@@ -3815,6 +3815,115 @@ shape as this milestone, just more call sites); any second provider
 (native f16, cooperative-matrix, CPU ISA packs - all later Phase 8
 milestones that build ON this ABI, not part of it).
 
+### M8.5 - FP4/NF4: a non-uniform 4-bit codebook tier, measured against Q4's uniform grid
+
+`DType::NF4` (bitsandbytes' non-uniform quantile codebook) and `DType::F4E2M1`
+(the OCP Microscaling FP4 format) added as two new 4-bit weight tiers,
+identical in PHYSICAL layout to the existing `Q4` (`crates/model/src/int4.rs`):
+8 codes packed per `u32`, one `f32` scale per 32-element group, W4A8
+(activations stay on the existing int8 dynamic-quant path - see
+`model::int4`'s own module doc for why: no int4 accelerator instruction
+exists in this engine, so narrowing activations too would only add a second
+quant tier for no byte saving). The ONLY difference from `Q4` is the
+codebook: `Q4` reconstructs `scale * code` (`code` signed, evenly spaced
+across `[-7, 7]`); the two new tiers reconstruct `scale * LUT[code]` (`code`
+an UNSIGNED index `0..16`, `LUT` one of two fixed 16-entry tables) -
+`crates/model/src/lut4.rs` (new), `NF4_LUT` (the standard published
+bitsandbytes quantile values) and `F4E2M1_LUT` (1 sign + 2 exponent + 1
+mantissa bit, magnitudes `{0, 0.5, 1, 1.5, 2, 3, 4, 6}`, derived and pinned
+against the OCP E2M1 bit layout by `f4e2m1_lut_matches_the_ocp_e2m1_
+magnitude_table`).
+
+**The actual value proposition, measured, not assumed.** This milestone's
+whole point is that a non-uniform codebook reconstructs real (roughly
+Gaussian, small-magnitude) weight distributions more accurately than an
+evenly-spaced grid at the IDENTICAL 4-bit budget - `lut4::tests::
+nf4_beats_q4_on_a_gaussian_like_distribution` draws a synthetic weight
+tensor from an approximately-Gaussian distribution (Irwin-Hall via a
+deterministic LCG), quantizes it BOTH ways at `group=32`, and asserts NF4's
+mean-squared reconstruction error is lower. **A real bug this test caught
+before trusting its own result**: the first draft's LCG-to-uniform
+conversion shifted by one bit too many (`state >> 33` combined with a
+32-bit divisor), silently halving the generator's effective range and
+biasing the "Gaussian" badly enough (std off by half, mean off by several
+sigma) to FLIP the test's own conclusion - NF4 measured WORSE than Q4
+(`nf4_mse=3.68e-5` vs `q4_mse=1.09e-5`) on the broken generator. Caught by
+cross-checking the exact same quantize/dequantize logic in an independent
+Python simulation before trusting the Rust result (the same "verify the
+generator, not just the formula" discipline B5's own FTZ bug used) - fixed
+by reading the top 32 bits (`state >> 32`) instead of the top 31, re-ran,
+and NF4 wins as expected (`nf4_mse≈3.0e-6` vs `q4_mse≈3.6e-6`, ~16% lower,
+matching the independent Python simulation to within noise). This is exactly
+the kind of measurement bug this campaign's own decision 4 exists to catch:
+a plausible-looking number that was wrong for a reason unrelated to the
+actual quantization math.
+
+**Device kernels**: `matmul_q4_gemv_nf4.wgsl`/`matmul_q4_gemv_f4e2m1.wgsl`
+(new), `matmul_q4_gemv.wgsl`'s exact decode-regime `WorkgroupPerOutput`
+structure (64-thread workgroup tile, 1 barrier - see that kernel's own
+header for the full W4A8 params/layout doc) with one real change: the
+per-nibble weight value is a 4-level binary `select` tree over the 16-entry
+codebook (portable - no `array<f32,16>` const, since no kernel in this tree
+uses an indexed const array and it is untested on the CPU JIT; a `select`
+tree on the nibble's own bits is exactly as portable as the `bitcast`/
+`select` machinery `f16_decode_expr` already relies on) instead of the
+nibble's sign-extended integer value. Because the codebook is NOT linear in
+the raw code (`LUT[code]` has no closed form), the inner reduction MUST
+apply the lookup before multiplying by the int8 activation - `matmul_q4_
+gemv`'s own i32-dot-then-scale shortcut only works because `Q4`'s codebook
+IS linear - so this variant accumulates a per-nibble f32 MAC instead of an
+i32 dot product, computing the exact same real number `Q4`'s formula would
+if `Q4` used this codebook, not an approximation of it (see each kernel's
+own header for the full derivation). Named with a `q4` marker
+(`matmul_q4_gemv_nf4`/`matmul_q4_gemv_f4e2m1`) per `scripts/build/
+kernelmeta.py`'s own `@quant q4` naming convention; headers validated by
+`make kernels-table` (`docs/reference/kernels.md` regenerated clean, zero
+declaration/code mismatches).
+
+**`DType` wiring**: `bits()=4, per_word()=8 (derived), bytes()=1`, `promote()`
+via `int8_dot` (identical capability Q4 already rides, reused rather than
+inventing a new one - the codebook lookup is a kernel-selection detail, not
+a device-capability one). `backend_api::select`'s `dtype_storage_
+requirement`/`Op::MatMul`/`Op::PagedAttention`/`Op::MoeExpertLinear` arms and
+`model::ops::Ops::{threads,Weight::upload}`/`model::probe`'s `Tier` impl/
+`qwen3vl::caps::linear_dtype`/`qwen35::config::layer_weight_bytes` all
+updated for exhaustiveness (2 new enum variants force every non-wildcard
+match over `DType` to cover them) - `qwen35`'s own byte-budget formula
+mirrors `Q4`'s exactly (identical physical layout). `Weight::upload`
+deliberately does NOT build a `Weight::NF4`/`Weight::F4E2M1` this session
+(same scope boundary B4/B5 drew around "migrate model call sites" for
+bf16/f16) - its `assert!` refuses both loudly, a clearly-scoped follow-up,
+not attempted half-done.
+
+**Gate**: `crates/model/src/lut4.rs`'s 6 unit tests (codebook shape/
+round-trip/every-code-reachable/the Gaussian-vs-Q4 comparison above), plus
+`crates/model/tests/matmul_lut4_gemm.rs` (3 tests, REAL wgpu hardware -
+Intel Arc iGPU, confirmed via the adapter string printed at test time, not
+skipped): both kernels' device output against a host oracle built from the
+EXACT LUT-dequantized weight (not a re-quantization - only the on-device
+int8 ACTIVATION quant remains as noise, tighter than Q4's own tolerance),
+cosine ≥0.999 and relative-L2 <0.05 (measured 0.999991/0.0042 for NF4,
+0.999986/0.0060 for F4E2M1), plus a sanity check that the two codebooks
+disagree on identical weight bits. `cargo test -p brain-backend-api --lib`
+(47/47, including the capability-sweep test extended to cover `NF4`/
+`F4E2M1`), `cargo test -p brain-model --lib` (186/186, includes `lut4`'s own
+6), `cargo check --workspace` clean, `python3 scripts/build/gen-kernel-
+table.py --check` clean (459 kernels, zero declaration/code mismatches),
+`bash scripts/gates/check-kernel-selection.sh` shows only pre-existing
+unrelated violations (none touch a file this milestone changed), `cargo
+clippy -p brain-backend-api -p brain-model -p brain-qwen3vl -p brain-qwen35
+-p brain-kernels --lib --tests` clean on every file this milestone touched
+(one real finding, `clippy::excessive_precision` on `NF4_LUT`'s own
+9-significant-digit literal, fixed via `cargo clippy --fix`; every other
+warning is pre-existing, in a file this milestone did not touch). **Commit**:
+one.
+
+**Deferred, explicitly out of scope**: `model::ops::Weight::NF4`/`Weight::
+F4E2M1` façade wiring (migrating a real model's linear call sites onto
+either tier); a register-tiled/prefill-shaped sibling kernel
+(`matmul_q4_dyn_reg`'s own LUT variant) - only the decode-regime GEMV was
+built and gated this session.
+
 ## Not yet done
 
 Phase 0 is closed. Phase 1 is in progress per the recalibrated scope above.

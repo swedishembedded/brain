@@ -46,6 +46,7 @@ pub mod int4;
 pub mod int8;
 pub mod kquant;
 pub mod lora;
+pub mod lut4;
 pub mod moe;
 pub mod ops;
 // wasm-gated like `distributed`/`parallel`/`shard`: a TCP transport has no

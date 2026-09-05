@@ -274,6 +274,23 @@ pub enum DType {
     /// differently because it names a different thing (block geometry, not
     /// device packing).
     Q8K,
+    /// bitsandbytes NF4: the identical physical layout as `Q4` (4-bit codes,
+    /// 8 per `u32`, one per-32-element-group `f32` scale, int8 activations -
+    /// W4A8, same reason `Q4` is) but a NON-UNIFORM 16-entry codebook instead
+    /// of `Q4`'s uniform `scale*code`: `scale * NF4_LUT[code]`, `code` read
+    /// UNSIGNED (0..15, no sign-extension - the codebook itself is signed,
+    /// the nibble is a plain index into it). See `model::lut4::NF4_LUT` for
+    /// the actual quantile values and `model::lut4`'s module doc for why a
+    /// non-uniform codebook reconstructs real weight distributions (which
+    /// cluster near zero, roughly Gaussian) more accurately than `Q4`'s
+    /// evenly-spaced levels at the identical 4-bit budget.
+    NF4,
+    /// OCP Microscaling FP4 (E2M1): same physical layout as `NF4` (4-bit
+    /// codes, 8/`u32`, per-32-group `f32` scale, W4A8), a DIFFERENT fixed
+    /// 16-entry codebook - 1 sign bit, 2 exponent bits, 1 mantissa bit,
+    /// magnitudes `{0, 0.5, 1, 1.5, 2, 3, 4, 6}` - see
+    /// `model::lut4::F4E2M1_LUT`.
+    F4E2M1,
 }
 
 /// Opaque handle to a kernel registered via [`Backend::register_native`] -
@@ -315,7 +332,7 @@ impl DType {
             DType::F32 => 32,
             DType::F16 | DType::BF16 => 16,
             DType::I8 | DType::Q8K => 8,
-            DType::Q4 | DType::Q4K => 4,
+            DType::Q4 | DType::Q4K | DType::NF4 | DType::F4E2M1 => 4,
         }
     }
 
@@ -335,7 +352,7 @@ impl DType {
         match self {
             DType::F32 => 4,
             DType::F16 | DType::BF16 => 2,
-            DType::I8 | DType::Q4 | DType::Q4K | DType::Q8K => 1,
+            DType::I8 | DType::Q4 | DType::Q4K | DType::Q8K | DType::NF4 | DType::F4E2M1 => 1,
         }
     }
 
@@ -408,6 +425,24 @@ impl DType {
                     DType::F32
                 }
             }
+            // Both new 4-bit codebook tiers are W4A8, exactly like `Q4` -
+            // only the codebook differs, and the codebook lookup happens in
+            // the GEMM kernel, not in anything `NumericSupport` gates
+            // separately. See `DType::NF4`'s own doc comment.
+            DType::NF4 => {
+                if numeric.int8_dot {
+                    DType::NF4
+                } else {
+                    DType::F32
+                }
+            }
+            DType::F4E2M1 => {
+                if numeric.int8_dot {
+                    DType::F4E2M1
+                } else {
+                    DType::F32
+                }
+            }
         }
     }
 
@@ -426,6 +461,8 @@ impl DType {
             DType::Q4 => "q4",
             DType::Q4K => "q4k",
             DType::Q8K => "q8k",
+            DType::NF4 => "nf4",
+            DType::F4E2M1 => "f4e2m1",
         }
     }
 
@@ -441,6 +478,8 @@ impl DType {
             "q4" => Some(DType::Q4),
             "q4k" => Some(DType::Q4K),
             "q8k" => Some(DType::Q8K),
+            "nf4" => Some(DType::NF4),
+            "f4e2m1" => Some(DType::F4E2M1),
             _ => None,
         }
     }
@@ -462,7 +501,17 @@ mod dtype_tests {
             ..NumericSupport::BASELINE
         };
         for numeric in [none, full] {
-            for dtype in [DType::F32, DType::F16, DType::BF16, DType::I8, DType::Q4, DType::Q4K, DType::Q8K] {
+            for dtype in [
+                DType::F32,
+                DType::F16,
+                DType::BF16,
+                DType::I8,
+                DType::Q4,
+                DType::Q4K,
+                DType::Q8K,
+                DType::NF4,
+                DType::F4E2M1,
+            ] {
                 let promoted = dtype.promote(&numeric);
                 assert!(
                     promoted.bytes() >= dtype.bytes(),
@@ -494,7 +543,17 @@ mod dtype_tests {
             int8_dot: true,
             ..NumericSupport::BASELINE
         };
-        for dtype in [DType::F32, DType::F16, DType::BF16, DType::I8, DType::Q4, DType::Q4K, DType::Q8K] {
+        for dtype in [
+            DType::F32,
+            DType::F16,
+            DType::BF16,
+            DType::I8,
+            DType::Q4,
+            DType::Q4K,
+            DType::Q8K,
+            DType::NF4,
+            DType::F4E2M1,
+        ] {
             // Full support: promotes to itself.
             assert_eq!(dtype.promote(&full), dtype, "{dtype:?} with full support must promote to itself");
             // Zero support: promotes to F32 (F32 is already F32).
@@ -567,6 +626,8 @@ mod dtype_tests {
         assert_eq!(DType::BF16.bytes(), 2);
         assert_eq!(DType::I8.bytes(), 1);
         assert_eq!(DType::Q4.bytes(), 1);
+        assert_eq!(DType::NF4.bytes(), 1);
+        assert_eq!(DType::F4E2M1.bytes(), 1);
     }
 
     #[test]
@@ -581,11 +642,25 @@ mod dtype_tests {
         assert_eq!(DType::I8.per_word(), 4);
         assert_eq!(DType::Q4.bits(), 4);
         assert_eq!(DType::Q4.per_word(), 8);
+        assert_eq!(DType::NF4.bits(), 4);
+        assert_eq!(DType::NF4.per_word(), 8);
+        assert_eq!(DType::F4E2M1.bits(), 4);
+        assert_eq!(DType::F4E2M1.per_word(), 8);
     }
 
     #[test]
     fn name_and_from_name_round_trip_every_variant() {
-        for dt in [DType::F32, DType::F16, DType::BF16, DType::I8, DType::Q4] {
+        for dt in [
+            DType::F32,
+            DType::F16,
+            DType::BF16,
+            DType::I8,
+            DType::Q4,
+            DType::Q4K,
+            DType::Q8K,
+            DType::NF4,
+            DType::F4E2M1,
+        ] {
             assert_eq!(DType::from_name(dt.name()), Some(dt), "{dt:?} did not round-trip through its own name");
         }
     }

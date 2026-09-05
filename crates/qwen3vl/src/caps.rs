@@ -955,6 +955,11 @@ pub fn linear_dtype(dir: &str, max_pixels: u32, precision: Precision) -> Result<
         // comment above.
         Dtype::Q4K => "q4k",
         Dtype::Q8K => "q8k",
+        // M8.5's two new codebook tiers - no `qwen3vl` resident builds
+        // either today (same reason as `Q4K`/`Q8K` above), kept here only
+        // for exhaustiveness.
+        Dtype::NF4 => "nf4",
+        Dtype::F4E2M1 => "f4e2m1",
     };
     with_resident(dir, max_pixels, precision, |hot| Ok(hot.model.linear_dtype().map(|dt| name(dt).to_string())))
 }

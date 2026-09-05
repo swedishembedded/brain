@@ -380,6 +380,17 @@ impl Qwen35Config {
                     // table), only `bits` differs.
                     gpu_core::select::Dtype::Q4K => n * (k / 2 + k.div_ceil(group).div_ceil(2) * 4 + k.div_ceil(256) * 4),
                     gpu_core::select::Dtype::Q8K => n * (k + k.div_ceil(group).div_ceil(2) * 4 + k.div_ceil(256) * 4),
+                    // M8.5: `NF4`/`F4E2M1` share `Q4`'s exact physical layout
+                    // (4-bit codes, 8/`u32`, one `f32` scale per `group`) -
+                    // only the codebook a device kernel looks each code up in
+                    // differs, which costs nothing on disk/VRAM. No
+                    // `TierPolicy` in this tree selects either yet
+                    // (`model::ops::Weight::upload` does not build a
+                    // `Weight::NF4`/`Weight::F4E2M1`, M8.5's own follow-up),
+                    // so this arm exists only for exhaustiveness today.
+                    gpu_core::select::Dtype::NF4 | gpu_core::select::Dtype::F4E2M1 => {
+                        n * k / 2 + n * k.div_ceil(group) * 4
+                    }
                 }
             })
             .sum()

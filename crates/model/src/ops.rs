@@ -650,6 +650,20 @@ impl Weight {
             Dtype::Q4K | Dtype::Q8K => {
                 unreachable!("Weight::upload: {want:?} is refused by the assert above -- build a Weight::KQuant directly from gguf::kquant's own packed output instead")
             }
+            // M8.5 added `NF4`/
+            // `F4E2M1` as `DType` tiers and their own `model::lut4` host
+            // quantize/dequantize pair plus a device kernel
+            // (`matmul_q4_gemv_nf4`/`matmul_q4_gemv_f4e2m1`), but deliberately
+            // did NOT wire a `Weight::NF4`/`Weight::F4E2M1` arm into this
+            // façade this session - that migration (mirroring what B7 did for
+            // Q4) is a clearly-scoped follow-up, not attempted half-done here.
+            // The `assert!` above already refuses both before this match
+            // runs, so this arm is unreachable in practice, same as `Q4K`/
+            // `Q8K` above and for the same reason: loud, not a silent
+            // fallthrough.
+            Dtype::NF4 | Dtype::F4E2M1 => {
+                unreachable!("Weight::upload: {want:?} is refused by the assert above -- model::lut4 provides the host quantize/dequantize pair and the device kernel exists, but no Weight::{want:?} façade arm has been built yet (M8.5 follow-up)")
+            }
         }
     }
 }
@@ -1172,7 +1186,10 @@ impl Ops {
     /// to `gpu_core::provider::wgsl::WgslProvider::threads` - it has zero
     /// dependency on this crate's kernel-name table, so it now lives where
     /// [`Ops::matmul`] actually calls it (inside `WgslProvider::lower`), not
-    /// duplicated here as dead code.
+    /// duplicated here as dead code. **M8.5** added `NF4`/`F4E2M1` to that
+    /// moved formula's `PackedInt8` tile arm directly (this doc comment's
+    /// home moved before M8.5 landed, so the integrating cherry-pick applied
+    /// M8.5's dtype addition there instead of reintroducing this function).
     ///
     /// `y[yoff .. yoff + m*n)] = act[xr0..xr0+m, :] @ wᵀ`, where `m` is
     /// however many rows `act` was built for ([`Ops::act`]'s `rows`). The

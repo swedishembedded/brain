@@ -54,7 +54,20 @@ impl WgslProvider {
             KernelVariant::WorkgroupPerOutput => n * 64,
             KernelVariant::RegisterTiled => tile(),
             KernelVariant::PackedInt8 => match dt {
-                Dtype::I8 | Dtype::Q4 | Dtype::Q4K | Dtype::Q8K => tile(),
+                // `NF4`/`F4E2M1` (M8.5) are W4A8, physically packed exactly
+                // like `Q4` - a future register-tiled `PackedInt8` kernel for
+                // either would need the identical tile geometry, so they fold
+                // into this arm now even though no such kernel exists yet
+                // (only `matmul_q4_gemv_nf4`/`matmul_q4_gemv_f4e2m1`,
+                // `WorkgroupPerOutput`, do).
+                Dtype::I8 | Dtype::Q4 | Dtype::Q4K | Dtype::Q8K | Dtype::NF4 | Dtype::F4E2M1 => tile(),
+                // `select::candidates` never offers `PackedInt8` for an
+                // F32-family dtype (see this method's own doc comment) -
+                // this arm is unreachable in practice, kept only so the
+                // match stays exhaustive over `Dtype` without silently
+                // absorbing a real future `PackedInt8` dtype into the wrong
+                // formula the way the pre-M5.5 blanket `_ => m*n` did for
+                // `Dtype::Q4`.
                 Dtype::F32 | Dtype::BF16 | Dtype::F16 => m * n,
             },
             KernelVariant::SplitReduction => {

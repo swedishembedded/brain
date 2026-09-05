@@ -67,7 +67,12 @@
 //! [`Tier`] impl below (so `arithmetic`/`describe`/`label` all cover them),
 //! but this probe's own GEMM sweep has not been extended to measure them
 //! yet; that is a follow-on, not a gap this milestone's dispatch wiring
-//! needed to close.
+//! needed to close. Same story for `Dtype::NF4`/`Dtype::F4E2M1` (M8.5): both
+//! share `Q4`'s `int8_dot` capability and physical packing (see
+//! `DType::NF4`'s own doc comment) and are covered by [`Tier`] below, but
+//! neither reaches this sweep - `crate::ops::Weight::upload` does not build
+//! a `Weight::NF4`/`Weight::F4E2M1` yet either (see that function's own doc),
+//! so there is no GEMM dispatch path for `gemm` to time.
 
 use std::time::{Duration, Instant};
 
@@ -112,7 +117,7 @@ impl Tier for Dtype {
     fn arithmetic(self) -> Arithmetic {
         match self {
             Dtype::F32 | Dtype::BF16 | Dtype::F16 => Arithmetic::Float32,
-            Dtype::I8 | Dtype::Q4 | Dtype::Q4K | Dtype::Q8K => Arithmetic::Int8Dot,
+            Dtype::I8 | Dtype::Q4 | Dtype::Q4K | Dtype::Q8K | Dtype::NF4 | Dtype::F4E2M1 => Arithmetic::Int8Dot,
         }
     }
 
@@ -125,6 +130,8 @@ impl Tier for Dtype {
             Dtype::Q4 => "int4 weights + int8 activations, i32 accumulate (W4A8)",
             Dtype::Q4K => "affine 4-bit K-quant weights (GGUF Q4_K) + int8 activations, i32 accumulate + fp32 min-correction",
             Dtype::Q8K => "affine 5-bit K-quant weights (GGUF Q5_K, 8-bit slot) + int8 activations, i32 accumulate + fp32 min-correction",
+            Dtype::NF4 => "non-uniform 4-bit (bitsandbytes NF4 codebook) weights + int8 activations, i32 accumulate (W4A8)",
+            Dtype::F4E2M1 => "OCP MXFP4 (E2M1 codebook) weights + int8 activations, i32 accumulate (W4A8)",
         }
     }
 
@@ -137,6 +144,8 @@ impl Tier for Dtype {
             Dtype::Q4 => "q4",
             Dtype::Q4K => "q4k",
             Dtype::Q8K => "q8k",
+            Dtype::NF4 => "nf4",
+            Dtype::F4E2M1 => "f4e2m1",
         }
     }
 }

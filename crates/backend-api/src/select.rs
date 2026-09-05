@@ -330,13 +330,17 @@ impl Requirement {
 /// packed int8 quantization every other tier here uses, only the weight
 /// side's reconstruction (`ds*code - dm` instead of `ds*code`) differs, and
 /// that difference is a kernel-selection detail (`model::ops::Ops::bind`),
-/// not a device-capability one.
+/// not a device-capability one. `NF4`/`F4E2M1` (M8.5) ride the identical
+/// `int8_dot` capability for the identical reason: both are W4A8, physically
+/// packed exactly like `Q4` (see `DType::NF4`'s own doc comment) - only the
+/// codebook the GEMM kernel looks each nibble up in differs, which is again
+/// a kernel-selection detail, not a device-capability one.
 fn dtype_storage_requirement(dt: Dtype) -> Requirement {
     match dt {
         Dtype::F32 => Requirement::default(),
         Dtype::BF16 => Requirement { bf16_storage: true, ..Requirement::default() },
         Dtype::F16 => Requirement { f16_storage: true, ..Requirement::default() },
-        Dtype::I8 | Dtype::Q4 | Dtype::Q4K | Dtype::Q8K => Requirement { int8_dot: true, ..Requirement::default() },
+        Dtype::I8 | Dtype::Q4 | Dtype::Q4K | Dtype::Q8K | Dtype::NF4 | Dtype::F4E2M1 => Requirement { int8_dot: true, ..Requirement::default() },
     }
 }
 
@@ -679,7 +683,7 @@ pub fn candidates(op: Op, shape: OpShape, caps: &DeviceCaps) -> Vec<KernelVarian
             // per dtype (`matmul_kq_dyn`/`matmul_kq_gemv` for these two,
             // `matmul_i8_dyn`/`matmul_i8_gemv` for I8) - this function only
             // ever names the logical variant.
-            Dtype::I8 | Dtype::Q4 | Dtype::Q4K | Dtype::Q8K => {
+            Dtype::I8 | Dtype::Q4 | Dtype::Q4K | Dtype::Q8K | Dtype::NF4 | Dtype::F4E2M1 => {
                 if shape.m > DECODE_REGIME_MAX_ROWS || !caps.workgroup_reductions {
                     vec![PackedInt8]
                 } else if shape.m <= I8_GEMV_MAX_ROWS {
@@ -793,7 +797,7 @@ pub fn candidates(op: Op, shape: OpShape, caps: &DeviceCaps) -> Vec<KernelVarian
         // with this dtype for `Op::PagedAttention` today.
         Op::PagedAttention => match shape.dtype {
             Dtype::F32 | Dtype::BF16 | Dtype::F16 => vec![WorkgroupPerOutput, Reference],
-            Dtype::I8 | Dtype::Q4 | Dtype::Q4K | Dtype::Q8K => vec![Reference],
+            Dtype::I8 | Dtype::Q4 | Dtype::Q4K | Dtype::Q8K | Dtype::NF4 | Dtype::F4E2M1 => vec![Reference],
         },
         // Sparse-MoE expert linear - capability only, NO shape gate, unlike
         // `Op::MatMul`'s Dtype arm this mirrors: none of
@@ -824,7 +828,7 @@ pub fn candidates(op: Op, shape: OpShape, caps: &DeviceCaps) -> Vec<KernelVarian
         // already does.
         Op::MoeExpertLinear => match shape.dtype {
             Dtype::F32 | Dtype::BF16 | Dtype::F16 => vec![Reference],
-            Dtype::I8 | Dtype::Q4 | Dtype::Q4K | Dtype::Q8K => vec![PackedInt8],
+            Dtype::I8 | Dtype::Q4 | Dtype::Q4K | Dtype::Q8K | Dtype::NF4 | Dtype::F4E2M1 => vec![PackedInt8],
         },
         // The 1D convolutions. `conv1d`/`convtr1d` are one-thread-per-output
         // kernels with a serial `Cin*K` reduction, i.e. the classic "wrong
@@ -1728,11 +1732,22 @@ mod tests {
             Op::MaxAbsRow,
             Op::PagedAttention,
         ];
-        let dtypes = [Dtype::F32, Dtype::F16, Dtype::BF16, Dtype::I8, Dtype::Q4];
+        let dtypes = [
+            Dtype::F32,
+            Dtype::F16,
+            Dtype::BF16,
+            Dtype::I8,
+            Dtype::Q4,
+            Dtype::NF4,
+            Dtype::F4E2M1,
+        ];
         // 6 independent bools -> 64 combinations (f32 is always true, not
         // varied) crossed with workgroup_reductions (2), covering baseline
         // (all false), int8_dot-only, full-everything, and every
-        // single-flag-true combination along the way.
+        // single-flag-true combination along the way. `Dtype::NF4`/`Dtype::
+        // F4E2M1` (M8.5) join the dtype list above - this test's whole point
+        // is exhaustive proof over the FULL input space, so a new dtype
+        // belongs in the same sweep, not a narrower one bolted on.
         for bits in 0u8..64 {
             let numeric = NumericSupport {
                 f32: true,
