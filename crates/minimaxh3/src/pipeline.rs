@@ -608,7 +608,12 @@ pub fn encode_keyframe_condition(video_vae_cfg: &VideoVaeConfig, video_vae_tenso
 /// Every weight source [`generate`] needs, none held resident together - see
 /// this module's own doc for the phase-sequential loading order.
 pub struct H3Checkpoint<'a> {
-    pub dit_tensors: &'a Tensors,
+    /// A streaming [`checkpoint::weightio::WeightReader`] (never
+    /// materializes the ~33B-param checkpoint as a whole-map host copy - see
+    /// [`crate::model::H3Transformer::load`]'s own doc) or, in a test, the
+    /// eager `Tensors` map every real `TensorSource` implementor still
+    /// satisfies.
+    pub dit_tensors: &'a dyn checkpoint::TensorSource,
     pub dit_cfg: H3TransformerConfig,
     pub video_vae_tensors: &'a Tensors,
     pub video_vae_cfg: VideoVaeConfig,

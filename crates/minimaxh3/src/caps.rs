@@ -366,18 +366,105 @@ const TEXT_ENCODER_SEQ_LEN: u32 = 512;
 /// see [`qwen3vl::Qwen3Vl::encode_hidden`]'s own doc for why that is only
 /// valid for a splice-free instance) plus its BPE tokenizer, from `paths`.
 /// Mirrors `qwen3vl::caps`'s own `load_hf_resident` (not reusable directly:
-/// private to that module) at fp32, no vision capacity - this crate never
-/// splices a keyframe into the SAME instance a plain `t2va` request uses,
-/// so there is no reason to pay for DeepStack/splice buffers here. A REAL
-/// load: the checkpoint is tens of GB, so this is deliberately not called
-/// on every request without [`has_real_text_encoder`] gating it first.
+/// private to that module), no vision capacity - this crate never splices a
+/// keyframe into the SAME instance a plain `t2va` request uses, so there is
+/// no reason to pay for DeepStack/splice buffers here. A REAL load: the
+/// checkpoint is tens of GB, so this is deliberately not called on every
+/// request without [`has_real_text_encoder`] gating it first.
+///
+/// **int8, not fp32** - and relies on [`qwen3vl::Qwen3Vl::from_hf`] streaming
+/// the decoder's weights rather than materializing them eagerly. Measured
+/// directly, not assumed: this checkpoint's `text_encoder/` is 63GB of bf16
+/// on disk, and `checkpoint::safetensors::read_model_dir` (the ORIGINAL
+/// `from_hf` implementation) decodes every tensor to f32 up front regardless
+/// of the caller's requested destination dtype - a ~126GB source held
+/// entirely in memory before `Qwen::new_shard_dt_decode` allocates a single
+/// destination byte. That single fact, not a 2x-during-construction "peak",
+/// is what a real run's memory trace confirmed: switching the destination
+/// from fp32 to int8 (halving the DESTINATION buffer) made no measurable
+/// difference to the climb - both attempts hit the same ~149GB container
+/// cap at nearly the same point, because both were still dominated by the
+/// SAME dtype-independent ~126GB source decode. `Qwen3Vl::from_hf` now
+/// streams the decoder (`model.language_model.*`) straight off a
+/// [`checkpoint::weightio::WeightReader`] one tensor at a time
+/// (`qwen3vl::import::decoder_source`), the same mechanism
+/// `qwen3::import::hf_shard_source` already gives FLUX.2's text encoder -
+/// so peak cost is now the destination buffers `dt` actually needs (int8:
+/// ~1 byte/param) plus one tensor's transient f32 expansion, not the whole
+/// checkpoint's. int8 is kept on top of that for the steady-state resident
+/// footprint, not because it was ever the fix for the load-time peak - the
+/// accuracy cost is real but not yet a concern this port has a real-scale
+/// numeric oracle to weigh against anyway (see [`build_text_encoder`]'s own
+/// tests).
+///
+/// **Truncated to [`pipeline::TEXT_ENCODER_LAYER`], not the checkpoint's
+/// full 64 layers** - `encode_text_real`/`pipeline::encode_text` never reads
+/// past that tap (`qwen.encode_hidden(tokens, TEXT_ENCODER_LAYER)`), so the
+/// 14 layers past it are never built, uploaded, or even read off disk (a
+/// shard file none of the truncated shard's required tensors live in is
+/// never faulted into memory - see [`qwen3vl::Qwen3Vl::from_hf_shard`]'s own
+/// doc). This is the same truncated-tap-layer shape FLUX.2's own Qwen3 text
+/// encoder already uses, applied here for the first time to `Qwen3Vl`.
+/// A truncated shard's decoder can only run the batched-forward path (the
+/// incremental KV-cache path `Qwen::decode_steps` uses refuses a non-whole
+/// shard outright), which `encode_hidden` already falls back to correctly -
+/// this is also the FASTER path for a whole-prompt encode: one batched pass
+/// over the sequence, not one incremental step per token.
+/// The best per-layer-linear storage tier the AMBIENT device (`--device`/
+/// `BRAIN_DEVICE`) can actually deliver, cheapest-real-cost first: int8 (if
+/// `caps.numeric.int8_dot`), else bf16 (if `caps.numeric.bf16_storage` -
+/// storage-only, decoded to fp32 inside the kernel, but still a genuine 2x
+/// on bytes moved/resident), else fp32.
+///
+/// **Why this exists, not a hardcoded request**: `gpu_core::select::Dtype::
+/// promote` silently demotes an unsupported tier back to fp32 -
+/// `Weight::upload`'s own doc says as much ("read `Qwen::linear_dtype` for
+/// what actually landed, never this request"), but `build_text_encoder`
+/// used to just ask for `Dtype::I8` and never check. On the CPU JIT backend
+/// `NumericSupport.int8_dot` is `false` (`backend-cpu`'s own doc: "the
+/// multi-barrier packed-int8 GEMMs are outside the JIT's single-barrier
+/// model, and there is no VNNI fast path yet") - so EVERY prior real-weight
+/// run in this port's history asked for int8 and silently got fp32 instead,
+/// which is the actual reason a 50-layer-truncated encoder (expected ~25GB
+/// at int8) climbed to ~140GB (matching a ~100GB fp32 destination plus
+/// transient overhead, not a leak - confirmed via `/proc/<pid>/smaps_rollup`
+/// showing the growth as anonymous/private-dirty, not file-backed page
+/// cache). `bf16_storage` IS `true` on the CPU backend (host RAM holds any
+/// byte layout - see that struct's own comment), so this is a REAL,
+/// non-lying 2x reduction there, not a second silent no-op.
+fn best_linear_dtype() -> gpu_core::select::Dtype {
+    use gpu_core::select::Dtype;
+    let probe = gpu_core::Gpu::new(&[]);
+    let n = probe.caps().numeric;
+    if n.int8_dot {
+        Dtype::I8
+    } else if n.bf16_storage || n.bf16 {
+        Dtype::BF16
+    } else {
+        Dtype::F32
+    }
+}
+
 pub fn build_text_encoder(paths: &Paths) -> Result<(qwen3vl::Qwen3Vl, data::qwen_tokenizer::QwenBpe), String> {
     let cfg_path = format!("{}/config.json", paths.text_encoder);
     let cfg_text = std::fs::read_to_string(&cfg_path).map_err(|e| format!("minimaxh3 text encoder: cannot read {cfg_path}: {e}"))?;
     let cfg_json: serde_json::Value = serde_json::from_str(&cfg_text).map_err(|e| format!("minimaxh3 text encoder: cannot parse {cfg_path}: {e}"))?;
     let cfg = qwen3vl::Qwen3VlConfig::from_hf(&cfg_json);
     let tok = data::qwen_tokenizer::QwenBpe::from_dir(&paths.tokenizer).map_err(|e| format!("minimaxh3 text encoder: tokenizer: {e}"))?;
-    let qwen = qwen3vl::Qwen3Vl::from_hf(&paths.text_encoder, cfg.vision, cfg.text, TEXT_ENCODER_SEQ_LEN, cfg.image_token_id, 0, 0, cfg.mrope_section, gpu_core::select::Dtype::F32)?;
+    let shard = model::Shard { start: 0, end: pipeline::TEXT_ENCODER_LAYER, embed: true, head: false, gpu_index: model::Shard::ANY_GPU };
+    let dt = best_linear_dtype();
+    let qwen = qwen3vl::Qwen3Vl::from_hf_shard(
+        &paths.text_encoder,
+        cfg.vision,
+        cfg.text,
+        TEXT_ENCODER_SEQ_LEN,
+        cfg.image_token_id,
+        0,
+        0,
+        cfg.mrope_section,
+        dt,
+        shard,
+    )?;
     Ok((qwen, tok))
 }
 
@@ -517,19 +604,25 @@ impl Paths {
     }
 }
 
-/// Read a bare file OR a sharded `<name>.safetensors.index.json` directory
-/// into a [`vae::blocks::Tensors`] map with NO name remapping -
-/// `checkpoint::safetensors::read_model_dir` plus the same
-/// `HashMap`-from-`Vec<StTensor>` collection every other import in this crate
-/// starts from, minus any fold/rename step (there is none to do here - see
-/// [`Paths::dit`]'s doc for whether the real checkpoint's own tensor names
-/// need one). `pub` so `crates/cli/src/resident_minimaxh3.rs` can read the
-/// DiT tensors ONCE (into its own resident [`crate::model::H3Transformer`])
+/// Open a streaming reader over the DiT checkpoint at `path` - a bare file
+/// or a sharded `<name>.safetensors.index.json` directory, no name
+/// remapping (the real checkpoint's own tensor names already match
+/// [`crate::model::H3Transformer::load`]'s naming - see [`Paths::dit`]'s own
+/// doc). `pub` so `crates/cli/src/resident_minimaxh3.rs` can open the DiT
+/// reader ONCE (into its own resident [`crate::model::H3Transformer`])
 /// without going through [`LoadedWeights::load`], which would also re-read
 /// the VAEs.
-pub fn read_tensors(path: &str) -> Result<vae::blocks::Tensors, String> {
-    let raw = checkpoint::safetensors::read_model_dir(std::path::Path::new(path))?;
-    Ok(raw.into_iter().map(|t| (t.name, (t.shape, t.data))).collect())
+///
+/// A streaming [`checkpoint::weightio::WeightReader`], not the eager
+/// `read_model_dir` this crate's VAE loaders still use: at ~33B params,
+/// materializing this checkpoint's tensors into a whole-map host copy
+/// before [`crate::model::H3Transformer::load`] uploads a single byte would
+/// cost ~132GB on its own (bf16-on-disk decoded to fp32) - the exact mistake
+/// `qwen3vl::Qwen3Vl::from_hf` used to make on the (much smaller) text
+/// encoder, which measurably OOMed a 150GB container cap before it was
+/// fixed the same way.
+pub fn open_dit_reader(path: &str) -> Result<checkpoint::weightio::WeightReader, String> {
+    checkpoint::weightio::WeightReader::open_hf_dir(std::path::Path::new(path)).map_err(|e| format!("minimaxh3: open DiT checkpoint {path}: {e}"))
 }
 
 /// The video/audio VAE weights [`pipeline::t2va`]/[`pipeline::fl2va`] need,
@@ -582,7 +675,7 @@ impl VaeWeights {
     /// `ckpt.dit_tensors` - see [`pipeline::t2va_hot`]'s doc) can pass an
     /// empty placeholder map rather than keeping a real one around just to
     /// satisfy this field.
-    pub fn as_checkpoint<'a>(&'a self, dit_tensors: &'a vae::blocks::Tensors, dit_cfg: H3TransformerConfig) -> pipeline::H3Checkpoint<'a> {
+    pub fn as_checkpoint<'a>(&'a self, dit_tensors: &'a dyn checkpoint::TensorSource, dit_cfg: H3TransformerConfig) -> pipeline::H3Checkpoint<'a> {
         pipeline::H3Checkpoint {
             dit_tensors,
             dit_cfg,
@@ -605,22 +698,26 @@ impl VaeWeights {
 /// (`crates/cli/src/resident_minimaxh3.rs`) uses [`VaeWeights`] plus its own
 /// resident DiT instead, so the (33B) DiT is not re-read from disk per call.
 pub struct LoadedWeights {
-    pub dit_tensors: vae::blocks::Tensors,
+    /// A streaming reader over the DiT's own (~33B-param) checkpoint - never
+    /// a whole-map host copy. See [`open_dit_reader`]'s own doc for why this
+    /// is not [`read_tensors`], which is still the right (eager) call for
+    /// the VAEs (hundreds of MB, not a memory risk).
+    pub dit_reader: checkpoint::weightio::WeightReader,
     pub dit_cfg: H3TransformerConfig,
     pub vae: VaeWeights,
 }
 
 impl LoadedWeights {
-    /// Load every weight from `paths` - a bare read for the DiT (see
-    /// [`Paths::dit`]'s doc) plus [`VaeWeights::load`].
+    /// Load every weight from `paths` - a streaming reader for the DiT (see
+    /// [`open_dit_reader`]'s own doc) plus [`VaeWeights::load`].
     pub fn load(paths: &Paths) -> Result<LoadedWeights, String> {
-        Ok(LoadedWeights { dit_tensors: read_tensors(&paths.dit)?, dit_cfg: H3TransformerConfig::real(), vae: VaeWeights::load(paths)? })
+        Ok(LoadedWeights { dit_reader: open_dit_reader(&paths.dit)?, dit_cfg: H3TransformerConfig::real(), vae: VaeWeights::load(paths)? })
     }
 
     /// A borrowing [`pipeline::H3Checkpoint`] over these tensors - built fresh
     /// per call since [`pipeline::H3Checkpoint`] borrows rather than owns.
     pub fn as_checkpoint(&self) -> pipeline::H3Checkpoint<'_> {
-        self.vae.as_checkpoint(&self.dit_tensors, self.dit_cfg)
+        self.vae.as_checkpoint(&self.dit_reader, self.dit_cfg)
     }
 }
 
@@ -668,19 +765,19 @@ pub fn fl2va_hot_on(ckpt: &pipeline::H3Checkpoint, inv: &capability::Invocation,
 }
 
 /// [`t2va_hot_on`]'s COLD equivalent: load a fresh [`crate::model::
-/// H3Transformer`] from `weights.dit_tensors` and run once. Used by the
+/// H3Transformer`] from `weights.dit_reader` and run once. Used by the
 /// direct (non-resident) [`MiniMaxH3Provider`] below - real residency is
 /// `crates/cli/src/resident_minimaxh3.rs`'s job.
 pub fn t2va_on(weights: &LoadedWeights, inv: &capability::Invocation, p: &GenParams, paths: &Paths) -> capability::ActionResult {
     let ckpt = weights.as_checkpoint();
-    let model = crate::model::H3Transformer::load(&weights.dit_tensors, weights.dit_cfg, p.opts.device.as_deref());
+    let model = crate::model::H3Transformer::load(&weights.dit_reader, weights.dit_cfg, p.opts.device.as_deref());
     t2va_hot_on(&ckpt, inv, p, paths, &model)
 }
 
 /// [`t2va_on`]'s `fl2va` analogue.
 pub fn fl2va_on(weights: &LoadedWeights, inv: &capability::Invocation, p: &GenParams, paths: &Paths, keyframes: &[pipeline::KeyframeCondition]) -> capability::ActionResult {
     let ckpt = weights.as_checkpoint();
-    let model = crate::model::H3Transformer::load(&weights.dit_tensors, weights.dit_cfg, p.opts.device.as_deref());
+    let model = crate::model::H3Transformer::load(&weights.dit_reader, weights.dit_cfg, p.opts.device.as_deref());
     fl2va_hot_on(&ckpt, inv, p, paths, keyframes, &model)
 }
 

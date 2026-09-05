@@ -259,8 +259,8 @@ impl MiniMaxH3Instance {
         let want = device_key(self.device);
         let needs_load = !matches!(&*guard, Some((dk, _)) if dk == &want);
         if needs_load {
-            let dit_tensors = minimaxh3::caps::read_tensors(&self.paths.dit)?;
-            let model = minimaxh3::model::H3Transformer::load(&dit_tensors, H3TransformerConfig::real(), device_name(self.device).as_deref());
+            let dit_reader = minimaxh3::caps::open_dit_reader(&self.paths.dit)?;
+            let model = minimaxh3::model::H3Transformer::load(&dit_reader, H3TransformerConfig::real(), device_name(self.device).as_deref());
             *guard = Some((want, model));
         }
         let (_, model) = guard.as_ref().expect("just ensured");

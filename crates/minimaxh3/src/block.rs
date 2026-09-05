@@ -272,6 +272,118 @@ pub struct RefinerBlockWeights {
     pub fc2: DeviceBuffer,
 }
 
+// ---------------- streaming per-block loading ----------------
+//
+// One place backing BOTH `H3Transformer::load`'s eager whole-model build
+// (every block resident, for a caller that reuses one instance across many
+// forwards - the resident-serving path) and a caller that processes blocks
+// ONE AT A TIME, dropping each block's weights before loading the next
+// (`model::tests::dit_matches_the_real_reference_numerically_layer_by_layer`'s
+// own reason to exist: a real-weight VALIDATION run that only checks three
+// tap points has no business holding all `num_layers` blocks' weights
+// resident just to reach them - a single-block validation pass needs at
+// most one block's weights (~2.6GB at these real dimensions) at a time, not
+// the whole ~132GB fp32 model).
+
+/// Fetch-upload-drop one f32 tensor as a device buffer. `advise_drop`s the
+/// source's pages behind it immediately - this tensor's data is fully
+/// consumed once `ctx.upload` returns.
+pub fn load_dev(tensors: &dyn checkpoint::TensorSource, ctx: &Ctx, name: &str) -> DeviceBuffer {
+    let mut buf: Option<DeviceBuffer> = None;
+    let found = tensors.with_tensor(name, &mut |data| buf = Some(ctx.upload(data)));
+    assert!(found, "minimaxh3 model: missing tensor {name:?}");
+    tensors.advise_drop(name);
+    buf.unwrap()
+}
+
+/// [`load_dev`]'s host-side twin, for the small per-block tensors
+/// (`adaln_proj`'s weight/bias) [`block_forward`] reads fresh every call
+/// rather than uploading once.
+pub fn load_host(tensors: &dyn checkpoint::TensorSource, name: &str) -> Vec<f32> {
+    let mut out: Option<Vec<f32>> = None;
+    let found = tensors.with_tensor(name, &mut |data| out = Some(data.to_vec()));
+    assert!(found, "minimaxh3 model: missing tensor {name:?}");
+    tensors.advise_drop(name);
+    out.unwrap()
+}
+
+/// Split the fused SwiGLU projection's two output-feature halves into
+/// separate contiguous buffers. The split itself must happen INSIDE the
+/// `with_tensor` callback (the borrowed slice does not outlive it); the
+/// row-count check that would read the tensor's own 2D shape is a numel
+/// check instead - a streaming `TensorSource` has no shape to hand back,
+/// and the total element count is exactly what the split below depends on.
+pub fn load_fc1(tensors: &dyn checkpoint::TensorSource, ctx: &Ctx, prefix: &str, hidden: u32, ffn: u32) -> (DeviceBuffer, DeviceBuffer) {
+    let name = format!("{prefix}.ff.net.0.proj.weight");
+    let half = (ffn * hidden) as usize;
+    let mut out: Option<(DeviceBuffer, DeviceBuffer)> = None;
+    let found = tensors.with_tensor(&name, &mut |data| {
+        assert_eq!(data.len(), 2 * half, "{name}: expected {} elements, got {}", 2 * half, data.len());
+        out = Some((ctx.upload(&data[..half]), ctx.upload(&data[half..2 * half])));
+    });
+    assert!(found, "minimaxh3 model: missing tensor {name:?}");
+    tensors.advise_drop(&name);
+    out.unwrap()
+}
+
+/// The 6 attention-projection tensors shared by both block kinds' `.attn`
+/// sub-module naming (`to_q`/`to_k`/`to_v`/`norm_q`/`norm_k`/`to_out.0`).
+pub fn load_attn(tensors: &dyn checkpoint::TensorSource, ctx: &Ctx, prefix: &str) -> (DeviceBuffer, DeviceBuffer, DeviceBuffer, DeviceBuffer, DeviceBuffer, DeviceBuffer) {
+    (
+        load_dev(tensors, ctx, &format!("{prefix}.to_q.weight")),
+        load_dev(tensors, ctx, &format!("{prefix}.to_k.weight")),
+        load_dev(tensors, ctx, &format!("{prefix}.to_v.weight")),
+        load_dev(tensors, ctx, &format!("{prefix}.norm_q.weight")),
+        load_dev(tensors, ctx, &format!("{prefix}.norm_k.weight")),
+        load_dev(tensors, ctx, &format!("{prefix}.to_out.0.weight")),
+    )
+}
+
+/// Load `transformer_blocks.{index}`'s weights - a single [`BlockWeights`],
+/// nothing else. A caller processing blocks one at a time drops the
+/// returned value (freeing its device buffers) before loading the next
+/// index.
+pub fn load_block(tensors: &dyn checkpoint::TensorSource, ctx: &Ctx, index: usize, hidden: u32, ffn: u32) -> BlockWeights {
+    let p = format!("transformer_blocks.{index}");
+    let (wq, wk, wv, norm_q, norm_k, wo) = load_attn(tensors, ctx, &format!("{p}.attn"));
+    let (fc1_value, fc1_gate) = load_fc1(tensors, ctx, &p, hidden, ffn);
+    BlockWeights {
+        wq,
+        wk,
+        wv,
+        wo,
+        norm_q,
+        norm_k,
+        norm1: load_dev(tensors, ctx, &format!("{p}.norm1.weight")),
+        norm2: load_dev(tensors, ctx, &format!("{p}.norm2.weight")),
+        fc1_value,
+        fc1_gate,
+        fc2: load_dev(tensors, ctx, &format!("{p}.ff.net.2.weight")),
+        adaln_w: load_host(tensors, &format!("{p}.adaln_proj.linear.weight")),
+        adaln_b: load_host(tensors, &format!("{p}.adaln_proj.linear.bias")),
+    }
+}
+
+/// [`load_block`]'s `token_refiner.refiner_blocks.{index}` analogue.
+pub fn load_refiner_block(tensors: &dyn checkpoint::TensorSource, ctx: &Ctx, index: usize, hidden: u32, ffn: u32) -> RefinerBlockWeights {
+    let p = format!("token_refiner.refiner_blocks.{index}");
+    let (wq, wk, wv, norm_q, norm_k, wo) = load_attn(tensors, ctx, &format!("{p}.attn"));
+    let (fc1_value, fc1_gate) = load_fc1(tensors, ctx, &p, hidden, ffn);
+    RefinerBlockWeights {
+        wq,
+        wk,
+        wv,
+        wo,
+        norm_q,
+        norm_k,
+        norm1: load_dev(tensors, ctx, &format!("{p}.norm1.weight")),
+        norm2: load_dev(tensors, ctx, &format!("{p}.norm2.weight")),
+        fc1_value,
+        fc1_gate,
+        fc2: load_dev(tensors, ctx, &format!("{p}.ff.net.2.weight")),
+    }
+}
+
 // ---------------- forwards ----------------
 
 /// `MiniMaxH3TokenRefinerBlock.forward`: plain pre-norm attention (no RoPE)
