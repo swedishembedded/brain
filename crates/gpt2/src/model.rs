@@ -114,6 +114,11 @@ const EMBED_TILE: usize = 46;
 // longer owns the whole query row t (Op::AttnBwdDScores, see
 // `dscores_kernel`). Appended, so every index above is unchanged.
 const ATTN_BWD_DSCORES_ROWS: usize = 47;
+// Per-row CE-gradient scale (`model::lossw::WeightedCe::hook`, self-improve
+// P9) - `Batch::LmWeighted` opt-in only (`enable_weighted_loss`). Appended
+// here (and only here) is the whole opt-in: an instance that never calls
+// `enable_weighted_loss` never pushes this step and pays no extra dispatch.
+const SCALE_ROW: usize = 48;
 
 /// The LayerNorm family this model dispatches through `model::block`, which
 /// picks the coalesced variant per device (`backend_api::select`).
@@ -178,6 +183,7 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("clip_coef_wg", kernels::CLIP_COEF_WG),
     ("embed_tile", kernels::EMBED_TILE),
     ("attn_bwd_dscores_rows", kernels::ATTN_BWD_DSCORES_ROWS),
+    ("scale_row", kernels::SCALE_ROW),
 ];
 
 /// Pick the forward-linear GEMM kernel + its dispatch thread count for an
@@ -387,6 +393,13 @@ pub struct Gpt {
     logits: gpu_core::DeviceBuffer,
     ce_buf: gpu_core::DeviceBuffer,
 
+    // Reward/advantage-weighted CE gradient (off = None, ordinary supervised
+    // training, zero extra dispatch) - see `model::lossw::WeightedCe`'s own
+    // doc comment for the shared recipe this adopts (`qwen3::Qwen`'s own
+    // `enable_weighted_loss` was the first adopter). See
+    // `model::Batch::LmWeighted`'s doc comment for the contract this realizes.
+    weighted_ce: Option<model::lossw::WeightedCe>,
+
     // backward temporaries
     dres: Vec<gpu_core::DeviceBuffer>,
     d_logits: gpu_core::DeviceBuffer,
@@ -572,6 +585,7 @@ impl Gpt {
             xn_final: hd_v(n * d),
             logits: hd_v(n * v),
             ce_buf: hd_v(n),
+            weighted_ce: None,
             dres,
             d_logits: hd_v(n * v),
             ce_stats: hd_v(n * 2),
@@ -719,7 +733,13 @@ impl Gpt {
     pub fn loss(&self) -> f32 {
         let n = (self.b * self.t) as usize;
         let losses = self.gpu.read(&self.ce_buf, n);
-        losses.iter().sum::<f32>() / self.count.get()
+        // Must return the SAME scalar `backward`'s (weighted) `d_logits`
+        // differentiates (the `Model::forward` contract) - see
+        // `model::lossw::WeightedCe::loss`'s own doc comment for why.
+        match &self.weighted_ce {
+            Some(w) => w.loss(&self.gpu, &losses, self.count.get()),
+            None => losses.iter().sum::<f32>() / self.count.get(),
+        }
     }
 
     pub fn forward(&self) -> f32 {
@@ -772,10 +792,19 @@ impl Gpt {
             // Two-pass CE gradient (see qwen): O(rows*vocab) not O(rows*vocab^2).
             s.push(self.gpu.step(CE_STATS, &[&self.logits, &self.targets, &self.ce_stats], &[n, v, IGNORE], n));
             s.push(self.gpu.step_buf(CE_GRAD_STATS, &self.ce_grad_uni, &[&self.logits, &self.targets, &self.ce_stats, &self.d_logits], n * v));
+            // `enable_weighted_loss()`-opt-in only: `WeightedCe::hook` scales the
+            // freshly-computed per-position CE gradient into its own scratch
+            // buffer, and everywhere downstream reads THAT instead of the raw
+            // `d_logits`. An instance that never called `enable_weighted_loss`
+            // never pushes this step and pays no extra dispatch.
+            let d_logits_bw: &gpu_core::DeviceBuffer = match &self.weighted_ce {
+                Some(w) => w.hook(&self.gpu, &mut s, SCALE_ROW, &self.d_logits),
+                None => &self.d_logits,
+            };
             let (bk, bt) = dw_kernel(v as usize, d as usize);
-            s.push(self.gpu.step(bk, &[&self.d_logits, &self.xn_final, g("lm_head.weight")], &[n, d, v], bt));
+            s.push(self.gpu.step(bk, &[d_logits_bw, &self.xn_final, g("lm_head.weight")], &[n, d, v], bt));
             let (bk, bt) = dx_kernel(n as usize, d as usize);
-            s.push(self.gpu.step(bk, &[&self.d_logits, self.w("lm_head.weight"), &self.d_xn], &[n, d, v, 0], bt));
+            s.push(self.gpu.step(bk, &[d_logits_bw, self.w("lm_head.weight"), &self.d_xn], &[n, d, v, 0], bt));
             let last = c.n_layers as usize;
             s.push(model::block::ln_stats_fwd(&self.gpu, &LN_IDS, &self.res[last], &self.ln_mean, &self.ln_inv, d, n, 1e-5));
             s.push(self.gpu.step(LN_DGAMMA, &[&self.d_xn, &self.res[last], &self.ln_mean, &self.ln_inv, g("ln.weight")], &[d, n], d));
@@ -840,6 +869,45 @@ impl Gpt {
 
     pub fn poll_wait(&self) {
         self.gpu.poll_wait();
+    }
+
+    // ---- reward/advantage-weighted CE gradient (model::Batch::LmWeighted) ----
+
+    /// Opt into per-position weighted CE gradient - call once after
+    /// construction (before the first `backward`); every ordinary
+    /// (unweighted) `Gpt` pays zero extra dispatch, same opt-in shape as
+    /// `qwen3::Qwen::enable_weighted_loss` (the reference implementation
+    /// [`model::lossw::WeightedCe`] was hoisted from). Once enabled,
+    /// `backward` always routes `d_logits` through `scale_row.wgsl` - a
+    /// `model::Batch::Lm` batch on an enabled instance implicitly weights
+    /// every position `1.0` (via [`Self::set_batch`]'s `Batch::Lm` arm, see
+    /// the `model::Model::set_batch` impl below), reproducing the unweighted
+    /// gradient exactly; `model::Batch::LmWeighted` supplies real
+    /// per-position weights.
+    pub fn enable_weighted_loss(&mut self) {
+        let n = (self.b * self.t) as u64;
+        let v = self.cfg.vocab as u64;
+        self.weighted_ce = Some(model::lossw::WeightedCe::new(&self.gpu, n, v));
+        if !self.bwd_steps.is_empty() {
+            self.bwd_steps = self.build_backward_steps();
+        }
+    }
+
+    /// Write the per-position CE gradient weights (`[b·t]`) for the next
+    /// `backward`. Panics if [`Self::enable_weighted_loss`] was never called.
+    pub fn write_weights(&self, weights: &[f32]) {
+        let w = self.weighted_ce.as_ref().expect("Gpt::write_weights: call enable_weighted_loss() first");
+        w.write(&self.gpu, weights);
+    }
+
+    /// Per-position `log p_θ(target)` for the batch [`Self::forward`] most
+    /// recently ran: the negation of `ce_buf`, which [`Self::forward`]
+    /// already read back to host to sum into its scalar return. `0.0` at
+    /// IGNORE positions, since `ce_value_masked.wgsl` writes exactly `0.0`
+    /// there.
+    pub fn batch_token_logprobs(&self) -> Vec<f32> {
+        let n = (self.b * self.t) as usize;
+        self.gpu.read(&self.ce_buf, n).iter().map(|&nll| -nll).collect()
     }
 
     /// OFFLINE FLOP/OPS cost of the recorded batch forward — walks the step
@@ -1125,9 +1193,36 @@ impl model::Model for Gpt {
 
     fn set_batch(&self, batch: model::Batch) {
         match batch {
-            model::Batch::Lm { tokens, targets } => Gpt::set_batch(self, tokens, targets),
-            _ => panic!("gpt2::Gpt only supports Batch::Lm"),
+            model::Batch::Lm { tokens, targets } => {
+                Gpt::set_batch(self, tokens, targets);
+                // An `enable_weighted_loss()`-enabled instance always routes
+                // `backward` through `scale_row` (see that method's doc
+                // comment) - an ordinary `Batch::Lm` on such an instance must
+                // reproduce the unweighted gradient exactly, so weight every
+                // position 1.0 rather than leaving the weighted-CE weights
+                // stale from a previous `Batch::LmWeighted` call.
+                if self.weighted_ce.is_some() {
+                    let ones = vec![1.0f32; (self.b * self.t) as usize];
+                    self.write_weights(&ones);
+                }
+            }
+            model::Batch::LmWeighted { tokens, targets, weights } => {
+                assert!(self.weighted_ce.is_some(), "gpt2::Gpt: Batch::LmWeighted requires enable_weighted_loss() to have been called first");
+                Gpt::set_batch(self, tokens, targets);
+                self.write_weights(weights);
+            }
+            _ => panic!("gpt2::Gpt only supports Batch::Lm / Batch::LmWeighted"),
         }
+    }
+
+    fn enable_weighted_loss(&mut self) {
+        Gpt::enable_weighted_loss(self)
+    }
+    fn batch_token_logprobs(&self) -> Option<Vec<f32>> {
+        Some(Gpt::batch_token_logprobs(self))
+    }
+    fn set_loss_weights(&self, weights: &[f32]) {
+        Gpt::write_weights(self, weights)
     }
 
     fn forward(&self) -> f32 {

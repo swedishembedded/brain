@@ -365,6 +365,28 @@ pub fn check_qwen3_weighted(seed: u64) -> Report {
     directional_check(&model, 5e-3, 4, seed ^ 0x5a17)
 }
 
+/// The same `model::Batch::LmWeighted` recipe as [`check_qwen3_weighted`], on
+/// `gpt2::Gpt` instead of `qwen3::Qwen` - the second adopter of the hoisted
+/// `model::lossw::WeightedCe` (`Gpt::enable_weighted_loss`/`write_weights`),
+/// proving the primitive is generic rather than qwen3-shaped in disguise.
+/// Same tiny config/batch as [`check_gpt`], same non-uniform (including
+/// exactly-zero) per-position weights as [`check_qwen3_weighted`], for the
+/// same reason: a uniform weight wouldn't distinguish "scaled correctly per
+/// row" from "scaled correctly overall".
+pub fn check_gpt2_weighted(seed: u64) -> Report {
+    use gpt2::{Gpt, GptConfig};
+    let cfg = GptConfig { vocab: 23, block_size: 12, n_layers: 2, d_model: 16, n_heads: 2, d_ff: 32 };
+    let init = gpt2::init_weights(&cfg, seed);
+    let mut model = Gpt::new(cfg, 2, 6, &init);
+    model.enable_weighted_loss();
+    let x: Vec<u32> = (0..12).map(|i| (i * 5 + 1) % 23).collect();
+    let y: Vec<u32> = (0..12).map(|i| (i * 5 + 2) % 23).collect();
+    model.set_batch(&x, &y);
+    let weights: Vec<f32> = (0..12).map(|i| if i % 2 == 0 { 0.0 } else { 0.25 * (1 + i) as f32 }).collect();
+    model.write_weights(&weights);
+    directional_check(&model, 5e-3, 4, seed ^ 0x5a17)
+}
+
 /// Build a tiny LFM2.5 encoder (conv + attention + conv layer stack) and
 /// gradient-check it. This is the correctness gate for the bidirectional
 /// attention backward through the GQA→MHA expansion (`kv_expand_bwd`
@@ -1695,6 +1717,16 @@ mod tests {
             return;
         }
         let report = check_qwen3_weighted(7);
+        report.print();
+        assert_grad_gate(&report, "model");
+    }
+
+    #[test]
+    fn gpt2_weighted_analytic_grads_match_finite_differences() {
+        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+            return;
+        }
+        let report = check_gpt2_weighted(7);
         report.print();
         assert_grad_gate(&report, "model");
     }

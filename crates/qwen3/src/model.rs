@@ -514,16 +514,12 @@ pub struct Qwen {
 
     // Reward/advantage-weighted CE gradient (off = None, ordinary supervised
     // training, zero extra dispatch). When enabled via `enable_weighted_loss`,
-    // the backward scales `d_logits` per ROW (token position) by
-    // `loss_weights` (`scale_row.wgsl`) into `d_logits_weighted`, and every
-    // downstream consumer (`head` dw/dx) reads that instead of the raw
-    // `d_logits`. Named `loss_weights`, not `weights` - that name is already
-    // the Ops/Weight façade's per-tensor map (`self.weights: HashMap<String,
-    // Weight>`, B7) a few fields below. See `model::Batch::LmWeighted`'s doc
-    // comment for the contract this realizes.
-    weighted: Cell<bool>,
-    loss_weights: DeviceBuffer,
-    d_logits_weighted: DeviceBuffer,
+    // the backward scales `d_logits` per ROW (token position) by the hoisted
+    // `WeightedCe`'s weights (`scale_row.wgsl`) into its own scratch buffer,
+    // and every downstream consumer (`head` dw/dx) reads that instead of the
+    // raw `d_logits`. See `model::Batch::LmWeighted`'s doc comment for the
+    // contract this realizes.
+    weighted_ce: Option<model::lossw::WeightedCe>,
 
     // Decode-path M-RoPE: a single-row `[1, head_dim/2]` cos/sin table, reused
     // (overwritten) every `step_mrope`/`step_embed_mrope` call rather than
@@ -1094,9 +1090,7 @@ impl Qwen {
             mrope: Cell::new(false),
             mrope_cos: st(1),
             mrope_sin: st(1),
-            weighted: Cell::new(false),
-            loss_weights: st(1),
-            d_logits_weighted: st(1),
+            weighted_ce: None,
             decode_mrope_cos,
             decode_mrope_sin,
             deepstack: Cell::new(None),
@@ -1699,21 +1693,12 @@ impl Qwen {
         self.gpu.submit(&[], &self.fwd_steps);
         let n = (self.b * self.t) as usize;
         let losses = self.gpu.read(&self.ce_buf, n);
-        if self.weighted.get() {
+        match &self.weighted_ce {
             // Must return the SAME scalar `backward`'s (weighted) `d_logits`
-            // differentiates (the `Model::forward` contract), not the plain
-            // mean CE - `d_logits_weighted[row] = loss_weights[row] *
-            // d_logits[row]` is exactly the gradient of
-            // `Σ loss_weights[i]·ce_loss[i] / count` (per-row terms don't
-            // cross, so a per-row scalar factor commutes with `d/d(logits)`),
-            // never of `Σ ce_loss[i] / count`. Read back `loss_weights`
-            // itself rather than caching the host `Vec<f32>` from
-            // `write_weights` - one extra small host read per forward, kept
-            // simple and impossible to let drift from what `backward` reads.
-            let w = self.gpu.read(&self.loss_weights, n);
-            losses.iter().zip(&w).map(|(l, wi)| l * wi).sum::<f32>() / self.count.get()
-        } else {
-            losses.iter().sum::<f32>() / self.count.get()
+            // differentiates (the `Model::forward` contract) - see
+            // `model::lossw::WeightedCe::loss`'s own doc comment for why.
+            Some(w) => w.loss(&self.gpu, &losses, self.count.get()),
+            None => losses.iter().sum::<f32>() / self.count.get(),
         }
     }
 
@@ -1766,19 +1751,16 @@ impl Qwen {
             // 151936 this is the difference between ~10 ms and ~56 s per backward.
             s.push(self.gpu.step(CE_STATS, &[&self.logits, &self.targets, &self.ce_stats], &[n, v, IGNORE], n));
             s.push(self.gpu.step_buf(CE_GRAD_STATS, &self.ce_grad_uni, &[&self.logits, &self.targets, &self.ce_stats, &self.d_logits], n * v));
-            // `enable_weighted_loss()`-opt-in only: scale the freshly-computed
-            // per-position CE gradient by `self.loss_weights` (`scale_row.wgsl`,
-            // NOT in-place - see that kernel's own doc comment) into
-            // `d_logits_weighted`, then read THAT everywhere downstream reads
-            // what would otherwise be the raw `d_logits`. An instance that
-            // never called `enable_weighted_loss` never pushes this step and
-            // pays no extra dispatch (matches `model::Batch::LmWeighted`'s doc
-            // comment: ordinary training pays zero extra kernel dispatches).
-            let d_logits_bw: &DeviceBuffer = if self.weighted.get() {
-                s.push(self.gpu.step(SCALE_ROW, &[&self.d_logits, &self.loss_weights, &self.d_logits_weighted], &[n * v, v], n * v));
-                &self.d_logits_weighted
-            } else {
-                &self.d_logits
+            // `enable_weighted_loss()`-opt-in only: `WeightedCe::hook` scales the
+            // freshly-computed per-position CE gradient into its own scratch
+            // buffer, and everywhere downstream reads THAT instead of the raw
+            // `d_logits`. An instance that never called `enable_weighted_loss`
+            // never pushes this step and pays no extra dispatch (matches
+            // `model::Batch::LmWeighted`'s doc comment: ordinary training pays
+            // zero extra kernel dispatches).
+            let d_logits_bw: &DeviceBuffer = match &self.weighted_ce {
+                Some(w) => w.hook(&self.gpu, &mut s, SCALE_ROW, &self.d_logits),
+                None => &self.d_logits,
             };
             if self.trainable(head) {
                 let (bk, bt) = dw_kernel_bw(v, d);
@@ -2021,9 +2003,7 @@ impl Qwen {
     pub fn enable_weighted_loss(&mut self) {
         let n = (self.b * self.t) as u64;
         let v = self.cfg.vocab as u64;
-        self.loss_weights = self.gpu.storage(n);
-        self.d_logits_weighted = self.gpu.storage(n * v);
-        self.weighted.set(true);
+        self.weighted_ce = Some(model::lossw::WeightedCe::new(&self.gpu, n, v));
         if !self.bwd_steps.is_empty() {
             self.bwd_steps = self.build_backward_steps();
         }
@@ -2033,9 +2013,8 @@ impl Qwen {
     /// `backward`. Panics if [`Self::enable_weighted_loss`] was never called - the
     /// same "opt in before use" contract as the M-RoPE/VLM splice setters above.
     pub fn write_weights(&self, weights: &[f32]) {
-        assert!(self.weighted.get(), "Qwen::write_weights: call enable_weighted_loss() first");
-        assert_eq!(weights.len(), (self.b * self.t) as usize, "Qwen::write_weights: expected {} weights, got {}", self.b * self.t, weights.len());
-        self.gpu.write(&self.loss_weights, bytemuck::cast_slice(weights));
+        let w = self.weighted_ce.as_ref().expect("Qwen::write_weights: call enable_weighted_loss() first");
+        w.write(&self.gpu, weights);
     }
 
     /// Write the per-token M-RoPE cos/sin tables (`[b·t, head_dim/2]` row-major)
@@ -2751,15 +2730,15 @@ impl model::Model for Qwen {
                 // `backward` through `scale_row` (see that method's doc
                 // comment) - an ordinary `Batch::Lm` on such an instance must
                 // reproduce the unweighted gradient exactly, so weight every
-                // position 1.0 rather than leaving `self.loss_weights` stale
-                // from a previous `Batch::LmWeighted` call.
-                if self.weighted.get() {
+                // position 1.0 rather than leaving the weighted-CE weights
+                // stale from a previous `Batch::LmWeighted` call.
+                if self.weighted_ce.is_some() {
                     let ones = vec![1.0f32; (self.b * self.t) as usize];
                     self.write_weights(&ones);
                 }
             }
             model::Batch::LmWeighted { tokens, targets, weights } => {
-                assert!(self.weighted.get(), "qwen3::Qwen: Batch::LmWeighted requires enable_weighted_loss() to have been called first");
+                assert!(self.weighted_ce.is_some(), "qwen3::Qwen: Batch::LmWeighted requires enable_weighted_loss() to have been called first");
                 Qwen::set_batch(self, tokens, targets);
                 self.write_weights(weights);
             }

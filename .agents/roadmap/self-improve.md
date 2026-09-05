@@ -436,7 +436,7 @@ touched file (two `#[allow(clippy::type_complexity)]` added on the new
 5-tuple-returning loader helpers, matching an existing repo convention for
 that lint).
 
-## P9 - hoist `WeightedCe`, adopt a second model - TODO
+## P9 - hoist `WeightedCe`, adopt a second model - DONE
 
 New `crates/model/src/lossw.rs::WeightedCe` hoists the three-part
 buffers-plus-`SCALE_ROW`-step-plus-weighted-`forward` recipe currently
@@ -453,6 +453,45 @@ Gate: `gradcheck::check_qwen3_weighted` stays green unchanged; new
 `gradcheck::check_gpt2_weighted` following its exact pattern (non-uniform
 weights including exact zeros, `directional_check` against finite
 differences).
+
+`WeightedCe` exposes exactly four operations - `new` (allocate the `[n]`
+weight row + `[n·v]` scratch buffer), `hook` (append the `scale_row` step,
+return the buffer downstream backward steps must read), `write` (upload
+per-position weights), `loss` (the weighted-sum-over-count scalar `forward`
+returns) - so a model owns a single `Option<WeightedCe>` field (`None` =
+ordinary training, zero extra buffers/dispatch) in place of the three
+separate fields (`Cell<bool>` flag + two raw buffers) `qwen3::Qwen` carried
+before this phase. `qwen3::Qwen::enable_weighted_loss`/`write_weights`/
+`forward`/`build_backward_steps` are now thin delegates to it, with no
+change to what they compute - the pre-existing `check_qwen3_weighted`
+gradcheck is the proof. `gpt2::Gpt` gained the identical trio
+(`enable_weighted_loss`, `write_weights`, `batch_token_logprobs`) plus a
+real `Batch::LmWeighted` arm in its `model::Model::set_batch` (previously a
+wildcard panic) and its own `scale_row` kernel registration
+(`crates/gpt2/src/model.rs`'s `PIPELINES`) - built in ~40 lines against
+~60 for `qwen3`'s original inline version, confirming the hoist actually
+shrinks a second adopter rather than just moving the copy.
+
+**Verified**: `cargo test -p brain-gradcheck --lib weighted` - both
+`qwen3_weighted_analytic_grads_match_finite_differences` (unchanged) and
+the new `gpt2_weighted_analytic_grads_match_finite_differences` (confirmed
+red first: it failed to compile against the pre-`enable_weighted_loss`
+`gpt2::Gpt`) green. `cargo test -p brain-gpt2 --lib` - all 15 tests green,
+including `pipelines_fully_costed` (confirms the newly-appended `scale_row`
+kernel has a `gpu_core::cost` formula) and `backward_grads_finite`/
+`forward_finite_and_deterministic` (unweighted path unchanged).
+`cargo test -p brain-qwen3 --lib` - 124 passed, 2 ignored, 3 failed; the 3
+failures (`embed_step_survives_a_vocab_table_that_exceeds_one_storage_binding`,
+`head_matmul_over_binding_cap_does_not_panic`,
+`head_matmul_tiled_matches_untiled_within_tolerance`) are this box's
+integrated-GPU 2047 MiB `max_buffer_size` rejecting an oversized vocab-table
+test fixture, unrelated to weighted loss - confirmed via `git stash` that
+they fail identically on the pre-P9 tree. `cargo check --workspace
+--all-targets --exclude brain-vulkan` clean. `cargo clippy -p brain-model -p
+brain-qwen3 -p brain-gpt2 -p brain-gradcheck --all-targets` clean on every
+touched file (pre-existing `doc_lazy_continuation`/`needless_range_loop`
+warnings elsewhere in `brain-model`'s test fixtures and `qwen3::serve` left
+untouched).
 
 ## P10 - generic rollout - TODO
 

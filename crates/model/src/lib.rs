@@ -47,6 +47,7 @@ pub mod int8;
 pub mod kquant;
 pub mod logprobs;
 pub mod lora;
+pub mod lossw;
 pub mod lut4;
 pub mod moe;
 pub mod objective;
@@ -133,12 +134,13 @@ pub enum Batch<'a> {
     ///
     /// A model opts into this variant by constructing itself with weighted-
     /// loss support enabled (each model's own opt-in method, e.g.
-    /// `qwen3::Qwen::enable_weighted_loss`, following the same
-    /// allocate-buffer/rebuild-steps pattern as `enable_mrope`/
-    /// `enable_mm_splice`) - NOT by every model handling this variant by
-    /// default, so ordinary (unweighted) training pays zero extra kernel
-    /// dispatches. A model that has not opted in may treat this like any
-    /// other unsupported `Batch` variant (panic, matching the existing
+    /// `qwen3::Qwen::enable_weighted_loss` / `gpt2::Gpt::enable_weighted_loss`,
+    /// both thin wrappers over the shared [`lossw::WeightedCe`] primitive,
+    /// following the same allocate-buffer/rebuild-steps pattern as
+    /// `enable_mrope`/`enable_mm_splice`) - NOT by every model handling this
+    /// variant by default, so ordinary (unweighted) training pays zero extra
+    /// kernel dispatches. A model that has not opted in may treat this like
+    /// any other unsupported `Batch` variant (panic, matching the existing
     /// `Batch::Lm`-only models' own wildcard arm).
     LmWeighted { tokens: &'a [u32], targets: &'a [u32], weights: &'a [f32] },
 }
@@ -206,8 +208,9 @@ pub trait Model {
     /// Default panics: a model must explicitly override this to support
     /// `crates/rl`'s generic weighted-training driver - the same opt-in,
     /// thin-per-model-wiring shape [`Batch::LmWeighted`]'s own doc comment
-    /// documents. `qwen3::Qwen::enable_weighted_loss` is the reference
-    /// implementation this delegates to.
+    /// documents. [`lossw::WeightedCe`] is the shared primitive
+    /// `qwen3::Qwen::enable_weighted_loss` / `gpt2::Gpt::enable_weighted_loss`
+    /// both delegate to.
     fn enable_weighted_loss(&mut self) {
         unimplemented!("{}: does not implement Model::enable_weighted_loss (no weighted-loss/Batch::LmWeighted support yet)", std::any::type_name::<Self>());
     }
@@ -246,7 +249,8 @@ pub trait Model {
     /// Default panics, for the same reason [`Model::enable_weighted_loss`]'s
     /// does: a model must explicitly opt in (typically a one-line delegate to
     /// whatever setter backs its `Batch::LmWeighted` support, e.g.
-    /// `qwen3::Qwen::write_weights`) and must have called
+    /// `qwen3::Qwen::write_weights` / `gpt2::Gpt::write_weights`, both thin
+    /// wrappers over [`lossw::WeightedCe::write`]) and must have called
     /// [`Model::enable_weighted_loss`] first.
     fn set_loss_weights(&self, _weights: &[f32]) {
         unimplemented!("{}: does not implement Model::set_loss_weights", std::any::type_name::<Self>());
