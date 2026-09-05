@@ -4877,6 +4877,127 @@ ever, and the invariant it exists to prove (`f16_gflops >= gflops`) holds.
 **Commit**: one (the `roof::measure` gate fix, the `backend-wgpu` F16 tier
 and `f16_storage` override, the inverted test, this ledger entry).
 
+### M6.4 (backfilled) - multi-tensor AdamW step, `O(2P+1)` not `O(3P+1)`
+
+Landed `2026-09-02` (commit `29c795cdd`, `optim, kernels, backends:
+multi-tensor AdamW step, O(2P+1) not O(3P+1) (M6.4)`), one day after this
+campaign opened, self-labelled `M6.4` in its own commit message and in
+`crates/optim/src/lib.rs`'s own module doc - but no corresponding entry was
+ever written here, a gap M6.5's own entry above found and flagged rather
+than silently working around. Backfilled now, from that commit's own
+message and the source it left behind, since a milestone number a live
+source file cites but this ledger has never heard of is exactly the kind of
+drift this document exists to prevent.
+
+`optim::Optim::step` dispatched `3P+1` GPU calls (`P` = trainable tensor
+count: `P` grad-norm + 1 clip-coefficient + `P` grad-scale + `P` AdamW) plus
+`P` separate 9-word `gpu.write`s per step to `P` physically distinct AdamW
+uniforms that differed between tensors ONLY in `numel` - every other field
+identical across every tensor in one step, so rewriting all `P` copies
+every step was pure waste, and on wgpu each `write` after the first paid an
+empty `queue.submit(None)`. Folded the grad pre-scale directly into
+`adamw.wgsl` (`g = grad[i] * scale * coef[0]`), removing the grad-scale
+stage entirely (`3P+1 -> 2P+1`: `P` grad-norm + 1 clip-coefficient + `P`
+AdamW). `coef` is device-resident (the same `clip_coef` buffer the clip
+stage already computes when active, or a build-time-constant `[1.0]`
+otherwise); the rest of AdamW's hyperparameters moved into ONE uniform
+buffer (`Graph::hparams`) written ONCE per `step()` regardless of `P`,
+with a tiny per-tensor descriptor slot (`numel`, for the padded-tail guard)
+written once at graph build time and never again.
+
+Added `DeviceStats::writes` across all four backends (wgpu/cpu/vulkan/wasm)
+so the `O(P) -> O(1)` write-count claim was a measured number, not an
+assertion. Verified (per that commit): `brain-optim` full suite green on
+both GPU (P40) and CPU-JIT backends, including
+`clipped_step_dispatches_2p_plus_1_and_writes_are_flat_in_tensor_count`;
+kernel table regenerated and consistent (448 kernels at the time); zero
+clippy warnings.
+
+This closes the parenthetical M6.5's own entry left open - Phase 6's fourth
+outline item (a multi-tensor optimizer) is NOT fully done (the true `O(1)`
+endpoint still needs the cross-cutting `ParamStore` flattening M6.5's "Not
+yet done" paragraph describes, correctly still out of scope), but the
+`3P+1 -> 2P+1` half of it is real, already landed, and now has the ledger
+entry its own source always claimed it did.
+
+### M8.14 - Phase 8 close-out: the ledger reconciled, `AGENTS.md` re-checked, the capability report rendered
+
+Closes this wave of work. Three things, no new kernel:
+
+**Ledger reconciliation.** `select::Op` grew from 8 variants (this ledger's
+own "verified findings" table, §1, records the count as it stood when the
+campaign OPENED - a baseline snapshot this document deliberately does not
+edit after the fact, per decision 3's own scope: corrections belong to
+`AGENTS.md`'s live prose, not to the frozen "what we found" table) to 16
+today (`MatMul, RmsNorm, LayerNorm, ArgMaxRow, GradNorm, MaxAbsRow, Conv1d,
+ConvTranspose1d, Softmax, AttnBwdDScores, PagedAttention, MoeExpertLinear,
+Conv2d, PagedAttentionFused, Conv3d, Conv2dBackward` - counted directly
+against `crates/backend-api/src/select.rs`, not assumed from an earlier
+milestone's own claim); M8.3's own entry already states the current count
+correctly, so no correction was needed there, only this note confirming it
+was checked. M6.4's own gap (a milestone real source code names but this
+ledger never recorded) is backfilled above. `AGENTS.md`'s `OperatorProvider`
+paragraph (amended by M8.3, extended by M8.7/M8.9) re-read end to end and
+confirmed internally consistent: M8.9 landed first (the first REAL non-
+reference provider) with M8.7 correctly described as landing a SECOND one,
+not a duplicate "first" claim.
+
+**The capability report, rendered and checked, not assumed clean:**
+`make test/capability-report` on this box (Intel Core Ultra 7 155H /
+Meteor Lake CPU, Arc integrated GPU) shows exactly two harness-gated skips,
+matching the two milestones this phase actually could not validate here:
+
+```
+capability                    skips  reason(s)
+----------                    -----  ---------
+coopmat-hardware                  1  vkCreateComputePipelines accepted the coopmat SPIR-V on
+                                      this Intel ANV device even though it has no
+                                      VK_KHR_cooperative_matrix shapes (caps.arch.matrix is
+                                      None) - pipeline creation succeeding is NOT proof this
+                                      device can correctly EXECUTE OpTypeCooperativeMatrixKHR;
+                                      needs Turing sm_75+ or equivalent real matrix-engine
+                                      hardware to validate a dispatch
+avx512-vnni                       1  fast_ops::dot32_i8_avx512vnni (M8.12) needs AVX-512-VNNI
+                                      (VPDPBUSD); this box has no AVX-512 of any kind -
+                                      compiled and shape-tested only, never run on real VNNI
+                                      hardware
+```
+
+M8.13's NEON/SVE code does not even appear in this report - not because it
+passed, but because it is `#[cfg(target_arch = "aarch64")]`-gated and this
+is an x86_64 box, so the whole module compiles OUT entirely; its own ledger
+entry already states plainly it has never been compiled anywhere in this
+campaign, a stricter and more honest claim than a runtime skip would be.
+M8.12's AMX arms (`amx-tile`/`amx-int8`) were not attempted at all - `is_
+x86_feature_detected!("amx-tile")` fails to compile on stable Rust (a real
+toolchain gap, not a choice) - recorded in M8.12's own entry, not silently
+dropped, and not re-litigated here.
+
+**What Phase 8 is, honestly, at close:** the `OperatorProvider` ABI (M8.3)
+is real and landed, but its reach is `Op::MatMul` only - every other
+dispatch path (`Ops::embed`/`moe_linear`/`matmul_dx`/`matmul_dw`,
+`model::block`'s gates, `qwen3::serve`'s manual GEMM region) is untouched,
+stated plainly in M8.3's own entry and in `AGENTS.md`. Two real, non-
+reference providers exist (`CoopMatProvider` M8.9, `NativeF16Provider`
+M8.7) and both correctly decline on every box this campaign has actually
+run on - proven, not assumed, in each one's own gate. The CPU ISA family
+(M8.10/M8.11) is the one part of this phase with a REAL, MEASURED,
+production-reachable win on this box: a ~37-41x AVX2 packed-int8 GEMM
+speedup, hoisted through the same ABI. Precision tiers gained two genuinely
+new, measured storage/decode tiers (NF4/F4E2M1 M8.5, portable FP8 M8.6) and
+one corrected circular dead-code path (`f16_gflops`, M8.2); native bf16
+compute remains permanently out of WGSL's reach by construction (M8.8), a
+restraint, not a gap to close. Nothing in this phase claims a bigger win
+than what was actually measured on the hardware that was actually
+available - the honest summary is: the ARCHITECTURE this phase set out to
+build (the provider seam, the capability lattice, the schedule-space
+search) is real and in place; the HARDWARE this phase's more exotic tiers
+target (Turing+ matrix engines, AVX-512/AMX/NEON silicon) was never present
+to prove them against, and every one of those gaps is named, gated, and
+traceable rather than silently assumed away.
+
+**Commit**: one (this entry only - no code change).
+
 ## Not yet done
 
 Phase 0 is closed. Phase 1 is in progress per the recalibrated scope above.
@@ -4933,11 +5054,10 @@ been built for. Not attempted this session, on purpose: `crates/optim/
 src/lib.rs`'s own module doc already gives the honest reason. The optimizer
 is currently `2P+1` dispatches per step (`P` = trainable tensor count) -
 already down from an older `3P+1` by folding grad-scale directly into
-`adamw.wgsl` (a real, already-landed win; see the parenthetical under M6.5
-above for the gap that this fold's own source comments name a `kernel-
-performance.md` entry, "M6.4", that was never actually written - worth
-someone backfilling, but not this session's work to verify after the fact).
-Reaching the true `O(1)`-dispatch endpoint needs physically flattening
+`adamw.wgsl` (a real, already-landed win, `M6.4` above - backfilled into
+this ledger, closing the gap M6.5's own entry flagged: that fold's source
+comments named a `kernel-performance.md` entry that had never actually been
+written). Reaching the true `O(1)`-dispatch endpoint needs physically flattening
 `weight`/`grad`/`m`/`v` into one contiguous slab per category and binding a
 sub-range of it per tensor - which means threading `step_sliced`'s existing
 offset/length binding (or a new "bind a baked-in sub-range of a shared
@@ -4954,3 +5074,36 @@ automatically a cost" finding) both suggest a real risk that flattening
 every model's parameter store buys a training step less than its refactor
 cost, which should be checked with a profile before, not after, fifteen
 crates change shape.
+
+**Phase 7 status.** Opened, not closed. `M7.1` (`DataParallel::adamw_step`
+gradient-transfer bucketing) is the only milestone landed - a host-side,
+API-stable fix removing an easy inefficiency in one training path. Every
+harder item this phase is actually named for remains fully open: the
+`Collective` trait's signature (still owned `Vec<f32>` in/out, no dtype
+parameter, no async handle, no error channel - `crates/model/src/
+collective.rs`, unchanged), any device-resident collective, tensor-parallel
+wiring end-to-end (`crates/model/src/plan.rs`'s `TpPlan` still has zero
+consumers - a real planner with nothing plugged into it), expert
+parallelism, ZeRO/FSDP-style parameter sharding. None of these were
+attempted; M7.1's own entry names them explicitly as out of scope, not
+silently deferred.
+
+**Phase 8 status.** M8.0 through M8.14 are all landed (see each entry
+above); M8.14 is this phase's own close-out and states plainly what is
+real vs. build-and-gated. The phase's own decision 1 ("provider seam now,
+native packs later... no vendor pack ships in this campaign") held: the
+two real non-reference providers this phase produced (`NativeF16Provider`,
+`CoopMatProvider`) both correctly decline on every box available to build
+them against, which is the phase's own harness contract (decision 2)
+working exactly as designed, not a shortfall. What is genuinely still open,
+distinct from "built but unvalidated": widening `Ops`'s reach beyond
+`Op::MatMul` (a Phase 1 job, not Phase 8's, per M8.3's own scope note);
+AMX support (blocked on stable Rust's missing `is_x86_feature_detected!`
+arms, a toolchain gap, not a design choice); ARM NEON/SVE validation
+(blocked on this sandbox having no ARM cross-compilation path at all); the
+true `O(1)`-dispatch multi-tensor optimizer (Phase 6's, not Phase 8's,
+tracked in that phase's own status above). No further Phase 8 milestones
+are planned; the next real hardware-dependent step is validating M8.9's
+coopmat kernel and M8.12's AVX-512-VNNI kernel on real Turing+/VNNI
+hardware, which needs that hardware to exist, not more source-level work
+on this box.
