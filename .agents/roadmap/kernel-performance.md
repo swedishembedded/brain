@@ -1316,6 +1316,101 @@ prerequisite compile fix), `docs: record the selector/scratch-sizing rule
 M2.4 caught` (F.7b), `model, qwen3: move the M2.4 fused-attention selector
 call out of run_batched_steps` (the `no_kernel_names.rs` fix above).
 
+### M2.5 - `paged_flash_prefill_hd256`: a separate kernel closing the head_dim=256 gap that kept Qwen3.8-27B off the fused prefill path entirely
+
+W4a of this campaign's own scope note re-derived the gap from source rather
+than taking the audit's framing on trust: `paged_flash_prefill.wgsl` (M2.3)
+hard-codes `const HD: u32 = 128u` and its own header caps `head_dim` there -
+not an oversight, `qwen35::serve`'s own `MAX_PREFILL_TOKENS` doc already
+names the reason plainly ("the fused flash-attention prefill kernel ... does
+not fit this model's head_dim = 256 yet"). `Qwen35Config::qwen38_27b()` (the
+model this whole campaign is measured against) has `head_dim = 256`, so
+`qwen35::serve::Engine::prefill` stays on `model::block::gqa_chunk_step`'s
+materialized `[chunk, n_heads, pos+chunk]` score/prob slab for every GQA
+layer today - the thing M2.3/M2.4 built the fused kernel specifically to
+remove, unreachable for this model at this shape.
+
+**A separate kernel file, not an in-place rewrite of `paged_flash_prefill.wgsl`
+- the fallback this milestone's own brief named as the safer choice when a
+lane-split rewrite cannot be landed with full confidence in one session.**
+Doubling `LANES*CH` to cover `head_dim=256` in place would double `ksh`/`vsh`
+from 4 KiB each to 8 KiB each - together with `part`'s own 8 KiB, 24 KiB
+total, over the WebGPU-guaranteed 16 KiB `maxComputeWorkgroupStorageSize`
+floor `paged_flash_prefill`/`flash_attn_causal_gqa` both sit exactly at
+(`backend_api::DeviceCaps::portable_baseline`'s own comment names this as
+the engine's own portability convention, not a soft target). Editing that
+kernel in place to widen its tile would also put every OTHER model already
+on the HD=128 fused path (Qwen3-0.6B among them) at risk of a shared-memory
+regression for a change none of them need.
+
+`paged_flash_prefill_hd256.wgsl` instead STREAMS two `HD0=128`-wide head_dim
+fragments through the SAME `ksh`/`vsh` budget that kernel already uses:
+stage fragment 0's K tile, accumulate its partial `Q.K` dot product into a
+per-thread REGISTER (`sfull`, not shared memory), then restage the SAME
+buffer with fragment 1's K tile and add its partial - before any softmax
+math runs at all, since the online-softmax statistics (row max, sum of exp)
+are a function of the FULL head_dim dot product and would be wrong computed
+per-fragment. Only once `sfull` holds the complete head_dim score does the
+tile's online-softmax update run, once, exactly as `paged_flash_prefill`
+already does; the resulting weights (`pj`) are then shared UNCHANGED by both
+value fragments, since P@V splits cleanly per fragment once the weights
+themselves are known (V's head_dim is what is being PRODUCED, not summed
+over). Net shared memory: `ksh` 4 KiB + `vsh` 4 KiB + `part` 8 KiB = 16 KiB,
+IDENTICAL to `paged_flash_prefill`'s own budget, not doubled - paid for with
+roughly double the barrier count (~10 `workgroupBarrier()`s per KV tile
+against that kernel's 3), a barrier/instruction-count cost, not a memory
+one. `@cpu no` regardless (GPU-only by construction, same as its HD=128
+sibling), so the CPU JIT's barrier-per-body limit does not apply.
+
+**Gate.** `crates/model/src/paged.rs::flash_tests::
+paged_flash_prefill_hd256_matches_batched_triad_at_head_dim_256` is an exact
+clone of `paged_flash_prefill_matches_batched_triad`'s own scenario (GQA
+`n_heads=4, n_kv_heads=2`, a `start=17` cached prefix, a `cc=130` chunk
+spanning three `BR=64` query tiles, a scrambled/reversed block table) with
+only `head_dim` (256, `qwen38_27b`'s own value) and the dispatched kernel
+changed, so any divergence is attributable to the head_dim split and not a
+different scenario. Same `1e-3` absolute-error bound every other
+fused-vs-triad gate in this file uses, for the same reason
+(`paged_flash_prefill`'s own header): online softmax reassociates the
+reduction, so this is never bit-exact against the triad's exact-max-then-
+single-pass reference. Measured maxabs on this box (`wgpu`, Intel Arc iGPU
+via Vulkan - this sandbox has no Tesla P40, see below): `1.1920929e-6`,
+the same order of magnitude as `paged_flash_prefill_matches_batched_triad`'s
+own `4.172325e-7` run in the SAME test binary invocation, both comfortably
+under the `1e-3` bound. `cargo test --offline -p brain-model --lib
+paged::flash_tests`: 5 passed, 0 failed.
+
+**Not wired into `qwen35::serve` - deliberately, following M2.3/M2.4's own
+split.** M2.3 built `paged_flash_prefill` with a correctness-only gate and
+left wiring it behind `Op::PagedAttentionFused` to M2.4; this milestone does
+the same for the `head_dim=256` regime. `qwen35::serve::Engine::prefill`
+still calls `gqa_chunk_step` unconditionally after this commit. Wiring this
+kernel in looks tractable (`qwen35`'s per-layer cache already uses the
+degenerate one-block-per-sequence paged scheme `gqa_chunk_step` itself
+builds - `block_size = cap`, `block_ids` all zero - the same addressing
+`paged_flash_prefill_hd256` expects), but it needs its own selector-shape
+work (`Op::PagedAttentionFused` keys on `(causal_chunk, kv_int8)`, not
+`head_dim`, so a new key dimension or a new call-site guard is needed to
+route `head_dim=256` to this kernel and every other shape to the existing
+HD=128 arm) and its own `qwen35`-side gradcheck/parity re-verification -
+left as a named follow-up, not rushed into this commit.
+
+**This box could not run W4b's own hard bar, so W4b was not attempted.**
+This session's sandbox has no NVIDIA device at all (`nvidia-smi: command not
+found`, no `/dev/nvidia*`; `vulkaninfo` enumerates only an Intel Arc iGPU and
+`llvmpipe` software Vulkan) - not the Tesla P40 pair this whole ledger's own
+numbers are measured against (confirmed by the test run above's own
+`adapter:` line). `qwen_bench serve 1 20 512` on THIS hardware would not be
+a number comparable to the M0.2 baseline or to anything else in this file,
+so committing to W4b's hard bar (beat the triad's measured time on that
+exact command on that exact hardware, or record it killed with real
+numbers) was not responsible here - a design note for whoever next has that
+hardware is recorded in "Not yet done" below instead of a fabricated or
+non-comparable measurement.
+
+**Commit**: one (`paged_flash_prefill_hd256.wgsl` + catalogue regen + the
+correctness test).
+
 ### M3.2 - Device admission head, and `PagedDecoder::admit_greedy`/`admit_topk`
 
 `qwen3::serve::Engine` kept a SECOND, host-only copy of the LM head
@@ -3008,7 +3103,20 @@ largest serving scratch buffer - shrinks 4x at a representative shape
 whenever it is live. `brain-qwen3`/`brain-model` build and test clean (M2.4
 also closed the concurrent-migration compile break that had blocked
 M2.1/M2.2/M2.3's own `cargo test -p brain-model` runs for their entire
-duration). **Phase 4 (M4.1-M4.3) is closed** - fused QKV/gate-up, fused
+duration). **M2.5 reopened Phase 2 narrowly, for one shape**:
+`paged_flash_prefill_hd256` closes the `head_dim=256` functional gap that
+kept `qwen35` (Qwen3.8-27B) off the fused causal-chunk-prefill path
+entirely (correctness-gated, `1e-3` bound, same as M2.3), but is NOT wired
+into `qwen35::serve` yet - that needs its own selector-shape work and
+`qwen35`-side gradcheck re-verification, named as a follow-up in M2.5's own
+entry, the same split M2.3/M2.4 already used for the HD=128 kernel. Decode's
+"split-key-then-combine" occupancy fix M2.1 named and this campaign's own
+W4b asked to reopen was NOT attempted (M2.5's own entry): the box available
+for that session had no Tesla P40 (an Intel Arc iGPU + `llvmpipe` software
+Vulkan only), and W4b's own hard bar requires measuring against this
+ledger's own hardware to mean anything - a design note for whoever next has
+that hardware is filed in M2.5's own entry rather than a fabricated or
+non-comparable number. **Phase 4 (M4.1-M4.3) is closed** - fused QKV/gate-up, fused
 QK-norm+RoPE+KV-append, and fused RMSNorm+int8 activation quant, each a
 kept (not killed) real dispatch-count and per-kernel device-time reduction
 with a correspondingly modest whole-pass effect at this hardware/shape,

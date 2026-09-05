@@ -1168,4 +1168,106 @@ mod flash_tests {
         assert!(worst > 0.0, "sanity: q/k/v are not all-zero, so a real match should not be a trivial 0==0");
         assert!(worst < 1e-3, "paged_flash_prefill vs batched triad maxabs={worst}");
     }
+
+    /// M2.5: `paged_flash_prefill_hd256` (a SEPARATE kernel file from
+    /// `paged_flash_prefill`, see its own header for why) streams two
+    /// `HD0=128`-wide head_dim fragments through the same `ksh`/`vsh`
+    /// budget that kernel already uses, instead of doubling it - this test
+    /// is the numerical proof that the streamed two-pass score/output
+    /// accumulation is equivalent to a single full-head_dim pass, at the
+    /// real `head_dim=256` shape `qwen35::config::Qwen35Config::
+    /// qwen38_27b()` actually ships (checked against that constructor, not
+    /// assumed). Otherwise an exact clone of `paged_flash_prefill_matches_
+    /// batched_triad` above - same GQA ratio, same `start`/`cc` shape
+    /// spanning three `BR=64` query tiles, same scrambled block table - only
+    /// `hd` and the dispatched kernel differ, so any divergence here is
+    /// attributable to the head_dim split, not a different scenario.
+    ///
+    /// Same `1e-3` absolute-error bound as every other fused-vs-triad gate
+    /// in this file, for the identical reason: online softmax reassociates
+    /// the reduction, so this is never bit-exact against the triad's exact-
+    /// max-then-single-pass reference.
+    #[test]
+    fn paged_flash_prefill_hd256_matches_batched_triad_at_head_dim_256() {
+        static PREFILL_HD256_PIPES: &[(&str, &str)] = &[
+            ("paged_decode_scores_batched", kernels::PAGED_DECODE_SCORES_BATCHED),
+            ("decode_softmax_batched", kernels::DECODE_SOFTMAX_BATCHED),
+            ("paged_decode_apply_batched", kernels::PAGED_DECODE_APPLY_BATCHED),
+            ("paged_flash_prefill_hd256", kernels::PAGED_FLASH_PREFILL_HD256),
+        ];
+        let g = gpu_core::testgpu::dev(PREFILL_HD256_PIPES);
+        let (nh, nkv, hd) = (4u32, 2u32, 256u32); // qwen38_27b's own head_dim
+        let group = nh / nkv;
+        let (kv_stride, hq) = (nkv * hd, nh * hd);
+        let scale = 1.0f32 / (hd as f32).sqrt();
+
+        let start = 17u32; // tokens already cached by an earlier chunk
+        let cc = 130u32; // this chunk's own rows - spans 3 BR=64 query tiles
+        let total = start + cc; // live keys once this chunk's own K/V land
+        let bs = 4u32;
+        let num_blocks = 64u32;
+        let max_bt = (total.div_ceil(bs) + 4).max(8); // headroom past what's used
+        let cap = total;
+
+        let mut rng = Rng::new(2560);
+        let qflat: Vec<f32> = (0..cc * hq).map(|_| rng.next_gaussian() as f32).collect();
+        let kflat: Vec<f32> = (0..total * kv_stride).map(|_| rng.next_gaussian() as f32).collect();
+        let vflat: Vec<f32> = (0..total * kv_stride).map(|_| rng.next_gaussian() as f32).collect();
+
+        // A scrambled (reversed) logical->physical block mapping, shared by
+        // every row of the chunk - same convention `paged_flash_prefill_
+        // matches_batched_triad` already uses.
+        let table: Vec<u32> = (0..max_bt).map(|lb| num_blocks - 1 - lb).collect();
+
+        let mut pk = vec![0f32; (num_blocks * bs * kv_stride) as usize];
+        let mut pv = vec![0f32; (num_blocks * bs * kv_stride) as usize];
+        for tok in 0..total {
+            let phys = table[(tok / bs) as usize];
+            let dst = ((phys * bs + tok % bs) * kv_stride) as usize;
+            let src = (tok * kv_stride) as usize;
+            pk[dst..dst + kv_stride as usize].copy_from_slice(&kflat[src..src + kv_stride as usize]);
+            pv[dst..dst + kv_stride as usize].copy_from_slice(&vflat[src..src + kv_stride as usize]);
+        }
+
+        let seqlens: Vec<u32> = (0..cc).map(|i| start + i + 1).collect(); // causal: row i attends 0..=start+i
+        let btflat: Vec<u32> = (0..cc as usize).flat_map(|_| table.clone()).collect();
+
+        let qb = g.storage_init("q", &qflat);
+        let poolk = g.storage_init("pk", &pk);
+        let poolv = g.storage_init("pv", &pv);
+        let bt = g.storage((cc * max_bt) as u64);
+        g.write(&bt, &btflat);
+        let sl = g.storage(cc as u64);
+        g.write(&sl, &seqlens);
+
+        // --- reference: the three-stage batched triad, `bsz = cc` rows ---
+        let sc = g.storage((cc * nh * cap) as u64);
+        let pr = g.storage((cc * nh * cap) as u64);
+        let ctx_ref_buf = g.storage((cc * hq) as u64);
+        let steps = vec![
+            g.step(0, &[&qb, &poolk, &bt, &sl, &sc], &[cc, nh, group, hd, bs, kv_stride, cap, max_bt, fb(scale)], cc * nh * cap),
+            g.step(1, &[&sc, &sl, &pr], &[cc, nh, cap], cc * nh),
+            g.step(2, &[&pr, &poolv, &bt, &sl, &ctx_ref_buf], &[cc, nh, group, hd, bs, kv_stride, cap, max_bt], cc * nh * hd),
+        ];
+        g.submit(&[], &steps);
+        let ctx_ref = g.read(&ctx_ref_buf, (cc * hq) as usize);
+
+        // --- one fused dispatch per (head, query-tile), head_dim streamed
+        // as two 128-wide fragments, no scores/probs at all ---
+        let ctx_flash_buf = g.storage((cc * hq) as u64);
+        let ntiles_q = cc.div_ceil(64); // BR = paged_flash_prefill_hd256's own tile size
+        let fsteps = vec![g.step(
+            3,
+            &[&qb, &poolk, &poolv, &bt, &sl, &ctx_flash_buf],
+            &[cc, nh, nkv, hd, group, bs, max_bt],
+            nh * ntiles_q * 256, // 256 = paged_flash_prefill_hd256's own @workgroup_size
+        )];
+        g.submit(&[], &fsteps);
+        let ctx_flash = g.read(&ctx_flash_buf, (cc * hq) as usize);
+
+        let worst = ctx_ref.iter().zip(&ctx_flash).fold(0f32, |m, (a, b)| m.max((a - b).abs()));
+        println!("paged_flash_prefill_hd256 vs batched triad: worst maxabs = {worst:e}");
+        assert!(worst > 0.0, "sanity: q/k/v are not all-zero, so a real match should not be a trivial 0==0");
+        assert!(worst < 1e-3, "paged_flash_prefill_hd256 vs batched triad maxabs={worst}");
+    }
 }
