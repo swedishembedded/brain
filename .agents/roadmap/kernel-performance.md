@@ -3709,6 +3709,112 @@ brain-backend-vulkan -p brain-backend-cpu --all-targets` clean.
 `NumericSupport`, the backward-compatibility and real-hardware tests, and
 this ledger entry, together as one self-contained unit).
 
+### M8.3 - the `OperatorProvider` ABI, the registry, and the WGSL reference provider land - zero behaviour change
+
+Phase 8 (precision tiers and the provider seam) opens its architectural
+centerpiece. `AGENTS.md`'s "fp32 arithmetic only, core compute only" bullet
+already named this as the sanctioned extension point "once it lands" -
+`crates/gpu-core/src/provider/{mod,wgsl,parity}.rs` is that landing, and the
+same commit corrects `AGENTS.md`'s wording from "once it lands" to what is
+now true.
+
+**The trait, load-bearing pieces**: `OperatorProvider { name, requires,
+accepts, lower }`, requests shaped as `OpRequest { op: select::Op, shape,
+pass: Pass::{Forward,Backward}, operands: &[Operand], attrs, bind }` -
+`select::Op`'s 16 variants are reused unchanged, deliberately not a new
+operator enum. A provider `lower`s by PUSHING `Step`s onto the caller's tape
+(`LowerCtx::steps`) and never submits - the M6.2/M6.3 async-submission and
+tape-capture machinery both depend on that contract, so a provider that
+executed synchronously would silently forfeit both. `ProviderRegistry` keeps
+the WGSL reference provider ALWAYS last and ALWAYS accepting, so an empty
+registry is structurally identical to no seam existing at all, and
+`BRAIN_NO_PROVIDER=<name>` disables one by name, mirroring
+`BRAIN_NO_KERNEL_UPGRADE`'s existing A/B-switch convention one seam down.
+
+**The one real deviation from the seam's own sketch, and why**: `gpu-core`
+sits BELOW `model` in the dependency graph and cannot own the
+`(KernelVariant, Dtype) -> kernel name` table `Ops::bind` does (those name
+spellings are `model`'s own registered-kernel contract). So `OpRequest`
+carries a caller-supplied `bind: &dyn Fn(KernelVariant) -> (usize, &'static
+str)` closure - `Ops` (which already has its name table) supplies it, the
+WGSL provider stays ignorant of kernel-name strings entirely. A future
+non-WGSL provider does not need this at all: it resolves through the two new
+defaulted `Backend` trait methods below instead, which never had string
+names to begin with.
+
+**Two defaulted `Backend` extensions** (`crates/backend-api/src/lib.rs`):
+`register_native(&self, spec: &NativeSpec) -> Option<NativeId>` and
+`step_native(&self, id: NativeId, bufs, params, threads) -> Option<Step>`,
+both `None` by default so no existing backend is forced to implement
+anything. `NativeSpec` is `SpirV { code, entry, bindings }` or
+`HostFn(&'static str)`. No backend implements either yet - these exist so a
+LATER (not this milestone) cooperative-matrix or CPU-ISA-pack provider can
+still push real `Step`s onto the tape instead of escaping it, which is the
+exact mechanism this milestone's own doc comment on the trait explains is
+lost the moment a provider dispatches outside `Backend`: async submission,
+tape replay, per-dispatch cost accounting, and the profiler all key off
+`Gpu::step`.
+
+**The WGSL reference provider is `Ops::matmul`'s pre-existing dispatch body,
+moved, not rewritten**: `WgslProvider::lower_matmul` is
+`selector.select(...)` -> bind the kernel -> compute thread count (`Self::
+threads`, `Ops::threads` moved verbatim, including the two `unreachable!`
+arms `Op::MatMul`'s own `candidates()` never returns) -> `gpu.step_sliced(...)`.
+`Ops::with_selector` keeps its EXACT pre-existing signature (M1.2's
+injection point, reused not replaced) by becoming
+`with_providers(gpu, ProviderRegistry::reference(sel))` internally; the new,
+more general `Ops::with_providers(gpu, reg: ProviderRegistry)` is additive.
+
+**Honest scope limit, stated here and in `AGENTS.md`'s amended bullet**: only
+`Op::MatMul` (i.e. only `Ops::matmul`) is wired through the seam this
+milestone. `Ops::embed`/`moe_linear`/`matmul_dx`/`matmul_dw`,
+`model::block`'s attention/softmax/paged-attention gates, and
+`qwen3::serve`'s manual GEMM region (a deliberate M1.2 exception) are all
+untouched and stay entirely outside this seam's reach - AGENTS.md's
+constraints hold there with no exceptions exactly as before. A later
+provider therefore does not speed up any of those simply by existing; each
+needs its own migration onto the seam first.
+
+**Gate - the no-regression proof, twice over**:
+- `crates/model/tests/ops_facade_parity.rs` passes completely UNCHANGED
+  (both its tests, output-bit-identical across tiers and row offsets).
+- A new, STRONGER test, `crates/model/tests/ops_matmul_step_identity.rs`:
+  for a representative shape/tier sweep, the exact `StepMeta` (kernel index,
+  params, thread count) `Ops::matmul` records THROUGH
+  `ProviderRegistry::dispatch` matches `Ops::matmul_kernel`'s own
+  pre-existing, unchanged-by-this-milestone diagnostic report - proving the
+  DISPATCH did not change, not just the output. Deliberately does NOT
+  compare against `ops_facade_parity.rs`'s own oracle
+  (`model::dispatch::{mm_rows_off,...}`, which resolves a kernel via a
+  SEPARATE selection heuristic, `model::block::gemm_variant`, confirmed to
+  disagree with `Ops::matmul`'s real `DefaultSelector` at `m=64,n=64,k=128`
+  on this box's real device even though both compute the identical result -
+  a pre-existing divergence this milestone is not the one to fix, and
+  comparing against it here would have wrongly flagged that old divergence
+  as a new one).
+- Registry-level unit tests: `an_empty_registry_is_the_reference_provider`,
+  `BRAIN_NO_PROVIDER_removes_a_provider_from_the_chain`,
+  `prefer_keeps_the_reference_provider_last`.
+- `cargo clippy -p brain-gpu-core -p brain-backend-api -p brain-model
+  --all-targets` clean on every file this milestone touches; `make
+  check/workspace` green (117 crates).
+
+**Measured here: N/A by design**, matching the milestone's own success
+criterion - nothing was meant to move, and nothing did.
+
+**`caps: &DeviceCaps`, not `&ArchDesc`, in `LowerCtx`**: M8.1 (a sibling
+wave-1 milestone, landed in a separate worktree) had not merged into this
+worktree's branch point, so this milestone's `LowerCtx` carries the
+pre-existing `DeviceCaps` type rather than the new architecture descriptor.
+Adapting this field once M8.1 is integrated is recorded here as a real,
+small follow-up, not silently absorbed.
+
+**Deliberately deferred, not attempted**: widening the seam to
+`Ops::embed`/`moe_linear`/`matmul_dx`/`matmul_dw` (a real follow-up, same
+shape as this milestone, just more call sites); any second provider
+(native f16, cooperative-matrix, CPU ISA packs - all later Phase 8
+milestones that build ON this ABI, not part of it).
+
 ## Not yet done
 
 Phase 0 is closed. Phase 1 is in progress per the recalibrated scope above.

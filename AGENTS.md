@@ -1421,13 +1421,20 @@ a metric that isn't there was simply forgotten.
   above genuinely block reaching peak throughput on hardware with matrix
   engines, async copy, or native low-precision compute (tensor cores, AMX,
   FP8/FP4) - none of which this repo's own boxes have, so the constraint has
-  never yet cost a measured regression here. The sanctioned extension point,
-  once it lands, is an `OperatorProvider` seam (kernel-performance.md Phase 8):
-  a logical operator resolves to a provider, WGSL is *always* the reference
-  provider every other one is gated against for correctness, and every rule in
-  this section keeps applying to that reference provider without exception.
-  Until that seam exists, WGSL remains the only implementation and this
-  section's constraints hold everywhere, with no exceptions.
+  never yet cost a measured regression here. The sanctioned extension point is
+  the `OperatorProvider` seam (`crates/gpu-core/src/provider`,
+  kernel-performance.md M8.3): a logical operator resolves to a provider,
+  WGSL is *always* the reference provider every other one is gated against
+  for correctness, and every rule in this section keeps applying to that
+  reference provider without exception. **The seam exists but is narrow**:
+  M8.3 wired only `Op::MatMul` through it (`model::ops::Ops::matmul`); every
+  other dispatch path - `Ops::embed`/`moe_linear`/`matmul_dx`/`matmul_dw`,
+  `model::block`'s attention/softmax/paged-attention gates, `qwen3::serve`'s
+  manual GEMM region - is still WGSL-only with no provider indirection at
+  all, and this section's constraints hold there with no exceptions exactly
+  as before. A provider for any of THOSE call sites needs its own migration
+  onto the seam first; the seam existing for `Op::MatMul` is not license to
+  bypass this section anywhere it has not been migrated.
 - **Never put a large `var<function>` array behind a runtime loop bound.** WGSL
   function-scope arrays only become registers if the compiler can unroll every
   index; bound the loop by a `Params` field and the array lands in *local*

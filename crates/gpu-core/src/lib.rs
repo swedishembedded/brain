@@ -51,6 +51,14 @@ pub mod profile;
 /// Drop-in fast kernels a model inherits without editing its dispatch sites.
 mod upgrade;
 
+/// The `OperatorProvider` ABI, registry, WGSL reference provider and
+/// cross-provider parity harness (`kernel-performance.md` Phase 8, M8.3).
+/// Native-only: `backend_api::Backend::register_native`/`step_native` (what
+/// a wave-2 non-WGSL provider dispatches through) are native-only, and this
+/// module's own tests build a `Gpu` via `testgpu`, itself native-only.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod provider;
+
 /// Replay arena for the per-iteration scratch of a repeated pass.
 pub mod scratch;
 

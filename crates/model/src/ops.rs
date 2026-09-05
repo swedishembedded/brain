@@ -100,6 +100,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use gpu_core::provider::{LowerCtx, Operand, OpRequest, Pass, ProviderRegistry, Role};
 use gpu_core::select::{self, Dtype, KernelSelector, KernelVariant, Op, OpShape};
 use gpu_core::{DeviceBuffer, DeviceCaps, Gpu, Step};
 
@@ -888,7 +889,19 @@ pub struct Ops {
     gpu: Gpu,
     caps: DeviceCaps,
     idx: HashMap<&'static str, usize>,
+    /// Kept for [`Ops::matmul_kernel`]'s own diagnostic report ONLY -
+    /// [`Ops::matmul`] itself dispatches through `providers`, never this
+    /// field directly, since M8.3 moved that dispatch onto the
+    /// `OperatorProvider` seam. See [`Ops::with_providers`]'s doc comment for
+    /// the one narrow case (a caller-built registry with its own selector,
+    /// bypassing both [`Ops::new`] and [`Ops::with_selector`]) where this
+    /// field's policy can differ from what `providers` actually runs.
     selector: Arc<dyn KernelSelector>,
+    /// What [`Ops::matmul`] (`Op::MatMul` only - see `gpu_core::provider`'s
+    /// module doc for this seam's current scope) actually dispatches
+    /// through. `Ops::embed`/`moe_linear`/`matmul_dx`/`matmul_dw` are not
+    /// migrated onto this seam yet and do not consult it.
+    providers: ProviderRegistry,
 }
 
 impl Ops {
@@ -919,7 +932,42 @@ impl Ops {
     /// (`Arc<dyn KernelSelector>` - `Arc`, not `Box`, so the same instance
     /// can also be kept by the caller and reused for its own dispatch, the
     /// way `qwen3::serve::Engine` does).
+    ///
+    /// Internally this is now [`Ops::with_providers`]`(gpu,
+    /// ProviderRegistry::reference(selector.clone()))` (M8.3) - an EMPTY
+    /// registry (nothing preferred beyond the WGSL reference provider) IS
+    /// today's behaviour, so this constructor's own contract - and every
+    /// existing call site's - is unchanged bit-for-bit.
     pub fn with_selector(gpu: Gpu, selector: Arc<dyn KernelSelector>) -> Result<Ops, String> {
+        let providers = ProviderRegistry::reference(selector.clone());
+        Self::build(gpu, selector, providers)
+    }
+
+    /// [`Ops::new`], but the DISPATCH is the caller's whole
+    /// [`ProviderRegistry`], not just a [`KernelSelector`] the fixed WGSL
+    /// path consults. `Ops::matmul` pushes an `OpRequest` at `registry.
+    /// dispatch(...)` instead of resolving a kernel by hand - see
+    /// `gpu_core::provider`'s module doc for the ABI and this seam's current
+    /// `Op::MatMul`-only scope (M8.3, `kernel-performance.md` Phase 8).
+    ///
+    /// [`Ops::matmul_kernel`]'s diagnostic report is sourced from a fresh
+    /// `CachedSelector<DefaultSelector>`, NOT from any selector `providers`'
+    /// own reference provider may have been built with - a `ProviderRegistry`
+    /// does not expose one generically (a non-WGSL provider need not have a
+    /// `KernelSelector` at all). This cannot change what `Ops::matmul` itself
+    /// dispatches (that always goes through `providers`, never this field);
+    /// it only means a caller of THIS constructor with a custom-selector
+    /// registry should not rely on `matmul_kernel`'s reported name matching
+    /// its own policy. No existing caller uses this constructor with a
+    /// non-default selector (it did not exist before this milestone), so
+    /// this is a documented limitation of new surface, not a behaviour
+    /// change to anything that already worked.
+    pub fn with_providers(gpu: Gpu, providers: ProviderRegistry) -> Result<Ops, String> {
+        let selector: Arc<dyn KernelSelector> = Arc::new(select::CachedSelector::new(select::DefaultSelector));
+        Self::build(gpu, selector, providers)
+    }
+
+    fn build(gpu: Gpu, selector: Arc<dyn KernelSelector>, providers: ProviderRegistry) -> Result<Ops, String> {
         let caps = gpu.caps();
         let mut idx = HashMap::with_capacity(kname::ALL.len());
         for &name in kname::ALL {
@@ -933,7 +981,7 @@ impl Ops {
             })?;
             idx.insert(name, i);
         }
-        Ok(Ops { gpu, caps, idx, selector })
+        Ok(Ops { gpu, caps, idx, selector, providers })
     }
 
     pub fn caps(&self) -> &DeviceCaps {
@@ -1117,61 +1165,61 @@ impl Ops {
     /// unchanged"), so it needs the SAME dispatch geometry `Dtype::I8`
     /// already gets - getting this wrong under-dispatches the tile grid and
     /// leaves real output elements never written (silent output corruption,
-    /// not a crash - see `kq_dtypes_dispatch_the_tiled_formula_not_m_times_n`
-    /// below, added specifically to catch a regression here).
-    fn threads(v: KernelVariant, dt: Dtype, m: u32, n: u32) -> u32 {
-        let tile = || m.div_ceil(128) * n.div_ceil(128) * 256;
-        match v {
-            KernelVariant::Reference => m * n,
-            KernelVariant::WorkgroupPerOutput => n * 64,
-            KernelVariant::RegisterTiled => tile(),
-            KernelVariant::PackedInt8 => match dt {
-                Dtype::I8 | Dtype::Q4 | Dtype::Q4K | Dtype::Q8K => tile(),
-                // `select::candidates` never offers `PackedInt8` for an
-                // F32-family dtype (see this method's own doc comment) -
-                // this arm is unreachable in practice, kept only so the
-                // match stays exhaustive over `Dtype` without silently
-                // absorbing a real future `PackedInt8` dtype into the wrong
-                // formula the way the pre-M5.5 blanket `_ => m*n` did for
-                // `Dtype::Q4`.
-                Dtype::F32 | Dtype::BF16 | Dtype::F16 => m * n,
-            },
-            KernelVariant::SplitReduction => {
-                unreachable!("Op::MatMul's candidates() never returns SplitReduction")
-            }
-            KernelVariant::FusedFlash => {
-                unreachable!("Op::MatMul's candidates() never returns FusedFlash")
-            }
-        }
-    }
-
+    /// not a crash).
+    ///
+    /// **M8.3**: this formula itself (and its regression test,
+    /// `kq_dtypes_dispatch_the_tiled_formula_not_m_times_n`) moved verbatim
+    /// to `gpu_core::provider::wgsl::WgslProvider::threads` - it has zero
+    /// dependency on this crate's kernel-name table, so it now lives where
+    /// [`Ops::matmul`] actually calls it (inside `WgslProvider::lower`), not
+    /// duplicated here as dead code.
+    ///
     /// `y[yoff .. yoff + m*n)] = act[xr0..xr0+m, :] @ wᵀ`, where `m` is
     /// however many rows `act` was built for ([`Ops::act`]'s `rows`). The
-    /// ENTIRE selection policy lives here: build an [`OpShape`] from `w`'s
-    /// own `(n, k)` and `act`'s `m`, ask the selector, [`Ops::bind`] the
-    /// choice to a kernel name, look up its index, push one [`Step`].
+    /// selection/kernel-name/thread-count/dispatch logic that used to live
+    /// directly in this method now lives in `gpu_core::provider::wgsl::
+    /// WgslProvider::lower` (moved verbatim - same selector call, same
+    /// [`Self::bind`] name table, same thread-count formula, same
+    /// `step_sliced` call); this method's own job is now only building the
+    /// per-dtype [`Operand`] bundle (identical buffers, identical offsets,
+    /// identical params to what it pushed by hand before) and handing it to
+    /// `self.providers.dispatch`. Zero behaviour change: `crates/model/tests/
+    /// ops_facade_parity.rs` (unchanged) still asserts the output is
+    /// bit-identical to the pre-existing `dispatch.rs`-driven oracle.
     pub fn matmul(&self, s: &mut Vec<Step>, w: &Weight, act: &Act, y: &DeviceBuffer, yoff: u64) {
         let (n, k) = (w.n(), w.k());
         assert_eq!(act.k, k, "Ops::matmul: activation width {} does not match weight K {k}", act.k);
         let m = act.m;
         let shape = OpShape { m, n, k, dtype: w.dtype() };
-        let variant = self.selector.select(Op::MatMul, shape, &self.caps);
         let group = w.group();
-        let kind = self.idx[Self::bind(variant, w.dtype(), group)];
-        let threads = Self::threads(variant, w.dtype(), m, n);
+        let dt = w.dtype();
+        let bind = |variant: KernelVariant| -> (usize, &'static str) {
+            let name = Self::bind(variant, dt, group);
+            (self.idx[name], name)
+        };
+
+        let oo = (yoff, m as u64 * n as u64);
+
         match w {
             // `BF16`/`F16` read the SAME `act.x` (raw f32, never quantized -
             // only the WEIGHT narrows for these tiers) with the SAME
             // `[m, k, n]` params `F32` uses; the weight buffer's own offset
             // is always `(0, 0)` for all three (whole-buffer, independent of
             // which activation rows `m` covers), so only which physical
-            // kernel `kind`/`Self::bind` chose differs - the packed-vs-plain
+            // kernel `Self::bind` chose differs - the packed-vs-plain
             // layout is entirely the kernel's own concern, not this dispatch
             // site's.
             Weight::F32 { w: wb, .. } | Weight::BF16 { w: wb, .. } | Weight::F16 { w: wb, .. } => {
                 let xo = (act.xr0 as u64 * k as u64, m as u64 * k as u64);
-                let oo = (yoff, m as u64 * n as u64);
-                s.push(self.gpu.step_sliced(kind, &[&act.x, wb, y], &[xo, (0, 0), oo], &[m, k, n], threads));
+                let attrs = [m, k, n];
+                let operands = [
+                    Operand { role: Role::Act, buf: &act.x, range: xo, dtype: Dtype::F32 },
+                    Operand { role: Role::Weight, buf: wb, range: (0, 0), dtype: dt },
+                    Operand { role: Role::Out, buf: y, range: oo, dtype: Dtype::F32 },
+                ];
+                let req = OpRequest { op: Op::MatMul, shape, pass: Pass::Forward, operands: &operands, attrs: &attrs, bind: &bind };
+                let mut ctx = LowerCtx { gpu: &self.gpu, caps: &self.caps, steps: s, capture: false };
+                self.providers.dispatch(&mut ctx, &req);
             }
             Weight::I8 { w: wb, s: sw, .. } | Weight::Q4 { w: wb, s: sw, .. } => {
                 // The packed activation BUFFER OFFSET is ALWAYS int8-word
@@ -1184,7 +1232,6 @@ impl Ops {
                 let kg = k as u64 / per_word;
                 let xo = (act.xr0 as u64 * kg, m as u64 * kg);
                 let so = (act.xr0 as u64, m as u64);
-                let oo = (yoff, m as u64 * n as u64);
                 // The kernel's own `k` PARAM (not a buffer offset) is a
                 // SEPARATE contract per dtype, and the two disagree:
                 // `matmul_i8_{dyn,gemv}.wgsl` take the packed word count
@@ -1213,7 +1260,7 @@ impl Ops {
                 // this same `I8`/`Q4` arm by mistake would be the only way
                 // this fallback silently mis-derives `param_k` - it does not
                 // today.
-                let param_k = match w.dtype() {
+                let param_k = match dt {
                     Dtype::I8 => kg as u32,
                     _ => k,
                 };
@@ -1221,13 +1268,17 @@ impl Ops {
                     "Ops::matmul: this activation was built with Ops::act_f32, which promises no \
                      quantized weight reads it - build it with Ops::act instead",
                 );
-                s.push(self.gpu.step_sliced(
-                    kind,
-                    &[quant.xq_for(k), wb, &quant.sx, sw, y],
-                    &[xo, (0, 0), so, (0, 0), oo],
-                    &[m, param_k, n],
-                    threads,
-                ));
+                let attrs = [m, param_k, n];
+                let operands = [
+                    Operand { role: Role::Act, buf: quant.xq_for(k), range: xo, dtype: Dtype::I8 },
+                    Operand { role: Role::Weight, buf: wb, range: (0, 0), dtype: dt },
+                    Operand { role: Role::ActScale, buf: &quant.sx, range: so, dtype: Dtype::F32 },
+                    Operand { role: Role::WeightScale, buf: sw, range: (0, 0), dtype: Dtype::F32 },
+                    Operand { role: Role::Out, buf: y, range: oo, dtype: Dtype::F32 },
+                ];
+                let req = OpRequest { op: Op::MatMul, shape, pass: Pass::Forward, operands: &operands, attrs: &attrs, bind: &bind };
+                let mut ctx = LowerCtx { gpu: &self.gpu, caps: &self.caps, steps: s, capture: false };
+                self.providers.dispatch(&mut ctx, &req);
             }
             // M12: affine K-quant (`Weight::KQuant { affine: true, .. }` -
             // Q4_K/Q5_K, `matmul_kq_dyn`/`matmul_kq_gemv`). The non-affine
@@ -1239,11 +1290,10 @@ impl Ops {
             // `xgs` buffers this arm binds.
             Weight::KQuant { w: wb, sz, .. } => {
                 assert!(
-                    w.dtype() == Dtype::Q4K || w.dtype() == Dtype::Q8K,
-                    "Ops::matmul: Weight::KQuant reached the affine dispatch arm with dtype {:?} -- \
+                    dt == Dtype::Q4K || dt == Dtype::Q8K,
+                    "Ops::matmul: Weight::KQuant reached the affine dispatch arm with dtype {dt:?} -- \
                      a non-affine (Q6_K) KQuant weight must be built with a plain ds-only `sz` and \
-                     dispatched as Dtype::I8 at group=16, not through this arm",
-                    w.dtype()
+                     dispatched as Dtype::I8 at group=16, not through this arm"
                 );
                 let KqScale::Packed { wsm, wd } = sz else {
                     unreachable!(
@@ -1265,30 +1315,34 @@ impl Ops {
                 // follow (see `crate::int8::quant_rows_steps`'s own doc
                 // comment on `xgs`'s offset units).
                 let go = (act.xr0 as u64 * (k as u64 / crate::int8::GROUP as u64), m as u64 * (k as u64 / crate::int8::GROUP as u64));
-                let oo = (yoff, m as u64 * n as u64);
                 let quant = act.quant.as_ref().expect(
                     "Ops::matmul: this activation was built with Ops::act_f32, which promises no \
                      quantized weight reads it - build it with Ops::act or Ops::act_kq instead",
                 );
                 let xgs = act.xgs.as_ref().unwrap_or_else(|| {
                     panic!(
-                        "Ops::matmul: this Weight::KQuant weight (dtype {:?}) needs the activation's \
+                        "Ops::matmul: this Weight::KQuant weight (dtype {dt:?}) needs the activation's \
                          xgs group-sum prepass (crate::kquant's affine correction term), but this \
                          activation was built without one -- build it with Ops::act_kq, not Ops::act \
-                         or Ops::act_f32",
-                        w.dtype()
+                         or Ops::act_f32"
                     )
                 });
                 // `k` (RAW LOGICAL K, not a packed word count) - see the
                 // long comment on the `I8`/`Q4` arm above for why this is
                 // the correct param here too.
-                s.push(self.gpu.step_sliced(
-                    kind,
-                    &[quant.xq_for(k), wb, &quant.sx, wsm, wd, xgs, y],
-                    &[xo, (0, 0), so, (0, 0), (0, 0), go, oo],
-                    &[m, k, n],
-                    threads,
-                ));
+                let attrs = [m, k, n];
+                let operands = [
+                    Operand { role: Role::Act, buf: quant.xq_for(k), range: xo, dtype: Dtype::I8 },
+                    Operand { role: Role::Weight, buf: wb, range: (0, 0), dtype: dt },
+                    Operand { role: Role::ActScale, buf: &quant.sx, range: so, dtype: Dtype::F32 },
+                    Operand { role: Role::WeightMin, buf: wsm, range: (0, 0), dtype: Dtype::F32 },
+                    Operand { role: Role::WeightScale, buf: wd, range: (0, 0), dtype: Dtype::F32 },
+                    Operand { role: Role::ActGroupSum, buf: xgs, range: go, dtype: Dtype::F32 },
+                    Operand { role: Role::Out, buf: y, range: oo, dtype: Dtype::F32 },
+                ];
+                let req = OpRequest { op: Op::MatMul, shape, pass: Pass::Forward, operands: &operands, attrs: &attrs, bind: &bind };
+                let mut ctx = LowerCtx { gpu: &self.gpu, caps: &self.caps, steps: s, capture: false };
+                self.providers.dispatch(&mut ctx, &req);
             }
         }
     }
@@ -1910,32 +1964,6 @@ mod tests {
         // group=32 (every dtype that predates M12) is untouched.
         assert_eq!(Ops::bind(PackedInt8, Dtype::I8, 32), kname::MATMUL_I8_DYN);
         assert_eq!(Ops::bind(WorkgroupPerOutput, Dtype::I8, 32), kname::MATMUL_I8_GEMV);
-    }
-
-    /// *** The specific bug `Ops::threads`'s own doc comment warns about ***:
-    /// `Weight::KQuant`'s affine dtypes, and (since M5.5's `matmul_q4_dyn_reg`
-    /// was wired into `Ops::bind`) `Dtype::Q4` too, MUST dispatch the TILED
-    /// formula (`matmul_kq_dyn`/`matmul_q4_dyn_reg` are 128x128 register-tiled
-    /// kernels, `matmul_i8_dyn`'s own siblings), not a naive `m*n` count.
-    /// Getting this wrong under-dispatches the tile grid and leaves real
-    /// output elements never written - silent output corruption a
-    /// compile-time check cannot catch, which is exactly why this is a
-    /// runtime assertion against the SAME tile formula
-    /// `Dtype::I8`/`Dtype::RegisterTiled` already use, not merely "some
-    /// number".
-    #[test]
-    fn kq_dtypes_dispatch_the_tiled_formula_not_m_times_n() {
-        let (m, n) = (513u32, 257u32);
-        let expected_tile = m.div_ceil(128) * n.div_ceil(128) * 256;
-        assert_ne!(expected_tile, m * n, "test shape must distinguish tile() from m*n");
-        for dt in [Dtype::Q4, Dtype::Q4K, Dtype::Q8K] {
-            assert_eq!(
-                Ops::threads(KernelVariant::PackedInt8, dt, m, n),
-                expected_tile,
-                "{dt:?} must dispatch the tile formula, not m*n -- under-dispatching leaves real \
-                 output elements never written (silent corruption, not a crash)"
-            );
-        }
     }
 
     /// [`KvPage::word_count`] - the actual allocation-size logic

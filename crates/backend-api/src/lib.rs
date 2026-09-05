@@ -276,6 +276,37 @@ pub enum DType {
     Q8K,
 }
 
+/// Opaque handle to a kernel registered via [`Backend::register_native`] -
+/// see that method's doc comment for the whole point of this seam (Phase 8,
+/// `kernel-performance.md` M8.3). Backend-assigned; a caller never constructs
+/// one, only stores what [`Backend::register_native`] returned.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub struct NativeId(pub u32);
+
+/// How a native kernel binds one storage buffer, in bind order - what
+/// [`Backend::register_native`] needs to build a pipeline layout without this
+/// crate naming any specific graphics API's binding type.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BindKind {
+    StorageRead,
+    StorageReadWrite,
+    Uniform,
+}
+
+/// A provider's own compiled kernel, handed to [`Backend::register_native`] -
+/// the wave-2 (native f16, cooperative-matrix, CPU ISA pack) counterpart of
+/// the `(name, wgsl_source)` pair every WGSL kernel registers with today.
+pub enum NativeSpec {
+    /// Pre-compiled SPIR-V (a cooperative-matrix / native-f16 provider's own
+    /// pipeline): entry point name and the storage-binding layout it expects,
+    /// in bind order.
+    SpirV { code: &'static [u8], entry: &'static str, bindings: &'static [BindKind] },
+    /// A host-native compute path (a CPU ISA-pack provider's own function),
+    /// named for diagnostics/profiling only - the backend that accepts this
+    /// decides how it actually runs.
+    HostFn(&'static str),
+}
+
 impl DType {
     /// Bits per element. The single source every other width query derives
     /// from, so a new tier only ever adds one match arm.
@@ -1045,6 +1076,46 @@ pub trait Backend: Send + Sync {
     /// static never reaches, so its profile was unreadable by construction.
     /// No-op when profiling is off or the backend does not time kernels.
     fn dump_profile(&self) {}
+
+    /// Register a provider's own compiled kernel (SPIR-V or a host-native
+    /// function) on this backend, returning a handle to dispatch it with
+    /// [`Backend::step_native`]. `None` when the backend has no native
+    /// compilation path for `spec` - true of every backend today (WGSL is the
+    /// only kernel source this trait's other methods know how to run); a
+    /// provider that gets `None` back must fall back to WGSL or decline the
+    /// request outright.
+    ///
+    /// **Why this pair of methods exists, and what breaks if a provider
+    /// bypasses them** (`kernel-performance.md` Phase 8, M8.3). A provider
+    /// that compiles and dispatches its own kernel OUTSIDE `Backend` - calling
+    /// into `wgpu`/`ash` directly, say - loses everything `Gpu::step` gives a
+    /// WGSL dispatch for free: asynchronous submission (the dispatch is
+    /// invisible to the backend's own submit/fence bookkeeping, so it either
+    /// blocks the whole pipeline or races it), tape capture/replay (M6.3's
+    /// decode-tape-per-bsz-bucket mechanism has nothing to replay if the
+    /// provider ran eagerly instead of pushing a [`Step`]), the per-dispatch
+    /// cost accounting (`gpu_core::cost`), and the profiler
+    /// (`BRAIN_PROFILE`'s per-kernel table). Routing through
+    /// `register_native`/`step_native` instead makes a non-WGSL kernel a
+    /// [`Step`] like any other - pushed onto the caller's tape by
+    /// `gpu_core::provider::LowerCtx`, submitted and timed by the same
+    /// machinery every WGSL dispatch already uses, never executed out of
+    /// band. No backend implements real native compilation yet; these are
+    /// the trait methods a wave-2 provider (native f16, cooperative-matrix,
+    /// a CPU ISA pack) needs to exist before it can be written at all.
+    fn register_native(&self, _spec: &NativeSpec) -> Option<NativeId> {
+        None
+    }
+
+    /// Record a dispatch of a kernel registered via
+    /// [`Backend::register_native`] - the native-pipeline analogue of
+    /// [`Backend::step`]. `None` when this backend does not recognise `id`
+    /// (every backend today, since none can produce one); see
+    /// [`Backend::register_native`]'s doc comment for why a provider must
+    /// route through this rather than dispatching `id` itself.
+    fn step_native(&self, _id: NativeId, _bufs: &[&DeviceBuffer], _params: &[u32], _threads: u32) -> Option<Step> {
+        None
+    }
 }
 
 /// Whether `BRAIN_PROFILE` asks for profiling output - the ONE parse of that
