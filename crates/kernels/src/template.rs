@@ -854,6 +854,280 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
 "#;
 }
 
+/// M8.7 - the ONE hand-written, production (not PoC) native-f16 dispatch
+/// kernel: a native-f16 sibling of `matmul_reg3.wgsl`, registered via
+/// [`native_f16_variant`] and dispatched through
+/// `gpu_core::provider::native_f16::NativeF16Provider`. Deliberately NOT a
+/// general f32-to-f16 source rewrite (see [`native_f16_variant`]'s own doc
+/// comment for why that is out of scope) - this is a second, hand-written
+/// kernel body, kept in lock-step with `matmul_reg3.wgsl` by construction:
+/// identical `Params`, identical 128x128 tile / 8x8-per-thread register
+/// block / 256-thread workgroup / software-pipelined K-chunk staging (every
+/// global load, shared-memory store, barrier, and guarded output write is
+/// BYTE-IDENTICAL to `matmul_reg3.wgsl` - the diff is exactly the inner FMA
+/// block below), so a reviewer diffing the two sees only the one change
+/// this milestone is actually about.
+///
+/// **What's actually narrowed, and what is not.** `x`/`w`/`out` stay plain
+/// `array<f32>` storage bindings - no packed-f16 buffer layout, no
+/// bandwidth change from `matmul_reg3`'s own. Only the MULTIPLY narrows:
+/// each of the 64 per-thread products converts its two `f32` shared-memory
+/// operands to `f16` (`f16(a)`/`f16(b)`), multiplies in `f16`, then widens
+/// the product back to `f32` (`f32(ah * bh)`) before adding into the
+/// existing `f32` accumulator - narrow-register multiply, wide accumulate,
+/// exactly the mechanism `native_f16_poc::ROOF_FMA` measured (1.38x-3.76x on
+/// this campaign's own Intel Arc iGPU, `kernel-performance.md`'s B11/M8.7
+/// entries) rather than a bandwidth-driven win. A packed-f16 WEIGHT buffer
+/// (halving bytes moved, the way `dtype_variant`'s storage tier already
+/// does for `BF16`/`F16`) is a real, separate follow-up this milestone does
+/// not attempt - see `NativeF16Provider`'s own module doc for the exact
+/// reason (a plain-f32 buffer bit-pattern must never be reachable through a
+/// path that expects packed f16 bytes, or vice versa).
+///
+/// **Subnormals flush to zero on this hardware, by design, not by
+/// oversight.** `native_f16_poc::ELEMENTWISE_FMA`'s own real-hardware
+/// measurement (`kernel-performance.md`'s B11 table) already established
+/// that this campaign's Intel Arc iGPU's native-f16 ALU flushes a subnormal
+/// `f16` RESULT to zero rather than preserving it - the identical
+/// `f16(a) * f16(b)` primitive this kernel's inner loop uses, just inside a
+/// GEMM instead of a single FMA. `crates/gpu-core/tests/
+/// native_f16_provider.rs`'s own subnormal-boundary case pins this same,
+/// already-documented behaviour for the GEMM path rather than silently
+/// ignoring it.
+pub mod native_f16_matmul {
+    /// `enable f16;` is prepended by [`super::native_f16_variant`] - this
+    /// constant, like [`super::native_f16_poc`]'s two bodies, is NOT itself
+    /// prefixed with it (so pasting it anywhere without that wrapper fails to
+    /// compile, deliberately - the same contract [`super::native_f16_poc`]'s
+    /// own doc comment states).
+    pub const MATMUL_REG3_F16N: &str = r#"
+struct Params { m: u32, k: u32, n: u32, };
+
+@group(0) @binding(0) var<uniform> p: Params;
+@group(0) @binding(1) var<storage, read>       x:   array<f32>;
+@group(0) @binding(2) var<storage, read>       w:   array<f32>;
+@group(0) @binding(3) var<storage, read_write> out: array<f32>;
+
+const BM: u32 = 128u;
+const BN: u32 = 128u;
+const BK: u32 = 8u;
+const SP: u32 = 129u;  // padded shared stride (BM + 1)
+const WG: u32 = 256u;
+const LN: u32 = 16u;   // lane grid: 16 x 16 threads, stride-16 interleave
+
+var<workgroup> As: array<f32, 1032>;  // BK*SP, k-major: As[kk*SP + r]
+var<workgroup> Bs: array<f32, 1032>;
+
+@compute @workgroup_size(256)
+fn main(@builtin(workgroup_id) wgid: vec3<u32>,
+        @builtin(local_invocation_id) lid: vec3<u32>,
+        @builtin(num_workgroups) nwg: vec3<u32>) {
+    let tid = lid.x;
+    let ty = tid / LN;
+    let tx = tid % LN;
+    let wg = wgid.y * nwg.x + wgid.x;
+    let tiles_n = (p.n + BN - 1u) / BN;
+    let row0 = (wg / tiles_n) * BM;
+    let col0 = (wg % tiles_n) * BN;
+
+    // Each thread stages 4 A and 4 B elements; only the k-offset moves per chunk.
+    var sr: array<u32, 4>;
+    var skk: array<u32, 4>;
+    var arow_g: array<u32, 4>;
+    var brow_g: array<u32, 4>;
+    for (var e = 0u; e < 4u; e = e + 1u) {
+        let idx = tid + e * WG;   // 0..1023
+        let r = idx / BK;         // 0..127
+        let kk = idx % BK;        // 0..7
+        sr[e] = r; skk[e] = kk;
+        arow_g[e] = row0 + r;
+        brow_g[e] = col0 + r;
+    }
+
+    // 64 scalar-register accumulators, f32 -- unchanged from matmul_reg3.
+    var c00 = 0.0; var c01 = 0.0; var c02 = 0.0; var c03 = 0.0; var c04 = 0.0; var c05 = 0.0; var c06 = 0.0; var c07 = 0.0;
+    var c10 = 0.0; var c11 = 0.0; var c12 = 0.0; var c13 = 0.0; var c14 = 0.0; var c15 = 0.0; var c16 = 0.0; var c17 = 0.0;
+    var c20 = 0.0; var c21 = 0.0; var c22 = 0.0; var c23 = 0.0; var c24 = 0.0; var c25 = 0.0; var c26 = 0.0; var c27 = 0.0;
+    var c30 = 0.0; var c31 = 0.0; var c32 = 0.0; var c33 = 0.0; var c34 = 0.0; var c35 = 0.0; var c36 = 0.0; var c37 = 0.0;
+    var c40 = 0.0; var c41 = 0.0; var c42 = 0.0; var c43 = 0.0; var c44 = 0.0; var c45 = 0.0; var c46 = 0.0; var c47 = 0.0;
+    var c50 = 0.0; var c51 = 0.0; var c52 = 0.0; var c53 = 0.0; var c54 = 0.0; var c55 = 0.0; var c56 = 0.0; var c57 = 0.0;
+    var c60 = 0.0; var c61 = 0.0; var c62 = 0.0; var c63 = 0.0; var c64 = 0.0; var c65 = 0.0; var c66 = 0.0; var c67 = 0.0;
+    var c70 = 0.0; var c71 = 0.0; var c72 = 0.0; var c73 = 0.0; var c74 = 0.0; var c75 = 0.0; var c76 = 0.0; var c77 = 0.0;
+
+    var rA: array<f32, 4>;
+    var rB: array<f32, 4>;
+
+    let nchunks = (p.k + BK - 1u) / BK;
+
+    // Prime: load chunk 0 into shared.
+    for (var e = 0u; e < 4u; e = e + 1u) {
+        let gk = skk[e];
+        if (arow_g[e] < p.m && gk < p.k) { As[skk[e] * SP + sr[e]] = x[arow_g[e] * p.k + gk]; }
+        else                             { As[skk[e] * SP + sr[e]] = 0.0; }
+        if (brow_g[e] < p.n && gk < p.k) { let wi = brow_g[e] * p.k + gk; Bs[skk[e] * SP + sr[e]] = w[wi]; }
+        else                             { Bs[skk[e] * SP + sr[e]] = 0.0; }
+    }
+    workgroupBarrier();
+
+    for (var c = 0u; c < nchunks; c = c + 1u) {
+        let has_next = c + 1u < nchunks;
+        if (has_next) {
+            let k1 = (c + 1u) * BK;
+            for (var e = 0u; e < 4u; e = e + 1u) {
+                let gk = k1 + skk[e];
+                if (arow_g[e] < p.m && gk < p.k) { rA[e] = x[arow_g[e] * p.k + gk]; } else { rA[e] = 0.0; }
+                if (brow_g[e] < p.n && gk < p.k) { let wi = brow_g[e] * p.k + gk; rB[e] = w[wi]; } else { rB[e] = 0.0; }
+            }
+        }
+        for (var kk = 0u; kk < BK; kk = kk + 1u) {
+            let ao = kk * SP + ty;
+            let bo = kk * SP + tx;
+            let a0 = As[ao + 0u];
+            let a1 = As[ao + 16u];
+            let a2 = As[ao + 32u];
+            let a3 = As[ao + 48u];
+            let a4 = As[ao + 64u];
+            let a5 = As[ao + 80u];
+            let a6 = As[ao + 96u];
+            let a7 = As[ao + 112u];
+            let b0 = Bs[bo + 0u];
+            let b1 = Bs[bo + 16u];
+            let b2 = Bs[bo + 32u];
+            let b3 = Bs[bo + 48u];
+            let b4 = Bs[bo + 64u];
+            let b5 = Bs[bo + 80u];
+            let b6 = Bs[bo + 96u];
+            let b7 = Bs[bo + 112u];
+            // The one real change from matmul_reg3.wgsl: narrow both
+            // operands to f16 registers, multiply IN f16, then widen the
+            // product back to f32 before accumulating -- narrow-ALU
+            // multiply, wide accumulate, matching native_f16_poc::ROOF_FMA's
+            // own measured mechanism (see this module's doc comment).
+            let ah0: f16 = f16(a0); let ah1: f16 = f16(a1); let ah2: f16 = f16(a2); let ah3: f16 = f16(a3);
+            let ah4: f16 = f16(a4); let ah5: f16 = f16(a5); let ah6: f16 = f16(a6); let ah7: f16 = f16(a7);
+            let bh0: f16 = f16(b0); let bh1: f16 = f16(b1); let bh2: f16 = f16(b2); let bh3: f16 = f16(b3);
+            let bh4: f16 = f16(b4); let bh5: f16 = f16(b5); let bh6: f16 = f16(b6); let bh7: f16 = f16(b7);
+            c00 += f32(ah0 * bh0); c01 += f32(ah0 * bh1); c02 += f32(ah0 * bh2); c03 += f32(ah0 * bh3); c04 += f32(ah0 * bh4); c05 += f32(ah0 * bh5); c06 += f32(ah0 * bh6); c07 += f32(ah0 * bh7);
+            c10 += f32(ah1 * bh0); c11 += f32(ah1 * bh1); c12 += f32(ah1 * bh2); c13 += f32(ah1 * bh3); c14 += f32(ah1 * bh4); c15 += f32(ah1 * bh5); c16 += f32(ah1 * bh6); c17 += f32(ah1 * bh7);
+            c20 += f32(ah2 * bh0); c21 += f32(ah2 * bh1); c22 += f32(ah2 * bh2); c23 += f32(ah2 * bh3); c24 += f32(ah2 * bh4); c25 += f32(ah2 * bh5); c26 += f32(ah2 * bh6); c27 += f32(ah2 * bh7);
+            c30 += f32(ah3 * bh0); c31 += f32(ah3 * bh1); c32 += f32(ah3 * bh2); c33 += f32(ah3 * bh3); c34 += f32(ah3 * bh4); c35 += f32(ah3 * bh5); c36 += f32(ah3 * bh6); c37 += f32(ah3 * bh7);
+            c40 += f32(ah4 * bh0); c41 += f32(ah4 * bh1); c42 += f32(ah4 * bh2); c43 += f32(ah4 * bh3); c44 += f32(ah4 * bh4); c45 += f32(ah4 * bh5); c46 += f32(ah4 * bh6); c47 += f32(ah4 * bh7);
+            c50 += f32(ah5 * bh0); c51 += f32(ah5 * bh1); c52 += f32(ah5 * bh2); c53 += f32(ah5 * bh3); c54 += f32(ah5 * bh4); c55 += f32(ah5 * bh5); c56 += f32(ah5 * bh6); c57 += f32(ah5 * bh7);
+            c60 += f32(ah6 * bh0); c61 += f32(ah6 * bh1); c62 += f32(ah6 * bh2); c63 += f32(ah6 * bh3); c64 += f32(ah6 * bh4); c65 += f32(ah6 * bh5); c66 += f32(ah6 * bh6); c67 += f32(ah6 * bh7);
+            c70 += f32(ah7 * bh0); c71 += f32(ah7 * bh1); c72 += f32(ah7 * bh2); c73 += f32(ah7 * bh3); c74 += f32(ah7 * bh4); c75 += f32(ah7 * bh5); c76 += f32(ah7 * bh6); c77 += f32(ah7 * bh7);
+        }
+        workgroupBarrier();
+        if (has_next) {
+            for (var e = 0u; e < 4u; e = e + 1u) {
+                As[skk[e] * SP + sr[e]] = rA[e];
+                Bs[skk[e] * SP + sr[e]] = rB[e];
+            }
+        }
+        workgroupBarrier();
+    }
+
+    // Guarded stores: thread (ty,tx) owns rows ty+16i and columns tx+16j.
+    let m0 = row0 + ty + 0u;
+    let m1 = row0 + ty + 16u;
+    let m2 = row0 + ty + 32u;
+    let m3 = row0 + ty + 48u;
+    let m4 = row0 + ty + 64u;
+    let m5 = row0 + ty + 80u;
+    let m6 = row0 + ty + 96u;
+    let m7 = row0 + ty + 112u;
+
+    if (m0 < p.m) {
+        let r0 = m0 * p.n + col0 + tx;
+        if (col0 + tx + 0u < p.n) { out[r0 + 0u] = c00; }
+        if (col0 + tx + 16u < p.n) { out[r0 + 16u] = c01; }
+        if (col0 + tx + 32u < p.n) { out[r0 + 32u] = c02; }
+        if (col0 + tx + 48u < p.n) { out[r0 + 48u] = c03; }
+        if (col0 + tx + 64u < p.n) { out[r0 + 64u] = c04; }
+        if (col0 + tx + 80u < p.n) { out[r0 + 80u] = c05; }
+        if (col0 + tx + 96u < p.n) { out[r0 + 96u] = c06; }
+        if (col0 + tx + 112u < p.n) { out[r0 + 112u] = c07; }
+    }
+    if (m1 < p.m) {
+        let r1 = m1 * p.n + col0 + tx;
+        if (col0 + tx + 0u < p.n) { out[r1 + 0u] = c10; }
+        if (col0 + tx + 16u < p.n) { out[r1 + 16u] = c11; }
+        if (col0 + tx + 32u < p.n) { out[r1 + 32u] = c12; }
+        if (col0 + tx + 48u < p.n) { out[r1 + 48u] = c13; }
+        if (col0 + tx + 64u < p.n) { out[r1 + 64u] = c14; }
+        if (col0 + tx + 80u < p.n) { out[r1 + 80u] = c15; }
+        if (col0 + tx + 96u < p.n) { out[r1 + 96u] = c16; }
+        if (col0 + tx + 112u < p.n) { out[r1 + 112u] = c17; }
+    }
+    if (m2 < p.m) {
+        let r2 = m2 * p.n + col0 + tx;
+        if (col0 + tx + 0u < p.n) { out[r2 + 0u] = c20; }
+        if (col0 + tx + 16u < p.n) { out[r2 + 16u] = c21; }
+        if (col0 + tx + 32u < p.n) { out[r2 + 32u] = c22; }
+        if (col0 + tx + 48u < p.n) { out[r2 + 48u] = c23; }
+        if (col0 + tx + 64u < p.n) { out[r2 + 64u] = c24; }
+        if (col0 + tx + 80u < p.n) { out[r2 + 80u] = c25; }
+        if (col0 + tx + 96u < p.n) { out[r2 + 96u] = c26; }
+        if (col0 + tx + 112u < p.n) { out[r2 + 112u] = c27; }
+    }
+    if (m3 < p.m) {
+        let r3 = m3 * p.n + col0 + tx;
+        if (col0 + tx + 0u < p.n) { out[r3 + 0u] = c30; }
+        if (col0 + tx + 16u < p.n) { out[r3 + 16u] = c31; }
+        if (col0 + tx + 32u < p.n) { out[r3 + 32u] = c32; }
+        if (col0 + tx + 48u < p.n) { out[r3 + 48u] = c33; }
+        if (col0 + tx + 64u < p.n) { out[r3 + 64u] = c34; }
+        if (col0 + tx + 80u < p.n) { out[r3 + 80u] = c35; }
+        if (col0 + tx + 96u < p.n) { out[r3 + 96u] = c36; }
+        if (col0 + tx + 112u < p.n) { out[r3 + 112u] = c37; }
+    }
+    if (m4 < p.m) {
+        let r4 = m4 * p.n + col0 + tx;
+        if (col0 + tx + 0u < p.n) { out[r4 + 0u] = c40; }
+        if (col0 + tx + 16u < p.n) { out[r4 + 16u] = c41; }
+        if (col0 + tx + 32u < p.n) { out[r4 + 32u] = c42; }
+        if (col0 + tx + 48u < p.n) { out[r4 + 48u] = c43; }
+        if (col0 + tx + 64u < p.n) { out[r4 + 64u] = c44; }
+        if (col0 + tx + 80u < p.n) { out[r4 + 80u] = c45; }
+        if (col0 + tx + 96u < p.n) { out[r4 + 96u] = c46; }
+        if (col0 + tx + 112u < p.n) { out[r4 + 112u] = c47; }
+    }
+    if (m5 < p.m) {
+        let r5 = m5 * p.n + col0 + tx;
+        if (col0 + tx + 0u < p.n) { out[r5 + 0u] = c50; }
+        if (col0 + tx + 16u < p.n) { out[r5 + 16u] = c51; }
+        if (col0 + tx + 32u < p.n) { out[r5 + 32u] = c52; }
+        if (col0 + tx + 48u < p.n) { out[r5 + 48u] = c53; }
+        if (col0 + tx + 64u < p.n) { out[r5 + 64u] = c54; }
+        if (col0 + tx + 80u < p.n) { out[r5 + 80u] = c55; }
+        if (col0 + tx + 96u < p.n) { out[r5 + 96u] = c56; }
+        if (col0 + tx + 112u < p.n) { out[r5 + 112u] = c57; }
+    }
+    if (m6 < p.m) {
+        let r6 = m6 * p.n + col0 + tx;
+        if (col0 + tx + 0u < p.n) { out[r6 + 0u] = c60; }
+        if (col0 + tx + 16u < p.n) { out[r6 + 16u] = c61; }
+        if (col0 + tx + 32u < p.n) { out[r6 + 32u] = c62; }
+        if (col0 + tx + 48u < p.n) { out[r6 + 48u] = c63; }
+        if (col0 + tx + 64u < p.n) { out[r6 + 64u] = c64; }
+        if (col0 + tx + 80u < p.n) { out[r6 + 80u] = c65; }
+        if (col0 + tx + 96u < p.n) { out[r6 + 96u] = c66; }
+        if (col0 + tx + 112u < p.n) { out[r6 + 112u] = c67; }
+    }
+    if (m7 < p.m) {
+        let r7 = m7 * p.n + col0 + tx;
+        if (col0 + tx + 0u < p.n) { out[r7 + 0u] = c70; }
+        if (col0 + tx + 16u < p.n) { out[r7 + 16u] = c71; }
+        if (col0 + tx + 32u < p.n) { out[r7 + 32u] = c72; }
+        if (col0 + tx + 48u < p.n) { out[r7 + 48u] = c73; }
+        if (col0 + tx + 64u < p.n) { out[r7 + 64u] = c74; }
+        if (col0 + tx + 80u < p.n) { out[r7 + 80u] = c75; }
+        if (col0 + tx + 96u < p.n) { out[r7 + 96u] = c76; }
+        if (col0 + tx + 112u < p.n) { out[r7 + 112u] = c77; }
+    }
+}
+"#;
+}
+
 /// M8.6: the E4M3/E5M2 portable FP8
 /// decode expressions - a DIFFERENT mechanism from [`dtype_variant`], not a
 /// third tier bolted onto it. `dtype_variant`'s declaration/load rewrite is

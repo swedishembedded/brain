@@ -52,6 +52,7 @@ pub mod coopmat;
 /// `kernel-performance.md` M8.10/M8.11, this ABI's first non-reference
 /// provider.
 pub mod cpu_isa;
+pub mod native_f16;
 pub mod parity;
 pub mod wgsl;
 

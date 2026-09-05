@@ -621,6 +621,16 @@ mod native_facade {
             self.inner.identity()
         }
 
+        /// Whether this handle's device was granted the WGSL `enable f16;`
+        /// native-compute extension - availability only, never a speed claim
+        /// (see `backend_api::Backend::supports_native_f16`'s own doc for why
+        /// a caller MUST check this before compiling `enable f16;` source, and
+        /// `crate::provider::native_f16` for the one production consumer,
+        /// M8.7).
+        pub fn supports_native_f16(&self) -> bool {
+            self.inner.supports_native_f16()
+        }
+
         /// What this device can actually do - class, limits, numeric tiers.
         /// Cached at backend construction; reading it is free.
         ///

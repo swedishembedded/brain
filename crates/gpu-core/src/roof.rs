@@ -240,7 +240,12 @@ impl Bound {
 }
 
 /// The probe kernel set - the two sources whose fingerprint keys the cache.
-const PROBE_KERNELS: &[(&str, &str)] = &[
+/// `pub(crate)` (M8.7): `NativeF16Provider::probe` builds its own probe
+/// device from this exact list, the same way [`measure`] itself does, rather
+/// than assuming the CALLER's `Gpu` handle happens to have `roof_fma`
+/// registered at index 0 (it does not - that handle's kernel list is
+/// whatever the caller's own model/test registered).
+pub(crate) const PROBE_KERNELS: &[(&str, &str)] = &[
     ("roof_fma", kernels::ROOF_FMA),
     ("axpy", kernels::AXPY),
     ("roof_dp4a", kernels::ROOF_DP4A),
@@ -610,11 +615,14 @@ fn best_of(gpu: &Gpu, steps: &[crate::Step], reps: usize, deadline: Instant) -> 
 /// rungs that follow time a device that is awake. Nothing is recorded: this is
 /// the ramp, not the measurement.
 ///
+/// `pub(crate)` (M8.7): `NativeF16Provider::probe` warms the SAME probe
+/// device up before timing it, matching [`measure`]'s own order.
+///
 /// Adds at most `roof_warmup()` plus one dispatch to `measure`'s wall clock -
 /// the deadline is checked before each submit, and `WARMUP_ITERS` bounds how
 /// long any single one can be. A device that times out mid-warm-up returns
 /// early and lets the first real rung report the failure.
-fn warm_up(gpu: &Gpu) {
+pub(crate) fn warm_up(gpu: &Gpu) {
     let budget = roof_warmup();
     if budget.is_zero() {
         return;
@@ -632,7 +640,11 @@ fn warm_up(gpu: &Gpu) {
     }
 }
 
-fn measure_compute(gpu: &Gpu) -> Option<f32> {
+// `pub(crate)`, not `pub`: `crate::provider::native_f16::NativeF16Provider`
+// (M8.7) reuses this exact fp32 GFLOP/s probe as the denominator of its own
+// measured f16 speedup, rather than re-implementing the same calibration
+// loop a second time - still private to every OTHER crate, same as before.
+pub(crate) fn measure_compute(gpu: &Gpu) -> Option<f32> {
     let inp = gpu.storage(FMA_THREADS as u64);
     let out = gpu.storage(FMA_THREADS as u64);
     gpu.write_f32(&inp, &vec![1.0f32; FMA_THREADS as usize]);
@@ -710,7 +722,11 @@ fn measure_int8(gpu: &Gpu) -> Option<f32> {
 ///
 /// No caps gate in here - the caller (`measure`) applies it, exactly as
 /// `measure_int8` leaves its own `int8_dot` gate to its caller.
-fn measure_f16(gpu: &Gpu) -> Option<f32> {
+// `pub(crate)` (M8.7): `NativeF16Provider::probe` calls this directly rather
+// than re-measuring - it already gates on `Gpu::supports_native_f16` itself
+// (see that method's doc for why the caller, not this function, must own
+// that check), so no new gate is added here.
+pub(crate) fn measure_f16(gpu: &Gpu) -> Option<f32> {
     const K_FMA_F16: usize = 0; // this handle's only compiled kernel
     let (name, src) =
         kernels::template::native_f16_variant("roof_fma_f16", kernels::template::native_f16_poc::ROOF_FMA);

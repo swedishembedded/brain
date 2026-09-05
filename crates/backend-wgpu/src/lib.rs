@@ -2412,6 +2412,10 @@ impl Backend for WgpuBackend {
     fn dump_profile(&self) {
         self.dump_profile_now()
     }
+    #[cfg(not(target_arch = "wasm32"))]
+    fn supports_native_f16(&self) -> bool {
+        self.supports_shader_f16()
+    }
     fn set_kernel_timing(&self, on: bool) -> bool {
         match &self.shared.gpu_profile {
             Some(p) => {

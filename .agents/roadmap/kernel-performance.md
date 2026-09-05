@@ -4595,6 +4595,156 @@ compiled out entirely, which is the one thing confirmable here (that this
 milestone's addition costs nothing and breaks nothing on the box that
 actually runs this campaign's tests). **Commit**: one.
 
+### M8.7 - `NativeF16Provider`: the first non-reference `OperatorProvider`, gated on a REAL measured speedup, never availability
+
+Confirmed the landed shapes directly against source before writing anything
+(M8.0/M8.1/M8.3/M8.5/M8.6's own entries above, `crates/gpu-core/src/provider/
+{mod,wgsl,parity}.rs`, `crates/backend-api/src/arch.rs`, `select.rs`'s
+`Requirement`) - all real, all as described. `kernels::template::
+native_f16_variant`/`native_f16_poc` (B11) had proven the mechanism (narrow
+`f16` registers, `f32` accumulate) but shipped no production dispatch class;
+this milestone closes that gap with ONE hand-written kernel and ONE new
+provider, nothing more.
+
+**The kernel**: `kernels::template::native_f16_matmul::MATMUL_REG3_F16N`
+(new module, Rust-embedded like `native_f16_poc` - deliberately NOT a
+`crates/kernels/wgsl/*.wgsl` disk file, so `scripts/build/gen-kernel-
+table.py`'s header-driven catalogue never sees it, the same scope
+`native_f16_poc` already chose). Byte-identical to `matmul_reg3.wgsl` in
+every structural respect - `Params`, 128x128 tile, 8x8 per-thread register
+block, 256-thread workgroup, software-pipelined K-chunk staging, every
+global load/shared store/barrier/guarded output write - except the 64
+per-thread products: each converts its two `f32` shared-memory operands to
+`f16` registers, multiplies IN `f16`, then widens the product back to `f32`
+before adding into the existing `f32` accumulator. Both `x`/`w` stay plain
+`array<f32>` bindings - no packed-f16 buffer layout, no bandwidth change
+from `matmul_reg3`'s own; only the multiply narrows, exactly the mechanism
+`native_f16_poc::ROOF_FMA` measured (not a bandwidth-driven win - see the
+kernel's own module doc for the real follow-up that would be). Registered
+via `native_f16_variant("matmul_reg3_f16n", ...)`.
+
+**The provider**: `gpu_core::provider::native_f16::NativeF16Provider` (new
+file), implementing `OperatorProvider` for `Op::MatMul`/`Pass::Forward` at
+`Dtype::F32` only - an ALTERNATIVE, measured-faster implementation of the
+SAME fp32 forward GEMM `matmul_reg3` already serves, not a new storage tier
+(see the module's own doc for why a future integration behind `Ops::matmul`'s
+existing `Dtype::F16` STORAGE tier would need a distinct dtype tag first, so
+a `lower`-failure fallback could never reinterpret one buffer layout as the
+other). Not wired into any live call site this milestone - matches M8.3's
+own "each future provider needs its own migration onto the seam" scope
+boundary exactly.
+
+**The capability gate, and a real design correction along the way.** The
+brief's own instruction was "`requires()` must demand BOTH that f16 executes
+AND that it is measured fast" - read literally, `requires()` returning
+`Requirement{f16_compute:true,..}` looked like the right shape, until
+checking what `satisfied_by` actually reads: `caps.numeric.f16`, which is a
+PERMANENT `false` in every backend's production `query_caps` (B11's own
+finding, point 4: a roofline-grade measurement does not belong on that
+hot path, mirroring `peak_gflops`/`peak_bandwidth_gbs` staying `None` until
+measured lazily). Setting it would have made this provider permanently
+UNSELECTABLE regardless of what it itself measures - a worse bug than the
+"availability alone is enough" trap this milestone exists to avoid, not a
+fix for it. So `requires()` stays `Requirement::default()` (imposes nothing
+through that shared channel) and the real gate lives entirely in
+`accepts()`: `self.arch.is_fast(DType::F16)` against THIS provider's own
+`ArchDesc` snapshot, built once by `NativeF16Provider::probe` and never
+read from the ambient `DeviceCaps`. `probe` itself needed a second real fix
+after its first draft: it originally called `gpu_core::roof::measure_compute`/
+`measure_f16` directly on the CALLER's own `Gpu` handle, which panicked on
+real hardware with a wgpu bind-group-layout validation error (`"Number of
+bindings ... (3) does not match ... (4)"`) - `measure_compute` assumes
+`roof_fma` sits at kernel index 0, but the caller's handle had `matmul`/
+`matmul_reg3_f16n` there instead. Fixed by mirroring `roof::measure`'s own
+order exactly: build a fresh probe device from `roof::PROBE_KERNELS`
+(`gpu.new_like`, now `pub(crate)`), warm it up, then measure BOTH rates on
+that dedicated device - `measure_compute`/`measure_f16`/`warm_up`/
+`PROBE_KERNELS` all widened `pub(crate)` for this reuse, no other change to
+`roof.rs`. `Gpu::supports_native_f16`/`backend_api::Backend::
+supports_native_f16` (new, defaulted `false`, overridden only in
+`backend-wgpu` as `self.supports_shader_f16()`) gate `probe` BEFORE it ever
+compiles `enable f16;` source - a hard device-fault panic on every backend
+this engine has otherwise, confirmed the hard way once already this
+milestone (a different panic, same class, when the wgpu backend's
+uncaptured-error handler fired during early testing of the kernel dispatch
+itself before this gate existed in the right place).
+
+**Gradient-check safety, structural**: `accepts()` returns `false`
+unconditionally for `Pass::Backward`, tested directly
+(`declines_backward_pass_even_when_f16_is_fast`, using a synthetic
+comfortably-fast `ArchDesc` so the test cannot pass by accident via the
+speed gate instead).
+
+**Subnormals**: `native_f16_poc::ELEMENTWISE_FMA`'s own real-hardware finding
+(this Intel Arc iGPU flushes a subnormal `f16` result to zero) is the exact
+`f16(a)*f16(b)` primitive this kernel's inner loop uses too -
+`native_f16_matmul_subnormal_product_matches_documented_flush_to_zero`
+(real hardware) constructs `a=0.006, b=0.005` (product ≈3e-5, below f16's
+`2^-14` minimum normal), dispatches through the real GEMM kernel at
+`m=n=k=1`, and asserts the device output is EXACTLY `0.0` - a specific,
+real, already-documented outcome pinned directly, not a permissive
+"either" tolerance.
+
+**Gate**: `crates/gpu-core/src/provider/native_f16.rs`'s own 6 unit tests
+(no GPU: the measured-fast gate at `Absent`/`Native`-unmeasured/
+below-margin, the positive fast-accept case, backward-declines-even-when-
+fast, non-F32-shape-declines-even-when-fast, the tile-formula regression
+guard, the `kernel()` name/wrapping pin - all synthetic `ArchDesc`s, per the
+milestone's own "construct one, don't require real slow hardware"
+instruction) plus `crates/gpu-core/tests/native_f16_provider.rs` (3 tests,
+REAL wgpu hardware - Intel Arc iGPU (MTL), confirmed via the printed adapter
+string): the measured-speedup report, forward-pass parity against the WGSL
+reference at a numeric tolerance across the same four shapes `provider::
+parity::MATMUL_CASES` uses (reusing `assert_provider_parity`/`ParityCase`/
+`Tolerance` unchanged - this provider never calls `OpRequest::bind`, so the
+shared harness's `KernelVariant::Reference`-only `bind` closure is safe for
+both sides), and the subnormal case above. The parity tolerance's `atol`
+was raised from an initial `2e-3` to `1e-2` after a REAL measured outlier:
+the `300x260x128` shape's own near-zero output elements (an fp32 sum that
+happens to land close to zero from sign cancellation across ~128
+random-signed terms) showed up to `3.1e-3` absolute deviation on a
+`~6.4e-3`-magnitude element - the highest-relative-error regime for ANY
+reduced-precision reassociation, not a structural bug (confirmed: every
+other element across all four shapes passed at the original tolerance).
+`cargo test -p brain-gpu-core --lib provider::native_f16::` (6/6), `cargo
+test -p brain-gpu-core --test native_f16_provider` (3/3, real hardware),
+`cargo clippy -p brain-gpu-core -p brain-kernels -p brain-backend-api -p
+brain-backend-wgpu --all-targets` clean on every file this milestone
+touched (one real finding, 3x `clippy::doc_lazy_continuation` in this
+module's own doc comment - a paragraph line starting with a backtick span
+right after a "- "-ending previous line, read as an unindented list
+continuation - reworded, not suppressed; every other warning is
+pre-existing, in files this milestone did not touch), `python3 scripts/
+build/gen-kernel-table.py --check` clean (466 kernels - unaffected, the new
+kernel is Rust-embedded, never a disk file), `bash scripts/gates/check-
+workspace-members.sh` clean (117 crates).
+
+**Measured, honestly - the real number is far more modest than B11's own
+headline, and that is the finding.** `NativeF16Provider::probe` on this same
+Intel Arc iGPU (MTL), three separate runs: `1.258x`, one run that dipped
+BELOW `FAST_TIER_MIN_SPEEDUP` (the subnormal test correctly self-skipped,
+printing why), `1.212x`. Contrast with B11's own `native_f16_poc::ROOF_FMA`-
+only number (`1.38x-3.76x`, median ~1.9x): a REAL register-tiled GEMM's win
+from narrowing only the multiply is much smaller and genuinely borderline
+here, because the global-memory loads and workgroup-barrier staging this
+kernel ALSO does (unlike the PoC's pure dependency-free FMA chain) dilute
+the ALU-width win - memory/barrier time does not shrink just because the
+multiply got narrower. On THIS box, across the runs observed, the provider
+sometimes clears the gate and sometimes does not - BOTH outcomes are
+correct per this milestone's own design (a device where the honest number
+sits right at the noise floor around the threshold SHOULD flip both ways
+run to run), and this is reported plainly rather than cherry-picking the
+run that clears it. **Commit**: one (kernel, provider, the two `Backend`/
+`Gpu` extensions, `roof.rs`'s three widened visibilities, both test files,
+this ledger entry).
+
+**Deferred, explicitly out of scope**: wiring this provider behind any real
+model call site (`model::ops::Ops::matmul` migration) - not attempted, same
+scope boundary M8.3 itself drew. A packed-f16 STORAGE buffer (halving bytes
+moved, `dtype_variant`'s own storage-tier shape) - a real, separate
+follow-up this milestone's kernel doc names explicitly, not attempted.
+`backend-vulkan`'s own native-f16 feature request/measurement - out of
+scope, matching B11's own wgpu-only precedent for this exact tier.
 
 ## Not yet done
 

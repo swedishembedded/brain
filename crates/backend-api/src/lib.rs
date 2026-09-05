@@ -1277,6 +1277,27 @@ pub trait Backend: Send + Sync {
     fn step_native(&self, _id: NativeId, _bufs: &[&DeviceBuffer], _params: &[u32], _threads: u32) -> Option<Step> {
         None
     }
+
+    /// Whether THIS device was granted the WGSL `enable f16;` native-compute
+    /// extension (`wgpu::Features::SHADER_F16`, or a backend-local
+    /// equivalent) - availability only, never a speed claim (`caps().numeric
+    /// .f16`/`arch.is_fast(F16)` answer that question instead, see
+    /// `backend_api::arch`'s own doc comment on why the two must never
+    /// conflate). `false` by default: attempting to compile `enable f16;`
+    /// source on a backend that never asked for this feature is a hard
+    /// device-fault panic on every backend this engine has (wgpu's own
+    /// uncaptured-error handler, per `backend-wgpu::from_adapter`'s own doc),
+    /// not a graceful `Result` - so `M8.7`'s `gpu_core::provider::native_f16
+    /// ::NativeF16Provider` MUST check this before ever attempting that
+    /// compile, the same way `crates/backend-wgpu/tests/native_f16.rs`'s own
+    /// tests already check `WgpuBackend::supports_shader_f16()` first. Only
+    /// `backend-wgpu` overrides it today - deliberately wgpu-only, matching
+    /// `kernels::template::native_f16_variant`'s own scope (`backend-vulkan`'s
+    /// equivalent feature request is a real, separate follow-up, same as B11
+    /// left it).
+    fn supports_native_f16(&self) -> bool {
+        false
+    }
 }
 
 /// Whether `BRAIN_PROFILE` asks for profiling output - the ONE parse of that
