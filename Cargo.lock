@@ -1745,6 +1745,7 @@ dependencies = [
  "brain-data",
  "brain-model",
  "brain-qwen3",
+ "serde",
  "serde_json",
  "tempfile",
 ]

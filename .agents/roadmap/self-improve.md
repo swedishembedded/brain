@@ -578,7 +578,7 @@ file (pre-existing warnings elsewhere in both crates, e.g. `crates/model/
 tests/matmul_kq.rs`, `crates/model/src/int8.rs`, `crates/qwen3/src/
 serve.rs:5229`, are untouched by this phase).
 
-## P11 - `Environment` / `Verifier` - TODO
+## P11 - `Environment` / `Verifier` - DONE
 
 New `crates/rl/src/env.rs`: `Task { id, prompt: Vec<u32>, answer:
 serde_json::Value }`, `Environment { name, tasks(seed) -> Vec<Task>,
@@ -609,6 +609,34 @@ parallel system living next to it.
 Gate: unit tests for a verifier over a small self-contained task family
 (see `.agents/roadmap/gauntlet.md`) and for multi-step `step()`; existing
 `rl::atif` tests stay green unchanged.
+
+**Verified**: `crates/rl/src/env.rs` adds `Task`/`Step`/`StepOutcome`/
+`Reward`/`Environment`/`Verifier` exactly as spec'd, `Reward.parts` a
+`BTreeMap` (not `HashMap`) so a stored reward re-serializes byte-stable -
+part of what "re-scorable run artifact" requires. `rl::atif` gained
+`task_from_trajectory` (builds a `Task` whose `answer` carries the
+trajectory's own pre-stamped P0 reward - what a verifier needs to
+reproduce it, never a label) and `AtifVerifier` (a real `Verifier` impl,
+reading that `answer` back deterministically); `trajectory_reward` itself
+is untouched and both new pieces are thin wrappers over it, and
+`ingest_dir` now routes its reward extraction through
+`task_from_trajectory` + `AtifVerifier::verify` instead of calling
+`trajectory_reward` directly - the special-case relationship is load-
+bearing in the actual call graph, not just claimed in a comment.
+`cargo test -p brain-rl --lib`: 10 passed (was 9; the 9 pre-existing
+`rl::atif`/`load_weighted` tests unchanged and still green, plus one new
+`atif::tests::atif_verifier_is_a_real_verifier_impl_agreeing_with_
+trajectory_reward` and the two new `env::tests` gate tests -
+`exact_match_verifier_recomputes_correctness_from_task_answer_
+deterministically` over a tiny echo task family, and
+`multi_step_step_runs_a_bounded_episode_constrained_to_legal_actions` over
+a 3-turn counter environment asserting `legal_actions` is honoured every
+turn and a verifier re-derives the outcome from the transcript alone).
+`cargo test -p brain-rl` (whole crate, including the two `tests/*.rs`
+integration files): 14 passed. `cargo clippy -p brain-rl --all-targets`
+clean on every touched file (pre-existing warnings elsewhere, e.g.
+`crates/gguf/src/kquant.rs`, are untouched by this phase). `cargo check
+--workspace --all-targets --exclude brain-vulkan` clean.
 
 ## P12 - `Grpo` objective (and RFT/STaR as its degenerate case) - TODO
 

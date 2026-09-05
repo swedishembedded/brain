@@ -10,6 +10,12 @@
 //! (here, real sven coding sessions) into training examples is inherently
 //! domain-specific and does not try to generalize further.
 //!
+//! Reward extraction itself is a special case of [`crate::env`]'s
+//! `Environment`/`Verifier` seam, not a parallel system beside it:
+//! [`task_from_trajectory`] builds the generic `Task` and [`AtifVerifier`]
+//! is the `Verifier` impl - both thin wrappers over [`trajectory_reward`],
+//! which stays the one place the P0 reward stamp is actually read.
+//!
 //! ## Scope (v1)
 //!
 //! - Text-only step content ([`atif::MessageBody::Text`]); a multimodal
@@ -28,6 +34,7 @@
 //!   silently indistinguishable from training on a known-good one, exactly
 //!   what the weighted-loss contract exists to prevent.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use atif::{MessageBody, StepOrigin, TraceStep, Trajectory};
@@ -35,12 +42,44 @@ use data::chat::{ChatMessage, ChatSample, ToolCall};
 use data::chat_template::ChatTemplate;
 use data::qwen_tokenizer::QwenBpe;
 
+use crate::env::{Reward, Step, Task, Verifier};
+
 /// The trajectory-level reward sven's task machine stamps at
 /// `final_metrics.extra.reward` once a task concludes (self-improve roadmap
 /// P0). `None` when absent - see this module's doc comment on why that
 /// means "skip", not "default to 1.0".
 pub fn trajectory_reward(traj: &Trajectory) -> Option<f32> {
     traj.final_metrics.as_ref()?.extra.as_ref()?.get("reward")?.as_f64().map(|r| r as f32)
+}
+
+/// Build the [`crate::env::Task`] this module's [`AtifVerifier`] needs from
+/// an ATIF trajectory - what turns ATIF-ingestion into a special case of
+/// the `env` seam rather than a parallel reward path beside it. `answer`
+/// carries the trajectory's own pre-stamped outcome ([`trajectory_reward`]):
+/// what a verifier needs to reproduce the reward, never something fed to a
+/// model as a rollout prompt (`prompt` is left empty - this trajectory was
+/// already recorded, not sampled through this seam). `None` when the
+/// trajectory has no reward stamp, matching `trajectory_reward`'s own
+/// "skip, don't default" contract.
+pub fn task_from_trajectory(traj: &Trajectory) -> Option<Task> {
+    let reward = trajectory_reward(traj)?;
+    let id = traj.trajectory_id.clone().or_else(|| traj.session_id.clone()).unwrap_or_default();
+    Some(Task { id, prompt: Vec::new(), answer: serde_json::json!({ "reward": reward }) })
+}
+
+/// [`Verifier`] over ATIF trajectories: recomputes the reward from
+/// [`Task::answer`] alone (built by [`task_from_trajectory`]), ignoring
+/// `transcript`/`completion` - the trajectory's outcome was already
+/// determined by sven's task machine (P0) before this seam ever sees it,
+/// so there is nothing left here to recompute from raw tokens, only to
+/// read back deterministically.
+pub struct AtifVerifier;
+
+impl Verifier for AtifVerifier {
+    fn verify(&self, task: &Task, _transcript: &[Step], _completion: &[u32]) -> Reward {
+        let value = task.answer.get("reward").and_then(serde_json::Value::as_f64).unwrap_or(0.0) as f32;
+        Reward { value, parts: BTreeMap::from([("trajectory_reward".to_string(), value)]) }
+    }
 }
 
 /// Convert one tool invocation's arguments into the compact string form
@@ -168,10 +207,11 @@ pub fn ingest_dir(trajectories_dir: &Path, tok: &QwenBpe, tmpl: &ChatTemplate, v
                 continue;
             }
         };
-        let Some(reward) = trajectory_reward(&traj) else {
+        let Some(task) = task_from_trajectory(&traj) else {
             eprintln!("rl::atif::ingest_dir: {}: no reward stamp (final_metrics.extra.reward), skipping", path.display());
             continue;
         };
+        let reward = AtifVerifier.verify(&task, &[], &[]).value;
         match to_chat_sample(&traj) {
             Ok(sample) => samples.push(WeightedSample { sample, reward }),
             Err(e) => eprintln!("rl::atif::ingest_dir: {}: {e}, skipping", path.display()),
@@ -226,6 +266,21 @@ mod tests {
             traj.final_metrics = Some(FinalMetrics { extra: Some(serde_json::json!({ "reward": r })), ..Default::default() });
         }
         traj
+    }
+
+    #[test]
+    fn atif_verifier_is_a_real_verifier_impl_agreeing_with_trajectory_reward() {
+        let traj = trajectory_with_reward(Some(0.75));
+        let task = task_from_trajectory(&traj).expect("stamped trajectory yields a Task");
+        let reward = AtifVerifier.verify(&task, &[], &[]);
+        assert_eq!(reward.value, trajectory_reward(&traj).unwrap());
+        assert_eq!(reward.parts.get("trajectory_reward"), Some(&0.75));
+
+        // An unstamped trajectory carries no recomputable answer, so it
+        // yields no Task at all - matching trajectory_reward's own
+        // "skip, don't default" contract, one seam not two.
+        let unstamped = trajectory_with_reward(None);
+        assert!(task_from_trajectory(&unstamped).is_none());
     }
 
     #[test]

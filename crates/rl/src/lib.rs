@@ -33,6 +33,7 @@
 
 pub mod atif;
 pub mod continuous;
+pub mod env;
 
 use std::path::Path;
 

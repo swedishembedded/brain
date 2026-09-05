@@ -15,6 +15,7 @@ brain-data.workspace = true
 brain-checkpoint.workspace = true
 brain-atif.workspace = true
 brain-qwen3.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
