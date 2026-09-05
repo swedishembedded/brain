@@ -23,60 +23,36 @@ fn probe_device() -> WgpuBackend {
     WgpuBackend::new(&[("axpy", kernels::AXPY)])
 }
 
-/// Verifies the CPU JIT's actual behaviour on a native-f16 kernel - and the
-/// real answer, found by actually compiling AND RUNNING it (not assumed from
-/// reading `wgsl_cpu::Ty`'s variant list), is more dangerous than a clean
-/// rejection: `wgsl_cpu::Jit::new` SUCCEEDS on this source. naga's
-/// `ScalarKind::Float` does not carry bit width, so `Ty::from_scalar` maps
-/// f16 (width 2) to the exact same `Ty::F32` arm as f32 (width 4), so the
-/// CPU JIT silently executes every `f16` operation as plain fp32. Proven
-/// with the overflow case from the correctness test below: `60000.0 * 1.0 +
-/// 6000.0`, which a real f16 ALU must saturate to `+inf` (past f16's 65504
-/// max), comes back from the CPU JIT as the un-saturated fp32 sum
-/// `66000.0`, a silently WRONG answer rather than a compile error. This is why
-/// `caps.numeric.f16` staying unconditionally `false` on `backend-cpu`
-/// (checked next, `numeric_f16_never_entangles_across_backends`) is
-/// structural insurance, not a redundant belt-and-suspenders: nothing about
-/// this toolchain will refuse a native-f16 dispatch reaching the CPU JIT by
-/// mistake, so the capability gate is the ONLY thing preventing a silent
-/// wrong-answer bug, not a compiler error this crate could rely on instead.
+/// Verifies the CPU JIT's actual behaviour on a native-f16 kernel: M8.0
+/// closed a silent-miscompile trap here, so `wgsl_cpu::Jit::new` must now
+/// REFUSE this source rather than (as it used to) silently accept it and run
+/// every `f16` operation as plain fp32. Before the fix, naga's
+/// `ScalarKind::Float` alone (no width) made `Ty::from_scalar` map f16
+/// (width 2) to the exact same `Ty::F32` arm as f32 (width 4), so the
+/// overflow case below - `60000.0 * 1.0 + 6000.0`, which a real f16 ALU must
+/// saturate to `+inf` (past f16's 65504 max) - used to come back as the
+/// un-saturated fp32 sum `66000.0`: a silently WRONG answer with no error.
+/// `Ty::from_scalar` now takes the whole `naga::Scalar` (kind AND width) and
+/// rejects width-2 float outright, naming f16 in the error. `caps.numeric.f16`
+/// staying unconditionally `false` on `backend-cpu` (checked next,
+/// `numeric_f16_never_entangles_across_backends`) remains the belt to this
+/// fix's suspenders: two independent layers now refuse this path rather than
+/// one being the only thing standing between it and a silent wrong answer.
 /// No GPU needed for this one.
 #[test]
-fn native_f16_kernel_silently_diverges_on_the_cpu_jit_rather_than_being_rejected() {
+fn native_f16_kernel_is_rejected_by_the_cpu_jit_rather_than_silently_diverging() {
     let (name, src) = native_f16_variant("elementwise_fma_f16", native_f16_poc::ELEMENTWISE_FMA);
-    let jit = wgsl_cpu::Jit::new(&[(name, src)]).unwrap_or_else(|e| {
+    let err = wgsl_cpu::Jit::new(&[(name, src)]).err().unwrap_or_else(|| {
         panic!(
-            "expected the CPU JIT to (wrongly) ACCEPT this source (naga's ScalarKind has no \
-             width, so wsgl-cpu's Ty::from_scalar cannot distinguish f16 from f32) -- if it now \
-             rejects it instead, wgsl-cpu grew real f16 awareness and this test (and the doc \
-             comment on `native_f16_variant` explaining why the CPU backend must never reach this \
-             tier) needs updating to match. Actual error: {e}"
+            "expected the CPU JIT to REFUSE this native-f16 source now that Ty::from_scalar \
+             carries scalar width -- it compiled without error instead, which means the f16 \
+             rejection (`crates/wgsl-cpu/src/lib.rs`'s `Ty::from_scalar`) regressed"
         )
     });
-
-    // Run it for real: overflow past f16's range must come back UN-saturated
-    // (the fp32 sum, not +inf) - the concrete, numeric proof that this is a
-    // silent semantic divergence, not merely "compiles but happens to still
-    // be correct because f16 is a strict subset of f32's range".
-    let backend = backend_cpu::CpuBackend::new(&[(name, src)]);
-    let _ = jit; // `Jit::new` above is the structural check; `CpuBackend::new` re-derives its own `Jit` internally for the dispatch below.
-    let a = backend.storage_init("a", &[60000.0]);
-    let b = backend.storage_init("b", &[1.0]);
-    let c = backend.storage_init("c", &[6000.0]);
-    let out = backend.storage(1);
-    let step = backend.step(0, &[&a, &b, &c, &out], &[1], 1);
-    backend.submit(&[], &[step]);
-    backend.poll_wait();
-    let got = backend.read(&out, 1)[0];
-    eprintln!(
-        "CPU JIT ran the native-f16-labeled overflow case as plain fp32: got {got} (a real f16 \
-         ALU would saturate to +inf here)"
-    );
-    assert_eq!(
-        got, 66000.0,
-        "expected the un-saturated fp32 sum (confirming the CPU JIT treats this as fp32, not \
-         f16) -- got {got} instead, which would mean the divergence this test documents no \
-         longer reproduces"
+    eprintln!("CPU JIT correctly refused the native-f16 kernel: {err}");
+    assert!(
+        err.contains("f16"),
+        "expected the rejection to name f16 explicitly (so the failure is diagnosable), got: {err}"
     );
 }
 

@@ -728,29 +728,30 @@ fn rewrite_workgroup_size(src: &str, value: u32) -> Result<String, String> {
 /// real `f16`-typed locals; this function does not inspect or validate
 /// that, only wraps it.
 ///
-/// Deliberately wgpu-only, and the REAL reason is worse than "cannot
-/// compile" - checked, not assumed, and the check found a more dangerous
-/// failure mode than a loud rejection. This repo's CPU JIT (`wgsl-cpu`) has
-/// no `f16` entry in its own `Ty` lattice (`{F32, U32, I32, Bool}`), but its
-/// `Ty::from_scalar` maps EVERY `naga::ScalarKind::Float` - f16 (2-byte) and
-/// f32 (4-byte) alike - to the SAME `Ty::F32` arm, because naga's
-/// `ScalarKind` does not carry width and `from_scalar` never inspects the
-/// scalar's own `width` field. The practical result, confirmed by actually
-/// compiling AND RUNNING [`native_f16_poc::ELEMENTWISE_FMA`] through
-/// `wgsl_cpu::Jit::new`: it compiles WITHOUT ERROR and runs EVERY `f16`
-/// operation as fp32 - e.g. `60000.0 * 1.0 + 6000.0` (which a real f16 ALU
-/// saturates to `+inf`, past f16's 65504 max) comes back as the plain fp32
-/// sum `66000.0`. So the CPU backend is not merely unable to run this tier -
-/// it will silently RUN IT WRONG if ever asked to, which is exactly why
+/// Deliberately wgpu-only. Before M8.0 (`kernel-performance.md`) the REAL
+/// reason was worse than "cannot compile": this repo's CPU JIT (`wgsl-cpu`)
+/// had no `f16` entry in its own `Ty` lattice (`{F32, U32, I32, Bool}`), and
+/// its `Ty::from_scalar` took only `naga::ScalarKind` - not the whole
+/// `naga::Scalar` - so it mapped EVERY `ScalarKind::Float` - f16 (2-byte) and
+/// f32 (4-byte) alike - to the SAME `Ty::F32` arm, silently. Confirmed at the
+/// time by actually compiling AND RUNNING [`native_f16_poc::ELEMENTWISE_FMA`]
+/// through `wgsl_cpu::Jit::new`: it compiled WITHOUT ERROR and ran EVERY
+/// `f16` operation as fp32 - e.g. `60000.0 * 1.0 + 6000.0` (which a real f16
+/// ALU saturates to `+inf`, past f16's 65504 max) came back as the plain
+/// fp32 sum `66000.0`. M8.0 fixed this structurally: `Ty::from_scalar` now
+/// takes the whole `Scalar` (kind AND width) and refuses width-2 float
+/// outright, naming f16 in the error, so `wgsl_cpu::Jit::new` now REJECTS
+/// this source instead of silently miscompiling it. This function stays
+/// wgpu-only regardless - the CPU JIT still has no `f16` entry in its `Ty`
+/// lattice, it now just fails loudly instead of silently, and
 /// `caps.numeric.f16` staying structurally `false` on `backend-cpu`
 /// (unconditionally, independent of anything wgpu measures - see
 /// `crates/backend-wgpu/tests/native_f16.rs`'s
-/// `numeric_f16_never_entangles_across_backends`) is the ONLY thing standing
-/// between this tier and a silent wrong-answer bug, not any compile-time
-/// rejection this crate could rely on. See
+/// `numeric_f16_never_entangles_across_backends`) remains the belt to that
+/// fix's suspenders, not a lone line of defense any more. See
 /// `crates/backend-wgpu/tests/native_f16.rs`'s
-/// `native_f16_kernel_silently_diverges_on_the_cpu_jit_rather_than_being_
-/// rejected` for the real compile-and-run proof.
+/// `native_f16_kernel_is_rejected_by_the_cpu_jit_rather_than_silently_
+/// diverging` for the real compile-and-refuse proof.
 pub fn native_f16_variant(name: &'static str, body: &'static str) -> Variant {
     let source = format!("enable f16;\n{body}");
     (name, Box::leak(source.into_boxed_str()))

@@ -3498,6 +3498,90 @@ commit.
 **Commit**: one - `model, kernels: GEMM-ify GDN's UT-transform via repeated
 squaring, forward (M5.9)`.
 
+### M8.0 - The CPU JIT stops silently mis-executing native f16
+
+A narrow structural fix landed AHEAD of the rest of Phase 8's precision-tier
+work, deliberately: everything else this phase adds (real FP8/FP4/native-f16
+compute tiers, the `OperatorProvider` seam, per-provider capability flags)
+sits on top of this JIT's own type-resolution correctness, so a capability
+flag added later in this phase must never become load-bearing over a silent
+miscompile trap already sitting underneath it.
+
+`crates/wgsl-cpu/src/lib.rs`'s `Ty::from_scalar` took only `naga::ScalarKind`
+(`Float`/`Uint`/`Sint`/`Bool`), never the scalar's own `width` field, so both
+f16 (`enable f16;` WGSL, width 2) and f32 (width 4) mapped to the identical
+`Ty::F32` arm - naga's `ScalarKind` alone genuinely cannot tell them apart.
+Confirmed by compiling AND RUNNING `kernels::template::native_f16_poc::
+ELEMENTWISE_FMA` through `wgsl_cpu::Jit::new` before touching anything: it
+compiled WITHOUT ERROR and ran `60000.0 * 1.0 + 6000.0` - which a real f16 ALU
+must saturate to `+inf` past f16's 65504 max - as the plain fp32 sum
+`66000.0`. Not a rejection, not a rounding difference: a silently wrong
+answer with no error at all, the exact failure class this phase's later
+precision tiers must never reintroduce.
+
+Fix: `Ty::from_scalar` now takes the WHOLE `naga::Scalar` (kind and width)
+and matches `(kind, width)` together - `(Float, 4) -> F32`, `(Uint, 4) ->
+U32`, `(Sint, 4) -> I32`, `(Bool, _) -> Bool`, `(Float, 2)` returns `Err`
+naming f16 explicitly and spelling out the 66000.0-vs-+inf divergence in the
+message text (so the failure is diagnosable from the error alone, not just
+from this ledger entry), anything else falls through to a generic
+"unsupported scalar" `Err`. All four call sites (`local_array_info`,
+`scalar_ty_of`, `array_elem_ty`, and the `Expression::As` cast handler, which
+only carried `kind`/`convert: Option<width>` separately and now constructs
+the full `Scalar` from those two before calling through) pass the complete
+scalar through instead of just `.kind`.
+
+TDD: `crates/backend-wgpu/tests/native_f16.rs` already had exactly the
+red-flag test this milestone's brief asked for -
+`native_f16_kernel_silently_diverges_on_the_cpu_jit_rather_than_being_
+rejected` - which had been asserting the bug's behaviour as a documented,
+accepted trap (`assert_eq!(got, 66000.0, ...)`). Re-ran it FIRST, unmodified,
+against the pre-fix code to confirm it still reproduced (it did: `got 66000`,
+printed). Inverted it to `native_f16_kernel_is_rejected_by_the_cpu_jit_
+rather_than_silently_diverging`, asserting `Jit::new` now returns `Err`
+containing "f16" - RED against the pre-fix code (the old assertion would now
+fail differently: `Jit::new` used to return `Ok`), GREEN after. The
+sibling test in the same file, `numeric_f16_never_entangles_across_backends`,
+was already true before this change and needed no edit: `backend-cpu`'s
+`NumericSupport.f16` is unconditionally `false` via `..NumericSupport::
+BASELINE` (`crates/backend-api/src/lib.rs`), never overridden by `backend-cpu
+::query_caps` (`crates/backend-cpu/src/lib.rs:1017-1025` sets only
+`f16_storage`/`bf16_storage`, both a different flag - storage-tier bf16/f16
+BYTE decode, which stays fp32 arithmetic throughout and needs no gate at
+all) - confirmed by direct `grep -rn "f16" crates/backend-cpu/src` rather
+than assumed. That flag remains the belt to this fix's suspenders: two
+independent layers now refuse a native-f16 dispatch on the CPU JIT rather
+than one being the sole line of defense.
+
+Doc comments in `kernels::template::native_f16_variant` and
+`gpu_core::roof::measure_f16` that described the old "silently aliases f16 to
+f32" behaviour as current fact were updated in the same commit to describe
+the fix, since a stale doc comment asserting a since-fixed danger is exactly
+the kind of false claim `AGENTS.md`'s kernel-metadata rule already warns
+against for a different file.
+
+Workspace grep for any test or code path expecting an f16 WGSL kernel to
+silently execute as fp32 on the CPU backend found none beyond the one test
+inverted above - this was a private implementation accident, never a
+documented feature, so nothing else in the tree depended on it.
+
+Verification: `cargo test --release -p brain-backend-wgpu --test native_f16`
+(5/5 green, including the inverted test and the unrelated roofline/gate-logic
+tests in the same file, which skip cleanly on this box's lack of
+`wgpu::Features::SHADER_F16`), `cargo test --release -p brain-wgsl-cpu
+--all-targets` and `cargo test --release -p brain-kernels --all-targets`
+green, `cargo clippy -p brain-wgsl-cpu --all-targets` clean.
+`brain-wgsl-cpu`'s own `compile_all.rs` has one PRE-EXISTING failure,
+`dtype_tiers_compile_or_fail_only_for_the_documented_barrier_reason`
+(`paged_flash_decode`'s `// @tpl pool_k,pool_v -> ...` header names two
+bindings joined by a comma with no whitespace between them, but that test's
+own `tpl_binding` helper takes only the first whitespace-delimited token and
+hands it to `dtype_variant` as a single binding name, which cannot find a
+literal `pool_k,pool_v` declaration) - confirmed via `git apply`/`git
+checkout --` round-trip that it fails identically with none of this
+milestone's changes applied, so it predates and is unrelated to M8.0; left
+untouched as out of scope. **Commit**: one.
+
 ## Not yet done
 
 Phase 0 is closed. Phase 1 is in progress per the recalibrated scope above.

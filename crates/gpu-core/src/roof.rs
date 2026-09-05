@@ -700,9 +700,10 @@ fn measure_int8(gpu: &Gpu) -> Option<f32> {
 /// every `measure()` call compiles unconditionally: `enable f16;` WGSL only
 /// compiles where `wgpu::Features::SHADER_F16` was granted at device
 /// creation, and other backends' compilers are not guaranteed to accept it
-/// at all (the CPU JIT's `wgsl_cpu::Ty` lattice has no f16 entry and silently
-/// aliases it to f32 instead - see `native_f16_variant`'s own doc for the
-/// proof). Keeping this kernel out of `PROBE_KERNELS` is what keeps the
+/// at all (the CPU JIT's `wgsl_cpu::Ty` lattice has no f16 entry and, since
+/// M8.0, refuses this source outright rather than silently aliasing it to
+/// f32 - see `native_f16_variant`'s own doc for the proof). Keeping this
+/// kernel out of `PROBE_KERNELS` is what keeps the
 /// probe INERT - never even attempted - on any backend `measure`'s caller
 /// has not gated true, rather than relying on every non-wgpu backend to
 /// happen to reject or safely alias source it was never meant to see.

@@ -43,7 +43,7 @@ use std::collections::{HashMap, HashSet};
 
 use naga::{
     AddressSpace, BinaryOperator, Block, BuiltIn, Expression, Handle, Literal, MathFunction,
-    ScalarKind, Statement, TypeInner, UnaryOperator,
+    Scalar, ScalarKind, Statement, TypeInner, UnaryOperator,
 };
 
 /// The ABI of every compiled kernel.
@@ -301,13 +301,33 @@ enum Ty {
 }
 
 impl Ty {
-    fn from_scalar(kind: ScalarKind) -> Result<Ty, String> {
-        Ok(match kind {
-            ScalarKind::Float => Ty::F32,
-            ScalarKind::Uint => Ty::U32,
-            ScalarKind::Sint => Ty::I32,
-            ScalarKind::Bool => Ty::Bool,
-            other => return Err(format!("unsupported scalar kind {other:?}")),
+    /// Takes the WHOLE `naga::Scalar` (kind AND width), not just `ScalarKind`,
+    /// because `ScalarKind` alone cannot distinguish f16 (width 2) from f32
+    /// (width 4) - both are `ScalarKind::Float`. Matching on `(kind, width)`
+    /// together is the fix for a real silent-miscompile bug this JIT had: an
+    /// `enable f16;` kernel's `f16` arithmetic used to compile and run as
+    /// plain fp32 with no error, so `60000.0 * 1.0 + 6000.0` came back as the
+    /// un-saturated fp32 sum `66000.0` instead of the `+inf` a real f16 ALU
+    /// must saturate to past its 65504 max. f16 is refused outright rather
+    /// than silently executed wrong.
+    fn from_scalar(scalar: Scalar) -> Result<Ty, String> {
+        Ok(match (scalar.kind, scalar.width) {
+            (ScalarKind::Float, 4) => Ty::F32,
+            (ScalarKind::Float, 2) => {
+                return Err(
+                    "f16 (`enable f16;`, width-2 float) has no native execution path on this \
+                     CPU JIT and is refused rather than silently executed as fp32: a real f16 \
+                     ALU saturates `60000.0 * 1.0 + 6000.0` to +inf (past f16's 65504 max), but \
+                     running that arithmetic in fp32 registers instead silently returns the \
+                     un-saturated 66000.0 - a wrong answer with no error, not a rounding \
+                     difference"
+                        .to_string(),
+                )
+            }
+            (ScalarKind::Uint, 4) => Ty::U32,
+            (ScalarKind::Sint, 4) => Ty::I32,
+            (ScalarKind::Bool, _) => Ty::Bool,
+            _ => return Err(format!("unsupported scalar {scalar:?}")),
         })
     }
     fn is_float(self) -> bool {
@@ -346,7 +366,7 @@ fn local_array_info(m: &naga::Module, ty: Handle<naga::Type>) -> Result<(Ty, u32
     match &m.types[ty].inner {
         TypeInner::Array { base, size, .. } => {
             let elem = match &m.types[*base].inner {
-                TypeInner::Scalar(s) => Ty::from_scalar(s.kind)?,
+                TypeInner::Scalar(s) => Ty::from_scalar(*s)?,
                 other => return Err(format!("local array of non-scalar {other:?}")),
             };
             let count = match size {
@@ -970,7 +990,7 @@ fn cl_ty(ty: Ty) -> types::Type {
 /// Scalar type of a value-typed naga type handle (Scalar or single-component).
 fn scalar_ty_of(m: &naga::Module, ty: Handle<naga::Type>) -> Result<Ty, String> {
     match &m.types[ty].inner {
-        TypeInner::Scalar(s) => Ty::from_scalar(s.kind),
+        TypeInner::Scalar(s) => Ty::from_scalar(*s),
         other => Err(format!("expected scalar local, got {other:?}")),
     }
 }
@@ -979,7 +999,7 @@ fn scalar_ty_of(m: &naga::Module, ty: Handle<naga::Type>) -> Result<Ty, String> 
 fn array_elem_ty(m: &naga::Module, ty: Handle<naga::Type>) -> Result<Ty, String> {
     match &m.types[ty].inner {
         TypeInner::Array { base, .. } => match &m.types[*base].inner {
-            TypeInner::Scalar(s) => Ty::from_scalar(s.kind),
+            TypeInner::Scalar(s) => Ty::from_scalar(*s),
             other => Err(format!("array of non-scalar {other:?}")),
         },
         other => Err(format!("expected array global, got {other:?}")),
@@ -1566,7 +1586,7 @@ impl<'a, 'b> Tr<'a, 'b> {
         convert: Option<u8>,
     ) -> Result<Eval, String> {
         let (v, t) = self.scalar(expr)?;
-        let target = Ty::from_scalar(kind)?;
+        let target = Ty::from_scalar(Scalar { kind, width: convert.unwrap_or(4) })?;
         if t == target {
             return Ok(Eval::Scalar(v, t));
         }
