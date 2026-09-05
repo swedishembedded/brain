@@ -117,8 +117,41 @@ unsafe fn silu_mul_avx2(a: &[f32], b: &[f32], out: &mut [f32]) {
 /// `matmul` (`matmul.wgsl`): `C[M,N] = sum_k A[M,K]·B[N,K]` - i.e. `A @ Bᵀ` with
 /// K contiguous in both operands. This is the transformer hot path (every q/k/v/o
 /// projection, FFN, and head), which otherwise runs as the scalar per-element JIT
-/// loop. Threaded over output rows; each row uses AVX2 FMA with 4-column register
-/// blocking so each A-row load feeds four B-row dot products.
+/// loop. Threaded over output rows.
+///
+/// ## Why the loop nest is column-outer, row-inner
+///
+/// The obvious nest - "for each output row, dot it against every B row" - is
+/// what this function used to do, and it is **DRAM-bandwidth-bound, not
+/// compute-bound**: it walks the whole of `B` once per row of `A`, so a
+/// thread holding `R` rows moves `R · n · k · 4` bytes. At MiniMax-H3's FFN
+/// shape (`k=5376, n=14336`, a 308 MB weight) that measured 32 GFLOP/s
+/// against a ~100 GB/s memory system - i.e. it was running at essentially
+/// 100% of achievable bandwidth and ~2% of achievable FLOPs, so no amount of
+/// extra vector width or extra threads could have helped.
+///
+/// Inverting the nest - hold a 4-column tile of `B` and sweep ALL of this
+/// thread's `A` rows through it - drops that to `n · k · 4` bytes per thread
+/// (the tile is reused across every row instead of the row being reused
+/// across every tile), and the tile itself (`4·k·4` = 86 KB at the shape
+/// above) stays resident in L2 for the whole sweep. `A`'s rows are then the
+/// re-read operand, but a thread's row block is small enough to stay in
+/// L2/L3, which DRAM is not.
+///
+/// ## The microkernel
+///
+/// [`block3x4_abt`] holds a 3-row x 4-column tile: 12 AVX2 accumulators, 3
+/// A-vector registers and one B temporary - exactly the 16 `ymm` registers
+/// Haswell has, chosen so nothing spills. The 12 independent FMA chains also
+/// cover the 5-cycle FMA latency (2 FMAs/cycle needs >=10 in flight), which
+/// the old 4-accumulator row kernel did not: it was additionally capped at
+/// ~4/5 of issue rate even when its data was already in cache.
+///
+/// Edges (the `m % 3` rows and `n % 4` columns a whole tile cannot cover) fall
+/// back to the row kernel and a narrow column loop respectively, so the
+/// contract is unchanged for every shape - this function still WRITES `c`
+/// (never accumulates into it) and is bit-identical in structure to the old
+/// one for `m < 3` or `n < 4`.
 pub fn matmul_abt(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n: usize) {
     if m == 0 || n == 0 {
         return;
@@ -139,23 +172,217 @@ pub fn matmul_abt(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n: us
         }
         row_abt_scalar(arow, b, crow, k, n);
     };
+    // One thread's share of the output rows, blocked as above. `rows` is the
+    // number of A rows starting at `row0`; `cchunk` is their `[rows, n]` slice
+    // of C.
+    let threads = rayon::current_num_threads();
+    // The ORIGINAL chunking, and still the one every row-outer shape gets, so
+    // that nothing which did not opt into the new nest changes behaviour at
+    // all: same kernel, same chunk size, same schedule.
+    let rows_row_outer = (m / (threads * 4)).max(1);
+    // WHICH operand should stay resident decides the nest, and it is a
+    // property of the shape, not a constant. Column-outer keeps a B tile
+    // resident and re-reads this thread's A rows; row-outer (the original)
+    // keeps one A row resident and re-reads B.
+    //
+    // Column-outer only pays when B is BOTH the bigger operand (`n*k` vs one
+    // chunk's `rows*k`, so just `n` vs the chunk height) AND too big to
+    // survive in cache across a row sweep - because its whole benefit is
+    // turning B's per-row re-read into a single stream, and a B that was
+    // already being re-read out of L2/L3 had nothing to gain. Below the
+    // threshold the extra per-tile bookkeeping (12 horizontal reductions and a
+    // strided 3x4 store per 4-column tile) is pure loss, and at a short `k`
+    // there are too few FMAs per tile to hide it.
+    //
+    // Both directions are measured, not assumed - `matmul_shape_bench` runs
+    // the two nests interleaved at these exact shapes:
+    //   * `adaln_proj` (`m=5376, k=2688, n=2`): B is 21 KB against a 57 MB A,
+    //     so column-outer would stream all of A once PER COLUMN - 212 ms
+    //     against row-outer's 30 ms.
+    //   * per-head attention scores (`m=960, k=128, n=960`): B is 492 KB,
+    //     cache-resident, and column-outer measured 18 GFLOP/s against
+    //     row-outer's 120.
+    //   * the FFN (`m=960, k=5376, n=14336`): B is 308 MB, nothing holds it,
+    //     and column-outer measured 225 GFLOP/s against 59.
+    const B_RESIDENT_FLOATS: usize = 512 * 1024; // 2 MB, past any per-core cache share
+    #[cfg(target_arch = "x86_64")]
+    let col_outer = (tier == crate::fast_conv::IsaTier::Avx2 || tier == crate::fast_conv::IsaTier::Avx512) && n >= 4 && n * k > B_RESIDENT_FLOATS && n >= (m / threads).max(1);
+    #[cfg(not(target_arch = "x86_64"))]
+    let col_outer = false;
+    // Column-outer wants the FEWEST, TALLEST chunks it can get - its whole
+    // point is amortizing each B tile over as many of a thread's rows as
+    // possible, and four chunks per thread would re-stream every tile four
+    // times. Floor division, not `div_ceil`, so `m >= threads` still yields at
+    // least one chunk per thread (`div_ceil` would leave threads idle: `m=49`
+    // over 48 threads is 25 chunks of 2, not 49 of 1).
+    let rows_per = if col_outer { (m / threads).max(1) } else { rows_row_outer };
+    let block = |row0: usize, rows: usize, cchunk: &mut [f32]| {
+        #[cfg(target_arch = "x86_64")]
+        if col_outer {
+            // AVX-512 hosts run the AVX2 microkernel here rather than a 512-bit
+            // twin: this nest is bandwidth-shaped, and widening the vector
+            // without a host to verify it on is exactly the untested-second-
+            // implementation trap `row_abt_avx512`'s own doc records. The
+            // 512-bit row kernel still owns the row tail below.
+            unsafe { block_abt_avx2(a, b, cchunk, row0, rows, k, n) };
+            return;
+        }
+        for r in 0..rows {
+            row(&a[(row0 + r) * k..(row0 + r) * k + k], &mut cchunk[r * n..r * n + n]);
+        }
+    };
     // Small problems: rayon fan-out costs more than it saves - run inline (still
     // AVX2). Threshold ~ a few hundred K MACs, below which the tiny transformer
     // matmuls (patch/head) were slower threaded than the scalar JIT loop.
     if m * n * k < 262_144 {
-        for r in 0..m {
-            row(&a[r * k..r * k + k], &mut c[r * n..r * n + n]);
-        }
+        block(0, m, c);
         return;
     }
-    let rows_per = (m / (rayon::current_num_threads() * 4)).max(1);
     c.par_chunks_mut(rows_per * n).enumerate().for_each(|(ci, cchunk)| {
-        let row0 = ci * rows_per;
-        let nrows = cchunk.len() / n;
-        for r in 0..nrows {
-            row(&a[(row0 + r) * k..(row0 + r) * k + k], &mut cchunk[r * n..r * n + n]);
-        }
+        block(ci * rows_per, cchunk.len() / n, cchunk);
     });
+}
+
+/// [`matmul_abt`]'s blocked nest for one thread's row range - see that
+/// function's doc for the blocking argument. `cchunk` is `[rows, n]`,
+/// corresponding to `a`'s rows `row0 .. row0+rows`.
+///
+/// # Safety
+/// `a` must hold `(row0+rows)*k` floats, `b` `n*k`, `cchunk` `rows*n`, and the
+/// host must have AVX2+FMA.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn block_abt_avx2(a: &[f32], b: &[f32], cchunk: &mut [f32], row0: usize, rows: usize, k: usize, n: usize) {
+    let m3 = rows - rows % 3;
+    let n4 = n - n % 4;
+    let ap = a.as_ptr().add(row0 * k);
+    let bp = b.as_ptr();
+    let cp = cchunk.as_mut_ptr();
+    // Column-outer so each B tile is loaded once per thread, row-inner so it is
+    // reused across every one of this thread's rows while still in L2.
+    let mut j = 0usize;
+    while j < n4 {
+        let mut i = 0usize;
+        while i < m3 {
+            block3x4_abt(ap.add(i * k), bp.add(j * k), cp.add(i * n + j), k, n);
+            i += 3;
+        }
+        j += 4;
+    }
+    // Column tail (< 4 columns) for the rows the tile nest covered.
+    while j < n {
+        let bj = bp.add(j * k);
+        for i in 0..m3 {
+            *cp.add(i * n + j) = dot_avx2(ap.add(i * k), bj, k);
+        }
+        j += 1;
+    }
+    // Row tail (< 3 rows), full width - the original row kernel, unchanged.
+    for i in m3..rows {
+        let arow = std::slice::from_raw_parts(ap.add(i * k), k);
+        let crow = std::slice::from_raw_parts_mut(cp.add(i * n), n);
+        row_abt_avx2(arow, b, crow, k, n);
+    }
+}
+
+/// One 3-row x 4-column output tile of `A·Bᵀ`, accumulated over the full `k`.
+///
+/// 12 accumulators + 3 A vectors + 1 B temporary = the 16 `ymm` registers
+/// AVX2 has, so the inner loop spills nothing; the 12 independent FMA chains
+/// keep both FMA ports busy through their 5-cycle latency.
+///
+/// # Safety
+/// `ap` must hold `3*k` floats (rows `k` apart), `bp` `4*k` (rows `k` apart),
+/// `cp` must be writable at offsets `{0,n,2n} + {0,1,2,3}`, AVX2+FMA present.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+#[inline]
+unsafe fn block3x4_abt(ap: *const f32, bp: *const f32, cp: *mut f32, k: usize, n: usize) {
+    use std::arch::x86_64::*;
+    let mut acc = [_mm256_setzero_ps(); 12];
+    let (a0p, a1p, a2p) = (ap, ap.add(k), ap.add(2 * k));
+    let (b0p, b1p, b2p, b3p) = (bp, bp.add(k), bp.add(2 * k), bp.add(3 * k));
+    let mut kk = 0usize;
+    while kk + 8 <= k {
+        let av0 = _mm256_loadu_ps(a0p.add(kk));
+        let av1 = _mm256_loadu_ps(a1p.add(kk));
+        let av2 = _mm256_loadu_ps(a2p.add(kk));
+        let bv = _mm256_loadu_ps(b0p.add(kk));
+        acc[0] = _mm256_fmadd_ps(av0, bv, acc[0]);
+        acc[1] = _mm256_fmadd_ps(av1, bv, acc[1]);
+        acc[2] = _mm256_fmadd_ps(av2, bv, acc[2]);
+        let bv = _mm256_loadu_ps(b1p.add(kk));
+        acc[3] = _mm256_fmadd_ps(av0, bv, acc[3]);
+        acc[4] = _mm256_fmadd_ps(av1, bv, acc[4]);
+        acc[5] = _mm256_fmadd_ps(av2, bv, acc[5]);
+        let bv = _mm256_loadu_ps(b2p.add(kk));
+        acc[6] = _mm256_fmadd_ps(av0, bv, acc[6]);
+        acc[7] = _mm256_fmadd_ps(av1, bv, acc[7]);
+        acc[8] = _mm256_fmadd_ps(av2, bv, acc[8]);
+        let bv = _mm256_loadu_ps(b3p.add(kk));
+        acc[9] = _mm256_fmadd_ps(av0, bv, acc[9]);
+        acc[10] = _mm256_fmadd_ps(av1, bv, acc[10]);
+        acc[11] = _mm256_fmadd_ps(av2, bv, acc[11]);
+        kk += 8;
+    }
+    let mut out = [0f32; 12];
+    for (o, v) in out.iter_mut().zip(acc) {
+        *o = hsum256(v);
+    }
+    // Scalar k-tail, in the same (column-major within the tile) order.
+    while kk < k {
+        let (x0, x1, x2) = (*a0p.add(kk), *a1p.add(kk), *a2p.add(kk));
+        for (t, bpt) in [b0p, b1p, b2p, b3p].iter().enumerate() {
+            let bw = *bpt.add(kk);
+            out[t * 3] += x0 * bw;
+            out[t * 3 + 1] += x1 * bw;
+            out[t * 3 + 2] += x2 * bw;
+        }
+        kk += 1;
+    }
+    for t in 0..4 {
+        *cp.add(t) = out[t * 3];
+        *cp.add(n + t) = out[t * 3 + 1];
+        *cp.add(2 * n + t) = out[t * 3 + 2];
+    }
+}
+
+/// Horizontal sum of an AVX2 vector - shared by [`block3x4_abt`] and
+/// [`dot_avx2`], and identical to the `hsum` [`row_abt_avx2`] defines inline.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+#[inline]
+unsafe fn hsum256(v: std::arch::x86_64::__m256) -> f32 {
+    use std::arch::x86_64::*;
+    let lo = _mm256_castps256_ps128(v);
+    let hi = _mm256_extractf128_ps(v, 1);
+    let s = _mm_add_ps(lo, hi);
+    let s = _mm_hadd_ps(s, s);
+    let s = _mm_hadd_ps(s, s);
+    _mm_cvtss_f32(s)
+}
+
+/// `Σ_i x[i]·y[i]` over `k` floats - [`block_abt_avx2`]'s narrow column tail.
+///
+/// # Safety
+/// `x` and `y` must each hold `k` floats and the host must have AVX2+FMA.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+#[inline]
+unsafe fn dot_avx2(x: *const f32, y: *const f32, k: usize) -> f32 {
+    use std::arch::x86_64::*;
+    let mut acc = _mm256_setzero_ps();
+    let mut i = 0usize;
+    while i + 8 <= k {
+        acc = _mm256_fmadd_ps(_mm256_loadu_ps(x.add(i)), _mm256_loadu_ps(y.add(i)), acc);
+        i += 8;
+    }
+    let mut s = hsum256(acc);
+    while i < k {
+        s += *x.add(i) * *y.add(i);
+        i += 1;
+    }
+    s
 }
 
 #[allow(dead_code)]
@@ -1708,7 +1935,46 @@ pub fn attn_scores_cross(
     q_off: usize,
     k_off: usize,
 ) {
-    let scale = 1.0 / (hd as f32).sqrt();
+    scores_packed(q, kv, scores, bsz, heads, tq, tk, hd, q_stride, kv_stride, q_off, k_off, 1.0 / (hd as f32).sqrt());
+}
+
+/// `attn_scores_qk`: the SELF-attention twin of [`attn_scores_cross`] - one
+/// `[seq, seq]` score block per head from two separate q/k buffers that share
+/// one channel stride, with the scale supplied by the caller rather than
+/// assumed to be `1/√head_dim`.
+///
+/// Deliberately not folded into `attn_scores_cross` by passing `q` twice: the
+/// kernel's own `scale` uniform is a genuine degree of freedom (its two
+/// documented callers use `1/√hd`, but nothing in the contract fixes that),
+/// and a hardcoded scale would not crash - it would silently scale every
+/// score wrong and still produce plausible-looking output. The CAUSAL variant
+/// is not handled here either: the dispatcher leaves `causal != 0` on the JIT
+/// path rather than masking after the fact, for the same reason.
+#[allow(clippy::too_many_arguments)]
+pub fn attn_scores_qk(q: &[f32], k: &[f32], scores: &mut [f32], bsz: usize, heads: usize, seq: usize, hd: usize, qk_stride: usize, scale: f32) {
+    scores_packed(q, k, scores, bsz, heads, seq, seq, hd, qk_stride, qk_stride, 0, 0, scale);
+}
+
+/// The packing + per-head GEMM both score kernels above share: pack this
+/// head's strided `[t, hd]` q and k slices contiguous (folding `scale` into q,
+/// so the GEMM itself stays a plain unscaled `A·Bᵀ`) and hand the pair to
+/// [`matmul_abt`].
+#[allow(clippy::too_many_arguments)]
+fn scores_packed(
+    q: &[f32],
+    kv: &[f32],
+    scores: &mut [f32],
+    bsz: usize,
+    heads: usize,
+    tq: usize,
+    tk: usize,
+    hd: usize,
+    q_stride: usize,
+    kv_stride: usize,
+    q_off: usize,
+    k_off: usize,
+    scale: f32,
+) {
     let mut qh = vec![0f32; tq * hd];
     let mut kh = vec![0f32; tk * hd];
     for b in 0..bsz {
@@ -1965,9 +2231,18 @@ mod tests {
 
     #[test]
     fn matmul_abt_matches_scalar() {
-        // sweep shapes incl. non-multiples of 8 (K tail) and 4 (N tail).
+        // Sweep shapes incl. non-multiples of 8 (K tail), 4 (N tail) and 3 (M
+        // tail, the 3x4 register tile's row edge).
+        //
+        // The last three shapes are all past the 262_144-MAC threading
+        // threshold, which is a distinct code path and not merely a bigger
+        // one: it splits the rows into per-thread chunks, so a tile-edge bug
+        // can hide at every chunk boundary rather than only at the end of the
+        // matrix. `(1,16,32)`/`(2,512,1024)` keep the `m < 3` case (row kernel
+        // only) covered on both sides of that threshold, and `(8,7,3)` the
+        // `n < 4` case (column tail only).
         let mut s = 7u32;
-        for &(m, k, n) in &[(1, 16, 32), (5, 63, 17), (33, 128, 40), (8, 7, 3), (2, 512, 1024)] {
+        for &(m, k, n) in &[(1, 16, 32), (5, 63, 17), (33, 128, 40), (8, 7, 3), (2, 512, 1024), (100, 130, 70), (97, 129, 67), (12, 4096, 12)] {
             let a: Vec<f32> = (0..m * k).map(|_| lcg(&mut s)).collect();
             let b: Vec<f32> = (0..n * k).map(|_| lcg(&mut s)).collect();
             let mut c = vec![0.0f32; m * n];
@@ -2024,6 +2299,91 @@ mod tests {
             "matmul {m}x{k}x{n} ({} threads): AVX2+threads {:.2} ms ({:.1} GFLOP/s) | scalar+threads {:.2} ms ({:.1} GFLOP/s) | scalar-1t {:.2} ms | AVX2-vs-scalar-threaded {:.1}x",
             rayon::current_num_threads(), avx * 1e3, gflops / avx, scalt * 1e3, gflops / scalt, scal * 1e3, scalt / avx
         );
+    }
+
+    /// [`matmul_abt`]'s two nests head to head at the shapes that actually
+    /// decide a large diffusion-transformer forward, reporting the MINIMUM of
+    /// several runs (a mean on a shared host measures the other tenant).
+    ///
+    /// Both nests are run in ONE process, back to back, on the same buffers -
+    /// the only way to attribute a difference to the code rather than to
+    /// whatever else the machine was doing between two separate builds.
+    ///
+    /// Shapes are MiniMax-H3's real per-layer GEMMs at a 960-row packed
+    /// sequence (`hidden=5376`, `inner=7168`, `ffn=14336`), plus its per-head
+    /// attention score block (`k=128`) and its `adaln_proj` projection, which
+    /// is the deliberate counter-example: `n=2` is the shape where the
+    /// column-outer nest is the WRONG choice and the selector must reject it.
+    ///
+    /// Run: `cargo test -p brain-backend-cpu --release matmul_shape_bench -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn matmul_shape_bench() {
+        let mut s = 5u32;
+        // (label, m, k, n)
+        let shapes = [
+            ("h3 q/k/v   ", 960usize, 5376usize, 7168usize),
+            ("h3 to_out  ", 960, 7168, 5376),
+            ("h3 fc1     ", 960, 5376, 14336),
+            ("h3 fc2     ", 960, 14336, 5376),
+            ("h3 attn qk ", 960, 128, 960),
+            ("h3 adaln   ", 5376, 2688, 2),
+            // Either side of the B_RESIDENT_FLOATS threshold, to show the
+            // selector is not balanced on a knife edge: same k, B just under
+            // and well over 2 MB.
+            ("edge k128 B1MB ", 960, 128, 2048),
+            ("edge k128 B8MB ", 960, 128, 16384),
+            ("edge k1024 B4MB", 960, 1024, 1024),
+        ];
+        for (label, m, k, n) in shapes {
+            let a: Vec<f32> = (0..m * k).map(|_| lcg(&mut s)).collect();
+            let b: Vec<f32> = (0..n * k).map(|_| lcg(&mut s)).collect();
+            let mut c = vec![0.0f32; m * n];
+            let gflop = 2.0 * m as f64 * k as f64 * n as f64 / 1e9;
+            let iters = 5;
+
+            // The pre-existing row-outer nest, verbatim, as the baseline.
+            let rows_per = (m / (rayon::current_num_threads() * 4)).max(1);
+            let mut c2 = vec![0.0f32; m * n];
+            let row_outer = |c2: &mut Vec<f32>| {
+                c2.par_chunks_mut(rows_per * n).enumerate().for_each(|(ci, cc)| {
+                    let row0 = ci * rows_per;
+                    for r in 0..cc.len() / n {
+                        unsafe { row_abt_avx2(&a[(row0 + r) * k..(row0 + r) * k + k], &b, &mut cc[r * n..r * n + n], k, n) };
+                    }
+                });
+            };
+            matmul_abt(&a, &b, &mut c, m, k, n); // warm
+            row_outer(&mut c2);
+
+            // INTERLEAVED, one iteration of each arm at a time, rather than
+            // all of one then all of the other: on a host with other tenants
+            // the load drifts over the minutes a full sweep takes, and running
+            // the arms in sequence silently charges that drift to whichever
+            // arm ran second. Min-of-iters on top of that reports the least
+            // contended observation each arm actually got.
+            let (mut best, mut base) = (f64::INFINITY, f64::INFINITY);
+            for _ in 0..iters {
+                let t = std::time::Instant::now();
+                matmul_abt(&a, &b, &mut c, m, k, n);
+                best = best.min(t.elapsed().as_secs_f64());
+                let t = std::time::Instant::now();
+                row_outer(&mut c2);
+                base = base.min(t.elapsed().as_secs_f64());
+            }
+            let mut maxrel = 0f32;
+            for i in 0..c.len() {
+                maxrel = maxrel.max((c[i] - c2[i]).abs() / (c2[i].abs() + 1e-3));
+            }
+            eprintln!(
+                "{label} m={m:<5} k={k:<6} n={n:<6} | now {:>8.2} ms ({:>6.1} GFLOP/s) | row-outer {:>8.2} ms ({:>6.1} GFLOP/s) | {:.2}x | max rel err {maxrel:.2e}",
+                best * 1e3,
+                gflop / best,
+                base * 1e3,
+                gflop / base,
+                base / best
+            );
+        }
     }
 
     // Scalar-threaded moe_linear_gated reference, matching moe_linear_gated.wgsl's
@@ -3056,5 +3416,85 @@ mod tests {
             scalar_secs / avx2_secs,
             k = kg,
         );
+    }
+
+    /// The bidirectional self-attention trio's native CPU paths against the
+    /// three `.wgsl` kernels' OWN definitions, transcribed index-for-index
+    /// from `attn_scores_qk.wgsl`, `attn_softmax_bidir.wgsl` and
+    /// `attn_apply_full.wgsl` rather than from the cross-family fast ops they
+    /// route into - the whole point is to catch a mis-mapped uniform or a
+    /// swapped q/k, and a reference derived from the same code being tested
+    /// could not see either.
+    ///
+    /// `head_dim=128` with a `qk_stride > heads*hd` (a fused-buffer slice) and
+    /// a `seq` that is not a multiple of the GEMM's 4-column block are all
+    /// deliberate: they are the real MiniMax-H3 head width and the shapes
+    /// where an off-by-one in the packing loop would otherwise hide.
+    #[test]
+    fn bidirectional_self_attention_fast_paths_match_the_kernel_definitions() {
+        let mut s = 7u32;
+        for &(bsz, heads, seq, hd) in &[(1usize, 3usize, 13usize, 128usize), (2, 2, 8, 16), (1, 4, 5, 32)] {
+            let stride = heads * hd;
+            let scale = 1.0 / (hd as f32).sqrt() * 1.7; // deliberately NOT 1/√hd
+            let q: Vec<f32> = (0..bsz * seq * stride).map(|_| lcg(&mut s)).collect();
+            let k: Vec<f32> = (0..bsz * seq * stride).map(|_| lcg(&mut s)).collect();
+            let v: Vec<f32> = (0..bsz * seq * stride).map(|_| lcg(&mut s)).collect();
+
+            // --- attn_scores_qk.wgsl ---
+            let mut want_sc = vec![0f32; bsz * heads * seq * seq];
+            for b in 0..bsz {
+                for h in 0..heads {
+                    for i in 0..seq {
+                        for j in 0..seq {
+                            let qb = (b * seq + i) * stride + h * hd;
+                            let kb = (b * seq + j) * stride + h * hd;
+                            let dot: f32 = (0..hd).map(|d| q[qb + d] * k[kb + d]).sum();
+                            want_sc[((b * heads + h) * seq + i) * seq + j] = dot * scale;
+                        }
+                    }
+                }
+            }
+            let mut got_sc = vec![0f32; bsz * heads * seq * seq];
+            attn_scores_qk(&q, &k, &mut got_sc, bsz, heads, seq, hd, stride, scale);
+            for i in 0..got_sc.len() {
+                assert!((got_sc[i] - want_sc[i]).abs() < 1e-4, "scores_qk {bsz}/{heads}/{seq}/{hd} i={i}: got {} want {}", got_sc[i], want_sc[i]);
+            }
+
+            // --- attn_softmax_bidir.wgsl ---
+            let rows = bsz * heads * seq;
+            let mut want_p = vec![0f32; rows * seq];
+            for r in 0..rows {
+                let row = &want_sc[r * seq..r * seq + seq];
+                let mx = row.iter().fold(f32::NEG_INFINITY, |a, &x| a.max(x));
+                let sum: f32 = row.iter().map(|&x| (x - mx).exp()).sum();
+                for (j, w) in want_p[r * seq..r * seq + seq].iter_mut().enumerate() {
+                    *w = (row[j] - mx).exp() / sum;
+                }
+            }
+            let mut got_p = vec![0f32; rows * seq];
+            attn_softmax_cross(&want_sc, &mut got_p, rows, seq);
+            for i in 0..got_p.len() {
+                assert!((got_p[i] - want_p[i]).abs() < 1e-6, "softmax_bidir {bsz}/{heads}/{seq} i={i}: got {} want {}", got_p[i], want_p[i]);
+            }
+
+            // --- attn_apply_full.wgsl ---
+            let mut want_o = vec![0f32; bsz * seq * stride];
+            for b in 0..bsz {
+                for h in 0..heads {
+                    for i in 0..seq {
+                        for d in 0..hd {
+                            let pb = ((b * heads + h) * seq + i) * seq;
+                            let acc: f32 = (0..seq).map(|j| want_p[pb + j] * v[(b * seq + j) * stride + h * hd + d]).sum();
+                            want_o[(b * seq + i) * stride + h * hd + d] = acc;
+                        }
+                    }
+                }
+            }
+            let mut got_o = vec![0f32; bsz * seq * stride];
+            attn_apply_cross(&want_p, &v, &mut got_o, bsz, heads, seq, seq, hd, stride, 0, stride);
+            for i in 0..got_o.len() {
+                assert!((got_o[i] - want_o[i]).abs() < 1e-5, "apply_full {bsz}/{heads}/{seq}/{hd} i={i}: got {} want {}", got_o[i], want_o[i]);
+            }
+        }
     }
 }

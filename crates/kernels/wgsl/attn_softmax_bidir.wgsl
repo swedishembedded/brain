@@ -4,7 +4,7 @@
 // @what  Row-wise bidirectional softmax over the full key axis
 // @how   one thread per output element, 3 nested serial reductions
 // @opt   1
-// @cpu   yes
+// @cpu   native
 // @gpu   yes
 // @npu   yes
 // @quant none

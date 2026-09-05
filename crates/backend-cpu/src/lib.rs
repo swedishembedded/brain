@@ -197,6 +197,18 @@ struct FastIdx {
     kv_k_headt: Option<usize>,
     attn_softmax_cross: Option<usize>,
     attn_apply_cross: Option<usize>,
+    // The BIDIRECTIONAL SELF-attention trio (`attn_{scores_qk,softmax_bidir,
+    // apply_full}.wgsl`) a packed-sequence diffusion transformer runs - the
+    // same three GEMM/softmax shapes as the cross family above, differing only
+    // in that query and key length are one `seq_len` and the value buffer has
+    // no fused-KV offset. Without these three the whole attention half of such
+    // a forward runs one output element per JIT invocation: measured on
+    // MiniMax-H3's real block shape (56 heads x 128, seq 960), 1.1 GFLOP/s for
+    // `attn_apply_full` against the 29-62 GFLOP/s `matmul_abt` reaches on the
+    // same host - a third of the entire DiT forward spent in one kernel.
+    attn_scores_qk: Option<usize>,
+    attn_softmax_bidir: Option<usize>,
+    attn_apply_full: Option<usize>,
     moe_linear_gated: Option<usize>,
     moe_linear_gated_dx: Option<usize>,
     moe_linear_gated_dw: Option<usize>,
@@ -268,6 +280,9 @@ impl CpuBackend {
                 kv_k_headt: find("kv_k_headt"),
                 attn_softmax_cross: find("attn_softmax_cross"),
                 attn_apply_cross: find("attn_apply_cross"),
+                attn_scores_qk: find("attn_scores_qk"),
+                attn_softmax_bidir: find("attn_softmax_bidir"),
+                attn_apply_full: find("attn_apply_full"),
                 moe_linear_gated: find("moe_linear_gated"),
                 moe_linear_gated_dx: find("moe_linear_gated_dx"),
                 moe_linear_gated_dw: find("moe_linear_gated_dw"),
@@ -677,6 +692,57 @@ impl CpuBackend {
                 let kv = std::slice::from_raw_parts(bufs[1] as *const f32, span_len(b * tk, kvs, vo, h, hd));
                 let o = std::slice::from_raw_parts_mut(bufs[2] as *mut f32, b * tq * dm);
                 fast_ops::attn_apply_cross(p, kv, o, b, h, tq, tk, hd, kvs, vo, dm);
+            }
+            return;
+        }
+        // Bidirectional self-attention trio. Each is the tq==tk, zero-offset
+        // case of the cross kernel directly above it, so they route into the
+        // SAME three fast ops rather than growing a second implementation of
+        // the same three shapes.
+        //
+        // `attn_scores_qk` carries two uniforms the cross kernel has no
+        // equivalent of: `causal` and an explicit `scale`. The scale is passed
+        // through (never assumed to be 1/√hd); `causal != 0` deliberately
+        // FALLS THROUGH to the JIT rather than being emulated, because the
+        // masked variant is a different kernel shape and a wrong mask is
+        // exactly the kind of silently-plausible output this repo's porting
+        // rules exist to prevent.
+        if Some(kind) == f.attn_scores_qk && bufs.len() >= 3 {
+            unsafe {
+                let pu = std::slice::from_raw_parts(uniform, 7);
+                let (b, h, s, hd) = (pu[0] as usize, pu[1] as usize, pu[2] as usize, pu[3] as usize);
+                let (qks, causal) = (pu[4] as usize, pu[5]);
+                let scale = f32::from_bits(pu[6]);
+                if causal == 0 {
+                    let span = span_len(b * s, qks, 0, h, hd);
+                    let q = std::slice::from_raw_parts(bufs[0] as *const f32, span);
+                    let k = std::slice::from_raw_parts(bufs[1] as *const f32, span);
+                    let sc = std::slice::from_raw_parts_mut(bufs[2] as *mut f32, b * h * s * s);
+                    fast_ops::attn_scores_qk(q, k, sc, b, h, s, hd, qks, scale);
+                    return;
+                }
+            }
+        }
+        if Some(kind) == f.attn_softmax_bidir && bufs.len() >= 2 {
+            unsafe {
+                let pu = std::slice::from_raw_parts(uniform, 3);
+                let t = pu[2] as usize;
+                let rows = (pu[0] * pu[1]) as usize * t;
+                let s = std::slice::from_raw_parts(bufs[0] as *const f32, rows * t);
+                let p = std::slice::from_raw_parts_mut(bufs[1] as *mut f32, rows * t);
+                fast_ops::attn_softmax_cross(s, p, rows, t);
+            }
+            return;
+        }
+        if Some(kind) == f.attn_apply_full && bufs.len() >= 3 {
+            unsafe {
+                let pu = std::slice::from_raw_parts(uniform, 6);
+                let (b, h, t, hd) = (pu[0] as usize, pu[1] as usize, pu[2] as usize, pu[3] as usize);
+                let (vs, dm) = (pu[4] as usize, pu[5] as usize);
+                let p = std::slice::from_raw_parts(bufs[0] as *const f32, b * h * t * t);
+                let v = std::slice::from_raw_parts(bufs[1] as *const f32, span_len(b * t, vs, 0, h, hd));
+                let o = std::slice::from_raw_parts_mut(bufs[2] as *mut f32, b * t * dm);
+                fast_ops::attn_apply_cross(p, v, o, b, h, t, t, hd, vs, 0, dm);
             }
             return;
         }

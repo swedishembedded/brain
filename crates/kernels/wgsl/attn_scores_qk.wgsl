@@ -4,7 +4,7 @@
 // @what  Attention scores from SEPARATE q,k buffers, with a configurable scale and an optional causal mask - covers Kronos's two attention modes
 // @how   one thread per output element, serial inner reduction
 // @opt   2
-// @cpu   yes
+// @cpu   native
 // @gpu   yes
 // @npu   no
 // @quant none

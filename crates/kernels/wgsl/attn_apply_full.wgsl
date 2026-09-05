@@ -4,7 +4,7 @@
 // @what  Attention output over ALL keys (non-causal), reading v from a SEPARATE value buffer (not a fused qkv)
 // @how   one thread per output element, serial inner reduction
 // @opt   2
-// @cpu   yes
+// @cpu   native
 // @gpu   yes
 // @npu   no
 // @quant none
