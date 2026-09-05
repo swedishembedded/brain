@@ -4746,6 +4746,59 @@ follow-up this milestone's kernel doc names explicitly, not attempted.
 `backend-vulkan`'s own native-f16 feature request/measurement - out of
 scope, matching B11's own wgpu-only precedent for this exact tier.
 
+### M8.8 - bf16: a restraint, not a kernel
+
+WGSL has NO `enable bf16;` and no bf16 scalar type AT ALL - unlike `f16`,
+which the spec exposes as a real, narrow arithmetic type (M8.7's whole
+mechanism), there is no rewrite or polyfill that gets bf16 ARITHMETIC into
+WGSL. This milestone ships three things and zero kernels, per its own brief.
+
+**1. Confirmed, not fixed - no structural gap.** `backend_api::arch::
+ArchDesc` can already express `DType::BF16 => TierLevel::Native`/`Matrix` in
+principle today: `ArchDesc::tier`/`set_tier` are generic over every `DType`
+`arch.rs`'s own `DTYPE_COUNT` enumerates (BF16 included), and nothing in the
+type's own shape special-cases F16 over BF16 - `is_fast`/`executes`/`holds`
+all work identically for either. What is missing is real POPULATION (no
+backend's `query_caps` ever sets `BF16`'s tier above `Storage`, since no
+non-WGSL bf16 backend exists to query) - a capability gap waiting on that
+future backend, not a structural one this repo needs to fix here.
+
+**2. A permanent, grep-level restraint test** (`crates/kernels/tests/
+bf16_wgsl_restraint.rs`, new, two tests, no GPU, sub-second): (a) every
+real `.wgsl` file under `crates/kernels/wgsl/` (466 files, the same
+directory `gen-kernel-table.py`'s own `kernelmeta.WGSL` walks) contains
+neither `enable bf16` nor a bare `bf16` CODE token - `//` comments are
+stripped before the token scan, since the `@dtype f32|bf16|f16` header
+convention and prose like `moe_linear_gated_kq.wgsl`'s own "the bf16/f16
+WEIGHT STORAGE tier" line legitimately name `bf16` as a SUPPORTED STORAGE
+dtype (an actual bug the first draft of this test caught in itself: an
+unstripped bare-token scan flagged that exact comment line before the fix -
+confirmed via `git diff`, not just asserted); (b) no
+`select::Requirement::bf16_compute: true` appears anywhere in
+`backend-api/src/select.rs` or any `gpu_core::provider::*` file - grepped
+across all five real files that could ever build a `Requirement` for a
+WGSL-dispatched request, simple and textual per the milestone's own "not a
+semantic test" instruction.
+
+**3. `AGENTS.md` correction, same commit.** Amended the "fp32 arithmetic
+only, core compute only" bullet's `OperatorProvider` paragraph (the one
+M8.3 previously amended to name the seam "once it lands") with a new
+paragraph stating plainly: native f16 compute now exists, but only behind a
+measured-capability, non-default provider (M8.7's `NativeF16Provider`) -
+never the WGSL reference this bullet's "no f16" rule still constrains
+without exception; native bf16 compute is structurally out of WGSL's reach
+and can only ever come from a genuinely non-WGSL provider (a SPIR-V bf16
+extension via `Backend::register_native`/`step_native`, or AVX512-BF16/
+AMX-BF16 on the CPU backend) - neither exists yet.
+
+**Measured here: no, and it never can be on WGSL** - this milestone is
+intentionally build-and-restrain only, stated plainly rather than padded
+with a number that has nothing to do with the actual deliverable.
+
+**Gate**: `cargo test -p brain-kernels --test bf16_wgsl_restraint` (2/2).
+**Commit**: one (the restraint test, the `AGENTS.md` correction, this
+ledger entry, together as one self-contained unit).
+
 ## Not yet done
 
 Phase 0 is closed. Phase 1 is in progress per the recalibrated scope above.

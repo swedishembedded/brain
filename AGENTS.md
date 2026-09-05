@@ -1435,6 +1435,7 @@ a metric that isn't there was simply forgotten.
   as before. A provider for any of THOSE call sites needs its own migration
   onto the seam first; the seam existing for `Op::MatMul` is not license to
   bypass this section anywhere it has not been migrated.
+
   **M8.9 landed the first real (non-reference) provider**:
   `gpu_core::provider::coopmat::CoopMatProvider`, a `VK_KHR_cooperative_matrix`
   f16xf16->f32 GEMM registered through `Backend::register_native`/
@@ -1450,6 +1451,37 @@ a metric that isn't there was simply forgotten.
   proof of correct execution, which is why `Requirement.matrix` (checked
   before `register_native` is ever reached) is the authoritative gate, not
   whether registration happened to succeed.
+
+  **M8.7 landed a second non-reference provider, and it is exactly the
+  "no f16" bullet's one sanctioned exception, not a quiet reversal of it.**
+  `gpu_core::provider::native_f16::NativeF16Provider`
+  dispatches `matmul_reg3_f16n` - real `enable f16;` WGSL, narrow-register
+  multiply, f32 accumulate - but it is a Rust-generated kernel body
+  (`kernels::template::native_f16_variant`, mirroring B11's own PoC scope),
+  never one of the on-disk files under `crates/kernels/wgsl/` this bullet's
+  parenthetical audits, and it is gated behind a REAL measurement
+  (`backend_api::Backend::supports_native_f16` for mere availability,
+  `ArchDesc::is_fast(DType::F16)` for the actual "worth it" gate - `Native`
+  tier alone is never enough), never selected by default. The reference WGSL
+  provider this bullet's rule still constrains without exception is
+  everything `matmul_reg3.wgsl`/`matmul.wgsl`/every other on-disk kernel
+  dispatches - that rule has not moved. **Native BF16 compute cannot follow
+  the same path even in principle**: WGSL has no `enable bf16;` and no bf16
+  scalar type at all (unlike f16, which the spec exposes as a real, narrow
+  arithmetic type) - there is no rewrite or polyfill that gets bf16
+  arithmetic into WGSL, so a bf16 sibling of `NativeF16Provider` is not a
+  smaller version of this milestone, it is a different KIND of provider
+  entirely: only a genuinely non-WGSL backend (a SPIR-V bf16 extension via
+  `backend_api::Backend::register_native`/`step_native`, or AVX512-BF16/
+  AMX-BF16 on the CPU backend) could ever host one, and neither exists in
+  this tree today (M8.8, `kernel-performance.md`, pins this as a permanent
+  grep-level restraint: no WGSL kernel source anywhere in `crates/kernels/
+  wgsl/` may contain `enable bf16` or a bf16 WGSL type, and no
+  `OperatorProvider::requires` may claim a bf16 compute tier for a
+  WGSL-backed provider). `ArchDesc` can already EXPRESS `BF16 => Native`/
+  `Matrix` in principle (M8.1's tier lattice is not f16-specific) - nothing
+  populates it that way yet, which is a capability gap waiting on that
+  future non-WGSL backend, not a structural one this repo needs to fix.
 - **Never put a large `var<function>` array behind a runtime loop bound.** WGSL
   function-scope arrays only become registers if the compiler can unroll every
   index; bound the loop by a `Params` field and the array lands in *local*
