@@ -1714,6 +1714,135 @@ mod tests {
         r.finish("minimaxh3 video vae tiny-config forward vs real reference");
     }
 
+    /// Tiling is what BOUNDS the ViT decoder's sequence length, so the
+    /// `u32` score-count ceiling in [`attention`] is unreachable on the
+    /// tiled path at any canvas - including the released 768x1344 one,
+    /// where the untiled path overflowed it.
+    ///
+    /// This is the property that makes that assert a real invariant rather
+    /// than an arbitrary limit: a tile is a 16x16 latent grid whatever the
+    /// canvas, so the sequence depends only on the temporal chunk size, and
+    /// the canvas cancels out entirely. If this ever fails, the tiling has
+    /// stopped bounding the sequence and the fix is there, not here.
+    #[test]
+    fn tiling_bounds_the_vit_sequence_below_the_u32_score_ceiling_at_every_canvas() {
+        let cfg = VideoVaeConfig::real();
+        let ratio = cfg.spatial_compression_ratio();
+        let heads = cfg.decoder_num_attention_heads as u64;
+        // The longest latent clip `decode` ever hands one `decode_clip`.
+        let clip_latent_frames = cfg.tokens_chunk_size() + cfg.token_overlap();
+        let tile_latent = cfg.tile_sample_min_height / ratio;
+        assert_eq!(tile_latent, 16, "a 256-pixel tile is a 16x16 latent grid at ratio {ratio}");
+
+        // 1344 is the released canvas's long edge; 4096 is far past
+        // anything this model is run at.
+        for canvas in [256u32, 384, 512, 768, 1024, 1344, 4096] {
+            let latent = canvas / ratio;
+            let (starts, lens, _) = split_tiles(canvas, cfg.tile_sample_min_width, cfg.tile_sample_min_overlap_width, ratio);
+            // Every tile is at most one tile_size wide, so the per-tile
+            // latent grid never exceeds 16 on an axis however large the
+            // canvas gets.
+            let max_tile_latent = lens.iter().map(|l| l / ratio).max().expect("at least one tile");
+            assert!(max_tile_latent <= tile_latent, "canvas {canvas}: a tile spans {max_tile_latent} latents, more than the {tile_latent} a 256-pixel tile should");
+
+            let seq = clip_latent_frames as u64 * (max_tile_latent as u64).pow(2) + cfg.decoder_num_register_tokens as u64 + 1;
+            let scores = heads * seq * seq;
+            assert!(scores <= u32::MAX as u64, "canvas {canvas}: tiled seq_len {seq} still overflows the u32 score space ({scores})");
+
+            // And the untiled path at the same canvas, to show the ceiling
+            // is a real one that tiling is what avoids - not a limit that
+            // was simply set high enough.
+            let untiled_seq = clip_latent_frames as u64 * (latent as u64).pow(2) + cfg.decoder_num_register_tokens as u64 + 1;
+            let untiled_scores = heads * untiled_seq * untiled_seq;
+            println!("  canvas {canvas:>5}: {} tiles, tiled seq {seq} ({scores} scores), untiled seq {untiled_seq} ({untiled_scores} scores){}", starts.len(), if untiled_scores > u32::MAX as u64 { " OVERFLOWS" } else { "" });
+        }
+
+        // The released canvas is the one section 2 of the audit measured as
+        // overflowing untiled: 48x84 latents, 28229 tokens. Assert that the
+        // untiled path there really would overflow, so this test cannot
+        // quietly become vacuous if the config's widths change.
+        let untiled_released = clip_latent_frames as u64 * (768 / ratio) as u64 * (1344 / ratio) as u64 + cfg.decoder_num_register_tokens as u64 + 1;
+        assert!(heads * untiled_released * untiled_released > u32::MAX as u64, "the untiled 768x1344 decode no longer overflows - this test's premise is stale");
+    }
+
+    /// REAL-WEIGHT numeric parity for the spatial tiling: one tiled
+    /// `_decode_clip` over a 384x384 canvas (a 24x24 latent grid, a 2x2 tile
+    /// grid) through the actual `MiniMaxAI/MiniMax-H3` video VAE, against
+    /// the real installed `diffusers==0.40.0` decoding the same latent,
+    /// dumped by `tools/minimaxh3_video_vae_real_tiled_dump_reference.py`.
+    ///
+    /// This is a different claim from
+    /// [`tiny_config_matches_the_real_reference_numerically`]'s tiled rungs,
+    /// which pin the tiling ALGORITHM at random weights. What only real
+    /// weights can show is that the algorithm composes correctly with the
+    /// real 36-layer ViT decoder at its real widths - that a real tile is
+    /// genuinely a 16x16 latent grid whose `[-1, 1)` rotary coordinates are
+    /// the ones the decoder was trained on. The tiny config cannot see that:
+    /// its `decoder_attention_head_dim: 8` leaves one RoPE frequency per
+    /// axis, where `theta^0 = 1` hides any frequency-ladder error.
+    ///
+    /// The golden carries the reference's UNTILED decode of the same latent
+    /// too, purely as a vacuity guard, so this rung cannot pass against an
+    /// implementation that quietly decoded the whole frame.
+    #[test]
+    fn tiled_decode_matches_the_real_reference_numerically_with_real_weights() {
+        let Ok(root) = std::env::var("BRAIN_MINIMAXH3_DIR") else {
+            brain_testutil::skip("BRAIN_MINIMAXH3_DIR not set - no local MiniMax-H3 checkout to decode from");
+            return;
+        };
+        let fixture_dir = brain_testutil::testdata_path("golden/minimaxh3/video_vae_real_tiled");
+        let fixture_file = fixture_dir.join("minimaxh3_video_vae_real_tiled.safetensors");
+        if !fixture_file.is_file() {
+            brain_testutil::skip(&format!(
+                "{} not found - run BRAIN_MINIMAXH3_DIR={root} tools/minimaxh3_video_vae_real_tiled_dump_reference.py --out {}",
+                fixture_file.display(),
+                fixture_dir.display()
+            ));
+            return;
+        }
+
+        let cfg = VideoVaeConfig::real();
+        let dir = format!("{root}/vae");
+        let tensors = crate::import::import_video_vae(&dir, &cfg).unwrap_or_else(|e| panic!("import_video_vae: {e}"));
+
+        let raw = checkpoint::safetensors::read(fixture_file.to_str().expect("fixture path is valid UTF-8")).expect("read golden fixture");
+        let fx: std::collections::HashMap<String, checkpoint::safetensors::StTensor> = raw.into_iter().map(|t| (t.name.clone(), t)).collect();
+        let get = |name: &str| -> &[f32] { &fx.get(name).unwrap_or_else(|| panic!("golden tap {name:?} missing")).data };
+        let shape = |name: &str| -> &[usize] { &fx.get(name).unwrap().shape };
+
+        let zs = shape("input_z_real_tiled").to_vec();
+        let (zt, zh, zw) = (zs[1] as u32, zs[2] as u32, zs[3] as u32);
+        let ratio = cfg.spatial_compression_ratio();
+        let (canvas_h, canvas_w) = (zh * ratio, zw * ratio);
+        assert!(cfg.use_tiling, "real() must ship the reference's own use_tiling default");
+        let (ty, ..) = split_tiles(canvas_h, cfg.tile_sample_min_height, cfg.tile_sample_min_overlap_height, ratio);
+        let (tx, ..) = split_tiles(canvas_w, cfg.tile_sample_min_width, cfg.tile_sample_min_overlap_width, ratio);
+        assert!(ty.len() > 1 && tx.len() > 1, "the golden's {canvas_h}x{canvas_w} canvas is not multi-tile ({}x{})", ty.len(), tx.len());
+
+        let device = std::env::var("BRAIN_MINIMAXH3_TEST_DEVICE").unwrap_or_else(|_| "cpu".to_string());
+        eprintln!("decoding a real-weight {canvas_h}x{canvas_w} canvas as a {}x{} tile grid on device={device:?} ...", ty.len(), tx.len());
+        let t0 = std::time::Instant::now();
+        let (pixels, pt, ph, pw) = decode_clip(&cfg, &tensors, Some(&device), get("input_z_real_tiled"), zt, zh, zw);
+        eprintln!("  decoded in {:.1}s", t0.elapsed().as_secs_f32());
+        assert_eq!([cfg.out_channels as usize, pt as usize, ph as usize, pw as usize], *shape("tap_real_tiled_pixels"));
+
+        let mut r = brain_testutil::parity::Report::new(0.9999);
+        r.check("tap_real_tiled_pixels (2x2 tile grid, real weights)", &pixels, get("tap_real_tiled_pixels"));
+
+        // Vacuity guard, against the reference's OWN untiled decode of the
+        // same latent: this port's tiled result must be far closer to the
+        // tiled reference than the untiled reference is.
+        let tiled_ref = get("tap_real_tiled_pixels");
+        let untiled_ref = get("tap_real_untiled_pixels");
+        let sep = untiled_ref.iter().zip(tiled_ref).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+        let err = pixels.iter().zip(tiled_ref).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+        println!("  vacuity guard: the reference's own untiled decode differs from its tiled one by max_abs {sep:.3e}; this port's tiled decode by {err:.3e}");
+        assert!(sep > 1e-2, "the reference's tiled and untiled decodes agree to {sep:.3e} at real weights - this rung would pass vacuously");
+        assert!(err < sep / 100.0, "this port's tiled decode ({err:.3e}) is not decisively closer to the tiled reference than the untiled one is ({sep:.3e})");
+
+        r.finish("minimaxh3 video vae real-weight tiled decode vs real reference");
+    }
+
     /// `split_tiles` against the REAL reference's own `_split_tiles`, called
     /// directly at a spread of lengths and dumped as integers by
     /// `tools/minimaxh3_video_vae_dump_reference.py`.

@@ -337,6 +337,14 @@ mod tests {
     /// NaN/Inf, matching this crate's Phase 4 audio-VAE precedent
     /// (`decode_runs_at_real_scale_with_real_weights_and_stays_finite`). Same
     /// download-blocked skip as the coverage test above.
+    ///
+    /// The 256x256 canvas is exactly where spatial tiling is a no-op
+    /// (`_split_tiles` returns one full-size tile when `tile_size >=
+    /// length`), so this deliberately exercises the single-tile path: it is
+    /// a finiteness check over the real encoder and decoder at real widths,
+    /// not a tiling check. The tiled path is gated NUMERICALLY, against the
+    /// reference rather than against a finiteness assertion, by
+    /// `video_vae::tests::tiled_decode_matches_the_real_reference_numerically_with_real_weights`.
     #[test]
     fn video_vae_round_trip_runs_at_real_scale_with_real_weights_and_stays_finite() {
         let Ok(root) = std::env::var("BRAIN_MINIMAXH3_DIR") else {

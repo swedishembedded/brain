@@ -228,7 +228,7 @@ Result: **11 taps, worst cosine 1.0000000000.**
 | Video VAE ViT decoder token->pixel reassembly | **MATCHED.** Tokenize order, register + zero cls token placement, stripping after `proj_out`, and the `(oc, dt, dh, dw)` feature nesting all verified element-for-element. |
 | Video VAE decoder RoPE | **MATCHED.** `inv_freq` ladder, axis concatenation order, `tile(2)` half-split pairing at distance 24, the `2*pi` factor, and the unrotated tail channels (`rope_dim_ratio = 0.75`). |
 | Video VAE temporal chunking (`clip_length=17`, `token_drop=3`) | **MATCHED.** `num_chunks` formula, sub-chunk split, 5-frame cross-fade, `pad_frames` tail trim - traced through a real 124-frame / 37-latent-frame decode. |
-| Video VAE spatial tiling | **MISMATCHED - NOT the 128x128 cause.** See section 2. Not implemented; overflow made loud, doc corrected. |
+| Video VAE spatial tiling | **MISMATCHED - NOW MATCHED.** Was not implemented (section 2, and not the 128x128 cause). Implemented and gated numerically at random and real weights in the second follow-up section below. |
 | Video VAE GroupNorm / eps / reflect + causal padding | **MATCHED.** (Also: none of it is on the ViT decode path.) |
 | `attention()` `u32` score-count arithmetic | **MISMATCHED - FIXED** (widened to `u64` + assert). Only reachable via the untiled path at a large canvas. |
 | Row scatter/gather glue (`index_copy` order, `adaln_indices`) | **MATCHED** by source read; `text`, `video`, `audio` scatter order matches, and `position_ids` is cast to f32 on both sides before RoPE. |
@@ -241,13 +241,11 @@ Result: **11 taps, worst cosine 1.0000000000.**
   the Qwen3-VL splice gap is separately documented and was out of scope here.
 - **Audio VAE / vocoder decode internals** - only the latent normalization and
   the channel-major transpose feeding it were checked (both match).
-- **A real-weight numeric comparison of this port's OWN video VAE decode
-  against the reference's.** The reference decoder was run at 128x128 (it
-  reconstructs a recognizable scene from an 8x8 latent - see section 1), and
-  this port's decoder math is covered by the existing tiny-config golden, but
-  the two were not compared at real weights and real geometry. That gap is
-  worth closing along with the tiling work in section 2, since the tiny golden
-  cannot see either.
+- ~~**A real-weight numeric comparison of this port's OWN video VAE decode
+  against the reference's.**~~ **CLOSED** by the second follow-up section
+  below: `tiled_decode_matches_the_real_reference_numerically_with_real_weights`
+  compares this port's decode against the reference's at real weights and a
+  real multi-tile geometry, cosine 1.0000000000 / rel_l2 9.6e-7.
 - **An end-to-end real-weight generation at a corrected canvas.** The
   conclusions above are from component-level real-weight numerics plus the
   quantified rotary-density argument. A ~1024x1024 run with the latent-stats
@@ -256,18 +254,27 @@ Result: **11 taps, worst cosine 1.0000000000.**
 
 ## Recommended next steps, in order
 
-1. Implement the video VAE's spatial tiling (`_split_tiles` / `_blend` /
-   `_stitch_tiles`, tiled `_decode_clip` / `_encode_clip`). It is the blocker
-   for generating at any useful canvas, and the current tiny-config golden
-   cannot catch it - that golden was dumped with `use_tiling=False`, and
-   `tiny()`'s `decoder_attention_head_dim: 8` gives one RoPE frequency per
-   axis, where `theta^0 = 1` hides any frequency-ladder error too.
+1. ~~Implement the video VAE's spatial tiling (`_split_tiles` / `_blend` /
+   `_stitch_tiles`, tiled `_decode_clip` / `_encode_clip`).~~ **DONE** - see
+   the second follow-up section at the end of this document for the
+   algorithm details that were not obvious from section 2's summary, and for
+   the real-weight parity numbers. Both directions are implemented (the
+   reference tiles encode as well as decode, which section 2 did not say),
+   and both are gated numerically against the real reference.
 2. Re-run the real generation at 768x1344 (or at least 1024x1024) with the
    latent-stats fix and tiling in place. Do not judge port correctness from a
    128x128 result - section 3 shows that resolution cannot work.
 3. Consider refusing, or at least warning on, a canvas whose spatial rotary
    step is far from the trained ~1.0. A silent 8x-off positional grid is a
    large foot-gun that costs a full generation run to discover.
+4. **New, surfaced by the tiling work:** route `video_vae`'s `linear`
+   through `model::block::pick_gemm` the way the DiT already is. The VAE
+   decoder still dispatches the naive `matmul` kernel, and at the real
+   widths one FFN dispatch (261 x 2048 x 8192) does not finish inside the
+   30s `BRAIN_GPU_WAIT_S` budget on a P40 - so the real-weight tiled decode
+   currently only completes on the CPU JIT (71s for four tiles). This does
+   not affect correctness and did not block the tiling gate, but step 2's
+   full-canvas generation runs many more tiles than four.
 
 ---
 
@@ -423,6 +430,8 @@ fused path has no such ceiling because it never builds the matrix.
 - The video VAE's spatial tiling is still unimplemented and is still the
   blocker for a correct canvas above 256px (section 2 and step 1 above). This
   work removes the DiT's constraint, not the VAE's.
+- **RESOLVED by the second follow-up section below.** The video VAE's
+  spatial tiling is now implemented and gated numerically at real weights.
 - The backward pass is untouched, and not because it was carefully preserved:
   `grad.rs` is a separate HOST-side autodiff implementation (`attn_fwd` /
   `attn_bwd`, generic over `Fp`) that never dispatched these device kernels at
@@ -430,3 +439,194 @@ fused path has no such ceiling because it never builds the matrix.
   the backward, which is exactly why the flash family is forward-only.
 - Nothing in `pipeline.rs` changed; the packing and scheduling proven correct
   in the audit above are untouched.
+
+---
+
+# Follow-up: the video VAE's spatial tiling, implemented
+
+Section 2 above recorded the gap and step 1 of the next steps called it the
+blocker for any canvas over 256px. It is now implemented in
+`crates/minimaxh3/src/video_vae.rs` and gated numerically against the real
+installed `diffusers==0.40.0`, at random weights and at real weights.
+
+## What section 2's summary got slightly wrong, or did not say
+
+Reading `_split_tiles` / `_blend` / `_stitch_tiles` / `_decode_clip` /
+`_encode_clip` end to end turned up five things worth recording, because
+each is a place a "looks right" implementation lands somewhere plausible and
+wrong.
+
+1. **The reference tiles BOTH directions, not decode only.** `_encode_clip`
+   is tiled too, and it is not symmetric with `_decode_clip`: encode lays
+   tiles out in pixel space and stitches LATENT output, so it converts the
+   overlaps by `// spatial_compression_ratio` before stitching, while decode
+   lays tiles out in pixel space, maps them BACK onto the latent grid to
+   slice the input, and stitches with the pixel overlaps unconverted.
+2. **`spatial_compression_ratio` is 16, not 8.** It is
+   `prod(spatial_downsample_factors) = prod([2,2,2,2,1,1])`. So a 256-pixel
+   tile is a 16x16 latent window, which is the figure section 2 quotes, but
+   the slack-distribution step below moves in 16-pixel units, not 8.
+3. **There is no partial edge tile.** Every tile `_split_tiles` returns is
+   exactly `tile_size` long. The slack is absorbed by WIDENING the overlaps
+   (round-robin, in whole `spatial_compression_ratio` steps), which is what
+   keeps every tile boundary latent-aligned and what lets the last tile end
+   exactly at `length`. This matters more than it sounds: it is why the ViT
+   decoder sees an identically shaped grid for every tile, which is the
+   whole point given its rotary coordinates are normalized to the grid it is
+   handed.
+4. **The tile count is grown until the union covers the length at the
+   minimum overlap, so it can exceed `ceil(length / tile_size)`.** 512
+   pixels with 256-pixel tiles is **three** tiles, not two. The layouts, from
+   the reference itself:
+
+   | length | tiles | overlaps |
+   |---|---|---|
+   | 128 | 1 (of length 128) | - |
+   | 256 | 1 (of length 256) | - |
+   | 384 | 2 | `[128]` |
+   | 512 | 3 | `[128, 128]` |
+   | 768 | 4 | `[96, 80, 80]` |
+   | 1024 | 5 | `[64, 64, 64, 64]` |
+   | 1344 | 7 | `[80, 80, 80, 80, 64, 64]` |
+
+   Note 768 and 1344: the round-robin leaves UNEVEN overlaps. An
+   implementation that spread the slack evenly, or that used a single
+   overlap everywhere, passes at 384/512/1024 and fails at 768 - which is
+   one axis of the released canvas.
+5. **`_stitch_tiles` blends against the ORIGINAL neighbouring tiles**, not
+   against the already-blended-and-trimmed results it is accumulating. So
+   for a tile that overlaps both the tile above and the tile to its left,
+   the vertical cross-fade runs against the raw tile above, and the
+   horizontal cross-fade then runs against a raw left neighbour that has had
+   no vertical blend applied. That asymmetry is reproduced rather than
+   "improved" - the natural implementation (blend against what you already
+   built) is a different computation.
+
+The blend itself is the unsurprising part: a linear cross-fade over
+`min(a.dim, b.dim, blend_extent)` slices, weighting `a` by `1 - k/E` and `b`
+by `k/E`, returning something with `b`'s own shape (it overwrites `b`'s
+head, it does not concatenate). That is the same shape of operation as the
+temporal cross-fade this port already had.
+
+## The trap that made the existing golden vacuous
+
+`MiniMaxH3VideoTransformerBlock` initializes its LayerScale gates as
+`nn.Parameter(torch.zeros(dim))` (`scale1`, `scale2`), and the ViT decoder
+initializes `register_tokens` to zeros. At default init that makes
+`h = h + attn(norm(h)) * 0` an **exact no-op**, so all 36 transformer blocks
+vanish and the decoder collapses to `proj_out(norm_out(proj_in(z)))` - a
+per-token map with no attention, no RoPE and no position dependence at all.
+
+Two consequences. First, the pre-existing tiny-config golden
+(`tiny_config_matches_the_real_reference_numerically`) was passing without
+exercising the transformer stack at all; section 2's worry that `tiny()`'s
+`decoder_attention_head_dim: 8` hides RoPE errors was understating it.
+Second, and the reason it was caught: the first tiled golden dumped at
+default init showed the reference's own tiled and untiled decodes agreeing
+to **4.8e-07**, which is float32 noise. A position-independent per-token map
+cannot tell a tile apart from a whole frame, so the rung would have passed
+against an implementation with no tiling in it whatsoever.
+
+The dumper now randomizes every all-zero parameter and asserts none survive,
+and both the dumper and the Rust test carry an explicit vacuity guard rather
+than relying on someone noticing a suspiciously clean number.
+
+## Correctness
+
+`video_vae::tests::tiny_config_matches_the_real_reference_numerically`, real
+installed `diffusers==0.40.0`, tiny config, non-zero gates, CPU JIT:
+
+| tap | cosine | rel_l2 | n |
+|---|---|---|---|
+| `tap_tiled_dec_pixels` (512x768, a 3x4 tile grid, uneven width overlaps) | 1.0000000000 | 1.540e-7 | 4718592 |
+| `tap_tiled_enc_moments` (384x384, a 2x2 tile grid) | 1.0000000000 | 8.392e-7 | 4608 |
+
+Vacuity guard on the same run: this port's UNTILED decode of the same latent
+misses the tiled reference by max_abs **2.6e-2** where the tiled path misses
+it by **8.3e-7**, a separation of ~31000x. The dumper independently measures
+the reference's own tiled-vs-untiled difference at the same geometry and
+gets the same 2.6e-2, so the guard's threshold is measured, not chosen.
+
+`video_vae::tests::split_tiles_matches_the_real_references_own_tile_layout`
+compares the tile layout as DATA at the seven lengths tabulated above -
+starts, lengths and overlaps, element for element - so a layout error
+localizes to the layout instead of smearing across a blended pixel buffer.
+
+## Correctness at REAL weights
+
+`video_vae::tests::tiled_decode_matches_the_real_reference_numerically_with_real_weights`,
+the actual `MiniMaxAI/MiniMax-H3` video VAE (2.60e9 parameters, imported by
+this port's own `import_video_vae`), decoding a 384x384 canvas as a 2x2 tile
+grid, against the same latent decoded by the real installed
+`diffusers==0.40.0`:
+
+| tap | cosine | rel_l2 | max_abs | n |
+|---|---|---|---|---|
+| `tap_real_tiled_pixels` | **1.0000000000** | **9.631e-7** | 1.454e-5 | 1769472 |
+
+This is a different claim from the tiny-config rungs, which pin the tiling
+ALGORITHM at random weights. What only real weights show is that the
+algorithm composes correctly with the real 36-layer ViT decoder at its real
+widths - that a real tile is genuinely a 16x16 latent grid whose `[-1, 1)`
+rotary coordinates are the ones the decoder was trained on. The tiny config
+structurally cannot see that: its `decoder_attention_head_dim: 8` leaves one
+RoPE frequency per axis, where `theta^0 = 1` hides any frequency-ladder
+error, which is the same blind spot section 2's step 1 flagged.
+
+Vacuity guard on the same run, against the reference's OWN untiled decode of
+the same latent: the untiled reference misses the tiled reference by max_abs
+**5.415**, this port's tiled decode misses it by **1.454e-5** - a separation
+of ~372000x. The threshold is the reference's own measured behaviour, not a
+chosen number.
+
+Run on the CPU JIT (48 threads), 71s for the four tiles. The Vulkan arm of
+the same test times out on the 30s `BRAIN_GPU_WAIT_S` budget, and that is
+worth recording as a SEPARATE gap rather than papering over: `video_vae`'s
+`linear` still dispatches the naive `matmul` kernel, where the DiT was moved
+to `model::block::pick_gemm`. At the real decoder's widths one FFN dispatch
+is 261 x 2048 x 8192, which the naive kernel does not finish in 30s on a
+P40. Nothing about tiling depends on this - the tiled path is what makes
+those dispatches small enough to be worth optimizing at all - but a real
+generation at a useful canvas will want the VAE decoder on `pick_gemm` too.
+
+## The `u32` score ceiling is now unreachable, and that is a property
+
+Section 2 left `attention`'s widened `u32` score-count assert as a loud
+failure rather than a fix. Tiling is the fix, and
+`video_vae::tests::tiling_bounds_the_vit_sequence_below_the_u32_score_ceiling_at_every_canvas`
+pins it: because a tile is a 16x16 latent grid whatever the canvas, the
+sequence depends only on the temporal chunk size and the canvas cancels out
+entirely.
+
+| canvas | tiles | tiled seq_len | untiled seq_len | untiled scores at 32 heads |
+|---|---|---|---|---|
+| 256 | 1 | 1797 | 1797 | 1.03e8 |
+| 384 | 2 | **1797** | 4037 | 5.22e8 |
+| 512 | 3 | **1797** | 7173 | 1.65e9 |
+| 768 | 4 | **1797** | 16133 | 8.33e9 **overflows** |
+| 1024 | 5 | **1797** | 28677 | 2.63e10 **overflows** |
+| 1344 | 7 | **1797** | 49397 | 7.81e10 **overflows** |
+| 4096 | 21 | **1797** | 458757 | 6.73e12 **overflows** |
+
+1797 is the figure section 2 quoted for the tiled path, now held at every
+canvas rather than asserted once. The test also asserts that the untiled
+768x1344 decode still WOULD overflow, so it cannot quietly go vacuous if the
+config's widths change. The assert's message now says the fix for hitting it
+is to leave tiling on, never to widen the limit.
+
+## What the untiled path was actually costing, measured
+
+`tools/minimaxh3_video_vae_real_tiled_dump_reference.py` decodes one latent
+through the REAL `MiniMaxAI/MiniMax-H3` video VAE (2.60e9 parameters,
+trained LayerScale gates, max `|scale|` 1.03e-1) at 384x384 both ways:
+
+| | vs the tiled decode |
+|---|---|
+| the reference's own UNTILED decode | max_abs **5.415**, rel_l2 **0.386** |
+
+So section 2's "structurally, not numerically" wrong was right, and this
+puts a number on it: at the smallest canvas that tiles at all, ignoring
+tiling changes 39% of the output by L2. At the released 768x1344 canvas the
+frame-to-tile ratio is 3x and 5.25x rather than 1.5x, so this is a floor on
+the error, not an estimate of it.
+
