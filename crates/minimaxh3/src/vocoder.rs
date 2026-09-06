@@ -474,6 +474,19 @@ pub fn decode_with_taps(cfg: &VocoderConfig, tensors: &Tensors, z: &[f32], t: u3
             let idx = i * cfg.resblock_kernel_sizes.len() + r;
             let y = amp_block(&mut cx, &format!("decoder.resblocks.{idx}"), cout, l, cfg.resblock_kernel_sizes[r], cfg.resblock_dilations[r], &up);
             axpy_into(&cx.gpu, &acc, 1.0 / 3.0, &y, cout * l);
+            // One [`amp_block`] is 6 [`activation1d`] calls, and each of
+            // those allocates ~7 fresh device buffers (two replicate-pads,
+            // two filters, the 2x-upsampled SnakeBeta pair, the downsampled
+            // result) on top of 6 `conv1d_same` outputs and 3 `add`s - none
+            // reused across iterations. On the wgpu backend dropping a
+            // `DeviceBuffer` does not free VRAM until a poll proves the GPU
+            // is done with it, so without a reclaim point here the whole
+            // decode's allocations accumulate: at a real generation's audio
+            // length (~5s -> 207 latents -> 165,600 samples after the 7
+            // upsample stages) that crossed 4.29 GB, over the backend's own
+            // per-device ceiling, and aborted the run. One poll per resblock
+            // bounds it to a single `amp_block`'s working set.
+            cx.gpu.poll_wait();
         }
         h = acc;
         if i == 0 {
