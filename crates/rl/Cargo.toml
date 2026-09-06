@@ -3,18 +3,27 @@ name = "brain-rl"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Continuous/reward-driven training: a generic weighted-training driver over model::Model + model::Batch::LmWeighted (no architecture-specific code), plus the qwen3-specific ATIF-trajectory ingestion and continuous-loop cycle built on top of it (self-improve roadmap P3/P5)."
+description = "Continuous/reward-driven training: a generic weighted-training driver over model::Model + model::Batch::LmWeighted (no architecture-specific code), plus rollout/environment/objective/gate machinery (self-improve roadmap P8-P18) any Model can adopt. The qwen3-specific ATIF-trajectory ingestion and hot-swap continuous-loop cycle (P3/P5) live behind the `qwen3` feature, off by default, so a generic consumer of this crate does not pull brain-qwen3 into its dependency graph."
 
 [lib]
 name = "rl"
 path = "src/lib.rs"
+
+[features]
+# `rl::continuous` (the qwen3-specific ATIF ingest + hot-swap adapter cycle,
+# self-improve roadmap P5/P6a) and every integration test that needs a real,
+# small, fast-to-train `model::Model` to exercise the generic P10-P18
+# machinery against. OFF by default: `rl::improve::cycle` and everything
+# else in this crate is generic over any `model::Model` and must not force
+# every consumer of this crate to link brain-qwen3.
+qwen3 = ["dep:brain-qwen3"]
 
 [dependencies]
 brain-model.workspace = true
 brain-data.workspace = true
 brain-checkpoint.workspace = true
 brain-atif.workspace = true
-brain-qwen3.workspace = true
+brain-qwen3 = { workspace = true, optional = true }
 # `bench::metrics::sign_test` - the hoisted exact one-sided paired sign test
 # `gate::gate` builds its promote/reject decision on (self-improve roadmap
 # P16). `bench` is "how this repo scores models" already, so `gate` is a
@@ -28,3 +37,61 @@ tempfile.workspace = true
 # `tests/grpo_gradcheck.rs` - GRPO's local `CheckModel` harness (self-improve
 # roadmap P12's gate).
 brain-gradcheck.workspace = true
+
+# Every integration test below trains a real (tiny) `qwen3::Qwen` - the only
+# `model::Model` in this repo with a full weighted-loss + `logits_all` +
+# device-adapter LoRA save/fold story wired up for testing today (self-improve
+# roadmap P9's "adopt a second model" covers `gpt2::Gpt` for weighted-loss,
+# but no test fixture here has been ported onto it yet). `required-features`
+# makes `cargo test -p brain-rl` (no `--features`) skip building these
+# targets entirely, rather than fail to compile against the now-optional
+# `brain-qwen3` dependency - run with `--features qwen3` to build and run them.
+[[test]]
+name = "continuous_cycle"
+path = "tests/continuous_cycle.rs"
+required-features = ["qwen3"]
+
+[[test]]
+name = "grpo_gradcheck"
+path = "tests/grpo_gradcheck.rs"
+required-features = ["qwen3"]
+
+[[test]]
+name = "grpo_objective"
+path = "tests/grpo_objective.rs"
+required-features = ["qwen3"]
+
+[[test]]
+name = "dpo_gradcheck"
+path = "tests/dpo_gradcheck.rs"
+required-features = ["qwen3"]
+
+[[test]]
+name = "dpo_objective"
+path = "tests/dpo_objective.rs"
+required-features = ["qwen3"]
+
+[[test]]
+name = "distill_gradcheck"
+path = "tests/distill_gradcheck.rs"
+required-features = ["qwen3"]
+
+[[test]]
+name = "distill_full_kl"
+path = "tests/distill_full_kl.rs"
+required-features = ["qwen3"]
+
+[[test]]
+name = "mixture_anchor_regression"
+path = "tests/mixture_anchor_regression.rs"
+required-features = ["qwen3"]
+
+[[test]]
+name = "qwen3_fit_weighted"
+path = "tests/qwen3_fit_weighted.rs"
+required-features = ["qwen3"]
+
+[[test]]
+name = "improve_cycle"
+path = "tests/improve_cycle.rs"
+required-features = ["qwen3"]

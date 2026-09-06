@@ -1003,7 +1003,7 @@ file (pre-existing warnings in `crates/gguf` and `qwen35::
 int8_gguf_resident` untouched by this phase). `cargo check --workspace
 --all-targets --exclude brain-vulkan` clean.
 
-## P18 - `rl::improve::cycle` - TODO
+## P18 - `rl::improve::cycle` - DONE
 
 Generalizes P5/P6a's qwen3-only `rl::continuous::run_cycle` into: rollout
 (P10) over an environment's explore split (P11) -> verify (P11) -> build a
@@ -1026,3 +1026,120 @@ This is the machinery `.agents/roadmap/gauntlet.md`'s environments are
 built to exercise - see that file for the environments themselves, the
 retention-matrix and plasticity artifacts, and why they are a separate
 crate from `crates/bench`.
+
+New `crates/rl/src/improve.rs`, generic over any `model::Model` (no qwen3-
+specific code): `explore_anchor_split` (builds the explore/held-out `Task`
+lists from an `Environment` and asserts, by hashing every `Task::id`, that
+the two sets are disjoint - the "hashed and asserted, not assumed"
+structural gate); `assert_trained_spans_were_sampled` (the "no label ever
+enters training" check, a multiset membership test - a span used twice in
+training needs two matching occurrences among what was actually sampled,
+not merely a set-membership check that a compromised path could satisfy by
+reusing one real sample many times); and `cycle` itself, which loads
+`base_checkpoint`'s weights, trains a caller-supplied, already-configured
+`model::Objective` (P12's `Grpo` in the concrete gate below - "whichever
+objective is configured" - GRPO's own `group_size == 1` path already
+degenerates to RFT/STaR, and `Dpo`/`DistillTopK`/`Mixture` compose the same
+way since all four are already plain `model::Objective` impls after
+P12-P15) via `model::fit_with`, scores both the incumbent and the freshly-
+trained candidate on the SAME held-out tasks by decoding greedily from
+disk-reloaded checkpoints (never the in-memory instance - the
+`lora_learning_gate` lesson `crates/rl/src/gate.rs` already documents) and
+calling `gate::gate`, and - only on `Decision::Promote` - saves a versioned
+LoRA adapter via the already-generic `model::lora::device_adapter::
+save_adapter` (P4) and stamps it with a `checkpoint::st::TrainingProvenance`
+(P16) by round-tripping the just-written file once. `next_adapter_version`
+(P16's fix to `rl::continuous::run_cycle`'s own versioning) is hoisted here
+and `continuous.rs` now calls it instead of carrying its own copy - one
+implementation, not two.
+
+`objective::grpo::Grpo` gains `CycleLog` (a small `Rc<RefCell<..>>` handle,
+attached via a new `Grpo::with_log` builder mirroring the existing
+`with_reference`): every completion `Grpo::refill` samples (kept or
+dropped) and every completion span `Grpo::micro_step` actually trains on,
+recorded in order, retrievable through a caller-held clone even after the
+`Grpo` itself is consumed by `model::fit_with`. This is what lets the gate
+test check structural assertion #1 against a REAL training run rather than
+a synthetic stand-in.
+
+`crates/rl/Cargo.toml` makes `brain-qwen3` an optional dependency behind a
+new `qwen3` feature (default off); `rl::continuous` (P5/P6a's hot-swap
+cycle) is now `#[cfg(feature = "qwen3")]` in `lib.rs`; every existing
+integration test under `crates/rl/tests/` needs a real `model::Model` and
+today only `qwen3::Qwen` has the full weighted-loss + `logits_all` +
+device-adapter story wired up for testing (P9 ported `gpt2::Gpt` onto
+weighted-loss but no test fixture here has followed yet), so all nine
+pre-existing test binaries plus the new `improve_cycle.rs` gate got explicit
+`[[test]]` entries with `required-features = ["qwen3"]` - `cargo test -p
+brain-rl` (no flags) now runs only the 48 fully-generic lib tests;
+`--features qwen3` is required to build/run any of the ten integration
+tests, exactly the "with it explicitly enabled if they need qwen3-specific
+pieces" the phase brief asked to verify. `crates/cli` (the only other
+crate depending on `brain-rl`, via `continuous_train.rs`'s direct call to
+`rl::continuous::run_cycle`) now requests `features = ["qwen3"]` on its
+`brain-rl` dependency - a no-op for its own build graph since `brain-cli`
+already links `brain-qwen3` unconditionally for a dozen other reasons.
+
+**Known limitation, not fixed in this phase**: `crates/rl`'s OTHER
+always-on dependency, `brain-bench` (needed for `gate::gate`'s
+`bench::metrics::sign_test`, wired in P16), itself unconditionally depends
+on `brain-qwen3` (`bench::qwen_decoder`) as part of being "how this repo
+scores models" against real reference architectures. So a hypothetical
+consumer of `crates/rl` that wants ONLY the fully-generic `env`/`gate`/
+`improve` surface with zero qwen3 in its build graph does not get that
+today - `rl::gate`'s own dependency on `brain-bench` reintroduces it
+regardless of `rl::continuous`'s feature gate. Trimming `brain-bench`'s own
+dependency surface (or relocating `sign_test` to a lighter-weight home) is
+a real, separate `crates/bench` change this phase's brief did not ask for
+and did not make; `cargo tree -p brain-rl --no-default-features` still
+shows `brain-qwen3` in the graph via this path, which is a deliberate,
+documented gap rather than an oversight.
+
+Gate: `crates/rl/tests/improve_cycle.rs`, a real, tiny `qwen3::Qwen`
+(`QwenConfig::tiny`, LoRA on the four attention projections) end to end.
+`improve_cycle_end_to_end_promotes_a_genuinely_better_candidate` trains 120
+GRPO steps (`group_size = 2`) against a fixed-prompt/fixed-target
+environment, reliably drives the held-out split's frac-match score from the
+untrained incumbent's near-zero to the candidate's near-perfect, and
+asserts `Decision::Promote`, a real loadable adapter (fold-and-diff proves
+it changes the base weights) carrying a `TrainingProvenance` with the
+right `regime`/`seed`/`cycle` and a `GateOutcome` recording `"promote"`,
+AND both structural assertions (`assert_trained_spans_were_sampled` against
+the run's own `CycleLog`, non-trivially - the run trains on more than zero
+sampled spans). `improve_cycle_rejects_a_deliberately_worse_candidate_and_
+retains_the_incumbent` takes that same promoted checkpoint as its new
+incumbent and runs a second `cycle` whose "objective" is `Sabotage` - a
+`model::Objective` whose `micro_step` does no forward/backward at all, only
+`Model::write_weight`-ing fresh uniform noise over every parameter, the
+gate criterion's own literal "corrupting/randomizing its weights before
+gating" - and asserts `Decision::Reject`, no adapter produced, and the out
+dir left empty: the incumbent is retained, proving the gate discriminates
+rather than rubber-stamping.
+
+**Verified**: `cargo test -p brain-rl --lib` - 48 passed, including 6 new
+`improve::tests` (the two `explore_anchor_split` cases - accepts a genuine
+disjoint split, panics on a colliding seed - the two
+`assert_trained_spans_were_sampled` cases - accepts a true subset multiset,
+panics on both an unsampled span and a double-use of a single sample - and
+`softmax_entropy`'s one-hot/uniform closed forms) plus 1 new
+`objective::grpo::tests::cycle_log_clones_share_the_same_underlying_log`.
+`cargo test -p brain-rl --features qwen3` (whole crate, all ten integration
+binaries) - every pre-existing suite still green unchanged
+(`continuous_cycle` 3, `distill_full_kl` 1, `distill_gradcheck` 1,
+`dpo_gradcheck` 1, `dpo_objective` 1, `grpo_gradcheck` 1, `grpo_objective`
+2, `mixture_anchor_regression` 1, `qwen3_fit_weighted` 2) plus the new
+`improve_cycle` gate above, 2 passed in 58.25s (observed on this box: the
+promote scenario's held-out frac-match score moved from the untrained
+incumbent's near-zero to the trained candidate's near-1.0 across all six
+held-out tasks, comfortably clearing the paired sign test at `alpha =
+0.05`; the reject scenario's sabotaged candidate scored at or below the
+now-well-trained incumbent on every held-out task). `cargo test -p
+brain-rl` with NO `--features` flag - only the 48 lib tests run (all ten
+`[[test]]` binaries correctly skipped via `required-features`), proving the
+default build genuinely does not need `brain-qwen3` to test green. `cargo
+check -p brain-cli --all-targets` and `cargo check -p brain-rl --lib`
+(feature off) both clean. `cargo clippy -p brain-rl --all-targets --features
+qwen3` and `cargo clippy -p brain-cli --all-targets` clean on every touched
+file (pre-existing warnings in `crates/gguf` and `crates/qwen3tts`,
+untouched by this phase). `cargo check --workspace --all-targets --exclude
+brain-vulkan` clean.

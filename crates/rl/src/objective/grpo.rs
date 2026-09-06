@@ -219,6 +219,56 @@ struct PackedRow {
     old_lp: Vec<f32>,
     ref_lp: Vec<f32>,
     advantage: Vec<f32>,
+    /// The raw completion span this row was packed from - kept alongside
+    /// the packed arrays purely for [`CycleLog`]'s bookkeeping (self-improve
+    /// roadmap P18's "no label ever enters training" structural assertion),
+    /// not read by [`Grpo::micro_step`]'s own training math.
+    completion: Vec<u32>,
+}
+
+/// Observability hook for self-improve roadmap P18's structural "every
+/// completion span written into a training set is a member of the multiset
+/// the policy actually sampled that cycle" assertion: every completion
+/// [`Grpo::refill`] draws (kept or dropped) and every completion span
+/// [`Grpo::micro_step`] actually pops off the training queue, recorded in
+/// order. A plain `Rc<RefCell<..>>` handle rather than a getter on `Grpo`
+/// itself, because `Grpo` is typically consumed by value (`model::fit_with`
+/// takes its [`model::Objective`] by value and drops it at the end) - attach
+/// a log via [`Grpo::with_log`] before handing the objective off, keep your
+/// own clone, and read it back afterward.
+#[derive(Clone, Default)]
+pub struct CycleLog(std::rc::Rc<std::cell::RefCell<CycleLogInner>>);
+
+#[derive(Default)]
+struct CycleLogInner {
+    sampled: Vec<Vec<u32>>,
+    trained: Vec<Vec<u32>>,
+}
+
+impl CycleLog {
+    pub fn new() -> CycleLog {
+        CycleLog::default()
+    }
+
+    /// Every completion [`Grpo::refill`] sampled (kept or dropped) since
+    /// construction, in sample order.
+    pub fn sampled(&self) -> Vec<Vec<u32>> {
+        self.0.borrow().sampled.clone()
+    }
+
+    /// Every completion span [`Grpo::micro_step`] actually popped off the
+    /// training queue and trained on, in training order.
+    pub fn trained(&self) -> Vec<Vec<u32>> {
+        self.0.borrow().trained.clone()
+    }
+
+    fn push_sampled(&self, tokens: Vec<u32>) {
+        self.0.borrow_mut().sampled.push(tokens);
+    }
+
+    fn push_trained(&self, tokens: Vec<u32>) {
+        self.0.borrow_mut().trained.push(tokens);
+    }
 }
 
 /// GRPO's (and RFT/STaR's) hyperparameters. `seq_len` is the packed row's
@@ -293,6 +343,7 @@ pub struct Grpo<E: Environment, V: Verifier> {
     pending: std::collections::VecDeque<PackedRow>,
     last_mean_reward: f32,
     last_kept_frac: f32,
+    log: CycleLog,
 }
 
 impl<E: Environment, V: Verifier> Grpo<E, V> {
@@ -306,6 +357,7 @@ impl<E: Environment, V: Verifier> Grpo<E, V> {
             pending: std::collections::VecDeque::new(),
             last_mean_reward: 0.0,
             last_kept_frac: 0.0,
+            log: CycleLog::default(),
         }
     }
 
@@ -321,6 +373,15 @@ impl<E: Environment, V: Verifier> Grpo<E, V> {
         self
     }
 
+    /// Attach an external [`CycleLog`] so a caller can observe what this
+    /// objective actually sampled/trained on after it has been consumed
+    /// (typically by `model::fit_with`) - see [`CycleLog`]'s own doc
+    /// comment.
+    pub fn with_log(mut self, log: CycleLog) -> Grpo<E, V> {
+        self.log = log;
+        self
+    }
+
     fn pack(&self, prompt: &[u32], completion: &Completion, adv: f32, ref_logprobs: Option<&[f32]>) -> PackedRow {
         let mut row = PackedRow {
             tokens: vec![0u32; self.cfg.seq_len],
@@ -328,6 +389,7 @@ impl<E: Environment, V: Verifier> Grpo<E, V> {
             old_lp: vec![0f32; self.cfg.seq_len],
             ref_lp: vec![0f32; self.cfg.seq_len],
             advantage: vec![0f32; self.cfg.seq_len],
+            completion: completion.tokens.clone(),
         };
         pack_row(&mut row.tokens, &mut row.targets, &mut row.old_lp, &mut row.ref_lp, &mut row.advantage, 0, self.cfg.seq_len, prompt, completion, adv, ref_logprobs);
         row
@@ -351,6 +413,7 @@ impl<E: Environment, V: Verifier> Grpo<E, V> {
             let mut rewards = Vec::with_capacity(self.cfg.max_attempts.max(1));
             for _ in 0..self.cfg.max_attempts.max(1) {
                 let c = roll.sample_n(&task.prompt, 1, &self.cfg.rollout, rng).pop().expect("sample_n(1) returns exactly one completion");
+                self.log.push_sampled(c.tokens.clone());
                 let reward = self.verifier.verify(&task, &[], &c.tokens).value;
                 rewards.push(reward);
                 if reward > 0.0 {
@@ -365,6 +428,9 @@ impl<E: Environment, V: Verifier> Grpo<E, V> {
             self.last_kept_frac = 0.0;
         } else {
             let group = roll.sample_n(&task.prompt, self.cfg.group_size, &self.cfg.rollout, rng);
+            for c in &group {
+                self.log.push_sampled(c.tokens.clone());
+            }
             let rewards: Vec<f32> = group.iter().map(|c| self.verifier.verify(&task, &[], &c.tokens).value).collect();
             self.last_mean_reward = rewards.iter().sum::<f32>() / rewards.len().max(1) as f32;
             let advs = group_advantages(&rewards);
@@ -402,6 +468,7 @@ impl<M: Model, E: Environment, V: Verifier> Objective<M> for Grpo<E, V> {
             // legitimate no-signal micro-step, not an error.
             return 0.0;
         };
+        self.log.push_trained(row.completion.clone());
 
         // One ordinary forward (reads the CURRENT policy's per-token
         // logprobs) ...
@@ -445,6 +512,24 @@ impl<M: Model, E: Environment, V: Verifier> Objective<M> for Grpo<E, V> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cycle_log_clones_share_the_same_underlying_log() {
+        // The whole point of `CycleLog` (self-improve roadmap P18): a
+        // caller keeps a clone before handing the original into something
+        // that consumes it by value (`model::fit_with`'s own `Objective`
+        // parameter), and still sees every push made through the moved
+        // clone afterward.
+        let log = super::CycleLog::new();
+        let handle = log.clone();
+        log.push_sampled(vec![1, 2, 3]);
+        log.push_sampled(vec![4, 5]);
+        log.push_trained(vec![1, 2, 3]);
+        drop(log);
+
+        assert_eq!(handle.sampled(), vec![vec![1, 2, 3], vec![4, 5]]);
+        assert_eq!(handle.trained(), vec![vec![1, 2, 3]]);
+    }
+
     use super::*;
 
     #[test]

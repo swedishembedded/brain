@@ -32,9 +32,11 @@
 //! - see the [`atif`] module.
 
 pub mod atif;
+#[cfg(feature = "qwen3")]
 pub mod continuous;
 pub mod env;
 pub mod gate;
+pub mod improve;
 pub mod objective;
 
 use std::path::Path;
