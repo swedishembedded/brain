@@ -763,16 +763,56 @@ remaining warnings are pre-existing, in `crates/gguf`, untouched by this
 phase). `cargo check --workspace --all-targets --exclude brain-vulkan`
 clean.
 
-## P14 - `DistillTopK` objective - TODO
+## P14 - `DistillTopK` objective - DONE
 
 `crates/rl/src/objective/distill.rs`: K weighted-CE passes per the keystone
 `p - q_K = Σ_k q_k·(p - e_{v_k})` identity - zero new kernels, zero new
-gradient path beyond what P9 already gradchecked.
+gradient path beyond what P9 already gradchecked. Unlike DPO's/GRPO's weight
+formulas, `topk_weight` needs no current-policy readback at all (`w_k =
+q_k·count` is pure teacher data), so `DistillTopK` trains at plain `b = 1`
+with no packed-row shape constraint. `pass_arrays` builds one pass `k`'s
+`Batch::LmWeighted` `targets`/`weights` from a row's per-position `TopK`
+teacher distributions, scaling by THAT pass's own active-position count so a
+ragged per-position `K` (some positions carrying fewer teacher candidates
+than others) needs no special-casing - each pass cancels its own divisor
+independently. `neg_entropy` (a pure function of the teacher's own data)
+turns the K passes' summed weighted-CE losses into the true `KL(q_K‖p)`
+rather than the teacher-entropy-shifted cross-entropy.
 
-Gate: `gradcheck::check_distill_topk_qwen3` FD against the host KL; a
-separate test asserting `K = vocab` reproduces exact `KL(q‖p)` to fp32
-tolerance (proving the K-sparse path is a genuine special case of full KL,
-not a different approximation that happens to also work).
+Gate: `check_distill_topk_qwen3` (`crates/rl/tests/distill_gradcheck.rs`), a
+local `CheckModel` harness (`b = 1`, `qwen3::Qwen`, a 3-of-23 top-K teacher
+distribution at 3 of 6 positions, prompt-only at the rest) whose `loss()`
+recomputes the true accumulated `KL(q_K‖p)` host-side via this module's own
+`pass_arrays`/`neg_entropy`, FD-checked against the analytic gradient
+accumulated by K independent `backward()` calls (`Model::backward`'s
+documented accumulate-not-overwrite contract is what makes that summation
+equal the keystone identity rather than each pass overwriting the last). A
+SEPARATE test, `distill_topk_at_k_equals_vocab_reproduces_exact_kl`
+(`crates/rl/tests/distill_full_kl.rs`), sets `K = vocab` (every one of
+`QwenConfig::tiny`'s 23 ids, a synthetic strictly-positive teacher
+distribution per position) and asserts the K-pass mechanism's realized
+scalar matches a textbook `KL(q‖p) = Σ_v q_v·(ln q_v − ln p_v)` computed a
+SECOND, independent way (plain `ln`/softmax arithmetic on
+`Qwen::logits_all`'s raw logits, never calling back into
+`rl::objective::distill`) - the proof that the K-sparse path is a genuine
+special case of full KL, not a different approximation that happens to also
+gradcheck.
+
+**Verified**: `cargo test -p brain-rl --lib objective::distill` - 6 unit
+tests (the keystone identity itself on plain vectors independent of any
+model, `pass_arrays`'s ragged-count scaling, `neg_entropy`'s one-hot/uniform
+closed forms, `pack_row`'s alignment and truncation). `cargo test -p
+brain-rl --test distill_gradcheck` - the FD gate above, green with every
+parameter's `rel` error under the workspace `(4e-3, 8e-2)` tolerance and
+zero dead gradients. `cargo test -p brain-rl --test distill_full_kl` - the
+K=vocab exact-KL gate above, green. `cargo test -p brain-rl` (whole crate) -
+44 passed (33 lib + 2 `continuous_cycle` + 1 `distill_full_kl` + 1
+`distill_gradcheck` + 1 `dpo_gradcheck` + 1 `dpo_objective` + 1
+`grpo_gradcheck` + 2 `grpo_objective` + 2 `qwen3_fit_weighted`). `cargo
+clippy -p brain-rl --all-targets` clean on every touched file (the only
+remaining warnings are pre-existing, in `crates/gguf`, untouched by this
+phase). `cargo check --workspace --all-targets --exclude brain-vulkan`
+clean.
 
 ## P15 - `Mixture` objective / anchor replay - TODO
 
