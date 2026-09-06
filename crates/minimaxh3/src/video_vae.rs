@@ -119,8 +119,18 @@ const K_ATTN_APPLY_FULL: usize = 15;
 const K_SILU_MUL: usize = 16;
 const K_GATE_ROW: usize = 17;
 const K_LAYERNORM_ROWS: usize = 18;
+/// The 128x128 register-tiled GEMM `linear` picks via `model::block::
+/// pick_gemm` once a shape clears the measured tile-fill crossover - the
+/// same fix `crate::block::linear`'s own doc explains in full (plain
+/// `matmul` is a naive one-thread-per-output kernel with a fully
+/// uncoalesced weight-row access pattern on a real GPU; this crate's own
+/// DiT already made this switch). The ViT decoder's per-tile token count is
+/// bounded by the fixed 256x256-pixel tile size regardless of output
+/// canvas, so this is a straightforward speed fix here, not the memory-wall
+/// fix flash attention was for the DiT's unbounded packed sequence.
+const K_MATMUL_REG3: usize = 19;
 
-pub const KERNELS: [(&str, &str); 19] = [
+pub const KERNELS: [(&str, &str); 20] = [
     ("conv3d", kernels::CONV3D),
     ("silu", kernels::SILU),
     ("add2", kernels::ADD2),
@@ -140,6 +150,7 @@ pub const KERNELS: [(&str, &str); 19] = [
     ("silu_mul", kernels::SILU_MUL),
     ("gate_row", kernels::GATE_ROW),
     ("layernorm_rows", kernels::LAYERNORM_ROWS),
+    ("matmul_reg3", kernels::MATMUL_REG3),
 ];
 
 /// The two-stage GroupNorm reduction's threads-per-group - matching
@@ -1037,7 +1048,8 @@ pub fn posterior_mode(moments: &[f32], latent_channels: u32, t: u32, h: u32, w: 
 
 fn linear(cx: &Ctx, x: &DeviceBuffer, w: &DeviceBuffer, bias: Option<&DeviceBuffer>, m: u32, k: u32, n: u32) -> DeviceBuffer {
     let y = cx.gpu.storage((m * n) as u64);
-    cx.gpu.submit(&[], &[cx.gpu.step(K_MATMUL, &[x, w, &y], &[m, k, n], m * n)]);
+    let (mm, threads) = model::block::pick_gemm(m as usize, n as usize, K_MATMUL, K_MATMUL_REG3, false);
+    cx.gpu.submit(&[], &[cx.gpu.step(mm, &[x, w, &y], &[m, k, n], threads)]);
     if let Some(b) = bias {
         cx.gpu.submit(&[], &[cx.gpu.step(K_BIAS_ADD, &[&y, b], &[m, n], m * n)]);
     }
