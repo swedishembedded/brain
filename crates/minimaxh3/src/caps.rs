@@ -1082,6 +1082,18 @@ mod tests {
             brain_testutil::skip("BRAIN_MINIMAXH3_DIR not set - no local MiniMax-H3 checkout to encode from");
             return;
         };
+        // `build_text_encoder`/`Qwen3Vl::from_hf_shard` has no explicit
+        // device parameter - it follows ambient `BRAIN_DEVICE` unconditionally
+        // (`model::Shard::ANY_GPU` "keeps the ambient selection"). Real
+        // generation (`generate_t2va.rs`) sets `BRAIN_DEVICE=cpu` in its own
+        // process for exactly this reason: this 50-layer/hidden=5120 shard is
+        // a genuinely huge, unstreamed load with no business landing on a
+        // consumer GPU by ambient accident. This test skipped that env var,
+        // so it OOM'd real GPUs when one happened to be ambient-selected -
+        // matching `qwen3vl`'s and `fastvlm`'s own test-suite precedent
+        // (`qwen3vl::parity`/`train_smoke`, `fastvlm::parity`/`train_smoke`)
+        // of forcing CPU the same way for their own heavy real-weight tests.
+        std::env::set_var("BRAIN_DEVICE", "cpu");
         let paths = Paths::resolve(&root);
         if !has_real_text_encoder(&paths) {
             brain_testutil::skip(&format!("{}/config.json or {}/tokenizer.json not found - text encoder not (yet) downloaded", paths.text_encoder, paths.tokenizer));
