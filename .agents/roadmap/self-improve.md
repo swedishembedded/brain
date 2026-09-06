@@ -705,6 +705,24 @@ brain-rl --all-targets` clean on every touched file (the only remaining
 warnings are pre-existing, in `crates/gguf`, untouched by this phase).
 `cargo check --workspace --all-targets --exclude brain-vulkan` clean.
 
+**A normalization-convention note, found on review, not a defect the gate
+would catch either way.** Because `token_term`'s weight has no explicit
+factor of the row's own token count, and `Model::set_batch`'s `count`
+(the kernel's own `/C` divisor) is computed per call from whatever single
+row is currently uploaded, the realized per-optimizer-step gradient
+divides EACH completion's contribution by ITS OWN length before summing
+across the group - the original GRPO paper's per-sample length
+normalization, not DAPO's batch-level token normalization this file's
+`Batch::LmWeighted` doc comment (P2) cites as "the more robust default."
+Both are legitimate, self-consistent objectives - the `token_term`/
+`loss()` pair the gradcheck FD-tests agree with each other either way, so
+this is invisible to that gate by construction; it is a choice of WHICH
+correct objective is implemented, not a bug in implementing one. Getting
+true batch-level normalization would need the group's total token count
+known before the first of its `group_size` micro-steps backward()s -
+i.e. a two-pass rollout-then-train restructuring of `Grpo`, not a one-line
+change - and is left as a follow-up, not assumed away.
+
 ## P13 - `Dpo` objective - DONE
 
 `crates/rl/src/objective/dpo.rs`: chosen/rejected packed as the two rows of
