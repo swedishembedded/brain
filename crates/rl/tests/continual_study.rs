@@ -552,14 +552,19 @@ fn twelve_cycles_run_end_to_end_but_capability_does_not_accumulate_at_this_scale
          protocol; the retention matrix is real and comes from the gate's own decodes; both structural properties held on \
          every cycle (every trained completion span was a member of the multiset the policy actually sampled, and all {} \
          frozen probe ids were disjoint from {} explore ids); no cycle collapsed onto a single output; the first cycle is \
-         real learning ({r_1_1:.3} against the untrained base's {:.3}); and the gate discriminated - {} promotions, {} \
-         rejects, including a retention-anchor rejection.\n\
-         DOES NOT ESTABLISH - and the run says the opposite: capability did NOT accumulate. Final ACC {:.3} is BELOW the \
-         untrained base's own {:.3} and barely above a last-task-only model's {last_only:.3}; BWT {:+.3}; the cycle-1 \
-         canary fell {r_1_1:.3} -> {r_n_1:.3}; only {learned} of {CYCLES} cycles reached R[k][k] >= {PREREG_MIN_DIAGONAL:.2}. \
-         rho(N) = {rho_n:.3} is NOT interpretable as a plasticity measurement here, because both the warm arm and the \
-         fresh-adapter control sit near the floor and a ratio of two near-zero numbers is noise - the OLS slope's 95% CI \
-         {:?} spans essentially the whole plausible range, which is the same statement.\n\
+         real learning ({r_1_1:.3} against the untrained base's own zero-shot score on that SAME 16-probe task, {:.3}); \
+         and the gate discriminated - {} promotions, {} rejects, including a retention-anchor rejection.\n\
+         DOES NOT ESTABLISH - and the run says the opposite: capability did NOT accumulate. Final ACC {:.3} (a 192-probe, \
+         {CYCLES}-task aggregate) sits BELOW b_base {:.3} - the untrained base's zero-shot score on ONLY probe T1's 16 \
+         probes, since the base's score on the other {} probe sets was never separately measured, so this is a \
+         same-task-scale comparison, not an apples-to-apples 192-probe baseline - and only barely above a last-task-only \
+         model's {last_only:.3}; BWT {:+.3}; the cycle-1 canary fell {r_1_1:.3} -> {r_n_1:.3}; only {learned} of {CYCLES} \
+         cycles reached R[k][k] >= {PREREG_MIN_DIAGONAL:.2}. rho(N) = {rho_n:.3} and its OLS slope over cycle index are \
+         NOT reliable plasticity summary statistics here: rho is a ratio whose denominator (the fresh-adapter control) \
+         is sometimes itself near zero, which can produce large or small ratios that say more about the denominator than \
+         about the numerator - the OLS slope's 95% CI {:?} reflects exactly that instability rather than a real trend. \
+         This does NOT mean the fresh control sat near the floor throughout - per-cycle warm-vs-fresh scores must be read \
+         individually, not summarized by rho's slope alone.\n\
          The binding constraint is measured, not guessed: see the joint-training oracle (Arm 3), which cannot hold the 12 \
          rules either even when trained on all of them AT ONCE.",
         report.probe_ids_checked,
@@ -569,6 +574,7 @@ fn twelve_cycles_run_end_to_end_but_capability_does_not_accumulate_at_this_scale
         rejects.len(),
         report.acc,
         report.b_base,
+        CYCLES - 1,
         report.bwt,
         report.plasticity_slope.map(|s| (s.ci_lo, s.ci_hi)),
     );

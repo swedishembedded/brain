@@ -309,7 +309,8 @@ pub struct StudyConfig {
     pub gate: GateConfig,
     pub gate_policy: GatePolicy,
     /// Arm 2: train a fresh adapter per cycle at an identical budget, to get
-    /// both the FWT baseline and the plasticity denominator.
+    /// both the transfer-vs-fresh-control baseline and the plasticity
+    /// denominator (see [`xfer_vs_fresh_control`] for why this is not FWT).
     pub plasticity_control: bool,
     pub work_dir: PathBuf,
     /// Print one row per cycle as it completes (a 12-cycle run is minutes of
@@ -341,7 +342,8 @@ pub struct CycleRecord {
     /// The candidate arm on cycle `k`'s probe: `R[k][k]` when promoted.
     pub heldout_candidate: f64,
     /// The incumbent arm on cycle `k`'s probe - i.e. the model servable after
-    /// cycle `k-1`, zero-shot on a task it has never seen. Feeds FWT.
+    /// cycle `k-1`, zero-shot on a task it has never seen. Feeds
+    /// [`xfer_vs_fresh_control`].
     pub heldout_incumbent: f64,
     /// `R[k][0..=k]` from the servable arm - this cycle's whole matrix row.
     pub retention_row: Vec<f64>,
@@ -425,7 +427,8 @@ pub struct StudyReport {
     pub promotions: usize,
     pub acc: f64,
     pub bwt: f64,
-    pub fwt: Option<f64>,
+    /// See [`xfer_vs_fresh_control`] - NOT the literature's FWT metric.
+    pub xfer_vs_fresh: Option<f64>,
     pub plasticity_slope: Option<bench::metrics::Slope>,
     /// How many frozen probe ids the pre-loop split-integrity check hashed.
     pub probe_ids_checked: usize,
@@ -472,7 +475,7 @@ impl StudyReport {
 
     pub fn summary(&self) -> String {
         let t = self.r_matrix.len();
-        let fwt = self.fwt.map(|v| format!("{v:+.3}")).unwrap_or_else(|| "n/a".to_string());
+        let xvf = self.xfer_vs_fresh.map(|v| format!("{v:+.3}")).unwrap_or_else(|| "n/a".to_string());
         let rho_n = self.records.last().and_then(|r| r.plasticity_ratio).map(|v| format!("{v:.3}")).unwrap_or_else(|| "n/a".to_string());
         let slope = match self.plasticity_slope {
             Some(s) => format!("slope {:+.4}/cycle, 95% CI [{:+.4}, {:+.4}]", s.slope, s.ci_lo, s.ci_hi),
@@ -488,7 +491,7 @@ impl StudyReport {
         let oracle = self.joint_oracle_acc.map(|v| format!("{v:.3}")).unwrap_or_else(|| "not run".to_string());
         let last_only = self.last_task_only_acc.map(|v| format!("{v:.3}")).unwrap_or_else(|| "not run".to_string());
         format!(
-            "ACC {:.3}   BWT {:+.3}   FWT {fwt}   promotions {}/{t}   rejects: {causes}\n\
+            "ACC {:.3}   BWT {:+.3}   xfer_vs_fresh {xvf}   promotions {}/{t}   rejects: {causes}\n\
              chance baseline b_base (untrained base on probe T1) {:.3}\n\
              plasticity rho(N) {rho_n}   {slope}\n\
              joint-training oracle ACC {oracle}   last-task-only ACC {last_only}\n\
@@ -524,12 +527,27 @@ pub fn bwt(r: &[Vec<f64>]) -> f64 {
     total / (t - 1) as f64
 }
 
-/// `FWT = (1/(T-1)) Σ_{k>=2} (R[k-1][k] - b̄_k)` - how much better than a
-/// from-scratch control the loop is at a task it has never trained on.
-/// `zero_shot[k]` is `R[k-1][k]` (the incumbent arm's score on cycle `k`'s
-/// probe, free from the gate's own decodes); `b_fresh[k]` is Arm 2's.
-pub fn fwt(zero_shot: &[f64], b_fresh: &[f64]) -> f64 {
-    assert_eq!(zero_shot.len(), b_fresh.len(), "continual::fwt: zero-shot and fresh-control series must be parallel");
+/// NOT the literature's forward-transfer (FWT) metric, on purpose - Lopez-
+/// Paz & Ranzato's FWT compares against an UNTRAINED random-init reference
+/// (`b̄_k`), which this harness never scores: Arm 2 always trains its fresh
+/// adapter for the full per-cycle budget (see
+/// [`StudyConfig::plasticity_control`]), because the same fresh-adapter
+/// score doubles as the plasticity denominator. `zero_shot[k] - b_fresh[k]`
+/// therefore compares against a FULLY-TRAINED fresh control and is
+/// guaranteed negative whenever training works at all - it answers "does
+/// the incumbent's accumulated experience transfer to an unseen task at
+/// least as well as a fresh adapter trained on that task alone", not "does
+/// it beat having learned nothing". Reading this as FWT invites exactly
+/// that confusion (found on adversarial review of this harness's own
+/// output), which is why it is named and printed as `xfer_vs_fresh`, not
+/// `fwt`.
+///
+/// `(1/(T-1)) Σ_{k>=2} (zero_shot[k] - b_fresh[k])`. `zero_shot[k]` is
+/// `R[k-1][k]` (the incumbent arm's score on cycle `k`'s probe, free from
+/// the gate's own decodes); `b_fresh[k]` is Arm 2's same-cycle fresh-adapter
+/// score.
+pub fn xfer_vs_fresh_control(zero_shot: &[f64], b_fresh: &[f64]) -> f64 {
+    assert_eq!(zero_shot.len(), b_fresh.len(), "continual::xfer_vs_fresh_control: zero-shot and fresh-control series must be parallel");
     let t = zero_shot.len();
     if t < 2 {
         return 0.0;
@@ -800,7 +818,7 @@ pub fn run_study<M: Model, C: Curriculum>(spec: &StudySpec, curr: &C, cfg: &Stud
     };
 
     let zero_shot: Vec<f64> = records.iter().map(|r| r.heldout_incumbent).collect();
-    let fwt_value = if b_fresh.len() == records.len() && records.len() >= 2 { Some(fwt(&zero_shot, &b_fresh)) } else { None };
+    let xfer_vs_fresh_value = if b_fresh.len() == records.len() && records.len() >= 2 { Some(xfer_vs_fresh_control(&zero_shot, &b_fresh)) } else { None };
     let rho: Vec<f64> = records.iter().filter_map(|r| r.plasticity_ratio).collect();
     let xs: Vec<f64> = (1..=rho.len()).map(|i| i as f64).collect();
     let plasticity_slope = bench::metrics::ols_slope_ci(&xs, &rho);
@@ -808,7 +826,7 @@ pub fn run_study<M: Model, C: Curriculum>(spec: &StudySpec, curr: &C, cfg: &Stud
     Ok(StudyReport {
         acc: acc(&r_matrix),
         bwt: bwt(&r_matrix),
-        fwt: fwt_value,
+        xfer_vs_fresh: xfer_vs_fresh_value,
         plasticity_slope,
         promotions,
         records,
@@ -967,19 +985,19 @@ mod tests {
     }
 
     #[test]
-    fn fwt_compares_zero_shot_against_the_fresh_adapter_control() {
+    fn xfer_vs_fresh_control_compares_zero_shot_against_the_fresh_adapter_control() {
         // Cycle 0 is excluded by construction (nothing precedes it).
         let zero_shot = [0.05, 0.30, 0.40];
         let b_fresh = [0.60, 0.20, 0.25];
         // ((0.30 - 0.20) + (0.40 - 0.25)) / 2 = 0.125
-        assert!((fwt(&zero_shot, &b_fresh) - 0.125).abs() < 1e-12);
-        assert_eq!(fwt(&[0.1], &[0.2]), 0.0);
+        assert!((xfer_vs_fresh_control(&zero_shot, &b_fresh) - 0.125).abs() < 1e-12);
+        assert_eq!(xfer_vs_fresh_control(&[0.1], &[0.2]), 0.0);
     }
 
     #[test]
     #[should_panic(expected = "must be parallel")]
-    fn fwt_rejects_mismatched_series() {
-        let _ = fwt(&[0.1, 0.2], &[0.3]);
+    fn xfer_vs_fresh_control_rejects_mismatched_series() {
+        let _ = xfer_vs_fresh_control(&[0.1, 0.2], &[0.3]);
     }
 
     #[test]

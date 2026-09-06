@@ -33,7 +33,9 @@ sequential gated cycles, the retention matrix and plasticity control are
 instrumented and reported, and the gate is measurably better than a coin -
 but capability did NOT accumulate across those cycles at the one model
 scale, one architecture, one task family and one seed that were measured
-(final ACC 0.271 against the untrained base's own 0.354 on the same probes).
+(final ACC 0.271 sits below b_base 0.354, the untrained base's zero-shot
+score on one 16-probe task - not a like-for-like 192-probe baseline, since
+the base's score on the other 11 tasks was never separately measured).
 Read the rollup section at the end of this file before quoting anything
 above it as a continuous-learning result.
 
@@ -1321,7 +1323,7 @@ is recorded here rather than applied quietly.
     c11   0.67 0.06 0.08 0.06 0.38 0.33 0.08 0.10 0.08 0.10 0.98    .
     c12   0.67 0.06 0.08 0.06 0.38 0.33 0.08 0.10 0.08 0.10 0.98 0.31
 
-    ACC 0.271   BWT -0.066   FWT -0.153   promotions 2/12
+    ACC 0.271   BWT -0.066   xfer_vs_fresh -0.153   promotions 2/12
     rejects: c2:anchor c3:notsig c4:notsig c5:notsig c6:notsig c7:notsig
              c8:notsig c9:notsig c10:notsig c12:notsig
     chance baseline b_base (untrained base on probe T1) 0.354
@@ -1354,32 +1356,46 @@ was a member of the multiset the policy actually sampled, and all 192 frozen
 probe ids were disjoint from 3072 explore ids by content-space partition and
 by id hash; no cycle collapsed onto a small output set (worst distinct
 fraction 0.964); the first cycle is real learning (0.896 against the
-untrained base's 0.354); and the gate discriminated - 2 promotions, 10
-rejects, **including a `Cause::AnchorRegressed` rejection at cycle 2**, which
-retires that variant's "decorative" status. Catastrophic forgetting is
-visible and correctly captured: cycle 11's promotion (its own probe 0.98)
-cost T1 0.90 -> 0.67 and T4 0.35 -> 0.06.
+untrained base's own zero-shot score on that same 16-probe task, 0.354); and
+the gate discriminated - 2 promotions, 10 rejects, **including a
+`Cause::AnchorRegressed` rejection at cycle 2**, which retires that
+variant's "decorative" status. Catastrophic forgetting is visible and
+correctly captured: cycle 11's promotion (its own probe 0.98) cost T1
+0.90 -> 0.67 and T4 0.35 -> 0.06.
 
 **Does not establish - the run says the opposite.** Capability did NOT
-accumulate. Final ACC 0.271 is BELOW the untrained base's own 0.354 on the
-same probes, and only 0.045 above a last-task-only model's 0.226. BWT
--0.066. Only 3 of 12 cycles reached `R[k][k] >= 0.60`.
+accumulate. Final ACC 0.271 (a 192-probe, 12-task aggregate) sits below
+b_base 0.354 - the untrained base's zero-shot score on ONLY probe T1's 16
+probes, since its score on the other 11 probe sets was never separately
+measured, so this is a same-task-scale comparison, not an apples-to-apples
+192-probe baseline - and only 0.045 above a last-task-only model's 0.226.
+BWT -0.066. Only 3 of 12 cycles reached `R[k][k] >= 0.60` (2 of 12 by the
+tighter, promotion-only reading below).
 
-**rho(12) = 0.190 is NOT a plasticity measurement here.** Both the warm arm
-and the fresh-adapter control sit near the floor, and a ratio of two
-near-zero numbers is noise - the per-cycle series (1.00, 0.77, 0.40, 1.60,
-0.06, 0.70, 2.00, 3.00, 0.24, 0.29, 1.47, 0.19) and the OLS 95% CI
-[-0.174, +0.173], which spans essentially the whole plausible range, are the
-same statement twice. No plasticity claim, positive or negative, is
-supported by this run.
+**rho(12) = 0.190 and its OLS slope are NOT reliable plasticity summary
+statistics, but not for the reason first written here** (corrected on
+adversarial audit - see the "Continuous-learning validation" rollup section
+below for the full correction, kept in one place rather than duplicated).
+In short: the fresh-adapter control is NOT near the floor (mean 0.442
+against the warm arm's 0.285, reaching >=0.96 at cycle 5 where the warm arm
+reaches 0.063) - `rho`'s instability comes from its denominator being a
+ratio term, not from both arms being near zero, and the warm-vs-fresh gap
+this run actually produced is itself a real, if not-yet-significant
+(p ~ 0.27 at n=11), signal that the rollup section reports properly.
 
-**The binding constraint is measured, not guessed.** The Arm-3 oracle -
-one adapter, all 12 rules AT ONCE, the whole study's step budget, zero
-sequential interference - reaches 0.071, below the untrained base. So "the
-loop forgot task 1" and "a rank-8 adapter driven by GRPO at this budget
-cannot represent 12 cue-conditioned rules at all" are **not
-distinguishable** by this run, and they have opposite fixes. The BWT above
-must be read as a capacity/optimization result, not a forgetting result.
+**The binding constraint is measured, not fully guessed, and the warm-start
+gap above partially resolves it.** The Arm-3 oracle - one adapter, all 12
+rules AT ONCE, the whole study's step budget, zero sequential interference -
+reaches 0.071, below the untrained base's T1-only score. So "a rank-8
+adapter driven by GRPO at this budget cannot represent 12 cue-conditioned
+rules pooled at once" is a real, separate finding from "the loop forgot
+task 1" - and the two are only **partially** distinguished by this run
+(see the corrected plasticity reading above: the per-rule capacity looks
+ample, since a fresh adapter alone reaches ~0.96 on `cue06`; what
+specifically underperforms is the warm-started arm). They still have
+opposite fixes, and the BWT above should be read primarily as a
+capacity/optimization result, not a forgetting result, with the caveat
+above attached rather than dropped.
 
 **Also not established:** scale (12 cycles at this size says nothing about
 10^3; loss of plasticity in deep continual learning has needed ~2000
@@ -1500,7 +1516,7 @@ of its own.
 continual_learning -- --seed 1`, 900.8 s wall clock on a cached base
 (fixture check `0.995` on the pretraining rules, `0.417` on study rule T1):
 
-    ACC 0.271   BWT -0.066   FWT -0.153   promotions 2/12
+    ACC 0.271   BWT -0.066   xfer_vs_fresh -0.153   promotions 2/12
     rejects: c2:anchor c3:notsig c4:notsig c5:notsig c6:notsig c7:notsig
              c8:notsig c9:notsig c10:notsig c12:notsig
     b_base 0.354   rho(12) 0.190   slope -0.0005/cycle, 95% CI [-0.1742, +0.1733]
@@ -1536,7 +1552,7 @@ carried 1, agreeing on 5 of 12.
 |---|---|---|
 | ACC | 0.271 | **0.056** |
 | BWT | -0.066 | **-0.133** |
-| FWT | -0.153 | -0.318 |
+| xfer_vs_fresh (not literature FWT) | -0.153 | -0.318 |
 | cycle-1 canary R[N][1] | 0.667 | **0.146** |
 | min distinct-completion fraction | 0.964 | **0.047** |
 | carried forward | 2 of 12 | 8 of 12 |
@@ -1683,7 +1699,17 @@ One architecture: `qwen3::Qwen`, `n_layers 2`, `d_model 64`, `n_heads 4`,
 `n_kv_heads 2`, `head_dim 16`, `d_ff 256`, `vocab 32`, tied embeddings -
 order 10^5 parameters. One adapter: rank-8 LoRA, alpha 16, targets
 `wq,wk,wv,wo` only, over a frozen full-parameter-pretrained base. One
-objective: GRPO, group 2, 240 steps per cycle, `lr 5e-3`, explore temp 1.5.
+objective: GRPO, group 2, 240 steps per cycle, `lr 5e-3`, explore temp 1.5,
+**`replay_frac 0.0`, `rehearsal 0`** - the one setting worth calling out
+explicitly (found missing from this list on adversarial audit): the
+harness's own doc comments name pure sequential learning with no replay as
+having a diagnosed degenerate failure mode (cycle 1's single-cue rule is
+solvable by a cue-independent policy, a shortcut later cycles must climb
+out of), and the escalation ladder below shows replay/rehearsal arms were
+tried and also failed - so this negative is not explained by the shortcut
+alone, but the headline run measured here is specifically the
+known-degenerate configuration. Anyone reproducing or requoting the
+negative needs this setting alongside the rest.
 One seed (1) for the 12-cycle trajectory, one task order, one device (Intel
 Arc MTL, release). The separate 5-seed pre-registration covers cycle 1 ONLY
 and exists to size thresholds; it supports no multi-cycle claim.
@@ -1702,9 +1728,14 @@ changed and the probe re-scored the same model. The one promotion that did
 land in between (cycle 11, its own probe 0.979) is also the one that moved
 the canary, 0.896 -> 0.667, taking T4 0.354 -> 0.063 in the same step.
 
-Aggregates over the full 12x12 matrix: **ACC 0.271, BWT -0.066, FWT -0.153**,
-against an untrained base scoring **0.354** on the same 192 frozen probes and
-a last-task-only control at **0.226**. The joint-training capacity oracle
+Aggregates over the full 12x12 matrix: **ACC 0.271, BWT -0.066,
+xfer_vs_fresh -0.153** (NOT the literature's forward-transfer metric - see
+the correction below), against **b_base 0.354**, the untrained base's
+zero-shot score on ONLY probe T1's 16 probes - the untrained base's score
+on the other 11 probe sets was never separately measured, so "ACC (a
+192-probe, 12-task aggregate) sits below b_base" is a same-task-scale
+comparison, not an apples-to-apples 192-probe baseline - and a
+last-task-only control at **0.226**. The joint-training capacity oracle
 (one adapter, all 12 rules pooled, the whole study's 2880-step budget, zero
 sequential interference) reaches **0.071** (0.063 on a re-run) against a
 pre-registered bar of 0.60.
@@ -1741,14 +1772,43 @@ cycle): 1.00, 0.77, 0.40, 1.60, 0.06, 0.70, 2.00, 3.00, 0.24, 0.29, 1.47,
 0.19. Terminal `rho(12) = 0.190`. OLS slope over cycle index
 **-0.0005 per cycle, 95% CI [-0.1742, +0.1733]**.
 
-**This is an instrumented plasticity measurement that returned noise, and it
-should be cited that way and no other way.** From cycle 2 on both arms sit
-near the floor, so `rho` is a ratio of two near-zero numbers; the CI spanning
-essentially the entire plausible range around a slope four orders of
-magnitude smaller than its own half-width is the same statement in the second
-form. Plasticity was neither shown to be preserved nor shown to decay. The
-apparatus works; the experiment it was pointed at could not produce a signal
-for it to measure.
+**Correction (found on adversarial audit of this section, not by the
+harness's own asserts): the sentence this section originally used to
+dismiss `rho` - "both arms sit near the floor" - is false, and the false
+reading hid the run's most interesting signal.** Inverting `rho =
+heldout_candidate / max(heldout_fresh, 1e-6)` against the printed warm
+column (the `R[k][k]`-adjacent per-cycle diagonal, not the retention
+column) recovers the fresh-control series: mean **0.442**, against the
+warm arm's mean **0.285**. The fresh control is not near the floor - at
+cycle 5 it reaches **>=0.96** on `cue06 picks(4,1,2)` where the warm arm
+reaches **0.063**. Over the 11 discordant cycles the fresh control beats
+the warm arm on **7**; an exact sign test on 7-of-11 gives **p ~ 0.27**
+- suggestive, not significant at this n, and that is the honest caveat,
+a different one from the one originally written here.
+
+Two consequences. First, the OLS **slope** over `rho` itself remains
+uninterpretable as stated below - `rho` is a ratio with a near-zero
+denominator on several cycles, so the slope's instability is real even
+though the "near the floor" premise was wrong. Second, and more
+important: this **partially** distinguishes the two explanations the next
+section calls indistinguishable. A single rank-8 adapter reaches ~0.96 on
+one rule (`cue06`) in 240 steps from a frozen base - per-rule capacity is
+not obviously the constraint. What measurably fails at cycle 5 is the
+**warm-started** arm specifically, not fresh training on that same rule.
+The joint-training oracle's 0.071 is still a real, separate finding (12
+rules pooled at once exceeds this adapter) - but "the loop forgot" and
+"this adapter cannot represent 12 rules at all" are not equally supported
+by this run; the warm-start-specific failure has the stronger evidence
+behind it.
+
+OLS slope over cycle index on the `rho` series itself: **-0.0005 per
+cycle, 95% CI [-0.1742, +0.1733]** - a CI spanning essentially the entire
+plausible range around a slope four orders of magnitude smaller than its
+own half-width. That specific number is genuinely uninterpretable, for the
+stated ratio-instability reason. It is not evidence that nothing is going
+on - the warm-vs-fresh gap above is the real signal this apparatus
+produced, and it was overwritten in the first draft of this section rather
+than reported.
 
 ### Gate informativeness
 
@@ -1780,21 +1840,37 @@ servable model collapsed to 9 distinct completions across 192 probes against
 the gated arm's worst cycle at 185 of 192, and cycle 2 shows the mechanism in
 one line (the gate rejected it as `AnchorRegressed`, the coin carried it, and
 the canary fell 0.90 -> 0.08 on the spot and never recovered). And that the
-whole trajectory is reproducible: bit-identical per-cycle numbers, retention
-matrix and aggregates across three separate processes.
+whole trajectory is reproducible ON THIS BOX, same driver and build:
+bit-identical per-cycle numbers, retention matrix and aggregates across
+three separate processes - though not unconditionally so (the capacity
+oracle itself gave 0.071 on one run and 0.063 on a later re-run, so GPU
+determinism here is a property of these code paths on this specific setup,
+not a general guarantee).
 
-**What these numbers do not prove, and in three places contradict.** They do
-not prove that brain accumulates capability across cycles - they measure the
-opposite at this scale: final ACC 0.271 is BELOW the untrained base's own
-0.354 on the same probes and only 0.045 above a last-task-only model, BWT is
--0.066, and 2 of 12 cycles acquired and kept their rule. They do not prove
-anything about plasticity in either direction, for the reason given above.
-They do not even establish WHY accumulation failed: the capacity oracle
-reaches 0.071 with zero sequential interference, so "the loop forgot task 1"
-and "a rank-8 attention-only LoRA driven by GRPO at 240 steps per cycle
-cannot represent 12 cue-conditioned rules at all" are not distinguishable by
-this run, and they have opposite fixes - which also means the BWT figure must
-be read as a capacity/optimization result and not as a forgetting result.
+**What these numbers do not prove, and in several places contradict.** They
+do not prove that brain accumulates capability across cycles - they measure
+the opposite at this scale: final ACC 0.271 (a 192-probe, 12-task
+aggregate) sits below b_base 0.354, the untrained base's zero-shot score on
+ONLY probe T1's 16 probes (its score on the other 11 probe sets was never
+separately measured, so this is not an apples-to-apples 192-probe
+baseline), and only 0.045 above a last-task-only model; BWT is -0.066, and
+2 of 12 cycles acquired and kept their rule. They do not establish
+plasticity in a statistically significant sense - but they DO show a real,
+if not-yet-significant (p ~ 0.27 at n=11), signal: the fresh-adapter
+control outperforms the warm-started arm on 7 of 11 discordant cycles (mean
+0.442 vs 0.285), which the "Continuous-learning validation" rollup section
+below reports in full after this section's own first draft mischaracterized
+it as "both arms near the floor." They do not fully establish WHY
+accumulation failed, though the same warm-vs-fresh gap partially resolves
+it: the capacity oracle reaches 0.071 with zero sequential interference,
+and a fresh adapter alone reaches ~0.96 on one rule, so "the loop forgot
+task 1" (evidence: the warm-start gap) and "a rank-8 attention-only LoRA
+driven by GRPO at 240 steps per cycle cannot represent 12 cue-conditioned
+rules pooled at once" (evidence: the oracle) are separate, both-real
+findings rather than the single indistinguishable one an earlier draft of
+this section claimed - and they still have opposite fixes, which also means
+the BWT figure must be read primarily as a capacity/optimization result and
+not as a forgetting result.
 They do not prove the gate is ALIGNED: better than a coin against the
 retention matrix it is itself scored on is not evidence that the retention
 matrix measures anything a human wants. And the negative does not generalize

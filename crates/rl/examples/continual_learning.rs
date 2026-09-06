@@ -479,13 +479,18 @@ fn print_verdict(report: &StudyReport, oracle: Option<f64>, args: &Args, targets
         );
     } else {
         println!(
-            "DOES NOT ESTABLISH - and this run says the opposite. Capability did NOT accumulate: final ACC {:.3} against\n\
-             the untrained base's own {:.3} on the same probes and a last-task-only model's {}; BWT {:+.3}; the cycle-1\n\
-             canary went {r_1_1:.3} -> {r_n_1:.3}. When both the warm arm and the fresh-adapter control sit near the\n\
-             floor, rho(N) is a ratio of two near-zero numbers and is NOT interpretable as plasticity in either\n\
-             direction. OLS slope on rho: {}.",
+            "DOES NOT ESTABLISH - and this run says the opposite. Capability did NOT accumulate: final ACC {:.3} (a\n\
+             192-probe, {t}-task aggregate) sits below b_base {:.3} - the untrained base's zero-shot score on ONLY\n\
+             probe T1's 16 probes (its score on the other {} probe sets was never separately measured, so this is a\n\
+             same-task-scale comparison, not an apples-to-apples 192-probe baseline) - and a last-task-only model's {};\n\
+             BWT {:+.3}; the cycle-1 canary went {r_1_1:.3} -> {r_n_1:.3}. rho(N) and its OLS slope over cycle index are\n\
+             NOT reliable plasticity summary statistics here: rho is a ratio whose denominator (the fresh-adapter\n\
+             control) is sometimes itself near zero, so a large or small ratio can say more about the denominator than\n\
+             the numerator. This does NOT mean the fresh control sat near the floor throughout - read the per-cycle\n\
+             warm and fresh scores individually, not rho's slope alone. OLS slope on rho: {}.",
             report.acc,
             report.b_base,
+            t - 1,
             last_only.map(|v| format!("{v:.3}")).unwrap_or_else(|| "n/a".to_string()),
             report.bwt,
             report
