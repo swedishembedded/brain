@@ -56,12 +56,22 @@ fn main() {
     eprintln!("      done in {:.1}s", t1.elapsed().as_secs_f32());
 
     let ckpt = weights.as_checkpoint();
+    // Real-hardware measurement (dit_matches_the_real_reference_numerically_
+    // layer_by_layer with BRAIN_MINIMAXH3_TEST_DEVICE=vulkan, uncontended):
+    // a full 50-block forward on this box's P40 completes in ~112s, faster
+    // than the CPU backend's ~148-190s at the same real dimensions - so
+    // "vulkan" is the better default now, overridable via
+    // BRAIN_MINIMAXH3_GEN_DEVICE. This is independent of BRAIN_DEVICE (the
+    // text encoder's own ambient device selection, kept on CPU separately -
+    // its ~63GB checkpoint has no reduced-precision GPU tier and would OOM a
+    // single P40).
+    let dit_device = std::env::var("BRAIN_MINIMAXH3_GEN_DEVICE").unwrap_or_else(|_| "vulkan".to_string());
     let opts = minimaxh3::pipeline::GenOpts {
         canvas: Some((canvas_px, canvas_px)),
         num_frames,
         num_inference_steps: steps,
         seed: 0,
-        device: Some("cpu".to_string()),
+        device: Some(dit_device),
     };
 
     eprintln!(
