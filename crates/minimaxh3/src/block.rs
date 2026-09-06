@@ -88,8 +88,20 @@ const K_ROW_SCATTER: usize = 12;
 /// pattern, while `matmul_reg3` stages both operands through workgroup
 /// memory.
 const K_MATMUL_REG3: usize = 13;
+/// Packs the three separate `[seq_len, inner]` q/k/v projections into the one
+/// `[seq_len, 3*inner]` slab every kernel in the flash family reads through
+/// `qkv_stride`/`q_off`/`k_off`/`v_off`. Only [`attention_flash`] dispatches
+/// it - the materialized trio reads q/k/v as three bindings and needs no slab.
+const K_PACK_QKV: usize = 14;
+/// The four interchangeable bidirectional flash-attention rungs, registered as
+/// a complete set so `model::block::flash_bidir_variant` can walk the whole
+/// ladder from this crate's queried `DeviceCaps` (see [`FLASH_IDS`]).
+const K_FLASH_ATTN_BIDIR: usize = 15;
+const K_FLASH_ATTN_BIDIR_SPLIT: usize = 16;
+const K_FLASH_ATTN_BIDIR_REG: usize = 17;
+const K_FLASH_ATTN_BIDIR_REG2: usize = 18;
 
-pub const KERNELS: [(&str, &str); 14] = [
+pub const KERNELS: [(&str, &str); 19] = [
     ("matmul", kernels::MATMUL),
     ("bias_add", kernels::BIAS_ADD),
     ("rmsnorm_eps", kernels::RMSNORM_EPS),
@@ -104,7 +116,22 @@ pub const KERNELS: [(&str, &str); 14] = [
     ("add2", kernels::ADD2),
     ("row_scatter", kernels::ROW_SCATTER),
     ("matmul_reg3", kernels::MATMUL_REG3),
+    ("pack_qkv", kernels::PACK_QKV),
+    ("flash_attn_bidir", kernels::FLASH_ATTN_BIDIR),
+    ("flash_attn_bidir_split", kernels::FLASH_ATTN_BIDIR_SPLIT),
+    ("flash_attn_bidir_reg", kernels::FLASH_ATTN_BIDIR_REG),
+    ("flash_attn_bidir_reg2", kernels::FLASH_ATTN_BIDIR_REG2),
 ];
+
+/// This crate's rung set for [`model::block::flash_bidir_variant`] - all four
+/// registered, so the selector picks the best one this device's queried caps
+/// allow rather than this crate pinning a rung by hand.
+const FLASH_IDS: model::block::FlashIds = model::block::FlashIds {
+    bidir: K_FLASH_ATTN_BIDIR,
+    split: Some(K_FLASH_ATTN_BIDIR_SPLIT),
+    reg: Some(K_FLASH_ATTN_BIDIR_REG),
+    reg2: Some(K_FLASH_ATTN_BIDIR_REG2),
+};
 
 /// One open device + the shared kernel table - every op below dispatches
 /// through this, matching `crate::vocoder::Ctx`'s own role.
@@ -177,7 +204,79 @@ fn rope_partial(cx: &Ctx, buf: &DeviceBuffer, cos: &DeviceBuffer, sin: &DeviceBu
 /// `[seq_len, heads*head_dim]` q/k/v buffers - `MiniMaxH3AttnProcessor`'s own
 /// shape (no causal mask, no cross-attention anywhere in the model). Returns
 /// `[seq_len, heads*head_dim]`.
+///
+/// Both arms below compute the SAME function - `softmax(q·kᵀ/√head_dim)·v`,
+/// unmasked, in the same `[seq_len, heads*head_dim]` row-major output layout -
+/// and differ only in whether the `[heads, seq_len, seq_len]` scores and probs
+/// matrices are ever written to device memory. They are picked by
+/// [`attn_mode`], never by shape.
 fn attention(cx: &Ctx, q: &DeviceBuffer, k: &DeviceBuffer, v: &DeviceBuffer, seq_len: u32, heads: u32, head_dim: u32) -> DeviceBuffer {
+    match attn_mode(&cx.gpu, head_dim) {
+        AttnMode::Flash => attention_flash(cx, q, k, v, seq_len, heads, head_dim),
+        AttnMode::Materialized => attention_trio(cx, q, k, v, seq_len, heads, head_dim),
+    }
+}
+
+/// The self-attention path for this device.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AttnMode {
+    /// One fused `flash_attn_bidir*` dispatch, online softmax, nothing
+    /// `O(seq_len²)` ever allocated.
+    Flash,
+    /// The `attn_scores_qk -> attn_softmax_bidir -> attn_apply_full` trio,
+    /// which materializes both `[heads, seq_len, seq_len]` matrices.
+    Materialized,
+}
+
+/// Which attention path this device takes.
+///
+/// Flash is the default wherever the device can run it, because the trio's two
+/// materialized `[heads, seq_len, seq_len]` slabs are what make this model OOM
+/// long before the weights do: H3 attends over ONE packed sequence holding
+/// every video, audio and text token of the whole clip at once, so `seq_len`
+/// grows with the square of the canvas edge and the slabs grow with its fourth
+/// power. At 56 heads the pair costs `2·56·seq_len²·4` bytes - already tens of
+/// gigabytes at the token counts a 256x256 canvas produces, against a 24 GB
+/// card and a per-binding ceiling far below that. Flash's peak attention
+/// memory is `O(seq_len·head_dim)` instead.
+///
+/// The device check is [`model::block::flash_gate`] - the shared outer gate
+/// every flash-family caller in this workspace goes through, whose
+/// `workgroup_reductions` bit is false on the Cranelift CPU JIT (these kernels
+/// need two or three top-level barriers where that JIT splits at one). So the
+/// CPU path keeps the trio, which `backend_cpu::FastIdx` routes to native
+/// dispatched fast paths by kernel NAME, and which therefore stays the
+/// reference definition of the math this crate's tiny-config tests check.
+///
+/// This crate's own extra condition is `head_dim <= 128`, the family's hard
+/// limit (`flash_bidir_step` asserts it): checked here so an out-of-range
+/// config falls back rather than panicking. `H3TransformerConfig`'s real
+/// `attention_head_dim` is 128 - exactly at the limit, not under it, so any
+/// future variant with a wider head silently takes the trio and must be
+/// re-measured rather than assumed to fit.
+///
+/// `BRAIN_MINIMAXH3_ATTN=flash|trio` forces either arm. Without it, an A/B on
+/// a device that can run flash compares the fused path against itself and
+/// reports a meaningless parity - which looks like evidence and is not; it is
+/// also how the memory measurement gets its "before" number without checking
+/// out an older commit.
+pub fn attn_mode(gpu: &Gpu, head_dim: u32) -> AttnMode {
+    match std::env::var("BRAIN_MINIMAXH3_ATTN").ok().as_deref() {
+        Some("flash") => return AttnMode::Flash,
+        Some("trio") => return AttnMode::Materialized,
+        _ => {}
+    }
+    if model::block::flash_gate(&gpu.caps(), head_dim <= 128) {
+        AttnMode::Flash
+    } else {
+        AttnMode::Materialized
+    }
+}
+
+/// The materialized `scores -> softmax -> apply` trio: two
+/// `[heads, seq_len, seq_len]` device buffers, three dispatches. The reference
+/// definition of this crate's attention, and the only arm the CPU JIT can run.
+fn attention_trio(cx: &Ctx, q: &DeviceBuffer, k: &DeviceBuffer, v: &DeviceBuffer, seq_len: u32, heads: u32, head_dim: u32) -> DeviceBuffer {
     let inner = heads * head_dim;
     let scale = 1.0 / (head_dim as f32).sqrt();
     let scores = cx.gpu.storage((heads * seq_len * seq_len) as u64);
@@ -186,6 +285,36 @@ fn attention(cx: &Ctx, q: &DeviceBuffer, k: &DeviceBuffer, v: &DeviceBuffer, seq
     cx.gpu.submit(&[], &[cx.gpu.step(K_ATTN_SOFTMAX_BIDIR, &[&scores, &probs], &[1, heads, seq_len], heads * seq_len)]);
     let out = cx.gpu.storage((seq_len * inner) as u64);
     cx.gpu.submit(&[], &[cx.gpu.step(K_ATTN_APPLY_FULL, &[&probs, v, &out], &[1, heads, seq_len, head_dim, inner, inner], heads * seq_len * head_dim)]);
+    out
+}
+
+/// One fused flash-attention dispatch over the whole packed sequence.
+///
+/// The family reads q, k and v as three REGIONS of a single row-major slab
+/// rather than three bindings, so the projections are packed into
+/// `[seq_len, 3*inner]` first (`pack_qkv`, one dispatch, one pass over
+/// `3·seq_len·inner` elements). That slab is the entire extra allocation this
+/// path makes, and it is linear in `seq_len` where the trio's pair of matrices
+/// is quadratic: at 56 heads the crossover is at `seq_len = 3·inner/heads =
+/// 3·head_dim = 384` tokens, i.e. everything past a trivially small sequence.
+///
+/// The shape contract `flash_bidir_step` documents is met exactly by that
+/// slab: `stride = 3*inner`, `q_off/k_off/v_off = 0/inner/2*inner`,
+/// `d_model = inner = heads*head_dim`, `bsz = 1` (H3 packs the whole clip into
+/// ONE sequence, so there is never a second sample to batch). The kernel
+/// applies `1/sqrt(head_dim)` itself and masks nothing, which is what this
+/// model wants - the scale matches [`attention_trio`]'s explicit one and the
+/// attention is bidirectional in both arms.
+///
+/// RoPE has already been applied to `q`/`k` in place by the caller, so packing
+/// AFTER it (rather than rotating inside the slab, as `minimaxmusic3` does)
+/// keeps the rotation dispatches bit-identical to the trio path's.
+fn attention_flash(cx: &Ctx, q: &DeviceBuffer, k: &DeviceBuffer, v: &DeviceBuffer, seq_len: u32, heads: u32, head_dim: u32) -> DeviceBuffer {
+    let inner = heads * head_dim;
+    let qkv = cx.gpu.storage((seq_len * 3 * inner) as u64);
+    cx.gpu.submit(&[], &[cx.gpu.step(K_PACK_QKV, &[q, k, v, &qkv], &[seq_len, inner], seq_len * 3 * inner)]);
+    let out = cx.gpu.storage((seq_len * inner) as u64);
+    cx.gpu.submit(&[], &[model::block::flash_bidir_step(&cx.gpu, FLASH_IDS, 1, heads, seq_len, head_dim, inner, &qkv, &out)]);
     out
 }
 
@@ -538,4 +667,131 @@ pub fn block_forward(
     let ff_out = linear(cx, &act, &w.fc2, None, seq_len, ffn, hidden);
     let out = gated_residual(cx, &h1, &gate_mlp, &ff_out, seq_len, hidden);
     (out, attn_out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Cosine similarity and max absolute difference between two same-length
+    /// vectors - the pair of numbers this workspace's numeric parity gates are
+    /// always stated in.
+    fn cos_and_maxabs(a: &[f32], b: &[f32]) -> (f64, f64) {
+        assert_eq!(a.len(), b.len());
+        let (mut dot, mut na, mut nb, mut maxabs) = (0f64, 0f64, 0f64, 0f64);
+        for (x, y) in a.iter().zip(b) {
+            let (x, y) = (*x as f64, *y as f64);
+            dot += x * y;
+            na += x * x;
+            nb += y * y;
+            maxabs = maxabs.max((x - y).abs());
+        }
+        (dot / (na.sqrt() * nb.sqrt()), maxabs)
+    }
+
+    /// Deterministic pseudo-random fill - a SplitMix64 draw's top 24 bits
+    /// mapped into `[-1, 1)`, so both arms see byte-identical inputs without
+    /// pulling an RNG dependency into this module.
+    ///
+    /// The RANGE is load-bearing, not cosmetic. `q·k` runs over `head_dim`
+    /// terms and is then scaled by only `1/sqrt(head_dim)`, so inputs an order
+    /// of magnitude wide push the logits far enough apart that `softmax`
+    /// saturates to a one-hot pick of a single `v` row - at which point BOTH
+    /// arms return that row verbatim, agree bit-for-bit, and prove nothing
+    /// about the online softmax. An earlier version of this generator divided
+    /// by 2048 instead of 2^23 and produced values up to 8191; it reported
+    /// cosine 1.0000000000 and max_abs exactly 0 at every sequence length,
+    /// which looked like an unusually clean pass and was in fact a vacuous
+    /// one. [`assert_mixing`] below is the standing guard against that.
+    fn fill(n: usize, seed: u64) -> Vec<f32> {
+        let mut s = seed;
+        (0..n)
+            .map(|_| {
+                s = s.wrapping_add(0x9E37_79B9_7F4A_7C15);
+                let mut z = s;
+                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                z ^= z >> 31;
+                ((z >> 40) as f32 / 8_388_608.0) - 1.0
+            })
+            .collect()
+    }
+
+    fn std_dev(v: &[f32]) -> f64 {
+        let mean = v.iter().map(|x| *x as f64).sum::<f64>() / v.len() as f64;
+        (v.iter().map(|x| (*x as f64 - mean).powi(2)).sum::<f64>() / v.len() as f64).sqrt()
+    }
+
+    /// Fail unless the attention actually AVERAGED over many keys.
+    ///
+    /// Attention output is a convex combination of `v` rows, so a softmax that
+    /// spreads its mass over `n` keys shrinks the spread of the result by
+    /// roughly `sqrt(n)`, while one that has saturated to a single key
+    /// reproduces a `v` row unchanged and leaves the spread equal to `v`'s.
+    /// Comparing two arms on a saturated softmax compares two copies of the
+    /// same lookup and would pass no matter what the online softmax did with
+    /// its running max and rescale - the exact code this test exists to check.
+    /// Half of `v`'s own standard deviation is a deliberately loose threshold:
+    /// it is nowhere near the `1/sqrt(37)` a near-uniform mix over even the
+    /// shortest sequence here would give, so it fires only on genuine
+    /// saturation and never on an unlucky draw.
+    fn assert_mixing(out: &[f32], v: &[f32], seq_len: u32) {
+        let (so, sv) = (std_dev(out), std_dev(v));
+        assert!(
+            so < 0.5 * sv,
+            "seq_len {seq_len}: softmax did not mix - output std {so:.4} vs v std {sv:.4}. \
+             The logits have saturated to a one-hot pick, so both attention arms are \
+             returning the same v row verbatim and this comparison proves nothing."
+        );
+    }
+
+    /// The fused flash path must compute the SAME attention as the
+    /// materialized trio, not merely something close: the same
+    /// `1/sqrt(head_dim)` scale, the same unmasked bidirectional coverage, the
+    /// same `[seq_len, heads*head_dim]` output layout. Only the accumulation
+    /// ORDER differs - the online softmax rescales as it streams where the
+    /// trio normalizes once - so the two must agree to fp32 rounding, and
+    /// nothing beyond rounding is being traded away for the memory win.
+    ///
+    /// Runs at the REAL `head_dim` of 128 - the flash family's hard ceiling,
+    /// which `H3TransformerConfig::real()` sits exactly on, not under - and at
+    /// sequence lengths deliberately coprime to the kernels' tiles: none is a
+    /// multiple of the `BR` query tile (64, or 128 on the `reg2` rung) or of
+    /// the `BC = 16` key tile, so the partial-tile guards and the zero-filled
+    /// tail rows are exercised rather than skipped. 37 is also shorter than a
+    /// single query tile, the degenerate case where one workgroup covers the
+    /// whole sequence.
+    ///
+    /// GPU-only by construction: the flash family needs workgroup barriers the
+    /// Cranelift CPU JIT cannot split a kernel body at, so on the default
+    /// `cpu` device both arms would BE the trio and the comparison would be
+    /// vacuous. Point `BRAIN_MINIMAXH3_TEST_DEVICE` at a real device to run
+    /// it; it skips rather than passing silently otherwise.
+    #[test]
+    fn flash_attention_matches_the_materialized_trio_numerically() {
+        let Ok(device) = std::env::var("BRAIN_MINIMAXH3_TEST_DEVICE") else {
+            brain_testutil::skip("BRAIN_MINIMAXH3_TEST_DEVICE not set - the flash family is GPU-only, so there is nothing to compare against on the CPU JIT");
+            return;
+        };
+        let cx = Ctx::new(Some(&device));
+        if attn_mode(&cx.gpu, 128) != AttnMode::Flash {
+            brain_testutil::skip(&format!("device {device:?} cannot run the flash-attention family - both arms would be the trio"));
+            return;
+        }
+
+        let (heads, head_dim) = (4u32, 128u32);
+        let inner = heads * head_dim;
+        for &seq_len in &[37u32, 100, 200] {
+            let n = (seq_len * inner) as usize;
+            let v_host = fill(n, 3);
+            let (q, k, v) = (cx.upload(&fill(n, 1)), cx.upload(&fill(n, 2)), cx.upload(&v_host));
+            let want = cx.gpu.read(&attention_trio(&cx, &q, &k, &v, seq_len, heads, head_dim), n);
+            let got = cx.gpu.read(&attention_flash(&cx, &q, &k, &v, seq_len, heads, head_dim), n);
+            assert_mixing(&want, &v_host, seq_len);
+            let (cos, maxabs) = cos_and_maxabs(&want, &got);
+            println!("seq_len {seq_len}: cosine {cos:.10}, max_abs {maxabs:.3e}");
+            assert!(cos > 0.999999, "seq_len {seq_len}: flash vs trio cosine {cos:.10} (max_abs {maxabs:.3e})");
+            assert!(maxabs < 1e-4, "seq_len {seq_len}: flash vs trio max_abs {maxabs:.3e} (cosine {cos:.10})");
+        }
+    }
 }
