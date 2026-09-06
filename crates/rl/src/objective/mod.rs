@@ -8,3 +8,4 @@
 pub mod distill;
 pub mod dpo;
 pub mod grpo;
+pub mod mixture;

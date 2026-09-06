@@ -814,19 +814,59 @@ remaining warnings are pre-existing, in `crates/gguf`, untouched by this
 phase). `cargo check --workspace --all-targets --exclude brain-vulkan`
 clean.
 
-## P15 - `Mixture` objective / anchor replay - TODO
+## P15 - `Mixture` objective / anchor replay - DONE
 
-`objective::Mixture<M>`: a probability-weighted draw over sub-objectives
-per micro-step - zero new gradient math, it delegates. Paired with a fixed
-anchor dataset (a frozen sample of the base model's own SFT data) for
-anti-forgetting. Explicitly the weakest member of this family and said so
-plainly: an L2-to-reference penalty would need a new argument threaded
-through `Model::adamw_step` across all ~19 implementors, which is out of
-scope here; LoRA's bounded-rank delta is the implicit regularizer this
-whole self-improvement path already leans on.
+`crates/rl/src/objective/mixture.rs`: `objective::Mixture<M>` - a
+probability-weighted draw over sub-objectives per micro-step, zero new
+gradient math. `draw_arm` is the entire mechanism: one uniform draw from
+`data::rng::Rng`, normalized against the arms' own weights (need not
+already sum to `1`), picking which already-existing `Objective::micro_step`
+runs this micro-step; `Mixture::micro_step` calls it once and delegates
+completely. `Anchor` (same file) is the fixed anchor-dataset arm: ordinary
+unweighted causal-LM training (`Batch::Lm`) over a `data::loader::
+TokenDataset`, structurally identical to `model::train`'s private
+`CausalLm` but exposed here because `Mixture` needs a plain-LM arm and
+`model::train::CausalLm` is not public. `Mixture::eval`/`itos` delegate to
+the first arm (the primary objective, by convention) since averaging
+heterogeneous regimes' losses is not a meaningful number. Explicitly the
+weakest member of this family and said so plainly: an L2-to-reference
+penalty would need a new argument threaded through `Model::adamw_step`
+across all ~19 implementors, which is out of scope here; LoRA's
+bounded-rank delta is the implicit regularizer this whole self-improvement
+path already leans on.
 
-Gate: deterministic mixture-ratio unit test (seeded draw counts match the
-configured probabilities); an anchor-regression integration test.
+Gate: `draw_arm_matches_configured_probabilities_over_many_draws`
+(`crates/rl/src/objective/mixture.rs`'s own unit tests) - 200,000 seeded
+draws at weights `[0.7, 0.2, 0.1]` land within 1 percentage point of each
+configured probability. A SEPARATE anchor-regression integration test
+(`crates/rl/tests/mixture_anchor_regression.rs`): a real `qwen3::Qwen`
+(`QwenConfig::tiny`, tied embeddings) trained on a "primary" token
+distribution disjoint in id-range from a held-out "anchor" distribution, for
+the same total step budget and identical initial weights, two ways - primary
+objective alone vs. a `Mixture` of that same primary objective plus an
+`Anchor` arm. Training the primary objective alone measurably raises the
+anchor's held-out loss (the tied softmax's normalization is what makes even
+disjoint-id training forget - a real, if miniature, forgetting mechanism,
+not a fudge); mixing in the anchor arm keeps that same held-out loss from
+degrading anywhere near as much.
+
+**Verified**: `cargo test -p brain-rl --lib objective::mixture` - 3 unit
+tests (the ratio gate above at `tol = 0.01`, a fixed-seed determinism check,
+and a check that un-normalized weights like `[7, 2, 1]` draw identically to
+their already-normalized `[0.7, 0.2, 0.1]` form). `cargo test -p brain-rl
+--test mixture_anchor_regression` - the anchor-regression gate above, green
+(observed on this box: baseline anchor loss 3.14, primary-alone 10.54 after
+120 steps, mixture 0.04 - the mixture branch did not merely degrade less,
+it improved, since half its steps train directly on the anchor's own
+distribution). `cargo test -p brain-rl` (whole crate) - 48 passed (36 lib,
+33 pre-existing + 3 new, + 2 `continuous_cycle` + 1 `distill_full_kl` + 1
+`distill_gradcheck` + 1 `dpo_gradcheck` + 1 `dpo_objective` + 1
+`grpo_gradcheck` + 2 `grpo_objective` + 1 `mixture_anchor_regression` + 2
+`qwen3_fit_weighted`), zero failures. `cargo clippy -p brain-rl
+--all-targets` clean on every touched file (the
+only remaining warnings are pre-existing, in `crates/gguf`, untouched by
+this phase). `cargo check --workspace --all-targets --exclude brain-vulkan`
+clean.
 
 ## P16 - lineage + programmatic promote/reject - TODO
 
