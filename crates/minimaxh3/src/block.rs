@@ -137,11 +137,17 @@ const FLASH_IDS: model::block::FlashIds = model::block::FlashIds {
 /// through this, matching `crate::vocoder::Ctx`'s own role.
 pub struct Ctx {
     pub gpu: Gpu,
+    /// Reused device buffers for [`load_block_streaming`]'s uniform
+    /// per-block shapes - see that function's doc for why this exists.
+    /// `None` until the streaming block loop's first block; every model
+    /// crate's other `Ctx` use (eager resident load, video VAE, vocoder)
+    /// never touches this field.
+    block_slots: std::cell::RefCell<Option<BlockSlots>>,
 }
 
 impl Ctx {
     pub fn new(device: Option<&str>) -> Ctx {
-        Ctx { gpu: Gpu::open(device, &KERNELS) }
+        Ctx { gpu: Gpu::open(device, &KERNELS), block_slots: std::cell::RefCell::new(None) }
     }
 
     pub fn upload(&self, data: &[f32]) -> DeviceBuffer {
@@ -556,6 +562,141 @@ pub fn load_block(tensors: &dyn checkpoint::TensorSource, ctx: &Ctx, index: usiz
         fc2: load_dev(tensors, ctx, &format!("{p}.ff.net.2.weight")),
         adaln_w: load_host(tensors, &format!("{p}.adaln_proj.linear.weight")),
         adaln_b: load_host(tensors, &format!("{p}.adaln_proj.linear.bias")),
+    }
+}
+
+/// Every [`BlockWeights`] field that lives on the device, held resident
+/// and overwritten in place by [`load_block_streaming`] instead of being
+/// allocated fresh per block.
+struct BlockSlots {
+    wq: DeviceBuffer,
+    wk: DeviceBuffer,
+    wv: DeviceBuffer,
+    wo: DeviceBuffer,
+    norm_q: DeviceBuffer,
+    norm_k: DeviceBuffer,
+    norm1: DeviceBuffer,
+    norm2: DeviceBuffer,
+    fc1_value: DeviceBuffer,
+    fc1_gate: DeviceBuffer,
+    fc2: DeviceBuffer,
+}
+
+/// [`load_dev`]'s in-place twin: overwrite an already-allocated buffer's
+/// bytes instead of allocating a new one. Chunked (matching `ltxv`'s own
+/// `write_f32_chunked` convention, `1<<20` words) rather than one
+/// `write_f32` call for a multi-hundred-MB tensor - see `Gpu::write_at`'s
+/// own doc for why an unchunked call leaves a same-size staging
+/// allocation permanently resident on this engine's non-ReBAR GPUs.
+fn write_dev(tensors: &dyn checkpoint::TensorSource, ctx: &Ctx, name: &str, buf: &DeviceBuffer) {
+    let mut wrote = false;
+    let found = tensors.with_tensor(name, &mut |data| {
+        ctx.gpu.write_f32_chunked(buf, data, 1 << 20);
+        wrote = true;
+    });
+    assert!(found, "minimaxh3 model: missing tensor {name:?}");
+    debug_assert!(wrote);
+    tensors.advise_drop(name);
+}
+
+/// [`load_fc1`]'s in-place twin.
+fn write_fc1(tensors: &dyn checkpoint::TensorSource, ctx: &Ctx, prefix: &str, hidden: u32, ffn: u32, value: &DeviceBuffer, gate: &DeviceBuffer) {
+    let name = format!("{prefix}.ff.net.0.proj.weight");
+    let half = (ffn * hidden) as usize;
+    let mut wrote = false;
+    let found = tensors.with_tensor(&name, &mut |data| {
+        assert_eq!(data.len(), 2 * half, "{name}: expected {} elements, got {}", 2 * half, data.len());
+        ctx.gpu.write_f32_chunked(value, &data[..half], 1 << 20);
+        ctx.gpu.write_f32_chunked(gate, &data[half..2 * half], 1 << 20);
+        wrote = true;
+    });
+    assert!(found, "minimaxh3 model: missing tensor {name:?}");
+    debug_assert!(wrote);
+    tensors.advise_drop(&name);
+}
+
+/// [`load_attn`]'s in-place twin.
+#[allow(clippy::too_many_arguments)]
+fn write_attn(tensors: &dyn checkpoint::TensorSource, ctx: &Ctx, prefix: &str, wq: &DeviceBuffer, wk: &DeviceBuffer, wv: &DeviceBuffer, norm_q: &DeviceBuffer, norm_k: &DeviceBuffer, wo: &DeviceBuffer) {
+    write_dev(tensors, ctx, &format!("{prefix}.to_q.weight"), wq);
+    write_dev(tensors, ctx, &format!("{prefix}.to_k.weight"), wk);
+    write_dev(tensors, ctx, &format!("{prefix}.to_v.weight"), wv);
+    write_dev(tensors, ctx, &format!("{prefix}.norm_q.weight"), norm_q);
+    write_dev(tensors, ctx, &format!("{prefix}.norm_k.weight"), norm_k);
+    write_dev(tensors, ctx, &format!("{prefix}.to_out.0.weight"), wo);
+}
+
+/// [`load_block`]'s reused-buffer twin for the streaming denoise loop: the
+/// first call allocates each of the block's 11 device buffers exactly
+/// once (sized by `hidden`/`ffn`, uniform across every one of
+/// `cfg.num_layers` blocks AND every denoise step in this architecture);
+/// every later call overwrites those SAME buffers in place via
+/// `write_f32_chunked` instead of allocating fresh ones. Safe to call
+/// back-to-back for different block indices (and across denoise steps,
+/// since the caller keeps the same `Ctx` alive for the whole generation -
+/// see `H3Transformer::forward_streaming`'s own doc) because the
+/// streaming loop's own `cx.gpu.poll_wait()` after every block already
+/// guarantees the previous block's GPU work has fully completed - and so
+/// stopped reading these buffers - before the next block's weights land.
+///
+/// Exists because a real P40 measurement showed the naive per-block
+/// [`load_block`] path (fresh `storage_init`/`create_buffer_init` calls
+/// every block) performs on the order of 50 blocks x 16 steps x 11
+/// buffers of large create/destroy cycles on one long-lived wgpu device -
+/// which eventually fragments the Vulkan suballocator's free list badly
+/// enough to fail an allocation outright, well below the card's actual
+/// VRAM ceiling (`nvidia-smi`'s reserved-byte counter stayed bounded the
+/// whole time this was happening - the fragmentation is invisible to it).
+/// This cuts that to 11 allocations total for the entire generation. Not
+/// used by [`H3Transformer::load`]'s eager resident-load path, which
+/// needs all `num_layers` blocks' buffers alive SIMULTANEOUSLY and must
+/// keep calling [`load_block`] unchanged.
+pub fn load_block_streaming(tensors: &dyn checkpoint::TensorSource, ctx: &Ctx, index: usize, hidden: u32, ffn: u32) -> BlockWeights {
+    let p = format!("transformer_blocks.{index}");
+    let adaln_w = load_host(tensors, &format!("{p}.adaln_proj.linear.weight"));
+    let adaln_b = load_host(tensors, &format!("{p}.adaln_proj.linear.bias"));
+
+    let mut slots = ctx.block_slots.borrow_mut();
+    if slots.is_none() {
+        let (wq, wk, wv, norm_q, norm_k, wo) = load_attn(tensors, ctx, &format!("{p}.attn"));
+        let (fc1_value, fc1_gate) = load_fc1(tensors, ctx, &p, hidden, ffn);
+        *slots = Some(BlockSlots {
+            wq,
+            wk,
+            wv,
+            wo,
+            norm_q,
+            norm_k,
+            norm1: load_dev(tensors, ctx, &format!("{p}.norm1.weight")),
+            norm2: load_dev(tensors, ctx, &format!("{p}.norm2.weight")),
+            fc1_value,
+            fc1_gate,
+            fc2: load_dev(tensors, ctx, &format!("{p}.ff.net.2.weight")),
+        });
+    } else {
+        let s = slots.as_ref().unwrap();
+        write_attn(tensors, ctx, &format!("{p}.attn"), &s.wq, &s.wk, &s.wv, &s.norm_q, &s.norm_k, &s.wo);
+        write_fc1(tensors, ctx, &p, hidden, ffn, &s.fc1_value, &s.fc1_gate);
+        write_dev(tensors, ctx, &format!("{p}.norm1.weight"), &s.norm1);
+        write_dev(tensors, ctx, &format!("{p}.norm2.weight"), &s.norm2);
+        write_dev(tensors, ctx, &format!("{p}.ff.net.2.weight"), &s.fc2);
+    }
+
+    let s = slots.as_ref().unwrap();
+    BlockWeights {
+        wq: s.wq.clone(),
+        wk: s.wk.clone(),
+        wv: s.wv.clone(),
+        wo: s.wo.clone(),
+        norm_q: s.norm_q.clone(),
+        norm_k: s.norm_k.clone(),
+        norm1: s.norm1.clone(),
+        norm2: s.norm2.clone(),
+        fc1_value: s.fc1_value.clone(),
+        fc1_gate: s.fc1_gate.clone(),
+        fc2: s.fc2.clone(),
+        adaln_w,
+        adaln_b,
     }
 }
 

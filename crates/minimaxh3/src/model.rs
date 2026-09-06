@@ -230,9 +230,11 @@ impl H3Transformer {
 
     /// [`Self::forward_with_taps`] WITHOUT ever building a resident
     /// [`H3Transformer`] - no `Vec<BlockWeights>` for all `num_layers`
-    /// blocks is ever alive at once. Loads (via [`block::load_block`]) one
-    /// block's weights, runs it, drops it (end of the loop body - Rust
-    /// frees `w`'s device buffers there), then loads the next.
+    /// blocks is ever alive at once. Loads (via
+    /// [`block::load_block_streaming`]) one block's weights into a set of
+    /// device buffers reused across every block AND every denoise step,
+    /// runs it, then overwrites those same buffers with the next block's
+    /// weights.
     ///
     /// This exists for exactly one reason: a real-weight VALIDATION run
     /// that only checks a handful of tap points (block 0, a middle block,
@@ -352,7 +354,7 @@ impl H3Transformer {
         let mut tap_mid_block_out: Vec<f32> = Vec::new();
         let mut tap_last_block_out: Vec<f32> = Vec::new();
         for i in 0..n_layers {
-            let w = block::load_block(tensors, ctx, i, hidden, cfg.ffn_dim);
+            let w = block::load_block_streaming(tensors, ctx, i, hidden, cfg.ffn_dim);
             let (out, attn_out) = block::block_forward(cx, &w, &h, &adaln_idx_dev, &cos, &sin, &temb_silu, num_timesteps, cfg, seq_len);
             if i == 0 {
                 tap_block0_attn_out = cx.gpu.read(&attn_out, (seq_len * hidden) as usize);
@@ -365,20 +367,17 @@ impl H3Transformer {
                 tap_last_block_out = cx.gpu.read(&out, (seq_len * hidden) as usize);
             }
             h = out;
-            // `w` drops here, but on the wgpu backend dropping a `DeviceBuffer`
-            // does not itself reclaim VRAM - wgpu only recycles a resource once
-            // it can prove the GPU has finished with it, which needs a poll.
-            // A loop that only submits (most iterations here read nothing back)
-            // never triggers that proof, so 50 blocks' worth of "already
-            // dropped in Rust, not yet reclaimed by wgpu" buffers pile up and
-            // OOM a 24GB card well before the model's own real per-block
-            // footprint (~2.6GB) would - measured directly on a P40: without
-            // this call, GPU memory climbed monotonically and unboundedly
-            // (nvidia-smi polling showed a steady rise with no plateau) until
-            // the device OOM'd; with it, memory stays bounded (~3-4.6GB)
-            // across the whole run. `poll_wait` is a no-op on the CPU backend
-            // (`backend_cpu::CpuBackend::poll_wait`, `HashMap`-backed buffers
-            // need no such proof), so this costs nothing there.
+            // `w`'s device buffers are now REUSED across blocks (see
+            // `block::load_block_streaming`'s doc), not freshly allocated
+            // and dropped each iteration, so this call is no longer about
+            // reclaiming per-block buffers - it still matters for `out`/
+            // `attn_out`/`h`'s own allocations (one fresh buffer per block
+            // for the block's output) and for the intermediate scratch
+            // buffers `block_forward` allocates internally, which are NOT
+            // pooled and must still be proven-finished before wgpu can
+            // recycle them. `poll_wait` is a no-op on the CPU backend
+            // (`backend_cpu::CpuBackend::poll_wait`, `HashMap`-backed
+            // buffers need no such proof), so this costs nothing there.
             cx.gpu.poll_wait();
         }
 
