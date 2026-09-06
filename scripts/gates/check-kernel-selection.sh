@@ -86,6 +86,8 @@ cd "$(dirname "$0")/../.."
 # kernel<TAB>file<TAB>reason -- see the three categories above. Keep sorted by
 # kernel then file so a diff shows exactly what changed.
 ALLOWLIST=$(cat <<'EOF'
+attn_bwd_dscores	crates/glmdsa/src/model.rs	No select::Op covers this backward-pass attention kernel at all yet - a gap Phase 5's family table does not currently itemise; tracked via this gate's M1.3 inventory, not fixed here.
+attn_bwd_dscores	crates/toymoe/src/train.rs	No select::Op covers this backward-pass attention kernel at all yet - a gap Phase 5's family table does not currently itemise; tracked via this gate's M1.3 inventory, not fixed here.
 conv2d	crates/minimaxmusic3/src/discriminator.rs	Outside Op::Conv2d's deliberately narrow scope (that Op covers only vae::blocks::Builder::conv_s, per its own doc comment) - same category as vision::blocks::Conv's already-documented exemption, not a regression.
 decode_softmax	crates/glmdsa/src/model.rs	No select::Op covers this model's own paged/incremental-decode softmax yet (Op::Softmax is a different kernel family - see its doc); part of the campaign's already-identified paged-attention triad, tracked for Phase 2/Phase 5.
 decode_softmax	crates/gpt2/src/model.rs	No select::Op covers this model's own paged/incremental-decode softmax yet (Op::Softmax is a different kernel family - see its doc); part of the campaign's already-identified paged-attention triad, tracked for Phase 2/Phase 5.
@@ -101,7 +103,6 @@ matmul	crates/qwen35/src/model.rs	Not yet migrated onto the existing Op::MatMul/
 matmul	crates/qwen35moe/src/model.rs	Not yet migrated onto the existing Op::MatMul/model::ops::Ops seam - Phase 1 M1.4 / Phase 5 backlog item, not fixed here.
 matmul	crates/qwen3omnimoe/src/talker.rs	Not yet migrated onto the existing Op::MatMul/model::ops::Ops seam - Phase 1 M1.4 / Phase 5 backlog item, not fixed here.
 matmul	crates/qwen3omnimoe/src/thinker.rs	Not yet migrated onto the existing Op::MatMul/model::ops::Ops seam - Phase 1 M1.4 / Phase 5 backlog item, not fixed here.
-matmul	crates/qwen3tts/src/gen.rs	Not yet migrated onto the existing Op::MatMul/model::ops::Ops seam - Phase 1 M1.4 / Phase 5 backlog item, not fixed here.
 matmul	crates/toyautoencoder/src/model.rs	Not yet migrated onto the existing Op::MatMul/model::ops::Ops seam - Phase 1 M1.4 / Phase 5 backlog item, not fixed here.
 matmul	crates/toymoe/src/train.rs	Not yet migrated onto the existing Op::MatMul/model::ops::Ops seam - Phase 1 M1.4 / Phase 5 backlog item, not fixed here.
 matmul	crates/toypid/src/model.rs	Not yet migrated onto the existing Op::MatMul/model::ops::Ops seam - Phase 1 M1.4 / Phase 5 backlog item, not fixed here.
@@ -112,6 +113,7 @@ matmul_dw	crates/kronos/src/train.rs	No select::Op covers the backward GEMMs (ma
 matmul_dw	crates/model/tests/tensor_parallel.rs	Test harness for dp/shard-parity checks constructs raw GPU steps directly by design, never through model::ops::Ops - not a served/trained model path.
 matmul_dw	crates/qwen35/src/model.rs	No select::Op covers the backward GEMMs (matmul_dw vs matmul_dw_reg) at all yet - a gap Phase 5's family table does not currently itemise; tracked via this gate's M1.3 inventory, not fixed here.
 matmul_dw	crates/qwen35moe/src/model.rs	No select::Op covers the backward GEMMs (matmul_dw vs matmul_dw_reg) at all yet - a gap Phase 5's family table does not currently itemise; tracked via this gate's M1.3 inventory, not fixed here.
+matmul_dw	crates/qwen3tts/src/mtp.rs	@opt 2/5, faster sibling matmul_dw_reg exists - not yet migrated onto it, MTP-specific backward path, backlog.
 matmul_dw	crates/toyautoencoder/src/model.rs	No select::Op covers the backward GEMMs (matmul_dw vs matmul_dw_reg) at all yet - a gap Phase 5's family table does not currently itemise; tracked via this gate's M1.3 inventory, not fixed here.
 matmul_dw	crates/toymoe/src/train.rs	No select::Op covers the backward GEMMs (matmul_dw vs matmul_dw_reg) at all yet - a gap Phase 5's family table does not currently itemise; tracked via this gate's M1.3 inventory, not fixed here.
 matmul_dw	crates/toypid/src/model.rs	No select::Op covers the backward GEMMs (matmul_dw vs matmul_dw_reg) at all yet - a gap Phase 5's family table does not currently itemise; tracked via this gate's M1.3 inventory, not fixed here.
@@ -122,6 +124,7 @@ matmul_dx	crates/kronos/src/train.rs	No select::Op covers the backward GEMMs (ma
 matmul_dx	crates/model/tests/tensor_parallel.rs	Test harness for dp/shard-parity checks constructs raw GPU steps directly by design, never through model::ops::Ops - not a served/trained model path.
 matmul_dx	crates/qwen35/src/model.rs	No select::Op covers the backward GEMMs (matmul_dx vs matmul_dx_reg) at all yet - a gap Phase 5's family table does not currently itemise; tracked via this gate's M1.3 inventory, not fixed here.
 matmul_dx	crates/qwen35moe/src/model.rs	No select::Op covers the backward GEMMs (matmul_dx vs matmul_dx_reg) at all yet - a gap Phase 5's family table does not currently itemise; tracked via this gate's M1.3 inventory, not fixed here.
+matmul_dx	crates/qwen3tts/src/mtp.rs	@opt 2/5, faster sibling matmul_dx_reg exists - not yet migrated onto it, MTP-specific backward path, backlog.
 matmul_dx	crates/toyautoencoder/src/model.rs	No select::Op covers the backward GEMMs (matmul_dx vs matmul_dx_reg) at all yet - a gap Phase 5's family table does not currently itemise; tracked via this gate's M1.3 inventory, not fixed here.
 matmul_dx	crates/toymoe/src/train.rs	No select::Op covers the backward GEMMs (matmul_dx vs matmul_dx_reg) at all yet - a gap Phase 5's family table does not currently itemise; tracked via this gate's M1.3 inventory, not fixed here.
 matmul_dx	crates/toypid/src/model.rs	No select::Op covers the backward GEMMs (matmul_dx vs matmul_dx_reg) at all yet - a gap Phase 5's family table does not currently itemise; tracked via this gate's M1.3 inventory, not fixed here.
@@ -130,6 +133,8 @@ rmsnorm	crates/chronos2/src/model.rs	Not yet migrated onto the existing Op::RmsN
 rmsnorm	crates/fincast/src/model.rs	Not yet migrated onto the existing Op::RmsNorm/model::ops::Ops seam - Phase 1 M1.4 / Phase 5 backlog item, not fixed here.
 rmsnorm	crates/kronos/src/nn.rs	Not yet migrated onto the existing Op::RmsNorm/model::ops::Ops seam - Phase 1 M1.4 / Phase 5 backlog item, not fixed here.
 rmsnorm	crates/toymoe/src/train.rs	Not yet migrated onto the existing Op::RmsNorm/model::ops::Ops seam - Phase 1 M1.4 / Phase 5 backlog item, not fixed here.
+rmsnorm_dx	crates/glmdsa/src/model.rs	No select::Op covers this backward-pass kernel at all yet - a gap Phase 5's family table does not currently itemise; tracked via this gate's M1.3 inventory, not fixed here.
+rmsnorm_dx	crates/toymoe/src/train.rs	No select::Op covers this backward-pass kernel at all yet - a gap Phase 5's family table does not currently itemise; tracked via this gate's M1.3 inventory, not fixed here.
 EOF
 )
 
