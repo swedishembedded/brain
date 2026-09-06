@@ -276,12 +276,36 @@ pub fn attn_mode(gpu: &Gpu, head_dim: u32) -> AttnMode {
 /// The materialized `scores -> softmax -> apply` trio: two
 /// `[heads, seq_len, seq_len]` device buffers, three dispatches. The reference
 /// definition of this crate's attention, and the only arm the CPU JIT can run.
+///
+/// `heads * seq_len * seq_len` is computed in u64 and bounded, because in u32
+/// it WRAPS - at the real 56 heads, past `seq_len` 8757. A wrapped count is
+/// not a clean failure: it sizes the scores buffer and the dispatch's thread
+/// count from the same wrong number, so a shape that wraps to something small
+/// allocates happily and computes garbage with nothing anywhere saying so. It
+/// is only visible at all today because `seq_len` 9900 happens to wrap to
+/// 4.77 GB, which still trips the device's own maximum-buffer-size check.
+/// Same defect, same reasoning and same fix as the video VAE's untiled
+/// attention (see `video_vae`'s own scores sizing); this arm just reaches it
+/// at a lower `seq_len` because it runs 56 heads rather than 32.
+///
+/// The bound is a refusal rather than a widening because there is nothing to
+/// widen INTO: a dispatch takes a u32 thread count, so a score matrix with
+/// more than `u32::MAX` elements cannot be dispatched at all in this form.
+/// [`attention_flash`] has no such ceiling - it never builds the matrix - so
+/// on any device that can run it this limit is unreachable.
 fn attention_trio(cx: &Ctx, q: &DeviceBuffer, k: &DeviceBuffer, v: &DeviceBuffer, seq_len: u32, heads: u32, head_dim: u32) -> DeviceBuffer {
     let inner = heads * head_dim;
     let scale = 1.0 / (head_dim as f32).sqrt();
-    let scores = cx.gpu.storage((heads * seq_len * seq_len) as u64);
-    cx.gpu.submit(&[], &[cx.gpu.step(K_ATTN_SCORES_QK, &[q, k, &scores], &[1, heads, seq_len, head_dim, inner, 0, gpu_core::f(scale)], heads * seq_len * seq_len)]);
-    let probs = cx.gpu.storage((heads * seq_len * seq_len) as u64);
+    let n_scores = heads as u64 * seq_len as u64 * seq_len as u64;
+    assert!(
+        n_scores <= u32::MAX as u64,
+        "minimaxh3 attention: materialized scores need {n_scores} elements at seq_len {seq_len} x {heads} heads, \
+         past the u32 dispatch ceiling. This shape needs the fused flash path (a device with workgroup reductions, \
+         and BRAIN_MINIMAXH3_ATTN not pinned to \"trio\")."
+    );
+    let scores = cx.gpu.storage(n_scores);
+    cx.gpu.submit(&[], &[cx.gpu.step(K_ATTN_SCORES_QK, &[q, k, &scores], &[1, heads, seq_len, head_dim, inner, 0, gpu_core::f(scale)], n_scores as u32)]);
+    let probs = cx.gpu.storage(n_scores);
     cx.gpu.submit(&[], &[cx.gpu.step(K_ATTN_SOFTMAX_BIDIR, &[&scores, &probs], &[1, heads, seq_len], heads * seq_len)]);
     let out = cx.gpu.storage((seq_len * inner) as u64);
     cx.gpu.submit(&[], &[cx.gpu.step(K_ATTN_APPLY_FULL, &[&probs, v, &out], &[1, heads, seq_len, head_dim, inner, inner], heads * seq_len * head_dim)]);
@@ -743,6 +767,29 @@ mod tests {
              The logits have saturated to a one-hot pick, so both attention arms are \
              returning the same v row verbatim and this comparison proves nothing."
         );
+    }
+
+    /// A score matrix too large to address in u32 must be REFUSED, not
+    /// silently wrapped.
+    ///
+    /// At the real 56 heads, `heads * seq_len * seq_len` exceeds `u32::MAX`
+    /// past `seq_len` 8757 - well inside the range a 512x512 canvas reaches
+    /// (~9900 packed rows). Computed in u32 it wraps, and the wrapped value
+    /// then sizes BOTH the scores buffer and the dispatch's thread count, so
+    /// the failure mode is a plausible-looking allocation full of garbage
+    /// rather than an error. This is the same defect, at a lower `seq_len`
+    /// because of the head count, that the video VAE's untiled attention
+    /// already had to bound.
+    ///
+    /// Runs on the CPU device with deliberately undersized q/k/v: the bound is
+    /// checked before any buffer is read, which is the whole point - a shape
+    /// this large must be rejected before it allocates anything.
+    #[test]
+    #[should_panic(expected = "past the u32 dispatch ceiling")]
+    fn a_score_matrix_too_large_to_address_is_refused_rather_than_wrapped() {
+        let cx = Ctx::new(Some("cpu"));
+        let (q, k, v) = (cx.upload(&[0.0]), cx.upload(&[0.0]), cx.upload(&[0.0]));
+        attention_trio(&cx, &q, &k, &v, 9900, 56, 128);
     }
 
     /// The fused flash path must compute the SAME attention as the
