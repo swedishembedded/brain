@@ -268,3 +268,165 @@ Result: **11 taps, worst cosine 1.0000000000.**
 3. Consider refusing, or at least warning on, a canvas whose spatial rotary
    step is far from the trained ~1.0. A silent 8x-off positional grid is a
    large foot-gun that costs a full generation run to discover.
+
+---
+
+# Follow-up: the DiT's attention memory wall, and its removal
+
+A separate pass, after the audit above, addressed the other half of "why can
+this not generate at a useful canvas". The audit's section 3 concluded a
+recognizable generation needs at least a ~384px canvas, because the spatial
+rotary grid aliases below that. This section is about why that canvas was
+**structurally unreachable**, and is no longer.
+
+## The wall
+
+`block::block_forward` and `refiner_block_forward` computed bidirectional
+self-attention as `attn_scores_qk -> attn_softmax_bidir -> attn_apply_full`,
+which materializes BOTH `[heads, seq_len, seq_len]` matrices as real device
+buffers between stages.
+
+H3 attends over ONE packed sequence holding every video, audio and text token
+of the whole clip at once, so those matrices grow with the FOURTH power of the
+canvas edge while everything else grows with the second. Packed sequence
+lengths, for the example's default 124 frames (`build_packed_sequence`:
+`video_rows = latent_frames * (latent_h/2) * (latent_w/2)`, `audio_rows = 414`,
+plus one row per prompt token `T`):
+
+| canvas | seq_len | one scores buffer at 56 heads |
+|---|---|---|
+| 128x128 | 1006 + T | 215 MiB |
+| 256x256 | 2782 + T | 1675 MiB |
+| 384x384 | 5742 + T | 7088 MiB |
+| 512x512 | 9886 + T | 21 GB |
+
+The decisive point is that this is a per-BUFFER ceiling, not an
+out-of-memory one. This box's P40 reports `max_buffer_size` 4094 MiB
+(`max_storage_buffer_binding_size` 2047 MiB). So at 384x384 - the SMALLEST
+canvas section 3 says can produce a recognizable result - a single scores
+buffer is 7088 MiB and the allocation is refused inside
+`Device::create_buffer`. **No amount of VRAM fixes that.** The minimum viable
+canvas was unreachable on any GPU as long as the matrices were materialized.
+
+## The fix
+
+`crates/kernels/wgsl/flash_attn_bidir.wgsl` and its three siblings already
+existed and are already carried by `wan`, `ltxv`, `flux1`/`flux2`, `lfm2`,
+`minimaxmusic3`, `s3dit`, `qwen3vl` and `model::vit`. They fuse
+scores -> softmax -> apply into one dispatch with an online softmax, so
+neither matrix is ever written and peak attention memory is
+`O(seq_len * head_dim)`.
+
+Wiring this in was adoption, not new kernel work. The selection seam already
+existed too (`model::block::flash_gate` + `flash_bidir_variant` over a full
+`FlashIds` rung set), so the rung is chosen from queried `DeviceCaps` rather
+than pinned per model. Two things are worth knowing for the next adopter:
+
+- The family reads q/k/v as three REGIONS of one packed slab, not as three
+  bindings. minimaxh3 had three separate buffers, so a `pack_qkv` dispatch
+  builds the slab first. That slab is the only extra allocation the fused path
+  makes and it is linear in `seq_len` where the pair of matrices was quadratic.
+- `head_dim` 128 is EXACTLY the family's ceiling, not under it, and H3's real
+  `attention_head_dim` is 128. Any future variant with a wider head silently
+  falls back to the trio and must be re-measured, not assumed to fit.
+
+The CPU path deliberately keeps the trio: `flash_gate`'s
+`workgroup_reductions` bit is false on the Cranelift JIT, which splits a
+kernel body at one barrier where these kernels need two or three. So the
+materialized trio remains the reference definition of the math, and
+`backend_cpu::FastIdx` still routes all three by kernel NAME to native fast
+paths (verified, not assumed - appending kernels to the table cannot disturb a
+name lookup). `BRAIN_MINIMAXH3_ATTN=flash|trio` forces either arm, which is
+how the before/after pair below was taken without checking out an older
+commit.
+
+## Correctness
+
+`model::tests::dit_matches_the_real_reference_numerically_layer_by_layer`,
+real checkpoint, real weights, `BRAIN_MINIMAXH3_TEST_DEVICE=vulkan`, both arms
+on the same P40, 11 taps each:
+
+| arm | worst cosine | at tap |
+|---|---|---|
+| trio (before) | 0.9999998613 | `output_audio` |
+| flash (after) | 0.9999998770 | `output_audio` |
+
+The trio arm reproduces this document's own previously recorded figure
+(0.9999998613) exactly, so the baseline is verified rather than recalled. Both
+pass the test's 0.9999 floor and every other tap is cosine 1.0000000000.
+
+Note this gate runs at `seq_len` 9, so it proves the MATH and cannot show the
+memory win. A direct arm-vs-arm comparison is therefore also in the tree, as
+`block::tests::flash_attention_matches_the_materialized_trio_numerically`: at
+the real `head_dim` 128 and sequence lengths coprime to the kernels' BR/BC
+tiles, cosine 1.0000000000 and max_abs 1.3e-7 - fp32 rounding, which is the
+only difference the online softmax's accumulation order can introduce.
+
+That test carries a guard against passing vacuously, because its first version
+did. Its random fill produced values up to 8191, which pushed the logits to
+~1e8 and saturated the softmax to a one-hot pick; both arms then returned the
+same `v` row verbatim and agreed bit-for-bit (max_abs exactly 0). That looks
+like an unusually clean pass and proves nothing about the online softmax.
+`assert_mixing` now fails unless the attention actually averaged, and was
+checked to fire on the old generator.
+
+## Measured memory
+
+One real-dimension block forward (56 heads x 128, hidden 5376, ffn 14336),
+`nvidia-smi` polled at 100 ms on an otherwise idle P40, via
+`crates/minimaxh3/examples/dit_attn_vram.rs`. Sequence lengths are the real
+packed lengths from the table above:
+
+| canvas | seq_len | trio peak | flash peak | trio time | flash time |
+|---|---|---|---|---|---|
+| 256x256 | 2800 | 6233 MiB | 3113 MiB | 5.71s | 1.05s |
+| 384x384 | 5760 | **refused** | 4752 MiB | - | 2.06s |
+| 512x512 | 9900 | **refused** | 7045 MiB | - | 3.70s |
+
+Both refusals are `create_buffer` failures against the 4094 MiB
+`max_buffer_size`, not OOM.
+
+Sanity check on the apparatus: at `seq_len` 3072 the measured trio-minus-flash
+delta was 3780 MiB, against a predicted 4032 MiB of scores+probs less the
+256 MiB packed-qkv slab the fused path adds = 3776 MiB. Measurement and shape
+arithmetic agree to 4 MiB, which is what makes the numbers above trustworthy.
+
+**So a 384x384 canvas, the minimum section 3 says can work, now fits in under
+5 GB of attention-path memory where it previously could not be allocated at
+all; and 512x512 fits in ~7 GB.** A full real generation at those canvases was
+not run - it is hours of wall time and, per the audit above, still needs the
+video VAE's spatial tiling before any canvas over 256px is correct end to end.
+The DiT-forward-level result is what is claimed here, nothing more.
+
+## A silent-wrong-answer bug found while measuring
+
+At `seq_len` 9900 the trio arm failed reporting a 4774370816-byte buffer - but
+`56 * 9900 * 9900 * 4` is 21.9 GB, not 4.77 GB. 4774370816 is exactly the
+u32-WRAPPED element count times four: `heads * seq_len * seq_len` was computed
+in u32 and overflows past `seq_len` 8757 at 56 heads.
+
+That wrapped number sized both the buffer and the dispatch's thread count, so
+a shape wrapping to something small would have allocated happily and returned
+a plausible tensor full of garbage. It was visible here only by luck - this
+particular shape wraps to a value that still trips the device's own
+maximum-buffer-size check.
+
+This is the same defect the video VAE's untiled attention scores sizing
+already had to bound; this arm reaches it at a lower `seq_len` only because it
+runs 56 heads where that one runs 32. Now computed in u64 and refused with an
+explanatory assertion (a refusal, not a widening: a dispatch takes a u32
+thread count, so such a matrix cannot be expressed in this form at all). The
+fused path has no such ceiling because it never builds the matrix.
+
+## What this does not change
+
+- The video VAE's spatial tiling is still unimplemented and is still the
+  blocker for a correct canvas above 256px (section 2 and step 1 above). This
+  work removes the DiT's constraint, not the VAE's.
+- The backward pass is untouched, and not because it was carefully preserved:
+  `grad.rs` is a separate HOST-side autodiff implementation (`attn_fwd` /
+  `attn_bwd`, generic over `Fp`) that never dispatched these device kernels at
+  all. It keeps its own materialized `probs` because it needs that slab for
+  the backward, which is exactly why the flash family is forward-only.
+- Nothing in `pipeline.rs` changed; the packing and scheduling proven correct
+  in the audit above are untouched.
