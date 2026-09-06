@@ -2060,3 +2060,151 @@ citations) informed the choice of E1 but is not itself verified and is
 deliberately not cited by name in this file - see the no-doc-citation
 discipline this repo already applies to `docs/`; the same caution applies
 to unverified external literature.
+
+## P19e - the sequential SFT+rehearsal regime, as CODE - IMPLEMENTED, NOT YET MEASURED
+
+P19d's diagnosis names the experiment nobody has run: the twelve-cycle
+sequential study with BOTH measured failure modes fixed at once - the
+cue-independent shortcut (r = 0.987 against the recorded zero-shot column)
+removed by a rehearsal pool that is non-empty even at cycle 1, and GRPO's
+~237x per-rule supervision starvation plus its 73.6% zero-gradient group
+rate removed by teacher-forced dense supervision at a real batch width.
+Every replay/rehearsal row of the escalation ladder kept GRPO as the
+objective and therefore kept the starvation in place too.
+
+P19e is the CODE for that experiment and nothing else. **It reports no
+measurement of the new regime and makes no continual-learning claim.** The
+run, its pre-registration, and the ledger entry that scores A1-A8 belong to
+a separate pass and are deliberately not in this section.
+
+### What was built
+
+- `model::Objective` gains a forwarding `impl<M, O: Objective<M> + ?Sized>
+  Objective<M> for Box<O>` (`crates/model/src/objective.rs`). Every consumer
+  of the seam (`model::fit_with`, `rl::improve::cycle`) takes `O:
+  Objective<M>` BY VALUE and is monomorphized per call site, so a runtime
+  choice between two structurally different objectives has to be erased into
+  one type first. `?Sized` covers the trait object and a boxed concrete
+  objective alike; the non-`'static` case is load-bearing because
+  `Grpo<ReplayEnv<'a, C>, _>` borrows its curriculum. It lives in `model`
+  because it must: `Box` is `#[fundamental]`, so the same impl downstream
+  would violate the orphan rule.
+- `model::Objective::batch_shape() -> Option<(u32, u32)>`, defaulted to
+  `None`, plus `rl::improve::objective_shape`. This fixes a latent coupling
+  the design pass had not found: `improve::cycle` and `continual::train_from`
+  both built the training model as `M::new(cfg, 1, cfg.block_size(), ..)`,
+  hardcoding one row because every objective they had ever hosted was a
+  rollout objective that uploads one. A model built for `b` rows holds a
+  token buffer of exactly `b * t` elements (`Qwen::set_batch` writes straight
+  into it), so a teacher-forced arm at batch 128 would upload 128*12 ids into
+  a 1*12 buffer. `None` reproduces the old hardcoded shape exactly, so no
+  existing call site moves.
+- `rl::continual::{Regime, SftConfig, SftSource}`; `Curriculum::
+  {rehearsal_len, write_sft_dataset, sft_mask_before}` (all defaulted, so no
+  implementor breaks) with `PositionCopy` impls; `rehearsal_pool`,
+  `sft_cycle_opts`, `sft_arms`, `sft_objective`. `Regime::Grpo` is the
+  `Default` and `sft_cycle_opts` is a SECOND function rather than a branch
+  inside `cycle_opts`, so the recorded trajectory's code path is untouched.
+- `run_study`/`joint_oracle` branch on the regime. Under `Regime::Sft`:
+  `replay_frac != 0.0` is a hard error rather than a silently ignored knob;
+  a zero-length rehearsal pool at cycle 0 is a hard error, because that is
+  exactly the one-cue configuration the regime exists to remove; and
+  `improve::assert_trained_spans_were_sampled` is NOT run, because the
+  regime is teacher-forced on `curriculum::target_of` and the check would
+  pass vacuously - running it would turn a real structural property into a
+  silent no-op that still reads like a pass.
+- `CycleRecord::row()` prints `-` rather than `0` in the `trained`, `reward`
+  and `train/sampled` columns for a non-sampling regime. `0` there would
+  read as "this cycle trained on nothing and earned no reward", which is a
+  different and false statement from "these columns do not apply".
+- `StudyReport::summary()` now prints the `b_fresh` series. It was computed
+  and never printed, which forced the P19d audit to recover the Arm 2
+  trajectory by inverting `rho = warm/fresh` algebraically - and the first
+  draft of that section got the conclusion backwards as a result.
+- `curriculum::mask_before_char()`, replacing a hand-derived `Some('b')` in
+  `examples/oracle_capacity_check.rs`.
+- `--regime grpo|sft` and `--eval-per-cycle N` on
+  `examples/continual_learning.rs`, with `steps`/`eval_per_cycle`/
+  `rehearsal` resolved per regime AFTER parsing (240/16/0 vs 800/48/4) so an
+  explicit flag always wins and no-flags is unchanged. Under `--regime sft`
+  the program prints, before any number and again in the verdict block, that
+  the no-label property is NOT APPLICABLE and was not checked, what the
+  rehearsal pool contains per cycle, and that a 48-probe retention cell is
+  not cell-comparable to the recorded run's 16-probe one.
+
+### Where the SFT constants come from
+
+`steps = 800`: under the 50/50 mixture, cycle `k`'s new rule receives `0.5 *
+128 * steps` presentations. This file's own frozen base needed 48,000 per
+rule to reach 0.995 on 16 rules; P19d's E1 needed 64,000 per rule to reach
+0.910 on 12 pooled. Those bracket 750-1000 steps; 800 gives 51,200, just
+above the known-sufficient floor, and is the conservative end deliberately -
+a cycle adds ONE rule to an adapter that already holds `k`, while both
+anchors measure learning N rules from a zero-delta start.
+
+`eval_per_cycle = 48`: `bench::metrics::sign_test` counts DISCORDANT pairs
+only (`crates/bench/src/metrics.rs`), so `n` is not `eval_per_cycle`. At 16
+probes a cycle whose two arms tie on 12 has `n = 4`, and the exact one-sided
+binomial cannot reach `p <= 0.05` at n = 4 for ANY outcome, not even 4-0.
+Nine of the recorded study's twelve cycles rejected as `notsig`. At 48 the
+required win rate drops from 75.0% to 64.6% AND the discordant ceiling
+triples. Probe seeds are `PROBE_SEED_BASE + cycle*10_000 + i`, so a 48-probe
+set is a superset of the same cycle's 16-probe seeds with no cross-cycle
+collision - but the cells are NOT cell-comparable to the recorded run's.
+
+`rehearsal = 4`: held at the value the escalation ladder's own
+replay+rehearsal rows used, so a difference in the new run is attributable
+to the objective rather than to a re-tuned pool. The pool is unbounded in
+`k` (no window) because ACC is the mean over ALL frozen probes and the A1
+canary is the OLDEST rule, so a window would be optimizing against the
+study's own metric.
+
+### What this section deliberately does NOT do
+
+It does not implement the per-anchor-BLOCK gate clause the design pass
+recommended (`gate::Cause::BlockRegressed`, `GateConfig::max_block_drop`).
+That clause is separable and defaulted-off by design, and the only way to
+route a per-block threshold from `run_study` down to `gate::gate` is to add
+a field to `GateConfig` and to `improve::Evaluation`, which forces edits into
+`crates/rl/tests/improve_cycle.rs` - the one thing this phase was told to
+leave untouched. The recorded defect it targets is real (cycle 11's
+promotion took T1 0.90 -> 0.67 and T4 0.35 -> 0.06 while the POOLED anchor
+mean stayed inside budget) and it remains open.
+
+It states no number about `Regime::Sft`'s continual-learning behavior. The
+only SFT execution done here was a 2-cycle, 200-step plumbing smoke run to
+prove the loop closes and trains; its numbers are not a result and are not
+recorded as one.
+
+### Verified
+
+`cargo run --release --example continual_learning` with NO flags, run on this
+box against the cached frozen base after the change, reproduces the recorded
+run above **row for row**: all twelve trajectory rows identical on every
+column except wall clock (`trained`, `heldout`, `zero0`, `probeT1`, `rho`,
+`reward`, `train/sampled`, `distinct`, gate cause, kept), the same 12x12
+retention matrix cell for cell, **ACC 0.271, BWT -0.066, xfer_vs_fresh
+-0.153, promotions 2/12**, the same reject causes `c2:anchor` plus nine
+`notsig`, `b_base 0.354`, `rho(N) 0.190`, slope `-0.0005/cycle` CI
+`[-0.1742, +0.1733]`, last-task-only `0.226`, joint-training oracle
+**0.071**, `192 frozen probe ids checked disjoint from 3072 explore ids`.
+That is the regression gate for the whole change, and it passes: the new
+regime is additive.
+
+`cargo test --release -p brain-rl --features qwen3` per binary, one at a
+time: `--test continual_study` 3 passed (903 s, including the 5-seed
+pre-registration - `R[1][1] = [0.896, 0.896, 0.896, 0.979, 0.917]`, spread
+0.083, all five PROMOTE - and the full 12-cycle study), `--test
+improve_cycle` 2 passed, `--test mixture_anchor_regression` 1 passed, `--lib`
+76 passed. `cargo test -p brain-model --lib objective` 3 passed. **No
+existing test changed what it asserts**; the only edits to existing test
+files are the one `regime: Regime::Grpo,` field the new `StudyConfig` field
+forces at `tests/continual_study.rs`'s single literal, and its import.
+`cargo clippy -p brain-rl -p brain-model --all-targets --features qwen3`
+clean on the touched files; `cargo check --workspace --all-targets --exclude
+brain-vulkan` clean.
+
+The `Regime::Sft` path was exercised only as plumbing: a 2-cycle run at 60
+and at 200 steps, which trained, gated, promoted cycle 1 and rejected cycle 2
+on the anchor clause. Those numbers are a smoke test, not a measurement, and
+nothing in this section is derived from them.

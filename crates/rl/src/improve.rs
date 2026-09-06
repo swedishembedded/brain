@@ -370,6 +370,32 @@ fn gate_outcome(report: &GateReport) -> checkpoint::st::GateOutcome {
     }
 }
 
+/// The `(rows, block)` to build the training model at, taken from the
+/// objective itself ([`Objective::batch_shape`]) and defaulting to the one-row
+/// shape every rollout-driven objective uploads - the value this used to
+/// hardcode, so a GRPO-shaped caller constructs exactly the model it always
+/// did.
+///
+/// `block` is asserted equal to the checkpoint's own, because it is not free
+/// to differ: the checkpoint's positional tables are sized for it, and a
+/// mismatch would be a wrong-shape forward rather than a smaller one.
+pub(crate) fn objective_shape<M: Model, O: Objective<M>>(objective: &O, cfg: &M::Config) -> (u32, u32) {
+    match objective.batch_shape() {
+        None => (1, cfg.block_size()),
+        Some((rows, block)) => {
+            assert!(rows >= 1, "rl::improve: an objective declared a zero-row batch shape");
+            assert_eq!(
+                block,
+                cfg.block_size(),
+                "rl::improve: the objective uploads {block}-token rows but the checkpoint's block_size is {} - \
+                 the model's token buffer is sized b*t, so this would forward over stale or overrun rows rather than fail",
+                cfg.block_size()
+            );
+            (rows, block)
+        }
+    }
+}
+
 /// One `rl::improve` cycle: train `objective` (already configured over
 /// whichever `Environment`/`Verifier` and P12-P15 objective the caller
 /// chose) starting from `base_checkpoint`'s weights, gate the result against
@@ -389,7 +415,8 @@ pub fn cycle<M: Model, O: Objective<M>>(
     let base = checkpoint::load(base_checkpoint.to_str().expect("utf-8 path"));
     let base_cfg = M::Config::from_json(&base.header["config"]);
     let init = base.by_role("");
-    let model = M::new(base_cfg.clone(), 1, base_cfg.block_size(), &init);
+    let (rows, block) = objective_shape(&objective, &base_cfg);
+    let model = M::new(base_cfg.clone(), rows, block, &init);
 
     model::fit_with(model, objective, opts, Some(train_out))?;
 

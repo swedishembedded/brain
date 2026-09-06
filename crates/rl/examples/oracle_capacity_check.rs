@@ -226,11 +226,11 @@ fn main() {
         seed: SFT_SEED,
         checkpoint_secs: 0,
         align_to_lines: true,
-        // SEP's itos char (curriculum::line_aligned_meta maps token id `i`
-        // to `'a' + i`; SEP = 1 -> 'b') - supervise only the completion
-        // (t0,t1,t2), not the prompt, which the loss would otherwise spend
-        // most of its gradient trivially predicting.
-        mask_before: Some('b'),
+        // Supervise only the completion (t0,t1,t2), not the prompt, which the
+        // loss would otherwise spend most of its gradient trivially
+        // predicting. The char is derived by the dataset writer's own module
+        // rather than restated here, so the two cannot drift apart.
+        mask_before: Some(curriculum::mask_before_char()),
         mask_per_line: true,
     };
 

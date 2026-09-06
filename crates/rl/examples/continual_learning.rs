@@ -21,9 +21,25 @@
 //! Run it:
 //! ```text
 //! cargo run --release -p brain-rl --features qwen3 --example continual_learning -- \
-//!     [--cycles 12] [--steps 240] [--seed 1] [--replay 0.0] [--rehearsal 0] \
-//!     [--null-gate] [--skip-oracle] [--out DIR] [--base FILE]
+//!     [--regime grpo|sft] [--cycles 12] [--steps N] [--eval-per-cycle N] [--seed 1] \
+//!     [--replay 0.0] [--rehearsal N] [--null-gate] [--skip-oracle] [--out DIR] [--base FILE]
 //! ```
+//! With NO flags this is bit-identical to the recorded run above: `--regime
+//! grpo`, 240 steps, 16 probes per cycle, rehearsal 0.
+//!
+//! `--regime sft` is a DIFFERENT and strictly WEAKER experiment, not a tuning
+//! of the default one. It trains each cycle with teacher-forced supervision on
+//! the environment's own known-correct completions, mixed 50/50 with a
+//! rehearsal pool over every prior study rule plus the background rules the
+//! frozen base already solves. That removes both separately-diagnosed causes
+//! of the negative result above at once - the cue-independent shortcut, and
+//! GRPO's per-rule supervision starvation - at the cost of the label-free
+//! property: under `--regime sft` the no-label structural check is vacuous by
+//! construction and is deliberately NOT run, which the program says in its own
+//! output rather than leaving to a reader to infer. Its per-regime defaults
+//! (800 steps, 48 probes per cycle, rehearsal 4) are documented at the
+//! constants that carry them.
+//!
 //! Budget on an Intel Arc MTL box: about 4 minutes to pretrain the frozen base
 //! the first time (cached afterwards, and shared with the study test's cache),
 //! then roughly 1 minute per cycle with the plasticity control on, plus about
@@ -49,7 +65,7 @@ use std::path::{Path, PathBuf};
 use model::FitOpts;
 use qwen3::config::{LoraCfg, QwenConfig};
 use qwen3::model::Qwen;
-use rl::continual::{self, GatePolicy, PositionCopy, StudyConfig, StudyReport, StudySpec};
+use rl::continual::{self, GatePolicy, PositionCopy, Regime, SftConfig, StudyConfig, StudyReport, StudySpec};
 use rl::curriculum::{self, ContentSplit, PositionCopyEnv, PositionCopyVerifier, Rule};
 use rl::env::Environment;
 use rl::gate::GateConfig;
@@ -70,11 +86,50 @@ const LORA_RANK: u32 = 8;
 const LORA_ALPHA: f32 = 16.0;
 const LORA_TARGETS: [&str; 4] = ["wq", "wk", "wv", "wo"];
 
-const EVAL_PER_CYCLE: usize = 16;
 const GROUP_SIZE: usize = 2;
 const LR: f32 = 5e-3;
 const MIN_LR: f32 = 5e-4;
 const EXPLORE_TEMP: f32 = 1.5;
+
+// ---------------------------------------------------------------------------
+// Per-regime defaults. `--regime grpo` (the default) reproduces the recorded
+// study exactly; `--regime sft` is a DIFFERENT experiment with its own
+// defaults, and mixing the two sets would silently produce a third thing that
+// is neither. An explicit flag always wins over both.
+// ---------------------------------------------------------------------------
+
+const GRPO_STEPS: u32 = 240;
+const GRPO_EVAL_PER_CYCLE: usize = 16;
+const GRPO_REHEARSAL: usize = 0;
+
+/// Derived, not picked. This exact architecture reaches 0.995 on 16 rules at
+/// 48,000 record presentations per rule, and a pooled 12-rule SFT run reached
+/// 0.910 at 64,000. Under the 50/50 mixture, cycle `k`'s NEW rule receives
+/// `0.5 * batch * steps` presentations, so 750 steps hits the first anchor and
+/// 1000 the second; 800 sits just above the known-sufficient floor at 51,200,
+/// which is the conservative end on purpose - a cycle starts from an adapter
+/// that already holds `k` rules and needs to add exactly one, whereas both
+/// anchors measure learning N rules from a zero-delta start.
+const SFT_STEPS: u32 = 800;
+
+/// Raised from the GRPO run's 16, for POWER, and the reason is structural
+/// rather than a preference for bigger numbers. The gate's sign test is
+/// computed over DISCORDANT pairs only, so at 16 probes a cycle where the two
+/// arms tie on 12 has n = 4 - and at n = 4 the exact one-sided binomial cannot
+/// reach p <= 0.05 at ANY outcome, not even a clean 4-0 sweep. 48 lowers the
+/// win rate a significant result needs from 75.0% to 64.6% AND triples the
+/// ceiling on the discordant count, so the test is reachable at all.
+///
+/// Probe seeds are `base + cycle * 10_000 + i`, so a 48-probe set is a
+/// SUPERSET of the same cycle's 16-probe set and still cannot collide across
+/// cycles - but the retention cells are not cell-comparable to the recorded
+/// run's, and any report of them has to say so.
+const SFT_EVAL_PER_CYCLE: usize = 48;
+
+/// Held at the value the escalation ladder's rehearsal rows already used, so
+/// the new run's difference is attributable to the OBJECTIVE rather than to a
+/// re-tuned pool.
+const SFT_REHEARSAL: usize = 4;
 
 /// The gate's entropy arm is DISABLED (`min_entropy_ratio: 0.0`), and that is
 /// a measurement rather than a convenience: the position-copy family has
@@ -148,26 +203,66 @@ fn fixture_fingerprint() -> String {
     )
 }
 
+/// Parsed command line. `steps`, `eval_per_cycle` and `rehearsal` are
+/// `Option` on purpose: their defaults depend on `--regime`, and resolving
+/// them at parse time would bake the GRPO defaults into an SFT run.
 struct Args {
+    regime: RegimeArg,
     cycles: usize,
-    steps: u32,
+    steps: Option<u32>,
+    eval_per_cycle: Option<usize>,
     seed: u64,
     replay: f64,
-    rehearsal: usize,
+    rehearsal: Option<usize>,
     null_gate: bool,
     skip_oracle: bool,
     out: PathBuf,
     base: Option<PathBuf>,
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum RegimeArg {
+    Grpo,
+    Sft,
+}
+
+impl Args {
+    fn steps(&self) -> u32 {
+        self.steps.unwrap_or(match self.regime {
+            RegimeArg::Grpo => GRPO_STEPS,
+            RegimeArg::Sft => SFT_STEPS,
+        })
+    }
+    fn eval_per_cycle(&self) -> usize {
+        self.eval_per_cycle.unwrap_or(match self.regime {
+            RegimeArg::Grpo => GRPO_EVAL_PER_CYCLE,
+            RegimeArg::Sft => SFT_EVAL_PER_CYCLE,
+        })
+    }
+    fn rehearsal(&self) -> usize {
+        self.rehearsal.unwrap_or(match self.regime {
+            RegimeArg::Grpo => GRPO_REHEARSAL,
+            RegimeArg::Sft => SFT_REHEARSAL,
+        })
+    }
+    fn regime(&self) -> Regime {
+        match self.regime {
+            RegimeArg::Grpo => Regime::Grpo,
+            RegimeArg::Sft => Regime::Sft(SftConfig::default()),
+        }
+    }
+}
+
 impl Default for Args {
     fn default() -> Args {
         Args {
+            regime: RegimeArg::Grpo,
             cycles: 12,
-            steps: 240,
+            steps: None,
+            eval_per_cycle: None,
             seed: 1,
             replay: 0.0,
-            rehearsal: 0,
+            rehearsal: None,
             null_gate: false,
             skip_oracle: false,
             out: std::env::temp_dir().join("brain-rl-example-continual"),
@@ -176,8 +271,9 @@ impl Default for Args {
     }
 }
 
-const USAGE: &str = "usage: continual_learning [--cycles N] [--steps N] [--seed S] [--replay F] \
-                     [--rehearsal N] [--null-gate] [--skip-oracle] [--out DIR] [--base FILE]";
+const USAGE: &str = "usage: continual_learning [--regime grpo|sft] [--cycles N] [--steps N] \
+                     [--eval-per-cycle N] [--seed S] [--replay F] [--rehearsal N] [--null-gate] \
+                     [--skip-oracle] [--out DIR] [--base FILE]";
 
 fn parse_args() -> Args {
     let mut a = Args::default();
@@ -191,12 +287,27 @@ fn parse_args() -> Args {
     };
     while i < argv.len() {
         match argv[i].as_str() {
+            "--regime" => {
+                a.regime = match need(i, &argv).as_str() {
+                    "grpo" => RegimeArg::Grpo,
+                    "sft" => RegimeArg::Sft,
+                    other => {
+                        eprintln!("--regime takes grpo or sft, got {other}\n{USAGE}");
+                        std::process::exit(2);
+                    }
+                };
+                i += 2;
+            }
             "--cycles" => {
                 a.cycles = need(i, &argv).parse().expect("--cycles takes an integer");
                 i += 2;
             }
             "--steps" => {
-                a.steps = need(i, &argv).parse().expect("--steps takes an integer");
+                a.steps = Some(need(i, &argv).parse().expect("--steps takes an integer"));
+                i += 2;
+            }
+            "--eval-per-cycle" => {
+                a.eval_per_cycle = Some(need(i, &argv).parse().expect("--eval-per-cycle takes an integer"));
                 i += 2;
             }
             "--seed" => {
@@ -208,7 +319,7 @@ fn parse_args() -> Args {
                 i += 2;
             }
             "--rehearsal" => {
-                a.rehearsal = need(i, &argv).parse().expect("--rehearsal takes an integer");
+                a.rehearsal = Some(need(i, &argv).parse().expect("--rehearsal takes an integer"));
                 i += 2;
             }
             "--out" => {
@@ -340,6 +451,44 @@ fn check_base(base: &Path) {
     );
 }
 
+/// Printed BEFORE any number under `--regime sft`, and again in the verdict
+/// block, because the regime's claim is strictly weaker than the default's and
+/// a reader who skims the trajectory would otherwise carry the wrong one away.
+fn print_sft_disclaimer(args: &Args) {
+    println!(
+        "\nno-label property: NOT APPLICABLE on this run. --regime sft is teacher-forced on the environment's own\n\
+         known-correct completions (rl::curriculum::target_of), so rl::improve::assert_trained_spans_were_sampled has\n\
+         nothing to check and was deliberately NOT run - reaching it would turn a real structural check into a silent\n\
+         no-op that still reads like a pass. This regime makes NO label-free claim; --regime grpo is the one that does.\n\
+         Read every number below as \"continual learning with an oracle-labeled curriculum and rehearsal\", which is a\n\
+         strictly weaker statement than the pure-sequential result this harness was built to test."
+    );
+    println!(
+        "rehearsal pool composition: at cycle k the pool arm draws UNIFORMLY over the k prior study rules plus the {}\n\
+         background rules the frozen base already solves - so cycle 1's pool is those {} background rules alone, which\n\
+         is what makes cycle 1 unsolvable by a cue-independent policy. The pool is unbounded in k (no window), since\n\
+         ACC is scored over ALL probes and a window would be optimizing against the metric.",
+        args.rehearsal(),
+        args.rehearsal()
+    );
+    if args.eval_per_cycle() != GRPO_EVAL_PER_CYCLE {
+        println!(
+            "probe count: {} per cycle, not the recorded run's {}. Probe seeds are base + cycle*10000 + i, so each set\n\
+             is a SUPERSET of the recorded set's seeds - but the retention cells below are NOT cell-comparable to the\n\
+             recorded run's, and must not be diffed against them as if they were.",
+            args.eval_per_cycle(),
+            GRPO_EVAL_PER_CYCLE
+        );
+    }
+    println!(
+        "pre-registered targets: A1-A8 below are printed UNCHANGED. They were sized on a 5-seed, single-cycle\n\
+         measurement of the GRPO regime at 16 probes, and have NOT been re-measured for this regime - so they are the\n\
+         honest bar (moving them to make them reachable would void the apparatus) but they are not a bar this regime's\n\
+         own seed noise has been checked against. Re-run the single-cycle pre-registration under this regime before\n\
+         reading a PASS here as a result."
+    );
+}
+
 fn min_distinct_frac(report: &StudyReport) -> f64 {
     report.records.iter().map(|r| r.distinct_completions as f64 / r.decoded_tasks as f64).fold(f64::INFINITY, f64::min)
 }
@@ -438,18 +587,45 @@ fn print_verdict(report: &StudyReport, oracle: Option<f64>, args: &Args, targets
             report.promotions
         );
     }
-    println!("\nlabel-leak check: {trained} trained completion spans are a sub-multiset of the {sampled} spans the policy itself sampled - OK");
-    println!("  (rl::improve::assert_trained_spans_were_sampled ran inside the harness on EVERY cycle and on every control-arm");
-    println!("   run; it panics on a violation, so reaching this line is the proof rather than a flag anyone had to check)");
+    match args.regime {
+        RegimeArg::Grpo => {
+            println!("\nlabel-leak check: {trained} trained completion spans are a sub-multiset of the {sampled} spans the policy itself sampled - OK");
+            println!("  (rl::improve::assert_trained_spans_were_sampled ran inside the harness on EVERY cycle and on every control-arm");
+            println!("   run; it panics on a violation, so reaching this line is the proof rather than a flag anyone had to check)");
+        }
+        RegimeArg::Sft => print_sft_disclaimer(args),
+    }
     println!("split integrity: {} frozen probe ids checked disjoint from {} explore ids", report.probe_ids_checked, report.explore_ids_checked);
 
+    let pipeline = match args.regime {
+        RegimeArg::Grpo => "rollout -> verify -> GRPO -> gate -> promote/reject",
+        RegimeArg::Sft => "teacher-forced SFT on new rule + rehearsal pool -> gate -> promote/reject",
+    };
+    // Only --regime grpo can claim the no-label property. Naming both
+    // properties under a teacher-forced regime would be a false statement in
+    // the program's own output, which is the failure mode this whole block
+    // exists to prevent.
+    // Each arm carries its own line breaks through to the trailing "(worst
+    // distinct fraction", so the GRPO paragraph is byte-identical to the one
+    // that produced the recorded output.
+    let structural = match args.regime {
+        RegimeArg::Grpo => {
+            "both structural properties\n\
+             held on every cycle (every trained span was sampled by the policy; every probe id was disjoint from the explore\n\
+             split by content-space partition AND by id hash); no cycle collapsed onto one output (worst distinct fraction"
+        }
+        RegimeArg::Sft => {
+            "the ONE structural property this regime can\n\
+             claim held on every cycle (every probe id was disjoint from the explore split by content-space partition AND\n\
+             by id hash) - the no-label property is not the second one, it was not checked here at all; no cycle collapsed\n\
+             onto one output (worst distinct fraction"
+        }
+    };
     println!("\nWHAT THIS RUN DOES AND DOES NOT PROVE");
     println!(
-        "ESTABLISHES. Over {t} sequential real cycles (rollout -> verify -> GRPO -> gate -> promote/reject) on the\n\
+        "ESTABLISHES. Over {t} sequential real cycles ({pipeline}) on the\n\
          position-copy task family, at this model scale, with ONE seed ({}) and a frozen pretrained base: the harness ran\n\
-         the full protocol and the retention matrix above came from the gate's own decodes; both structural properties\n\
-         held on every cycle (every trained span was sampled by the policy; every probe id was disjoint from the explore\n\
-         split by content-space partition AND by id hash); no cycle collapsed onto one output (worst distinct fraction\n\
+         the full protocol and the retention matrix above came from the gate's own decodes; {structural}\n\
          {:.3}); {} ({r_1_1:.3} against the untrained base's {:.3} on the same probe); and the gate\n\
          {}.",
         args.seed,
@@ -555,12 +731,13 @@ fn main() {
         base_checkpoint: &base,
         adapter: AdapterMeta { rank: LORA_RANK, alpha: LORA_ALPHA, targets: &targets, family: "qwen", base_id: "poscopy-pretrained", dataset_id: None },
     };
+    let regime = args.regime();
     let cfg = StudyConfig {
         cycles: args.cycles,
-        steps_per_cycle: args.steps,
+        steps_per_cycle: args.steps(),
         group_size: GROUP_SIZE,
         grad_accum: GROUP_SIZE as u32,
-        eval_per_cycle: EVAL_PER_CYCLE,
+        eval_per_cycle: args.eval_per_cycle(),
         lr: LR,
         min_lr: MIN_LR,
         explore_temp: EXPLORE_TEMP,
@@ -571,8 +748,9 @@ fn main() {
         plasticity_control: true,
         work_dir: args.out.join(if args.null_gate { "arm4" } else { "arm1" }),
         verbose: true,
+        regime: regime.clone(),
     };
-    let curr = PositionCopy::new(args.rehearsal);
+    let curr = PositionCopy::new(args.rehearsal());
 
     println!(
         "base: pretrained (frozen) + LoRA r{LORA_RANK} a{LORA_ALPHA} on {}   seed {}   gate: {}",
@@ -583,10 +761,31 @@ fn main() {
             GatePolicy::CoinFlip { seed } => format!("coin-flip (Arm 4, null gate, seed {seed}) - the real gate still runs and is still reported"),
         }
     );
-    println!(
-        "{} cycles x {} GRPO steps, group {GROUP_SIZE}, temp {EXPLORE_TEMP}, replay {:.2}, rehearsal {}, {EVAL_PER_CYCLE} frozen probes per cycle",
-        args.cycles, args.steps, args.replay, args.rehearsal
-    );
+    match &regime {
+        Regime::Grpo => println!(
+            "{} cycles x {} GRPO steps, group {GROUP_SIZE}, temp {EXPLORE_TEMP}, replay {:.2}, rehearsal {}, {} frozen probes per cycle",
+            args.cycles,
+            args.steps(),
+            args.replay,
+            args.rehearsal(),
+            args.eval_per_cycle()
+        ),
+        Regime::Sft(s) => println!(
+            "{} cycles x {} teacher-forced SFT steps at batch {}, lr {}, mixture {:.2} new rule / {:.2} rehearsal pool,\n\
+             rehearsal {} background rules, {} frozen probes per cycle",
+            args.cycles,
+            args.steps(),
+            s.batch,
+            s.lr,
+            s.new_weight,
+            s.rehearsal_weight,
+            args.rehearsal(),
+            args.eval_per_cycle()
+        ),
+    }
+    if let Regime::Sft(_) = &regime {
+        print_sft_disclaimer(&args);
+    }
     println!("arms: 1 (the gated loop) + 2 (per-cycle fresh-adapter control){}\n", if args.skip_oracle { "" } else { " + 3 (joint-training capacity oracle)" });
 
     let started = std::time::Instant::now();
@@ -596,7 +795,7 @@ fn main() {
     let oracle = if args.skip_oracle {
         None
     } else {
-        println!("Arm 3: training one fresh adapter on all {} rules POOLED for {} steps - the capacity control", args.cycles, args.steps * args.cycles as u32);
+        println!("Arm 3: training one fresh adapter on all {} rules POOLED for {} steps - the capacity control", args.cycles, args.steps() * args.cycles as u32);
         let o = continual::joint_oracle::<Qwen, _>(&spec, &curr, &cfg).expect("joint_oracle");
         report.joint_oracle_acc = Some(o);
         Some(o)

@@ -66,6 +66,7 @@ use crate::env::{Environment, Task, Verifier};
 use crate::gate::{Decision, GateConfig, GateReport};
 use crate::improve::{self, AdapterMeta, ArmScores, CycleArtifacts, Evaluation, ProvenanceInput};
 use crate::objective::grpo::{CycleLog, Grpo, GrpoConfig};
+use crate::objective::mixture::{Anchor, Mixture};
 
 /// Base seed for the frozen evaluation probes. Probe seeds are a pure
 /// function of `(cycle, index)`, never of [`StudyConfig::seed`]: the probe
@@ -74,6 +75,85 @@ use crate::objective::grpo::{CycleLog, Grpo, GrpoConfig};
 const PROBE_SEED_BASE: u64 = 900_000_000;
 /// How many explore draws per cycle the pre-loop split-integrity check runs.
 const EXPLORE_AUDIT_DRAWS: u64 = 256;
+
+/// Which training regime a cycle runs.
+///
+/// [`Regime::Grpo`] is the recorded twelve-cycle study's regime and is the
+/// DEFAULT, so a study written without thinking about this reproduces
+/// bit-identically rather than silently changing. [`Regime::Sft`] attacks the
+/// two separately diagnosed failure modes of that run at once: the
+/// cue-independent shortcut (via a rehearsal pool that is non-empty even at
+/// cycle 1 - see [`rehearsal_pool`]) and GRPO's per-rule supervision
+/// starvation together with its large zero-gradient group rate (via
+/// teacher-forced dense supervision at a real batch width).
+///
+/// [`Regime::Sft`] is a strictly WEAKER claim than [`Regime::Grpo`], and every
+/// report of it has to say so: it trains on the environment's own
+/// known-correct completions ([`crate::curriculum::target_of`]), so the
+/// no-label structural check
+/// ([`crate::improve::assert_trained_spans_were_sampled`]) is VACUOUS under it
+/// by construction rather than merely unused - which is why [`run_study`] does
+/// not run it under this regime instead of running it and reporting a pass it
+/// did not earn.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum Regime {
+    #[default]
+    Grpo,
+    Sft(SftConfig),
+}
+
+impl Regime {
+    /// The stable regime tag recorded in [`CycleRecord::regime`] and in the
+    /// promoted adapter's training provenance.
+    pub fn tag(&self) -> &'static str {
+        match self {
+            Regime::Grpo => "grpo",
+            Regime::Sft(_) => "sft_mixture",
+        }
+    }
+}
+
+/// Everything [`Regime::Sft`] needs that [`Regime::Grpo`] has no meaning for.
+/// Carried INSIDE the variant so a GRPO run cannot set an SFT knob that would
+/// then be silently ignored, and so [`StudyConfig`] grows exactly one field.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SftConfig {
+    /// Mixture weight on cycle `k`'s NEW rule.
+    pub new_weight: f32,
+    /// Mixture weight on the rehearsal pool (every prior study rule plus the
+    /// background rules the frozen base already solves).
+    pub rehearsal_weight: f32,
+    /// Distinct records written per SFT dataset, per arm, per cycle.
+    pub seqs: usize,
+    /// Rows per optimizer step. Wide on purpose: a step at this width is
+    /// dispatch-dominated on this stack, so supervision density here is nearly
+    /// free, and supervision density is the entire point of the regime.
+    pub batch: u32,
+    pub lr: f32,
+    pub min_lr: f32,
+    pub warmup: u32,
+}
+
+impl Default for SftConfig {
+    /// The measured pooled-SFT recipe that reached 0.910 on this task family's
+    /// 192-probe shape, plus the 50/50 new-vs-rehearsal split this regime adds
+    /// on top of it.
+    fn default() -> Self {
+        SftConfig { new_weight: 0.5, rehearsal_weight: 0.5, seqs: 30_000, batch: 128, lr: 3e-3, min_lr: 3e-4, warmup: 100 }
+    }
+}
+
+/// Which rule an SFT dataset record is drawn from - a study cycle's own rule,
+/// or one of the background rehearsal rules. Mirrors [`ReplayEnv`]'s union
+/// exactly, so both regimes attack the cue-independent shortcut with the same
+/// task set rather than two subtly different ones.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SftSource {
+    /// Cycle `k`'s own rule.
+    Cycle(usize),
+    /// The `i`-th rehearsal rule, parallel to [`Curriculum::rehearsal_envs`].
+    Rehearsal(usize),
+}
 
 /// A sequence of tasks to learn, one per cycle.
 pub trait Curriculum {
@@ -116,6 +196,27 @@ pub trait Curriculum {
     /// cue-conditional from cycle 1 onward. See [`ReplayEnv`].
     fn rehearsal_envs(&self) -> Vec<Self::Env> {
         Vec::new()
+    }
+
+    /// How many rehearsal rules exist, without constructing the environments.
+    fn rehearsal_len(&self) -> usize {
+        self.rehearsal_envs().len()
+    }
+
+    /// Write a `model::load_dataset`-shaped directory of `n` teacher-forced
+    /// records drawn UNIFORMLY over `sources`, from the EXPLORE split only.
+    /// Required by [`Regime::Sft`]; the default panics rather than letting a
+    /// curriculum that has not implemented it train on nothing.
+    fn write_sft_dataset(&self, _sources: &[SftSource], _n: usize, _seed: u64, _out_dir: &Path) -> std::io::Result<()> {
+        panic!("continual::Curriculum::write_sft_dataset: this curriculum does not implement Regime::Sft");
+    }
+
+    /// `FitOpts::mask_before` for that dataset: the char whose token ends the
+    /// prompt, so the loss supervises the COMPLETION only. `None` means "do
+    /// not mask", which on this dataset shape is a measured 0.509-vs-0.910
+    /// difference at an identical budget, not a stylistic one.
+    fn sft_mask_before(&self) -> Option<char> {
+        None
     }
 }
 
@@ -160,6 +261,28 @@ impl Curriculum for PositionCopy {
     }
     fn rehearsal_envs(&self) -> Vec<PositionCopyEnv> {
         Rule::pretrain_rules(self.rehearsal).into_iter().map(|r| PositionCopyEnv::new(r, ContentSplit::Explore)).collect()
+    }
+    fn rehearsal_len(&self) -> usize {
+        self.rehearsal
+    }
+    fn write_sft_dataset(&self, sources: &[SftSource], n: usize, seed: u64, out_dir: &Path) -> std::io::Result<()> {
+        let pre = Rule::pretrain_rules(self.rehearsal);
+        let rules: Vec<Rule> = sources
+            .iter()
+            .map(|s| match *s {
+                SftSource::Cycle(k) => Rule::for_cycle(k),
+                SftSource::Rehearsal(i) => *pre
+                    .get(i)
+                    .unwrap_or_else(|| panic!("continual::PositionCopy::write_sft_dataset: rehearsal source {i} but only {} rehearsal rules exist", pre.len())),
+            })
+            .collect();
+        // `write_pretrain_dataset` draws uniformly over its rule list and is
+        // Explore-split-only by construction - which is exactly the rehearsal
+        // sampler this regime needs, so there is no second one to keep in sync.
+        crate::curriculum::write_pretrain_dataset(&rules, n, seed, out_dir)
+    }
+    fn sft_mask_before(&self) -> Option<char> {
+        Some(crate::curriculum::mask_before_char())
     }
 }
 
@@ -316,6 +439,16 @@ pub struct StudyConfig {
     /// Print one row per cycle as it completes (a 12-cycle run is minutes of
     /// wall clock; silence for all of it is not a usable harness).
     pub verbose: bool,
+    /// Which objective each cycle trains. [`Regime::Grpo`] (the [`Default`])
+    /// reproduces the recorded study bit-for-bit.
+    ///
+    /// `lr`/`min_lr`/`group_size`/`grad_accum`/`explore_temp`/`replay_frac`
+    /// above are GRPO-regime knobs. [`Regime::Sft`] carries its own in
+    /// [`SftConfig`], and [`run_study`] ASSERTS `replay_frac == 0.0` under it
+    /// rather than accepting a setting it would silently ignore - a run's own
+    /// config is a record of what it did, and a knob that did nothing makes
+    /// that record false.
+    pub regime: Regime,
 }
 
 /// Architecture-specific facts [`run_study`] cannot derive.
@@ -377,17 +510,24 @@ impl CycleRecord {
         let applied = if self.applied_promote { "yes" } else { "no " };
         let rho = self.plasticity_ratio.map(|r| format!("{r:5.2}")).unwrap_or_else(|| "    -".to_string());
         let distinct = format!("{}/{}", self.distinct_completions, self.decoded_tasks);
+        // `trained`, `reward` and `train/sampled` are all counts over SAMPLED
+        // rollouts, which a teacher-forced regime does not produce at all.
+        // Printing the zeros they would otherwise hold would read as "this
+        // cycle trained on nothing and earned no reward", which is a different
+        // and false statement from "these columns do not apply here".
+        let sampling = self.regime == "grpo";
+        let (trained, reward, train_sampled) = if sampling {
+            (format!("{:6}", self.trained_spans), format!("{:6.3}", self.mean_reward), format!("{:5}/{:<5}", self.trained_spans, self.sampled_spans))
+        } else {
+            (format!("{:>6}", "-"), format!("{:>6}", "-"), format!("{:>5}/{:<5}", "-", "-"))
+        };
         format!(
-            "{:3}  {:<20} {:6}  {:6.3}  {:6.3}  {:6.3}  {rho}  {:6.3}  {:5}/{:<5}  {distinct:>7}  {:<14} {applied}  {:6.1}",
+            "{:3}  {:<20} {trained}  {:6.3}  {:6.3}  {:6.3}  {rho}  {reward}  {train_sampled}  {distinct:>7}  {:<14} {applied}  {:6.1}",
             self.cycle + 1,
             self.label,
-            self.trained_spans,
             self.heldout_candidate,
             self.heldout_incumbent,
             self.canary_t1,
-            self.mean_reward,
-            self.trained_spans,
-            self.sampled_spans,
             gate,
             self.wall_secs
         )
@@ -490,9 +630,20 @@ impl StudyReport {
         let causes = if causes.is_empty() { "-".to_string() } else { causes.join(" ") };
         let oracle = self.joint_oracle_acc.map(|v| format!("{v:.3}")).unwrap_or_else(|| "not run".to_string());
         let last_only = self.last_task_only_acc.map(|v| format!("{v:.3}")).unwrap_or_else(|| "not run".to_string());
+        // Printed rather than merely stored, because `xfer_vs_fresh` and
+        // `rho` are both computed AGAINST it: without the series itself on
+        // the page, a reader has to invert a ratio to recover the control
+        // arm's own trajectory, and an adversarial review of this harness's
+        // output got that inversion backwards.
+        let fresh = if self.b_fresh.is_empty() {
+            "not run (Arm 2 disabled)".to_string()
+        } else {
+            format!("{}   mean {:.3}", self.b_fresh.iter().map(|v| format!("{v:.3}")).collect::<Vec<_>>().join(" "), mean(&self.b_fresh))
+        };
         format!(
             "ACC {:.3}   BWT {:+.3}   xfer_vs_fresh {xvf}   promotions {}/{t}   rejects: {causes}\n\
              chance baseline b_base (untrained base on probe T1) {:.3}\n\
+             b_fresh (Arm 2, a fresh adapter per cycle on that cycle's own probe): {fresh}\n\
              plasticity rho(N) {rho_n}   {slope}\n\
              joint-training oracle ACC {oracle}   last-task-only ACC {last_only}\n\
              split integrity: {} frozen probe ids checked disjoint from {} explore ids\n",
@@ -593,6 +744,99 @@ fn cycle_opts(cfg: &StudyConfig, cycle: usize, block: u32) -> FitOpts {
     }
 }
 
+/// Dataset-stream salt for Arm 1 (the gated, warm-started loop).
+const ARM1_SALT: u64 = 0;
+/// Dataset-stream salt for Arm 2 (the per-cycle fresh-adapter control). The
+/// two arms must differ only in WHERE THEY STARTED; sharing a dataset seed
+/// would make the control a partial replica of the thing it controls.
+const ARM2_SALT: u64 = 0x000F_5E54;
+/// Dataset-stream salt for Arm 3 (the joint-training oracle).
+const ORACLE_SALT: u64 = 0x000A_C1E0;
+/// Salt separating the rehearsal-pool arm's draw from the new-rule arm's.
+const POOL_SALT: u64 = 0x00A1_1CE5;
+
+/// Cycle `k`'s rehearsal pool: EVERY prior study rule plus EVERY background
+/// rehearsal rule, drawn uniformly.
+///
+/// Unbounded in `k` on purpose. A window of size `w` deliberately lets rules
+/// older than `w` decay, and the study's headline metric (`ACC`, the mean over
+/// ALL frozen probe sets) plus its canary (the OLDEST rule's retention cell)
+/// are precisely what such a window would be optimizing against. Uniform over
+/// the growing union also produces the right cumulative profile for free: rule
+/// `j` is rehearsed on every cycle after its own, so the oldest rules
+/// accumulate the most rehearsal and the newest the least, which is the
+/// anti-forgetting profile the retention matrix rewards, with no scheduler.
+///
+/// At `k = 0` the pool is the background rules ALONE, and that is the case
+/// that matters most: those are cues the frozen base already solves, so a
+/// cue-independent policy scores near zero on half the mixture from the first
+/// step, and cycle 1 stops being solvable by the shortcut.
+fn rehearsal_pool<C: Curriculum>(curr: &C, cycle: usize) -> Vec<SftSource> {
+    (0..cycle).map(SftSource::Cycle).chain((0..curr.rehearsal_len()).map(SftSource::Rehearsal)).collect()
+}
+
+/// [`cycle_opts`] for [`Regime::Sft`]. Deliberately a SECOND function rather
+/// than a branch inside `cycle_opts`, so the GRPO path stays byte-identical to
+/// the one that produced the recorded trajectory.
+fn sft_cycle_opts<C: Curriculum>(cfg: &StudyConfig, sft: &SftConfig, curr: &C, cycle: usize, block: u32) -> FitOpts {
+    FitOpts {
+        steps: cfg.steps_per_cycle,
+        batch_size: sft.batch,
+        block_size: block,
+        lr: sft.lr,
+        min_lr: sft.min_lr,
+        warmup: sft.warmup,
+        decay_iters: cfg.steps_per_cycle,
+        weight_decay: 0.0,
+        grad_clip: 1.0,
+        // GRPO needs one whole group's advantages per update; teacher-forced
+        // SFT gets its rows from the batch instead, in one dispatch.
+        grad_accum: 1,
+        eval_interval: 0,
+        eval_batches: 0,
+        seed: cfg.seed.wrapping_add(cycle as u64 * 1_000),
+        checkpoint_secs: 0,
+        // Both required by `curriculum::write_pretrain_dataset`'s own
+        // contract: without line alignment the loader draws mid-record windows
+        // and supervises completions whose prompt is not in the window, and
+        // without the mask the loss is spent mostly re-predicting the prompt.
+        align_to_lines: true,
+        mask_before: curr.sft_mask_before(),
+        mask_per_line: true,
+    }
+}
+
+/// Cycle `k`'s two SFT arms: one over the NEW rule, one over the rehearsal
+/// pool, each a `model::load_dataset` directory under `cycle_dir`.
+///
+/// Separated from [`sft_objective`] because everything interesting about the
+/// regime - which rules each arm covers, at what weight, from which dataset
+/// stream - is decided here and is checkable without a GPU or a `Model`.
+fn sft_arms<C: Curriculum>(curr: &C, sft: &SftConfig, cycle: usize, cycle_dir: &Path, opts: &FitOpts, arm_salt: u64) -> std::io::Result<Vec<(f32, Anchor)>> {
+    let new_dir = cycle_dir.join("sft-new");
+    let pool_dir = cycle_dir.join("sft-pool");
+    let seed = opts.seed ^ arm_salt;
+    curr.write_sft_dataset(&[SftSource::Cycle(cycle)], sft.seqs, seed, &new_dir)?;
+    curr.write_sft_dataset(&rehearsal_pool(curr, cycle), sft.seqs, seed ^ POOL_SALT, &pool_dir)?;
+
+    let (new_train, _, new_bc, v1) = model::load_dataset(&new_dir, opts)?;
+    let (pool_train, _, pool_bc, v2) = model::load_dataset(&pool_dir, opts)?;
+    assert_eq!(v1, v2, "continual::sft_arms: the two SFT arms must share one vocab, got {v1} and {v2}");
+    assert_eq!(
+        (new_bc.batch_size, new_bc.block_size),
+        (pool_bc.batch_size, pool_bc.block_size),
+        "continual::sft_arms: both arms upload into the same model, so they must agree on the batch shape"
+    );
+    Ok(vec![(sft.new_weight, Anchor::new(new_train, new_bc)), (sft.rehearsal_weight, Anchor::new(pool_train, pool_bc))])
+}
+
+/// Cycle `k`'s SFT objective: [`sft_arms`] composed by [`Mixture`], which adds
+/// no gradient math of its own - it draws which arm runs each micro-step.
+fn sft_objective<M: Model, C: Curriculum>(curr: &C, sft: &SftConfig, cycle: usize, cycle_dir: &Path, opts: &FitOpts, arm_salt: u64) -> std::io::Result<Mixture<M>> {
+    let arms = sft_arms(curr, sft, cycle, cycle_dir, opts, arm_salt)?;
+    Ok(Mixture::new(arms.into_iter().map(|(w, a)| (w, Box::new(a) as Box<dyn model::Objective<M>>)).collect()))
+}
+
 fn grpo_cfg(cfg: &StudyConfig, block: usize, completion_len: usize) -> GrpoConfig {
     GrpoConfig {
         group_size: cfg.group_size,
@@ -616,6 +860,13 @@ fn block_of<M: Model>(path: &Path) -> u32 {
     M::Config::from_json(&c.header["config"]).block_size()
 }
 
+/// The base checkpoint's own vocabulary size - what an SFT dataset's token ids
+/// index into, and therefore what its `meta.json` has to agree with.
+fn vocab_of<M: Model>(path: &Path) -> u32 {
+    let c = checkpoint::load(path.to_str().expect("utf-8 path"));
+    M::Config::from_json(&c.header["config"]).vocab()
+}
+
 /// Run the whole study: `cfg.cycles` sequential gated cycles (Arm 1), plus
 /// the per-cycle fresh-adapter control (Arm 2) when enabled.
 pub fn run_study<M: Model, C: Curriculum>(spec: &StudySpec, curr: &C, cfg: &StudyConfig) -> std::io::Result<StudyReport> {
@@ -627,6 +878,21 @@ pub fn run_study<M: Model, C: Curriculum>(spec: &StudySpec, curr: &C, cfg: &Stud
         prompt_len + completion_len <= block as usize,
         "continual::run_study: the curriculum's {prompt_len}+{completion_len} token shape does not fit the base checkpoint's block_size {block}"
     );
+    if let Regime::Sft(sft) = &cfg.regime {
+        assert!(
+            cfg.replay_frac == 0.0,
+            "continual::run_study: replay_frac drives ReplayEnv, which only Regime::Grpo uses - under Regime::Sft the \
+             equivalent knob is SftConfig::rehearsal_weight (currently {}), and accepting a silently-ignored replay_frac \
+             would make a run's own config a false record of what it did",
+            sft.rehearsal_weight
+        );
+        assert!(
+            curr.rehearsal_len() > 0,
+            "continual::run_study: Regime::Sft at cycle 0 has NO prior study rule, so a zero-length rehearsal pool would \
+             train cycle 1 on one cue only - exactly the cue-independent shortcut this regime exists to remove, whose \
+             predicted scores correlate with the recorded study's own zero-shot column at r = 0.987"
+        );
+    }
 
     // ---- Pre-loop split integrity (structural, runs every study) ----------
     //
@@ -703,9 +969,20 @@ pub fn run_study<M: Model, C: Curriculum>(spec: &StudySpec, curr: &C, cfg: &Stud
         );
 
         let log = CycleLog::new();
-        let train_env = ReplayEnv::new(curr, k, cfg.replay_frac);
-        let objective = Grpo::new(train_env, curr.verifier(), grpo_cfg(cfg, block as usize, completion_len)).with_log(log.clone());
-        let opts = cycle_opts(cfg, k, block);
+        let opts = match &cfg.regime {
+            Regime::Grpo => cycle_opts(cfg, k, block),
+            Regime::Sft(sft) => sft_cycle_opts(cfg, sft, curr, k, block),
+        };
+        // The one place a runtime regime choice has to be erased: `improve::
+        // cycle` takes its objective BY VALUE and is monomorphized per call
+        // site, and `Grpo<ReplayEnv<'_, C>, _>` borrows `curr` so the box
+        // cannot be `'static`.
+        let objective: Box<dyn model::Objective<M> + '_> = match &cfg.regime {
+            Regime::Grpo => {
+                Box::new(Grpo::new(ReplayEnv::new(curr, k, cfg.replay_frac), curr.verifier(), grpo_cfg(cfg, block as usize, completion_len)).with_log(log.clone()))
+            }
+            Regime::Sft(sft) => Box::new(sft_objective::<M, C>(curr, sft, k, &cycle_dir, &opts, ARM1_SALT)?),
+        };
 
         let outcome = improve::cycle::<M, _>(
             &incumbent,
@@ -717,28 +994,48 @@ pub fn run_study<M: Model, C: Curriculum>(spec: &StudySpec, curr: &C, cfg: &Stud
                 adapter_out_dir: &adapter_dir,
                 adapter: spec.adapter,
                 provenance: ProvenanceInput {
-                    regime: "grpo".to_string(),
+                    regime: cfg.regime.tag().to_string(),
                     seed: opts.seed,
-                    hyperparams: serde_json::json!({
-                        "group_size": cfg.group_size,
-                        "grad_accum": cfg.grad_accum,
-                        "steps": cfg.steps_per_cycle,
-                        "lr": cfg.lr,
-                    }),
+                    hyperparams: match &cfg.regime {
+                        Regime::Grpo => serde_json::json!({
+                            "group_size": cfg.group_size,
+                            "grad_accum": cfg.grad_accum,
+                            "steps": cfg.steps_per_cycle,
+                            "lr": cfg.lr,
+                        }),
+                        Regime::Sft(sft) => serde_json::json!({
+                            "steps": cfg.steps_per_cycle,
+                            "batch": sft.batch,
+                            "lr": sft.lr,
+                            "new_weight": sft.new_weight,
+                            "rehearsal_weight": sft.rehearsal_weight,
+                            "seqs": sft.seqs,
+                            "rehearsal_rules": curr.rehearsal_len(),
+                            "pool_rules": rehearsal_pool(curr, k).len(),
+                        }),
+                    },
                     environment: curr.label(k),
                     cycle: k as u64,
                 },
             },
         )?;
 
-        // Structural check #1, unconditionally, EVERY cycle (not only on a
+        // Structural check #1, EVERY cycle under Regime::Grpo (not only on a
         // promotion): every completion span this cycle trained on is a member
         // of the multiset it actually sampled. This panics in-harness rather
         // than returning a flag - a label reaching training invalidates the
         // whole run, so there is nothing to carry forward and report.
+        //
+        // Under Regime::Sft it is NOT run, deliberately: that regime is
+        // teacher-forced on the environment's own known-correct completions,
+        // so both logs are empty and the check would pass vacuously. Reaching
+        // it would turn a real structural property into a silent no-op that
+        // still reads like a pass.
         let trained = log.trained();
         let sampled = log.sampled();
-        improve::assert_trained_spans_were_sampled(&trained, &sampled);
+        if matches!(cfg.regime, Regime::Grpo) {
+            improve::assert_trained_spans_were_sampled(&trained, &sampled);
+        }
 
         let applied_promote = cfg.gate_policy.applies(outcome.decision, k);
         if outcome.decision == Decision::Promote {
@@ -761,11 +1058,23 @@ pub fn run_study<M: Model, C: Curriculum>(spec: &StudySpec, curr: &C, cfg: &Stud
             let fresh_out = cycle_dir.join("fresh.safetensors");
             let fresh_log = CycleLog::new();
             // The SAME training distribution as Arm 1, so the plasticity
-            // ratio compares two runs that differ only in where they started.
-            let fresh_env = ReplayEnv::new(curr, k, cfg.replay_frac);
-            let fresh_obj = Grpo::new(fresh_env, curr.verifier(), grpo_cfg(cfg, block as usize, completion_len)).with_log(fresh_log.clone());
+            // ratio compares two runs that differ only in where they started -
+            // which is also why the SFT arm gets a different DATASET STREAM
+            // (`ARM2_SALT`) rather than a replay of Arm 1's own draws.
+            let fresh_dir = cycle_dir.join("fresh");
+            let fresh_obj: Box<dyn model::Objective<M> + '_> = match &cfg.regime {
+                Regime::Grpo => Box::new(
+                    Grpo::new(ReplayEnv::new(curr, k, cfg.replay_frac), curr.verifier(), grpo_cfg(cfg, block as usize, completion_len)).with_log(fresh_log.clone()),
+                ),
+                Regime::Sft(sft) => {
+                    std::fs::create_dir_all(&fresh_dir)?;
+                    Box::new(sft_objective::<M, C>(curr, sft, k, &fresh_dir, &opts, ARM2_SALT)?)
+                }
+            };
             train_from::<M, _>(spec.base_checkpoint, fresh_obj, &opts, &fresh_out)?;
-            improve::assert_trained_spans_were_sampled(&fresh_log.trained(), &fresh_log.sampled());
+            if matches!(cfg.regime, Regime::Grpo) {
+                improve::assert_trained_spans_were_sampled(&fresh_log.trained(), &fresh_log.sampled());
+            }
             let (scores, _) = improve::score_checkpoint::<M>(&fresh_out, held_out, &verifier, &greedy_params);
             last_fresh = Some(fresh_out);
             let v = mean(&scores);
@@ -778,7 +1087,7 @@ pub fn run_study<M: Model, C: Curriculum>(spec: &StudySpec, curr: &C, cfg: &Stud
         let record = CycleRecord {
             cycle: k,
             label: curr.label(k),
-            regime: "grpo",
+            regime: cfg.regime.tag(),
             gate_decision: outcome.decision,
             applied_promote,
             report: outcome.report,
@@ -855,7 +1164,8 @@ fn train_from<M: Model, O: model::Objective<M>>(base: &Path, objective: O, opts:
     let c = checkpoint::load(base.to_str().expect("utf-8 path"));
     let cfg = M::Config::from_json(&c.header["config"]);
     let init = c.by_role("");
-    let model = M::new(cfg.clone(), 1, cfg.block_size(), &init);
+    let (rows, block) = improve::objective_shape(&objective, &cfg);
+    let model = M::new(cfg.clone(), rows, block, &init);
     model::fit_with(model, objective, opts, Some(out))?;
     Ok(())
 }
@@ -878,13 +1188,34 @@ pub fn joint_oracle<M: Model, C: Curriculum>(spec: &StudySpec, curr: &C, cfg: &S
     let _ = std::fs::remove_file(&out);
 
     let log = CycleLog::new();
-    let env = PooledEnv { curr, cycles: cfg.cycles };
-    let objective = Grpo::new(env, curr.verifier(), grpo_cfg(cfg, block as usize, completion_len)).with_log(log.clone());
-    let mut opts = cycle_opts(cfg, 0, block);
+    let mut opts = match &cfg.regime {
+        Regime::Grpo => cycle_opts(cfg, 0, block),
+        Regime::Sft(sft) => sft_cycle_opts(cfg, sft, curr, 0, block),
+    };
     opts.steps = cfg.steps_per_cycle * cfg.cycles as u32;
     opts.decay_iters = opts.steps;
+    // Under Regime::Sft the oracle covers the STUDY rules only, with no
+    // rehearsal arm: it is asking what one adapter can hold when every study
+    // rule is present at once, which is the capacity question Arm 3 exists for.
+    let sft_dir = cfg.work_dir.join("oracle-sft");
+    let objective: Box<dyn model::Objective<M> + '_> = match &cfg.regime {
+        Regime::Grpo => Box::new(Grpo::new(PooledEnv { curr, cycles: cfg.cycles }, curr.verifier(), grpo_cfg(cfg, block as usize, completion_len)).with_log(log.clone())),
+        Regime::Sft(sft) => {
+            let sources: Vec<SftSource> = (0..cfg.cycles).map(SftSource::Cycle).collect();
+            curr.write_sft_dataset(&sources, sft.seqs, opts.seed ^ ORACLE_SALT, &sft_dir)?;
+            let (train, _, bc, vocab) = model::load_dataset(&sft_dir, &opts)?;
+            assert_eq!(
+                vocab,
+                vocab_of::<M>(spec.base_checkpoint),
+                "continual::joint_oracle: the pooled SFT dataset's vocab must match the base checkpoint's, or the ids it emits index the wrong embedding rows"
+            );
+            Box::new(Anchor::new(train, bc))
+        }
+    };
     train_from::<M, _>(spec.base_checkpoint, objective, &opts, &out)?;
-    improve::assert_trained_spans_were_sampled(&log.trained(), &log.sampled());
+    if matches!(cfg.regime, Regime::Grpo) {
+        improve::assert_trained_spans_were_sampled(&log.trained(), &log.sampled());
+    }
 
     let verifier = curr.verifier();
     let all: Vec<Task> = (0..cfg.cycles)
@@ -1046,6 +1377,175 @@ mod tests {
         let all: HashSet<u64> = (0..12).flat_map(|k| probe_seeds(k, 16)).collect();
         assert_eq!(all.len(), 12 * 16, "probe seed ranges must not collide across cycles");
         assert_eq!(probe_seeds(3, 16), probe_seeds(3, 16), "probe seeds must be a pure function of (cycle, index)");
+    }
+
+    // ---- Regime::Sft ------------------------------------------------------
+
+    /// The pool is what makes cycle 1 unsolvable by the cue-independent
+    /// shortcut, so its composition is the regime's load-bearing property,
+    /// not a detail: at cycle 1 there is NO prior study rule, and a pool that
+    /// were empty there would train the first cycle on exactly one cue - the
+    /// measured failure this regime exists to remove.
+    #[test]
+    fn the_rehearsal_pool_is_every_prior_study_rule_plus_every_background_rule() {
+        let curr = PositionCopy::new(4);
+        assert_eq!(
+            rehearsal_pool(&curr, 0),
+            vec![SftSource::Rehearsal(0), SftSource::Rehearsal(1), SftSource::Rehearsal(2), SftSource::Rehearsal(3)],
+            "at cycle 1 the background rules ARE the whole pool"
+        );
+        assert_eq!(
+            rehearsal_pool(&curr, 3),
+            vec![
+                SftSource::Cycle(0),
+                SftSource::Cycle(1),
+                SftSource::Cycle(2),
+                SftSource::Rehearsal(0),
+                SftSource::Rehearsal(1),
+                SftSource::Rehearsal(2),
+                SftSource::Rehearsal(3)
+            ]
+        );
+        // Unbounded in k, deliberately: ACC is scored over ALL probes, so a
+        // sliding window would be optimizing against the study's own metric.
+        assert_eq!(rehearsal_pool(&curr, 11).len(), 15);
+        // And with no background rules, cycle 1's pool really is empty - which
+        // is why `run_study` refuses that configuration under `Regime::Sft`.
+        assert!(rehearsal_pool(&PositionCopy::new(0), 0).is_empty());
+    }
+
+    #[test]
+    fn write_sft_dataset_covers_exactly_the_requested_sources_and_stays_record_aligned() {
+        let curr = PositionCopy::new(4);
+        let dir = std::env::temp_dir().join(format!("brain-rl-continual-sft-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let sources = [SftSource::Cycle(2), SftSource::Rehearsal(0)];
+        curr.write_sft_dataset(&sources, 400, 7, &dir).unwrap();
+
+        let want: HashSet<u32> = [Rule::for_cycle(2).cue, Rule::pretrain_rules(4)[0].cue].into_iter().collect();
+        let train = data::binio::read_tokens_u32(&dir.join("train")).unwrap();
+        assert_eq!(train.len(), 400 * crate::curriculum::RECORD_LEN);
+        let seen: HashSet<u32> = train.chunks(crate::curriculum::RECORD_LEN).map(|r| r[0]).collect();
+        assert_eq!(seen, want, "the dataset must cover exactly the requested sources - no more (leakage) and no fewer (a silently one-cue arm)");
+
+        // The loader contract this dataset format requires, checked against the
+        // real loader: without it every supervised completion token in a
+        // mid-record window is label noise rather than supervision.
+        let opts = model::FitOpts { block_size: crate::curriculum::SEQ_LEN as u32, batch_size: 8, align_to_lines: true, ..Default::default() };
+        let (train_ds, _val, batch_cfg, vocab) = model::load_dataset(&dir, &opts).unwrap();
+        assert_eq!(vocab, crate::curriculum::VOCAB);
+        let mut rng = data::rng::Rng::new(3);
+        for _ in 0..10 {
+            let (x, _y) = train_ds.get_batch(&batch_cfg, &mut rng);
+            for row in x.chunks(crate::curriculum::SEQ_LEN) {
+                assert!(want.contains(&row[0]), "a window started at token {} instead of a record cue", row[0]);
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The loss must supervise the COMPLETION only. E1 measured what the
+    /// alternative costs on exactly this data: 0.509 unmasked against 0.910
+    /// masked at an identical budget.
+    #[test]
+    fn the_sft_mask_char_is_the_prompt_terminator_this_vocabulary_actually_uses() {
+        let c = PositionCopy::default();
+        assert_eq!(c.sft_mask_before(), Some(crate::curriculum::mask_before_char()));
+        assert_eq!(c.rehearsal_len(), 4);
+        assert_eq!(PositionCopy::new(0).rehearsal_len(), 0);
+    }
+
+    /// `sft_cycle_opts` is a SECOND function rather than a branch inside
+    /// `cycle_opts` precisely so the GRPO path stays byte-identical; this pins
+    /// the three settings whose loss would be silent rather than loud.
+    #[test]
+    fn sft_cycle_opts_carries_the_loader_contract_and_a_real_batch_width() {
+        let cfg = grpo_study_config();
+        let sft = SftConfig::default();
+        let opts = sft_cycle_opts(&cfg, &sft, &PositionCopy::default(), 3, 12);
+        assert!(opts.align_to_lines, "a write_sft_dataset directory is only trainable with line alignment on");
+        assert_eq!(opts.mask_before, Some(crate::curriculum::mask_before_char()));
+        assert!(opts.mask_per_line);
+        assert_eq!(opts.batch_size, 128, "the regime's whole supervision-density advantage is the batch width");
+        assert_eq!(opts.grad_accum, 1, "grad_accum is GRPO's group-per-update requirement and has no meaning here");
+        assert_eq!(opts.steps, cfg.steps_per_cycle);
+        assert_eq!(opts.decay_iters, cfg.steps_per_cycle);
+        // The GRPO path is untouched by the new field.
+        let grpo = cycle_opts(&cfg, 3, 12);
+        assert_eq!(grpo.batch_size, 1);
+        assert_eq!(grpo.mask_before, None);
+        assert_eq!(grpo.seed, opts.seed, "both regimes derive the per-cycle seed the same way");
+    }
+
+    /// The two arms are the regime: one over the NEW rule, one over the pool,
+    /// at the configured weights, over two genuinely different datasets.
+    #[test]
+    fn the_sft_arms_are_the_new_rule_and_the_pool_at_the_configured_weights() {
+        let curr = PositionCopy::new(4);
+        let cfg = grpo_study_config();
+        let sft = SftConfig { seqs: 300, ..SftConfig::default() };
+        let dir = std::env::temp_dir().join(format!("brain-rl-continual-arms-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let opts = sft_cycle_opts(&cfg, &sft, &curr, 2, 12);
+
+        let arms = sft_arms(&curr, &sft, 2, &dir, &opts, 0).unwrap();
+        assert_eq!(arms.len(), 2);
+        assert!((arms[0].0 - 0.5).abs() < 1e-6);
+        assert!((arms[1].0 - 0.5).abs() < 1e-6);
+        // Both arms upload into ONE model, which the caller builds from this
+        // shape: an arm at a different width would overrun that model's token
+        // buffer or leave stale rows in the forward.
+        assert_eq!(arms[0].1.batch_shape(), (sft.batch, 12));
+        assert_eq!(arms[1].1.batch_shape(), (sft.batch, 12));
+
+        let cues = |sub: &str| -> HashSet<u32> {
+            data::binio::read_tokens_u32(&dir.join(sub).join("train")).unwrap().chunks(crate::curriculum::RECORD_LEN).map(|r| r[0]).collect()
+        };
+        assert_eq!(cues("sft-new"), HashSet::from([Rule::for_cycle(2).cue]), "arm 1 is cycle k's own rule and nothing else");
+        let mut want_pool: HashSet<u32> = (0..2).map(|k| Rule::for_cycle(k).cue).collect();
+        want_pool.extend(Rule::pretrain_rules(4).iter().map(|r| r.cue));
+        assert_eq!(cues("sft-pool"), want_pool, "arm 2 is every prior study rule plus every background rule");
+
+        // The fresh control (Arm 2 of the study) must draw a DIFFERENT stream
+        // than Arm 1, or it is a partial replica rather than a control.
+        let salted_dir = dir.join("salted");
+        std::fs::create_dir_all(&salted_dir).unwrap();
+        let _ = sft_arms(&curr, &sft, 2, &salted_dir, &opts, ARM2_SALT).unwrap();
+        let a = data::binio::read_tokens_u32(&dir.join("sft-new").join("train")).unwrap();
+        let b = data::binio::read_tokens_u32(&salted_dir.join("sft-new").join("train")).unwrap();
+        assert_ne!(a, b, "the fresh-control arm must not draw the identical dataset stream the warm arm did");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A `StudyConfig` for the unit tests above. `Regime::Grpo` is the default
+    /// so that a config written without thinking about the regime reproduces
+    /// the recorded study rather than silently changing it.
+    fn grpo_study_config() -> StudyConfig {
+        StudyConfig {
+            cycles: 12,
+            steps_per_cycle: 800,
+            group_size: 2,
+            grad_accum: 2,
+            eval_per_cycle: 16,
+            lr: 5e-3,
+            min_lr: 5e-4,
+            explore_temp: 1.5,
+            replay_frac: 0.0,
+            seed: 1,
+            gate: crate::gate::GateConfig::default(),
+            gate_policy: GatePolicy::Real,
+            plasticity_control: false,
+            work_dir: PathBuf::from("/nonexistent"),
+            verbose: false,
+            regime: Regime::default(),
+        }
+    }
+
+    #[test]
+    fn the_default_regime_is_grpo_so_an_existing_study_reproduces_unchanged() {
+        assert_eq!(Regime::default(), Regime::Grpo);
+        assert_eq!(grpo_study_config().regime, Regime::Grpo);
     }
 
     #[test]

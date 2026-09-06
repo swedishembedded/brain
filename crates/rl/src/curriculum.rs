@@ -340,6 +340,21 @@ pub fn write_pretrain_dataset(rules: &[Rule], n: usize, seed: u64, out_dir: &Pat
     Ok(())
 }
 
+/// The [`model::FitOpts::mask_before`] char for a
+/// [`write_pretrain_dataset`] directory: [`SEP`]'s own `itos` char, since
+/// [`line_aligned_meta`] maps token id `i` to `'a' + i` (and `PAD -> '\n'`).
+/// Masking up to and including it supervises `[t0, t1, t2]` - the completion -
+/// and nothing else.
+///
+/// Exported so no caller re-derives `'b'` by hand. The difference this makes
+/// is measured, not stylistic: on this exact dataset, the same budget reaches
+/// 0.509 with the loss spread over the whole record and 0.910 with it masked
+/// to the completion, because most of an unmasked record's gradient is spent
+/// trivially re-predicting a prompt that is already in the window.
+pub fn mask_before_char() -> char {
+    char::from_u32('a' as u32 + SEP).expect("ascii")
+}
+
 /// `meta.json` whose `itos` maps `PAD -> '\n'`, which is how
 /// `model::load_dataset` learns which token id delimits a record. Every other
 /// id gets a distinct placeholder char (the loader only ever looks up `'\n'`,
@@ -484,6 +499,17 @@ mod tests {
     #[test]
     fn uniform_chance_is_one_over_vocab() {
         assert!((uniform_chance() - 1.0 / 32.0).abs() < 1e-12);
+    }
+
+    /// The masking char is derived, not guessed: it must round-trip through
+    /// the dataset's OWN metadata back to [`SEP`], or the loss would be masked
+    /// at the wrong position and supervise the prompt instead of - or as well
+    /// as - the completion.
+    #[test]
+    fn mask_before_char_round_trips_through_the_datasets_own_metadata_to_sep() {
+        let meta = data::binio::Meta::from_json(&line_aligned_meta()).unwrap();
+        assert_eq!(meta.stoi().get(&mask_before_char()), Some(&SEP));
+        assert_ne!(mask_before_char(), '\n', "masking before the record separator would supervise the whole record, not the completion");
     }
 
     #[test]

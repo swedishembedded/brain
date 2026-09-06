@@ -56,7 +56,7 @@ use std::path::{Path, PathBuf};
 use model::FitOpts;
 use qwen3::config::{LoraCfg, QwenConfig};
 use qwen3::model::Qwen;
-use rl::continual::{self, GatePolicy, PositionCopy, StudyConfig, StudyReport, StudySpec};
+use rl::continual::{self, GatePolicy, PositionCopy, Regime, StudyConfig, StudyReport, StudySpec};
 use rl::curriculum::{self, ContentSplit, PositionCopyEnv, PositionCopyVerifier, Rule};
 use rl::env::Environment;
 use rl::gate::{Decision, GateConfig};
@@ -338,6 +338,10 @@ fn study_config_for(seed: u64, cycles: usize, work_dir: PathBuf, plasticity_cont
         plasticity_control,
         work_dir,
         verbose: true,
+        // The recorded study's regime, stated rather than defaulted: this
+        // file's pre-registered constants describe a GRPO run and nothing
+        // else.
+        regime: Regime::Grpo,
     }
 }
 

@@ -49,6 +49,14 @@ impl Anchor {
     pub fn new(data: TokenDataset, batch_cfg: BatchConfig) -> Self {
         Anchor { data, batch_cfg }
     }
+
+    /// The `(rows, block)` every [`Anchor::micro_step`] uploads - literally
+    /// the loader's own [`BatchConfig`]. Inherent as well as the
+    /// [`Objective::batch_shape`] it backs, so a composer can check it without
+    /// naming a `Model` type it does not otherwise need.
+    pub fn batch_shape(&self) -> (u32, u32) {
+        (self.batch_cfg.batch_size as u32, self.batch_cfg.block_size as u32)
+    }
 }
 
 impl<M: Model> Objective<M> for Anchor {
@@ -74,6 +82,14 @@ impl<M: Model> Objective<M> for Anchor {
             total += model.forward();
         }
         Some(total / batches.max(1) as f32)
+    }
+
+    /// Exactly the loader's own [`BatchConfig`], because that is literally
+    /// what [`Anchor::micro_step`] uploads. A caller that constructs the model
+    /// itself (`rl::improve::cycle`) needs this: an anchor arm at batch 128
+    /// against a model built for one row is a buffer overrun, not a slow path.
+    fn batch_shape(&self) -> Option<(u32, u32)> {
+        Some(Anchor::batch_shape(self))
     }
 }
 
@@ -145,6 +161,16 @@ impl<M: Model> Objective<M> for Mixture<M> {
 
     fn itos(&self) -> Option<&[char]> {
         self.arms.first().and_then(|a| a.itos())
+    }
+
+    /// The FIRST arm's, by the same convention `eval`/`itos` already follow.
+    /// A mixture whose arms upload different batch shapes cannot be trained by
+    /// a caller that builds one model for all of them, so arms are expected to
+    /// agree; the composer is what enforces that, since only it knows how the
+    /// arms were built (see `rl::continual`'s SFT mixture, whose two arms are
+    /// loaded from one `FitOpts`).
+    fn batch_shape(&self) -> Option<(u32, u32)> {
+        self.arms.first().and_then(|a| a.batch_shape())
     }
 }
 
