@@ -28,7 +28,7 @@ implementations agree trivially (saturated) or disagree meaninglessly.
 
 Usage:
   BRAIN_MINIMAXH3_DIR=/path/to/MiniMax-H3 \\
-  /home/user/.venv/bin/python3 \\
+  python3 \\
       tools/minimaxh3_video_vae_real_tiled_dump_reference.py \\
       --out testdata/golden/minimaxh3/video_vae_real_tiled
 """

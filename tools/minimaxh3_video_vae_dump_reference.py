@@ -53,7 +53,7 @@ nothing here renames anything), plus:
     inferred from a stitched result.
 
 Usage:
-  /home/user/.venv/bin/python3 tools/minimaxh3_video_vae_dump_reference.py \\
+  python3 tools/minimaxh3_video_vae_dump_reference.py \\
       --out testdata/golden/minimaxh3/video_vae_tiny [--seed 5]
 """
 

@@ -27,7 +27,7 @@ video/audio outputs, into one `minimaxh3_dit_tiny.safetensors` +
 `manifest.json`.
 
 Usage:
-  /home/user/.venv/bin/python3 tools/minimaxh3_dit_dump_reference.py \\
+  python3 tools/minimaxh3_dit_dump_reference.py \\
       --out testdata/golden/minimaxh3/dit_tiny [--seed 3]
 """
 

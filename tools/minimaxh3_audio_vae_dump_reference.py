@@ -36,7 +36,7 @@ the same quantity two ways" self-check porting.md asks for, not merely
 trusting the manual replay).
 
 Usage:
-  /home/user/.venv/bin/python3 tools/minimaxh3_audio_vae_dump_reference.py \\
+  python3 tools/minimaxh3_audio_vae_dump_reference.py \\
       --audio-vae-dir "$BRAIN_MINIMAXH3_DIR/FL2VA/audio_vae" \\
       --out testdata/golden/minimaxh3/audio_vae [--t 6 --seed 7]
 """
