@@ -833,6 +833,20 @@ fn generate(ckpt: &H3Checkpoint, text: &TextConditioning, keyframes: &[KeyframeC
         compact_audio.copy_from_slice(&audio_next);
     }
 
+    // `streaming_ctx` (the DiT's device) is a local `let` binding, so
+    // without this it would stay alive - and its VRAM reserved - through
+    // BOTH decode stages below, since `video_vae::decode` and
+    // `vocoder::decode` each open their OWN fresh `Ctx::new(device)` on
+    // the same physical GPU. Three wgpu devices resident at once (the
+    // DiT's + the video VAE's + the audio vocoder's) on a 24GB P40 is
+    // exactly the "two devices alive simultaneously" collision already
+    // seen once in this engine (ltxv's DiT-session-vs-upscaler/decode
+    // case) - and real-measured here too: a 384x384 generation OOM'd at
+    // the SAME point regardless of step count (3 steps failed exactly
+    // like 16), which only makes sense if the failure is tied to
+    // REACHING decode, not to how much denoising happened first.
+    drop(streaming_ctx);
+
     // 5. Video decode (`MiniMaxH3AfterDenoiseStep` + `MiniMaxH3VideoDecodeStep`).
     let generated_video_rows = &compact_video[num_condition_video_rows * video_patch_dim..];
     let latent_channels = vae_cfg.latent_channels;
