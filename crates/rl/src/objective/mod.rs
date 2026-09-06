@@ -5,4 +5,5 @@
 //! P11's [`crate::env`] seam - GRPO first, DPO/top-K distillation follow in
 //! later phases as siblings of this module.
 
+pub mod dpo;
 pub mod grpo;

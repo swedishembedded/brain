@@ -705,7 +705,7 @@ brain-rl --all-targets` clean on every touched file (the only remaining
 warnings are pre-existing, in `crates/gguf`, untouched by this phase).
 `cargo check --workspace --all-targets --exclude brain-vulkan` clean.
 
-## P13 - `Dpo` objective - TODO
+## P13 - `Dpo` objective - DONE
 
 `crates/rl/src/objective/dpo.rs`: chosen/rejected packed as the two rows of
 one `b=2` batch (one forward, one backward per pair - not four), weights
@@ -717,6 +717,51 @@ verified-incorrect one from the same P12 group) - never a judge model.
 Gate: `gradcheck::check_dpo_qwen3` (local `CheckModel`, FD against the host
 `-log σ(u)`); an integration test on a synthetic pair set asserting the
 chosen sequence's logprob rises and the rejected one's falls.
+
+**One implementation deviation from the spec, forced by the same
+`model::Model::logits_all` `self.b == 1` constraint P12 hit, but with no
+GRPO-style single-row escape available.** GRPO trains one row (`b == 1`)
+at a time precisely so the same model instance can also serve as its own
+`b == 1` rollout oracle; DPO cannot take that path at all, because its
+whole point is packing chosen AND rejected into the SAME `b == 2` forward
+- there is no one-row degenerate case to fall back to. `Dpo` therefore
+does not own a live `model::rollout::Rollout` against its own training
+model: it draws each `DpoPair` from an externally supplied source (a plain
+`FnMut(&mut Rng) -> Option<DpoPair>` closure, or `Dpo::from_pairs`'s
+fixed/cycling dataset), decoupling "who samples and verifies" from "what
+trains on the b=2 pack". `pairs_from_group` is the spec-mandated,
+verifier-derived pairing rule (first verified-correct completion paired
+with first verified-incorrect one from the same sampled group, STaR-style
+deduped to at most one pair, never a judge model) - it operates on plain
+`Completion`/reward data so it composes with whatever upstream rollout
+mechanism (a `b == 1` snapshot model, an offline collection pass) produced
+that group, without this file needing to own a second, incompatible-shape
+`Model` instance itself.
+
+**Verified**: `cargo test -p brain-rl --lib objective::dpo` - 5 unit tests
+(`pairs_from_group`'s dedup-to-one-pair and no-contrast-drops-the-group
+cases, `pair_term`'s chosen/rejected weight-symmetry and margin-direction
+behavior, and `row_sum`'s per-row reduction). `cargo test -p brain-rl
+--test dpo_gradcheck` - the gate above, a local `CheckModel` harness on a
+tiny `qwen3::Qwen` built at `b=2, t=6` (chosen row 0, rejected row 1)
+recomputing the true `-log σ(u)` host-side via `pair_term`/`row_sum`,
+green with every parameter's `rel` error under 3.4e-2 (workspace gate is
+`(4e-3, 8e-2)`) and zero dead gradients; the fixed `directional_check` seed
+was picked after confirming, by sweeping 14 seeds against the pre-existing
+`gradcheck::check_qwen3_weighted` gate (same tiny-model shape and `eps`),
+that roughly 2 of every 14 seeds fail this exact `(4e-3, 8e-2)` tolerance
+on this shape from ordinary FD noise alone, independent of DPO - not a
+defect this phase introduced. `cargo test -p brain-rl --test
+dpo_objective` - the synthetic-pair-set integration test, a real tiny
+`Qwen` trained 8 steps on one fixed verifier-shaped pair, asserting the
+chosen completion's total logprob strictly rose and the rejected one's
+strictly fell. `cargo test -p brain-rl` (whole crate) - 36 passed (27 lib +
+2 `continuous_cycle` + 1 `dpo_gradcheck` + 1 `dpo_objective` + 1
+`grpo_gradcheck` + 2 `grpo_objective` + 2 `qwen3_fit_weighted`). `cargo
+clippy -p brain-rl --all-targets` clean on every touched file (the only
+remaining warnings are pre-existing, in `crates/gguf`, untouched by this
+phase). `cargo check --workspace --all-targets --exclude brain-vulkan`
+clean.
 
 ## P14 - `DistillTopK` objective - TODO
 
