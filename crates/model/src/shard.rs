@@ -33,6 +33,15 @@
 //!   capacity. This is what a resident model loading real weights needs, and
 //!   it handles any device count, unequal VRAM, and honest infeasibility.
 //!
+//! # Two executors, resident and streamed
+//!
+//! [`Pipeline`] runs a [`Shardable`] model whose stages are BUILT and stay
+//! resident. [`StreamPlan`] is placement alone, for a model whose layers are
+//! visited one at a time because no card can hold a stage of it - it asks
+//! nothing of the model but a layer count and a cost, and answers only "which
+//! card runs which layers". Both cut with [`plan_balanced`]; both carry only
+//! the residual across a cut, host-staged.
+//!
 //! # Pipeline-parallel training (the rest of this file)
 //!
 //! A model's decoder layers are split into contiguous ranges — one **stage** per
@@ -340,6 +349,194 @@ pub fn plan_by_capacity(cost: &LayerBytes, devices: &[(usize, u64)]) -> Option<V
 /// ALL the devices together cannot hold it.
 pub fn plan_fewest_devices(cost: &LayerBytes, devices: &[(usize, u64)]) -> Option<Vec<Placement>> {
     (1..=devices.len()).find_map(|n| plan_by_capacity(cost, &devices[..n]))
+}
+
+/// Which physical card each contiguous layer range of a **streamed** model
+/// runs on.
+///
+/// [`Pipeline`] below is the RESIDENT form of pipeline parallelism: a stage is
+/// a built [`Shardable`] model that holds its own layers' weights for as long
+/// as it lives. A model too large to hold even one stage resident streams
+/// instead - one layer's weights uploaded, run, overwritten by the next
+/// (`crates/minimaxh3`'s 33B DiT: ~2.6 GB per block at fp32 x 50 blocks, so no
+/// contiguous range of it is resident on any card at any time).
+///
+/// Streaming and sharding are ORTHOGONAL, not alternatives: each card streams
+/// its OWN block range one block at a time. What that needs from this module
+/// is only the placement - which layers, which card, where the residual
+/// crosses - and none of what [`Pipeline`] needs (a `Model` impl, a weight
+/// map, `set_batch`, a backward). Hence this type requires nothing of the
+/// model at all: a layer count, a [`ShardCost`], and the same [`plan_balanced`]
+/// DP every resident consumer already trusts. That is the whole difference,
+/// and the reason the streaming crates could not use [`Pipeline`] (both
+/// `ltxv::shard` and `minimaxmusic3::dit_shard` record in their own docs that
+/// `Pipeline<TheirDiT>` type-checks but is not a usable entry point).
+///
+/// The contract for the model crate:
+///
+/// * Open ONE device per stage, inside [`StreamPlan::open_stage`], ONCE -
+///   never per step. Every `Gpu` built under that scope binds the stage's card
+///   (`gpu_core::devices::with_gpu` is thread-local and race-free).
+/// * Carry only the residual across a cut, host-staged (read it back on stage
+///   `i`, upload it on stage `i+1`) - the same single tensor and the same
+///   host staging [`Pipeline::forward`] uses, for the same reason: it is the
+///   only cross-stage value, and its size is identical at every possible cut.
+///   An f32 host round trip is lossless, so a split plan computes bit-identical
+///   numbers to the unsplit one; only the placement changes.
+/// * Keep the streaming discipline WITHIN a stage. More cards must mean less
+///   resident per card, never "there is room now, load everything".
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StreamPlan {
+    stages: Vec<Shard>,
+}
+
+/// Opt out of streaming multi-GPU placement without changing any code path:
+/// `BRAIN_STREAM_SHARD=0` forces [`StreamPlan::auto`] to resolve a single
+/// stage. Deliberately an opt-OUT - a split plan is bit-identical to the
+/// unsplit one (see [`StreamPlan`]'s contract), so using the cards the box has
+/// is the right default, and the handle exists for bisecting a suspected
+/// driver problem or for leaving a card free for another process.
+///
+/// Follows `ltxv::devplan`'s `BRAIN_LTXV_CFG_PARALLEL` convention, spelling
+/// included.
+pub fn stream_shard_enabled() -> bool {
+    !matches!(std::env::var("BRAIN_STREAM_SHARD").as_deref(), Ok("0") | Ok("false") | Ok("off"))
+}
+
+impl StreamPlan {
+    /// One stage covering every layer, on the ambient device selection - byte
+    /// for byte the un-sharded path, and what every CPU-backend, single-card
+    /// and explicitly-pinned run resolves to.
+    pub fn single(n_layers: usize) -> StreamPlan {
+        StreamPlan { stages: vec![Shard::whole(n_layers)] }
+    }
+
+    /// One stage per entry of `gpus`, cut by [`plan_balanced`].
+    ///
+    /// The stage count is clamped to the layer count: a device opened for a
+    /// stage with no layers costs a real wgpu device and a real allocator pool
+    /// and buys nothing, so more cards than layers uses only the leading ones.
+    /// An empty `gpus` is [`Self::single`].
+    pub fn balanced(cost: &ShardCost, gpus: &[usize]) -> StreamPlan {
+        let k = gpus.len().min(cost.n_layers.max(1));
+        if k <= 1 {
+            let stages = match gpus.first() {
+                Some(&g) => vec![Shard { start: 0, end: cost.n_layers, embed: true, head: true, gpu_index: g }],
+                None => return StreamPlan::single(cost.n_layers),
+            };
+            return StreamPlan { stages };
+        }
+        StreamPlan { stages: plan_balanced(cost, &gpus[..k]) }
+    }
+
+    /// The plan for this machine as it is actually allowed to be used right
+    /// now: every card in the `--device`/`BRAIN_DEVICE` schedulable set, cut
+    /// by [`plan_balanced`].
+    ///
+    /// `device` is a model crate's own per-call device token (the
+    /// `--device`-shaped string `gpu_core::Gpu::open` takes: `"cpu"`,
+    /// `"gpu"`, `"gpu1"`, `"vulkan"`, ...), or `None` to inherit the ambient
+    /// selection. It is RESOLVED through the same grammar `--device` itself
+    /// uses rather than treated as an opaque "the caller named something, do
+    /// not split": `"gpu1"` names one card and must not be spread over two,
+    /// but `"gpu"` and `"vulkan"` name a backend and every card behind it, and
+    /// collapsing those to a single card is exactly the bug this type exists
+    /// to remove (a generation that asked for "the GPUs" running on card 0
+    /// while card 1 sits at zero).
+    ///
+    /// Resolves [`Self::single`] on a CPU-backend run, with fewer than two
+    /// schedulable cards, and under [`stream_shard_enabled`]'s opt-out.
+    ///
+    /// The first stage lands on whatever card is already selected on this
+    /// thread (`current_gpu()`) when that card is in the set, so a run inside
+    /// a residency executor's `with_gpu` lane keeps its assigned card as stage
+    /// 0 and borrows the others rather than silently relocating - the same
+    /// rule `ltxv::devplan`/`minimaxmusic3::devplan` already apply to their
+    /// CFG split.
+    pub fn auto(cost: &ShardCost, device: Option<&str>) -> StreamPlan {
+        if !stream_shard_enabled() {
+            return StreamPlan::single(cost.n_layers);
+        }
+        let gpus = schedulable_gpus(device);
+        if gpus.len() < 2 {
+            return StreamPlan::single(cost.n_layers);
+        }
+        StreamPlan::balanced(cost, &gpus)
+    }
+
+    pub fn stages(&self) -> &[Shard] {
+        &self.stages
+    }
+    pub fn n_stages(&self) -> usize {
+        self.stages.len()
+    }
+    pub fn n_layers(&self) -> usize {
+        self.stages.last().map(|s| s.end).unwrap_or(0)
+    }
+    /// True when the layers really are spread over more than one card - the
+    /// predicate that decides whether a second device is opened at all.
+    pub fn is_split(&self) -> bool {
+        self.stages.len() > 1
+    }
+    /// Which stage owns `layer`.
+    pub fn stage_of(&self, layer: usize) -> usize {
+        self.stages.iter().position(|s| s.owns(layer)).unwrap_or_else(|| panic!("StreamPlan: no stage owns layer {layer} of {}", self.n_layers()))
+    }
+    /// One line, `gpu0:0..25 gpu1:25..50` - what a run prints, so an automatic
+    /// placement decision is never a silent one.
+    pub fn describe(&self) -> String {
+        self.stages
+            .iter()
+            .map(|s| {
+                let card = if s.gpu_index == Shard::ANY_GPU { "ambient".to_string() } else { format!("gpu{}", s.gpu_index) };
+                format!("{card}:{}..{}", s.start, s.end)
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// Build stage `s`'s device inside its own placement scope: every
+    /// `gpu_core::Gpu` built under `f` binds that stage's card. An
+    /// [`Shard::ANY_GPU`] stage runs `f` unscoped, keeping the ambient
+    /// selection.
+    ///
+    /// Errors from `with_gpu` (a plan naming a card this machine does not
+    /// have) propagate - never clamped, since running on a different card
+    /// would hide the bug rather than fix it.
+    pub fn open_stage<R>(&self, s: usize, f: impl FnOnce() -> R) -> Result<R, String> {
+        let shard = self.stages.get(s).ok_or_else(|| format!("StreamPlan::open_stage: no stage {s} (plan has {})", self.stages.len()))?;
+        match shard.gpu_index {
+            Shard::ANY_GPU => Ok(f()),
+            i => gpu_core::devices::with_gpu(i as u32, f),
+        }
+    }
+}
+
+/// The cards a streamed model may schedule on, honouring a per-call device
+/// token exactly as `--device` would, ordered so this thread's current
+/// selection comes first.
+///
+/// Reads `ambient_compute_set()` (or the token's own resolution) rather than
+/// `gpus()`: the raw registry ignores a `--device gpu0` restriction, and a
+/// plan built from it would place a stage on a card the operator excluded -
+/// the failure mode `gpu_core::devices::schedulable_gpu_count`'s own doc
+/// records.
+fn schedulable_gpus(device: Option<&str>) -> Vec<usize> {
+    use gpu_core::devices;
+    let set = match device {
+        None => devices::ambient_compute_set().clone(),
+        Some(tok) => match devices::DeviceSpec::parse(tok).and_then(|s| s.resolve(&devices::Inventory::probe())) {
+            Ok(s) => s,
+            // An unparseable token is `Gpu::open`'s "anything else" case: the
+            // ambient selection decides, so this does too.
+            Err(_) => devices::ambient_compute_set().clone(),
+        },
+    };
+    if set.backend == devices::Backend::Cpu {
+        return Vec::new();
+    }
+    let at = devices::current_gpu().and_then(|c| set.gpus.iter().position(|&g| g == c)).unwrap_or(0);
+    set.gpus.iter().cycle().skip(at).take(set.gpus.len()).map(|&g| g as usize).collect()
 }
 
 /// Host-resident fused optimiser state (master weights + AdamW moments in RAM),
@@ -885,5 +1082,144 @@ mod tests {
         let cost = uniform(4, GB, 0, 0);
         assert!(plan_by_capacity(&cost, &[]).is_none());
         assert!(plan_fewest_devices(&cost, &[]).is_none());
+    }
+
+    // ---- streamed placement (StreamPlan) ----
+
+    /// Contiguous, complete, endpoints marked exactly once, no empty stage -
+    /// the invariant a streaming loop depends on: every layer runs exactly
+    /// once, in order, and every opened device has work to do.
+    fn assert_plan_well_formed(p: &StreamPlan, n_layers: usize) {
+        let st = p.stages();
+        assert_eq!(st[0].start, 0, "the first stage must start at layer 0");
+        assert_eq!(st[st.len() - 1].end, n_layers, "the last stage must end at n_layers");
+        for w in st.windows(2) {
+            assert_eq!(w[0].end, w[1].start, "stage ranges must be contiguous with no gap or overlap");
+        }
+        assert_eq!(st.iter().filter(|s| s.embed).count(), 1, "exactly one embed stage");
+        assert_eq!(st.iter().filter(|s| s.head).count(), 1, "exactly one head stage");
+        assert_eq!(p.n_layers(), n_layers);
+        for l in 0..n_layers {
+            let s = p.stage_of(l);
+            assert!(st[s].owns(l), "stage_of({l}) = {s} does not own it");
+        }
+    }
+
+    /// The concrete case this exists for: MiniMax-H3's 50 blocks over two
+    /// cards must actually be split across both, balanced, not left on one.
+    #[test]
+    fn fifty_blocks_over_two_cards_are_split_across_both() {
+        let cost = ShardCost { n_layers: 50, per_layer: 606e6, embed: 700e6, head: 30e6, boundary_words: 1 };
+        let p = StreamPlan::balanced(&cost, &[0, 1]);
+        assert_eq!(p.n_stages(), 2);
+        assert!(p.is_split());
+        assert_plan_well_formed(&p, 50);
+        assert_eq!(p.stages()[0].gpu_index, 0);
+        assert_eq!(p.stages()[1].gpu_index, 1);
+        let counts: Vec<usize> = p.stages().iter().map(|s| s.end - s.start).collect();
+        assert_eq!(counts.iter().sum::<usize>(), 50);
+        // Neither card is left idle, and the split is genuinely balanced
+        // rather than a token block handed to the second card.
+        assert!(counts.iter().all(|&c| c >= 20), "both cards must carry a real share of the stack: {counts:?}");
+        // The token refiner rides on the embed stage, so that stage gives up
+        // layers for it - the balance is cost-modelled, never a 50/50 rule.
+        assert!(counts[0] < counts[1], "the endpoint-weight-carrying stage must take fewer blocks: {counts:?}");
+        assert_eq!(p.stage_of(0), 0);
+        assert_eq!(p.stage_of(49), 1);
+    }
+
+    /// An odd block count and three cards still cover every block exactly
+    /// once - the genericity the machine shape decides, not a hardcoded halve.
+    #[test]
+    fn an_odd_block_count_over_three_cards_still_covers_every_block() {
+        let cost = ShardCost { n_layers: 37, per_layer: 1.0, embed: 2.0, head: 1.0, boundary_words: 1 };
+        let p = StreamPlan::balanced(&cost, &[0, 1, 2]);
+        assert_eq!(p.n_stages(), 3);
+        assert_plan_well_formed(&p, 37);
+    }
+
+    /// One card, no cards named, and the opt-out all resolve to the single
+    /// ambient stage - byte for byte the un-sharded path.
+    #[test]
+    fn one_card_or_none_resolves_to_a_single_ambient_stage() {
+        let cost = ShardCost { n_layers: 12, per_layer: 1.0, embed: 1.0, head: 1.0, boundary_words: 1 };
+        for p in [StreamPlan::balanced(&cost, &[]), StreamPlan::single(12)] {
+            assert_eq!(p.n_stages(), 1);
+            assert!(!p.is_split());
+            assert!(p.stages()[0].is_whole(12));
+            assert_eq!(p.stages()[0].gpu_index, Shard::ANY_GPU);
+            assert_plan_well_formed(&p, 12);
+        }
+        // One named card is still one stage, pinned to that card.
+        let one = StreamPlan::balanced(&cost, &[1]);
+        assert_eq!(one.n_stages(), 1);
+        assert_eq!(one.stages()[0].gpu_index, 1);
+        assert!(one.stages()[0].is_whole(12));
+    }
+
+    /// More cards than layers must not open a device for an empty stage:
+    /// a stage with no blocks costs a real device and a real allocator pool
+    /// and runs nothing.
+    #[test]
+    fn more_cards_than_layers_uses_only_as_many_as_there_are_layers() {
+        let cost = ShardCost { n_layers: 2, per_layer: 1.0, embed: 0.0, head: 0.0, boundary_words: 1 };
+        let p = StreamPlan::balanced(&cost, &[0, 1, 2, 3]);
+        assert_eq!(p.n_stages(), 2, "four cards, two layers: only two stages");
+        assert_plan_well_formed(&p, 2);
+        for s in p.stages() {
+            assert!(s.end > s.start, "no stage may be empty: {:?}", p.stages());
+        }
+    }
+
+    /// `auto` must never name a card outside what this process may schedule
+    /// on, and must degrade to a single stage rather than a half-formed split.
+    /// Machine-shape-independent: it asserts the INVARIANT against whatever
+    /// this box really has, so it is meaningful on a two-card box, a one-card
+    /// box and a GPU-less runner alike.
+    #[test]
+    fn auto_stays_inside_the_schedulable_set() {
+        let cost = ShardCost { n_layers: 8, per_layer: 1.0, embed: 1.0, head: 1.0, boundary_words: 1 };
+        let p = StreamPlan::auto(&cost, None);
+        assert_plan_well_formed(&p, 8);
+        let set = gpu_core::devices::ambient_compute_set();
+        if !stream_shard_enabled() || set.backend == gpu_core::devices::Backend::Cpu || set.gpus.len() < 2 {
+            assert!(!p.is_split(), "fewer than two schedulable cards must resolve a single stage");
+            return;
+        }
+        assert!(p.is_split(), "two schedulable cards must produce a genuinely split plan");
+        for s in p.stages() {
+            assert!(set.gpus.contains(&(s.gpu_index as u32)), "auto named gpu{} outside the schedulable set {:?}", s.gpu_index, set.gpus);
+        }
+    }
+
+    /// A device token that names ONE card is an instruction and must not be
+    /// spread; a token that names a backend ("gpu", "vulkan") names every card
+    /// behind it and must be. Collapsing the latter to one card is exactly the
+    /// "asked for the GPUs, ran on gpu0 while gpu1 idled" bug.
+    #[test]
+    fn a_named_card_never_splits_but_a_named_backend_may() {
+        let cost = ShardCost { n_layers: 8, per_layer: 1.0, embed: 1.0, head: 1.0, boundary_words: 1 };
+        assert!(!StreamPlan::auto(&cost, Some("gpu0")).is_split(), "an explicitly named card must stay one stage");
+        assert!(!StreamPlan::auto(&cost, Some("cpu")).is_split(), "a CPU-backend run has no cards to split across");
+        let set = gpu_core::devices::ambient_compute_set();
+        if stream_shard_enabled() && set.backend != gpu_core::devices::Backend::Cpu && set.gpus.len() >= 2 {
+            assert!(StreamPlan::auto(&cost, Some("gpu")).is_split(), "\"gpu\" names every card, not card 0");
+        }
+    }
+
+    /// `open_stage` on an ambient (un-pinned) stage is a plain call - the
+    /// single-device path must not depend on a GPU existing at all.
+    #[test]
+    fn open_stage_on_an_ambient_plan_is_a_straight_call() {
+        let p = StreamPlan::single(4);
+        assert_eq!(p.open_stage(0, || 41 + 1), Ok(42));
+        assert!(p.open_stage(1, || ()).is_err(), "a stage index the plan does not have must be an error");
+    }
+
+    #[test]
+    fn describe_names_every_stage_and_its_card() {
+        let cost = ShardCost { n_layers: 10, per_layer: 1.0, embed: 0.0, head: 0.0, boundary_words: 1 };
+        assert_eq!(StreamPlan::balanced(&cost, &[0, 1]).describe(), "gpu0:0..5 gpu1:5..10");
+        assert_eq!(StreamPlan::single(10).describe(), "ambient:0..10");
     }
 }

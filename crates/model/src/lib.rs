@@ -81,7 +81,7 @@ pub use grid::{Coord, Grid, LocalGroups};
 pub use parallel::DataParallel;
 pub use plan::{plan_tp, Hardware, ModelShape, TpPlan};
 #[cfg(not(target_arch = "wasm32"))]
-pub use shard::{plan_balanced, Pipeline, Shard, ShardCost, Shardable};
+pub use shard::{plan_balanced, Pipeline, Shard, ShardCost, Shardable, StreamPlan};
 
 pub use objective::Objective;
 pub use train::{cosine_lr, generate, FitOpts, IGNORE};
