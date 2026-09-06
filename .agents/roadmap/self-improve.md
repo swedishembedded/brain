@@ -1427,10 +1427,219 @@ keyed by a config fingerprint), T1 ~380 s, T2 ~1030 s, T3 ~370 s.
   term (`GrpoConfig::kl_beta`, already implemented and gradient-checked in
   P12) to stop cycle 1 over-committing. Re-run T1's pre-registration first;
   the current constants are frozen against the current fixture.
-- **P19c - the two runnable demos** (`crates/rl/examples/continual_learning.rs`,
-  `autonomous_exploration.rs`) over `run_study`/`GatePolicy::CoinFlip`. The
-  harness API they need is in place. They must print the verdict above, not
-  a success story.
+- **P19c - the two runnable demos** - DONE, see the P19c section below.
 - **P20 - `brain improve` CLI verb.** Needs `crates/cli` verb registration,
   capability-manifest wiring and the e2e examples manifest; deliberately out
   of scope here.
+
+## P19c - two runnable demos over the harness - DONE
+
+P19's harness ships nothing a human can run: its numbers only exist inside a
+test binary. P19c is the human-facing surface - two real programs over the
+same API `tests/continual_study.rs` drives, each printing the trajectory it
+actually measured on the run in front of you. Neither prints a canned
+number. Neither prints a success story: the first one's headline is P19's
+negative, reproduced independently, and the second one measured a negative
+of its own.
+
+### What was built
+
+- `crates/rl/examples/continual_learning.rs` (new). N sequential gated
+  cycles through `continual::run_study`, with the fresh-adapter plasticity
+  control (Arm 2) always on and the joint-training capacity oracle (Arm 3)
+  unless `--skip-oracle`. Prints one row per cycle as it completes, then the
+  retention matrix, the aggregate summary, every pre-registered target
+  scored PASS/FAIL, and a verdict block computed from the run's own numbers
+  rather than written in advance - "capability accumulated" and "did not
+  accumulate" are both real branches, selected by the measured ACC, and each
+  names what the run does AND does not establish. `--null-gate` is Arm 4
+  (`GatePolicy::CoinFlip`): the real gate still runs and is still reported
+  while a coin decides what carries forward, and the program prints how
+  often the two agreed. Flags: `--cycles --steps --seed --replay
+  --rehearsal --null-gate --skip-oracle --out --base`. The frozen pretrained
+  base is cached under the same fingerprint the study test uses, so a base
+  built by either is reused by the other; on a fingerprint mismatch the
+  example builds its own under `--out` rather than retraining over a fixture
+  another run may still be measuring against.
+- `crates/rl/examples/autonomous_exploration.rs` (new). Verifier-only GRPO
+  from a COLD START (`Model::init_weights`, nothing pretrained), given only
+  `PositionCopyEnv` and `PositionCopyVerifier`. Per round it prints what it
+  sampled, how much verified above zero, how much verified perfect, the mean
+  verified reward, trained/sampled span counts and the frozen held-out
+  score. It prints `Task::answer` next to the recomputed target (the answer
+  is the RULE; the target is recomputed from the prompt and never stored),
+  runs `improve::assert_trained_spans_were_sampled` every round, and then
+  BREAKS that check on purpose - splicing one target straight out of
+  `Task::answer` into the trained list, inside `catch_unwind` with the panic
+  hook silenced - and prints the panic message, so the check is visibly not
+  a no-op. `--base` runs the identical label-free loop on top of a supplied
+  checkpoint; that is the control for the cold-start result below. Flags:
+  `--rounds --steps --group-size --seed --temp --lr --out --base`.
+- `crates/rl/Cargo.toml`: two `[[example]]` entries, `required-features =
+  ["qwen3"]`, matching the crate's existing test wiring.
+
+### Verified: continual_learning, 12 cycles, seed 1, real gate
+
+`cargo run --release -p brain-rl --features qwen3 --example
+continual_learning -- --seed 1`, 900.8 s wall clock on a cached base
+(fixture check `0.995` on the pretraining rules, `0.417` on study rule T1):
+
+    ACC 0.271   BWT -0.066   FWT -0.153   promotions 2/12
+    rejects: c2:anchor c3:notsig c4:notsig c5:notsig c6:notsig c7:notsig
+             c8:notsig c9:notsig c10:notsig c12:notsig
+    b_base 0.354   rho(12) 0.190   slope -0.0005/cycle, 95% CI [-0.1742, +0.1733]
+    joint-training oracle ACC 0.071   last-task-only ACC 0.226
+    label-leak check: 2433 trained spans are a sub-multiset of 9210 sampled
+    split integrity: 192 frozen probe ids disjoint from 3072 explore ids
+
+    A1 retention      R[12][1] 0.667 >= 0.896 - 0.15 = 0.746        FAIL
+    A2 canary alive   R[12][1] 0.667 >= 0.354 + 0.20 = 0.554        PASS
+    A3 no collapse    min distinct fraction 0.964 >= 0.50           PASS
+    A4 sustained      promotions 2 >= 10                            FAIL
+    A5 really learned R[k][k] >= 0.60 on 3 of 12                    FAIL
+    A6 plasticity     rho(12) 0.190 >= 0.60                         FAIL
+    A7 accumulation   ACC 0.271 >= 0.226 + 0.15 = 0.376             FAIL
+    A8 capacity       oracle 0.071 >= 0.60                          FAIL
+
+**Every per-cycle number, the whole retention matrix and every aggregate is
+bit-identical to the P19 study run above**, across three separate processes
+(the study test plus two runs of this example) - a different program, the
+same seeds, the same cached base. That is worth recording for its own sake:
+the study is reproducible outside the test binary, so its negative is a
+property of the system rather than of one test harness's incidental state.
+Only the wall clock moves (900.8 s and 961.7 s for the two example runs).
+
+### Verified: continual_learning --null-gate (Arm 4)
+
+The same 12 cycles, same seed, same base, `--null-gate --skip-oracle`: the
+real gate still runs and is still reported, but a seeded coin decides what
+carries forward. It carried 8 of 12 forward where the real gate would have
+carried 1, agreeing on 5 of 12.
+
+| | Arm 1 (real gate) | Arm 4 (coin flip) |
+|---|---|---|
+| ACC | 0.271 | **0.056** |
+| BWT | -0.066 | **-0.133** |
+| FWT | -0.153 | -0.318 |
+| cycle-1 canary R[N][1] | 0.667 | **0.146** |
+| min distinct-completion fraction | 0.964 | **0.047** |
+| carried forward | 2 of 12 | 8 of 12 |
+
+**The gate carries information.** The sharpest evidence is structural rather
+than a difference of means: the coin-flip arm's servable model COLLAPSED -
+9 distinct greedy completions across 192 probes (0.047), against the real
+gate's worst cycle at 0.964 - because it kept promoting candidates the gate
+had rejected. Cycle 2 shows the mechanism in one line: the real gate
+rejected it as `Cause::AnchorRegressed`, the coin carried it anyway, and the
+cycle-1 canary fell 0.90 -> 0.08 on the spot and never recovered.
+
+**What this does NOT show.** One seed per arm. The 0.215 ACC gap is smaller
+than the 0.292 single-cycle training-outcome spread the P19 pre-registration
+measured, so the ACC and BWT differences alone are suggestive, not
+conclusive; the collapse and the canary are the parts of this comparison
+that a seed cannot plausibly manufacture. And an informative gate is still
+not an ALIGNED gate: this says the gate's decisions correlate with the
+retention matrix it is scored on, not that the retention matrix measures
+anything a human wants.
+
+### Verified: autonomous_exploration, cold start (the default)
+
+`cargo run --release -p brain-rl --features qwen3 --example
+autonomous_exploration`, 6 rounds x 500 GRPO steps, group 2, temp 1.5,
+lr 3e-3, seed 11, 212.1 s:
+
+    rnd  sampled  verified>0  verified=1.0  mean_reward  trained/sampled  heldout
+      0     1672        191          0         0.040       338/1672        0.000
+      1     1692        184          0         0.037       318/1692        0.104
+      2     1708        172          0         0.035       302/1708        0.021
+      3     1736        162          0         0.031       275/1736        0.083
+      4     1698        169          1         0.035       312/1698        0.188
+      5     1660        192          0         0.040       350/1660        0.104
+
+    starting policy on the frozen probes 0.000 (uniform-token reference 0.031)
+    negative control: the spliced target PANICKED, naming the span - the
+    no-label check is not a no-op
+
+**A NEGATIVE, and the demo says so in its own output: verifier-only GRPO
+does not bootstrap this task from random weights at this budget.** Mean
+verified reward is flat at 0.031-0.040 across all 3000 steps, i.e. at the
+uniform-token reference, and the held-out column wobbles inside sampling
+noise on 16 probes. The mechanism is in the table, not inferred: a GRPO
+group whose members all earn the same reward has zero advantage and is
+dropped whole, so a policy at chance trains on roughly a fifth of what it
+samples and that fifth carries almost no signal.
+
+### Verified: autonomous_exploration --base (the control for that negative)
+
+The same program, the same 3000 label-free steps, the same probes, started
+from the frozen pretrained base instead of random weights:
+
+    rnd  sampled  verified>0  verified=1.0  mean_reward  trained/sampled  heldout
+      0     1588       1499        847        0.763       422/1588        1.000
+      1     1614       1595       1006        0.835       397/1614        1.000
+      ...
+      5     1914       1912       1807        0.980        96/1914        1.000
+
+    held-out 0.354 -> 1.000; mean verified reward 0.763 -> 0.980
+
+So the cold-start negative is **about the prerequisite skill, not about the
+absence of labels**: there are no labels in either run, and the run whose
+base can already sometimes stumble into a correct completion saturates its
+probes in one round. Verifier-only RL sharpens a behavior the policy can
+reach; it does not conjure one it has no gradient toward. This is the same
+finding P19 hit from the other side, where a randomly initialized base could
+not be studied at all and a pretraining step had to be added.
+
+### The cold-start sweep behind the defaults
+
+Measured on this box, release, seed 11, cue02 picks(0,1,2), 16 frozen
+probes. "trained/sampled" is completion spans trained on out of spans
+sampled.
+
+| config | trained/sampled, first -> last round | mean reward | held-out |
+|---|---|---|---|
+| group 2, temp 1.0, 3x60 | 35/216 -> 40/210 | 0.032 -> 0.046 | 0.000 -> 0.042 |
+| group 4, temp 1.0, 3x500 | 350/6972 -> 0/8020 | 0.066 -> 0.065 | 0.000 -> 0.083 |
+| group 2, temp 1.5, 2x200 | 114/696 -> 126/684 | 0.032 -> 0.036 | 0.000 -> 0.063 |
+| group 2, temp 2.0, 2x200 | 116/694 -> 136/674 | 0.032 -> 0.036 | 0.000 -> 0.063 |
+| group 2, temp 2.5, 2x200 | 118/692 -> 118/692 | 0.032 -> 0.030 | 0.042 -> 0.000 |
+| group 2, temp 1.5, 6x1000 | 598/3412 -> 632/3378 | 0.035 -> 0.036 | 0.00 0.02 0.08 0.19 0.08 0.06 0.00 |
+
+The `group 4, temp 1.0` row is the sharpest of these: by round 3 the loop
+trained on **zero** of 8020 sampled spans, because every group of four came
+back with identical rewards. Doubling the group size buys nothing when the
+policy is deterministic enough that a group has no spread, which is the same
+exploration-collapse mechanism `StudyConfig::explore_temp` documents from
+the warm side. Defaults were set from this sweep (group 2, temp 1.5, 6 x
+500) and 6 x 1000 was run to confirm that a longer budget does not change
+the verdict.
+
+### What P19c establishes, and what it does not
+
+**Establishes.** Two programs a human can run end to end print real,
+measured trajectories: 12 gated cycles with retention matrix, control arms
+and pre-registered targets scored PASS/FAIL, and a cold-start verifier-only
+loop with its no-label property checked every round and then deliberately
+violated in front of the reader. The study's negative reproduces
+bit-identically outside the test binary. The no-label check has teeth,
+demonstrated rather than asserted.
+
+**Does not establish.** Nothing about continual learning that P19 did not
+already establish, and P19's verdict stands unchanged: capability does not
+accumulate at this scale, and the capacity oracle says the binding
+constraint is capacity/optimization rather than forgetting. The exploration
+demo adds one task, one environment, one seed, no gate and no retention
+probe - it is one loop closing, not a sequence. Neither demo says anything
+about scale, generality, live or non-stationary data, seed robustness, order
+independence, or self-improvement of any kind.
+
+### Gate
+
+`cargo test -p brain-rl --lib` 69 passed. `cargo clippy -p brain-rl
+--all-targets --features qwen3` clean (examples included). `cargo check
+--workspace --all-targets --exclude brain-vulkan` clean. SPDX,
+no-doc-citation, no-machine-path and no-em-dash gates pass on both new files.
+Both examples run end to end on this box: continual_learning 900.8 s (12
+cycles + Arm 2 + Arm 3, cached base) and 535.7 s for the `--null-gate
+--skip-oracle` arm; autonomous_exploration 212.1 s per run, cold or with
+`--base`.

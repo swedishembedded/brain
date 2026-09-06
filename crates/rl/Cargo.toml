@@ -104,3 +104,16 @@ required-features = ["qwen3"]
 name = "continual_study"
 path = "tests/continual_study.rs"
 required-features = ["qwen3"]
+
+# The two runnable demos over that harness. `cargo run --release -p brain-rl
+# --features qwen3 --example <name>`; both train real models on a real GPU and
+# print the trajectory they actually measured, including when it is negative.
+[[example]]
+name = "continual_learning"
+path = "examples/continual_learning.rs"
+required-features = ["qwen3"]
+
+[[example]]
+name = "autonomous_exploration"
+path = "examples/autonomous_exploration.rs"
+required-features = ["qwen3"]
