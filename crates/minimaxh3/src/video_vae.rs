@@ -73,33 +73,24 @@
 //!   "traced by hand, not run" - [`decode`]'s own tests exercise it at a
 //!   non-degenerate multi-chunk size, not only the single-chunk case.
 //!
-//! # Explicitly out of scope this pass
-//!
-//! **Spatial tiling** (`_split_tiles`/`_stitch_tiles`, `use_tiling=True` by
-//! default in the reference) is NOT implemented - [`encode_clip`]/
-//! [`decode_clip`] are the reference's `use_tiling=False` path exactly (this
-//! port's tiny-config numeric parity golden is dumped with
-//! `vae.use_tiling = False` set explicitly, so the comparison is apples to
-//! apples, not a hidden mismatch). The reference's own docstring states tiled
-//! and untiled decode are NOT numerically equivalent (the ViT decoder's
-//! attention has no cross-tile receptive field), so this is a real, honestly
-//! recorded scope cut for a later pass, not a hidden approximation.
-//!
-//! What that costs, stated concretely, because "not numerically equivalent"
-//! undersells it. `_split_tiles` returns a SINGLE full-size tile whenever the
-//! tile size covers the frame (`if tile_size >= length: return [0], [length],
-//! []`), so below 256 pixels on both axes the tiled and untiled paths are the
-//! same computation and this cut costs nothing. Above it they diverge
-//! structurally rather than numerically: the reference always hands its ViT
-//! decoder a 256x256-pixel tile, i.e. a 16x16 LATENT grid, and that decoder's
-//! rotary coordinates are normalized to `[-1, 1)` across whatever grid it is
-//! given. Passing the whole frame instead stretches every positional
-//! relationship the 36 attention layers were trained on by the frame-to-tile
-//! ratio, while the per-token `proj_out` still paints a hard 16x16 pixel
-//! block - which shows up as a regular patch grid, not as blur. So this path
-//! is correct at small canvases and progressively wrong above 256 pixels,
-//! which is the opposite of the usual "approximation degrades gracefully"
-//! intuition and is why it is worth spelling out here.
+//! * **Spatial tiling is part of the model, not a memory optimization.**
+//!   `use_tiling` is `True` in the reference's own `__init__`, so the tiled
+//!   path is the SHIPPED one, and [`encode_clip`]/[`decode_clip`] default to
+//!   it here too. It cannot be treated as an optional chunking of the same
+//!   computation: the ViT decoder's rotary coordinates are normalized to
+//!   `[-1, 1)` across whatever grid it is handed, so the 256x256-pixel /
+//!   16x16-latent tile size is baked into what the 36 attention layers were
+//!   trained to read. Handing the decoder a whole large frame instead
+//!   stretches every positional relationship by the frame-to-tile ratio
+//!   while the per-token `proj_out` still paints a hard 16x16 pixel block -
+//!   a regular patch grid, not blur. Below 256 pixels on both axes it makes
+//!   no difference at all (`_split_tiles` returns a single full-size tile
+//!   when `tile_size >= length`), which is exactly why the failure is easy
+//!   to miss: the untiled path is correct at small canvases and
+//!   progressively wrong above 256 pixels, the opposite of the usual
+//!   "approximation degrades gracefully" intuition. See [`split_tiles`] and
+//!   [`stitch_tiles`] for the three details of the algorithm that a
+//!   plausible-looking implementation gets wrong.
 //!
 //! Swedish Embedded AB implements this video variational autoencoder port
 //! for its clients. If your team needs expertise in porting causal 3D CNN /
@@ -204,6 +195,22 @@ pub struct VideoVaeConfig {
     /// Trailing latent frames dropped once per whole encode
     /// (`AutoencoderKLMiniMaxH3.config.token_drop`).
     pub token_drop: u32,
+    /// `AutoencoderKLMiniMaxH3.use_tiling` - `True` in the reference's own
+    /// `__init__`, i.e. tiling is the SHIPPED path, not an opt-in. These five
+    /// fields are plain instance attributes there, not `config.json` entries,
+    /// so their values come from the constructor body rather than the
+    /// checkpoint.
+    pub use_tiling: bool,
+    /// `tile_sample_min_height` - the tile height in PIXEL space.
+    pub tile_sample_min_height: u32,
+    /// `tile_sample_min_width` - the tile width in PIXEL space.
+    pub tile_sample_min_width: u32,
+    /// `tile_sample_min_overlap_height` - the MINIMUM overlap between two
+    /// vertically adjacent tiles, in pixels. The actual overlap is widened
+    /// from here so the tiles cover the frame exactly, see [`split_tiles`].
+    pub tile_sample_min_overlap_height: u32,
+    /// `tile_sample_min_overlap_width` - the same, horizontally.
+    pub tile_sample_min_overlap_width: u32,
 }
 
 impl Default for VideoVaeConfig {
@@ -237,6 +244,11 @@ impl VideoVaeConfig {
             decoder_norm_eps: 1e-5,
             clip_length: 17,
             token_drop: 3,
+            use_tiling: true,
+            tile_sample_min_height: 256,
+            tile_sample_min_width: 256,
+            tile_sample_min_overlap_height: 64,
+            tile_sample_min_overlap_width: 64,
         }
     }
 
@@ -249,7 +261,11 @@ impl VideoVaeConfig {
     /// which stages carry a downsample module and desync the encoder/
     /// decoder's shared `patch_size`/`patch_size_t` wiring from the real
     /// config's own shape, same reasoning as
-    /// `H3TransformerConfig::tiny()` keeping `patch_size` literal).
+    /// `H3TransformerConfig::tiny()` keeping `patch_size` literal). The five
+    /// tiling fields are kept LITERAL for the same reason: they are measured
+    /// in PIXELS against `spatial_compression_ratio` (which this config keeps
+    /// literal at 16), so shrinking them would produce a tile geometry the
+    /// reference never uses and the parity golden could not gate.
     pub fn tiny() -> VideoVaeConfig {
         VideoVaeConfig {
             in_channels: 3,
@@ -271,6 +287,11 @@ impl VideoVaeConfig {
             decoder_norm_eps: 1e-5,
             clip_length: 17,
             token_drop: 3,
+            use_tiling: true,
+            tile_sample_min_height: 256,
+            tile_sample_min_width: 256,
+            tile_sample_min_overlap_height: 64,
+            tile_sample_min_overlap_width: 64,
         }
     }
 
@@ -504,6 +525,246 @@ fn blend_frames_host(a: &[f32], at: u32, b: &[f32], bt: u32, c: u32, h: u32, w: 
 }
 
 // ==================================================================
+// Spatial tiling - `_split_tiles` / `_blend` / `_stitch_tiles` and the
+// tiled halves of `_decode_clip` / `_encode_clip`.
+//
+// The reference lays fixed-size tiles over the frame and blends the
+// overlaps. It matters that this is not a memory optimization that could be
+// skipped: the ViT decoder's rotary coordinates are normalized across
+// whatever grid it is handed, so the tile size is part of the MODEL, and
+// handing it a whole large frame is a different (wrong) computation, not a
+// less-chunked version of the same one. See this module's own doc.
+// ==================================================================
+
+/// A channel-major `[c,t,h,w]` host tensor - the spatial tiling's working
+/// unit. `t` is carried through untouched: tiling is purely spatial, the
+/// temporal chunking is the separate outer `_encode`/`_decode` machinery.
+#[derive(Clone)]
+struct Tile {
+    data: Vec<f32>,
+    c: u32,
+    t: u32,
+    h: u32,
+    w: u32,
+}
+
+impl Tile {
+    fn new(data: Vec<f32>, c: u32, t: u32, h: u32, w: u32) -> Tile {
+        assert_eq!(data.len(), (c * t * h * w) as usize, "Tile::new: {} values for [{c},{t},{h},{w}]", data.len());
+        Tile { data, c, t, h, w }
+    }
+}
+
+/// `AutoencoderKLMiniMaxH3._split_tiles(length, tile_size, min_overlap)`,
+/// returning `(tile_start_indices, tile_lengths, overlaps)`.
+///
+/// Three properties of this are easy to get wrong from the name alone, so
+/// they are spelled out:
+///
+/// * **There is no partial edge tile.** Every returned length is exactly
+///   `tile_size`; the slack is absorbed by WIDENING the overlaps, not by
+///   truncating the last tile. So the last tile ends exactly at `length`
+///   and the decoder sees an identically-shaped grid for every tile - which
+///   is the whole point, given its rotary coordinates are normalized to the
+///   grid it is given.
+/// * **The tile COUNT is grown until the union can cover `length` at the
+///   minimum overlap**, so it can exceed `ceil(length / tile_size)`. At
+///   512 pixels with 256-pixel tiles that gives THREE tiles, not two.
+/// * **The slack is distributed round-robin in whole `ratio` steps**
+///   (`remaining // ratio` increments of `ratio`), which is what keeps every
+///   tile boundary latent-aligned. The division truncates; the reference
+///   does not correct for a remainder, and neither does this.
+///
+/// The degenerate `tile_size >= length` case returns ONE tile of the full
+/// `length` (not of `tile_size`) with no overlaps - the reason tiling is a
+/// no-op at or below 256 pixels rather than a different computation.
+fn split_tiles(length: u32, tile_size: u32, min_overlap: u32, ratio: u32) -> (Vec<u32>, Vec<u32>, Vec<u32>) {
+    if tile_size >= length {
+        return (vec![0], vec![length], Vec::new());
+    }
+    let mut num_tiles = length.div_ceil(tile_size);
+    while (tile_size as i64) * (num_tiles as i64) - (min_overlap as i64) * (num_tiles as i64 - 1) - (length as i64) < 0 {
+        num_tiles += 1;
+    }
+    let n_ov = (num_tiles - 1) as usize;
+    let mut overlaps = vec![min_overlap; n_ov];
+    let remaining = tile_size * num_tiles - overlaps.iter().sum::<u32>() - length;
+    for i in 0..(remaining / ratio) {
+        overlaps[(i as usize) % n_ov] += ratio;
+    }
+    let mut starts = vec![0u32];
+    for &ov in overlaps.iter() {
+        starts.push(starts[starts.len() - 1] + tile_size - ov);
+    }
+    (starts, vec![tile_size; num_tiles as usize], overlaps)
+}
+
+/// `_blend(a, b, blend_extent, dim=-2)` - the HEIGHT axis. Returns a tensor
+/// with `b`'s OWN shape, whose leading `min(a.h, b.h, blend_extent)` rows
+/// are a linear cross-fade from `a`'s TRAILING rows into `b`'s leading rows.
+/// Same "overwrite `b`'s head, never grow" semantics as
+/// [`blend_frames_host`]'s temporal version.
+fn blend_h(a: &Tile, b: &Tile, blend_extent: u32) -> Tile {
+    let be = blend_extent.min(a.h).min(b.h);
+    let mut out = b.data.clone();
+    for ci in 0..a.c {
+        for ti in 0..a.t {
+            for k in 0..be {
+                let wa = 1.0 - (k as f32) / (be as f32);
+                let wb = (k as f32) / (be as f32);
+                let a_row = (((ci * a.t + ti) * a.h + (a.h - be + k)) * a.w) as usize;
+                let b_row = (((ci * b.t + ti) * b.h + k) * b.w) as usize;
+                for x in 0..b.w as usize {
+                    out[b_row + x] = a.data[a_row + x] * wa + b.data[b_row + x] * wb;
+                }
+            }
+        }
+    }
+    Tile::new(out, b.c, b.t, b.h, b.w)
+}
+
+/// `_blend(a, b, blend_extent, dim=-1)` - the WIDTH axis, same semantics as
+/// [`blend_h`].
+fn blend_w(a: &Tile, b: &Tile, blend_extent: u32) -> Tile {
+    let be = blend_extent.min(a.w).min(b.w);
+    let mut out = b.data.clone();
+    for ci in 0..a.c {
+        for ti in 0..a.t {
+            for hi in 0..b.h {
+                let a_row = (((ci * a.t + ti) * a.h + hi) * a.w) as usize;
+                let b_row = (((ci * b.t + ti) * b.h + hi) * b.w) as usize;
+                for k in 0..be as usize {
+                    let wa = 1.0 - (k as f32) / (be as f32);
+                    let wb = (k as f32) / (be as f32);
+                    out[b_row + k] = a.data[a_row + (a.w - be) as usize + k] * wa + b.data[b_row + k] * wb;
+                }
+            }
+        }
+    }
+    Tile::new(out, b.c, b.t, b.h, b.w)
+}
+
+/// `x[..., :keep, :]` - keep the leading `keep` rows.
+fn trim_h(x: &Tile, keep: u32) -> Tile {
+    assert!(keep <= x.h, "trim_h: keep {keep} > h {}", x.h);
+    let mut out = Vec::with_capacity((x.c * x.t * keep * x.w) as usize);
+    for ci in 0..x.c {
+        for ti in 0..x.t {
+            let base = (((ci * x.t + ti) * x.h) * x.w) as usize;
+            out.extend_from_slice(&x.data[base..base + (keep * x.w) as usize]);
+        }
+    }
+    Tile::new(out, x.c, x.t, keep, x.w)
+}
+
+/// `x[..., :, :keep]` - keep the leading `keep` columns.
+fn trim_w(x: &Tile, keep: u32) -> Tile {
+    assert!(keep <= x.w, "trim_w: keep {keep} > w {}", x.w);
+    let mut out = Vec::with_capacity((x.c * x.t * x.h * keep) as usize);
+    for ci in 0..x.c {
+        for ti in 0..x.t {
+            for hi in 0..x.h {
+                let base = (((ci * x.t + ti) * x.h + hi) * x.w) as usize;
+                out.extend_from_slice(&x.data[base..base + keep as usize]);
+            }
+        }
+    }
+    Tile::new(out, x.c, x.t, x.h, keep)
+}
+
+/// `torch.cat(row, dim=-1)` over same-`(c,t,h)` tiles.
+fn cat_w(row: &[Tile]) -> Tile {
+    let first = &row[0];
+    let wtot: u32 = row.iter().map(|t| t.w).sum();
+    let mut out = vec![0f32; (first.c * first.t * first.h * wtot) as usize];
+    for ci in 0..first.c {
+        for ti in 0..first.t {
+            for hi in 0..first.h {
+                let mut woff = 0u32;
+                for tile in row {
+                    let src = (((ci * tile.t + ti) * tile.h + hi) * tile.w) as usize;
+                    let dst = (((ci * first.t + ti) * first.h + hi) * wtot + woff) as usize;
+                    out[dst..dst + tile.w as usize].copy_from_slice(&tile.data[src..src + tile.w as usize]);
+                    woff += tile.w;
+                }
+            }
+        }
+    }
+    Tile::new(out, first.c, first.t, first.h, wtot)
+}
+
+/// `torch.cat(rows, dim=-2)` over same-`(c,t,w)` tiles.
+fn cat_h(rows: &[Tile]) -> Tile {
+    let first = &rows[0];
+    let htot: u32 = rows.iter().map(|t| t.h).sum();
+    let mut out = vec![0f32; (first.c * first.t * htot * first.w) as usize];
+    for ci in 0..first.c {
+        for ti in 0..first.t {
+            let mut hoff = 0u32;
+            for tile in rows {
+                let src = (((ci * tile.t + ti) * tile.h) * tile.w) as usize;
+                let dst = (((ci * first.t + ti) * htot + hoff) * first.w) as usize;
+                let n = (tile.h * tile.w) as usize;
+                out[dst..dst + n].copy_from_slice(&tile.data[src..src + n]);
+                hoff += tile.h;
+            }
+        }
+    }
+    Tile::new(out, first.c, first.t, htot, first.w)
+}
+
+/// `_stitch_tiles(tiles, height_overlaps, width_overlaps)`.
+///
+/// The detail worth stating, because the natural implementation gets it
+/// wrong: **both blends read the ORIGINAL neighbouring tiles**, not the
+/// already-blended-and-trimmed results being accumulated. `tiles[i-1][j]`
+/// and `tiles[i][j-1]` are indexed straight out of the input grid, so in a
+/// corner region (where a tile overlaps both the tile above and the tile to
+/// its left) the vertical cross-fade runs first against the RAW tile above,
+/// and the horizontal cross-fade then runs against the RAW tile to the
+/// left, which has itself had no vertical blend applied. That asymmetry is
+/// the reference's behaviour and is reproduced here rather than "improved".
+fn stitch_tiles(tiles: &[Vec<Tile>], height_overlaps: &[u32], width_overlaps: &[u32]) -> Tile {
+    let mut result_rows: Vec<Tile> = Vec::with_capacity(tiles.len());
+    for (i, row) in tiles.iter().enumerate() {
+        let mut result_row: Vec<Tile> = Vec::with_capacity(row.len());
+        for (j, tile) in row.iter().enumerate() {
+            let mut cur = tile.clone();
+            if i > 0 {
+                cur = blend_h(&tiles[i - 1][j], &cur, height_overlaps[i - 1]);
+            }
+            if j > 0 {
+                cur = blend_w(&row[j - 1], &cur, width_overlaps[j - 1]);
+            }
+            if i < tiles.len() - 1 {
+                cur = trim_h(&cur, cur.h - height_overlaps[i]);
+            }
+            if j < row.len() - 1 {
+                cur = trim_w(&cur, cur.w - width_overlaps[j]);
+            }
+            result_row.push(cur);
+        }
+        result_rows.push(cat_w(&result_row));
+    }
+    cat_h(&result_rows)
+}
+
+/// `x[..., y0:y0+th, x0:x0+tw]` of a channel-major `[c,t,h,w]` host buffer.
+fn spatial_window_host(x: &[f32], c: u32, t: u32, h: u32, w: u32, y0: u32, th: u32, x0: u32, tw: u32) -> Vec<f32> {
+    assert!(y0 + th <= h && x0 + tw <= w, "spatial_window_host: [{y0},{}) x [{x0},{}) of {h}x{w}", y0 + th, x0 + tw);
+    let mut out = Vec::with_capacity((c * t * th * tw) as usize);
+    for ci in 0..c {
+        for ti in 0..t {
+            for hi in y0..y0 + th {
+                let base = (((ci * t + ti) * h + hi) * w + x0) as usize;
+                out.extend_from_slice(&x[base..base + tw as usize]);
+            }
+        }
+    }
+    out
+}
+
+// ==================================================================
 // Device ops shared by the encoder and the decoder
 // ==================================================================
 
@@ -638,23 +899,23 @@ fn resnet_block3d(cx: &Ctx, tensors: &Tensors, prefix: &str, cin: u32, cout: u32
 // Encoder: MiniMaxH3VideoEncoder3d + quant_conv, one clip (untiled)
 // ==================================================================
 
-/// `_encode_clip` at `use_tiling=False`: `quant_conv(encoder(x))` over ONE
-/// pixel clip, `x` a channel-major `[in_channels,t,h,w]` host buffer.
+/// `_encode_clip`'s `use_tiling=False` body: `quant_conv(encoder(x))` over
+/// ONE pixel clip, `x` a channel-major `[in_channels,t,h,w]` host buffer.
 /// Returns the flat moments buffer `[2*latent_channels,t',h',w']` plus its
-/// shape.
-pub fn encode_clip(cfg: &VideoVaeConfig, tensors: &Tensors, device: Option<&str>, x: &[f32], t: u32, h: u32, w: u32) -> (Vec<f32>, u32, u32, u32) {
+/// shape. Takes an already-open [`Ctx`] so a tiled encode opens ONE device
+/// for the whole tile grid.
+fn encode_clip_untiled(cx: &Ctx, cfg: &VideoVaeConfig, tensors: &Tensors, x: &[f32], t: u32, h: u32, w: u32) -> (Vec<f32>, u32, u32, u32) {
     assert_eq!(x.len(), (cfg.in_channels * t * h * w) as usize, "encode_clip: input length {} != in_channels*t*h*w", x.len());
-    let cx = Ctx::new(device);
     let xin = cx.gpu.storage_init("video_vae.pixels", x);
 
-    let (mut cur, mut ct, mut ch, mut cw) = causal_conv3d(&cx, tensors, "encoder.conv_in", cfg.in_channels, t, h, w, cfg.block_out_channels[0], 3, (1, 1, 1), 1, 2, &xin);
+    let (mut cur, mut ct, mut ch, mut cw) = causal_conv3d(cx, tensors, "encoder.conv_in", cfg.in_channels, t, h, w, cfg.block_out_channels[0], 3, (1, 1, 1), 1, 2, &xin);
     let mut cur_c = cfg.block_out_channels[0];
 
     for i in 0..6usize {
         let cout = cfg.block_out_channels[i];
         for j in 0..cfg.layers_per_block as usize {
             let p = format!("encoder.down_blocks.{i}.resnets.{j}");
-            let (y, t2, h2, w2) = resnet_block3d(&cx, tensors, &p, cur_c, cout, ct, ch, cw, cfg.norm_num_groups, cfg.norm_eps, &cur);
+            let (y, t2, h2, w2) = resnet_block3d(cx, tensors, &p, cur_c, cout, ct, ch, cw, cfg.norm_num_groups, cfg.norm_eps, &cur);
             cur = y;
             ct = t2;
             ch = h2;
@@ -663,7 +924,7 @@ pub fn encode_clip(cfg: &VideoVaeConfig, tensors: &Tensors, device: Option<&str>
         }
         if cfg.temporal_downsample_factors[i] * cfg.spatial_downsample_factors[i] > 1 {
             let p = format!("encoder.down_blocks.{i}.downsamplers.0.conv");
-            let (y, t2, h2, w2) = downsample_conv3d(&cx, tensors, &p, cur_c, ct, ch, cw, cfg.temporal_downsample_factors[i], cfg.spatial_downsample_factors[i], &cur);
+            let (y, t2, h2, w2) = downsample_conv3d(cx, tensors, &p, cur_c, ct, ch, cw, cfg.temporal_downsample_factors[i], cfg.spatial_downsample_factors[i], &cur);
             cur = y;
             ct = t2;
             ch = h2;
@@ -671,13 +932,56 @@ pub fn encode_clip(cfg: &VideoVaeConfig, tensors: &Tensors, device: Option<&str>
         }
     }
 
-    let n = group_norm_t_isolated(&cx, tensors, "encoder.norm_out", cur_c, ct, ch, cw, cfg.norm_num_groups, cfg.norm_eps, &cur);
-    let s = silu3d(&cx, &n, cur_c * ct * ch * cw);
-    let (out, t3, h3, w3) = causal_conv3d(&cx, tensors, "encoder.conv_out", cur_c, ct, ch, cw, 2 * cfg.latent_channels, 3, (1, 1, 1), 1, 2, &s);
-    let (moments, t4, h4, w4) = causal_conv3d(&cx, tensors, "quant_conv", 2 * cfg.latent_channels, t3, h3, w3, 2 * cfg.latent_channels, 1, (1, 1, 1), 0, 0, &out);
+    let n = group_norm_t_isolated(cx, tensors, "encoder.norm_out", cur_c, ct, ch, cw, cfg.norm_num_groups, cfg.norm_eps, &cur);
+    let s = silu3d(cx, &n, cur_c * ct * ch * cw);
+    let (out, t3, h3, w3) = causal_conv3d(cx, tensors, "encoder.conv_out", cur_c, ct, ch, cw, 2 * cfg.latent_channels, 3, (1, 1, 1), 1, 2, &s);
+    let (moments, t4, h4, w4) = causal_conv3d(cx, tensors, "quant_conv", 2 * cfg.latent_channels, t3, h3, w3, 2 * cfg.latent_channels, 1, (1, 1, 1), 0, 0, &out);
 
     let flat = cx.gpu.read(&moments, (2 * cfg.latent_channels * t4 * h4 * w4) as usize);
     (flat, t4, h4, w4)
+}
+
+/// `_encode_clip`: one temporal clip, spatially tiled when
+/// `cfg.use_tiling` (the reference's own shipped default).
+///
+/// Tiles are laid out directly in pixel space here - unlike [`decode_clip`],
+/// where they are laid out in pixel space and then mapped back onto the
+/// latent grid - and the overlaps handed to [`stitch_tiles`] are converted
+/// to LATENT units (`overlap / spatial_compression_ratio`) because what is
+/// being stitched is the encoder's latent output, not pixels.
+pub fn encode_clip(cfg: &VideoVaeConfig, tensors: &Tensors, device: Option<&str>, x: &[f32], t: u32, h: u32, w: u32) -> (Vec<f32>, u32, u32, u32) {
+    let cx = Ctx::new(device);
+    encode_clip_in(&cx, cfg, tensors, x, t, h, w)
+}
+
+fn encode_clip_in(cx: &Ctx, cfg: &VideoVaeConfig, tensors: &Tensors, x: &[f32], t: u32, h: u32, w: u32) -> (Vec<f32>, u32, u32, u32) {
+    if !cfg.use_tiling {
+        return encode_clip_untiled(cx, cfg, tensors, x, t, h, w);
+    }
+    let ratio = cfg.spatial_compression_ratio();
+    let (y_idx, y_len, y_ov) = split_tiles(h, cfg.tile_sample_min_height, cfg.tile_sample_min_overlap_height, ratio);
+    let (x_idx, x_len, x_ov) = split_tiles(w, cfg.tile_sample_min_width, cfg.tile_sample_min_overlap_width, ratio);
+    // One full-size tile is the untiled computation exactly (`_split_tiles`
+    // returns `[0], [length], []`), so take the cheap path rather than
+    // round-tripping the whole clip through a one-element stitch.
+    if y_idx.len() == 1 && x_idx.len() == 1 {
+        return encode_clip_untiled(cx, cfg, tensors, x, t, h, w);
+    }
+
+    let mut rows: Vec<Vec<Tile>> = Vec::with_capacity(y_idx.len());
+    for (&i_pos, &i_len) in y_idx.iter().zip(y_len.iter()) {
+        let mut row: Vec<Tile> = Vec::with_capacity(x_idx.len());
+        for (&j_pos, &j_len) in x_idx.iter().zip(x_len.iter()) {
+            let sub = spatial_window_host(x, cfg.in_channels, t, h, w, i_pos, i_len, j_pos, j_len);
+            let (m, mt, mh, mw) = encode_clip_untiled(cx, cfg, tensors, &sub, t, i_len, j_len);
+            row.push(Tile::new(m, 2 * cfg.latent_channels, mt, mh, mw));
+        }
+        rows.push(row);
+    }
+    let lat_y_ov: Vec<u32> = y_ov.iter().map(|o| o / ratio).collect();
+    let lat_x_ov: Vec<u32> = x_ov.iter().map(|o| o / ratio).collect();
+    let out = stitch_tiles(&rows, &lat_y_ov, &lat_x_ov);
+    (out.data, out.t, out.h, out.w)
 }
 
 /// `_encode`: chunk `x` into `clip_length`-pixel-frame clips (repeat-padding
@@ -688,8 +992,9 @@ pub fn encode_clip(cfg: &VideoVaeConfig, tensors: &Tensors, device: Option<&str>
 /// entirely (`_encode`'s own documented special case - repeating a lone
 /// image to fill a clip is not this model's training-time conditioning).
 pub fn encode(cfg: &VideoVaeConfig, tensors: &Tensors, device: Option<&str>, x: &[f32], num_frames: u32, h: u32, w: u32) -> (Vec<f32>, u32, u32, u32) {
+    let cx = Ctx::new(device);
     if num_frames == 1 {
-        return encode_clip(cfg, tensors, device, x, 1, h, w);
+        return encode_clip_in(&cx, cfg, tensors, x, 1, h, w);
     }
     let clip_length = cfg.clip_length;
     let pad = (clip_length - num_frames % clip_length) % clip_length;
@@ -701,7 +1006,7 @@ pub fn encode(cfg: &VideoVaeConfig, tensors: &Tensors, device: Option<&str>, x: 
     let mut oc = 0u32;
     for i in 0..(total / clip_length) {
         let clip = slice_frames_host(&xpad, cfg.in_channels, total, h, w, i * clip_length, clip_length);
-        let (moments, ct, ch, cw) = encode_clip(cfg, tensors, device, &clip, clip_length, h, w);
+        let (moments, ct, ch, cw) = encode_clip_in(&cx, cfg, tensors, &clip, clip_length, h, w);
         oh = ch;
         ow = cw;
         oc = 2 * cfg.latent_channels;
@@ -771,18 +1076,21 @@ fn attention(cx: &Ctx, q: &DeviceBuffer, k: &DeviceBuffer, v: &DeviceBuffer, seq
     // oversized decode fails with this message instead of silently allocating
     // a wrapped-around buffer and dispatching a wrapped-around thread count.
     //
-    // The way to reach that here is a canvas wide enough that the untiled
-    // decode path (see this module's "Explicitly out of scope" doc - spatial
-    // tiling is not implemented) hands the ViT decoder the whole frame at
-    // once: the reference would have split it into 256x256 tiles of 16x16
-    // latents each and never built a sequence anywhere near this long.
+    // With `use_tiling` on - the reference's own shipped default, and this
+    // port's - every tile is a 16x16 LATENT window whatever the canvas, so
+    // the sequence is `t * 256 + num_register_tokens + 1` (1797 at the real
+    // decoder's 7-latent-frame chunk) and this ceiling is three orders of
+    // magnitude away. Reaching it therefore means tiling was bypassed
+    // (`use_tiling = false`) on a frame the reference would have split, not
+    // that the limit is too low: the fix is to leave tiling on, never to
+    // widen this.
     let scores_len = heads as u64 * seq_len as u64 * seq_len as u64;
     assert!(
         scores_len <= u32::MAX as u64,
         "video_vae::attention: {heads} heads x {seq_len}^2 attention scores ({scores_len} elements) overflows the u32 \
-         dispatch space. This is the untiled decode path meeting a frame the reference would have tiled - spatial \
-         tiling (`_split_tiles`/`_stitch_tiles`) is not implemented in this port, so decode is limited to canvases \
-         whose latent grid keeps the ViT sequence short."
+         dispatch space. Only the UNTILED decode path can build a sequence this long - with `use_tiling` on, the \
+         reference's own default, `_split_tiles` bounds every tile to a 16x16 latent grid. Set `use_tiling` rather \
+         than raising this limit."
     );
     let scores = cx.gpu.storage(scores_len);
     cx.gpu.submit(&[], &[cx.gpu.step(K_ATTN_SCORES_QK, &[q, k, &scores], &[1, heads, seq_len, head_dim, inner, 0, f(scale)], heads * seq_len * seq_len)]);
@@ -931,15 +1239,15 @@ fn unpatchify(proj: &[f32], num_frames: u32, height: u32, width: u32, out_channe
     out
 }
 
-/// `_decode_clip` at `use_tiling=False`: `decoder(post_quant_conv(z))` over
-/// ONE latent clip. `z` a channel-major `[latent_channels,t,h,w]` host
+/// `_decode_clip`'s `use_tiling=False` body: `decoder(post_quant_conv(z))`
+/// over ONE latent clip. `z` a channel-major `[latent_channels,t,h,w]` host
 /// buffer. Returns the pixel buffer `[out_channels, t*patch_size_t,
-/// h*patch_size, w*patch_size]` plus its shape.
-pub fn decode_clip(cfg: &VideoVaeConfig, tensors: &Tensors, device: Option<&str>, z: &[f32], t: u32, h: u32, w: u32) -> (Vec<f32>, u32, u32, u32) {
+/// h*patch_size, w*patch_size]` plus its shape. Takes an already-open
+/// [`Ctx`] so a tiled decode opens ONE device for the whole tile grid.
+fn decode_clip_untiled(cx: &Ctx, cfg: &VideoVaeConfig, tensors: &Tensors, z: &[f32], t: u32, h: u32, w: u32) -> (Vec<f32>, u32, u32, u32) {
     assert_eq!(z.len(), (cfg.latent_channels * t * h * w) as usize, "decode_clip: input length {} != latent_channels*t*h*w", z.len());
-    let cx = Ctx::new(device);
     let zin = cx.gpu.storage_init("video_vae.z", z);
-    let (pz, t1, h1, w1) = causal_conv3d(&cx, tensors, "post_quant_conv", cfg.latent_channels, t, h, w, cfg.latent_channels, 1, (1, 1, 1), 0, 0, &zin);
+    let (pz, t1, h1, w1) = causal_conv3d(cx, tensors, "post_quant_conv", cfg.latent_channels, t, h, w, cfg.latent_channels, 1, (1, 1, 1), 0, 0, &zin);
     let pz_host = cx.gpu.read(&pz, (cfg.latent_channels * t1 * h1 * w1) as usize);
 
     // Tokenize: [C,T,H,W] channel-major -> [num_patches, C] row-major
@@ -959,10 +1267,10 @@ pub fn decode_clip(cfg: &VideoVaeConfig, tensors: &Tensors, device: Option<&str>
     }
 
     let dim = cfg.decoder_dim();
-    let proj_in_w = upload(&cx, tensors, "decoder.proj_in.weight");
-    let proj_in_b = upload(&cx, tensors, "decoder.proj_in.bias");
+    let proj_in_w = upload(cx, tensors, "decoder.proj_in.weight");
+    let proj_in_b = upload(cx, tensors, "decoder.proj_in.bias");
     let tok_buf = cx.gpu.storage_init("video_vae.tokens", &tokens);
-    let embedded = linear(&cx, &tok_buf, &proj_in_w, Some(&proj_in_b), num_patches, cfg.latent_channels, dim);
+    let embedded = linear(cx, &tok_buf, &proj_in_w, Some(&proj_in_b), num_patches, cfg.latent_channels, dim);
     let embedded_host = cx.gpu.read(&embedded, (num_patches * dim) as usize);
 
     let (_, register) = get(tensors, "decoder.register_tokens");
@@ -994,16 +1302,16 @@ pub fn decode_clip(cfg: &VideoVaeConfig, tensors: &Tensors, device: Option<&str>
     let mut hbuf = cx.gpu.storage_init("video_vae.h0", &full);
     for i in 0..cfg.decoder_num_layers as usize {
         let p = format!("decoder.transformer_blocks.{i}");
-        hbuf = decoder_block_forward(&cx, tensors, &p, &hbuf, &cos_dev, &sin_dev, &ones_hd, cfg, seq_len);
+        hbuf = decoder_block_forward(cx, tensors, &p, &hbuf, &cos_dev, &sin_dev, &ones_hd, cfg, seq_len);
     }
 
-    let norm_out_w = upload(&cx, tensors, "decoder.norm_out.weight");
-    let norm_out_b = upload(&cx, tensors, "decoder.norm_out.bias");
-    let normed = layernorm_rows(&cx, &hbuf, &norm_out_w, &norm_out_b, seq_len, dim, cfg.decoder_norm_eps);
-    let proj_out_w = upload(&cx, tensors, "decoder.proj_out.weight");
-    let proj_out_b = upload(&cx, tensors, "decoder.proj_out.bias");
+    let norm_out_w = upload(cx, tensors, "decoder.norm_out.weight");
+    let norm_out_b = upload(cx, tensors, "decoder.norm_out.bias");
+    let normed = layernorm_rows(cx, &hbuf, &norm_out_w, &norm_out_b, seq_len, dim, cfg.decoder_norm_eps);
+    let proj_out_w = upload(cx, tensors, "decoder.proj_out.weight");
+    let proj_out_b = upload(cx, tensors, "decoder.proj_out.bias");
     let out_patch = cfg.decoder_out_patch();
-    let full_out = linear(&cx, &normed, &proj_out_w, Some(&proj_out_b), seq_len, dim, out_patch);
+    let full_out = linear(cx, &normed, &proj_out_w, Some(&proj_out_b), seq_len, dim, out_patch);
     let full_out_host = cx.gpu.read(&full_out, (seq_len * out_patch) as usize);
     let patch_rows = &full_out_host[..(num_patches * out_patch) as usize];
 
@@ -1011,6 +1319,53 @@ pub fn decode_clip(cfg: &VideoVaeConfig, tensors: &Tensors, device: Option<&str>
     let pst = cfg.temporal_compression_ratio();
     let pixels = unpatchify(patch_rows, t1, h1, w1, cfg.out_channels, pst, ps);
     (pixels, t1 * pst, h1 * ps, w1 * ps)
+}
+
+/// `_decode_clip`: one temporal clip, spatially tiled when `cfg.use_tiling`
+/// (the reference's own shipped default).
+///
+/// The tile grid is laid out in PIXEL space and then mapped back onto the
+/// latent grid (`z[..., i_pos/ratio : i_pos/ratio + i_len/ratio, ...]`) -
+/// the opposite direction from [`encode_clip`], and the reason
+/// [`split_tiles`] is called with the pixel height `h * ratio` rather than
+/// with `h`. Because [`split_tiles`] keeps every boundary latent-aligned,
+/// those divisions are exact. [`stitch_tiles`] is then given the PIXEL
+/// overlaps unconverted, since what is being stitched here is pixels.
+///
+/// This is what bounds the ViT decoder's sequence length: every tile is a
+/// 256x256-pixel / 16x16-latent window whatever the canvas, so the sequence
+/// stays at `t * 256 + num_register_tokens + 1` instead of growing with the
+/// frame area. See [`attention`]'s own overflow assert.
+pub fn decode_clip(cfg: &VideoVaeConfig, tensors: &Tensors, device: Option<&str>, z: &[f32], t: u32, h: u32, w: u32) -> (Vec<f32>, u32, u32, u32) {
+    let cx = Ctx::new(device);
+    decode_clip_in(&cx, cfg, tensors, z, t, h, w)
+}
+
+fn decode_clip_in(cx: &Ctx, cfg: &VideoVaeConfig, tensors: &Tensors, z: &[f32], t: u32, h: u32, w: u32) -> (Vec<f32>, u32, u32, u32) {
+    if !cfg.use_tiling {
+        return decode_clip_untiled(cx, cfg, tensors, z, t, h, w);
+    }
+    let ratio = cfg.spatial_compression_ratio();
+    let height = h * ratio;
+    let width = w * ratio;
+    let (y_idx, y_len, y_ov) = split_tiles(height, cfg.tile_sample_min_height, cfg.tile_sample_min_overlap_height, ratio);
+    let (x_idx, x_len, x_ov) = split_tiles(width, cfg.tile_sample_min_width, cfg.tile_sample_min_overlap_width, ratio);
+    if y_idx.len() == 1 && x_idx.len() == 1 {
+        return decode_clip_untiled(cx, cfg, tensors, z, t, h, w);
+    }
+
+    let mut rows: Vec<Vec<Tile>> = Vec::with_capacity(y_idx.len());
+    for (&i_pos, &i_len) in y_idx.iter().zip(y_len.iter()) {
+        let mut row: Vec<Tile> = Vec::with_capacity(x_idx.len());
+        for (&j_pos, &j_len) in x_idx.iter().zip(x_len.iter()) {
+            let sub = spatial_window_host(z, cfg.latent_channels, t, h, w, i_pos / ratio, i_len / ratio, j_pos / ratio, j_len / ratio);
+            let (p, pt, ph, pw) = decode_clip_untiled(cx, cfg, tensors, &sub, t, i_len / ratio, j_len / ratio);
+            row.push(Tile::new(p, cfg.out_channels, pt, ph, pw));
+        }
+        rows.push(row);
+    }
+    let out = stitch_tiles(&rows, &y_ov, &x_ov);
+    (out.data, out.t, out.h, out.w)
 }
 
 /// `_decode`: mirrors `_encode`'s chunking. Decodes `tokens_chunk_size +
@@ -1029,6 +1384,7 @@ pub fn decode(cfg: &VideoVaeConfig, tensors: &Tensors, device: Option<&str>, z: 
     let frame_pre_padding = cfg.frame_pre_padding();
     let frame_overlap = cfg.frame_overlap();
     let ps = cfg.spatial_compression_ratio();
+    let cx = Ctx::new(device);
 
     let num_tokens = nt + token_drop;
     let pad_tokens = (tokens_chunk_size - num_tokens % tokens_chunk_size) % tokens_chunk_size;
@@ -1045,7 +1401,7 @@ pub fn decode(cfg: &VideoVaeConfig, tensors: &Tensors, device: Option<&str>, z: 
         let start = i * tokens_chunk_size;
         let take = (tokens_chunk_size + token_overlap).min(zt - start);
         let zc = slice_frames_host(&zpad, c, zt, h, w, start, take);
-        let (clip_pixels, cf, ch_, cw_) = decode_clip(cfg, tensors, device, &zc, take, h, w);
+        let (clip_pixels, cf, ch_, cw_) = decode_clip_in(&cx, cfg, tensors, &zc, take, h, w);
         assert_eq!((ch_, cw_), (fh, fw), "decode: clip spatial shape drifted");
 
         for j in 0..(1 + u32::from(token_drop > 0)) {
@@ -1298,6 +1654,103 @@ mod tests {
         assert_eq!([cfg.out_channels as usize, pt2 as usize, ph2 as usize, pw2 as usize], *shape("tap_multi_pixels"));
         r.check("tap_multi_pixels", &pixels2, get("tap_multi_pixels"));
 
+        // ---- rung 3: TILED _decode_clip at 512x768 (a 3x4 tile grid) ----
+        // The tile grid this lands on has UNEVEN width overlaps
+        // ([96,80,80]) and even height overlaps ([128,128]), so a height/
+        // width mix-up or an "all overlaps equal" simplification cannot
+        // pass. The dumper self-validates that the reference's own tiled and
+        // untiled results differ here (max abs 2.6e-2), so this rung cannot
+        // pass vacuously against the untiled path.
+        assert!(cfg.use_tiling, "tiny() must ship the reference's own use_tiling default");
+        let ratio = cfg.spatial_compression_ratio();
+        let dec_shape = shape("input_z_tiled").to_vec();
+        let (zt, zh, zw) = (dec_shape[1] as u32, dec_shape[2] as u32, dec_shape[3] as u32);
+        assert!(zh * ratio > cfg.tile_sample_min_height && zw * ratio > cfg.tile_sample_min_width, "rung 3 canvas {}x{} is not above the tile size - it would not tile", zh * ratio, zw * ratio);
+        let (tiled_pixels, tpt, tph, tpw) = decode_clip(&cfg, &tensors, Some("cpu"), get("input_z_tiled"), zt, zh, zw);
+        assert_eq!([cfg.out_channels as usize, tpt as usize, tph as usize, tpw as usize], *shape("tap_tiled_dec_pixels"));
+        r.check("tap_tiled_dec_pixels (3x4 tile grid)", &tiled_pixels, get("tap_tiled_dec_pixels"));
+
+        // Vacuity guard: decode the SAME latent through this port's untiled
+        // path and require it to disagree with the reference's tiled output
+        // by far more than the float32 noise the tiled path clears it by.
+        // Without this, a tiling implementation that quietly degenerated to
+        // "decode the whole frame" would still pass the rung above at any
+        // canvas where the two happened to be close, which is exactly the
+        // failure mode - a confident, structured, wrong output - that this
+        // whole pass exists to rule out.
+        let mut untiled_cfg = cfg.clone();
+        untiled_cfg.use_tiling = false;
+        let (untiled_pixels, ..) = decode_clip(&untiled_cfg, &tensors, Some("cpu"), get("input_z_tiled"), zt, zh, zw);
+        let want = get("tap_tiled_dec_pixels");
+        let untiled_err = untiled_pixels.iter().zip(want).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+        let tiled_err = tiled_pixels.iter().zip(want).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+        println!("  vacuity guard: untiled max_abs vs the tiled reference {untiled_err:.3e}, tiled {tiled_err:.3e}");
+        assert!(untiled_err > 1e-3, "the untiled decode agrees with the TILED reference to {untiled_err:.3e} - rung 3 would pass vacuously");
+        assert!(untiled_err > 1000.0 * tiled_err, "the tiled path is not meaningfully closer than the untiled one ({tiled_err:.3e} vs {untiled_err:.3e})");
+
+        // ---- rung 4: TILED _encode_clip at 384x384 (a 2x2 tile grid) ----
+        // The other tiling direction: tiles are laid out in pixel space and
+        // the LATENT output is stitched, so the overlaps are converted by
+        // `/ spatial_compression_ratio` where rung 3 uses them as-is.
+        let enc_shape = shape("input_x_tiled").to_vec();
+        let (xt, xh, xw) = (enc_shape[1] as u32, enc_shape[2] as u32, enc_shape[3] as u32);
+        assert!(xh > cfg.tile_sample_min_height && xw > cfg.tile_sample_min_width, "rung 4 canvas {xh}x{xw} is not above the tile size - it would not tile");
+        let (tiled_moments, tmt, tmh, tmw) = encode_clip(&cfg, &tensors, Some("cpu"), get("input_x_tiled"), xt, xh, xw);
+        assert_eq!([2 * cfg.latent_channels as usize, tmt as usize, tmh as usize, tmw as usize], *shape("tap_tiled_enc_moments"));
+        r.check("tap_tiled_enc_moments (2x2 tile grid)", &tiled_moments, get("tap_tiled_enc_moments"));
+
         r.finish("minimaxh3 video vae tiny-config forward vs real reference");
+    }
+
+    /// `split_tiles` against the REAL reference's own `_split_tiles`, called
+    /// directly at a spread of lengths and dumped as integers by
+    /// `tools/minimaxh3_video_vae_dump_reference.py`.
+    ///
+    /// This is a separate rung from the stitched-output goldens on purpose:
+    /// the tile layout is the part of the algorithm with the most room for a
+    /// plausible-but-wrong answer (tile count, slack distribution, edge
+    /// handling), and comparing it as DATA localizes a mismatch to the
+    /// layout instead of leaving it smeared across a blended pixel buffer.
+    #[test]
+    fn split_tiles_matches_the_real_references_own_tile_layout() {
+        let fixture_dir = brain_testutil::testdata_path("golden/minimaxh3/video_vae_tiny");
+        let fixture_file = fixture_dir.join("minimaxh3_video_vae_tiny.safetensors");
+        if !fixture_file.is_file() {
+            brain_testutil::skip(&format!("{} not found - run tools/minimaxh3_video_vae_dump_reference.py --out {}", fixture_file.display(), fixture_dir.display()));
+            return;
+        }
+        let raw = checkpoint::safetensors::read(fixture_file.to_str().expect("fixture path is valid UTF-8")).expect("read golden fixture");
+        let fx: std::collections::HashMap<String, checkpoint::safetensors::StTensor> = raw.into_iter().map(|t| (t.name.clone(), t)).collect();
+
+        let ratio = VideoVaeConfig::real().spatial_compression_ratio();
+        let probes: Vec<(u32, u32, u32)> = fx
+            .keys()
+            .filter_map(|k| k.strip_prefix("tap_split_starts_"))
+            .map(|s| {
+                let p: Vec<u32> = s.split('_').map(|v| v.parse().expect("probe key is three integers")).collect();
+                (p[0], p[1], p[2])
+            })
+            .collect();
+        assert!(!probes.is_empty(), "golden has no tap_split_* probes - regenerate it with the current dumper");
+
+        let mut multi_tile = 0usize;
+        for (length, tile, min_ov) in probes {
+            let key = format!("{length}_{tile}_{min_ov}");
+            let want = |what: &str| -> Vec<u32> { fx[&format!("tap_split_{what}_{key}")].data.iter().map(|v| *v as u32).collect() };
+            let (starts, lens, ovs) = split_tiles(length, tile, min_ov, ratio);
+            assert_eq!(starts, want("starts"), "_split_tiles({length},{tile},{min_ov}) start indices");
+            assert_eq!(lens, want("lengths"), "_split_tiles({length},{tile},{min_ov}) tile lengths");
+            assert_eq!(ovs, want("overlaps"), "_split_tiles({length},{tile},{min_ov}) overlaps");
+            if starts.len() > 1 {
+                multi_tile += 1;
+                // Every tile is FULL size and the union covers `length`
+                // exactly - there is no partial edge tile, the slack lives
+                // in the widened overlaps.
+                assert!(lens.iter().all(|&l| l == tile), "_split_tiles({length}) produced a partial edge tile");
+                assert_eq!(starts[starts.len() - 1] + tile, length, "_split_tiles({length}) does not end exactly at the length");
+                assert!(starts.iter().all(|s| s.is_multiple_of(ratio)), "_split_tiles({length}) produced a start that is not latent-aligned");
+            }
+        }
+        assert!(multi_tile >= 4, "only {multi_tile} multi-tile probes - the golden is not covering the tiling regime");
     }
 }

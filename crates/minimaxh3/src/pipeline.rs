@@ -1032,28 +1032,11 @@ mod tests {
         }
     }
 
+    /// `VideoVaeConfig::tiny()` itself - this was a field-for-field copy of
+    /// it, which silently went stale every time that constructor gained a
+    /// field.
     fn tiny_video_vae_cfg() -> VideoVaeConfig {
-        VideoVaeConfig {
-            in_channels: 3,
-            out_channels: 3,
-            latent_channels: 4,
-            block_out_channels: [8, 16, 16, 32, 32, 64],
-            layers_per_block: 2,
-            spatial_downsample_factors: [2, 2, 2, 2, 1, 1],
-            temporal_downsample_factors: [1, 2, 2, 1, 1, 1],
-            norm_num_groups: 2,
-            norm_eps: 1e-6,
-            decoder_num_layers: 2,
-            decoder_num_attention_heads: 2,
-            decoder_attention_head_dim: 8,
-            decoder_num_register_tokens: 4,
-            decoder_ffn_mult: 4,
-            decoder_rope_theta: 100.0,
-            decoder_rope_dim_ratio: 0.75,
-            decoder_norm_eps: 1e-5,
-            clip_length: 17,
-            token_drop: 3,
-        }
+        VideoVaeConfig::tiny()
     }
 
     fn tiny_vocoder_cfg() -> VocoderConfig {

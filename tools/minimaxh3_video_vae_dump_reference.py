@@ -14,11 +14,12 @@ that constructor's own doc for why), with small seeded random weights (this
 class's own default init, made reproducible by seeding torch's global RNG
 before construction).
 
-`vae.use_tiling = False` is set explicitly - this port's `encode_clip`/
-`decode_clip` are the reference's untiled path exactly (spatial tiling is
-out of scope this pass, see `crate::video_vae`'s own module doc), so the
-comparison below is apples to apples, not a hidden mismatch against a tiled
-reference.
+The first two rungs are dumped with `vae.use_tiling = False` and a 32x32
+canvas, where the tiled and untiled paths are the same computation anyway
+(`_split_tiles` returns one full-size tile when `tile_size >= length`), so
+they pin the untiled clip math on its own. The tiled rungs below then turn
+`use_tiling` back on - the reference's OWN shipped default - at canvases
+above 256 pixels, which is the only place the two paths differ.
 
 Dumps every weight (`state_dict()` - PyTorch's own dotted keys ARE
 `crate::video_vae::VideoVaeConfig::tensor_manifest`'s own tensor names, so
@@ -37,6 +38,19 @@ nothing here renames anything), plus:
     the `num_chunks=0` edge case a single clip's worth would hit - see
     `crate::video_vae`'s own module doc) - matching `crate::video_vae::
     encode`/`decode`'s own outer chunk orchestration.
+  - a TILED `_decode_clip` at 512x768 pixels (a 32x48 latent grid), which
+    `_split_tiles` covers with a 3x4 tile grid. The width axis is the
+    interesting one: four 256-pixel tiles over 768 pixels leave 64 pixels of
+    slack, and the round-robin distribution hands it out unevenly, giving
+    overlaps `[96, 80, 80]` rather than three equal ones. The height axis
+    gives an even `[128, 128]`, so a height/width mix-up cannot pass.
+  - a TILED `_encode_clip` at 384x384 pixels (a 2x2 tile grid), which is the
+    OTHER tiling direction: `_encode_clip` lays its tiles out in pixel space
+    and stitches LATENT output, so it converts the overlaps by
+    `// spatial_compression_ratio` where `_decode_clip` uses them as-is.
+  - `_split_tiles` itself, called directly at a spread of lengths and dumped
+    as flat integer tensors, so the tile layout is gated as data rather than
+    inferred from a stitched result.
 
 Usage:
   /home/user/.venv/bin/python3 tools/minimaxh3_video_vae_dump_reference.py \\
@@ -87,6 +101,33 @@ TINY_CFG = dict(
 HEIGHT = 32
 WIDTH = 32
 
+# The tiled rungs. Both are above the 256-pixel tile size on at least one
+# axis, which is the only regime where the tiled and untiled paths differ.
+# 512x768 decodes as a 3x4 tile grid with UNEVEN width overlaps; 384x384
+# encodes as a 2x2 grid. Latent frame counts are kept at 1 - spatial tiling
+# is orthogonal to the temporal chunking, which the two rungs above already
+# gate, and this keeps the dumped pixel tensors a sane size.
+TILED_DEC_H = 512
+TILED_DEC_W = 768
+TILED_DEC_FRAMES = 1
+TILED_ENC_H = 384
+TILED_ENC_W = 384
+TILED_ENC_FRAMES = 1
+
+# The lengths `_split_tiles` is probed at, paired with the tile size and the
+# minimum overlap it is probed with. 256/64 are the reference's own shipped
+# `tile_sample_min_*` values; the 128 rows check the degenerate
+# `tile_size >= length` branch that makes tiling a no-op at small canvases.
+SPLIT_PROBES = [
+    (128, 256, 64),
+    (256, 256, 64),
+    (384, 256, 64),
+    (512, 256, 64),
+    (768, 256, 64),
+    (1024, 256, 64),
+    (1344, 256, 64),
+]
+
 
 def save(out, name, tensors, manifest):
     tensors = {k: v.detach().to(torch.float32).clone().contiguous() for k, v in tensors.items()}
@@ -108,6 +149,29 @@ def main():
     torch.manual_seed(args.seed)
     model = AutoencoderKLMiniMaxH3(**TINY_CFG)
     model.eval()
+
+    # `MiniMaxH3VideoTransformerBlock` initializes its LayerScale gates as
+    # `nn.Parameter(torch.zeros(dim))` (scale1/scale2), and the ViT decoder
+    # initializes `register_tokens` to zeros too. At default init that makes
+    # `h = h + attn(norm(h)) * 0` an EXACT no-op, so all 36 (here 2)
+    # transformer blocks vanish and the decoder collapses to
+    # `proj_out(norm_out(proj_in(z)))` - a per-token map with no attention,
+    # no RoPE and no position dependence whatsoever.
+    #
+    # That would make this golden vacuous over the entire transformer stack,
+    # and in particular would make the tiled and untiled decode paths agree
+    # to float32 noise (measured: 4.8e-07), since a position-independent
+    # per-token map cannot tell a tile apart from a whole frame. The real
+    # checkpoint's trained gates are of course not zero. So every all-zero
+    # parameter is filled with small random values here, and the fill is
+    # verified to have actually changed the forward.
+    zeroed = [n for n, p in model.named_parameters() if not p.any()]
+    for name, p in model.named_parameters():
+        if not p.any():
+            p.copy_(torch.randn(p.shape, generator=torch.Generator().manual_seed(args.seed + 100 + len(name))) * 0.1)
+    print(f"randomized {len(zeroed)} all-zero parameters (LayerScale gates / register tokens): {zeroed[:6]}{' ...' if len(zeroed) > 6 else ''}", flush=True)
+    assert not any(not p.any() for p in model.parameters()), "an all-zero parameter survived the fill"
+
     model.use_tiling = False
     print(f"built AutoencoderKLMiniMaxH3 ({sum(p.numel() for p in model.parameters())} params), use_tiling={model.use_tiling}", flush=True)
     print(f"  spatial_compression_ratio={model.spatial_compression_ratio} temporal_compression_ratio={model.temporal_compression_ratio}", flush=True)
@@ -158,6 +222,56 @@ def main():
     except Exception as e:  # noqa: BLE001 - this IS the degenerate-num_chunks probe
         print(f"  NOTE: public decode() on a single clip's latent raised {type(e).__name__}: {e} (a previously-flagged num_chunks==0 degenerate case - _decode_clip is used directly for the single-clip golden instead, and the two-clip golden exercises the public decode() path at a non-degenerate num_chunks)", flush=True)
 
+    # ---- tiled rungs: use_tiling back ON (the reference's own default),
+    # at canvases above the 256-pixel tile size where the tiled and untiled
+    # paths actually differ. ---------------------------------------------
+    model.use_tiling = True
+    ratio = int(model.spatial_compression_ratio)
+
+    split_taps = {}
+    for length, tile, min_ov in SPLIT_PROBES:
+        idx, lens, ovs = model._split_tiles(length, tile, min_ov)
+        assert idx[-1] + lens[-1] == length, f"_split_tiles({length},{tile},{min_ov}) does not end at {length}: {idx} {lens}"
+        assert sum(lens) - sum(ovs) == length, f"_split_tiles({length},{tile},{min_ov}) does not cover {length} exactly"
+        key = f"{length}_{tile}_{min_ov}"
+        split_taps[f"tap_split_starts_{key}"] = torch.tensor(idx, dtype=torch.float32)
+        split_taps[f"tap_split_lengths_{key}"] = torch.tensor(lens, dtype=torch.float32)
+        split_taps[f"tap_split_overlaps_{key}"] = torch.tensor(ovs, dtype=torch.float32)
+        print(f"  _split_tiles({length},{tile},{min_ov}): starts={idx} lengths={lens} overlaps={ovs}", flush=True)
+
+    # Tiled decode: a latent grid whose pixel extent is 512x768 -> 3x4 tiles.
+    z_tiled = (torch.randn((1, TINY_CFG["latent_channels"], TILED_DEC_FRAMES, TILED_DEC_H // ratio, TILED_DEC_W // ratio), generator=g) * 0.5).to(torch.float32)
+    dec_tiled = model._decode_clip(z_tiled)
+    ny = len(model._split_tiles(TILED_DEC_H, model.tile_sample_min_height, model.tile_sample_min_overlap_height)[0])
+    nx = len(model._split_tiles(TILED_DEC_W, model.tile_sample_min_width, model.tile_sample_min_overlap_width)[0])
+    assert ny > 1 and nx > 1, f"tiled decode rung is not multi-tile: {ny}x{nx}"
+    print(f"  tap_tiled_dec_pixels: {tuple(dec_tiled.shape)} from a {ny}x{nx} tile grid", flush=True)
+
+    # Self-validation that the tiled path is genuinely a DIFFERENT
+    # computation here, so this rung cannot pass vacuously against an
+    # untiled implementation.
+    model.use_tiling = False
+    dec_untiled = model._decode_clip(z_tiled)
+    model.use_tiling = True
+    d_tile = (dec_tiled.double() - dec_untiled.double()).abs().max().item()
+    print(f"  self-validate tiled vs untiled _decode_clip at {TILED_DEC_H}x{TILED_DEC_W}: max abs diff {d_tile:.3e}", flush=True)
+    assert d_tile > 1e-3, f"tiled and untiled _decode_clip agree to {d_tile:.3e} - this rung would pass vacuously"
+
+    # Tiled encode: 384x384 pixels -> a 2x2 tile grid.
+    x_tiled = (torch.randn((1, 3, TILED_ENC_FRAMES, TILED_ENC_H, TILED_ENC_W), generator=g) * 0.3).to(torch.float32)
+    enc_tiled = model._encode_clip(x_tiled)
+    eny = len(model._split_tiles(TILED_ENC_H, model.tile_sample_min_height, model.tile_sample_min_overlap_height)[0])
+    enx = len(model._split_tiles(TILED_ENC_W, model.tile_sample_min_width, model.tile_sample_min_overlap_width)[0])
+    assert eny > 1 and enx > 1, f"tiled encode rung is not multi-tile: {eny}x{enx}"
+    print(f"  tap_tiled_enc_moments: {tuple(enc_tiled.shape)} from a {eny}x{enx} tile grid", flush=True)
+
+    model.use_tiling = False
+    enc_untiled = model._encode_clip(x_tiled)
+    model.use_tiling = True
+    d_enc_tile = (enc_tiled.double() - enc_untiled.double()).abs().max().item()
+    print(f"  self-validate tiled vs untiled _encode_clip at {TILED_ENC_H}x{TILED_ENC_W}: max abs diff {d_enc_tile:.3e}", flush=True)
+    assert d_enc_tile > 1e-3, f"tiled and untiled _encode_clip agree to {d_enc_tile:.3e} - this rung would pass vacuously"
+
     tensors = {
         "input_x1": x1[0],
         "tap_clip_moments": moments1[0],
@@ -166,12 +280,25 @@ def main():
         "input_x2": x2[0],
         "tap_multi_latent": z2[0],
         "tap_multi_pixels": dec2[0],
+        "input_z_tiled": z_tiled[0],
+        "tap_tiled_dec_pixels": dec_tiled[0],
+        "input_x_tiled": x_tiled[0],
+        "tap_tiled_enc_moments": enc_tiled[0],
     }
+    tensors.update(split_taps)
     weights = dict(model.state_dict())
     tensors.update(weights)
 
     manifest = {
-        "run": {"seed": args.seed, "height": HEIGHT, "width": WIDTH, "clip_length": clip_length},
+        "run": {
+            "seed": args.seed,
+            "height": HEIGHT,
+            "width": WIDTH,
+            "clip_length": clip_length,
+            "tiled_decode": {"height": TILED_DEC_H, "width": TILED_DEC_W, "latent_frames": TILED_DEC_FRAMES, "tile_grid": [ny, nx]},
+            "tiled_encode": {"height": TILED_ENC_H, "width": TILED_ENC_W, "frames": TILED_ENC_FRAMES, "tile_grid": [eny, enx]},
+            "split_probes": [list(p) for p in SPLIT_PROBES],
+        },
         "versions": {"torch": torch.__version__, "python": sys.version.split()[0]},
         "geometry": {
             "spatial_compression_ratio": int(model.spatial_compression_ratio),
@@ -180,6 +307,10 @@ def main():
             "frame_pre_padding": int(model.frame_pre_padding),
             "token_overlap": int(model.token_overlap),
             "frame_overlap": int(model.frame_overlap),
+            "tile_sample_min_height": int(model.tile_sample_min_height),
+            "tile_sample_min_width": int(model.tile_sample_min_width),
+            "tile_sample_min_overlap_height": int(model.tile_sample_min_overlap_height),
+            "tile_sample_min_overlap_width": int(model.tile_sample_min_overlap_width),
         },
     }
     manifest["source"] = source_block(
