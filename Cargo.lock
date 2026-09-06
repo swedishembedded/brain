@@ -1741,6 +1741,7 @@ name = "brain-rl"
 version = "1.1.0"
 dependencies = [
  "brain-atif",
+ "brain-bench",
  "brain-checkpoint",
  "brain-data",
  "brain-gradcheck",
@@ -2112,6 +2113,7 @@ name = "brain-wan"
 version = "1.1.0"
 dependencies = [
  "brain-backend-cpu",
+ "brain-bench",
  "brain-capability",
  "brain-checkpoint",
  "brain-clip",

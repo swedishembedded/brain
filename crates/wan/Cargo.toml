@@ -38,3 +38,6 @@ brain-testutil.workspace = true
 # stays free of an imaging dependency (see `pipeline.rs`'s doc on `Video`).
 brain-clip.workspace = true
 brain-imaging.workspace = true
+# The hoisted `metrics::sign_test` (self-improve roadmap P16) - this test's
+# own paired sign test used to be inlined here.
+brain-bench.workspace = true

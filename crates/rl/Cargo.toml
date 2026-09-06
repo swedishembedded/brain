@@ -15,6 +15,11 @@ brain-data.workspace = true
 brain-checkpoint.workspace = true
 brain-atif.workspace = true
 brain-qwen3.workspace = true
+# `bench::metrics::sign_test` - the hoisted exact one-sided paired sign test
+# `gate::gate` builds its promote/reject decision on (self-improve roadmap
+# P16). `bench` is "how this repo scores models" already, so `gate` is a
+# consumer, not a reimplementation.
+brain-bench.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 

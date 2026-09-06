@@ -868,7 +868,7 @@ only remaining warnings are pre-existing, in `crates/gguf`, untouched by
 this phase). `cargo check --workspace --all-targets --exclude brain-vulkan`
 clean.
 
-## P16 - lineage + programmatic promote/reject - TODO
+## P16 - lineage + programmatic promote/reject - DONE
 
 `checkpoint::ModelCard` gains an additive `training: Option<TrainingProvenance>`
 (`code_revision` - the training CODE's git commit, `-dirty` when the tree
@@ -909,6 +909,37 @@ Gate: `ModelCard` round-trips with `training` set and old cards without it
 still deserialize; a `gate` unit test hitting every `Cause` variant on
 synthetic paired scores; `wan`'s finetune A/B test green on the hoisted
 `sign_test`.
+
+**Verified**: `checkpoint::st::tests::model_card_round_trips_with_training_provenance_set`
+and `old_card_json_without_training_field_still_deserializes` (both new) -
+`cargo test -p brain-checkpoint --lib` 130 passed. `bench::metrics::tests::
+sign_test_*` (4 tests) and `binom_coeff_matches_known_values_and_never_
+underflows` (the `k > n` case that used to underflow) - `cargo test -p
+brain-bench --lib` 69 passed. `rl::gate::tests` - one test per `Cause`
+variant plus the all-four-clear promote path (5 tests) - `cargo test -p
+brain-rl --lib gate::` green; `cargo test -p brain-rl --lib` 41 passed,
+`cargo test -p brain-rl` (whole crate, all integration tests including
+`mixture_anchor_regression` and the two new `continuous_cycle` versioning
+tests) green with zero failures. `wan`'s `finetune_ab.rs` migrated onto
+`bench::metrics::sign_test` and re-verified with `cargo test -p brain-wan
+--test finetune_ab -- --ignored` (no real Wan/CLIP weights on this box, so
+it exercises the test's own early-skip path, not the full G2 gate - it
+still proves the migration compiles and runs clean end to end). `cargo
+clippy -p brain-rl -p brain-bench -p brain-checkpoint -p brain-wan
+--all-targets` clean on every touched file (pre-existing warnings in
+`crates/gguf` untouched by this phase). `cargo check --workspace
+--all-targets --exclude brain-vulkan` clean.
+
+Deviation from the literal spec text: `TrainingProvenance`'s `gate` field is
+typed as a new `checkpoint::GateOutcome` struct (decision/p_value/
+effect_size/anchor_delta/entropy_ratio) rather than `rl::gate::GateReport`
+itself, since `checkpoint` cannot depend on `rl` (the dependency runs the
+other way already: `rl` depends on `checkpoint`). `rl::continuous::
+run_cycle` is left un-wired to `TrainingProvenance`/`gate::gate` - the spec
+says "ideally," and threading a full lineage record (git revision, regime,
+gate outcome from a real disk-reloaded A/B) through the continuous cycle is
+naturally P18's `rl::improve::cycle` integration work, not something to
+half-wire here without a real caller.
 
 ## P17 - resumable LoRA adapters - TODO
 

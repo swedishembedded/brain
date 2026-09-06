@@ -34,6 +34,7 @@
 pub mod atif;
 pub mod continuous;
 pub mod env;
+pub mod gate;
 pub mod objective;
 
 use std::path::Path;

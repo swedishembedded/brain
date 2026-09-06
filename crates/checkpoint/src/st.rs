@@ -106,6 +106,66 @@ pub struct ModelCard {
     /// came from, for provenance and for `brain models migrate`-style tooling.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_repo: Option<String>,
+    /// Training lineage (self-improve roadmap P16): WHICH training run
+    /// produced these weights, distinct from [`ModelCard::variant_of`] (an
+    /// architecture-variant relation, not a training-history one). Additive
+    /// (`#[serde(default)]`): absent on any card written before this field
+    /// existed, which still deserializes fine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub training: Option<TrainingProvenance>,
+}
+
+/// The programmatic promote/reject decision a checkpoint was scored under
+/// (`crates/rl/src/gate.rs::gate` produces these numbers; this struct only
+/// carries them for lineage, so `checkpoint` never depends on `rl`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GateOutcome {
+    /// `"promote"` or `"reject: <cause>"` (e.g. `"reject: not_significant"`).
+    pub decision: String,
+    pub p_value: f64,
+    pub effect_size: f64,
+    /// Anchor-suite regression (incumbent minus candidate); positive means
+    /// the candidate did worse on the anchor suite.
+    pub anchor_delta: f64,
+    /// Candidate completion entropy over incumbent completion entropy on the
+    /// held-out gate tasks; well below 1.0 flags mode collapse.
+    pub entropy_ratio: f64,
+}
+
+/// Additive training-lineage record (self-improve roadmap P16) - WHICH
+/// training run produced these weights, not which base architecture they
+/// share tensors with (that is [`ModelCard::variant_of`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TrainingProvenance {
+    /// The training CODE's git commit (`git rev-parse --short HEAD`), with a
+    /// `-dirty` suffix appended when the working tree was not clean at train
+    /// time - reproducing a promoted checkpoint means checking out this
+    /// exact revision (or acknowledging the local diff), never assuming HEAD
+    /// on trust.
+    pub code_revision: String,
+    /// The training regime/objective name (e.g. `"grpo"`, `"dpo"`,
+    /// `"distill_topk"`, `"mixture"`).
+    pub regime: String,
+    pub seed: u64,
+    /// Regime-specific hyperparameters (learning rate, KL coefficient, rank,
+    /// ...) - free-form since every regime's knobs differ.
+    #[serde(default)]
+    pub hyperparams: Value,
+    /// Free-form description of the training environment (device/backend,
+    /// e.g. `"gpu/wgpu"` or `"cpu/24c"`).
+    pub environment: String,
+    /// The promote/reject decision this checkpoint was gated under, when a
+    /// gate ran (`None` for a checkpoint that was never gated, e.g. a base
+    /// import or the very first cycle with no incumbent to compare against).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate: Option<GateOutcome>,
+    /// The checkpoint id/path this training run started from (the
+    /// incumbent), when this is a continuation cycle rather than a
+    /// from-scratch run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trained_from: Option<String>,
+    /// The continuous-loop cycle number that produced this checkpoint.
+    pub cycle: u64,
 }
 
 /// The single metadata key holding the whole card as a JSON string.
@@ -139,6 +199,7 @@ impl ModelCard {
             repo: None,
             revision: None,
             source_repo: None,
+            training: None,
         }
     }
 
@@ -457,6 +518,45 @@ mod tests {
         // brain.card round-trips the full struct, including the new fields.
         let roundtrip = ModelCard::from_metadata(&meta).unwrap();
         assert_eq!(roundtrip, card);
+    }
+
+    #[test]
+    fn old_card_json_without_training_field_still_deserializes() {
+        // Exactly what a card written before P16's `training` field existed
+        // looks like on disk -- the key is simply absent.
+        let old = serde_json::json!({
+            "schema_version": 1,
+            "id": "qwen3-0.6b",
+            "family": "qwen",
+        });
+        let card: ModelCard = serde_json::from_value(old).expect("additive `training` field must not break old cards");
+        assert_eq!(card.training, None);
+    }
+
+    #[test]
+    fn model_card_round_trips_with_training_provenance_set() {
+        let mut card = sample_card();
+        card.training = Some(TrainingProvenance {
+            code_revision: "abc1234-dirty".into(),
+            regime: "grpo".into(),
+            seed: 1234,
+            hyperparams: serde_json::json!({"lr": 1e-4, "kl_coeff": 0.1}),
+            environment: "gpu/wgpu".into(),
+            gate: Some(GateOutcome {
+                decision: "promote".into(),
+                p_value: 0.01,
+                effect_size: 0.12,
+                anchor_delta: -0.01,
+                entropy_ratio: 0.97,
+            }),
+            trained_from: Some("qwen3-0.6b-cycle-3".into()),
+            cycle: 4,
+        });
+
+        let meta = card.to_metadata();
+        let roundtrip = ModelCard::from_metadata(&meta).expect("training-bearing card must round-trip");
+        assert_eq!(roundtrip, card);
+        assert_eq!(roundtrip.training.as_ref().unwrap().code_revision, "abc1234-dirty");
     }
 
     #[test]

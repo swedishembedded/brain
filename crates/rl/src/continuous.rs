@@ -96,10 +96,25 @@ pub fn run_cycle(
     let model = Qwen::new(trained_cfg, 1, block, &init);
 
     std::fs::create_dir_all(adapter_out_dir)?;
-    let version = std::fs::read_dir(adapter_out_dir)?.count();
+    let version = next_adapter_version(adapter_out_dir)?;
     let adapter_path = adapter_out_dir.join(format!("adapter-{version:06}.safetensors"));
     let base_id = base_checkpoint.file_stem().and_then(|s| s.to_str()).unwrap_or("base");
     qwen3::lora::save_adapter(adapter_path.to_str().expect("utf-8 path"), &model, &format!("adapter-{version:06}"), base_id, None)?;
 
     Ok(Some(adapter_path))
+}
+
+/// One past the highest existing `adapter-{n:06}.safetensors` version already
+/// in `dir` (0 if the dir has none yet). Deliberately NOT `read_dir().count()`,
+/// because a retention policy (or a user) deleting an old adapter must not
+/// shift every later version down and silently overwrite the next one
+/// produced. Unrecognized filenames are ignored rather than erroring, since
+/// the out dir is a plain directory a caller could put other files into.
+fn next_adapter_version(dir: &Path) -> std::io::Result<u32> {
+    let max = std::fs::read_dir(dir)?
+        .filter_map(|e| e.ok())
+        .filter_map(|e| e.file_name().to_str().map(str::to_string))
+        .filter_map(|name| name.strip_prefix("adapter-")?.strip_suffix(".safetensors")?.parse::<u32>().ok())
+        .max();
+    Ok(max.map(|v| v + 1).unwrap_or(0))
 }

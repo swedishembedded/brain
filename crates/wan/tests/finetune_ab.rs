@@ -433,29 +433,20 @@ fn a_concept_lora_moves_held_out_generation_toward_the_concept_more_than_a_match
     let mean = |v: &[f32]| v.iter().sum::<f32>() / v.len() as f32;
     let (mean_adapted, mean_control) = (mean(&deltas_adapted), mean(&deltas_control));
 
-    // Exact one-sided paired sign test: k = pairs with s_adapted > s_base,
-    // p = P(Binomial(n, 0.5) >= k) - no distributional assumption, easy to
-    // verify by hand, and the primary option the gate spec names.
-    let k = deltas_adapted.iter().filter(|&&d| d > 0.0).count();
-    let binom_sf = |n: usize, k: usize| -> f64 {
-        let mut p = 0.0f64;
-        for i in k..=n {
-            p += binom_coeff(n, i) * 0.5f64.powi(n as i32);
-        }
-        p
-    };
-    fn binom_coeff(n: usize, k: usize) -> f64 {
-        let mut c = 1.0f64;
-        for i in 0..k.min(n - k).max(0) {
-            c = c * (n - i) as f64 / (i + 1) as f64;
-        }
-        c
-    }
-    let p_value = binom_sf(n, k);
+    // Exact one-sided paired sign test, conditioned on discordant pairs only
+    // - hoisted to `bench::metrics::sign_test` (self-improve roadmap P16);
+    // see that function's doc for the two defects this fixes over what used
+    // to be inlined here (summing the tail over every pair rather than just
+    // the discordant ones, and a `usize` underflow in the binomial
+    // coefficient).
+    let s_base_f64: Vec<f64> = s_base.iter().map(|&v| v as f64).collect();
+    let s_adapted_f64: Vec<f64> = s_adapted.iter().map(|&v| v as f64).collect();
+    let sign = bench::metrics::sign_test(&s_adapted_f64, &s_base_f64);
+    let (k, p_value) = (sign.k, sign.p_value);
 
     println!("G2: n={n} pairs, s_base={s_base:?}");
     println!("G2: s_adapted={s_adapted:?}  s_control={s_control:?}");
-    println!("G2: mean delta adapted={mean_adapted:+.5}  control={mean_control:+.5}  (sign test k={k}/{n}, one-sided p={p_value:.4})");
+    println!("G2: mean delta adapted={mean_adapted:+.5}  control={mean_control:+.5}  (sign test k={k}/{} discordant, one-sided p={p_value:.4})", sign.n);
 
     // ---- anti-degeneracy: motion + texture must not blow up or collapse ----
     let agg_motion_texture = |clips: &[(usize, u64, Vec<Vec<f32>>)]| -> (f32, f32) {

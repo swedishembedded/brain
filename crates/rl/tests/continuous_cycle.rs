@@ -140,3 +140,51 @@ fn run_cycle_trains_and_produces_a_versioned_loadable_adapter() {
     let any_changed = before.iter().any(|(name, v)| folded.get(name).map(|after| after != v).unwrap_or(false));
     assert!(any_changed, "the produced adapter must actually change the folded base weights");
 }
+
+#[test]
+fn run_cycle_versions_the_new_adapter_past_the_highest_surviving_one_even_after_a_deletion() {
+    if skip() {
+        return;
+    }
+    let dir = tmp("versioning");
+    let trajectories = dir.join("trajectories");
+    std::fs::create_dir_all(&trajectories).unwrap();
+    let base_path = dir.join("base.safetensors");
+    write_base_checkpoint(&base_path, 23, 1);
+
+    let traj_json = serde_json::json!({
+        "schema_version": "ATIF-v1.7",
+        "agent": {"name": "test-agent", "version": "0.0.1"},
+        "final_metrics": {"extra": {"reward": 1.0}},
+        "steps": [
+            {"step_id": 1, "source": "user", "message": "hihihihihi"},
+            {"step_id": 2, "source": "agent", "message": "hihihihihihihihihi"}
+        ]
+    });
+    std::fs::write(trajectories.join("t1.json"), serde_json::to_string(&traj_json).unwrap()).unwrap();
+
+    // Simulate an out dir that already produced adapter-000000 and
+    // adapter-000002, and had adapter-000001 deleted in between (e.g. by a
+    // retention policy). `read_dir().count()` would see 2 files and name the
+    // next one "adapter-000002.safetensors" -- silently overwriting the
+    // still-live one. The fix must name it one past the highest surviving
+    // version instead, regardless of how many files remain.
+    let adapters_dir = dir.join("adapters");
+    std::fs::create_dir_all(&adapters_dir).unwrap();
+    std::fs::write(adapters_dir.join("adapter-000000.safetensors"), b"placeholder").unwrap();
+    std::fs::write(adapters_dir.join("adapter-000002.safetensors"), b"placeholder").unwrap();
+
+    let opts = model::FitOpts { steps: 5, batch_size: 2, block_size: 4, ..Default::default() };
+    let adapter_path = rl::continuous::run_cycle(&trajectories, &base_path, &dir.join("train.safetensors"), &adapters_dir, &tiny_tok(), &tiny_tmpl(), 2, 4.0, &opts)
+        .expect("run_cycle")
+        .expect("a reward-stamped trajectory must produce an adapter");
+
+    assert_eq!(
+        adapter_path.file_name().unwrap().to_str().unwrap(),
+        "adapter-000003.safetensors",
+        "must version past the highest surviving adapter (2), not the file count (2)"
+    );
+    // The pre-existing adapter-000002.safetensors must survive untouched --
+    // the whole point of this test is that it was NOT overwritten.
+    assert_eq!(std::fs::read(adapters_dir.join("adapter-000002.safetensors")).unwrap(), b"placeholder");
+}
