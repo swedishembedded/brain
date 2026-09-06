@@ -44,8 +44,15 @@
 //! thresholds, not to estimate the effect), order independence (one task
 //! order was run), or anything resembling recursive self-improvement. Nor
 //! does the negative result generalize: it is a statement about THIS scale,
-//! adapter, budget and regime, and the joint-training oracle says the binding
-//! constraint is capacity/optimization rather than forgetting.
+//! adapter, budget and regime. The joint-training oracle here (Arm 3) gives
+//! each rule the same per-rule budget one cycle already gives it (`cycles *
+//! steps_per_cycle` total, split `cycles` ways), so its low score measures
+//! per-rule sample starvation, not adapter capacity - a later pass found a
+//! cue-independent shortcut explains this file's own diagonal to r=0.936,
+//! and a pooled-budget capacity check (a separate example) reached 0.910 on
+//! this same adapter shape. Both are recorded, not retracted here, in the
+//! roadmap this file's own doc comments used to cite only in the negative
+//! direction.
 //!
 //! Run one binary at a time, single-threaded (shared GPU):
 //! `cargo test -p brain-rl --features qwen3 --test continual_study --release
@@ -569,8 +576,10 @@ fn twelve_cycles_run_end_to_end_but_capability_does_not_accumulate_at_this_scale
          about the numerator - the OLS slope's 95% CI {:?} reflects exactly that instability rather than a real trend. \
          This does NOT mean the fresh control sat near the floor throughout - per-cycle warm-vs-fresh scores must be read \
          individually, not summarized by rho's slope alone.\n\
-         The binding constraint is measured, not guessed: see the joint-training oracle (Arm 3), which cannot hold the 12 \
-         rules either even when trained on all of them AT ONCE.",
+         The joint-training oracle (Arm 3) reaching a low score here does NOT establish a capacity limit: it gives each \
+         rule the same per-rule budget one cycle already gives it, not a bigger pooled one, so a low score here measures \
+         per-rule sample starvation on this regime, not adapter capacity (a separate pooled-budget capacity check on the \
+         same adapter shape reached 0.910; this file's Regime::Grpo path is not that check).",
         report.probe_ids_checked,
         report.explore_ids_checked,
         report.b_base,

@@ -1892,6 +1892,19 @@ self-improvement loop has been shown to run, gate and be measured as a
 sequence at the smallest scale it was tested on; no claim that brain "learns
 continuously" is supported by anything in this repository today.**
 
+**This sentence is now regime-scoped, and an audit found this paragraph
+still stated it as if it were not.** It remains true, unretracted, for
+`Regime::Grpo` at `replay_frac 0.0`/`rehearsal 0` - the configuration every
+sentence above it in this rollup describes. It is FALSE for `Regime::Sft`
+with a rehearsal pool, which was built and measured after this rollup was
+first written: see this file's "P19e"/"P19f" sections, where capability
+demonstrably does accumulate (ACC 0.815-0.932 against a 0.310 ceiling for
+any shortcut, at two seeds) - with its own, different set of caveats
+(teacher-forced on oracle labels, not label-free; unbounded full-history
+replay, closer to incremental joint training than continual learning under
+a memory bound; no forward transfer). Read P19f in full before quoting
+either version of this sentence.
+
 ### Still unvalidated, regardless of this workflow's outcome
 
 None of the following moved. They are listed so the rollup above is not
@@ -2064,10 +2077,17 @@ now understood to target the wrong mechanism (a static reference anchor
 does not address a shortcut the training distribution itself induces) and
 should not be the next experiment run.
 
-**Verification status.** The shortcut correlation (r=0.987), the joint-
-oracle budget arithmetic, the 237x/73.6% supervision figures, and E1's two
-recorded runs are all either arithmetic over numbers already in this file
-or a program run on this box, checked by reading the actual code cited.
+**Verification status.** The shortcut correlation, the joint-oracle budget
+arithmetic, the 237x/73.6% supervision figures, and E1's two recorded runs
+are all either arithmetic over numbers already in this file or a program
+run on this box, checked by reading the actual code cited. **The r=0.987
+figure specifically does not reproduce as stated** - a later pass (P19f's
+sanity check 3) found it holds only over cycles 2-11 (n=10, r=0.988); the
+stated n=11 window (cycles 2-12) gives r=0.936, because cycle 12 is the
+largest single outlier against the shortcut. The diagnosis (a real,
+dominant cue-independence effect) is unaffected either way - an r of 0.936
+is still overwhelming - but the specific number above is superseded by
+P19f's, which is correct.
 The broader literature this research pass drew on to prioritize which
 experiment to run first (curriculum-ordering and RL-sample-efficiency
 citations) informed the choice of E1 but is not itself verified and is
@@ -2242,10 +2262,42 @@ comparison used. Same apparatus, same eight bars, both directions counted.)
     ACC (all probes)                     0.271        0.932        0.815
     R[N][1] (cycle-1 canary)             0.667        1.000        0.986
     BWT                                 -0.066       -0.069       -0.052
-    promotions                            2/12        12/12        10/12
-    last-task-only control               0.226        0.267        0.293
+    promotions [1]                        2/12        12/12        10/12
+    last-task-only control [2]           0.226        0.267        0.293
     joint-training oracle (Arm 3)        0.071        0.959        0.999
     pre-registered targets passed        2 of 8       8 of 8       8 of 8
+
+**[1]** Not comparable across the two GRPO/SFT columns without the
+`eval_per_cycle: 16 -> 48` context in "What is honestly weak" below: the
+sign test needs 12/16 (75.0%) wins to reach `p<=0.05` at 16 probes and only
+31/48 (64.6%) at 48, so an unmeasured share of GRPO's ten rejections may
+have been structurally unreachable at its own probe count, not a genuine
+regime difference - found on adversarial audit, not by this table's first
+draft.
+
+**[2]** Under `Regime::Sft` this row is NOT a last-task-only control -
+found on adversarial audit, confirmed by reading `crates/rl/src/
+continual.rs` directly. `last_task_only_acc` is scored off Arm 2's fresh
+adapter, and under `Regime::Sft` Arm 2 is built by the SAME `sft_objective`
+call as the real candidate (`fresh_obj` at the "Arm 2: the fresh-adapter
+control" comment calls `sft_objective::<M, C>(curr, sft, k, ...)`
+identically to Arm 1) - i.e. it trains on the full 50/50 new-rule +
+rehearsal-pool mixture, not on cycle `k`'s rule alone. It IS a genuine
+fresh-vs-warm-start control (same training distribution, different starting
+weights) - which is a real and useful thing to have measured - it is simply
+mislabeled. Under `Regime::Grpo` the row is a true last-task-only control,
+because `ReplayEnv::new(curr, k, cfg.replay_frac)` at `replay_frac 0.0`
+reduces to "cycle k's rule only" by construction; the mismatch is
+regime-specific, not a bug in the metric's original design. Direction
+matters here: a from-scratch adapter given MORE of the training
+distribution (all 12 rules' worth, at one cycle's budget) than a genuine
+last-task-only baseline would get can only score higher, so A7
+("accumulation exceeds a last-task-only control by a margin") is scored
+against a HARDER bar than intended under `Regime::Sft` - it still passes by
+0.515/0.372, so this does not overturn A7, but the row's own name should
+not be trusted, and fixing `last_task_only_acc` to mean the same thing
+under both regimes (a single dedicated single-rule-only SFT arm, distinct
+from the mixture-trained fresh control) is open, not done.
 
 Seed 2 is the weaker of the two and is the honest headline number if only
 one is quoted. Both sit far above the **0.310** ceiling that the best
@@ -2277,12 +2329,22 @@ and a new regime must re-measure. 5 seeds x cycle 1, `--regime sft
     spread s = 0.000   sigma = 0.000   mean = 1.000
     b_base (untrained base on probe T1, 48 probes) = 0.444
 
-The GRPO regime's own pre-registration was `[0.938, 0.833, 0.708, 1.000,
-0.833]`, `s = 0.292`. That `s` was **larger** than `PREREG_RETENTION_DROP`
-(0.15), which is why P19 recorded on its own record that no A1 verdict at
-one seed was robust to seed at that precision. Under `Regime::Sft`, `s =
-0.000 < 0.15`, so that specific caveat does **not** apply to A1 here. It
-still applies to everything the single-seed 12-cycle trajectory says.
+P19's own record quotes the GRPO regime's pre-registration as `[0.938,
+0.833, 0.708, 1.000, 0.833]`, `s = 0.292`. **That value does not reproduce
+on this tree and this box.** Re-running the identical GRPO pre-registration
+test as part of this change's own regression gate (see "Verified" below)
+gives `[0.896, 0.896, 0.896, 0.979, 0.917]`, `s = 0.083` - found on
+adversarial audit of this section, not caught by the section's own first
+draft, which quoted the stale 0.292 for contrast without checking it
+against the reproduction sitting a few paragraphs below it in the same
+file. The honest comparison is **0.000 (SFT) vs 0.083 (GRPO, as it
+reproduces today)**, and both already sit under `PREREG_RETENTION_DROP`
+(0.15) - so this specific caveat does not currently distinguish the two
+regimes at cycle 1, contrary to what an s=0.292-vs-0.000 contrast would
+suggest. `PREREG_MEASUREMENT` in `crates/rl/tests/continual_study.rs` still
+carries the unreproducible 0.292 and has not been corrected in code as of
+this writing. It still applies to everything the single-seed 12-cycle
+trajectory says.
 
 ### The run (Arm 1 + 2 + 3, seed 1, 12 cycles, 800 SFT steps/cycle at batch 128, mixture 0.50 new rule / 0.50 rehearsal pool, rehearsal 4, 48 frozen probes/cycle)
 
@@ -2439,9 +2501,14 @@ did not survive one.
    CLONE of the training rng, so the hook is numerically inert, and the
    instrumented run reproduced the un-instrumented one's trajectory exactly
    - 1.000/1.000, `zero0` 0.069, ACC 1.000 on a 2-cycle probe). Cycle 1's
-   warm arm: eval loss **2.728 -> 0.639**, converged by step ~500. Cycle 2's
-   warm arm, starting from the cycle-1 adapter: **3.400 -> 0.594**. Cycle
-   2's FRESH arm, starting from the base: **6.926**, i.e. the frozen base is
+   warm arm: TRAIN-split loss (`Anchor::eval` reads `self.data`, which
+   `sft_arms` fills with the training mixture itself, not a held-out split -
+   found on adversarial audit; this is evidence of a real training signal,
+   not a held-out evaluation, and the sanity pass's conclusion does not
+   depend on the distinction) **2.728 -> 0.639**, converged by step ~500.
+   Cycle 2's warm arm, starting from the cycle-1 adapter: **3.400 -> 0.594**.
+   Cycle 2's FRESH arm, starting from the base: **6.926**, i.e. the frozen
+   base is
    confidently WRONG on an unseen cue, and still learns it - "confidently"
    is against `ln(VOCAB) = ln 32 = 3.466`, the loss of a uniform predictor,
    so it starts twice as bad as guessing. The residual ~0.6 is structural,
@@ -2571,6 +2638,27 @@ did not survive one.
   They were printed unchanged and scored unchanged - moving a bar to make it
   reachable would void the apparatus - but a regime's own noise was only
   re-measured for cycle 1.
+- **This is the easy end of continual learning, and the file did not say so
+  plainly until an audit asked for it.** `rehearsal_pool` under `Regime::Sft`
+  is the union of every prior cycle's rule plus the background rules, with
+  no window, and every cycle rewrites 30,000 fresh records over that
+  growing, unbounded union - approximately incremental JOINT training, not
+  learning under any realistic memory or storage bound. The numbers are
+  consistent with this: the sequential loop lands 0.027 (seed 1) and 0.184
+  (seed 2) below its own pooled oracle, i.e. close to what training on
+  everything at once would give directly. Retaining a rule this way is
+  close to definitional given the training distribution, not a hard-won
+  property of the loop. Anti-forgetting under a BOUNDED replay budget (a
+  fixed-size buffer, a decaying rehearsal window) remains completely
+  untested - the one config in the escalation ladder that used bounded
+  rehearsal (`rehearsal 4` under `Regime::Grpo`) still had GRPO's own
+  starvation in place and never isolated the two variables.
+- **There is no forward transfer.** The incumbent's zero-shot score on each
+  newly-introduced rule (`zero0` in the trajectory table) ranges 0.042-0.514
+  across all 24 cycles on both seeds - what accumulates under this regime is
+  memorization of rules the model was explicitly trained on, held in place
+  by replay, not an emerging ability to generalize to an unseen rule from
+  the ones already learned.
 
 ### Corrections this section makes to text above it
 
