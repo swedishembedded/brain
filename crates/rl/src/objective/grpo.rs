@@ -242,6 +242,7 @@ pub struct CycleLog(std::rc::Rc<std::cell::RefCell<CycleLogInner>>);
 #[derive(Default)]
 struct CycleLogInner {
     sampled: Vec<Vec<u32>>,
+    rewards: Vec<f32>,
     trained: Vec<Vec<u32>>,
 }
 
@@ -256,6 +257,15 @@ impl CycleLog {
         self.0.borrow().sampled.clone()
     }
 
+    /// The verified reward of every completion in [`CycleLog::sampled`],
+    /// parallel to it and in the same order. This is the honest cycle-wide
+    /// mean-reward series: [`Objective::metrics`] can only report the LAST
+    /// group's mean, and by the time a caller can read it the objective has
+    /// already been consumed by `model::fit_with`.
+    pub fn rewards(&self) -> Vec<f32> {
+        self.0.borrow().rewards.clone()
+    }
+
     /// Every completion span [`Grpo::micro_step`] actually popped off the
     /// training queue and trained on, in training order.
     pub fn trained(&self) -> Vec<Vec<u32>> {
@@ -264,6 +274,10 @@ impl CycleLog {
 
     fn push_sampled(&self, tokens: Vec<u32>) {
         self.0.borrow_mut().sampled.push(tokens);
+    }
+
+    fn push_reward(&self, reward: f32) {
+        self.0.borrow_mut().rewards.push(reward);
     }
 
     fn push_trained(&self, tokens: Vec<u32>) {
@@ -415,6 +429,7 @@ impl<E: Environment, V: Verifier> Grpo<E, V> {
                 let c = roll.sample_n(&task.prompt, 1, &self.cfg.rollout, rng).pop().expect("sample_n(1) returns exactly one completion");
                 self.log.push_sampled(c.tokens.clone());
                 let reward = self.verifier.verify(&task, &[], &c.tokens).value;
+                self.log.push_reward(reward);
                 rewards.push(reward);
                 if reward > 0.0 {
                     let rl = self.ref_logprobs.as_ref().map(|f| f(&task, &c));
@@ -432,6 +447,9 @@ impl<E: Environment, V: Verifier> Grpo<E, V> {
                 self.log.push_sampled(c.tokens.clone());
             }
             let rewards: Vec<f32> = group.iter().map(|c| self.verifier.verify(&task, &[], &c.tokens).value).collect();
+            for &r in &rewards {
+                self.log.push_reward(r);
+            }
             self.last_mean_reward = rewards.iter().sum::<f32>() / rewards.len().max(1) as f32;
             let advs = group_advantages(&rewards);
             self.last_kept_frac = if advs.iter().any(|&a| a != 0.0) { 1.0 } else { 0.0 };

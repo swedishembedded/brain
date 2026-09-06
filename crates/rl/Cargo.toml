@@ -95,3 +95,12 @@ required-features = ["qwen3"]
 name = "improve_cycle"
 path = "tests/improve_cycle.rs"
 required-features = ["qwen3"]
+
+# The multi-cycle continual-learning study (self-improve roadmap P19): 12
+# sequential gated cycles plus a fresh-adapter plasticity control and a
+# joint-training capacity oracle. Minutes of wall clock, one GPU - run it
+# alone, with `-- --test-threads=1`.
+[[test]]
+name = "continual_study"
+path = "tests/continual_study.rs"
+required-features = ["qwen3"]

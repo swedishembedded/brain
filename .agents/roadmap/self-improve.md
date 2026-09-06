@@ -1161,3 +1161,276 @@ qwen3` and `cargo clippy -p brain-cli --all-targets` clean on every touched
 file (pre-existing warnings in `crates/gguf` and `crates/qwen3tts`,
 untouched by this phase). `cargo check --workspace --all-targets --exclude
 brain-vulkan` clean.
+
+## P19 - multi-cycle continual-learning harness - HARNESS DONE, CONTINUAL-LEARNING CLAIM NOT ESTABLISHED
+
+P18 proved a gated improvement loop closes ONCE. It said nothing about
+whether the second cycle destroys the first one's capability, whether the
+tenth can still learn, or whether the gate carries information. Those are
+properties of a SEQUENCE. P19 builds the harness that measures them and
+runs it. **The harness works; the loop does not accumulate capability at
+this model scale, and the joint-training oracle says the binding constraint
+is capacity/optimization rather than forgetting.** That negative is the
+result, recorded here with the numbers that produced it.
+
+### What was built
+
+- `crates/rl/src/curriculum.rs` (new): the **position-copy** task family.
+  Prompt `[cue, c0..c4, SEP]`, completion = the 3 content tokens at the
+  cue's own ordered 3-of-5 position triple. All 60 rules are three
+  positional copies, so every rule is of *identical structural difficulty by
+  construction* - the invariance the plasticity ratio needs. `ContentSplit`
+  partitions the 16^5 content tuples STRUCTURALLY (`hash(content) % 4 == 0`
+  is eval space), so an explore tuple can never also be an eval tuple; a
+  seed-range split would leak, since a 12-cycle study draws ~1400 explore
+  against ~192 eval tuples and expects a collision. `Task::id` is derived
+  from content + cue, never from the seed, so `improve::explore_anchor_
+  split`'s id-hash check is a real second check rather than a tautology.
+  `Task::answer` carries the RULE (`{"picks":[i,j,k]}`), never the target -
+  `target_of` recomputes it from the prompt, and a unit test asserts no
+  content or target token appears anywhere in the answer JSON.
+  `PositionCopyVerifier` gives dense partial credit (matches / 3), which is
+  what gives a cold-start GRPO group reward VARIANCE at all: an exact-match
+  reward makes every early group all-wrong, and `group_advantages` drops a
+  zero-variance group.
+- `crates/rl/src/continual.rs` (new, generic over `M: Model`): `Curriculum`
+  trait, `run_study` (Arm 1 + Arm 2), `joint_oracle` (Arm 3), `GatePolicy::
+  {Real, CoinFlip}` (Arm 4), `pretrain_base`/`overlay_adapter`, and the pure
+  metric functions `acc`/`bwt`/`fwt` (unit-tested on hand-built matrices,
+  including a negative-BWT case).
+- `crates/rl/src/improve.rs`: argument grouping (`Evaluation`,
+  `CycleArtifacts`) retires the 11-positional-argument `cycle` signature and
+  its `#[allow(clippy::too_many_arguments)]`; `score_checkpoint` becomes
+  public and gains `decode_checkpoint`; `ArmScores` carries per-task scores
+  so a multi-cycle caller recovers a whole retention-matrix row from the
+  gate's own decodes at ZERO extra decode cost; `Evaluation::anchor` makes
+  `Cause::AnchorRegressed` load-bearing (empty anchor preserves P18
+  behavior byte-for-byte, which `tests/improve_cycle.rs` still gates,
+  unchanged in what it asserts).
+- `crates/bench/src/metrics.rs`: `ols_slope_ci` (OLS + two-sided 95% CI from
+  a small hard-coded t table), next to `sign_test` for the same reason.
+- `crates/rl/src/objective/grpo.rs`: `CycleLog::rewards` - the cycle-wide
+  verified-reward series, parallel to `sampled`. `Objective::metrics` can
+  only report the LAST group's mean and the objective is consumed by
+  `fit_with` before a caller can read it.
+
+### D5 in practice: the retention probe IS the gate's anchor
+
+Cycle *k*'s 16 eval tasks are frozen at introduction and serve as (a) the
+gate's held-out set at cycle *k* and (b) task *k*'s retention probe forever
+after. From cycle 2 on, the anchor suite is the concatenated probes of
+tasks 1..k-1 in cycle order, sliced back into matrix cells. The R matrix
+therefore costs nothing extra, and `R[k][k]` is literally the gate's own
+candidate score.
+
+### Three defects the fixture and gate checks caught (all real, all fixed)
+
+1. **Unaligned pretraining windows.** `model::load_dataset` draws windows at
+   uniformly random offsets. With 12-token records that means ~1 window in
+   12 contains a complete example, and every other window supervises
+   completion tokens whose own prompt is not inside it - label noise, not
+   supervision. Measured: the base scored **0.146** on rules it had been
+   trained on. Fixed by emitting `[cue, c0..c4, SEP, t0, t1, t2, PAD]`
+   records with `PAD` as the record separator and a `meta.json` that maps
+   `PAD -> '\n'`, then training with `FitOpts::align_to_lines = true`.
+   `curriculum::tests::the_loader_draws_only_record_aligned_windows_from_
+   this_dataset` now asserts this against the real loader.
+2. **`d_ff` too narrow / pretraining budget too small.** Sweep, scoring the
+   base on rules it was trained on: `d_ff 128`, 3k steps, batch 32 -> 0.318;
+   `d_ff 256` -> 0.448; 8 rules / 8k steps -> 1.000; 3L/d96 / 8 rules -> 1.000;
+   3L/d96 / 16 rules / 6k -> 0.438; 3L/d96 / 16 rules / 20k -> 1.000 (639 s);
+   **2L/d64 / 16 rules / 6k steps / batch 128 -> 0.995 in 236 s** (chosen).
+   The binding constraint was per-rule step budget, not capacity: batching
+   at 128 bought the budget almost for free, since a step at this size is
+   dominated by dispatch overhead (32 ms/step regardless of batch).
+3. **The gate's entropy arm rejects a PERFECT candidate.** The position-copy
+   family has exactly one correct completion per prompt, so a policy that
+   has SOLVED a rule decodes it greedily with near-zero entropy. Measured: a
+   cycle-1 candidate scoring **1.000** on its held-out probe was rejected as
+   `Cause::Degenerate` at `entropy_ratio = 0.078`. On a deterministic
+   verifiable task the entropy ratio cannot separate "collapsed onto one
+   output" from "solved it". The study sets `min_entropy_ratio = 0.0` and
+   replaces the check with a sharper, direct one:
+   `ArmScores::distinct_completions`, the number of DISTINCT greedy
+   completions across the decoded probes (a collapsed policy emits one for
+   every prompt). Observed 16/16 ... 192/192 on every cycle of every run -
+   nothing ever collapsed.
+
+### Pre-registration (T1), executed BEFORE any assertion was written
+
+5 seeds x cycle 1, one frozen pretrained base, Intel Arc MTL, release:
+
+    R[1][1] = [0.938, 0.833, 0.708, 1.000, 0.833]   all five PROMOTE
+    spread s = 0.292   sigma = 0.100   mean = 0.863
+    b_base (untrained base on probe T1) = 0.354
+    uniform-token analytic chance = 0.031
+    distinct completions 16/16 on every seed
+
+`PREREG_NOISE_BAND = max(0.15, 2s) = 0.59`. **Caveat on record**: `s = 0.292`
+is single-cycle TRAINING-OUTCOME spread and it is LARGER than
+`PREREG_RETENTION_DROP` (0.15), so any A1 verdict at one seed is not robust
+to seed at that precision. At the original 120 steps/cycle the measurement
+was `[0.958, 0.917, 0.604, 0.771, 0.354]`, `s = 0.604`, with one seed
+failing to learn at all - escalation rung 1 (120 -> 240 steps) was taken and
+is recorded here rather than applied quietly.
+
+### The run (Arm 1 + Arm 2, seed 1, 12 cycles, 240 GRPO steps/cycle, group 2, rank-8 attention LoRA on a frozen pretrained base)
+
+    cyc  task                 trained  heldout   zero0  probeT1    rho  reward  train/sampled  distinct  gate           kept    secs
+      1  cue02 picks(0,1,2)      216   0.896   0.354   0.896   1.00   0.664    216/754      16/16  PROMOTE        yes    70.0
+      2  cue03 picks(1,0,3)      172   0.354   0.083   0.896   0.77   0.179    172/798      32/32  reject/anchor  no     32.1
+      3  cue04 picks(2,0,4)      208   0.042   0.021   0.896   0.40   0.071    208/762      48/48  reject/notsig  no     69.6
+      4  cue05 picks(3,1,0)      186   0.167   0.354   0.896   1.60   0.097    186/784      64/64  reject/notsig  no     28.8
+      5  cue06 picks(4,1,2)      196   0.063   0.625   0.896   0.06   0.121    196/774      80/80  reject/notsig  no     69.5
+      6  cue07 picks(0,2,4)      228   0.438   0.313   0.896   0.70   0.358    228/742      96/96  reject/notsig  no     32.0
+      7  cue08 picks(1,3,0)      191   0.083   0.104   0.896   2.00   0.060    191/780    110/112  reject/notsig  no     69.3
+      8  cue09 picks(2,3,1)      158   0.063   0.042   0.896   3.00   0.097    158/812    125/128  reject/notsig  no     49.7
+      9  cue10 picks(3,2,4)      217   0.125   0.125   0.896   0.24   0.133    217/754    141/144  reject/notsig  no     61.9
+     10  cue11 picks(4,3,0)      230   0.125   0.125   0.896   0.29   0.102    230/740    156/160  reject/notsig  no     66.0
+     11  cue12 picks(0,4,2)      241   0.979   0.604   0.667   1.47   0.684    241/730    170/176  PROMOTE        yes   103.2
+     12  cue13 picks(1,4,3)      190   0.083   0.313   0.667   0.19   0.129    190/780    185/192  reject/notsig  no     84.1
+
+    retention matrix R[i][j]  (rows = model servable after cycle i, cols = frozen probe j)
+          T1   T2   T3   T4   T5   T6   T7   T8   T9   T10  T11  T12
+    c1    0.90    .    .    .    .    .    .    .    .    .    .    .
+    c2    0.90 0.08    .    .    .    .    .    .    .    .    .    .
+    c3    0.90 0.08 0.02    .    .    .    .    .    .    .    .    .
+    c4    0.90 0.08 0.02 0.35    .    .    .    .    .    .    .    .
+    c5    0.90 0.08 0.02 0.35 0.63    .    .    .    .    .    .    .
+    c6    0.90 0.08 0.02 0.35 0.63 0.31    .    .    .    .    .    .
+    c7    0.90 0.08 0.02 0.35 0.63 0.31 0.10    .    .    .    .    .
+    c8    0.90 0.08 0.02 0.35 0.63 0.31 0.10 0.04    .    .    .    .
+    c9    0.90 0.08 0.02 0.35 0.63 0.31 0.10 0.04 0.13    .    .    .
+    c10   0.90 0.08 0.02 0.35 0.63 0.31 0.10 0.04 0.13 0.13    .    .
+    c11   0.67 0.06 0.08 0.06 0.38 0.33 0.08 0.10 0.08 0.10 0.98    .
+    c12   0.67 0.06 0.08 0.06 0.38 0.33 0.08 0.10 0.08 0.10 0.98 0.31
+
+    ACC 0.271   BWT -0.066   FWT -0.153   promotions 2/12
+    rejects: c2:anchor c3:notsig c4:notsig c5:notsig c6:notsig c7:notsig
+             c8:notsig c9:notsig c10:notsig c12:notsig
+    chance baseline b_base (untrained base on probe T1) 0.354
+    plasticity rho(N) 0.190   slope -0.0005/cycle, 95% CI [-0.1742, +0.1733]
+    last-task-only ACC 0.226
+    split integrity: 192 frozen probe ids checked disjoint from 3072 explore ids
+
+Joint-training oracle (Arm 3): one fresh rank-8 adapter on **all 12 rules
+pooled** for 2880 GRPO steps -> **ACC 0.071** over all 192 frozen probes
+(0.063 on a second run). Pre-registered bar was 0.60.
+
+### Pre-registered targets, scored
+
+    A1 retention      R[12][1] 0.667 >= 0.896 - 0.15 = 0.746        FAIL
+    A2 canary alive   R[12][1] 0.667 >= b_base 0.354 + 0.20 = 0.554 PASS
+    A3 no collapse    min distinct fraction 0.964 >= 0.50           PASS
+    A4 sustained      promotions 2 >= 10                            FAIL
+    A5 really learned R[k][k] >= 0.60 on 3 of 12 (need 10)          FAIL
+    A6 plasticity     rho(12) 0.190 >= 0.60                         FAIL
+    A7 accumulation   ACC 0.271 >= 0.226 + 0.15 = 0.376             FAIL
+
+### What this run establishes, and what it does not
+
+**Establishes.** Over 12 sequential real cycles (rollout -> verify -> GRPO ->
+gate -> promote/reject) on the position-copy family, at this model scale,
+with one seed and a frozen pretrained base: the harness runs the full
+protocol and its retention matrix comes from the gate's own decodes; both
+structural properties held on every cycle - every trained completion span
+was a member of the multiset the policy actually sampled, and all 192 frozen
+probe ids were disjoint from 3072 explore ids by content-space partition and
+by id hash; no cycle collapsed onto a small output set (worst distinct
+fraction 0.964); the first cycle is real learning (0.896 against the
+untrained base's 0.354); and the gate discriminated - 2 promotions, 10
+rejects, **including a `Cause::AnchorRegressed` rejection at cycle 2**, which
+retires that variant's "decorative" status. Catastrophic forgetting is
+visible and correctly captured: cycle 11's promotion (its own probe 0.98)
+cost T1 0.90 -> 0.67 and T4 0.35 -> 0.06.
+
+**Does not establish - the run says the opposite.** Capability did NOT
+accumulate. Final ACC 0.271 is BELOW the untrained base's own 0.354 on the
+same probes, and only 0.045 above a last-task-only model's 0.226. BWT
+-0.066. Only 3 of 12 cycles reached `R[k][k] >= 0.60`.
+
+**rho(12) = 0.190 is NOT a plasticity measurement here.** Both the warm arm
+and the fresh-adapter control sit near the floor, and a ratio of two
+near-zero numbers is noise - the per-cycle series (1.00, 0.77, 0.40, 1.60,
+0.06, 0.70, 2.00, 3.00, 0.24, 0.29, 1.47, 0.19) and the OLS 95% CI
+[-0.174, +0.173], which spans essentially the whole plausible range, are the
+same statement twice. No plasticity claim, positive or negative, is
+supported by this run.
+
+**The binding constraint is measured, not guessed.** The Arm-3 oracle -
+one adapter, all 12 rules AT ONCE, the whole study's step budget, zero
+sequential interference - reaches 0.071, below the untrained base. So "the
+loop forgot task 1" and "a rank-8 adapter driven by GRPO at this budget
+cannot represent 12 cue-conditioned rules at all" are **not
+distinguishable** by this run, and they have opposite fixes. The BWT above
+must be read as a capacity/optimization result, not a forgetting result.
+
+**Also not established:** scale (12 cycles at this size says nothing about
+10^3; loss of plasticity in deep continual learning has needed ~2000
+sequential tasks to become unambiguous), generality (the family is synthetic
+and difficulty-invariant BY CONSTRUCTION - that control was bought by
+removing exactly the properties that break real systems: distribution shift,
+ambiguity, label noise, adversarial content), live or non-stationary data,
+that the gate measures anything a human wants (the null-gate arm exists but
+was not run), seed robustness (one seed; the 5-seed measurement covers cycle
+1 only and exists to SIZE thresholds), order independence (one task order),
+recursive self-improvement, or full-model continual learning (the base is
+frozen and only a bounded-rank adapter moves, which is itself a regularizer).
+**The negative result does not generalize either**: it is a statement about
+this scale, adapter, budget and regime.
+
+### The escalation ladder, and what each rung actually did
+
+Everything below was measured, not reasoned about. Diagonals are `R[k][k]`.
+
+| lever | setting | result |
+|---|---|---|
+| steps/cycle (rung 1) | 120 | 5-seed cycle-1 spread 0.604, one seed at chance |
+| steps/cycle (rung 1) | 240 | spread 0.292, all five promote - **kept** |
+| steps/cycle | 960 | cycle 1 -> 1.000, cycles 2-4 [0.02, 0.02, 0.35] - strictly WORSE |
+| LoRA (rung 2) | rank 16, `wq,wk,wv,wo,gate,up,down` | 4 of 5 seeds score 0.00-0.08 on cycle 1 (mean reward 0.10 vs 0.66 at rank 8); the larger adapter at `lr 5e-3` destroys the pretrained prior - **rejected** |
+| explore temp | 1.0 / 1.5 / 2.0 / 2.5 | 1.0 starves GRPO (cycle 3 trained on 34 of 936 sampled spans); 1.5 fixes the sampling (208/762) and changes nothing downstream; 2.0+ degrades cycle 1 |
+| group size | 2 / 4 | no effect on chaining ([1.00, 0.02, 0.02, 0.35] at g4) |
+| anchor replay | 0.3 / 0.5 | 1/5 promotions, diagonals [0.90, 0.10, 0.02, 0.33, 0.63] |
+| replay + rehearsal on pretrained rules | 0.5 | 2/5 promotions, BWT -0.063, diagonals [0.35, 0.17, 0.50, 0.04, 0.60] - cycle 1 is no longer solvable by ignoring the cue, but nothing learns well |
+| decoy-pretrained base (cue-conditional prior over the whole cue space) | 240 steps | cycle 1 falls to 0.08-0.29: overwriting a confidently pretrained mapping is harder than learning from a neutral one |
+| decoy base + replay 0.5 | 960 steps | 0/4 promotions, diagonals [0.15, 0.02, 0.04, 0.04] |
+
+The mechanism the sweep exposes: with one rule per cycle, the cheapest
+policy that solves cycle 1 is **cue-independent** ("always emit
+picks(0,1,2)"), and an unconditional policy is a hole every later cycle has
+to climb out of - which is why a LONGER cycle 1 makes the run strictly
+worse. `ReplayEnv` and `Curriculum::rehearsal_envs` exist in the harness
+(configurable, default off) because they are the levers that attack exactly
+that, and their doc comments carry these measurements.
+
+### Gate
+
+`cargo test -p brain-rl --lib` - 69 passed (48 pre-existing + 21 new:
+`curriculum` 11, `continual` 10). `cargo test -p brain-bench --lib
+metrics::` - 13 passed including 3 new `ols_slope_ci` cases. `cargo test --release -p brain-rl --features qwen3 --test
+improve_cycle` - 2 passed, **unchanged in what it asserts** (the regression
+gate for the `Evaluation`/`CycleArtifacts` refactor). `cargo test --release
+-p brain-rl --features qwen3 --test continual_study -- --test-threads=1` -
+3 passed. `cargo clippy -p brain-rl -p brain-bench
+--all-targets --features qwen3` and `cargo check --workspace --all-targets
+--exclude brain-vulkan` clean.
+
+Wall clock on this box: fixture 240-290 s (cached across the three tests,
+keyed by a config fingerprint), T1 ~380 s, T2 ~1030 s, T3 ~370 s.
+
+### Follow-ups
+
+- **P19b - make the loop chain.** The oracle says capacity/optimization is
+  binding, so the next honest step is a bigger adapter at a lower learning
+  rate (the rank-16 run failed on `lr`, not on rank), or a KL-to-reference
+  term (`GrpoConfig::kl_beta`, already implemented and gradient-checked in
+  P12) to stop cycle 1 over-committing. Re-run T1's pre-registration first;
+  the current constants are frozen against the current fixture.
+- **P19c - the two runnable demos** (`crates/rl/examples/continual_learning.rs`,
+  `autonomous_exploration.rs`) over `run_study`/`GatePolicy::CoinFlip`. The
+  harness API they need is in place. They must print the verdict above, not
+  a success story.
+- **P20 - `brain improve` CLI verb.** Needs `crates/cli` verb registration,
+  capability-manifest wiring and the e2e examples manifest; deliberately out
+  of scope here.

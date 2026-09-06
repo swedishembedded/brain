@@ -31,7 +31,7 @@ use qwen3::config::{LoraCfg, QwenConfig};
 use qwen3::model::Qwen;
 use rl::env::{Environment, Reward, Step, Task, Verifier};
 use rl::gate::{Decision, GateConfig};
-use rl::improve::{self, AdapterMeta, ProvenanceInput};
+use rl::improve::{self, AdapterMeta, CycleArtifacts, Evaluation, ProvenanceInput};
 use rl::objective::grpo::{CycleLog, Grpo, GrpoConfig};
 
 fn gpu_disabled() -> bool {
@@ -169,18 +169,26 @@ fn improve_cycle_end_to_end_promotes_a_genuinely_better_candidate() {
     let adapter_dir = dir.join("adapters");
     let train_out = dir.join("train.safetensors");
     let targets: Vec<String> = LoraCfg::attn(4, 8.0).targets;
+    // `anchor: &[]` - this single-environment cycle has no separate retention
+    // suite, so the held-out set doubles as the gate's anchor headline (the
+    // behavior `rl::improve::cycle` shipped with, preserved exactly).
     let outcome = improve::cycle::<Qwen, _>(
         &base_path,
         objective,
-        &held_out,
-        &FracMatchVerifier,
-        &greedy_rollout_params(),
+        &Evaluation {
+            held_out: &held_out,
+            anchor: &[],
+            verifier: &FracMatchVerifier,
+            rollout: &greedy_rollout_params(),
+            gate_cfg: &GateConfig { min_entropy_ratio: 0.0, ..GateConfig::default() },
+        },
         &opts,
-        &train_out,
-        &adapter_dir,
-        AdapterMeta { rank: 4, alpha: 8.0, targets: &targets, family: "qwen", base_id: "base", dataset_id: None },
-        ProvenanceInput { regime: "grpo".to_string(), seed: 7, hyperparams: serde_json::json!({"group_size": 2, "clip_eps": 0.2}), environment: "cpu/test".to_string(), cycle: 0 },
-        &GateConfig { min_entropy_ratio: 0.0, ..GateConfig::default() },
+        CycleArtifacts {
+            train_out: &train_out,
+            adapter_out_dir: &adapter_dir,
+            adapter: AdapterMeta { rank: 4, alpha: 8.0, targets: &targets, family: "qwen", base_id: "base", dataset_id: None },
+            provenance: ProvenanceInput { regime: "grpo".to_string(), seed: 7, hyperparams: serde_json::json!({"group_size": 2, "clip_eps": 0.2}), environment: "cpu/test".to_string(), cycle: 0 },
+        },
     )
     .expect("cycle");
 
@@ -247,15 +255,20 @@ fn improve_cycle_rejects_a_deliberately_worse_candidate_and_retains_the_incumben
     let good = improve::cycle::<Qwen, _>(
         &base_path,
         objective,
-        &held_out,
-        &FracMatchVerifier,
-        &greedy_rollout_params(),
+        &Evaluation {
+            held_out: &held_out,
+            anchor: &[],
+            verifier: &FracMatchVerifier,
+            rollout: &greedy_rollout_params(),
+            gate_cfg: &GateConfig { min_entropy_ratio: 0.0, ..GateConfig::default() },
+        },
         &opts,
-        &dir.join("train.safetensors"),
-        &dir.join("adapters"),
-        AdapterMeta { rank: 4, alpha: 8.0, targets: &targets, family: "qwen", base_id: "base", dataset_id: None },
-        ProvenanceInput { regime: "grpo".to_string(), seed: 7, hyperparams: serde_json::json!({}), environment: "cpu/test".to_string(), cycle: 0 },
-        &GateConfig { min_entropy_ratio: 0.0, ..GateConfig::default() },
+        CycleArtifacts {
+            train_out: &dir.join("train.safetensors"),
+            adapter_out_dir: &dir.join("adapters"),
+            adapter: AdapterMeta { rank: 4, alpha: 8.0, targets: &targets, family: "qwen", base_id: "base", dataset_id: None },
+            provenance: ProvenanceInput { regime: "grpo".to_string(), seed: 7, hyperparams: serde_json::json!({}), environment: "cpu/test".to_string(), cycle: 0 },
+        },
     )
     .expect("cycle");
     assert_eq!(good.decision, Decision::Promote, "the setup cycle producing this test's incumbent must itself promote: {:?}", good.report);
@@ -276,15 +289,14 @@ fn improve_cycle_rejects_a_deliberately_worse_candidate_and_retains_the_incumben
     let outcome = improve::cycle::<Qwen, _>(
         &incumbent_path,
         sabotage,
-        &held_out,
-        &FracMatchVerifier,
-        &greedy_rollout_params(),
+        &Evaluation { held_out: &held_out, anchor: &[], verifier: &FracMatchVerifier, rollout: &greedy_rollout_params(), gate_cfg: &GateConfig::default() },
         &FitOpts { steps: 2, grad_accum: 1, eval_interval: 0, eval_batches: 0, seed: 999, checkpoint_secs: 0, ..FitOpts::default() },
-        &dir.join("train_sabotaged.safetensors"),
-        &adapter_dir_2,
-        AdapterMeta { rank: 4, alpha: 8.0, targets: &targets, family: "qwen", base_id: "incumbent", dataset_id: None },
-        ProvenanceInput { regime: "sabotage".to_string(), seed: 999, hyperparams: serde_json::json!({}), environment: "cpu/test".to_string(), cycle: 1 },
-        &GateConfig::default(),
+        CycleArtifacts {
+            train_out: &dir.join("train_sabotaged.safetensors"),
+            adapter_out_dir: &adapter_dir_2,
+            adapter: AdapterMeta { rank: 4, alpha: 8.0, targets: &targets, family: "qwen", base_id: "incumbent", dataset_id: None },
+            provenance: ProvenanceInput { regime: "sabotage".to_string(), seed: 999, hyperparams: serde_json::json!({}), environment: "cpu/test".to_string(), cycle: 1 },
+        },
     )
     .expect("cycle");
 

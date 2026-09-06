@@ -98,6 +98,36 @@ pub fn assert_trained_spans_were_sampled(trained: &[Vec<u32>], sampled: &[Vec<u3
     }
 }
 
+/// One arm's per-task scores from the gate's own decode pass, kept rather
+/// than collapsed to a mean. A multi-cycle caller (see [`crate::continual`])
+/// recovers a whole retention-matrix row from these at ZERO extra decode
+/// cost: the gate already had to decode every anchor task on both arms to
+/// make its decision, so re-decoding them for a separate "retention report"
+/// would be measuring the same model twice.
+#[derive(Clone, Debug, Default)]
+pub struct ArmScores {
+    /// Per task, in [`Evaluation::held_out`] order.
+    pub held_out: Vec<f64>,
+    /// Per task, in [`Evaluation::anchor`] order (empty when there is no
+    /// separate anchor suite).
+    pub anchor: Vec<f64>,
+    /// Mean completion entropy over the decoded tasks - [`gate`]'s
+    /// non-degeneracy signal.
+    pub mean_entropy: f64,
+    /// How many DISTINCT completions the arm produced across all decoded
+    /// tasks, out of `held_out.len() + anchor.len()`.
+    ///
+    /// The direct, assumption-free mode-collapse measurement, and the one
+    /// [`crate::gate::Cause::Degenerate`]'s entropy ratio cannot make on a
+    /// task family with exactly ONE correct completion per prompt: there, a
+    /// policy that has actually SOLVED the task decodes greedily with
+    /// near-zero entropy, so a low entropy ratio is the signature of success
+    /// and of collapse alike. Counting distinct completions separates them
+    /// outright - a collapsed policy emits one completion for every prompt,
+    /// a correct one emits a different completion per prompt.
+    pub distinct_completions: usize,
+}
+
 /// The programmatic promote/reject decision plus everything a caller needs
 /// to act on it. `adapter_path` is `Some` only on [`Decision::Promote`] - a
 /// rejected candidate produces no new servable artifact, the incumbent is
@@ -106,12 +136,52 @@ pub struct CycleOutcome {
     pub decision: Decision,
     pub report: GateReport,
     pub adapter_path: Option<PathBuf>,
+    /// The candidate arm's own per-task scores, exactly as the gate saw them.
+    pub candidate: ArmScores,
+    /// The incumbent arm's, likewise.
+    pub incumbent: ArmScores,
+}
+
+/// What [`cycle`] scores its two arms on. Grouping these five together (they
+/// travel as a unit and are never varied independently) is what retires the
+/// eleven-positional-argument `cycle` signature this replaces.
+pub struct Evaluation<'a> {
+    /// The gate's primary suite: the tasks the candidate must beat the
+    /// incumbent on.
+    pub held_out: &'a [Task],
+    /// The RETENTION suite: tasks from earlier cycles this cycle must not
+    /// destroy. EMPTY means "no separate anchor" and the held-out set doubles
+    /// as the anchor headline - exactly the single-environment behavior this
+    /// module shipped with, preserved for existing callers.
+    pub anchor: &'a [Task],
+    pub verifier: &'a dyn Verifier,
+    /// Must be greedy ([`model::serve::SampleParams::greedy`]): both arms are
+    /// scored by the same deterministic decode, or the comparison is noise.
+    pub rollout: &'a RolloutParams,
+    pub gate_cfg: &'a GateConfig,
+}
+
+/// Where [`cycle`] writes, and what it stamps on what it writes.
+pub struct CycleArtifacts<'a> {
+    /// The full trained checkpoint, written whether or not the gate promotes
+    /// (a rejected candidate is left on disk for inspection).
+    pub train_out: &'a Path,
+    /// Directory the versioned adapter lands in, on promotion only.
+    pub adapter_out_dir: &'a Path,
+    pub adapter: AdapterMeta<'a>,
+    pub provenance: ProvenanceInput,
 }
 
 /// Everything [`cycle`] needs to save a promoted candidate as a versioned,
 /// loadable LoRA adapter via [`model::lora::device_adapter::save_adapter`] -
 /// architecture-specific bits the CALLER supplies, so this module stays
 /// generic over `M: Model` rather than hardcoding qwen3's `LoraCfg`.
+///
+/// `Copy`: a multi-cycle caller ([`crate::continual`]) hands the SAME adapter
+/// description to every cycle, and a description that could not be handed out
+/// twice would force either a clone-per-cycle dance or a per-cycle
+/// reconstruction that could drift.
+#[derive(Clone, Copy)]
 pub struct AdapterMeta<'a> {
     pub rank: u32,
     pub alpha: f32,
@@ -206,60 +276,76 @@ fn softmax_entropy(logits: &[f32]) -> f32 {
     -exps.iter().map(|&e| e / sum).filter(|&p| p > 0.0).map(|p| p * p.ln()).sum::<f32>()
 }
 
-/// Load `path` as an `M`, greedily decode every `held_out` task's prompt,
-/// score each completion with `verifier`, and return `(per-task scores, mean
-/// completion entropy)`. Both arms of [`cycle`]'s gate call this on
-/// disk-reloaded checkpoints - never the freshly-trained in-memory instance
-/// (the `lora_learning_gate` lesson [`crate::gate`] itself documents: what is
+/// Load `path` as an `M`, greedily decode every task's prompt, score each
+/// completion with `verifier`, and return `(per-task scores, mean completion
+/// entropy)`. Both arms of [`cycle`]'s gate call this on disk-reloaded
+/// checkpoints - never the freshly-trained in-memory instance (the
+/// `lora_learning_gate` lesson [`crate::gate`] itself documents: what is
 /// actually served must be what is scored).
-fn score_checkpoint<M: Model>(path: &Path, held_out: &[Task], verifier: &dyn Verifier, rollout: &RolloutParams) -> (Vec<f64>, f64) {
+///
+/// Public so a multi-cycle caller can score a checkpoint the gate never saw
+/// (a control arm, an untrained baseline) through exactly the same decode
+/// path the gate uses - the alternative, a second scoring routine, is how
+/// two arms of one comparison quietly stop being comparable.
+pub fn score_checkpoint<M: Model>(path: &Path, tasks: &[Task], verifier: &dyn Verifier, rollout: &RolloutParams) -> (Vec<f64>, f64) {
+    let (scores, entropy, _) = decode_checkpoint::<M>(path, tasks, verifier, rollout);
+    (scores, entropy)
+}
+
+/// [`score_checkpoint`] plus the decoded completions themselves - what the
+/// distinct-completion collapse check ([`ArmScores::distinct_completions`])
+/// is computed from, without a second decode pass.
+pub fn decode_checkpoint<M: Model>(path: &Path, tasks: &[Task], verifier: &dyn Verifier, rollout: &RolloutParams) -> (Vec<f64>, f64, Vec<Vec<u32>>) {
     let c = checkpoint::load(path.to_str().expect("utf-8 path"));
     let cfg = M::Config::from_json(&c.header["config"]);
     let init = c.by_role("");
     let model = M::new(cfg.clone(), 1, cfg.block_size(), &init);
     let mut roll = ModelRollout::new(&model);
     let mut rng = Rng::new(0); // greedy: rollout::RolloutParams::sample must be SampleParams::greedy()
-    let mut scores = Vec::with_capacity(held_out.len());
-    let mut entropies = Vec::with_capacity(held_out.len());
-    for task in held_out {
+    let mut scores = Vec::with_capacity(tasks.len());
+    let mut entropies = Vec::with_capacity(tasks.len());
+    let mut completions = Vec::with_capacity(tasks.len());
+    for task in tasks {
         let completion = roll.sample_n(&task.prompt, 1, rollout, &mut rng).pop().expect("sample_n(1) returns exactly one completion");
         scores.push(verifier.verify(task, &[], &completion.tokens).value as f64);
         entropies.push(mean_completion_entropy(&model, &task.prompt, &completion.tokens));
+        completions.push(completion.tokens);
     }
     let mean_entropy = if entropies.is_empty() { 0.0 } else { entropies.iter().sum::<f64>() / entropies.len() as f64 };
-    (scores, mean_entropy)
+    (scores, mean_entropy, completions)
 }
 
 /// Score both arms (both decoded greedily from disk-reloaded checkpoints,
-/// same held-out tasks, same order - see [`score_checkpoint`]) and run
-/// [`gate::gate`] over the result. The anchor-suite headline
-/// ([`GateInput::anchor_candidate`]/`anchor_incumbent`) is this same
-/// held-out set's mean score: a deliberate simplification for a single-
-/// environment cycle (a caller wiring a real, separate anchor suite - e.g.
-/// a retention-matrix benchmark run across many task families - passes its
-/// own headline scores through [`gate::gate`] directly instead of calling
-/// this).
-fn score_and_gate<M: Model>(
-    incumbent_path: &Path,
-    candidate_path: &Path,
-    held_out: &[Task],
-    verifier: &dyn Verifier,
-    rollout: &RolloutParams,
-    cfg: &GateConfig,
-) -> GateReport {
-    let (incumbent_scores, incumbent_entropy) = score_checkpoint::<M>(incumbent_path, held_out, verifier, rollout);
-    let (candidate_scores, candidate_entropy) = score_checkpoint::<M>(candidate_path, held_out, verifier, rollout);
-    let anchor_incumbent = mean(&incumbent_scores);
-    let anchor_candidate = mean(&candidate_scores);
-    let input = GateInput {
-        candidate_scores: &candidate_scores,
-        incumbent_scores: &incumbent_scores,
-        anchor_candidate,
-        anchor_incumbent,
-        entropy_candidate: candidate_entropy,
-        entropy_incumbent: incumbent_entropy,
+/// the same `held_out ++ anchor` task list in the same order, ONE decode pass
+/// per arm - see [`score_checkpoint`]) and run [`gate::gate`] over the
+/// result.
+///
+/// The anchor-suite headline ([`GateInput::anchor_candidate`]/
+/// `anchor_incumbent`) is the mean over [`Evaluation::anchor`] when that
+/// suite is non-empty - which is what makes [`crate::gate::Cause::
+/// AnchorRegressed`] load-bearing rather than decorative - and otherwise the
+/// held-out set's own mean, byte-for-byte the single-environment behavior
+/// this module shipped with.
+fn score_and_gate<M: Model>(incumbent_path: &Path, candidate_path: &Path, eval: &Evaluation) -> (GateReport, ArmScores, ArmScores) {
+    let all: Vec<Task> = eval.held_out.iter().chain(eval.anchor.iter()).cloned().collect();
+    let n_held = eval.held_out.len();
+    let split = |(scores, entropy, completions): (Vec<f64>, f64, Vec<Vec<u32>>)| -> ArmScores {
+        let distinct: HashSet<Vec<u32>> = completions.into_iter().collect();
+        ArmScores { held_out: scores[..n_held].to_vec(), anchor: scores[n_held..].to_vec(), mean_entropy: entropy, distinct_completions: distinct.len() }
     };
-    gate(&input, cfg)
+    let incumbent = split(decode_checkpoint::<M>(incumbent_path, &all, eval.verifier, eval.rollout));
+    let candidate = split(decode_checkpoint::<M>(candidate_path, &all, eval.verifier, eval.rollout));
+
+    let headline = |a: &ArmScores| if a.anchor.is_empty() { mean(&a.held_out) } else { mean(&a.anchor) };
+    let input = GateInput {
+        candidate_scores: &candidate.held_out,
+        incumbent_scores: &incumbent.held_out,
+        anchor_candidate: headline(&candidate),
+        anchor_incumbent: headline(&incumbent),
+        entropy_candidate: candidate.mean_entropy,
+        entropy_incumbent: incumbent.mean_entropy,
+    };
+    (gate(&input, eval.gate_cfg), candidate, incumbent)
 }
 
 fn mean(v: &[f64]) -> f64 {
@@ -287,25 +373,19 @@ fn gate_outcome(report: &GateReport) -> checkpoint::st::GateOutcome {
 /// One `rl::improve` cycle: train `objective` (already configured over
 /// whichever `Environment`/`Verifier` and P12-P15 objective the caller
 /// chose) starting from `base_checkpoint`'s weights, gate the result against
-/// that same incumbent on `held_out`, and - only on [`Decision::Promote`] -
+/// that same incumbent on `eval`, and - only on [`Decision::Promote`] -
 /// save a versioned, lineage-stamped LoRA adapter. A rejected candidate's
 /// full training checkpoint (`train_out`) is left on disk for inspection but
 /// no adapter is produced - the incumbent (`base_checkpoint`) is what stays
 /// servable.
-#[allow(clippy::too_many_arguments)]
 pub fn cycle<M: Model, O: Objective<M>>(
     base_checkpoint: &Path,
     objective: O,
-    held_out: &[Task],
-    verifier: &dyn Verifier,
-    rollout: &RolloutParams,
+    eval: &Evaluation,
     opts: &FitOpts,
-    train_out: &Path,
-    adapter_out_dir: &Path,
-    adapter: AdapterMeta,
-    provenance: ProvenanceInput,
-    gate_cfg: &GateConfig,
+    artifacts: CycleArtifacts,
 ) -> std::io::Result<CycleOutcome> {
+    let CycleArtifacts { train_out, adapter_out_dir, adapter, provenance } = artifacts;
     let base = checkpoint::load(base_checkpoint.to_str().expect("utf-8 path"));
     let base_cfg = M::Config::from_json(&base.header["config"]);
     let init = base.by_role("");
@@ -313,7 +393,7 @@ pub fn cycle<M: Model, O: Objective<M>>(
 
     model::fit_with(model, objective, opts, Some(train_out))?;
 
-    let report = score_and_gate::<M>(base_checkpoint, train_out, held_out, verifier, rollout, gate_cfg);
+    let (report, candidate, incumbent) = score_and_gate::<M>(base_checkpoint, train_out, eval);
 
     let adapter_path = match report.decision {
         Decision::Promote => {
@@ -354,7 +434,7 @@ pub fn cycle<M: Model, O: Objective<M>>(
         Decision::Reject(_) => None,
     };
 
-    Ok(CycleOutcome { decision: report.decision, report, adapter_path })
+    Ok(CycleOutcome { decision: report.decision, report, adapter_path, candidate, incumbent })
 }
 
 /// Attach `training` to `path`'s already-written [`checkpoint::st::
