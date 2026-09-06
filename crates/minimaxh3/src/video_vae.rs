@@ -1022,6 +1022,11 @@ pub fn encode(cfg: &VideoVaeConfig, tensors: &Tensors, device: Option<&str>, x: 
         ow = cw;
         oc = 2 * cfg.latent_channels;
         chunks.push((moments, ct));
+        // Same reclaim-point requirement as `decode`'s own chunk loop (see
+        // its comment) - each clip's encoder activations must be proven
+        // finished before the next clip's are allocated, or they pile up
+        // across chunks on the wgpu backend.
+        cx.gpu.poll_wait();
     }
     let (mut moments, mut t) = concat_frames_host(&chunks, oc, oh, ow);
     if cfg.token_drop > 0 {
@@ -1415,6 +1420,19 @@ pub fn decode(cfg: &VideoVaeConfig, tensors: &Tensors, device: Option<&str>, z: 
         let zc = slice_frames_host(&zpad, c, zt, h, w, start, take);
         let (clip_pixels, cf, ch_, cw_) = decode_clip_in(&cx, cfg, tensors, &zc, take, h, w);
         assert_eq!((ch_, cw_), (fh, fw), "decode: clip spatial shape drifted");
+        // Same reclaim-point requirement as `H3Transformer::forward_streaming`'s
+        // per-block loop (see that function's own doc): on the wgpu backend,
+        // dropping a `DeviceBuffer` does not itself free VRAM until a poll
+        // proves the GPU is done with it. A chunked loop that only submits
+        // and reads back at the very end of each `decode_clip_in` call never
+        // triggers that proof between chunks, so each clip's 36-layer ViT
+        // decoder activations pile up - measured directly on a P40: without
+        // this call, a 124-frame/384x384 decode (num_chunks in the
+        // single-digit range here) climbed from ~0.4GB to ~22GB in ~10
+        // seconds, one multi-GB jump per chunk, until it OOM'd; with it,
+        // each chunk's buffers are reclaimed before the next chunk's clip is
+        // decoded.
+        cx.gpu.poll_wait();
 
         for j in 0..(1 + u32::from(token_drop > 0)) {
             let frame_start = j * chunk_num_frames;
