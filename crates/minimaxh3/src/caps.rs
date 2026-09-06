@@ -1088,12 +1088,31 @@ mod tests {
         // generation (`generate_t2va.rs`) sets `BRAIN_DEVICE=cpu` in its own
         // process for exactly this reason: this 50-layer/hidden=5120 shard is
         // a genuinely huge, unstreamed load with no business landing on a
-        // consumer GPU by ambient accident. This test skipped that env var,
-        // so it OOM'd real GPUs when one happened to be ambient-selected -
-        // matching `qwen3vl`'s and `fastvlm`'s own test-suite precedent
-        // (`qwen3vl::parity`/`train_smoke`, `fastvlm::parity`/`train_smoke`)
-        // of forcing CPU the same way for their own heavy real-weight tests.
+        // consumer GPU by ambient accident.
+        //
+        // `set_var` here is NOT sufficient on its own: `gpu_core::devices`'s
+        // ambient resolution is cached in a process-lifetime `OnceLock`
+        // (`ambient_compute_set`'s own doc), so if any EARLIER test in this
+        // same binary already resolved it (with whatever `BRAIN_DEVICE` was
+        // set to at that point), this line changes nothing - the real bug a
+        // prior fix here missed. There is no way to force a fresh resolution
+        // from inside a test (`gpu_core::devices`'s own test suite hits the
+        // identical wall and works around it by testing pure functions
+        // instead - see its `narrowing_nothing_leaves_brain_gpu_index_reachable`
+        // doc). So: set it best-effort for the case nothing has resolved yet,
+        // then verify what actually got cached rather than trust the env var
+        // - and skip cleanly instead of risking a real GPU OOM if some
+        // earlier test already locked in an ambient GPU.
         std::env::set_var("BRAIN_DEVICE", "cpu");
+        if !gpu_core::devices::ambient_compute_set().gpus.is_empty() {
+            brain_testutil::skip(
+                "ambient compute set already resolved to a GPU by an earlier test in this binary \
+                 (gpu_core::devices caches ambient selection per-process) - re-run this test alone, \
+                 or with BRAIN_DEVICE=cpu set in the environment BEFORE invoking cargo test, to avoid \
+                 loading this 50-layer/hidden=5120 shard onto a real GPU",
+            );
+            return;
+        }
         let paths = Paths::resolve(&root);
         if !has_real_text_encoder(&paths) {
             brain_testutil::skip(&format!("{}/config.json or {}/tokenizer.json not found - text encoder not (yet) downloaded", paths.text_encoder, paths.tokenizer));
