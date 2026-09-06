@@ -414,6 +414,17 @@ impl H3Transformer {
         let audio_out = block::gather_rows(cx, &audio_idx, &audio_full, num_audio, cfg.audio_in_channels);
 
         let output = H3Output { video: cx.gpu.read(&video_out, (num_video * video_patch_dim) as usize), audio: cx.gpu.read(&audio_out, (num_audio * cfg.audio_in_channels) as usize) };
+
+        // Same reasoning as the per-block poll_wait above, but for the
+        // "outer" buffers allocated once per call (norm_out/proj_out
+        // weights, shift/scale tables, gather results) rather than once
+        // per block: this function now runs once per denoising step, so
+        // without a final reclaim point these residual buffers compound
+        // step over step even though the per-block leak is already
+        // handled above (measured: a 384x384/16-step generation still
+        // OOM'd, later than before the per-block fix but not fixed).
+        cx.gpu.poll_wait();
+
         let taps = H3Taps {
             refiner_out: tap_refiner_out,
             rope_cos: rope_tables.cos,
