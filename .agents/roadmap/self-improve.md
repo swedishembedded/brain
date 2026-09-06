@@ -1929,3 +1929,134 @@ mistaken for closing them.
   in-process-verifiable. Surface: `brain improve` as a CLI verb (P20) was
   not attempted, so the loop remains reachable only from a test binary or a
   `cargo run --example`.
+
+### P19d - why it actually failed, and the capacity question settled
+
+A follow-up research pass (given the two paragraphs above and every number
+already in this file, asked to find what would actually make the loop
+accumulate capability) found a real diagnosis this rollup had not reached,
+and one number below was checked by actually running it, not by citing a
+paper.
+
+**The cue-independent shortcut, confirmed to three decimals.**
+`ReplayEnv`'s doc comment (P19's own escalation-ladder notes) already
+*hypothesized* that with `replay_frac 0.0` the cheapest solution to cycle 1
+is a policy that ignores the cue entirely and always emits `picks(0,1,2)`.
+Scoring that exact hypothesis against the recorded `zero0` column (the
+incumbent's zero-shot score on each newly-introduced rule) - predicted
+score = positional overlap of rule *k* with `(0,1,2)` divided by 3 - gives
+**Pearson r = 0.987, MAE = 0.061, n = 11** across the whole trajectory.
+This is not a hypothesis anymore. Cycles 2-12 of the recorded study measure
+"can GRPO overwrite a confident wrong prior," not "does capability
+accumulate" - and the only non-cycle-1 promotion (cycle 11, `picks(0,4,2)`,
+2-of-3 overlap with the shortcut) is exactly the rule closest to that
+shortcut, meaning the loop never established cue-conditionality at all.
+
+**The joint-training "capacity oracle" (Arm 3) never measured capacity.**
+`joint_oracle` (`continual.rs`) sets `opts.steps = steps_per_cycle *
+cycles` = 2880 over all 12 rules pooled via `PooledEnv::tasks`, which draws
+`seed % cycles` - so each rule receives a mean of **240 steps, identical to
+what a single cycle already gives it**, not a bigger per-rule budget. Its
+recorded 0.071 confounds capacity with per-rule sample starvation and
+cannot support "a rank-8 adapter cannot represent 12 rules" - the claim
+this file made from it in the "Establishes/does not establish" sections
+above. That claim is retracted by the experiment below, not just by this
+argument.
+
+**Per-rule supervision was roughly 237x below what this exact architecture
+is already known to need.** The frozen base itself (this file's own
+fixture) learns 16 cue-conditioned rules to 0.995 using 48,000 record
+presentations per rule, full-parameter, teacher-forced. A GRPO study cycle
+delivers a mean of 203 trained completion spans per rule - **48,000 / 203
+~= 237x**. Most of the shortfall is structural, not incidental: at
+`group_size 2`, a group with rewards `{0,0}` or `{1,1}` yields a
+zero-advantage group with no gradient at all (`group_advantages`, `crates/
+rl/src/objective/grpo.rs`), and for a Bernoulli(p) reward that floor is
+`p^2 + (1-p)^2`, minimized at exactly 50% at p=0.5 - **never below 50% at
+any p, for group size 2.** Cross-checking two independently-derivable
+numbers already in this file's own trajectory - `trained/2` kept groups
+against `sampled/2` total groups, and the separately-recorded "2433 trained
+spans of 9210 sampled" - both give **73.6% of every GRPO group in the
+recorded study producing zero gradient.**
+
+**The warm-vs-fresh "plasticity" reading in the section above is also not
+the right explanation, and the study's own ladder falsifies it.** The
+escalation ladder recorded elsewhere in this file includes a decoy-
+pretrained-base row: a **fresh, zero-delta** adapter (no warm start at all)
+degrading identically when the base itself carries a confidently wrong
+cue-conditional prior. A fresh adapter facing a neutral prior (Arm 2) and a
+fresh adapter facing a confidently wrong one (the decoy row) behave
+differently for a reason that has nothing to do with warm-starting. The
+warm-vs-fresh gap this file reported above is real, but "prior conflict"
+explains it without invoking plasticity loss, and is the more parsimonious
+reading.
+
+**E1 - the capacity question, settled by actually running it.** Built
+`crates/rl/examples/oracle_capacity_check.rs`: the frozen base plus a
+fresh rank-8 `wq,wk,wv,wo` LoRA, trained with plain teacher-forced SFT
+(`rl::objective::mixture::Anchor`, zero RL, zero exploration) on all 12
+study rules **pooled** (no sequential interference at all), for 6,000
+steps at batch 128 - the same per-rule supervision density the base's own
+pretraining needed, not GRPO's 240-step cycle budget. Scored on the same
+192-probe shape (12 rules x 16 held-out probes) the study's own ACC is
+computed from.
+
+First run, unmasked loss (predicting the whole record including the
+prompt, not just the completion): **ACC 0.509** - ambiguous, better than
+the study's GRPO result (0.271) but well under a decisive threshold.
+Second run, completion-only masked loss (`FitOpts::mask_before: Some('b')`
+- `'b'` is SEP's own `itos` char in this vocabulary, `mask_per_line:
+true`, both stacking on the `align_to_lines: true` this dataset format
+already requires): **ACC 0.910**, loss 8.253 -> 1.053, 294 s wall-clock on
+this box, reusing the already-cached frozen base.
+
+**This settles it. Capacity is not the binding constraint.** A rank-8,
+attention-only LoRA adapter over this exact frozen base CAN represent all
+12 cue-conditioned rules at once - 0.910 against the actual study's 0.271
+and the mismeasured "oracle"'s 0.071, using less wall-clock than one
+GRPO-driven cycle of the 12-cycle study needed, with zero sequential
+interference and zero exploration. The 12-cycle GRPO study's failure to
+accumulate is a training-regime/curriculum problem - the cue-independent
+shortcut above, compounding with GRPO's per-rule supervision starvation -
+not a model-sizing problem. `crates/rl/tests/mixture_anchor_regression.rs`
+already proves `Mixture` composes an SFT-shaped `Anchor` arm with another
+objective without new gradient math; the not-yet-run experiment this
+result recommends is the 12-cycle sequential study with BOTH failure modes
+addressed at once (replay/rehearsal removing the shortcut, an SFT-shaped
+or dense-reward-shaped objective removing the supervision starvation) -
+something no arm of this study has tried, because every replay/rehearsal
+row in the escalation ladder above kept GRPO as the objective and therefore
+kept the 237x starvation and 73.6% waste rate in place too.
+
+**What this does not do.** It does not re-run the 12-cycle study under a
+fixed regime, so it does not itself demonstrate accumulation across
+sequential cycles - it demonstrates that the ONE thing standing in the way
+of a positive result is not adapter size. It does not test any regime
+other than plain teacher-forced SFT on the oracle's own known-correct
+completions - a task this family happens to have and the Gauntlet's
+harder environments (still design-only) mostly will not. It is one seed,
+one architecture, one task family, like everything else in this rollup.
+
+**Corrections this section makes to the text above it, recorded rather
+than silently overwritten:** the "Establishes/does not establish" and
+"proves/does not prove" sections' framing of Arm 3 as a capacity verdict is
+retracted per the joint-oracle finding above; "the warm-start-specific
+failure has the stronger evidence" is now the second-best explanation, not
+the best one, per the decoy-base finding; BWT should be read as "near zero
+because there was very little cue-conditional capability to lose," not as
+a clean capacity/optimization result either. The P19b follow-up proposing
+a static `kl_beta` reference-KL term to "stop cycle 1 over-committing" is
+now understood to target the wrong mechanism (a static reference anchor
+does not address a shortcut the training distribution itself induces) and
+should not be the next experiment run.
+
+**Verification status.** The shortcut correlation (r=0.987), the joint-
+oracle budget arithmetic, the 237x/73.6% supervision figures, and E1's two
+recorded runs are all either arithmetic over numbers already in this file
+or a program run on this box, checked by reading the actual code cited.
+The broader literature this research pass drew on to prioritize which
+experiment to run first (curriculum-ordering and RL-sample-efficiency
+citations) informed the choice of E1 but is not itself verified and is
+deliberately not cited by name in this file - see the no-doc-citation
+discipline this repo already applies to `docs/`; the same caution applies
+to unverified external literature.
