@@ -56,16 +56,25 @@ fn main() {
     eprintln!("      done in {:.1}s", t1.elapsed().as_secs_f32());
 
     let ckpt = weights.as_checkpoint();
+    // "gpu"/"wgpu", never "vulkan" - `gpu_core::Gpu::open` only recognizes
+    // "cpu"/"gpu"/"wgpu"/"gpu<N>" as explicit tokens; anything else (this
+    // included "vulkan") falls through to Gpu::new's AMBIENT resolution,
+    // which reads BRAIN_DEVICE - so a process that also sets BRAIN_DEVICE=cpu
+    // (to keep the text encoder off the GPU, see below) would silently force
+    // this onto CPU too, defeating the whole point of asking for a GPU here.
+    // Confirmed by a real run: 30+ minutes into a "GPU" 256x256 generation,
+    // nvidia-smi showed 0% utilization the whole time and the process was
+    // burning 26 CPU cores - it had been running on CPU regardless of this
+    // setting. "gpu"/"wgpu" force `Gpu::new_wgpu` unconditionally, ignoring
+    // BRAIN_DEVICE entirely, which is what's actually needed here.
+    //
     // Real-hardware measurement (dit_matches_the_real_reference_numerically_
-    // layer_by_layer with BRAIN_MINIMAXH3_TEST_DEVICE=vulkan, uncontended):
-    // a full 50-block forward on this box's P40 completes in ~112s, faster
-    // than the CPU backend's ~148-190s at the same real dimensions - so
-    // "vulkan" is the better default now, overridable via
-    // BRAIN_MINIMAXH3_GEN_DEVICE. This is independent of BRAIN_DEVICE (the
-    // text encoder's own ambient device selection, kept on CPU separately -
-    // its ~63GB checkpoint has no reduced-precision GPU tier and would OOM a
-    // single P40).
-    let dit_device = std::env::var("BRAIN_MINIMAXH3_GEN_DEVICE").unwrap_or_else(|_| "vulkan".to_string());
+    // layer_by_layer with BRAIN_MINIMAXH3_TEST_DEVICE=vulkan and BRAIN_DEVICE
+    // unset, uncontended): a full 50-block forward completes in ~112s on
+    // this box's P40 - but that was the tiny 9-row validation sequence, NOT
+    // a real generation's actual sequence length, so it is not a valid
+    // estimate of real per-step generation time on either device.
+    let dit_device = std::env::var("BRAIN_MINIMAXH3_GEN_DEVICE").unwrap_or_else(|_| "gpu".to_string());
     let opts = minimaxh3::pipeline::GenOpts {
         canvas: Some((canvas_px, canvas_px)),
         num_frames,
