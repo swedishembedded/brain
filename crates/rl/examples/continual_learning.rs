@@ -9,14 +9,29 @@
 //! scored PASS/FAIL, and a verdict block that states what the run does and
 //! does not establish.
 //!
-//! **This demo is not a success story, and it is not supposed to be.** At this
-//! model scale the loop runs, the gate discriminates, the harness's structural
-//! checks hold - and capability does NOT accumulate: the last measured run
-//! finished with ACC below the untrained base's own score on the same probes,
-//! 2 of 12 cycles promoted, and a joint-training oracle that cannot hold the
-//! 12 rules either even when trained on all of them at once. Every number this
-//! program prints is measured in front of you on this run; nothing is canned.
-//! Whatever it prints is the result, including when that result is negative.
+//! **The DEFAULT regime here is not a success story, and it is not supposed to
+//! be.** At this model scale, under `--regime grpo`, the loop runs, the gate
+//! discriminates, the harness's structural checks hold - and capability does
+//! NOT accumulate: the recorded run finished at ACC 0.271, below the untrained
+//! base's own 0.354 on the same probes, with 2 of 12 cycles promoted and a
+//! joint-training oracle at 0.071. That oracle number is NOT a capacity
+//! verdict, and an earlier version of this comment read it as one: it gives
+//! each pooled rule the same budget a single cycle gives it, and the same
+//! rank-8 adapter holds all 12 rules at 0.910 once that budget is raised.
+//!
+//! **`--regime sft` is the one configuration measured to accumulate**, and it
+//! pays for that with the property the default regime exists to test. Two
+//! seeds of the same 12-cycle study ended at ACC 0.932 and 0.815 with the
+//! cycle-1 canary at 1.000 and 0.986, 12 and 10 of 12 cycles promoted, and
+//! every pre-registered target passing - against a measured 0.310 ceiling for
+//! the best fixed cue-independent policy on these probe sets, and last-task-
+//! only controls of 0.267 and 0.293 that do not reach that ceiling. It is
+//! teacher-forced on the environment's own known-correct completions, so the
+//! no-label structural check is vacuous and is not run; see below.
+//!
+//! Every number this program prints is measured in front of you on this run;
+//! nothing is canned. Whatever it prints is the result, including when that
+//! result is negative.
 //!
 //! Run it:
 //! ```text

@@ -38,11 +38,14 @@ score on one 16-probe task - not a like-for-like 192-probe baseline, since
 the base's score on the other 11 tasks was never separately measured).
 **That last clause is REGIME-SCOPED as of P19f**: it is true and unretracted
 for `Regime::Grpo`, and false for `Regime::Sft`, where the same twelve-cycle
-study reaches ACC 0.932 with all eight pre-registered targets passing - at
-the cost of the label-free property, since that regime is teacher-forced on
-the environment's own known-correct completions. Read the rollup section AND
-P19f at the end of this file before quoting anything above it as a
-continuous-learning result.
+study reaches ACC **0.815 and 0.932** on two seeds with all eight
+pre-registered targets passing on both - at the cost of the label-free
+property, since that regime is teacher-forced on the environment's own
+known-correct completions. Quote the 0.815: P19f's own instruction is that
+the weaker seed is the honest headline, and this summary quoted only the
+stronger one in its first draft. Read the rollup section AND P19f at the end
+of this file before quoting anything above it as a continuous-learning
+result.
 
 **Standing invariant, unchanged by any of this: brain
 never depends on sven.** `crates/atif` mirrors sven's trajectory format by
@@ -1951,7 +1954,13 @@ Scoring that exact hypothesis against the recorded `zero0` column (the
 incumbent's zero-shot score on each newly-introduced rule) - predicted
 score = positional overlap of rule *k* with `(0,1,2)` divided by 3 - gives
 **Pearson r = 0.987, MAE = 0.061, n = 11** across the whole trajectory.
-This is not a hypothesis anymore. Cycles 2-12 of the recorded study measure
+This is not a hypothesis anymore. **Corrected by P19f's sanity pass**: that
+`r`/MAE pair is the cycles 2-11 window (n = 10, r = 0.988, MAE = 0.065), not
+the n = 11 it is labelled with. Recomputed over cycles 2-12, which is what
+"the whole trajectory" means here, it is **r = 0.936, MAE = 0.087, n = 11**.
+The diagnosis is unaffected; quote the 0.936 figure.
+
+Cycles 2-12 of the recorded study measure
 "can GRPO overwrite a confident wrong prior," not "does capability
 accumulate" - and the only non-cycle-1 promotion (cycle 11, `picks(0,4,2)`,
 2-of-3 overlap with the shortcut) is exactly the rule closest to that
@@ -2070,7 +2079,8 @@ to unverified external literature.
 
 P19d's diagnosis names the experiment nobody has run: the twelve-cycle
 sequential study with BOTH measured failure modes fixed at once - the
-cue-independent shortcut (r = 0.987 against the recorded zero-shot column)
+cue-independent shortcut (r = 0.987 against the recorded zero-shot column;
+P19f's recomputation over the full cycles 2-12 window gives 0.936)
 removed by a rehearsal pool that is non-empty even at cycle 1, and GRPO's
 ~237x per-rule supervision starvation plus its 73.6% zero-gradient group
 rate removed by teacher-forced dense supervision at a real batch width.
@@ -2222,8 +2232,11 @@ it is the first one in this file's continual-learning arc.** Over twelve
 sequential gated cycles the servable model ends at **ACC 0.932 (seed 1) and
 0.815 (seed 2)**, with the cycle-1 probe still at **1.000 / 0.986**, and
 **all eight pre-registered targets A1-A8 PASS on both seeds** - against the
-recorded GRPO study's ACC 0.271, 2 of 12 promotions, and five of seven
-targets failed.
+recorded GRPO study's ACC 0.271, 2 of 12 promotions, and six of eight
+targets failed. (The GRPO section scores A1-A7 in a table and A8 in the
+paragraph immediately after it - "Pre-registered bar was 0.60" against a
+measured 0.071 - so its denominator is 8, not the 7 the first draft of this
+comparison used. Same apparatus, same eight bars, both directions counted.)
 
     metric                     GRPO (recorded)   SFT seed 1   SFT seed 2
     ACC (all probes)                     0.271        0.932        0.815
@@ -2232,12 +2245,13 @@ targets failed.
     promotions                            2/12        12/12        10/12
     last-task-only control               0.226        0.267        0.293
     joint-training oracle (Arm 3)        0.071        0.959        0.999
-    pre-registered targets passed        2 of 7       8 of 8       8 of 8
+    pre-registered targets passed        2 of 8       8 of 8       8 of 8
 
 Seed 2 is the weaker of the two and is the honest headline number if only
-one is quoted. Both sit far above the **0.25** ceiling that the best
-possible cue-independent policy can reach on these 12 rules (section
-"sanity pass", check 4), and far above the last-task-only control.
+one is quoted. Both sit far above the **0.310** ceiling that the best
+possible cue-independent policy reaches on these 12 rules' own frozen
+probes (section "sanity pass", check 4), and far above the last-task-only
+control - which does NOT clear that ceiling on either seed (0.267, 0.293).
 
 **Read the scope sentence before the numbers.** This is `Regime::Sft`:
 teacher-forced supervision on the environment's own known-correct
@@ -2342,8 +2356,46 @@ seed 2, where A5 passes at exactly the bar - see below.
     A3 min distinct 0.907      PASS      A7 ACC 0.815 >= 0.443           PASS
     A4 promotions 10 >= 10     PASS      A8 oracle 0.999 >= 0.60         PASS
 
-    final servable row:
-    0.99 0.98 0.56 0.67 0.95 0.97 0.88 0.41 0.65 0.90 0.83 1.00
+Seed 2's full trajectory and matrix are printed here rather than summarized,
+because several claims in this section are read off individual cells of them
+and the summary line alone cannot support those. **Re-run end to end during
+the documentation pass and reproduced digit for digit**: the same twelve
+rows on every column except wall clock, the same 12x12 matrix cell for cell,
+the same ACC 0.815 / BWT -0.052 / xfer_vs_fresh -0.836 / rho 1.029 / oracle
+0.999 / last-task-only 0.293, and the same two `c5:anchor` / `c11:anchor`
+rejections. The regime is deterministic at a fixed seed on this box.
+
+    cyc  task                 trained  heldout   zero0  probeT1    rho  reward  train/sampled  distinct  gate           kept    secs
+      1  cue02 picks(0,1,2)        -   1.000   0.444   1.000   1.00       -      -/-        48/48  PROMOTE        yes    49.0
+      2  cue03 picks(1,0,3)        -   1.000   0.069   0.993   1.00       -      -/-        96/96  PROMOTE        yes    71.0
+      3  cue04 picks(2,0,4)        -   0.972   0.083   0.958   0.97       -      -/-      141/144  PROMOTE        yes    33.6
+      4  cue05 picks(3,1,0)        -   1.000   0.056   0.979   1.00       -      -/-      189/192  PROMOTE        yes    65.7
+      5  cue06 picks(4,1,2)        -   1.000   0.333   0.979   1.01       -      -/-      234/240  reject/anchor  no     62.5
+      6  cue07 picks(0,2,4)        -   0.979   0.063   0.986   0.99       -      -/-      281/288  PROMOTE        yes    44.6
+      7  cue08 picks(1,3,0)        -   0.993   0.285   0.979   1.01       -      -/-      320/336  PROMOTE        yes    84.3
+      8  cue09 picks(2,3,1)        -   0.993   0.354   0.993   0.99       -      -/-      354/384  PROMOTE        yes    72.0
+      9  cue10 picks(3,2,4)        -   1.000   0.174   1.000   1.01       -      -/-      400/432  PROMOTE        yes    81.3
+     10  cue11 picks(4,3,0)        -   1.000   0.042   0.986   1.00       -      -/-      438/480  PROMOTE        yes    88.9
+     11  cue12 picks(0,4,2)        -   0.993   0.083   0.986   0.99       -      -/-      479/528  reject/anchor  no     73.6
+     12  cue13 picks(1,4,3)        -   1.000   0.188   0.986   1.03       -      -/-      523/576  PROMOTE        yes    59.5
+
+    retention matrix R[i][j]
+          T1   T2   T3   T4   T5   T6   T7   T8   T9   T10  T11  T12
+    c1    1.00    .    .    .    .    .    .    .    .    .    .    .
+    c2    0.99 1.00    .    .    .    .    .    .    .    .    .    .
+    c3    0.96 0.97 0.97    .    .    .    .    .    .    .    .    .
+    c4    0.98 0.99 0.81 1.00    .    .    .    .    .    .    .    .
+    c5    0.98 0.99 0.81 1.00 0.33    .    .    .    .    .    .    .
+    c6    0.99 0.99 0.95 0.97 0.64 0.98    .    .    .    .    .    .
+    c7    0.98 1.00 0.95 0.69 0.61 0.96 0.99    .    .    .    .    .
+    c8    0.99 1.00 0.98 0.61 0.69 0.97 0.92 0.99    .    .    .    .
+    c9    1.00 1.00 0.72 0.98 0.66 0.99 0.99 0.66 1.00    .    .    .
+    c10   0.99 1.00 0.74 0.72 0.98 0.99 0.97 0.66 0.70 1.00    .    .
+    c11   0.99 1.00 0.74 0.72 0.98 0.99 0.97 0.66 0.70 1.00 0.08    .
+    c12   0.99 0.98 0.56 0.67 0.95 0.97 0.88 0.41 0.65 0.90 0.83 1.00
+
+    b_fresh (Arm 2): 1.000 1.000 1.000 1.000 0.993 0.993 0.986 1.000 0.986
+                     1.000 1.000 0.972   mean 0.994
 
 **Seed 2 fixes seed 1's single biggest weakness and introduces its own.** It
 rejected two cycles on `Cause::AnchorRegressed`, so on this seed the gate
@@ -2363,8 +2415,13 @@ even if cycle `j` was rejected. Measured on seed 2, `R[i][5]` after the
 cycle-5 rejection: **0.33, 0.64, 0.61, 0.69, 0.66, 0.98, 0.98, 0.95** across
 cycles 5 to 12; and `R[i][11]` after the cycle-11 rejection: **0.08 -> 0.83**
 in a single cycle. This is a genuine and previously unrecorded property, and
-it cuts both ways: it is why seed 2's BWT is only -0.052 despite two
-rejections, and it means **the gate under `Regime::Sft` is a weaker ratchet
+it cuts both ways. It is why seed 2's BWT reads as only -0.052 despite two
+rejections - a rejected cycle's diagonal `R[k][k]` is the incumbent's low
+zero-shot score, rehearsal then lifts the same column back up, and
+`R[N][k] - R[k][k]` comes out strongly POSITIVE, so this is an artifact of
+the rejection pattern rather than better retention (see the BWT
+comparability bullet below for the decomposition). And it means **the gate
+under `Regime::Sft` is a weaker ratchet
 than it looks**, because rejecting a cycle does not keep that rule out of
 the training distribution - it only keeps that cycle's weights from carrying
 forward. Nothing in the harness was claiming otherwise, but nothing was
@@ -2385,12 +2442,18 @@ did not survive one.
    warm arm: eval loss **2.728 -> 0.639**, converged by step ~500. Cycle 2's
    warm arm, starting from the cycle-1 adapter: **3.400 -> 0.594**. Cycle
    2's FRESH arm, starting from the base: **6.926**, i.e. the frozen base is
-   confidently WRONG on an unseen cue, and still learns it. The residual
-   ~0.6 is structural, not a stall: `block_size` is 12 over 11-token
-   records, so each window supervises one token of the NEXT record whose
-   content is uniform over 16 values, a floor of `ln(16)/6 = 0.462`.
-2. **Nothing is degenerate.** Worst distinct-completion fraction 535/576 =
-   **0.929**; no cycle collapsed onto a small output set. Note this metric
+   confidently WRONG on an unseen cue, and still learns it - "confidently"
+   is against `ln(VOCAB) = ln 32 = 3.466`, the loss of a uniform predictor,
+   so it starts twice as bad as guessing. The residual ~0.6 is structural,
+   not a stall, and the denominator checks out against the loader: with
+   `block_size` 12 over 11-token records the target row is `[c0..c4, SEP,
+   t0, t1, t2, PAD, cue', c0']`, `mask_before` at `SEP` ignores the first
+   six, and of the six that remain `t0,t1,t2` and `PAD` are determined by
+   the prompt and `cue'` by a single-rule arm's dataset - leaving exactly
+   one uniform-over-`CONTENT_N = 16` token, a floor of `ln(16)/6 = 0.462`.
+2. **Nothing is degenerate.** Worst distinct-completion fraction **0.929**
+   (535/576) on seed 1 and **0.907** on seed 2; no cycle on either seed
+   collapsed onto a small output set. Note this metric
    alone could never have caught the shortcut (the completion is content
    copied from the prompt, so it varies even under a cue-independent
    policy), which is why check 3 exists.
@@ -2411,14 +2474,31 @@ did not survive one.
    is unaffected either way, and this section uses the wider n = 11 window
    for both regimes so the comparison is like-for-like.
 4. **ACC 0.932 is arithmetically out of reach for any cue-independent
-   policy.** Enumerating all 60 ordered position triples, the best fixed
-   cue-ignoring policy scores **0.25** on the 12 study rules (and it is
-   `picks(0,1,2)`, the diagnosed shortcut itself). The observed 0.932 cannot
-   be produced by one. As a consistency check that lands in the same place,
-   the last-task-only control - the cycle-12 fresh adapter scored on all 576
-   probes - measures **0.267**, right at that ceiling.
+   policy.** Enumerating all 60 ordered position triples and scoring each
+   one with `PositionCopyVerifier` on the study's own 576 frozen probes
+   (`eval_env_for(k)` x `probe_seeds(k, 48)`, `k = 0..12`), the best fixed
+   cue-ignoring policy is `picks(1,3,0)` at **0.310**; the diagnosed
+   shortcut `picks(0,1,2)` measures **0.297** and ranks 7th of 60; the mean
+   over all 60 is 0.251 and the worst is 0.182. Neither observed ACC (0.932,
+   0.815) can be produced by one.
+   *Correction to this check's own first draft, which claimed a 0.25 ceiling
+   reached by `picks(0,1,2)`.* 0.25 is the ceiling on POSITIONAL PICK
+   OVERLAP - the mean over the 12 rules of how many of a fixed triple's
+   three positions the rule also copies - and 7 of the 60 triples tie at it,
+   `picks(0,1,2)` among them, so it was not even the unique argmax of the
+   quantity it did describe. It is not the ceiling on what ACC measures:
+   `PositionCopyVerifier` compares emitted TOKENS, so a wrong pick still
+   scores whenever the two slots happen to hold the same content token,
+   which is 1 draw in `CONTENT_N = 16`. That adds about `(1 - overlap)/16`
+   to every cue-independent policy's measured score and reorders the argmax.
+   The conclusion is unaffected - the weaker seed still clears the corrected
+   ceiling by 0.505 - but one reading flips: against the mistaken 0.25 the
+   last-task-only controls (the cycle-12 fresh adapter scored on all 576
+   probes) read as BEATING the cue-independent ceiling, and against the
+   measured 0.310 they land just under it, at **0.267 (seed 1) and 0.293
+   (seed 2)**. That is the ordering the control was supposed to show.
    `ACC` and `BWT` were also recomputed by hand from the printed matrix
-   cells (0.9325 and -0.0692) and match what the program printed.
+   cells (0.9325 and -0.0691) and match what the program printed.
 
 ### What is honestly weak about this run, stated because it is
 
@@ -2429,29 +2509,54 @@ did not survive one.
   seed was worth its 21 minutes.
 - **Acquisition was never hard under this regime.** The Arm-2 fresh control
   reached mean **0.987 / 0.994** on each cycle's own probe, and the Arm-1
-  candidate's `heldout` score was >= 0.97 on all 24 cycles across both
-  seeds - including the two the gate rejected. So "the loop learned task k"
+  candidate's `heldout` score never fell below **0.979 (seed 1) or 0.972
+  (seed 2)** on any of the 24 cycles - including the two the gate rejected,
+  where it was 1.000 and 0.993. So "the loop learned task k"
   is close to free here; the entire content of the result is RETENTION plus
   the fact that the ratchet carried it forward. A regime in which every
   cycle's candidate succeeds is not a hard test of a gate.
 - **The seed spread on the headline number is large.** ACC 0.932 vs 0.815 on
-  two seeds is a spread of 0.117, which is comparable to the whole margin by
-  which A7 clears its bar on some readings. Two seeds cannot estimate that
-  spread, only demonstrate it is not zero. The single-cycle pre-registration
-  measured s = 0.000, so cycle-1 acquisition is stable across seeds while
-  the twelve-cycle aggregate is not - those are different quantities and the
-  first does not license the second.
-- **BWT is -0.069, statistically indistinguishable in magnitude from the
-  GRPO run's -0.066, and that coincidence must not be read as equivalence.**
-  GRPO's BWT was near zero because there was almost no cue-conditional
-  capability to lose. Here it is negative while ACC is 0.932, i.e. real
-  capability was acquired and a little of it really was lost. Two cells
-  carry almost all of it: **T3 `cue04 picks(2,0,4)` 0.98 -> 0.72 at cycle 9,
-  and T8 `cue09 picks(2,3,1)` 0.99 -> 0.72 at cycle 10**, both stable
-  thereafter. Every other final cell is >= 0.94. The uniform-over-the-union
-  rehearsal pool is not a complete anti-forgetting mechanism; it is a very
-  good one with two visible holes, and this run does not explain why those
-  two rules.
+  two seeds is a spread of 0.117. The first draft of this bullet called that
+  "comparable to the whole margin by which A7 clears its bar", which the
+  arithmetic does not support: A7's margin is 0.515 on seed 1 and 0.372 on
+  seed 2, so the spread is under a third of the narrower one. It IS most of
+  A1's margin on seed 2 (0.986 against a 0.850 bar, margin 0.136), and it is
+  larger than every A4/A5 margin, both of which land at exactly zero. Two
+  seeds cannot estimate that spread, only demonstrate it is not zero. The
+  single-cycle pre-registration measured s = 0.000, so cycle-1 acquisition
+  is stable across seeds while the twelve-cycle aggregate is not - those are
+  different quantities and the first does not license the second.
+- **BWT is -0.069, numerically almost the same as the GRPO run's -0.066,
+  and that coincidence must not be read as equivalence.** (No test was run
+  on the difference and none could be at one run per regime; the claim is
+  arithmetic closeness, not statistical equivalence.) GRPO's BWT was near
+  zero because there was almost no cue-conditional capability to lose. Here
+  it is negative while ACC is 0.932, i.e. real capability was acquired and a
+  little of it really was lost. Two cells carry MOST of it - **T3 `cue04
+  picks(2,0,4)`, diagonal 0.98, dropping at cycle 9 and ending 0.72, and T8
+  `cue09 picks(2,3,1)`, diagonal 0.99, dropping at cycle 10 and ending
+  0.72** - both stable thereafter. But "most" is 70%, not "almost all",
+  which the first draft of this bullet claimed: the two cells contribute
+  -0.53 of the -0.76 total, and the other nine still sum to -0.23. Every
+  other final cell is >= 0.94. The uniform-over-the-union rehearsal pool is
+  not a complete anti-forgetting mechanism; it is a very good one with two
+  visible holes plus a thin spread of loss everywhere else, and this run
+  does not explain why those two rules.
+- **Seed 2's BWT (-0.052) is NOT comparable to seed 1's (-0.069), and the
+  ordering it suggests is an artifact of the rejections.** Read naively the
+  table says seed 2 forgot LESS while finishing 0.117 lower on ACC. The
+  caveat this section already records for `R[k][k]` bites harder on BWT,
+  which is built out of that diagonal: on a REJECTED cycle `R[k][k]` is the
+  incumbent's zero-shot score, so `R[N][k] - R[k][k]` comes out large and
+  POSITIVE. Summing `R[12][j] - R[j][j]` over the seed-2 matrix printed
+  above gives -0.55 across eleven cells, of which the two REJECTED cycles
+  contribute `0.95 - 0.33 = +0.62` and `0.83 - 0.08 = +0.75`. Strip those
+  two and the nine PROMOTED cells sum to **-1.92**, averaging **-0.213** -
+  about three times seed 1's -0.069. Seed 2 forgot substantially MORE on the
+  cycles it actually promoted; the two rejections are worth +0.125 of BWT
+  between them and are the entire reason the headline reads better. BWT is
+  only comparable across runs with the same rejection pattern, and these two
+  runs do not have one.
 - **`eval_per_cycle` moved 16 -> 48**, for the sign-test power reason P19e
   records. `probe_seeds(k, 48)` is a superset of `probe_seeds(k, 16)`, so
   the probe sets are nested, but **the R cells are NOT cell-comparable to
@@ -2478,11 +2583,23 @@ did not survive one.
   "a rank-8 adapter cannot represent 12 rules" on the grounds that
   `joint_oracle` gave each rule only 240 steps. Run under `Regime::Sft` the
   same Arm 3 reaches **0.959 and 0.999** against the recorded 0.071. The
-  0.071 was measuring GRPO's per-rule starvation, not capacity. The
-  sequential gated loop lands **0.027** below the pooled oracle on seed 1
-  and **0.184** below it on seed 2, so the pooled oracle is a real upper
-  bound that the sequential loop approaches without reaching - which is the
-  expected ordering, and seed 1 came closer to it than seed 2 did.
+  0.071 was measuring GRPO's per-rule starvation, not capacity, and this run
+  puts a number on the gap rather than leaving it as an argument:
+  `joint_oracle` uses `steps_per_cycle * cycles` under either regime, but
+  `sft_cycle_opts` sets `batch_size = 128` where `cycle_opts` sets 1, so the
+  SFT oracle is `9600 * 128 / 12` = about **102,400 record presentations per
+  rule** against the GRPO oracle's ~240 steps per rule - on the same code
+  path, the same rules and the same probe sets. This file's own frozen base
+  needed 48,000 per rule; the SFT oracle is above that floor and the GRPO
+  oracle is orders of magnitude below it. (Presentations, not distinct
+  records: `SftConfig::seqs` writes 30,000 records over the 12 pooled rules,
+  so each is seen roughly 41 times.) The sequential gated loop lands
+  **0.027** below the pooled oracle on seed 1 and **0.184** below it on seed
+  2, so on both runs the pooled oracle sits above the sequential loop and is
+  approached without being reached - the expected ordering, with seed 1
+  closer than seed 2. Two runs is an observed ordering, not an established
+  bound; nothing here proves the sequential loop cannot exceed a pooled
+  oracle on some seed.
 - P19d's E1 pooled-SFT figure was **0.910** on 192 probes; the same pooled
   arrangement measured here on 576 probes reaches 0.959 and 0.999. Those
   three numbers are three points from different budgets and probe counts and
@@ -2513,3 +2630,46 @@ file.
 `--regime grpo` with no flags still reproduces the recorded GRPO trajectory
 row for row - is unaffected and was not re-run here, because nothing in the
 tree moved between P19e's verification of it and this measurement.
+
+### Verified, second pass - what a documentation review re-measured
+
+A later precision pass re-checked this section against the code and against
+fresh runs, and the corrections it made are marked inline above rather than
+applied silently. What it ran:
+
+- **`--regime sft --seed 2`, again, end to end.** Reproduced the recorded
+  seed-2 run digit for digit on every printed column except wall clock; its
+  trajectory and matrix are now printed above so the per-cell claims are
+  checkable. Both rejected cycles landed in the same places for the same
+  cause.
+- **The cue-independent ceiling, measured instead of derived.** All 60
+  ordered triples scored with `PositionCopyVerifier` against the 576 real
+  frozen probes, out of tree against `brain-rl` as a path dependency so
+  nothing in `crates/` moved. This is what corrected 0.25 to 0.310 in check
+  4 and flipped how the last-task-only control reads.
+- **`bwt`/`acc` recomputed from both printed matrices** (`continual.rs`
+  defines them as Lopez-Paz and Ranzato's ACC and BWT). Seed 1: ACC 0.9325,
+  BWT -0.0691. Seed 2: ACC 0.8158, BWT -0.050 from 2-decimal cells. This is
+  what surfaced the cross-seed BWT comparability problem.
+- **The shortcut correlations recomputed on all three trajectories.** GRPO
+  0.936 / 0.988 over the two windows, seed 1 r = 0.0757 MAE 0.219, seed 2
+  r = 0.0076 MAE 0.242, all n = 11 over cycles 2-12. Every figure this
+  section already reported held.
+- **The `ln(16)/6` loss floor derived against `data::loader`'s actual
+  masking** rather than asserted: 6 supervised targets per window, exactly
+  one of them a uniform-over-16 content token. It holds.
+- **Two doc comments in `crates/rl/src/continual.rs` were wrong and are
+  fixed here** (comments only, no logic): `rehearsal_pool` said a
+  cue-independent policy "scores near zero" on the cycle-1 background half,
+  where it measures 0.452; and `joint_oracle` said a LOW oracle ACC licenses
+  reading the loop's BWT as a capacity result, which is exactly the
+  inference P19d retracted. `examples/continual_learning.rs`'s module doc
+  carried the same retracted capacity reading and an unscoped "capability
+  does NOT accumulate", both now regime-scoped.
+
+`cargo check -p brain-rl --all-targets --features qwen3`, `cargo clippy -p
+brain-rl --all-targets --features qwen3` (clean on brain-rl; the only
+warnings are pre-existing ones in `brain-gguf`), `cargo doc -p brain-rl
+--no-deps` (no new link warnings) and `cargo check --workspace --all-targets
+--exclude brain-vulkan` all pass. The `no-doc-citations`, `no-machine-paths`
+and `no-em-dash` gates pass on the touched files.

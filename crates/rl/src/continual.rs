@@ -768,9 +768,19 @@ const POOL_SALT: u64 = 0x00A1_1CE5;
 /// anti-forgetting profile the retention matrix rewards, with no scheduler.
 ///
 /// At `k = 0` the pool is the background rules ALONE, and that is the case
-/// that matters most: those are cues the frozen base already solves, so a
-/// cue-independent policy scores near zero on half the mixture from the first
-/// step, and cycle 1 stops being solvable by the shortcut.
+/// that matters most: those are cues the frozen base already solves, so half
+/// the mixture penalizes the cue-independent shortcut from the first step and
+/// cycle 1 stops being solvable by it.
+///
+/// The size of that penalty is measured, and it is SMALLER than "the shortcut
+/// scores zero here" - a claim this comment used to make. At `rehearsal = 4`
+/// the background rules are `picks(0,1,3)`, `(0,2,3)`, `(0,3,4)` and
+/// `(1,0,2)`, each sharing one or two of its three positions with
+/// `picks(0,1,2)`, so the shortcut still scores 0.686 / 0.375 / 0.374 / 0.374
+/// on them (mean 0.452), for a mixture mean of 0.726 against the 1.000 a
+/// cue-conditional policy gets - not the 0.53 a pool of position-disjoint
+/// rules would give. Enough to make cue-conditionality strictly better, which
+/// is all cycle 1 needs, and not a floor.
 fn rehearsal_pool<C: Curriculum>(curr: &C, cycle: usize) -> Vec<SftSource> {
     (0..cycle).map(SftSource::Cycle).chain((0..curr.rehearsal_len()).map(SftSource::Rehearsal)).collect()
 }
@@ -1178,8 +1188,19 @@ fn train_from<M: Model, O: model::Objective<M>>(base: &Path, objective: O, opts:
 /// to hold N rules at once" are indistinguishable, and they have opposite
 /// fixes (change the training regime vs. buy more rank). A high oracle ACC
 /// says capacity is not the binding constraint, so a low loop BWT is a
-/// forgetting result; a low oracle ACC says the opposite and the loop's BWT
-/// must be read as a capacity result.
+/// forgetting result.
+///
+/// The converse does NOT hold, and this comment used to claim it did. A LOW
+/// oracle ACC is not a capacity result either, because this function spends
+/// `steps_per_cycle * cycles` on `cycles` pooled rules - i.e. it hands each
+/// rule the same budget ONE sequential cycle already gives it, not a larger
+/// one. Under [`Regime::Grpo`] (`batch_size` 1) that starves the oracle: the
+/// recorded 12-cycle study's oracle scored 0.071, and the SAME rank-8 adapter
+/// on the SAME 12 rules reached 0.910 once the per-rule budget was raised to
+/// the density the frozen base's own pretraining used. Under [`Regime::Sft`]
+/// (`batch_size` 128) the same call is above that density and measures 0.959
+/// and 0.999 on two seeds. So a low oracle ACC means "capacity OR per-rule
+/// supervision", and only a high one is a clean verdict.
 pub fn joint_oracle<M: Model, C: Curriculum>(spec: &StudySpec, curr: &C, cfg: &StudyConfig) -> std::io::Result<f64> {
     let (_, completion_len) = curr.shape();
     let block = block_of::<M>(spec.base_checkpoint);
