@@ -638,7 +638,7 @@ clean on every touched file (pre-existing warnings elsewhere, e.g.
 `crates/gguf/src/kquant.rs`, are untouched by this phase). `cargo check
 --workspace --all-targets --exclude brain-vulkan` clean.
 
-## P12 - `Grpo` objective (and RFT/STaR as its degenerate case) - TODO
+## P12 - `Grpo` objective (and RFT/STaR as its degenerate case) - DONE
 
 `crates/rl/src/objective/grpo.rs`: group rollout via P10/P11, per-group
 advantage `A_i = (r_i - mean_r)/(std_r + 1e-4)` with zero-variance groups
@@ -646,21 +646,64 @@ dropped (an all-right or all-wrong group contributes nothing - this is
 what makes GRPO cheap here), the clipped importance-ratio weight and
 optional k3 KL-to-reference term from the keystone derivation above, using
 **precomputed** reference logprobs (no co-resident reference model needed
-for a frozen reference - only its constant logprobs). Plain
-rejection-sampling/STaR training is the same code with uniform weights and
-one kept completion per prompt, deduplicated (over-weighting easy prompts
-by keeping every correct sample is the classic STaR collapse mode).
+for a frozen reference - only its constant logprobs, threaded through as a
+per-completion closure the caller attaches via `Grpo::with_reference`,
+called once per sampled completion). Plain rejection-sampling/STaR
+training is the same `token_term` weight formula with uniform (`1.0`)
+advantage and one kept completion per prompt, deduplicated via bounded
+rejection sampling (`group_size == 1`) - not a second implementation next
+to it (over-weighting easy prompts by keeping every correct sample is the
+classic STaR collapse mode, avoided by keeping at most one).
 
-Gate: a **local `CheckModel` harness** (12 existing precedents for
-composite, non-`Model::forward` objectives, e.g. `crates/gradcheck/src/
-clip.rs:112`) whose `loss()` recomputes the true clipped surrogate on the
-host and whose `backward()` runs the weighted-CE backward, so finite
-differences test the real objective, not a stand-in - the blanket `impl<M:
-Model> CheckModel` does not apply here by design, since GRPO's `forward()`
-!= what its `backward()` differentiates. Known, documented gotcha: the
-clip indicator is piecewise-constant, so FD legitimately disagrees for any
-token within some margin of the `1±ε` boundary; the harness asserts no
-sampled token sits inside that margin rather than loosening the tolerance.
+**One implementation deviation from the spec, forced by the actual
+`model::Model::logits_all` contract, not a shortcut.** Every current
+weighted-loss-capable `Model::logits_all` impl (`qwen3::Qwen`, `gpt2::Gpt`)
+asserts `self.b == 1` - `model::rollout::Rollout` is a single-sequence,
+re-prefill-per-sample oracle by design. A `Model` is constructed once at a
+fixed `(b, t)`, so the same instance a `Grpo::micro_step` call trains
+cannot also be the one a `group_size`-completion group is rolled out from
+unless `b == 1` throughout. `Grpo::micro_step` therefore pops one already-
+sampled, already-scored row off an internal queue and trains it (one
+row = one forward/backward, matching the actual per-sequence rollout
+primitive); when the queue is empty it samples and scores a fresh group
+(or, for RFT/STaR, rejection-samples one completion) and refills. The
+existing `model::train::fit_with` grad-accumulation loop (`opts.grad_accum`
+set to a multiple of `group_size`) is what turns a run of `group_size`
+such micro-steps back into one optimizer step over the whole group - no
+second accumulation mechanism was invented for this.
+
+Gate: a **local `CheckModel` harness** (`crates/rl/tests/
+grpo_gradcheck.rs`, following `crates/gradcheck/src/clip.rs`'s shape) whose
+`loss()` recomputes the true clipped surrogate (+ k3 KL) on the host via
+the exact same `token_term` function `Grpo::micro_step` calls, and whose
+`backward()` runs the ordinary weighted-CE backward - the blanket `impl<M:
+Model> CheckModel for M` does not apply here by design, since
+`Qwen::forward()`'s own return value (computed before the true per-token
+weight is known) is not the scalar `backward()` ends up differentiating.
+Documented gotcha: the clip indicator is piecewise-constant, so FD
+legitimately disagrees for any token within some margin of the `1±eps`
+boundary; the harness asserts every sampled (non-KL-only) token's base-
+point ratio sits outside that margin before ever calling
+`directional_check`, rather than loosening the tolerance.
+
+**Verified**: `cargo test -p brain-rl --lib objective::grpo` - 12 unit
+tests (`group_advantages`'s z-score/zero-variance-drop/size-one-uniform
+cases, every `token_term` clip branch including the "KL applies even at
+zero advantage" case, and `pack_row`'s alignment + truncation). `cargo
+test -p brain-rl --test grpo_gradcheck` - the gate above, green, `rel`
+errors up to 5.3e-2 (workspace gate is `(4e-3, 8e-2)`), zero dead
+gradients, on a tiny `qwen3::Qwen` with non-uniform positive/negative/
+exact-zero advantages and a nonzero k3 KL term. `cargo test -p brain-rl
+--test grpo_objective` - two end-to-end plumbing tests (`group_size = 2`
+and the RFT/STaR `group_size = 1` path) driving a real tiny `Qwen` through
+`model::fit_with` against a small deterministic `Environment`/`Verifier`,
+asserting finite losses throughout. `cargo test -p brain-rl` (whole crate,
+including the pre-existing P3/P5/P11 suites) - 29 passed (22 lib + 2
+`continuous_cycle` + 1 `grpo_gradcheck` + 2 `grpo_objective` + 2
+`qwen3_fit_weighted`). `cargo clippy -p
+brain-rl --all-targets` clean on every touched file (the only remaining
+warnings are pre-existing, in `crates/gguf`, untouched by this phase).
+`cargo check --workspace --all-targets --exclude brain-vulkan` clean.
 
 ## P13 - `Dpo` objective - TODO
 

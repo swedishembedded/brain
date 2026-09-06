@@ -1743,6 +1743,7 @@ dependencies = [
  "brain-atif",
  "brain-checkpoint",
  "brain-data",
+ "brain-gradcheck",
  "brain-model",
  "brain-qwen3",
  "serde",

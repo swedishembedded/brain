@@ -20,3 +20,6 @@ serde_json.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# `tests/grpo_gradcheck.rs` - GRPO's local `CheckModel` harness (self-improve
+# roadmap P12's gate).
+brain-gradcheck.workspace = true
