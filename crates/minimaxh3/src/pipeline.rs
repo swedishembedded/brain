@@ -41,6 +41,7 @@
 use vae::blocks::Tensors;
 
 use crate::config::{H3TransformerConfig, TAG_AUDIO, TAG_VIDEO};
+use crate::block::Ctx;
 use crate::model::{H3Transformer, PackedInputs};
 use crate::schedule::{DualSchedule, H3Scheduler};
 use crate::video_vae::VideoVaeConfig;
@@ -787,6 +788,17 @@ fn generate(ckpt: &H3Checkpoint, text: &TextConditioning, keyframes: &[KeyframeC
     // what actually lets `device` name a real GPU here at all, not only
     // "cpu": the eager load's ~132GB fp32 resident footprint never fits in
     // any single GPU's VRAM on this box, streaming's ~2.6GB/block does.
+    //
+    // The device is opened ONCE here, outside the step loop, and reused for
+    // every step - `forward_streaming` takes an already-open `&Ctx` for
+    // exactly this reason. Opening a fresh device per step (as an earlier
+    // version of this loop did, since `forward_streaming` used to take a
+    // device string and build its own `Ctx` internally) OOM'd a 24GB P40
+    // partway through a real 16-step generation: wgpu gives no guarantee
+    // that one device's resources are reclaimed before the next opens, so
+    // 16 devices in sequence accumulated instead of one device's steady-
+    // state footprint repeating.
+    let streaming_ctx = model.is_none().then(|| Ctx::new(device));
     let mut sched = DualSchedule::new();
     sched.set_timesteps(opts.num_inference_steps);
     let num_steps = sched.num_steps();
@@ -811,7 +823,7 @@ fn generate(ckpt: &H3Checkpoint, text: &TextConditioning, keyframes: &[KeyframeC
         };
         let out = match model {
             Some(m) => m.forward(&inp),
-            None => H3Transformer::forward_streaming(ckpt.dit_tensors, dit_cfg, device, &inp),
+            None => H3Transformer::forward_streaming(ckpt.dit_tensors, dit_cfg, streaming_ctx.as_ref().expect("streaming_ctx is Some whenever model is None"), &inp),
         };
 
         let gen_video_pred = &out.video[num_condition_video_rows * video_patch_dim..];

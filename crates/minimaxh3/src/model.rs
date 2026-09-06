@@ -264,15 +264,23 @@ impl H3Transformer {
     /// single GPU's VRAM on this box; streaming caps the per-step footprint
     /// at one block's weights (~2.6GB at real dimensions) regardless of
     /// which device runs the compute.
-    pub fn forward_streaming(tensors: &dyn checkpoint::TensorSource, cfg: &H3TransformerConfig, device: Option<&str>, inp: &PackedInputs) -> H3Output {
-        Self::forward_streaming_with_taps(tensors, cfg, device, inp).0
+    ///
+    /// Takes an ALREADY-OPEN `&Ctx`, never a device string - a caller
+    /// driving a real multi-step denoise loop must open the device ONCE
+    /// outside the loop and reuse it every step. A real-weight 384x384/
+    /// 16-step generation OOM'd a 24GB P40 when this instead called
+    /// `Ctx::new(device)` internally on every step (opening 16 separate wgpu
+    /// devices in sequence, with no guarantee the previous one's resources
+    /// were reclaimed before the next opened) - the fix is structural, not a
+    /// tighter memory budget: one device, reused.
+    pub fn forward_streaming(tensors: &dyn checkpoint::TensorSource, cfg: &H3TransformerConfig, ctx: &Ctx, inp: &PackedInputs) -> H3Output {
+        Self::forward_streaming_with_taps(tensors, cfg, ctx, inp).0
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn forward_streaming_with_taps(tensors: &dyn checkpoint::TensorSource, cfg: &H3TransformerConfig, device: Option<&str>, inp: &PackedInputs) -> (H3Output, H3Taps) {
-        let ctx = Ctx::new(device);
-        let cx = &ctx;
-        let dev = |name: &str| block::load_dev(tensors, &ctx, name);
+    pub fn forward_streaming_with_taps(tensors: &dyn checkpoint::TensorSource, cfg: &H3TransformerConfig, ctx: &Ctx, inp: &PackedInputs) -> (H3Output, H3Taps) {
+        let cx = ctx;
+        let dev = |name: &str| block::load_dev(tensors, ctx, name);
         let host = |name: &str| block::load_host(tensors, name);
         let hidden = cfg.hidden_size;
 
@@ -292,7 +300,7 @@ impl H3Transformer {
         let audio_proj_in_b = dev("audio_proj_in.bias");
         let context_embedder_w = dev("context_embedder.weight");
         let context_embedder_b = dev("context_embedder.bias");
-        let refiner_blocks: Vec<RefinerBlockWeights> = (0..cfg.num_refiner_layers as usize).map(|i| block::load_refiner_block(tensors, &ctx, i, hidden, cfg.ffn_dim)).collect();
+        let refiner_blocks: Vec<RefinerBlockWeights> = (0..cfg.num_refiner_layers as usize).map(|i| block::load_refiner_block(tensors, ctx, i, hidden, cfg.ffn_dim)).collect();
         let refiner_final_norm = dev("token_refiner.final_norm.weight");
 
         let video_in = cx.upload(inp.hidden_states);
@@ -344,7 +352,7 @@ impl H3Transformer {
         let mut tap_mid_block_out: Vec<f32> = Vec::new();
         let mut tap_last_block_out: Vec<f32> = Vec::new();
         for i in 0..n_layers {
-            let w = block::load_block(tensors, &ctx, i, hidden, cfg.ffn_dim);
+            let w = block::load_block(tensors, ctx, i, hidden, cfg.ffn_dim);
             let (out, attn_out) = block::block_forward(cx, &w, &h, &adaln_idx_dev, &cos, &sin, &temb_silu, num_timesteps, cfg, seq_len);
             if i == 0 {
                 tap_block0_attn_out = cx.gpu.read(&attn_out, (seq_len * hidden) as usize);
@@ -690,7 +698,8 @@ mod tests {
         eprintln!("running real DiT one block at a time on device={device_str:?} (never all 50 blocks resident - see H3Transformer::forward_streaming_with_taps's own doc) ...");
         let t0 = std::time::Instant::now();
         let reader = crate::caps::open_dit_reader(&paths.dit).unwrap_or_else(|e| panic!("open_dit_reader: {e}"));
-        let (out, taps) = H3Transformer::forward_streaming_with_taps(&reader, &cfg, Some(&device_str), &inp);
+        let ctx = crate::block::Ctx::new(Some(&device_str));
+        let (out, taps) = H3Transformer::forward_streaming_with_taps(&reader, &cfg, &ctx, &inp);
         eprintln!("  done in {:.1}s", t0.elapsed().as_secs_f32());
 
         assert_eq!(taps.mid_block_index, 25, "golden was dumped at mid_block=25; H3TransformerConfig::real()'s own 50 layers must still land on 25");
