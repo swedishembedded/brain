@@ -941,26 +941,67 @@ gate outcome from a real disk-reloaded A/B) through the continuous cycle is
 naturally P18's `rl::improve::cycle` integration work, not something to
 half-wire here without a real caller.
 
-## P17 - resumable LoRA adapters - TODO
+## P17 - resumable LoRA adapters - DONE
 
-`qwen3::finetune::finetune` always calls `init_weights` fresh
-(`finetune.rs:31-116`), so a LoRA adapter can never be incrementally
-continued across cycles - every call starts its adapter at zero-delta
-init; `qwen35::finetune` mirrors it verbatim ("mirrors `qwen3::finetune`
-exactly" per its own doc comment). No file-format change is needed to fix
-this: `Qwen::save` already writes every `ps.params` entry including
-`lora_a`/`lora_b`, and `cfg.to_json` already carries the LoRA config - the
-defect is confined to the *load* path. Adds `finetune_from(base, dir,
-opts, mode, out, resume: bool)`; when `resume && out.exists()`, loads `out`
-(not `base`) for both config and weights and asserts the checkpoint's
-`lora.rank`/`alpha` match the request, skipping the fresh-init overlay.
-Once P8 lands, the better end state is `qwen3::finetune` collapsing onto
-`fit_with(CausalLm)` and getting resume from `build_or_resume` for free.
+`qwen3::finetune::finetune` always called `init_weights` fresh, so a LoRA
+adapter could never be incrementally continued across cycles - every call
+started its adapter at zero-delta init; `qwen35::finetune` mirrored it
+verbatim ("mirrors `qwen3::finetune` exactly" per its own doc comment). No
+file-format change was needed to fix this: `Qwen::save` already writes
+every `ps.params` entry including `lora_a`/`lora_b`, and `cfg.to_json`
+already carries the LoRA config - the defect was confined to the *load*
+path. Both crates gain `finetune_from(base, dir, opts, mode, out, resume:
+bool)`; `finetune` becomes a one-line call to it with `resume: false`
+(every existing caller's behavior is unchanged). When `resume &&
+out.exists()`, architecture and weights come from `out` (not `base`), and
+for `Mode::Lora` the checkpoint's `lora.rank`/`alpha` are asserted equal to
+the request before the fresh-init overlay is skipped - a mismatch panics
+loudly rather than silently re-shaping the adapter. The
+`BRAIN_OFFLOAD_ADAM` env-var dance (needed for `FullOffload`'s Role
+assignment regardless of resume-vs-fresh) is hoisted above the resume/fresh
+branch so it still runs on the resume path. Once P8 lands, the better end
+state is `qwen3::finetune` collapsing onto `fit_with(CausalLm)` and getting
+resume from `build_or_resume` for free.
 
 Gate: train -> save -> resume -> train; loss keeps dropping and `‖B·A‖`
 grows monotonically across the resume boundary, mirroring `crates/qwen3/
 tests/lora_learning_gate.rs`'s own discipline of requiring the DATA to
-explain the result, not just "the adapter changed."
+explain the result, not just "the adapter changed." `finetune_from`'s own
+returned per-cycle `final` loss is a single noisy last-training-batch value
+(as `lora_learning_gate.rs` itself notes), too noisy to hang "loss keeps
+dropping" on directly - so the gate re-evaluates each checkpoint's mean CE
+over 30 fresh batches, reloaded from disk, instead. The decisive check is
+that a resumed cycle's *initial* loss (measured before any new training
+step, off the reloaded checkpoint) lands near the PREVIOUS cycle's 30-batch
+eval, not back up near a fresh adapter's initial loss - and a `resume=false`
+control run (same base/seed/data as cycle 1) is asserted to reproduce cycle
+1's own initial loss almost exactly first, so that comparison has a
+trustworthy yardstick. `‖B·A‖` (the tracked target leaf's LoRA delta
+Frobenius norm, reloaded from disk each time) is asserted to grow strictly
+across the resume boundary; each cycle is kept deliberately short (8 steps)
+so cycle 1 alone does not already reach this tiny task's loss floor, which
+is where the norm stops moving monotonically.
+
+**Verified**: `crates/qwen3/tests/lora_resume_gate.rs` (new) -
+`lora_resume_continues_the_same_adapter_instead_of_resetting_it` (cycle 1
+init `3.0993` -> 30-batch eval `2.9287`, control init `3.0993` matching
+cycle 1's initial loss exactly, cycle 2 resumed init `2.9287` -> 30-batch
+eval `2.9178`, `‖B·A‖` `0.294 -> 0.420`) and
+`resume_with_mismatched_lora_rank_panics` - `cargo test -p brain-qwen3
+--test lora_resume_gate` 2 passed. `crates/qwen35/tests/lora_resume_gate.rs`
+(new), the same gate for the hybrid GDN/attention decoder (cycle 1 init
+`3.2180` -> 30-batch eval `2.3981`, control matching exactly, cycle 2
+resumed -> 30-batch eval `2.3411`, `‖B·A‖` `3.051 -> 8.031`) - `cargo test
+-p brain-qwen35 --test lora_resume_gate` 1 passed. Confirmed the
+refactor left `finetune`'s own existing behavior byte-identical: `cargo
+test -p brain-qwen3 --test lora_learning_gate` and `--test lora_roundtrip`
+still green, `cargo test -p brain-qwen35 --test lora_roundtrip` still
+green, `cargo test -p brain-cli --test qwen_lora_finetune` still compiles
+and runs its early-skip path (needs real weights, as before). `cargo
+clippy -p brain-qwen3 -p brain-qwen35 --all-targets` clean on every touched
+file (pre-existing warnings in `crates/gguf` and `qwen35::
+int8_gguf_resident` untouched by this phase). `cargo check --workspace
+--all-targets --exclude brain-vulkan` clean.
 
 ## P18 - `rl::improve::cycle` - TODO
 
