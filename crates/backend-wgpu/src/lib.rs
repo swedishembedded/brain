@@ -582,6 +582,21 @@ struct DeviceShared {
     /// wasm the same way the trait itself does not declare the method there.
     #[cfg(not(target_arch = "wasm32"))]
     identity: backend_api::GpuIdentity,
+    /// Bytes belonging to [`TrackedBuffer`]s that Rust has already dropped
+    /// (their last `DeviceBuffer` handle went out of scope) but that
+    /// `poll_wait` has not yet proven the GPU is done with - the exact
+    /// quantity that silently piles up when a loop allocates and drops a
+    /// fresh set of device buffers every iteration without polling in
+    /// between (see [`WgpuBackend::poll_wait`]'s own doc: dropping a
+    /// `DeviceBuffer` does not itself reclaim VRAM on this backend). Never
+    /// grows from a buffer that is kept ALIVE on purpose (e.g. a resident
+    /// model's whole weight set) - only from ones actually abandoned - so
+    /// [`WgpuBackend::track`]'s threshold check on this counter has no
+    /// legitimate reason to ever fire; every time it has, in this engine's
+    /// own history, it was a real missing `poll_wait()`. `Arc` so a
+    /// [`TrackedBuffer`]'s `Drop` impl can reach it without holding the
+    /// whole device alive.
+    pending_reclaim_bytes: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl DeviceShared {
@@ -599,6 +614,7 @@ impl DeviceShared {
         plcache: Option<std::sync::Arc<PlCache>>,
         vendor_id: u32,
         #[cfg(not(target_arch = "wasm32"))] identity: backend_api::GpuIdentity,
+        pending_reclaim_bytes: std::sync::Arc<std::sync::atomic::AtomicU64>,
     ) -> DeviceShared {
         let device_lost = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         {
@@ -707,6 +723,7 @@ impl DeviceShared {
             faulted,
             #[cfg(not(target_arch = "wasm32"))]
             identity,
+            pending_reclaim_bytes,
         }
     }
 }
@@ -870,6 +887,49 @@ pub struct WgpuBackend {
     stats_write: std::sync::atomic::AtomicU64,
 }
 
+/// A `wgpu::Buffer` that reports its own byte size into the owning
+/// device's [`DeviceShared::pending_reclaim_bytes`] the moment Rust drops
+/// the LAST reference to it. Every buffer this backend hands out as a
+/// [`backend_api::DeviceBuffer`] is one of these, never a bare
+/// `wgpu::Buffer` - see [`wbuf`] for why every internal use of a
+/// `DeviceBuffer`'s inner buffer goes through this wrapper.
+///
+/// This is what makes "a streaming loop forgot to call `poll_wait()`
+/// between iterations" a structural, always-caught failure instead of a
+/// silent multi-gigabyte accumulation that only surfaces as a generic,
+/// unlocalized OOM panic hours into a run: see [`WgpuBackend::track`]'s
+/// own doc for the check this enables.
+pub struct TrackedBuffer {
+    buf: wgpu::Buffer,
+    pending: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl Drop for TrackedBuffer {
+    fn drop(&mut self) {
+        self.pending.fetch_add(self.buf.size(), std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Lets a caller that still holds a `TrackedBuffer` directly (rather than
+/// through the type-erased `DeviceBuffer`, e.g. this crate's own
+/// lower-level tests) pass `&TrackedBuffer` anywhere `&wgpu::Buffer` is
+/// expected, via ordinary deref coercion - no behavior here, purely a
+/// transparent view onto the wrapped buffer.
+impl std::ops::Deref for TrackedBuffer {
+    type Target = wgpu::Buffer;
+    fn deref(&self) -> &wgpu::Buffer {
+        &self.buf
+    }
+}
+
+/// Extract the underlying `wgpu::Buffer` from a `DeviceBuffer` this
+/// backend created - i.e. from a [`TrackedBuffer`], never a bare
+/// `wgpu::Buffer` (which is why this downcasts to `TrackedBuffer`, not to
+/// `wgpu::Buffer` directly).
+fn wbuf(b: &DeviceBuffer) -> &wgpu::Buffer {
+    &b.downcast_ref::<TrackedBuffer>().buf
+}
+
 impl WgpuBackend {
     // Field shims so the rest of this file (and its tests) keep reading
     // `self.device()` / `self.queue()` / … unchanged.
@@ -891,7 +951,14 @@ impl WgpuBackend {
     fn poll_wait_bounded(&self, what: &str) {
         let timeout = gpu_wait_timeout();
         match self.device().poll(wgpu::PollType::Wait { submission_index: None, timeout: Some(timeout) }) {
-            Ok(_) => {}
+            Ok(_) => {
+                // A completed wait proves the GPU has caught up with every
+                // submission recorded before it, so wgpu can now genuinely
+                // reclaim any `TrackedBuffer` whose last Rust reference
+                // already dropped - see `DeviceShared::pending_reclaim_bytes`'s
+                // own doc.
+                self.shared.pending_reclaim_bytes.store(0, std::sync::atomic::Ordering::Relaxed);
+            }
             Err(wgpu::PollError::Timeout) => {
                 if self.shared.device_lost.load(std::sync::atomic::Ordering::SeqCst) {
                     panic!("{what}: GPU device lost while waiting for a submit to complete");
@@ -1086,6 +1153,11 @@ impl WgpuBackend {
             self.shared.vendor_id,
             #[cfg(not(target_arch = "wasm32"))]
             self.shared.identity.clone(),
+            // Same physical device, same real VRAM budget - a different
+            // kernel set's `WgpuBackend` on this device must count against
+            // and be caught by the SAME pending-reclaim debt, not start a
+            // fresh counter that would hide the other kernel set's leaks.
+            self.shared.pending_reclaim_bytes.clone(),
         ));
         WgpuBackend::from_shared(shared, profile_on)
     }
@@ -1374,6 +1446,7 @@ impl WgpuBackend {
             info.vendor,
             #[cfg(not(target_arch = "wasm32"))]
             identity,
+            std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         ));
         WgpuBackend::from_shared(shared, profile_on)
     }
@@ -2014,28 +2087,58 @@ impl WgpuBackend {
         }
     }
 
-    pub fn storage(&self, n: u64) -> wgpu::Buffer {
-        self.device().create_buffer(&wgpu::BufferDescriptor {
+    /// Wrap a freshly created buffer for [`TrackedBuffer`]'s own drop-time
+    /// accounting, first refusing to hand out ANY new buffer if too much
+    /// previously-dropped memory is still unreclaimed.
+    ///
+    /// The threshold is this device's own `max_buffer_size` - the size of
+    /// the single largest buffer it can allocate at all - rather than an
+    /// arbitrary constant: once as much memory as the biggest possible ONE
+    /// buffer is sitting dropped-but-unreclaimed, a caller has almost
+    /// certainly forgotten to poll, on any hardware this runs on, and the
+    /// alternative is exactly the failure mode this exists to prevent - a
+    /// loop that silently accumulates gigabytes of abandoned buffers until
+    /// a real allocation fails with a generic, unlocalized "wgpu error: Out
+    /// of Memory" hours into a run (see [`Self::pending_reclaim_bytes`]'s
+    /// own doc for the real incidents this reproduces).
+    fn track(&self, buf: wgpu::Buffer) -> TrackedBuffer {
+        let pending = self.shared.pending_reclaim_bytes.load(std::sync::atomic::Ordering::Relaxed);
+        let ceiling = self.device().limits().max_buffer_size;
+        assert!(
+            pending <= ceiling,
+            "brain gpu: {pending} bytes of device buffers were dropped without an intervening \
+             poll_wait() (more than this device's own single-buffer ceiling of {ceiling} bytes). \
+             A loop that allocates fresh device buffers every iteration must call `poll_wait()` \
+             (or reuse buffers across iterations instead of allocating fresh ones) at least once \
+             per iteration - not only after the whole loop. See `WgpuBackend::poll_wait`'s own doc."
+        );
+        TrackedBuffer { buf, pending: self.shared.pending_reclaim_bytes.clone() }
+    }
+
+    pub fn storage(&self, n: u64) -> TrackedBuffer {
+        let buf = self.device().create_buffer(&wgpu::BufferDescriptor {
             label: None,
             size: (n * 4).max(4),
             usage: wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::COPY_DST
                 | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
-        })
+        });
+        self.track(buf)
     }
 
-    pub fn storage_init(&self, name: &str, data: &[f32]) -> wgpu::Buffer {
-        self.device().create_buffer_init(&wgpu::util::BufferInitDescriptor {
+    pub fn storage_init(&self, name: &str, data: &[f32]) -> TrackedBuffer {
+        let buf = self.device().create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some(name),
             contents: bytemuck::cast_slice(data),
             usage: wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::COPY_DST
                 | wgpu::BufferUsages::COPY_SRC,
-        })
+        });
+        self.track(buf)
     }
 
-    pub fn buffer(&self, label: &str, size: u64, usage: BufUsage) -> wgpu::Buffer {
+    pub fn buffer(&self, label: &str, size: u64, usage: BufUsage) -> TrackedBuffer {
         let mut u = wgpu::BufferUsages::empty();
         if usage.contains(BufUsage::STORAGE) {
             u |= wgpu::BufferUsages::STORAGE;
@@ -2049,12 +2152,13 @@ impl WgpuBackend {
         if usage.contains(BufUsage::UNIFORM) {
             u |= wgpu::BufferUsages::UNIFORM;
         }
-        self.device().create_buffer(&wgpu::BufferDescriptor {
+        let buf = self.device().create_buffer(&wgpu::BufferDescriptor {
             label: Some(label),
             size,
             usage: u,
             mapped_at_creation: false,
-        })
+        });
+        self.track(buf)
     }
 
     fn uniform(&self, data: &[u32]) -> wgpu::Buffer {
@@ -2075,14 +2179,15 @@ impl WgpuBackend {
     /// its bind group across many submits, changing only the uniform contents —
     /// avoiding the per-dispatch buffer/bind-group churn that otherwise exhausts
     /// the GPU memory aperture in long training loops.
-    pub fn uniform_dynamic(&self, len: usize) -> wgpu::Buffer {
+    pub fn uniform_dynamic(&self, len: usize) -> TrackedBuffer {
         let size = ((len * 4).div_ceil(16) * 16).max(16) as u64;
-        self.device().create_buffer(&wgpu::BufferDescriptor {
+        let buf = self.device().create_buffer(&wgpu::BufferDescriptor {
             label: Some("params"),
             size,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
-        })
+        });
+        self.track(buf)
     }
 
     /// Build one dispatch around an already-allocated uniform buffer: bind group
@@ -2226,7 +2331,11 @@ impl WgpuBackend {
     pub fn poll_wait_timeout(&self, timeout: std::time::Duration) -> bool {
         self.flush();
         match self.device().poll(wgpu::PollType::Wait { submission_index: None, timeout: Some(timeout) }) {
-            Ok(_) => true,
+            Ok(_) => {
+                // Same reclaim-point reasoning as `poll_wait_bounded`.
+                self.shared.pending_reclaim_bytes.store(0, std::sync::atomic::Ordering::Relaxed);
+                true
+            }
             Err(wgpu::PollError::Timeout) => false,
             Err(e) => panic!("device.poll failed: {e}"),
         }
@@ -2530,31 +2639,31 @@ impl Backend for WgpuBackend {
         DeviceBuffer::new(WgpuBackend::uniform_dynamic(self, len))
     }
     fn write(&self, buf: &DeviceBuffer, data: &[u32]) {
-        WgpuBackend::write(self, buf.downcast_ref::<wgpu::Buffer>(), data)
+        WgpuBackend::write(self, wbuf(buf), data)
     }
     fn write_at(&self, buf: &DeviceBuffer, offset_words: u64, data: &[u32]) {
-        WgpuBackend::write_at(self, buf.downcast_ref::<wgpu::Buffer>(), offset_words, data)
+        WgpuBackend::write_at(self, wbuf(buf), offset_words, data)
     }
     fn step(&self, kind: usize, bufs: &[&DeviceBuffer], params: &[u32], threads: u32) -> Step {
-        let bs: Vec<&wgpu::Buffer> = bufs.iter().map(|b| b.downcast_ref::<wgpu::Buffer>()).collect();
+        let bs: Vec<&wgpu::Buffer> = bufs.iter().map(|b| wbuf(b)).collect();
         Step::new(WgpuBackend::step(self, kind, &bs, params, threads))
     }
     fn step_sliced(&self, kind: usize, bufs: &[&DeviceBuffer], offsets: &[(u64, u64)], params: &[u32], threads: u32) -> Step {
-        let bs: Vec<&wgpu::Buffer> = bufs.iter().map(|b| b.downcast_ref::<wgpu::Buffer>()).collect();
+        let bs: Vec<&wgpu::Buffer> = bufs.iter().map(|b| wbuf(b)).collect();
         Step::new(WgpuBackend::step_sliced(self, kind, &bs, offsets, params, threads))
     }
     fn step_buf(&self, kind: usize, ubuf: &DeviceBuffer, bufs: &[&DeviceBuffer], threads: u32) -> Step {
-        let bs: Vec<&wgpu::Buffer> = bufs.iter().map(|b| b.downcast_ref::<wgpu::Buffer>()).collect();
-        Step::new(WgpuBackend::step_buf(self, kind, ubuf.downcast_ref::<wgpu::Buffer>(), &bs, threads))
+        let bs: Vec<&wgpu::Buffer> = bufs.iter().map(|b| wbuf(b)).collect();
+        Step::new(WgpuBackend::step_buf(self, kind, wbuf(ubuf), &bs, threads))
     }
     fn submit(&self, clears: &[&DeviceBuffer], steps: &[Step]) {
-        let cs: Vec<&wgpu::Buffer> = clears.iter().map(|b| b.downcast_ref::<wgpu::Buffer>()).collect();
+        let cs: Vec<&wgpu::Buffer> = clears.iter().map(|b| wbuf(b)).collect();
         let ss: Vec<WgpuStep> = steps.iter().map(|s| s.downcast_ref::<WgpuStep>().clone()).collect();
         WgpuBackend::submit(self, &cs, &ss);
     }
     #[cfg(not(target_arch = "wasm32"))]
     fn read(&self, buf: &DeviceBuffer, n: usize) -> Vec<f32> {
-        WgpuBackend::read(self, buf.downcast_ref::<wgpu::Buffer>(), n)
+        WgpuBackend::read(self, wbuf(buf), n)
     }
     #[cfg(not(target_arch = "wasm32"))]
     fn poll_wait(&self) {
@@ -2577,7 +2686,7 @@ impl Backend for WgpuBackend {
 #[cfg(target_arch = "wasm32")]
 impl WgpuBackend {
     pub async fn read_async_buf(&self, buf: &DeviceBuffer, n: usize) -> Vec<f32> {
-        self.read_async(buf.downcast_ref::<wgpu::Buffer>(), n).await
+        self.read_async(wbuf(buf), n).await
     }
 }
 
