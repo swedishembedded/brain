@@ -932,6 +932,12 @@ fn encode_clip_untiled(cx: &Ctx, cfg: &VideoVaeConfig, tensors: &Tensors, x: &[f
             ch = h2;
             cw = w2;
             cur_c = cout;
+            // Same reclaim-point requirement as the ViT decoder's per-layer
+            // loop (see `decode_clip_untiled`'s own comment): each resnet
+            // block uploads its own fresh weight buffers, never reused
+            // across blocks, so they must be proven finished with before
+            // the next block's buffers are allocated.
+            cx.gpu.poll_wait();
         }
         if cfg.temporal_downsample_factors[i] * cfg.spatial_downsample_factors[i] > 1 {
             let p = format!("encoder.down_blocks.{i}.downsamplers.0.conv");
@@ -940,6 +946,7 @@ fn encode_clip_untiled(cx: &Ctx, cfg: &VideoVaeConfig, tensors: &Tensors, x: &[f
             ct = t2;
             ch = h2;
             cw = w2;
+            cx.gpu.poll_wait();
         }
     }
 
@@ -986,6 +993,10 @@ fn encode_clip_in(cx: &Ctx, cfg: &VideoVaeConfig, tensors: &Tensors, x: &[f32], 
             let sub = spatial_window_host(x, cfg.in_channels, t, h, w, i_pos, i_len, j_pos, j_len);
             let (m, mt, mh, mw) = encode_clip_untiled(cx, cfg, tensors, &sub, t, i_len, j_len);
             row.push(Tile::new(m, 2 * cfg.latent_channels, mt, mh, mw));
+            // Belt-and-suspenders alongside `encode_clip_untiled`'s own
+            // per-block poll_wait: reclaim this tile's buffers before the
+            // next tile's encoder pass starts allocating.
+            cx.gpu.poll_wait();
         }
         rows.push(row);
     }
@@ -1320,6 +1331,18 @@ fn decode_clip_untiled(cx: &Ctx, cfg: &VideoVaeConfig, tensors: &Tensors, z: &[f
     for i in 0..cfg.decoder_num_layers as usize {
         let p = format!("decoder.transformer_blocks.{i}");
         hbuf = decoder_block_forward(cx, tensors, &p, &hbuf, &cos_dev, &sin_dev, &ones_hd, cfg, seq_len);
+        // Same reclaim-point requirement as `H3Transformer::forward_streaming`'s
+        // per-block loop: `decoder_block_forward` uploads roughly 18 fresh
+        // device buffers per call (`upload`/`storage_init`, never reused
+        // across layers), and dropping a `DeviceBuffer` does not itself free
+        // VRAM on the wgpu backend until a poll proves the GPU is done with
+        // it. Without this, one call's 36 layers alone hold onto ~10GB of
+        // never-reclaimed weight buffers (dim=2048/ffn=8192 per layer) plus
+        // activations - and `decode_clip_in`'s tile loop calls this function
+        // once per tile (4 times for a 2x2 grid), so a real decode OOM'd
+        // well before the outer per-chunk `poll_wait` in `decode`/`encode`
+        // ever got a chance to run.
+        cx.gpu.poll_wait();
     }
 
     let norm_out_w = upload(cx, tensors, "decoder.norm_out.weight");
@@ -1378,6 +1401,10 @@ fn decode_clip_in(cx: &Ctx, cfg: &VideoVaeConfig, tensors: &Tensors, z: &[f32], 
             let sub = spatial_window_host(z, cfg.latent_channels, t, h, w, i_pos / ratio, i_len / ratio, j_pos / ratio, j_len / ratio);
             let (p, pt, ph, pw) = decode_clip_untiled(cx, cfg, tensors, &sub, t, i_len / ratio, j_len / ratio);
             row.push(Tile::new(p, cfg.out_channels, pt, ph, pw));
+            // Belt-and-suspenders alongside `decode_clip_untiled`'s own
+            // per-layer poll_wait: reclaim this tile's buffers before the
+            // next tile's 36-layer forward pass starts allocating.
+            cx.gpu.poll_wait();
         }
         rows.push(row);
     }
