@@ -633,10 +633,9 @@ pub fn open_dit_reader(path: &str) -> Result<checkpoint::weightio::WeightReader,
 /// DiT resident while still re-reading these (hundreds of MB, cheap) VAEs
 /// per call - the same "not everything worth loading is worth CACHING"
 /// judgment `resident_wan.rs`'s own module doc states for its own VAE/T5.
-/// Per-channel VAE latent normalization defaults to `mean=0/std=1` (the
-/// reference's own registered default) - real per-channel values are not
-/// available from this port's current checkpoint download
-/// (`pipeline::encode_keyframe_condition`'s own doc states the same gap).
+/// The per-channel VAE latent normalization is read from each VAE's own
+/// `config.json` by [`read_latent_stats`] - see that function's doc for why a
+/// missing file is an error here rather than a `mean=0`/`std=1` fallback.
 pub struct VaeWeights {
     pub video_vae_tensors: vae::blocks::Tensors,
     pub video_vae_cfg: VideoVaeConfig,
@@ -648,19 +647,66 @@ pub struct VaeWeights {
     pub audio_latents_std: Vec<f32>,
 }
 
+/// Read a VAE component's own per-channel latent normalization out of its
+/// `config.json` (`latents_mean`/`latents_std`), checking both arrays are
+/// exactly `channels` long.
+///
+/// The reference applies these on both sides of the DiT - `encode_vae_condition`
+/// normalizes with `(latents - mean) / std` and `MiniMaxH3VideoDecodeStep` /
+/// `MiniMaxH3AudioDecodeStep` denormalize with `latents * std + mean` - so the
+/// diffusion model works in a whitened latent space and the VAE decoder never
+/// sees anything but the raw one.
+///
+/// **A missing or malformed `config.json` is an error, deliberately, and not a
+/// `mean=0`/`std=1` fallback.** Those two values are the IDENTITY of that
+/// affine transform, so falling back to them does not degrade the decode a
+/// little - it deletes the denormalization step entirely and hands the decoder
+/// a whitened latent it was never trained on, producing a wrong picture with
+/// no error anywhere. A default that is indistinguishable from a correct load
+/// but silently wrong is worse than a refusal, so this refuses. The real
+/// values are per-channel and nowhere near the identity: the released video
+/// VAE's means span -1.37..1.07 and its standard deviations 0.45..3.28.
+pub fn read_latent_stats(dir: &str, channels: usize) -> Result<(Vec<f32>, Vec<f32>), String> {
+    let path = format!("{dir}/config.json");
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("minimaxh3: cannot read {path} for the VAE latent normalization: {e}"))?;
+    let json: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("minimaxh3: cannot parse {path}: {e}"))?;
+    let field = |name: &str| -> Result<Vec<f32>, String> {
+        let array = json.get(name).and_then(|v| v.as_array()).ok_or_else(|| format!("minimaxh3: {path} has no `{name}` array - it cannot be the VAE config this port expects"))?;
+        let values: Vec<f32> = array.iter().map(|v| v.as_f64().map(|f| f as f32).ok_or_else(|| format!("minimaxh3: {path}: `{name}` holds a non-numeric entry"))).collect::<Result<_, _>>()?;
+        if values.len() != channels {
+            return Err(format!("minimaxh3: {path}: `{name}` has {} entries, expected {channels} (one per latent channel)", values.len()));
+        }
+        Ok(values)
+    };
+    // Not named `std`: that would shadow the crate root for the rest of this
+    // function.
+    let stds = field("latents_std")?;
+    if let Some(bad) = stds.iter().position(|&s| !(s.is_finite() && s > 0.0)) {
+        return Err(format!("minimaxh3: {path}: `latents_std[{bad}]` is {}, which cannot divide the encode side", stds[bad]));
+    }
+    let means = field("latents_mean")?;
+    if let Some(bad) = means.iter().position(|m| !m.is_finite()) {
+        return Err(format!("minimaxh3: {path}: `latents_mean[{bad}]` is {}", means[bad]));
+    }
+    Ok((means, stds))
+}
+
 impl VaeWeights {
     /// Load both VAEs from `paths`, at the real config numbers - two-way
-    /// import coverage via `crate::import`'s own functions.
+    /// import coverage via `crate::import`'s own functions - together with
+    /// each one's per-channel latent normalization ([`read_latent_stats`]).
     pub fn load(paths: &Paths) -> Result<VaeWeights, String> {
         let video_vae_cfg = VideoVaeConfig::real();
         let vocoder_cfg = crate::vocoder::VocoderConfig::h3_32khz();
         let video_vae_tensors = crate::import::import_video_vae(&paths.video_vae, &video_vae_cfg)?;
         let vocoder_tensors = crate::import::import_audio_vae_decoder(&paths.vocoder, &vocoder_cfg)?;
+        let (video_latents_mean, video_latents_std) = read_latent_stats(&paths.video_vae, video_vae_cfg.latent_channels as usize)?;
+        let (audio_latents_mean, audio_latents_std) = read_latent_stats(&paths.vocoder, vocoder_cfg.vae_latent_channels as usize)?;
         Ok(VaeWeights {
-            video_latents_mean: vec![0.0; video_vae_cfg.latent_channels as usize],
-            video_latents_std: vec![1.0; video_vae_cfg.latent_channels as usize],
-            audio_latents_mean: vec![0.0; vocoder_cfg.vae_latent_channels as usize],
-            audio_latents_std: vec![1.0; vocoder_cfg.vae_latent_channels as usize],
+            video_latents_mean,
+            video_latents_std,
+            audio_latents_mean,
+            audio_latents_std,
             video_vae_tensors,
             video_vae_cfg,
             vocoder_tensors,
@@ -1055,6 +1101,54 @@ mod tests {
         // larger-magnitude spread; a loose sanity bound, not a parity check.
         let max_abs = text.embeds.iter().fold(0.0f32, |m, &v| m.max(v.abs()));
         assert!(max_abs > 1.0, "real hidden state magnitude looks stub-like (max_abs={max_abs})");
+    }
+
+    /// The VAE latent normalization must come from the checkpoint, and must
+    /// not be the identity.
+    ///
+    /// This is the regression gate for a real defect: [`VaeWeights::load`]
+    /// used to hand `pipeline::generate` `mean=0`/`std=1` placeholders, which
+    /// are the IDENTITY of the affine transform the reference applies, so the
+    /// video VAE decoded a whitened latent it was never trained on and every
+    /// generated frame came out wrong - with nothing failing anywhere. The
+    /// two assertions below are the two halves of that bug: that the values
+    /// are read at all, and that they are not the identity that made the read
+    /// look unnecessary.
+    #[test]
+    fn vae_latent_normalization_is_read_from_the_checkpoint_and_is_not_the_identity() {
+        let Ok(root) = std::env::var("BRAIN_MINIMAXH3_DIR") else {
+            brain_testutil::skip("BRAIN_MINIMAXH3_DIR not set - no local MiniMax-H3 checkout to read VAE latent stats from");
+            return;
+        };
+        let paths = Paths::resolve(&root);
+        if !std::path::Path::new(&paths.video_vae).join("config.json").is_file() {
+            brain_testutil::skip(&format!("{}/config.json not found - video VAE not (yet) downloaded", paths.video_vae));
+            return;
+        }
+
+        let video_channels = VideoVaeConfig::real().latent_channels as usize;
+        let (mean, std) = read_latent_stats(&paths.video_vae, video_channels).unwrap_or_else(|e| panic!("video VAE latent stats: {e}"));
+        assert_eq!(mean.len(), video_channels);
+        assert_eq!(std.len(), video_channels);
+        assert!(mean.iter().all(|v| v.is_finite()) && std.iter().all(|v| v.is_finite()));
+        assert!(std.iter().all(|&s| s > 0.0), "every latent_std must be positive - it divides the encode side");
+        // The placeholders this test exists to keep out. Real per-channel
+        // stats are nowhere near the identity: the released video VAE's means
+        // span roughly -1.37..1.07 and its stds 0.45..3.28.
+        assert!(mean.iter().any(|&m| m.abs() > 0.1), "latents_mean looks like the all-zero placeholder: {mean:?}");
+        assert!(std.iter().any(|&s| (s - 1.0).abs() > 0.1), "latents_std looks like the all-one placeholder: {std:?}");
+
+        let audio_channels = crate::vocoder::VocoderConfig::h3_32khz().vae_latent_channels as usize;
+        if std::path::Path::new(&paths.vocoder).join("config.json").is_file() {
+            let (amean, astd) = read_latent_stats(&paths.vocoder, audio_channels).unwrap_or_else(|e| panic!("audio VAE latent stats: {e}"));
+            assert_eq!(amean.len(), audio_channels);
+            assert_eq!(astd.len(), audio_channels);
+            assert!(astd.iter().all(|&s| s > 0.0));
+            assert!(amean.iter().any(|&m| m.abs() > 0.01) || astd.iter().any(|&s| (s - 1.0).abs() > 0.1), "audio latents_mean/std look like the placeholders");
+        }
+
+        // A wrong channel count is a hard error, never a silent truncation.
+        assert!(read_latent_stats(&paths.video_vae, video_channels + 1).is_err(), "a channel-count mismatch must be refused");
     }
 
     /// `av_outcome`'s wire format round-trips through the shared clip codec,

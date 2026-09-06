@@ -555,10 +555,12 @@ pub struct KeyframeCondition {
 /// (`uint8` range as `f32`, matching `encode_vae_condition`'s own
 /// `pixels.div(255.0)`). `video_latents_mean`/`video_latents_std` are the
 /// video VAE's own per-channel latent normalization (`vae.config.
-/// latents_mean`/`latents_std` - real per-channel values live in the real
-/// checkpoint's `vae/config.json`, not yet downloaded per this crate's
-/// roadmap; pass `vec![0.0; latent_channels]`/`vec![1.0; latent_channels]`
-/// - the reference's own registered default - until they are).
+/// latents_mean`/`latents_std`), read from the checkpoint by
+/// [`crate::caps::read_latent_stats`]. They are a required input rather than
+/// something defaulted here: `mean=0`/`std=1` is the IDENTITY of this affine
+/// transform, so a default would not approximate the real values, it would
+/// delete the normalization step and silently feed the DiT a latent in the
+/// wrong space - see [`crate::caps::read_latent_stats`]'s own doc.
 ///
 /// **Deliberate deviation**: the reference SAMPLES the encoder's posterior
 /// (`posterior.sample(generator=...)`, seeded independently of the request);
@@ -1253,5 +1255,161 @@ mod tests {
         let text = tiny_text(2, dit_cfg.text_dim as usize, 24);
         let opts = tiny_gen_opts(25);
         assert!(fl2va(&ckpt, &text, &[], &opts).is_err());
+    }
+
+    // ------------------------------------------------------------------
+    // Real-geometry numeric parity for the pipeline GLUE
+    // ------------------------------------------------------------------
+
+    /// The geometry a real 128x128 / 124-frame `t2va` request resolves to -
+    /// the same constants `tools/minimaxh3_layout_dump_reference.py` dumps at.
+    const GOLDEN_LATENT_H: u32 = 8;
+    const GOLDEN_LATENT_W: u32 = 8;
+    const GOLDEN_LATENT_FRAMES: u32 = 37;
+    const GOLDEN_AUDIO_LATENTS: u32 = 207;
+    const GOLDEN_TEXT_TOKENS: usize = 37;
+    const GOLDEN_PATCH: [u32; 3] = [1, 2, 2];
+    const GOLDEN_LATENT_CHANNELS: u32 = 24;
+    const GOLDEN_STEPS: usize = 20;
+
+    /// `crate::model`'s real-weight golden proves the DiT's own block math is
+    /// right GIVEN a correctly packed input; it hand-builds that input, so
+    /// everything that ASSEMBLES it is invisible to it. This test closes that
+    /// gap: it replays the REAL installed `diffusers==0.40.0`
+    /// `build_packed_sequence` / `build_row_timesteps` / `MiniMaxH3Scheduler` /
+    /// `patchify_video_latents` outputs, dumped at the geometry an actual
+    /// generation runs at (not a toy - 37 latent frames wraps the
+    /// `(1,4,4,4,4)` rotary spacing seven times), against this module's own
+    /// equivalents.
+    ///
+    /// One thing this does NOT cover: the shift's `unique_consecutive` pass
+    /// never actually collapses anything at either of H3's two shifts - the
+    /// float32 grid stays strictly decreasing at every step count checked up
+    /// to 5000, so `sigmas.len() == num_inference_steps` throughout and that
+    /// branch is unreachable in practice. It is ported because the reference
+    /// has it, not because it fires.
+    ///
+    /// Both the `t2va` (no keyframes) and the `fl2va` (`first`+`last` anchors,
+    /// which is what exercises the pairwise-summed `"last"` anchor time and
+    /// the conditioning-row pinning) layouts are covered.
+    #[test]
+    fn pipeline_layout_matches_the_real_reference_numerically() {
+        let fixture_dir = brain_testutil::testdata_path("golden/minimaxh3/layout");
+        let fixture_file = fixture_dir.join("minimaxh3_layout.safetensors");
+        if !fixture_file.is_file() {
+            brain_testutil::skip(&format!("{} not found - run tools/minimaxh3_layout_dump_reference.py --out {}", fixture_file.display(), fixture_dir.display()));
+            return;
+        }
+        let Some(src) = brain_testutil::golden::Source::open(&fixture_dir, "tools/minimaxh3_layout_dump_reference.py") else {
+            return;
+        };
+        let ok = src.require(&[
+            ("latent_height", GOLDEN_LATENT_H as i64),
+            ("latent_width", GOLDEN_LATENT_W as i64),
+            ("num_latent_frames", GOLDEN_LATENT_FRAMES as i64),
+            ("num_audio_latents", GOLDEN_AUDIO_LATENTS as i64),
+            ("num_text_tokens", GOLDEN_TEXT_TOKENS as i64),
+            ("patch_t", GOLDEN_PATCH[0] as i64),
+            ("patch_h", GOLDEN_PATCH[1] as i64),
+            ("patch_w", GOLDEN_PATCH[2] as i64),
+            ("audio_channels", AUDIO_CHANNELS as i64),
+            ("latent_channels", GOLDEN_LATENT_CHANNELS as i64),
+            ("num_inference_steps", GOLDEN_STEPS as i64),
+            ("video_shift_x1000", (crate::schedule::H3_VIDEO_SHIFT * 1000.0) as i64),
+            ("audio_shift_x1000", (crate::schedule::H3_AUDIO_SHIFT * 1000.0) as i64),
+        ]);
+        if !ok {
+            return;
+        }
+
+        let raw = checkpoint::safetensors::read(fixture_file.to_str().expect("fixture path is valid UTF-8")).expect("read golden fixture");
+        let fx: std::collections::HashMap<String, checkpoint::safetensors::StTensor> = raw.into_iter().map(|t| (t.name.clone(), t)).collect();
+        let get = |name: &str| -> &[f32] { &fx.get(name).unwrap_or_else(|| panic!("golden fixture entry {name:?} missing")).data };
+        let get_u32 = |name: &str| -> Vec<u32> { get(name).iter().map(|&v| v.round() as u32).collect() };
+
+        let mut r = brain_testutil::parity::Report::new(0.9999);
+
+        for (prefix, anchors) in [("t2va", &[][..]), ("fl2va", &[Anchor::First, Anchor::Last][..])] {
+            let text_tags = get_u32(&format!("{prefix}_text_token_tags"));
+            assert_eq!(text_tags.len(), GOLDEN_TEXT_TOKENS, "{prefix}: golden text-tag count");
+            let packed = build_packed_sequence(&text_tags, GOLDEN_LATENT_FRAMES, GOLDEN_LATENT_H, GOLDEN_LATENT_W, GOLDEN_AUDIO_LATENTS, GOLDEN_PATCH, AUDIO_CHANNELS, anchors);
+
+            // The rotary grid is the highest-value comparison here: it is
+            // per-token, and lesson #49's own generalizable point is that a
+            // wrong per-token quantity produces confident structured garbage
+            // rather than an obviously broken picture.
+            r.check(&format!("{prefix} position_ids"), &packed.position_ids, get(&format!("{prefix}_position_ids")));
+
+            // Index/tag arrays are exact integers, so they are asserted
+            // equal outright rather than run through a cosine.
+            assert_eq!(packed.token_tags, get_u32(&format!("{prefix}_token_tags")), "{prefix}: token_tags");
+            assert_eq!(packed.video_indices, get_u32(&format!("{prefix}_video_indices")), "{prefix}: video_indices");
+            assert_eq!(packed.audio_indices, get_u32(&format!("{prefix}_audio_indices")), "{prefix}: audio_indices");
+            assert_eq!(packed.text_indices, get_u32(&format!("{prefix}_text_indices")), "{prefix}: text_indices");
+            let counts = get_u32(&format!("{prefix}_row_counts"));
+            assert_eq!(packed.num_condition_video_rows as u32, counts[0], "{prefix}: num_condition_video_rows");
+            assert_eq!(packed.num_condition_audio_rows as u32, counts[1], "{prefix}: num_condition_audio_rows");
+            assert_eq!(packed.token_tags.len() as u32, counts[2], "{prefix}: sequence_length");
+
+            // The full per-step row-timestep plan, driven off this port's own
+            // two schedules exactly as `generate` drives it.
+            let mut sched = DualSchedule::new();
+            sched.set_timesteps(GOLDEN_STEPS);
+            let unique_counts = get_u32(&format!("{prefix}_row_unique_counts"));
+            let golden_unique = get(&format!("{prefix}_row_unique_timesteps"));
+            let golden_indices = get_u32(&format!("{prefix}_row_timestep_indices"));
+            assert_eq!(sched.num_steps(), unique_counts.len(), "{prefix}: step count");
+            let seq_len = packed.token_tags.len();
+            let mut cursor = 0usize;
+            for step in 0..sched.num_steps() {
+                let (video_ts, audio_ts) = sched.current_timesteps(step);
+                let condition_video_ts = video_ts.max(KEYFRAME_NOISE_AUG);
+                let (unique_ts, ts_idx) = build_row_timesteps(&packed.video_indices, &packed.audio_indices, packed.num_condition_video_rows, packed.num_condition_audio_rows, packed.text_indices.len(), video_ts, audio_ts, condition_video_ts, 1.0);
+                let n = unique_counts[step] as usize;
+                assert_eq!(unique_ts.len(), n, "{prefix} step {step}: number of distinct timesteps");
+                // A handful of scalars, one of which is legitimately exactly
+                // 0.0 (at step 0 the shift maps sigma=1 to 1 under both
+                // shifts, so t = 1 - sigma = 0 for video and audio alike).
+                // Compared elementwise rather than through the cosine report,
+                // which - rightly - refuses an all-zero reference as
+                // degenerate.
+                for (k, (&got, &want)) in unique_ts.iter().zip(&golden_unique[cursor..cursor + n]).enumerate() {
+                    assert!((got - want).abs() <= 1e-6 * want.abs().max(1.0), "{prefix} step {step}: unique timestep {k} is {got}, reference has {want}");
+                }
+                assert_eq!(ts_idx, golden_indices[step * seq_len..(step + 1) * seq_len], "{prefix} step {step}: per-row timestep index");
+                cursor += n;
+            }
+            assert_eq!(cursor, golden_unique.len(), "{prefix}: consumed the whole ragged timestep plan");
+        }
+
+        // Both shifted-sigma schedules, plus one real Euler step each - the
+        // step is what catches a swapped sigma source or a flipped velocity
+        // sign, neither of which the sigma grid alone can see.
+        for (name, shift) in [("video", crate::schedule::H3_VIDEO_SHIFT), ("audio", crate::schedule::H3_AUDIO_SHIFT)] {
+            let mut sched = H3Scheduler::new(shift);
+            sched.set_timesteps(GOLDEN_STEPS);
+            r.check(&format!("sched {name} sigmas"), sched.sigmas(), get(&format!("sched_{name}_sigmas")));
+            r.check(&format!("sched {name} timesteps"), sched.timesteps(), get(&format!("sched_{name}_timesteps")));
+            let step_index = get_u32(&format!("sched_{name}_step_index"))[0] as usize;
+            let sample = get(&format!("sched_{name}_step_sample"));
+            let velocity = get(&format!("sched_{name}_step_velocity"));
+            let stepped = sched.step(velocity, sched.timesteps()[step_index], sample, step_index);
+            r.check(&format!("sched {name} euler step"), &stepped, get(&format!("sched_{name}_step_out")));
+        }
+
+        let scaled = H3Scheduler::scale_noise(get("scale_noise_clean"), KEYFRAME_NOISE_AUG, get("scale_noise_noise"));
+        r.check("scale_noise at keyframe_noise_aug", &scaled, get("scale_noise_out"));
+
+        // The DiT-level patchify at the real latent shape, and its inverse
+        // against the reference's OWN reshape/permute (not merely against
+        // this module's forward direction, which a matched pair of wrong
+        // permutations would satisfy).
+        let latents = get("patchify_latents");
+        let rows = patchify_video(latents, GOLDEN_LATENT_CHANNELS, GOLDEN_LATENT_FRAMES, GOLDEN_LATENT_H, GOLDEN_LATENT_W, GOLDEN_PATCH);
+        r.check("patchify_video rows", &rows, get("patchify_rows"));
+        let back = unpatchify_video(get("patchify_rows"), GOLDEN_LATENT_CHANNELS, GOLDEN_LATENT_FRAMES, GOLDEN_LATENT_H, GOLDEN_LATENT_W, GOLDEN_PATCH);
+        r.check("unpatchify_video latents", &back, get("patchify_roundtrip"));
+
+        r.finish("minimaxh3 pipeline layout/schedule/patchify vs the real reference");
     }
 }

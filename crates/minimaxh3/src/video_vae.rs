@@ -85,6 +85,22 @@
 //! attention has no cross-tile receptive field), so this is a real, honestly
 //! recorded scope cut for a later pass, not a hidden approximation.
 //!
+//! What that costs, stated concretely, because "not numerically equivalent"
+//! undersells it. `_split_tiles` returns a SINGLE full-size tile whenever the
+//! tile size covers the frame (`if tile_size >= length: return [0], [length],
+//! []`), so below 256 pixels on both axes the tiled and untiled paths are the
+//! same computation and this cut costs nothing. Above it they diverge
+//! structurally rather than numerically: the reference always hands its ViT
+//! decoder a 256x256-pixel tile, i.e. a 16x16 LATENT grid, and that decoder's
+//! rotary coordinates are normalized to `[-1, 1)` across whatever grid it is
+//! given. Passing the whole frame instead stretches every positional
+//! relationship the 36 attention layers were trained on by the frame-to-tile
+//! ratio, while the per-token `proj_out` still paints a hard 16x16 pixel
+//! block - which shows up as a regular patch grid, not as blur. So this path
+//! is correct at small canvases and progressively wrong above 256 pixels,
+//! which is the opposite of the usual "approximation degrades gracefully"
+//! intuition and is why it is worth spelling out here.
+//!
 //! Swedish Embedded AB implements this video variational autoencoder port
 //! for its clients. If your team needs expertise in porting causal 3D CNN /
 //! ViT video codecs to new inference stacks, you can procure our services by
@@ -749,9 +765,28 @@ fn rope_partial(cx: &Ctx, buf: &DeviceBuffer, cos: &DeviceBuffer, sin: &DeviceBu
 fn attention(cx: &Ctx, q: &DeviceBuffer, k: &DeviceBuffer, v: &DeviceBuffer, seq_len: u32, heads: u32, head_dim: u32) -> DeviceBuffer {
     let inner = heads * head_dim;
     let scale = 1.0 / (head_dim as f32).sqrt();
-    let scores = cx.gpu.storage((heads * seq_len * seq_len) as u64);
+    // `heads * seq_len * seq_len` is the score-matrix element count, and it
+    // does not fit in a u32 for a long sequence: at the real config's 32 heads
+    // it wraps past seq_len 11585. Computed in u64 and checked, so an
+    // oversized decode fails with this message instead of silently allocating
+    // a wrapped-around buffer and dispatching a wrapped-around thread count.
+    //
+    // The way to reach that here is a canvas wide enough that the untiled
+    // decode path (see this module's "Explicitly out of scope" doc - spatial
+    // tiling is not implemented) hands the ViT decoder the whole frame at
+    // once: the reference would have split it into 256x256 tiles of 16x16
+    // latents each and never built a sequence anywhere near this long.
+    let scores_len = heads as u64 * seq_len as u64 * seq_len as u64;
+    assert!(
+        scores_len <= u32::MAX as u64,
+        "video_vae::attention: {heads} heads x {seq_len}^2 attention scores ({scores_len} elements) overflows the u32 \
+         dispatch space. This is the untiled decode path meeting a frame the reference would have tiled - spatial \
+         tiling (`_split_tiles`/`_stitch_tiles`) is not implemented in this port, so decode is limited to canvases \
+         whose latent grid keeps the ViT sequence short."
+    );
+    let scores = cx.gpu.storage(scores_len);
     cx.gpu.submit(&[], &[cx.gpu.step(K_ATTN_SCORES_QK, &[q, k, &scores], &[1, heads, seq_len, head_dim, inner, 0, f(scale)], heads * seq_len * seq_len)]);
-    let probs = cx.gpu.storage((heads * seq_len * seq_len) as u64);
+    let probs = cx.gpu.storage(scores_len);
     cx.gpu.submit(&[], &[cx.gpu.step(K_ATTN_SOFTMAX_BIDIR, &[&scores, &probs], &[1, heads, seq_len], heads * seq_len)]);
     let out = cx.gpu.storage((seq_len * inner) as u64);
     cx.gpu.submit(&[], &[cx.gpu.step(K_ATTN_APPLY_FULL, &[&probs, v, &out], &[1, heads, seq_len, head_dim, inner, inner], heads * seq_len * head_dim)]);
