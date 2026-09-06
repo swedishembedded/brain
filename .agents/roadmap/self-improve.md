@@ -19,9 +19,25 @@ loop needs regardless of who supplies the trajectories. This does **not**
 replace P6 - P6 is the real-sven-traffic proof and stays exactly as blocked
 as the note at the end of this file says. P7+ is what makes the machinery
 demonstrable on brain's own procedurally-generated, in-process-verifiable
-environments (see `.agents/roadmap/gauntlet.md`) without fabricating a
-stand-in for sven, which the same honesty discipline that deferred P6 would
-otherwise forbid. **Standing invariant, unchanged by any of this: brain
+environments without fabricating a stand-in for sven, which the same
+honesty discipline that deferred P6 would otherwise forbid.
+
+Two corrections to that sentence, so it is not read as more than it says.
+(a) The environments it refers to are the ones that exist in this repo:
+P11's `Environment`/`Verifier` pairs and P19's position-copy family in
+`crates/rl/src/curriculum.rs`. `.agents/roadmap/gauntlet.md`'s
+five-environment suite is a DESIGN with zero lines of code, and nothing in
+this file has ever been run against it. (b) "Demonstrable" was cashed out in
+P19/P19c, and the result is mixed: the loop's mechanics close over 12
+sequential gated cycles, the retention matrix and plasticity control are
+instrumented and reported, and the gate is measurably better than a coin -
+but capability did NOT accumulate across those cycles at the one model
+scale, one architecture, one task family and one seed that were measured
+(final ACC 0.271 against the untrained base's own 0.354 on the same probes).
+Read the rollup section at the end of this file before quoting anything
+above it as a continuous-learning result.
+
+**Standing invariant, unchanged by any of this: brain
 never depends on sven.** `crates/atif` mirrors sven's trajectory format by
 hand-copying it (see P1) precisely so that stays true; every environment
 introduced from P11 on is self-contained inside brain with an in-process
@@ -1643,3 +1659,197 @@ Both examples run end to end on this box: continual_learning 900.8 s (12
 cycles + Arm 2 + Arm 3, cached base) and 535.7 s for the `--null-gate
 --skip-oracle` arm; autonomous_exploration 212.1 s per run, cold or with
 `--base`.
+
+## Continuous-learning validation - PARTIAL (rollup of P19 + P19c)
+
+This section exists because of a specific reporting failure earlier in this
+effort: a completed piece of work was summarized to the user as "brain can
+learn continuously end-to-end" when what had actually been validated was
+per-objective gradient math (P7-P15, real and solid) plus exactly ONE
+trained-and-promoted cycle and ONE separately-rejected cycle (P18) - two
+data points, never chained, one environment, one architecture, no retention
+measurement, no plasticity measurement, no live operation. P19 built the
+harness that measures the sequence and P19c made it runnable outside a test
+binary. **The measurement landed. The claim did not.** Everything below is
+a rollup of numbers already recorded in the two sections above, gathered in
+one place so the ledger cannot be read selectively, plus one arithmetic
+correction to a pre-registered score.
+
+### Exactly what was run
+
+One task family (`rl::curriculum` position-copy: prompt `[cue, c0..c4, SEP]`,
+completion = the 3 content tokens at the cue's own ordered position triple).
+One architecture: `qwen3::Qwen`, `n_layers 2`, `d_model 64`, `n_heads 4`,
+`n_kv_heads 2`, `head_dim 16`, `d_ff 256`, `vocab 32`, tied embeddings -
+order 10^5 parameters. One adapter: rank-8 LoRA, alpha 16, targets
+`wq,wk,wv,wo` only, over a frozen full-parameter-pretrained base. One
+objective: GRPO, group 2, 240 steps per cycle, `lr 5e-3`, explore temp 1.5.
+One seed (1) for the 12-cycle trajectory, one task order, one device (Intel
+Arc MTL, release). The separate 5-seed pre-registration covers cycle 1 ONLY
+and exists to size thresholds; it supports no multi-cycle claim.
+
+### Retention trajectory
+
+`R[i][1]`, the frozen cycle-1 probe re-scored against the model servable
+after each cycle `i`:
+
+    i         1     2     3     4     5     6     7     8     9    10    11    12
+    R[i][1] 0.896 0.896 0.896 0.896 0.896 0.896 0.896 0.896 0.896 0.896 0.667 0.667
+
+Flat for ten cycles for a mechanical reason, not an encouraging one: nothing
+was promoted between cycle 1 and cycle 11, so the servable weights never
+changed and the probe re-scored the same model. The one promotion that did
+land in between (cycle 11, its own probe 0.979) is also the one that moved
+the canary, 0.896 -> 0.667, taking T4 0.354 -> 0.063 in the same step.
+
+Aggregates over the full 12x12 matrix: **ACC 0.271, BWT -0.066, FWT -0.153**,
+against an untrained base scoring **0.354** on the same 192 frozen probes and
+a last-task-only control at **0.226**. The joint-training capacity oracle
+(one adapter, all 12 rules pooled, the whole study's 2880-step budget, zero
+sequential interference) reaches **0.071** (0.063 on a re-run) against a
+pre-registered bar of 0.60.
+
+Diagonal `R[k][k]` - what the model servable after cycle `k` scores on the
+rule introduced at cycle `k`, at the two decimals the matrix was printed to:
+
+    0.90 0.08 0.02 0.35 0.63 0.31 0.10 0.04 0.13 0.13 0.98 0.31
+
+**An arithmetic correction to A5, recorded rather than restated.** Three of
+those entries clear the pre-registered 0.60 bar, which is what A5 reports
+("3 of 12"). Only two of the three were produced by a promotion. Cycle 5 was
+rejected as not-significant, so the servable weights did not move, and its
+0.63 is the cycle-1 model's ZERO-SHOT score on rule `cue06 picks(4,1,2)` -
+its recorded `zero0` is 0.625. `R[k][k]` is a property of the servable model,
+not of the cycle's learning, and on rejected cycles the two differ. The
+number of cycles at which the loop acquired the newly introduced rule and
+kept it is therefore **2 of 12**, not 3. A5's metric is not wrong, it is
+looser than its own label ("really learned") suggests, and the looser reading
+is the more flattering one.
+
+### Promoted vs rejected
+
+**2 promotions of 12 cycles** (cycles 1 and 11). **10 rejections**: cycle 2
+`Cause::AnchorRegressed`, cycles 3, 4, 5, 6, 7, 8, 9, 10 and 12 as
+not-significant. Zero rejections for degeneracy - the distinct-completion
+fraction never fell below 0.964 (185 of 192 at its worst), so no cycle in the
+gated arm ever collapsed onto a small output set.
+
+### Plasticity trend
+
+Per-cycle `rho` (warm-arm learning over the fresh-adapter control on the same
+cycle): 1.00, 0.77, 0.40, 1.60, 0.06, 0.70, 2.00, 3.00, 0.24, 0.29, 1.47,
+0.19. Terminal `rho(12) = 0.190`. OLS slope over cycle index
+**-0.0005 per cycle, 95% CI [-0.1742, +0.1733]**.
+
+**This is an instrumented plasticity measurement that returned noise, and it
+should be cited that way and no other way.** From cycle 2 on both arms sit
+near the floor, so `rho` is a ratio of two near-zero numbers; the CI spanning
+essentially the entire plausible range around a slope four orders of
+magnitude smaller than its own half-width is the same statement in the second
+form. Plasticity was neither shown to be preserved nor shown to decay. The
+apparatus works; the experiment it was pointed at could not produce a signal
+for it to measure.
+
+### Gate informativeness
+
+The null-gate arm (`GatePolicy::CoinFlip`, same seed, same base, same 12
+cycles) carried 8 of 12 candidates forward where the real gate carried 2, and
+the two agreed on 5 of 12.
+
+| | real gate | coin flip |
+|---|---|---|
+| ACC | 0.271 | 0.056 |
+| BWT | -0.066 | -0.133 |
+| cycle-1 canary `R[N][1]` | 0.667 | 0.146 |
+| min distinct-completion fraction | 0.964 | 0.047 (9 completions over 192 probes) |
+| carried forward | 2 of 12 | 8 of 12 |
+
+### This proves / this does not prove
+
+**What these numbers prove.** That the full protocol runs as a sequence and
+is measurable: 12 consecutive rollout -> verify -> GRPO -> gate ->
+promote/reject cycles executed, each contributing a real row to a retention
+matrix built from the gate's own decodes, with a per-cycle fresh-adapter
+control and a joint-training capacity oracle alongside. That two structural
+properties held on every cycle: every trained completion span was a member
+of the multiset the policy actually sampled, and all 192 frozen probe ids
+were disjoint from 3072 explore ids by content-space partition and by id
+hash. That the first cycle is real learning (0.896 against the same untrained
+base's 0.354). That the gate carries information - the coin-flip arm's
+servable model collapsed to 9 distinct completions across 192 probes against
+the gated arm's worst cycle at 185 of 192, and cycle 2 shows the mechanism in
+one line (the gate rejected it as `AnchorRegressed`, the coin carried it, and
+the canary fell 0.90 -> 0.08 on the spot and never recovered). And that the
+whole trajectory is reproducible: bit-identical per-cycle numbers, retention
+matrix and aggregates across three separate processes.
+
+**What these numbers do not prove, and in three places contradict.** They do
+not prove that brain accumulates capability across cycles - they measure the
+opposite at this scale: final ACC 0.271 is BELOW the untrained base's own
+0.354 on the same probes and only 0.045 above a last-task-only model, BWT is
+-0.066, and 2 of 12 cycles acquired and kept their rule. They do not prove
+anything about plasticity in either direction, for the reason given above.
+They do not even establish WHY accumulation failed: the capacity oracle
+reaches 0.071 with zero sequential interference, so "the loop forgot task 1"
+and "a rank-8 attention-only LoRA driven by GRPO at 240 steps per cycle
+cannot represent 12 cue-conditioned rules at all" are not distinguishable by
+this run, and they have opposite fixes - which also means the BWT figure must
+be read as a capacity/optimization result and not as a forgetting result.
+They do not prove the gate is ALIGNED: better than a coin against the
+retention matrix it is itself scored on is not evidence that the retention
+matrix measures anything a human wants. And the negative does not generalize
+any further than the positive would have: it is a statement about this scale,
+this adapter, this budget and this regime, not about brain, GRPO, or
+continual learning in general.
+
+The one-sentence form, for anyone quoting this file: **brain's
+self-improvement loop has been shown to run, gate and be measured as a
+12-cycle sequence, and has been shown NOT to accumulate capability over that
+sequence at the smallest scale it was tested on; no claim that brain "learns
+continuously" is supported by anything in this repository today.**
+
+### Still unvalidated, regardless of this workflow's outcome
+
+None of the following moved. They are listed so the rollup above is not
+mistaken for closing them.
+
+- **Live, timed or unattended operation (P6a, unchanged).** Nothing calls
+  `hot_swap_cycle` on a timer or watch loop, and it is still not wired into
+  `brain serve`'s startup path (`run_apis` in `crates/cli/src/run_cli.rs`).
+  Every cycle counted above was driven synchronously by a test binary or an
+  example a human started. Zero cycles have ever run unattended, and zero
+  have ever swapped an adapter into a live serving process.
+- **Real sven-driven trajectories (P0/P6, unchanged, out of brain's repo by
+  design).** Every task in every number above is procedurally generated
+  inside brain with an in-process oracle. The reward stamp (P0) does not
+  exist on the sven side yet, and P6 - the multi-session, two-repo,
+  real-traffic proof - stays exactly as deferred as it was. The standing
+  invariant that brain never depends on sven is why it must stay that way
+  rather than be simulated here.
+- **The Gauntlet (`.agents/roadmap/gauntlet.md`, still design-only, zero
+  code).** All five environments (`AlienLang`, `AlienAPI`, `AlienAlgo`,
+  `AlienWorld`, `AlienGame`), the sixteen diagnostics, the three holdout
+  tiers and the L0-L8 ladder are a design document. `crates/gauntlet` does
+  not exist. Nothing in this rollup was run against any of it, and P19's
+  single difficulty-invariant synthetic family is deliberately the opposite
+  of what that suite is for: the invariance the plasticity ratio needs was
+  bought by removing exactly the properties (distribution shift, ambiguity,
+  label noise, adversarial content) the Gauntlet is designed to introduce.
+- **Coverage the harness never reached.** Architectures: `continual::
+  run_study` is generic over `M: Model`, but it has only ever been
+  instantiated at `qwen3::Qwen`; the repo carries `Model` impls in 16 other
+  files (`gpt2`, `qwen35`, `qwen35moe`, `deepseek2`, `glmdsa`, `lfm2`,
+  `yolov8`, `nemotronasr`, the toy models, and the `parallel` wrapper), and
+  not one of them has been through a continual-learning cycle. Scale:
+  one model shape of order 10^5 parameters, 12 cycles - published loss of
+  plasticity in deep continual learning needs on the order of 10^3
+  sequential tasks to become unambiguous. Statistics: one seed and one task
+  order for the whole trajectory, with a measured single-cycle
+  training-outcome spread (0.292) LARGER than the retention threshold (0.15)
+  it is compared against, so no single-seed A-target verdict here is robust
+  to seed at the precision it is stated. Regime: the base is frozen and only
+  a bounded-rank adapter moves, which is itself a regularizer - full-model
+  continual learning is untested. Data: stationary, synthetic, noise-free,
+  in-process-verifiable. Surface: `brain improve` as a CLI verb (P20) was
+  not attempted, so the loop remains reachable only from a test binary or a
+  `cargo run --example`.
