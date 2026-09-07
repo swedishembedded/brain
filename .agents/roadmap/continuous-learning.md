@@ -165,7 +165,18 @@ No CLI change needed - `brain qwen3 finetune --lora` is untouched, this
 milestone only makes the existing training loop visible as a capability.
 **Commit:** one.
 
-### B3b - qwen3 `lora_gate` as a `capability::Action`
+### B3b - qwen3 `lora_gate` as a `capability::Action` (ON HOLD)
+**On hold pending a real decision about whether whale scheduling is wanted
+at all.** An attempt hit a hard Cargo cycle (`brain-qwen3 → brain-rl →
+brain-bench → brain-qwen3`) - the gate machinery sits ABOVE qwen3 in the
+layering, so reaching it from qwen3's own manifest needs crate surgery, not
+a wiring fix. The product decision since taken is that the core learning
+loop works with sven+brain alone and whale is an optional later scale-out,
+so nothing downstream is blocked: `B9` gives the same study a plain CLI
+entry point from `crates/cli`, which legally depends on both crates. Resume
+this only when a whale graph is actually being built, and decide the crate
+surgery then rather than forcing it now.
+
 Wraps `B2`'s gate: candidate adapter blob + probe-set blob in, a
 `GateReport` + promote/reject decision out. This is what makes the whale
 graph two nodes (`lora_train` → `lora_gate`) rather than one - load-bearing
@@ -249,6 +260,85 @@ flip pass/fail independent of the aggregate decision.
 **Test-first:** `a_batch_promote_still_names_every_fact_that_did_not_land` -
 construct a batch where the aggregate gate promotes but one fact's probe
 still fails post-training, assert the report names it.
+**Commit:** one.
+
+### B9 - `brain document-study`, the local entry point (DONE)
+`B5′` made the study real; nothing shipped could run one. `rl::document::
+run_document_study` was reachable only from `crates/rl/tests/
+document_study.rs`, so the sven+brain loop had no way to train, gate and
+publish a document adapter without a whale graph in front of it. This
+milestone is that command, and nothing more:
+
+```
+brain document-study --arch <name> --weights BASE --dataset FILE.json
+                     --adapter-dir DIR --report FILE.json [...]
+```
+
+- reads `{"cycles": [[{fact, probe_question, expected_answer}, …], …],
+  "anchors": […]}` through `deny_unknown_fields` structs (the dataset is the
+  one input brain did not produce, so serde is the structural validator, and
+  it runs before anything touches the base);
+- runs the gated arm and the null-gate control arm via
+  `run_document_study`, unchanged;
+- **always** writes the JSON report - per cycle: the facts trained, the
+  incumbent's and the candidate's pass rate on that cycle's frozen probes,
+  the gate's own `p_value`/`effect_size`/reject cause, the null-gate arm's
+  parallel row, plus `promoted`/`decision` overall;
+- on a promote only, publishes the adapter `rl::improve::cycle` already
+  wrote into `--adapter-dir` as `adapter-{n:06}.safetensors`, one past the
+  HIGHEST version already there - named through `rl::improve::
+  latest_adapter`, the same function `brain serve --watch-adapters DIR`
+  calls, so producer and consumer cannot drift.
+
+**Top-level and `--arch`-driven, deliberately - not `brain qwen3
+document-study`.** `run_study` is generic over `M: model::Model` and
+`DocumentCurriculum` names no model type, so the study is architecture-
+agnostic machinery; hanging its only entry point off one model's verb tree
+would tie a general capability to one consumer and invite the next consumer
+to grow a second copy (the workspace's most expensive recurring defect).
+It follows `brain bench eval --arch <name>` instead: one top-level command,
+a `brain_arch` id selecting which `Model` impl it monomorphises for, and a
+registry a new architecture joins by adding one row. Everything
+architecture-specific is a two-method `StudyArch` impl (how that
+architecture spells a LoRA overlay, how to widen its context); the base is
+read through `ModelConfig::from_json` and overlaid by the generic
+`continual::overlay_adapter`.
+
+**What bounds that registry is the TOKENIZER, not the model.**
+`DocumentCurriculum`'s `Env`/`Ver` associated types name
+`data::qwen_tokenizer::QwenBpe`, and `data::chat::prepare_chat_samples`
+takes it, so an architecture qualifies iff it loads an HF `tokenizer.json`
+BPE and its config can carry a LoRA overlay - today `qwen3`, `qwen35`,
+`qwen35moe`. Widening it past the Qwen tokenizer family is a change to
+`rl::document`, not to this command.
+
+**Per-fact rows are NOT here** - see `B8`. A per-fact verdict needs the
+candidate arm's own `(task id, score)` pairs, and `continual::CycleRecord`
+collapses those to means before the study report is built; reconstructing
+them in the CLI would mean a second decode pass, i.e. a different
+measurement presented as the gate's. The report names each cycle's facts
+instead. `B8` is the milestone that threads the per-task scores through.
+
+**`B3b` is on hold, not superseded and not abandoned in place.** Exposing
+the gate as a `capability::Action` on qwen3's own manifest hits a real Cargo
+cycle (`brain-qwen3 → brain-rl → brain-bench → brain-qwen3`), and the
+product decision is that the core learning loop works with sven+brain alone,
+with whale as an optional later scale-out. `crates/cli` legally depends on
+both `brain-qwen3` and `brain-rl` (it is the top of the layering), so this
+command needs none of that resolved. Whether `B3b` is worth its
+crate-surgery is a decision to make when whale scheduling is actually
+wanted - not a prerequisite for the local loop.
+
+**Test-first:**
+- `a_document_study_writes_a_report_and_publishes_an_adapter_only_on_promote`
+  - the real binary on the tiny CPU qwen3 fixture, asserting the report's
+  shape both ways and that a promote leaves exactly the file
+  `rl::improve::latest_adapter` (the watcher's own lookup) adopts;
+- `a_malformed_dataset_is_refused_before_any_training_starts` - an unknown
+  triple field fails by name, with no report written;
+- `an_unregistered_architecture_is_refused_and_names_the_registered_ones`;
+- unit: the publish naming/versioning contract, the dataset boundary, and
+  that every registry id is a real `brain_arch` id.
 **Commit:** one.
 
 ### F1 - the flagship autonomous document-learning benchmark

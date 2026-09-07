@@ -59,3 +59,41 @@ on whether the adapter beats the base.
 A served adapter is folded into its base weights at load time, so there is
 no extra per-token cost to serving a fine-tuned model versus the base
 model.
+
+## Teaching a model a document, with a gate
+
+```
+brain document-study --arch <name> --weights BASE --dataset facts.json \
+                     --adapter-dir DIR --report report.json
+```
+
+trains a LoRA adapter on a batch of frozen
+`{fact, probe_question, expected_answer}` triples and decides, against a
+pre-registered statistical bar, whether the result is good enough to
+promote. It is one command, not a pipeline: the dataset goes in, a verdict
+comes out.
+
+- `--arch <name>` - which architecture the base checkpoint is
+  (`qwen3`, `qwen35`, `qwen35moe`; defaults to `qwen3`).
+- `--dataset FILE.json` -
+  `{"cycles": [[{"fact": …, "probe_question": …, "expected_answer": …}, …]],
+  "anchors": [ … ]}`. Each entry of `cycles` is one batch the study trains
+  and gates as a unit; `anchors` is the behaviour suite every batch
+  rehearses so a new document cannot quietly destroy what the model already
+  did. Unknown or missing fields are rejected by name before any training
+  starts.
+- `--report FILE.json` - **always** written, whether the study promotes or
+  rejects: per batch, the pass rate on its frozen probes before and after
+  training, the gate's own p-value and effect size, the reason for a
+  rejection, and the same row for a control arm whose gate is a coin flip -
+  the comparison that says whether the real gate carried any information.
+- `--adapter-dir DIR` - written to **only** on a promote, as
+  `adapter-NNNNNN.safetensors`. That is exactly the name and ordering
+  `brain serve --watch-adapters DIR` looks for, so a promoted adapter is
+  picked up by a running server with no restart.
+
+The probe questions are never trained on - only the facts are - so the
+score is a held-out measurement rather than a memorisation check. A run
+scoring fewer probes than the pre-registered floor is reported as
+`"preregistered": false`: it exercised the machinery, but it is not a
+result.

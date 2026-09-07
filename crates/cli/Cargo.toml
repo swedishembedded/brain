@@ -135,6 +135,9 @@ brain-timesfm3.workspace = true
 brain-server.workspace = true
 brain-onnx.workspace = true
 brain-npu.workspace = true
+# `document-study`'s dataset/report boundary: typed, `deny_unknown_fields`
+# structs at the point of entry rather than permissive `Value` indexing.
+serde.workspace = true
 serde_json.workspace = true
 brain-vulkan = { workspace = true, optional = true }
 brain-clip.workspace = true

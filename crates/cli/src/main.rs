@@ -18,6 +18,7 @@ mod catalog;
 mod data_cli;
 mod depth_cli;
 mod devices_cli;
+mod document_study_cli;
 mod federated_cli;
 mod flops_cli;
 mod flux2_cli;
@@ -332,6 +333,18 @@ BENCHMARK SUITE (architecture evaluation)
                                            # RANKED tuning recommendations: what to tune to improve
                                            # in the best capability direction (headroom x size-slope)
   brain bench compare <a.json> <b.json> ...# side-by-side leaderboard across results artifacts
+
+CONTINUAL LEARNING (teach a model a document, gated)
+  brain document-study --arch <name> --weights BASE --dataset FILE.json
+                       --adapter-dir DIR --report FILE.json
+                       [--work-dir DIR --lora RANK --alpha A --eval-per-cycle N
+                        --steps N --seqs N --batch B --lr X --seed S
+                        --null-gate-seed S --models-dir DIR --quiet]
+      Trains a LoRA adapter on a batch of frozen {fact, probe_question,
+      expected_answer} triples, gates promotion on a pre-registered bar, and
+      runs the null-gate control arm beside it. Always writes the JSON report;
+      publishes an adapter into --adapter-dir (named adapter-NNNNNN.safetensors,
+      what `brain serve --watch-adapters DIR` adopts) only if the gate promoted.
 
 HTTP INFERENCE APIS (brain as an OpenAI / Anthropic / OpenRouter backend)
   brain serve [--openai [PORT]] [--anthropic [PORT]] [--openrouter [PORT]] [--dbus]
@@ -1103,6 +1116,7 @@ fn main() {
             }
         }
         Some("bench") => run_bench(&argv[2..]),
+        Some("document-study") => document_study_cli::run(&argv[2..]),
         Some("perf") => perf_cli::run_perf(&argv[2..]),
         Some("forecast") => forecast_cli::run_forecast(&argv[2..]),
         Some("label") => label_cli::run_label(&argv[2..]),

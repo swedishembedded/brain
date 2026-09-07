@@ -508,7 +508,7 @@ fn finetune(args: &[String]) {
 /// is checked FIRST: a relative path like `out/qwen.safetensors` also parses
 /// as a syntactically valid (if unlikely) `ModelRef`, so "is this a real
 /// file" must win before "is this a ref" is even considered.
-fn resolve_base(base: &str, store_root: Option<&Path>) -> Result<(PathBuf, PathBuf, String), String> {
+pub(crate) fn resolve_base(base: &str, store_root: Option<&Path>) -> Result<(PathBuf, PathBuf, String), String> {
     let path = Path::new(base);
     if path.is_file() {
         let dir = path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
