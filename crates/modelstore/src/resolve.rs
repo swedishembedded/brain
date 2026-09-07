@@ -246,7 +246,15 @@ pub fn resolve(arch: &str, records: &[ArtifactRecord], specs: &[&dyn ArchSpec], 
     let mut per_role: Vec<(&'static str, RoleResult)> = Vec::new();
     for &role in spec.roles() {
         if let Some(path) = overrides.get(role) {
-            let found = records.iter().position(|r| r.path.to_string_lossy() == *path);
+            // Two ways to name a candidate: the exact absolute path an
+            // advanced/scripted caller already has, or (matched on trailing
+            // path COMPONENTS, not a substring) a `<vendor>/<repo>`
+            // reference the same way `--model`/`brain pull` already accept
+            // one elsewhere in this codebase - `--text-encoder
+            // Qwen/Qwen3-8B` must work without the caller ever typing this
+            // store's absolute root.
+            let want = Path::new(path.as_str());
+            let found = records.iter().position(|r| r.path.to_string_lossy() == *path || r.path.ends_with(want));
             per_role.push((role, found.map(RoleResult::One).unwrap_or(RoleResult::None)));
             continue;
         }
@@ -443,6 +451,41 @@ mod tests {
             Resolution::Resolved(a) => assert_eq!(a.roles["dit"], PathBuf::from("/models/toy/anything.bin")),
             other => panic!("expected Resolved, got {other:?}"),
         }
+    }
+
+    /// A caller's override (a CLI flag like `--text-encoder`) may name a
+    /// `<vendor>/<repo>` reference the same way every other part of this
+    /// codebase does, not only a raw absolute path -- matching on the
+    /// trailing path components (`Path::ends_with`) rather than requiring
+    /// exact string equality is what makes `--text-encoder Qwen/Qwen3-8B`
+    /// work the same way `--model Qwen/Qwen3-8B` and `brain pull
+    /// Qwen/Qwen3-8B` already do elsewhere.
+    #[test]
+    fn an_override_accepts_a_vendor_repo_reference_not_only_a_raw_path() {
+        let records = vec![rec("/models/Qwen/Qwen3-8B")];
+        let spec = ToySpec { classify_confidence: Confidence::Guessed, validate_ok: true };
+        let specs: Vec<&dyn ArchSpec> = vec![&spec];
+        let mut overrides = BTreeMap::new();
+        overrides.insert("dit".to_string(), "Qwen/Qwen3-8B".to_string());
+        let out = resolve("toy", &records, &specs, &overrides);
+        match out {
+            Resolution::Resolved(a) => assert_eq!(a.roles["dit"], PathBuf::from("/models/Qwen/Qwen3-8B")),
+            other => panic!("expected Resolved, got {out:?}", out = other),
+        }
+    }
+
+    /// A `<vendor>/<repo>`-shaped override must still match nothing when no
+    /// record's path actually ends with it -- this is name-based matching
+    /// against real scanned artifacts, never a filesystem probe of its own.
+    #[test]
+    fn a_vendor_repo_override_matching_no_record_is_missing_not_a_panic() {
+        let records = vec![rec("/models/toy/dit.bin")];
+        let spec = ToySpec { classify_confidence: Confidence::Guessed, validate_ok: true };
+        let specs: Vec<&dyn ArchSpec> = vec![&spec];
+        let mut overrides = BTreeMap::new();
+        overrides.insert("dit".to_string(), "Nobody/Nothing".to_string());
+        let out = resolve("toy", &records, &specs, &overrides);
+        assert!(matches!(out, Resolution::Missing(_)), "{out:?}");
     }
 
     #[test]
