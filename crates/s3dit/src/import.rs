@@ -305,7 +305,7 @@ pub const GGUF_ARCHITECTURE: &str = "lumina2";
 /// importer (mis-routed at the registry level, since both share
 /// [`GGUF_ARCHITECTURE`]) fails loudly with a clear message instead of
 /// silently producing a wrong-but-plausible checkpoint.
-const DISCRIMINATOR_TENSOR: &str = "cap_embedder.0.weight";
+pub(crate) const DISCRIMINATOR_TENSOR: &str = "cap_embedder.0.weight";
 
 /// Import a Z-Image GGUF (any block-quant this crate's `checkpoint::gguf`
 /// dequant supports) into a brain-native single-file safetensors checkpoint

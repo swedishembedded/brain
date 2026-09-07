@@ -1819,6 +1819,7 @@ dependencies = [
  "brain-gpu-core",
  "brain-kernels",
  "brain-model",
+ "brain-modelstore",
  "brain-paramstore",
  "brain-qwen3",
  "brain-testutil",

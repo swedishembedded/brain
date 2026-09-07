@@ -31,6 +31,7 @@ pub mod model;
 pub mod pipeline;
 pub mod modelgrad;
 pub mod shard;
+pub mod spec;
 pub mod train;
 
 pub use dev::{DitI8Cache, ZImageDit, ZImageDitI8, ZImageDitShard, ZImageDitWindowed};
