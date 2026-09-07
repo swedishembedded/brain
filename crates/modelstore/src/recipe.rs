@@ -878,6 +878,50 @@ mod tests {
         }
     }
 
+    /// The exact `black-forest-labs/FLUX.2-klein-4B` file listing (real
+    /// upstream repo, transcribed from its `model_index.json` and root
+    /// listing): a diffusers pipeline shaped BYTE-FOR-BYTE like
+    /// [`zimage_turbo_listing`] -- `model_index.json` at the root plus the
+    /// same four `transformer/`/`vae/`/`text_encoder/`/`tokenizer/` role
+    /// dirs. Nothing in the listing alone tells the two families apart; only
+    /// `model_index.json`'s own `_class_name` (`"Flux2KleinPipeline"`, not a
+    /// Z-Image class) does, which is why the fix here is a `repos` pin, not a
+    /// shape refinement.
+    fn flux2_klein_4b_listing() -> Vec<String> {
+        [
+            "model_index.json",
+            "transformer/config.json",
+            "transformer/diffusion_pytorch_model.safetensors",
+            "vae/config.json",
+            "vae/diffusion_pytorch_model.safetensors",
+            "text_encoder/config.json",
+            "text_encoder/model-00001-of-00002.safetensors",
+            "text_encoder/model-00002-of-00002.safetensors",
+            "text_encoder/model.safetensors.index.json",
+            "tokenizer/tokenizer.json",
+            "tokenizer/tokenizer_config.json",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect()
+    }
+
+    /// The bug this whole track exists to fix: `black-forest-labs/
+    /// FLUX.2-klein-4B` is an official BFL FLUX.2 release, not a Z-Image
+    /// checkpoint, but its listing matches [`ZimageRecipe::matches`] exactly
+    /// (`model_index.json` + all four role dirs) and the registry is
+    /// currently first-match-wins with `ZimageRecipe` declared first -- so
+    /// today it is misclassified as `"zimage"`, and `convert_zimage` would go
+    /// on to hardcode `family: "zimage"` into its manifest. This must resolve
+    /// to some OTHER recipe.
+    #[test]
+    fn flux2_repo_is_not_misclassified_as_zimage() {
+        let listing = flux2_klein_4b_listing();
+        let r = ModelRef::new("black-forest-labs", "FLUX.2-klein-4B", None);
+        let matched = recipes().into_iter().find(|x| x.matches(&r, &listing)).unwrap();
+        assert_ne!(matched.id(), "zimage", "an official BFL FLUX.2 repo must not be classified as Z-Image");
+    }
+
     /// The exact `Wan-AI/Wan2.1-T2V-1.3B` file listing, confirmed live via
     /// the HF API this session -- NOT the local checkout, which is a
     /// deliberately partial `allow_patterns` download and therefore no
