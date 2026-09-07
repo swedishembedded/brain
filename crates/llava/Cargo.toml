@@ -28,6 +28,7 @@ bytemuck.workspace = true
 brain-data.workspace = true
 brain-imaging.workspace = true
 brain-checkpoint.workspace = true
+brain-modelstore.workspace = true
 
 [dev-dependencies]
 brain-testutil.workspace = true

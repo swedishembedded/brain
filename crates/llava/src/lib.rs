@@ -29,6 +29,7 @@ pub mod config;
 pub mod import;
 pub mod model;
 pub mod prompt;
+pub mod spec;
 pub mod template;
 
 pub use config::LlavaConfig;
