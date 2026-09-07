@@ -221,36 +221,12 @@ fn resolve_flux2(model: Option<&str>, vae: Option<&str>, text_encoder: Option<&s
     }
 }
 
-/// The question plus every candidate's own selector flags - what a caller
-/// types next to pick one, straight from the resolver's own
-/// [`brain_modelstore::resolve::ModelCandidate::selector`].
-fn describe_ambiguity(a: &brain_modelstore::resolve::Ambiguity) -> String {
-    use brain_modelstore::resolve::Question;
-    let mut s = match &a.question {
-        Question::Role { role } => format!("flux2: more than one candidate for '{role}' - nothing picked automatically. Choose one:\n"),
-        Question::Variant { shape_class } => format!("flux2: which {shape_class} variant - klein or base? (not recoverable from the weights' own shape). Choose one:\n"),
-        Question::Unverifiable { path } => format!("flux2: {} could not be read enough to classify\n", path.display()),
-    };
-    for c in &a.choices {
-        for (flag, value) in &c.selector {
-            s.push_str(&format!("  {flag} {value}\n"));
-        }
-    }
-    s
-}
-
-/// Every missing role's own doc string plus any near-misses (an interrupted
-/// download, say) that explain why it looks empty anyway.
-fn describe_missing(m: &brain_modelstore::resolve::Missing) -> String {
-    let mut s = String::new();
-    for r in &m.roles {
-        s.push_str(&format!("flux2: {}: {}\n", r.role, r.doc));
-        for near in &r.near_misses {
-            s.push_str(&format!("  {near}\n"));
-        }
-    }
-    s
-}
+/// The question plus every candidate's own selector flags, and every missing
+/// role's own doc string plus near-misses - shared with every other
+/// architecture's CLI, since neither rendering has anything flux2-specific
+/// left in it (the architecture name comes from `Ambiguity::arch`/
+/// `Missing::arch`, not a hardcoded prefix).
+use brain_modelstore::resolve::{describe_ambiguity, describe_missing};
 
 fn generate(args: &[String]) -> Result<(), String> {
     let mut prompt = None;
@@ -592,57 +568,9 @@ fn finetune(args: &[String]) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    fn empty_assembly() -> capability::Assembly {
-        capability::Assembly { id: "local/flux2-klein-9b".into(), arch: "flux2".into(), variant: None, roles: Default::default(), provenance: Vec::new() }
-    }
-
-    /// The printed message must name the actual question and every real
-    /// candidate's own selector flags - what a caller types next, straight
-    /// from the resolver's own output, never a hand-summarized guess.
-    #[test]
-    fn describe_ambiguity_prints_the_question_and_every_selector() {
-        let choices = vec![
-            brain_modelstore::resolve::ModelCandidate { assembly: Box::new(empty_assembly()), selector: vec![("--variant".to_string(), "klein-9b".to_string())], summary: "flux2 klein-9b".to_string() },
-            brain_modelstore::resolve::ModelCandidate { assembly: Box::new(empty_assembly()), selector: vec![("--variant".to_string(), "base-9b".to_string())], summary: "flux2 base-9b".to_string() },
-        ];
-        let a = brain_modelstore::resolve::Ambiguity { arch: "flux2".to_string(), question: brain_modelstore::resolve::Question::Variant { shape_class: "9b".to_string() }, choices };
-        let out = describe_ambiguity(&a);
-        assert!(out.contains("9b"), "{out}");
-        assert!(out.contains("--variant klein-9b"), "{out}");
-        assert!(out.contains("--variant base-9b"), "{out}");
-    }
-
-    /// A `Role` ambiguity names the role in the question line, not only in
-    /// the selectors below it.
-    #[test]
-    fn describe_ambiguity_names_the_role_for_a_role_question() {
-        let choices = vec![brain_modelstore::resolve::ModelCandidate {
-            assembly: Box::new(empty_assembly()),
-            selector: vec![("--text-encoder".to_string(), "/models/Qwen/Qwen3-8B".to_string())],
-            summary: "text_encoder: /models/Qwen/Qwen3-8B".to_string(),
-        }];
-        let a = brain_modelstore::resolve::Ambiguity { arch: "flux2".to_string(), question: brain_modelstore::resolve::Question::Role { role: "text_encoder".to_string() }, choices };
-        let out = describe_ambiguity(&a);
-        assert!(out.contains("text_encoder"), "{out}");
-        assert!(out.contains("--text-encoder /models/Qwen/Qwen3-8B"), "{out}");
-    }
-
-    /// Every missing role's own doc string and near-misses (an interrupted
-    /// download, say) must survive into the printed message.
-    #[test]
-    fn describe_missing_prints_the_doc_and_near_misses() {
-        let m = brain_modelstore::resolve::Missing {
-            arch: "flux2".to_string(),
-            roles: vec![brain_modelstore::resolve::MissingRole {
-                role: "text_encoder".to_string(),
-                doc: "no artifact classifies as text_encoder for arch flux2".to_string(),
-                near_misses: vec!["an interrupted download exists at /models/x.safetensors".to_string()],
-            }],
-        };
-        let out = describe_missing(&m);
-        assert!(out.contains("text_encoder"), "{out}");
-        assert!(out.contains("interrupted download"), "{out}");
-    }
+    // describe_ambiguity/describe_missing are now brain_modelstore::resolve's
+    // own shared functions (imported above) - their behavior is tested there,
+    // generically, not re-tested per architecture here.
 
     /// `Pipeline::build_dit` tells brain's own adapter container apart from a
     /// third-party ai-toolkit/ComfyUI one **by file extension**: a

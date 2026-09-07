@@ -113,6 +113,41 @@ pub enum Resolution {
     Missing(Box<Missing>),
 }
 
+/// The question plus every real candidate's own selector flags - what a
+/// caller types next to pick one, straight from the resolver's own
+/// [`ModelCandidate::selector`]. Every architecture's own CLI needs this
+/// identical rendering (only the architecture name in the message differs,
+/// and that already lives on `a.arch`), so it lives here once instead of
+/// being hand-copied per architecture.
+pub fn describe_ambiguity(a: &Ambiguity) -> String {
+    let mut s = match &a.question {
+        Question::Role { role } => format!("{}: more than one candidate for '{role}' - nothing picked automatically. Choose one:\n", a.arch),
+        Question::Variant { shape_class } => format!("{}: which {shape_class} variant? (not recoverable from the weights' own shape). Choose one:\n", a.arch),
+        Question::Unverifiable { path } => format!("{}: {} could not be read enough to classify\n", a.arch, path.display()),
+    };
+    for c in &a.choices {
+        for (flag, value) in &c.selector {
+            s.push_str(&format!("  {flag} {value}\n"));
+        }
+    }
+    s
+}
+
+/// Every missing role's own doc string plus any near-misses (an interrupted
+/// download, say) that explain why it looks empty anyway - the same
+/// rendering every architecture's CLI needs, shared for the same reason as
+/// [`describe_ambiguity`].
+pub fn describe_missing(m: &Missing) -> String {
+    let mut s = String::new();
+    for r in &m.roles {
+        s.push_str(&format!("{}: {}: {}\n", m.arch, r.role, r.doc));
+        for near in &r.near_misses {
+            s.push_str(&format!("  {near}\n"));
+        }
+    }
+    s
+}
+
 /// What [`ArchSpec::assemble`] decided once exactly one candidate per role
 /// was already chosen.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -601,6 +636,61 @@ mod tests {
             Resolution::Resolved(a) => a,
         };
         assert_eq!(found.roles["sidecar"], PathBuf::from("/models/vendor/repo-component/sidecar.json"));
+    }
+
+    fn empty_assembly(arch: &str) -> Assembly {
+        Assembly { id: format!("local/{arch}"), arch: arch.to_string(), variant: None, roles: BTreeMap::new(), provenance: Vec::new() }
+    }
+
+    /// The printed message must name the actual question and every real
+    /// candidate's own selector flags - what a caller types next - straight
+    /// from the resolver's own output, never a hand-summarized guess. Every
+    /// architecture's CLI needs this identical rendering, only the
+    /// architecture name (already on `Ambiguity::arch`) differs.
+    #[test]
+    fn describe_ambiguity_prints_the_question_and_every_selector() {
+        let choices = vec![
+            ModelCandidate { assembly: Box::new(empty_assembly("wan")), selector: vec![("--variant".to_string(), "t2v-14b".to_string())], summary: "wan t2v-14b".to_string() },
+            ModelCandidate { assembly: Box::new(empty_assembly("wan")), selector: vec![("--variant".to_string(), "t2v-1.3b".to_string())], summary: "wan t2v-1.3b".to_string() },
+        ];
+        let a = Ambiguity { arch: "wan".to_string(), question: Question::Variant { shape_class: "14b".to_string() }, choices };
+        let out = describe_ambiguity(&a);
+        assert!(out.contains("wan"), "{out}");
+        assert!(out.contains("14b"), "{out}");
+        assert!(out.contains("--variant t2v-14b"), "{out}");
+        assert!(out.contains("--variant t2v-1.3b"), "{out}");
+    }
+
+    /// A `Role` ambiguity names the role in the question line, not only in
+    /// the selectors below it.
+    #[test]
+    fn describe_ambiguity_names_the_role_for_a_role_question() {
+        let choices = vec![ModelCandidate {
+            assembly: Box::new(empty_assembly("wan")),
+            selector: vec![("--text-encoder".to_string(), "/models/google/umt5-xxl".to_string())],
+            summary: "text_encoder: /models/google/umt5-xxl".to_string(),
+        }];
+        let a = Ambiguity { arch: "wan".to_string(), question: Question::Role { role: "text_encoder".to_string() }, choices };
+        let out = describe_ambiguity(&a);
+        assert!(out.contains("text_encoder"), "{out}");
+        assert!(out.contains("--text-encoder /models/google/umt5-xxl"), "{out}");
+    }
+
+    /// Every missing role's own doc string and near-misses (an interrupted
+    /// download, say) must survive into the printed message, per role.
+    #[test]
+    fn describe_missing_prints_every_roles_doc_and_near_misses() {
+        let m = Missing {
+            arch: "wan".to_string(),
+            roles: vec![
+                MissingRole { role: "dit".to_string(), doc: "no artifact classifies as dit for arch wan".to_string(), near_misses: vec!["an interrupted download exists at /models/wan/dit.gguf".to_string()] },
+                MissingRole { role: "vae".to_string(), doc: "no artifact classifies as vae for arch wan".to_string(), near_misses: Vec::new() },
+            ],
+        };
+        let out = describe_missing(&m);
+        assert!(out.contains("dit") && out.contains("no artifact classifies as dit"), "{out}");
+        assert!(out.contains("interrupted download exists at /models/wan/dit.gguf"), "{out}");
+        assert!(out.contains("vae") && out.contains("no artifact classifies as vae"), "{out}");
     }
 
     #[test]
