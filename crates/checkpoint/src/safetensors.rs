@@ -341,6 +341,35 @@ fn index_filename(dir: &std::path::Path) -> Option<std::path::PathBuf> {
         .find(|p| p.exists())
 }
 
+/// Whether [`read_model_dir`] would actually succeed against `dir` RIGHT
+/// NOW, without reading any tensor data - a cheap pre-flight a caller can
+/// use to decide "real weights or fall back to something else" before
+/// paying for (and failing partway through) a real, possibly huge load.
+///
+/// Checking the index file's own EXISTENCE is not enough: a directory mid
+/// download can have the index but still be missing shards it references
+/// (the reverse gap - index present, shards trailing - is exactly as real
+/// as the one a MiniMax-H3 checkout hit this port's own development: `hf
+/// download` landed 10 of 14 `model-*-of-00014.safetensors` shards with no
+/// index at all, so a naive "does SOME weight file exist" check reported
+/// ready when the load would actually fail). So a sharded directory is
+/// ready only when the index exists AND every shard it names is present.
+pub fn has_model_weights(dir: &std::path::Path) -> bool {
+    if dir.is_file() {
+        return true;
+    }
+    if let Some(index) = index_filename(dir) {
+        let Ok(idx_bytes) = std::fs::read(&index) else { return false };
+        let Ok(idx) = serde_json::from_slice::<Value>(&idx_bytes) else { return false };
+        let Some(map) = idx["weight_map"].as_object() else { return false };
+        if map.is_empty() {
+            return false;
+        }
+        return map.values().all(|shard| shard.as_str().is_some_and(|s| dir.join(s).is_file()));
+    }
+    ["model.safetensors", "diffusion_pytorch_model.safetensors"].into_iter().any(|n| dir.join(n).is_file())
+}
+
 pub fn read_model_dir(dir: &std::path::Path) -> Result<Vec<StTensor>, String> {
     // A component can be shipped as a bare file rather than a directory - a
     // swapped-in text encoder is the usual case. Mirrors
