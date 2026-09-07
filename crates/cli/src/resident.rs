@@ -19,6 +19,40 @@ use residency::{Device, Executor, Instance, InstanceKey, MemCost, Policy, Reside
 use serde_json::{json, Value};
 use s3dit::pipeline::{HotPipeline, Image, Paths};
 
+use crate::resident_llm::QwenResident;
+
+/// The one shared serving [`Executor`], plus the CONCRETE model handles a
+/// caller needs for an inherent method the erased `Arc<dyn ResidentModel>`
+/// does not carry.
+///
+/// Today that is exactly one: [`QwenResident::set_adapter`], the write half
+/// of the continuous-learning hot swap (`crate::continuous_train`). It is
+/// inherent rather than a `ResidentModel` method because "point yourself at
+/// a new LoRA adapter" is not a concept the trait has - putting it there
+/// would put a decoder-LM-shaped method on every detector, VAE and
+/// forecaster that implements it - so the erased handle the executor holds
+/// cannot call it at all.
+///
+/// The handle here is the SAME `Arc` that was registered, never a second
+/// `QwenResident` over the same checkpoint: `set_adapter` writes into that
+/// object's own `RwLock`, read by ITS `activate`, so a write to a copy is a
+/// hot swap that silently does nothing.
+pub struct Serving {
+    pub executor: Executor,
+    /// `None` when `BRAIN_QWEN_WEIGHTS` names no checkpoint, i.e. this
+    /// process serves no Qwen3 and there is nothing to hot-swap.
+    pub qwen: Option<Arc<QwenResident>>,
+}
+
+/// Register `qwen` (when its weights are configured) as an ordinary erased
+/// resident AND keep the concrete handle - see [`Serving::qwen`] for why
+/// both, and why they must be one allocation.
+fn register_qwen(models: &mut Vec<Arc<dyn ResidentModel>>, qwen: Option<QwenResident>) -> Option<Arc<QwenResident>> {
+    let q = Arc::new(qwen?);
+    models.push(q.clone());
+    Some(q)
+}
+
 /// Build the shared executor with every model registered, sized to the given per-GPU
 /// budgets. `gpus` is `(index, total_bytes)` per card; `reserved` bytes are kept free
 /// on each. `unified_gpus` names the indices among `gpus` that physically share RAM
@@ -44,7 +78,7 @@ use s3dit::pipeline::{HotPipeline, Image, Paths};
 /// a 10s admission timeout and a generic 429, since a claim failure never fires
 /// `on_admit`. The physical RAM does not disappear just because CPU-side compute is
 /// disabled, so `pool_ram` must always be the real, ungated host RAM figure.
-pub fn build_executor(gpus: &[(u32, u64)], npus: &[(u32, u64)], unified_gpus: &[u32], reserved: u64, cpu_ram: u64, pool_ram: u64, models_dir: Option<&std::path::Path>, policy: Policy) -> Executor {
+pub fn build_executor(gpus: &[(u32, u64)], npus: &[(u32, u64)], unified_gpus: &[u32], reserved: u64, cpu_ram: u64, pool_ram: u64, models_dir: Option<&std::path::Path>, policy: Policy) -> Serving {
     let mut budgets = residency::budget::Budgets::new();
     // The process-wide ceiling (`--limit-vram-total`/`--limit-ram-total`) is
     // applied to EVERY budget below, so the advisory placement layer and the
@@ -95,9 +129,9 @@ pub fn build_executor(gpus: &[(u32, u64)], npus: &[(u32, u64)], unified_gpus: &[
     if let Some(g) = crate::resident_llm::GlmResident::from_env() {
         models.push(Arc::new(g));
     }
-    if let Some(q) = crate::resident_llm::QwenResident::from_env() {
-        models.push(Arc::new(q));
-    }
+    // The one resident kept BOTH ways: erased for the executor, concrete for
+    // the hot-swap path's inherent `set_adapter` -- see `Serving::qwen`.
+    let qwen = register_qwen(&mut models, QwenResident::from_env());
     // Qwen3.5-35B-A3B hybrid Gated-DeltaNet/GQA sparse-MoE decoder
     // (BRAIN_QWEN35MOE_WEIGHTS + BRAIN_QWEN35MOE_TOKENIZER) -- single-GPU,
     // fp32 weights + KV only (see resident_qwen35moe.rs's own module doc for
@@ -269,7 +303,7 @@ pub fn build_executor(gpus: &[(u32, u64)], npus: &[(u32, u64)], unified_gpus: &[
             qwen35::int8_gguf_resident::GGUF_ENV
         );
     }
-    exec
+    Serving { executor: exec, qwen }
 }
 
 // ---------------------------------------------------------------- yolo
@@ -634,6 +668,31 @@ fn emit_image(img: Image) -> Outcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `QwenResident::set_adapter` is INHERENT, not a `ResidentModel`
+    /// method, so the erased `Arc<dyn ResidentModel>` the executor holds
+    /// cannot call it at all - which is why [`build_executor`] hands the
+    /// concrete handle back alongside the executor.
+    ///
+    /// It must be the SAME object, not a second `QwenResident` built over
+    /// the same checkpoint: the adapter path lives in that object's own
+    /// `RwLock`, read by ITS `activate`, so a write to a copy is a write
+    /// nothing ever reads - a hot swap that silently does nothing.
+    #[test]
+    fn the_registered_qwen_resident_and_the_concrete_handle_are_one_object() {
+        let mut models: Vec<Arc<dyn ResidentModel>> = Vec::new();
+        assert!(register_qwen(&mut models, None).is_none(), "no configured qwen weights must yield no handle");
+        assert!(models.is_empty(), "and must register nothing");
+
+        let card = checkpoint::st::ModelCard::new("brain/qwen3", "qwen");
+        let resident = crate::resident_llm::QwenResident::from_card("unused.safetensors", &card, Some("unused.json"), None);
+        let handle = register_qwen(&mut models, Some(resident)).expect("a configured qwen resident yields a concrete handle");
+        assert_eq!(models.len(), 1, "the erased handle is registered exactly once");
+        assert!(
+            std::ptr::eq(Arc::as_ptr(&handle) as *const (), Arc::as_ptr(&models[0]) as *const ()),
+            "the concrete handle and the registered erased one must be the same allocation, or set_adapter writes where no activate reads"
+        );
+    }
 
     /// Real end-to-end proof that demote/promote works against the actual
     /// ~31 GB Z-Image checkpoint, not a synthetic model: activate (builds

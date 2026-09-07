@@ -417,7 +417,11 @@ pub fn run_serve(args: &[String]) {
 /// Discover schedulable compute (GPUs/NPUs/CPU RAM, narrowed by `--device`), resolve
 /// the model directory, and build the one shared residency executor that every serving
 /// surface (D-Bus + the HTTP APIs) drives.
-fn build_serving_executor(reserve_gb: u64, models_dir: Option<String>) -> residency::Executor {
+///
+/// Returns `crate::resident::Serving`, not a bare `Executor`: the
+/// continuous-learning hot swap needs the CONCRETE `QwenResident` handle
+/// alongside the type-erased one the executor holds - see that type's doc.
+fn build_serving_executor(reserve_gb: u64, models_dir: Option<String>) -> crate::resident::Serving {
     // Discover the GPUs' capacity so the scheduler can budget/evict against real VRAM,
     // then narrow to what `--device` made schedulable. With no `--device` the set is
     // every device, which is exactly the "use all the hardware wisely" default.
@@ -532,8 +536,7 @@ fn build_serving_executor(reserve_gb: u64, models_dir: Option<String>) -> reside
         }
         eprintln!("brain serve: scanning model dir {}", d.display());
     }
-    let executor = crate::resident::build_executor(&gpus, &npus, &unified_gpus, reserved, cpu_compute_ram, ram, dir.as_deref(), residency::Policy::from_env());
-    executor
+    crate::resident::build_executor(&gpus, &npus, &unified_gpus, reserved, cpu_compute_ram, ram, dir.as_deref(), residency::Policy::from_env())
 }
 
 /// Live host RAM this process could actually get right now: `MemAvailable`
@@ -628,7 +631,12 @@ fn build_auto_fetch_supplier(models_dir: Option<&str>) -> Option<Arc<dyn residen
 
 fn run_apis(a: RunApis) {
     let supplier = build_auto_fetch_supplier(a.models_dir.as_deref());
-    let executor = build_serving_executor(a.reserve_gb, a.models_dir);
+    // `qwen` is the concrete hot-swap handle (`resident::Serving`). Bound and
+    // deliberately unused here: the opt-in adapter watcher that reads it is
+    // the next commit, and naming it at the one call site that will spawn
+    // that watcher is what makes the handle's whole purpose reviewable
+    // separately from the watcher's own logic.
+    let crate::resident::Serving { executor, qwen: _qwen } = build_serving_executor(a.reserve_gb, a.models_dir);
     let manifests = executor.manifests();
     let served: Vec<&str> = manifests.iter().map(|m| m.model.as_str()).collect();
     eprintln!("brain serve: models: {}", served.join(", "));
