@@ -744,6 +744,14 @@ pub struct FactVerdict {
 /// [`task_id`] applied to each triple's `probe_question`, exactly what
 /// [`DocumentEnv::tasks`] stamps on the [`Task`] the gate decoded.
 ///
+/// A fact's probes are the triples whose fact [`normalize`]s to the same
+/// text, NOT the ones whose raw string matches: [`FactBatch::new`] collapses
+/// the training rows under exactly that identity, so two spellings of one
+/// fact are one row and one verdict. Matching raw here would drop every
+/// probe an extractor happened to re-emit with different casing or spacing,
+/// and a fact whose only failing probe was written that way would be
+/// reported as LANDED - the concealment this whole function exists to stop.
+///
 /// Panics, naming the offending probe, if `by_task` does not cover every one
 /// of `batch`'s probes: a fact this cycle never scored cannot be honestly
 /// reported as landed OR failed.
@@ -752,7 +760,8 @@ pub fn fact_verdicts(batch: &FactBatch, by_task: &[(String, f64)]) -> Vec<FactVe
         .facts()
         .iter()
         .map(|fact| {
-            let landed = batch.triples().iter().filter(|t| &t.fact == fact).all(|t| {
+            let identity = normalize(fact);
+            let landed = batch.triples().iter().filter(|t| normalize(&t.fact) == identity).all(|t| {
                 let id = task_id(&t.probe_question);
                 let (_, score) = by_task.iter().find(|(tid, _)| *tid == id).unwrap_or_else(|| {
                     panic!(
@@ -912,6 +921,44 @@ mod tests {
         // The rejection must be about MAGNITUDE, not noise: the sign test
         // still cleared alpha.
         assert!(report.p_value <= document_gate_config().alpha, "p = {} should still clear alpha", report.p_value);
+    }
+
+    /// [`FactBatch::new`] deduplicates the trained rows by their NORMALISED
+    /// text: two triples whose `fact` differs only in casing or internal
+    /// whitespace are ONE training row and therefore ONE verdict. So
+    /// [`fact_verdicts`] has to group its probes by the same identity. Group
+    /// them by the RAW string instead and every probe written under the other
+    /// spelling silently leaves the group - `all()` over the survivors then
+    /// reports LANDED for a fact whose only failing probe was spelled that
+    /// way, which is precisely the "15 landed, 5 did not" concealment this
+    /// function exists to prevent.
+    #[test]
+    fn a_facts_verdict_covers_its_probes_however_that_facts_row_was_spelled() {
+        let batch = FactBatch::new(vec![
+            FactProbe {
+                fact: "The 3rd relay closes at 13 volts".to_string(),
+                probe_question: "when does the third relay close".to_string(),
+                expected_answer: "13 volts".to_string(),
+            },
+            FactProbe {
+                // The SAME fact, as an extractor re-emitted it for the second
+                // probe: different capitalisation, a doubled space.
+                fact: "the 3rd  relay closes at 13 volts".to_string(),
+                probe_question: "what is the third relay threshold".to_string(),
+                expected_answer: "13 volts".to_string(),
+            },
+        ]);
+        assert_eq!(batch.facts().len(), 1, "two spellings of one fact are ONE trained row - that is what makes this a single verdict");
+
+        let by_task: Vec<(String, f64)> =
+            vec![(task_id(&batch.triples()[0].probe_question), 1.0), (task_id(&batch.triples()[1].probe_question), 0.0)];
+
+        let verdicts = fact_verdicts(&batch, &by_task);
+        assert_eq!(verdicts.len(), 1, "one verdict per DISTINCT fact");
+        assert!(
+            !verdicts[0].landed,
+            "one of this fact's two probes scored zero, so the fact has NOT landed - which spelling that probe's row carried is not a property of the fact"
+        );
     }
 
     /// The three thresholds the document config deliberately does NOT move
