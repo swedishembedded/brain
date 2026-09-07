@@ -316,7 +316,7 @@ fn wants_weight_acquisition(arch: &str, rest: &[String]) -> bool {
 /// resolver-migrated case needs an explicit marker, not an overload of a
 /// field whose "empty" already means something else for those others).
 /// Grown by one entry per architecture as it migrates.
-const RESOLVER_MIGRATED_ARCHS: &[&str] = &["flux2", "qwen3tts", "kronos"];
+const RESOLVER_MIGRATED_ARCHS: &[&str] = &["flux2", "qwen3tts", "kronos", "ltxv"];
 
 fn dispatch_arch(arch: &str, rest: Vec<String>) {
     // Skipped for `-h`/`--help`: help text must never block on a network
@@ -833,6 +833,15 @@ mod tests {
         assert!(brain_arch::by_id("kronos").expect("kronos row").weights_env.is_empty());
         assert!(brain_arch::by_id("kronos").expect("kronos row").extra_refs.is_empty());
         assert!(!weights_already_named("kronos", &s(&["speak"])));
+    }
+
+    /// `ltxv` moved to the resolver too - see
+    /// `qwen3tts_no_longer_wants_env_based_weight_acquisition`'s own doc.
+    #[test]
+    fn ltxv_no_longer_wants_env_based_weight_acquisition() {
+        let _serial = env_lock();
+        assert!(brain_arch::by_id("ltxv").expect("ltxv row").weights_env.is_empty());
+        assert!(!weights_already_named("ltxv", &s(&["t2v", "--vae", "v", "--prompt", "p"])));
     }
 
     #[test]

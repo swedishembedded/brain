@@ -13,17 +13,20 @@
 //! ```
 //!
 //! **`--dit-config` decides whether any of this is a quality claim.** The VAE
-//! and the latent upscalers are always real (real weights,
-//! `--vae`/`$BRAIN_LTXV_VAE`, `$BRAIN_LTXV_UPSAMPLER_SPATIAL`). The DiT is
-//! the tiny config with FRESH RANDOM WEIGHTS by default, which makes every
-//! output a wiring proof and nothing else; `--dit-config ltx25_22b` with
-//! `--dit`/`$BRAIN_LTXV_DIT` loads the real checkpoint. The prompt likewise
-//! only folds into a deterministic context stub unless
-//! `--text-encoder`/`$BRAIN_LTXV_TEXT_ENCODER` names the real Gemma-4
-//! encoder. See `ltxv::pipeline`'s module doc for the full account of what
-//! is real and what is not.
+//! and the latent upscalers are always real (real weights, `--vae` resolved
+//! from the model store - the only required role - and
+//! `$BRAIN_LTXV_UPSAMPLER_SPATIAL`). The DiT is the tiny config with FRESH
+//! RANDOM WEIGHTS by default, which makes every output a wiring proof and
+//! nothing else; `--dit-config ltx25_22b` with a resolved `--dit` loads the
+//! real checkpoint. The prompt likewise only folds into a deterministic
+//! context stub unless a resolved `--text-encoder` names the real Gemma-4
+//! encoder. dit/vae/audio_vae/text_encoder/tokenizer are resolved through
+//! `brain_modelstore::resolve` (`ltxv::spec::LtxvSpec`) rather than
+//! `BRAIN_LTXV_*` - see `resolve_ltxv`. See `ltxv::pipeline`'s module doc for
+//! the full account of what is real and what is not.
 
 use ltxv::pipeline::{DfrOpts, DfrPaths, GenOpts, LongOpts, MaskedOpts, Paths, UpscaleOpts};
+use ltxv::spec::LtxvSpec;
 
 const HELP: &str = r#"brain ltxv t2v - LTX-2.5 text to video (M4 smoke test: real VAE + tiny random-weight DiT, no real text encoder yet)
 
@@ -143,19 +146,20 @@ Placement:
   gpu0 also confines the run to one card, since placement never leaves the
   schedulable set --device names.
 
-Weights (flag wins over the environment variable):
-  --vae <path>              $BRAIN_LTXV_VAE       the causal 3D video VAE
-  --dit <path>              $BRAIN_LTXV_DIT       real 22B DiT GGUF (only
-                                                   read when --dit-config
-                                                   ltx25_22b)
-  --text-encoder <path>     $BRAIN_LTXV_TEXT_ENCODER  real Gemma-4 text
-                                                   encoder (optional; the
-                                                   deterministic prompt
-                                                   stub runs without it)
+Weights (resolved from the models directory; a flag names a candidate
+outright, an ambiguous or missing outcome prints every real candidate and
+exits - --models-dir/BRAIN_MODELS_DIR names where to look):
+  --vae <path>              the causal 3D video VAE (the only required role)
+  --dit <path>              real 22B DiT GGUF (only read when --dit-config
+                             ltx25_22b)
+  --text-encoder <path>     real Gemma-4 text encoder (optional; the
+                             deterministic prompt stub runs without it)
                             $BRAIN_LTXV_UPSAMPLER_SPATIAL  spatial x2 latent
                                                    upscaler - REQUIRED above
                                                    6144 video tokens, unused
-                                                   below (see Stages)
+                                                   below (see Stages). Not a
+                                                   resolver role - env/flag
+                                                   only, same as always.
 
 Stages:
   The distilled checkpoint's fixed 8-sigma schedule is only distilled to
@@ -356,19 +360,18 @@ Length:
   grid with no room for one carried frame plus one new one is refused before
   any weight is read, rather than after an hour of work.
 
-Weights (flag wins over the environment variable):
-  --vae <path>               $BRAIN_LTXV_VAE       the causal 3D video VAE
+Weights (resolved from the models directory; a flag names a candidate
+outright, an ambiguous or missing outcome prints every real candidate and
+exits):
+  --vae <path>               the causal 3D video VAE (the only required role)
   --upsampler-spatial <path> $BRAIN_LTXV_UPSAMPLER_SPATIAL  spatial x2 latent
                                                    upscaler - REQUIRED, it is
                                                    what this command runs
-  --dit <path>               $BRAIN_LTXV_DIT       real 22B DiT GGUF (only
-                                                   read when --dit-config
-                                                   ltx25_22b)
-  --text-encoder <path>      $BRAIN_LTXV_TEXT_ENCODER  real Gemma-4 text
-                                                   encoder (without it
-                                                   --prompt reaches the model
-                                                   only as a stub and cannot
-                                                   guide anything)
+  --dit <path>               real 22B DiT GGUF (only read when --dit-config
+                             ltx25_22b)
+  --text-encoder <path>      real Gemma-4 text encoder (without it --prompt
+                             reaches the model only as a stub and cannot
+                             guide anything)
 
   $BRAIN_LTXV_AUDIO_VAE is NOT read here. Upscaling refines the VIDEO latent
   only: it runs no audio-visual DiT and decodes no audio, so setting that
@@ -522,23 +525,37 @@ Sound:
   output has NO sound track. The source's own audio stays in --input, and
   re-attaching it is a separate ffmpeg mux.
 
-Weights:
-  --vae <path>              $BRAIN_LTXV_VAE       the causal 3D video VAE
-  --dit <path>              $BRAIN_LTXV_DIT       real 22B DiT GGUF (only
-                                                   read when --dit-config
-                                                   names the real model)
-  --text-encoder <path>     $BRAIN_LTXV_TEXT_ENCODER  real Gemma-4 text
-                                                   encoder; without it the
-                                                   prompt reaches a stub
-                            $BRAIN_LTXV_UPSAMPLER_SPATIAL and
-                            $BRAIN_LTXV_AUDIO_VAE are not read by this
-                            command - it never upscales and never generates
-                            sound.
+Weights (resolved from the models directory; a flag names a candidate
+outright, an ambiguous or missing outcome prints every real candidate and
+exits):
+  --vae <path>              the causal 3D video VAE (the only required role)
+  --dit <path>              real 22B DiT GGUF (only read when --dit-config
+                            names the real model)
+  --text-encoder <path>     real Gemma-4 text encoder; without it the
+                            prompt reaches a stub
+                            $BRAIN_LTXV_UPSAMPLER_SPATIAL and the audio VAE
+                            role are not read by this command - it never
+                            upscales and never generates sound.
 
 Placement:
   --device <cpu|gpu>        DiT + VAE (default: the ambient BRAIN_DEVICE)"#;
 
+/// Resolve `dit`/`vae`/`audio_vae`/`text_encoder`/`tokenizer` through the
+/// model-store resolver (`brain_modelstore::resolve::resolve` +
+/// [`LtxvSpec`]) instead of `BRAIN_LTXV_*` - `overrides` carries whatever
+/// role flags [`crate::resolver_cli::extract_role_overrides`] already pulled
+/// out of this command's own argv. `vae` is the only role `resolve_or_exit`
+/// can fail to fill; every other role simply stays `None` in the returned
+/// `Paths`, exactly as an unset env var/absent flag already did.
+fn resolve_ltxv(overrides: &std::collections::BTreeMap<String, String>, spatial_upsampler: Option<&str>) -> Result<Paths, String> {
+    let spec = LtxvSpec;
+    let assembly = crate::resolver_cli::resolve_or_exit("ltxv", &spec, overrides);
+    Paths::from_assembly(&assembly, spatial_upsampler)
+}
+
 fn t2v(args: &[String]) -> Result<(), String> {
+    let (overrides, args) = crate::resolver_cli::extract_role_overrides(&LtxvSpec, args);
+    let args = &args[..];
     let mut o = GenOpts::default();
     let mut context_frames = ltxv::longform::CONTEXT_FRAMES;
     let mut prompt: Option<String> = None;
@@ -547,9 +564,6 @@ fn t2v(args: &[String]) -> Result<(), String> {
     // value - and refusing `--scene` alongside it depends on knowing.
     let mut frames_given = false;
     let mut out: Option<String> = None;
-    let mut vae: Option<String> = None;
-    let mut dit: Option<String> = None;
-    let mut text_encoder: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         let need = |i: usize| -> Result<&String, String> { args.get(i + 1).ok_or_else(|| format!("{} needs a value", args[i])) };
@@ -581,15 +595,6 @@ fn t2v(args: &[String]) -> Result<(), String> {
             "--dit-config" => o.dit_config = need(i)?.clone(),
             "--device" => {
                 o.device = Some(need(i)?.clone());
-            }
-            "--vae" => {
-                vae = Some(need(i)?.clone());
-            }
-            "--dit" => {
-                dit = Some(need(i)?.clone());
-            }
-            "--text-encoder" => {
-                text_encoder = Some(need(i)?.clone());
             }
             "--conditioning-strength" => o.conditioning_strength = flt(i, "--conditioning-strength")?,
             "--context-frames" => context_frames = num(i, "--context-frames")?,
@@ -637,7 +642,7 @@ fn t2v(args: &[String]) -> Result<(), String> {
     };
     o.frames = scenes.iter().map(|s| s.frames).sum();
     let out = out.ok_or("--output-path is required")?;
-    let paths = Paths::resolve(vae.as_deref(), dit.as_deref(), text_encoder.as_deref(), None)?;
+    let paths = resolve_ltxv(&overrides, None)?;
 
     let (lh, lw) = (o.height / 32, o.width / 32);
     let context_latents = {
@@ -796,13 +801,12 @@ fn t2v(args: &[String]) -> Result<(), String> {
 }
 
 fn upscale(args: &[String]) -> Result<(), String> {
+    let (overrides, args) = crate::resolver_cli::extract_role_overrides(&LtxvSpec, args);
+    let args = &args[..];
     let mut o = UpscaleOpts::default();
     let mut prompt: Option<String> = None;
     let mut input: Option<String> = None;
     let mut out: Option<String> = None;
-    let mut vae: Option<String> = None;
-    let mut dit: Option<String> = None;
-    let mut text_encoder: Option<String> = None;
     let mut upsampler_spatial: Option<String> = None;
     let mut fps: Option<usize> = None;
     let mut context_frames = ltxv::longform::CONTEXT_FRAMES;
@@ -831,15 +835,6 @@ fn upscale(args: &[String]) -> Result<(), String> {
             "--device" => {
                 o.base.device = Some(need(i)?.clone());
             }
-            "--vae" => {
-                vae = Some(need(i)?.clone());
-            }
-            "--dit" => {
-                dit = Some(need(i)?.clone());
-            }
-            "--text-encoder" => {
-                text_encoder = Some(need(i)?.clone());
-            }
             "--upsampler-spatial" => {
                 upsampler_spatial = Some(need(i)?.clone());
             }
@@ -853,7 +848,7 @@ fn upscale(args: &[String]) -> Result<(), String> {
     }
     let input = input.ok_or("--input is required")?;
     let out = out.ok_or("--output-path is required")?;
-    let paths = Paths::resolve(vae.as_deref(), dit.as_deref(), text_encoder.as_deref(), upsampler_spatial.as_deref())?;
+    let paths = resolve_ltxv(&overrides, upsampler_spatial.as_deref())?;
     let prompt = prompt.unwrap_or_default();
     o.context_latent_frames = {
         let vcfg = ltxv::LtxVaeConfig::conv25();
@@ -941,13 +936,12 @@ fn upscale(args: &[String]) -> Result<(), String> {
 /// entirely in what the pipeline does with the latent, not in the file
 /// handling.
 fn v2v(args: &[String]) -> Result<(), String> {
+    let (overrides, args) = crate::resolver_cli::extract_role_overrides(&LtxvSpec, args);
+    let args = &args[..];
     let mut o = MaskedOpts::default();
     let mut prompt: Option<String> = None;
     let mut input: Option<String> = None;
     let mut out: Option<String> = None;
-    let mut vae: Option<String> = None;
-    let mut dit: Option<String> = None;
-    let mut text_encoder: Option<String> = None;
     let mut fps: Option<usize> = None;
     let mut i = 0;
     while i < args.len() {
@@ -966,9 +960,6 @@ fn v2v(args: &[String]) -> Result<(), String> {
             "--fps" => fps = Some(num(i, "--fps")?),
             "--dit-config" => o.base.dit_config = need(i)?.clone(),
             "--device" => o.base.device = Some(need(i)?.clone()),
-            "--vae" => vae = Some(need(i)?.clone()),
-            "--dit" => dit = Some(need(i)?.clone()),
-            "--text-encoder" => text_encoder = Some(need(i)?.clone()),
             "--help" | "-h" => {
                 println!("{V2V_HELP}");
                 std::process::exit(0);
@@ -983,7 +974,7 @@ fn v2v(args: &[String]) -> Result<(), String> {
     if o.mask_dir.is_empty() {
         return Err("--mask is required: without a mask this command has nothing to regenerate and would return the input clip".into());
     }
-    let paths = Paths::resolve(vae.as_deref(), dit.as_deref(), text_encoder.as_deref(), None)?;
+    let paths = resolve_ltxv(&overrides, None)?;
 
     let in_path = std::path::Path::new(&input);
     let decoded = imaging::video::decode_frames_rgb8(in_path, &imaging::video::VideoDecodeOpts { fps: None, max_frames: 0 })?;
@@ -1142,6 +1133,8 @@ fn dfr(args: &[String]) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    use brain_modelstore::resolve::ArchSpec;
+
     /// The help text is the whole user interface: every flag the parser
     /// accepts has to appear in it, and vice versa - `wan_cli`'s own
     /// self-check, ported unchanged.
@@ -1165,9 +1158,6 @@ mod tests {
             "--eta",
             "--dit-config",
             "--device",
-            "--vae",
-            "--dit",
-            "--text-encoder",
             "--scene",
             "--start-frame",
             "--end-frame",
@@ -1179,12 +1169,23 @@ mod tests {
             assert!(super::HELP.contains(flag), "{flag} is parsed but not in --help");
             assert!(src.contains(&format!("\"{flag}\"")), "{flag} is in --help but not parsed");
         }
-        for (var, _) in ltxv::pipeline::PATH_VARS {
-            assert!(super::HELP.contains(var), "{var} is read but not in --help");
+        // `--vae`/`--dit`/`--text-encoder` are the model-store resolver's own
+        // role-override flags now (`crate::resolver_cli::extract_role_
+        // overrides`, matched against `LtxvSpec::roles()` - never a literal
+        // match arm in this file), so they're checked against the resolver's
+        // own role table instead of a quoted string in source.
+        for role in ["vae", "dit", "text_encoder"] {
+            let flag = format!("--{}", role.replace('_', "-"));
+            assert!(super::HELP.contains(&flag), "{flag} is a resolver role flag but not in --help");
+            assert!(ltxv::spec::LtxvSpec.roles().contains(&role), "{role} is documented as a role flag but LtxvSpec doesn't declare it");
         }
-        for (var, _) in ltxv::pipeline::OPTIONAL_PATH_VARS {
-            assert!(super::HELP.contains(var), "{var} is read but not in --help");
-        }
+        // `BRAIN_LTXV_UPSAMPLER_SPATIAL` is the one `Paths` env var this
+        // command still reads directly - it names no resolver role (see
+        // `ltxv::pipeline::OPTIONAL_PATH_VARS`'s own doc). The other three
+        // (`vae`/`dit`/`text_encoder`) are checked above via the resolver's
+        // own role table instead: `Paths::from_env`'s env vars for them are
+        // read only by the served path (`resident_ltxv.rs`), not this CLI.
+        assert!(super::HELP.contains(ltxv::pipeline::OPTIONAL_PATH_VARS[2].0), "{} is read but not in --help", ltxv::pipeline::OPTIONAL_PATH_VARS[2].0);
     }
 
     /// Same self-check as [`every_flag_the_parser_accepts_is_documented`],
@@ -1194,16 +1195,21 @@ mod tests {
     #[test]
     fn every_upscale_flag_the_parser_accepts_is_documented() {
         let src = include_str!("ltxv_cli.rs");
-        for flag in ["--prompt", "--input", "--output-path", "--factor", "--refine-steps", "--guidance", "--seed", "--fps", "--dit-config", "--device", "--vae", "--dit", "--text-encoder", "--upsampler-spatial"] {
+        for flag in ["--prompt", "--input", "--output-path", "--factor", "--refine-steps", "--guidance", "--seed", "--fps", "--dit-config", "--device", "--upsampler-spatial"] {
             assert!(super::UPSCALE_HELP.contains(flag), "{flag} is parsed but not in upscale --help");
             assert!(src.contains(&format!("\"{flag}\"")), "{flag} is in upscale --help but not parsed");
         }
-        for (var, _) in ltxv::pipeline::PATH_VARS {
-            assert!(super::UPSCALE_HELP.contains(var), "{var} is read but not in upscale --help");
+        // See `every_flag_the_parser_accepts_is_documented`'s own comment:
+        // these three are the resolver's role-override flags, not literal
+        // match arms in this file.
+        for role in ["vae", "dit", "text_encoder"] {
+            let flag = format!("--{}", role.replace('_', "-"));
+            assert!(super::UPSCALE_HELP.contains(&flag), "{flag} is a resolver role flag but not in upscale --help");
+            assert!(ltxv::spec::LtxvSpec.roles().contains(&role), "{role} is documented as a role flag but LtxvSpec doesn't declare it");
         }
-        for (var, _) in ltxv::pipeline::OPTIONAL_PATH_VARS {
-            assert!(super::UPSCALE_HELP.contains(var), "{var} is read but not in upscale --help");
-        }
+        // See `every_flag_the_parser_accepts_is_documented`'s own comment:
+        // this is the one `Paths` env var this command still reads directly.
+        assert!(super::UPSCALE_HELP.contains(ltxv::pipeline::OPTIONAL_PATH_VARS[2].0), "{} is read but not in upscale --help", ltxv::pipeline::OPTIONAL_PATH_VARS[2].0);
         // The one number in the help text that is a real constant rather than
         // prose: a ceiling the help promises and the pipeline enforces must
         // not drift apart.
@@ -1215,16 +1221,21 @@ mod tests {
     #[test]
     fn every_v2v_flag_the_parser_accepts_is_documented() {
         let src = include_str!("ltxv_cli.rs");
-        for flag in ["--prompt", "--input", "--mask", "--output-path", "--strength", "--steps", "--guidance", "--seed", "--fps", "--dit-config", "--device", "--vae", "--dit", "--text-encoder"] {
+        for flag in ["--prompt", "--input", "--mask", "--output-path", "--strength", "--steps", "--guidance", "--seed", "--fps", "--dit-config", "--device"] {
             assert!(super::V2V_HELP.contains(flag), "{flag} is parsed but not in v2v --help");
             assert!(src.contains(&format!("\"{flag}\"")), "{flag} is in v2v --help but not parsed");
         }
-        for (var, _) in ltxv::pipeline::PATH_VARS {
-            assert!(super::V2V_HELP.contains(var), "{var} is read but not in v2v --help");
+        // See `every_flag_the_parser_accepts_is_documented`'s own comment:
+        // these three are the resolver's role-override flags, not literal
+        // match arms in this file.
+        for role in ["vae", "dit", "text_encoder"] {
+            let flag = format!("--{}", role.replace('_', "-"));
+            assert!(super::V2V_HELP.contains(&flag), "{flag} is a resolver role flag but not in v2v --help");
+            assert!(ltxv::spec::LtxvSpec.roles().contains(&role), "{role} is documented as a role flag but LtxvSpec doesn't declare it");
         }
-        for (var, _) in ltxv::pipeline::OPTIONAL_PATH_VARS {
-            assert!(super::V2V_HELP.contains(var), "{var} is read but not in v2v --help");
-        }
+        // See `every_flag_the_parser_accepts_is_documented`'s own comment:
+        // this is the one `Paths` env var this command still reads directly.
+        assert!(super::V2V_HELP.contains(ltxv::pipeline::OPTIONAL_PATH_VARS[2].0), "{} is read but not in v2v --help", ltxv::pipeline::OPTIONAL_PATH_VARS[2].0);
         // The interchange format this command consumes is a contract with a
         // separate producer, so its version string is in the help verbatim
         // rather than paraphrased.

@@ -34,6 +34,10 @@ brain-diffusion.workspace = true
 # The generalized capability interface (`crate::caps`) - manifest, actions,
 # cancellation - per the serving contract every model ships.
 brain-capability.workspace = true
+# The model-store resolver (`crate::spec::LtxvSpec`) - turns an inventory
+# scan into a resolved dit/vae/audio_vae/text_encoder/tokenizer Assembly
+# instead of BRAIN_LTXV_* env vars.
+brain-modelstore.workspace = true
 # Seeded noise/weight-init RNG (`data::rng::Rng`), the same SplitMix64 +
 # Box-Muller stream `wan::pipeline` uses, for reproducible `--seed` runs.
 brain-data.workspace = true

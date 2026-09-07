@@ -158,6 +158,7 @@ pub mod pipeline;
 pub mod refcond;
 pub mod rope;
 pub mod shard;
+pub mod spec;
 pub mod upsampler;
 pub mod vae3d;
 pub mod vocoder;

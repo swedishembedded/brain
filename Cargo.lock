@@ -1322,6 +1322,7 @@ dependencies = [
  "brain-kernels",
  "brain-memauth",
  "brain-model",
+ "brain-modelstore",
  "brain-residency",
  "brain-testutil",
  "brain-vae",

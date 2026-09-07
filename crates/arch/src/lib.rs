@@ -533,13 +533,17 @@ pub const ARCHS: &[Arch] = &[
     // upstream ships them as two independent checkpoints with unrelated
     // shapes, unlike Wan's single VAE role. The vocoder ships bundled inside
     // the audio-VAE checkpoint's own metadata, not as a fourth file.
+    // No `weights_env`: t2v/upscale/v2v resolve dit/vae/audio_vae/
+    // text_encoder/tokenizer through `brain_modelstore::resolve`
+    // (`ltxv::spec::LtxvSpec`, wired into `crates/cli/src/ltxv_cli.rs`'s
+    // `resolve_ltxv`) - `vae` is the only required role there, matching
+    // this pipeline's own real/optional weight split (see `ltxv::pipeline`'s
+    // module doc). `dfr`'s own `DfrPaths` (vae/spatial_upsampler/temporal_
+    // upsampler) is a separate, still env/flag-driven struct, not part of
+    // this row's roles either way.
     arch!("ltxv", "LTX-2.5 two-stream audio+video diffusion transformer", Video, Brain, "brain-ltxv",
           hf: &["AVTransformer3DModel"],
-          default_ref: Some("Lightricks/LTX-2.5"),
-          weights_env: &[("BRAIN_LTXV_DIT", "dit"), ("BRAIN_LTXV_VAE", "vae"),
-                         ("BRAIN_LTXV_AUDIO_VAE", "audio_vae"),
-                         ("BRAIN_LTXV_TEXT_ENCODER", "text_encoder"),
-                         ("BRAIN_LTXV_TOKENIZER", "tokenizer")]),
+          default_ref: Some("Lightricks/LTX-2.5")),
     // -- 3D -----------------------------------------------------------
     arch!("worldmirror2", "WorldMirror-2 multi-view 3D reconstruction", ThreeD, Brain, "brain-worldmirror2"),
     arch!("splat", "3D Gaussian Splatting rasterizer", ThreeD, Brain, "brain-splat"),
