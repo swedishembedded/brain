@@ -32,6 +32,7 @@ pub mod remap;
 pub mod split;
 pub mod srccheck;
 pub mod torchpt;
+pub mod torchpt_write;
 pub mod zipread;
 #[cfg(test)]
 mod testalloc;
