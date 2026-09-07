@@ -98,7 +98,11 @@ fn resolve_arch(l: &LocalModel) -> Option<&'static brain_arch::Arch> {
     let card = l.card.as_ref()?;
     match l.format {
         Format::Gguf => brain_arch::by_gguf(&card.family),
-        _ => brain_arch::by_id(&card.family),
+        // A compound checkpoint's family is whichever recipe claimed the
+        // repo (`ZimageRecipe::id()` == `"zimage"`, not `"s3dit"`) - see
+        // `brain_arch::Arch::families`'s doc for why `by_id` alone leaves a
+        // correctly-classified Z-Image checkpoint invisible here.
+        _ => brain_arch::by_family(&card.family),
     }
 }
 
@@ -720,4 +724,35 @@ fn run_measure(arch_id: &str, ref_str: &str, config: &serde_json::Value, reps: u
     );
     println!("  per layer: {}", eng(m.per_layer.flops as f64, "FLOP"));
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn compound_local(id: &str, family: &str) -> LocalModel {
+        let reference = brain_modelref::ModelRef::parse(id).unwrap();
+        let card = ModelCard::for_ref(id, reference.vendor(), reference.repo(), None, family);
+        LocalModel {
+            reference,
+            dir: PathBuf::from("/dev/null"),
+            weights: PathBuf::from("/dev/null/brain.manifest.json"),
+            tokenizer: None,
+            card: Some(card),
+            format: Format::Compound,
+            adapter: None,
+            roles: Some(BTreeMap::new()),
+        }
+    }
+
+    #[test]
+    fn resolve_arch_follows_a_compound_recipes_family_alias_to_its_canonical_arch() {
+        // Z-Image's real on-disk manifest carries `family: "zimage"`
+        // (`ZimageRecipe::id()`), not the arch table's own id `"s3dit"` -
+        // before `by_family` this made a correctly pulled, correctly
+        // classified Z-Image checkpoint invisible to `brain models list`.
+        let l = compound_local("Tongyi-MAI/Z-Image-Turbo", "zimage");
+        assert_eq!(resolve_arch(&l).map(|a| a.id), Some("s3dit"));
+    }
 }

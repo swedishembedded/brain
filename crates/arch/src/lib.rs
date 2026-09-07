@@ -166,6 +166,16 @@ pub struct Arch {
     /// stale `default_ref` would be. Empty when no survey has been done for
     /// this architecture yet.
     pub variants: &'static [Variant],
+    /// Extra recipe/manifest family strings that also mean this arch, besides
+    /// `id` itself - see [`by_family`]. A compound checkpoint's
+    /// `CompoundManifest::family` is a free string chosen by whichever
+    /// `modelstore::recipe::ArtifactRecipe` claimed the repo (`"zimage"` for
+    /// `ZimageRecipe`, `"wan"` for `WanRecipe`, ...), and is under no
+    /// obligation to equal this table's canonical `id` - `s3dit`'s recipe
+    /// family is `"zimage"`, not `"s3dit"`. Empty for every row whose recipe
+    /// family already equals `id` (the common case: `wan`, `kronos`, every
+    /// `FilesRecipe` row named after its own arch).
+    pub families: &'static [&'static str],
 }
 
 /// One upstream repo plus the quantizations it publishes - see
@@ -200,6 +210,7 @@ const DEFAULT: Arch = Arch {
     extra_refs: &[],
     weights_env: &[],
     variants: &[],
+    families: &[],
 };
 
 macro_rules! arch {
@@ -425,7 +436,13 @@ pub const ARCHS: &[Arch] = &[
     arch!("clip", "CLIP-L / OpenCLIP-bigG / EVA-CLIP text+image towers", Vision, LlamaCpp, "brain-clip"),
     arch!("zipdepth", "ZipDepth monocular depth (pure-conv)", Vision, Brain, "brain-zipdepth"),
     // -- Image generation / restoration --------------------------------
-    arch!("s3dit", "Z-Image S3-DiT text-to-image", Image, Brain, "brain-s3dit", default_ref: Some("Tongyi-MAI/Z-Image-Turbo"), weights_env: &[("BRAIN_S3DIT_DIT", "dit"), ("BRAIN_S3DIT_VAE", "vae"), ("BRAIN_S3DIT_QWEN", "text_encoder"), ("BRAIN_S3DIT_TOKENIZER", "tokenizer")]),
+    // `families: &["zimage"]` - `ZimageRecipe::id()` (and the
+    // `CompoundManifest::family` it writes at pull/finish time) is
+    // `"zimage"`, not `"s3dit"`; without the alias a pulled Z-Image
+    // checkpoint's family string finds no row here and falls into `brain
+    // models list`'s "custom checkpoint of an architecture not in
+    // brain_arch" bucket despite being correctly classified.
+    arch!("s3dit", "Z-Image S3-DiT text-to-image", Image, Brain, "brain-s3dit", default_ref: Some("Tongyi-MAI/Z-Image-Turbo"), weights_env: &[("BRAIN_S3DIT_DIT", "dit"), ("BRAIN_S3DIT_VAE", "vae"), ("BRAIN_S3DIT_QWEN", "text_encoder"), ("BRAIN_S3DIT_TOKENIZER", "tokenizer")], families: &["zimage"]),
     // `black-forest-labs/FLUX.2-klein-4B` ships the same shape
     // `ZimageRecipe` already matches generically (`model_index.json` +
     // transformer/vae/text_encoder/tokenizer role dirs) and even reuses
@@ -576,6 +593,16 @@ pub fn by_hf(class_name: &str) -> Option<&'static Arch> {
     ARCHS.iter().find(|a| a.hf.contains(&class_name))
 }
 
+/// The [`Arch`] this recipe/manifest family string means: `id` first, then
+/// each row's [`Arch::families`] aliases. What `models_cli::resolve_arch`
+/// uses for every non-GGUF (safetensors/compound) `LocalModel` - a
+/// `CompoundManifest::family` is chosen by whichever recipe claimed the
+/// repo, which is not always spelled the same as the arch's own canonical
+/// `id` (see [`Arch::families`]'s doc).
+pub fn by_family(family: &str) -> Option<&'static Arch> {
+    by_id(family).or_else(|| ARCHS.iter().find(|a| a.families.contains(&family)))
+}
+
 /// The [`Arch`] whose GGUF `general.architecture` spelling is `architecture`.
 /// Checks [`Arch::gguf`] first, then falls back to `id` for architectures
 /// whose GGUF spelling equals their canonical id.
@@ -698,6 +725,37 @@ mod tests {
     fn by_id_finds_a_known_row_and_none_for_unknown() {
         assert_eq!(by_id("qwen3").map(|a| a.id), Some("qwen3"));
         assert_eq!(by_id("totally-unknown"), None);
+    }
+
+    #[test]
+    fn by_family_resolves_a_recipe_alias_ahead_of_a_canonical_id() {
+        // "zimage" is Z-Image's real recipe/manifest family string (see
+        // `crates/modelstore/src/recipe.rs`'s `ZimageRecipe`), but the real
+        // arch id is "s3dit" -- `by_id("zimage")` finds nothing, which is the
+        // defect `by_family` exists to close. A canonical id must still
+        // resolve through `by_family` too (it just checks `by_id` first),
+        // and an unknown string must still resolve to nothing.
+        assert_eq!(by_family("zimage").map(|a| a.id), Some("s3dit"));
+        assert_eq!(by_family("s3dit").map(|a| a.id), Some("s3dit"));
+        assert_eq!(by_family("totally-unknown"), None);
+    }
+
+    #[test]
+    fn family_aliases_never_collide_with_a_real_id_or_each_other() {
+        // A families entry that happened to equal some OTHER arch's real id
+        // would make that arch permanently unreachable by its own id through
+        // `by_family` (the alias, scanned second, would never even be
+        // reached) -- and two arches both claiming the same alias would make
+        // `by_family` silently return whichever comes first in `ARCHS`,
+        // exactly the class of silent misattribution this table exists to
+        // rule out.
+        let mut seen: HashSet<&str> = HashSet::new();
+        for a in ARCHS {
+            for alias in a.families {
+                assert!(by_id(alias).is_none(), "{:?}: family alias {alias:?} collides with a real arch id", a.id);
+                assert!(seen.insert(alias), "{:?}: family alias {alias:?} claimed by more than one arch", a.id);
+            }
+        }
     }
 
     #[test]
