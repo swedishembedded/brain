@@ -248,13 +248,27 @@ pub fn resolve(arch: &str, records: &[ArtifactRecord], specs: &[&dyn ArchSpec], 
         if let Some(path) = overrides.get(role) {
             // Two ways to name a candidate: the exact absolute path an
             // advanced/scripted caller already has, or (matched on trailing
-            // path COMPONENTS, not a substring) a `<vendor>/<repo>`
-            // reference the same way `--model`/`brain pull` already accept
-            // one elsewhere in this codebase - `--text-encoder
-            // Qwen/Qwen3-8B` must work without the caller ever typing this
-            // store's absolute root.
+            // path COMPONENTS, not a substring, and against every ANCESTOR
+            // directory too - not just the record's own path) a
+            // `<vendor>/<repo>` reference the same way `--model`/`brain
+            // pull` already accept one elsewhere in this codebase -
+            // `--tokenizer Qwen/Qwen3-8B` must resolve to the tokenizer.json
+            // FILE that role actually needs, not the repo DIRECTORY the
+            // reference literally names, and must work without the caller
+            // ever typing this store's absolute root.
             let want = Path::new(path.as_str());
-            let found = records.iter().position(|r| r.path.to_string_lossy() == *path || r.path.ends_with(want));
+            let matches = |p: &Path| p.to_string_lossy() == *path || p.ancestors().any(|a| a.ends_with(want));
+            // Prefer a candidate `classify` already picked out for THIS
+            // role - it is what makes an ancestor-directory reference land
+            // on the right FILE within that directory, when more than one
+            // real artifact happens to live under it. Only an override
+            // naming something `classify` found no candidate for at all
+            // falls back to a bare whole-inventory search (the advanced
+            // escape hatch: point at an exact path by hand).
+            let found = by_role
+                .get(role)
+                .and_then(|cands| cands.iter().map(|(idx, _)| *idx).find(|&idx| matches(&records[idx].path)))
+                .or_else(|| records.iter().position(|r| matches(&r.path)));
             per_role.push((role, found.map(RoleResult::One).unwrap_or(RoleResult::None)));
             continue;
         }
@@ -370,6 +384,68 @@ mod tests {
                 Err("toy validate: deliberately incompatible".to_string())
             }
         }
+    }
+
+    /// A toy TWO-role arch: "component" (any path containing "component")
+    /// and "sidecar" (any path containing "sidecar") - enough to test an
+    /// override reference that names a DIRECTORY containing several real
+    /// candidates for DIFFERENT roles, the shape a plain HF checkpoint
+    /// directory (weights + a co-located tokenizer file) actually takes.
+    struct TwoRoleSpec;
+    impl ArchSpec for TwoRoleSpec {
+        fn arch(&self) -> &'static str {
+            "two"
+        }
+        fn roles(&self) -> &'static [&'static str] {
+            &["component", "sidecar"]
+        }
+        fn classify(&self, records: &[ArtifactRecord], _root: &Path) -> Vec<(usize, String, Confidence)> {
+            records
+                .iter()
+                .enumerate()
+                .filter_map(|(i, r)| {
+                    let s = r.path.to_string_lossy();
+                    if s.contains("sidecar") {
+                        Some((i, "sidecar".to_string(), Confidence::Declared))
+                    } else if s.contains("component") {
+                        Some((i, "component".to_string(), Confidence::Declared))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        }
+        fn assemble(&self, chosen: &BTreeMap<String, usize>, _records: &[ArtifactRecord], _overrides: &BTreeMap<String, String>) -> Result<AssembleOutcome, String> {
+            if chosen.contains_key("component") && chosen.contains_key("sidecar") {
+                Ok(AssembleOutcome::Assembled(AssembledVariant { id: "local/two".to_string(), variant: None }))
+            } else {
+                Err("missing a role".to_string())
+            }
+        }
+        fn validate(&self, _assembly: &Assembly) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    /// A `<vendor>/<repo>`-shaped override for one role must resolve to a
+    /// real candidate ALREADY classified for THAT role, not to whatever
+    /// record the reference's trailing path components happen to match
+    /// first - a bare directory reference for a role whose real artifact is
+    /// a FILE living inside that directory (a plain HF checkpoint's own
+    /// tokenizer.json, say) must land on the file, never the directory.
+    #[test]
+    fn an_override_directory_reference_resolves_to_the_classified_file_inside_it_not_the_directory() {
+        let records = vec![rec("/models/vendor/repo-component"), rec("/models/vendor/repo-component/sidecar.json")];
+        let spec = TwoRoleSpec;
+        let specs: Vec<&dyn ArchSpec> = vec![&spec];
+        let mut overrides = BTreeMap::new();
+        overrides.insert("sidecar".to_string(), "vendor/repo-component".to_string());
+        let found = match resolve("two", &records, &specs, &overrides) {
+            Resolution::Missing(m) => panic!("expected the sidecar role to resolve, got Missing: {m:?}"),
+            Resolution::Ambiguous(a) => panic!("expected the sidecar role to resolve, got Ambiguous: {a:?}"),
+            Resolution::Resolved(a) => a,
+        };
+        assert_eq!(found.roles["sidecar"], PathBuf::from("/models/vendor/repo-component/sidecar.json"));
     }
 
     #[test]
