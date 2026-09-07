@@ -297,20 +297,6 @@ impl Upscaler for Session {
     }
 }
 
-impl UpscaleProvider<Session> {
-    /// Build from `BRAIN_ESRGAN_WEIGHTS`, on a device of this crate's kernel
-    /// set. `None` when the var is unset or names nothing that exists - the
-    /// caller turns that into its own "set BRAIN_..." message.
-    pub fn from_env() -> Option<UpscaleProvider<Session>> {
-        let path = std::env::var("BRAIN_ESRGAN_WEIGHTS").ok().filter(|p| !p.is_empty())?;
-        if !std::path::Path::new(&path).exists() {
-            return None;
-        }
-        let gpu = Gpu::new(&crate::model::KERNELS);
-        load(&path, gpu).ok().map(UpscaleProvider::new)
-    }
-}
-
 /// Import a released checkpoint and build a session.
 pub fn load(path: &str, gpu: Gpu) -> Result<Session, String> {
     let (tensors, shapes, src) = crate::import::read(path)?;

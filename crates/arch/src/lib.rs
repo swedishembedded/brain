@@ -508,7 +508,10 @@ pub const ARCHS: &[Arch] = &[
     // Agreement is non-commercial-only and there is no official HF repo -
     // the user supplies weights they obtained themselves.
     arch!("supir", "SUPIR photo-realistic image restoration (SDXL + GLVControl + ZeroSFT)", Image, Brain, "brain-supir"),
-    arch!("rrdbnet", "Real-ESRGAN RRDBNet super-resolution", Image, Brain, "brain-rrdbnet", default_ref: Some("schwgHao/RealESRGAN_x4plus"), weights_env: &[("BRAIN_ESRGAN_WEIGHTS", "weights")]),
+    // No `weights_env`: rrdbnet resolves its single `weights` role through
+    // `brain_modelstore::resolve` (`crates/rrdbnet/src/spec.rs`), not
+    // `BRAIN_ESRGAN_WEIGHTS`.
+    arch!("rrdbnet", "Real-ESRGAN RRDBNet super-resolution", Image, Brain, "brain-rrdbnet", default_ref: Some("schwgHao/RealESRGAN_x4plus")),
     // -- Video generation -----------------------------------------------
     // `wan` names the FAMILY, not the release: Wan2.1 and Wan2.2 share one
     // upstream architecture name, one HF class (`WanTransformer3DModel`) and

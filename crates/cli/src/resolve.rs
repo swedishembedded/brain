@@ -317,7 +317,19 @@ fn wants_weight_acquisition(arch: &str, rest: &[String]) -> bool {
 /// field whose "empty" already means something else for those others).
 /// Grown by one entry per architecture as it migrates.
 const RESOLVER_MIGRATED_ARCHS: &[&str] = &[
-    "flux2", "qwen3tts", "kronos", "ltxv", "qwen35", "qwen3vl", "fastvlm", "moondream3", "deepseek2ocr", "qwen3asr", "nemotronasr", "sam2",
+    "flux2",
+    "qwen3tts",
+    "kronos",
+    "ltxv",
+    "qwen35",
+    "qwen3vl",
+    "fastvlm",
+    "moondream3",
+    "deepseek2ocr",
+    "qwen3asr",
+    "nemotronasr",
+    "sam2",
+    "rrdbnet",
 ];
 
 fn dispatch_arch(arch: &str, rest: Vec<String>) {

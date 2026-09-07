@@ -34,6 +34,7 @@ pub mod caps;
 pub mod config;
 pub mod import;
 pub mod model;
+pub mod spec;
 pub mod train;
 
 pub use config::RrdbConfig;

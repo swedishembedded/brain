@@ -179,7 +179,7 @@ pub struct ModelEntry {
     /// from it (`crates/cli/src/catalog.rs`'s `resolved_assembly_for`/
     /// `provider_from_assembly` is what actually resolves or threads one
     /// through for it and for every architecture migrated onto the resolver
-    /// since, `sam2`/`nemotronasr`/`qwen3asr` - single `weights`-role
+    /// since, `sam2`/`rrdbnet`/`nemotronasr`/`qwen3asr` - single `weights`-role
     /// architectures, via [`Assembly::role_path`] - included); every entry
     /// not yet migrated still ignores the argument and reads `BRAIN_*` env
     /// vars instead, per the module doc.
@@ -437,10 +437,21 @@ pub fn models() -> Vec<ModelEntry> {
         },
         ModelEntry {
             manifest: rrdbnet::caps::manifest,
-            provider: from_env!(
-                rrdbnet::caps::UpscaleProvider::from_env,
-                "set BRAIN_ESRGAN_WEIGHTS to an existing RealESRGAN_x4plus.pth"
-            ),
+            provider: |assembly: &Assembly| {
+                let weights = assembly.role_path("weights")?;
+                // Checked before `Gpu::new` (unlike the resolved path
+                // itself, which the resolver already confirmed exists at
+                // resolve time) - a caller handing this fn a raw Assembly
+                // directly (a unit test, say) must not pay for a real
+                // device just to find out the path is bad, the same
+                // discipline `from_env!`'s own existence check gave every
+                // other entry here.
+                if !std::path::Path::new(&weights).exists() {
+                    return Err(format!("rrdbnet: {weights} does not exist"));
+                }
+                let gpu = gpu_core::Gpu::new(&rrdbnet::KERNELS);
+                rrdbnet::caps::load(&weights, gpu).map(|s| Arc::new(rrdbnet::caps::UpscaleProvider::new(s)) as Arc<dyn Provider>)
+            },
             resident: None,
         },
         ModelEntry {
@@ -628,18 +639,19 @@ fn stage_registry() -> capability::Registry {
     let mut inner = capability::Registry::new();
     for e in models() {
         let id = (e.manifest)().model;
-        // Only the models a stage can actually name today. `sam2` is
-        // resolver-migrated - its own provider reads a real Assembly's
+        // Only the models a stage can actually name today. `sam2`/`rrdbnet`
+        // are resolver-migrated - their own provider reads a real Assembly's
         // `weights` role (see this file's `models()`), so a real one - when
         // an explicit models directory is opted into, see
-        // `resolved_stage_assembly`'s own doc - stands in for the env var it
-        // used to read. `codeformer`/`rrdbnet` have not migrated yet, so an
-        // empty placeholder stands in for both exactly as before (their own
-        // providers still read `BRAIN_CODEFORMER_WEIGHTS`/
-        // `BRAIN_ESRGAN_WEIGHTS` directly).
+        // `resolved_stage_assembly`'s own doc - stands in for the env var
+        // each used to read. `codeformer` has not migrated yet, so an empty
+        // placeholder stands in for it exactly as before (its own provider
+        // still reads `BRAIN_CODEFORMER_WEIGHTS` directly).
         let assembly = if id == imgpipe::SEGMENT_MODEL {
             resolved_stage_assembly("sam2", &sam2::spec::Sam2Spec)
-        } else if id == imgpipe::RESTORE_MODEL || id == imgpipe::UPSCALE_MODEL {
+        } else if id == imgpipe::UPSCALE_MODEL {
+            resolved_stage_assembly("rrdbnet", &rrdbnet::spec::RrdbnetSpec)
+        } else if id == imgpipe::RESTORE_MODEL {
             Some(empty_assembly())
         } else {
             continue;
