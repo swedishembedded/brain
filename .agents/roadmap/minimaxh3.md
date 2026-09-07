@@ -989,6 +989,51 @@ user-visible half and went first.
   only row that actually moved peak memory - confirming int8 was never
   real on this backend for any earlier row, including the ones that looked
   like an "int8 vs fp32, no difference" A/B.
+- ~~Text conditioning was positionless: the real encoder's layer-50 features
+  had never been numerically checked against `transformers`~~ - root-caused,
+  not guessed. Every `qwen3vl::Qwen3Vl` decoder is built with
+  `enable_mrope()`, so its batched forward rotates q/k from the host-written
+  `mrope_cos`/`mrope_sin` tables and NEVER from the analytic `rope_base`.
+  `splice_vision` (the image path) writes those tables and `generate` writes
+  a per-step 1-row table for every prompt token, but `Qwen3Vl::encode_hidden`
+  - the text-only tap `crate::caps::encode_text_real` calls - wrote nothing,
+  so q and k were rotated by an unwritten (zero) table. A zero table does not
+  mean "no rotation": it ANNIHILATES both (`q' = q·cos - q_half·sin = 0`),
+  every attention score collapses to zero and every softmax to a uniform
+  average over the causal prefix. The output stayed finite and still varied
+  with the tokens, which is why nothing caught it - and it only became
+  reachable when the encoder moved from the decode-only build (whose
+  incremental path rotates with the analytic `ROPE_AT` kernel at each token's
+  own position, which is correct) to the truncated batched build in the
+  memory table above. Fixed by `Qwen3Vl::write_text_mrope_tables` (the
+  diagonal `[i,i,i]` positions `mrope::get_rope_index` yields for a run with
+  no vision placeholders), guarded by
+  `qwen3vl`'s `text_only_encode_hidden_applies_positional_rope` (batched vs
+  decode-only build of the same weights - a weight-free spec test, since a
+  finiteness check provably cannot see this).
+  Measured against `tools/minimaxh3_text_encoder_real_dump_reference.py`
+  (stock `Qwen3VLForConditionalGeneration`, `add_special_tokens=False`,
+  `output_hidden_states=True`, `hidden_states[50]`, fp32, CPU), prompt
+  "A golden retriever puppy playing in a sunlit garden" (11 tokens, ids
+  identical on both sides):
+  | | mean | max_abs | L2 | rel L2 vs fp32 reference |
+  |---|---|---|---|---|
+  | brain, before the fix | 3.078168 | 18028.32 | 48959.79 | - (3.15x the reference norm) |
+  | brain, after the fix | 0.352031 | 15389.05 | 15551.08 | **5.75e-6** |
+  | reference `hidden_states[50]` (fp32) | 0.352027 | 15388.96 | 15552.91 | 0 |
+  | reference `hidden_states[50]` (bf16) | 0.349730 | 15168.00 | 15341.29 | 1.47e-2 |
+  The tap index is confirmed by the same comparison, not assumed: brain sits
+  at 5.75e-6 from `hidden_states[50]` and at 1.48e-2 / 1.68e-2 from
+  `hidden_states[49]` / `[51]`, so `encode_hidden(tokens, 50)` needs no
+  off-by-one adjustment, as the Phase-0 source reading already concluded.
+  The `max_abs ~15000` is REAL - Qwen3-VL genuinely has massive-activation
+  outlier channels at this depth, in the reference too.
+- The DiT's own real-weight parity test
+  (`dit_matches_the_real_reference_numerically_layer_by_layer`) still feeds
+  SYNTHETIC `torch.randn(...) * 0.3` as `encoder_hidden_states` (max_abs
+  ~1-2). Real layer-50 features carry outlier channels three to four orders
+  of magnitude larger (table above), so `context_embedder`'s behaviour at
+  the real conditioning magnitude is still unmeasured.
 - `t2va`/`fl2va`'s denoise loop threads neither cancellation nor per-step
   progress yet (`wan`/`ltxv` both poll `inv.cancel` per step; this one does
   neither) - `.streaming()` on the manifest currently means "long-running"
