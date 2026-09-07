@@ -194,9 +194,16 @@ pub fn build_executor(gpus: &[(u32, u64)], npus: &[(u32, u64)], unified_gpus: &[
     // advertise an NPU footprint and auto-place there when budgeted), and
     // splat (`brain/splat` - render/fit, `resident_splat.rs`) which, unlike
     // every other entry here, needs no weights at all: the scene arrives as
-    // request bytes, so it is always registered, gated on nothing. Folded
-    // into `catalog::models()` so `brain caps`/`brain do` and this executor
-    // can no longer disagree about their existence.
+    // request bytes, so it is always registered, gated on nothing, and
+    // worldmirror2 (`brain/worldmirror2` - reconstruct, `BRAIN_WORLDMIRROR2_
+    // WEIGHTS`, `resident_worldmirror2.rs`) which, like GLM/qwen3.5 above,
+    // takes `weights` as a per-invocation action param on the direct path,
+    // so its own `manifest` is weights-free - but whose resident (like
+    // splat's) is registered declaratively here rather than by a manual push
+    // below, since `resident_worldmirror2.rs` lives in this crate the same
+    // reason `resident_splat.rs` does. Folded into `catalog::models()` so
+    // `brain caps`/`brain do` and this executor can no longer disagree about
+    // their existence.
     models.extend(crate::catalog::residents());
     // Deterministic mock model (BRAIN_MOCK): a real ResidentModel — no weights, no
     // GPU — registered as `mock` so the HTTP conformance harness can validate the

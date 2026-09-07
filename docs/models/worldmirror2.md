@@ -14,9 +14,9 @@ yourself; for rendering or further optimizing the resulting scene, see the
 |---|---|
 | Inference             | [x] |
 | Training from scratch | [ ] |
-| CLI (`brain <arch> <action>`)       | [ ] |
-| HTTP API               | [ ] |
-| D-Bus                  | [ ] |
+| CLI (`brain <arch> <action>`)       | [ ] (has its own `brain mirror …` subcommand instead - see "Running it" below) |
+| HTTP API               | [ ] `reconstruct` takes a REQUIRED `images` input blob, so it is not a text-to-image/chat action |
+| D-Bus                  | [x] `reconstruct` (one-shot) |
 | Batched serving        | [ ] |
 
 ## Getting the weights
@@ -64,6 +64,36 @@ normal-map PPM for inspection.
 `brain mirror export-npu` exports individual model stages as ONNX for
 running on the Intel NPU or CPU via OpenVINO - an advanced path for NPU
 deployment rather than everyday use.
+
+## Serving (D-Bus)
+
+Model id: `brain/worldmirror2`. `BRAIN_WORLDMIRROR2_WEIGHTS` names the
+imported checkpoint - a machine-side setting, not a per-request param (a
+remote caller cannot answer "where is the checkpoint on THIS machine").
+
+```bash
+brain caps brain/worldmirror2
+```
+
+`reconstruct` (one-shot): takes `images` (N unposed frames, concatenated
+interleaved-HWC f32 RGB - the same video convention every other video input
+in this repo uses; every frame shares one `(w,h)`, which must also be a
+multiple of the model's 14px patch grid) plus `min_opacity`/`max_depth`/
+`prune_voxel`/`maps`, mirroring `brain mirror infer`'s own flags exactly.
+Returns `scene` (the reconstructed Gaussian scene, Inria-layout binary PLY)
+and `cameras` (the per-frame cameras WorldMirror-2 predicted, the same JSON
+shape `cameras.json` uses); `maps` additionally returns a per-frame depth-map
+video when requested. See
+[`examples/vision/worldmirror2_reconstruct.py`](../../examples/vision/worldmirror2_reconstruct.py).
+
+One resident instance serves every request shape: the model is
+shape-adaptive internally (it rebuilds its own per-shape buffers on demand,
+keeping the ~5GB checkpoint resident across a shape change), so the
+scheduler keys the instance on the checkpoint alone, never on
+frames/width/height. The one honest cost: only one shape's buffers are
+cached at a time, so a workload that keeps ALTERNATING between two request
+shapes on this one instance pays a full rebuild on every call - a latency
+cost, not a correctness bug.
 
 ## Hardware and limits
 

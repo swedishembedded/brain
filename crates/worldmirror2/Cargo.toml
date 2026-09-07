@@ -19,6 +19,8 @@ brain-imaging.workspace = true
 brain-model.workspace = true
 brain-splat.workspace = true
 serde_json.workspace = true
+# `caps.rs` - the serving contract's capability surface.
+brain-capability.workspace = true
 
 [dev-dependencies]
 brain-testutil.workspace = true

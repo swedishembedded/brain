@@ -56,22 +56,22 @@ fn s3_forward_is_finite() {
     let frames: Vec<f32> = (0..s * 3 * h * w).map(|_| 0.5 + 0.4 * r.scaled(0.5)).collect();
 
     let gpu = gpu_core::Gpu::new_cpu(worldmirror2::model::PIPELINES);
-    let mut model = Mirror::new(&gpu, cfg, &init, 0);
+    let mut model = Mirror::new(gpu, cfg, &init, 0);
     model.forward(&frames, s, hp, wp);
 
     let td = worldmirror2::model::PATCH_START + hp * wp;
     // DINOv2 per frame
-    let po = gpu.read(model.patch_tokens(), s * hp * wp * 64);
+    let po = model.gpu().read(model.patch_tokens(), s * hp * wp * 64);
     for fi in 0..s {
         let f = &po[fi * hp * wp * 64..(fi + 1) * hp * wp * 64];
         let bad = f.iter().filter(|x| !x.is_finite()).count();
         assert_eq!(bad, 0, "dino patch_out frame {fi}: {bad} non-finite");
     }
     // trunk tokens + taps
-    let tt = gpu.read(model.trunk_tokens(), s * td * 64);
+    let tt = model.gpu().read(model.trunk_tokens(), s * td * 64);
     assert_eq!(tt.iter().filter(|x| !x.is_finite()).count(), 0, "NaN in trunk tokens");
     for (ti, tap) in model.taps().iter().enumerate() {
-        let v = gpu.read(tap, s * td * 128);
+        let v = model.gpu().read(tap, s * td * 128);
         let bad = v.iter().filter(|x| !x.is_finite()).count();
         assert_eq!(bad, 0, "tap{ti}: {bad}/{} non-finite", v.len());
         // different frame content must reach the taps differently
@@ -92,7 +92,7 @@ fn s3_forward_is_finite() {
             (Head::GsDepth, 3),
             (Head::GsParams, 12),
         ] {
-            let v = gpu.read(model.head_out(head, fi), ch * h * w);
+            let v = model.gpu().read(model.head_out(head, fi), ch * h * w);
             let bad = v.iter().filter(|x| !x.is_finite()).count();
             assert_eq!(bad, 0, "frame {fi} {head:?}: {bad}/{} non-finite", v.len());
         }
@@ -101,7 +101,7 @@ fn s3_forward_is_finite() {
     let cam = model.cam_pred_raw();
     assert!(cam.iter().all(|v| v.is_finite()), "camera pred has NaN: {cam:?}");
     let (splats, cams, weights) =
-        assemble(&gpu, &model, &frames, s, w as u32, h as u32, &AssembleOpts::default());
+        assemble(model.gpu(), &model, &frames, s, w as u32, h as u32, &AssembleOpts::default());
     assert_eq!(cams.len(), s);
     assert!(splats.means.iter().all(|v| v.is_finite()), "NaN means");
     assert!(!splats.is_empty());

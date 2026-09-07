@@ -12,6 +12,7 @@
 //! Populated phase by phase (P0: config/param_list/import).
 
 pub mod cam;
+pub mod caps;
 pub mod config;
 pub mod dpt;
 pub mod gaussians;

@@ -172,6 +172,19 @@ pub fn models() -> Vec<ModelEntry> {
         provider: catalog::always!(splat::caps::SplatProvider::new()),
         resident: catalog::resident!(crate::resident_splat::SplatResident::from_env),
     });
+    // WorldMirror-2 multi-view 3D reconstruction. Same shape as GLM/qwen3.5
+    // above (`weights` is a per-invocation action param, so `manifest` is
+    // weights-free and costs nothing to build), but registered HERE rather
+    // than in `crates/catalog` because its resident adapter
+    // (`resident_worldmirror2.rs`) is CLI-local, same reason `splat` just
+    // above lives here too - `brain-catalog` cannot depend back on `brain-cli`
+    // (see this file's module doc), so a model whose resident needs
+    // `crate::resident_llm::on_device` must have its WHOLE entry live here.
+    entries.push(ModelEntry {
+        manifest: worldmirror2::caps::manifest,
+        provider: catalog::always!(worldmirror2::caps::WorldMirror2Provider::new()),
+        resident: catalog::resident!(crate::resident_worldmirror2::WorldMirror2Resident::from_env),
+    });
     // No-weights utility models, listed by `brain caps` but served (over
     // D-Bus/HTTP) directly from `resident.rs::build_executor`, which pushes
     // them as stateless residents itself rather than through this list -

@@ -157,16 +157,16 @@ fn t2_dinov2_patch_tokens() {
     let cfg = MirrorConfig::default();
     let init = worldmirror2::import::load(&ckpt, &cfg).expect("import");
     let gpu = gpu_core::Gpu::new_cpu(worldmirror2::model::PIPELINES);
-    let mut model = worldmirror2::model::Mirror::new(&gpu, cfg, &init, 0);
+    let mut model = worldmirror2::model::Mirror::new(gpu, cfg, &init, 0);
     drop(init);
     model.forward(&chw, 1, 37, 37);
-    let got = gpu.read(model.patch_tokens(), 1369 * 1024);
+    let got = model.gpu().read(model.patch_tokens(), 1369 * 1024);
     check_sample("t2_patch_tokens", &got, &get_sample(&m, "t2_patch_tokens"), 2e-4);
 
     // ---- T4 + T5: report every diverging stage in one run ----
     let mut errs: Vec<String> = Vec::new();
     for (i, tap) in model.taps().iter().enumerate() {
-        let got = gpu.read(tap, 1376 * 2048);
+        let got = model.gpu().read(tap, 1376 * 2048);
         if let Some(e) = diff_sample(&format!("t4_tap{i}"), &got, &get_sample(&m, &format!("t4_tap{i}")), 3e-3) {
             errs.push(e);
         }
@@ -180,7 +180,7 @@ fn t2_dinov2_patch_tokens() {
         ("t5_gs_head", Head::GsDepth, 3),
         ("t5_gs_params", Head::GsParams, 12),
     ] {
-        let got = gpu.read(model.head_out(head, 0), ch * px);
+        let got = model.gpu().read(model.head_out(head, 0), ch * px);
         if let Some(e) = diff_sample(key, &got, &get_sample(&m, key), 5e-3) {
             errs.push(e);
         }
@@ -218,12 +218,12 @@ fn t2_dinov2_patch_tokens() {
         let td = 7 + 37 * 28;
         let mut errs7: Vec<String> = Vec::new();
         for (key, ti) in [("t7_tap0", 0usize), ("t7_tap3", 3)] {
-            let got = gpu.read(&model.taps()[ti], td * 2048);
+            let got = model.gpu().read(&model.taps()[ti], td * 2048);
             if let Some(e) = diff_sample(key, &got, &get_sample(&m, key), 3e-3) {
                 errs7.push(e);
             }
         }
-        let got = gpu.read(model.head_out(Head::Depth, 0), 3 * w2 * h2);
+        let got = model.gpu().read(model.head_out(Head::Depth, 0), 3 * w2 * h2);
         if let Some(e) = diff_sample("t7_depth_head", &got, &get_sample(&m, "t7_depth_head"), 5e-3) {
             errs7.push(e);
         }

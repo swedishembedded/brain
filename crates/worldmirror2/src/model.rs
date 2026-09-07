@@ -8,9 +8,12 @@
 //! extend this file's `Mirror` with further recorded stages on the same
 //! `ParamStore`/scratch.
 //!
-//! Follows the depth `Predictor` pattern: borrows the `Gpu`, holds the frozen
-//! `ParamStore`, lazily (re)builds buffers when the input shape changes, and
-//! records the whole forward as `Step`s.
+//! Follows the depth `Predictor` pattern for the shape-adaptive rebuild:
+//! OWNS its `Gpu` (matching `supir::model`/`controlnet::model`/`vqgan::model`,
+//! not `Predictor`'s own borrow - a resident `Instance` must hold a built
+//! `Mirror` across calls with nothing else keeping the `Gpu` alive), holds the
+//! frozen `ParamStore`, lazily (re)builds buffers when the input shape
+//! changes, and records the whole forward as `Step`s.
 
 use std::collections::HashMap;
 
@@ -152,8 +155,8 @@ struct Built {
     steps: Vec<Step>,
 }
 
-pub struct Mirror<'g> {
-    gpu: &'g Gpu,
+pub struct Mirror {
+    gpu: Gpu,
     pub cfg: MirrorConfig,
     pub ps: ParamStore,
     base: usize,
@@ -169,14 +172,21 @@ pub struct Mirror<'g> {
     built: Option<Built>,
 }
 
-impl<'g> Mirror<'g> {
+impl Mirror {
     /// `base` = offset of [`PIPELINES`] inside the `Gpu`'s kernel list.
+    ///
+    /// Takes `gpu` BY VALUE and holds it: `Mirror` OWNS its `Gpu`, matching
+    /// every other served model in this repo (`supir::model`,
+    /// `controlnet::model`, `vqgan::model`) - a borrowed `&'g Gpu` is what a
+    /// one-shot CLI can afford but a resident `Instance` cannot, since it must
+    /// hold the built model across calls with nothing else keeping the `Gpu`
+    /// alive. Access it back via [`Mirror::gpu`].
     pub fn new(
-        gpu: &'g Gpu,
+        gpu: Gpu,
         cfg: MirrorConfig,
         init: &HashMap<String, Vec<f32>>,
         base: usize,
-    ) -> Mirror<'g> {
+    ) -> Mirror {
         let c = cfg.dim;
         let reg = cfg.reg_tokens;
         // Assemble the constant per-frame head rows host-side: cls gets
@@ -212,7 +222,7 @@ impl<'g> Mirror<'g> {
             .into_iter()
             .map(|(n, s)| (n, s.iter().product(), Role::Frozen))
             .collect();
-        let ps = ParamStore::new_with_roles(gpu, roles, init);
+        let ps = ParamStore::new_with_roles(&gpu, roles, init);
         Mirror {
             gpu,
             cfg,
@@ -230,6 +240,14 @@ impl<'g> Mirror<'g> {
 
     fn w(&self, name: &str) -> &DeviceBuffer {
         self.ps.w(name)
+    }
+
+    /// The `Gpu` this model owns - callers that need to read its output
+    /// buffers back (`gaussians::assemble`, `gaussians::frame_maps`) or drive
+    /// further GPU work in the same session go through this rather than
+    /// holding their own handle.
+    pub fn gpu(&self) -> &Gpu {
+        &self.gpu
     }
 
     fn dino_block_weights(&self, b: usize) -> VitBlockWeights<'_> {
@@ -299,7 +317,7 @@ impl<'g> Mirror<'g> {
         let rows = (s * td) as u32;
         let rows_t = (s * td_t) as u32;
         let (h, w) = (hp * cfg.patch, wp * cfg.patch);
-        let gpu = self.gpu;
+        let gpu = &self.gpu;
         let ids = vit_ids(self.base);
         let sh = VitShape {
             dim: c as u32,

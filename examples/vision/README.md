@@ -14,6 +14,7 @@ marshalled through D-Bus.
 | `brain/moondream3` | `caption` → generated text from an image + an instruction, streamed per token ([`moondream3_caption.py`](moondream3_caption.py)) | `BRAIN_MOONDREAM3_WEIGHTS` (the checkpoint directory) |
 | `brain/qwen3vl` | `generate` → generated text from an image + a prompt, streamed per token ([`qwen3vl_caption.py`](qwen3vl_caption.py)) | `BRAIN_QWEN3VL_WEIGHTS` (checkpoint directory or GGUF) |
 | `brain/splat` | `render` → one posed view of a 3D Gaussian-splat scene ([`splat_render.py`](splat_render.py)); `fit` → optimize a scene against N posed views, streamed per iteration ([`splat_fit.py`](splat_fit.py)) | none - the scene is request bytes, always served |
+| `brain/worldmirror2` | `reconstruct` → N unposed images in, a Gaussian-splat scene + per-frame cameras out, one feed-forward pass ([`worldmirror2_reconstruct.py`](worldmirror2_reconstruct.py)) | `BRAIN_WORLDMIRROR2_WEIGHTS` (the checkpoint) |
 
 Moondream 3's example uses `Subscribe` rather than `Run`, for the same reason
 DeepSeek-OCR's does: neither decoder has a KV cache, so every generated token is
@@ -134,6 +135,18 @@ driven remotely, cancellable mid-run like any other long training action.
 
 The interactive WASD/mouse fly-through (`brain splat view`) is deliberately
 NOT served: it is human-in-the-loop with no request/response shape.
+
+## `worldmirror2_reconstruct.py` - WorldMirror-2 multi-view reconstruction
+
+`reconstruct` is a plain `Run` (single feed-forward pass - nothing to stream):
+N unposed images packed into one `video` blob in (same convention as
+`splat_fit.py`'s target views: every frame shares one `(w, h)`, which must
+also land on a whole number of the model's 14px patches), a Gaussian-splat
+scene out (`brain splat view scene.ply` renders it) plus the `cameras`
+WorldMirror-2 itself predicted - this model estimates poses, it does not take
+them as input. `min_opacity`/`max_depth`/`prune_voxel` mirror `brain
+worldmirror2 infer`'s own flags exactly; `--maps` additionally fetches a
+per-frame depth-map video, written out as `..._depth_NN.ppm`.
 
 ## What is NOT here
 

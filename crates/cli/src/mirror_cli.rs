@@ -86,7 +86,9 @@ fn load_frames(spec: &str, cfg: &MirrorConfig) -> (Vec<f32>, usize, usize, usize
 }
 
 /// Run the model, assemble the scene, then hand everything to `k` (the model
-/// borrows the Gpu, so the whole flow lives in one scope).
+/// OWNS the Gpu now - `model.gpu()` is how `k` and this function reach it -
+/// so the whole flow still lives in one scope, but only because `k` runs
+/// before `model` is dropped, not because of a borrow).
 #[allow(clippy::type_complexity)]
 fn with_scene<R>(
     weights: &str,
@@ -108,13 +110,13 @@ fn with_scene<R>(
     let pipes: Vec<(&str, &str)> =
         worldmirror2::model::PIPELINES.iter().chain(splat::PIPELINES.iter()).copied().collect();
     let gpu = Gpu::new(&pipes);
-    let mut model = Mirror::new(&gpu, cfg, &init, 0);
+    let mut model = Mirror::new(gpu, cfg, &init, 0);
     drop(init);
     eprintln!("running WorldMirror-2 on {s} frame(s) at {w}x{h} …");
     let t0 = std::time::Instant::now();
     model.forward(&frames, s, hp, wp);
     let opts = AssembleOpts { min_opacity: min_op, max_depth };
-    let (mut splats, cams, weights) = assemble(&gpu, &model, &frames, s, w, h, &opts);
+    let (mut splats, cams, weights) = assemble(model.gpu(), &model, &frames, s, w, h, &opts);
     eprintln!(
         "forward + assembly: {:.1}s, {} gaussians",
         t0.elapsed().as_secs_f32(),
@@ -125,7 +127,7 @@ fn with_scene<R>(
         splats = splat::prune::voxel_merge(&splats, &weights, prune_voxel, 0);
         eprintln!("voxel prune ({prune_voxel}): {before} -> {} gaussians", splats.len());
     }
-    k(&gpu, &model, &splats, &cams, s, w, h)
+    k(model.gpu(), &model, &splats, &cams, s, w, h)
 }
 
 /// Grayscale (depth, min-max normalized) and normal-map PPMs for inspection.

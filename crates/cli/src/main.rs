@@ -80,6 +80,7 @@ mod resident_sam2;
 mod resident_restore;
 mod resident_splat;
 mod resident_supir;
+mod resident_worldmirror2;
 mod resolve;
 mod roofline_cli;
 mod run_cli;
