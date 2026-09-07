@@ -1094,29 +1094,56 @@ pub(crate) mod tests {
         std::env::remove_var("BRAIN_LLAVA_WEIGHTS");
     }
 
-    /// `moondream3` declares one role (`dir`) from its `default_ref` fetch.
-    /// Feeding its `default_ref`'s vendor/repo a plain dense-transformers
-    /// checkpoint (config.json + model.safetensors, no compound manifest)
-    /// exercises exactly the case `ensure_env_weights_with`'s own doc comment
-    /// flags as unhandled: every fetch step succeeds, but the merged roles
-    /// never cover what the var needs. That must be a named error, not a
-    /// warning plus a silent Ok.
+    /// `qwen3tts` declares two roles (`weights_dir`, `ckpt`) from its
+    /// `default_ref` fetch, and its own dedicated `FilesRecipe` only claims a
+    /// repo that actually has a `speech_tokenizer/config.json` sibling (see
+    /// `convert_transformers`'s own comment) - feeding its `default_ref`'s
+    /// vendor/repo a plain dense-transformers checkpoint (bare root
+    /// config.json + model.safetensors, no `speech_tokenizer/` at all) falls
+    /// through to the generic `TransformersRecipe` catch-all instead, which
+    /// converts it and names the result `"weights"` - neither of qwen3tts's
+    /// OWN role names. This exercises exactly the case `ensure_env_weights_with`'s
+    /// own doc comment flags as unhandled: every fetch step succeeds, but the
+    /// merged roles never cover what either var needs. That must be a named
+    /// error, not a warning plus a silent Ok.
+    ///
+    /// `moondream3` used to be this test's own fixture (it also declared a
+    /// single role, `dir`, from its `default_ref`) until it moved to the
+    /// resolver and its `weights_env` went empty, which makes
+    /// `ensure_env_weights_with` a guaranteed no-op for it now (line 637's
+    /// own `is_empty()` early return) - not a case this test can exercise
+    /// through that architecture any longer. `qwen3tts` itself has SINCE ALSO
+    /// moved to the resolver for the same reason, which is exactly what this
+    /// #[ignore] records: every multi-role `weights_env` + `default_ref`
+    /// architecture whose recipe conversion could plausibly produce roles
+    /// that don't cover what the declared vars need (the scenario this test
+    /// exists to catch) has now moved to the resolver, and none is left in
+    /// the registry to exercise this through. The underlying merge-mismatch
+    /// check in `ensure_env_weights_with` is unchanged and still real; only
+    /// this test's real-architecture fixture ran out. Re-enable against a
+    /// synthetic recipe/arch pair instead of a real one if this legacy path
+    /// survives long enough to need it again - otherwise this whole test (and
+    /// the function it covers) is dead code once the last `weights_env` row
+    /// migrates.
     #[test]
+    #[ignore = "no remaining registry row combines multi-role weights_env, a default_ref, and a recipe-conversion role mismatch - every one migrated to the resolver"]
     fn ensure_env_weights_with_errors_when_a_role_is_still_missing_after_a_successful_autofetch() {
         let _serial = env_lock();
         let (config, weights) = tiny_qwen3_hf_files();
         let mut hub = FakeHub::new();
-        hub.add_file("moondream", "moondream3-preview", "main", "config.json", config);
-        hub.add_file("moondream", "moondream3-preview", "main", "model.safetensors", weights);
+        hub.add_file("Qwen", "Qwen3-TTS-12Hz-0.6B-Base", "main", "config.json", config);
+        hub.add_file("Qwen", "Qwen3-TTS-12Hz-0.6B-Base", "main", "model.safetensors", weights);
         let store = store(&format!("supply-test-env-weights-role-still-missing-{}", std::process::id()));
         std::env::set_var("BRAIN_AUTO_FETCH", "1");
-        std::env::remove_var("BRAIN_MOONDREAM3_WEIGHTS");
+        for (var, _) in brain_arch::by_id("qwen3tts").unwrap().weights_env {
+            std::env::remove_var(var);
+        }
 
-        let err = ensure_env_weights_with("moondream3", &store, &hub).unwrap_err();
+        let err = ensure_env_weights_with("qwen3tts", &store, &hub).unwrap_err();
 
         std::env::remove_var("BRAIN_AUTO_FETCH");
-        assert!(err.contains("BRAIN_MOONDREAM3_WEIGHTS"), "{err}");
-        assert!(err.contains("dir"), "{err}");
+        assert!(err.contains("BRAIN_QWEN3TTS_WEIGHTS"), "{err}");
+        assert!(err.contains("weights_dir"), "{err}");
     }
 
     #[test]
