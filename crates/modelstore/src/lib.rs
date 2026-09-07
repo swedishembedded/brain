@@ -25,6 +25,7 @@
 
 pub mod fetch;
 pub mod hub;
+pub mod inventory;
 pub mod plan;
 pub mod recipe;
 pub mod refurl;
