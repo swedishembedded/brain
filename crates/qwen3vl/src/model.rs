@@ -369,11 +369,16 @@ impl Qwen3Vl {
         Ok(Self::from_tensors(tensors, vcfg, dcfg, seq_len, image_token_id, image_row0, n_visual, mrope_section, dt))
     }
 
-    /// End-to-end forward for one image + text stream; returns the decoder's scalar
-    /// loss. `pixels` is the host-packed `[grid_h·grid_w, patch_vec]` patch tensor;
-    /// `tokens`/`targets` are the full text stream (image placeholders carry IGNORE
-    /// targets). Panics if the visual-token count disagrees with the placement.
-    pub fn forward(&self, tokens: &[u32], targets: &[u32], grid: (u32, u32), pixels: &[f32]) -> f32 {
+    /// Vision-splice prefix shared by [`Self::forward`] and the
+    /// `encode_hidden*_with_image` family below: vision tower → merge →
+    /// DeepStack taps → M-RoPE tables → decoder image-embedding splice.
+    /// Leaves the decoder mid-splice, ready for either `set_batch`+`forward()`
+    /// (a training loss) or `encode_hidden`/`encode_hiddens` (an intermediate
+    /// hidden-state tap, no LM head involved) - the decoder does not care
+    /// which comes next, only that the splice already ran. `pixels` is the
+    /// host-packed `[grid_h·grid_w, patch_vec]` patch tensor. Panics if the
+    /// visual-token count disagrees with the placement.
+    fn splice_vision(&self, tokens: &[u32], grid: (u32, u32), pixels: &[f32]) {
         let (gh, gw) = grid;
         let n = gh * gw;
         let m2 = self.merge * self.merge;
@@ -395,11 +400,64 @@ impl Qwen3Vl {
         let positions = get_rope_index(tokens, self.image_token_id, &grids_llm);
         let (cos, sin) = mrope_tables(&positions, self.mrope_section, self.decoder.cfg.head_dim, self.decoder.cfg.rope_theta);
 
-        // Splice + decode.
         self.decoder.write_mrope_tables(&cos, &sin);
         self.decoder.write_img_embeds(&visual);
+    }
+
+    /// End-to-end forward for one image + text stream; returns the decoder's scalar
+    /// loss. `pixels` is the host-packed `[grid_h·grid_w, patch_vec]` patch tensor;
+    /// `tokens`/`targets` are the full text stream (image placeholders carry IGNORE
+    /// targets). Panics if the visual-token count disagrees with the placement.
+    pub fn forward(&self, tokens: &[u32], targets: &[u32], grid: (u32, u32), pixels: &[f32]) -> f32 {
+        self.splice_vision(tokens, grid, pixels);
         self.decoder.set_batch(tokens, targets);
         self.decoder.forward()
+    }
+
+    /// Text-only intermediate hidden state at `layer` - no vision splice,
+    /// plain text through the decoder, never the LM head. What a text-only
+    /// conditioning request needs (no image/video reference present): turns
+    /// this composite from generation-only into a reusable intermediate-layer
+    /// multimodal encoder, the way `qwen3::Qwen::encode_hidden` already is
+    /// for plain-text conditioning (Z-Image/FLUX.2's caption features). See
+    /// `qwen3::Qwen::encode_hidden` for the exact layer-indexing convention
+    /// (`res[0]` = token embedding, `res[l]` = block `l-1`'s output).
+    ///
+    /// **Only call this on an instance built with `n_visual=0`** (no image
+    /// splice enabled at all), or on tokens shorter than the splice's
+    /// `image_row0` (see [`Self::new`]). `enable_mm_splice`'s row range is a
+    /// fixed positional overwrite baked in once at construction and applied
+    /// on EVERY forward regardless of which method is called or what token id
+    /// sits at that row - it is not gated on the image placeholder id, and
+    /// nothing here re-checks it. Calling this on an image-capable instance
+    /// whose splice rows fall inside `tokens`, without first writing real
+    /// visual content there, silently reads back an unwritten (typically
+    /// zero) buffer rather than the token embedding a plain-text caller would
+    /// expect - use [`Self::encode_hidden_with_image`] for that case instead.
+    pub fn encode_hidden(&self, tokens: &[u32], layer: usize) -> Vec<f32> {
+        self.decoder.encode_hidden(tokens, layer)
+    }
+
+    /// [`Self::encode_hidden`] at several depths from one forward - see
+    /// `qwen3::Qwen::encode_hiddens`. Same splice-row caveat as
+    /// [`Self::encode_hidden`].
+    pub fn encode_hiddens(&self, tokens: &[u32], layers: &[usize]) -> Vec<Vec<f32>> {
+        self.decoder.encode_hiddens(tokens, layers)
+    }
+
+    /// [`Self::encode_hidden`] with one image spliced in first, via the same
+    /// vision-splice prefix [`Self::forward`] uses - never runs the LM head.
+    /// What an image/video-reference conditioning request needs on top of the
+    /// text-only path above.
+    pub fn encode_hidden_with_image(&self, tokens: &[u32], image: ImageInput<'_>, layer: usize) -> Vec<f32> {
+        self.splice_vision(tokens, image.grid, image.pixels);
+        self.decoder.encode_hidden(tokens, layer)
+    }
+
+    /// [`Self::encode_hidden_with_image`] at several depths from one forward.
+    pub fn encode_hiddens_with_image(&self, tokens: &[u32], image: ImageInput<'_>, layers: &[usize]) -> Vec<Vec<f32>> {
+        self.splice_vision(tokens, image.grid, image.pixels);
+        self.decoder.encode_hiddens(tokens, layers)
     }
 
     /// Zero the decoder's gradient buffers before a training step. The vision
@@ -951,6 +1009,164 @@ mod tests {
         let loss = model.forward(&tokens, &targets, (4, 4), &pixels);
         assert!(loss.is_finite(), "end-to-end loss must be finite, got {loss}");
         assert!(loss > 0.0, "cross-entropy loss should be positive");
+    }
+
+    /// Same tiny synthetic shape as [`end_to_end_forward_is_finite`], proving
+    /// the intermediate-hidden-state family this session added: text-only
+    /// `encode_hidden`/`encode_hiddens` never touch the vision tower at all
+    /// (finite output, and `encode_hiddens`'s last tap agrees bit-for-bit with
+    /// `encode_hidden` at the same layer - both read the same `res[]` buffer
+    /// off an equivalent forward), and the `_with_image` twins actually run
+    /// the vision splice (their output differs from the no-image path at the
+    /// same tokens, and `encode_hiddens_with_image`'s last tap agrees with
+    /// `encode_hidden_with_image`) rather than silently ignoring the image.
+    #[test]
+    fn encode_hidden_family_is_finite_and_the_image_splice_actually_changes_it() {
+        let vcfg = VisionConfig {
+            depth: 2,
+            hidden: 32,
+            num_heads: 2,
+            intermediate: 64,
+            patch_size: 2,
+            temporal_patch_size: 1,
+            spatial_merge_size: 2,
+            num_position_embeddings: 16,
+            out_hidden_size: 40,
+            in_channels: 2,
+            deepstack_indexes: vec![0, 1],
+            tokens_per_second: 2,
+        };
+        let dcfg = QwenConfig {
+            vocab: 23,
+            block_size: 16,
+            n_layers: 2,
+            d_model: 40,
+            n_heads: 4,
+            n_kv_heads: 2,
+            head_dim: 8,
+            d_ff: 64,
+            rope_theta: 1.0e6,
+            rms_eps: 1e-6,
+            max_position_embeddings: 16,
+            tie_embeddings: true,
+            qk_norm: true,
+            attn_bias: false,
+            lora: None,
+        };
+
+        let (c, pv, mlp) = (vcfg.hidden as usize, vcfg.patch_vec_dim() as usize, vcfg.intermediate as usize);
+        let mut vspecs: Vec<(&str, usize, bool)> = vec![
+            ("patch_embed.weight", c * pv, false),
+            ("patch_embed.bias", c, false),
+            ("pos_embed", vcfg.num_position_embeddings as usize * c, false),
+        ];
+        let block_leaf_dims: Vec<(String, usize, bool)> = (0..vcfg.depth)
+            .flat_map(|b| {
+                [
+                    (format!("blocks.{b}.norm1.weight"), c, true),
+                    (format!("blocks.{b}.norm1.bias"), c, false),
+                    (format!("blocks.{b}.qkv.weight"), 3 * c * c, false),
+                    (format!("blocks.{b}.qkv.bias"), 3 * c, false),
+                    (format!("blocks.{b}.proj.weight"), c * c, false),
+                    (format!("blocks.{b}.proj.bias"), c, false),
+                    (format!("blocks.{b}.norm2.weight"), c, true),
+                    (format!("blocks.{b}.norm2.bias"), c, false),
+                    (format!("blocks.{b}.fc1.weight"), mlp * c, false),
+                    (format!("blocks.{b}.fc1.bias"), mlp, false),
+                    (format!("blocks.{b}.fc2.weight"), c * mlp, false),
+                    (format!("blocks.{b}.fc2.bias"), c, false),
+                ]
+            })
+            .collect();
+        for (n, s, o) in &block_leaf_dims {
+            vspecs.push((n.as_str(), *s, *o));
+        }
+        let vweights = rand_map(Rng::new(31), &vspecs);
+
+        let merged = c * 4;
+        let mweights = rand_map(
+            Rng::new(32),
+            &[
+                ("ln.weight", c, true),
+                ("ln.bias", c, false),
+                ("fc1.weight", merged * merged, false),
+                ("fc1.bias", merged, false),
+                ("fc2.weight", 40 * merged, false),
+                ("fc2.bias", 40, false),
+            ],
+        );
+        let ds_mweights: Vec<HashMap<String, Vec<f32>>> = (0..2u64)
+            .map(|i| {
+                rand_map(
+                    Rng::new(40 + i),
+                    &[
+                        ("ln.weight", merged, true),
+                        ("ln.bias", merged, false),
+                        ("fc1.weight", merged * merged, false),
+                        ("fc1.bias", merged, false),
+                        ("fc2.weight", 40 * merged, false),
+                        ("fc2.bias", 40, false),
+                    ],
+                )
+            })
+            .collect();
+
+        let dweights = qwen3::init_weights(&dcfg, 33);
+        let d_model = dcfg.d_model as usize;
+        let last = dcfg.n_layers as usize;
+
+        // -- text-only path: an instance with NO image splice enabled at all
+        // (n_visual=0) -- `enable_mm_splice`'s row range applies to every
+        // forward UNCONDITIONALLY once baked in at construction (it is a
+        // fixed positional overwrite, not gated on which token id sits
+        // there), so `encode_hidden`'s "text-only" contract only holds on an
+        // instance built this way; see the doc comment on `encode_hidden`.
+        let text_model = Qwen3Vl::new(
+            vcfg.clone(),
+            dcfg.clone(),
+            vweights.clone(),
+            mweights.clone(),
+            ds_mweights.clone(),
+            &dweights,
+            5,
+            IMG,
+            0,
+            0,
+            [2, 1, 1],
+            DecoderBuild::Batched,
+        );
+        let text_tokens: Vec<u32> = vec![1, 2, 3, 4, 5];
+        let h_text = text_model.encode_hidden(&text_tokens, last);
+        assert_eq!(h_text.len(), text_tokens.len() * d_model);
+        assert!(h_text.iter().all(|v| v.is_finite()), "text-only encode_hidden must be finite");
+
+        let taps = text_model.encode_hiddens(&text_tokens, &[0, 1, last]);
+        assert_eq!(taps.len(), 3);
+        for t in &taps {
+            assert_eq!(t.len(), text_tokens.len() * d_model);
+            assert!(t.iter().all(|v| v.is_finite()));
+        }
+        assert_eq!(h_text, taps[2], "encode_hiddens's last tap must agree bit-for-bit with encode_hidden at the same layer");
+
+        // -- image path: same shape as end_to_end_forward_is_finite, on an
+        // instance actually built with the image splice enabled --
+        let image_model =
+            Qwen3Vl::new(vcfg.clone(), dcfg, vweights, mweights, ds_mweights, &dweights, 7, IMG, 2, 4, [2, 1, 1], DecoderBuild::Batched);
+        let tokens: Vec<u32> = vec![1, 2, IMG, IMG, IMG, IMG, 3];
+        let pv_total = (16 * vcfg.patch_vec_dim()) as usize;
+        let mut rng = Rng::new(34);
+        let pixels: Vec<f32> = (0..pv_total).map(|_| rng.next_f32() - 0.5).collect();
+        let image = ImageInput { grid: (4, 4), pixels: &pixels };
+
+        let h_no_image = image_model.encode_hidden(&tokens, last);
+        let h_with_image = image_model.encode_hidden_with_image(&tokens, image, last);
+        assert_eq!(h_with_image.len(), tokens.len() * d_model);
+        assert!(h_with_image.iter().all(|v| v.is_finite()), "image-splice encode_hidden must be finite");
+        assert_ne!(h_no_image, h_with_image, "the vision splice must actually change the hidden state, not be silently ignored");
+
+        let img_taps = image_model.encode_hiddens_with_image(&tokens, image, &[0, last]);
+        assert_eq!(img_taps.len(), 2);
+        assert_eq!(img_taps[1], h_with_image, "encode_hiddens_with_image's last tap must agree with encode_hidden_with_image");
     }
 
     /// Same tiny synthetic shape as [`end_to_end_forward_is_finite`], but
