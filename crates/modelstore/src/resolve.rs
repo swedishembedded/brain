@@ -173,8 +173,22 @@ pub enum AssembleOutcome {
 /// read tensor bytes or touch a device.
 pub trait ArchSpec: Send + Sync {
     fn arch(&self) -> &'static str;
-    /// Required role names, in the order [`resolve`] reports them.
+    /// Every role name this architecture declares, in the order [`resolve`]
+    /// reports them - both required and optional (see [`Self::optional_roles`]).
     fn roles(&self) -> &'static [&'static str];
+    /// The subset of [`Self::roles`] that MAY resolve to zero candidates
+    /// without producing [`Resolution::Missing`] - a role real production
+    /// code treats as genuinely opt-in (present, it's used; absent, the
+    /// caller's own documented fallback runs), not a placeholder for "not
+    /// implemented yet". A role in this list that DOES have a candidate is
+    /// still picked exactly like a required one - this only changes what
+    /// happens at zero.
+    ///
+    /// Default: empty, so every declared role is required - the behavior
+    /// every `ArchSpec` had before this existed.
+    fn optional_roles(&self) -> &'static [&'static str] {
+        &[]
+    }
     /// Every `(record index, role, confidence)` the inventory plausibly
     /// supports - one record may appear for more than one role, and a role
     /// may have zero, one, or many candidates.
@@ -344,9 +358,10 @@ pub fn resolve(arch: &str, records: &[ArtifactRecord], specs: &[&dyn ArchSpec], 
         per_role.push((role, if candidates.len() == 1 { RoleResult::One(candidates[0].0) } else { RoleResult::Ambiguous(candidates) }));
     }
 
+    let optional = spec.optional_roles();
     let missing: Vec<MissingRole> = per_role
         .iter()
-        .filter(|(_, r)| matches!(r, RoleResult::None))
+        .filter(|(role, r)| matches!(r, RoleResult::None) && !optional.contains(role))
         .map(|(role, _)| MissingRole { role: role.to_string(), doc: spec.missing_doc(role), near_misses: near_misses(records) })
         .collect();
     if !missing.is_empty() {
@@ -355,15 +370,22 @@ pub fn resolve(arch: &str, records: &[ArtifactRecord], specs: &[&dyn ArchSpec], 
 
     // A best-current single choice per role, for building EVERY role's
     // hypothetical assemblies - including the one about to be reported as
-    // ambiguous, which needs every OTHER role already pinned down.
+    // ambiguous, which needs every OTHER role already pinned down. An
+    // optional role with zero candidates contributes no entry at all - it
+    // already passed the missing-role filter above precisely because
+    // nothing on disk answers for it, so `chosen`/the resulting `Assembly`
+    // must not claim a path for it either.
     let mut chosen: BTreeMap<String, usize> = BTreeMap::new();
     for (role, r) in &per_role {
-        let idx = match r {
-            RoleResult::One(i) => *i,
-            RoleResult::Ambiguous(cands) => cands[0].0,
-            RoleResult::None => unreachable!("missing roles returned above"),
-        };
-        chosen.insert(role.to_string(), idx);
+        match r {
+            RoleResult::One(i) => {
+                chosen.insert(role.to_string(), *i);
+            }
+            RoleResult::Ambiguous(cands) => {
+                chosen.insert(role.to_string(), cands[0].0);
+            }
+            RoleResult::None => {}
+        }
     }
 
     if let Some((role, RoleResult::Ambiguous(candidates))) = per_role.iter().find(|(_, r)| matches!(r, RoleResult::Ambiguous(_))) {
@@ -963,6 +985,100 @@ mod tests {
         overrides.insert("weights".to_string(), "/models/noacq/hand-placed.bin".to_string());
         match resolve("noacq", &records, &specs, &overrides) {
             Resolution::Resolved(a) => assert_eq!(a.roles["weights"], PathBuf::from("/models/noacq/hand-placed.bin")),
+            other => panic!("expected Resolved, got {other:?}"),
+        }
+    }
+
+    /// One required role ("dit"), one optional role ("sidecar") - the toy
+    /// arch a real architecture with an opt-in, absent-today extra weight
+    /// (LTX-2.5's real DiT/text-encoder/tokenizer roles) needs to prove
+    /// against.
+    struct RequiredAndOptionalSpec;
+    impl ArchSpec for RequiredAndOptionalSpec {
+        fn arch(&self) -> &'static str {
+            "reqopt"
+        }
+        fn roles(&self) -> &'static [&'static str] {
+            &["dit", "sidecar"]
+        }
+        fn optional_roles(&self) -> &'static [&'static str] {
+            &["sidecar"]
+        }
+        fn classify(&self, records: &[ArtifactRecord], _root: &Path) -> Vec<(usize, String, Confidence)> {
+            records
+                .iter()
+                .enumerate()
+                .filter_map(|(i, r)| {
+                    let s = r.path.to_string_lossy();
+                    if s.contains("sidecar") {
+                        Some((i, "sidecar".to_string(), Confidence::Declared))
+                    } else if s.contains("dit") {
+                        Some((i, "dit".to_string(), Confidence::Declared))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        }
+        fn assemble(&self, chosen: &BTreeMap<String, usize>, _records: &[ArtifactRecord], _overrides: &BTreeMap<String, String>) -> Result<AssembleOutcome, String> {
+            if chosen.contains_key("dit") {
+                Ok(AssembleOutcome::Assembled(AssembledVariant { id: "local/reqopt".to_string(), variant: None }))
+            } else {
+                Err("missing dit".to_string())
+            }
+        }
+        fn validate(&self, _assembly: &Assembly) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    /// The gap this whole extension exists to close: an optional role with
+    /// zero candidates on disk must resolve cleanly (not `Missing`), and the
+    /// resulting `Assembly` must carry no path for it at all - there is
+    /// nothing to claim one from.
+    #[test]
+    fn an_optional_role_with_zero_candidates_resolves_instead_of_going_missing() {
+        let records = vec![rec("/models/reqopt/dit.bin")];
+        let spec = RequiredAndOptionalSpec;
+        let specs: Vec<&dyn ArchSpec> = vec![&spec];
+        let out = resolve("reqopt", &records, &specs, &BTreeMap::new());
+        match out {
+            Resolution::Resolved(a) => {
+                assert_eq!(a.roles["dit"], PathBuf::from("/models/reqopt/dit.bin"));
+                assert!(!a.roles.contains_key("sidecar"), "an absent optional role must carry no path: {a:?}");
+            }
+            other => panic!("expected Resolved, got {other:?}"),
+        }
+    }
+
+    /// The required role in the SAME arch still goes `Missing` at zero
+    /// candidates - `optional_roles` narrows the exemption to exactly the
+    /// roles it names, not every role on the spec.
+    #[test]
+    fn a_required_role_with_zero_candidates_still_goes_missing_even_when_the_arch_has_an_optional_one_too() {
+        let records = vec![rec("/models/reqopt/sidecar.bin")];
+        let spec = RequiredAndOptionalSpec;
+        let specs: Vec<&dyn ArchSpec> = vec![&spec];
+        let out = resolve("reqopt", &records, &specs, &BTreeMap::new());
+        match out {
+            Resolution::Missing(m) => {
+                assert_eq!(m.roles.len(), 1, "{m:?}");
+                assert_eq!(m.roles[0].role, "dit");
+            }
+            other => panic!("expected Missing, got {other:?}"),
+        }
+    }
+
+    /// An optional role that DOES have a candidate is picked exactly like a
+    /// required one - `optional_roles` only changes what happens at zero.
+    #[test]
+    fn an_optional_role_with_a_real_candidate_is_still_picked() {
+        let records = vec![rec("/models/reqopt/dit.bin"), rec("/models/reqopt/sidecar.bin")];
+        let spec = RequiredAndOptionalSpec;
+        let specs: Vec<&dyn ArchSpec> = vec![&spec];
+        let out = resolve("reqopt", &records, &specs, &BTreeMap::new());
+        match out {
+            Resolution::Resolved(a) => assert_eq!(a.roles["sidecar"], PathBuf::from("/models/reqopt/sidecar.bin")),
             other => panic!("expected Resolved, got {other:?}"),
         }
     }
