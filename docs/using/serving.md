@@ -7,7 +7,7 @@ one scheduler, and exposes them over one or more transports at once.
 ```
 brain serve [--openai[:PORT]] [--anthropic[:PORT]] [--openrouter[:PORT]] \
             [--dbus] [--models-dir DIR] [--api-keys-out FILE] \
-            [--ready-file PATH]
+            [--ready-file PATH] [--watch-adapters DIR]
 ```
 
 - `--openai[:PORT]` - serve an OpenAI-compatible HTTP API (default port if
@@ -22,10 +22,29 @@ brain serve [--openai[:PORT]] [--anthropic[:PORT]] [--openrouter[:PORT]] \
 - `--api-keys-out FILE` - also write the generated API keys to `FILE`, not
   just stdout.
 - `--ready-file PATH` - see **Readiness** below.
+- `--watch-adapters DIR` - see **Hot-swapping a LoRA adapter** below. Off
+  unless given.
 
 At least one surface flag is meaningful for a useful server; an unknown flag
 is a hard error (exit 2), not a warning. Run `brain serve --help` for the
 authoritative flag list.
+
+## Hot-swapping a LoRA adapter
+
+`--watch-adapters DIR` points the server at a directory a training or
+promotion step publishes LoRA adapters into, and swaps the served Qwen3 onto
+the newest one **without a restart**. It is off unless the flag is given.
+
+- "Newest" is the highest-versioned `adapter-NNNNNN.safetensors` in `DIR` -
+  the version, never the modification time, so republishing an older version
+  does not roll the server back onto it.
+- A request already running is never interrupted. The swap applies to the
+  next request against that model; the current one finishes on the weights it
+  started with.
+- The adapter is folded into the base weights when the model is next loaded,
+  so a swapped-in adapter costs nothing per request compared with the base.
+- Only the Qwen3 resident (`BRAIN_QWEN_WEIGHTS`) is watched. With no Qwen3
+  configured, the flag has nothing to swap and no watcher runs.
 
 ## Access control is always on
 

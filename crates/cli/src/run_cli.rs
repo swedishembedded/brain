@@ -104,6 +104,12 @@ SERVING OPTIONS
                          (else $BRAIN_MODELS_DIR, else $XDG_DATA_HOME/brain/models)
   --api-keys-out FILE    write {\"openai\":\"sk-brain-…\", …} as JSON, mode 0600
   --reserve-gb N         GB of VRAM kept free per GPU for activations (default 2)
+  --watch-adapters DIR   watch DIR for promoted LoRA adapters and hot-swap the
+                         served Qwen3 onto the newest one, with no restart. OFF
+                         unless given. The newest is the highest-versioned
+                         adapter-NNNNNN.safetensors, never the newest mtime.
+                         A request already running is never interrupted: the
+                         swap applies to the next one.
   --ready-file PATH      create PATH (empty) once EVERY surface requested above
                          has bound its listener. Because the APIKEY lines and
                          --api-keys-out are both written BEFORE any bind, PATH
@@ -233,6 +239,12 @@ pub fn run_serve(args: &[String]) {
     // Global model directory scanned at startup for the served-model catalog
     // (`--models-dir`, else BRAIN_MODELS_DIR / XDG default; see model_dir::resolve).
     let mut models_dir: Option<String> = None;
+    // Opt-in continuous-learning hot swap (`--watch-adapters DIR`): watch DIR
+    // for a promoted LoRA adapter and point the served Qwen3 at it without a
+    // restart. `None` (the default) spawns no watcher at all -- a server that
+    // silently reloads its weights because a file appeared on disk is not
+    // something an operator should get without asking for it.
+    let mut watch_adapters: Option<String> = None;
     // HTTP inference APIs (`--anthropic|--openai|--openrouter [PORT]`), each on its own
     // localhost port with a per-provider key generated at startup. All share the one
     // executor (with D-Bus, if also selected). `--api-keys-out FILE` writes the keys as
@@ -281,6 +293,7 @@ pub fn run_serve(args: &[String]) {
             "--dbus-name" => dbus_name = Some(val(args, &mut i, "--dbus-name")),
             "--reserve-gb" => dbus_reserve_gb = parsed(args, &mut i, "--reserve-gb"),
             "--models-dir" => models_dir = Some(val(args, &mut i, "--models-dir")),
+            "--watch-adapters" => watch_adapters = Some(val(args, &mut i, "--watch-adapters")),
             "--anthropic" => anthropic = Some(take_port(args, &mut i, 8787)),
             "--openai" => openai = Some(take_port(args, &mut i, 8788)),
             "--openrouter" => openrouter = Some(take_port(args, &mut i, 8789)),
@@ -334,6 +347,7 @@ pub fn run_serve(args: &[String]) {
             openrouter,
             api_keys_out,
             ready,
+            watch_adapters,
         });
     }
 
@@ -567,6 +581,9 @@ struct RunApis {
     /// Notified once per bound surface (HTTP + D-Bus); disabled unless
     /// `--ready-file` was given. See `brain_shutdown::ready::Gate`.
     ready: brain_shutdown::ready::Gate,
+    /// `--watch-adapters DIR`: the continuous-learning hot-swap watcher's
+    /// directory, `None` (no watcher) unless the flag was given.
+    watch_adapters: Option<String>,
 }
 
 /// Build the one shared executor and bring up the requested surfaces: D-Bus
@@ -631,12 +648,7 @@ fn build_auto_fetch_supplier(models_dir: Option<&str>) -> Option<Arc<dyn residen
 
 fn run_apis(a: RunApis) {
     let supplier = build_auto_fetch_supplier(a.models_dir.as_deref());
-    // `qwen` is the concrete hot-swap handle (`resident::Serving`). Bound and
-    // deliberately unused here: the opt-in adapter watcher that reads it is
-    // the next commit, and naming it at the one call site that will spawn
-    // that watcher is what makes the handle's whole purpose reviewable
-    // separately from the watcher's own logic.
-    let crate::resident::Serving { executor, qwen: _qwen } = build_serving_executor(a.reserve_gb, a.models_dir);
+    let crate::resident::Serving { executor, qwen } = build_serving_executor(a.reserve_gb, a.models_dir);
     let manifests = executor.manifests();
     let served: Vec<&str> = manifests.iter().map(|m| m.model.as_str()).collect();
     eprintln!("brain serve: models: {}", served.join(", "));
@@ -651,6 +663,13 @@ fn run_apis(a: RunApis) {
     // Ctrl-C/SIGTERM reaches whichever surfaces are actually running.
     let (trigger, shutdown) = brain_shutdown::channel();
     brain_shutdown::install_signals(trigger);
+
+    // The continuous-learning hot swap, opt-in (`--watch-adapters DIR`). Held
+    // for the whole serving lifetime: the handle stops and joins its thread on
+    // drop, so the watcher cannot outlive the surfaces it was swapping models
+    // under. `qwen` is the CONCRETE resident handle -- `set_adapter` is
+    // inherent, so the erased one the executor holds could not do this.
+    let _adapter_watcher = crate::continuous_train::spawn_adapter_watcher(a.watch_adapters.as_ref().map(std::path::Path::new), qwen, &executor);
 
     let dbus_handle = if a.dbus {
         let opts = brain_dbus::DbusOpts {

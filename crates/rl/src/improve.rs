@@ -204,6 +204,31 @@ pub struct ProvenanceInput {
     pub cycle: u64,
 }
 
+/// The highest-versioned `adapter-{n:06}.safetensors` already in `dir`, as
+/// `(version, path)` - `None` when the directory holds no adapter yet.
+///
+/// The VERSION orders these, never the modification time or the directory
+/// order: a publisher that re-writes an older version, or a filesystem that
+/// hands back entries in inode order, must not make an older adapter look
+/// like the newest one. A consumer that wants "the current adapter" (the
+/// serving-side watcher in `crates/cli`) and the producer that names the
+/// next one ([`next_adapter_version`]) therefore agree by construction.
+pub fn latest_adapter(dir: &Path) -> std::io::Result<Option<(u32, PathBuf)>> {
+    let mut best: Option<(u32, PathBuf)> = None;
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let Some(v) = name.strip_prefix("adapter-").and_then(|n| n.strip_suffix(".safetensors")).and_then(|n| n.parse::<u32>().ok()) else {
+            continue;
+        };
+        if best.as_ref().is_none_or(|(b, _)| v > *b) {
+            best = Some((v, entry.path()));
+        }
+    }
+    Ok(best)
+}
+
 /// One `adapter-{n:06}.safetensors` version past the highest one already in
 /// `dir` (0 if none yet). Deliberately NOT `read_dir().count()` - deleting an
 /// old adapter must not shift every later version down and silently
@@ -211,12 +236,7 @@ pub struct ProvenanceInput {
 /// `qwen3` feature) `crate::continuous::run_cycle`, which used to carry its
 /// own copy of exactly this logic.
 pub(crate) fn next_adapter_version(dir: &Path) -> std::io::Result<u32> {
-    let max = std::fs::read_dir(dir)?
-        .filter_map(|e| e.ok())
-        .filter_map(|e| e.file_name().to_str().map(str::to_string))
-        .filter_map(|name| name.strip_prefix("adapter-")?.strip_suffix(".safetensors")?.parse::<u32>().ok())
-        .max();
-    Ok(max.map(|v| v + 1).unwrap_or(0))
+    Ok(latest_adapter(dir)?.map(|(v, _)| v + 1).unwrap_or(0))
 }
 
 /// `git rev-parse --short HEAD`, `-dirty`-suffixed when the working tree is
@@ -491,6 +511,27 @@ mod tests {
         fn tasks(&self, seed: u64) -> Vec<Task> {
             vec![Task { id: format!("echo-{seed}"), prompt: vec![1, 2, 3], answer: serde_json::json!([4, 5]) }]
         }
+    }
+
+    /// The VERSION orders adapters, not the modification time and not the
+    /// directory order: a publisher that rewrites an older version last
+    /// (or a filesystem handing entries back in inode order) must not make
+    /// an older adapter look like the current one to the serving-side
+    /// watcher. Non-adapter files in the same directory are ignored.
+    #[test]
+    fn latest_adapter_is_the_highest_version_never_the_newest_file() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(latest_adapter(dir.path()).unwrap().is_none(), "an empty directory has no current adapter");
+
+        for name in ["adapter-000000.safetensors", "adapter-000007.safetensors", "adapter-000002.safetensors", "notes.txt", "adapter-latest.safetensors"] {
+            std::fs::write(dir.path().join(name), b"x").unwrap();
+        }
+        // adapter-000002 was written AFTER 000007, and `adapter-latest`
+        // sorts after every numbered one lexically - neither may win.
+        let (v, path) = latest_adapter(dir.path()).unwrap().expect("a directory with adapters has a current one");
+        assert_eq!(v, 7);
+        assert_eq!(path.file_name().unwrap(), "adapter-000007.safetensors");
+        assert_eq!(next_adapter_version(dir.path()).unwrap(), 8, "the producer names one past the version the consumer reads");
     }
 
     #[test]
