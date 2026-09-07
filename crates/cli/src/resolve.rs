@@ -402,7 +402,13 @@ fn flag_twin(arch: &str, var: &str) -> String {
 /// explicitly, because [`crate::supply::ensure_env_weights`] can only see the
 /// environment. The flag has to win over the variable AND over the fetch.
 fn weights_already_named(arch: &str, rest: &[String]) -> bool {
-    let Some(a) = brain_arch::by_id(arch) else { return false };
+    weights_already_named_with(arch, brain_arch::by_id(arch), rest)
+}
+
+/// [`weights_already_named`]'s logic, taking an already-looked-up `Arch` -
+/// see [`wants_default_weights_with`] for why a test needs this seam.
+fn weights_already_named_with(arch: &str, a: Option<&brain_arch::Arch>, rest: &[String]) -> bool {
+    let Some(a) = a else { return false };
     if a.weights_env.is_empty() {
         return false; // nothing to name; `ensure_env_weights` no-ops anyway
     }
@@ -452,6 +458,16 @@ fn weights_already_named(arch: &str, rest: &[String]) -> bool {
 /// risk giving some future, unrelated arch's own "embed" verb a training
 /// path this injection was never meant to touch.
 fn wants_default_weights(arch: &str, verb: Option<&str>) -> bool {
+    wants_default_weights_with(arch, brain_arch::by_id(arch), verb)
+}
+
+/// [`wants_default_weights`]'s logic, taking an already-looked-up `Arch`
+/// instead of resolving one itself - so a test can exercise the decision
+/// against a hand-built fixture instead of a real, live registry row, which a
+/// registry-wide migration (every `weights_env` row moving to the resolver,
+/// as one eventually will) would otherwise leave with no real example left
+/// to test against at all.
+fn wants_default_weights_with(arch: &str, a: Option<&brain_arch::Arch>, verb: Option<&str>) -> bool {
     // A `Arch::weights_env` architecture whose vars the caller has ALREADY
     // exported has fully specified its weights, so there is nothing to fetch
     // and nothing to inject. `supply::ensure_default_weights` below would
@@ -463,12 +479,12 @@ fn wants_default_weights(arch: &str, verb: Option<&str>) -> bool {
     // never use, then appended a `--weights` flag `flux2_cli` rejects.
     //
     // Keyed on "every var is set", NOT on "declares weights_env": those two are
-    // NOT disjoint. `qwen35`, `qwen3vl` and `s3dit` all declare `weights_env`
-    // and still depend on this injection when the vars are unset, so skipping
-    // for every `weights_env` row would break them. This mirrors
+    // NOT disjoint. Several rows declare `weights_env` and still depend on
+    // this injection when the vars are unset, so skipping for every
+    // `weights_env` row would break them. This mirrors
     // `ensure_env_weights`'s own "every var the caller needs is already set"
     // early return, keeping one rule in both entry points.
-    if brain_arch::by_id(arch).is_some_and(|a| {
+    if a.is_some_and(|a| {
         !a.weights_env.is_empty()
             && a.weights_env.iter().all(|(var, _)| std::env::var_os(var).is_some_and(|v| !v.is_empty()))
     }) {
@@ -567,6 +583,34 @@ mod tests {
         assert!(!wants_default_weights("qwen3", Some("train")));
     }
 
+    /// A synthetic multi-role `Arch`, for the tests below that need to
+    /// exercise `wants_default_weights`/`weights_already_named` against a
+    /// declared `weights_env` + `default_ref` pair. This registry migrated
+    /// one real architecture at a time onto the resolver until none was left
+    /// that still paired the two (every `weights_env` row that ALSO carried a
+    /// `default_ref` moved to the resolver over the course of this
+    /// migration) - a test pinned to whichever real row was left "still on
+    /// the env-var path" kept going stale as the next one migrated. A
+    /// hand-built fixture, exercised through the `_with` seam that takes an
+    /// already-looked-up `Arch` instead of resolving one from the live
+    /// registry, can never go stale that way.
+    fn multi_role_fixture() -> brain_arch::Arch {
+        brain_arch::Arch {
+            id: "resolvetestarch",
+            display: "Resolve test fixture",
+            domain: brain_arch::Domain::Toy,
+            source: brain_arch::Source::Toy,
+            package: "brain-toy",
+            gguf: None,
+            hf: &[],
+            default_ref: Some("test-vendor/test-repo"),
+            extra_refs: &[],
+            weights_env: &[("BRAIN_RESOLVETESTARCH_DIT", "dit"), ("BRAIN_RESOLVETESTARCH_VAE", "vae")],
+            variants: &[],
+            families: &[],
+        }
+    }
+
     /// A caller who has exported every `Arch::weights_env` path has fully
     /// specified its weights, so no `default_ref` may be fetched and no
     /// `--weights` injected. `brain flux2 generate` downloaded the 4B
@@ -574,37 +618,33 @@ mod tests {
     /// `canon_verb` maps `generate` to `infer` and `ensure_default_weights`
     /// (unlike `ensure_env_weights`) consults none of those vars.
     ///
-    /// The partially-configured and unset cases must still fetch: several rows
-    /// (`moondream3`, `qwen3vl`, `qwen35`, ...) declare `weights_env` AND
-    /// depend on default fetching, which is why the rule keys on "every var
-    /// set" rather than on "declares weights_env".
-    ///
-    /// Uses `ltxv` as its example architecture (still on the env-var path;
-    /// `flux2` and `wan` both moved to the resolver and their `weights_env`
-    /// is now empty).
+    /// The partially-configured and unset cases must still fetch: a
+    /// `weights_env` row can still depend on default fetching, which is why
+    /// the rule keys on "every var set" rather than on "declares
+    /// weights_env" - see [`multi_role_fixture`].
     #[test]
     fn a_fully_configured_weights_env_architecture_skips_the_default_fetch() {
         let _serial = env_lock();
-        let a = brain_arch::by_id("ltxv").expect("ltxv row");
-        let vars: Vec<&str> = a.weights_env.iter().map(|(v, _)| *v).collect();
-        assert!(vars.len() >= 2, "ltxv should declare several roles");
+        let fixture = multi_role_fixture();
+        let vars: Vec<&str> = fixture.weights_env.iter().map(|(v, _)| *v).collect();
+        assert!(vars.len() >= 2, "the fixture should declare several roles");
 
         // Nothing exported: the default-fetch path stays available.
         for v in &vars {
             std::env::remove_var(v);
         }
-        assert!(wants_default_weights("ltxv", Some("generate")), "unset env must still fetch");
+        assert!(wants_default_weights_with(fixture.id, Some(&fixture), Some("generate")), "unset env must still fetch");
 
         // Every path exported: nothing to fetch, nothing to inject.
         for v in &vars {
             std::env::set_var(v, "/nonexistent/for-test");
         }
-        assert!(!wants_default_weights("ltxv", Some("generate")), "fully configured must not fetch");
-        assert!(!wants_default_weights("ltxv", Some("infer")));
+        assert!(!wants_default_weights_with(fixture.id, Some(&fixture), Some("generate")), "fully configured must not fetch");
+        assert!(!wants_default_weights_with(fixture.id, Some(&fixture), Some("infer")));
 
         // Partially configured is NOT fully specified, so it still fetches.
         std::env::remove_var(vars[0]);
-        assert!(wants_default_weights("ltxv", Some("generate")), "partial env must still fetch");
+        assert!(wants_default_weights_with(fixture.id, Some(&fixture), Some("generate")), "partial env must still fetch");
 
         for v in &vars {
             std::env::remove_var(v);
@@ -618,20 +658,9 @@ mod tests {
     /// obviously right and is simply false.
     #[test]
     fn weights_env_and_the_weights_flag_are_not_mutually_exclusive() {
-        // `qwen35_cli.rs` parses `--weights`; the `qwen35` row also declares
-        // `weights_env` (and a `default_ref`).
-        let a = brain_arch::by_id("qwen35").expect("qwen35 row");
-        assert!(
-            !a.weights_env.is_empty(),
-            "qwen35 is the standing counterexample to the disjointness assumption; \
-             if this row changed, re-check wants_default_weights' comment"
-        );
-        // And plenty of rows pair weights_env with a default_ref they still need.
-        for id in ["moondream3", "qwen3vl", "sam2", "rrdbnet"] {
-            let a = brain_arch::by_id(id).expect("row exists");
-            assert!(!a.weights_env.is_empty() && a.default_ref.is_some(), "{id} should declare both");
-            assert!(wants_default_weights(id, Some("infer")), "{id}: default fetch must survive");
-        }
+        let fixture = multi_role_fixture();
+        assert!(!fixture.weights_env.is_empty() && fixture.default_ref.is_some(), "the fixture should declare both");
+        assert!(wants_default_weights_with(fixture.id, Some(&fixture), Some("infer")), "default fetch must survive when unset");
     }
 
     #[test]
@@ -673,27 +702,28 @@ mod tests {
     /// re-download the very component `--model` overrides. A role that is
     /// neither set nor named still leaves the fetch in place.
     ///
-    /// Uses `ltxv` as its example architecture (still on the env-var path;
-    /// `flux2` and `wan` both moved to the resolver and their `weights_env`
-    /// is now empty, so neither can exercise this legacy machinery any more).
+    /// Uses [`multi_role_fixture`] as its example architecture - see that
+    /// fixture's own doc for why a real registry row cannot serve here any
+    /// more.
     #[test]
     fn a_model_flag_counts_as_naming_the_primary_weights() {
         let _serial = env_lock();
-        let vars: Vec<_> = brain_arch::by_id("ltxv").expect("ltxv row").weights_env.iter().map(|(v, _)| *v).collect();
+        let fixture = multi_role_fixture();
+        let vars: Vec<_> = fixture.weights_env.iter().map(|(v, _)| *v).collect();
         for &var in &vars {
             std::env::remove_var(var);
         }
         let with_model = s(&["infer", "--model", "some/dit", "--prompt", "p"]);
-        assert!(!weights_already_named("ltxv", &with_model), "the auxiliary roles are still unnamed");
+        assert!(!weights_already_named_with(fixture.id, Some(&fixture), &with_model), "the auxiliary roles are still unnamed");
 
         // Every role but the primary (`weights_env[0]`, the DiT) set via its
         // own variable.
         for &var in &vars[1..] {
             std::env::set_var(var, "x");
         }
-        assert!(weights_already_named("ltxv", &with_model), "--model names the DiT; the rest are in the env");
+        assert!(weights_already_named_with(fixture.id, Some(&fixture), &with_model), "--model names the DiT; the rest are in the env");
         assert!(
-            !weights_already_named("ltxv", &s(&["infer", "--prompt", "p"])),
+            !weights_already_named_with(fixture.id, Some(&fixture), &s(&["infer", "--prompt", "p"])),
             "without --model the unset primary still wants the fetch"
         );
 
@@ -792,9 +822,8 @@ mod tests {
         assert!(matches!(resolve(&s(&[])), Resolved::Empty));
     }
 
-    /// Uses `ltxv` (five roles: dit/vae/audio_vae/text_encoder/tokenizer,
-    /// still on the env-var path) rather than `wan`, which moved to the
-    /// resolver and now declares an empty `weights_env`.
+    /// Uses [`multi_role_fixture`] rather than a real registry row - see that
+    /// fixture's own doc for why.
     #[test]
     fn explicit_weight_flags_suppress_the_auto_fetch() {
         let _serial = env_lock();
@@ -811,23 +840,24 @@ mod tests {
         // flag that must be recognized, not silently missed.
         assert_eq!(flag_twin("qwen3tts", "BRAIN_QWEN3TTS_WEIGHTS"), "--weights-dir");
 
-        let roles = brain_arch::by_id("ltxv").expect("ltxv row").weights_env;
+        let fixture = multi_role_fixture();
+        let roles = fixture.weights_env;
         for (var, _) in roles {
             std::env::remove_var(var);
         }
         let mut all = vec!["infer".to_string()];
         for (var, _) in roles {
-            all.push(flag_twin("ltxv", var));
+            all.push(flag_twin(fixture.id, var));
             all.push(format!("path-for-{var}"));
         }
-        assert!(weights_already_named("ltxv", &all));
+        assert!(weights_already_named_with(fixture.id, Some(&fixture), &all));
 
         let mut missing_one = vec!["infer".to_string()];
         for (var, _) in &roles[..roles.len() - 1] {
-            missing_one.push(flag_twin("ltxv", var));
+            missing_one.push(flag_twin(fixture.id, var));
             missing_one.push(format!("path-for-{var}"));
         }
-        assert!(!weights_already_named("ltxv", &missing_one));
+        assert!(!weights_already_named_with(fixture.id, Some(&fixture), &missing_one));
         // An architecture with no `weights_env` is unaffected either way.
         assert!(!weights_already_named("gpt2", &all));
     }
