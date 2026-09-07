@@ -907,7 +907,7 @@ pub fn parse(bytes: &[u8]) -> Result<ReadReport, String> {
         }
     }
     let (root, off, len) =
-        pkl.ok_or("torchpt: no data.pkl entry — not a torch >= 1.6 zip checkpoint")?;
+        pkl.ok_or("torchpt: no data.pkl entry - not a torch >= 1.6 zip checkpoint")?;
 
     let mut u = Unpickler { b: &bytes[off..off + len], pos: 0, stack: Vec::new(), memo: HashMap::new() };
     let tree = u.run()?;
@@ -936,4 +936,94 @@ pub fn read_report(path: &str) -> Result<ReadReport, String> {
 #[cfg(not(target_arch = "wasm32"))]
 pub fn read(path: &str) -> Result<Vec<NamedTensor>, String> {
     read_report(path).map(|r| r.tensors)
+}
+
+// ---------------------------------------------------------------------------
+// shapes-only reading - no tensor DATA ever touched
+// ---------------------------------------------------------------------------
+//
+// A `_rebuild_tensor_v2` node's `size` is a plain literal already sitting in
+// the pickle stream (see `TensorNode`/the `torch._utils` arm of `Unpickler::
+// call` above) - nothing about it depends on the storage blob a persistent id
+// merely NAMES. So a caller that only wants "what tensors are in here, and
+// what shape are they" (a classifier deciding what ROLE a checkpoint plays,
+// say) never needs `Archive::materialize`'s dequantize-and-copy at all.
+
+/// Walk the unpickled tree collecting `(name, shape)` for every tensor leaf,
+/// exactly the flattening [`flatten`] does - but without an [`Archive`] and
+/// without reading any storage bytes.
+fn flatten_shapes(v: &Val, prefix: &str, out: &mut Vec<(String, Vec<usize>)>, skipped: &mut usize) -> Result<(), String> {
+    match v {
+        Val::Dict(d) => {
+            let pairs: Vec<(Val, Val)> = d.borrow().clone();
+            for (k, val) in &pairs {
+                let name = join(prefix, &key_string(k)?);
+                flatten_shapes(val, &name, out, skipped)?;
+            }
+        }
+        Val::List(l) => {
+            let items: Vec<Val> = l.borrow().clone();
+            for (i, e) in items.iter().enumerate() {
+                flatten_shapes(e, &join(prefix, &i.to_string()), out, skipped)?;
+            }
+        }
+        Val::Tuple(t) => {
+            for (i, e) in t.iter().enumerate() {
+                flatten_shapes(e, &join(prefix, &i.to_string()), out, skipped)?;
+            }
+        }
+        Val::Tensor(t) => {
+            let name = if prefix.is_empty() { "tensor".to_string() } else { prefix.to_string() };
+            out.push((name, t.size.clone()));
+        }
+        Val::Mark => return Err("torchpt: internal error: MARK escaped the pickle stack".into()),
+        _ => *skipped += 1,
+    }
+    Ok(())
+}
+
+/// [`shapes`] over an in-memory (or mmap'd) byte buffer - the shapes-only
+/// sibling of [`parse`]. Locates and unpickles `<root>/data.pkl` exactly as
+/// `parse` does; the only difference is that a tensor leaf contributes its
+/// `(name, shape)` and nothing else, so the `<root>/data/<key>` storage
+/// entries are never read even though [`zipread::parse`] still has to walk
+/// past them to build the entry list.
+pub fn parse_shapes(bytes: &[u8]) -> Result<Vec<(String, Vec<usize>)>, String> {
+    let entries = zipread::parse(bytes)?;
+    let mut pkl: Option<(usize, usize)> = None;
+    for e in &entries {
+        let is_pkl = e.name == "data.pkl" || e.name.ends_with("/data.pkl");
+        if is_pkl {
+            if pkl.is_some() {
+                return Err("torchpt: multiple data.pkl entries in archive".into());
+            }
+            pkl = Some((e.offset, e.len));
+        }
+    }
+    let (off, len) = pkl.ok_or("torchpt: no data.pkl entry - not a torch >= 1.6 zip checkpoint")?;
+
+    let mut u = Unpickler { b: &bytes[off..off + len], pos: 0, stack: Vec::new(), memo: HashMap::new() };
+    let tree = u.run()?;
+
+    let mut out = Vec::new();
+    let mut skipped = 0usize;
+    flatten_shapes(&tree, "", &mut out, &mut skipped)?;
+    Ok(out)
+}
+
+/// Every tensor's name + shape in a `torch.save` checkpoint, read from `path`
+/// without materializing a single value.
+///
+/// Mmap'd rather than `std::fs::read`'d, for the same reason
+/// [`crate::mmap::MmapSafetensors`]/`checkpoint::gguf::MmapGguf` are: the
+/// storage bytes a multi-gigabyte checkpoint is mostly made of are never
+/// touched by [`parse_shapes`], so classifying (or shape-checking) one costs
+/// a handful of small reads near the zip's central directory and each
+/// entry's local header, never a read of the weights themselves.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn shapes(path: &str) -> Result<Vec<(String, Vec<usize>)>, String> {
+    let file = std::fs::File::open(path).map_err(|e| format!("torchpt: open {path}: {e}"))?;
+    // SAFETY: weight files are treated as immutable for the mapping's lifetime.
+    let mmap = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| format!("torchpt: mmap {path}: {e}"))?;
+    parse_shapes(&mmap)
 }

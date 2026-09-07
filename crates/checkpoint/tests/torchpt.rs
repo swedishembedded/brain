@@ -638,3 +638,88 @@ fn garbage_bytes_error() {
     assert!(torchpt::parse(b"not a zip at all").is_err());
     assert!(torchpt::parse(&[]).is_err());
 }
+
+// ---------------------------------------------------------------------------
+// shapes() - name+shape only, no storage bytes read
+// ---------------------------------------------------------------------------
+
+/// `parse_shapes` reads every tensor's name and shape straight off the
+/// `_rebuild_tensor_v2` args in the pickle stream, matching what `parse` (which
+/// also materializes the data) reports for the same file.
+#[test]
+fn parse_shapes_matches_parse_names_and_shapes() {
+    let p = P::new()
+        .op(0x7d) // EMPTY_DICT
+        .op(0x28) // MARK
+        .s("token_embedding.weight")
+        .tensor("FloatStorage", "0", 12, 0, &[4, 3], &[3, 1])
+        .s("blocks.0.attn.q.weight")
+        .tensor("FloatStorage", "1", 9, 0, &[3, 3], &[3, 1])
+        .op(0x75) // SETITEMS
+        .stop();
+    let file = pt_archive(&p, &[("0", f32_bytes(&[0.0; 12])), ("1", f32_bytes(&[0.0; 9]))]);
+
+    let full = torchpt::parse(&file).unwrap();
+    let mut shapes = torchpt::parse_shapes(&file).unwrap();
+    shapes.sort();
+    let mut want: Vec<(String, Vec<usize>)> = full.tensors.iter().map(|t| (t.name.clone(), t.shape.clone())).collect();
+    want.sort();
+    assert_eq!(shapes, want);
+}
+
+/// The whole point: `parse_shapes` never reads a byte of any storage blob, so
+/// a storage entry can be EMPTY (or hold garbage shorter than its declared
+/// numel) and shape-reading still succeeds - unlike `parse`, which needs the
+/// real bytes to materialize the tensor's data.
+#[test]
+fn parse_shapes_never_touches_storage_bytes() {
+    let p = P::new()
+        .op(0x7d)
+        .s("encoder.conv1.weight")
+        .tensor("FloatStorage", "0", 1_000_000, 0, &[10, 3, 3, 3, 3], &[810, 270, 90, 3, 1])
+        .op(0x73) // SETITEM
+        .stop();
+    // The storage entry is present (a real zip needs the member to exist) but
+    // its bytes are far short of the 4,000,000 the declared numel implies.
+    let file = pt_archive(&p, &[("0", vec![0u8; 4])]);
+
+    let shapes = torchpt::parse_shapes(&file).unwrap();
+    assert_eq!(shapes, vec![("encoder.conv1.weight".to_string(), vec![10, 3, 3, 3, 3])]);
+    // `parse` (which materializes data) must fail on the same short storage -
+    // proving the two really do differ in whether they touch the blob.
+    assert!(torchpt::parse(&file).is_err(), "materializing this file should fail on the short storage");
+}
+
+/// Nested dicts flatten the same way for shapes as they do for `parse`.
+#[test]
+fn parse_shapes_flattens_nested_dicts() {
+    let p = P::new()
+        .global("collections", "OrderedDict")
+        .op(0x71).op(0x01)
+        .op(0x29)
+        .op(0x52)
+        .op(0x71).op(0x00)
+        .op(0x28)
+        .s("vae")
+        .op(0x68).op(0x01)
+        .op(0x29)
+        .op(0x52)
+        .op(0x28)
+        .s("decoder.conv1.weight")
+        .tensor("FloatStorage", "0", 4, 0, &[2, 2], &[2, 1])
+        .op(0x75)
+        .op(0x75)
+        .stop();
+    let file = pt_archive(&p, &[("0", f32_bytes(&[0.0; 4]))]);
+    let shapes = torchpt::parse_shapes(&file).unwrap();
+    assert_eq!(shapes, vec![("vae.decoder.conv1.weight".to_string(), vec![2, 2])]);
+}
+
+/// A zip with no `data.pkl` errors the same way for `parse_shapes` as it does
+/// for `parse`.
+#[test]
+fn parse_shapes_missing_data_pkl_errors() {
+    let file = zip_with(&[("archive/version", b"3\n", 0, 0)]);
+    let err = torchpt::parse_shapes(&file).unwrap_err();
+    assert!(err.contains("data.pkl"), "unexpected error: {err}");
+}

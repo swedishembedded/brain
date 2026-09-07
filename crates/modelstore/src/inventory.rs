@@ -29,6 +29,13 @@ use serde::{Deserialize, Serialize};
 pub enum ArtifactKind {
     Gguf,
     Safetensors,
+    /// A `torch.save` checkpoint (`.pth`) - the format a native (non-diffusers)
+    /// PyTorch release ships a component in, e.g. Wan2.1's `Wan2.1_VAE.pth` and
+    /// `models_t5_umt5-xxl-enc-bf16.pth`. Content classification reads it
+    /// through [`checkpoint::torchpt::shapes`] (mmap'd, no tensor data read),
+    /// the same header-only discipline `Gguf`/`Safetensors` classification
+    /// already follows.
+    Pth,
     /// A directory holding a foreign (non-brain) HF checkpoint: `config.json`
     /// plus one or more `model*.safetensors` files, or a
     /// `model.safetensors.index.json` shard set - the loader takes the
@@ -218,6 +225,8 @@ fn kind_of_extension(fname: &str) -> Option<ArtifactKind> {
         Some(ArtifactKind::Gguf)
     } else if fname.ends_with(".safetensors") || fname.ends_with(".safetensors.part") {
         Some(ArtifactKind::Safetensors)
+    } else if fname.ends_with(".pth") || fname.ends_with(".pth.part") {
+        Some(ArtifactKind::Pth)
     } else {
         None
     }
@@ -553,6 +562,38 @@ mod tests {
             assert_eq!(r.completeness, Completeness::Complete, "{r:?}");
             assert!(r.usable());
         }
+    }
+
+    /// A bare `torch.save` checkpoint (`.pth`) sitting vendor-flat, exactly the
+    /// shape Wan2.1's native release ships its VAE and umT5 encoder in
+    /// (`Wan2.1_VAE.pth`, `models_t5_umt5-xxl-enc-bf16.pth`) - `kind_of_extension`
+    /// used to know only `.gguf`/`.safetensors`, so these were invisible to
+    /// `scan` regardless of where they sat.
+    #[test]
+    fn a_bare_pth_file_is_inventoried() {
+        let root = scratch_root("pth-file");
+        let path = root.join("Wan-AI").join("Wan2.1_VAE.pth");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"not a real zip, but the inventory only stats it").unwrap();
+
+        let found = scan(&root);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].kind, ArtifactKind::Pth);
+        assert_eq!(found[0].completeness, Completeness::Complete);
+        assert_eq!(found[0].path, path);
+    }
+
+    /// A `.pth` inside a repo directory (not just vendor-flat) is walked the
+    /// same way a loose `.gguf`/`.safetensors` already is.
+    #[test]
+    fn a_pth_file_inside_a_repo_directory_is_inventoried() {
+        let root = scratch_root("pth-in-repo");
+        let path = root.join("Wan-AI").join("Wan2.1-T2V-1.3B").join("Wan2.1_VAE.pth");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"stub").unwrap();
+
+        let found = scan(&root);
+        assert_eq!(found.iter().filter(|r| r.kind == ArtifactKind::Pth).count(), 1, "{found:?}");
     }
 
     #[test]
