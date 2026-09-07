@@ -96,6 +96,22 @@ pub struct CompoundManifest {
 /// The manifest file name inside a compound model's repo directory.
 pub const MANIFEST_FILE: &str = "brain.manifest.json";
 
+/// Why a PRESENT `brain.manifest.json` failed to resolve into a servable
+/// compound model -- distinguished from "no manifest here at all" (which
+/// [`Store::local_compound`]-style lookups report separately, not as one of
+/// these) so a caller can tell "not installed" apart from "installed but
+/// broken", and so a manifest that tries to escape its own repo directory is
+/// rejected by name rather than folded into a generic "not found".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LocalError {
+    /// `role`'s manifest-declared path doesn't exist on disk.
+    MissingRole { role: String, path: PathBuf },
+    /// `role`'s manifest-declared path (`rel`, relative to the repo dir) is
+    /// absolute or contains a `..` component -- accepting it would let a
+    /// manifest read/serve a file outside the model's own directory.
+    UnsafeRolePath { role: String, rel: String },
+}
+
 /// A models directory on disk, laid out `<vendor>/<base-repo>/...`.
 pub struct Store {
     root: PathBuf,
@@ -220,8 +236,8 @@ impl Store {
     }
 
     fn local_base(&self, reference: &ModelRef, dir: &Path) -> Option<LocalModel> {
-        if let Some(m) = self.local_compound(reference, dir) {
-            return Some(m);
+        if let Some(result) = self.local_compound(reference, dir) {
+            return result.ok();
         }
         let weights = dir.join(BASE_WEIGHTS_FILE);
         open_local(reference.clone(), dir.to_path_buf(), weights, Format::Safetensors)
@@ -230,11 +246,19 @@ impl Store {
     /// A [`CompoundManifest`]-described model: tried before the single-file
     /// case (same class -- no quant, no adapter), since a repo dir carrying
     /// `brain.manifest.json` has no `model.brain.safetensors` to fall back
-    /// to. `None` (not a partial `LocalModel`) if the manifest is missing,
-    /// unparseable, or any role's path doesn't exist -- an incomplete
-    /// compound model is "not found", the same policy [`open_local`] already
-    /// applies to a missing single weights file.
-    fn local_compound(&self, reference: &ModelRef, dir: &Path) -> Option<LocalModel> {
+    /// to.
+    ///
+    /// `None` when there is no manifest here at all (not compound, or
+    /// unparseable -- fall through to the single-file case the same as
+    /// before). `Some(Err(_))` when a manifest IS present but doesn't
+    /// resolve -- a role's path is missing ([`LocalError::MissingRole`]) or
+    /// escapes the repo dir ([`LocalError::UnsafeRolePath`]) -- so a caller
+    /// that wants the reason (see `Store::local_detailed`) can have it,
+    /// while [`Store::local`]'s plain `Option` still just folds this to
+    /// `None` (an incomplete/unsafe compound model is "not found" there,
+    /// the same policy [`open_local`] applies to a missing single weights
+    /// file).
+    fn local_compound(&self, reference: &ModelRef, dir: &Path) -> Option<Result<LocalModel, LocalError>> {
         let manifest_path = dir.join(MANIFEST_FILE);
         if !manifest_path.is_file() {
             return None;
@@ -243,14 +267,18 @@ impl Store {
         let manifest: CompoundManifest = serde_json::from_slice(&bytes).ok()?;
         let mut roles = BTreeMap::new();
         for (role, rel) in &manifest.roles {
-            let p = dir.join(rel);
+            let rel_path = Path::new(rel);
+            if rel_path.is_absolute() || rel_path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+                return Some(Err(LocalError::UnsafeRolePath { role: role.clone(), rel: rel.clone() }));
+            }
+            let p = dir.join(rel_path);
             if !p.exists() {
-                return None;
+                return Some(Err(LocalError::MissingRole { role: role.clone(), path: p }));
             }
             roles.insert(role.clone(), p);
         }
         let card = ModelCard::for_ref(&manifest.id, reference.vendor(), reference.repo(), None, &manifest.family);
-        Some(LocalModel {
+        Some(Ok(LocalModel {
             reference: reference.clone(),
             dir: dir.to_path_buf(),
             weights: manifest_path,
@@ -259,7 +287,7 @@ impl Store {
             format: Format::Compound,
             adapter: None,
             roles: Some(roles),
-        })
+        }))
     }
 
     fn local_quant(&self, reference: &ModelRef, dir: &Path, quant: Quant) -> Option<LocalModel> {
@@ -547,6 +575,30 @@ mod tests {
 
         let r = ModelRef::new("Tongyi-MAI", "Z-Image-Turbo", None);
         assert!(store.local(&r).is_none(), "an incomplete compound model must not resolve as found");
+    }
+
+    #[test]
+    fn local_compound_rejects_a_role_path_that_escapes_the_repo_dir() {
+        let store = scratch_store("modelstore-lib-test-compound-traversal");
+        let dir = store.repo_dir(&ModelRef::new("Tongyi-MAI", "Z-Image-Turbo", None));
+        std::fs::create_dir_all(&dir).unwrap();
+        let manifest = CompoundManifest {
+            id: "Tongyi-MAI/Z-Image-Turbo".to_string(),
+            family: "zimage".to_string(),
+            roles: BTreeMap::from([("vae".to_string(), "../../etc/passwd".to_string())]),
+        };
+        std::fs::write(dir.join(MANIFEST_FILE), serde_json::to_vec(&manifest).unwrap()).unwrap();
+
+        let r = ModelRef::new("Tongyi-MAI", "Z-Image-Turbo", None);
+        let result = store.local_compound(&r, &dir).expect("manifest is present, so this must not be None");
+        match result {
+            Err(LocalError::UnsafeRolePath { role, rel }) => {
+                assert_eq!(role, "vae");
+                assert_eq!(rel, "../../etc/passwd");
+            }
+            Err(other) => panic!("expected UnsafeRolePath, got {other:?}"),
+            Ok(_) => panic!("expected UnsafeRolePath, got a resolved LocalModel"),
+        }
     }
 
     #[test]
