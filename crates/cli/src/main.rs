@@ -47,6 +47,7 @@ mod qwen35_cli;
 mod qwen35moe_cli;
 mod qwen_cli;
 mod resident;
+mod resolver_cli;
 mod resident_asr;
 mod resident_cosyvoice;
 mod resident_deepseekocr;

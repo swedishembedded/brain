@@ -166,27 +166,16 @@ fn ref_bound(i: usize, anchored: bool, ref_size: Option<u32>) -> Option<u32> {
     }
 }
 
-/// Exit code for a genuinely ambiguous resolve outcome - distinct from the
-/// generic `exit(1)` an ordinary `Err` gets, and from a missing role's own
-/// code below, so a caller (a script, a human reading `$?`) can tell "there
-/// was a real question here" apart from "something was flatly wrong".
-const AMBIGUOUS_EXIT: i32 = 3;
-/// Exit code for `Resolution::Missing` - distinct from [`AMBIGUOUS_EXIT`]:
-/// nothing on disk satisfies a role at all, rather than several things doing
-/// so equally well.
-const MISSING_EXIT: i32 = 4;
-
 /// Resolve FLUX.2's four weight roles through the model-store resolver
 /// (`brain_modelstore::resolve::resolve` + [`flux2::spec::Flux2Spec`])
 /// instead of `BRAIN_FLUX2_*` variables: `--model`/`--text-encoder` name a
 /// role's file outright (the resolver's own override contract - an exact
 /// path already found by scanning the models directory), `--variant` states
-/// the klein-vs-base family a weight's shape alone can never answer. Prints
-/// and exits on `Ambiguous`/`Missing` - neither is recoverable within this
-/// command, and resolving is never a place to guess.
+/// the klein-vs-base family a weight's shape alone can never answer.
+/// `crate::resolver_cli::resolve_or_exit` does the actual scan/resolve and
+/// prints+exits on `Ambiguous`/`Missing` - shared with every other
+/// architecture's own resolver-backed command, not flux2-specific.
 fn resolve_flux2(model: Option<&str>, vae: Option<&str>, text_encoder: Option<&str>, tokenizer: Option<&str>, variant: Option<&str>) -> Result<(Paths, capability::Assembly), String> {
-    let root = crate::model_dir::resolve(None).ok_or("no models directory (set --models-dir, BRAIN_MODELS_DIR, or $HOME)")?;
-    let records = brain_modelstore::inventory::scan(&root);
     let mut overrides = std::collections::BTreeMap::new();
     if let Some(m) = model {
         overrides.insert("dit".to_string(), m.to_string());
@@ -204,29 +193,10 @@ fn resolve_flux2(model: Option<&str>, vae: Option<&str>, text_encoder: Option<&s
         overrides.insert("variant".to_string(), v.to_string());
     }
     let spec = flux2::spec::Flux2Spec;
-    let specs: [&dyn brain_modelstore::resolve::ArchSpec; 1] = [&spec];
-    match brain_modelstore::resolve::resolve("flux2", &records, &specs, &overrides) {
-        brain_modelstore::resolve::Resolution::Resolved(assembly) => {
-            let paths = Paths::from_assembly(&assembly)?;
-            Ok((paths, *assembly))
-        }
-        brain_modelstore::resolve::Resolution::Ambiguous(a) => {
-            eprint!("{}", describe_ambiguity(&a));
-            std::process::exit(AMBIGUOUS_EXIT);
-        }
-        brain_modelstore::resolve::Resolution::Missing(m) => {
-            eprint!("{}", describe_missing(&m));
-            std::process::exit(MISSING_EXIT);
-        }
-    }
+    let assembly = crate::resolver_cli::resolve_or_exit("flux2", &spec, &overrides);
+    let paths = Paths::from_assembly(&assembly)?;
+    Ok((paths, assembly))
 }
-
-/// The question plus every candidate's own selector flags, and every missing
-/// role's own doc string plus near-misses - shared with every other
-/// architecture's CLI, since neither rendering has anything flux2-specific
-/// left in it (the architecture name comes from `Ambiguity::arch`/
-/// `Missing::arch`, not a hardcoded prefix).
-use brain_modelstore::resolve::{describe_ambiguity, describe_missing};
 
 fn generate(args: &[String]) -> Result<(), String> {
     let mut prompt = None;
