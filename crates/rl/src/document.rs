@@ -719,6 +719,55 @@ pub fn run_document_study<M: Model>(spec: &StudySpec, curr: &DocumentCurriculum,
     })
 }
 
+/// One fact's own promote/reject verdict for a cycle, independent of the
+/// cycle's aggregate gate decision (continuous-learning roadmap B8).
+///
+/// A batch of many facts trained and gated together produces ONE verdict for
+/// the whole batch - "20 facts in, promote" can silently mean 15 landed and
+/// 5 did not, and neither the user nor sven's ledger (`S6′`) can tell which
+/// without this.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FactVerdict {
+    /// The fact statement, exactly as it was trained on.
+    pub fact: String,
+    /// `true` iff EVERY one of this fact's own probes scored a pass (reward
+    /// `1.0`) on the candidate arm. Not a mean: a fact with three probes
+    /// where two flip and one does not has NOT landed - averaging is exactly
+    /// what would hide the one that failed.
+    pub landed: bool,
+}
+
+/// Per-fact rows for one [`FactBatch`], from the candidate arm's own
+/// `(task id, score)` pairs on its held-out probes - the SAME per-task
+/// decodes [`crate::gate::gate`] itself was scored from, never a second
+/// pass. `by_task` need not be in any particular order; task ids are
+/// [`task_id`] applied to each triple's `probe_question`, exactly what
+/// [`DocumentEnv::tasks`] stamps on the [`Task`] the gate decoded.
+///
+/// Panics, naming the offending probe, if `by_task` does not cover every one
+/// of `batch`'s probes: a fact this cycle never scored cannot be honestly
+/// reported as landed OR failed.
+pub fn fact_verdicts(batch: &FactBatch, by_task: &[(String, f64)]) -> Vec<FactVerdict> {
+    batch
+        .facts()
+        .iter()
+        .map(|fact| {
+            let landed = batch.triples().iter().filter(|t| &t.fact == fact).all(|t| {
+                let id = task_id(&t.probe_question);
+                let (_, score) = by_task.iter().find(|(tid, _)| *tid == id).unwrap_or_else(|| {
+                    panic!(
+                        "rl::document::fact_verdicts: probe {:?} (fact {:?}) was not scored this cycle - `by_task` must \
+                         cover every one of the batch's probes",
+                        t.probe_question, fact
+                    )
+                });
+                *score >= 1.0
+            });
+            FactVerdict { fact: fact.clone(), landed }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -876,5 +925,48 @@ mod tests {
         assert_eq!(cfg.anchor_budget, def.anchor_budget);
         assert_eq!(cfg.min_entropy_ratio, def.min_entropy_ratio);
         assert!(cfg.min_effect_size > def.min_effect_size);
+    }
+
+    /// A batch of N facts trained and gated together produces ONE verdict for
+    /// the whole batch: "20 facts in, promote" can silently mean 19 landed
+    /// and 1 did not. This is the case that verdict would hide - the
+    /// aggregate gate promotes (57 of 60 probes flip, an effect size and a
+    /// significance no default or document config would reject), but one
+    /// fact's own three probes still score zero post-training, and the
+    /// per-fact report must name that fact anyway (continuous-learning
+    /// roadmap B8).
+    #[test]
+    fn a_batch_promote_still_names_every_fact_that_did_not_land() {
+        let batch = batch_of_twenty_facts();
+        let failed_fact = batch.facts()[7].clone();
+
+        let mut by_task: Vec<(String, f64)> = Vec::new();
+        let mut candidate_scores: Vec<f64> = Vec::new();
+        for t in batch.triples() {
+            let score = if t.fact == failed_fact { 0.0 } else { 1.0 };
+            by_task.push((task_id(&t.probe_question), score));
+            candidate_scores.push(score);
+        }
+        let incumbent_scores = vec![0.0f64; candidate_scores.len()];
+
+        let input = GateInput {
+            candidate_scores: &candidate_scores,
+            incumbent_scores: &incumbent_scores,
+            anchor_candidate: 0.9,
+            anchor_incumbent: 0.9,
+            entropy_candidate: 2.0,
+            entropy_incumbent: 2.0,
+        };
+        let report = gate(&input, &document_gate_config());
+        assert_eq!(report.decision, Decision::Promote, "57 of 60 probes flipping must promote in aggregate under the document gate config");
+
+        let verdicts = fact_verdicts(&batch, &by_task);
+        assert_eq!(verdicts.len(), 20, "one verdict per DISTINCT fact");
+        let not_landed: Vec<&str> = verdicts.iter().filter(|v| !v.landed).map(|v| v.fact.as_str()).collect();
+        assert_eq!(
+            not_landed,
+            vec![failed_fact.as_str()],
+            "the aggregate gate promoted, but the report must still name the one fact whose own probes did not land"
+        );
     }
 }
