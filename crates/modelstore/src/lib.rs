@@ -104,6 +104,10 @@ pub const MANIFEST_FILE: &str = "brain.manifest.json";
 /// rejected by name rather than folded into a generic "not found".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LocalError {
+    /// Nothing servable at `reference`'s repo dir at all -- no manifest, no
+    /// weights file, an unparseable/cardless one. The same "not found"
+    /// [`Store::local`] has always folded every failure into.
+    NotFound,
     /// `role`'s manifest-declared path doesn't exist on disk.
     MissingRole { role: String, path: PathBuf },
     /// `role`'s manifest-declared path (`rel`, relative to the repo dir) is
@@ -224,14 +228,32 @@ impl Store {
 
     /// Looks up `reference` on disk. `None` if the expected file is absent or
     /// unreadable as a weight file -- callers fall through to [`plan`] either way.
+    ///
+    /// A thin wrapper over [`local_detailed`](Store::local_detailed) that
+    /// discards WHY a lookup failed -- existing callers that only ever
+    /// needed "found or not" keep that shape; a caller that needs to tell
+    /// "not installed" apart from "installed but missing/unsafe a role"
+    /// (e.g. `discover`'s error reporting) uses `local_detailed` instead.
     pub fn local(&self, reference: &ModelRef) -> Option<LocalModel> {
+        self.local_detailed(reference).ok()
+    }
+
+    /// [`Store::local`], but on failure names WHY: [`LocalError::MissingRole`]
+    /// or [`LocalError::UnsafeRolePath`] for a compound manifest that is
+    /// present but broken, [`LocalError::NotFound`] for every other "nothing
+    /// here" case (no manifest, no weights file, unreadable card, ...) --
+    /// [`Store::local`] just folds all three to `None`.
+    pub fn local_detailed(&self, reference: &ModelRef) -> Result<LocalModel, LocalError> {
         let dir = self.repo_dir(reference);
         if reference.adapter().is_some() {
-            return self.local_adapter(reference, &dir);
+            return self.local_adapter(reference, &dir).ok_or(LocalError::NotFound);
         }
         match reference.quant() {
-            Some(q) => self.local_quant(reference, &dir, q),
-            None => self.local_base(reference, &dir),
+            Some(q) => self.local_quant(reference, &dir, q).ok_or(LocalError::NotFound),
+            None => match self.local_compound(reference, &dir) {
+                Some(result) => result,
+                None => open_local(reference.clone(), dir.clone(), dir.join(BASE_WEIGHTS_FILE), Format::Safetensors).ok_or(LocalError::NotFound),
+            },
         }
     }
 
@@ -592,6 +614,49 @@ mod tests {
         let r = ModelRef::new("Tongyi-MAI", "Z-Image-Turbo", None);
         let result = store.local_compound(&r, &dir).expect("manifest is present, so this must not be None");
         match result {
+            Err(LocalError::UnsafeRolePath { role, rel }) => {
+                assert_eq!(role, "vae");
+                assert_eq!(rel, "../../etc/passwd");
+            }
+            Err(other) => panic!("expected UnsafeRolePath, got {other:?}"),
+            Ok(_) => panic!("expected UnsafeRolePath, got a resolved LocalModel"),
+        }
+    }
+
+    #[test]
+    fn local_detailed_names_the_missing_role_instead_of_a_bare_not_found() {
+        let store = scratch_store("modelstore-lib-test-compound-detailed-missing");
+        write_compound_fixture(&store, "Tongyi-MAI", "Z-Image-Turbo");
+        let dir = store.repo_dir(&ModelRef::new("Tongyi-MAI", "Z-Image-Turbo", None));
+        // Simulate an interrupted fetch: the manifest is there, but the "vae"
+        // role's file never landed.
+        std::fs::remove_file(dir.join("vae").join("diffusion_pytorch_model.safetensors")).unwrap();
+
+        let r = ModelRef::new("Tongyi-MAI", "Z-Image-Turbo", None);
+        match store.local_detailed(&r) {
+            Err(LocalError::MissingRole { role, .. }) => assert_eq!(role, "vae"),
+            Err(other) => panic!("expected MissingRole, got {other:?}"),
+            Ok(_) => panic!("expected MissingRole, got a resolved LocalModel"),
+        }
+        // The plain Option-returning `local` keeps its existing "not found"
+        // behavior -- callers that don't want the detail see none of it.
+        assert!(store.local(&r).is_none());
+    }
+
+    #[test]
+    fn local_detailed_names_an_unsafe_role_path_the_same_as_local_compound() {
+        let store = scratch_store("modelstore-lib-test-compound-detailed-traversal");
+        let dir = store.repo_dir(&ModelRef::new("Tongyi-MAI", "Z-Image-Turbo", None));
+        std::fs::create_dir_all(&dir).unwrap();
+        let manifest = CompoundManifest {
+            id: "Tongyi-MAI/Z-Image-Turbo".to_string(),
+            family: "zimage".to_string(),
+            roles: BTreeMap::from([("vae".to_string(), "../../etc/passwd".to_string())]),
+        };
+        std::fs::write(dir.join(MANIFEST_FILE), serde_json::to_vec(&manifest).unwrap()).unwrap();
+
+        let r = ModelRef::new("Tongyi-MAI", "Z-Image-Turbo", None);
+        match store.local_detailed(&r) {
             Err(LocalError::UnsafeRolePath { role, rel }) => {
                 assert_eq!(role, "vae");
                 assert_eq!(rel, "../../etc/passwd");
