@@ -61,6 +61,33 @@ these. Not yet supported: pipeline sharding for brain's other trainable
 architectures (GLM-5.2, the Sparse MoE Transformer, and the rest) — extending
 it to a new model is a small, well-scoped integration, not a redesign.
 
+## Streamed models: sharding without residency
+
+The pipeline above keeps every stage's weights **resident** on its card. Some
+models are too large for even one stage to be resident - a 33B diffusion
+transformer at fp32 is ~132 GB, and no single card holds a useful fraction of
+it. Those models *stream*: one layer's weights are uploaded, run, and
+overwritten by the next layer's, so the live weight footprint is one layer
+rather than one stage.
+
+Streaming and sharding are not alternatives; they compose. Each card streams
+its **own** contiguous layer range, one layer at a time, and the same
+automatic, cost-balanced placement decides which range goes where. What this
+buys on an *N*-card box is the use of every card, each card's endpoint weights
+and per-step upload traffic cut to its own share, and headroom for larger
+inputs - not a smaller per-layer footprint, which is set by the largest single
+layer and is the same however many cards there are.
+
+Correctness is unchanged: only the residual crosses a stage boundary, staged
+through host memory as f32, which is lossless - a split run computes
+bit-identical outputs to a single-card one. Speed is unchanged too for a model
+with one sample in flight (a guidance-distilled diffusion model, for instance):
+the stages run in sequence, so sharding here adds capacity and utilisation, not
+throughput.
+
+Implemented and tested today for MiniMax-H3's joint video+audio DiT
+(`crates/minimaxh3`).
+
 ## Composes with data parallelism
 
 Pipeline parallelism and data parallelism combine: shard a large model across
