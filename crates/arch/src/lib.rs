@@ -450,9 +450,12 @@ pub const ARCHS: &[Arch] = &[
     // no new recipe is needed - confirmed against the real repo listing.
     // Vendor publishes no GGUF at all for either size (community quantizers
     // do - a different vendor namespace, omitted per the `qwen3` row comment).
+    // No `weights_env`: flux2 resolves its weights through
+    // `brain_modelstore::resolve` (crates/cli/src/flux2_cli.rs's `generate`)
+    // rather than `BRAIN_FLUX2_*` environment variables. `default_ref` still
+    // names what `brain pull flux2`/`brain models list` fetch/display.
     arch!("flux2", "FLUX.2 Klein MMDiT text-to-image + editing", Image, Brain, "brain-flux2",
           default_ref: Some("black-forest-labs/FLUX.2-klein-4B"),
-          weights_env: &[("BRAIN_FLUX2_DIT", "dit"), ("BRAIN_FLUX2_VAE", "vae"), ("BRAIN_FLUX2_TE", "text_encoder"), ("BRAIN_FLUX2_TOKENIZER", "tokenizer")],
           variants: &[
               Variant { reference: "black-forest-labs/FLUX.2-klein-4B", params: 3_875_544_576, quants: &[] },
               // Gated under a non-commercial license, unlike the 4B row above.

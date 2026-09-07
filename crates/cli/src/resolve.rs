@@ -303,6 +303,21 @@ fn wants_weight_acquisition(arch: &str, rest: &[String]) -> bool {
     }
 }
 
+/// Architectures whose weight resolution has fully moved to
+/// `brain_modelstore::resolve` (a `--model`/per-role-flag/store-inventory
+/// based resolver, wired into that architecture's own handler) and must
+/// never again go through EITHER legacy env-var mechanism below --
+/// `ensure_env_weights` (keyed on `Arch::weights_env`, already a no-op once
+/// that's empty) AND, independently, `maybe_inject_default_weights` (keyed
+/// only on the verb being infer-shaped, so it still fires for an arch with
+/// an EMPTY `weights_env` too -- that's the whole point of it for
+/// `weights_env`-free architectures like `zipdepth`/`gpt2`, which is exactly
+/// why emptying `weights_env` alone does not opt an architecture out: the
+/// resolver-migrated case needs an explicit marker, not an overload of a
+/// field whose "empty" already means something else for those others).
+/// Grown by one entry per architecture as it migrates.
+const RESOLVER_MIGRATED_ARCHS: &[&str] = &["flux2"];
+
 fn dispatch_arch(arch: &str, rest: Vec<String>) {
     // Skipped for `-h`/`--help`: help text must never block on a network
     // fetch (or hang, if `BRAIN_MODELS_DIR` points somewhere with no local
@@ -313,7 +328,8 @@ fn dispatch_arch(arch: &str, rest: Vec<String>) {
         // architecture (`ltxv load ...`). Infra verbs keep their own output.
         crate::load_line::install(arch);
     }
-    // Unconditional (past the gate above) and first: covers BOTH halves of
+    let resolver_migrated = RESOLVER_MIGRATED_ARCHS.contains(&arch);
+    // Unconditional (past the gates above) and first: covers BOTH halves of
     // this resolver. `ARCH_TO_MODEL` architectures have no `--weights` flag
     // at all (`run_do`'s params are the action's own schema) and always
     // need this; a handful of `ARCH_HANDLERS` architectures (`qwen3tts`)
@@ -322,7 +338,7 @@ fn dispatch_arch(arch: &str, rest: Vec<String>) {
     // way `maybe_inject_default_weights` below expects, so this can't be
     // scoped to just the `ARCH_TO_MODEL` branch. No-ops instantly for every
     // architecture with an empty `weights_env` (everything else today).
-    let attempt_fetch = wants_weight_acquisition(arch, &rest);
+    let attempt_fetch = !resolver_migrated && wants_weight_acquisition(arch, &rest);
     if attempt_fetch && !weights_already_named(arch, &rest) {
         crate::supply::ensure_env_weights(arch);
     }
@@ -562,29 +578,32 @@ mod tests {
     /// (`s3dit`, `qwen3vl`, `qwen35`, ...) declare `weights_env` AND depend on
     /// default fetching, which is why the rule keys on "every var set" rather
     /// than on "declares weights_env".
+    ///
+    /// Uses `wan` as its example architecture (still on the env-var path;
+    /// `flux2` moved to the resolver and its `weights_env` is now empty).
     #[test]
     fn a_fully_configured_weights_env_architecture_skips_the_default_fetch() {
         let _serial = env_lock();
-        let a = brain_arch::by_id("flux2").expect("flux2 row");
+        let a = brain_arch::by_id("wan").expect("wan row");
         let vars: Vec<&str> = a.weights_env.iter().map(|(v, _)| *v).collect();
-        assert!(vars.len() >= 2, "flux2 should declare several roles");
+        assert!(vars.len() >= 2, "wan should declare several roles");
 
         // Nothing exported: the default-fetch path stays available.
         for v in &vars {
             std::env::remove_var(v);
         }
-        assert!(wants_default_weights("flux2", Some("generate")), "unset env must still fetch");
+        assert!(wants_default_weights("wan", Some("generate")), "unset env must still fetch");
 
         // Every path exported: nothing to fetch, nothing to inject.
         for v in &vars {
             std::env::set_var(v, "/nonexistent/for-test");
         }
-        assert!(!wants_default_weights("flux2", Some("generate")), "fully configured must not fetch");
-        assert!(!wants_default_weights("flux2", Some("infer")));
+        assert!(!wants_default_weights("wan", Some("generate")), "fully configured must not fetch");
+        assert!(!wants_default_weights("wan", Some("infer")));
 
         // Partially configured is NOT fully specified, so it still fetches.
         std::env::remove_var(vars[0]);
-        assert!(wants_default_weights("flux2", Some("generate")), "partial env must still fetch");
+        assert!(wants_default_weights("wan", Some("generate")), "partial env must still fetch");
 
         for v in &vars {
             std::env::remove_var(v);
@@ -652,28 +671,45 @@ mod tests {
     /// `--model` must stop the default-ref fetch, which would otherwise
     /// re-download the very component `--model` overrides. A role that is
     /// neither set nor named still leaves the fetch in place.
+    ///
+    /// Uses `wan` as its example architecture (still on the env-var path;
+    /// `flux2` moved to the resolver and its `weights_env` is now empty, so
+    /// it can no longer exercise this legacy machinery).
     #[test]
     fn a_model_flag_counts_as_naming_the_primary_weights() {
         let _serial = env_lock();
-        let vars: Vec<_> = brain_arch::by_id("flux2").expect("flux2 row").weights_env.iter().map(|(v, _)| *v).collect();
+        let vars: Vec<_> = brain_arch::by_id("wan").expect("wan row").weights_env.iter().map(|(v, _)| *v).collect();
         for &var in &vars {
             std::env::remove_var(var);
         }
-        let with_model = s(&["generate", "--model", "some/dit", "--prompt", "p"]);
-        assert!(!weights_already_named("flux2", &with_model), "the auxiliary roles are still unnamed");
+        let with_model = s(&["t2v", "--model", "some/dit", "--prompt", "p"]);
+        assert!(!weights_already_named("wan", &with_model), "the auxiliary roles are still unnamed");
 
-        std::env::set_var("BRAIN_FLUX2_VAE", "v");
-        std::env::set_var("BRAIN_FLUX2_TE", "t");
-        std::env::set_var("BRAIN_FLUX2_TOKENIZER", "k");
-        assert!(weights_already_named("flux2", &with_model), "--model names the DiT; the rest are in the env");
+        std::env::set_var("BRAIN_WAN_VAE", "v");
+        std::env::set_var("BRAIN_WAN_T5", "t");
+        std::env::set_var("BRAIN_WAN_TOKENIZER", "k");
+        assert!(weights_already_named("wan", &with_model), "--model names the DiT; the rest are in the env");
         assert!(
-            !weights_already_named("flux2", &s(&["generate", "--prompt", "p"])),
+            !weights_already_named("wan", &s(&["t2v", "--prompt", "p"])),
             "without --model the unset primary still wants the fetch"
         );
 
         for &var in &vars {
             std::env::remove_var(var);
         }
+    }
+
+    /// `flux2` moved to the resolver: its `weights_env` is empty, so
+    /// `weights_already_named` has nothing to name (its own documented
+    /// "nothing to name; `ensure_env_weights` no-ops anyway" early return) --
+    /// and that no-op is exactly what lets `dispatch_arch` reach the
+    /// resolver-based handler at all, instead of failing on unset
+    /// `BRAIN_FLUX2_*` vars that no longer mean anything.
+    #[test]
+    fn flux2_no_longer_wants_env_based_weight_acquisition() {
+        let _serial = env_lock();
+        assert!(brain_arch::by_id("flux2").expect("flux2 row").weights_env.is_empty());
+        assert!(!weights_already_named("flux2", &s(&["generate", "--prompt", "p"])));
     }
 
     #[test]
