@@ -26,27 +26,62 @@ pub const AMBIGUOUS_EXIT: i32 = 3;
 /// Exit code for `Resolution::Missing`.
 pub const MISSING_EXIT: i32 = 4;
 
-/// Resolve `arch`'s roles through the model-store resolver, printing and
-/// exiting on `Ambiguous`/`Missing` - neither is recoverable within a single
-/// command invocation, and resolving is never a place to guess. Scans the
-/// models directory itself (`crate::model_dir::resolve`), so a caller only
-/// needs its own [`ArchSpec`] and whatever role/variant overrides its own
-/// flags parsed.
-pub fn resolve_or_exit(arch: &str, spec: &dyn ArchSpec, overrides: &BTreeMap<String, String>) -> Assembly {
-    let Some(root) = crate::model_dir::resolve(None) else {
-        eprintln!("{arch}: no models directory (set --models-dir, BRAIN_MODELS_DIR, or $HOME)");
-        std::process::exit(1);
-    };
+/// [`try_resolve`]'s failure shapes, each carrying its own already-rendered
+/// message - kept distinct (rather than one `String`) so a caller that must
+/// exit the process ([`resolve_or_exit`]) can still pick the right exit code,
+/// while a caller that cannot (`crate::catalog::provider`) can collapse it to
+/// one message via [`ResolveFailure::message`].
+pub enum ResolveFailure {
+    /// No models directory is configured at all - not a resolver outcome,
+    /// a precondition the resolver was never reached to evaluate.
+    NoModelsDir(String),
+    Ambiguous(String),
+    Missing(String),
+}
+
+impl ResolveFailure {
+    /// The rendered message, regardless of which shape this is.
+    pub fn message(&self) -> &str {
+        match self {
+            ResolveFailure::NoModelsDir(m) | ResolveFailure::Ambiguous(m) | ResolveFailure::Missing(m) => m,
+        }
+    }
+}
+
+/// Resolve `arch`'s roles through the model-store resolver: scans the models
+/// directory itself (`crate::model_dir::resolve`) and reports every
+/// non-`Resolved` outcome as an [`ResolveFailure`] instead of exiting - for a
+/// caller that cannot exit the process on failure, such as
+/// `crate::catalog::provider`'s "build me a runnable provider, or say why
+/// not" contract.
+pub fn try_resolve(arch: &str, spec: &dyn ArchSpec, overrides: &BTreeMap<String, String>) -> Result<Assembly, ResolveFailure> {
+    let root = crate::model_dir::resolve(None).ok_or_else(|| ResolveFailure::NoModelsDir(format!("{arch}: no models directory (set --models-dir, BRAIN_MODELS_DIR, or $HOME)")))?;
     let records = brain_modelstore::inventory::scan(&root);
     let specs: [&dyn ArchSpec; 1] = [spec];
     match brain_modelstore::resolve::resolve(arch, &records, &specs, overrides) {
-        Resolution::Resolved(assembly) => *assembly,
-        Resolution::Ambiguous(a) => {
-            eprint!("{}", describe_ambiguity(&a));
+        Resolution::Resolved(assembly) => Ok(*assembly),
+        Resolution::Ambiguous(a) => Err(ResolveFailure::Ambiguous(describe_ambiguity(&a))),
+        Resolution::Missing(m) => Err(ResolveFailure::Missing(describe_missing(&m))),
+    }
+}
+
+/// [`try_resolve`], printing and exiting on `Ambiguous`/`Missing`/no-models-
+/// directory instead of returning an `Err` - neither is recoverable within a
+/// single command invocation, and resolving is never a place to guess. What
+/// every dedicated `<arch>_cli.rs` resolver-backed command calls.
+pub fn resolve_or_exit(arch: &str, spec: &dyn ArchSpec, overrides: &BTreeMap<String, String>) -> Assembly {
+    match try_resolve(arch, spec, overrides) {
+        Ok(assembly) => assembly,
+        Err(ResolveFailure::NoModelsDir(m)) => {
+            eprintln!("{m}");
+            std::process::exit(1);
+        }
+        Err(ResolveFailure::Ambiguous(m)) => {
+            eprint!("{m}");
             std::process::exit(AMBIGUOUS_EXIT);
         }
-        Resolution::Missing(m) => {
-            eprint!("{}", describe_missing(&m));
+        Err(ResolveFailure::Missing(m)) => {
+            eprint!("{m}");
             std::process::exit(MISSING_EXIT);
         }
     }
