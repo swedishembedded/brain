@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Generalized model-capability interface — the single shape every brain model
+//! Generalized model-capability interface - the single shape every brain model
 //! exposes its actions through, so the **CLI** (`brain do …`) and the **event
 //! API** (`ActionRequest`/`ActionResult`) dispatch them *generically*.
 //!
@@ -13,20 +13,20 @@
 //! info@swedishembedded.com.
 //!
 //! The whole design in four types:
-//! * [`Provider`] — a loaded model, advertising a [`Manifest`] of the actions it
+//! * [`Provider`] - a loaded model, advertising a [`Manifest`] of the actions it
 //!   supports and handing back an [`Action`] by name.
-//! * [`ActionSpec`] — a self-describing schema for one action (typed
+//! * [`ActionSpec`] - a self-describing schema for one action (typed
 //!   [`ParamSpec`]s plus binary [`BlobSpec`] inputs/outputs), serializable so a
 //!   host can discover
 //!   and drive it without hard-coding anything.
-//! * [`Invocation`] → [`Outcome`] — one call: typed params (`serde_json`) + named
+//! * [`Invocation`] → [`Outcome`] - one call: typed params (`serde_json`) + named
 //!   binary blobs in, scalar outputs + named blobs out.
-//! * [`Registry`] — the shared dispatcher the CLI and the runtime both use:
+//! * [`Registry`] - the shared dispatcher the CLI and the runtime both use:
 //!   register providers, list manifests, validate + run an action by
 //!   `(model, action)`.
 //!
 //! Adding a capability to brain is implementing [`Action`] and listing it in a
-//! [`Provider`] — no new CLI subcommand, no new `events::Event` variant. That is
+//! [`Provider`] - no new CLI subcommand, no new `events::Event` variant. That is
 //! the point: one generalized interface, every model, every action.
 
 use std::collections::BTreeMap;
@@ -147,7 +147,7 @@ impl ParamSpec {
     }
 }
 
-/// The kind of a binary input/output — enough for a host to pick a codec.
+/// The kind of a binary input/output - enough for a host to pick a codec.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Media {
     Image,
@@ -359,7 +359,7 @@ pub struct Manifest {
     /// Maximum tokens (prompt + completion) this instance can actually serve
     /// right now, when known. Populated by chat-capable resident models from
     /// their REAL configured engine capacity (e.g. the paged KV-cache sizing
-    /// derived from `BRAIN_QWEN_CTX`) — deliberately NOT the checkpoint's
+    /// derived from `BRAIN_QWEN_CTX`) - deliberately NOT the checkpoint's
     /// architectural `max_position_embeddings`, which the engine may not
     /// actually be able to hold (this is what advertising the wrong number
     /// looks like: a client builds a prompt the model claims to support, the
@@ -435,7 +435,7 @@ impl Blob {
 pub struct CancelToken(Option<Arc<AtomicBool>>);
 
 impl CancelToken {
-    /// An armed token: any clone can request — and observe — cancellation.
+    /// An armed token: any clone can request - and observe - cancellation.
     pub fn armed() -> CancelToken {
         CancelToken(Some(Arc::new(AtomicBool::new(false))))
     }
@@ -518,7 +518,7 @@ pub fn content_text(content: Option<&Value>) -> String {
 ///
 /// This is the ONLY path real OpenAI/Anthropic HTTP traffic exercises (both
 /// chat handlers always populate `messages`, never a bare `prompt`; `prompt`
-/// is a convenience for D-Bus/direct callers). It lives here ONCE — it used
+/// is a convenience for D-Bus/direct callers). It lives here ONCE - it used
 /// to be copy-pasted character-for-character into omni, qwenvl and the mock
 /// resident, each copy annotated "kept in sync deliberately"; per the
 /// hoist-and-migrate policy a shared extraction cannot silently disagree
@@ -576,8 +576,8 @@ impl Outcome {
 /// A progress update emitted while a streaming action runs. `delta` carries a
 /// per-token text fragment for streaming generation (`None` for plain step
 /// progress); a front-end appends deltas to reconstruct the running output.
-/// `event` carries a structured, out-of-band progress payload — e.g. a
-/// tool-call event surfaced mid-generation — for updates that don't fit the
+/// `event` carries a structured, out-of-band progress payload - e.g. a
+/// tool-call event surfaced mid-generation - for updates that don't fit the
 /// plain-text `delta` shape; `None` for ordinary step/token progress.
 #[derive(Clone, Debug)]
 pub struct Progress {
@@ -587,16 +587,16 @@ pub struct Progress {
     pub delta: Option<String>,
     pub event: Option<serde_json::Value>,
     /// A named binary chunk to emit MID-STREAM (e.g. one vocoded audio
-    /// segment from a chunked decode) — `(name, blob)`, reusing [`Blob`]'s
+    /// segment from a chunked decode) - `(name, blob)`, reusing [`Blob`]'s
     /// own shape (media tag + bytes + meta) rather than inventing a second
     /// one, since a mid-stream chunk and a terminal [`Outcome`] blob carry
     /// the same kind of payload, just at a different point in the action's
-    /// life. `None` for every progress kind that predates this field — an
+    /// life. `None` for every progress kind that predates this field - an
     /// existing caller matching on `step`/`total`/`message`/`delta`/`event`
     /// is unaffected. The D-Bus `Subscribe` transport
     /// (`crates/dbus/src/service.rs`) is what actually turns a `Some` here
     /// into an out-of-band memfd `blob` frame on the SAME `SOCK_SEQPACKET`
-    /// side-channel `StreamTx::blob` already uses for terminal blobs — no
+    /// side-channel `StreamTx::blob` already uses for terminal blobs - no
     /// new transport, and this stays a plain in-process `Vec<u8>` (cheap,
     /// no fd overhead) until it reaches that boundary.
     pub chunk: Option<(String, Blob)>,
@@ -617,7 +617,7 @@ impl Progress {
         Progress { step, total, message: "event".into(), delta: None, event: Some(v), chunk: None }
     }
     /// A mid-stream binary chunk (e.g. one vocoded audio segment), named
-    /// `name` — see [`Self::chunk`]'s field doc for the full shape/transport
+    /// `name` - see [`Self::chunk`]'s field doc for the full shape/transport
     /// story. `message` is still a plain human-readable step description
     /// (e.g. `"decoding chunk 3/10"`); the payload itself lives in `chunk`.
     pub fn chunk(step: u32, total: u32, message: impl Into<String>, name: impl Into<String>, blob: Blob) -> Progress {
@@ -645,7 +645,7 @@ pub trait Provider: Send + Sync {
 
 // ===================== the shared dispatcher =====================
 
-/// Holds the loaded providers and dispatches actions by `(model, action)` — the
+/// Holds the loaded providers and dispatches actions by `(model, action)` - the
 /// one path the CLI and the event runtime both go through.
 #[derive(Default)]
 pub struct Registry {
@@ -677,6 +677,38 @@ impl Registry {
         let inv = act.spec().validate(inv)?;
         act.run(&inv, progress)
     }
+}
+
+// ===================== assemblies (a resolved, loadable model) =====================
+
+/// A resolved set of on-disk components that together form one loadable
+/// model - the output of `crates/modelstore`'s resolver, and what a
+/// model crate's loader is finally handed.
+///
+/// Lives here (not in `modelstore`, which sits below `capability` in the
+/// dependency graph) because every model crate with a `caps.rs` already
+/// depends on `brain-capability` to advertise its [`Manifest`] - an
+/// `Assembly` is what a caps module receives before it can build one, so
+/// putting it here adds zero new dependency edges for any of them.
+#[derive(Clone, Debug)]
+pub struct Assembly {
+    /// The id this assembly registers/serves under. A single-repo model
+    /// keeps its upstream `vendor/repo` (`"black-forest-labs/FLUX.2-klein-9B"`);
+    /// an assembly stitched together across vendors (no one upstream repo
+    /// describes the whole thing) uses the reserved `"local/"` vendor
+    /// (`brain_modelref::is_reserved`) - `"local/flux2-klein-9b"`.
+    pub id: String,
+    /// Matches a [`brain_arch`]-style `Arch::id`.
+    pub arch: String,
+    pub variant: Option<String>,
+    /// Role name (`"dit"`, `"vae"`, `"text_encoder"`, …) to the file or
+    /// directory that role's loader accepts, verbatim - no further
+    /// resolution needed by the loader.
+    pub roles: BTreeMap<String, std::path::PathBuf>,
+    /// Human-readable lines describing where each component came from,
+    /// printed before any load (e.g. `"dit: unsloth/flux-2-klein-9b-Q8_0.gguf
+    /// (vendor-flat, Q8_0)"`).
+    pub provenance: Vec<String>,
 }
 
 #[cfg(test)]
@@ -905,5 +937,24 @@ mod tests {
         // unknown model / action
         assert!(reg.run("nope", "echo", Invocation::new(), &mut |_| {}).is_err());
         assert!(reg.run("echo-model", "nope", Invocation::new(), &mut |_| {}).is_err());
+    }
+
+    #[test]
+    fn assembly_carries_its_fields_back_unchanged() {
+        let mut roles = BTreeMap::new();
+        roles.insert("dit".to_string(), std::path::PathBuf::from("/models/unsloth/flux-2-klein-9b-Q8_0.gguf"));
+        roles.insert("vae".to_string(), std::path::PathBuf::from("/models/unsloth/flux2-vae.safetensors"));
+        let assembly = Assembly {
+            id: "local/flux2-klein-9b".to_string(),
+            arch: "flux2".to_string(),
+            variant: Some("klein-9b".to_string()),
+            roles: roles.clone(),
+            provenance: vec!["dit: unsloth/flux-2-klein-9b-Q8_0.gguf (vendor-flat, Q8_0)".to_string()],
+        };
+        assert_eq!(assembly.id, "local/flux2-klein-9b");
+        assert_eq!(assembly.arch, "flux2");
+        assert_eq!(assembly.variant.as_deref(), Some("klein-9b"));
+        assert_eq!(assembly.roles, roles);
+        assert_eq!(assembly.provenance.len(), 1);
     }
 }
