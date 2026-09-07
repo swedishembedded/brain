@@ -302,6 +302,16 @@ const MAX_COMPONENT_DEPTH: u32 = 3;
 fn walk_repo_dir(dir: &Path, scan_root: &Path, cache: &BTreeMap<PathBuf, CacheEntry>, probed: &mut dyn FnMut(&Path), out: &mut Vec<ArtifactRecord>, depth: u32) {
     if let Some(record) = hfdir_record(dir, scan_root, cache, probed) {
         out.push(record);
+        // The directory collapsed to one record for its WEIGHTS, but a
+        // `tokenizer.json` sitting right beside `config.json` in that same
+        // directory is a role of its own (an architecture's text-encoder
+        // role and its tokenizer role are ordinarily two different roles of
+        // the SAME checkpoint) - it must still be independently
+        // discoverable rather than disappearing into the one HfDir record.
+        let tok = dir.join("tokenizer.json");
+        if tok.is_file() {
+            push_file_record(&tok, scan_root, ArtifactKind::TokenizerJson, cache, probed, out);
+        }
         return;
     }
     if depth > MAX_COMPONENT_DEPTH {
@@ -559,6 +569,29 @@ mod tests {
         assert_eq!(found[0].kind, ArtifactKind::HfDir);
         assert_eq!(found[0].path, dir);
         assert_eq!(found[0].completeness, Completeness::Complete);
+    }
+
+    /// Real bug, found by actually running the resolver against a real
+    /// store: an HF checkpoint directory that collapses to one `HfDir`
+    /// record returned immediately, before ever walking its own files -- so
+    /// a `tokenizer.json` sitting right next to `config.json` in that same
+    /// directory never became a record of its own, and a role that wants
+    /// "this checkpoint's weights" and a role that wants "this checkpoint's
+    /// tokenizer" (two different roles of the same architecture, the
+    /// ordinary case) could never both resolve to the one real repo.
+    #[test]
+    fn a_tokenizer_co_located_with_a_collapsed_hfdir_is_still_its_own_record() {
+        let root = scratch_root("hfdir-with-tokenizer");
+        let dir = root.join("Qwen").join("Qwen3-8B");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.json"), b"{}").unwrap();
+        tiny_safetensors(&dir.join("model.safetensors"));
+        std::fs::write(dir.join("tokenizer.json"), b"{}").unwrap();
+
+        let found = scan(&root);
+        assert_eq!(found.iter().filter(|r| r.kind == ArtifactKind::HfDir).count(), 1, "{found:?}");
+        let tok = found.iter().find(|r| r.kind == ArtifactKind::TokenizerJson).unwrap_or_else(|| panic!("no TokenizerJson record, got {found:?}"));
+        assert_eq!(tok.path, dir.join("tokenizer.json"));
     }
 
     #[test]
