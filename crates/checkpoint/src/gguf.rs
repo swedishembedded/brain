@@ -791,6 +791,33 @@ fn parse_header(bytes: &[u8]) -> Result<Header, String> {
     Ok((kv, infos, data_start))
 }
 
+/// The byte offset a GGUF file's declared tensor data must extend to,
+/// computed from the header alone: `data_start` plus the furthest tensor's
+/// `offset + on-disk length`. Never touches a tensor's own bytes - only the
+/// mapping's leading pages (magic, KV, tensor infos) are faulted in, exactly
+/// like [`MmapGguf::open`]'s own header-only read.
+///
+/// Deliberately does not use [`MmapGguf::open`]: that constructor bounds-
+/// checks every tensor against the mapped length and *fails* the moment one
+/// doesn't fit, which is right for a loader but wrong for detecting a
+/// truncated file - the caller here needs the two numbers (declared vs.
+/// actual), not an error that discards them.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn declared_data_extent(path: &str) -> Result<u64, String> {
+    let file = std::fs::File::open(path).map_err(|e| format!("gguf: open {path}: {e}"))?;
+    // SAFETY: same immutable-for-the-mapping's-lifetime contract every other
+    // mmap in this crate relies on.
+    let mmap = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| format!("gguf: mmap {path}: {e}"))?;
+    let (_, infos, data_start) = parse_header(&mmap)?;
+    let mut extent = data_start as u64;
+    for info in &infos {
+        let numel: usize = info.shape.iter().product();
+        let nbytes = tensor_nbytes(info.ty, numel).ok_or_else(|| format!("gguf: {} unknown type {}", info.name, info.ty))?;
+        extent = extent.max(data_start as u64 + info.offset + nbytes as u64);
+    }
+    Ok(extent)
+}
+
 /// Validate a split GGUF's parts agree with each other and with the file set
 /// [`MmapGguf::open`] actually found on disk, before a single tensor byte is
 /// read. `part_paths`/`part_kv`/`part_infos` are one entry per part, in
@@ -3308,5 +3335,31 @@ mod tests {
             assert_eq!(got.unwrap().len(), numel);
             std::fs::remove_file(&path).ok();
         }
+    }
+
+    /// `declared_data_extent` must report the same extent whether or not the
+    /// tensor bytes it describes actually exist on disk - proof it parses
+    /// only the header. Truncating to exactly the data-start boundary leaves
+    /// zero tensor bytes in the file at all, so an unchanged, correct answer
+    /// is only possible without reading past the header.
+    #[test]
+    fn declared_data_extent_matches_a_whole_file_and_survives_truncation_to_the_header_boundary() {
+        let raw: Vec<u8> = (0..16i32).flat_map(|i| (i as f32).to_le_bytes()).collect();
+        let path = std::env::temp_dir().join(format!("brain-gguf-extent-{}.gguf", std::process::id()));
+        let path = path.to_str().unwrap().to_string();
+        crate::gguf_write::write(&path, &[], &[crate::gguf_write::TensorOut { name: "w".to_string(), shape: vec![16], ty: T_F32, data: raw }], 32).unwrap();
+
+        let actual = std::fs::metadata(&path).unwrap().len();
+        let declared = declared_data_extent(&path).unwrap();
+        assert_eq!(declared, actual, "an intact file's declared extent must equal its real size");
+
+        let data_start = declared - 16 * 4; // one F32 tensor of 16 elements: 4 bytes/elem
+        let f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        f.set_len(data_start).unwrap();
+        drop(f);
+        let declared_after_truncation = declared_data_extent(&path).unwrap();
+        assert_eq!(declared_after_truncation, declared, "header-only truncation must not change the computed extent");
+
+        std::fs::remove_file(&path).ok();
     }
 }

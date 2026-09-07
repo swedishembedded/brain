@@ -431,6 +431,36 @@ pub fn read_card(path: &str) -> io::Result<Option<ModelCard>> {
     Ok(ModelCard::from_metadata(&read_metadata(path)?))
 }
 
+/// The byte offset a safetensors file's declared tensor data must extend to:
+/// the `[8-byte len][JSON header]` prefix plus the furthest tensor's
+/// `data_offsets[1]` (offsets are relative to the end of the header, per the
+/// safetensors format). Reads only the length prefix and header JSON via
+/// `read_exact` - never touches a tensor's own bytes - so it stays cheap even
+/// on a multi-gigabyte file and, unlike opening the file as a full
+/// [`crate::mmap::MmapSafetensors`], succeeds on a file truncated partway
+/// through the tensor blob (the case this exists to detect).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn declared_data_extent(path: &str) -> io::Result<u64> {
+    let mut file = std::fs::File::open(path)?;
+    let mut len_bytes = [0u8; 8];
+    file.read_exact(&mut len_bytes)?;
+    let hlen = u64::from_le_bytes(len_bytes);
+    let mut hbytes = vec![0u8; hlen as usize];
+    file.read_exact(&mut hbytes)?;
+    let header: Value = serde_json::from_slice(&hbytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let obj = header.as_object().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "st: header not an object"))?;
+    let mut max_end: u64 = 0;
+    for (name, meta) in obj {
+        if name == "__metadata__" {
+            continue;
+        }
+        if let Some(end) = meta.get("data_offsets").and_then(|o| o.as_array()).and_then(|a| a.get(1)).and_then(|v| v.as_u64()) {
+            max_end = max_end.max(end);
+        }
+    }
+    Ok(8 + hlen + max_end)
+}
+
 /// Sum tensor element counts from a safetensors header without loading tensors.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn param_count_from_header(path: &str) -> io::Result<u64> {
@@ -651,5 +681,29 @@ mod tests {
         let m = parse_safetensors(&bytes).unwrap();
         assert_eq!(m.tensors["a"], vec![1.0, -2.5]);
         assert_eq!(m.tensors["b"], vec![1.0, -4.0]);
+    }
+
+    /// `declared_data_extent` must report the same extent whether or not the
+    /// tensor bytes it describes still exist on disk - proof it reads only
+    /// the `[len][json]` header, never the blob. Truncating right at the
+    /// header boundary leaves zero tensor bytes in the file at all, so an
+    /// unchanged, correct answer is only possible without reading past it.
+    #[test]
+    fn declared_data_extent_matches_a_whole_file_and_survives_truncation_to_the_header_boundary() {
+        let path = scratch("extent");
+        save_safetensors(&path, &[("w".to_string(), vec![4], vec![1.0, 2.0, 3.0, 4.0])], &serde_json::json!({}), None).unwrap();
+
+        let actual = std::fs::metadata(&path).unwrap().len();
+        let declared = declared_data_extent(&path).unwrap();
+        assert_eq!(declared, actual, "an intact file's declared extent must equal its real size");
+
+        let data_start = declared - 4 * 4; // one F32 tensor of 4 elements: 4 bytes/elem
+        let f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        f.set_len(data_start).unwrap();
+        drop(f);
+        let declared_after_truncation = declared_data_extent(&path).unwrap();
+        assert_eq!(declared_after_truncation, declared, "header-only truncation must not change the computed extent");
+
+        std::fs::remove_file(&path).ok();
     }
 }
