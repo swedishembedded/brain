@@ -142,7 +142,11 @@ prose - settle each from the Apache-2.0 diffusers source once installed
       pull` only - `default_ref: None` still blocks auto-fetch; the
       `crates/cli/src/supply.rs::convert`-side manifest write for this
       recipe id is a recorded gap below)
-- [ ] Phase 3 - Qwen3-VL `encode_hidden`/`encode_hiddens` extension
+- [x] Phase 3 - Qwen3-VL `encode_hidden`/`encode_hiddens` extension (text-only
+      and `_with_image` twins; found and documented a real landmine along
+      the way - `enable_mm_splice`'s row range is positional and
+      unconditional per forward once baked in at construction, so the
+      text-only path is only safe on an `n_visual=0` instance)
 - [ ] Phase 4 - audio VAE port + real-weight parity (first real milestone)
 - [ ] Phase 5 - H3 DiT core, tiny-config -> real-weight parity ladder
 - [ ] Phase 6 - video VAE (gated on `video_vae/` download)
