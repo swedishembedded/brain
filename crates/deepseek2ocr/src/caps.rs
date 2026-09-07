@@ -79,11 +79,6 @@ use crate::prompt::{self, Prompt};
 /// one's do not: it is exactly the `ggml-org/DeepSeek-OCR-GGUF` pair or nothing.
 pub const MODEL: &str = "deepseek-ai/DeepSeek-OCR";
 
-/// `$BRAIN_DEEPSEEK_OCR_DIR` - the directory holding BOTH shipped GGUFs. One
-/// variable for a multi-file checkpoint, matching `BRAIN_ARCFACE_DIR` /
-/// `BRAIN_CLIP_DIR`.
-pub const DIR_VAR: &str = "BRAIN_DEEPSEEK_OCR_DIR";
-
 /// The instruction the reference model ships with, and the one
 /// `tests/prompt_real.rs` pinned against the real tokenizer. Used when a request
 /// carries neither `messages` nor `prompt`.
@@ -136,11 +131,6 @@ pub const SEQ_LEN: u32 = 512;
 /// `max_new` cannot exceed ~229 here whatever a caller asks for.
 pub const DEFAULT_MAX_NEW: i64 = 128;
 
-/// `$BRAIN_DEEPSEEK_OCR_DIR`, or empty.
-fn default_dir() -> String {
-    std::env::var(DIR_VAR).unwrap_or_default()
-}
-
 pub fn generate_spec() -> ActionSpec {
     ActionSpec::new(
         "generate",
@@ -160,8 +150,12 @@ pub fn generate_spec() -> ActionSpec {
     )
     .param(ParamSpec::new("max_new", ParamType::Int, "max tokens to generate").default(json!(DEFAULT_MAX_NEW)))
     .param(
-        ParamSpec::new("weights", ParamType::Str, "checkpoint DIRECTORY holding both DeepSeek-OCR GGUFs (mmproj + LM)")
-            .host_env(DIR_VAR),
+        ParamSpec::new(
+            "weights",
+            ParamType::Str,
+            "checkpoint DIRECTORY holding both DeepSeek-OCR GGUFs (mmproj + LM); overrides the model-store resolver's own pick when set",
+        )
+        .host_resolved(),
     )
     .input(BlobSpec::new("image", Media::Image, "raw HWC f32 pixels in [0,1], meta {w,h} (capability::blob's wire convention)").required())
     .output(BlobSpec::new("text", Media::Text, "the decoded document text"))
@@ -178,7 +172,8 @@ pub fn manifest() -> Manifest {
 }
 
 /// The manifest for the RESIDENT/scheduled service (D-Bus, executor, HTTP):
-/// the checkpoint directory is service-side configuration ([`DIR_VAR`]), so
+/// the checkpoint directory is service-side configuration (resolved through
+/// the model store, see `crate::spec::Deepseek2ocrSpec`), so
 /// the served action carries only real per-request parameters - see
 /// `glmdsa::caps::manifest_resident`'s doc for why a static, CLI-facing
 /// manifest and a stripped resident one are two different things, not one
@@ -376,15 +371,11 @@ pub struct DeepseekOcrProvider {
 }
 
 impl DeepseekOcrProvider {
-    /// `None` when `$BRAIN_DEEPSEEK_OCR_DIR` is unset or does not hold both
-    /// shipped GGUFs - advertising a model whose every call would fail is worse
-    /// than not advertising it.
-    pub fn from_env() -> Option<DeepseekOcrProvider> {
-        Self::new(default_dir())
-    }
-
-    /// Direct constructor (no env round-trip), for a caller that already has the
-    /// path - the same seam every imaging resident exposes.
+    /// `None` when `dir` is empty or does not hold both shipped GGUFs -
+    /// advertising a model whose every call would fail is worse than not
+    /// advertising it. `crates/cli/src/catalog.rs` builds `dir` from a
+    /// resolved [`capability::Assembly`] (`crate::spec::Deepseek2ocrSpec`'s
+    /// `dir` role) rather than an env var.
     pub fn new(dir: impl Into<String>) -> Option<DeepseekOcrProvider> {
         let dir = dir.into();
         if dir.is_empty() {
@@ -426,7 +417,7 @@ impl Action for GenerateAction {
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         let dir = inv.get_str("weights").filter(|s| !s.is_empty()).unwrap_or_else(|| self.dir.clone());
         if dir.is_empty() {
-            return Err(format!("deepseek-ocr generate: no checkpoint directory (set 'weights' or ${DIR_VAR})"));
+            return Err("deepseek-ocr generate: no checkpoint directory (pass 'weights', or configure one through the models directory)".to_string());
         }
         let mut guard = RESIDENT.lock().map_err(|_| "deepseek-ocr: resident lock poisoned")?;
         if !matches!(&*guard, Some(s) if s.dir == dir) {

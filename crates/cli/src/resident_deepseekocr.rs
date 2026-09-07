@@ -63,7 +63,7 @@
 //! here is a performance phase of its own, not a wrapper this file could write.
 
 use capability::{ActionResult, Invocation, Manifest, Progress};
-use deepseek2ocr::caps::{Session, DIR_VAR, MODEL};
+use deepseek2ocr::caps::{Session, MODEL};
 use residency::multi::{MultiDeviceCost, MultiDeviceResidentModel};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 
@@ -108,10 +108,10 @@ pub const COMPOSITE_PEAK_BYTES: u64 = 22u64 << 30;
 /// would be better, and replacing both constants with one is open work.
 pub const HOST_BYTES_SPLIT: u64 = COMPOSITE_PEAK_BYTES - VISION_DEVICE_BYTES;
 
-/// DeepSeek-OCR behind the scheduler. `BRAIN_DEEPSEEK_OCR_DIR` names the
-/// directory holding BOTH shipped GGUFs (`mmproj-DeepSeek-OCR-Q8_0.gguf` and
-/// `DeepSeek-OCR-Q8_0.gguf`) - one variable for a multi-file checkpoint, the
-/// same convention as `BRAIN_ARCFACE_DIR` and `BRAIN_CLIP_DIR`.
+/// DeepSeek-OCR behind the scheduler. `dir` names the directory holding BOTH
+/// shipped GGUFs (`mmproj-DeepSeek-OCR-Q8_0.gguf` and `DeepSeek-OCR-Q8_0.gguf`),
+/// resolved through `deepseek2ocr::spec::Deepseek2ocrSpec`'s `dir` role (see
+/// [`Self::from_assembly`]).
 pub struct DeepseekOcrResident {
     dir: String,
     /// The canonical card the vision tower is placed on, or `None` when the
@@ -120,16 +120,17 @@ pub struct DeepseekOcrResident {
 }
 
 impl DeepseekOcrResident {
-    /// `None` when the variable is unset or the directory does not hold both
-    /// files - registering a model whose every call would fail is worse than
-    /// not serving it.
-    ///
-    /// `gpus` is `build_executor`'s own budgeted `(index, TOTAL bytes)` list and
-    /// `reserved` its per-card headroom, so the card this picks is chosen
-    /// against genuinely usable capacity - the same figure the scheduler
-    /// budgets against.
-    pub fn from_env(gpus: &[(u32, u64)], reserved: u64) -> Option<DeepseekOcrResident> {
-        let dir = std::env::var(DIR_VAR).ok().filter(|p| !p.is_empty())?;
+    /// The [`catalog::MultiCtor`] shape: `dir` comes from an already-resolved
+    /// [`capability::Assembly`] (`deepseek2ocr::spec::Deepseek2ocrSpec`'s
+    /// `dir` role - see that module's doc) instead of `BRAIN_DEEPSEEK_OCR_DIR`.
+    pub fn from_assembly(assembly: &capability::Assembly, gpus: &[(u32, u64)], reserved: u64) -> Option<DeepseekOcrResident> {
+        let dir = match deepseek2ocr::spec::dir_from_assembly(assembly) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("brain: deepseek-ocr not served ({e})");
+                return None;
+            }
+        };
         Self::new(dir, gpus, reserved)
     }
 

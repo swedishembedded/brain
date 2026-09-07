@@ -41,6 +41,7 @@ brain-capability.workspace = true
 # "strip a trailing replacement char, emit the suffix". Nothing else of
 # `crates/qwen3` is used here.
 brain-qwen3.workspace = true
+brain-modelstore.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]

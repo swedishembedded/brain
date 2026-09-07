@@ -60,11 +60,15 @@ use, no env var needed:
 <dir>/DeepSeek-OCR-Q8_0.gguf            3.1 GB   the decoder, and the tokenizer
 ```
 
-To point at a checkpoint you already have, set `BRAIN_DEEPSEEK_OCR_DIR` at
-the directory holding **both** files yourself. If either is missing the
-model does not register at all - `brain caps` still lists it (the manifest
-is weights-free) but the CLI and `brain serve` say which file is missing
-rather than failing mid-request.
+A directory holding **both** files anywhere under the models directory is
+discovered automatically, resolved through
+`deepseek2ocr::spec::Deepseek2ocrSpec` (real header content: the LM GGUF's
+own `general.architecture == "deepseek2-ocr"`, paired with a sibling vision
+GGUF declaring `general.architecture == "clip"` and `clip.projector_type ==
+"deepseekocr"` - never by filename). If either is missing the model does not
+register at all - `brain caps` still lists it (the manifest is weights-free)
+but the CLI and `brain serve` say which file is missing rather than failing
+mid-request. `weights` still names a directory outright, per request.
 
 On first use brain writes one derived file beside them:
 
@@ -86,10 +90,9 @@ There is no dedicated `brain deepseekocr` verb - one generic action,
 ```bash
 brain caps deepseek-ai/DeepSeek-OCR
 
-BRAIN_DEEPSEEK_OCR_DIR=<dir> \
-  brain deepseek2ocr generate \
-    --prompt "<|grounding|>Convert the document to markdown." \
-    --max_new 10 --in image=page.ppm --json
+brain deepseek2ocr generate \
+  --prompt "<|grounding|>Convert the document to markdown." \
+  --max_new 10 --in image=page.ppm --json
 ```
 
 ```json
@@ -109,9 +112,8 @@ an image attached and streams the decoded text back token by token, with real
 `prompt_tokens` / `completion_tokens` / `finish_reason`.
 
 ```bash
-BRAIN_DEEPSEEK_OCR_DIR=<dir> \
-  dbus-run-session -- bash -c 'brain serve --dbus & sleep 5
-    python3 examples/vision/deepseek-ocr/ocr_document.py --image page.ppm --max-new 8'
+dbus-run-session -- bash -c 'brain serve --dbus & sleep 5
+  python3 examples/vision/deepseek-ocr/ocr_document.py --image page.ppm --max-new 8'
 ```
 
 Reference client: [`examples/vision/deepseek-ocr/`](../../examples/vision/deepseek-ocr/README.md).
@@ -123,7 +125,7 @@ Reference client: [`examples/vision/deepseek-ocr/`](../../examples/vision/deepse
 | `prompt` | the instruction after the image. Default `<\|grounding\|>Convert the document to markdown.` - the reference model's own prompt |
 | `messages` | flattened chat messages (JSON array string); the last user turn becomes the instruction |
 | `max_new` | tokens to generate, default 32. **Every token is a full recompute** - see below |
-| `weights` | override `BRAIN_DEEPSEEK_OCR_DIR` for one request |
+| `weights` | override the model-store resolver's own pick for one request |
 
 The reserved markers are ordinary text in the instruction and are tokenized
 atomically: `<|grounding|>` turns on grounding mode (the model then emits

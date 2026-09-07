@@ -136,6 +136,9 @@ pub mod preprocess;
 pub mod prompt;
 pub mod rows;
 pub mod train;
+/// [`brain_modelstore::resolve::ArchSpec`] - which on-disk checkpoint
+/// directory satisfies this model's `dir` role (the mmproj + LM GGUF pair).
+pub mod spec;
 
 pub use config::DeepseekOcrConfig;
 pub use encoder::{DeepEncoder, GLUE_PIPELINES};
