@@ -105,7 +105,11 @@ use std::sync::{Arc, Mutex};
 use capability::{Action, ActionResult, Invocation, Outcome, Progress, Provider};
 
 /// Decoded generation request: the variant config + name, [`GenOpts`], and an
-/// optional LoRA adapter path. Validates sizes (/16) and the 9B license gate.
+/// optional LoRA adapter path. Validates sizes (/16); does NOT gate the 9B
+/// license - this decodes a bare `Invocation`, with no weight file to sniff,
+/// so its `variant`/`cfg` are the caller's STATED request only. A caller with
+/// real weights in hand (a `paths.dit`) must run [`bind_variant`] against them
+/// and gate on the result - see that function's doc.
 pub struct GenParams {
     pub cfg: Flux2Config,
     pub variant: String,
@@ -115,11 +119,11 @@ pub struct GenParams {
     pub precision: crate::Precision,
 }
 
-/// Decode + validate the shared generation params from an invocation.
+/// Decode + validate the shared generation params from an invocation. Does
+/// NOT license-gate - see [`GenParams`]'s doc.
 pub fn gen_params_from(inv: &Invocation) -> Result<GenParams, String> {
     let variant = inv.get_str("variant").unwrap_or_else(|| "klein-4b".into());
     let cfg = Flux2Config::from_name(&variant)?;
-    check_license(&variant)?;
     let precision = crate::Precision::from_name(
         &inv.get_str("precision").unwrap_or_else(|| "fp32".into()),
     )?;
@@ -164,9 +168,36 @@ pub fn gen_params_from(inv: &Invocation) -> Result<GenParams, String> {
     Ok(GenParams { cfg, variant, adapter, opts, precision })
 }
 
+/// Combine a caller-STATED variant's klein/base FAMILY with the DiT at
+/// `dit_path`'s ACTUAL, sniffed size ([`crate::sniff_dit_size`]), so the
+/// returned variant string always names the real weights - the size half of a
+/// request's `variant` is a claim, never a fact, and must not be trusted
+/// as-is. This is what every [`check_license`] call site not already holding
+/// a resident's own bound identity (`crates/cli/src/resident_flux2.rs`) must
+/// run its variant through FIRST: a real 9B checkpoint requested/labeled
+/// "klein-4b" still comes back "klein-9b" here, so the license gate sees the
+/// truth regardless of the mislabel.
+///
+/// Errors if `requested`'s family half is not `klein`/`base`, or if
+/// `dit_path`'s own shapes match neither known size.
+pub fn bind_variant(dit_path: &str, requested: &str) -> Result<String, String> {
+    let family = requested.strip_suffix("-4b").or_else(|| requested.strip_suffix("-9b")).unwrap_or(requested);
+    if family != "klein" && family != "base" {
+        return Err(format!("flux2: unknown variant '{requested}' (klein-4b|klein-9b|base-4b|base-9b)"));
+    }
+    let size = crate::sniff_dit_size(dit_path)?;
+    Ok(format!("{family}-{}", size.as_str()))
+}
+
 /// The 9B weights are released under the FLUX.2 \[Non-Commercial\] License —
 /// refuse them unless the operator opted in, and print the attribution notice
 /// once per process when enabled.
+///
+/// `variant` must be a TRUSTED variant string - a resident's own bound
+/// identity, or the result of [`bind_variant`] - never a raw, caller-supplied
+/// one: this function itself has no weights to check the claim against, so
+/// passing it an unverified string reopens exactly the hole `bind_variant`
+/// closes.
 pub fn check_license(variant: &str) -> Result<(), String> {
     if !variant.ends_with("9b") {
         return Ok(());
@@ -247,7 +278,11 @@ pub fn image_outcome(rgb: &[u8], w: u32, h: u32) -> Outcome {
 pub fn train_action(paths: &Paths, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
     let dir = inv.get_str("data").ok_or("lora_train: 'data' folder is required")?;
     let save = inv.get_str("save").ok_or("lora_train: 'save' path is required")?;
-    let variant = inv.get_str("variant").unwrap_or_else(|| "klein-4b".into());
+    let requested = inv.get_str("variant").unwrap_or_else(|| "klein-4b".into());
+    // Bound against `paths.dit`'s own shapes, not trusted as stated - see
+    // `bind_variant`'s doc: this is the ONE place a served `lora_train`
+    // decides which weights it is actually about to train against.
+    let variant = bind_variant(&paths.dit, &requested)?;
     let cfg = Flux2Config::from_name(&variant)?;
     check_license(&variant)?;
     let opts = crate::finetune::TrainOpts {
@@ -332,29 +367,32 @@ impl Action for Flux2Action {
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         match self.name.as_str() {
             "text2image" | "edit" => {
-                // Params (incl. the 9B license gate) before the weights-env
-                // check — a licensing refusal must not hide behind "not set".
+                // Params before the weights-env check - a missing/malformed
+                // request must not hide behind "not set". The license gate
+                // itself needs `paths` (it checks the REAL weights' sniffed
+                // size, not the request's claim - see `bind_variant`), so it
+                // runs right after paths resolve, still before any weight is
+                // actually loaded.
                 let p = gen_params_from(inv)?;
                 let paths = Paths::from_env()?;
+                let variant = bind_variant(&paths.dit, &p.variant)?;
+                check_license(&variant)?;
+                let cfg = Flux2Config::from_name(&variant)?;
                 let refs = refs_from(inv, self.name == "edit")?;
                 let n_gen = (p.opts.height / 16) * (p.opts.width / 16);
                 let n_ref = ref_tokens(&refs, &p.opts);
-                let key: HotKey = (p.variant.clone(), p.precision.name(), p.opts.width, p.opts.height, n_ref, p.adapter.clone());
+                let key: HotKey = (variant, p.precision.name(), p.opts.width, p.opts.height, n_ref, p.adapter.clone());
 
                 let mut guard = self.hot.lock().map_err(|_| "hot pipeline lock poisoned")?;
                 if !matches!(&*guard, Some((k, _)) if *k == key) {
                     *guard = None; // free the old resident weights before building new
                     progress(Progress::step(0, 1, "loading weights (first call for this variant/size)"));
-                    let pipe = Pipeline::build_sized(&p.cfg, &paths, n_gen + n_ref, n_gen, p.adapter.as_ref(), p.precision, 1)?;
+                    let pipe = Pipeline::build_sized(&cfg, &paths, n_gen + n_ref, n_gen, p.adapter.as_ref(), p.precision, 1)?;
                     *guard = Some((key, pipe));
                 }
                 generate_on(&guard.as_ref().unwrap().1, inv, &refs, &p.opts, progress)
             }
-            "lora_train" => {
-                let variant = inv.get_str("variant").unwrap_or_else(|| "klein-4b".into());
-                check_license(&variant)?;
-                train_action(&Paths::from_env()?, inv, progress)
-            }
+            "lora_train" => train_action(&Paths::from_env()?, inv, progress),
             other => Err(format!("flux2-klein '{other}': unknown action")),
         }
     }
@@ -425,5 +463,66 @@ mod tests {
         }
         assert!(check_license("klein-4b").is_ok());
         assert!(check_license("base-4b").is_ok());
+    }
+
+    /// A minimal single-file safetensors fixture carrying only the five
+    /// tensors `flux2::sniff_dit_size` reads, at real `cfg` dimensions - `U8`
+    /// content of all zeros (the sniff never decodes a value, only the
+    /// header's declared shapes). Mirrors `import`'s own test fixture.
+    fn write_fake_dit(cfg: &Flux2Config, tag: &str) -> std::path::PathBuf {
+        let entries = [
+            ("img_in.weight".to_string(), vec![cfg.hidden, cfg.in_channels]),
+            ("txt_in.weight".to_string(), vec![cfg.hidden, cfg.context_in_dim]),
+            ("double_blocks.0.img_attn.norm.query_norm.scale".to_string(), vec![cfg.head_dim()]),
+            (format!("double_blocks.{}.marker", cfg.depth_double - 1), vec![1]),
+            (format!("single_blocks.{}.marker", cfg.depth_single - 1), vec![1]),
+        ];
+        let mut header = serde_json::Map::new();
+        let mut blob: Vec<u8> = Vec::new();
+        for (name, shape) in &entries {
+            let n: usize = shape.iter().product();
+            let start = blob.len();
+            blob.resize(start + n, 0u8);
+            header.insert(name.clone(), json!({"dtype": "U8", "shape": shape, "data_offsets": [start, blob.len()]}));
+        }
+        let mut hbytes = serde_json::to_vec(&serde_json::Value::Object(header)).unwrap();
+        hbytes.resize(hbytes.len().next_multiple_of(8), b' ');
+        let mut file = (hbytes.len() as u64).to_le_bytes().to_vec();
+        file.extend_from_slice(&hbytes);
+        file.extend_from_slice(&blob);
+        static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("brain-flux2-caps-dit-{tag}-{}-{n}.safetensors", std::process::id()));
+        std::fs::write(&path, &file).unwrap();
+        path
+    }
+
+    /// THE regression test for the compliance hole: a real 9B-shaped
+    /// checkpoint, requested/labeled "klein-4b" (the mislabel that used to
+    /// skip the NC gate entirely, since the old `check_license` trusted the
+    /// string verbatim), must still be recognized as 9B and refused.
+    /// `bind_variant` is what closes it - it never guesses, only sniffs.
+    #[test]
+    fn a_mislabeled_9b_checkpoint_is_still_license_gated() {
+        let path = write_fake_dit(&Flux2Config::klein_9b(), "mislabel");
+        let bound = bind_variant(path.to_str().unwrap(), "klein-4b").expect("a real 9B checkpoint must sniff cleanly");
+        assert_eq!(bound, "klein-9b", "the mislabel must not survive binding");
+        if std::env::var("BRAIN_FLUX2_ALLOW_NC").ok().as_deref() != Some("1") {
+            let err = check_license(&bound).unwrap_err();
+            assert!(err.contains("Non-Commercial"), "{err}");
+            assert!(err.contains("BRAIN_FLUX2_ALLOW_NC"), "{err}");
+        }
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// `bind_variant` keeps the caller's stated FAMILY (klein vs base is not
+    /// sniffable) while overriding only the SIZE half from the real weights.
+    #[test]
+    fn bind_variant_keeps_the_stated_family_but_sniffs_the_size() {
+        let path = write_fake_dit(&Flux2Config::klein_4b(), "family");
+        assert_eq!(bind_variant(path.to_str().unwrap(), "base-9b").unwrap(), "base-4b");
+        assert_eq!(bind_variant(path.to_str().unwrap(), "klein-4b").unwrap(), "klein-4b");
+        assert!(bind_variant(path.to_str().unwrap(), "not-a-family").is_err());
+        std::fs::remove_file(&path).ok();
     }
 }

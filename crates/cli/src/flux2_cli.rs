@@ -232,8 +232,6 @@ fn generate(args: &[String]) -> Result<(), String> {
     }
     let prompt = prompt.ok_or("--prompt is required")?;
     let out = out.ok_or("--out is required")?;
-    let variant = Flux2Config::from_name(&variant_name)?;
-    flux2::caps::check_license(&variant_name)?; // 9B = FLUX Non-Commercial license
 
     // load refs as [-1,1] CHW, center-cropped to /16 (shared helper - the
     // capability provider uses the same one), optionally downscaled first so
@@ -289,6 +287,14 @@ fn generate(args: &[String]) -> Result<(), String> {
     if let Some(te) = text_encoder {
         paths.te = te;
     }
+    // Bound against the DiT's own shapes, not trusted as `--variant` stated
+    // it - a real 9B checkpoint run with `--variant klein-4b` (the default!)
+    // must still be recognized as 9B and license-gated (see `bind_variant`'s
+    // doc). `variant_name` is reassigned to the bound truth so every message
+    // below prints what is actually running, not the caller's claim.
+    variant_name = flux2::caps::bind_variant(&paths.dit, &variant_name)?;
+    flux2::caps::check_license(&variant_name)?; // 9B = FLUX Non-Commercial license
+    let variant = Flux2Config::from_name(&variant_name)?;
     // Q8_0 GGUF is not an fp32 checkpoint with an optional output tier: the
     // FLUX.2 constructor consumes it through its packed DP4A representation.
     // Omitted `--precision` therefore follows the source; an explicit fp32
@@ -465,8 +471,6 @@ fn finetune(args: &[String]) -> Result<(), String> {
     if opts.rank == 0 || opts.steps == 0 {
         return Err("--rank and --steps must both be at least 1".into());
     }
-    let cfg = Flux2Config::from_name(&variant_name)?;
-    flux2::caps::check_license(&variant_name)?; // 9B = FLUX Non-Commercial license
     let mut paths = Paths::from_env()?;
     // Training and generation must be able to name the SAME encoder: an
     // adapter learns against the conditioning it was shown, so training on one
@@ -474,6 +478,12 @@ fn finetune(args: &[String]) -> Result<(), String> {
     if let Some(te) = ft_text_encoder {
         paths.te = te;
     }
+    // Bound against the frozen base's own shapes, not trusted as `--variant`
+    // stated it - see `bind_variant`'s doc. `variant_name` is reassigned to
+    // the bound truth so the log line below names what is actually training.
+    variant_name = flux2::caps::bind_variant(&paths.dit, &variant_name)?;
+    flux2::caps::check_license(&variant_name)?; // 9B = FLUX Non-Commercial license
+    let cfg = Flux2Config::from_name(&variant_name)?;
 
     eprintln!(
         "flux2 finetune: {variant_name} {} trainer, rank {} steps {} size {} lr {} seed {} ckpt-every {}{} -> {}",
