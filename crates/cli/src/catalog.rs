@@ -44,7 +44,7 @@
 
 use std::sync::Arc;
 
-use capability::{Manifest, Provider};
+use capability::{Assembly, Manifest, Provider};
 use catalog::{ModelEntry, ResidentCtor};
 use residency::ResidentModel;
 
@@ -144,22 +144,22 @@ pub fn models() -> Vec<ModelEntry> {
     // direction.
     entries.push(ModelEntry {
         manifest: crate::resident_forecast::chronos2_manifest,
-        provider: || Err("chronos-2 has no direct `brain do` provider yet - serve it (`brain serve --dbus` or an HTTP surface) with BRAIN_CHRONOS2 set".to_string()),
+        provider: |_assembly: &Assembly| Err("chronos-2 has no direct `brain do` provider yet - serve it (`brain serve --dbus` or an HTTP surface) with BRAIN_CHRONOS2 set".to_string()),
         resident: catalog::resident!(crate::resident_forecast::Chronos2Resident::from_env),
     });
     entries.push(ModelEntry {
         manifest: crate::resident_forecast::fincast_manifest,
-        provider: || Err("fincast has no direct `brain do` provider yet - serve it (`brain serve --dbus` or an HTTP surface) with BRAIN_FINCAST set".to_string()),
+        provider: |_assembly: &Assembly| Err("fincast has no direct `brain do` provider yet - serve it (`brain serve --dbus` or an HTTP surface) with BRAIN_FINCAST set".to_string()),
         resident: catalog::resident!(crate::resident_forecast::FincastResident::from_env),
     });
     entries.push(ModelEntry {
         manifest: crate::resident_forecast::kronos_manifest,
-        provider: || Err("kronos has no direct `brain do` provider yet - serve it (`brain serve --dbus` or an HTTP surface) with BRAIN_KRONOS_TOKENIZER + BRAIN_KRONOS_DECODER set".to_string()),
+        provider: |_assembly: &Assembly| Err("kronos has no direct `brain do` provider yet - serve it (`brain serve --dbus` or an HTTP surface) with BRAIN_KRONOS_TOKENIZER + BRAIN_KRONOS_DECODER set".to_string()),
         resident: catalog::resident!(crate::resident_forecast::KronosResident::from_env),
     });
     entries.push(ModelEntry {
         manifest: crate::resident_forecast::timesfm3_manifest,
-        provider: || Err("timesfm3 has no direct `brain do` provider yet - serve it (`brain serve --dbus` or an HTTP surface) with BRAIN_TIMESFM3 set".to_string()),
+        provider: |_assembly: &Assembly| Err("timesfm3 has no direct `brain do` provider yet - serve it (`brain serve --dbus` or an HTTP surface) with BRAIN_TIMESFM3 set".to_string()),
         resident: catalog::resident!(crate::resident_forecast::Timesfm3Resident::from_env),
     });
     // No-weights utility models, listed by `brain caps` but served (over
@@ -183,11 +183,18 @@ pub fn manifests() -> Vec<Manifest> {
     models().into_iter().map(|e| (e.manifest)()).collect()
 }
 
+/// A placeholder [`Assembly`] for a caller that has none - every entry but
+/// flux2's own ignores the argument today (see
+/// `catalog::ModelEntry::provider`'s doc).
+fn empty_assembly() -> Assembly {
+    Assembly { id: String::new(), arch: String::new(), variant: None, roles: Default::default(), provenance: Vec::new() }
+}
+
 /// Build a runnable provider for `model`, or say why not.
 pub fn provider(model: &str) -> Result<Arc<dyn Provider>, String> {
     for e in models() {
         if (e.manifest)().model == model {
-            return (e.provider)();
+            return (e.provider)(&empty_assembly());
         }
     }
     Err(format!("unknown model '{model}' (see `brain caps`)"))
