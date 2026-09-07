@@ -1365,9 +1365,9 @@ pub(crate) mod tests {
     /// `"ZImagePipeline"`).
     #[test]
     fn convert_zimage_refuses_when_model_index_names_a_different_pipeline() {
-        // Pid-suffixed like `seed_wan`'s store name: `std::env::temp_dir()`
-        // is machine-wide, and other worktrees exercising this same track
-        // concurrently could otherwise collide on a bare literal name.
+        // Pid-suffixed: `std::env::temp_dir()` is machine-wide, and other
+        // worktrees exercising this same track concurrently could otherwise
+        // collide on a bare literal name.
         let dir = store(&format!("supply-test-zimage-wrong-class-{}", std::process::id())).root().to_path_buf();
         let repo_dir = dir.join("black-forest-labs").join("FLUX.2-klein-4B");
         for role_dir in ["transformer", "vae", "text_encoder", "tokenizer"] {
@@ -1415,8 +1415,8 @@ pub(crate) mod tests {
             hub.add_file("black-forest-labs", "FLUX.2-klein-4B", "main", f, b"stub".to_vec());
         }
         hub.add_file("black-forest-labs", "FLUX.2-klein-4B", "main", "model_index.json", br#"{"_class_name": "Flux2KleinPipeline"}"#.to_vec());
-        // Pid-suffixed like `seed_wan`'s store name -- see the comment on
-        // that helper for why a bare literal name is not safe here.
+        // Pid-suffixed: a bare literal name is not safe when other worktrees
+        // exercise this same track concurrently against a shared temp dir.
         let dir = store(&format!("supply-test-flux2-compound-{}", std::process::id())).root().to_path_buf();
         let supplier = StoreSupplier::new(Store::new(dir.clone()), Box::new(hub));
         let e = exec();
