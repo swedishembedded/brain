@@ -180,6 +180,105 @@ fn qkv_slot(name: &str) -> Option<(String, usize)> {
     Some((format!("double_blocks.{n}.{stream}_attn.qkv.weight"), slot))
 }
 
+/// The DiT size class recoverable from tensor shapes ALONE: 4B or 9B.
+///
+/// Deliberately does NOT say klein vs base: the two share byte-identical
+/// tensor shapes (they differ only in the sampling recipe -
+/// [`Flux2Config::distilled`]), so no shape-based sniffer can ever recover
+/// that half of a variant name. A caller that needs the klein/base
+/// distinction must state it explicitly; this type exists so nothing
+/// downstream can mistake "sniffed" for "the whole variant".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DitSize {
+    FourB,
+    NineB,
+}
+
+impl DitSize {
+    /// The size-half of a variant name (`"4b"` / `"9b"`), e.g. to build
+    /// `"{family}-{size}"` once a caller has separately stated klein/base.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DitSize::FourB => "4b",
+            DitSize::NineB => "9b",
+        }
+    }
+}
+
+/// Determine a DiT's [`DitSize`] from its tensor names/shapes alone - no
+/// tensor bytes read, so this costs no dequantization and is testable
+/// without a real checkpoint (the same rationale as `wan::import::
+/// dit_config_from_shapes`, which this mirrors).
+///
+/// Reads exactly five numbers, each from where it is actually declared
+/// rather than inferred:
+/// - `hidden` from `img_in.weight`'s output (row) dimension;
+/// - `context_in_dim` from `txt_in.weight`'s input (column) dimension;
+/// - `n_heads` from `double_blocks.0.img_attn.norm.query_norm.scale`'s width
+///   (the QK-norm scale is exactly one head wide) divided into `hidden` -
+///   NEVER from a hidden-size lookup table, which would silently misreport a
+///   nonstandard head count as whatever the common case uses;
+/// - `depth_double`/`depth_single` from the highest `double_blocks.<n>.`/
+///   `single_blocks.<n>.` index actually present, plus one - so a truncated
+///   checkpoint disagrees with a known size by count, not by name.
+///
+/// The five are matched as a TUPLE against [`Flux2Config::klein_4b`]/
+/// [`Flux2Config::klein_9b`]; neither matching is a named error listing both,
+/// never a guess.
+pub fn dit_config_from_shapes(shapes: &[(String, Vec<usize>)]) -> Result<DitSize, String> {
+    let shape_of = |name: &str| shapes.iter().find(|(n, _)| n == name).map(|(_, s)| s.as_slice());
+
+    let hidden = *shape_of("img_in.weight")
+        .ok_or("flux2 dit sniff: no img_in.weight - not a FLUX.2 DiT checkpoint")?
+        .first()
+        .ok_or("flux2 dit sniff: img_in.weight has no dimensions")?;
+    let context_in_dim = *shape_of("txt_in.weight")
+        .ok_or("flux2 dit sniff: no txt_in.weight - not a FLUX.2 DiT checkpoint")?
+        .get(1)
+        .ok_or("flux2 dit sniff: txt_in.weight has fewer than 2 dimensions")?;
+
+    let max_block_index = |prefix: &str| -> Option<usize> {
+        shapes
+            .iter()
+            .filter_map(|(n, _)| n.strip_prefix(prefix).and_then(|rest| rest.split('.').next()).and_then(|i| i.parse::<usize>().ok()))
+            .max()
+    };
+    let depth_double = max_block_index("double_blocks.")
+        .map(|m| m + 1)
+        .ok_or("flux2 dit sniff: no double_blocks.<n>.* tensors - not a FLUX.2 DiT checkpoint")?;
+    let depth_single = max_block_index("single_blocks.")
+        .map(|m| m + 1)
+        .ok_or("flux2 dit sniff: no single_blocks.<n>.* tensors - not a FLUX.2 DiT checkpoint")?;
+
+    let head_dim = *shape_of("double_blocks.0.img_attn.norm.query_norm.scale")
+        .ok_or("flux2 dit sniff: no double_blocks.0.img_attn.norm.query_norm.scale - cannot determine head count")?
+        .first()
+        .ok_or("flux2 dit sniff: double_blocks.0.img_attn.norm.query_norm.scale has no dimensions")?;
+    if head_dim == 0 || !hidden.is_multiple_of(head_dim) {
+        return Err(format!("flux2 dit sniff: hidden {hidden} is not evenly divisible by the QK-norm width {head_dim}"));
+    }
+    let n_heads = hidden / head_dim;
+
+    let known = [(DitSize::FourB, Flux2Config::klein_4b()), (DitSize::NineB, Flux2Config::klein_9b())];
+    for (size, cfg) in &known {
+        if cfg.hidden == hidden && cfg.context_in_dim == context_in_dim && cfg.n_heads == n_heads && cfg.depth_double == depth_double && cfg.depth_single == depth_single {
+            return Ok(*size);
+        }
+    }
+    let describe = |cfg: &Flux2Config| {
+        format!(
+            "hidden={} context_in_dim={} n_heads={} depth_double={} depth_single={}",
+            cfg.hidden, cfg.context_in_dim, cfg.n_heads, cfg.depth_double, cfg.depth_single
+        )
+    };
+    Err(format!(
+        "flux2 dit sniff: shapes (hidden={hidden} context_in_dim={context_in_dim} n_heads={n_heads} depth_double={depth_double} depth_single={depth_single}) \
+         match neither known FLUX.2 size - 4b: {}; 9b: {}",
+        describe(&Flux2Config::klein_4b()),
+        describe(&Flux2Config::klein_9b())
+    ))
+}
+
 /// Import the diffusers `transformer/` folder layout: rename, re-fuse the
 /// split double-block q/k/v projections (q‖k‖v along dim 0), and swap the
 /// halves of `norm_out.linear` — diffusers' `AdaLayerNormContinuous` chunks
@@ -406,5 +505,62 @@ mod tests {
         let (_, w) = &map["final_layer.adaLN_modulation.1.weight"];
         assert_eq!(w[0], 8.0);
         assert_eq!(w[d * d], 7.0);
+    }
+
+    /// Real BFL klein-9b fingerprint (unsloth/flux-2-klein-9b-Q8_0.gguf): 201
+    /// tensors, hidden 4096, context_in_dim 12288, 8 double + 24 single
+    /// blocks - `Flux2Config::klein_9b().tensor_manifest()` reproduces
+    /// exactly these shapes, so it stands in for the real header without
+    /// shipping one.
+    #[test]
+    fn nine_b_shapes_are_recognized_by_size_alone() {
+        let shapes = Flux2Config::klein_9b().tensor_manifest();
+        assert_eq!(shapes.len(), 201);
+        assert_eq!(dit_config_from_shapes(&shapes), Ok(DitSize::NineB));
+    }
+
+    #[test]
+    fn four_b_shapes_are_recognized_by_size_alone() {
+        let shapes = Flux2Config::klein_4b().tensor_manifest();
+        assert_eq!(shapes.len(), 149);
+        assert_eq!(dit_config_from_shapes(&shapes), Ok(DitSize::FourB));
+    }
+
+    /// A block stack missing an entire index (here `double_blocks.7`) reads
+    /// as depth_double=7, which matches NEITHER known size - the function
+    /// must refuse to guess, and its error must name both known shapes so a
+    /// human can tell what is actually short.
+    #[test]
+    fn a_truncated_block_stack_errors_naming_both_known_shapes() {
+        let mut shapes = Flux2Config::klein_9b().tensor_manifest();
+        shapes.retain(|(n, _)| !n.starts_with("double_blocks.7."));
+        let err = dit_config_from_shapes(&shapes).unwrap_err();
+        assert!(err.contains("4b:"), "{err}");
+        assert!(err.contains("9b:"), "{err}");
+    }
+
+    /// Head count must come from the QK-norm scale's own width, never from a
+    /// hidden-size lookup table: at hidden=4096 (the 9b hidden), a QK-norm
+    /// scale implying a NONSTANDARD 64-wide head (n_heads=64, not the real
+    /// 32) must surface as 64 in the error, not silently normalize to 32.
+    #[test]
+    fn head_count_is_read_from_the_qk_norm_scale_not_a_hidden_lookup() {
+        let mut shapes = Flux2Config::klein_9b().tensor_manifest();
+        for (n, s) in shapes.iter_mut() {
+            if n == "double_blocks.0.img_attn.norm.query_norm.scale" {
+                *s = vec![64]; // head_dim 64 -> n_heads 4096/64 = 64, not 32
+            }
+        }
+        let err = dit_config_from_shapes(&shapes).unwrap_err();
+        assert!(err.contains("n_heads=64"), "{err}");
+    }
+
+    #[test]
+    fn missing_required_tensors_error_by_name() {
+        let shapes = Flux2Config::klein_4b().tensor_manifest();
+        let no_img_in: Vec<_> = shapes.iter().filter(|(n, _)| n != "img_in.weight").cloned().collect();
+        assert!(dit_config_from_shapes(&no_img_in).unwrap_err().contains("img_in.weight"));
+        let no_txt_in: Vec<_> = shapes.iter().filter(|(n, _)| n != "txt_in.weight").cloned().collect();
+        assert!(dit_config_from_shapes(&no_txt_in).unwrap_err().contains("txt_in.weight"));
     }
 }
