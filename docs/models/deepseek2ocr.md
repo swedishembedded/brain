@@ -51,26 +51,47 @@ for the composite-level merge helper (`lora_init_map`) that exists so far.
 
 ## Getting the weights
 
-Model id: `deepseek-ai/DeepSeek-OCR`. The checkpoint is the GGUF pair
-`ggml-org/DeepSeek-OCR-GGUF` publishes, and it auto-fetches (⤓, opt-in `--autofetch`) on first CLI
-use, no env var needed:
+Model id: `deepseek-ai/DeepSeek-OCR`. **Either published release works**, and
+brain recognizes whichever one it finds on disk.
+
+The default is the GGUF pair `ggml-org/DeepSeek-OCR-GGUF` publishes, which
+auto-fetches (⤓, opt-in `--autofetch`) on first CLI use, no env var needed:
 
 ```text
 <dir>/mmproj-DeepSeek-OCR-Q8_0.gguf     448 MB   SAM + CLIP + projector
 <dir>/DeepSeek-OCR-Q8_0.gguf            3.1 GB   the decoder, and the tokenizer
 ```
 
-A directory holding **both** files anywhere under the models directory is
-discovered automatically, resolved through
-`deepseek2ocr::spec::Deepseek2ocrSpec` (real header content: the LM GGUF's
-own `general.architecture == "deepseek2-ocr"`, paired with a sibling vision
-GGUF declaring `general.architecture == "clip"` and `clip.projector_type ==
-"deepseekocr"` - never by filename). If either is missing the model does not
-register at all - `brain caps` still lists it (the manifest is weights-free)
-but the CLI and `brain serve` say which file is missing rather than failing
-mid-request. `weights` still names a directory outright, per request.
+`brain pull deepseek-ai/DeepSeek-OCR` fetches the upstream `transformers`
+release instead:
 
-On first use brain writes one derived file beside them:
+```text
+<dir>/config.json                                the shape, cross-checked against the tensors
+<dir>/tokenizer.json                             the real merges and specials
+<dir>/model-00001-of-000001.safetensors  6.7 GB  every tensor, BF16
+```
+
+That one is used **as downloaded** - no conversion step and no derived file
+beside it, because the tensor names map onto brain's exactly and the decoder
+reads straight from the shard. It costs more disk than the quantized pair
+(6.7 GB vs 3.5 GB) but skips the pair's one-off ~12 GB fp32 expansion, so it
+is the smaller footprint overall and the faster first load. It also carries
+the real `tokenizer.json` rather than the GGUF's `tokenizer.ggml.*` KV, which
+names the pre-tokenizer instead of defining it.
+
+Either checkpoint is discovered automatically anywhere under the models
+directory, resolved through `deepseek2ocr::spec::Deepseek2ocrSpec` on **real
+header content, never by filename**: for the GGUF pair, the LM's own
+`general.architecture == "deepseek2-ocr"` paired with a sibling vision GGUF
+declaring `general.architecture == "clip"` and `clip.projector_type ==
+"deepseekocr"`; for the upstream release, a `config.json` declaring
+`architectures: ["DeepseekOCRForCausalLM"]`. If a required file is missing the
+model does not register at all - `brain caps` still lists it (the manifest is
+weights-free) but the CLI and `brain serve` say what is missing rather than
+failing mid-request. `weights` still names a directory outright, per request.
+
+On first use of **the GGUF pair** brain writes one derived file beside it (the
+upstream release needs no such expansion - see above):
 
 ```text
 <dir>/DeepSeek-OCR-brain-fp32.safetensors   11.7 GB   the decoder's fp32 expansion

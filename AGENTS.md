@@ -588,9 +588,16 @@ fast and scalable kernel - not a naive one.
     patch embed **bypassed** in favour of those tokens → concat
     `[clip_spatial, compressor_flat]` → one projector linear) spliced into the
     **DeepSeek-V2-family MoE decoder** (12 layers, 64 routed experts top-6 +
-    2 shared fused, plain MHA - not MLA). Imported from the shipped
-    `ggml-org/DeepSeek-OCR-GGUF` Q8_0 pair with two-way coverage over both
-    files. Parity-gated per stage against a checkpoint-free golden dump at
+    2 shared fused, plain MHA - not MLA). **Both published releases load**,
+    with two-way coverage over each: the shipped `ggml-org/DeepSeek-OCR-GGUF`
+    Q8_0 pair, and the upstream `deepseek-ai/DeepSeek-OCR` `transformers`
+    checkpoint (`deepseek2ocr::hf`), which is read IN PLACE - it needs no
+    tensor rewrite (the rename is exact and its CLIP qkv already ships fused),
+    so its decoder streams through a `checkpoint::remap::RemapSource` off the
+    checkpoint's own BF16 and that path never builds the ~12 GB fp32
+    intermediate the GGUF pair needs. `import::Files::locate` recognizes
+    either shape, so `caps::Session::load` is the same either way.
+    Parity-gated per stage against a checkpoint-free golden dump at
     deliberately non-coincidental dims (SAM patch embed → decoder logits), and
     real-weight-gated at production shape; the SAM tower's own real-weight
     parity is what found the **wgpu 3-or-more-block corruption at 1024²** that
