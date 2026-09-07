@@ -13,7 +13,7 @@
 //! tensor value or touches a device - see [`ArchSpec::validate`]'s contract.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use brain_modelstore::inventory::{ArtifactKind, ArtifactRecord};
 use brain_modelstore::plan::declared_architecture;
@@ -95,9 +95,32 @@ fn classify_safetensors(idx: usize, rec: &ArtifactRecord, out: &mut Vec<(usize, 
     }
 }
 
-fn classify_tokenizer(idx: usize, rec: &ArtifactRecord, out: &mut Vec<(usize, String, Confidence)>) {
+/// The path component directly under `root` that `path` falls within (the
+/// vendor directory, in store terms) - `None` if `path` is not under `root`
+/// at all. Two paths sharing this are two artifacts published by the same
+/// vendor, regardless of how deeply either one is nested below that point:
+/// a plain HF checkpoint's own directory, a diffusers pipeline's per-role
+/// subdirectories, and a hand-placed loose file plus its own small
+/// tokenizer-only sub-repo are all real, differently-shaped layouts a real
+/// vendor's release takes - and all share this one property.
+fn vendor_dir(path: &Path, root: &Path) -> Option<PathBuf> {
+    let rel = path.strip_prefix(root).ok()?;
+    rel.components().next().map(|c| root.join(c))
+}
+
+/// A `tokenizer.json` carries no `architecture`/`_class_name` field of its
+/// own, so "is this valid JSON" is true of every tokenizer in the whole
+/// store, from every unrelated architecture - not enough on its own. What
+/// IS real signal is whether this file was published by the same vendor
+/// ([`vendor_dir`]) as a component this same call already classified as a
+/// FLUX.2 role - `vendor_dirs` is that set, built by [`Self::classify`].
+fn classify_tokenizer(idx: usize, rec: &ArtifactRecord, root: &Path, vendor_dirs: &std::collections::BTreeSet<PathBuf>, out: &mut Vec<(usize, String, Confidence)>) {
     let Ok(bytes) = std::fs::read(&rec.path) else { return };
-    if serde_json::from_slice::<serde_json::Value>(&bytes).is_ok() {
+    if serde_json::from_slice::<serde_json::Value>(&bytes).is_err() {
+        return;
+    }
+    let Some(vendor) = vendor_dir(&rec.path, root) else { return };
+    if vendor_dirs.contains(&vendor) {
         out.push((idx, "tokenizer".to_string(), Confidence::Declared));
     }
 }
@@ -136,22 +159,28 @@ impl ArchSpec for Flux2Spec {
         ROLES
     }
 
-    fn classify(&self, records: &[ArtifactRecord], _inventory_root: &Path) -> Vec<(usize, String, Confidence)> {
+    fn classify(&self, records: &[ArtifactRecord], inventory_root: &Path) -> Vec<(usize, String, Confidence)> {
         let mut out = Vec::new();
+        // Pass 1: dit/vae/text_encoder - every one of these reads real
+        // content (a GGUF header's KV/shapes, or a config.json's own
+        // declared fields), never a record's own filename.
         for (idx, rec) in records.iter().enumerate() {
-            // A record whose only evidence would be its own filename never
-            // even reaches these branches - every one of them reads real
-            // content (a GGUF header's KV/shapes, or a config.json's own
-            // declared fields), never the path.
             if !rec.usable() {
                 continue;
             }
             match rec.kind {
                 ArtifactKind::Gguf => classify_gguf(idx, rec, &mut out),
                 ArtifactKind::HfDir => classify_hfdir(idx, rec, &mut out),
-                ArtifactKind::TokenizerJson => classify_tokenizer(idx, rec, &mut out),
                 ArtifactKind::Safetensors => classify_safetensors(idx, rec, &mut out),
                 _ => {}
+            }
+        }
+        // Pass 2: tokenizer, using pass 1's own results as the real signal
+        // a bare "is this valid JSON" check cannot provide on its own.
+        let vendor_dirs: std::collections::BTreeSet<PathBuf> = out.iter().filter_map(|(idx, ..)| vendor_dir(&records[*idx].path, inventory_root)).collect();
+        for (idx, rec) in records.iter().enumerate() {
+            if rec.usable() && rec.kind == ArtifactKind::TokenizerJson {
+                classify_tokenizer(idx, rec, inventory_root, &vendor_dirs, &mut out);
             }
         }
         out
@@ -302,22 +331,60 @@ mod tests {
 
     /// A full, unambiguous set of records for a 9b assembly: a real 9b dit,
     /// a vae, a tokenizer, and exactly ONE text_encoder candidate.
+    /// Nested one level under a `vendor` directory (not flat under `dir`
+    /// itself) - `dir` stands in for the models root, and every real store
+    /// layout ([`vendor_dir`]'s doc) puts a release under one such
+    /// directory below the root, never directly in it.
     fn nine_b_fixture(dir: &std::path::Path) -> Vec<ArtifactRecord> {
-        std::fs::create_dir_all(dir).unwrap();
-        let dit_path = dir.join("dit.gguf");
+        let vendor = dir.join("vendor");
+        std::fs::create_dir_all(&vendor).unwrap();
+        let dit_path = vendor.join("dit.gguf");
         write_dit_gguf(&dit_path, &Flux2Config::klein_9b(), "flux");
-        let te_path = dir.join("Qwen3-8B");
+        let te_path = vendor.join("Qwen3-8B");
         write_qwen3_hfdir(&te_path, 4096);
-        let vae_path = dir.join("vae");
+        let vae_path = vendor.join("vae");
         write_vae_hfdir(&vae_path);
-        let tok_path = dir.join("tokenizer.json");
+        let tok_path = vendor.join("tokenizer.json");
         write_tokenizer_json(&tok_path);
         vec![
             complete(dit_path, ArtifactKind::Gguf),
             complete(te_path, ArtifactKind::HfDir),
             complete(vae_path, ArtifactKind::HfDir),
             complete(tok_path, ArtifactKind::TokenizerJson),
+            // A second vendor's unrelated file, present in every real store
+            // - without one, resolve()'s own root inference (the deepest
+            // common ancestor of every record it's given) would collapse
+            // onto this fixture's single `vendor` directory instead of
+            // `dir`, which breaks vendor_dir-based tokenizer matching the
+            // same way a single-vendor store never would in practice. Never
+            // written to disk: ArtifactRecord literals don't need to be.
+            complete(dir.join("other-vendor").join("unrelated.bin"), ArtifactKind::Opaque),
         ]
+    }
+
+    /// "is this valid JSON" is true of every tokenizer.json in the entire
+    /// store, from every unrelated architecture - a Wan/MiniMax/etc
+    /// tokenizer must not classify as a FLUX.2 candidate just because it
+    /// happens to also be a tokenizer.json somewhere on disk. Co-location
+    /// with an already-classified FLUX.2 component is the real signal.
+    #[test]
+    fn classify_tokenizer_requires_co_location_with_a_real_component_not_any_tokenizer_in_the_store() {
+        let dir = tmp("tokenizer-co-location");
+        let mut records = nine_b_fixture(&dir);
+
+        // An unrelated architecture's own checkpoint + its own tokenizer,
+        // living nowhere near any FLUX.2 component.
+        let unrelated_dir = dir.join("unrelated-arch");
+        std::fs::create_dir_all(&unrelated_dir).unwrap();
+        let unrelated_tok = unrelated_dir.join("tokenizer.json");
+        write_tokenizer_json(&unrelated_tok);
+        records.push(complete(unrelated_tok.clone(), ArtifactKind::TokenizerJson));
+
+        let out = Flux2Spec.classify(&records, dir.as_path());
+        let tokenizer_candidates: Vec<_> = out.iter().filter(|(_, role, _)| role == "tokenizer").collect();
+        assert_eq!(tokenizer_candidates.len(), 1, "{out:?}");
+        let (idx, ..) = tokenizer_candidates[0];
+        assert_ne!(records[*idx].path, unrelated_tok, "the unrelated tokenizer must never classify: {out:?}");
     }
 
     #[test]
@@ -366,12 +433,11 @@ mod tests {
         assert_eq!(out, vec![(0, "vae".to_string(), Confidence::Declared)], "{out:?}");
     }
 
-    /// Real bug, found by actually running `brain flux2 generate` against a
-    /// real store: a causal 3D video VAE (Wan's real release) carries the
-    /// exact same `decoder`/`encoder`.conv_in.weight tensor NAMES FLUX.2's
-    /// VAE does, so a name-only check misclassifies an entirely unrelated
-    /// architecture's checkpoint as a FLUX.2 vae candidate. The conv's
-    /// shape RANK (4 for a 2D image VAE, 5 for a causal 3D video VAE) is
+    /// A causal 3D video VAE (Wan's real release) carries the exact same
+    /// `decoder`/`encoder`.conv_in.weight tensor NAMES FLUX.2's VAE does, so
+    /// a name-only check misclassifies an entirely unrelated architecture's
+    /// checkpoint as a FLUX.2 vae candidate. The conv's shape RANK (4 for a
+    /// 2D image VAE, 5 for a causal 3D video VAE) is
     /// real, always-present structure, not a guess.
     #[test]
     fn classify_rejects_a_causal_3d_video_vae_sharing_the_same_tensor_names() {
@@ -431,8 +497,12 @@ mod tests {
     fn two_text_encoder_candidates_at_equal_confidence_is_ambiguous_not_a_silent_pick() {
         let dir = tmp("two-text-encoders");
         let mut records = nine_b_fixture(&dir);
-        // A second, equally Declared text_encoder candidate: the real
-        // machine's unsloth uncensored-qwen3 GGUF, same embedding_length.
+        // A second, equally Declared text_encoder candidate: a real
+        // release's uncensored-qwen3 GGUF, same embedding_length, published
+        // by a second vendor - a real store always has more than one, and
+        // resolve()'s own root inference (the deepest common ancestor of
+        // every record) needs that second vendor present to land on `dir`
+        // rather than collapsing onto the fixture's own single vendor dir.
         let second_te = dir.join("flux2-klein-9b-uncensored-q8_0.gguf");
         write_qwen3_gguf(&second_te, 4096);
         records.push(complete(second_te, ArtifactKind::Gguf));
