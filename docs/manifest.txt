@@ -86,6 +86,7 @@ models/forecast.md
 models/chronos2.md
 models/fincast.md
 models/kronos.md
+models/timesfm3.md
 models/world-models.md
 models/diamond.md
 models/genieredux.md
