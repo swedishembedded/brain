@@ -167,3 +167,69 @@ fn ply_roundtrip() {
         assert!((r.opacities[i] - s.opacities[i]).abs() < 1e-5);
     }
 }
+
+/// `write()` (file) and `serialize()` (in-memory) must produce byte-identical
+/// output for the same `Splats` - one function writing the same bytes twice,
+/// via degree-0 and degree-1 (variable-width header) fixtures.
+#[test]
+fn ply_serialize_matches_write_exactly() {
+    let dir = std::env::temp_dir().join("splat_ply_test");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    for sh_deg in [0u32, 1u32] {
+        let (mut s, _) = random_scene(16, 123);
+        if sh_deg == 1 {
+            let n_rest = 9;
+            let mut rest = vec![0.0f32; s.len() * n_rest];
+            let mut r = Lcg(999);
+            for v in rest.iter_mut() {
+                *v = r.next() * 2.0 - 1.0;
+            }
+            s.sh_rest = Some((sh_deg, rest));
+        }
+        let path = dir.join(format!("serialize_match_deg{sh_deg}.ply"));
+        let path = path.to_str().unwrap();
+        splat::ply::write(path, &s).unwrap();
+        let file_bytes = std::fs::read(path).unwrap();
+        let mem_bytes = splat::ply::serialize(&s).unwrap();
+        assert_eq!(file_bytes.len(), mem_bytes.len(), "sh_deg={sh_deg} length mismatch");
+        assert_eq!(file_bytes, mem_bytes, "sh_deg={sh_deg} byte mismatch");
+        println!("ply_serialize_matches_write_exactly: sh_deg={sh_deg} compared_bytes={}", file_bytes.len());
+    }
+}
+
+/// `parse(serialize(s))` must reproduce the fixture within the same
+/// activation-inversion tolerances as `ply_roundtrip` above (not exact, since
+/// write() inverts opacity/scale/color activations and clamps at extremes).
+#[test]
+fn ply_serialize_roundtrip_within_tolerance() {
+    let (s, _) = random_scene(64, 7);
+    let bytes = splat::ply::serialize(&s).unwrap();
+    let r = splat::ply::parse(&bytes).unwrap();
+    assert_eq!(r.len(), s.len());
+
+    let mut max_means = 0.0f32;
+    let mut max_quats = 0.0f32;
+    let mut max_scales = 0.0f32;
+    let mut max_colors = 0.0f32;
+    let mut max_opac = 0.0f32;
+    for i in 0..s.len() {
+        for k in 0..3 {
+            max_means = max_means.max((r.means[i * 3 + k] - s.means[i * 3 + k]).abs());
+            max_scales = max_scales.max((r.scales[i * 3 + k] - s.scales[i * 3 + k]).abs());
+            max_colors = max_colors.max((r.colors[i * 3 + k] - s.colors[i * 3 + k]).abs());
+        }
+        for k in 0..4 {
+            max_quats = max_quats.max((r.quats[i * 4 + k] - s.quats[i * 4 + k]).abs());
+        }
+        max_opac = max_opac.max((r.opacities[i] - s.opacities[i]).abs());
+    }
+    println!(
+        "ply_serialize_roundtrip_within_tolerance: max_means={max_means:e} max_quats={max_quats:e} max_scales={max_scales:e} max_colors={max_colors:e} max_opacities={max_opac:e}"
+    );
+    assert!(max_means < 1e-6, "means {max_means}");
+    assert!(max_quats < 1e-6, "quats {max_quats}");
+    assert!(max_scales < 1e-4, "scales {max_scales}");
+    assert!(max_colors < 1e-5, "colors {max_colors}");
+    assert!(max_opac < 1e-5, "opacities {max_opac}");
+}

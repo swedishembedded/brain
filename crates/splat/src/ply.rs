@@ -114,6 +114,23 @@ pub fn parse(bytes: &[u8]) -> Result<Splats, String> {
 
 /// Write a scene as an Inria-layout PLY (degree-0 unless `sh_rest` is set).
 pub fn write(path: &str, s: &Splats) -> Result<(), String> {
+    let f = std::fs::File::create(path).map_err(|e| format!("cannot create {path}: {e}"))?;
+    let mut w = BufWriter::new(f);
+    write_to(&mut w, s)
+}
+
+/// Serialize a scene as an Inria-layout PLY into an in-memory buffer.
+///
+/// Byte-identical to what [`write`] puts on disk for the same `Splats`.
+pub fn serialize(s: &Splats) -> Result<Vec<u8>, String> {
+    let mut buf: Vec<u8> = Vec::new();
+    write_to(&mut buf, s)?;
+    Ok(buf)
+}
+
+/// Write a scene as an Inria-layout PLY (degree-0 unless `sh_rest` is set)
+/// into any [`std::io::Write`] sink.
+pub fn write_to<W: Write>(w: &mut W, s: &Splats) -> Result<(), String> {
     let n = s.len();
     let (sh_deg, rest) = match &s.sh_rest {
         Some((d, r)) => (*d, r.as_slice()),
@@ -126,8 +143,6 @@ pub fn write(path: &str, s: &Splats) -> Result<(), String> {
         3 => 45,
         _ => return Err("unsupported SH degree".into()),
     };
-    let f = std::fs::File::create(path).map_err(|e| format!("cannot create {path}: {e}"))?;
-    let mut w = BufWriter::new(f);
     let mut hdr = String::from("ply\nformat binary_little_endian 1.0\n");
     hdr += &format!("element vertex {n}\n");
     for p in ["x", "y", "z", "nx", "ny", "nz", "f_dc_0", "f_dc_1", "f_dc_2"] {
