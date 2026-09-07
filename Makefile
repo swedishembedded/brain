@@ -17,6 +17,27 @@
 #   make gradcheck       # backprop correctness gate
 #   make test            # full cargo test suite
 
+# CARGO_HOME selects where registry caches, compiled crates, and binaries are
+# stored. Pinned to the ordinary default so every invocation (make, CI,
+# agent) resolves the same absolute source paths in Cargo's fingerprint
+# files rather than rebuilding from scratch if $HOME ever differs between
+# them - matching whale's own Makefile, which states the same rule.
+CARGO_HOME = $(HOME)/.cargo
+export CARGO_HOME
+
+# sccache caches rustc invocations by (source, flags, deps) hash across
+# separate `cargo` processes - auto-enabled here (mirroring whale's
+# Makefile) so every developer/CI box with it installed benefits by
+# default, not just a machine that happens to have hand-written it into a
+# local, gitignored `.cargo/config.toml`. A machine that also wants the
+# faster `mold` linker or a capped job count (see that file's own comment
+# for why - 22 concurrent thin-LTO test-binary links exceeded this box's
+# RAM) still sets those there; only the wrapper itself is universal enough
+# to default on for everyone.
+ifneq ($(shell command -v sccache 2>/dev/null),)
+export RUSTC_WRAPPER = sccache
+endif
+
 BRAIN  ?= ./target/release/brain
 # The debug-build binary the e2e bats suites drive by default (they build via the
 # `build/debug` target, not `build/release`, so the fast lane stays fast). Override
