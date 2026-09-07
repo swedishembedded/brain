@@ -55,8 +55,8 @@
 //! its own KV cache, and the block forward has no batch dimension. Adding one
 //! is a separate piece of work from this seam.
 
-use capability::{ActionResult, Invocation, Manifest, Progress};
-use moondream3::caps::{Session, DIR_VAR, MODEL};
+use capability::{ActionResult, Assembly, Invocation, Manifest, Progress};
+use moondream3::caps::{Session, MODEL};
 use moondream3::model::Precision;
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 
@@ -74,18 +74,19 @@ const INT8_BYTES: u64 = 11u64 << 30;
 /// of per-block activation scratch, same derivation.
 const FP32_BYTES: u64 = 44u64 << 30;
 
-/// Moondream 3 behind the scheduler. `BRAIN_MOONDREAM3_WEIGHTS` names the
-/// checkpoint DIRECTORY (`config.json`, the safetensors shards, `tokenizer.json`).
+/// Moondream 3 behind the scheduler. `dir` (`config.json`, the safetensors
+/// shards, `tokenizer.json`) is resolved through `moondream3::spec::
+/// Moondream3Spec`'s `dir` role - see [`Self::from_assembly`].
 pub struct Moondream3Resident {
     dir: String,
 }
 
 impl Moondream3Resident {
-    /// `None` when the variable is unset or the directory is absent -
-    /// registering a model whose every call would fail is worse than not
-    /// serving it.
-    pub fn from_env() -> Option<Moondream3Resident> {
-        let dir = std::env::var(DIR_VAR).ok().filter(|p| !p.is_empty())?;
+    /// `None` when the resolver names no `dir` role, or the directory it
+    /// named is absent - registering a model whose every call would fail is
+    /// worse than not serving it.
+    pub fn from_assembly(assembly: &Assembly) -> Option<Moondream3Resident> {
+        let dir = assembly.roles.get("dir").map(|p| p.to_string_lossy().into_owned())?;
         Self::new(dir)
     }
 
@@ -112,8 +113,8 @@ impl Moondream3Resident {
 impl ResidentModel for Moondream3Resident {
     fn manifest(&self) -> Manifest {
         // The stripped, weights-free spec: this resident's checkpoint
-        // directory is already resolved (`self.dir`, from `from_env`/
-        // `from_dir`), so a served caller must never be told a `weights`
+        // directory is already resolved (`self.dir`, from `from_assembly`/
+        // `new`), so a served caller must never be told a `weights`
         // param exists to set - see `moondream3::caps::manifest_resident`'s
         // doc. `run` below never reads `weights` from `inv` either.
         moondream3::caps::manifest_resident()

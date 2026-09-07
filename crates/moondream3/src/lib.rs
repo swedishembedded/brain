@@ -3,6 +3,9 @@
 
 pub mod caps;
 pub mod config;
+/// [`brain_modelstore::resolve::ArchSpec`] - which on-disk checkpoint
+/// directory satisfies Moondream 3's `dir` role.
+pub mod spec;
 pub mod decoder;
 pub mod import;
 pub mod model;

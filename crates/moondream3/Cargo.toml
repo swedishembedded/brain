@@ -29,6 +29,7 @@ brain-checkpoint.workspace = true
 brain-data.workspace = true
 # `caps` - the capability manifest / action surface.
 brain-capability.workspace = true
+brain-modelstore.workspace = true
 
 [dev-dependencies]
 brain-testutil.workspace = true

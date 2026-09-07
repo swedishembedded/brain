@@ -56,20 +56,16 @@ use crate::model::{MoondreamModel, Precision};
 
 /// The catalog id.
 ///
-/// A `brain/` placeholder, not the upstream repo name, because
-/// [`DIR_VAR`] points at an ARBITRARY directory: the loader accepts any
-/// checkpoint whose `config.json` matches the preview architecture, so the id
-/// stands in for "whatever is configured" rather than naming one specific
-/// release. `deepseek-ai/DeepSeek-OCR` is the one catalog id that does name its
+/// A `brain/` placeholder, not the upstream repo name, because the resolved
+/// `dir` role (`crate::spec::Moondream3Spec`) accepts ANY directory whose
+/// `config.json` matches the preview architecture, so the id stands in for
+/// "whatever is configured" rather than naming one specific release.
+/// `deepseek-ai/DeepSeek-OCR` is the one catalog id that does name its
 /// upstream repo, and only because its weights are exactly one shipped GGUF
 /// pair or nothing - a distinction `crates/cli/tests/model_ids.rs` enforces.
 /// The upstream repo to FETCH from is a separate field, `crates/arch`'s
 /// `default_ref`.
 pub const MODEL: &str = "brain/moondream3";
-
-/// `$BRAIN_MOONDREAM3_WEIGHTS` - the checkpoint DIRECTORY (`config.json`, the
-/// safetensors shards, and `tokenizer.json`).
-pub const DIR_VAR: &str = "BRAIN_MOONDREAM3_WEIGHTS";
 
 /// The instruction used when a request carries neither `messages` nor `prompt`.
 pub const DEFAULT_PROMPT: &str = "Describe this image.";
@@ -91,10 +87,6 @@ pub const SEQ_LEN: u32 = 1 + 729 + 96;
 /// and a caller that wants more asks for it.
 pub const DEFAULT_MAX_NEW: i64 = 32;
 
-fn default_dir() -> String {
-    std::env::var(DIR_VAR).unwrap_or_default()
-}
-
 pub fn caption_spec() -> ActionSpec {
     ActionSpec::new("caption", "Moondream 3: an image + an instruction in, generated text out (greedy, streamed per token)")
         .streaming()
@@ -105,7 +97,9 @@ pub fn caption_spec() -> ActionSpec {
             ParamSpec::new("precision", ParamType::Str, "int8 (default, ~9 GiB) or fp32 (~43 GiB - needs a very large machine)")
                 .default(json!("int8")),
         )
-        .param(ParamSpec::new("weights", ParamType::Str, "checkpoint DIRECTORY").host_env(DIR_VAR))
+        .param(
+            ParamSpec::new("weights", ParamType::Str, "checkpoint DIRECTORY; overrides the model-store resolver's own pick when set").host_resolved(),
+        )
         .input(BlobSpec::new("image", Media::Image, "raw HWC f32 pixels in [0,1], meta {w,h} (capability::blob's wire convention)").required())
         .output(BlobSpec::new("text", Media::Text, "the generated text"))
 }
@@ -121,7 +115,8 @@ pub fn manifest() -> Manifest {
 }
 
 /// The manifest for the RESIDENT/scheduled service (D-Bus, executor, HTTP):
-/// the checkpoint directory is service-side configuration ([`DIR_VAR`]), so
+/// the checkpoint directory is service-side configuration (resolved through
+/// the model store, see `crate::spec::Moondream3Spec`), so
 /// the served action carries only real per-request parameters - see
 /// `glmdsa::caps::manifest_resident`'s doc for why a static, CLI-facing
 /// manifest and a stripped resident one are two different things, not one
@@ -289,17 +284,25 @@ impl Session {
 
 /// Direct provider: builds (and caches) one [`Session`] per
 /// `(directory, precision)` on first use.
-pub struct Moondream3Provider;
+///
+/// `default_dir` is the model-store resolver's own pick
+/// (`crate::spec::Moondream3Spec`'s `dir` role), used whenever a request
+/// omits `weights` - see [`CaptionAction::run`].
+#[derive(Default)]
+pub struct Moondream3Provider {
+    default_dir: Option<String>,
+}
 
 impl Moondream3Provider {
     pub fn new() -> Moondream3Provider {
-        Moondream3Provider
+        Moondream3Provider::default()
     }
-}
 
-impl Default for Moondream3Provider {
-    fn default() -> Self {
-        Self::new()
+    /// Bind the resolved `dir` role as this provider's own per-request
+    /// fallback.
+    pub fn with_default_dir(mut self, dir: Option<String>) -> Moondream3Provider {
+        self.default_dir = dir;
+        self
     }
 }
 
@@ -308,11 +311,13 @@ impl Provider for Moondream3Provider {
         manifest()
     }
     fn action(&self, name: &str) -> Option<std::sync::Arc<dyn Action>> {
-        (name == "caption").then(|| std::sync::Arc::new(CaptionAction) as std::sync::Arc<dyn Action>)
+        (name == "caption").then(|| std::sync::Arc::new(CaptionAction { default_dir: self.default_dir.clone() }) as std::sync::Arc<dyn Action>)
     }
 }
 
-struct CaptionAction;
+struct CaptionAction {
+    default_dir: Option<String>,
+}
 
 /// One process-wide resident, keyed by `(dir, precision)` so switching either
 /// rebuilds. The provider is registered once, and a ~9 GiB build is not
@@ -325,10 +330,11 @@ impl Action for CaptionAction {
     }
 
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        let dir = inv.get_str("weights").filter(|s| !s.is_empty()).unwrap_or_else(default_dir);
-        if dir.is_empty() {
-            return Err(format!("moondream3 caption: no checkpoint - set {DIR_VAR} or pass `weights`"));
-        }
+        let dir = inv
+            .get_str("weights")
+            .filter(|s| !s.is_empty())
+            .or_else(|| self.default_dir.clone())
+            .ok_or("moondream3 caption: no checkpoint (pass 'weights', or configure one through the models directory)")?;
         let precision = parse_precision(&inv.get_str("precision").unwrap_or_else(|| "int8".to_string()))?;
         let mut guard = RESIDENT.lock().map_err(|_| "moondream3: resident lock poisoned")?;
         if !matches!(&*guard, Some(s) if s.dir() == dir && s.precision() == precision) {
@@ -392,7 +398,7 @@ mod tests {
             "image",
             Blob::new(Media::Image, vec![0u8; 12]).with_meta(json!({"w": 1, "h": 1})),
         );
-        let err = CaptionAction.run(&inv, &mut |_| {}).err().unwrap_or_default();
+        let err = CaptionAction { default_dir: None }.run(&inv, &mut |_| {}).err().unwrap_or_default();
         assert!(err.contains("moondream3"), "{err}");
     }
 
