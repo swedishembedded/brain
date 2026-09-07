@@ -189,6 +189,31 @@ pub trait ArchSpec: Send + Sync {
     /// components. Must not read tensor bytes or touch a device - this runs
     /// before either ever happens anywhere in the calling code.
     fn validate(&self, assembly: &Assembly) -> Result<(), String>;
+
+    /// [`MissingRole::doc`] for a role [`Self::classify`] found no candidate
+    /// for, with no override supplied either. The default reproduces
+    /// `resolve`'s own historical generic wording; an architecture whose role
+    /// has NO on-disk acquisition path at all (no `default_ref`, and nothing
+    /// content-based `classify` could ever recognize as a fetchable default -
+    /// `llava`/`campplus`/`s3tokenizer`'s shared case) overrides this with
+    /// [`no_default_checkpoint_doc`] to name the real escape hatch (the
+    /// override flag) instead of a bare "no artifact classifies" - the
+    /// resolver-side equivalent of `crate::supply::ensure_env_weights_with`'s
+    /// identically-worded env-based "no default checkpoint known" error.
+    fn missing_doc(&self, role: &str) -> String {
+        format!("no artifact classifies as {role} for arch {}", self.arch())
+    }
+}
+
+/// Shared wording for [`ArchSpec::missing_doc`] on a role with no on-disk
+/// acquisition path at all - names the exact `--<dashed-role>` override flag
+/// the CLI's per-role flag stripper (`crates/cli/src/resolver_cli.rs`'s
+/// `extract_role_overrides`, every resolver-migrated architecture's own)
+/// derives from `role`, so the message tells the caller precisely what to
+/// type next instead of leaving them to guess at a flag spelling from a
+/// generic "nothing classifies" message.
+pub fn no_default_checkpoint_doc(arch: &str, role: &str) -> String {
+    format!("{arch}: no default checkpoint known for role {role:?} -- pass --{} to name one explicitly", role.replace('_', "-"))
 }
 
 /// The deepest path ancestor common to every record - a stable inventory
@@ -322,7 +347,7 @@ pub fn resolve(arch: &str, records: &[ArtifactRecord], specs: &[&dyn ArchSpec], 
     let missing: Vec<MissingRole> = per_role
         .iter()
         .filter(|(_, r)| matches!(r, RoleResult::None))
-        .map(|(role, _)| MissingRole { role: role.to_string(), doc: format!("no artifact classifies as {role} for arch {arch}"), near_misses: near_misses(records) })
+        .map(|(role, _)| MissingRole { role: role.to_string(), doc: spec.missing_doc(role), near_misses: near_misses(records) })
         .collect();
     if !missing.is_empty() {
         return Resolution::Missing(Box::new(Missing { arch: arch.to_string(), roles: missing }));
@@ -860,5 +885,85 @@ mod tests {
         let spec = ToySpec { classify_confidence: Confidence::Declared, validate_ok: true };
         let specs: Vec<&dyn ArchSpec> = vec![&spec];
         resolve("not-toy", &[], &specs, &BTreeMap::new());
+    }
+
+    /// A spec that never classifies anything, standing in for
+    /// `llava`/`campplus`/`s3tokenizer` - no `default_ref`, and nothing
+    /// on-disk content could ever satisfy the role, so [`ArchSpec::missing_doc`]
+    /// is overridden with [`no_default_checkpoint_doc`] instead of the default
+    /// generic wording.
+    struct NoAcquisitionSpec;
+    impl ArchSpec for NoAcquisitionSpec {
+        fn arch(&self) -> &'static str {
+            "noacq"
+        }
+        fn roles(&self) -> &'static [&'static str] {
+            &["weights"]
+        }
+        fn classify(&self, _records: &[ArtifactRecord], _root: &Path) -> Vec<(usize, String, Confidence)> {
+            Vec::new()
+        }
+        fn assemble(&self, chosen: &BTreeMap<String, usize>, _records: &[ArtifactRecord], _overrides: &BTreeMap<String, String>) -> Result<AssembleOutcome, String> {
+            chosen.get("weights").ok_or("no weights chosen")?;
+            Ok(AssembleOutcome::Assembled(AssembledVariant { id: "local/noacq".to_string(), variant: None }))
+        }
+        fn validate(&self, _assembly: &Assembly) -> Result<(), String> {
+            Ok(())
+        }
+        fn missing_doc(&self, role: &str) -> String {
+            no_default_checkpoint_doc(self.arch(), role)
+        }
+    }
+
+    /// The default [`ArchSpec::missing_doc`] every OTHER spec in this module
+    /// (never overriding it) still gets - `resolve`'s prior generic wording,
+    /// unchanged by this mechanism existing.
+    #[test]
+    fn missing_doc_defaults_to_the_generic_wording_when_a_spec_does_not_override_it() {
+        let records: Vec<ArtifactRecord> = vec![rec("/models/toy/unrelated.bin")];
+        let spec = ToySpec { classify_confidence: Confidence::Declared, validate_ok: true };
+        let specs: Vec<&dyn ArchSpec> = vec![&spec];
+        match resolve("toy", &records, &specs, &BTreeMap::new()) {
+            Resolution::Missing(m) => assert_eq!(m.roles[0].doc, "no artifact classifies as dit for arch toy"),
+            other => panic!("expected Missing, got {other:?}"),
+        }
+    }
+
+    /// A role with no on-disk acquisition path at all: with no override and
+    /// nothing to classify, `resolve` reports Missing with a doc naming BOTH
+    /// that no default checkpoint is known AND the exact override flag to
+    /// pass - never the bare "no artifact classifies" wording, which leaves
+    /// the caller to guess how to actually run this architecture.
+    #[test]
+    fn a_role_with_no_acquisition_path_names_the_override_flag_instead_of_the_generic_wording() {
+        let spec = NoAcquisitionSpec;
+        let specs: Vec<&dyn ArchSpec> = vec![&spec];
+        match resolve("noacq", &[], &specs, &BTreeMap::new()) {
+            Resolution::Missing(m) => {
+                assert_eq!(m.roles.len(), 1);
+                let doc = &m.roles[0].doc;
+                assert!(doc.contains("no default checkpoint known"), "{doc}");
+                assert!(doc.contains("--weights"), "{doc}");
+            }
+            other => panic!("expected Missing, got {other:?}"),
+        }
+    }
+
+    /// The override escape hatch still resolves cleanly for a no-acquisition-
+    /// path role, exactly as it does for every other architecture - the
+    /// override bypasses `classify` entirely (see
+    /// `an_override_is_honored_without_reclassifying` above), so an empty
+    /// `classify` never blocks it.
+    #[test]
+    fn a_role_with_no_acquisition_path_still_resolves_via_an_explicit_override() {
+        let records = vec![rec("/models/noacq/hand-placed.bin")];
+        let spec = NoAcquisitionSpec;
+        let specs: Vec<&dyn ArchSpec> = vec![&spec];
+        let mut overrides = BTreeMap::new();
+        overrides.insert("weights".to_string(), "/models/noacq/hand-placed.bin".to_string());
+        match resolve("noacq", &records, &specs, &overrides) {
+            Resolution::Resolved(a) => assert_eq!(a.roles["weights"], PathBuf::from("/models/noacq/hand-placed.bin")),
+            other => panic!("expected Resolved, got {other:?}"),
+        }
     }
 }
