@@ -229,12 +229,15 @@ surfaces.
 models are - see [Configuration](configuration.md#paths) for the full
 precedence ladder.
 
-### Naming weights on a model command: `--model`
+### Naming weights on a model command
 
-Model commands grow the same `--model` argument for their primary weights
-(the DiT, for an image or video model) instead of a per-command flag:
-`brain flux2 generate --model <ARG>` overrides `BRAIN_FLUX2_DIT`. The
-command prints the model it is about to load before anything is loaded.
+A multi-role model command names each weight role with a flag spelled exactly
+as the role is: `brain flux2 generate --dit <ARG>` states the DiT,
+`--vae`/`--text-encoder`/`--tokenizer` the rest. The 1:1 spelling is load
+bearing, not cosmetic: when a role cannot be resolved, the error prints the
+role name as the flag to pass, so a role whose flag is spelled differently
+would tell you to type something the command rejects. The command prints the
+model it is about to load before anything is loaded.
 
 `ARG` is read against one ladder, whichever way you mean it:
 
@@ -246,9 +249,8 @@ command prints the model it is about to load before anything is loaded.
 - **A `<vendor>/<repo>[-<QUANT>]` id** resolves through the model store: a
   local copy wins; otherwise the model is announced and downloaded, with
   per-file progress. A compound checkpoint (a diffusers pipeline) hands the
-  command its named role. For `flux2`, the remaining components - VAE, text
-  encoder, tokenizer - still come from their `BRAIN_FLUX2_*` variables, so
-  mix sources with that in mind.
+  command its named role. Roles you do not name are resolved from the models
+  directory, so mix sources with that in mind.
 
 Anything else is refused with what was probed and what a model id looks
 like, rather than silently fetching something adjacent.

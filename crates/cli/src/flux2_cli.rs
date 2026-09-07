@@ -54,15 +54,15 @@ const HELP: &str = "brain flux2 <cmd>
                                     # stock tensor names/shapes drops in - a fine-tune, an
                                     # abliteration, a re-quantisation - `validate()` rejects a
                                     # mismatched size against the chosen DiT before any load.
-           [--model <path>]         # state the DiT weights outright, the same way.
+           [--dit <path>]           # state the DiT weights outright, the same way.
            [--vae <path>]           # state the VAE outright, the same way.
            [--tokenizer <path>]     # state the tokenizer outright, the same way.
-                                    # --model/--vae/--text-encoder/--tokenizer/--variant are the
-                                    # resolver's overrides: when they leave a role genuinely
-                                    # ambiguous (more than one candidate, or klein-vs-base
-                                    # unstated - never recoverable from a weight's shape) every
-                                    # real candidate's selector flag prints and the run exits
-                                    # rather than guessing.
+                                    # --dit/--vae/--text-encoder/--tokenizer/--variant are the
+                                    # resolver's overrides, one flag per role: when they leave a
+                                    # role genuinely ambiguous (more than one candidate, or
+                                    # klein-vs-base unstated - never recoverable from a weight's
+                                    # shape) every real candidate's selector flag prints and the
+                                    # run exits rather than guessing.
            [--adapter <path>]...    # LoRA: brain's own `finetune` checkpoint, or a
                                     # third-party ai-toolkit/ComfyUI .safetensors.
                                     # REPEATABLE - pass it once per adapter to stack
@@ -120,7 +120,7 @@ const HELP: &str = "brain flux2 <cmd>
            # frozen base on the card and differentiates only the low-rank
            # factors. Which one ran is printed at the top of every run.
 Weights: `generate` resolves dit/vae/text_encoder/tokenizer from the models
-directory (--models-dir / BRAIN_MODELS_DIR) - --model/--text-encoder/--variant
+directory (--models-dir / BRAIN_MODELS_DIR) - --dit/--text-encoder/--variant
 name a role outright, and an ambiguous or missing outcome prints every real
 candidate and exits rather than guessing. `finetune` still reads
 BRAIN_FLUX2_{DIT,VAE,TE,TOKENIZER}.
@@ -220,16 +220,22 @@ fn attach_lora_scale(specs: &mut [AdapterSpec], scaled: &mut usize, value: f32) 
 
 /// Resolve FLUX.2's four weight roles through the model-store resolver
 /// (`brain_modelstore::resolve::resolve` + [`flux2::spec::Flux2Spec`])
-/// instead of `BRAIN_FLUX2_*` variables: `--model`/`--text-encoder` name a
+/// instead of `BRAIN_FLUX2_*` variables: `--dit`/`--text-encoder` name a
 /// role's file outright (the resolver's own override contract - an exact
 /// path already found by scanning the models directory), `--variant` states
 /// the klein-vs-base family a weight's shape alone can never answer.
+///
+/// One flag per role, spelled as the role is: `dit` -> `--dit`, `vae` ->
+/// `--vae`, and so on. That is not decoration - `describe_ambiguity` /
+/// `describe_missing` print the ROLE NAME as the flag to pass when a role
+/// cannot be resolved, so any role whose flag is spelled differently tells
+/// the user to type something the parser rejects.
 /// `crate::resolver_cli::resolve_or_exit` does the actual scan/resolve and
 /// prints+exits on `Ambiguous`/`Missing` - shared with every other
 /// architecture's own resolver-backed command, not flux2-specific.
-fn resolve_flux2(model: Option<&str>, vae: Option<&str>, text_encoder: Option<&str>, tokenizer: Option<&str>, variant: Option<&str>) -> Result<(Paths, capability::Assembly), String> {
+fn resolve_flux2(dit: Option<&str>, vae: Option<&str>, text_encoder: Option<&str>, tokenizer: Option<&str>, variant: Option<&str>) -> Result<(Paths, capability::Assembly), String> {
     let mut overrides = std::collections::BTreeMap::new();
-    if let Some(m) = model {
+    if let Some(m) = dit {
         overrides.insert("dit".to_string(), m.to_string());
     }
     if let Some(v) = vae {
@@ -267,7 +273,7 @@ fn generate(args: &[String]) -> Result<(), String> {
     let mut adapters: Vec<AdapterSpec> = Vec::new();
     let mut scaled = 0usize;
     let mut text_encoder: Option<String> = None;
-    let mut model: Option<String> = None;
+    let mut dit: Option<String> = None;
     let mut vae: Option<String> = None;
     let mut tokenizer: Option<String> = None;
     let mut i = 0;
@@ -326,7 +332,7 @@ fn generate(args: &[String]) -> Result<(), String> {
                 attach_lora_scale(&mut adapters, &mut scaled, s)?;
             }
             "--text-encoder" => text_encoder = Some(need(i)?.clone()),
-            "--model" => model = Some(need(i)?.clone()),
+            "--dit" => dit = Some(need(i)?.clone()),
             "--vae" => vae = Some(need(i)?.clone()),
             "--tokenizer" => tokenizer = Some(need(i)?.clone()),
             other => return Err(format!("unknown flag {other}\n{HELP}")),
@@ -377,12 +383,12 @@ fn generate(args: &[String]) -> Result<(), String> {
     }
 
     // Weights come from the model-store resolver, never BRAIN_FLUX2_*: scan
-    // the models directory for every candidate artifact, then let `--model`/
+    // the models directory for every candidate artifact, then let `--dit`/
     // `--text-encoder`/`--variant` (when the caller actually typed it) state
     // the roles nothing on disk can pick on its own. An ambiguous or missing
     // outcome prints and exits here - neither is recoverable within this
     // command, and resolve() never silently picks.
-    let (paths, assembly) = resolve_flux2(model.as_deref(), vae.as_deref(), text_encoder.as_deref(), tokenizer.as_deref(), variant_explicit.then_some(variant_name.as_str()))?;
+    let (paths, assembly) = resolve_flux2(dit.as_deref(), vae.as_deref(), text_encoder.as_deref(), tokenizer.as_deref(), variant_explicit.then_some(variant_name.as_str()))?;
     variant_name = assembly.variant.clone().ok_or("flux2: resolved assembly has no variant")?;
     flux2::caps::check_license(&variant_name)?; // 9B = FLUX Non-Commercial license
     let variant = Flux2Config::from_name(&variant_name)?;
