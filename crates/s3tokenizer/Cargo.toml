@@ -17,6 +17,8 @@ path = "src/lib.rs"
 brain-audio.workspace = true
 brain-model.workspace = true
 brain-onnx.workspace = true
+brain-modelstore.workspace = true
+brain-capability.workspace = true
 
 [dev-dependencies]
 brain-testutil.workspace = true
