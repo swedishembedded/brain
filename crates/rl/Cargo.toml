@@ -31,6 +31,10 @@ brain-qwen3 = { workspace = true, optional = true }
 brain-bench.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# `document::answer_digest` - the checksum form `env`'s doc sanctions for a
+# `Task::answer` whose correct completion cannot be recomputed from the
+# prompt. The same crate `modelstore`/`cli` already hash content with.
+sha2.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
