@@ -55,8 +55,9 @@ const HELP: &str = "brain label <cmd>
   --model M       which captioner to use (default qwen3vl). Any model
                   implementing captioner::Captioner can be listed here; the
                   workflow itself is model-agnostic.
-  --weights DIR   checkpoint directory, else the model's own env var
-                  ($BRAIN_QWEN3VL_WEIGHTS / $BRAIN_FASTVLM_WEIGHTS / $BRAIN_LLAVA_WEIGHTS).
+  --weights DIR   checkpoint directory, else resolved automatically from the
+                  models directory (qwen3vl/fastvlm) or the model's own env
+                  var ($BRAIN_LLAVA_WEIGHTS, not yet resolver-based).
   --out FILE      caption file, relative to <dir> (default captions.yaml).
   --prompt TEXT   the instruction handed to the model for every image. This
                   is where caption quality is decided; the built-in default
@@ -131,6 +132,27 @@ pub fn run_label(argv: &[String]) {
 /// error message below and the architecture a GGUF names in its own metadata
 /// are all the same vocabulary rather than three that drift.
 const CAPTIONERS: &[&str] = &["qwen3vl", "fastvlm", "llava"];
+
+/// `model`'s resolved `weights` role, for the architectures migrated onto the
+/// model-store resolver (`qwen3vl`, `fastvlm`) - `None` for every other model
+/// (`llava`, still env-based) or when nothing resolved (printed by
+/// `try_resolve`'s own error, not raised here: a labeling run with no
+/// checkpoint anywhere should still reach `build`'s own clean "no checkpoint"
+/// error, worded for this workflow, rather than the resolver's).
+fn resolved_default_weights(model: &str) -> Option<String> {
+    let (arch, spec): (&str, &dyn brain_modelstore::resolve::ArchSpec) = match model {
+        "qwen3vl" => ("qwen3vl", &qwen3vl::spec::Qwen3VlSpec),
+        "fastvlm" => ("fastvlm", &fastvlm::spec::FastvlmSpec),
+        _ => return None,
+    };
+    match crate::resolver_cli::try_resolve(arch, spec, &Default::default()) {
+        Ok(assembly) => assembly.roles.get("weights").map(|p| p.to_string_lossy().into_owned()),
+        Err(e) => {
+            eprintln!("label: {arch}'s default checkpoint did not resolve ({e})");
+            None
+        }
+    }
+}
 
 /// Build the captioner for `model`. This is the ONE place the CLI knows which
 /// models exist; everything after it is `dyn Captioner`.
@@ -258,15 +280,24 @@ fn images(args: &[String]) -> Result<(), String> {
     let instruction = instruction(&prompt, &trigger, &trigger_role);
 
     let model = resolve_model(&model, model_was_given, &weights)?;
-    if weights.is_empty() {
-        // No `--weights`: fetch the architecture's own default checkpoint and
-        // set the env var its captioner already reads, the same auto-supply
-        // every `brain infer <arch>` gets. Without this, the first thing a new
-        // user sees from `brain label images <dir>` is the captioner
-        // complaining that no checkpoint directory was set, with no hint that
-        // brain can fetch one.
+    let weights = if !weights.is_empty() {
+        weights
+    } else if let Some(resolved) = resolved_default_weights(&model) {
+        // qwen3vl/fastvlm: resolved through the model-store resolver
+        // (`qwen3vl::spec::Qwen3VlSpec`/`fastvlm::spec::FastvlmSpec`) instead
+        // of `BRAIN_QWEN3VL_WEIGHTS`/`BRAIN_FASTVLM_WEIGHTS` - see those
+        // modules' own doc.
+        resolved
+    } else {
+        // llava: not yet migrated - fetch the architecture's own default
+        // checkpoint and set the env var its captioner still reads, the same
+        // auto-supply every `brain infer <arch>` gets. Without this, the
+        // first thing a new user sees from `brain label images <dir>
+        // --model llava` is the captioner complaining that no checkpoint
+        // directory was set, with no hint that brain can fetch one.
         crate::supply::ensure_env_weights(&model);
-    }
+        weights
+    };
     let mut model = build(&model, &weights, max_pixels, &precision)?;
     let caps = model.capabilities();
     eprintln!("label: {} -> {}/{out} (max_new {max_new}{})", caps.model, dir, if overwrite { ", overwrite" } else { ", resuming" });

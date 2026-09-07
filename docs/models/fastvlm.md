@@ -23,16 +23,16 @@ captioning, see [Qwen3-VL](qwen3vl.md); both are compared on the
 Model id: `brain/fastvlm` (a `brain/`-namespaced served id, per this
 project's naming grammar, is never itself fetched from the network) - but
 `apple/FastVLM-0.5B` auto-fetches (⤓, opt-in `--autofetch`) on first CLI use, no env var needed.
-To point at a different checkpoint, set `BRAIN_FASTVLM_WEIGHTS` to a
-directory holding `config.json` + `model.safetensors` + `tokenizer.json`
-(overridable per call via the `weights` param).
+Any checkpoint directory under the models directory (`config.json` +
+`model.safetensors` + `tokenizer.json`, `architectures[0] ==
+"LlavaQwen2ForCausalLM"`) is discovered automatically, resolved through
+`fastvlm::spec::FastvlmSpec`; `--weights` still names one outright per call.
 
 ## Running it
 
 ```bash
-BRAIN_FASTVLM_WEIGHTS=/path/to/fastvlm \
-  brain fastvlm caption --prompt "Describe this image." --max_new 48 \
-    --in image=photo.ppm --out text=caption.txt
+brain fastvlm caption --prompt "Describe this image." --max_new 48 \
+  --in image=photo.ppm --out text=caption.txt
 ```
 
 Over D-Bus:
@@ -57,8 +57,8 @@ connection setup this snippet builds on.
 - `precision` - `fp32` (default) or `int8` for the language decoder; the
   vision tower always runs fp32 regardless of this setting.
 - `image` input - raw HWC f32 pixels in `[0,1]`, with `{w,h}` metadata.
-- `weights` - per-call override of the checkpoint directory (in place of
-  `BRAIN_FASTVLM_WEIGHTS`).
+- `weights` - per-call override of the checkpoint directory, in place of the
+  model-store resolver's own pick (`fastvlm::spec::FastvlmSpec`).
 
 ## Hardware and limits
 

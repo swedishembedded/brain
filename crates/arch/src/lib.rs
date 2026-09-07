@@ -265,7 +265,15 @@ pub const ARCHS: &[Arch] = &[
     // real `architectures[0]` class and the `model_type` fallback spelling,
     // same convention as `qwen3`'s row - a config lacking `architectures`
     // still resolves via `model_type: "qwen3_5"`.
-    arch!("qwen35", "Qwen3.5/3.8-27B dense hybrid GDN/GQA decoder + MTP + ViT", Multimodal, LlamaCpp, "brain-qwen35", gguf: Some("qwen35"), hf: &["Qwen3_5ForConditionalGeneration", "qwen3_5"], default_ref: Some("Qwen/Qwen3.8-27B-FP8"), weights_env: &[("BRAIN_QWEN35_DIR", "dir")]),
+    // `weights_env` is empty: this row used to declare a FOURTH spelling
+    // (`BRAIN_QWEN35_DIR`) that matched none of the three the crate's own
+    // code actually checked (`BRAIN_QWEN35_WEIGHTS`/`BRAIN_QWEN35_TOKENIZER`
+    // in `caps.rs`, `BRAIN_QWEN35_GGUF` in `crates/cli/src/resident.rs`'s
+    // `multi_gpu_gguf_from_env`) - already dead on arrival. All three (and
+    // this row's own stale one) are now resolved through
+    // `qwen35::spec::Qwen35Spec`'s `weights`/`tokenizer` roles instead - see
+    // `crates/cli/src/catalog.rs`'s `resolved_assembly_for`.
+    arch!("qwen35", "Qwen3.5/3.8-27B dense hybrid GDN/GQA decoder + MTP + ViT", Multimodal, LlamaCpp, "brain-qwen35", gguf: Some("qwen35"), hf: &["Qwen3_5ForConditionalGeneration", "qwen3_5"], default_ref: Some("Qwen/Qwen3.8-27B-FP8")),
     arch!("glmdsa", "GLM-5.2 (glm_moe_dsa: MLA + sigmoid noaux_tc MoE + DSA)", Text, LlamaCpp, "brain-glmdsa"),
     arch!("deepseek2", "DeepSeek-V2-family MoE decoder", Text, LlamaCpp, "brain-deepseek2"),
     arch!("lfm2", "LiquidAI LFM2.5-Encoder", Text, LlamaCpp, "brain-lfm2", hf: &["Lfm2ForCausalLM"], default_ref: Some("LiquidAI/LFM2.5-350M"),
@@ -296,7 +304,13 @@ pub const ARCHS: &[Arch] = &[
     // a top-k sparse-MoE decoder, not this dense one; it used to be listed as a
     // `Variant` here, which was wrong (this arch cannot load it) - see the
     // `qwen3vlmoe` row below, confirmed against the real released config.json.
-    arch!("qwen3vl", "Qwen3-VL-4B (ViT+PatchMerger+DeepStack)", Multimodal, LlamaCpp, "brain-qwen3vl", hf: &["Qwen3VLForConditionalGeneration"], default_ref: Some("Qwen/Qwen3-VL-4B-Instruct"), weights_env: &[("BRAIN_QWEN3VL_WEIGHTS", "weights")],
+    // `weights_env` is empty: `generate`/`lora_train`'s checkpoint is
+    // resolved through `qwen3vl::spec::Qwen3VlSpec` (the model-store
+    // resolver) instead of `BRAIN_QWEN3VL_WEIGHTS` - see
+    // `crates/cli/src/catalog.rs`'s `resolved_assembly_for`. The residency
+    // adapter (`crates/cli/src/resident_qwen3vl.rs`) still reads that
+    // variable directly - out of this migration's scope.
+    arch!("qwen3vl", "Qwen3-VL-4B (ViT+PatchMerger+DeepStack)", Multimodal, LlamaCpp, "brain-qwen3vl", hf: &["Qwen3VLForConditionalGeneration"], default_ref: Some("Qwen/Qwen3-VL-4B-Instruct"),
         variants: &[
             Variant { reference: "Qwen/Qwen3-VL-2B-Instruct", params: 2_127_532_032, quants: &["Q4_K_M", "Q8_0"] },
             Variant { reference: "Qwen/Qwen3-VL-4B-Instruct", params: 4_400_000_000, quants: &["Q4_K_M", "Q8_0"] },
@@ -320,8 +334,16 @@ pub const ARCHS: &[Arch] = &[
             // ~3B active of 31B total.
             Variant { reference: "Qwen/Qwen3-VL-30B-A3B-Instruct", params: 31_070_000_000, quants: &["Q4_K_M", "Q8_0"] },
         ]),
-    arch!("fastvlm", "Apple FastVLM (FastViTHD + Qwen2 decoder)", Multimodal, Brain, "brain-fastvlm", hf: &["LlavaQwen2ForCausalLM"], default_ref: Some("apple/FastVLM-0.5B"), weights_env: &[("BRAIN_FASTVLM_WEIGHTS", "weights")]),
-    arch!("moondream3", "Moondream 3 (SigLIP + MoE decoder)", Multimodal, Brain, "brain-moondream3", hf: &["Moondream3ForConditionalGeneration"], default_ref: Some("moondream/moondream3-preview"), weights_env: &[("BRAIN_MOONDREAM3_WEIGHTS", "dir")]),
+    // `weights_env` is empty: FastVLM's checkpoint is resolved through
+    // `fastvlm::spec::FastvlmSpec` (the model-store resolver) instead of
+    // `BRAIN_FASTVLM_WEIGHTS` - see `crates/cli/src/catalog.rs`'s
+    // `resolved_assembly_for`.
+    arch!("fastvlm", "Apple FastVLM (FastViTHD + Qwen2 decoder)", Multimodal, Brain, "brain-fastvlm", hf: &["LlavaQwen2ForCausalLM"], default_ref: Some("apple/FastVLM-0.5B")),
+    // `weights_env` is empty: `dir` is resolved through
+    // `moondream3::spec::Moondream3Spec` (the model-store resolver) instead
+    // of `BRAIN_MOONDREAM3_WEIGHTS` - see `crates/cli/src/catalog.rs`'s
+    // `resolved_assembly_for`.
+    arch!("moondream3", "Moondream 3 (SigLIP + MoE decoder)", Multimodal, Brain, "brain-moondream3", hf: &["Moondream3ForConditionalGeneration"], default_ref: Some("moondream/moondream3-preview")),
     // LLaVA-1.5: CLIP-L/14@336 vision tower + a Vicuna-1.5 (LLaMA-2) decoder,
     // an `mm_projector` splicing patch features into the text stream at
     // `mm_vision_select_layer = -2`. `hf:` is the original repo's own
@@ -338,10 +360,14 @@ pub const ARCHS: &[Arch] = &[
     // not `deepseek-ai/DeepSeek-OCR` -- the latter is a `transformers`-shaped
     // repo with an empty `hf:` list here, so it would fall through to
     // `TransformersRecipe` and fail `UnsupportedArchitecture`, and this is
-    // the checkpoint `crates/deepseek2ocr` actually loads (`BRAIN_DEEPSEEK_OCR_DIR`
+    // the checkpoint `crates/deepseek2ocr` actually loads (its `dir` role
     // wants the two-GGUF pair, not an HF safetensors dir). See
     // `crates/modelstore/src/recipe.rs`'s `deepseek2ocr-gguf` `FilesRecipe` row.
-    arch!("deepseek2ocr", "DeepSeek-OCR (SAM+CLIP DeepEncoder + DeepSeek-V2 decoder)", Multimodal, LlamaCpp, "brain-deepseek2ocr", gguf: Some("deepseek2-ocr"), default_ref: Some("ggml-org/DeepSeek-OCR-GGUF"), weights_env: &[("BRAIN_DEEPSEEK_OCR_DIR", "dir")],
+    // `weights_env` is empty: `dir` is resolved through
+    // `deepseek2ocr::spec::Deepseek2ocrSpec` (the model-store resolver)
+    // instead of `BRAIN_DEEPSEEK_OCR_DIR` - see
+    // `crates/cli/src/catalog.rs`'s `resolved_assembly_for`.
+    arch!("deepseek2ocr", "DeepSeek-OCR (SAM+CLIP DeepEncoder + DeepSeek-V2 decoder)", Multimodal, LlamaCpp, "brain-deepseek2ocr", gguf: Some("deepseek2-ocr"), default_ref: Some("ggml-org/DeepSeek-OCR-GGUF"),
         variants: &[Variant { reference: "ggml-org/DeepSeek-OCR-GGUF", params: 3_336_106_240, quants: &["Q8_0"] }]),
     arch!("qwen3asr", "Qwen3-ASR-1.7B (Whisper-style encoder + Qwen3 decoder)", Audio, Brain, "brain-qwen3asr", hf: &["Qwen3ASRForConditionalGeneration"], default_ref: Some("Qwen/Qwen3-ASR-1.7B"), weights_env: &[("BRAIN_QWEN3ASR", "weights")]),
     arch!("nemotronasr", "Nemotron-3.5-ASR-Streaming (FastConformer + RNN-T)", Audio, Brain, "brain-nemotronasr", hf: &["Nemotron3_5AsrForRNNT"], default_ref: Some("nvidia/nemotron-3.5-asr-streaming-0.6b"), weights_env: &[("BRAIN_NEMOTRONASR", "weights")],

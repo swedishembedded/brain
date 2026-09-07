@@ -46,6 +46,20 @@ impl ResolveFailure {
             ResolveFailure::NoModelsDir(m) | ResolveFailure::Ambiguous(m) | ResolveFailure::Missing(m) => m,
         }
     }
+    /// The process exit code a CLI caller should use for this outcome.
+    pub fn exit_code(&self) -> i32 {
+        match self {
+            ResolveFailure::NoModelsDir(_) => 1,
+            ResolveFailure::Ambiguous(_) => AMBIGUOUS_EXIT,
+            ResolveFailure::Missing(_) => MISSING_EXIT,
+        }
+    }
+}
+
+impl std::fmt::Display for ResolveFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.message())
+    }
 }
 
 /// Resolve `arch`'s roles through the model-store resolver: scans the models
@@ -72,17 +86,9 @@ pub fn try_resolve(arch: &str, spec: &dyn ArchSpec, overrides: &BTreeMap<String,
 pub fn resolve_or_exit(arch: &str, spec: &dyn ArchSpec, overrides: &BTreeMap<String, String>) -> Assembly {
     match try_resolve(arch, spec, overrides) {
         Ok(assembly) => assembly,
-        Err(ResolveFailure::NoModelsDir(m)) => {
-            eprintln!("{m}");
-            std::process::exit(1);
-        }
-        Err(ResolveFailure::Ambiguous(m)) => {
-            eprint!("{m}");
-            std::process::exit(AMBIGUOUS_EXIT);
-        }
-        Err(ResolveFailure::Missing(m)) => {
-            eprint!("{m}");
-            std::process::exit(MISSING_EXIT);
+        Err(e) => {
+            eprint!("{}", e.message());
+            std::process::exit(e.exit_code());
         }
     }
 }

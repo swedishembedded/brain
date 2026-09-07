@@ -168,12 +168,14 @@ pub enum ResidentCtor {
 /// Builds a single-device adapter, or `None` when its weights are not configured.
 pub type SingleCtor = fn() -> Option<Arc<dyn ResidentModel>>;
 
-/// Builds a multi-device adapter from `build_executor`'s budgeted `(index,
-/// TOTAL bytes)` GPU list and its per-card reserve - such a model has to choose
-/// its own device set against genuinely usable capacity, because
-/// `residency::multi::pick_devices` checks the set it names but never
-/// substitutes a different one.
-pub type MultiCtor = fn(&[(u32, u64)], u64) -> Option<Arc<dyn residency::multi::MultiDeviceResidentModel>>;
+/// Builds a multi-device adapter from an already-resolved [`Assembly`] (see
+/// [`ModelEntry::provider`]'s doc - the same contract, for the multi-device
+/// claim path) plus `build_executor`'s budgeted `(index, TOTAL bytes)` GPU
+/// list and its per-card reserve - such a model has to choose its own device
+/// set against genuinely usable capacity, because `residency::multi::
+/// pick_devices` checks the set it names but never substitutes a different
+/// one.
+pub type MultiCtor = fn(&Assembly, &[(u32, u64)], u64) -> Option<Arc<dyn residency::multi::MultiDeviceResidentModel>>;
 
 /// One served model. `provider` and `manifest` describe the SAME model by
 /// construction - that is the whole point of the type. See the module doc for
@@ -183,9 +185,11 @@ pub struct ModelEntry {
     pub manifest: fn() -> Manifest,
     /// Build something runnable from an already-resolved [`Assembly`]. `Err`
     /// carries the model's OWN "set BRAIN_…" message, so a caller never sees
-    /// a generic one. Every entry but FLUX.2's ignores the assembly today
-    /// (its weights still come from `BRAIN_*` env vars, per the module doc);
-    /// FLUX.2's own entry is the first to build its `Provider` from it.
+    /// a generic one. FLUX.2's entry was the first to build its `Provider`
+    /// from it (`crates/cli/src/catalog.rs`'s `resolved_assembly_for` is what
+    /// actually resolves one for it and for every architecture migrated onto
+    /// the resolver since); every entry not yet migrated still ignores the
+    /// argument and reads `BRAIN_*` env vars instead, per the module doc.
     pub provider: fn(&Assembly) -> Result<Arc<dyn Provider>, String>,
     /// Register with the residency scheduler, when this model has an adapter
     /// and its weights are configured. `None` from the fn means "not
@@ -224,13 +228,14 @@ macro_rules! resident {
     };
 }
 
-/// Shorthand: a MULTI-device residency adapter built from env, given
-/// `build_executor`'s budgeted GPU list and per-card reserve.
+/// Shorthand: a MULTI-device residency adapter built from an already-resolved
+/// [`Assembly`](crate::__reexport::Assembly), given `build_executor`'s
+/// budgeted GPU list and per-card reserve.
 #[macro_export]
 macro_rules! resident_multi {
     ($ctor:path) => {
-        Some($crate::ResidentCtor::Multi((|gpus: &[(u32, u64)], reserved: u64| {
-            $ctor(gpus, reserved).map(|r| std::sync::Arc::new(r) as std::sync::Arc<dyn $crate::__reexport::MultiDeviceResidentModel>)
+        Some($crate::ResidentCtor::Multi((|assembly: &$crate::__reexport::Assembly, gpus: &[(u32, u64)], reserved: u64| {
+            $ctor(assembly, gpus, reserved).map(|r| std::sync::Arc::new(r) as std::sync::Arc<dyn $crate::__reexport::MultiDeviceResidentModel>)
         }) as $crate::MultiCtor))
     };
 }
@@ -329,13 +334,19 @@ pub fn models() -> Vec<ModelEntry> {
             provider: always!(qwen35moe::caps::Qwen35Provider::new()),
             resident: None,
         },
-        // Qwen3.8-27B dense hybrid GDN/GQA decoder: same reasoning as
-        // qwen35moe above (weights is a per-invocation action param; the
-        // always-hot HTTP/D-Bus path is `crate::resident_qwen35::Qwen35Resident`,
-        // registered directly in `crates/cli/src/resident.rs`).
+        // Qwen3.8-27B dense hybrid GDN/GQA decoder: `weights`/`tokenizer` are
+        // per-invocation action params, resolved through
+        // `qwen35::spec::Qwen35Spec` instead of `BRAIN_QWEN35_{WEIGHTS,
+        // TOKENIZER}` (see that module's doc); the always-hot HTTP/D-Bus path
+        // is `crate::resident_qwen35::Qwen35Resident`, registered directly in
+        // `crates/cli/src/resident.rs`.
         ModelEntry {
             manifest: qwen35::caps::manifest,
-            provider: always!(qwen35::caps::Qwen35Provider::new()),
+            provider: |assembly: &Assembly| {
+                let weights = assembly.roles.get("weights").map(|p| p.to_string_lossy().into_owned());
+                let tokenizer = assembly.roles.get("tokenizer").map(|p| p.to_string_lossy().into_owned());
+                Ok(Arc::new(qwen35::caps::Qwen35Provider::new().with_defaults(weights, tokenizer)) as Arc<dyn Provider>)
+            },
             resident: None,
         },
         ModelEntry {
@@ -343,9 +354,17 @@ pub fn models() -> Vec<ModelEntry> {
             provider: always!(lfm2::caps::LfmProvider::new()),
             resident: None,
         },
+        // FastVLM: `weights` is resolved through `fastvlm::spec::FastvlmSpec`
+        // (see that module's doc) instead of `BRAIN_FASTVLM_WEIGHTS` -
+        // `Assembly::roles["weights"]` when the caller resolved one, `None`
+        // otherwise (a caller that still names `weights` per request, or has
+        // not scanned a models directory at all).
         ModelEntry {
             manifest: fastvlm::caps::manifest,
-            provider: always!(fastvlm::caps::FastVlmProvider::new()),
+            provider: |assembly: &Assembly| {
+                let weights = assembly.roles.get("weights").map(|p| p.to_string_lossy().into_owned());
+                Ok(Arc::new(fastvlm::caps::FastVlmProvider::new(weights)) as Arc<dyn Provider>)
+            },
             resident: None,
         },
         ModelEntry {
@@ -353,10 +372,16 @@ pub fn models() -> Vec<ModelEntry> {
             provider: always!(llava::caps::LlavaProvider::new()),
             resident: None,
         },
+        // `weights` is resolved through `qwen3vl::spec::Qwen3VlSpec` (see that
+        // module's doc) instead of `BRAIN_QWEN3VL_WEIGHTS` - same shape as
+        // fastvlm's own entry above.
         ModelEntry {
             manifest: qwen3vl::caps::manifest,
-            provider: always!(qwen3vl::caps::QwenVlProvider::new()),
-            resident: None, // no residency adapter yet -- brain caps/brain do only, matching fastvlm's own state
+            provider: |assembly: &Assembly| {
+                let weights = assembly.roles.get("weights").map(|p| p.to_string_lossy().into_owned());
+                Ok(Arc::new(qwen3vl::caps::QwenVlProvider::new(weights)) as Arc<dyn Provider>)
+            },
+            resident: None, // qwen3vl's own residency adapter (crates/cli/src/resident_qwen3vl.rs) is CLI-local and out of this migration's scope
         },
         ModelEntry {
             manifest: yolov8::caps::manifest,
@@ -496,21 +521,28 @@ pub fn models() -> Vec<ModelEntry> {
         // vision tower runs on wgpu while its decoder runs on the CPU
         // backend, so it holds real bytes on two devices at once - see
         // `crate::resident_deepseekocr`'s header in `crates/cli`.
+        // `dir` is resolved through `deepseek2ocr::spec::Deepseek2ocrSpec`
+        // (see that module's doc) instead of `BRAIN_DEEPSEEK_OCR_DIR`.
         ModelEntry {
             manifest: deepseek2ocr::caps::manifest,
-            provider: from_env!(
-                deepseek2ocr::caps::DeepseekOcrProvider::from_env,
-                "set BRAIN_DEEPSEEK_OCR_DIR to a directory holding mmproj-DeepSeek-OCR-Q8_0.gguf + DeepSeek-OCR-Q8_0.gguf"
-            ),
+            provider: |assembly: &Assembly| {
+                let dir = deepseek2ocr::spec::dir_from_assembly(assembly)?;
+                deepseek2ocr::caps::DeepseekOcrProvider::new(dir).map(|p| Arc::new(p) as Arc<dyn Provider>).ok_or_else(|| "deepseek-ocr: resolved dir does not hold both shipped GGUFs".to_string())
+            },
             resident: None,
         },
         // Moondream 3: an image in, text out. SigLIP ViT with overlap multi-crop
         // -> connector -> a parallel-block sparse-MoE decoder. int8 experts by
         // default, because the fp32 build is ~43 GiB and loads nowhere - see
         // `crate::resident_moondream3`'s header in `crates/cli`.
+        // `dir` is resolved through `moondream3::spec::Moondream3Spec` (see
+        // that module's doc) instead of `BRAIN_MOONDREAM3_WEIGHTS`.
         ModelEntry {
             manifest: moondream3::caps::manifest,
-            provider: always!(moondream3::caps::Moondream3Provider::new()),
+            provider: |assembly: &Assembly| {
+                let dir = assembly.roles.get("dir").map(|p| p.to_string_lossy().into_owned());
+                Ok(Arc::new(moondream3::caps::Moondream3Provider::new().with_default_dir(dir)) as Arc<dyn Provider>)
+            },
             resident: None,
         },
         ModelEntry {
@@ -775,10 +807,15 @@ mod tests {
             for a in &m.actions {
                 for p in &a.params {
                     if WEIGHT_LOCATION_PARAMS.contains(&p.name.as_str()) {
+                        // `host_env` (one literal env var) and `host_resolved`
+                        // (a richer host-side answer, e.g. a model-store
+                        // resolver scan - see `ParamSpec::host_resolved`'s own
+                        // doc) are the two ways a param declares "the host
+                        // answers this, never a remote caller".
                         assert!(
-                            p.host_env.is_some(),
+                            p.host_env.is_some() || p.host_resolved,
                             "'{}':'{}' takes '{}' as a plain param - it will be published to every \
-                             remote caller until it declares `.host_env(\"BRAIN_…\")`",
+                             remote caller until it declares `.host_env(\"BRAIN_…\")` or `.host_resolved()`",
                             m.model,
                             a.name,
                             p.name
@@ -812,7 +849,7 @@ mod tests {
             assert_eq!(full.model, served.model);
             assert_eq!(full.actions.len(), served.actions.len(), "'{}' lost an action", full.model);
             for (fa, sa) in full.actions.iter().zip(&served.actions) {
-                let expect: Vec<&str> = fa.params.iter().filter(|p| p.host_env.is_none()).map(|p| p.name.as_str()).collect();
+                let expect: Vec<&str> = fa.params.iter().filter(|p| p.host_env.is_none() && !p.host_resolved).map(|p| p.name.as_str()).collect();
                 let got: Vec<&str> = sa.params.iter().map(|p| p.name.as_str()).collect();
                 assert_eq!(got, expect, "'{}':'{}' params changed beyond the host-resolved ones", full.model, fa.name);
                 assert_eq!(sa.inputs.len(), fa.inputs.len(), "'{}':'{}' lost an input", full.model, fa.name);

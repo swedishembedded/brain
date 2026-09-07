@@ -100,10 +100,10 @@ fn resident_ctor_for(model_id: &str) -> Option<ResidentCtor> {
         // decoder runs on the CPU backend, so it must be claimed through
         // `claim_multi` for both to be budgeted - see
         // `crate::resident_deepseekocr`'s header.
-        return catalog::resident_multi!(crate::resident_deepseekocr::DeepseekOcrResident::from_env);
+        return catalog::resident_multi!(crate::resident_deepseekocr::DeepseekOcrResident::from_assembly);
     }
     if model_id == moondream3::caps::MODEL {
-        return catalog::resident!(crate::resident_moondream3::Moondream3Resident::from_env);
+        return None; // registered directly in build_executor with a resolved Assembly, see resident.rs
     }
     if model_id == qwen3vl::caps::MODEL {
         return catalog::resident!(crate::resident_qwen3vl::Qwen3VlResident::from_env);
@@ -207,21 +207,21 @@ pub fn manifests() -> Vec<Manifest> {
     models().into_iter().map(|e| (e.manifest)()).collect()
 }
 
-/// A placeholder [`Assembly`] for a caller that has none - every entry whose
-/// architecture has no [`ArchSpec`] registered below ignores the argument
-/// entirely (see `catalog::ModelEntry::provider`'s doc).
+/// A placeholder [`Assembly`] for a caller that has none - every entry not
+/// listed in [`resolver_spec_for`] ignores the argument today (see
+/// `catalog::ModelEntry::provider`'s doc).
 fn empty_assembly() -> Assembly {
     Assembly { id: String::new(), arch: String::new(), variant: None, roles: Default::default(), provenance: Vec::new() }
 }
 
-/// `(catalog model id, arch name, ArchSpec)` for every model whose
-/// `ModelEntry::provider` actually reads the [`Assembly`] it is called with -
-/// [`provider`] resolves a real one for these through the model-store
-/// resolver instead of [`empty_assembly`]. FLUX.2 is not listed here: it
-/// reaches its own resolver-backed weights through `crate::flux2_cli`'s
-/// dedicated command, never through this generic `brain do` path, so its
-/// catalog entry keeps building from `empty_assembly` here (a pre-existing
-/// gap this migration does not change).
+/// `(arch name, ArchSpec)` for every catalog model id whose `ModelEntry::provider`
+/// actually reads the [`Assembly`] it is called with - [`resolved_assembly_for`]
+/// resolves a real one for these through the model-store resolver instead of
+/// [`empty_assembly`]. FLUX.2 is not listed here: it reaches its own
+/// resolver-backed weights through `crate::flux2_cli`'s dedicated command,
+/// never through this generic `brain do` path, so its catalog entry keeps
+/// building from `empty_assembly` here (a pre-existing gap this migration
+/// does not change).
 fn resolver_spec_for(model_id: &str) -> Option<(&'static str, Box<dyn ArchSpec>)> {
     if model_id == cosyvoice::caps::MODEL {
         return Some(("cosyvoice", Box::new(cosyvoice::spec::CosyVoiceSpec)));
@@ -229,7 +229,33 @@ fn resolver_spec_for(model_id: &str) -> Option<(&'static str, Box<dyn ArchSpec>)
     if model_id == minimaxmusic3::caps::MODEL {
         return Some(("minimaxmusic3", Box::new(minimaxmusic3::spec::MinimaxMusic3Spec)));
     }
+    if model_id == qwen35::caps::MODEL {
+        return Some(("qwen35", Box::new(qwen35::spec::Qwen35Spec)));
+    }
+    if model_id == qwen3vl::caps::MODEL {
+        return Some(("qwen3vl", Box::new(qwen3vl::spec::Qwen3VlSpec)));
+    }
+    if model_id == fastvlm::caps::MODEL {
+        return Some(("fastvlm", Box::new(fastvlm::spec::FastvlmSpec)));
+    }
+    if model_id == moondream3::caps::MODEL {
+        return Some(("moondream3", Box::new(moondream3::spec::Moondream3Spec)));
+    }
+    if model_id == deepseek2ocr::caps::MODEL {
+        return Some(("deepseek2ocr", Box::new(deepseek2ocr::spec::Deepseek2ocrSpec)));
+    }
     None
+}
+
+/// [`resolver_spec_for`] plus the actual resolve, collapsed to one `Result`
+/// so both [`provider`] and [`multi_residents`] share the same choke point
+/// instead of each re-deriving "look up the spec, then resolve it" - `Some`
+/// only for a model [`resolver_spec_for`] actually names; `None` means "this
+/// model's weights are not resolver-based at all", so the caller falls back
+/// to [`empty_assembly`].
+fn resolved_assembly_for(model: &str) -> Option<Result<Assembly, String>> {
+    let (arch, spec) = resolver_spec_for(model)?;
+    Some(crate::resolver_cli::try_resolve(arch, spec.as_ref(), &std::collections::BTreeMap::new()).map_err(|e| e.message().to_string()))
 }
 
 /// Build a runnable provider for `model`, or say why not.
@@ -244,8 +270,8 @@ fn resolver_spec_for(model_id: &str) -> Option<(&'static str, Box<dyn ArchSpec>)
 pub fn provider(model: &str) -> Result<Arc<dyn Provider>, String> {
     for e in models() {
         if (e.manifest)().model == model {
-            let assembly = match resolver_spec_for(model) {
-                Some((arch, spec)) => crate::resolver_cli::try_resolve(arch, spec.as_ref(), &std::collections::BTreeMap::new()).map_err(|e| e.message().to_string())?,
+            let assembly = match resolved_assembly_for(model) {
+                Some(r) => r?,
                 None => empty_assembly(),
             };
             return (e.provider)(&assembly);
@@ -281,7 +307,18 @@ pub fn multi_residents(gpus: &[(u32, u64)], reserved: u64) -> Vec<Arc<dyn reside
     models()
         .into_iter()
         .filter_map(|e| match e.resident {
-            Some(ResidentCtor::Multi(f)) => f(gpus, reserved),
+            Some(ResidentCtor::Multi(f)) => {
+                let model = (e.manifest)().model;
+                let assembly = match resolved_assembly_for(&model) {
+                    Some(Ok(a)) => a,
+                    Some(Err(err)) => {
+                        eprintln!("brain: {model} not served ({err})");
+                        return None;
+                    }
+                    None => empty_assembly(),
+                };
+                f(&assembly, gpus, reserved)
+            }
             _ => None,
         })
         .collect()
@@ -408,7 +445,6 @@ mod tests {
             flux1::caps::MODEL,
             pulid::caps::MODEL,
             deepseek2ocr::caps::MODEL,
-            moondream3::caps::MODEL,
             qwen3vl::caps::MODEL,
             qwen3tts::caps::MODEL,
             minimaxmusic3::caps::MODEL,

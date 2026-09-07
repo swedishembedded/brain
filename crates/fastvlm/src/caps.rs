@@ -30,12 +30,6 @@ use paramstore::ParamStore;
 use qwen3::model::Qwen;
 
 pub const MODEL: &str = "brain/fastvlm";
-/// Default FastVLM checkpoint directory — from `$BRAIN_FASTVLM_WEIGHTS`, never a
-/// baked-in absolute path (see AGENTS.md: no absolute paths in source). Empty when
-/// unset, so the `weights` param (or the caller) must supply one.
-fn default_weights() -> String {
-    std::env::var("BRAIN_FASTVLM_WEIGHTS").unwrap_or_default()
-}
 /// The tower's input side and its output grid (1024 px → 256 tokens of 3072).
 const VISION_SIDE: u32 = 1024;
 const IMG_TOKENS: u32 = 256;
@@ -44,8 +38,12 @@ const VISION_DIM: u32 = 3072;
 pub fn manifest() -> Manifest {
     let caption = ActionSpec::new("caption", "describe an image (MobileCLIP tower + Qwen2 decoder, greedy)")
         .param(
-            ParamSpec::new("weights", ParamType::Str, "FastVLM checkpoint DIRECTORY (config.json + model.safetensors + tokenizer.json)")
-                .host_env("BRAIN_FASTVLM_WEIGHTS"),
+            ParamSpec::new(
+                "weights",
+                ParamType::Str,
+                "FastVLM checkpoint DIRECTORY (config.json + model.safetensors + tokenizer.json); overrides the model-store resolver's own pick when set",
+            )
+            .host_resolved(),
         )
         .param(ParamSpec::new("prompt", ParamType::Str, "instruction for the model").default(serde_json::json!("Describe this image.")))
         .param(ParamSpec::new("max_new", ParamType::Int, "max caption tokens").default(serde_json::json!(48)))
@@ -60,9 +58,10 @@ pub fn manifest() -> Manifest {
 }
 
 /// The manifest for the RESIDENT/scheduled service (D-Bus, executor, HTTP):
-/// the checkpoint directory is service-side configuration
-/// (`BRAIN_FASTVLM_WEIGHTS`), so the served action carries only real
-/// per-request parameters - see `glmdsa::caps::manifest_resident`'s doc for
+/// the checkpoint directory is service-side configuration (resolved through
+/// the model store, see `crate::spec::FastvlmSpec`), so the served action
+/// carries only real per-request parameters - see
+/// `glmdsa::caps::manifest_resident`'s doc for
 /// why a static, CLI-facing manifest and a stripped resident one are two
 /// different things, not one hidden behind deployment state. Used by
 /// `residency::bridge::ProviderResident::stateless_with_manifest`, which
@@ -99,17 +98,27 @@ struct DecodeStage {
     tok: data::qwen_tokenizer::QwenBpe,
 }
 
-pub struct FastVlmProvider;
+/// A stateless-to-construct provider that carries the checkpoint directory
+/// the model-store resolver picked (or `None`, when the caller must always
+/// name `weights` explicitly per request - e.g. `brain do` before a models
+/// directory is scanned) as its own fallback for a request that omits
+/// `weights`.
+pub struct FastVlmProvider {
+    default_weights: Option<String>,
+}
 
 impl FastVlmProvider {
-    pub fn new() -> FastVlmProvider {
-        FastVlmProvider
+    /// `default_weights` is the resolved `weights` role's path (see
+    /// `crate::spec::FastvlmSpec`), or `None` for a provider that must be
+    /// given `weights` on every request.
+    pub fn new(default_weights: Option<String>) -> FastVlmProvider {
+        FastVlmProvider { default_weights }
     }
 }
 
 impl Default for FastVlmProvider {
     fn default() -> Self {
-        Self::new()
+        Self::new(None)
     }
 }
 
@@ -119,11 +128,13 @@ impl Provider for FastVlmProvider {
         manifest()
     }
     fn action(&self, name: &str) -> Option<Arc<dyn Action>> {
-        (name == "caption").then(|| Arc::new(CaptionAction) as Arc<dyn Action>)
+        (name == "caption").then(|| Arc::new(CaptionAction { default_weights: self.default_weights.clone() }) as Arc<dyn Action>)
     }
 }
 
-struct CaptionAction;
+struct CaptionAction {
+    default_weights: Option<String>,
+}
 
 // One process-wide resident per STAGE (the provider is registered once);
 // keyed by checkpoint dir (and precision for the decoder) so switching swaps
@@ -137,7 +148,11 @@ impl Action for CaptionAction {
     }
 
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        let dir = inv.get_str("weights").filter(|s| !s.is_empty()).unwrap_or_else(default_weights);
+        let dir = inv
+            .get_str("weights")
+            .filter(|s| !s.is_empty())
+            .or_else(|| self.default_weights.clone())
+            .ok_or("fastvlm caption: no checkpoint directory (pass 'weights', or configure one through the models directory)")?;
         let prompt = inv.get_str("prompt").unwrap_or_else(|| "Describe this image.".to_string());
         let max_new = inv.get_i64("max_new").unwrap_or(48).clamp(1, 512) as usize;
         let precision = inv.get_str("precision").unwrap_or_else(|| "fp32".to_string());
@@ -364,7 +379,7 @@ mod tests {
                 "image",
                 Blob::new(Media::Image, vec![0u8; 12]).with_meta(serde_json::json!({"w": 1, "h": 1})),
             );
-        let r = CaptionAction.run(&inv, &mut |_| {});
+        let r = CaptionAction { default_weights: None }.run(&inv, &mut |_| {});
         let err = r.err().unwrap_or_default();
         assert!(err.contains("cannot read"), "{err}");
     }

@@ -139,12 +139,17 @@ pub fn build_executor(gpus: &[(u32, u64)], npus: &[(u32, u64)], unified_gpus: &[
     if let Some(q) = crate::resident_qwen35moe::Qwen35Resident::from_env() {
         models.push(Arc::new(q));
     }
-    // Qwen3.8-27B dense hybrid Gated-DeltaNet/GQA decoder
-    // (BRAIN_QWEN35_WEIGHTS + BRAIN_QWEN35_TOKENIZER) -- same single-GPU,
-    // fp32 weights + KV scope as qwen35moe above (see resident_qwen35.rs's
-    // own module doc).
-    if let Some(q) = crate::resident_qwen35::Qwen35Resident::from_env() {
-        models.push(Arc::new(q));
+    // Qwen3.8-27B dense hybrid Gated-DeltaNet/GQA decoder, resolved through
+    // `qwen35::spec::Qwen35Spec`'s `weights`/`tokenizer` roles instead of
+    // `BRAIN_QWEN35_{WEIGHTS,TOKENIZER}` -- same single-GPU, fp32 weights +
+    // KV scope as qwen35moe above (see resident_qwen35.rs's own module doc).
+    match crate::resolver_cli::try_resolve("qwen35", &qwen35::spec::Qwen35Spec, &Default::default()) {
+        Ok(assembly) => {
+            if let Some(q) = crate::resident_qwen35::Qwen35Resident::from_assembly(&assembly) {
+                models.push(Arc::new(q));
+            }
+        }
+        Err(e) => eprintln!("brain: qwen35 not served over the scheduler ({e})"),
     }
     // LFM2.5-Encoder (BRAIN_LFM2 + BRAIN_LFM2_TOKENIZER): fill-mask + embeddings
     // with equal-length true batching (see resident_lfm.rs).
@@ -224,10 +229,31 @@ pub fn build_executor(gpus: &[(u32, u64)], npus: &[(u32, u64)], unified_gpus: &[
     // `weights` param is CLI-only convenience (`brain fastvlm caption
     // --weights ...`) that a scheduled caller must never see or be able to
     // set - see `fastvlm::caps::manifest_resident`'s doc.
+    let fastvlm_weights = match crate::resolver_cli::try_resolve("fastvlm", &fastvlm::spec::FastvlmSpec, &Default::default()) {
+        Ok(assembly) => assembly.roles.get("weights").map(|p| p.to_string_lossy().into_owned()),
+        Err(e) => {
+            eprintln!("brain: fastvlm serving no default checkpoint ({e})");
+            None
+        }
+    };
     models.push(Arc::new(ProviderResident::stateless_with_manifest(
-        Arc::new(fastvlm::caps::FastVlmProvider::new()),
+        Arc::new(fastvlm::caps::FastVlmProvider::new(fastvlm_weights)),
         fastvlm::caps::manifest_resident(),
     )));
+    // Moondream 3: `dir` resolved through `moondream3::spec::Moondream3Spec`
+    // instead of `BRAIN_MOONDREAM3_WEIGHTS` - registered directly (not through
+    // `crate::catalog::residents()`) because `Moondream3Resident::
+    // from_assembly` needs the resolved `Assembly` the generic `SingleCtor`
+    // shape has no room for, the same reason FLUX.2's own resident is
+    // registered directly above rather than through that list.
+    match crate::resolver_cli::try_resolve("moondream3", &moondream3::spec::Moondream3Spec, &Default::default()) {
+        Ok(assembly) => {
+            if let Some(m) = crate::resident_moondream3::Moondream3Resident::from_assembly(&assembly) {
+                models.push(Arc::new(m));
+            }
+        }
+        Err(e) => eprintln!("brain: moondream3 not served over the scheduler ({e})"),
+    }
     // LLaVA-1.5-13B captioning: same stateless-resident shape as FastVLM
     // above - the provider manages its own weight residency lazily, per
     // checkpoint dir. Same `manifest_resident` reasoning as FastVLM.
@@ -306,12 +332,6 @@ pub fn build_executor(gpus: &[(u32, u64)], npus: &[(u32, u64)], unified_gpus: &[
     // `resident_qwen35::multi_gpu_gguf_from_env`'s own doc.
     if let Some(q) = crate::resident_qwen35::multi_gpu_gguf_from_env(gpus, reserved) {
         exec.register_multi(Arc::new(q));
-    } else {
-        eprintln!(
-            "brain: {} not served over the scheduler (set {} to a Qwen3.8-27B*.gguf, or fetch it into the model store)",
-            qwen35::int8_gguf_resident::MODEL,
-            qwen35::int8_gguf_resident::GGUF_ENV
-        );
     }
     Serving { executor: exec, qwen }
 }

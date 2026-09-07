@@ -103,11 +103,22 @@ pub struct ParamSpec {
     /// Only meaningful on a [`ParamType::Str`] param: an environment variable
     /// is a string. `crates/catalog`'s tests pin that over the real catalog.
     pub host_env: Option<String>,
+    /// The same "this is host configuration, not a caller's choice" contract
+    /// [`ParamSpec::host_env`] documents, for a param whose host-side answer
+    /// comes from somewhere richer than one literal environment variable (a
+    /// model-store resolver scan, say) rather than a name `ActionSpec::
+    /// validate` can read directly. [`ActionSpec::for_serving`] drops it from
+    /// a served/remote manifest exactly as it drops a `host_env` param; unlike
+    /// `host_env`, `validate` does NOT fill it in - the provider itself
+    /// supplies the resolved value as its own fallback when a request omits
+    /// it (see e.g. `fastvlm::caps::FastVlmProvider`), so there is no
+    /// still-checked environment variable standing behind it.
+    pub host_resolved: bool,
 }
 
 impl ParamSpec {
     pub fn new(name: &str, ty: ParamType, help: &str) -> ParamSpec {
-        ParamSpec { name: name.into(), ty, required: false, default: None, help: help.into(), min: None, max: None, step: None, host_env: None }
+        ParamSpec { name: name.into(), ty, required: false, default: None, help: help.into(), min: None, max: None, step: None, host_env: None, host_resolved: false }
     }
     pub fn required(mut self) -> ParamSpec {
         self.required = true;
@@ -117,6 +128,12 @@ impl ParamSpec {
     /// [`ParamSpec::host_env`] for what that means and why it exists.
     pub fn host_env(mut self, var: &str) -> ParamSpec {
         self.host_env = Some(var.into());
+        self
+    }
+    /// Marks this param as host-resolved from something other than one named
+    /// environment variable - see [`ParamSpec::host_resolved`].
+    pub fn host_resolved(mut self) -> ParamSpec {
+        self.host_resolved = true;
         self
     }
     pub fn default(mut self, v: Value) -> ParamSpec {
@@ -143,6 +160,7 @@ impl ParamSpec {
             "values": match &self.ty { ParamType::Enum(v) => json!(v), _ => Value::Null },
             "min": self.min, "max": self.max, "step": self.step,
             "host_env": self.host_env,
+            "host_resolved": self.host_resolved,
         })
     }
 }
@@ -253,15 +271,16 @@ impl ActionSpec {
     }
 
     /// This action as a REMOTE caller sees it: every host-resolved param
-    /// ([`ParamSpec::host_env`]) dropped, because a caller that does not share
-    /// this machine's filesystem cannot answer it and must not be asked.
-    /// Everything else - every real per-request knob - survives untouched.
+    /// ([`ParamSpec::host_env`] or [`ParamSpec::host_resolved`]) dropped,
+    /// because a caller that does not share this machine's filesystem cannot
+    /// answer it and must not be asked. Everything else - every real
+    /// per-request knob - survives untouched.
     ///
     /// This is the single definition every "served" manifest is derived from,
     /// so a model's direct surface and its served surface cannot drift: they
     /// are one [`ActionSpec`] and a projection of it.
     pub fn for_serving(mut self) -> ActionSpec {
-        self.params.retain(|p| p.host_env.is_none());
+        self.params.retain(|p| p.host_env.is_none() && !p.host_resolved);
         self
     }
 

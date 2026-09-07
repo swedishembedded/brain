@@ -19,6 +19,9 @@ pub mod vision_import;
 /// `capability::Provider` — the image-caption action (`brain do fastvlm caption`).
 pub mod caps;
 pub mod captioner;
+/// [`brain_modelstore::resolve::ArchSpec`] - which on-disk checkpoint
+/// directory satisfies FastVLM's `weights` role.
+pub mod spec;
 #[cfg(test)]
 mod parity;
 #[cfg(test)]

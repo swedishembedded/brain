@@ -95,10 +95,8 @@ served, with no error.
 | `BRAIN_SDXL_DIR` + `BRAIN_CONTROLNET_DIR` | SDXL + ControlNet text2image (both required) | the SDXL root above plus a diffusers ControlNet root |
 | `BRAIN_FLUX1_DIR` | FLUX.1 text2image | diffusers-layout root; must hold `transformer/`, or the model is not served |
 | `BRAIN_FLUX1_DIR` + `BRAIN_PULID_DIR` + `BRAIN_ARCFACE_DIR` + `BRAIN_CLIP_DIR` | PuLID identity-conditioned FLUX.1 text2image (all four required) | the FLUX.1 root plus the PuLID weights dir, and the face/CLIP dirs above |
-| `BRAIN_QWEN35_DIR` | Qwen3.8-27B dense hybrid decoder | HF checkpoint dir |
-| `BRAIN_FASTVLM_WEIGHTS` | FastVLM vision-language | checkpoint directory |
-| `BRAIN_QWEN3VL_WEIGHTS` | Qwen-VL vision-language (`brain caps`/`brain do` only - not yet residency-scheduled) | checkpoint directory |
-| `BRAIN_DEEPSEEK_OCR_DIR` | DeepSeek-OCR document image → text/markdown (CPU-resident, ~22 GiB) | dir holding `mmproj-DeepSeek-OCR-Q8_0.gguf` + `DeepSeek-OCR-Q8_0.gguf` |
+| _(none)_ | Qwen3.8-27B dense hybrid decoder, FastVLM vision-language, Moondream 3 vision-language, DeepSeek-OCR document image → text/markdown - all resolved automatically from the models directory (`qwen35`/`fastvlm`/`moondream3`/`deepseek2ocr::spec`); `--weights`/`weights` (and `--tokenizer` for qwen35) still name a checkpoint outright per call | n/a |
+| `BRAIN_QWEN3VL_WEIGHTS` | Qwen-VL vision-language's residency adapter (`brain serve`; direct `brain caps`/`brain do` use is resolved automatically like the row above, not yet migrated for serving) | checkpoint directory |
 | `BRAIN_CHRONOS2` | Chronos-2 forecasting | weights |
 | `BRAIN_FINCAST` | FinCast forecasting | weights |
 | `BRAIN_TIMESFM3` | TimesFM-3 forecasting (natively multivariate; target-only over this served path). `brain pull google/timesfm-3.0-pytorch` fetches the checkpoint, but no caller sets this variable for you yet - point it at the fetched directory (or an imported `.safetensors`) yourself | weights |

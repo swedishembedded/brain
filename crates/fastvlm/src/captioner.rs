@@ -38,7 +38,8 @@ pub struct FastVlmCaptioner {
 
 impl FastVlmCaptioner {
     /// Caption with the checkpoint in `dir`. An empty `dir` falls back to
-    /// `$BRAIN_FASTVLM_WEIGHTS`, the same as the served path.
+    /// whatever `crate::caps::FastVlmProvider::new` was constructed with -
+    /// the model-store resolver's own pick, when one is configured.
     pub fn new(dir: impl Into<String>) -> FastVlmCaptioner {
         FastVlmCaptioner { dir: dir.into(), precision: "fp32".to_string() }
     }
@@ -71,7 +72,7 @@ impl Captioner for FastVlmCaptioner {
                 on_token(d);
             }
         };
-        let action = crate::caps::FastVlmProvider::new()
+        let action = crate::caps::FastVlmProvider::new(None)
             .action("caption")
             .ok_or("fastvlm: the 'caption' action is missing from its own provider")?;
         let outcome = action.run(&inv, &mut progress)?;

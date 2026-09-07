@@ -100,10 +100,10 @@ round trip matters more than a pretty one.
 
 ## Choosing a model
 
-| `--model` | Weights env | Notes |
+| `--model` | Weights | Notes |
 |---|---|---|
-| `qwen3vl` (default) | `BRAIN_QWEN3VL_WEIGHTS` | aspect-preserving smart resize, per-image token count (`--max-pixels` caps it); the more detailed describer, and much the more expensive |
-| `fastvlm` | `BRAIN_FASTVLM_WEIGHTS` | small and fast, fixed 1024 px square input; `fp32` or `int8` decoder |
+| `qwen3vl` (default) | resolved automatically (`qwen3vl::spec::Qwen3VlSpec`) | aspect-preserving smart resize, per-image token count (`--max-pixels` caps it); the more detailed describer, and much the more expensive |
+| `fastvlm` | resolved automatically (`fastvlm::spec::FastvlmSpec`) | small and fast, fixed 1024 px square input; `fp32` or `int8` decoder |
 
 Both implement `captioner::Captioner`, and the labeler drives them through it
 without knowing anything about either. A model crate joins by adding one file:
