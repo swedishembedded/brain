@@ -620,6 +620,7 @@ impl Qwen3Vl {
     /// zero) buffer rather than the token embedding a plain-text caller would
     /// expect - use [`Self::encode_hidden_with_image`] for that case instead.
     pub fn encode_hidden(&self, tokens: &[u32], layer: usize) -> Vec<f32> {
+        self.write_text_mrope_tables(tokens.len());
         self.decoder.encode_hidden(tokens, layer)
     }
 
@@ -627,7 +628,34 @@ impl Qwen3Vl {
     /// `qwen3::Qwen::encode_hiddens`. Same splice-row caveat as
     /// [`Self::encode_hidden`].
     pub fn encode_hiddens(&self, tokens: &[u32], layers: &[usize]) -> Vec<Vec<f32>> {
+        self.write_text_mrope_tables(tokens.len());
         self.decoder.encode_hiddens(tokens, layers)
+    }
+
+    /// Upload the interleaved-M-RoPE `(cos, sin)` tables for a PURE-TEXT
+    /// stream of `len` tokens - the diagonal position assignment
+    /// `[i, i, i]`, which is exactly what [`crate::mrope::get_rope_index`]
+    /// produces for a run with no vision placeholders in it.
+    ///
+    /// Every `Qwen3Vl` decoder is switched to the table-driven `rope2d`
+    /// M-RoPE path at construction ([`Self::assemble`]'s `enable_mrope`), so
+    /// its batched forward NEVER derives a rotation angle from the analytic
+    /// `rope_base` - it reads whatever the host last uploaded. The
+    /// vision-splice prefix ([`Self::splice_vision`]) uploads those tables as
+    /// part of its own work, and [`Self::generate`] uploads a per-step
+    /// 1-row table for every prompt token including plain text ones; a
+    /// text-only batched encode is the one path that has neither, so it must
+    /// do this itself. Without it q and k are rotated by an unwritten (zero)
+    /// table, and a zero table does not mean "no rotation" - it ANNIHILATES
+    /// both (`q' = q·cos - q_half·sin = 0`), collapsing every attention
+    /// score to zero and every softmax to a uniform average over the causal
+    /// prefix. The output stays finite and still varies with the tokens, so
+    /// nothing short of a positional oracle notices; see
+    /// `text_only_encode_hidden_applies_positional_rope`.
+    fn write_text_mrope_tables(&self, len: usize) {
+        let positions: Vec<[u32; 3]> = (0..len as u32).map(|i| [i; 3]).collect();
+        let (cos, sin) = mrope_tables(&positions, self.mrope_section, self.decoder.cfg.head_dim, self.decoder.cfg.rope_theta);
+        self.decoder.write_mrope_tables(&cos, &sin);
     }
 
     /// [`Self::encode_hidden`] with one image spliced in first, via the same
@@ -1457,6 +1485,116 @@ mod tests {
         );
         let got = truncated.encode_hidden(&tokens, layer);
         assert_eq!(got, want, "a shard truncated past `layer` must reproduce the full model's hidden state at `layer` bit-for-bit");
+    }
+
+    /// Text-only [`Qwen3Vl::encode_hidden`] must apply REAL positional RoPE.
+    ///
+    /// Every `Qwen3Vl` decoder is built with `enable_mrope()`, so its batched
+    /// forward rotates q/k from the host-written `mrope_cos`/`mrope_sin`
+    /// tables rather than the analytic `rope_base`. The vision-splice path
+    /// (`splice_vision`) writes those tables; a TEXT-ONLY encode has no
+    /// vision splice, so it must write them itself - otherwise q/k are
+    /// rotated by an unwritten (zero) table, which annihilates q and k
+    /// entirely (`q' = q·cos - q_half·sin = 0`), collapsing attention to a
+    /// uniform average over the causal prefix. The result stays finite and
+    /// prompt-dependent, so a finiteness check cannot see it; only a
+    /// positional oracle can.
+    ///
+    /// The oracle is the decode-only build of the SAME weights: its
+    /// incremental KV-cache path rotates with the analytic `ROPE_AT` kernel
+    /// at each token's own absolute position (`Qwen::decode_steps`'s
+    /// `mrope: None` arm), which is what interleaved M-RoPE degenerates to
+    /// on a pure-text stream (all three axes advance together, so every
+    /// channel sees the same angle regardless of which axis owns it). So the
+    /// two builds must agree - to fp32 reduction-order tolerance, exactly as
+    /// `qwen3::Qwen`'s own
+    /// `encode_hidden_on_a_decode_only_build_matches_the_batched_forward`
+    /// states for the non-M-RoPE case.
+    #[test]
+    fn text_only_encode_hidden_applies_positional_rope() {
+        let vcfg = VisionConfig {
+            depth: 2,
+            hidden: 32,
+            num_heads: 2,
+            intermediate: 64,
+            patch_size: 2,
+            temporal_patch_size: 1,
+            spatial_merge_size: 2,
+            num_position_embeddings: 16,
+            out_hidden_size: 40,
+            in_channels: 2,
+            deepstack_indexes: vec![],
+            tokens_per_second: 2,
+        };
+        let dcfg = QwenConfig {
+            vocab: 23,
+            block_size: 16,
+            n_layers: 3,
+            d_model: 40,
+            n_heads: 4,
+            n_kv_heads: 2,
+            head_dim: 8,
+            d_ff: 64,
+            rope_theta: 1.0e6,
+            rms_eps: 1e-6,
+            max_position_embeddings: 16,
+            tie_embeddings: true,
+            qk_norm: true,
+            attn_bias: false,
+            lora: None,
+        };
+
+        let (c, pv, mlp) = (vcfg.hidden as usize, vcfg.patch_vec_dim() as usize, vcfg.intermediate as usize);
+        let mut vspecs: Vec<(String, usize, bool)> = vec![
+            ("patch_embed.weight".into(), c * pv, false),
+            ("patch_embed.bias".into(), c, false),
+            ("pos_embed".into(), vcfg.num_position_embeddings as usize * c, false),
+        ];
+        for b in 0..vcfg.depth {
+            vspecs.extend([
+                (format!("blocks.{b}.norm1.weight"), c, true),
+                (format!("blocks.{b}.norm1.bias"), c, false),
+                (format!("blocks.{b}.qkv.weight"), 3 * c * c, false),
+                (format!("blocks.{b}.qkv.bias"), 3 * c, false),
+                (format!("blocks.{b}.proj.weight"), c * c, false),
+                (format!("blocks.{b}.proj.bias"), c, false),
+                (format!("blocks.{b}.norm2.weight"), c, true),
+                (format!("blocks.{b}.norm2.bias"), c, false),
+                (format!("blocks.{b}.fc1.weight"), mlp * c, false),
+                (format!("blocks.{b}.fc1.bias"), mlp, false),
+                (format!("blocks.{b}.fc2.weight"), c * mlp, false),
+                (format!("blocks.{b}.fc2.bias"), c, false),
+            ]);
+        }
+        let vspecs: Vec<(&str, usize, bool)> = vspecs.iter().map(|(n, s, o)| (n.as_str(), *s, *o)).collect();
+        let vweights = rand_map(Rng::new(51), &vspecs);
+        let merged = c * 4;
+        let mweights = rand_map(
+            Rng::new(52),
+            &[
+                ("ln.weight", c, true),
+                ("ln.bias", c, false),
+                ("fc1.weight", merged * merged, false),
+                ("fc1.bias", merged, false),
+                ("fc2.weight", 40 * merged, false),
+                ("fc2.bias", 40, false),
+            ],
+        );
+        let dweights = qwen3::init_weights(&dcfg, 53);
+        let tokens: Vec<u32> = vec![1, 5, 3, 9, 2, 7, 4];
+        let layer = dcfg.n_layers as usize;
+
+        // No image splice at all (n_visual = 0) - the shape
+        // `minimaxh3::caps::build_text_encoder` uses for a text-only prompt.
+        let mk = |build| Qwen3Vl::new(vcfg.clone(), dcfg.clone(), vweights.clone(), mweights.clone(), vec![], &dweights, 16, IMG, 0, 0, [2, 1, 1], build);
+        let want = mk(DecoderBuild::Decode(Dtype::F32)).encode_hidden(&tokens, layer);
+        let got = mk(DecoderBuild::Batched).encode_hidden(&tokens, layer);
+
+        assert_eq!(got.len(), want.len());
+        let err: f32 = got.iter().zip(&want).map(|(a, b)| (a - b) * (a - b)).sum::<f32>().sqrt();
+        let norm: f32 = want.iter().map(|v| v * v).sum::<f32>().sqrt();
+        let rel = err / norm.max(1e-12);
+        assert!(rel < 1e-4, "text-only batched encode_hidden must match the analytic-RoPE decode path (rel err {rel:e})");
     }
 
     /// Same tiny synthetic shape as [`end_to_end_forward_is_finite`], but
