@@ -129,6 +129,7 @@
 pub mod caps;
 pub mod config;
 pub mod encoder;
+pub mod hf;
 pub mod import;
 pub mod layout;
 pub mod model;
