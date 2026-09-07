@@ -54,17 +54,33 @@ fn write_dit_gguf(path: &Path, cfg: &Flux2Config) {
     checkpoint::gguf_write::write(path.to_str().unwrap(), &[("general.architecture".to_string(), GgufValue::String("flux".to_string()))], &tensors, 32).unwrap();
 }
 
+/// Toy vocab size every fixture writer in this file agrees on, so
+/// `Flux2Spec::classify`'s vocab-compatibility check finds a real match
+/// between a synthetic tokenizer and its intended text encoder.
+const TOY_VOCAB: usize = 100;
+
 /// A GGUF text encoder sharing `general.architecture = "qwen3"` with a real
 /// llama.cpp-quantized Qwen3 - unambiguous for `text_encoder` on its own
 /// (see `Flux2Spec::classify`'s doc: no shape check needed).
 fn write_qwen3_gguf(path: &Path, hidden: u64) {
+    let tokens = GgufValue::Array((0..TOY_VOCAB).map(|i| GgufValue::String(format!("t{i}"))).collect());
     checkpoint::gguf_write::write(
         path.to_str().unwrap(),
-        &[("general.architecture".to_string(), GgufValue::String("qwen3".to_string())), ("qwen3.embedding_length".to_string(), GgufValue::U64(hidden))],
+        &[
+            ("general.architecture".to_string(), GgufValue::String("qwen3".to_string())),
+            ("qwen3.embedding_length".to_string(), GgufValue::U64(hidden)),
+            ("tokenizer.ggml.tokens".to_string(), tokens),
+        ],
         &[TensorOut { name: "dummy".to_string(), shape: vec![1], ty: checkpoint::gguf::GgmlType::F32.id(), data: vec![0u8; 4] }],
         32,
     )
     .unwrap();
+}
+
+/// A real vocab table at [`TOY_VOCAB`] entries.
+fn write_tokenizer_json(path: &Path) {
+    let vocab: serde_json::Map<String, serde_json::Value> = (0..TOY_VOCAB).map(|i| (format!("t{i}"), serde_json::json!(i))).collect();
+    std::fs::write(path, serde_json::to_vec(&serde_json::json!({"version": "1.0", "model": {"vocab": vocab}, "added_tokens": []})).unwrap()).unwrap();
 }
 
 fn write_shard(path: &Path) {
@@ -84,7 +100,7 @@ fn write_index(dir: &Path, shard_name: &str) {
 /// collapses to a single `HfDir` record.
 fn write_hf_checkpoint(dir: &Path, architectures: &[&str], hidden_size: u64) {
     std::fs::create_dir_all(dir).unwrap();
-    std::fs::write(dir.join("config.json"), serde_json::to_vec(&serde_json::json!({"architectures": architectures, "hidden_size": hidden_size})).unwrap()).unwrap();
+    std::fs::write(dir.join("config.json"), serde_json::to_vec(&serde_json::json!({"architectures": architectures, "hidden_size": hidden_size, "vocab_size": TOY_VOCAB})).unwrap()).unwrap();
     write_shard(&dir.join("model-00001-of-00001.safetensors"));
     write_index(dir, "model-00001-of-00001.safetensors");
 }
@@ -148,7 +164,7 @@ fn build_store() -> PathBuf {
     // directory the way a real fetched tokenizer would.
     let unsloth_tokenizer_dir = unsloth_dir.join("flux2-klein-9b-tokenizer");
     std::fs::create_dir_all(&unsloth_tokenizer_dir).unwrap();
-    std::fs::write(unsloth_tokenizer_dir.join("tokenizer.json"), serde_json::to_vec(&serde_json::json!({"version": "1.0"})).unwrap()).unwrap();
+    write_tokenizer_json(&unsloth_tokenizer_dir.join("tokenizer.json"));
 
     // --- Qwen/Qwen3-8B: a real, canonical <vendor>/<repo> checkpoint - the
     // FIRST valid text_encoder candidate. ---

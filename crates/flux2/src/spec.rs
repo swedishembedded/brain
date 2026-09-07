@@ -108,19 +108,62 @@ fn vendor_dir(path: &Path, root: &Path) -> Option<PathBuf> {
     rel.components().next().map(|c| root.join(c))
 }
 
+/// A tokenizer's own vocabulary size: the BPE `vocab` table plus
+/// `added_tokens` - real content, not the file's name.
+fn tokenizer_vocab_count(bytes: &[u8]) -> Option<usize> {
+    let v: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    let base = v.get("model")?.get("vocab")?.as_object()?.len();
+    let added = v.get("added_tokens").and_then(|a| a.as_array()).map_or(0, Vec::len);
+    Some(base + added)
+}
+
+/// The embedding table row count a text encoder candidate declares: an HF
+/// directory's `config.json` `vocab_size`, or a GGUF's own
+/// `tokenizer.ggml.tokens` array length (the real embedded vocab, present on
+/// every real release regardless of whether a separate `vocab_size` KV is).
+fn text_encoder_vocab_size(path: &Path) -> Option<usize> {
+    if path.extension().is_some_and(|e| e == "gguf") {
+        let g = MmapGguf::open(&path.to_string_lossy()).ok()?;
+        g.kv().get("tokenizer.ggml.tokens").and_then(|v| if let checkpoint::gguf::GgufValue::Array(a) = v { Some(a.len()) } else { None })
+    } else {
+        let bytes = std::fs::read(path.join("config.json")).ok()?;
+        let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+        v.get("vocab_size").and_then(serde_json::Value::as_u64).map(|n| n as usize)
+    }
+}
+
+/// A tokenizer whose own vocabulary is within 5% of a candidate's declared
+/// embedding-table size: real checkpoints pad the embedding table a little
+/// past the tokenizer's literal entry count (reserved/unused slots), so
+/// exact equality is too strict, but a genuinely different model's
+/// tokenizer (a different vocabulary entirely, not a padding difference)
+/// misses by a wide margin, not a few hundred tokens.
+fn vocab_is_compatible(tokenizer_count: usize, encoder_vocab_size: usize) -> bool {
+    tokenizer_count <= encoder_vocab_size && encoder_vocab_size - tokenizer_count <= encoder_vocab_size / 20
+}
+
 /// A `tokenizer.json` carries no `architecture`/`_class_name` field of its
 /// own, so "is this valid JSON" is true of every tokenizer in the whole
-/// store, from every unrelated architecture - not enough on its own. What
-/// IS real signal is whether this file was published by the same vendor
+/// store, from every unrelated architecture - not enough on its own. Real
+/// signal is two-fold: the file was published by the same vendor
 /// ([`vendor_dir`]) as a component this same call already classified as a
-/// FLUX.2 role - `vendor_dirs` is that set, built by [`Self::classify`].
-fn classify_tokenizer(idx: usize, rec: &ArtifactRecord, root: &Path, vendor_dirs: &std::collections::BTreeSet<PathBuf>, out: &mut Vec<(usize, String, Confidence)>) {
+/// FLUX.2 role, AND (since one vendor commonly publishes several unrelated
+/// models under the same directory - a real store has this) its own
+/// vocabulary size is actually compatible with at least one of that
+/// vendor's text_encoder candidates, not merely a different model that
+/// happens to share a top-level folder.
+fn classify_tokenizer(idx: usize, rec: &ArtifactRecord, root: &Path, vendor_dirs: &std::collections::BTreeSet<PathBuf>, text_encoder_candidates: &[&Path], out: &mut Vec<(usize, String, Confidence)>) {
     let Ok(bytes) = std::fs::read(&rec.path) else { return };
-    if serde_json::from_slice::<serde_json::Value>(&bytes).is_err() {
+    let Some(tok_count) = tokenizer_vocab_count(&bytes) else { return };
+    let Some(vendor) = vendor_dir(&rec.path, root) else { return };
+    if !vendor_dirs.contains(&vendor) {
         return;
     }
-    let Some(vendor) = vendor_dir(&rec.path, root) else { return };
-    if vendor_dirs.contains(&vendor) {
+    let compatible = text_encoder_candidates
+        .iter()
+        .filter(|p| vendor_dir(p, root).as_deref() == Some(vendor.as_path()))
+        .any(|p| text_encoder_vocab_size(p).is_some_and(|v| vocab_is_compatible(tok_count, v)));
+    if compatible {
         out.push((idx, "tokenizer".to_string(), Confidence::Declared));
     }
 }
@@ -178,9 +221,10 @@ impl ArchSpec for Flux2Spec {
         // Pass 2: tokenizer, using pass 1's own results as the real signal
         // a bare "is this valid JSON" check cannot provide on its own.
         let vendor_dirs: std::collections::BTreeSet<PathBuf> = out.iter().filter_map(|(idx, ..)| vendor_dir(&records[*idx].path, inventory_root)).collect();
+        let text_encoder_candidates: Vec<&Path> = out.iter().filter(|(_, role, _)| role == "text_encoder").map(|(idx, ..)| records[*idx].path.as_path()).collect();
         for (idx, rec) in records.iter().enumerate() {
             if rec.usable() && rec.kind == ArtifactKind::TokenizerJson {
-                classify_tokenizer(idx, rec, inventory_root, &vendor_dirs, &mut out);
+                classify_tokenizer(idx, rec, inventory_root, &vendor_dirs, &text_encoder_candidates, &mut out);
             }
         }
         out
@@ -256,7 +300,13 @@ mod tests {
         checkpoint::gguf_write::write(path.to_str().unwrap(), &[("general.architecture".to_string(), checkpoint::gguf::GgufValue::String(arch_kv.to_string()))], &tensors, 32).unwrap();
     }
 
+    /// Toy vocab size every fixture writer below agrees on, so
+    /// [`vocab_is_compatible`] finds a real match between a synthetic
+    /// tokenizer and its intended text encoder.
+    const TOY_VOCAB: usize = 100;
+
     fn write_qwen3_gguf(path: &std::path::Path, hidden: u64) {
+        let tokens = checkpoint::gguf::GgufValue::Array((0..TOY_VOCAB).map(|i| checkpoint::gguf::GgufValue::String(format!("t{i}"))).collect());
         checkpoint::gguf_write::write(
             path.to_str().unwrap(),
             &[
@@ -264,6 +314,7 @@ mod tests {
                 ("general.finetune".to_string(), checkpoint::gguf::GgufValue::String("uncensored-text-encoder".to_string())),
                 ("qwen3.embedding_length".to_string(), checkpoint::gguf::GgufValue::U64(hidden)),
                 ("qwen3.block_count".to_string(), checkpoint::gguf::GgufValue::U32(36)),
+                ("tokenizer.ggml.tokens".to_string(), tokens),
             ],
             &[checkpoint::gguf_write::TensorOut { name: "dummy".to_string(), shape: vec![1], ty: checkpoint::gguf::GgmlType::F32.id(), data: vec![0u8; 4] }],
             32,
@@ -273,7 +324,7 @@ mod tests {
 
     fn write_qwen3_hfdir(dir: &std::path::Path, hidden: u64) {
         std::fs::create_dir_all(dir).unwrap();
-        std::fs::write(dir.join("config.json"), serde_json::to_vec(&serde_json::json!({"architectures": ["Qwen3ForCausalLM"], "hidden_size": hidden})).unwrap()).unwrap();
+        std::fs::write(dir.join("config.json"), serde_json::to_vec(&serde_json::json!({"architectures": ["Qwen3ForCausalLM"], "hidden_size": hidden, "vocab_size": TOY_VOCAB})).unwrap()).unwrap();
     }
 
     fn write_vae_hfdir(dir: &std::path::Path) {
@@ -281,8 +332,12 @@ mod tests {
         std::fs::write(dir.join("config.json"), serde_json::to_vec(&serde_json::json!({"_class_name": "AutoencoderKLFlux2"})).unwrap()).unwrap();
     }
 
+    /// A real vocab table at [`TOY_VOCAB`] entries, matching what every
+    /// synthetic text encoder in this module declares - [`vocab_is_compatible`]
+    /// checks real content, so a fixture must actually agree with itself.
     fn write_tokenizer_json(path: &std::path::Path) {
-        std::fs::write(path, serde_json::to_vec(&serde_json::json!({"version": "1.0"})).unwrap()).unwrap();
+        let vocab: serde_json::Map<String, serde_json::Value> = (0..TOY_VOCAB).map(|i| (format!("t{i}"), serde_json::json!(i))).collect();
+        std::fs::write(path, serde_json::to_vec(&serde_json::json!({"version": "1.0", "model": {"vocab": vocab}, "added_tokens": []})).unwrap()).unwrap();
     }
 
     /// A bare vendor-flat VAE safetensors file (`unsloth`'s own release
@@ -385,6 +440,35 @@ mod tests {
         assert_eq!(tokenizer_candidates.len(), 1, "{out:?}");
         let (idx, ..) = tokenizer_candidates[0];
         assert_ne!(records[*idx].path, unrelated_tok, "the unrelated tokenizer must never classify: {out:?}");
+    }
+
+    /// A vendor commonly publishes several unrelated models under the same
+    /// top-level directory (a real store has exactly this: Qwen's own
+    /// dense Qwen3-8B and its unrelated, differently-vocabbed Qwen3.5-27B
+    /// checkpoint both live under `models/Qwen/`) - a same-vendor tokenizer
+    /// belonging to that OTHER, unrelated model must not classify as a
+    /// FLUX.2 candidate just because it shares the vendor directory with a
+    /// real one.
+    #[test]
+    fn classify_tokenizer_requires_vocab_compatibility_not_only_the_same_vendor() {
+        let dir = tmp("tokenizer-vocab-mismatch");
+        let mut records = nine_b_fixture(&dir);
+
+        // A second, unrelated checkpoint published by the SAME vendor as
+        // the real text encoder, with a genuinely different vocabulary -
+        // not a padding difference, a different model entirely.
+        let other_model_dir = dir.join("vendor").join("Other-Model-27B");
+        std::fs::create_dir_all(&other_model_dir).unwrap();
+        let mismatched_tok = other_model_dir.join("tokenizer.json");
+        let big_vocab: serde_json::Map<String, serde_json::Value> = (0..(TOY_VOCAB * 2)).map(|i| (format!("t{i}"), serde_json::json!(i))).collect();
+        std::fs::write(&mismatched_tok, serde_json::to_vec(&serde_json::json!({"model": {"vocab": big_vocab}, "added_tokens": []})).unwrap()).unwrap();
+        records.push(complete(mismatched_tok.clone(), ArtifactKind::TokenizerJson));
+
+        let out = Flux2Spec.classify(&records, dir.as_path());
+        let tokenizer_candidates: Vec<_> = out.iter().filter(|(_, role, _)| role == "tokenizer").collect();
+        assert_eq!(tokenizer_candidates.len(), 1, "{out:?}");
+        let (idx, ..) = tokenizer_candidates[0];
+        assert_ne!(records[*idx].path, mismatched_tok, "the vocab-mismatched same-vendor tokenizer must never classify: {out:?}");
     }
 
     #[test]
