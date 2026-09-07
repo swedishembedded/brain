@@ -279,6 +279,56 @@ pub fn dit_config_from_shapes(shapes: &[(String, Vec<usize>)]) -> Result<DitSize
     ))
 }
 
+/// Determine a DiT checkpoint's [`DitSize`] straight from its own weight
+/// file's header - no tensor bytes decoded, so this is cheap even against a
+/// multi-GB checkpoint. Reads the same three shapes [`read_dit_tensors`]
+/// loads for real:
+///
+/// - a `.gguf` is already BFL-named on disk (the GGUF conversions carry the
+///   reference names - see `read_dit_tensors`'s doc), so its header names and
+///   shapes go straight into [`dit_config_from_shapes`];
+/// - a single-file safetensors is a released BFL-named file, read the same
+///   way;
+/// - a diffusers `transformer/` directory is renamed onto BFL names through
+///   [`diffusers_to_bfl`] the same way [`import_diffusers`] does, best-effort:
+///   the split q/k/v projections it does not recognize (handled at import
+///   time via `qkv_slot` instead, which needs bytes from three tensors at
+///   once) are simply left unmapped, which costs nothing here because none of
+///   the five numbers [`dit_config_from_shapes`] reads ever comes from one.
+pub fn sniff_dit_size(path: &str) -> Result<DitSize, String> {
+    let p = std::path::Path::new(path);
+    if p.extension().is_some_and(|x| x == "gguf") {
+        let g = checkpoint::gguf::MmapGguf::open(path)?;
+        let shapes: Vec<(String, Vec<usize>)> = g.names().iter().map(|n| (n.clone(), g.shape(n).map(<[usize]>::to_vec).unwrap_or_default())).collect();
+        return dit_config_from_shapes(&shapes);
+    }
+    let files: Vec<std::path::PathBuf> = if p.is_dir() {
+        let mut files: Vec<_> = std::fs::read_dir(p)
+            .map_err(|e| format!("{path}: {e}"))?
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|q| q.extension().is_some_and(|x| x == "safetensors"))
+            .collect();
+        files.sort();
+        if files.is_empty() {
+            return Err(format!("flux2 dit sniff: no .safetensors under {path}"));
+        }
+        files
+    } else {
+        vec![p.to_path_buf()]
+    };
+    let mut shapes: Vec<(String, Vec<usize>)> = Vec::new();
+    for f in &files {
+        let m = checkpoint::mmap::MmapSafetensors::open(f).map_err(|e| format!("{}: {e}", f.display()))?;
+        for name in m.names() {
+            let shape = m.shape(name).unwrap_or(&[]).to_vec();
+            let canon = diffusers_to_bfl(name).unwrap_or_else(|| name.clone());
+            shapes.push((canon, shape));
+        }
+    }
+    dit_config_from_shapes(&shapes)
+}
+
 /// Import the diffusers `transformer/` folder layout: rename, re-fuse the
 /// split double-block q/k/v projections (q‖k‖v along dim 0), and swap the
 /// halves of `norm_out.linear` — diffusers' `AdaLayerNormContinuous` chunks
@@ -562,5 +612,84 @@ mod tests {
         assert!(dit_config_from_shapes(&no_img_in).unwrap_err().contains("img_in.weight"));
         let no_txt_in: Vec<_> = shapes.iter().filter(|(n, _)| n != "txt_in.weight").cloned().collect();
         assert!(dit_config_from_shapes(&no_txt_in).unwrap_err().contains("txt_in.weight"));
+    }
+
+    /// A minimal single-file safetensors fixture: real logical shapes (so
+    /// `dit_config_from_shapes` reads real numbers off it), but `U8` (1
+    /// byte/element) content of all zeros - the sniff never decodes a value,
+    /// only the header's declared shapes, so the byte CONTENT is irrelevant
+    /// and only the byte COUNT (which `U8` minimizes) matters.
+    fn write_fake_dit_safetensors(path: &std::path::Path, entries: &[(&str, Vec<usize>)]) {
+        let mut header = serde_json::Map::new();
+        let mut blob: Vec<u8> = Vec::new();
+        for (name, shape) in entries {
+            let n: usize = shape.iter().product();
+            let start = blob.len();
+            blob.resize(start + n, 0u8);
+            header.insert(
+                name.to_string(),
+                serde_json::json!({"dtype": "U8", "shape": shape, "data_offsets": [start, blob.len()]}),
+            );
+        }
+        let mut hbytes = serde_json::to_vec(&serde_json::Value::Object(header)).unwrap();
+        hbytes.resize(hbytes.len().next_multiple_of(8), b' ');
+        let mut file = (hbytes.len() as u64).to_le_bytes().to_vec();
+        file.extend_from_slice(&hbytes);
+        file.extend_from_slice(&blob);
+        std::fs::write(path, &file).unwrap();
+    }
+
+    /// The five tensors [`dit_config_from_shapes`] actually reads, at real
+    /// `cfg` dimensions - only block indices 0 and `depth-1` are present
+    /// (max-index detection does not need the ones in between), which keeps
+    /// the fixture five tensors instead of `cfg.tensor_manifest().len()`.
+    fn minimal_dit_entries(cfg: &Flux2Config) -> Vec<(&'static str, Vec<usize>)> {
+        vec![
+            ("img_in.weight", vec![cfg.hidden, cfg.in_channels]),
+            ("txt_in.weight", vec![cfg.hidden, cfg.context_in_dim]),
+            ("double_blocks.0.img_attn.norm.query_norm.scale", vec![cfg.head_dim()]),
+            ("double_blocks.0.marker", vec![1]),
+            ("single_blocks.0.marker", vec![1]),
+        ]
+    }
+
+    fn dit_fixture_path(tag: &str) -> std::path::PathBuf {
+        static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        std::env::temp_dir().join(format!("brain-flux2-dit-sniff-{tag}-{}-{n}.safetensors", std::process::id()))
+    }
+
+    #[test]
+    fn sniff_dit_size_reads_a_real_9b_shaped_single_file_safetensors() {
+        let cfg = Flux2Config::klein_9b();
+        let mut entries = minimal_dit_entries(&cfg);
+        let last_double = format!("double_blocks.{}.marker", cfg.depth_double - 1);
+        let last_single = format!("single_blocks.{}.marker", cfg.depth_single - 1);
+        entries.push((Box::leak(last_double.into_boxed_str()), vec![1]));
+        entries.push((Box::leak(last_single.into_boxed_str()), vec![1]));
+        let path = dit_fixture_path("9b");
+        write_fake_dit_safetensors(&path, &entries);
+        assert_eq!(sniff_dit_size(path.to_str().unwrap()), Ok(DitSize::NineB));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn sniff_dit_size_reads_a_real_4b_shaped_single_file_safetensors() {
+        let cfg = Flux2Config::klein_4b();
+        let mut entries = minimal_dit_entries(&cfg);
+        let last_double = format!("double_blocks.{}.marker", cfg.depth_double - 1);
+        let last_single = format!("single_blocks.{}.marker", cfg.depth_single - 1);
+        entries.push((Box::leak(last_double.into_boxed_str()), vec![1]));
+        entries.push((Box::leak(last_single.into_boxed_str()), vec![1]));
+        let path = dit_fixture_path("4b");
+        write_fake_dit_safetensors(&path, &entries);
+        assert_eq!(sniff_dit_size(path.to_str().unwrap()), Ok(DitSize::FourB));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn sniff_dit_size_rejects_a_missing_gguf_path_loudly() {
+        let err = sniff_dit_size("/nonexistent/brain-flux2-sniff-test.gguf").unwrap_err();
+        assert!(!err.is_empty());
     }
 }

@@ -16,14 +16,73 @@ use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 
 /// FLUX.2 Klein resident model family, gated on the four weight env vars
 /// (`BRAIN_FLUX2_{DIT,VAE,TE,TOKENIZER}`).
+///
+/// `id`/`variant` are BOUND at construction time, from the DiT weights
+/// themselves ([`flux2::sniff_dit_size`]) - never re-derived per request from
+/// an `Invocation`. This is what closes the compliance hole a per-request
+/// "variant" param used to open: a real 9B checkpoint keyed and
+/// license-gated as whatever the caller happened to claim (defaulting to
+/// "klein-4b" when the caller claimed nothing at all).
 pub struct Flux2Resident {
+    /// What this instance's keys and manifest register under -
+    /// `flux2::caps::MODEL` for the env-configured build, but a fetched
+    /// checkpoint would register under its own reference (same reason
+    /// `WanResident::from_paths` takes one).
+    id: String,
+    /// The full variant name bound to the real weights: sniffed SIZE
+    /// (`4b`/`9b`, from [`flux2::sniff_dit_size`]) combined with an explicit
+    /// klein/base FAMILY (`BRAIN_FLUX2_FAMILY`, default `"klein"`) - klein vs
+    /// base is not recoverable from tensor shapes (see [`flux2::DitSize`]'s
+    /// doc), so it can never be sniffed, only stated. `flux2::caps::
+    /// check_license` reads this string's own size suffix, so binding it here
+    /// (not per request) is what makes that gate trustworthy.
+    variant: String,
     paths: flux2::Paths,
 }
 
 impl Flux2Resident {
-    /// `None` (not registered) unless all four `BRAIN_FLUX2_*` vars are set.
+    /// `None` (not registered) unless all four `BRAIN_FLUX2_*` vars are set
+    /// AND the named DiT's own header sniffs cleanly - a misconfigured or
+    /// unreadable DiT must not silently masquerade as "not registered".
     pub fn from_env() -> Option<Flux2Resident> {
-        flux2::Paths::from_env().ok().map(|paths| Flux2Resident { paths })
+        let paths = flux2::Paths::from_env().ok()?;
+        match Flux2Resident::from_paths(flux2::caps::MODEL.to_string(), paths) {
+            Ok(r) => Some(r),
+            Err(e) => {
+                eprintln!("brain: flux2-klein not served over the scheduler (BRAIN_FLUX2_DIT: {e})");
+                None
+            }
+        }
+    }
+
+    /// Bind a resident to real, explicitly-named weights. `id` is the
+    /// registration name (see the struct doc); `variant` is fixed HERE, from
+    /// `paths.dit`'s own tensor shapes combined with `BRAIN_FLUX2_FAMILY`
+    /// (default `"klein"`).
+    pub fn from_paths(id: String, paths: flux2::Paths) -> Result<Flux2Resident, String> {
+        let family = std::env::var("BRAIN_FLUX2_FAMILY").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "klein".to_string());
+        if family != "klein" && family != "base" {
+            return Err(format!("BRAIN_FLUX2_FAMILY must be 'klein' or 'base' (got {family:?})"));
+        }
+        let size = flux2::sniff_dit_size(&paths.dit)?;
+        let variant = format!("{family}-{}", size.as_str());
+        flux2::Flux2Config::from_name(&variant)?; // the combination must actually exist
+        Ok(Flux2Resident { id, variant, paths })
+    }
+}
+
+/// A request's `variant` param, if present, must name exactly the resident's
+/// own bound identity - it can describe the run, never redirect it. Silently
+/// honoring a different string would key/estimate correctly (both already
+/// ignore it) but generate under a caller's false belief about which weights
+/// ran; silently ignoring a wrong one would hide a caller's mistake instead
+/// of surfacing it.
+fn check_variant_matches(bound: &str, inv: &Invocation) -> Result<(), String> {
+    match inv.get_str("variant") {
+        Some(v) if v != bound => Err(format!(
+            "flux2: request named variant '{v}', but this resident is bound to '{bound}' from its actual weights - the bound variant cannot be overridden per request"
+        )),
+        _ => Ok(()),
     }
 }
 
@@ -70,13 +129,18 @@ fn ref_tokens_from_meta(inv: &Invocation) -> u32 {
 
 impl ResidentModel for Flux2Resident {
     fn manifest(&self) -> Manifest {
-        flux2::caps::manifest()
+        // The shared schema, under THIS instance's own id - see `id`'s doc.
+        Manifest { model: self.id.clone(), ..flux2::caps::manifest() }
     }
 
     fn instance_key(&self, action: &str, inv: &Invocation) -> InstanceKey {
-        let variant = inv.get_str("variant").unwrap_or_else(|| "klein-4b".into());
+        // `self.variant` ALWAYS - never `inv`'s "variant": the bound identity
+        // is fixed at construction from the real weights (see the struct
+        // doc), so a per-request variant can only be checked against it
+        // (`check_variant_matches`, applied where the request can still be
+        // refused - `Instance::run`/`run_batch`), never used to key.
         if action == "lora_train" {
-            return InstanceKey::new(flux2::caps::MODEL, format!("train:{variant}"));
+            return InstanceKey::new(&self.id, format!("train:{}", self.variant));
         }
         let precision = inv.get_str("precision").unwrap_or_else(|| "fp32".into());
         let w = inv.get_i64("width").unwrap_or(512);
@@ -87,6 +151,7 @@ impl ResidentModel for Flux2Resident {
         // appended when present (a different strength is different weights).
         // The path goes last because it is the only field that may contain ':'.
         let adapter = inv.get_str("adapter").filter(|s| !s.is_empty());
+        let variant = &self.variant;
         let config = match adapter {
             Some(a) => {
                 let sc = inv.get_f64("lora_scale").unwrap_or(1.0);
@@ -94,7 +159,7 @@ impl ResidentModel for Flux2Resident {
             }
             None => format!("{variant}:{precision}:{w}x{h}:{nref}"),
         };
-        InstanceKey::new(flux2::caps::MODEL, config)
+        InstanceKey::new(&self.id, config)
     }
 
     fn estimate(&self, key: &InstanceKey) -> MemCost {
@@ -134,14 +199,19 @@ impl ResidentModel for Flux2Resident {
     }
 
     fn activate(&self, key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
-        if let Some(variant) = key.config.strip_prefix("train:") {
-            flux2::caps::check_license(variant)?;
+        if key.config.strip_prefix("train:").is_some() {
+            // `self.variant` - the resident's own BOUND identity (sniffed
+            // from the real weights at construction, see the struct doc),
+            // never a string parsed back out of `key.config`.
+            flux2::caps::check_license(&self.variant)?;
             // Training builds (and drops) its own encoders + host trainer per
             // run — no resident pipeline to hold.
-            return Ok(Box::new(Flux2Instance { pipe: None, paths: clone_paths(&self.paths) }));
+            return Ok(Box::new(Flux2Instance { pipe: None, paths: clone_paths(&self.paths), variant: self.variant.clone() }));
         }
         // "{variant}:{precision}:{w}x{h}:{nref}[:{lora_scale}:{adapter}]" -
-        // the adapter path is last because it may contain ':'.
+        // the adapter path is last because it may contain ':'. The variant
+        // field is always `self.variant` (see `instance_key`), so parsing it
+        // back out here is just recovering what this resident itself wrote.
         let mut it = key.config.splitn(6, ':');
         let variant = it.next().ok_or("flux2: bad instance key")?;
         let precision = flux2::Precision::from_name(it.next().ok_or("flux2: bad instance key")?)?;
@@ -154,7 +224,7 @@ impl ResidentModel for Flux2Resident {
             .map(|path| flux2::AdapterSpec { path: path.to_string(), scale: lora_scale });
         let (w, h) = wh.split_once('x').ok_or("flux2: bad instance key")?;
         let (w, h): (u32, u32) = (w.parse().map_err(|_| "flux2: bad width")?, h.parse().map_err(|_| "flux2: bad height")?);
-        flux2::caps::check_license(variant)?;
+        flux2::caps::check_license(&self.variant)?;
         let cfg = flux2::Flux2Config::from_name(variant)?;
         let n_gen = (h / 16) * (w / 16);
         // Place the pipeline on the assigned card (scoped registry selection;
@@ -162,7 +232,7 @@ impl ResidentModel for Flux2Resident {
         let pipe = crate::resident_llm::on_device(device, || {
             flux2::Pipeline::build_sized(&cfg, &self.paths, n_gen + nref, n_gen, adapter.as_ref(), precision, max_batch())
         })??;
-        Ok(Box::new(Flux2Instance { pipe: Some(pipe), paths: clone_paths(&self.paths) }))
+        Ok(Box::new(Flux2Instance { pipe: Some(pipe), paths: clone_paths(&self.paths), variant: self.variant.clone() }))
     }
 }
 
@@ -172,14 +242,17 @@ fn clone_paths(p: &flux2::Paths) -> flux2::Paths {
 }
 
 /// A resident FLUX.2 instance: `pipe` for generation keys, `None` for the
-/// training key.
+/// training key. `variant` is the resident's own bound identity, carried down
+/// so every request can be checked against it (`check_variant_matches`).
 struct Flux2Instance {
     pipe: Option<flux2::Pipeline>,
     paths: flux2::Paths,
+    variant: String,
 }
 
 impl Instance for Flux2Instance {
     fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        check_variant_matches(&self.variant, inv)?;
         match action {
             "text2image" | "edit" => {
                 let pipe = self.pipe.as_ref().ok_or("flux2: generation on a training instance")?;
@@ -221,7 +294,7 @@ impl Instance for Flux2Instance {
         let mut out: Vec<ActionResult> = Vec::with_capacity(invs.len());
         for inv in invs {
             out.push(Err("not run".to_string()));
-            reqs.push(match build_request(action, inv) {
+            reqs.push(match check_variant_matches(&self.variant, inv).and_then(|()| build_request(action, inv)) {
                 Ok(r) => Some(r),
                 Err(e) => {
                     *out.last_mut().unwrap() = Err(e);
@@ -259,4 +332,103 @@ fn build_request(action: &str, inv: &Invocation) -> Result<flux2::BatchRequest, 
     let refs = flux2::caps::refs_from(inv, action == "edit")?;
     let prompt = inv.get_str("prompt").ok_or("'prompt' is required")?;
     Ok(flux2::BatchRequest { prompt, refs, opts: p.opts, cancel: inv.cancel.clone() })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// A minimal single-file safetensors fixture carrying only the five
+    /// tensors `flux2::sniff_dit_size` actually reads, at real `cfg`
+    /// dimensions - `U8` (1 byte/element) content of all zeros, because the
+    /// sniff never decodes a value, only the header's declared shapes.
+    fn write_fake_dit(cfg: &flux2::Flux2Config, tag: &str) -> std::path::PathBuf {
+        let entries = [
+            ("img_in.weight".to_string(), vec![cfg.hidden, cfg.in_channels]),
+            ("txt_in.weight".to_string(), vec![cfg.hidden, cfg.context_in_dim]),
+            ("double_blocks.0.img_attn.norm.query_norm.scale".to_string(), vec![cfg.head_dim()]),
+            (format!("double_blocks.{}.marker", cfg.depth_double - 1), vec![1]),
+            (format!("single_blocks.{}.marker", cfg.depth_single - 1), vec![1]),
+        ];
+        let mut header = serde_json::Map::new();
+        let mut blob: Vec<u8> = Vec::new();
+        for (name, shape) in &entries {
+            let n: usize = shape.iter().product();
+            let start = blob.len();
+            blob.resize(start + n, 0u8);
+            header.insert(name.clone(), json!({"dtype": "U8", "shape": shape, "data_offsets": [start, blob.len()]}));
+        }
+        let mut hbytes = serde_json::to_vec(&serde_json::Value::Object(header)).unwrap();
+        hbytes.resize(hbytes.len().next_multiple_of(8), b' ');
+        let mut file = (hbytes.len() as u64).to_le_bytes().to_vec();
+        file.extend_from_slice(&hbytes);
+        file.extend_from_slice(&blob);
+        static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("brain-cli-flux2-resident-{tag}-{}-{n}.safetensors", std::process::id()));
+        std::fs::write(&path, &file).unwrap();
+        path
+    }
+
+    fn paths_with_dit(dit: String) -> flux2::Paths {
+        flux2::Paths { dit, vae: "/vae".into(), te: "/te".into(), tokenizer: "/tok".into() }
+    }
+
+    /// The whole point of binding at construction: two residents pointed at
+    /// DIFFERENT real checkpoints must key differently, and a per-request
+    /// "variant" must never move that key - not even to the truth.
+    #[test]
+    fn the_resident_binds_its_variant_from_the_real_weights_not_a_default() {
+        let p4 = write_fake_dit(&flux2::Flux2Config::klein_4b(), "4b");
+        let p9 = write_fake_dit(&flux2::Flux2Config::klein_9b(), "9b");
+        let r4 = Flux2Resident::from_paths(flux2::caps::MODEL.to_string(), paths_with_dit(p4.to_str().unwrap().to_string())).unwrap();
+        let r9 = Flux2Resident::from_paths(flux2::caps::MODEL.to_string(), paths_with_dit(p9.to_str().unwrap().to_string())).unwrap();
+        assert_eq!(r4.variant, "klein-4b", "a 4B-shaped checkpoint must bind to klein-4b, not default there by luck");
+        assert_eq!(r9.variant, "klein-9b", "a 9B-shaped checkpoint must bind to klein-9b, never klein-4b's default");
+
+        let base = Invocation::new().set("prompt", json!("a"));
+        let k4 = r4.instance_key("text2image", &base);
+        let k9 = r9.instance_key("text2image", &base);
+        assert_ne!(k4.config, k9.config, "two different underlying checkpoints must key differently");
+        assert!(k4.config.starts_with("klein-4b:"), "{}", k4.config);
+        assert!(k9.config.starts_with("klein-9b:"), "{}", k9.config);
+
+        // A caller cannot redirect the key by naming a variant on the
+        // request - not even the "true" one for a DIFFERENT resident.
+        let spoofed = r4.instance_key("text2image", &base.clone().set("variant", json!("klein-9b")));
+        assert_eq!(k4.config, spoofed.config, "instance_key must never key on the per-request variant");
+
+        std::fs::remove_file(&p4).ok();
+        std::fs::remove_file(&p9).ok();
+    }
+
+    /// This is the enforcement half of the bound identity: a request whose
+    /// own "variant" disagrees with what the resident is actually running
+    /// must be refused, not silently honored (which would run the real
+    /// weights under the caller's false belief) or silently ignored (which
+    /// would hide the caller's mistake). Exercised through `Instance::run`
+    /// on the `lora_train` key so no real GPU/weights are needed - the
+    /// contradiction must be caught before anything else runs.
+    #[test]
+    fn a_request_naming_a_contradicting_variant_is_a_hard_error() {
+        let p4 = write_fake_dit(&flux2::Flux2Config::klein_4b(), "contradiction");
+        let r = Flux2Resident::from_paths(flux2::caps::MODEL.to_string(), paths_with_dit(p4.to_str().unwrap().to_string())).unwrap();
+        assert_eq!(r.variant, "klein-4b");
+        let key = r.instance_key("lora_train", &Invocation::new());
+        let mut inst = r.activate(&key, Device::Cpu).unwrap();
+
+        let bad = Invocation::new().set("variant", json!("klein-9b"));
+        let err = inst.run("lora_train", &bad, &mut |_| {}).unwrap_err();
+        assert!(err.contains("klein-9b") && err.contains("klein-4b"), "{err}");
+
+        // Agreeing with the bound variant (or omitting it) must pass this
+        // gate - the run then fails downstream for an unrelated reason (no
+        // real dataset), never on the variant check.
+        let ok = Invocation::new().set("variant", json!("klein-4b")).set("data", json!("/nonexistent")).set("save", json!("/nonexistent/out"));
+        let downstream_err = inst.run("lora_train", &ok, &mut |_| {}).unwrap_err();
+        assert!(!downstream_err.contains("bound to"), "{downstream_err}");
+
+        std::fs::remove_file(&p4).ok();
+    }
 }
