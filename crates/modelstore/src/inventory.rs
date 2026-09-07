@@ -302,15 +302,33 @@ const MAX_COMPONENT_DEPTH: u32 = 3;
 fn walk_repo_dir(dir: &Path, scan_root: &Path, cache: &BTreeMap<PathBuf, CacheEntry>, probed: &mut dyn FnMut(&Path), out: &mut Vec<ArtifactRecord>, depth: u32) {
     if let Some(record) = hfdir_record(dir, scan_root, cache, probed) {
         out.push(record);
-        // The directory collapsed to one record for its WEIGHTS, but a
-        // `tokenizer.json` sitting right beside `config.json` in that same
-        // directory is a role of its own (an architecture's text-encoder
-        // role and its tokenizer role are ordinarily two different roles of
-        // the SAME checkpoint) - it must still be independently
-        // discoverable rather than disappearing into the one HfDir record.
-        let tok = dir.join("tokenizer.json");
-        if tok.is_file() {
-            push_file_record(&tok, scan_root, ArtifactKind::TokenizerJson, cache, probed, out);
+        // The directory collapsed to one record for its WEIGHTS (the shard
+        // set `shard_filenames` found), but that is not everything the
+        // directory holds. A `tokenizer.json` sitting right beside
+        // `config.json` is a role of its own (an architecture's
+        // text-encoder role and its tokenizer role are ordinarily two
+        // different roles of the SAME checkpoint), and an independently
+        // produced `.gguf`/loose `.safetensors` re-quantization sitting next
+        // to it is a SECOND, alternative artifact for the same weights role
+        // - neither is one of the shards this HfDir record already
+        // represents, so both must still be independently discoverable
+        // rather than disappearing into the one collapsed record.
+        let shards = shard_filenames(dir);
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            if is_symlink(&entry) || entry.path().is_dir() {
+                continue;
+            }
+            let path = entry.path();
+            let Some(fname) = path.file_name().and_then(|s| s.to_str()) else { continue };
+            if shards.iter().any(|s| s == fname) || fname == "config.json" || fname == "model.safetensors.index.json" {
+                continue;
+            }
+            if let Some(kind) = kind_of_extension(fname) {
+                push_file_record(&path, scan_root, kind, cache, probed, out);
+            } else if fname == "tokenizer.json" {
+                push_file_record(&path, scan_root, ArtifactKind::TokenizerJson, cache, probed, out);
+            }
         }
         return;
     }
@@ -591,6 +609,35 @@ mod tests {
         assert_eq!(found.iter().filter(|r| r.kind == ArtifactKind::HfDir).count(), 1, "{found:?}");
         let tok = found.iter().find(|r| r.kind == ArtifactKind::TokenizerJson).unwrap_or_else(|| panic!("no TokenizerJson record, got {found:?}"));
         assert_eq!(tok.path, dir.join("tokenizer.json"));
+    }
+
+    /// A real store layout: a converted `model.brain.safetensors` (its
+    /// filename alone matches the loose-shard glob `model*.safetensors`,
+    /// collapsing the directory to one `HfDir` record) sitting beside an
+    /// independently produced `.gguf` re-quantization of the SAME model. The
+    /// GGUF is not one of the shards the `HfDir` record represents - it is a
+    /// second, alternative artifact a caller must be able to name (via
+    /// `--text-encoder`/`--model`) and have classified on its own, exactly
+    /// like the co-located `tokenizer.json` case above. Before this fix,
+    /// `walk_repo_dir` returned immediately after the `HfDir` + tokenizer
+    /// records, so the `.gguf` had no record at all: unmatchable by an
+    /// override, invisible to `classify()`, indistinguishable from not
+    /// existing on disk.
+    #[test]
+    fn a_gguf_co_located_with_a_collapsed_hfdir_is_still_its_own_record() {
+        let root = scratch_root("hfdir-with-gguf-sibling");
+        let dir = root.join("Qwen").join("Qwen3-8B");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.json"), b"{}").unwrap();
+        tiny_safetensors(&dir.join("model.brain.safetensors"));
+        std::fs::write(dir.join("tokenizer.json"), b"{}").unwrap();
+        tiny_gguf(&dir.join("qwen3-8b-q4_k_m.gguf"));
+
+        let found = scan(&root);
+        assert_eq!(found.iter().filter(|r| r.kind == ArtifactKind::HfDir).count(), 1, "{found:?}");
+        assert_eq!(found.iter().filter(|r| r.kind == ArtifactKind::TokenizerJson).count(), 1, "{found:?}");
+        let gguf = found.iter().find(|r| r.kind == ArtifactKind::Gguf).unwrap_or_else(|| panic!("no Gguf record, got {found:?}"));
+        assert_eq!(gguf.path, dir.join("qwen3-8b-q4_k_m.gguf"));
     }
 
     #[test]
