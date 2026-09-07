@@ -61,11 +61,17 @@
 //! can procure our services by sending an email to info@swedishembedded.com.
 
 use std::collections::{BTreeMap, HashSet};
+use std::path::Path;
 
+use data::chat::{ChatMessage, ChatSample, ENDOFTEXT};
+use data::chat_template::ChatTemplate;
+use data::qwen_tokenizer::QwenBpe;
+use data::rng::Rng;
 use data::tokenizer::Tokenizer;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::continual::{Curriculum, SftSource};
 use crate::env::{Environment, Reward, Step, Task, Verifier};
 use crate::gate::GateConfig;
 
@@ -345,6 +351,202 @@ pub fn train_probe_split<'a, T: Tokenizer>(batch: &'a FactBatch, tok: &'a T) -> 
         "rl::document::train_probe_split: probe question(s) {overlap:?} are also training rows - a held-out score is only honest if the policy never trained on the task it is scored against"
     );
     (train, probe)
+}
+
+/// A document/fact [`Curriculum`]: one validated [`FactBatch`] per cycle over
+/// one tokenizer, plus the behavioural anchor suite every cycle rehearses
+/// (continuous-learning roadmap B5').
+///
+/// There is deliberately no new training composition here. Brain has already
+/// MEASURED that a per-cycle `improve::cycle` composition does not accumulate
+/// capability at this model scale, and that [`crate::continual::Regime::Sft`]
+/// (teacher-forced, mixed with a rehearsal pool) does; so this milestone
+/// implements the trait that regime already drives rather than inventing a
+/// cycle beside it. Everything a document study needs beyond this impl (the
+/// retention matrix, BWT, the fresh-adapter control, the pre-registered
+/// PASS/FAIL block) is [`crate::continual::run_study`]'s, unchanged.
+///
+/// ## Two row shapes, because a fact and a behaviour are not the same thing
+///
+/// A CYCLE row is a fact statement, supervised whole: the model has to KNOW
+/// the fact, not copy it out of a context window, so the fact is
+/// language-modelled with nothing masked in front of it. An ANCHOR row is a
+/// behaviour - a prompt and the response it must still produce - so its
+/// prompt is masked context and only the response is supervised, the ordinary
+/// chat-SFT shape. That is why the anchor suite is presented through
+/// [`FactSplit::Probe`]: it is the half of a [`FactBatch`] that carries a
+/// `(prompt, response)` pair. Those rows are never scored as probes; nothing
+/// in [`crate::continual::run_study`] evaluates a rehearsal environment.
+pub struct DocumentCurriculum<'a> {
+    cycles: &'a [FactBatch],
+    anchors: &'a [FactBatch],
+    tok: &'a QwenBpe,
+    tmpl: &'a ChatTemplate,
+    vocab: usize,
+    shape: (usize, usize),
+}
+
+impl<'a> DocumentCurriculum<'a> {
+    /// Validate the whole study up front and take the borrows.
+    ///
+    /// Panics, naming what failed, on any of:
+    ///
+    /// - no cycles, or no anchor suite ([`crate::continual::run_study`] refuses
+    ///   a zero-length rehearsal pool under `Regime::Sft` anyway; failing here
+    ///   says WHICH input was empty);
+    /// - a `vocab` that does not span [`data::chat::ENDOFTEXT`] - every
+    ///   dataset [`Self::write_sft_dataset`] writes terminates its records
+    ///   with that id, so a model whose embedding is shorter would index off
+    ///   the end of its own table;
+    /// - anything [`train_probe_split`] refuses on any cycle's batch (the
+    ///   held-out floor, and the probe/training id disjointness). Running B2's
+    ///   check on every cycle HERE is what makes "explore/eval splits disjoint
+    ///   by construction" a checked property of this curriculum rather than a
+    ///   promise about how the batches were built.
+    ///
+    /// [`Curriculum::shape`] is DERIVED, over every row of every environment
+    /// this curriculum can present: the longest presented text and the longest
+    /// expected completion, in tokens. Deriving it is what makes it identical
+    /// across cycles - the invariance the plasticity ratio depends on - instead
+    /// of a number a caller has to keep true by hand.
+    pub fn new(cycles: &'a [FactBatch], anchors: &'a [FactBatch], tok: &'a QwenBpe, tmpl: &'a ChatTemplate, vocab: usize) -> DocumentCurriculum<'a> {
+        assert!(!cycles.is_empty(), "rl::document::DocumentCurriculum::new: a study needs at least one cycle's fact batch");
+        assert!(
+            !anchors.is_empty(),
+            "rl::document::DocumentCurriculum::new: the anchor suite is empty - Regime::Sft mixes it into EVERY cycle's draw, \
+             and without it cycle 1's training distribution is one document alone, which is the cue-independent shortcut \
+             continual::rehearsal_pool exists to remove"
+        );
+        assert!(
+            vocab > ENDOFTEXT as usize,
+            "rl::document::DocumentCurriculum::new: vocab {vocab} does not span data::chat::ENDOFTEXT ({ENDOFTEXT}), the record \
+             separator every prepare_chat_samples dataset carries - a model trained on one would index past its own embedding table"
+        );
+        for batch in cycles {
+            let _ = train_probe_split(batch, tok);
+        }
+
+        let mut prompt_len = 0usize;
+        let mut completion_len = 0usize;
+        let envs: Vec<DocumentEnv<'_, QwenBpe>> = cycles
+            .iter()
+            .flat_map(|b| [DocumentEnv::new(b, FactSplit::Train, tok), DocumentEnv::new(b, FactSplit::Probe, tok)])
+            .chain(anchors.iter().map(|b| DocumentEnv::new(b, FactSplit::Probe, tok)))
+            .collect();
+        for env in &envs {
+            for i in 0..env.len() {
+                let (presented, expected) = env.row(i);
+                prompt_len = prompt_len.max(tok.encode(presented).len());
+                completion_len = completion_len.max(tok.encode(expected).len());
+            }
+        }
+
+        DocumentCurriculum { cycles, anchors, tok, tmpl, vocab, shape: (prompt_len, completion_len) }
+    }
+
+    /// Cycle `k`'s batch, panicking with the study's own bounds rather than a
+    /// bare index panic - `run_study` drives `0..cfg.cycles`, and a config with
+    /// more cycles than batches is a study that would silently repeat one.
+    fn batch(&self, cycle: usize) -> &'a FactBatch {
+        self.cycles
+            .get(cycle)
+            .unwrap_or_else(|| panic!("rl::document: cycle {cycle} requested but the curriculum holds {} fact batch(es)", self.cycles.len()))
+    }
+
+    /// The environment one [`SftSource`] draws its rows from: a cycle's
+    /// TRAINING half, or an anchor suite's `(prompt, response)` half.
+    fn env_for_source(&self, source: SftSource) -> DocumentEnv<'a, QwenBpe> {
+        match source {
+            SftSource::Cycle(k) => self.env_for(k),
+            SftSource::Rehearsal(i) => {
+                let batch = self
+                    .anchors
+                    .get(i)
+                    .unwrap_or_else(|| panic!("rl::document: rehearsal source {i} but only {} anchor suite(s) exist", self.anchors.len()));
+                DocumentEnv::new(batch, FactSplit::Probe, self.tok)
+            }
+        }
+    }
+}
+
+/// One row as a supervised chat sample - see [`DocumentCurriculum`]'s doc
+/// comment for why the two splits are shaped differently.
+fn record(env: &DocumentEnv<'_, QwenBpe>, i: usize) -> ChatSample {
+    let (presented, expected) = env.row(i);
+    let messages = match env.split() {
+        FactSplit::Train => vec![ChatMessage::assistant(presented, true)],
+        FactSplit::Probe => vec![ChatMessage::user(presented), ChatMessage::assistant(expected, true)],
+    };
+    ChatSample { messages, tools: Vec::new() }
+}
+
+impl<'a> Curriculum for DocumentCurriculum<'a> {
+    type Env = DocumentEnv<'a, QwenBpe>;
+    type Ver = DocumentVerifier<'a, QwenBpe>;
+
+    fn env_for(&self, cycle: usize) -> DocumentEnv<'a, QwenBpe> {
+        DocumentEnv::new(self.batch(cycle), FactSplit::Train, self.tok)
+    }
+
+    fn eval_env_for(&self, cycle: usize) -> DocumentEnv<'a, QwenBpe> {
+        DocumentEnv::new(self.batch(cycle), FactSplit::Probe, self.tok)
+    }
+
+    fn verifier(&self) -> DocumentVerifier<'a, QwenBpe> {
+        DocumentVerifier::new(self.tok)
+    }
+
+    fn label(&self, cycle: usize) -> String {
+        let batch = self.batch(cycle);
+        format!("doc{:02} {} facts/{} probes", cycle + 1, batch.facts().len(), batch.triples().len())
+    }
+
+    fn shape(&self) -> (usize, usize) {
+        self.shape
+    }
+
+    fn rehearsal_envs(&self) -> Vec<DocumentEnv<'a, QwenBpe>> {
+        (0..self.anchors.len()).map(|i| self.env_for_source(SftSource::Rehearsal(i))).collect()
+    }
+
+    fn rehearsal_len(&self) -> usize {
+        self.anchors.len()
+    }
+
+    /// `n` records drawn uniformly over `sources` (and, within a source,
+    /// uniformly over its rows), written through
+    /// [`data::chat::prepare_chat_samples`] - so the per-token `train.mask.bin`
+    /// companion file is what supervises the loss, and
+    /// [`model::load_dataset`] aligns every sampled window to a record start
+    /// on its own.
+    ///
+    /// The validation split is deliberately EMPTY: this dataset is consumed by
+    /// [`crate::objective::mixture::Anchor`], which takes the training split
+    /// only, and `run_study` runs its cycles at `eval_interval: 0`. Writing an
+    /// unread val split would be a second, silently-unchecked draw.
+    fn write_sft_dataset(&self, sources: &[SftSource], n: usize, seed: u64, out_dir: &Path) -> std::io::Result<()> {
+        assert!(!sources.is_empty(), "rl::document::write_sft_dataset: no sources - there is nothing to draw from");
+        assert!(n > 0, "rl::document::write_sft_dataset: a zero-record dataset trains nothing");
+        let envs: Vec<DocumentEnv<'a, QwenBpe>> = sources.iter().map(|s| self.env_for_source(*s)).collect();
+        let mut rng = Rng::new(seed);
+        let samples: Vec<ChatSample> = (0..n)
+            .map(|_| {
+                let env = &envs[(rng.next_u64() % envs.len() as u64) as usize];
+                let row = (rng.next_u64() % env.len() as u64) as usize;
+                record(env, row)
+            })
+            .collect();
+        data::chat::prepare_chat_samples(&samples, &[], self.tok, self.tmpl, self.vocab, out_dir).map_err(std::io::Error::other)
+    }
+
+    /// `None`: the token-level `train.mask.bin` [`Self::write_sft_dataset`]
+    /// writes supersedes character-offset masking outright, and
+    /// `model::load_dataset` ignores `mask_before` whenever that file is
+    /// present. Stated rather than inherited from the trait default, because
+    /// on this dataset shape the two are not interchangeable.
+    fn sft_mask_before(&self) -> Option<char> {
+        None
+    }
 }
 
 #[cfg(test)]

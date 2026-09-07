@@ -109,6 +109,16 @@ name = "continual_study"
 path = "tests/continual_study.rs"
 required-features = ["qwen3"]
 
+# The document/fact `Curriculum` and the study over it (continuous-learning
+# roadmap B5'). Trains a real, tiny decoder whose vocabulary must span
+# `data::chat::ENDOFTEXT` (the record separator every
+# `data::chat::prepare_chat_samples` dataset carries), so its greedy decodes
+# dominate its wall clock - minutes, one device, run it alone.
+[[test]]
+name = "document_study"
+path = "tests/document_study.rs"
+required-features = ["qwen3"]
+
 # The runnable demos/diagnostics over that harness. `cargo run --release -p
 # brain-rl --features qwen3 --example <name>`; all of them train real models on
 # a real GPU and print the trajectory they actually measured, including when it

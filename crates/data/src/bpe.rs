@@ -57,7 +57,14 @@ pub struct Gpt2Bpe {
 /// every other byte is assigned a fresh code point starting at `256`, in
 /// ascending byte order. This guarantees a bijection between the 256 bytes and
 /// 256 distinct printable, non-whitespace characters.
-pub(crate) fn bytes_to_unicode() -> [char; 256] {
+///
+/// `pub` because it is the exact vocabulary a caller needs to build a
+/// merge-free byte-level [`crate::qwen_tokenizer::QwenBpe`] in memory (a
+/// checkpoint-free tokenizer fixture, `QwenBpe::from_gguf` over one token per
+/// byte). That table has one correct value and it is this one, so a caller
+/// that cannot reach it re-derives the reference's own ranges by hand - which
+/// is the copy this workspace's one-implementation rule exists to prevent.
+pub fn bytes_to_unicode() -> [char; 256] {
     // The directly-mapped, printable byte ranges (inclusive) from the reference.
     let mut bs: Vec<u32> = Vec::new();
     bs.extend(b'!' as u32..=b'~' as u32);
