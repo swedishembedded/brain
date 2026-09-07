@@ -1304,6 +1304,50 @@ pub(crate) mod tests {
         assert!(Store::new(dir).local(&base).is_some());
     }
 
+    /// The actual bug this whole track exists to fix, end to end:
+    /// `black-forest-labs/FLUX.2-klein-4B` is an official BFL repo, shaped
+    /// byte-for-byte like `Tongyi-MAI/Z-Image-Turbo` above (same
+    /// `model_index.json` + four role dirs), and must land as family
+    /// `"flux2"`, never `"zimage"` -- `modelstore::recipe::select`'s
+    /// `repos`-pin tiebreak is what routes it to the `flux2` `FilesRecipe`
+    /// row, and the `convert` dispatch's generic `files_recipe_roles`
+    /// fallback (the same one `sam2`/`kronos`/`timesfm3` already go through)
+    /// is what writes the manifest -- no `flux2`-specific finish code is
+    /// needed for THIS to hold.
+    ///
+    /// `ensure()` itself still errors: `flux2` has no `resident_for_compound`
+    /// dispatch arm yet (`model_dir.rs`'s own doc note -- it is reachable only
+    /// through its own `BRAIN_FLUX2_*` env vars, wiring a real resident for it
+    /// is separate work). That is expected and out of scope here; what this
+    /// track owns is that the CONVERT step already ran and left the right
+    /// manifest on disk before that later, unrelated failure.
+    #[test]
+    fn ensure_writes_the_flux2_family_manifest_though_no_resident_dispatch_exists_yet() {
+        let mut hub = FakeHub::new();
+        for f in [
+            "model_index.json",
+            "transformer/config.json",
+            "transformer/diffusion_pytorch_model.safetensors",
+            "vae/config.json",
+            "vae/diffusion_pytorch_model.safetensors",
+            "text_encoder/config.json",
+            "text_encoder/model.safetensors",
+            "tokenizer/tokenizer.json",
+        ] {
+            hub.add_file("black-forest-labs", "FLUX.2-klein-4B", "main", f, b"stub".to_vec());
+        }
+        let dir = store("supply-test-flux2-compound").root().to_path_buf();
+        let supplier = StoreSupplier::new(Store::new(dir.clone()), Box::new(hub));
+        let e = exec();
+        let err = supplier.ensure("black-forest-labs/FLUX.2-klein-4B", &e, &mut |_, _, _| {}).unwrap_err();
+        assert!(err.contains("family not servable"), "{err}");
+
+        let manifest_bytes = std::fs::read(dir.join("black-forest-labs").join("FLUX.2-klein-4B").join(brain_modelstore::MANIFEST_FILE)).unwrap();
+        let manifest: brain_modelstore::CompoundManifest = serde_json::from_slice(&manifest_bytes).unwrap();
+        assert_eq!(manifest.family, "flux2", "must not be misclassified as zimage");
+        assert_eq!(manifest.roles.len(), 4);
+    }
+
     /// The whole point of the `wan` recipe: `Wan-AI/Wan2.1-T2V-1.3B` has a
     /// root `config.json` declaring `"model_type": "t2v"` and no
     /// `architectures`, so before `WanRecipe` existed this plan reached
