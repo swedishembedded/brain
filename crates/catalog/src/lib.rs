@@ -271,14 +271,17 @@ pub fn models() -> Vec<ModelEntry> {
             },
             resident: None,
         },
-        // Wan2.1 text-to-video. Like flux2, the four weight roles live in the
-        // provider (from `BRAIN_WAN_*`), not in an action param, so one
-        // manifest serves `brain caps`, `brain do` and the D-Bus surface. The
-        // residency adapter is registered from `resident.rs` (it is one of the
-        // env-gated `from_env` families that list explains), not from here.
+        // Wan2.1 text-to-video. Like flux2, the provider builds its weight
+        // paths from the resolved Assembly (`wan::pipeline::Paths::
+        // from_assembly`) instead of `BRAIN_WAN_*`. The residency adapter is
+        // registered from `resident.rs` (it is one of the env-gated
+        // `from_env` families that list explains), not from here.
         ModelEntry {
             manifest: wan::caps::manifest,
-            provider: always!(wan::caps::WanProvider::new()),
+            provider: |assembly: &Assembly| {
+                let paths = wan::pipeline::Paths::from_assembly(assembly)?;
+                Ok(Arc::new(wan::caps::WanProvider::from_paths(paths)) as Arc<dyn Provider>)
+            },
             resident: None,
         },
         // LTX-2.5 text-to-video: a smoke-test pipeline (real VAE +

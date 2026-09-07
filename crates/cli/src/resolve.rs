@@ -579,31 +579,32 @@ mod tests {
     /// default fetching, which is why the rule keys on "every var set" rather
     /// than on "declares weights_env".
     ///
-    /// Uses `wan` as its example architecture (still on the env-var path;
-    /// `flux2` moved to the resolver and its `weights_env` is now empty).
+    /// Uses `ltxv` as its example architecture (still on the env-var path;
+    /// `flux2` and `wan` both moved to the resolver and their `weights_env`
+    /// is now empty).
     #[test]
     fn a_fully_configured_weights_env_architecture_skips_the_default_fetch() {
         let _serial = env_lock();
-        let a = brain_arch::by_id("wan").expect("wan row");
+        let a = brain_arch::by_id("ltxv").expect("ltxv row");
         let vars: Vec<&str> = a.weights_env.iter().map(|(v, _)| *v).collect();
-        assert!(vars.len() >= 2, "wan should declare several roles");
+        assert!(vars.len() >= 2, "ltxv should declare several roles");
 
         // Nothing exported: the default-fetch path stays available.
         for v in &vars {
             std::env::remove_var(v);
         }
-        assert!(wants_default_weights("wan", Some("generate")), "unset env must still fetch");
+        assert!(wants_default_weights("ltxv", Some("generate")), "unset env must still fetch");
 
         // Every path exported: nothing to fetch, nothing to inject.
         for v in &vars {
             std::env::set_var(v, "/nonexistent/for-test");
         }
-        assert!(!wants_default_weights("wan", Some("generate")), "fully configured must not fetch");
-        assert!(!wants_default_weights("wan", Some("infer")));
+        assert!(!wants_default_weights("ltxv", Some("generate")), "fully configured must not fetch");
+        assert!(!wants_default_weights("ltxv", Some("infer")));
 
         // Partially configured is NOT fully specified, so it still fetches.
         std::env::remove_var(vars[0]);
-        assert!(wants_default_weights("wan", Some("generate")), "partial env must still fetch");
+        assert!(wants_default_weights("ltxv", Some("generate")), "partial env must still fetch");
 
         for v in &vars {
             std::env::remove_var(v);
@@ -672,25 +673,27 @@ mod tests {
     /// re-download the very component `--model` overrides. A role that is
     /// neither set nor named still leaves the fetch in place.
     ///
-    /// Uses `wan` as its example architecture (still on the env-var path;
-    /// `flux2` moved to the resolver and its `weights_env` is now empty, so
-    /// it can no longer exercise this legacy machinery).
+    /// Uses `ltxv` as its example architecture (still on the env-var path;
+    /// `flux2` and `wan` both moved to the resolver and their `weights_env`
+    /// is now empty, so neither can exercise this legacy machinery any more).
     #[test]
     fn a_model_flag_counts_as_naming_the_primary_weights() {
         let _serial = env_lock();
-        let vars: Vec<_> = brain_arch::by_id("wan").expect("wan row").weights_env.iter().map(|(v, _)| *v).collect();
+        let vars: Vec<_> = brain_arch::by_id("ltxv").expect("ltxv row").weights_env.iter().map(|(v, _)| *v).collect();
         for &var in &vars {
             std::env::remove_var(var);
         }
-        let with_model = s(&["t2v", "--model", "some/dit", "--prompt", "p"]);
-        assert!(!weights_already_named("wan", &with_model), "the auxiliary roles are still unnamed");
+        let with_model = s(&["infer", "--model", "some/dit", "--prompt", "p"]);
+        assert!(!weights_already_named("ltxv", &with_model), "the auxiliary roles are still unnamed");
 
-        std::env::set_var("BRAIN_WAN_VAE", "v");
-        std::env::set_var("BRAIN_WAN_T5", "t");
-        std::env::set_var("BRAIN_WAN_TOKENIZER", "k");
-        assert!(weights_already_named("wan", &with_model), "--model names the DiT; the rest are in the env");
+        // Every role but the primary (`weights_env[0]`, the DiT) set via its
+        // own variable.
+        for &var in &vars[1..] {
+            std::env::set_var(var, "x");
+        }
+        assert!(weights_already_named("ltxv", &with_model), "--model names the DiT; the rest are in the env");
         assert!(
-            !weights_already_named("wan", &s(&["t2v", "--prompt", "p"])),
+            !weights_already_named("ltxv", &s(&["infer", "--prompt", "p"])),
             "without --model the unset primary still wants the fetch"
         );
 
@@ -710,6 +713,15 @@ mod tests {
         let _serial = env_lock();
         assert!(brain_arch::by_id("flux2").expect("flux2 row").weights_env.is_empty());
         assert!(!weights_already_named("flux2", &s(&["generate", "--prompt", "p"])));
+    }
+
+    /// `wan` moved to the resolver too - same gate as `flux2`'s own test
+    /// above, on `t2v` instead of `generate`.
+    #[test]
+    fn wan_no_longer_wants_env_based_weight_acquisition() {
+        let _serial = env_lock();
+        assert!(brain_arch::by_id("wan").expect("wan row").weights_env.is_empty());
+        assert!(!weights_already_named("wan", &s(&["t2v", "--prompt", "p"])));
     }
 
     #[test]
@@ -780,11 +792,14 @@ mod tests {
         assert!(matches!(resolve(&s(&[])), Resolved::Empty));
     }
 
+    /// Uses `ltxv` (five roles: dit/vae/audio_vae/text_encoder/tokenizer,
+    /// still on the env-var path) rather than `wan`, which moved to the
+    /// resolver and now declares an empty `weights_env`.
     #[test]
     fn explicit_weight_flags_suppress_the_auto_fetch() {
         let _serial = env_lock();
-        // `wan` declares four roles; naming all four on the command line must
-        // stop the 17.6 GB default-ref fetch, and naming three must not.
+        // Naming every role on the command line must stop the default-ref
+        // fetch, and naming all but one must not.
         assert_eq!(flag_twin("wan", "BRAIN_WAN_DIT"), "--dit");
         assert_eq!(flag_twin("wan", "BRAIN_WAN_TOKENIZER"), "--tokenizer");
         // A variable that does not follow the pattern yields a flag nothing
@@ -796,13 +811,23 @@ mod tests {
         // flag that must be recognized, not silently missed.
         assert_eq!(flag_twin("qwen3tts", "BRAIN_QWEN3TTS_WEIGHTS"), "--weights-dir");
 
-        for (var, _) in brain_arch::by_id("wan").expect("wan row").weights_env {
+        let roles = brain_arch::by_id("ltxv").expect("ltxv row").weights_env;
+        for (var, _) in roles {
             std::env::remove_var(var);
         }
-        let all = s(&["t2v", "--dit", "d", "--vae", "v", "--t5", "t", "--tokenizer", "k", "--prompt", "x"]);
-        assert!(weights_already_named("wan", &all));
-        let three = s(&["t2v", "--dit", "d", "--vae", "v", "--t5", "t", "--prompt", "x"]);
-        assert!(!weights_already_named("wan", &three));
+        let mut all = vec!["infer".to_string()];
+        for (var, _) in roles {
+            all.push(flag_twin("ltxv", var));
+            all.push(format!("path-for-{var}"));
+        }
+        assert!(weights_already_named("ltxv", &all));
+
+        let mut missing_one = vec!["infer".to_string()];
+        for (var, _) in &roles[..roles.len() - 1] {
+            missing_one.push(flag_twin("ltxv", var));
+            missing_one.push(format!("path-for-{var}"));
+        }
+        assert!(!weights_already_named("ltxv", &missing_one));
         // An architecture with no `weights_env` is unaffected either way.
         assert!(!weights_already_named("gpt2", &all));
     }

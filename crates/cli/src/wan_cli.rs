@@ -9,14 +9,41 @@
 //! brain wan t2v --prompt "a cat walking on a beach" --seed 42 --output-path out.mp4
 //! ```
 //!
-//! Every weight role has a flag (`--dit`, `--vae`, `--t5`, `--tokenizer`) AND
-//! an environment variable (`BRAIN_WAN_*`), and **the flag wins**
-//! (`wan::pipeline::Paths::resolve` is where that is decided). Everything else
-//! defaults from `WanConfig`, so a run that names only a prompt and an output
-//! path is upstream's own configuration.
+//! `t2v`'s weights come from [`resolve_wan`] (the model-store resolver over
+//! the models directory - see [`crate::model_dir::resolve`]), never
+//! `BRAIN_WAN_*`; `finetune` still reads those variables directly, same as
+//! `flux2_cli::run_flux2`'s own split. Everything else defaults from
+//! `WanConfig`, so a run that names only a prompt and an output path is
+//! upstream's own configuration.
 
 use wan::pipeline::{GenOpts, Paths, Solver};
 use wan::WanConfig;
+
+/// Resolve Wan's four weight roles through the model-store resolver
+/// (`brain_modelstore::resolve::resolve` + [`wan::spec::WanSpec`]) instead of
+/// `BRAIN_WAN_*` variables: `--dit`/`--vae`/`--t5`/`--tokenizer` name a role's
+/// file outright (the resolver's own override contract), the same shape
+/// `flux2_cli::resolve_flux2` already follows.
+/// `crate::resolver_cli::resolve_or_exit` does the actual scan/resolve and
+/// prints+exits on `Ambiguous`/`Missing`.
+fn resolve_wan(dit: Option<&str>, vae: Option<&str>, t5: Option<&str>, tokenizer: Option<&str>) -> Result<Paths, String> {
+    let mut overrides = std::collections::BTreeMap::new();
+    if let Some(v) = dit {
+        overrides.insert("dit".to_string(), v.to_string());
+    }
+    if let Some(v) = vae {
+        overrides.insert("vae".to_string(), v.to_string());
+    }
+    if let Some(v) = t5 {
+        overrides.insert("text_encoder".to_string(), v.to_string());
+    }
+    if let Some(v) = tokenizer {
+        overrides.insert("tokenizer".to_string(), v.to_string());
+    }
+    let spec = wan::spec::WanSpec;
+    let assembly = crate::resolver_cli::resolve_or_exit("wan", &spec, &overrides);
+    Paths::from_assembly(&assembly)
+}
 
 const HELP: &str = r#"brain wan t2v - Wan2.1 text to video
 
@@ -44,11 +71,15 @@ Sampling (defaults from WanConfig, i.e. upstream's own generate.py defaults):
   --adapter <path>         fold in a trained LoRA adapter (from `finetune`)
                            before generating
 
-Weights (flag wins over the environment variable):
-  --dit <path>             $BRAIN_WAN_DIT        transformer dir/file/.gguf
-  --vae <path>             $BRAIN_WAN_VAE        Wan2.1_VAE.pth or vae/
-  --t5 <path>              $BRAIN_WAN_T5         umT5-XXL encoder
-  --tokenizer <path>       $BRAIN_WAN_TOKENIZER  tokenizer.json or its dir
+Weights: `t2v` resolves dit/vae/text_encoder/tokenizer from the models
+directory (--models-dir / BRAIN_MODELS_DIR) - --dit/--vae/--t5/--tokenizer
+name a role outright, and an ambiguous or missing outcome prints every real
+candidate and exits rather than guessing. `finetune` still reads
+BRAIN_WAN_DIT, BRAIN_WAN_VAE, BRAIN_WAN_T5 and BRAIN_WAN_TOKENIZER.
+  --dit <path>             transformer dir/file/.gguf
+  --vae <path>             Wan2.1_VAE.pth or vae/
+  --t5 <path>              umT5-XXL encoder
+  --tokenizer <path>       tokenizer.json or its dir
   --dit-dtype <dtype>      $BRAIN_WAN_DIT_DTYPE  f32 (default) | f16 | int8 |
                            int4 - the DiT's weight STORAGE precision;
                            arithmetic always stays fp32. int8/int4 are a
@@ -191,7 +222,7 @@ fn t2v(args: &[String]) -> Result<(), String> {
     }
     let prompt = prompt.ok_or("--prompt is required")?;
     let out = out.ok_or("--output-path is required")?;
-    let paths = Paths::resolve(dit.as_deref(), vae.as_deref(), t5.as_deref(), tokenizer.as_deref())?;
+    let paths = resolve_wan(dit.as_deref(), vae.as_deref(), t5.as_deref(), tokenizer.as_deref())?;
     // Flag wins over the environment variable, same precedence as every other
     // wan CLI option that has both (see `Paths::resolve`'s own doc).
     let dtype_name = dit_dtype.or_else(|| std::env::var("BRAIN_WAN_DIT_DTYPE").ok().filter(|s| !s.is_empty()));

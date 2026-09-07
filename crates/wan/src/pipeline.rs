@@ -135,6 +135,24 @@ impl Paths {
             tokenizer: pick(tokenizer, 3, "--tokenizer")?,
         })
     }
+
+    /// Build `Paths` from an already-resolved [`capability::Assembly`]
+    /// ([`brain_modelstore::resolve::resolve`]'s `Resolution::Resolved`
+    /// output) - no environment or flag involved. A missing role should be
+    /// unreachable in practice (`resolve` only ever returns `Resolved` once
+    /// every required role is filled), but this must name it rather than
+    /// panic if it somehow isn't - see `flux2::pipeline::Paths::from_assembly`,
+    /// the pattern this mirrors exactly.
+    pub fn from_assembly(assembly: &capability::Assembly) -> Result<Paths, String> {
+        let get = |role: &str| -> Result<String, String> {
+            assembly
+                .roles
+                .get(role)
+                .map(|p| p.to_string_lossy().into_owned())
+                .ok_or_else(|| format!("wan: assembly '{}' has no {role} role", assembly.id))
+        };
+        Ok(Paths { dit: get("dit")?, vae: get("vae")?, t5: get("text_encoder")?, tokenizer: get("tokenizer")? })
+    }
 }
 
 /// Everything a single generation varies. Built from a [`WanConfig`] so an
@@ -701,6 +719,39 @@ mod tests {
         assert_eq!(o.solver, Solver::UniPc);
         // The text encoder defaults OFF the accelerator on purpose.
         assert_eq!(o.te_device, None);
+    }
+
+    fn assembly_with_roles(roles: &[(&str, &str)]) -> capability::Assembly {
+        capability::Assembly {
+            id: "local/wan-t2v-1.3B".to_string(),
+            arch: "wan".to_string(),
+            variant: Some("t2v-1.3B".to_string()),
+            roles: roles.iter().map(|(k, v)| (k.to_string(), std::path::PathBuf::from(v))).collect(),
+            provenance: Vec::new(),
+        }
+    }
+
+    /// The resolver-driven path: every role comes from the [`Assembly`]
+    /// itself, never the environment - `text_encoder` maps to `Paths::t5`,
+    /// the one role whose env var (`BRAIN_WAN_T5`) spells it differently.
+    #[test]
+    fn from_assembly_reads_every_role_from_the_assembly() {
+        let assembly = assembly_with_roles(&[("dit", "d"), ("vae", "v"), ("text_encoder", "t"), ("tokenizer", "k")]);
+        let p = Paths::from_assembly(&assembly).unwrap();
+        assert_eq!(p.dit, "d");
+        assert_eq!(p.vae, "v");
+        assert_eq!(p.t5, "t");
+        assert_eq!(p.tokenizer, "k");
+    }
+
+    /// Unreachable for a real `Resolution::Resolved` assembly (the resolver
+    /// guarantees every required role is present) - but a missing role must
+    /// still be a named error, never a panic.
+    #[test]
+    fn from_assembly_names_a_missing_role_instead_of_panicking() {
+        let assembly = assembly_with_roles(&[("dit", "d"), ("vae", "v"), ("tokenizer", "k")]);
+        let err = Paths::from_assembly(&assembly).unwrap_err();
+        assert!(err.contains("text_encoder"), "{err}");
     }
 
     /// The flag must win over the variable, in both directions, for every one

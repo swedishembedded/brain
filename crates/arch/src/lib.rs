@@ -511,11 +511,16 @@ pub const ARCHS: &[Arch] = &[
     // variable rather than something auto-fetch would fail to resolve.
     // No vendor GGUF for any Wan repo - what exists (city96/QuantStack) is
     // community-only, omitted per the `qwen3` row comment.
+    // `weights_env` is empty: `brain wan t2v` resolves its four roles through
+    // `wan::spec::WanSpec` (the model-store resolver) instead, the same
+    // migration `flux2`'s own row went through first. `finetune` still reads
+    // the BRAIN_WAN_* variables directly (see `wan_cli::run_wan`'s own doc),
+    // so the FIELD stays on `Arch` for the other ~20 architectures not yet
+    // migrated - only this row's value is empty.
     arch!("wan", "Wan2.1/2.2 video diffusion transformer (T2V/I2V)", Video, Brain, "brain-wan",
           hf: &["WanTransformer3DModel"],
           default_ref: Some("Wan-AI/Wan2.1-T2V-1.3B"),
-          weights_env: &[("BRAIN_WAN_DIT", "dit"), ("BRAIN_WAN_VAE", "vae"),
-                         ("BRAIN_WAN_T5", "text_encoder"), ("BRAIN_WAN_TOKENIZER", "tokenizer")],
+          weights_env: &[],
           variants: &[
               Variant { reference: "Wan-AI/Wan2.1-T2V-1.3B", params: 1_418_996_800, quants: &[] },
               Variant { reference: "Wan-AI/Wan2.1-T2V-14B", params: 14_288_491_584, quants: &[] },

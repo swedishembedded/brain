@@ -872,36 +872,6 @@ pub(crate) mod tests {
         Executor::start(vec![], budgets, Policy::default())
     }
 
-    /// Seed one servable `Wan-AI/Wan2.1-T2V-1.3B` compound into a fresh
-    /// store through the real plan/download/convert ladder and return the
-    /// store root. The file list is the real repo listing;
-    /// `ensure_completes_the_native_wan_plan_and_registers_a_wan_resident`
-    /// documents it file by file -- the fetch-gate tests need the same
-    /// bytes, so they share this instead of restating it. The directory is
-    /// pid-suffixed so a fresh store is guaranteed, never a reused one.
-    fn seed_wan(name: &str) -> std::path::PathBuf {
-        let mut hub = FakeHub::new();
-        for f in [
-            "README.md",
-            "LICENSE.txt",
-            "assets/logo.png",
-            "config.json",
-            "diffusion_pytorch_model.safetensors",
-            "Wan2.1_VAE.pth",
-            "models_t5_umt5-xxl-enc-bf16.pth",
-            "google/umt5-xxl/tokenizer.json",
-            "google/umt5-xxl/tokenizer_config.json",
-            "google/umt5-xxl/special_tokens_map.json",
-            "google/umt5-xxl/spiece.model",
-        ] {
-            hub.add_file("Wan-AI", "Wan2.1-T2V-1.3B", "main", f, b"stub".to_vec());
-        }
-        let dir = store(&format!("{name}-{}", std::process::id())).root().to_path_buf();
-        let supplier = StoreSupplier::new(Store::new(dir.clone()), Box::new(hub));
-        let e = exec();
-        supplier.ensure("Wan-AI/Wan2.1-T2V-1.3B", &e, &mut |_, _, _| {}).unwrap();
-        dir
-    }
 
     #[test]
     fn next_download_pct_bucket_reports_each_new_10pct_threshold_once() {
@@ -1022,79 +992,25 @@ pub(crate) mod tests {
         std::env::remove_var("BRAIN_AUTO_FETCH");
     }
 
-    /// A pulled checkpoint resolves with fetching OFF -- the store lookup is
-    /// local I/O, not a fetch, so a pulled model works exactly as before.
+    /// `wan` moved to the resolver (`wan::spec::WanSpec`,
+    /// `wan_cli::resolve_wan`): its `weights_env` is now empty, so
+    /// `ensure_env_weights_with` - the env-based supply path this whole
+    /// section otherwise exercises with real fetch-gate scenarios - has
+    /// nothing left to check for it and is a documented no-op (see
+    /// `weights_already_named`'s identical "nothing to name" early return in
+    /// `resolve.rs`), regardless of what is pulled, fetched, or set. This
+    /// replaces the richer scenario coverage `wan` used to carry here (a
+    /// local-store resolve, a missing-weights remedy message, an opted-in
+    /// fetch) - that scenario shape still needs covering through some other
+    /// still-env-based multi-role architecture once one is free of its own
+    /// migration.
     #[test]
-    fn ensure_env_weights_resolves_a_pulled_checkpoint_from_the_local_store_when_fetching_is_off() {
+    fn ensure_env_weights_no_longer_wants_anything_for_wan() {
         let _serial = env_lock();
-        let dir = seed_wan("supply-test-env-weights-local");
+        assert!(brain_arch::by_id("wan").expect("wan row").weights_env.is_empty());
+        let dir = store(&format!("supply-test-env-weights-wan-noop-{}", std::process::id()));
         std::env::remove_var("BRAIN_AUTO_FETCH");
-        for (var, _) in brain_arch::by_id("wan").unwrap().weights_env {
-            std::env::remove_var(var);
-        }
-        ensure_env_weights_with("wan", &Store::new(dir), &FakeHub::new()).unwrap();
-        for (var, role) in brain_arch::by_id("wan").unwrap().weights_env {
-            let p = std::env::var(var).unwrap_or_else(|_| panic!("{var} must be set from the local store"));
-            assert!(std::path::Path::new(&p).exists(), "{var} -> {role:?} -> {p} must exist");
-        }
-        for (var, _) in brain_arch::by_id("wan").unwrap().weights_env {
-            std::env::remove_var(var);
-        }
-    }
-
-    /// Default OFF and nothing pulled: a hard error naming the unset
-    /// variables and both remedies (`brain pull`, `--autofetch`) -- never a
-    /// download, and never the provider's bare "BRAIN_X not set" as the
-    /// caller's only clue.
-    #[test]
-    fn ensure_env_weights_names_the_remedy_when_nothing_is_pulled_and_fetching_is_off() {
-        let _serial = env_lock();
-        let dir = store(&format!("supply-test-env-weights-missing-{}", std::process::id()));
-        std::env::remove_var("BRAIN_AUTO_FETCH");
-        for (var, _) in brain_arch::by_id("wan").unwrap().weights_env {
-            std::env::remove_var(var);
-        }
-        let err = ensure_env_weights_with("wan", &dir, &FakeHub::new()).unwrap_err();
-        assert!(err.contains("BRAIN_WAN_DIT"), "{err}");
-        assert!(err.contains("brain pull Wan-AI/Wan2.1-T2V-1.3B"), "{err}");
-        assert!(err.contains("--autofetch"), "{err}");
-        for (var, _) in brain_arch::by_id("wan").unwrap().weights_env {
-            std::env::remove_var(var);
-        }
-    }
-
-    /// Opted in, the original behavior is byte-for-byte intact: missing
-    /// weights are fetched through the store's ladder and every role lands
-    /// in its variable.
-    #[test]
-    fn ensure_env_weights_fetches_when_the_environment_opts_in() {
-        let _serial = env_lock();
-        let dir = store(&format!("supply-test-env-weights-fetch-{}", std::process::id()));
-        let mut hub = FakeHub::new();
-        for f in [
-            "config.json",
-            "diffusion_pytorch_model.safetensors",
-            "Wan2.1_VAE.pth",
-            "models_t5_umt5-xxl-enc-bf16.pth",
-            "google/umt5-xxl/tokenizer.json",
-            "google/umt5-xxl/tokenizer_config.json",
-            "google/umt5-xxl/special_tokens_map.json",
-            "google/umt5-xxl/spiece.model",
-        ] {
-            hub.add_file("Wan-AI", "Wan2.1-T2V-1.3B", "main", f, b"stub".to_vec());
-        }
-        std::env::set_var("BRAIN_AUTO_FETCH", "1");
-        for (var, _) in brain_arch::by_id("wan").unwrap().weights_env {
-            std::env::remove_var(var);
-        }
-        ensure_env_weights_with("wan", &dir, &hub).unwrap();
-        for (var, _) in brain_arch::by_id("wan").unwrap().weights_env {
-            assert!(std::env::var_os(var).is_some_and(|v| !v.is_empty()), "{var} must be set by the fetch");
-        }
-        for (var, _) in brain_arch::by_id("wan").unwrap().weights_env {
-            std::env::remove_var(var);
-        }
-        std::env::remove_var("BRAIN_AUTO_FETCH");
+        ensure_env_weights_with("wan", &dir, &FakeHub::new()).unwrap();
     }
 
     /// A pulled ref resolves with fetching OFF and a hub holding NOTHING --

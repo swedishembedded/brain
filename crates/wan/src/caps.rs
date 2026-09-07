@@ -247,21 +247,16 @@ pub fn train_action(paths: &Paths, inv: &Invocation, progress: &mut dyn FnMut(Pr
 /// The executable Wan model behind the manifest. Holds a **hot DiT** so a
 /// long-lived process (`brain run` / the event server) loads and uploads the
 /// transformer once per (variant, latent extent, device) and reuses it across
-/// `ActionRequest`s. Weight paths come from the environment
-/// (`BRAIN_WAN_{DIT,VAE,T5,TOKENIZER}`).
+/// `ActionRequest`s. Weight paths are BOUND at construction (see
+/// [`WanProvider::from_paths`]) - never re-resolved per request.
 pub struct WanProvider {
     hot: Arc<Mutex<Option<HotDit>>>,
+    paths: Paths,
 }
 
 impl WanProvider {
-    pub fn new() -> WanProvider {
-        WanProvider { hot: Arc::new(Mutex::new(None)) }
-    }
-}
-
-impl Default for WanProvider {
-    fn default() -> Self {
-        WanProvider::new()
+    pub fn from_paths(paths: Paths) -> WanProvider {
+        WanProvider { hot: Arc::new(Mutex::new(None)), paths }
     }
 }
 
@@ -274,14 +269,17 @@ impl Provider for WanProvider {
             .actions
             .iter()
             .any(|a| a.name == name)
-            .then(|| Arc::new(WanAction { name: name.to_string(), hot: self.hot.clone() }) as Arc<dyn Action>)
+            .then(|| Arc::new(WanAction { name: name.to_string(), hot: self.hot.clone(), paths: self.paths.clone() }) as Arc<dyn Action>)
     }
 }
 
-/// One Wan action, dispatched through the shared helpers above.
+/// One Wan action, dispatched through the shared helpers above. `paths` is
+/// the provider's own bound weights (see [`WanProvider::from_paths`]) - never
+/// re-resolved per request.
 struct WanAction {
     name: String,
     hot: Arc<Mutex<Option<HotDit>>>,
+    paths: Paths,
 }
 
 impl Action for WanAction {
@@ -291,17 +289,11 @@ impl Action for WanAction {
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         match self.name.as_str() {
             "t2v" => {
-                // Params before the weights-env check: a request that could
-                // never run must not read "you forgot to export BRAIN_WAN_DIT".
                 let p = gen_params_from(inv)?;
-                let paths = Paths::from_env()?;
                 let mut guard = self.hot.lock().map_err(|_| "hot DiT lock poisoned")?;
-                generate_on(&paths, &mut guard, inv, &p, progress)
+                generate_on(&self.paths, &mut guard, inv, &p, progress)
             }
-            "lora_train" => {
-                let paths = Paths::from_env()?;
-                train_action(&paths, inv, progress)
-            }
+            "lora_train" => train_action(&self.paths, inv, progress),
             other => Err(format!("wan '{other}': unknown action")),
         }
     }
