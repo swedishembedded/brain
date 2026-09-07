@@ -360,6 +360,28 @@ const FILES_RECIPES: &[FilesRecipe] = &[
         files: &["config.json", "model.safetensors"],
         roles: &[("weights", ".")],
     },
+    // FLUX.2-klein: the official BFL release repos, which ship a diffusers
+    // pipeline shaped BYTE-FOR-BYTE like `ZimageRecipe`'s own four role dirs
+    // (`model_index.json` + `transformer/`/`vae/`/`text_encoder/`/
+    // `tokenizer/`) -- `ZimageRecipe::matches` cannot tell the two families
+    // apart, and nothing reads `model_index.json`'s own `_class_name`
+    // (`"Flux2KleinPipeline"`, never a Z-Image class) at match time. `repos`
+    // is the same escape hatch Kronos and TimesFM-3 use for a listing that
+    // is genuinely ambiguous by shape alone; unlike those two, the shape
+    // match ALSO exists here (`ZimageRecipe`), which is exactly why this row
+    // needs `select`'s `RepoPinned` > `Shape` tiebreak to win rather than
+    // simply being claimed first.
+    FilesRecipe {
+        id: "flux2",
+        family: "flux2",
+        signature: &["model_index.json"],
+        repos: &["black-forest-labs/FLUX.2-klein-4B", "black-forest-labs/FLUX.2-klein-9B"],
+        files: &[],
+        // Same four roles as `ZimageRecipe` -- both loaders read the same
+        // diffusers pipeline layout -- reused directly rather than a second
+        // copy of the same four pairs.
+        roles: ZimageRecipe::ROLES,
+    },
 ];
 
 /// The `(family, roles)` a [`FilesRecipe::id`] carries, for the finish-side
@@ -977,16 +999,34 @@ mod tests {
     /// FLUX.2-klein-4B` is an official BFL FLUX.2 release, not a Z-Image
     /// checkpoint, but its listing matches [`ZimageRecipe::matches`] exactly
     /// (`model_index.json` + all four role dirs). `ZimageRecipe`'s shape
-    /// match is the only recipe here that claims it today (no `repos`-pinned
-    /// row exists yet), so `select`'s tiebreak has nothing to prefer it
-    /// over. Real registry, real `select` -- the same call
-    /// `plan::plan_from_listing` makes.
+    /// match and the `flux2` row's `repos` pin both claim it -- `select`'s
+    /// `RepoPinned` > `Shape` tiebreak (not registry declaration order) is
+    /// what must resolve that in `flux2`'s favor. Real registry, real
+    /// `select` -- the same call `plan::plan_from_listing` makes.
     #[test]
     fn flux2_repo_is_not_misclassified_as_zimage() {
         let listing = flux2_klein_4b_listing();
         let r = ModelRef::new("black-forest-labs", "FLUX.2-klein-4B", None);
         let picked = select(recipes(), &r, &listing).unwrap();
-        assert_ne!(picked.id(), "zimage", "an official BFL FLUX.2 repo must not be classified as Z-Image");
+        assert_eq!(picked.id(), "flux2", "an official BFL FLUX.2 repo must resolve to the flux2 recipe, not zimage");
+
+        // Regression guard: Z-Image's own real repo (no `repos` pin, shape
+        // match only) must still resolve to `zimage`, unchanged.
+        let z = ModelRef::new("Tongyi-MAI", "Z-Image-Turbo", None);
+        assert_eq!(select(recipes(), &z, &zimage_turbo_listing()).unwrap().id(), "zimage");
+    }
+
+    #[test]
+    fn flux2_recipe_fetches_the_listing_verbatim_and_names_zimages_own_roles() {
+        let listing = flux2_klein_4b_listing();
+        let hub = crate::hub::FakeHub::new();
+        let r = ModelRef::new("black-forest-labs", "FLUX.2-klein-4B", None);
+        let recipe = recipes().into_iter().find(|x| x.id() == "flux2").unwrap();
+        let files: Vec<String> = recipe.artifacts(&r, &listing, &hub).unwrap().into_iter().map(|a| a.file).collect();
+        assert_eq!(files, listing, "no extraneous files to skip in this repo's real listing -- the whole thing is fetched");
+        let (family, roles) = files_recipe_roles("flux2").unwrap();
+        assert_eq!(family, "flux2");
+        assert_eq!(roles, ZimageRecipe::ROLES);
     }
 
     /// A recipe that matches every listing, at whatever [`Specificity`] tier
