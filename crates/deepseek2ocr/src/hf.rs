@@ -45,7 +45,10 @@
 //! discipline, you can procure our services by emailing
 //! info@swedishembedded.com.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+
+use checkpoint::remap::{Fetch, RemapSource};
+use checkpoint::weightio::WeightReader;
 
 use clip::config::ClipVisionConfig;
 use deepseek2::DeepseekV2Config;
@@ -237,6 +240,81 @@ pub fn encoder_manifest(cfg: &DeepseekOcrConfig) -> Vec<(String, usize)> {
     v.extend(cfg.clip.tensor_manifest().into_iter().map(|(n, s)| (n, s.iter().product::<usize>())));
     v.extend(cfg.glue_param_list());
     v
+}
+
+/// Split a checkpoint's tensor names into the two halves' fetch plans, keyed
+/// by the brain-side name.
+///
+/// One pass over the SOURCE names (rather than looking each manifest entry up
+/// by a hand-written inverse map) is what makes the coverage check meaningful
+/// in both directions: an upstream tensor this crate does not understand is an
+/// error here, and a manifest entry no upstream tensor produced is caught by
+/// the per-half `validate` below.
+///
+/// Returned as `Fetch::Whole` throughout because the map really is a pure
+/// rename - the upstream CLIP tower already ships its qkv fused the way brain
+/// wants it, so nothing is sliced or concatenated.
+pub fn plans(names: &[String], cfg: &DeepseekOcrConfig) -> Result<(HashMap<String, Fetch>, HashMap<String, Fetch>), String> {
+    let (mut enc, mut dec) = (HashMap::new(), HashMap::new());
+    for src in names {
+        let (side, brain) = match classify(src, cfg)? {
+            Half::Encoder(n) => (&mut enc, n),
+            Half::Decoder(n) => (&mut dec, n),
+        };
+        if side.insert(brain.clone(), Fetch::Whole(src.clone())).is_some() {
+            return Err(format!("{LABEL}: two source tensors map to {brain}"));
+        }
+    }
+    for (label, plan, want) in [("encoder", &enc, encoder_manifest(cfg)), ("decoder", &dec, cfg.decoder.param_list())] {
+        let missing: Vec<&str> = want.iter().map(|(n, _)| n.as_str()).filter(|n| !plan.contains_key(*n)).collect();
+        if !missing.is_empty() {
+            return Err(format!("{LABEL}: this checkpoint produces no {label} tensor for {} parameter(s): {missing:?}", missing.len()));
+        }
+    }
+    Ok((enc, dec))
+}
+
+/// The encoder half's weights, read out of an open checkpoint under brain's
+/// own names.
+///
+/// Eager, unlike the decoder: `DeepEncoder::new` uploads the whole tower at
+/// once and the vision half is ~0.5 GB of the checkpoint, so this matches what
+/// `crate::import::encoder_weights` already materializes from the mmproj.
+pub fn encoder_weights(reader: &WeightReader, cfg: &DeepseekOcrConfig) -> Result<HashMap<String, Vec<f32>>, String> {
+    let names: Vec<String> = reader.names().map(str::to_string).collect();
+    let (enc, _) = plans(&names, cfg)?;
+    let mut out = HashMap::with_capacity(enc.len());
+    for (brain, fetch) in enc {
+        let Fetch::Whole(src) = fetch else { unreachable!("plans yields only whole tensors") };
+        let data = reader.tensor(&src).ok_or_else(|| format!("{LABEL}: {src}: could not be read"))?;
+        out.insert(brain, data);
+    }
+    Ok(out)
+}
+
+/// The decoder half as a streaming [`checkpoint::TensorSource`] under brain's
+/// own names, borrowing `reader`.
+///
+/// Nothing is expanded to disk: each tensor is decoded from the checkpoint's
+/// own BF16 on demand, so this path never builds the ~12 GB fp32 intermediate
+/// the GGUF pair needs (`crate::import::expand_lm`).
+pub fn decoder_source<'a>(reader: &'a WeightReader, cfg: &DeepseekOcrConfig) -> Result<RemapSource<'a>, String> {
+    let names: Vec<String> = reader.names().map(str::to_string).collect();
+    let (_, dec) = plans(&names, cfg)?;
+    let src = RemapSource::new(reader, dec);
+    src.validate(&cfg.decoder.param_list())?;
+    Ok(src)
+}
+
+/// Every tensor's shape, header-only - what [`config_from_shapes`] reads.
+pub fn shapes(reader: &WeightReader) -> BTreeMap<String, Vec<usize>> {
+    reader
+        .names()
+        .map(str::to_string)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .filter_map(|n| reader.shape(&n).map(|s| (n.clone(), s.iter().map(|d| *d as usize).collect())))
+        .collect()
 }
 
 /// One tensor's extent along `axis`, or a message naming the tensor.
@@ -699,6 +777,32 @@ mod tests {
                 assert_eq!(got[name], *numel, "{label}: {name} element count");
             }
         }
+    }
+
+    /// The same coverage, through the function the loader actually calls -
+    /// `plans`, not `classify` - because that is what decides whether a real
+    /// `Session::load` succeeds, and it is where an INCOMPLETE checkpoint has
+    /// to be refused rather than loaded with a silently missing tensor.
+    #[test]
+    fn plans_partition_the_checkpoint_and_refuse_an_incomplete_one() {
+        let cfg = DeepseekOcrConfig::deepseek_ocr(1);
+        let names: Vec<String> = upstream_shapes().into_keys().collect();
+        let (enc, dec) = plans(&names, &cfg).expect("the real checkpoint plans cleanly");
+        assert_eq!(enc.len(), 476, "the vision half");
+        assert_eq!(dec.len(), 2234, "the decoder half");
+        assert_eq!(enc.len() + dec.len(), names.len(), "every source tensor is claimed exactly once");
+
+        // Drop one expert. Every remaining tensor still classifies, so only
+        // the manifest check can catch it.
+        let short: Vec<String> = names.iter().filter(|n| !n.starts_with("model.layers.5.mlp.experts.17.")).cloned().collect();
+        let e = plans(&short, &cfg).unwrap_err();
+        assert!(e.contains("blocks.5.mlp.experts.17"), "the refusal must name what is missing: {e}");
+
+        // A checkpoint carrying a tensor this crate does not understand stops
+        // the import rather than being partly loaded.
+        let mut extra = names.clone();
+        extra.push("model.layers.0.self_attn.q_norm.weight".to_string());
+        assert!(plans(&extra, &cfg).is_err(), "an unclassifiable tensor must stop the import");
     }
 
     /// The config is DERIVED from the checkpoint's own shapes, not read out of

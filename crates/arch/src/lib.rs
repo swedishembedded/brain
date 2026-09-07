@@ -356,18 +356,21 @@ pub const ARCHS: &[Arch] = &[
     // no auto-fetch here because SUPIR's own weights don't either, for the
     // same non-commercial-license reason - see the `supir` row below.
     arch!("llava", "LLaVA-1.5-13B (CLIP-L/14@336 + Vicuna-1.5 decoder)", Multimodal, Brain, "brain-llava", hf: &["LlavaLlamaForCausalLM"], weights_env: &[("BRAIN_LLAVA_WEIGHTS", "weights")]),
-    // `default_ref` names the GGUF release repo (`ggml-org/DeepSeek-OCR-GGUF`),
-    // not `deepseek-ai/DeepSeek-OCR` -- the latter is a `transformers`-shaped
-    // repo with an empty `hf:` list here, so it would fall through to
-    // `TransformersRecipe` and fail `UnsupportedArchitecture`, and this is
-    // the checkpoint `crates/deepseek2ocr` actually loads (its `dir` role
-    // wants the two-GGUF pair, not an HF safetensors dir). See
-    // `crates/modelstore/src/recipe.rs`'s `deepseek2ocr-gguf` `FilesRecipe` row.
+    // BOTH published releases of this model are pullable, and
+    // `crates/deepseek2ocr`'s `import::Files::locate` recognizes either on
+    // disk: `default_ref` stays the GGUF pair (`ggml-org/DeepSeek-OCR-GGUF`,
+    // claimed by `crates/modelstore/src/recipe.rs`'s `deepseek2ocr-gguf`
+    // `FilesRecipe` row), while `hf:` names the upstream `transformers`
+    // release's own `architectures[0]` so `deepseek-ai/DeepSeek-OCR` routes
+    // through `TransformersRecipe` instead of failing
+    // `UnsupportedArchitecture`. That repo needs no tensor rewrite at
+    // download time -- `deepseek2ocr` reads its safetensors in place -- so
+    // `crates/cli/src/supply.rs` lists it as a passthrough family.
     // `weights_env` is empty: `dir` is resolved through
     // `deepseek2ocr::spec::Deepseek2ocrSpec` (the model-store resolver)
     // instead of `BRAIN_DEEPSEEK_OCR_DIR` - see
     // `crates/cli/src/catalog.rs`'s `resolved_assembly_for`.
-    arch!("deepseek2ocr", "DeepSeek-OCR (SAM+CLIP DeepEncoder + DeepSeek-V2 decoder)", Multimodal, LlamaCpp, "brain-deepseek2ocr", gguf: Some("deepseek2-ocr"), default_ref: Some("ggml-org/DeepSeek-OCR-GGUF"),
+    arch!("deepseek2ocr", "DeepSeek-OCR (SAM+CLIP DeepEncoder + DeepSeek-V2 decoder)", Multimodal, LlamaCpp, "brain-deepseek2ocr", gguf: Some("deepseek2-ocr"), hf: &["DeepseekOCRForCausalLM"], default_ref: Some("ggml-org/DeepSeek-OCR-GGUF"),
         variants: &[Variant { reference: "ggml-org/DeepSeek-OCR-GGUF", params: 3_336_106_240, quants: &["Q8_0"] }]),
     // No `weights_env`: qwen3asr resolves its single `weights` role through
     // `brain_modelstore::resolve` (`crates/qwen3asr/src/spec.rs`), not

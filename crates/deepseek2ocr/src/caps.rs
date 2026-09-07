@@ -241,14 +241,16 @@ impl Session {
         let t1 = std::time::Instant::now();
         let dev_vision = |k: &'static [(&'static str, &'static str)]| gpu_core::Gpu::new_wgpu(k);
         let dev_decoder = |k: &'static [(&'static str, &'static str)]| gpu_core::Gpu::new_cpu(k);
-        let vision = import::encoder_weights_from(&files.mmproj)?;
+        let vision = import::encoder_weights_for(&files, &cfg)?;
         stage_time("load: mmproj import (encoder weights)", t1);
         let t2 = std::time::Instant::now();
-        let decoder = import::decoder_reader(&files)?;
+        let reader = import::decoder_reader(&files)?;
+        let decoder = import::decoder_source(&files, &reader, &cfg)?;
         stage_time("load: decoder_reader open", t2);
         let t3 = std::time::Instant::now();
         let model = DeepseekOcr::new_with_prompt_devices(&dev_vision, &dev_decoder, cfg.clone(), &vision, &decoder, 0, SEQ_LEN, &shape, false);
         drop(decoder);
+        drop(reader);
         drop(vision);
         stage_time("load: DeepseekOcr::new_with_prompt_devices (weight upload + tape build)", t3);
 

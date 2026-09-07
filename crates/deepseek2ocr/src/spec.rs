@@ -2,19 +2,30 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! DeepSeek-OCR's [`ArchSpec`]: which on-disk directory satisfies its one
-//! `dir` role - a directory holding the LM GGUF (`general.architecture ==
-//! "deepseek2-ocr"`) and its sibling vision-tower GGUF (`general.architecture
-//! == "clip"`, `clip.projector_type == "deepseekocr"`). Header-only, the same
-//! contract `flux2::spec::Flux2Spec` follows.
+//! `dir` role. Header-only, the same contract `flux2::spec::Flux2Spec`
+//! follows, and content-based throughout - every check below reads what a
+//! file DECLARES, never what it is named.
 //!
-//! `crate::import::Files` collapses this same pair down to two named paths
-//! from one directory argument; this module is the other direction - finding
-//! that directory from a scanned inventory in the first place. The inventory
-//! scanner never collapses this pair into one directory-shaped record (no
-//! `config.json`, so [`brain_modelstore::inventory`] walks it file-by-file
-//! and records each GGUF on its own), so [`ArchSpec::classify`] names the LM
-//! GGUF's own record as the `dir` candidate - [`dir_from_assembly`] recovers
-//! the actual directory from it.
+//! `crate::import::Files::locate` turns one directory argument into the
+//! specific paths a load needs; this module is the other direction - finding
+//! that directory in a scanned inventory in the first place. Both published
+//! releases are recognized, and the inventory represents them differently:
+//!
+//! * the `ggml-org/DeepSeek-OCR-GGUF` pair - the LM GGUF
+//!   (`general.architecture == "deepseek2-ocr"`) beside its vision tower
+//!   (`general.architecture == "clip"`, `clip.projector_type ==
+//!   "deepseekocr"`). It has no `config.json`, so
+//!   [`brain_modelstore::inventory`] never collapses it into a
+//!   directory-shaped record: it walks the pair file-by-file, and
+//!   [`ArchSpec::classify`] names the LM GGUF's own record as the `dir`
+//!   candidate.
+//! * the upstream `deepseek-ai/DeepSeek-OCR` `transformers` release, whose
+//!   `config.json` is exactly what makes the scanner collapse it into ONE
+//!   `HfDir` record - so here the record's path already IS the directory.
+//!
+//! [`dir_from_assembly`] reconciles the two by asking whether the role it was
+//! given is itself a directory, so neither side has to know which recipe
+//! fetched the checkpoint.
 //!
 //! Swedish Embedded AB implements resolver-based checkpoint discovery like
 //! this for clients running mixed fleets of hand-placed and fetched weights.
@@ -60,7 +71,20 @@ impl ArchSpec for Deepseek2ocrSpec {
     fn classify(&self, records: &[ArtifactRecord], _inventory_root: &Path) -> Vec<(usize, String, Confidence)> {
         let mut out = Vec::new();
         for (idx, rec) in records.iter().enumerate() {
-            if !rec.usable() || rec.kind != ArtifactKind::Gguf {
+            if !rec.usable() {
+                continue;
+            }
+            // The upstream `transformers` release. Unlike the GGUF pair this
+            // IS collapsed into one directory record (it has a `config.json`),
+            // so the record's own path is already the directory
+            // `crate::import::Files::locate` wants - see `dir_from_assembly`.
+            if rec.kind == ArtifactKind::HfDir {
+                if declares_deepseek_ocr(&rec.path) {
+                    out.push((idx, "dir".to_string(), Confidence::Derived));
+                }
+                continue;
+            }
+            if rec.kind != ArtifactKind::Gguf {
                 continue;
             }
             let Ok(g) = MmapGguf::open(&rec.path.to_string_lossy()) else { continue };
@@ -91,17 +115,44 @@ impl ArchSpec for Deepseek2ocrSpec {
     }
 }
 
-/// The checkpoint DIRECTORY a resolved [`Assembly`]'s `dir` role names - the
-/// LM GGUF's own parent, since that is the record [`ArchSpec::classify`]
-/// picked (see this module's doc). A missing role or a rootless path should
-/// be unreachable in practice (`resolve` only returns `Resolved` once every
-/// required role is filled, and `classify` only ever names a record with a
-/// real parent), but this must name it rather than panic if it somehow isn't.
+/// Whether an HF-shaped directory's `config.json` declares THIS model.
+///
+/// Content, not filename: a store can hold many `transformers` checkpoints,
+/// and the architecture string is the same one
+/// `brain_modelstore::plan` gated the download on
+/// (`brain_arch`'s `deepseek2ocr` row).
+fn declares_deepseek_ocr(dir: &Path) -> bool {
+    let Ok(bytes) = std::fs::read(dir.join("config.json")) else { return false };
+    let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes) else { return false };
+    json["architectures"].as_array().is_some_and(|a| a.iter().any(|v| v.as_str() == Some(HF_ARCHITECTURE)))
+}
+
+/// The upstream release's own `architectures[0]`, as registered in
+/// `brain_arch`'s `deepseek2ocr` row.
+const HF_ARCHITECTURE: &str = "DeepseekOCRForCausalLM";
+
+/// The checkpoint DIRECTORY a resolved [`Assembly`]'s `dir` role names.
+///
+/// The two layouts name it differently and the difference is structural, not
+/// a heuristic: an HF checkpoint is ONE directory record, so the role already
+/// holds the directory, while the GGUF pair is recorded file-by-file (no
+/// `config.json` for the inventory scanner to collapse on), so the role holds
+/// the LM GGUF and the directory is its parent. Testing whether the role
+/// itself is a directory tells the two apart without either side having to
+/// know which recipe fetched it.
+///
+/// A missing role or a rootless path should be unreachable in practice
+/// (`resolve` only returns `Resolved` once every required role is filled, and
+/// `classify` only ever names a record with a real parent), but this must
+/// name it rather than panic if it somehow isn't.
 pub fn dir_from_assembly(assembly: &Assembly) -> Result<String, String> {
-    let lm = assembly.roles.get("dir").ok_or_else(|| format!("deepseek2ocr: assembly '{}' has no dir role", assembly.id))?;
-    lm.parent()
+    let role = assembly.roles.get("dir").ok_or_else(|| format!("deepseek2ocr: assembly '{}' has no dir role", assembly.id))?;
+    if role.is_dir() {
+        return Ok(role.to_string_lossy().into_owned());
+    }
+    role.parent()
         .map(|p| p.to_string_lossy().into_owned())
-        .ok_or_else(|| format!("deepseek2ocr: {} has no parent directory", lm.display()))
+        .ok_or_else(|| format!("deepseek2ocr: {} has no parent directory", role.display()))
 }
 
 #[cfg(test)]
@@ -114,6 +165,18 @@ mod tests {
         static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         std::env::temp_dir().join(format!("brain-deepseek2ocr-spec-test-{tag}-{}-{n}", std::process::id()))
+    }
+
+    /// A structurally valid, tensor-free safetensors file: an 8-byte
+    /// little-endian header length followed by that many bytes of JSON. The
+    /// inventory scanner probes a checkpoint's declared extent against its
+    /// real size, so a zero-byte placeholder is (correctly) recorded as
+    /// incomplete and never classified.
+    fn write_empty_safetensors(path: &Path) {
+        let header = b"{}";
+        let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+        bytes.extend_from_slice(header);
+        std::fs::write(path, bytes).unwrap();
     }
 
     fn tiny_tensor() -> checkpoint::gguf_write::TensorOut {
@@ -211,6 +274,37 @@ mod tests {
                 assert_eq!(assembly.arch, "deepseek2ocr");
                 assert_eq!(dir_from_assembly(&assembly).unwrap(), ckpt_dir.to_string_lossy());
             }
+            other => panic!("expected Resolved, got {other:?}"),
+        }
+    }
+
+    /// A pulled `deepseek-ai/DeepSeek-OCR` resolves with no env vars too, and
+    /// its `dir` role is the DIRECTORY rather than a file inside it -- the
+    /// inventory collapses an HF checkpoint into one record because it has a
+    /// `config.json`, which is exactly what the GGUF pair lacks.
+    #[test]
+    fn resolves_the_upstream_transformers_checkpoint_to_its_own_directory() {
+        let dir = tmp("resolves-hf");
+        let ckpt_dir = dir.join("deepseek-ai").join("DeepSeek-OCR");
+        std::fs::create_dir_all(&ckpt_dir).unwrap();
+        std::fs::write(ckpt_dir.join("config.json"), br#"{"architectures":["DeepseekOCRForCausalLM"]}"#).unwrap();
+        write_empty_safetensors(&ckpt_dir.join("model.safetensors"));
+        // An unrelated transformers checkpoint in the same store must not be
+        // claimed: the architecture, not the shape, is what decides.
+        let other = dir.join("other-vendor").join("Some-LM");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join("config.json"), br#"{"architectures":["Qwen3ForCausalLM"]}"#).unwrap();
+        write_empty_safetensors(&other.join("model.safetensors"));
+
+        let records = brain_modelstore::inventory::scan(&dir);
+        let out = Deepseek2ocrSpec.classify(&records, &dir);
+        assert_eq!(out.len(), 1, "only the DeepSeek-OCR checkpoint is claimed: {out:?}");
+        assert_eq!(records[out[0].0].path, ckpt_dir);
+
+        let spec = Deepseek2ocrSpec;
+        let specs: Vec<&dyn ArchSpec> = vec![&spec];
+        match resolve("deepseek2ocr", &records, &specs, &BTreeMap::new()) {
+            Resolution::Resolved(assembly) => assert_eq!(dir_from_assembly(&assembly).unwrap(), ckpt_dir.to_string_lossy()),
             other => panic!("expected Resolved, got {other:?}"),
         }
     }

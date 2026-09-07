@@ -249,7 +249,13 @@ fn convert_wan(store: &Store, vendor: &str, repo: &str) -> Result<(), String> {
 /// fetch instead -- confirmed the hard way for `fastvlm` (a checkpoint
 /// converted through this curated path fails at load: "read .../vocab.json:
 /// No such file or directory").
-const PASSTHROUGH_TRANSFORMERS_FAMILIES: &[&str] = &["qwen3vl", "nemotronasr"];
+///
+/// Each entry carries the ROLE name its model crate's resolver expects, since
+/// that is not uniform: most want a single `weights` role pointing at the
+/// directory, but `deepseek2ocr` composes four checkpoints out of one
+/// directory and calls that role `dir`
+/// (`deepseek2ocr::spec::Deepseek2ocrSpec`).
+const PASSTHROUGH_TRANSFORMERS_FAMILIES: &[(&str, &str)] = &[("qwen3vl", "weights"), ("nemotronasr", "weights"), ("deepseek2ocr", "dir")];
 
 /// The original (and still only) family: an HF `transformers`-shaped repo.
 /// Reads `<dir>/config.json` to pick the specific qwen/glm/lfm/gpt importer
@@ -277,8 +283,8 @@ fn convert_transformers(store: &Store, vendor: &str, repo: &str) -> Result<(), S
     // for every other family the upstream `model.safetensors` is dead
     // weight once the brain-format file exists; for these it IS what gets
     // served.
-    if PASSTHROUGH_TRANSFORMERS_FAMILIES.contains(&family) {
-        return convert_files(store, vendor, repo, family, &[("weights", ".")]);
+    if let Some((_, role)) = PASSTHROUGH_TRANSFORMERS_FAMILIES.iter().find(|(f, _)| *f == family) {
+        return convert_files(store, vendor, repo, family, &[(role, ".")]);
     }
     // qwen3tts's own repo (`speech_tokenizer/config.json` present) is claimed
     // by the `qwen3tts` `FilesRecipe` ahead of `TransformersRecipe` in
