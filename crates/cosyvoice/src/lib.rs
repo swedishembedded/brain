@@ -171,3 +171,4 @@ pub mod lmlora;
 pub mod pipeline;
 pub mod profile;
 pub mod sampling;
+pub mod spec;

@@ -380,31 +380,20 @@ pub const ARCHS: &[Arch] = &[
     // DiT) and small vocoder causality deltas; the release is a config
     // (`Variant::CosyVoice2`/`CosyVoice3`), exactly as `wan` spans 2.1/2.2.
     // No official llama.cpp/GGUF architecture entry exists upstream, hence
-    // `gguf: None`. `weights_env` names one role per component since
-    // upstream ships `llm.pt`/`flow.pt`/`hift.pt` as three independent files
-    // under one repo, not one combined checkpoint; `s3tokenizer` and
-    // `campplus` are separate rows above, not roles here, because they are
-    // independently useful architectures, not CosyVoice internals (the same
-    // split `qwen3tts`/`mimi`/`ecapatdnn` already use).
+    // `gguf: None`. `s3tokenizer`/`campplus` are separate rows above, not
+    // roles here, because they are independently useful architectures, not
+    // CosyVoice internals (the same split `qwen3tts`/`mimi`/`ecapatdnn`
+    // already use).
     //
-    // `default_ref` names ONLY the CosyVoice 2 repo, deliberately - not
-    // `extra_refs`: CosyVoice 3's repo carries the SAME three role names
-    // (`llm`/`flow`/`hift`), not additional ones, so it is a second variant
-    // of one role set, not a compound checkpoint `extra_refs` merges roles
-    // from (see `kronos`'s row for that shape). Fetching CosyVoice 3 means
-    // pointing the `weights_env` vars at it explicitly, same as any other
-    // non-default `wan`/`flux2` variant.
+    // No `weights_env`: this architecture resolves `llm`/`flow`/`hift`/
+    // `tokenizer` through the model-store resolver (`crate::spec::
+    // CosyVoiceSpec`), not `BRAIN_COSYVOICE_*` - see that module's own doc.
+    // `default_ref` still names ONLY the CosyVoice 2 repo; a store holding
+    // BOTH generations' checkpoints resolves as an `Ambiguous` `llm`/`flow`/
+    // `hift` role (two real candidates, same confidence), never a silent
+    // pick of one generation over the other.
     arch!("cosyvoice", "CosyVoice 2/3 (LLM-based streaming zero-shot TTS)", Audio, Brain, "brain-cosyvoice",
-          default_ref: Some("FunAudioLLM/CosyVoice2-0.5B"),
-          weights_env: &[("BRAIN_COSYVOICE_LLM", "llm"),
-                         ("BRAIN_COSYVOICE_FLOW", "flow"),
-                         ("BRAIN_COSYVOICE_HIFT", "hift"),
-                         // The stock Qwen BPE identity (`vocab.json`/
-                         // `merges.txt`) the LM's text side needs -
-                         // `CosyVoice-BlankEN` supplies no weights this
-                         // crate loads (see `crate::llm_import`'s module
-                         // doc), only the tokenizer.
-                         ("BRAIN_COSYVOICE_TOKENIZER", "tokenizer")]),
+          default_ref: Some("FunAudioLLM/CosyVoice2-0.5B")),
     // Five chained components, no single upstream checkpoint file: a real
     // Qwen3-8B "Global LLM" (`qwen_7B/qwen_7B/`, llama.cpp's own `qwen3`
     // architecture - reused via `crates/qwen3`, not reimplemented here), a

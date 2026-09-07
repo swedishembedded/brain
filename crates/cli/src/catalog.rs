@@ -44,6 +44,7 @@
 
 use std::sync::Arc;
 
+use brain_modelstore::resolve::ArchSpec;
 use capability::{Assembly, Manifest, Provider};
 use catalog::{ModelEntry, ResidentCtor};
 use residency::ResidentModel;
@@ -206,18 +207,45 @@ pub fn manifests() -> Vec<Manifest> {
     models().into_iter().map(|e| (e.manifest)()).collect()
 }
 
-/// A placeholder [`Assembly`] for a caller that has none - every entry but
-/// flux2's own ignores the argument today (see
-/// `catalog::ModelEntry::provider`'s doc).
+/// A placeholder [`Assembly`] for a caller that has none - every entry whose
+/// architecture has no [`ArchSpec`] registered below ignores the argument
+/// entirely (see `catalog::ModelEntry::provider`'s doc).
 fn empty_assembly() -> Assembly {
     Assembly { id: String::new(), arch: String::new(), variant: None, roles: Default::default(), provenance: Vec::new() }
 }
 
+/// `(catalog model id, arch name, ArchSpec)` for every model whose
+/// `ModelEntry::provider` actually reads the [`Assembly`] it is called with -
+/// [`provider`] resolves a real one for these through the model-store
+/// resolver instead of [`empty_assembly`]. FLUX.2 is not listed here: it
+/// reaches its own resolver-backed weights through `crate::flux2_cli`'s
+/// dedicated command, never through this generic `brain do` path, so its
+/// catalog entry keeps building from `empty_assembly` here (a pre-existing
+/// gap this migration does not change).
+fn resolver_spec_for(model_id: &str) -> Option<(&'static str, Box<dyn ArchSpec>)> {
+    if model_id == cosyvoice::caps::MODEL {
+        return Some(("cosyvoice", Box::new(cosyvoice::spec::CosyVoiceSpec)));
+    }
+    None
+}
+
 /// Build a runnable provider for `model`, or say why not.
+///
+/// A model listed in [`resolver_spec_for`] gets a REAL, resolver-built
+/// `Assembly` (scanning the models directory, same as `brain <arch> …`'s own
+/// dedicated commands) - an `Ambiguous`/`Missing` outcome, or no models
+/// directory at all, becomes this function's own `Err` (never an "unknown
+/// model", per `every_listed_model_is_constructible_by_name`'s own contract:
+/// a listed model may legitimately fail for want of weights). Every other
+/// model still gets [`empty_assembly`], unchanged.
 pub fn provider(model: &str) -> Result<Arc<dyn Provider>, String> {
     for e in models() {
         if (e.manifest)().model == model {
-            return (e.provider)(&empty_assembly());
+            let assembly = match resolver_spec_for(model) {
+                Some((arch, spec)) => crate::resolver_cli::try_resolve(arch, spec.as_ref(), &std::collections::BTreeMap::new()).map_err(|e| e.message().to_string())?,
+                None => empty_assembly(),
+            };
+            return (e.provider)(&assembly);
         }
     }
     Err(format!("unknown model '{model}' (see `brain caps`)"))

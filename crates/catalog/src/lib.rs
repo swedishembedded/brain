@@ -528,14 +528,20 @@ pub fn models() -> Vec<ModelEntry> {
             provider: always!(minimaxmusic3::caps::MinimaxMusic3Provider::new()),
             resident: None,
         },
-        // CosyVoice 2/3 zero-shot voice cloning TTS. Stateless
-        // (`cosyvoice::pipeline::generate` loads and drops all five
-        // checkpoints per call, see its own module doc) - `SynthAction::run`
-        // reads `BRAIN_COSYVOICE_*`/`BRAIN_S3TOKENIZER_V2`/`BRAIN_CAMPPLUS_DIR`
-        // from the environment itself, so `always!` is correct here too.
+        // CosyVoice 2/3 zero-shot voice cloning TTS. `llm`/`flow`/`hift`/
+        // `tokenizer` come from `cosyvoice::spec::CosyVoiceSpec` via the
+        // resolved Assembly this entry is called with (`s3tokenizer`/
+        // `campplus` are still separate, not-yet-migrated architectures -
+        // `CosyVoicePaths::from_assembly` reads those two from their own env
+        // vars). `cosyvoice::pipeline::generate` still loads and drops all
+        // five checkpoints per call (see its own module doc), so the bound
+        // `paths` this provider holds cost nothing to keep between calls.
         ModelEntry {
             manifest: cosyvoice::caps::manifest,
-            provider: always!(cosyvoice::caps::CosyVoiceProvider::new()),
+            provider: |assembly: &Assembly| {
+                let paths = cosyvoice::pipeline::CosyVoicePaths::from_assembly(assembly)?;
+                Ok(Arc::new(cosyvoice::caps::CosyVoiceProvider::new(paths)) as Arc<dyn Provider>)
+            },
             resident: None,
         },
         // Speech-to-text. Discovery is weight-free (the caps manifests); the

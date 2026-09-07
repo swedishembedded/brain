@@ -217,14 +217,18 @@ pub fn synth_action(paths: &CosyVoicePaths, inv: &Invocation, _progress: &mut dy
         .blob("audio", Blob::new(Media::Audio, bytes).with_meta(json!({"format": "wav", "sample_rate": out.sample_rate, "channels": 1}))))
 }
 
-/// The executable CosyVoice model behind the manifest. Stateless - see this
-/// module's own doc for why nothing is held warm across calls.
-#[derive(Default)]
-pub struct CosyVoiceProvider;
+/// The executable CosyVoice model behind the manifest. Weight paths are
+/// BOUND at construction (see [`CosyVoiceProvider::new`]) - never
+/// re-resolved per request, matching `flux2::caps::Flux2Provider`'s own
+/// `paths` field. Otherwise stateless - see this module's own doc for why
+/// nothing is held warm across calls.
+pub struct CosyVoiceProvider {
+    paths: CosyVoicePaths,
+}
 
 impl CosyVoiceProvider {
-    pub fn new() -> CosyVoiceProvider {
-        CosyVoiceProvider
+    pub fn new(paths: CosyVoicePaths) -> CosyVoiceProvider {
+        CosyVoiceProvider { paths }
     }
 }
 
@@ -233,19 +237,23 @@ impl Provider for CosyVoiceProvider {
         manifest()
     }
     fn action(&self, name: &str) -> Option<Arc<dyn Action>> {
-        (name == "synth").then(|| Arc::new(SynthAction) as Arc<dyn Action>)
+        (name == "synth").then(|| Arc::new(SynthAction { paths: self.paths.clone() }) as Arc<dyn Action>)
     }
 }
 
-struct SynthAction;
+/// One `synth` action, dispatched through [`synth_action`]. `paths` is the
+/// provider's own bound weights (see [`CosyVoiceProvider::new`]) - never
+/// re-resolved per request.
+struct SynthAction {
+    paths: CosyVoicePaths,
+}
 
 impl Action for SynthAction {
     fn spec(&self) -> ActionSpec {
         synth_spec()
     }
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        let paths = CosyVoicePaths::from_env().map_err(|e| format!("cosyvoice synth: {e}"))?;
-        synth_action(&paths, inv, progress)
+        synth_action(&self.paths, inv, progress)
     }
 }
 
@@ -276,7 +284,8 @@ mod tests {
 
     #[test]
     fn provider_exposes_synth_and_nothing_else() {
-        let p = CosyVoiceProvider::new();
+        let paths = CosyVoicePaths { llm: String::new(), flow: String::new(), hift: String::new(), s3tokenizer: String::new(), campplus: String::new(), tokenizer: String::new() };
+        let p = CosyVoiceProvider::new(paths);
         assert!(p.action("synth").is_some());
         assert!(p.action("nonexistent").is_none());
     }
