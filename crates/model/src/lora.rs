@@ -20,6 +20,15 @@
 //! which tensors are targeted, the fused-tensor offsets, and how to load its
 //! own trained-adapter container.
 //!
+//! [`read_external_adapter`] reads what the third-party ecosystem
+//! (ai-toolkit / ComfyUI / diffusers / LyCORIS) writes, in the two shapes it
+//! writes: **LoRA** (`ΔW = (α/r)·B·A`, a low-rank product) and **LoKr**
+//! (`ΔW = mult·(W1 ⊗ W2)`, a Kronecker product, full rank in general). They
+//! are different math with different scale conventions, so they are separate
+//! variants of [`ExternalDelta`] rather than one reconstruction with two
+//! spellings - and the choice is made per TARGET, so a stack may mix files of
+//! either kind.
+//!
 //! [`device_adapter`] is the OTHER LoRA family in this codebase - device-side
 //! param-list adapters (`.lora_a`/`.lora_b` tensors living in a `Model`'s own
 //! `ParamStore`, not a host-side `Pair`) used by `qwen3`/`qwen35moe`/
@@ -91,8 +100,8 @@ impl Pair {
 
     /// A pair over ALREADY-TRAINED `A [r×in]` / `B [out×r]` weights - the
     /// read-only shape a fold needs, with the Adam moments left empty because
-    /// nothing here will ever be stepped. Used by [`ExternalPair::as_pair`] so
-    /// folding a third-party adapter reuses [`Pair::delta`] rather than
+    /// nothing here will ever be stepped. Used by [`ExternalPair::add_delta`]
+    /// so folding a third-party LoRA reuses [`Pair::delta`] rather than
     /// growing a second `B·A`.
     pub fn from_ab(out: usize, inn: usize, r: usize, a: Vec<f32>, b: Vec<f32>) -> Pair {
         Pair { out, inn, r, a, b, ma: Vec::new(), va: Vec::new(), mb: Vec::new(), vb: Vec::new() }
@@ -366,12 +375,8 @@ const EXTERNAL_SUFFIXES: [(&str, &str); 3] = [
 /// either stored whole (`lokr_w1`) or as its own low-rank pair
 /// (`lokr_w1_a` @ `lokr_w1_b`), and a single file may do it differently for
 /// `w1` than for `w2`.
-/// `.lokr_t2` is listed so it is REFUSED by name rather than falling through
-/// to "unrecognised tensor": it is the convolutional CP-decomposition factor,
-/// a shape none of this workspace's LoKr targets (all linears) can be, and
-/// folding the rest of such a file would half-apply the adapter.
-const LOKR_SUFFIXES: [&str; 7] =
-    [".lokr_w1", ".lokr_w2", ".lokr_w1_a", ".lokr_w1_b", ".lokr_w2_a", ".lokr_w2_b", ".lokr_t2"];
+const LOKR_SUFFIXES: [&str; 6] =
+    [".lokr_w1", ".lokr_w2", ".lokr_w1_a", ".lokr_w1_b", ".lokr_w2_a", ".lokr_w2_b"];
 
 /// Read a third-party (ai-toolkit / ComfyUI / diffusers / LyCORIS)
 /// `.safetensors` adapter into per-linear [`ExternalPair`]s, resolving each to
@@ -421,6 +426,16 @@ pub fn read_external_adapter(path: &str) -> Result<Vec<ExternalPair>, String> {
         }
         if matched {
             continue;
+        }
+        // Refused by name, and BEFORE its shape is checked: `lokr_t2` is the
+        // convolutional CP-decomposition factor, 4-D in the wild, which no
+        // linear target can be. Reading the rest of such a file would
+        // half-apply the adapter.
+        if name.ends_with(".lokr_t2") {
+            return Err(format!(
+                "lora {path}: '{name}' is a LoKr key this loader does not implement \
+                 (lokr_t2 is the convolutional factor; only linear targets are supported)"
+            ));
         }
         // Longest first: `.lokr_w1_a` must not be read as `.lokr_w1` plus a
         // stem ending in `_a`.

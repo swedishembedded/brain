@@ -132,6 +132,19 @@ impl SupirLora {
     }
 
     /// Add every targeted delta onto `base`, IN PLACE.
+    ///
+    /// Every trunk target is its own `[out, in]` tensor keyed by
+    /// [`model::adapter::LinearSite::name`], so [`model::adapter::AdapterSet::fold_into`]
+    /// - the same validate-then-write whole-tensor fold every other
+    ///   architecture's `AdapterSet` uses - covers this without any
+    ///   SUPIR-specific placement table. `self.set`'s entries are a `Vec` in
+    ///   the fixed canonical order [`linear_sites`] built, so a run is
+    ///   reproducible without an extra sort.
+    ///
+    /// Still a panic, not a `Result`: `apply` is defined as "clone, then
+    /// `fold_into`" and both are used by this crate's own training entry
+    /// points, where a base map missing a targeted linear is a construction
+    /// bug rather than user input.
     pub fn fold_into(&self, base: &mut Tensors) {
         self.set.fold_into(base, 1.0).unwrap_or_else(|e| panic!("supir lora: {e}"));
     }

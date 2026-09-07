@@ -72,7 +72,7 @@ brain/flux2-klein` lists them) over D-Bus and over HTTP at
   generating. brain's own `finetune` checkpoint and third-party
   `.safetensors` files are told apart by extension; a third-party file may be
   in either of the two conventions the ai-toolkit / ComfyUI / diffusers /
-  LyCORIS ecosystem writes, and which one it is is read from its own keys:
+  LyCORIS ecosystem writes, and which one it is comes from its own keys:
 
   | family | keys | delta |
   | --- | --- | --- |

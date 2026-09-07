@@ -191,6 +191,11 @@ impl LoraAdapter {
     /// `crate::dit::LtxDit` reads from), so the unchanged generation path
     /// produces adapter-conditioned output. Errors by name if a targeted
     /// tensor is absent or the wrong size.
+    ///
+    /// LTX-2.5 fuses nothing this adapter targets, so every pair is a whole
+    /// `[out, in]` tensor at offset 0 keyed by its site name - exactly what
+    /// [`model::adapter::AdapterSet::fold_into`] already does generically,
+    /// validating every target before writing any of them.
     pub fn fold_into_tensors(&self, ts: &mut vae::blocks::Tensors) -> Result<(), String> {
         self.set.fold_into(ts, 1.0)
     }

@@ -273,6 +273,11 @@ impl LoraAdapter {
     /// Fold this adapter into an **inference** tensor map (`crate::dit::
     /// av_dit_tensor_manifest`'s own bare naming), so the unchanged
     /// generation path produces adapter-conditioned output.
+    ///
+    /// Every target is a whole `[out, in]` tensor at offset 0 keyed by its
+    /// site name - [`model::adapter::AdapterSet::fold_into`] already covers
+    /// this generically, the same shared fold the video-only adapter next
+    /// door uses, differing only in [`LEAVES`].
     pub fn fold_into_tensors(&self, ts: &mut vae::blocks::Tensors) -> Result<(), String> {
         self.set.fold_into(ts, 1.0)
     }

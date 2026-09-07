@@ -120,11 +120,16 @@ fn folding_into_the_inference_tensors_equals_applying_to_the_training_weights() 
     // vacuously-true comparison of two untouched copies).
     assert!(applied != base, "3 LoRA steps must have moved the effective weights");
 
-    // A missing base tensor is an error BY NAME, not a silent skip.
+    // A missing base tensor is an error BY NAME, not a silent skip - and the
+    // map comes back PRISTINE, not half folded. A caller that logs the error
+    // and carries on must not be left holding weights that are neither the
+    // base nor the adapted model.
     let mut broken = ts.clone();
     broken.remove("blocks.1.cross_attn.v.weight");
+    let before = broken.clone();
     let e = ad.fold_into_tensors(&mut broken).expect_err("a missing tensor must fail");
     assert!(e.contains("blocks.1.cross_attn.v.weight"), "{e}");
+    assert!(broken == before, "a rejected fold must leave every other tensor untouched");
 }
 
 #[test]

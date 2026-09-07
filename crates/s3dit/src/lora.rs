@@ -36,7 +36,7 @@ use model::adapter::{AdapterKind, AdapterSet, KeyStyle, LinearSite, TargetHp, Ta
 // keeps only the Z-Image-specific block walk and serialization naming.
 // `LoraCfg` is re-exported for existing callers.
 pub use model::lora::LoraCfg;
-use model::lora::{LoraGrads, LoraPair};
+use model::lora::{fold_placements, LoraGrads, LoraPair, Placement};
 
 /// The seven leaves targeted per block, `(leaf, out, inn)` given `dim`/`hidden`.
 fn leaf_shapes(dim: usize, hidden: usize) -> [(&'static str, usize, usize); 7] {
@@ -164,18 +164,21 @@ impl LoraAdapter {
     /// Each main block `l`'s `W += (α/r)·B·A` is added onto the matching
     /// `layers.{l}.{…}.weight`. Refiner blocks are not adapted (the adapter only
     /// targets the main layers). Errors if a targeted tensor is absent.
+    ///
+    /// The `import_comfy` layout stores each of the seven as its own
+    /// `[out, in]` tensor, so this is a table of whole-tensor placements over
+    /// [`model::lora::fold_placements`], which owns the validation contract
+    /// and the `B·A` arithmetic for every architecture's fold.
     pub fn fold_into_comfy(&self, t: &mut crate::block::Tensors) -> Result<(), String> {
-        for (site, k) in self.set.iter() {
-            let l = site.layer.expect("s3dit lora: every site has a layer index");
-            let key = comfy_key(l, site.leaf);
-            let w = t.get_mut(&key).ok_or_else(|| format!("lora: base tensor {key} missing"))?;
-            let spec = k.spec();
-            if w.1.len() != spec.out * spec.inn {
-                return Err(format!("lora: {key} is {} elems, adapter expects {}", w.1.len(), spec.out * spec.inn));
-            }
-            k.delta_into(1.0, &mut w.1);
-        }
-        Ok(())
+        let ps: Vec<Placement<'_>> = self
+            .set
+            .iter()
+            .map(|(site, k)| {
+                let l = site.layer.expect("s3dit lora: every site has a layer index");
+                Placement::whole(comfy_key(l, site.leaf), k.pair())
+            })
+            .collect();
+        fold_placements(t, self.hp.scale(), &ps)
     }
 
     /// Reload an adapter (weights only; Adam state reset) from `to_tensors`

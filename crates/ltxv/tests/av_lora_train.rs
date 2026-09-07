@@ -105,11 +105,14 @@ fn folding_into_the_av_inference_tensors_equals_applying_to_the_training_weights
     assert!(applied == folded, "fold-into-tensors and apply-to-weights must be bit-equal");
     assert!(applied != base, "3 AV LoRA steps must have moved the effective weights");
 
-    // A missing base tensor is an error BY NAME, not a silent skip.
+    // A missing base tensor is an error BY NAME, not a silent skip - and the
+    // map comes back PRISTINE, not half folded.
     let mut broken = ts.clone();
     broken.remove("transformer_blocks.1.audio_to_video_attn.to_v.weight");
+    let before = broken.clone();
     let e = ad.fold_into_tensors(&mut broken).expect_err("a missing tensor must fail");
     assert!(e.contains("transformer_blocks.1.audio_to_video_attn.to_v.weight"), "{e}");
+    assert!(broken == before, "a rejected fold must leave every other tensor untouched");
 }
 
 #[test]

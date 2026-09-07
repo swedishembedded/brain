@@ -216,8 +216,14 @@ fast and scalable kernel - not a naive one.
     does). See `.agents/roadmap/flux2.md` for the measured step cost and the
     per-kernel profile the next optimisation pass is measured from. The adapter must NOT be named `.safetensors`: `Pipeline::build_dit`
     uses that extension to recognise a third-party ai-toolkit/ComfyUI LoRA, so
-    the CLI refuses it. 9B weights are NC-licensed - see
-    `docs/models/flux2.md`.
+    the CLI refuses it. `--adapter`/`--lora-scale` are **repeatable and paired
+    positionally**, so several adapters stack in one generation, folded in the
+    order given, each at its own strength (`flux2::lora::fold_adapters` over
+    `model::lora`'s shared driver). A third-party file may be **LoRA**
+    (`.lora_A`/`.lora_B`, delta `B·A`) or **LoKr** (`.lokr_w1`/`.lokr_w2`,
+    delta `W1 ⊗ W2`) and the family is read from its own keys, per adapter -
+    note LoKr's `.alpha` is a scale only when a factor is stored decomposed.
+    9B weights are NC-licensed - see `docs/models/flux2.md`.
 
 12b-bis. **FLUX.1 / Kontext** (`crates/flux1`) - BFL's 12 B MMDiT: 19
     double-stream blocks (separate img/txt weights, joint attention over

@@ -255,6 +255,12 @@ impl LoraAdapter {
     /// [`crate::WanDit`] / [`crate::WanDitDev`] build from), so the unchanged
     /// generation path produces adapter-conditioned video. Errors by name if a
     /// targeted tensor is absent or the wrong size.
+    ///
+    /// Every targeted linear is an UNFUSED whole tensor here (wan's
+    /// checkpoint stores `q`/`k`/`v` separately), so this is a table of
+    /// whole-tensor placements and nothing else - the validation contract and
+    /// the `B·A` arithmetic are [`model::lora::fold_placements`]'s, shared
+    /// with every other architecture's fold.
     pub fn fold_into_tensors(&self, ts: &mut crate::model::Tensors) -> Result<(), String> {
         self.set.fold_into(ts, 1.0)
     }
