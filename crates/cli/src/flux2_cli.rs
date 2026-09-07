@@ -54,12 +54,15 @@ const HELP: &str = "brain flux2 <cmd>
                                     # stock tensor names/shapes drops in - a fine-tune, an
                                     # abliteration, a re-quantisation - `validate()` rejects a
                                     # mismatched size against the chosen DiT before any load.
-           [--model <path>]         # state the DiT weights outright, the same way. --model/
-                                    # --text-encoder/--variant are the resolver's overrides:
-                                    # when they leave a role genuinely ambiguous (more than one
-                                    # candidate, or klein-vs-base unstated - never recoverable
-                                    # from a weight's shape) every real candidate's selector
-                                    # flag prints and the run exits rather than guessing.
+           [--model <path>]         # state the DiT weights outright, the same way.
+           [--vae <path>]           # state the VAE outright, the same way.
+           [--tokenizer <path>]     # state the tokenizer outright, the same way.
+                                    # --model/--vae/--text-encoder/--tokenizer/--variant are the
+                                    # resolver's overrides: when they leave a role genuinely
+                                    # ambiguous (more than one candidate, or klein-vs-base
+                                    # unstated - never recoverable from a weight's shape) every
+                                    # real candidate's selector flag prints and the run exits
+                                    # rather than guessing.
            [--adapter <path>]       # LoRA: brain's own `finetune` checkpoint, or a
                                     # third-party ai-toolkit/ComfyUI .safetensors
            [--lora-scale S]         # LoRA strength (ComfyUI strength_model), default 1.0
@@ -181,15 +184,21 @@ const MISSING_EXIT: i32 = 4;
 /// the klein-vs-base family a weight's shape alone can never answer. Prints
 /// and exits on `Ambiguous`/`Missing` - neither is recoverable within this
 /// command, and resolving is never a place to guess.
-fn resolve_flux2(model: Option<&str>, text_encoder: Option<&str>, variant: Option<&str>) -> Result<(Paths, capability::Assembly), String> {
+fn resolve_flux2(model: Option<&str>, vae: Option<&str>, text_encoder: Option<&str>, tokenizer: Option<&str>, variant: Option<&str>) -> Result<(Paths, capability::Assembly), String> {
     let root = crate::model_dir::resolve(None).ok_or("no models directory (set --models-dir, BRAIN_MODELS_DIR, or $HOME)")?;
     let records = brain_modelstore::inventory::scan(&root);
     let mut overrides = std::collections::BTreeMap::new();
     if let Some(m) = model {
         overrides.insert("dit".to_string(), m.to_string());
     }
+    if let Some(v) = vae {
+        overrides.insert("vae".to_string(), v.to_string());
+    }
     if let Some(te) = text_encoder {
         overrides.insert("text_encoder".to_string(), te.to_string());
+    }
+    if let Some(t) = tokenizer {
+        overrides.insert("tokenizer".to_string(), t.to_string());
     }
     if let Some(v) = variant {
         overrides.insert("variant".to_string(), v.to_string());
@@ -259,6 +268,8 @@ fn generate(args: &[String]) -> Result<(), String> {
     let mut lora_scale = 1.0f32;
     let mut text_encoder: Option<String> = None;
     let mut model: Option<String> = None;
+    let mut vae: Option<String> = None;
+    let mut tokenizer: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         let need = |i: usize| -> Result<&String, String> {
@@ -313,6 +324,8 @@ fn generate(args: &[String]) -> Result<(), String> {
             "--lora-scale" => lora_scale = need(i)?.parse().map_err(|e| format!("--lora-scale: {e}"))?,
             "--text-encoder" => text_encoder = Some(need(i)?.clone()),
             "--model" => model = Some(need(i)?.clone()),
+            "--vae" => vae = Some(need(i)?.clone()),
+            "--tokenizer" => tokenizer = Some(need(i)?.clone()),
             other => return Err(format!("unknown flag {other}\n{HELP}")),
         }
         i += 2;
@@ -366,7 +379,7 @@ fn generate(args: &[String]) -> Result<(), String> {
     // the roles nothing on disk can pick on its own. An ambiguous or missing
     // outcome prints and exits here - neither is recoverable within this
     // command, and resolve() never silently picks.
-    let (paths, assembly) = resolve_flux2(model.as_deref(), text_encoder.as_deref(), variant_explicit.then_some(variant_name.as_str()))?;
+    let (paths, assembly) = resolve_flux2(model.as_deref(), vae.as_deref(), text_encoder.as_deref(), tokenizer.as_deref(), variant_explicit.then_some(variant_name.as_str()))?;
     variant_name = assembly.variant.clone().ok_or("flux2: resolved assembly has no variant")?;
     flux2::caps::check_license(&variant_name)?; // 9B = FLUX Non-Commercial license
     let variant = Flux2Config::from_name(&variant_name)?;
