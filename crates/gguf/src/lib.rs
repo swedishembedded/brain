@@ -50,7 +50,7 @@ pub mod route;
 
 pub use import::{ImportStats, Mapped};
 pub use int8_direct::try_i8_rect;
-pub use kquant::{try_kq_rect, KqLayout};
+pub use kquant::{try_kq_rect, KqLayout, KqRect};
 pub use kv::{architecture, ArchKv};
 pub use leaf::{role, Role};
 pub use route::{route, route_path, Route};

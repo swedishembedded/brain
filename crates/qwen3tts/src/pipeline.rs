@@ -67,8 +67,8 @@ pub struct GenOpts {
     ///
     /// There is deliberately no separate residual/`ResidualOpts` field. There
     /// used to be one, defaulting to `None` = greedy, which meant brain filled
-    /// 15 of every 16 codebooks - the ones carrying most of the acoustic detail
-    /// - with an argmax while the checkpoint's own `generation_config.json` said
+    /// 15 of every 16 codebooks - the ones carrying most of the acoustic detail -
+    /// with an argmax while the checkpoint's own `generation_config.json` said
     /// `subtalker_dosample: true`. A knob a caller has to remember to set in
     /// order to match the reference is not a lever, it is the same second source
     /// of truth that shipped `repetition_penalty = 1.0`.

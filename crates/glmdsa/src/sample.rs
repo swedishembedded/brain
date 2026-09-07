@@ -175,7 +175,7 @@ mod kv_gen_tests {
         let cfg = GlmConfig::tiny();
         let init = crate::init::init_weights(&cfg, 11);
         let model = Glm::new_on(gpu_core::testgpu::dev(crate::model::PIPELINES), cfg.clone(), 1, 64, &init);
-        let vocab = cfg.vocab as u32;
+        let vocab = cfg.vocab;
         let prompt = vec![2u32, 6, 4, 1, 7, 3, 5];
         let max_new = 32;
 

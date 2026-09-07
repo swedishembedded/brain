@@ -12,6 +12,7 @@
 //!     when `ref_text` is given ([`crate::pipeline::clone`]).
 //!   - `design` - instruct-style VoiceDesign and/or CustomVoice preset
 //!     speakers ([`crate::pipeline::design`]).
+//!
 //! All one-shot: the wav is the single artifact. Like the pipeline functions
 //! themselves (and the `TtsResident` adapter), the weights load per call -
 //! the load-once seam (`serve::TtsEngine`) is OpenVINO/NPU-only, so there is

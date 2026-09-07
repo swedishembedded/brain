@@ -54,7 +54,6 @@ fn tiny_vcfg() -> VisionConfig {
         in_channels: 2,
         tokens_per_second: 2,
         deepstack_indexes: vec![], // this model has none - see `vl.rs`'s module doc
-        tokens_per_second: 2,
     }
 }
 

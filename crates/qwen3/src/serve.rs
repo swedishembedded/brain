@@ -5223,8 +5223,8 @@ mod tests {
     /// bindings each within the limit.
     ///
     /// Deliberately calls `Self::batched_tape` directly and submits/reads
-    /// only `sc.res[0]` (the post-embed residual) - never `Self::head_steps`
-    /// - to isolate the embedding gather under test here from the SEPARATE,
+    /// only `sc.res[0]` (the post-embed residual) - never `Self::head_steps` -
+    /// to isolate the embedding gather under test here from the SEPARATE,
     /// pre-existing fp32 head/logits binding-size limit `Self::head_steps`
     /// has never tiled (out of scope for this fix - see this crate's own
     /// `serve.rs` module doc / the task that introduced this test for the

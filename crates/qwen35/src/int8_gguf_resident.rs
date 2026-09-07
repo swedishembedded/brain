@@ -1735,7 +1735,7 @@ mod tests {
         )
         .unwrap();
         let mg = MmapGguf::open(&path).unwrap();
-        let names = vec![
+        let names = [
             "blocks.0.linear_attn.A_log".to_string(),
             "blocks.0.linear_attn.dt_bias".to_string(),
             "blocks.0.linear_attn.norm.weight".to_string(),

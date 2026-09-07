@@ -86,8 +86,8 @@ fn checkable(cfg: MtpConfig, seed: u64) -> Checkable {
 /// therefore run at a large gain: the residual stream's rms is set by the
 /// input rows themselves, not by a trained residual, so a step that is
 /// harmless on a real-width model is a several-percent perturbation of the
-/// normalised input here. `small_to_mtp_projection.bias` is the extreme case
-/// - one bias entry shifts the same channel of EVERY position at once, in
+/// normalised input here. `small_to_mtp_projection.bias` is the extreme case -
+/// one bias entry shifts the same channel of EVERY position at once, in
 /// phase, which is the most curved direction the graph has.
 ///
 /// The evidence this is a step-size question and not a wrong gradient: sweep

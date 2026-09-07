@@ -32,8 +32,8 @@ fn word_error_rate(reference: &str, hypothesis: &str) -> f32 {
     for (i, row) in dp.iter_mut().enumerate().take(n + 1) {
         row[0] = i;
     }
-    for j in 0..=m {
-        dp[0][j] = j;
+    for (j, cell) in dp[0].iter_mut().enumerate() {
+        *cell = j;
     }
     for i in 1..=n {
         for j in 1..=m {

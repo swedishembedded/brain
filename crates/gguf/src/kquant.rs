@@ -160,9 +160,18 @@ fn geometry(ty: GgmlType) -> Option<(u32, usize, bool, usize)> {
     })
 }
 
+/// [`try_kq_rect`]'s success value: `(wq, wsm, wd, layout)` - the packed
+/// codes, the packed per-group `(sc, m)` sub-scale pairs, the packed
+/// per-super-block `(d, dmin)` f16 pairs, and the [`KqLayout`] that says how
+/// to read the first three (see this module's own doc comment for each
+/// plane's exact bit layout). Named rather than written inline because a
+/// bare 4-tuple whose first three members are all `Vec<u32>` says nothing at
+/// a call site about which one is which.
+pub type KqRect = (Vec<u32>, Vec<u32>, Vec<u32>, KqLayout);
+
 /// Relayout the rectangle rows `[r0, r0+n_out)` x cols `[c0, c0+k)` of a
-/// tensor stored as `[_, stride]` from its raw GGUF blocks into `(wq, wsm,
-/// wd, layout)` - this module's canonical device K-quant shape.
+/// tensor stored as `[_, stride]` from its raw GGUF blocks into a
+/// [`KqRect`] - this module's canonical device K-quant shape.
 ///
 /// `None` means "fall back to the fp32 route", never a partial or
 /// approximate answer: `source` has no raw blocks for `name` (see
@@ -171,7 +180,7 @@ fn geometry(ty: GgmlType) -> Option<(u32, usize, bool, usize)> {
 /// of the type's block size (32 for Q4_0/Q5_0/Q8_0, 256 for Q4_K/Q5_K/Q6_K -
 /// a K-quant super-block cannot be split, so an unaligned `k` is a refusal
 /// even when it would be a valid legacy-block boundary).
-pub fn try_kq_rect(source: &dyn TensorSource, name: &str, stride: usize, r0: usize, n_out: usize, c0: usize, k: usize) -> Option<(Vec<u32>, Vec<u32>, Vec<u32>, KqLayout)> {
+pub fn try_kq_rect(source: &dyn TensorSource, name: &str, stride: usize, r0: usize, n_out: usize, c0: usize, k: usize) -> Option<KqRect> {
     let (block, raw) = source.raw_blocks(name)?;
     let ty = block.ty;
     let (bits, group, affine, block_elems) = geometry(ty)?;
@@ -298,7 +307,7 @@ pub fn unpack_row_codes(words: &[u32], layout: &KqLayout) -> Vec<i32> {
 /// signed interpretation applies [`KqLayout::scale_signed`] itself, since
 /// this function has no `KqLayout` to consult.
 pub fn unpack_group_scale(wsm: &[u32], g: usize) -> (u8, u8) {
-    let (w, shift) = (g / 2, if g % 2 == 0 { 0u32 } else { 16u32 });
+    let (w, shift) = (g / 2, if g.is_multiple_of(2) { 0u32 } else { 16u32 });
     let word = wsm[w];
     (((word >> shift) & 0xFF) as u8, ((word >> (shift + 8)) & 0xFF) as u8)
 }
