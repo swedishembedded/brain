@@ -133,6 +133,11 @@ pub enum Naming {
     Hf,
     /// llama.cpp GGUF names.
     Gguf,
+    /// Already brain's own parameter names (a prior `brain qwen3 import`'s
+    /// output, or any other checkpoint the model-store resolver points
+    /// straight at without an upstream repo behind it) - every name maps to
+    /// itself, no remap table needed.
+    Brain,
 }
 
 impl Naming {
@@ -140,14 +145,18 @@ impl Naming {
     ///
     /// GGUF's spelling is unmistakable and unshared: llama.cpp names the
     /// embedding table `token_embd.weight` and prefixes every per-layer tensor
-    /// `blk.`, neither of which appears in any HF checkpoint. Absence of both
-    /// means HF - which is also what every caller predating GGUF support got,
-    /// so an unrecognizable checkpoint fails in exactly the place it used to
-    /// (the coverage check), naming the tensor it could not find.
+    /// `blk.`, neither of which appears in any HF checkpoint. Brain's own
+    /// spelling is equally unmistakable: the tied/untied embedding table is
+    /// always named `tok.weight`, which neither HF nor GGUF ever uses.
+    /// Absence of all three means HF - which is also what every caller
+    /// predating GGUF support got, so an unrecognizable checkpoint fails in
+    /// exactly the place it used to (the coverage check), naming the tensor
+    /// it could not find.
     pub fn of(r: &checkpoint::weightio::WeightReader) -> Naming {
-        let gguf = r.names().any(|n| n == "token_embd.weight" || n.starts_with("blk."));
-        if gguf {
+        if r.names().any(|n| n == "token_embd.weight" || n.starts_with("blk.")) {
             Naming::Gguf
+        } else if r.names().any(|n| n == "tok.weight") {
+            Naming::Brain
         } else {
             Naming::Hf
         }
@@ -159,6 +168,7 @@ impl Naming {
         match self {
             Naming::Hf => hf_to_brain(name, tie),
             Naming::Gguf => crate::gguf_import::gguf_to_brain(name, tie),
+            Naming::Brain => Some(name.to_string()),
         }
     }
 }
@@ -686,6 +696,29 @@ mod tests {
             assert!(s_hf.with_tensor(&name, &mut |d| w = Some(d.to_vec())));
             assert_eq!(v, w, "{name}: truncated GGUF shard must match the HF route");
         }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A checkpoint already in brain's own tensor naming (produced by a
+    /// prior `brain qwen3 import`, or resolved by the model-store resolver
+    /// pointing straight at an already-converted `model.brain.safetensors`)
+    /// carries names that are the brain param names verbatim -
+    /// `Naming::of` recognized only Hf and Gguf, so a brain-native
+    /// checkpoint fell through to "absence of GGUF spellings means HF" and
+    /// `hf_to_brain` could not match a single one of its own names, leaving
+    /// `source`'s remap plan completely empty.
+    #[test]
+    fn source_reads_a_checkpoint_already_in_brain_naming_with_no_remap_needed() {
+        let cfg = QwenConfig::tiny();
+        let dir = std::env::temp_dir().join(format!("brain-qwen3-brain-native-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("model.brain.safetensors");
+        let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = cfg.param_list().into_iter().map(|(name, numel)| (name, vec![numel as u64], vec![0.0f32; numel])).collect();
+        checkpoint::st::save_safetensors(path.to_str().unwrap(), &tensors, &serde_json::Value::Null, None).unwrap();
+
+        let r = checkpoint::weightio::WeightReader::open_hf_dir(&dir).unwrap();
+        assert_eq!(Naming::of(&r), Naming::Brain, "a checkpoint whose own names already match cfg.param_list() must sniff as Naming::Brain");
+        source(&r, &cfg).expect("a brain-native checkpoint needs no remap - source() must not report a missing fetch plan for every tensor");
         std::fs::remove_dir_all(&dir).ok();
     }
 
