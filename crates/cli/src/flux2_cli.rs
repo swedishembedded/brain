@@ -64,7 +64,11 @@ const HELP: &str = "brain flux2 <cmd>
                                     # shape) every real candidate's selector flag prints and the
                                     # run exits rather than guessing.
            [--adapter <path>]...    # LoRA: brain's own `finetune` checkpoint, or a
-                                    # third-party ai-toolkit/ComfyUI .safetensors.
+                                    # third-party ai-toolkit/ComfyUI/LyCORIS
+                                    # .safetensors in either recognised family -
+                                    # LoRA (.lora_A/.lora_B, delta B*A) or LoKr
+                                    # (.lokr_w1/.lokr_w2, delta W1 kron W2), read
+                                    # from the file's own keys.
                                     # REPEATABLE - pass it once per adapter to stack
                                     # several in one generation (a face adapter plus a
                                     # style adapter, say). They fold in the order given,

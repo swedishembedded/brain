@@ -69,12 +69,26 @@ brain/flux2-klein` lists them) over D-Bus and over HTTP at
   printed before the pipeline is built, so a run that does not fit says which
   reference spent the budget.
 - `--adapter <path>` (repeatable) - fold a LoRA adapter into the DiT before
-  generating. Two families are accepted, told apart by extension: brain's own
-  `finetune` checkpoint, or a third-party `.safetensors` adapter in the
-  ai-toolkit / ComfyUI / diffusers convention
-  (`diffusion_model.<module>.lora_A/B.weight`). The adapter must have been
-  trained for the `--variant` you select; a key that does not match a tensor
-  of that variant is a hard error naming the tensor, never a silent skip.
+  generating. brain's own `finetune` checkpoint and third-party
+  `.safetensors` files are told apart by extension; a third-party file may be
+  in either of the two conventions the ai-toolkit / ComfyUI / diffusers /
+  LyCORIS ecosystem writes, and which one it is is read from its own keys:
+
+  | family | keys | delta |
+  | --- | --- | --- |
+  | LoRA | `<module>.lora_A/.lora_B` (aliases `.lora_down`/`.lora_up`) | `(alpha/r)·B·A`, a low-rank product |
+  | LoKr | `<module>.lokr_w1`/`.lokr_w2`, either optionally stored as its own `_a`/`_b` pair | `W1 ⊗ W2`, a Kronecker product |
+
+  The two are different math, not spellings of one thing: a LoKr delta is
+  full rank in general. A LoKr file's `.alpha` is a scale **only** when one of
+  its factors is stored decomposed (then `alpha/dim`); with both factors
+  stored whole the multiplier is `1.0` and the stored alpha is ignored, which
+  is what both reference implementations do and what real ai-toolkit files
+  depend on (they write a ~`1e10` sentinel there).
+
+  The adapter must have been trained for the `--variant` you select; a key
+  that does not match a tensor of that variant is a hard error naming the
+  tensor, never a silent skip.
 
   Pass the flag more than once to **stack** adapters in one generation - a
   face-identity adapter plus a style adapter, say. The two families mix

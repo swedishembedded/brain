@@ -392,7 +392,7 @@ impl Action for Flux2Action {
                     // One adapter at most over the wire: the `adapter` param
                     // is a single string, so a served call cannot express the
                     // stack `Pipeline` folds (`brain flux2 generate` can).
-                    let adapters: &[crate::AdapterSpec] = p.adapter.as_ref().map(std::slice::from_ref).unwrap_or(&[]);
+                    let adapters: &[crate::AdapterSpec] = p.adapter.as_slice();
                     let pipe = Pipeline::build_sized(&cfg, paths, n_gen + n_ref, n_gen, adapters, p.precision, 1)?;
                     *guard = Some((key, pipe));
                 }

@@ -127,9 +127,14 @@ impl PendingLora {
                     }
                 }
             }
+            let family = match (file.iter().any(|p| p.family() == "lora"), file.iter().any(|p| p.family() == "lokr")) {
+                (true, true) => "lora+lokr",
+                (false, true) => "lokr",
+                _ => "lora",
+            };
             reports.push(model::lora::FoldReport {
                 path: path.to_string(),
-                external: true,
+                family,
                 pairs: file.len(),
                 rank: file.iter().map(|p| p.r).max().unwrap_or(0),
                 strength: spec.scale,
@@ -152,7 +157,7 @@ impl PendingLora {
     /// Same operation, same order and same scaling as the batch fold.
     fn apply(&self, name: &str, w: &mut [f32]) {
         for (p, scale) in self.pairs.iter().filter(|(p, _)| p.base_key == name) {
-            p.as_pair().delta(scale * p.alpha_mult, w);
+            p.add_delta(*scale, w);
         }
     }
 }
@@ -331,9 +336,12 @@ mod tests {
             out,
             inn,
             r: 1,
-            a: (0..inn).map(|i| 0.1 + i as f32 * 0.01).collect(),
-            b: (0..out).map(|i| 0.2 + i as f32 * 0.02).collect(),
             alpha_mult: 1.0,
+            delta: model::lora::ExternalDelta::Lora {
+                r: 1,
+                a: (0..inn).map(|i| 0.1 + i as f32 * 0.01).collect(),
+                b: (0..out).map(|i| 0.2 + i as f32 * 0.02).collect(),
+            },
         }
     }
 

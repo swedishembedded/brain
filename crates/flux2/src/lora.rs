@@ -562,21 +562,22 @@ impl crate::modelgrad::GradSink<f32> for LoraStep<'_> {
 }
 
 
-/// Fold a THIRD-PARTY (ai-toolkit / ComfyUI / diffusers) LoRA `.safetensors`
-/// into the inference tensor map, so an unchanged generation run produces
-/// adapter-conditioned images.
+/// Fold a THIRD-PARTY (ai-toolkit / ComfyUI / diffusers / LyCORIS)
+/// `.safetensors` adapter into the inference tensor map, so an unchanged
+/// generation run produces adapter-conditioned images. Both third-party
+/// families are accepted - LoRA (`B·A`) and LoKr (`W1 ⊗ W2`) - decided from
+/// the file's own keys.
 ///
 /// This is the OTHER direction from [`load_adapter`]: that one reloads an
 /// adapter brain itself trained (brain's checkpoint container, per-slice pairs
 /// over `q`/`k`/`v` separately). A third-party file instead adapts the FUSED
-/// matrices - one shared `A` for the whole `qkv`, one for the whole
-/// `linear1` - which is not a shape [`LoraAdapter`] can hold, but is a
-/// strictly simpler fold: every target is a whole tensor at offset 0.
+/// matrices - one delta for the whole `qkv`, one for the whole `linear1` -
+/// which is not a shape [`LoraAdapter`] can hold, but is a strictly simpler
+/// fold: every target is a whole tensor at offset 0.
 ///
 /// A thin wrapper over [`model::lora::fold_external_into`] supplying this
 /// architecture's own name for the wrong-base-model message; the reference
-/// semantics (`W += strength·(alpha/r)·B·A`, per ComfyUI's weight adapter and
-/// ai-toolkit's trainer) and the validate-before-writing contract are
+/// semantics per family and the validate-before-writing contract are
 /// documented there, once, for every model that reads such a file.
 pub fn fold_external_adapter(
     path: &str,

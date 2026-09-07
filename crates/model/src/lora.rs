@@ -203,6 +203,69 @@ impl Pair {
     }
 }
 
+/// A `[rows, cols]` row-major matrix read straight out of an adapter file -
+/// one Kronecker factor, or one factor's reconstruction. See [`Lokr`].
+#[derive(Clone)]
+pub struct Factor {
+    pub rows: usize,
+    pub cols: usize,
+    pub data: Vec<f32>,
+}
+
+impl Factor {
+    fn new(shape: &[usize], data: Vec<f32>, what: &str) -> Result<Factor, String> {
+        if shape.len() != 2 || shape[0] * shape[1] != data.len() {
+            return Err(format!("{what} is {shape:?}, expected a 2-D matrix matching its data"));
+        }
+        Ok(Factor { rows: shape[0], cols: shape[1], data })
+    }
+
+    /// `self · rhs`, the reconstruction of a factor a file stored low-rank
+    /// (`lokr_w1 = lokr_w1_a @ lokr_w1_b`).
+    fn matmul(&self, rhs: &Factor, what: &str) -> Result<Factor, String> {
+        if self.cols != rhs.rows {
+            return Err(format!(
+                "{what}: [{}, {}] @ [{}, {}] do not compose",
+                self.rows, self.cols, rhs.rows, rhs.cols
+            ));
+        }
+        let mut out = vec![0.0f32; self.rows * rhs.cols];
+        for i in 0..self.rows {
+            for k in 0..self.cols {
+                let s = self.data[i * self.cols + k];
+                if s == 0.0 {
+                    continue;
+                }
+                let (r, o) = (&rhs.data[k * rhs.cols..(k + 1) * rhs.cols], &mut out[i * rhs.cols..(i + 1) * rhs.cols]);
+                for j in 0..rhs.cols {
+                    o[j] += s * r[j];
+                }
+            }
+        }
+        Ok(Factor { rows: self.rows, cols: rhs.cols, data: out })
+    }
+}
+
+/// A **LoKr** (low-rank Kronecker) adapter for one linear:
+/// `ΔW = mult · (W1 ⊗ W2)`, `[w1.rows·w2.rows, w1.cols·w2.cols]`.
+///
+/// Genuinely different math from LoRA, not a naming variant of it: LoRA's
+/// delta is a low-rank PRODUCT `B·A`, LoKr's is a Kronecker product of two
+/// small factors, which is full rank in general.
+pub struct Lokr {
+    pub w1: Factor,
+    pub w2: Factor,
+}
+
+/// Which family a third-party file uses for one target, with that family's
+/// own factors. See [`read_external_adapter`].
+pub enum ExternalDelta {
+    /// `ΔW = mult · B·A`, `A [r×in]` ("down"), `B [out×r]` ("up").
+    Lora { r: usize, a: Vec<f32>, b: Vec<f32> },
+    /// `ΔW = mult · (W1 ⊗ W2)`.
+    Lokr(Lokr),
+}
+
 /// One linear's adapter exactly as a THIRD-PARTY file stores it, with the
 /// base tensor key it targets already resolved. See [`read_external_adapter`].
 pub struct ExternalPair {
@@ -213,21 +276,82 @@ pub struct ExternalPair {
     pub stem: String,
     pub out: usize,
     pub inn: usize,
+    /// The file's own rank for this target: LoRA's `r`, LoKr's decomposition
+    /// dimension, or 0 for a LoKr whose factors are both stored full (which
+    /// has no rank - see [`ExternalPair::alpha_mult`]).
     pub r: usize,
-    /// `A [r×in]` - the "down" projection.
-    pub a: Vec<f32>,
-    /// `B [out×r]` - the "up" projection.
-    pub b: Vec<f32>,
-    /// `alpha/r`, or 1.0 when the file carries no `.alpha` tensor.
+    /// The multiplier the file's own `.alpha` resolves to, ON TOP of the
+    /// caller's strength.
+    ///
+    /// * **LoRA**: `alpha/r`, or 1.0 when the file carries no `.alpha`.
+    ///   ai-toolkit writes `alpha == rank` and strips the key on PEFT-format
+    ///   saves; ComfyUI's adapter uses 1.0 outright when it is missing.
+    /// * **LoKr**: `alpha/dim` ONLY when a factor is stored decomposed, `dim`
+    ///   being that decomposition's inner dimension; **1.0 when both factors
+    ///   are stored full, whatever the file's `.alpha` says**. Both reference
+    ///   implementations do exactly this (ComfyUI leaves its `dim` unset and
+    ///   falls back to `alpha = 1.0`; LyCORIS overwrites `alpha` with
+    ///   `lora_dim` in full-factor mode so `alpha/dim == 1`), and real
+    ///   ai-toolkit LoKr files rely on it - they store a sentinel `alpha`
+    ///   around 1e10 that would destroy the weights if it were honoured.
     pub alpha_mult: f32,
+    /// The family and its factors.
+    pub delta: ExternalDelta,
 }
 
 impl ExternalPair {
-    /// A [`Pair`] over the same `A`/`B`, so the fold reuses the ONE `B·A`
-    /// implementation ([`Pair::delta`]) rather than growing a second one.
-    pub fn as_pair(&self) -> Pair {
-        Pair::from_ab(self.out, self.inn, self.r, self.a.clone(), self.b.clone())
+    /// `"lora"` or `"lokr"` - which family this target's delta comes from.
+    pub fn family(&self) -> &'static str {
+        match self.delta {
+            ExternalDelta::Lora { .. } => "lora",
+            ExternalDelta::Lokr(_) => "lokr",
+        }
     }
+
+    /// Add `scale · alpha_mult · ΔW` into `w`, the base tensor's row-major
+    /// `[out, in]` data.
+    pub fn add_delta(&self, scale: f32, w: &mut [f32]) {
+        let s = scale * self.alpha_mult;
+        match &self.delta {
+            // Reuses the ONE `B·A` implementation ([`Pair::delta`]) rather
+            // than growing a second one.
+            ExternalDelta::Lora { r, a, b } => {
+                Pair::from_ab(self.out, self.inn, *r, a.clone(), b.clone()).delta(s, w)
+            }
+            ExternalDelta::Lokr(kr) => kron_delta(kr, s, w),
+        }
+    }
+}
+
+/// `w[i1·r2+i2, j1·c2+j2] += scale · W1[i1,j1] · W2[i2,j2]` - the Kronecker
+/// product, accumulated straight into the base tensor rather than
+/// materialized. On klein-9b's `qkv` the product is `[12288, 4096]`, 50M
+/// floats; building it only to add it once would double the peak for nothing.
+///
+/// One task per output row. The rows are disjoint and each keeps its `j1`
+/// walk in ascending order, so this is bit-identical to the serial version -
+/// the same property [`Pair::delta_strided`] is written for, and for the same
+/// reason: a fold whose result depended on the thread count would make an
+/// adapted generation irreproducible.
+fn kron_delta(kr: &Lokr, scale: f32, w: &mut [f32]) {
+    let (r1, c1) = (kr.w1.rows, kr.w1.cols);
+    let (r2, c2) = (kr.w2.rows, kr.w2.cols);
+    let stride = c1 * c2;
+    debug_assert_eq!(w.len(), r1 * r2 * stride);
+    par::rows_mut(w, stride, |o, row| {
+        let (i1, i2) = (o / r2, o % r2);
+        let w2row = &kr.w2.data[i2 * c2..(i2 + 1) * c2];
+        for j1 in 0..c1 {
+            let s = kr.w1.data[i1 * c1 + j1] * scale;
+            if s == 0.0 {
+                continue;
+            }
+            let chunk = &mut row[j1 * c2..(j1 + 1) * c2];
+            for j2 in 0..c2 {
+                chunk[j2] += s * w2row[j2];
+            }
+        }
+    });
 }
 
 /// The `(A-suffix, B-suffix)` spellings a third-party adapter may use, in the
@@ -238,22 +362,45 @@ const EXTERNAL_SUFFIXES: [(&str, &str); 3] = [
     (".lora.down.weight", ".lora.up.weight"),
 ];
 
-/// Read a third-party (ai-toolkit / ComfyUI / diffusers) LoRA `.safetensors`
-/// into per-linear [`ExternalPair`]s, resolving each to the base tensor key it
-/// targets.
+/// The LyCORIS / kohya-ss LoKr factor spellings, per target stem. A factor is
+/// either stored whole (`lokr_w1`) or as its own low-rank pair
+/// (`lokr_w1_a` @ `lokr_w1_b`), and a single file may do it differently for
+/// `w1` than for `w2`.
+/// `.lokr_t2` is listed so it is REFUSED by name rather than falling through
+/// to "unrecognised tensor": it is the convolutional CP-decomposition factor,
+/// a shape none of this workspace's LoKr targets (all linears) can be, and
+/// folding the rest of such a file would half-apply the adapter.
+const LOKR_SUFFIXES: [&str; 7] =
+    [".lokr_w1", ".lokr_w2", ".lokr_w1_a", ".lokr_w1_b", ".lokr_w2_a", ".lokr_w2_b", ".lokr_t2"];
+
+/// Read a third-party (ai-toolkit / ComfyUI / diffusers / LyCORIS)
+/// `.safetensors` adapter into per-linear [`ExternalPair`]s, resolving each to
+/// the base tensor key it targets.
 ///
 /// Key matching is ComfyUI's: strip a leading `diffusion_model.`, strip the
-/// `.lora_{A,B}.weight` suffix, and the remaining stem plus `.weight` is the
-/// base tensor. `.alpha`, when present, is read as the scalar it is.
+/// family suffix, and the remaining stem plus `.weight` is the base tensor.
+/// `.alpha`, when present, is read as the scalar it is.
 ///
-/// **Every key must be understood.** An unrecognised name, a half pair, or a
-/// mismatched `r` is an error naming the tensor - never a skip. A loader that
-/// quietly drops keys returns base-model output that looks like a successful
-/// adapted run, which is the single worst outcome for this feature.
+/// **Two families, decided per target stem**, because one file adapts every
+/// linear the same way but a STACK may mix files:
+/// * **LoRA** - `.lora_A/.lora_B` (and the `.lora_down/.lora_up`,
+///   `.lora.down/.lora.up` aliases). `ΔW = (α/r)·B·A`.
+/// * **LoKr** - `.lokr_w1`/`.lokr_w2`, either of which may instead be stored
+///   as its own low-rank pair (`.lokr_w1_a` @ `.lokr_w1_b`).
+///   `ΔW = mult·(W1 ⊗ W2)`. See [`ExternalPair::alpha_mult`] for the scale
+///   convention, which is NOT LoRA's.
+///
+/// **Every key must be understood.** An unrecognised name, a half pair, a
+/// mismatched `r`, or a stem carrying both families is an error naming the
+/// tensor - never a skip. A loader that quietly drops keys returns base-model
+/// output that looks like a successful adapted run, which is the single worst
+/// outcome for this feature.
 pub fn read_external_adapter(path: &str) -> Result<Vec<ExternalPair>, String> {
     let tensors = checkpoint::safetensors::read(path)?;
     let mut a: HashMap<String, (Vec<usize>, Vec<f32>)> = HashMap::new();
     let mut b: HashMap<String, (Vec<usize>, Vec<f32>)> = HashMap::new();
+    // stem -> suffix (without the leading dot) -> factor.
+    let mut kr: HashMap<String, HashMap<&'static str, Factor>> = HashMap::new();
     let mut alpha: HashMap<String, f32> = HashMap::new();
     for t in tensors {
         let name = t.name.as_str();
@@ -272,69 +419,158 @@ pub fn read_external_adapter(path: &str) -> Result<Vec<ExternalPair>, String> {
                 break;
             }
         }
-        if !matched {
-            if let Some(stem) = name.strip_suffix(".alpha") {
-                let v = t.data.first().copied().ok_or_else(|| {
-                    format!("lora {path}: '{name}' is an empty alpha scalar")
-                })?;
-                alpha.insert(stem.to_string(), v);
-                continue;
-            }
-            return Err(format!(
-                "lora {path}: unrecognised tensor '{name}' (expected a \
-                 .lora_A/.lora_B, .lora_down/.lora_up or .alpha key)"
-            ));
+        if matched {
+            continue;
         }
+        // Longest first: `.lokr_w1_a` must not be read as `.lokr_w1` plus a
+        // stem ending in `_a`.
+        let mut best: Option<&'static str> = None;
+        for s in LOKR_SUFFIXES {
+            if name.ends_with(s) && best.is_none_or(|prev| s.len() > prev.len()) {
+                best = Some(s);
+            }
+        }
+        if let Some(s) = best {
+            let stem = name.strip_suffix(s).expect("matched above").to_string();
+            let f = Factor::new(&t.shape, t.data, &format!("lora {path}: '{name}'"))?;
+            kr.entry(stem).or_default().insert(&s[1..], f);
+            continue;
+        }
+        if let Some(stem) = name.strip_suffix(".alpha") {
+            let v = t
+                .data
+                .first()
+                .copied()
+                .ok_or_else(|| format!("lora {path}: '{name}' is an empty alpha scalar"))?;
+            alpha.insert(stem.to_string(), v);
+            continue;
+        }
+        return Err(format!(
+            "lora {path}: unrecognised tensor '{name}' (expected a \
+             .lora_A/.lora_B, .lora_down/.lora_up, .lokr_w1/.lokr_w2 \
+             (optionally _a/_b) or .alpha key)"
+        ));
     }
-    if a.is_empty() {
-        return Err(format!("lora {path}: no LoRA pairs found in this file"));
+    if a.is_empty() && kr.is_empty() {
+        return Err(format!("lora {path}: no LoRA or LoKr pairs found in this file"));
     }
-    let mut stems: Vec<String> = a.keys().cloned().collect();
-    stems.sort();
     for stem in b.keys() {
         if !a.contains_key(stem) {
             return Err(format!("lora {path}: '{stem}' has an up/B half but no down/A half"));
         }
     }
+    for stem in kr.keys() {
+        if a.contains_key(stem) || b.contains_key(stem) {
+            return Err(format!(
+                "lora {path}: '{stem}' carries BOTH LoRA and LoKr keys - the two are different \
+                 deltas, and there is no defined way to read a target as both"
+            ));
+        }
+    }
+    let mut stems: Vec<String> = a.keys().chain(kr.keys()).cloned().collect();
+    stems.sort();
     let mut out = Vec::with_capacity(stems.len());
     for stem in stems {
-        let (ashape, adata) = a.remove(&stem).expect("stem came from a");
-        let (bshape, bdata) = b
-            .remove(&stem)
-            .ok_or_else(|| format!("lora {path}: '{stem}' has a down/A half but no up/B half"))?;
-        if ashape.len() != 2 || bshape.len() != 2 {
-            return Err(format!(
-                "lora {path}: '{stem}' is {ashape:?}/{bshape:?}, expected two 2-D matrices"
-            ));
-        }
-        let (r, inn) = (ashape[0], ashape[1]);
-        let (o, rb) = (bshape[0], bshape[1]);
-        if r != rb {
-            return Err(format!(
-                "lora {path}: '{stem}' rank disagrees - A is {ashape:?} (r={r}), B is {bshape:?} (r={rb})"
-            ));
-        }
-        if adata.len() != r * inn || bdata.len() != o * r {
-            return Err(format!("lora {path}: '{stem}' tensor data does not match its shape"));
-        }
-        let base_key =
-            format!("{}.weight", stem.strip_prefix("diffusion_model.").unwrap_or(&stem));
-        out.push(ExternalPair {
-            base_key,
-            stem: stem.clone(),
-            out: o,
-            inn,
-            r,
-            a: adata,
-            b: bdata,
-            // Both references resolve an absent `.alpha` to a multiplier of
-            // exactly 1.0: ai-toolkit writes alpha == rank (so alpha/r == 1)
-            // and strips the key on PEFT-format saves; ComfyUI's adapter uses
-            // `alpha = 1.0` outright when the tensor is missing.
-            alpha_mult: alpha.get(&stem).map(|al| al / r as f32).unwrap_or(1.0),
-        });
+        let base_key = format!("{}.weight", stem.strip_prefix("diffusion_model.").unwrap_or(&stem));
+        let al = alpha.get(&stem).copied();
+        let pair = match kr.remove(&stem) {
+            Some(factors) => read_lokr(path, &stem, base_key, factors, al)?,
+            None => {
+                let (ashape, adata) = a.remove(&stem).expect("stem came from a or kr");
+                let (bshape, bdata) = b
+                    .remove(&stem)
+                    .ok_or_else(|| format!("lora {path}: '{stem}' has a down/A half but no up/B half"))?;
+                if ashape.len() != 2 || bshape.len() != 2 {
+                    return Err(format!(
+                        "lora {path}: '{stem}' is {ashape:?}/{bshape:?}, expected two 2-D matrices"
+                    ));
+                }
+                let (r, inn) = (ashape[0], ashape[1]);
+                let (o, rb) = (bshape[0], bshape[1]);
+                if r != rb {
+                    return Err(format!(
+                        "lora {path}: '{stem}' rank disagrees - A is {ashape:?} (r={r}), B is {bshape:?} (r={rb})"
+                    ));
+                }
+                if adata.len() != r * inn || bdata.len() != o * r {
+                    return Err(format!("lora {path}: '{stem}' tensor data does not match its shape"));
+                }
+                ExternalPair {
+                    base_key,
+                    stem: stem.clone(),
+                    out: o,
+                    inn,
+                    r,
+                    // Both references resolve an absent `.alpha` to a
+                    // multiplier of exactly 1.0: ai-toolkit writes
+                    // alpha == rank (so alpha/r == 1) and strips the key on
+                    // PEFT-format saves; ComfyUI's adapter uses `alpha = 1.0`
+                    // outright when the tensor is missing.
+                    alpha_mult: al.map(|v| v / r as f32).unwrap_or(1.0),
+                    delta: ExternalDelta::Lora { r, a: adata, b: bdata },
+                }
+            }
+        };
+        out.push(pair);
     }
     Ok(out)
+}
+
+/// One LoKr target: resolve `W1`/`W2` (reconstructing either from its own
+/// `_a`/`_b` pair when the file stored it that way) and the scale.
+///
+/// The scale follows ComfyUI's `weight_adapter/lokr.py` exactly: `dim` is set
+/// only by a DECOMPOSED factor's inner dimension (`w2`'s winning over `w1`'s
+/// when both are decomposed, which is the order that file assigns them in),
+/// and the multiplier is `alpha/dim` only when both an alpha and a `dim`
+/// exist - otherwise 1.0. LyCORIS reaches the same number from the other end
+/// by writing `alpha = lora_dim` in full-factor mode. See
+/// [`ExternalPair::alpha_mult`].
+fn read_lokr(
+    path: &str,
+    stem: &str,
+    base_key: String,
+    mut factors: HashMap<&'static str, Factor>,
+    alpha: Option<f32>,
+) -> Result<ExternalPair, String> {
+    let mut dim = None;
+    let mut take = |whole: &str, af: &str, bf: &str, dim: &mut Option<usize>| -> Result<Factor, String> {
+        match factors.remove(whole) {
+            Some(f) => Ok(f),
+            None => {
+                let (fa, fb) = (factors.remove(af), factors.remove(bf));
+                match (fa, fb) {
+                    (Some(fa), Some(fb)) => {
+                        // ComfyUI reads the decomposition dimension off the
+                        // `_b` half: `dim = w1_b.shape[0]`.
+                        *dim = Some(fb.rows);
+                        fa.matmul(&fb, &format!("lora {path}: '{stem}.{af}' @ '{stem}.{bf}'"))
+                    }
+                    _ => Err(format!(
+                        "lora {path}: '{stem}' has neither a whole '{whole}' nor a complete \
+                         '{af}'/'{bf}' pair"
+                    )),
+                }
+            }
+        }
+    };
+    let w1 = take("lokr_w1", "lokr_w1_a", "lokr_w1_b", &mut dim)?;
+    let w2 = take("lokr_w2", "lokr_w2_a", "lokr_w2_b", &mut dim)?;
+    if let Some((leftover, _)) = factors.into_iter().next() {
+        return Err(format!("lora {path}: '{stem}.{leftover}' is a LoKr key this loader does not implement"));
+    }
+    Ok(ExternalPair {
+        base_key,
+        stem: stem.to_string(),
+        out: w1.rows * w2.rows,
+        inn: w1.cols * w2.cols,
+        r: dim.unwrap_or(0),
+        alpha_mult: match (alpha, dim) {
+            (Some(al), Some(d)) => al / d as f32,
+            _ => 1.0,
+        },
+        delta: ExternalDelta::Lokr(Lokr { w1, w2 }),
+    })
 }
 
 /// A name-keyed host tensor map: `name -> (shape, row-major data)`. Every
@@ -422,21 +658,33 @@ pub fn fold_placements(ts: &mut Tensors, scale: f32, ps: &[Placement<'_>]) -> Re
 #[derive(Clone, Debug, PartialEq)]
 pub struct FoldReport {
     pub path: String,
-    /// True for a third-party `.safetensors` file, false for the caller's own
-    /// trained-adapter container.
-    pub external: bool,
+    /// Which adapter family the file turned out to be: `"brain"` for the
+    /// caller's own trained container, or a third-party file's own family -
+    /// `"lora"`, `"lokr"`, or `"lora+lokr"` for one that uses both across
+    /// different targets. Worth saying out loud: the families are different
+    /// math, and "the adapter loaded" is not the same claim as "it loaded as
+    /// what you think it is".
+    pub family: &'static str,
     /// Adapted linears (a full-coverage FLUX.2 klein-9b adapter has 112).
     pub pairs: usize,
-    /// The file's rank, or the largest one if it is not uniform.
+    /// The file's rank, or the largest one if it is not uniform. 0 for a LoKr
+    /// whose factors are all stored full, which has no rank.
     pub rank: usize,
     /// The strength the delta was scaled by.
     pub strength: f32,
 }
 
+impl FoldReport {
+    /// True for a third-party `.safetensors` file, false for the caller's own
+    /// trained-adapter container.
+    pub fn external(&self) -> bool {
+        self.family != "brain"
+    }
+}
+
 impl std::fmt::Display for FoldReport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let kind = if self.external { "external" } else { "brain" };
-        write!(f, "folded {kind} LoRA {} - {} linears, rank {}, strength {}", self.path, self.pairs, self.rank, self.strength)
+        write!(f, "folded {} adapter {} - {} linears, rank {}, strength {}", self.family, self.path, self.pairs, self.rank, self.strength)
     }
 }
 
@@ -483,10 +731,10 @@ pub fn fold_adapter_files(
     for &(path, strength) in specs {
         if path.ends_with(".safetensors") {
             let info = fold_external_into(path, ts, strength, arch)?;
-            out.push(FoldReport { path: path.to_string(), external: true, pairs: info.pairs, rank: info.rank, strength });
+            out.push(FoldReport { path: path.to_string(), family: info.family, pairs: info.pairs, rank: info.rank, strength });
         } else {
             let (pairs, rank) = native(path, ts, strength)?;
-            out.push(FoldReport { path: path.to_string(), external: false, pairs, rank, strength });
+            out.push(FoldReport { path: path.to_string(), family: "brain", pairs, rank, strength });
         }
     }
     Ok(out)
@@ -497,32 +745,40 @@ pub fn fold_adapter_files(
 pub struct ExternalFold {
     /// Adapted linears.
     pub pairs: usize,
-    /// The file's rank, or the largest one if it is not uniform.
+    /// The file's rank, or the largest one if it is not uniform. 0 for a LoKr
+    /// stored with full factors, which has no rank.
     pub rank: usize,
     /// The `strength` the delta was scaled by.
     pub scale: f32,
+    /// `"lora"`, `"lokr"`, or `"lora+lokr"`.
+    pub family: &'static str,
 }
 
-/// Fold a THIRD-PARTY (ai-toolkit / ComfyUI / diffusers) LoRA `.safetensors`
-/// into a base tensor map, so an unchanged generation run produces
-/// adapter-conditioned output.
+/// Fold a THIRD-PARTY (ai-toolkit / ComfyUI / diffusers / LyCORIS)
+/// `.safetensors` adapter into a base tensor map, so an unchanged generation
+/// run produces adapter-conditioned output.
 ///
 /// This is the other direction from an architecture's own trained container:
 /// that one holds per-slice pairs over `q`/`k`/`v` separately, while a
 /// third-party file adapts the FUSED matrices - one shared `A` for the whole
 /// `qkv` - which is a strictly simpler fold, because every target is then a
-/// whole tensor at offset 0 and [`Pair::delta`] is the exact operation.
+/// whole tensor at offset 0.
 ///
 /// ## Semantics, taken from the reference implementations
 ///
-/// `W += strength · (alpha/r) · B·A`, matching ComfyUI's weight adapter
-/// (`comfy/weight_adapter/lora.py`: `weight += (strength * alpha) * mm(mat1,
-/// mat2)` with `mat1` the up/`lora_B` and `mat2` the down/`lora_A`, and
-/// `alpha = v[2]/rank` or `1.0` when no `.alpha` tensor is present) and
+/// **LoRA**: `W += strength · (alpha/r) · B·A`, matching ComfyUI's weight
+/// adapter (`comfy/weight_adapter/lora.py`: `weight += (strength * alpha) *
+/// mm(mat1, mat2)` with `mat1` the up/`lora_B` and `mat2` the down/`lora_A`,
+/// and `alpha = v[2]/rank` or `1.0` when no `.alpha` tensor is present) and
 /// ai-toolkit's trainer (`toolkit/network_mixins.py`: `scale = alpha /
 /// lora_dim`, alpha initialised to the rank and stripped from PEFT-format
 /// saves). `B·A` needs no transpose: both store PyTorch `nn.Linear` weights
 /// `[out, in]`, which is already brain's row-major manifest layout.
+///
+/// **LoKr**: `W += strength · mult · (W1 ⊗ W2)`, matching
+/// `comfy/weight_adapter/lokr.py` (`weight += (strength * alpha) *
+/// torch.kron(w1, w2)`), with `mult` per [`ExternalPair::alpha_mult`] - which
+/// for a full-factor file is 1.0 and NOT the stored alpha.
 ///
 /// `strength` is ComfyUI's `strength_model` - a user dial, default 1.0, NOT a
 /// value read from the file.
@@ -531,16 +787,14 @@ pub struct ExternalFold {
 /// not have" message, which is the message a wrong-base-model adapter
 /// produces and therefore the one that has to say which base was expected.
 ///
-/// Every pair is validated against the base map BEFORE anything is written
-/// ([`fold_placements`]), so a rejected adapter leaves the weights untouched
-/// rather than half folded.
+/// Every target is validated against the base map BEFORE anything is written,
+/// so a rejected adapter leaves the weights untouched rather than half folded.
 pub fn fold_external_into(path: &str, ts: &mut Tensors, strength: f32, arch: &str) -> Result<ExternalFold, String> {
     let pairs = read_external_adapter(path)?;
     // A key that matches nothing is a hard error naming the tensor: silently
     // skipping it would return base-model output from a run the user believes
-    // is adapted. Checked here rather than left to `fold_placements` because
-    // this layer can say WHY a name is unknown - the adapter is for another
-    // model - and can name the adapter's own stem alongside the base key.
+    // is adapted. This layer can also say WHY a name is unknown - the adapter
+    // is for another model - and name the adapter's own stem alongside it.
     for p in &pairs {
         match ts.get(&p.base_key) {
             None => {
@@ -550,24 +804,32 @@ pub fn fold_external_into(path: &str, ts: &mut Tensors, strength: f32, arch: &st
                     p.base_key, p.stem
                 ))
             }
-            Some((shape, _)) if shape.as_slice() != [p.out, p.inn] => {
+            Some((shape, data)) if shape.as_slice() != [p.out, p.inn] || data.len() != p.out * p.inn => {
                 return Err(format!(
-                    "lora {path}: '{}' is {shape:?}, but the adapter for it is [{}, {}]",
-                    p.base_key, p.out, p.inn
+                    "lora {path}: '{}' is {shape:?} ({} values), but the {} adapter for it is [{}, {}]",
+                    p.base_key,
+                    data.len(),
+                    p.family(),
+                    p.out,
+                    p.inn
                 ))
             }
             Some(_) => {}
         }
     }
     let rank = pairs.iter().map(|p| p.r).max().unwrap_or(0);
-    // Each pair carries its own `alpha/r` multiplier, so they cannot share one
-    // `fold_placements` call's single scale - one call each, in file order.
+    let family = match (pairs.iter().any(|p| p.family() == "lora"), pairs.iter().any(|p| p.family() == "lokr")) {
+        (true, true) => "lora+lokr",
+        (false, true) => "lokr",
+        _ => "lora",
+    };
+    // Each target carries its own alpha multiplier and its own family's math,
+    // so the deltas are added one at a time, in file order.
     for p in &pairs {
-        let pair = p.as_pair();
-        fold_placements(ts, strength * p.alpha_mult, &[Placement::whole(p.base_key.clone(), &pair)])
-            .map_err(|e| format!("lora {path}: {e}"))?;
+        let w = &mut ts.get_mut(&p.base_key).expect("validated above").1;
+        p.add_delta(strength, w);
     }
-    Ok(ExternalFold { pairs: pairs.len(), rank, scale: strength })
+    Ok(ExternalFold { pairs: pairs.len(), rank, scale: strength, family })
 }
 
 /// In-place bias-corrected Adam (β 0.9/0.999, eps 1e-8, no weight decay).

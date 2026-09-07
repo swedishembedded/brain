@@ -155,7 +155,7 @@ fn a_single_brain_adapter_is_bit_identical_to_the_single_adapter_fold() {
             .expect("stacked fold");
         assert_eq!(got, want, "strength {strength}: the one-adapter list must reproduce fold_into_tensors_at exactly");
         assert_eq!(reports.len(), 1);
-        assert!(!reports[0].external, "a .brain container is not the third-party family");
+        assert!(!reports[0].external(), "a .brain container is not the third-party family");
         assert_eq!(reports[0].rank, 2);
     }
 }
@@ -178,7 +178,7 @@ fn a_single_external_adapter_is_bit_identical_to_the_single_adapter_fold() {
         fold_adapters(&fc, &mut got, &[AdapterSpec { path: path.clone(), scale: 0.7 }]).expect("stacked fold");
     assert_eq!(got, want);
     assert_eq!(got[key].1, want[key].1);
-    assert!(reports[0].external);
+    assert!(reports[0].external());
     assert_eq!((reports[0].pairs, reports[0].rank), (1, 1));
 }
 
@@ -274,7 +274,7 @@ fn the_two_adapter_families_stack_together() {
     )
     .expect("stacked fold");
     assert_eq!(got, want, "a mixed stack is the two single folds applied in list order");
-    assert_eq!(reports.iter().filter(|r| r.external).count(), 1);
+    assert_eq!(reports.iter().filter(|r| r.external()).count(), 1);
 }
 
 /// A rejected adapter anywhere in the list is a hard error naming the offending

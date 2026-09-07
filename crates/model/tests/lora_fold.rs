@@ -166,7 +166,7 @@ fn two_adapters_fold_in_order_each_at_its_own_scale() {
     // 1.0*1 + 0.5*2 = 2 everywhere.
     assert_eq!(ts["img_in.weight"].1, vec![2.0; 6]);
     assert_eq!(reports.len(), 2);
-    assert!(reports.iter().all(|r| r.external && r.pairs == 1 && r.rank == 1));
+    assert!(reports.iter().all(|r| r.external() && r.pairs == 1 && r.rank == 1));
     assert_eq!(reports[0].strength, 1.0);
     assert_eq!(reports[1].strength, 0.5);
 
@@ -206,8 +206,8 @@ fn adapters_over_distinct_tensors_stack_and_native_files_reach_the_callers_loade
     assert_eq!(ts["img_in.weight"].1, vec![1.0; 6]);
     assert_eq!(ts["txt_in.weight"].1, vec![2.0; 6]);
     assert_eq!(native_calls, vec![("some/adapter.brain".to_string(), 2.0)]);
-    assert!(reports[0].external);
-    assert!(!reports[1].external);
+    assert!(reports[0].external());
+    assert!(!reports[1].external());
     assert_eq!((reports[1].pairs, reports[1].rank), (7, 4));
 }
 
@@ -221,6 +221,186 @@ fn no_adapters_leaves_the_map_untouched() {
         fold_adapter_files(&mut ts, &[], "test", |_, _, _| unreachable!("no adapter, no loader")).expect("folds");
     assert!(reports.is_empty());
     assert_eq!(ts, base);
+}
+
+// -------------------------------------------------------------------- LoKr
+
+/// `W1 ⊗ W2` written out by hand, so the fold is checked against arithmetic
+/// rather than against a second implementation of itself.
+///
+/// `W1 = [[1,2],[3,4]]`, `W2 = [[5,6],[7,8]]`:
+/// ```text
+///   [ 1*W2  2*W2 ]   [  5  6 | 10 12 ]
+///   [ 3*W2  4*W2 ] = [  7  8 | 14 16 ]
+///                    [ 15 18 | 20 24 ]
+///                    [ 21 24 | 28 32 ]
+/// ```
+/// Both factors are stored FULL, which is the case the real ai-toolkit
+/// adapters use - and the case in which the file's own `.alpha` is NOT a
+/// scale: both reference implementations resolve the multiplier to exactly
+/// 1.0 there (ComfyUI leaves `dim` unset so `alpha = 1.0`; LyCORIS writes
+/// `alpha = lora_dim` so `alpha/dim == 1`). A file whose stored alpha is a
+/// large sentinel - and real ones are - must therefore be folded at 1.0, not
+/// at the sentinel.
+#[test]
+fn a_full_factor_lokr_folds_the_kronecker_product_and_ignores_the_stored_alpha() {
+    let p = tmp("lokr-full.safetensors");
+    write_st(
+        &p,
+        &[
+            ("diffusion_model.img_in.lokr_w1", vec![2, 2], vec![1.0, 2.0, 3.0, 4.0]),
+            ("diffusion_model.img_in.lokr_w2", vec![2, 2], vec![5.0, 6.0, 7.0, 8.0]),
+            ("diffusion_model.img_in.alpha", vec![], vec![1.0e10]),
+        ],
+    );
+    let want = vec![
+        5.0, 6.0, 10.0, 12.0, //
+        7.0, 8.0, 14.0, 16.0, //
+        15.0, 18.0, 20.0, 24.0, //
+        21.0, 24.0, 28.0, 32.0,
+    ];
+    let mut ts = map(&[("img_in.weight", vec![4, 4], vec![0.0; 16])]);
+    let info = fold_external_into(p.to_str().unwrap(), &mut ts, 1.0, "test").expect("folds");
+    assert_eq!(ts["img_in.weight"].1, want, "W + kron(W1, W2), exactly");
+    assert_eq!(info.pairs, 1);
+    assert_eq!(info.family, "lokr");
+
+    // Strength still multiplies the whole delta, and 0 is a bit-exact no-op.
+    let mut ts = map(&[("img_in.weight", vec![4, 4], vec![0.0; 16])]);
+    fold_external_into(p.to_str().unwrap(), &mut ts, 0.5, "test").expect("folds");
+    assert_eq!(ts["img_in.weight"].1, want.iter().map(|v| v * 0.5).collect::<Vec<_>>());
+
+    let mut ts = map(&[("img_in.weight", vec![4, 4], vec![3.0; 16])]);
+    fold_external_into(p.to_str().unwrap(), &mut ts, 0.0, "test").expect("folds");
+    assert_eq!(ts["img_in.weight"].1, vec![3.0; 16]);
+}
+
+/// A factor may itself be stored low-rank (`lokr_w1_a @ lokr_w1_b`), and THEN
+/// the file's `.alpha` is a real scale: `alpha / dim`, `dim` being the
+/// decomposition's own inner dimension.
+///
+/// `W1_a = [[1],[3]]`, `W1_b = [[1,2]]` -> `W1 = [[1,2],[3,6]]`, `dim = 1`.
+/// `W2 = I₂`, `alpha = 2` -> multiplier 2, and
+/// `2·(W1 ⊗ I₂) = [[2,0,4,0],[0,2,0,4],[6,0,12,0],[0,6,0,12]]`.
+#[test]
+fn a_decomposed_lokr_factor_is_reconstructed_and_scaled_by_alpha_over_dim() {
+    let p = tmp("lokr-decomposed.safetensors");
+    write_st(
+        &p,
+        &[
+            ("diffusion_model.img_in.lokr_w1_a", vec![2, 1], vec![1.0, 3.0]),
+            ("diffusion_model.img_in.lokr_w1_b", vec![1, 2], vec![1.0, 2.0]),
+            ("diffusion_model.img_in.lokr_w2", vec![2, 2], vec![1.0, 0.0, 0.0, 1.0]),
+            ("diffusion_model.img_in.alpha", vec![], vec![2.0]),
+        ],
+    );
+    let mut ts = map(&[("img_in.weight", vec![4, 4], vec![0.0; 16])]);
+    fold_external_into(p.to_str().unwrap(), &mut ts, 1.0, "test").expect("folds");
+    assert_eq!(
+        ts["img_in.weight"].1,
+        vec![
+            2.0, 0.0, 4.0, 0.0, //
+            0.0, 2.0, 0.0, 4.0, //
+            6.0, 0.0, 12.0, 0.0, //
+            0.0, 6.0, 0.0, 12.0,
+        ]
+    );
+}
+
+/// A LoRA adapter and a LoKr adapter in the SAME stack. The format decision is
+/// per adapter, not once for the run, so each one folds by its own family's
+/// math at its own strength - and the shared target ends up moved by the sum.
+#[test]
+fn a_stack_may_mix_lora_and_lokr_adapters() {
+    let lora = external("mix-lora", "img_in", &[1.0, 1.0, 1.0, 1.0], &[1.0, 1.0, 1.0, 1.0]); // delta 1 everywhere
+    let kr = tmp("mix-lokr.safetensors");
+    write_st(
+        &kr,
+        &[
+            ("diffusion_model.img_in.lokr_w1", vec![2, 2], vec![1.0, 0.0, 0.0, 1.0]),
+            ("diffusion_model.img_in.lokr_w2", vec![2, 2], vec![2.0, 2.0, 2.0, 2.0]),
+        ],
+    );
+    // kron(I₂, 2·J₂) is 2 on the two diagonal 2x2 blocks, 0 off them.
+    let kron = vec![
+        2.0, 2.0, 0.0, 0.0, //
+        2.0, 2.0, 0.0, 0.0, //
+        0.0, 0.0, 2.0, 2.0, //
+        0.0, 0.0, 2.0, 2.0,
+    ];
+    let mut ts = map(&[("img_in.weight", vec![4, 4], vec![0.0; 16])]);
+    let reports = fold_adapter_files(
+        &mut ts,
+        &[(lora.as_str(), 1.0), (kr.to_str().unwrap(), 0.5)],
+        "test",
+        |_, _, _| unreachable!(),
+    )
+    .expect("folds");
+    let want: Vec<f32> = kron.iter().map(|k| 1.0 + 0.5 * k).collect();
+    assert_eq!(ts["img_in.weight"].1, want);
+    assert_eq!(reports[0].family, "lora");
+    assert_eq!(reports[1].family, "lokr");
+}
+
+/// A LoKr key this loader does not implement (`lokr_t2`, the convolutional
+/// CP-decomposition factor) must be refused by name. FLUX.2's targets are all
+/// linears, so a file carrying one is not what we think it is - and folding
+/// the rest of it would produce a plausible image from a partly-applied
+/// adapter.
+#[test]
+fn an_unimplemented_lokr_key_is_refused_by_name() {
+    let p = tmp("lokr-t2.safetensors");
+    write_st(
+        &p,
+        &[
+            ("diffusion_model.img_in.lokr_w1", vec![2, 2], vec![1.0; 4]),
+            ("diffusion_model.img_in.lokr_t2", vec![2, 2], vec![1.0; 4]),
+            ("diffusion_model.img_in.lokr_w2_a", vec![2, 1], vec![1.0; 2]),
+            ("diffusion_model.img_in.lokr_w2_b", vec![1, 2], vec![1.0; 2]),
+        ],
+    );
+    let mut ts = map(&[("img_in.weight", vec![4, 4], vec![0.0; 16])]);
+    let e = fold_external_into(p.to_str().unwrap(), &mut ts, 1.0, "test").expect_err("must refuse");
+    assert!(e.contains("lokr_t2"), "the error must name the key it cannot handle: {e}");
+}
+
+/// A stem carrying BOTH families is a file we do not understand, not a merge
+/// opportunity: guessing which one is authoritative would silently halve or
+/// double an adapter's effect.
+#[test]
+fn a_stem_with_both_lora_and_lokr_keys_is_refused() {
+    let p = tmp("lokr-mixed-stem.safetensors");
+    write_st(
+        &p,
+        &[
+            ("diffusion_model.img_in.lokr_w1", vec![2, 2], vec![1.0; 4]),
+            ("diffusion_model.img_in.lokr_w2", vec![2, 2], vec![1.0; 4]),
+            ("diffusion_model.img_in.lora_A.weight", vec![1, 4], vec![1.0; 4]),
+            ("diffusion_model.img_in.lora_B.weight", vec![4, 1], vec![1.0; 4]),
+        ],
+    );
+    let mut ts = map(&[("img_in.weight", vec![4, 4], vec![0.0; 16])]);
+    let e = fold_external_into(p.to_str().unwrap(), &mut ts, 1.0, "test").expect_err("must refuse");
+    assert!(e.contains("img_in"), "the error must name the stem: {e}");
+}
+
+/// The shape a LoKr adapter implies for its target is `W1.rows·W2.rows` by
+/// `W1.cols·W2.cols`, and a mismatch against the base is the wrong-model case
+/// - caught before anything is written, as for LoRA.
+#[test]
+fn a_lokr_shape_mismatch_fails_before_writing() {
+    let p = tmp("lokr-badshape.safetensors");
+    write_st(
+        &p,
+        &[
+            ("diffusion_model.img_in.lokr_w1", vec![2, 2], vec![1.0; 4]),
+            ("diffusion_model.img_in.lokr_w2", vec![3, 2], vec![1.0; 6]),
+        ],
+    );
+    let mut ts = map(&[("img_in.weight", vec![4, 4], vec![0.0; 16])]);
+    let e = fold_external_into(p.to_str().unwrap(), &mut ts, 1.0, "test").expect_err("must refuse");
+    assert!(e.contains("img_in.weight"), "the error must name the tensor: {e}");
+    assert_eq!(ts["img_in.weight"].1, vec![0.0; 16], "a rejected adapter writes nothing");
 }
 
 /// An adapter key that matches no base tensor is a hard error naming the

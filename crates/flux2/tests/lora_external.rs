@@ -194,3 +194,37 @@ fn the_real_vsp_adapter_covers_only_klein_9b_tensors() {
     let touched = ts.values().filter(|(_, d)| d.iter().any(|v| *v != 0.0)).count();
     assert_eq!(touched, 112, "every adapted tensor changed");
 }
+
+/// A real **LoKr** adapter against the real klein-9b manifest, weight-free the
+/// same way (`BRAIN_FLUX2_LOKR`).
+///
+/// The property that matters here is not "it parsed": it is that the delta
+/// stays in the range a weight update can survive. Real ai-toolkit LoKr files
+/// store a sentinel `.alpha` in the 1e10 range, which is meaningful only
+/// because both reference implementations IGNORE it when both factors are
+/// stored full. Honouring it instead would produce a file that loads, folds,
+/// and renders noise - so the gate is on the magnitude of the fold, not on
+/// the absence of an error.
+#[test]
+fn a_real_lokr_adapter_folds_at_a_sane_magnitude() {
+    let Ok(path) = std::env::var("BRAIN_FLUX2_LOKR") else {
+        brain_testutil::skip("BRAIN_FLUX2_LOKR unset");
+        return;
+    };
+    let cfg = flux2::Flux2Config::klein_9b();
+    let mut ts: flux2::Tensors = cfg
+        .tensor_manifest()
+        .into_iter()
+        .map(|(n, s)| {
+            let numel = s.iter().product::<usize>();
+            (n, (s, vec![0.0f32; numel]))
+        })
+        .collect();
+    let info = fold_external_adapter(&path, &mut ts, 1.0).expect("real LoKr adapter folds");
+    assert_eq!(info.family, "lokr");
+    assert!(info.pairs > 0, "a LoKr file with no adapted linears is not a LoKr file");
+    let touched = ts.values().filter(|(_, d)| d.iter().any(|v| *v != 0.0)).count();
+    assert_eq!(touched, info.pairs, "every adapted tensor changed");
+    let peak = ts.values().flat_map(|(_, d)| d.iter()).fold(0.0f32, |m, v| m.max(v.abs()));
+    assert!(peak.is_finite() && peak < 10.0, "the folded delta peaks at {peak:e} - the stored alpha sentinel leaked into the scale");
+}
