@@ -97,12 +97,73 @@ fn open_store(a: &mut Args) -> Option<Store> {
 fn resolve_arch(l: &LocalModel) -> Option<&'static brain_arch::Arch> {
     let card = l.card.as_ref()?;
     match l.format {
-        Format::Gguf => brain_arch::by_gguf(&card.family),
+        Format::Gguf => resolve_gguf_arch(&card.family, l.weights.to_str()),
         // A compound checkpoint's family is whichever recipe claimed the
         // repo (`ZimageRecipe::id()` == `"zimage"`, not `"s3dit"`) - see
         // `brain_arch::Arch::families`'s doc for why `by_id` alone leaves a
         // correctly-classified Z-Image checkpoint invisible here.
         _ => brain_arch::by_family(&card.family),
+    }
+}
+
+/// GGUF `general.architecture` spellings more than one [`brain_arch::Arch`]
+/// row could mean, plus the ONE tensor shape that structurally tells them
+/// apart. `brain_arch::by_gguf` is a strict 1:1 string map (and must stay
+/// one - `gguf_spellings_are_unique_across_archs` is a real invariant, not
+/// an oversight) so it cannot express "this spelling means A or B depending
+/// on shape". FLUX.1 and FLUX.2 both report `general.architecture = "flux"`
+/// (llama.cpp/ComfyUI-GGUF spell neither differently), but FLUX.2's extra
+/// 2x2 pixel-unshuffle over FLUX.1's plain patchify doubles `img_in.weight`'s
+/// width - confirmed against each family's own tensor manifest:
+/// `crates/flux1/src/config.rs`'s `lin!("img_in", d, self.in_channels)` with
+/// `in_channels: 64` on every named variant (dev/kontext-dev/schnell), and
+/// `crates/flux2/src/config.rs`'s `("img_in.weight", vec![d, self.in_channels])`
+/// with `in_channels: 128` on both klein sizes.
+struct GgufAmbiguity {
+    spelling: &'static str,
+    tensor: &'static str,
+    /// (arch id, expected width) - the tiebreak tensor's last dimension.
+    candidates: &'static [(&'static str, usize)],
+}
+
+const GGUF_AMBIGUITIES: &[GgufAmbiguity] = &[GgufAmbiguity { spelling: "flux", tensor: "img_in.weight", candidates: &[("flux1", 64), ("flux2", 128)] }];
+
+/// Disambiguates a GGUF `general.architecture` spelling claimed by more than
+/// one `Arch` row, via `shape_of` (a closure so this stays testable without a
+/// real file - the caller opens the GGUF header, never the tensor bytes).
+/// `Ok(None)` means `spelling` names no known ambiguity, so the caller should
+/// fall back to the ordinary [`brain_arch::by_gguf`] lookup. `Err` names
+/// every candidate rather than ever guessing: no tiebreak tensor, or a width
+/// matching none of them.
+fn resolve_ambiguous_gguf_arch(spelling: &str, shape_of: impl FnOnce(&str) -> Option<Vec<usize>>) -> Result<Option<&'static brain_arch::Arch>, String> {
+    let Some(amb) = GGUF_AMBIGUITIES.iter().find(|a| a.spelling == spelling) else { return Ok(None) };
+    let names = || amb.candidates.iter().map(|(id, _)| *id).collect::<Vec<_>>().join("/");
+    let shape = shape_of(amb.tensor).ok_or_else(|| format!("{spelling}: GGUF has no {} tensor to disambiguate {} by shape", amb.tensor, names()))?;
+    let width = *shape.last().ok_or_else(|| format!("{spelling}: {} tensor has no dimensions", amb.tensor))?;
+    match amb.candidates.iter().find(|(_, w)| *w == width) {
+        Some((id, _)) => Ok(Some(brain_arch::by_id(id).unwrap_or_else(|| panic!("{id:?}: GGUF_AMBIGUITIES names an id not in brain_arch::ARCHS")))),
+        None => Err(format!(
+            "{spelling}: {} width {width} matches none of {} ({})",
+            amb.tensor,
+            names(),
+            amb.candidates.iter().map(|(id, w)| format!("{id}={w}")).collect::<Vec<_>>().join(", ")
+        )),
+    }
+}
+
+/// `resolve_arch`'s `Format::Gguf` branch: try the shape-based tiebreak
+/// first (a no-op for every spelling but `"flux"` today), falling back to
+/// the ordinary 1:1 lookup. An ambiguity that fails to resolve is reported
+/// to stderr and treated as unresolved, never silently guessed at.
+fn resolve_gguf_arch(family: &str, path: Option<&str>) -> Option<&'static brain_arch::Arch> {
+    let shape_of = |tensor: &str| -> Option<Vec<usize>> { checkpoint::gguf::MmapGguf::open(path?).ok()?.shape(tensor).map(|s| s.to_vec()) };
+    match resolve_ambiguous_gguf_arch(family, shape_of) {
+        Ok(Some(arch)) => Some(arch),
+        Ok(None) => brain_arch::by_gguf(family),
+        Err(e) => {
+            eprintln!("brain models: {e}");
+            None
+        }
     }
 }
 
@@ -754,5 +815,71 @@ mod tests {
         // classified Z-Image checkpoint invisible to `brain models list`.
         let l = compound_local("Tongyi-MAI/Z-Image-Turbo", "zimage");
         assert_eq!(resolve_arch(&l).map(|a| a.id), Some("s3dit"));
+    }
+
+    #[test]
+    fn ambiguous_gguf_flux_resolves_by_img_in_width() {
+        assert_eq!(resolve_ambiguous_gguf_arch("flux", |_| Some(vec![3072, 64])).map(|a| a.map(|a| a.id)), Ok(Some("flux1")));
+        assert_eq!(resolve_ambiguous_gguf_arch("flux", |_| Some(vec![3072, 128])).map(|a| a.map(|a| a.id)), Ok(Some("flux2")));
+    }
+
+    #[test]
+    fn ambiguous_gguf_flux_rejects_an_unexpected_width_naming_both_candidates() {
+        let err = resolve_ambiguous_gguf_arch("flux", |_| Some(vec![3072, 96])).unwrap_err();
+        assert!(err.contains("flux1"), "{err}");
+        assert!(err.contains("flux2"), "{err}");
+        assert!(err.contains("96"), "{err}");
+    }
+
+    #[test]
+    fn ambiguous_gguf_flux_rejects_a_missing_tiebreak_tensor() {
+        let err = resolve_ambiguous_gguf_arch("flux", |_| None).unwrap_err();
+        assert!(err.contains("img_in.weight"), "{err}");
+    }
+
+    #[test]
+    fn a_spelling_with_no_known_ambiguity_falls_back_to_the_ordinary_lookup() {
+        assert_eq!(resolve_ambiguous_gguf_arch("qwen35moe", |_| panic!("must not open a header for a non-ambiguous spelling")), Ok(None));
+    }
+
+    /// Write a real, minimal GGUF: `general.architecture` plus one
+    /// `img_in.weight` tensor of the given width - the two synthetic headers
+    /// (FLUX.1-shaped, FLUX.2-shaped) and the one rejected width the spec
+    /// calls for, read back through the SAME `MmapGguf::open`/`shape` path
+    /// `resolve_gguf_arch` uses in production.
+    fn flux_gguf_fixture(file: &str, width: usize) -> String {
+        use checkpoint::gguf::GgmlType;
+        use checkpoint::gguf_write::{write, TensorOut};
+        let path = std::env::temp_dir().join(file).to_string_lossy().into_owned();
+        let hidden = 8usize;
+        let kv = vec![("general.architecture".to_string(), checkpoint::gguf::GgufValue::String("flux".to_string()))];
+        let data = vec![0u8; hidden * width * 4];
+        let tensors = vec![TensorOut { name: "img_in.weight".to_string(), shape: vec![hidden, width], ty: GgmlType::F32.id(), data }];
+        write(&path, &kv, &tensors, 32).unwrap();
+        path
+    }
+
+    fn gguf_local(path: String, family: &str) -> LocalModel {
+        let reference = brain_modelref::ModelRef::new("test", "flux-gguf", None);
+        let card = ModelCard::new("test/flux-gguf", family);
+        LocalModel { reference, dir: PathBuf::from("/dev/null"), weights: PathBuf::from(path), tokenizer: None, card: Some(card), format: Format::Gguf, adapter: None, roles: None }
+    }
+
+    #[test]
+    fn resolve_arch_disambiguates_a_real_flux_gguf_by_its_real_img_in_shape() {
+        let flux1_path = flux_gguf_fixture("models-cli-test-flux1-shaped.gguf", 64);
+        let l = gguf_local(flux1_path, "flux");
+        assert_eq!(resolve_arch(&l).map(|a| a.id), Some("flux1"));
+
+        let flux2_path = flux_gguf_fixture("models-cli-test-flux2-shaped.gguf", 128);
+        let l = gguf_local(flux2_path, "flux");
+        assert_eq!(resolve_arch(&l).map(|a| a.id), Some("flux2"));
+    }
+
+    #[test]
+    fn resolve_arch_refuses_to_guess_a_flux_gguf_of_an_unexpected_width() {
+        let path = flux_gguf_fixture("models-cli-test-flux-unexpected-width.gguf", 96);
+        let l = gguf_local(path, "flux");
+        assert_eq!(resolve_arch(&l), None, "an unrecognized img_in width must never be silently attributed to either family");
     }
 }
