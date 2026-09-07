@@ -183,7 +183,7 @@ fn fit_recovers_perturbed_scene() {
     };
 
     let cfg = FitCfg { iters: 120, lr: 5e-3, log_every: 0, ..Default::default() };
-    let (_fitted, mse_end) = fit(&g, ks, &init, &targets, &cfg);
+    let (_fitted, mse_end) = fit(&g, ks, &init, &targets, &cfg, &mut |_it, _mse| true);
     assert!(
         (mse_end as f64) < mse0 * 0.35,
         "fit did not converge: start {mse0:.6} end {mse_end:.6}"

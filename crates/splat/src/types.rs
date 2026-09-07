@@ -56,6 +56,23 @@ impl Camera {
     }
 }
 
+/// Frame a scene of known axis-aligned bounds: eye backed off along -Z from
+/// the bounds center, looking back at it. Shared by the CLI (`splat_cli::render`/
+/// `::view`) and `caps::render` - hoisted here so neither holds its own copy.
+pub fn auto_camera_from_bounds(bounds: ([f32; 3], [f32; 3]), width: u32, height: u32, fov: f32) -> Camera {
+    let (lo, hi) = bounds;
+    let c = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, (lo[2] + hi[2]) / 2.0];
+    let r = ((hi[0] - lo[0]).powi(2) + (hi[1] - lo[1]).powi(2) + (hi[2] - lo[2]).powi(2)).sqrt() / 2.0;
+    let eye = [c[0], c[1], c[2] - 2.2 * r.max(1e-3)];
+    Camera::look_at(eye, c, [0.0, -1.0, 0.0], fov, width, height)
+}
+
+/// [`auto_camera_from_bounds`] over `s`'s own bounds - the convenience form
+/// most callers want.
+pub fn auto_camera(s: &Splats, width: u32, height: u32, fov: f32) -> Camera {
+    auto_camera_from_bounds(s.bounds(), width, height, fov)
+}
+
 pub fn sub3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
 }

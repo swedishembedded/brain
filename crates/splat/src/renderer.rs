@@ -439,6 +439,14 @@ impl Renderer {
 
 /// Sort a host scene front-to-back for the given camera (the naive kernel
 /// composites in buffer order). Returns a reordered copy.
+/// Drop the alpha channel: interleaved RGBA f32 `[N*4]` -> interleaved RGB f32
+/// `[N*3]`. The one implementation both the CLI's PPM writer and `caps::render`
+/// use - [`Renderer::read_rgba`]'s natural output is RGBA, but every consumer
+/// of a *rendered image* (a wire-format blob, an 8-bit quantizer) wants RGB.
+pub fn rgba_to_rgb(rgba: &[f32]) -> Vec<f32> {
+    rgba.chunks_exact(4).flat_map(|px| [px[0], px[1], px[2]]).collect()
+}
+
 pub fn sorted_by_depth(s: &Splats, cam: &Camera) -> Splats {
     let v = cam.viewmat();
     let mut order: Vec<usize> = (0..s.len()).collect();

@@ -1918,6 +1918,7 @@ dependencies = [
 name = "brain-splat"
 version = "1.1.0"
 dependencies = [
+ "brain-capability",
  "brain-gpu-core",
  "brain-kernels",
  "bytemuck",

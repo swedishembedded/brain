@@ -16,8 +16,8 @@
 
 use gpu_core::Gpu;
 use splat::opt::{fit as splat_fit, FitCfg, TargetView};
-use splat::renderer::{sorted_by_depth, GpuSplats, Renderer};
-use splat::types::{cross3, norm3, Camera, Mode, RenderOpts, Splats};
+use splat::renderer::{rgba_to_rgb, sorted_by_depth, GpuSplats, Renderer};
+use splat::types::{auto_camera, cross3, norm3, Camera, Mode, RenderOpts, Splats};
 use splat::Kernels;
 use wm_display::keymap::{Key, KeySet, UxKey};
 use wm_display::sink::{FrameSink, Hud};
@@ -76,15 +76,6 @@ fn vec3(a: &mut Args, name: &str) -> Option<[f32; 3]> {
         }
         [v[0], v[1], v[2]]
     })
-}
-
-/// Frame the scene: eye backed off along -Z from the bounds center.
-pub fn auto_camera(s: &Splats, width: u32, height: u32, fov: f32) -> Camera {
-    let (lo, hi) = s.bounds();
-    let c = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, (lo[2] + hi[2]) / 2.0];
-    let r = ((hi[0] - lo[0]).powi(2) + (hi[1] - lo[1]).powi(2) + (hi[2] - lo[2]).powi(2)).sqrt() / 2.0;
-    let eye = [c[0], c[1], c[2] - 2.2 * r.max(1e-3)];
-    Camera::look_at(eye, c, [0.0, -1.0, 0.0], fov, width, height)
 }
 
 fn render(argv: &[String]) {
@@ -458,7 +449,7 @@ fn fit_cmd(argv: &[String]) {
     let ks = Kernels::at(0);
     println!("fitting {} gaussians against {} views ({} iters, lr {lr}) …", s.len(), targets.len(), iters);
     let cfg = FitCfg { iters, lr, ..Default::default() };
-    let (fitted, mse) = splat_fit(&g, ks, &s, &targets, &cfg);
+    let (fitted, mse) = splat_fit(&g, ks, &s, &targets, &cfg, &mut |_it, _mse| true);
     splat::ply::write(&out, &fitted).unwrap_or_else(|e| {
         eprintln!("PLY write failed: {e}");
         std::process::exit(1);
@@ -480,8 +471,8 @@ pub fn write_ppm_rgb(path: &str, rgb: &[u8], w: usize, h: usize) {
 /// viewer concern and has no second copy. The RGBA→RGB8 quantisation and the P6
 /// header both come from `imaging`.
 pub fn write_ppm(path: &str, rgba: &[f32], w: usize, h: usize, normalize: bool) {
-    let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
-    if normalize {
+    let hwc = if normalize {
+        let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
         for px in rgba.chunks_exact(4) {
             if px[3] > 1e-6 {
                 lo = lo.min(px[0]);
@@ -492,13 +483,10 @@ pub fn write_ppm(path: &str, rgba: &[f32], w: usize, h: usize, normalize: bool) 
             lo = 0.0;
             hi = 1.0;
         }
-    }
-    let mut hwc = Vec::with_capacity(w * h * 3);
-    for px in rgba.chunks_exact(4) {
-        for &v in px.iter().take(3) {
-            hwc.push(if normalize { (v - lo) / (hi - lo) } else { v });
-        }
-    }
+        rgba.chunks_exact(4).flat_map(|px| [(px[0] - lo) / (hi - lo), (px[1] - lo) / (hi - lo), (px[2] - lo) / (hi - lo)]).collect()
+    } else {
+        rgba_to_rgb(rgba)
+    };
     let img = imaging::pixels::hwc_to_rgb8(&hwc, w as u32, h as u32, 3, imaging::ChannelPolicy::RequireRgb)
         .unwrap_or_else(|e| panic!("cannot write {path}: {e}"));
     imaging::save(path, &img).unwrap_or_else(|e| panic!("cannot write {path}: {e}"));

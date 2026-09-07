@@ -40,7 +40,13 @@ pub struct TargetView {
 
 /// Fit `init` against the targets; returns the optimized scene and the final
 /// mean MSE across views.
-pub fn fit(gpu: &Gpu, ks: Kernels, init: &Splats, targets: &[TargetView], cfg: &FitCfg) -> (Splats, f32) {
+///
+/// `on_step(iter, mse)` is polled once per completed iteration, inside this
+/// loop (not bolted on from outside) - returning `false` aborts early, at the
+/// end of whichever iteration just ran. `crates/cli/src/splat_cli.rs::fit_cmd`
+/// passes a closure that only prints and always returns `true`;
+/// `splat::caps::fit` polls the invocation's cancel token from its own.
+pub fn fit(gpu: &Gpu, ks: Kernels, init: &Splats, targets: &[TargetView], cfg: &FitCfg, on_step: &mut dyn FnMut(usize, f32) -> bool) -> (Splats, f32) {
     assert!(!targets.is_empty());
     let n = init.len();
     let (maxw, maxh) = targets
@@ -164,6 +170,9 @@ pub fn fit(gpu: &Gpu, ks: Kernels, init: &Splats, targets: &[TargetView], cfg: &
         last_loss = (loss_sum / targets.len() as f64) as f32;
         if cfg.log_every > 0 && (it % cfg.log_every == 0 || it + 1 == cfg.iters) {
             println!("fit iter {it:4}: mse {last_loss:.6}");
+        }
+        if !on_step(it, last_loss) {
+            break;
         }
     }
 

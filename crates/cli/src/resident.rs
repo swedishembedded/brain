@@ -189,9 +189,12 @@ pub fn build_executor(gpus: &[(u32, u64)], npus: &[(u32, u64)], unified_gpus: &[
     // by `brain do` and yet missing here (which is exactly how Real-ESRGAN
     // shipped unreachable). Each is still gated on its own weights env var.
     // ... plus, from the same catalog: TTS (BRAIN_QWEN3TTS_WEIGHTS), speech-to-text
-    // (BRAIN_NEMOTRONASR + BRAIN_QWEN3ASR), and the forecasting foundation models
+    // (BRAIN_NEMOTRONASR + BRAIN_QWEN3ASR), the forecasting foundation models
     // (BRAIN_CHRONOS2 / BRAIN_FINCAST / BRAIN_KRONOS_* — chronos2/fincast
-    // advertise an NPU footprint and auto-place there when budgeted). Folded
+    // advertise an NPU footprint and auto-place there when budgeted), and
+    // splat (`brain/splat` - render/fit, `resident_splat.rs`) which, unlike
+    // every other entry here, needs no weights at all: the scene arrives as
+    // request bytes, so it is always registered, gated on nothing. Folded
     // into `catalog::models()` so `brain caps`/`brain do` and this executor
     // can no longer disagree about their existence.
     models.extend(crate::catalog::residents());

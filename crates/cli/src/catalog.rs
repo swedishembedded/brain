@@ -162,9 +162,19 @@ pub fn models() -> Vec<ModelEntry> {
         provider: |_assembly: &Assembly| Err("timesfm3 has no direct `brain do` provider yet - serve it (`brain serve --dbus` or an HTTP surface) with BRAIN_TIMESFM3 set".to_string()),
         resident: catalog::resident!(crate::resident_forecast::Timesfm3Resident::from_env),
     });
+    // 3D Gaussian Splatting (render/fit): unlike every entry above, it needs
+    // no weights at all - the scene arrives as request bytes - so, unlike the
+    // truly stateless pair just below, it DOES have a resident
+    // (`resident_splat.rs`, always constructible, gated on nothing): render/
+    // fit genuinely allocate GPU buffers per request, worth scheduling.
+    entries.push(ModelEntry {
+        manifest: splat::caps::manifest,
+        provider: catalog::always!(splat::caps::SplatProvider::new()),
+        resident: catalog::resident!(crate::resident_splat::SplatResident::from_env),
+    });
     // No-weights utility models, listed by `brain caps` but served (over
     // D-Bus/HTTP) directly from `resident.rs::build_executor`, which pushes
-    // them as stateless residents itself rather than through this list - 
+    // them as stateless residents itself rather than through this list -
     // hence `resident: None` here, exactly as before this file existed.
     entries.push(ModelEntry { manifest: crate::imageops::manifest, provider: catalog::always!(crate::imageops::ImageOps), resident: None });
     entries.push(ModelEntry {

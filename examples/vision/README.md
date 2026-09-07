@@ -13,6 +13,7 @@ marshalled through D-Bus.
 | `arcface` | `embed` → a 512-d identity vector (detects + aligns first unless `align=false`) | `BRAIN_ARCFACE_DIR` (the antelopev2 directory) |
 | `brain/moondream3` | `caption` → generated text from an image + an instruction, streamed per token ([`moondream3_caption.py`](moondream3_caption.py)) | `BRAIN_MOONDREAM3_WEIGHTS` (the checkpoint directory) |
 | `brain/qwen3vl` | `generate` → generated text from an image + a prompt, streamed per token ([`qwen3vl_caption.py`](qwen3vl_caption.py)) | `BRAIN_QWEN3VL_WEIGHTS` (checkpoint directory or GGUF) |
+| `brain/splat` | `render` → one posed view of a 3D Gaussian-splat scene ([`splat_render.py`](splat_render.py)); `fit` → optimize a scene against N posed views, streamed per iteration ([`splat_fit.py`](splat_fit.py)) | none - the scene is request bytes, always served |
 
 Moondream 3's example uses `Subscribe` rather than `Run`, for the same reason
 DeepSeek-OCR's does: neither decoder has a KV cache, so every generated token is
@@ -118,6 +119,21 @@ face1.ppm     -0.0722    1.0000
 Pass `--align false` (or `{"align": false}` over the bus) when the input is
 already an aligned face crop; then no detector runs and the embedding is the
 reference one bit for bit (cosine 1.000000 against the insightface goldens).
+
+## `splat_render.py` / `splat_fit.py` - 3D Gaussian Splatting
+
+Unlike every other model on this page, `brain/splat` needs no checkpoint at
+all - the scene (Inria-layout binary PLY) arrives as request bytes, so it is
+always served. `render` is a plain `Run`: a scene plus a camera pose in, one
+image out (auto-framed from the scene's own bounds when neither `--eye` nor
+`--target` is given). `fit` is a `Subscribe`: an initial scene plus N posed
+target views (a `cameras.json` in `brain mirror infer`'s format, one PPM per
+camera) in, the optimized scene out, with the per-iteration MSE streamed as it
+improves - the rasterizer backward pass (`crates/splat/src/opt.rs::fit`)
+driven remotely, cancellable mid-run like any other long training action.
+
+The interactive WASD/mouse fly-through (`brain splat view`) is deliberately
+NOT served: it is human-in-the-loop with no request/response shape.
 
 ## What is NOT here
 

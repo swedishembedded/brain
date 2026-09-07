@@ -11,6 +11,7 @@
 //! pipelines in a single `Gpu` (kernel `kind` indices are per-`Gpu`
 //! positional).
 
+pub mod caps;
 pub mod opt;
 pub mod ply;
 pub mod prune;

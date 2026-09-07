@@ -14,9 +14,9 @@ a discrete graphics card.
 |---|---|
 | Inference             | [x] |
 | Training from scratch | [x] |
-| CLI (`brain <arch> <action>`)       | [ ] |
-| HTTP API               | [ ] |
-| D-Bus                  | [ ] |
+| CLI (`brain <arch> <action>`)       | [ ] (has its own `brain splat …` subcommand instead - see "Running it" below) |
+| HTTP API               | [ ] `render`/`fit` both take a REQUIRED `scene` input blob, so neither is a text-to-image/chat action |
+| D-Bus                  | [x] `render` (one-shot) and `fit` (streaming); `view` is human-in-the-loop and is not served |
 | Batched serving        | [ ] |
 
 ## Getting the weights
@@ -77,6 +77,27 @@ into a scene that actually reproduces your photos.
 | `--images <dir\|list>` | `fit` | target photos, one per camera, in order |
 | `--iters N` | `fit` | optimization steps (default `200`) |
 | `--lr X` | `fit` | learning rate (default `5e-3`) |
+
+## Serving (D-Bus)
+
+Model id: `brain/splat`. Always served - the scene arrives as request bytes,
+so there is no checkpoint to configure.
+
+```bash
+brain caps brain/splat
+```
+
+`render` (one-shot): takes `scene` (Inria-layout binary PLY) plus the same
+camera/size/depth/background params as `brain splat render` above, returns
+`image`. `fit` (streaming): takes `scene` plus `video` (N target views,
+concatenated interleaved-HWC f32 RGB frames - the same convention every other
+video input uses) and a `views` param (the camera array as JSON, the shape
+`cameras.json` uses), returns the optimized `scene` and reports the
+per-iteration MSE as progress; cancellable mid-run like any other long-running
+served action. `view` is deliberately not served - it is an interactive
+WASD/mouse loop with no request/response shape. See
+[`examples/vision/splat_render.py`](../../examples/vision/splat_render.py) and
+[`splat_fit.py`](../../examples/vision/splat_fit.py).
 
 ## Hardware and limits
 
