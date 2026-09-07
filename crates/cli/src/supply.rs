@@ -40,6 +40,11 @@ fn convert(store: &Store, vendor: &str, repo: &str, recipe: &str) -> Result<(), 
     match recipe {
         "transformers" => convert_transformers(store, vendor, repo),
         "zimage" => convert_zimage(store, vendor, repo),
+        // Special-cased ahead of the generic `files_recipe_roles` fallback
+        // purely for `convert_diffusers_pipeline`'s `model_index.json`
+        // safety net -- see its docs. The manifest it writes is otherwise
+        // identical to what the fallback would have produced.
+        "flux2" => convert_flux2(store, vendor, repo),
         "wan" => convert_wan(store, vendor, repo),
         "yolo" => convert_yolo(store, vendor, repo),
         // Real conversion (four output files, two roles), not a passthrough
@@ -146,24 +151,55 @@ fn convert_yolo(store: &Store, vendor: &str, repo: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The zimage recipe: no tensor rewrite is needed (`s3dit::import::
-/// import_comfy` already remaps names in memory at load time), so "finish"
-/// is just writing the `brain.manifest.json` `Store::local` reads back --
-/// naming the SAME four role paths `ZimageRecipe::artifacts` just downloaded,
-/// from `ZimageRecipe::ROLES` (one source of truth for z-image's role
-/// layout, not a second guess of what landed on disk).
-fn convert_zimage(store: &Store, vendor: &str, repo: &str) -> Result<(), String> {
+/// The finish step shared by every diffusers-pipeline family
+/// (`model_index.json` at the repo root + role subdirectories): no tensor
+/// rewrite is needed for any of them (each loader remaps names in memory at
+/// load time), so "finish" is writing the `brain.manifest.json`
+/// `Store::local` reads back, via [`convert_files`] -- but ONLY after
+/// confirming `model_index.json`'s own `_class_name` actually names the
+/// pipeline this recipe was written for.
+///
+/// That check exists because a file listing alone cannot always tell two
+/// such families apart: an official `black-forest-labs/FLUX.2-klein-4B`
+/// checkpoint matches `ZimageRecipe`'s shape signature byte-for-byte (see
+/// `brain_modelstore::recipe`'s `flux2` `FilesRecipe` row), and was in fact
+/// misclassified as `"zimage"` before that row's `repos` pin existed. A pin
+/// can be missing or wrong for some family added later the same way; this is
+/// the safety net that turns that mistake into a loud, named "wrong recipe
+/// matched this repo" error at conversion time instead of a silently wrong
+/// manifest, whether or not the registry's `matches()`/`select` ordering got
+/// it right.
+fn convert_diffusers_pipeline(store: &Store, vendor: &str, repo: &str, family: &str, roles_table: &'static [(&'static str, &'static str)], expected_class_name: &str) -> Result<(), String> {
     let dir = store.repo_dir(&ModelRef::new(vendor, repo, None));
-    let mut roles = BTreeMap::new();
-    for (role, rel) in ZimageRecipe::ROLES {
-        if !dir.join(rel).exists() {
-            return Err(format!("{vendor}/{repo}: convert: role {role:?} ({rel}) did not download"));
-        }
-        roles.insert(role.to_string(), rel.to_string());
+    let index_bytes = std::fs::read(dir.join("model_index.json")).map_err(|e| format!("{vendor}/{repo}: convert: read model_index.json: {e}"))?;
+    let index: serde_json::Value = serde_json::from_slice(&index_bytes).map_err(|e| format!("{vendor}/{repo}: convert: unparseable model_index.json: {e}"))?;
+    let class_name = index
+        .get("_class_name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| format!("{vendor}/{repo}: convert: model_index.json has no _class_name"))?;
+    if class_name != expected_class_name {
+        return Err(format!(
+            "{vendor}/{repo}: convert: model_index.json declares _class_name {class_name:?}, expected {expected_class_name:?} for the {family:?} recipe -- wrong recipe matched this repo"
+        ));
     }
-    let manifest = CompoundManifest { id: format!("{vendor}/{repo}"), family: "zimage".to_string(), roles };
-    let bytes = serde_json::to_vec_pretty(&manifest).map_err(|e| format!("{vendor}/{repo}: convert: encode manifest: {e}"))?;
-    std::fs::write(dir.join(MANIFEST_FILE), bytes).map_err(|e| format!("{vendor}/{repo}: convert: write manifest: {e}"))
+    convert_files(store, vendor, repo, family, roles_table)
+}
+
+/// The zimage recipe: [`ZimageRecipe::ROLES`] is z-image's own role layout
+/// (one source of truth for what `ZimageRecipe::artifacts` downloaded and
+/// what this manifest names, not a second guess of what landed on disk), and
+/// `"ZImagePipeline"` is the `_class_name` every real Z-Image release
+/// declares (`s3dit::pipeline`'s module docs name it directly).
+fn convert_zimage(store: &Store, vendor: &str, repo: &str) -> Result<(), String> {
+    convert_diffusers_pipeline(store, vendor, repo, "zimage", ZimageRecipe::ROLES, "ZImagePipeline")
+}
+
+/// The flux2 recipe: same shape, same roles ([`ZimageRecipe::ROLES`]) as
+/// z-image, but a different pipeline class -- `"Flux2KleinPipeline"` is what
+/// `black-forest-labs/FLUX.2-klein-4B`'s and `-9B`'s own `model_index.json`
+/// declare.
+fn convert_flux2(store: &Store, vendor: &str, repo: &str) -> Result<(), String> {
+    convert_diffusers_pipeline(store, vendor, repo, "flux2", ZimageRecipe::ROLES, "Flux2KleinPipeline")
 }
 
 /// The wan recipe: like [`convert_zimage`], no tensor rewrite is needed
@@ -1274,7 +1310,6 @@ pub(crate) mod tests {
         // vars involved anywhere in this path.
         let mut hub = FakeHub::new();
         for f in [
-            "model_index.json",
             "transformer/config.json",
             "transformer/diffusion_pytorch_model.safetensors",
             "vae/config.json",
@@ -1285,6 +1320,7 @@ pub(crate) mod tests {
         ] {
             hub.add_file("Tongyi-MAI", "Z-Image-Turbo", "main", f, b"stub".to_vec());
         }
+        hub.add_file("Tongyi-MAI", "Z-Image-Turbo", "main", "model_index.json", br#"{"_class_name": "ZImagePipeline"}"#.to_vec());
         let dir = store("supply-test-zimage-compound").root().to_path_buf();
         let supplier = StoreSupplier::new(Store::new(dir.clone()), Box::new(hub));
         let e = exec();
@@ -1302,6 +1338,35 @@ pub(crate) mod tests {
         assert_eq!(manifest.roles.len(), 4);
         let base = ModelRef::new("Tongyi-MAI", "Z-Image-Turbo", None);
         assert!(Store::new(dir).local(&base).is_some());
+    }
+
+    /// The safety net a `repos` pin alone cannot guarantee: a recipe's shape
+    /// match (`model_index.json` + the four role dirs) is not proof of which
+    /// pipeline a repo really is -- `black-forest-labs/FLUX.2-klein-4B`
+    /// matches `ZimageRecipe`'s shape byte-for-byte, and a missing or wrong
+    /// `repos` pin on some family added later could route a repo to the
+    /// wrong finish code the same way. `convert_zimage` must refuse rather
+    /// than write a manifest when the downloaded `model_index.json` itself
+    /// names a different pipeline (`"Flux2KleinPipeline"`, not
+    /// `"ZImagePipeline"`).
+    #[test]
+    fn convert_zimage_refuses_when_model_index_names_a_different_pipeline() {
+        // Pid-suffixed like `seed_wan`'s store name: `std::env::temp_dir()`
+        // is machine-wide, and other worktrees exercising this same track
+        // concurrently could otherwise collide on a bare literal name.
+        let dir = store(&format!("supply-test-zimage-wrong-class-{}", std::process::id())).root().to_path_buf();
+        let repo_dir = dir.join("black-forest-labs").join("FLUX.2-klein-4B");
+        for role_dir in ["transformer", "vae", "text_encoder", "tokenizer"] {
+            std::fs::create_dir_all(repo_dir.join(role_dir)).unwrap();
+        }
+        std::fs::write(repo_dir.join("vae/diffusion_pytorch_model.safetensors"), b"stub").unwrap();
+        std::fs::write(repo_dir.join("tokenizer/tokenizer.json"), b"stub").unwrap();
+        std::fs::write(repo_dir.join("model_index.json"), br#"{"_class_name": "Flux2KleinPipeline"}"#).unwrap();
+
+        let store = Store::new(dir);
+        let err = convert_zimage(&store, "black-forest-labs", "FLUX.2-klein-4B").unwrap_err();
+        assert!(err.contains("Flux2KleinPipeline"), "{err}");
+        assert!(err.contains("ZImagePipeline"), "{err}");
     }
 
     /// The actual bug this whole track exists to fix, end to end:
@@ -1325,7 +1390,6 @@ pub(crate) mod tests {
     fn ensure_writes_the_flux2_family_manifest_though_no_resident_dispatch_exists_yet() {
         let mut hub = FakeHub::new();
         for f in [
-            "model_index.json",
             "transformer/config.json",
             "transformer/diffusion_pytorch_model.safetensors",
             "vae/config.json",
@@ -1336,7 +1400,10 @@ pub(crate) mod tests {
         ] {
             hub.add_file("black-forest-labs", "FLUX.2-klein-4B", "main", f, b"stub".to_vec());
         }
-        let dir = store("supply-test-flux2-compound").root().to_path_buf();
+        hub.add_file("black-forest-labs", "FLUX.2-klein-4B", "main", "model_index.json", br#"{"_class_name": "Flux2KleinPipeline"}"#.to_vec());
+        // Pid-suffixed like `seed_wan`'s store name -- see the comment on
+        // that helper for why a bare literal name is not safe here.
+        let dir = store(&format!("supply-test-flux2-compound-{}", std::process::id())).root().to_path_buf();
         let supplier = StoreSupplier::new(Store::new(dir.clone()), Box::new(hub));
         let e = exec();
         let err = supplier.ensure("black-forest-labs/FLUX.2-klein-4B", &e, &mut |_, _, _| {}).unwrap_err();

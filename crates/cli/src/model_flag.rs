@@ -248,7 +248,6 @@ mod tests {
         let dir = scratch("compound");
         let mut hub = FakeHub::new();
         for f in [
-            "model_index.json",
             "transformer/config.json",
             "transformer/diffusion_pytorch_model.safetensors",
             "vae/config.json",
@@ -259,6 +258,7 @@ mod tests {
         ] {
             hub.add_file("Tongyi-MAI", "Z-Image-Turbo", "main", f, b"stub".to_vec());
         }
+        hub.add_file("Tongyi-MAI", "Z-Image-Turbo", "main", "model_index.json", br#"{"_class_name": "ZImagePipeline"}"#.to_vec());
         let m = resolve_with("Tongyi-MAI/Z-Image-Turbo", "dit", Some(&dir), &hub).unwrap();
         assert_eq!(m.name, "Tongyi-MAI/Z-Image-Turbo");
         assert!(m.path.ends_with("transformer"), "{}", m.path);
