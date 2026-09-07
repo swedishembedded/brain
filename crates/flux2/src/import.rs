@@ -605,6 +605,21 @@ mod tests {
         assert!(err.contains("n_heads=64"), "{err}");
     }
 
+    /// `klein_9b`/`klein_base_9b` differ only in [`Flux2Config::distilled`],
+    /// a field absent from `tensor_manifest`'s shapes entirely - so the two
+    /// real checkpoints are byte-identical in every shape, and `DitSize`
+    /// (`FourB`/`NineB` only) has no variant that could even NAME a
+    /// klein/base answer. A resolver needing that distinction must be told
+    /// explicitly; nothing here can ever recover it from shapes.
+    #[test]
+    fn shapes_cannot_distinguish_klein_from_base() {
+        let klein = Flux2Config::klein_9b();
+        let base = Flux2Config::klein_base_9b();
+        assert_eq!(klein.tensor_manifest(), base.tensor_manifest());
+        assert_eq!(dit_config_from_shapes(&klein.tensor_manifest()), Ok(DitSize::NineB));
+        assert_eq!(dit_config_from_shapes(&base.tensor_manifest()), Ok(DitSize::NineB));
+    }
+
     #[test]
     fn missing_required_tensors_error_by_name() {
         let shapes = Flux2Config::klein_4b().tensor_manifest();
