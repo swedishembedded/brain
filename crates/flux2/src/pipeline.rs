@@ -5,9 +5,11 @@
 //! CFG (base) rectified-flow Euler → FLUX.2 VAE decode; image editing via
 //! reference-image token concatenation (RoPE t-offsets 10·(i+1)).
 //!
-//! Weight locations come from env only (`Paths::from_env`) — never baked-in
-//! paths. The text encoder runs the parity-proven masked-pad path
-//! (`Qwen::encode_hiddens_padded`, layers 9/18/27 concatenated).
+//! Weight locations come from either `Paths::from_env` (env only) or
+//! `Paths::from_assembly` (a resolver-picked [`capability::Assembly`]) -
+//! never a literal path baked in. The text encoder runs the parity-proven
+//! masked-pad path (`Qwen::encode_hiddens_padded`, layers 9/18/27
+//! concatenated).
 
 use crate::config::Flux2Config;
 use crate::model::{position_ids, Flux2Model};
@@ -19,11 +21,12 @@ pub const TAP_LAYERS: [usize; 3] = [9, 18, 27];
 /// Right-pad token for the masked-pad text-encoder path.
 pub const PAD_TOKEN: u32 = 151643;
 
-/// Weight locations, env-only:
-/// `BRAIN_FLUX2_DIT` (diffusers `transformer/` dir, BFL single-file
-/// safetensors, or BF16 GGUF), `BRAIN_FLUX2_VAE` (diffusers `vae/` dir or
-/// file), `BRAIN_FLUX2_TE` (HF text-encoder dir), `BRAIN_FLUX2_TOKENIZER`
-/// (`tokenizer.json`).
+/// Weight locations - either read straight from env ([`Paths::from_env`]:
+/// `BRAIN_FLUX2_DIT`, diffusers `transformer/` dir, BFL single-file
+/// safetensors, or BF16 GGUF; `BRAIN_FLUX2_VAE`, diffusers `vae/` dir or
+/// file; `BRAIN_FLUX2_TE`, HF text-encoder dir; `BRAIN_FLUX2_TOKENIZER`,
+/// `tokenizer.json`) or resolved by [`Paths::from_assembly`] from a
+/// `dit`/`vae`/`text_encoder`/`tokenizer`-rolled [`capability::Assembly`].
 #[derive(Clone, Debug)]
 pub struct Paths {
     pub dit: String,
@@ -51,6 +54,23 @@ impl Paths {
             te: get("BRAIN_FLUX2_TE")?,
             tokenizer: get("BRAIN_FLUX2_TOKENIZER")?,
         })
+    }
+
+    /// Build `Paths` from an already-resolved [`capability::Assembly`]
+    /// ([`brain_modelstore::resolve::resolve`]'s `Resolution::Resolved`
+    /// output) - no environment involved. A missing role should be
+    /// unreachable in practice (`resolve` only ever returns `Resolved` once
+    /// every required role is filled), but this must name it rather than
+    /// panic if it somehow isn't.
+    pub fn from_assembly(assembly: &capability::Assembly) -> Result<Paths, String> {
+        let get = |role: &str| -> Result<String, String> {
+            assembly
+                .roles
+                .get(role)
+                .map(|p| p.to_string_lossy().into_owned())
+                .ok_or_else(|| format!("flux2: assembly '{}' has no {role} role", assembly.id))
+        };
+        Ok(Paths { dit: get("dit")?, vae: get("vae")?, te: get("text_encoder")?, tokenizer: get("tokenizer")? })
     }
 }
 
@@ -1799,6 +1819,38 @@ mod tests {
         // `from_env` keeps requiring all four.
         std::env::set_var("BRAIN_FLUX2_VAE", "v");
         assert!(Paths::from_env().is_err());
+    }
+
+    fn assembly_with_roles(roles: &[(&str, &str)]) -> capability::Assembly {
+        capability::Assembly {
+            id: "local/flux2-klein-9b".to_string(),
+            arch: "flux2".to_string(),
+            variant: Some("klein-9b".to_string()),
+            roles: roles.iter().map(|(k, v)| (k.to_string(), std::path::PathBuf::from(v))).collect(),
+            provenance: Vec::new(),
+        }
+    }
+
+    /// The resolver-driven path: every role comes from the [`Assembly`]
+    /// itself, never the environment.
+    #[test]
+    fn from_assembly_reads_every_role_from_the_assembly() {
+        let assembly = assembly_with_roles(&[("dit", "d"), ("vae", "v"), ("text_encoder", "t"), ("tokenizer", "k")]);
+        let p = Paths::from_assembly(&assembly).unwrap();
+        assert_eq!(p.dit, "d");
+        assert_eq!(p.vae, "v");
+        assert_eq!(p.te, "t");
+        assert_eq!(p.tokenizer, "k");
+    }
+
+    /// Unreachable for a real `Resolution::Resolved` assembly (the resolver
+    /// guarantees every required role is present) - but a missing role must
+    /// still be a named error, never a panic.
+    #[test]
+    fn from_assembly_names_a_missing_role_instead_of_panicking() {
+        let assembly = assembly_with_roles(&[("dit", "d"), ("vae", "v"), ("tokenizer", "k")]);
+        let err = Paths::from_assembly(&assembly).unwrap_err();
+        assert!(err.contains("text_encoder"), "{err}");
     }
 
     /// A [`Denoiser`] with no checkpoint behind it, so the sampler itself can
