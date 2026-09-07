@@ -34,7 +34,6 @@ mod load_line;
 mod ltxv_cli;
 mod mirror_cli;
 mod model_dir;
-mod model_flag;
 mod models_cli;
 mod npu_cli;
 mod omni_cli;

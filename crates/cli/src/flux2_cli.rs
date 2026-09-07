@@ -3,9 +3,10 @@
 
 //! `brain flux2 …` - FLUX.2 Klein text-to-image + image editing.
 //!
-//! Weights via env (`BRAIN_FLUX2_{DIT,VAE,TE,TOKENIZER}`) with the generic
-//! `--model` flag overriding the DiT (see `model_flag`); images in/out are
-//! binary PPM P6 (the CLI-wide convention).
+//! `generate`'s weights come from [`resolve_flux2`] (the model-store
+//! resolver over the models directory - see [`crate::model_dir::resolve`]),
+//! never `BRAIN_FLUX2_*`; `finetune` still reads those variables directly.
+//! Images in/out are binary PPM P6 (the CLI-wide convention).
 
 use flux2::{AdapterSpec, Flux2Config, GenOpts, Paths, Pipeline};
 
@@ -47,20 +48,18 @@ const HELP: &str = "brain flux2 <cmd>
            [--mask <mask.png>]      # WHITE = regenerate, BLACK = preserve the first
                                     # --ref exactly (which must be at the output size);
                                     # greys blend. Omit = regenerate everything.
-           [--text-encoder <path>]  # swap the text encoder: an HF directory, or a single
-                                    # .safetensors/.gguf FILE. Overrides BRAIN_FLUX2_TE.
-                                    # The shape is taken from --variant (klein-4b => Qwen3-4B,
-                                    # klein-9b => Qwen3-8B), never from a config.json, so any
-                                    # checkpoint with the stock tensor names and shapes drops
-                                    # in - a fine-tune, an abliteration, a re-quantisation.
-                                    # A checkpoint of a DIFFERENT shape is rejected at load.
-           [--model <path>]         # the DiT weights. Overrides BRAIN_FLUX2_DIT. An
-                                    # explicit .gguf/.safetensors extension is taken
-                                    # literally (the file must exist); without one,
-                                    # <name>.gguf then <name>.safetensors are probed beside
-                                    # the path; a <vendor>/<repo> id resolves through the
-                                    # model store and is DOWNLOADED when no local copy
-                                    # exists. VAE/TE/tokenizer still come from env.
+           [--text-encoder <path>]  # state the text encoder outright: an HF directory, or a
+                                    # single .safetensors/.gguf FILE, exactly as the models
+                                    # directory scan already found it. Any checkpoint with the
+                                    # stock tensor names/shapes drops in - a fine-tune, an
+                                    # abliteration, a re-quantisation - `validate()` rejects a
+                                    # mismatched size against the chosen DiT before any load.
+           [--model <path>]         # state the DiT weights outright, the same way. --model/
+                                    # --text-encoder/--variant are the resolver's overrides:
+                                    # when they leave a role genuinely ambiguous (more than one
+                                    # candidate, or klein-vs-base unstated - never recoverable
+                                    # from a weight's shape) every real candidate's selector
+                                    # flag prints and the run exits rather than guessing.
            [--adapter <path>]       # LoRA: brain's own `finetune` checkpoint, or a
                                     # third-party ai-toolkit/ComfyUI .safetensors
            [--lora-scale S]         # LoRA strength (ComfyUI strength_model), default 1.0
@@ -94,7 +93,11 @@ const HELP: &str = "brain flux2 <cmd>
            # Both trainers run the same op sequence; the device one keeps the
            # frozen base on the card and differentiates only the low-rank
            # factors. Which one ran is printed at the top of every run.
-Weights (env): BRAIN_FLUX2_DIT, BRAIN_FLUX2_VAE, BRAIN_FLUX2_TE, BRAIN_FLUX2_TOKENIZER
+Weights: `generate` resolves dit/vae/text_encoder/tokenizer from the models
+directory (--models-dir / BRAIN_MODELS_DIR) - --model/--text-encoder/--variant
+name a role outright, and an ambiguous or missing outcome prints every real
+candidate and exits rather than guessing. `finetune` still reads
+BRAIN_FLUX2_{DIT,VAE,TE,TOKENIZER}.
 Text-encoder placement (env): BRAIN_FLUX2_TE_DEVICE=gpu<i>[:i8] (truncated shard on that card)";
 
 pub fn run_flux2(args: &[String]) {
@@ -160,12 +163,93 @@ fn ref_bound(i: usize, anchored: bool, ref_size: Option<u32>) -> Option<u32> {
     }
 }
 
+/// Exit code for a genuinely ambiguous resolve outcome - distinct from the
+/// generic `exit(1)` an ordinary `Err` gets, and from a missing role's own
+/// code below, so a caller (a script, a human reading `$?`) can tell "there
+/// was a real question here" apart from "something was flatly wrong".
+const AMBIGUOUS_EXIT: i32 = 3;
+/// Exit code for `Resolution::Missing` - distinct from [`AMBIGUOUS_EXIT`]:
+/// nothing on disk satisfies a role at all, rather than several things doing
+/// so equally well.
+const MISSING_EXIT: i32 = 4;
+
+/// Resolve FLUX.2's four weight roles through the model-store resolver
+/// (`brain_modelstore::resolve::resolve` + [`flux2::spec::Flux2Spec`])
+/// instead of `BRAIN_FLUX2_*` variables: `--model`/`--text-encoder` name a
+/// role's file outright (the resolver's own override contract - an exact
+/// path already found by scanning the models directory), `--variant` states
+/// the klein-vs-base family a weight's shape alone can never answer. Prints
+/// and exits on `Ambiguous`/`Missing` - neither is recoverable within this
+/// command, and resolving is never a place to guess.
+fn resolve_flux2(model: Option<&str>, text_encoder: Option<&str>, variant: Option<&str>) -> Result<(Paths, capability::Assembly), String> {
+    let root = crate::model_dir::resolve(None).ok_or("no models directory (set --models-dir, BRAIN_MODELS_DIR, or $HOME)")?;
+    let records = brain_modelstore::inventory::scan(&root);
+    let mut overrides = std::collections::BTreeMap::new();
+    if let Some(m) = model {
+        overrides.insert("dit".to_string(), m.to_string());
+    }
+    if let Some(te) = text_encoder {
+        overrides.insert("text_encoder".to_string(), te.to_string());
+    }
+    if let Some(v) = variant {
+        overrides.insert("variant".to_string(), v.to_string());
+    }
+    let spec = flux2::spec::Flux2Spec;
+    let specs: [&dyn brain_modelstore::resolve::ArchSpec; 1] = [&spec];
+    match brain_modelstore::resolve::resolve("flux2", &records, &specs, &overrides) {
+        brain_modelstore::resolve::Resolution::Resolved(assembly) => {
+            let paths = Paths::from_assembly(&assembly)?;
+            Ok((paths, *assembly))
+        }
+        brain_modelstore::resolve::Resolution::Ambiguous(a) => {
+            eprint!("{}", describe_ambiguity(&a));
+            std::process::exit(AMBIGUOUS_EXIT);
+        }
+        brain_modelstore::resolve::Resolution::Missing(m) => {
+            eprint!("{}", describe_missing(&m));
+            std::process::exit(MISSING_EXIT);
+        }
+    }
+}
+
+/// The question plus every candidate's own selector flags - what a caller
+/// types next to pick one, straight from the resolver's own
+/// [`brain_modelstore::resolve::ModelCandidate::selector`].
+fn describe_ambiguity(a: &brain_modelstore::resolve::Ambiguity) -> String {
+    use brain_modelstore::resolve::Question;
+    let mut s = match &a.question {
+        Question::Role { role } => format!("flux2: more than one candidate for '{role}' - nothing picked automatically. Choose one:\n"),
+        Question::Variant { shape_class } => format!("flux2: which {shape_class} variant - klein or base? (not recoverable from the weights' own shape). Choose one:\n"),
+        Question::Unverifiable { path } => format!("flux2: {} could not be read enough to classify\n", path.display()),
+    };
+    for c in &a.choices {
+        for (flag, value) in &c.selector {
+            s.push_str(&format!("  {flag} {value}\n"));
+        }
+    }
+    s
+}
+
+/// Every missing role's own doc string plus any near-misses (an interrupted
+/// download, say) that explain why it looks empty anyway.
+fn describe_missing(m: &brain_modelstore::resolve::Missing) -> String {
+    let mut s = String::new();
+    for r in &m.roles {
+        s.push_str(&format!("flux2: {}: {}\n", r.role, r.doc));
+        for near in &r.near_misses {
+            s.push_str(&format!("  {near}\n"));
+        }
+    }
+    s
+}
+
 fn generate(args: &[String]) -> Result<(), String> {
     let mut prompt = None;
     let mut out = None;
     let mut o = GenOpts { width: 512, height: 512, ..GenOpts::default() };
     let (mut want_w, mut want_h): (Option<u32>, Option<u32>) = (None, None);
     let mut variant_name = "klein-4b".to_string();
+    let mut variant_explicit = false;
     let mut precision = flux2::Precision::F32;
     let mut precision_was_explicit = false;
     let mut refs: Vec<String> = Vec::new();
@@ -208,7 +292,10 @@ fn generate(args: &[String]) -> Result<(), String> {
                 return Err("--ref-cond-scale was renamed to --ref-resolution-scale (the same 0..=1 dial)".into())
             }
             "--guidance" => o.guidance = need(i)?.parse().map_err(|e| format!("--guidance: {e}"))?,
-            "--variant" => variant_name = need(i)?.clone(),
+            "--variant" => {
+                variant_name = need(i)?.clone();
+                variant_explicit = true;
+            }
             "--precision" => {
                 precision = flux2::Precision::from_name(need(i)?)?;
                 precision_was_explicit = true;
@@ -273,26 +360,14 @@ fn generate(args: &[String]) -> Result<(), String> {
         o.mask = Some(m);
     }
 
-    // A store id resolves to a canonical name worth printing; a plain path
-    // (and the env-provided DiT) IS its own identity. The flag stands in
-    // for BRAIN_FLUX2_DIT, so the variable is not required with it present.
-    let mut model_name: Option<String> = None;
-    let mut dit = None;
-    if let Some(m) = &model {
-        let resolved = crate::model_flag::resolve(m, "dit")?;
-        dit = Some(resolved.path);
-        model_name = Some(resolved.name);
-    }
-    let mut paths = Paths::from_env_with_dit(dit)?;
-    if let Some(te) = text_encoder {
-        paths.te = te;
-    }
-    // Bound against the DiT's own shapes, not trusted as `--variant` stated
-    // it - a real 9B checkpoint run with `--variant klein-4b` (the default!)
-    // must still be recognized as 9B and license-gated (see `bind_variant`'s
-    // doc). `variant_name` is reassigned to the bound truth so every message
-    // below prints what is actually running, not the caller's claim.
-    variant_name = flux2::caps::bind_variant(&paths.dit, &variant_name)?;
+    // Weights come from the model-store resolver, never BRAIN_FLUX2_*: scan
+    // the models directory for every candidate artifact, then let `--model`/
+    // `--text-encoder`/`--variant` (when the caller actually typed it) state
+    // the roles nothing on disk can pick on its own. An ambiguous or missing
+    // outcome prints and exits here - neither is recoverable within this
+    // command, and resolve() never silently picks.
+    let (paths, assembly) = resolve_flux2(model.as_deref(), text_encoder.as_deref(), variant_explicit.then_some(variant_name.as_str()))?;
+    variant_name = assembly.variant.clone().ok_or("flux2: resolved assembly has no variant")?;
     flux2::caps::check_license(&variant_name)?; // 9B = FLUX Non-Commercial license
     let variant = Flux2Config::from_name(&variant_name)?;
     // Q8_0 GGUF is not an fp32 checkpoint with an optional output tier: the
@@ -316,7 +391,7 @@ fn generate(args: &[String]) -> Result<(), String> {
     }
     // Which model this run is actually about to load, before anything is
     // loaded.
-    eprintln!("flux2: model {} ({}, {}, steps {steps})", model_name.as_deref().unwrap_or(&paths.dit), variant_name, precision.name());
+    eprintln!("flux2: model {} ({}, {}, steps {steps})", assembly.id, variant_name, precision.name());
     let n_gen = (o.height / 16) * (o.width / 16);
     // Every supplied reference conditions the model; under `--strength` the
     // first one does so at `--ref-resolution-scale` of its own size *and* seeds the
@@ -503,6 +578,58 @@ fn finetune(args: &[String]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn empty_assembly() -> capability::Assembly {
+        capability::Assembly { id: "local/flux2-klein-9b".into(), arch: "flux2".into(), variant: None, roles: Default::default(), provenance: Vec::new() }
+    }
+
+    /// The printed message must name the actual question and every real
+    /// candidate's own selector flags - what a caller types next, straight
+    /// from the resolver's own output, never a hand-summarized guess.
+    #[test]
+    fn describe_ambiguity_prints_the_question_and_every_selector() {
+        let choices = vec![
+            brain_modelstore::resolve::ModelCandidate { assembly: Box::new(empty_assembly()), selector: vec![("--variant".to_string(), "klein-9b".to_string())], summary: "flux2 klein-9b".to_string() },
+            brain_modelstore::resolve::ModelCandidate { assembly: Box::new(empty_assembly()), selector: vec![("--variant".to_string(), "base-9b".to_string())], summary: "flux2 base-9b".to_string() },
+        ];
+        let a = brain_modelstore::resolve::Ambiguity { arch: "flux2".to_string(), question: brain_modelstore::resolve::Question::Variant { shape_class: "9b".to_string() }, choices };
+        let out = describe_ambiguity(&a);
+        assert!(out.contains("9b"), "{out}");
+        assert!(out.contains("--variant klein-9b"), "{out}");
+        assert!(out.contains("--variant base-9b"), "{out}");
+    }
+
+    /// A `Role` ambiguity names the role in the question line, not only in
+    /// the selectors below it.
+    #[test]
+    fn describe_ambiguity_names_the_role_for_a_role_question() {
+        let choices = vec![brain_modelstore::resolve::ModelCandidate {
+            assembly: Box::new(empty_assembly()),
+            selector: vec![("--text-encoder".to_string(), "/models/Qwen/Qwen3-8B".to_string())],
+            summary: "text_encoder: /models/Qwen/Qwen3-8B".to_string(),
+        }];
+        let a = brain_modelstore::resolve::Ambiguity { arch: "flux2".to_string(), question: brain_modelstore::resolve::Question::Role { role: "text_encoder".to_string() }, choices };
+        let out = describe_ambiguity(&a);
+        assert!(out.contains("text_encoder"), "{out}");
+        assert!(out.contains("--text-encoder /models/Qwen/Qwen3-8B"), "{out}");
+    }
+
+    /// Every missing role's own doc string and near-misses (an interrupted
+    /// download, say) must survive into the printed message.
+    #[test]
+    fn describe_missing_prints_the_doc_and_near_misses() {
+        let m = brain_modelstore::resolve::Missing {
+            arch: "flux2".to_string(),
+            roles: vec![brain_modelstore::resolve::MissingRole {
+                role: "text_encoder".to_string(),
+                doc: "no artifact classifies as text_encoder for arch flux2".to_string(),
+                near_misses: vec!["an interrupted download exists at /models/x.safetensors".to_string()],
+            }],
+        };
+        let out = describe_missing(&m);
+        assert!(out.contains("text_encoder"), "{out}");
+        assert!(out.contains("interrupted download"), "{out}");
+    }
 
     /// `Pipeline::build_dit` tells brain's own adapter container apart from a
     /// third-party ai-toolkit/ComfyUI one **by file extension**: a
