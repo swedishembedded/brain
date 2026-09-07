@@ -135,18 +135,23 @@ fn predict(args: &[String]) {
         let context = (want / patch).max(1) * patch;
         (Box::new(m), "timesfm3", context)
     } else {
-        // Weights: explicit flags win, else the env pair, else the default
-        // Kronos refs fill the pair in -- fetching only when opted in
-        // ([`crate::supply::auto_fetch_enabled`]).
-        if kronos_tok.is_none() || kronos_dec.is_none() {
-            crate::supply::ensure_env_weights("kronos");
+        // Weights: `--kronos-tokenizer`/`--kronos-decoder` (when given) are
+        // the model-store resolver's own role overrides now
+        // (`brain_modelstore::resolve::resolve` + `kronos::spec::KronosSpec`)
+        // instead of `BRAIN_KRONOS_TOKENIZER`/`BRAIN_KRONOS_DECODER` -
+        // classification tells the two repos apart by their own
+        // `config.json` content, so an ambiguous or missing outcome prints
+        // every real candidate and exits rather than guessing.
+        let mut overrides = std::collections::BTreeMap::new();
+        if let Some(t) = &kronos_tok {
+            overrides.insert("tokenizer".to_string(), t.clone());
         }
-        let env = |v: &str| std::env::var(v).ok().filter(|s| !s.is_empty());
-        let (Some(tok), Some(dec)) = (kronos_tok.or_else(|| env("BRAIN_KRONOS_TOKENIZER")), kronos_dec.or_else(|| env("BRAIN_KRONOS_DECODER"))) else {
-            eprintln!("brain forecast predict: no kronos checkpoint resolved, and neither");
-            eprintln!("  --kronos-tokenizer/--kronos-decoder nor BRAIN_KRONOS_TOKENIZER/BRAIN_KRONOS_DECODER are set (or pass --timesfm3 <weights>)");
-            std::process::exit(1);
-        };
+        if let Some(d) = &kronos_dec {
+            overrides.insert("decoder".to_string(), d.clone());
+        }
+        let spec = kronos::spec::KronosSpec;
+        let assembly = crate::resolver_cli::resolve_or_exit("kronos", &spec, &overrides);
+        let (tok, dec) = (assembly.roles["tokenizer"].to_string_lossy().into_owned(), assembly.roles["decoder"].to_string_lossy().into_owned());
         let m = match kronos::KronosForecaster::load(&tok, &dec) {
             Ok(m) => m,
             Err(e) => {

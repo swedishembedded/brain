@@ -316,7 +316,7 @@ fn wants_weight_acquisition(arch: &str, rest: &[String]) -> bool {
 /// resolver-migrated case needs an explicit marker, not an overload of a
 /// field whose "empty" already means something else for those others).
 /// Grown by one entry per architecture as it migrates.
-const RESOLVER_MIGRATED_ARCHS: &[&str] = &["flux2", "qwen3tts"];
+const RESOLVER_MIGRATED_ARCHS: &[&str] = &["flux2", "qwen3tts", "kronos"];
 
 fn dispatch_arch(arch: &str, rest: Vec<String>) {
     // Skipped for `-h`/`--help`: help text must never block on a network
@@ -819,6 +819,20 @@ mod tests {
         let _serial = env_lock();
         assert!(brain_arch::by_id("qwen3tts").expect("qwen3tts row").weights_env.is_empty());
         assert!(!weights_already_named("qwen3tts", &s(&["synth", "--weights-dir", "D", "--ckpt", "C", "--text", "hi"])));
+    }
+
+    /// `kronos` moved to the resolver too - see
+    /// `qwen3tts_no_longer_wants_env_based_weight_acquisition`'s own doc.
+    /// kronos has no `ARCH_HANDLERS` entry of its own (it dispatches
+    /// generically via `ARCH_TO_MODEL`), but the same env-var auto-fetch
+    /// gate this row exempts it from would otherwise still apply to `brain
+    /// kronos ...`/`brain <verb> kronos` invocations.
+    #[test]
+    fn kronos_no_longer_wants_env_based_weight_acquisition() {
+        let _serial = env_lock();
+        assert!(brain_arch::by_id("kronos").expect("kronos row").weights_env.is_empty());
+        assert!(brain_arch::by_id("kronos").expect("kronos row").extra_refs.is_empty());
+        assert!(!weights_already_named("kronos", &s(&["speak"])));
     }
 
     #[test]

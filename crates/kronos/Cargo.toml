@@ -10,6 +10,8 @@ name = "kronos"
 path = "src/lib.rs"
 
 [dependencies]
+brain-capability.workspace = true
+brain-modelstore.workspace = true
 brain-gpu-core.workspace = true
 brain-data.workspace = true
 brain-backend-cpu.workspace = true

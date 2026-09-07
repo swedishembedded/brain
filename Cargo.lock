@@ -1251,12 +1251,14 @@ name = "brain-kronos"
 version = "1.1.0"
 dependencies = [
  "brain-backend-cpu",
+ "brain-capability",
  "brain-checkpoint",
  "brain-data",
  "brain-forecast",
  "brain-gpu-core",
  "brain-kernels",
  "brain-model",
+ "brain-modelstore",
  "brain-optim",
  "brain-paramstore",
  "brain-testutil",

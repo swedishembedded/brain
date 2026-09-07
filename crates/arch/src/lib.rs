@@ -547,15 +547,22 @@ pub const ARCHS: &[Arch] = &[
     arch!("chronos2", "Chronos-2 encoder-only patch transformer", Forecast, Brain, "brain-chronos2"),
     // Two repos, one model: `Kronos-base` is the decoder and
     // `Kronos-Tokenizer-base` is the BSQ tokenizer, and upstream publishes no
-    // combined release - see `extra_refs`. `-base` rather than `-small` as
-    // the default because it is the tier the published RankIC results are
-    // quoted for, and 391 MB is not a size worth trading accuracy for.
+    // combined release. `-base` rather than `-small` as the default because
+    // it is the tier the published RankIC results are quoted for, and
+    // 391 MB is not a size worth trading accuracy for.
     // No GGUF anywhere - a small forecasting transformer outside the
     // llama.cpp/GGUF ecosystem, like `sam2` above.
+    //
+    // No `weights_env`/`extra_refs`: kronos resolves both roles through
+    // `brain_modelstore::resolve` (`kronos::spec::KronosSpec`, wired into
+    // `crates/cli/src/forecast_cli.rs`'s own `predict`), which tells the two
+    // repos apart by their own `config.json` content rather than needing
+    // `extra_refs` to auto-fetch a second, unclassified checkpoint into an
+    // env var nothing then reads. `extra_refs` itself stays on `Arch` for a
+    // future architecture in this same two-repo shape that has not migrated
+    // yet; `default_ref` still names what `brain pull kronos` fetches.
     arch!("kronos", "Kronos BSQ-tokenizer candlestick model", Forecast, Brain, "brain-kronos",
           default_ref: Some("NeoQuasar/Kronos-base"),
-          extra_refs: &["NeoQuasar/Kronos-Tokenizer-base"],
-          weights_env: &[("BRAIN_KRONOS_DECODER", "decoder"), ("BRAIN_KRONOS_TOKENIZER", "tokenizer")],
           variants: &[
               Variant { reference: "NeoQuasar/Kronos-mini", params: 4_108_192, quants: &[] },
               Variant { reference: "NeoQuasar/Kronos-small", params: 24_741_696, quants: &[] },
@@ -675,16 +682,14 @@ mod tests {
     }
 
     #[test]
-    fn kronos_names_both_of_its_upstream_repos() {
-        // The two-repo case the `extra_refs` field exists for. If someone ever
-        // finds (or publishes) a single repo carrying both checkpoints, this
-        // is the test that should send them to `Arch::extra_refs`'s doc before
-        // they collapse the row.
+    fn kronos_resolves_its_two_upstream_repos_through_the_resolver_not_weights_env() {
+        // kronos moved off `weights_env`/`extra_refs` onto the model-store
+        // resolver (`kronos::spec::KronosSpec`) - see the row's own comment.
+        // `default_ref` still names what `brain pull kronos` fetches.
         let k = by_id("kronos").expect("the kronos row exists");
         assert_eq!(k.default_ref, Some("NeoQuasar/Kronos-base"));
-        assert_eq!(k.extra_refs, &["NeoQuasar/Kronos-Tokenizer-base"]);
-        let roles: Vec<&str> = k.weights_env.iter().map(|(_, r)| *r).collect();
-        assert_eq!(roles, ["decoder", "tokenizer"], "one role per repo, and the names the two FilesRecipe rows write");
+        assert!(k.extra_refs.is_empty());
+        assert!(k.weights_env.is_empty());
     }
 
     #[test]

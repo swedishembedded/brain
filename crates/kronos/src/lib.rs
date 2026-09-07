@@ -25,6 +25,7 @@ pub mod kvcache;
 pub mod nn;
 pub mod preprocess;
 pub mod finetune;
+pub mod spec;
 pub mod tokenizer;
 pub mod train;
 
