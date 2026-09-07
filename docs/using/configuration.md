@@ -168,13 +168,13 @@ See [`docs/using/serving.md`](serving.md) for what admission/backpressure means 
 | `BRAIN_WAN_DIT_DTYPE` | the Wan DiT's weight dtype; `brain wan t2v --dit-dtype` wins over it | checkpoint's own dtype |
 | `BRAIN_FLUX1_VAE_DEVICE` | where the FLUX.1 VAE decode runs (`cpu`/`gpu<i>`) | `cpu` |
 | `BRAIN_QWEN3TTS_LANG` / `BRAIN_QWEN3TTS_REF` / `BRAIN_QWEN3TTS_REF_TEXT` | TTS language / reference voice `.wav` / its transcript | `english` / none / none |
-| `BRAIN_MIMI_WEIGHTS` | TTS codec weights override | derived from `BRAIN_QWEN3TTS_WEIGHTS` |
+| `BRAIN_MIMI_WEIGHTS` | TTS codec weights override | derived from the resolved qwen3tts `weights_dir` role |
 | `BRAIN_QWEN3TTS_TALKER` | TTS talker placement (`cpu`, `npu`/`npu-fp32`, or an NPU int4 KV mode) | model-size default |
 | `BRAIN_QWEN3TTS_MTP` | TTS next-token-prediction placement (`cpu`, `npu`, `fused`) | model-size default |
 | `BRAIN_QWEN3TTS_CODEC` | TTS codec placement (`windowed`, `cpu-stream`, `npu-stream`) | default engine path |
 | `BRAIN_QWEN3TTS_STREAM_CHUNK` | frames per chunk in `cpu-stream` codec mode | 16 |
 | `BRAIN_QWEN3TTS_STREAM_WIN` | frames kept resident in the streaming decode window (rounds up to a multiple of the chunk size) | 32 |
-| `BRAIN_QWEN3TTS_SPEAKER` | overrides the speaker-encoder weights used for voice-clone evaluation | derived from `BRAIN_QWEN3TTS_WEIGHTS` |
+| `BRAIN_QWEN3TTS_SPEAKER` | overrides the speaker-encoder weights used for voice-clone evaluation | derived from the resolved qwen3tts `weights_dir` role |
 | `BRAIN_QWEN3TTS_NPU_DEVICE` | OpenVINO device for the TTS NPU talker | auto |
 | `BRAIN_QWEN3TTS_RES` | resources base for `brain qwen3tts serve`'s default engine paths | unset (flags supply paths) |
 | `BRAIN_QWEN3ASR_WINDOW` / `BRAIN_QWEN3ASR_MAXNEW` | Qwen3-ASR window (s) / max tokens | 30 / 200 |

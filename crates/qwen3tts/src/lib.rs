@@ -28,6 +28,7 @@ pub mod sampling;
 pub mod serve;
 pub mod prompt;
 pub mod sft;
+pub mod spec;
 pub mod talker;
 #[cfg(test)]
 mod testsupport;

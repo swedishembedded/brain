@@ -316,7 +316,7 @@ fn wants_weight_acquisition(arch: &str, rest: &[String]) -> bool {
 /// resolver-migrated case needs an explicit marker, not an overload of a
 /// field whose "empty" already means something else for those others).
 /// Grown by one entry per architecture as it migrates.
-const RESOLVER_MIGRATED_ARCHS: &[&str] = &["flux2"];
+const RESOLVER_MIGRATED_ARCHS: &[&str] = &["flux2", "qwen3tts"];
 
 fn dispatch_arch(arch: &str, rest: Vec<String>) {
     // Skipped for `-h`/`--help`: help text must never block on a network
@@ -807,30 +807,18 @@ mod tests {
         assert!(!weights_already_named("gpt2", &all));
     }
 
-    /// Regression for the qwen3tts flag/variable-name mismatch: its dedicated
-    /// CLI's flag is `--weights-dir`, but `BRAIN_QWEN3TTS_WEIGHTS` (the
-    /// variable) does not literally end in `weights-dir`. Before `flag_twin`
-    /// consumed the declared role instead of re-deriving one from the
-    /// variable name, `brain qwen3tts synth --weights-dir D --ckpt C ...`
-    /// could never satisfy `weights_already_named` and always fell through
-    /// to `ensure_env_weights`'s auto-fetch gate despite naming both paths.
+    /// `qwen3tts` moved to the resolver, the same way `flux2` did (see
+    /// `flux2_no_longer_wants_env_based_weight_acquisition`): its
+    /// `weights_env` is empty, so `weights_already_named` has nothing to
+    /// name (its own documented "nothing to name; `ensure_env_weights`
+    /// no-ops anyway" early return) - `tts_cli.rs`'s own `--weights-dir`/
+    /// `--ckpt` flags are the resolver's role overrides now, not a pair this
+    /// legacy env-var gate needs to recognize at all.
     #[test]
-    fn qwen3tts_weights_dir_and_ckpt_flags_suppress_the_auto_fetch() {
+    fn qwen3tts_no_longer_wants_env_based_weight_acquisition() {
         let _serial = env_lock();
-        for (var, _) in brain_arch::by_id("qwen3tts").expect("qwen3tts row").weights_env {
-            std::env::remove_var(var);
-        }
-        let named = s(&["synth", "--weights-dir", "D", "--ckpt", "C", "--text", "hi"]);
-        assert!(weights_already_named("qwen3tts", &named));
-        let only_ckpt = s(&["synth", "--ckpt", "C", "--text", "hi"]);
-        assert!(!weights_already_named("qwen3tts", &only_ckpt));
-        // The GENERIC capability dispatcher spells the same flag with an
-        // underscore, because its flags come from the manifest's param names
-        // (`weights_dir`). `brain qwen3tts batch --weights_dir D --ckpt C ...`
-        // names both paths just as explicitly and must suppress the fetch too
-        // - before this, the generic path always tripped the gate.
-        let generic = s(&["batch", "--weights_dir", "D", "--ckpt", "C", "--requests", "[]"]);
-        assert!(weights_already_named("qwen3tts", &generic));
+        assert!(brain_arch::by_id("qwen3tts").expect("qwen3tts row").weights_env.is_empty());
+        assert!(!weights_already_named("qwen3tts", &s(&["synth", "--weights-dir", "D", "--ckpt", "C", "--text", "hi"])));
     }
 
     #[test]

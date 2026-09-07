@@ -34,6 +34,29 @@ pub struct TtsPaths {
     pub ckpt_dir: String,
 }
 
+impl TtsPaths {
+    /// Build `TtsPaths` from an already-resolved [`capability::Assembly`]
+    /// (`crate::spec::Qwen3TtsSpec`'s `weights_dir`/`ckpt` roles) instead of
+    /// `BRAIN_QWEN3TTS_WEIGHTS`/`BRAIN_QWEN3TTS_CKPT` - the same
+    /// `<weights_dir>/talker.safetensors` etc layout every existing caller
+    /// (`crate::caps::paths_from`, `crates/cli/src/tts_cli.rs::paths`)
+    /// already builds by hand from those two variables.
+    pub fn from_assembly(assembly: &capability::Assembly) -> Result<TtsPaths, String> {
+        let get = |role: &str| -> Result<&std::path::Path, String> {
+            assembly.roles.get(role).map(|p| p.as_path()).ok_or_else(|| format!("qwen3tts: assembly '{}' has no {role} role", assembly.id))
+        };
+        let weights_dir = get("weights_dir")?;
+        let ckpt_dir = get("ckpt")?;
+        Ok(TtsPaths {
+            talker: weights_dir.join("talker.safetensors").to_string_lossy().into_owned(),
+            mtp: weights_dir.join("mtp.safetensors").to_string_lossy().into_owned(),
+            codec: weights_dir.join("codec.safetensors").to_string_lossy().into_owned(),
+            speaker: weights_dir.join("speaker.safetensors").to_string_lossy().into_owned(),
+            ckpt_dir: ckpt_dir.to_string_lossy().into_owned(),
+        })
+    }
+}
+
 /// Sampling / length controls for the Talker.
 ///
 /// Split into two halves on purpose:

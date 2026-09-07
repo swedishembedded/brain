@@ -32,6 +32,7 @@
 //!       `qwen3tts::sft` for the aligned multi-codebook loss both modes share.
 
 use qwen3tts::{GenOpts, TtsPaths};
+use qwen3tts::spec::Qwen3TtsSpec;
 
 fn val(args: &[String], i: &mut usize, flag: &str) -> String {
     *i += 1;
@@ -216,23 +217,22 @@ fn run_step(name: &str, r: Result<(), String>) {
 }
 
 struct CommonArgs {
-    weights_dir: String,
-    ckpt: String,
+    paths: TtsPaths,
     out: String,
     lang: String,
     opts: GenOpts,
 }
 
+/// `--weights-dir`/`--ckpt` (or neither, when the store holds exactly one
+/// candidate) are the resolver's own role overrides -- the model-store
+/// resolver (`brain_modelstore::resolve::resolve` + [`Qwen3TtsSpec`])
+/// replaces `BRAIN_QWEN3TTS_WEIGHTS`/`BRAIN_QWEN3TTS_CKPT` here, the same
+/// way `flux2_cli::resolve_flux2` replaced FLUX.2's own env vars: an
+/// ambiguous or missing outcome prints every real candidate and exits
+/// rather than falling back to a hardcoded default directory.
 fn parse_common(args: &[String]) -> (CommonArgs, std::collections::HashMap<String, String>) {
-    // `--weights-dir` defaults from $BRAIN_QWEN3TTS_WEIGHTS when set, same as
-    // `--ckpt` below does from $BRAIN_QWEN3TTS_CKPT -- both are "where do the
-    // converted/original checkpoint files live" and both are documented,
-    // fetchable env vars, so one silently ignoring its var while the other
-    // honors it was a drift, not a choice.
-    let mut weights_dir = std::env::var("BRAIN_QWEN3TTS_WEIGHTS").ok().filter(|v| !v.is_empty()).unwrap_or_else(|| "out/tts".to_string());
-    // Checkpoint dir comes from $BRAIN_QWEN3TTS_CKPT (or `--ckpt`); never a baked-in
-    // absolute path (see AGENTS.md: no absolute paths in source).
-    let mut ckpt = std::env::var("BRAIN_QWEN3TTS_CKPT").unwrap_or_default();
+    let mut weights_dir: Option<String> = None;
+    let mut ckpt: Option<String> = None;
     let mut out = "out.wav".to_string();
     let mut lang = "english".to_string();
     let mut opts = GenOpts::default();
@@ -240,8 +240,8 @@ fn parse_common(args: &[String]) -> (CommonArgs, std::collections::HashMap<Strin
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--weights-dir" => weights_dir = val(args, &mut i, "--weights-dir"),
-            "--ckpt" => ckpt = val(args, &mut i, "--ckpt"),
+            "--weights-dir" => weights_dir = Some(val(args, &mut i, "--weights-dir")),
+            "--ckpt" => ckpt = Some(val(args, &mut i, "--ckpt")),
             "--out" => out = val(args, &mut i, "--out"),
             "--lang" | "--language" => lang = val(args, &mut i, "--lang"),
             "--max-frames" => {
@@ -294,26 +294,29 @@ fn parse_common(args: &[String]) -> (CommonArgs, std::collections::HashMap<Strin
         }
         i += 1;
     }
-    (
-        CommonArgs {
-            weights_dir,
-            ckpt,
-            out,
-            lang,
-            opts,
-        },
-        extra,
-    )
+    let mut overrides = std::collections::BTreeMap::new();
+    if let Some(w) = weights_dir {
+        overrides.insert("weights_dir".to_string(), w);
+    }
+    if let Some(c) = ckpt {
+        overrides.insert("ckpt".to_string(), c);
+    }
+    let spec = Qwen3TtsSpec;
+    let assembly = crate::resolver_cli::resolve_or_exit("qwen3tts", &spec, &overrides);
+    let paths = TtsPaths::from_assembly(&assembly).unwrap_or_else(|e| {
+        eprintln!("brain qwen3tts: {e}");
+        std::process::exit(1);
+    });
+
+    (CommonArgs { paths, out, lang, opts }, extra)
 }
 
-fn paths(c: &CommonArgs) -> TtsPaths {
-    TtsPaths {
-        talker: format!("{}/talker.safetensors", c.weights_dir),
-        mtp: format!("{}/mtp.safetensors", c.weights_dir),
-        codec: format!("{}/codec.safetensors", c.weights_dir),
-        speaker: format!("{}/speaker.safetensors", c.weights_dir),
-        ckpt_dir: c.ckpt.clone(),
-    }
+/// The resolved `weights_dir` role, recovered from `c.paths.talker`'s own
+/// parent (every file `TtsPaths::from_assembly` builds lives directly under
+/// it) - the NPU export/compile cache lives beside those weights, the same
+/// place it always has.
+fn weights_dir_of(c: &CommonArgs) -> String {
+    std::path::Path::new(&c.paths.talker).parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default()
 }
 
 /// Read a `[T,16]` u32 codes file: 8-byte little-endian count header + u32 data
@@ -378,9 +381,9 @@ fn clone(args: &[String]) {
         c.out
     );
     let result = if npu {
-        let cache = format!("{}/npu-cache", c.weights_dir);
+        let cache = format!("{}/npu-cache", weights_dir_of(&c));
         qwen3tts::pipeline::clone_npu(
-            &paths(&c), &c.opts, &text, &refw, &ref_text, &c.lang, ref_code, Some(&cache),
+            &c.paths, &c.opts, &text, &refw, &ref_text, &c.lang, ref_code, Some(&cache),
         )
     } else {
         // Unarmed: this is a foreground one-shot command, so Ctrl-C ends the
@@ -388,7 +391,7 @@ fn clone(args: &[String]) {
         // SURVIVE the abort (`caps.rs`/`resident_tts.rs`), which pass their
         // invocation's own token instead.
         let cancel = capability::CancelToken::default();
-        qwen3tts::pipeline::clone(&paths(&c), &c.opts, &text, &refw, &ref_text, &c.lang, ref_code, &cancel)
+        qwen3tts::pipeline::clone(&c.paths, &c.opts, &text, &refw, &ref_text, &c.lang, ref_code, &cancel)
     };
     let wav = match result {
         Ok(w) => w,
@@ -419,11 +422,11 @@ fn synth(args: &[String]) {
         c.out
     );
     let result = if npu {
-        let cache = format!("{}/npu-cache", c.weights_dir);
-        qwen3tts::pipeline::synth_npu(&paths(&c), &c.opts, &text, &c.lang, Some(&cache))
+        let cache = format!("{}/npu-cache", weights_dir_of(&c));
+        qwen3tts::pipeline::synth_npu(&c.paths, &c.opts, &text, &c.lang, Some(&cache))
     } else {
         let cancel = capability::CancelToken::default(); // unarmed, as in `clone`
-        qwen3tts::pipeline::synth(&paths(&c), &c.opts, &text, &c.lang, &cancel)
+        qwen3tts::pipeline::synth(&c.paths, &c.opts, &text, &c.lang, &cancel)
     };
     let wav = match result {
         Ok(w) => w,
@@ -461,11 +464,11 @@ fn design(args: &[String]) {
         c.out
     );
     let result = if npu {
-        let cache = format!("{}/npu-cache", c.weights_dir);
-        qwen3tts::pipeline::design_npu(&paths(&c), &c.opts, &text, &c.lang, &instruct, speaker, Some(&cache))
+        let cache = format!("{}/npu-cache", weights_dir_of(&c));
+        qwen3tts::pipeline::design_npu(&c.paths, &c.opts, &text, &c.lang, &instruct, speaker, Some(&cache))
     } else {
         let cancel = capability::CancelToken::default(); // unarmed, as in `clone`
-        qwen3tts::pipeline::design(&paths(&c), &c.opts, &text, &c.lang, &instruct, speaker, &cancel)
+        qwen3tts::pipeline::design(&c.paths, &c.opts, &text, &c.lang, &instruct, speaker, &cancel)
     };
     let wav = match result {
         Ok(w) => w,

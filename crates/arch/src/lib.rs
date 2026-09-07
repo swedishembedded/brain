@@ -350,7 +350,12 @@ pub const ARCHS: &[Arch] = &[
     // No vendor GGUF (safetensors only) - a community-only repo exists but
     // names a different vendor than this row's `reference` could carry; see
     // the `qwen3` row's comment on why community quantizer repos are omitted.
-    arch!("qwen3tts", "Qwen3-TTS (Talker + MTP code predictor)", Audio, LlamaCpp, "brain-qwen3tts", hf: &["Qwen3TTSForConditionalGeneration"], default_ref: Some("Qwen/Qwen3-TTS-12Hz-0.6B-Base"), weights_env: &[("BRAIN_QWEN3TTS_WEIGHTS", "weights_dir"), ("BRAIN_QWEN3TTS_CKPT", "ckpt")],
+    // Weight resolution is the model-store resolver (`qwen3tts::spec::
+    // Qwen3TtsSpec`), not `weights_env` - `brain qwen3tts import`'s own
+    // two-role `brain.manifest.json` (`weights_dir`/`ckpt`) is what
+    // `classify()` recognizes, so there is no `(env var, role)` table for
+    // this row to declare any more.
+    arch!("qwen3tts", "Qwen3-TTS (Talker + MTP code predictor)", Audio, LlamaCpp, "brain-qwen3tts", hf: &["Qwen3TTSForConditionalGeneration"], default_ref: Some("Qwen/Qwen3-TTS-12Hz-0.6B-Base"),
         variants: &[Variant { reference: "Qwen/Qwen3-TTS-12Hz-0.6B-Base", params: 914_643_008, quants: &[] }]),
     arch!("mimi", "Mimi/Moshi-style 12 Hz neural audio codec", Audio, Brain, "brain-mimi"),
     arch!("ecapatdnn", "ECAPA-TDNN speaker encoder", Audio, Brain, "brain-ecapatdnn"),
