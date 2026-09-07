@@ -24,9 +24,12 @@ single image. For dedicated single-purpose captioning instead, see
 
 Model id: `brain/qwen3vl` (the served id itself is never fetched, per this
 project's naming grammar) - but `Qwen/Qwen3-VL-4B-Instruct` auto-fetches (⤓, opt-in
-`--autofetch`) on first CLI use, no env var needed. To point at a different checkpoint, set
-`BRAIN_QWEN3VL_WEIGHTS` (overridable per call via the `weights` param) to
-either of the two checkpoint layouts brain reads. Which one a path is, is
+`--autofetch`) on first CLI use, no env var needed. A HuggingFace-layout
+checkpoint dropped anywhere under the models directory is discovered
+automatically (`architectures[0] == "Qwen3VLForConditionalGeneration"`,
+resolved through `qwen3vl::spec::Qwen3VlSpec`); the `weights` param still
+names either checkpoint layout below outright, which is required for the
+GGUF pair (not yet resolver-discoverable). Which one a path is, is
 sniffed, never declared:
 
 **HuggingFace safetensors** - a directory holding `config.json` +
@@ -69,13 +72,14 @@ path, no CLI verb, no capability wiring exist for it.
 ## Running it
 
 ```bash
-BRAIN_QWEN3VL_WEIGHTS=/path/to/qwen3-vl \
-  brain qwen3vl generate --prompt "Describe this image." --max_new 64 \
-    --in image=photo.ppm --out text=answer.txt
+brain qwen3vl generate --prompt "Describe this image." --max_new 64 \
+  --in image=photo.ppm --out text=answer.txt
 ```
 
 It is also **served**: with `BRAIN_QWEN3VL_WEIGHTS` set, `brain serve --dbus`
-registers a residency adapter (`crates/cli/src/resident_qwen3vl.rs`) that
+registers a residency adapter (`crates/cli/src/resident_qwen3vl.rs`, still
+env-configured - it does not yet read the model-store resolver `generate`/
+`lora_train` use) that
 builds the checkpoint ONCE (device-placed, GPU or CPU) and reuses it across
 requests, reachable over D-Bus (`Run`/`Subscribe` -
 `examples/vision/qwen3vl_caption.py`) and, because `generate` matches the
@@ -96,9 +100,10 @@ checkpoint has been run through this resident on this machine)
 - `image` input - a still image: raw HWC f32 pixels in `[0,1]`, with `{w,h}`
   metadata. Exactly one of `image`/`video` is required.
 - `video` input + `fps` - a short clip; see [Video input](#video-input).
-- `weights` - per-call override of the checkpoint (in place of
-  `BRAIN_QWEN3VL_WEIGHTS`): a safetensors directory, a GGUF language half, or
-  the directory holding a GGUF pair.
+- `weights` - per-call override of the checkpoint, in place of the
+  model-store resolver's own pick (`qwen3vl::spec::Qwen3VlSpec`, HF-layout
+  checkpoints only): a safetensors directory, a GGUF language half, or the
+  directory holding a GGUF pair.
 - `tools` / `tool_choice` - the same tool-calling request/response contract
   `brain qwen3 generate` has, over image+text input: `tools` is a JSON array
   of OpenAI-shaped function schemas; `tool_choice` is `"auto"` (default),
@@ -125,9 +130,8 @@ own run of visual tokens in the prompt, in key order, ahead of your question
 text.
 
 ```bash
-BRAIN_QWEN3VL_WEIGHTS=/path/to/qwen3-vl \
-  brain qwen3vl generate --prompt "What changed between these two photos?" \
-    --in image=before.ppm --in image1=after.ppm --out text=answer.txt
+brain qwen3vl generate --prompt "What changed between these two photos?" \
+  --in image=before.ppm --in image1=after.ppm --out text=answer.txt
 ```
 
 `max_pixels` still bounds each image's own resize budget; the resident's
@@ -269,7 +273,8 @@ brain do qwen3vl lora_train \
 - `save` - output path for the trained adapter (required). Also returned as
   the `adapter` output blob - a remote client has no filesystem access to
   `save` on the server.
-- `weights` - the base checkpoint to adapt (defaults to `BRAIN_QWEN3VL_WEIGHTS`).
+- `weights` - the base checkpoint to adapt (defaults to the model-store
+  resolver's own pick, `qwen3vl::spec::Qwen3VlSpec`).
 - `rank`/`alpha` - LoRA capacity/scale (defaults 8 / 16.0).
 - `steps`/`lr` - training steps and peak learning rate (cosine schedule).
 - `size` - training image square size, px; must be a multiple of

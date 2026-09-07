@@ -26,6 +26,7 @@ brain-capability.workspace = true
 brain-captioner.workspace = true
 brain-data.workspace = true
 brain-imaging.workspace = true
+brain-modelstore.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]

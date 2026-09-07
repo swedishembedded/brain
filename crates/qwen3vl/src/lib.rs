@@ -16,6 +16,13 @@
 pub mod caps;
 pub mod captioner;
 pub mod config;
+/// [`brain_modelstore::resolve::ArchSpec`] - which on-disk checkpoint
+/// directory satisfies Qwen3-VL's `weights` role. Covers the HuggingFace
+/// directory layout (`config.json` + safetensors + `tokenizer.json`) only -
+/// the llama.cpp two-file GGUF layout `crate::caps::classify_source` also
+/// accepts is not yet resolver-discoverable, and must still be named
+/// explicitly (`--weights <dir>`) until a future pass adds it.
+pub mod spec;
 pub mod encoder;
 pub mod finetune;
 pub mod gguf_import;

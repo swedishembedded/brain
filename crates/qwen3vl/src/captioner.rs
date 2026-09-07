@@ -45,7 +45,8 @@ pub struct Qwen3VlCaptioner {
 
 impl Qwen3VlCaptioner {
     /// Caption with the checkpoint in `dir`. An empty `dir` falls back to
-    /// `$BRAIN_QWEN3VL_WEIGHTS`, the same as the served path.
+    /// whatever `crate::caps::QwenVlProvider::new` was constructed with - the
+    /// model-store resolver's own pick, when one is configured.
     pub fn new(dir: impl Into<String>) -> Qwen3VlCaptioner {
         Qwen3VlCaptioner { dir: dir.into(), max_pixels: DEFAULT_MAX_PIXELS, precision: crate::caps::Precision::F32 }
     }
@@ -117,7 +118,7 @@ impl Captioner for Qwen3VlCaptioner {
                 on_token(d);
             }
         };
-        let action = crate::caps::QwenVlProvider::new()
+        let action = crate::caps::QwenVlProvider::new(None)
             .action("generate")
             .ok_or("qwen3vl: the 'generate' action is missing from its own provider")?;
         let outcome = action.run(&inv, &mut progress)?;

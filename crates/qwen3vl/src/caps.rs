@@ -154,17 +154,12 @@ impl Precision {
     }
 }
 
-/// The env var naming the checkpoint directory (or a raw GGUF path) - read
-/// directly by [`default_weights`], and (via
-/// `crates/cli/src/resident_qwen3vl.rs::Qwen3VlResident::from_env`) the one
-/// place the residency adapter learns where its weights live.
+/// The env var naming the checkpoint directory (or a raw GGUF path) - read by
+/// `crates/cli/src/resident_qwen3vl.rs::Qwen3VlResident::from_env`, the one
+/// place the residency adapter learns where its weights live (this crate's
+/// own `generate`/`lora_train` actions no longer read it directly - see
+/// `crate::spec::Qwen3VlSpec`).
 pub const DIR_VAR: &str = "BRAIN_QWEN3VL_WEIGHTS";
-
-/// Default checkpoint directory - `$BRAIN_QWEN3VL_WEIGHTS`, never a baked-in
-/// absolute path (AGENTS.md: no absolute paths in source).
-fn default_weights() -> String {
-    std::env::var(DIR_VAR).unwrap_or_default()
-}
 
 /// Pixel-area budget for the resident model's DeepStack/splice buffer
 /// CAPACITY (see this module's doc) - a practical default (roughly a
@@ -241,8 +236,12 @@ pub fn generate_spec() -> ActionSpec {
         .param(ParamSpec::new("top_p", ParamType::Float, "nucleus sampling threshold (>= 1 = disabled)").default(json!(1.0)).min(0.0).max(1.0).step(0.01))
         .param(ParamSpec::new("seed", ParamType::Int, "RNG seed").default(json!(0)))
         .param(
-            ParamSpec::new("weights", ParamType::Str, "Qwen3-VL checkpoint DIRECTORY (config.json + model.safetensors[.index.json] + tokenizer.json)")
-                .host_env(DIR_VAR),
+            ParamSpec::new(
+                "weights",
+                ParamType::Str,
+                "Qwen3-VL checkpoint DIRECTORY (config.json + model.safetensors[.index.json] + tokenizer.json); overrides the model-store resolver's own pick when set",
+            )
+            .host_resolved(),
         )
         .param(
             ParamSpec::new(
@@ -293,8 +292,12 @@ pub fn lora_train_spec() -> ActionSpec {
         .param(ParamSpec::new("data", ParamType::Str, "folder with images + a captions.yaml (`filename: prompt`) and/or captions.jsonl").required())
         .param(ParamSpec::new("save", ParamType::Str, "output path for the trained adapter").required())
         .param(
-            ParamSpec::new("weights", ParamType::Str, "base Qwen3-VL checkpoint DIRECTORY to adapt (config.json + model.safetensors[.index.json] + tokenizer.json)")
-                .host_env(DIR_VAR),
+            ParamSpec::new(
+                "weights",
+                ParamType::Str,
+                "base Qwen3-VL checkpoint DIRECTORY to adapt (config.json + model.safetensors[.index.json] + tokenizer.json); overrides the model-store resolver's own pick when set",
+            )
+            .host_resolved(),
         )
         .param(ParamSpec::new("rank", ParamType::Int, "LoRA rank (capacity/size tradeoff)").default(json!(8)))
         .param(ParamSpec::new("alpha", ParamType::Float, "LoRA alpha (delta scale = alpha/rank)").default(json!(16.0)))
@@ -478,17 +481,28 @@ impl Resident {
     }
 }
 
-pub struct QwenVlProvider;
+/// A stateless-to-construct provider that carries the checkpoint directory
+/// the model-store resolver picked (or `None`, when a caller must always name
+/// `weights` explicitly per request) as its own fallback for a request that
+/// omits `weights` - shared by BOTH `generate` and `lora_train`, so a
+/// resolved checkpoint reaches whichever action a request names, not just
+/// one of them.
+pub struct QwenVlProvider {
+    default_weights: Option<String>,
+}
 
 impl QwenVlProvider {
-    pub fn new() -> QwenVlProvider {
-        QwenVlProvider
+    /// `default_weights` is the resolved `weights` role's path (see
+    /// `crate::spec::Qwen3VlSpec`), or `None` for a provider that must be
+    /// given `weights` on every request.
+    pub fn new(default_weights: Option<String>) -> QwenVlProvider {
+        QwenVlProvider { default_weights }
     }
 }
 
 impl Default for QwenVlProvider {
     fn default() -> Self {
-        Self::new()
+        Self::new(None)
     }
 }
 
@@ -498,8 +512,8 @@ impl Provider for QwenVlProvider {
     }
     fn action(&self, name: &str) -> Option<std::sync::Arc<dyn Action>> {
         match name {
-            "generate" => Some(std::sync::Arc::new(GenerateAction) as std::sync::Arc<dyn Action>),
-            "lora_train" => Some(std::sync::Arc::new(LoraTrainAction) as std::sync::Arc<dyn Action>),
+            "generate" => Some(std::sync::Arc::new(GenerateAction { default_weights: self.default_weights.clone() }) as std::sync::Arc<dyn Action>),
+            "lora_train" => Some(std::sync::Arc::new(LoraTrainAction { default_weights: self.default_weights.clone() }) as std::sync::Arc<dyn Action>),
             _ => None,
         }
     }
@@ -561,7 +575,9 @@ pub fn parse_tool_request(inv: &Invocation) -> Result<(ToolChoice, Vec<String>),
 // switching either swaps cleanly -- mirrors fastvlm::caps's DECODE static.
 static RESIDENT: Mutex<Option<Resident>> = Mutex::new(None);
 
-struct GenerateAction;
+struct GenerateAction {
+    default_weights: Option<String>,
+}
 
 impl Action for GenerateAction {
     fn spec(&self) -> ActionSpec {
@@ -577,17 +593,20 @@ impl Action for GenerateAction {
         let video_frames = decode_media(inv)?;
         let (tool_choice, tools) = parse_tool_request(inv)?;
 
-        let dir = inv.get_str("weights").filter(|s| !s.is_empty()).unwrap_or_else(default_weights);
-        if dir.is_empty() {
-            return Err("qwenvl generate: no checkpoint directory (set 'weights' or $BRAIN_QWEN3VL_WEIGHTS)".to_string());
-        }
+        let dir = inv
+            .get_str("weights")
+            .filter(|s| !s.is_empty())
+            .or_else(|| self.default_weights.clone())
+            .ok_or("qwenvl generate: no checkpoint directory (pass 'weights', or configure one through the models directory)")?;
         let max_pixels = inv.get_i64("max_pixels").unwrap_or(DEFAULT_SERVE_MAX_PIXELS as i64).max(1) as u32;
         let precision = Precision::from_name(inv.get_str("precision").unwrap_or_default().as_str())?;
         with_resident(&dir, max_pixels, precision, |hot| hot.generate(inv, video_frames, tool_choice, &tools, progress))
     }
 }
 
-struct LoraTrainAction;
+struct LoraTrainAction {
+    default_weights: Option<String>,
+}
 
 impl Action for LoraTrainAction {
     fn spec(&self) -> ActionSpec {
@@ -595,10 +614,11 @@ impl Action for LoraTrainAction {
     }
 
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        let dir = inv.get_str("weights").filter(|s| !s.is_empty()).unwrap_or_else(default_weights);
-        if dir.is_empty() {
-            return Err("qwenvl lora_train: no base checkpoint directory (set 'weights' or $BRAIN_QWEN3VL_WEIGHTS)".to_string());
-        }
+        let dir = inv
+            .get_str("weights")
+            .filter(|s| !s.is_empty())
+            .or_else(|| self.default_weights.clone())
+            .ok_or("qwenvl lora_train: no base checkpoint directory (pass 'weights', or configure one through the models directory)")?;
         let data = inv.get_str("data").ok_or("qwenvl lora_train: 'data' folder is required")?;
         let save = inv.get_str("save").ok_or("qwenvl lora_train: 'save' path is required")?;
         let opts = crate::finetune::TrainOpts {
@@ -1172,6 +1192,14 @@ mod tests {
     use super::*;
     use capability::Blob;
 
+    /// The real-weight tests below gate on `$BRAIN_QWEN3VL_WEIGHTS` directly
+    /// (skip-if-absent, a local convenience for exercising this crate against
+    /// a real checkpoint) - independent of `crate::spec::Qwen3VlSpec`'s own
+    /// model-store resolver, which is what a served run actually uses.
+    fn default_weights() -> String {
+        std::env::var(DIR_VAR).unwrap_or_default()
+    }
+
     #[test]
     fn manifest_validates_without_weights() {
         let m = manifest();
@@ -1261,13 +1289,13 @@ mod tests {
     fn generate_requires_exactly_one_of_image_or_video() {
         let base = || Invocation::new().set("prompt", json!("describe this"));
         let neither = base();
-        let err = GenerateAction.run(&neither, &mut |_| {}).unwrap_err();
+        let err = GenerateAction { default_weights: None }.run(&neither, &mut |_| {}).unwrap_err();
         assert!(err.contains("exactly one of 'image'/'video'"), "{err}");
 
         let both = base()
             .blob("image", Blob::new(Media::Image, vec![0u8; 12]).with_meta(json!({"w": 1, "h": 1})))
             .blob("video", Blob::new(Media::Video, vec![0u8; 12]).with_meta(json!({"frames": 1, "w": 1, "h": 1, "c": 3})));
-        let err = GenerateAction.run(&both, &mut |_| {}).unwrap_err();
+        let err = GenerateAction { default_weights: None }.run(&both, &mut |_| {}).unwrap_err();
         assert!(err.contains("exactly one of 'image'/'video'"), "{err}");
     }
 
@@ -1280,7 +1308,7 @@ mod tests {
         let inv = Invocation::new()
             .set("prompt", json!("describe this clip"))
             .blob("video", Blob::new(Media::Video, vec![0u8; 24]).with_meta(json!({"frames": 2, "w": 1, "h": 1, "c": 3})));
-        let err = GenerateAction.run(&inv, &mut |_| {}).unwrap_err();
+        let err = GenerateAction { default_weights: None }.run(&inv, &mut |_| {}).unwrap_err();
         assert!(err.contains("'fps'"), "{err}");
     }
 
@@ -1294,7 +1322,7 @@ mod tests {
             .set("prompt", json!("describe this clip"))
             .set("fps", json!(30.0))
             .blob("video", Blob::new(Media::Video, bytes).with_meta(json!({"frames": n, "w": 1, "h": 1, "c": 3})));
-        let err = GenerateAction.run(&inv, &mut |_| {}).unwrap_err();
+        let err = GenerateAction { default_weights: None }.run(&inv, &mut |_| {}).unwrap_err();
         assert!(err.contains(&format!("{n} frames")), "{err}");
         assert!(err.contains("at most"), "{err}");
     }
@@ -1351,7 +1379,7 @@ mod tests {
             .set("tools", json!(r#"[{"type":"function","function":{"name":"get_weather"}}]"#))
             .set("tool_choice", json!(r#"{"type":"function","function":{"name":"no_such_tool"}}"#))
             .blob("image", Blob::new(Media::Image, vec![0u8; 12]).with_meta(json!({"w": 1, "h": 1})));
-        let err = GenerateAction.run(&inv, &mut |_| {}).unwrap_err();
+        let err = GenerateAction { default_weights: None }.run(&inv, &mut |_| {}).unwrap_err();
         assert!(err.contains("no_such_tool"), "got: {err}");
         assert!(!err.contains("nonexistent"), "must fail on tool_choice before ever touching weights: {err}");
     }
@@ -1377,7 +1405,7 @@ mod tests {
             .set("prompt", json!("Describe this image."))
             .set("max_new", json!(4))
             .blob("image", Blob::new(Media::Image, bytes).with_meta(json!({"w": w, "h": h})));
-        let out = GenerateAction.run(&inv, &mut |_| {}).expect("served generate path failed on real weights");
+        let out = GenerateAction { default_weights: None }.run(&inv, &mut |_| {}).expect("served generate path failed on real weights");
         assert!(out.blobs.contains_key("text"), "generate must emit its declared text blob");
     }
 
@@ -1408,7 +1436,7 @@ mod tests {
             .set("tool_choice", json!("required"))
             .blob("image", Blob::new(Media::Image, bytes.clone()).with_meta(json!({"w": w, "h": h})));
         let mut events = 0u32;
-        let out = GenerateAction.run(&inv, &mut |_p| events += 1).expect("served generate path failed on real weights");
+        let out = GenerateAction { default_weights: None }.run(&inv, &mut |_p| events += 1).expect("served generate path failed on real weights");
         assert!(out.outputs.get("finish_reason").is_some(), "shared SeqState::finish must report a finish_reason");
         assert!(out.outputs.get("prompt_tokens").is_some());
         assert!(out.outputs.get("completion_tokens").is_some());
@@ -1422,7 +1450,7 @@ mod tests {
             .set("tools", json!(tools))
             .set("tool_choice", json!("none"))
             .blob("image", Blob::new(Media::Image, bytes.clone()).with_meta(json!({"w": w, "h": h})));
-        let out_none = GenerateAction.run(&inv_none, &mut |_| {}).expect("served generate path failed on real weights (tool_choice none)");
+        let out_none = GenerateAction { default_weights: None }.run(&inv_none, &mut |_| {}).expect("served generate path failed on real weights (tool_choice none)");
         assert_ne!(out_none.outputs.get("finish_reason"), Some(&json!("tool_choice_unmet")), "none must never demand a tool call");
     }
 
@@ -1432,7 +1460,7 @@ mod tests {
             .set("weights", json!("/nonexistent/qwenvl"))
             .set("prompt", json!("describe this"))
             .blob("image", Blob::new(Media::Image, vec![0u8; 12]).with_meta(json!({"w": 1, "h": 1})));
-        let r = GenerateAction.run(&inv, &mut |_| {});
+        let r = GenerateAction { default_weights: None }.run(&inv, &mut |_| {});
         let err = r.err().unwrap_or_default();
         // The spec is that a weights path that is neither of the two supported
         // checkpoint shapes is refused BY NAME, before any tensor is touched.
@@ -1446,7 +1474,7 @@ mod tests {
     #[test]
     fn empty_prompt_is_a_clean_error_before_touching_weights() {
         let inv = Invocation::new().blob("image", Blob::new(Media::Image, vec![0u8; 12]).with_meta(json!({"w": 1, "h": 1})));
-        let r = GenerateAction.run(&inv, &mut |_| {});
+        let r = GenerateAction { default_weights: None }.run(&inv, &mut |_| {});
         let err = r.err().unwrap_or_default();
         assert!(err.contains("empty prompt"), "{err}");
     }
