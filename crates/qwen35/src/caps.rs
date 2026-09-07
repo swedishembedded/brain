@@ -96,13 +96,27 @@ pub const DEFAULT_MAX_NEW: i64 = 128;
 pub fn manifest() -> Manifest {
     let generate = ActionSpec::new("generate", "generate tokens continuing a prompt (Qwen3.8-27B dense hybrid GDN/GQA decoder, KV-cache decode, one Progress per token)")
         .streaming()
-        .param(ParamSpec::new("weights", ParamType::Str, "path to a brain-format Qwen3.8-27B checkpoint (.safetensors)").required().host_env("BRAIN_QWEN35_WEIGHTS"))
+        .param(
+            ParamSpec::new(
+                "weights",
+                ParamType::Str,
+                "path to a brain-format Qwen3.8-27B checkpoint (.safetensors) or a Q8_0 GGUF release; overrides the model-store resolver's own pick when set",
+            )
+            .host_resolved(),
+        )
         .param(ParamSpec::new(
             "prompt",
             ParamType::Str,
             "the prompt: text (with a tokenizer) or whitespace/comma-separated token ids (without); ignored when `messages` is set",
         ))
-        .param(ParamSpec::new("tokenizer", ParamType::Str, "path to tokenizer.json; omit to feed/return raw token ids").host_env("BRAIN_QWEN35_TOKENIZER"))
+        .param(
+            ParamSpec::new(
+                "tokenizer",
+                ParamType::Str,
+                "path to tokenizer.json; omit to use the model-store resolver's own pick, or an empty string to force the raw token-id path even when one is configured",
+            )
+            .host_resolved(),
+        )
         .param(ParamSpec::new("max_new", ParamType::Int, "number of new tokens to generate").default(json!(DEFAULT_MAX_NEW)))
         .param(ParamSpec::new("temp", ParamType::Float, "sampling temperature (<= 0 = greedy)").default(json!(0.0)))
         .param(ParamSpec::new("top_k", ParamType::Int, "top-k filter (40 = standard; 1 = greedy; 0 or negative = disabled)").default(json!(40)))
@@ -162,14 +176,30 @@ struct Hot {
 /// The executable Qwen3.8-27B model behind the manifest. Construction is
 /// free - the checkpoint loads lazily on the first `generate` and stays
 /// resident.
+///
+/// `default_weights`/`default_tokenizer` are the model-store resolver's own
+/// pick (`crate::spec::Qwen35Spec`), used whenever a request omits the
+/// corresponding param - see [`GenerateAction::run`].
 #[derive(Default)]
 pub struct Qwen35Provider {
     hot: Arc<Mutex<Option<Hot>>>,
+    default_weights: Option<String>,
+    default_tokenizer: Option<String>,
 }
 
 impl Qwen35Provider {
     pub fn new() -> Qwen35Provider {
         Qwen35Provider::default()
+    }
+
+    /// Bind the resolved `weights`/`tokenizer` roles (see
+    /// `crate::spec::Qwen35Spec`) as this provider's own per-request
+    /// fallback - either may be absent (a caller must then always name it
+    /// explicitly).
+    pub fn with_defaults(mut self, weights: Option<String>, tokenizer: Option<String>) -> Qwen35Provider {
+        self.default_weights = weights;
+        self.default_tokenizer = tokenizer;
+        self
     }
 }
 
@@ -178,12 +208,16 @@ impl Provider for Qwen35Provider {
         manifest()
     }
     fn action(&self, name: &str) -> Option<Arc<dyn Action>> {
-        (name == "generate").then(|| Arc::new(GenerateAction { hot: self.hot.clone() }) as Arc<dyn Action>)
+        (name == "generate").then(|| {
+            Arc::new(GenerateAction { hot: self.hot.clone(), default_weights: self.default_weights.clone(), default_tokenizer: self.default_tokenizer.clone() }) as Arc<dyn Action>
+        })
     }
 }
 
 struct GenerateAction {
     hot: Arc<Mutex<Option<Hot>>>,
+    default_weights: Option<String>,
+    default_tokenizer: Option<String>,
 }
 
 impl Action for GenerateAction {
@@ -192,12 +226,29 @@ impl Action for GenerateAction {
     }
 
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        let weights = inv.get_str("weights").ok_or("qwen35 generate: missing required param 'weights'")?;
+        let weights = inv
+            .get_str("weights")
+            .filter(|s| !s.is_empty())
+            .or_else(|| self.default_weights.clone())
+            .ok_or("qwen35 generate: no checkpoint (pass 'weights', or configure one through the models directory)")?;
         if !Path::new(&weights).exists() {
             return Err(format!("qwen35 generate: weights not found at '{weights}'"));
         }
         if inv.get_bool("streaming").unwrap_or(false) {
             return Self::run_streaming(inv, &weights);
+        }
+        // `crate::spec::Qwen35Spec`'s `weights` role accepts a Q8_0 GGUF as
+        // well as a brain-format checkpoint (see that module's doc), but this
+        // resident path only ever calls `checkpoint::load`, which reads
+        // safetensors alone and panics on anything else - a clean error here,
+        // before that call, is what makes a store holding only a GGUF fail
+        // safely instead of taking the process down. A GGUF checkpoint is
+        // served through the multi-GPU int8 resident instead
+        // (`qwen35::int8_gguf_resident::Qwen35GgufResident`).
+        if weights.ends_with(".gguf") {
+            return Err(format!(
+                "qwen35 generate: '{weights}' is a GGUF checkpoint, which this in-process action cannot load (it only reads brain-format .safetensors) - name a .safetensors checkpoint explicitly, or serve this GGUF through the multi-GPU int8 resident instead"
+            ));
         }
 
         let precision = inv.get_str("precision").unwrap_or_else(|| "fp32".to_string());
@@ -209,8 +260,11 @@ impl Action for GenerateAction {
         // result is returned as ids. With one, requests go through the same
         // chat-template/tool-call/stop-string/cancellation logic `qwen3`'s
         // HTTP/D-Bus serving path runs (`qwen3::chat`) - see this module's own
-        // doc for why that is safe to reuse as-is.
-        let tok = match inv.get_str("tokenizer").filter(|p| !p.is_empty()) {
+        // doc for why that is safe to reuse as-is. An explicit empty string
+        // opts out of `default_tokenizer` (the resolved pick), the same way
+        // `weights` above does, for a caller that genuinely wants the raw
+        // token-id path despite a resolved tokenizer being configured.
+        let tok = match inv.get_str("tokenizer").filter(|p| !p.is_empty()).or_else(|| self.default_tokenizer.clone()) {
             Some(p) => Some(QwenBpe::from_file(&p)?),
             None => None,
         };
@@ -427,17 +481,21 @@ mod tests {
         let g = &m.actions[0];
         assert_eq!(g.name, "generate");
         assert!(g.streaming, "generate must stream (one Progress per token)");
-        assert!(g.params.iter().any(|p| p.name == "weights" && p.required));
+        // `weights` is no longer a manifest-`required` param: it is
+        // `host_resolved` (see `crate::spec::Qwen35Spec`), so a request that
+        // omits it is only rejected by `GenerateAction::run` itself, once
+        // there is no resolved default to fall back to either - never by
+        // `validate` (which cannot see that default).
+        assert!(g.params.iter().any(|p| p.name == "weights" && !p.required && p.host_resolved));
         // `prompt` is NOT required: `messages` (the shared chat-serving parse)
         // can supply the request instead, matching `qwen35moe::caps`'s own spec.
         assert!(g.params.iter().any(|p| p.name == "prompt" && !p.required));
         assert!(g.params.iter().any(|p| p.name == "messages"));
         assert_eq!(g.params.iter().find(|p| p.name == "max_new").unwrap().default, Some(json!(DEFAULT_MAX_NEW)));
         assert_eq!(g.outputs[0].media, Media::Text);
-        // validation: defaults fill, missing required rejected, no weights loaded.
+        // validation: defaults fill, unknown params rejected, no weights loaded.
         let inv = g.validate(Invocation::new().set("weights", json!("w")).set("prompt", json!("1 2"))).unwrap();
         assert_eq!(inv.get_i64("max_new"), Some(DEFAULT_MAX_NEW));
-        assert!(g.validate(Invocation::new().set("prompt", json!("1"))).is_err());
         assert!(g.validate(Invocation::new().set("weights", json!("w")).set("prompt", json!("1")).set("bogus", json!(1))).is_err());
         // the manifest round-trips to JSON for discovery.
         assert_eq!(manifest().to_json()["actions"][0]["name"], "generate");
@@ -495,6 +553,67 @@ mod tests {
             .run(MODEL, "generate", Invocation::new().set("weights", json!("/nonexistent/qwen35.safetensors")).set("prompt", json!("1 2")), &mut |_| {})
             .unwrap_err();
         assert!(err.contains("not found"), "got: {err}");
+    }
+
+    /// With no `weights` param AND no resolved default bound at construction
+    /// (`Qwen35Provider::new`, matching a caller that never resolved an
+    /// `Assembly`), the runtime error is a clean "no checkpoint" message, not
+    /// a panic and not `validate`'s old "missing required param" (which no
+    /// longer applies now that `weights` is `host_resolved`, not `required`).
+    #[test]
+    fn no_weights_and_no_bound_default_is_a_clean_runtime_error() {
+        let reg = {
+            let mut r = Registry::new();
+            r.register(Arc::new(Qwen35Provider::new()));
+            r
+        };
+        let err = reg.run(MODEL, "generate", Invocation::new().set("prompt", json!("1 2")), &mut |_| {}).unwrap_err();
+        assert!(err.contains("no checkpoint"), "got: {err}");
+    }
+
+    /// `crate::spec::Qwen35Spec`'s `weights` role accepts a Q8_0 GGUF (see
+    /// that module's own doc), but this action's resident path only ever
+    /// calls `checkpoint::load`, which panics on a non-safetensors file - a
+    /// GGUF checkpoint must be refused cleanly here, never reach that call.
+    #[test]
+    fn a_gguf_weights_path_is_a_clean_error_not_a_panic() {
+        let dir = std::env::temp_dir().join(format!("qwen35-caps-gguf-refused-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("qwen35.gguf");
+        std::fs::write(&path, b"not read, refused before that").unwrap();
+
+        let reg = {
+            let mut r = Registry::new();
+            r.register(Arc::new(Qwen35Provider::new()));
+            r
+        };
+        let err = reg
+            .run(MODEL, "generate", Invocation::new().set("weights", json!(path.to_str().unwrap())).set("prompt", json!("1 2")), &mut |_| {})
+            .unwrap_err();
+        assert!(err.contains("GGUF"), "got: {err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The resolved-default path: a provider bound via `with_defaults` serves
+    /// a request that names no `weights` at all, using the bound path - the
+    /// whole point of moving this off `BRAIN_QWEN35_WEIGHTS`.
+    #[test]
+    fn a_bound_default_weights_path_is_used_when_the_request_omits_one() {
+        let cfg = Qwen35Config::tiny();
+        let init = crate::init::init_weights(&cfg, 3);
+        let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = cfg.param_list().into_iter().map(|(name, n)| (name.clone(), vec![n as u64], init.get(&name).unwrap().clone())).collect();
+        let dir = std::env::temp_dir().join(format!("qwen35-caps-bound-default-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tiny.safetensors");
+        checkpoint::save(path.to_str().unwrap(), cfg.to_json(), &tensors);
+
+        let mut reg = Registry::new();
+        reg.register(Arc::new(Qwen35Provider::new().with_defaults(Some(path.to_str().unwrap().to_string()), None)));
+        let ids: Vec<u32> = (0..4).map(|i| (i * 7 + 1) % cfg.vocab).collect();
+        let prompt = ids.iter().map(u32::to_string).collect::<Vec<_>>().join(" ");
+        let out = reg.run(MODEL, "generate", Invocation::new().set("prompt", json!(prompt)).set("max_new", json!(2)), &mut |_| {}).unwrap();
+        assert_eq!(out.outputs["tokens"].as_u64().unwrap(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// End-to-end on a tiny synthetic checkpoint: save `Qwen35Config::tiny` +

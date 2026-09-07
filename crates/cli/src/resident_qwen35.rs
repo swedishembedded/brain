@@ -13,20 +13,14 @@
 //! Two ways in. [`Qwen35Resident::from_card`] serves a checkpoint the
 //! model-dir scan found (family `"qwen35"` - what `Qwen35::save` stamps,
 //! distinct from the MoE sibling's own `"qwen35moe"` family), under its own
-//! card id and with its sibling `tokenizer.json`; no env vars involved. The
-//! env path below is the manual alternative, for a checkpoint outside the
-//! models directory.
+//! card id and with its sibling `tokenizer.json`. [`Qwen35Resident::
+//! from_assembly`] is the other: `weights`/`tokenizer` resolved through
+//! `qwen35::spec::Qwen35Spec` (the model-store resolver scanning the whole
+//! models directory) rather than one specific already-discovered card - what
+//! `crates/cli/src/resident.rs::build_executor` calls.
 //!
-//! Env config follows `BRAIN_QWEN_*`'s naming convention:
-//!   * `BRAIN_QWEN35_WEIGHTS` - a brain-format Qwen3.8-27B checkpoint
-//!     (`.safetensors`, `checkpoint::load`-compatible). The primary gate;
-//!     unset means not served.
-//!   * `BRAIN_QWEN35_TOKENIZER` - the sibling `tokenizer.json`. If unset,
-//!     `activate()` falls back to a GGUF checkpoint's own embedded
-//!     `tokenizer.ggml.*` KV (see `crate::resident_llm::QwenResident::
-//!     activate`, the sibling this mirrors) before giving up - `Engine`
-//!     itself still never touches a `.gguf` file at all, so a GGUF
-//!     checkpoint gets a real tokenizer but no further than that today.
+//! Two knobs stay env-configured because they are not a checkpoint LOCATION,
+//! just a sizing choice with no on-disk signal to resolve from:
 //!   * `BRAIN_QWEN35_CTX` - the hard `prompt + max_new` cap for any ONE
 //!     sequence (`Engine::from_map`'s `max_seq_len`, which this engine also
 //!     uses as its per-sequence block size). Default 4096.
@@ -34,6 +28,13 @@
 //!     (`Engine::from_map`'s `max_concurrent`, i.e. `num_blocks` - NOT how
 //!     many are dispatched together on the GPU per step, which is always 1
 //!     for this engine). Default 4.
+//!
+//! `activate()` falls back to a GGUF checkpoint's own embedded
+//! `tokenizer.ggml.*` KV when no `tokenizer` role resolved (see
+//! `crate::resident_llm::QwenResident::activate`, the sibling this mirrors)
+//! before giving up - `Engine` itself still never touches a `.gguf` file at
+//! all, so a GGUF checkpoint gets a real tokenizer but no further than that
+//! today.
 //!
 //! A THIRD way in lives at the bottom of this file:
 //! [`multi_gpu_gguf_from_env`], the factory for
@@ -43,7 +44,9 @@
 //! not a mode of the one above. The two coexist: this one still serves an
 //! fp32 brain checkpoint that fits one card, that one serves the real 27B
 //! release on a box with enough cards and no room on disk for a ~108 GB fp32
-//! conversion.
+//! conversion - both now reached through the SAME `qwen35::spec::Qwen35Spec`
+//! resolved `weights` role, told apart by its extension
+//! (`.safetensors` vs `.gguf`).
 
 use capability::{ActionResult, Invocation, Manifest, Progress};
 use data::qwen_tokenizer::QwenBpe;
@@ -61,8 +64,9 @@ use crate::resident_llm::{est_vram, generate_spec, on_device};
 const MODEL: &str = qwen35::caps::MODEL;
 
 /// The Qwen3.8-27B dense hybrid Gated-DeltaNet/GQA decoder behind the
-/// scheduler (`BRAIN_QWEN35_WEIGHTS` + `BRAIN_QWEN35_TOKENIZER`). See this
-/// module's own doc for the exact (single-GPU, fp32-only) scope.
+/// scheduler. `path`/`tokenizer` are resolved through `qwen35::spec::
+/// Qwen35Spec`'s `weights`/`tokenizer` roles (see [`Self::from_assembly`]).
+/// See this module's own doc for the exact (single-GPU, fp32-only) scope.
 pub struct Qwen35Resident {
     id: String,
     path: String,
@@ -70,16 +74,21 @@ pub struct Qwen35Resident {
 }
 
 impl Qwen35Resident {
-    pub fn from_env() -> Option<Qwen35Resident> {
-        let path = std::env::var("BRAIN_QWEN35_WEIGHTS").ok().filter(|p| !p.is_empty())?;
-        let tokenizer = std::env::var("BRAIN_QWEN35_TOKENIZER").ok().unwrap_or_default();
+    /// `None` when the resolver names no `weights`, or names one this
+    /// engine cannot load: `Engine` only ever opens brain-native
+    /// safetensors (this module's own doc) - a resolved `.gguf` is the OTHER
+    /// resident's checkpoint (`crate::resident_qwen35::multi_gpu_gguf_from_env`),
+    /// not a mode of this one.
+    pub fn from_assembly(assembly: &capability::Assembly) -> Option<Qwen35Resident> {
+        let path = assembly.roles.get("weights").map(|p| p.to_string_lossy().into_owned()).filter(|p| !p.ends_with(".gguf"))?;
+        let tokenizer = assembly.roles.get("tokenizer").map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
         Some(Qwen35Resident { id: MODEL.to_string(), path, tokenizer })
     }
 
-    /// The model-dir counterpart of [`from_env`](Self::from_env): a checkpoint
-    /// discovered by `crate::model_dir` (family `"qwen35"` - what
+    /// The model-dir counterpart of [`from_assembly`](Self::from_assembly): a
+    /// checkpoint discovered by `crate::model_dir` (family `"qwen35"` - what
     /// `Qwen35::save` stamps on its `ModelCard`) served under its OWN card id
-    /// rather than the env fallback [`MODEL`].
+    /// rather than the resolver's [`MODEL`].
     ///
     /// `tokenizer` is the sibling `tokenizer.json` the scan found. It is
     /// required: `Engine` never opens a `.gguf`, so there is no
@@ -286,16 +295,10 @@ fn run_batch_scheduled(sched: &mut Scheduler, tok: &QwenBpe, eos: Option<u32>, i
 /// once, and a plain `register` would budget only one of them (see
 /// `crates/residency/src/multi.rs`' module doc).
 ///
-/// Where the `.gguf` comes from, in order:
-///   1. `BRAIN_QWEN35_GGUF` - an explicit path. The same variable
-///      `qwen35::gguf_import`'s own real-checkpoint gate uses, so a box
-///      configured to run those tests is configured to serve this.
-///   2. the model store's canonical location for the upstream release
-///      (`<models-dir>/unsloth/Qwen3.8-27B/Q8_0.gguf`, resolved through
-///      `modelstore::Store` - never a hardcoded machine path), when a
-///      `brain fetch` put it there.
-///
-/// Neither present ⇒ not served, and this returns `None`.
+/// The `.gguf` comes from `qwen35::spec::Qwen35Spec`'s resolved `weights`
+/// role (see [`resolve_qwen35_gguf`]) - anywhere under the models directory,
+/// never a hardcoded machine path. Nothing resolving ⇒ not served, and this
+/// returns `None`.
 ///
 /// `gpus` is `build_executor`'s own budgeted GPU list as `(index, TOTAL
 /// bytes)` and `reserved` the per-card headroom it keeps free, so what is
@@ -318,22 +321,17 @@ pub fn multi_gpu_gguf_from_env(gpus: &[(u32, u64)], reserved: u64) -> Option<qwe
     Some(qwen35::int8_gguf_resident::Qwen35GgufResident::new(path, devices, cap, tier))
 }
 
-/// [`multi_gpu_gguf_from_env`]'s file resolution: the env var, else the model
-/// store's canonical path for the upstream release. Returns `None` (never a
-/// guessed path) when neither exists on disk.
+/// [`multi_gpu_gguf_from_env`]'s file resolution: the model-store resolver's
+/// own `weights` role (`qwen35::spec::Qwen35Spec`), filtered to a `.gguf`
+/// path - a resolved brain-format `.safetensors` is `Qwen35Resident`'s own
+/// checkpoint (`crate::resident_qwen35::Qwen35Resident::from_assembly`), not
+/// this one's. `None` (never a guessed path) when the resolver names no
+/// `.gguf` `weights`.
 fn resolve_qwen35_gguf() -> Option<String> {
-    /// The upstream release this resident serves, as a `modelref` id.
-    const RELEASE: &str = "unsloth/Qwen3.8-27B-Q8_0";
-    if let Some(p) = std::env::var(qwen35::int8_gguf_resident::GGUF_ENV).ok().filter(|p| !p.is_empty()) {
-        if !std::path::Path::new(&p).is_file() {
-            eprintln!("brain: {}={p} does not name a readable file -- {} not served", qwen35::int8_gguf_resident::GGUF_ENV, qwen35::int8_gguf_resident::MODEL);
-            return None;
-        }
-        return Some(p);
-    }
-    let r = brain_modelref::ModelRef::parse(RELEASE).ok()?;
-    let store = brain_modelstore::Store::new(brain_modelstore::default_root()?);
-    Some(store.local(&r)?.weights.to_string_lossy().into_owned())
+    let assembly = crate::resolver_cli::try_resolve("qwen35", &qwen35::spec::Qwen35Spec, &Default::default())
+        .inspect_err(|e| eprintln!("brain: {} not served ({e})", qwen35::int8_gguf_resident::MODEL))
+        .ok()?;
+    assembly.roles.get("weights").map(|p| p.to_string_lossy().into_owned()).filter(|p| p.ends_with(".gguf"))
 }
 
 #[cfg(test)]
@@ -354,24 +352,28 @@ mod tests {
         }
     }
 
-    /// The GGUF resident is gated on a REAL file, not on the variable merely
-    /// being set: a stale `BRAIN_QWEN35_GGUF` pointing at a deleted download
-    /// must decline (and say so) rather than register a resident whose every
-    /// `estimate_multi` then reports zero devices and whose every request
-    /// fails placement.
+    /// No resolved `weights` role at all (an empty `Assembly`, matching "the
+    /// resolver found nothing") must decline cleanly rather than build a
+    /// resident whose every request then fails placement.
     #[test]
-    fn multi_gpu_gguf_declines_a_path_that_is_not_a_file() {
-        // SAFETY: no other test in this process reads/writes this exact var.
-        unsafe { std::env::set_var(qwen35::int8_gguf_resident::GGUF_ENV, "/nonexistent/qwen35.gguf") };
-        assert!(multi_gpu_gguf_from_env(&[(0, 24 << 30)], 2 << 30).is_none());
-        unsafe { std::env::remove_var(qwen35::int8_gguf_resident::GGUF_ENV) };
+    fn from_assembly_is_none_without_a_resolved_weights_role() {
+        let empty = capability::Assembly { id: String::new(), arch: "qwen35".to_string(), variant: None, roles: Default::default(), provenance: Vec::new() };
+        assert!(Qwen35Resident::from_assembly(&empty).is_none());
     }
 
+    /// A resolved `.gguf` `weights` role is the OTHER resident's checkpoint
+    /// (`multi_gpu_gguf_from_env`'s `Qwen35GgufResident`) - `Engine` never
+    /// opens a `.gguf` at all, so this must decline rather than try.
     #[test]
-    fn from_env_is_none_without_the_weights_var() {
-        // SAFETY: no other test in this process reads/writes this exact var.
-        unsafe { std::env::remove_var("BRAIN_QWEN35_WEIGHTS") };
-        assert!(Qwen35Resident::from_env().is_none());
+    fn from_assembly_declines_a_resolved_gguf_weights_role() {
+        let assembly = capability::Assembly {
+            id: String::new(),
+            arch: "qwen35".to_string(),
+            variant: None,
+            roles: std::collections::BTreeMap::from([("weights".to_string(), std::path::PathBuf::from("/models/unsloth/Qwen3.8-27B-Q8_0.gguf"))]),
+            provenance: Vec::new(),
+        };
+        assert!(Qwen35Resident::from_assembly(&assembly).is_none());
     }
 
     /// REGRESSION: this engine used to call `parse_request` directly, so it

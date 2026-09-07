@@ -43,10 +43,17 @@ intermediate.
 brain qwen35 infer --weights qwen35.safetensors --tokenizer tokenizer.json --prompt "..."
 ```
 
-Serving (HTTP/D-Bus, paged continuous batching):
+Serving (HTTP/D-Bus, paged continuous batching): drop the checkpoint (and its
+sibling `tokenizer.json`) under the models directory and `brain serve` finds
+it with no env var at all - resolved through `qwen35::spec::Qwen35Spec` (a
+`ModelCard.family == "qwen35"` `.safetensors`, or a `general.architecture ==
+"qwen35"` GGUF, paired with a co-located, vocab-compatible tokenizer). A
+`--weights`/`--tokenizer` flag on `brain qwen35 infer` still names either
+file outright, and prints every real candidate (with the flag to pick it) if
+the models directory holds more than one.
 
 ```bash
-BRAIN_QWEN35_WEIGHTS=qwen35.safetensors BRAIN_QWEN35_TOKENIZER=tokenizer.json brain serve
+brain serve
 ```
 
 ## Serving the real checkpoint from its Q8_0 GGUF (multi-GPU, INT8)
@@ -76,9 +83,11 @@ independently.
 > investigations and fixes behind it.
 
 ```bash
-BRAIN_QWEN35_GGUF=/path/to/Qwen3.8-27B-Q8_0.gguf brain serve
-# or drop the file at <models-dir>/unsloth/Qwen3.8-27B/Q8_0.gguf and it is
-# discovered with no env var at all.
+# drop the file anywhere under the models directory (e.g.
+# <models-dir>/unsloth/Qwen3.8-27B/Q8_0.gguf) and it is discovered with no
+# env var at all - the same qwen35::spec::Qwen35Spec resolver `brain/qwen35`
+# above uses, told apart by its `.gguf` extension.
+brain serve
 BRAIN_QWEN35_GGUF_CTX=2048   # per-sequence prompt+max_new cap (default 2048)
 ```
 

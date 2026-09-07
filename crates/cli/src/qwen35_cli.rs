@@ -3,10 +3,17 @@
 
 //! `brain qwen35 ...` - run the Qwen3.8-27B dense hybrid decoder.
 //!
-//!   brain qwen35 infer  --weights F [--tokenizer tokenizer.json] --prompt "..."
+//!   brain qwen35 infer  [--weights F] [--tokenizer tokenizer.json | --gguf G] --prompt "..."
 //!                     [--adapter adapter.safetensors] [--max-new N --temp X --top-k K --chat]
 //!   brain qwen35 finetune <data_dir> --base F --out F [--mode lora|full]
 //!                     [--rank R --alpha A] [--steps N --lr X ...]
+//!
+//! `infer`'s `--weights`/`--tokenizer` are optional: naming both explicitly
+//! (or `--weights` plus `--gguf`) uses exactly those files, unchanged; naming
+//! less than that resolves the rest through the model-store scan
+//! (`crate::resolver_cli`, `qwen35::spec::Qwen35Spec`) instead of erroring -
+//! printing every real candidate and exiting on an ambiguous or missing
+//! outcome.
 //!
 //! GGUF import lives in the GENERIC `brain import-gguf` command
 //! ([`crate::gguf_import`]), which dispatches on the file's own
@@ -80,8 +87,11 @@ fn import(args: &[String]) {
 /// `ModelRef` integration yet, so wiring that here would be new scope well
 /// beyond making the fold reachable.
 fn infer(args: &[String]) {
-    let mut weights = String::new();
-    let mut tokenizer = String::new();
+    // `--weights`/`--tokenizer` are the resolver's own role-override flags
+    // (`crate::resolver_cli::extract_role_overrides`) - pulled out FIRST so
+    // the loop below never sees them, matching `flux2_cli.rs`'s own shape.
+    let spec = qwen35::spec::Qwen35Spec;
+    let (mut overrides, args) = crate::resolver_cli::extract_role_overrides(&spec, args);
     let mut gguf_for_tok = String::new();
     let mut prompt = String::new();
     let mut adapter = String::new();
@@ -94,28 +104,36 @@ fn infer(args: &[String]) {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--weights" => weights = val(args, &mut i, "--weights"),
-            "--tokenizer" => tokenizer = val(args, &mut i, "--tokenizer"),
-            "--gguf" => gguf_for_tok = val(args, &mut i, "--gguf"),
-            "--prompt" => prompt = val(args, &mut i, "--prompt"),
-            "--adapter" => adapter = val(args, &mut i, "--adapter"),
-            "--max-new" => max_new = val(args, &mut i, "--max-new").parse().unwrap_or(max_new),
-            "--temp" => temp = val(args, &mut i, "--temp").parse().unwrap_or(temp),
-            "--top-k" => top_k = val(args, &mut i, "--top-k").parse().unwrap_or(top_k),
-            "--top-p" => top_p = val(args, &mut i, "--top-p").parse().unwrap_or(top_p),
-            "--seed" => seed = val(args, &mut i, "--seed").parse().unwrap_or(seed),
+            "--gguf" => gguf_for_tok = val(&args, &mut i, "--gguf"),
+            "--prompt" => prompt = val(&args, &mut i, "--prompt"),
+            "--adapter" => adapter = val(&args, &mut i, "--adapter"),
+            "--max-new" => max_new = val(&args, &mut i, "--max-new").parse().unwrap_or(max_new),
+            "--temp" => temp = val(&args, &mut i, "--temp").parse().unwrap_or(temp),
+            "--top-k" => top_k = val(&args, &mut i, "--top-k").parse().unwrap_or(top_k),
+            "--top-p" => top_p = val(&args, &mut i, "--top-p").parse().unwrap_or(top_p),
+            "--seed" => seed = val(&args, &mut i, "--seed").parse().unwrap_or(seed),
             "--chat" => chat = true,
             other => eprintln!("ignoring unknown flag {other:?}"),
         }
         i += 1;
     }
-    if weights.is_empty() || (tokenizer.is_empty() && gguf_for_tok.is_empty()) {
-        eprintln!(
-            "usage: brain qwen35 infer --weights F (--tokenizer tokenizer.json | --gguf original.gguf) --prompt \"...\" \
-             [--adapter adapter.safetensors] [--max-new N --temp X --top-k K --top-p P --seed S --chat]"
-        );
-        return;
-    }
+
+    // `--weights`/(`--tokenizer` or `--gguf`) named explicitly is the
+    // existing, unchanged manual path (a caller who already knows exactly
+    // which files to use - the resolver never second-guesses that). Anything
+    // less than that resolves through the model-store scan instead of
+    // hard-erroring: `resolve_or_exit` prints every real candidate and exits
+    // on an `Ambiguous`/`Missing` outcome, the same as `flux2_cli.rs`'s own
+    // `resolve_flux2`.
+    let weights_named = overrides.contains_key("weights");
+    let tokenizer_named = overrides.contains_key("tokenizer") || !gguf_for_tok.is_empty();
+    let (weights, tokenizer) = if weights_named && tokenizer_named {
+        (overrides.remove("weights").unwrap_or_default(), overrides.remove("tokenizer").unwrap_or_default())
+    } else {
+        let assembly = crate::resolver_cli::resolve_or_exit("qwen35", &spec, &overrides);
+        let get = |role: &str| assembly.roles.get(role).map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+        (get("weights"), get("tokenizer"))
+    };
 
     let tok = if !tokenizer.is_empty() {
         data::qwen_tokenizer::QwenBpe::from_file(&tokenizer)
@@ -140,6 +158,14 @@ fn infer(args: &[String]) {
         return;
     }
 
+    // `qwen35::spec::Qwen35Spec`'s `weights` role accepts a Q8_0 GGUF as well
+    // as a brain-format checkpoint, but this command only ever calls
+    // `checkpoint::load`, which reads safetensors alone and panics on
+    // anything else - refuse cleanly rather than reach that call.
+    if weights.ends_with(".gguf") {
+        eprintln!("qwen35 infer: '{weights}' is a GGUF checkpoint; this command only loads brain-format .safetensors (name one explicitly with --weights)");
+        return;
+    }
     let container = checkpoint::load(&weights);
     let cfg = Qwen35Config::from_json(&container.header["config"]);
     let mut init = container.by_role("");

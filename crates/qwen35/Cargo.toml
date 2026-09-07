@@ -24,6 +24,7 @@ brain-qwen3.workspace = true
 brain-qwen3vl.workspace = true
 brain-audio.workspace = true
 brain-weightset.workspace = true
+brain-modelstore.workspace = true
 serde_json.workspace = true
 bytemuck.workspace = true
 wgpu = "29"
