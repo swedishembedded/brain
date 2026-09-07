@@ -63,9 +63,26 @@ const HELP: &str = "brain flux2 <cmd>
                                     # unstated - never recoverable from a weight's shape) every
                                     # real candidate's selector flag prints and the run exits
                                     # rather than guessing.
-           [--adapter <path>]       # LoRA: brain's own `finetune` checkpoint, or a
-                                    # third-party ai-toolkit/ComfyUI .safetensors
-           [--lora-scale S]         # LoRA strength (ComfyUI strength_model), default 1.0
+           [--adapter <path>]...    # LoRA: brain's own `finetune` checkpoint, or a
+                                    # third-party ai-toolkit/ComfyUI .safetensors.
+                                    # REPEATABLE - pass it once per adapter to stack
+                                    # several in one generation (a face adapter plus a
+                                    # style adapter, say). They fold in the order given,
+                                    # each onto the result of the ones before it, and the
+                                    # deltas ADD on any linear more than one of them
+                                    # adapts: two adapters both at 1.0 move a shared
+                                    # weight by the sum of two separately trained deltas,
+                                    # which is usually stronger than either was validated
+                                    # at. --lora-scale is the dial for that.
+           [--lora-scale S]...      # LoRA strength (ComfyUI strength_model), default 1.0.
+                                    # REPEATABLE and paired POSITIONALLY: the Nth
+                                    # --lora-scale is the Nth --adapter's strength, and it
+                                    # must come AFTER that --adapter on the command line.
+                                    # A --lora-scale with no adapter of its own is an
+                                    # error rather than a guess. Adapters with no
+                                    # --lora-scale of their own fold at 1.0.
+                                    #   --adapter face.brain --lora-scale 0.8 \
+                                    #   --adapter style.safetensors --lora-scale 0.4
   finetune <data_dir> --out <adapter.brain> [--variant V] [--steps N] [--rank R] [--lr X]
            [--size S] [--seed K] [--ckpt-every N] [--resume] [--trainer device|host] [--cards N]
            [--text-encoder <path>] [--method lora|rslora] [--lr-ratio X] [--freeze-a]
@@ -172,6 +189,35 @@ fn ref_bound(i: usize, anchored: bool, ref_size: Option<u32>) -> Option<u32> {
     }
 }
 
+/// Attach a `--lora-scale` to the `--adapter` it belongs to.
+///
+/// The two flags are both repeatable and pair POSITIONALLY: the Nth
+/// `--lora-scale` is the Nth `--adapter`'s strength. `scaled` counts the
+/// adapters whose strength has already been claimed, so the next one lands on
+/// the next unscaled adapter - which means a strength must be written after
+/// the adapter it belongs to.
+///
+/// A strength with no adapter of its own is REFUSED rather than guessed at. A
+/// stacked run's whole point is that each adapter folds at its own strength,
+/// and the failure mode of guessing (attaching a strength to the wrong
+/// adapter, or to all of them) produces a plausible image from the wrong
+/// weights - which no error message ever gets written about, because the run
+/// succeeded.
+fn attach_lora_scale(specs: &mut [AdapterSpec], scaled: &mut usize, value: f32) -> Result<(), String> {
+    let Some(spec) = specs.get_mut(*scaled) else {
+        return Err(format!(
+            "--lora-scale {value} has no --adapter of its own ({} adapter(s) given, {} already \
+             carry a strength). Each --lora-scale applies to the --adapter it FOLLOWS: write \
+             `--adapter <path> --lora-scale <S>` once per adapter.",
+            specs.len(),
+            *scaled
+        ));
+    };
+    spec.scale = value;
+    *scaled += 1;
+    Ok(())
+}
+
 /// Resolve FLUX.2's four weight roles through the model-store resolver
 /// (`brain_modelstore::resolve::resolve` + [`flux2::spec::Flux2Spec`])
 /// instead of `BRAIN_FLUX2_*` variables: `--model`/`--text-encoder` name a
@@ -216,8 +262,10 @@ fn generate(args: &[String]) -> Result<(), String> {
     let mut refs: Vec<String> = Vec::new();
     let mut ref_size: Option<u32> = None;
     let mut mask_path: Option<String> = None;
-    let mut adapter: Option<String> = None;
-    let mut lora_scale = 1.0f32;
+    // Repeatable, like `--ref` above: one entry per `--adapter`, in the order
+    // they were typed, which is the order they fold in.
+    let mut adapters: Vec<AdapterSpec> = Vec::new();
+    let mut scaled = 0usize;
     let mut text_encoder: Option<String> = None;
     let mut model: Option<String> = None;
     let mut vae: Option<String> = None;
@@ -272,8 +320,11 @@ fn generate(args: &[String]) -> Result<(), String> {
                 ref_size = Some(n);
             }
             "--mask" => mask_path = Some(need(i)?.clone()),
-            "--adapter" => adapter = Some(need(i)?.clone()),
-            "--lora-scale" => lora_scale = need(i)?.parse().map_err(|e| format!("--lora-scale: {e}"))?,
+            "--adapter" => adapters.push(AdapterSpec::new(need(i)?.clone())),
+            "--lora-scale" => {
+                let s: f32 = need(i)?.parse().map_err(|e| format!("--lora-scale: {e}"))?;
+                attach_lora_scale(&mut adapters, &mut scaled, s)?;
+            }
             "--text-encoder" => text_encoder = Some(need(i)?.clone()),
             "--model" => model = Some(need(i)?.clone()),
             "--vae" => vae = Some(need(i)?.clone()),
@@ -375,9 +426,14 @@ fn generate(args: &[String]) -> Result<(), String> {
             None => eprintln!("flux2: ref {i} {rw}x{rh} -> no conditioning tokens (--ref-resolution-scale 0{role})"),
         }
     }
+    // Say what the stack is before it is folded: with several adapters the
+    // order and the per-adapter strength are what the result depends on, and
+    // both are easy to get wrong on a long command line.
+    for (n, a) in adapters.iter().enumerate() {
+        eprintln!("flux2: adapter {n} {} at strength {}", a.path, a.scale);
+    }
     eprintln!("flux2: building pipeline ({n_gen} generated + {n_ref} reference tokens) ...");
-    let spec = adapter.map(|path| AdapterSpec { path, scale: lora_scale });
-    let pipe = Pipeline::build_sized(&variant, &paths, n_gen + n_ref, n_gen, spec.as_ref(), precision, 1)?;
+    let pipe = Pipeline::build_sized(&variant, &paths, n_gen + n_ref, n_gen, &adapters, precision, 1)?;
     let t0 = std::time::Instant::now();
     // Per-phase wall clock: the callback fires immediately BEFORE each phase,
     // so the gap between two calls is the previous phase's duration. Text
@@ -564,6 +620,76 @@ fn finetune(args: &[String]) -> Result<(), String> {
     })?;
     eprintln!("flux2 finetune: {:.1}s total -> {}", t0.elapsed().as_secs_f32(), opts.save_path);
     Ok(())
+}
+
+#[cfg(test)]
+mod adapter_flag_tests {
+    use super::{attach_lora_scale, AdapterSpec};
+
+    /// Replay a `generate` argument list's `--adapter`/`--lora-scale` flags in
+    /// the order they were typed, exactly as `generate`'s own loop does.
+    fn parse(args: &[&str]) -> Result<Vec<AdapterSpec>, String> {
+        let mut specs: Vec<AdapterSpec> = Vec::new();
+        let mut scaled = 0usize;
+        let mut i = 0;
+        while i < args.len() {
+            match args[i] {
+                "--adapter" => specs.push(AdapterSpec::new(args[i + 1])),
+                "--lora-scale" => attach_lora_scale(&mut specs, &mut scaled, args[i + 1].parse().unwrap())?,
+                other => panic!("unexpected flag {other}"),
+            }
+            i += 2;
+        }
+        Ok(specs)
+    }
+
+    /// The single-adapter spelling this flag has always had must keep working
+    /// unchanged, with and without a strength.
+    #[test]
+    fn one_adapter_is_unchanged() {
+        let a = parse(&["--adapter", "a.brain"]).unwrap();
+        assert_eq!(a.len(), 1);
+        assert_eq!(a[0].path, "a.brain");
+        assert_eq!(a[0].scale, 1.0, "an adapter with no --lora-scale folds at the reference default");
+
+        let a = parse(&["--adapter", "a.brain", "--lora-scale", "0.6"]).unwrap();
+        assert_eq!(a[0].scale, 0.6);
+    }
+
+    /// The Nth `--lora-scale` belongs to the Nth `--adapter` - positional
+    /// pairing, the way `--ref` is positional. Adapters past the last given
+    /// strength take the default.
+    #[test]
+    fn scales_pair_positionally_with_adapters() {
+        let a = parse(&["--adapter", "face.brain", "--lora-scale", "0.8", "--adapter", "style.safetensors", "--lora-scale", "0.4"]).unwrap();
+        assert_eq!(a[0].path, "face.brain");
+        assert_eq!(a[0].scale, 0.8);
+        assert_eq!(a[1].path, "style.safetensors");
+        assert_eq!(a[1].scale, 0.4);
+
+        // Both adapters first, then one strength: it belongs to the FIRST
+        // adapter, and the second keeps the default rather than inheriting it.
+        let a = parse(&["--adapter", "face.brain", "--adapter", "style.safetensors", "--lora-scale", "0.8"]).unwrap();
+        assert_eq!((a[0].scale, a[1].scale), (0.8, 1.0));
+    }
+
+    /// A strength with no adapter of its own is an error, not a silent
+    /// mispairing: one written before any `--adapter`, and a second one for an
+    /// adapter that already has its strength.
+    #[test]
+    fn an_unpaired_strength_is_an_error_that_says_how_to_fix_it() {
+        let e = parse(&["--lora-scale", "0.5", "--adapter", "a.brain"]).unwrap_err();
+        assert!(e.contains("--lora-scale") && e.contains("--adapter"), "{e}");
+        let e = parse(&["--adapter", "a.brain", "--lora-scale", "0.5", "--lora-scale", "0.6"]).unwrap_err();
+        assert!(e.contains("--lora-scale"), "{e}");
+    }
+
+    /// No adapters at all is the ordinary unadapted run: an empty list, not an
+    /// error and not a phantom entry.
+    #[test]
+    fn no_adapter_is_an_empty_list() {
+        assert!(parse(&[]).unwrap().is_empty());
+    }
 }
 
 #[cfg(test)]

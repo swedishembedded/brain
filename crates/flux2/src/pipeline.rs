@@ -895,24 +895,31 @@ impl Pipeline {
     /// Build for a maximum joint sequence (txt + generated + reference
     /// tokens). `n_img_max` in latent tokens, e.g. 4096 for 1024×1024.
     pub fn build(cfg: &Flux2Config, paths: &Paths, n_img_max: u32) -> Result<Pipeline, String> {
-        Pipeline::build_adapted(cfg, paths, n_img_max, None)
+        Pipeline::build_adapted(cfg, paths, n_img_max, &[])
     }
 
-    /// [`Pipeline::build`] with an optional trained LoRA adapter
-    /// ([`crate::finetune`] output) folded into the DiT tensors before the
-    /// model is built — a plain generation run then produces
+    /// [`Pipeline::build`] with LoRA adapters ([`crate::finetune`] output, or
+    /// third-party `.safetensors` files) folded into the DiT tensors before
+    /// the model is built - a plain generation run then produces
     /// adapter-conditioned images with no model change.
-    pub fn build_adapted(cfg: &Flux2Config, paths: &Paths, n_img_max: u32, adapter: Option<&AdapterSpec>) -> Result<Pipeline, String> {
-        Pipeline::build_with(cfg, paths, n_img_max, adapter, crate::Precision::F32)
+    ///
+    /// `adapters` stack: every one is folded, **in list order**, onto the map
+    /// the previous one already changed, each at its own
+    /// [`AdapterSpec::scale`] - see [`crate::lora::fold_adapters`] for what
+    /// that does to a linear both of them adapt. An empty slice is the
+    /// unadapted build, byte for byte: no file is opened and the tensor map
+    /// is not touched.
+    pub fn build_adapted(cfg: &Flux2Config, paths: &Paths, n_img_max: u32, adapters: &[AdapterSpec]) -> Result<Pipeline, String> {
+        Pipeline::build_with(cfg, paths, n_img_max, adapters, crate::Precision::F32)
     }
 
     /// [`Pipeline::build_adapted`] with a DiT numeric tier: `Precision::Int8`
     /// builds the DP4A DiT (~4x smaller than f32 - DiT + int8 TE fit ONE
-    /// 24 GB card). A LoRA adapter (if any) is folded into the f32 tensors
+    /// 24 GB card). LoRA adapters (if any) are folded into the f32 tensors
     /// BEFORE quantization, so adapters work at either tier - the same order
     /// ComfyUI uses (patch the weights, then run).
-    pub fn build_with(cfg: &Flux2Config, paths: &Paths, n_img_max: u32, adapter: Option<&AdapterSpec>, precision: crate::Precision) -> Result<Pipeline, String> {
-        Pipeline::build_batched(cfg, paths, n_img_max, adapter, precision, 1)
+    pub fn build_with(cfg: &Flux2Config, paths: &Paths, n_img_max: u32, adapters: &[AdapterSpec], precision: crate::Precision) -> Result<Pipeline, String> {
+        Pipeline::build_batched(cfg, paths, n_img_max, adapters, precision, 1)
     }
 
     /// [`Pipeline::build_batched`] told the OUTPUT size separately.
@@ -932,11 +939,11 @@ impl Pipeline {
         paths: &Paths,
         n_img_max: u32,
         n_out_max: u32,
-        adapter: Option<&AdapterSpec>,
+        adapters: &[AdapterSpec],
         precision: crate::Precision,
         max_batch: u32,
     ) -> Result<Pipeline, String> {
-        Pipeline::build_inner(cfg, paths, n_img_max, n_out_max, adapter, precision, max_batch)
+        Pipeline::build_inner(cfg, paths, n_img_max, n_out_max, adapters, precision, max_batch)
     }
 
     /// The DiT half of a build: the weight source decision, any LoRA fold,
@@ -958,16 +965,21 @@ impl Pipeline {
     /// map. Safetensors, diffusers dirs, and the fp32 tier take the map route;
     /// a GGUF with a non-Q8_0 DiT linear is rejected during placement rather
     /// than silently converted.
+    ///
+    /// With SEVERAL adapters the streamed route is taken only when every one
+    /// of them is third-party, for that same reason - one brain-native
+    /// container anywhere in the stack sends the whole stack down the map
+    /// route, where both families fold identically.
     fn build_dit(
         cfg: &Flux2Config,
         paths: &Paths,
         n_max: u32,
-        adapter: Option<&AdapterSpec>,
+        adapters: &[AdapterSpec],
         precision: crate::Precision,
         max_batch: u32,
         gpu: gpu_core::Gpu,
     ) -> Result<Flux2Model, String> {
-        let external = adapter.filter(|a| a.path.ends_with(".safetensors"));
+        let all_external = adapters.iter().all(|a| a.path.ends_with(".safetensors"));
         // `BRAIN_FLUX2_NO_STREAM=1` forces the fp32-map route. Both produce
         // the same bytes, so this is not a correctness switch - it is what
         // lets the two be A/B'd on a real checkpoint (which is how the
@@ -977,9 +989,7 @@ impl Pipeline {
         if no_stream && paths.dit.ends_with(".gguf") {
             return Err("flux2: BRAIN_FLUX2_NO_STREAM is incompatible with a .gguf DiT; whole-map loading would decode its quantized tensors before construction".to_string());
         }
-        let streamable = precision == crate::Precision::Int8
-            && paths.dit.ends_with(".gguf")
-            && adapter.is_none_or(|a| a.path.ends_with(".safetensors"));
+        let streamable = precision == crate::Precision::Int8 && paths.dit.ends_with(".gguf") && all_external;
         if streamable {
             let g = checkpoint::gguf::MmapGguf::open(&paths.dit)?;
             // Two-way coverage still has to hold, and it has to hold BEFORE
@@ -987,50 +997,30 @@ impl Pipeline {
             // skipping it because the load got cheaper would trade the one
             // check that matters for the saving.
             crate::import::validate_manifest(&|n| g.shape(n).map(<[usize]>::to_vec), g.names(), cfg)?;
-            let lora = match external {
-                Some(ap) => {
-                    let l = crate::weights::PendingLora::open(&ap.path, ap.scale, &|n| g.shape(n).map(<[usize]>::to_vec))?;
-                    let (pairs, rank, scale) = l.summary();
+            let lora = match adapters.is_empty() {
+                true => None,
+                false => {
+                    let l = crate::weights::PendingLora::open_all(adapters, &|n| g.shape(n).map(<[usize]>::to_vec))?;
                     // Loud on success too: a run that claims to be adapted
                     // should say how much of the model it actually moved, so
                     // a silent no-op cannot hide behind a clean exit.
-                    eprintln!("flux2: folded external LoRA {} - {pairs} linears, rank {rank}, strength {scale}", ap.path);
+                    for r in l.reports() {
+                        eprintln!("flux2: {r}");
+                    }
                     Some(l)
                 }
-                None => None,
             };
             let src = crate::weights::DitWeights::gguf_adapted(&g, lora.as_ref());
             return Ok(Flux2Model::new_from(cfg, &src, gpu, n_max, max_batch, precision));
         }
 
         let mut dit_ts = read_dit_tensors(&paths.dit, cfg)?;
-        if let Some(ap) = adapter {
-            // Two adapter families reach this point, told apart by extension:
-            // a `.safetensors` is a THIRD-PARTY (ai-toolkit / ComfyUI) file
-            // over the fused matrices, anything else is brain's own trained
-            // checkpoint container. Both fold into the same f32 tensor map.
-            if ap.path.ends_with(".safetensors") {
-                let info = crate::lora::fold_external_adapter(&ap.path, &mut dit_ts, ap.scale)?;
-                eprintln!(
-                    "flux2: folded external LoRA {} - {} linears, rank {}, strength {}",
-                    ap.path, info.pairs, info.rank, info.scale
-                );
-            } else {
-                // The adapter's tensor shapes depend only on the architecture, not
-                // the latent grid - any (lh, lw) loads it.
-                let tcfg = crate::modelgrad::Cfg::from_flux2(cfg, 1, 1);
-                let ad = crate::lora::load_adapter(&ap.path, &tcfg)?;
-                // `ap.scale` multiplies the checkpoint's own alpha, exactly as
-                // it does on the external branch above - a strength the CLI
-                // parses but the model ignores is worse than no strength.
-                ad.fold_into_tensors_at(&mut dit_ts, ap.scale)?;
-                eprintln!(
-                    "flux2: folded brain LoRA {} - rank {}, strength {}",
-                    ap.path,
-                    ad.rank(),
-                    ap.scale
-                );
-            }
+        // Both adapter families fold into this one f32 map, in list order -
+        // see `crate::lora::fold_adapters` for the family split and for what
+        // stacking does to a linear more than one of them adapts. An empty
+        // list returns without touching `dit_ts`.
+        for r in crate::lora::fold_adapters(cfg, &mut dit_ts, adapters)? {
+            eprintln!("flux2: {r}");
         }
         let model = Flux2Model::new_batched(cfg, &dit_ts, gpu, n_max, max_batch, precision);
         drop(dit_ts);
@@ -1041,11 +1031,11 @@ impl Pipeline {
     /// generations sharing one denoise loop ([`Pipeline::generate_batch`]).
     /// Only the DiT activation scratch grows; the text encoder and VAE stay
     /// single-stream.
-    pub fn build_batched(cfg: &Flux2Config, paths: &Paths, n_img_max: u32, adapter: Option<&AdapterSpec>, precision: crate::Precision, max_batch: u32) -> Result<Pipeline, String> {
-        Pipeline::build_inner(cfg, paths, n_img_max, n_img_max, adapter, precision, max_batch)
+    pub fn build_batched(cfg: &Flux2Config, paths: &Paths, n_img_max: u32, adapters: &[AdapterSpec], precision: crate::Precision, max_batch: u32) -> Result<Pipeline, String> {
+        Pipeline::build_inner(cfg, paths, n_img_max, n_img_max, adapters, precision, max_batch)
     }
 
-    fn build_inner(cfg: &Flux2Config, paths: &Paths, n_img_max: u32, n_out_max: u32, adapter: Option<&AdapterSpec>, precision: crate::Precision, max_batch: u32) -> Result<Pipeline, String> {
+    fn build_inner(cfg: &Flux2Config, paths: &Paths, n_img_max: u32, n_out_max: u32, adapters: &[AdapterSpec], precision: crate::Precision, max_batch: u32) -> Result<Pipeline, String> {
         let n_max = cfg.txt_len as u32 + n_img_max;
         // Resolve the source's executable representation before placement.
         // Planning and construction must receive this same value; otherwise a
@@ -1081,7 +1071,7 @@ impl Pipeline {
         );
         let gpu = homes.run("dit", || gpu_core::Gpu::new(crate::model::KERNELS))?;
         let max_batch = max_batch.max(1);
-        let model = homes.run("dit", || Self::build_dit(cfg, paths, n_max, adapter, precision, max_batch, gpu))??;
+        let model = homes.run("dit", || Self::build_dit(cfg, paths, n_max, adapters, precision, max_batch, gpu))??;
         let dit_max_batch = model.max_batch();
         // The denoiser may be evicted by its own decode (the plan charged
         // them to take turns on one card); this rebuilds it, from the same
@@ -1090,10 +1080,10 @@ impl Pipeline {
             let cfg = cfg.clone();
             let paths = paths.clone();
             let homes = homes.clone();
-            let adapter = adapter.cloned();
+            let adapters = adapters.to_vec();
             Box::new(move || {
                 let gpu = homes.run("dit", || gpu_core::Gpu::new(crate::model::KERNELS))?;
-                Self::build_dit(&cfg, &paths, n_max, adapter.as_ref(), precision, max_batch, gpu)
+                Self::build_dit(&cfg, &paths, n_max, &adapters, precision, max_batch, gpu)
             }) as Box<dyn Fn() -> Result<Flux2Model, String> + Send + Sync>
         };
 

@@ -218,10 +218,16 @@ impl ResidentModel for Flux2Resident {
         let wh = it.next().ok_or("flux2: bad instance key")?;
         let nref: u32 = it.next().and_then(|s| s.parse().ok()).ok_or("flux2: bad instance key")?;
         let lora_scale: f32 = it.next().and_then(|s| s.parse().ok()).unwrap_or(1.0);
-        let adapter = it
+        // The instance key carries at most ONE adapter: `Pipeline` folds a
+        // whole stack, but the residency key is a flat `:`-separated string
+        // with no list encoding, so a served instance stays single-adapter
+        // (stacking is reachable from `brain flux2 generate --adapter ...`).
+        let adapters: Vec<flux2::AdapterSpec> = it
             .next()
             .filter(|s| !s.is_empty())
-            .map(|path| flux2::AdapterSpec { path: path.to_string(), scale: lora_scale });
+            .map(|path| flux2::AdapterSpec { path: path.to_string(), scale: lora_scale })
+            .into_iter()
+            .collect();
         let (w, h) = wh.split_once('x').ok_or("flux2: bad instance key")?;
         let (w, h): (u32, u32) = (w.parse().map_err(|_| "flux2: bad width")?, h.parse().map_err(|_| "flux2: bad height")?);
         flux2::caps::check_license(&self.variant)?;
@@ -230,7 +236,7 @@ impl ResidentModel for Flux2Resident {
         // Place the pipeline on the assigned card (scoped registry selection;
         // the TE card is flux2's own BRAIN_FLUX2_TE_DEVICE and left as configured).
         let pipe = crate::resident_llm::on_device(device, || {
-            flux2::Pipeline::build_sized(&cfg, &self.paths, n_gen + nref, n_gen, adapter.as_ref(), precision, max_batch())
+            flux2::Pipeline::build_sized(&cfg, &self.paths, n_gen + nref, n_gen, &adapters, precision, max_batch())
         })??;
         Ok(Box::new(Flux2Instance { pipe: Some(pipe), paths: clone_paths(&self.paths), variant: self.variant.clone() }))
     }

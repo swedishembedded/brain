@@ -31,9 +31,9 @@
 //! is deliberately NOT routed through [`model::adapter::AdapterSet::fold_into`]
 //! (which assumes one site owns one whole destination tensor) - it reaches
 //! into each [`model::lora::LoraPair`]'s underlying [`Pair`] via
-//! [`model::lora::LoraPair::pair`] and calls
-//! [`Pair::delta_strided`] directly with the fused offsets, exactly as
-//! before this migration.
+//! [`model::lora::LoraPair::pair`] and describes each one's fused offset as a
+//! [`model::lora::Placement`], leaving the validate-then-write arithmetic to
+//! [`model::lora::fold_placements`].
 //!
 //! Targets, per the fused-checkpoint layout:
 //! * double block, per stream: `qkv` → three row-slice pairs (q/k/v), `proj`,
@@ -48,12 +48,16 @@ use crate::grad::{SingleW, StreamG, StreamW};
 use crate::modelgrad::{Cfg, ModelGrads, ModelWeights};
 use model::adapter::{AdapterKind, AdapterSet, KeyStyle, LinearSite, TargetHp, TargetSpec};
 // The generic pair machinery (A/B init, ΔW apply, dW→(dA,dB) projection, Adam
-// moments) is model-agnostic and lives ONCE in `model::lora`, dispatched
-// through `model::adapter::AdapterKind` - this module keeps only the
-// FLUX.2-specific block walk, fused-tensor offsets and serialization naming.
-// `LoraCfg` is re-exported for existing callers.
-pub use model::lora::LoraCfg;
-use model::lora::{LoraGrads, LoraPair, Pair};
+// moments) is model-agnostic and lives ONCE in `model::lora` - this module
+// keeps only the FLUX.2-specific block walk, fused-tensor offsets and
+// serialization naming. `LoraCfg` is re-exported for existing callers.
+pub use model::lora::{ExternalFold, LoraCfg};
+use model::lora::{fold_placements, proj_step, LoraGrads, LoraPair, Pair, Placement};
+
+/// How FLUX.2 names itself in a wrong-base-model adapter error. One spelling,
+/// because that message is the one a user reads when an adapter trained for
+/// another model is loaded, and it has to say which base was expected.
+const ARCH: &str = "FLUX.2";
 
 const STREAMS: [&str; 2] = ["img", "txt"];
 /// Short leaf names, in the fixed order the walk/serializer/fold all share -
@@ -403,14 +407,17 @@ impl LoraAdapter {
     /// bending it for inference would silently change what a resumed run
     /// trains.
     pub fn fold_into_tensors_at(&self, ts: &mut crate::import::Tensors, strength: f32) -> Result<(), String> {
-        let scale = self.scale() * strength;
-        let get = |ts: &mut crate::import::Tensors, key: &str, want: usize| -> Result<Vec<usize>, String> {
-            match ts.get(key) {
-                Some((shape, data)) if data.len() == want => Ok(shape.clone()),
-                Some((_, data)) => Err(format!("lora: {key} has {} values, adapter expects {want}", data.len())),
-                None => Err(format!("lora: base tensor {key} missing")),
-            }
-        };
+        fold_placements(ts, self.scale() * strength, &self.placements())
+    }
+
+    /// Where every pair's delta lands in the BFL-named fused layout - the
+    /// FLUX.2-specific half of a fold, and the only half this crate owns
+    /// ([`model::lora::fold_placements`] owns the validation contract and the
+    /// arithmetic). Row/column offsets mirror `model.rs`'s build-time
+    /// fused → split slicing, which is what makes a folded adapter and an
+    /// `apply`ed one the same model.
+    fn placements(&self) -> Vec<Placement<'_>> {
+        let mut v = Vec::new();
         for n in 0..self.depth_double {
             let block = &self.set.as_slice()[n * 14..n * 14 + 14];
             for (j, s) in STREAMS.iter().enumerate() {
@@ -426,22 +433,16 @@ impl LoraAdapter {
                 let d = wq.inn;
                 let mlp = w1.out;
                 let qkv = format!("double_blocks.{n}.{s}_attn.qkv.weight");
-                get(ts, &qkv, 3 * d * d)?;
-                let buf = &mut ts.get_mut(&qkv).unwrap().1;
-                wq.delta_strided(scale, buf, 0, d, 0);
-                wk.delta_strided(scale, buf, d, d, 0);
-                wv.delta_strided(scale, buf, 2 * d, d, 0);
-                let proj = format!("double_blocks.{n}.{s}_attn.proj.weight");
-                get(ts, &proj, d * d)?;
-                wo.delta(scale, &mut ts.get_mut(&proj).unwrap().1);
+                let nq = 3 * d * d;
+                v.push(Placement::fused(qkv.clone(), wq, nq, 0, d, 0));
+                v.push(Placement::fused(qkv.clone(), wk, nq, d, d, 0));
+                v.push(Placement::fused(qkv, wv, nq, 2 * d, d, 0));
+                v.push(Placement::whole(format!("double_blocks.{n}.{s}_attn.proj.weight"), wo));
                 let m0 = format!("double_blocks.{n}.{s}_mlp.0.weight");
-                get(ts, &m0, 2 * mlp * d)?;
-                let buf = &mut ts.get_mut(&m0).unwrap().1;
-                w1.delta_strided(scale, buf, 0, d, 0);
-                w3.delta_strided(scale, buf, mlp, d, 0);
-                let m2 = format!("double_blocks.{n}.{s}_mlp.2.weight");
-                get(ts, &m2, d * mlp)?;
-                w2.delta(scale, &mut ts.get_mut(&m2).unwrap().1);
+                let nm = 2 * mlp * d;
+                v.push(Placement::fused(m0.clone(), w1, nm, 0, d, 0));
+                v.push(Placement::fused(m0, w3, nm, mlp, d, 0));
+                v.push(Placement::whole(format!("double_blocks.{n}.{s}_mlp.2.weight"), w2));
             }
         }
         let single_start = self.depth_double * 14;
@@ -453,22 +454,65 @@ impl LoraAdapter {
             let d = wq.inn;
             let mlp = w1.out;
             let l1 = format!("single_blocks.{n}.linear1.weight");
-            get(ts, &l1, (3 * d + 2 * mlp) * d)?;
-            let buf = &mut ts.get_mut(&l1).unwrap().1;
-            wq.delta_strided(scale, buf, 0, d, 0);
-            wk.delta_strided(scale, buf, d, d, 0);
-            wv.delta_strided(scale, buf, 2 * d, d, 0);
-            w1.delta_strided(scale, buf, 3 * d, d, 0);
-            w3.delta_strided(scale, buf, 3 * d + mlp, d, 0);
-            let l2 = format!("single_blocks.{n}.linear2.weight");
-            get(ts, &l2, d * (d + mlp))?;
-            let buf = &mut ts.get_mut(&l2).unwrap().1;
+            let n1 = (3 * d + 2 * mlp) * d;
+            v.push(Placement::fused(l1.clone(), wq, n1, 0, d, 0));
+            v.push(Placement::fused(l1.clone(), wk, n1, d, d, 0));
+            v.push(Placement::fused(l1.clone(), wv, n1, 2 * d, d, 0));
+            v.push(Placement::fused(l1.clone(), w1, n1, 3 * d, d, 0));
+            v.push(Placement::fused(l1, w3, n1, 3 * d + mlp, d, 0));
             // linear2 [D, D+mlp]: wo_a occupies columns 0..D, wo_b columns D..D+mlp
-            wo_a.delta_strided(scale, buf, 0, d + mlp, 0);
-            wo_b.delta_strided(scale, buf, 0, d + mlp, d);
+            let l2 = format!("single_blocks.{n}.linear2.weight");
+            let n2 = d * (d + mlp);
+            v.push(Placement::fused(l2.clone(), wo_a, n2, 0, d + mlp, 0));
+            v.push(Placement::fused(l2, wo_b, n2, 0, d + mlp, d));
         }
-        Ok(())
+        v
     }
+}
+
+/// Fold EVERY adapter in `adapters` into the DiT tensor map, in list order,
+/// each at its own `AdapterSpec::scale` - the one seam every `Pipeline`
+/// builder's LoRA handling goes through, so a stacked run's effect on the
+/// weights is testable without a checkpoint.
+///
+/// ## Order, and what stacking actually does to a weight
+///
+/// Adapter *n+1* folds onto the map adapter *n* already changed. The deltas
+/// are additive, so a linear adapted by several of them ends at
+/// `W + Σᵢ sᵢ·(αᵢ/rᵢ)·Bᵢ·Aᵢ`: each `--lora-scale` multiplies only its own
+/// adapter's delta, and adapters over the same linear **sum** there. They do
+/// not average and the later one does not win - so a face adapter and a style
+/// adapter both at 1.0 move their shared linears by the sum of two deltas,
+/// each of which was trained (and validated) alone. That is the dial to turn
+/// down when a stack over-cooks; the list order itself reaches the result only
+/// through float rounding, and is fixed rather than left to iteration order so
+/// the same command is reproducible.
+///
+/// An empty list returns immediately: no file is opened and `ts` is not
+/// touched, so an unadapted build is exactly what it was before stacking
+/// existed.
+///
+/// Each path picks its own family by extension - a `.safetensors` is a
+/// third-party (ai-toolkit / ComfyUI / diffusers) adapter over the fused
+/// matrices, anything else is brain's own trained container - and the two
+/// families may be mixed freely in one list.
+pub fn fold_adapters(
+    cfg: &crate::Flux2Config,
+    ts: &mut crate::import::Tensors,
+    adapters: &[crate::AdapterSpec],
+) -> Result<Vec<model::lora::FoldReport>, String> {
+    let specs: Vec<(&str, f32)> = adapters.iter().map(|a| (a.path.as_str(), a.scale)).collect();
+    // An adapter's tensor shapes depend only on the architecture, not the
+    // latent grid, so any (lh, lw) loads one.
+    let tcfg = crate::modelgrad::Cfg::from_flux2(cfg, 1, 1);
+    model::lora::fold_adapter_files(ts, &specs, ARCH, |path, ts, strength| {
+        let ad = load_adapter(path, &tcfg)?;
+        // `strength` multiplies the checkpoint's own alpha, exactly as it does
+        // on the third-party branch - a strength the model ignores is worse
+        // than no strength.
+        ad.fold_into_tensors_at(ts, strength)?;
+        Ok((ad.pairs().len(), ad.rank()))
+    })
 }
 
 /// One in-flight optimisation step, opened by [`LoraAdapter::stepper`]: it
@@ -517,17 +561,6 @@ impl crate::modelgrad::GradSink<f32> for LoraStep<'_> {
     }
 }
 
-/// What [`fold_external_adapter`] folded, for the caller to log. A run that
-/// claims to be adapted should be able to say how much of the model it moved.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ExternalFold {
-    /// Adapted linears (klein-9b's own full-coverage adapters have 112).
-    pub pairs: usize,
-    /// The file's rank, or the largest one if it is not uniform.
-    pub rank: usize,
-    /// The `strength` the delta was scaled by.
-    pub scale: f32,
-}
 
 /// Fold a THIRD-PARTY (ai-toolkit / ComfyUI / diffusers) LoRA `.safetensors`
 /// into the inference tensor map, so an unchanged generation run produces
@@ -538,67 +571,19 @@ pub struct ExternalFold {
 /// over `q`/`k`/`v` separately). A third-party file instead adapts the FUSED
 /// matrices - one shared `A` for the whole `qkv`, one for the whole
 /// `linear1` - which is not a shape [`LoraAdapter`] can hold, but is a
-/// strictly simpler fold: every target is a whole tensor at offset 0, so
-/// [`model::lora::Pair::delta`] is the exact operation.
+/// strictly simpler fold: every target is a whole tensor at offset 0.
 ///
-/// ## Semantics, taken from the reference implementations
-///
-/// `W += strength · (alpha/r) · B·A`, matching ComfyUI's weight adapter
-/// (`comfy/weight_adapter/lora.py`: `weight += (strength * alpha) * mm(mat1,
-/// mat2)` with `mat1` the up/`lora_B` and `mat2` the down/`lora_A`, and
-/// `alpha = v[2]/rank` or `1.0` when no `.alpha` tensor is present) and
-/// ai-toolkit's trainer (`toolkit/network_mixins.py`: `scale = alpha /
-/// lora_dim`, alpha initialised to the rank and stripped from PEFT-format
-/// saves). `B·A` needs no transpose: both store PyTorch `nn.Linear` weights
-/// `[out, in]`, which is already brain's row-major manifest layout.
-///
-/// `scale` is ComfyUI's `strength_model` - a user dial, default 1.0, NOT a
-/// value read from the file.
-///
-/// Every pair is validated against the base map BEFORE anything is written,
-/// so a rejected adapter leaves the weights untouched rather than half folded.
+/// A thin wrapper over [`model::lora::fold_external_into`] supplying this
+/// architecture's own name for the wrong-base-model message; the reference
+/// semantics (`W += strength·(alpha/r)·B·A`, per ComfyUI's weight adapter and
+/// ai-toolkit's trainer) and the validate-before-writing contract are
+/// documented there, once, for every model that reads such a file.
 pub fn fold_external_adapter(
     path: &str,
     ts: &mut crate::import::Tensors,
     scale: f32,
 ) -> Result<ExternalFold, String> {
-    let pairs = model::lora::read_external_adapter(path)?;
-    // Validate the WHOLE adapter first. A key that matches nothing is a hard
-    // error naming the tensor: silently skipping it would return base-model
-    // output from a run the user believes is adapted.
-    for p in &pairs {
-        match ts.get(&p.base_key) {
-            None => {
-                return Err(format!(
-                    "lora {path}: adapter targets '{}' (from '{}'), which this FLUX.2 variant \
-                     does not have - wrong base model for this adapter?",
-                    p.base_key, p.stem
-                ))
-            }
-            Some((shape, data)) => {
-                if shape.as_slice() != [p.out, p.inn] {
-                    return Err(format!(
-                        "lora {path}: '{}' is {shape:?}, but the adapter for it is [{}, {}]",
-                        p.base_key, p.out, p.inn
-                    ));
-                }
-                if data.len() != p.out * p.inn {
-                    return Err(format!(
-                        "lora {path}: '{}' holds {} values, expected {}",
-                        p.base_key,
-                        data.len(),
-                        p.out * p.inn
-                    ));
-                }
-            }
-        }
-    }
-    let rank = pairs.iter().map(|p| p.r).max().unwrap_or(0);
-    for p in &pairs {
-        let w = &mut ts.get_mut(&p.base_key).expect("validated above").1;
-        p.as_pair().delta(scale * p.alpha_mult, w);
-    }
-    Ok(ExternalFold { pairs: pairs.len(), rank, scale })
+    model::lora::fold_external_into(path, ts, scale, ARCH)
 }
 
 /// Save an adapter to brain's checkpoint format (header

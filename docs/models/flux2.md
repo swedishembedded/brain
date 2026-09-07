@@ -68,18 +68,38 @@ brain/flux2-klein` lists them) over D-Bus and over HTTP at
   photographs a valid input; the per-reference sizes and token counts are
   printed before the pipeline is built, so a run that does not fit says which
   reference spent the budget.
-- `--adapter <path>` - fold a LoRA adapter into the DiT before generating.
-  Two families are accepted, told apart by extension: brain's own `finetune`
-  checkpoint, or a third-party `.safetensors` adapter in the ai-toolkit /
-  ComfyUI / diffusers convention (`diffusion_model.<module>.lora_A/B.weight`).
-  The adapter must have been trained for the `--variant` you select; a key
-  that does not match a tensor of that variant is a hard error naming the
-  tensor, never a silent skip.
-- `--lora-scale <S>` - LoRA strength, ComfyUI's `strength_model`. Default
-  `1.0`. Third-party adapter files usually carry no alpha, in which case both
-  ai-toolkit and ComfyUI resolve the alpha multiplier to exactly 1.0 and this
-  flag is the only dial; `0.0` reproduces the base model, which is the way to
-  check what the adapter is actually contributing.
+- `--adapter <path>` (repeatable) - fold a LoRA adapter into the DiT before
+  generating. Two families are accepted, told apart by extension: brain's own
+  `finetune` checkpoint, or a third-party `.safetensors` adapter in the
+  ai-toolkit / ComfyUI / diffusers convention
+  (`diffusion_model.<module>.lora_A/B.weight`). The adapter must have been
+  trained for the `--variant` you select; a key that does not match a tensor
+  of that variant is a hard error naming the tensor, never a silent skip.
+
+  Pass the flag more than once to **stack** adapters in one generation - a
+  face-identity adapter plus a style adapter, say. The two families mix
+  freely. They fold in the order given, each onto the result of the ones
+  before it, so a linear that more than one of them adapts ends up moved by
+  the **sum** of their deltas: two adapters both at strength `1.0` push that
+  weight further than either was trained and validated at, which usually
+  reads as an over-cooked image. Lower each one's `--lora-scale` when
+  stacking rather than expecting the result to be an average.
+- `--lora-scale <S>` (repeatable) - LoRA strength, ComfyUI's
+  `strength_model`. Default `1.0`. Third-party adapter files usually carry no
+  alpha, in which case both ai-toolkit and ComfyUI resolve the alpha
+  multiplier to exactly 1.0 and this flag is the only dial; `0.0` reproduces
+  the base model, which is the way to check what the adapter is actually
+  contributing.
+
+  With several adapters it pairs **positionally** and must follow the
+  `--adapter` it belongs to. A `--lora-scale` with no adapter of its own is
+  refused rather than guessed at:
+
+  ```
+  brain flux2 generate --prompt "..." --out out.ppm \
+    --adapter face.brain          --lora-scale 0.8 \
+    --adapter style.safetensors   --lora-scale 0.4
+  ```
 - `--strength` - for image-to-image editing, a **continuous anchoring dial**
   in `0..=1` on the first `--ref` (which must then be supplied at the output
   size). `1.0` is free generation conditioned on the reference; lowering it

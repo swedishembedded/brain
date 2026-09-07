@@ -67,9 +67,9 @@ use checkpoint::gguf::MmapGguf;
 
 use crate::import::Tensors;
 
-/// A third-party LoRA that has been read and validated but NOT yet folded,
-/// so that folding can happen one weight matrix at a time inside the model
-/// build instead of over a resident fp32 map.
+/// One or more third-party LoRAs that have been read and validated but NOT
+/// yet folded, so that folding can happen one weight matrix at a time inside
+/// the model build instead of over a resident fp32 map.
 ///
 /// Pre-folding is what the fp32 path does, and it is why the adapter case
 /// used to cost the same 36 GB peak as the unadapted one: the fold needs a
@@ -78,55 +78,81 @@ use crate::import::Tensors;
 /// and those 112 are the big fused matrices - very nearly the whole
 /// parameter count - so "only the ones it touches" is no saving at all
 /// unless they are also handled one at a time.
+///
+/// A STACK of adapters is held flattened, in file order and then in each
+/// file's own order, each pair carrying the strength of the file it came
+/// from. That flattening is what makes the streamed fold agree with the
+/// resident-map one: `Pipeline`'s map route folds adapter 1 whole and then
+/// adapter 2 whole, so for any single tensor the deltas arrive in exactly the
+/// order [`PendingLora::apply`] walks them here.
 pub struct PendingLora {
-    pairs: Vec<model::lora::ExternalPair>,
-    scale: f32,
+    /// `(pair, the strength its own file folds at)`.
+    pairs: Vec<(model::lora::ExternalPair, f32)>,
+    reports: Vec<model::lora::FoldReport>,
 }
 
 impl PendingLora {
-    /// Read an adapter and validate every pair against `shapes` BEFORE
-    /// anything is folded, so a rejected adapter leaves the build untouched
-    /// rather than half applied - the same contract
+    /// Read every adapter in `specs` and validate all of their pairs against
+    /// `shapes` BEFORE anything is folded, so a rejected adapter leaves the
+    /// build untouched rather than half applied - the same contract
     /// `lora::fold_external_adapter` gives, checked against the checkpoint's
     /// declared shapes instead of against a materialized map.
-    pub fn open(path: &str, scale: f32, shapes: &dyn Fn(&str) -> Option<Vec<usize>>) -> Result<PendingLora, String> {
-        let pairs = model::lora::read_external_adapter(path)?;
-        for p in &pairs {
-            match shapes(&p.base_key) {
-                None => {
-                    return Err(format!(
-                        "lora {path}: adapter targets '{}' (from '{}'), which this FLUX.2 variant \
-                         does not have - wrong base model for this adapter?",
-                        p.base_key, p.stem
-                    ))
-                }
-                Some(s) => {
-                    if s.as_slice() != [p.out, p.inn] {
+    ///
+    /// Every path here must be a `.safetensors`; brain's own trained
+    /// container cannot be folded per tensor (its per-slice pairs are written
+    /// against the whole map), which is why `Pipeline::build_dit` only takes
+    /// the streamed route when every adapter is third-party.
+    pub fn open_all(specs: &[crate::AdapterSpec], shapes: &dyn Fn(&str) -> Option<Vec<usize>>) -> Result<PendingLora, String> {
+        let mut pairs = Vec::new();
+        let mut reports = Vec::new();
+        for spec in specs {
+            let path = spec.path.as_str();
+            let file = model::lora::read_external_adapter(path)?;
+            for p in &file {
+                match shapes(&p.base_key) {
+                    None => {
                         return Err(format!(
-                            "lora {path}: '{}' is {s:?}, but the adapter for it is [{}, {}]",
-                            p.base_key, p.out, p.inn
-                        ));
+                            "lora {path}: adapter targets '{}' (from '{}'), which this FLUX.2 variant \
+                             does not have - wrong base model for this adapter?",
+                            p.base_key, p.stem
+                        ))
+                    }
+                    Some(s) => {
+                        if s.as_slice() != [p.out, p.inn] {
+                            return Err(format!(
+                                "lora {path}: '{}' is {s:?}, but the adapter for it is [{}, {}]",
+                                p.base_key, p.out, p.inn
+                            ));
+                        }
                     }
                 }
             }
+            reports.push(model::lora::FoldReport {
+                path: path.to_string(),
+                external: true,
+                pairs: file.len(),
+                rank: file.iter().map(|p| p.r).max().unwrap_or(0),
+                strength: spec.scale,
+            });
+            pairs.extend(file.into_iter().map(|p| (p, spec.scale)));
         }
-        Ok(PendingLora { pairs, scale })
+        Ok(PendingLora { pairs, reports })
     }
 
-    /// Adapted linears, and the file's largest rank - what the caller logs.
-    pub fn summary(&self) -> (usize, usize, f32) {
-        (self.pairs.len(), self.pairs.iter().map(|p| p.r).max().unwrap_or(0), self.scale)
+    /// What each adapter in the stack will fold - what the caller logs.
+    pub fn reports(&self) -> &[model::lora::FoldReport] {
+        &self.reports
     }
 
     fn touches(&self, name: &str) -> bool {
-        self.pairs.iter().any(|p| p.base_key == name)
+        self.pairs.iter().any(|(p, _)| p.base_key == name)
     }
 
     /// Apply every pair targeting `name` to a full fp32 copy of that tensor.
     /// Same operation, same order and same scaling as the batch fold.
     fn apply(&self, name: &str, w: &mut [f32]) {
-        for p in self.pairs.iter().filter(|p| p.base_key == name) {
-            p.as_pair().delta(self.scale * p.alpha_mult, w);
+        for (p, scale) in self.pairs.iter().filter(|(p, _)| p.base_key == name) {
+            p.as_pair().delta(scale * p.alpha_mult, w);
         }
     }
 }
@@ -340,7 +366,7 @@ mod tests {
     fn a_lora_touched_tensor_declines_the_direct_path_but_still_folds_via_with_f32() {
         let (n, k) = (4usize, 32usize);
         let (g, path) = q8_gguf("w", n, k, "lora-decline");
-        let pending = PendingLora { pairs: vec![rank1_pair("w", n, k)], scale: 1.0 };
+        let pending = PendingLora { pairs: vec![(rank1_pair("w", n, k), 1.0)], reports: Vec::new() };
         let src = DitWeights::gguf_adapted(&g, Some(&pending));
 
         assert!(src.try_i8_rect("w", k, 0, n, 0, k).is_none(), "a LoRA-touched tensor must decline the byte-repack path");

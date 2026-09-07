@@ -389,7 +389,11 @@ impl Action for Flux2Action {
                 if !matches!(&*guard, Some((k, _)) if *k == key) {
                     *guard = None; // free the old resident weights before building new
                     progress(Progress::step(0, 1, "loading weights (first call for this variant/size)"));
-                    let pipe = Pipeline::build_sized(&cfg, paths, n_gen + n_ref, n_gen, p.adapter.as_ref(), p.precision, 1)?;
+                    // One adapter at most over the wire: the `adapter` param
+                    // is a single string, so a served call cannot express the
+                    // stack `Pipeline` folds (`brain flux2 generate` can).
+                    let adapters: &[crate::AdapterSpec] = p.adapter.as_ref().map(std::slice::from_ref).unwrap_or(&[]);
+                    let pipe = Pipeline::build_sized(&cfg, paths, n_gen + n_ref, n_gen, adapters, p.precision, 1)?;
                     *guard = Some((key, pipe));
                 }
                 generate_on(&guard.as_ref().unwrap().1, inv, &refs, &p.opts, progress)
