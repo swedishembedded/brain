@@ -83,8 +83,14 @@ fn classify_hfdir(idx: usize, rec: &ArtifactRecord, out: &mut Vec<(usize, String
 /// content exactly like `classify_gguf`/`classify_hfdir` do - never the name.
 fn classify_safetensors(idx: usize, rec: &ArtifactRecord, out: &mut Vec<(usize, String, Confidence)>) {
     let Ok(m) = checkpoint::mmap::MmapSafetensors::open(rec.path.to_string_lossy().as_ref()) else { return };
-    let names = m.names();
-    if names.iter().any(|n| n == "decoder.conv_in.weight") && names.iter().any(|n| n == "encoder.conv_in.weight") {
+    // `decoder`/`encoder`.conv_in.weight are generic autoencoder tensor
+    // names, not FLUX.2-specific - a real, unrelated architecture's causal
+    // 3D VIDEO vae (Wan's release) carries the exact same two names. The
+    // conv kernel's shape RANK is real structure that tells them apart: a
+    // 2D image vae is `[out,in,kh,kw]` (4 dims), a causal 3D video vae adds
+    // a leading temporal axis, `[out,in,kt,kh,kw]` (5 dims).
+    let is_2d_conv = |name: &str| m.shape(name).is_some_and(|s| s.len() == 4);
+    if is_2d_conv("decoder.conv_in.weight") && is_2d_conv("encoder.conv_in.weight") {
         out.push((idx, "vae".to_string(), Confidence::Declared));
     }
 }
@@ -255,10 +261,35 @@ mod tests {
     /// `vae/` directory or `config.json` beside it) - the one tensor pair
     /// [`classify_safetensors`] actually checks for, at real-name minimal
     /// payload.
+    /// Real FLUX.2 VAE shape rank: a 2D conv, `[out_ch, in_ch, kh, kw]` (4
+    /// dims) - `encoder.conv_in.weight` is `[128, 3, 3, 3]` on the real
+    /// unsloth release.
     fn write_vae_safetensors_flat(path: &std::path::Path) {
         checkpoint::st::save_safetensors(
             path.to_str().unwrap(),
-            &[("decoder.conv_in.weight".to_string(), vec![1], vec![0.0f32]), ("encoder.conv_in.weight".to_string(), vec![1], vec![0.0f32])],
+            &[
+                ("decoder.conv_in.weight".to_string(), vec![512, 32, 3, 3], vec![0.0f32; 512 * 32 * 3 * 3]),
+                ("encoder.conv_in.weight".to_string(), vec![128, 3, 3, 3], vec![0.0f32; 128 * 3 * 3 * 3]),
+            ],
+            &serde_json::json!({}),
+            None,
+        )
+        .unwrap();
+    }
+
+    /// A causal 3D VIDEO VAE (Wan's real shape rank): `[out_ch, in_ch, kt,
+    /// kh, kw]` (5 dims, the extra leading temporal axis) - carries the
+    /// SAME two tensor NAMES FLUX.2's own VAE does (`decoder`/
+    /// `encoder`.conv_in.weight are generic autoencoder naming, not
+    /// FLUX.2-specific), which is exactly what makes a name-only check a
+    /// false positive against a real, unrelated architecture's checkpoint.
+    fn write_causal_3d_vae_safetensors_flat(path: &std::path::Path) {
+        checkpoint::st::save_safetensors(
+            path.to_str().unwrap(),
+            &[
+                ("decoder.conv_in.weight".to_string(), vec![384, 16, 3, 3, 3], vec![0.0f32; 384 * 16 * 3 * 3 * 3]),
+                ("encoder.conv_in.weight".to_string(), vec![96, 3, 3, 3, 3], vec![0.0f32; 96 * 3 * 3 * 3 * 3]),
+            ],
             &serde_json::json!({}),
             None,
         )
@@ -331,6 +362,27 @@ mod tests {
         checkpoint::st::save_safetensors(decoy_path.to_str().unwrap(), &[("some.other.weight".to_string(), vec![1], vec![0.0f32])], &serde_json::json!({}), None).unwrap();
 
         let records = vec![complete(vae_path, ArtifactKind::Safetensors), complete(decoy_path, ArtifactKind::Safetensors)];
+        let out = Flux2Spec.classify(&records, dir.as_path());
+        assert_eq!(out, vec![(0, "vae".to_string(), Confidence::Declared)], "{out:?}");
+    }
+
+    /// Real bug, found by actually running `brain flux2 generate` against a
+    /// real store: a causal 3D video VAE (Wan's real release) carries the
+    /// exact same `decoder`/`encoder`.conv_in.weight tensor NAMES FLUX.2's
+    /// VAE does, so a name-only check misclassifies an entirely unrelated
+    /// architecture's checkpoint as a FLUX.2 vae candidate. The conv's
+    /// shape RANK (4 for a 2D image VAE, 5 for a causal 3D video VAE) is
+    /// real, always-present structure, not a guess.
+    #[test]
+    fn classify_rejects_a_causal_3d_video_vae_sharing_the_same_tensor_names() {
+        let dir = tmp("flat-vae-video-decoy");
+        std::fs::create_dir_all(&dir).unwrap();
+        let flux_vae_path = dir.join("flux2-vae.safetensors");
+        write_vae_safetensors_flat(&flux_vae_path);
+        let video_vae_path = dir.join("wan-vae.safetensors");
+        write_causal_3d_vae_safetensors_flat(&video_vae_path);
+
+        let records = vec![complete(flux_vae_path, ArtifactKind::Safetensors), complete(video_vae_path, ArtifactKind::Safetensors)];
         let out = Flux2Spec.classify(&records, dir.as_path());
         assert_eq!(out, vec![(0, "vae".to_string(), Confidence::Declared)], "{out:?}");
     }
