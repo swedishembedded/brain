@@ -159,6 +159,9 @@ pub struct CodeFormer {
     cfg: CodeFormerConfig,
     hw: (u32, u32),
     lhw: (u32, u32),
+    /// The batch this graph was built for (`1` unless built with
+    /// [`CodeFormer::new_batched`]).
+    n: u32,
     encode_steps: Vec<Step>,
     decode_steps: Vec<Step>,
     img_in: DeviceBuffer,
@@ -189,6 +192,31 @@ impl CodeFormer {
     /// (the shared builder's buffer pool is disabled), so leave it off outside
     /// tests.
     pub fn new(cfg: CodeFormerConfig, tensors: &Tensors, gpu: Gpu, taps: bool) -> CodeFormer {
+        Self::build(cfg, tensors, gpu, taps, 1)
+    }
+
+    /// Same as [`CodeFormer::new`], but for a batch of `n` images through ONE
+    /// pair of graphs (`vae::blocks::Builder::set_batch`):
+    /// [`CodeFormer::predict_codes`]/[`CodeFormer::generate`] both take/return
+    /// `[n, ...]`-shaped buffers.
+    ///
+    /// The convolutional encoder and generator ([`vqgan::model::run_blocks`])
+    /// reach `n` for free from the shared builder. The code-prediction
+    /// Transformer and the controllable feature transformation are NOT
+    /// `vae::blocks` - they dispatch their own kernels directly - so this
+    /// threads `n` through them by hand: [`record_transformer`]'s self-attention
+    /// gets a real `bsz` (not the folded-in-`rows` trick a plain GEMM/LayerNorm
+    /// tolerates, for the same reason `vae::blocks::Builder::attn`'s own
+    /// self-attention needs one), and its position embedding - one `[T,E]`
+    /// tensor shared by every image, not itself batched - is broadcast-added
+    /// per image (see `add_shared_rows`) rather than tiled into a `[n*T,E]`
+    /// host buffer.
+    pub fn new_batched(cfg: CodeFormerConfig, tensors: &Tensors, gpu: Gpu, taps: bool, n: u32) -> CodeFormer {
+        Self::build(cfg, tensors, gpu, taps, n)
+    }
+
+    fn build(cfg: CodeFormerConfig, tensors: &Tensors, gpu: Gpu, taps: bool, n: u32) -> CodeFormer {
+        assert!(n > 0, "restore: batch count must be positive");
         let img = cfg.img_size();
         let scale = cfg.vqgan.downscale();
         let (lh, lw) = (img / scale, img / scale);
@@ -201,9 +229,10 @@ impl CodeFormer {
         );
         let emb = cfg.vqgan.emb_dim;
         let ids = Ids::resolve(&gpu);
+        let nt = n * t; // sequence rows across the whole batch: n images x t positions each.
 
-        let img_in = gpu.storage((cfg.vqgan.in_channels * img * img) as u64);
-        let idx_in = gpu.storage(t as u64);
+        let img_in = gpu.storage((n * cfg.vqgan.in_channels * img * img) as u64);
+        let idx_in = gpu.storage(nt as u64);
         let w_buf = gpu.storage(1);
 
         // ---- submit A: encoder segments + transformer + argmax --------------
@@ -216,6 +245,7 @@ impl CodeFormer {
                 BlockNames::vqgan(),
                 taps,
             );
+            b.set_batch(n);
             let blocks = cfg.vqgan.encoder_blocks();
             // Encoder taps, ascending by block index (the walk order); the
             // config lists them in generator order.
@@ -236,7 +266,7 @@ impl CodeFormer {
                     w,
                     &x,
                 );
-                b.tap(format!("enc.{}", tp.size), &y, tp.channels * hh * ww);
+                b.tap(format!("enc.{}", tp.size), &y, n * tp.channels * hh * ww);
                 enc_feat.insert(tp.size, y.clone());
                 x = y;
                 h = hh;
@@ -246,17 +276,18 @@ impl CodeFormer {
             let (lq, (qh, qw)) =
                 vqgan::model::run_blocks(&mut b, "encoder", &blocks[start..], start, h, w, &x);
             assert_eq!((qh, qw), (lh, lw), "restore: encoder produced {qh}x{qw}, expected {lh}x{lw}");
-            b.tap("lq_feat".into(), &lq, emb * t);
+            b.tap("lq_feat".into(), &lq, nt * emb);
 
-            // `lq_feat.flatten(2).permute(2,0,1)` == the NCHW→NLC permutation.
+            // `lq_feat.flatten(2).permute(2,0,1)` == the NCHW→NLC permutation
+            // (batched - see `Builder::nchw_to_rows`).
             let rows = b.nchw_to_rows(emb, t, &lq);
             // `lq` is dead once its rows exist — it is NOT one of the four
             // encoder features the generator needs, so unlike the segment
             // outputs above it goes back to the pool. (`free` is a no-op in the
             // tapped build, which is what keeps the `lq_feat` tap readable.)
-            b.free((emb * t) as u64, lq);
+            b.free((n as u64) * (emb * t) as u64, lq);
             let (logits, idx_f32) = record_transformer(&mut b, &cfg, &ids, t, &rows);
-            b.free((emb * t) as u64, rows);
+            b.free((nt * emb) as u64, rows);
             let (steps, tp) = b.finish();
             (steps, logits, idx_f32, enc_feat, tp)
         };
@@ -271,11 +302,12 @@ impl CodeFormer {
                 BlockNames::vqgan(),
                 taps,
             );
+            b.set_batch(n);
             let cb = b.dev("quantize.embedding.weight");
-            let rows = vqgan::model::record_lookup(&mut b, &cb, t, emb, &idx_in);
+            let rows = vqgan::model::record_lookup(&mut b, &cb, nt, emb, &idx_in);
             let quant = b.rows_to_nchw(emb, t, &rows);
-            b.free((t * emb) as u64, rows);
-            b.tap("quant_feat".into(), &quant, emb * t);
+            b.free((nt * emb) as u64, rows);
+            b.tap("quant_feat".into(), &quant, nt * emb);
 
             let blocks = cfg.vqgan.generator_blocks();
             let mut x = quant;
@@ -285,7 +317,7 @@ impl CodeFormer {
             // want (the four features are read by the CFT much later); in the
             // generator nothing reads a segment input again, so holding them
             // was ~47 MB of dead VRAM on the production (`taps = false`) path.
-            let mut xlen = (emb * t) as u64;
+            let mut xlen = (nt * emb) as u64;
             let (mut h, mut w) = (lh, lw);
             let mut start = 0usize;
             for tp in cfg.taps() {
@@ -300,9 +332,9 @@ impl CodeFormer {
                 b.free(xlen, x);
                 let enc = &enc_feat[&tp.size];
                 let fused = record_fuse(&mut b, &cfg, &tp, enc, &y, hh, ww, &w_buf);
-                b.free((tp.channels * hh * ww) as u64, y);
+                b.free((n as u64) * (tp.channels * hh * ww) as u64, y);
                 x = fused;
-                xlen = (tp.channels * hh * ww) as u64;
+                xlen = (n as u64) * (tp.channels * hh * ww) as u64;
                 h = hh;
                 w = ww;
                 start = tp.gen_block + 1;
@@ -321,6 +353,7 @@ impl CodeFormer {
             cfg,
             hw: (img, img),
             lhw: (lh, lw),
+            n,
             encode_steps,
             decode_steps,
             img_in,
@@ -351,15 +384,15 @@ impl CodeFormer {
     /// logits, which equals `topk(softmax(logits), 1)` because softmax is
     /// monotone. Ties go to the lowest index in both.
     pub fn predict_codes(&self, image: &[f32]) -> Vec<u32> {
-        let n = (self.cfg.vqgan.in_channels * self.hw.0 * self.hw.1) as usize;
-        assert_eq!(image.len(), n, "restore: image has {} values, expected {n}", image.len());
+        let want = (self.n * self.cfg.vqgan.in_channels * self.hw.0 * self.hw.1) as usize;
+        assert_eq!(image.len(), want, "restore: image has {} values, expected {want}", image.len());
         let bits: Vec<u32> = image.iter().map(|v| v.to_bits()).collect();
         self.gpu.write(&self.img_in, &bits);
         self.gpu.submit(&[], &self.encode_steps);
         self.encoded.store(true, std::sync::atomic::Ordering::Release);
-        let t = (self.lhw.0 * self.lhw.1) as usize;
+        let nt = (self.n * self.lhw.0 * self.lhw.1) as usize;
         // `argmax_row` returns the winning column as f32 (exact below 2^24).
-        self.gpu.read(&self.idx_f32, t).into_iter().map(|v| v as u32).collect()
+        self.gpu.read(&self.idx_f32, nt).into_iter().map(|v| v as u32).collect()
     }
 
     /// Gather `indices` from the codebook and run the generator with the
@@ -371,8 +404,8 @@ impl CodeFormer {
     /// two submits, which is the whole reason the graph is split there.
     pub fn generate(&self, indices: &[u32], w: f32) -> Vec<f32> {
         self.assert_encoded("generate");
-        let t = (self.lhw.0 * self.lhw.1) as usize;
-        assert_eq!(indices.len(), t, "restore: {} indices, expected {t}", indices.len());
+        let nt = (self.n * self.lhw.0 * self.lhw.1) as usize;
+        assert_eq!(indices.len(), nt, "restore: {} indices, expected {nt}", indices.len());
         // The `embed` gather indexes the codebook with NO bounds check (brain
         // compiles its shaders with runtime checks off), so an out-of-range code
         // would read past the buffer instead of trapping. Validate here exactly
@@ -395,12 +428,12 @@ impl CodeFormer {
         Restoration { indices, w, image }
     }
 
-    /// The 1024-way code logits `[T, codebook_size]` from the last
+    /// The 1024-way code logits `[n*T, codebook_size]` from the last
     /// [`CodeFormer::predict_codes`].
     pub fn code_logits(&self) -> Vec<f32> {
         self.assert_encoded("code_logits");
-        let t = (self.lhw.0 * self.lhw.1) as usize;
-        self.gpu.read(&self.logits, t * self.cfg.vqgan.codebook_size as usize)
+        let nt = (self.n * self.lhw.0 * self.lhw.1) as usize;
+        self.gpu.read(&self.logits, nt * self.cfg.vqgan.codebook_size as usize)
     }
 
     /// Panic if submit A has never run: every buffer `what` reads is written by
@@ -415,7 +448,7 @@ impl CodeFormer {
     }
 
     fn out_len(&self) -> usize {
-        (self.cfg.vqgan.out_channels * self.hw.0 * self.hw.1) as usize
+        (self.n * self.cfg.vqgan.out_channels * self.hw.0 * self.hw.1) as usize
     }
 
     /// Read a recorded intermediate by name (`enc.256`, `lq_feat`, `ft.03`,
@@ -488,10 +521,40 @@ fn layernorm(
     y
 }
 
+/// Broadcast-add a buffer shared across the whole batch (`bias`, `[len]`
+/// long) onto every image's `[len]`-long row of `x` (`[bsz, len]`, batch
+/// outer), without a new kernel: `bsz` separate `add2` dispatches, one per
+/// image, each binding `bias` whole and a `[len]` slice of `x`/`y`.
+///
+/// Exists for [`record_transformer`]'s position embedding: `position_emb` is
+/// one `[T,E]` tensor, identical for every image (the codebook, `q/k/v`
+/// weights, and every other transformer tensor are ALSO shared, but those
+/// reach every row through a GEMM, which already treats "more rows" as more
+/// batch - see `Op::Linear`'s own doc on the shared `vae::blocks` tape. A
+/// broadcast add has no such GEMM to hide behind, so it needs this loop
+/// instead of a host-side tile).
+fn add_shared_rows(b: &mut Builder, bsz: u32, len: u32, x: &DeviceBuffer, bias: &DeviceBuffer) -> DeviceBuffer {
+    let total = (bsz as u64) * (len as u64);
+    let y = b.act(total);
+    for i in 0..bsz {
+        let off = (i as u64) * (len as u64);
+        let step = b.gpu().step_sliced(
+            vae::blocks::ADD2_SLOT,
+            &[x, bias, &y],
+            &[(off, len as u64), (0, 0), (off, len as u64)],
+            &[len],
+            len,
+        );
+        b.push_step(step);
+    }
+    y
+}
+
 /// The code-prediction Transformer: `feat_emb` → `n_layers` ×
 /// `TransformerSALayer` → `idx_pred_layer` → `argmax_row`.
 ///
-/// Returns `(logits[T, codebook_size], argmax[T] as f32)`.
+/// Returns `(logits[bsz*T, codebook_size], argmax[bsz*T] as f32)` (`bsz =
+/// b.batch()`, `1` unless the caller set a real batch).
 ///
 /// The reference layer (`codeformer_arch.py:120`) is **pre-norm**, and the
 /// position embedding goes to q and k but NOT to v:
@@ -521,88 +584,104 @@ pub(crate) fn record_transformer(
     let heads = cfg.n_head;
     let hd = cfg.head_dim();
     let eps = cfg.ln_eps;
-    let (ne, nmlp) = ((t * e) as u64, (t * mlp) as u64);
+    // `bsz` images x `t` positions each, stacked as ONE `[bsz*t, ...]` row
+    // set - every `linear`/`layernorm` here is per-row independent, so
+    // "more rows" is the whole change, the same fold `Op::Linear`'s own doc
+    // documents for the shared `vae::blocks` tape. Self-attention is NOT
+    // per-row independent (it contracts over `t`), so its three dispatches
+    // below get a real `bsz` Params field instead - exactly what
+    // `vae::blocks::Builder::attn`'s own self-attention needed.
+    let bsz = b.batch();
+    let rows = bsz * t;
+    let (ne, nmlp) = ((rows * e) as u64, (rows * mlp) as u64);
 
     let pos = b.dev("position_emb");
-    let mut x = linear(b, "feat_emb", t, cfg.vqgan.emb_dim, e, lq_rows);
-    b.tap("feat_emb".into(), &x, t * e);
+    let mut x = linear(b, "feat_emb", rows, cfg.vqgan.emb_dim, e, lq_rows);
+    b.tap("feat_emb".into(), &x, rows * e);
 
     for l in 0..cfg.n_layers as usize {
         let p = CodeFormerConfig::layer_prefix(l);
-        let n1 = layernorm(b, ids, &format!("{p}.norm1"), e, t, eps, &x);
-        b.tap(format!("ft.{l:02}.norm1"), &n1, t * e);
+        let n1 = layernorm(b, ids, &format!("{p}.norm1"), e, rows, eps, &x);
+        b.tap(format!("ft.{l:02}.norm1"), &n1, rows * e);
 
-        // q = k = norm1(x) + position_emb; v = norm1(x).
-        let qk_in = b.add(t * e, &n1, &pos);
-        let qk = linear(b, &format!("{p}.self_attn.qk"), t, e, 2 * e, &qk_in);
+        // q = k = norm1(x) + position_emb; v = norm1(x). `position_emb` is
+        // ONE `[t,e]` tensor shared by every image in the batch, hence the
+        // per-image broadcast rather than a plain `add`.
+        let qk_in = add_shared_rows(b, bsz, t * e, &n1, &pos);
+        let qk = linear(b, &format!("{p}.self_attn.qk"), rows, e, 2 * e, &qk_in);
         b.free(ne, qk_in);
-        let v = linear(b, &format!("{p}.self_attn.v"), t, e, e, &n1);
+        let v = linear(b, &format!("{p}.self_attn.v"), rows, e, e, &n1);
         b.free(ne, n1);
 
         // `attn_scores_bidir`  Params: [bsz, n_heads, tcols, head_dim, qkv_stride, q_off, k_off]
         // `attn_softmax_bidir` Params: [bsz, n_heads, tcols]
         // `attn_apply_bidir`   Params: [bsz, n_heads, tcols, head_dim, qkv_stride, v_off, d_model]
-        let scores = b.act((heads * t * t) as u64);
+        let scores = b.act((bsz * heads * t * t) as u64);
         let step = b.gpu().step(
             ids.scores,
             &[&qk, &scores],
-            &[1, heads, t, hd, 2 * e, 0, e],
-            heads * t * t,
+            &[bsz, heads, t, hd, 2 * e, 0, e],
+            bsz * heads * t * t,
         );
         b.push_step(step);
-        b.free((2 * t * e) as u64, qk);
-        let probs = b.act((heads * t * t) as u64);
-        let step = b.gpu().step(ids.softmax, &[&scores, &probs], &[1, heads, t], heads * t);
+        b.free((bsz as u64) * (2 * t * e) as u64, qk);
+        let probs = b.act((bsz * heads * t * t) as u64);
+        let step = b.gpu().step(ids.softmax, &[&scores, &probs], &[bsz, heads, t], bsz * heads * t);
         b.push_step(step);
-        b.free((heads * t * t) as u64, scores);
+        b.free((bsz * heads * t * t) as u64, scores);
         let ctx = b.act(ne);
-        let step =
-            b.gpu().step(ids.apply, &[&probs, &v, &ctx], &[1, heads, t, hd, e, 0, e], heads * t * hd);
+        let step = b.gpu().step(
+            ids.apply,
+            &[&probs, &v, &ctx],
+            &[bsz, heads, t, hd, e, 0, e],
+            bsz * heads * t * hd,
+        );
         b.push_step(step);
-        b.free((heads * t * t) as u64, probs);
+        b.free((bsz * heads * t * t) as u64, probs);
         b.free(ne, v);
-        b.tap(format!("ft.{l:02}.ctx"), &ctx, t * e);
+        b.tap(format!("ft.{l:02}.ctx"), &ctx, rows * e);
 
-        let ao = linear(b, &format!("{p}.self_attn.out_proj"), t, e, e, &ctx);
+        let ao = linear(b, &format!("{p}.self_attn.out_proj"), rows, e, e, &ctx);
         b.free(ne, ctx);
-        b.tap(format!("ft.{l:02}.attn_out"), &ao, t * e);
-        let res = b.add(t * e, &x, &ao);
+        b.tap(format!("ft.{l:02}.attn_out"), &ao, rows * e);
+        let res = b.add(rows * e, &x, &ao);
         b.free(ne, ao);
         b.free(ne, x);
 
-        let n2 = layernorm(b, ids, &format!("{p}.norm2"), e, t, eps, &res);
-        b.tap(format!("ft.{l:02}.norm2"), &n2, t * e);
-        let h1 = linear(b, &format!("{p}.linear1"), t, e, mlp, &n2);
+        let n2 = layernorm(b, ids, &format!("{p}.norm2"), e, rows, eps, &res);
+        b.tap(format!("ft.{l:02}.norm2"), &n2, rows * e);
+        let h1 = linear(b, &format!("{p}.linear1"), rows, e, mlp, &n2);
         b.free(ne, n2);
-        b.tap(format!("ft.{l:02}.linear1"), &h1, t * mlp);
+        b.tap(format!("ft.{l:02}.linear1"), &h1, rows * mlp);
         // `F.gelu`'s default is the ERF form, not the tanh approximation.
         let hact = b.act(nmlp);
-        let step = b.gpu().step(K_GELU_ERF, &[&h1, &hact], &[t * mlp], t * mlp);
+        let step = b.gpu().step(K_GELU_ERF, &[&h1, &hact], &[rows * mlp], rows * mlp);
         b.push_step(step);
         b.free(nmlp, h1);
-        let mo = linear(b, &format!("{p}.linear2"), t, mlp, e, &hact);
+        let mo = linear(b, &format!("{p}.linear2"), rows, mlp, e, &hact);
         b.free(nmlp, hact);
-        b.tap(format!("ft.{l:02}.linear2"), &mo, t * e);
-        x = b.add(t * e, &res, &mo);
+        b.tap(format!("ft.{l:02}.linear2"), &mo, rows * e);
+        x = b.add(rows * e, &res, &mo);
         b.free(ne, mo);
         b.free(ne, res);
-        b.tap(format!("ft.{l:02}"), &x, t * e);
+        b.tap(format!("ft.{l:02}"), &x, rows * e);
     }
 
     // idx_pred_layer = Sequential(LayerNorm(E), Linear(E, K, bias=False)).
-    let ln = layernorm(b, ids, "idx_pred_layer.0", e, t, eps, &x);
-    b.tap("logits_norm".into(), &ln, t * e);
+    let ln = layernorm(b, ids, "idx_pred_layer.0", e, rows, eps, &x);
+    b.tap("logits_norm".into(), &ln, rows * e);
     b.free(ne, x);
     let k = cfg.vqgan.codebook_size;
     let head = b.dev("idx_pred_layer.1.weight");
-    let logits = matmul(b, t, e, k, &ln, &head);
+    let logits = matmul(b, rows, e, k, &ln, &head);
     b.free(ne, ln);
-    b.tap("logits".into(), &logits, t * k);
+    b.tap("logits".into(), &logits, rows * k);
 
     // `argmax_row` Params: [m, n]; one invocation per ROW, ties → lowest index,
-    // returned as f32 (exact below 2^24, and the codebook is 1024).
-    let idx = b.act(t as u64);
-    let step = b.gpu().step(K_ARGMAX_ROW, &[&logits, &idx], &[t, k], t);
+    // returned as f32 (exact below 2^24, and the codebook is 1024) - rows are
+    // per-image positions, so this needs no `bsz` field of its own.
+    let idx = b.act(rows as u64);
+    let step = b.gpu().step(K_ARGMAX_ROW, &[&logits, &idx], &[rows, k], rows);
     b.push_step(step);
     (logits, idx)
 }
@@ -633,8 +712,12 @@ fn record_fuse(
 ) -> DeviceBuffer {
     let p = CodeFormerConfig::fuse_prefix(tap);
     let c = tap.channels;
-    let n = c * h * w;
-    let nn = n as u64;
+    // Every buffer here is `[bsz, c, h, w]` - `enc`/`dec` come from the
+    // shared builder's own batched `run_blocks`, so `n` (this fuse block's
+    // element count) folds `bsz` in the same way theirs does.
+    let bsz = b.batch();
+    let nn = (bsz as u64) * (c * h * w) as u64;
+    let n = nn as u32;
 
     let cat = b.concat(c, c, h, w, enc, dec);
     let e = b.resnet(&format!("{p}.encode_enc"), 2 * c, c, h, w, &cat);
@@ -656,7 +739,10 @@ fn record_fuse(
     b.free(nn, prod);
     b.free(nn, shift);
 
-    // out = dec; out += w * residual
+    // out = dec; out += w * residual. `w` is the ONE fidelity dial for the
+    // whole batch (a serving-time knob, not per-image), which is exactly why
+    // `scale_add` broadcasting `gate[0]` over the WHOLE (now batched) `n`
+    // remains correct unchanged.
     let out = b.act(nn);
     // `region_copy` Params: [rows, width, row_stride, off] — one whole row.
     let step = b.gpu().step(K_REGION_COPY, &[dec, &out], &[1, n, n, 0], n);
@@ -680,15 +766,15 @@ fn record_tower(
     w: u32,
     x: &DeviceBuffer,
 ) -> DeviceBuffer {
-    let n = c * h * w;
+    let n = (b.batch() as u64) * (c * h * w) as u64;
     let a = b.conv(&format!("{prefix}.0"), c, c, 3, 1, h, w, x);
     // `leaky_relu` Params: [total, slope] (slope bit-cast into the uniform).
-    let l = b.act(n as u64);
-    let step = b.gpu().step(K_LEAKY_RELU, &[&a, &l], &[n, f(cfg.leaky_slope)], n);
+    let l = b.act(n);
+    let step = b.gpu().step(K_LEAKY_RELU, &[&a, &l], &[n as u32, f(cfg.leaky_slope)], n as u32);
     b.push_step(step);
-    b.free(n as u64, a);
+    b.free(n, a);
     let y = b.conv(&format!("{prefix}.2"), c, c, 3, 1, h, w, &l);
-    b.free(n as u64, l);
+    b.free(n, l);
     y
 }
 

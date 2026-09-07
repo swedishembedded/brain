@@ -198,10 +198,21 @@ impl Trace {
 
     fn emit(&self, r: &mut Rev, grads: &Grads, op: &Op) {
         match op {
-            Op::Conv { w, b, cin, cout, k, stride, pad, h, w_in, ho, wo, x, y } => {
+            Op::Conv { w, b, cin, cout, k, stride, pad, h, w_in, ho, wo, n, x, y } => {
                 let Some(dy) = r.get(y) else { return };
-                let p = [1, *cin, *h, *w_in, *cout, *k, *stride, *pad, *ho, *wo];
-                let (hw, n_in) = (ho * wo, cin * h * w_in);
+                let bsz = *n;
+                let p = [bsz, *cin, *h, *w_in, *cout, *k, *stride, *pad, *ho, *wo];
+                let (hw, per_in) = (ho * wo, cin * h * w_in);
+                // Every row-count below is the WHOLE batch's rows stacked
+                // (`bsz * hw`), not one image's - `dW`/`dbias` correctly SUM
+                // their gradient over every row regardless of which image it
+                // came from (the weight/bias is shared across the batch,
+                // exactly what `conv2d_dw`'s own internal `N`-loop already
+                // does for the direct kernel), and the lowered path's `im2col`/
+                // `col2im` bind one image's slice at a time in a loop (neither
+                // kernel carries a batch dimension of its own).
+                let rows_total = bsz * hw;
+                let n_in = (bsz as u64) * per_in as u64;
                 let cinkk = cin * k * k;
                 // `backend_api::select::Op::Conv2dBackward` picks
                 // `KernelVariant::RegisterTiled` for BOTH dW's and dX's
@@ -237,30 +248,39 @@ impl Trace {
                 // same [HW, Cout] view — dW's GEMM, `bias_grad`, and dX's GEMM —
                 // and transposing per consumer showed up immediately as
                 // `nchw_nlc` doubling to 182 calls in the profile.
-                let t = r.tmp((cout * hw) as u64);
-                r.push(r.gpu.step(K_NCHW_NLC, &[&dy, &t], &[cout * hw, *cout, hw], cout * hw));
+                let t = r.tmp((rows_total * cout) as u64);
+                r.push(r.gpu.step(K_NCHW_NLC, &[&dy, &t], &[rows_total * cout, *cout, hw], rows_total * cout));
 
                 if lowered {
-                    let col = r.tmp((hw * cinkk) as u64);
-                    r.push(r.gpu.step(
-                        K_IM2COL_AT,
-                        &[x, &col],
-                        &[*cin, *h, *w_in, *k, *stride, *pad, *ho, *wo, cinkk, 0, hw],
-                        hw * cinkk,
-                    ));
+                    // Every image's `im2col` window, stacked as consecutive row
+                    // ranges of ONE `col` scratch (`im2col_at` itself has no
+                    // batch dimension - see its own doc - so this loop over
+                    // `bsz` is what the forward's `conv_s` already does).
+                    let col = r.tmp((rows_total * cinkk) as u64);
+                    for ni in 0..bsz {
+                        let x_off = (ni as u64) * per_in as u64;
+                        let col_off = (ni as u64) * (hw * cinkk) as u64;
+                        r.push(r.gpu.step_sliced(
+                            K_IM2COL_AT,
+                            &[x, &col],
+                            &[(x_off, per_in as u64), (col_off, (hw * cinkk) as u64)],
+                            &[*cin, *h, *w_in, *k, *stride, *pad, *ho, *wo, cinkk, 0, hw],
+                            hw * cinkk,
+                        ));
+                    }
                     // dW's tile grid is ceil(Cout/128)*ceil(CinKK/128) — it does
                     // NOT grow with the contraction length, so a wide-shallow
                     // conv launches a handful of workgroups and idles the card.
                     // Split the contraction to reach `DW_SPLITK_TARGET_WGS`.
                     let tiles = cout.div_ceil(128) * cinkk.div_ceil(128);
-                    let slices = super::DW_SPLITK_TARGET_WGS.div_ceil(tiles).max(1).min(hw.div_ceil(8));
+                    let slices = super::DW_SPLITK_TARGET_WGS.div_ceil(tiles).max(1).min(rows_total.div_ceil(8));
                     if slices > 1 {
                         let rc = (*cout as u64) * cinkk as u64;
                         let part = r.tmp(rc * slices as u64);
                         r.push(r.gpu.step(
                             r.ids.k(B_MATMUL_DW_SPLITK),
                             &[&t, &col, &part],
-                            &[hw, cinkk, *cout, slices],
+                            &[rows_total, cinkk, *cout, slices],
                             slices * tiles * 256,
                         ));
                         r.push(r.gpu.step(
@@ -276,19 +296,21 @@ impl Trace {
                         r.push(r.gpu.step(
                             r.ids.k(B_MATMUL_DW_REG),
                             &[&t, &col, grads.g(w)],
-                            &[hw, cinkk, *cout],
+                            &[rows_total, cinkk, *cout],
                             tiles * 256,
                         ));
                     }
-                    r.give((hw * cinkk) as u64, col);
+                    r.give((rows_total * cinkk) as u64, col);
                 } else {
                     r.push(r.gpu.step(r.ids.k(B_CONV_DW), &[&dy, x, grads.g(w)], &p, cout * cin * k * k));
                 }
                 // `bias_grad` reduces a [rows, features] buffer down its rows,
                 // but `dy` is NCHW = feature-major. One `nchw_nlc` puts the
                 // channels last; the alternative would be a new NCHW bias
-                // reduction kernel, and this composition needs neither.
-                r.bias_grad(&t, grads.g(b), hw, *cout);
+                // reduction kernel, and this composition needs neither. `rows`
+                // is the WHOLE batch's positions - a bias gradient sums over
+                // every one of them, same as `dW`'s above.
+                r.bias_grad(&t, grads.g(b), rows_total, *cout);
 
                 // dX (assigns) -> accumulate. Two paths:
                 //
@@ -299,6 +321,10 @@ impl Trace {
                 //    put it at a large share of a VQGAN training step, several
                 //    times the cost of the forward conv it mirrors. The lowering
                 //    measured faster at every shape in `vqgan_bench convbwd`.
+                //    `col2im`'s own doc records that it binds one image's slice
+                //    at a time - its `N` field decodes `dx`'s coordinate, not a
+                //    batch dimension in `dcol` - so, like `im2col_at` above,
+                //    this is a loop over `bsz`.
                 //  * DIRECT — below `GEMM_CONV_BWD_MIN_COUT`, and on any device
                 //    without workgroup reductions: `matmul_dx_reg` carries
                 //    barriers the CPU JIT cannot compile, so this branches on the
@@ -307,59 +333,73 @@ impl Trace {
                 // The NLC transpose the GEMM needs is `t`, which bias_grad has
                 // already built — so the fast path costs one transpose less than
                 // it looks.
-                let dx = r.tmp(n_in as u64);
+                let dx = r.tmp(n_in);
                 if lowered {
-                    let dcol = r.tmp((hw * cinkk) as u64);
+                    let dcol = r.tmp((rows_total * cinkk) as u64);
                     r.push(r.gpu.step(
                         r.ids.k(B_MATMUL_DX_REG),
                         &[&t, self.weight(w), &dcol],
-                        &[hw, cinkk, *cout, 0],
-                        hw.div_ceil(128) * cinkk.div_ceil(128) * 256,
+                        &[rows_total, cinkk, *cout, 0],
+                        rows_total.div_ceil(128) * cinkk.div_ceil(128) * 256,
                     ));
-                    r.push(r.gpu.step(
-                        r.ids.k(B_COL2IM),
-                        &[&dcol, &dx],
-                        &[1, *cin, *h, *w_in, *k, *stride, *pad, *ho, *wo, cinkk],
-                        n_in,
-                    ));
-                    r.give((hw * cinkk) as u64, dcol);
+                    for ni in 0..bsz {
+                        let dcol_off = (ni as u64) * (hw * cinkk) as u64;
+                        let dx_off = (ni as u64) * per_in as u64;
+                        r.push(r.gpu.step_sliced(
+                            r.ids.k(B_COL2IM),
+                            &[&dcol, &dx],
+                            &[(dcol_off, (hw * cinkk) as u64), (dx_off, per_in as u64)],
+                            &[1, *cin, *h, *w_in, *k, *stride, *pad, *ho, *wo, cinkk],
+                            per_in,
+                        ));
+                    }
+                    r.give((rows_total * cinkk) as u64, dcol);
                 } else {
-                    r.push(r.gpu.step(r.ids.k(B_CONV_DX), &[&dy, self.weight(w), &dx], &p, n_in));
+                    r.push(r.gpu.step(r.ids.k(B_CONV_DX), &[&dy, self.weight(w), &dx], &p, n_in as u32));
                 }
-                r.give((cout * hw) as u64, t);
-                r.acc(x, n_in as u64, &dx, 1.0);
-                r.give(n_in as u64, dx);
+                r.give((rows_total * cout) as u64, t);
+                r.acc(x, n_in, &dx, 1.0);
+                r.give(n_in, dx);
             }
-            Op::Gn { gb, c, h, w, g, x, stats, y } => {
+            Op::Gn { gb, c, h, w, g, n, x, stats, y } => {
                 let Some(dy) = r.get(y) else { return };
-                let n = c * h * w;
-                let p = [1, *c, *h, *w, *g];
+                let bsz = *n;
+                let total = (bsz as u64) * (c * h * w) as u64;
+                let p = [bsz, *c, *h, *w, *g];
                 let gbuf = self.weight(gb);
                 // dyg = dy * gamma, the shared input of gn_dsum and gn_dx.
-                let dyg = r.tmp(n as u64);
-                r.push(r.gpu.step(r.ids.k(B_SCALE_CHAN), &[&dy, gbuf, &dyg], &[n, *c, h * w], n));
-                let sums = r.tmp(4 * *g as u64);
+                // `scale_chan`'s Params are the generic `[rows,C,inner]` shape
+                // (see its own doc) - a leading batch axis is already exactly
+                // what "more rows" means to it, so `total` folding `bsz` in is
+                // the whole change.
+                let dyg = r.tmp(total);
+                r.push(r.gpu.step(r.ids.k(B_SCALE_CHAN), &[&dy, gbuf, &dyg], &[total as u32, *c, h * w], total as u32));
+                let sums = r.tmp((bsz * 4 * *g) as u64);
                 // Two-stage, barrier-free. `gn_dsum` is ONE invocation per
-                // group (32 lanes walking (C/G)*H*W elements each), measured at
-                // well under one percent of the card's bandwidth roof and a
-                // quarter of the whole backward. Stage 1 splits each group
-                // across `GN_P` partials (coalesced, strided), stage 2 folds
-                // them. No workgroupBarrier,
-                // so this needs no capability branch and `backend-cpu` gets it
-                // too — the same shape as the forward's `gn_part`/`gn_stats2`.
-                let part = r.tmp(2 * *g as u64 * super::GN_P as u64);
-                let pp = [1, *c, *h, *w, *g, super::GN_P];
-                r.push(r.gpu.step(r.ids.k(B_GN_DSUM_PART), &[x, &dyg, stats, &part], &pp, g * super::GN_P));
-                r.push(r.gpu.step(r.ids.k(B_GN_DSUM2), &[&part, stats, &sums], &pp, *g));
-                r.give(2 * *g as u64 * super::GN_P as u64, part);
+                // (n,g) group (32 lanes walking (C/G)*H*W elements each),
+                // measured at well under one percent of the card's bandwidth
+                // roof and a quarter of the whole backward. Stage 1 splits each
+                // group across `GN_P` partials (coalesced, strided), stage 2
+                // folds them. No workgroupBarrier, so this needs no capability
+                // branch and `backend-cpu` gets it too - the same shape as the
+                // forward's `gn_part`/`gn_stats2`.
+                let part = r.tmp((bsz * *g) as u64 * 2 * super::GN_P as u64);
+                let pp = [bsz, *c, *h, *w, *g, super::GN_P];
+                r.push(r.gpu.step(r.ids.k(B_GN_DSUM_PART), &[x, &dyg, stats, &part], &pp, bsz * g * super::GN_P));
+                r.push(r.gpu.step(r.ids.k(B_GN_DSUM2), &[&part, stats, &sums], &pp, bsz * g));
+                r.give((bsz * *g) as u64 * 2 * super::GN_P as u64, part);
                 // dgamma -> dgb[0..C], dbeta -> dgb[C..2C]: disjoint writes into
-                // the same fused buffer, both accumulating.
+                // the same fused buffer, both accumulating, and both SUMMED
+                // over the whole batch (gamma/beta are shared parameters, not
+                // per-image, so `gn_dgb_part`'s own internal `N*H*W` walk per
+                // channel is exactly this sum - no extra loop needed here,
+                // unlike `dW`/`col2im` above).
                 // Two-stage, and ONE pass over `dy` for both affine gradients.
                 // `gn_dgamma`/`gn_dbeta` were a lane per channel walking N*H*W
                 // each, together a couple of percent of the bandwidth roof, and
                 // each read the whole of `dy` separately.
                 let dgb_part = r.tmp(2 * *c as u64 * super::GN_P as u64);
-                let pg = [1, *c, *h, *w, *g, super::GN_P];
+                let pg = [bsz, *c, *h, *w, *g, super::GN_P];
                 r.push(r.gpu.step(
                     r.ids.k(B_GN_DGB_PART),
                     &[x, &dy, stats, &dgb_part],
@@ -368,12 +408,12 @@ impl Trace {
                 ));
                 r.push(r.gpu.step(r.ids.k(B_GN_DGB2), &[&dgb_part, grads.g(gb)], &pg, *c));
                 r.give(2 * *c as u64 * super::GN_P as u64, dgb_part);
-                let dx = r.tmp(n as u64);
-                r.push(r.gpu.step(r.ids.k(B_GN_DX), &[x, &dyg, &sums, &dx], &p, n));
-                r.acc(x, n as u64, &dx, 1.0);
-                r.give(n as u64, dx);
-                r.give(4 * *g as u64, sums);
-                r.give(n as u64, dyg);
+                let dx = r.tmp(total);
+                r.push(r.gpu.step(r.ids.k(B_GN_DX), &[x, &dyg, &sums, &dx], &p, total as u32));
+                r.acc(x, total, &dx, 1.0);
+                r.give(total, dx);
+                r.give((bsz * 4 * *g) as u64, sums);
+                r.give(total, dyg);
             }
             Op::Silu { n, x, y } => {
                 let Some(dy) = r.get(y) else { return };
@@ -387,37 +427,43 @@ impl Trace {
                 r.acc(a, *n as u64, &dy, 1.0);
                 r.acc(b, *n as u64, &dy, 1.0);
             }
-            Op::Up2 { c, h, w, x, y } => {
+            Op::Up2 { c, h, w, n, x, y } => {
                 let Some(dy) = r.get(y) else { return };
-                let n = c * h * w;
-                let dx = r.tmp(n as u64);
-                r.push(r.gpu.step(r.ids.k(B_UPSAMPLE2_DX), &[&dy, &dx], &[1, *c, *h, *w], n));
-                r.acc(x, n as u64, &dx, 1.0);
-                r.give(n as u64, dx);
+                let total = (*n as u64) * (c * h * w) as u64;
+                let dx = r.tmp(total);
+                r.push(r.gpu.step(r.ids.k(B_UPSAMPLE2_DX), &[&dy, &dx], &[*n, *c, *h, *w], total as u32));
+                r.acc(x, total, &dx, 1.0);
+                r.give(total, dx);
             }
-            // A layout permutation is its own transpose's adjoint.
-            Op::NchwNlc { c, hw, x, y } => {
+            // A layout permutation is its own transpose's adjoint. `total`
+            // folds the batch in exactly as the forward's `Builder::
+            // nchw_to_rows`/`rows_to_nchw` do.
+            Op::NchwNlc { c, hw, n, x, y } => {
                 let Some(dy) = r.get(y) else { return };
-                let n = c * hw;
-                let dx = r.tmp(n as u64);
-                r.push(r.gpu.step(K_NLC_NCHW, &[&dy, &dx], &[n, *c, *hw], n));
-                r.acc(x, n as u64, &dx, 1.0);
-                r.give(n as u64, dx);
+                let total = (*n as u64) * (c * hw) as u64;
+                let dx = r.tmp(total);
+                r.push(r.gpu.step(K_NLC_NCHW, &[&dy, &dx], &[total as u32, *c, *hw], total as u32));
+                r.acc(x, total, &dx, 1.0);
+                r.give(total, dx);
             }
-            Op::NlcNchw { c, hw, x, y } => {
+            Op::NlcNchw { c, hw, n, x, y } => {
                 let Some(dy) = r.get(y) else { return };
-                let n = c * hw;
-                let dx = r.tmp(n as u64);
-                r.push(r.gpu.step(K_NCHW_NLC, &[&dy, &dx], &[n, *c, *hw], n));
-                r.acc(x, n as u64, &dx, 1.0);
-                r.give(n as u64, dx);
+                let total = (*n as u64) * (c * hw) as u64;
+                let dx = r.tmp(total);
+                r.push(r.gpu.step(K_NCHW_NLC, &[&dy, &dx], &[total as u32, *c, *hw], total as u32));
+                r.acc(x, total, &dx, 1.0);
+                r.give(total, dx);
             }
-            Op::Attn { c, t, heads, head_dim, qkv, probs, y } => {
+            Op::Attn { c, t, heads, head_dim, n, qkv, probs, y } => {
                 let Some(d_ctx) = r.get(y) else { return };
+                let bsz = *n;
                 // The head split the FORWARD used, over the fused [T, 3C] rows
-                // — not an assumed single head (see `Op::Attn`).
+                // - not an assumed single head (see `Op::Attn`) - and the
+                // batch count it recorded, since `Bidir`/`bidir_bwd` are
+                // already fully `b`-parameterised (the same helper the
+                // FORWARD's `Builder::self_attn` calls).
                 let a = model::block::Bidir {
-                    b: 1,
+                    b: bsz,
                     t: *t,
                     n_heads: *heads,
                     head_dim: *head_dim,
@@ -426,8 +472,8 @@ impl Trace {
                     k_off: *c,
                     v_off: 2 * c,
                 };
-                let dscores = r.tmp((heads * t * t) as u64);
-                let d_qkv = r.tmp((3 * c * t) as u64);
+                let dscores = r.tmp((bsz as u64) * (heads * t * t) as u64);
+                let d_qkv = r.tmp((bsz as u64) * (3 * c * t) as u64);
                 // The quartet ASSIGNS into three disjoint regions of `d_qkv`
                 // (q at 0, k at C, v at 2C), so it needs no pre-zeroing.
                 let steps = model::block::bidir_bwd(
@@ -443,9 +489,9 @@ impl Trace {
                 for s in steps {
                     r.push(s);
                 }
-                r.acc(qkv, (3 * c * t) as u64, &d_qkv, 1.0);
-                r.give((3 * c * t) as u64, d_qkv);
-                r.give((heads * t * t) as u64, dscores);
+                r.acc(qkv, (bsz as u64) * (3 * c * t) as u64, &d_qkv, 1.0);
+                r.give((bsz as u64) * (3 * c * t) as u64, d_qkv);
+                r.give((bsz as u64) * (heads * t * t) as u64, dscores);
             }
             // ---- the transformer half -------------------------------------
             // `y = x·Wᵀ (+ b)`. `d_W` and `d_b` ACCUMULATE (one weight, many
@@ -570,17 +616,18 @@ impl Trace {
             }
             // A concat's adjoint is two slices of `dy` - a gather per output
             // element, no scatter.
-            Op::Concat { ca, cb, hw, a, b, y } => {
+            Op::Concat { ca, cb, hw, n, a, b, y } => {
                 let Some(dy) = r.get(y) else { return };
+                let bsz = *n;
                 let ctot = ca + cb;
-                let (na, nb) = ((*ca as u64) * (*hw as u64), (*cb as u64) * (*hw as u64));
+                let (na, nb) = ((bsz as u64) * (*ca as u64) * (*hw as u64), (bsz as u64) * (*cb as u64) * (*hw as u64));
                 // `concat_split` Params: [N, Ctot, Csrc, c_off, H, W]; `W = 1`
                 // and `H = hw` is the flat form (the kernel only ever uses H*W).
                 let da = r.tmp(na);
-                r.push(r.gpu.step(r.ids.k(B_CONCAT_SPLIT), &[&dy, &da], &[1, ctot, *ca, 0, *hw, 1], ca * hw));
+                r.push(r.gpu.step(r.ids.k(B_CONCAT_SPLIT), &[&dy, &da], &[bsz, ctot, *ca, 0, *hw, 1], bsz * ca * hw));
                 r.acc(a, na, &da, 1.0);
                 let db = r.tmp(nb);
-                r.push(r.gpu.step(r.ids.k(B_CONCAT_SPLIT), &[&dy, &db], &[1, ctot, *cb, *ca, *hw, 1], cb * hw));
+                r.push(r.gpu.step(r.ids.k(B_CONCAT_SPLIT), &[&dy, &db], &[bsz, ctot, *cb, *ca, *hw, 1], bsz * cb * hw));
                 r.acc(b, nb, &db, 1.0);
                 r.give(na, da);
                 r.give(nb, db);

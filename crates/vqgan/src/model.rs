@@ -203,6 +203,10 @@ pub struct Vqgan {
     /// Input image size and the latent grid it produces.
     hw: (u32, u32),
     lhw: (u32, u32),
+    /// The batch this graph was built for (`1` unless built with
+    /// [`Vqgan::new_batched`]). `encode`/`decode`/`generate`/`latent`/
+    /// `quantized` all read images `[n, ...]`-shaped.
+    n: u32,
     encode_steps: Vec<Step>,
     decode_steps: Vec<Step>,
     /// Index in `decode_steps` where the generator starts (the codebook gather
@@ -225,6 +229,35 @@ impl Vqgan {
     /// every activation (the builder's buffer pool is disabled), so leave it
     /// off outside tests.
     pub fn new(cfg: VqganConfig, tensors: &Tensors, h: u32, w: u32, gpu: Gpu, taps: bool) -> Vqgan {
+        Self::build(cfg, tensors, h, w, gpu, taps, 1)
+    }
+
+    /// Same as [`Vqgan::new`], but for a batch of `n` images through ONE
+    /// graph (`vae::blocks::Builder::set_batch`): `encode`/`decode`/
+    /// `generate`/`latent`/`quantized` all take/return `[n, ...]`-shaped
+    /// buffers.
+    ///
+    /// The codebook search (`vq_argmin`) and gather (`embed`) need no change
+    /// to reach `n`: both are already row-independent - one invocation per
+    /// query position, no dependency between rows - so passing `n * t`
+    /// queries (`t` positions per image) covers the whole batch with the
+    /// SAME two kernels [`Vqgan::new`] uses at `n = 1`. Only the encoder's
+    /// and generator's conv/GroupNorm/attention blocks needed the shared
+    /// builder's real batch count; the quantizer never hardcoded one.
+    pub fn new_batched(
+        cfg: VqganConfig,
+        tensors: &Tensors,
+        h: u32,
+        w: u32,
+        gpu: Gpu,
+        taps: bool,
+        n: u32,
+    ) -> Vqgan {
+        Self::build(cfg, tensors, h, w, gpu, taps, n)
+    }
+
+    fn build(cfg: VqganConfig, tensors: &Tensors, h: u32, w: u32, gpu: Gpu, taps: bool, n: u32) -> Vqgan {
+        assert!(n > 0, "vqgan: batch count must be positive");
         let scale = cfg.downscale();
         assert!(
             h.is_multiple_of(scale) && w.is_multiple_of(scale),
@@ -233,6 +266,7 @@ impl Vqgan {
         let (lh, lw) = (h / scale, w / scale);
         let t = lh * lw;
         let emb = cfg.emb_dim;
+        let nq = n * t; // queries the codebook search/gather cover: n images x t positions each.
 
         // The codebook is read by both graphs; upload it once.
         let codebook = {
@@ -242,27 +276,30 @@ impl Vqgan {
         };
 
         // ---- encoder + assignment ------------------------------------------
-        let img_in = gpu.storage((cfg.in_channels * h * w) as u64);
+        let img_in = gpu.storage((n * cfg.in_channels * h * w) as u64);
         let mut b =
             Builder::new(&gpu, tensors, cfg.norm_eps, cfg.norm_groups, BlockNames::vqgan(), taps);
+        b.set_batch(n);
         let z = run_blocks(&mut b, "encoder", &cfg.encoder_blocks(), 0, h, w, &img_in).0;
 
-        // z[emb, lh, lw] → z_flat[T, emb]: the quantizer's `z.permute(0,2,3,1)
-        // .view(-1, emb_dim)`, which is exactly the NCHW→NLC permutation.
+        // z[n,emb, lh, lw] → z_flat[n*T, emb]: the quantizer's
+        // `z.permute(0,2,3,1).view(-1, emb_dim)`, which is exactly the
+        // NCHW→NLC permutation (batched - see `Builder::nchw_to_rows`).
         let z_flat = b.nchw_to_rows(emb, t, &z);
-        b.tap("z_flat".into(), &z_flat, emb * t);
-        let packed = record_assign(&mut b, &codebook, t, cfg.codebook_size, emb, &z_flat);
-        b.free((emb * t) as u64, z_flat);
+        b.tap("z_flat".into(), &z_flat, nq * emb);
+        let packed = record_assign(&mut b, &codebook, nq, cfg.codebook_size, emb, &z_flat);
+        b.free((nq * emb) as u64, z_flat);
         let (encode_steps, mut all_taps) = b.finish();
 
         // ---- codebook gather + generator ------------------------------------
-        let idx_in = gpu.storage(t as u64);
+        let idx_in = gpu.storage(nq as u64);
         let mut b =
             Builder::new(&gpu, tensors, cfg.norm_eps, cfg.norm_groups, BlockNames::vqgan(), taps);
-        let rows = record_lookup(&mut b, &codebook, t, emb, &idx_in);
+        b.set_batch(n);
+        let rows = record_lookup(&mut b, &codebook, nq, emb, &idx_in);
         let z_q = b.rows_to_nchw(emb, t, &rows);
-        b.free((t * emb) as u64, rows);
-        b.tap("z_q".into(), &z_q, emb * t);
+        b.free((nq * emb) as u64, rows);
+        b.tap("z_q".into(), &z_q, nq * emb);
         let gather_end = b.n_steps();
         let (out, (oh, ow)) = run_blocks(&mut b, "generator", &cfg.generator_blocks(), 0, lh, lw, &z_q);
         assert_eq!((oh, ow), (h, w), "vqgan: generator output {oh}x{ow} != input {h}x{w}");
@@ -274,6 +311,7 @@ impl Vqgan {
             cfg,
             hw: (h, w),
             lhw: (lh, lw),
+            n,
             encode_steps,
             decode_steps,
             gather_end,
@@ -296,23 +334,26 @@ impl Vqgan {
         self.lhw
     }
 
-    /// Encode an image `[in_channels·H·W]` (row-major NCHW, batch 1) and assign
-    /// each latent position to its nearest code. Returns `(indices, min_dist)`;
-    /// the continuous latent stays on the device (see [`Vqgan::latent`]).
+    /// Encode `n` images `[n, in_channels, H, W]` (row-major NCHW, `n = 1`
+    /// unless built with [`Vqgan::new_batched`]) and assign each latent
+    /// position of each image to its nearest code. Returns `(indices,
+    /// min_dist)`, `n * t` long; the continuous latent stays on the device
+    /// (see [`Vqgan::latent`]).
     pub fn encode(&self, image: &[f32]) -> (Vec<u32>, Vec<f32>) {
-        let n = (self.cfg.in_channels * self.hw.0 * self.hw.1) as usize;
-        assert_eq!(image.len(), n, "vqgan: image has {} values, expected {n}", image.len());
+        let want = (self.n * self.cfg.in_channels * self.hw.0 * self.hw.1) as usize;
+        assert_eq!(image.len(), want, "vqgan: image has {} values, expected {want}", image.len());
         let bits: Vec<u32> = image.iter().map(|v| v.to_bits()).collect();
         self.gpu.write(&self.img_in, &bits);
         self.gpu.submit(&[], &self.encode_steps);
-        let t = (self.lhw.0 * self.lhw.1) as usize;
-        unpack(&self.gpu.read(&self.packed, 2 * t))
+        let nq = (self.n * self.lhw.0 * self.lhw.1) as usize;
+        unpack(&self.gpu.read(&self.packed, 2 * nq))
     }
 
-    /// Gather `indices` from the codebook and run the generator.
+    /// Gather `n * t` `indices` from the codebook and run the generator over
+    /// all `n` images.
     pub fn decode(&self, indices: &[u32]) -> Vec<f32> {
-        let t = (self.lhw.0 * self.lhw.1) as usize;
-        assert_eq!(indices.len(), t, "vqgan: {} indices, expected {t}", indices.len());
+        let nq = (self.n * self.lhw.0 * self.lhw.1) as usize;
+        assert_eq!(indices.len(), nq, "vqgan: {} indices, expected {nq}", indices.len());
         // The `embed` gather indexes `codebook[idx * d + c]` with NO bounds
         // check — brain compiles its shaders with `ShaderRuntimeChecks`
         // *unchecked*, so an out-of-range code reads past the buffer instead of
@@ -327,12 +368,12 @@ impl Vqgan {
         self.gpu.read(&self.out, self.out_len())
     }
 
-    /// Run the generator on a caller-supplied latent `[emb_dim·lh·lw]`,
+    /// Run the generator on a caller-supplied latent `[n, emb_dim, lh, lw]`,
     /// skipping the codebook gather — the seam CodeFormer's controllable
     /// feature transformation plugs into.
     pub fn generate(&self, z_q: &[f32]) -> Vec<f32> {
-        let n = (self.cfg.emb_dim * self.lhw.0 * self.lhw.1) as usize;
-        assert_eq!(z_q.len(), n, "vqgan: latent has {} values, expected {n}", z_q.len());
+        let want = (self.n * self.cfg.emb_dim * self.lhw.0 * self.lhw.1) as usize;
+        assert_eq!(z_q.len(), want, "vqgan: latent has {} values, expected {want}", z_q.len());
         let bits: Vec<u32> = z_q.iter().map(|v| v.to_bits()).collect();
         self.gpu.write(&self.z_q, &bits);
         self.gpu.submit(&[], &self.decode_steps[self.gather_end..]);
@@ -346,21 +387,22 @@ impl Vqgan {
         Reconstruction { indices, min_dist, image }
     }
 
-    /// The continuous encoder output `[emb_dim·lh·lw]` from the last
+    /// The continuous encoder output `[n, emb_dim, lh, lw]` from the last
     /// [`Vqgan::encode`].
     pub fn latent(&self) -> Vec<f32> {
-        let n = (self.cfg.emb_dim * self.lhw.0 * self.lhw.1) as usize;
+        let n = (self.n * self.cfg.emb_dim * self.lhw.0 * self.lhw.1) as usize;
         self.gpu.read(&self.z, n)
     }
 
-    /// The quantized latent `[emb_dim·lh·lw]` from the last [`Vqgan::decode`].
+    /// The quantized latent `[n, emb_dim, lh, lw]` from the last
+    /// [`Vqgan::decode`].
     pub fn quantized(&self) -> Vec<f32> {
-        let n = (self.cfg.emb_dim * self.lhw.0 * self.lhw.1) as usize;
+        let n = (self.n * self.cfg.emb_dim * self.lhw.0 * self.lhw.1) as usize;
         self.gpu.read(&self.z_q, n)
     }
 
     fn out_len(&self) -> usize {
-        (self.cfg.out_channels * self.hw.0 * self.hw.1) as usize
+        (self.n * self.cfg.out_channels * self.hw.0 * self.hw.1) as usize
     }
 
     /// Read a recorded intermediate by name (`encoder.blocks.7`,
@@ -410,6 +452,10 @@ pub fn run_blocks(
     w: u32,
     input: &DeviceBuffer,
 ) -> (DeviceBuffer, (u32, u32)) {
+    // Every buffer a block hands back is `[n, ...]`-shaped (`n =
+    // b.batch()`), so the length tracking this loop does for the pool/frees
+    // has to scale the same way a block itself would.
+    let bn = b.batch() as u64;
     let (mut hh, mut ww) = (h, w);
     let mut x = input.clone();
     let mut xlen = 0u64; // length of `x` when we own it (0 = caller-owned)
@@ -431,7 +477,7 @@ pub fn run_blocks(
                 hh *= 2;
                 ww *= 2;
                 let y = b.conv(&format!("{p}.conv"), c, c, 3, 1, hh, ww, &up);
-                b.free((c * hh * ww) as u64, up);
+                b.free(bn * (c * hh * ww) as u64, up);
                 (y, false)
             }
             // The VQGAN head is GroupNorm → Conv2d: no activation between them.
@@ -441,7 +487,7 @@ pub fn run_blocks(
         if xlen != 0 {
             b.free(xlen, prev);
         }
-        xlen = (blk.out_channels() * hh * ww) as u64;
+        xlen = bn * (blk.out_channels() * hh * ww) as u64;
         if !self_tapped {
             b.tap(p, &x, xlen as u32);
         }

@@ -22,10 +22,6 @@ its own backward is `check_vqgan`) and `check_codeformer_one_layer`, wired in
       face-alignment code targets a different landmark template than this
       model expects, so it can't be reused as-is; the restorer currently
       takes an already-aligned face
-- [ ] Batch > 1 support in the forward graph. Batch size is hardcoded to 1 in
-      the shared `vae::blocks` builder this crate and the diffusion VAE both
-      use, so the fix lands **there**, not as a codeformer-only fork - and
-      pays off for every VAE-family model at once
 - [ ] Input sizes other than 512x512
 - [ ] Performance profiling / optimization pass
 
@@ -39,8 +35,33 @@ Not gaps, recorded so they stop being re-opened:
   serving contract asks for.
 - `run_batch` is the serial default *with a stated reason*
   (`resident_restore.rs`: batching is no better a trade than running twice),
-  which the contract permits.
+  which the contract permits. This does NOT mean the forward graph itself
+  cannot batch (see below) - it means the serving contract chose not to wire
+  that capability up, for a reason unrelated to whether it exists.
 
 The position embedding is a fixed-size parameter with no interpolation, so
 the architecture itself is pinned to one input resolution rather than being
 resizable at runtime.
+
+**Batch > 1 in the forward graph is done.** The earlier note here ("batch
+size is hardcoded to 1 in the shared `vae::blocks` builder") was imprecise:
+every batch-sensitive kernel the builder dispatches has ALWAYS taken an
+`N`/`bsz` parameter and indexed per-sample correctly - the gap was purely
+that `vae::blocks::Builder` hardcoded that parameter to `1` at every dispatch
+site. That is fixed (`Builder::set_batch`), and it is what `CodeFormer::
+new_batched` builds on for the encoder and generator ([`vqgan::model::
+run_blocks`], shared with `crates/vqgan`). The code-prediction Transformer
+and the controllable feature transformation are NOT `vae::blocks` - they
+dispatch `attn_scores_bidir`/`_softmax`/`_apply` and the CFT's elementwise
+kernels directly - so `new_batched` threads `n` through those by hand too:
+the Transformer's self-attention gets a real `bsz` Params field (exactly what
+crossing batch elements there would otherwise risk, the same failure mode
+`vae::blocks::Builder::attn`'s own self-attention had to avoid), and its
+position embedding - one `[T,E]` tensor shared by every image, not itself
+batched - is broadcast-added per image rather than tiled into a host buffer.
+
+The one exception is `add_chan` (`sdxlunet`'s per-image timestep-embedding
+broadcast), which stays pinned to batch 1 for a reason specific to
+`sdxlunet`'s own bias upload - irrelevant here, since this crate's graph
+never records that op, but worth knowing before assuming every op the shared
+builder registers is now batch-general.

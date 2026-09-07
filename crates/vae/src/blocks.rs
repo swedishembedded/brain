@@ -422,16 +422,22 @@ pub(crate) enum Op {
         w_in: u32,
         ho: u32,
         wo: u32,
+        /// Batch count, as recorded by [`Builder::set_batch`] - see that
+        /// method's doc for why every NCHW-shaped `Op` carries it rather than
+        /// assuming 1.
+        n: u32,
         x: DeviceBuffer,
         y: DeviceBuffer,
     },
-    /// GroupNorm with the fused `gb[2C]` parameter and its retained `stats[2G]`.
+    /// GroupNorm with the fused `gb[2C]` parameter and its retained
+    /// `stats[2*n*G]`.
     Gn {
         gb: String,
         c: u32,
         h: u32,
         w: u32,
         g: u32,
+        n: u32,
         x: DeviceBuffer,
         stats: DeviceBuffer,
         y: DeviceBuffer,
@@ -439,12 +445,12 @@ pub(crate) enum Op {
     Silu { n: u32, x: DeviceBuffer, y: DeviceBuffer },
     Add2 { n: u32, a: DeviceBuffer, b: DeviceBuffer, y: DeviceBuffer },
     /// Nearest-2x upsample; dims are the INPUT's.
-    Up2 { c: u32, h: u32, w: u32, x: DeviceBuffer, y: DeviceBuffer },
-    /// `[c,hw] -> [hw,c]` (its adjoint is `NlcNchw` and vice versa).
-    NchwNlc { c: u32, hw: u32, x: DeviceBuffer, y: DeviceBuffer },
-    NlcNchw { c: u32, hw: u32, x: DeviceBuffer, y: DeviceBuffer },
-    /// The bidirectional attention trio over the fused `qkv[t, 3c]` rows.
-    /// `probs` is the cached softmax slab; `y` is the context `[t, c]`.
+    Up2 { c: u32, h: u32, w: u32, n: u32, x: DeviceBuffer, y: DeviceBuffer },
+    /// `[n,c,hw] -> [n,hw,c]` (its adjoint is `NlcNchw` and vice versa).
+    NchwNlc { c: u32, hw: u32, n: u32, x: DeviceBuffer, y: DeviceBuffer },
+    NlcNchw { c: u32, hw: u32, n: u32, x: DeviceBuffer, y: DeviceBuffer },
+    /// The bidirectional attention trio over the fused `qkv[n, t, 3c]` rows.
+    /// `probs` is the cached softmax slab; `y` is the context `[n, t, c]`.
     Attn {
         c: u32,
         t: u32,
@@ -455,6 +461,7 @@ pub(crate) enum Op {
         /// — silently, since the shapes still line up.
         heads: u32,
         head_dim: u32,
+        n: u32,
         qkv: DeviceBuffer,
         probs: DeviceBuffer,
         y: DeviceBuffer,
@@ -498,7 +505,7 @@ pub(crate) enum Op {
     },
     /// Channel concat of two NCHW maps - the up path's skip join. Its adjoint is
     /// two slices of `dy`, which `concat_split` performs without a scatter.
-    Concat { ca: u32, cb: u32, hw: u32, a: DeviceBuffer, b: DeviceBuffer, y: DeviceBuffer },
+    Concat { ca: u32, cb: u32, hw: u32, n: u32, a: DeviceBuffer, b: DeviceBuffer, y: DeviceBuffer },
     /// `y = a*x + b*f`, `edm_mix.wgsl`'s own contract - SUPIR's ZeroSFT/
     /// ZeroCrossAttn `control_scale` lerp reuses it verbatim. `a`/`b` are
     /// SCALARS (one-element device buffers), kept UNPACKED here (unlike the
@@ -582,6 +589,20 @@ pub struct Builder<'a> {
     /// [`Builder::dev`] only ever consults this after `t` reports a name
     /// missing.
     packed: Option<&'a PackedTensors>,
+    /// The batch count every subsequently-recorded NCHW-shaped block dispatches
+    /// over. `1` (the historical, only-ever-exercised value) until
+    /// [`Builder::set_batch`] is called.
+    ///
+    /// Every kernel this builder dispatches has ALWAYS taken an `N`/`bsz`
+    /// parameter and indexed per-sample correctly (`conv_bias_reg`,
+    /// `gn_apply`, `attn_scores_bidir`, ... - see each kernel's own `Params`).
+    /// What was missing was purely on the Rust side: every dispatch here
+    /// hardcoded that parameter to `1` and every activation buffer was sized
+    /// for one image. This field and [`Builder::set_batch`] are the fix - a
+    /// caller that uploads an `[N,C,H,W]` tensor and calls `set_batch(n)`
+    /// gets every block's buffers and dispatches sized for `n` images, one
+    /// graph, no per-image replay.
+    n: u32,
 }
 
 /// Ceiling on the im2col scratch, in f32 words (512 MiB). The lowered conv
@@ -634,6 +655,7 @@ impl<'a> Builder<'a> {
             attn_head_dim: None,
             mix_ids: None,
             packed: None,
+            n: 1,
         }
     }
 
@@ -722,6 +744,30 @@ impl<'a> Builder<'a> {
     pub fn set_train(&mut self, on: bool) {
         assert!(self.steps.is_empty(), "vae::blocks: set_train must precede the first block");
         self.train = on;
+    }
+
+    /// Configure the batch count every subsequently-recorded block dispatches
+    /// over - see [`Builder::n`](Builder)'s doc. Set this BEFORE recording any
+    /// block (the `assert` mirrors [`Builder::set_train`]'s, for the same
+    /// reason: this changes what every dispatch after it looks like, so
+    /// configure-before-recording must be enforced, not just conventional).
+    ///
+    /// The caller owns getting the buffers right: every `x` handed to a block
+    /// after this call must be `[n, ...]`-shaped (the per-image dims stay
+    /// exactly what they were), and the buffer this builder hands back is
+    /// `[n, ...]`-shaped in turn.
+    pub fn set_batch(&mut self, n: u32) {
+        assert!(self.steps.is_empty(), "vae::blocks: set_batch must precede the first block");
+        assert!(n > 0, "vae::blocks: batch count must be positive");
+        self.n = n;
+    }
+
+    /// The batch count configured with [`Builder::set_batch`] (`1` if never
+    /// called). A caller that tracks buffer lengths alongside the builder's own
+    /// (`vqgan::model::run_blocks`, shared with `codeformer`) needs this to
+    /// scale them the same way a block itself would.
+    pub fn batch(&self) -> u32 {
+        self.n
     }
 
     /// Whether this builder is recording the reverse-mode tape.
@@ -1006,38 +1052,48 @@ impl<'a> Builder<'a> {
         if self.train || !Self::conv2d_lowered(self.gpu, hw, cout, cinkk) {
             return self.conv_direct(wn, bn, &wgt, &bias, cin, cout, k, stride, pad, h, w, ho, wo, x);
         }
-        let y = self.act((cout * ho * wo) as u64);
+        let y = self.act((self.n as u64) * (cout * ho * wo) as u64);
         {
             // Positions per GEMM: a multiple of the 128-row tile, inside the
-            // scratch budget, at least one tile.
+            // scratch budget, at least one tile. The scratch stays sized for
+            // ONE image's positions regardless of `self.n` - see
+            // `COL_BUDGET_MIB`'s doc - so the batch is an OUTER loop around
+            // this per-image chunking rather than another factor inside it.
             let budget = gpu_core::lower::col_budget_floats(COL_BUDGET_MIB);
             let chunk = gpu_core::lower::col_chunk_rows(budget, u64::from(cinkk), 128, hw);
             let col = self.col_buf(chunk as u64 * cinkk as u64);
             let nhwc = self.act((hw * cout) as u64);
-            let mut pos = 0u32;
-            while pos < hw {
-                let cnt = chunk.min(hw - pos);
-                self.steps.push(self.gpu.step(
-                    K_IM2COL_AT,
-                    &[x, &col],
-                    &[cin, h, w, k, stride, pad, ho, wo, cinkk, pos, cnt],
-                    cnt * cinkk,
-                ));
+            let (in_len, out_len) = ((cin * h * w) as u64, (cout * ho * wo) as u64);
+            for ni in 0..self.n {
+                let x_off = (ni as u64) * in_len;
+                let y_off = (ni as u64) * out_len;
+                let mut pos = 0u32;
+                while pos < hw {
+                    let cnt = chunk.min(hw - pos);
+                    self.steps.push(self.gpu.step_sliced(
+                        K_IM2COL_AT,
+                        &[x, &col],
+                        &[(x_off, in_len), (0, 0)],
+                        &[cin, h, w, k, stride, pad, ho, wo, cinkk, pos, cnt],
+                        cnt * cinkk,
+                    ));
+                    self.steps.push(self.gpu.step_sliced(
+                        K_MATMUL,
+                        &[&col, &wgt, &nhwc],
+                        &[(0, 0), (0, 0), (pos as u64 * cout as u64, cnt as u64 * cout as u64)],
+                        &[cnt, cinkk, cout],
+                        cnt.div_ceil(128) * cout.div_ceil(128) * 256,
+                    ));
+                    pos += cnt;
+                }
                 self.steps.push(self.gpu.step_sliced(
-                    K_MATMUL,
-                    &[&col, &wgt, &nhwc],
-                    &[(0, 0), (0, 0), (pos as u64 * cout as u64, cnt as u64 * cout as u64)],
-                    &[cnt, cinkk, cout],
-                    cnt.div_ceil(128) * cout.div_ceil(128) * 256,
+                    K_NLC_BIAS_NCHW,
+                    &[&nhwc, &bias, &y],
+                    &[(0, 0), (0, 0), (y_off, out_len)],
+                    &[hw * cout, cout, hw],
+                    cout.div_ceil(64) * hw.div_ceil(64) * 64,
                 ));
-                pos += cnt;
             }
-            self.steps.push(self.gpu.step(
-                K_NLC_BIAS_NCHW,
-                &[&nhwc, &bias, &y],
-                &[hw * cout, cout, hw],
-                cout.div_ceil(64) * hw.div_ceil(64) * 64,
-            ));
             self.free((hw * cout) as u64, nhwc);
         }
         y
@@ -1065,12 +1121,13 @@ impl<'a> Builder<'a> {
         wo: u32,
         x: &DeviceBuffer,
     ) -> DeviceBuffer {
-        let y = self.act((cout * ho * wo) as u64);
-        let threads = cout.div_ceil(8) * (ho * wo).div_ceil(4);
+        let y = self.act((self.n as u64) * (cout * ho * wo) as u64);
+        // Dispatch total = N * ceil(Cout/8) * ceil(Ho*Wo/4) (`conv_bias_reg.wgsl`).
+        let threads = self.n * cout.div_ceil(8) * (ho * wo).div_ceil(4);
         self.steps.push(self.gpu.step(
             K_CONV,
             &[x, wgt, bias, &y],
-            &[1, cin, h, w, cout, k, stride, pad, ho, wo],
+            &[self.n, cin, h, w, cout, k, stride, pad, ho, wo],
             threads,
         ));
         if self.train {
@@ -1086,6 +1143,7 @@ impl<'a> Builder<'a> {
                 w_in: w,
                 ho,
                 wo,
+                n: self.n,
                 x: x.clone(),
                 y: y.clone(),
             });
@@ -1130,11 +1188,12 @@ impl<'a> Builder<'a> {
     ) -> DeviceBuffer {
         let gbn = gb_name.to_string();
         let g = self.groups;
-        let stats = self.act(2 * g as u64);
-        let y = self.act((c * h * w) as u64);
-        // Statistics: one WORKGROUP per group where the device can run a
+        let n = self.n;
+        let stats = self.act((n * 2 * g) as u64);
+        let y = self.act((n as u64) * (c * h * w) as u64);
+        // Statistics: one WORKGROUP per (n,g) group where the device can run a
         // workgroup reduction (`gn_stats_wg`), else the per-group reference
-        // kernel. `gn_stats` dispatches `g` = 32 *invocations* for up to 33 M
+        // kernel. `gn_stats` dispatches `n*g` = 32 *invocations* for up to 33 M
         // elements, measured as a large share of a 512² FLUX.2 VAE decode; the
         // cooperative kernel is the same two-pass math, coalesced and 32-way
         // parallel (see `gn_stats_wg.wgsl`).
@@ -1142,38 +1201,38 @@ impl<'a> Builder<'a> {
             self.steps.push(self.gpu.step(
                 K_GN_STATS_WG,
                 &[x, &stats],
-                &[1, c, h, w, g, f(self.eps)],
-                g * 256,
+                &[n, c, h, w, g, f(self.eps)],
+                n * g * 256,
             ));
         } else {
             // No workgroup reductions (backend-cpu): the SERIAL `gn_stats`
-            // dispatches `g` invocations for up to 33 M elements. The
+            // dispatches `n*g` invocations for up to 33 M elements. The
             // barrier-free two-stage reduction is the right fallback and
             // measured several times faster on the CPU JIT at every VAE
             // decoder shape from [512,64,64] to [128,512,512], the margin
             // holding as the shape grows. `crates/wm-diamond` built this pair
             // after profiling put the serial kernel at the bulk of its frame
             // time, and the shared builder never learned about it.
-            let part = self.act(2 * g as u64 * GN_P as u64);
+            let part = self.act((n * 2 * g) as u64 * GN_P as u64);
             self.steps.push(self.gpu.step(
                 K_GN_PART,
                 &[x, &part],
-                &[1, c, h, w, g, GN_P],
-                g * GN_P,
+                &[n, c, h, w, g, GN_P],
+                n * g * GN_P,
             ));
             self.steps.push(self.gpu.step(
                 K_GN_STATS2,
                 &[&part, &stats],
-                &[1, c, h, w, g, GN_P, f(self.eps)],
-                g,
+                &[n, c, h, w, g, GN_P, f(self.eps)],
+                n * g,
             ));
-            self.free(2 * g as u64 * GN_P as u64, part);
+            self.free((n * 2 * g) as u64 * GN_P as u64, part);
         }
         self.steps.push(self.gpu.step(
             K_GN_APPLY,
             &[x, &stats, gb, &y],
-            &[1, c, h, w, g],
-            c * h * w,
+            &[n, c, h, w, g],
+            n * c * h * w,
         ));
         if self.train {
             // `stats` is NOT freed in train mode (the pool is off): gn_dsum and
@@ -1184,12 +1243,13 @@ impl<'a> Builder<'a> {
                 h,
                 w,
                 g,
+                n,
                 x: x.clone(),
                 stats: stats.clone(),
                 y: y.clone(),
             });
         }
-        self.free(2 * g as u64, stats); // last read was GN_APPLY above
+        self.free((n * 2 * g) as u64, stats); // last read was GN_APPLY above
         y
     }
 
@@ -1213,12 +1273,13 @@ impl<'a> Builder<'a> {
         a: &DeviceBuffer,
         b: &DeviceBuffer,
     ) -> DeviceBuffer {
-        let n = (ca + cb) as u64 * h as u64 * w as u64;
-        let y = self.act(n);
+        let per_image = (ca + cb) as u64 * h as u64 * w as u64;
+        let total = (self.n as u64) * per_image;
+        let y = self.act(total);
         // `concat2` Params: [N, Ca, Cb, H, W]; one invocation per OUTPUT element.
-        self.steps.push(self.gpu.step(K_CONCAT2, &[a, b, &y], &[1, ca, cb, h, w], n as u32));
+        self.steps.push(self.gpu.step(K_CONCAT2, &[a, b, &y], &[self.n, ca, cb, h, w], total as u32));
         if self.train {
-            self.tape.push(Op::Concat { ca, cb, hw: h * w, a: a.clone(), b: b.clone(), y: y.clone() });
+            self.tape.push(Op::Concat { ca, cb, hw: h * w, n: self.n, a: a.clone(), b: b.clone(), y: y.clone() });
         }
         y
     }
@@ -1367,7 +1428,11 @@ impl<'a> Builder<'a> {
             self.steps.push(st);
         }
         if self.train {
-            self.tape.push(Op::Attn { c, t, heads, head_dim, qkv: qkv.clone(), probs: probs.clone(), y: ctx.clone() });
+            // `n: 1` matches this function's own hardcoded `Bidir { b: 1, .. }`
+            // above - `self_attn` is a lower-level primitive a caller uses for
+            // ITS OWN attention mechanism (unlike `Builder::attn`'s own
+            // trio), and does not read `self.n`.
+            self.tape.push(Op::Attn { c, t, heads, head_dim, n: 1, qkv: qkv.clone(), probs: probs.clone(), y: ctx.clone() });
         }
         self.free(slab, scores);
         self.free(slab, probs);
@@ -1443,10 +1508,10 @@ impl<'a> Builder<'a> {
 
     /// Nearest-neighbour 2× upsample: `[c,h,w] → [c,2h,2w]`.
     pub fn upsample(&mut self, c: u32, h: u32, w: u32, x: &DeviceBuffer) -> DeviceBuffer {
-        let y = self.act((c * 2 * h * 2 * w) as u64);
-        self.steps.push(self.gpu.step(K_UPSAMPLE2, &[x, &y], &[1, c, h, w], c * 4 * h * w));
+        let y = self.act((self.n as u64) * (c * 2 * h * 2 * w) as u64);
+        self.steps.push(self.gpu.step(K_UPSAMPLE2, &[x, &y], &[self.n, c, h, w], self.n * c * 4 * h * w));
         if self.train {
-            self.tape.push(Op::Up2 { c, h, w, x: x.clone(), y: y.clone() });
+            self.tape.push(Op::Up2 { c, h, w, n: self.n, x: x.clone(), y: y.clone() });
         }
         y
     }
@@ -1464,7 +1529,8 @@ impl<'a> Builder<'a> {
         w: u32,
         x: &DeviceBuffer,
     ) -> DeviceBuffer {
-        let (nin, nout) = ((cin * h * w) as u64, (cout * h * w) as u64);
+        let bn = self.n as u64;
+        let (nin, nout) = (bn * (cin * h * w) as u64, bn * (cout * h * w) as u64);
         // `r` aliases the input `x` when cin==cout (a residual we must NOT free — the
         // caller owns `x`); when cin!=cout it is a fresh shortcut-conv buffer we own.
         let (r, r_owned) = if cin != cout {
@@ -1474,30 +1540,30 @@ impl<'a> Builder<'a> {
             (x.clone(), false)
         };
         let n1 = self.gn(&format!("{prefix}.norm1"), cin, h, w, x);
-        self.tap(format!("{prefix}.norm1"), &n1, cin * h * w);
-        let s1 = self.silu(cin * h * w, &n1);
+        self.tap(format!("{prefix}.norm1"), &n1, nin as u32);
+        let s1 = self.silu(nin as u32, &n1);
         self.free(nin, n1);
         let c1 = self.conv(&format!("{prefix}.conv1"), cin, cout, 3, 1, h, w, &s1);
-        self.tap(format!("{prefix}.conv1"), &c1, cout * h * w);
+        self.tap(format!("{prefix}.conv1"), &c1, nout as u32);
         self.free(nin, s1);
         let n2 = self.gn(&format!("{prefix}.norm2"), cout, h, w, &c1);
-        self.tap(format!("{prefix}.norm2"), &n2, cout * h * w);
+        self.tap(format!("{prefix}.norm2"), &n2, nout as u32);
         self.free(nout, c1);
-        let s2 = self.silu(cout * h * w, &n2);
+        let s2 = self.silu(nout as u32, &n2);
         self.free(nout, n2);
         let c2 = self.conv(&format!("{prefix}.conv2"), cout, cout, 3, 1, h, w, &s2);
-        self.tap(format!("{prefix}.conv2"), &c2, cout * h * w);
+        self.tap(format!("{prefix}.conv2"), &c2, nout as u32);
         self.free(nout, s2);
         if r_owned {
             let sc = self.names.shortcut;
-            self.tap(format!("{prefix}.{sc}"), &r, cout * h * w);
+            self.tap(format!("{prefix}.{sc}"), &r, nout as u32);
         }
-        let out = self.add(cout * h * w, &c2, &r); // last read of c2 and r
+        let out = self.add(nout as u32, &c2, &r); // last read of c2 and r
         self.free(nout, c2);
         if r_owned {
             self.free(nout, r);
         }
-        self.tap(prefix.to_string(), &out, cout * h * w);
+        self.tap(prefix.to_string(), &out, nout as u32);
         out
     }
 
@@ -1515,12 +1581,15 @@ impl<'a> Builder<'a> {
         let t = h * w;
         let nnorm = self.names.attn_norm;
         let nproj = self.names.attn_proj;
+        // The BATCH count (named `nb`, not `bn` - `bn` below is the qkv bias
+        // tensor NAME).
+        let nb = self.n as u64;
         let normed = self.gn(&format!("{prefix}.{nnorm}"), c, h, w, x);
         // Taps are named after the tensor they follow, so they must use the
         // ARCHITECTURE's leaf name (as `resnet` does for its shortcut) — a tap
         // called `.norm` on a diffusers graph whose tensor is `.group_norm`
         // sends the next debugger to the wrong module.
-        self.tap(format!("{prefix}.{nnorm}"), &normed, c * t);
+        self.tap(format!("{prefix}.{nnorm}"), &normed, (nb * (c * t) as u64) as u32);
 
         // The qkv projection, as one [3C,C,1,1] weight + [3C] bias. Either the
         // checkpoint already ships it fused (DIAMOND's `qkv_proj`), or it holds
@@ -1587,14 +1656,14 @@ impl<'a> Builder<'a> {
         let qkv_wd = self.dev_fused(&wn, &qkv_w);
         let qkv_bd = self.dev_fused(&bn, &qkv_b);
 
-        // qkv 1×1 conv: [C,h,w] → [3C,h,w].
+        // qkv 1×1 conv: [n,C,h,w] → [n,3C,h,w].
         let qkv_chw =
             self.conv_direct(wn, bn, &qkv_wd, &qkv_bd, c, 3 * c, 1, 1, 0, h, w, h, w, &normed);
         // When the residual adds the normed tensor, the qkv conv is NOT its
         // last read — it has to survive to the final add.
         let residual_normed = self.names.attn_residual_normed;
         if !residual_normed {
-            self.free((c * t) as u64, normed.clone());
+            self.free(nb * (c * t) as u64, normed.clone());
         }
 
         let attn_rows = if gemm_attn {
@@ -1610,72 +1679,104 @@ impl<'a> Builder<'a> {
             // [3C, T], which is qᵀ/kᵀ/vᵀ — so `v` needs no transpose at all
             // (it is directly the `[n, k]` operand of the apply GEMM), and
             // q/k need one cheap `nchw_nlc` each.
-            let q_nlc = self.act((c * t) as u64);
-            let k_nlc = self.act((c * t) as u64);
-            for (i, dst) in [&q_nlc, &k_nlc].into_iter().enumerate() {
-                let off = (i as u64) * (c * t) as u64;
-                self.steps.push(self.gpu.step_sliced(
-                    K_NCHW_NLC,
-                    &[&qkv_chw, dst],
-                    &[(off, (c * t) as u64), (0, 0)],
-                    &[c * t, c, t],
-                    c * t,
+            //
+            // Neither `matmul_reg3` nor `nchw_nlc`/`nlc_nchw` (used per image
+            // below) carries a batch dimension in its own Params - this is the
+            // one dispatch pair that stayed a plain single-image GEMM rather
+            // than gaining an `N`/`bsz` slot - so self-attention over `n>1`
+            // images is an OUTER loop over per-image `[3C,T]` slices of
+            // `qkv_chw`, each writing its own `[T,C]` slice of the batched
+            // `rows` output. This is exactly what keeps attention from
+            // crossing batch elements: each image's `T×T` score matrix never
+            // sees another image's keys.
+            //
+            // PRE-EXISTING, not a batching concern: every `step_sliced` offset
+            // below is a multiple of `C*T` words, and a real wgpu backend
+            // requires storage-buffer bind offsets to be a multiple of 64
+            // words (`min_storage_buffer_offset_alignment`, 256 bytes) - so
+            // this path needs `C*T % 64 == 0`. Every real config in this tree
+            // (FLUX.2's VAE, VQGAN, CodeFormer) happens to satisfy that; a
+            // narrow-channel synthetic config might not (`crates/vae/tests/
+            // batch_forward.rs` found this at `C=6, T=16`) and would need a
+            // genuine kernel-side fix - padding or a copy instead of a slice -
+            // which is out of this item's scope (no new WGSL kernel work).
+            let rows = self.act(nb * (t * c) as u64);
+            let per_qkv = (3 * c * t) as u64;
+            let per_rows = (t * c) as u64;
+            for ni in 0..self.n {
+                let qkv_off = (ni as u64) * per_qkv;
+                let q_nlc = self.act((c * t) as u64);
+                let k_nlc = self.act((c * t) as u64);
+                for (i, dst) in [&q_nlc, &k_nlc].into_iter().enumerate() {
+                    let off = qkv_off + (i as u64) * (c * t) as u64;
+                    self.steps.push(self.gpu.step_sliced(
+                        K_NCHW_NLC,
+                        &[&qkv_chw, dst],
+                        &[(off, (c * t) as u64), (0, 0)],
+                        &[c * t, c, t],
+                        c * t,
+                    ));
+                }
+                // scores[T,T] = q[T,C] · k[T,C]ᵀ  (the 1/√C is folded into q)
+                let scores = self.act((t * t) as u64);
+                self.steps.push(self.gpu.step(
+                    K_MATMUL,
+                    &[&q_nlc, &k_nlc, &scores],
+                    &[t, c, t],
+                    t.div_ceil(128) * t.div_ceil(128) * 256,
                 ));
+                self.free((c * t) as u64, q_nlc);
+                self.free((c * t) as u64, k_nlc);
+                let probs = self.act((t * t) as u64);
+                self.steps.push(self.gpu.step(K_ATTN_SOFTMAX, &[&scores, &probs], &[1, 1, t], t));
+                self.free((t * t) as u64, scores);
+                // ctx[T,C] = probs[T,T] · v[T,C], with vᵀ = the third channel
+                // block of THIS image's conv output, read in place as the
+                // [n=C, k=T] operand; written into this image's slice of `rows`.
+                self.steps.push(self.gpu.step_sliced(
+                    K_MATMUL,
+                    &[&probs, &qkv_chw, &rows],
+                    &[(0, 0), (qkv_off + 2 * (c * t) as u64, (c * t) as u64), ((ni as u64) * per_rows, per_rows)],
+                    &[t, t, c],
+                    t.div_ceil(128) * c.div_ceil(128) * 256,
+                ));
+                self.free((t * t) as u64, probs);
             }
-            // scores[T,T] = q[T,C] · k[T,C]ᵀ  (the 1/√C is folded into q)
-            let scores = self.act((t * t) as u64);
-            self.steps.push(self.gpu.step(
-                K_MATMUL,
-                &[&q_nlc, &k_nlc, &scores],
-                &[t, c, t],
-                t.div_ceil(128) * t.div_ceil(128) * 256,
-            ));
-            self.free((c * t) as u64, q_nlc);
-            self.free((c * t) as u64, k_nlc);
-            let probs = self.act((t * t) as u64);
-            self.steps.push(self.gpu.step(K_ATTN_SOFTMAX, &[&scores, &probs], &[1, 1, t], t));
-            self.free((t * t) as u64, scores);
-            // ctx[T,C] = probs[T,T] · v[T,C], with vᵀ = the third channel block
-            // of the conv output, read in place as the [n=C, k=T] operand.
-            let rows = self.act((t * c) as u64);
-            self.steps.push(self.gpu.step_sliced(
-                K_MATMUL,
-                &[&probs, &qkv_chw, &rows],
-                &[(0, 0), (2 * (c * t) as u64, (c * t) as u64), (0, 0)],
-                &[t, t, c],
-                t.div_ceil(128) * c.div_ceil(128) * 256,
-            ));
-            self.free((t * t) as u64, probs);
-            self.free((3 * c * t) as u64, qkv_chw);
+            self.free(nb * per_qkv, qkv_chw);
             rows
         } else {
-            // NCHW [3C,h,w] → NLC rows [T, 3C].
+            // NCHW [n,3C,h,w] → NLC rows [n,T, 3C]. `nchw_nlc`'s total already
+            // folds the batch in (see [`Builder::nchw_to_rows`]), and
+            // `attn_scores_bidir`/`_softmax`/`_apply` all take a genuine `bsz`
+            // Params field that indexes per-sample - so, unlike the GEMM path
+            // above, this trio needs no per-image loop: one dispatch each,
+            // batch and all.
             let qkv = self.nchw_to_rows(3 * c, t, &qkv_chw);
-            self.free((3 * c * t) as u64, qkv_chw);
+            self.free(nb * (3 * c * t) as u64, qkv_chw);
 
             // `heads` heads of `head_dim` each; the kernel applies the
             // 1/√head_dim scale. Defaults to one head of width C.
-            let scores = self.act((heads * t * t) as u64);
+            let scores = self.act(nb * (heads * t * t) as u64);
             self.steps.push(self.gpu.step(
                 K_ATTN_SCORES,
                 &[&qkv, &scores],
-                &[1, heads, t, head_dim, 3 * c, 0, c],
-                heads * t * t,
+                &[self.n, heads, t, head_dim, 3 * c, 0, c],
+                self.n * heads * t * t,
             ));
-            let probs = self.act((heads * t * t) as u64);
+            let probs = self.act(nb * (heads * t * t) as u64);
             self.steps.push(self.gpu.step(
                 K_ATTN_SOFTMAX,
                 &[&scores, &probs],
-                &[1, heads, t],
-                heads * t,
+                &[self.n, heads, t],
+                self.n * heads * t,
             ));
-            self.free((heads * t * t) as u64, scores);
-            let rows = self.act((t * c) as u64);
+            self.free(nb * (heads * t * t) as u64, scores);
+            let rows = self.act(nb * (t * c) as u64);
             self.steps.push(self.gpu.step(
                 K_ATTN_APPLY,
                 &[&probs, &qkv, &rows], // last read of both probs and qkv
-                &[1, heads, t, head_dim, 3 * c, 2 * c, c],
-                heads * t * head_dim,
+                &[self.n, heads, t, head_dim, 3 * c, 2 * c, c],
+                self.n * heads * t * head_dim,
             ));
             if self.train {
                 // `probs` and `qkv` stay live: `attn_bwd_dscores_bidir` /
@@ -1685,33 +1786,34 @@ impl<'a> Builder<'a> {
                     t,
                     heads,
                     head_dim,
+                    n: self.n,
                     qkv: qkv.clone(),
                     probs: probs.clone(),
                     y: rows.clone(),
                 });
             }
-            self.free((heads * t * t) as u64, probs);
-            self.free((3 * c * t) as u64, qkv);
+            self.free(nb * (heads * t * t) as u64, probs);
+            self.free(nb * (3 * c * t) as u64, qkv);
             rows
         };
-        // NLC rows [T, C] → NCHW [C,h,w].
+        // NLC rows [n,T, C] → NCHW [n,C,h,w].
         let attn_chw = self.rows_to_nchw(c, t, &attn_rows);
-        self.free((t * c) as u64, attn_rows);
+        self.free(nb * (t * c) as u64, attn_rows);
 
         let proj = self.conv(&format!("{prefix}.{nproj}"), c, c, 1, 0, h, w, &attn_chw);
-        self.tap(format!("{prefix}.{nproj}"), &proj, c * t);
-        self.free((c * t) as u64, attn_chw);
+        self.tap(format!("{prefix}.{nproj}"), &proj, (nb * (c * t) as u64) as u32);
+        self.free(nb * (c * t) as u64, attn_chw);
         // `x` is caller-owned; `normed` is ours, and this is its last read.
         let out = match residual_normed {
             true => {
-                let y = self.add(c * h * w, &normed, &proj);
-                self.free((c * t) as u64, normed);
+                let y = self.add((nb * (c * h * w) as u64) as u32, &normed, &proj);
+                self.free(nb * (c * t) as u64, normed);
                 y
             }
-            false => self.add(c * h * w, x, &proj),
+            false => self.add((nb * (c * h * w) as u64) as u32, x, &proj),
         };
-        self.free((c * h * w) as u64, proj);
-        self.tap(prefix.to_string(), &out, c * h * w);
+        self.free(nb * (c * h * w) as u64, proj);
+        self.tap(prefix.to_string(), &out, (nb * (c * h * w) as u64) as u32);
         out
     }
 
@@ -1719,21 +1821,29 @@ impl<'a> Builder<'a> {
     /// any per-position linear want). Exposed because `vqgan`'s quantizer needs
     /// it outside a block.
     pub fn nchw_to_rows(&mut self, c: u32, hw: u32, x: &DeviceBuffer) -> DeviceBuffer {
-        let y = self.act((c * hw) as u64);
-        self.steps.push(self.gpu.step(K_NCHW_NLC, &[x, &y], &[c * hw, c, hw], c * hw));
+        // `nchw_nlc`'s Params are `(total, c, hw)`, decomposing `total` as
+        // `n*c*hw` internally (`n = idx/(hw*c)`) - so a batch of `self.n`
+        // images is folded into `total` alone; `c`/`hw` stay the per-image
+        // extents. This is the fix self-attention's batching depends on: `x`
+        // is `[n,c,hw]` and the output is `[n,hw,c]`, both batch-outer.
+        let total = (self.n as u64) * (c * hw) as u64;
+        let y = self.act(total);
+        self.steps.push(self.gpu.step(K_NCHW_NLC, &[x, &y], &[total as u32, c, hw], total as u32));
         if self.train {
-            self.tape.push(Op::NchwNlc { c, hw, x: x.clone(), y: y.clone() });
+            self.tape.push(Op::NchwNlc { c, hw, n: self.n, x: x.clone(), y: y.clone() });
         }
         y
     }
 
     /// NLC rows `[h·w, c]` → NCHW `[c,h,w]` (the exact inverse of
-    /// [`Builder::nchw_to_rows`]).
+    /// [`Builder::nchw_to_rows`]) - see that method's doc for the batch-total
+    /// fold.
     pub fn rows_to_nchw(&mut self, c: u32, hw: u32, x: &DeviceBuffer) -> DeviceBuffer {
-        let y = self.act((c * hw) as u64);
-        self.steps.push(self.gpu.step(K_NLC_NCHW, &[x, &y], &[c * hw, c, hw], c * hw));
+        let total = (self.n as u64) * (c * hw) as u64;
+        let y = self.act(total);
+        self.steps.push(self.gpu.step(K_NLC_NCHW, &[x, &y], &[total as u32, c, hw], total as u32));
         if self.train {
-            self.tape.push(Op::NlcNchw { c, hw, x: x.clone(), y: y.clone() });
+            self.tape.push(Op::NlcNchw { c, hw, n: self.n, x: x.clone(), y: y.clone() });
         }
         y
     }
