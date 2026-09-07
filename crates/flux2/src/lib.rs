@@ -36,6 +36,7 @@ pub mod mask;
 pub mod model;
 pub mod modelgrad;
 pub mod pipeline;
+pub mod spec;
 pub mod weights;
 
 pub use config::Flux2Config;

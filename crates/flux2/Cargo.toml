@@ -12,6 +12,7 @@ path = "src/lib.rs"
 [dependencies]
 brain-capability.workspace = true
 brain-gpu-core.workspace = true
+brain-modelstore.workspace = true
 brain-kernels.workspace = true
 brain-checkpoint.workspace = true
 # `weights::DitWeights` requantizes rows in parallel through `par`, the
