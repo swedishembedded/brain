@@ -20,6 +20,9 @@ brain-backend-cpu.workspace = true
 brain-gpu-core.workspace = true
 brain-kernels.workspace = true
 brain-checkpoint.workspace = true
+# The model-store resolver: WanSpec's own ArchSpec impl (crate::spec) resolves
+# the four weight roles from a scanned models directory instead of BRAIN_WAN_*.
+brain-modelstore.workspace = true
 brain-vae.workspace = true
 brain-model.workspace = true
 brain-dit.workspace = true

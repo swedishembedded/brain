@@ -2152,6 +2152,7 @@ dependencies = [
  "brain-imaging",
  "brain-kernels",
  "brain-model",
+ "brain-modelstore",
  "brain-paramstore",
  "brain-t5encoder",
  "brain-testutil",

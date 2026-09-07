@@ -41,6 +41,7 @@ pub mod model;
 pub mod modelgrad;
 pub mod pipeline;
 pub mod rope;
+pub mod spec;
 pub mod train;
 pub mod vae3d;
 
