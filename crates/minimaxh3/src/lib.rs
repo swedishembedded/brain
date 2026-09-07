@@ -57,6 +57,7 @@
 pub mod block;
 pub mod caps;
 pub mod config;
+pub mod dit_shard;
 pub mod grad;
 pub mod import;
 pub mod model;

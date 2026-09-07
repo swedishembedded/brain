@@ -803,10 +803,57 @@ The VRAM budget for when that is done (2x24 GB = 48 GB):
 | bf16/f16 storage, precomputed  | 20.2B  |  40 GB | only just - ~4 GB left for activations, and `scores`+`probs` alone are 2.8 GB at a 256px canvas |
 | int8, precomputed              | 20.2B  |  20 GB | comfortably, and the P40 has real DP4A |
 
-`Ctx::upload` is fp32-only today (no `Weight`-enum tier like `crates/qwen3`'s),
-`H3Transformer` implements no `model::shard::Shardable`, and Phase 8's
-precompute is a checkpoint transform not yet wired into `load` - all three are
-prerequisites, none of them started.
+`Ctx::upload` is fp32-only today (no `Weight`-enum tier like `crates/qwen3`'s)
+and Phase 8's precompute is a checkpoint transform not yet wired into `load` -
+both are prerequisites for a RESIDENT multi-card DiT, and neither is started.
+Placement itself is no longer one of them: see the next section.
+
+### Multi-GPU: the block stack is placed across every schedulable card
+
+The streaming denoise loop opened exactly ONE device, so on this two-card box
+every block of every step ran on gpu0 while gpu1 stayed at 1 MiB used for the
+whole generation - and gpu0 was the card that ran out of memory. That is now
+`crate::dit_shard`: `model::StreamPlan` (the model-agnostic half of
+`model::shard`, cut by the same `plan_balanced` exact DP the resident
+pipelines in `gpt2`/`ltxv`/`qwen35`/`minimaxmusic3` already use) gives each
+schedulable card a contiguous block range, and
+`H3Transformer::forward_streaming_with_taps` runs one `crate::block::Ctx` per
+stage. Only the residual stream crosses a cut, host-staged - lossless for
+f32, so a split plan is bit-identical to the single-stage one
+(`model::tests::a_two_stage_split_is_numerically_identical_to_the_single_
+stage_path` gates that on any machine, GPU-less included).
+
+Streaming and sharding COMPOSE - each card still streams its own range one
+block at a time, and this is deliberately not "there is room now, load
+everything". What that buys and what it does not:
+
+* It does **not** halve the per-card peak. A streamed stage's live footprint
+  is one block's weights (~2.6 GB fp32) plus that step's activations and
+  scratch, and every stage pays that whatever its range length. Splitting
+  changes how MANY blocks a card runs, not what one block costs.
+* It does move the endpoint weights apart: the token refiner (2 full-width
+  blocks, ~2.8 GB fp32, loaded per forward) is on the first stage only and
+  `norm_out`/`proj_out` on the last, where before one card held both.
+* It halves each card's per-step block uploads and its share of the
+  allocator churn that `crate::block::load_block_streaming`'s own doc
+  records as the failure mode (Vulkan suballocator fragmentation, invisible
+  to `nvidia-smi`'s reserved-byte counter).
+* It does **not** speed up one denoise step: with no CFG pass (H3 is
+  guidance-distilled) there is one sample in flight, so the stages run
+  strictly in sequence. A pipelined schedule needs two independent forwards
+  to overlap, which this architecture does not have. Weight PREFETCH is the
+  real overlap available here - card `i+1` uploading its first blocks while
+  card `i` computes - and is not implemented.
+
+Left for a follow-up, deliberately, not forgotten: **the video VAE decode is
+still single-card**. `video_vae::decode_clip_untiled`'s 36-layer loop has the
+same shape as the DiT's block loop and would take a `StreamPlan` the same
+way, but the VAE's better multi-card shape is its OUTER loop - `decode`/
+`decode_clip_in` process spatial TILES that share no state, which is
+embarrassingly parallel across cards rather than a pipeline, and is a
+different mechanism (`ltxv`/`minimaxmusic3`'s `devplan` CFG-split shape) from
+the layer sharding done here. Neither is wired; the DiT was the memory-hungry,
+user-visible half and went first.
 
 ## Recorded gaps (kept current)
 

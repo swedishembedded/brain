@@ -41,7 +41,7 @@
 use vae::blocks::Tensors;
 
 use crate::config::{H3TransformerConfig, TAG_AUDIO, TAG_VIDEO};
-use crate::block::Ctx;
+use crate::dit_shard::StreamingDit;
 use crate::model::{H3Transformer, PackedInputs};
 use crate::schedule::{DualSchedule, H3Scheduler};
 use crate::video_vae::VideoVaeConfig;
@@ -789,16 +789,23 @@ fn generate(ckpt: &H3Checkpoint, text: &TextConditioning, keyframes: &[KeyframeC
     // "cpu": the eager load's ~132GB fp32 resident footprint never fits in
     // any single GPU's VRAM on this box, streaming's ~2.6GB/block does.
     //
-    // The device is opened ONCE here, outside the step loop, and reused for
-    // every step - `forward_streaming` takes an already-open `&Ctx` for
-    // exactly this reason. Opening a fresh device per step (as an earlier
-    // version of this loop did, since `forward_streaming` used to take a
-    // device string and build its own `Ctx` internally) OOM'd a 24GB P40
-    // partway through a real 16-step generation: wgpu gives no guarantee
-    // that one device's resources are reclaimed before the next opens, so
-    // 16 devices in sequence accumulated instead of one device's steady-
-    // state footprint repeating.
-    let streaming_ctx = model.is_none().then(|| Ctx::new(device));
+    // The devices are opened ONCE here, outside the step loop, and reused
+    // for every step - `forward_streaming` takes an already-open
+    // `StreamingDit` for exactly this reason. Opening a fresh device per step
+    // (as an earlier version of this loop did, since `forward_streaming` used
+    // to take a device string and build its own `Ctx` internally) OOM'd a
+    // 24GB P40 partway through a real 16-step generation: wgpu gives no
+    // guarantee that one device's resources are reclaimed before the next
+    // opens, so 16 devices in sequence accumulated instead of one device's
+    // steady-state footprint repeating.
+    //
+    // "Devices", plural: `StreamingDit::open` spreads the block stack over
+    // every card this process may schedule on (`crate::dit_shard`), so each
+    // card streams its own contiguous block range instead of one card
+    // carrying all 50 blocks while the others idle. One card, a CPU-backend
+    // run or an explicitly named `gpu<i>` resolves to a single stage, which
+    // is the previous behaviour unchanged.
+    let streaming_ctx = model.is_none().then(|| StreamingDit::open(dit_cfg, device));
     let mut sched = DualSchedule::new();
     sched.set_timesteps(opts.num_inference_steps);
     let num_steps = sched.num_steps();
@@ -833,7 +840,7 @@ fn generate(ckpt: &H3Checkpoint, text: &TextConditioning, keyframes: &[KeyframeC
         compact_audio.copy_from_slice(&audio_next);
     }
 
-    // `streaming_ctx` (the DiT's device) is a local `let` binding, so
+    // `streaming_ctx` (the DiT's devices) is a local `let` binding, so
     // without this it would stay alive - and its VRAM reserved - through
     // BOTH decode stages below, since `video_vae::decode` and
     // `vocoder::decode` each open their OWN fresh `Ctx::new(device)` on
