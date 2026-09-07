@@ -704,14 +704,23 @@ fn ensure_env_weights_with(arch: &str, store: &Store, hub: &dyn Hub) -> Result<(
         }
     }
 
+    let mut missing: Vec<String> = Vec::new();
     for (var, role) in a.weights_env {
         if std::env::var_os(var).is_some_and(|v| !v.is_empty()) {
             continue;
         }
         match roles.get(*role).and_then(|p| p.to_str()) {
             Some(p) => std::env::set_var(var, p),
-            None => eprintln!("brain: {arch}: fetched but role {role:?} (for {var}) has no path (non-UTF8, not a compound checkpoint, or this recipe doesn't produce it)"),
+            None => missing.push(format!("{role:?} (for {var})")),
         }
+    }
+    if !missing.is_empty() {
+        // A fetch that reports success but still leaves a needed role
+        // uncovered (non-UTF8 path, not a compound checkpoint, or this
+        // recipe doesn't produce that role) must not read as success --
+        // the vars that DID resolve above stay set, but this is a real
+        // failure, not console noise the caller can miss.
+        return Err(format!("{arch}: fetched but missing role(s): {}", missing.join(", ")));
     }
     Ok(())
 }
@@ -1167,6 +1176,31 @@ pub(crate) mod tests {
         std::env::set_var("BRAIN_LLAVA_WEIGHTS", "already-set-llava.gguf");
         ensure_env_weights_with("llava", &store, &FakeHub::new()).unwrap();
         std::env::remove_var("BRAIN_LLAVA_WEIGHTS");
+    }
+
+    /// `moondream3` declares one role (`dir`) from its `default_ref` fetch.
+    /// Feeding its `default_ref`'s vendor/repo a plain dense-transformers
+    /// checkpoint (config.json + model.safetensors, no compound manifest)
+    /// exercises exactly the case `ensure_env_weights_with`'s own doc comment
+    /// flags as unhandled: every fetch step succeeds, but the merged roles
+    /// never cover what the var needs. That must be a named error, not a
+    /// warning plus a silent Ok.
+    #[test]
+    fn ensure_env_weights_with_errors_when_a_role_is_still_missing_after_a_successful_autofetch() {
+        let _serial = env_lock();
+        let (config, weights) = tiny_qwen3_hf_files();
+        let mut hub = FakeHub::new();
+        hub.add_file("moondream", "moondream3-preview", "main", "config.json", config);
+        hub.add_file("moondream", "moondream3-preview", "main", "model.safetensors", weights);
+        let store = store(&format!("supply-test-env-weights-role-still-missing-{}", std::process::id()));
+        std::env::set_var("BRAIN_AUTO_FETCH", "1");
+        std::env::remove_var("BRAIN_MOONDREAM3_WEIGHTS");
+
+        let err = ensure_env_weights_with("moondream3", &store, &hub).unwrap_err();
+
+        std::env::remove_var("BRAIN_AUTO_FETCH");
+        assert!(err.contains("BRAIN_MOONDREAM3_WEIGHTS"), "{err}");
+        assert!(err.contains("dir"), "{err}");
     }
 
     #[test]
