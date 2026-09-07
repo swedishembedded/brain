@@ -1046,6 +1046,7 @@ dependencies = [
  "brain-imaging",
  "brain-kernels",
  "brain-model",
+ "brain-modelstore",
  "brain-qwen3",
  "brain-testutil",
  "brain-vae",
@@ -1408,6 +1409,7 @@ name = "brain-modelstore"
 version = "1.1.0"
 dependencies = [
  "brain-arch",
+ "brain-capability",
  "brain-checkpoint",
  "brain-modelref",
  "serde",

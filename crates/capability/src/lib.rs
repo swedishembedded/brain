@@ -685,11 +685,13 @@ impl Registry {
 /// model - the output of `crates/modelstore`'s resolver, and what a
 /// model crate's loader is finally handed.
 ///
-/// Lives here (not in `modelstore`, which sits below `capability` in the
-/// dependency graph) because every model crate with a `caps.rs` already
-/// depends on `brain-capability` to advertise its [`Manifest`] - an
-/// `Assembly` is what a caps module receives before it can build one, so
-/// putting it here adds zero new dependency edges for any of them.
+/// Lives here rather than in a model crate because every model crate with a
+/// `caps.rs` already depends on `brain-capability` to advertise its
+/// [`Manifest`] - an `Assembly` is what a caps module receives before it can
+/// build one, so putting it here adds zero new dependency edges for any of
+/// them. `brain-modelstore` (whose `resolve` module builds `Assembly`
+/// values) depends on this crate for the type; `brain-capability` itself
+/// depends on nothing, so that edge does not cycle back.
 #[derive(Clone, Debug)]
 pub struct Assembly {
     /// The id this assembly registers/serves under. A single-repo model

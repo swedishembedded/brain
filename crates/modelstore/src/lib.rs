@@ -29,6 +29,7 @@ pub mod inventory;
 pub mod plan;
 pub mod recipe;
 pub mod refurl;
+pub mod resolve;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
