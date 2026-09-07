@@ -60,6 +60,7 @@ mod resident_lfm;
 mod continuous_train;
 mod resident_llm;
 mod resident_ltxv;
+mod resident_minimaxh3;
 mod resident_minimaxmusic3;
 mod resident_mock;
 mod resident_omni;

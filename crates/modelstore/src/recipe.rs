@@ -82,9 +82,15 @@ pub trait ArtifactRecipe: Send + Sync {
 
 /// The registry `plan_base` walks, in order. [`TransformersRecipe`] is last
 /// and always matches (the historical, still-default family) -- more
-/// specific recipes get first refusal, ahead of it.
+/// specific recipes get first refusal, ahead of it. [`H3Recipe`] before
+/// [`ZimageRecipe`] specifically: H3's real repo carries all four of
+/// Z-Image's role dirs (`transformer/`, `vae/`, `text_encoder/`,
+/// `tokenizer/`) as a strict subset of its own nine, so Z-Image's
+/// `matches` is satisfied too - the more specific 9-role match must run
+/// first or H3 silently downloads as an incomplete, wrongly-shaped Z-Image
+/// checkout.
 pub fn recipes() -> Vec<Box<dyn ArtifactRecipe>> {
-    let mut v: Vec<Box<dyn ArtifactRecipe>> = vec![Box::new(ZimageRecipe), Box::new(WanRecipe), Box::new(YoloRecipe)];
+    let mut v: Vec<Box<dyn ArtifactRecipe>> = vec![Box::new(H3Recipe), Box::new(ZimageRecipe), Box::new(WanRecipe), Box::new(YoloRecipe)];
     v.extend(FILES_RECIPES.iter().map(|r| Box::new(*r) as Box<dyn ArtifactRecipe>));
     // After the named rows (a repo whose GGUFs are a fixed SET, like
     // `deepseek2ocr-gguf`'s model+mmproj pair, must be claimed by its own row
@@ -415,6 +421,67 @@ impl ArtifactRecipe for ZimageRecipe {
         let mut artifacts = vec![artifact("model_index.json", "model_index.json")];
         for f in listing {
             if Self::ROLE_DIRS.iter().any(|prefix| f.starts_with(prefix)) {
+                artifacts.push(artifact(f.clone(), f.clone()));
+            }
+        }
+        Ok(artifacts)
+    }
+}
+
+/// The root-level `diffusers>=0.36.0.dev0` `MiniMaxH3ModularPipeline` layout:
+/// `model_index.json` sits at the repo root, naming ROLE DIRECTORIES
+/// (`transformer/`, `transformer_ref/`, `text_encoder/`, `vae/`,
+/// `audio_vae/`, `tokenizer/`, `processor/`, `scheduler/`,
+/// `audio_scheduler/`) that `transformer` and `transformer_ref` share -
+/// confirmed against the real HF tree API and `modular_model_index.json`,
+/// not a guess. The repo ALSO ships an older, fully-redundant
+/// `FL2VA/`+`Ref2VA/` two-level partitioned layout (a legacy
+/// `diffusers==0.32.2` `MiniMaxH3Pipeline` shape, each partition duplicating
+/// the ~78GB of components this layout shares once) - this recipe targets
+/// only the root layout, which is both the smaller download and the one
+/// `diffusers==0.40.0` (this port's actual math authority) loads.
+///
+/// This recipe only gets `brain pull` (and `brain models list`/`profile`)
+/// to fetch the right files -- `minimaxh3`'s `arch::ARCHS` row has no
+/// `default_ref`, so nothing in this crate ever calls it unprompted (the
+/// MiniMax H3 Community License's territorial and revenue-cap terms mean
+/// auto-fetch must never happen for this architecture). Turning a completed
+/// download into a servable `CompoundManifest` (`crates/cli/src/
+/// supply.rs::convert`) is separate, later work: this recipe's single `dir`
+/// role (matching the `arch::ARCHS` row's `weights_env`) is resolved by the
+/// model crate's own import code reading every role from one directory, not
+/// by a per-role manifest this crate would have to know how to build.
+pub struct H3Recipe;
+
+impl H3Recipe {
+    /// Role subdirectory names at the repo root.
+    const ROLE_DIRS: &'static [&'static str] =
+        &["transformer/", "transformer_ref/", "text_encoder/", "vae/", "audio_vae/", "tokenizer/", "processor/", "scheduler/", "audio_scheduler/"];
+    /// `transformer_ref/` is `ref2va`'s own separately-trained transformer
+    /// instance - a second, equally large copy of the DiT. `t2va`/`fl2va`
+    /// (the only tasks this port implements today) share plain
+    /// `transformer/`, so this recipe does not fetch `transformer_ref/` by
+    /// default; a future `ref2va` port fetches it by hand (or this recipe
+    /// grows a role toggle then) rather than every `brain pull` paying for
+    /// weights nothing yet reads.
+    const SKIP_BY_DEFAULT: &'static [&'static str] = &["transformer_ref/"];
+}
+
+impl ArtifactRecipe for H3Recipe {
+    fn id(&self) -> &'static str {
+        "minimaxh3"
+    }
+
+    fn matches(&self, _reference: &ModelRef, listing: &[String]) -> bool {
+        listing.iter().any(|f| f == "model_index.json") && Self::ROLE_DIRS.iter().all(|d| listing.iter().any(|f| f.starts_with(d)))
+    }
+
+    fn artifacts(&self, _reference: &ModelRef, listing: &[String], _hub: &dyn Hub) -> Result<Vec<Artifact>, Box<PlanError>> {
+        let mut artifacts = vec![artifact("model_index.json", "model_index.json")];
+        for f in listing {
+            let under_a_role_dir = Self::ROLE_DIRS.iter().any(|d| f.starts_with(d));
+            let skipped = Self::SKIP_BY_DEFAULT.iter().any(|d| f.starts_with(d));
+            if under_a_role_dir && !skipped {
                 artifacts.push(artifact(f.clone(), f.clone()));
             }
         }
@@ -863,6 +930,81 @@ mod tests {
         // skipped, not an oversight (z-image reimplements its own flow-match
         // scheduler; it doesn't read the diffusers scheduler config).
         assert!(!dest.contains(&"scheduler/scheduler_config.json"));
+    }
+
+    /// A representative `MiniMaxAI/MiniMax-H3` root-layout listing, built
+    /// from this session's real local download (`text_encoder/` is complete
+    /// locally at 14 shards; `transformer/`/`transformer_ref/`/`vae/` shard
+    /// counts are extrapolated placeholders, not yet confirmed against the
+    /// live HF API since those directories were still downloading as this
+    /// test was written) -- good enough to test this recipe's shape-matching
+    /// logic; not a claim about the exact remote file count, matching this
+    /// module's own `wan_t2v_1_3b_listing` vs `h3_*_listing` honesty split.
+    fn h3_root_listing() -> Vec<String> {
+        let mut v = vec![
+            "model_index.json".to_string(),
+            "transformer/config.json".to_string(),
+            "transformer_ref/config.json".to_string(),
+            "text_encoder/config.json".to_string(),
+            "text_encoder/model.safetensors.index.json".to_string(),
+            "vae/config.json".to_string(),
+            "vae/model.safetensors".to_string(),
+            "audio_vae/config.json".to_string(),
+            "audio_vae/model.safetensors".to_string(),
+            "audio_vae/minimax_h3_audio_vae.py".to_string(),
+            "tokenizer/tokenizer_config.json".to_string(),
+            "processor/preprocessor_config.json".to_string(),
+            "scheduler/scheduler_config.json".to_string(),
+            "audio_scheduler/scheduler_config.json".to_string(),
+        ];
+        for i in 1..=13 {
+            v.push(format!("transformer/model-{i:05}-of-00013.safetensors"));
+            v.push(format!("transformer_ref/model-{i:05}-of-00013.safetensors"));
+        }
+        for i in 1..=14 {
+            v.push(format!("text_encoder/model-{i:05}-of-00014.safetensors"));
+        }
+        v
+    }
+
+    #[test]
+    fn h3_recipe_matches_the_root_layout_repo_ahead_of_transformers() {
+        let listing = h3_root_listing();
+        let r = ModelRef::new("MiniMaxAI", "MiniMax-H3", None);
+        let matched = recipes().into_iter().find(|x| x.matches(&r, &listing)).unwrap();
+        assert_eq!(matched.id(), "minimaxh3", "the root-layout diffusers repo must not fall through to the transformers catch-all");
+    }
+
+    #[test]
+    fn h3_recipe_does_not_match_a_root_level_diffusers_repo_or_a_transformers_repo() {
+        let r = ModelRef::new("MiniMaxAI", "MiniMax-H3", None);
+        // Z-Image sits at the repo root too, same as H3 now does - the
+        // distinguishing signal is H3's specific 9-role-dir SET
+        // (transformer_ref/, audio_vae/, audio_scheduler/, ... nothing
+        // Z-Image ships), not "root vs nested" any more.
+        assert!(!H3Recipe.matches(&r, &zimage_turbo_listing()), "Z-Image's roles are a different, smaller set than H3's");
+        let flat = vec!["config.json".to_string(), "model.safetensors".to_string()];
+        assert!(!H3Recipe.matches(&r, &flat));
+    }
+
+    #[test]
+    fn h3_recipe_downloads_every_file_under_a_role_dir_except_transformer_ref() {
+        let listing = h3_root_listing();
+        let hub = crate::hub::FakeHub::new();
+        let r = ModelRef::new("MiniMaxAI", "MiniMax-H3", None);
+        let artifacts = H3Recipe.artifacts(&r, &listing, &hub).unwrap();
+        let dest: Vec<&str> = artifacts.iter().map(|a| a.dest_name.as_str()).collect();
+
+        for f in listing.iter().filter(|f| f.as_str() != "model_index.json") {
+            let under_a_role_dir = H3Recipe::ROLE_DIRS.iter().any(|d| f.starts_with(d));
+            let skipped = H3Recipe::SKIP_BY_DEFAULT.iter().any(|d| f.starts_with(d));
+            assert_eq!(dest.contains(&f.as_str()), under_a_role_dir && !skipped, "{f} inclusion disagrees with role-dir membership minus the default skip list");
+        }
+        assert!(dest.contains(&"model_index.json"));
+        // transformer_ref/ is real content in the listing (ref2va's own DiT
+        // copy) but deliberately not fetched by default - see
+        // SKIP_BY_DEFAULT's own doc comment.
+        assert!(!dest.iter().any(|d| d.starts_with("transformer_ref/")), "transformer_ref/ must not be fetched until ref2va is implemented");
     }
 
     #[test]

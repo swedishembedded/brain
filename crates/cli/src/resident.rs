@@ -141,6 +141,14 @@ pub fn build_executor(gpus: &[(u32, u64)], npus: &[(u32, u64)], unified_gpus: &[
     } else {
         eprintln!("brain: ltxv not served over the scheduler (set BRAIN_LTXV_VAE)");
     }
+    // MiniMax-H3 t2va/fl2va (BRAIN_MINIMAXH3_{DIT,VIDEO_VAE,VOCODER}): one
+    // resident transformer shared across every request shape, per device -
+    // see resident_minimaxh3.rs's own module doc.
+    if let Some(h) = crate::resident_minimaxh3::MiniMaxH3Resident::from_env() {
+        models.push(Arc::new(h));
+    } else {
+        eprintln!("brain: minimaxh3 not served over the scheduler (set BRAIN_MINIMAXH3_DIT/_VIDEO_VAE/_VOCODER)");
+    }
     // Monocular depth (BRAIN_ZIPDEPTH_WEIGHTS).
     if let Some(d) = crate::resident_depth::DepthResident::from_env() {
         models.push(Arc::new(d));

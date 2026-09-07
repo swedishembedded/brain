@@ -575,6 +575,7 @@ dependencies = [
  "brain-lfm2",
  "brain-llava",
  "brain-ltxv",
+ "brain-minimaxh3",
  "brain-minimaxmusic3",
  "brain-moondream3",
  "brain-nemotronasr",
@@ -680,6 +681,7 @@ dependencies = [
  "brain-ltxv",
  "brain-memauth",
  "brain-mimi",
+ "brain-minimaxh3",
  "brain-minimaxmusic3",
  "brain-model",
  "brain-modelcost",
@@ -1167,6 +1169,7 @@ dependencies = [
  "brain-kernels",
  "brain-lfm2",
  "brain-ltxv",
+ "brain-minimaxh3",
  "brain-minimaxmusic3",
  "brain-model",
  "brain-qwen3",
@@ -1342,6 +1345,27 @@ dependencies = [
  "brain-testutil",
  "bytemuck",
  "serde_json",
+]
+
+[[package]]
+name = "brain-minimaxh3"
+version = "1.1.0"
+dependencies = [
+ "brain-audio",
+ "brain-capability",
+ "brain-checkpoint",
+ "brain-data",
+ "brain-diffusion",
+ "brain-dit",
+ "brain-gpu-core",
+ "brain-kernels",
+ "brain-model",
+ "brain-paramstore",
+ "brain-qwen3vl",
+ "brain-testutil",
+ "brain-vae",
+ "serde_json",
+ "tracing",
 ]
 
 [[package]]

@@ -1,0 +1,57 @@
+[package]
+name = "brain-minimaxh3"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "MiniMax-H3 joint video+audio rectified-flow diffusion transformer (33B): one packed self-attention stack over video+audio+condition rows (not a two-stream architecture like ltxv), dual video/audio Euler schedules in one forward, AdaLN-precomputable to a ~19.3B resident backbone. Qwen3-VL text conditioning via brain-qwen3vl's truncated hidden-state encoder; causal-3D video VAE + DAC-lineage audio VAE, built on brain-dit / brain-model / brain-diffusion / brain-audio / brain-vae / brain-checkpoint / brain-gpu-core / brain-kernels."
+
+[lib]
+name = "minimaxh3"
+path = "src/lib.rs"
+
+[dependencies]
+# The serving surface: `caps.rs`'s manifest/action types, plus
+# `check_license`'s call sites (every `gen_params_from`-equivalent entry
+# point) - the license gate is part of the capability contract, not bolted
+# on separately.
+brain-capability.workspace = true
+brain-gpu-core.workspace = true
+brain-kernels.workspace = true
+brain-checkpoint.workspace = true
+# `AttentionGeometry`-shaped dispatch (QKV width != hidden width) and QK-norm
+# reuse the same pattern `wan`/`qwen3vl` already established in
+# `model::block`; `model::int8`/`model::lora` back Phase 8's precompute
+# tooling and Phase 10's LoRA.
+brain-model.workspace = true
+# `dit::adaln`/`dit::timestep` - the shared AdaLN-table and sinusoidal
+# timestep-embedder primitives every DiT crate in this workspace (wan, ltxv,
+# s3dit) already builds its own time-embedding path on.
+brain-dit.workspace = true
+# `crate::schedule`'s two independent shifted-sigma Euler schedules build on
+# `diffusion::discrete`'s existing sigma/step machinery rather than a new one.
+brain-diffusion.workspace = true
+# `crate::video_vae`: causal 3D conv/attention/GroupNorm primitives, the same
+# `vae::blocks3d` builder `wan::vae3d` uses - a second video VAE is a new
+# SCHEDULE over shared primitives, not new kernels (see wan.md's own lesson).
+brain-vae.workspace = true
+# `crate::audio_vae`: DAC-lineage strided causal convs + BigVGAN decoder,
+# reusing `audio::conv`'s 1D (transposed) conv Step-builders wherever the op
+# already exists (SnakeBeta activation is the one genuinely new piece).
+brain-audio.workspace = true
+# `qwen3vl::Qwen3Vl::encode_hidden`/`encode_hiddens` (Phase 3) - H3's text
+# conditioning IS a Qwen3-VL forward truncated to an intermediate hidden
+# layer, never a second encoder implementation.
+brain-qwen3vl.workspace = true
+brain-paramstore.workspace = true
+# Seeded noise/weight-init RNG (`data::rng::Rng`), the same SplitMix64 +
+# Box-Muller stream every other diffusion pipeline in this workspace uses for
+# reproducible `--seed` runs.
+brain-data.workspace = true
+serde_json.workspace = true
+# The `tracing` FACADE only, never a subscriber - `--trace-minimaxh3 <0-5>`
+# turns per-block/per-step events on; with no subscriber installed every
+# macro is a predictable-branch no-op.
+tracing.workspace = true
+
+[dev-dependencies]
+brain-testutil.workspace = true

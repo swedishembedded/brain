@@ -77,6 +77,7 @@ named on the model's own page (see
 |---|---|:---:|:---:|
 | [`wan`](wan.md) ⤓ | text-to-video (image-to-video not implemented) | [x] | library only |
 | [`ltxv`](ltxv.md) | text-to-video+audio (two-stream A/V DiT) -- in progress, not yet runnable | [ ] | [ ] |
+| [`minimaxh3`](minimaxh3.md) | text/first-last-frame/reference -> synchronized video+audio (packed single-stream DiT) -- in progress, not yet runnable | [ ] | [ ] |
 
 ## Vision and 3D
 

@@ -80,6 +80,7 @@ models/vqgan.md
 models/imgpipe.md
 models/wan.md
 models/ltxv.md
+models/minimaxh3.md
 models/worldmirror2.md
 models/splat.md
 models/forecast.md
