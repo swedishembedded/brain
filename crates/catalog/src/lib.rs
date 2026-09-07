@@ -253,9 +253,16 @@ pub mod __reexport {
 /// adapter is CLI-local.
 pub fn models() -> Vec<ModelEntry> {
     vec![
+        // Z-Image: the provider builds its weight paths from the resolved
+        // Assembly (`s3dit::pipeline::Paths::from_assembly`) instead of
+        // `BRAIN_S3DIT_*`, the same migration `flux2`/`wan` already went
+        // through.
         ModelEntry {
             manifest: s3dit::caps::manifest,
-            provider: |_assembly: &Assembly| s3dit::caps::ZImageProvider::load().map(|p| Arc::new(p) as Arc<dyn Provider>),
+            provider: |assembly: &Assembly| {
+                let paths = s3dit::pipeline::Paths::from_assembly(assembly)?;
+                Ok(Arc::new(s3dit::caps::ZImageProvider::from_paths(paths)) as Arc<dyn Provider>)
+            },
             resident: None, // ZImageResident::from_env is Result-shaped; registered directly in crates/cli/src/resident.rs
         },
         // FLUX.2 is the first entry whose provider actually reads the

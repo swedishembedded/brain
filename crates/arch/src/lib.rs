@@ -447,7 +447,11 @@ pub const ARCHS: &[Arch] = &[
     // checkpoint's family string finds no row here and falls into `brain
     // models list`'s "custom checkpoint of an architecture not in
     // brain_arch" bucket despite being correctly classified.
-    arch!("s3dit", "Z-Image S3-DiT text-to-image", Image, Brain, "brain-s3dit", default_ref: Some("Tongyi-MAI/Z-Image-Turbo"), weights_env: &[("BRAIN_S3DIT_DIT", "dit"), ("BRAIN_S3DIT_VAE", "vae"), ("BRAIN_S3DIT_QWEN", "text_encoder"), ("BRAIN_S3DIT_TOKENIZER", "tokenizer")], families: &["zimage"]),
+    // `weights_env` is empty: s3dit's own actions resolve their four roles
+    // through `s3dit::spec::S3ditSpec` (the model-store resolver) instead,
+    // the same migration `flux2`/`wan` already went through. The FIELD stays
+    // on `Arch` for the other architectures not yet migrated.
+    arch!("s3dit", "Z-Image S3-DiT text-to-image", Image, Brain, "brain-s3dit", default_ref: Some("Tongyi-MAI/Z-Image-Turbo"), weights_env: &[], families: &["zimage"]),
     // `black-forest-labs/FLUX.2-klein-4B` ships the same shape
     // `ZimageRecipe` already matches generically (`model_index.json` +
     // transformer/vae/text_encoder/tokenizer role dirs) and even reuses

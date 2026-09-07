@@ -563,7 +563,7 @@ mod tests {
     fn wants_default_weights_still_recognizes_the_generic_infer_mapping() {
         assert!(wants_default_weights("zipdepth", Some("infer")));
         assert!(wants_default_weights("qwen3vl", Some("generate")));
-        assert!(wants_default_weights("s3dit", Some("gen")));
+        assert!(wants_default_weights("moondream3", Some("gen")));
         assert!(!wants_default_weights("qwen3", Some("train")));
     }
 
@@ -575,9 +575,9 @@ mod tests {
     /// (unlike `ensure_env_weights`) consults none of those vars.
     ///
     /// The partially-configured and unset cases must still fetch: several rows
-    /// (`s3dit`, `qwen3vl`, `qwen35`, ...) declare `weights_env` AND depend on
-    /// default fetching, which is why the rule keys on "every var set" rather
-    /// than on "declares weights_env".
+    /// (`moondream3`, `qwen3vl`, `qwen35`, ...) declare `weights_env` AND
+    /// depend on default fetching, which is why the rule keys on "every var
+    /// set" rather than on "declares weights_env".
     ///
     /// Uses `ltxv` as its example architecture (still on the env-var path;
     /// `flux2` and `wan` both moved to the resolver and their `weights_env`
@@ -627,7 +627,7 @@ mod tests {
              if this row changed, re-check wants_default_weights' comment"
         );
         // And plenty of rows pair weights_env with a default_ref they still need.
-        for id in ["s3dit", "qwen3vl", "sam2", "rrdbnet"] {
+        for id in ["moondream3", "qwen3vl", "sam2", "rrdbnet"] {
             let a = brain_arch::by_id(id).expect("row exists");
             assert!(!a.weights_env.is_empty() && a.default_ref.is_some(), "{id} should declare both");
             assert!(wants_default_weights(id, Some("infer")), "{id}: default fetch must survive");

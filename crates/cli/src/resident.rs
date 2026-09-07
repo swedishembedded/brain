@@ -480,7 +480,8 @@ impl ZImageResident {
     /// constant instead would silently strand the request that triggered the
     /// fetch (it named the fetched ref, not `brain/s3dit`).
     pub fn from_paths(id: impl Into<String>, paths: Paths) -> Result<ZImageResident, String> {
-        Ok(ZImageResident { id: id.into(), paths, provider: Arc::new(s3dit::caps::ZImageProvider::load()?) })
+        let provider = Arc::new(s3dit::caps::ZImageProvider::from_paths(paths.clone()));
+        Ok(ZImageResident { id: id.into(), paths, provider })
     }
 }
 

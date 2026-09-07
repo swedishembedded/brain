@@ -98,15 +98,23 @@ type HotKey = (u32, u32, bool, Option<String>); // (width, height, hifi, adapter
 /// The executable Z-Image model behind the manifest. Holds a **hot pipeline
 /// cache** so a long-lived process (`brain run` / the event server) loads the
 /// ~20 GB of weights once and reuses them across `ActionRequest`s — subsequent
-/// generations are fast. Weight paths come from the environment
-/// (`BRAIN_S3DIT_DIT` / `_VAE` / `_QWEN` / `_TOKENIZER`).
+/// generations are fast. Weight paths are BOUND at construction (see
+/// [`ZImageProvider::from_paths`]) - never re-resolved per request.
 pub struct ZImageProvider {
     hot: Arc<Mutex<Option<(HotKey, crate::pipeline::HotPipeline)>>>,
+    paths: crate::pipeline::Paths,
 }
 
 impl ZImageProvider {
+    /// Weights from the environment (`BRAIN_S3DIT_DIT` / `_VAE` / `_QWEN` /
+    /// `_TOKENIZER`) - the historical construction path; still used wherever
+    /// no resolved [`capability::Assembly`] is in hand.
     pub fn load() -> Result<ZImageProvider, String> {
-        Ok(ZImageProvider { hot: Arc::new(Mutex::new(None)) })
+        Ok(ZImageProvider::from_paths(crate::pipeline::Paths::from_env()?))
+    }
+
+    pub fn from_paths(paths: crate::pipeline::Paths) -> ZImageProvider {
+        ZImageProvider { hot: Arc::new(Mutex::new(None)), paths }
     }
 }
 
@@ -115,7 +123,11 @@ impl Provider for ZImageProvider {
         manifest()
     }
     fn action(&self, name: &str) -> Option<Arc<dyn Action>> {
-        manifest().actions.iter().any(|a| a.name == name).then(|| Arc::new(ZAction { name: name.to_string(), hot: self.hot.clone() }) as Arc<dyn Action>)
+        manifest()
+            .actions
+            .iter()
+            .any(|a| a.name == name)
+            .then(|| Arc::new(ZAction { name: name.to_string(), hot: self.hot.clone(), paths: self.paths.clone() }) as Arc<dyn Action>)
     }
 }
 
@@ -129,6 +141,7 @@ impl Provider for ZImageProvider {
 struct ZAction {
     name: String,
     hot: Arc<Mutex<Option<(HotKey, crate::pipeline::HotPipeline)>>>,
+    paths: crate::pipeline::Paths,
 }
 
 impl Action for ZAction {
@@ -136,7 +149,7 @@ impl Action for ZAction {
         manifest().actions.into_iter().find(|a| a.name == self.name).expect("known action")
     }
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        let paths = crate::pipeline::Paths::from_env()?;
+        let paths = &self.paths;
         let prompt = inv.get_str("prompt").unwrap_or_default();
         let mut on = |step, total, message: &str| progress(Progress::step(step, total, message.to_string()));
         match self.name.as_str() {
@@ -157,7 +170,7 @@ impl Action for ZAction {
                     *guard = None; // free the old resident weights before building new
                     on(0, 1, "loading weights (first call for this size)");
                     // A fixed caption length so any prompt reuses the built graphs.
-                    let pipe = crate::pipeline::HotPipeline::build_adapted(&paths, width, height, 64, hifi, adapter.as_deref(), |m| on(0, 1, m))?;
+                    let pipe = crate::pipeline::HotPipeline::build_adapted(paths, width, height, 64, hifi, adapter.as_deref(), |m| on(0, 1, m))?;
                     *guard = Some((key, pipe));
                 }
                 let pipe = &guard.as_ref().unwrap().1;
@@ -167,7 +180,7 @@ impl Action for ZAction {
                 let (image, w, h) = capability::blob::decode_image(inv, "image")?;
                 let opts = opts_from(inv, w, h); // output matches the input image
                 let init = crate::pipeline::Init { image: &image, strength: inv.get_f64("strength").unwrap_or(0.55) as f32, mask: None, feather: 0 };
-                emit(crate::pipeline::generate_img(&prompt, &opts, &paths, init, &mut on)?)
+                emit(crate::pipeline::generate_img(&prompt, &opts, paths, init, &mut on)?)
             }
             "inpaint" => {
                 let (image, w, h) = capability::blob::decode_image(inv, "image")?;
@@ -177,7 +190,7 @@ impl Action for ZAction {
                 }
                 let opts = opts_from(inv, w, h);
                 let init = crate::pipeline::Init { image: &image, strength: inv.get_f64("strength").unwrap_or(0.85) as f32, mask: Some(&mask), feather: inv.get_i64("feather").unwrap_or(2).max(0) as u32 };
-                emit(crate::pipeline::generate_img(&prompt, &opts, &paths, init, &mut on)?)
+                emit(crate::pipeline::generate_img(&prompt, &opts, paths, init, &mut on)?)
             }
             "outpaint" => {
                 let (image, w, h) = capability::blob::decode_image(inv, "image")?;
@@ -187,7 +200,7 @@ impl Action for ZAction {
                 // The new border regenerates from scratch (strength 1); the mask
                 // re-anchors the original region every step so it is preserved.
                 let init = crate::pipeline::Init { image: &canvas, strength: 1.0, mask: Some(&mask), feather: inv.get_i64("feather").unwrap_or(3).max(0) as u32 };
-                emit(crate::pipeline::generate_img(&prompt, &opts, &paths, init, &mut on)?)
+                emit(crate::pipeline::generate_img(&prompt, &opts, paths, init, &mut on)?)
             }
             "lora_train" => {
                 let dir = inv.get_str("data").ok_or("lora_train: 'data' folder is required")?;
@@ -204,7 +217,7 @@ impl Action for ZAction {
                     ckpt_every: 100,
                 };
                 let mut prog = |step: u32, total: u32, message: String| progress(Progress::step(step, total, message));
-                let tensors = crate::finetune::run(&paths, std::path::Path::new(&dir), &opts, &inv.cancel, &mut prog)?;
+                let tensors = crate::finetune::run(paths, std::path::Path::new(&dir), &opts, &inv.cancel, &mut prog)?;
                 // Return the trained artifact itself, not just its server-side path —
                 // a remote client has no filesystem access to `save`.
                 use capability::Blob;
