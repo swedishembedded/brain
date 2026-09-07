@@ -75,6 +75,20 @@ fn classify_hfdir(idx: usize, rec: &ArtifactRecord, out: &mut Vec<(usize, String
     }
 }
 
+/// A bare vendor-flat VAE checkpoint (`pipeline::Paths::vae` accepts a file
+/// as well as a diffusers `vae/` directory - `build_inner`'s `vp.is_dir()`
+/// branch) - `decoder.conv_in.weight`/`encoder.conv_in.weight` are the two
+/// tensor names FLUX.2's own VAE always carries (`crates/vae/src/decoder.rs`),
+/// present together in no other role's checkpoint, so this reads real header
+/// content exactly like `classify_gguf`/`classify_hfdir` do - never the name.
+fn classify_safetensors(idx: usize, rec: &ArtifactRecord, out: &mut Vec<(usize, String, Confidence)>) {
+    let Ok(m) = checkpoint::mmap::MmapSafetensors::open(rec.path.to_string_lossy().as_ref()) else { return };
+    let names = m.names();
+    if names.iter().any(|n| n == "decoder.conv_in.weight") && names.iter().any(|n| n == "encoder.conv_in.weight") {
+        out.push((idx, "vae".to_string(), Confidence::Declared));
+    }
+}
+
 fn classify_tokenizer(idx: usize, rec: &ArtifactRecord, out: &mut Vec<(usize, String, Confidence)>) {
     let Ok(bytes) = std::fs::read(&rec.path) else { return };
     if serde_json::from_slice::<serde_json::Value>(&bytes).is_ok() {
@@ -130,6 +144,7 @@ impl ArchSpec for Flux2Spec {
                 ArtifactKind::Gguf => classify_gguf(idx, rec, &mut out),
                 ArtifactKind::HfDir => classify_hfdir(idx, rec, &mut out),
                 ArtifactKind::TokenizerJson => classify_tokenizer(idx, rec, &mut out),
+                ArtifactKind::Safetensors => classify_safetensors(idx, rec, &mut out),
                 _ => {}
             }
         }
@@ -235,6 +250,21 @@ mod tests {
         std::fs::write(path, serde_json::to_vec(&serde_json::json!({"version": "1.0"})).unwrap()).unwrap();
     }
 
+    /// A bare vendor-flat VAE safetensors file (`unsloth`'s own release
+    /// shape: both `encoder.*`/`decoder.*` halves in one file, no diffusers
+    /// `vae/` directory or `config.json` beside it) - the one tensor pair
+    /// [`classify_safetensors`] actually checks for, at real-name minimal
+    /// payload.
+    fn write_vae_safetensors_flat(path: &std::path::Path) {
+        checkpoint::st::save_safetensors(
+            path.to_str().unwrap(),
+            &[("decoder.conv_in.weight".to_string(), vec![1], vec![0.0f32]), ("encoder.conv_in.weight".to_string(), vec![1], vec![0.0f32])],
+            &serde_json::json!({}),
+            None,
+        )
+        .unwrap();
+    }
+
     fn complete(path: PathBuf, kind: ArtifactKind) -> ArtifactRecord {
         ArtifactRecord { path, size: 1, mtime_ns: 0, kind, completeness: Completeness::Complete }
     }
@@ -280,6 +310,29 @@ mod tests {
 
         assert_eq!(out, vec![(0, "text_encoder".to_string(), Confidence::Declared)], "{out:?}");
         assert!(out.iter().all(|(idx, ..)| *idx != 1), "the unreadable file must never classify, {out:?}");
+    }
+
+    /// `pipeline::Paths::vae` accepts a bare file, not only a diffusers
+    /// `vae/` directory (`build_inner`'s own `vp.is_dir()` branch) - a real
+    /// vendor-flat release (`unsloth/flux2-vae.safetensors`) ships exactly
+    /// that shape, so classification must recognize it from its own tensor
+    /// names, not only from `classify_hfdir`'s `_class_name` check.
+    #[test]
+    fn classify_recognizes_a_bare_vendor_flat_vae_safetensors_file() {
+        let dir = tmp("flat-vae");
+        std::fs::create_dir_all(&dir).unwrap();
+        let vae_path = dir.join("flux2-vae.safetensors");
+        write_vae_safetensors_flat(&vae_path);
+
+        // A decoy safetensors file with unrelated tensor names must NOT
+        // classify as anything - proving this reads real tensor names, not
+        // "any bare safetensors file is a vae".
+        let decoy_path = dir.join("flux2-vae-decoy.safetensors");
+        checkpoint::st::save_safetensors(decoy_path.to_str().unwrap(), &[("some.other.weight".to_string(), vec![1], vec![0.0f32])], &serde_json::json!({}), None).unwrap();
+
+        let records = vec![complete(vae_path, ArtifactKind::Safetensors), complete(decoy_path, ArtifactKind::Safetensors)];
+        let out = Flux2Spec.classify(&records, dir.as_path());
+        assert_eq!(out, vec![(0, "vae".to_string(), Confidence::Declared)], "{out:?}");
     }
 
     #[test]
