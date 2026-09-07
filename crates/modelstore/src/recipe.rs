@@ -78,20 +78,74 @@ pub trait ArtifactRecipe: Send + Sync {
     fn resolved_quant(&self, _reference: &ModelRef, _listing: &[String]) -> Option<Quant> {
         None
     }
+
+    /// Precedence tier this recipe's [`matches`](Self::matches) success
+    /// should carry when more than one recipe in the registry matches the
+    /// same listing. Defaults to [`Specificity::Shape`] (a filename/shape
+    /// signature, `TransformersRecipe`'s "always matches" catch-all
+    /// aside) -- override for the two real exceptions: [`FilesRecipe`]
+    /// reports [`Specificity::RepoPinned`] when its `repos` field claimed
+    /// the match, and [`TransformersRecipe`] reports
+    /// [`Specificity::CatchAll`]. See [`select`] for how this is used.
+    fn specificity(&self) -> Specificity {
+        Specificity::Shape
+    }
 }
 
-/// The registry `plan_base` walks, in order. [`TransformersRecipe`] is last
-/// and always matches (the historical, still-default family) -- more
-/// specific recipes get first refusal, ahead of it.
+/// The precedence tier a recipe's [`ArtifactRecipe::matches`] success
+/// carries, checked explicitly by [`select`] rather than left to
+/// [`recipes`]' declaration order. `RepoPinned` outranks `Shape` -- the one
+/// deliberate tiebreak this store makes -- because an exact `vendor/repo`
+/// pin ([`FilesRecipe::repos`]) is a stronger claim than a listing shape two
+/// unrelated families can share by accident (Z-Image's four role dirs are
+/// also exactly official FLUX.2's). `CatchAll` is lower than both, and is
+/// [`TransformersRecipe`]'s alone: it always matches, so it must never
+/// out-rank -- or "tie" with -- a more specific recipe, and there is by
+/// construction exactly one recipe at that tier, so it can never itself be
+/// ambiguous.
+///
+/// Two recipes at the SAME tier matching the same listing is not resolved by
+/// order at all any more -- see [`crate::plan::PlanError::AmbiguousRecipe`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Specificity {
+    RepoPinned,
+    Shape,
+    CatchAll,
+}
+
+/// The registry `plan_base` walks. [`TransformersRecipe`] always matches (the
+/// historical, still-default family), but no longer wins merely by being
+/// declared last: [`select`] is what decides among however many of these
+/// match a given listing.
 pub fn recipes() -> Vec<Box<dyn ArtifactRecipe>> {
     let mut v: Vec<Box<dyn ArtifactRecipe>> = vec![Box::new(ZimageRecipe), Box::new(WanRecipe), Box::new(YoloRecipe)];
     v.extend(FILES_RECIPES.iter().map(|r| Box::new(*r) as Box<dyn ArtifactRecipe>));
-    // After the named rows (a repo whose GGUFs are a fixed SET, like
-    // `deepseek2ocr-gguf`'s model+mmproj pair, must be claimed by its own row
-    // first) and before the catch-all.
     v.push(Box::new(GgufRecipe));
     v.push(Box::new(TransformersRecipe));
     v
+}
+
+/// Picks the one recipe among `candidates` that claims `reference`/`listing`,
+/// applying [`Specificity`] as the sole deliberate tiebreak -- see its docs.
+/// `candidates` is a parameter (rather than this calling [`recipes`] itself)
+/// so a test can pass a small synthetic registry instead of the real one.
+///
+/// More than one candidate at the winning tier is
+/// [`crate::plan::PlanError::AmbiguousRecipe`], never a silent first-match
+/// pick: the whole point of this function is that `recipes()`' declaration
+/// order stops being load-bearing.
+pub fn select(candidates: Vec<Box<dyn ArtifactRecipe>>, reference: &ModelRef, listing: &[String]) -> Result<Box<dyn ArtifactRecipe>, Box<PlanError>> {
+    let matched: Vec<Box<dyn ArtifactRecipe>> = candidates.into_iter().filter(|r| r.matches(reference, listing)).collect();
+    let best = matched
+        .iter()
+        .map(|r| r.specificity())
+        .min()
+        .expect("candidates must include at least one recipe that can match (the real registry's catch-all always does)");
+    let mut winners: Vec<Box<dyn ArtifactRecipe>> = matched.into_iter().filter(|r| r.specificity() == best).collect();
+    match winners.len() {
+        1 => Ok(winners.remove(0)),
+        _ => Err(Box::new(PlanError::AmbiguousRecipe(reference.clone(), winners.iter().map(|r| r.id()).collect()))),
+    }
 }
 
 /// A repo servable by downloading a small, fixed set of named files verbatim
@@ -332,6 +386,14 @@ impl ArtifactRecipe for FilesRecipe {
             return Ok(listing.iter().map(|f| artifact(f.clone(), f.clone())).collect());
         }
         Ok(self.files.iter().map(|f| artifact(*f, *f)).collect())
+    }
+
+    fn specificity(&self) -> Specificity {
+        if self.repos.is_empty() {
+            Specificity::Shape
+        } else {
+            Specificity::RepoPinned
+        }
     }
 }
 
@@ -733,10 +795,11 @@ impl ArtifactRecipe for TransformersRecipe {
     }
 
     fn matches(&self, _reference: &ModelRef, _listing: &[String]) -> bool {
-        // Catch-all: always tried, always last (see `recipes()`). Its own
-        // artifacts() below produces the specific "no config.json"/
-        // "unsupported architecture" errors when nothing more specific
-        // claimed the repo first.
+        // Catch-all: always tried (see `recipes()`), but ranked lowest by
+        // `specificity()` below so it never wins -- or ties -- against a
+        // more specific recipe. Its own artifacts() below produces the
+        // specific "no config.json"/"unsupported architecture" errors when
+        // nothing more specific claimed the repo first.
         true
     }
 
@@ -783,6 +846,10 @@ impl ArtifactRecipe for TransformersRecipe {
         }
 
         Ok(artifacts)
+    }
+
+    fn specificity(&self) -> Specificity {
+        Specificity::CatchAll
     }
 }
 
@@ -909,17 +976,68 @@ mod tests {
     /// The bug this whole track exists to fix: `black-forest-labs/
     /// FLUX.2-klein-4B` is an official BFL FLUX.2 release, not a Z-Image
     /// checkpoint, but its listing matches [`ZimageRecipe::matches`] exactly
-    /// (`model_index.json` + all four role dirs) and the registry is
-    /// currently first-match-wins with `ZimageRecipe` declared first -- so
-    /// today it is misclassified as `"zimage"`, and `convert_zimage` would go
-    /// on to hardcode `family: "zimage"` into its manifest. This must resolve
-    /// to some OTHER recipe.
+    /// (`model_index.json` + all four role dirs). `ZimageRecipe`'s shape
+    /// match is the only recipe here that claims it today (no `repos`-pinned
+    /// row exists yet), so `select`'s tiebreak has nothing to prefer it
+    /// over. Real registry, real `select` -- the same call
+    /// `plan::plan_from_listing` makes.
     #[test]
     fn flux2_repo_is_not_misclassified_as_zimage() {
         let listing = flux2_klein_4b_listing();
         let r = ModelRef::new("black-forest-labs", "FLUX.2-klein-4B", None);
-        let matched = recipes().into_iter().find(|x| x.matches(&r, &listing)).unwrap();
-        assert_ne!(matched.id(), "zimage", "an official BFL FLUX.2 repo must not be classified as Z-Image");
+        let picked = select(recipes(), &r, &listing).unwrap();
+        assert_ne!(picked.id(), "zimage", "an official BFL FLUX.2 repo must not be classified as Z-Image");
+    }
+
+    /// A recipe that matches every listing, at whatever [`Specificity`] tier
+    /// it is built with -- the minimal fixture for exercising [`select`]'s
+    /// tiebreak without touching the real registry.
+    struct AlwaysMatches(&'static str, Specificity);
+
+    impl ArtifactRecipe for AlwaysMatches {
+        fn id(&self) -> &'static str {
+            self.0
+        }
+        fn matches(&self, _reference: &ModelRef, _listing: &[String]) -> bool {
+            true
+        }
+        fn artifacts(&self, _reference: &ModelRef, _listing: &[String], _hub: &dyn Hub) -> Result<Vec<Artifact>, Box<PlanError>> {
+            Ok(vec![])
+        }
+        fn specificity(&self) -> Specificity {
+            self.1
+        }
+    }
+
+    /// The bug `select`'s [`Specificity`] tiebreak exists to replace: two
+    /// recipes matching the SAME listing at the SAME tier used to be
+    /// resolved by `recipes()`' declaration order alone (whichever was
+    /// pushed first won, silently). Now it is a named error listing both
+    /// candidates, not a guess.
+    #[test]
+    fn select_reports_a_named_error_when_two_recipes_tie_at_the_same_specificity() {
+        let candidates: Vec<Box<dyn ArtifactRecipe>> = vec![Box::new(AlwaysMatches("fake-a", Specificity::Shape)), Box::new(AlwaysMatches("fake-b", Specificity::Shape))];
+        let r = ModelRef::new("some", "repo", None);
+        match select(candidates, &r, &["anything".to_string()]) {
+            Err(e) => match *e {
+                PlanError::AmbiguousRecipe(ref_, ids) => {
+                    assert_eq!(ref_, r);
+                    assert_eq!(ids, vec!["fake-a", "fake-b"]);
+                }
+                other => panic!("expected AmbiguousRecipe, got {other:?}"),
+            },
+            Ok(_) => panic!("expected AmbiguousRecipe, got a pick"),
+        }
+    }
+
+    /// A `RepoPinned` match must win outright over a `Shape` match on the
+    /// same listing -- the actual FLUX.2/Z-Image fix relies on exactly this.
+    #[test]
+    fn select_prefers_a_repo_pinned_match_over_a_shape_match() {
+        let candidates: Vec<Box<dyn ArtifactRecipe>> = vec![Box::new(AlwaysMatches("shape-only", Specificity::Shape)), Box::new(AlwaysMatches("pinned", Specificity::RepoPinned))];
+        let r = ModelRef::new("some", "repo", None);
+        let picked = select(candidates, &r, &["anything".to_string()]).unwrap();
+        assert_eq!(picked.id(), "pinned");
     }
 
     /// The exact `Wan-AI/Wan2.1-T2V-1.3B` file listing, confirmed live via

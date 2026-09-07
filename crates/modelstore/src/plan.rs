@@ -64,6 +64,12 @@ pub enum PlanError {
     NoUpstreamArtifact(ModelRef, String),
     /// The base repo's declared architecture is not one brain can load.
     UnsupportedArchitecture(ModelRef, String),
+    /// More than one recipe in [`crate::recipe::recipes`] matched this repo's
+    /// listing at the same [`crate::recipe::Specificity`] tier, so
+    /// [`crate::recipe::select`] had no deliberate tiebreak left to apply.
+    /// Never silently resolved by registry declaration order -- see
+    /// [`crate::recipe::select`]'s docs.
+    AmbiguousRecipe(ModelRef, Vec<&'static str>),
     Hub(HubError),
 }
 
@@ -73,6 +79,7 @@ impl std::fmt::Display for PlanError {
             PlanError::NotFetchable(r) => write!(f, "{r}: reserved vendor, not on disk"),
             PlanError::NoUpstreamArtifact(r, why) => write!(f, "{r}: {why}"),
             PlanError::UnsupportedArchitecture(r, arch) => write!(f, "{r}: unsupported architecture {arch:?}"),
+            PlanError::AmbiguousRecipe(r, ids) => write!(f, "{r}: ambiguous recipe match -- {} all match this repo's listing with equal specificity", ids.join(", ")),
             PlanError::Hub(e) => write!(f, "{e}"),
         }
     }
@@ -282,10 +289,7 @@ fn plan_base(reference: &ModelRef, revision: &str, store: &Store, hub: &dyn Hub)
 fn plan_from_listing(reference: &ModelRef, listing: &[String], revision: &str, hub: &dyn Hub) -> Result<Plan, Box<PlanError>> {
     let vendor = reference.vendor();
     let repo = reference.repo();
-    let recipe = crate::recipe::recipes()
-        .into_iter()
-        .find(|r| r.matches(reference, listing))
-        .expect("the last recipe in the registry is a catch-all and always matches");
+    let recipe = crate::recipe::select(crate::recipe::recipes(), reference, listing)?;
     let artifacts = recipe.artifacts(reference, listing, hub)?;
     // A recipe that CHOSE between interchangeable artifacts says so, and the
     // choice rides on the plan's reference: that is what the front end prints
