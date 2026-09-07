@@ -62,4 +62,5 @@ pub mod model;
 pub mod precompute_adaln;
 pub mod rope;
 pub mod schedule;
+pub mod video_vae;
 pub mod vocoder;

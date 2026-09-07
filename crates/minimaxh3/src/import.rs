@@ -28,6 +28,7 @@ use std::collections::HashMap;
 use audio::conv::fold_weight_norm;
 use vae::blocks::Tensors;
 
+use crate::video_vae::VideoVaeConfig;
 use crate::vocoder::VocoderConfig;
 
 /// Prefixes this port deliberately does not read - present in the checkpoint
@@ -94,6 +95,39 @@ pub fn import_audio_vae_decoder(dir: &str, cfg: &VocoderConfig) -> Result<Tensor
     );
 
     assert_eq!(out.len(), manifest.len(), "minimaxh3 audio_vae import: produced {} tensors, manifest has {}", out.len(), manifest.len());
+
+    Ok(out)
+}
+
+/// Import `<dir>/model.safetensors` (the video `vae/` component directory -
+/// the real checkpoint's ROOT flat layout: `transformer/`, `transformer_ref/`,
+/// a shared `text_encoder/`, `vae/` and `audio_vae/`, one copy of everything,
+/// the layout the current download targets; the audio VAE import above still
+/// reads the OLDER `FL2VA/audio_vae` nested layout from before that download
+/// strategy changed, updating it is deferred separately - this is new Phase 6
+/// code, so it targets the layout the pending download actually produces, not
+/// the deprecated one) into a decode/encode-ready [`Tensors`]
+/// map matching [`VideoVaeConfig::tensor_manifest`]. Two-way coverage: every
+/// manifest entry must be present at its manifest shape, and the checkpoint
+/// carries NOTHING beyond the manifest (unlike the audio VAE, this
+/// checkpoint's own shipped inference forward - `encoder`+`decoder`+
+/// `quant_conv`+`post_quant_conv` - uses every module the class defines, so
+/// there is no analogous "out of scope" prefix set to special-case here).
+pub fn import_video_vae(dir: &str, cfg: &VideoVaeConfig) -> Result<Tensors, String> {
+    let path = format!("{dir}/model.safetensors");
+    let raw = checkpoint::safetensors::read(&path)?;
+    let mut by_name: HashMap<String, (Vec<usize>, Vec<f32>)> = raw.into_iter().map(|t| (t.name, (t.shape, t.data))).collect();
+
+    let mut out: Tensors = HashMap::new();
+    let manifest = cfg.tensor_manifest();
+    for (name, shape) in &manifest {
+        let (s, v) = by_name.remove(name).ok_or_else(|| format!("minimaxh3 video_vae import: missing tensor {name:?}"))?;
+        assert_eq!(&s, shape, "{name}: checkpoint shape {s:?} disagrees with the manifest's {shape:?}");
+        out.insert(name.clone(), (shape.clone(), v));
+    }
+
+    assert!(by_name.is_empty(), "minimaxh3 video_vae import: {} tensor(s) unclaimed by the manifest: {:?}", by_name.len(), by_name.keys().collect::<Vec<_>>());
+    assert_eq!(out.len(), manifest.len(), "minimaxh3 video_vae import: produced {} tensors, manifest has {}", out.len(), manifest.len());
 
     Ok(out)
 }
@@ -254,5 +288,69 @@ mod tests {
         r.check("tap_stage0", &taps.stage0, &get("tap_stage0").data);
         r.check("waveform", &wave, &get("waveform").data);
         r.finish("minimaxh3 audio vae decode vs real reference");
+    }
+
+    /// `import_video_vae` against the real checkpoint's `vae/` component
+    /// (the root flat layout - see [`import_video_vae`]'s own doc), when
+    /// `BRAIN_MINIMAXH3_DIR` points at a checkout that has it. As of this
+    /// port's Phase 6 pass, `vae/` had NOT yet been fetched (only
+    /// `text_encoder/` partially and `FL2VA/audio_vae` were present locally) -
+    /// this test exists and is correct, but real-weight coverage is BLOCKED on
+    /// that download, not yet achieved; it skips cleanly rather than claiming
+    /// something unverified, matching this crate's own honesty convention
+    /// (compare `import_covers_the_real_checkpoint_two_way` above, which hit
+    /// the same state for the audio VAE before its own download completed).
+    #[test]
+    fn video_vae_import_covers_the_real_checkpoint_two_way() {
+        let Ok(root) = std::env::var("BRAIN_MINIMAXH3_DIR") else {
+            brain_testutil::skip("BRAIN_MINIMAXH3_DIR not set - no local MiniMax-H3 checkout to import from");
+            return;
+        };
+        let dir = format!("{root}/vae");
+        if !std::path::Path::new(&dir).join("model.safetensors").is_file() {
+            brain_testutil::skip(&format!("{dir}/model.safetensors not found - video vae not (yet) downloaded"));
+            return;
+        }
+
+        let cfg = VideoVaeConfig::real();
+        let tensors = import_video_vae(&dir, &cfg).unwrap_or_else(|e| panic!("import_video_vae: {e}"));
+        assert_eq!(tensors.len(), cfg.tensor_manifest().len());
+        assert_eq!(tensors.get("encoder.conv_in.weight").unwrap().0, vec![128, 3, 3, 3, 3]);
+        assert_eq!(tensors.get("decoder.proj_in.weight").unwrap().0, vec![2048, 24]);
+    }
+
+    /// Real-scale structural validation: the full encoder+decoder round trip
+    /// (`encode_clip` -> `posterior_mode` -> `decode_clip`) against the real
+    /// imported weights, at the checkpoint's ACTUAL widths - finite, no
+    /// NaN/Inf, matching this crate's Phase 4 audio-VAE precedent
+    /// (`decode_runs_at_real_scale_with_real_weights_and_stays_finite`). Same
+    /// download-blocked skip as the coverage test above.
+    #[test]
+    fn video_vae_round_trip_runs_at_real_scale_with_real_weights_and_stays_finite() {
+        let Ok(root) = std::env::var("BRAIN_MINIMAXH3_DIR") else {
+            brain_testutil::skip("BRAIN_MINIMAXH3_DIR not set - no local MiniMax-H3 checkout to decode from");
+            return;
+        };
+        let dir = format!("{root}/vae");
+        if !std::path::Path::new(&dir).join("model.safetensors").is_file() {
+            brain_testutil::skip(&format!("{dir}/model.safetensors not found - video vae not (yet) downloaded"));
+            return;
+        }
+
+        let cfg = VideoVaeConfig::real();
+        let tensors = import_video_vae(&dir, &cfg).unwrap_or_else(|e| panic!("import_video_vae: {e}"));
+
+        let (t, h, w) = (cfg.clip_length, 256u32, 256u32);
+        let mut rng = data::rng::Lcg::new(21);
+        let pixels = rng.vec_scaled((cfg.in_channels * t * h * w) as usize, 0.3);
+        let (moments, mt, mh, mw) = crate::video_vae::encode_clip(&cfg, &tensors, Some("cpu"), &pixels, t, h, w);
+        assert!(moments.iter().all(|v| v.is_finite()), "real-weight encode output must be finite");
+        assert!(moments.iter().any(|&v| v != 0.0), "real-weight encode output must not be trivially all-zero");
+
+        let z = crate::video_vae::posterior_mode(&moments, cfg.latent_channels, mt, mh, mw);
+        let (pix, pt, ph, pw) = crate::video_vae::decode_clip(&cfg, &tensors, Some("cpu"), &z, mt, mh, mw);
+        assert_eq!(pix.len(), (cfg.out_channels * pt * ph * pw) as usize);
+        assert!(pix.iter().all(|v| v.is_finite()), "real-weight decode output must be finite");
+        assert!(pix.iter().any(|&v| v != 0.0), "real-weight decode output must not be trivially all-zero");
     }
 }
