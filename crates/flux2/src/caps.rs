@@ -323,21 +323,16 @@ type HotKey = (String, &'static str, u32, u32, u32, Option<crate::AdapterSpec>);
 /// The executable FLUX.2 model behind the manifest. Holds a **hot pipeline
 /// cache** so a long-lived process (`brain run` / the event server) loads the
 /// weights once per (variant, size, refs, adapter) and reuses them across
-/// `ActionRequest`s. Weight paths come from the environment
-/// (`BRAIN_FLUX2_{DIT,VAE,TE,TOKENIZER}`).
+/// `ActionRequest`s. Weight paths are BOUND at construction (see
+/// [`Flux2Provider::new`]) - never re-resolved per request.
 pub struct Flux2Provider {
     hot: Arc<Mutex<Option<(HotKey, Pipeline)>>>,
+    paths: Paths,
 }
 
 impl Flux2Provider {
-    pub fn new() -> Flux2Provider {
-        Flux2Provider { hot: Arc::new(Mutex::new(None)) }
-    }
-}
-
-impl Default for Flux2Provider {
-    fn default() -> Self {
-        Flux2Provider::new()
+    pub fn new(paths: Paths) -> Flux2Provider {
+        Flux2Provider { hot: Arc::new(Mutex::new(None)), paths }
     }
 }
 
@@ -350,14 +345,17 @@ impl Provider for Flux2Provider {
             .actions
             .iter()
             .any(|a| a.name == name)
-            .then(|| Arc::new(Flux2Action { name: name.to_string(), hot: self.hot.clone() }) as Arc<dyn Action>)
+            .then(|| Arc::new(Flux2Action { name: name.to_string(), hot: self.hot.clone(), paths: self.paths.clone() }) as Arc<dyn Action>)
     }
 }
 
-/// One FLUX.2 action, dispatched through the shared helpers above.
+/// One FLUX.2 action, dispatched through the shared helpers above. `paths` is
+/// the provider's own bound weights (see [`Flux2Provider::new`]) - never
+/// re-resolved per request.
 struct Flux2Action {
     name: String,
     hot: Arc<Mutex<Option<(HotKey, Pipeline)>>>,
+    paths: Paths,
 }
 
 impl Action for Flux2Action {
@@ -367,14 +365,12 @@ impl Action for Flux2Action {
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         match self.name.as_str() {
             "text2image" | "edit" => {
-                // Params before the weights-env check - a missing/malformed
-                // request must not hide behind "not set". The license gate
+                // Params before the license gate - a missing/malformed
+                // request must not hide behind a licensing message. The gate
                 // itself needs `paths` (it checks the REAL weights' sniffed
-                // size, not the request's claim - see `bind_variant`), so it
-                // runs right after paths resolve, still before any weight is
-                // actually loaded.
+                // size, not the request's claim - see `bind_variant`).
                 let p = gen_params_from(inv)?;
-                let paths = Paths::from_env()?;
+                let paths = &self.paths;
                 let variant = bind_variant(&paths.dit, &p.variant)?;
                 check_license(&variant)?;
                 let cfg = Flux2Config::from_name(&variant)?;
@@ -387,12 +383,12 @@ impl Action for Flux2Action {
                 if !matches!(&*guard, Some((k, _)) if *k == key) {
                     *guard = None; // free the old resident weights before building new
                     progress(Progress::step(0, 1, "loading weights (first call for this variant/size)"));
-                    let pipe = Pipeline::build_sized(&cfg, &paths, n_gen + n_ref, n_gen, p.adapter.as_ref(), p.precision, 1)?;
+                    let pipe = Pipeline::build_sized(&cfg, paths, n_gen + n_ref, n_gen, p.adapter.as_ref(), p.precision, 1)?;
                     *guard = Some((key, pipe));
                 }
                 generate_on(&guard.as_ref().unwrap().1, inv, &refs, &p.opts, progress)
             }
-            "lora_train" => train_action(&Paths::from_env()?, inv, progress),
+            "lora_train" => train_action(&self.paths, inv, progress),
             other => Err(format!("flux2-klein '{other}': unknown action")),
         }
     }

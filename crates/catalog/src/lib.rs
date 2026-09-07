@@ -258,9 +258,17 @@ pub fn models() -> Vec<ModelEntry> {
             provider: |_assembly: &Assembly| s3dit::caps::ZImageProvider::load().map(|p| Arc::new(p) as Arc<dyn Provider>),
             resident: None, // ZImageResident::from_env is Result-shaped; registered directly in crates/cli/src/resident.rs
         },
+        // FLUX.2 is the first entry whose provider actually reads the
+        // Assembly it is called with - `flux2::pipeline::Paths::from_assembly`
+        // instead of the `BRAIN_FLUX2_*` variables every other entry here
+        // still uses (see the module doc: only this one architecture is
+        // migrated to the resolver in this stage).
         ModelEntry {
             manifest: flux2::caps::manifest,
-            provider: always!(flux2::caps::Flux2Provider::new()),
+            provider: |assembly: &Assembly| {
+                let paths = flux2::pipeline::Paths::from_assembly(assembly)?;
+                Ok(Arc::new(flux2::caps::Flux2Provider::new(paths)) as Arc<dyn Provider>)
+            },
             resident: None,
         },
         // Wan2.1 text-to-video. Like flux2, the four weight roles live in the
