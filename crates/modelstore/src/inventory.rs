@@ -571,10 +571,9 @@ mod tests {
         assert_eq!(found[0].completeness, Completeness::Complete);
     }
 
-    /// Real bug, found by actually running the resolver against a real
-    /// store: an HF checkpoint directory that collapses to one `HfDir`
-    /// record returned immediately, before ever walking its own files -- so
-    /// a `tokenizer.json` sitting right next to `config.json` in that same
+    /// An HF checkpoint directory that collapses to one `HfDir` record
+    /// returned immediately, before ever walking its own files -- so a
+    /// `tokenizer.json` sitting right next to `config.json` in that same
     /// directory never became a record of its own, and a role that wants
     /// "this checkpoint's weights" and a role that wants "this checkpoint's
     /// tokenizer" (two different roles of the same architecture, the
