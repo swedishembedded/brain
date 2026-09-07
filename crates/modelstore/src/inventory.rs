@@ -140,8 +140,11 @@ fn stat(path: &Path) -> std::io::Result<(u64, u64)> {
 }
 
 /// Probe one `.gguf`/`.safetensors` file that is NOT a `.part` - reads only
-/// its header (never tensor bytes) to decide [`Completeness`].
-fn probe_file(path: &Path, kind: ArtifactKind) -> Completeness {
+/// its header (never tensor bytes) to decide [`Completeness`]: a streamed
+/// download can be cut short partway through its tensor data with no `.part`
+/// sibling to give it away, so the header's own declared extent is checked
+/// against what actually landed on disk.
+fn probe_streamed(path: &Path, kind: ArtifactKind) -> Completeness {
     let actual = match std::fs::metadata(path) {
         Ok(m) => m.len(),
         Err(e) => return Completeness::Unreadable(e.to_string()),
@@ -149,12 +152,25 @@ fn probe_file(path: &Path, kind: ArtifactKind) -> Completeness {
     let declared = match kind {
         ArtifactKind::Gguf => checkpoint::gguf::declared_data_extent(path.to_string_lossy().as_ref()),
         ArtifactKind::Safetensors => checkpoint::st::declared_data_extent(path.to_string_lossy().as_ref()).map_err(|e| e.to_string()),
-        _ => unreachable!("probe_file only ever called for Gguf/Safetensors"),
+        _ => unreachable!("probe_streamed only ever called for Gguf/Safetensors"),
     };
     match declared {
         Ok(declared) if actual < declared => Completeness::Truncated { declared, actual },
         Ok(_) => Completeness::Complete,
         Err(e) => Completeness::Unreadable(e),
+    }
+}
+
+/// [`Completeness`] for a file that is NOT a `.part` and not a streamed
+/// checkpoint (`Gguf`/`Safetensors`) - a `tokenizer.json`/`model_index.json`
+/// manifest is read whole rather than streamed, so it carries no "declared
+/// extent" a truncated download could fall short of; a stat that succeeds at
+/// all means the file is there to read, and whether its bytes actually parse
+/// is [`crate::resolve::ArchSpec::classify`]'s job, not the inventory's.
+fn probe_whole_file(path: &Path) -> Completeness {
+    match std::fs::metadata(path) {
+        Ok(_) => Completeness::Complete,
+        Err(e) => Completeness::Unreadable(e.to_string()),
     }
 }
 
@@ -172,8 +188,10 @@ fn record_for(path: &Path, rel: &Path, kind: ArtifactKind, cache: &BTreeMap<Path
     probed(path);
     let completeness = if is_part_file(path) {
         Completeness::Partial { final_path: final_path_of(path) }
+    } else if matches!(kind, ArtifactKind::Gguf | ArtifactKind::Safetensors) {
+        probe_streamed(path, kind)
     } else {
-        probe_file(path, kind)
+        probe_whole_file(path)
     };
     Some(ArtifactRecord { path: path.to_path_buf(), size, mtime_ns, kind, completeness })
 }
@@ -441,6 +459,33 @@ mod tests {
         assert_eq!(found[0].kind, ArtifactKind::Gguf);
         assert_eq!(found[0].completeness, Completeness::Complete);
         assert_eq!(found[0].path, root.join("unsloth").join("foo.gguf"));
+    }
+
+    /// A real `tokenizer.json`/`model_index.json` sitting inside a repo
+    /// directory - `walk_repo_dir` recognizes both filenames explicitly, but
+    /// `probe_file` only ever knew how to compute a declared-vs-actual byte
+    /// extent for `Gguf`/`Safetensors`. Neither kind streams: a manifest this
+    /// small is read whole, so "complete" is just "readable" (an interrupted
+    /// download is still caught by its `.part` sibling, same as any other
+    /// kind - see `a_part_file_is_partial_and_absent_from_a_usable_filter`).
+    #[test]
+    fn a_real_tokenizer_json_and_model_index_json_scan_without_panicking() {
+        let root = scratch_root("tokenizer-and-index");
+        let repo = root.join("black-forest-labs").join("FLUX.2-klein-4B");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(repo.join("model_index.json"), br#"{"_class_name": "Flux2KleinPipeline"}"#).unwrap();
+        let tok_dir = repo.join("tokenizer");
+        std::fs::create_dir_all(&tok_dir).unwrap();
+        std::fs::write(tok_dir.join("tokenizer.json"), br#"{"version": "1.0"}"#).unwrap();
+
+        let found = scan(&root);
+        let by_kind = |k: ArtifactKind| found.iter().filter(|r| r.kind == k).count();
+        assert_eq!(by_kind(ArtifactKind::PipelineIndex), 1, "{found:?}");
+        assert_eq!(by_kind(ArtifactKind::TokenizerJson), 1, "{found:?}");
+        for r in &found {
+            assert_eq!(r.completeness, Completeness::Complete, "{r:?}");
+            assert!(r.usable());
+        }
     }
 
     #[test]
