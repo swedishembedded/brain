@@ -19,10 +19,6 @@ play.
 - [ ] Generalize the VQ/EDM host math that currently lives in the
       DIAMOND-specific code into the shared world-model core, for reuse by
       other architectures
-- [ ] `wm play`'s Enter/reset should restore the initial seed context and
-      reseed the RNG deterministically — it currently resets to zeros,
-      producing a random continuation rather than restarting from the
-      original context
 - [ ] INT8 post-training quantization for the NPU graph (only an fp32 export
       exists today)
 - [ ] Reduce per-inference-step GPU submission overhead by batching multiple
@@ -37,3 +33,9 @@ GenieRedux's checkpoint conversion and per-run forward pass are slow enough
 on CPU that interactive play isn't practical yet without the on-device-graph
 work above; this is an engineering/performance gap, not a correctness one —
 its outputs already match the reference exactly.
+
+Enter/reset is done - `diamond::play`'s `reset` snapshots the seed context
+(`init_obs`/`init_act`) and re-seeds `NormalRng::new(self.seed)`, and
+`reset_initial` restores both, so the interactive Enter key rewinds to the
+exact original context and noise stream rather than a random continuation.
+Gated bit-exactly by `crates/diamond/tests/reset.rs`.
