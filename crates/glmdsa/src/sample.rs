@@ -124,6 +124,17 @@ fn sample_logits(logits: &[f32], temperature: f32, top_k: usize, rng: &mut Rng) 
     (scaled.len() - 1) as u32
 }
 
+// Note on what is NOT claimed here: `generate_kv`'s sampled path (temperature
+// > 0, the served default of 0.8/top_k=40) is never asserted bit-identical to
+// plain `generate`. `generate_kv` applies GLM's untied `lm_head` on the host
+// in a scalar loop (see its own doc comment), which agrees with the device
+// path's logits to only ~1e-3 - enough to flip which of two close candidates
+// a sampler draws, even though both walk the exact same RNG draw sequence
+// (one `rng.next_f32()` per emitted token, identically ordered in both
+// functions - see `sample_logits`). Bit-identity between the two functions is
+// only claimable at `temperature=0` (greedy, `generate_kv_matches_recompute_
+// greedy` below); the sampled-path test below instead pins `generate_kv`'s
+// own contract (valid token ids, and self-reproducible given the same seed).
 #[cfg(test)]
 mod kv_gen_tests {
     use super::*;
@@ -131,17 +142,53 @@ mod kv_gen_tests {
     use crate::model::Glm;
 
     /// KV-cache generation must produce the SAME greedy tokens as the O(T²)
-    /// recompute path (the cache is algebraically exact; logits agree to ~1e-3).
+    /// recompute path (the cache is algebraically exact; logits agree to
+    /// ~1e-3, never enough to flip an argmax). Two prompts, >=32 tokens each,
+    /// so this is a real regression net rather than the original 4-token/
+    /// one-prompt smoke.
     #[test]
     fn generate_kv_matches_recompute_greedy() {
         let cfg = GlmConfig::tiny();
         let init = crate::init::init_weights(&cfg, 7);
-        let model = Glm::new_on(gpu_core::testgpu::dev(crate::model::PIPELINES), cfg.clone(), 1, 8, &init);
-        let prompt = vec![1u32, 5, 3];
-        let mut r1 = data::rng::Rng::new(0);
-        let recompute = generate(&model, &prompt, 4, 0.0, 0, None, &mut r1);
-        let mut r2 = data::rng::Rng::new(0);
-        let kv = generate_kv(&model, &prompt, 4, 0.0, 0, None, &mut r2);
-        assert_eq!(recompute, kv, "KV greedy generation must equal recompute generation");
+        let model = Glm::new_on(gpu_core::testgpu::dev(crate::model::PIPELINES), cfg.clone(), 1, 64, &init);
+        let mut compared = 0usize;
+        for prompt in [vec![1u32, 5, 3], vec![2u32, 6, 4, 1, 7, 3, 5]] {
+            let mut r1 = data::rng::Rng::new(0);
+            let recompute = generate(&model, &prompt, 32, 0.0, 0, None, &mut r1);
+            let mut r2 = data::rng::Rng::new(0);
+            let kv = generate_kv(&model, &prompt, 32, 0.0, 0, None, &mut r2);
+            assert_eq!(recompute, kv, "KV greedy generation must equal recompute generation for prompt {prompt:?}");
+            compared += recompute.len();
+        }
+        println!("generate_kv_matches_recompute_greedy: compared {compared} tokens across 2 prompts, 0 differing token ids");
+        assert!(compared >= 64, "expected >=32 tokens compared per prompt across 2 prompts, got {compared}");
+    }
+
+    /// The SAMPLED path's own contract (temp=0.8, top_k=40, the served
+    /// default) - not bit-identity vs `generate` (see the module note above
+    /// for why that is never claimed). Every emitted id must be a valid
+    /// vocab index, and `generate_kv` must be byte-identical to ITSELF across
+    /// two runs seeded identically (the RNG is the only source of
+    /// nondeterminism in this path - no other hidden state should leak in).
+    #[test]
+    fn generate_kv_sampled_path_is_well_formed_and_self_reproducible() {
+        let cfg = GlmConfig::tiny();
+        let init = crate::init::init_weights(&cfg, 11);
+        let model = Glm::new_on(gpu_core::testgpu::dev(crate::model::PIPELINES), cfg.clone(), 1, 64, &init);
+        let vocab = cfg.vocab as u32;
+        let prompt = vec![2u32, 6, 4, 1, 7, 3, 5];
+        let max_new = 32;
+
+        let mut r1 = data::rng::Rng::new(42);
+        let run1 = generate_kv(&model, &prompt, max_new, 0.8, 40, None, &mut r1);
+        let mut r2 = data::rng::Rng::new(42);
+        let run2 = generate_kv(&model, &prompt, max_new, 0.8, 40, None, &mut r2);
+
+        println!("generate_kv_sampled_path_is_well_formed_and_self_reproducible: {} tokens/run, vocab={vocab}", run1.len());
+        assert_eq!(run1.len(), max_new, "sampled generate_kv must emit max_new tokens with no eos set");
+        for &id in &run1 {
+            assert!(id < vocab, "sampled token id {id} must be < vocab ({vocab})");
+        }
+        assert_eq!(run1, run2, "generate_kv must be byte-identical to itself given the same seed");
     }
 }

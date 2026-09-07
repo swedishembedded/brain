@@ -54,11 +54,57 @@ produces an ONNX graph validated on real NPU hardware (fp32 only).
       to exist first, and then the flag describes it. Doing it in that order is
       the difference between a served streaming endpoint and a manifest that
       lies to the router.
-- [ ] `Instance::run_batch` for GLM is the serial default and does not yet say
-      why - the decoder is autoregressive, so the honest options are batching
-      the prefill or adopting `model::serve::PagedDecoder` (see
-      `.agents/rules/serving-contract.md`), not a comment
-- [ ] A runnable `examples/` client for GLM, like the other served models have
+- [x] `crates/cli/src/resident_llm.rs::GlmInstance::run` now calls
+      `glmdsa::sample::generate_kv` (the KV-cached fast path), matching the
+      direct `brain glmdsa generate` path (`glmdsa::caps::GenerateAction`,
+      which already called `generate_kv`). Before this the served and direct
+      surfaces silently disagreed about how GLM samples - not an RNG-ordering
+      bug (`sample_logits` draws exactly one `rng.next_f32()` per emitted
+      token, identically ordered in both `generate` and `generate_kv`), but a
+      real numerical one: `generate_kv` applies GLM's untied `lm_head` on the
+      host in a scalar loop, agreeing with the device path's logits to only
+      ~1e-3 - enough to flip a sampled token at the served default
+      (`temp=0.8`, `top_k=40`) even though bit-identity still holds at
+      `temperature=0` (greedy; see the extended
+      `sample::kv_gen_tests::generate_kv_matches_recompute_greedy`).
+- [x] `Instance::run_batch` for GLM is the serial default, and now SAYS why in
+      a comment (`GlmInstance`'s `run_batch`) plus the fuller rationale in
+      `GlmResident`'s module doc - **this item's original wording above was
+      itself wrong and is corrected here, not obeyed literally.** Both
+      "honest options" it named - batching the prefill, or adopting
+      `model::serve::PagedDecoder` - require a batched forward this model
+      does not have: `Glm::step` takes one token id and one KV-cache,
+      `Glm::logits_all_compact` takes one window, `Glm::set_batch` builds one
+      TRAINING sequence - there is no N axis anywhere in the MLA attention or
+      the sigmoid `noaux_tc` MoE dispatch to widen. Writing a `run_batch`
+      override that loops `run()` would also be a byte-for-byte redundant
+      copy of `residency::model`'s own default (`crates/residency/src/
+      model.rs` lines ~53-58) - this repo's established convention for
+      exactly this situation is a comment where the override would go, not a
+      written-out duplicate (`resident_asr.rs`'s Qwen3-ASR, `resident_restore.
+      rs`'s CodeFormer/VQGAN - both comment-only, no override). **Real
+      batched serving needs a batched MLA + sigmoid `noaux_tc` MoE forward
+      first** - new kernel/architecture work, explicitly out of scope here,
+      tracked as its own item below.
+  - [ ] **Batched MLA + sigmoid `noaux_tc` MoE forward for GLM** - the actual
+        missing prerequisite for both real batched serving and the
+        `qwen35moe`/`qwen3`-style paged-KV `Scheduler` machinery. Until this
+        exists, GLM's `run_batch` correctly stays the residency default
+        serial loop (see above); do not reach for `PagedDecoder` without it.
+  - [ ] `GlmInstance`'s served (resident) path has no automated test on this
+        box: `GlmResident::activate` requires `BRAIN_GLMDSA_WEIGHTS` to point
+        at a checkpoint with an embedded char vocab, and no such fixture is
+        committed (this repo's convention gitignores test fixtures/goldens
+        under `testdata/`). A real, disclosed coverage gap, not a hidden one -
+        `crates/glmdsa/src/sample.rs`'s `kv_gen_tests` cover the sampling
+        function itself at the model level instead. Closing this needs a tiny
+        committed GLM checkpoint with a char vocab, which is its own item, not
+        something to manufacture as a side effect of unrelated work.
+- [x] A runnable `examples/` client for GLM, like the other served models have
+      (`examples/llm/glmdsa.py`, D-Bus only - GLM's `generate` is not
+      `.streaming()`, see the item above, so it is not reachable over
+      `/v1/chat/completions`/`/v1/messages`; `--openai`/`--anthropic` are
+      refused with that explanation rather than silently doing nothing).
 - [ ] `brain glmdsa infer --device npu` - the exported ONNX graph isn't wired
       into an inference command yet; today `export` hands you a graph to run
       through OpenVINO yourself

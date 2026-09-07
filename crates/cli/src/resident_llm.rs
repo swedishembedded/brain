@@ -184,6 +184,43 @@ impl Instance for GptInstance {
 
 /// The GLM decoder (MLA + sigmoid noaux_tc MoE) behind the scheduler
 /// (`BRAIN_GLMDSA_WEIGHTS`). Char-level: the checkpoint must embed its vocab.
+///
+/// Decoding is [`glmdsa::sample::generate_kv`] (the KV-cached fast path) -
+/// the same one `glmdsa::caps::GenerateAction` (the direct `brain glmdsa
+/// generate` path) calls, so the served and direct surfaces sample
+/// identically rather than drifting (they used to: this adapter called the
+/// slower cache-free `generate` while the direct path had already moved to
+/// `generate_kv`). Bit-identity between `generate` and `generate_kv` only
+/// holds at `temperature=0` (greedy) - `generate_kv` applies GLM's untied
+/// `lm_head` on the host in a scalar loop, agreeing with the device path to
+/// only ~1e-3, which is enough to flip a sampled token when two candidates
+/// are close (see `generate_kv`'s own doc comment). The served default is
+/// `temp=0.8`, so this is a real, disclosed numerical difference from the
+/// pre-KV behaviour, not a regression: the two paths were never
+/// bit-identical at temperature>0, they now just agree with EACH OTHER
+/// (served == direct) instead of the served path being the slow, no-longer-
+/// canonical one.
+///
+/// # Batching: deliberately serial, and here is why
+///
+/// `GlmInstance` runs the residency default `run_batch` (a loop over `run`,
+/// `residency::model`'s `Instance` default) rather than an override - GLM has
+/// no batch axis to exploit yet. [`glmdsa::model::Glm::step`] takes one
+/// token id and one KV-cache, [`glmdsa::model::Glm::logits_all_compact`]
+/// takes one window, and [`glmdsa::model::Glm::set_batch`] builds one
+/// TRAINING sequence - there is no N dimension threaded through the MLA
+/// attention or the sigmoid `noaux_tc` MoE dispatch anywhere in this model.
+/// The two options this repo's serving contract names for a served decoder
+/// (batching the prefill, or adopting `model::serve::PagedDecoder`) both
+/// assume a batched forward already exists to drive - GLM's does not, and
+/// building one (batched MLA + batched sigmoid `noaux_tc` MoE) is new
+/// kernel/architecture work, tracked as its own out-of-scope roadmap item,
+/// not something this adapter can shortcut. Concurrent requests are still
+/// served today: the residency scheduler's own default loop interleaves
+/// them across separate `run` calls on this one resident instance, exactly
+/// like `crate::resident_restore`'s CodeFormer/VQGAN graphs (see that
+/// module's doc for the same reasoning applied to a fixed-shape recorded
+/// graph instead of a missing batch axis).
 pub struct GlmResident {
     id: String,
     path: String,
@@ -244,11 +281,13 @@ impl Instance for GlmInstance {
         let ids = self.tok.encode(&prompt_text);
         let mut rng = Rng::new(seed);
         progress(Progress::step(0, max_new as u32, "generating"));
-        let gen = glmdsa::sample::generate(&self.model, &ids, max_new, temp, top_k, None, &mut rng);
+        let gen = glmdsa::sample::generate_kv(&self.model, &ids, max_new, temp, top_k, None, &mut rng);
         let text = self.tok.decode(&gen);
         progress(Progress::step(max_new as u32, max_new as u32, "done"));
         Ok(text_outcome(text))
     }
+    // `run_batch` is deliberately the residency-default serial loop - GLM has
+    // no batch axis to exploit yet, see `GlmResident`'s module doc for why.
 }
 
 // ---------------------------------------------------------------- qwen

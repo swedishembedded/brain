@@ -119,6 +119,67 @@ than the residency-managed resident above; see
 
 ---
 
+# glmdsa.py - GLM-5.2 text generation, D-Bus only
+
+Send a raw prompt to GLM-5.2's MLA + sigmoid `noaux_tc` MoE decoder and get a
+completion back over D-Bus. GLM is char-level (no chat template, no
+`messages`) and its `generate` action is not `.streaming()`
+(`crates/apiserve/src/catalog.rs::api_caps` gates `/v1/chat/completions` and
+`/v1/messages` on that flag, and GLM does not set it yet), so **this
+example offers `--dbus` only**; `--openai`/`--anthropic` are refused outright
+with that explanation rather than silently doing nothing over an endpoint
+that will never see this model. Decoding is `glmdsa::sample::generate_kv`
+end to end - the served path (`crates/cli/src/resident_llm.rs::GlmResident`)
+and the direct `brain glmdsa generate` path (`crates/glmdsa/src/caps.rs`)
+sample identically.
+
+**Real GLM-5.2, over D-Bus:**
+
+```bash
+BRAIN_GLMDSA_WEIGHTS=/path/to/glm.brain.safetensors \
+  dbus-run-session -- bash -c '
+    brain serve --dbus & sleep 2
+    python3 examples/llm/glmdsa.py --dbus --prompt "Once upon a time" --max_new 64
+  '
+```
+
+**Quick, deps-free wire-contract check** (no GLM checkpoint needed - exercises
+the exact same `generate` action shape against the mock resident):
+
+```bash
+BRAIN_MOCK=1 dbus-run-session -- bash -c '
+  brain serve --dbus & sleep 2
+  python3 examples/llm/glmdsa.py --dbus --model brain/mock --prompt hi
+'
+```
+
+**Ad hoc, no server at all** - `brain glmdsa generate` loads a checkpoint and
+generates directly (weights are a per-call flag, not an env-configured
+resident):
+
+```bash
+brain glmdsa generate --weights /path/to/glm.brain.safetensors \
+    --prompt "2+2=" --max_new 8
+```
+
+### Flags
+
+```
+--dbus                  use the D-Bus transport (the only one this example serves)
+--openai URL            refused (GLM's generate action is not .streaming())
+--anthropic URL         refused (same reason)
+--prompt TEXT           the prompt to continue (required)
+--max_new N             number of new tokens to generate (default 128)
+--temp X                sampling temperature; <= 0 = greedy (default 0.8)
+--top_k N               top-k filter; 0 or negative disables it (default 40)
+--seed N                RNG seed (default 0)
+--model MODEL           served model name (default brain/glm; brain/mock for the wire-contract check)
+```
+
+### Dependencies
+
+- `jeepney` - D-Bus with fd passing.
+
 ## Who builds brain
 
 brain is built by **[Swedish Embedded AB](https://swedishembedded.com)** - we
