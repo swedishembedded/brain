@@ -29,13 +29,19 @@ use serde::{Deserialize, Serialize};
 pub enum ArtifactKind {
     Gguf,
     Safetensors,
-    /// A `torch.save` checkpoint (`.pth`) - the format a native (non-diffusers)
-    /// PyTorch release ships a component in, e.g. Wan2.1's `Wan2.1_VAE.pth` and
-    /// `models_t5_umt5-xxl-enc-bf16.pth`. Content classification reads it
-    /// through [`checkpoint::torchpt::shapes`] (mmap'd, no tensor data read),
+    /// A `torch.save` checkpoint (`.pt` or `.pth` - the same pickle/zip
+    /// container under two conventional extensions) - the format a native
+    /// (non-diffusers) PyTorch release ships a component in, e.g. Wan2.1's
+    /// `Wan2.1_VAE.pth`/`models_t5_umt5-xxl-enc-bf16.pth`, or CosyVoice's
+    /// `llm.pt`/`flow.pt`/`hift.pt`. Content classification reads it through
+    /// [`checkpoint::torchpt::read_shapes`] (mmap'd, no tensor data read),
     /// the same header-only discipline `Gguf`/`Safetensors` classification
-    /// already follows.
-    Pth,
+    /// already follows. Whole-file completeness only ([`probe_whole_file`]):
+    /// unlike `Gguf`/`Safetensors`, a `.pt`/`.pth` archive's own
+    /// end-of-central-directory record carries no single "total declared
+    /// bytes" figure this crate reads today, so a `.part` sibling is the
+    /// completeness signal, not a declared-vs-actual byte extent.
+    Torch,
     /// A directory holding a foreign (non-brain) HF checkpoint: `config.json`
     /// plus one or more `model*.safetensors` files, or a
     /// `model.safetensors.index.json` shard set - the loader takes the
@@ -225,8 +231,8 @@ fn kind_of_extension(fname: &str) -> Option<ArtifactKind> {
         Some(ArtifactKind::Gguf)
     } else if fname.ends_with(".safetensors") || fname.ends_with(".safetensors.part") {
         Some(ArtifactKind::Safetensors)
-    } else if fname.ends_with(".pth") || fname.ends_with(".pth.part") {
-        Some(ArtifactKind::Pth)
+    } else if fname.ends_with(".pt") || fname.ends_with(".pt.part") || fname.ends_with(".pth") || fname.ends_with(".pth.part") {
+        Some(ArtifactKind::Torch)
     } else {
         None
     }
@@ -578,7 +584,7 @@ mod tests {
 
         let found = scan(&root);
         assert_eq!(found.len(), 1, "{found:?}");
-        assert_eq!(found[0].kind, ArtifactKind::Pth);
+        assert_eq!(found[0].kind, ArtifactKind::Torch);
         assert_eq!(found[0].completeness, Completeness::Complete);
         assert_eq!(found[0].path, path);
     }
@@ -593,7 +599,47 @@ mod tests {
         std::fs::write(&path, b"stub").unwrap();
 
         let found = scan(&root);
-        assert_eq!(found.iter().filter(|r| r.kind == ArtifactKind::Pth).count(), 1, "{found:?}");
+        assert_eq!(found.iter().filter(|r| r.kind == ArtifactKind::Torch).count(), 1, "{found:?}");
+    }
+
+    /// The `.pt` sibling extension - the shape CosyVoice ships `llm.pt`/
+    /// `flow.pt`/`hift.pt` in - is recognized as the SAME kind as `.pth`
+    /// (both are the same `torch.save` pickle/zip container), even though
+    /// its own directory carries no `config.json` to collapse it into an
+    /// `HfDir` record.
+    #[test]
+    fn a_torch_pt_checkpoint_is_inventoried_as_the_same_kind_as_pth() {
+        let root = scratch_root("torch-pt");
+        let path = root.join("FunAudioLLM").join("CosyVoice2-0.5B").join("llm.pt");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"not really a zip, inventory never reads past the extension").unwrap();
+
+        let found = scan(&root);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].kind, ArtifactKind::Torch);
+        assert_eq!(found[0].completeness, Completeness::Complete);
+        assert_eq!(found[0].path, path);
+    }
+
+    /// A `.pt.part` sibling is an interrupted download, exactly like a
+    /// `.gguf.part`/`.safetensors.part`/`.pth.part` one - never usable, and
+    /// its `final_path` names what the completed download would have been.
+    #[test]
+    fn a_partial_torch_pt_download_is_partial_and_absent_from_a_usable_filter() {
+        let root = scratch_root("torch-pt-part");
+        let part = root.join("FunAudioLLM").join("CosyVoice2-0.5B").join("llm.pt.part");
+        std::fs::create_dir_all(part.parent().unwrap()).unwrap();
+        std::fs::write(&part, b"partial bytes").unwrap();
+
+        let found = scan(&root);
+        assert_eq!(found.len(), 1);
+        let r = &found[0];
+        assert_eq!(r.kind, ArtifactKind::Torch);
+        match &r.completeness {
+            Completeness::Partial { final_path } => assert_eq!(final_path, &part.parent().unwrap().join("llm.pt")),
+            other => panic!("expected Partial, got {other:?}"),
+        }
+        assert!(!r.usable());
     }
 
     #[test]

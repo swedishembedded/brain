@@ -186,6 +186,7 @@ pub fn write(path: &str, tensors: &[TensorOut]) -> Result<(), String> {
     pickle.push(0x2e); // STOP
 
     let mut zip = ZipWriter::new();
+    zip.add("archive/version", b"3\n");
     zip.add("archive/data.pkl", &pickle);
     for (i, t) in tensors.iter().enumerate() {
         let bytes: Vec<u8> = t.data.iter().flat_map(|v| v.to_le_bytes()).collect();
@@ -237,7 +238,7 @@ mod tests {
         let path = tmp("shapes-only");
         write(path.to_str().unwrap(), &[TensorOut { name: "encoder.conv1.weight".to_string(), shape: vec![2, 3, 3, 3, 3], data: vec![0.0; 2 * 3 * 3 * 3 * 3] }]).unwrap();
 
-        let shapes = crate::torchpt::shapes(path.to_str().unwrap()).unwrap();
+        let shapes = crate::torchpt::read_shapes(path.to_str().unwrap()).unwrap();
         assert_eq!(shapes, vec![("encoder.conv1.weight".to_string(), vec![2, 3, 3, 3, 3])]);
 
         std::fs::remove_file(&path).ok();

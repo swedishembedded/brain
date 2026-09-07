@@ -982,7 +982,7 @@ fn flatten_shapes(v: &Val, prefix: &str, out: &mut Vec<(String, Vec<usize>)>, sk
     Ok(())
 }
 
-/// [`shapes`] over an in-memory (or mmap'd) byte buffer - the shapes-only
+/// [`read_shapes`] over an in-memory (or mmap'd) byte buffer - the shapes-only
 /// sibling of [`parse`]. Locates and unpickles `<root>/data.pkl` exactly as
 /// `parse` does; the only difference is that a tensor leaf contributes its
 /// `(name, shape)` and nothing else, so the `<root>/data/<key>` storage
@@ -1021,7 +1021,7 @@ pub fn parse_shapes(bytes: &[u8]) -> Result<Vec<(String, Vec<usize>)>, String> {
 /// a handful of small reads near the zip's central directory and each
 /// entry's local header, never a read of the weights themselves.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn shapes(path: &str) -> Result<Vec<(String, Vec<usize>)>, String> {
+pub fn read_shapes(path: &str) -> Result<Vec<(String, Vec<usize>)>, String> {
     let file = std::fs::File::open(path).map_err(|e| format!("torchpt: open {path}: {e}"))?;
     // SAFETY: weight files are treated as immutable for the mapping's lifetime.
     let mmap = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| format!("torchpt: mmap {path}: {e}"))?;

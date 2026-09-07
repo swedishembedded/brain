@@ -9,7 +9,7 @@
 //! Every check here is header/config only: a GGUF's KV metadata and tensor
 //! shapes ([`checkpoint::gguf::MmapGguf`]), a safetensors file's own tensor
 //! shapes ([`checkpoint::mmap::MmapSafetensors`]), or a `torch.save`
-//! checkpoint's own tensor names/shapes ([`checkpoint::torchpt::shapes`],
+//! checkpoint's own tensor names/shapes ([`checkpoint::torchpt::read_shapes`],
 //! mmap'd, no tensor data read) - mirroring `crate::import::dit_manifest`'s
 //! own "shapes, never values" discipline. Nothing here ever touches a
 //! device - see [`ArchSpec::validate`]'s contract.
@@ -98,7 +98,7 @@ fn is_wan_text_encoder(shapes: &[(String, Vec<usize>)]) -> bool {
 }
 
 fn classify_pth(idx: usize, rec: &ArtifactRecord, out: &mut Vec<(usize, String, Confidence)>) {
-    let Ok(shapes) = checkpoint::torchpt::shapes(&rec.path.to_string_lossy()) else { return };
+    let Ok(shapes) = checkpoint::torchpt::read_shapes(&rec.path.to_string_lossy()) else { return };
     if is_wan_vae(&shapes) {
         out.push((idx, "vae".to_string(), Confidence::Declared));
     } else if is_wan_text_encoder(&shapes) {
@@ -114,7 +114,7 @@ fn classify_pth(idx: usize, rec: &ArtifactRecord, out: &mut Vec<(usize, String, 
 /// same discipline that function's own doc anticipates for an architecture
 /// whose tokenizer-shaped role does not fit its orchestration.
 fn wan_text_encoder_vocab_size(path: &Path) -> Option<usize> {
-    let shapes = checkpoint::torchpt::shapes(&path.to_string_lossy()).ok()?;
+    let shapes = checkpoint::torchpt::read_shapes(&path.to_string_lossy()).ok()?;
     shapes.iter().find(|(n, _)| n == "token_embedding.weight").and_then(|(_, s)| s.first().copied())
 }
 
@@ -164,7 +164,7 @@ impl ArchSpec for WanSpec {
             match rec.kind {
                 ArtifactKind::Gguf => classify_gguf(idx, rec, &mut out),
                 ArtifactKind::Safetensors => classify_safetensors(idx, rec, &mut out),
-                ArtifactKind::Pth => classify_pth(idx, rec, &mut out),
+                ArtifactKind::Torch => classify_pth(idx, rec, &mut out),
                 _ => {}
             }
         }
@@ -191,7 +191,7 @@ impl ArchSpec for WanSpec {
         let te_path = assembly.roles.get("text_encoder").ok_or("wan validate: assembly has no text_encoder role")?;
         let shapes = dit_shapes(dit_path)?;
         let cfg = dit_config_from_shapes(&shapes)?;
-        let te_shapes = checkpoint::torchpt::shapes(&te_path.to_string_lossy()).map_err(|e| format!("wan validate: opening text_encoder {}: {e}", te_path.display()))?;
+        let te_shapes = checkpoint::torchpt::read_shapes(&te_path.to_string_lossy()).map_err(|e| format!("wan validate: opening text_encoder {}: {e}", te_path.display()))?;
         let d_model = te_shapes
             .iter()
             .find(|(n, _)| n == "token_embedding.weight")
@@ -321,8 +321,8 @@ mod tests {
         write_tokenizer_json(&tok_path);
         vec![
             complete(dit_path, ArtifactKind::Safetensors),
-            complete(vae_path, ArtifactKind::Pth),
-            complete(te_path, ArtifactKind::Pth),
+            complete(vae_path, ArtifactKind::Torch),
+            complete(te_path, ArtifactKind::Torch),
             complete(tok_path, ArtifactKind::TokenizerJson),
             complete(dir.join("other-vendor").join("unrelated.bin"), ArtifactKind::Opaque),
         ]
@@ -373,7 +373,7 @@ mod tests {
             ],
         )
         .unwrap();
-        let records = vec![complete(real.clone(), ArtifactKind::Pth), complete(decoy, ArtifactKind::Pth)];
+        let records = vec![complete(real.clone(), ArtifactKind::Torch), complete(decoy, ArtifactKind::Torch)];
         let out = WanSpec.classify(&records, dir.as_path());
         assert_eq!(out, vec![(0, "vae".to_string(), Confidence::Declared)], "{out:?}");
     }
