@@ -1407,7 +1407,7 @@ pub(crate) mod tests {
         let supplier = StoreSupplier::new(Store::new(dir.clone()), Box::new(hub));
         let e = exec();
         let err = supplier.ensure("black-forest-labs/FLUX.2-klein-4B", &e, &mut |_, _, _| {}).unwrap_err();
-        assert!(err.contains("family not servable"), "{err}");
+        assert!(err.contains("compound family 'flux2' not servable from the model dir yet"), "{err}");
 
         let manifest_bytes = std::fs::read(dir.join("black-forest-labs").join("FLUX.2-klein-4B").join(brain_modelstore::MANIFEST_FILE)).unwrap();
         let manifest: brain_modelstore::CompoundManifest = serde_json::from_slice(&manifest_bytes).unwrap();
