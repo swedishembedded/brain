@@ -609,8 +609,7 @@ pub(crate) fn source_map(mg: &checkpoint::gguf::MmapGguf) -> Result<HashMap<Stri
 /// shape, which suits a parameter store of flat buffers and loses the rank of
 /// `patch_embedding.weight`'s 5-D conv kernel and of every `modulation` table.
 pub fn import_gguf(mg: &checkpoint::gguf::MmapGguf, out_path: &str, id_override: Option<&str>) -> Result<(), String> {
-    let shapes: Vec<(String, Vec<usize>)> =
-        mg.names().iter().map(|n| (n.clone(), mg.shape(n).map(<[usize]>::to_vec).unwrap_or_default())).collect();
+    let shapes: Vec<(String, Vec<usize>)> = mg.all_shapes();
     // The native and diffusers name spaces disagree about everything except
     // `patch_embedding.weight`, so the variant is read before any remapping.
     let cfg = dit_config_from_shapes(&shapes)?;

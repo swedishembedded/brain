@@ -42,9 +42,7 @@ impl WanGgufSource {
     /// that already opened the file (e.g. to read its `ModelCard`) uses to
     /// avoid a second `mmap()`.
     pub fn from_mmap(mg: MmapGguf) -> Result<WanGgufSource, String> {
-        let shapes: Vec<(String, Vec<usize>)> =
-            mg.names().iter().map(|n| (n.clone(), mg.shape(n).map(<[usize]>::to_vec).unwrap_or_default())).collect();
-        let cfg = dit_config_from_shapes(&shapes)?;
+        let cfg = dit_config_from_shapes(&mg.all_shapes())?;
         let source_of = source_map(&mg)?;
         Ok(WanGgufSource { src: GgufSource::renaming(mg, source_of), cfg })
     }

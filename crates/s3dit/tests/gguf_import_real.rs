@@ -117,8 +117,7 @@ fn z_image_gguf_names_the_dit_and_covers_the_manifest() {
     // NOT Z-Image's, it is Lumina2's, and only this tensor separates them.
     assert!(mg.shape("cap_embedder.0.weight").is_some(), "the Z-Image discriminator tensor");
 
-    let shapes: Vec<(String, Vec<usize>)> =
-        mg.names().iter().map(|n| (n.clone(), mg.shape(n).expect("shape").to_vec())).collect();
+    let shapes: Vec<(String, Vec<usize>)> = mg.all_shapes();
     let cfg = dit_config_from_shapes(&shapes).expect("derive the config from the tensor shapes");
     println!("  {} source tensors, quant label {:?}, {} parameters", shapes.len(), mg.model_card().quant, mg.param_count());
     println!("  derived dim {} heads {} layers {} refiners {} cap_feat {}", cfg.dim, cfg.n_heads, cfg.n_layers, cfg.n_refiner_layers, cfg.cap_feat_dim);

@@ -299,8 +299,7 @@ pub fn sniff_dit_size(path: &str) -> Result<DitSize, String> {
     let p = std::path::Path::new(path);
     if p.extension().is_some_and(|x| x == "gguf") {
         let g = checkpoint::gguf::MmapGguf::open(path)?;
-        let shapes: Vec<(String, Vec<usize>)> = g.names().iter().map(|n| (n.clone(), g.shape(n).map(<[usize]>::to_vec).unwrap_or_default())).collect();
-        return dit_config_from_shapes(&shapes);
+        return dit_config_from_shapes(&g.all_shapes());
     }
     let files: Vec<std::path::PathBuf> = if p.is_dir() {
         let mut files: Vec<_> = std::fs::read_dir(p)

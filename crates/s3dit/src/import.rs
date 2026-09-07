@@ -354,8 +354,7 @@ pub fn import_gguf(mg: &MmapGguf, out_path: &str, id_override: Option<&str>) -> 
             mg.kv().get("general.architecture")
         ));
     }
-    let shapes: Vec<(String, Vec<usize>)> =
-        mg.names().iter().map(|n| (n.clone(), mg.shape(n).map(<[usize]>::to_vec).unwrap_or_default())).collect();
+    let shapes: Vec<(String, Vec<usize>)> = mg.all_shapes();
     let cfg = dit_config_from_shapes(&shapes)?;
 
     // Source order, so the write loop is one pass over the mmap and one

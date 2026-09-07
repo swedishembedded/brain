@@ -113,8 +113,7 @@ fn wan_gguf_header_names_the_14b_and_covers_the_manifest() {
     let arch = mg.kv().get("general.architecture").and_then(|v| v.as_str());
     assert_eq!(arch, Some(GGUF_ARCHITECTURE), "general.architecture");
 
-    let shapes: Vec<(String, Vec<usize>)> =
-        mg.names().iter().map(|n| (n.clone(), mg.shape(n).expect("shape").to_vec())).collect();
+    let shapes: Vec<(String, Vec<usize>)> = mg.all_shapes();
     let cfg = dit_config_from_shapes(&shapes).expect("derive the variant from the tensor shapes");
     println!("  {} tensors, derived variant {}", shapes.len(), cfg.name);
     println!("  quant label {:?}, {} parameters", mg.model_card().quant, mg.param_count());
@@ -156,8 +155,7 @@ fn wan_gguf_header_names_the_14b_and_covers_the_manifest() {
 #[test]
 fn wan_gguf_dequantizes_every_tensor_to_finite_values() {
     let Some(mg) = open_gguf() else { return };
-    let shapes: Vec<(String, Vec<usize>)> =
-        mg.names().iter().map(|n| (n.clone(), mg.shape(n).expect("shape").to_vec())).collect();
+    let shapes: Vec<(String, Vec<usize>)> = mg.all_shapes();
     let cfg = dit_config_from_shapes(&shapes).expect("derive the variant");
 
     let mut dtypes: BTreeMap<&str, usize> = BTreeMap::new();

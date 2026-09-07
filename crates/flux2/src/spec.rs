@@ -37,9 +37,6 @@ fn flux2_in_channels() -> usize {
     Flux2Config::klein_4b().in_channels
 }
 
-fn gguf_shapes(g: &MmapGguf) -> Vec<(String, Vec<usize>)> {
-    g.names().iter().map(|n| (n.clone(), g.shape(n).map(<[usize]>::to_vec).unwrap_or_default())).collect()
-}
 
 fn classify_gguf(idx: usize, rec: &ArtifactRecord, out: &mut Vec<(usize, String, Confidence)>) {
     let Ok(g) = MmapGguf::open(&rec.path.to_string_lossy()) else { return };
@@ -55,7 +52,7 @@ fn classify_gguf(idx: usize, rec: &ArtifactRecord, out: &mut Vec<(usize, String,
             if second != flux2_in_channels() {
                 return;
             }
-            if dit_config_from_shapes(&gguf_shapes(&g)).is_ok() {
+            if dit_config_from_shapes(&g.all_shapes()).is_ok() {
                 out.push((idx, "dit".to_string(), Confidence::Derived));
             }
         }
@@ -158,7 +155,7 @@ impl ArchSpec for Flux2Spec {
         let dit_idx = *chosen.get("dit").ok_or("flux2 assemble: no dit chosen")?;
         let dit_rec = &records[dit_idx];
         let g = MmapGguf::open(&dit_rec.path.to_string_lossy()).map_err(|e| format!("flux2 assemble: opening dit {}: {e}", dit_rec.path.display()))?;
-        let size = dit_config_from_shapes(&gguf_shapes(&g))?;
+        let size = dit_config_from_shapes(&g.all_shapes())?;
         let shape_class = size.as_str().to_string();
 
         if let Some(variant) = overrides.get("variant") {
