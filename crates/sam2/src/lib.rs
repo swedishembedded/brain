@@ -52,6 +52,7 @@ pub mod hostpe;
 pub mod import;
 pub mod maskseq;
 pub mod model;
+pub mod spec;
 pub mod train;
 pub mod video;
 

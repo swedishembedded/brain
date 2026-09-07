@@ -482,21 +482,21 @@ mod tests {
         }
     }
 
-    /// `qwen3asr`/`nemotronasr` both defer their real checkpoint load past
-    /// construction ([`LazyProvider`] loads lazily on the first action run -
-    /// see its own doc comment) - so with the weights role coming from a
-    /// resolved [`Assembly`], construction alone SUCCEEDS even for a made-up
-    /// path. A regression back to `from_env!` would instead answer
-    /// `Err("set BRAIN_…")` here, because the relevant variable is
-    /// (deliberately, via the `remove_var` calls below) unset - that flip
-    /// from `Err` to `Ok` is exactly what this asserts.
+    /// `sam2`/`qwen3asr`/`nemotronasr` all defer their real checkpoint load
+    /// past construction (`Sam2Provider::new`/[`LazyProvider`] both load lazily
+    /// on the first action run - see their own doc comments) - so with the
+    /// weights role coming from a resolved [`Assembly`], construction alone
+    /// SUCCEEDS even for a made-up path. A regression back to `from_env!`
+    /// would instead answer `Err("set BRAIN_…")` here, because the relevant
+    /// variable is (deliberately, via the `remove_var` calls below) unset -
+    /// that flip from `Err` to `Ok` is exactly what this asserts.
     #[test]
     fn deferred_load_providers_construct_from_the_assembly_with_no_env_set() {
         let _serial = brain_testutil::env_lock();
-        for var in ["BRAIN_QWEN3ASR", "BRAIN_NEMOTRONASR"] {
+        for var in ["BRAIN_QWEN3ASR", "BRAIN_NEMOTRONASR", "BRAIN_SAM2_WEIGHTS"] {
             std::env::remove_var(var);
         }
-        for (model, arch) in [(qwen3asr::caps::MODEL, "qwen3asr"), (nemotronasr::caps::MODEL, "nemotronasr")] {
+        for (model, arch) in [(qwen3asr::caps::MODEL, "qwen3asr"), (nemotronasr::caps::MODEL, "nemotronasr"), (sam2::caps::MODEL, "sam2")] {
             let assembly = assembly_with_weights(arch, "/nonexistent/brain-catalog-test-weights");
             provider_from_assembly(model, &assembly).unwrap_or_else(|e| panic!("{arch}: construction from a resolved assembly must succeed (the real load is deferred): {e}"));
         }

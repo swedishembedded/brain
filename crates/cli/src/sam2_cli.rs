@@ -9,9 +9,12 @@
 //! ```
 //!
 //! Every OTHER `sam2` verb (`segment`) still goes through the generic
-//! capability dispatch, unchanged: this module forwards anything it does not
-//! recognise to `caps_cli::run_do`, so adding a dedicated handler did not take
-//! the image path off its shared code path.
+//! capability dispatch: this module forwards anything it does not recognise
+//! to `crate::resolver_cli::run_generic_migrated`, so adding a dedicated
+//! handler did not take the image path off its shared code path - and `track`
+//! (below) resolves its own `weights`/`variant` through the SAME
+//! `sam2::spec::Sam2Spec` resolver `segment` does, so both entry points agree
+//! on which checkpoint a given models-directory state means.
 //!
 //! # Why this is not a `capability::Action`
 //!
@@ -53,8 +56,12 @@ USAGE:
   --prompt-frame <n>    frame the click sits on (default 0)
   --out <dir>           mask-sequence directory (masks.json + mask_%06d.png)
 
-  --weights <path>      sam2.1_hiera_*.pt (default: $BRAIN_SAM2_WEIGHTS)
-  --variant <tiny|large>  checkpoint variant (default tiny)
+  --weights <path>      state the checkpoint outright, as the models directory
+                        scan already found it (default: resolved from the
+                        models directory - --models-dir / BRAIN_MODELS_DIR)
+  --variant <tiny|large>  state the checkpoint's own size outright; checked
+                        against its real trunk width, not trusted blindly
+                        (default: derived from that width)
   --max-frames <n>      stop after n frames (default: the whole clip)
   --fps <f>             resample the clip to this rate before tracking
   --object-id <n>       recorded in masks.json for multi-character work
@@ -68,10 +75,12 @@ from 0. Any downsampling is the consumer's, against its own grid.
 pub fn run_sam2(args: &[String]) {
     let verb = args.first().map(String::as_str).unwrap_or("");
     if verb != "track" {
-        // Everything else is the image path, reached generically.
-        let mut do_args = vec![sam2::caps::MODEL.to_string()];
-        do_args.extend_from_slice(args);
-        std::process::exit(crate::caps_cli::run_do(&do_args));
+        // Everything else is the image path, reached generically - through
+        // the SAME resolver `track` below uses, so both entry points agree
+        // on which checkpoint a given models-directory state means.
+        std::process::exit(
+            crate::resolver_cli::run_generic_migrated("sam2", sam2::caps::MODEL, args).expect("sam2 is a resolver-migrated architecture"),
+        );
     }
     if args.iter().any(|a| a == "-h" || a == "--help") {
         print!("{HELP}");
@@ -165,24 +174,34 @@ impl Clip {
 }
 
 fn track(args: &[String]) -> Result<(), String> {
-    let mut a = Args::new(args);
+    // The same resolver `segment` (the ARCH_TO_MODEL/generic path, above)
+    // uses: an explicit `--weights`/`--variant` is a stated claim, checked
+    // against the checkpoint's own real trunk width rather than trusted
+    // outright (`sam2::spec::Sam2Spec::assemble`) - the derived variant wins
+    // when neither is given.
+    let spec = sam2::spec::Sam2Spec;
+    let (mut overrides, remaining) = crate::resolver_cli::extract_role_overrides(&spec, args);
+    let mut a = Args::new(&remaining);
     let video = a.take_str("--video");
     let frames_dir = a.take_str("--frames");
     let point = a.take_str("--point").ok_or("--point <x,y> is required: it is what picks the object")?;
     let label = a.f32_or("--label", 1.0);
     let prompt_frame = a.usize_or("--prompt-frame", 0);
     let out = a.take_str("--out").ok_or("--out <dir> is required")?;
-    let variant = a.str_or("--variant", "tiny");
-    let weights = a
-        .take_str("--weights")
-        .or_else(|| std::env::var("BRAIN_SAM2_WEIGHTS").ok())
-        .ok_or("--weights <sam2.1_hiera_*.pt> (or BRAIN_SAM2_WEIGHTS) is required")?;
+    let variant_flag = a.take_str("--variant");
     let max_frames = a.u32_or("--max-frames", 0);
     let fps = a.take_str("--fps").and_then(|s| s.parse::<f64>().ok());
     let object_id = a.u32_or("--object-id", 0);
     let invert = a.take_flag("--invert");
     let soft = a.take_flag("--soft");
     a.finish();
+    if let Some(v) = variant_flag {
+        overrides.insert("variant".to_string(), v);
+    }
+
+    let assembly = crate::resolver_cli::resolve_or_exit("sam2", &spec, &overrides);
+    let weights = assembly.role_path("weights")?;
+    let variant = assembly.variant.clone().ok_or("sam2 track: resolved assembly has no variant")?;
 
     let (px, py) = parse_point(&point)?;
     let cfg = sam2::caps::variant_config(&variant)?;

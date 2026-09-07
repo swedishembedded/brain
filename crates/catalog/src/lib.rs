@@ -179,10 +179,10 @@ pub struct ModelEntry {
     /// from it (`crates/cli/src/catalog.rs`'s `resolved_assembly_for`/
     /// `provider_from_assembly` is what actually resolves or threads one
     /// through for it and for every architecture migrated onto the resolver
-    /// since, `nemotronasr`/`qwen3asr` - single `weights`-role architectures,
-    /// via [`Assembly::role_path`] - included); every entry not yet migrated
-    /// still ignores the argument and reads `BRAIN_*` env vars instead, per
-    /// the module doc.
+    /// since, `sam2`/`nemotronasr`/`qwen3asr` - single `weights`-role
+    /// architectures, via [`Assembly::role_path`] - included); every entry
+    /// not yet migrated still ignores the argument and reads `BRAIN_*` env
+    /// vars instead, per the module doc.
     pub provider: fn(&Assembly) -> Result<Arc<dyn Provider>, String>,
     /// Register with the residency scheduler, when this model has an adapter
     /// and its weights are configured. `None` from the fn means "not
@@ -391,12 +391,16 @@ pub fn models() -> Vec<ModelEntry> {
         // residency adapter advertise ONE manifest each. Every `resident: None`
         // below is a CLI-local adapter, patched in by `brain-cli`'s own
         // `catalog.rs` - see this file's module doc.
+        // sam2 is the first of this migration's architectures whose provider
+        // reads the Assembly it is called with (`role_path`, the single-role
+        // counterpart of flux2's own `Paths::from_assembly`) - see the
+        // module doc on why `resident` still patches in separately.
         ModelEntry {
             manifest: sam2::caps::manifest,
-            provider: from_env!(
-                sam2::caps::Sam2Provider::from_env,
-                "set BRAIN_SAM2_WEIGHTS to an existing sam2.1_hiera_*.pt checkpoint"
-            ),
+            provider: |assembly: &Assembly| {
+                let weights = assembly.role_path("weights")?;
+                Ok(Arc::new(sam2::caps::Sam2Provider::new(weights)) as Arc<dyn Provider>)
+            },
             resident: None,
         },
         ModelEntry {
@@ -624,18 +628,58 @@ fn stage_registry() -> capability::Registry {
     let mut inner = capability::Registry::new();
     for e in models() {
         let id = (e.manifest)().model;
-        // Only the models a stage can actually name today. Registering the rest
-        // would build providers nobody asked for (some load weights). None of
-        // sam2/codeformer/rrdbnet reads its Assembly argument yet (all three
-        // are still `from_env!`), so an empty placeholder is exactly as good
-        // as a real one here.
-        if [imgpipe::SEGMENT_MODEL, imgpipe::RESTORE_MODEL, imgpipe::UPSCALE_MODEL].contains(&id.as_str()) {
-            if let Ok(p) = (e.provider)(&empty_assembly()) {
+        // Only the models a stage can actually name today. `sam2` is
+        // resolver-migrated - its own provider reads a real Assembly's
+        // `weights` role (see this file's `models()`), so a real one - when
+        // an explicit models directory is opted into, see
+        // `resolved_stage_assembly`'s own doc - stands in for the env var it
+        // used to read. `codeformer`/`rrdbnet` have not migrated yet, so an
+        // empty placeholder stands in for both exactly as before (their own
+        // providers still read `BRAIN_CODEFORMER_WEIGHTS`/
+        // `BRAIN_ESRGAN_WEIGHTS` directly).
+        let assembly = if id == imgpipe::SEGMENT_MODEL {
+            resolved_stage_assembly("sam2", &sam2::spec::Sam2Spec)
+        } else if id == imgpipe::RESTORE_MODEL || id == imgpipe::UPSCALE_MODEL {
+            Some(empty_assembly())
+        } else {
+            continue;
+        };
+        if let Some(a) = assembly {
+            if let Ok(p) = (e.provider)(&a) {
                 inner.register(p);
             }
         }
     }
     inner
+}
+
+/// A resolver-migrated stage model's real [`Assembly`], scanned from an
+/// EXPLICITLY opted-into models directory - `None` when none is published/set,
+/// the directory is unreadable, or `arch` simply does not resolve there (an
+/// unconfigured stage is skipped, same as an absent `BRAIN_*` var used to make
+/// `from_env!` skip it).
+///
+/// Deliberately [`brain_modelstore::explicit_models_root`], NOT
+/// [`brain_modelstore::default_root`]: this runs as a side effect of
+/// constructing the `imgpipe` provider, which plain library use (including
+/// `cargo test`'s own `every_listed_model_is_constructible_by_name`) can
+/// reach with no CLI invocation and no opt-in in sight - falling all the way
+/// to `default_root`'s bare `$HOME` tier would scan (and best-effort
+/// cache-write into) a real developer's actual model store as a side effect
+/// of running the test suite. This is the base catalog's own copy of the
+/// scan/resolve shape `crate::resolver_cli::resolve_or_exit` uses in the CLI
+/// (a different crate this one may not depend on - see the module doc), kept
+/// minimal: no override flags, no `--models-dir` support, and silent rather
+/// than printing/exiting on `Ambiguous`/`Missing`, since nothing upstream of
+/// a pipeline stage can act on either outcome anyway.
+fn resolved_stage_assembly(arch: &str, spec: &dyn brain_modelstore::resolve::ArchSpec) -> Option<Assembly> {
+    let root = brain_modelstore::explicit_models_root()?;
+    let records = brain_modelstore::inventory::scan(&root);
+    let specs: [&dyn brain_modelstore::resolve::ArchSpec; 1] = [spec];
+    match brain_modelstore::resolve::resolve(arch, &records, &specs, &std::collections::BTreeMap::new()) {
+        brain_modelstore::resolve::Resolution::Resolved(a) => Some(*a),
+        _ => None,
+    }
 }
 
 /// A placeholder [`Assembly`] for a caller that has none - every entry but

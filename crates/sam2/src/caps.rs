@@ -305,17 +305,11 @@ pub struct Sam2Provider {
 }
 
 impl Sam2Provider {
-    /// `weights` is the checkpoint path; it comes from a CLI flag or
-    /// `BRAIN_SAM2_WEIGHTS`, never a baked-in path.
+    /// `weights` is the checkpoint path - resolved by `brain_modelstore::resolve`
+    /// (see [`crate::spec::Sam2Spec`]) from the models directory, never a
+    /// baked-in path or an env var read directly here.
     pub fn new(weights: impl Into<String>) -> Sam2Provider {
         Sam2Provider { weights: weights.into(), hot: Arc::new(Mutex::new(None)) }
-    }
-
-    /// `BRAIN_SAM2_WEIGHTS` — `None` when unset or missing on disk, so the
-    /// caller can skip registration rather than serve a model that cannot load.
-    pub fn from_env() -> Option<Sam2Provider> {
-        let path = std::env::var("BRAIN_SAM2_WEIGHTS").ok().filter(|p| !p.is_empty())?;
-        std::path::Path::new(&path).exists().then(|| Sam2Provider::new(path))
     }
 }
 

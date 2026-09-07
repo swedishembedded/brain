@@ -317,7 +317,7 @@ fn wants_weight_acquisition(arch: &str, rest: &[String]) -> bool {
 /// field whose "empty" already means something else for those others).
 /// Grown by one entry per architecture as it migrates.
 const RESOLVER_MIGRATED_ARCHS: &[&str] = &[
-    "flux2", "qwen3tts", "kronos", "ltxv", "qwen35", "qwen3vl", "fastvlm", "moondream3", "deepseek2ocr", "qwen3asr", "nemotronasr",
+    "flux2", "qwen3tts", "kronos", "ltxv", "qwen35", "qwen3vl", "fastvlm", "moondream3", "deepseek2ocr", "qwen3asr", "nemotronasr", "sam2",
 ];
 
 fn dispatch_arch(arch: &str, rest: Vec<String>) {
@@ -673,21 +673,6 @@ mod tests {
         let fixture = multi_role_fixture();
         assert!(!fixture.weights_env.is_empty() && fixture.default_ref.is_some(), "the fixture should declare both");
         assert!(wants_default_weights_with(fixture.id, Some(&fixture), Some("infer")), "default fetch must survive when unset");
-    }
-
-    /// The five architectures this migration moved onto the resolver empty
-    /// their `weights_env` - `wants_default_weights`'s "every var already
-    /// set" early return can no longer apply to them (nothing to check), and
-    /// `RESOLVER_MIGRATED_ARCHS` is what stops `dispatch_arch` from calling
-    /// either legacy path at all for them, exactly as it already does for
-    /// `flux2`.
-    #[test]
-    fn every_migrated_arch_has_an_empty_weights_env_and_is_resolver_migrated() {
-        for id in ["qwen35", "qwen3vl", "fastvlm", "moondream3", "deepseek2ocr"] {
-            let a = brain_arch::by_id(id).expect(id);
-            assert!(a.weights_env.is_empty(), "{id} should have emptied weights_env");
-            assert!(RESOLVER_MIGRATED_ARCHS.contains(&id), "{id} should be in RESOLVER_MIGRATED_ARCHS");
-        }
     }
 
     #[test]

@@ -444,7 +444,11 @@ pub const ARCHS: &[Arch] = &[
     // llama.cpp/GGUF ecosystem. Rows below have empty `quants` deliberately,
     // not omitted: "this repo is real, no official quant exists" is itself
     // useful information for `brain models list` to render.
-    arch!("sam2", "SAM 2.1 promptable segmentation (image path)", Vision, Brain, "brain-sam2", default_ref: Some("facebook/sam2.1-hiera-tiny"), weights_env: &[("BRAIN_SAM2_WEIGHTS", "weights")],
+    // No `weights_env`: sam2 resolves its single `weights` role through
+    // `brain_modelstore::resolve` (`crates/sam2/src/spec.rs`, which also
+    // derives the tiny/large variant from the checkpoint's own trunk width),
+    // not `BRAIN_SAM2_WEIGHTS`.
+    arch!("sam2", "SAM 2.1 promptable segmentation (image path)", Vision, Brain, "brain-sam2", default_ref: Some("facebook/sam2.1-hiera-tiny"),
         variants: &[
             Variant { reference: "facebook/sam2.1-hiera-tiny", params: 38_963_010, quants: &[] },
             Variant { reference: "facebook/sam2.1-hiera-small", params: 46_060_866, quants: &[] },
