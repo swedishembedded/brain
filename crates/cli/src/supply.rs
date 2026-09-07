@@ -627,17 +627,31 @@ pub fn ensure_env_weights(arch: &str) {
 /// resolve. The `Err` case is exactly the fetching-off-and-not-pulled error
 /// the CLI prints and exits on.
 fn ensure_env_weights_with(arch: &str, store: &Store, hub: &dyn Hub) -> Result<(), String> {
-    let Some(a) = brain_arch::by_id(arch) else { return Ok(()) };
+    // Unrecognized arch ids never reach here except by a bug in the CLI
+    // dispatch (a typo'd id string, or a new `arch!()` row that call site
+    // hasn't picked up) -- surfacing it by name here is what lets a
+    // developer find the mismatch, rather than the CLI silently behaving as
+    // if there were no weights to resolve at all.
+    let a = brain_arch::by_id(arch)
+        .ok_or_else(|| format!("{arch}: unknown to brain_arch::by_id (bug: check the CLI dispatch for a typo'd or unregistered architecture id)"))?;
     if a.weights_env.is_empty() || a.weights_env.iter().all(|(var, _)| std::env::var_os(var).is_some_and(|v| !v.is_empty())) {
         return Ok(()); // nothing to resolve, or every var the caller needs is already set
     }
-    let Some(default_ref) = a.default_ref else { return Ok(()) };
     let unset: Vec<(&str, &str)> = a
         .weights_env
         .iter()
         .filter(|(var, _)| std::env::var_os(var).is_none_or(|v| v.is_empty()))
         .map(|(var, role)| (*var, *role))
         .collect();
+    // `default_ref: None` with a non-empty `weights_env` (llava, campplus,
+    // s3tokenizer today) means no confirmed small upstream repo exists to
+    // auto-fetch -- there is nothing this function can do but name exactly
+    // what the caller must supply themselves, never claim a fetch is
+    // possible when none is.
+    let Some(default_ref) = a.default_ref else {
+        let vars: Vec<&str> = unset.iter().map(|(var, _)| *var).collect();
+        return Err(format!("{arch}: no default checkpoint known for this architecture -- set {} yourself", vars.join(", ")));
+    };
 
     if !auto_fetch_enabled() {
         // Fetching is opt-in. A pulled checkpoint still resolves -- the
@@ -1103,6 +1117,56 @@ pub(crate) mod tests {
         let err = ensure_default_weights_with("qwen3", &store, &FakeHub::new()).unwrap_err();
         assert!(err.contains("brain pull Qwen/Qwen3-0.6B"), "{err}");
         assert!(err.contains("--autofetch"), "{err}");
+    }
+
+    /// An arch id `brain_arch::by_id` does not recognize is a caller bug
+    /// (a typo somewhere in the CLI dispatch, not a user-facing weights
+    /// problem) -- it must surface as a named error, not a silent no-op that
+    /// leaves whatever downstream error fires next with no clue why.
+    #[test]
+    fn ensure_env_weights_with_names_the_bug_for_an_unrecognized_arch_id() {
+        let store = store("supply-test-env-weights-unknown-arch");
+        let err = ensure_env_weights_with("totally-bogus", &store, &FakeHub::new()).unwrap_err();
+        assert!(err.contains("totally-bogus"), "{err}");
+        assert!(err.contains("unknown"), "{err}");
+    }
+
+    /// llava/campplus/s3tokenizer all declare `weights_env` but no
+    /// `default_ref` (no confirmed small upstream repo to auto-fetch) --
+    /// with the variable unset this must name it and explain there is
+    /// nothing to fetch, never silently return Ok and leave the caller with
+    /// no explanation at all.
+    #[test]
+    fn ensure_env_weights_with_names_the_var_when_no_default_checkpoint_is_known() {
+        let _serial = env_lock();
+        let store = store("supply-test-env-weights-no-default-ref");
+        for (arch, vars) in [
+            ("llava", &["BRAIN_LLAVA_WEIGHTS"][..]),
+            ("campplus", &["BRAIN_CAMPPLUS_DIR"][..]),
+            ("s3tokenizer", &["BRAIN_S3TOKENIZER_V2", "BRAIN_S3TOKENIZER_V3"][..]),
+        ] {
+            for v in vars {
+                std::env::remove_var(v);
+            }
+            let err = ensure_env_weights_with(arch, &store, &FakeHub::new()).unwrap_err();
+            for v in vars {
+                assert!(err.contains(v), "{arch}: {err:?} must name {v}");
+            }
+            assert!(err.contains("no default checkpoint known"), "{arch}: {err:?} must not claim there is something to auto-fetch");
+        }
+    }
+
+    /// The flag-twin escape hatch (`resolve.rs`'s `weights_already_named`)
+    /// never even calls this function when `--weights`/its twin flag was
+    /// given -- but the variable being set directly (what that flag ends up
+    /// mapping to) must keep resolving exactly as before the fix above.
+    #[test]
+    fn ensure_env_weights_with_still_succeeds_when_the_var_is_already_set_with_no_default_ref() {
+        let _serial = env_lock();
+        let store = store("supply-test-env-weights-no-default-ref-set");
+        std::env::set_var("BRAIN_LLAVA_WEIGHTS", "already-set-llava.gguf");
+        ensure_env_weights_with("llava", &store, &FakeHub::new()).unwrap();
+        std::env::remove_var("BRAIN_LLAVA_WEIGHTS");
     }
 
     #[test]
