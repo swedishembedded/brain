@@ -282,15 +282,36 @@ const FILES_RECIPES: &[FilesRecipe] = &[
         files: &[],
         roles: &[("weights", ".")],
     },
+    // Qwen3.5's real repo (`Qwen/Qwen3.8-27B-FP8`) ships `vocab.json`+
+    // `merges.txt`+`preprocessor_config.json` too -- its spliced
+    // Qwen3-VL-style vision tower needs a preprocessor config the same way a
+    // Whisper-style ASR encoder does -- so it is claimed here, ahead of
+    // `qwen3asr`'s broader signature below, by the one thing that IS unique
+    // to it: the repo name (same escape hatch `kronos`/`timesfm3` use, see
+    // `FilesRecipe::repos`'s doc). `TransformersRecipe`'s curated fetch
+    // cannot serve it anyway: this repo's shards are named `layers-N.
+    // safetensors`, not the `model-NNNNN-of-MMMMM.safetensors` convention
+    // that recipe looks for, so `files: &[]` (the whole listing) is the only
+    // way to actually land every shard.
+    FilesRecipe {
+        id: "qwen35",
+        family: "qwen35",
+        signature: &["vocab.json", "merges.txt", "preprocessor_config.json", "mtp.safetensors"],
+        repos: &["Qwen/Qwen3.8-27B-FP8"],
+        files: &[],
+        roles: &[("weights", ".")],
+    },
     FilesRecipe {
         id: "qwen3asr",
         family: "qwen3asr",
         // No single distinctively-named file (an ordinary transformers-repo
-        // shape) -- this exact combination is specific enough. Same gap as
-        // `fastvlm`, caught by inspection before running it for real:
-        // `Qwen/Qwen3-ASR-1.7B` ships `vocab.json`+`merges.txt`, no unified
-        // `tokenizer.json`, so `TransformersRecipe`'s curated fetch would
-        // miss the tokenizer files the same way it did for fastvlm.
+        // shape). NOT actually unique to this repo alone (see the `qwen35`
+        // row above, which now claims the one real repo that also has this
+        // shape, ahead of this one) -- caught by inspection before running
+        // it for real: `Qwen/Qwen3-ASR-1.7B` ships `vocab.json`+
+        // `merges.txt`, no unified `tokenizer.json`, so `TransformersRecipe`'s
+        // curated fetch would miss the tokenizer files the same way it did
+        // for fastvlm.
         signature: &["vocab.json", "merges.txt", "preprocessor_config.json"],
         repos: &[],
         files: &[],
@@ -1538,5 +1559,42 @@ mod tests {
         for f in ["flux-2-klein-9b-BF16.gguf", "flux-2-klein-9b-F16.gguf", "flux-2-klein-9b-q8_0.gguf", "model.gguf", "model-Q8_0.safetensors"] {
             assert_eq!(quant_of_gguf(f), None, "{f} must declare no quantization");
         }
+    }
+
+    /// A representative slice of the real `Qwen/Qwen3.8-27B-FP8` listing
+    /// (confirmed against the locally pulled repo) -- just enough for
+    /// `matches()` to see the ordinary-transformers-shape signature this
+    /// test guards against.
+    fn qwen35_fp8_listing() -> Vec<String> {
+        ["config.json", "tokenizer.json", "tokenizer_config.json", "vocab.json", "merges.txt", "preprocessor_config.json", "mtp.safetensors", "model.safetensors.index.json", "layers-0.safetensors"]
+            .into_iter()
+            .map(String::from)
+            .collect()
+    }
+
+    /// `qwen3asr`'s `FilesRecipe` signature (`vocab.json`+`merges.txt`+
+    /// `preprocessor_config.json`) was written as "an ordinary
+    /// transformers-repo shape, but specific ENOUGH" -- it is not. Qwen3.5's
+    /// real repo ships all three too (its spliced Qwen3-VL-style vision
+    /// tower needs `preprocessor_config.json` the same way a Whisper-style
+    /// ASR encoder does), so before `qwen35`'s own `repos`-keyed row existed
+    /// below, `Qwen/Qwen3.8-27B-FP8` -- a real, unrelated 27B checkpoint --
+    /// silently got claimed by `qwen3asr` and its pulled manifest carried
+    /// `family: "qwen3asr"`, corrupting `brain models list`'s attribution.
+    #[test]
+    fn qwen35s_ordinary_transformers_shape_is_not_swallowed_by_qwen3asr() {
+        let r = ModelRef::new("Qwen", "Qwen3.8-27B-FP8", None);
+        let listing = qwen35_fp8_listing();
+        let matched = recipes().into_iter().find(|x| x.matches(&r, &listing)).unwrap();
+        assert_eq!(matched.id(), "qwen35", "must not fall through to qwen3asr's broader signature");
+    }
+
+    /// The fix above must not cost `qwen3asr` its own real repo.
+    #[test]
+    fn qwen3asr_recipe_still_matches_its_own_real_repo() {
+        let r = ModelRef::new("Qwen", "Qwen3-ASR-1.7B", None);
+        let listing: Vec<String> = ["config.json", "vocab.json", "merges.txt", "preprocessor_config.json"].into_iter().map(String::from).collect();
+        let matched = recipes().into_iter().find(|x| x.matches(&r, &listing)).unwrap();
+        assert_eq!(matched.id(), "qwen3asr");
     }
 }

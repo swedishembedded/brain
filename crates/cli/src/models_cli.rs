@@ -818,6 +818,16 @@ mod tests {
     }
 
     #[test]
+    fn resolve_arch_attributes_the_real_qwen35_checkpoint_correctly_once_pulled() {
+        // What `qwen35`'s dedicated `FilesRecipe` row (`crates/modelstore/
+        // src/recipe.rs`) now writes for `Qwen/Qwen3.8-27B-FP8`, instead of
+        // the `family: "qwen3asr"` a repo-listing signature collision with
+        // the ASR recipe used to silently produce.
+        let l = compound_local("Qwen/Qwen3.8-27B-FP8", "qwen35");
+        assert_eq!(resolve_arch(&l).map(|a| a.id), Some("qwen35"));
+    }
+
+    #[test]
     fn ambiguous_gguf_flux_resolves_by_img_in_width() {
         assert_eq!(resolve_ambiguous_gguf_arch("flux", |_| Some(vec![3072, 64])).map(|a| a.map(|a| a.id)), Ok(Some("flux1")));
         assert_eq!(resolve_ambiguous_gguf_arch("flux", |_| Some(vec![3072, 128])).map(|a| a.map(|a| a.id)), Ok(Some("flux2")));
