@@ -732,9 +732,46 @@ pub struct Assembly {
     pub provenance: Vec<String>,
 }
 
+impl Assembly {
+    /// One role's resolved path, as a loader-ready `String` - the single-role
+    /// counterpart of a multi-role architecture's own `Paths::from_assembly`
+    /// (`flux2::pipeline::Paths`, say): every architecture whose loader takes
+    /// just one path/directory (most of them - a single `"weights"` role)
+    /// needs exactly this lookup with exactly this error shape, so it lives
+    /// here once rather than being hand-written per architecture.
+    pub fn role_path(&self, role: &str) -> Result<String, String> {
+        self.roles.get(role).map(|p| p.to_string_lossy().into_owned()).ok_or_else(|| format!("{}: assembly '{}' has no {role} role", self.arch, self.id))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assembly(roles: &[(&str, &str)]) -> Assembly {
+        Assembly {
+            id: "local/toy".to_string(),
+            arch: "toy".to_string(),
+            variant: None,
+            roles: roles.iter().map(|&(k, v)| (k.to_string(), std::path::PathBuf::from(v))).collect(),
+            provenance: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn role_path_returns_the_resolved_path_as_a_string() {
+        let a = assembly(&[("weights", "/models/facebook/sam2.1-hiera-tiny")]);
+        assert_eq!(a.role_path("weights").unwrap(), "/models/facebook/sam2.1-hiera-tiny");
+    }
+
+    #[test]
+    fn role_path_names_the_arch_id_and_missing_role_rather_than_a_generic_error() {
+        let a = assembly(&[]);
+        let err = a.role_path("weights").unwrap_err();
+        assert!(err.contains("toy"), "{err}");
+        assert!(err.contains("local/toy"), "{err}");
+        assert!(err.contains("weights"), "{err}");
+    }
 
     struct Echo;
     impl Action for Echo {
