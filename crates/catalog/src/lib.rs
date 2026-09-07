@@ -58,7 +58,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use capability::{Action, ActionResult, ActionSpec, Invocation, Manifest, Progress, Provider};
+use capability::{Action, ActionResult, ActionSpec, Assembly, Invocation, Manifest, Progress, Provider};
 use residency::ResidentModel;
 
 /// A provider whose heavy weight load is deferred to the FIRST action run (and
@@ -181,9 +181,12 @@ pub type MultiCtor = fn(&[(u32, u64)], u64) -> Option<Arc<dyn residency::multi::
 pub struct ModelEntry {
     /// The static manifest: safe to build with no weights loaded.
     pub manifest: fn() -> Manifest,
-    /// Build something runnable. `Err` carries the model's OWN "set BRAIN_…"
-    /// message, so a caller never sees a generic one.
-    pub provider: fn() -> Result<Arc<dyn Provider>, String>,
+    /// Build something runnable from an already-resolved [`Assembly`]. `Err`
+    /// carries the model's OWN "set BRAIN_…" message, so a caller never sees
+    /// a generic one. Every entry but FLUX.2's ignores the assembly today
+    /// (its weights still come from `BRAIN_*` env vars, per the module doc);
+    /// FLUX.2's own entry is the first to build its `Provider` from it.
+    pub provider: fn(&Assembly) -> Result<Arc<dyn Provider>, String>,
     /// Register with the residency scheduler, when this model has an adapter
     /// and its weights are configured. `None` from the fn means "not
     /// configured"; a `None` field means "no adapter exists yet" OR "the
@@ -193,19 +196,23 @@ pub struct ModelEntry {
     pub resident: Option<ResidentCtor>,
 }
 
-/// Shorthand: a provider that needs no weights.
+/// Shorthand: a provider that needs no weights. Ignores the [`Assembly`]
+/// [`ModelEntry::provider`] is called with - nothing built this way reads
+/// one yet.
 #[macro_export]
 macro_rules! always {
     ($e:expr) => {
-        || Ok(std::sync::Arc::new($e) as std::sync::Arc<dyn $crate::__reexport::Provider>)
+        |_assembly: &$crate::__reexport::Assembly| Ok(std::sync::Arc::new($e) as std::sync::Arc<dyn $crate::__reexport::Provider>)
     };
 }
 
 /// Shorthand: a provider built from env, with the model's own error message.
+/// Ignores the [`Assembly`] [`ModelEntry::provider`] is called with - still
+/// env-only, same as before this parameter existed.
 #[macro_export]
 macro_rules! from_env {
     ($ctor:path, $msg:literal) => {
-        || $ctor().map(|p| std::sync::Arc::new(p) as std::sync::Arc<dyn $crate::__reexport::Provider>).ok_or($msg.to_string())
+        |_assembly: &$crate::__reexport::Assembly| $ctor().map(|p| std::sync::Arc::new(p) as std::sync::Arc<dyn $crate::__reexport::Provider>).ok_or($msg.to_string())
     };
 }
 
@@ -234,7 +241,7 @@ macro_rules! resident_multi {
 /// `use` of `capability`/`residency` just to invoke these macros.
 #[doc(hidden)]
 pub mod __reexport {
-    pub use capability::Provider;
+    pub use capability::{Assembly, Provider};
     pub use residency::multi::MultiDeviceResidentModel;
     pub use residency::ResidentModel;
 }
@@ -248,7 +255,7 @@ pub fn models() -> Vec<ModelEntry> {
     vec![
         ModelEntry {
             manifest: s3dit::caps::manifest,
-            provider: || s3dit::caps::ZImageProvider::load().map(|p| Arc::new(p) as Arc<dyn Provider>),
+            provider: |_assembly: &Assembly| s3dit::caps::ZImageProvider::load().map(|p| Arc::new(p) as Arc<dyn Provider>),
             resident: None, // ZImageResident::from_env is Result-shaped; registered directly in crates/cli/src/resident.rs
         },
         ModelEntry {
@@ -440,7 +447,7 @@ pub fn models() -> Vec<ModelEntry> {
         // not a direct dependency - see `supir::caps`'s own module doc.
         ModelEntry {
             manifest: supir::caps::manifest,
-            provider: || {
+            provider: |_assembly: &Assembly| {
                 let paths = supir::pipeline::Paths::from_env()?;
                 if !std::path::Path::new(&paths.backbone_root).join("unet").exists() {
                     return Err(format!("supir: {} holds no unet/", paths.backbone_root));
@@ -490,7 +497,7 @@ pub fn models() -> Vec<ModelEntry> {
         },
         ModelEntry {
             manifest: imgpipe::caps::manifest,
-            provider: || Ok(Arc::new(imgpipe::caps::PipelineProvider::new(Arc::new(stage_registry()))) as Arc<dyn Provider>),
+            provider: |_assembly: &Assembly| Ok(Arc::new(imgpipe::caps::PipelineProvider::new(Arc::new(stage_registry()))) as Arc<dyn Provider>),
             resident: None,
         },
         ModelEntry {
@@ -519,7 +526,7 @@ pub fn models() -> Vec<ModelEntry> {
         // are patched in by `brain-cli`'s own catalog.
         ModelEntry {
             manifest: nemotronasr::caps::manifest,
-            provider: || {
+            provider: |_assembly: &Assembly| {
                 let dir = env_path("BRAIN_NEMOTRONASR", "a Nemotron 3.5 ASR checkpoint dir")?;
                 Ok(Arc::new(LazyProvider::new(
                     nemotronasr::caps::manifest,
@@ -533,7 +540,7 @@ pub fn models() -> Vec<ModelEntry> {
         },
         ModelEntry {
             manifest: qwen3asr::caps::manifest,
-            provider: || {
+            provider: |_assembly: &Assembly| {
                 let dir = env_path("BRAIN_QWEN3ASR", "a Qwen3-ASR checkpoint dir")?;
                 Ok(Arc::new(LazyProvider::new(
                     qwen3asr::caps::manifest,
@@ -561,14 +568,25 @@ fn stage_registry() -> capability::Registry {
     for e in models() {
         let id = (e.manifest)().model;
         // Only the models a stage can actually name today. Registering the rest
-        // would build providers nobody asked for (some load weights).
+        // would build providers nobody asked for (some load weights). None of
+        // sam2/codeformer/rrdbnet reads its Assembly argument yet (all three
+        // are still `from_env!`), so an empty placeholder is exactly as good
+        // as a real one here.
         if [imgpipe::SEGMENT_MODEL, imgpipe::RESTORE_MODEL, imgpipe::UPSCALE_MODEL].contains(&id.as_str()) {
-            if let Ok(p) = (e.provider)() {
+            if let Ok(p) = (e.provider)(&empty_assembly()) {
                 inner.register(p);
             }
         }
     }
     inner
+}
+
+/// A placeholder [`Assembly`] for a caller that has none - every entry but
+/// FLUX.2's own ignores the argument entirely (see [`ModelEntry::provider`]'s
+/// doc), so this stands in wherever no real, resolver-built one is in hand
+/// yet.
+fn empty_assembly() -> Assembly {
+    Assembly { id: String::new(), arch: String::new(), variant: None, roles: Default::default(), provenance: Vec::new() }
 }
 
 /// The registry SUPIR's optional caption auto-fill dispatches
@@ -611,10 +629,16 @@ pub fn serving_manifests() -> Vec<Manifest> {
 }
 
 /// Build a runnable provider for `model`, or say why not.
+///
+/// Calls the entry's provider with an [`empty_assembly`]: every entry but
+/// FLUX.2's own ignores the argument (see [`ModelEntry::provider`]'s doc), so
+/// this stays the plain by-name lookup every existing caller already has. A
+/// caller holding a real, resolver-built [`Assembly`] for an architecture
+/// that reads it uses the entry's `provider` fn directly instead.
 pub fn provider(model: &str) -> Result<Arc<dyn Provider>, String> {
     for e in models() {
         if (e.manifest)().model == model {
-            return (e.provider)();
+            return (e.provider)(&empty_assembly());
         }
     }
     Err(format!("unknown model '{model}' (see `brain caps`)"))
