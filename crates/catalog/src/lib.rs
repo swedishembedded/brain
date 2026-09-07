@@ -523,9 +523,17 @@ pub fn models() -> Vec<ModelEntry> {
             provider: always!(qwen3tts::caps::TtsProvider::new()),
             resident: None,
         },
+        // MiniMax Music 3. Like flux2, its six roles live in the provider
+        // (resolved through `minimaxmusic3::spec::MinimaxMusic3Spec` from
+        // the Assembly this entry is called with), not `BRAIN_MINIMAXMUSIC3_*`
+        // - the residency adapter (registered from `resident.rs`, not from
+        // here) still reads those env vars.
         ModelEntry {
             manifest: minimaxmusic3::caps::manifest,
-            provider: always!(minimaxmusic3::caps::MinimaxMusic3Provider::new()),
+            provider: |assembly: &Assembly| {
+                let paths = minimaxmusic3::generate::Paths::from_assembly(assembly)?;
+                Ok(Arc::new(minimaxmusic3::caps::MinimaxMusic3Provider::new(paths)) as Arc<dyn Provider>)
+            },
             resident: None,
         },
         // CosyVoice 2/3 zero-shot voice cloning TTS. `llm`/`flow`/`hift`/

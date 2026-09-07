@@ -118,6 +118,7 @@ pub mod global_llm;
 pub mod lora;
 pub mod memory;
 pub mod pipeline;
+pub mod spec;
 pub mod stitch;
 pub mod train;
 pub mod vocoder;

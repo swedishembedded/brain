@@ -399,18 +399,12 @@ pub const ARCHS: &[Arch] = &[
     // architecture - reused via `crates/qwen3`, not reimplemented here), a
     // 4-layer causal "RVQ depth decoder", a small conv "condition encoder", a
     // 36-layer flow-matching DiT, and a DAC-style vocoder. No official GGUF
-    // release exists upstream, hence `gguf: None`. `weights_env` names one
-    // role per component since upstream ships them as five independent
-    // checkpoint dirs under one repo, not one combined file.
+    // release exists upstream, hence `gguf: None`. No `weights_env`: this
+    // architecture resolves its six roles through the model-store resolver
+    // (`crate::spec::MinimaxMusic3Spec`), not `BRAIN_MINIMAXMUSIC3_*`.
     arch!("minimaxmusic3", "MiniMax Music 3 (lyrics+caption-conditioned music generation)", Audio, Brain, "brain-minimaxmusic3",
           hf: &["MiniMaxMusic3ForConditionalGeneration"],
-          default_ref: Some("MiniMaxAI/MiniMax-Music3"),
-          weights_env: &[("BRAIN_MINIMAXMUSIC3_LM", "language_model"),
-                         ("BRAIN_MINIMAXMUSIC3_DEPTH", "depth_decoder"),
-                         ("BRAIN_MINIMAXMUSIC3_CONDITION", "condition_encoder"),
-                         ("BRAIN_MINIMAXMUSIC3_DIT", "transformer"),
-                         ("BRAIN_MINIMAXMUSIC3_VOCODER", "vocoder"),
-                         ("BRAIN_MINIMAXMUSIC3_TOKENIZER", "tokenizer")]),
+          default_ref: Some("MiniMaxAI/MiniMax-Music3")),
     // -- Vision: detection / segmentation / face / depth -------------------
     arch!("yolov8", "YOLOv8-style anchor-free detector", Vision, Brain, "brain-yolov8", default_ref: Some("Ultralytics/YOLOv8")),
     arch!("sam1", "SAM-1 / ViTDet ViT-B tower", Vision, Brain, "brain-sam1"),

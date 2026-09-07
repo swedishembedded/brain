@@ -226,6 +226,9 @@ fn resolver_spec_for(model_id: &str) -> Option<(&'static str, Box<dyn ArchSpec>)
     if model_id == cosyvoice::caps::MODEL {
         return Some(("cosyvoice", Box::new(cosyvoice::spec::CosyVoiceSpec)));
     }
+    if model_id == minimaxmusic3::caps::MODEL {
+        return Some(("minimaxmusic3", Box::new(minimaxmusic3::spec::MinimaxMusic3Spec)));
+    }
     None
 }
 

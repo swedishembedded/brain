@@ -30,6 +30,7 @@ brain-residency.workspace = true
 # - the process-wide host ceiling `--limit-ram-total` publishes - so an
 # in-process caller with no residency manager still has a governor.
 brain-memauth.workspace = true
+brain-modelstore.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]

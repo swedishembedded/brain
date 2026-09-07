@@ -93,6 +93,36 @@ impl Paths {
         };
         Ok(Paths { lm: get(0)?, depth: get(1)?, condition: get(2)?, dit: get(3)?, vocoder: get(4)?, tokenizer: get(5)? })
     }
+
+    /// Build every role from an already-resolved [`capability::Assembly`]
+    /// (`crate::spec::MinimaxMusic3Spec`'s own six roles) - no environment
+    /// involved.
+    ///
+    /// `language_model` resolves to a real `HfDir` (its own directory,
+    /// already what this field wants); `depth_decoder`/`condition_encoder`/
+    /// `transformer`/`vocoder`/`tokenizer` resolve to the single safetensors/
+    /// `tokenizer.json` FILE `crate::spec`'s own classification found inside
+    /// each role's directory (none of the four brain-native components ships
+    /// a `config.json` of its own, so none collapses to a directory record -
+    /// see that module's own doc), so this takes each resolved file's own
+    /// parent directory instead - exactly the same "resolved to a file, this
+    /// struct wants the directory" shape `cosyvoice::pipeline::CosyVoicePaths
+    /// ::from_assembly` handles for `llm`/`flow`/`hift`/`tokenizer`.
+    pub fn from_assembly(assembly: &capability::Assembly) -> Result<Paths, String> {
+        let dir_of = |role: &str| -> Result<String, String> {
+            let p = assembly.roles.get(role).ok_or_else(|| format!("minimaxmusic3: assembly '{}' has no {role} role", assembly.id))?;
+            let d = if p.is_dir() { p.as_path() } else { p.parent().ok_or_else(|| format!("minimaxmusic3: {role} path {} has no parent directory", p.display()))? };
+            Ok(d.to_string_lossy().into_owned())
+        };
+        Ok(Paths {
+            lm: dir_of("language_model")?,
+            depth: dir_of("depth_decoder")?,
+            condition: dir_of("condition_encoder")?,
+            dit: dir_of("transformer")?,
+            vocoder: dir_of("vocoder")?,
+            tokenizer: dir_of("tokenizer")?,
+        })
+    }
 }
 
 /// The AR stage's own frame rate (`ConditionEncoderConfig::real()`'s
@@ -353,11 +383,16 @@ mod tests {
     }
 
     #[test]
-    fn path_vars_names_match_the_arch_registrys_own_weights_env_table() {
-        // crates/arch's own `weights_env` list for "minimaxmusic3" (checked
-        // by hand against crates/arch/src/lib.rs, not re-imported here to
-        // avoid a dependency cycle) - this test pins that PATH_VARS cannot
-        // silently drift from that registration.
+    fn path_vars_role_order_matches_the_archspecs_own_roles() {
+        // The six `PATH_VARS` entries are `Paths`' own field order
+        // (`lm, depth, condition, dit, vocoder, tokenizer`), which must stay
+        // in exact lockstep with `crate::spec::MinimaxMusic3Spec::roles()` -
+        // the resolver's role list now, not `crates/arch`'s `weights_env`
+        // table (empty for this arch's row).
+        use brain_modelstore::resolve::ArchSpec;
+        let spec = crate::spec::MinimaxMusic3Spec;
+        assert_eq!(spec.roles(), ["language_model", "depth_decoder", "condition_encoder", "transformer", "vocoder", "tokenizer"]);
+
         let vars: Vec<&str> = PATH_VARS.iter().map(|(v, _)| *v).collect();
         assert_eq!(
             vars,

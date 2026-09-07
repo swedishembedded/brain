@@ -42,10 +42,12 @@ use crate::generate::{generate, GenOpts, Paths};
 pub const MODEL: &str = "brain/minimaxmusic3";
 
 /// The one action every surface (direct, resident, D-Bus) declares -
-/// generation params only, no weight paths (those come from the
-/// `BRAIN_MINIMAXMUSIC3_*` env vars `crate::generate::Paths::from_env`
-/// reads, matching `crates/arch`'s own `weights_env` registration for
-/// this architecture).
+/// generation params only, no weight paths. The direct/`brain do` path
+/// (`brain-catalog`'s own `ModelEntry::provider`) resolves those through the
+/// model-store resolver (`crate::spec::MinimaxMusic3Spec`) and binds them
+/// into [`MinimaxMusic3Provider`] at construction; the residency adapter
+/// (`crates/cli/src/resident_minimaxmusic3.rs`) still reads the
+/// `BRAIN_MINIMAXMUSIC3_*` env vars `crate::generate::Paths::from_env` does.
 pub fn generate_spec() -> ActionSpec {
     let d = GenOpts::default();
     ActionSpec::new("generate", "generate a song from lyrics and a caption (Qwen3-8B Global LLM AR sampling, CFG-guided flow-matching DiT denoise, DAC-style vocoder, 44.1 kHz stereo)")
@@ -94,9 +96,10 @@ fn opts_from(inv: &Invocation) -> GenOpts {
 
 /// Run one `generate` call and wrap the result as an audio-output
 /// [`Outcome`] - ONE implementation, shared by [`MinimaxMusic3Provider`]
-/// and the residency adapter. `paths` is resolved by the caller (direct
-/// vs. resident differ only in error framing, not in how paths resolve -
-/// both ultimately read [`Paths::from_env`]).
+/// and the residency adapter. `paths` is resolved by the caller - the
+/// direct/`brain do` path through the resolver
+/// (`crate::spec::MinimaxMusic3Spec`), the residency adapter still through
+/// [`Paths::from_env`].
 pub fn generate_action(paths: &Paths, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
     let lyrics = inv.get_str("lyrics").ok_or("minimaxmusic3 generate: missing required param 'lyrics'")?;
     let caption = inv.get_str("caption").ok_or("minimaxmusic3 generate: missing required param 'caption'")?;
@@ -128,16 +131,19 @@ pub fn generate_action(paths: &Paths, inv: &Invocation, progress: &mut dyn FnMut
         .blob("audio", Blob::new(Media::Audio, bytes).with_meta(json!({"format": "wav", "sample_rate": song.sample_rate, "channels": 2}))))
 }
 
-/// The executable MiniMax Music 3 model behind the manifest. Stateless -
-/// it owns nothing across calls; what IS warm across calls belongs to
-/// `crate::weightcache`, not to any instance of this type (see this
-/// module's own doc).
-#[derive(Default)]
-pub struct MinimaxMusic3Provider;
+/// The executable MiniMax Music 3 model behind the manifest. Weight paths
+/// are BOUND at construction (see [`MinimaxMusic3Provider::new`]) - never
+/// re-resolved per request, matching `flux2::caps::Flux2Provider`'s own
+/// `paths` field. Otherwise stateless - it holds no built model; what IS
+/// warm across calls belongs to `crate::weightcache`, not to any instance of
+/// this type (see this module's own doc).
+pub struct MinimaxMusic3Provider {
+    paths: Paths,
+}
 
 impl MinimaxMusic3Provider {
-    pub fn new() -> MinimaxMusic3Provider {
-        MinimaxMusic3Provider
+    pub fn new(paths: Paths) -> MinimaxMusic3Provider {
+        MinimaxMusic3Provider { paths }
     }
 }
 
@@ -146,19 +152,23 @@ impl Provider for MinimaxMusic3Provider {
         manifest()
     }
     fn action(&self, name: &str) -> Option<Arc<dyn Action>> {
-        (name == "generate").then(|| Arc::new(GenerateAction) as Arc<dyn Action>)
+        (name == "generate").then(|| Arc::new(GenerateAction { paths: self.paths.clone() }) as Arc<dyn Action>)
     }
 }
 
-struct GenerateAction;
+/// One `generate` action, dispatched through [`generate_action`]. `paths` is
+/// the provider's own bound weights (see [`MinimaxMusic3Provider::new`]) -
+/// never re-resolved per request.
+struct GenerateAction {
+    paths: Paths,
+}
 
 impl Action for GenerateAction {
     fn spec(&self) -> ActionSpec {
         generate_spec()
     }
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        let paths = Paths::from_env().map_err(|e| format!("minimaxmusic3 generate: {e}"))?;
-        generate_action(&paths, inv, progress)
+        generate_action(&self.paths, inv, progress)
     }
 }
 
@@ -186,16 +196,20 @@ mod tests {
         assert_eq!(resident_manifest().actions.len(), manifest().actions.len());
     }
 
+    fn empty_paths() -> Paths {
+        Paths { lm: String::new(), depth: String::new(), condition: String::new(), dit: String::new(), vocoder: String::new(), tokenizer: String::new() }
+    }
+
     #[test]
     fn provider_exposes_generate_and_nothing_else() {
-        let p = MinimaxMusic3Provider::new();
+        let p = MinimaxMusic3Provider::new(empty_paths());
         assert!(p.action("generate").is_some());
         assert!(p.action("nonexistent").is_none());
     }
 
     #[test]
     fn generate_action_rejects_a_missing_required_param() {
-        let paths = Paths { lm: String::new(), depth: String::new(), condition: String::new(), dit: String::new(), vocoder: String::new(), tokenizer: String::new() };
+        let paths = empty_paths();
         let inv = Invocation::new().set("caption", json!("test"));
         let mut progress = |_: Progress| {};
         let err = generate_action(&paths, &inv, &mut progress).unwrap_err();

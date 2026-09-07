@@ -1369,6 +1369,7 @@ dependencies = [
  "brain-kernels",
  "brain-memauth",
  "brain-model",
+ "brain-modelstore",
  "brain-qwen3",
  "brain-residency",
  "brain-testutil",
