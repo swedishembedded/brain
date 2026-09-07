@@ -517,6 +517,53 @@ pub fn classify_tokenizer_role(records: &[ArtifactRecord], root: &Path, role: &s
     }
 }
 
+/// Read every `brain.manifest.json` (`crate::MANIFEST_FILE`) under
+/// `root/<vendor>/<repo>/` that declares `family`, mapping its own recorded
+/// roles straight onto whichever already-scanned [`ArtifactRecord`] lives at
+/// each role's resolved path - [`Confidence::Recorded`], never re-derived
+/// from that role's own raw file content. This is the shared short-circuit
+/// every architecture with a real multi-file conversion step
+/// (`convert_files`'s own `brain.manifest.json` writer, in
+/// `crates/cli/src/supply.rs`) needs identically, so a compound-converted
+/// checkpoint's roles are recognized once here rather than re-derived per
+/// architecture.
+///
+/// Matches by PATH against `records`, not by [`crate::inventory::
+/// ArtifactKind::Compound`] alone: a role name is a property of the
+/// manifest, not of the record, so this is what ties the two together.
+/// Appends to `out` in place, matching every other `classify_*` helper.
+pub fn classify_compound_manifest(records: &[ArtifactRecord], root: &Path, family: &str, out: &mut Vec<(usize, String, Confidence)>) {
+    let Ok(vendors) = std::fs::read_dir(root) else { return };
+    for vendor in vendors.flatten() {
+        let vendor_path = vendor.path();
+        if !vendor_path.is_dir() {
+            continue;
+        }
+        let Ok(repos) = std::fs::read_dir(&vendor_path) else { continue };
+        for repo in repos.flatten() {
+            let repo_path = repo.path();
+            if !repo_path.is_dir() {
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(repo_path.join(crate::MANIFEST_FILE)) else { continue };
+            let Ok(manifest) = serde_json::from_slice::<crate::CompoundManifest>(&bytes) else { continue };
+            if manifest.family != family {
+                continue;
+            }
+            for (role, rel) in &manifest.roles {
+                let rel_path = Path::new(rel);
+                if rel_path.is_absolute() || rel_path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+                    continue;
+                }
+                let want = repo_path.join(rel_path);
+                if let Some(idx) = records.iter().position(|r| r.usable() && r.path == want) {
+                    out.push((idx, role.clone(), Confidence::Recorded));
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1081,5 +1128,51 @@ mod tests {
             Resolution::Resolved(a) => assert_eq!(a.roles["sidecar"], PathBuf::from("/models/reqopt/sidecar.bin")),
             other => panic!("expected Resolved, got {other:?}"),
         }
+    }
+
+    /// A directory carrying a `brain.manifest.json` for the SAME family the
+    /// caller asks about maps each declared role onto whichever already-
+    /// scanned record sits at that role's resolved path - the two-role
+    /// (`ckpt`/`weights_dir`) shape a real `convert_files`-written manifest
+    /// takes.
+    #[test]
+    fn classify_compound_manifest_maps_declared_roles_onto_matching_records_by_path() {
+        let dir = tmp("compound-manifest-classify");
+        let repo = dir.join("Qwen").join("Qwen3-TTS-12Hz-0.6B-Base");
+        std::fs::create_dir_all(repo.join("brain_tts")).unwrap();
+        let manifest = crate::CompoundManifest {
+            id: "Qwen/Qwen3-TTS-12Hz-0.6B-Base".to_string(),
+            family: "qwen3tts".to_string(),
+            roles: BTreeMap::from([("ckpt".to_string(), ".".to_string()), ("weights_dir".to_string(), "brain_tts".to_string())]),
+        };
+        std::fs::write(repo.join(crate::MANIFEST_FILE), serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let records = vec![
+            complete(repo.clone(), crate::inventory::ArtifactKind::Compound),
+            complete(repo.join("brain_tts"), crate::inventory::ArtifactKind::Compound),
+        ];
+
+        let mut out = Vec::new();
+        classify_compound_manifest(&records, &dir, "qwen3tts", &mut out);
+        assert_eq!(out.len(), 2, "{out:?}");
+        assert!(out.contains(&(0, "ckpt".to_string(), Confidence::Recorded)), "{out:?}");
+        assert!(out.contains(&(1, "weights_dir".to_string(), Confidence::Recorded)), "{out:?}");
+    }
+
+    /// A manifest declaring a DIFFERENT family must contribute nothing - a
+    /// compound-converted checkpoint for one architecture must never
+    /// classify as another's roles just because both happen to use the
+    /// same on-disk manifest mechanism.
+    #[test]
+    fn classify_compound_manifest_ignores_a_manifest_for_a_different_family() {
+        let dir = tmp("compound-manifest-wrong-family");
+        let repo = dir.join("Qwen").join("Other-Model");
+        std::fs::create_dir_all(&repo).unwrap();
+        let manifest = crate::CompoundManifest { id: "Qwen/Other-Model".to_string(), family: "wan".to_string(), roles: BTreeMap::from([("ckpt".to_string(), ".".to_string())]) };
+        std::fs::write(repo.join(crate::MANIFEST_FILE), serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let records = vec![complete(repo.clone(), crate::inventory::ArtifactKind::Compound)];
+
+        let mut out = Vec::new();
+        classify_compound_manifest(&records, &dir, "qwen3tts", &mut out);
+        assert!(out.is_empty(), "{out:?}");
     }
 }

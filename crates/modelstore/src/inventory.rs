@@ -39,6 +39,12 @@ pub enum ArtifactKind {
     /// A bare `model_index.json` (diffusers pipeline manifest) - evidence
     /// that a pipeline lives nearby, never itself weights.
     PipelineIndex,
+    /// One role's location as declared by a `brain.manifest.json` compound
+    /// manifest (`crate::MANIFEST_FILE`) sitting in this record's own
+    /// directory - a file or a directory, whichever that role's loader
+    /// accepts, exactly as `Store`'s own compound-model lookup already
+    /// treats a compound model's roles. See `resolve::classify_compound_manifest`.
+    Compound,
     Opaque,
 }
 
@@ -300,6 +306,10 @@ const MAX_COMPONENT_DEPTH: u32 = 3;
 /// otherwise walks its files and recurses into subdirectories up to
 /// [`MAX_COMPONENT_DEPTH`].
 fn walk_repo_dir(dir: &Path, scan_root: &Path, cache: &BTreeMap<PathBuf, CacheEntry>, probed: &mut dyn FnMut(&Path), out: &mut Vec<ArtifactRecord>, depth: u32) {
+    if let Some(mut records) = compound_records(dir, scan_root, cache, probed) {
+        out.append(&mut records);
+        return;
+    }
     if let Some(record) = hfdir_record(dir, scan_root, cache, probed) {
         out.push(record);
         // The directory collapsed to one record for its WEIGHTS (the shard
@@ -393,6 +403,35 @@ fn shard_filenames(dir: &Path) -> Vec<String> {
 /// foreign HF checkpoint directory: `config.json` plus a shard set. `None`
 /// when `dir` doesn't have that shape at all, so the caller falls through to
 /// walking it file-by-file instead.
+/// `dir` holding a `brain.manifest.json` compound manifest: one record per
+/// declared role path (file or directory), tagged [`ArtifactKind::Compound`]
+/// - the manifest is a complete description of what lives in this directory
+/// on its own, so it REPLACES the generic per-file walk here rather than
+/// supplementing it (same shape as [`hfdir_record`]'s collapse-and-stop).
+///
+/// `None` when `dir` carries no manifest at all, so the caller falls through
+/// to the ordinary walk exactly as before this existed. A role path that is
+/// absolute or escapes `dir` (a `..` component) is skipped rather than
+/// followed - the same safety rule `Store`'s own compound-model lookup
+/// applies to a manifest's role paths.
+fn compound_records(dir: &Path, scan_root: &Path, cache: &BTreeMap<PathBuf, CacheEntry>, probed: &mut dyn FnMut(&Path)) -> Option<Vec<ArtifactRecord>> {
+    let manifest_path = dir.join(crate::MANIFEST_FILE);
+    if !manifest_path.is_file() {
+        return None;
+    }
+    let bytes = std::fs::read(&manifest_path).ok()?;
+    let manifest: crate::CompoundManifest = serde_json::from_slice(&bytes).ok()?;
+    let mut out = Vec::new();
+    for rel in manifest.roles.values() {
+        let rel_path = Path::new(rel);
+        if rel_path.is_absolute() || rel_path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+            continue;
+        }
+        push_file_record(&dir.join(rel_path), scan_root, ArtifactKind::Compound, cache, probed, &mut out);
+    }
+    Some(out)
+}
+
 fn hfdir_record(dir: &Path, scan_root: &Path, cache: &BTreeMap<PathBuf, CacheEntry>, probed: &mut dyn FnMut(&Path)) -> Option<ArtifactRecord> {
     if !dir.join("config.json").is_file() {
         return None;
@@ -665,6 +704,41 @@ mod tests {
         let found = scan_with_probe_hook(&root, &mut |p| probes2.push(p.to_path_buf()));
         assert_eq!(probes2, vec![touched.clone()], "only the changed file should be re-probed, got {probes2:?}");
         assert_eq!(found.len(), 2);
+    }
+
+    /// A directory carrying `brain.manifest.json` (`crate::MANIFEST_FILE`,
+    /// the shape `convert_files` in `crates/cli/src/supply.rs` writes for a
+    /// real multi-file conversion like qwen3tts's) must produce one
+    /// `Compound` record per declared role path - INCLUDING a role
+    /// ("weights_dir") that points at a bare subdirectory with no
+    /// `config.json` of its own, which nothing else in this walker would
+    /// otherwise ever turn into a single record.
+    #[test]
+    fn a_compound_manifest_directory_yields_one_record_per_declared_role() {
+        let root = scratch_root("compound-manifest");
+        let dir = root.join("Qwen").join("Qwen3-TTS-12Hz-0.6B-Base");
+        std::fs::create_dir_all(dir.join("brain_tts")).unwrap();
+        // "ckpt" role's own dir also looks HF-checkpoint-shaped (real
+        // qwen3tts checkpoints do) - the manifest must still win over
+        // `hfdir_record`'s collapse, not merely coexist with it.
+        std::fs::write(dir.join("config.json"), b"{}").unwrap();
+        tiny_safetensors(&dir.join("brain_tts").join("talker.safetensors"));
+        let manifest = crate::CompoundManifest {
+            id: "Qwen/Qwen3-TTS-12Hz-0.6B-Base".to_string(),
+            family: "qwen3tts".to_string(),
+            roles: BTreeMap::from([("ckpt".to_string(), ".".to_string()), ("weights_dir".to_string(), "brain_tts".to_string())]),
+        };
+        std::fs::write(dir.join(crate::MANIFEST_FILE), serde_json::to_vec(&manifest).unwrap()).unwrap();
+
+        let found = scan(&root);
+        let compound: Vec<&ArtifactRecord> = found.iter().filter(|r| r.kind == ArtifactKind::Compound).collect();
+        assert_eq!(compound.len(), 2, "{found:?}");
+        assert!(compound.iter().any(|r| r.path == dir), "no record for the ckpt role's directory: {found:?}");
+        assert!(compound.iter().any(|r| r.path == dir.join("brain_tts")), "no record for the weights_dir role's directory: {found:?}");
+        assert!(compound.iter().all(|r| r.usable()), "{found:?}");
+        // The manifest fully describes this directory - it must not ALSO
+        // collapse to a separate HfDir record for the same path.
+        assert!(found.iter().all(|r| r.kind != ArtifactKind::HfDir), "{found:?}");
     }
 
     #[test]
