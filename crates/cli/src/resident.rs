@@ -210,13 +210,17 @@ pub fn build_executor(gpus: &[(u32, u64)], npus: &[(u32, u64)], unified_gpus: &[
     // on its own when no dir is configured or the scan finds nothing.
     if let Some(dir) = models_dir {
         let existing: std::collections::BTreeSet<String> = models.iter().map(|m| m.manifest().model).collect();
-        for r in crate::model_dir::discover(dir) {
+        let (discovered, errors) = crate::model_dir::discover(dir);
+        for r in discovered {
             let id = r.manifest().model;
             if existing.contains(&id) {
                 eprintln!("brain: model dir entry '{id}' shadowed by an env-gated resident; keeping the env one");
                 continue;
             }
             models.push(r);
+        }
+        for e in &errors {
+            eprintln!("brain: {} (family '{}') not registered: {} -- check its brain.manifest.json roles, or re-fetch it", e.dir.display(), e.family, e.reason);
         }
     }
 

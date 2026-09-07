@@ -769,7 +769,7 @@ impl StoreSupplier {
         // resolved reference is what `Store::local` finds the fetched bytes
         // under. Identical to `r` for every recipe that makes no choice.
         let local = self.store.local(&plan.reference).ok_or_else(|| format!("{model}: fetched but not found on disk (unexpected)"))?;
-        let resident = crate::model_dir::resident_for_local(&local).ok_or_else(|| format!("{model}: family not servable"))?;
+        let resident = crate::model_dir::resident_for_local(&local).map_err(|e| format!("{model}: {e}"))?;
         exec.register_if_absent(resident);
         Ok(())
     }

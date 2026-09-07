@@ -68,21 +68,73 @@ pub fn resolve(flag: Option<&str>) -> Option<PathBuf> {
     brain_modelstore::default_root()
 }
 
+/// A [`LocalModel`](brain_modelstore::LocalModel) [`discover`] could not turn
+/// into a resident -- today, only a compound (`roles.is_some()`) model,
+/// since a single-file model's failure stays the pre-existing
+/// `register`-internal `eprintln` (see that function's doc). Named by repo
+/// dir and family so a caller can act on it instead of it vanishing into
+/// stderr.
+#[derive(Debug, Clone)]
+pub struct DiscoveryError {
+    pub dir: PathBuf,
+    pub family: String,
+    pub reason: String,
+}
+
 /// Scan `dir` and build one resident per discovered model-card id. Deduplicates
 /// by id (first wins, store layout before flat layout). See the module docs
 /// for the layout precedence and the skip/warn policy.
-pub fn discover(dir: &Path) -> Vec<Arc<dyn ResidentModel>> {
+///
+/// Returns every [`DiscoveryError`] a compound model produced alongside the
+/// residents that DID construct -- a partial scan still serves what it can.
+pub fn discover(dir: &Path) -> (Vec<Arc<dyn ResidentModel>>, Vec<DiscoveryError>) {
     let mut out: Vec<Arc<dyn ResidentModel>> = Vec::new();
+    let mut errors: Vec<DiscoveryError> = Vec::new();
     let mut seen: BTreeSet<String> = BTreeSet::new();
 
     let mut locals = brain_modelstore::Store::new(dir.to_path_buf()).scan();
     locals.sort_by(|a, b| a.weights.cmp(&b.weights)); // deterministic catalog order
     for local in &locals {
+        if local.roles.is_some() {
+            // A compound model has no single weights path (`local.weights` is
+            // the manifest file itself) -- `register`/`resident_for` is the
+            // single-file dispatcher and must never see one of these; go
+            // through the compound-aware dispatch instead.
+            register_compound(local, &mut seen, &mut out, &mut errors);
+            continue;
+        }
         register(&local.weights, &local.card, &local.dir, local.adapter.as_deref(), &mut seen, &mut out);
     }
 
     discover_flat(dir, &mut seen, &mut out);
-    out
+    (out, errors)
+}
+
+/// [`register`]'s dedup-then-construct-then-free-on-failure dance, for a
+/// compound model dispatched through [`resident_for_local`] instead of
+/// [`resident_for`] -- kept a separate function (not folded into `register`,
+/// which takes a bare weights path a compound model doesn't have) so the two
+/// dispatchers stay independently readable.
+fn register_compound(local: &brain_modelstore::LocalModel, seen: &mut BTreeSet<String>, out: &mut Vec<Arc<dyn ResidentModel>>, errors: &mut Vec<DiscoveryError>) {
+    let family = local.card.as_ref().map(|c| c.family.clone()).unwrap_or_default();
+    let id = match local.card.as_ref() {
+        Some(c) => c.id.clone(),
+        None => {
+            errors.push(DiscoveryError { dir: local.dir.clone(), family, reason: "no model card".to_string() });
+            return;
+        }
+    };
+    if !seen.insert(id.clone()) {
+        errors.push(DiscoveryError { dir: local.dir.clone(), family, reason: format!("duplicate model id '{id}'") });
+        return;
+    }
+    match resident_for_local(local) {
+        Ok(r) => out.push(r),
+        Err(reason) => {
+            seen.remove(&id); // free the id if the family declined, same as `register`
+            errors.push(DiscoveryError { dir: local.dir.clone(), family, reason });
+        }
+    }
 }
 
 static FLAT_LAYOUT_WARNING: Once = Once::new();
@@ -345,47 +397,34 @@ fn resident_for(weights: &str, card: &ModelCard, tokenizer: Option<&str>, adapte
 /// A compound (multi-file, `local.roles.is_some()`) model has no single
 /// weights path, so it dispatches separately, by family, before the
 /// single-path case below even applies.
-pub(crate) fn resident_for_local(local: &brain_modelstore::LocalModel) -> Option<Arc<dyn ResidentModel>> {
-    let card = local.card.as_ref()?;
+///
+/// `Err` names WHY, rather than printing and returning `None` -- both
+/// callers decide for themselves what to do with the reason (`discover`
+/// collects it as a [`DiscoveryError`]; `supply::StoreSupplier::ensure`
+/// folds it into the error it already returns to ITS caller).
+pub(crate) fn resident_for_local(local: &brain_modelstore::LocalModel) -> Result<Arc<dyn ResidentModel>, String> {
+    let card = local.card.as_ref().ok_or_else(|| "no model card".to_string())?;
     if let Some(roles) = &local.roles {
         return resident_for_compound(card, roles);
     }
-    let weights = local.weights.to_str()?;
+    let weights = local.weights.to_str().ok_or_else(|| "weights path is not valid UTF-8".to_string())?;
     let tokenizer = local.tokenizer.as_deref().and_then(|p| p.to_str());
     let adapter = local.adapter.as_deref().and_then(|p| p.to_str());
-    resident_for(weights, card, tokenizer, adapter)
+    resident_for(weights, card, tokenizer, adapter).ok_or_else(|| format!("family '{}' not servable from the model dir yet", card.family))
 }
 
 /// The compound-model counterpart of [`resident_for`]: family dispatch keyed
 /// on named roles (a directory or file each) rather than one weights path.
-fn resident_for_compound(card: &ModelCard, roles: &std::collections::BTreeMap<String, PathBuf>) -> Option<Arc<dyn ResidentModel>> {
+fn resident_for_compound(card: &ModelCard, roles: &std::collections::BTreeMap<String, PathBuf>) -> Result<Arc<dyn ResidentModel>, String> {
     match brain_family(&card.family) {
-        "zimage" => match zimage_paths_from_roles(roles) {
-            Ok(paths) => match crate::resident::ZImageResident::from_paths(card.id.clone(), paths) {
-                Ok(z) => Some(Arc::new(z)),
-                Err(e) => {
-                    eprintln!("brain: skip {} ({e})", card.id);
-                    None
-                }
-            },
-            Err(e) => {
-                eprintln!("brain: skip {} ({e})", card.id);
-                None
-            }
-        },
-        "wan" => match wan_paths_from_roles(roles) {
-            // Unlike zimage's, this construction cannot fail: the four roles
-            // ARE the model, and the weights are read lazily at activate().
-            Ok(paths) => Some(Arc::new(crate::resident_wan::WanResident::from_paths(card.id.clone(), paths))),
-            Err(e) => {
-                eprintln!("brain: skip {} ({e})", card.id);
-                None
-            }
-        },
-        other => {
-            eprintln!("brain: skip {} (compound family '{other}' not servable from the model dir yet)", card.id);
-            None
+        "zimage" => {
+            let paths = zimage_paths_from_roles(roles)?;
+            crate::resident::ZImageResident::from_paths(card.id.clone(), paths).map(|z| Arc::new(z) as Arc<dyn ResidentModel>)
         }
+        // Unlike zimage's, this construction cannot fail: the four roles ARE
+        // the model, and the weights are read lazily at activate().
+        "wan" => wan_paths_from_roles(roles).map(|paths| Arc::new(crate::resident_wan::WanResident::from_paths(card.id.clone(), paths)) as Arc<dyn ResidentModel>),
+        other => Err(format!("compound family '{other}' not servable from the model dir yet")),
     }
 }
 
@@ -572,7 +611,7 @@ mod tests {
         let dir = tmp_dir("ggufqwensplit");
         write_gguf_qwen_split(&dir, "qwen3-split", "toy-qwen-gguf-split");
 
-        let residents = discover(&dir);
+        let (residents, _) = discover(&dir);
         let matching: Vec<&Arc<dyn ResidentModel>> = residents.iter().filter(|r| r.manifest().model == "toy-qwen-gguf-split").collect();
         assert_eq!(matching.len(), 1, "the 3-part split must register exactly once, not once per part");
 
@@ -601,7 +640,7 @@ mod tests {
         // GGUF card is synthesized from KV and dispatched by family.
         write_gguf(&dir, "toy.gguf", "gpt", "toy-gguf");
 
-        let got = ids(&discover(&dir));
+        let got = ids(&discover(&dir).0);
         assert!(got.contains(&"toy-base".to_string()), "base missing: {got:?}");
         assert!(got.contains(&"toy-ft".to_string()), "ft missing: {got:?}");
         assert!(!got.contains(&"toy-unknown".to_string()), "unknown family not skipped: {got:?}");
@@ -624,7 +663,7 @@ mod tests {
         write_st(&dir, "yolo.safetensors", "toy-yolo", "yolo");
         write_st(&dir, "depth.safetensors", "toy-depth", "depth");
 
-        let residents = discover(&dir);
+        let (residents, _) = discover(&dir);
         let got = ids(&residents);
         assert!(got.contains(&"toy-glm".to_string()), "glm missing: {got:?}");
         assert!(got.contains(&"toy-yolo".to_string()), "yolo missing: {got:?}");
@@ -637,7 +676,7 @@ mod tests {
         // No tokenizer.json → the encoder cannot construct → skipped (not fatal).
         let dir = tmp_dir("notok");
         write_st(&dir, "enc.safetensors", "toy-enc", "lfm");
-        let got = ids(&discover(&dir));
+        let got = ids(&discover(&dir).0);
         assert!(!got.contains(&"toy-enc".to_string()), "lfm registered without a tokenizer: {got:?}");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -656,7 +695,7 @@ mod tests {
         // tokenizer.json, and advertises the streaming chat `generate` action.
         let dir = tmp_dir("ggufqwen");
         write_gguf_qwen(&dir, "qwen3.gguf", "toy-qwen-gguf");
-        let residents = discover(&dir);
+        let (residents, _) = discover(&dir);
         let got = ids(&residents);
         assert!(got.contains(&"toy-qwen-gguf".to_string()), "qwen gguf not registered: {got:?}");
 
@@ -753,7 +792,7 @@ mod tests {
         )
         .unwrap();
 
-        let got = ids(&discover(&dir));
+        let got = ids(&discover(&dir).0);
         assert!(got.contains(&"VendorA/RepoX".to_string()), "A missing: {got:?}");
         assert!(
             !got.contains(&"VendorB/RepoY".to_string()),
@@ -796,11 +835,53 @@ mod tests {
         )
         .unwrap();
 
-        let residents = discover(&dir);
+        let (residents, _) = discover(&dir);
         let got = ids(&residents);
         assert!(got.contains(&"Qwen/Qwen3-Toy".to_string()), "base missing: {got:?}");
         assert!(got.contains(&"Qwen/Qwen3-Toy:swedishembedded-com:generic-sft:latest".to_string()), "adapter missing: {got:?}");
         assert_eq!(got.len(), 2, "expected exactly base + adapter, got: {got:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A `brain.manifest.json` naming `family` with the four wan-shaped roles
+    /// (dit/vae/text_encoder/tokenizer), same layout `supply::convert_wan`
+    /// writes -- content is never opened at construction (`WanResident::
+    /// from_paths` reads lazily at `activate()`), so stub bytes are enough.
+    fn write_compound_fixture(dir: &Path, vendor: &str, repo: &str, family: &str) {
+        let repo_dir = dir.join(vendor).join(repo);
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        let mut roles = BTreeMap::new();
+        for role in ["dit", "vae", "text_encoder", "tokenizer"] {
+            std::fs::write(repo_dir.join(format!("{role}.bin")), b"stub").unwrap();
+            roles.insert(role.to_string(), format!("{role}.bin"));
+        }
+        let manifest = brain_modelstore::CompoundManifest { id: format!("{vendor}/{repo}"), family: family.to_string(), roles };
+        std::fs::write(repo_dir.join(brain_modelstore::MANIFEST_FILE), serde_json::to_vec(&manifest).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn discover_registers_a_wan_compound_model_via_resident_for_local() {
+        let dir = tmp_dir("compound-wan");
+        write_compound_fixture(&dir, "Wan-AI", "Wan2.1-T2V-1.3B", "wan");
+
+        let (residents, errors) = discover(&dir);
+        assert!(errors.is_empty(), "unexpected discovery errors: {errors:?}");
+        let got = ids(&residents);
+        assert!(got.contains(&"Wan-AI/Wan2.1-T2V-1.3B".to_string()), "wan compound model not discovered: {got:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn discover_reports_an_unrecognized_compound_family_as_a_named_error_not_a_panic() {
+        let dir = tmp_dir("compound-unknown-family");
+        write_compound_fixture(&dir, "Some-Vendor", "Mystery-Compound", "flux2");
+
+        let (residents, errors) = discover(&dir);
+        let got = ids(&residents);
+        assert!(!got.contains(&"Some-Vendor/Mystery-Compound".to_string()), "unrecognized compound family must not register: {got:?}");
+        assert_eq!(errors.len(), 1, "expected exactly one discovery error, got: {errors:?}");
+        assert_eq!(errors[0].family, "flux2");
+        assert_eq!(errors[0].dir, dir.join("Some-Vendor").join("Mystery-Compound"));
         std::fs::remove_dir_all(&dir).ok();
     }
 }
