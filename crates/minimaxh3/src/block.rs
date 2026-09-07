@@ -59,7 +59,6 @@
 
 use gpu_core::{DeviceBuffer, Gpu};
 use model::hostmath::linear_rows;
-use paramstore::upload::Uploader;
 
 use crate::config::{H3TransformerConfig, MODALITY_NUM};
 
@@ -315,22 +314,25 @@ pub struct RefinerBlockWeights {
 
 /// Fetch-upload-drop one f32 tensor as a device buffer. `advise_drop`s the
 /// source's pages behind it immediately - this tensor's data is fully
-/// consumed once `up`'s upload returns.
+/// consumed once `ctx.upload` returns.
 ///
-/// Goes through [`Uploader::host_f32`], never `Ctx::upload`/`storage_init`:
-/// `create_buffer_init`'s mapped-at-creation path forces the destination onto
-/// an inefficient memory type on a non-ReBAR GPU - the exact bug
-/// `paramstore::upload`'s own doc records (a 16.8GB encoder ballooning to
-/// ~30GB and OOMing), reproduced here independently at real scale: a single
-/// real-weight forward pass measured over 12 minutes on a P40 through
-/// `Ctx::upload`, against ~150s on CPU. `Uploader` also folds in the
-/// per-tensor `poll_wait` this crate's streaming block loop separately
-/// needed for a different reason (bounding wgpu's un-reclaimed submit
-/// buffers across many blocks that mostly never read back) - one mechanism
-/// for both costs, not two.
-pub fn load_dev(tensors: &dyn checkpoint::TensorSource, up: &mut Uploader, name: &str) -> DeviceBuffer {
+/// Deliberately `Ctx::upload`/`storage_init`, not `paramstore::upload::
+/// Uploader`: a real-hardware measurement (`crates/gpu-core/tests/
+/// bench_upload_cadence.rs`) found routing this crate's loads through
+/// `Uploader` is a regression on the CPU backend (a "device buffer" there
+/// already IS host memory, so `storage_init` is one direct copy and
+/// `Uploader`'s chunking only adds per-chunk overhead with nothing to avoid)
+/// and within measurement noise on a real P40 (the forked wgpu's
+/// `create_buffer_init` no longer carries the VRAM-doubling defect
+/// `Uploader`'s own module doc was written against - see `crates/gpu-core/
+/// tests/vram_overhead.rs`). An earlier version of this function used
+/// `Uploader` based on a since-retracted ~12-minute-vs-CPU GPU measurement
+/// that turned out to be dominated by unrelated system contention, not this
+/// function - including a separate probe bug that briefly pointed the same
+/// way for a different reason.
+pub fn load_dev(tensors: &dyn checkpoint::TensorSource, ctx: &Ctx, name: &str) -> DeviceBuffer {
     let mut buf: Option<DeviceBuffer> = None;
-    let found = tensors.with_tensor(name, &mut |data| buf = Some(up.host_f32(data)));
+    let found = tensors.with_tensor(name, &mut |data| buf = Some(ctx.upload(data)));
     assert!(found, "minimaxh3 model: missing tensor {name:?}");
     tensors.advise_drop(name);
     buf.unwrap()
@@ -353,13 +355,13 @@ pub fn load_host(tensors: &dyn checkpoint::TensorSource, name: &str) -> Vec<f32>
 /// row-count check that would read the tensor's own 2D shape is a numel
 /// check instead - a streaming `TensorSource` has no shape to hand back,
 /// and the total element count is exactly what the split below depends on.
-pub fn load_fc1(tensors: &dyn checkpoint::TensorSource, up: &mut Uploader, prefix: &str, hidden: u32, ffn: u32) -> (DeviceBuffer, DeviceBuffer) {
+pub fn load_fc1(tensors: &dyn checkpoint::TensorSource, ctx: &Ctx, prefix: &str, hidden: u32, ffn: u32) -> (DeviceBuffer, DeviceBuffer) {
     let name = format!("{prefix}.ff.net.0.proj.weight");
     let half = (ffn * hidden) as usize;
     let mut out: Option<(DeviceBuffer, DeviceBuffer)> = None;
     let found = tensors.with_tensor(&name, &mut |data| {
         assert_eq!(data.len(), 2 * half, "{name}: expected {} elements, got {}", 2 * half, data.len());
-        out = Some((up.host_f32(&data[..half]), up.host_f32(&data[half..2 * half])));
+        out = Some((ctx.upload(&data[..half]), ctx.upload(&data[half..2 * half])));
     });
     assert!(found, "minimaxh3 model: missing tensor {name:?}");
     tensors.advise_drop(&name);
@@ -368,14 +370,14 @@ pub fn load_fc1(tensors: &dyn checkpoint::TensorSource, up: &mut Uploader, prefi
 
 /// The 6 attention-projection tensors shared by both block kinds' `.attn`
 /// sub-module naming (`to_q`/`to_k`/`to_v`/`norm_q`/`norm_k`/`to_out.0`).
-pub fn load_attn(tensors: &dyn checkpoint::TensorSource, up: &mut Uploader, prefix: &str) -> (DeviceBuffer, DeviceBuffer, DeviceBuffer, DeviceBuffer, DeviceBuffer, DeviceBuffer) {
+pub fn load_attn(tensors: &dyn checkpoint::TensorSource, ctx: &Ctx, prefix: &str) -> (DeviceBuffer, DeviceBuffer, DeviceBuffer, DeviceBuffer, DeviceBuffer, DeviceBuffer) {
     (
-        load_dev(tensors, up, &format!("{prefix}.to_q.weight")),
-        load_dev(tensors, up, &format!("{prefix}.to_k.weight")),
-        load_dev(tensors, up, &format!("{prefix}.to_v.weight")),
-        load_dev(tensors, up, &format!("{prefix}.norm_q.weight")),
-        load_dev(tensors, up, &format!("{prefix}.norm_k.weight")),
-        load_dev(tensors, up, &format!("{prefix}.to_out.0.weight")),
+        load_dev(tensors, ctx, &format!("{prefix}.to_q.weight")),
+        load_dev(tensors, ctx, &format!("{prefix}.to_k.weight")),
+        load_dev(tensors, ctx, &format!("{prefix}.to_v.weight")),
+        load_dev(tensors, ctx, &format!("{prefix}.norm_q.weight")),
+        load_dev(tensors, ctx, &format!("{prefix}.norm_k.weight")),
+        load_dev(tensors, ctx, &format!("{prefix}.to_out.0.weight")),
     )
 }
 
@@ -383,10 +385,10 @@ pub fn load_attn(tensors: &dyn checkpoint::TensorSource, up: &mut Uploader, pref
 /// nothing else. A caller processing blocks one at a time drops the
 /// returned value (freeing its device buffers) before loading the next
 /// index.
-pub fn load_block(tensors: &dyn checkpoint::TensorSource, up: &mut Uploader, index: usize, hidden: u32, ffn: u32) -> BlockWeights {
+pub fn load_block(tensors: &dyn checkpoint::TensorSource, ctx: &Ctx, index: usize, hidden: u32, ffn: u32) -> BlockWeights {
     let p = format!("transformer_blocks.{index}");
-    let (wq, wk, wv, norm_q, norm_k, wo) = load_attn(tensors, up, &format!("{p}.attn"));
-    let (fc1_value, fc1_gate) = load_fc1(tensors, up, &p, hidden, ffn);
+    let (wq, wk, wv, norm_q, norm_k, wo) = load_attn(tensors, ctx, &format!("{p}.attn"));
+    let (fc1_value, fc1_gate) = load_fc1(tensors, ctx, &p, hidden, ffn);
     BlockWeights {
         wq,
         wk,
@@ -394,21 +396,21 @@ pub fn load_block(tensors: &dyn checkpoint::TensorSource, up: &mut Uploader, ind
         wo,
         norm_q,
         norm_k,
-        norm1: load_dev(tensors, up, &format!("{p}.norm1.weight")),
-        norm2: load_dev(tensors, up, &format!("{p}.norm2.weight")),
+        norm1: load_dev(tensors, ctx, &format!("{p}.norm1.weight")),
+        norm2: load_dev(tensors, ctx, &format!("{p}.norm2.weight")),
         fc1_value,
         fc1_gate,
-        fc2: load_dev(tensors, up, &format!("{p}.ff.net.2.weight")),
+        fc2: load_dev(tensors, ctx, &format!("{p}.ff.net.2.weight")),
         adaln_w: load_host(tensors, &format!("{p}.adaln_proj.linear.weight")),
         adaln_b: load_host(tensors, &format!("{p}.adaln_proj.linear.bias")),
     }
 }
 
 /// [`load_block`]'s `token_refiner.refiner_blocks.{index}` analogue.
-pub fn load_refiner_block(tensors: &dyn checkpoint::TensorSource, up: &mut Uploader, index: usize, hidden: u32, ffn: u32) -> RefinerBlockWeights {
+pub fn load_refiner_block(tensors: &dyn checkpoint::TensorSource, ctx: &Ctx, index: usize, hidden: u32, ffn: u32) -> RefinerBlockWeights {
     let p = format!("token_refiner.refiner_blocks.{index}");
-    let (wq, wk, wv, norm_q, norm_k, wo) = load_attn(tensors, up, &format!("{p}.attn"));
-    let (fc1_value, fc1_gate) = load_fc1(tensors, up, &p, hidden, ffn);
+    let (wq, wk, wv, norm_q, norm_k, wo) = load_attn(tensors, ctx, &format!("{p}.attn"));
+    let (fc1_value, fc1_gate) = load_fc1(tensors, ctx, &p, hidden, ffn);
     RefinerBlockWeights {
         wq,
         wk,
@@ -416,11 +418,11 @@ pub fn load_refiner_block(tensors: &dyn checkpoint::TensorSource, up: &mut Uploa
         wo,
         norm_q,
         norm_k,
-        norm1: load_dev(tensors, up, &format!("{p}.norm1.weight")),
-        norm2: load_dev(tensors, up, &format!("{p}.norm2.weight")),
+        norm1: load_dev(tensors, ctx, &format!("{p}.norm1.weight")),
+        norm2: load_dev(tensors, ctx, &format!("{p}.norm2.weight")),
         fc1_value,
         fc1_gate,
-        fc2: load_dev(tensors, up, &format!("{p}.ff.net.2.weight")),
+        fc2: load_dev(tensors, ctx, &format!("{p}.ff.net.2.weight")),
     }
 }
 
