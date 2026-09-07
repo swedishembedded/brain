@@ -1687,6 +1687,16 @@ impl MmapGguf {
         self.shapes.get(name).map(|s| s.as_slice())
     }
 
+    /// Every tensor's `(name, shape)`, in the file's declared order - what a
+    /// `dit_config_from_shapes`-style caller (flux2, wan, s3dit each have
+    /// their own) needs to derive an architecture's config from a real
+    /// checkpoint's own tensor shapes, header-only, no tensor bytes read.
+    /// One shared reader instead of the same `names().iter().map(...)`
+    /// duplicated per caller.
+    pub fn all_shapes(&self) -> Vec<(String, Vec<usize>)> {
+        self.order.iter().map(|n| (n.clone(), self.shapes.get(n).cloned().unwrap_or_default())).collect()
+    }
+
     /// A tensor's own ggml quant type, as a name (`"F32"`, `"BF16"`, `"Q4_K"`,
     /// …), if present.
     ///
@@ -3359,6 +3369,37 @@ mod tests {
         drop(f);
         let declared_after_truncation = declared_data_extent(&path).unwrap();
         assert_eq!(declared_after_truncation, declared, "header-only truncation must not change the computed extent");
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// `all_shapes` must agree, name-for-name and shape-for-shape, with
+    /// calling `shape(name)` for every entry in `names()` - the whole point
+    /// of having one shared reader is that it cannot silently diverge from
+    /// the two lower-level methods every caller used to compose by hand.
+    #[test]
+    fn all_shapes_matches_names_and_shape_for_every_tensor() {
+        let path = std::env::temp_dir().join(format!("brain-gguf-all-shapes-{}.gguf", std::process::id()));
+        let path = path.to_str().unwrap().to_string();
+        crate::gguf_write::write(
+            &path,
+            &[("general.architecture".to_string(), GgufValue::String("toy".to_string()))],
+            &[
+                crate::gguf_write::TensorOut { name: "a.weight".to_string(), shape: vec![4, 2], ty: T_F32, data: vec![0u8; 4 * 2 * 4] },
+                crate::gguf_write::TensorOut { name: "b.weight".to_string(), shape: vec![3], ty: T_F32, data: vec![0u8; 3 * 4] },
+            ],
+            32,
+        )
+        .unwrap();
+
+        let mg = MmapGguf::open(&path).unwrap();
+        let all = mg.all_shapes();
+        assert_eq!(all.len(), mg.names().len());
+        for (name, shape) in &all {
+            assert_eq!(mg.shape(name).map(<[usize]>::to_vec).as_deref(), Some(shape.as_slice()), "{name}");
+        }
+        assert!(all.iter().any(|(n, s)| n == "a.weight" && s == &[4, 2]));
+        assert!(all.iter().any(|(n, s)| n == "b.weight" && s == &[3]));
 
         std::fs::remove_file(&path).ok();
     }
