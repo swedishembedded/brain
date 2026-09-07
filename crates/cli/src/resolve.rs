@@ -330,6 +330,7 @@ const RESOLVER_MIGRATED_ARCHS: &[&str] = &[
     "nemotronasr",
     "sam2",
     "rrdbnet",
+    "timesfm3",
 ];
 
 fn dispatch_arch(arch: &str, rest: Vec<String>) {
@@ -781,7 +782,10 @@ mod tests {
     /// Every architecture this migration moved onto the resolver has an
     /// empty `weights_env` (so `ensure_env_weights` is already a no-op for
     /// it) AND is listed in [`RESOLVER_MIGRATED_ARCHS`] - so the two can
-    /// never drift apart as more architectures migrate.
+    /// never drift apart as more architectures migrate (and so the
+    /// `ARCH_HANDLERS` branch's `maybe_inject_default_weights` never runs for
+    /// one either - `sam2` is the one of these reachable through that
+    /// branch, via its own dedicated `_cli.rs`).
     #[test]
     fn resolver_migrated_archs_declare_no_weights_env() {
         for id in RESOLVER_MIGRATED_ARCHS {

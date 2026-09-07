@@ -611,13 +611,12 @@ pub const ARCHS: &[Arch] = &[
     // (not a transformers-family repo) so `hf` is empty; `modelstore::recipe`
     // routes the fetch by repo name instead, the same way it does for
     // Kronos's two repos. No GGUF anywhere, like `chronos2`/`kronos` above.
-    // The 3.0 pretrained
-    // weights are `timesfm-non-commercial-license-v1.0` (source is
-    // Apache-2.0) - `weights_env` still fetches them for free; the loader
-    // gates real use behind an explicit acknowledgement, not this table.
+    // The 3.0 pretrained weights are `timesfm-non-commercial-license-v1.0`
+    // (source is Apache-2.0). No `weights_env`: timesfm3 resolves its single
+    // `weights` role through `brain_modelstore::resolve`
+    // (`crates/timesfm3/src/spec.rs`), not `BRAIN_TIMESFM3`.
     arch!("timesfm3", "TimesFM-3 stacked mixing transformer (variate attention)", Forecast, Brain, "brain-timesfm3",
           default_ref: Some("google/timesfm-3.0-pytorch"),
-          weights_env: &[("BRAIN_TIMESFM3", "weights")],
           variants: &[
               Variant { reference: "google/timesfm-3.0-pytorch", params: 330_710_976, quants: &[] },
           ]),
