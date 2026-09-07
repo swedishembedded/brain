@@ -1462,6 +1462,37 @@ pub(crate) mod tests {
         assert_eq!(manifest.roles.len(), 4);
     }
 
+    /// `deepseek-ai/DeepSeek-OCR` is a passthrough family: `deepseek2ocr`
+    /// reads the upstream safetensors in place, so the finish step must write
+    /// a manifest and LEAVE THE WEIGHTS ALONE rather than rewriting tensors
+    /// and then deleting the shards, which is what every other
+    /// `transformers`-shaped repo's convert step does.
+    ///
+    /// The role is `dir`, not `weights`: that is the name
+    /// `deepseek2ocr::spec::Deepseek2ocrSpec` resolves, and a manifest naming
+    /// the other one would download correctly and then fail to resolve.
+    #[test]
+    fn ensure_passes_the_upstream_deepseek_ocr_checkpoint_through_under_its_own_role() {
+        let mut hub = FakeHub::new();
+        hub.add_file("deepseek-ai", "DeepSeek-OCR", "main", "config.json", br#"{"architectures":["DeepseekOCRForCausalLM"]}"#.to_vec());
+        for f in ["tokenizer.json", "tokenizer_config.json", "model.safetensors"] {
+            hub.add_file("deepseek-ai", "DeepSeek-OCR", "main", f, b"stub".to_vec());
+        }
+        let dir = store(&format!("supply-test-deepseekocr-hf-{}", std::process::id())).root().to_path_buf();
+        let supplier = StoreSupplier::new(Store::new(dir.clone()), Box::new(hub));
+        let e = exec();
+        // Reaching a resident-dispatch complaint means the fetch AND the
+        // finish step both completed; the checkpoint here is a stub.
+        let _ = supplier.ensure("deepseek-ai/DeepSeek-OCR", &e, &mut |_, _, _| {});
+
+        let repo = dir.join("deepseek-ai").join("DeepSeek-OCR");
+        let manifest: brain_modelstore::CompoundManifest = serde_json::from_slice(&std::fs::read(repo.join(brain_modelstore::MANIFEST_FILE)).unwrap()).unwrap();
+        assert_eq!(manifest.family, "deepseek2ocr");
+        assert_eq!(manifest.roles.get("dir").map(String::as_str), Some("."), "the resolver's role name, not `weights`: {:?}", manifest.roles);
+        assert!(repo.join("model.safetensors").exists(), "a passthrough family's upstream weights ARE what gets served, so they must survive convert");
+        assert!(!repo.join("model.brain.safetensors").exists(), "nothing is rewritten on this path");
+    }
+
     /// The whole point of the `wan` recipe: `Wan-AI/Wan2.1-T2V-1.3B` has a
     /// root `config.json` declaring `"model_type": "t2v"` and no
     /// `architectures`, so before `WanRecipe` existed this plan reached

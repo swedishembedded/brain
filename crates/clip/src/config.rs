@@ -376,8 +376,23 @@ impl ClipVisionConfig {
     ///    selects the exact-erf form. (What the ORIGINAL CLIP-L uses is
     ///    quick-GELU, and llama.cpp's own reading of `use_gelu = true` is its
     ///    `FFN_GELU`, the tanh approximation - so all three candidates are in
-    ///    play and no CLIP-internal reference tap exists to settle it. This
-    ///    tracks the file's own flag, which is the only defensible default.)
+    ///    play. This tracks the file's own flag.)
+    ///
+    ///    **The upstream source has since settled it, and it disagrees with
+    ///    this value.** `deepseek-ai/DeepSeek-OCR`'s own `deepencoder.py`
+    ///    defines `quick_gelu(x) = x * sigmoid(1.702 * x)` and applies it in
+    ///    `NoTPFeedForward::forward` (`self.fc2(quick_gelu(self.fc1(x)))`),
+    ///    which is the MLP of `NoTPTransformerBlock`, the block
+    ///    `NoTPTransformer` stacks for `VitModel` - i.e. exactly this tower.
+    ///    (The SAM tower is unaffected: `ImageEncoderViT`'s `Block` takes
+    ///    `act_layer: Type[nn.Module] = nn.GELU`, the exact-erf form, which
+    ///    is what `crates/sam1` already uses.) So this tower should be
+    ///    `TextAct::QuickGelu` and both import paths currently run it at
+    ///    `GeluErf`. Changing it is a real numerics change to an already-
+    ///    shipped path, so it is recorded here rather than applied in
+    ///    passing: it needs its own re-gate against the real-weight parity
+    ///    tests, which are skip-if-absent and did not run when this was
+    ///    found.
     ///  * `layer_norm_eps` is 1e-5 and that is NOT the file's key - see
     ///    [`Self::from_gguf`].
     pub fn deepseek_ocr() -> ClipVisionConfig {
