@@ -11,6 +11,15 @@
 //! and its own init distribution (passed into [`Pair::new`] as a closure, so
 //! existing seeds keep producing bit-identical adapters).
 //!
+//! Above the per-linear math sits the **fold** layer - [`Placement`] /
+//! [`fold_placements`] (add a loaded adapter's deltas into a name-keyed host
+//! tensor map) and [`fold_adapter_files`] (do that for a LIST of adapter
+//! files, in order, each at its own strength). Same split as [`Pair::new`]'s:
+//! the shared code owns the validation contract, the arithmetic and the
+//! ordering; the caller supplies what is genuinely architecture-specific -
+//! which tensors are targeted, the fused-tensor offsets, and how to load its
+//! own trained-adapter container.
+//!
 //! [`device_adapter`] is the OTHER LoRA family in this codebase - device-side
 //! param-list adapters (`.lora_a`/`.lora_b` tensors living in a `Model`'s own
 //! `ParamStore`, not a host-side `Pair`) used by `qwen3`/`qwen35moe`/
@@ -326,6 +335,239 @@ pub fn read_external_adapter(path: &str) -> Result<Vec<ExternalPair>, String> {
         });
     }
     Ok(out)
+}
+
+/// A name-keyed host tensor map: `name -> (shape, row-major data)`. Every
+/// architecture in this workspace already spells its own alias for exactly
+/// this type (`flux2::import::Tensors`, `wan::model::Tensors`,
+/// `vae::blocks::Tensors`, `s3dit::block::Tensors`, ...), so a shared fold can
+/// take one map and serve all of them without any crate changing its type.
+pub type Tensors = HashMap<String, (Vec<usize>, Vec<f32>)>;
+
+/// Where ONE [`Pair`]'s delta lands inside a base tensor.
+///
+/// Two cases, and only two, occur across this workspace's models:
+/// * an UNFUSED linear - the pair covers the whole `[out, in]` tensor
+///   ([`Placement::whole`]); and
+/// * a FUSED matrix - a checkpoint stores several linears stacked into one
+///   tensor (`flux2`'s `qkv`, `mlp.0`, `linear1`) or side by side
+///   (`linear2`'s column split), and the pair owns one rectangle of it
+///   ([`Placement::fused`]).
+///
+/// The rectangle is expressed exactly as [`Pair::delta_strided`] takes it, so
+/// this type is a description of a fold, not a second implementation of one.
+pub struct Placement<'a> {
+    /// The base tensor this delta is added into.
+    pub key: String,
+    pub pair: &'a Pair,
+    /// How many values the base tensor must hold IN TOTAL - the whole fused
+    /// tensor's size, not this rectangle's. It is the one number that catches
+    /// an adapter built for a different variant before anything is written.
+    pub elems: usize,
+    /// First row of the rectangle within the base tensor.
+    pub row0: usize,
+    /// The base tensor's row length (`pair.inn` for an unfused linear).
+    pub row_stride: usize,
+    /// First column of the rectangle within a row.
+    pub col0: usize,
+}
+
+impl<'a> Placement<'a> {
+    /// The whole of an unfused `[out, in]` tensor.
+    pub fn whole(key: impl Into<String>, pair: &'a Pair) -> Placement<'a> {
+        Placement { key: key.into(), pair, elems: pair.out * pair.inn, row0: 0, row_stride: pair.inn, col0: 0 }
+    }
+
+    /// One rectangle of a fused tensor holding `elems` values in rows of
+    /// `row_stride`, starting at `(row0, col0)`.
+    pub fn fused(key: impl Into<String>, pair: &'a Pair, elems: usize, row0: usize, row_stride: usize, col0: usize) -> Placement<'a> {
+        Placement { key: key.into(), pair, elems, row0, row_stride, col0 }
+    }
+}
+
+/// Add `scale·(B·A)` into `ts` for every placement, in list order.
+///
+/// **Every placement is validated against `ts` BEFORE anything is written**,
+/// so a rejected adapter leaves the map exactly as it was rather than half
+/// folded. That matters more here than the extra pass costs: the map is what a
+/// model is then built from, and a half-folded map builds a model that is
+/// neither the base nor the adapted one, from a call that returned an error
+/// the caller may well have logged and continued past.
+///
+/// An absent or mis-sized target is an error naming the tensor - never a skip.
+/// A loader that quietly drops a target returns base-model output from a run
+/// the user believes is adapted, which is the worst outcome this layer has.
+///
+/// An empty list is a byte-for-byte no-op and touches nothing.
+pub fn fold_placements(ts: &mut Tensors, scale: f32, ps: &[Placement<'_>]) -> Result<(), String> {
+    for p in ps {
+        match ts.get(&p.key) {
+            None => return Err(format!("lora: base tensor {} missing", p.key)),
+            Some((_, data)) if data.len() != p.elems => {
+                return Err(format!("lora: {} is {} elems, adapter expects {}", p.key, data.len(), p.elems))
+            }
+            Some(_) => {}
+        }
+    }
+    for p in ps {
+        let w = &mut ts.get_mut(&p.key).expect("validated above").1;
+        p.pair.delta_strided(scale, w, p.row0, p.row_stride, p.col0);
+    }
+    Ok(())
+}
+
+/// What one adapter's fold moved, for the caller to log. A run that claims to
+/// be adapted should be able to say how much of the model it actually changed,
+/// so a silent no-op cannot hide behind a clean exit.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FoldReport {
+    pub path: String,
+    /// True for a third-party `.safetensors` file, false for the caller's own
+    /// trained-adapter container.
+    pub external: bool,
+    /// Adapted linears (a full-coverage FLUX.2 klein-9b adapter has 112).
+    pub pairs: usize,
+    /// The file's rank, or the largest one if it is not uniform.
+    pub rank: usize,
+    /// The strength the delta was scaled by.
+    pub strength: f32,
+}
+
+impl std::fmt::Display for FoldReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let kind = if self.external { "external" } else { "brain" };
+        write!(f, "folded {kind} LoRA {} - {} linears, rank {}, strength {}", self.path, self.pairs, self.rank, self.strength)
+    }
+}
+
+/// Fold a LIST of adapter files into one tensor map - the multi-adapter
+/// primitive. `specs` is `(path, strength)` in the order the caller wants them
+/// applied.
+///
+/// ## Order
+///
+/// Adapters fold **in list order onto the same map**: adapter *n+1* reads the
+/// map adapter *n* already changed, so the fold is a composition, not a set.
+/// With additive low-rank deltas the arithmetic is
+/// `W' = W + Σᵢ sᵢ·(αᵢ/rᵢ)·Bᵢ·Aᵢ`, i.e. each strength multiplies only its own
+/// adapter's delta. Two adapters over the same linear therefore SUM there -
+/// they do not average, and the second does not replace the first - so
+/// stacking a face adapter at 1.0 with a style adapter at 1.0 moves that
+/// weight by the sum of both trained deltas, which is usually more than either
+/// was validated at. Lowering each one's strength is the dial for that; the
+/// order itself only reaches the result through float rounding, which is why
+/// it is defined rather than left to a hash map's iteration.
+///
+/// ## Format
+///
+/// A `.safetensors` path is a THIRD-PARTY (ai-toolkit / ComfyUI / diffusers)
+/// adapter over whole fused matrices and is handled here, by
+/// [`fold_external_into`]. Anything else is the architecture's own trained
+/// container and goes to `native`, which must load it and fold it at the given
+/// strength, returning `(adapted linears, rank)` for the report. Only the
+/// architecture knows its own block walk and fused offsets, so that half stays
+/// a closure - exactly as [`Pair::new`] keeps the init distribution caller-side.
+///
+/// `arch` names the architecture in error messages ("...which this FLUX.2
+/// variant does not have").
+///
+/// An empty `specs` is a byte-for-byte no-op: nothing is read, nothing is
+/// loaded, and the map is not touched.
+pub fn fold_adapter_files(
+    ts: &mut Tensors,
+    specs: &[(&str, f32)],
+    arch: &str,
+    mut native: impl FnMut(&str, &mut Tensors, f32) -> Result<(usize, usize), String>,
+) -> Result<Vec<FoldReport>, String> {
+    let mut out = Vec::with_capacity(specs.len());
+    for &(path, strength) in specs {
+        if path.ends_with(".safetensors") {
+            let info = fold_external_into(path, ts, strength, arch)?;
+            out.push(FoldReport { path: path.to_string(), external: true, pairs: info.pairs, rank: info.rank, strength });
+        } else {
+            let (pairs, rank) = native(path, ts, strength)?;
+            out.push(FoldReport { path: path.to_string(), external: false, pairs, rank, strength });
+        }
+    }
+    Ok(out)
+}
+
+/// What [`fold_external_into`] folded.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ExternalFold {
+    /// Adapted linears.
+    pub pairs: usize,
+    /// The file's rank, or the largest one if it is not uniform.
+    pub rank: usize,
+    /// The `strength` the delta was scaled by.
+    pub scale: f32,
+}
+
+/// Fold a THIRD-PARTY (ai-toolkit / ComfyUI / diffusers) LoRA `.safetensors`
+/// into a base tensor map, so an unchanged generation run produces
+/// adapter-conditioned output.
+///
+/// This is the other direction from an architecture's own trained container:
+/// that one holds per-slice pairs over `q`/`k`/`v` separately, while a
+/// third-party file adapts the FUSED matrices - one shared `A` for the whole
+/// `qkv` - which is a strictly simpler fold, because every target is then a
+/// whole tensor at offset 0 and [`Pair::delta`] is the exact operation.
+///
+/// ## Semantics, taken from the reference implementations
+///
+/// `W += strength · (alpha/r) · B·A`, matching ComfyUI's weight adapter
+/// (`comfy/weight_adapter/lora.py`: `weight += (strength * alpha) * mm(mat1,
+/// mat2)` with `mat1` the up/`lora_B` and `mat2` the down/`lora_A`, and
+/// `alpha = v[2]/rank` or `1.0` when no `.alpha` tensor is present) and
+/// ai-toolkit's trainer (`toolkit/network_mixins.py`: `scale = alpha /
+/// lora_dim`, alpha initialised to the rank and stripped from PEFT-format
+/// saves). `B·A` needs no transpose: both store PyTorch `nn.Linear` weights
+/// `[out, in]`, which is already brain's row-major manifest layout.
+///
+/// `strength` is ComfyUI's `strength_model` - a user dial, default 1.0, NOT a
+/// value read from the file.
+///
+/// `arch` names the architecture in the "this adapter targets a tensor you do
+/// not have" message, which is the message a wrong-base-model adapter
+/// produces and therefore the one that has to say which base was expected.
+///
+/// Every pair is validated against the base map BEFORE anything is written
+/// ([`fold_placements`]), so a rejected adapter leaves the weights untouched
+/// rather than half folded.
+pub fn fold_external_into(path: &str, ts: &mut Tensors, strength: f32, arch: &str) -> Result<ExternalFold, String> {
+    let pairs = read_external_adapter(path)?;
+    // A key that matches nothing is a hard error naming the tensor: silently
+    // skipping it would return base-model output from a run the user believes
+    // is adapted. Checked here rather than left to `fold_placements` because
+    // this layer can say WHY a name is unknown - the adapter is for another
+    // model - and can name the adapter's own stem alongside the base key.
+    for p in &pairs {
+        match ts.get(&p.base_key) {
+            None => {
+                return Err(format!(
+                    "lora {path}: adapter targets '{}' (from '{}'), which this {arch} variant \
+                     does not have - wrong base model for this adapter?",
+                    p.base_key, p.stem
+                ))
+            }
+            Some((shape, _)) if shape.as_slice() != [p.out, p.inn] => {
+                return Err(format!(
+                    "lora {path}: '{}' is {shape:?}, but the adapter for it is [{}, {}]",
+                    p.base_key, p.out, p.inn
+                ))
+            }
+            Some(_) => {}
+        }
+    }
+    let rank = pairs.iter().map(|p| p.r).max().unwrap_or(0);
+    // Each pair carries its own `alpha/r` multiplier, so they cannot share one
+    // `fold_placements` call's single scale - one call each, in file order.
+    for p in &pairs {
+        let pair = p.as_pair();
+        fold_placements(ts, strength * p.alpha_mult, &[Placement::whole(p.base_key.clone(), &pair)])
+            .map_err(|e| format!("lora {path}: {e}"))?;
+    }
+    Ok(ExternalFold { pairs: pairs.len(), rank, scale: strength })
 }
 
 /// In-place bias-corrected Adam (β 0.9/0.999, eps 1e-8, no weight decay).
