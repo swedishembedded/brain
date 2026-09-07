@@ -234,17 +234,76 @@ pub(crate) fn model_for_arch(arch: &str) -> Option<&'static str> {
     ARCH_TO_MODEL.iter().find(|(id, _)| *id == arch).map(|(_, model)| *model)
 }
 
+/// The closed verb vocabulary of an [`ARCH_HANDLERS`] entry, in the form
+/// [`crate::args::canon_verb`] normalizes an input verb to -- checked
+/// BEFORE [`dispatch_arch`] acquires any weights, so a mistyped verb (`brain
+/// flux2 t2i`: "t2i" is not a real flux2 verb, the real one is
+/// `generate`/`infer`) reports "unknown subcommand" instead of first trying
+/// to pull a multi-GB default checkpoint for a command that could never run.
+///
+/// Populated only for the handlers whose `weights_env` makes that fetch
+/// real (non-empty, per `brain_arch::by_id`): for every other
+/// `ARCH_HANDLERS` entry `ensure_env_weights` is already a guaranteed
+/// instant no-op, so there is nothing expensive to guard and adding a row
+/// here would just be a second verb list to keep in sync with each
+/// handler's own match arms for no behavioral gain. `qwen3tts` and `sam2`
+/// are the two exceptions among THOSE: both forward any verb their own match
+/// arm does not recognize to the generic capability dispatcher
+/// (`crate::caps_cli::run_do`) instead of rejecting it outright, so there is
+/// no fixed vocabulary to check them against here either -- they stay
+/// ungated, unchanged from before this table existed.
+const ARCH_HANDLER_VERBS: &[(&str, &[&str])] = &[
+    ("flux2", &["generate", "infer", "finetune"]),
+    // Deliberately NOT `infer` -- `wan_cli::run_wan`'s own module doc: that
+    // canonicalizes from `generate`/`gen`/`sample`, which would inject a
+    // single `--weights` flag onto a command that takes four weight roles.
+    ("wan", &["t2v", "text2video", "finetune"]),
+    ("ltxv", &["t2v", "text2video", "upscale", "v2v", "dfr"]),
+];
+
+/// Whether `verb` is one `arch` is known to accept, checked before any
+/// weight acquisition is attempted.
+///
+/// `Some(true)`/`Some(false)` for an architecture this gate has an opinion
+/// about ([`ARCH_HANDLER_VERBS`], or an [`ARCH_TO_MODEL`] architecture
+/// checked against its own static capability manifest -- no weights loaded,
+/// the same manifest `brain caps` prints and `run_do` itself validates the
+/// action name against, just consulted earlier). `None` for everything
+/// else: no opinion, so the caller must treat the verb as fine and proceed
+/// exactly as it did before this gate existed.
+fn verb_is_known(arch: &str, verb: &str) -> Option<bool> {
+    if let Some((_, verbs)) = ARCH_HANDLER_VERBS.iter().find(|(id, _)| *id == arch) {
+        return Some(verbs.contains(&crate::args::canon_verb(verb)));
+    }
+    if let Some(model) = model_for_arch(arch) {
+        return Some(crate::catalog::manifests().iter().any(|m| m.model == model && m.actions.iter().any(|a| a.name == verb)));
+    }
+    None
+}
+
+/// Whether [`dispatch_arch`] should attempt to acquire `arch`'s weights for
+/// this invocation at all -- the single gate in front of
+/// `ensure_env_weights`'s network/filesystem work.
+///
+/// `false` for `-h`/`--help` (unchanged: help text must never block on a
+/// fetch, or hang, if `BRAIN_MODELS_DIR` points somewhere with no local
+/// weights and the network is slow/unreachable, just to print itself), for
+/// no verb at all (bare `brain flux2` is exactly as help-shaped), and now
+/// also for a verb [`verb_is_known`] says the handler will reject -- the
+/// real bug this closes: `brain flux2 t2i` used to fetch flux2's default
+/// checkpoint before `flux2_cli::run_flux2`'s own dispatch ever got a
+/// chance to say "unknown subcommand t2i".
+fn wants_weight_acquisition(arch: &str, rest: &[String]) -> bool {
+    if rest.iter().any(|a| a == "-h" || a == "--help") {
+        return false;
+    }
+    match rest.first() {
+        None => false,
+        Some(verb) => verb_is_known(arch, verb) != Some(false),
+    }
+}
+
 fn dispatch_arch(arch: &str, rest: Vec<String>) {
-    // Unconditional and first: covers BOTH halves of this resolver.
-    // `ARCH_TO_MODEL` architectures have no `--weights` flag at all (`run_do`'s
-    // params are the action's own schema) and always need this; a handful of
-    // `ARCH_HANDLERS` architectures (`qwen3tts`) ALSO read `BRAIN_*` env vars
-    // as their own flags' defaults (`--ckpt` defaults to `$BRAIN_QWEN3TTS_CKPT`)
-    // rather than taking `--weights` the way `maybe_inject_default_weights`
-    // below expects, so this can't be scoped to just the `ARCH_TO_MODEL`
-    // branch. No-ops instantly for every architecture with an empty
-    // `weights_env` (everything else today).
-    //
     // Skipped for `-h`/`--help`: help text must never block on a network
     // fetch (or hang, if `BRAIN_MODELS_DIR` points somewhere with no local
     // weights and the network is slow/unreachable) just to print itself.
@@ -253,12 +312,22 @@ fn dispatch_arch(arch: &str, rest: Vec<String>) {
         // Weight-load progress for this command's own runs, named after the
         // architecture (`ltxv load ...`). Infra verbs keep their own output.
         crate::load_line::install(arch);
-        if !weights_already_named(arch, &rest) {
-            crate::supply::ensure_env_weights(arch);
-        }
+    }
+    // Unconditional (past the gate above) and first: covers BOTH halves of
+    // this resolver. `ARCH_TO_MODEL` architectures have no `--weights` flag
+    // at all (`run_do`'s params are the action's own schema) and always
+    // need this; a handful of `ARCH_HANDLERS` architectures (`qwen3tts`)
+    // ALSO read `BRAIN_*` env vars as their own flags' defaults (`--ckpt`
+    // defaults to `$BRAIN_QWEN3TTS_CKPT`) rather than taking `--weights` the
+    // way `maybe_inject_default_weights` below expects, so this can't be
+    // scoped to just the `ARCH_TO_MODEL` branch. No-ops instantly for every
+    // architecture with an empty `weights_env` (everything else today).
+    let attempt_fetch = wants_weight_acquisition(arch, &rest);
+    if attempt_fetch && !weights_already_named(arch, &rest) {
+        crate::supply::ensure_env_weights(arch);
     }
     if let Some((_, handler)) = ARCH_HANDLERS.iter().find(|(id, _)| *id == arch) {
-        let rest = maybe_inject_default_weights(arch, rest);
+        let rest = if attempt_fetch { maybe_inject_default_weights(arch, rest) } else { rest };
         return handler(&rest);
     }
     if let Some((_, model)) = ARCH_TO_MODEL.iter().find(|(id, _)| *id == arch) {
@@ -777,5 +846,110 @@ mod tests {
             }
             assert!(!has_model_row, "{id:?} is in both ARCH_HANDLERS and ARCH_TO_MODEL");
         }
+    }
+
+    /// The reported bug: `brain flux2 t2i` ("t2i" is not a real flux2 verb --
+    /// the real one is `generate`/`infer`) printed "not pulled: BRAIN_FLUX2_DIT,
+    /// ... unset and no local copy of black-forest-labs/FLUX.2-klein-4B" and
+    /// exited 1, because `dispatch_arch` ran `ensure_env_weights`
+    /// unconditionally before ever reaching `flux2_cli::run_flux2`'s own
+    /// "unknown subcommand" branch. `verb_is_known` is the gate that gets
+    /// checked FIRST now: `Some(false)` for a verb the handler will reject,
+    /// so `wants_weight_acquisition` (below) can skip the fetch entirely
+    /// with zero filesystem/network side effects.
+    #[test]
+    fn verb_is_known_rejects_flux2s_invalid_verb() {
+        assert_eq!(verb_is_known("flux2", "t2i"), Some(false));
+        assert_eq!(verb_is_known("flux2", "bogus"), Some(false));
+    }
+
+    /// flux2's real verbs (`generate`/`infer`/`finetune`) and their
+    /// `canon_verb` synonyms (`gen`/`sample` -> infer, `fine-tune` ->
+    /// finetune) must still be recognized -- this is the regression guard: a
+    /// gate that is too strict would turn a real invocation into a false
+    /// "unknown subcommand".
+    #[test]
+    fn verb_is_known_accepts_flux2s_real_verbs_and_synonyms() {
+        for v in ["generate", "infer", "finetune", "gen", "sample", "fine-tune"] {
+            assert_eq!(verb_is_known("flux2", v), Some(true), "flux2 should accept {v:?}");
+        }
+    }
+
+    /// `wan` deliberately does NOT accept the generic `generate`/`infer`
+    /// spelling (its own module doc: those canonicalize to "infer", which
+    /// would wrongly inject a single `--weights` flag onto a command that
+    /// takes four weight roles) -- only `t2v`/`text2video` and `finetune`.
+    /// The regression guard for the OTHER architecture this bug class hits:
+    /// a bogus wan verb must be rejected too, and wan's real verbs must stay
+    /// accepted.
+    #[test]
+    fn verb_is_known_matches_wans_own_closed_verb_set() {
+        assert_eq!(verb_is_known("wan", "t2i"), Some(false));
+        for v in ["t2v", "text2video", "finetune"] {
+            assert_eq!(verb_is_known("wan", v), Some(true), "wan should accept {v:?}");
+        }
+        // `generate`/`infer` canonicalize to "infer", which wan's own CLI
+        // does not accept -- must stay rejected, not silently allowed.
+        assert_eq!(verb_is_known("wan", "generate"), Some(false));
+        assert_eq!(verb_is_known("wan", "infer"), Some(false));
+    }
+
+    /// An architecture this gate has no opinion about (no `weights_env`, so
+    /// `ensure_env_weights` is already a guaranteed instant no-op -- nothing
+    /// expensive to guard) is untouched: `None`, not `Some(false)`, so
+    /// `wants_weight_acquisition` treats it exactly as before this gate
+    /// existed.
+    #[test]
+    fn verb_is_known_has_no_opinion_on_an_ungated_handler() {
+        assert_eq!(verb_is_known("gpt2", "t2i"), None);
+        assert_eq!(verb_is_known("gpt2", "train"), None);
+    }
+
+    /// The actual gate `dispatch_arch` consults before calling
+    /// `ensure_env_weights`: this is the function whose `false` means "zero
+    /// filesystem/network side effects" for the reported bug. Exercised
+    /// directly (rather than through `dispatch_arch`, which calls
+    /// `std::process::exit` on every real code path) so a regression here
+    /// fails a normal test instead of killing the test process.
+    #[test]
+    fn wants_weight_acquisition_skips_the_fetch_for_an_unknown_verb() {
+        assert!(!wants_weight_acquisition("flux2", &s(&["t2i"])));
+        assert!(!wants_weight_acquisition("wan", &s(&["t2i"])));
+        // No verb at all (bare `brain flux2`) is help-shaped too -- must not
+        // block on a fetch just to print the handler's own usage.
+        assert!(!wants_weight_acquisition("flux2", &s(&[])));
+        assert!(!wants_weight_acquisition("flux2", &s(&["--help"])));
+    }
+
+    /// The regression guard: every real verb (and its `canon_verb`
+    /// synonyms) must still reach the fetch gate exactly as before this
+    /// change.
+    #[test]
+    fn wants_weight_acquisition_still_proceeds_for_every_real_verb() {
+        for v in ["generate", "infer", "finetune", "gen", "sample", "fine-tune"] {
+            assert!(wants_weight_acquisition("flux2", &s(&[v])), "flux2 {v:?} should still attempt weight acquisition");
+        }
+        for v in ["t2v", "text2video", "finetune"] {
+            assert!(wants_weight_acquisition("wan", &s(&[v])), "wan {v:?} should still attempt weight acquisition");
+        }
+        // An arch with no verb table entry is unaffected: unchanged
+        // (pre-existing) behavior, gated only by help/no-verb.
+        assert!(wants_weight_acquisition("gpt2", &s(&["t2i"])));
+        assert!(wants_weight_acquisition("gpt2", &s(&["train"])));
+    }
+
+    /// `ARCH_TO_MODEL` architectures validate against their own capability
+    /// manifest's action names (no separate hardcoded list) -- `s3dit`'s
+    /// manifest is a real, populated one to check this against.
+    #[test]
+    fn verb_is_known_validates_arch_to_model_verbs_against_the_manifest() {
+        assert_eq!(verb_is_known("s3dit", "not-a-real-action"), Some(false));
+        let model = model_for_arch("s3dit").expect("s3dit has an ARCH_TO_MODEL row");
+        let real_action = crate::catalog::manifests()
+            .into_iter()
+            .find(|m| m.model == model)
+            .and_then(|m| m.actions.first().map(|a| a.name.clone()))
+            .expect("s3dit's manifest should list at least one action");
+        assert_eq!(verb_is_known("s3dit", &real_action), Some(true));
     }
 }
