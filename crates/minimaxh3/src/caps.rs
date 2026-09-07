@@ -344,13 +344,16 @@ pub fn text_conditioning_stub(prompt: &str, text_dim: u32, seed: u64) -> pipelin
 }
 
 /// Whether `paths` names a checkout with a real Qwen3-VL text encoder to
-/// load - both `text_encoder/config.json` and `tokenizer/tokenizer.json`
-/// present (the two files [`build_text_encoder`] reads first). A cheap,
-/// pre-load check so a caller can fall back to
-/// [`text_conditioning_stub`] without paying for (and failing on) a partial
-/// checkout.
+/// load - `text_encoder/config.json`, `tokenizer/tokenizer.json`, AND (via
+/// [`checkpoint::safetensors::has_model_weights`], which checks every
+/// shard a sharded index names is actually present, not just that the
+/// index exists) the encoder's own weight shards. A cheap, pre-load check
+/// so a caller can fall back to [`text_conditioning_stub`] without paying
+/// for (and failing partway through) a partial checkout.
 pub fn has_real_text_encoder(paths: &Paths) -> bool {
-    std::path::Path::new(&paths.text_encoder).join("config.json").is_file() && std::path::Path::new(&paths.tokenizer).join("tokenizer.json").is_file()
+    std::path::Path::new(&paths.text_encoder).join("config.json").is_file()
+        && std::path::Path::new(&paths.tokenizer).join("tokenizer.json").is_file()
+        && checkpoint::safetensors::has_model_weights(std::path::Path::new(&paths.text_encoder))
 }
 
 /// A short, fixed context length for one prompt - MiniMax-H3 prompts are a
@@ -922,6 +925,39 @@ mod tests {
         assert_ne!(a.embeds, c.embeds, "a different prompt must change the stub");
         let d = text_conditioning_stub("a cat on a skateboard", 12, 8);
         assert_ne!(a.embeds, d.embeds, "a different seed must change the stub");
+    }
+
+    /// The real Qwen3-VL text encoder, loaded from a real `BRAIN_MINIMAXH3_DIR`
+    /// checkout, must actually produce real, finite, non-trivial conditioning
+    /// - not the stub, and [`text_conditioning`] must pick the real path over
+    /// the stub automatically once weights exist. This is a genuinely large
+    /// load (tens of GB); skips cleanly, like every other real-weight test in
+    /// this crate, when the checkout is not present.
+    #[test]
+    fn text_conditioning_uses_the_real_encoder_when_weights_are_present() {
+        let Ok(root) = std::env::var("BRAIN_MINIMAXH3_DIR") else {
+            brain_testutil::skip("BRAIN_MINIMAXH3_DIR not set - no local MiniMax-H3 checkout to encode from");
+            return;
+        };
+        let paths = Paths::resolve(&root);
+        if !has_real_text_encoder(&paths) {
+            brain_testutil::skip(&format!("{}/config.json or {}/tokenizer.json not found - text encoder not (yet) downloaded", paths.text_encoder, paths.tokenizer));
+            return;
+        }
+
+        let text = text_conditioning(&paths, "a red fox running through snow at dusk", 5120, 3).unwrap_or_else(|e| panic!("real text conditioning: {e}"));
+        assert!(!text.embeds.is_empty(), "real encoder must produce non-empty embeds");
+        assert_eq!(text.embeds.len() % 5120, 0, "embeds must be a whole number of text_dim=5120 rows");
+        let num_tokens = text.embeds.len() / 5120;
+        assert_eq!(text.token_tags.len(), num_tokens);
+        assert!(text.token_tags.iter().all(|&t| t == crate::config::TAG_TEXT), "a plain t2va prompt has no image rows");
+        assert!(text.embeds.iter().all(|v| v.is_finite()), "real encoder output must be finite");
+        assert!(text.embeds.iter().any(|&v| v != 0.0), "real encoder output must not be trivially all-zero");
+        // Not the stub's own distribution (mean-0, scale-0.5 Gaussian) -
+        // a real hidden state at this depth has a very different, much
+        // larger-magnitude spread; a loose sanity bound, not a parity check.
+        let max_abs = text.embeds.iter().fold(0.0f32, |m, &v| m.max(v.abs()));
+        assert!(max_abs > 1.0, "real hidden state magnitude looks stub-like (max_abs={max_abs})");
     }
 
     /// `av_outcome`'s wire format round-trips through the shared clip codec,

@@ -145,8 +145,7 @@ mod tests {
     /// own "not downloaded yet" skip check agrees with what the import
     /// function underneath it will actually accept.
     fn has_weights(dir: &str) -> bool {
-        let d = std::path::Path::new(dir);
-        d.join("model.safetensors").is_file() || d.join("diffusion_pytorch_model.safetensors").is_file() || d.join("model.safetensors.index.json").is_file()
+        checkpoint::safetensors::has_model_weights(std::path::Path::new(dir))
     }
 
     /// `import_audio_vae_decoder` against the real checkpoint, when
