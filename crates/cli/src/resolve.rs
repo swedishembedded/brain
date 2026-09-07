@@ -318,6 +318,7 @@ fn wants_weight_acquisition(arch: &str, rest: &[String]) -> bool {
 /// Grown by one entry per architecture as it migrates.
 const RESOLVER_MIGRATED_ARCHS: &[&str] = &[
     "flux2",
+    "wan",
     "qwen3tts",
     "kronos",
     "ltxv",

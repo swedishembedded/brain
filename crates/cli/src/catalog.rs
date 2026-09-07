@@ -223,6 +223,9 @@ fn empty_assembly() -> Assembly {
 /// building from `empty_assembly` here (a pre-existing gap this migration
 /// does not change).
 fn resolver_spec_for(model_id: &str) -> Option<(&'static str, Box<dyn ArchSpec>)> {
+    if model_id == s3dit::caps::MODEL {
+        return Some(("s3dit", Box::new(s3dit::spec::S3ditSpec)));
+    }
     if model_id == cosyvoice::caps::MODEL {
         return Some(("cosyvoice", Box::new(cosyvoice::spec::CosyVoiceSpec)));
     }
