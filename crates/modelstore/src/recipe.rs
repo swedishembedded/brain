@@ -85,8 +85,9 @@ pub trait ArtifactRecipe: Send + Sync {
     /// signature, `TransformersRecipe`'s "always matches" catch-all
     /// aside) -- override for the two real exceptions: [`FilesRecipe`]
     /// reports [`Specificity::RepoPinned`] when its `repos` field claimed
-    /// the match, and [`TransformersRecipe`] reports
-    /// [`Specificity::CatchAll`]. See [`select`] for how this is used.
+    /// the match and [`Specificity::NamedFiles`] otherwise, and
+    /// [`TransformersRecipe`] reports [`Specificity::CatchAll`]. See
+    /// [`select`] for how this is used.
     fn specificity(&self) -> Specificity {
         Specificity::Shape
     }
@@ -94,21 +95,30 @@ pub trait ArtifactRecipe: Send + Sync {
 
 /// The precedence tier a recipe's [`ArtifactRecipe::matches`] success
 /// carries, checked explicitly by [`select`] rather than left to
-/// [`recipes`]' declaration order. `RepoPinned` outranks `Shape` -- the one
-/// deliberate tiebreak this store makes -- because an exact `vendor/repo`
-/// pin ([`FilesRecipe::repos`]) is a stronger claim than a listing shape two
-/// unrelated families can share by accident (Z-Image's four role dirs are
-/// also exactly official FLUX.2's). `CatchAll` is lower than both, and is
-/// [`TransformersRecipe`]'s alone: it always matches, so it must never
-/// out-rank -- or "tie" with -- a more specific recipe, and there is by
-/// construction exactly one recipe at that tier, so it can never itself be
-/// ambiguous.
+/// [`recipes`]' declaration order. The ordering is "how narrowly did this
+/// recipe have to describe the repo to claim it":
+///
+/// * `RepoPinned` -- an exact `vendor/repo` name ([`FilesRecipe::repos`]).
+///   The strongest claim, because a listing shape two unrelated families can
+///   share by accident cannot override it (Z-Image's four role dirs are also
+///   exactly official FLUX.2's).
+/// * `NamedFiles` -- a set of specific upstream release FILENAMES
+///   ([`FilesRecipe::signature`]). Narrower than a shape scan, which is why
+///   it outranks one: `deepseek2ocr-gguf` names `ggml-org/DeepSeek-OCR-GGUF`'s
+///   two files, while [`GgufRecipe`] only observes that the repo contains
+///   `.gguf` at all.
+/// * `Shape` -- an extension or directory-layout scan over the listing.
+/// * `CatchAll` -- [`TransformersRecipe`]'s alone: it always matches, so it
+///   must never out-rank -- or "tie" with -- a more specific recipe, and
+///   there is by construction exactly one recipe at that tier, so it can
+///   never itself be ambiguous.
 ///
 /// Two recipes at the SAME tier matching the same listing is not resolved by
 /// order at all any more -- see [`crate::plan::PlanError::AmbiguousRecipe`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Specificity {
     RepoPinned,
+    NamedFiles,
     Shape,
     CatchAll,
 }
@@ -433,7 +443,14 @@ impl ArtifactRecipe for FilesRecipe {
 
     fn specificity(&self) -> Specificity {
         if self.repos.is_empty() {
-            Specificity::Shape
+            // Never `Shape`: a `signature` is a set of specific upstream
+            // release filenames (see this type's own docs), which is a
+            // stronger claim than a shape matcher scanning for an
+            // extension. `ggml-org/DeepSeek-OCR-GGUF` is the case that
+            // proves it -- `deepseek2ocr-gguf` names both of that repo's
+            // files, `GgufRecipe` merely notices the repo has `.gguf` in
+            // it, and at one tier the two tie and the pull refuses.
+            Specificity::NamedFiles
         } else {
             Specificity::RepoPinned
         }
@@ -1101,6 +1118,49 @@ mod tests {
         assert_eq!(picked.id(), "pinned");
     }
 
+    /// A [`FilesRecipe`] keys on specific named release artifacts, so its
+    /// claim is stronger than a broad shape matcher's even when it names no
+    /// `repos` -- otherwise the two tie and `select` refuses a repo that has
+    /// exactly one right answer. Loses to a `repos` pin, which is stronger
+    /// still.
+    #[test]
+    fn select_prefers_a_named_files_match_over_a_shape_match() {
+        const NAMED: FilesRecipe =
+            FilesRecipe { id: "named", family: "named", signature: &["distinctive.bin"], repos: &[], files: &["distinctive.bin"], roles: &[("weights", "distinctive.bin")] };
+        let r = ModelRef::new("some", "repo", None);
+        let listing = vec!["distinctive.bin".to_string()];
+
+        let candidates: Vec<Box<dyn ArtifactRecipe>> = vec![Box::new(AlwaysMatches("shape-only", Specificity::Shape)), Box::new(NAMED)];
+        assert_eq!(select(candidates, &r, &listing).unwrap().id(), "named");
+
+        let candidates: Vec<Box<dyn ArtifactRecipe>> = vec![Box::new(AlwaysMatches("pinned", Specificity::RepoPinned)), Box::new(NAMED)];
+        assert_eq!(select(candidates, &r, &listing).unwrap().id(), "pinned", "an exact repo pin is still the stronger claim");
+    }
+
+    /// Every [`FILES_RECIPES`] row must be reachable through the REAL
+    /// registry via [`select`] on a listing carrying its own signature --
+    /// not merely be the first `matches` hit. A row that ties with another
+    /// recipe is a `pull` that refuses a repo with one right answer, which
+    /// is exactly how `ggml-org/DeepSeek-OCR-GGUF` broke against the generic
+    /// `gguf` recipe.
+    #[test]
+    fn every_files_recipe_row_is_unambiguously_selected_from_the_real_registry() {
+        for row in FILES_RECIPES {
+            let listing: Vec<String> = row.signature.iter().map(|s| s.to_string()).chain(row.files.iter().map(|s| s.to_string())).collect();
+            let r = match row.repos.first() {
+                Some(pinned) => {
+                    let (vendor, repo) = pinned.split_once('/').expect("a pinned repo is vendor/repo");
+                    ModelRef::new(vendor, repo, None)
+                }
+                None => ModelRef::new("some-vendor", "some-repo", None),
+            };
+            match select(recipes(), &r, &listing) {
+                Ok(picked) => assert_eq!(picked.id(), row.id, "{} claims its own signature", row.id),
+                Err(e) => panic!("{} is not selectable from the real registry: {e}", row.id),
+            }
+        }
+    }
+
     /// The exact `Wan-AI/Wan2.1-T2V-1.3B` file listing, confirmed live via
     /// the HF API this session -- NOT the local checkout, which is a
     /// deliberately partial `allow_patterns` download and therefore no
@@ -1384,8 +1444,11 @@ mod tests {
         let listing: Vec<String> = ["README.md", "DeepSeek-OCR-Q8_0.gguf", "mmproj-DeepSeek-OCR-Q8_0.gguf"].into_iter().map(String::from).collect();
         let hub = crate::hub::FakeHub::new();
         let r = ModelRef::new("ggml-org", "DeepSeek-OCR-GGUF", None);
-        let recipe = recipes().into_iter().find(|r| r.id() == "deepseek2ocr-gguf").unwrap();
-        assert!(recipe.matches(&r, &listing));
+        // Through `select`, not `recipes().find(...)`: a bare `find` is
+        // first-match-wins and would pass even while the real planner
+        // refuses this repo as ambiguous.
+        let recipe = select(recipes(), &r, &listing).unwrap();
+        assert_eq!(recipe.id(), "deepseek2ocr-gguf");
         let artifacts = recipe.artifacts(&r, &listing, &hub).unwrap();
         let files: Vec<&str> = artifacts.iter().map(|a| a.file.as_str()).collect();
         assert_eq!(files, ["DeepSeek-OCR-Q8_0.gguf", "mmproj-DeepSeek-OCR-Q8_0.gguf"]);
@@ -1537,7 +1600,7 @@ mod tests {
     fn a_named_gguf_pair_still_routes_to_its_own_recipe() {
         let listing: Vec<String> = ["README.md", "DeepSeek-OCR-Q8_0.gguf", "mmproj-DeepSeek-OCR-Q8_0.gguf"].into_iter().map(String::from).collect();
         let r = ModelRef::new("ggml-org", "DeepSeek-OCR-GGUF", None);
-        assert_eq!(recipes().into_iter().find(|x| x.matches(&r, &listing)).unwrap().id(), "deepseek2ocr-gguf");
+        assert_eq!(select(recipes(), &r, &listing).unwrap().id(), "deepseek2ocr-gguf");
         let hub = crate::hub::FakeHub::new();
         let err = GgufRecipe.artifacts(&r, &listing, &hub).unwrap_err().to_string();
         assert!(err.contains("Q8_0"), "the ambiguity must name the quantization two files claim: {err}");
