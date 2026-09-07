@@ -101,6 +101,18 @@ pub fn run_caps(argv: &[String]) -> i32 {
 /// from `brain <architecture> <action> ...` (the arch id translated to its
 /// model id first) before calling this.
 pub fn run_do(argv: &[String]) -> i32 {
+    run_do_impl(argv, None)
+}
+
+/// [`run_do`], from an already-resolved [`capability::Assembly`] instead of
+/// the placeholder empty one every other model's provider still ignores -
+/// what `crate::resolver_cli::run_generic_migrated` calls once it has
+/// resolved a migrated architecture's weights.
+pub fn run_do_with_assembly(argv: &[String], assembly: &capability::Assembly) -> i32 {
+    run_do_impl(argv, Some(assembly))
+}
+
+fn run_do_impl(argv: &[String], assembly: Option<&capability::Assembly>) -> i32 {
     let (model, action) = match (argv.first(), argv.get(1)) {
         (Some(m), Some(a)) if !m.starts_with("--") && !a.starts_with("--") => (m.clone(), a.clone()),
         _ => {
@@ -112,7 +124,11 @@ pub fn run_do(argv: &[String]) -> i32 {
     // resolves to the canonical `brain/<name>` before dispatch, but is never
     // itself what gets registered or listed (see modelref::alias's module docs).
     let model = brain_modelref::alias::canonical(&model).map(str::to_string).unwrap_or(model);
-    let reg = match crate::catalog::provider(&model).map(|p| {
+    let built = match assembly {
+        Some(a) => crate::catalog::provider_from_assembly(&model, a),
+        None => crate::catalog::provider(&model),
+    };
+    let reg = match built.map(|p| {
         let mut r = Registry::new();
         r.register(p);
         r

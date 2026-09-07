@@ -18,7 +18,7 @@
 
 use std::path::{Path, PathBuf};
 
-use brain_modelstore::{default_root, models_dir_in, publish_data_root};
+use brain_modelstore::{default_root, explicit_models_root, models_dir_in, publish_data_root};
 
 fn set(key: &str, value: Option<&str>) {
     unsafe {
@@ -46,12 +46,15 @@ fn the_data_root_override_outranks_the_environment_and_clearing_it_restores_it()
     publish_data_root(None);
 
     // 1. No override: BRAIN_MODELS_DIR wins, exactly as before this existed.
+    //    `explicit_models_root` agrees -- BRAIN_MODELS_DIR is one of ITS tiers too.
     assert_eq!(default_root(), Some(PathBuf::from("/env/models")));
+    assert_eq!(explicit_models_root(), Some(PathBuf::from("/env/models")));
 
     // 2. The override outranks an explicitly-set BRAIN_MODELS_DIR, and lands
     //    on <root>/models -- the flag names a DATA root, not a models dir.
     publish_data_root(Some(PathBuf::from("/flag/brain")));
     assert_eq!(default_root(), Some(PathBuf::from("/flag/brain/models")));
+    assert_eq!(explicit_models_root(), Some(PathBuf::from("/flag/brain/models")));
 
     // 3. Clearing it restores the environment answer -- the override is not
     //    a one-way latch.
@@ -61,16 +64,23 @@ fn the_data_root_override_outranks_the_environment_and_clearing_it_restores_it()
     // 4. Without BRAIN_MODELS_DIR, XDG_DATA_HOME is next.
     set("BRAIN_MODELS_DIR", None);
     assert_eq!(default_root(), Some(PathBuf::from("/xdg/brain/models")));
+    assert_eq!(explicit_models_root(), Some(PathBuf::from("/xdg/brain/models")));
 
     // 5. Without either, $HOME/.local/share/brain/models -- which is exactly
     //    `models_dir_in` applied to the documented default data root, so the
     //    flag's default is the same path the environment already produced.
+    //    `explicit_models_root` diverges HERE, on purpose: a bare `$HOME` is
+    //    inherited by every process, never an opt-in the way the three tiers
+    //    above are, so it answers `None` rather than silently reaching into
+    //    whatever real store happens to sit under this `$HOME`.
     set("XDG_DATA_HOME", None);
     assert_eq!(default_root(), Some(PathBuf::from("/synthetic-home/somebody/.local/share/brain/models")));
     assert_eq!(default_root(), Some(models_dir_in(Path::new("/synthetic-home/somebody/.local/share/brain"))));
+    assert_eq!(explicit_models_root(), None, "a bare $HOME must never count as an explicit models root");
 
     // 6. And the override still wins from the bottom of the ladder too.
     publish_data_root(Some(PathBuf::from("/flag/brain")));
     assert_eq!(default_root(), Some(PathBuf::from("/flag/brain/models")));
+    assert_eq!(explicit_models_root(), Some(PathBuf::from("/flag/brain/models")));
     publish_data_root(None);
 }

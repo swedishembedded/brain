@@ -10,6 +10,7 @@ pub mod config;
 pub mod encoder;
 pub mod import;
 pub mod model;
+pub mod spec;
 
 pub use config::{AudioEncoderConfig, QwenAsrConfig};
 pub use encoder::AudioEncoder;

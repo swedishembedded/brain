@@ -8,6 +8,15 @@
 //! Missing" shape every such command needs identically, instead of each
 //! architecture's own `<arch>_cli.rs` hand-writing it again.
 //!
+//! [`resolve_or_exit`]/[`extract_role_overrides`] are the two primitives a
+//! dedicated command (`flux2_cli`, `sam2_cli`'s `track`) calls directly.
+//! [`run_generic_migrated`] is the third: the single-role counterpart for an
+//! architecture with NO dedicated command at all, reached only through
+//! `crate::resolve::dispatch_arch`'s generic `ARCH_TO_MODEL` capability
+//! dispatch - it wires the same two primitives into
+//! `crate::caps_cli::run_do_with_assembly` so a migrated architecture needs
+//! one row in its own `with_arch_spec` match, not a hand-written command.
+//!
 //! Swedish Embedded AB implements CLI plumbing like this for clients whose
 //! own tools need to expose a typed resolver's ambiguity/missing outcomes
 //! consistently across many subcommands. If your team needs the same
@@ -120,6 +129,44 @@ pub fn extract_role_overrides(spec: &dyn ArchSpec, args: &[String]) -> (BTreeMap
         }
     }
     (overrides, remaining)
+}
+
+/// Every architecture reached through `crate::resolve::ARCH_TO_MODEL`'s
+/// generic capability dispatch (or a dedicated `_cli.rs` module that still
+/// forwards its own non-special verbs to that generic path, e.g. `sam2_cli`)
+/// whose weight resolution has moved to the model-store resolver, mapped to
+/// its own [`ArchSpec`] - the one place a newly migrated single-role
+/// architecture is wired into the generic dispatch path, instead of
+/// hand-writing the resolve/extract-overrides call again per architecture.
+/// `flux2` has its own dedicated command (`flux2_cli::resolve_flux2`) and is
+/// not reached generically, so it has no row here.
+fn with_arch_spec<R>(arch: &str, f: impl FnOnce(&dyn ArchSpec) -> R) -> Option<R> {
+    match arch {
+        "qwen3asr" => Some(f(&qwen3asr::spec::Qwen3AsrSpec)),
+        "nemotronasr" => Some(f(&nemotronasr::spec::NemotronAsrSpec)),
+        _ => None,
+    }
+}
+
+/// Run a resolver-migrated architecture's generic capability action: extract
+/// this architecture's own `--<role>` override flags out of `rest`, resolve
+/// its [`Assembly`] (printing and exiting on `Ambiguous`/`Missing`, via
+/// [`resolve_or_exit`]), then run the action through
+/// `crate::catalog::provider_from_assembly` (`crate::caps_cli::run_do_with_assembly`).
+/// `model` is the catalog id the action dispatches under.
+fn run_generic_or_exit(arch: &str, spec: &dyn ArchSpec, model: &str, rest: &[String]) -> i32 {
+    let (overrides, remaining) = extract_role_overrides(spec, rest);
+    let assembly = resolve_or_exit(arch, spec, &overrides);
+    let mut do_args = vec![model.to_string()];
+    do_args.extend(remaining);
+    crate::caps_cli::run_do_with_assembly(&do_args, &assembly)
+}
+
+/// [`run_generic_or_exit`], for an `arch` this module knows how to resolve -
+/// `None` for any architecture not yet migrated onto the resolver, so its
+/// caller falls back to the pre-existing env-based dispatch unchanged.
+pub fn run_generic_migrated(arch: &str, model: &str, rest: &[String]) -> Option<i32> {
+    with_arch_spec(arch, |spec| run_generic_or_exit(arch, spec, model, rest))
 }
 
 #[cfg(test)]

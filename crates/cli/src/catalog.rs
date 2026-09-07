@@ -160,7 +160,7 @@ pub fn models() -> Vec<ModelEntry> {
     });
     entries.push(ModelEntry {
         manifest: crate::resident_forecast::timesfm3_manifest,
-        provider: |_assembly: &Assembly| Err("timesfm3 has no direct `brain do` provider yet - serve it (`brain serve --dbus` or an HTTP surface) with BRAIN_TIMESFM3 set".to_string()),
+        provider: |_assembly: &Assembly| Err("timesfm3 has no direct `brain do` provider yet - serve it (`brain serve --dbus` or an HTTP surface) with BRAIN_TIMESFM3 set, or the resolver (`brain timesfm3 predict ...`)".to_string()),
         resident: catalog::resident!(crate::resident_forecast::Timesfm3Resident::from_env),
     });
     // 3D Gaussian Splatting (render/fit): unlike every entry above, it needs
@@ -268,13 +268,25 @@ fn resolved_assembly_for(model: &str) -> Option<Result<Assembly, String>> {
 /// a listed model may legitimately fail for want of weights). Every other
 /// model still gets [`empty_assembly`], unchanged.
 pub fn provider(model: &str) -> Result<Arc<dyn Provider>, String> {
+    let assembly = match resolved_assembly_for(model) {
+        Some(r) => r?,
+        None => empty_assembly(),
+    };
+    provider_from_assembly(model, &assembly)
+}
+
+/// [`provider`], from an already-resolved [`Assembly`] instead of resolving
+/// one itself -- the entry point for a caller that already has one on hand
+/// (`crate::resolver_cli::run_generic_or_exit`, called from
+/// `crate::resolve::dispatch_arch`'s `ARCH_TO_MODEL` branch, or from a
+/// dedicated `_cli.rs` module that forwards its own non-special verbs to the
+/// generic path, e.g. `sam2_cli`), so that path never resolves twice. Every
+/// other model's `provider` fn still ignores the argument (see
+/// `catalog::ModelEntry::provider`'s doc).
+pub fn provider_from_assembly(model: &str, assembly: &Assembly) -> Result<Arc<dyn Provider>, String> {
     for e in models() {
         if (e.manifest)().model == model {
-            let assembly = match resolved_assembly_for(model) {
-                Some(r) => r?,
-                None => empty_assembly(),
-            };
-            return (e.provider)(&assembly);
+            return (e.provider)(assembly);
         }
     }
     Err(format!("unknown model '{model}' (see `brain caps`)"))
@@ -455,6 +467,38 @@ mod tests {
         for id in patched {
             assert!(ids.contains(id), "resident_ctor_for patches '{id}', which is not a catalog::models() entry");
             assert!(resident_ctor_for(id).is_some(), "'{id}' must resolve to a resident ctor");
+        }
+    }
+
+    /// A resolved [`Assembly`]'s `weights` role, as a loader-ready path -
+    /// no `id`/`variant`/`provenance` beyond what the assertion below reads.
+    fn assembly_with_weights(arch: &str, weights: &str) -> Assembly {
+        Assembly {
+            id: format!("local/{arch}"),
+            arch: arch.to_string(),
+            variant: None,
+            roles: std::collections::BTreeMap::from([("weights".to_string(), std::path::PathBuf::from(weights))]),
+            provenance: Vec::new(),
+        }
+    }
+
+    /// `qwen3asr`/`nemotronasr` both defer their real checkpoint load past
+    /// construction ([`LazyProvider`] loads lazily on the first action run -
+    /// see its own doc comment) - so with the weights role coming from a
+    /// resolved [`Assembly`], construction alone SUCCEEDS even for a made-up
+    /// path. A regression back to `from_env!` would instead answer
+    /// `Err("set BRAIN_…")` here, because the relevant variable is
+    /// (deliberately, via the `remove_var` calls below) unset - that flip
+    /// from `Err` to `Ok` is exactly what this asserts.
+    #[test]
+    fn deferred_load_providers_construct_from_the_assembly_with_no_env_set() {
+        let _serial = brain_testutil::env_lock();
+        for var in ["BRAIN_QWEN3ASR", "BRAIN_NEMOTRONASR"] {
+            std::env::remove_var(var);
+        }
+        for (model, arch) in [(qwen3asr::caps::MODEL, "qwen3asr"), (nemotronasr::caps::MODEL, "nemotronasr")] {
+            let assembly = assembly_with_weights(arch, "/nonexistent/brain-catalog-test-weights");
+            provider_from_assembly(model, &assembly).unwrap_or_else(|e| panic!("{arch}: construction from a resolved assembly must succeed (the real load is deferred): {e}"));
         }
     }
 }

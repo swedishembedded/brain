@@ -316,8 +316,9 @@ fn wants_weight_acquisition(arch: &str, rest: &[String]) -> bool {
 /// resolver-migrated case needs an explicit marker, not an overload of a
 /// field whose "empty" already means something else for those others).
 /// Grown by one entry per architecture as it migrates.
-const RESOLVER_MIGRATED_ARCHS: &[&str] =
-    &["flux2", "qwen3tts", "kronos", "ltxv", "qwen35", "qwen3vl", "fastvlm", "moondream3", "deepseek2ocr"];
+const RESOLVER_MIGRATED_ARCHS: &[&str] = &[
+    "flux2", "qwen3tts", "kronos", "ltxv", "qwen35", "qwen3vl", "fastvlm", "moondream3", "deepseek2ocr", "qwen3asr", "nemotronasr",
+];
 
 fn dispatch_arch(arch: &str, rest: Vec<String>) {
     // Skipped for `-h`/`--help`: help text must never block on a network
@@ -348,6 +349,16 @@ fn dispatch_arch(arch: &str, rest: Vec<String>) {
         return handler(&rest);
     }
     if let Some((_, model)) = ARCH_TO_MODEL.iter().find(|(id, _)| *id == arch) {
+        // A resolver-migrated architecture resolves its own `--<role>`
+        // override flags and its `Assembly` first (`resolver_migrated` is
+        // exactly this table's membership, so the two can never disagree);
+        // everything else still goes through the pre-existing env-based
+        // provider construction unchanged.
+        if resolver_migrated {
+            if let Some(code) = crate::resolver_cli::run_generic_migrated(arch, model, &rest) {
+                std::process::exit(code);
+            }
+        }
         // `run_do` expects `[model, action, ...flags]`; `rest` is already
         // `[verb, ...flags]` with the verb doubling as the action name, so
         // prepending the model id is the whole translation.
@@ -768,6 +779,18 @@ mod tests {
         let _serial = env_lock();
         assert!(brain_arch::by_id("wan").expect("wan row").weights_env.is_empty());
         assert!(!weights_already_named("wan", &s(&["t2v", "--prompt", "p"])));
+    }
+
+    /// Every architecture this migration moved onto the resolver has an
+    /// empty `weights_env` (so `ensure_env_weights` is already a no-op for
+    /// it) AND is listed in [`RESOLVER_MIGRATED_ARCHS`] - so the two can
+    /// never drift apart as more architectures migrate.
+    #[test]
+    fn resolver_migrated_archs_declare_no_weights_env() {
+        for id in RESOLVER_MIGRATED_ARCHS {
+            let a = brain_arch::by_id(id).expect("row exists");
+            assert!(a.weights_env.is_empty(), "{id}: still declares weights_env after moving to the resolver");
+        }
     }
 
     #[test]

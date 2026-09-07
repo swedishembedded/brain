@@ -369,8 +369,14 @@ pub const ARCHS: &[Arch] = &[
     // `crates/cli/src/catalog.rs`'s `resolved_assembly_for`.
     arch!("deepseek2ocr", "DeepSeek-OCR (SAM+CLIP DeepEncoder + DeepSeek-V2 decoder)", Multimodal, LlamaCpp, "brain-deepseek2ocr", gguf: Some("deepseek2-ocr"), default_ref: Some("ggml-org/DeepSeek-OCR-GGUF"),
         variants: &[Variant { reference: "ggml-org/DeepSeek-OCR-GGUF", params: 3_336_106_240, quants: &["Q8_0"] }]),
-    arch!("qwen3asr", "Qwen3-ASR-1.7B (Whisper-style encoder + Qwen3 decoder)", Audio, Brain, "brain-qwen3asr", hf: &["Qwen3ASRForConditionalGeneration"], default_ref: Some("Qwen/Qwen3-ASR-1.7B"), weights_env: &[("BRAIN_QWEN3ASR", "weights")]),
-    arch!("nemotronasr", "Nemotron-3.5-ASR-Streaming (FastConformer + RNN-T)", Audio, Brain, "brain-nemotronasr", hf: &["Nemotron3_5AsrForRNNT"], default_ref: Some("nvidia/nemotron-3.5-asr-streaming-0.6b"), weights_env: &[("BRAIN_NEMOTRONASR", "weights")],
+    // No `weights_env`: qwen3asr resolves its single `weights` role through
+    // `brain_modelstore::resolve` (`crates/qwen3asr/src/spec.rs`), not
+    // `BRAIN_QWEN3ASR`.
+    arch!("qwen3asr", "Qwen3-ASR-1.7B (Whisper-style encoder + Qwen3 decoder)", Audio, Brain, "brain-qwen3asr", hf: &["Qwen3ASRForConditionalGeneration"], default_ref: Some("Qwen/Qwen3-ASR-1.7B")),
+    // No `weights_env`: nemotronasr resolves its single `weights` role
+    // through `brain_modelstore::resolve` (`crates/nemotronasr/src/spec.rs`),
+    // not `BRAIN_NEMOTRONASR`.
+    arch!("nemotronasr", "Nemotron-3.5-ASR-Streaming (FastConformer + RNN-T)", Audio, Brain, "brain-nemotronasr", hf: &["Nemotron3_5AsrForRNNT"], default_ref: Some("nvidia/nemotron-3.5-asr-streaming-0.6b"),
         variants: &[Variant { reference: "nvidia/nemotron-3.5-asr-streaming-0.6b", params: 637_997_088, quants: &["Q8_0"] }]),
     // -- Audio / TTS ------------------------------------------------------
     // No vendor GGUF (safetensors only) - a community-only repo exists but

@@ -189,6 +189,33 @@ pub fn default_root() -> Option<PathBuf> {
         .map(|h| Path::new(&h).join(".local").join("share").join("brain").join("models"))
 }
 
+/// [`default_root`]'s first three tiers only -- never the bare `$HOME`
+/// fallback. For a caller that scans (and best-effort cache-writes into) the
+/// resolved directory as a SIDE EFFECT of something else entirely, not because
+/// anyone asked it to look at the models store: `crates/catalog`'s `imgpipe`
+/// stage-registry composition is exactly this shape, reached from plain
+/// `cargo test`/library construction with no CLI invocation, no `--models-dir`
+/// flag and no opt-in in sight. A `$HOME` a caller merely INHERITS (every
+/// process has one) is not the same kind of signal a published data root, an
+/// explicit `BRAIN_MODELS_DIR`, or `$XDG_DATA_HOME` is - all three are
+/// something a user or the CLI's own flag parsing SET on purpose. Skipping
+/// the bare-`$HOME` tier here is what keeps such a caller from silently
+/// scanning (and writing a `.brain-inventory.json` cache into) a real
+/// developer's actual model store the moment their crate happens to link one
+/// that composes an architecture reachable this way.
+pub fn explicit_models_root() -> Option<PathBuf> {
+    if let Some(root) = DATA_ROOT.read().unwrap_or_else(|e| e.into_inner()).as_deref() {
+        return Some(models_dir_in(root));
+    }
+    if let Some(p) = std::env::var_os("BRAIN_MODELS_DIR").filter(|s| !s.is_empty()) {
+        return Some(PathBuf::from(p));
+    }
+    if let Some(x) = std::env::var_os("XDG_DATA_HOME").filter(|s| !s.is_empty()) {
+        return Some(Path::new(&x).join("brain").join("models"));
+    }
+    None
+}
+
 /// The brain-format conversion of a base repo's weights -- what a resident
 /// actually loads. The upstream `model.safetensors` (or shard set) that
 /// produced it is not itself servable: `model_dir::register` requires a

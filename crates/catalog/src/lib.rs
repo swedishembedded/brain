@@ -140,16 +140,6 @@ fn qwen_asr_tuning() -> (f32, usize) {
     (window_secs, max_new)
 }
 
-/// A required env-var path for a catalog provider closure: `Err` with the
-/// model's own "set BRAIN_…" message when unset, empty, or nonexistent.
-fn env_path(var: &str, what: &str) -> Result<String, String> {
-    let p = std::env::var(var).ok().filter(|p| !p.is_empty()).ok_or_else(|| format!("set {var} to {what}"))?;
-    if !std::path::Path::new(&p).exists() {
-        return Err(format!("{var}={p} does not exist"));
-    }
-    Ok(p)
-}
-
 /// A residency-adapter constructor: `None` from the inner `fn` when the model's
 /// weights are not configured, so the scheduler simply does not serve it.
 ///
@@ -186,10 +176,13 @@ pub struct ModelEntry {
     /// Build something runnable from an already-resolved [`Assembly`]. `Err`
     /// carries the model's OWN "set BRAIN_…" message, so a caller never sees
     /// a generic one. FLUX.2's entry was the first to build its `Provider`
-    /// from it (`crates/cli/src/catalog.rs`'s `resolved_assembly_for` is what
-    /// actually resolves one for it and for every architecture migrated onto
-    /// the resolver since); every entry not yet migrated still ignores the
-    /// argument and reads `BRAIN_*` env vars instead, per the module doc.
+    /// from it (`crates/cli/src/catalog.rs`'s `resolved_assembly_for`/
+    /// `provider_from_assembly` is what actually resolves or threads one
+    /// through for it and for every architecture migrated onto the resolver
+    /// since, `nemotronasr`/`qwen3asr` - single `weights`-role architectures,
+    /// via [`Assembly::role_path`] - included); every entry not yet migrated
+    /// still ignores the argument and reads `BRAIN_*` env vars instead, per
+    /// the module doc.
     pub provider: fn(&Assembly) -> Result<Arc<dyn Provider>, String>,
     /// Register with the residency scheduler, when this model has an adapter
     /// and its weights are configured. `None` from the fn means "not
@@ -590,8 +583,8 @@ pub fn models() -> Vec<ModelEntry> {
         // are patched in by `brain-cli`'s own catalog.
         ModelEntry {
             manifest: nemotronasr::caps::manifest,
-            provider: |_assembly: &Assembly| {
-                let dir = env_path("BRAIN_NEMOTRONASR", "a Nemotron 3.5 ASR checkpoint dir")?;
+            provider: |assembly: &Assembly| {
+                let dir = assembly.role_path("weights")?;
                 Ok(Arc::new(LazyProvider::new(
                     nemotronasr::caps::manifest,
                     Box::new(move || {
@@ -604,8 +597,8 @@ pub fn models() -> Vec<ModelEntry> {
         },
         ModelEntry {
             manifest: qwen3asr::caps::manifest,
-            provider: |_assembly: &Assembly| {
-                let dir = env_path("BRAIN_QWEN3ASR", "a Qwen3-ASR checkpoint dir")?;
+            provider: |assembly: &Assembly| {
+                let dir = assembly.role_path("weights")?;
                 Ok(Arc::new(LazyProvider::new(
                     qwen3asr::caps::manifest,
                     Box::new(move || {
