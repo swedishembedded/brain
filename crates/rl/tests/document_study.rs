@@ -38,8 +38,11 @@ use checkpoint::gguf::GgufTokenizer;
 use data::chat_template::ChatTemplate;
 use data::qwen_tokenizer::QwenBpe;
 use data::tokenizer::Tokenizer;
+use qwen3::config::{LoraCfg, QwenConfig};
+use qwen3::model::Qwen;
 use rl::continual::{Curriculum, SftSource};
-use rl::document::{DocumentCurriculum, FactBatch, FactProbe};
+use rl::document::{self, DocumentCurriculum, DocumentStudyConfig, FactBatch, FactProbe, MIN_HELD_OUT_PROBES};
+use rl::improve::AdapterMeta;
 
 // ---------------------------------------------------------------------------
 // Fixture: two cycles of a document batch, plus the behavioural anchor suite
@@ -230,3 +233,116 @@ fn no_probe_answer_appears_in_any_trained_span() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// B5' - the study
+// ---------------------------------------------------------------------------
+
+/// Probes SCORED per cycle. Far below the pre-registered floor on purpose -
+/// every scored probe is a full greedy decode against a 151k-vocabulary head,
+/// and this test's job is the harness, not the claim. The report says so.
+const EVAL_PER_CYCLE: usize = 3;
+const STEPS_PER_CYCLE: u32 = 8;
+/// Records written per SFT dataset, per arm, per cycle.
+const SEQS: usize = 64;
+const BATCH: u32 = 4;
+/// Must exceed the longest record the curriculum writes: a prompt, a
+/// completion, the template's own framing and the `<|endoftext|>` separator.
+/// Below that, `data::loader`'s record alignment finds no valid window start.
+const BLOCK: u32 = 64;
+
+fn gpu_disabled() -> bool {
+    std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+}
+
+fn base_checkpoint(path: &Path, cfg: &QwenConfig, seed: u64) {
+    let init = qwen3::init_weights(cfg, seed);
+    let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = cfg
+        .param_list()
+        .into_iter()
+        .map(|(name, n)| {
+            let v = init.get(&name).unwrap_or_else(|| panic!("init missing {name}")).clone();
+            (name, vec![n as u64], v)
+        })
+        .collect();
+    checkpoint::save(path.to_str().expect("utf-8 path"), cfg.to_json(), &tensors);
+}
+
+fn study_config() -> QwenConfig {
+    QwenConfig {
+        vocab: VOCAB,
+        block_size: BLOCK,
+        max_position_embeddings: BLOCK,
+        lora: Some(LoraCfg::attn(4, 8.0)),
+        ..QwenConfig::tiny()
+    }
+}
+
+/// The whole B5' protocol on the tiny fixture: `run_study` under
+/// `Regime::Sft` over the document curriculum, the gated arm and the
+/// null-gate control arm, an Arm-0 baseline from the untrained base, and a
+/// retention matrix that is actually well formed.
+#[test]
+fn a_document_curriculum_runs_a_full_study_and_emits_a_retention_matrix() {
+    if gpu_disabled() {
+        return;
+    }
+    let cycles: Vec<FactBatch> = (0..CYCLES).map(cycle_batch).collect();
+    let anchors = vec![anchor_batch()];
+    let tok = byte_tokenizer();
+    let tmpl = line_template();
+    let curr = DocumentCurriculum::new(&cycles, &anchors, &tok, &tmpl, VOCAB as usize);
+
+    let dir = tmp("study");
+    let cfg = study_config();
+    let base = dir.join("base.safetensors");
+    base_checkpoint(&base, &cfg, 11);
+
+    let targets = LoraCfg::attn(4, 8.0).targets;
+    let spec = rl::continual::StudySpec {
+        base_checkpoint: &base,
+        adapter: AdapterMeta { rank: 4, alpha: 8.0, targets: &targets, family: "qwen", base_id: "document-fixture", dataset_id: None },
+    };
+    let mut study = DocumentStudyConfig { work_dir: dir.join("work"), ..DocumentStudyConfig::default() };
+    study.cycles = CYCLES;
+    study.eval_per_cycle = EVAL_PER_CYCLE;
+    study.steps_per_cycle = STEPS_PER_CYCLE;
+    study.sft.seqs = SEQS;
+    study.sft.batch = BATCH;
+    study.verbose = true;
+
+    let report = document::run_document_study::<Qwen>(&spec, &curr, &study).expect("run_document_study");
+    println!("{}", report.table());
+    println!("{}", report.summary());
+
+    // The retention matrix is real and lower-triangular: row i is the model
+    // servable after cycle i, scored on probes 0..=i.
+    assert_eq!(report.gated.r_matrix.len(), CYCLES, "one matrix row per cycle");
+    for (i, row) in report.gated.r_matrix.iter().enumerate() {
+        assert_eq!(row.len(), i + 1, "row {i} must score exactly the probes introduced so far");
+        for v in row {
+            assert!((0.0..=1.0).contains(v), "a retention cell must be a mean of 0/1 exact-match rewards, got {v}");
+        }
+    }
+    assert_eq!(report.gated.records.len(), CYCLES);
+    for r in &report.gated.records {
+        assert_eq!(r.regime, "sft_mixture", "the document study must run the SFT regime, the only one measured to accumulate");
+    }
+
+    // The frozen probe sets were checked disjoint from the explore split on
+    // the ids that were really generated, not merely argued about.
+    assert_eq!(report.gated.probe_ids_checked, CYCLES * EVAL_PER_CYCLE);
+    assert!(report.gated.explore_ids_checked > 0);
+
+    // Arm 0: the untrained base's own score on cycle 1's probes - the
+    // baseline every later number is read against.
+    assert!((0.0..=1.0).contains(&report.gated.b_base));
+    // The null-gate control arm ran too, on the same probes.
+    assert_eq!(report.null_gate.r_matrix.len(), CYCLES);
+    assert_eq!(report.null_gate.b_base, report.gated.b_base, "both arms must score the same untrained base on the same frozen probes");
+
+    // Honesty: this run scored far below the pre-registered held-out floor,
+    // and the report says so rather than presenting a smoke test as a result.
+    assert!(report.eval_per_cycle < MIN_HELD_OUT_PROBES, "this fixture is deliberately below the floor - if it were not, the check below would be vacuous");
+    assert!(!report.preregistered);
+    assert!(report.summary().contains("NOT a pre-registered result"), "{}", report.summary());
+}

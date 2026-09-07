@@ -61,7 +61,9 @@
 //! can procure our services by sending an email to info@swedishembedded.com.
 
 use std::collections::{BTreeMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+use model::Model;
 
 use data::chat::{ChatMessage, ChatSample, ENDOFTEXT};
 use data::chat_template::ChatTemplate;
@@ -71,7 +73,7 @@ use data::tokenizer::Tokenizer;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::continual::{Curriculum, SftSource};
+use crate::continual::{self, Curriculum, GatePolicy, Regime, SftConfig, SftSource, StudyConfig, StudyReport, StudySpec};
 use crate::env::{Environment, Reward, Step, Task, Verifier};
 use crate::gate::GateConfig;
 
@@ -547,6 +549,174 @@ impl<'a> Curriculum for DocumentCurriculum<'a> {
     fn sft_mask_before(&self) -> Option<char> {
         None
     }
+}
+
+/// Everything a document study chooses, and nothing it may not.
+///
+/// The regime and the gate are deliberately NOT fields: a document study is
+/// [`Regime::Sft`] over [`document_gate_config`], both fixed before any run,
+/// and a knob for either would be an invitation to tune after seeing the
+/// result. The GRPO-only knobs of [`StudyConfig`] are likewise absent -
+/// `run_study` never reads them under `Regime::Sft`, and a config field that
+/// did nothing would make a run's own record of itself false.
+///
+/// [`Default`] IS the pre-registration: one cycle, `MIN_HELD_OUT_PROBES`
+/// scored probes, `SftConfig::default`'s measured recipe. A caller normally
+/// sets `cycles`/`work_dir` and leaves the rest; a caller that lowers
+/// `eval_per_cycle` gets a report that says the run was not pre-registered
+/// (see [`DocumentStudyReport::preregistered`]).
+#[derive(Clone, Debug)]
+pub struct DocumentStudyConfig {
+    pub cycles: usize,
+    pub steps_per_cycle: u32,
+    /// Frozen probes SCORED per cycle - simultaneously the gate's held-out
+    /// set and that cycle's permanent retention probe.
+    pub eval_per_cycle: usize,
+    pub seed: u64,
+    /// The coin the null-gate arm flips. Separate from `seed` so the two arms
+    /// differ in their GATE, not in their training stream.
+    pub null_gate_seed: u64,
+    pub sft: SftConfig,
+    /// Arm 2, the per-cycle fresh-adapter control. Off by default: it doubles
+    /// a study's training cost and answers a plasticity question, which is not
+    /// what the MVP's document claim rests on.
+    pub plasticity_control: bool,
+    pub work_dir: PathBuf,
+    pub verbose: bool,
+}
+
+impl Default for DocumentStudyConfig {
+    fn default() -> Self {
+        DocumentStudyConfig {
+            cycles: 1,
+            steps_per_cycle: 240,
+            eval_per_cycle: MIN_HELD_OUT_PROBES,
+            seed: 1,
+            null_gate_seed: 2,
+            sft: SftConfig::default(),
+            plasticity_control: false,
+            // Repo-relative, and normally overridden: a study writes a
+            // checkpoint per cycle per arm.
+            work_dir: PathBuf::from("out/document-study"),
+            verbose: true,
+        }
+    }
+}
+
+/// Both arms of a document study, and whether the run was entitled to call
+/// itself a result.
+///
+/// This is the surface a per-fact report (roadmap B8) hangs off: it holds the
+/// whole [`StudyReport`] of each arm, not a collapsed scalar, so per-fact rows
+/// can be derived from the same decodes the gate already made rather than from
+/// a second scoring pass.
+pub struct DocumentStudyReport {
+    /// Arm 1: the real, gated loop. Its `b_base` is Arm 0 - the untrained
+    /// base's own score on the first cycle's probes - and its
+    /// `heldout_incumbent` column is that arm's zero-shot series.
+    pub gated: StudyReport,
+    /// The null-gate control ([`GatePolicy::CoinFlip`]): the real gate still
+    /// runs and is still recorded, but a coin decides what carries forward. If
+    /// the gated arm is not separated from this, the gate is decorative and
+    /// the study's number carries no information about it.
+    pub null_gate: StudyReport,
+    pub eval_per_cycle: usize,
+    /// Whether this run met the pre-registered held-out floor
+    /// ([`MIN_HELD_OUT_PROBES`]). A run below it is a harness exercise, and
+    /// [`Self::summary`] says so in words - reported rather than forbidden,
+    /// because a study that cannot be run at all in a test is a study nothing
+    /// checks.
+    pub preregistered: bool,
+}
+
+impl DocumentStudyReport {
+    /// `ACC(gated) - ACC(null gate)`: the separation that licenses any claim
+    /// that the gate carried information at all.
+    pub fn arm_separation(&self) -> f64 {
+        self.gated.acc - self.null_gate.acc
+    }
+
+    /// Both arms' per-cycle tables plus the gated arm's retention matrix.
+    pub fn table(&self) -> String {
+        format!(
+            "Arm 1 (gated)\n{}\n{}\nnull-gate control arm\n{}",
+            self.gated.table(),
+            self.gated.matrix_table(),
+            self.null_gate.table()
+        )
+    }
+
+    pub fn summary(&self) -> String {
+        let prereg = if self.preregistered {
+            format!("{} held-out probes per cycle: at or above the pre-registered floor of {MIN_HELD_OUT_PROBES}", self.eval_per_cycle)
+        } else {
+            format!(
+                "{} held-out probes per cycle is BELOW the pre-registered floor of {MIN_HELD_OUT_PROBES}: this run exercises the \
+                 harness and is NOT a pre-registered result",
+                self.eval_per_cycle
+            )
+        };
+        format!(
+            "document study - Arm 0 baseline (untrained base on probe T1) {:.3}\n\nArm 1 (gated):\n{}\nnull-gate control arm:\n{}\narm separation (gated ACC - null-gate ACC) {:+.3}\n{prereg}\n",
+            self.gated.b_base,
+            self.gated.summary(),
+            self.null_gate.summary(),
+            self.arm_separation()
+        )
+    }
+}
+
+/// Run a document study: the gated arm and the null-gate control arm, both
+/// [`continual::run_study`] over `curr` under [`Regime::Sft`] and
+/// [`document_gate_config`], on the same frozen probes.
+///
+/// The control arms are not optional here, and that is this repo's own
+/// convention rather than a preference: a learning claim with no control arm
+/// does not count, and the existing null-gate diff on the synthetic curriculum
+/// is what licensed the claim that the gate carries information at all. Arm 0
+/// costs nothing extra - `run_study` already scores the untrained base on the
+/// first cycle's probes ([`StudyReport::b_base`]) and already records each
+/// cycle's zero-shot incumbent column.
+///
+/// Arm 3 (the joint-training capacity oracle, [`continual::joint_oracle`]) is
+/// deliberately NOT run: it is post-MVP, and its verdict is only clean in one
+/// direction anyway (see that function's own doc comment).
+pub fn run_document_study<M: Model>(spec: &StudySpec, curr: &DocumentCurriculum, cfg: &DocumentStudyConfig) -> std::io::Result<DocumentStudyReport> {
+    let arm = |gate_policy: GatePolicy, work_dir: PathBuf| StudyConfig {
+        cycles: cfg.cycles,
+        steps_per_cycle: cfg.steps_per_cycle,
+        // `group_size`/`grad_accum`/`explore_temp` drive GRPO rollouts, which
+        // this regime does not draw; `lr`/`min_lr` are GRPO's too - the SFT
+        // path reads `SftConfig`'s own. Mirrored rather than left at some
+        // unrelated value so a run's serialized config does not read as a
+        // learning rate that was never applied.
+        group_size: 1,
+        grad_accum: 1,
+        eval_per_cycle: cfg.eval_per_cycle,
+        lr: cfg.sft.lr,
+        min_lr: cfg.sft.min_lr,
+        explore_temp: 1.0,
+        // `run_study` asserts this is 0.0 under `Regime::Sft`: the equivalent
+        // knob there is `SftConfig::rehearsal_weight`.
+        replay_frac: 0.0,
+        seed: cfg.seed,
+        gate: document_gate_config(),
+        gate_policy,
+        plasticity_control: cfg.plasticity_control,
+        work_dir,
+        verbose: cfg.verbose,
+        regime: Regime::Sft(cfg.sft.clone()),
+    };
+
+    let gated = continual::run_study::<M, _>(spec, curr, &arm(GatePolicy::Real, cfg.work_dir.join("gated")))?;
+    let null_gate = continual::run_study::<M, _>(spec, curr, &arm(GatePolicy::CoinFlip { seed: cfg.null_gate_seed }, cfg.work_dir.join("null-gate")))?;
+
+    Ok(DocumentStudyReport {
+        gated,
+        null_gate,
+        eval_per_cycle: cfg.eval_per_cycle,
+        preregistered: cfg.eval_per_cycle >= MIN_HELD_OUT_PROBES,
+    })
 }
 
 #[cfg(test)]
