@@ -99,6 +99,45 @@ fact:**
   once the document-specific config is wired in.
 **Commit:** one.
 
+### B2b - hoist the gate below the model layer (DONE)
+
+`B3b` needs `B2`'s gate and probe contract from inside `crates/qwen3`, and
+could not have them: `crates/qwen3` is layer 4, `rl::gate` computed its
+significance bar with `bench::metrics::sign_test`, and `brain-bench` links
+every model it benchmarks - so `brain-qwen3 -> brain-rl -> brain-bench ->
+brain-qwen3` was a real Cargo cycle, not a style objection. It was found by
+adding the dependency and reading `cargo tree`, and correctly refused rather
+than routed around.
+
+The fix is a **new leaf crate, `crates/promote`** (`brain-promote`), holding
+the part of this machinery that never needed a model: the
+`Environment`/`Verifier` seam (`promote::env`), the exact paired sign test
+(`promote::stats`), the four-bar promote/reject decision (`promote::gate`),
+and the frozen `{fact, probe_question, expected_answer}` contract with its
+environment, verifier, `document_gate_config` and per-fact verdicts
+(`promote::document`). Its whole dependency closure is `brain-data` and
+below, so a model crate can depend on it.
+
+Nothing was copied. `rl::env`/`rl::gate` are `pub use promote::{env, gate}`,
+`rl::document` re-exports `promote::document::*` alongside the half that DOES
+need a model (the `Curriculum` impl, `write_sft_dataset`, `run_document_
+study`), and `bench::metrics::sign_test`/`SignTest` are re-exports too - so
+every existing caller, `crates/wan`'s finetune A/B gate included, is
+unchanged. `B2`'s and `bench`'s own named tests moved with the code and pass
+verbatim; the only source changes are import paths, panic-message prefixes
+that name the module they are in, and two items widened from private to
+public (`DocumentEnv::row`, `document::task_id`) because the half left in
+`rl` and any future gate action are now callers rather than neighbours.
+
+The layering is machine-checked, not asserted in prose:
+`scripts/gates/check-crate-layers.sh` (wired into `make check/scripts`) fails
+if `brain-promote`'s `--all-features` closure ever reaches the model layer -
+`--all-features` because `brain-rl` already hides `brain-qwen3` behind an
+off-by-default feature, and a default-features check would wave the same
+escape hatch through.
+
+**Commit:** one.
+
 ### B3a - qwen3 `lora_train` as a `capability::Action`
 Today qwen3 finetune is CLI-only (`crates/cli/src/qwen_cli.rs:559::
 finetune_lora`) - not visible to whale's node-type generation at all.

@@ -3,7 +3,7 @@ name = "brain-rl"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Continuous/reward-driven training: a generic weighted-training driver over model::Model + model::Batch::LmWeighted (no architecture-specific code), plus rollout/environment/objective/gate machinery (self-improve roadmap P8-P18) any Model can adopt. The qwen3-specific ATIF-trajectory ingestion and hot-swap continuous-loop cycle (P3/P5) live behind the `qwen3` feature, off by default, so a generic consumer of this crate does not pull brain-qwen3 into its dependency graph."
+description = "Continuous/reward-driven training: a generic weighted-training driver over model::Model + model::Batch::LmWeighted (no architecture-specific code), plus rollout/objective/continual-study machinery (self-improve roadmap P8-P18) any Model can adopt. The model-agnostic half of that - the Environment/Verifier seam and the promote/reject gate - lives in brain-promote so a model crate can reach it, and is re-exported here unchanged as rl::env / rl::gate. The qwen3-specific ATIF-trajectory ingestion and hot-swap continuous-loop cycle (P3/P5) live behind the `qwen3` feature, off by default, so a generic consumer of this crate does not pull brain-qwen3 into its dependency graph."
 
 [lib]
 name = "rl"
@@ -20,21 +20,23 @@ qwen3 = ["dep:brain-qwen3"]
 
 [dependencies]
 brain-model.workspace = true
+# `rl::env` and `rl::gate` ARE `promote::env`/`promote::gate` - re-exported
+# from lib.rs, never copied. They moved there so a model crate (layer 4) can
+# gate a candidate adapter without the cycle `brain-qwen3 -> brain-rl ->
+# brain-bench -> brain-qwen3`.
+brain-promote.workspace = true
 brain-data.workspace = true
 brain-checkpoint.workspace = true
 brain-atif.workspace = true
 brain-qwen3 = { workspace = true, optional = true }
-# `bench::metrics::sign_test` - the hoisted exact one-sided paired sign test
-# `gate::gate` builds its promote/reject decision on (self-improve roadmap
-# P16). `bench` is "how this repo scores models" already, so `gate` is a
-# consumer, not a reimplementation.
+# `bench::metrics::ols_slope_ci` - the plasticity trend `continual`'s study
+# reports (never asserts on). `bench` is "how this repo scores models"
+# already, so this is a consumer, not a reimplementation. The sign test the
+# gate itself runs on used to come from here too; it now comes from
+# `brain-promote`, which is reachable from below the model layer.
 brain-bench.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-# `document::answer_digest` - the checksum form `env`'s doc sanctions for a
-# `Task::answer` whose correct completion cannot be recomputed from the
-# prompt. The same crate `modelstore`/`cli` already hash content with.
-sha2.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

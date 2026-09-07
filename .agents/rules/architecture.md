@@ -67,6 +67,20 @@ Six layers. Each may depend only on layers above it.
    model                   architecture-agnostic Model trait + generic trainer,
                            shared block builders (block.rs, vit.rs), paged KV,
                            and the multi-GPU parallelism layer (see below)
+   promote                 the model-agnostic promote/reject decision: the
+                           Environment/Verifier reward seam, the exact paired
+                           sign test, the four-bar gate over already-scored
+                           pairs, and the document/fact probe contract. A
+                           LEAF - it depends on no other brain crate at all.
+                           It sits HERE, not next to `rl` at layer 5, because
+                           a layer-4 model crate has to be able to gate its
+                           own candidate adapter: with the gate up there,
+                           `brain-qwen3 -> brain-rl -> brain-bench ->
+                           brain-qwen3` was a real Cargo cycle. `rl` and
+                           `bench` re-export from here rather than owning
+                           anything, so no caller changed and nothing is
+                           duplicated; `scripts/gates/check-crate-layers.sh`
+                           fails the build if this closure ever climbs.
 
  ─── 4. models ─────────────────────────────────────────────────────────────
    decoder LMs    gpt2  qwen3  qwen35moe  toymoe  glmdsa  toypid  toyseq2seq  toyautoencoder  timeseries

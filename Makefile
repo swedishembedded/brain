@@ -418,6 +418,11 @@ test/slow:
 # `backend_api::select` seam and outside its own reasoned allow-list - see
 # that script for the full rationale and the M1.3 entry in
 # .agents/roadmap/kernel-performance.md for the inventory it produced.
+# check-crate-layers.sh additionally requires every crate that exists so a
+# MODEL crate can depend on it to keep a dependency closure within layers 1-3
+# - the layering in .agents/rules/architecture.md is otherwise unenforced, and
+# one violation there is not a style problem but a hard Cargo cycle that only
+# surfaces at the next call site.
 check/scripts:
 	bash scripts/gates/check-scripts.sh
 	bash scripts/gates/check-env-docs.sh
@@ -430,6 +435,7 @@ check/scripts:
 	bash scripts/gates/check-doc-links.sh
 	bash scripts/gates/check-kernel-selection.sh
 	bash scripts/gates/check-multi-gpu-sharding.sh
+	bash scripts/gates/check-crate-layers.sh
 
 # SPDX/copyright header gate: every Rust/C/Python/shell/Makefile/WGSL/...
 # source file must carry exactly one "SPDX-License-Identifier: Apache-2.0"

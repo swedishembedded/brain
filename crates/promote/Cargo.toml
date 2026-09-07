@@ -1,0 +1,22 @@
+[package]
+name = "brain-promote"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The model-agnostic promote/reject decision: the Environment/Verifier reward seam, the exact paired sign test and the four-bar promotion gate built on it. A LEAF crate by design - it depends on no model crate, so a model crate (brain-qwen3 and friends, layer 4) can gate a candidate adapter without dragging in the training stack. brain-rl and brain-bench re-export it, so every existing caller of rl::gate / bench::metrics::sign_test is unchanged."
+
+[lib]
+name = "promote"
+path = "src/lib.rs"
+
+[dependencies]
+# `data::tokenizer::Tokenizer` - the tokenizer seam `document`'s environment
+# and verifier are generic over. `brain-data` is a training-substrate crate
+# with no model in it, so depending on it keeps this crate reachable from
+# every model crate; see `crates/promote/src/lib.rs`.
+brain-data.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# `document::answer_digest` - the checksum form a `Task::answer` takes when
+# its correct completion cannot be recomputed from the prompt.
+sha2.workspace = true

@@ -25,6 +25,7 @@ default-members = [
     "crates/gguf",
     "crates/paramstore",
     "crates/optim",
+    "crates/promote",
     "crates/atif",
     "crates/rl",
     "crates/data",
@@ -159,6 +160,7 @@ brain-checkpoint = { path = "crates/checkpoint" }
 brain-gguf = { path = "crates/gguf" }
 brain-paramstore = { path = "crates/paramstore" }
 brain-optim = { path = "crates/optim" }
+brain-promote = { path = "crates/promote" }
 brain-atif = { path = "crates/atif" }
 brain-rl = { path = "crates/rl" }
 brain-data = { path = "crates/data" }

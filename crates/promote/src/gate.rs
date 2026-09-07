@@ -7,7 +7,7 @@
 //!
 //! Promotion requires **all four**:
 //! 1. An exact one-sided paired binomial sign test, `p <= alpha`, conditioned
-//!    on discordant pairs only ([`bench::metrics::sign_test`], hoisted from
+//!    on discordant pairs only ([`crate::stats::sign_test`], hoisted from
 //!    `wan`'s finetune A/B gate rather than re-derived here).
 //! 2. A minimum effect size (mean candidate-minus-incumbent score), so a
 //!    significant-but-trivial win does not promote.
@@ -109,7 +109,7 @@ pub struct GateReport {
 /// the [`Cause`] - all four still get computed either way, so `GateReport`
 /// always carries the full picture regardless of which one rejected.
 pub fn gate(input: &GateInput, cfg: &GateConfig) -> GateReport {
-    let sign = bench::metrics::sign_test(input.candidate_scores, input.incumbent_scores);
+    let sign = crate::stats::sign_test(input.candidate_scores, input.incumbent_scores);
     let effect_size = mean(input.candidate_scores) - mean(input.incumbent_scores);
     let anchor_delta = input.anchor_incumbent - input.anchor_candidate;
     let entropy_ratio = if input.entropy_incumbent.abs() > f64::EPSILON { input.entropy_candidate / input.entropy_incumbent } else { 1.0 };

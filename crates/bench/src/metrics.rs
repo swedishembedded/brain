@@ -145,45 +145,19 @@ pub fn repetition_rate(tokens: &[u32]) -> f32 {
     reps as f32 / (tokens.len() - 1) as f32
 }
 
-/// Result of [`sign_test`]: the discordant-pair count, how many of those
-/// favored the candidate, and the resulting one-sided p-value.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct SignTest {
-    /// Number of discordant pairs (`candidate != baseline`); concordant
-    /// (tied) pairs carry no directional information and are excluded.
-    pub n: usize,
-    /// Of those `n` discordant pairs, how many favored the candidate
-    /// (`candidate > baseline`).
-    pub k: usize,
-    /// One-sided `P(Binomial(n, 0.5) >= k)` - the chance of seeing at least
-    /// this many candidate wins among the discordant pairs if the true win
-    /// probability were 0.5 (candidate no better than baseline).
-    pub p_value: f64,
-}
-
-/// Exact one-sided paired sign test, conditioned on discordant pairs only
-/// (self-improve roadmap P16's promotion gate; hoisted from an inlined
-/// version this fixes two defects in: summing the binomial tail over *every*
-/// pair rather than just the discordant ones - wrong-shaped for a binary
-/// 0/1 outcome, since a tied pair is not evidence either way - and a
-/// `n - k` `usize` subtraction that underflowed whenever `k > n`).
+/// The exact one-sided paired sign test - re-exported from
+/// [`promote::stats`], which is where it lives now.
 ///
-/// `candidate` and `baseline` must be the same length, one paired score per
-/// task, same tasks in the same order for both arms.
-pub fn sign_test(candidate: &[f64], baseline: &[f64]) -> SignTest {
-    assert_eq!(candidate.len(), baseline.len(), "sign_test: paired arrays must have equal length");
-    let mut n = 0usize;
-    let mut k = 0usize;
-    for (c, b) in candidate.iter().zip(baseline) {
-        if c > b {
-            n += 1;
-            k += 1;
-        } else if c < b {
-            n += 1;
-        }
-    }
-    SignTest { n, k, p_value: binom_sf(n, k) }
-}
+/// It was defined here, and the argument for that still stands for every
+/// other statistic in this module: `bench` is how this repo scores models. It
+/// stopped standing for this one, because this one is also the significance
+/// bar `rl::gate::gate` promotes a candidate on, and `brain-bench` links
+/// every model crate it benchmarks - so a model crate could not reach the
+/// gate without the cycle `brain-qwen3 -> brain-rl -> brain-bench ->
+/// brain-qwen3`. The arithmetic depends on nothing, so it moved below the
+/// model layer; `bench::metrics::sign_test` is unchanged as a path, and
+/// there is exactly one implementation.
+pub use promote::stats::{sign_test, SignTest};
 
 /// Result of [`ols_slope_ci`]: the fitted line plus a two-sided 95 %
 /// confidence interval on its slope.
@@ -209,7 +183,7 @@ pub struct Slope {
 /// freedom. Small hard-coded table for `df` 1..=30 (the only regime a
 /// 12-point series can reach), 1.960 (the normal limit) beyond - the same
 /// "no external stats dependency, spell the constants out" stance
-/// [`binom_coeff`] takes for the sign test.
+/// [`sign_test`]'s own binomial coefficient takes.
 fn t_crit_95(df: usize) -> f64 {
     const T: [f64; 30] = [
         12.706, 4.303, 3.182, 2.776, 2.571, 2.447, 2.365, 2.306, 2.262, 2.228, 2.201, 2.179, 2.160, 2.145, 2.131, 2.120, 2.110, 2.101, 2.093, 2.086, 2.080,
@@ -230,9 +204,11 @@ fn t_crit_95(df: usize) -> f64 {
 /// degrees of freedom. `None` for fewer than 3 points (no residual degrees of
 /// freedom, so no interval) or a degenerate `xs` (zero variance).
 ///
-/// Lives next to [`sign_test`] for the same reason that one was hoisted here:
-/// `bench` is how this repo scores models, and a trend-over-cycles statistic
-/// is a scoring statistic, not a training-loop detail.
+/// Lives here because `bench` is how this repo scores models and a
+/// trend-over-cycles statistic is a scoring statistic, not a training-loop
+/// detail. Unlike [`sign_test`], nothing below the model layer needs it - it
+/// is reported by the continual-learning study in `crates/rl`, never by a
+/// promote/reject decision - so it stayed when that one moved.
 pub fn ols_slope_ci(xs: &[f64], ys: &[f64]) -> Option<Slope> {
     assert_eq!(xs.len(), ys.len(), "ols_slope_ci: xs and ys must have equal length");
     let n = xs.len();
@@ -257,32 +233,6 @@ pub fn ols_slope_ci(xs: &[f64], ys: &[f64]) -> Option<Slope> {
     let stderr = (sse / df as f64 / sxx).sqrt();
     let t = t_crit_95(df);
     Some(Slope { slope, intercept, stderr, ci_lo: slope - t * stderr, ci_hi: slope + t * stderr, n })
-}
-
-/// `P(Binomial(n, 0.5) >= k)`.
-fn binom_sf(n: usize, k: usize) -> f64 {
-    let mut p = 0.0f64;
-    for i in k..=n {
-        p += binom_coeff(n, i) * 0.5f64.powi(n as i32);
-    }
-    p
-}
-
-/// `n choose k`, computed via the multiplicative running-product form (no
-/// factorials, so it never overflows for realistic `n`). Returns `0.0` for
-/// the out-of-range `k > n` rather than underflowing: the historical bug
-/// this hoist fixes computed `n - k` on `usize` before checking `k <= n`,
-/// which panicked in debug builds and wrapped to a huge value in release.
-fn binom_coeff(n: usize, k: usize) -> f64 {
-    if k > n {
-        return 0.0;
-    }
-    let k = k.min(n - k);
-    let mut c = 1.0f64;
-    for i in 0..k {
-        c = c * (n - i) as f64 / (i + 1) as f64;
-    }
-    c
 }
 
 #[cfg(test)]
@@ -320,16 +270,6 @@ mod tests {
     }
 
     #[test]
-    fn binom_coeff_matches_known_values_and_never_underflows() {
-        assert_eq!(binom_coeff(5, 2), 10.0);
-        assert_eq!(binom_coeff(5, 0), 1.0);
-        assert_eq!(binom_coeff(5, 5), 1.0);
-        // The historical bug: `n - k` on `usize` before checking `k <= n`
-        // underflowed here. Must be exactly 0, not a panic or a huge number.
-        assert_eq!(binom_coeff(3, 5), 0.0);
-    }
-
-    #[test]
     fn ols_slope_ci_recovers_an_exact_line_with_a_ci_containing_it() {
         // y = 3 - 0.5x exactly: zero residual -> zero stderr -> a degenerate
         // CI that still contains the true slope.
@@ -358,51 +298,5 @@ mod tests {
         assert!(ols_slope_ci(&[], &[]).is_none());
         // Degenerate x (every point at the same cycle index) has no slope.
         assert!(ols_slope_ci(&[1.0, 1.0, 1.0], &[1.0, 2.0, 3.0]).is_none());
-    }
-
-    #[test]
-    fn sign_test_all_discordant_pairs_favor_candidate() {
-        let candidate = [1.0, 1.0, 1.0, 1.0, 1.0];
-        let baseline = [0.0, 0.0, 0.0, 0.0, 0.0];
-        let r = sign_test(&candidate, &baseline);
-        assert_eq!(r.n, 5);
-        assert_eq!(r.k, 5);
-        assert!((r.p_value - 0.5f64.powi(5)).abs() < 1e-9, "p={}", r.p_value);
-    }
-
-    #[test]
-    fn sign_test_conditions_on_discordant_pairs_only() {
-        // Two tied pairs carry no directional evidence and must not count
-        // toward `n` - this is the "sums over ALL pairs" defect the hoist
-        // fixes: with the old (buggy) shape, tied pairs would each
-        // contribute as a "loss," diluting a real, significant win.
-        let candidate = [1.0, 0.0, 1.0];
-        let baseline = [1.0, 0.0, 0.0];
-        let r = sign_test(&candidate, &baseline);
-        assert_eq!(r.n, 1);
-        assert_eq!(r.k, 1);
-        assert!((r.p_value - 0.5).abs() < 1e-9);
-    }
-
-    #[test]
-    fn sign_test_no_discordant_pairs_is_not_significant() {
-        let candidate = [1.0, 0.0, 1.0];
-        let baseline = [1.0, 0.0, 1.0];
-        let r = sign_test(&candidate, &baseline);
-        assert_eq!(r.n, 0);
-        assert_eq!(r.k, 0);
-        assert_eq!(r.p_value, 1.0);
-    }
-
-    #[test]
-    fn sign_test_mixed_discordant_pairs_matches_hand_binomial_tail() {
-        // 4 discordant pairs, 3 favor the candidate:
-        // P(Binomial(4,0.5) >= 3) = (C(4,3) + C(4,4)) / 16 = 5/16.
-        let candidate = [1.0, 1.0, 1.0, 0.0, 5.0];
-        let baseline = [0.0, 0.0, 0.0, 1.0, 5.0];
-        let r = sign_test(&candidate, &baseline);
-        assert_eq!(r.n, 4);
-        assert_eq!(r.k, 3);
-        assert!((r.p_value - 5.0 / 16.0).abs() < 1e-9, "p={}", r.p_value);
     }
 }

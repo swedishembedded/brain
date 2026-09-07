@@ -19,6 +19,12 @@ brain-glmdsa.workspace = true
 brain-toyautoencoder.workspace = true
 brain-eval.workspace = true
 brain-checkpoint.workspace = true
+# `metrics::sign_test`/`SignTest` - re-exported, not reimplemented. They were
+# defined here until a model crate needed the promote/reject gate built on
+# them and could not have it: this crate links every model it benchmarks, so
+# depending on it from below the model layer is a cycle. See
+# `crates/promote/src/stats.rs`.
+brain-promote.workspace = true
 # Forecasting scenarios (fcbench) so the forecasting battery registers as
 # Benchmarks alongside the LM/algorithmic ones.
 brain-fcbench.workspace = true

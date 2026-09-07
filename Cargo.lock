@@ -505,6 +505,7 @@ dependencies = [
  "brain-glmdsa",
  "brain-gpt2",
  "brain-model",
+ "brain-promote",
  "brain-qwen3",
  "brain-toyautoencoder",
  "brain-toymoe",
@@ -1543,6 +1544,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-promote"
+version = "1.1.0"
+dependencies = [
+ "brain-data",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "brain-pulid"
 version = "1.1.0"
 dependencies = [
@@ -1748,10 +1759,10 @@ dependencies = [
  "brain-data",
  "brain-gradcheck",
  "brain-model",
+ "brain-promote",
  "brain-qwen3",
  "serde",
  "serde_json",
- "sha2",
  "tempfile",
 ]
 

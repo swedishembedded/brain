@@ -37,10 +37,27 @@ pub mod continual;
 pub mod continuous;
 pub mod curriculum;
 pub mod document;
-pub mod env;
-pub mod gate;
 pub mod improve;
 pub mod objective;
+
+/// The `Environment`/`Verifier` reward seam and the promote/reject gate,
+/// re-exported from [`promote`] - their real home since the milestone that
+/// moved them there.
+///
+/// They were modules of this crate, and that was a layering mistake with real
+/// consequences: `gate` computes its significance bar with a sign test that
+/// lived in `bench::metrics`, `brain-bench` links every model crate it
+/// benchmarks, and so a model crate wanting to expose "gate this candidate
+/// adapter" as a capability action hit a genuine Cargo cycle -
+/// `brain-qwen3 -> brain-rl -> brain-bench -> brain-qwen3`. Nothing in either
+/// module needed a model, a device or a training loop, so both moved to
+/// `brain-promote`, which depends on no model crate at all.
+///
+/// Re-exported rather than reimplemented, and re-exported as the MODULES
+/// themselves rather than item by item, so `rl::env::Task`, `rl::gate::gate`
+/// and every other path a caller already writes resolve to exactly the same
+/// items they always did - there is no second copy of any of this to drift.
+pub use promote::{env, gate};
 
 use std::path::Path;
 
