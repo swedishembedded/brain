@@ -610,7 +610,10 @@ fn print_verdict(report: &StudyReport, oracle: Option<f64>, args: &Args, targets
         }
         RegimeArg::Sft => print_sft_disclaimer(args),
     }
-    println!("split integrity: {} frozen probe ids checked disjoint from {} explore ids", report.probe_ids_checked, report.explore_ids_checked);
+    println!(
+        "split integrity: {} frozen probe ids checked disjoint from {} explore ids and {} rehearsal ids",
+        report.probe_ids_checked, report.explore_ids_checked, report.rehearsal_ids_checked
+    );
 
     let pipeline = match args.regime {
         RegimeArg::Grpo => "rollout -> verify -> GRPO -> gate -> promote/reject",

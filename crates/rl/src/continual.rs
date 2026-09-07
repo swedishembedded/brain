@@ -75,6 +75,9 @@ use crate::objective::mixture::{Anchor, Mixture};
 const PROBE_SEED_BASE: u64 = 900_000_000;
 /// How many explore draws per cycle the pre-loop split-integrity check runs.
 const EXPLORE_AUDIT_DRAWS: u64 = 256;
+/// Salt separating the rehearsal half of that check from the explore half, so
+/// the two enumerate different seeds rather than the same 256 twice.
+const REHEARSAL_AUDIT_SALT: u64 = 0x0005_EEDA_1700;
 
 /// Which training regime a cycle runs.
 ///
@@ -574,6 +577,11 @@ pub struct StudyReport {
     pub probe_ids_checked: usize,
     /// How many explore-split task ids it checked those against.
     pub explore_ids_checked: usize,
+    /// How many REHEARSAL task ids it checked them against. Reported beside
+    /// `explore_ids_checked` rather than folded into it because they are two
+    /// claims about two different training sources: folded, one of them could
+    /// silently go to zero without the printed total moving.
+    pub rehearsal_ids_checked: usize,
 }
 
 /// The header [`run_study`] prints above its live per-cycle rows, and
@@ -646,8 +654,8 @@ impl StudyReport {
              b_fresh (Arm 2, a fresh adapter per cycle on that cycle's own probe): {fresh}\n\
              plasticity rho(N) {rho_n}   {slope}\n\
              joint-training oracle ACC {oracle}   last-task-only ACC {last_only}\n\
-             split integrity: {} frozen probe ids checked disjoint from {} explore ids\n",
-            self.acc, self.bwt, self.promotions, self.b_base, self.probe_ids_checked, self.explore_ids_checked
+             split integrity: {} frozen probe ids checked disjoint from {} explore ids and {} rehearsal ids\n",
+            self.acc, self.bwt, self.promotions, self.b_base, self.probe_ids_checked, self.explore_ids_checked, self.rehearsal_ids_checked
         )
     }
 }
@@ -816,6 +824,51 @@ fn sft_cycle_opts<C: Curriculum>(cfg: &StudyConfig, sft: &SftConfig, curr: &C, c
     }
 }
 
+/// Audit every environment a cycle's TRAINING draw can reach against the
+/// frozen probe ids, and panic naming the first task that is both.
+///
+/// There are TWO such sources, not one. Each cycle's explore split is the
+/// obvious one. The rehearsal pool is the other, and it is just as much a
+/// training source: [`ReplayEnv`] draws it under [`Regime::Grpo`] and
+/// [`rehearsal_pool`] writes it into every cycle's SFT mixture under
+/// [`Regime::Sft`]. A rehearsal environment that yields a frozen retention
+/// probe is therefore the SAME leak the explore audit exists to catch,
+/// arriving through the source that audit did not look at - and it is the
+/// worse one, because the rehearsal pool is mixed into EVERY cycle, so one
+/// colliding task contaminates the whole matrix rather than one row. A
+/// curriculum whose rehearsal suite is caller-supplied (see
+/// [`crate::document::DocumentCurriculum`]'s anchor suite) has nothing but
+/// this check standing between it and rehearsing exactly what it is scored
+/// on.
+///
+/// Returns `(explore ids checked, rehearsal ids checked)`.
+fn audit_training_sources<C: Curriculum>(curr: &C, cycles: usize, probe_ids: &HashSet<String>) -> (usize, usize) {
+    let mut explore_ids_checked = 0usize;
+    for k in 0..cycles {
+        explore_ids_checked += audit_source(&curr.env_for(k), k as u64, "explore", probe_ids);
+    }
+    let mut rehearsal_ids_checked = 0usize;
+    for (i, env) in curr.rehearsal_envs().iter().enumerate() {
+        rehearsal_ids_checked += audit_source(env, REHEARSAL_AUDIT_SALT.wrapping_add(i as u64), "rehearsal", probe_ids);
+    }
+    (explore_ids_checked, rehearsal_ids_checked)
+}
+
+/// One environment's share of [`audit_training_sources`]: draw
+/// [`EXPLORE_AUDIT_DRAWS`] tasks from `env` and assert none of their ids is a
+/// frozen retention probe. Returns how many ids it checked.
+fn audit_source<E: Environment>(env: &E, salt: u64, source: &str, probe_ids: &HashSet<String>) -> usize {
+    for s in 0..EXPLORE_AUDIT_DRAWS {
+        let t = env.tasks(s.wrapping_mul(0x9E37_79B9).wrapping_add(salt)).into_iter().next().expect("Curriculum environment produced no task");
+        assert!(
+            !probe_ids.contains(&t.id),
+            "continual::run_study: {source} task {} is also a frozen retention probe - a held-out score is only honest if the policy never trained on the task it is scored against",
+            t.id
+        );
+    }
+    EXPLORE_AUDIT_DRAWS as usize
+}
+
 /// Cycle `k`'s two SFT arms: one over the NEW rule, one over the rehearsal
 /// pool, each a `model::load_dataset` directory under `cycle_dir`.
 ///
@@ -929,19 +982,7 @@ pub fn run_study<M: Model, C: Curriculum>(spec: &StudySpec, curr: &C, cfg: &Stud
         }
     }
     assert_eq!(probe_ids.len(), cfg.cycles * cfg.eval_per_cycle);
-    let mut explore_ids_checked = 0usize;
-    for k in 0..cfg.cycles {
-        let env = curr.env_for(k);
-        for s in 0..EXPLORE_AUDIT_DRAWS {
-            let t = env.tasks(s.wrapping_mul(0x9E37_79B9).wrapping_add(k as u64)).into_iter().next().expect("Curriculum::env_for produced no task");
-            assert!(
-                !probe_ids.contains(&t.id),
-                "continual::run_study: explore task {} is also a frozen retention probe - a held-out score is only honest if the policy never trained on the task it is scored against",
-                t.id
-            );
-            explore_ids_checked += 1;
-        }
-    }
+    let (explore_ids_checked, rehearsal_ids_checked) = audit_training_sources(curr, cfg.cycles, &probe_ids);
 
     // ---- The chance baseline: the untrained base on cycle 1's probe ------
     let verifier = curr.verifier();
@@ -1156,6 +1197,7 @@ pub fn run_study<M: Model, C: Curriculum>(spec: &StudySpec, curr: &C, cfg: &Stud
         joint_oracle_acc: None,
         probe_ids_checked: probe_ids.len(),
         explore_ids_checked,
+        rehearsal_ids_checked,
     })
 }
 
@@ -1302,6 +1344,112 @@ pub fn overlay_adapter<M: Model>(pretrained: &Path, study_cfg: &M::Config, seed:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An environment whose task ids a test picks by hand, so it can decide
+    /// exactly which ids each half of a curriculum produces. `tasks` maps a
+    /// seed onto `seed % len`, the same way every real environment here does.
+    struct IdEnv {
+        ids: Vec<String>,
+    }
+
+    impl Environment for IdEnv {
+        fn name(&self) -> &str {
+            "toy-id"
+        }
+        fn tasks(&self, seed: u64) -> Vec<Task> {
+            vec![Task { id: self.ids[(seed % self.ids.len() as u64) as usize].clone(), prompt: vec![1], answer: serde_json::Value::Null }]
+        }
+    }
+
+    struct NoVerifier;
+    impl Verifier for NoVerifier {
+        fn verify(&self, _t: &Task, _s: &[crate::env::Step], _c: &[u32]) -> crate::env::Reward {
+            crate::env::Reward::default()
+        }
+    }
+
+    /// A curriculum whose explore, eval and rehearsal halves are three
+    /// caller-chosen id lists - enough to drive the split-integrity audit
+    /// with no model, no checkpoint and no device.
+    struct ThreeWay {
+        explore: Vec<String>,
+        eval: Vec<String>,
+        rehearsal: Vec<String>,
+    }
+
+    impl Curriculum for ThreeWay {
+        type Env = IdEnv;
+        type Ver = NoVerifier;
+        fn env_for(&self, _cycle: usize) -> IdEnv {
+            IdEnv { ids: self.explore.clone() }
+        }
+        fn eval_env_for(&self, _cycle: usize) -> IdEnv {
+            IdEnv { ids: self.eval.clone() }
+        }
+        fn verifier(&self) -> NoVerifier {
+            NoVerifier
+        }
+        fn label(&self, cycle: usize) -> String {
+            format!("toy{cycle}")
+        }
+        fn shape(&self) -> (usize, usize) {
+            (1, 1)
+        }
+        fn rehearsal_envs(&self) -> Vec<IdEnv> {
+            vec![IdEnv { ids: self.rehearsal.clone() }]
+        }
+        fn rehearsal_len(&self) -> usize {
+            1
+        }
+    }
+
+    fn probe_id_set(ids: &[&str]) -> HashSet<String> {
+        ids.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// The explore half of the audit, unchanged: a cycle's own training
+    /// environment may not reach a frozen retention probe.
+    #[test]
+    #[should_panic(expected = "explore task p1 is also a frozen retention probe")]
+    fn an_explore_environment_that_yields_a_frozen_probe_is_refused() {
+        let curr = ThreeWay {
+            explore: vec!["x0".to_string(), "p1".to_string()],
+            eval: vec!["p0".to_string(), "p1".to_string()],
+            rehearsal: vec!["r0".to_string()],
+        };
+        let _ = audit_training_sources(&curr, 1, &probe_id_set(&["p0", "p1"]));
+    }
+
+    /// The REHEARSAL pool is a training source too - `ReplayEnv` draws it
+    /// under `Regime::Grpo` and `rehearsal_pool` writes it into every cycle's
+    /// SFT mixture under `Regime::Sft` - so a rehearsal environment that
+    /// yields a frozen retention probe is the same leak, arriving through the
+    /// one training source the audit did not cover. Auditing only the explore
+    /// half leaves a curriculum free to REHEARSE the exact tasks it is scored
+    /// on, and every held-out number in the study is then a memorisation
+    /// score with nothing saying so.
+    #[test]
+    #[should_panic(expected = "rehearsal task p1 is also a frozen retention probe")]
+    fn a_rehearsal_environment_that_yields_a_frozen_probe_is_refused() {
+        let curr = ThreeWay {
+            explore: vec!["x0".to_string(), "x1".to_string()],
+            eval: vec!["p0".to_string(), "p1".to_string()],
+            rehearsal: vec!["r0".to_string(), "p1".to_string()],
+        };
+        let _ = audit_training_sources(&curr, 1, &probe_id_set(&["p0", "p1"]));
+    }
+
+    /// A genuinely disjoint curriculum passes, and the two counts are
+    /// reported separately - the non-vacuity check on the test above, since a
+    /// rehearsal count of zero would mean the rehearsal half was never drawn
+    /// from at all.
+    #[test]
+    fn a_disjoint_curriculum_passes_and_reports_both_source_counts() {
+        let curr = ThreeWay { explore: vec!["x0".to_string()], eval: vec!["p0".to_string()], rehearsal: vec!["r0".to_string()] };
+        let (explore, rehearsal) = audit_training_sources(&curr, 2, &probe_id_set(&["p0"]));
+        assert_eq!(explore, 2 * EXPLORE_AUDIT_DRAWS as usize, "every cycle's explore split is drawn from");
+        assert_eq!(rehearsal, EXPLORE_AUDIT_DRAWS as usize, "and so is every rehearsal environment");
+    }
 
     /// A hand-built 3x3 lower-triangular R matrix with a deliberately
     /// NEGATIVE backward transfer: task 1 was learned at 0.90 and ends at
