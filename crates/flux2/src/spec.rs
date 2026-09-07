@@ -13,7 +13,7 @@
 //! tensor value or touches a device - see [`ArchSpec::validate`]'s contract.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use brain_modelstore::inventory::{ArtifactKind, ArtifactRecord};
 use brain_modelstore::plan::declared_architecture;
@@ -95,79 +95,6 @@ fn classify_safetensors(idx: usize, rec: &ArtifactRecord, out: &mut Vec<(usize, 
     }
 }
 
-/// The path component directly under `root` that `path` falls within (the
-/// vendor directory, in store terms) - `None` if `path` is not under `root`
-/// at all. Two paths sharing this are two artifacts published by the same
-/// vendor, regardless of how deeply either one is nested below that point:
-/// a plain HF checkpoint's own directory, a diffusers pipeline's per-role
-/// subdirectories, and a hand-placed loose file plus its own small
-/// tokenizer-only sub-repo are all real, differently-shaped layouts a real
-/// vendor's release takes - and all share this one property.
-fn vendor_dir(path: &Path, root: &Path) -> Option<PathBuf> {
-    let rel = path.strip_prefix(root).ok()?;
-    rel.components().next().map(|c| root.join(c))
-}
-
-/// A tokenizer's own vocabulary size: the BPE `vocab` table plus
-/// `added_tokens` - real content, not the file's name.
-fn tokenizer_vocab_count(bytes: &[u8]) -> Option<usize> {
-    let v: serde_json::Value = serde_json::from_slice(bytes).ok()?;
-    let base = v.get("model")?.get("vocab")?.as_object()?.len();
-    let added = v.get("added_tokens").and_then(|a| a.as_array()).map_or(0, Vec::len);
-    Some(base + added)
-}
-
-/// The embedding table row count a text encoder candidate declares: an HF
-/// directory's `config.json` `vocab_size`, or a GGUF's own
-/// `tokenizer.ggml.tokens` array length (the real embedded vocab, present on
-/// every real release regardless of whether a separate `vocab_size` KV is).
-fn text_encoder_vocab_size(path: &Path) -> Option<usize> {
-    if path.extension().is_some_and(|e| e == "gguf") {
-        let g = MmapGguf::open(&path.to_string_lossy()).ok()?;
-        g.kv().get("tokenizer.ggml.tokens").and_then(|v| if let checkpoint::gguf::GgufValue::Array(a) = v { Some(a.len()) } else { None })
-    } else {
-        let bytes = std::fs::read(path.join("config.json")).ok()?;
-        let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-        v.get("vocab_size").and_then(serde_json::Value::as_u64).map(|n| n as usize)
-    }
-}
-
-/// A tokenizer whose own vocabulary is within 5% of a candidate's declared
-/// embedding-table size: real checkpoints pad the embedding table a little
-/// past the tokenizer's literal entry count (reserved/unused slots), so
-/// exact equality is too strict, but a genuinely different model's
-/// tokenizer (a different vocabulary entirely, not a padding difference)
-/// misses by a wide margin, not a few hundred tokens.
-fn vocab_is_compatible(tokenizer_count: usize, encoder_vocab_size: usize) -> bool {
-    tokenizer_count <= encoder_vocab_size && encoder_vocab_size - tokenizer_count <= encoder_vocab_size / 20
-}
-
-/// A `tokenizer.json` carries no `architecture`/`_class_name` field of its
-/// own, so "is this valid JSON" is true of every tokenizer in the whole
-/// store, from every unrelated architecture - not enough on its own. Real
-/// signal is two-fold: the file was published by the same vendor
-/// ([`vendor_dir`]) as a component this same call already classified as a
-/// FLUX.2 role, AND (since one vendor commonly publishes several unrelated
-/// models under the same directory - a real store has this) its own
-/// vocabulary size is actually compatible with at least one of that
-/// vendor's text_encoder candidates, not merely a different model that
-/// happens to share a top-level folder.
-fn classify_tokenizer(idx: usize, rec: &ArtifactRecord, root: &Path, vendor_dirs: &std::collections::BTreeSet<PathBuf>, text_encoder_candidates: &[&Path], out: &mut Vec<(usize, String, Confidence)>) {
-    let Ok(bytes) = std::fs::read(&rec.path) else { return };
-    let Some(tok_count) = tokenizer_vocab_count(&bytes) else { return };
-    let Some(vendor) = vendor_dir(&rec.path, root) else { return };
-    if !vendor_dirs.contains(&vendor) {
-        return;
-    }
-    let compatible = text_encoder_candidates
-        .iter()
-        .filter(|p| vendor_dir(p, root).as_deref() == Some(vendor.as_path()))
-        .any(|p| text_encoder_vocab_size(p).is_some_and(|v| vocab_is_compatible(tok_count, v)));
-    if compatible {
-        out.push((idx, "tokenizer".to_string(), Confidence::Declared));
-    }
-}
-
 /// `txt_in.weight`'s second dimension - a pure header shape lookup, zero
 /// tensor bytes read.
 fn dit_context_in_dim(path: &Path) -> Result<usize, String> {
@@ -218,15 +145,12 @@ impl ArchSpec for Flux2Spec {
                 _ => {}
             }
         }
-        // Pass 2: tokenizer, using pass 1's own results as the real signal
-        // a bare "is this valid JSON" check cannot provide on its own.
-        let vendor_dirs: std::collections::BTreeSet<PathBuf> = out.iter().filter_map(|(idx, ..)| vendor_dir(&records[*idx].path, inventory_root)).collect();
+        // Pass 2: tokenizer, using pass 1's own results (the text_encoder
+        // candidates) as the real signal a bare "is this valid JSON" check
+        // cannot provide on its own - shared with every other architecture
+        // that has a tokenizer-shaped role, not flux2-specific.
         let text_encoder_candidates: Vec<&Path> = out.iter().filter(|(_, role, _)| role == "text_encoder").map(|(idx, ..)| records[*idx].path.as_path()).collect();
-        for (idx, rec) in records.iter().enumerate() {
-            if rec.usable() && rec.kind == ArtifactKind::TokenizerJson {
-                classify_tokenizer(idx, rec, inventory_root, &vendor_dirs, &text_encoder_candidates, &mut out);
-            }
-        }
+        brain_modelstore::resolve::classify_tokenizer_role(records, inventory_root, "tokenizer", &text_encoder_candidates, &mut out);
         out
     }
 

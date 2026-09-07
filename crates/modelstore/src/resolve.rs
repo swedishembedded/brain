@@ -342,6 +342,99 @@ pub fn resolve(arch: &str, records: &[ArtifactRecord], specs: &[&dyn ArchSpec], 
     }
 }
 
+// ===================== shared tokenizer-role classification =====================
+//
+// A tokenizer.json carries no `architecture`/`_class_name` field of its own
+// to check against, so "is this valid JSON" is true of every tokenizer.json
+// in an entire store, from every unrelated architecture. Every architecture
+// with a tokenizer-shaped role (flux2's `tokenizer`, and every future
+// architecture with one - wan, s3dit, cosyvoice, minimaxmusic3, qwen3tts all
+// have the identical shape) needs the same two real signals to narrow that
+// down: the file was published by the same vendor as a component this same
+// `classify` call already identified as one of that architecture's real
+// roles, AND its own vocabulary size is actually compatible with that
+// component's declared embedding-table size - one vendor commonly publishes
+// several differently-sized, differently-vocabbed models under the same
+// top-level directory, so vendor alone is not enough either.
+
+/// The path component directly under `root` that `path` falls within (the
+/// vendor directory, in store terms) - `None` if `path` is not under `root`
+/// at all. Two paths sharing this are two artifacts published by the same
+/// vendor, regardless of how deeply either one is nested below that point:
+/// a plain HF checkpoint's own directory, a diffusers pipeline's per-role
+/// subdirectories, and a hand-placed loose file plus its own small
+/// tokenizer-only sub-repo are all real, differently-shaped layouts a real
+/// vendor's release takes - and all share this one property.
+pub fn vendor_dir(path: &Path, root: &Path) -> Option<PathBuf> {
+    let rel = path.strip_prefix(root).ok()?;
+    rel.components().next().map(|c| root.join(c))
+}
+
+/// A tokenizer's own vocabulary size: the BPE `vocab` table plus
+/// `added_tokens` - real content, not the file's name.
+pub fn tokenizer_vocab_count(bytes: &[u8]) -> Option<usize> {
+    let v: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    let base = v.get("model")?.get("vocab")?.as_object()?.len();
+    let added = v.get("added_tokens").and_then(|a| a.as_array()).map_or(0, Vec::len);
+    Some(base + added)
+}
+
+/// The embedding table row count a checkpoint declares: an HF directory's
+/// `config.json` `vocab_size`, or a GGUF's own `tokenizer.ggml.tokens` array
+/// length (the real embedded vocab, present on every real release regardless
+/// of whether a separate `vocab_size` KV is).
+pub fn checkpoint_vocab_size(path: &Path) -> Option<usize> {
+    if path.extension().is_some_and(|e| e == "gguf") {
+        let g = checkpoint::gguf::MmapGguf::open(&path.to_string_lossy()).ok()?;
+        g.kv().get("tokenizer.ggml.tokens").and_then(|v| if let checkpoint::gguf::GgufValue::Array(a) = v { Some(a.len()) } else { None })
+    } else {
+        let bytes = std::fs::read(path.join("config.json")).ok()?;
+        let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+        v.get("vocab_size").and_then(serde_json::Value::as_u64).map(|n| n as usize)
+    }
+}
+
+/// A tokenizer whose own vocabulary is within 5% of a candidate's declared
+/// embedding-table size: real checkpoints pad the embedding table a little
+/// past the tokenizer's literal entry count (reserved/unused slots), so
+/// exact equality is too strict, but a genuinely different model's
+/// tokenizer (a different vocabulary entirely, not a padding difference)
+/// misses by a wide margin, not a few hundred tokens.
+pub fn vocab_is_compatible(tokenizer_count: usize, checkpoint_vocab: usize) -> bool {
+    tokenizer_count <= checkpoint_vocab && checkpoint_vocab - tokenizer_count <= checkpoint_vocab / 20
+}
+
+/// Classify every usable [`crate::inventory::ArtifactKind::TokenizerJson`]
+/// record in `records` as `role`, using [`vendor_dir`] and
+/// [`vocab_is_compatible`] as the real signal a bare "is this valid JSON"
+/// check cannot provide. `dependency_candidates` is the set of already
+/// classified paths this tokenizer must pair with (an architecture's own
+/// text-encoder/LLM-shaped role candidates, from earlier in the same
+/// `classify` call) - a tokenizer is a candidate only if it shares a vendor
+/// with at least one of them AND its own vocabulary is compatible with that
+/// same candidate's declared embedding size.
+///
+/// Appends to `out` in place, matching every other `classify_*` helper in
+/// this module.
+pub fn classify_tokenizer_role(records: &[ArtifactRecord], root: &Path, role: &str, dependency_candidates: &[&Path], out: &mut Vec<(usize, String, Confidence)>) {
+    let vendor_dirs: std::collections::BTreeSet<PathBuf> = dependency_candidates.iter().filter_map(|p| vendor_dir(p, root)).collect();
+    for (idx, rec) in records.iter().enumerate() {
+        if !rec.usable() || rec.kind != crate::inventory::ArtifactKind::TokenizerJson {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(&rec.path) else { continue };
+        let Some(tok_count) = tokenizer_vocab_count(&bytes) else { continue };
+        let Some(vendor) = vendor_dir(&rec.path, root) else { continue };
+        if !vendor_dirs.contains(&vendor) {
+            continue;
+        }
+        let compatible = dependency_candidates.iter().filter(|p| vendor_dir(p, root).as_deref() == Some(vendor.as_path())).any(|p| checkpoint_vocab_size(p).is_some_and(|v| vocab_is_compatible(tok_count, v)));
+        if compatible {
+            out.push((idx, role.to_string(), Confidence::Declared));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -352,6 +445,68 @@ mod tests {
 
     fn partial_rec(path: &str, final_path: &str) -> ArtifactRecord {
         ArtifactRecord { path: PathBuf::from(path), size: 1, mtime_ns: 0, kind: crate::inventory::ArtifactKind::Opaque, completeness: Completeness::Partial { final_path: PathBuf::from(final_path) } }
+    }
+
+    fn tmp(tag: &str) -> PathBuf {
+        static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        std::env::temp_dir().join(format!("brain-modelstore-resolve-test-{tag}-{}-{n}", std::process::id()))
+    }
+
+    fn complete(path: PathBuf, kind: crate::inventory::ArtifactKind) -> ArtifactRecord {
+        ArtifactRecord { path, size: 1, mtime_ns: 0, kind, completeness: Completeness::Complete }
+    }
+
+    fn write_tokenizer_json(path: &Path, vocab_count: usize) {
+        let vocab: serde_json::Map<String, serde_json::Value> = (0..vocab_count).map(|i| (format!("t{i}"), serde_json::json!(i))).collect();
+        std::fs::write(path, serde_json::to_vec(&serde_json::json!({"model": {"vocab": vocab}, "added_tokens": []})).unwrap()).unwrap();
+    }
+
+    fn write_hf_checkpoint(dir: &Path, vocab_size: usize) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("config.json"), serde_json::to_vec(&serde_json::json!({"vocab_size": vocab_size})).unwrap()).unwrap();
+    }
+
+    /// Two different architectures' tokenizer-classification needs, at
+    /// once: a role whose real candidate lives in the SAME vendor directory
+    /// as the checkpoint it must pair with, at a matching vocab size, and a
+    /// same-vendor-but-wrong-model tokenizer (a real store commonly has
+    /// exactly this - one vendor publishing several differently-sized
+    /// checkpoints) that must not classify despite sharing the vendor.
+    #[test]
+    fn classify_tokenizer_role_requires_both_vendor_and_vocab_match() {
+        let dir = tmp("tokenizer-role");
+        let checkpoint_dir = dir.join("vendor").join("model-a");
+        write_hf_checkpoint(&checkpoint_dir, 100);
+        let real_tok = dir.join("vendor").join("model-a").join("tokenizer.json");
+        write_tokenizer_json(&real_tok, 100);
+        // Same vendor, a DIFFERENT (larger) checkpoint - real signal a
+        // vendor-only check would miss.
+        let other_checkpoint_dir = dir.join("vendor").join("model-b");
+        write_hf_checkpoint(&other_checkpoint_dir, 400);
+        let mismatched_tok = dir.join("vendor").join("model-b-tokenizer.json");
+        write_tokenizer_json(&mismatched_tok, 400);
+        // A different vendor entirely, with a vocab size that WOULD match
+        // model-a if vendor weren't checked at all.
+        let unrelated_tok = dir.join("other-vendor").join("tokenizer.json");
+        std::fs::create_dir_all(unrelated_tok.parent().unwrap()).unwrap();
+        write_tokenizer_json(&unrelated_tok, 100);
+
+        let records = vec![complete(real_tok.clone(), crate::inventory::ArtifactKind::TokenizerJson), complete(mismatched_tok, crate::inventory::ArtifactKind::TokenizerJson), complete(unrelated_tok, crate::inventory::ArtifactKind::TokenizerJson)];
+        let dependency_candidates: Vec<&Path> = vec![checkpoint_dir.as_path()];
+        let mut out = Vec::new();
+        classify_tokenizer_role(&records, &dir, "tokenizer", &dependency_candidates, &mut out);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(records[out[0].0].path, real_tok);
+    }
+
+    /// Padding tolerance: a real checkpoint's declared vocab_size is
+    /// slightly larger than the tokenizer's literal entry count (reserved
+    /// slots) - within 5% must still match.
+    #[test]
+    fn vocab_is_compatible_tolerates_real_world_padding_but_not_a_different_model() {
+        assert!(vocab_is_compatible(151_669, 151_936), "real Qwen3-8B numbers must be compatible");
+        assert!(!vocab_is_compatible(151_669, 248_320), "a genuinely different model's vocab must not be compatible");
     }
 
     /// A toy single-role arch: "dit" only, one candidate classifies at
