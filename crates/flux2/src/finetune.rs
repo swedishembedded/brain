@@ -44,9 +44,10 @@ use std::path::Path;
 
 use crate::config::Flux2Config;
 use crate::devtrain::DeviceTrainer;
-use crate::lora::{save_adapter, LoraAdapter, LoraCfg};
+use crate::lora::{save_adapter, LoraAdapter};
 use crate::modelgrad::{self, make_flow_batch, Batch, Cfg, ModelWeights};
 use crate::pipeline::{Paths, PAD_TOKEN, TAP_LAYERS};
+use model::adapter::TargetHp;
 use data::qwen_tokenizer::QwenBpe;
 use data::Tokenizer;
 
@@ -239,6 +240,14 @@ pub struct TrainOpts {
     /// because silently continuing from whatever happens to be lying at the
     /// output path is how a run inherits an unrelated adapter.
     pub resume: bool,
+    /// rsLoRA: scale `alpha/sqrt(rank)` instead of `alpha/rank`, so the
+    /// update is not increasingly suppressed as rank grows.
+    pub rank_stabilized: bool,
+    /// LoRA+: `B`'s effective learning rate is `lr_ratio * lr`. `1.0` (the
+    /// default) is plain LoRA.
+    pub lr_ratio: f32,
+    /// LoRA-FA: freeze `A` at its random init: only `B` trains.
+    pub freeze_a: bool,
 }
 
 /// Fine-tune a LoRA adapter on `dir` (a captioned-image folder — see
@@ -326,6 +335,13 @@ pub fn run(
                 opts.rank
             ));
         }
+        let saved_hp = ad.hp();
+        if saved_hp.rank_stabilized != opts.rank_stabilized || saved_hp.lr_ratio != opts.lr_ratio || saved_hp.freeze_a != opts.freeze_a {
+            return Err(format!(
+                "{}: adapter was trained with rs={} lr_ratio={} freeze_a={}, this run asks for rs={} lr_ratio={} freeze_a={} - resuming would silently change the training method mid-run",
+                opts.save_path, saved_hp.rank_stabilized, saved_hp.lr_ratio, saved_hp.freeze_a, opts.rank_stabilized, opts.lr_ratio, opts.freeze_a
+            ));
+        }
         let done = ad.steps_done() as u32;
         if done >= opts.steps {
             return Err(format!(
@@ -343,7 +359,15 @@ pub fn run(
         if opts.resume {
             progress(0, opts.steps + 1, format!("--resume: nothing at {}, starting fresh", opts.save_path));
         }
-        (LoraAdapter::new(&cfg, LoraCfg { seed: opts.seed, ..LoraCfg::new(opts.rank) }), 0)
+        let hp = TargetHp {
+            rank: opts.rank,
+            alpha: opts.rank as f32,
+            rank_stabilized: opts.rank_stabilized,
+            dropout: 0.0,
+            lr_ratio: opts.lr_ratio,
+            freeze_a: opts.freeze_a,
+        };
+        (LoraAdapter::new_with_hp(&cfg, hp, opts.seed), 0)
     };
     let mut rng = data::rng::Rng::new(opts.seed ^ 0x5eed_f10c);
     // Advance the sigma stream past the steps already taken. `sigma` is one

@@ -85,6 +85,9 @@ pub fn manifest() -> Manifest {
         .param(ParamSpec::new("cards", ParamType::Int, "GPUs the device trainer spreads the block stack over (klein-9b's fp32 frozen base does not fit one 24 GiB card)").default(json!(1)))
         .param(ParamSpec::new("trainer", ParamType::Enum(vec!["device".into(), "host".into()]), "gradient implementation: 'device' runs the WGSL kernels with the frozen base on the card; 'host' is the finite-difference-gradchecked reference it is validated against").default(json!("device")))
         .param(ParamSpec::new("variant", ParamType::Enum(VARIANTS.iter().map(|s| s.to_string()).collect()), "base model to adapt; 9B needs BRAIN_FLUX2_ALLOW_NC=1").default(json!("klein-4b")))
+        .param(ParamSpec::new("method", ParamType::Enum(vec!["lora".into(), "rslora".into()]), "adapter scale: 'lora' is alpha/rank, 'rslora' is alpha/sqrt(rank) (rank-stabilized, does not suppress the update as rank grows)").default(json!("lora")))
+        .param(ParamSpec::new("lr_ratio", ParamType::Float, "LoRA+ : B's effective learning rate is lr_ratio*lr; 1.0 (the default) is plain LoRA").default(json!(1.0)).min(1.0).max(64.0))
+        .param(ParamSpec::new("freeze_a", ParamType::Bool, "LoRA-FA: freeze A at its random init, train only B").default(json!(false)))
         .output(BlobSpec::new("adapter", Media::Bytes, "the trained LoRA adapter checkpoint"));
 
     Manifest::new(
@@ -301,6 +304,9 @@ pub fn train_action(paths: &Paths, inv: &Invocation, progress: &mut dyn FnMut(Pr
         // A served run is the one most likely to be cancelled and re-issued,
         // so the same request repeated continues rather than restarting.
         resume: inv.get_bool("resume").unwrap_or(false),
+        rank_stabilized: inv.get_str("method").unwrap_or_else(|| "lora".into()) == "rslora",
+        lr_ratio: inv.get_f64("lr_ratio").unwrap_or(1.0) as f32,
+        freeze_a: inv.get_bool("freeze_a").unwrap_or(false),
     };
     let mut prog = |step: u32, total: u32, message: String| progress(Progress::step(step, total, message));
     let adapter = crate::finetune::run(&cfg, paths, std::path::Path::new(&dir), &opts, &inv.cancel, &mut prog)?;
@@ -429,6 +435,13 @@ mod tests {
         assert!(lt.params.iter().any(|p| p.name == "data" && p.required));
         assert!(lt.params.iter().any(|p| p.name == "save" && p.required));
         assert!(lt.outputs.iter().any(|b| b.name == "adapter" && b.media == Media::Bytes));
+        // method/lr_ratio/freeze_a are params on this SAME action, not a new
+        // one - the action list assertion above already pins that.
+        let method = lt.params.iter().find(|p| p.name == "method").unwrap();
+        assert_eq!(method.default, Some(json!("lora")));
+        assert!(matches!(&method.ty, ParamType::Enum(v) if v == &["lora".to_string(), "rslora".to_string()]));
+        assert_eq!(lt.params.iter().find(|p| p.name == "lr_ratio").unwrap().default, Some(json!(1.0)));
+        assert_eq!(lt.params.iter().find(|p| p.name == "freeze_a").unwrap().default, Some(json!(false)));
         // the whole manifest round-trips to JSON for discovery.
         let j = m.to_json();
         assert_eq!(j["actions"].as_array().unwrap().len(), 3);

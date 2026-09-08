@@ -128,3 +128,38 @@ fn resuming_at_a_different_rank_is_refused() {
     assert_ne!(loaded.rank(), asked_for, "the guard's premise: the file's rank differs from the request");
     let _ = std::fs::remove_file(&path);
 }
+
+/// The premise `finetune::run`'s rs/lr_ratio/freeze_a resume guard depends
+/// on: those three fields round-trip through save/load exactly, on top of
+/// (not instead of) the existing rank/alpha/steps fields. An adapter saved
+/// before these fields existed (`a_checkpoint_without_a_step_count_still_
+/// loads`'s header shape) must still load as plain LoRA - checked here by
+/// asserting `TargetHp::new`'s (the pre-existing, always-plain-LoRA path's)
+/// own defaults match what an old header falls back to.
+#[test]
+fn rs_lr_ratio_and_freeze_a_round_trip_through_save_and_load() {
+    use model::adapter::TargetHp;
+
+    let c = cfg();
+    let path = tmp("hpguard");
+    let hp = TargetHp { rank: RANK, alpha: RANK as f32 * 2.0, rank_stabilized: true, dropout: 0.0, lr_ratio: 4.0, freeze_a: true };
+    let ad = LoraAdapter::new_with_hp(&c, hp, 7);
+    save_adapter(&path, &ad);
+
+    let loaded = load_adapter(&path, &c).expect("reload");
+    let got = loaded.hp();
+    assert_eq!(got.rank, hp.rank);
+    assert_eq!(got.alpha, hp.alpha);
+    assert!(got.rank_stabilized, "rs must round-trip");
+    assert_eq!(got.lr_ratio, hp.lr_ratio, "lr_ratio must round-trip");
+    assert!(got.freeze_a, "freeze_a must round-trip");
+    let _ = std::fs::remove_file(&path);
+
+    // A plain-LoRA adapter (what every pre-M12 checkpoint is) still loads
+    // with the documented old-header fallback defaults: no rs, ratio 1.0,
+    // A trainable - exactly TargetHp::new's own shape.
+    let plain = TargetHp::new(RANK, RANK as f32);
+    assert!(!plain.rank_stabilized);
+    assert_eq!(plain.lr_ratio, 1.0);
+    assert!(!plain.freeze_a);
+}

@@ -68,7 +68,7 @@ const HELP: &str = "brain flux2 <cmd>
            [--lora-scale S]         # LoRA strength (ComfyUI strength_model), default 1.0
   finetune <data_dir> --out <adapter.brain> [--variant V] [--steps N] [--rank R] [--lr X]
            [--size S] [--seed K] [--ckpt-every N] [--resume] [--trainer device|host] [--cards N]
-           [--text-encoder <path>]
+           [--text-encoder <path>] [--method lora|rslora] [--lr-ratio X] [--freeze-a]
            # Train a LoRA on a folder of captioned images (see data::imageset for
            # the caption formats; `brain label` writes one). The adapter it writes
            # is what `generate --adapter` loads. Do NOT name it '.safetensors':
@@ -93,6 +93,12 @@ const HELP: &str = "brain flux2 <cmd>
            #                   minutes per step at klein scale)
            #   --cards N       GPUs the device trainer spreads the stack over
            #                   (default 1; klein-9b's fp32 base needs 2)
+           #   --method M      lora (default, alpha/rank) or rslora
+           #                   (alpha/sqrt(rank) - does not suppress the update
+           #                   as rank grows)
+           #   --lr-ratio X    LoRA+: B's effective lr is lr-ratio*lr (default
+           #                   1.0, plain LoRA)
+           #   --freeze-a      LoRA-FA: freeze A at its random init, train only B
            # Both trainers run the same op sequence; the device one keeps the
            # frozen base on the card and differentiates only the low-rank
            # factors. Which one ran is printed at the top of every run.
@@ -450,6 +456,9 @@ fn finetune(args: &[String]) -> Result<(), String> {
         save_path: String::new(),
         ckpt_every: 100,
         resume: false,
+        rank_stabilized: false,
+        lr_ratio: 1.0,
+        freeze_a: false,
     };
     let mut i = 0;
     while i < args.len() {
@@ -475,6 +484,19 @@ fn finetune(args: &[String]) -> Result<(), String> {
             "--trainer" => opts.trainer = flux2::finetune::Trainer::from_name(need(i)?)?,
             "--text-encoder" => ft_text_encoder = Some(need(i)?.clone()),
             "--cards" => opts.cards = need(i)?.parse().map_err(|e| format!("--cards: {e}"))?,
+            "--method" => {
+                opts.rank_stabilized = match need(i)?.as_str() {
+                    "lora" => false,
+                    "rslora" => true,
+                    other => return Err(format!("--method: {other} is not one of lora, rslora")),
+                }
+            }
+            "--lr-ratio" => opts.lr_ratio = need(i)?.parse().map_err(|e| format!("--lr-ratio: {e}"))?,
+            "--freeze-a" => {
+                opts.freeze_a = true;
+                i += 1;
+                continue;
+            }
             "--help" | "-h" => {
                 println!("{HELP}");
                 return Ok(());
@@ -520,9 +542,19 @@ fn finetune(args: &[String]) -> Result<(), String> {
     let cfg = Flux2Config::from_name(&variant_name)?;
 
     eprintln!(
-        "flux2 finetune: {variant_name} {} trainer, rank {} steps {} size {} lr {} seed {} ckpt-every {}{} -> {}",
-        opts.trainer.name(), opts.rank, opts.steps, opts.size, opts.lr, opts.seed, opts.ckpt_every,
-        if opts.resume { " resume" } else { "" }, opts.save_path
+        "flux2 finetune: {variant_name} {} trainer, rank {} ({}) steps {} size {} lr {} (x{} on B) seed {} ckpt-every {}{}{} -> {}",
+        opts.trainer.name(),
+        opts.rank,
+        if opts.rank_stabilized { "rslora" } else { "lora" },
+        opts.steps,
+        opts.size,
+        opts.lr,
+        opts.lr_ratio,
+        opts.seed,
+        opts.ckpt_every,
+        if opts.freeze_a { " freeze-a" } else { "" },
+        if opts.resume { " resume" } else { "" },
+        opts.save_path
     );
     // The CLI has no cancel front-end - an unarmed Default token never fires.
     let cancel = capability::CancelToken::default();

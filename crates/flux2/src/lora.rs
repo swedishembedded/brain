@@ -202,9 +202,18 @@ pub struct LoraAdapter {
 impl LoraAdapter {
     /// Fresh adapter (B=0 → initial no-op) sized for `cfg`.
     pub fn new(cfg: &Cfg, lc: LoraCfg) -> LoraAdapter {
+        Self::new_with_hp(cfg, TargetHp::from(lc), lc.seed)
+    }
+
+    /// [`Self::new`], with every [`TargetHp`] field a caller wants (rsLoRA,
+    /// LoRA+'s `lr_ratio`, LoRA-FA's `freeze_a`) instead of only what
+    /// [`LoraCfg`] carries - what `brain flux2 finetune --method/--lr-ratio/
+    /// --freeze-a` builds from. `seed` is separate from `hp` because
+    /// `TargetHp` has no seed field (it is a training-time draw, not an
+    /// adapter hyperparameter).
+    pub fn new_with_hp(cfg: &Cfg, hp: TargetHp, seed: u64) -> LoraAdapter {
         let sites = linear_sites(cfg);
-        let hp = TargetHp::from(lc);
-        let mut rng = data::rng::Rng::new(lc.seed ^ 0xf1a2_b3c4_d5e6_0789);
+        let mut rng = data::rng::Rng::new(seed ^ 0xf1a2_b3c4_d5e6_0789);
         // Same init distribution as before the model::lora hoist (uniform,
         // ±0.02) so existing seeds reproduce bit-identical adapters.
         let mut init = move || (rng.next_f64() - 0.5) as f32 * 0.04;
@@ -214,6 +223,11 @@ impl LoraAdapter {
 
     pub fn rank(&self) -> usize {
         self.hp.rank
+    }
+    /// The full hyperparameter set this adapter was built with - what a
+    /// caller checks a resumed run's request against (see `finetune::run`).
+    pub fn hp(&self) -> TargetHp {
+        self.hp
     }
     /// Optimiser steps already folded into this adapter. Persisted in the
     /// checkpoint header so an interrupted run can pick up its schedule -
@@ -352,8 +366,12 @@ impl LoraAdapter {
     /// Reload an adapter (weights only; Adam state reset) from [`Self::to_tensors`]
     /// output — a fresh adapter of the right shape with `A,B` overwritten.
     pub fn from_tensors(cfg: &Cfg, lc: LoraCfg, tensors: &std::collections::HashMap<String, Vec<f32>>) -> Result<LoraAdapter, String> {
+        Self::from_tensors_with_hp(cfg, TargetHp::from(lc), tensors)
+    }
+
+    /// [`Self::from_tensors`], with a full [`TargetHp`] - see [`Self::new_with_hp`].
+    pub fn from_tensors_with_hp(cfg: &Cfg, hp: TargetHp, tensors: &std::collections::HashMap<String, Vec<f32>>) -> Result<LoraAdapter, String> {
         let sites = linear_sites(cfg);
-        let hp = TargetHp::from(lc);
         // flux2's own checkpoint round-trip never carried shapes (`load_adapter`
         // reads a plain name->data map) - wrap with an empty shape per tensor
         // so `LoraPair::load_tensors` falls back to its length check, the
@@ -592,9 +610,16 @@ pub fn save_adapter(path: &str, ad: &LoraAdapter) {
         .into_iter()
         .map(|(n, s, d)| (n, s.iter().map(|&x| x as u64).collect(), d))
         .collect();
+    let hp = ad.hp();
     checkpoint::save(
         path,
-        serde_json::json!({"model": "flux2-lora", "rank": ad.rank(), "alpha": ad.alpha(), "steps": ad.steps_done()}),
+        serde_json::json!({
+            "model": "flux2-lora", "rank": ad.rank(), "alpha": ad.alpha(), "steps": ad.steps_done(),
+            // Additive: a reader from before these existed uses their
+            // documented defaults (see load_adapter) and gets plain LoRA -
+            // exactly what every adapter saved before this change was.
+            "rs": hp.rank_stabilized, "lr_ratio": hp.lr_ratio, "freeze_a": hp.freeze_a,
+        }),
         &t,
     );
 }
@@ -615,10 +640,16 @@ pub fn load_adapter(path: &str, cfg: &Cfg) -> Result<LoraAdapter, String> {
     }
     let rank = c.header["config"]["rank"].as_u64().ok_or("adapter: missing rank in header")? as usize;
     let alpha = c.header["config"]["alpha"].as_f64().unwrap_or(rank as f64) as f32;
+    // Additive fields, defaulting to plain LoRA for a file saved before they
+    // existed: no rank-stabilization, no LoRA+ ratio, A trainable.
+    let rank_stabilized = c.header["config"]["rs"].as_bool().unwrap_or(false);
+    let lr_ratio = c.header["config"]["lr_ratio"].as_f64().unwrap_or(1.0) as f32;
+    let freeze_a = c.header["config"]["freeze_a"].as_bool().unwrap_or(false);
+    let hp = TargetHp { rank, alpha, rank_stabilized, dropout: 0.0, lr_ratio, freeze_a };
     let map: std::collections::HashMap<String, Vec<f32>> =
         c.tensors.into_iter().map(|t| (t.name, t.data)).collect();
     let steps = c.header["config"]["steps"].as_u64().unwrap_or(0);
-    let mut ad = LoraAdapter::from_tensors(cfg, LoraCfg { rank, alpha, seed: 0 }, &map)?;
+    let mut ad = LoraAdapter::from_tensors_with_hp(cfg, hp, &map)?;
     ad.set_steps_done(steps);
     Ok(ad)
 }
