@@ -2423,13 +2423,13 @@ dispatches across the run, ~3785 dispatches per decode token, at roughly
    fp32 = 293 MB, comfortably inside the 2047 MiB storage-binding limit, but
    a real change to how `ParamStore` lays the experts out, since a duplicate
    copy would add 9.7 GB to a 13.25 GiB budget on a 24 GiB card.
-2. **Reuse bind groups across decode steps.** The decode tape is the same
-   buffer set every token; nothing in `gpu_core` caches the bind group for a
-   repeated `(pipeline, buffers)` pair. This is a gpu-core change that would
-   pay every model with a per-token dispatch loop, not just this one.
-3. **The prefill round's MoE.** `moe_linear_gated` at m=283 is still
+2. **The prefill round's MoE.** `moe_linear_gated` at m=283 is still
    element-per-thread (2112 calls, 2105 ms, the whole prefill). It is past
    the decode regime so no GEMV applies; a tiled sibling would be the fix.
+
+Item 2 of the previous list - reuse the bind group for a repeated
+`(pipeline, buffers, params)` dispatch instead of rebuilding it - is done,
+in `gpu_core` where it pays every model rather than here. See Phase 11.
 
 ### Found in passing, NOT fixed here
 
@@ -2443,3 +2443,137 @@ backend and belongs in `crates/sam1`'s ledger.
 `crates/model/tests/ops_kquant.rs` did not complete in 45 minutes under heavy
 load on this run and was killed; it is unrelated to anything here (k-quant
 ops) and was excluded from the suite run, not fixed.
+
+## Phase 11: the page was host-bound, and CLIP was running its GEMM naive
+
+Phase 10 closed with a measured claim: after the two decode-regime kernel
+tiers, GPU kernel time accounted for ~53 ms of a 129 ms decode token, and the
+rest was host-side bind-group and uniform construction across ~3785
+dispatches per token. Re-measured from scratch on the current tree, that
+still held, and it was bigger than the token figure suggested - across a
+whole 512-token page the run built **1 945 491 bind groups for 1 945 491
+dispatches**, one per dispatch, and spent more wall time doing it than the
+GPU spent computing.
+
+The vision half had a second, unrelated problem that no profile had ever
+looked at: the CLIP tower was dispatching a naive GEMM.
+
+### What was actually measured
+
+One real page (a rendered 1240x1754 text page), 283-row prompt, 512 generated
+tokens, `brain deepseek2ocr generate`, both halves on ONE Tesla P40 (`--device
+gpu1`, `$BRAIN_DEEPSEEK_OCR_DECODER_DEVICE=gpu1`), the two builds run back to
+back on an otherwise idle host:
+
+<!-- perf-number: one page, one card, one revision -->
+| | before | after |
+|---|---|---|
+| generate (encode + prefill + 512 decode) | 77.50 s | **49.45 s** |
+| of that, CLIP forward | 5.02 s | **0.15 s** |
+| of that, SAM forward | 1.18 s | 1.12 s |
+| GPU kernel time (decoder card) | 30.63 s | 30.82 s |
+| dispatches | 1 945 491 | 1 945 491 |
+| bind groups + uniform buffers built | 1 945 491 | **33 384** |
+
+**The decoded markdown is byte-identical** (1957 bytes, 512 tokens) across
+all four runs taken - both builds, both under load and idle.
+
+Decoder alone, served shape, both arms in one process on an idle host
+(`deepseek2/tests/decode_throughput.rs`, the same harness Phase 10's table
+came from), which isolates the decode step from the vision half:
+
+<!-- perf-number: one decoder, one card, one revision -->
+| decoder | 283-row prefill | per token |
+|---|---|---|
+| wgpu, Phase 10 | 3.17 s | 0.129 s |
+| **wgpu, now** | **3.11 s** | **0.059 s** |
+| CPU Cranelift JIT, now | 6.73 s | 0.125 s |
+
+Both backends decoded the same 32 ids. The CPU arm is within noise of its
+Phase 10 figure, which is the check that matters for a change made in
+`gpu_core`: the cache is armed on whichever handle the model was built on,
+and it must not cost the backend that never had the problem.
+
+The two rows that carry the argument are the last two: the dispatch count is
+unchanged to the digit, so the GPU is doing exactly the work it did before,
+and the bind-group count fell 58x because the same dispatch is now recorded
+once and re-submitted rather than rebuilt every token. GPU kernel time is
+likewise unchanged, which is the point - this was never a kernel problem.
+
+A first pair of runs taken while the host was carrying a load average near
+200 (several other build/test jobs) read 181.42 s before and 49.49 s after.
+That 3.67x is the same change measured through a contended host: the cost it
+removes is host-side, so contention inflates the "before" and barely touches
+the "after". The quiet-host 1.57x above is the honest one to quote.
+
+### The mechanism, and where it lives
+
+`gpu_core::Gpu::enable_step_cache` (new, `crates/gpu-core/src/stepcache.rs`).
+A dispatch is a pure function of `(kernel, buffers, params, threads)` - the
+backend reads nothing else to build one - so the second time a caller asks
+for the same one it can have the first one back, bit for bit. It is in
+`gpu_core` and not in this decoder because every model in the workspace that
+re-records a tape per step has the same problem; `DeepseekV2::ensure_decode`
+is simply its first caller, arming it with room for several times the
+repeating tape.
+
+Opt-in and capped, because an entry holds a strong handle to every buffer its
+key names (an `alloc_id` is an `Arc` address, and a recycled one under a live
+key would be a silent wrong-memory bug). Arm it on a handle whose buffers are
+long-lived - a built model's weights and scratch - not on one that allocates
+per call. At capacity the entries that have never been reused are dropped
+first, which is self-tuning for a decode tape: the ~3.7 k dispatches that
+repeat verbatim every token get hit and stay, and the thin
+position-carrying seam (RoPE and the attention trio, ~7 per layer) can never
+repeat and is what gets evicted.
+
+Gated by `crates/gpu-core/tests/step_cache.rs` on both backends: a replayed
+tape's results are bit-identical to a rebuilt one's; buffer CONTENTS are
+outside the key, so re-submitting a hit after rewriting its inputs computes
+the new values; a different params/buffer/thread-count each MISSES; and
+clearing releases the pinned handles.
+
+### CLIP was 33x off, and it was one missing pipeline row
+
+`model::vit::vit_block_fwd_cached` dispatched `k.matmul` (one thread per
+output element, serial inner reduction) for all four of a block's large
+linears, unconditionally, while its uncached sibling `vit_block_fwd` has
+resolved `matmul_reg3` by name since it was written. `ClipVision` is built
+entirely on the cached builder, and `CLIP_VISION_PIPELINES` did not register
+a tiled GEMM at all - unlike `ClipText` and `EvaVision` in the same file,
+which both go through `block::pick_gemm`.
+
+At the tower's DeepSeek-OCR shape (257 rows, d_model 1024, ff 4096, 24
+blocks) every one of those linears clears the 128x128 tile floor. Values are
+unchanged: `matmul_reg3` tiles the OUTPUT, never `k`, and on `backend-cpu`
+both names route to the one native AVX2 GEMM. Gated bit-for-bit on both
+backends by `clip/tests/vision.rs::the_tiled_gemm_is_bit_identical_to_the_
+naive_one`, at a fixture above the tile floor (the existing `tiny` fixture is
+far below it and never dispatched the tiled kernel at all).
+
+This is a `crates/clip` fix, not a deepseek2ocr one: `crates/llava` drives the
+same tower at 577 tokens and inherits it.
+
+### What is left, and why it stops here
+
+49.45 s decomposes as ~1.3 s vision encode, ~30.8 s of GPU kernel time and
+~17 s of host time still spent encoding the compute pass. Both remaining
+terms are dominated by the SAME number: **1 945 491 dispatches**, of which
+1 083 456 are `moe_linear_gated_gemv` - 64 experts x 3 projections x 11 MoE
+layers x 512 tokens, when the router picks 6 of those 64. That kernel alone
+is 16.6 s of the 30.8 s, at ~15 us per dispatch for a call that mostly does
+nothing but launch.
+
+Cutting the dispatch count is therefore the whole remaining lever, and it is
+item 1 of the list above, unchanged: `moe::expert_fwd_grouped` already exists
+and is already parity-gated, and wiring it would take the per-token MoE from
+~3520 dispatches to ~12 per layer. What blocks it is not the kernel but the
+weight layout: it needs each layer's 64 expert matrices concatenated into one
+buffer per projection, and `ParamStore` has no way to back several named
+leaves with one allocation, so today the only way to produce that operand is
+a second copy - 9.7 GB on top of a 13.25 GiB decoder, on a 24 GiB card. The
+enabling change is a fused-parameter-bank capability in `ParamStore` (plus a
+concatenating `TensorSource` adapter so the bank streams straight out of the
+checkpoint), which every MoE decoder in the workspace would use -
+`qwen35moe`'s 256 experts far more than this one's 64. That is a design
+change, not a tuning pass, and it is deliberately not attempted here.

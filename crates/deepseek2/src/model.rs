@@ -1503,6 +1503,31 @@ impl DeepseekV2 {
         // every row's block table is a single zero (see `gqa_chunk_step`'s
         // own doc). Written once here rather than once per round.
         g.write(&dec.block_ids, &vec![0u32; self.chunk as usize]);
+        // Replay this instance's decode tape instead of rebuilding it every
+        // round (`gpu_core::Gpu::enable_step_cache`, which is where the
+        // argument for why replay is bit-identical lives).
+        //
+        // `decode_rows` re-records the WHOLE tape per round, and for this
+        // architecture that tape is `n_experts` dispatches wide per MoE layer
+        // whatever the router picked: at DeepSeek-OCR's 64-expert, 11-MoE-
+        // layer shape a single-row round records ~3.8 k dispatches, of which
+        // ~3.7 k are byte-identical to the round before (only the RoPE and
+        // attention steps carry the position). Rebuilding each of those means
+        // a fresh uniform buffer and a fresh bind group, and on a Tesla P40
+        // that host-side work, not the kernels, is most of a decoded token.
+        //
+        // Every buffer the tape names is owned by `Decode`/`ParamStore` and
+        // lives as long as this model, so pinning them costs nothing that was
+        // not already resident - the case `enable_step_cache`'s own doc names
+        // as the one it is for. The capacity covers the repeating tape several
+        // times over, so the position-carrying seam (which can never repeat
+        // and is what the cache evicts first) cannot push it out.
+        //
+        // Sized from the config rather than a constant: `n_layers` MoE layers
+        // at `n_experts * 5` dispatches each is the term that dominates, and a
+        // model with more of either needs proportionally more room.
+        let tape = (c.n_layers() * c.n_experts() * 5).max(4096) as usize;
+        g.enable_step_cache(4 * tape);
         *self.dec.borrow_mut() = Some(dec);
     }
 

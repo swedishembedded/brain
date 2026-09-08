@@ -48,6 +48,12 @@ pub mod roof;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod profile;
 
+/// Recorded dispatches a hot loop replays instead of rebuilding - see
+/// [`Gpu::enable_step_cache`]. Native-only: the browser facade has its own
+/// `step` and no such loop.
+#[cfg(not(target_arch = "wasm32"))]
+mod stepcache;
+
 /// Drop-in fast kernels a model inherits without editing its dispatch sites.
 mod upgrade;
 
@@ -373,6 +379,14 @@ mod native_facade {
         /// not opted in ever sees - makes [`Gpu::storage`] allocate exactly as
         /// it always did. See [`crate::scratch`] for the aliasing argument.
         arena: Mutex<Option<crate::scratch::Arena>>,
+        /// Whether [`Gpu::step`] consults [`Self::memo`] at all. OFF until
+        /// [`Gpu::enable_step_cache`], and read as a relaxed atomic so a
+        /// handle that never opted in pays one load, not a lock, per
+        /// dispatch - the same shape [`Self::cost_enabled`] uses for the same
+        /// reason.
+        memo_enabled: std::sync::atomic::AtomicBool,
+        /// Recorded dispatches to replay - see [`crate::stepcache`].
+        memo: Mutex<Option<crate::stepcache::StepCache>>,
     }
 
     impl Gpu {
@@ -397,6 +411,8 @@ mod native_facade {
                 mem_device,
                 grants: Mutex::new(Vec::new()),
                 arena: Mutex::new(None),
+                memo_enabled: std::sync::atomic::AtomicBool::new(false),
+                memo: Mutex::new(None),
             }
         }
 
@@ -1008,10 +1024,91 @@ mod native_facade {
         /// `BRAIN_PROFILE=1` names the real pipeline.
         pub fn step(&self, kind: usize, bufs: &[&DeviceBuffer], params: &[u32], threads: u32) -> Step {
             crate::assert_no_output_alias(bufs);
+            // See `enable_step_cache`: OFF is one relaxed load, and a hit
+            // returns the dispatch the miss below would have built. The lock
+            // is taken for the lookup and again for the insert, never across
+            // the backend call in between - two threads racing the same miss
+            // both build a valid dispatch and the second simply replaces the
+            // first, which is cheaper than serialising every recording on one
+            // handle behind a driver call.
+            let armed = self.memo_enabled.load(Ordering::Relaxed);
+            if armed {
+                let hit = self
+                    .memo
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .as_mut()
+                    .and_then(|c| c.get(kind, bufs, params, threads));
+                if let Some(s) = hit {
+                    return s;
+                }
+            }
             let (k, t) = crate::upgrade::apply(&self.upgrades, kind, Some(params), threads);
-            self.inner
+            let step = self
+                .inner
                 .step(k, bufs, params, t)
-                .with_meta(StepMeta { kernel: kind, params: Some(params.to_vec()), threads })
+                .with_meta(StepMeta { kernel: kind, params: Some(params.to_vec()), threads });
+            if armed {
+                if let Some(c) = self.memo.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+                    c.put(kind, bufs, params, threads, &step);
+                }
+            }
+            step
+        }
+
+        /// **Replay recorded dispatches instead of rebuilding them.**
+        ///
+        /// Arms [`crate::stepcache`] on this handle with room for
+        /// `max_entries` distinct `(kernel, buffers, params, threads)` calls.
+        /// From here on a repeated [`Self::step`] returns the `Step` it
+        /// returned the first time rather than asking the backend to build
+        /// another - on wgpu that is a fresh uniform buffer plus a fresh bind
+        /// group per dispatch, tens of microseconds of driver work each, and
+        /// it is what dominates any loop that re-records a wide tape every
+        /// iteration (an incremental decoder; a sparse MoE that dispatches
+        /// every expert).
+        ///
+        /// **The result is bit-identical, not approximately so**: a dispatch
+        /// is a pure function of exactly those four inputs, so a hit is the
+        /// dispatch a miss would have produced. Buffer CONTENTS are outside
+        /// the key and free to change between submits - a bind group names
+        /// buffers, not their values - which is precisely what makes replay
+        /// legal for a decode step whose tape differs between tokens only in
+        /// what it reads.
+        ///
+        /// Opt-in and capped because an entry keeps its buffers alive (see
+        /// [`crate::stepcache`]): arm it on a handle whose buffers are
+        /// long-lived - a built model's weights and scratch - and not on one
+        /// that allocates fresh device memory per call, which would pin every
+        /// temporary it ever dispatched against. `max_entries` should leave
+        /// room for the repeating tape PLUS whatever churn runs alongside it;
+        /// at capacity the entries that have never been reused are the ones
+        /// dropped, so a tape that repeats survives a seam that cannot.
+        ///
+        /// Idempotent: arming an already-armed handle keeps the entries it
+        /// has and re-caps it.
+        pub fn enable_step_cache(&self, max_entries: usize) {
+            let mut memo = self.memo.lock().unwrap_or_else(|e| e.into_inner());
+            if memo.is_none() {
+                *memo = Some(crate::stepcache::StepCache::new(max_entries));
+            }
+            self.memo_enabled.store(true, Ordering::Relaxed);
+        }
+
+        /// Stop replaying and drop every recorded dispatch (releasing the
+        /// buffer handles the entries pinned). A handle that was never armed
+        /// is unaffected.
+        pub fn clear_step_cache(&self) {
+            self.memo_enabled.store(false, Ordering::Relaxed);
+            *self.memo.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        }
+
+        /// `(hits, misses, live entries)` since [`Self::enable_step_cache`],
+        /// or `None` on a handle that never armed one. What a test asserts
+        /// against to show a replayed tape is actually being replayed rather
+        /// than silently rebuilt.
+        pub fn step_cache_stats(&self) -> Option<(u64, u64, usize)> {
+            self.memo.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map(|c| c.stats())
         }
         pub fn step_sliced(&self, kind: usize, bufs: &[&DeviceBuffer], offsets: &[(u64, u64)], params: &[u32], threads: u32) -> Step {
             // NB: sliced views of ONE buffer at disjoint offsets are legal and common

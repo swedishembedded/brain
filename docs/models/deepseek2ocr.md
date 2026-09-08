@@ -166,6 +166,27 @@ way against **91.8 s** with the decoder on the 48-thread CPU Cranelift JIT -
 **1.47x**, with byte-identical decoded markdown, and the 283-row prefill is
 **3.2 s against 5.6 s**.
 
+Both figures above predate two changes that cut the page substantially: the
+CLIP tower was dispatching a naive GEMM (see `crates/clip`), and the decode
+loop rebuilt one bind group per dispatch per token instead of replaying the
+one it had already recorded (`gpu_core::Gpu::enable_step_cache`). A rendered
+1240x1754 text page at the same 512-token budget, both halves on ONE P40,
+the two builds run back to back on an idle host:
+
+| | before | after |
+|---|---|---|
+| generate (encode + prefill + 512 decode) | 77.50 s | 49.45 s | <!-- perf-number: one page, one card, one revision -->
+| of that, CLIP forward | 5.02 s | 0.15 s | <!-- perf-number: one stage of that same page -->
+| bind groups built | 1 945 491 | 33 384 |
+| dispatches | 1 945 491 | 1 945 491 |
+
+The decoded markdown is byte-identical across both, and the dispatch count is
+unchanged - the GPU does exactly the work it did before.
+
+What dominates the remainder is that dispatch COUNT, not any kernel: this
+decoder dispatches all 64 experts of every MoE layer every token whatever the
+router picked, which is 1 083 456 of those 1 945 491 dispatches.
+
 <!-- perf-number: the CPU side of that comparison is not this repo's default build -->
 That CPU figure is the FAST one: it needs `crates/backend-cpu`'s rayon/GEMV
 scheduling fix, without which the same page takes 539 s. Comparing the card
