@@ -544,6 +544,21 @@ impl crate::adapter::AdapterKind for LoraPair {
     }
 
     fn new(spec: crate::adapter::TargetSpec, hp: crate::adapter::TargetHp, init: &mut dyn FnMut() -> f32) -> LoraPair {
+        // LoRA dropout needs the adapter's INPUT activation `x` (mask
+        // `drop(x)` before `A·x`) - this host path's whole shape is
+        // `project(dw: &[f32])`, projecting a dense `dL/dW_eff` that never
+        // carries `x` at all, so there is no dW to project once masking
+        // makes the adapter non-linear in a single step. A silently-ignored
+        // dropout is exactly the "config field parsed but never read"
+        // failure this fails loudly instead - see
+        // `crate::adapter::AdapterKind`'s doc for which paths CAN apply it
+        // (a device trainer with `x` at the adapter's input; none of this
+        // workspace's device model crates wire a dropout config through
+        // yet, tracked as open work).
+        assert_eq!(
+            hp.dropout, 0.0,
+            "LoraPair: dropout requires an activation-aware path (this host dense-dW-projection path never sees the adapter's input x)"
+        );
         let mut pair = Pair::new(spec.out, spec.inn, hp.rank, init);
         if hp.freeze_a {
             pair.freeze_a();

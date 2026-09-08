@@ -62,16 +62,62 @@ card without quantization or sharding).
 
 ---
 
-# Phase 1 - the generic adapter substrate (in progress)
+# Phase 1 - the generic adapter substrate (done, except the two gaps below)
 
-Full design detail lives in the session plan that opened this campaign
+Full design detail lived in the session plan that opened this campaign
 (`AdapterKind`/`TargetSpec`/`TargetHp`/`AdapterSet`/`TargetSelector` in
-`crates/model/src/adapter/`, migration of all 8 host crates onto it, device
-param-list/role/save/fold kind-awareness, and rsLoRA + LoRA+ + LoRA dropout
-+ LoRA-FA + per-layer rank/alpha built on top). Status and milestone-by-
+`crates/model/src/adapter/`; migration of the 6 host crates with real
+consumers onto it - supir, cosyvoice, s3dit, ltxv + av_lora, wan, flux2;
+device param-list/role/save/fold kind-awareness; rsLoRA; LoRA+; LoRA-FA;
+per-layer rank/alpha on the host substrate). Status and milestone-by-
 milestone verification numbers are tracked in this repo's normal commit
 history and test suite, not duplicated here - see `crates/model/src/adapter/`
 for what has landed. Phases 2-9 below assume Phase 1 exists and is stable.
+
+**Two things scoped out of Phase 1, on purpose, and why:**
+
+1. **`minimaxmusic3`'s three LoRA modules were not migrated.** They are a
+   genuinely different substrate today (no Adam, no alpha, no
+   serialization, `delta` allocates a fresh `Vec` instead of accumulating
+   in place) with zero consumers outside their own tests - migrating them
+   would change what those tests measure for no product benefit. Cheap
+   whenever it happens: their `name -> shape` functions are already a
+   `linear_sites()` body.
+2. **Three capabilities have real, tested substrate support but no wired
+   consumer, and were deliberately left unwired rather than built as
+   unreachable code ahead of one:**
+   - **Per-target rank/alpha on the DEVICE family** (qwen3/qwen35/
+     qwen35moe/deepseek2/kronos) - `AdapterPlan`/`AdapterSet::
+     build_planned` exist and are tested on the host substrate
+     (`crates/model/tests/adapter_per_target_rank.rs`), but none of those
+     four crates' `LoraCfg` exposes anything but a single scalar `rank`,
+     so there is no real caller to size mixed-rank device scratch buffers
+     against yet.
+   - **Device-side LoRA-FA** (`Role::Frozen` specifically for `.lora_a`,
+     leaving `.lora_b` trainable) - the host substrate's `freeze_a` is
+     structural (`Pair::freeze_a`, gated by
+     `crates/model/tests/adapter_lora_fa.rs`), but none of the four
+     device-family crates' configs expose a `freeze_a` flag.
+   - **LoRA dropout on the device family** - the host path now hard-errors
+     on a nonzero `TargetHp::dropout` (`crates/model/tests/
+     adapter_dropout.rs` - `LoraPair::project` consumes a dense
+     `dL/dW_eff` and never sees the adapter's input `x`, so masking it
+     there is not expressible), and the device family is where it
+     genuinely belongs (a trainer with `x` at the adapter's input can mask
+     it before `A·x` and re-derive the identical mask in the backward's
+     recompute of that same activation) - but building it means a NEW
+     WGSL kernel (a counter-based mask hash, no PRNG kernel exists in this
+     tree today) plus touching qwen3/qwen35/qwen35moe/deepseek2's
+     `lora_fwd`/`proj_bwd` dispatch, for a config knob nothing sets yet.
+   All three are real work, not abandoned - each gets a config field (a
+   per-crate `LoraCfg.freeze_a: bool` / per-target rank map / `dropout:
+   f32`) and its own device-side wiring the day a caller (most likely
+   M12's CLI/capability surface, or self-improve's LoRA-in-RL-loop
+   workstream) actually needs one. Building the device dispatch first,
+   with no caller to gate it against, is exactly the "ported and
+   unit-tested is not reachable" shape this campaign's own decisions
+   section (#5, no hand-maintained support claims) argues against
+   documenting as done.
 
 ---
 
