@@ -32,6 +32,11 @@
 //!   `DeepseekV2::generate_greedy_kv_stream` honors by not dispatching any
 //!   further `step` calls - wall time now tracks how early the model actually
 //!   stopped, not always `max_new`.
+//! * **Real n-gram anti-repetition.** `model::serve::apply_no_repeat_ngram` -
+//!   a verbatim port of upstream's own `vllm-project/recipes` entry for this
+//!   model (`ngram_size = 30`, `window_size = 90`, `<td>`/`</td>` whitelisted)
+//!   - runs on every step's logits before argmax, through
+//!   `DeepseekOcr::generate_greedy_kv_from_prompt_stream_filtered`.
 //! * **Real token accounting.** `prompt_tokens` / `completion_tokens` /
 //!   `finish_reason` are set explicitly, because `apiserve::bridge::read_outcome`
 //!   defaults them to `0`/`0`/`"stop"` when absent - i.e. an action that omits
@@ -155,6 +160,21 @@ fn default_chunk_len() -> u32 {
 /// A caller that wants a different ceiling passes its own `max_new`.
 pub const DEFAULT_MAX_NEW: i64 = 2048;
 
+/// `model::serve::apply_no_repeat_ngram`'s `ngram_size` - upstream's own
+/// `deepseek-ai/DeepSeek-OCR` vLLM recipe value (`vllm-project/recipes`'
+/// `NGramPerReqLogitsProcessor` config), which this crate ports verbatim.
+/// `$BRAIN_DEEPSEEK_OCR_NGRAM_SIZE`, `0` disables the filter entirely
+/// (`apply_no_repeat_ngram` is defined as a no-op at `ngram_size == 0`).
+fn default_ngram_size() -> usize {
+    std::env::var("BRAIN_DEEPSEEK_OCR_NGRAM_SIZE").ok().and_then(|s| s.parse().ok()).unwrap_or(30)
+}
+
+/// `model::serve::apply_no_repeat_ngram`'s `window_size` - same upstream
+/// recipe value as [`default_ngram_size`]. `$BRAIN_DEEPSEEK_OCR_WINDOW_SIZE`.
+fn default_window_size() -> usize {
+    std::env::var("BRAIN_DEEPSEEK_OCR_WINDOW_SIZE").ok().and_then(|s| s.parse().ok()).unwrap_or(90)
+}
+
 pub fn generate_spec() -> ActionSpec {
     ActionSpec::new(
         "generate",
@@ -227,6 +247,16 @@ pub struct Session {
     /// changed `$BRAIN_DEEPSEEK_OCR_CTX` mid-process can never disagree with
     /// what the resident composite was actually sized for.
     ctx: u32,
+    /// `model::serve::apply_no_repeat_ngram`'s `(ngram_size, window_size)`,
+    /// resolved once at load time (see [`default_ngram_size`]/
+    /// [`default_window_size`]) for the same reason `ctx` is.
+    ngram: (usize, usize),
+    /// Token ids exempted from the n-gram ban - `<td>`/`</td>`
+    /// (`prompt::TD_OPEN`/`TD_CLOSE`) when this tokenizer carries them as
+    /// reserved tokens (the real checkpoint's does; a toy test tokenizer may
+    /// not, and an absent tag is simply not whitelisted rather than an
+    /// error - the filter still works, just without that exemption).
+    ngram_whitelist: std::collections::HashSet<u32>,
 }
 
 impl Session {
@@ -258,6 +288,7 @@ impl Session {
         let cfg = import::config(&files, 1)?;
         let tok = import::tokenizer(&files)?;
         let eos = tok.special_id(prompt::EOS).ok_or_else(|| format!("this tokenizer has no reserved {:?} token", prompt::EOS))?;
+        let ngram_whitelist: std::collections::HashSet<u32> = [prompt::TD_OPEN, prompt::TD_CLOSE].into_iter().filter_map(|s| tok.special_id(s)).collect();
 
         // The prompt the splice is SIZED for: text_before is always empty, so
         // `row0` is 1 and `n_rows` is 273 whatever instruction a request
@@ -286,7 +317,8 @@ impl Session {
 
         let pre = gpu_core::Gpu::new_cpu(preprocess::PIPELINES);
         stage_time("load: TOTAL", t0);
-        Ok(Session { dir: dir.to_string(), cfg, model, tok, eos, pre, ctx })
+        let ngram = (default_ngram_size(), default_window_size());
+        Ok(Session { dir: dir.to_string(), cfg, model, tok, eos, pre, ctx, ngram, ngram_whitelist })
     }
 
     /// Which checkpoint directory this session was built from.
@@ -352,21 +384,28 @@ impl Session {
         let mut printed = String::new();
         let mut step = 0u32;
         let mut stopped = false;
-        let out = self.model.generate_greedy_kv_from_prompt_stream(&image, &prompt, max_new, &mut |_, tok_id| {
-            step += 1;
-            if tok_id == self.eos {
-                stopped = true;
-                return false; // real early stop: no further decode steps are dispatched
-            }
-            ids.push(tok_id);
-            let full = self.tok.decode(&ids);
-            let (delta, np) = qwen3::chat::stream_delta(&printed, &full);
-            printed = np;
-            if !delta.is_empty() {
-                progress(Progress::token(step, max_new, delta));
-            }
-            true
-        });
+        let (ngram_size, window_size) = self.ngram;
+        let out = self.model.generate_greedy_kv_from_prompt_stream_filtered(
+            &image,
+            &prompt,
+            max_new,
+            &mut |history, logits| model::serve::apply_no_repeat_ngram(logits, history, ngram_size, window_size, &self.ngram_whitelist),
+            &mut |_, tok_id| {
+                step += 1;
+                if tok_id == self.eos {
+                    stopped = true;
+                    return false; // real early stop: no further decode steps are dispatched
+                }
+                ids.push(tok_id);
+                let full = self.tok.decode(&ids);
+                let (delta, np) = qwen3::chat::stream_delta(&printed, &full);
+                printed = np;
+                if !delta.is_empty() {
+                    progress(Progress::token(step, max_new, delta));
+                }
+                true
+            },
+        );
         // An early stop makes `out` SHORTER than the full budget, on purpose -
         // that is the whole point of `generate_greedy_kv_stream` over
         // `_cb`. `stopped` already distinguishes the two cases for
@@ -538,5 +577,36 @@ mod tests {
         // because `text_before` is empty by construction.)
         assert!(long.len() > short.len(), "a longer instruction must produce a longer prompt");
         assert!(a.len() + DEFAULT_MAX_NEW as usize <= default_ctx_len() as usize, "the default request must fit the built context");
+    }
+
+    /// `default_ngram_size`/`default_window_size` must match upstream's own
+    /// `deepseek-ai/DeepSeek-OCR` vLLM recipe values (30, 90) absent an
+    /// operator override, and must actually honour
+    /// `$BRAIN_DEEPSEEK_OCR_NGRAM_SIZE`/`$BRAIN_DEEPSEEK_OCR_WINDOW_SIZE` when
+    /// set - a typo'd env var name here would silently ignore an operator's
+    /// override forever. Not parallel-safe against another test reading the
+    /// SAME two vars (none in this file does), same caveat
+    /// `modelstore`'s own env-mutating tests record.
+    #[test]
+    fn ngram_defaults_match_the_upstream_recipe_and_honour_env_overrides() {
+        // SAFETY: no other test in this crate reads these two vars, so this
+        // cannot race a concurrently-running one within this binary.
+        unsafe {
+            std::env::remove_var("BRAIN_DEEPSEEK_OCR_NGRAM_SIZE");
+            std::env::remove_var("BRAIN_DEEPSEEK_OCR_WINDOW_SIZE");
+        }
+        assert_eq!(default_ngram_size(), 30, "upstream's own recipe value");
+        assert_eq!(default_window_size(), 90, "upstream's own recipe value");
+
+        unsafe {
+            std::env::set_var("BRAIN_DEEPSEEK_OCR_NGRAM_SIZE", "12");
+            std::env::set_var("BRAIN_DEEPSEEK_OCR_WINDOW_SIZE", "40");
+        }
+        assert_eq!(default_ngram_size(), 12);
+        assert_eq!(default_window_size(), 40);
+        unsafe {
+            std::env::remove_var("BRAIN_DEEPSEEK_OCR_NGRAM_SIZE");
+            std::env::remove_var("BRAIN_DEEPSEEK_OCR_WINDOW_SIZE");
+        }
     }
 }

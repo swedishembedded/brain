@@ -476,8 +476,27 @@ impl DeepseekOcr {
     /// [`Self::generate_greedy_kv_cb`] with an EARLY-STOP callback, forwarded
     /// straight to `deepseek2::DeepseekV2::generate_greedy_kv_stream` - see
     /// that method's doc for the exact contract and why stopping here skips
-    /// real dispatches, not just unread output.
+    /// real dispatches, not just unread output. No logits filter -
+    /// [`Self::generate_greedy_kv_stream_filtered`] is the twin that takes
+    /// one.
     pub fn generate_greedy_kv_stream(&self, image: &[f32], prompt_ids: &[u32], n_new: u32, on_token: &mut dyn FnMut(usize, u32) -> bool) -> Vec<u32> {
+        self.generate_greedy_kv_stream_filtered(image, prompt_ids, n_new, &mut |_, _| {}, on_token)
+    }
+
+    /// [`Self::generate_greedy_kv_stream`] with a LOGITS FILTER applied
+    /// before each step's argmax, forwarded straight to `deepseek2::
+    /// DeepseekV2::generate_greedy_kv_stream_filtered` - see that method's
+    /// doc for the `filter(generated_so_far, logits)` contract (e.g.
+    /// `model::serve::apply_no_repeat_ngram`, which `deepseek2ocr::caps`
+    /// wires up).
+    pub fn generate_greedy_kv_stream_filtered(
+        &self,
+        image: &[f32],
+        prompt_ids: &[u32],
+        n_new: u32,
+        filter: &mut dyn FnMut(&[u32], &mut [f32]),
+        on_token: &mut dyn FnMut(usize, u32) -> bool,
+    ) -> Vec<u32> {
         assert!(
             self.row0 + self.n_rows <= prompt_ids.len() as u32,
             "the prompt's {} tokens do not contain the image run [{}, {})",
@@ -493,7 +512,7 @@ impl DeepseekOcr {
         );
         let embeds = self.encode_block(image);
         self.dec.write_img_embeds(&embeds);
-        self.dec.generate_greedy_kv_stream(prompt_ids, n_new, on_token)
+        self.dec.generate_greedy_kv_stream_filtered(prompt_ids, n_new, filter, on_token)
     }
 
     /// [`Self::generate_greedy_kv`] driven by the [`Prompt`] this composite was
@@ -514,14 +533,31 @@ impl DeepseekOcr {
 
     /// [`Self::generate_greedy_kv_from_prompt_cb`] with an early-stop
     /// callback - see [`Self::generate_greedy_kv_stream`]'s doc for the exact
-    /// contract.
+    /// contract. No logits filter -
+    /// [`Self::generate_greedy_kv_from_prompt_stream_filtered`] is the twin
+    /// that takes one, and what `deepseek2ocr::caps` uses to serve.
     pub fn generate_greedy_kv_from_prompt_stream(&self, image: &[f32], prompt: &Prompt, n_new: u32, on_token: &mut dyn FnMut(usize, u32) -> bool) -> Vec<u32> {
+        self.generate_greedy_kv_from_prompt_stream_filtered(image, prompt, n_new, &mut |_, _| {}, on_token)
+    }
+
+    /// [`Self::generate_greedy_kv_from_prompt_stream`] with a LOGITS FILTER
+    /// applied before each step's argmax - see
+    /// [`Self::generate_greedy_kv_stream_filtered`]'s doc for the exact
+    /// contract.
+    pub fn generate_greedy_kv_from_prompt_stream_filtered(
+        &self,
+        image: &[f32],
+        prompt: &Prompt,
+        n_new: u32,
+        filter: &mut dyn FnMut(&[u32], &mut [f32]),
+        on_token: &mut dyn FnMut(usize, u32) -> bool,
+    ) -> Vec<u32> {
         assert_eq!(
             prompt.image_run(),
             self.image_run(),
             "this prompt's image run is not the one the splice was sized at"
         );
-        self.generate_greedy_kv_stream(image, &prompt.ids, n_new, on_token)
+        self.generate_greedy_kv_stream_filtered(image, &prompt.ids, n_new, filter, on_token)
     }
 
     pub fn zero_grads(&self) {

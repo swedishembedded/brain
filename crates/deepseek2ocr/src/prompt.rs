@@ -76,6 +76,15 @@ pub const REF_CLOSE: &str = "<|/ref|>";
 pub const DET_OPEN: &str = "<|det|>";
 /// Closes a grounded detection box list.
 pub const DET_CLOSE: &str = "<|/det|>";
+/// HTML table-cell open tag - a reserved CONTROL token here (id 128821 in the
+/// real checkpoint), not ordinary vocabulary, because Markdown table output is
+/// built out of literal `<td>`/`</td>` spans. Exempted from
+/// `model::serve::apply_no_repeat_ngram`'s ban list (`caps::Session`'s
+/// whitelist) - a real table repeats this pair far more often than the
+/// anti-repetition gate's `ngram_size` would otherwise tolerate.
+pub const TD_OPEN: &str = "<td>";
+/// Closes an HTML table cell - see [`TD_OPEN`].
+pub const TD_CLOSE: &str = "</td>";
 
 /// Load the LM's own tokenizer out of a GGUF's `tokenizer.ggml.*` KV.
 ///

@@ -282,6 +282,52 @@ fn sample_from_topk_impl(candidates: &[(u32, f32)], params: SampleParams, rng: &
     (candidates[last].0, probs[last].ln() - kept_sum.ln())
 }
 
+/// Ports vLLM's `NoRepeatNGramLogitsProcessor` verbatim
+/// (`vllm/model_executor/models/deepseek_ocr.py`, the
+/// `NGramPerReqLogitsProcessor` its own `deepseek-ai/DeepSeek-OCR` recipe
+/// wires up) - the anti-repetition filter upstream recommends specifically
+/// because a long OCR document's greedy decode can lock onto a repeated
+/// span (a table row, a repeated header) with nothing to break the loop.
+/// Upstream's own recipe values: `ngram_size = 30`, `window_size = 90`,
+/// `whitelist_token_ids = {<td>, </td>}` - table cells legitimately repeat
+/// a short tag pair far more than 30 tokens apart, so banning them would
+/// corrupt real tables rather than protect against a stuck decode.
+///
+/// `history` is the GENERATED ids so far (never the prompt - matching
+/// vLLM's own `output_ids`, which tracks only what the request itself
+/// produced). Operates in place on `logits`, a full `[vocab]` row (this
+/// decode step's own shape, unlike [`sample_from_topk`]'s candidate list -
+/// there is no on-device top-K truncation upstream of this call to filter
+/// instead). Finds every earlier position in the last `window_size`
+/// generated tokens whose following `(ngram_size - 1)`-token span matches
+/// the CURRENT trailing span, and bans whatever token immediately followed
+/// each such match there (i.e. every token that would recreate an n-gram
+/// already seen inside the window), except tokens in `whitelist`. A no-op
+/// once `history.len() < ngram_size` (not enough tokens yet to form one).
+pub fn apply_no_repeat_ngram(logits: &mut [f32], history: &[u32], ngram_size: usize, window_size: usize, whitelist: &std::collections::HashSet<u32>) {
+    if ngram_size == 0 || history.len() < ngram_size {
+        return;
+    }
+    let current_prefix = &history[history.len() - (ngram_size - 1)..];
+    let search_start = history.len().saturating_sub(window_size);
+    let search_end = history.len() - ngram_size + 1;
+
+    let mut banned: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    for i in search_start..search_end {
+        if history[i..i + ngram_size - 1] == *current_prefix {
+            banned.insert(history[i + ngram_size - 1]);
+        }
+    }
+    for tok in banned {
+        if whitelist.contains(&tok) {
+            continue;
+        }
+        if let Some(l) = logits.get_mut(tok as usize) {
+            *l = f32::NEG_INFINITY;
+        }
+    }
+}
+
 /// Greedy argmax of a logits/score vector — pure host math, no decoder
 /// dependency, so it is a free function rather than a [`PagedDecoder`] method.
 fn argmax(s: &[f32]) -> u32 {
@@ -1198,5 +1244,97 @@ mod tests {
         accept_token(&mut r, 99); // would be EOS if configured
         assert!(!r.done);
         assert_eq!(r.generated, vec![99]);
+    }
+
+    /// A hand-worked case matching vLLM's own `NoRepeatNGramLogitsProcessor`
+    /// semantics exactly: `ngram_size = 3` means the ban key is the trailing
+    /// TWO-token prefix. History `[1,2,3, 4,5, 1,2,3, 4,5, 1,2]` ends in the
+    /// prefix `(1,2)`; that pair occurred twice before (positions 0 and 5),
+    /// each time followed by `3` - so `3` alone is banned, not `4` or `5`
+    /// (which never immediately follow `(1,2)`).
+    #[test]
+    fn no_repeat_ngram_bans_exactly_the_token_that_completes_a_seen_ngram() {
+        let history = [1u32, 2, 3, 4, 5, 1, 2, 3, 4, 5, 1, 2];
+        let mut logits = vec![0.0f32; 6];
+        apply_no_repeat_ngram(&mut logits, &history, 3, 90, &std::collections::HashSet::new());
+        assert_eq!(logits[3], f32::NEG_INFINITY, "token 3 completes the twice-seen (1,2) ngram and must be banned");
+        assert_eq!(logits[4], 0.0, "token 4 never immediately follows (1,2) and must be untouched");
+        assert_eq!(logits[5], 0.0, "token 5 never immediately follows (1,2) and must be untouched");
+        assert_eq!(logits[1], 0.0);
+        assert_eq!(logits[2], 0.0);
+    }
+
+    /// The whitelist exempts a token from the ban even though it would
+    /// otherwise complete a seen n-gram - upstream's own reason for this
+    /// (DeepSeek-OCR's `<td>`/`</td>` table tags) is exactly this shape: a
+    /// short, LEGITIMATELY-repeating pair inside a real table.
+    #[test]
+    fn no_repeat_ngram_whitelist_exempts_an_otherwise_banned_token() {
+        let history = [1u32, 2, 3, 1, 2];
+        let mut logits = vec![0.0f32; 4];
+        let whitelist: std::collections::HashSet<u32> = [3].into_iter().collect();
+        apply_no_repeat_ngram(&mut logits, &history, 3, 90, &whitelist);
+        assert_eq!(logits[3], 0.0, "3 is whitelisted, so it must survive despite completing the seen (1,2) ngram");
+    }
+
+    /// `window_size` bounds the lookback: a match older than `window_size`
+    /// generated tokens must NOT be found, matching vLLM's own
+    /// `search_start = max(0, len(output_ids) - window_size)`.
+    #[test]
+    fn no_repeat_ngram_respects_the_window() {
+        // (1,2)->9 occurs at position 0, then 6 filler tokens, then the
+        // current trailing prefix (1,2) again. With window_size=5 the match
+        // at position 0 is outside the window (search_start = 10-5 = 5) so 9
+        // must NOT be banned; with window_size=90 it must be.
+        let history = [1u32, 2, 9, 0, 0, 0, 0, 0, 0, 1, 2];
+        let mut narrow = vec![0.0f32; 10];
+        apply_no_repeat_ngram(&mut narrow, &history, 3, 5, &std::collections::HashSet::new());
+        assert_eq!(narrow[9], 0.0, "the (1,2)->9 match at position 0 is outside a 5-token window");
+
+        let mut wide = vec![0.0f32; 10];
+        apply_no_repeat_ngram(&mut wide, &history, 3, 90, &std::collections::HashSet::new());
+        assert_eq!(wide[9], f32::NEG_INFINITY, "the same match must be found with a 90-token window");
+    }
+
+    /// Too few generated tokens to form even one n-gram: a no-op, not a panic
+    /// (the reference's own early return, `len(output_ids) < ngram_size`).
+    #[test]
+    fn no_repeat_ngram_is_a_noop_below_ngram_size() {
+        let history = [1u32, 2];
+        let mut logits = vec![0.0f32; 4];
+        apply_no_repeat_ngram(&mut logits, &history, 5, 90, &std::collections::HashSet::new());
+        assert!(logits.iter().all(|&x| x == 0.0));
+    }
+
+    /// Upstream's own recipe values for `deepseek-ai/DeepSeek-OCR`
+    /// (`ngram_size=30, window_size=90`) end to end: a 30-token span repeated
+    /// verbatim (as a stuck decode would produce) must have its continuation
+    /// banned the moment the SAME 29-token prefix recurs, and a genuine table
+    /// alternating `<td>`/`</td>` every other token (a far shorter cycle than
+    /// 30) must NOT be affected by the ngram gate at all - it never forms a
+    /// repeated 29-token prefix in the first place, so the whitelist is
+    /// belt-and-braces here, not what saves it.
+    #[test]
+    fn no_repeat_ngram_matches_the_deepseek_ocr_recipe_defaults() {
+        const NGRAM: usize = 30;
+        const WINDOW: usize = 90;
+        let span: Vec<u32> = (100..129).collect(); // 29 distinct filler tokens
+        let mut history = span.clone();
+        history.push(7); // the span's own 30th token, first time through
+        history.extend(span.clone()); // repeat the 29-token prefix verbatim
+        let mut logits = vec![0.0f32; 200];
+        apply_no_repeat_ngram(&mut logits, &history, NGRAM, WINDOW, &std::collections::HashSet::new());
+        assert_eq!(logits[7], f32::NEG_INFINITY, "repeating the exact 29-token prefix must ban its historical continuation");
+
+        // A real table: <td>(128821) content(50) </td>(128822) content(51) ...
+        let mut table = Vec::new();
+        for _ in 0..40 {
+            table.extend([128821u32, 50, 128822, 51]);
+        }
+        let whitelist: std::collections::HashSet<u32> = [128821, 128822].into_iter().collect();
+        let mut table_logits = vec![0.0f32; 128823];
+        apply_no_repeat_ngram(&mut table_logits, &table, NGRAM, WINDOW, &whitelist);
+        assert_eq!(table_logits[128821], 0.0, "<td> must survive inside its own real table");
+        assert_eq!(table_logits[128822], 0.0, "</td> must survive inside its own real table");
     }
 }

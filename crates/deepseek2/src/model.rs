@@ -1331,8 +1331,25 @@ impl DeepseekV2 {
     /// tokens; returning `false` stops the loop after appending `tok`, so a
     /// caller sees `result.len() < prompt_ids.len() + n_new`. Mirrors
     /// `qwen3::sample::generate_kv_stream`'s callback shape rather than
-    /// inventing a new one.
+    /// inventing a new one. No logits filter -
+    /// [`Self::generate_greedy_stream_filtered`] is the twin that takes one.
     pub fn generate_greedy_stream(&self, prompt_ids: &[u32], n_new: u32, on_token: &mut dyn FnMut(usize, u32) -> bool) -> Vec<u32> {
+        self.generate_greedy_stream_filtered(prompt_ids, n_new, &mut |_, _| {}, on_token)
+    }
+
+    /// [`Self::generate_greedy_stream`] with a LOGITS FILTER applied before
+    /// each step's argmax: `filter(generated_so_far, logits)` gets the
+    /// GENERATED ids only (never the prompt, matching e.g.
+    /// `model::serve::apply_no_repeat_ngram`'s own `history` convention) and
+    /// this step's full `[vocab]` row, mutated in place - a caller wanting an
+    /// n-gram/repetition filter does not need a second copy of this loop.
+    pub fn generate_greedy_stream_filtered(
+        &self,
+        prompt_ids: &[u32],
+        n_new: u32,
+        filter: &mut dyn FnMut(&[u32], &mut [f32]),
+        on_token: &mut dyn FnMut(usize, u32) -> bool,
+    ) -> Vec<u32> {
         assert!(!prompt_ids.is_empty(), "deepseekv2: greedy decode needs at least one prompt token");
         let total = prompt_ids.len() + n_new as usize;
         assert!(
@@ -1345,8 +1362,10 @@ impl DeepseekV2 {
         let mut ids = Vec::with_capacity(total);
         ids.extend_from_slice(prompt_ids);
         for i in 0..n_new as usize {
-            let logits = self.logits_all(&ids);
-            let next = argmax(&logits[logits.len() - vocab..]) as u32;
+            let full = self.logits_all(&ids);
+            let mut logits = full[full.len() - vocab..].to_vec();
+            filter(&ids[prompt_ids.len()..], &mut logits);
+            let next = argmax(&logits) as u32;
             ids.push(next);
             if !on_token(i, next) {
                 break;
@@ -1764,8 +1783,24 @@ impl DeepseekV2 {
     /// early here actually skips work: each remaining [`Self::step`] call is
     /// a real `O(1)` dispatch this loop never issues, not just an unread
     /// result (`tests::generate_greedy_kv_stream_stops_dispatching_on_false`
-    /// gates the dispatch count, not just the returned `Vec`'s length).
+    /// gates the dispatch count, not just the returned `Vec`'s length). No
+    /// logits filter - [`Self::generate_greedy_kv_stream_filtered`] is the
+    /// twin that takes one.
     pub fn generate_greedy_kv_stream(&self, prompt_ids: &[u32], n_new: u32, on_token: &mut dyn FnMut(usize, u32) -> bool) -> Vec<u32> {
+        self.generate_greedy_kv_stream_filtered(prompt_ids, n_new, &mut |_, _| {}, on_token)
+    }
+
+    /// [`Self::generate_greedy_kv_stream`] with a LOGITS FILTER applied
+    /// before each step's argmax - see [`Self::generate_greedy_stream_filtered`]'s
+    /// doc for the exact `filter(generated_so_far, logits)` contract, which
+    /// this shares verbatim.
+    pub fn generate_greedy_kv_stream_filtered(
+        &self,
+        prompt_ids: &[u32],
+        n_new: u32,
+        filter: &mut dyn FnMut(&[u32], &mut [f32]),
+        on_token: &mut dyn FnMut(usize, u32) -> bool,
+    ) -> Vec<u32> {
         assert!(!prompt_ids.is_empty(), "deepseekv2: greedy decode needs at least one prompt token");
         assert_eq!(self.b, 1, "deepseekv2: KV-cache decode requires b == 1");
         let total = prompt_ids.len() + n_new as usize;
@@ -1787,7 +1822,7 @@ impl DeepseekV2 {
         // not a caller option. Both return the LAST prompt row's `[vocab]`
         // logits - `logits_all`'s tail slice for the batched path,
         // `prefill_chunked` already narrows to it for the chunked one.
-        let logits = if self.batched {
+        let mut logits = if self.batched {
             let logits = self.logits_all(&ids);
             self.fill_cache_from_prefill(prompt_ids.len() as u32);
             logits[logits.len() - vocab..].to_vec()
@@ -1796,13 +1831,15 @@ impl DeepseekV2 {
         };
         self.dec_pos.set(prompt_ids.len() as u32);
 
+        filter(&ids[prompt_ids.len()..], &mut logits);
         let mut next = argmax(&logits) as u32;
         ids.push(next);
         if !on_token(0, next) {
             return ids;
         }
         for i in 1..n_new as usize {
-            let logits = self.step(next);
+            let mut logits = self.step(next);
+            filter(&ids[prompt_ids.len()..], &mut logits);
             next = argmax(&logits) as u32;
             ids.push(next);
             if !on_token(i, next) {
@@ -2234,6 +2271,35 @@ mod tests {
             early_steps < full_steps,
             "an early stop dispatched {early_steps} GPU steps, not fewer than the full run's {full_steps} - the loop kept computing after `false`"
         );
+    }
+
+    /// `generate_greedy_kv_stream_filtered`'s filter actually reaches the
+    /// logits the argmax reads: banning the token an unfiltered run would
+    /// have picked must force a DIFFERENT (finite) choice, not the same one
+    /// or a crash. `model::serve::apply_no_repeat_ngram` gates the filter
+    /// function itself in isolation; this gates that the plumbing here calls
+    /// it before argmax, not after, and with the right buffer.
+    #[test]
+    fn generate_greedy_kv_stream_filtered_reaches_the_argmax() {
+        let cfg = DeepseekV2Config::tiny();
+        let init = crate::init::init_weights(&cfg, 7);
+        let m = DeepseekV2::new_on(gpu_core::testgpu::dev(PIPELINES), cfg, 1, 8, &init, false);
+        let prompt = [1u32, 5, 2];
+        let n_new = 2u32;
+
+        let unfiltered = m.generate_greedy_kv(&prompt, n_new);
+        let first_pick = unfiltered[prompt.len()];
+
+        let got = m.generate_greedy_kv_stream_filtered(
+            &prompt,
+            n_new,
+            &mut |_history, logits| {
+                logits[first_pick as usize] = f32::NEG_INFINITY;
+            },
+            &mut |_, _| true,
+        );
+        assert_ne!(got[prompt.len()], first_pick, "banning the unfiltered choice must change what argmax picks");
+        assert!(got[prompt.len()] < m.cfg.vocab(), "the filtered pick must still be a real vocab id");
     }
 }
 
