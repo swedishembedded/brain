@@ -238,6 +238,38 @@ fn gemm_step(
     }
 }
 
+/// [`gemm_step`] for [`vit_block_fwd_cached`], whose reference kernel is
+/// `matmul` rather than `matmul_rows`.
+///
+/// The cached builder's callers do not all register `matmul_rows` -
+/// `crates/clip`'s `ClipVision` leaves that slot [`UNREGISTERED`] - so the
+/// two builders cannot share one fallback. Everything else is [`gemm_step`]'s
+/// contract verbatim, including the 128x128 tile floor and the opt-in by
+/// NAME: a model that does not register `matmul_reg3` records exactly the
+/// dispatch it recorded before, and one that does gets the tiled kernel for
+/// the same sum in the same `k` order (see [`gemm_step`]'s own doc for why
+/// that is bit-identical on a GPU, and for the re-certification a model owes
+/// on the CPU JIT).
+fn gemm_step_cached(
+    g: &Gpu,
+    k: &VitKernelIds,
+    reg: Option<usize>,
+    x: &DeviceBuffer,
+    w: &DeviceBuffer,
+    out: &DeviceBuffer,
+    m: u32,
+    kdim: u32,
+    n: u32,
+) -> Step {
+    const TILE: u32 = 128;
+    match reg {
+        Some(i) if m >= TILE && n >= TILE => {
+            g.step(i, &[x, w, out], &[m, kdim, n], m.div_ceil(TILE) * n.div_ceil(TILE) * 256)
+        }
+        _ => g.step(k.matmul, &[x, w, out], &[m, kdim, n], m * n),
+    }
+}
+
 /// Largest query-chunk size whose `[heads, chunk, max_span]` f32 score slab
 /// fits in `budget_bytes` (min 64 rows so tiny budgets still work).
 pub fn attn_chunk_for(sh: &VitShape, max_span: u32, budget_bytes: u64) -> u32 {
@@ -525,9 +557,13 @@ pub fn vit_block_fwd_cached(
     let ln = crate::block::LayerNormIds::resolve(g, k.layernorm, kb.ln_stats, kb.layernorm_dx);
     let hd = sh.head_dim();
     let stride = 3 * c;
+    // The four large linears take the tiled GEMM where this model registered
+    // one - see `gemm_step_cached`. `None` on a model that did not, which
+    // records the naive dispatch unchanged.
+    let reg = g.kernel_index("matmul_reg3");
 
     steps.push(crate::block::layernorm_fwd(g, &ln, &cache.x_in, w.norm1_w, w.norm1_b, &cache.ln1, c, rows, sh.eps));
-    steps.push(g.step(k.matmul, &[&cache.ln1, w.qkv_w, &cache.qkv_pre], &[rows, c, stride], rows * stride));
+    steps.push(gemm_step_cached(g, k, reg, &cache.ln1, w.qkv_w, &cache.qkv_pre, rows, c, stride));
     steps.push(g.step(k.bias_add, &[&cache.qkv_pre, w.qkv_b], &[rows, stride], rows * stride));
     steps.push(g.step(kb.axpy, &[&cache.qkv, &cache.qkv_pre], &[rows * stride, f(1.0)], rows * stride));
     if let Some(qk) = &w.qk_norm {
@@ -555,7 +591,7 @@ pub fn vit_block_fwd_cached(
         g, &cross, km.as_ref(), sh, &cache.qkv, stride, 0, &cache.qkv, stride, c, 2 * c, &cache.ctx, scores,
         &cache.probs, &att, steps,
     );
-    steps.push(g.step(k.matmul, &[&cache.ctx, w.proj_w, &cache.attn_proj], &[rows, c, c], rows * c));
+    steps.push(gemm_step_cached(g, k, reg, &cache.ctx, w.proj_w, &cache.attn_proj, rows, c, c));
     steps.push(g.step(k.bias_add, &[&cache.attn_proj, w.proj_b], &[rows, c], rows * c));
     let branch: &DeviceBuffer = if let Some(ls1) = w.ls1 {
         steps.push(g.step(k.scale_chan, &[&cache.attn_proj, ls1, scr_tmp], &[rows * c, c, 1], rows * c));
@@ -566,10 +602,10 @@ pub fn vit_block_fwd_cached(
     steps.push(g.step(k.add2, &[&cache.x_in, branch, &cache.res_mid], &[rows * c], rows * c));
 
     steps.push(crate::block::layernorm_fwd(g, &ln, &cache.res_mid, w.norm2_w, w.norm2_b, &cache.ln2, c, rows, sh.eps));
-    steps.push(g.step(k.matmul, &[&cache.ln2, w.fc1_w, &cache.h], &[rows, c, sh.mlp], rows * sh.mlp));
+    steps.push(gemm_step_cached(g, k, reg, &cache.ln2, w.fc1_w, &cache.h, rows, c, sh.mlp));
     steps.push(g.step(k.bias_add, &[&cache.h, w.fc1_b], &[rows, sh.mlp], rows * sh.mlp));
     steps.push(g.step(k.mlp_act, &[&cache.h, &cache.h2], &[rows * sh.mlp], rows * sh.mlp));
-    steps.push(g.step(k.matmul, &[&cache.h2, w.fc2_w, &cache.mlp_out], &[rows, sh.mlp, c], rows * c));
+    steps.push(gemm_step_cached(g, k, reg, &cache.h2, w.fc2_w, &cache.mlp_out, rows, sh.mlp, c));
     steps.push(g.step(k.bias_add, &[&cache.mlp_out, w.fc2_b], &[rows, c], rows * c));
     let branch: &DeviceBuffer = if let Some(ls2) = w.ls2 {
         steps.push(g.step(k.scale_chan, &[&cache.mlp_out, ls2, scr_tmp], &[rows * c, c, 1], rows * c));

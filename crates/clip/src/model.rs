@@ -1280,6 +1280,16 @@ pub const CLIP_VISION_PIPELINES: &[(&str, &str)] = &[
     // span buys the same sweep coalesced loads.
     ("kv_k_headt", kernels::KV_K_HEADT),
     ("attn_scores_cross_kt", kernels::ATTN_SCORES_CROSS_KT),
+    // The 128x128 register-tiled GEMM `model::vit::vit_block_fwd_cached`
+    // resolves BY NAME for a block's four large linears. `matmul` (one thread
+    // per output ELEMENT, serial inner reduction) re-reads both operands out
+    // of DRAM for every one of them, which at CLIP-L/14's 1024/4096 widths is
+    // the tower's whole cost; the tiled kernel contracts the SAME `k` axis in
+    // the SAME order per accumulator, so the values are bit-identical (see
+    // `model::vit::gemm_step`'s doc, and
+    // `tests/vision.rs::the_tiled_gemm_is_bit_identical_to_the_naive_one`).
+    // Appended, so every index above is unchanged.
+    ("matmul_reg3", kernels::MATMUL_REG3),
 ];
 
 /// **Where [`ClipVision`]'s patch tokens come from.** The tower is IDENTICAL

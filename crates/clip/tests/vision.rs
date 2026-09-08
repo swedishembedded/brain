@@ -24,10 +24,18 @@
 //! 4. **The training build's forward is the inference build's forward**, bit for
 //!    bit - a gradient check compares a model against itself and cannot see a
 //!    forward that drifted between the two builds.
+//! 5. **The tiled GEMM is the naive one's values.** The tower registers
+//!    `matmul_reg3`, which `model::vit::vit_block_fwd_cached` resolves by name
+//!    for a block's four large linears once the output is at least one 128x128
+//!    tile; every other test here runs the `tiny` fixture, which is far below
+//!    that floor and therefore never dispatches it at all. One case runs a
+//!    fixture ABOVE the floor against the same tower built without that kernel
+//!    registered, and requires bit equality on both backends.
 //!
 //! No fixtures: the weights come from `clip::init`, so nothing here skips.
 
 use std::collections::HashMap;
+use std::sync::OnceLock;
 
 use data::rng::Rng;
 use gpu_core::Gpu;
@@ -470,6 +478,86 @@ fn training_build_forward_is_identical_to_the_inference_build() {
     assert_eq!(a.len(), b.len());
     for (i, (x, y)) in a.iter().zip(&b).enumerate() {
         assert_eq!(x.to_bits(), y.to_bits(), "out[{i}]: inference {x} vs training {y}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 5. the tiled GEMM is the naive one's values
+// ---------------------------------------------------------------------------
+
+/// A fixture ABOVE `model::vit`'s 128x128 tile floor in every one of a block's
+/// four linears, which [`tiny`] deliberately is not: `d_model 128` (so the
+/// o-projection's `n` is 128), `mlp 256`, and a `12x12` native grid, i.e.
+/// `1 + 144 = 145` rows. Still pairwise-distinct where it can be
+/// (`d_model != mlp != n_heads != head_dim`), and `B = 1` so the attention
+/// span alignment [`tiny`]'s own doc explains does not constrain it.
+fn tiled(act: TextAct) -> ClipVisionConfig {
+    ClipVisionConfig {
+        shape: gguf::deepseek_ocr_vision::ClipConfig {
+            d_model: 128,
+            n_layers: 2,
+            n_heads: 4,
+            ffn_hidden: 256,
+            patch_size: 2,
+            image_size: 24, // native grid 12x12
+            n_positions: 145,
+            layer_norm_eps: 1e-5,
+        },
+        act,
+    }
+}
+
+/// [`CLIP_VISION_PIPELINES`] with the tiled GEMM withheld, and otherwise
+/// entry-for-entry the same list in the same order - so a tower built on it
+/// differs from the shipped one in exactly one way: `vit_block_fwd_cached`'s
+/// `kernel_index("matmul_reg3")` finds nothing and records the naive `matmul`
+/// dispatch the tower recorded before that row existed.
+///
+/// A `'static` slice with a stable address, so `gpu_core::testgpu::dev` pools
+/// it as its own kernel set on the one shared test device rather than building
+/// a second physical one.
+fn reference_pipelines() -> &'static [(&'static str, &'static str)] {
+    static REF: OnceLock<Vec<(&'static str, &'static str)>> = OnceLock::new();
+    REF.get_or_init(|| CLIP_VISION_PIPELINES.iter().filter(|(n, _)| *n != "matmul_reg3").copied().collect()).as_slice()
+}
+
+/// **The gate the tiled GEMM is adopted under.** `matmul_reg3` tiles the
+/// OUTPUT, never `k` - each thread still contracts the whole `k` axis in order
+/// into its own accumulator - so on a GPU it is the same sum in the same order
+/// as `matmul`, and on the CPU JIT both names route to the one native AVX2
+/// GEMM (`backend-cpu` treats them as one equivalence class). Either way the
+/// tower's output must be equal BIT FOR BIT, not close: this kernel sits under
+/// every model that drives `ClipVision` (DeepSeek-OCR's DeepEncoder, LLaVA),
+/// and "agrees to five decimals" is not a property their own real-weight
+/// parity gates could absorb.
+#[test]
+fn the_tiled_gemm_is_bit_identical_to_the_naive_one() {
+    let cfg = tiled(TextAct::GeluErf);
+    let init = clip::init::init_vision_weights(&cfg, 41);
+    let native = (cfg.native_grid(), cfg.native_grid());
+    let tokens = clip::init::fixed_tokens_grid(&cfg, 1, native, 43);
+
+    for (label, dev) in devices() {
+        let tiled_tower = ClipVision::new_on(dev.gpu(), cfg.clone(), 1, PatchSource::Tokens { grid: native }, &init);
+        tiled_tower.set_tokens(&tokens);
+        tiled_tower.forward();
+        let a = tiled_tower.read_output();
+        drop(tiled_tower);
+
+        let ref_gpu = match dev {
+            Dev::Default => gpu_core::testgpu::dev(reference_pipelines()),
+            Dev::CpuJit => Gpu::new_cpu(reference_pipelines()),
+        };
+        let naive = ClipVision::new_on(ref_gpu, cfg.clone(), 1, PatchSource::Tokens { grid: native }, &init);
+        naive.set_tokens(&tokens);
+        naive.forward();
+        let b = naive.read_output();
+
+        assert_eq!(a.len(), b.len(), "[{label}] output length");
+        assert!(a.iter().any(|v| v.abs() > 1e-4), "[{label}] tower output is ~zero - the case proves nothing");
+        for (i, (x, y)) in a.iter().zip(&b).enumerate() {
+            assert_eq!(x.to_bits(), y.to_bits(), "[{label}] out[{i}]: matmul_reg3 {x} vs matmul {y}");
+        }
     }
 }
 
