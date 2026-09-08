@@ -909,6 +909,7 @@ dependencies = [
  "brain-imaging",
  "brain-kernels",
  "brain-model",
+ "brain-optim",
  "brain-paramstore",
  "brain-qwen3",
  "brain-sam1",
