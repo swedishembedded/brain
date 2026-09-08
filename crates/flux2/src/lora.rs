@@ -52,7 +52,7 @@ use model::adapter::{AdapterKind, AdapterSet, KeyStyle, LinearSite, TargetHp, Ta
 // keeps only the FLUX.2-specific block walk, fused-tensor offsets and
 // serialization naming. `LoraCfg` is re-exported for existing callers.
 pub use model::lora::{ExternalFold, LoraCfg};
-use model::lora::{fold_placements, proj_step, LoraGrads, LoraPair, Pair, Placement};
+use model::lora::{fold_placements, LoraGrads, LoraPair, Pair, Placement};
 
 /// How FLUX.2 names itself in a wrong-base-model adapter error. One spelling,
 /// because that message is the one a user reads when an adapter trained for
