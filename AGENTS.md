@@ -671,6 +671,23 @@ fast and scalable kernel - not a naive one.
     token-for-token agreement with the reference is NOT claimed. Full ledger:
     `.agents/roadmap/deepseek2ocr.md`.)*
 
+13e2. **DeepSeek-OCR-2** (`crates/deepseekocr2`, over `crates/{sam1,deepseek2,gguf}`) -
+    the successor to 13e, reusing its DeepSeek-V2 decoder UNCHANGED. Only the
+    vision front end is new: SAM ViT-B (unchanged) feeds a 24-layer
+    Qwen2-shaped GQA tower run as a learned-query resampler under a
+    **prefix-LM mask** (image tokens bidirectional among themselves, learned
+    query tokens causal over everything before them - composed from brain's
+    existing `attn_prefix_mask` kernel plus `kv_expand` widening GQA to the
+    bidirectional attention family, zero new kernels), then a single linear
+    projector, replacing 13e's SAM+compressor+CLIP chain. Gradient-checked
+    (`gradcheck::deepseekocr2`), LoRA + full-fine-tune capable
+    (`crates/deepseekocr2/src/train.rs`), `deepseekocr2::caps` (`generate`,
+    streaming). Global view only today (multi-tile needs a SAM
+    position-embedding resample not yet built) and no vendor-published GGUF
+    exists (community conversions only, no auto-fetch). Full ledger:
+    `.agents/roadmap/deepseekocr2.md`; user-facing page
+    `docs/models/deepseekocr2.md`.
+
 13f. **CosyVoice 2/3** (`crates/cosyvoice` + `crates/s3tokenizer` +
     `crates/campplus`) - LLM-based streaming zero-shot voice cloning: a
     Qwen2.5-0.5B speech-token LM (hosted on `crates/qwen3`) + a causal
@@ -872,6 +889,7 @@ front-end to depend on.
 | `qwen3asr` | Whisper-style + Nemotron 3.5 FastConformer streaming ASR |
 | `qwen3omnimoe` / `qwen3vl` / `fastvlm` / `moondream3` | Qwen3-Omni-30B Thinker (multi-GPU resident); Qwen3-VL-4B; FastVLM-0.5B; Moondream 3 - see `docs/models/vlm.md` for the latter three |
 | `deepseek2ocr` / `deepseek2` / `sam1` | DeepSeek-OCR: the composite (DeepEncoder + splice + decoder, `import`/`caps` incl. the served `generate`); its DeepSeek-V2-family MoE decoder; the SAM-1 ViT-B tower the DeepEncoder is built on |
+| `deepseekocr2` | DeepSeek-OCR-2: SAM (shared with `deepseek2ocr`) + a new Qwen2-GQA prefix-LM resampler, spliced into the unmodified `deepseek2` decoder; own `import`/`caps`/`train` |
 | `forecast` / `fcbench` / `chronos2` / `kronos` / `fincast` / `timesfm3` | forecasting seam, backtester, four imported models |
 | `wm-core` / `diamond` / `genieredux` / `wm-display` | world-model trait + fake model; DIAMOND; GenieRedux-G; SDL window |
 
@@ -955,6 +973,7 @@ front-end to depend on.
 | SAM 2.1 promptable segmentation (image path) | `crates/sam2/src/{config,import,model,hostpe}.rs`; goldens via `tools/goldens/sam2_dump_reference.py`; user-facing page `docs/models/sam2.md` |
 | **SAM 2.1 video tracking** (the temporal memory bank) and the per-frame **mask-sequence format** other models consume | `crates/sam2/src/{video,maskseq}.rs`, `crates/cli/src/sam2_cli.rs` (`brain sam2 track`); goldens via `tools/goldens/sam2_video_dump_reference.py`; the consumer side is `ltxv::maskcond::read_mask_sequence` |
 | DeepSeek-OCR (document image -> text/markdown) | `.agents/roadmap/deepseek2ocr.md`; `crates/deepseek2ocr/src/{config,encoder,layout,model,preprocess,prompt,rows,import,caps}.rs` over `crates/{sam1,clip,deepseek2,gguf}`; resident `crates/cli/src/resident_deepseekocr.rs`; goldens via `tools/goldens/deepseek_ocr_dump_reference.py`; user-facing page `docs/models/deepseek2ocr.md` |
+| DeepSeek-OCR-2 (document image -> text/markdown, new vision front end) | `.agents/roadmap/deepseekocr2.md`; `crates/deepseekocr2/src/{config,encoder,model,preprocess,prompt,rows,import,caps,train}.rs` over `crates/{sam1,deepseek2,gguf}`; resident `crates/cli/src/resident_deepseekocr2.rs`; goldens via `tools/goldens/deepseekocr2_dump_reference.py`; user-facing page `docs/models/deepseekocr2.md` |
 | WorldMirror-2 (photos → 3DGS scene) | `docs/models/worldmirror2/{readme,status}.md`; `crates/worldmirror2`, `crates/cli/src/mirror_cli.rs` |
 | 3D Gaussian Splatting rasterizer + viewer + fit | `docs/models/splat/{readme,status}.md`; `crates/splat`, `crates/cli/src/splat_cli.rs` |
 | Shared ViT block builder (DINOv2/trunk/camera-head) | `crates/model/src/vit.rs` |

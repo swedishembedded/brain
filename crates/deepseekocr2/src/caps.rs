@@ -65,7 +65,9 @@ pub const SEQ_LEN: u32 = 512;
 /// sequence, not the `O(1)` step a KV cache would give. Measured on this
 /// crate's own release build: a real end-to-end `brain deepseekocr2
 /// generate` request with `max_new=16` completes; `max_new=40` did not
-/// finish inside a 280 s budget on this box. 16 is the number that
+/// finish inside a 280 s budget on this box (perf-number: one-time
+/// measurement on the box this milestone was built on, not a promise for
+/// other hardware). 16 is the number that
 /// completed, not a guess - raise it once decode moves to a KV cache the
 /// way v1's `deepseek2::DeepseekV2::generate_greedy_kv` already did (see
 /// this module's header), the same staged shape v1's own default followed.

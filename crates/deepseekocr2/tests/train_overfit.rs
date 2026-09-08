@@ -261,9 +261,10 @@ fn lora_overfits_a_single_example_against_a_real_base() {
     // NOT a near-zero bar, deliberately: phase 1's near-zero threshold is
     // reachable because full fine-tune moves the WHOLE network, including
     // the decoder's 64-expert MoE FFN, which a LoRA config restricted to
-    // attention/MLP-projection ranks never touches. Measured across several
-    // rank/lr combinations, this phase consistently reaches a large (>95%)
-    // reduction from its own confidently-wrong starting point but plateaus
+    // attention/MLP-projection ranks never touches. This phase consistently
+    // reaches a large reduction (perf-number: measured on this crate's own
+    // tiny fixture, not a claim about any real checkpoint) - over 95% off
+    // its own confidently-wrong starting point - but plateaus
     // in the 0.5-0.7 range rather than continuing to zero - a capacity
     // ceiling of the adapter's rank against this task, not a wiring defect
     // (the mechanism itself is separately proven: the no-op test above shows

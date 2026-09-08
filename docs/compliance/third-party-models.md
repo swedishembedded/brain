@@ -50,4 +50,6 @@ CosyVoice, Mimi (dual Apache-2.0/MIT), NeMo/nemotronasr, Wan2.1/2.2,
 diffusers-derived crates (`diffusion`, `dit`, `vae`, `sdxlunet`'s *code*,
 `controlnet`'s *code*), DeepSeek-V2/DeepSeek-OCR (code: MIT; a separate
 DeepSeek `LICENSE-MODEL` governs the weights and was not diffed in detail),
-LLaVA, T5, gpt2 (no real checkpoint fetch path).
+DeepSeek-OCR-2 (both code and weights Apache-2.0 per the model's own
+released repo - unlike v1, no separate model license applies), LLaVA, T5,
+gpt2 (no real checkpoint fetch path).

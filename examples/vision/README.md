@@ -34,7 +34,9 @@ A third vision model lives in its own directory here, because its example is
 about a streaming decode rather than a one-shot image result:
 [`deepseek-ocr/`](deepseek-ocr/README.md) - `deepseek-ai/DeepSeek-OCR`, a
 document page in and decoded text out, streamed token by token
-(`BRAIN_DEEPSEEK_OCR_DIR`).
+(`BRAIN_DEEPSEEK_OCR_DIR`). [`deepseek-ocr-2/`](deepseek-ocr-2/README.md) is
+its successor, same shape, new vision front end
+(`BRAIN_DEEPSEEKOCR2_DIR`).
 
 Discover them the same way as everything else:
 
