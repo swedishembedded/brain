@@ -126,6 +126,11 @@ GGUF exists; the reference safetensors checkpoint is `deepseek-ai/DeepSeek-OCR-2
   projected space, not before projection. `mm.model.fc.{weight,bias}`
   confirmed as a single Linear(896->1280) - matches the reference's `linear`
   `MlpProjector` exactly, no MLP.
+- **A final tower-wide norm exists and was not in the original architecture
+  sketch: `v.post_ln.weight [896]`** - a weight-only (RMSNorm) tensor applied
+  once, after all 24 encoder blocks and before the query slice/projector.
+  Brings the real tensor count to exactly 473 (`24*12 + 1 + 12*14 + 11 + 5`);
+  M1's classifier maps it to `vision.encoder.norm.weight`.
 - **Still open, deliberately not guessed:** how MULTIPLE local tiles order
   themselves relative to each other and to the global view. The graph
   builder confirms one view's internal order (image tokens, then queries,
@@ -145,4 +150,16 @@ encoder (taps per view: concat input, per-layer pre/post-mask scores,
 softmax probs, layer output, query slice, projector output), and the final
 row-gather (local tiles row-major, then the global view, then the
 separator), consumed by `crates/deepseekocr2/tests/tiny_ref.rs` (M3).
-Remaining milestones (M1, M3-M12) not started.
+
+M1 (GGUF import for the mmproj) done: `crates/gguf/src/deepseekocr2_vision.rs`
+classifies all 473 real mmproj tensors - SAM reuses `deepseek_ocr_vision::
+SamConfig` verbatim under the same `vision.sam.*` names `crates/sam1` already
+reads, the new Qwen2 resampler lands under `vision.encoder.*` plus
+`vision.query_{local,global}` and `vision.projector.fc.*`/
+`vision.view_separator` - with full two-way coverage proven against the real
+checkpoint (`crates/gguf/tests/deepseekocr2.rs`). The LM half needed no new
+code (see above). Registry wiring (`crates/arch`, `crates/cli/src/
+gguf_import.rs`'s `IMPORTERS` table, the modelstore recipe) is deferred to
+M7, once `crates/deepseekocr2` exists for `check-arch-names.sh` to point at.
+
+Remaining milestones (M3-M12) not started.

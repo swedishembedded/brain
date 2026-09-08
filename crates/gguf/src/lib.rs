@@ -41,6 +41,7 @@
 
 pub mod deepseek_ocr;
 pub mod deepseek_ocr_vision;
+pub mod deepseekocr2_vision;
 pub mod import;
 pub mod int8_direct;
 pub mod kquant;
