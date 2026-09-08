@@ -302,8 +302,8 @@ impl LoraStore {
     /// independent generators.
     pub fn new(gpu: &Gpu, cfg: &Qwen35Config, init: &HashMap<String, Vec<f32>>) -> LoraStore {
         assert!(cfg.lora.is_some(), "stream_train::LoraStore::new: cfg.lora must be set");
-        let lora_init: HashMap<String, Vec<f32>> = init.iter().filter(|(k, _)| k.ends_with(".lora_a") || k.ends_with(".lora_b")).map(|(k, v)| (k.clone(), v.clone())).collect();
-        let expect_n = cfg.param_list().iter().filter(|(k, _)| k.ends_with(".lora_a") || k.ends_with(".lora_b")).count();
+        let lora_init: HashMap<String, Vec<f32>> = init.iter().filter(|(k, _)| model::adapter::device::is_adapter_param(k)).map(|(k, v)| (k.clone(), v.clone())).collect();
+        let expect_n = cfg.param_list().iter().filter(|(k, _)| model::adapter::device::is_adapter_param(k)).count();
         assert_eq!(lora_init.len(), expect_n, "stream_train::LoraStore::new: init map is missing some of cfg.param_list()'s .lora_a/.lora_b tensors");
         let params: Vec<(String, usize)> = lora_init.iter().map(|(k, v)| (k.clone(), v.len())).collect();
         let ps = ParamStore::new(gpu, params, &lora_init);

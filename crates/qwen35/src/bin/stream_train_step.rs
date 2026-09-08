@@ -120,7 +120,7 @@ fn main() {
 
             let mut out: HashMap<String, Vec<f32>> = HashMap::new();
             for (name, _) in cfg.param_list() {
-                if name.ends_with(".lora_a") || name.ends_with(".lora_b") {
+                if model::adapter::device::is_adapter_param(&name) {
                     out.insert(name.clone(), trainer.lora.ps.read_weight(&trainer.gpu, &name));
                 }
             }

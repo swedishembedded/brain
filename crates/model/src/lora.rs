@@ -375,13 +375,21 @@ pub mod device_adapter {
         family: &str,
         dataset_id: Option<&str>,
     ) -> std::io::Result<()> {
+        let r = rank as usize;
         let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = model
             .param_names()
             .into_iter()
-            .filter(|name| name.ends_with(".lora_a") || name.ends_with(".lora_b"))
+            .filter(|name| crate::adapter::device::is_adapter_param(name))
             .map(|name| {
                 let data = model.read_weight(&name);
-                (name.clone(), vec![data.len() as u64], data)
+                // Real 2-D shape, not the flattened `[len]` this used to
+                // write - recovered from `data.len()`/`rank` exactly like
+                // `read_external_adapter` already does for third-party
+                // files, since the device family has no other place a
+                // shape could come from. `.lora_a` is `[r,in]`, `.lora_b`
+                // is `[out,r]`.
+                let shape = if name.ends_with(".lora_a") { vec![r as u64, (data.len() / r) as u64] } else { vec![(data.len() / r) as u64, r as u64] };
+                (name.clone(), shape, data)
             })
             .collect();
         assert!(!tensors.is_empty(), "save_adapter: no .lora_a/.lora_b tensors in the param store");
@@ -416,6 +424,14 @@ pub mod device_adapter {
             .card()
             .unwrap_or_else(|| panic!("fold_adapter_into: {adapter_path} has no ModelCard"));
         let a = card.adapter.as_ref().unwrap_or_else(|| panic!("fold_adapter_into: {adapter_path}'s card has no adapter descriptor"));
+        // `Adapter.kind` is a free-form string nothing branched on before
+        // this - make it load-bearing: an unknown kind is a hard error
+        // naming it, not a silent "treat everything as lora" (this fold's
+        // math IS the lora fold; a DoRA/LoKr file would need a different
+        // one, and getting that wrong silently would be the exact
+        // "loader that quietly drops keys" failure `read_external_adapter`
+        // already refuses to allow for third-party files).
+        assert_eq!(a.kind, "lora", "fold_adapter_into: {adapter_path}'s adapter kind is {:?}, but this fold only implements \"lora\"", a.kind);
         let rank = a.rank.unwrap_or_else(|| panic!("fold_adapter_into: {adapter_path}'s adapter has no rank"));
         let alpha = a.alpha.unwrap_or(rank as f32);
         let scale = alpha / rank as f32;

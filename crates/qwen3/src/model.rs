@@ -858,7 +858,7 @@ impl Qwen {
             let roles = plist
                 .into_iter()
                 .map(|(n, c)| {
-                    let role = if n.ends_with(".lora_a") || n.ends_with(".lora_b") {
+                    let role = if model::adapter::device::is_adapter_param(&n) {
                         paramstore::Role::Trainable
                     } else {
                         paramstore::Role::Frozen

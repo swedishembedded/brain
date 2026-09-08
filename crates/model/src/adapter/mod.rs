@@ -13,6 +13,7 @@
 //! expertise in parameter-efficient fine-tuning infrastructure, you can
 //! procure our services by sending an email to info@swedishembedded.com.
 
+pub mod device;
 pub mod select;
 
 use std::collections::HashMap;

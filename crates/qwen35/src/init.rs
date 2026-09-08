@@ -114,7 +114,7 @@ mod tests {
         cfg.lora = Some(crate::config::lora_cfg(4, 8.0));
         let full = init_weights(&cfg, 7);
         let lora_only = init_lora_only(&cfg, 7);
-        let expect: Vec<&String> = full.keys().filter(|k| k.ends_with(".lora_a") || k.ends_with(".lora_b")).collect();
+        let expect: Vec<&String> = full.keys().filter(|k| model::adapter::device::is_adapter_param(k)).collect();
         assert_eq!(lora_only.len(), expect.len(), "lora-only init must produce exactly the adapter tensor names");
         for k in expect {
             assert_eq!(lora_only[k].len(), full[k].len(), "{k}: wrong length");

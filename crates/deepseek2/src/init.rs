@@ -60,7 +60,7 @@ pub fn init_weights(cfg: &DeepseekV2Config, seed: u64) -> HashMap<String, Vec<f3
 /// own weights" merge, keeping only the half of that fresh init the merge
 /// actually needs. Empty when `cfg.lora` is `None`.
 pub fn init_adapters(cfg: &DeepseekV2Config, seed: u64) -> HashMap<String, Vec<f32>> {
-    init_weights(cfg, seed).into_iter().filter(|(n, _)| n.ends_with(".lora_a") || n.ends_with(".lora_b")).collect()
+    init_weights(cfg, seed).into_iter().filter(|(n, _)| model::adapter::device::is_adapter_param(n)).collect()
 }
 
 #[cfg(test)]
@@ -106,7 +106,7 @@ mod tests {
         let cfg = DeepseekV2Config { lora: Some(crate::config::lora_cfg(2, 4.0)), ..base.clone() };
         let adapters = init_adapters(&cfg, 7);
         let expected: std::collections::HashSet<String> =
-            cfg.param_list().into_iter().filter(|(n, _)| n.ends_with(".lora_a") || n.ends_with(".lora_b")).map(|(n, _)| n).collect();
+            cfg.param_list().into_iter().filter(|(n, _)| model::adapter::device::is_adapter_param(n)).map(|(n, _)| n).collect();
         assert!(!expected.is_empty());
         assert_eq!(adapters.keys().cloned().collect::<std::collections::HashSet<_>>(), expected);
         for (name, v) in &adapters {

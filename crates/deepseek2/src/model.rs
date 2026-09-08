@@ -537,7 +537,7 @@ impl DeepseekV2 {
                 let role = if !train {
                     Role::Frozen
                 } else if cfg.lora.is_some() {
-                    if n.ends_with(".lora_a") || n.ends_with(".lora_b") { Role::Trainable } else { Role::Frozen }
+                    if model::adapter::device::is_adapter_param(&n) { Role::Trainable } else { Role::Frozen }
                 } else {
                     Role::Trainable
                 };
