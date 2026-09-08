@@ -66,4 +66,4 @@ pub mod model;
 
 pub use config::DeepseekV2Config;
 pub use init::init_weights;
-pub use model::{DeepseekV2, IGNORE, PIPELINES};
+pub use model::{DeepseekV2, Sizes, IGNORE, PIPELINES};

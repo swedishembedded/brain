@@ -73,7 +73,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
-use model::block::{self, Gqa, GqaDecodeIds, KernelIds};
+use model::block::{self, Gqa, KernelIds};
 use model::moe::{
     self, ExpertBwdScratch, ExpertGrads, MoeActs, MoeIds, MoeIdsBwd, MoeShape, RouterBwdIds, RouterKind, SharedExpertActs, SharedExpertBwdIds,
     SharedExpertBwdScratch, SharedExpertGrads, SharedExpertIds, SharedExpertScratch,
@@ -133,22 +133,33 @@ const SPLICE_BWD: usize = 40;
 /// every other LoRA dispatch (`MATMUL`/`MATMUL_DX`/`MATMUL_DW`/`GRAD_SCALE`)
 /// reuses a slot already registered above.
 const AXPY: usize = 41;
-// ---- incremental KV-cache decode kernels (single new token vs the growing
-// cache) -- see `DeepseekV2::step`'s doc. Appended so every index above stays
-// unchanged. ----
+// ---- incremental/chunked KV-cache decode kernels (`n` new rows vs the
+// growing cache, `n = 1` being a plain decode step) -- see
+// `DeepseekV2::decode_rows`'s doc. Appended so every index above stays
+// unchanged. `ROPE_AT` rotates at an explicit absolute position (`ROPE`
+// above only knows `row % tcols`, unusable for a row past position 0); the
+// other four back `model::block::gqa_chunk_step` (a chunk of `n` new queries
+// attending a growing KV cache; `n = 1` is what used to be a separate
+// `gqa_decode_step`/`GqaDecodeIds` kernel triad, now unified onto this one
+// path since `gqa_chunk_step` at `n = 1` dispatches identically); `KV_APPEND`
+// bulk-fills the cache from a `batched = true` build's own resident forward
+// buffers (`fill_cache_from_prefill`); `CONCAT_SPLIT` pulls a round's LAST
+// row out of its `[n, d]` hidden state before the final norm + `lm_head`, so
+// a round that is not the final one never materializes `[n, vocab]` logits.
 const ROPE_AT: usize = 42;
-const ATTN_DECODE_SCORES: usize = 43;
-const DECODE_SOFTMAX: usize = 44;
-const ATTN_DECODE_APPLY: usize = 45;
-const KV_APPEND: usize = 46;
-const RMSNORM_ROWS: usize = 47;
+const KV_APPEND: usize = 43;
+const RMSNORM_ROWS: usize = 44;
 // The coalesced RMSNorm BACKWARD-x twin of `rmsnorm_dx` above: `rmsnorm_dx`
 // gives thread `t` row `t` and walks that whole row TWICE (`sum(x^2)` and
 // `sum(dy*w*x)`), so a warp's 32 loads are `dim` floats apart and each 32-byte
 // sector fetched serves one useful float. `rmsnorm_dx_rows` splits both
 // reductions across 64 threads of one workgroup and is coalesced by
 // construction. Appended, so every index above is unchanged.
-const RMSNORM_DX_ROWS: usize = 48;
+const RMSNORM_DX_ROWS: usize = 45;
+const PAGED_DECODE_SCORES_BATCHED: usize = 46;
+const DECODE_SOFTMAX_BATCHED: usize = 47;
+const PAGED_DECODE_APPLY_BATCHED: usize = 48;
+const CONCAT_SPLIT: usize = 49;
 
 pub const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -199,16 +210,15 @@ pub const PIPELINES: &[(&str, &str)] = &[
     // LoRA's scaled-accumulate -- appended after the base set, so every
     // index above is unchanged for a non-LoRA build too.
     ("axpy", kernels::AXPY),
-    // Incremental KV-cache decode -- the O(1)-new-token twin of the O(T)
-    // batched forward above. `rope_at` rotates at an explicit absolute
-    // position (`rope_base` only knows `row % tcols`, unusable for a single
-    // new row past position 0); the other four are the same
-    // append/score/softmax/apply primitives `crates/gpt`/`crates/glm`/
-    // `crates/qwen3` already use for their own decode step.
+    // Incremental/chunked KV-cache decode -- `n = 1` is a plain decode step,
+    // `n > 1` a prefill round (`DeepseekV2::decode_rows`). `rope_at` rotates
+    // at an explicit absolute position (`rope_base` only knows `row % tcols`,
+    // unusable past position 0); `kv_append` bulk-fills the cache from a
+    // `batched = true` build's own resident forward buffers; the other three
+    // back `model::block::gqa_chunk_step` (a chunk of `n` new queries
+    // attending a growing KV cache - `n = 1` is what a separate
+    // `gqa_decode_step` kernel triad used to serve).
     ("rope_at", kernels::ROPE_AT),
-    ("attn_decode_scores", kernels::ATTN_DECODE_SCORES),
-    ("decode_softmax", kernels::DECODE_SOFTMAX),
-    ("attn_decode_apply", kernels::ATTN_DECODE_APPLY),
     ("kv_append", kernels::KV_APPEND),
     // Coalesced RMSNorm -- the throughput twin of `rmsnorm` above, selected
     // by `block::rms_variant` inside `block::rmsnorm_fwd`. Appended, so
@@ -218,6 +228,12 @@ pub const PIPELINES: &[(&str, &str)] = &[
     // above, selected by the SAME `block::rms_variant` policy inside
     // `block::rmsnorm_bwd`. Appended, so every index above is unchanged.
     ("rmsnorm_dx_rows", kernels::RMSNORM_DX_ROWS),
+    // Chunked prefill (`model::block::gqa_chunk_step` + the last-row extract
+    // ahead of the head) -- appended, so every index above is unchanged.
+    ("paged_decode_scores_batched", kernels::PAGED_DECODE_SCORES_BATCHED),
+    ("decode_softmax_batched", kernels::DECODE_SOFTMAX_BATCHED),
+    ("paged_decode_apply_batched", kernels::PAGED_DECODE_APPLY_BATCHED),
+    ("concat_split", kernels::CONCAT_SPLIT),
 ];
 
 fn kernel_ids() -> KernelIds {
@@ -240,6 +256,19 @@ fn kernel_ids() -> KernelIds {
         silu_da: SILU_DA,
         silu_db: SILU_DB,
         rmsnorm_rows: RMSNORM_ROWS,
+    }
+}
+
+/// Kernel ids [`block::gqa_chunk_step`] dispatches, copied verbatim from
+/// `crates/qwen35/src/model.rs`'s function of the same name (the same four
+/// kernels, the same shared `splice` slot [`SPLICE`] already registers for
+/// the vision-language embedding splice).
+fn gqa_chunk_ids() -> block::GqaChunkIds {
+    block::GqaChunkIds {
+        splice: SPLICE,
+        scores_batched: PAGED_DECODE_SCORES_BATCHED,
+        softmax_batched: DECODE_SOFTMAX_BATCHED,
+        apply_batched: PAGED_DECODE_APPLY_BATCHED,
     }
 }
 
@@ -329,30 +358,40 @@ struct LayerBufs {
     mlp: Mlp,
 }
 
-/// Per-layer / shared GPU scratch for the incremental single-token KV-cache
-/// decode path, plus the persistent K/V cache -- the `O(1)`-new-token twin of
+/// Per-layer / shared GPU scratch for the incremental KV-cache decode path,
+/// plus the persistent K/V cache -- the `O(chunk)`-per-round twin of
 /// [`DeepseekV2::build_forward`]'s `O(T)` batched recompute. Built lazily the
-/// first time [`DeepseekV2::step`] runs (inference-only; sized for `n=1` rows
-/// and a `cap = self.t` cache), so the training buffers above are never
-/// disturbed.
+/// first time [`DeepseekV2::step`]/[`DeepseekV2::decode_rows`] runs
+/// (inference-only; sized for `chunk` rows and a `cap = self.ctx` cache), so
+/// the training buffers above are never disturbed.
 ///
 /// Every scratch buffer below (attention AND MLP/MoE) is reused across
-/// layers -- layers run strictly sequentially in one step, so nothing needs a
+/// layers -- layers run strictly sequentially in one round, so nothing needs a
 /// per-layer copy except the persistent `kcache`/`vcache` (which must survive
-/// from one step to the next) and `res` (the residual stream snapshot each
+/// from one round to the next) and `res` (the residual stream snapshot each
 /// layer reads and the next layer writes). This mirrors `crates/gpt`'s
 /// `Decode` struct; the MoE scratch (`moe_acts` etc.) is the one addition
 /// this architecture's decoder needs over that plain-MLP shape.
+///
+/// A single-token [`DeepseekV2::step`] is the `chunk = 1` degenerate case of
+/// [`DeepseekV2::decode_rows`] - same buffers, same dispatches, `n = 1` -
+/// which is why this struct carries no separate 1-row fields any more.
 struct Decode {
-    cap: u32, // K/V cache capacity == self.t (max context)
-    tok_id: DeviceBuffer,
-    res: Vec<DeviceBuffer>, // [n_layers+1] residual-stream snapshots, [d]
+    cap: u32, // K/V cache capacity == self.ctx
+    /// Round width every buffer below is sized for (`self.chunk`). A round
+    /// may use fewer rows (a ragged last round); it may never use more.
+    chunk: u32,
+    tok_ids: DeviceBuffer,      // [chunk] u32
+    block_ids: DeviceBuffer,    // [chunk] u32, always zero (one flat cache "block" per sequence)
+    seq_lens: DeviceBuffer,     // [chunk] u32, seq_lens[i] = pos_start + i + 1
+    res: Vec<DeviceBuffer>,     // [n_layers+1] residual-stream snapshots, [chunk, d]
+    last_row: DeviceBuffer,     // [d] -- the round's last row, pulled out before the head
     xn1: DeviceBuffer,
     q: DeviceBuffer,
     k: DeviceBuffer,
     v: DeviceBuffer,
-    scores: DeviceBuffer,
-    probs: DeviceBuffer,
+    scores: DeviceBuffer, // [chunk, n_heads, cap]
+    probs: DeviceBuffer,  // [chunk, n_heads, cap]
     ctx: DeviceBuffer,
     proj: DeviceBuffer,
     xmid: DeviceBuffer,
@@ -400,6 +439,22 @@ pub struct DeepseekV2 {
     opt: Optim,
     b: u32,
     t: u32,
+    /// KV-cache capacity (the decode position ceiling). Equals `t` for every
+    /// caller today (`new_on`/`new_sized` with the default `Sizes`); a caller
+    /// that wants a context wider than the batched tape it builds passes a
+    /// larger `ctx` explicitly. See [`Sizes`].
+    ctx: u32,
+    /// Prefill round width a chunked (non-batched) build steps `Decode`'s
+    /// scratch at. `1` for every caller today - only meaningful once a
+    /// `batched: false` build's `prefill_chunked` (added in a later phase)
+    /// steps rounds wider than one token at a time.
+    chunk: u32,
+    /// Whether this instance built the `[b*t, ...]` batched forward/backward
+    /// tape at all. `true` for every caller today. `forward`/`backward`/
+    /// `logits_all`/`read_*` are only ever valid on a `batched: true`
+    /// instance; a `batched: false` one exists to decode through
+    /// [`Decode`]'s cheaper per-row scratch instead.
+    batched: bool,
     count: Cell<f32>,
 
     tokens: DeviceBuffer,
@@ -479,6 +534,30 @@ pub struct DeepseekV2 {
     dec_pos: Cell<u32>,
 }
 
+/// The four numbers [`DeepseekV2::new_sized`] needs that a plain `(b, t)`
+/// conflates: `t` is both "how wide is the batched tape" and "how large is
+/// the KV cache" in [`DeepseekV2::new_on`], which is fine for training/parity
+/// (both are the same number there) but wrong for a long-context inference
+/// build, where the KV cache should be far larger than any one prefill round.
+#[derive(Clone, Copy, Debug)]
+pub struct Sizes {
+    pub b: u32,
+    /// Width of the batched `[b*t, ...]` forward/backward tape. Ignored
+    /// (a 1-element stub is still built so field access stays uniform) when
+    /// `batched == false`.
+    pub t: u32,
+    /// KV-cache capacity - the decode position ceiling. Independent of `t`:
+    /// a chunked prefill's rounds are `t`-or-narrower slices of a sequence
+    /// that can run all the way out to `ctx`.
+    pub ctx: u32,
+    /// Prefill round width [`Decode`]'s per-token scratch is stepped at.
+    pub chunk: u32,
+    /// Whether to build the `[b*t, ...]` batched tape at all. `false` means
+    /// only [`Decode`]'s cheaper per-row scratch is usable
+    /// (`forward`/`backward`/`logits_all`/`read_*` are refused).
+    pub batched: bool,
+}
+
 impl DeepseekV2 {
     /// Trainable model on a fresh device.
     pub fn new(cfg: DeepseekV2Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> DeepseekV2 {
@@ -492,8 +571,25 @@ impl DeepseekV2 {
     }
 
     /// Build on an existing device handle (the pooled test device, a placed
-    /// card) - see `Gpt::new_on` for the convention.
+    /// card) - see `Gpt::new_on` for the convention. `ctx = t`, `chunk = 1`,
+    /// `batched = true`: the batched tape IS the KV-cache capacity and the
+    /// per-token `Decode` scratch is the only chunk width this constructor
+    /// ever needs, which is exactly the training/parity shape every existing
+    /// caller uses. See [`Self::new_sized`] for a long-context inference build.
     pub fn new_on(gpu: Gpu, cfg: DeepseekV2Config, b: u32, t: u32, src: &dyn checkpoint::TensorSource, train: bool) -> DeepseekV2 {
+        DeepseekV2::new_sized(gpu, cfg, Sizes { b, t, ctx: t, chunk: 1, batched: true }, src, train)
+    }
+
+    /// [`Self::new_on`] generalized to a context wider than the batched tape:
+    /// see [`Sizes`] for what each field controls.
+    pub fn new_sized(gpu: Gpu, cfg: DeepseekV2Config, sizes: Sizes, src: &dyn checkpoint::TensorSource, train: bool) -> DeepseekV2 {
+        let Sizes { b, t, ctx, chunk, batched } = sizes;
+        assert!(
+            !batched || ctx >= t,
+            "deepseekv2: the KV-cache capacity ({ctx}) must be at least the batched tape width ({t})"
+        );
+        assert!(chunk >= 1, "deepseekv2: chunk must be at least 1 row");
+        assert!(batched || !train, "deepseekv2: a batched=false instance has no tape to train through - build_backward needs the batched forward");
         // `rope_base.wgsl` rotates the WHOLE `head_dim`. A partial-rotary config
         // would need `rope_partial.wgsl` and a different backward; refuse it
         // loudly rather than silently rotating dimensions the reference leaves
@@ -563,14 +659,24 @@ impl DeepseekV2 {
         let t_scratch = std::time::Instant::now();
         let opt = Optim::new(ADAMW, GRADNORM_SQ, GRAD_SCALE, CLIP_COEF, GRAD_SCALE_BUF);
 
-        let n = (b * t) as u64;
+        // The WHOLE batched `[b*t, ...]` tape - every buffer below scaled by
+        // `n` or `bht2` - is a 1-element stub when `batched == false`: a
+        // chunked-decode-only instance never records `build_forward`/
+        // `build_backward` (see `m.fwd_steps`/`m.bwd_steps` below) and reads
+        // logits through `Decode`'s per-row scratch instead (see
+        // `ensure_decode`), so nothing ever dispatches into these buffers.
+        // This is the dominant memory cost of a long-context build: the MoE
+        // `acts` below alone are ~86% of a batched row's ~13.25 MB (`MoeActs`
+        // saves EVERY expert's own activations for backward, vs `Decode`'s one
+        // shared set reused across every layer and every expert).
+        let n = if batched { (b * t) as u64 } else { 1 };
         let d = cfg.d_model() as u64;
         let v = cfg.vocab() as u64;
         let e = cfg.n_experts() as u64;
         let dense_ff = cfg.ffn_hidden() as u64;
         let shared_ff = cfg.shared_ff() as u64;
         let ff_max = cfg.ff_max() as u64;
-        let bht2 = (b * cfg.n_heads() * t * t) as u64;
+        let bht2 = if batched { (b * cfg.n_heads() * t * t) as u64 } else { 1 };
         let st = |x: u64| gpu.storage(x);
 
         // LoRA scratch: rank `r` (1 when unconfigured), output width `d_model`
@@ -580,12 +686,13 @@ impl DeepseekV2 {
         let lora_da = st(n * lora_r);
         let lora_out = st(n * d);
 
-        // Backward-only buffers are sized at a 1-element stub when `!train`,
-        // the same convention `gate_stub`/LoRA scratch already use below --
-        // `build_backward` is never called in that case (see `bwd_steps`
-        // below), so nothing ever dispatches into them; allocating them at
-        // `n`/`bht2` regardless would cost a second full-size copy of the
-        // batched graph's activations for a build that never runs backward.
+        // Backward-only buffers are sized at a 1-element stub whenever
+        // `build_backward` will not be called (`!train`, which already covers
+        // `!batched` since that implies `!train` - see the assert above), the
+        // same convention `gate_stub`/LoRA scratch already use below. This is
+        // the finer-grained twin of the `n`/`bht2` gate above: it also shrinks
+        // a `batched=true, train=false` forward-only build (the composite
+        // parity path this crate's callers already use).
         let bn = if train { n } else { 1 };
         let bwd_bht2 = if train { bht2 } else { 1 };
 
@@ -596,7 +703,7 @@ impl DeepseekV2 {
             dres.push(st(bn * d));
         }
         let moe_shape = MoeShape {
-            rows: b * t,
+            rows: n as u32,
             d_model: cfg.d_model(),
             moe_ff: cfg.moe_ff(),
             n_experts: cfg.n_experts(),
@@ -654,6 +761,9 @@ impl DeepseekV2 {
             cfg,
             b,
             t,
+            ctx,
+            chunk,
+            batched,
             count: Cell::new(1.0),
             ps,
             moe_expert_names,
@@ -706,8 +816,8 @@ impl DeepseekV2 {
             eprintln!("deepseekv2: new_on: scratch buffer allocation: {:.1} ms", t_scratch.elapsed().as_secs_f64() * 1e3);
         }
         let t_tape = std::time::Instant::now();
-        m.fwd_steps = m.build_forward(m.b, m.t);
-        m.bwd_steps = if train { m.build_backward() } else { Vec::new() };
+        m.fwd_steps = if batched { m.build_forward(m.b, m.t) } else { Vec::new() };
+        m.bwd_steps = if batched && train { m.build_backward() } else { Vec::new() };
         if profile {
             eprintln!("deepseekv2: new_on: tape build (fwd{}): {:.1} ms", if train { "+bwd" } else { "" }, t_tape.elapsed().as_secs_f64() * 1e3);
         }
@@ -1105,6 +1215,7 @@ impl DeepseekV2 {
     // ---- run ----
 
     pub fn forward(&self) -> f32 {
+        assert!(self.batched, "DeepseekV2::forward on a batched=false (chunked-decode-only) instance");
         self.gpu.submit(&[], &self.fwd_steps);
         let n = (self.b * self.t) as usize;
         self.gpu.read(&self.ce_buf, n).iter().sum::<f32>() / self.count.get()
@@ -1139,11 +1250,12 @@ impl DeepseekV2 {
         self.ps.trainable.iter().map(|(n, _)| n.clone()).collect()
     }
     pub fn ctx_len(&self) -> usize {
-        self.t as usize
+        self.ctx as usize
     }
 
     /// Per-position logits for one sequence (`b` must be 1, `len <= t`).
     pub fn logits_all(&self, tokens: &[u32]) -> Vec<f32> {
+        assert!(self.batched, "deepseekv2: logits_all needs a batched=true instance - a chunked (batched=false) build has no batched tape to run");
         let t_use = tokens.len() as u32;
         assert!(t_use <= self.t && self.b == 1, "deepseekv2 decoder sized too small for logits_all");
         // The rebuilt tape carries the splice too, so a short sequence must still
@@ -1253,57 +1365,74 @@ impl DeepseekV2 {
         let shared_ff = c.shared_ff() as u64;
         let vocab = c.vocab() as u64;
         let nh = c.n_heads() as u64;
-        let cap = self.t;
+        // The KV-cache capacity, NOT the batched tape width `self.t` - the two
+        // coincide for every `new_on` caller (`ctx == t`) but a long-context
+        // `new_sized` build wants a cache far larger than any one prefill round.
+        let cap = self.ctx;
+        // Every buffer below is sized for `chunk` rows - `self.chunk` for
+        // every `new_on` caller (the single-token decode step's `chunk = 1`
+        // degenerate case), wider for a `new_sized` build that prefills in
+        // rounds. A round may use fewer rows than this (a ragged last round);
+        // `decode_rows` never asks for more.
+        let chunk = self.chunk as u64;
         let g = &self.gpu;
         let st = |x: u64| g.storage(x);
-        let idbuf = || g.buffer("dec_tok_id", 4, gpu_core::BufUsage::STORAGE | gpu_core::BufUsage::COPY_DST);
+        let idbuf = |label: &str, n: u64| g.buffer(label, n * 4, gpu_core::BufUsage::STORAGE | gpu_core::BufUsage::COPY_DST);
 
         let mut res = Vec::new();
         for _ in 0..=c.n_layers() as usize {
-            res.push(st(d));
+            res.push(st(chunk * d));
         }
         let (mut kcache, mut vcache) = (Vec::new(), Vec::new());
         for _ in 0..c.n_layers() as usize {
             kcache.push(st(cap as u64 * d));
             vcache.push(st(cap as u64 * d));
         }
-        let moe_shape1 = MoeShape { rows: 1, d_model: c.d_model(), moe_ff: c.moe_ff(), n_experts: c.n_experts(), top_k: c.top_k() };
+        let moe_shape_chunk = MoeShape { rows: self.chunk, d_model: c.d_model(), moe_ff: c.moe_ff(), n_experts: c.n_experts(), top_k: c.top_k() };
 
         let dec = Decode {
             cap,
-            tok_id: idbuf(),
+            chunk: self.chunk,
+            tok_ids: idbuf("dec_tok_ids", chunk),
+            block_ids: idbuf("dec_block_ids", chunk),
+            seq_lens: idbuf("dec_seq_lens", chunk),
             res,
-            xn1: st(d),
-            q: st(d),
-            k: st(d),
-            v: st(d),
-            scores: st(nh * cap as u64),
-            probs: st(nh * cap as u64),
-            ctx: st(d),
-            proj: st(d),
-            xmid: st(d),
-            xn2: st(d),
-            dense_gate_pre: st(dense_ff),
-            dense_up: st(dense_ff),
-            dense_h: st(dense_ff),
-            router_logits: st(e),
-            gate: st(e),
-            moe_acts: MoeActs::new(g, &moe_shape1),
-            sh_gate: st(shared_ff),
-            sh_up: st(shared_ff),
-            sh_h: st(shared_ff),
-            sh_out: st(d),
-            moe_acc: st(d),
-            mlp_out: st(d),
+            last_row: st(d),
+            xn1: st(chunk * d),
+            q: st(chunk * d),
+            k: st(chunk * d),
+            v: st(chunk * d),
+            scores: st(chunk * nh * cap as u64),
+            probs: st(chunk * nh * cap as u64),
+            ctx: st(chunk * d),
+            proj: st(chunk * d),
+            xmid: st(chunk * d),
+            xn2: st(chunk * d),
+            dense_gate_pre: st(chunk * dense_ff),
+            dense_up: st(chunk * dense_ff),
+            dense_h: st(chunk * dense_ff),
+            router_logits: st(chunk * e),
+            gate: st(chunk * e),
+            moe_acts: MoeActs::new(g, &moe_shape_chunk),
+            sh_gate: st(chunk * shared_ff),
+            sh_up: st(chunk * shared_ff),
+            sh_h: st(chunk * shared_ff),
+            sh_out: st(chunk * d),
+            moe_acc: st(chunk * d),
+            mlp_out: st(chunk * d),
             xn_final: st(d),
             logits: st(vocab),
             kcache,
             vcache,
         };
+        // `block_ids` never changes: one flat cache "block" per sequence, so
+        // every row's block table is a single zero (see `gqa_chunk_step`'s
+        // own doc). Written once here rather than once per round.
+        g.write(&dec.block_ids, &vec![0u32; self.chunk as usize]);
         *self.dec.borrow_mut() = Some(dec);
     }
 
-    /// Bulk-fill the persistent KV cache from a just-run batched forward's
+    /// Bulk-fill the persistent KV cache from a just-run BATCHED forward's
     /// resident per-layer `k`/`v` buffers ([`Self::layers`]) -- the prefill
     /// half of [`block::kv_cache_fill`]'s documented pattern: after a normal
     /// batched pass over the prompt's `n` positions, one flat `kv_append`
@@ -1312,6 +1441,16 @@ impl DeepseekV2 {
     /// a [`Self::logits_all`]/[`Self::build_forward`] call over EXACTLY the
     /// tokens the cache should hold -- `self.layers[l].k`/`.v` hold whatever
     /// that most recent forward wrote, nothing more.
+    ///
+    /// `batched = true` builds' own prefill mechanism: `generate_greedy_kv_cb`
+    /// still runs the WHOLE prompt through one `logits_all` dispatch pass and
+    /// calls this, rather than [`Self::prefill_chunked`], because
+    /// `prefill_chunked` at a narrow `chunk` (every `new_on` caller's default
+    /// is `chunk = 1`) would dispatch every MoE expert once per CHUNK instead
+    /// of once for the whole prompt - `decode_rows`'s own comment on why that
+    /// trade measures worse, at prefill scale. A `batched = false` build has
+    /// no batched tape to run `logits_all` through at all, so it always uses
+    /// `prefill_chunked` - see that method's doc.
     fn fill_cache_from_prefill(&self, n: u32) {
         self.ensure_decode();
         let c = &self.cfg;
@@ -1328,25 +1467,40 @@ impl DeepseekV2 {
     }
 
     /// **Incremental KV-cache decode** of a single token id at the current
-    /// cache position, returning that new token's logits (`[vocab]`). This is
-    /// the `O(1)`-per-token twin of [`Self::logits_all`]'s `O(T)` batched
-    /// recompute: only the new token's Q/K/V are projected and only the
-    /// new token's row runs through the MoE/dense FFN; its K/V are appended to
-    /// the persistent per-layer cache and a single query attends over
-    /// positions `0..=pos`. Expressed entirely in the existing WGSL op set
-    /// (`model::block::gqa_decode_step` plus `kernels::ROPE_AT` for the
-    /// explicit-position rotation `rope_base.wgsl` cannot express at a single
-    /// row past position 0), so it runs on whatever backend `Gpu` selected.
+    /// cache position, returning that new token's logits (`[vocab]`). The
+    /// `n = 1` case of [`Self::decode_rows`] - see that method's doc for how
+    /// the round is expressed.
     pub fn step(&self, token_id: u32) -> Vec<f32> {
         self.ensure_decode();
         let pos = self.dec_pos.get();
-        let logits = self.decode_at(token_id, pos);
+        let logits = self.decode_rows(&[token_id], pos);
         self.dec_pos.set(pos + 1);
         logits
     }
 
-    /// Record + run the incremental decode tape for one token at absolute `pos`.
-    fn decode_at(&self, token_id: u32, pos: u32) -> Vec<f32> {
+    /// Record + run one chunked-decode ROUND: `tokens.len()` new rows
+    /// starting at absolute position `pos_start`, returning only the round's
+    /// LAST row's logits (`[vocab]`) - the next token to draw, or (mid-prefill)
+    /// the seam into the following round.
+    ///
+    /// Generalizes the old single-token decode step to `n` rows at once:
+    /// `n` new queries are RoPE'd at `pos_base + row`, appended to the
+    /// persistent per-layer KV cache at `[pos_start, pos_start+n)`
+    /// (`block::gqa_chunk_step`'s own `kv_cache_fill_at`, not a separate bulk
+    /// fill), and attend causally within the round while seeing every cached
+    /// row from earlier rounds. The MoE/dense FFN run unchanged at `n` rows -
+    /// routing is per-row, so a chunk's math is a batched restatement of `n`
+    /// single-token steps, not a different computation (`tests/
+    /// chunked_prefill.rs` gates exactly this claim against a token-by-token
+    /// `step` replay). Only the LAST row is ever pulled through the final
+    /// norm + `lm_head` (`kernels::CONCAT_SPLIT`), so a round that is not the
+    /// final one never materializes `[n, vocab]` logits.
+    ///
+    /// `n = 1` (what [`Self::step`] calls this with) reproduces the old
+    /// `decode_at`'s dispatches exactly: `gqa_chunk_step` at `n = 1` is
+    /// `gqa_decode_step` plus the same `kv_cache_fill_at` a bulk prefill used
+    /// to need a separate call for.
+    fn decode_rows(&self, tokens: &[u32], pos_start: u32) -> Vec<f32> {
         let c = &self.cfg;
         let d = c.d_model();
         let nh = c.n_heads();
@@ -1360,58 +1514,77 @@ impl DeepseekV2 {
         let ids = kernel_ids();
         let moe_kernel_ids = moe_ids();
         let shared_ids = shared_expert_ids();
-        let decode_ids = GqaDecodeIds { kv_append: KV_APPEND, attn_decode_scores: ATTN_DECODE_SCORES, decode_softmax: DECODE_SOFTMAX, attn_decode_apply: ATTN_DECODE_APPLY };
-        let shape1 = MoeShape { rows: 1, d_model: d, moe_ff: c.moe_ff(), n_experts: e, top_k: c.top_k() };
+        let chunk_ids = gqa_chunk_ids();
+        let n = tokens.len() as u32;
+        let shape_n = MoeShape { rows: n, d_model: d, moe_ff: c.moe_ff(), n_experts: e, top_k: c.top_k() };
 
         let dec_ref = self.dec.borrow();
         let dec = dec_ref.as_ref().unwrap();
         let cap = dec.cap;
-        assert!(pos < cap, "deepseekv2 decode pos {pos} exceeds the sized context {cap}");
+        assert!(n >= 1 && n <= dec.chunk, "deepseekv2 decode_rows: {n} rows exceeds this instance's {}-row chunk", dec.chunk);
+        let t_max = pos_start + n;
+        assert!(t_max <= cap, "deepseekv2 decode_rows: round [{pos_start}, {t_max}) exceeds the sized context {cap}");
 
-        g.write(&dec.tok_id, &[token_id]);
+        g.write(&dec.tok_ids, tokens);
+        let seq_lens: Vec<u32> = (0..n).map(|i| pos_start + i + 1).collect();
+        g.write(&dec.seq_lens, &seq_lens);
+
         let mut s: Vec<Step> = Vec::new();
-        s.push(g.step(EMBED, &[&dec.tok_id, self.w("tok.weight"), &dec.res[0]], &[d, 1], d));
+        s.push(g.step(EMBED, &[&dec.tok_ids, self.w("tok.weight"), &dec.res[0]], &[d, n], n * d));
+
+        // The vision-language splice, made CHUNK-relative: `enable_mm_splice`'s
+        // `[row0, row0+n_rows)` is an absolute row range over the whole
+        // sequence, but `dec.res[0]` only ever holds THIS round's `n` rows.
+        // `Self::chunk_plan` never lets a round boundary fall inside the
+        // spliced run, so a round either contains the whole thing or none of
+        // it; a partial overlap here is a `chunk_plan` bug, not a case to
+        // paper over.
+        if let Some((row0, n_rows)) = self.mm_splice.get() {
+            if row0 >= pos_start && row0 + n_rows <= pos_start + n {
+                s.push(model::vlm::splice_fwd(g, SPLICE, &self.img_embeds, &dec.res[0], (row0 - pos_start) * d, n_rows * d));
+            } else {
+                assert!(
+                    row0 + n_rows <= pos_start || row0 >= pos_start + n,
+                    "deepseekv2 decode_rows: round [{pos_start}, {}) partially overlaps the spliced run [{row0}, {}) - chunk_plan should never produce this",
+                    pos_start + n,
+                    row0 + n_rows
+                );
+            }
+        }
 
         for l in 0..c.n_layers() as usize {
             let p = |name: &str| format!("blocks.{l}.{name}");
 
-            // ---- plain MHA decode step: LN -> q/k/v -> RoPE@pos -> attend over cache ----
-            self.norm_fwd(&mut s, &dec.res[l], &p("ln1.weight"), &dec.xn1, d, 1);
-            self.mm(&mut s, &dec.xn1, &p("self_attn.q_proj.weight"), &dec.q, 1, d, d);
-            self.mm(&mut s, &dec.xn1, &p("self_attn.k_proj.weight"), &dec.k, 1, d, d);
-            self.mm(&mut s, &dec.xn1, &p("self_attn.v_proj.weight"), &dec.v, 1, d, d);
-            s.push(g.step(ROPE_AT, &[&dec.q], &[1, nh, hd, d, 0, pos, f(theta)], nh * (hd / 2)));
-            s.push(g.step(ROPE_AT, &[&dec.k], &[1, nh, hd, d, 0, pos, f(theta)], nh * (hd / 2)));
-            s.extend(block::gqa_decode_step(g, &decode_ids, nh, nh, hd, pos, cap, &dec.q, &dec.k, &dec.v, &dec.kcache[l], &dec.vcache[l], &dec.scores, &dec.probs, &dec.ctx));
-            self.mm(&mut s, &dec.ctx, &p("self_attn.o_proj.weight"), &dec.proj, 1, d, d);
-            s.push(g.step(ADD2, &[&dec.res[l], &dec.proj, &dec.xmid], &[d], d));
+            // ---- plain MHA chunk step: LN -> q/k/v -> RoPE@[pos_start..) -> attend over cache ----
+            self.norm_fwd(&mut s, &dec.res[l], &p("ln1.weight"), &dec.xn1, d, n);
+            self.mm(&mut s, &dec.xn1, &p("self_attn.q_proj.weight"), &dec.q, n, d, d);
+            self.mm(&mut s, &dec.xn1, &p("self_attn.k_proj.weight"), &dec.k, n, d, d);
+            self.mm(&mut s, &dec.xn1, &p("self_attn.v_proj.weight"), &dec.v, n, d, d);
+            s.push(g.step(ROPE_AT, &[&dec.q], &[n, nh, hd, d, 0, pos_start, f(theta)], n * nh * (hd / 2)));
+            s.push(g.step(ROPE_AT, &[&dec.k], &[n, nh, hd, d, 0, pos_start, f(theta)], n * nh * (hd / 2)));
+            s.extend(block::gqa_chunk_step(
+                g, &chunk_ids, nh, nh, hd, pos_start, n, cap, &dec.q, &dec.k, &dec.v, &dec.kcache[l], &dec.vcache[l], &dec.block_ids, &dec.seq_lens, &dec.scores, &dec.probs, &dec.ctx,
+            ));
+            self.mm(&mut s, &dec.ctx, &p("self_attn.o_proj.weight"), &dec.proj, n, d, d);
+            s.push(g.step(ADD2, &[&dec.res[l], &dec.proj, &dec.xmid], &[n * d], n * d));
 
-            // ---- MLP: dense (leading blocks) or MoE, over the ONE new row ----
-            self.norm_fwd(&mut s, &dec.xmid, &p("ln2.weight"), &dec.xn2, d, 1);
+            // ---- MLP: dense (leading blocks) or MoE, over the `n` new rows ----
+            self.norm_fwd(&mut s, &dec.xmid, &p("ln2.weight"), &dec.xn2, d, n);
             if c.is_moe_layer(l as u32) {
-                self.mm(&mut s, &dec.xn2, &p("mlp.router.weight"), &dec.router_logits, 1, d, e);
-                s.push(moe::router_fwd_kind(g, &moe_kernel_ids, self.router_kind(), &shape1, &dec.router_logits, None, &dec.gate, None));
-                // Tried and MEASURED, not shipped: skipping the ~58/64
-                // non-selected experts' dispatches by reading `gate` back to
-                // the host per layer (mirroring `crates/glm`'s
-                // `forward_compact`/`model::moe::expert_fwd_compact` trade).
-                // `moe_linear_gated` call count dropped 67584 -> 8250, but
-                // its OWN total time was unchanged and the whole decode's
-                // profiled total went UP: the per-row gate check inside
-                // `moe_linear_gated.wgsl` already makes a non-selected
-                // expert's dispatch cheap, so the real cost was the
-                // SELECTED experts' compute all along, and the 352 extra
-                // host round-trips (11 MoE layers x 32 tokens) this needs
-                // cost about as much as the skipped dispatches saved, so it
-                // was reverted rather than shipped - a per-kernel dispatch
-                // count is not the same thing as a whole-pass win, and only
-                // the whole-pass number decides whether a fix worked.
+                self.mm(&mut s, &dec.xn2, &p("mlp.router.weight"), &dec.router_logits, n, d, e);
+                s.push(moe::router_fwd_kind(g, &moe_kernel_ids, self.router_kind(), &shape_n, &dec.router_logits, None, &dec.gate, None));
+                // Every expert dispatches every round regardless of `n` - see
+                // `decode_at`'s (this function's predecessor) own comment on
+                // why the per-row gate-skip trade measured worse. That
+                // argument was made at `n = 1`; a wide chunk amortizes the
+                // SAME fixed 64-dispatch cost over many more rows, so it
+                // applies even more strongly here, not less.
                 for ei in 0..e as usize {
                     let (gn, un, dn) = &self.moe_expert_names[l][ei];
                     s.extend(moe::expert_fwd(
                         g,
                         &moe_kernel_ids,
-                        &shape1,
+                        &shape_n,
                         &dec.xn2,
                         &dec.gate,
                         self.w(gn),
@@ -1426,7 +1599,7 @@ impl DeepseekV2 {
                 s.extend(moe::shared_expert_fwd(
                     g,
                     &shared_ids,
-                    1,
+                    n,
                     d,
                     shared_ff,
                     &dec.xn2,
@@ -1447,28 +1620,107 @@ impl DeepseekV2 {
                     &dec.mlp_out,
                 ));
             } else {
-                self.mm(&mut s, &dec.xn2, &p("mlp.gate.weight"), &dec.dense_gate_pre, 1, d, dense_ff);
-                self.mm(&mut s, &dec.xn2, &p("mlp.up.weight"), &dec.dense_up, 1, d, dense_ff);
-                s.push(block::swiglu_fwd(g, &ids, &dec.dense_gate_pre, &dec.dense_up, &dec.dense_h, dense_ff));
-                self.mm(&mut s, &dec.dense_h, &p("mlp.down.weight"), &dec.mlp_out, 1, dense_ff, d);
+                self.mm(&mut s, &dec.xn2, &p("mlp.gate.weight"), &dec.dense_gate_pre, n, d, dense_ff);
+                self.mm(&mut s, &dec.xn2, &p("mlp.up.weight"), &dec.dense_up, n, d, dense_ff);
+                s.push(block::swiglu_fwd(g, &ids, &dec.dense_gate_pre, &dec.dense_up, &dec.dense_h, n * dense_ff));
+                self.mm(&mut s, &dec.dense_h, &p("mlp.down.weight"), &dec.mlp_out, n, dense_ff, d);
             }
-            s.push(g.step(ADD2, &[&dec.xmid, &dec.mlp_out, &dec.res[l + 1]], &[d], d));
+            s.push(g.step(ADD2, &[&dec.xmid, &dec.mlp_out, &dec.res[l + 1]], &[n * d], n * d));
         }
 
+        // Only the LAST row is ever wanted (the next token to draw, or the
+        // seam into the next round) - pull it out of the final layer's
+        // `[n, d]` residual BEFORE the head, so the head runs at ONE row
+        // regardless of how wide this round was.
         let last = c.n_layers() as usize;
-        self.norm_fwd(&mut s, &dec.res[last], "norm.weight", &dec.xn_final, d, 1);
+        s.push(g.step(CONCAT_SPLIT, &[&dec.res[last], &dec.last_row], &[1, n * d, d, (n - 1) * d, 1, 1], d));
+        self.norm_fwd(&mut s, &dec.last_row, "norm.weight", &dec.xn_final, d, 1);
         self.mm(&mut s, &dec.xn_final, c.head_weight(), &dec.logits, 1, d, vocab as u32);
         g.submit(&[], &s);
         g.read(&dec.logits, vocab)
+    }
+
+    /// Chunk boundaries for `total` sequence positions at this instance's
+    /// `self.chunk` round width, cut so that no round boundary falls INSIDE a
+    /// spliced image run: a round that would otherwise straddle
+    /// `[row0, row0+n_rows)` is shortened to end exactly at `row0`, and the
+    /// run itself becomes its own (possibly narrower-than-`chunk`) round.
+    /// Every other boundary is a plain `chunk`-wide cut. `decode_rows`
+    /// asserts the invariant this produces (a round either fully contains the
+    /// splice or has none of it) rather than trusting this function silently.
+    fn chunk_plan(&self, total: u32) -> Vec<(u32, u32)> {
+        let splice = self.mm_splice.get();
+        if let Some((row0, n_rows)) = splice {
+            assert!(row0 + n_rows <= total, "deepseekv2 chunk_plan: the spliced run [{row0}, {}) does not fit in {total} tokens", row0 + n_rows);
+            assert!(
+                n_rows <= self.chunk,
+                "deepseekv2 chunk_plan: the spliced run is {n_rows} rows wide, wider than this instance's {}-row chunk - a splice run must fit in one round",
+                self.chunk
+            );
+        }
+        let mut plan = Vec::new();
+        let mut pos = 0u32;
+        while pos < total {
+            let len = match splice {
+                Some((row0, n_rows)) if pos == row0 => n_rows,
+                Some((row0, _)) if pos < row0 && pos + self.chunk > row0 => row0 - pos,
+                _ => self.chunk.min(total - pos),
+            };
+            plan.push((pos, len));
+            pos += len;
+        }
+        plan
+    }
+
+    /// **Chunked prefill**: run `tokens` through [`Self::decode_rows`] in
+    /// bounded rounds of `self.chunk` (see [`Self::chunk_plan`]), seeding the
+    /// persistent KV cache round by round instead of one `O(T)` batched
+    /// forward. This is the ONLY prefill path a `batched = false` instance
+    /// has - `logits_all`/`build_forward` need the batched tape this instance
+    /// never built - so it is what makes a context far wider than any single
+    /// batched-tape build affordable stays cheap: every round costs
+    /// [`Decode`]'s per-row scratch (shared across layers, nothing saved for
+    /// backward), not `crates/model/src/moe.rs`'s per-expert-per-row
+    /// `MoeActs` a batched tape's backward needs.
+    ///
+    /// A `batched = true` instance (every `new_on` caller today) should NOT
+    /// use this for a real prompt at `chunk = 1`: each round still dispatches
+    /// every expert regardless of round width (see `decode_rows`'s own
+    /// comment), so a narrow chunk multiplies that fixed per-round dispatch
+    /// count instead of amortizing it - exactly the "measured worse" trade
+    /// `decode_at`'s original comment already recorded, at prefill scale
+    /// instead of one decode step. `generate_greedy_kv_cb` therefore keeps
+    /// using `logits_all` (one dispatch pass over the WHOLE prompt) for a
+    /// `batched = true` build and only calls this for `batched = false`,
+    /// where a caller is expected to size `chunk` sensibly (hundreds of
+    /// rows, not one).
+    ///
+    /// Returns the LAST round's last-row logits (`[vocab]`) - the seam into
+    /// the caller's first generated token. Also usable directly (not just via
+    /// [`Self::generate_greedy_kv_cb`]) by a caller that wants the prompt's
+    /// next-token logits without an argmax already applied - the chunked
+    /// twin of [`Self::logits_all`] for that purpose.
+    pub fn prefill_chunked(&self, tokens: &[u32]) -> Vec<f32> {
+        self.ensure_decode();
+        assert!(!tokens.is_empty(), "deepseekv2 prefill_chunked: at least one token is required");
+        let mut logits = Vec::new();
+        for (start, len) in self.chunk_plan(tokens.len() as u32) {
+            logits = self.decode_rows(&tokens[start as usize..(start + len) as usize], start);
+        }
+        self.dec_pos.set(tokens.len() as u32);
+        logits
     }
 
     /// **Greedy autoregressive decode, KV-cached** - the `O(T)` twin of
     /// [`Self::generate_greedy`]'s `O(T²)` recompute, producing the SAME
     /// tokens (the cache is algebraically exact, see `tests::
     /// generate_greedy_kv_matches_recompute` and `tests/generate.rs`'s
-    /// real-weight gate). The prompt is run through ONE batched forward
-    /// ([`Self::logits_all`], which also handles the vision-language splice if
-    /// enabled) to seed the KV cache via [`Self::fill_cache_from_prefill`];
+    /// real-weight gate, plus `tests/chunked_prefill.rs`'s continuity check
+    /// against a token-by-token replay).
+    ///
+    /// The prompt is prefilled through [`Self::logits_all`] (`batched = true`)
+    /// or [`Self::prefill_chunked`] (`batched = false`) - see whichever
+    /// method's own doc for why the split exists - to seed the KV cache;
     /// every token after that is one [`Self::step`] call instead of a full
     /// re-run over the whole sequence so far.
     ///
@@ -1485,11 +1737,11 @@ impl DeepseekV2 {
         assert!(!prompt_ids.is_empty(), "deepseekv2: greedy decode needs at least one prompt token");
         assert_eq!(self.b, 1, "deepseekv2: KV-cache decode requires b == 1");
         let total = prompt_ids.len() + n_new as usize;
+        let cap = if self.batched { self.t } else { self.ctx };
         assert!(
-            total <= self.t as usize,
-            "deepseekv2: greedy decode of {} prompt + {n_new} new tokens needs a context of {total}, but this instance is sized for {}",
+            total <= cap as usize,
+            "deepseekv2: greedy decode of {} prompt + {n_new} new tokens needs a context of {total}, but this instance is sized for {cap}",
             prompt_ids.len(),
-            self.t
         );
         let vocab = self.cfg.vocab() as usize;
         let mut ids: Vec<u32> = prompt_ids.to_vec();
@@ -1498,14 +1750,21 @@ impl DeepseekV2 {
         }
 
         self.reset_cache();
-        // Prefill: one batched forward over the whole prompt (handles the
-        // splice, RoPE positions and causal mask exactly like the recompute
-        // path), whose resident per-layer k/v seed the persistent cache.
-        let logits = self.logits_all(&ids);
-        self.fill_cache_from_prefill(prompt_ids.len() as u32);
+        // Prefill: see `logits_all`/`fill_cache_from_prefill` vs
+        // `prefill_chunked`'s own docs for why the choice is `self.batched`,
+        // not a caller option. Both return the LAST prompt row's `[vocab]`
+        // logits - `logits_all`'s tail slice for the batched path,
+        // `prefill_chunked` already narrows to it for the chunked one.
+        let logits = if self.batched {
+            let logits = self.logits_all(&ids);
+            self.fill_cache_from_prefill(prompt_ids.len() as u32);
+            logits[logits.len() - vocab..].to_vec()
+        } else {
+            self.prefill_chunked(&ids)
+        };
         self.dec_pos.set(prompt_ids.len() as u32);
 
-        let mut next = argmax(&logits[logits.len() - vocab..]) as u32;
+        let mut next = argmax(&logits) as u32;
         ids.push(next);
         on_token(next);
         for _ in 1..n_new {
@@ -1532,16 +1791,30 @@ impl DeepseekV2 {
     /// One contiguous run only, which is the single-view scope this decoder is
     /// gated at; a multi-view layout emits one call per run and is a `rows`-level
     /// change (`deepseek2ocr::rows`), not a change here.
+    ///
+    /// Bounded against `self.ctx` (the true sequence ceiling, batched or not);
+    /// a `batched = true` instance is ADDITIONALLY bounded against the
+    /// `b*t` batched tape it will actually splice through (`build_forward`'s
+    /// `res[0]` is sized exactly `b*t` rows - `self.ctx == self.t` for every
+    /// such build today, so this is a strictly narrower, still-redundant
+    /// check). A `batched = false` instance's chunked prefill validates the
+    /// run against `self.chunk` instead, in [`Self::chunk_plan`] - a run must
+    /// fit inside one round there, which `self.ctx` alone does not guarantee.
     pub fn enable_mm_splice(&mut self, row0: u32, n_rows: u32) {
-        let n = self.b * self.t;
-        assert!(row0 + n_rows <= n, "splice rows [{row0}, {}) exceed the {n}-row residual stream", row0 + n_rows);
+        assert!(row0 + n_rows <= self.ctx, "splice rows [{row0}, {}) exceed the {}-row context", row0 + n_rows, self.ctx);
+        if self.batched {
+            let n = self.b * self.t;
+            assert!(row0 + n_rows <= n, "splice rows [{row0}, {}) exceed the {n}-row batched residual stream", row0 + n_rows);
+        }
         let sz = (n_rows * self.cfg.d_model()) as u64;
         self.img_embeds = self.gpu.storage(sz);
         self.d_img_embeds = self.gpu.storage(sz);
         self.mm_splice.set(Some((row0, n_rows)));
-        self.fwd_steps = self.build_forward(self.b, self.t);
-        if !self.bwd_steps.is_empty() {
-            self.bwd_steps = self.build_backward();
+        if self.batched {
+            self.fwd_steps = self.build_forward(self.b, self.t);
+            if !self.bwd_steps.is_empty() {
+                self.bwd_steps = self.build_backward();
+            }
         }
     }
 
