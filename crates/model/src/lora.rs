@@ -89,6 +89,24 @@ impl Pair {
         Pair { out, inn, r, a, b, ma: Vec::new(), va: Vec::new(), mb: Vec::new(), vb: Vec::new() }
     }
 
+    /// LoRA-FA: drop `A`'s Adam moments, making "never train `A`" structural
+    /// rather than a promise every caller of [`Self::adam_step`]/
+    /// [`Self::adam_a`] has to remember to keep. `adam_a` indexes `ma`/`va`
+    /// at every position `da` has (`model::lora::adam`'s `for i in
+    /// 0..p.len()`), so calling it after this is an immediate
+    /// index-out-of-bounds panic, not a silent no-op - "we remember not to"
+    /// becomes "it cannot".
+    pub fn freeze_a(&mut self) {
+        self.ma = Vec::new();
+        self.va = Vec::new();
+    }
+
+    /// Has [`Self::freeze_a`] been called? What a caller building a param
+    /// list checks before deciding whether `A` needs Adam state at all.
+    pub fn a_is_frozen(&self) -> bool {
+        self.ma.is_empty() && self.va.is_empty()
+    }
+
     /// `w += scale·B·A` in `W`'s `[out×in]` row-major layout.
     pub fn delta(&self, scale: f32, w: &mut [f32]) {
         self.delta_strided(scale, w, 0, self.inn, 0);
@@ -526,7 +544,10 @@ impl crate::adapter::AdapterKind for LoraPair {
     }
 
     fn new(spec: crate::adapter::TargetSpec, hp: crate::adapter::TargetHp, init: &mut dyn FnMut() -> f32) -> LoraPair {
-        let pair = Pair::new(spec.out, spec.inn, hp.rank, init);
+        let mut pair = Pair::new(spec.out, spec.inn, hp.rank, init);
+        if hp.freeze_a {
+            pair.freeze_a();
+        }
         LoraPair { pair, spec, hp }
     }
 
