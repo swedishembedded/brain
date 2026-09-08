@@ -676,6 +676,20 @@ impl Trace {
                 r.acc(fx, *n as u64, &dfx, 1.0);
                 r.give(*n as u64, dfx);
             }
+            // `y = x * scale[c]` -> `dx = dy * scale[c]`: `scale[c]` does not
+            // depend on `x`, so the forward kernel IS its own adjoint, run on
+            // `dy` in place of `x` - no new kernel, the same `scale_chan`
+            // dispatch `Op::Gn`'s `dyg = dy * gamma` above already uses.
+            // `scale` is a host constant, never a [`Grads`] target: gradient
+            // flows ONLY to `x` - deliberately no `dscale` (see [`super::
+            // Op::ScaleChan`]'s doc for why one would be dead code here).
+            Op::ScaleChan { total, c, inner, x, scale, y } => {
+                let Some(dy) = r.get(y) else { return };
+                let dx = r.tmp(*total as u64);
+                r.push(r.gpu.step(r.ids.k(B_SCALE_CHAN), &[&dy, scale, &dx], &[*total, *c, *inner], *total));
+                r.acc(x, *total as u64, &dx, 1.0);
+                r.give(*total as u64, dx);
+            }
         }
     }
 }

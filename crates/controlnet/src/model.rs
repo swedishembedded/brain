@@ -60,7 +60,11 @@ use crate::config::ControlNetConfig;
 use crate::import::Tensors;
 
 /// The one kernel slot appended to `sdxlunet::model::KERNELS`.
-const K_SCALE: usize = sdxlunet::model::KERNELS.len();
+///
+/// `pub(crate)` - `crate::train::ControlNetTrainer` (the training graph)
+/// needs this same slot index to hand to
+/// [`vae::blocks::Builder::set_scale_chan_ids`].
+pub(crate) const K_SCALE: usize = sdxlunet::model::KERNELS.len();
 
 /// This model's kernel set: **`sdxlunet::model::KERNELS` verbatim** (so the
 /// backbone's block recorder finds every slot at the index it resolved) plus
@@ -148,6 +152,7 @@ impl ControlNet {
         let scale_in = gpu.storage(1);
 
         let mut r = Rec::new(&gpu, &bb, tensors, t_enc, taps);
+        r.blocks().set_scale_chan_ids(vae::blocks::ScaleChanIds { fwd: K_SCALE });
 
         r.conditioning(&bb, &temb_in, &aug_in);
 
@@ -369,14 +374,16 @@ impl ControlSource for ControlNet {
     }
 }
 
-/// `y = x · scale[0]` via `scale_chan` with `c = 1, inner = 1`.
+/// `y = x · scale[0]` via [`vae::blocks::Builder::scale_chan`] with `c = 1,
+/// inner = 1` - a differentiable recorder, not `push_step`: a train-mode
+/// caller ([`crate::train::ControlNetTrainer`]) needs `dL/dx = dy · scale[0]`
+/// to reach the zero-conv underneath, and `push_step` (the previous
+/// implementation) records a forward step with nothing on the reverse tape,
+/// silently zeroing every gradient upstream of it. See
+/// [`vae::blocks::Op::ScaleChan`]'s doc for why there is deliberately no
+/// `dscale` adjoint.
 fn scale_buf(r: &mut Rec<'_>, x: &DeviceBuffer, n: u32, scale: &DeviceBuffer) -> DeviceBuffer {
-    let y = r.blocks().act(n as u64);
-    let g = r.blocks().gpu();
-    // `scale_chan` Params: [total, c, inner]; bufs [x, scale, out].
-    let step = g.step(K_SCALE, &[x, scale, &y], &[n, 1, 1], n);
-    r.blocks().push_step(step);
-    y
+    r.blocks().scale_chan(n, 1, 1, x, scale)
 }
 
 #[cfg(test)]

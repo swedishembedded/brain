@@ -42,6 +42,10 @@ brain-sdxlunet.workspace = true
 # `check_supir` / `check_supir_elementwise` (src/supir.rs) - the SUPIR control
 # trunk + adaptors training graph.
 brain-supir.workspace = true
+# `check_controlnet` / `check_controlnet_elementwise` (src/controlnet.rs) -
+# the SDXL ControlNet training graph (trainable copy + frozen backbone +
+# residual injection).
+brain-controlnet.workspace = true
 brain-gpu-core.workspace = true
 # `check_arcface` (src/arcface.rs) - the ArcFace/IResNet training graph.
 brain-arcface.workspace = true

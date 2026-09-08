@@ -1161,6 +1161,7 @@ dependencies = [
  "brain-arcface",
  "brain-clip",
  "brain-codeformer",
+ "brain-controlnet",
  "brain-cosyvoice",
  "brain-data",
  "brain-flux2",

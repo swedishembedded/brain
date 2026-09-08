@@ -438,6 +438,20 @@ pub struct ScaleAddIds {
     pub fwd: usize,
 }
 
+/// The caller's `scale_chan` forward slot - see [`Builder::scale_chan`].
+///
+/// `scale_chan` (`y = x * scale[c]`, `[rows, C, inner]`) is already one of
+/// [`BWD_KERNELS`] (dispatched inside [`grad`]'s own `Op::Gn` adjoint as
+/// `dyg = dy * gamma`), but it is NOT one of [`KERNELS`] as a FORWARD
+/// primitive: `controlnet` (its `conditioning_scale` dial) and every other
+/// caller of this recorder registers it under its own slot, the same reason
+/// [`LreluIds`]/[`ScaleAddIds`] are threaded rather than shared - the CPU
+/// backend's JIT rejects a second definition of one kernel name.
+#[derive(Clone, Copy)]
+pub struct ScaleChanIds {
+    pub fwd: usize,
+}
+
 /// One recorded forward stage, with exactly the buffers its adjoint reads.
 ///
 /// Recorded only in **train mode** ([`Builder::set_train`]); the tape is what
@@ -561,6 +575,19 @@ pub(crate) enum Op {
     /// target: the adjoint routes gradient THROUGH it to `fx` only, exactly
     /// like [`Op::Mix`]'s `a`/`b`.
     ScaleAdd { n: u32, scale: DeviceBuffer, fx: DeviceBuffer, y: DeviceBuffer },
+    /// `y = x * scale[c]`, `[rows, C, inner]` layout - see
+    /// [`Builder::scale_chan`]. `scale` is a HOST-CONSTANT buffer (a
+    /// per-request dial, e.g. ControlNet's `conditioning_scale` - never a
+    /// [`Grads`](grad::Grads) target): the adjoint routes gradient THROUGH
+    /// it to `x` only, via the SAME `scale_chan` kernel run on `dy` in place
+    /// of `x` (`scale[c]` does not depend on `x`, so `dx = dy * scale[c]` is
+    /// literally another `scale_chan` dispatch - the identical trick
+    /// `grad::Op::Gn`'s own `dyg = dy * gamma` already uses this kernel for).
+    /// There is deliberately no `dscale` adjoint: nothing in this tree
+    /// trains `conditioning_scale` (it is a per-request `ParamSpec`, not a
+    /// manifest tensor - see `controlnet::caps`), so a `dscale` kernel would
+    /// be dead code with no consumer.
+    ScaleChan { total: u32, c: u32, inner: u32, x: DeviceBuffer, scale: DeviceBuffer, y: DeviceBuffer },
 }
 
 /// Graph-construction state (borrows the device + host tensors).
@@ -640,6 +667,11 @@ pub struct Builder<'a> {
     /// residual_scale`] panics by name rather than dispatching slot zero if
     /// it is missing.
     scale_add_ids: Option<ScaleAddIds>,
+    /// The caller's `scale_chan` forward slot - see [`ScaleChanIds`]. `None`
+    /// until [`Builder::set_scale_chan_ids`] is called; [`Builder::
+    /// scale_chan`] panics by name rather than dispatching slot zero if it
+    /// is missing.
+    scale_chan_ids: Option<ScaleChanIds>,
     /// An int8-packed fallback weight source - see [`Builder::set_packed`].
     /// `None` for every caller except an int8 build (`sdxlunet::int8`,
     /// `supir::int8`): the plain fp32 path is completely unaffected, since
@@ -713,6 +745,7 @@ impl<'a> Builder<'a> {
             mix_ids: None,
             lrelu_ids: None,
             scale_add_ids: None,
+            scale_chan_ids: None,
             packed: None,
             n: 1,
         }
@@ -785,6 +818,12 @@ impl<'a> Builder<'a> {
     /// [`Builder::residual_scale`] call - see [`ScaleAddIds`].
     pub fn set_scale_add_ids(&mut self, ids: ScaleAddIds) {
         self.scale_add_ids = Some(ids);
+    }
+
+    /// Supply the caller's `scale_chan` forward slot. Must precede any
+    /// [`Builder::scale_chan`] call - see [`ScaleChanIds`].
+    pub fn set_scale_chan_ids(&mut self, ids: ScaleChanIds) {
+        self.scale_chan_ids = Some(ids);
     }
 
     /// Install a packed int8 weight source: a name [`Builder::dev`] cannot
@@ -1621,6 +1660,34 @@ impl<'a> Builder<'a> {
         self.steps.push(self.gpu.step(slot, &[scale, fx, &y], &[1, n, 1, 0, 0], n));
         if self.train {
             self.tape.push(Op::ScaleAdd { n, scale: scale.clone(), fx: fx.clone(), y: y.clone() });
+        }
+        y
+    }
+
+    /// `y = x * scale[c]`, `[rows, C, inner]` layout (`total = rows*C*inner`
+    /// elements) - the generic per-channel scale `scale_chan.wgsl` documents,
+    /// reused here as the differentiable recorder for a caller's own
+    /// per-request scale dial (`controlnet::model`'s `conditioning_scale`,
+    /// `c = 1, inner = 1`, is the first consumer). `scale` is a host-constant
+    /// buffer, never a gradient target - see [`Op::ScaleChan`].
+    ///
+    /// The forward slot is caller-supplied (see [`ScaleChanIds`]) for the
+    /// same reason [`Builder::leaky_relu`]'s is: `scale_chan` is not one of
+    /// [`KERNELS`], the caller already registers it under its own slot (it
+    /// IS one of [`BWD_KERNELS`], dispatched internally by [`grad`]'s own
+    /// `Op::Gn` adjoint - a different use of the same kernel). Recorded on
+    /// the tape so a train-mode builder differentiates through it - the old
+    /// `Builder::push_step` call site (`controlnet::model::scale_buf`) did
+    /// not, which silently zeroed every gradient upstream of a zero-conv.
+    pub fn scale_chan(&mut self, total: u32, c: u32, inner: u32, x: &DeviceBuffer, scale: &DeviceBuffer) -> DeviceBuffer {
+        let y = self.act(total as u64);
+        let slot = self
+            .scale_chan_ids
+            .expect("vae::blocks: Builder::set_scale_chan_ids must precede Builder::scale_chan")
+            .fwd;
+        self.steps.push(self.gpu.step(slot, &[x, scale, &y], &[total, c, inner], total));
+        if self.train {
+            self.tape.push(Op::ScaleChan { total, c, inner, x: x.clone(), scale: scale.clone(), y: y.clone() });
         }
         y
     }

@@ -24,6 +24,9 @@
 //!   map).
 //! * [`init`] — deterministic synthetic weights for the smoke test.
 //! * [`model`] — the forward graph.
+//! * [`train`] - the training graph (`ControlNetTrainer`): the trainable copy
+//!   plus the frozen backbone and the residual injection, on one
+//!   reverse-mode tape, and `gradcheck::check_controlnet`'s subject.
 //!
 //! **Adds no block, and one kernel *slot* rather than one kernel.** The
 //! trainable copy is `sdxlunet::model::Rec` verbatim; the conditioning embedder and
@@ -33,9 +36,9 @@
 //! prefix-extension is what lets ONE device drive a UNet and a ControlNet
 //! together.
 //!
-//! **Forward only.** `check_controlnet`, LoRA/finetuning, INT8, batch > 1, the
-//! serving contract (a `capability::Provider`, a residency adapter,
-//! `run_batch`, D-Bus, an example) and a sampling CLI are all deferred.
+//! LoRA/finetuning, INT8, batch > 1, the serving contract (a
+//! `capability::Provider`, a residency adapter, `run_batch`, D-Bus, an
+//! example) and a sampling CLI are still deferred.
 
 pub mod adapter;
 pub mod caps;
@@ -44,6 +47,7 @@ pub mod config;
 pub mod import;
 pub mod init;
 pub mod model;
+pub mod train;
 
 pub use adapter::{
     check_compatible, order_for, ControlAdapter, ControlSource, InjectionPoint, Layout, Residuals,

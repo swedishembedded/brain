@@ -47,6 +47,12 @@ pub use vqgan::check_vqgan;
 pub mod supir;
 pub use supir::{check_supir, check_supir_elementwise};
 
+/// `check_controlnet` / `check_controlnet_elementwise` - the SDXL ControlNet
+/// training graph: the trainable copy + zero-convs, recorded alongside the
+/// frozen backbone with the residual injection on the same tape.
+pub mod controlnet;
+pub use controlnet::{check_controlnet, check_controlnet_elementwise};
+
 pub mod clip;
 pub use clip::check_clip;
 
