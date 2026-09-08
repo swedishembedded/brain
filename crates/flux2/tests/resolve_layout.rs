@@ -105,8 +105,8 @@ fn write_hf_checkpoint(dir: &Path, architectures: &[&str], hidden_size: u64) {
     write_index(dir, "model-00001-of-00001.safetensors");
 }
 
-/// Real FLUX.2 VAE shape rank: a 2D conv, `[out_ch, in_ch, kh, kw]` (4 dims)
-/// - `Flux2Spec::classify` uses this to tell a real image VAE apart from an
+/// Real FLUX.2 VAE shape rank: a 2D conv, `[out_ch, in_ch, kh, kw]` (4 dims).
+/// `Flux2Spec::classify` uses this to tell a real image VAE apart from an
 /// unrelated architecture's causal 3D video VAE, which shares the same
 /// tensor names at a 5-dim shape.
 fn write_vae_safetensors_flat(path: &Path) {

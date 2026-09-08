@@ -39,7 +39,7 @@ impl LayerRange {
             }
         }
         let every = self.every.max(1);
-        (l - self.first.unwrap_or(0)) % every == 0
+        (l - self.first.unwrap_or(0)).is_multiple_of(every)
     }
 }
 

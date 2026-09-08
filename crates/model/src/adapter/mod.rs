@@ -232,8 +232,12 @@ pub trait AdapterKind: Sized + Send {
 
     /// `get(canonical_suffix)` returns the tensor this adapter should load
     /// for that suffix, if present in the source file.
-    fn load_tensors(&mut self, get: &dyn Fn(&str) -> Option<(Vec<usize>, Vec<f32>)>) -> Result<(), String>;
+    fn load_tensors(&mut self, get: &dyn Fn(&str) -> Option<TensorShapeAndData>) -> Result<(), String>;
 }
+
+/// A tensor's shape alongside its flat row-major data, exactly what
+/// [`AdapterKind::load_tensors`]'s lookup closure hands back per suffix.
+pub type TensorShapeAndData = (Vec<usize>, Vec<f32>);
 
 /// The canonical-order engine every per-model `LoraAdapter`-shaped struct
 /// hand-writes today: a `Vec<(LinearSite, K)>` in caller-declared order,

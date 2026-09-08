@@ -4,9 +4,10 @@
 //! Shared CLI plumbing for a `--model`/`--<role>`/`--variant`-driven
 //! architecture command (`brain flux2 generate`, and every architecture
 //! migrated onto the model-store resolver after it) - one place for the
-//! "parse role override flags, resolve, print and exit on Ambiguous/
-//! Missing" shape every such command needs identically, instead of each
-//! architecture's own `<arch>_cli.rs` hand-writing it again.
+//! "resolve, then print and exit on `Ambiguous`/`Missing`" shape every such
+//! command needs identically. Parsing a command's own `--<role>` flags into
+//! the override map this expects is still each `<arch>_cli.rs`'s own job -
+//! its flags are interleaved with plenty that aren't roles at all.
 //!
 //! [`resolve_or_exit`]/[`extract_role_overrides`] are the two primitives a
 //! dedicated command (`flux2_cli`, `sam2_cli`'s `track`) calls directly.

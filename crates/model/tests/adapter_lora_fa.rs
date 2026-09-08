@@ -45,7 +45,7 @@ fn a_frozen_pair_panics_if_something_calls_adam_a_directly() {
     let mut pair = Pair::new(4, 3, 2, || 0.01);
     pair.freeze_a();
     assert!(pair.a_is_frozen());
-    pair.adam_a(&vec![0.1; 2 * 3], 0.01, 1);
+    pair.adam_a(&[0.1; 2 * 3], 0.01, 1);
 }
 
 #[test]
