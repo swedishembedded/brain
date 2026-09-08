@@ -40,7 +40,7 @@ impl LoraCfg {
         LoraCfg { rank, alpha: rank as f32, seed: 0 }
     }
     pub fn scale(&self) -> f32 {
-        self.alpha / self.rank as f32
+        crate::adapter::TargetHp::from(*self).scale()
     }
 }
 
@@ -156,10 +156,23 @@ impl Pair {
         (da, db)
     }
 
+    /// One Adam step on `A` alone (β 0.9/0.999, eps 1e-8, no weight decay).
+    /// Split out from [`Pair::adam_step`] so LoRA+ can give `A`/`B`
+    /// different effective learning rates while a plain `lr_ratio == 1.0`
+    /// caller reproduces today's single call bit-for-bit.
+    pub fn adam_a(&mut self, da: &[f32], lr: f32, t: u64) {
+        adam(&mut self.a, &mut self.ma, &mut self.va, da, lr, t);
+    }
+
+    /// One Adam step on `B` alone. See [`Pair::adam_a`].
+    pub fn adam_b(&mut self, db: &[f32], lr: f32, t: u64) {
+        adam(&mut self.b, &mut self.mb, &mut self.vb, db, lr, t);
+    }
+
     /// One Adam step on `A,B` (β 0.9/0.999, eps 1e-8, no weight decay).
     pub fn adam_step(&mut self, da: &[f32], db: &[f32], lr: f32, t: u64) {
-        adam(&mut self.a, &mut self.ma, &mut self.va, da, lr, t);
-        adam(&mut self.b, &mut self.mb, &mut self.vb, db, lr, t);
+        self.adam_a(da, lr, t);
+        self.adam_b(db, lr, t);
     }
 }
 
@@ -448,5 +461,95 @@ pub mod device_adapter {
                 }
             }
         }
+    }
+}
+
+/// [`Pair`]'s gradient pair, as consumed by [`crate::adapter::AdapterKind::step`].
+pub struct LoraGrads {
+    pub da: Vec<f32>,
+    pub db: Vec<f32>,
+}
+
+/// [`Pair`] wearing the generic [`crate::adapter::AdapterKind`] seam. `Pair`
+/// itself is untouched by this wrapper - every method below calls straight
+/// through to it, so every existing seed reproduces bit-identical adapters
+/// and the documented parallel-split axis contract on [`Pair::project`]
+/// (dB splits on output rows, dA splits on the rank axis) is preserved by
+/// construction rather than re-derived.
+pub struct LoraPair {
+    pair: Pair,
+    spec: crate::adapter::TargetSpec,
+    hp: crate::adapter::TargetHp,
+}
+
+impl LoraPair {
+    /// The underlying [`Pair`], e.g. for a caller that still wants the
+    /// non-generic `delta`/`delta_strided`/`project` directly.
+    pub fn pair(&self) -> &Pair {
+        &self.pair
+    }
+}
+
+impl crate::adapter::AdapterKind for LoraPair {
+    type Grads = LoraGrads;
+
+    fn kind_name() -> &'static str {
+        "lora"
+    }
+
+    fn param_suffixes(hp: &crate::adapter::TargetHp, spec: &crate::adapter::TargetSpec) -> Vec<(&'static str, Vec<usize>)> {
+        vec![(".lora_a", vec![hp.rank, spec.inn]), (".lora_b", vec![spec.out, hp.rank])]
+    }
+
+    fn new(spec: crate::adapter::TargetSpec, hp: crate::adapter::TargetHp, init: &mut dyn FnMut() -> f32) -> LoraPair {
+        let pair = Pair::new(spec.out, spec.inn, hp.rank, init);
+        LoraPair { pair, spec, hp }
+    }
+
+    fn spec(&self) -> crate::adapter::TargetSpec {
+        self.spec
+    }
+
+    fn hp(&self) -> &crate::adapter::TargetHp {
+        &self.hp
+    }
+
+    fn delta_into(&self, strength: f32, dst: &mut [f32]) {
+        self.pair.delta_strided(self.hp.scale() * strength, dst, self.spec.row0, self.spec.row_stride, self.spec.col0);
+    }
+
+    fn project(&self, dw: &[f32]) -> LoraGrads {
+        let (da, db) = self.pair.project(dw, self.hp.scale());
+        LoraGrads { da, db }
+    }
+
+    fn step(&mut self, g: &LoraGrads, lr: f32, t: u64) {
+        if !self.hp.freeze_a {
+            self.pair.adam_a(&g.da, lr, t);
+        }
+        self.pair.adam_b(&g.db, lr * self.hp.lr_ratio, t);
+    }
+
+    fn to_tensors(&self) -> Vec<(&'static str, Vec<usize>, Vec<f32>)> {
+        vec![
+            (".lora_a", vec![self.pair.r, self.pair.inn], self.pair.a.clone()),
+            (".lora_b", vec![self.pair.out, self.pair.r], self.pair.b.clone()),
+        ]
+    }
+
+    fn load_tensors(&mut self, get: &dyn Fn(&str) -> Option<(Vec<usize>, Vec<f32>)>) -> Result<(), String> {
+        if let Some((shape, data)) = get(".lora_a") {
+            if shape != [self.pair.r, self.pair.inn] {
+                return Err(format!("LoraPair::load_tensors: .lora_a shape {shape:?} does not match [{}, {}]", self.pair.r, self.pair.inn));
+            }
+            self.pair.a = data;
+        }
+        if let Some((shape, data)) = get(".lora_b") {
+            if shape != [self.pair.out, self.pair.r] {
+                return Err(format!("LoraPair::load_tensors: .lora_b shape {shape:?} does not match [{}, {}]", self.pair.out, self.pair.r));
+            }
+            self.pair.b = data;
+        }
+        Ok(())
     }
 }
