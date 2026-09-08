@@ -162,4 +162,46 @@ code (see above). Registry wiring (`crates/arch`, `crates/cli/src/
 gguf_import.rs`'s `IMPORTERS` table, the modelstore recipe) is deferred to
 M7, once `crates/deepseekocr2` exists for `check-arch-names.sh` to point at.
 
-Remaining milestones (M3-M12) not started.
+M3 (the resampler's forward pass) done: new crate `crates/deepseekocr2`
+(`config::{Qwen2EncoderConfig, DeepseekOcr2VisionConfig}`,
+`encoder::Resampler`). Composes SAM's already-produced per-view token grid
+(taken as a plain host slice - `sam1::SamEncoder` itself is not invoked here,
+matching M2's golden's own scope) with the matching learned query bank, runs
+the shared 24-Qwen2-block GQA tower under the prefix-LM mask, applies the
+final norm, slices the query half, projects. The mask composes with the
+mask-agnostic MHA `attn_scores_bidir`/`attn_softmax_bidir`/`attn_apply_bidir`
+family with `attn_prefix_mask` dispatched in between (the
+`crates/moondream3` precedent), fed by `model::block::kv_expand_fwd`
+widening GQA's 2 KV heads to 14 (the `crates/lfm2` precedent) - zero new
+kernels, as the plan's decisive finding predicted.
+
+Found and fixed on the spot: M2's golden was missing the real model's final
+tower-wide norm (`v.post_ln.weight` / `vision.encoder.norm.weight`, the
+tensor M1 discovered mid-flight while M2 was already running in parallel and
+had no way to see) - added to the dumper and regenerated, rather than
+building M3's encoder to match an incomplete fixture.
+
+`tests/tiny_ref.rs` passes on the real detected GPU (Intel Arc, Vulkan/wgpu
+backend, not a CPU-backend stub): every tap - concat input, per-layer
+pre/post-mask scores, softmax probs, layer output, query slice, projected
+output, for all 6 local tiles and the global view, plus the host-side
+row-gather - lands at cosine >= 0.999999 against the checkpoint-free golden.
+`scores_post_mask` is checked by allow/disallow PATTERN rather than raw
+value (the reference's `-1e9` sentinel and `attn_prefix_mask.wgsl`'s `-1e30`
+both underflow probs to an exact 0.0 in fp32, but are not the same number,
+so a plain cosine check on that one tap would not be a trustworthy signal
+either way). The mutation check (inverting the mask's two arms) fails the
+pattern check as required, proving the gate is not hollow.
+
+One real wgpu constraint surfaced and got fixed during this milestone, worth
+recording for the next one: `add2` (three distinct buffer args) cannot serve
+a residual accumulation with the SAME buffer passed as both an input and the
+output - wgpu's storage-binding usage-scope validation rejects a buffer
+bound read-write in one slot and read in another within the same dispatch.
+`add_inplace` (`out[i] += a[i]`, one read_write buffer) is the correct
+kernel for every `x = x + delta` residual add in this tower, and probably in
+any future one built the same way.
+
+Registry wiring, the real `SamEncoder` composition, the device-side
+row-splice into the decoder, and CLI/serving are still M5-M7's job.
+Remaining milestones (M4-M12) not started.

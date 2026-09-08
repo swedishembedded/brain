@@ -40,17 +40,18 @@ accident.
 Files written under `--out` (default `testdata/deepseekocr2`):
 
   tiny/ckpt/model.safetensors  the seeded-random weights: one shared encoder
-                             (`encoder.layer{i}.*`), the two query banks
+                             (`encoder.layer{i}.*`), its final shared norm
+                             (`encoder.norm.weight`), the two query banks
                              (`query_bank.{local,global}`), the projector and
                              the separator - the contract a future
                              `deepseekocr2::import` matches its own tiny-mode
                              loader against.
   tiny/golden.safetensors    per-view query-concat input, per-layer attention
                              scores before/after the prefix-LM mask and after
-                             softmax, each layer's output, the query-half
-                             slice, the projector output, and the final
-                             gathered row sequence (all local tiles, the
-                             global view, one separator).
+                             softmax, each layer's output, the post-final-norm
+                             sequence, the query-half slice, the projector
+                             output, and the final gathered row sequence (all
+                             local tiles, the global view, one separator).
   manifest-tiny.json         shapes + sha256 of that file, the tiny config
                              (doubling as the golden's `source.identity`,
                              since there is no checkpoint), and the two design
@@ -238,13 +239,22 @@ def gqa_layer(p, prefix_, x, cfg, weight_prefix, tap, tap_prefix):
 
 def resample_view(p, cfg, n_query, sam_tokens, query_bank, tap, view_name):
     """SAM tokens ++ query bank -> `cfg["layers"]` GQA-prefix blocks (ONE
-    shared encoder, whatever the view or tile) -> keep the query half ->
-    project. Returns the projected `[n_query, decoder_hidden]` result; every
-    intermediate is recorded under `view_name.*`."""
+    shared encoder, whatever the view or tile) -> one final shared RMSNorm ->
+    keep the query half -> project. Returns the projected `[n_query,
+    decoder_hidden]` result; every intermediate is recorded under
+    `view_name.*`.
+
+    The final norm is a real, separately-confirmed tensor (`v.post_ln` in the
+    real mmproj header - see the ledger's M1 entry), applied ONCE per view
+    after the last block and before the slice, with the same shared weight
+    every view and tile reads - not a per-view parameter, same as every
+    other weight this fixture's `build()` allocates only once."""
     x = torch.cat([sam_tokens, query_bank], dim=0)
     tap[f"{view_name}.concat_in"] = x
     for layer in range(cfg["layers"]):
         x = gqa_layer(p, n_query, x, cfg, f"encoder.layer{layer}", tap, f"{view_name}.layer{layer}")
+    x = rms_norm(x, p["encoder.norm.weight"])
+    tap[f"{view_name}.post_norm"] = x
     query_half = x[n_query:, :]
     tap[f"{view_name}.query_slice"] = query_half
     proj = query_half @ p["projector.weight"].t() + p["projector.bias"]
@@ -274,6 +284,7 @@ def build(cfg, seed):
         p.new(f"{pfx}.ffn_gate.weight", (ff, hidden))
         p.new(f"{pfx}.ffn_up.weight", (ff, hidden))
         p.new(f"{pfx}.ffn_down.weight", (hidden, ff))
+    p.gain("encoder.norm.weight", hidden)
     p.new("query_bank.local", (cfg["n_query_local"], hidden))
     p.new("query_bank.global", (cfg["n_query_global"], hidden))
     p.new("projector.weight", (dh, hidden))

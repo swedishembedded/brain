@@ -1,0 +1,21 @@
+[package]
+name = "brain-deepseekocr2"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "DeepSeek-OCR-2's DeepEncoder V2 resampler: SAM ViT-B token grid + a learned query bank, run through a Qwen2-shaped GQA tower under a prefix-LM mask (image tokens bidirectional, query tokens causal), then a linear projector into the DeepSeek-V2 decoder's width."
+
+[lib]
+name = "deepseekocr2"
+path = "src/lib.rs"
+
+[dependencies]
+brain-gpu-core.workspace = true
+brain-kernels.workspace = true
+brain-model.workspace = true
+brain-paramstore.workspace = true
+brain-sam1.workspace = true
+brain-checkpoint.workspace = true
+
+[dev-dependencies]
+brain-testutil.workspace = true

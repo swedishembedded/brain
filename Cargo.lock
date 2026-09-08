@@ -895,6 +895,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-deepseekocr2"
+version = "1.1.0"
+dependencies = [
+ "brain-checkpoint",
+ "brain-gpu-core",
+ "brain-kernels",
+ "brain-model",
+ "brain-paramstore",
+ "brain-sam1",
+ "brain-testutil",
+]
+
+[[package]]
 name = "brain-diamond"
 version = "1.1.0"
 dependencies = [
