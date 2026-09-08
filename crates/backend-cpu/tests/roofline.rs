@@ -69,7 +69,24 @@ fn measure_matches_ignored_bench_order_of_magnitude() {
     );
 }
 
-/// Requirement 3: fast enough to be one rung of `brain roofline`'s "first
+/// Requirement 3: a real MEMORY roof, not `None`.
+///
+/// Every hot kernel of a resident decoder's steady state is a GEMV - one new
+/// token against a weight read once and never revisited - at 0.5 FLOP/byte.
+/// Grading those against a compute roof names the wrong bound, so the CPU rung
+/// has to report a bandwidth the same way `gpu_core::roof` does for a card.
+/// Sanity, not equality: below any real DDR3 single channel would mean the
+/// probe is measuring something other than DRAM, and above a terabyte a second
+/// would mean it never left cache.
+#[test]
+fn measure_returns_a_real_dram_bandwidth() {
+    let r = measure();
+    let gbs = r.bandwidth_gbs.expect("the CPU rung must report a measured DRAM bandwidth, not None");
+    assert!(gbs > 1.0, "suspiciously low DRAM GB/s: {gbs}");
+    assert!(gbs < 1000.0, "suspiciously high DRAM GB/s - the working set fit in cache? {gbs}");
+}
+
+/// Requirement 4: fast enough to be one rung of `brain roofline`'s "first
 /// result within 10 seconds" budget across every accelerator class - well
 /// under a second on its own, generously bounded at 2s so a loaded CI runner
 /// doesn't flake.

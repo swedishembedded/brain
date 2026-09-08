@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! The CPU backend's own roofline probe - real measured GFLOP/s, not a guess.
+//! The CPU backend's own roofline probe - real measured GFLOP/s **and GB/s**,
+//! not a guess. Both halves are needed to say which bound a kernel is under:
+//! a decoder's steady state is GEMV-shaped at 0.5 FLOP/byte, so the compute
+//! roof alone would grade every one of its hot kernels against the wrong
+//! ceiling.
 //!
 //! `CpuBackend::caps` (`crate::lib::CpuBackend::caps`) explicitly leaves
 //! `peak_gflops`/`peak_bandwidth_gbs` as `None` and defers to
@@ -33,11 +37,13 @@ pub struct CpuRoofline {
     /// Peak fp32 arithmetic rate observed over a representative conv2d mix,
     /// GFLOP/s. Real and measured - never a spec-sheet guess.
     pub gflops: f32,
-    /// Peak DRAM bandwidth, GB/s. Always `None` here: the lifted methodology
-    /// times compute-bound conv shapes only and does not isolate a memory
-    /// triad the way `gpu_core::roof` does for the GPU. Extend this with a
-    /// real measurement, don't guess it, if a memory roof is ever needed on
-    /// the CPU rung.
+    /// Peak DRAM bandwidth, GB/s, as measured by [`measure_bandwidth`] - the
+    /// roof that decides every GEMV-shaped kernel in a resident decoder's
+    /// steady state, which the conv mix above cannot speak to.
+    ///
+    /// `Option` so a caller that assembles a `CpuRoofline` without probing
+    /// memory can say so rather than inventing a figure; [`measure`] always
+    /// fills it in.
     pub bandwidth_gbs: Option<f32>,
 }
 
@@ -96,5 +102,66 @@ pub fn measure() -> CpuRoofline {
         total_flop += flop;
         total_min += best;
     }
-    CpuRoofline { gflops: (total_flop / total_min / 1e9) as f32, bandwidth_gbs: None }
+    CpuRoofline { gflops: (total_flop / total_min / 1e9) as f32, bandwidth_gbs: Some(measure_bandwidth()) }
+}
+
+/// Working set per triad array, in f32 elements. Two arrays at 96 MiB each is
+/// 192 MiB live, comfortably past any current server L3 (this class of host
+/// carries 30-60 MiB per socket), so the loop reads DRAM and not cache - the
+/// distinction the whole number exists to make.
+const TRIAD_FLOATS: usize = 96 * 1024 * 1024 / 4;
+
+/// Timed repeats; the contention-robust minimum is kept, same rule as
+/// [`measure`]'s compute mix.
+const TRIAD_REPEATS: usize = 5;
+
+/// Measure this host's real fp32 DRAM bandwidth with a threaded axpy triad
+/// (`y[i] += a*x[i]`), GB/s.
+///
+/// **Threaded on purpose, and initialised the same way it is read.** The
+/// number a kernel is graded against is the bandwidth a *parallel* consumer
+/// can reach, not what one core can pull - on a multi-socket host those differ
+/// by an order of magnitude, and a single-core figure would flatter every
+/// serial kernel into looking roof-bound. First touch happens through the same
+/// parallel chunking as the timed loop, so the pages land on the node whose
+/// core will read them and the probe measures the interleaving a real
+/// parallel kernel gets rather than one node's share.
+///
+/// Counted as three streams per element (read `x`, read `y`, write `y`), the
+/// same convention `gpu_core::roof`'s own triad uses, so the two device
+/// classes' `gbs` numbers mean the same thing.
+pub fn measure_bandwidth() -> f32 {
+    use rayon::prelude::*;
+    let n = TRIAD_FLOATS;
+    let mut x = vec![0f32; n];
+    let mut y = vec![0f32; n];
+    // ~4 chunks per thread: enough to balance, few enough that the fan-out is
+    // not what is being timed.
+    let chunk = (n / (rayon::current_num_threads() * 4)).max(1 << 16);
+    x.par_chunks_mut(chunk).enumerate().for_each(|(c, s)| {
+        for (i, v) in s.iter_mut().enumerate() {
+            *v = ((c + i) % 17) as f32;
+        }
+    });
+    y.par_chunks_mut(chunk).enumerate().for_each(|(c, s)| {
+        for (i, v) in s.iter_mut().enumerate() {
+            *v = ((c + i) % 13) as f32;
+        }
+    });
+    let a = 1.000_001f32;
+    let mut best = f64::INFINITY;
+    for _ in 0..TRIAD_REPEATS {
+        let t = Instant::now();
+        y.par_chunks_mut(chunk).enumerate().for_each(|(c, s)| {
+            let xs = &x[c * chunk..c * chunk + s.len()];
+            for (v, &xv) in s.iter_mut().zip(xs) {
+                *v += a * xv;
+            }
+        });
+        best = best.min(t.elapsed().as_secs_f64());
+    }
+    // Keep the result observable so nothing about the loop is dead code.
+    std::hint::black_box(y[n - 1]);
+    let bytes = 3.0 * n as f64 * 4.0;
+    (bytes / best / 1e9) as f32
 }
