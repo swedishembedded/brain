@@ -42,7 +42,7 @@
 //! reference and a real caller's [`sam_tokens_from_nchw`] both feed (SAM has
 //! its own gate; nothing here re-derives it).
 
-use gpu_core::{DeviceBuffer, Gpu};
+use gpu_core::{f, DeviceBuffer, Gpu, Step};
 use model::block::{self, Bidir, BidirIds, KernelIds, UNREGISTERED};
 use paramstore::{ParamStore, Role};
 
@@ -76,6 +76,12 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("silu_mul", kernels::SILU_MUL),
     ("silu_bwd_da", kernels::SILU_BWD_DA),
     ("silu_bwd_db", kernels::SILU_BWD_DB),
+    ("axpy", kernels::AXPY),
+    ("adamw", kernels::ADAMW),
+    ("gradnorm_sq", kernels::GRADNORM_SQ),
+    ("grad_scale", kernels::GRAD_SCALE),
+    ("clip_coef", kernels::CLIP_COEF),
+    ("grad_scale_buf", kernels::GRAD_SCALE_BUF),
 ];
 
 /// Resolved pipeline indices, looked up once at construction.
@@ -106,6 +112,8 @@ struct Ids {
     silu_mul: usize,
     silu_da: usize,
     silu_db: usize,
+    axpy: usize,
+    grad_scale: usize,
 }
 
 impl Ids {
@@ -137,6 +145,8 @@ impl Ids {
             silu_mul: idx("silu_mul"),
             silu_da: idx("silu_bwd_da"),
             silu_db: idx("silu_bwd_db"),
+            axpy: idx("axpy"),
+            grad_scale: idx("grad_scale"),
         }
     }
 
@@ -242,23 +252,42 @@ pub struct Resampler {
     ps: ParamStore,
     ids: Ids,
     cfg: DeepseekOcr2VisionConfig,
+    opt: optim::Optim,
 }
 
 impl Resampler {
-    /// `init` must name every tensor in [`Qwen2EncoderConfig::param_list`] and
-    /// [`DeepseekOcr2VisionConfig::projector_param_list`] - one flat source,
-    /// since the two name spaces are already disjoint
-    /// (`vision.encoder.*`/`vision.query_*` vs `vision.projector.*`/
-    /// `vision.view_separator`).
+    /// `init` must name every tensor [`DeepseekOcr2VisionConfig::param_list`]
+    /// declares - the encoder stack, the projector, the separator, and (when
+    /// `cfg.lora` is set) the adapter pair, all as one flat source.
+    ///
+    /// Role assignment mirrors `deepseek2::DeepseekV2::new_on`'s device-family
+    /// convention exactly: frozen everywhere at inference; with LoRA
+    /// configured, only `model::adapter::device::is_adapter_param` tensors
+    /// train and everything else freezes (the base weights, loaded from
+    /// `init`, never move); with no LoRA, every tensor is trainable - full
+    /// fine-tune, unchanged from this constructor's behavior before this
+    /// field existed.
     pub fn new_on(gpu: Gpu, cfg: DeepseekOcr2VisionConfig, init: &dyn checkpoint::TensorSource, train: bool) -> Resampler {
         cfg.check();
         let ids = Ids::resolve(&gpu);
-        let role = if train { Role::Trainable } else { Role::Frozen };
-        let mut params = cfg.encoder.param_list();
-        params.extend(cfg.projector_param_list());
-        let roles: Vec<(String, usize, Role)> = params.into_iter().map(|(n, numel)| (n, numel, role)).collect();
+        let roles: Vec<(String, usize, Role)> = cfg
+            .param_list()
+            .into_iter()
+            .map(|(n, numel)| {
+                let role = if !train {
+                    Role::Frozen
+                } else if cfg.lora.is_some() {
+                    if model::adapter::device::is_adapter_param(&n) { Role::Trainable } else { Role::Frozen }
+                } else {
+                    Role::Trainable
+                };
+                (n, numel, role)
+            })
+            .collect();
         let ps = ParamStore::new_with_roles_src(&gpu, roles, init);
-        Resampler { gpu, ps, ids, cfg }
+        let idx = |name: &str| gpu.kernel_index(name).unwrap_or_else(|| panic!("deepseekocr2: {name} not registered - is it missing from PIPELINES?"));
+        let opt = optim::Optim::new(idx("adamw"), idx("gradnorm_sq"), idx("grad_scale"), idx("clip_coef"), idx("grad_scale_buf"));
+        Resampler { gpu, ps, ids, cfg, opt }
     }
 
     pub fn gpu(&self) -> &Gpu {
@@ -266,6 +295,13 @@ impl Resampler {
     }
     pub fn read_weight(&self, name: &str) -> Vec<f32> {
         self.ps.read_weight(&self.gpu, name)
+    }
+    /// One AdamW step over every `Role::Trainable` tensor - the base weights
+    /// when `cfg.lora` is `None` (full fine-tune), or just the adapter pair
+    /// when it is set (LoRA), exactly as `ParamStore`'s role assignment in
+    /// [`Self::new_on`] already decided.
+    pub fn adamw_step(&self, t: u32, lr: f32, wd: f32, clip: Option<f32>) {
+        self.opt.step(&self.gpu, &self.ps, t, lr, wd, 0.9, 0.95, 1e-8, clip, 1.0);
     }
 
     /// Write `vision.view_separator`'s own gradient. Unlike every other
@@ -276,7 +312,9 @@ impl Resampler {
     /// (`crate::rows`'s `separator_row` of the decoder's splice gradient) IS
     /// the whole gradient, and this simply places it.
     pub fn write_view_separator_grad(&self, d_separator: &[f32]) {
-        self.gpu.write_f32(self.ps.g("vision.view_separator"), d_separator);
+        if self.trainable("vision.view_separator") {
+            self.gpu.write_f32(self.ps.g("vision.view_separator"), d_separator);
+        }
     }
 
     /// Run the shared tower on one view's SAM tokens, keep the query half,
@@ -335,6 +373,7 @@ impl Resampler {
         let ids = &self.ids;
         let bids = ids.as_block_ids();
         let w = |leaf: &str| self.ps.w(&format!("vision.encoder.blocks.{l}.{leaf}"));
+        let wn = |leaf: &str| format!("vision.encoder.blocks.{l}.{leaf}");
 
         let x_in = self.snapshot(x, (t * d) as usize);
 
@@ -345,14 +384,15 @@ impl Resampler {
         let q = g.storage((t * d) as u64);
         let k = g.storage((t * kv) as u64);
         let v = g.storage((t * kv) as u64);
-        let steps = vec![
-            g.step(ids.matmul, &[&xn1, w("attn.q.weight"), &q], &[t, d, d], t * d),
-            g.step(ids.bias_add, &[&q, w("attn.q.bias")], &[t, d], t * d),
-            g.step(ids.matmul, &[&xn1, w("attn.k.weight"), &k], &[t, d, kv], t * kv),
-            g.step(ids.bias_add, &[&k, w("attn.k.bias")], &[t, kv], t * kv),
-            g.step(ids.matmul, &[&xn1, w("attn.v.weight"), &v], &[t, d, kv], t * kv),
-            g.step(ids.bias_add, &[&v, w("attn.v.bias")], &[t, kv], t * kv),
-        ];
+        let mut steps = vec![g.step(ids.matmul, &[&xn1, w("attn.q.weight"), &q], &[t, d, d], t * d)];
+        self.lora_fwd(&mut steps, "attn.q", &xn1, &wn("attn.q.weight"), &q, t, d, d);
+        steps.push(g.step(ids.bias_add, &[&q, w("attn.q.bias")], &[t, d], t * d));
+        steps.push(g.step(ids.matmul, &[&xn1, w("attn.k.weight"), &k], &[t, d, kv], t * kv));
+        self.lora_fwd(&mut steps, "attn.k", &xn1, &wn("attn.k.weight"), &k, t, d, kv);
+        steps.push(g.step(ids.bias_add, &[&k, w("attn.k.bias")], &[t, kv], t * kv));
+        steps.push(g.step(ids.matmul, &[&xn1, w("attn.v.weight"), &v], &[t, d, kv], t * kv));
+        self.lora_fwd(&mut steps, "attn.v", &xn1, &wn("attn.v.weight"), &v, t, d, kv);
+        steps.push(g.step(ids.bias_add, &[&v, w("attn.v.bias")], &[t, kv], t * kv));
         g.submit(&[], &steps);
         g.submit(&[], &[block::rope_fwd(g, &bids, &q, t, nh, hd, d, t, e.rope_theta), block::rope_fwd(g, &bids, &k, t, nkv, hd, kv, t, e.rope_theta)]);
 
@@ -382,7 +422,9 @@ impl Resampler {
         g.submit(&[], &[g.step(ids.apply, &[&probs_buf, &qkv, &ctx], &[1, nh, t, hd, 3 * d, 2 * d, d], nh * t * hd)]);
 
         let attn_out = g.storage((t * d) as u64);
-        g.submit(&[], &[g.step(ids.matmul, &[&ctx, w("attn.out.weight"), &attn_out], &[t, d, d], t * d)]);
+        let mut out_steps = vec![g.step(ids.matmul, &[&ctx, w("attn.out.weight"), &attn_out], &[t, d, d], t * d)];
+        self.lora_fwd(&mut out_steps, "attn.out", &ctx, &wn("attn.out.weight"), &attn_out, t, d, d);
+        g.submit(&[], &out_steps);
         g.submit(&[], &[g.step(ids.add_inplace, &[x, &attn_out], &[t * d], t * d)]);
 
         let x_mid = self.snapshot(x, (t * d) as usize);
@@ -392,15 +434,17 @@ impl Resampler {
         g.submit(&[], &[block::rmsnorm_fwd(g, &bids, x, w("norm2.weight"), &xn2, d, t)]);
         let gate = g.storage((t * ff) as u64);
         let up = g.storage((t * ff) as u64);
-        let steps = vec![
-            g.step(ids.matmul, &[&xn2, w("mlp.gate.weight"), &gate], &[t, d, ff], t * ff),
-            g.step(ids.matmul, &[&xn2, w("mlp.up.weight"), &up], &[t, d, ff], t * ff),
-        ];
+        let mut steps = vec![g.step(ids.matmul, &[&xn2, w("mlp.gate.weight"), &gate], &[t, d, ff], t * ff)];
+        self.lora_fwd(&mut steps, "mlp.gate", &xn2, &wn("mlp.gate.weight"), &gate, t, d, ff);
+        steps.push(g.step(ids.matmul, &[&xn2, w("mlp.up.weight"), &up], &[t, d, ff], t * ff));
+        self.lora_fwd(&mut steps, "mlp.up", &xn2, &wn("mlp.up.weight"), &up, t, d, ff);
         g.submit(&[], &steps);
         let h = g.storage((t * ff) as u64);
         g.submit(&[], &[g.step(ids.silu_mul, &[&gate, &up, &h], &[t * ff], t * ff)]);
         let mlp_out = g.storage((t * d) as u64);
-        g.submit(&[], &[g.step(ids.matmul, &[&h, w("mlp.down.weight"), &mlp_out], &[t, ff, d], t * d)]);
+        let mut down_steps = vec![g.step(ids.matmul, &[&h, w("mlp.down.weight"), &mlp_out], &[t, ff, d], t * d)];
+        self.lora_fwd(&mut down_steps, "mlp.down", &h, &wn("mlp.down.weight"), &mlp_out, t, ff, d);
+        g.submit(&[], &down_steps);
         g.submit(&[], &[g.step(ids.add_inplace, &[x, &mlp_out], &[t * d], t * d)]);
 
         let out = g.read(x, (t * d) as usize);
@@ -441,36 +485,45 @@ impl Resampler {
         let bidir_ids = ids.as_bidir_ids();
         let w = |leaf: &str| self.ps.w(&format!("vision.encoder.blocks.{l}.{leaf}"));
         let gr = |leaf: &str| self.ps.g(&format!("vision.encoder.blocks.{l}.{leaf}"));
+        let wn = |leaf: &str| format!("vision.encoder.blocks.{l}.{leaf}");
 
         // ---- MLP residual: x_out = x_mid + mlp_out ----
         let d_mlp_out = d_x_out; // identity through the residual add
         let d_h = g.storage((t * ff) as u64);
-        g.submit(&[], &[g.step(ids.matmul_dx, &[d_mlp_out, w("mlp.down.weight"), &d_h], &[t, ff, d, 0], t * ff)]);
-        g.submit(&[], &[g.step(ids.matmul_dw, &[d_mlp_out, &st.h, gr("mlp.down.weight")], &[t, ff, d], d * ff)]);
+        let mut down_dx = vec![g.step(ids.matmul_dx, &[d_mlp_out, w("mlp.down.weight"), &d_h], &[t, ff, d, 0], t * ff)];
+        self.lora_bwd(&mut down_dx, "mlp.down", d_mlp_out, &st.h, &wn("mlp.down.weight"), &d_h, t, ff, d);
+        g.submit(&[], &down_dx);
+        if self.trainable(&wn("mlp.down.weight")) {
+            g.submit(&[], &[g.step(ids.matmul_dw, &[d_mlp_out, &st.h, gr("mlp.down.weight")], &[t, ff, d], d * ff)]);
+        }
 
         let d_gate = g.storage((t * ff) as u64);
         let d_up = g.storage((t * ff) as u64);
         g.submit(&[], &[g.step(ids.silu_da, &[&st.gate, &st.up, &d_h, &d_gate], &[t * ff], t * ff), g.step(ids.silu_db, &[&st.gate, &d_h, &d_up], &[t * ff], t * ff)]);
 
         let d_xn2 = g.storage((t * d) as u64);
-        g.submit(
-            &[],
-            &[
-                g.step(ids.matmul_dx, &[&d_up, w("mlp.up.weight"), &d_xn2], &[t, d, ff, 0], t * d),
-                g.step(ids.matmul_dx, &[&d_gate, w("mlp.gate.weight"), &d_xn2], &[t, d, ff, 1], t * d),
-            ],
-        );
-        g.submit(
-            &[],
-            &[
-                g.step(ids.matmul_dw, &[&d_up, &st.xn2, gr("mlp.up.weight")], &[t, d, ff], ff * d),
-                g.step(ids.matmul_dw, &[&d_gate, &st.xn2, gr("mlp.gate.weight")], &[t, d, ff], ff * d),
-            ],
-        );
+        let mut xn2_dx = vec![
+            g.step(ids.matmul_dx, &[&d_up, w("mlp.up.weight"), &d_xn2], &[t, d, ff, 0], t * d),
+            g.step(ids.matmul_dx, &[&d_gate, w("mlp.gate.weight"), &d_xn2], &[t, d, ff, 1], t * d),
+        ];
+        self.lora_bwd(&mut xn2_dx, "mlp.up", &d_up, &st.xn2, &wn("mlp.up.weight"), &d_xn2, t, d, ff);
+        self.lora_bwd(&mut xn2_dx, "mlp.gate", &d_gate, &st.xn2, &wn("mlp.gate.weight"), &d_xn2, t, d, ff);
+        g.submit(&[], &xn2_dx);
+        let mut xn2_dw = Vec::new();
+        if self.trainable(&wn("mlp.up.weight")) {
+            xn2_dw.push(g.step(ids.matmul_dw, &[&d_up, &st.xn2, gr("mlp.up.weight")], &[t, d, ff], ff * d));
+        }
+        if self.trainable(&wn("mlp.gate.weight")) {
+            xn2_dw.push(g.step(ids.matmul_dw, &[&d_gate, &st.xn2, gr("mlp.gate.weight")], &[t, d, ff], ff * d));
+        }
+        if !xn2_dw.is_empty() {
+            g.submit(&[], &xn2_dw);
+        }
 
         let d_x_mid_from_norm2 = g.storage((t * d) as u64);
         let inv2 = g.storage(t as u64);
-        g.submit(&[], block::rmsnorm_bwd(g, &bids, &st.x_mid, w("norm2.weight"), &d_xn2, &d_x_mid_from_norm2, &inv2, Some(gr("norm2.weight")), d, t).as_slice());
+        let norm2_grad = self.trainable(&wn("norm2.weight")).then(|| gr("norm2.weight"));
+        g.submit(&[], block::rmsnorm_bwd(g, &bids, &st.x_mid, w("norm2.weight"), &d_xn2, &d_x_mid_from_norm2, &inv2, norm2_grad, d, t).as_slice());
 
         // Fresh storage is not guaranteed zeroed on every backend, and both
         // dispatches below are `+=` (`add_inplace`) with no prior `=` write -
@@ -481,8 +534,12 @@ impl Resampler {
         // ---- attention residual: x_mid = x_in + attn_out ----
         let d_attn_out = &d_x_mid; // identity through the residual add
         let d_ctx = g.storage((t * d) as u64);
-        g.submit(&[], &[g.step(ids.matmul_dx, &[d_attn_out, w("attn.out.weight"), &d_ctx], &[t, d, d, 0], t * d)]);
-        g.submit(&[], &[g.step(ids.matmul_dw, &[d_attn_out, &st.ctx, gr("attn.out.weight")], &[t, d, d], d * d)]);
+        let mut ctx_dx = vec![g.step(ids.matmul_dx, &[d_attn_out, w("attn.out.weight"), &d_ctx], &[t, d, d, 0], t * d)];
+        self.lora_bwd(&mut ctx_dx, "attn.out", d_attn_out, &st.ctx, &wn("attn.out.weight"), &d_ctx, t, d, d);
+        g.submit(&[], &ctx_dx);
+        if self.trainable(&wn("attn.out.weight")) {
+            g.submit(&[], &[g.step(ids.matmul_dw, &[d_attn_out, &st.ctx, gr("attn.out.weight")], &[t, d, d], d * d)]);
+        }
 
         let d_scores = g.storage((nh * t * t) as u64);
         let d_qkv = g.storage((t * 3 * d) as u64);
@@ -511,33 +568,116 @@ impl Resampler {
         g.submit(&[], &[block::rope_bwd(g, &bids, &d_q, t, nh, hd, d, t, e.rope_theta), block::rope_bwd(g, &bids, &d_k, t, nkv, hd, kv, t, e.rope_theta)]);
 
         let d_xn1 = g.storage((t * d) as u64);
-        g.submit(
-            &[],
-            &[
-                g.step(ids.matmul_dx, &[&d_q, w("attn.q.weight"), &d_xn1], &[t, d, d, 0], t * d),
-                g.step(ids.matmul_dx, &[&d_k, w("attn.k.weight"), &d_xn1], &[t, d, kv, 1], t * d),
-                g.step(ids.matmul_dx, &[&d_v, w("attn.v.weight"), &d_xn1], &[t, d, kv, 1], t * d),
-            ],
-        );
-        g.submit(
-            &[],
-            &[
-                g.step(ids.matmul_dw, &[&d_q, &st.xn1, gr("attn.q.weight")], &[t, d, d], d * d),
-                g.step(ids.matmul_dw, &[&d_k, &st.xn1, gr("attn.k.weight")], &[t, d, kv], kv * d),
-                g.step(ids.matmul_dw, &[&d_v, &st.xn1, gr("attn.v.weight")], &[t, d, kv], kv * d),
-                g.step(ids.bias_grad, &[&d_q, gr("attn.q.bias")], &[t, d], d),
-                g.step(ids.bias_grad, &[&d_k, gr("attn.k.bias")], &[t, kv], kv),
-                g.step(ids.bias_grad, &[&d_v, gr("attn.v.bias")], &[t, kv], kv),
-            ],
-        );
+        let mut xn1_dx = vec![
+            g.step(ids.matmul_dx, &[&d_q, w("attn.q.weight"), &d_xn1], &[t, d, d, 0], t * d),
+            g.step(ids.matmul_dx, &[&d_k, w("attn.k.weight"), &d_xn1], &[t, d, kv, 1], t * d),
+            g.step(ids.matmul_dx, &[&d_v, w("attn.v.weight"), &d_xn1], &[t, d, kv, 1], t * d),
+        ];
+        self.lora_bwd(&mut xn1_dx, "attn.q", &d_q, &st.xn1, &wn("attn.q.weight"), &d_xn1, t, d, d);
+        self.lora_bwd(&mut xn1_dx, "attn.k", &d_k, &st.xn1, &wn("attn.k.weight"), &d_xn1, t, d, kv);
+        self.lora_bwd(&mut xn1_dx, "attn.v", &d_v, &st.xn1, &wn("attn.v.weight"), &d_xn1, t, d, kv);
+        g.submit(&[], &xn1_dx);
+
+        let mut xn1_dw = Vec::new();
+        if self.trainable(&wn("attn.q.weight")) {
+            xn1_dw.push(g.step(ids.matmul_dw, &[&d_q, &st.xn1, gr("attn.q.weight")], &[t, d, d], d * d));
+        }
+        if self.trainable(&wn("attn.k.weight")) {
+            xn1_dw.push(g.step(ids.matmul_dw, &[&d_k, &st.xn1, gr("attn.k.weight")], &[t, d, kv], kv * d));
+        }
+        if self.trainable(&wn("attn.v.weight")) {
+            xn1_dw.push(g.step(ids.matmul_dw, &[&d_v, &st.xn1, gr("attn.v.weight")], &[t, d, kv], kv * d));
+        }
+        if self.trainable(&wn("attn.q.bias")) {
+            xn1_dw.push(g.step(ids.bias_grad, &[&d_q, gr("attn.q.bias")], &[t, d], d));
+        }
+        if self.trainable(&wn("attn.k.bias")) {
+            xn1_dw.push(g.step(ids.bias_grad, &[&d_k, gr("attn.k.bias")], &[t, kv], kv));
+        }
+        if self.trainable(&wn("attn.v.bias")) {
+            xn1_dw.push(g.step(ids.bias_grad, &[&d_v, gr("attn.v.bias")], &[t, kv], kv));
+        }
+        if !xn1_dw.is_empty() {
+            g.submit(&[], &xn1_dw);
+        }
 
         let d_x_in_from_norm1 = g.storage((t * d) as u64);
         let inv1 = g.storage(t as u64);
-        g.submit(&[], block::rmsnorm_bwd(g, &bids, &st.x_in, w("norm1.weight"), &d_xn1, &d_x_in_from_norm1, &inv1, Some(gr("norm1.weight")), d, t).as_slice());
+        let norm1_grad = self.trainable(&wn("norm1.weight")).then(|| gr("norm1.weight"));
+        g.submit(&[], block::rmsnorm_bwd(g, &bids, &st.x_in, w("norm1.weight"), &d_xn1, &d_x_in_from_norm1, &inv1, norm1_grad, d, t).as_slice());
 
         let d_x_in = g.storage((t * d) as u64);
         g.submit(&[&d_x_in], &[g.step(ids.add_inplace, &[&d_x_in, &d_x_mid], &[t * d], t * d), g.step(ids.add_inplace, &[&d_x_in, &d_x_in_from_norm1], &[t * d], t * d)]);
         d_x_in
+    }
+
+    /// Whether `name`'s base weight has a grad buffer at all - `false` for a
+    /// LoRA-frozen base (see [`Self::new_on`]'s role assignment), in which
+    /// case dispatching its `matmul_dw` would panic on a missing
+    /// `ParamStore::g` entry. Mirrors `deepseek2::model::DeepseekV2`'s own
+    /// `trainable` exactly.
+    fn trainable(&self, name: &str) -> bool {
+        self.ps.grad.contains_key(name)
+    }
+
+    /// `Some((rank, alpha/rank))` when `leaf` (one of
+    /// [`crate::config::Qwen2EncoderConfig::lora_leaves`]) is one of
+    /// `self.cfg.lora`'s targets, `None` otherwise - mirrors
+    /// `deepseek2::model::DeepseekV2`'s own `lora_for` exactly.
+    fn lora_for(&self, leaf: &str) -> Option<(u32, f32)> {
+        self.cfg.lora.as_ref().filter(|lc| lc.targets_leaf(leaf)).map(|lc| (lc.rank, lc.alpha / lc.rank as f32))
+    }
+
+    /// Forward LoRA delta for a targeted linear: `y += (alpha/r)*(x*Aᵀ)*Bᵀ`,
+    /// in place on `y` (which the caller has already written the base
+    /// `x*Wᵀ` into, for the SAME `wname`, immediately before this call). A
+    /// no-op when `leaf` is not targeted. `wname` is this layer's full
+    /// tensor name (e.g. `vision.encoder.blocks.3.attn.q.weight`), matching
+    /// [`crate::config::Qwen2EncoderConfig::lora_param_list`]'s own naming so
+    /// the `.lora_a`/`.lora_b` suffixes resolve to real `ParamStore` entries.
+    /// Unlike `deepseek2`'s own `lora_fwd`, the scratch here is a fresh
+    /// per-call allocation rather than a persistent field - this crate's
+    /// existing convention (every buffer in [`Self::layer_fwd`] is
+    /// allocated fresh), and correct either way since AdamW never touches
+    /// these buffers.
+    #[allow(clippy::too_many_arguments)]
+    fn lora_fwd(&self, s: &mut Vec<Step>, leaf: &str, x: &DeviceBuffer, wname: &str, y: &DeviceBuffer, m: u32, k: u32, nout: u32) {
+        let Some((r, scale)) = self.lora_for(leaf) else { return };
+        let g = &self.gpu;
+        let a = format!("{wname}.lora_a");
+        let bnm = format!("{wname}.lora_b");
+        let xa = g.storage((m * r) as u64);
+        s.push(g.step(self.ids.matmul, &[x, self.ps.w(&a), &xa], &[m, k, r], m * r));
+        let delta = g.storage((m * nout) as u64);
+        s.push(g.step(self.ids.matmul, &[&xa, self.ps.w(&bnm), &delta], &[m, r, nout], m * nout));
+        s.push(g.step(self.ids.axpy, &[y, &delta], &[m * nout, f(scale)], m * nout));
+    }
+
+    /// Backward for the OPTIONAL LoRA delta on a targeted linear - the base
+    /// gradient (computed by the caller immediately before this call, via
+    /// the same `matmul_dx`/`matmul_dw` dispatch every non-LoRA linear here
+    /// already uses) is unconditional and already correct; this adds the
+    /// adapter's own `gA`/`gB` and its share of `dx` on top, ALWAYS
+    /// accumulating into `dx` (`acc = 1`) since the base's own `matmul_dx`
+    /// write for the same buffer always runs first at every call site. A
+    /// no-op when `leaf` is not targeted. Mirrors `deepseek2::model`'s own
+    /// `lora_bwd` exactly (same derivation: `a = x*Aᵀ`, `gB += scale*d_outᵀ*a`,
+    /// `da = scale*(d_out*B)`, `gA += daᵀ*x`, `dx += da*A`).
+    #[allow(clippy::too_many_arguments)]
+    fn lora_bwd(&self, s: &mut Vec<Step>, leaf: &str, d_out: &DeviceBuffer, x: &DeviceBuffer, wname: &str, dx: &DeviceBuffer, m: u32, k: u32, nout: u32) {
+        let Some((r, scale)) = self.lora_for(leaf) else { return };
+        let g = &self.gpu;
+        let a = format!("{wname}.lora_a");
+        let bnm = format!("{wname}.lora_b");
+        let xa = g.storage((m * r) as u64);
+        s.push(g.step(self.ids.matmul, &[x, self.ps.w(&a), &xa], &[m, k, r], m * r));
+        s.push(g.step(self.ids.grad_scale, &[&xa], &[m * r, f(scale)], m * r));
+        s.push(g.step(self.ids.matmul_dw, &[d_out, &xa, self.ps.g(&bnm)], &[m, r, nout], nout * r));
+        let da = g.storage((m * r) as u64);
+        s.push(g.step(self.ids.matmul_dx, &[d_out, self.ps.w(&bnm), &da], &[m, r, nout, 0], m * r));
+        s.push(g.step(self.ids.grad_scale, &[&da], &[m * r, f(scale)], m * r));
+        s.push(g.step(self.ids.matmul_dw, &[&da, x, self.ps.g(&a)], &[m, k, r], r * k));
+        s.push(g.step(self.ids.matmul_dx, &[&da, self.ps.w(&a), dx], &[m, k, r, 1], m * k));
     }
 
     /// Names of every trainable parameter this tower owns - the encoder
@@ -615,8 +755,12 @@ impl Resampler {
 
         let d_proj = self.gpu.storage((n_query * pout) as u64);
         self.gpu.write_f32(&d_proj, d_projected);
-        self.gpu.submit(&[], &[self.gpu.step(self.ids.bias_grad, &[&d_proj, self.ps.g("vision.projector.fc.bias")], &[n_query, pout], pout)]);
-        self.gpu.submit(&[], &[self.gpu.step(self.ids.matmul_dw, &[&d_proj, &st.q_dev, self.ps.g("vision.projector.fc.weight")], &[n_query, pin, pout], pout * pin)]);
+        if self.trainable("vision.projector.fc.bias") {
+            self.gpu.submit(&[], &[self.gpu.step(self.ids.bias_grad, &[&d_proj, self.ps.g("vision.projector.fc.bias")], &[n_query, pout], pout)]);
+        }
+        if self.trainable("vision.projector.fc.weight") {
+            self.gpu.submit(&[], &[self.gpu.step(self.ids.matmul_dw, &[&d_proj, &st.q_dev, self.ps.g("vision.projector.fc.weight")], &[n_query, pin, pout], pout * pin)]);
+        }
         let d_q_dev = self.gpu.storage((n_query * pin) as u64);
         self.gpu.submit(&[], &[self.gpu.step(self.ids.matmul_dx, &[&d_proj, self.ps.w("vision.projector.fc.weight"), &d_q_dev], &[n_query, pin, pout, 0], n_query * pin)]);
         let d_query_slice = self.gpu.read(&d_q_dev, (n_query * pin) as usize);
@@ -630,9 +774,10 @@ impl Resampler {
 
         let d_x_final = self.gpu.storage((t * d) as u64);
         let inv = self.gpu.storage(t as u64);
+        let final_norm_grad = self.trainable("vision.encoder.norm.weight").then(|| self.ps.g("vision.encoder.norm.weight"));
         self.gpu.submit(
             &[],
-            block::rmsnorm_bwd(&self.gpu, &self.ids.as_block_ids(), &st.x_final, self.ps.w("vision.encoder.norm.weight"), &d_normed_buf, &d_x_final, &inv, Some(self.ps.g("vision.encoder.norm.weight")), d, t).as_slice(),
+            block::rmsnorm_bwd(&self.gpu, &self.ids.as_block_ids(), &st.x_final, self.ps.w("vision.encoder.norm.weight"), &d_normed_buf, &d_x_final, &inv, final_norm_grad, d, t).as_slice(),
         );
 
         let mut d_x = d_x_final;
@@ -642,8 +787,10 @@ impl Resampler {
         let d_concat_in = self.gpu.read(&d_x, (t * d) as usize);
 
         let (d_sam, d_query_bank) = d_concat_in.split_at((n_query * d) as usize);
-        let query_bank_grad = self.ps.g(if local { "vision.query_local.weight" } else { "vision.query_global.weight" });
-        self.gpu.write_f32(query_bank_grad, d_query_bank);
+        let qb_name = if local { "vision.query_local.weight" } else { "vision.query_global.weight" };
+        if self.trainable(qb_name) {
+            self.gpu.write_f32(self.ps.g(qb_name), d_query_bank);
+        }
 
         d_sam.to_vec()
     }

@@ -165,7 +165,7 @@ pub fn vision_config(mmproj: &Path, decoder_hidden: u32) -> Result<DeepseekOcr2V
         ));
     }
 
-    let cfg = DeepseekOcr2VisionConfig { sam: SamViTConfig::from(&full.sam), encoder, decoder_hidden };
+    let cfg = DeepseekOcr2VisionConfig { sam: SamViTConfig::from(&full.sam), encoder, decoder_hidden, lora: None };
     cfg.check();
     Ok(cfg)
 }

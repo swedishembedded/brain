@@ -521,4 +521,72 @@ crates) all pass. `cargo clippy -p brain-deepseek2 --all-targets
 brain-deepseekocr2 --lib`, `cargo test -p brain-deepseek2ocr --lib` (37
 passed), and the full workspace `cargo test -p brain-gradcheck` all green.
 
-Remaining milestones (M9-M12) not started.
+M9 (LoRA + full fine-tune, with overfit proofs) done. Full fine-tune needed
+zero new plumbing beyond `train:true, lora:None` already giving every
+parameter `Role::Trainable` - `full_finetune_overfits_a_single_example`/
+`_a_small_batch` (`crates/deepseekocr2/tests/train_overfit.rs`) drive loss
+from ~2.93 (uniform-guess, `ln(19)`) to 7e-6 / 1e-4 on the shared tiny
+fixture. LoRA needed real new work: `crates/deepseekocr2/src/{config,encoder,init}.rs`
+add `DeepseekOcr2VisionConfig::lora: Option<qwen3::LoraCfg>`, seven
+LoRA-targetable per-layer leaves (`Qwen2EncoderConfig::lora_leaves` - qkv,
+attn.out, the three MLP linears; each `.lora_a`/`.lora_b` sized from that
+leaf's REAL `(out,in)` - this tower is GQA with asymmetric MLP widths, so it
+cannot take `deepseek2::config`'s own shortcut of one shared `rank*d_model`
+size for every target), the same `Role::Frozen`-base/`Role::Trainable`-adapter
+role split `deepseek2::DeepseekV2` already uses, and a from-scratch
+`lora_fwd`/`lora_bwd` pair mirroring that crate's exact derivation (two
+matmuls + AXPY forward, the four-matmul-plus-two-grad-scale backward) - zero
+new kernels, all composed from `matmul`/`matmul_dx`/`matmul_dw`/`axpy`/
+`grad_scale`, already registered for the optimizer.
+
+**A real defect the gradcheck-adjacent testing caught, not from `make
+gradcheck` itself:** every backward site that writes into a base weight's
+grad buffer (`matmul_dw`, `bias_grad`, the two norms' `rmsnorm_bwd` grad
+output, the query banks, the separator, the projector) was unconditionally
+dispatched - correct when everything is trainable (full fine-tune, this
+crate's only mode before M9), but a LoRA-frozen base has NO grad buffer
+allocated at all (`ParamStore::g` panics on a missing entry), so EVERY one of
+those ~13 call sites needed a `self.trainable(name)` guard mirroring
+`deepseek2::model::DeepseekV2`'s own `trainable()` helper. Missing even one
+would have panicked the very first LoRA backward call - caught here before
+any of the overfit tests could even run, not by a numerical mismatch.
+
+**A second, more interesting non-defect surfaced during verification, and is
+recorded so it is not mistaken for a bug later:** a naive `lora_overfits_a_single_example`
+built exactly like the full-fine-tune tests (LoRA on a fresh RANDOM base)
+plateaus at ~2.86-2.93 - barely moving - at every rank (2 through 6) and
+learning rate tried. A `#[cfg(test)]`-free diagnostic pass (read back a
+targeted linear's output with the adapter's `B` forced to a large constant
+vs. left at zero, and a direct finite-difference check on `.lora_a`/
+`.lora_b`) confirmed the delta correctly reaches the residual stream and the
+analytic gradient matches the numeric one - the mechanism is correct. A
+control experiment reproduced the SAME plateau using ONLY `deepseek2`'s own
+pre-existing, unmodified decoder LoRA (nothing from this campaign) against a
+random base, ruling out anything vision-specific. The real explanation:
+LoRA's whole premise is a frozen base that is ALREADY a useful
+representation; a random, never-trained composite has none, and a rank-limited
+correction cannot manufacture the WHOLE network's worth of missing capacity
+(full fine-tune only succeeds because it also moves the decoder's 64-expert
+MoE FFN, which no LoRA config here ever targets). The shipped test,
+`lora_overfits_a_single_example_against_a_real_base`, instead full-fine-tunes
+a real base first (reusing the already-proven path), then applies a fresh
+LoRA adapter to a DIFFERENT example on top of it - the scenario LoRA is
+actually built for - and gates on a large (>90%) relative loss reduction from
+a genuinely difficult (confidently-wrong) starting point, not an absolute
+near-zero bar.
+
+`crates/deepseekocr2/src/train.rs` (new): `lora_init_map`, the two-tower
+composite-level seam merging fresh `.lora_a`/`.lora_b` tensors (via each
+tower's own `init::init_adapters`) over an existing base - the checkpoint
+case `lora_overfits_a_single_example_against_a_real_base`'s Phase 2 exercises
+directly (a REAL, previously-trained base, not a fresh synthetic one).
+
+Gates: `check/spdx`, `check-no-machine-paths.sh`, `check-workspace-members.sh`,
+`check-scripts.sh`, `check-no-doc-citations.sh`, `check-multi-gpu-sharding.sh`
+all pass. `cargo clippy -p brain-deepseekocr2 --all-targets --all-features --
+-D warnings` clean. `cargo test -p brain-deepseekocr2` (all suites, 27
+tests) and `cargo test -p brain-gradcheck --lib deepseekocr2` (the
+pre-existing M4 gradcheck, unaffected since it never sets `cfg.lora`) both
+green.
+
+Remaining milestones (M10-M12) not started.

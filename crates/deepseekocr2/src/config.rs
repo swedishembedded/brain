@@ -15,6 +15,12 @@
 
 use sam1::SamViTConfig;
 
+/// One `LoraCfg` type spans both device-family LoRA users in this workspace
+/// (`deepseek2`'s own `pub use qwen3::LoraCfg` is the other) - reusing it
+/// here rather than declaring a near-identical struct keeps `rank`/`alpha`/
+/// `targets` meaning the same thing on both halves of this composite.
+pub use qwen3::LoraCfg;
+
 /// The 24-layer Qwen2-shaped GQA tower's own shape. Not `qwen3::QwenConfig`:
 /// this tower is a bare resampler (no token embedding, no LM head, a mask
 /// `qwen3::Qwen` cannot express), so a purpose-built struct is more honest
@@ -115,6 +121,51 @@ impl Qwen2EncoderConfig {
         out.push(("vision.query_global.weight".to_string(), self.n_query_global as usize * self.d_model as usize));
         out
     }
+
+    /// The seven per-layer linears a LoRA config can target - the resampler's
+    /// analogue of `deepseek2::config::lora_targets`. Unlike that decoder
+    /// (plain MHA, every targetable leaf square at `d_model x d_model`), this
+    /// tower is GQA with asymmetric MLP widths, so nothing here can shortcut
+    /// to one shared `(out, in)` pair - see [`Self::linear_shape`].
+    pub fn lora_leaves() -> [&'static str; 7] {
+        ["attn.q", "attn.k", "attn.v", "attn.out", "mlp.gate", "mlp.up", "mlp.down"]
+    }
+
+    /// `(out, in)` for one [`Self::lora_leaves`] entry, or `None` for
+    /// anything else (norms, biases, the query banks - none of which is a
+    /// `[out, in]` linear a LoRA pair can attach to).
+    fn linear_shape(&self, leaf: &str) -> Option<(usize, usize)> {
+        let (d, kv, ff) = (self.d_model as usize, self.kv_dim() as usize, self.ffn_hidden as usize);
+        match leaf {
+            "attn.q" | "attn.out" => Some((d, d)),
+            "attn.k" | "attn.v" => Some((kv, d)),
+            "mlp.gate" | "mlp.up" => Some((ff, d)),
+            "mlp.down" => Some((d, ff)),
+            _ => None,
+        }
+    }
+
+    /// `.lora_a`/`.lora_b` for every [`Self::lora_leaves`] entry `lora`
+    /// targets, across every layer, each sized from its OWN real `(out, in)`
+    /// shape (`A: [rank, in]`, `B: [out, rank]`) rather than one shared size -
+    /// the thing `deepseek2::config::DeepseekV2Config::param_list` can get
+    /// away with skipping because its four targets are all square.
+    pub fn lora_param_list(&self, lora: &LoraCfg) -> Vec<(String, usize)> {
+        let r = lora.rank as usize;
+        let mut out = Vec::new();
+        for l in 0..self.n_layers {
+            for leaf in Self::lora_leaves() {
+                if !lora.targets_leaf(leaf) {
+                    continue;
+                }
+                let (o, i) = self.linear_shape(leaf).expect("lora_leaves() names only real linear leaves");
+                let base = format!("vision.encoder.blocks.{l}.{leaf}.weight");
+                out.push((format!("{base}.lora_a"), r * i));
+                out.push((format!("{base}.lora_b"), o * r));
+            }
+        }
+        out
+    }
 }
 
 /// The whole `DeepEncoder V2` tower: SAM's grid, the resampler above, and the
@@ -126,6 +177,13 @@ pub struct DeepseekOcr2VisionConfig {
     /// The language model's own hidden width - the projector's output and
     /// the view separator's width.
     pub decoder_hidden: u32,
+    /// `None` (the default) means every tower parameter trains directly -
+    /// full fine-tune, `Resampler::new_on`'s existing `train`-flag behavior,
+    /// unchanged by adding this field. `Some` freezes everything except the
+    /// targeted linears' fresh `.lora_a`/`.lora_b` pair, the same
+    /// frozen-base/adapter split `deepseek2::DeepseekV2Config::lora` already
+    /// gives the decoder this crate wraps.
+    pub lora: Option<LoraCfg>,
 }
 
 impl DeepseekOcr2VisionConfig {
@@ -145,4 +203,46 @@ impl DeepseekOcr2VisionConfig {
             ("vision.view_separator".to_string(), pout),
         ]
     }
+
+    /// `.lora_a`/`.lora_b` for `self.lora`'s targets - delegates entirely to
+    /// [`Qwen2EncoderConfig::lora_param_list`]. The projector, the separator,
+    /// and the two query banks are never LoRA-targetable: the projector's
+    /// forward delta is not wired (a real gap, not an oversight - see this
+    /// module's `lora_targets` doc), and neither the separator nor a query
+    /// bank is a `[out, in]` linear a LoRA pair could attach to at all.
+    pub fn lora_param_list(&self, lora: &LoraCfg) -> Vec<(String, usize)> {
+        self.encoder.lora_param_list(lora)
+    }
+
+    /// Every real parameter this config implies, including `self.lora`'s
+    /// adapter tensors when set - the ONE list `Resampler::new_on` and
+    /// `crate::init::init_weights` both build from, so the two can never
+    /// silently drift into naming a different tensor set.
+    pub fn param_list(&self) -> Vec<(String, usize)> {
+        let mut out = self.encoder.param_list();
+        out.extend(self.projector_param_list());
+        if let Some(lora) = &self.lora {
+            out.extend(self.lora_param_list(lora));
+        }
+        out
+    }
+}
+
+/// The seven LoRA-targetable leaves this tower's per-layer linears carry -
+/// [`Qwen2EncoderConfig::lora_leaves`] verbatim. **Deliberately excludes the
+/// projector**: unlike the seven per-layer linears, `Resampler`'s forward
+/// never composes a `.lora_a`/`.lora_b` delta into `vision.projector.fc`'s
+/// output (that wiring does not exist yet - a real follow-up, not a silent
+/// gap: a `LoraCfg` naming `"projector"` here would produce tensors
+/// [`DeepseekOcr2VisionConfig::param_list`] allocates and trains, that the
+/// forward pass then never reads, which is worse than not offering the
+/// target at all).
+pub fn lora_targets() -> Vec<String> {
+    Qwen2EncoderConfig::lora_leaves().iter().map(|s| s.to_string()).collect()
+}
+
+/// A [`LoraCfg`] targeting every one of [`lora_targets`] at the given
+/// rank/alpha - the vision-tower analogue of `deepseek2::config::lora_cfg`.
+pub fn lora_cfg(rank: u32, alpha: f32) -> LoraCfg {
+    LoraCfg { rank, alpha, targets: lora_targets() }
 }

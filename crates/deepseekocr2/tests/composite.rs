@@ -74,7 +74,7 @@ impl Fixture {
             n_query_global: 3,
         };
         let decoder_cfg = DeepseekV2Config::tiny();
-        let vision_cfg = DeepseekOcr2VisionConfig { sam, encoder, decoder_hidden: decoder_cfg.shape.d_model };
+        let vision_cfg = DeepseekOcr2VisionConfig { sam, encoder, decoder_hidden: decoder_cfg.shape.d_model, lora: None };
         let grid = TileGrid::new(2, 1);
         let seq = decoder_cfg.block_size;
 

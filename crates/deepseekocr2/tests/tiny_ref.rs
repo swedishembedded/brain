@@ -187,6 +187,7 @@ fn the_resampler_matches_the_checkpoint_free_golden_stage_by_stage() {
             n_query_global: dims.n_query_global,
         },
         decoder_hidden: dims.decoder_hidden,
+        lora: None,
     };
     let init = build_init(&cfg, &ck);
 

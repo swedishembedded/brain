@@ -120,7 +120,7 @@ pub fn check_deepseekocr2(seed: u64) -> Report {
         n_query_local: 3,
         n_query_global: 5,
     };
-    let cfg = DeepseekOcr2VisionConfig { sam, encoder, decoder_hidden: 6 };
+    let cfg = DeepseekOcr2VisionConfig { sam, encoder, decoder_hidden: 6, lora: None };
 
     let mut rng = Rng::new(seed);
     let mut init: HashMap<String, Vec<f32>> = HashMap::new();
