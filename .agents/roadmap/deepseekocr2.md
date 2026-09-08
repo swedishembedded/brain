@@ -103,21 +103,17 @@ GGUF exists; the reference safetensors checkpoint is `deepseek-ai/DeepSeek-OCR-2
   confirmed. RMSNorm eps `clip.vision.attention.layer_norm_epsilon ~= 1e-6`.
   No `rope_theta`/`max_position_embeddings` KV present - as with v1's
   `rope.dimension_count=0` quirk, llama.cpp's compiled-in Qwen2 default
-  applies unread from this file. **Confirmed from
-  `tools/mtmd/models/deepseekocr2.cpp`'s `clip_graph_deepseekocr2::build()`**
-  (merged to llama.cpp master 2026-05-29, PR #20975):
-  `ggml_rope_ext(ctx0, x, inp_pos, nullptr, d_head, GGML_ROPE_TYPE_NEOX,
-  131072, 1000000, 1, 0, 1, 0, 0)` - **theta 1e6, NEOX (half-split) layout**,
-  matching the reference `Qwen2Config(rope_theta=1e6)` exactly. The mask
-  itself is built as an externally-supplied `[seq_len, seq_len]` f32 input
-  tensor (constructed host-side before the graph runs, not inside
-  `build_vit()`), consistent with the earlier finding that the hybrid
-  bidirectional-image/causal-query mask is prepared CPU-side. Also confirmed
-  from the same source: image tokens are concatenated with the query bank
-  via `ggml_concat(ctx0, inp, query_embed, 1)` - **image tokens first, query
-  tokens appended after**, matching the reference's `cat([x, query], dim=1)`
-  - and the view separator is appended conditionally
-  (`img.add_viewsep`) via a second `ggml_concat`.
+  applies unread from this file. Cross-checked against the merged mtmd
+  graph builder for this projector type (`tools/mtmd/models/
+  deepseekocr2.cpp`, landed on llama.cpp master 2026-05-29, PR #20975): its
+  rope dispatch for the resampler pins **theta 1e6, NEOX (half-split)
+  layout**, matching `Qwen2Config(rope_theta=1e6)`. The same source confirms
+  the mask is built as a separate `[seq_len, seq_len]` f32 buffer supplied
+  to the graph rather than computed inside the block itself - consistent
+  with the earlier finding that the hybrid mask is assembled host-side
+  before the encoder runs - and that the sequence order is **image tokens
+  first, learned queries appended after**, with the view separator appended
+  once more, conditionally, at the end of each view's sequence.
 - **Learned query embeddings, real shapes**: `v.resample_query_768.weight
   [896,144]` (the 144-token/768-tile bank) and `v.resample_query_1024.weight
   [896,256]` (the 256-token/1024-global bank) - both present, both named
@@ -130,20 +126,23 @@ GGUF exists; the reference safetensors checkpoint is `deepseek-ai/DeepSeek-OCR-2
   projected space, not before projection. `mm.model.fc.{weight,bias}`
   confirmed as a single Linear(896->1280) - matches the reference's `linear`
   `MlpProjector` exactly, no MLP.
-- **Not yet resolved from these headers** (needs the llama.cpp mtmd graph
-  builder source, or a real forward, per the plan's M0/M5 gate):
-  - the Qwen2 encoder's real RoPE theta and position-embedding convention
-    (interleaved vs NEOX-half-split) as actually dispatched, not merely
-    the reference config's stated default;
-  - multi-tile ordering (local tiles vs the global view vs the separator) -
-    the reference's own placeholder-token builder and embedding-scatter
-    code disagree on order (see the HF-side research), and `config.json`'s
-    `global_view_pos: "head"` needs to be read against the graph builder's
-    actual concatenation, not the Python reference alone, since the mmproj
-    graph is llama.cpp's own construction and is what any GGUF-based
-    serving path actually runs.
+- **Still open, deliberately not guessed:** how MULTIPLE local tiles order
+  themselves relative to each other and to the global view. The graph
+  builder confirms one view's internal order (image tokens, then queries,
+  then an optional separator) and the HF reference confirms one tile's
+  placeholder layout, but neither source pinned here settles the sequence
+  across several tiles in a >1x1 grid. Settle this at M5 against a real
+  forward or a real dump, the same way v1's own row layout was settled -
+  not from reading either source's code in isolation.
 
 ## Status
 
-M0 (resources + fact-pinning) done as of this entry. Remaining milestones
-(M1-M12) not started.
+M0 (resources + fact-pinning) done. M2 (checkpoint-free tiny golden for the
+new vision tower) done: `tools/goldens/deepseekocr2_dump_reference.py`
+dumps `testdata/deepseekocr2/tiny/{ckpt/model.safetensors,golden.safetensors}`
++ `manifest-tiny.json` - the query-concat, the shared Qwen2 GQA prefix-LM
+encoder (taps per view: concat input, per-layer pre/post-mask scores,
+softmax probs, layer output, query slice, projector output), and the final
+row-gather (local tiles row-major, then the global view, then the
+separator), consumed by `crates/deepseekocr2/tests/tiny_ref.rs` (M3).
+Remaining milestones (M1, M3-M12) not started.
