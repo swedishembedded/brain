@@ -430,8 +430,13 @@ mod tests {
 
         // Agreeing with the bound variant (or omitting it) must pass this
         // gate - the run then fails downstream for an unrelated reason (no
-        // real dataset), never on the variant check.
-        let ok = Invocation::new().set("variant", json!("klein-4b")).set("data", json!("/nonexistent")).set("save", json!("/nonexistent/out"));
+        // real dataset), never on the variant check. `seed` is a required
+        // param (see `fix: seed is a required param, never a silent
+        // default`) enforced by `ActionSpec::validate` before a served
+        // invocation ever reaches `Instance::run` - this test calls `run`
+        // directly, bypassing that gate, so it must supply `seed` itself to
+        // keep exercising the downstream failure this test is actually about.
+        let ok = Invocation::new().set("variant", json!("klein-4b")).set("data", json!("/nonexistent")).set("save", json!("/nonexistent/out")).set("seed", json!(0));
         let downstream_err = inst.run("lora_train", &ok, &mut |_| {}).unwrap_err();
         assert!(!downstream_err.contains("bound to"), "{downstream_err}");
 
