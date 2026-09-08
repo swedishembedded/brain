@@ -151,8 +151,14 @@ impl KeyStyle {
         }
     }
 
+    /// `base_name` is the exact key a caller's base-weight map uses (so
+    /// `fold_into`'s lookups can use [`LinearSite::name`] directly); every
+    /// known adapter naming convention in this tree - brain's own,
+    /// ComfyUI's, PEFT's - names the adapter tensor against the STEM, so a
+    /// trailing `.weight` is stripped before the suffix is appended.
     pub fn format(&self, base_name: &str, canonical_suffix: &str) -> String {
-        format!("{}{}{}", self.prefix(), base_name, self.suffix(canonical_suffix))
+        let stem = base_name.strip_suffix(".weight").unwrap_or(base_name);
+        format!("{}{}{}", self.prefix(), stem, self.suffix(canonical_suffix))
     }
 }
 

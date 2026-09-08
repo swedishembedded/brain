@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! LoRA (low-rank adapters) over the `GLVControl` trunk's attention and MLP
-//! projections.
+//! projections, over the generic `model::adapter` substrate.
 //!
 //! Every targeted linear `W [out×in]` gets `W_eff = W + (α/r)·B·A`, `A
 //! [r×in]`, `B [out×r]` - the standard shape [`model::lora::Pair`] already
@@ -12,13 +12,15 @@
 //!
 //! ## Targets, discovered from the manifest rather than hand-listed
 //! [`crate::config::trunk_manifest`] is the single source of truth for the
-//! trunk's tensor names; [`SupirLora::new`] filters it to the eight linear
+//! trunk's tensor names; [`linear_sites`] filters it to the eight linear
 //! suffixes [`sdxlunet::model::Rec::transformer_block`] emits (`attn1.qkv`,
 //! `attn1.to_out`, `attn2.to_q`, `attn2.kv`, `attn2.to_out`, `ff.hidden`,
 //! `ff.gate`, `ff.out`) - the trunk's every `BasicTransformerBlock`, at
 //! whatever depth [`crate::config::SupirConfig`] the caller built with has.
 //! Naming-driven discovery, not a hand-enumeration of block indices, so a
-//! bigger/smaller trunk config is covered automatically.
+//! bigger/smaller trunk config is covered automatically. Shapes come from
+//! the manifest itself, not from a hand-derived `(dim, ...)` tuple - this
+//! crate does not need to know its own dimensions to target its own linears.
 //!
 //! The frozen SDXL backbone and the 12 adaptors are NOT targeted here - the
 //! trunk is SUPIR's own trainable copy of the encoder, the natural site for a
@@ -41,8 +43,12 @@
 //! from the frozen base plus the current `A,B`, and
 //! [`crate::train::SupirTrainer::write_weight`] overwrites the graph's
 //! existing buffer directly - no re-recording. `dL/dW_eff`, read back via
-//! `read_grad`, is projected to `(dA, dB)` by [`model::lora::proj_step`]
-//! exactly as every other model in this workspace does it.
+//! `read_grad`, is projected to `(dA, dB)` exactly as every other model in
+//! this workspace does it. Unlike the pre-migration version of this module, a
+//! step that is missing a targeted tensor's gradient is now a hard error, not
+//! a silent skip - the generic engine makes the full target-name set knowable
+//! up front, so there is no reason left to tolerate a caller supplying only a
+//! subset.
 //!
 //! Cloning the whole base [`Tensors`] map per `apply`/`fold_into` call is
 //! fine at [`crate::config::SupirConfig::tiny`]'s toy scale (what this
@@ -56,8 +62,9 @@
 
 use std::collections::HashMap;
 
+use model::adapter::{AdapterKind, AdapterSet, KeyStyle, LinearSite, TargetHp, TargetSpec};
 pub use model::lora::LoraCfg;
-use model::lora::{proj_step, randn, Pair};
+use model::lora::{LoraGrads, LoraPair};
 use sdxlunet::import::Tensors;
 
 use crate::config::SupirConfig;
@@ -67,47 +74,50 @@ use crate::config::SupirConfig;
 const TARGET_SUFFIXES: [&str; 8] =
     ["attn1.qkv", "attn1.to_out", "attn2.to_q", "attn2.kv", "attn2.to_out", "ff.hidden", "ff.gate", "ff.out"];
 
-/// A LoRA adapter over the trunk's attention/MLP projections, keyed by the
-/// FULL base tensor name (`control_model....weight`) each [`Pair`] adapts.
+/// Every linear in `cfg`'s trunk manifest this crate offers to a PEFT
+/// adapter, discovered from the manifest rather than hand-listed.
+pub fn linear_sites(cfg: &SupirConfig) -> Vec<LinearSite> {
+    let manifest = crate::config::trunk_manifest(&cfg.trunk);
+    let mut sites = Vec::new();
+    for (name, shape) in &manifest {
+        let Some(stem) = name.strip_suffix(".weight") else { continue };
+        let Some(leaf) = TARGET_SUFFIXES.iter().find(|s| stem.ends_with(*s)) else { continue };
+        assert_eq!(shape.len(), 2, "supir lora: {name} is not a 2D linear weight: {shape:?}");
+        sites.push(LinearSite { name: name.clone(), leaf, layer: None, spec: TargetSpec::whole(shape[0], shape[1]) });
+    }
+    sites
+}
+
+/// A LoRA adapter over the trunk's attention/MLP projections.
 pub struct SupirLora {
-    scale: f32,
-    rank: usize,
-    pairs: HashMap<String, Pair>,
-    t: u64,
+    set: AdapterSet<LoraPair>,
+    hp: TargetHp,
 }
 
 impl SupirLora {
     /// Fresh adapter (`B = 0` -> initial no-op) over every targeted linear in
     /// `cfg.trunk`.
     pub fn new(cfg: &SupirConfig, lc: LoraCfg) -> SupirLora {
-        let manifest = crate::config::trunk_manifest(&cfg.trunk);
-        let mut rng = lc.seed ^ 0x5350_4952_4c6f_5241;
-        let mut pairs = HashMap::new();
-        for (name, shape) in &manifest {
-            let Some(stem) = name.strip_suffix(".weight") else { continue };
-            if !TARGET_SUFFIXES.iter().any(|s| stem.ends_with(s)) {
-                continue;
-            }
-            assert_eq!(shape.len(), 2, "supir lora: {name} is not a 2D linear weight: {shape:?}");
-            let (out, inn) = (shape[0], shape[1]);
-            let pair = Pair::new(out, inn, lc.rank, || (randn(&mut rng) * 0.02) as f32);
-            pairs.insert(name.clone(), pair);
-        }
-        assert!(!pairs.is_empty(), "supir lora: no targeted linears found in the trunk manifest");
-        SupirLora { scale: lc.scale(), rank: lc.rank, pairs, t: 0 }
+        let sites = linear_sites(cfg);
+        assert!(!sites.is_empty(), "supir lora: no targeted linears found in the trunk manifest");
+        let hp = TargetHp::from(lc);
+        let mut rng: u64 = lc.seed ^ 0x5350_4952_4c6f_5241;
+        let mut init = move || (model::lora::randn(&mut rng) * 0.02) as f32;
+        let set = AdapterSet::build(sites, hp, KeyStyle::Brain, &mut init);
+        SupirLora { set, hp }
     }
 
     /// Every base tensor name this adapter targets.
     pub fn names(&self) -> impl Iterator<Item = &str> {
-        self.pairs.keys().map(String::as_str)
+        self.set.iter().map(|(site, _)| site.name.as_str())
     }
 
     pub fn rank(&self) -> usize {
-        self.rank
+        self.hp.rank
     }
 
     pub fn alpha(&self) -> f32 {
-        self.scale * self.rank as f32
+        self.hp.alpha
     }
 
     /// `base_w + scale·B·A` for the ONE named tensor - the per-tensor
@@ -116,16 +126,14 @@ impl SupirLora {
     /// one already-read-back host `Vec<f32>`) reduce to.
     pub fn apply_one(&self, name: &str, base_w: &[f32]) -> Vec<f32> {
         let mut w = base_w.to_vec();
-        self.pairs[name].delta(self.scale, &mut w);
+        let (_, k) = self.set.iter().find(|(site, _)| site.name == name).unwrap_or_else(|| panic!("supir lora: {name} is not targeted"));
+        k.delta_into(1.0, &mut w);
         w
     }
 
     /// Add every targeted delta onto `base`, IN PLACE.
     pub fn fold_into(&self, base: &mut Tensors) {
-        for (name, pair) in &self.pairs {
-            let (_, w) = base.get_mut(name).unwrap_or_else(|| panic!("supir lora: base tensor {name} missing"));
-            pair.delta(self.scale, w);
-        }
+        self.set.fold_into(base, 1.0).unwrap_or_else(|e| panic!("supir lora: {e}"));
     }
 
     /// A cloned copy of `base` with every targeted delta added - see the
@@ -138,48 +146,36 @@ impl SupirLora {
     }
 
     /// One optimisation step: project `grads[name] = dL/dW_eff` onto each
-    /// targeted pair's `(dA, dB)` and Adam-update it. Silently skips a name
-    /// `grads` does not carry (a caller checking only a subset).
+    /// targeted pair's `(dA, dB)` and Adam-update it. A name `grads` does
+    /// not carry is now a hard error, not a silent skip.
     pub fn step(&mut self, grads: &HashMap<String, Vec<f32>>, lr: f32) {
-        self.t += 1;
-        let (scale, t) = (self.scale, self.t);
-        for (name, pair) in &mut self.pairs {
-            if let Some(g) = grads.get(name) {
-                proj_step(pair, g, scale, lr, t);
-            }
-        }
+        let projected: Vec<LoraGrads> = self
+            .set
+            .iter()
+            .map(|(site, k)| {
+                let dw = grads.get(&site.name).unwrap_or_else(|| {
+                    panic!("supir lora: step: missing gradient for {:?} - every targeted tensor's gradient is required", site.name)
+                });
+                k.project(dw)
+            })
+            .collect();
+        self.set.step_projected(&projected, lr);
     }
 
     /// Serialise to `(name, shape, data)` tensors - `<stem>.lora_{a,b}`.
     pub fn to_tensors(&self) -> Vec<(String, Vec<usize>, Vec<f32>)> {
-        let mut names: Vec<&String> = self.pairs.keys().collect();
-        names.sort();
-        let mut out = Vec::with_capacity(names.len() * 2);
-        for name in names {
-            let p = &self.pairs[name];
-            let stem = name.strip_suffix(".weight").expect("keys are always base .weight names");
-            out.push((format!("{stem}.lora_a"), vec![p.r, p.inn], p.a.clone()));
-            out.push((format!("{stem}.lora_b"), vec![p.out, p.r], p.b.clone()));
-        }
-        out
+        self.set.to_tensors()
     }
 
     /// Reload an adapter (weights only; Adam state reset) from
     /// [`Self::to_tensors`]'s output - a fresh adapter of the right shape
     /// with `A,B` overwritten.
     pub fn from_tensors(cfg: &SupirConfig, lc: LoraCfg, tensors: &HashMap<String, (Vec<usize>, Vec<f32>)>) -> Result<SupirLora, String> {
-        let mut ad = SupirLora::new(cfg, lc);
-        let names: Vec<String> = ad.pairs.keys().cloned().collect();
-        for name in names {
-            let stem = name.strip_suffix(".weight").expect("keys are always base .weight names");
-            let (ka, kb) = (format!("{stem}.lora_a"), format!("{stem}.lora_b"));
-            let (_, a) = tensors.get(&ka).ok_or_else(|| format!("supir lora: missing {ka}"))?;
-            let (_, b) = tensors.get(&kb).ok_or_else(|| format!("supir lora: missing {kb}"))?;
-            let p = ad.pairs.get_mut(&name).expect("name came from ad.pairs");
-            p.a = a.clone();
-            p.b = b.clone();
-        }
-        Ok(ad)
+        let sites = linear_sites(cfg);
+        assert!(!sites.is_empty(), "supir lora: no targeted linears found in the trunk manifest");
+        let hp = TargetHp::from(lc);
+        let set = AdapterSet::from_tensors(sites, hp, KeyStyle::Brain, tensors)?;
+        Ok(SupirLora { set, hp })
     }
 }
 
@@ -189,6 +185,26 @@ mod tests {
 
     fn cfg() -> SupirConfig {
         SupirConfig::tiny()
+    }
+
+    /// `linear_sites` must target exactly the same set of base tensor names
+    /// the pre-migration `HashMap`-keyed enumeration did - the manifest
+    /// filter itself did not change, only its container.
+    #[test]
+    fn linear_sites_matches_the_target_suffix_filter_over_the_manifest() {
+        let cfg = cfg();
+        let manifest = crate::config::trunk_manifest(&cfg.trunk);
+        let mut want: Vec<String> = manifest
+            .iter()
+            .filter_map(|(name, _)| {
+                let stem = name.strip_suffix(".weight")?;
+                TARGET_SUFFIXES.iter().any(|s| stem.ends_with(s)).then(|| name.clone())
+            })
+            .collect();
+        want.sort();
+        let mut got: Vec<String> = linear_sites(&cfg).into_iter().map(|s| s.name).collect();
+        got.sort();
+        assert_eq!(want, got);
     }
 
     /// `B = 0` at construction, so [`SupirLora::apply`] must reproduce every

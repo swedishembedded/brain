@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! LoRA (low-rank adapters) for [`crate::lmgrad`]'s host Qwen2-style LM
-//! reference.
+//! reference, over the generic `model::adapter` substrate.
 //!
 //! ## Why `model::lora::Pair`, not `qwen3::lora`/`qwen3::LoraCfg`
 //!
@@ -18,12 +18,8 @@
 //! What this module reuses instead is the OTHER LoRA family already shared
 //! across this workspace's host training references: `model::lora::Pair`,
 //! the same `W_eff = W + (α/r)·B·A` host adapter `wan::lora`/`flux2::lora`/
-//! `s3dit::lora` build on. It is the correct analogue for a host `Fp`-generic
-//! reference (materialise `W_eff`, run the gradchecked backward, project
-//! `dL/dW_eff` onto `(dA, dB)`) the same way `qwen3::lora` is the correct
-//! analogue for a device-resident `Model` - both trace back to the same
-//! `B = 0`-at-init, frozen-base convention, just wired through the shape each
-//! architecture's training graph actually has.
+//! `s3dit::lora`/`supir::lora` build on, wearing the generic
+//! `model::adapter::AdapterKind` seam via `model::lora::LoraPair`.
 //!
 //! Targets: `wq`/`wk`/`wv`/`wo` per layer - the same four projections
 //! `qwen3::LoraCfg::attn` targets by default, so a rank/alpha choice means the
@@ -35,48 +31,87 @@
 //! architecture-specific table a low-rank update does not suit well (a
 //! handful of tokens would need to move by a large amount each, which a
 //! shared rank-`r` factor does not represent efficiently).
+//!
+//! [`crate::lmgrad::LmWeights`] is a TYPED struct (`layers: Vec<LayerW<T>>`
+//! with named `wq`/`wk`/`wv`/`wo` fields), not a name-keyed map, so unlike
+//! `supir::lora`'s `fold_into` over a `HashMap`, [`LmLora::apply`]/
+//! [`LmLora::step`] match each [`model::adapter::LinearSite::leaf`] against
+//! the base struct's field by hand - the same name-to-field seam
+//! `minimaxmusic3::depth_lora::read_layer_grad` already uses for its own
+//! typed grads struct.
 
-use crate::lmgrad::{Fp, LayerW, LmDims, LmGrads, LmWeights};
+use crate::lmgrad::{Fp, LmDims, LmGrads, LmWeights};
 pub use model::lora::LoraCfg;
-use model::lora::{proj_step, randn, Pair};
+use model::adapter::{AdapterKind, AdapterSet, KeyStyle, LinearSite, TargetHp, TargetSpec};
+use model::lora::{LoraGrads, LoraPair};
 
-struct LayerLora {
-    wq: Pair,
-    wk: Pair,
-    wv: Pair,
-    wo: Pair,
+/// Every linear this crate offers to a PEFT adapter: `wq`/`wk`/`wv`/`wo` per
+/// layer, in that order, matching the pre-migration `LayerLora` field order
+/// (and its random-init draw order) exactly.
+pub fn linear_sites(d: &LmDims) -> Vec<LinearSite> {
+    let (dm, hq, hkv) = (d.d_model, d.n_heads * d.head_dim, d.n_kv_heads * d.head_dim);
+    let mut sites = Vec::with_capacity(d.n_layers * 4);
+    for l in 0..d.n_layers {
+        sites.push(LinearSite { name: format!("layers.{l}.wq"), leaf: "wq", layer: Some(l), spec: TargetSpec::whole(hq, dm) });
+        sites.push(LinearSite { name: format!("layers.{l}.wk"), leaf: "wk", layer: Some(l), spec: TargetSpec::whole(hkv, dm) });
+        sites.push(LinearSite { name: format!("layers.{l}.wv"), leaf: "wv", layer: Some(l), spec: TargetSpec::whole(hkv, dm) });
+        sites.push(LinearSite { name: format!("layers.{l}.wo"), leaf: "wo", layer: Some(l), spec: TargetSpec::whole(dm, hq) });
+    }
+    sites
+}
+
+fn field_mut<'a, T>(w: &'a mut LmWeights<T>, layer: usize, leaf: &str) -> &'a mut Vec<T> {
+    let l = &mut w.layers[layer];
+    match leaf {
+        "wq" => &mut l.wq,
+        "wk" => &mut l.wk,
+        "wv" => &mut l.wv,
+        "wo" => &mut l.wo,
+        other => panic!("cosyvoice lmlora: unknown leaf {other:?}"),
+    }
+}
+
+fn field<'a, T>(w: &'a LmWeights<T>, layer: usize, leaf: &str) -> &'a Vec<T> {
+    let l = &w.layers[layer];
+    match leaf {
+        "wq" => &l.wq,
+        "wk" => &l.wk,
+        "wv" => &l.wv,
+        "wo" => &l.wo,
+        other => panic!("cosyvoice lmlora: unknown leaf {other:?}"),
+    }
 }
 
 /// A LoRA adapter over every layer of [`crate::lmgrad`]'s LM.
 pub struct LmLora {
-    scale: f32,
-    rank: usize,
-    layers: Vec<LayerLora>,
-    t: u64,
+    set: AdapterSet<LoraPair>,
+    hp: TargetHp,
+    n_layers: usize,
 }
 
 impl LmLora {
     /// Fresh adapter sized for `d`. `B = 0`, so [`Self::apply`] returns
-    /// weights bit-identical to the base - `tests/lm_overfit.rs` asserts this
-    /// rather than assumes it.
+    /// weights bit-identical to the base - this module's own
+    /// `lora_is_an_exact_no_op_at_init` test asserts this rather than
+    /// assumes it (the top-level `tests/lm_overfit.rs` in this crate does
+    /// not reference this module at all).
     pub fn new(d: &LmDims, lc: LoraCfg) -> LmLora {
-        let (dm, hq, hkv, r) = (d.d_model, d.n_heads * d.head_dim, d.n_kv_heads * d.head_dim, lc.rank);
+        let sites = linear_sites(d);
+        let hp = TargetHp::from(lc);
         let mut seed = lc.seed ^ 0x434F_5359_564F_4943; // "COSYVOIC"
-        let mk = |out: usize, inn: usize, seed: &mut u64| Pair::new(out, inn, r, || (randn(seed) * 0.02) as f32);
-        let layers = (0..d.n_layers)
-            .map(|_| LayerLora { wq: mk(hq, dm, &mut seed), wk: mk(hkv, dm, &mut seed), wv: mk(hkv, dm, &mut seed), wo: mk(dm, hq, &mut seed) })
-            .collect();
-        LmLora { scale: lc.scale(), rank: r, layers, t: 0 }
+        let mut init = move || (model::lora::randn(&mut seed) * 0.02) as f32;
+        let set = AdapterSet::build(sites, hp, KeyStyle::Brain, &mut init);
+        LmLora { set, hp, n_layers: d.n_layers }
     }
 
     pub fn rank(&self) -> usize {
-        self.rank
+        self.hp.rank
     }
     pub fn scale(&self) -> f32 {
-        self.scale
+        self.hp.scale()
     }
     pub fn n_layers(&self) -> usize {
-        self.layers.len()
+        self.n_layers
     }
 
     /// Effective weights `W_eff = W + scale·B·A` on `wq/wk/wv/wo`; every other
@@ -84,11 +119,9 @@ impl LmLora {
     /// base is cloned, never mutated.
     pub fn apply(&self, base: &LmWeights<f32>) -> LmWeights<f32> {
         let mut w = base.clone();
-        for (a, l) in self.layers.iter().zip(w.layers.iter_mut()) {
-            a.wq.delta(self.scale, &mut l.wq);
-            a.wk.delta(self.scale, &mut l.wk);
-            a.wv.delta(self.scale, &mut l.wv);
-            a.wo.delta(self.scale, &mut l.wo);
+        for (site, k) in self.set.iter() {
+            let layer = site.layer.expect("cosyvoice lmlora: every site has a layer index");
+            k.delta_into(1.0, field_mut(&mut w, layer, site.leaf));
         }
         w
     }
@@ -97,23 +130,33 @@ impl LmLora {
     /// forward on [`Self::apply`]'s own output) onto `(dA, dB)` per targeted
     /// linear and Adam-step them. The base itself never moves.
     pub fn step(&mut self, base_grads: &LmGrads<f32>, lr: f32) {
-        self.t += 1;
-        for (a, gl) in self.layers.iter_mut().zip(base_grads.layers.iter()) {
-            proj_step(&mut a.wq, &gl.wq, self.scale, lr, self.t);
-            proj_step(&mut a.wk, &gl.wk, self.scale, lr, self.t);
-            proj_step(&mut a.wv, &gl.wv, self.scale, lr, self.t);
-            proj_step(&mut a.wo, &gl.wo, self.scale, lr, self.t);
-        }
+        let projected: Vec<LoraGrads> = self
+            .set
+            .iter()
+            .map(|(site, k)| {
+                let layer = site.layer.expect("cosyvoice lmlora: every site has a layer index");
+                k.project(field(base_grads, layer, site.leaf))
+            })
+            .collect();
+        self.set.step_projected(&projected, lr);
     }
 }
 
 /// Sanity helper for tests: every targeted tensor's `(A, B)` shapes match the
 /// base layer's own projection shapes.
 pub fn shapes_match<T: Fp>(d: &LmDims, lora: &LmLora, base: &LmWeights<T>) -> bool {
-    let check = |pair: &Pair, w: &Vec<T>, out: usize, inn: usize| pair.out == out && pair.inn == inn && w.len() == out * inn;
     let (dm, hq, hkv) = (d.d_model, d.n_heads * d.head_dim, d.n_kv_heads * d.head_dim);
-    lora.layers.iter().zip(base.layers.iter()).all(|(a, l): (&LayerLora, &LayerW<T>)| {
-        check(&a.wq, &l.wq, hq, dm) && check(&a.wk, &l.wk, hkv, dm) && check(&a.wv, &l.wv, hkv, dm) && check(&a.wo, &l.wo, dm, hq)
+    lora.set.iter().all(|(site, k)| {
+        let layer = site.layer.expect("layer index");
+        let spec = k.spec();
+        let (want_out, want_inn) = match site.leaf {
+            "wq" => (hq, dm),
+            "wk" => (hkv, dm),
+            "wv" => (hkv, dm),
+            "wo" => (dm, hq),
+            other => panic!("unknown leaf {other:?}"),
+        };
+        spec.out == want_out && spec.inn == want_inn && field(base, layer, site.leaf).len() == want_out * want_inn
     })
 }
 
@@ -124,6 +167,20 @@ mod tests {
 
     fn tiny_example(d: &LmDims) -> Example {
         Example { text_ids: vec![2, 4, 1], special_sos: 0, special_task: if d.special_vocab > 0 { 1 } else { d.speech_vocab - 2 }, speech_tokens: vec![1, 3, 5, 2] }
+    }
+
+    /// `linear_sites` must enumerate exactly `wq,wk,wv,wo` per layer, in that
+    /// order - the pre-migration draw order every existing seed depends on.
+    #[test]
+    fn linear_sites_enumerates_four_leaves_per_layer_in_order() {
+        let d = LmDims::tiny();
+        let sites = linear_sites(&d);
+        assert_eq!(sites.len(), d.n_layers * 4);
+        for (l, chunk) in sites.chunks(4).enumerate() {
+            let leaves: Vec<&str> = chunk.iter().map(|s| s.leaf).collect();
+            assert_eq!(leaves, ["wq", "wk", "wv", "wo"]);
+            assert!(chunk.iter().all(|s| s.layer == Some(l)));
+        }
     }
 
     #[test]
