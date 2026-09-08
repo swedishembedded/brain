@@ -10,6 +10,7 @@
 //!   brain npu bench    --onnx M [--input S --ov-device NPU --iters N --warmup W --hint latency|throughput ...]
 //!   brain npu sim      --weights F --calib <dir> --data <dir>   # fp32 vs INT8 mAP, no NPU
 //!   brain npu omni     --hf-dir DIR [--out-dir out/omni] [--n-audio N --grid-h H --grid-w W --code-len T]
+//!   brain npu deepseekocr2 --weights DIR [--seq S --out-dir out]  # resampler (2 views) + decoder ONNX
 //!
 //! `export`/`quantize`/`sim` are pure Rust and run anywhere. `run`/`bench`/`check`
 //! (compile) need OpenVINO + an Intel NPU at run time; on a machine without them
@@ -38,15 +39,52 @@ pub fn run_npu(args: &[String]) {
         Some("bench") => bench(&args[1..]),
         Some("sim") => sim(&args[1..]),
         Some("lfm") => lfm(&args[1..]),
+        Some("deepseekocr2") => deepseekocr2(&args[1..]),
         Some("lfm-bench") => lfm_bench(&args[1..]),
         Some("chronos2") => chronos2(&args[1..]),
         Some("kronos") => kronos(&args[1..]),
         Some("fincast") => fincast(&args[1..]),
         Some("omni") => omni(&args[1..]),
         other => eprintln!(
-            "usage: brain npu <export|quantize|check|run|bench|sim|lfm|lfm-bench|chronos2|kronos|fincast|omni> ...  (got {other:?})"
+            "usage: brain npu <export|quantize|check|run|bench|sim|lfm|lfm-bench|chronos2|kronos|fincast|omni|deepseekocr2> ...  (got {other:?})"
         ),
     }
+}
+
+/// `brain npu deepseekocr2 --weights DIR --seq S --out-dir out` - export
+/// DeepSeek-OCR-2's ONNX-eligible pieces (the resampler, one graph per view
+/// size, and the decoder) for a best-effort OpenVINO/NPU compile attempt.
+/// `--weights` is the directory `deepseekocr2::import::Files::locate` reads
+/// (both GGUFs, or their already-expanded fp32 forms). SAM is NOT exported -
+/// see `npu::deepseekocr2_topology`'s module doc for the real, unresolved
+/// reason (no windowed-attention/relative-position-bias ONNX precedent
+/// exists in this crate yet).
+fn deepseekocr2(args: &[String]) {
+    let mut weights = String::new();
+    let mut seq = 512usize;
+    let mut out_dir = String::from("out/deepseekocr2-onnx");
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--weights" => weights = val(args, &mut i, "--weights"),
+            "--seq" => seq = val(args, &mut i, "--seq").parse().unwrap_or(seq),
+            "--out-dir" => out_dir = val(args, &mut i, "--out-dir"),
+            other => {
+                eprintln!("brain npu deepseekocr2: unknown flag {other:?}");
+                std::process::exit(2);
+            }
+        }
+        i += 1;
+    }
+    if weights.is_empty() {
+        eprintln!("usage: brain npu deepseekocr2 --weights DIR --seq S --out-dir out");
+        std::process::exit(2);
+    }
+    if let Err(e) = npu::deepseekocr2_export::export_all(&weights, seq, &out_dir) {
+        eprintln!("brain npu deepseekocr2: {e}");
+        std::process::exit(1);
+    }
+    println!("brain npu deepseekocr2: wrote resampler_local.onnx, resampler_global.onnx, decoder.onnx -> {out_dir}");
 }
 
 fn val(args: &[String], i: &mut usize, flag: &str) -> String {

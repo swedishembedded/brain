@@ -597,5 +597,60 @@ v1's split code/weights licensing), an `AGENTS.md` ledger entry + crate
 table + routing table row, and `examples/vision/deepseek-ocr-2/README.md`.
 Quickstart untouched, as scoped.
 
-Remaining milestones (M10, M12) not started by this entry; see the Status
+M10 (NPU/ONNX export, unvalidated - no NPU firmware on this host, as
+directed) done for the resampler, honestly incomplete for the decoder:
+
+- `crates/npu/src/deepseekocr2_topology.rs` builds the resampler+projector
+  as a fixed-shape ONNX graph (SAM excluded - see below), following
+  `nemotron_topology.rs`'s precedent of baking a static additive attention
+  mask as an initializer. The prefix-LM mask exports exactly as the plan
+  predicted: `allow(i,j) = (i<P && j<P) || (j<=i)` bakes into one
+  `[1,1,2P,2P]` buffer, no data-dependent control flow, no new op. GQA
+  (14/2) is expressed as an explicit Reshape+Expand+Reshape head-repeat,
+  the same shape `qwen_topology.rs`'s own GQA emitters already use.
+- `crates/npu/src/deepseek2_topology.rs` builds the decoder (plain MHA +
+  sparse top-k MoE) by adapting `qwen35moe_topology.rs::Topo::moe_layer`'s
+  existing sparse gather-based MoE dispatch (stack every expert into one
+  `Gather`-indexable initializer, `TopK` the router probabilities, one
+  broadcasting `MatMul` over the selected experts) - **this is real,
+  working precedent for exactly the "MoE routing is a known hard case for
+  static ONNX graphs" question the plan raised**, not a new invention. Two
+  real differences from that precedent are read from `cfg` rather than
+  assumed (`norm_topk_prob`/`routed_scaling` gate the renormalising
+  `Div`/scaling `Mul`; the real checkpoint carries neither, matching the LM
+  GGUF's own absent `scoring_func`/`topk_method` keys), and the shared
+  expert is unweighted (`model::moe::shared_expert_fwd`'s `None` arm) rather
+  than qwen35moe's sigmoid-gated one.
+- `crates/npu/src/deepseekocr2_export.rs` + `brain npu deepseekocr2
+  --weights DIR --seq S --out-dir out` wire both into the CLI, reusing
+  `deepseekocr2::import`'s existing real-checkpoint expansion so this export
+  reads the same tensors every other real-weight test in this campaign does.
+- `crates/npu/tests/deepseekocr2_onnx.rs`: structural tests (tiny fixture,
+  no OpenVINO/hardware needed) pass for BOTH the resampler (both view
+  sizes) and the decoder (asserting a real `TopK` node appears, so the MoE
+  path is provably exercised, not silently skipped).
+- **Real-checkpoint run, honest result**: both resampler views exported
+  successfully against the actual downloaded checkpoint (~1.4 GiB each,
+  valid ONNX). **The decoder export did not complete against the real
+  checkpoint - the process was killed with zero output as its RSS crossed
+  ~16 GiB on this box's 30 GiB of RAM (swap already near-full from this
+  session's own build activity), the same host-RAM ceiling
+  `qwen35moe_export.rs`'s own doc comment already documents for the
+  identical reason (a dense per-layer expert stack held fully in memory
+  before serialization) at a larger scale.** This is a resource ceiling on
+  THIS host under THIS load, not a defect in the graph builder - the
+  builder is proven correct on the tiny fixture, including the MoE path.
+  Not forced or faked; recorded here as the honest outcome the plan asked
+  for.
+- **SAM is not exported, by design, and this is a REAL unresolved gap**: no
+  windowed-attention-with-decomposed-relative-position-bias ONNX export
+  precedent exists anywhere in this crate. A real fix needs a new topology
+  emitter for that op shape - unstarted work, not a hidden assumption.
+
+Gates: `check/spdx`, `check-no-machine-paths.sh`, `check-no-doc-citations.sh`,
+`check-scripts.sh`, `check-multi-gpu-sharding.sh`, `check-env-docs.sh` all
+pass. `cargo clippy -p brain-npu -p brain-cli --all-targets --all-features
+-- -D warnings` clean.
+
+Remaining milestone (M12) not started by this entry; see the Status
 section above/below for any milestone landed separately.

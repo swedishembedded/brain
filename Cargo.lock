@@ -1503,6 +1503,8 @@ dependencies = [
  "brain-chronos2",
  "brain-cosyvoice",
  "brain-data",
+ "brain-deepseek2",
+ "brain-deepseekocr2",
  "brain-diamond",
  "brain-eval",
  "brain-events",

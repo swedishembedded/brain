@@ -60,6 +60,9 @@ pub mod nemotron_topology;
 pub mod nemotron_export;
 pub mod qwen_asr_topology;
 pub mod qwenvl_topology;
+pub mod deepseek2_topology;
+pub mod deepseekocr2_export;
+pub mod deepseekocr2_topology;
 
 // OpenVINO runtime seam (real on x86_64 linux/windows, stub elsewhere).
 pub mod openvino;
