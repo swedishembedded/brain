@@ -56,9 +56,8 @@ clip	CLIP/OpenCLIP/EVA-CLIP text+image towers, at most a few B params (bigG) - f
 codeformer	Blind face restoration (VQGAN-scale), well under 1B params - single GPU by design.
 controlnet	A conditioning adapter added on top of a host backbone, not an independently large model - single GPU by design.
 cosyvoice	default_ref FunAudioLLM/CosyVoice2-0.5B - 0.5B, single GPU by design.
-deepseek2	MoE decoder, large by architecture family - not yet migrated onto model::shard; backlog.
-deepseek2ocr	DeepSeek-V2-family decoder + SAM/CLIP encoder, large by architecture family - not yet migrated onto model::shard; backlog.
-deepseekocr2	Same DeepSeek-V2-family decoder as deepseek2ocr (unmodified) plus a new SAM/Qwen2-resampler encoder - not yet migrated onto model::shard; backlog.
+deepseek2ocr	The shared crates/deepseek2 decoder now implements Shardable, but this composite crate's own source (SAM+CLIP encoder, the splice into the decoder) never mentions it - the vision tower is not yet migrated; backlog.
+deepseekocr2	Same shared crates/deepseek2 decoder as deepseek2ocr, now Shardable - but this composite crate's own SAM/Qwen2-resampler vision tower is not yet migrated; backlog.
 diamond	EDM diffusion world model, forecasting/world-model scale, not LLM-scale - single GPU by design.
 ecapatdnn	Speaker-embedding backbone (ECAPA-TDNN), well under 1B params - single GPU by design.
 fincast	Patched decoder + sparse MoE at forecasting scale, not LLM-scale - single GPU by design.

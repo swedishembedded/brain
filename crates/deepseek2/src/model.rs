@@ -60,8 +60,10 @@
 //! base decoder's own forward/backward). See [`DeepseekV2::lora_fwd`]/
 //! [`DeepseekV2::lora_bwd`].
 //!
-//! Not implemented here (see this crate's lib doc for why): INT8, sharding,
-//! paged-KV decode. One more known limit worth naming rather than
+//! Not implemented here (see this crate's lib doc for why): INT8, paged-KV
+//! decode. `model::Shardable` IS implemented (`crate::shard`) - see this
+//! file's own `shard`/`new_shard`/`new_impl_on` and [`shard_param_list`].
+//! One more known limit worth naming rather than
 //! discovering: the embedding and `lm_head` matmuls are **untiled**, so at the
 //! real 129280 x 1280 shape their weight binding is ~662 MB - fine on
 //! Vulkan/wgpu-native and on the CPU backend, over the GL backend's 128 MB
@@ -80,6 +82,7 @@ use model::moe::{
     RouterBwdIds, RouterKind, SharedExpertActs, SharedExpertBwdIds, SharedExpertBwdScratch, SharedExpertGrads, SharedExpertIds,
     SharedExpertScratch,
 };
+use model::Shard;
 use optim::Optim;
 use paramstore::{ParamStore, Role};
 
@@ -501,6 +504,13 @@ struct Decode {
 pub struct DeepseekV2 {
     pub gpu: Gpu,
     pub cfg: DeepseekV2Config,
+    /// Pipeline shard this instance owns (whole model, `embed && head`, by
+    /// default - see [`Shard::whole`]). Layer indices in `layers`/`res`/`dres`
+    /// stay ABSOLUTE (`res` is always allocated `0..=cfg.n_layers()` wide, see
+    /// `new_impl_on`'s own doc), only the forward/backward tape's own layer
+    /// loop and the embed/head epilogues are shard-relative. Mirrors
+    /// `qwen3::Qwen`'s and `qwen35moe::Qwen35`'s own `shard` field exactly.
+    pub shard: Shard,
     ps: ParamStore,
     /// `[layer] -> (gate, up, down)` expert-BANK names for every MoE layer
     /// (`None` for a dense layer), built ONCE here instead of `format!`ed by
@@ -636,6 +646,37 @@ pub struct Sizes {
     pub batched: bool,
 }
 
+/// The parameter subset a shard holds. A whole shard returns `cfg.param_list()`
+/// verbatim (so the single-device store is byte-identical to before sharding
+/// existed - the whole reason `Shard::whole` is a safe default). A partial
+/// shard keeps only its own layers' weights, plus `tok.weight` when it embeds
+/// (or carries a tied head), and `norm.weight`+the head weight when it is the
+/// head stage. Mirrors `qwen35moe::model::shard_param_list`/
+/// `qwen3::model::shard_param_list` exactly, adapted to this crate's
+/// `"blocks.{l}."`-prefixed naming (`DeepseekV2Config::param_list`'s doc).
+fn shard_param_list(cfg: &DeepseekV2Config, shard: &Shard) -> Vec<(String, usize)> {
+    let full = cfg.param_list();
+    if shard.is_whole(cfg.n_layers() as usize) {
+        return full;
+    }
+    let head = cfg.head_weight(); // "tok.weight" (tied) or "lm_head.weight"
+    let tied = head == "tok.weight";
+    full.into_iter()
+        .filter(|(name, _)| {
+            if let Some(rest) = name.strip_prefix("blocks.") {
+                let l: usize = rest.split('.').next().and_then(|s| s.parse().ok()).unwrap_or(usize::MAX);
+                return shard.owns(l);
+            }
+            match name.as_str() {
+                "tok.weight" => shard.embed || (shard.head && tied),
+                "norm.weight" => shard.head,
+                _ if name == head => shard.head, // untied lm_head
+                _ => false,
+            }
+        })
+        .collect()
+}
+
 impl DeepseekV2 {
     /// Trainable model on a fresh device.
     pub fn new(cfg: DeepseekV2Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> DeepseekV2 {
@@ -653,14 +694,38 @@ impl DeepseekV2 {
     /// `batched = true`: the batched tape IS the KV-cache capacity and the
     /// per-token `Decode` scratch is the only chunk width this constructor
     /// ever needs, which is exactly the training/parity shape every existing
-    /// caller uses. See [`Self::new_sized`] for a long-context inference build.
+    /// caller uses. Always the WHOLE model (`Shard::whole`) - see
+    /// [`Self::new_sized`] for a long-context inference build and
+    /// [`Self::new_shard`] for a partial pipeline stage.
     pub fn new_on(gpu: Gpu, cfg: DeepseekV2Config, b: u32, t: u32, src: &dyn checkpoint::TensorSource, train: bool) -> DeepseekV2 {
-        DeepseekV2::new_sized(gpu, cfg, Sizes { b, t, ctx: t, chunk: 1, batched: true }, src, train)
+        let shard = Shard::whole(cfg.n_layers() as usize);
+        DeepseekV2::new_impl_on(gpu, cfg, Sizes { b, t, ctx: t, chunk: 1, batched: true }, src, train, shard)
     }
 
     /// [`Self::new_on`] generalized to a context wider than the batched tape:
-    /// see [`Sizes`] for what each field controls.
+    /// see [`Sizes`] for what each field controls. Always the WHOLE model.
     pub fn new_sized(gpu: Gpu, cfg: DeepseekV2Config, sizes: Sizes, src: &dyn checkpoint::TensorSource, train: bool) -> DeepseekV2 {
+        let shard = Shard::whole(cfg.n_layers() as usize);
+        DeepseekV2::new_impl_on(gpu, cfg, sizes, src, train, shard)
+    }
+
+    /// Build ONE pipeline stage on a device of `shard.gpu_index`'s choosing
+    /// (`Shard::ANY_GPU` keeps the ambient `--device`/scoped selection - see
+    /// `Shard::whole`'s own doc). Always a trainable, `ctx = t, chunk = 1,
+    /// batched = true` build: `model::Pipeline` (this trait's only caller) is
+    /// a training executor, which needs the batched tape, not chunked decode.
+    /// Mirrors `qwen35moe::Qwen35::new_shard`/`qwen3::Qwen::new_shard` exactly
+    /// - see `crate::shard`'s [`model::Shardable`] impl.
+    pub fn new_shard(cfg: DeepseekV2Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, shard: Shard) -> DeepseekV2 {
+        let gpu = if shard.gpu_index == Shard::ANY_GPU {
+            Gpu::new(PIPELINES)
+        } else {
+            Gpu::new_on_index(shard.gpu_index as u32, PIPELINES).unwrap_or_else(|e| panic!("deepseekv2 shard placement: {e}"))
+        };
+        DeepseekV2::new_impl_on(gpu, cfg, Sizes { b, t, ctx: t, chunk: 1, batched: true }, init, true, shard)
+    }
+
+    fn new_impl_on(gpu: Gpu, cfg: DeepseekV2Config, sizes: Sizes, src: &dyn checkpoint::TensorSource, train: bool, shard: Shard) -> DeepseekV2 {
         let Sizes { b, t, ctx, chunk, batched } = sizes;
         assert!(
             !batched || ctx >= t,
@@ -704,8 +769,7 @@ impl DeepseekV2 {
         //    -- is Frozen.
         //  - full training (`train && cfg.lora.is_none()`): every weight
         //    Role::Trainable, unchanged from before this field existed.
-        let roles: Vec<_> = cfg
-            .param_list()
+        let roles: Vec<_> = shard_param_list(&cfg, &shard)
             .into_iter()
             .map(|(n, c)| {
                 let role = if !train {
@@ -830,6 +894,7 @@ impl DeepseekV2 {
 
         let mut m = DeepseekV2 {
             cfg,
+            shard,
             b,
             t,
             ctx,
@@ -1036,14 +1101,19 @@ impl DeepseekV2 {
         let shape = self.moe_shape(n);
         let mut s: Vec<Step> = Vec::new();
 
-        s.push(self.gpu.step(EMBED, &[&self.tokens, self.w("tok.weight"), &self.res[0]], &[d, n], n * d));
-        // Vision-language splice: overwrite the image-placeholder rows of the
-        // freshly-gathered residual stream with the projected image tokens.
-        if let Some((row0, n_rows)) = self.mm_splice.get() {
-            s.push(model::vlm::splice_fwd(&self.gpu, SPLICE, &self.img_embeds, &self.res[0], row0 * d, n_rows * d));
+        // Embedding gather + vision-language splice - embed stage only. A
+        // non-embed stage's `res[shard.start]` must already hold the previous
+        // stage's output before this tape runs (`Shardable::write_in_res`).
+        if self.shard.embed {
+            s.push(self.gpu.step(EMBED, &[&self.tokens, self.w("tok.weight"), &self.res[0]], &[d, n], n * d));
+            // Vision-language splice: overwrite the image-placeholder rows of the
+            // freshly-gathered residual stream with the projected image tokens.
+            if let Some((row0, n_rows)) = self.mm_splice.get() {
+                s.push(model::vlm::splice_fwd(&self.gpu, SPLICE, &self.img_embeds, &self.res[0], row0 * d, n_rows * d));
+            }
         }
 
-        for l in 0..c.n_layers() as usize {
+        for l in self.shard.start..self.shard.end {
             let lb = &self.layers[l];
             let p = |name: &str| format!("blocks.{l}.{name}");
 
@@ -1140,11 +1210,15 @@ impl DeepseekV2 {
             s.push(self.gpu.step(ADD2, &[&lb.xmid, &self.mlp_out, &self.res[l + 1]], &[n * d], n * d));
         }
 
-        // final norm + untied lm_head + masked CE
-        let last = c.n_layers() as usize;
-        self.norm_fwd(&mut s, &self.res[last], "norm.weight", &self.xn_final, d, n);
-        self.mm(&mut s, &self.xn_final, c.head_weight(), &self.logits, n, d, v);
-        s.push(self.gpu.step(CE_VALUE, &[&self.logits, &self.targets, &self.ce_buf], &[n, v, IGNORE], n));
+        // final norm + untied lm_head + masked CE - head stage only. A
+        // non-head stage's OUTPUT boundary is `res[shard.end]`, already
+        // written by the layer loop above (`Shardable::read_out_res`).
+        if self.shard.head {
+            let last = c.n_layers() as usize;
+            self.norm_fwd(&mut s, &self.res[last], "norm.weight", &self.xn_final, d, n);
+            self.mm(&mut s, &self.xn_final, c.head_weight(), &self.logits, n, d, v);
+            s.push(self.gpu.step(CE_VALUE, &[&self.logits, &self.targets, &self.ce_buf], &[n, v, IGNORE], n));
+        }
         s
     }
 
@@ -1167,13 +1241,18 @@ impl DeepseekV2 {
         let shape = self.moe_shape(n);
         let mut s: Vec<Step> = Vec::new();
 
-        // ---- head + final norm ----
-        s.push(self.gpu.step_buf(CE_GRAD, &self.ce_grad_uni, &[&self.logits, &self.targets, &self.d_logits], n * v));
-        self.mm_bwd(&mut s, &self.d_logits, &self.xn_final, head, &self.d_xn, n, d, v, 0);
-        let last = c.n_layers() as usize;
-        self.norm_bwd(&mut s, &self.res[last], "norm.weight", &self.d_xn, &self.dres[last], d, n);
+        // ---- head + final norm - head stage only. A non-head stage starts
+        // instead from the externally-supplied gradient at `dres[shard.end]`
+        // (`Shardable::write_out_dres`), which the layer loop below reads as
+        // `dres[l+1]` on its very first (highest-l) iteration. ----
+        if self.shard.head {
+            s.push(self.gpu.step_buf(CE_GRAD, &self.ce_grad_uni, &[&self.logits, &self.targets, &self.d_logits], n * v));
+            self.mm_bwd(&mut s, &self.d_logits, &self.xn_final, head, &self.d_xn, n, d, v, 0);
+            let last = c.n_layers() as usize;
+            self.norm_bwd(&mut s, &self.res[last], "norm.weight", &self.d_xn, &self.dres[last], d, n);
+        }
 
-        for l in (0..c.n_layers() as usize).rev() {
+        for l in (self.shard.start..self.shard.end).rev() {
             let lb = &self.layers[l];
             let p = |name: &str| format!("blocks.{l}.{name}");
 
@@ -1297,25 +1376,38 @@ impl DeepseekV2 {
             s.push(self.gpu.step(ADD2, &[&self.dxmid, &self.d_tmp, &self.dres[l]], &[n * d], n * d));
         }
 
-        // Vision-language splice backward: move the image rows' residual grad into
-        // `d_img_embeds` and ZERO them in dres[0] BEFORE emb_bwd, so the scatter
-        // below never trains the placeholder token's embedding row.
-        if let Some((row0, n_rows)) = self.mm_splice.get() {
-            s.push(model::vlm::splice_bwd(&self.gpu, SPLICE_BWD, &self.dres[0], &self.d_img_embeds, row0 * d, n_rows * d));
-        }
-
-        // embedding backward (untied head: only the embedding path writes tok.weight)
-        if self.trainable("tok.weight") {
-            s.push(self.gpu.step(EMB_BWD, &[&self.tokens, &self.dres[0], self.g("tok.weight")], &[n, d, v], v * d));
+        // Vision-language splice backward + embedding backward - embed stage
+        // only (both touch `res[0]`/`dres[0]`/`tok.weight`, which only exist
+        // on this stage's own boundary when it owns the embedding).
+        if self.shard.embed {
+            // Move the image rows' residual grad into `d_img_embeds` and ZERO
+            // them in dres[0] BEFORE emb_bwd, so the scatter below never
+            // trains the placeholder token's embedding row.
+            if let Some((row0, n_rows)) = self.mm_splice.get() {
+                s.push(model::vlm::splice_bwd(&self.gpu, SPLICE_BWD, &self.dres[0], &self.d_img_embeds, row0 * d, n_rows * d));
+            }
+            // untied head: only the embedding path writes tok.weight
+            if self.trainable("tok.weight") {
+                s.push(self.gpu.step(EMB_BWD, &[&self.tokens, &self.dres[0], self.g("tok.weight")], &[n, d, v], v * d));
+            }
         }
         s
     }
 
     // ---- run ----
 
-    pub fn forward(&self) -> f32 {
+    /// Submit the forward tape without reading a loss - the non-head stage's
+    /// half of `forward()`, and what `Shardable::run_forward_stage` calls on
+    /// any stage that doesn't own the CE/head epilogue (its `ce_buf` was never
+    /// written into by this stage's own tape, so reading it would return
+    /// stale or uninitialised data - see `crate::shard`).
+    pub fn forward_submit(&self) {
         assert!(self.batched, "DeepseekV2::forward on a batched=false (chunked-decode-only) instance");
         self.gpu.submit(&[], &self.fwd_steps);
+    }
+
+    pub fn forward(&self) -> f32 {
+        self.forward_submit();
         let n = (self.b * self.t) as usize;
         self.gpu.read(&self.ce_buf, n).iter().sum::<f32>() / self.count.get()
     }
@@ -1325,6 +1417,28 @@ impl DeepseekV2 {
         let n = self.b * self.t;
         self.gpu.write(&self.ce_grad_uni, &[n, self.cfg.vocab(), IGNORE, f(self.count.get())]);
         self.gpu.submit(&[], &self.bwd_steps);
+    }
+
+    // ---- pipeline-parallel cross-stage seam (see `crate::shard`) ----
+
+    fn res_numel(&self) -> usize {
+        (self.b * self.t) as usize * self.cfg.d_model() as usize
+    }
+    /// Read this stage's OUTPUT residual `res[shard.end]` (input to the next stage).
+    pub fn read_out_res(&self) -> Vec<f32> {
+        self.gpu.read(&self.res[self.shard.end], self.res_numel())
+    }
+    /// Write this stage's INPUT residual `res[shard.start]` (from the previous stage).
+    pub fn write_in_res(&self, data: &[f32]) {
+        self.gpu.write(&self.res[self.shard.start], bytemuck::cast_slice(data));
+    }
+    /// Read this stage's INPUT-side residual grad `dres[shard.start]` (to the previous stage).
+    pub fn read_in_dres(&self) -> Vec<f32> {
+        self.gpu.read(&self.dres[self.shard.start], self.res_numel())
+    }
+    /// Write this stage's OUTPUT-side residual grad `dres[shard.end]` (from the next stage).
+    pub fn write_out_dres(&self, data: &[f32]) {
+        self.gpu.write(&self.dres[self.shard.end], bytemuck::cast_slice(data));
     }
 
     pub fn zero_grads(&self) {

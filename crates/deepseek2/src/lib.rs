@@ -61,22 +61,24 @@
 //! check + `O(T²)`-recompute greedy decode
 //! ([`model::DeepseekV2::generate_greedy`]) + **LoRA** fine-tuning
 //! ([`config::DeepseekV2Config::lora`], frozen base + trainable low-rank
-//! adapters on the four attention projections - see `model`'s own doc).
-//! Deliberately **out of scope** for this phase, and listed here rather than
-//! half-built: INT8 quantization, cross-GPU tensor/expert sharding, and
-//! paged-KV incremental serving - so of the two decode tiers the sibling
-//! decoders keep (`sample::generate` recompute, `sample::generate_kv`
-//! cached), only the recompute one exists here. `crates/qwen35moe` - the
-//! crate this one's decoder shape (and now its LoRA shape) is modelled on -
-//! has all four; this crate copies its *decoder*, not its production
-//! surface, and each of those is additive on top of the parameter layout
-//! below rather than a change to it.
+//! adapters on the four attention projections - see `model`'s own doc) +
+//! **cross-GPU pipeline sharding** ([`model::Shardable`] for `DeepseekV2`,
+//! see [`shard`]). Deliberately **out of scope** for this phase, and listed
+//! here rather than half-built: INT8 quantization and paged-KV incremental
+//! serving - so of the two decode tiers the sibling decoders keep
+//! (`sample::generate` recompute, `sample::generate_kv` cached), only the
+//! recompute one exists here. `crates/qwen35moe` - the crate this one's
+//! decoder shape (and now its LoRA and sharding shape) is modelled on - has
+//! all four; this crate copies its *decoder*, not its production surface,
+//! and each of those is additive on top of the parameter layout below rather
+//! than a change to it.
 
 pub mod config;
 pub mod import;
 pub mod init;
 pub mod lora;
 pub mod model;
+pub mod shard;
 
 pub use config::DeepseekV2Config;
 pub use init::init_weights;

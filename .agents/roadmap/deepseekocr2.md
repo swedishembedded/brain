@@ -480,4 +480,45 @@ after confirming one transient `WgpuBackend::new_on` adapter-creation
 timeout was box-load flakiness, not a regression - reproduced clean on
 both HEAD and this branch depending on concurrent load) both green.
 
-Remaining milestones (M8-M12) not started.
+M8 (`Shardable` for the shared decoder) done: `crates/deepseek2` (the decoder
+both this crate and v1 wrap unmodified) now implements `model::Shardable` -
+`crates/deepseek2/src/shard.rs`, a `shard: Shard` field threaded through
+`DeepseekV2`, a `shard_param_list` filter mirroring `qwen35moe`'s exactly,
+and the embed/head/layer-range gating in `build_forward`/`build_backward`
+(`crates/deepseek2/src/model.rs`). `Shard::whole` (every existing caller's
+default) is bit-for-bit the old unconditional code path by construction, not
+merely by intent - proven by the WHOLE existing test suite (gradcheck,
+generate/KV-parity, `deepseek2ocr`'s own 37 tests) passing unchanged with
+zero tolerance adjustment.
+
+**Verified for real on this hardware**: the single-device path (every
+existing test, unchanged). **Structurally implemented, gated to skip
+without a second GPU, NOT verified on this box**: the 2-device bit-identity
+test, `crates/deepseek2/tests/shard_parity.rs` (mirrors
+`gpt2`/`qwen35moe`'s own `shard_parity.rs` exactly - `model::Pipeline`
+auto-placement, loss + per-tensor gradient comparison at `rel<1e-3`). This
+box's one GPU is an integrated Intel Arc part; `gpu_core::discrete_gpu_count()`
+correctly reports 0, so the test's own `gpu_disabled()` check skips it via
+`brain_testutil::skip_unavailable` rather than faking a pass - confirmed by
+running with `--nocapture` and reading the printed skip reason, not assumed
+from the test merely returning `ok`.
+
+**Allow-list resolution** (`scripts/gates/check-multi-gpu-sharding.sh`):
+removed the `deepseek2` row (now genuinely shards) rather than the
+`deepseek2ocr`/`deepseekocr2` rows - the gate is a per-CRATE textual-presence
+check, and while the shared decoder now shards, `crates/deepseek2ocr` and
+`crates/deepseekocr2` are still their own crates whose OWN source (the SAM
+tower, the splice glue) never mentions `model::shard`/`Shardable` - their
+vision towers are the real remaining gap. Reworded both rows to say so
+precisely rather than leaving the old "not yet migrated; backlog" text,
+which is no longer accurate about the decoder half.
+
+Gates: `check/spdx`, `check-no-machine-paths.sh`, `check-workspace-members.sh`,
+`check-scripts.sh`, `check-multi-gpu-sharding.sh` (0 stale rows, 0 missing
+crates) all pass. `cargo clippy -p brain-deepseek2 --all-targets
+--all-features -- -D warnings` clean. `cargo test -p brain-deepseek2 --lib
+--tests` (all suites, including the new `shard_parity`), `cargo test -p
+brain-deepseekocr2 --lib`, `cargo test -p brain-deepseek2ocr --lib` (37
+passed), and the full workspace `cargo test -p brain-gradcheck` all green.
+
+Remaining milestones (M9-M12) not started.
