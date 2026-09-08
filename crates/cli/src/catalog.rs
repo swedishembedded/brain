@@ -102,6 +102,12 @@ fn resident_ctor_for(model_id: &str) -> Option<ResidentCtor> {
         // `crate::resident_deepseekocr`'s header.
         return catalog::resident_multi!(crate::resident_deepseekocr::DeepseekOcrResident::from_assembly);
     }
+    if model_id == deepseekocr2::caps::MODEL {
+        // Single-device (CPU) for now, unlike v1 - see
+        // `crate::resident_deepseekocr2`'s header for why the wgpu split v1
+        // eventually earned is not claimed here yet.
+        return catalog::resident!(crate::resident_deepseekocr2::DeepseekOcr2Resident::from_env);
+    }
     if model_id == moondream3::caps::MODEL {
         return None; // registered directly in build_executor with a resolved Assembly, see resident.rs
     }
@@ -460,6 +466,7 @@ mod tests {
             flux1::caps::MODEL,
             pulid::caps::MODEL,
             deepseek2ocr::caps::MODEL,
+            deepseekocr2::caps::MODEL,
             qwen3vl::caps::MODEL,
             qwen3tts::caps::MODEL,
             minimaxmusic3::caps::MODEL,

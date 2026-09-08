@@ -37,6 +37,7 @@ named on the model's own page (see
 | [`llava`](llava.md) | image captioning (also [SUPIR](supir.md)'s optional auto-caption input) | [x] (untested against real weights - see the model's own page) |
 | [`qwen3vl`](qwen3vl.md) ⤓ | image + text → text | [x] |
 | [`deepseek2ocr`](deepseek2ocr.md) ⤓ | document image → text/markdown (OCR, tables, grounding) | [x] |
+| [`deepseekocr2`](deepseekocr2.md) | document image → text/markdown, global view only (no auto-fetch - no vendor GGUF exists yet) | [x] |
 | [`qwen3omnimoe`](qwen3omnimoe/readme.md) | text/audio/image/video → text, plus spoken output | [x] |
 | [`moondream3`](moondream3.md) | image + instruction → text (captioning) | [x] |
 

@@ -42,6 +42,7 @@ brain-supir.workspace = true
 brain-flux1.workspace = true
 brain-pulid.workspace = true
 brain-deepseek2ocr.workspace = true
+brain-deepseekocr2.workspace = true
 brain-moondream3.workspace = true
 brain-imgpipe.workspace = true
 brain-qwen3tts.workspace = true

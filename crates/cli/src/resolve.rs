@@ -114,6 +114,7 @@ const ARCH_TO_MODEL: &[(&str, &str)] = &[
     ("rrdbnet", "brain/rrdbnet"),
     ("clip", "brain/clip"),
     ("deepseek2ocr", "deepseek-ai/DeepSeek-OCR"),
+    ("deepseekocr2", "deepseek-ai/DeepSeek-OCR-2"),
     ("nemotronasr", "brain/nemotronasr"),
     ("qwen3asr", "brain/qwen3asr"),
     ("chronos2", "brain/chronos2"),

@@ -77,3 +77,8 @@ pub fn build_prompt(tok: &QwenBpe, before: &str, after: &str, n_rows: u32) -> Re
 /// against the real checkpoint's own vocabulary - a hand-built stand-in
 /// tokenizer here would only duplicate that with a fixture of its own.
 pub const BOS: &str = "<｜begin▁of▁sentence｜>";
+
+/// The reserved EOS marker's own text. Same tokenizer, same vocabulary as
+/// v1's (M0's ledger), so this is the identical reserved string, not an
+/// independently-derived one.
+pub const EOS: &str = "<｜end▁of▁sentence｜>";

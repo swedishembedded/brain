@@ -41,7 +41,10 @@ fn static_manifests() -> Vec<serde_json::Value> {
 /// placeholder to abstract over a choice that does not exist. That crate's
 /// own tests assert the same id for the same reason, so this is a named,
 /// intentional carve-out here, not a hole in the invariant.
-const DELIBERATE_NON_RESERVED_ID: &str = "deepseek-ai/DeepSeek-OCR";
+///
+/// `deepseek-ai/DeepSeek-OCR-2` is the same carve-out for the same reason,
+/// on v1's successor (`crates/deepseekocr2`).
+const DELIBERATE_NON_RESERVED_IDS: &[&str] = &["deepseek-ai/DeepSeek-OCR", "deepseek-ai/DeepSeek-OCR-2"];
 
 #[test]
 fn every_static_model_id_is_a_valid_ref_under_a_reserved_vendor() {
@@ -49,7 +52,7 @@ fn every_static_model_id_is_a_valid_ref_under_a_reserved_vendor() {
     assert!(!manifests.is_empty(), "brain caps --json returned no models");
     for m in &manifests {
         let id = m.get("model").and_then(|v| v.as_str()).unwrap_or_else(|| panic!("manifest missing a \"model\" field: {m}"));
-        if id == DELIBERATE_NON_RESERVED_ID {
+        if DELIBERATE_NON_RESERVED_IDS.contains(&id) {
             continue;
         }
         let r = ModelRef::parse(id).unwrap_or_else(|e| panic!("{id:?} is not a valid ModelRef: {e}"));

@@ -347,6 +347,7 @@ including those.
 | [`brain/fastvlm`](docs/models/fastvlm.md) | Multimodal | dedicated fast image captioning |
 | [`brain/llava`](docs/models/llava.md) | Multimodal | image captioning (also [SUPIR](docs/models/supir.md)'s optional auto-caption input) |
 | [`deepseek-ai/DeepSeek-OCR`](docs/models/deepseek2ocr.md) | Multimodal | document image -> text/markdown |
+| [`deepseek-ai/DeepSeek-OCR-2`](docs/models/deepseekocr2.md) | Multimodal | document image -> text/markdown (global view only) |
 | [`brain/nemotronasr`](docs/models/nemotronasr.md) | Audio | streaming speech-to-text (FastConformer + RNN-T) |
 | [`brain/qwen3asr`](docs/models/qwen3asr.md) | Audio | offline speech-to-text |
 | [`brain/qwen3tts`](docs/models/qwen3tts.md) | Audio | voice cloning / text-to-speech (Talker + MTP + codec) |

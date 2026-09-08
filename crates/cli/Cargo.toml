@@ -150,6 +150,8 @@ brain-pulid.workspace = true
 # DeepSeek-OCR: `deepseek2ocr::caps` (the manifest + the served `generate`) and
 # `deepseek2ocr::import` (the checkpoint layout `resident_deepseekocr` locates).
 brain-deepseek2ocr.workspace = true
+# DeepSeek-OCR-2: `deepseekocr2::caps` and `deepseekocr2::import`, same shape.
+brain-deepseekocr2.workspace = true
 brain-imgpipe.workspace = true
 # `brain fetch`: a blocking, streaming HTTP client (rustls, no system OpenSSL)
 # is enough for a one-shot CLI download; no need to pull tokio in for this.

@@ -45,6 +45,7 @@ models/fastvlm.md
 models/moondream3.md
 models/llava.md
 models/deepseek2ocr.md
+models/deepseekocr2.md
 models/asr.md
 models/qwen3asr.md
 models/nemotronasr.md

@@ -52,6 +52,7 @@ mod resolver_cli;
 mod resident_asr;
 mod resident_cosyvoice;
 mod resident_deepseekocr;
+mod resident_deepseekocr2;
 mod resident_moondream3;
 mod resident_qwen3vl;
 mod resident_depth;

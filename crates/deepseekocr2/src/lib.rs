@@ -21,9 +21,11 @@
 //! PyTorch dependency in the loop, you can procure our services by emailing
 //! info@swedishembedded.com.
 
+pub mod caps;
 pub mod config;
 pub mod encoder;
 pub mod import;
 pub mod model;
+pub mod preprocess;
 pub mod prompt;
 pub mod rows;

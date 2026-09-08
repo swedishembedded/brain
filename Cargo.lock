@@ -570,6 +570,7 @@ dependencies = [
  "brain-controlnet",
  "brain-cosyvoice",
  "brain-deepseek2ocr",
+ "brain-deepseekocr2",
  "brain-fastvlm",
  "brain-flux1",
  "brain-flux2",
@@ -661,6 +662,7 @@ dependencies = [
  "brain-data",
  "brain-dbus",
  "brain-deepseek2ocr",
+ "brain-deepseekocr2",
  "brain-diamond",
  "brain-ecapatdnn",
  "brain-eval",
@@ -898,16 +900,20 @@ dependencies = [
 name = "brain-deepseekocr2"
 version = "1.1.0"
 dependencies = [
+ "brain-capability",
  "brain-checkpoint",
  "brain-data",
  "brain-deepseek2",
  "brain-gguf",
  "brain-gpu-core",
+ "brain-imaging",
  "brain-kernels",
  "brain-model",
  "brain-paramstore",
+ "brain-qwen3",
  "brain-sam1",
  "brain-testutil",
+ "serde_json",
 ]
 
 [[package]]

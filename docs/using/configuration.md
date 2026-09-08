@@ -99,6 +99,7 @@ served, with no error.
 | `BRAIN_FLUX1_DIR` + `BRAIN_PULID_DIR` + `BRAIN_ARCFACE_DIR` + `BRAIN_CLIP_DIR` | PuLID identity-conditioned FLUX.1 text2image (all four required) | the FLUX.1 root plus the PuLID weights dir, and the face/CLIP dirs above |
 | _(none)_ | Qwen3.8-27B dense hybrid decoder, FastVLM vision-language, Moondream 3 vision-language, DeepSeek-OCR document image → text/markdown - all resolved automatically from the models directory (`qwen35`/`fastvlm`/`moondream3`/`deepseek2ocr::spec`); `--weights`/`weights` (and `--tokenizer` for qwen35) still name a checkpoint outright per call | n/a |
 | `BRAIN_QWEN3VL_WEIGHTS` | Qwen-VL vision-language's residency adapter (`brain serve`; direct `brain caps`/`brain do` use is resolved automatically like the row above, not yet migrated for serving) | checkpoint directory |
+| `BRAIN_DEEPSEEKOCR2_DIR` | DeepSeek-OCR-2 document image → text/markdown (CPU-resident, ~16 GiB, global view only) - not yet migrated onto the model-store resolver, unlike v1 above | dir holding `mmproj-deepseek-ocr-2-q8_0.gguf` + `deepseek-ocr-2-q8_0.gguf` |
 | `BRAIN_CHRONOS2` | Chronos-2 forecasting | weights |
 | `BRAIN_FINCAST` | FinCast forecasting | weights |
 | `BRAIN_TIMESFM3` | TimesFM-3 forecasting (natively multivariate; target-only over this served path). `brain pull google/timesfm-3.0-pytorch` fetches the checkpoint, but no caller sets this variable for you yet - point it at the fetched directory (or an imported `.safetensors`) yourself | weights |

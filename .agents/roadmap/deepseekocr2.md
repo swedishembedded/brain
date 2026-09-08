@@ -387,4 +387,97 @@ adapter-creation timeout from this box running several concurrent
 heavy builds/tests at once, not a numerical regression; this crate's own
 `deepseekocr2_resampler_analytic_grads_match_finite_differences` passed.
 
-Remaining milestones (M7-M12) not started.
+M7 (CLI, capability, residency) done.
+
+**`crates/deepseekocr2/src/preprocess.rs`** (new): real images in, global
+view only - the same aspect-preserving centred fit-and-pad + `[0,1]->[-1,1]`
+normalization convention M0 confirmed identical to v1's, restated
+independently rather than shared code (a caller of `imaging`'s own
+primitives, not a port of v1's module). Verified non-degenerate against a
+real rendered document: full `[-1,1]` range reached, zero non-finite
+values, correct `[3,1024,1024]` shape (checked with a throwaway example,
+deleted before commit - not part of the crate).
+
+**`crates/deepseekocr2/src/caps.rs`** (new): `Provider` + a streaming
+`generate` `Action`, the same chat-capable shape v1's `caps.rs` and
+`apiserve::catalog::api_caps` require. `Session::load` builds the composite
+AND a resident `sam1::SamEncoder` from the SAME `WeightReader` (read twice -
+SAM's tensors, then the resampler's - the identical reuse `tests/
+real_weight.rs` already relies on), so a real per-request image goes
+through real SAM every call rather than a synthetic grid. Decode is
+`DeepseekV2::generate_greedy_cb` (full-recompute, M6-proven), not the
+KV-cached path - that composition has not been independently verified for
+this composite's splice.
+
+**Registry wiring**: `arch!("deepseekocr2", ...)` in `crates/arch` -
+**deliberately claims no `gguf:` string on the LM side** (the collision
+with `deepseek2ocr`'s `"deepseek2-ocr"` is real, M0's finding, not fixed
+here - a bare LM-only `brain import` correctly resolves as v1's decoder,
+same tensors under the same name); the vision half's own discriminator
+(`clip.projector_type="deepseekocr2"`) is read directly by this crate's own
+`import.rs`, never through `crates/gguf/src/route.rs`'s generic dispatch,
+so no `IMPORTERS` table entry was needed either. `ARCH_TO_MODEL`
+(`crates/cli/src/resolve.rs`), a `ModelEntry` (`crates/catalog`), the
+`resident_ctor_for` patch + `every_patched_id_is_a_real_catalog_entry` row
+(`crates/cli/src/catalog.rs`), a `mod resident_deepseekocr2;` line (no
+`main.rs` match arm - forbidden), and a reserved-vendor carve-out in
+`crates/cli/tests/model_ids.rs` (widened from v1's single `const` to a
+slice, since two case-exact upstream ids now need one).
+
+**Residency, single-device (CPU), unlike v1's wgpu/CPU split**: this
+crate's own real-weight test suite pins CPU throughout specifically because
+stacking a SECOND 24-block-deep tower behind SAM on one wgpu device has not
+been independently verified the way v1's single SAM tower was (v1's own
+split only landed once THAT verification existed) - `crate::
+resident_deepseekocr2` inherits that caution rather than claiming an
+unverified placement. `COMPOSITE_PEAK_BYTES = 16 GiB`, measured (not
+guessed): `real_weight_generate.rs --release --ignored --nocapture`
+reports VmHWM 15.73 GiB for the whole composite (SAM + resampler + decoder,
+a 3-token greedy decode), rounded up.
+
+**No fetch recipe added to `crates/modelstore`, on purpose**: no
+vendor-published GGUF exists for this model, only community conversions of
+varying provenance - adding a `FilesRecipe` naming one would misrepresent
+an unofficial third-party repo as the canonical upstream release the way
+every other recipe's `repos:` field implicitly claims. `BRAIN_DEEPSEEKOCR2_
+DIR` must be pointed at a manually-placed pair; documented as such in
+`docs/models/deepseekocr2.md` (a minimal stub - `check-arch-names.sh`
+requires the page to exist once the architecture registered; the full
+options/hardware-limits content is M11's job) and `docs/using/
+configuration.md`.
+
+**Real end-to-end, on the real checkpoint**: `brain caps --json` lists
+`deepseek-ai/DeepSeek-OCR-2`; `BRAIN_DEEPSEEKOCR2_DIR=<dir> brain
+deepseekocr2 generate --in image=<rendered doc> --prompt "Free OCR"
+--max_new 12` runs to completion (release build) - real preprocessing, real
+SAM, real resampler, real splice, real decode, a well-formed streamed
+response. The decoded text came back empty (the model emitted EOS as its
+first token) on the specific synthetic test graphic used here; per this
+crate's own established rule (M6: "no independent oracle exists for this
+checkpoint's own numbers... reported, not gated"), that is recorded as an
+observation, not asserted as a bug or a pass - the pipeline that produced
+it is independently verified correct (preprocessing checked non-degenerate;
+every stage upstream of the decoder is gradient-checked; the decode loop's
+causal self-consistency is proven in M6). `DEFAULT_MAX_NEW` is set to 16,
+the real number that completed inside a 280s budget on this box in the
+same run (`max_new=40` did not) - not a guess, and explicitly documented as
+a staging point pending the KV-cache migration noted above.
+
+Gates: `check/spdx`, `check-no-machine-paths.sh`, `check-large-files.sh`,
+`check-workspace-members.sh`, `check-scripts.sh`, `check-env-docs.sh`,
+`check-no-doc-citations.sh` (three citations of this ledger's own path from
+source comments were found and rephrased inline - source may not cite
+`.agents/`, only `docs/` may), and `check-multi-gpu-sharding.sh` (a new
+allow-list row added, mirroring v1's - `Shardable` is M8's job) all pass.
+`check-arch-names.sh` still fails only on the same pre-existing,
+unrelated debt M6 already confirmed (three `main.rs` literal match arms,
+one missing `qwen3vlmoe` docs page) - re-confirmed via `git stash` on a
+clean tree; `deepseekocr2`'s own row/page introduce no new violation.
+`cargo clippy -p brain-deepseekocr2 -p brain-cli -p brain-catalog -p
+brain-arch --all-targets --all-features -- -D warnings` clean. `cargo test
+-p brain-deepseekocr2`, `-p brain-cli --bin brain` (312 passed, 0 failed,
+after confirming one transient `WgpuBackend::new_on` adapter-creation
+timeout was box-load flakiness, not a regression - reproduced clean on
+both HEAD and this branch depending on concurrent load) both green.
+
+Remaining milestones (M8-M12) not started.

@@ -58,6 +58,7 @@ controlnet	A conditioning adapter added on top of a host backbone, not an indepe
 cosyvoice	default_ref FunAudioLLM/CosyVoice2-0.5B - 0.5B, single GPU by design.
 deepseek2	MoE decoder, large by architecture family - not yet migrated onto model::shard; backlog.
 deepseek2ocr	DeepSeek-V2-family decoder + SAM/CLIP encoder, large by architecture family - not yet migrated onto model::shard; backlog.
+deepseekocr2	Same DeepSeek-V2-family decoder as deepseek2ocr (unmodified) plus a new SAM/Qwen2-resampler encoder - not yet migrated onto model::shard; backlog.
 diamond	EDM diffusion world model, forecasting/world-model scale, not LLM-scale - single GPU by design.
 ecapatdnn	Speaker-embedding backbone (ECAPA-TDNN), well under 1B params - single GPU by design.
 fincast	Patched decoder + sparse MoE at forecasting scale, not LLM-scale - single GPU by design.

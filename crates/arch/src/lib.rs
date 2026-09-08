@@ -372,6 +372,21 @@ pub const ARCHS: &[Arch] = &[
     // `crates/cli/src/catalog.rs`'s `resolved_assembly_for`.
     arch!("deepseek2ocr", "DeepSeek-OCR (SAM+CLIP DeepEncoder + DeepSeek-V2 decoder)", Multimodal, LlamaCpp, "brain-deepseek2ocr", gguf: Some("deepseek2-ocr"), hf: &["DeepseekOCRForCausalLM"], default_ref: Some("ggml-org/DeepSeek-OCR-GGUF"),
         variants: &[Variant { reference: "ggml-org/DeepSeek-OCR-GGUF", params: 3_336_106_240, quants: &["Q8_0"] }]),
+    // `gguf: None`, deliberately - the LM half's `general.architecture` is
+    // the SAME string as `deepseek2ocr`'s (`"deepseek2-ocr"`), because it IS
+    // the same unmodified decoder (M0's ledger). `by_gguf` maps one string to
+    // one id, and `deepseek2ocr` already claims it, so this row makes no
+    // claim on the LM side - a bare `brain import` of this checkpoint's LM
+    // file alone correctly resolves as v1's decoder (same tensors, same
+    // names). The vision half's own discriminator, `clip.projector_type =
+    // "deepseekocr2"`, is unambiguous and is read directly by
+    // `crates/deepseekocr2/src/import.rs`, never through this registry's
+    // generic single-file dispatch. No `default_ref`: no vendor-published
+    // GGUF exists for this model as of this writing, only community
+    // conversions of varying provenance - auto-fetch is deliberately not
+    // wired to one of them, since that would misrepresent an unofficial
+    // conversion as the canonical upstream release.
+    arch!("deepseekocr2", "DeepSeek-OCR-2 (SAM + Qwen2 GQA resampler DeepEncoder V2 + DeepSeek-V2 decoder)", Multimodal, LlamaCpp, "brain-deepseekocr2", weights_env: &[("BRAIN_DEEPSEEKOCR2_DIR", "dir")]),
     // No `weights_env`: qwen3asr resolves its single `weights` role through
     // `brain_modelstore::resolve` (`crates/qwen3asr/src/spec.rs`), not
     // `BRAIN_QWEN3ASR`.

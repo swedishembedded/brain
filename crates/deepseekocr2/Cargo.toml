@@ -10,15 +10,19 @@ name = "deepseekocr2"
 path = "src/lib.rs"
 
 [dependencies]
+brain-capability.workspace = true
 brain-checkpoint.workspace = true
 brain-data.workspace = true
 brain-deepseek2.workspace = true
 brain-gguf.workspace = true
 brain-gpu-core.workspace = true
+brain-imaging.workspace = true
 brain-kernels.workspace = true
 brain-model.workspace = true
 brain-paramstore.workspace = true
+brain-qwen3.workspace = true
 brain-sam1.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 brain-testutil.workspace = true

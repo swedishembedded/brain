@@ -539,6 +539,20 @@ pub fn models() -> Vec<ModelEntry> {
             },
             resident: None,
         },
+        // DeepSeek-OCR-2: v1's successor. Same decoder (`crates/deepseek2`,
+        // unmodified), a new vision tower - SAM feeding a Qwen2 GQA resampler
+        // under a prefix-LM mask, global view only for now (see
+        // `deepseekocr2::caps`'s own header for the scope this milestone
+        // shipped). Single-device (CPU) today, unlike v1's wgpu/CPU split -
+        // see `crate::resident_deepseekocr2`'s header for why.
+        ModelEntry {
+            manifest: deepseekocr2::caps::manifest,
+            provider: from_env!(
+                deepseekocr2::caps::DeepseekOcr2Provider::from_env,
+                "set BRAIN_DEEPSEEKOCR2_DIR to a directory holding mmproj-deepseek-ocr-2-q8_0.gguf + deepseek-ocr-2-q8_0.gguf"
+            ),
+            resident: None,
+        },
         // Moondream 3: an image in, text out. SigLIP ViT with overlap multi-crop
         // -> connector -> a parallel-block sparse-MoE decoder. int8 experts by
         // default, because the fp32 build is ~43 GiB and loads nowhere - see
