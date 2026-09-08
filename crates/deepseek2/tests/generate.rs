@@ -53,6 +53,11 @@
 //! [`deepseek2::model::DeepseekV2::generate_greedy_kv`] over the SAME prompt
 //! and demands the SAME ids - the real-weight half of the KV-cache decode gate
 //! (the fast-lane half is `src/model.rs`'s `generate_greedy_kv_matches_recompute`).
+//!
+//! The gate runs on BOTH backends - the CPU Cranelift JIT and a real
+//! wgpu/Vulkan card - against this one reference, because the two do not share
+//! an implementation of the kernels this loop dispatches. See
+//! `tests/parity.rs`'s Backend section.
 
 /// The model-store lookup, the one-off fp32 expansion, the CPU-backend pin and
 /// the inference build - shared with `tests/parity.rs`.
@@ -68,10 +73,28 @@ const PROMPT: usize = 2;
 #[ignore = "real 2.9 B-parameter checkpoint: ~12 GB resident and a one-off ~12 GB fp32 expansion on disk. Two of these in parallel would exhaust any machine that can run one, so it stays out of the fast lane. `make test/slow`, or `cargo test --release -p brain-deepseekv2 --test generate -- --nocapture --test-threads=1`."]
 #[test]
 fn real_lm_greedy_decode_matches_llamacpp() {
+    check_against_llamacpp(real_lm::cpu(), "cpu");
+}
+
+/// The same composed-loop gate with the decoder built on a real wgpu/Vulkan
+/// card. The loop under test - RoPE's advancing position argument, the causal
+/// mask as the sequence grows, the KV append, and the MoE router's per-step
+/// selection - is dispatched by a different set of kernel implementations on
+/// each backend (see `tests/parity.rs`'s own Backend note), so agreeing with
+/// llama.cpp on one proves nothing about the other. This decoder is served on
+/// both, so both are gated.
+#[ignore = "real 2.9 B-parameter checkpoint on a real card: ~12 GB of VRAM. Slow lane only. `make test/slow`, or `cargo test --release -p brain-deepseekv2 --test generate -- --nocapture --test-threads=1 --ignored`."]
+#[test]
+fn real_lm_greedy_decode_matches_llamacpp_on_wgpu() {
+    let Some(gpu) = real_lm::wgpu() else { return };
+    check_against_llamacpp(gpu, "wgpu");
+}
+
+fn check_against_llamacpp(gpu: gpu_core::Gpu, backend: &str) {
     let n_new = (REFERENCE.len() - PROMPT) as u32;
-    println!("== deepseekv2 composed-loop parity ({PROMPT}-token prompt + {n_new} greedy steps)");
+    println!("== deepseekv2 composed-loop parity, {backend} ({PROMPT}-token prompt + {n_new} greedy steps)");
     brain_testutil::mem("start");
-    let Some(m) = real_lm::open(REFERENCE.len() as u32) else { return };
+    let Some(m) = real_lm::open_on(REFERENCE.len() as u32, gpu) else { return };
     brain_testutil::mem("decoder built (inference)");
 
     let got = m.generate_greedy(&REFERENCE[..PROMPT], n_new);

@@ -61,14 +61,20 @@
 //!
 //! ## Backend
 //!
-//! Pinned to `backend-cpu`, for two reasons and both recorded rather than
-//! assumed. (1) `crates/sam1/tests/parity.rs` documents a device-level buffer
-//! corruption on the wgpu path that appears once a graph holds more than a
-//! couple of blocks' worth of large buffers at production shape - this decoder
-//! is ~12 GB of fp32 parameters, far past that. (2) The card here is an
-//! integrated GPU whose reported `max_buffer_size` is 2047 MiB against a
-//! ~12 GB working set. A GPU number would not be trustworthy, and a parity test
-//! that cannot be trusted is worse than one that is honest about where it ran.
+//! **Both**, as two tests over one shared body: `real_lm_decoder_matches_
+//! llamacpp` builds the decoder on the CPU Cranelift JIT and
+//! `real_lm_decoder_matches_llamacpp_on_wgpu` on a real discrete card, each
+//! compared against the same llama.cpp dump at the same [`FLOOR`].
+//!
+//! Two backends is not redundancy here. This decode path's dominant kernels -
+//! `moe_linear_gated`, `silu_mul`, `scale_add`, `concat_split`, the `matmul`
+//! family - are hand-written Rust siblings on `backend-cpu`, selected by
+//! kernel NAME in its dispatch ladder and validated against scalar references
+//! that live beside them; wgpu runs the WGSL. They are two implementations of
+//! the same contract, and a gate on one says nothing about the other. The
+//! decoder's largest single tensor (`tok.weight`, 129280x1280 fp32 = 662 MB)
+//! fits a 2047 MiB storage binding, and its ~12 GB working set fits a 24 GB
+//! card, so the GPU run is a real one rather than a partial.
 //!
 //! Fixture: `<testdata>/deepseek-ocr/real/decoder.safetensors`, produced by
 //! `tools/goldens/deepseek_ocr_convert_llamacpp_dump.py` (its header documents
@@ -97,7 +103,7 @@ fn tail<'a>(got: &'a [f32], want: &StTensor, width: usize) -> &'a [f32] {
     &got[got.len() - want.data.len()..]
 }
 
-fn build() -> Option<(DeepseekV2, std::collections::HashMap<String, StTensor>)> {
+fn build_on(gpu: gpu_core::Gpu) -> Option<(DeepseekV2, std::collections::HashMap<String, StTensor>)> {
     let fixture = testdata("deepseek-ocr/real/decoder.safetensors");
     if !fixture.exists() {
         brain_testutil::skip(&format!("deepseekv2 parity: fixture missing at {}", fixture.display()));
@@ -105,18 +111,20 @@ fn build() -> Option<(DeepseekV2, std::collections::HashMap<String, StTensor>)> 
     }
     let golden = load(&fixture);
     let tokens: Vec<u32> = golden["tokens"].data.iter().map(|v| *v as u32).collect();
-    let m = real_lm::open(tokens.len() as u32)?;
+    let m = real_lm::open_on(tokens.len() as u32, gpu)?;
     m.logits_all(&tokens);
     Some((m, golden))
 }
 
-#[ignore = "real 2.9 B-parameter checkpoint: ~12 GB resident and a one-off ~12 GB fp32 expansion on disk. Two of these in parallel would exhaust any machine that can run one, so it stays out of the fast lane. `make test/slow`, or `cargo test --release -p brain-deepseekv2 --test parity -- --nocapture --test-threads=1`."]
-#[test]
-fn real_lm_decoder_matches_llamacpp() {
-    let Some((m, golden)) = build() else { return };
+fn build() -> Option<(DeepseekV2, std::collections::HashMap<String, StTensor>)> {
+    build_on(real_lm::cpu())
+}
+
+/// The whole per-stage comparison, for whichever backend built `m`.
+fn check_stages(m: &DeepseekV2, golden: &std::collections::HashMap<String, StTensor>, backend: &str) {
     let d = m.cfg.d_model() as usize;
     let vocab = m.cfg.vocab() as usize;
-    println!("== deepseekv2 real-weight parity");
+    println!("== deepseekv2 real-weight parity ({backend})");
 
     let mut r = Report::wide(FLOOR, 18);
     r.check("embd", tail(&m.read_res(0), &golden["embd"], d), &golden["embd"].data);
@@ -138,7 +146,32 @@ fn real_lm_decoder_matches_llamacpp() {
     let am = |v: &[f32]| v.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).expect("nonempty").0;
     println!("  greedy next token: brain {} vs reference {}", am(ours), am(&golden["result_output"].data));
     assert_eq!(am(ours), am(&golden["result_output"].data), "greedy next token disagrees");
-    r.finish("deepseekv2 real-weight");
+    r.finish(&format!("deepseekv2 real-weight ({backend})"));
+}
+
+#[ignore = "real 2.9 B-parameter checkpoint: ~12 GB resident and a one-off ~12 GB fp32 expansion on disk. Two of these in parallel would exhaust any machine that can run one, so it stays out of the fast lane. `make test/slow`, or `cargo test --release -p brain-deepseekv2 --test parity -- --nocapture --test-threads=1`."]
+#[test]
+fn real_lm_decoder_matches_llamacpp() {
+    let Some((m, golden)) = build() else { return };
+    check_stages(&m, &golden, "cpu");
+}
+
+/// The same per-stage gate, at the same [`FLOOR`], with the decoder built on a
+/// real wgpu/Vulkan card instead of the CPU Cranelift JIT.
+///
+/// This is not a duplicate of the test above: the two backends do not share an
+/// implementation of this decode path's dominant kernels. `moe_linear_gated`,
+/// `silu_mul`, `scale_add`, `concat_split` and the `matmul` family are
+/// hand-written Rust siblings on `backend-cpu` (selected by kernel NAME in its
+/// dispatch ladder), while wgpu runs the WGSL itself. Gating only one of them
+/// against llama.cpp leaves the other's ~12 GB real-weight behaviour unproven,
+/// and this decoder is served on both.
+#[ignore = "real 2.9 B-parameter checkpoint on a real card: ~12 GB of VRAM. Slow lane only. `make test/slow`, or `cargo test --release -p brain-deepseekv2 --test parity -- --nocapture --test-threads=1 --ignored`."]
+#[test]
+fn real_lm_decoder_matches_llamacpp_on_wgpu() {
+    let Some(gpu) = real_lm::wgpu() else { return };
+    let Some((m, golden)) = build_on(gpu) else { return };
+    check_stages(&m, &golden, "wgpu");
 }
 
 /// The MoE router internals of every MoE layer, and the raw-gate fact.
