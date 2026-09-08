@@ -80,6 +80,10 @@ const B_XDV_ACC: usize = 32;
 const B_LN_STATS: usize = 33;
 const B_BIAS_GRAD_PART: usize = 34;
 const B_BIAS_GRAD_FINAL: usize = 35;
+// RRDBNet's LeakyReLU + scalar-multiply residual (see `super::BWD_KERNELS`'s
+// own note on why these are APPENDED here too).
+const B_LEAKY_RELU_BWD: usize = 36;
+const B_SCALE_ADD_DEXP: usize = 37;
 
 /// Where the caller placed [`super::BWD_KERNELS`] in its kernel set.
 #[derive(Clone, Copy)]
@@ -647,6 +651,30 @@ impl Trace {
                 r.acc(f, *n as u64, &df, 1.0);
                 r.give(*n as u64, dx);
                 r.give(*n as u64, df);
+            }
+            // `y = leaky_relu(x, slope)` -> `dx = dy` where `x >= 0`, `slope*dy`
+            // otherwise. `leaky_relu_bwd` binds the PRE-activation, like every
+            // other activation adjoint in this file.
+            Op::LeakyRelu { n, slope, x, y } => {
+                let Some(dy) = r.get(y) else { return };
+                let dx = r.tmp(*n as u64);
+                r.push(r.gpu.step(r.ids.k(B_LEAKY_RELU_BWD), &[x, &dy, &dx], &[*n, f(*slope)], *n));
+                r.acc(x, *n as u64, &dx, 1.0);
+                r.give(*n as u64, dx);
+            }
+            // `y = scale[0] * fx` -> `dfx = scale[0] * dy`. `scale_add_dexp`
+            // Params: [n_rows, d_model, n_experts, e_idx]; bufs [gate,
+            // d_moe_acc, d_expert] - `n_rows = 1, d_model = n, n_experts = 1,
+            // e_idx = 0` mirrors the forward `scale_add` dispatch exactly (see
+            // `super::Builder::residual_scale`). Gradient flows ONLY to `fx` -
+            // `scale` is a host constant, never a [`Grads`] target: route
+            // gradient THROUGH it, never assign a gradient TO it.
+            Op::ScaleAdd { n, scale, fx, y } => {
+                let Some(dy) = r.get(y) else { return };
+                let dfx = r.tmp(*n as u64);
+                r.push(r.gpu.step(r.ids.k(B_SCALE_ADD_DEXP), &[scale, &dy, &dfx], &[1, *n, 1, 0], *n));
+                r.acc(fx, *n as u64, &dfx, 1.0);
+                r.give(*n as u64, dfx);
             }
         }
     }

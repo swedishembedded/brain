@@ -294,8 +294,12 @@ fast and scalable kernel - not a naive one.
     WORSE than cropping it, so cropping is what ships. **Serving contract
     met**: `rrdbnet::caps` (`upscale`, env-gated on `BRAIN_ESRGAN_WEIGHTS`),
     `resident_upscale::UpscaleResident`, D-Bus `Run`, and wired into
-    `imgpipe` as the pipeline's `UPSCALE_MODEL` stage. *(No backward/
-    gradcheck yet - forward-only, matching its siblings in this cluster.)*
+    `imgpipe` as the pipeline's `UPSCALE_MODEL` stage. **Training / backward
+    done** (`crates/rrdbnet/src/train.rs`, gated by `gradcheck::check_rrdbnet`
+    + `check_rrdbnet_elementwise`) - closing it found the SAME
+    `Builder::push_step`-past-the-tape defect `check_unet` closed (lessons.md
+    #55, #89), independently, on the LeakyReLU activation and the scaled
+    residual.
 
 12c-bis. **CodeFormer face restoration** (`crates/codeformer`) - what turns the
     VQ autoencoder above into a blind face restorer: the **code-prediction
@@ -1631,7 +1635,8 @@ a metric that isn't there was simply forgotten.
   imaging workstream's `check_sam2` (+ `_on`), `check_arcface`, `check_vqgan`
   (+ `_lowered`), `check_clip` (+ `_bigg`, `_tiled`),
   `check_t5` (+ `_one_block`, `_tiled`, `_rel_bias_elementwise`)
-  and `check_codeformer` (+ `_one_layer`). The authoritative list is
+  `check_codeformer` (+ `_one_layer`), and `check_rrdbnet`
+  (+ `_elementwise`). The authoritative list is
   `grep 'pub fn check_' crates/gradcheck/src/` - an entry point that is not
   wired into `crates/gradcheck/tests/` is not a gate. SSA-style forward (each stage
   writes a fresh buffer that doubles as the backprop activation cache) -
@@ -1641,8 +1646,8 @@ a metric that isn't there was simply forgotten.
   every new model, not an opt-out.** Forward-only is the exception, and it
   requires the same explicit justification the models that already ship that
   way recorded when they did: `check_flux1`,
-  `check_controlnet`, `check_pulid`, `check_instantid`, `check_chronos2`
-  and `check_rrdbnet` are genuinely absent
+  `check_controlnet`, `check_pulid`, `check_instantid` and `check_chronos2`
+  are genuinely absent
   because those ports prioritized reaching a working forward pass on
   hardware-constrained checkpoints first, each documented in its own
   `.agents/roadmap/<model>.md` - that list is a record of what shipped
@@ -1653,7 +1658,11 @@ a metric that isn't there was simply forgotten.
   transformer half was emitted with `Builder::push_step`, i.e. it was not
   differentiable at all rather than merely un-gated. `check_controlnet` is
   unblocked by it, since ControlNet's trainable copy IS those same recorded
-  blocks. Do not
+  blocks. `check_rrdbnet` is now CLOSED too, and the identical bug (lessons.md
+  #55, #89) was found there independently - `rrdbnet::model`'s LeakyReLU and
+  scaled residual were also emitted with `Builder::push_step`, confirming this
+  is a property of the escape hatch itself, not of transformer-shaped code. Do
+  not
   cite "some models ship forward-only" as a reason to skip backward on a new
   model; if a genuine constraint forces that tradeoff, name it and record it
   the same way, in the same change.

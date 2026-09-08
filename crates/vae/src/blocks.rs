@@ -131,7 +131,7 @@ pub const MATMUL_REG3_SLOT: usize = K_MATMUL;
 /// cooperative twin anywhere in the tree — that is a documented perf gap,
 /// NOT a correctness gate, because none of them
 /// uses `workgroupBarrier()` and all three are exact on `backend-cpu`.
-pub const BWD_KERNELS: [(&str, &str); 36] = [
+pub const BWD_KERNELS: [(&str, &str); 38] = [
     ("conv2d_dx", kernels::CONV2D_DX),
     ("conv2d_dw", kernels::CONV2D_DW),
     ("bias_grad", kernels::BIAS_GRAD),
@@ -201,6 +201,16 @@ pub const BWD_KERNELS: [(&str, &str); 36] = [
     // `BwdIds::at(base)` offset stays valid.
     ("bias_grad_part", kernels::BIAS_GRAD_PART),
     ("bias_grad_final", kernels::BIAS_GRAD_FINAL),
+    // ---- LeakyReLU + the MoE-combine-as-scalar-multiply residual ----
+    // (RRDBNet: `Builder::leaky_relu` / `Builder::residual_scale`). APPENDED,
+    // so every existing `BwdIds::at(base)` offset stays valid. This is the
+    // SECOND occurrence of the `push_step`-inside-a-differentiated-chain bug
+    // this file's own doc warns about (the first was SDXL's transformer
+    // half, above) - `rrdbnet::model`'s `lrelu`/`residual` used to call
+    // `Builder::push_step` directly, so every conv weight upstream of an
+    // activation got a silent ZERO gradient.
+    ("leaky_relu_bwd", kernels::LEAKY_RELU_BWD),
+    ("scale_add_dexp", kernels::SCALE_ADD_DEXP),
 ];
 
 /// Row-chunks per column for the two-stage `bias_grad_part`/`bias_grad_final`
@@ -401,6 +411,33 @@ pub struct MixIds {
     pub bwd: usize,
 }
 
+/// The caller's `leaky_relu` forward slot - see [`Builder::leaky_relu`].
+///
+/// Threaded through for the same reason [`MixIds`] is: `leaky_relu` is not one
+/// of [`KERNELS`], because every caller with this activation (`rrdbnet`,
+/// `codeformer`, `ecapatdnn`, ...) already registers it under its own slot,
+/// and the CPU backend's JIT rejects a second definition of the same kernel
+/// name. `leaky_relu_bwd`, unlike `edm_mix`'s `scale_row`, is NOT one of those
+/// pre-existing per-caller kernels - it is new - so it lives once in
+/// [`BWD_KERNELS`] instead and needs no threading.
+#[derive(Clone, Copy)]
+pub struct LreluIds {
+    pub fwd: usize,
+}
+
+/// The caller's `scale_add` forward slot - see [`Builder::residual_scale`].
+///
+/// `scale_add` is the MoE gated-combine kernel reused here as a scalar
+/// multiply (`n_experts = 1`, `e_idx = 0`, `accumulate = 0` - see
+/// `Builder::residual_scale`'s doc). It is not one of [`KERNELS`] for the same
+/// reason `leaky_relu` is not: the caller already registers it under its own
+/// slot. `scale_add_dexp` lives once in [`BWD_KERNELS`] and needs no
+/// threading.
+#[derive(Clone, Copy)]
+pub struct ScaleAddIds {
+    pub fwd: usize,
+}
+
 /// One recorded forward stage, with exactly the buffers its adjoint reads.
 ///
 /// Recorded only in **train mode** ([`Builder::set_train`]); the tape is what
@@ -513,6 +550,17 @@ pub(crate) enum Op {
     /// each on its own. Host constants, never trained - like EDM's own
     /// `c_skip`/`c_out`, there is no `dab` kernel.
     Mix { n: u32, x: DeviceBuffer, f: DeviceBuffer, a: DeviceBuffer, b: DeviceBuffer, y: DeviceBuffer },
+    /// `y = leaky_relu(x, slope)`, elementwise. `slope` is a host constant
+    /// (RRDBNet fixes it at 0.2 for every activation), never a gradient
+    /// target - the adjoint (`leaky_relu_bwd`) reads it back as a uniform,
+    /// exactly like `Op::Mix`'s `a`/`b`.
+    LeakyRelu { n: u32, slope: f32, x: DeviceBuffer, y: DeviceBuffer },
+    /// `y = scale[0] * fx` - the `scale_add` MoE-combine kernel reused as a
+    /// scalar multiply (see [`Builder::residual_scale`]). `scale` is a
+    /// ONE-ELEMENT host-constant buffer, never a [`Grads`](grad::Grads)
+    /// target: the adjoint routes gradient THROUGH it to `fx` only, exactly
+    /// like [`Op::Mix`]'s `a`/`b`.
+    ScaleAdd { n: u32, scale: DeviceBuffer, fx: DeviceBuffer, y: DeviceBuffer },
 }
 
 /// Graph-construction state (borrows the device + host tensors).
@@ -583,6 +631,15 @@ pub struct Builder<'a> {
     /// until [`Builder::set_mix_ids`] is called; [`Builder::mix`] panics by
     /// name rather than dispatching slot zero if it is missing.
     mix_ids: Option<MixIds>,
+    /// The caller's `leaky_relu` forward slot - see [`LreluIds`]. `None` until
+    /// [`Builder::set_lrelu_ids`] is called; [`Builder::leaky_relu`] panics by
+    /// name rather than dispatching slot zero if it is missing.
+    lrelu_ids: Option<LreluIds>,
+    /// The caller's `scale_add` forward slot - see [`ScaleAddIds`]. `None`
+    /// until [`Builder::set_scale_add_ids`] is called; [`Builder::
+    /// residual_scale`] panics by name rather than dispatching slot zero if
+    /// it is missing.
+    scale_add_ids: Option<ScaleAddIds>,
     /// An int8-packed fallback weight source - see [`Builder::set_packed`].
     /// `None` for every caller except an int8 build (`sdxlunet::int8`,
     /// `supir::int8`): the plain fp32 path is completely unaffected, since
@@ -654,6 +711,8 @@ impl<'a> Builder<'a> {
             col: None,
             attn_head_dim: None,
             mix_ids: None,
+            lrelu_ids: None,
+            scale_add_ids: None,
             packed: None,
             n: 1,
         }
@@ -714,6 +773,18 @@ impl<'a> Builder<'a> {
     /// [`Builder::mix`] call - see [`MixIds`].
     pub fn set_mix_ids(&mut self, ids: MixIds) {
         self.mix_ids = Some(ids);
+    }
+
+    /// Supply the caller's `leaky_relu` forward slot. Must precede any
+    /// [`Builder::leaky_relu`] call - see [`LreluIds`].
+    pub fn set_lrelu_ids(&mut self, ids: LreluIds) {
+        self.lrelu_ids = Some(ids);
+    }
+
+    /// Supply the caller's `scale_add` forward slot. Must precede any
+    /// [`Builder::residual_scale`] call - see [`ScaleAddIds`].
+    pub fn set_scale_add_ids(&mut self, ids: ScaleAddIds) {
+        self.scale_add_ids = Some(ids);
     }
 
     /// Install a packed int8 weight source: a name [`Builder::dev`] cannot
@@ -1502,6 +1573,54 @@ impl<'a> Builder<'a> {
         self.steps.push(self.gpu.step(K_ADD2, &[a, b, &y], &[n], n));
         if self.train {
             self.tape.push(Op::Add2 { n, a: a.clone(), b: b.clone(), y: y.clone() });
+        }
+        y
+    }
+
+    /// LeakyReLU(`slope`), elementwise over `n` values.
+    ///
+    /// The forward slot is caller-supplied (see [`LreluIds`]) because
+    /// `leaky_relu` is not one of [`KERNELS`] - every caller with this
+    /// activation already registers it under its own slot, and the CPU
+    /// backend's JIT rejects a second definition of the same kernel name.
+    /// Recorded on the tape so a train-mode builder differentiates through
+    /// it - the old `Builder::push_step` call site did not, which is why
+    /// every parameter upstream of one of these activations used to get a
+    /// silent ZERO gradient (RRDBNet: `body.*` never moved).
+    pub fn leaky_relu(&mut self, n: u32, slope: f32, x: &DeviceBuffer) -> DeviceBuffer {
+        let y = self.act(n as u64);
+        let slot = self.lrelu_ids.expect("vae::blocks: Builder::set_lrelu_ids must precede Builder::leaky_relu").fwd;
+        self.steps.push(self.gpu.step(slot, &[x, &y], &[n, f(slope)], n));
+        if self.train {
+            self.tape.push(Op::LeakyRelu { n, slope, x: x.clone(), y: y.clone() });
+        }
+        y
+    }
+
+    /// `y = scale[0] * fx`, elementwise over `n` values - reusing the MoE
+    /// gated-combine kernel `scale_add` as a scalar multiply: `n_experts = 1`,
+    /// `e_idx = 0`, `accumulate = 0` makes its `acc[t,c] = gate[t,e_idx] *
+    /// src[t,c]` collapse to exactly this (`rrdbnet::model::residual`'s own
+    /// use, which this method replaces). `scale` is a ONE-ELEMENT host
+    /// constant buffer, never a gradient target - see [`Op::ScaleAdd`].
+    ///
+    /// The forward slot is caller-supplied (see [`ScaleAddIds`]) for the same
+    /// reason [`Builder::leaky_relu`]'s is: `scale_add` is not one of
+    /// [`KERNELS`], the caller already registers it under its own slot.
+    /// Recorded on the tape so a train-mode builder differentiates through
+    /// it - the old `Builder::push_step` call site did not.
+    pub fn residual_scale(&mut self, n: u32, scale: &DeviceBuffer, fx: &DeviceBuffer) -> DeviceBuffer {
+        let y = self.act(n as u64);
+        let slot = self
+            .scale_add_ids
+            .expect("vae::blocks: Builder::set_scale_add_ids must precede Builder::residual_scale")
+            .fwd;
+        // `scale_add` Params: [seq_len, d_model, n_experts, e_idx, accumulate] -
+        // `[1, n, 1, 0, 0]`, the exact layout `rrdbnet::model::residual` used to
+        // build by hand.
+        self.steps.push(self.gpu.step(slot, &[scale, fx, &y], &[1, n, 1, 0, 0], n));
+        if self.train {
+            self.tape.push(Op::ScaleAdd { n, scale: scale.clone(), fx: fx.clone(), y: y.clone() });
         }
         y
     }

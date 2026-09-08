@@ -305,7 +305,6 @@ shipped under real constraints, not a template".
 | `flux1` | `check_flux1` | full-depth fp32 does not fit one card; gate at reduced depth as the forward parity already does |
 | `pulid` | `check_pulid` | blocked by a real structural issue its ledger names: the forward reuses buffers across layers in an inference shape, so a training-mode forward with per-layer allocation is a prerequisite. Scope that first |
 | `chronos2` | `build_backward` + `impl model::Model` + `check_chronos2` | today's path is inference-only, per-op-submit; needs SSA buffers |
-| `rrdbnet` | none | forward-only, no recorded justification |
 | `deepseek2ocr` | only `check_deepseekocr_relpos*` | the composite has an exact adjoint reaching input pixels but no model-level entry point |
 | `instantid` | none | forward is not implemented at all - this is a Phase 5 item, not Phase 3 |
 

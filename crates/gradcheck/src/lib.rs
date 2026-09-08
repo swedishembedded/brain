@@ -32,6 +32,11 @@ pub use arcface::check_arcface;
 
 pub mod vqgan;
 
+/// `check_rrdbnet` / `check_rrdbnet_elementwise` - the RRDBNet (Real-ESRGAN)
+/// backward: LeakyReLU + the scaled residual routed onto the reverse-mode tape.
+pub mod rrdbnet;
+pub use rrdbnet::{check_rrdbnet, check_rrdbnet_elementwise};
+
 /// `check_unet` - the SDXL UNet2DConditionModel backward, the first diffusion
 /// BACKBONE (rather than autoencoder) gated here.
 pub mod unet;

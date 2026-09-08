@@ -34,6 +34,9 @@ brain-ltxv.workspace = true
 brain-sam2.workspace = true
 brain-vqgan.workspace = true
 brain-vae.workspace = true
+# `check_rrdbnet` / `check_rrdbnet_elementwise` (src/rrdbnet.rs) - the RRDBNet
+# (Real-ESRGAN) training graph.
+brain-rrdbnet.workspace = true
 # `check_unet` (src/unet.rs) - the SDXL UNet2DConditionModel training graph.
 brain-sdxlunet.workspace = true
 # `check_supir` / `check_supir_elementwise` (src/supir.rs) - the SUPIR control

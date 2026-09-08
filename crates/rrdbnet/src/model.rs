@@ -20,8 +20,9 @@
 //! familiar failure shape — so `RESIDUAL_SCALE` is named once
 //! and the parity test taps both block outputs.
 
-use gpu_core::{f, DeviceBuffer, Gpu, Step};
-use vae::blocks::{BlockNames, Builder, Tensors};
+use gpu_core::{DeviceBuffer, Gpu, Step};
+use vae::blocks::grad::Trace;
+use vae::blocks::{BlockNames, Builder, LreluIds, ScaleAddIds, Tensors};
 
 use crate::config::RrdbConfig;
 
@@ -36,6 +37,20 @@ const RESIDUAL_SCALE: f32 = 0.2;
 const N_BLOCKS: usize = vae::blocks::NEXT_SLOT;
 const K_LEAKY_RELU: usize = N_BLOCKS;
 const K_SCALE_ADD: usize = N_BLOCKS + 1;
+
+/// This crate's own forward slots, threaded to [`Builder::set_lrelu_ids`] /
+/// [`Builder::set_scale_add_ids`] - see [`Rrdb::build`]. `pub(crate)` because
+/// [`crate::train`] rebuilds the same ids to describe the training graph's
+/// kernel set (`vae::blocks::LreluIds`/`ScaleAddIds` are just `{fwd: usize}`,
+/// but restating the two slot numbers by hand is exactly the "drifts by one
+/// entry, silently wrong" risk [`vae::blocks::kernels_with`]'s own doc warns
+/// about).
+pub(crate) fn lrelu_ids() -> LreluIds {
+    LreluIds { fwd: K_LEAKY_RELU }
+}
+pub(crate) fn scale_add_ids() -> ScaleAddIds {
+    ScaleAddIds { fwd: K_SCALE_ADD }
+}
 
 /// This model's kernel set: the shared block kernels verbatim (copied by
 /// [`vae::blocks::kernels_with`], never restated) plus the two this net adds (`concat2` now comes from the shared set).
@@ -61,11 +76,48 @@ pub struct Rrdb {
     /// binds. Held because the recorded steps reference it: dropping it would
     /// free device memory the graph still dispatches against.
     _scale: DeviceBuffer,
+    /// The reverse-mode tape, present only on an [`Rrdb::new_train`] build.
+    trace: Option<Trace>,
 }
 
 impl Rrdb {
     /// Record the graph for a `[1, in_channels, h, w]` input.
     pub fn new(gpu: Gpu, cfg: RrdbConfig, w: &Tensors, h: u32, wd: u32, taps_on: bool) -> Rrdb {
+        Rrdb::build(gpu, cfg, w, h, wd, taps_on, false)
+    }
+
+    /// [`Rrdb::new`] recording the reverse-mode tape - what
+    /// [`crate::train::RrdbTrainer`] builds on. No taps: nothing here needs the
+    /// parity ladder, and taps pin buffers exactly like train mode already does.
+    pub fn new_train(gpu: Gpu, cfg: RrdbConfig, w: &Tensors, h: u32, wd: u32) -> Rrdb {
+        Rrdb::build(gpu, cfg, w, h, wd, false, true)
+    }
+
+    /// The recorded tape, on an [`Rrdb::new_train`] build.
+    pub fn trace(&self) -> &Trace {
+        self.trace.as_ref().expect("rrdb: no tape recorded - build with Rrdb::new_train")
+    }
+
+    /// The graph's input buffer (`[in_channels, h, w]`).
+    pub fn input(&self) -> &DeviceBuffer {
+        &self.x_in
+    }
+
+    /// The graph's UNCLAMPED output buffer (`conv_last`). `run` clamps to
+    /// `[0,1]` only on the HOST readback (see its own doc) - this device
+    /// buffer is exactly the reference network's own `out`, which is what a
+    /// training loss and a gradient check must both differentiate: computing
+    /// through a clamp's kink would corrupt a finite-difference gradient
+    /// wherever a pixel saturates.
+    pub fn out(&self) -> &DeviceBuffer {
+        &self.y_out
+    }
+
+    pub fn config(&self) -> &RrdbConfig {
+        &self.cfg
+    }
+
+    fn build(gpu: Gpu, cfg: RrdbConfig, w: &Tensors, h: u32, wd: u32, taps_on: bool, train: bool) -> Rrdb {
         // eps/groups are unused here (no GroupNorm in this net); the builder
         // takes them for the AutoencoderKL shape it also serves.
         // The residual weight, uploaded once and bound by every `scale_add`.
@@ -73,6 +125,16 @@ impl Rrdb {
         gpu.write_f32(&scale_buf, &[RESIDUAL_SCALE]);
 
         let mut b = Builder::new(&gpu, w, 1e-6, 32, BlockNames::diffusers(), taps_on);
+        // Must precede the first recorded block (mirrors `Builder::set_train`'s
+        // own ordering requirement).
+        b.set_train(train);
+        // This crate's `leaky_relu`/`scale_add` are registered under OUR OWN
+        // slots (`K_LEAKY_RELU`/`K_SCALE_ADD`), not `vae::blocks::KERNELS` -
+        // see `LreluIds`/`ScaleAddIds`'s own doc for why. Needed whether or not
+        // `train`: `Builder::leaky_relu`/`residual_scale` dispatch the forward
+        // either way, and only additionally record the tape when `train`.
+        b.set_lrelu_ids(lrelu_ids());
+        b.set_scale_add_ids(scale_add_ids());
 
         let (f_, g) = (cfg.num_feat, cfg.num_grow_ch);
         let hw = (h as u64) * (wd as u64);
@@ -114,8 +176,11 @@ impl Rrdb {
         // one, and the reference's own output is unclamped.
         b.tap("out".into(), &y_out, (cfg.out_channels as u64 * ch as u64 * cw as u64) as u32);
 
+        // Read BEFORE `finish` consumes the builder (mirrors
+        // `sdxlunet::model::Unet::build`'s ordering).
+        let trace = train.then(|| b.trace());
         let (steps, taps) = b.finish();
-        Rrdb { gpu, cfg, steps, x_in, y_out, taps, hw: (ch, cw), _scale: scale_buf }
+        Rrdb { gpu, cfg, steps, x_in, y_out, taps, hw: (ch, cw), _scale: scale_buf, trace }
     }
 
     /// Output size `(h, w)` — the input scaled by [`RrdbConfig::scale`].
@@ -162,28 +227,27 @@ impl Rrdb {
 }
 
 /// `y = leaky_relu(x, 0.2)`, out of place.
+///
+/// Recorded on the tape via [`Builder::leaky_relu`] (not `Builder::push_step`,
+/// which records NOTHING a train-mode reverse walk can see - the exact bug
+/// this net's backward closes, see the module doc).
 fn lrelu(b: &mut Builder, n: u64, x: &DeviceBuffer) -> DeviceBuffer {
-    let y = b.act(n);
-    let g = b.gpu();
-    b.push_step(g.step(K_LEAKY_RELU, &[x, &y], &[n as u32, f(LRELU_SLOPE)], n as u32));
-    y
+    b.leaky_relu(n as u32, LRELU_SLOPE, x)
 }
 
 /// `out = x + RESIDUAL_SCALE * fx`, out of place — the `out * 0.2 + x` that
 /// closes both a dense block and an RRDB.
 ///
-/// Two dispatches over existing kernels rather than a new one. `scale_add` is
-/// the MoE gated accumulate (`acc = gate[0] * src` at `n_experts = 1`,
-/// `e_idx = 0`, `accumulate = 0`), which is exactly a scalar multiply when the
-/// scalar lives in a one-element buffer - the same use `crates/codeformer` makes
-/// of it. `axpy` would be one dispatch, but it accumulates IN PLACE into a
-/// buffer that must already hold `x`, and `Builder::act` hands back pooled
-/// buffers with arbitrary contents, so it would need a copy first.
+/// `Builder::residual_scale` records `t = RESIDUAL_SCALE * fx` on the tape (via
+/// `scale_add`, the MoE gated accumulate reused as a scalar multiply - see its
+/// own doc); the closing `b.add(n, x, &t)` is ALREADY tape-recorded
+/// (`Op::Add2`), so `dL/dx` and `dL/dt` fall out of the existing addition
+/// backward for free - nothing extra is needed here. `axpy` would be one
+/// dispatch instead of two, but it accumulates IN PLACE into a buffer that
+/// must already hold `x`, and `Builder::act` hands back pooled buffers with
+/// arbitrary contents, so it would need a copy first.
 fn residual(b: &mut Builder, n: u64, scale: &DeviceBuffer, x: &DeviceBuffer, fx: &DeviceBuffer) -> DeviceBuffer {
-    let t = b.act(n);
-    let g = b.gpu();
-    // `scale_add` Params: [seq_len, d_model, n_experts, e_idx, accumulate].
-    b.push_step(g.step(K_SCALE_ADD, &[scale, fx, &t], &[1, n as u32, 1, 0, 0], n as u32));
+    let t = b.residual_scale(n as u32, scale, fx);
     let y = b.add(n as u32, x, &t);
     b.free(n, t);
     y
