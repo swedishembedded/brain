@@ -238,6 +238,16 @@ pub fn matmul_abt(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n: us
         block(0, m, c);
         return;
     }
+    // `m == 1` is a GEMV, and a row split has exactly one non-empty task for
+    // it: every projection of every autoregressive decode step used to run on
+    // ONE core no matter how many the pool had - on a 2x12-core Xeon E5-2690
+    // v3, 11.3 GB/s against a measured 39.0 GB/s parallel DRAM roof, i.e. one
+    // core's share of it. [`gemv_cols`] splits the output columns instead,
+    // bit-identically; see its doc.
+    if m == 1 && n >= 8 {
+        gemv_cols(a, b, c, k, n);
+        return;
+    }
     c.par_chunks_mut(rows_per * n).enumerate().for_each(|(ci, cchunk)| {
         block(ci * rows_per, cchunk.len() / n, cchunk);
     });
@@ -1497,13 +1507,129 @@ pub fn moe_linear_gated_fwd(
         }
         return;
     }
-    let rows_per = (m / (rayon::current_num_threads() * 4)).max(1);
+    // How many rows this expert was actually routed - the work this call has,
+    // as opposed to the `m` rows it is shaped over. One strided pass over the
+    // gate's own column, cheaper than any of the arithmetic it decides.
+    let live = (0..m).filter(|r| gate[r * n_experts + e_idx] > 0.0).count();
+    if live == 0 {
+        // The common case at inference: with `top_k` of `n_experts` routed,
+        // `1 - top_k/n_experts` of every layer's expert dispatches have no
+        // work at all and are a `memset` wearing a GEMM's clothes. Splitting
+        // that over `m` rayon tasks is how a 58-of-64 no-op came to cost more
+        // than the 6 that had work.
+        zero_par(out);
+        return;
+    }
+    if live == 1 && n >= 8 {
+        // ONE routed row - every decode step's shape, since a single new token
+        // picks `top_k` experts and each of those sees exactly one row. A row
+        // split has one non-empty task by construction, so the whole GEMV ran
+        // on one core; splitting COLUMNS is what gives it the pool. See
+        // `matmul_abt`'s `gemv_cols` for the bit-identity argument, which is
+        // the same one here - this calls the same row microkernel.
+        let r = (0..m).find(|r| gate[r * n_experts + e_idx] > 0.0).expect("live == 1");
+        let (head, rest) = out.split_at_mut(r * n);
+        let (orow, tail) = rest.split_at_mut(n);
+        zero_par(head);
+        zero_par(tail);
+        gemv_cols(&x[r * k..r * k + k], w, orow, k, n);
+        return;
+    }
+    // Row-parallel, but with the task count set by the WORK (`live`) rather
+    // than by `m`: at `m = 283` and 26 routed rows the old
+    // `rows_per = m/(threads*4)` floored to 1, so a prefill round fanned 283
+    // rayon tasks out over the pool to run 26 of them - and paid the wake-up
+    // for all 283. Each task still walks its own contiguous row span in
+    // order, zeroing the rows that are not routed, so every output element is
+    // computed by the same microkernel over the same `k` in the same order as
+    // before.
+    let rows_per = m.div_ceil(live.min(rayon::current_num_threads()).max(1));
     out.par_chunks_mut(rows_per * n).enumerate().for_each(|(ci, cchunk)| {
         let row0 = ci * rows_per;
         let nrows = cchunk.len() / n;
         for r in 0..nrows {
             row(row0 + r, &x[(row0 + r) * k..(row0 + r) * k + k], &mut cchunk[r * n..r * n + n]);
         }
+    });
+}
+
+/// Bytes of streamed operand one rayon task must be given before fanning out
+/// pays for itself on this scheduler.
+///
+/// Waking a sleeping worker is a futex round trip, and a dispatch that hands
+/// 48 of them a few kilobytes each spends more time in the kernel than in the
+/// arithmetic - measured on a 2x12-core host as 586 s of system time against
+/// 131 s of user time across one real DeepSeek-OCR page, almost all of it in
+/// per-row fan-out on kernels like this one. At a single core's ~11 GB/s
+/// streaming rate, 128 KiB is ~11 us of work - past that cost, and measured
+/// (a 128 KiB / 256 KiB / 512 KiB / 1 MiB / 2 MiB / 4 MiB / 16 MiB sweep over
+/// this decoder's four real GEMV shapes and a whole replayed prefill round) as
+/// the point where the extra parallelism stops paying for the extra wake-ups.
+const MIN_TASK_BYTES: usize = 128 * 1024;
+
+/// Task count for `bytes` of streamed work: enough to use the pool on
+/// something big, exactly one (i.e. no fan-out at all) on something small.
+fn task_count(bytes: usize) -> usize {
+    (bytes / MIN_TASK_BYTES).clamp(1, rayon::current_num_threads())
+}
+
+/// `buf.fill(0.0)`, fanned out only when there is enough of it to be worth a
+/// wake-up.
+fn zero_par(buf: &mut [f32]) {
+    let tasks = task_count(buf.len() * 4);
+    if tasks <= 1 {
+        buf.fill(0.0);
+        return;
+    }
+    let chunk = buf.len().div_ceil(tasks);
+    buf.par_chunks_mut(chunk).for_each(|c| c.fill(0.0));
+}
+
+/// `out[j] = Σ_i a[i]·b[j,i]` for ONE row, fanned out over output COLUMNS.
+///
+/// The skinny-`m` case every resident decoder's steady state is made of: one
+/// new token against a weight read once and never revisited, at
+/// `2k / 4k` = 0.5 FLOP/byte - bounded by weight traffic, so the only thing
+/// that matters is how many cores are pulling it. Splitting the output ROWS
+/// cannot do that when there is one row; splitting the output COLUMNS gives
+/// each task a contiguous `b[j0*k .. j1*k]` slab, which is the coalesced half
+/// of `b` anyway.
+///
+/// **Bit-identical to the unsplit call.** Every output column is a full
+/// `k`-length reduction that touches no other column, and each task runs the
+/// same [`row_abt_avx2`]/[`row_abt_avx512`]/[`row_abt_scalar`] microkernel
+/// over its own columns; the split changes which core computes a column, never
+/// the order in which that column's `k` products are summed. Boundaries are
+/// held at multiples of 4 so the microkernel's 4-column register block covers
+/// the same column quadruples it would have unsplit, leaving only the original
+/// `n % 4` tail to the narrow path.
+fn gemv_cols(a: &[f32], b: &[f32], c: &mut [f32], k: usize, n: usize) {
+    debug_assert_eq!(a.len(), k);
+    debug_assert_eq!(c.len(), n);
+    #[cfg(target_arch = "x86_64")]
+    let tier = crate::fast_conv::isa_tier();
+    let run = |b: &[f32], c: &mut [f32], cols: usize| {
+        #[cfg(target_arch = "x86_64")]
+        if tier == crate::fast_conv::IsaTier::Avx512 {
+            unsafe { row_abt_avx512(a, b, c, k, cols) };
+            return;
+        }
+        #[cfg(target_arch = "x86_64")]
+        if tier == crate::fast_conv::IsaTier::Avx2 {
+            unsafe { row_abt_avx2(a, b, c, k, cols) };
+            return;
+        }
+        row_abt_scalar(a, b, c, k, cols);
+    };
+    let tasks = task_count(n * k * 4);
+    if tasks <= 1 {
+        run(b, c, n);
+        return;
+    }
+    let cols = n.div_ceil(tasks).div_ceil(4) * 4;
+    c.par_chunks_mut(cols).enumerate().for_each(|(t, cc)| {
+        let j0 = t * cols;
+        run(&b[j0 * k..(j0 + cc.len()) * k], cc, cc.len());
     });
 }
 
@@ -2258,6 +2384,169 @@ mod tests {
         }
     }
 
+    /// The one-row microkernel run over the WHOLE weight, i.e. what
+    /// [`gemv_cols`] does with no split at all - the reference a split result
+    /// must equal bit for bit, not merely within a tolerance.
+    fn gemv_unsplit_ref(a: &[f32], b: &[f32], c: &mut [f32], k: usize, n: usize) {
+        #[cfg(target_arch = "x86_64")]
+        {
+            let tier = crate::fast_conv::isa_tier();
+            if tier == crate::fast_conv::IsaTier::Avx512 {
+                unsafe { row_abt_avx512(a, b, c, k, n) };
+                return;
+            }
+            if tier == crate::fast_conv::IsaTier::Avx2 {
+                unsafe { row_abt_avx2(a, b, c, k, n) };
+                return;
+            }
+        }
+        row_abt_scalar(a, b, c, k, n);
+    }
+
+    /// **Spec: splitting a decode step's GEMV across the pool changes where a
+    /// column is computed, never what it computes.**
+    ///
+    /// `m = 1` is every autoregressive step's shape and the one the row split
+    /// could not parallelise at all. Fanning it out over columns is only a
+    /// legitimate scheduling change if it is bit-identical - a tolerance would
+    /// let a real reassociation through, and this model's own gates
+    /// (`deepseek2/tests/generate.rs` matching llama.cpp token for token,
+    /// `deepseek2ocr/tests/real_weight_long_context.rs` matching itself across
+    /// two prefill mechanisms) are argmax comparisons that a last-ulp drift can
+    /// flip.
+    ///
+    /// Shapes are the real decoder's four GEMVs plus deliberately awkward ones:
+    /// `n` not a multiple of 4 (so the narrow column tail is exercised at the
+    /// LAST task rather than the last column of a whole matrix) and `k` not a
+    /// multiple of 8 (so the scalar k-tail runs inside every task).
+    #[test]
+    fn gemv_column_split_is_bit_identical() {
+        let mut s = 23u32;
+        for &(k, n) in &[(1280usize, 896usize), (1280, 1280), (1280, 1792), (1280, 4099), (129, 3001), (1280, 9)] {
+            let a: Vec<f32> = (0..k).map(|_| lcg(&mut s)).collect();
+            let b: Vec<f32> = (0..n * k).map(|_| lcg(&mut s)).collect();
+            let mut got = vec![0.0f32; n];
+            let mut want = vec![0.0f32; n];
+            matmul_abt(&a, &b, &mut got, 1, k, n);
+            gemv_unsplit_ref(&a, &b, &mut want, k, n);
+            assert_eq!(got, want, "matmul_abt m=1 k={k} n={n} is not bit-identical to the unsplit microkernel");
+        }
+    }
+
+    /// **Spec: an expert's routed rows decide its result, not how the rows are
+    /// scheduled** - across all three of `moe_linear_gated_fwd`'s regimes
+    /// (nothing routed, exactly one row routed, many rows routed), each of
+    /// which now takes a different path through the pool.
+    ///
+    /// Bit-identity again, against the row-at-a-time reference the WGSL kernel
+    /// describes: a non-routed row is exactly zero and a routed one is exactly
+    /// the same reduction the unsplit microkernel performs.
+    #[test]
+    fn moe_linear_gated_row_regimes_are_bit_identical() {
+        let (k, n, ne) = (1280usize, 896usize, 64usize);
+        let mut s = 29u32;
+        let b: Vec<f32> = (0..n * k).map(|_| lcg(&mut s)).collect();
+        // (m, rows routed to expert 3) - none, one, and a real prefill round's
+        // share of 283 rows at top_k=6 of 64.
+        // A run of routed rows long enough that a task holds several of them
+        // exercises the compacted nest's 3-row register tile AND its `% 3` row
+        // tail; the sparse cases above leave a task with one row, which only
+        // ever reaches the tail.
+        let dense: Vec<usize> = (0..131).map(|i| i * 2 + 1).collect();
+        for &(m, live_rows) in &[
+            (283usize, &[] as &[usize]),
+            (283, &[0]),
+            (283, &[137]),
+            (283, &[282]),
+            (1, &[0]),
+            (283, &[3, 40, 41, 99, 200, 281]),
+            (283, &dense[..]),
+            (283, &dense[..7]),
+            (283, &dense[..2]),
+        ] {
+            let x: Vec<f32> = (0..m * k).map(|_| lcg(&mut s)).collect();
+            let mut gate = vec![0.0f32; m * ne];
+            for &r in live_rows {
+                gate[r * ne + 3] = 0.5;
+            }
+            let mut got = vec![7.0f32; m * n];
+            moe_linear_gated_fwd(&x, &b, &gate, &mut got, m, k, n, ne, 3);
+            let mut want = vec![0.0f32; m * n];
+            for &r in live_rows {
+                gemv_unsplit_ref(&x[r * k..r * k + k], &b, &mut want[r * n..r * n + n], k, n);
+            }
+            assert_eq!(got, want, "moe_linear_gated_fwd m={m} with {} routed rows is not bit-identical", live_rows.len());
+        }
+    }
+
+    /// The **decode-step** shape: `m = 1`, one new token against a weight that
+    /// is read once and thrown away. This is what every autoregressive step of
+    /// a resident decoder actually dispatches, and it is a pure GEMV -
+    /// arithmetic intensity `2k·n / (n·k·4)` = 0.5 FLOP/byte, i.e. bounded by
+    /// weight traffic, never by the FMA rate.
+    ///
+    /// An earlier attempt at an `m = 1` microbench was dropped as untrustworthy
+    /// (it read a physically impossible ~10-30 TFLOP/s). Two things made it
+    /// lie, and this one fixes both rather than dropping the shape:
+    ///
+    /// * **One weight, re-read.** A single `n·k` matrix at this shape is 4.6 MB
+    ///   and lives in a server L3 for the whole loop, so the second
+    ///   iteration onward measured cache bandwidth, not the DRAM traffic a real
+    ///   decode step pays. Here a **bank** of `EXPERTS` distinct weights is
+    ///   swept in order, sized past L3 on purpose - which is also exactly the
+    ///   real access pattern (a decoder walks every layer's weights once per
+    ///   token and comes back to none of them).
+    /// * **A loop-invariant call.** Rotating the weight pointer per iteration
+    ///   makes the call genuinely different each time, and the accumulated
+    ///   output checksum is returned through `black_box`, so nothing can be
+    ///   hoisted.
+    ///
+    /// Reported as **GB/s of weight traffic against the measured roof**, not as
+    /// GFLOP/s: at 0.5 FLOP/byte the FLOP rate is a derived quantity and citing
+    /// it would name the wrong bound (see this repo's rule on reporting the
+    /// bound a kernel is actually under).
+    ///
+    /// Run: `cargo test -p brain-backend-cpu --release decode_gemv_bench -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn decode_gemv_bench() {
+        // (label, k, n) at DeepSeek-OCR's real decoder dims (d_model 1280,
+        // moe_ff 896, shared 2x896, vocab 129280) - the four GEMV shapes one
+        // decode step issues, in descending call count.
+        let shapes = [("moe expert ", 1280usize, 896usize), ("attn q/k/v/o", 1280, 1280), ("shared expert", 1280, 1792), ("lm_head    ", 1280, 129280)];
+        let mut s = 11u32;
+        let a: Vec<f32> = (0..1280).map(|_| lcg(&mut s)).collect();
+        for (label, k, n) in shapes {
+            // Enough distinct weights to blow past any current server L3 -
+            // the bank, not any one matrix, is what must exceed the cache.
+            let bytes = (n * k * 4) as f64;
+            let experts = ((256.0 * 1024.0 * 1024.0 / bytes).ceil() as usize).max(2);
+            let bank: Vec<Vec<f32>> = (0..experts).map(|_| (0..n * k).map(|_| lcg(&mut s)).collect()).collect();
+            let mut c = vec![0.0f32; n];
+            let mut sink = 0.0f64;
+            for b in &bank {
+                matmul_abt(&a, b, &mut c, 1, k, n); // warm every page in
+            }
+            let mut best = f64::INFINITY;
+            for _ in 0..3 {
+                let t = std::time::Instant::now();
+                for b in &bank {
+                    matmul_abt(&a, b, &mut c, 1, k, n);
+                    sink += c[0] as f64;
+                }
+                best = best.min(t.elapsed().as_secs_f64() / experts as f64);
+            }
+            std::hint::black_box(sink);
+            eprintln!(
+                "decode gemv {label} m=1 k={k:<5} n={n:<6} ({experts:>3} x {:.2} MB bank, {} threads): {:>8.3} ms/call, {:>7.1} GB/s",
+                bytes / 1e6,
+                rayon::current_num_threads(),
+                best * 1e3,
+                bytes / best / 1e9,
+            );
+        }
+    }
+
     // Perf microbench (run: cargo test -p brain-backend-cpu --release matmul_bench -- --ignored --nocapture)
     #[test]
     #[ignore]
@@ -2452,6 +2741,103 @@ mod tests {
             "moe_linear_gated m={m} k={k} n={n} ({live_rows} live/{m} rows, {} threads): AVX2 {:.2} ms ({:.1} GFLOP/s) | scalar+threads {:.2} ms ({:.1} GFLOP/s) | speedup {:.2}x",
             rayon::current_num_threads(), avx * 1e3, gflops / avx, scalt * 1e3, gflops / scalt, scalt / avx
         );
+
+        // The SAME shape against a COLD weight - the arm the reused-`w` loop
+        // above cannot measure. A real prefill round walks 2112 distinct
+        // expert matrices (11 MoE layers x 64 experts x 3 projections, 9.7 GB
+        // at this shape) and revisits none of them inside the round, so every
+        // call's weight arrives from DRAM. Reusing one 4.59 MB `w` leaves it in
+        // L3 from the second iteration on, which is why the number
+        // above and the one below can differ by an order of magnitude - and the
+        // served path only ever sees the cold one.
+        let bank_bytes = 512usize * 1024 * 1024;
+        let experts = (bank_bytes / (n * k * 4)).max(2);
+        let bank: Vec<Vec<f32>> = (0..experts).map(|_| (0..n * k).map(|_| lcg(&mut s)).collect()).collect();
+        let mut sink = 0.0f64;
+        for b in &bank {
+            moe_linear_gated_fwd(&x, b, &gate, &mut out, m, k, n, ne, e); // warm the pages in
+        }
+        let mut cold = f64::INFINITY;
+        for _ in 0..3 {
+            let t = std::time::Instant::now();
+            for b in &bank {
+                moe_linear_gated_fwd(&x, b, &gate, &mut out, m, k, n, ne, e);
+                sink += out[0] as f64;
+            }
+            cold = cold.min(t.elapsed().as_secs_f64() / experts as f64);
+        }
+        std::hint::black_box(sink);
+        eprintln!(
+            "moe_linear_gated m={m} k={k} n={n} COLD ({experts} x {:.2} MB bank): {:.2} ms ({:.1} GFLOP/s, {:.1} GB/s of weight)",
+            (n * k * 4) as f64 / 1e6,
+            cold * 1e3,
+            gflops / cold,
+            (n * k * 4) as f64 / cold / 1e9,
+        );
+    }
+
+    /// A whole **prefill round** of DeepSeek-OCR's MoE stack, replayed at the
+    /// real call pattern rather than one call in a loop: 64 experts x 3
+    /// projections of distinct weights (881 MB, so nothing survives in cache
+    /// between calls) swept 11 times for the 11 MoE layers, against a gate
+    /// where every one of the `m` rows selects exactly `top_k` of the 64
+    /// experts - the invariant `router_gate.wgsl` actually produces, which an
+    /// independent-Bernoulli gate does not (it gets the mean right and the
+    /// per-expert distribution wrong).
+    ///
+    /// This is the shape that decides the served path's prefill, and the one
+    /// that single-call benchmarks cannot see: they measure a warm weight and
+    /// a warm rayon pool, and report a time an order of magnitude away from
+    /// what the same kernel costs inside a real round.
+    ///
+    /// Run: `cargo test -p brain-backend-cpu --release moe_prefill_round_bench -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn moe_prefill_round_bench() {
+        let (k, n, ne, top_k, layers) = (1280usize, 896usize, 64usize, 6usize, 11usize);
+        for m in [283usize, 1] {
+            let mut s = 17u32;
+            let x: Vec<f32> = (0..m * k).map(|_| lcg(&mut s)).collect();
+            // Exactly `top_k` of `ne` per row, as the real router emits.
+            let mut gate = vec![0f32; m * ne];
+            for r in 0..m {
+                for t in 0..top_k {
+                    gate[r * ne + (r * top_k + t) % ne] = 0.25;
+                }
+            }
+            // Every weight the round touches, distinct - 11 layers x 64
+            // experts x 3 projections is 9.7 GB at this shape, which is the
+            // whole point: a bank small enough to be revisited measures a
+            // cache the served path never gets.
+            let bank: Vec<Vec<f32>> = (0..layers * ne * 3).map(|_| (0..n * k).map(|_| lcg(&mut s)).collect()).collect();
+            // One output slab per expert, as `model::moe::MoeActs` holds -
+            // not one buffer reused 2112 times, which would sit in L3 and
+            // leave the weight more of it than it really has.
+            let mut outs: Vec<Vec<f32>> = (0..ne).map(|_| vec![0f32; m * n]).collect();
+            let mut sink = 0.0f64;
+            let mut best = f64::INFINITY;
+            for _ in 0..2 {
+                let t = std::time::Instant::now();
+                for (i, b) in bank.iter().enumerate() {
+                    let e = (i / 3) % ne;
+                    let out = &mut outs[e];
+                    moe_linear_gated_fwd(&x, b, &gate, out, m, k, n, ne, e);
+                    sink += out[0] as f64;
+                }
+                best = best.min(t.elapsed().as_secs_f64());
+            }
+            std::hint::black_box(sink);
+            let calls = layers * ne * 3;
+            let live_flop = 2.0 * (m * top_k / ne).max(1) as f64 * k as f64 * n as f64 * calls as f64;
+            eprintln!(
+                "moe prefill round m={m:<4} ({calls} calls over a {:.0} MB bank, {} threads): {:>8.1} ms total, {:>7.3} ms/call, {:>6.1} GFLOP/s",
+                (bank.len() * n * k * 4) as f64 / 1e6,
+                rayon::current_num_threads(),
+                best * 1e3,
+                best * 1e3 / calls as f64,
+                live_flop / best / 1e9,
+            );
+        }
     }
 
     // Perf microbench for the self-attention family at DeepSeek-OCR's real
