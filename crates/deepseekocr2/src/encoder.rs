@@ -34,14 +34,13 @@
 //!
 //! ## Scope of this module
 //!
-//! Forward only - training and the backward-through-the-mask question belong
-//! to a later milestone. SAM's own forward (`sam1::SamEncoder`) is NOT
-//! invoked here: this module takes a view's already-produced `[n_query,
-//! d_model]` image-token grid as a plain host slice, exactly as
-//! [`resample_view`]'s golden reference does (SAM has its own gate; nothing
-//! here re-derives it). Composing this resampler with a real `SamEncoder` and
-//! splicing its multi-view output into the DeepSeek-V2 decoder are later
-//! milestones' work.
+//! Forward AND backward are both implemented and gradient-checked
+//! (`gradcheck::check_deepseekocr2`), including the SAM-token-grid input.
+//! SAM's own forward (`sam1::SamEncoder`) is still NOT invoked *inside* this
+//! module: it takes a view's already-produced `[n_query, d_model]` image-
+//! token grid as a plain host slice, the same seam [`resample_view`]'s golden
+//! reference and a real caller's [`sam_tokens_from_nchw`] both feed (SAM has
+//! its own gate; nothing here re-derives it).
 
 use gpu_core::{DeviceBuffer, Gpu};
 use model::block::{self, Bidir, BidirIds, KernelIds, UNREGISTERED};
@@ -663,6 +662,24 @@ impl Resampler {
 /// assembly is nothing more than placing already-computed `Vec<f32>` blocks
 /// one after another. A device gather kernel here would cost a dispatch to
 /// do exactly what `Vec::extend_from_slice` already does for free.
+/// A real `sam1::SamEncoder`'s output (`[1, c, h, w]` NCHW, channel-major)
+/// reshaped into the `[n_query, d_model]` row-major token grid
+/// [`Resampler::resample_view`] expects, where `n_query = h*w` and
+/// `d_model = c`. SAM's compressor emits one spatial position per output
+/// channel-vector; this is that vector transpose, done once on the host
+/// rather than inside a device kernel, since it runs once per view and the
+/// buffer is small (at most `256 * 896` floats for the global view).
+pub fn sam_tokens_from_nchw(nchw: &[f32], c: usize, n: usize) -> Vec<f32> {
+    assert_eq!(nchw.len(), c * n, "sam_tokens_from_nchw: expected {c}x{n}, got {}", nchw.len());
+    let mut out = vec![0.0f32; c * n];
+    for ch in 0..c {
+        for pos in 0..n {
+            out[pos * c + ch] = nchw[ch * n + pos];
+        }
+    }
+    out
+}
+
 pub fn gather_rows(local_tiles: &[Vec<f32>], global: &[f32], separator: &[f32]) -> Vec<f32> {
     let mut out = Vec::new();
     for tile in local_tiles {

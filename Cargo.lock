@@ -901,6 +901,7 @@ dependencies = [
  "brain-checkpoint",
  "brain-data",
  "brain-deepseek2",
+ "brain-gguf",
  "brain-gpu-core",
  "brain-kernels",
  "brain-model",

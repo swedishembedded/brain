@@ -131,14 +131,23 @@ GGUF exists; the reference safetensors checkpoint is `deepseek-ai/DeepSeek-OCR-2
   once, after all 24 encoder blocks and before the query slice/projector.
   Brings the real tensor count to exactly 473 (`24*12 + 1 + 12*14 + 11 + 5`);
   M1's classifier maps it to `vision.encoder.norm.weight`.
-- **Still open, deliberately not guessed:** how MULTIPLE local tiles order
-  themselves relative to each other and to the global view. The graph
-  builder confirms one view's internal order (image tokens, then queries,
-  then an optional separator) and the HF reference confirms one tile's
-  placeholder layout, but neither source pinned here settles the sequence
-  across several tiles in a >1x1 grid. Settle this at M5 against a real
-  forward or a real dump, the same way v1's own row layout was settled -
-  not from reading either source's code in isolation.
+- **Multi-tile ordering: CONFIRMED at M6, from the merged mtmd source
+  directly** (`tools/mtmd/mtmd-image.cpp`'s
+  `mtmd_image_preprocessor_deepseekocr::preprocess` and `tools/mtmd/mtmd.cpp`'s
+  chunk-assembly loop, both read in full against a local llama.cpp
+  checkout). `PROJECTOR_TYPE_DEEPSEEKOCR`/`PROJECTOR_TYPE_DEEPSEEKOCR2` share
+  the SAME preprocessor class AND both set `ov_img_first = false`
+  (`mtmd.cpp`), so v2's tile order is the same shape v1 already settled: the
+  assembly loop's own comments state it plainly - "add slices (or tiles)"
+  (row-major, `for y in 0..n_row: for x in 0..n_col`) runs BEFORE "add
+  overview image (last)". `add_viewsep` is set ONLY on the overview chunk
+  (`preprocess`'s `output.overview.add_viewsep = true` - tiles never set
+  it), and the per-view graph (`clip_graph_deepseekocr2::build()`) appends
+  the separator after ITS OWN chunk's tokens when that chunk's flag is set -
+  so with the overview placed last, the separator lands at the very end of
+  the whole sequence. This is exactly `crate::rows::row_plan`'s existing
+  formula (local tiles row-major, then the global view, then one trailing
+  separator) - M2/M3/M5's assumption is now a checked fact, not a guess.
 
 ## Status
 
@@ -286,4 +295,96 @@ and `crates/flux2/tests/resolve_layout.rs` - `cargo clippy -p
 brain-deepseekocr2 --all-targets` is itself warning-free. `make gradcheck`
 (the full workspace suite, not just this crate) is green.
 
-Remaining milestones (M6-M12) not started.
+M6 (real-weight parity and the decode loop) done, global view only.
+
+**Part A - import wiring.** `crates/deepseekocr2/src/import.rs`: `Files::
+locate` resolves the shipped pair by role (mirroring `crates/deepseek2ocr/
+src/import.rs`'s shape); `expand_vision`/`expand_lm` cache each half's fp32
+expansion beside the checkpoint, built on demand (`gguf::deepseekocr2_vision
+::import` for the ~1 GB vision half, `deepseek2::import::import_file` -
+the SAME function v1's own decoder expansion already calls, unmodified -
+for the ~12 GB decoder); `vision_config` derives the tower's shape from the
+mmproj's own KV/tensor shapes and checks it against `Qwen2EncoderConfig::
+deepseek_ocr2()`, `rope_theta` excepted (the file cannot state it - M0).
+
+**Part B - real-weight tests**, siblings of v1's own, global view only
+(see the gap this scopes around, below): `tests/real_weight.rs` runs the
+REAL `sam1::SamEncoder` (M3's host-slice placeholder finally replaced with
+the genuine tower) on a constant-fill 1024x1024 image, through the real
+resampler, through the real splice, into the real decoder - asserting
+every stage finite and dimensionally right (**reported, not gated**: unlike
+v1, no independent capture of THIS checkpoint's own numbers exists yet, so
+inventing a cosine floor would be theatre) and that the splice really
+placed the projector output verbatim into the residual stream (`assert_eq!`
+on the spliced rows, not a tolerance). `tests/real_weight_generate.rs`
+drives the composed greedy decode loop for 3 real steps and gets causal
+self-consistency for free - one forward over the length-`L-1` prefix
+reproduces every step-time argmax - which is the strongest oracle-free
+signal available and it holds. `tests/prompt_real.rs` is close to a direct
+port of v1's own (same tokenizer, confirmed at M0), now proven against v2's
+OWN GGUF rather than assumed to match because the vocab table matches.
+
+Both real-weight tests PASS on the real checkpoint (release profile, CPU
+backend): forward test finite logits, spread 28.9 (well above the 1.0
+plausibility floor), peak RSS 17.9 GiB; decode test's causal-consistency
+loop holds over all 3 generated steps, peak RSS 15.8 GiB. New crate helper
+`encoder::sam_tokens_from_nchw` bridges SAM's real NCHW compressor output
+into the resampler's `[n_query, d_model]` input - the one piece of glue
+neither M3 (host-slice input) nor `sam1` (NCHW producer) needed until real
+composition was actually wired. `model::DeepseekOcr2::prime_vision` factors
+the vision-forward half of `forward` out from the loss-computing half, so a
+decode loop can prime the splice once and then drive `deepseek2::DeepseekV2
+::generate_greedy` directly.
+
+**The real gap Part B works around, stated plainly**: local (768x768) tile
+SAM inference needs `vision.sam.pos_embed` resampled from its checkpoint
+native 64x64 grid to 48x48 - `crates/sam1` has NO position-embedding
+resampling today (its `pos_embed` is a fixed-size parameter, added via a
+plain elementwise `add2`, checked at `ParamStore` construction against
+`cfg.grid_h*grid_w`). This blocks real MULTI-tile SAM inference, not the
+composite's correctness: `tests/composite.rs` (M5) and `tests/tiny_ref.rs`
+(M3) already prove the row-gather/splice mechanism for multiple tiles
+against synthetic SAM grids, independent of whether SAM itself can produce
+a real one yet. Building the resampling belongs to a real sub-milestone of
+its own (a real kernel + its own gradient check, since `sam1` is
+trainable), not a rushed addition here - recorded as outstanding.
+
+**Part C - the multi-tile ordering question** - resolved by reading the
+merged llama.cpp source directly rather than a runtime dump (see the fact
+entry above). The originally planned route (a real `llama-mtmd-debug`
+graph-eval dump, `tools/goldens/deepseekocr2_convert_llamacpp_dump.py`) was
+attempted first: llama.cpp was cloned, patched (a new, original
+`BRAIN_GGUF_DUMP_DIR`-gated full-tensor dump added to `common/debug.cpp`,
+alongside its existing truncated-preview printer, not replacing it) and
+built clean. But `llama-mtmd-debug`'s `encode` mode turned out to only
+support encoding ONE synthetic square view at a time (`-n` must be exactly
+144 or 256 tokens' worth - `clip_graph_deepseekocr2::build()` asserts it) -
+it does not run the higher-level multi-tile preprocessing/assembly path at
+all, so it structurally cannot exercise tile-to-tile ordering regardless of
+image size. `llama-mtmd-cli` (built and available) does run that full
+path, but has no equivalent debug-dump hook. Given that, reading
+`mtmd-image.cpp`'s preprocessor and `mtmd.cpp`'s chunk-assembly loop
+directly settled the question with MORE certainty than a single opaque
+tensor dump would have (the maintainers' own code comments state the order
+in words: "add slices (or tiles)" then "add overview image (last)") - no
+Rust or Python code changed as a result, since the existing `row_plan`
+formula was already correct.
+
+Gates: `check/spdx`, `check-no-machine-paths.sh`, `check-scripts.sh`,
+`check-env-docs.sh`, `check-no-doc-citations.sh`, `check-multi-gpu-
+sharding.sh` (deepseekocr2 not yet in the `arch!()` registry, so correctly
+outside this check's scope until M7) all pass for what this milestone
+touched. `check-arch-names.sh` fails on pre-existing debt unrelated to
+this crate (three hard-coded `main.rs` match arms for `document-study`/
+`gguf`/`models`/`roofline`, one missing `qwen3vlmoe` docs page) - confirmed
+by grep, none naming `deepseekocr2`. `cargo clippy -p brain-deepseekocr2
+--all-targets --all-features -- -D warnings` is clean (two `doc_lazy_
+continuation` lints from a wrapped `- ` at a doc-comment line start were
+real and fixed). `cargo test -p brain-gradcheck` (full workspace, 1205s):
+67 passed, 2 failed - both `qwen`/`qwen_lora` gradcheck tests, both failing
+on `WgpuBackend::new_on ... exceeded 30s -- driver likely wedged`, a GPU-
+adapter-creation timeout from this box running several concurrent
+heavy builds/tests at once, not a numerical regression; this crate's own
+`deepseekocr2_resampler_analytic_grads_match_finite_differences` passed.
+
+Remaining milestones (M7-M12) not started.

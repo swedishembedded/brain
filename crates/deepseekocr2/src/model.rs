@@ -107,12 +107,13 @@ impl DeepseekOcr2 {
         self.set_tokens(ids, &vec![IGNORE; ids.len()]);
     }
 
-    /// Run every view's resampler, gather the spliced block, and run the
-    /// decoder. `local_tiles` must be `self.row_plan().grid.tiles()` entries
-    /// long, each `[n_query_local, d_model]`; `global` is
-    /// `[n_query_global, d_model]`. Returns the masked cross-entropy loss and
-    /// the per-view state [`Self::backward`] needs.
-    pub fn forward(&self, local_tiles: &[Vec<f32>], global: &[f32]) -> (f32, CompositeState) {
+    /// Run every view's resampler and gather the spliced block, writing it
+    /// into the decoder's image-embedding buffer, WITHOUT running the
+    /// decoder itself. The shared half of [`Self::forward`] and
+    /// [`Self::prime_vision`] - inference-only callers (a decode loop, which
+    /// drives the decoder itself through `decoder().generate_greedy`) need
+    /// the write but not a loss.
+    fn run_vision(&self, local_tiles: &[Vec<f32>], global: &[f32]) -> CompositeState {
         let e = &self.vision_cfg.encoder;
         assert_eq!(local_tiles.len() as u32, self.plan.grid.tiles(), "expected one SAM token grid per local tile");
         for t in local_tiles {
@@ -134,8 +135,30 @@ impl DeepseekOcr2 {
         assert_eq!(block.len(), self.plan.len() * self.vision_cfg.decoder_hidden as usize, "the gathered block does not match the row plan");
 
         self.dec.write_img_embeds(&block);
+        CompositeState { tile_states, global_state }
+    }
+
+    /// Run every view's resampler, gather the spliced block, and run the
+    /// decoder. `local_tiles` must be `self.row_plan().grid.tiles()` entries
+    /// long, each `[n_query_local, d_model]`; `global` is
+    /// `[n_query_global, d_model]`. Returns the masked cross-entropy loss and
+    /// the per-view state [`Self::backward`] needs.
+    pub fn forward(&self, local_tiles: &[Vec<f32>], global: &[f32]) -> (f32, CompositeState) {
+        let st = self.run_vision(local_tiles, global);
         let loss = self.dec.forward();
-        (loss, CompositeState { tile_states, global_state })
+        (loss, st)
+    }
+
+    /// Write the image embeds without computing a loss - the seam a decode
+    /// loop uses: prime the vision half once, then drive the decoder
+    /// directly through [`Self::decoder`]'s own `generate_greedy`/
+    /// `generate_greedy_cb`, which re-applies this same splice on every
+    /// recompute since the compiled forward tape re-runs it after every
+    /// embedding lookup. The returned [`CompositeState`] is only needed if a
+    /// caller also wants [`Self::backward`] through the vision half; a plain
+    /// inference decode loop can drop it.
+    pub fn prime_vision(&self, local_tiles: &[Vec<f32>], global: &[f32]) -> CompositeState {
+        self.run_vision(local_tiles, global)
     }
 
     /// Full backward of the loss [`Self::forward`] returned: the decoder's

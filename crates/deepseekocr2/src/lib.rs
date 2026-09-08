@@ -23,5 +23,7 @@
 
 pub mod config;
 pub mod encoder;
+pub mod import;
 pub mod model;
+pub mod prompt;
 pub mod rows;
