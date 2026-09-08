@@ -269,6 +269,17 @@ impl Resampler {
         self.ps.read_weight(&self.gpu, name)
     }
 
+    /// Write `vision.view_separator`'s own gradient. Unlike every other
+    /// parameter here, the composite's row layout ([`crate::rows`]) places
+    /// this vector on exactly ONE row of the assembled sequence, never more -
+    /// so, exactly as [`Self::backward_train`] already does for the query
+    /// bank, there is nothing to accumulate: the caller's `d_separator` slice
+    /// (`crate::rows`'s `separator_row` of the decoder's splice gradient) IS
+    /// the whole gradient, and this simply places it.
+    pub fn write_view_separator_grad(&self, d_separator: &[f32]) {
+        self.gpu.write_f32(self.ps.g("vision.view_separator"), d_separator);
+    }
+
     /// Run the shared tower on one view's SAM tokens, keep the query half,
     /// project it. `sam_tokens` is `[n_query, d_model]` where `n_query` is
     /// `cfg.encoder.n_query_local` or `n_query_global`, selected by `local`.
@@ -640,13 +651,18 @@ impl Resampler {
 }
 
 /// Gather every local tile's projected output (in caller-supplied order - the
-/// real model's order is row-major over the tile grid, width-first), then the
-/// global view's, then one learned separator row. Pure host concatenation:
-/// nothing here is a device dispatch, since it is nothing more than placing
-/// already-computed rows one after another (the DEVICE-side splice into the
-/// decoder's own row layout, with its own backward, is a later milestone -
-/// see `crates/deepseek2ocr/src/layout.rs`'s `RowGather` for the shape that
-/// work will follow).
+/// real model's order is row-major over the tile grid, width-first, per
+/// `crate::rows`'s `row_plan`, and is a design assumption pending M6's
+/// empirical check), then the global view's, then one learned separator row.
+///
+/// Pure host concatenation, on purpose: unlike v1's `RowGather`
+/// (`crates/deepseek2ocr/src/layout.rs`), which exists to avoid a host round
+/// trip for a layout that interleaves many `image_newline` rows between
+/// token rows, v2's layout has no interleaving at all - every view's rows
+/// are already one contiguous run (`crate::rows::RowPlan::runs`), so the
+/// assembly is nothing more than placing already-computed `Vec<f32>` blocks
+/// one after another. A device gather kernel here would cost a dispatch to
+/// do exactly what `Vec::extend_from_slice` already does for free.
 pub fn gather_rows(local_tiles: &[Vec<f32>], global: &[f32], separator: &[f32]) -> Vec<f32> {
     let mut out = Vec::new();
     for tile in local_tiles {
@@ -655,4 +671,39 @@ pub fn gather_rows(local_tiles: &[Vec<f32>], global: &[f32], separator: &[f32]) 
     out.extend_from_slice(global);
     out.extend_from_slice(separator);
     out
+}
+
+/// The adjoint of [`gather_rows`]: split the decoder's splice gradient
+/// (`[n_rows, d_model]`, `crate::model::DeepseekOcr2::backward`'s
+/// `read_d_img_embeds()`) back into per-tile gradients, the global view's,
+/// and the separator's own gradient - in the same order `gather_rows`
+/// concatenated them.
+///
+/// A pure split, not a gather: nothing in [`gather_rows`] permutes a row or
+/// shares one row across two destinations, so the adjoint of a concatenation
+/// is exactly a concatenation's inverse - slicing, with no index table and no
+/// accumulation (contrast v1's `RowGather::build_bwd`, whose `image_newline`
+/// gradient sums over several rows because several rows read it; v2's
+/// separator is read by exactly one row, so its own gradient IS that row -
+/// see [`Resampler::write_view_separator_grad`]).
+pub fn scatter_rows(d_block: &[f32], n_tiles: usize, n_query_local: u32, n_query_global: u32, d_model: u32) -> (Vec<Vec<f32>>, Vec<f32>, Vec<f32>) {
+    let d = d_model as usize;
+    let (local_len, global_len) = (n_query_local as usize * d, n_query_global as usize * d);
+    assert_eq!(
+        d_block.len(),
+        n_tiles * local_len + global_len + d,
+        "d_block's length does not match n_tiles={n_tiles}, n_query_local={n_query_local}, n_query_global={n_query_global}, d_model={d_model}"
+    );
+    let mut off = 0usize;
+    let d_local_tiles: Vec<Vec<f32>> = (0..n_tiles)
+        .map(|_| {
+            let tile = d_block[off..off + local_len].to_vec();
+            off += local_len;
+            tile
+        })
+        .collect();
+    let d_global = d_block[off..off + global_len].to_vec();
+    off += global_len;
+    let d_separator = d_block[off..off + d].to_vec();
+    (d_local_tiles, d_global, d_separator)
 }

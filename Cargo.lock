@@ -899,6 +899,8 @@ name = "brain-deepseekocr2"
 version = "1.1.0"
 dependencies = [
  "brain-checkpoint",
+ "brain-data",
+ "brain-deepseek2",
  "brain-gpu-core",
  "brain-kernels",
  "brain-model",

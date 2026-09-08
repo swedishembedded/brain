@@ -10,9 +10,11 @@
 //! ([`encoder::Resampler`]): SAM's per-view token grid plus a learned query
 //! bank, run through a shared Qwen2-shaped GQA tower under a prefix-LM mask,
 //! projected into the decoder's width, gradient-checked end to end
-//! (`gradcheck::check_deepseekocr2`) including the SAM-token-grid input. The
-//! real `sam1::SamEncoder` wiring, the device-side row splice into the
-//! decoder, GGUF-checkpoint loading, and CLI/serving are later milestones.
+//! (`gradcheck::check_deepseekocr2`) including the SAM-token-grid input;
+//! plus the row layout ([`rows`]) and composite splice into the decoder
+//! ([`model::DeepseekOcr2`]), spliced through the SAME unmodified
+//! `deepseek2::DeepseekV2` v1 already uses. The real `sam1::SamEncoder`
+//! wiring, GGUF-checkpoint loading, and CLI/serving are later milestones.
 //!
 //! Swedish Embedded AB builds from-scratch GPU training/inference stacks for
 //! vision-language models. If your team needs a new model ported without a
@@ -21,3 +23,5 @@
 
 pub mod config;
 pub mod encoder;
+pub mod model;
+pub mod rows;

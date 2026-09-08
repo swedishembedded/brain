@@ -238,4 +238,52 @@ parameter at once; no other kernel wiring needed a change. Recorded here
 because the failure signature (a specific parameter family reading exactly
 zero) is the fast way to recognize this class of bug again.
 
-Remaining milestones (M5-M12) not started.
+M5 (row layout + composite splice) done: `crates/deepseekocr2/src/rows.rs`
+(`Src`/`TileGrid`/`RowPlan`/`row_plan`, pure host index math, unit-tested in
+isolation) formalizes the row order M2/M3 already assumed - local tiles
+row-major width-first, then the global view, then one separator row.
+**Still a design assumption, not an empirical fact**: which order MULTIPLE
+local tiles take relative to each other and to the global view is pinned
+nowhere in the real header or the merged graph builder for more than one
+tile, so `row_plan`'s formula is what M6 must check against a real forward
+or a real dump, not the other way around.
+
+The device-side splice `deepseek2ocr2::model`'s brief called for turned out
+to need no device dispatch at all: v2's row layout has no interleaving (no
+`image_newline`), so every view's projected rows are already one contiguous
+run, and the assembly `gather_rows` (already built in M3) does is exactly
+what `Vec::extend_from_slice` gives for free - the adjoint added here,
+`encoder::scatter_rows`, is a plain split for the same reason. This is a
+real simplification versus v1's `RowGather` (`crates/deepseek2ocr/src/
+layout.rs`), which needs device buffers and an index-gather kernel
+specifically because MANY rows there read the same `image_newline` vector;
+v2's separator is read by exactly ONE row, so its own gradient is that row
+directly (`Resampler::write_view_separator_grad`), never a sum.
+
+New composite `crates/deepseekocr2/src/model.rs` (`DeepseekOcr2`) splices
+the resampler's gathered block into `deepseek2::DeepseekV2` via that
+crate's existing, UNMODIFIED `enable_mm_splice`/`write_img_embeds`/
+`read_d_img_embeds` seam - the same one v1's composite uses, crossing the
+two towers as a host `Vec<f32>` so they need not share a device or backend.
+`tests/composite.rs` gates: `gather_rows`/`scatter_rows` are exact host
+inverses; the spliced separator row is bit-identical to the checkpoint
+tensor at the row plan's last position (exact equality, not cosine, since
+it is a direct copy); a projector row lands exactly where its run says it
+should; a full end-to-end directional finite-difference check through
+`forward`+`backward` (tile 0's SAM input perturbed, decoder loss compared)
+- analytic vs numeric agree at rel 1.6e-4; and a mutation check that
+swapping two tiles' order changes the assembled block, so the row order
+itself is under test, not assumed. SAM's real `SamEncoder` is still not
+invoked (M6/M7's job, per M3's scope note).
+
+Confirmed pre-existing, unrelated to this milestone (matches M1's own
+finding almost exactly): `make check/scripts` fails on `check-env-docs.sh`
+- 9 undocumented `BRAIN_*` vars across `flux2`/`ltxv`/`qwen35`/the hub
+endpoint, none read anywhere in this crate. `make clippy` fails on 6
+pre-existing warnings in `crates/model/src/adapter/*`,
+`crates/model/tests/adapter_lora_fa.rs`, `crates/cli/src/resolver_cli.rs`,
+and `crates/flux2/tests/resolve_layout.rs` - `cargo clippy -p
+brain-deepseekocr2 --all-targets` is itself warning-free. `make gradcheck`
+(the full workspace suite, not just this crate) is green.
+
+Remaining milestones (M6-M12) not started.
