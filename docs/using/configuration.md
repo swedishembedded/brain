@@ -43,6 +43,8 @@ Most users never need these - they exist for GPU-driver quirks and profiling.
 | --- | --- | --- |
 | `BRAIN_VK_SERIAL` | forces one-dispatch-at-a-time submission on the native-Vulkan backend; works around a hang on some Intel integrated-GPU drivers | auto-detected by vendor |
 | `BRAIN_VK_NO_SERIAL` | forces the opposite of `BRAIN_VK_SERIAL` even on a vendor that's normally auto-serialized | unset |
+| `BRAIN_NO_PROVIDER` | comma-separated compute-provider names to disable, for bisecting a suspected provider-specific bug (mirrors `BRAIN_NO_KERNEL_UPGRADE` one level down) | none disabled |
+| `BRAIN_STREAM_SHARD` | `0`/`false`/`off` opts a streaming checkpoint out of automatic multi-GPU placement, forcing a single stage; a split plan is always bit-identical to the unsplit one, so this is for bisecting a driver problem or freeing a card for another process, not correctness | on (splits when it helps) |
 | `BRAIN_VK_VALIDATE` | enables Vulkan validation layers on the native-Vulkan backend | off |
 | `BRAIN_GPU_GL` | forces the OpenGL backend instead of Vulkan (wgpu) | off |
 | `BRAIN_GPU_VALIDATION` | enables wgpu debug/validation instance flags | off |
@@ -124,6 +126,8 @@ served, with no error.
 | `BRAIN_SCHED_BATCH_WEIGHT` | scheduler priority weight favoring larger batches | 200.0 |
 | `BRAIN_SCHED_MAX_WAIT_MS` | a group whose oldest job has waited longer than this is force-picked regardless of batch size | 2000 |
 | `BRAIN_CONF` | see above | 0.25 |
+| `BRAIN_LIMIT_VRAM_TOTAL` | environment fallback for `--limit-vram-total`: a ceiling on VRAM the whole process may hold, summed over every GPU (not per card) | no ceiling |
+| `BRAIN_LIMIT_RAM_TOTAL` | environment fallback for `--limit-ram-total`: a ceiling on host RAM the process may hold (CPU + every NPU) | no ceiling |
 
 See [`docs/using/serving.md`](serving.md) for what admission/backpressure means in practice.
 
@@ -143,6 +147,7 @@ See [`docs/using/serving.md`](serving.md) for what admission/backpressure means 
 | `BRAIN_QWEN35_MAX_BATCH` | Qwen3.8-27B dense serving batch slots | 4 |
 | `BRAIN_LFM2_BATCH` | LFM batched-forward slots per instance | 2 |
 | `BRAIN_FLUX2_MAX_BATCH` | FLUX.2 concurrent same-size batch cap | 4 |
+| `BRAIN_FLUX2_FAMILY` | `klein` or `base`, combined with the DiT's own sniffed size (`4b`/`9b`) to pick the served variant when a resident is bound to explicit weight paths rather than a `--variant` flag | `klein` |
 | `BRAIN_FLUX2_TE_DEVICE` | **Override** for FLUX.2 text-encoder placement (`gpu<i>[:i8]` for a truncated shard on that card). Unset, placement is automatic: the pipeline declares the DiT, encoder and VAE with their costs and the engine places them on cards that can hold them (`residency::plan`, reached through `gpu_core::devices::place`), printing what it chose | automatic |
 | `BRAIN_FLUX2_NO_STREAM` | `1` forces a non-GGUF FLUX.2 DiT to build from a whole fp32 tensor map. It is rejected for a `.gguf` DiT: decoding a quantized GGUF into a whole fp32 map is not an allowed implicit conversion | off |
 | `BRAIN_FLUX2_TE_NO_STREAM` | `1` forces the FLUX.2 text encoder to be imported as one whole fp32 map instead of streamed per tensor from a mapping. Same character as `BRAIN_FLUX2_NO_STREAM`: identical weights either way, kept as an A/B instrument and a fallback | off (streamed) |
@@ -192,6 +197,7 @@ page under `docs/models/`.
 | `BRAIN_PIPELINE_CACHE_DIR` | GPU pipeline/shader cache directory | backend default |
 | `BRAIN_OV_CACHE` | OpenVINO compiled-graph cache directory | `$TMPDIR/brain_ov_cache` |
 | `BRAIN_QWEN3TTS_RES` | resources base for `brain qwen3tts serve`'s default paths | unset |
+| `BRAIN_HUB_ENDPOINT` | additional allowed host for model downloads (checked before the standard `HF_ENDPOINT`), both as a base URL and as a redirect target - never a blanket "trust any redirect" | the standard hub host only |
 
 ### Which models directory wins
 

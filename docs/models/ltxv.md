@@ -206,6 +206,12 @@ brain -v --device gpu0 ltxv t2v --dit-config ltx25_22b \
   overridable with `BRAIN_LTXV_LONGFORM_MAX_TOKENS`.
 * **A request that fits one window is unchanged.** It is handed straight to the
   single-window path, bit for bit, and none of this runs.
+* **The stage-major loop is the default for video-only clips** (stage 1 at
+  half resolution across the whole clip, then stage 2 refines it at full
+  resolution); `BRAIN_LTXV_LONGFORM_STAGE_MAJOR=0` (or `off`/`false`) is the
+  kill switch back to the older window-major loop, e.g. to bisect a
+  regression against it. Audio-visual clips always use the window-major loop
+  regardless of this variable.
 * **`--audio` crosses the same seams**, on its own time grid and with its own
   constraint on where a seam may fall - see "Generating sound" below.
 * **`--end-frame` and `--mid-frame` are refused for a multi-window clip** - the

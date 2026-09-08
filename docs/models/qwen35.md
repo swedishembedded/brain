@@ -89,6 +89,12 @@ independently.
 # above uses, told apart by its `.gguf` extension.
 brain serve
 BRAIN_QWEN35_GGUF_CTX=2048   # per-sequence prompt+max_new cap (default 2048)
+BRAIN_QWEN35_GGUF_TIER=q4    # per-leaf quantization tier: "i8" (default), "q4",
+                             # or "q4,in_proj_a.weight=f32,in_proj_b.weight=f32"
+                             # to pin specific tensors at fp32; a malformed
+                             # grammar panics rather than serving a silently
+                             # wrong precision
+BRAIN_QWEN35_GGUF_DEBUG=1    # extra diagnostics on the streaming GGUF residency path
 ```
 
 What it does differently:
