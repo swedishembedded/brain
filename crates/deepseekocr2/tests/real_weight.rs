@@ -47,11 +47,19 @@ mod real_vision;
 
 use real_vision::{describe, pin_cpu_backend, real_files};
 
+/// Wall time since `t0`, printed next to [`mem`]'s RSS/peak line so a stage's
+/// cost reads as one pair of numbers rather than two separately-timestamped
+/// log lines a reader has to correlate by hand.
+fn lap(t0: &std::time::Instant, label: &str) {
+    println!("  [time] {label:<30} {:>7.2}s", t0.elapsed().as_secs_f64());
+}
+
 #[ignore = "the whole real composite: SAM + a 24-layer, 400M-parameter resampler, plus the 2.9B-parameter decoder. Slow lane only. `make test/slow`, or `cargo test --release -p brain-deepseekocr2 --test real_weight -- --nocapture`."]
 #[test]
 fn real_weight_composite_forward_global_view() {
     let Some(files) = real_files() else { return };
     pin_cpu_backend();
+    let t0 = std::time::Instant::now();
     mem("start");
 
     let decoder_cfg = DeepseekV2Config::deepseek_ocr(1);
@@ -73,6 +81,7 @@ fn real_weight_composite_forward_global_view() {
     let sam_tokens = sam_tokens_from_nchw(&sam_nchw, vision_cfg.sam.compress_out as usize, vision_cfg.encoder.n_query_global as usize);
     assert_eq!(describe("sam_output", &sam_tokens), sam_tokens.len(), "SAM output has non-finite values");
     mem("real SAM forward done");
+    lap(&t0, "real SAM forward done");
     drop(sam);
 
     // ---- the composite: encoder + splice + decoder ------------------------
@@ -84,12 +93,16 @@ fn real_weight_composite_forward_global_view() {
     drop(decoder_init);
     assert_eq!(m.image_run(), (row0, n_rows));
     mem("composite built (inference)");
+    lap(&t0, "composite built (inference)");
 
     let ids: Vec<u32> = vec![0u32; seq as usize]; // BOS everywhere; image rows are placeholders, their embedding is overwritten
     m.set_tokens_unsupervised(&ids);
+    let t_fwd = std::time::Instant::now();
     let (loss, _state) = m.forward(&[], &sam_tokens);
     assert_eq!(loss, 0.0, "every target is IGNORE, so a forward-only run reports no loss");
     mem("forward done");
+    lap(&t0, "forward done (cumulative)");
+    lap(&t_fwd, "forward done (resampler+decoder only)");
 
     let projected = m.encoder().resample_view(&sam_tokens, false).projected;
     assert_eq!(describe("projector_out", &projected), projected.len(), "projector output has non-finite values");

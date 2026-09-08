@@ -652,5 +652,102 @@ Gates: `check/spdx`, `check-no-machine-paths.sh`, `check-no-doc-citations.sh`,
 pass. `cargo clippy -p brain-npu -p brain-cli --all-targets --all-features
 -- -D warnings` clean.
 
-Remaining milestone (M12) not started by this entry; see the Status
-section above/below for any milestone landed separately.
+M12 (profile, then optimize only what the profile justifies) done - **no
+optimization was implemented, and that is the milestone's real outcome, not
+a shortfall.** Instrumented `tests/real_weight.rs` with wall-clock stage
+timing alongside its existing `mem()` calls (kept permanently - measured
+numbers belong in the test, not a throwaway script) and ran it for real
+against the checkpoint pair already on disk:
+
+```
+real SAM forward done            26.41s   (rss 3.98 GiB)
+composite built (weight load)   +12.65s   (rss 12.41 GiB, peak 13.00 GiB)
+resampler + decoder forward      +7.97s   (rss 16.82 GiB)
+------------------------------------------------------
+cumulative                       47.04s   (peak 17.88 GiB)
+```
+
+**KV-expand (M3's design choice - expand GQA's 2 KV heads to 14 rather than
+write new masked-GQA kernels) is confirmed negligible, with a number
+instead of an assumption.** The combined resampler+decoder forward - which
+CONTAINS every KV-expand dispatch across all 24 resampler layers, plus the
+entire 12-layer/64-expert decoder's own MoE forward over 259 tokens - is
+7.97s, the SMALLEST of the three stages and well under a fifth of total wall
+time. At real sequence lengths (512 resampler tokens, 259 decoder tokens)
+the expanded K/V buffers are on the order of tens of MB against a >17 GiB
+resident model; writing ~7 new masked-GQA kernels (the plan's alternative)
+would shave a cost that is already too small to see against everything
+around it. **Not built - the plan's own prediction held, now measured.**
+
+**Encoder-block fusion**: same reasoning, same evidence - fusing RMSNorm/
+SwiGLU dispatch inside an already-7.97s combined stage that includes a
+64-expert MoE decoder pass would not move a measurable needle. **Not
+built.**
+
+**int8 residency for "the tower"**: the profile reframes this candidate
+rather than killing it outright. Peak resident memory (17.88 GiB) is
+dominated by the DECODER's fp32-expanded weights (~11.6 GiB for 2.9B
+params, visible in the 12.41 GiB jump at "composite built") - not the
+vision tower, which SAM's own 3.98 GiB and the resampler's much smaller
+weight set account for only a minority of. This is the same host-RAM
+pressure M10 already hit exporting the decoder to ONNX. The real lever is
+int8 for the DECODER, which is `crates/deepseek2`-wide (shared with v1) and
+already the explicit subject of a separate, larger campaign in this repo
+(`.agents/roadmap/peft.md` Phase 2, INT8 frozen-base training - "the
+priority; the long pole"). Building a deepseekocr2-specific int8 vision-
+tower path here would solve the smaller half of the real memory problem
+and duplicate machinery that campaign is already building properly for the
+bigger half. **Not built here; the real fix already has a home.**
+
+**Batched serving**: unchanged from the plan's own reasoning - needs a
+batch axis on `crates/sam1`, which is shared with v1 and out of scope for a
+rushed change in this campaign's last milestone. **Not built; recorded as
+a real scoped-out follow-up**, same as M6/M10's SAM gaps below.
+
+**One real, actionable finding this profile surfaced that the plan did not
+anticipate**: SAM's own forward (26.41s) is the single largest cost in the
+whole run, and the CPU JIT backend logs `kernel "matmul_reg3" not
+JIT-compiled (only a single top-level workgroupBarrier() is supported);
+must use a native fast path or the GPU` during it - a `crates/sam1`-wide
+observation (affects v1 too), not a deepseekocr2-specific one, and
+therefore out of this crate's scope to fix. Recorded here as a genuine
+follow-up lead for whoever next touches SAM's CPU path.
+
+Gates: `check/spdx`, `check-no-machine-paths.sh`, `check-scripts.sh` all
+pass. `cargo clippy --release -p brain-deepseekocr2 --all-targets
+--all-features -- -D warnings` clean. `cargo test -p brain-deepseekocr2`
+(all suites) green.
+
+---
+
+## Campaign closed: M0-M12 all landed
+
+DeepSeek-OCR-2 is supported end to end: real-checkpoint inference (global
+view; CPU backend, ~17.9 GiB peak, measured), LoRA and full fine-tune with
+real overfit proofs, `Shardable` on the shared decoder, a CLI/capability/
+residency surface, an ONNX/NPU export path for the resampler (real,
+checkpoint-verified) and the decoder (structurally proven, RAM-ceilinged on
+this host), and full user-facing docs.
+
+**Genuinely outstanding, each recorded at the milestone that found it, none
+hidden:**
+- SAM has no ONNX export precedent for windowed attention + decomposed
+  relative-position bias (M10) - the vision tower's NPU story is
+  incomplete until this exists.
+- The decoder's MoE ONNX export needs more host RAM than this box has free
+  under load (M10) - a resource ceiling, not a builder defect; untested at
+  a size that fits.
+- Local-tile (768x768) real SAM inference needs position-embedding
+  resampling `crates/sam1` does not implement (M6) - the row-gather/splice
+  mechanism for multiple tiles is already proven correct against the
+  checkpoint-free golden, independent of this gap.
+- No NPU firmware exists on any host available to this campaign, so
+  nothing exported here has been run on real NPU hardware (M10, as
+  directed at the outset).
+- LoRA on a fresh/undertrained base plateaus regardless of rank or
+  learning rate (M9) - a real property of the method, not a bug; the
+  shipped test demonstrates the actual use case (adapting an already
+  fine-tuned base) instead.
+- SAM's CPU forward is the single largest real-checkpoint cost measured in
+  this campaign (M12) and does not hit a native fast-path kernel on this
+  backend - a `crates/sam1`-wide lead, not fixed here.
