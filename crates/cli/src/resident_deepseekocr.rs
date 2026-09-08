@@ -87,13 +87,21 @@ pub const VISION_DEVICE_BYTES: u64 = 6u64 << 30;
 /// Peak footprint of the WHOLE composite with every stage on the CPU - the
 /// figure this file used to report as a RAM-only cost.
 ///
-/// MEASURED, not derived from the file sizes: the real-weight composite gate
-/// (`crates/deepseek2ocr/tests/real_weight_generate.rs`) reports VmHWM
-/// 21.32 GiB for exactly this build at exactly this shape, read off
-/// `/proc/self/status`. Rounded up to 22 GiB for the served context (512 rows
-/// rather than the test's ~260, i.e. one larger `[seq, 129280]` logit slab). A
-/// file-size sum would say ~15 GB and be wrong by the whole activation working
-/// set.
+/// MEASURED at the OLD 512-token flat-batched-tape shape, not derived from
+/// the file sizes: the real-weight composite gate (`crates/deepseek2ocr/
+/// tests/real_weight_generate.rs`) reported VmHWM 21.32 GiB for that build,
+/// read off `/proc/self/status`, rounded up to 22 GiB for the served
+/// context's own extra rows (512 vs the test's ~260, i.e. one larger
+/// `[seq, 129280]` logit slab in that flat tape). A file-size sum would say
+/// ~15 GB and be wrong by the whole activation working set.
+///
+/// **Stale as of the chunked-prefill change** (`DeepseekOcr::
+/// new_with_prompt_devices_sized`, `deepseek2::model::Sizes{batched: false,
+/// ..}`): the served build no longer allocates a flat `[ctx, ...]` tape at
+/// all, so the "one larger logit slab" rationale above no longer applies
+/// group-wise. Kept as a conservative (now almost certainly an
+/// OVER-estimate, not under) upper bound until re-measured for real on the
+/// new shape - lowering it needs a real VmHWM read, not arithmetic.
 pub const COMPOSITE_PEAK_BYTES: u64 = 22u64 << 30;
 
 /// Host bytes held once the vision half is on a card: the measured all-CPU peak

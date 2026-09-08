@@ -41,7 +41,7 @@
 //! projector, the concat, CLIP's injected-token seam and the whole SAM tower to
 //! the input pixels.
 
-use deepseek2::model::DeepseekV2;
+use deepseek2::model::{DeepseekV2, Sizes};
 use deepseek2::IGNORE;
 
 use crate::config::DeepseekOcrConfig;
@@ -114,7 +114,7 @@ impl DeepseekOcr {
         train: bool,
     ) -> DeepseekOcr {
         let n_rows = cfg.image_tokens();
-        DeepseekOcr::build(dev, dev, cfg, vision, decoder, seed, seq, row0, n_rows, None, train)
+        DeepseekOcr::build(dev, dev, cfg, vision, decoder, seed, seq, 1, true, row0, n_rows, None, train)
     }
 
     /// The **real-layout** composite: the splice is sized and filled from a
@@ -176,10 +176,49 @@ impl DeepseekOcr {
         );
         assert!(prompt.len() <= seq as usize, "the prompt's {} ids do not fit a {seq}-token sequence", prompt.len());
         let (row0, n_rows) = prompt.image_run();
-        DeepseekOcr::build(dev_vision, dev_decoder, cfg, vision, decoder, seed, seq, row0, n_rows, Some(&prompt.plan.rows), train)
+        DeepseekOcr::build(dev_vision, dev_decoder, cfg, vision, decoder, seed, seq, 1, true, row0, n_rows, Some(&prompt.plan.rows), train)
     }
 
-    /// The one constructor both public ones funnel through. `layout` decides
+    /// [`Self::new_with_prompt_devices`] for a context wider than any one
+    /// prefill round: `ctx` (renamed from `seq` because it is now a KV-cache
+    /// capacity, not a batched tape width - see `deepseek2::model::Sizes`)
+    /// can be far larger than `chunk`, the prefill round width. Always
+    /// `batched = false` (this is the ONLY reason to want `chunk > 1` at all;
+    /// see `deepseek2::DeepseekV2::prefill_chunked`'s own doc for why a
+    /// `batched = true` build must not use a narrow chunk for a real prompt),
+    /// so `train` must be `false` too - there is no batched tape to train
+    /// through. `caps::Session::load` is the one production caller; every
+    /// other caller keeps using [`Self::new_with_prompt_devices`]
+    /// (`ctx = chunk = seq`, `batched = true`, unchanged behaviour).
+    ///
+    /// `forward`/`backward`/`set_tokens` are NOT valid on the resulting
+    /// instance (they need the batched tape) - only `generate_greedy_kv*`
+    /// (through `deepseek2::DeepseekV2::prefill_chunked`) is.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_prompt_devices_sized(
+        dev_vision: DeviceFactory<'_>,
+        dev_decoder: DeviceFactory<'_>,
+        cfg: DeepseekOcrConfig,
+        vision: &dyn checkpoint::TensorSource,
+        decoder: &dyn checkpoint::TensorSource,
+        seed: u64,
+        ctx: u32,
+        chunk: u32,
+        prompt: &Prompt,
+    ) -> DeepseekOcr {
+        assert_eq!(
+            prompt.n_rows as usize,
+            prompt.plan.rows.len(),
+            "the prompt's image block and its row plan disagree ({} ids, {} plan rows)",
+            prompt.n_rows,
+            prompt.plan.rows.len()
+        );
+        assert!(prompt.len() <= ctx as usize, "the prompt's {} ids do not fit a {ctx}-token context", prompt.len());
+        let (row0, n_rows) = prompt.image_run();
+        DeepseekOcr::build(dev_vision, dev_decoder, cfg, vision, decoder, seed, ctx, chunk, false, row0, n_rows, Some(&prompt.plan.rows), false)
+    }
+
+    /// The one constructor every public one funnels through. `layout` decides
     /// which of the two fill paths this composite uses; everything else is
     /// identical, which is what keeps the parity path bit-identical.
     ///
@@ -189,6 +228,12 @@ impl DeepseekOcr {
     /// handles (the splice crosses them as a host `Vec<f32>`, never a raw
     /// device buffer), so picking different backends for each is a
     /// device-selection change only, not an architectural one.
+    ///
+    /// `chunk`/`batched` are [`deepseek2::model::Sizes`]'s fields, threaded
+    /// straight through to `DeepseekV2::new_sized` - every caller but
+    /// [`Self::new_with_prompt_devices_sized`] passes `(1, true)`, reproducing
+    /// `DeepseekV2::new_on`'s shape exactly (bit-identical to before these
+    /// params existed).
     #[allow(clippy::too_many_arguments)]
     fn build(
         dev_vision: DeviceFactory<'_>,
@@ -198,6 +243,8 @@ impl DeepseekOcr {
         decoder: &dyn checkpoint::TensorSource,
         seed: u64,
         seq: u32,
+        chunk: u32,
+        batched: bool,
         row0: u32,
         n_rows: u32,
         layout: Option<&[Src]>,
@@ -229,8 +276,13 @@ impl DeepseekOcr {
         crate::stage_time("build: decoder Gpu::new_cpu (Cranelift JIT compile)", t_jit);
 
         let t_dec = std::time::Instant::now();
-        let mut dec = DeepseekV2::new_on(gpu, cfg.decoder.clone(), 1, seq, decoder, train);
-        crate::stage_time("build: decoder new_on (weight stream/upload + scratch alloc)", t_dec);
+        // `t` (the batched tape width) is `seq` when `batched` - `DeepseekV2::
+        // new_on`'s exact shape - and irrelevant (stubbed internally) otherwise,
+        // where `chunk` is what actually sizes the decode scratch.
+        let t = if batched { seq } else { chunk };
+        let sizes = Sizes { b: 1, t, ctx: seq, chunk, batched };
+        let mut dec = DeepseekV2::new_sized(gpu, cfg.decoder.clone(), sizes, decoder, train);
+        crate::stage_time("build: decoder new_sized (weight stream/upload + scratch alloc)", t_dec);
 
         dec.enable_mm_splice(row0, n_rows);
         DeepseekOcr { cfg, enc, dec, rows, row0, n_rows, seq }

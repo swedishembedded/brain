@@ -175,21 +175,31 @@ the backend other models build on, so the card is chosen by scoped registry
 selection instead.
 
 <!-- perf-number: hardware requirement, not a throughput claim -->
-**~22 GiB resident.** Measured, not estimated: the real-weight composite gate
-reports peak RSS for this exact build, read off `/proc/self/status`. The
-served instance is sized for a 512-token context (the 273-row image block,
-BOS, the instruction, and room to generate). A box with less than ~24 GiB
-free will not activate it. That figure was measured with every stage on the
-CPU; it is what the scheduler splits into the GPU/CPU pair above, so the two
-halves sum to it rather than each claiming it.
+**~22 GiB resident (measured at the old 512-token flat-tape shape; pending
+re-measurement on the chunked one - see `crates/cli/src/
+resident_deepseekocr.rs`'s `COMPOSITE_PEAK_BYTES` doc).** The served instance
+is now sized for the checkpoint's real 8192-token context by default
+(`$BRAIN_DEEPSEEK_OCR_CTX`, clamped to that ceiling), not a fixed 512 - the
+long-standing reason for the 512 cap (every extra row of context cost a
+`[seq, 129280]` logit slab in a flat batched tape) no longer applies:
+`DeepseekV2::prefill_chunked` prefills in bounded rounds
+(`$BRAIN_DEEPSEEK_OCR_CHUNK`, default 512, which already covers the whole
+real prompt in one round) against a KV cache sized to the context instead of
+a tape sized to it, so a wider context grows the KV cache and the round
+scratch, not a `[ctx, vocab]` slab. A box with less than ~24 GiB free
+probably still activates it, likely with room to spare - the 22 GiB figure
+predates this change and has not yet been re-measured downward.
 
-**KV-cached decode.** Decode used to be `O(T²)` recompute with no KV cache -
-every generated token re-ran the whole sequence through all 12 MoE layers.
-`DeepseekV2::generate_greedy_kv` closed that: the prompt pays one batched
-forward that also seeds a persistent per-layer K/V cache, and every token
-after that is one `O(1)` incremental decode step
-(`model::block::gqa_decode_step` plus a single-row MoE/dense FFN pass), not a
-full re-run of the sequence.
+**KV-cached, CHUNKED decode.** Decode used to be `O(T²)` recompute with no KV
+cache - every generated token re-ran the whole sequence through all 12 MoE
+layers. `DeepseekV2::generate_greedy_kv` closed that with a persistent
+per-layer K/V cache; `DeepseekV2::prefill_chunked` (used whenever the
+composite is built `batched = false`, which is what serving now does) then
+replaced the SINGLE batched forward that used to seed that cache with
+several bounded rounds, so the prompt's own cost no longer requires the flat
+tape either. Every generated token after prefill is still one `O(1)`
+incremental decode step (`model::block::gqa_chunk_step` at one new row, plus
+a single-row MoE/dense FFN pass), not a full re-run of the sequence.
 
 **Model construction and vision encoding (SAM ViT-B at 1024x1024 ->
 CLIP-L/24 -> compressor -> projector) were profiled and optimized across
@@ -206,10 +216,10 @@ with `BRAIN_PROFILE=1` and `brain perf run` (see
 [Performance](../performance/overview.md)); numbers measured on one machine
 at one point in this model's development are not a promise for yours.
 
-**No early stop.** The greedy loop always runs `max_new` steps. The output is
-truncated at the first end-of-sentence id and `finish_reason` reports `stop`
-honestly, but the wall time is always the full budget - stopping early needs a
-fallible callback in `crates/deepseekv2`, not a wrapper here.
+**Real EOS early stop.** `DeepseekV2::generate_greedy_kv_stream`'s callback
+returns `false` on the model's end-of-sentence id, which stops the loop from
+dispatching any further decode steps - wall time now tracks how early the
+model actually stopped, not always the full `max_new` budget.
 
 **One image, one view, batch 1.** The decoder's splice takes exactly one
 contiguous `(row0, n_rows)` run, so only DeepSeek-OCR's *global* (overview) view

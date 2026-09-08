@@ -92,42 +92,68 @@ pub const MODEL: &str = "deepseek-ai/DeepSeek-OCR";
 /// own help.
 pub const DEFAULT_INSTRUCTION: &str = "<|grounding|>Convert the document to markdown.";
 
-/// Built context length: the 273-row image block plus BOS plus a real
-/// instruction plus room to generate. A fixed, documented budget - not the
-/// checkpoint's 8192 architectural ceiling - because every extra row costs a
-/// `[seq, 129280]` logit slab at build time. (This used to add "and this
-/// model has no KV cache to amortise it"; that has been false since Phase 8's
-/// [`deepseek2::DeepseekV2::generate_greedy_kv`] - the reason the budget is
-/// fixed is the per-row build cost, not a missing cache.)
-/// (`qwen3vl::caps` used a fixed budget here too until it moved to
-/// `$BRAIN_QWEN3VL_CTX` clamped to the checkpoint's declared
-/// `max_position_embeddings`, viable there because that decode path DOES
-/// have a KV cache to amortise the extra rows against.)
-pub const SEQ_LEN: u32 = 512;
+/// Built context length (the KV-cache capacity, `deepseek2::model::Sizes::ctx`
+/// - NOT a batched tape width any more, see [`CHUNK_LEN`]).
+///
+/// **Used to be a fixed 512-token budget** because every extra row cost a
+/// `[seq, 129280]` logit slab in a flat batched tape at build time - the
+/// 273-row image block plus BOS plus a real instruction is ~283 rows, so
+/// `max_new` could not exceed ~229 whatever a caller asked for. Chunked
+/// prefill (`deepseek2::DeepseekV2::prefill_chunked`, this composite built
+/// with `batched = false` via [`DeepseekOcr::new_with_prompt_devices_sized`])
+/// removed that flat tape entirely, so the real limit is now the checkpoint's
+/// own architectural ceiling.
+///
+/// `$BRAIN_DEEPSEEK_OCR_CTX`, mirroring `qwen3vl::caps`'s own
+/// `$BRAIN_QWEN3VL_CTX` - an env-level operator knob, not a per-request
+/// parameter, because it sizes a real device allocation (the KV cache, plus
+/// `chunk`'s prefill scratch) the resident is built with once. Clamped to
+/// the real checkpoint's declared `max_position_embeddings` (8192,
+/// `DeepseekV2Config::deepseek_ocr`'s shape) - this decode path's KV cache is
+/// plain linear fp32, so an operator asking for MORE than the checkpoint was
+/// trained on would not be a longer context, just a larger allocation the
+/// model was never taught to use.
+fn default_ctx_len() -> u32 {
+    const CHECKPOINT_MAX: u32 = 8192;
+    std::env::var("BRAIN_DEEPSEEK_OCR_CTX").ok().and_then(|s| s.parse().ok()).unwrap_or(CHECKPOINT_MAX).clamp(1, CHECKPOINT_MAX)
+}
+
+/// Prefill round width (`deepseek2::model::Sizes::chunk`) - see
+/// `DeepseekV2::decode_rows`'s own doc for what this trades off: a wider
+/// round amortises each MoE layer's fixed 64-expert dispatch cost over more
+/// rows (this model's 283-row prompt is 2-3 rounds at 128-256, not 283
+/// individual chunks), at the cost of a wider `[chunk, n_heads, ctx]`
+/// attention-score slab. 512 comfortably covers the whole real prompt (the
+/// 273-row image block + BOS + instruction, ~283 rows) in ONE round, so a
+/// real request's prefill is exactly one dispatch pass, same as the old flat
+/// batched tape was - only the KV cache, not the prefill itself, is what
+/// changed shape.
+///
+/// `$BRAIN_DEEPSEEK_OCR_CHUNK`, same operator-knob rationale as
+/// [`default_ctx_len`].
+fn default_chunk_len() -> u32 {
+    std::env::var("BRAIN_DEEPSEEK_OCR_CHUNK").ok().and_then(|s| s.parse().ok()).unwrap_or(512u32).max(1)
+}
 
 /// Default generated-token budget.
 ///
-/// **This was 32, for a reason that no longer holds.** That default came from
-/// the pre-KV-cache decoder, where every generated token was one FULL
-/// recompute of the grown sequence through 12 MoE layers - ~22 s per extra
-/// token measured, so `--max_new 32` was roughly twelve minutes of pure
-/// decode. Phase 8 replaced that loop with [`deepseek2::DeepseekV2::
-/// generate_greedy_kv`], a real KV cache: the prompt pays one batched
-/// forward and every token after it is one `O(1)` incremental step. Decode
-/// stopped being the dominant cost of a page at all (model construction and
-/// the vision encoder are), and a 32-token ceiling stopped buying anything
-/// while still truncating "convert the document to markdown" mid-sentence.
+/// **This was 128**, calibrated to the OLD fixed 512-token context (the
+/// 273-row image block plus BOS plus the instruction left room for at most
+/// ~229 generated tokens, so 128 was picked from two real calibration
+/// requests to fit comfortably under that ceiling while still producing real
+/// multi-sentence markdown - 414 characters measured, 40.1-69.7 s served
+/// median for prefill plus up to 128 KV-cached steps).
 ///
-/// 128 is not a guess either: it is the budget a real 50-page document sweep
-/// ran at, calibrated by two real requests rather than picked. It produced
-/// real multi-sentence markdown (414 characters measured), and the served
-/// per-page decode measured 40.1-69.7 s (median 61.9 s) for prefill plus up
-/// to 128 KV-cached steps.
-///
-/// It is also comfortably under this model's hard ceiling: [`SEQ_LEN`] is 512
-/// and the 273-row image block plus BOS plus the instruction is ~283 rows, so
-/// `max_new` cannot exceed ~229 here whatever a caller asks for.
-pub const DEFAULT_MAX_NEW: i64 = 128;
+/// Raised now that [`default_ctx_len`] is no longer capped near 512: real
+/// documents (tables, code listings, multi-column pages) routinely need
+/// 500-2000+ output tokens, which the old ceiling could never reach
+/// regardless of what a caller asked for. 2048 is a provisional operator
+/// default, not a throughput claim - decode speed itself (currently ~0.5
+/// s/token measured, unrelated to this change) is a separate, tracked
+/// follow-up; EOS early stop (`DeepseekV2::generate_greedy_kv_stream`) means
+/// a real document that finishes sooner does not pay for the unused budget.
+/// A caller that wants a different ceiling passes its own `max_new`.
+pub const DEFAULT_MAX_NEW: i64 = 2048;
 
 pub fn generate_spec() -> ActionSpec {
     ActionSpec::new(
@@ -166,7 +192,7 @@ pub fn manifest() -> Manifest {
          -> CLIP-L) spliced into a DeepSeek-V2 MoE decoder. Greedy, batch 1, vision on wgpu, decoder on CPU.",
         vec![generate_spec()],
     )
-    .with_max_context_tokens(SEQ_LEN as u64)
+    .with_max_context_tokens(default_ctx_len() as u64)
 }
 
 /// The manifest for the RESIDENT/scheduled service (D-Bus, executor, HTTP):
@@ -196,6 +222,11 @@ pub struct Session {
     /// The device the preprocessor dispatches on - its own handle, because its
     /// kernel list ([`preprocess::PIPELINES`]) is not any model stage's.
     pre: gpu_core::Gpu,
+    /// The context `self.model` was actually built at (`default_ctx_len()` at
+    /// load time) - read back here rather than recomputed per request, so a
+    /// changed `$BRAIN_DEEPSEEK_OCR_CTX` mid-process can never disagree with
+    /// what the resident composite was actually sized for.
+    ctx: u32,
 }
 
 impl Session {
@@ -246,15 +277,16 @@ impl Session {
         let decoder = import::decoder_source(&files, &reader, &cfg)?;
         stage_time("load: decoder_reader open", t2);
         let t3 = std::time::Instant::now();
-        let model = DeepseekOcr::new_with_prompt_devices(&dev_vision, &dev_decoder, cfg.clone(), &vision, &decoder, 0, SEQ_LEN, &shape, false);
+        let ctx = default_ctx_len();
+        let model = DeepseekOcr::new_with_prompt_devices_sized(&dev_vision, &dev_decoder, cfg.clone(), &vision, &decoder, 0, ctx, default_chunk_len(), &shape);
         drop(decoder);
         drop(reader);
         drop(vision);
-        stage_time("load: DeepseekOcr::new_with_prompt_devices (weight upload + tape build)", t3);
+        stage_time("load: DeepseekOcr::new_with_prompt_devices_sized (weight upload + tape build)", t3);
 
         let pre = gpu_core::Gpu::new_cpu(preprocess::PIPELINES);
         stage_time("load: TOTAL", t0);
-        Ok(Session { dir: dir.to_string(), cfg, model, tok, eos, pre })
+        Ok(Session { dir: dir.to_string(), cfg, model, tok, eos, pre, ctx })
     }
 
     /// Which checkpoint directory this session was built from.
@@ -282,7 +314,7 @@ impl Session {
                 t
             }
         };
-        let max_new = inv.get_i64("max_new").unwrap_or(DEFAULT_MAX_NEW).clamp(1, SEQ_LEN as i64) as u32;
+        let max_new = inv.get_i64("max_new").unwrap_or(DEFAULT_MAX_NEW).clamp(1, self.ctx as i64) as u32;
         let (hwc, w, h) = capability::blob::decode_image(inv, "image")?;
 
         let prompt = Self::build_prompt(&self.tok, &self.cfg, &instruction)?;
@@ -296,11 +328,12 @@ impl Session {
                 self.model.image_run()
             ));
         }
-        if prompt.len() + max_new as usize > SEQ_LEN as usize {
+        if prompt.len() + max_new as usize > self.ctx as usize {
             return Err(format!(
-                "deepseek-ocr generate: prompt ({} tokens, incl. the {}-row image block) + max_new ({max_new}) exceeds this model's context {SEQ_LEN}",
+                "deepseek-ocr generate: prompt ({} tokens, incl. the {}-row image block) + max_new ({max_new}) exceeds this model's context {}",
                 prompt.len(),
-                prompt.n_rows
+                prompt.n_rows,
+                self.ctx
             ));
         }
 
@@ -450,7 +483,7 @@ mod tests {
         assert!(a.params.iter().any(|p| p.name == "max_new"));
         assert!(a.inputs.iter().any(|b| b.name == "image" && b.media == Media::Image && b.required));
         assert!(a.outputs.iter().any(|b| b.name == "text" && b.media == Media::Text));
-        assert_eq!(m.max_context_tokens, Some(SEQ_LEN as u64));
+        assert_eq!(m.max_context_tokens, Some(default_ctx_len() as u64));
     }
 
     /// An unconfigured provider must not exist at all, rather than exist and
@@ -504,6 +537,6 @@ mod tests {
         // invariance above is not vacuous. (Only the tail moves; `row0` cannot,
         // because `text_before` is empty by construction.)
         assert!(long.len() > short.len(), "a longer instruction must produce a longer prompt");
-        assert!(a.len() + DEFAULT_MAX_NEW as usize <= SEQ_LEN as usize, "the default request must fit the built context");
+        assert!(a.len() + DEFAULT_MAX_NEW as usize <= default_ctx_len() as usize, "the default request must fit the built context");
     }
 }

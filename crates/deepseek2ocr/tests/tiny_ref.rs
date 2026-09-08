@@ -826,3 +826,70 @@ fn split_device_vision_wgpu_decoder_cpu_matches_all_cpu() {
     assert!(cos_dec_in > 0.9999, "the spliced decoder input diverges between backends (cos {cos_dec_in}) -- vision half disagrees");
     assert!(cos_logits > 0.9999, "final logits diverge between backends (cos {cos_logits})");
 }
+
+/// **Long-context wiring gate**: `DeepseekOcr::new_with_prompt_devices_sized`
+/// (`caps::Session::load`'s new constructor, `batched = false`) must produce
+/// the SAME greedy decode as `DeepseekOcr::new_with_prompt_devices`
+/// (`batched = true`, the parity path every other composite test uses) on
+/// the same fixture, same weights, same prompt - proving the new params
+/// (`ctx`, `chunk`) are threaded into `deepseek2::model::Sizes` correctly and
+/// that the composite's splice still lands right when the image run does NOT
+/// start the round (`chunk` is picked to force the prompt into 3 rounds: a
+/// 1-token prefix before the splice, the splice's own round, and a tail).
+///
+/// This is the composite-level twin of `deepseek2::tests::chunked_prefill`'s
+/// `a_splice_run_that_straddles_a_chunk_boundary_is_recut` - that test
+/// proves the decoder alone; this one proves the encoder+splice+decoder
+/// wiring `caps::Session::load` actually exercises.
+#[test]
+fn long_context_sized_composite_matches_the_batched_one() {
+    let ckpt = testdata("deepseek-ocr/tiny/ckpt/model.safetensors");
+    let golden_path = testdata("deepseek-ocr/tiny/golden.safetensors");
+    if !ckpt.exists() || !golden_path.exists() {
+        brain_testutil::skip("fixtures absent");
+        return;
+    }
+    let ck = load(&ckpt);
+    let g = load(&golden_path);
+    let cfg = DeepseekOcrConfig::tiny();
+    let init = build_init(&cfg, &ck);
+    let (gh, gw) = cfg.token_grid();
+
+    let mut plan_rows: Vec<Src> = Vec::new();
+    for y in 0..gh {
+        plan_rows.extend((0..gw).map(|x| Src::Projector(y * gw + x)));
+        plan_rows.push(Src::Newline);
+    }
+    plan_rows.push(Src::Separator);
+    let n_rows = plan_rows.len() as u32;
+
+    let row0 = 1u32;
+    let n_new = 3u32;
+    let image_token_id = 0u32;
+    let mut ids: Vec<u32> = vec![1]; // BOS
+    ids.extend(std::iter::repeat_n(image_token_id, n_rows as usize));
+    ids.extend([2, 3]); // trailing instruction text
+    let prompt = Prompt {
+        ids: ids.clone(),
+        row0,
+        n_rows,
+        plan: RowPlan { rows: plan_rows, tokens_per_side: gw, grid: ViewGrid::global_only() },
+    };
+    let seq = ids.len() as u32 + n_new;
+    // Forces >= 3 rounds under `batched = false`: [0,row0) is its own round
+    // (the splice cannot start mid-round), [row0,row0+n_rows) is the splice's
+    // own round (`chunk == n_rows`), and the rest chunks normally.
+    let chunk = n_rows;
+
+    let cpu_dev = |p: &'static [(&'static str, &'static str)]| gpu_core::Gpu::new_cpu(p);
+
+    let m_batched = DeepseekOcr::new_with_prompt_devices(&cpu_dev, &cpu_dev, cfg.clone(), &init, &init, 7, seq, &prompt, false);
+    let want = m_batched.generate_greedy_kv_from_prompt(&g["image"].data, &prompt, n_new);
+
+    let m_chunked = DeepseekOcr::new_with_prompt_devices_sized(&cpu_dev, &cpu_dev, cfg.clone(), &init, &init, 7, seq, chunk, &prompt);
+    let got = m_chunked.generate_greedy_kv_from_prompt(&g["image"].data, &prompt, n_new);
+
+    assert_eq!(got.len(), want.len());
+    assert_eq!(&got[..ids.len()], &ids[..], "the prompt must come back verbatim");
+    assert_eq!(got, want, "chunked (batched=false) composite generation diverged from the batched one");
+}
