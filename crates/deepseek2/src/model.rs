@@ -580,11 +580,20 @@ impl DeepseekV2 {
         let lora_da = st(n * lora_r);
         let lora_out = st(n * d);
 
+        // Backward-only buffers are sized at a 1-element stub when `!train`,
+        // the same convention `gate_stub`/LoRA scratch already use below --
+        // `build_backward` is never called in that case (see `bwd_steps`
+        // below), so nothing ever dispatches into them; allocating them at
+        // `n`/`bht2` regardless would cost a second full-size copy of the
+        // batched graph's activations for a build that never runs backward.
+        let bn = if train { n } else { 1 };
+        let bwd_bht2 = if train { bht2 } else { 1 };
+
         let mut res = Vec::new();
         let mut dres = Vec::new();
         for _ in 0..=cfg.n_layers() {
             res.push(st(n * d));
-            dres.push(st(n * d));
+            dres.push(st(bn * d));
         }
         let moe_shape = MoeShape {
             rows: b * t,
@@ -667,23 +676,23 @@ impl DeepseekV2 {
             sh_out: st(n * d),
             mlp_out: st(n * d),
             gate_stub: st(1),
-            d_logits: st(n * v),
-            d_xn: st(n * d),
-            d_tmp: st(n * d),
-            dxmid: st(n * d),
-            d_ctx: st(n * d),
-            d_scores: st(bht2),
-            d_q: st(n * d),
-            d_k: st(n * d),
-            d_v: st(n * d),
-            d_h: st(n * ff_max),
-            d_gate_pre: st(n * ff_max),
-            d_up: st(n * ff_max),
-            d_router_logits: st(n * e),
-            d_gate: st(n * e),
-            d_expert_out: st(n * d),
+            d_logits: st(bn * v),
+            d_xn: st(bn * d),
+            d_tmp: st(bn * d),
+            dxmid: st(bn * d),
+            d_ctx: st(bn * d),
+            d_scores: st(bwd_bht2),
+            d_q: st(bn * d),
+            d_k: st(bn * d),
+            d_v: st(bn * d),
+            d_h: st(bn * ff_max),
+            d_gate_pre: st(bn * ff_max),
+            d_up: st(bn * ff_max),
+            d_router_logits: st(bn * e),
+            d_gate: st(bn * e),
+            d_expert_out: st(bn * d),
             fe: st(e),
-            inv: st(n),
+            inv: st(bn),
             lora_a,
             lora_da,
             lora_out,
