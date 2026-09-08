@@ -327,12 +327,23 @@ impl DeepseekOcr {
     /// [`Self::generate_greedy`] with a per-token callback - the seam a served
     /// path emits REAL streaming deltas from, forwarded straight to
     /// [`DeepseekV2::generate_greedy_cb`], so it fires once per generated token
-    /// and exactly `n_new` times.
+    /// and exactly `n_new` times. Never stops early -
+    /// [`Self::generate_greedy_stream`] is the twin that can.
     ///
     /// The encode/splice half runs ONCE before the first callback, as in
     /// [`Self::generate_greedy`] - the vision tower is not a per-token cost and
     /// nothing about it is observable through this seam.
-    pub fn generate_greedy_cb(&self, image: &[f32], prompt_ids: &[u32], n_new: u32, on_token: impl FnMut(u32)) -> Vec<u32> {
+    pub fn generate_greedy_cb(&self, image: &[f32], prompt_ids: &[u32], n_new: u32, mut on_token: impl FnMut(u32)) -> Vec<u32> {
+        self.generate_greedy_stream(image, prompt_ids, n_new, &mut |_, tok| {
+            on_token(tok);
+            true
+        })
+    }
+
+    /// [`Self::generate_greedy_cb`] with an early-stop callback - see
+    /// `deepseek2::DeepseekV2::generate_greedy_stream`'s doc for the exact
+    /// contract (`on_token(i, tok)`, `false` stops after appending `tok`).
+    pub fn generate_greedy_stream(&self, image: &[f32], prompt_ids: &[u32], n_new: u32, on_token: &mut dyn FnMut(usize, u32) -> bool) -> Vec<u32> {
         assert!(
             self.row0 + self.n_rows <= prompt_ids.len() as u32,
             "the prompt's {} tokens do not contain the image run [{}, {})",
@@ -348,7 +359,7 @@ impl DeepseekOcr {
         );
         let embeds = self.encode_block(image);
         self.dec.write_img_embeds(&embeds);
-        self.dec.generate_greedy_cb(prompt_ids, n_new, on_token)
+        self.dec.generate_greedy_stream(prompt_ids, n_new, on_token)
     }
 
     /// [`Self::generate_greedy`] driven by the [`Prompt`] this composite was
@@ -368,13 +379,22 @@ impl DeepseekOcr {
     /// [`Self::generate_greedy_cb`] - same streaming contract (fires exactly
     /// `n_new` times, never for a prompt id, and the return value still carries
     /// the prompt ahead of the generated ids).
-    pub fn generate_greedy_from_prompt_cb(&self, image: &[f32], prompt: &Prompt, n_new: u32, on_token: impl FnMut(u32)) -> Vec<u32> {
+    pub fn generate_greedy_from_prompt_cb(&self, image: &[f32], prompt: &Prompt, n_new: u32, mut on_token: impl FnMut(u32)) -> Vec<u32> {
+        self.generate_greedy_from_prompt_stream(image, prompt, n_new, &mut |_, tok| {
+            on_token(tok);
+            true
+        })
+    }
+
+    /// [`Self::generate_greedy_from_prompt_cb`] with an early-stop callback -
+    /// see [`Self::generate_greedy_stream`]'s doc for the exact contract.
+    pub fn generate_greedy_from_prompt_stream(&self, image: &[f32], prompt: &Prompt, n_new: u32, on_token: &mut dyn FnMut(usize, u32) -> bool) -> Vec<u32> {
         assert_eq!(
             prompt.image_run(),
             self.image_run(),
             "this prompt's image run is not the one the splice was sized at"
         );
-        self.generate_greedy_cb(image, &prompt.ids, n_new, on_token)
+        self.generate_greedy_stream(image, &prompt.ids, n_new, on_token)
     }
 
     /// [`Self::generate_greedy`], KV-cached - the `O(T)` twin of the `O(T²)`
@@ -392,8 +412,20 @@ impl DeepseekOcr {
     }
 
     /// [`Self::generate_greedy_kv`] with a per-token callback - same streaming
-    /// seam as [`Self::generate_greedy_cb`].
-    pub fn generate_greedy_kv_cb(&self, image: &[f32], prompt_ids: &[u32], n_new: u32, on_token: impl FnMut(u32)) -> Vec<u32> {
+    /// seam as [`Self::generate_greedy_cb`]. Never stops early -
+    /// [`Self::generate_greedy_kv_stream`] is the twin that can.
+    pub fn generate_greedy_kv_cb(&self, image: &[f32], prompt_ids: &[u32], n_new: u32, mut on_token: impl FnMut(u32)) -> Vec<u32> {
+        self.generate_greedy_kv_stream(image, prompt_ids, n_new, &mut |_, tok| {
+            on_token(tok);
+            true
+        })
+    }
+
+    /// [`Self::generate_greedy_kv_cb`] with an EARLY-STOP callback, forwarded
+    /// straight to `deepseek2::DeepseekV2::generate_greedy_kv_stream` - see
+    /// that method's doc for the exact contract and why stopping here skips
+    /// real dispatches, not just unread output.
+    pub fn generate_greedy_kv_stream(&self, image: &[f32], prompt_ids: &[u32], n_new: u32, on_token: &mut dyn FnMut(usize, u32) -> bool) -> Vec<u32> {
         assert!(
             self.row0 + self.n_rows <= prompt_ids.len() as u32,
             "the prompt's {} tokens do not contain the image run [{}, {})",
@@ -409,7 +441,7 @@ impl DeepseekOcr {
         );
         let embeds = self.encode_block(image);
         self.dec.write_img_embeds(&embeds);
-        self.dec.generate_greedy_kv_cb(prompt_ids, n_new, on_token)
+        self.dec.generate_greedy_kv_stream(prompt_ids, n_new, on_token)
     }
 
     /// [`Self::generate_greedy_kv`] driven by the [`Prompt`] this composite was
@@ -419,13 +451,25 @@ impl DeepseekOcr {
     }
 
     /// [`Self::generate_greedy_kv_from_prompt`] with a per-token callback.
-    pub fn generate_greedy_kv_from_prompt_cb(&self, image: &[f32], prompt: &Prompt, n_new: u32, on_token: impl FnMut(u32)) -> Vec<u32> {
+    /// Never stops early - [`Self::generate_greedy_kv_from_prompt_stream`] is
+    /// the twin that can, and what `deepseek2ocr::caps` uses to serve.
+    pub fn generate_greedy_kv_from_prompt_cb(&self, image: &[f32], prompt: &Prompt, n_new: u32, mut on_token: impl FnMut(u32)) -> Vec<u32> {
+        self.generate_greedy_kv_from_prompt_stream(image, prompt, n_new, &mut |_, tok| {
+            on_token(tok);
+            true
+        })
+    }
+
+    /// [`Self::generate_greedy_kv_from_prompt_cb`] with an early-stop
+    /// callback - see [`Self::generate_greedy_kv_stream`]'s doc for the exact
+    /// contract.
+    pub fn generate_greedy_kv_from_prompt_stream(&self, image: &[f32], prompt: &Prompt, n_new: u32, on_token: &mut dyn FnMut(usize, u32) -> bool) -> Vec<u32> {
         assert_eq!(
             prompt.image_run(),
             self.image_run(),
             "this prompt's image run is not the one the splice was sized at"
         );
-        self.generate_greedy_kv_cb(image, &prompt.ids, n_new, on_token)
+        self.generate_greedy_kv_stream(image, &prompt.ids, n_new, on_token)
     }
 
     pub fn zero_grads(&self) {

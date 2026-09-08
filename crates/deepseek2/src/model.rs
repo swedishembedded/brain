@@ -1317,8 +1317,22 @@ impl DeepseekV2 {
     /// callback's stream is `result[prompt_ids.len()..]`, not `result`.
     ///
     /// The loop is otherwise byte-for-byte [`Self::generate_greedy`]'s: same
-    /// `O(T²)` recompute, same tie-break, same sized-context assertions.
+    /// `O(T²)` recompute, same tie-break, same sized-context assertions. Never
+    /// stops early - [`Self::generate_greedy_stream`] is the twin that can.
     pub fn generate_greedy_cb(&self, prompt_ids: &[u32], n_new: u32, mut on_token: impl FnMut(u32)) -> Vec<u32> {
+        self.generate_greedy_stream(prompt_ids, n_new, &mut |_, tok| {
+            on_token(tok);
+            true
+        })
+    }
+
+    /// [`Self::generate_greedy_cb`] with an EARLY-STOP callback: `on_token(i,
+    /// tok)` fires with `i` the 0-based index into the generated (not prompt)
+    /// tokens; returning `false` stops the loop after appending `tok`, so a
+    /// caller sees `result.len() < prompt_ids.len() + n_new`. Mirrors
+    /// `qwen3::sample::generate_kv_stream`'s callback shape rather than
+    /// inventing a new one.
+    pub fn generate_greedy_stream(&self, prompt_ids: &[u32], n_new: u32, on_token: &mut dyn FnMut(usize, u32) -> bool) -> Vec<u32> {
         assert!(!prompt_ids.is_empty(), "deepseekv2: greedy decode needs at least one prompt token");
         let total = prompt_ids.len() + n_new as usize;
         assert!(
@@ -1330,11 +1344,13 @@ impl DeepseekV2 {
         let vocab = self.cfg.vocab() as usize;
         let mut ids = Vec::with_capacity(total);
         ids.extend_from_slice(prompt_ids);
-        for _ in 0..n_new {
+        for i in 0..n_new as usize {
             let logits = self.logits_all(&ids);
             let next = argmax(&logits[logits.len() - vocab..]) as u32;
             ids.push(next);
-            on_token(next);
+            if !on_token(i, next) {
+                break;
+            }
         }
         ids
     }
@@ -1732,8 +1748,24 @@ impl DeepseekV2 {
     }
 
     /// [`Self::generate_greedy_kv`] with a per-token callback - same seam as
-    /// [`Self::generate_greedy_cb`].
+    /// [`Self::generate_greedy_cb`]. Never stops early -
+    /// [`Self::generate_greedy_kv_stream`] is the twin that can.
     pub fn generate_greedy_kv_cb(&self, prompt_ids: &[u32], n_new: u32, mut on_token: impl FnMut(u32)) -> Vec<u32> {
+        self.generate_greedy_kv_stream(prompt_ids, n_new, &mut |_, tok| {
+            on_token(tok);
+            true
+        })
+    }
+
+    /// [`Self::generate_greedy_kv_cb`] with an EARLY-STOP callback - see
+    /// [`Self::generate_greedy_stream`]'s doc for the exact contract
+    /// (`on_token(i, tok)`, `i` 0-based over generated tokens, `false` stops
+    /// after appending `tok`). Unlike the `O(T²)` recompute family, stopping
+    /// early here actually skips work: each remaining [`Self::step`] call is
+    /// a real `O(1)` dispatch this loop never issues, not just an unread
+    /// result (`tests::generate_greedy_kv_stream_stops_dispatching_on_false`
+    /// gates the dispatch count, not just the returned `Vec`'s length).
+    pub fn generate_greedy_kv_stream(&self, prompt_ids: &[u32], n_new: u32, on_token: &mut dyn FnMut(usize, u32) -> bool) -> Vec<u32> {
         assert!(!prompt_ids.is_empty(), "deepseekv2: greedy decode needs at least one prompt token");
         assert_eq!(self.b, 1, "deepseekv2: KV-cache decode requires b == 1");
         let total = prompt_ids.len() + n_new as usize;
@@ -1766,12 +1798,16 @@ impl DeepseekV2 {
 
         let mut next = argmax(&logits) as u32;
         ids.push(next);
-        on_token(next);
-        for _ in 1..n_new {
+        if !on_token(0, next) {
+            return ids;
+        }
+        for i in 1..n_new as usize {
             let logits = self.step(next);
             next = argmax(&logits) as u32;
             ids.push(next);
-            on_token(next);
+            if !on_token(i, next) {
+                break;
+            }
         }
         ids
     }
@@ -2158,6 +2194,46 @@ mod tests {
         );
         assert_eq!(m.generate_greedy_kv(&prompt, n_new), all, "generate_greedy_kv diverges from generate_greedy_kv_cb");
         assert_eq!(m.generate_greedy(&prompt, n_new), all, "recompute diverges from the KV-cached callback loop");
+    }
+
+    /// `generate_greedy_kv_stream` returning `false` must stop ISSUING
+    /// dispatches, not just return a shorter `Vec` - a wrapper that ran every
+    /// step and truncated the result afterward would pass a length-only
+    /// check for free while burning the full budget every time, which is
+    /// exactly the bug `deepseek2ocr::caps`'s serving loop had before this
+    /// method existed (its own `stopped` flag kept the loop running "so
+    /// nothing more is emitted", not to skip work).
+    #[test]
+    fn generate_greedy_kv_stream_stops_dispatching_on_false() {
+        let cfg = DeepseekV2Config::tiny();
+        let init = crate::init::init_weights(&cfg, 7);
+        let m = DeepseekV2::new_on(gpu_core::testgpu::dev(PIPELINES), cfg, 1, 8, &init, false);
+        let prompt = [1u32, 5, 2];
+        let n_new = 5u32;
+        let stop_after = 2usize; // 0-based index: stop once i == 1 (2 tokens emitted)
+
+        // Baseline: how many dispatches a full, never-stopping run costs.
+        m.gpu.reset_ops_counters();
+        let full = m.generate_greedy_kv(&prompt, n_new);
+        let full_steps = m.gpu.ops_counters().steps;
+        assert_eq!(full.len(), prompt.len() + n_new as usize);
+
+        // Under test: stop after the 2nd generated token.
+        m.gpu.reset_ops_counters();
+        let mut seen = 0usize;
+        let early = m.generate_greedy_kv_stream(&prompt, n_new, &mut |i, _tok| {
+            seen += 1;
+            i + 1 < stop_after
+        });
+        let early_steps = m.gpu.ops_counters().steps;
+
+        assert_eq!(seen, stop_after, "the callback must fire exactly once per token up to and including the stopping one");
+        assert_eq!(early.len(), prompt.len() + stop_after, "an early stop must shorten the returned sequence, not just the callback count");
+        assert_eq!(&early[..], &full[..early.len()], "an early-stopped run must be a prefix of the full run");
+        assert!(
+            early_steps < full_steps,
+            "an early stop dispatched {early_steps} GPU steps, not fewer than the full run's {full_steps} - the loop kept computing after `false`"
+        );
     }
 }
 

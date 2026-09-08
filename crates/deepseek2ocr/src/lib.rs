@@ -122,9 +122,10 @@
 //!   Not done: a `finetune`-style CLI-driven training LOOP (`qwen3::finetune`'s
 //!   shape) over a real dataset -- this phase proves the wiring descends, not a
 //!   production fine-tune.
-//! * Not done: INT8, KV-cached decode, EOS early-stop, sampling beyond
-//!   greedy, a dedicated `brain deepseekocr` verb, and the wgpu backend (see
-//!   [`caps`]'s header for the `crates/sam1` corruption that forces CPU).
+//! * Not done: INT8, sampling beyond greedy, a dedicated `brain deepseekocr`
+//!   verb, and the wgpu backend for the decoder (see [`caps`]'s header for
+//!   why the decoder stays on CPU - a scope reason now, not the `crates/
+//!   sam1` corruption that used to force it, which is fixed).
 
 pub mod caps;
 pub mod config;

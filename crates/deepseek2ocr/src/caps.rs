@@ -24,9 +24,14 @@
 //!   16 `image_newline` rows and the one `view_separator` row carry the mmproj's
 //!   learned vectors rather than being 17 missing rows.
 //! * **Real per-token streaming**, off
-//!   [`crate::DeepseekOcr::generate_greedy_kv_from_prompt_cb`], diffed with
+//!   [`crate::DeepseekOcr::generate_greedy_kv_from_prompt_stream`], diffed with
 //!   `qwen3::chat::stream_delta` so a multi-byte character never escapes
 //!   half-decoded.
+//! * **Real EOS early stop.** The decode loop returns `false` from its
+//!   callback the moment the model emits end-of-sentence, which
+//!   `DeepseekV2::generate_greedy_kv_stream` honors by not dispatching any
+//!   further `step` calls - wall time now tracks how early the model actually
+//!   stopped, not always `max_new`.
 //! * **Real token accounting.** `prompt_tokens` / `completion_tokens` /
 //!   `finish_reason` are set explicitly, because `apiserve::bridge::read_outcome`
 //!   defaults them to `0`/`0`/`"stop"` when absent - i.e. an action that omits
@@ -36,13 +41,6 @@
 //!
 //! ## What is not
 //!
-//! * **The decode loop does not stop at EOS.** `generate_greedy_kv_from_prompt_cb`
-//!   always runs `max_new` steps (each one now `O(1)`, not a full recompute);
-//!   this module truncates the result at the first end-of-sentence id and
-//!   reports `finish_reason = "stop"`, but the *wall time* is always `max_new`
-//!   steps. Early termination is a `crates/deepseekv2` change (the callback
-//!   there is synchronous and infallible), not something a serving wrapper can
-//!   fake.
 //! * **Greedy only, batch 1, one contiguous image run.** No sampling, no
 //!   Base/Gundam multi-tile layout (the decoder splice takes one run). The
 //!   decode IS now KV-cached (`DeepseekV2::generate_greedy_kv`) - the prompt
@@ -321,14 +319,11 @@ impl Session {
         let mut printed = String::new();
         let mut step = 0u32;
         let mut stopped = false;
-        let out = self.model.generate_greedy_kv_from_prompt_cb(&image, &prompt, max_new, |tok_id| {
+        let out = self.model.generate_greedy_kv_from_prompt_stream(&image, &prompt, max_new, &mut |_, tok_id| {
             step += 1;
-            if stopped {
-                return; // past EOS: the loop still runs, but nothing more is emitted
-            }
             if tok_id == self.eos {
                 stopped = true;
-                return;
+                return false; // real early stop: no further decode steps are dispatched
             }
             ids.push(tok_id);
             let full = self.tok.decode(&ids);
@@ -337,8 +332,13 @@ impl Session {
             if !delta.is_empty() {
                 progress(Progress::token(step, max_new, delta));
             }
+            true
         });
-        debug_assert_eq!(out.len(), prompt.len() + max_new as usize);
+        // An early stop makes `out` SHORTER than the full budget, on purpose -
+        // that is the whole point of `generate_greedy_kv_stream` over
+        // `_cb`. `stopped` already distinguishes the two cases for
+        // `finish`/`completion` below.
+        debug_assert!(out.len() <= prompt.len() + max_new as usize);
         stage_time("generate: encode+splice+decode (TOTAL)", t_gen);
         // A resident device never drops, so its BRAIN_PROFILE table would
         // otherwise never print -- same pattern `crates/fastvlm`'s caps.rs uses.
