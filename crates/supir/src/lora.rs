@@ -83,7 +83,7 @@ pub fn linear_sites(cfg: &SupirConfig) -> Vec<LinearSite> {
         let Some(stem) = name.strip_suffix(".weight") else { continue };
         let Some(leaf) = TARGET_SUFFIXES.iter().find(|s| stem.ends_with(*s)) else { continue };
         assert_eq!(shape.len(), 2, "supir lora: {name} is not a 2D linear weight: {shape:?}");
-        sites.push(LinearSite { name: name.clone(), leaf, layer: None, spec: TargetSpec::whole(shape[0], shape[1]) });
+        sites.push(LinearSite { name: name.clone(), leaf, layer: None, spec: TargetSpec::whole(shape[0], shape[1]), save_name: None });
     }
     sites
 }

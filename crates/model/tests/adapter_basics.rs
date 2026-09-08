@@ -137,6 +137,7 @@ fn target_selector_layers_filters_by_layer_field_not_name_substring() {
         leaf: "wq",
         layer: Some(layer),
         spec: TargetSpec::whole(4, 4),
+        save_name: None,
     };
     let sel = TargetSelector::Layers {
         inner: Box::new(TargetSelector::Leaves(vec!["wq".to_string()])),
@@ -148,12 +149,12 @@ fn target_selector_layers_filters_by_layer_field_not_name_substring() {
     assert!(!sel.matches(&site("blocks.5.wq", 5)));
     // A name containing a layer-shaped substring outside the `layer` field
     // must not confuse the selector - it never parses `name`.
-    assert!(!sel.matches(&LinearSite { name: "blocks.2.extra.4.wq".to_string(), leaf: "wq", layer: Some(9), spec: TargetSpec::whole(4, 4) }));
+    assert!(!sel.matches(&LinearSite { name: "blocks.2.extra.4.wq".to_string(), leaf: "wq", layer: Some(9), spec: TargetSpec::whole(4, 4), save_name: None }));
 }
 
 #[test]
 fn target_selector_unknown_kind_of_query_returns_false_not_panic() {
     let sel = TargetSelector::Not(Box::new(TargetSelector::All));
-    let site = LinearSite { name: "x".to_string(), leaf: "x", layer: None, spec: TargetSpec::whole(1, 1) };
+    let site = LinearSite { name: "x".to_string(), leaf: "x", layer: None, spec: TargetSpec::whole(1, 1), save_name: None };
     assert!(!sel.matches(&site));
 }

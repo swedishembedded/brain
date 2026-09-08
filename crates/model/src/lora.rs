@@ -488,6 +488,13 @@ impl LoraPair {
     pub fn pair(&self) -> &Pair {
         &self.pair
     }
+
+    /// The underlying [`Pair`], mutably - e.g. for a device trainer that
+    /// uploads/downloads `A`/`B` directly rather than through
+    /// [`crate::adapter::AdapterKind`]'s `delta_into`/`project`/`step`.
+    pub fn pair_mut(&mut self) -> &mut Pair {
+        &mut self.pair
+    }
 }
 
 impl crate::adapter::AdapterKind for LoraPair {

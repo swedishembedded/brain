@@ -190,7 +190,7 @@ pub fn linear_sites(cfg: &AvCfg) -> Vec<LinearSite> {
     for l in 0..cfg.num_layers {
         for leaf in LEAVES {
             let (out, inn) = leaf_shape(leaf, vdim, adim);
-            sites.push(LinearSite { name: format!("transformer_blocks.{l}.{leaf}.weight"), leaf, layer: Some(l), spec: TargetSpec::whole(out, inn) });
+            sites.push(LinearSite { name: format!("transformer_blocks.{l}.{leaf}.weight"), leaf, layer: Some(l), spec: TargetSpec::whole(out, inn), save_name: None });
         }
     }
     sites

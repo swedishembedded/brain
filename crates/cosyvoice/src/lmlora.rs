@@ -52,10 +52,10 @@ pub fn linear_sites(d: &LmDims) -> Vec<LinearSite> {
     let (dm, hq, hkv) = (d.d_model, d.n_heads * d.head_dim, d.n_kv_heads * d.head_dim);
     let mut sites = Vec::with_capacity(d.n_layers * 4);
     for l in 0..d.n_layers {
-        sites.push(LinearSite { name: format!("layers.{l}.wq"), leaf: "wq", layer: Some(l), spec: TargetSpec::whole(hq, dm) });
-        sites.push(LinearSite { name: format!("layers.{l}.wk"), leaf: "wk", layer: Some(l), spec: TargetSpec::whole(hkv, dm) });
-        sites.push(LinearSite { name: format!("layers.{l}.wv"), leaf: "wv", layer: Some(l), spec: TargetSpec::whole(hkv, dm) });
-        sites.push(LinearSite { name: format!("layers.{l}.wo"), leaf: "wo", layer: Some(l), spec: TargetSpec::whole(dm, hq) });
+        sites.push(LinearSite { name: format!("layers.{l}.wq"), leaf: "wq", layer: Some(l), spec: TargetSpec::whole(hq, dm), save_name: None });
+        sites.push(LinearSite { name: format!("layers.{l}.wk"), leaf: "wk", layer: Some(l), spec: TargetSpec::whole(hkv, dm), save_name: None });
+        sites.push(LinearSite { name: format!("layers.{l}.wv"), leaf: "wv", layer: Some(l), spec: TargetSpec::whole(hkv, dm), save_name: None });
+        sites.push(LinearSite { name: format!("layers.{l}.wo"), leaf: "wo", layer: Some(l), spec: TargetSpec::whole(dm, hq), save_name: None });
     }
     sites
 }

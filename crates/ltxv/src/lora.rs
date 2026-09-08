@@ -107,7 +107,7 @@ pub fn linear_sites(cfg: &Cfg) -> Vec<LinearSite> {
                 "ff.net.2" => (dim, 4 * dim),
                 _ => (dim, dim),
             };
-            sites.push(LinearSite { name: format!("transformer_blocks.{l}.{leaf}.weight"), leaf, layer: Some(l), spec: TargetSpec::whole(out, inn) });
+            sites.push(LinearSite { name: format!("transformer_blocks.{l}.{leaf}.weight"), leaf, layer: Some(l), spec: TargetSpec::whole(out, inn), save_name: None });
         }
     }
     sites

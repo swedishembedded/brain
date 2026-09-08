@@ -106,6 +106,20 @@ pub struct LinearSite {
     /// this field directly rather than parsing it back out of `name`.
     pub layer: Option<usize>,
     pub spec: TargetSpec,
+    /// The serialization key stem, when it differs from `name`. `None`
+    /// means "use `name`" - true for every crate with one adapter per base
+    /// tensor. It must differ when several sites share ONE fold
+    /// destination (flux2's `wq`/`wk`/`wv` all target the same fused
+    /// `qkv.weight` at different `spec.row0` offsets): those sites cannot
+    /// all serialize under `name`, or [`AdapterSet::to_tensors`] would
+    /// collide three adapters onto one `.lora_a`/`.lora_b` pair.
+    pub save_name: Option<String>,
+}
+
+impl LinearSite {
+    fn ser_name(&self) -> &str {
+        self.save_name.as_deref().unwrap_or(&self.name)
+    }
 }
 
 /// A model that can enumerate the linears a [`select::TargetSelector`] may
@@ -247,7 +261,7 @@ impl<K: AdapterKind> AdapterSet<K> {
         let mut entries = Vec::with_capacity(sites.len());
         for site in sites {
             let mut k = K::new(site.spec, hp, &mut zero);
-            let name = site.name.clone();
+            let name = site.ser_name().to_string();
             let get = |suffix: &str| -> Option<(Vec<usize>, Vec<f32>)> {
                 src.get(&key_style.format(&name, suffix)).cloned()
             };
@@ -271,6 +285,27 @@ impl<K: AdapterKind> AdapterSet<K> {
 
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut (LinearSite, K)> {
         self.entries.iter_mut()
+    }
+
+    /// Random-access slice view, for a caller (e.g. a device trainer) that
+    /// indexes directly into a known sub-range of the canonical order rather
+    /// than walking every entry.
+    pub fn as_slice(&self) -> &[(LinearSite, K)] {
+        &self.entries
+    }
+
+    pub fn as_mut_slice(&mut self) -> &mut [(LinearSite, K)] {
+        &mut self.entries
+    }
+
+    /// Optimiser steps already applied - see flux2's `steps_done`/
+    /// `set_steps_done` for why this is worth persisting across a resume.
+    pub fn steps(&self) -> u64 {
+        self.t
+    }
+
+    pub fn set_steps(&mut self, t: u64) {
+        self.t = t;
     }
 
     /// Chunk length 1, matching flux2's `step_projected` - documented there
@@ -311,7 +346,7 @@ impl<K: AdapterKind> AdapterSet<K> {
         let mut out = Vec::new();
         for (site, k) in &self.entries {
             for (suffix, shape, data) in k.to_tensors() {
-                out.push((self.key_style.format(&site.name, suffix), shape, data));
+                out.push((self.key_style.format(site.ser_name(), suffix), shape, data));
             }
         }
         out

@@ -67,7 +67,7 @@ pub fn linear_sites(cfg: &Cfg) -> Vec<LinearSite> {
     let mut sites = Vec::with_capacity(cfg.n_layers * 7);
     for l in 0..cfg.n_layers {
         for (leaf, out, inn) in leaf_shapes(cfg.dim, hidden) {
-            sites.push(LinearSite { name: format!("blocks.{l}.{leaf}"), leaf, layer: Some(l), spec: TargetSpec::whole(out, inn) });
+            sites.push(LinearSite { name: format!("blocks.{l}.{leaf}"), leaf, layer: Some(l), spec: TargetSpec::whole(out, inn), save_name: None });
         }
     }
     sites
