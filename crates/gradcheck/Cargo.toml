@@ -64,6 +64,10 @@ brain-minimaxmusic3.workspace = true
 # `check_cosyvoice_lm_block` / `check_cosyvoice_lm` (src/lib.rs) - CosyVoice's
 # Qwen2-style speech-token LM host training reference.
 brain-cosyvoice.workspace = true
+# `check_deepseekocr2` (src/deepseekocr2.rs) - DeepSeek-OCR-2's DeepEncoder V2
+# resampler (the prefix-LM-masked Qwen2 GQA tower + projector).
+brain-deepseekocr2.workspace = true
+brain-sam1.workspace = true
 
 [dev-dependencies]
 brain-testutil.workspace = true

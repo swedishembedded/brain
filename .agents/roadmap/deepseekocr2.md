@@ -204,4 +204,38 @@ any future one built the same way.
 
 Registry wiring, the real `SamEncoder` composition, the device-side
 row-splice into the decoder, and CLI/serving are still M5-M7's job.
-Remaining milestones (M4-M12) not started.
+
+M4 (backward + gradcheck) done: every dispatch in `encoder.rs`'s forward now
+has a mirrored backward (`layer_bwd`, plus the final-norm/projector backward
+in `Resampler::backward_train`), reached via `forward_train`/`backward_train`
+- a training-shaped pair distinct from `resample_view`'s inference/tap
+shape, sharing the same per-layer dispatch (`layer_fwd` now also returns the
+retained device buffers backward needs, snapshotted by host round-trip at
+both residual points since `x` is mutated in place twice per layer).
+`attn_prefix_mask` needed no backward of its own, as the plan predicted -
+the softmax jacobian over the already-masked `probs` carries the right
+(~0) gradient into every masked entry, the same reasoning `crates/moondream3`
+already established. `gradcheck::check_deepseekocr2`
+(`crates/gradcheck/src/deepseekocr2.rs`) is a bespoke `CheckModel` harness,
+not the blanket `model::Model` impl - the resampler has no natural batch or
+loss of its own, so the harness supplies a fixed random linear probe against
+the projected output and bridges `loss()`/`backward()`'s two-call contract
+with a `RefCell<Option<TrainState>>`. Covers every trainable tensor AND the
+SAM-token-grid input (needed for a real SAM+encoder joint fine-tune later).
+
+**One real bug found and fixed by the gradcheck itself**, worth recording:
+the first cut wired `kv_expand_bwd`'s dispatch through `ids.kv_expand` (the
+FORWARD copy kernel) instead of the real `kv_expand_bwd.wgsl`/`KV_EXPAND_BWD`
+pipeline - two kernels with adjacent names in this crate's own `PIPELINES`
+list, easy to conflate. Symptom was exactly what a wrong-kernel dispatch
+should look like: `attn.k.weight`/`attn.v.weight`/`attn.v.bias` came back
+with an analytic gradient of EXACTLY `0.0` against a clearly nonzero
+numeric one (`report.dead_gradients()`'s signature), while `norm1.weight` -
+downstream of the same broken `d_xn1` fan-in - showed a real but
+four-orders-of-magnitude-too-small analytic value. Registering
+`kv_expand_bwd` as its own `Ids` field and pipeline entry fixed every
+parameter at once; no other kernel wiring needed a change. Recorded here
+because the failure signature (a specific parameter family reading exactly
+zero) is the fast way to recognize this class of bug again.
+
+Remaining milestones (M5-M12) not started.

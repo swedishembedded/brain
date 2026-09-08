@@ -78,6 +78,14 @@ pub use deepseekocr::{check_deepseekocr_relpos, check_deepseekocr_relpos_element
 pub mod bf16_train;
 pub use bf16_train::{check_matmul_bf16_weight, check_matmul_bf16_weight_eps_sweep};
 
+/// DeepSeek-OCR-2's DeepEncoder V2 resampler (`crates/deepseekocr2`) - the
+/// prefix-LM-masked Qwen2 GQA tower + projector this crate's own `deepseekocr`
+/// module does not cover (that one is SAM's rel-pos kernels only, shared with
+/// v1). A bespoke [`CheckModel`] harness, not the blanket `model::Model` impl:
+/// the resampler is a sub-component with no natural batch/loss of its own.
+pub mod deepseekocr2;
+pub use deepseekocr2::check_deepseekocr2;
+
 /// A model the checker can drive: a fixed batch must already be set.
 pub trait CheckModel {
     fn param_names(&self) -> Vec<String>;
@@ -1700,6 +1708,16 @@ mod tests {
         let report = check_gpt(7);
         report.print();
         assert_grad_gate(&report, "model");
+    }
+
+    #[test]
+    fn deepseekocr2_resampler_analytic_grads_match_finite_differences() {
+        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+            return;
+        }
+        let report = check_deepseekocr2(11);
+        report.print();
+        assert_grad_gate(&report, "deepseekocr2 resampler");
     }
 
     #[test]

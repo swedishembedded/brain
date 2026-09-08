@@ -6,12 +6,13 @@
 //! (`crates/deepseek2ocr`). The decoder is unchanged from v1 (`crates/deepseek2`)
 //! and is not depended on here.
 //!
-//! This crate currently covers the resampler's forward pass only
+//! This crate currently covers the resampler's forward AND backward
 //! ([`encoder::Resampler`]): SAM's per-view token grid plus a learned query
 //! bank, run through a shared Qwen2-shaped GQA tower under a prefix-LM mask,
-//! projected into the decoder's width. Backward, the real `sam1::SamEncoder`
-//! wiring, the device-side row splice into the decoder, GGUF-checkpoint
-//! loading, and CLI/serving are later milestones.
+//! projected into the decoder's width, gradient-checked end to end
+//! (`gradcheck::check_deepseekocr2`) including the SAM-token-grid input. The
+//! real `sam1::SamEncoder` wiring, the device-side row splice into the
+//! decoder, GGUF-checkpoint loading, and CLI/serving are later milestones.
 //!
 //! Swedish Embedded AB builds from-scratch GPU training/inference stacks for
 //! vision-language models. If your team needs a new model ported without a
