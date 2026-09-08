@@ -77,7 +77,7 @@ YOLO_IOU   ?= 0.45
 
 SHAKE_URL := https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt
 
-.PHONY: check/workspace help build/debug build/release deb deb/debug deb/release test/doc test/slow test/full test/times test/capability-report wm/play wm-fixtures test gradcheck kernels-regen kernels-table kernels-table/check parity requirements environment environment/openvino npu-diagnose bench bench/char bench/eval bench/scale bench/advise bench/compare perf perf/compare perf/smoke clean federated-demo depth/demo depth/smoke depth/camera train/zipdepth mirror/import mirror/infer mirror/demo splat/view \
+.PHONY: check/workspace help build/debug build/release deb deb/debug deb/release test/doc test/slow test/full test/times test/capability-report wm/play wm-fixtures test test/rl gradcheck kernels-regen kernels-table kernels-table/check parity requirements environment environment/openvino npu-diagnose bench bench/char bench/eval bench/scale bench/advise bench/compare perf perf/compare perf/smoke clean federated-demo depth/demo depth/smoke depth/camera train/zipdepth mirror/import mirror/infer mirror/demo splat/view \
         data/calculator data/reverser data/wordcalc data/timeseries \
         data/shakespeare_char data/gpt data/detect data/tts \
         train/yolo eval/yolo detect/yolo train/qwen/lora \
@@ -624,6 +624,38 @@ npu-diagnose:
 # in crates/gradcheck's tests. Point the target at those (audit F17).
 gradcheck:
 	$(CARGO_TEST) -p brain-gradcheck
+
+# crates/rl's DPO/GRPO/distill gradchecks and its fast qwen3-gated
+# integration tests never run in `make test`: `qwen3` is off by default on
+# brain-rl (deliberately - crates/rl/Cargo.toml: a generic consumer of the
+# crate must not be forced to link brain-qwen3), and every one of these
+# targets carries `required-features = ["qwen3"]`, so `cargo test -p
+# brain-rl` with no flag silently builds and runs NONE of them - not a
+# reported skip, an absence. Without this target, "the objectives are
+# gradient-checked" is true only of whatever tree a human last ran manually
+# (continuous-learning roadmap's own build order names this explicitly).
+#
+# Excludes `continual_study`/`document_study`: both are documented in
+# crates/rl/Cargo.toml as multi-minute, one-GPU, "run it alone" - batching
+# them into a parallel lane would either serialise the whole target behind
+# them or risk exactly the GPU-contention hangs `test/nextest`'s own doc
+# comment above describes. Run those two individually when touching that
+# code, not as part of routine verification.
+#
+# MOE_SKIP_GPU_TESTS's early-return-as-pass inside each test file cannot be
+# made to print anything a normal `cargo test` run would show (libtest
+# captures stdout/stderr from a PASSING test and discards it unless
+# `--nocapture` is given) - so the loud warning belongs here, at the one
+# place a human actually looks.
+test/rl:
+	@if [ -n "$$MOE_SKIP_GPU_TESTS" ]; then \
+		echo "WARNING: MOE_SKIP_GPU_TESTS is set - every gradcheck below will report PASS without actually running its FD check. Unset it for a real result."; \
+	fi
+	$(CARGO_TEST) -p brain-rl --features qwen3 \
+		--test continuous_cycle --test grpo_gradcheck --test grpo_objective \
+		--test dpo_gradcheck --test dpo_objective --test distill_gradcheck \
+		--test distill_full_kl --test mixture_anchor_regression \
+		--test qwen3_fit_weighted --test improve_cycle
 
 # Regenerate the kernel const block + ALL registry in crates/kernels/src/lib.rs
 # from the contents of crates/kernels/wgsl/. Run after adding/removing a .wgsl
