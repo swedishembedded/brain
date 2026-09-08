@@ -403,6 +403,7 @@ pub mod device_adapter {
             alpha: Some(alpha),
             targets: Some(targets.to_vec()),
             dataset_id: dataset_id.map(str::to_string),
+            per_target: None,
         });
 
         let config = serde_json::json!({ "rank": rank, "alpha": alpha, "targets": targets });

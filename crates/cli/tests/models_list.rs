@@ -98,6 +98,7 @@ fn write_adapter(store: &Store, vendor: &str, repo: &str, owner: &str, name: &st
         alpha: Some(16.0),
         targets: Some(vec!["q".to_string(), "k".to_string(), "v".to_string(), "o".to_string()]),
         dataset_id: Some("sql-2026".to_string()),
+        per_target: None,
     });
     let tensors = vec![("blocks.0.attn.wq.lora_a".to_string(), vec![4, 1], vec![1.0f32; 4])];
     checkpoint::st::save_safetensors(path.to_str().unwrap(), &tensors, &serde_json::json!({}), Some(&card)).unwrap();

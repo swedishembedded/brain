@@ -826,7 +826,7 @@ mod tests {
         std::fs::create_dir_all(&adapter_dir).unwrap();
         let mut adapter_card = ModelCard::new("Qwen/Qwen3-Toy:swedishembedded-com:generic-sft:latest", "qwen");
         adapter_card.variant_of = Some("Qwen/Qwen3-Toy".to_string());
-        adapter_card.adapter = Some(st::Adapter { kind: "lora".into(), rank: Some(4), base: Some("Qwen/Qwen3-Toy".to_string()), alpha: Some(8.0), targets: Some(vec!["wq".into()]), dataset_id: None });
+        adapter_card.adapter = Some(st::Adapter { kind: "lora".into(), rank: Some(4), base: Some("Qwen/Qwen3-Toy".to_string()), alpha: Some(8.0), targets: Some(vec!["wq".into()]), dataset_id: None, per_target: None });
         st::save_safetensors(
             adapter_dir.join("adapter.brain.safetensors").to_str().unwrap(),
             &[("blocks.0.attn.wq.weight.lora_a".into(), vec![1u64], vec![0.1f32])],

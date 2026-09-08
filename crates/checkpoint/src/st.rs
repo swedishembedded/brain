@@ -37,6 +37,27 @@ pub struct Adapter {
     /// (`sha256:...`, bench's `dataset_id`), when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dataset_id: Option<String>,
+    /// Per-target rank/alpha, when they are not uniform across every
+    /// target - `rank`/`alpha` above then carry the MAX seen, so an old
+    /// reader that only understands the scalar pair still gets a safe
+    /// (over-)estimate rather than a wrong one. Additive: absent on any
+    /// card written before per-target rank existed, and absent when every
+    /// target shares one rank/alpha (the common case).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub per_target: Option<Vec<AdapterTarget>>,
+}
+
+/// One target's own rank/alpha, when [`Adapter::per_target`] is present.
+/// `name` matches [`crate::st::StModel`]'s own tensor naming for that
+/// target's base leaf - the same name a fold looks the base weight up by.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AdapterTarget {
+    pub name: String,
+    pub rank: u32,
+    pub alpha: f32,
+    /// rsLoRA: this target's scale is `alpha/sqrt(rank)`, not `alpha/rank`.
+    #[serde(default)]
+    pub rs: bool,
 }
 
 /// Declared input/output modalities.
@@ -505,6 +526,7 @@ mod tests {
                 alpha: Some(32.0),
                 targets: Some(vec!["wq".into(), "wk".into(), "wv".into(), "wo".into()]),
                 dataset_id: Some("sha256:abc123".into()),
+                per_target: None,
             }),
             capabilities: vec!["text".into(), "chat".into()],
             modalities: Some(Modalities { input: vec!["text".into()], output: vec!["text".into()] }),

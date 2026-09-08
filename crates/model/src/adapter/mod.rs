@@ -14,6 +14,7 @@
 //! procure our services by sending an email to info@swedishembedded.com.
 
 pub mod device;
+pub mod plan;
 pub mod select;
 
 use std::collections::HashMap;
@@ -245,7 +246,16 @@ pub struct AdapterSet<K: AdapterKind> {
 
 impl<K: AdapterKind> AdapterSet<K> {
     pub fn build(sites: Vec<LinearSite>, hp: TargetHp, key_style: KeyStyle, init: &mut dyn FnMut() -> f32) -> Self {
-        let entries = sites.into_iter().map(|site| {
+        let planned = sites.into_iter().map(|site| (site, hp)).collect();
+        Self::build_planned(planned, key_style, init)
+    }
+
+    /// [`Self::build`], with a per-site [`TargetHp`] instead of one shared
+    /// for every target - what a per-layer rank/alpha plan resolves to
+    /// (see [`super::plan::AdapterPlan::resolve`]). `build` is the uniform
+    /// special case, `planned.iter().map(|s| (s, hp))`.
+    pub fn build_planned(planned: Vec<(LinearSite, TargetHp)>, key_style: KeyStyle, init: &mut dyn FnMut() -> f32) -> Self {
+        let entries = planned.into_iter().map(|(site, hp)| {
             let k = K::new(site.spec, hp, init);
             (site, k)
         }).collect();
@@ -258,15 +268,30 @@ impl<K: AdapterKind> AdapterSet<K> {
         key_style: KeyStyle,
         src: &HashMap<String, (Vec<usize>, Vec<f32>)>,
     ) -> Result<Self, String> {
+        Self::from_tensors_planned(sites.into_iter().map(|site| (site, hp)).collect(), key_style, src)
+    }
+
+    /// [`Self::from_tensors`], with a per-site [`TargetHp`] - see
+    /// [`Self::build_planned`]. Each target's rank is still re-derived from
+    /// its own tensor SHAPE where the source provides one
+    /// ([`AdapterKind::load_tensors`]'s shape check) - `hp.rank` here only
+    /// sizes the fresh adapter `load_tensors` then overwrites, and a
+    /// mismatch between the two is a hard error from that check, never a
+    /// silently wrong geometry.
+    pub fn from_tensors_planned(
+        planned: Vec<(LinearSite, TargetHp)>,
+        key_style: KeyStyle,
+        src: &HashMap<String, (Vec<usize>, Vec<f32>)>,
+    ) -> Result<Self, String> {
         let mut zero = || 0.0f32;
-        let mut entries = Vec::with_capacity(sites.len());
-        for site in sites {
+        let mut entries = Vec::with_capacity(planned.len());
+        for (site, hp) in planned {
             let mut k = K::new(site.spec, hp, &mut zero);
             let name = site.ser_name().to_string();
             let get = |suffix: &str| -> Option<(Vec<usize>, Vec<f32>)> {
                 src.get(&key_style.format(&name, suffix)).cloned()
             };
-            k.load_tensors(&get)?;
+            k.load_tensors(&get).map_err(|e| format!("{name}: {e}"))?;
             entries.push((site, k));
         }
         Ok(AdapterSet { entries, key_style, t: 0 })

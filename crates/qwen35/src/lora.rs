@@ -90,6 +90,7 @@ mod tests {
             alpha: Some(alpha),
             targets: Some(vec![leaf.to_string()]),
             dataset_id: None,
+            per_target: None,
         });
         let tensors = vec![
             (format!("{leaf}.lora_a"), vec![a.len() as u64], a),
