@@ -97,6 +97,29 @@ pub struct FactProbe {
     pub expected_answer: String,
 }
 
+impl FactProbe {
+    /// Parse one `{fact, probe_question, expected_answer}` record per line
+    /// from a `.jsonl` blob (a capability action's uploaded input, so bytes
+    /// rather than a path - `data::chat::ChatSample::from_jsonl`'s own path-based
+    /// reader is the file-based precedent this mirrors). Blank lines are
+    /// skipped; every other line is a hard parse failure naming its 1-based
+    /// line number, matching this type's own `deny_unknown_fields` contract
+    /// (a missing/mistyped/extra field fails loudly, not silently).
+    pub fn from_jsonl(bytes: &[u8]) -> Result<Vec<FactProbe>, String> {
+        let text = std::str::from_utf8(bytes).map_err(|e| format!("not valid UTF-8: {e}"))?;
+        let mut out = Vec::new();
+        for (lineno, line) in text.lines().enumerate() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let probe: FactProbe = serde_json::from_str(line).map_err(|e| format!("line {}: {e}", lineno + 1))?;
+            out.push(probe);
+        }
+        Ok(out)
+    }
+}
+
 /// Which half of a [`FactBatch`] an environment presents.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FactSplit {
@@ -432,6 +455,43 @@ mod tests {
     use crate::gate::{gate, Cause, Decision, GateInput};
     use data::tokenizer::CharTokenizer;
     use std::collections::HashSet;
+
+    #[test]
+    fn from_jsonl_parses_one_record_per_line_and_skips_blank_lines() {
+        let text = "\n{\"fact\":\"f1\",\"probe_question\":\"q1\",\"expected_answer\":\"a1\"}\n\n{\"fact\":\"f2\",\"probe_question\":\"q2\",\"expected_answer\":\"a2\"}\n";
+        let rows = FactProbe::from_jsonl(text.as_bytes()).expect("parses");
+        assert_eq!(
+            rows,
+            vec![
+                FactProbe { fact: "f1".into(), probe_question: "q1".into(), expected_answer: "a1".into() },
+                FactProbe { fact: "f2".into(), probe_question: "q2".into(), expected_answer: "a2".into() },
+            ]
+        );
+    }
+
+    #[test]
+    fn from_jsonl_on_empty_input_is_an_empty_vec() {
+        assert_eq!(FactProbe::from_jsonl(b"").expect("parses"), Vec::new());
+    }
+
+    #[test]
+    fn from_jsonl_names_the_line_of_a_syntax_error() {
+        let text = "{\"fact\":\"f1\",\"probe_question\":\"q1\",\"expected_answer\":\"a1\"}\nnot json\n";
+        let err = FactProbe::from_jsonl(text.as_bytes()).unwrap_err();
+        assert!(err.starts_with("line 2:"), "error must name the 1-based line, got: {err}");
+    }
+
+    #[test]
+    fn from_jsonl_rejects_an_unknown_field() {
+        let text = "{\"fact\":\"f1\",\"probe_question\":\"q1\",\"expected_answer\":\"a1\",\"extra\":\"x\"}\n";
+        assert!(FactProbe::from_jsonl(text.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn from_jsonl_rejects_invalid_utf8() {
+        let err = FactProbe::from_jsonl(&[0xff, 0xfe, 0xfd]).unwrap_err();
+        assert!(err.contains("UTF-8"), "error must say why: {err}");
+    }
 
     /// 20 facts x 3 probes = 60 triples, the batch shape B2 sizes its
     /// held-out budget against.
