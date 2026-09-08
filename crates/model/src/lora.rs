@@ -538,15 +538,31 @@ impl crate::adapter::AdapterKind for LoraPair {
     }
 
     fn load_tensors(&mut self, get: &dyn Fn(&str) -> Option<(Vec<usize>, Vec<f32>)>) -> Result<(), String> {
+        // An EMPTY shape means the source genuinely does not carry one (e.g.
+        // ltxv's checkpoint round-trip loses shape - `crate::checkpoint`'s
+        // safetensors path is the source of truth there, not this adapter),
+        // not "shape [0]" - fall back to a length check in that case rather
+        // than reject every such reader. A non-empty, WRONG shape is still a
+        // hard error: wan's own reason (an A/B swap is length-compatible on
+        // square targets) is exactly why a real shape must be checked when
+        // one is available.
         if let Some((shape, data)) = get(".lora_a") {
-            if shape != [self.pair.r, self.pair.inn] {
-                return Err(format!("LoraPair::load_tensors: .lora_a shape {shape:?} does not match [{}, {}]", self.pair.r, self.pair.inn));
+            let want = [self.pair.r, self.pair.inn];
+            if !shape.is_empty() && shape != want {
+                return Err(format!("LoraPair::load_tensors: .lora_a shape {shape:?} does not match {want:?}"));
+            }
+            if data.len() != want[0] * want[1] {
+                return Err(format!("LoraPair::load_tensors: .lora_a has {} elements, expected {}", data.len(), want[0] * want[1]));
             }
             self.pair.a = data;
         }
         if let Some((shape, data)) = get(".lora_b") {
-            if shape != [self.pair.out, self.pair.r] {
-                return Err(format!("LoraPair::load_tensors: .lora_b shape {shape:?} does not match [{}, {}]", self.pair.out, self.pair.r));
+            let want = [self.pair.out, self.pair.r];
+            if !shape.is_empty() && shape != want {
+                return Err(format!("LoraPair::load_tensors: .lora_b shape {shape:?} does not match {want:?}"));
+            }
+            if data.len() != want[0] * want[1] {
+                return Err(format!("LoraPair::load_tensors: .lora_b has {} elements, expected {}", data.len(), want[0] * want[1]));
             }
             self.pair.b = data;
         }
