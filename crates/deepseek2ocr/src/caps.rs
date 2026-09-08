@@ -51,13 +51,14 @@
 //!   decode IS now KV-cached (`DeepseekV2::generate_greedy_kv`) - the prompt
 //!   pays one batched forward, every generated token after that is one
 //!   incremental step, not a full re-run of the whole sequence so far.
-//! * **Split backend.** [`Session::load`] builds the vision encoder
-//!   (SAM+CLIP+glue) on `gpu_core::Gpu::new_wgpu` and the decoder on
-//!   `gpu_core::Gpu::new_cpu`, regardless of the ambient device selection.
-//!   `crates/sam1`'s tower used to corrupt its per-block buffers on wgpu at
-//!   1024x1024 with three or more blocks; that is fixed and confirmed at
-//!   real-weight scale (see `crates/sam1/tests/wgpu_real_weight_parity.rs`),
-//!   which is what let the vision half move off the CPU backend.
+//! * **Both halves on the GPU, on a host that has one.** [`Session::load`]
+//!   builds the vision encoder (SAM+CLIP+glue) with `gpu_core::Gpu::new_wgpu`
+//!   and picks the decoder's device with [`decoder_device`] - a real card by
+//!   default, the CPU Cranelift JIT when there is none or when an operator
+//!   asks for it (`$BRAIN_DEEPSEEK_OCR_DECODER_DEVICE`). Both backends are
+//!   gated against the same llama.cpp reference
+//!   (`crates/deepseek2/tests/{parity,generate}.rs`), so the choice is a
+//!   placement decision, not a correctness one.
 
 use std::sync::Mutex;
 
@@ -175,6 +176,133 @@ fn default_window_size() -> usize {
     std::env::var("BRAIN_DEEPSEEK_OCR_WINDOW_SIZE").ok().and_then(|s| s.parse().ok()).unwrap_or(90)
 }
 
+/// Device bytes the vision tower (SAM ViT-B at 1024² + the 16x compressor +
+/// CLIP-L + the projector) holds while hot.
+///
+/// MEASURED on a Tesla P40, on the card, not inferred from host RSS: a real
+/// page through the production [`Session::load`] peaks that card at
+/// **6.27 GiB** (`nvidia-smi memory.used`, sampled for the life of the
+/// process, with the decoder placed elsewhere so the figure is the tower's
+/// alone). 7 GiB rounds that up.
+///
+/// `crates/cli/src/resident_deepseekocr.rs` budgets it; the constant lives
+/// here because [`decoder_device`] needs it to decide whether one card can
+/// hold both halves.
+pub const VISION_DEVICE_BYTES: u64 = 7u64 << 30;
+
+/// Device bytes the decoder half holds while hot, at the default context.
+///
+/// MEASURED the same way, on the same run: **13.25 GiB** on its own Tesla P40
+/// at `ctx = 8192`, `chunk = 512` (the served defaults). It decomposes as
+/// ~11.4 GiB of weights (2234 tensors, 2.9 B parameters at fp32), ~1.0 GiB of
+/// KV cache (12 layers x 2 x 8192 x 1280 fp32), ~0.5 GiB of per-expert MoE
+/// activation scratch at a 512-row round, and ~0.3 GiB of attention
+/// score/probability slabs. 14 GiB rounds that up.
+///
+/// A smaller `$BRAIN_DEEPSEEK_OCR_CTX` shrinks only the KV cache, which is
+/// the smallest of those four terms - the weights do not move - so this is
+/// close to a floor, not an average.
+pub const DECODER_DEVICE_BYTES: u64 = 14u64 << 30;
+
+/// Host bytes the whole composite holds once the decoder is on a card:
+/// tokenizer, the transient mmproj import, the CPU-side preprocessor and the
+/// per-token host work. MEASURED at **2.63 GiB** of VmHWM over a real page.
+pub const HOST_BYTES_GPU_DECODER: u64 = 3u64 << 30;
+
+/// Host bytes the whole composite holds with the decoder on the CPU backend -
+/// the ~11.4 GiB of fp32 weights that would otherwise be on a card, plus
+/// [`HOST_BYTES_GPU_DECODER`]'s working set. MEASURED at **13.51 GiB** of
+/// VmHWM over the same page.
+pub const HOST_BYTES_CPU_DECODER: u64 = 14u64 << 30;
+
+/// Where [`Session::load`] builds the decoder half.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DecoderDevice {
+    /// The CPU Cranelift JIT (`gpu_core::Gpu::new_cpu`).
+    Cpu,
+    /// wgpu on the ambient card - the same one the vision tower resolves to,
+    /// so both halves share that card's VRAM.
+    SameCard,
+    /// wgpu on card `i`, so the decoder's ~14 GiB and the tower's ~6 GiB come
+    /// out of two different pools.
+    Card(u32),
+}
+
+/// Which device the decoder half is built on, given the card the vision tower
+/// is going to (`None` when the caller has not chosen one, i.e. whatever the
+/// ambient selection resolves to).
+///
+/// `$BRAIN_DEEPSEEK_OCR_DECODER_DEVICE` is the operator override, in the same
+/// spirit as [`default_ctx_len`]'s `$BRAIN_DEEPSEEK_OCR_CTX`: it sizes a real
+/// device allocation the resident is built with once, so it is an env-level
+/// knob rather than a per-request parameter. It takes `cpu`, `gpu` (the
+/// ambient card), a bare card index or `gpu<i>` (that card), or `auto`. An
+/// unparseable value is a warning and `auto`, never a hard failure of a
+/// server's activation.
+///
+/// `auto` - the default - resolves as:
+///
+/// 1. **No discrete GPU: [`DecoderDevice::Cpu`].** `Gpu::new_wgpu` on such a
+///    box resolves to a software rasteriser whose buffers ARE host RAM, which
+///    is strictly worse than the Cranelift JIT that is already there.
+/// 2. **A second discrete card that can hold [`DECODER_DEVICE_BYTES`]:
+///    [`DecoderDevice::Card`] on the largest such card.** Keeping the two
+///    halves on separate cards is what makes the placement fit comfortably
+///    rather than at 83% of one 24 GiB card.
+/// 3. **One card big enough for both halves: [`DecoderDevice::SameCard`].**
+/// 4. **Otherwise [`DecoderDevice::Cpu`]** - a decoder that does not fit is
+///    not a decoder that runs slowly, it is one that fails to allocate.
+///
+/// The GPU is the default where it fits because it is measured faster, not
+/// assumed: on a Tesla P40 against the 48-thread Cranelift JIT, at the served
+/// `ctx = 8192`/`chunk = 512` shape with the real checkpoint, wgpu decodes
+/// 0.198 s/token against 0.772 s/token and prefills a 283-row prompt in
+/// 3.31 s against 13.78 s - and produces the same ids, which
+/// `crates/deepseek2/tests/decode_throughput.rs` asserts rather than assumes.
+pub fn decoder_device(vision_card: Option<u32>) -> DecoderDevice {
+    match std::env::var("BRAIN_DEEPSEEK_OCR_DECODER_DEVICE").ok().map(|s| s.trim().to_ascii_lowercase()) {
+        None => auto_decoder_device(vision_card),
+        Some(s) if s.is_empty() || s == "auto" => auto_decoder_device(vision_card),
+        Some(s) if s == "cpu" => DecoderDevice::Cpu,
+        Some(s) if s == "gpu" || s == "wgpu" => DecoderDevice::SameCard,
+        Some(s) => match s.strip_prefix("gpu").unwrap_or(&s).parse::<u32>() {
+            Ok(i) => DecoderDevice::Card(i),
+            Err(_) => {
+                eprintln!("brain: BRAIN_DEEPSEEK_OCR_DECODER_DEVICE={s:?} is not cpu|gpu|gpu<i>|<i>|auto - using auto");
+                auto_decoder_device(vision_card)
+            }
+        },
+    }
+}
+
+fn auto_decoder_device(vision_card: Option<u32>) -> DecoderDevice {
+    let cards = gpu_core::devices::gpus();
+    let discrete: Vec<&gpu_core::devices::DeviceId> =
+        cards.iter().filter(|d| d.identity.class == gpu_core::DeviceClass::DiscreteGpu).collect();
+    if discrete.is_empty() {
+        return DecoderDevice::Cpu;
+    }
+    let ambient = vision_card.or_else(gpu_core::devices::current_gpu);
+    if let Some(other) = discrete
+        .iter()
+        .filter(|d| Some(d.index) != ambient && d.identity.vram_bytes >= DECODER_DEVICE_BYTES)
+        .max_by_key(|d| d.identity.vram_bytes)
+    {
+        return DecoderDevice::Card(other.index);
+    }
+    let host_card = match ambient {
+        Some(i) => discrete.iter().find(|d| d.index == i).copied(),
+        None => discrete.first().copied(),
+    };
+    match host_card {
+        Some(d) if d.identity.vram_bytes >= VISION_DEVICE_BYTES + DECODER_DEVICE_BYTES => DecoderDevice::SameCard,
+        // A card whose size the registry could not read (`vram_bytes == 0`)
+        // is not evidence that it fits; refusing to guess keeps a failed
+        // allocation from being this function's doing.
+        _ => DecoderDevice::Cpu,
+    }
+}
+
 pub fn generate_spec() -> ActionSpec {
     ActionSpec::new(
         "generate",
@@ -209,7 +337,7 @@ pub fn manifest() -> Manifest {
     Manifest::new(
         MODEL,
         "DeepSeek-OCR -- document image in, text/markdown out. DeepEncoder (SAM ViT-B + 16x compressor \
-         -> CLIP-L) spliced into a DeepSeek-V2 MoE decoder. Greedy, batch 1, vision on wgpu, decoder on CPU.",
+         -> CLIP-L) spliced into a DeepSeek-V2 MoE decoder. Greedy, batch 1, both halves on the GPU where one fits.",
         vec![generate_spec()],
     )
     .with_max_context_tokens(default_ctx_len() as u64)
@@ -260,29 +388,44 @@ pub struct Session {
 }
 
 impl Session {
-    /// Build the whole composite from a checkpoint directory. Minutes, and a
-    /// ~22 GiB peak - this is the call `ResidentModel::activate` makes once.
+    /// Build the whole composite from a checkpoint directory - the call
+    /// `ResidentModel::activate` makes once. Tens of seconds, and roughly
+    /// [`VISION_DEVICE_BYTES`] + [`DECODER_DEVICE_BYTES`] +
+    /// [`HOST_BYTES_GPU_DECODER`] once it is up.
     ///
-    /// **The decoder is forced onto the CPU backend**, with `Gpu::new_cpu`, not
-    /// by mutating `BRAIN_DEVICE`: this object lives for the life of a server
-    /// process, and a process-global env write from inside one model's
-    /// activation would silently change the backend every *other* resident
-    /// builds on afterwards. It has no wgpu-corruption reason to move (that bug
-    /// was `crates/sam1`'s tower, not the decoder) and no measured wgpu benefit
-    /// either, so it stays put.
+    /// **The vision encoder (SAM+CLIP+glue) builds on `Gpu::new_wgpu`** and
+    /// **the decoder on whatever [`decoder_device`] picks** - a real card
+    /// wherever one fits, the CPU Cranelift JIT otherwise or on an operator's
+    /// say-so. On a Tesla P40 the GPU decoder is 3.9x faster per token and
+    /// 4.2x faster on prefill than the 48-thread JIT at this exact shape, and
+    /// decodes the same ids (`crates/deepseek2/tests/decode_throughput.rs`).
     ///
-    /// **The vision encoder (SAM+CLIP+glue) now builds on `Gpu::new_wgpu`.**
-    /// `crates/sam1`'s known wgpu corruption at 1024x1024 with three or more
-    /// blocks (what pinned this whole model to the CPU backend originally) is
-    /// fixed and confirmed at real-weight scale (`crates/sam1/tests/
-    /// wgpu_real_weight_parity.rs`, `wgpu_block_count_corruption.rs`) - a prior
-    /// pass measured a several-fold CPU-vs-wgpu gap on this tower, so
-    /// moving it is a real per-page win, not a defensive no-op. The vision
-    /// tower and the decoder are already separate `Gpu` handles - the splice
-    /// crosses them as a host `Vec<f32>` (`DeepseekOcr::encode_block`), never a
-    /// raw device buffer - so giving them different backends is a
-    /// device-selection change, not an architectural one.
+    /// Neither device is selected by mutating `BRAIN_DEVICE`: this object
+    /// lives for the life of a server process, and a process-global env write
+    /// from inside one model's activation would silently change the backend
+    /// every *other* resident builds on afterwards. A specific card is entered
+    /// with `gpu_core::devices::with_gpu`, a thread-scoped selection that ends
+    /// with the call.
+    ///
+    /// The vision tower and the decoder are separate `Gpu` handles - the
+    /// splice crosses them as a host `Vec<f32>` (`DeepseekOcr::encode_block`),
+    /// never a raw device buffer - so putting them on different backends, or
+    /// on two different cards, is a device-selection change and not an
+    /// architectural one.
     pub fn load(dir: &str) -> Result<Session, String> {
+        Session::load_with(dir, decoder_device(None))
+    }
+
+    /// [`Session::load`] with the decoder's placement chosen by the caller
+    /// rather than re-derived from this process's device registry.
+    ///
+    /// The scheduler needs this: `crates/cli/src/resident_deepseekocr.rs`
+    /// RESERVES device bytes against a specific set of devices before
+    /// activating, and a second, independent placement decision inside the
+    /// build could name a different card than the one that was reserved. One
+    /// decision, passed down, is what makes the reservation and the allocation
+    /// describe the same bytes.
+    pub fn load_with(dir: &str, placement: DecoderDevice) -> Result<Session, String> {
         let t0 = std::time::Instant::now();
         let files = Files::locate(dir)?;
         let cfg = import::config(&files, 1)?;
@@ -300,7 +443,24 @@ impl Session {
 
         let t1 = std::time::Instant::now();
         let dev_vision = |k: &'static [(&'static str, &'static str)]| gpu_core::Gpu::new_wgpu(k);
-        let dev_decoder = |k: &'static [(&'static str, &'static str)]| gpu_core::Gpu::new_cpu(k);
+        let dev_cpu = |k: &'static [(&'static str, &'static str)]| gpu_core::Gpu::new_cpu(k);
+        let dev_same_card = dev_vision;
+        // `with_gpu` is a thread-scoped selection, so this closure lands the
+        // decoder on exactly `i` however the ambient selection is set, and
+        // leaves that selection untouched for the vision factory beside it.
+        let dev_other_card = |k: &'static [(&'static str, &'static str)]| {
+            let i = match placement {
+                DecoderDevice::Card(i) => i,
+                _ => unreachable!("dev_other_card is only installed for DecoderDevice::Card"),
+            };
+            gpu_core::devices::with_gpu(i, || gpu_core::Gpu::new_wgpu(k)).unwrap_or_else(|e| panic!("deepseek-ocr: decoder on gpu{i}: {e}"))
+        };
+        let dev_decoder: crate::DeviceFactory = match placement {
+            DecoderDevice::Cpu => &dev_cpu,
+            DecoderDevice::SameCard => &dev_same_card,
+            DecoderDevice::Card(_) => &dev_other_card,
+        };
+        eprintln!("deepseek-ocr: vision on wgpu, decoder on {placement:?}");
         let vision = import::encoder_weights_for(&files, &cfg)?;
         stage_time("load: mmproj import (encoder weights)", t1);
         let t2 = std::time::Instant::now();
@@ -608,5 +768,55 @@ mod tests {
             std::env::remove_var("BRAIN_DEEPSEEK_OCR_NGRAM_SIZE");
             std::env::remove_var("BRAIN_DEEPSEEK_OCR_WINDOW_SIZE");
         }
+    }
+
+    /// The operator override must actually reach [`decoder_device`], and each
+    /// spelling must mean what its doc says. A typo in the variable name, or
+    /// an arm that silently fell through to `auto`, would leave an operator
+    /// unable to put this decoder back on the CPU on a box where that is what
+    /// they want - and the failure would be invisible, because `auto` picks a
+    /// plausible answer too.
+    ///
+    /// The `auto` path itself is deliberately NOT asserted to a fixed value:
+    /// it reads this box's real device registry, so a test that pinned it
+    /// would only be pinning the machine it last ran on. What IS asserted
+    /// about `auto` is the one property that holds on every host - it never
+    /// names a card the registry does not have.
+    #[test]
+    fn the_decoder_device_override_is_honoured_and_auto_names_a_real_card() {
+        // SAFETY: no other test in this crate reads this var.
+        let restore = std::env::var("BRAIN_DEEPSEEK_OCR_DECODER_DEVICE").ok();
+        let set = |v: Option<&str>| unsafe {
+            match v {
+                Some(v) => std::env::set_var("BRAIN_DEEPSEEK_OCR_DECODER_DEVICE", v),
+                None => std::env::remove_var("BRAIN_DEEPSEEK_OCR_DECODER_DEVICE"),
+            }
+        };
+
+        set(Some("cpu"));
+        assert_eq!(decoder_device(None), DecoderDevice::Cpu);
+        set(Some("CPU"));
+        assert_eq!(decoder_device(None), DecoderDevice::Cpu, "the value is case-insensitive");
+        set(Some("gpu"));
+        assert_eq!(decoder_device(None), DecoderDevice::SameCard);
+        set(Some("gpu1"));
+        assert_eq!(decoder_device(None), DecoderDevice::Card(1));
+        set(Some("3"));
+        assert_eq!(decoder_device(None), DecoderDevice::Card(3), "a bare index names a card");
+
+        // An unparseable value must not take a server's activation down.
+        set(Some("banana"));
+        let fallback = decoder_device(None);
+        set(None);
+        assert_eq!(fallback, decoder_device(None), "an unparseable override must resolve exactly as `auto` does");
+
+        let n = gpu_core::devices::gpus().len() as u32;
+        match decoder_device(None) {
+            DecoderDevice::Card(i) => assert!(i < n, "auto named gpu{i} on a box with {n} card(s)"),
+            DecoderDevice::SameCard => assert!(n > 0, "auto chose a card on a box with none"),
+            DecoderDevice::Cpu => {}
+        }
+
+        set(restore.as_deref());
     }
 }

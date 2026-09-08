@@ -2261,3 +2261,124 @@ pointer for whoever picks this up in the same environment).
       `crates/model/src/vit.rs`, the Hardware-and-limits section of
       `docs/models/deepseek2ocr.md`, and `residency::multi`'s "first and so far
       only" note all still described the CPU pin as current.
+
+## Phase 10: the decoder moves onto the GPU, and both backends get gated
+
+The split backend Phase 9 landed put the vision tower on wgpu and left the
+DeepSeek-V2 MoE decoder on `Gpu::new_cpu`, with a doc comment saying it had
+"no measured wgpu benefit". That claim was never measured on a discrete card.
+It is now, on two Tesla P40s, and it was wrong.
+
+### The correctness gap that had to close first
+
+`crates/deepseek2` ran every gate on ONE backend: `parity.rs` and
+`generate.rs` wrote `BRAIN_DEVICE=cpu` before building a device, and
+`chunked_prefill.rs` compares each backend against itself. Nothing in the
+crate could see a kernel that is right on one backend and wrong on the other,
+and this decode path is exactly the shape where that matters -
+`moe_linear_gated`, `silu_mul`, `scale_add`, `concat_split` and the `matmul`
+family are hand-written Rust siblings on `backend-cpu`, selected by kernel
+NAME in its dispatch ladder and validated only against scalar references
+beside them, while wgpu runs the WGSL. (`crates/deepseek2` is also absent from
+`scripts/gates/parity-gate.sh` entirely - still open.)
+
+Audited for the lesson-#5 failure mode (a `workgroupBarrier()` reduction with
+no barrier-free sibling returning zeros on one backend): **no MoE or attention
+kernel on this path carries a barrier, workgroup memory or an atomic.** The
+two that do are handled - `rmsnorm_rows` is caps-gated at RECORD time by
+`block::rms_variant` and degrades to barrier-free `rmsnorm` on the CPU, and
+`matmul_reg3` is intercepted by name before `backend-cpu`'s JIT (which refuses
+3-barrier kernels outright rather than mis-executing them).
+
+Four gates, all green:
+
+| gate | what it proves | measured |
+|---|---|---|
+| `deepseek2/tests/backend_parity.rs` (new, fast lane) | tiny fixture, CPU vs wgpu, both tapes + greedy ids | worst 2.24e-8, bound 1e-6 |
+| `deepseek2/tests/parity.rs` + `generate.rs` wgpu twins | the real 2.9 B decoder vs llama.cpp, on each backend | token for token on both |
+| `deepseek2/tests/decode_throughput.rs` (new, slow lane) | served ctx 8192 / chunk 512 / 283-row shape, same ids | identical over 32 steps |
+| `deepseek2ocr/tests/tiny_ref.rs::every_device_placement_matches_all_cpu` | wiring: (wgpu,wgpu) and (wgpu,cpu) vs all-CPU | cos 1.0000000000 |
+
+`tests/common/real_lm.rs` takes the device as an argument (`open_on`) instead
+of writing `BRAIN_DEVICE`: a process-global env write cannot express "this
+build on the CPU, that one on the card" inside one test binary.
+
+### Measured, on the served build
+
+One real page (a rendered datasheet page, 1240x1754), same prompt, `--max-new
+512`, through `examples/batch_ocr.rs` on the production `Session::load`:
+
+| | decoder on CPU | decoder on a P40 |
+|---|---|---|
+| page wall time | **539.3 s** | **121.3 s** (4.4x) |
+| per token | 0.772 s | 0.198 s |
+| 283-row prefill | 13.78 s | 3.31 s |
+| host VmHWM | 13.51 GiB | **2.63 GiB** |
+| vision card | 6.27 GiB | 6.27 GiB |
+| decoder card | - | 13.25 GiB |
+| decoded markdown | byte-identical to the other column | |
+
+The CPU column was taken with the box under a load average near 60, so it is
+if anything generous to the GPU side being smaller than it looks; the
+decoder-only measurement on a quiet run
+(`deepseek2/tests/decode_throughput.rs`) puts the same comparison at 5.9x on
+prefill and 6.0x on decode.
+
+### Where the GPU time actually goes, and what is still on the table
+
+`BRAIN_PROFILE=1` over prefill + 32 decode steps, on the card:
+
+```text
+=== GPU op counts === uniforms=124905 bind_groups=124905 submits=4865 dispatches=124905
+moe_linear_gated  3290.0 ms  69696 calls  (50.8%)
+matmul            2649.1 ms   3117 calls  (40.9%)
+scale_add          162.7 ms  23232 calls  ( 2.5%)
+silu_mul           158.7 ms  23628 calls  ( 2.4%)
+router_gate         74.3 ms    363 calls  ( 1.1%)
+```
+
+69696 = 33 rounds x 2112, i.e. **every MoE layer dispatches all 64 experts for
+every row and masks the 58 it did not route to**. That reads ~9.7 GB of expert
+weights per token where the top-6 routing needs ~0.9 GB. `model::moe::
+expert_fwd_grouped` (device-side row permutation + grouped GEMM over
+`matmul_reg3_grouped`, no host readback, ~12 dispatches per layer instead of
+192) is the written and parity-gated fix
+(`crates/model/tests/moe_grouped_parity.rs`) and **has no production caller
+yet**; wiring it here needs this decoder's per-expert weight tensors
+concatenated into one buffer per (layer, projection) - 64 x 1280 x 896 fp32 =
+293 MB, comfortably inside the 2047 MiB storage-binding limit. It is GPU-only
+(`matmul_reg3_grouped` is a 3-barrier kernel with no `fast_ops` sibling), so
+the selection must be caps-gated at record time and the CPU path keeps
+`expert_fwd`.
+
+`matmul`'s 40.9% is the second target: at one decode row these are GEMVs
+launched with only `n` threads (1280 or 1792), ~4 GFLOP/s against the card's
+11.8 TFLOP/s roof.
+
+### Placement, and the CPU path staying reachable
+
+`caps::decoder_device(vision_card) -> DecoderDevice::{Cpu, SameCard, Card(i)}`
+is the one decision, read by `Session::load_with` and by
+`crates/cli/src/resident_deepseekocr.rs` alike so a reservation and an
+allocation cannot name different cards. `$BRAIN_DEEPSEEK_OCR_DECODER_DEVICE`
+takes `cpu`, `gpu`, `gpu<i>`, a bare index, or `auto` (default); `auto`
+prefers a second discrete card, then one card big enough for both halves, then
+the CPU. A GPU-less host stays on the CPU deliberately: `Gpu::new_wgpu` there
+is a software rasteriser whose buffers are host RAM.
+
+The residency constants are now four independent measurements
+(`VISION_DEVICE_BYTES` 7 GiB, `DECODER_DEVICE_BYTES` 14 GiB,
+`HOST_BYTES_GPU_DECODER` 3 GiB, `HOST_BYTES_CPU_DECODER` 14 GiB) rather than a
+decomposition of the single 21.32 GiB all-CPU VmHWM taken at the long-gone
+512-token flat-tape shape, and they live in `deepseek2ocr::caps` because
+`decoder_device` needs two of them to decide whether one card holds both
+halves.
+
+### Found in passing, NOT fixed here
+
+`deepseek2ocr/tests/tiny_ref.rs::composite_backward_reaches_the_image_and_descends`
+**fails on `BRAIN_DEVICE=vulkan`** (the native ash+naga backend, not wgpu):
+`vision.sam.blocks.0.attn.rel_pos_h` gets no gradient. Confirmed pre-existing
+by re-running it at the parent commit. Green on wgpu and on the CPU JIT, so it
+does not touch the served path, but it is the lesson-#5 shape on a third
+backend and belongs in `crates/sam1`'s ledger.

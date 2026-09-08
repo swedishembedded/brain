@@ -148,13 +148,13 @@ impl DeepseekOcr {
 
     /// [`Self::new_with_prompt`] with the vision encoder (SAM+CLIP+glue) and the
     /// decoder built on INDEPENDENTLY chosen devices, instead of one factory for
-    /// both. This is what lets a caller put the vision tower on wgpu (fast, and
-    /// no longer known-corrupting at production scale -- `crates/sam1`'s
-    /// 3-or-more-block wgpu bug is fixed, see that crate's own tests) while
-    /// leaving the decoder on the CPU backend it has no reason to move off yet.
-    /// `caps::Session::load` is the one production caller; every other caller
-    /// keeps using [`Self::new_with_prompt`] (equivalent to passing `dev` twice
-    /// here, unchanged behaviour).
+    /// both. The two halves meet as a host `Vec<f32>` (`Self::encode_block`),
+    /// never a shared device buffer, so they can sit on different backends or
+    /// on two different cards - which is what `caps::Session::load`, the one
+    /// production caller, uses to put the tower on one card and the ~14 GiB
+    /// MoE decoder on another. Every other caller keeps using
+    /// [`Self::new_with_prompt`] (equivalent to passing `dev` twice here,
+    /// unchanged behaviour).
     #[allow(clippy::too_many_arguments)] // same knobs as new_with_prompt, split into two devices
     pub fn new_with_prompt_devices(
         dev_vision: DeviceFactory<'_>,

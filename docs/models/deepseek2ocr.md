@@ -155,40 +155,60 @@ atomically: `<|grounding|>` turns on grounding mode (the model then emits
 
 ## Hardware and limits
 
-**Split backend: vision on wgpu, decoder on CPU.** `crates/sam1`'s ViT tower
-used to corrupt its per-block buffers on the wgpu backend at 1024x1024 once
-the graph held three or more blocks - a tracked correctness bug that produced
-plausible-looking garbage rather than an error. That bug is now fixed and
-confirmed at real-weight scale (5/5 clean parity runs plus 32/32 clean trials
-under induced heavy contention reproducing the original failure conditions),
-so `caps::Session::load` builds the vision encoder (SAM+CLIP+glue) on
-`gpu_core::Gpu::new_wgpu` and the decoder on `gpu_core::Gpu::new_cpu` (the
-decoder has no wgpu-corruption history and no measured wgpu benefit, so it
-stays put). Because it holds real bytes on two devices at once, it is the one
-served model the scheduler claims through its **multi-device** path: it names
-`(GPU, ~6 GiB)` for the vision tower and `(CPU, ~16 GiB)` for everything
-host-side, so each device is checked against its own budget instead of one of
-them being invisible. On a host whose GPU shares physical RAM with the CPU,
-both names draw from the one shared memory pool, so nothing is double-counted.
-It does not mutate `BRAIN_DEVICE`; a server-lifetime resident must not change
-the backend other models build on, so the card is chosen by scoped registry
-selection instead.
+**Both halves on the GPU, on a host that has one.** `caps::Session::load`
+builds the vision encoder (SAM+CLIP+glue) with `gpu_core::Gpu::new_wgpu` and
+the decoder on whichever device `caps::decoder_device` picks. That is a real
+card by default: on two Tesla P40s the served build places the tower on one
+and the DeepSeek-V2 MoE decoder on the other, and a page that took **539 s**
+with the decoder on the 48-thread CPU Cranelift JIT takes **121 s** with it on
+a card - same image, same prompt, same 512-token budget, and byte-identical
+decoded markdown. Per token that is **0.198 s against 0.772 s**, and the
+283-row prompt prefills in **3.3 s against 13.8 s**.
+
+The GPU is the default because it is measured faster, not assumed, and the
+decoder is correct on both: `crates/deepseek2/tests/{parity,generate}.rs`
+gate the real 2.9 B decoder against the SAME llama.cpp reference on each
+backend (it reproduces llama.cpp's continuation token for token on both),
+`crates/deepseek2/tests/backend_parity.rs` gates the two against each other
+at the fp32 noise floor, and
+`crates/deepseek2/tests/decode_throughput.rs` asserts they decode the same ids
+at the served `ctx = 8192`/`chunk = 512` shape while reporting each one's cost.
+
+**`$BRAIN_DEEPSEEK_OCR_DECODER_DEVICE` is the operator knob**, alongside
+`$BRAIN_DEEPSEEK_OCR_CTX`/`$BRAIN_DEEPSEEK_OCR_CHUNK`: `cpu`, `gpu` (the
+vision tower's own card), `gpu<i>` or a bare index (that card), or `auto`
+(the default). `auto` prefers a second discrete card, falls back to sharing
+the tower's card when one is big enough for both, and falls back to the CPU
+when there is no discrete GPU at all - on such a box `Gpu::new_wgpu` resolves
+to a software rasteriser whose buffers ARE host RAM, which is strictly worse
+than the Cranelift JIT already there. The CPU decoder is a supported
+placement, not a deprecated one; it is what a GPU-less host runs and what an
+operator gets by asking.
 
 <!-- perf-number: hardware requirement, not a throughput claim -->
-**~22 GiB resident (measured at the old 512-token flat-tape shape; pending
-re-measurement on the chunked one - see `crates/cli/src/
-resident_deepseekocr.rs`'s `COMPOSITE_PEAK_BYTES` doc).** The served instance
-is now sized for the checkpoint's real 8192-token context by default
-(`$BRAIN_DEEPSEEK_OCR_CTX`, clamped to that ceiling), not a fixed 512 - the
-long-standing reason for the 512 cap (every extra row of context cost a
+**~7 GiB + ~14 GiB of VRAM and ~3 GiB of RAM**, measured on the served build
+(`nvidia-smi memory.used` per card and `/proc/self/status` VmHWM, sampled for
+the life of a real page): **6.27 GiB** on the vision card, **13.25 GiB** on
+the decoder card, **2.63 GiB** of host RSS. With the decoder on the CPU
+instead it is 6.27 GiB of VRAM and **13.51 GiB** of RAM. Each of those is its
+own direct measurement, so `crates/cli/src/resident_deepseekocr.rs` names
+every device the instance really occupies with its own figure rather than
+splitting one number across devices - which is what it used to do, from a
+21.32 GiB all-CPU reading taken at the long-superseded 512-token flat-tape
+shape.
+
+The decoder's ~11.4 GiB is fp32 weights (2234 tensors, 2.9 B parameters); the
+rest is ~1.0 GiB of KV cache at the checkpoint's real 8192-token context
+(`$BRAIN_DEEPSEEK_OCR_CTX`, clamped to that ceiling), ~0.5 GiB of per-expert
+MoE activation scratch at a 512-row prefill round, and ~0.3 GiB of attention
+slabs. A smaller context shrinks only the KV cache - the weights do not move -
+so those figures are close to a floor rather than an average. The long-standing
+reason context used to be capped near 512 (every extra row cost a
 `[seq, 129280]` logit slab in a flat batched tape) no longer applies:
 `DeepseekV2::prefill_chunked` prefills in bounded rounds
-(`$BRAIN_DEEPSEEK_OCR_CHUNK`, default 512, which already covers the whole
-real prompt in one round) against a KV cache sized to the context instead of
-a tape sized to it, so a wider context grows the KV cache and the round
-scratch, not a `[ctx, vocab]` slab. A box with less than ~24 GiB free
-probably still activates it, likely with room to spare - the 22 GiB figure
-predates this change and has not yet been re-measured downward.
+(`$BRAIN_DEEPSEEK_OCR_CHUNK`, default 512, which already covers the whole real
+prompt in one round) against a KV cache sized to the context instead of a tape
+sized to it.
 
 **KV-cached, CHUNKED decode.** Decode used to be `O(T²)` recompute with no KV
 cache - every generated token re-ran the whole sequence through all 12 MoE
@@ -201,17 +221,20 @@ tape either. Every generated token after prefill is still one `O(1)`
 incremental decode step (`model::block::gqa_chunk_step` at one new row, plus
 a single-row MoE/dense FFN pass), not a full re-run of the sequence.
 
-**Model construction and vision encoding (SAM ViT-B at 1024x1024 ->
-CLIP-L/24 -> compressor -> projector) were profiled and optimized across
-several passes**, including AVX2/AVX-512 fast paths for the decode loop's
-dominant CPU kernels and moving the vision encoder onto the wgpu backend once
-a `crates/sam1` correctness bug that used to block it there was fixed. The
-decoder itself stays on the CPU backend (no measured wgpu benefit for that
-stage).
+**Not yet optimized for sparsity.** Every MoE layer still dispatches all 64
+experts for every row and masks the 58 it did not route to, which is what
+`BRAIN_PROFILE=1` shows dominating a decode step on both backends
+(`moe_linear_gated`, 2112 dispatches and ~9.7 GB of expert-weight reads per
+token, 51% of GPU kernel time). `model::moe::expert_fwd_grouped` - a
+device-side row permutation plus a grouped GEMM, already written and
+parity-gated in `crates/model/tests/moe_grouped_parity.rs` - is the standing
+fix and would read only the top-6 experts' weights; it needs this decoder's
+per-expert weight tensors concatenated per layer first. See
+`.agents/roadmap/deepseek2ocr.md`.
 
 For the actual measured numbers behind these changes - wall-clock deltas,
 per-kernel profiles, and the full history of what was tried and what didn't
-pan out - see `.agents/roadmap/deepseek-ocr.md`, or measure your own build
+pan out - see `.agents/roadmap/deepseek2ocr.md`, or measure your own build
 with `BRAIN_PROFILE=1` and `brain perf run` (see
 [Performance](../performance/overview.md)); numbers measured on one machine
 at one point in this model's development are not a promise for yours.

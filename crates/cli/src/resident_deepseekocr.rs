@@ -11,46 +11,48 @@
 //! `deepseek2ocr::caps`, so this file holds no second copy of the
 //! preprocessing, the prompt assembly or the token accounting.
 //!
-//! # This model spans TWO devices, and now says so
+//! # This model spans TWO devices, and names both
 //!
-//! [`deepseek2ocr::caps::Session::load`] builds the vision encoder
-//! (SAM + CLIP + glue) with `gpu_core::Gpu::new_wgpu` and the decoder with
-//! `gpu_core::Gpu::new_cpu`. That split landed in `crates/deepseek2ocr` once
-//! `crates/sam1`'s wgpu corruption at 1024x1024/3-or-more-blocks was fixed and
-//! confirmed at real-weight scale (`crates/sam1/tests/
-//! wgpu_real_weight_parity.rs`) - but this file was not updated with it, and
-//! kept declaring a **RAM-only** `MemCost` (`vram == 0`) plus an `activate`
-//! that refused any non-CPU assignment as "CPU-only". Both statements were
-//! false from the moment the split landed, and the consequence was the exact
-//! defect `residency::multi`'s own module doc names: the vision tower's real
-//! device bytes were **invisible to the budget**, so on a host with a discrete
-//! card the scheduler would happily place another model on top of memory this
-//! one had already spoken for.
+//! [`deepseek2ocr::caps::Session::load_with`] builds the vision encoder
+//! (SAM + CLIP + glue) with `gpu_core::Gpu::new_wgpu`, and the decoder on
+//! whichever device the [`deepseek2ocr::caps::DecoderDevice`] it is handed
+//! names - a second card, the vision card, or the CPU Cranelift JIT.
 //!
 //! [`MultiDeviceCost`] is the honest expression, and the reason this model is
 //! registered through `Executor::register_multi` rather than the ordinary
 //! single-device list: every device the instance touches is NAMED, with its own
-//! real byte count, checked against its own real budget.
+//! real byte count, checked against its own real budget. Which devices those
+//! are depends on the placement, and all three shapes are budgeted:
 //!
-//! * `(Device::Gpu(i), `[`VISION_DEVICE_BYTES`]`)` - the vision tower.
-//! * `(Device::Cpu, `[`HOST_BYTES_SPLIT`]`)` - the decoder plus everything
-//!   host-side.
+//! * decoder on a second card - `(Gpu(v), `[`VISION_DEVICE_BYTES`]`)`,
+//!   `(Gpu(d), `[`DECODER_DEVICE_BYTES`]`)`, `(Cpu, `[`HOST_BYTES_GPU_DECODER`]`)`.
+//! * decoder on the vision card - one GPU entry holding both, plus the same
+//!   host figure.
+//! * decoder on the CPU - `(Gpu(v), `[`VISION_DEVICE_BYTES`]`)` and
+//!   `(Cpu, `[`HOST_BYTES_CPU_DECODER`]`)`.
 //!
-//! On a host whose GPU shares physical RAM with the CPU (the Intel Arc iGPU
-//! every real-weight number quoted below was measured on), `build_executor`
-//! has already declared `Device::Cpu` and that card into
-//! ONE `memauth` pool, so naming both devices charges the shared pool once
-//! rather than twice - which is precisely what that pool exists for. On a
-//! discrete card the two figures are genuinely two different pools.
+//! Every one of those constants is a direct measurement of the served build
+//! (`nvidia-smi memory.used` per card and `/proc/self/status` VmHWM, sampled
+//! for the life of a real page through this exact loader), not a decomposition
+//! of one number across devices.
 //!
-//! Neither half touches `BRAIN_DEVICE`: a resident lives for the life of the
+//! On a host whose GPU shares physical RAM with the CPU, `build_executor` has
+//! already declared `Device::Cpu` and that card into ONE `memauth` pool, so
+//! naming both devices charges the shared pool once rather than twice - which
+//! is precisely what that pool exists for. On discrete cards the figures are
+//! genuinely separate pools.
+//!
+//! Nothing here touches `BRAIN_DEVICE`: a resident lives for the life of the
 //! server process, and a process-global env write from inside one model's
 //! activation would change the backend every *other* resident builds on
 //! afterwards. Placement is a scoped registry selection
 //! (`gpu_core::devices::with_gpu`, via [`crate::resident_llm::on_device`]) -
-//! `Session::load`'s `Gpu::new_wgpu` resolves the ambient selection, so running
-//! it inside that scope lands the vision tower on exactly the card
-//! `estimate_multi` reserved. (The one-shot test glue in
+//! `Session::load_with`'s `Gpu::new_wgpu` resolves the ambient selection, so
+//! running it inside that scope lands the vision tower on exactly the card
+//! `estimate_multi` reserved, and the decoder's own card is entered by a
+//! nested `with_gpu` inside that call. The placement is computed ONCE, here,
+//! and passed down, so the reservation and the allocation cannot name
+//! different cards. (The one-shot test glue in
 //! `crates/deepseek2ocr/tests/common/real_vision.rs` does mutate `BRAIN_DEVICE`
 //! - correctly, for a single-threaded test binary that owns the process.)
 //!
@@ -63,58 +65,18 @@
 //! here is a performance phase of its own, not a wrapper this file could write.
 
 use capability::{ActionResult, Invocation, Manifest, Progress};
-use deepseek2ocr::caps::{Session, MODEL};
+use deepseek2ocr::caps::{DecoderDevice, Session, MODEL};
 use residency::multi::{MultiDeviceCost, MultiDeviceResidentModel};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 
-/// Device bytes the vision tower (SAM ViT-B at 1024² + the 16x compressor +
-/// CLIP-L + the projector) holds while hot.
-///
-/// **Derived from one real measurement, not guessed and not measured twice.**
-/// The encoder-only real-weight run (`crates/deepseek2ocr/tests/
-/// real_weight_image.rs`) reports process VmHWM of 1.59 GiB after the mmproj
-/// import, 3.44 GiB once the tower is built, and 7.17-7.22 GiB after a forward:
-/// i.e. ~1.85 GiB of weights and ~3.7 GiB of activation buffers above the
-/// import baseline. Those were host buffers (the run was all-CPU); on wgpu
-/// they are the same buffers on the device. 6 GiB rounds that ~5.6 GiB up for
-/// the served shape.
-///
-/// For scale, `crate::resident_sam2` budgets 3 GiB of activation slack for
-/// `hiera_tiny` at the same 1024² input, on top of its weights - so this is the
-/// same order of magnitude arrived at independently.
-pub const VISION_DEVICE_BYTES: u64 = 6u64 << 30;
+pub use deepseek2ocr::caps::{DECODER_DEVICE_BYTES, HOST_BYTES_CPU_DECODER, HOST_BYTES_GPU_DECODER, VISION_DEVICE_BYTES};
 
-/// Peak footprint of the WHOLE composite with every stage on the CPU - the
-/// figure this file used to report as a RAM-only cost.
-///
-/// MEASURED at the OLD 512-token flat-batched-tape shape, not derived from
-/// the file sizes: the real-weight composite gate (`crates/deepseek2ocr/
-/// tests/real_weight_generate.rs`) reported VmHWM 21.32 GiB for that build,
-/// read off `/proc/self/status`, rounded up to 22 GiB for the served
-/// context's own extra rows (512 vs the test's ~260, i.e. one larger
-/// `[seq, 129280]` logit slab in that flat tape). A file-size sum would say
-/// ~15 GB and be wrong by the whole activation working set.
-///
-/// **Stale as of the chunked-prefill change** (`DeepseekOcr::
-/// new_with_prompt_devices_sized`, `deepseek2::model::Sizes{batched: false,
-/// ..}`): the served build no longer allocates a flat `[ctx, ...]` tape at
-/// all, so the "one larger logit slab" rationale above no longer applies
-/// group-wise. Kept as a conservative (now almost certainly an
-/// OVER-estimate, not under) upper bound until re-measured for real on the
-/// new shape - lowering it needs a real VmHWM read, not arithmetic.
-pub const COMPOSITE_PEAK_BYTES: u64 = 22u64 << 30;
-
-/// Host bytes held once the vision half is on a card: the measured all-CPU peak
-/// minus the part that moved.
-///
-/// The two constants therefore SUM to the one measurement rather than each
-/// claiming it - reporting [`COMPOSITE_PEAK_BYTES`] of RAM *and*
-/// [`VISION_DEVICE_BYTES`] of VRAM would over-reserve by the vision tower on
-/// every host, and reporting only one of them is what this file did wrong
-/// before. This is a decomposition of a single measurement, not two
-/// independent ones; a direct measurement of the split build on a discrete card
-/// would be better, and replacing both constants with one is open work.
-pub const HOST_BYTES_SPLIT: u64 = COMPOSITE_PEAK_BYTES - VISION_DEVICE_BYTES;
+/// Peak footprint of the WHOLE composite with the decoder on the CPU backend:
+/// [`HOST_BYTES_CPU_DECODER`] of host RAM plus [`VISION_DEVICE_BYTES`] on the
+/// card. Kept as one name because that is what a GPU-less host pays entirely
+/// out of RAM (there `Gpu::new_wgpu` resolves to a software rasteriser whose
+/// buffers ARE host RAM, so the tower's bytes are host bytes too).
+pub const COMPOSITE_PEAK_BYTES: u64 = HOST_BYTES_CPU_DECODER + VISION_DEVICE_BYTES;
 
 /// DeepSeek-OCR behind the scheduler. `dir` names the directory holding BOTH
 /// shipped GGUFs (`mmproj-DeepSeek-OCR-Q8_0.gguf` and `DeepSeek-OCR-Q8_0.gguf`),
@@ -125,6 +87,11 @@ pub struct DeepseekOcrResident {
     /// The canonical card the vision tower is placed on, or `None` when the
     /// caller budgeted no GPU that could hold it (see [`Self::pick_vision_gpu`]).
     vision_gpu: Option<u32>,
+    /// Where the decoder half goes - decided ONCE, at construction, and both
+    /// budgeted by [`Self::estimate_multi`] and handed to
+    /// `Session::load_with` by [`Self::activate_multi`], so the reservation
+    /// and the allocation cannot name different devices.
+    decoder: DecoderDevice,
 }
 
 impl DeepseekOcrResident {
@@ -147,7 +114,11 @@ impl DeepseekOcrResident {
     pub fn new(dir: impl Into<String>, gpus: &[(u32, u64)], reserved: u64) -> Option<DeepseekOcrResident> {
         let dir = dir.into();
         match deepseek2ocr::import::Files::locate(&dir) {
-            Ok(_) => Some(DeepseekOcrResident { dir, vision_gpu: Self::pick_vision_gpu(gpus, reserved) }),
+            Ok(_) => {
+                let vision_gpu = Self::pick_vision_gpu(gpus, reserved);
+                let decoder = deepseek2ocr::caps::decoder_device(vision_gpu);
+                Some(DeepseekOcrResident { dir, vision_gpu, decoder })
+            }
             Err(e) => {
                 eprintln!("brain: deepseek-ocr not served ({e})");
                 None
@@ -190,7 +161,7 @@ impl ResidentModel for DeepseekOcrResident {
         // One composite serves every request: the splice is sized at the
         // instruction-independent (1, 273) image run, so nothing in an
         // invocation can fork the graph. Keying on anything else would
-        // duplicate a ~22 GiB build.
+        // duplicate a ~21 GiB build.
         InstanceKey::new(MODEL, self.dir.clone())
     }
 
@@ -215,19 +186,35 @@ impl ResidentModel for DeepseekOcrResident {
 
 impl MultiDeviceResidentModel for DeepseekOcrResident {
     fn estimate_multi(&self, _key: &InstanceKey) -> MultiDeviceCost {
-        // Cheap and panic-free by construction (a little arithmetic over two
-        // consts and an Option<u32>) -- this runs on the dispatcher thread on
-        // every scheduling round, and a panic there kills serving for every
-        // OTHER model too, not just this one.
-        match self.vision_gpu {
-            // With no card big enough for the tower, `Session::load`'s
-            // `Gpu::new_wgpu` resolves to whatever wgpu offers -- a software
-            // rasteriser on a GPU-less box -- whose buffers ARE host RAM. The
-            // all-CPU peak is exactly the right figure for that case, and it is
-            // the one that was actually measured.
-            None => MultiDeviceCost::new(vec![(Device::Cpu, COMPOSITE_PEAK_BYTES)], 0),
-            Some(i) => MultiDeviceCost::new(vec![(Device::Gpu(i), VISION_DEVICE_BYTES), (Device::Cpu, HOST_BYTES_SPLIT)], 0),
-        }
+        // Cheap and panic-free by construction (a little arithmetic over four
+        // consts, an Option<u32> and an enum decided at construction) -- this
+        // runs on the dispatcher thread on every scheduling round, and a panic
+        // there kills serving for every OTHER model too, not just this one.
+        let Some(v) = self.vision_gpu else {
+            // With no card big enough for the tower, `Gpu::new_wgpu` resolves
+            // to whatever wgpu offers -- a software rasteriser on a GPU-less
+            // box -- whose buffers ARE host RAM. Everything this model holds
+            // is then host bytes, which is exactly [`COMPOSITE_PEAK_BYTES`].
+            return MultiDeviceCost::new(vec![(Device::Cpu, COMPOSITE_PEAK_BYTES)], 0);
+        };
+        let cost = match self.decoder {
+            DecoderDevice::Cpu => vec![(Device::Gpu(v), VISION_DEVICE_BYTES), (Device::Cpu, HOST_BYTES_CPU_DECODER)],
+            DecoderDevice::SameCard => {
+                vec![(Device::Gpu(v), VISION_DEVICE_BYTES + DECODER_DEVICE_BYTES), (Device::Cpu, HOST_BYTES_GPU_DECODER)]
+            }
+            // A `Card(i)` that happens to name the vision card is the same
+            // pool as `SameCard`, and must be charged once rather than as two
+            // entries the budget would see as two devices.
+            DecoderDevice::Card(i) if i == v => {
+                vec![(Device::Gpu(v), VISION_DEVICE_BYTES + DECODER_DEVICE_BYTES), (Device::Cpu, HOST_BYTES_GPU_DECODER)]
+            }
+            DecoderDevice::Card(i) => vec![
+                (Device::Gpu(v), VISION_DEVICE_BYTES),
+                (Device::Gpu(i), DECODER_DEVICE_BYTES),
+                (Device::Cpu, HOST_BYTES_GPU_DECODER),
+            ],
+        };
+        MultiDeviceCost::new(cost, 0)
     }
 
     fn activate_multi(&self, key: &InstanceKey, devices: &[Device]) -> Result<Box<dyn Instance>, String> {
@@ -239,14 +226,16 @@ impl MultiDeviceResidentModel for DeepseekOcrResident {
         if devices.len() != planned.len() || !devices.iter().all(|d| planned.contains(d)) {
             return Err(format!("{MODEL}: activate_multi got devices {devices:?} but the plan placed {planned:?}"));
         }
-        // Scoped registry selection, never env mutation: `Session::load` builds
-        // the vision half with `Gpu::new_wgpu`, which resolves the ambient
-        // selection, so this scope is what puts it on the reserved card. The
-        // decoder's `Gpu::new_cpu` and the preprocessor's are unaffected by the
-        // scope -- they name the CPU backend explicitly.
+        // Scoped registry selection, never env mutation: `Session::load_with`
+        // builds the vision half with `Gpu::new_wgpu`, which resolves the
+        // ambient selection, so this scope is what puts it on the reserved
+        // card. A decoder on its OWN card enters a nested `with_gpu` inside
+        // that call, and a decoder on the CPU names that backend explicitly;
+        // neither is affected by this scope.
+        let placement = self.decoder;
         let session = match self.vision_gpu {
-            Some(i) => crate::resident_llm::on_device(Device::Gpu(i), || Session::load(&key.config))?,
-            None => Session::load(&key.config),
+            Some(i) => crate::resident_llm::on_device(Device::Gpu(i), || Session::load_with(&key.config, placement))?,
+            None => Session::load_with(&key.config, placement),
         }?;
         Ok(Box::new(DeepseekOcrInstance { session }))
     }
@@ -282,8 +271,17 @@ mod tests {
         vec![(0, 24 * GB), (1, 24 * GB)]
     }
 
+    /// A resident at an EXPLICIT decoder placement. The real
+    /// `deepseek2ocr::caps::decoder_device` reads this box's own device
+    /// registry, so a test that let it choose would assert about whatever
+    /// hardware it last ran on; naming the placement is what makes each case
+    /// below a statement about the accounting rather than about a machine.
+    fn resident_with(gpus: &[(u32, u64)], decoder: DecoderDevice) -> DeepseekOcrResident {
+        DeepseekOcrResident { dir: "/tmp".into(), vision_gpu: DeepseekOcrResident::pick_vision_gpu(gpus, 2 * GB), decoder }
+    }
+
     fn resident(gpus: &[(u32, u64)]) -> DeepseekOcrResident {
-        DeepseekOcrResident { dir: "/tmp".into(), vision_gpu: DeepseekOcrResident::pick_vision_gpu(gpus, 2 * GB) }
+        resident_with(gpus, DecoderDevice::Cpu)
     }
 
     fn key(r: &DeepseekOcrResident) -> InstanceKey {
@@ -297,30 +295,65 @@ mod tests {
         assert!(DeepseekOcrResident::new("/definitely/not/a/deepseek/dir", &two_cards(), 2 * GB).is_none());
     }
 
-    /// THE BUG THIS FILE WAS FIXED FOR: the vision tower runs on wgpu, so its
-    /// device bytes must be named and budgeted. A cost that mentions no GPU is
-    /// how another model gets placed on top of memory this one already holds.
+    /// THE BUG THIS FILE WAS FIXED FOR: every device this instance really
+    /// holds bytes on must be named and budgeted. A cost that omits one is how
+    /// another model gets placed on top of memory this one already holds -
+    /// and now that the decoder can land on a SECOND card, there are three
+    /// placements to get right, not one.
     #[test]
-    fn the_vision_tower_is_charged_to_a_real_card() {
-        let r = resident(&two_cards());
+    fn every_placement_names_every_device_it_occupies() {
+        // Decoder on the CPU: the tower's card and the host.
+        let r = resident_with(&two_cards(), DecoderDevice::Cpu);
         let cost = r.estimate_multi(&key(&r));
-        let named: Vec<Device> = cost.devices().collect();
-        assert!(named.contains(&Device::Gpu(0)) || named.contains(&Device::Gpu(1)), "no card named: {named:?}");
-        assert!(named.contains(&Device::Cpu), "the CPU-side decoder must stay budgeted too: {named:?}");
-        assert_eq!(cost.on(Device::Gpu(0)) + cost.on(Device::Gpu(1)), VISION_DEVICE_BYTES);
-        assert_eq!(cost.on(Device::Cpu), HOST_BYTES_SPLIT);
+        assert_eq!(cost.devices().collect::<Vec<_>>(), vec![Device::Gpu(1), Device::Cpu]);
+        assert_eq!(cost.on(Device::Gpu(1)), VISION_DEVICE_BYTES);
+        assert_eq!(cost.on(Device::Cpu), HOST_BYTES_CPU_DECODER);
+
+        // Decoder on its own card: THREE devices, each with its own figure.
+        let r = resident_with(&two_cards(), DecoderDevice::Card(0));
+        let cost = r.estimate_multi(&key(&r));
+        assert_eq!(cost.on(Device::Gpu(1)), VISION_DEVICE_BYTES, "the tower stays on the card pick_vision_gpu chose");
+        assert_eq!(cost.on(Device::Gpu(0)), DECODER_DEVICE_BYTES);
+        assert_eq!(cost.on(Device::Cpu), HOST_BYTES_GPU_DECODER, "the host keeps only the working set once the weights are on a card");
+
+        // Decoder on the tower's own card: ONE card entry holding both, not
+        // two entries the budget would read as two separate pools.
+        for placement in [DecoderDevice::SameCard, DecoderDevice::Card(1)] {
+            let r = resident_with(&two_cards(), placement);
+            let cost = r.estimate_multi(&key(&r));
+            assert_eq!(cost.devices().collect::<Vec<_>>(), vec![Device::Gpu(1), Device::Cpu], "{placement:?}");
+            assert_eq!(cost.on(Device::Gpu(1)), VISION_DEVICE_BYTES + DECODER_DEVICE_BYTES, "{placement:?}");
+            assert_eq!(cost.on(Device::Cpu), HOST_BYTES_GPU_DECODER, "{placement:?}");
+        }
     }
 
-    /// The decomposition must not inflate the model: the two halves sum to the
-    /// one figure that was actually measured, rather than each claiming it.
+    /// Moving the decoder onto a card must MOVE its ~11.4 GiB of fp32
+    /// weights off the host, not merely add a card entry beside an unchanged
+    /// host claim - which is exactly the accounting hole this file was fixed
+    /// for once already, in the other direction.
+    ///
+    /// The two placements do not claim the same TOTAL, and that is a real
+    /// difference rather than a rounding artefact: the decoder's KV cache,
+    /// per-expert MoE scratch and attention slabs (~1.8 GiB at the served
+    /// shape) are fully reserved when they live on a card, while on the host
+    /// VmHWM only ever counts the pages a run actually touches. Asserting
+    /// equality here would be asserting something the measurements say is
+    /// false; what IS asserted is the direction and the magnitude.
     #[test]
-    fn the_two_halves_sum_to_the_measured_composite_peak() {
-        let r = resident(&two_cards());
-        let cost = r.estimate_multi(&key(&r));
-        // `total_accelerator_bytes` sums every NAMED device, and `Device::Cpu`
-        // is one of the two this instance names.
-        assert_eq!(cost.total_accelerator_bytes(), COMPOSITE_PEAK_BYTES);
-        assert_eq!(cost.ram(), 0, "the host figure is a named device, not the descriptive `ram` field claim_multi never budgets");
+    fn putting_the_decoder_on_a_card_takes_its_weights_off_the_host() {
+        let cpu = resident_with(&two_cards(), DecoderDevice::Cpu);
+        let gpu = resident_with(&two_cards(), DecoderDevice::Card(0));
+        let (a, b) = (cpu.estimate_multi(&key(&cpu)), gpu.estimate_multi(&key(&gpu)));
+        assert_eq!(a.total_accelerator_bytes(), COMPOSITE_PEAK_BYTES);
+        let freed = a.on(Device::Cpu) - b.on(Device::Cpu);
+        assert!(
+            freed >= 10 * GB,
+            "moving the decoder to a card freed only {freed} host bytes - the fp32 weights alone are ~11.4 GiB, so they did not move"
+        );
+        assert!(b.on(Device::Gpu(0)) >= 10 * GB, "and those bytes must be charged to the card that now holds them");
+        for c in [&a, &b] {
+            assert_eq!(c.ram(), 0, "the host figure is a named device, not the descriptive `ram` field claim_multi never budgets");
+        }
     }
 
     /// A card too small for the tower is not named at all - naming it would

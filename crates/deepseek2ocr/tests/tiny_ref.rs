@@ -748,22 +748,19 @@ fn the_real_layout_splices_the_learned_rows_verbatim_and_trains_them() {
     }
 }
 
-/// **Phase 8 split-device wiring gate**: `caps::Session::load` now builds the
-/// vision encoder (SAM+CLIP+glue) on `Gpu::new_wgpu` and the decoder on
-/// `Gpu::new_cpu` via [`DeepseekOcr::new_with_prompt_devices`], instead of one
-/// `Gpu::new_cpu` factory for both (`crates/sam1`'s wgpu corruption at
-/// 1024x1024/3+ blocks -- what forced the single CPU factory originally -- is
-/// fixed and confirmed at real-weight scale, see `crates/sam1/tests/
-/// wgpu_real_weight_parity.rs`). This is NOT a re-verification of wgpu's SAM
-/// correctness -- that is that test's job. It is a wiring gate: build the SAME
-/// tiny checkpoint-free fixture two ways, all-CPU
-/// ([`DeepseekOcr::new_with_prompt`]) and split-device
-/// ([`DeepseekOcr::new_with_prompt_devices`], vision on wgpu / decoder on
-/// CPU), and assert the two forward outputs agree -- so a future edit that
-/// crosses the wires (e.g. hands the decoder's `PIPELINES` to the vision
-/// factory, or vice versa) fails loudly here instead of silently shipping.
+/// **Device-placement wiring gate**: `caps::Session::load` builds the vision
+/// encoder (SAM+CLIP+glue) and the decoder through two INDEPENDENT device
+/// factories ([`DeepseekOcr::new_with_prompt_devices`]), and which backend
+/// each gets is a runtime decision (`caps::decoder_device`). This is NOT a
+/// re-verification of either backend's numerics -- `crates/sam1/tests/
+/// wgpu_real_weight_parity.rs` and `crates/deepseek2/tests/backend_parity.rs`
+/// own that. It is a wiring gate: build the SAME tiny checkpoint-free fixture
+/// three ways -- all-CPU, vision-on-wgpu with a CPU decoder, and BOTH halves
+/// on wgpu -- and assert every one agrees, so a future edit that crosses the
+/// wires (hands the decoder's `PIPELINES` to the vision factory, or vice
+/// versa) fails loudly here instead of silently shipping.
 #[test]
-fn split_device_vision_wgpu_decoder_cpu_matches_all_cpu() {
+fn every_device_placement_matches_all_cpu() {
     let ckpt = testdata("deepseek-ocr/tiny/ckpt/model.safetensors");
     let golden_path = testdata("deepseek-ocr/tiny/golden.safetensors");
     if !ckpt.exists() || !golden_path.exists() {
@@ -811,20 +808,29 @@ fn split_device_vision_wgpu_decoder_cpu_matches_all_cpu() {
     let logits_cpu = m_cpu.read_logits();
     let dec_in_cpu = m_cpu.read_decoder_input();
 
-    let m_split = DeepseekOcr::new_with_prompt_devices(&wgpu_dev, &cpu_dev, cfg.clone(), &init, &init, 7, seq, &prompt, false);
-    m_split.set_tokens_unsupervised(&ids);
-    let loss_split = m_split.forward(&g["image"].data);
-    assert!(loss_split.is_finite());
-    let logits_split = m_split.read_logits();
-    let dec_in_split = m_split.read_decoder_input();
+    // Every placement `caps::decoder_device` can pick, against that reference.
+    // `(wgpu, wgpu)` is the served default wherever a card fits; `(wgpu, cpu)`
+    // is what an operator's `BRAIN_DEEPSEEK_OCR_DECODER_DEVICE=cpu` selects,
+    // and what a GPU-less box falls back to for the decoder half.
+    for (label, vis, dec) in [
+        ("vision=wgpu, decoder=wgpu", &wgpu_dev as &dyn Fn(&'static [(&'static str, &'static str)]) -> gpu_core::Gpu, &wgpu_dev as &dyn Fn(_) -> _),
+        ("vision=wgpu, decoder=cpu", &wgpu_dev, &cpu_dev),
+    ] {
+        let m_split = DeepseekOcr::new_with_prompt_devices(vis, dec, cfg.clone(), &init, &init, 7, seq, &prompt, false);
+        m_split.set_tokens_unsupervised(&ids);
+        let loss_split = m_split.forward(&g["image"].data);
+        assert!(loss_split.is_finite(), "{label}: non-finite loss");
+        let logits_split = m_split.read_logits();
+        let dec_in_split = m_split.read_decoder_input();
 
-    let (cos_logits, max_abs_logits) = compare(&logits_cpu, &logits_split);
-    let (cos_dec_in, max_abs_dec_in) = compare(&dec_in_cpu, &dec_in_split);
-    println!("split-device (vision=wgpu, decoder=cpu) vs all-cpu:");
-    println!("  decoder_input cos {cos_dec_in:.10}  max_abs {max_abs_dec_in:.3e}");
-    println!("  logits        cos {cos_logits:.10}  max_abs {max_abs_logits:.3e}");
-    assert!(cos_dec_in > 0.9999, "the spliced decoder input diverges between backends (cos {cos_dec_in}) -- vision half disagrees");
-    assert!(cos_logits > 0.9999, "final logits diverge between backends (cos {cos_logits})");
+        let (cos_logits, max_abs_logits) = compare(&logits_cpu, &logits_split);
+        let (cos_dec_in, max_abs_dec_in) = compare(&dec_in_cpu, &dec_in_split);
+        println!("{label} vs all-cpu:");
+        println!("  decoder_input cos {cos_dec_in:.10}  max_abs {max_abs_dec_in:.3e}");
+        println!("  logits        cos {cos_logits:.10}  max_abs {max_abs_logits:.3e}");
+        assert!(cos_dec_in > 0.9999, "{label}: the spliced decoder input diverges (cos {cos_dec_in}) -- vision half disagrees");
+        assert!(cos_logits > 0.9999, "{label}: final logits diverge (cos {cos_logits})");
+    }
 }
 
 /// **Long-context wiring gate**: `DeepseekOcr::new_with_prompt_devices_sized`

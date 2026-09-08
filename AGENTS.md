@@ -600,8 +600,8 @@ fast and scalable kernel - not a naive one.
     Parity-gated per stage against a checkpoint-free golden dump at
     deliberately non-coincidental dims (SAM patch embed → decoder logits), and
     real-weight-gated at production shape; the SAM tower's own real-weight
-    parity is what found the **wgpu 3-or-more-block corruption at 1024²** that
-    pins this whole model to the CPU backend. The **real 273-row image block**
+    parity is what found the **wgpu 3-or-more-block corruption at 1024²**,
+    since fixed and re-gated on the card. The **real 273-row image block**
     is assembled (256 projector rows + 16 `image_newline` + 1 `view_separator`,
     the mmproj's two learned vectors) by `layout::RowGather` and sized from
     `prompt::build_prompt`'s own `n_rows`; the backward is the exact adjoint
@@ -616,20 +616,40 @@ fast and scalable kernel - not a naive one.
     `deepseek2ocr::import` - this crate's four real-weight test binaries are
     thin wrappers over it, so a served run and its own parity test cannot
     disagree about which tensors they loaded.
-    *(**Split backend**: `caps::Session::load` builds the vision encoder
-    (SAM+CLIP+glue) on `Gpu::new_wgpu` and the decoder on `Gpu::new_cpu` -
-    `crates/sam1`'s wgpu corruption at 1024x1024/3+ blocks that used to force
-    an all-CPU build is fixed and confirmed at real-weight scale. Because it
-    then holds real bytes on TWO devices, it is the repo's second
+    *(**Both halves on the GPU where one fits**: `caps::Session::load` builds
+    the vision encoder (SAM+CLIP+glue) with `Gpu::new_wgpu` and places the
+    decoder with `caps::decoder_device` - by default a real card, preferring a
+    SECOND one so the two halves do not share VRAM; `Gpu::new_cpu` when there
+    is no discrete GPU, or on an operator's
+    `$BRAIN_DEEPSEEK_OCR_DECODER_DEVICE=cpu` (which also takes
+    `gpu`/`gpu<i>`/`<i>`/`auto`). The CPU decoder stays a supported placement,
+    not a removed one. **Measured on two Tesla P40s**, same page and prompt at
+    a 512-token budget: **121 s/page on the GPU decoder against 539 s on the
+    48-thread Cranelift JIT** (0.198 vs 0.772 s/token, 3.3 vs 13.8 s for the
+    283-row prefill), with **byte-identical** decoded markdown. Both backends
+    are gated against the SAME llama.cpp reference
+    (`crates/deepseek2/tests/{parity,generate}.rs` each grow a wgpu twin; the
+    real 2.9 B decoder reproduces llama.cpp token for token on each),
+    against each other at the fp32 noise floor
+    (`crates/deepseek2/tests/backend_parity.rs`, worst 2.24e-8), and at the
+    served ctx/chunk shape (`crates/deepseek2/tests/decode_throughput.rs`
+    asserts identical ids and reports each one's cost). Because it holds real
+    bytes on up to THREE devices, it is the repo's second
     `MultiDeviceResidentModel` (after the int8 Omni Thinker) and the first one
-    in `catalog.rs`: `estimate_multi` names `(Gpu(i), 6 GiB)` for the vision
-    tower and `(Cpu, 16 GiB)` for the host side - a decomposition of the one
-    measured 21.32 GiB all-CPU peak, so the halves sum to it rather than each
-    claiming it - and `activate_multi` builds the tower on exactly the
-    reserved card via scoped registry selection. It used to report a RAM-only
-    `MemCost` (`vram == 0`), which left the tower's device bytes invisible to
-    the budget. Never an env mutation from inside a
-    server-lifetime resident. `run_batch` is the serial default and says why
+    in `catalog.rs`: `estimate_multi` names each of them at its own DIRECTLY
+    measured figure - `(Gpu(v), 7 GiB)` for the tower (6.27 GiB measured),
+    `(Gpu(d), 14 GiB)` for the decoder (13.25 GiB), `(Cpu, 3 GiB)` for the
+    host (2.63 GiB VmHWM), or `(Cpu, 14 GiB)` (13.51 GiB) when the decoder is
+    on the CPU - rather than splitting one all-CPU reading across devices, and
+    `activate_multi` computes the placement ONCE and passes it to
+    `Session::load_with`, so the reservation and the allocation cannot name
+    different cards. Never an env mutation from inside a
+    server-lifetime resident. **Not yet sparse**: every MoE layer still
+    dispatches all 64 experts per row (2112 dispatches and ~9.7 GB of
+    expert-weight reads per token, 51% of GPU kernel time under
+    `BRAIN_PROFILE=1`); `model::moe::expert_fwd_grouped` is the written,
+    parity-gated fix and needs this decoder's per-expert weights concatenated
+    per layer. `run_batch` is the serial default and says why
     (per-image encoder pass, no decoder batch axis). Decode IS KV-cached
     (`DeepseekV2::generate_greedy_kv`, `O(1)` per token past the prompt).
     Still not done: EOS early-stop, sampling beyond greedy, INT8, a
