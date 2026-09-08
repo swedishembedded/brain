@@ -1141,6 +1141,7 @@ wan/t2v: build/release
 # first (see that dumper's own module doc).
 PARITY_STRICT_SUITES ?= \
         brain-deepseek2ocr:tiny_ref \
+        brain-deepseekocr2:tiny_ref \
         brain-t5encoder:tiny_ref \
         brain-diffusion:discrete_parity,klein_schedule,wan_schedule_parity \
         brain-data:clip_tokenizer_parity \
