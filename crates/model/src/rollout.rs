@@ -114,6 +114,60 @@ fn accept(tokens: &mut Vec<u32>, logprobs: &mut Vec<f32>, next: u32, logprob: f3
     None
 }
 
+/// The mean per-token entropy (in nats) of the model's own next-token
+/// distribution at each position of `completion`, re-derived one
+/// [`Model::logits_all`] call per position - the same O(T^2),
+/// architecture-agnostic shape [`ModelRollout::sample_one`] samples from, so
+/// any [`Model`] with a token-classification head works with zero
+/// per-architecture code. `completion` is read back AFTER generation (it need
+/// not have been produced by this same rollout machinery - `qwen3::caps`'s
+/// promote/reject gate calls this over a completion
+/// `crate::sample::generate_kv_stream_with_head` already produced), so this
+/// recomputes the distribution rather than reusing a [`Completion::logprobs`]
+/// that was never captured.
+///
+/// A low mean entropy means the model was confident (near-argmax) at almost
+/// every step; `promote::gate` reads it as one more signal about whether a
+/// candidate adapter overfit its probe set, alongside the verified pass rate.
+///
+/// An empty `completion` has no position to average and returns `0.0` without
+/// calling `logits_all` at all.
+pub fn mean_completion_entropy<M: Model>(m: &M, prompt: &[u32], completion: &[u32]) -> f64 {
+    if completion.is_empty() {
+        return 0.0;
+    }
+    let block = m.config().block_size() as usize;
+    let vocab = m.config().vocab() as usize;
+    let mut ctx: Vec<u32> = prompt.to_vec();
+    let mut total = 0.0f64;
+    for &next in completion {
+        let window: &[u32] = if ctx.len() > block { &ctx[ctx.len() - block..] } else { &ctx };
+        let logits = m.logits_all(window).expect("mean_completion_entropy: model has no token-classification head");
+        let last = &logits[logits.len() - vocab..];
+        total += softmax_entropy(last);
+        ctx.push(next);
+    }
+    total / completion.len() as f64
+}
+
+/// `-Σ p·ln(p)` over the softmax of `logits`, max-subtracted for numerical
+/// stability. Zero-probability entries (only reachable after max-subtraction
+/// underflows a logit to exactly `0.0` in the exponentiated domain) are
+/// skipped rather than producing a `NaN` from `0·ln(0)`.
+fn softmax_entropy(logits: &[f32]) -> f64 {
+    let max = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max) as f64;
+    let exps: Vec<f64> = logits.iter().map(|&l| (l as f64 - max).exp()).collect();
+    let sum: f64 = exps.iter().sum();
+    exps.iter().fold(0.0, |h, &e| {
+        let p = e / sum;
+        if p > 0.0 {
+            h - p * p.ln()
+        } else {
+            h
+        }
+    })
+}
+
 /// The always-correct, architecture-agnostic rollout: one sample at a time,
 /// O(T^2) re-prefill via [`Model::logits_all`] exactly like
 /// `crate::train::generate` did before this module existed. Works for every
@@ -298,7 +352,136 @@ impl<D: PagedDecoder> Rollout for PagedRollout<D> {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+    use std::collections::HashMap;
+
     use super::*;
+    use crate::{Batch, ModelConfig};
+
+    #[derive(Clone)]
+    struct ToyCfg {
+        vocab: u32,
+        block_size: u32,
+    }
+    impl ModelConfig for ToyCfg {
+        fn param_list(&self) -> Vec<(String, usize)> {
+            vec![]
+        }
+        fn to_json(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
+        fn from_json(_v: &serde_json::Value) -> Self {
+            unimplemented!("not exercised by these tests")
+        }
+        fn vocab(&self) -> u32 {
+            self.vocab
+        }
+        fn block_size(&self) -> u32 {
+            self.block_size
+        }
+        fn finalize_for_dataset(self, _v: u32, _b: u32) -> Self {
+            self
+        }
+    }
+
+    /// A [`Model`] whose `logits_all` returns one fixed row per call, drawn in
+    /// order from `rows` (repeated for every position in the window - only the
+    /// LAST row is ever read) - just enough surface for
+    /// [`mean_completion_entropy`] to exercise, with every other method
+    /// `unimplemented!` so an accidental call (this function reading more than
+    /// `config`/`logits_all`) fails loudly rather than returning nonsense.
+    struct ToyModel {
+        cfg: ToyCfg,
+        rows: Vec<Vec<f32>>,
+        calls: Cell<usize>,
+    }
+    impl Model for ToyModel {
+        type Config = ToyCfg;
+        fn new(_cfg: ToyCfg, _b: u32, _t: u32, _init: &HashMap<String, Vec<f32>>) -> Self {
+            unimplemented!()
+        }
+        fn init_weights(_cfg: &ToyCfg, _seed: u64) -> HashMap<String, Vec<f32>> {
+            unimplemented!()
+        }
+        fn config(&self) -> &ToyCfg {
+            &self.cfg
+        }
+        fn set_batch(&self, _b: Batch) {
+            unimplemented!()
+        }
+        fn forward(&self) -> f32 {
+            unimplemented!()
+        }
+        fn backward(&self) {
+            unimplemented!()
+        }
+        fn zero_grads(&self) {
+            unimplemented!()
+        }
+        fn adamw_step(&self, _t: u32, _lr: f32, _wd: f32, _clip: Option<f32>, _extra_scale: f32) {
+            unimplemented!()
+        }
+        fn poll_wait(&self) {}
+        fn param_names(&self) -> Vec<String> {
+            unimplemented!()
+        }
+        fn read_weight(&self, _name: &str) -> Vec<f32> {
+            unimplemented!()
+        }
+        fn write_weight(&self, _name: &str, _data: &[f32]) {
+            unimplemented!()
+        }
+        fn read_grad(&self, _name: &str) -> Vec<f32> {
+            unimplemented!()
+        }
+        fn logits_all(&self, tokens: &[u32]) -> Option<Vec<f32>> {
+            let i = self.calls.get();
+            self.calls.set(i + 1);
+            let row = &self.rows[i];
+            Some(row.repeat(tokens.len()))
+        }
+        fn save(&self, _path: &str) {
+            unimplemented!()
+        }
+        fn config_json(&self) -> serde_json::Value {
+            unimplemented!()
+        }
+    }
+
+    #[test]
+    fn a_uniform_distribution_has_entropy_ln_vocab() {
+        let vocab = 4;
+        let m = ToyModel { cfg: ToyCfg { vocab, block_size: 64 }, rows: vec![vec![0.0; vocab as usize]], calls: Cell::new(0) };
+        let h = mean_completion_entropy(&m, &[1, 2], &[3]);
+        assert!((h - (vocab as f64).ln()).abs() < 1e-9, "uniform softmax entropy must be ln(vocab), got {h}");
+    }
+
+    #[test]
+    fn a_one_hot_distribution_has_near_zero_entropy() {
+        let m = ToyModel { cfg: ToyCfg { vocab: 4, block_size: 64 }, rows: vec![vec![50.0, 0.0, 0.0, 0.0]], calls: Cell::new(0) };
+        let h = mean_completion_entropy(&m, &[1], &[0]);
+        assert!(h < 1e-9, "a near-one-hot softmax must have ~0 entropy, got {h}");
+    }
+
+    #[test]
+    fn an_empty_completion_is_zero_and_never_calls_the_model() {
+        let m = ToyModel { cfg: ToyCfg { vocab: 4, block_size: 64 }, rows: vec![], calls: Cell::new(0) };
+        assert_eq!(mean_completion_entropy(&m, &[1, 2, 3], &[]), 0.0);
+    }
+
+    #[test]
+    fn multiple_positions_average_their_own_distinct_entropy() {
+        let vocab = 4;
+        // Position 0: uniform (entropy = ln 4). Position 1: one-hot (entropy ~ 0).
+        let m = ToyModel {
+            cfg: ToyCfg { vocab, block_size: 64 },
+            rows: vec![vec![0.0; vocab as usize], vec![50.0, 0.0, 0.0, 0.0]],
+            calls: Cell::new(0),
+        };
+        let h = mean_completion_entropy(&m, &[1], &[0, 1]);
+        let want = ((vocab as f64).ln() + 0.0) / 2.0;
+        assert!((h - want).abs() < 1e-6, "must be the unweighted mean of each position's own entropy, got {h} want {want}");
+    }
 
     #[test]
     fn candidates_from_logits_sorts_descending_with_lowest_index_tie_break() {
