@@ -592,9 +592,9 @@ pub const MATMUL_DX: &str = include_str!("../wgsl/matmul_dx.wgsl");
 pub const MATMUL_DX_REG: &str = include_str!("../wgsl/matmul_dx_reg.wgsl");
 /// `wgsl/matmul_gemv.wgsl`
 pub const MATMUL_GEMV: &str = include_str!("../wgsl/matmul_gemv.wgsl");
-/// `wgsl/matmul_gemv_f8e4m3.wgsl` (M8.6)
+/// `wgsl/matmul_gemv_f8e4m3.wgsl`
 pub const MATMUL_GEMV_F8E4M3: &str = include_str!("../wgsl/matmul_gemv_f8e4m3.wgsl");
-/// `wgsl/matmul_gemv_f8e5m2.wgsl` (M8.6)
+/// `wgsl/matmul_gemv_f8e5m2.wgsl`
 pub const MATMUL_GEMV_F8E5M2: &str = include_str!("../wgsl/matmul_gemv_f8e5m2.wgsl");
 /// `wgsl/matmul_gemv_reg.wgsl`
 pub const MATMUL_GEMV_REG: &str = include_str!("../wgsl/matmul_gemv_reg.wgsl");
@@ -618,12 +618,12 @@ pub const MATMUL_Q4_DYN: &str = include_str!("../wgsl/matmul_q4_dyn.wgsl");
 pub const MATMUL_Q4_DYN_REG: &str = include_str!("../wgsl/matmul_q4_dyn_reg.wgsl");
 /// `wgsl/matmul_q4_gemv.wgsl`
 pub const MATMUL_Q4_GEMV: &str = include_str!("../wgsl/matmul_q4_gemv.wgsl");
+/// `wgsl/matmul_q4_gemv_f4e2m1.wgsl`
+pub const MATMUL_Q4_GEMV_F4E2M1: &str = include_str!("../wgsl/matmul_q4_gemv_f4e2m1.wgsl");
+/// `wgsl/matmul_q4_gemv_nf4.wgsl`
+pub const MATMUL_Q4_GEMV_NF4: &str = include_str!("../wgsl/matmul_q4_gemv_nf4.wgsl");
 /// `wgsl/matmul_q4_gemv_reg.wgsl`
 pub const MATMUL_Q4_GEMV_REG: &str = include_str!("../wgsl/matmul_q4_gemv_reg.wgsl");
-/// `wgsl/matmul_q4_gemv_nf4.wgsl` (M8.5)
-pub const MATMUL_Q4_GEMV_NF4: &str = include_str!("../wgsl/matmul_q4_gemv_nf4.wgsl");
-/// `wgsl/matmul_q4_gemv_f4e2m1.wgsl` (M8.5)
-pub const MATMUL_Q4_GEMV_F4E2M1: &str = include_str!("../wgsl/matmul_q4_gemv_f4e2m1.wgsl");
 /// `wgsl/matmul_reg.wgsl`
 pub const MATMUL_REG: &str = include_str!("../wgsl/matmul_reg.wgsl");
 /// `wgsl/matmul_reg2.wgsl`
@@ -632,10 +632,10 @@ pub const MATMUL_REG2: &str = include_str!("../wgsl/matmul_reg2.wgsl");
 pub const MATMUL_REG3: &str = include_str!("../wgsl/matmul_reg3.wgsl");
 /// `wgsl/matmul_reg3_grouped.wgsl`
 pub const MATMUL_REG3_GROUPED: &str = include_str!("../wgsl/matmul_reg3_grouped.wgsl");
-/// `wgsl/matmul_reg4.wgsl`
-pub const MATMUL_REG4: &str = include_str!("../wgsl/matmul_reg4.wgsl");
 /// `wgsl/matmul_reg3_splitk.wgsl`
 pub const MATMUL_REG3_SPLITK: &str = include_str!("../wgsl/matmul_reg3_splitk.wgsl");
+/// `wgsl/matmul_reg4.wgsl`
+pub const MATMUL_REG4: &str = include_str!("../wgsl/matmul_reg4.wgsl");
 /// `wgsl/matmul_rows.wgsl`
 pub const MATMUL_ROWS: &str = include_str!("../wgsl/matmul_rows.wgsl");
 /// `wgsl/matmul_tile.wgsl`
@@ -674,6 +674,8 @@ pub const MOE_LINEAR_GATED: &str = include_str!("../wgsl/moe_linear_gated.wgsl")
 pub const MOE_LINEAR_GATED_DW: &str = include_str!("../wgsl/moe_linear_gated_dw.wgsl");
 /// `wgsl/moe_linear_gated_dx.wgsl`
 pub const MOE_LINEAR_GATED_DX: &str = include_str!("../wgsl/moe_linear_gated_dx.wgsl");
+/// `wgsl/moe_linear_gated_gemv.wgsl`
+pub const MOE_LINEAR_GATED_GEMV: &str = include_str!("../wgsl/moe_linear_gated_gemv.wgsl");
 /// `wgsl/moe_linear_gated_i8.wgsl`
 pub const MOE_LINEAR_GATED_I8: &str = include_str!("../wgsl/moe_linear_gated_i8.wgsl");
 /// `wgsl/moe_linear_gated_kq.wgsl`
@@ -1296,6 +1298,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("moe_linear_gated", MOE_LINEAR_GATED),
     ("moe_linear_gated_dw", MOE_LINEAR_GATED_DW),
     ("moe_linear_gated_dx", MOE_LINEAR_GATED_DX),
+    ("moe_linear_gated_gemv", MOE_LINEAR_GATED_GEMV),
     ("moe_linear_gated_i8", MOE_LINEAR_GATED_I8),
     ("moe_linear_gated_kq", MOE_LINEAR_GATED_KQ),
     ("moe_linear_gated_q4", MOE_LINEAR_GATED_Q4),

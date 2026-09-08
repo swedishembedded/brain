@@ -159,20 +159,32 @@ atomically: `<|grounding|>` turns on grounding mode (the model then emits
 builds the vision encoder (SAM+CLIP+glue) with `gpu_core::Gpu::new_wgpu` and
 the decoder on whichever device `caps::decoder_device` picks. That is a real
 card by default: on two Tesla P40s the served build places the tower on one
-and the DeepSeek-V2 MoE decoder on the other, and a page that took **539 s**
-with the decoder on the 48-thread CPU Cranelift JIT takes **121 s** with it on
-a card - same image, same prompt, same 512-token budget, and byte-identical
-decoded markdown. Per token that is **0.198 s against 0.772 s**, and the
-283-row prompt prefills in **3.3 s against 13.8 s**.
+and the DeepSeek-V2 MoE decoder on the other.
+<!-- perf-number: the comparison this default rests on, measured on one host -->
+One real page (283-token prompt, 512 generated tokens) takes **62.4 s** that
+way against **91.8 s** with the decoder on the 48-thread CPU Cranelift JIT -
+**1.47x**, with byte-identical decoded markdown, and the 283-row prefill is
+**3.2 s against 5.6 s**.
 
-The GPU is the default because it is measured faster, not assumed, and the
-decoder is correct on both: `crates/deepseek2/tests/{parity,generate}.rs`
-gate the real 2.9 B decoder against the SAME llama.cpp reference on each
-backend (it reproduces llama.cpp's continuation token for token on both),
-`crates/deepseek2/tests/backend_parity.rs` gates the two against each other
-at the fp32 noise floor, and
-`crates/deepseek2/tests/decode_throughput.rs` asserts they decode the same ids
-at the served `ctx = 8192`/`chunk = 512` shape while reporting each one's cost.
+<!-- perf-number: the CPU side of that comparison is not this repo's default build -->
+That CPU figure is the FAST one: it needs `crates/backend-cpu`'s rayon/GEMV
+scheduling fix, without which the same page takes 539 s. Comparing the card
+against an unfixed CPU would have overstated the win about six-fold, which is
+why the number quoted here is the fixed one.
+
+Speed is not the whole reason the GPU is the default. The CPU decoder spends
+all 48 cores and 13.5 GiB of host RAM to reach its throughput; the GPU
+decoder beats it on roughly one host thread and 2.7 GiB, which on a serving
+box is 47 cores and 11 GiB returned to every other resident.
+
+The decoder is correct on both, and gated as such:
+`crates/deepseek2/tests/{parity,generate}.rs` gate the real 2.9 B decoder
+against the SAME llama.cpp reference on each backend (it reproduces
+llama.cpp's continuation token for token on both),
+`crates/deepseek2/tests/backend_parity.rs` gates the two against each other at
+the fp32 noise floor, and `crates/deepseek2/tests/decode_throughput.rs`
+asserts they decode the same ids at the served `ctx = 8192`/`chunk = 512`
+shape while reporting each one's cost.
 
 **`$BRAIN_DEEPSEEK_OCR_DECODER_DEVICE` is the operator knob**, alongside
 `$BRAIN_DEEPSEEK_OCR_CTX`/`$BRAIN_DEEPSEEK_OCR_CHUNK`: `cpu`, `gpu` (the
@@ -181,16 +193,17 @@ vision tower's own card), `gpu<i>` or a bare index (that card), or `auto`
 the tower's card when one is big enough for both, and falls back to the CPU
 when there is no discrete GPU at all - on such a box `Gpu::new_wgpu` resolves
 to a software rasteriser whose buffers ARE host RAM, which is strictly worse
-than the Cranelift JIT already there. The CPU decoder is a supported
-placement, not a deprecated one; it is what a GPU-less host runs and what an
-operator gets by asking.
+than the Cranelift JIT already there. It reasons about each card's capacity,
+not its free memory (wgpu exposes no portable free-VRAM query), so on a
+shared box name the card outright. The CPU decoder is a supported placement,
+not a deprecated one.
 
 <!-- perf-number: hardware requirement, not a throughput claim -->
 **~7 GiB + ~14 GiB of VRAM and ~3 GiB of RAM**, measured on the served build
 (`nvidia-smi memory.used` per card and `/proc/self/status` VmHWM, sampled for
 the life of a real page): **6.27 GiB** on the vision card, **13.25 GiB** on
-the decoder card, **2.63 GiB** of host RSS. With the decoder on the CPU
-instead it is 6.27 GiB of VRAM and **13.51 GiB** of RAM. Each of those is its
+the decoder card, **2.68 GiB** of host RSS. With the decoder on the CPU
+instead it is 6.27 GiB of VRAM and **13.54 GiB** of RAM. Each of those is its
 own direct measurement, so `crates/cli/src/resident_deepseekocr.rs` names
 every device the instance really occupies with its own figure rather than
 splitting one number across devices - which is what it used to do, from a
@@ -221,16 +234,21 @@ tape either. Every generated token after prefill is still one `O(1)`
 incremental decode step (`model::block::gqa_chunk_step` at one new row, plus
 a single-row MoE/dense FFN pass), not a full re-run of the sequence.
 
-**Not yet optimized for sparsity.** Every MoE layer still dispatches all 64
-experts for every row and masks the 58 it did not route to, which is what
-`BRAIN_PROFILE=1` shows dominating a decode step on both backends
-(`moe_linear_gated`, 2112 dispatches and ~9.7 GB of expert-weight reads per
-token, 51% of GPU kernel time). `model::moe::expert_fwd_grouped` - a
+**Shaped for one decode row, but not yet sparse in its DISPATCHES.** Both of
+the decode path's dominant kernels now have a skinny-M tier selected against
+the device's own capabilities (`matmul_gemv` for the attention/shared-expert
+projections and the head, `moe_linear_gated_gemv` for the routed experts) -
+the element-per-thread kernels launch only `n` threads at one row, which on a
+P40 is fourteen warps against a 960-warp residency. What remains is that
+every MoE layer still DISPATCHES all 64 experts per row even though the
+kernel now skips the 58 dead ones without reading their weights.
+<!-- perf-number: where the remaining time goes, not a claim about how fast it is -->
+That is ~3785 dispatches per decode token, whose host-side bind-group cost is
+roughly 60% of a decode step's wall time. `model::moe::expert_fwd_grouped` - a
 device-side row permutation plus a grouped GEMM, already written and
 parity-gated in `crates/model/tests/moe_grouped_parity.rs` - is the standing
-fix and would read only the top-6 experts' weights; it needs this decoder's
-per-expert weight tensors concatenated per layer first. See
-`.agents/roadmap/deepseek2ocr.md`.
+fix; it needs this decoder's per-expert weight tensors concatenated per layer
+first. See `.agents/roadmap/deepseek2ocr.md`.
 
 For the actual measured numbers behind these changes - wall-clock deltas,
 per-kernel profiles, and the full history of what was tried and what didn't

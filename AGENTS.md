@@ -624,9 +624,13 @@ fast and scalable kernel - not a naive one.
     `$BRAIN_DEEPSEEK_OCR_DECODER_DEVICE=cpu` (which also takes
     `gpu`/`gpu<i>`/`<i>`/`auto`). The CPU decoder stays a supported placement,
     not a removed one. **Measured on two Tesla P40s**, same page and prompt at
-    a 512-token budget: **121 s/page on the GPU decoder against 539 s on the
-    48-thread Cranelift JIT** (0.198 vs 0.772 s/token, 3.3 vs 13.8 s for the
-    283-row prefill), with **byte-identical** decoded markdown. Both backends
+    a 512-token budget: **62.4 s/page on the GPU decoder against 91.8 s on the
+    48-thread Cranelift JIT** (1.47x; 3.2 vs 5.6 s for the 283-row prefill),
+    with **byte-identical** decoded markdown - and the CPU side of that is the
+    FAST one, requiring `crates/backend-cpu`'s rayon/GEMV scheduling fix
+    (without it the same page takes 539 s). Speed is not the whole reason for
+    the default: the CPU decoder spends all 48 cores and 13.5 GiB of host RAM
+    to reach that, the GPU one roughly one thread and 2.7 GiB. Both backends
     are gated against the SAME llama.cpp reference
     (`crates/deepseek2/tests/{parity,generate}.rs` each grow a wgpu twin; the
     real 2.9 B decoder reproduces llama.cpp token for token on each),
@@ -644,10 +648,15 @@ fast and scalable kernel - not a naive one.
     `activate_multi` computes the placement ONCE and passes it to
     `Session::load_with`, so the reservation and the allocation cannot name
     different cards. Never an env mutation from inside a
-    server-lifetime resident. **Not yet sparse**: every MoE layer still
-    dispatches all 64 experts per row (2112 dispatches and ~9.7 GB of
-    expert-weight reads per token, 51% of GPU kernel time under
-    `BRAIN_PROFILE=1`); `model::moe::expert_fwd_grouped` is the written,
+    server-lifetime resident. **Shaped for one decode row** - both dominant
+    kernels gained a skinny-M tier selected against the DEVICE's caps
+    (`model::block::gemv_tier`): `matmul_gemv` for the projections and the
+    head (measured 9.6x on the decode-row calls) and the new
+    `moe_linear_gated_gemv` for the routed experts, gated by
+    `crates/model/tests/moe_gemv_parity.rs`. **Not yet sparse in its
+    DISPATCHES**: every MoE layer still dispatches all 64 experts per row
+    (~3785 dispatches per decode token, whose host-side bind-group cost is
+    ~60% of a decode step); `model::moe::expert_fwd_grouped` is the written,
     parity-gated fix and needs this decoder's per-expert weights concatenated
     per layer. `run_batch` is the serial default and says why
     (per-image encoder pass, no decoder batch axis). Decode IS KV-cached

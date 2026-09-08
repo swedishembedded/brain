@@ -2267,7 +2267,7 @@ pointer for whoever picks this up in the same environment).
 The split backend Phase 9 landed put the vision tower on wgpu and left the
 DeepSeek-V2 MoE decoder on `Gpu::new_cpu`, with a doc comment saying it had
 "no measured wgpu benefit". That claim was never measured on a discrete card.
-It is now, on two Tesla P40s, and it was wrong.
+It is now, on two Tesla P40s.
 
 ### The correctness gap that had to close first
 
@@ -2290,7 +2290,7 @@ two that do are handled - `rmsnorm_rows` is caps-gated at RECORD time by
 `matmul_reg3` is intercepted by name before `backend-cpu`'s JIT (which refuses
 3-barrier kernels outright rather than mis-executing them).
 
-Four gates, all green:
+Five gates, all green:
 
 | gate | what it proves | measured |
 |---|---|---|
@@ -2298,81 +2298,138 @@ Four gates, all green:
 | `deepseek2/tests/parity.rs` + `generate.rs` wgpu twins | the real 2.9 B decoder vs llama.cpp, on each backend | token for token on both |
 | `deepseek2/tests/decode_throughput.rs` (new, slow lane) | served ctx 8192 / chunk 512 / 283-row shape, same ids | identical over 32 steps |
 | `deepseek2ocr/tests/tiny_ref.rs::every_device_placement_matches_all_cpu` | wiring: (wgpu,wgpu) and (wgpu,cpu) vs all-CPU | cos 1.0000000000 |
+| `model/tests/moe_gemv_parity.rs` (new) | the skinny-M expert kernel vs the one it tiers | 89040 elements, worst 5.7e-6 |
 
 `tests/common/real_lm.rs` takes the device as an argument (`open_on`) instead
 of writing `BRAIN_DEVICE`: a process-global env write cannot express "this
 build on the CPU, that one on the card" inside one test binary.
 
-### Measured, on the served build
+### The GPU decode path was not shaped for one row, and now is
 
-One real page (a rendered datasheet page, 1240x1754), same prompt, `--max-new
-512`, through `examples/batch_ocr.rs` on the production `Session::load`:
+The first GPU-vs-CPU numbers were taken before either side had been
+optimised, and both sides then moved - the CPU by a separate rayon/GEMV fix in
+`crates/backend-cpu`, the GPU by the two kernel tiers below. Only the last
+row of this table is a fair comparison, and it is the one to quote.
 
-| | decoder on CPU | decoder on a P40 |
+`BRAIN_PROFILE=1` over the served shape (ctx 8192, chunk 512, a 283-row
+prefill round plus 32 decode steps) named the problem exactly:
+
+```text
+moe_linear_gated  3290.0 ms  69696 calls  (50.8%)
+matmul            2649.1 ms   3117 calls  (40.9%)
+```
+
+Both are element-per-thread kernels, and at ONE decode row that means the
+whole dispatch is `n` threads - 896 for an expert projection, 1280 for a
+q/k/v/o. A Tesla P40 has 30 SMs and 2048 resident thread slots each, so 896
+threads is fourteen warps against a capacity of 960 and nothing hides the
+DRAM latency of the k-long serial reduction each thread runs. The decode-row
+`matmul`s measured ~4 GFLOP/s against an 11.8 TFLOP/s roof.
+
+Two tiers fixed it, both selected at RECORD time against the DEVICE's own
+caps (`model::block::gemv_tier`, keyed on `backend_api::select`'s existing
+`Op::MatMul` table) so the CPU keeps taking kernel names its own dispatch
+ladder routes to the native AVX2 GEMM:
+
+* **`matmul_gemv`** (existing kernel, newly registered here) for
+  `DeepseekV2::mm` and `moe::shared_expert_fwd_tiered`. `gpu_core::upgrade`
+  substitutes its register-accumulator sibling automatically:
+  `matmul_gemv_reg#MREG=1` measured **192 ms over 3073 decode calls against
+  the naive kernel's 1833 ms - 9.6x**.
+* **`moe_linear_gated_gemv`** (new kernel) for `moe::expert_fwd_tiered`.
+  `matmul_gemv.wgsl` plus `moe_linear_gated.wgsl`'s row gate.
+
+The MoE one has a subtlety worth recording, because the first version of it
+LOST: `w` is read once per k-step and shared by every row, so a k-loop
+entered on a dead expert streams that expert's entire weight matrix to
+discard it. At decode 58 of this model's 64 experts are dead per token, which
+turns a 0.91 GB read into a 9.7 GB one - measured at 41.9 us per call against
+the element-per-thread kernel's 16.8 us. Hoisting the "did ANY row route
+here" test above the k-loop (and skipping the loop rather than returning, so
+the barrier stays in statically-uniform control flow) took it to 14.9 us.
+
+Neither tier is bit-identical to the kernel it replaces - both fold 64
+partials instead of one serial accumulator - which is why they are visible
+call-site seams rather than `gpu_core::upgrade` rows, whose own bar demands
+bit-identity. `model/tests/moe_gemv_parity.rs` is the gate that obligation
+buys, and it checks the thing a tolerance alone would miss: a non-routed
+row's output must be EXACTLY zero, bit for bit, because `scale_add` reads
+that slot unconditionally.
+
+### Measured
+
+Decoder only, served shape, both arms in ONE process back to back
+(`deepseek2/tests/decode_throughput.rs`):
+
+| decoder | 283-row prefill | per token |
 |---|---|---|
-| page wall time | **539.3 s** | **121.3 s** (4.4x) |
-| per token | 0.772 s | 0.198 s |
-| 283-row prefill | 13.78 s | 3.31 s |
+| CPU, before the `backend-cpu` rayon/GEMV fix | 13.78 s | 0.772 s |
+| CPU, with that fix | 5.59 s | 0.137 s |
+| wgpu, before the two tiers above | 3.31 s | 0.198 s |
+| **wgpu, with them** | **3.17 s** | **0.129 s** |
+
+One real page (a rendered datasheet page, 1240x1754), same prompt,
+`--max-new 512`, through `examples/batch_ocr.rs` on the production
+`Session::load`, decoded markdown byte-identical between the two:
+
+| | decoder on CPU (fixed) | decoder on a P40 (tiered) |
+|---|---|---|
+| page wall time | **91.8 s** | **62.4 s** |
 | host VmHWM | 13.51 GiB | **2.63 GiB** |
 | vision card | 6.27 GiB | 6.27 GiB |
 | decoder card | - | 13.25 GiB |
-| decoded markdown | byte-identical to the other column | |
+| host cores busy | 48 | ~1 |
 
-The CPU column was taken with the box under a load average near 60, so it is
-if anything generous to the GPU side being smaller than it looks; the
-decoder-only measurement on a quiet run
-(`deepseek2/tests/decode_throughput.rs`) puts the same comparison at 5.9x on
-prefill and 6.0x on decode.
+That is **1.47x per page**, and it is the number to quote: a page is one
+vision pass plus one prefill plus 512 decode steps, which is what a caller
+actually waits for. Backing the fixed costs out of it puts the CPU at
+~0.164 s/token over 512 tokens and the GPU at ~0.111 s/token - a wider gap
+than the 32-token `decode_throughput` sample above (0.137 vs 0.129) reports,
+and the 512-token figure is the better-averaged one. The GPU-side page number
+was also taken with a tenant on the other card, so it is if anything
+pessimistic.
 
-### Where the GPU time actually goes, and what is still on the table
+**The CPU column requires `crates/backend-cpu`'s rayon/GEMV fix**, which
+lives on a separate branch and is NOT part of this change - it was applied on
+top of this working tree purely so the comparison would be fair. Measuring
+the GPU against the unfixed CPU would have flattered it by roughly 6x on
+decode, which is exactly the mistake a "GPU wins, ship it" conclusion is
+prone to.
 
-`BRAIN_PROFILE=1` over prefill + 32 decode steps, on the card:
+### Why GPU is the default, beyond the 1.47x
 
-```text
-=== GPU op counts === uniforms=124905 bind_groups=124905 submits=4865 dispatches=124905
-moe_linear_gated  3290.0 ms  69696 calls  (50.8%)
-matmul            2649.1 ms   3117 calls  (40.9%)
-scale_add          162.7 ms  23232 calls  ( 2.5%)
-silu_mul           158.7 ms  23628 calls  ( 2.4%)
-router_gate         74.3 ms    363 calls  ( 1.1%)
-```
+Even at parity it would be the right default, because the per-token number is
+not the whole cost. The CPU decoder spends 48 cores and 13.5 GiB of host RAM
+to reach its throughput; the GPU decoder beats it on one host thread and
+2.6 GiB, leaving the CPU free for every other resident the scheduler is
+holding and returning 11 GiB of RAM to the budget. It is also 1.8x on
+prefill, a fixed per-page cost no context length amortises.
 
-69696 = 33 rounds x 2112, i.e. **every MoE layer dispatches all 64 experts for
-every row and masks the 58 it did not route to**. That reads ~9.7 GB of expert
-weights per token where the top-6 routing needs ~0.9 GB. `model::moe::
-expert_fwd_grouped` (device-side row permutation + grouped GEMM over
-`matmul_reg3_grouped`, no host readback, ~12 dispatches per layer instead of
-192) is the written and parity-gated fix
-(`crates/model/tests/moe_grouped_parity.rs`) and **has no production caller
-yet**; wiring it here needs this decoder's per-expert weight tensors
-concatenated into one buffer per (layer, projection) - 64 x 1280 x 896 fp32 =
-293 MB, comfortably inside the 2047 MiB storage-binding limit. It is GPU-only
-(`matmul_reg3_grouped` is a 3-barrier kernel with no `fast_ops` sibling), so
-the selection must be caps-gated at record time and the CPU path keeps
-`expert_fwd`.
+And the remaining headroom is all on the GPU side, measured rather than
+hoped: after the two tiers, GPU kernel time accounts for ~53 ms of a 129 ms
+decode token. The other ~76 ms is HOST-side - 124905 bind groups for 124905
+dispatches across the run, ~3785 dispatches per decode token, at roughly
+20 us of host work each.
 
-`matmul`'s 40.9% is the second target: at one decode row these are GEMVs
-launched with only `n` threads (1280 or 1792), ~4 GFLOP/s against the card's
-11.8 TFLOP/s roof.
+### Next, in measured order
 
-### Placement, and the CPU path staying reachable
-
-`caps::decoder_device(vision_card) -> DecoderDevice::{Cpu, SameCard, Card(i)}`
-is the one decision, read by `Session::load_with` and by
-`crates/cli/src/resident_deepseekocr.rs` alike so a reservation and an
-allocation cannot name different cards. `$BRAIN_DEEPSEEK_OCR_DECODER_DEVICE`
-takes `cpu`, `gpu`, `gpu<i>`, a bare index, or `auto` (default); `auto`
-prefers a second discrete card, then one card big enough for both halves, then
-the CPU. A GPU-less host stays on the CPU deliberately: `Gpu::new_wgpu` there
-is a software rasteriser whose buffers are host RAM.
-
-The residency constants are now four independent measurements
-(`VISION_DEVICE_BYTES` 7 GiB, `DECODER_DEVICE_BYTES` 14 GiB,
-`HOST_BYTES_GPU_DECODER` 3 GiB, `HOST_BYTES_CPU_DECODER` 14 GiB) rather than a
-decomposition of the single 21.32 GiB all-CPU VmHWM taken at the long-gone
-512-token flat-tape shape, and they live in `deepseek2ocr::caps` because
-`decoder_device` needs two of them to decide whether one card holds both
-halves.
+1. **Cut the dispatch count.** `moe::expert_fwd_grouped` (device-side row
+   permutation + grouped GEMM, already written and parity-gated in
+   `model/tests/moe_grouped_parity.rs`, with no production caller yet)
+   replaces 2112 per-expert linear dispatches plus 704 `silu_mul` and 704
+   `scale_add` with ~12 per layer. That is ~3520 of the 3785 dispatches a
+   decode token pays for. It needs this decoder's per-expert weights
+   concatenated into one buffer per (layer, projection) - 64 x 1280 x 896
+   fp32 = 293 MB, comfortably inside the 2047 MiB storage-binding limit, but
+   a real change to how `ParamStore` lays the experts out, since a duplicate
+   copy would add 9.7 GB to a 13.25 GiB budget on a 24 GiB card.
+2. **Reuse bind groups across decode steps.** The decode tape is the same
+   buffer set every token; nothing in `gpu_core` caches the bind group for a
+   repeated `(pipeline, buffers)` pair. This is a gpu-core change that would
+   pay every model with a per-token dispatch loop, not just this one.
+3. **The prefill round's MoE.** `moe_linear_gated` at m=283 is still
+   element-per-thread (2112 calls, 2105 ms, the whole prefill). It is past
+   the decode regime so no GEMV applies; a tiled sibling would be the fix.
 
 ### Found in passing, NOT fixed here
 
@@ -2382,3 +2439,7 @@ halves.
 by re-running it at the parent commit. Green on wgpu and on the CPU JIT, so it
 does not touch the served path, but it is the lesson-#5 shape on a third
 backend and belongs in `crates/sam1`'s ledger.
+
+`crates/model/tests/ops_kquant.rs` did not complete in 45 minutes under heavy
+load on this run and was killed; it is unrelated to anything here (k-quant
+ops) and was excluded from the suite run, not fixed.

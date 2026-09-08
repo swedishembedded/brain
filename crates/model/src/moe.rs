@@ -273,9 +273,53 @@ pub fn expert_fwd(
     e_idx: u32,
     accumulate: bool,
 ) -> [Step; 5] {
+    expert_fwd_tiered(g, ids, None, shape, x, gate, gate_w, up_w, down_w, scratch, acc, e_idx, accumulate)
+}
+
+/// [`expert_fwd`] with a second, skinny-M tier for its three projections:
+/// `moe_linear_gated_gemv.wgsl`, one WORKGROUP per output column instead of
+/// one THREAD per output element.
+///
+/// Pass `Some(index)` when the model registered that kernel; this function
+/// then takes it exactly when `block::gemv_tier` says this device and this
+/// row count want it (`m <= 32` on a device with workgroup reductions), and
+/// `ids.linear_gated` otherwise. `None` is [`expert_fwd`] unchanged.
+///
+/// **This is a call-site seam, not a `gpu_core::upgrade` row, and that is
+/// deliberate**: the GEMV splits the K reduction across 64 lanes and folds
+/// their partials, so it reassociates a SUM and is not bit-identical to
+/// `moe_linear_gated` (they agree to ~1e-6, the same order `rmsnorm_rows`
+/// differs from `rmsnorm`). `upgrade`'s own bar rules that out for an
+/// invisible substitution - a model adopting it owes a visible numerical
+/// gate, and a visible call site is where that obligation belongs.
+///
+/// Why a separate entry point rather than a field on [`MoeIds`]: every model
+/// in the workspace builds one of those by struct literal, and a new required
+/// field would make each of them state an answer to a question only a decode
+/// path has. Adopting the tier stays additive.
+#[allow(clippy::too_many_arguments)]
+pub fn expert_fwd_tiered(
+    g: &Gpu,
+    ids: &MoeIds,
+    linear_gated_gemv: Option<usize>,
+    shape: &MoeShape,
+    x: &DeviceBuffer,
+    gate: &DeviceBuffer,
+    gate_w: &DeviceBuffer,
+    up_w: &DeviceBuffer,
+    down_w: &DeviceBuffer,
+    scratch: &ExpertScratch,
+    acc: &DeviceBuffer,
+    e_idx: u32,
+    accumulate: bool,
+) -> [Step; 5] {
     let (m, d, ff, e) = (shape.rows, shape.d_model, shape.moe_ff, shape.n_experts);
     let lin = |x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, k: u32, n: u32| {
-        g.step(ids.linear_gated, &[x, w, gate, out], &[m, k, n, e, e_idx], m * n)
+        let (kid, threads) = match linear_gated_gemv.zip(crate::block::gemv_tier(g, m, n)) {
+            Some((kid, threads)) => (kid, threads),
+            None => (ids.linear_gated, m * n),
+        };
+        g.step(kid, &[x, w, gate, out], &[m, k, n, e, e_idx], threads)
     };
     [
         lin(x, gate_w, scratch.gate_pre, d, ff),
@@ -777,15 +821,56 @@ pub fn shared_expert_fwd(
     acc: &DeviceBuffer,
     out: &DeviceBuffer,
 ) -> Vec<Step> {
+    shared_expert_fwd_tiered(g, ids, None, rows, d_model, shared_ff, x, gate_w, up_w, down_w, shared_gate_w, scratch, acc, out)
+}
+
+/// [`shared_expert_fwd`] with a skinny-M tier for its dense projections:
+/// `matmul_gemv.wgsl` (one WORKGROUP per output column) instead of
+/// `matmul.wgsl` (one THREAD per output element) exactly when
+/// [`crate::block::gemv_tier`] says this device and this row count want it.
+///
+/// `None` is [`shared_expert_fwd`] unchanged. Same rationale, and the same
+/// numerical obligation, as [`expert_fwd_tiered`]: the GEMV reassociates the K
+/// sum across 64 lanes, so a caller adopting it owes a gate rather than
+/// getting it invisibly.
+///
+/// The optional sigmoid-gate projection is `n = 1`, where the GEMV's one
+/// workgroup per column is one workgroup total - correct, and neither better
+/// nor worse than the single thread it replaces; it goes through the same
+/// selection so the arm has no second rule.
+#[allow(clippy::too_many_arguments)]
+pub fn shared_expert_fwd_tiered(
+    g: &Gpu,
+    ids: &SharedExpertIds,
+    matmul_gemv: Option<usize>,
+    rows: u32,
+    d_model: u32,
+    shared_ff: u32,
+    x: &DeviceBuffer,
+    gate_w: &DeviceBuffer,
+    up_w: &DeviceBuffer,
+    down_w: &DeviceBuffer,
+    shared_gate_w: Option<&DeviceBuffer>,
+    scratch: &SharedExpertScratch,
+    acc: &DeviceBuffer,
+    out: &DeviceBuffer,
+) -> Vec<Step> {
+    let mm = |xin: &DeviceBuffer, w: &DeviceBuffer, o: &DeviceBuffer, k: u32, n: u32| {
+        let (kid, threads) = match matmul_gemv.zip(crate::block::gemv_tier(g, rows, n)) {
+            Some((kid, threads)) => (kid, threads),
+            None => (ids.matmul, rows * n),
+        };
+        g.step(kid, &[xin, w, o], &[rows, k, n], threads)
+    };
     let mut steps = vec![
-        g.step(ids.matmul, &[x, gate_w, scratch.gate_pre], &[rows, d_model, shared_ff], rows * shared_ff),
-        g.step(ids.matmul, &[x, up_w, scratch.up], &[rows, d_model, shared_ff], rows * shared_ff),
+        mm(x, gate_w, scratch.gate_pre, d_model, shared_ff),
+        mm(x, up_w, scratch.up, d_model, shared_ff),
         g.step(ids.silu_mul, &[scratch.gate_pre, scratch.up, scratch.h], &[rows * shared_ff], rows * shared_ff),
-        g.step(ids.matmul, &[scratch.h, down_w, scratch.mlp_out], &[rows, shared_ff, d_model], rows * d_model),
+        mm(scratch.h, down_w, scratch.mlp_out, shared_ff, d_model),
     ];
     match shared_gate_w {
         Some(shared_gate_w) => {
-            steps.push(g.step(ids.matmul, &[x, shared_gate_w, scratch.gate_logits], &[rows, d_model, 1], rows));
+            steps.push(mm(x, shared_gate_w, scratch.gate_logits, d_model, 1));
             steps.push(g.step(ids.sigmoid, &[scratch.gate_logits, scratch.gate_scalar], &[rows], rows));
             steps.push(g.step(ids.scale_row, &[scratch.mlp_out, scratch.gate_scalar, scratch.scaled], &[rows * d_model, d_model], rows * d_model));
             steps.push(g.step(ids.add2, &[acc, scratch.scaled, out], &[rows * d_model], rows * d_model));

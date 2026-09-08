@@ -160,6 +160,29 @@ const PAGED_DECODE_SCORES_BATCHED: usize = 46;
 const DECODE_SOFTMAX_BATCHED: usize = 47;
 const PAGED_DECODE_APPLY_BATCHED: usize = 48;
 const CONCAT_SPLIT: usize = 49;
+// The decode-regime GEMM: one WORKGROUP per output column, each of its 64
+// threads reading a K-slice of the weight row once. `matmul`/`matmul_reg3`
+// launch one thread per output ELEMENT, so a single decode row dispatches only
+// `n` threads (1280 for a q/k/v/o projection) - twenty warps on a card that
+// needs thousands in flight to hide DRAM latency.
+// perf-number: the shortfall this tier exists to close, on the one card it was
+// measured on - not a throughput claim.
+// perf-number: ~4 GFLOP/s against a Tesla P40's 11.8 TFLOP/s roof, 41% of this decode path's GPU kernel time.
+// Selected by `block::gemv_tier` against the DEVICE's caps,
+// so the CPU JIT (no workgroup reductions) keeps taking a kernel name its own
+// dispatch ladder routes to the native AVX2 GEMM. Appended, so every index
+// above is unchanged.
+const MATMUL_GEMV: usize = 50;
+// The decode-regime twin of `moe_linear_gated`, same relationship
+// `matmul_gemv` has to `matmul`: one WORKGROUP per output column instead of
+// one thread per output element. At one decode row an expert projection
+// dispatches only `moe_ff` = 896 threads, fourteen warps against a Tesla
+// P40's 960-warp residency, and this decoder runs 2112 of those per token.
+// perf-number: same, the shortfall rather than a claim.
+// perf-number: 51% of the decode step's GPU kernel time, 0.91 GB of routed expert weights at ~10 GB/s against that card's ~346 GB/s roof.
+// Selected by `moe::expert_fwd_tiered` against the DEVICE's caps. Appended,
+// so every index above is unchanged.
+const MOE_LINEAR_GATED_GEMV: usize = 51;
 
 pub const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -234,6 +257,8 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("decode_softmax_batched", kernels::DECODE_SOFTMAX_BATCHED),
     ("paged_decode_apply_batched", kernels::PAGED_DECODE_APPLY_BATCHED),
     ("concat_split", kernels::CONCAT_SPLIT),
+    ("matmul_gemv", kernels::MATMUL_GEMV),
+    ("moe_linear_gated_gemv", kernels::MOE_LINEAR_GATED_GEMV),
 ];
 
 fn kernel_ids() -> KernelIds {
@@ -852,10 +877,22 @@ impl DeepseekV2 {
         }
     }
 
-    /// `out = x·Wᵀ`, size-adaptive between the naive `matmul` and the
-    /// register-tiled `matmul_reg3` by `block::pick_gemm`'s measured rule.
+    /// `out = x·Wᵀ`: the skinny-M [`MATMUL_GEMV`] when this instance's own
+    /// device and this shape want it (`block::gemv_tier`), otherwise exactly
+    /// what `block::pick_gemm`'s measured rule picked before - the naive
+    /// `matmul` or the register-tiled `matmul_reg3`. Every tier computes the
+    /// same math (`crates/model/tests/ops_matmul_step_identity.rs` holds that
+    /// contract), so this only changes speed.
+    ///
+    /// One decode row through this decoder is 94 of these per layer stack
+    /// (q/k/v/o on 12 layers, the router and the shared expert's three
+    /// projections on 11, and the `[1, 129280]` head), and at `m = 1` the
+    /// element-per-thread kernels launch only `n` threads each.
     fn mm(&self, s: &mut Vec<Step>, x: &DeviceBuffer, wname: &str, out: &DeviceBuffer, m: u32, k: u32, nout: u32) {
-        let (mk, mt) = block::pick_gemm(m as usize, nout as usize, MATMUL, MATMUL_REG3, false);
+        let (mk, mt) = match block::gemv_tier(&self.gpu, m, nout) {
+            Some(threads) => (MATMUL_GEMV, threads),
+            None => block::pick_gemm(m as usize, nout as usize, MATMUL, MATMUL_REG3, false),
+        };
         s.push(self.gpu.step(mk, &[x, self.w(wname), out], &[m, k, nout], mt));
     }
 
@@ -998,9 +1035,10 @@ impl DeepseekV2 {
                     // proportional to the rows actually routed here.
                     for ei in 0..e as usize {
                         let (gn, un, dn) = &self.moe_expert_names[l][ei];
-                        s.extend(moe::expert_fwd(
+                        s.extend(moe::expert_fwd_tiered(
                             &self.gpu,
                             &moe_ids(),
+                            Some(MOE_LINEAR_GATED_GEMV),
                             &shape,
                             &lb.xn2,
                             gate,
@@ -1017,9 +1055,10 @@ impl DeepseekV2 {
                     // is no shared-expert gate tensor in this checkpoint, and an
                     // unweighted sum of SwiGLU experts IS one SwiGLU of the
                     // summed width -- so this is one matmul triple, not two.
-                    s.extend(moe::shared_expert_fwd(
+                    s.extend(moe::shared_expert_fwd_tiered(
                         &self.gpu,
                         &shared_expert_ids(),
+                        Some(MATMUL_GEMV),
                         n,
                         d,
                         shared_ff,
@@ -1616,9 +1655,10 @@ impl DeepseekV2 {
                 // applies even more strongly here, not less.
                 for ei in 0..e as usize {
                     let (gn, un, dn) = &self.moe_expert_names[l][ei];
-                    s.extend(moe::expert_fwd(
+                    s.extend(moe::expert_fwd_tiered(
                         g,
                         &moe_kernel_ids,
+                        Some(MOE_LINEAR_GATED_GEMV),
                         &shape_n,
                         &dec.xn2,
                         &dec.gate,
@@ -1631,9 +1671,10 @@ impl DeepseekV2 {
                         ei != 0,
                     ));
                 }
-                s.extend(moe::shared_expert_fwd(
+                s.extend(moe::shared_expert_fwd_tiered(
                     g,
                     &shared_ids,
+                    Some(MATMUL_GEMV),
                     n,
                     d,
                     shared_ff,

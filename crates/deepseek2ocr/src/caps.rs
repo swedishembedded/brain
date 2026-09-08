@@ -253,12 +253,31 @@ pub enum DecoderDevice {
 /// 4. **Otherwise [`DecoderDevice::Cpu`]** - a decoder that does not fit is
 ///    not a decoder that runs slowly, it is one that fails to allocate.
 ///
+/// Those steps reason about each card's CAPACITY (`GpuIdentity::vram_bytes`,
+/// the largest DEVICE_LOCAL heap), never its free memory - wgpu exposes no
+/// portable free-VRAM query, so there is nothing honest to read. A card
+/// another process is already sitting on therefore still looks empty here.
+/// That is the scheduler's job on a served host, where
+/// `crates/cli/src/resident_deepseekocr.rs` passes the budgeted figures in,
+/// and the operator's on a shared one, where
+/// `$BRAIN_DEEPSEEK_OCR_DECODER_DEVICE=gpu<i>` names the card outright.
+///
 /// The GPU is the default where it fits because it is measured faster, not
-/// assumed: on a Tesla P40 against the 48-thread Cranelift JIT, at the served
-/// `ctx = 8192`/`chunk = 512` shape with the real checkpoint, wgpu decodes
-/// 0.198 s/token against 0.772 s/token and prefills a 283-row prompt in
-/// 3.31 s against 13.78 s - and produces the same ids, which
+/// assumed, and measured against the CPU backend at ITS best rather than at
+/// its default: with `crates/backend-cpu`'s rayon/GEMV scheduling fix in
+/// place:
+/// perf-number: the comparison this default rests on, on the one host it was
+/// measured on - not a throughput promise for another.
+/// a real page (283-token prompt, 512 generated tokens) on two Tesla P40s
+/// takes 62.4 s with the decoder on a card against 91.8 s on the 48-thread
+/// Cranelift JIT, and the 283-row prefill 3.2 s against 5.6 s.
+/// Both produce the same ids, which
 /// `crates/deepseek2/tests/decode_throughput.rs` asserts rather than assumes.
+///
+/// Throughput is not the only reason it is the default. The CPU decoder
+/// reaches its number with all 48 cores and ~13.5 GiB of host RAM busy; the
+/// GPU one beats it on roughly one host thread and ~2.7 GiB, which is 47
+/// cores and 11 GiB left for every other resident a server is holding.
 pub fn decoder_device(vision_card: Option<u32>) -> DecoderDevice {
     match std::env::var("BRAIN_DEEPSEEK_OCR_DECODER_DEVICE").ok().map(|s| s.trim().to_ascii_lowercase()) {
         None => auto_decoder_device(vision_card),
@@ -396,9 +415,13 @@ impl Session {
     /// **The vision encoder (SAM+CLIP+glue) builds on `Gpu::new_wgpu`** and
     /// **the decoder on whatever [`decoder_device`] picks** - a real card
     /// wherever one fits, the CPU Cranelift JIT otherwise or on an operator's
-    /// say-so. On a Tesla P40 the GPU decoder is 3.9x faster per token and
-    /// 4.2x faster on prefill than the 48-thread JIT at this exact shape, and
-    /// decodes the same ids (`crates/deepseek2/tests/decode_throughput.rs`).
+    /// say-so.
+    /// perf-number: see [`decoder_device`] for what this compares against.
+    /// On two Tesla P40s a real page costs 62.4 s that way against
+    /// 91.8 s with the decoder on the 48-thread JIT, on roughly one host
+    /// thread instead of 48 - and decodes the same ids
+    /// (`crates/deepseek2/tests/decode_throughput.rs`). See
+    /// [`decoder_device`] for what that comparison is against.
     ///
     /// Neither device is selected by mutating `BRAIN_DEVICE`: this object
     /// lives for the life of a server process, and a process-global env write

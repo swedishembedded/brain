@@ -2226,6 +2226,40 @@ pub fn gemm_variant(v: GemmVariants, m: u32, n: u32) -> (usize, u32) {
     }
 }
 
+/// `Some(invocation count)` when THIS device and this shape want the skinny-M
+/// `matmul_gemv` kernel (`[m,k]·[n,k]ᵀ`, one workgroup per output column);
+/// `None` when the caller should fall back to whatever it selected before -
+/// [`pick_gemm`] or [`gemm_variant`].
+///
+/// Same policy source as both of those (`backend_api::select`'s `Op::MatMul`
+/// table, whose decode-regime head is `WorkgroupPerOutput`), but keyed on
+/// `g.caps()` the way [`rms_variant`] already is rather than on
+/// [`fast_tier_caps`]'s always-capable stand-in. That distinction is
+/// load-bearing for a model whose graph runs on BOTH backends: `matmul_gemv`
+/// needs `workgroup_reductions`, which `backend-cpu` reports as `false`, and
+/// selecting it there would take the dispatch off that backend's native AVX2
+/// GEMM - reached BY KERNEL NAME from its dispatch ladder, which knows the
+/// whole `matmul{,_tiled,_reg,_reg2,_reg3,_reg4}` family and not
+/// `matmul_gemv` - and onto the generic WGSL JIT. Branching on the QUERIED
+/// capability at RECORD time, never at dispatch time, is what keeps a
+/// build's kernel selection from silently changing between backends mid-run
+/// - the same discipline this workspace already applies for correctness
+/// (a workgroup-barrier reduction with no barrier-free sibling can otherwise
+/// return a silently wrong result on exactly one backend); it applies to a
+/// throughput choice for the same reason.
+///
+/// Returning an `Option` rather than a whole tier decision is deliberate: a
+/// caller adopting the GEMV keeps its existing selection for every other
+/// shape, byte for byte, instead of also silently changing which kernel its
+/// non-decode shapes take.
+pub fn gemv_tier(g: &Gpu, m: u32, n: u32) -> Option<u32> {
+    let shape = select::OpShape { m, n, k: 0, dtype: select::Dtype::F32 };
+    match select::candidates(select::Op::MatMul, shape, &g.caps()).into_iter().next() {
+        Some(KernelVariant::WorkgroupPerOutput) => Some(n * 64),
+        _ => None,
+    }
+}
+
 /// SwiGLU activation forward: `h = SiLU(gate) * up`, elementwise over `total`.
 pub fn swiglu_fwd(g: &Gpu, k: &KernelIds, gate: &DeviceBuffer, up: &DeviceBuffer, h: &DeviceBuffer, total: u32) -> Step {
     g.step(k.silu_mul, &[gate, up, h], &[total], total)

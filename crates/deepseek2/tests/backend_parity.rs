@@ -47,11 +47,13 @@ use gpu_core::Gpu;
 /// MEASURED, not guessed: the worst disagreement over all three tests below
 /// is 2.24e-8 (batched forward), with the two decode tapes at 7.45e-9 to
 /// 1.49e-8 - i.e. one to three fp32 ulps at these magnitudes, which is what a
-/// different reduction order inside a GEMM costs and nothing more. 1e-6 sits
-/// ~45x above that and still an order of magnitude BELOW the weakest real
-/// signal `chunked_prefill.rs`'s mutation table records for this decoder
-/// (5.4e-6 for a chunk-relative RoPE), so a real divergence cannot hide under
-/// it.
+/// different reduction order inside a GEMM costs and nothing more.
+///
+/// perf-number: a numerical-tolerance ratio, not a throughput claim - 1e-6
+/// sits ~45x above that measured worst case, and still an order of magnitude
+/// BELOW the weakest real signal `chunked_prefill.rs`'s mutation table
+/// records for this decoder (5.4e-6 for a chunk-relative RoPE), so a real
+/// divergence cannot hide under it.
 const BOUND: f32 = 1e-6;
 
 fn maxabs(a: &[f32], b: &[f32]) -> f32 {
