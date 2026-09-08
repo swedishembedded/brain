@@ -589,4 +589,13 @@ tests) and `cargo test -p brain-gradcheck --lib deepseekocr2` (the
 pre-existing M4 gradcheck, unaffected since it never sets `cfg.lora`) both
 green.
 
-Remaining milestones (M10-M12) not started.
+M11 (user-facing docs) done: `docs/models/deepseekocr2.md` replaced M7's
+stub with the real page (honest support/hardware-limits sections, the
+no-vendor-GGUF guidance, real measured figures from M6/M7/M9 rather than
+placeholders), plus a license-compliance row (Apache-2.0, distinct from
+v1's split code/weights licensing), an `AGENTS.md` ledger entry + crate
+table + routing table row, and `examples/vision/deepseek-ocr-2/README.md`.
+Quickstart untouched, as scoped.
+
+Remaining milestones (M10, M12) not started by this entry; see the Status
+section above/below for any milestone landed separately.
