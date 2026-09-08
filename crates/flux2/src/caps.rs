@@ -41,7 +41,7 @@ fn gen_params(spec: ActionSpec) -> ActionSpec {
         .param(ParamSpec::new("width", ParamType::Int, "output width, px (multiple of 16)").default(json!(512)).min(64.0).max(2048.0).step(16.0))
         .param(ParamSpec::new("height", ParamType::Int, "output height, px (multiple of 16)").default(json!(512)).min(64.0).max(2048.0).step(16.0))
         .param(ParamSpec::new("steps", ParamType::Int, "denoising steps; 0 = variant default (4 distilled / 50 base)").default(json!(0)).min(0.0).max(150.0).step(1.0))
-        .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (omit for 0)"))
+        .param(ParamSpec::new("seed", ParamType::Int, "RNG seed - required, never silently randomized: two invocations with the same prompt/params and no explicit distinct seed would otherwise be indistinguishable to whale's execution cache and collapse to one cached result").required())
         .param(ParamSpec::new("ckpt_every", ParamType::Int, "checkpoint the adapter every N steps (0 = only at the end); each write is atomic, so an interrupted one cannot damage the last good checkpoint").default(json!(100)))
         .param(ParamSpec::new("resume", ParamType::Bool, "continue from the adapter already at 'save' instead of starting over - a cancelled multi-hour run then costs only the steps since its last checkpoint").default(json!(false)))
         .param(ParamSpec::new("guidance", ParamType::Float, "CFG scale -- base variants only (klein is guidance-distilled)").default(json!(4.0)).min(0.0).max(30.0).step(0.1))
@@ -81,7 +81,7 @@ pub fn manifest() -> Manifest {
         .param(ParamSpec::new("steps", ParamType::Int, "training steps").default(json!(200)))
         .param(ParamSpec::new("size", ParamType::Int, "training square size, px (multiple of 16)").default(json!(512)))
         .param(ParamSpec::new("lr", ParamType::Float, "learning rate").default(json!(1e-4)))
-        .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (omit for 0)"))
+        .param(ParamSpec::new("seed", ParamType::Int, "RNG seed - required, see text2image's own seed param doc for why").required())
         .param(ParamSpec::new("cards", ParamType::Int, "GPUs the device trainer spreads the block stack over (klein-9b's fp32 frozen base does not fit one 24 GiB card)").default(json!(1)))
         .param(ParamSpec::new("trainer", ParamType::Enum(vec!["device".into(), "host".into()]), "gradient implementation: 'device' runs the WGSL kernels with the frozen base on the card; 'host' is the finite-difference-gradchecked reference it is validated against").default(json!("device")))
         .param(ParamSpec::new("variant", ParamType::Enum(VARIANTS.iter().map(|s| s.to_string()).collect()), "base model to adapt; 9B needs BRAIN_FLUX2_ALLOW_NC=1").default(json!("klein-4b")))
@@ -145,7 +145,10 @@ pub fn gen_params_from(inv: &Invocation) -> Result<GenParams, String> {
         strength: (strength > 0.0).then_some(strength),
         steps: (steps > 0).then_some(steps),
         guidance: inv.get_f64("guidance").unwrap_or(4.0) as f32,
-        seed: inv.get_i64("seed").unwrap_or(0).max(0) as u64,
+        seed: inv
+            .get_i64("seed")
+            .expect("ActionSpec::validate refuses an invocation missing this required param")
+            .max(0) as u64,
         // Masked editing is reachable from `brain flux2 generate --mask` but
         // has no wire representation yet: it would need a second image blob on
         // the `edit` action, and `refs_from` currently treats every blob it
@@ -298,7 +301,10 @@ pub fn train_action(paths: &Paths, inv: &Invocation, progress: &mut dyn FnMut(Pr
         trainer: crate::finetune::Trainer::from_name(&inv.get_str("trainer").unwrap_or_else(|| "device".into()))?,
         cards: inv.get_i64("cards").unwrap_or(1).max(1) as usize,
         size: inv.get_i64("size").unwrap_or(512).max(16) as u32,
-        seed: inv.get_i64("seed").unwrap_or(0).max(0) as u64,
+        seed: inv
+            .get_i64("seed")
+            .expect("ActionSpec::validate refuses an invocation missing this required param")
+            .max(0) as u64,
         save_path: save.clone(),
         ckpt_every: inv.get_i64("ckpt_every").unwrap_or(100).max(0) as u32,
         // A served run is the one most likely to be cancelled and re-issued,
@@ -418,6 +424,10 @@ mod tests {
         // default, variant enum with klein-4b default, produces an image.
         let t2i = &m.actions[0];
         assert!(t2i.params.iter().any(|p| p.name == "prompt" && p.required));
+        // seed must be required, never silently defaulted: two invocations
+        // with no explicit distinct seed would otherwise be indistinguishable
+        // to whale's execution cache and collapse to one cached result.
+        assert!(t2i.params.iter().any(|p| p.name == "seed" && p.required && p.default.is_none()));
         assert_eq!(t2i.params.iter().find(|p| p.name == "width").unwrap().default, Some(json!(512)));
         assert_eq!(t2i.params.iter().find(|p| p.name == "steps").unwrap().default, Some(json!(0)));
         let variant = t2i.params.iter().find(|p| p.name == "variant").unwrap();
@@ -438,6 +448,7 @@ mod tests {
         let lt = m.actions.iter().find(|a| a.name == "lora_train").unwrap();
         assert!(lt.params.iter().any(|p| p.name == "data" && p.required));
         assert!(lt.params.iter().any(|p| p.name == "save" && p.required));
+        assert!(lt.params.iter().any(|p| p.name == "seed" && p.required && p.default.is_none()));
         assert!(lt.outputs.iter().any(|b| b.name == "adapter" && b.media == Media::Bytes));
         // method/lr_ratio/freeze_a are params on this SAME action, not a new
         // one - the action list assertion above already pins that.
@@ -475,6 +486,23 @@ mod tests {
             assert!(err.contains("BRAIN_FLUX2_ALLOW_NC"), "error must name the opt-in: {err}");
         }
         assert!(check_license("klein-4b").is_ok());
+    }
+
+    #[test]
+    fn text2image_refuses_an_invocation_missing_seed() {
+        let t2i = manifest().actions.into_iter().find(|a| a.name == "text2image").unwrap();
+        let inv = capability::Invocation::new().set("prompt", json!("a cat"));
+        let err = t2i.validate(inv).unwrap_err();
+        assert!(err.contains("seed"), "error must name the missing param: {err}");
+    }
+
+    #[test]
+    fn text2image_accepts_two_invocations_differing_only_in_seed() {
+        let t2i = manifest().actions.into_iter().find(|a| a.name == "text2image").unwrap();
+        let inv1 = capability::Invocation::new().set("prompt", json!("a cat")).set("seed", json!(1));
+        let inv2 = capability::Invocation::new().set("prompt", json!("a cat")).set("seed", json!(2));
+        assert!(t2i.validate(inv1).is_ok());
+        assert!(t2i.validate(inv2).is_ok());
         assert!(check_license("base-4b").is_ok());
     }
 

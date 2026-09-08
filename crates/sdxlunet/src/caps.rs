@@ -46,7 +46,7 @@ fn text2image_spec() -> ActionSpec {
         .param(ParamSpec::new("height", ParamType::Int, "output height, px (multiple of 8)").default(json!(1024)).min(256.0).max(2048.0).step(8.0))
         .param(ParamSpec::new("steps", ParamType::Int, "denoising steps").default(json!(30)).min(1.0).max(150.0).step(1.0))
         .param(ParamSpec::new("guidance", ParamType::Float, "classifier-free guidance scale; 1.0 disables CFG").default(json!(5.0)).min(1.0).max(30.0).step(0.1))
-        .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (omit for 0)"))
+        .param(ParamSpec::new("seed", ParamType::Int, "RNG seed - required, never silently randomized: two invocations with the same prompt/params and no explicit distinct seed would otherwise be indistinguishable to whale's execution cache and collapse to one cached result").required())
         .output(capability::BlobSpec::new("image", capability::Media::Image, "the generated image"))
 }
 
@@ -60,7 +60,9 @@ fn opts_from(inv: &Invocation) -> (String, GenerateOptions) {
     let o = GenerateOptions {
         steps: inv.get_i64("steps").unwrap_or(30).max(1) as usize,
         guidance: inv.get_f64("guidance").unwrap_or(5.0) as f32,
-        seed: inv.get_i64("seed").unwrap_or(0) as u64,
+        seed: inv
+            .get_i64("seed")
+            .expect("ActionSpec::validate refuses an invocation missing this required param") as u64,
         height: inv.get_i64("height").unwrap_or(1024).max(8) as u32,
         width: inv.get_i64("width").unwrap_or(1024).max(8) as u32,
         negative: inv.get_str("negative").unwrap_or_default(),
@@ -188,5 +190,19 @@ mod caps_tests {
         let w = spec.params.iter().find(|p| p.name == "width").expect("width param");
         assert_eq!(w.min, Some(256.0));
         assert_eq!(w.step, Some(8.0));
+    }
+
+    #[test]
+    fn seed_is_required_never_silently_defaulted() {
+        let spec = text2image_spec();
+        let seed = spec.params.iter().find(|p| p.name == "seed").expect("seed param");
+        assert!(seed.required && seed.default.is_none());
+    }
+
+    #[test]
+    fn text2image_refuses_an_invocation_missing_seed() {
+        let inv = Invocation::new().set("prompt", json!("a cat"));
+        let err = text2image_spec().validate(inv).unwrap_err();
+        assert!(err.contains("seed"), "error must name the missing param: {err}");
     }
 }

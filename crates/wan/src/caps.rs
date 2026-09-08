@@ -95,7 +95,7 @@ pub fn manifest() -> Manifest {
         .param(ParamSpec::new("frames", ParamType::Int, "training window length in frames; must be 1 + 4k").default(json!(9)))
         .param(ParamSpec::new("samples", ParamType::Int, "training windows to draw and encode up front").default(json!(8)))
         .param(ParamSpec::new("lr", ParamType::Float, "learning rate").default(json!(1e-4)))
-        .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (omit for 0)"))
+        .param(ParamSpec::new("seed", ParamType::Int, "RNG seed - required, never silently randomized: two invocations with the same params and no explicit distinct seed would otherwise be indistinguishable to whale's execution cache and collapse to one cached result").required())
         .param(ParamSpec::new("ckpt_every", ParamType::Int, "write a checkpoint every N steps (0 = final only)").default(json!(50)))
         .param(ParamSpec::new("variant", ParamType::Enum(VARIANTS.iter().map(|s| s.to_string()).collect()), "base model to adapt").default(json!("t2v-1.3B")))
         .param(ParamSpec::new("device", ParamType::Str, "device for the VAE encode and the DiT trainer; 'cpu' forces the host trainer (omit for brain's default, which uses the GPU where one is present)"))
@@ -225,7 +225,10 @@ pub fn train_action(paths: &Paths, inv: &Invocation, progress: &mut dyn FnMut(Pr
         lr: inv.get_f64("lr").unwrap_or(1e-4) as f32,
         frames: inv.get_i64("frames").unwrap_or(9).max(1) as usize,
         samples: inv.get_i64("samples").unwrap_or(8).max(1) as usize,
-        seed: inv.get_i64("seed").unwrap_or(0).max(0) as u64,
+        seed: inv
+            .get_i64("seed")
+            .expect("ActionSpec::validate refuses an invocation missing this required param")
+            .max(0) as u64,
         save_path: save.clone(),
         ckpt_every: inv.get_i64("ckpt_every").unwrap_or(50).max(0) as u32,
         device: inv.get_str("device").filter(|s| !s.is_empty()),
@@ -347,7 +350,7 @@ mod tests {
         let lt = &m.actions[1];
         assert!(lt.streaming);
         let required: Vec<&str> = lt.params.iter().filter(|p| p.required).map(|p| p.name.as_str()).collect();
-        assert_eq!(required, ["data", "save"]);
+        assert_eq!(required, ["data", "save", "seed"]);
         assert!(lt.outputs.iter().any(|b| b.name == "adapter" && b.media == Media::Bytes));
 
         // The whole manifest round-trips to JSON for discovery.
@@ -358,6 +361,16 @@ mod tests {
         assert_eq!(j["actions"][0]["streaming"], true);
         assert_eq!(j["actions"][0]["params"][0]["name"], "prompt");
         assert_eq!(j["actions"][0]["params"][0]["required"], true);
+    }
+
+    #[test]
+    fn lora_train_refuses_an_invocation_missing_seed() {
+        let lt = manifest().actions.into_iter().find(|a| a.name == "lora_train").unwrap();
+        let inv = Invocation::new()
+            .set("data", json!("training-set"))
+            .set("save", json!("adapter.brain"));
+        let err = lt.validate(inv).unwrap_err();
+        assert!(err.contains("seed"), "error must name the missing param: {err}");
     }
 
     /// Every enum value the manifest advertises must decode, and the manifest
