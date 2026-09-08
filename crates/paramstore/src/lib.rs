@@ -78,6 +78,11 @@ pub struct ParamStore {
     /// Params optimised off-device (grad on GPU, moments in RAM). Disjoint from
     /// `trainable`; the GPU optimiser skips these, `OffloadAdam` handles them.
     pub offload: Vec<(String, usize)>,
+    /// Per-tensor AdamW learning-rate multiplier (LoRA+: `B`'s effective lr
+    /// is `lr_ratio * lr`). Absent = `1.0`, so every existing caller is
+    /// unaffected. Set via [`Self::set_lr_mult`] after construction, then
+    /// read by `optim::Optim::build` when it writes each tensor's `desc`.
+    pub lr_mult: HashMap<String, f32>,
 }
 
 impl ParamStore {
@@ -207,7 +212,19 @@ impl ParamStore {
         let n_parts: u64 = trainable.iter().map(|(_, n)| gradnorm_parts(*n) as u64).sum();
         let norms = gpu.storage(n_parts.max(trainable.len() as u64).max(1));
         let clip_coef = gpu.storage(1);
-        ParamStore { params, trainable, weight, grad, adam_m, adam_v, norms, clip_coef, offload }
+        ParamStore { params, trainable, weight, grad, adam_m, adam_v, norms, clip_coef, offload, lr_mult: HashMap::new() }
+    }
+
+    /// Give `name`'s AdamW step a per-tensor learning-rate multiplier
+    /// (LoRA+). `1.0` (the default for every tensor not set here) is
+    /// bit-identical to today's single shared `lr`.
+    pub fn set_lr_mult(&mut self, name: &str, mult: f32) {
+        self.lr_mult.insert(name.to_string(), mult);
+    }
+
+    /// `name`'s multiplier, or `1.0` if never set.
+    pub fn lr_mult_of(&self, name: &str) -> f32 {
+        self.lr_mult.get(name).copied().unwrap_or(1.0)
     }
 
     /// Partial-sum layout of [`Self::norms`] for the cooperative grad-norm:

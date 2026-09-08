@@ -34,6 +34,15 @@ pub struct OffloadAdam {
 impl OffloadAdam {
     /// Initialise from the store's current (GPU-resident) offloaded weights.
     pub fn new(gpu: &Gpu, ps: &ParamStore) -> OffloadAdam {
+        // LoRA (the only source of a non-1.0 lr_mult today) and Role::Offload
+        // never coexist in this tree (a LoRA-training ParamStore assigns
+        // every non-adapter tensor Role::Frozen, never Role::Offload) - guard
+        // the untested combination loudly rather than silently applying the
+        // GPU path's per-tensor lr but not this host path's, if that ever
+        // changes.
+        for (name, _) in &ps.offload {
+            assert_eq!(ps.lr_mult_of(name), 1.0, "OffloadAdam: {name} has a non-1.0 lr_mult, which this host path does not yet apply");
+        }
         let state = ps
             .offload
             .iter()

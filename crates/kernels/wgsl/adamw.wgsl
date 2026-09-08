@@ -28,12 +28,14 @@
 // (and the buffer round-trip it cost) entirely: `optim::Optim` no longer
 // dispatches either kernel.
 //
-// `desc[0]` is this dispatch's element count, written ONCE when the
-// optimizer's dispatch graph is built and never again - every OTHER field
-// this kernel reads (`p`, `coef`) is shared across every parameter tensor's
-// AdamW dispatch in a step, so `p` is a single uniform buffer written once
-// per step regardless of parameter count, not once per tensor. See
-// `optim::Optim::step`.
+// `desc[0]` is this dispatch's element count; `desc[1]` (bitcast from f32)
+// is this tensor's LoRA+ learning-rate multiplier (`1.0` for an ordinary
+// tensor, so nothing here changes for a caller that never sets one) - both
+// written ONCE when the optimizer's dispatch graph is built and never again.
+// Every OTHER field this kernel reads (`p`, `coef`) is shared across every
+// parameter tensor's AdamW dispatch in a step, so `p` is a single uniform
+// buffer written once per step regardless of parameter count, not once per
+// tensor. See `optim::Optim::step`/`paramstore::ParamStore::set_lr_mult`.
 
 struct Params {
     lr: f32,
@@ -61,6 +63,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     let gidx = gid.y * (nwg.x * 64u) + gid.x;
     let idx = gidx;
     if (idx >= desc[0]) { return; }
+    let lrm = bitcast<f32>(desc[1]);
+    let lr = p.lr * lrm;
     let g = grad[idx] * p.scale * coef[0];
     let mi = p.beta1 * m[idx] + (1.0 - p.beta1) * g;
     let vi = p.beta2 * v[idx] + (1.0 - p.beta2) * g * g;
@@ -69,7 +73,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     let mhat = mi / p.bc1;
     let vhat = vi / p.bc2;
     var w = param[idx];
-    w = w - p.lr * p.wd * w;
-    w = w - p.lr * mhat / (sqrt(vhat) + p.eps);
+    w = w - lr * p.wd * w;
+    w = w - lr * mhat / (sqrt(vhat) + p.eps);
     param[idx] = w;
 }

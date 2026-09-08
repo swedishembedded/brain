@@ -182,11 +182,14 @@ impl Optim {
         };
 
         // One dispatch per tensor, ALL sharing `hparams` and `coef_buf`.
-        // `desc` is this tensor's element count - written once, here, never
-        // again (it cannot change for the life of this graph).
+        // `desc` is this tensor's element count plus its LoRA+ learning-rate
+        // multiplier (1.0 for every tensor `ParamStore::set_lr_mult` was
+        // never called on, so an all-1.0 store is bit-identical to before
+        // this field existed) - written once, here, never again (neither can
+        // change for the life of this graph).
         for (name, numel) in ps.opt_params() {
-            let desc = gpu.storage(1);
-            gpu.write(&desc, &[*numel as u32]);
+            let desc = gpu.storage(2);
+            gpu.write(&desc, &[*numel as u32, f(ps.lr_mult_of(name))]);
             steps.push(gpu.step_buf(
                 self.adamw,
                 &hparams,
@@ -433,5 +436,98 @@ mod tests {
             assert_eq!(dispatches, 2 * p + 1, "P={p}: expected 2P+1 dispatches (grad-scale folded into AdamW), got {dispatches}");
             assert!(writes <= 2, "P={p}: expected O(1) (<=2: clip_uni + shared hyperparams) writes per step, got {writes}");
         }
+    }
+
+    /// LoRA+: `ParamStore::set_lr_mult` scales exactly THAT tensor's step,
+    /// leaving every other tensor's untouched. Measured at `t=1`
+    /// deliberately - AdamW's bias-corrected update there is `lr * sign(g)`
+    /// regardless of `|g|` (`mhat=g, vhat=g^2` cancel under the sqrt), so the
+    /// ratio between two tensors' movement at `t=1` is EXACTLY their
+    /// `lr_mult` ratio, not something Adam's own nonlinearity could blur.
+    #[test]
+    fn lr_mult_scales_exactly_that_tensors_step() {
+        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+            return;
+        }
+        let gpu = gpu_core::testgpu::dev(KERNELS);
+        let opt = Optim::new(0, 1, 2, 3, 4);
+        let mut init = HashMap::new();
+        init.insert("a".to_string(), vec![1.0f32; 4]);
+        init.insert("b".to_string(), vec![1.0f32; 4]);
+        let mut ps = ParamStore::new(&gpu, vec![("a".to_string(), 4), ("b".to_string(), 4)], &init);
+        ps.set_lr_mult("b", 4.0);
+        gpu.write(ps.g("a"), bytemuck::cast_slice(&[2.0f32; 4]));
+        gpu.write(ps.g("b"), bytemuck::cast_slice(&[2.0f32; 4]));
+
+        opt.step(&gpu, &ps, 1, 0.1, 0.0, 0.9, 0.999, 1e-8, None, 1.0);
+        let wa = ps.read_weight(&gpu, "a");
+        let wb = ps.read_weight(&gpu, "b");
+
+        // a: plain step, w = 1.0 - lr = 0.9. b: 4x lr_mult, w = 1.0 - 4*lr = 0.6.
+        for &v in &wa {
+            assert!((v - 0.9).abs() < 1e-5, "a (lr_mult 1.0) got {v}, expected ~0.9");
+        }
+        for &v in &wb {
+            assert!((v - 0.6).abs() < 1e-5, "b (lr_mult 4.0) got {v}, expected ~0.6");
+        }
+        // The ratio the LoRA+ mechanism actually promises: b moved exactly
+        // 4x as far from its init as a did.
+        let ratio = (1.0 - wb[0]) / (1.0 - wa[0]);
+        assert!((ratio - 4.0).abs() < 1e-5, "expected exactly 4x, got {ratio}");
+    }
+
+    /// `lr_mult == 1.0` for every tensor (the default, unset case) must be
+    /// bit-identical to the pre-LoRA+ single-shared-lr behavior - the
+    /// regression guard for this whole change.
+    #[test]
+    fn lr_mult_unset_is_bit_identical_to_no_lr_mult_field() {
+        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+            return;
+        }
+        let gpu = gpu_core::testgpu::dev(KERNELS);
+        let opt = Optim::new(0, 1, 2, 3, 4);
+        let mut init = HashMap::new();
+        init.insert("p".to_string(), vec![1.0f32; 4]);
+        let ps = ParamStore::new(&gpu, vec![("p".to_string(), 4)], &init);
+        gpu.write(ps.g("p"), bytemuck::cast_slice(&[2.0f32; 4]));
+        opt.step(&gpu, &ps, 1, 0.1, 0.0, 0.9, 0.999, 1e-8, Some(1.0), 1.0);
+        let w = ps.read_weight(&gpu, "p");
+        for &v in &w {
+            assert!((v - 0.9).abs() < 1e-4, "expected the untouched AdamW+clip result ~0.9, got {v}");
+        }
+    }
+
+    /// `lr_mult` must not change the dispatch contract M6.4 pinned: still
+    /// `2P+1` dispatches, still O(1) writes - the multiplier rides in the
+    /// existing per-tensor `desc` buffer, which was already written once at
+    /// build time regardless of its word count.
+    #[test]
+    fn lr_mult_does_not_change_the_dispatch_contract() {
+        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+            return;
+        }
+        let gpu = gpu_core::testgpu::dev(KERNELS);
+        let opt = Optim::new(0, 1, 2, 3, 4);
+        let shapes: Vec<(String, usize)> = (0..3).map(|i| (format!("p{i}"), 16)).collect();
+        let mut init = HashMap::new();
+        for (n, _) in &shapes {
+            init.insert(n.clone(), vec![1.0f32; 16]);
+        }
+        let mut ps = ParamStore::new(&gpu, shapes.clone(), &init);
+        for (n, _) in &shapes {
+            gpu.write(ps.g(n), bytemuck::cast_slice(&[2.0f32; 16]));
+        }
+        ps.set_lr_mult("p1", 4.0);
+        let stats = || gpu.stats().expect("this backend must report DeviceStats");
+
+        opt.step(&gpu, &ps, 1, 0.01, 0.0, 0.9, 0.999, 1e-8, Some(1.0), 1.0);
+        let (d0, w0) = {
+            let s = stats();
+            (s.dispatches, s.writes)
+        };
+        opt.step(&gpu, &ps, 2, 0.01, 0.0, 0.9, 0.999, 1e-8, Some(1.0), 1.0);
+        let s = stats();
+        assert_eq!(s.dispatches - d0, 2 * 3 + 1, "lr_mult must not add dispatches");
+        assert!(s.writes - w0 <= 2, "lr_mult must not add per-step writes");
     }
 }
