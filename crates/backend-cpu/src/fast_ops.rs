@@ -1561,11 +1561,15 @@ pub fn moe_linear_gated_fwd(
 /// arithmetic - measured on a 2x12-core host as 586 s of system time against
 /// 131 s of user time across one real DeepSeek-OCR page, almost all of it in
 /// per-row fan-out on kernels like this one. At a single core's ~11 GB/s
-/// streaming rate, 128 KiB is ~11 us of work - past that cost, and measured
-/// (a 128 KiB / 256 KiB / 512 KiB / 1 MiB / 2 MiB / 4 MiB / 16 MiB sweep over
-/// this decoder's four real GEMV shapes and a whole replayed prefill round) as
-/// the point where the extra parallelism stops paying for the extra wake-ups.
-const MIN_TASK_BYTES: usize = 128 * 1024;
+/// streaming rate, 256 KiB is ~22 us of work - past that cost, and measured
+/// as the point where extra parallelism stops paying for extra wake-ups. The
+/// sweep that picked it (128 KiB / 256 KiB / 512 KiB / 1 MiB) ran on the REAL
+/// served path rather than on a microbenchmark, because the microbenchmark
+/// that models a whole prefill round has to hold ~10 GB of distinct weights
+/// and its run-to-run spread at that footprint is wider than the effect being
+/// tuned. On one real page's prefill: 17.1 s of kernel time at 256 KiB
+/// against 18.7 / 19.3 / 20.2 at 128 KiB / 512 KiB / 1 MiB.
+const MIN_TASK_BYTES: usize = 256 * 1024;
 
 /// Task count for `bytes` of streamed work: enough to use the pool on
 /// something big, exactly one (i.e. no fan-out at all) on something small.
