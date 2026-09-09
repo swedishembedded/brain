@@ -130,6 +130,13 @@ const ARCH_TO_MODEL: &[(&str, &str)] = &[
     // the exact same `supir::caps` this row's model id already serves
     // through `brain do`/D-Bus.
     ("supir", "brain/supir"),
+    // Same shape as `supir`: one action each (`flux1::caps`/`pulid::caps`
+    // both declare exactly `text2image`), every other registration point
+    // (catalog entry, residency adapter, D-Bus) already exists - only this
+    // row was missing. `pulid`'s model id is `brain/flux1-pulid`, not
+    // `brain/pulid` (`pulid::caps::MODEL`).
+    ("flux1", "brain/flux1"),
+    ("pulid", "brain/flux1-pulid"),
     // No-weights utility models: listed by `brain caps` (via `catalog::MODELS`)
     // but, before this row existed, unreachable from the CLI - the same
     // listed-but-unreachable gap `catalog.rs`'s own module docs warn about
@@ -371,6 +378,7 @@ fn dispatch_arch(arch: &str, rest: Vec<String>) {
         // provider construction unchanged.
         if resolver_migrated {
             if let Some(code) = crate::resolver_cli::run_generic_migrated(arch, model, &rest) {
+                crate::drain_before_exit();
                 std::process::exit(code);
             }
         }
@@ -379,7 +387,13 @@ fn dispatch_arch(arch: &str, rest: Vec<String>) {
         // prepending the model id is the whole translation.
         let mut do_args = vec![model.to_string()];
         do_args.extend(rest);
-        std::process::exit(caps_cli::run_do(&do_args));
+        let code = caps_cli::run_do(&do_args);
+        // `run_do` may have built a real device (any architecture's action
+        // that touches a GPU) - see `crate::drain_before_exit`'s own doc for
+        // the measured segfault this avoids: this exact command
+        // (`brain qwen3vl generate`) is the one that reproduced it.
+        crate::drain_before_exit();
+        std::process::exit(code);
     }
     eprintln!("brain: architecture {arch:?} is registered but not reachable via the CLI yet (see `brain caps` and `brain serve`)");
     std::process::exit(1);
@@ -1095,5 +1109,15 @@ mod tests {
             .and_then(|m| m.actions.first().map(|a| a.name.clone()))
             .expect("s3dit's manifest should list at least one action");
         assert_eq!(verb_is_known("s3dit", &real_action), Some(true));
+    }
+
+    /// `pulid`'s `ARCH_TO_MODEL` row - weights-free, no `Bundle`/`Flux1` build
+    /// involved. Pins the model id (`brain/flux1-pulid`, not `brain/pulid`)
+    /// and that `text2image` resolves against `pulid::caps::manifest()`.
+    #[test]
+    fn pulid_resolves_to_its_manifest_model_id() {
+        assert_eq!(model_for_arch("pulid"), Some(pulid::caps::MODEL));
+        assert_eq!(verb_is_known("pulid", "text2image"), Some(true));
+        assert_eq!(verb_is_known("pulid", "not-a-real-action"), Some(false));
     }
 }
