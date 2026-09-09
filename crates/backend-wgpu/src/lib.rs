@@ -784,6 +784,69 @@ pub fn process_exiting() -> bool {
     PROCESS_EXITING.load(std::sync::atomic::Ordering::SeqCst)
 }
 
+/// Every [`DeviceShared`] this process has ever constructed, held weakly so
+/// registering here never keeps one alive past its real owners. Populated by
+/// [`DeviceShared::compile`]; drained by [`drain_all_devices`].
+static LIVE_DEVICES: std::sync::Mutex<Vec<std::sync::Weak<DeviceShared>>> = std::sync::Mutex::new(Vec::new());
+
+fn register_live_device(shared: &std::sync::Arc<DeviceShared>) {
+    let mut reg = LIVE_DEVICES.lock().unwrap_or_else(|e| e.into_inner());
+    reg.retain(|w| w.strong_count() > 0); // prune dead entries as we go
+    reg.push(std::sync::Arc::downgrade(shared));
+}
+
+/// Wait every still-live device this process built idle, each bounded by
+/// `timeout` - a one-shot CLI's LAST action before it exits, not a step in
+/// normal operation.
+///
+/// # Why this exists
+///
+/// A one-shot `brain <arch> <verb>` run (e.g. `brain qwen3vl generate`)
+/// SUCCEEDS - the answer is generated and printed - and then segfaults on
+/// exit, roughly 2 out of 3 runs, measured over 10 back-to-back real
+/// `brain qwen3vl generate --precision int8` calls against a real 8B GGUF
+/// checkpoint on 2x Tesla P40 (Vulkan). `gdb` on the faulting process shows
+/// the crashing thread has ZERO Rust frames (`?? ()`, its own stack already
+/// unreadable) and was spawned exactly when device/adapter caps were
+/// queried - a live NVIDIA driver worker thread (the same class
+/// `WgpuBackend::new_like_device`'s own doc names: "the NVIDIA driver's
+/// worker threads segfault under many concurrent pipeline-set
+/// compilations/teardowns on one device"), not a thread this crate owns or
+/// can join.
+///
+/// This is a DIFFERENT hazard from the one [`set_process_exiting`] already
+/// fixes for `brain serve`'s shutdown. That one is a Rust-level race: an
+/// EXPLICIT `DeviceShared::drop` real-teardown call (`device.destroy()`
+/// equivalent) racing a live driver thread, fixed by skipping the explicit
+/// teardown and leaking instead. Here there is no explicit teardown at all
+/// to skip: a one-shot CLI's resident is cached in a process-lifetime
+/// `static` (never dropped, by construction - `static` items are never
+/// destructed), and the process already exits through `std::process::exit`
+/// (about as abrupt as Rust offers) immediately after printing its answer.
+/// Despite neither condition [`set_process_exiting`]'s own doc names as
+/// unsafe being present, the crash still reproduces at ~2/3 - so the driver
+/// worker thread(s) this device build spawned (pipeline-cache compilation,
+/// submission completion) are still doing real work, unrelated to Rust
+/// `Drop`, when `exit_group` abruptly kills every thread in the process,
+/// and that race is what segfaults. Waiting for the device to report idle
+/// FIRST removes the race instead of trying to out-run it.
+///
+/// Call [`set_process_exiting`] too (before or after - order does not
+/// matter, they guard different call sites) so any device that DOES get
+/// explicitly dropped after this point still leaks rather than double-faults.
+pub fn drain_all_devices(timeout: std::time::Duration) {
+    let devices: Vec<std::sync::Arc<DeviceShared>> = {
+        let mut reg = LIVE_DEVICES.lock().unwrap_or_else(|e| e.into_inner());
+        reg.retain(|w| w.strong_count() > 0);
+        reg.iter().filter_map(std::sync::Weak::upgrade).collect()
+    };
+    for d in devices {
+        if let Err(e) = d.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: Some(timeout) }) {
+            eprintln!("brain: drain_all_devices: poll did not complete cleanly: {e}");
+        }
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[cfg(not(target_arch = "wasm32"))]
 impl DeviceShared {
@@ -1276,6 +1339,7 @@ impl WgpuBackend {
             // fresh counter that would hide the other kernel set's leaks.
             self.shared.pending_reclaim_bytes.clone(),
         ));
+        register_live_device(&shared);
         WgpuBackend::from_shared(shared, profile_on)
     }
 
@@ -1565,6 +1629,7 @@ impl WgpuBackend {
             identity,
             std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         ));
+        register_live_device(&shared);
         WgpuBackend::from_shared(shared, profile_on)
     }
 

@@ -61,7 +61,10 @@ pub fn run_tts(args: &[String]) {
         Some(verb) if !verb.starts_with('-') => {
             let mut do_args = vec![qwen3tts::caps::MODEL.to_string()];
             do_args.extend_from_slice(args);
-            std::process::exit(crate::caps_cli::run_do(&do_args));
+            let code = crate::caps_cli::run_do(&do_args);
+            // See `crate::drain_before_exit`'s doc for the measured segfault
+            // this avoids on a real device build's abrupt-exit teardown.
+            crate::drain_before_exit(code);
         }
         other => {
             eprintln!("usage: brain qwen3tts <import|clone|synth|design|serve|finetune> ...  (got {other:?})");

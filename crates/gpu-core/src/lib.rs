@@ -90,6 +90,49 @@ pub fn set_process_exiting() {
     backend_wgpu::set_process_exiting();
 }
 
+/// Wait every device this process has built idle, each bounded by `timeout` -
+/// see `backend_wgpu::drain_all_devices` for the measured, real segfault
+/// (a one-shot CLI run that already printed its correct answer, killed by its
+/// own `std::process::exit` racing a live NVIDIA driver worker thread) this
+/// exists to remove. A one-shot CLI's LAST action before it exits, never a
+/// step in normal operation - call it once, right before
+/// [`set_process_exiting`] and `std::process::exit`, from a process's own
+/// shutdown path, never from library code.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn drain_all_devices(timeout: std::time::Duration) {
+    backend_wgpu::drain_all_devices(timeout);
+}
+
+/// Terminate the process immediately via the raw `_exit(2)` syscall wrapper,
+/// bypassing glibc's `atexit`/C++ static-destructor machinery entirely -
+/// unlike [`std::process::exit`], no `atexit`-registered handler (including
+/// any the NVIDIA/Vulkan userspace driver library itself may register) runs.
+///
+/// The SECOND candidate fix for the segfault [`drain_all_devices`] documents:
+/// draining every live device idle FIRST did not stop it (measured: both
+/// live devices reported `poll(Wait)` complete cleanly - no error, no
+/// timeout - and the process still segfaulted moments later, so the race is
+/// not "pending GPU work"). It happens in, or immediately after, whatever
+/// runs as part of glibc's own `exit()` sequence, which `_exit()` skips
+/// outright instead of trying to out-wait it.
+///
+/// Rust's buffered `Stdout`/`Stderr` are flushed FIRST: `_exit()` skips the
+/// flush-on-exit `std::rt` normally performs on a clean return from `main`
+/// or a `std::process::exit` call, and an unflushed buffer (routine the
+/// moment output is redirected to a file/pipe rather than a TTY) would
+/// otherwise silently truncate a caller's own answer - a worse regression
+/// than the crash this works around.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn hard_exit(code: i32) -> ! {
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    // SAFETY: `_exit` takes a plain status code and never returns; nothing
+    // after this call executes, which is exactly what the `-> !` signature
+    // and the flushes above already account for.
+    unsafe { libc::_exit(code) }
+}
+
 
 /// A process-wide device fixture for **test binaries** - explicit, documented,
 /// and torn down before exit.

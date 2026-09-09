@@ -378,8 +378,7 @@ fn dispatch_arch(arch: &str, rest: Vec<String>) {
         // provider construction unchanged.
         if resolver_migrated {
             if let Some(code) = crate::resolver_cli::run_generic_migrated(arch, model, &rest) {
-                crate::drain_before_exit();
-                std::process::exit(code);
+                crate::drain_before_exit(code);
             }
         }
         // `run_do` expects `[model, action, ...flags]`; `rest` is already
@@ -392,8 +391,7 @@ fn dispatch_arch(arch: &str, rest: Vec<String>) {
         // that touches a GPU) - see `crate::drain_before_exit`'s own doc for
         // the measured segfault this avoids: this exact command
         // (`brain qwen3vl generate`) is the one that reproduced it.
-        crate::drain_before_exit();
-        std::process::exit(code);
+        crate::drain_before_exit(code);
     }
     eprintln!("brain: architecture {arch:?} is registered but not reachable via the CLI yet (see `brain caps` and `brain serve`)");
     std::process::exit(1);

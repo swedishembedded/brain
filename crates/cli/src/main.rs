@@ -1065,6 +1065,34 @@ fn apply_data_dir(root: Option<String>) {
     brain_modelstore::publish_data_root(Some(root));
 }
 
+/// The full "about to terminate" sequence every one-shot CLI path that may
+/// have touched a real GPU device runs instead of a bare
+/// `std::process::exit`, then actually terminates with `code` - never
+/// returns.
+///
+/// See `gpu_core::drain_all_devices`'s own doc for the measured segfault this
+/// exists to avoid: `brain qwen3vl generate` already prints its correct
+/// answer, then segfaults on exit ~2-4 out of 10 real runs (int8, a real 8B
+/// GGUF checkpoint, 2x Tesla P40/Vulkan) - `gdb` shows the crashing thread
+/// has no Rust frames at all, a live NVIDIA driver worker thread killed
+/// mid-flight during process termination.
+///
+/// Two independent mitigations, in order, because the first ALONE measured
+/// as not enough: draining every live device to idle (bounded, 5s - generous
+/// for a device that is actually idle, since the CLI already blocked on
+/// reading its own last result back, and a bounded give-up rather than a
+/// hang if one genuinely wedged) confirmed both this run's devices report
+/// clean (no error, no timeout) and the process still segfaulted moments
+/// later - so the race is not "pending GPU work", and `gpu_core::hard_exit`
+/// (raw `_exit`, skipping glibc's own `exit()`/`atexit` sequence entirely,
+/// see its own doc) is the second, address the crash directly rather than
+/// trying to out-wait it.
+pub(crate) fn drain_before_exit(code: i32) -> ! {
+    gpu_core::drain_all_devices(std::time::Duration::from_secs(5));
+    gpu_core::set_process_exiting();
+    gpu_core::hard_exit(code);
+}
+
 fn main() {
     let argv: Vec<String> = std::env::args().collect();
     let argv = install_tracing(argv);
@@ -1133,6 +1161,16 @@ fn main() {
         Some("help") | Some("-h") | Some("--help") | None => print!("{HELP}"),
         Some(_) => resolve::dispatch(&argv[1..], HELP),
     }
+    // Every arm above either already called `drain_before_exit` itself (in
+    // which case this line is unreachable, which is fine - see the matching
+    // call sites in `resolve::dispatch`/`caps_cli::run_do` and
+    // `tts_cli::run_tts`) or returned normally, about to fall off `main` - in
+    // which case THIS is what actually terminates the process (`main`
+    // returning normally never reaches `drain_before_exit`'s `hard_exit`
+    // unless something calls it, so falling through to a bare return here
+    // would skip the fix entirely for every subcommand above that does not
+    // exit itself, e.g. `data`/`npu`/`federated`/`bench`).
+    drain_before_exit(0);
 }
 
 #[cfg(test)]
