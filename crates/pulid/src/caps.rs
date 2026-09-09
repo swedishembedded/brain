@@ -88,8 +88,9 @@ fn text2image_spec() -> ActionSpec {
         .param(ParamSpec::new("width", ParamType::Int, "output width, px (multiple of 16)").default(json!(1024)).min(256.0).max(2048.0).step(16.0))
         .param(ParamSpec::new("height", ParamType::Int, "output height, px (multiple of 16)").default(json!(1024)).min(256.0).max(2048.0).step(16.0))
         .param(ParamSpec::new("steps", ParamType::Int, "denoising steps; 0 = variant default").default(json!(0)).min(0.0).max(150.0).step(1.0))
+        .param(ParamSpec::new("start_step", ParamType::Int, "denoising step at which identity injection begins; 0 = every step. Upstream PuLID-FLUX guidance: smaller injects identity sooner (more fidelity, less freedom for the base structure) -- ~4 for photorealism, ~0-1 for stylization").default(json!(0)).min(0.0).max(150.0).step(1.0))
         .param(ParamSpec::new("guidance", ParamType::Float, "guidance_in scalar -- dev/kontext-dev only, schnell ignores it").default(json!(3.5)).min(0.0).max(10.0).step(0.1))
-        .param(ParamSpec::new("id_weight", ParamType::Float, "identity conditioning strength").default(json!(0.8)).min(0.0).max(2.0).step(0.05))
+        .param(ParamSpec::new("id_weight", ParamType::Float, "identity conditioning strength").default(json!(1.0)).min(0.0).max(3.0).step(0.05))
         .param(ParamSpec::new("max_len", ParamType::Int, "T5-XXL context length").default(json!(DEFAULT_MAX_LEN)).min(32.0).max(512.0).step(1.0))
         .param(ParamSpec::new("variant", ParamType::Enum(VARIANTS.iter().map(|s| s.to_string()).collect()), "FLUX.1 variant -- only dev is validated against a PuLID reference").default(json!("dev")))
         .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (omit for 0)"))
@@ -129,9 +130,10 @@ fn req_from(inv: &Invocation) -> Req {
             seed: inv.get_i64("seed").unwrap_or(0) as u64,
             height: inv.get_i64("height").unwrap_or(1024).max(16) as u32,
             width: inv.get_i64("width").unwrap_or(1024).max(16) as u32,
+            start_step: inv.get_i64("start_step").unwrap_or(0).max(0) as usize,
         },
         max_len: inv.get_i64("max_len").unwrap_or(DEFAULT_MAX_LEN as i64).max(1) as usize,
-        id_weight: inv.get_f64("id_weight").unwrap_or(0.8) as f32,
+        id_weight: inv.get_f64("id_weight").unwrap_or(1.0) as f32,
         precision: flux1::Precision::from_name(&inv.get_str("precision").unwrap_or_else(|| "int8".into())).unwrap_or(flux1::Precision::Int8),
     }
 }
@@ -207,7 +209,7 @@ impl Bundle {
         // `id_weight` given here is a placeholder; every request overwrites it
         // via `set_id_weight` before use (read at step-build time, so this is
         // a field write, not a graph rebuild - see `PulidAdapter`'s docs).
-        let adapter = PulidAdapter::new(ca, &pulid_cfg, fcfg.depth_double, fcfg.depth_single, 0.8);
+        let adapter = PulidAdapter::new(ca, &pulid_cfg, fcfg.depth_double, fcfg.depth_single, 1.0);
 
         Ok(Bundle { flux1, arcface, eva, idformer, adapter, pulid_cfg })
     }
@@ -401,7 +403,17 @@ mod caps_tests {
     fn id_weight_carries_ui_range() {
         let spec = text2image_spec();
         let p = spec.params.iter().find(|p| p.name == "id_weight").expect("id_weight param");
+        // Matches upstream PuLID-FLUX's own default (1.0) and UI range (0..3),
+        // not an arbitrary Brain-specific choice.
+        assert_eq!(p.default, Some(json!(1.0)));
         assert_eq!(p.min, Some(0.0));
-        assert_eq!(p.max, Some(2.0));
+        assert_eq!(p.max, Some(3.0));
+    }
+
+    #[test]
+    fn start_step_defaults_to_zero_every_step() {
+        let spec = text2image_spec();
+        let p = spec.params.iter().find(|p| p.name == "start_step").expect("start_step param");
+        assert_eq!(p.default, Some(json!(0)));
     }
 }

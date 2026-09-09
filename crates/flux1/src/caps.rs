@@ -92,6 +92,7 @@ fn req_from(inv: &Invocation) -> Req {
             seed: inv.get_i64("seed").unwrap_or(0) as u64,
             height: inv.get_i64("height").unwrap_or(1024).max(16) as u32,
             width: inv.get_i64("width").unwrap_or(1024).max(16) as u32,
+            start_step: 0, // meaningless here: plain flux1 never conditions (inject is always None)
         },
         max_len: inv.get_i64("max_len").unwrap_or(DEFAULT_MAX_LEN as i64).max(1) as usize,
         precision: crate::model::Precision::from_name(&inv.get_str("precision").unwrap_or_else(|| "fp32".into())).unwrap_or(crate::model::Precision::F32),

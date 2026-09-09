@@ -79,11 +79,20 @@ pub struct GenerateOptions {
     /// downscale composed with the DiT's 2x2 patchify).
     pub height: u32,
     pub width: u32,
+    /// The denoising step at which `generate_injected`'s conditioning starts
+    /// applying (steps before it forward WITHOUT `inject`, same as `inject:
+    /// None`). Meaningless when `inject` is `None` (plain `flux1::caps`
+    /// always passes 0 here and never reads it). Upstream PuLID-FLUX's own
+    /// `start_step`: smaller injects identity sooner (more fidelity, less
+    /// editability of the base structure); their guidance is ~4 for
+    /// photorealism, ~0-1 for stylization. Default 0 preserves this crate's
+    /// prior always-inject behavior.
+    pub start_step: usize,
 }
 
 impl Default for GenerateOptions {
     fn default() -> GenerateOptions {
-        GenerateOptions { steps: None, guidance: 3.5, seed: 0, height: 1024, width: 1024 }
+        GenerateOptions { steps: None, guidance: 3.5, seed: 0, height: 1024, width: 1024, start_step: 0 }
     }
 }
 
@@ -492,8 +501,8 @@ impl Flux1 {
         for i in 0..steps {
             let t = sigmas[i];
             let pred = match inject {
-                None => self.dit.forward(&lat, &ctx, &pooled, t, o.guidance, &ids, n_gen),
-                Some(inj) => self.dit.forward_injected(&lat, &ctx, &pooled, t, o.guidance, &ids, n_gen, inj),
+                Some(inj) if i >= o.start_step => self.dit.forward_injected(&lat, &ctx, &pooled, t, o.guidance, &ids, n_gen, inj),
+                _ => self.dit.forward(&lat, &ctx, &pooled, t, o.guidance, &ids, n_gen),
             };
             let dt = sigmas[i + 1] - t;
             for (x, v) in lat.iter_mut().zip(&pred) {
