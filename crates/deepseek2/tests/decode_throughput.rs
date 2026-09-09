@@ -62,7 +62,7 @@ fn run_on(gpu: gpu_core::Gpu, backend: &str) -> Option<Run> {
         return None;
     };
     let cfg = deepseek2::import::config_from_file(gguf.to_str().expect("utf-8 path"), 1).unwrap_or_else(|e| panic!("config_from_file: {e}"));
-    let src = checkpoint::weightio::WeightReader::open(&real_lm::expanded(&gguf, &st)).unwrap_or_else(|e| panic!("open expansion: {e}"));
+    let src = checkpoint::weightio::WeightReader::open(&real_lm::expanded(&gguf, &st, &cfg)).unwrap_or_else(|e| panic!("open expansion: {e}"));
 
     let t0 = Instant::now();
     let m = DeepseekV2::new_sized(gpu, cfg.clone(), Sizes { b: 1, t: 1, ctx: CTX, chunk: CHUNK, batched: false }, &src, false);
