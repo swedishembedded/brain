@@ -35,9 +35,10 @@
 //! # Not yet in scope
 //!
 //! Kontext reference-image editing, img2img (`strength`), LoRA adapters, and
-//! `int8`/batched serving are all deferred - this is a single-image
-//! text-to-image loop. `flux2::pipeline` is the fuller reference for what
-//! each of those needs when they land here.
+//! batched serving are all deferred - this is a single-image text-to-image
+//! loop. `int8` DiT precision and automatic DiT/T5-XXL device placement DO
+//! exist now (`load_with`/`plan_flux1`). `flux2::pipeline` is the fuller
+//! reference for what the still-deferred items need when they land here.
 //!
 //! # An honest note on verification
 //!
@@ -88,11 +89,28 @@ pub struct GenerateOptions {
     /// photorealism, ~0-1 for stylization. Default 0 preserves this crate's
     /// prior always-inject behavior.
     pub start_step: usize,
+    /// Upstream PuLID-FLUX's OPTIONAL true CFG: `Some(cfg)` runs a SECOND,
+    /// un-injected FLUX forward each step from `cfg.start_step` onward on a
+    /// negative prompt's own conditioning, and combines `neg + cfg.scale *
+    /// (pos - neg)` - on top of (not instead of) the distilled `guidance`
+    /// scalar every variant already has. `None` (the default) keeps the
+    /// original single-forward-per-step cost and behavior. Meaningless
+    /// without a `negative_prompt` passed to `generate_injected` - see its
+    /// own doc.
+    pub true_cfg: Option<TrueCfg>,
+}
+
+/// Parameters of upstream PuLID-FLUX's optional true-CFG branch. See
+/// [`GenerateOptions::true_cfg`].
+#[derive(Clone, Copy, Debug)]
+pub struct TrueCfg {
+    pub scale: f32,
+    pub start_step: usize,
 }
 
 impl Default for GenerateOptions {
     fn default() -> GenerateOptions {
-        GenerateOptions { steps: None, guidance: 3.5, seed: 0, height: 1024, width: 1024, start_step: 0 }
+        GenerateOptions { steps: None, guidance: 3.5, seed: 0, height: 1024, width: 1024, start_step: 0, true_cfg: None }
     }
 }
 
@@ -470,7 +488,7 @@ impl Flux1 {
 
     /// Generate one image. Returns HWC RGB in `[0,1]`.
     pub fn generate(&self, prompt: &str, o: &GenerateOptions, max_len: usize) -> Result<Vec<f32>, String> {
-        self.generate_injected(prompt, o, max_len, None)
+        self.generate_injected(prompt, None, o, max_len, None)
     }
 
     /// [`Flux1::generate`] with every DiT step routed through
@@ -478,9 +496,15 @@ impl Flux1 {
     /// `pulid::caps` uses to condition on an identity, and `crates/flux1`'s
     /// own `inject::BlockInject` trait so this needs no dependency on
     /// `pulid` (or any other adapter crate) to exist.
+    ///
+    /// `negative_prompt` only has an effect when `o.true_cfg` is also
+    /// `Some` (see [`GenerateOptions::true_cfg`]'s doc) - passing one without
+    /// the other is accepted, not an error, and behaves as if neither were
+    /// given (today's single-forward-per-step cost).
     pub fn generate_injected(
         &self,
         prompt: &str,
+        negative_prompt: Option<&str>,
         o: &GenerateOptions,
         max_len: usize,
         inject: Option<&dyn crate::inject::BlockInject>,
@@ -490,6 +514,11 @@ impl Flux1 {
         let n_gen = lh * lw;
 
         let (pooled, ctx) = self.encode(prompt, max_len)?;
+        // Only pay for the second tower encode when true CFG is actually on.
+        let neg = match (negative_prompt, o.true_cfg) {
+            (Some(np), Some(_)) => Some(self.encode(np, max_len)?),
+            _ => None,
+        };
 
         let dynamic_shift = self.variant != "schnell";
         let steps = o.steps.unwrap_or(if self.variant == "schnell" { 4 } else { 50 });
@@ -500,9 +529,22 @@ impl Flux1 {
 
         for i in 0..steps {
             let t = sigmas[i];
-            let pred = match inject {
+            let pos_pred = match inject {
                 Some(inj) if i >= o.start_step => self.dit.forward_injected(&lat, &ctx, &pooled, t, o.guidance, &ids, n_gen, inj),
                 _ => self.dit.forward(&lat, &ctx, &pooled, t, o.guidance, &ids, n_gen),
+            };
+            // True CFG: a SECOND, un-injected forward on the negative
+            // prompt's own conditioning - "unconditional" here means no
+            // identity injection at all, not a blank/zero prompt, matching
+            // upstream's own `id=None` unconditional branch. Doubles this
+            // step's DiT cost, which is why it is gated on `cfg.start_step`
+            // rather than applied unconditionally.
+            let pred = match (&neg, o.true_cfg) {
+                (Some((neg_pooled, neg_ctx)), Some(cfg)) if i >= cfg.start_step => {
+                    let neg_pred = self.dit.forward(&lat, neg_ctx, neg_pooled, t, o.guidance, &ids, n_gen);
+                    neg_pred.iter().zip(&pos_pred).map(|(n, p)| n + cfg.scale * (p - n)).collect()
+                }
+                _ => pos_pred,
             };
             let dt = sigmas[i + 1] - t;
             for (x, v) in lat.iter_mut().zip(&pred) {

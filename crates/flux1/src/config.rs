@@ -88,6 +88,18 @@ impl Flux1Config {
         Flux1Config::dev()
     }
 
+    /// `FLUX.1-Krea-dev` - byte-identical topology to [`Flux1Config::dev`]
+    /// (BFL's own release: a fine-tune of `dev`'s weights, not a new
+    /// architecture). Upstream PuLID added this as a supported combination
+    /// (Aug 2025); **this crate has neither the checkpoint nor a reference
+    /// dump to gate it against, so wiring the config through is NOT a claim
+    /// that Brain reproduces it correctly** - same honest status
+    /// `kontext-dev`/`schnell` already carry for PuLID, see
+    /// `pulid::caps::VARIANTS`'s doc.
+    pub fn krea_dev() -> Flux1Config {
+        Flux1Config::dev()
+    }
+
     /// `FLUX.1-schnell`: timestep-distilled, **no** guidance embedding.
     pub fn schnell() -> Flux1Config {
         Flux1Config { guidance_embed: false, ..Flux1Config::dev() }
@@ -98,9 +110,10 @@ impl Flux1Config {
         Ok(match v {
             "dev" => Flux1Config::dev(),
             "kontext-dev" => Flux1Config::kontext_dev(),
+            "krea-dev" => Flux1Config::krea_dev(),
             "schnell" => Flux1Config::schnell(),
             other => {
-                return Err(format!("unknown variant {other} (dev|kontext-dev|schnell)"))
+                return Err(format!("unknown variant {other} (dev|kontext-dev|krea-dev|schnell)"))
             }
         })
     }

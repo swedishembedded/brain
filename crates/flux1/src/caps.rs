@@ -30,14 +30,14 @@ use std::sync::{Arc, Mutex};
 use capability::{Action, ActionResult, ActionSpec, Invocation, Manifest, Outcome, ParamSpec, ParamType, Progress, Provider};
 use serde_json::json;
 
-use crate::pipeline::{Flux1, GenerateOptions};
+use crate::pipeline::{Flux1, GenerateOptions, TrueCfg};
 
 /// The model id used on the CLI (`brain do flux1 ...`), over D-Bus and in the
 /// residency manifest.
 pub const MODEL: &str = "brain/flux1";
 
 /// The variant enum, in manifest order.
-const VARIANTS: [&str; 3] = ["dev", "kontext-dev", "schnell"];
+const VARIANTS: [&str; 4] = ["dev", "kontext-dev", "krea-dev", "schnell"];
 
 /// The DiT precision enum, in manifest order - the CLI/capability names
 /// [`crate::model::Precision::from_name`] maps.
@@ -49,16 +49,19 @@ const PRECISIONS: [&str; 2] = ["fp32", "int8"];
 const DEFAULT_MAX_LEN: u32 = 512;
 
 fn text2image_spec() -> ActionSpec {
-    ActionSpec::new("text2image", "Generate an image from a text prompt (FLUX.1 dev/kontext-dev/schnell).")
+    ActionSpec::new("text2image", "Generate an image from a text prompt (FLUX.1 dev/kontext-dev/krea-dev/schnell).")
         .param(ParamSpec::new("prompt", ParamType::Str, "text description of the desired image").required())
         .param(ParamSpec::new("width", ParamType::Int, "output width, px (multiple of 16)").default(json!(1024)).min(256.0).max(2048.0).step(16.0))
         .param(ParamSpec::new("height", ParamType::Int, "output height, px (multiple of 16)").default(json!(1024)).min(256.0).max(2048.0).step(16.0))
-        .param(ParamSpec::new("steps", ParamType::Int, "denoising steps; 0 = variant default (4 schnell / 50 dev)").default(json!(0)).min(0.0).max(150.0).step(1.0))
-        .param(ParamSpec::new("guidance", ParamType::Float, "guidance_in scalar -- dev/kontext-dev only, schnell ignores it").default(json!(3.5)).min(0.0).max(10.0).step(0.1))
+        .param(ParamSpec::new("steps", ParamType::Int, "denoising steps; 0 = variant default (4 schnell / 50 others)").default(json!(0)).min(0.0).max(150.0).step(1.0))
+        .param(ParamSpec::new("guidance", ParamType::Float, "guidance_in scalar -- dev/kontext-dev/krea-dev only, schnell ignores it").default(json!(3.5)).min(0.0).max(10.0).step(0.1))
         .param(ParamSpec::new("max_len", ParamType::Int, "T5-XXL context length").default(json!(DEFAULT_MAX_LEN)).min(32.0).max(512.0).step(1.0))
         .param(ParamSpec::new("variant", ParamType::Enum(VARIANTS.iter().map(|s| s.to_string()).collect()), "model variant").default(json!("dev")))
         .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (omit for 0)"))
         .param(ParamSpec::new("precision", ParamType::Enum(PRECISIONS.iter().map(|s| s.to_string()).collect()), "DiT numeric tier -- int8 is what fits a 24 GiB card, fp32 is the parity reference").default(json!("fp32")))
+        .param(ParamSpec::new("negative_prompt", ParamType::Str, "negative conditioning for true CFG; ignored unless true_cfg > 0"))
+        .param(ParamSpec::new("true_cfg", ParamType::Float, "true classifier-free guidance scale on top of the distilled guidance scalar; 0 = disabled (default, single forward/step). Runs a SECOND DiT forward per step from cfg_start_step onward -- doubles cost while active").default(json!(0.0)).min(0.0).max(10.0).step(0.1))
+        .param(ParamSpec::new("cfg_start_step", ParamType::Int, "denoising step at which true CFG begins; steps before it use the positive prediction alone").default(json!(0)).min(0.0).max(150.0).step(1.0))
         .output(capability::BlobSpec::new("image", capability::Media::Image, "the generated image"))
 }
 
@@ -66,13 +69,14 @@ fn text2image_spec() -> ActionSpec {
 pub fn manifest() -> Manifest {
     Manifest::new(
         MODEL,
-        "FLUX.1 (Black Forest Labs) MMDiT text-to-image: dev (guidance-distilled), kontext-dev, schnell (timestep-distilled).",
+        "FLUX.1 (Black Forest Labs) MMDiT text-to-image: dev (guidance-distilled), kontext-dev, krea-dev, schnell (timestep-distilled).",
         vec![text2image_spec()],
     )
 }
 
 struct Req {
     prompt: String,
+    negative_prompt: Option<String>,
     variant: String,
     opts: GenerateOptions,
     max_len: usize,
@@ -80,8 +84,10 @@ struct Req {
 }
 
 fn req_from(inv: &Invocation) -> Req {
+    let true_cfg_scale = inv.get_f64("true_cfg").unwrap_or(0.0) as f32;
     Req {
         prompt: inv.get_str("prompt").unwrap_or_default(),
+        negative_prompt: inv.get_str("negative_prompt").filter(|s| !s.is_empty()),
         variant: inv.get_str("variant").unwrap_or_else(|| "dev".into()),
         opts: GenerateOptions {
             steps: {
@@ -93,6 +99,8 @@ fn req_from(inv: &Invocation) -> Req {
             height: inv.get_i64("height").unwrap_or(1024).max(16) as u32,
             width: inv.get_i64("width").unwrap_or(1024).max(16) as u32,
             start_step: 0, // meaningless here: plain flux1 never conditions (inject is always None)
+            true_cfg: (true_cfg_scale > 0.0)
+                .then_some(TrueCfg { scale: true_cfg_scale, start_step: inv.get_i64("cfg_start_step").unwrap_or(0).max(0) as usize }),
         },
         max_len: inv.get_i64("max_len").unwrap_or(DEFAULT_MAX_LEN as i64).max(1) as usize,
         precision: crate::model::Precision::from_name(&inv.get_str("precision").unwrap_or_else(|| "fp32".into())).unwrap_or(crate::model::Precision::F32),
@@ -133,7 +141,7 @@ impl Session {
                 e.insert(Flux1::load_with(&self.root, &req.variant, h, w, req.precision)?)
             }
         };
-        let hwc = p.generate(&req.prompt, &req.opts, req.max_len)?;
+        let hwc = p.generate_injected(&req.prompt, req.negative_prompt.as_deref(), &req.opts, req.max_len, None)?;
         Ok(Outcome::new().blob("image", capability::blob::image_blob(&hwc, w, h, 3)))
     }
 }
