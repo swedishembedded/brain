@@ -189,9 +189,10 @@ end. Treat a first real generation as the actual test of this file.
 
 ---
 
-## PuLID identity conditioning (`brain flux1-pulid text2image`)
+## PuLID identity conditioning (`brain pulid text2image`)
 
-`pulid_generate.py` adds a face photo to the FLUX.1 loop: ArcFace (raw
+`pulid_generate.py` (a D-Bus driver) or the CLI directly - both reach the same
+`pulid::caps` action - add a face photo to the FLUX.1 loop: ArcFace (raw
 embedding) + EVA-CLIP-L/336 (CLS + 5 tapped hidden states) compose into
 `id_cond`, `crate::model::IdFormer` projects 32 ID tokens, and
 `crate::adapter::PulidAdapter` cross-attends them into the DiT at 20 points
@@ -201,15 +202,25 @@ composes what, including the one real preprocessing gap (a plain resize
 where the reference uses face-parsing alignment brain does not have).
 
 ```bash
-BRAIN_FLUX1_DIR=/path/to/FLUX.1-dev \
-BRAIN_PULID_DIR=/path/to/pulid_flux_v0.9.1.safetensors \
-BRAIN_ARCFACE_DIR=/path/to/antelopev2 \
-BRAIN_CLIP_DIR=/path/to/eva-clip-dir \
+export BRAIN_FLUX1_DIR=/path/to/FLUX.1-dev \
+       BRAIN_PULID_DIR=/path/to/pulid_flux_v0.9.1.safetensors \
+       BRAIN_ARCFACE_DIR=/path/to/antelopev2 \
+       BRAIN_CLIP_DIR=/path/to/eva-clip-dir
+
+# directly over the CLI (any image format brain decodes, not just PPM):
+brain pulid text2image --prompt "a photo of a person hiking in the mountains" \
+  --in face_image=portrait.jpg --out image=out.png --precision int8
+
+# or over D-Bus, the same action:
 dbus-run-session -- bash -c '
   ./target/release/brain serve --dbus & sleep 2
   python3 examples/imagegen/pulid_generate.py \
     --prompt "a photo of a person hiking in the mountains" --face portrait.ppm'
 ```
+
+`--precision int8` (the CLI default) is what fits FLUX.1-dev's ~48 GiB fp32
+DiT on a single ≤24 GiB card; `--precision fp32` is the parity reference and
+needs a card that can hold it.
 
 Only `dev` is validated against a PuLID reference (the reference is built on
 FLUX.1-dev, not Kontext or schnell). Same scope/verification caveats as
