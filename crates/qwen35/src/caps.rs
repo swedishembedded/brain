@@ -93,6 +93,35 @@ pub fn with_template_flavor_default(inv: &Invocation) -> Invocation {
 pub const DEFAULT_MAX_NEW: i64 = 128;
 
 /// The full, static capability manifest - safe to build with no weights loaded.
+/// This build's [`Qwen35Config::infer_footprint_bytes`] estimate, declared to
+/// [`gpu_core::devices::place`] before `f` builds anything, so an
+/// over-budget checkpoint is refused BY NAME (which part, how many bytes,
+/// what each card has free) instead of `f` dispatching a doomed device
+/// allocation that panics the backend mid-upload - the exact crash this
+/// model's real ~108 GB fp32 scale reproduces on any card without it. Mirrors
+/// `qwen3vl::caps::place_and_build` exactly (see that function's own doc);
+/// this crate is not `qwen3vl`'s `Qwen`, so it keeps its own copy rather than
+/// a cross-crate dependency for one small helper.
+///
+/// Skipped - `f` runs exactly as it always did - when a device is ALREADY
+/// pinned ([`gpu_core::devices::current_gpu`] is `Some`): an explicit
+/// `--device`, so this cannot second-guess an operator's own choice.
+///
+/// No multi-GPU sharding exists on this action today (`crate::shard`'s
+/// `Shardable` impl is real but not wired into `brain qwen35 infer` - see
+/// this module's own doc's "No LoRA, no multi-GPU sharding wired into this
+/// action" note), so a checkpoint that needs more than one card's free VRAM
+/// is refused here rather than spread across cards - an honest "does not fit
+/// on ONE card" answer, not a claim that it cannot fit the machine at all.
+fn place_and_build<R>(bytes: u64, f: impl FnOnce() -> Result<R, String>) -> Result<R, String> {
+    if gpu_core::devices::current_gpu().is_some() {
+        return f();
+    }
+    let need = gpu_core::devices::Need::sized("qwen35", bytes, 0);
+    let homes = gpu_core::devices::place(&[need])?;
+    homes.run("qwen35", f)?
+}
+
 pub fn manifest() -> Manifest {
     let generate = ActionSpec::new("generate", "generate tokens continuing a prompt (Qwen3.8-27B dense hybrid GDN/GQA decoder, KV-cache decode, one Progress per token)")
         .streaming()
@@ -315,11 +344,25 @@ impl Action for GenerateAction {
         if !reuse {
             *guard = None; // free the old resident weights before loading new
             let cap = need.max(64);
-            let container = checkpoint::load(&weights);
-            let cfg = Qwen35Config::from_json(&container.header["config"]);
-            let init = container.by_role("");
-            let model =
-                if precision == "int8" { Qwen35::new_i8(cfg, 1, cap, &init) } else { Qwen35::new_on(gpu_core::Gpu::new(crate::model::pipelines()), cfg, 1, cap, &init) };
+            // `read_config` alone (a header parse, no tensor data) is enough
+            // to estimate the build BEFORE paying for `checkpoint::load`'s
+            // eager whole-checkpoint-to-host-RAM read - at this model's real
+            // ~108 GB fp32 scale, refusing here instead of after that load
+            // saves minutes on top of the driver-crash `place_and_build`
+            // itself prevents (see its own doc).
+            let cfg = Qwen35Config::from_json(&checkpoint::read_config(&weights));
+            let tier =
+                if precision == "int8" { model::ops::TierPolicy::uniform(gpu_core::select::Dtype::I8) } else { model::ops::TierPolicy::uniform(gpu_core::select::Dtype::F32) };
+            let bytes = cfg.infer_footprint_bytes(&tier, cap);
+            let model = place_and_build(bytes, || {
+                let container = checkpoint::load(&weights);
+                let init = container.by_role("");
+                Ok(if precision == "int8" {
+                    Qwen35::new_i8(cfg.clone(), 1, cap, &init)
+                } else {
+                    Qwen35::new_on(gpu_core::Gpu::new(crate::model::pipelines()), cfg.clone(), 1, cap, &init)
+                })
+            })?;
             let head = model.read_weight(model.cfg.head_weight());
             *guard = Some(Hot { precision: precision.clone(), weights: weights.clone(), cap, model, head });
         }

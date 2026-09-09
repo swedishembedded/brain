@@ -405,6 +405,48 @@ impl Qwen35Config {
             .sum()
     }
 
+    /// Bytes one sequence's decode state costs on the card holding a layer of
+    /// type `ty`, at `cap` decode positions: a GQA layer's `[cap, kv_dim]` K
+    /// and V cache, or a GDN layer's fixed-size (cap-independent) recurrent
+    /// state + conv history. `crate::int8_gguf_resident::layer_cost`'s own
+    /// per-layer decode-state term, and [`Self::infer_footprint_bytes`]'s -
+    /// moved here so a multi-device resident's byte-exact plan and a plain
+    /// single-device inference build's pre-flight estimate share ONE formula
+    /// rather than two that can drift.
+    pub fn layer_decode_state_bytes(&self, ty: LayerType, cap: u32) -> u64 {
+        match ty {
+            LayerType::Full => 2 * cap as u64 * self.kv_dim() as u64 * 4,
+            LayerType::Linear => {
+                let state = self.linear_num_value_heads as u64 * self.linear_key_head_dim as u64 * self.linear_value_head_dim as u64;
+                let hist = self.linear_conv_dim() as u64 * self.linear_conv_kernel_dim.saturating_sub(1) as u64;
+                (state + hist) * 4
+            }
+        }
+    }
+
+    /// A pre-flight VRAM estimate for a single-device inference build
+    /// (`crate::model::Qwen35::new_on`/`new_i8`/`new_shard_dt` at
+    /// `Shard::whole`) at `tier`, built for `cap` decode positions: every
+    /// layer's weights ([`Self::layer_weight_bytes`]) plus that layer's
+    /// decode state ([`Self::layer_decode_state_bytes`]), summed layer by
+    /// layer (so a non-uniform layer-type schedule is costed exactly), plus
+    /// the token embedding and `norm.weight`, and an untied `lm_head` - all
+    /// three always fp32 (`Qwen35::new_impl_on` never quantizes them; see
+    /// `crate::model::is_quantizable_linear`'s own doc).
+    ///
+    /// Unlike `crate::int8_gguf_resident::layer_cost` (which charges the
+    /// embedding ZERO - that resident reads rows straight off an mmap and
+    /// never uploads the whole table), a plain `Qwen35::new_on`/`new_i8`
+    /// build DOES upload the whole embedding into `ParamStore` - the two
+    /// estimates must not be conflated.
+    pub fn infer_footprint_bytes(&self, tier: &model::ops::TierPolicy, cap: u32) -> u64 {
+        let embed = self.vocab as u64 * self.d_model as u64 * 4;
+        let head = if self.tie_embeddings { 0 } else { self.vocab as u64 * self.d_model as u64 * 4 };
+        let norm = self.d_model as u64 * 4;
+        let layers: u64 = self.layer_types().into_iter().map(|ty| self.layer_weight_bytes(ty, tier) + self.layer_decode_state_bytes(ty, cap)).sum();
+        embed + head + norm + layers
+    }
+
     pub fn head_weight(&self) -> &'static str {
         if self.tie_embeddings {
             "tok.weight"
@@ -920,6 +962,54 @@ mod tests {
         assert!(names.iter().any(|n| n == "blocks.0.mlp.gate.weight.lora_a"));
         assert!(names.iter().any(|n| n == "blocks.0.mlp.gate.weight.lora_b"));
         assert!(names.iter().any(|n| n == "blocks.0.mlp.down.weight.lora_a"));
+    }
+
+    /// [`Qwen35Config::layer_decode_state_bytes`] must charge a GQA layer its
+    /// `[cap, kv_dim]` K+V cache and a GDN layer its fixed-size recurrent
+    /// state + conv history - the two must not be zero, and (at any
+    /// non-trivial `cap`) the GQA figure must grow with `cap` while the GDN
+    /// one does not (its state is `cap`-independent by construction).
+    #[test]
+    fn layer_decode_state_bytes_scales_with_cap_only_for_gqa() {
+        let cfg = Qwen35Config::qwen38_27b();
+        let gqa_small = cfg.layer_decode_state_bytes(LayerType::Full, 64);
+        let gqa_big = cfg.layer_decode_state_bytes(LayerType::Full, 4096);
+        assert!(gqa_small > 0 && gqa_big > gqa_small, "a GQA layer's decode state must grow with cap: {gqa_small} -> {gqa_big}");
+        let gdn_small = cfg.layer_decode_state_bytes(LayerType::Linear, 64);
+        let gdn_big = cfg.layer_decode_state_bytes(LayerType::Linear, 4096);
+        assert!(gdn_small > 0, "a GDN layer's recurrent state must not be zero");
+        assert_eq!(gdn_small, gdn_big, "a GDN layer's recurrent state is cap-independent");
+    }
+
+    /// THE regression this pair of functions exists for: `brain qwen35 infer`
+    /// on the fp32 path used to build a completely UNSIZED `Gpu::new(...)`
+    /// with no capacity check at all - a real ~108 GB checkpoint would stream
+    /// in full and then dispatch a doomed device allocation. Sanity-check
+    /// [`Qwen35Config::infer_footprint_bytes`] at the real 27B config lands
+    /// in a plausible multi-tens-of-GB range for fp32 and meaningfully
+    /// smaller for int8, and that it is NOT the old "no idea, ask the driver"
+    /// answer of zero.
+    #[test]
+    fn infer_footprint_bytes_is_plausible_at_real_scale_and_int8_is_smaller() {
+        let cfg = Qwen35Config::qwen38_27b();
+        let f32_tier = model::ops::TierPolicy::uniform(gpu_core::select::Dtype::F32);
+        let i8_tier = model::ops::TierPolicy::uniform(gpu_core::select::Dtype::I8);
+        let fp32 = cfg.infer_footprint_bytes(&f32_tier, 4096);
+        let int8 = cfg.infer_footprint_bytes(&i8_tier, 4096);
+        const GIB: u64 = 1 << 30;
+        assert!(fp32 > 60 * GIB, "fp32 footprint {} GiB looks too small for a ~27B-param decoder", fp32 / GIB);
+        assert!(int8 < fp32, "int8 must estimate smaller than fp32: fp32={fp32} int8={int8}");
+    }
+
+    /// A bigger `cap` (more KV-cache/decode-state positions) must estimate a
+    /// bigger footprint - the KV-cache term must not be a constant.
+    #[test]
+    fn infer_footprint_bytes_grows_with_cap() {
+        let cfg = Qwen35Config::tiny();
+        let tier = model::ops::TierPolicy::uniform(gpu_core::select::Dtype::F32);
+        let small = cfg.infer_footprint_bytes(&tier, 64);
+        let big = cfg.infer_footprint_bytes(&tier, 4096);
+        assert!(big > small, "a bigger cap must estimate a bigger footprint: small={small} big={big}");
     }
 
     /// Pins [`Qwen35Config::layer_weight_bytes`]'s real numbers at the real

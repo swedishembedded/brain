@@ -234,25 +234,11 @@ const DEFAULT_CTX: u32 = 2048;
 const MAX_PREFILL_TOKENS: u32 = 256;
 
 // ------------------------------------------------------------ byte accounting
-
-/// Bytes one sequence's DECODE state costs on the card that owns layer `l` -
-/// the per-layer half of what [`ShardCaches`] allocates, charged to the same
-/// stage the layer itself is charged to (which is exactly where it lands: a
-/// layer's cache lives on that layer's own device, never crossing a card).
-///
-/// A GQA layer carries a `[cap, kv_dim]` K and V cache; a GDN layer carries a
-/// fixed-size recurrent state plus a conv history, both independent of `cap`.
-/// Same shapes `crate::serve`'s `Engine` allocates for its own pool.
-fn layer_decode_state_bytes(cfg: &Qwen35Config, ty: LayerType, cap: u32) -> u64 {
-    match ty {
-        LayerType::Full => 2 * cap as u64 * cfg.kv_dim() as u64 * 4,
-        LayerType::Linear => {
-            let state = cfg.linear_num_value_heads as u64 * cfg.linear_key_head_dim as u64 * cfg.linear_value_head_dim as u64;
-            let hist = cfg.linear_conv_dim() as u64 * cfg.linear_conv_kernel_dim.saturating_sub(1) as u64;
-            (state + hist) * 4
-        }
-    }
-}
+//
+// The per-layer decode-state formula (`Qwen35Config::layer_decode_state_bytes`)
+// now lives on the config itself - shared with `Qwen35Config::
+// infer_footprint_bytes`'s single-device pre-flight estimate, see that
+// method's own doc for why the two must not each keep a private copy.
 
 /// Device bytes the INT8 `lm_head` occupies: `model::ops::Weight::I8`'s
 /// `[n, k/4]` packed words plus its `[n, k/GROUP]` f32 scales, both 4 bytes
@@ -286,7 +272,7 @@ pub fn layer_cost(cfg: &Qwen35Config, cap: u32, tier: &TierPolicy) -> LayerBytes
     let per_layer = cfg
         .layer_types()
         .into_iter()
-        .map(|ty| cfg.layer_weight_bytes(ty, tier) + layer_decode_state_bytes(cfg, ty, cap))
+        .map(|ty| cfg.layer_weight_bytes(ty, tier) + cfg.layer_decode_state_bytes(ty, cap))
         .collect();
     LayerBytes { per_layer, embed: 0, head: head_i8_bytes(cfg) + cfg.d_model as u64 * 4 }
 }
