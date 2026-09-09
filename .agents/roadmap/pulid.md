@@ -48,11 +48,40 @@ The image → `id_cond` path exists (`idcond::IdCond::from_image` /
       identity-fidelity metric - `examples/imagegen/identity_score.sh`'s
       ArcFace-cosine method is the tool, no real run has swept it yet.
 - [ ] Full-depth conditioning run across all injection sites - only a
-      reduced-depth run has been exercised; an int8 full-depth run is
-      possible in principle but has not been done. **Unblocked**: the
-      FLUX.1-dev checkpoint this needs is being fetched into
-      `BRAIN_FLUX1_DIR` for the first time in this workspace as of this
-      entry - run it once that lands.
+      reduced-depth run has been exercised. **The real FLUX.1-dev checkpoint
+      landed in this workspace for the first time and two real, pre-existing
+      defects surfaced on first contact** (neither caused by this session's
+      changes - both block a first real generation from completing at all,
+      independent of BiSeNet):
+      1. `data::unigram::UnigramTokenizer` does not implement SentencePiece's
+         `Precompiled` normalizer (`unigram.rs`'s own module docs and a test
+         already document this as a deliberate, known gap - reimplementing
+         sentencepiece's normalizer + its protobuf charsmap is a separate,
+         substantial undertaking, not attempted here). FLUX.1-dev's released
+         `tokenizer_2/tokenizer.json` (T5-XXL) uses exactly this normalizer,
+         so `brain flux1 text2image` fails at TOKENIZATION, before any
+         denoising step - this blocks EVERY flux1/pulid generation with the
+         real released tokenizer, not something specific to identity
+         conditioning.
+      2. Independent of (1): `pulid::caps::Bundle::load` panics inside
+         `clip::model::EvaVision::new_on` (a wgpu bind-group validation
+         error, "3 bindings vs a 5-binding layout") when built with real
+         weights. Diagnostic instrumentation confirmed this happens BEFORE
+         `bisenet::align::norm_crop_512` (or any other BiSeNet code) ever
+         runs - `EvaVision::new_on` merely uploads `ParamStore` weights, no
+         kernel dispatch of its own, so this is most likely a wgpu
+         asynchronous-error-reporting artifact surfacing a fault from an
+         EARLIER dispatch (elsewhere in `Bundle::load`'s sequence of
+         `gpu.new_like(...)` calls sharing one ambient device) at the next
+         GPU operation, not a bug in `EvaVision` itself. Not root-caused
+         further - `BRAIN_NO_KERNEL_UPGRADE=1` and swapping BiSeNet's
+         `new_like` for a fresh `Gpu::new` both leave it unchanged, ruling
+         out the kernel-upgrade table and BiSeNet-specific device sharing as
+         the cause.
+      Neither defect touches this crate's own parity-gated code (IDFormer/CA/
+      FLUX forward, or `crates/bisenet`'s own bit-exact-verified graph) -
+      both are pre-existing infrastructure gaps this workspace's first real
+      end-to-end run happened to be the first thing to reach.
 - [x] Multi-image identity conditioning - `pulid::caps::text2image` accepts
       `face_image` (primary, required) plus up to three optional
       `face_image1/2/3` auxiliary photos, mean-pooled per-representation
