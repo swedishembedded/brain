@@ -330,11 +330,21 @@ impl Action for GenerateAction {
         if !reuse {
             *guard = None; // free the old resident weights before loading new
             let cap = need.max(64);
-            let model = if precision == "int8" {
-                Qwen::load_inference_i8(&weights, 1, cap)
-            } else {
-                Qwen::load_inference(&weights, 1, cap)
-            };
+            // Refuse an over-budget checkpoint legibly BEFORE dispatching a
+            // device allocation, instead of letting `Qwen::load_inference*`
+            // OOM the driver - see `crate::footprint`'s own doc.
+            let reader = checkpoint::weightio::WeightReader::open(&weights).map_err(|e| format!("qwen generate: cannot open {weights}: {e}"))?;
+            let cfg = crate::config::QwenConfig::from_json(&reader.config());
+            let shard = crate::model::Shard::whole(cfg.n_layers as usize);
+            drop(reader);
+            let dt = if precision == "int8" { gpu_core::select::Dtype::I8 } else { gpu_core::select::Dtype::F32 };
+            let model = crate::footprint::place_and_build(&cfg, &shard, dt, 1, cap, false, false, "qwen3", || {
+                if precision == "int8" {
+                    Qwen::load_inference_i8(&weights, 1, cap)
+                } else {
+                    Qwen::load_inference(&weights, 1, cap)
+                }
+            })?;
             let head = model.read_weight(model.cfg.head_weight());
             *guard = Some(Hot { precision: precision.clone(), weights: weights.clone(), cap, model, head });
         }
@@ -849,7 +859,14 @@ fn fold_and_score(
     guarded("adapter", || crate::lora::fold_adapter_into(&mut tensors, &adapter_path.to_string_lossy()))?
         .map_err(|e| format!("qwen lora_gate: folding the candidate adapter: {e}"))?;
     let n_layers = cfg.n_layers as usize;
-    let m = Qwen::new_shard(cfg, 1, cap, &tensors, false, crate::model::Shard::whole(n_layers));
+    let shard = crate::model::Shard::whole(n_layers);
+    // Refuse an over-budget checkpoint legibly BEFORE dispatching a device
+    // allocation, instead of letting `Qwen::new_shard` OOM the driver - see
+    // `crate::footprint`'s own doc.
+    let (cfg_for_build, shard_for_build) = (cfg.clone(), shard.clone());
+    let m = crate::footprint::place_and_build(&cfg, &shard, gpu_core::select::Dtype::F32, 1, cap, false, false, "qwen3", move || {
+        Qwen::new_shard(cfg_for_build, 1, cap, &tensors, false, shard_for_build)
+    })?;
     score_arm(&m, tasks, verifier, max_new, eos, cancel)
 }
 

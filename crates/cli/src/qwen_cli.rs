@@ -350,8 +350,28 @@ fn infer(args: &[String]) {
         return;
     }
     let cap = (ids.len() + max_new) as u32;
+    // Refuse an over-budget checkpoint legibly BEFORE dispatching a device
+    // allocation, instead of letting `Qwen::load_inference` OOM the driver -
+    // see `qwen3::footprint`'s own doc for why (the qwen3vl sibling of this
+    // exact bug: `brain qwen3vl generate` used to crash the same way).
+    let reader = match checkpoint::weightio::WeightReader::open(&weights) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("brain qwen3 infer: cannot open {weights}: {e}");
+            return;
+        }
+    };
+    let cfg = QwenConfig::from_json(&reader.config());
+    let shard = qwen3::model::Shard::whole(cfg.n_layers as usize);
+    drop(reader);
     let t_load = std::time::Instant::now();
-    let model = Qwen::load_inference(&weights, 1, cap);
+    let model = match qwen3::footprint::place_and_build(&cfg, &shard, qwen3::Dtype::F32, 1, cap, false, false, "qwen3", || Qwen::load_inference(&weights, 1, cap)) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("brain qwen3 infer: {e}");
+            return;
+        }
+    };
     let load_ms = t_load.elapsed().as_secs_f64() * 1e3;
     let eos = tok.encode("<|im_end|>").first().copied();
     let mut rng = Rng::new(seed);
