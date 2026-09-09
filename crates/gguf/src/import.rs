@@ -125,8 +125,27 @@ impl ElemOp {
 }
 
 impl Mapped {
-    /// The MoE expert stack, under brain's shared expert naming
-    /// (`blocks.{layer}.mlp.experts.{e}.{leaf}.weight`).
+    /// The MoE expert stack kept FUSED, under brain's shared expert-bank
+    /// naming (`blocks.{layer}.mlp.experts.{leaf}.weight`): one tensor per
+    /// layer per projection, holding every expert's `[out, in]` matrix back to
+    /// back in expert order - byte-for-byte llama.cpp's own
+    /// `blk.N.ffn_{gate,up,down}_exps.weight` layout, so this is a rename and
+    /// nothing else.
+    ///
+    /// Prefer this over [`Mapped::expert_stack`]. A model whose forward reads
+    /// the bank as one buffer (`model::moe::expert_fwd_grouped`, or
+    /// `expert_fwd`'s `w_off`) needs no fan-out at all, and the fan-out is not
+    /// free: it turns one source tensor into `n_experts` independent
+    /// parameters, hence `n_experts` device buffers and `n_experts` separate
+    /// dispatches per projection per layer.
+    pub fn expert_bank(layer: usize, leaf: &str) -> Mapped {
+        Mapped::Simple(format!("blocks.{layer}.mlp.experts.{leaf}.weight"))
+    }
+
+    /// The MoE expert stack FANNED OUT, one parameter per expert, under
+    /// brain's per-expert naming (`blocks.{layer}.mlp.experts.{e}.{leaf}
+    /// .weight`) - for a model whose forward binds one buffer per expert.
+    /// [`Mapped::expert_bank`] is the layout-preserving alternative.
     pub fn expert_stack(layer: usize, leaf: &str, n_experts: usize) -> Mapped {
         Mapped::Split {
             into: (0..n_experts).map(|e| format!("blocks.{layer}.mlp.experts.{e}.{leaf}.weight")).collect(),

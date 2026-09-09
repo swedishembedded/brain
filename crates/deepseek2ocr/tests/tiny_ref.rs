@@ -177,10 +177,16 @@ fn build_init(cfg: &DeepseekOcrConfig, ck: &HashMap<String, StTensor>) -> HashMa
         }
         if cfg.decoder.is_moe_layer(l) {
             put(&format!("blocks.{l}.mlp.router.weight"), take(&s("mlp.gate.weight"), &mut used), &mut out);
-            for e in 0..cfg.decoder.n_experts() {
-                for nm in ["gate", "up", "down"] {
-                    put(&format!("blocks.{l}.mlp.experts.{e}.{nm}.weight"), take(&s(&format!("mlp.experts.{e}.{nm}_proj.weight")), &mut used), &mut out);
+            // One fused `[n_experts, out, in]` bank per projection, experts
+            // concatenated in index order - the decoder's own layout (see
+            // `gguf::import::Mapped::expert_bank`), which is also how the
+            // reference's per-expert tensors sit in the GGUF release.
+            for nm in ["gate", "up", "down"] {
+                let mut bank = Vec::new();
+                for e in 0..cfg.decoder.n_experts() {
+                    bank.extend(take(&s(&format!("mlp.experts.{e}.{nm}_proj.weight")), &mut used));
                 }
+                put(&format!("blocks.{l}.mlp.experts.{nm}.weight"), bank, &mut out);
             }
             for nm in ["gate", "up", "down"] {
                 put(&format!("blocks.{l}.mlp.shared.{nm}.weight"), take(&s(&format!("mlp.shared_experts.{nm}_proj.weight")), &mut used), &mut out);

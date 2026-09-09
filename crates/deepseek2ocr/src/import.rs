@@ -199,10 +199,20 @@ pub fn encoder_weights_from(mmproj: &Path) -> Result<HashMap<String, Vec<f32>>, 
 /// one tensor at a time (`deepseek2::import::import_file`), so it costs disk,
 /// not 11.7 GB of RAM - but it costs minutes, which is why the result is cached
 /// beside the checkpoint and why this prints what it is doing.
-pub fn expand_lm(lm: &Path, expanded: &Path) -> Result<String, String> {
+pub fn expand_lm(lm: &Path, expanded: &Path, want: &[(String, usize)]) -> Result<String, String> {
     let out = utf8(expanded)?.to_string();
     if expanded.exists() {
-        return Ok(out);
+        // A cached expansion is only usable if it carries the manifest THIS
+        // build asks for. It is derived, not shipped, so a stale one (written
+        // before a tensor-layout change) is re-derived rather than reported as
+        // a missing weight several stages later, where the message names a
+        // parameter and not the file that actually needs rebuilding.
+        match WeightReader::open(&out) {
+            Ok(r) if want.iter().all(|(n, _)| r.shape(n).is_some()) => return Ok(out),
+            Ok(_) => eprintln!("brain: {out}: cached expansion does not match this build's tensor layout - rebuilding"),
+            Err(e) => eprintln!("brain: {out}: cached expansion unreadable ({e}) - rebuilding"),
+        }
+        std::fs::remove_file(expanded).map_err(|e| format!("{}: removing the stale expansion: {e}", expanded.display()))?;
     }
     eprintln!("brain: expanding {} -> {} (once, ~12 GB on disk)", lm.display(), expanded.display());
     let stats = deepseek2::import::import_file(utf8(lm)?, &out, None)?;
@@ -216,10 +226,10 @@ pub fn expand_lm(lm: &Path, expanded: &Path) -> Result<String, String> {
 /// The reader is returned rather than consumed here because the HF layout
 /// needs it to outlive a [`checkpoint::remap::RemapSource`] borrowed from it
 /// - see [`decoder_source`].
-pub fn decoder_reader(files: &Files) -> Result<WeightReader, String> {
+pub fn decoder_reader(files: &Files, cfg: &DeepseekOcrConfig) -> Result<WeightReader, String> {
     match &files.layout {
         Layout::GgufPair { lm, expanded, .. } => {
-            let path = expand_lm(lm, expanded)?;
+            let path = expand_lm(lm, expanded, &cfg.decoder.param_list())?;
             WeightReader::open(&path).map_err(|e| format!("{path}: {e}"))
         }
         // No expansion: the upstream shards are read where they landed.

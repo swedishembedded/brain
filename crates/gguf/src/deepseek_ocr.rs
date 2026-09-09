@@ -30,10 +30,19 @@
 //! | `blk.0.ffn_{gate,up}.weight` | `[6848,1280]` | `blocks.0.mlp.{gate,up}.weight` (dense block) |
 //! | `blk.0.ffn_down.weight` | `[1280,6848]` | `blocks.0.mlp.down.weight` |
 //! | `blk.N.ffn_gate_inp.weight` | `[64,1280]` | `blocks.N.mlp.router.weight` |
-//! | `blk.N.ffn_{gate,up}_exps.weight` | `[64,896,1280]` | `blocks.N.mlp.experts.{e}.{gate,up}.weight` (fan-out) |
-//! | `blk.N.ffn_down_exps.weight` | `[64,1280,896]` | `blocks.N.mlp.experts.{e}.down.weight` |
+//! | `blk.N.ffn_{gate,up}_exps.weight` | `[64,896,1280]` | `blocks.N.mlp.experts.{gate,up}.weight` (fused bank) |
+//! | `blk.N.ffn_down_exps.weight` | `[64,1280,896]` | `blocks.N.mlp.experts.down.weight` (fused bank) |
 //! | `blk.N.ffn_{gate,up}_shexp.weight` | `[1792,1280]` | `blocks.N.mlp.shared.{gate,up}.weight` |
 //! | `blk.N.ffn_down_shexp.weight` | `[1280,1792]` | `blocks.N.mlp.shared.down.weight` |
+//!
+//! **The routed experts stay fused too.** Each `ffn_*_exps` tensor already
+//! holds all 64 experts' matrices back to back in expert order, which is
+//! exactly what a grouped-GEMM forward
+//! (`model::moe::expert_fwd_grouped`) binds as ONE weight operand, and what
+//! `expert_fwd`/`expert_bwd`'s `w_off` addresses one expert inside. Unpacking
+//! it into 64 independent parameters would cost 64 device buffers and 64
+//! separate dispatches per projection per layer to rebuild a layout the file
+//! already had.
 //!
 //! **The two shared experts stay fused, on purpose.** `expert_shared_count=2`
 //! and `expert_feed_forward_length=896`, and the `*_shexp` tensors are
@@ -132,12 +141,15 @@ impl DeepseekOcrConfig {
             if self.is_moe_layer(l) {
                 let ff = self.moe_intermediate_size as usize;
                 let sff = self.shared_intermediate_size() as usize;
-                out.push((p("mlp.router.weight"), self.n_experts as usize * d));
-                for e in 0..self.n_experts {
-                    out.push((p(&format!("mlp.experts.{e}.gate.weight")), ff * d));
-                    out.push((p(&format!("mlp.experts.{e}.up.weight")), ff * d));
-                    out.push((p(&format!("mlp.experts.{e}.down.weight")), d * ff));
-                }
+                // ONE tensor per projection, holding all `n_experts` matrices
+                // back to back in expert order - the checkpoint's own
+                // `blk.N.ffn_*_exps.weight` layout, kept rather than unpacked.
+                // See `Mapped::expert_bank`.
+                let ne = self.n_experts as usize;
+                out.push((p("mlp.router.weight"), ne * d));
+                out.push((p("mlp.experts.gate.weight"), ne * ff * d));
+                out.push((p("mlp.experts.up.weight"), ne * ff * d));
+                out.push((p("mlp.experts.down.weight"), ne * d * ff));
                 out.push((p("mlp.shared.gate.weight"), sff * d));
                 out.push((p("mlp.shared.up.weight"), sff * d));
                 out.push((p("mlp.shared.down.weight"), d * sff));
@@ -289,7 +301,6 @@ pub fn classify(name: &str, cfg: &DeepseekOcrConfig) -> Result<Mapped, String> {
     }
     let p = |s: &str| format!("blocks.{l}.{s}");
     let moe = cfg.is_moe_layer(l);
-    let n_experts = cfg.n_experts as usize;
 
     let m = match leaf {
         "attn_norm.weight" => Mapped::Simple(p("ln1.weight")),
@@ -304,9 +315,9 @@ pub fn classify(name: &str, cfg: &DeepseekOcrConfig) -> Result<Mapped, String> {
         "ffn_down.weight" if !moe => Mapped::Simple(p("mlp.down.weight")),
         // MoE block.
         "ffn_gate_inp.weight" if moe => Mapped::Simple(p("mlp.router.weight")),
-        "ffn_gate_exps.weight" if moe => Mapped::expert_stack(l as usize, "gate", n_experts),
-        "ffn_up_exps.weight" if moe => Mapped::expert_stack(l as usize, "up", n_experts),
-        "ffn_down_exps.weight" if moe => Mapped::expert_stack(l as usize, "down", n_experts),
+        "ffn_gate_exps.weight" if moe => Mapped::expert_bank(l as usize, "gate"),
+        "ffn_up_exps.weight" if moe => Mapped::expert_bank(l as usize, "up"),
+        "ffn_down_exps.weight" if moe => Mapped::expert_bank(l as usize, "down"),
         // Shared experts stay fused - see this module's doc.
         "ffn_gate_shexp.weight" if moe => Mapped::Simple(p("mlp.shared.gate.weight")),
         "ffn_up_shexp.weight" if moe => Mapped::Simple(p("mlp.shared.up.weight")),

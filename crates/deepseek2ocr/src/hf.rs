@@ -74,6 +74,12 @@ pub enum Half {
     Encoder(String),
     /// A name in the decoder's own `param_list`.
     Decoder(String),
+    /// ONE expert's slice of a decoder MoE expert bank. Upstream ships each
+    /// routed expert as its own `[out, in]` tensor; brain's decoder wants the
+    /// three `blocks.{l}.mlp.experts.{gate,up,down}.weight` banks the GGUF
+    /// release already stores fused, so `expert` says where in the bank this
+    /// source tensor belongs and [`plans`] concatenates them in that order.
+    DecoderExpert { bank: String, expert: u32 },
 }
 
 /// Shorthand for the one error shape this module reports.
@@ -115,7 +121,7 @@ pub fn classify(name: &str, cfg: &DeepseekOcrConfig) -> Result<Half, String> {
         return clip_leaf(rest, name, cfg).map(Half::Encoder);
     }
     if let Some(rest) = name.strip_prefix("model.layers.") {
-        return decoder_leaf(rest, name, cfg).map(Half::Decoder);
+        return decoder_leaf(rest, name, cfg);
     }
     Err(unknown(name))
 }
@@ -189,9 +195,9 @@ fn clip_leaf(rest: &str, full: &str, cfg: &DeepseekOcrConfig) -> Result<String, 
 }
 
 /// The DeepSeek-V2 decoder stack.
-fn decoder_leaf(rest: &str, full: &str, cfg: &DeepseekOcrConfig) -> Result<String, String> {
+fn decoder_leaf(rest: &str, full: &str, cfg: &DeepseekOcrConfig) -> Result<Half, String> {
     let (l, leaf) = split_indexed(rest, full, cfg.decoder.n_layers(), "decoder layer")?;
-    let p = |s: &str| Ok(format!("blocks.{l}.{s}"));
+    let p = |s: &str| Ok(Half::Decoder(format!("blocks.{l}.{s}")));
     match leaf {
         "input_layernorm.weight" => return p("ln1.weight"),
         "post_attention_layernorm.weight" => return p("ln2.weight"),
@@ -226,7 +232,7 @@ fn decoder_leaf(rest: &str, full: &str, cfg: &DeepseekOcrConfig) -> Result<Strin
         "down_proj.weight" => "down",
         _ => return Err(unknown(full)),
     };
-    p(&format!("mlp.experts.{e}.{which}.weight"))
+    Ok(Half::DecoderExpert { bank: format!("blocks.{l}.mlp.experts.{which}.weight"), expert: e })
 }
 
 /// The encoder half's manifest: every name [`classify`] may return as
@@ -251,18 +257,51 @@ pub fn encoder_manifest(cfg: &DeepseekOcrConfig) -> Vec<(String, usize)> {
 /// error here, and a manifest entry no upstream tensor produced is caught by
 /// the per-half `validate` below.
 ///
-/// Returned as `Fetch::Whole` throughout because the map really is a pure
-/// rename - the upstream CLIP tower already ships its qkv fused the way brain
-/// wants it, so nothing is sliced or concatenated.
+/// `Fetch::Whole` for everything except the decoder's MoE expert banks: the
+/// upstream CLIP tower already ships its qkv fused the way brain wants it, so
+/// nothing is sliced, but upstream DOES ship each routed expert separately
+/// while brain's decoder reads one `[n_experts, out, in]` bank per projection
+/// (the layout the GGUF release stores natively), so those are a
+/// `Fetch::Concat` of the experts in index order.
 pub fn plans(names: &[String], cfg: &DeepseekOcrConfig) -> Result<(HashMap<String, Fetch>, HashMap<String, Fetch>), String> {
     let (mut enc, mut dec) = (HashMap::new(), HashMap::new());
+    // bank name -> expert index -> source tensor. `BTreeMap` on the inner key
+    // is what makes the concatenation expert-ordered by construction rather
+    // than by a sort someone could later drop.
+    let mut banks: BTreeMap<String, BTreeMap<u32, String>> = BTreeMap::new();
     for src in names {
         let (side, brain) = match classify(src, cfg)? {
             Half::Encoder(n) => (&mut enc, n),
             Half::Decoder(n) => (&mut dec, n),
+            Half::DecoderExpert { bank, expert } => {
+                if let Some(prev) = banks.entry(bank.clone()).or_default().insert(expert, src.clone()) {
+                    return Err(format!("{LABEL}: two source tensors ({prev}, {src}) are expert {expert} of {bank}"));
+                }
+                continue;
+            }
         };
         if side.insert(brain.clone(), Fetch::Whole(src.clone())).is_some() {
             return Err(format!("{LABEL}: two source tensors map to {brain}"));
+        }
+    }
+    let n_experts = cfg.decoder.shape.n_experts;
+    for (bank, parts) in banks {
+        let missing: Vec<u32> = (0..n_experts).filter(|e| !parts.contains_key(e)).collect();
+        if !missing.is_empty() {
+            // Name each absent expert with its own per-expert leaf
+            // (`...experts.{e}.gate.weight`), so the message points at the one
+            // source tensor that is missing rather than only at the bank it
+            // would have joined.
+            let (head, tail) = bank.split_once("experts.").unwrap_or((bank.as_str(), ""));
+            let named: Vec<String> = missing.iter().map(|e| format!("{head}experts.{e}.{tail}")).collect();
+            return Err(format!(
+                "{LABEL}: {bank}: this checkpoint produces no tensor for {} of {n_experts} experts: {named:?}",
+                missing.len()
+            ));
+        }
+        let fetch = Fetch::Concat(parts.into_values().map(Fetch::Whole).collect());
+        if dec.insert(bank.clone(), fetch).is_some() {
+            return Err(format!("{LABEL}: two source tensors map to {bank}"));
         }
     }
     for (label, plan, want) in [("encoder", &enc, encoder_manifest(cfg)), ("decoder", &dec, cfg.decoder.param_list())] {
@@ -763,12 +802,25 @@ mod tests {
 
         let mut enc: BTreeMap<String, usize> = BTreeMap::new();
         let mut dec: BTreeMap<String, usize> = BTreeMap::new();
+        // Which experts each bank has been handed, so a bank's element count
+        // below is the SUM of its parts and a duplicate or missing expert is
+        // still a failure rather than an average that happens to fit.
+        let mut bank_experts: BTreeMap<String, Vec<u32>> = BTreeMap::new();
         for (name, shape) in &shapes {
             let numel: usize = shape.iter().product();
             match classify(name, &cfg).unwrap_or_else(|e| panic!("{e}")) {
                 Half::Encoder(n) => assert!(enc.insert(n.clone(), numel).is_none(), "two upstream tensors map to encoder {n}"),
                 Half::Decoder(n) => assert!(dec.insert(n.clone(), numel).is_none(), "two upstream tensors map to decoder {n}"),
+                Half::DecoderExpert { bank, expert } => {
+                    *dec.entry(bank.clone()).or_insert(0) += numel;
+                    bank_experts.entry(bank).or_default().push(expert);
+                }
             }
+        }
+        assert_eq!(bank_experts.len(), 11 * 3, "one bank per projection on each of the 11 MoE layers");
+        for (bank, mut experts) in bank_experts {
+            experts.sort_unstable();
+            assert_eq!(experts, (0..cfg.decoder.shape.n_experts).collect::<Vec<u32>>(), "{bank}: every expert exactly once");
         }
 
         for (label, got, want) in [("encoder", &enc, encoder_manifest(&cfg)), ("decoder", &dec, cfg.decoder.param_list())] {
@@ -793,8 +845,15 @@ mod tests {
         let names: Vec<String> = upstream_shapes().into_keys().collect();
         let (enc, dec) = plans(&names, &cfg).expect("the real checkpoint plans cleanly");
         assert_eq!(enc.len(), 476, "the vision half");
-        assert_eq!(dec.len(), 2234, "the decoder half");
-        assert_eq!(enc.len() + dec.len(), names.len(), "every source tensor is claimed exactly once");
+        // 2234 brain-side decoder names when every routed expert was its own
+        // parameter; the 11 MoE layers' 64x3 experts are now 3 fused banks
+        // each, so 2234 - 11 * (64 * 3 - 3) = 155.
+        assert_eq!(dec.len(), 155, "the decoder half");
+        assert_eq!(
+            enc.len() + dec.len() + 11 * (64 - 1) * 3,
+            names.len(),
+            "every source tensor is claimed exactly once (each bank claims 64 of them, not 1)"
+        );
 
         // Drop one expert. Every remaining tensor still classifies, so only
         // the manifest check can catch it.

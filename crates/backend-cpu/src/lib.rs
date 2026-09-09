@@ -170,6 +170,10 @@ struct FastIdx {
     matmul_reg: Option<usize>,
     matmul_reg2: Option<usize>,
     matmul_reg3: Option<usize>,
+    /// `matmul_reg3_grouped`: one dispatch over every expert's compacted row
+    /// range. Not part of the `matmul*` equivalence class above - its rows
+    /// come from device-written group tables, so it needs its own loop.
+    matmul_reg3_grouped: Option<usize>,
     matmul_reg4: Option<usize>,
     matmul_dx: Option<usize>,
     matmul_dx_reg: Option<usize>,
@@ -276,6 +280,7 @@ impl CpuBackend {
                 matmul_reg: find("matmul_reg"),
                 matmul_reg2: find("matmul_reg2"),
                 matmul_reg3: find("matmul_reg3"),
+                matmul_reg3_grouped: find("matmul_reg3_grouped"),
                 matmul_reg4: find("matmul_reg4"),
                 attn_scores_cross: find("attn_scores_cross"),
                 attn_scores_cross_kt: find("attn_scores_cross_kt"),
@@ -598,6 +603,82 @@ impl CpuBackend {
             }
             return;
         }
+        // matmul_reg3_grouped: ONE dispatch over every expert's compacted row
+        // range (`model::moe::expert_fwd_grouped`). params = [k, n, n_experts];
+        // bufs = [x, w, out, group_row_start, group_row_count, group_tile_start].
+        // The GPU kernel resolves a workgroup's expert from `group_tile_start`
+        // and then runs `matmul_reg3`'s body over that expert's rows; on CPU
+        // the same work is the per-expert loop below, each block routed to the
+        // same AVX2 GEMM the whole `matmul*` family uses. `group_tile_start`
+        // exists only to map a fixed GPU tile grid onto variable row counts,
+        // so it is read for nothing here - the row tables say everything.
+        //
+        // The compacted row count is not in the params (it is device-computed),
+        // so the buffer bounds come from the tables: the highest row any expert
+        // claims. Rows past that are the host's worst-case slack and are left
+        // untouched, exactly as the GPU kernel's own bound checks leave them.
+        //
+        // The expert blocks run in PARALLEL, which is the whole reason this
+        // routing is worth having on CPU as well as GPU. `matmul_abt`'s own
+        // parallelism is over OUTPUT ROWS, and a decode round gives each
+        // routed expert exactly one row - so a sequential walk would run the
+        // layer's `top_k` GEMVs one after another on one core while the rest
+        // of the pool idles, and each of those GEMVs streams a whole
+        // `[out, in]` expert matrix, which is bandwidth work that wants every
+        // core. Across experts is the only axis with parallelism at that
+        // shape, and it is exactly the axis the per-expert-dispatch kernel
+        // this replaced could not use.
+        if Some(kind) == f.matmul_reg3_grouped && bufs.len() >= 5 {
+            unsafe {
+                let pu = std::slice::from_raw_parts(uniform, 3);
+                let (k, n, e) = (pu[0] as usize, pu[1] as usize, pu[2] as usize);
+                let starts = std::slice::from_raw_parts(bufs[3] as *const u32, e);
+                let counts = std::slice::from_raw_parts(bufs[4] as *const u32, e);
+                let rows = (0..e).map(|i| starts[i] as usize + counts[i] as usize).max().unwrap_or(0);
+                if rows == 0 {
+                    return;
+                }
+                let x = std::slice::from_raw_parts(bufs[0] as *const f32, rows * k);
+                let w = std::slice::from_raw_parts(bufs[1] as *const f32, e * n * k);
+                let out = std::slice::from_raw_parts_mut(bufs[2] as *mut f32, rows * n);
+                let gemm = |ei: usize, o: &mut [f32]| {
+                    let (s, c) = (starts[ei] as usize, counts[ei] as usize);
+                    if c > 0 {
+                        fast_ops::matmul_abt(&x[s * k..(s + c) * k], &w[ei * n * k..(ei + 1) * n * k], o, c, k, n);
+                    }
+                };
+                // `row_start` is an exclusive scan of `row_count`, so the
+                // experts' row blocks TILE the compacted batch in expert
+                // order - which is what lets `out` be cut into disjoint
+                // per-expert pieces with safe `split_at_mut` rather than
+                // aliasing raw pointers. Verified rather than assumed: an
+                // unexpected table falls back to the sequential walk, which
+                // needs no such invariant.
+                let mut at = 0u32;
+                let tiled = starts.iter().zip(counts).all(|(s, c)| {
+                    let ok = *s == at;
+                    at += *c;
+                    ok
+                });
+                if tiled {
+                    let mut blocks: Vec<(usize, &mut [f32])> = Vec::with_capacity(e);
+                    let mut rest: &mut [f32] = out;
+                    for (ei, c) in counts.iter().enumerate() {
+                        let (head, tail) = rest.split_at_mut(*c as usize * n);
+                        blocks.push((ei, head));
+                        rest = tail;
+                    }
+                    blocks.into_par_iter().for_each(|(ei, o)| gemm(ei, o));
+                } else {
+                    for ei in 0..e {
+                        let s = starts[ei] as usize;
+                        let c = counts[ei] as usize;
+                        gemm(ei, &mut out[s * n..(s + c) * n]);
+                    }
+                }
+            }
+            return;
+        }
         // matmul_dx{,_reg}: dX[m,k] = sum_n dY[m,n]·W[n,k].  params = [m,k,n,acc];
         // bufs = [dY, W, dX]. The tiled `_reg` variant is GPU-only, so on CPU both
         // route to the same native backward GEMM (the one-graph rule for backprop).
@@ -754,12 +835,21 @@ impl CpuBackend {
         // moe_linear_gated{,_dx,_dw}: matmul_abt/matmul_dx/matmul_dw with a
         // per-row (or per-summed-row) gate early-exit - see fast_ops.rs's own
         // doc for why this is the decode loop's dominant cost kernel.
+        //
+        // The trailing `w_off` param each of the three carries is the element
+        // offset of THIS expert's `[n, k]` matrix inside the bound weight (or
+        // gradient) buffer - 0 when every expert owns its own buffer, and
+        // `e_idx * n * k` when the three projections are fused
+        // `[n_experts, n, k]` banks. Applied here by advancing the base
+        // pointer, which is exactly what the shader's own `p.w_off + ...`
+        // index does.
         if Some(kind) == f.moe_linear_gated && bufs.len() >= 4 {
             unsafe {
-                let pu = std::slice::from_raw_parts(uniform, 5);
+                let pu = std::slice::from_raw_parts(uniform, 6);
                 let (m, k, n, ne, e) = (pu[0] as usize, pu[1] as usize, pu[2] as usize, pu[3] as usize, pu[4] as usize);
+                let w_off = pu[5] as usize;
                 let x = std::slice::from_raw_parts(bufs[0] as *const f32, m * k);
-                let w = std::slice::from_raw_parts(bufs[1] as *const f32, n * k);
+                let w = std::slice::from_raw_parts((bufs[1] as *const f32).add(w_off), n * k);
                 let gate = std::slice::from_raw_parts(bufs[2] as *const f32, m * ne);
                 let out = std::slice::from_raw_parts_mut(bufs[3] as *mut f32, m * n);
                 fast_ops::moe_linear_gated_fwd(x, w, gate, out, m, k, n, ne, e);
@@ -768,11 +858,12 @@ impl CpuBackend {
         }
         if Some(kind) == f.moe_linear_gated_dx && bufs.len() >= 4 {
             unsafe {
-                let pu = std::slice::from_raw_parts(uniform, 6);
+                let pu = std::slice::from_raw_parts(uniform, 7);
                 let (m, k, n, ne, e) = (pu[0] as usize, pu[1] as usize, pu[2] as usize, pu[3] as usize, pu[4] as usize);
                 let acc = pu[5] != 0;
+                let w_off = pu[6] as usize;
                 let dy = std::slice::from_raw_parts(bufs[0] as *const f32, m * n);
-                let w = std::slice::from_raw_parts(bufs[1] as *const f32, n * k);
+                let w = std::slice::from_raw_parts((bufs[1] as *const f32).add(w_off), n * k);
                 let gate = std::slice::from_raw_parts(bufs[2] as *const f32, m * ne);
                 let dx = std::slice::from_raw_parts_mut(bufs[3] as *mut f32, m * k);
                 fast_ops::moe_linear_gated_dx(dy, w, gate, dx, m, k, n, ne, e, acc);
@@ -781,12 +872,13 @@ impl CpuBackend {
         }
         if Some(kind) == f.moe_linear_gated_dw && bufs.len() >= 4 {
             unsafe {
-                let pu = std::slice::from_raw_parts(uniform, 5);
+                let pu = std::slice::from_raw_parts(uniform, 6);
                 let (m, k, n, ne, e) = (pu[0] as usize, pu[1] as usize, pu[2] as usize, pu[3] as usize, pu[4] as usize);
+                let w_off = pu[5] as usize;
                 let dy = std::slice::from_raw_parts(bufs[0] as *const f32, m * n);
                 let x = std::slice::from_raw_parts(bufs[1] as *const f32, m * k);
                 let gate = std::slice::from_raw_parts(bufs[2] as *const f32, m * ne);
-                let dw = std::slice::from_raw_parts_mut(bufs[3] as *mut f32, n * k);
+                let dw = std::slice::from_raw_parts_mut((bufs[3] as *mut f32).add(w_off), n * k);
                 fast_ops::moe_linear_gated_dw(dy, x, gate, dw, m, k, n, ne, e);
             }
             return;

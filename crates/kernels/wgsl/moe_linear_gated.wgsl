@@ -23,6 +23,17 @@
 //
 // One kernel serves gate_proj, up_proj AND down_proj: they differ only in
 // (k, n) and which expert's weight is bound, not in this row-gating logic.
+//
+// `w_off` is where this expert's `[n, k]` matrix starts inside `w`, in
+// ELEMENTS. A checkpoint that stores each projection's experts as one fused
+// `[n_experts, n, k]` bank (llama.cpp's own `ffn_*_exps` convention, which
+// `crates/gguf` imports verbatim) binds the whole bank and passes
+// `e_idx * n * k`; a caller holding one buffer per expert passes 0. It is a
+// Params field rather than a `step_sliced` binding offset because a storage
+// binding must start on a 256-byte boundary and a small expert matrix
+// (`moe_ff * d_model` of a toy config) does not, so the offset has to live
+// inside the shader - the same reasoning `matmul_reg3_grouped.wgsl`'s own
+// header records for its per-workgroup `e * p.k * p.n` weight base.
 // The `gate` buffer stays the dense `[m, n_experts]` matrix `router_gate.wgsl`
 // already produces — down_proj re-reads the SAME row's gate value rather than
 // inspecting whether its input `h` row is exactly zero, so all three
@@ -39,6 +50,7 @@ struct Params {
     n: u32,
     n_experts: u32,
     e_idx: u32,
+    w_off: u32,
 };
 
 @group(0) @binding(0) var<uniform> p: Params;
@@ -62,7 +74,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
         return;
     }
     let x_base = row * p.k;
-    let w_base = col * p.k;
+    let w_base = p.w_off + col * p.k;
     var acc = 0.0;
     for (var i: u32 = 0u; i < p.k; i = i + 1u) {
         // Hoisted to a bare identifier (B8, same reason as matmul.wgsl's

@@ -4,7 +4,7 @@
 // @what  Grouped variant of matmul_reg3: one dispatch computes EVERY expert's compacted-batch GEMM
 // @how   register block per thread, 256-thread workgroup tile, 3 barriers, per-workgroup expert-group lookup
 // @opt   4
-// @cpu   no
+// @cpu   native-only
 // @gpu   yes-wg256
 // @npu   no
 // @quant none
@@ -57,13 +57,14 @@
 // M5.4's compact path had to pad around: this is a storage-array READ
 // inside the kernel, not a `step_sliced` buffer-view offset.
 //
-// `@cpu no`: unlike `matmul_reg3` (whose 3 barriers are why IT needs a
-// hand-written native CPU path, `backend_cpu::FastIdx::matmul_reg3`, rather
-// than the generic WGSL CPU JIT), this kernel is a NEW name the CPU backend
-// has no native override for, so it would fall through to the JIT and fail
-// its one-top-level-barrier limit. No native CPU port is attempted this
-// session - a deliberately deferred follow-up, not a silent gap: this
-// kernel is GPU-only until one lands.
+// `@cpu native-only`, for the same reason `matmul_reg3` is: 3 top-level
+// barriers, which the WGSL->CPU JIT's one-barrier-per-kernel model cannot
+// express. `backend_cpu::FastIdx::matmul_reg3_grouped` routes it to a
+// per-expert loop over the same AVX2 GEMM the rest of the `matmul*` family
+// uses, reading the row range for each expert out of `group_row_start`/
+// `group_row_count` (the tile table is a GPU-grid artifact and is not read
+// there). Gated by `backend-cpu/tests/matmul_family_native_fastpath.rs::
+// grouped_matmul_native_fastpath_matches_per_expert_reference`.
 
 struct Params { k: u32, n: u32, n_experts: u32 };
 

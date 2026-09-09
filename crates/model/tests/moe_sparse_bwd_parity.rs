@@ -82,7 +82,7 @@ fn run_bwd(
         let grad_down_w = g.storage((d * ff) as u64);
         let gr = ExpertGrads { gate_w: Some(&grad_gate_w), up_w: Some(&grad_up_w), down_w: Some(&grad_down_w) };
         let mut steps = Vec::new();
-        model::moe::expert_bwd(g, &bwd_ids, shape, x, gate, gate_w, up_w, down_w, &gr, &saved, &sb, d_moe_acc, &d_x, e_idx as u32, true, &mut steps);
+        model::moe::expert_bwd(g, &bwd_ids, shape, x, gate, gate_w, up_w, down_w, &gr, &saved, &sb, d_moe_acc, &d_x, e_idx as u32, 0, true, &mut steps);
         g.submit(&[&grad_gate_w, &grad_up_w, &grad_down_w], &steps);
         dw_all.push(g.read(&grad_gate_w, (ff * d) as usize));
         dw_all.push(g.read(&grad_up_w, (ff * d) as usize));
@@ -129,7 +129,7 @@ fn gated_backward_matches_dense_bit_for_bit() {
     let acc = g.storage((m * d) as u64);
     let mut acts = Vec::new();
     for (ei, (gw, uw, dw)) in weights.iter().enumerate() {
-        let steps = expert_fwd(&g, &fwd_ids, &shape, &x, &gate, gw, uw, dw, &scratch, &acc, ei as u32, ei != 0);
+        let steps = expert_fwd(&g, &fwd_ids, &shape, &x, &gate, gw, uw, dw, &scratch, &acc, ei as u32, 0, ei != 0);
         g.submit(&[], &steps);
         // Snapshot this expert's activations into owned buffers (the shared
         // scratch set above is overwritten by the next expert's forward).

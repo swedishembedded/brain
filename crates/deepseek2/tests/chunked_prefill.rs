@@ -161,8 +161,33 @@ fn whole_prompt_single_chunk_matches_token_by_token_replay() {
 /// splice. Comparing against `logits_all` (the batched, un-chunked tape) is
 /// also what makes this THE gate for `decode_rows`'s position/mask math
 /// itself - see the module doc's measured mutation table.
+///
+/// It is ALSO this crate's gate that the two routed-expert implementations
+/// agree: `logits_all` walks the experts one at a time
+/// (`model::moe::expert_fwd`, each addressing its own slice of the layer's
+/// fused weight bank through `w_off`), while `prefill_chunked`/`decode_rows`
+/// run the whole routed half as ONE grouped, device-permuted pass
+/// (`model::moe::expert_fwd_grouped`). A wrong expert order, a wrong bank
+/// stride or an off-by-one expert index is invisible to every shape check and
+/// to test (1) above (which compares `decode_rows` with itself); it shows up
+/// here, as a logit divergence against a completely different dispatch
+/// sequence over the same weights.
 #[test]
 fn a_splice_run_that_straddles_a_chunk_boundary_is_recut() {
+    straddling_splice_matches_the_batched_tape(&|| Gpu::new_cpu(PIPELINES));
+}
+
+/// [`a_splice_run_that_straddles_a_chunk_boundary_is_recut`] on the ambient
+/// backend, so the grouped routed-expert pass is checked against the
+/// per-expert one on the GPU too (`matmul_reg3_grouped.wgsl` and its native
+/// CPU counterpart are different implementations of the same contract, and
+/// only one of them is exercised by the CPU-pinned test above).
+#[test]
+fn a_splice_run_that_straddles_a_chunk_boundary_is_recut_default_backend() {
+    straddling_splice_matches_the_batched_tape(&|| Gpu::new(PIPELINES));
+}
+
+fn straddling_splice_matches_the_batched_tape(dev: &dyn Fn() -> Gpu) {
     let cfg = DeepseekV2Config::tiny();
     let d = cfg.d_model();
     let init = deepseek2::init_weights(&cfg, 7);
@@ -174,7 +199,7 @@ fn a_splice_run_that_straddles_a_chunk_boundary_is_recut() {
 
     // Reference: the batched (flat, un-chunked) tape over the whole prompt,
     // which shares no dispatch with `decode_rows`.
-    let mut mb = DeepseekV2::new_on(Gpu::new_cpu(PIPELINES), cfg.clone(), 1, prompt.len() as u32, &init, false);
+    let mut mb = DeepseekV2::new_on(dev(), cfg.clone(), 1, prompt.len() as u32, &init, false);
     mb.enable_mm_splice(row0, n_rows);
     mb.write_img_embeds(&img);
     let want = mb.logits_all(&prompt);
@@ -182,7 +207,7 @@ fn a_splice_run_that_straddles_a_chunk_boundary_is_recut() {
 
     // Under test: batched=false, chunked prefill, the splice straddling a
     // chunk boundary.
-    let mut mc = DeepseekV2::new_sized(Gpu::new_cpu(PIPELINES), cfg.clone(), Sizes { b: 1, t: 1, ctx, chunk, batched: false }, &init, false);
+    let mut mc = DeepseekV2::new_sized(dev(), cfg.clone(), Sizes { b: 1, t: 1, ctx, chunk, batched: false }, &init, false);
     mc.enable_mm_splice(row0, n_rows);
     mc.write_img_embeds(&img);
     let got_last = mc.prefill_chunked(&prompt);

@@ -440,8 +440,19 @@ mod tests {
         assert!(names.contains(&"blocks.1.mlp.router.weight".to_string()), "block 1 must be MoE");
         assert!(names.contains(&"blocks.1.mlp.shared.gate.weight".to_string()), "block 1 needs a fused shared expert");
         assert!(names.contains(&"lm_head.weight".to_string()), "lm_head is untied");
-        let experts = names.iter().filter(|n| n.contains(".mlp.experts.")).count();
-        assert_eq!(experts, 5 * 3, "5 routed experts x gate/up/down on the one MoE block");
+        // ONE fused bank per projection, not one tensor per expert - the
+        // checkpoint's own `ffn_*_exps` layout, kept (see
+        // `gguf::import::Mapped::expert_bank`).
+        let experts: Vec<&String> = names.iter().filter(|n| n.contains(".mlp.experts.")).collect();
+        assert_eq!(experts.len(), 3, "gate/up/down expert BANKS on the one MoE block: {experts:?}");
+        let ff = cfg.moe_ff() as usize;
+        let d = cfg.d_model() as usize;
+        let ne = cfg.n_experts() as usize;
+        for (n, numel) in cfg.param_list() {
+            if n.contains(".mlp.experts.") {
+                assert_eq!(numel, ne * ff * d, "{n}: a bank holds every expert's matrix");
+            }
+        }
     }
 
     /// Degenerate toy dims hide bug classes - assert the fixture keeps apart

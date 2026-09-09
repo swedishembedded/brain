@@ -33,6 +33,20 @@
 //! spelled explicitly on [`config::DeepseekV2Config`] rather than defaulted, so
 //! a forward and its backward can never disagree about them.
 //!
+//! **Routed experts stay fused too, and inference dispatches them as one
+//! group.** Each of a MoE layer's three projections is ONE
+//! `[n_experts, out, in]` parameter (`blocks.{l}.mlp.experts.{gate,up,down}
+//! .weight`), holding every expert's matrix back to back - byte-for-byte the
+//! checkpoint's own `blk.{l}.ffn_*_exps.weight` layout, imported without an
+//! unpacking step. Inference (`model::DeepseekV2::decode_rows`, which serves
+//! BOTH chunked prefill and single-row decode) binds each bank as one operand
+//! to `model::moe::expert_fwd_grouped`, so a layer's whole routed half is ~9
+//! dispatches whatever `n_experts` is, instead of `5 * n_experts` of which the
+//! router only ever selects `top_k`. The training forward/backward still walk
+//! experts one at a time (the backward needs each expert's own saved
+//! activations), addressing one inside the same bank through `expert_fwd`'s
+//! `w_off`.
+//!
 //! **Shared experts stay fused.** The checkpoint's `*_shexp` tensors are one
 //! `n_shared_experts * moe_intermediate_size`-wide SwiGLU with no shared-expert
 //! gate tensor: the shared experts are summed **unweighted**, and an unweighted

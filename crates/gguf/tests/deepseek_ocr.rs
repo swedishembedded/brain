@@ -87,8 +87,8 @@ fn lm_tensor_map_covers_the_real_checkpoint_both_ways() {
     let params = cfg.param_list();
 
     // Header-only: this checkpoint's fp32 expansion is ~10 GB, and the whole
-    // mapping (including the 64-way expert fan-out and every element count)
-    // is provable without expanding a byte of it.
+    // mapping (including every element count) is provable without expanding a
+    // byte of it.
     let stats = import::dry_run(&mg, &params, &|n| lm::classify(n, &cfg), "deepseek-ocr")
         .expect("every source tensor classified and every planned tensor produced");
 
@@ -96,10 +96,15 @@ fn lm_tensor_map_covers_the_real_checkpoint_both_ways() {
     assert_eq!(stats.written, params.len(), "the plan and the mapping must be the same set");
     assert!(stats.dropped.is_empty(), "the LM file has nothing to drop: {:?}", stats.dropped);
 
-    // The expert fan-out is where a plan and a classifier drift apart: 11 MoE
-    // layers x 64 experts x 3 leaves.
-    let experts = params.iter().filter(|(n, _)| n.contains(".mlp.experts.")).count();
-    assert_eq!(experts, 11 * 64 * 3);
+    // The routed experts stay in the file's own fused layout: 11 MoE layers x
+    // 3 expert BANKS, each holding all 64 experts' matrices back to back, not
+    // 11 x 64 x 3 separate parameters.
+    let banks: Vec<&(String, usize)> = params.iter().filter(|(n, _)| n.contains(".mlp.experts.")).collect();
+    assert_eq!(banks.len(), 11 * 3, "one bank per projection per MoE layer");
+    let per_expert = cfg.moe_intermediate_size as usize * cfg.d_model as usize;
+    for (n, numel) in &banks {
+        assert_eq!(*numel, cfg.n_experts as usize * per_expert, "{n}: a bank holds every expert's matrix");
+    }
     assert!(params.iter().any(|(n, _)| n == "blocks.0.mlp.gate.weight"), "blk.0 is the dense block");
     assert!(!params.iter().any(|(n, _)| n == "blocks.0.mlp.router.weight"), "a dense block has no router");
     assert!(params.iter().any(|(n, _)| n == "blocks.11.mlp.shared.down.weight"));

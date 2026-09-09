@@ -126,10 +126,10 @@ fn default_ctx_len() -> u32 {
 
 /// Prefill round width (`deepseek2::model::Sizes::chunk`) - see
 /// `DeepseekV2::decode_rows`'s own doc for what this trades off: a wider
-/// round amortises each MoE layer's fixed 64-expert dispatch cost over more
-/// rows (this model's 283-row prompt is 2-3 rounds at 128-256, not 283
-/// individual chunks), at the cost of a wider `[chunk, n_heads, ctx]`
-/// attention-score slab. 512 comfortably covers the whole real prompt (the
+/// round amortises each round's fixed per-layer dispatch cost over more rows
+/// (this model's 283-row prompt is 2-3 rounds at 128-256, not 283 individual
+/// chunks), at the cost of a wider `[chunk, n_heads, ctx]` attention-score
+/// slab and a wider grouped-MoE scratch. 512 comfortably covers the whole real prompt (the
 /// 273-row image block + BOS + instruction, ~283 rows) in ONE round, so a
 /// real request's prefill is exactly one dispatch pass, same as the old flat
 /// batched tape was - only the KV cache, not the prefill itself, is what
@@ -487,7 +487,7 @@ impl Session {
         let vision = import::encoder_weights_for(&files, &cfg)?;
         stage_time("load: mmproj import (encoder weights)", t1);
         let t2 = std::time::Instant::now();
-        let reader = import::decoder_reader(&files)?;
+        let reader = import::decoder_reader(&files, &cfg)?;
         let decoder = import::decoder_source(&files, &reader, &cfg)?;
         stage_time("load: decoder_reader open", t2);
         let t3 = std::time::Instant::now();

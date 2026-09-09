@@ -23,7 +23,10 @@ use std::collections::HashMap;
 use data::rng::Lcg;
 use gpu_core::{DeviceBuffer, Gpu};
 use gradcheck::{elementwise_check, CheckModel};
-use model::moe::{expert_fwd, moe_layer_bwd, router_fwd_kind, ExpertBwdScratch, ExpertGrads, MoeActs, MoeIds, MoeIdsBwd, MoeShape, RouterBwdIds, RouterKind};
+use model::moe::{
+    expert_fwd, moe_layer_bwd, router_fwd_kind, ExpertBwdScratch, ExpertGrads, ExpertWeights, MoeActs, MoeIds, MoeIdsBwd, MoeShape, RouterBwdIds,
+    RouterKind,
+};
 
 const PIPES: &[(&str, &str)] = &[
     ("matmul", kernels::MATMUL),
@@ -249,7 +252,8 @@ impl CheckModel for MoeLayerCheck {
         for e in 0..E as usize {
             let (gw, uw, dw) = &self.expert_w[e];
             let scratch = self.acts.at(e);
-            let fwd_steps = expert_fwd(g, &self.fwd_ids, &self.shape, &self.x, &self.gate, gw, uw, dw, &scratch, &self.acc, e as u32, e != 0);
+            // `w_off = 0`: this harness gives every expert its own buffers.
+            let fwd_steps = expert_fwd(g, &self.fwd_ids, &self.shape, &self.x, &self.gate, gw, uw, dw, &scratch, &self.acc, e as u32, 0, e != 0);
             g.submit(&[], &fwd_steps);
         }
 
@@ -280,6 +284,11 @@ impl CheckModel for MoeLayerCheck {
         let expert_grads: Vec<ExpertGrads> = self.expert_grad.iter().map(|(gw, uw, dw)| ExpertGrads { gate_w: Some(gw), up_w: Some(uw), down_w: Some(dw) }).collect();
         let sb = ExpertBwdScratch { d_expert_out: &self.d_expert_out, d_h: &self.d_h, d_gate_pre: &self.d_gate_pre, d_up: &self.d_up };
 
+        let expert_weights: Vec<ExpertWeights> = self
+            .expert_w
+            .iter()
+            .map(|(gw, uw, dw)| ExpertWeights { gate_w: gw.clone(), up_w: uw.clone(), down_w: dw.clone(), w_off: 0 })
+            .collect();
         let steps = moe_layer_bwd(
             g,
             &self.router_bwd_ids,
@@ -293,7 +302,7 @@ impl CheckModel for MoeLayerCheck {
             &self.d_router_logits,
             &router_weight_bwd,
             &self.x,
-            &self.expert_w,
+            &expert_weights,
             &expert_grads,
             &self.acts,
             &sb,

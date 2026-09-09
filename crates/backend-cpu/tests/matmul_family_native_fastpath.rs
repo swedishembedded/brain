@@ -270,3 +270,86 @@ fn matmul_i8_dyn_has_no_cpu_native_fastpath_and_is_unreachable_by_the_selector()
         );
     }
 }
+
+/// `matmul_reg3_grouped` - `matmul_reg3`'s per-expert-group twin, the ONE
+/// dispatch that computes every routed expert's compacted-batch GEMM
+/// (`model::moe::expert_fwd_grouped`). It carries the same 3 top-level
+/// barriers as `matmul_reg3`, so the JIT refuses it for the same reason and a
+/// native fast path is again the only way it can run on this backend - and
+/// unlike the plain family above it has no equivalence class to lean on: its
+/// tile-to-row mapping is a per-workgroup LOOKUP through three device-written
+/// group tables, so "route it to the same AVX2 GEMM" is a claim about reading
+/// those tables correctly, not only about arithmetic.
+///
+/// The reference is built from the tables rather than from the kernel: for
+/// each expert, rows `[row_start[e], row_start[e] + row_count[e])` of the
+/// compacted batch multiply THAT expert's `[n, k]` slice of the fused weight
+/// bank. Rows no expert claims must be left untouched, which the pre-poisoned
+/// output buffer checks - the grouped pipeline's combine step only reads
+/// positions the permutation actually emitted, so a native path that
+/// helpfully zeroed the slack would hide a real indexing bug.
+#[test]
+fn grouped_matmul_native_fastpath_matches_per_expert_reference() {
+    assert_jit_uncompilable("matmul_reg3_grouped", kernels::MATMUL_REG3_GROUPED);
+
+    let ks: &[(&str, &str)] = &[("matmul_reg3_grouped", kernels::MATMUL_REG3_GROUPED)];
+    let gpu = Gpu::new_cpu(ks);
+    let mut seed = Lcg::new(0x6C0DE);
+
+    // (k, n, per-expert row counts). The counts deliberately include a ZERO
+    // (an expert nothing routed to - the common case at decode), counts under
+    // the 128-row tile height, and one spanning several tiles.
+    let cases: &[(usize, usize, &[usize])] = &[(12, 7, &[1, 0, 2]), (33, 41, &[5, 0, 37, 1]), (64, 130, &[130, 3, 0, 200])];
+    const POISON: f32 = -12345.0;
+    for (k, n, counts) in cases {
+        let (k, n) = (*k, *n);
+        let e = counts.len();
+        let rows: usize = counts.iter().sum();
+        let starts: Vec<u32> = counts
+            .iter()
+            .scan(0u32, |acc, c| {
+                let s = *acc;
+                *acc += *c as u32;
+                Some(s)
+            })
+            .collect();
+        // Exclusive prefix of each expert's ceil(count/BM) tile count, BM=128
+        // (`matmul_reg3_grouped.wgsl`'s own constant).
+        let tiles: Vec<u32> = counts
+            .iter()
+            .scan(0u32, |acc, c| {
+                let s = *acc;
+                *acc += c.div_ceil(128) as u32;
+                Some(s)
+            })
+            .collect();
+
+        let x: Vec<f32> = (0..rows * k).map(|_| seed.scaled(0.5)).collect();
+        let w: Vec<f32> = (0..e * n * k).map(|_| seed.scaled(0.5)).collect();
+        let mut want = vec![POISON; rows * n];
+        for (ei, count) in counts.iter().enumerate() {
+            let s = starts[ei] as usize;
+            let block = matmul_abt(&x[s * k..(s + count) * k], &w[ei * n * k..(ei + 1) * n * k], *count, k, n);
+            want[s * n..(s + count) * n].copy_from_slice(&block);
+        }
+
+        let xb = gpu.storage_init("x", &x);
+        let wb = gpu.storage_init("w", &w);
+        let ob = gpu.storage_init("out", &vec![POISON; rows * n]);
+        let rs = gpu.storage(e as u64);
+        let rc = gpu.storage(e as u64);
+        let ts = gpu.storage(e as u64);
+        gpu.write(&rs, &starts);
+        gpu.write(&rc, &counts.iter().map(|c| *c as u32).collect::<Vec<u32>>());
+        gpu.write(&ts, &tiles);
+
+        let kind = gpu.kernel_index("matmul_reg3_grouped").expect("registered above");
+        let worst_case_tiles = e as u32 + (rows as u32).div_ceil(128);
+        let threads = worst_case_tiles * (n as u32).div_ceil(128) * 256;
+        let steps = vec![gpu.step(kind, &[&xb, &wb, &ob, &rs, &rc, &ts], &[k as u32, n as u32, e as u32], threads)];
+        gpu.submit(&[], &steps);
+        let got = gpu.read(&ob, rows * n);
+        let d = worst_abs(&got, &want);
+        assert!(d < TOL, "matmul_reg3_grouped k={k} n={n} counts={counts:?}: worst|Δ|={d} >= {TOL}");
+    }
+}

@@ -145,7 +145,7 @@ Reference client: [`examples/vision/deepseek-ocr/`](../../examples/vision/deepse
 |---|---|
 | `prompt` | the instruction after the image. Default `<\|grounding\|>Convert the document to markdown.` - the reference model's own prompt |
 | `messages` | flattened chat messages (JSON array string); the last user turn becomes the instruction |
-| `max_new` | tokens to generate, default 32. **Every token is a full recompute** - see below |
+| `max_new` | tokens to generate, default 2048 (`deepseek2ocr::caps::DEFAULT_MAX_NEW`). Decode is KV-cached and stops early on EOS - see below |
 | `weights` | override the model-store resolver's own pick for one request |
 
 The reserved markers are ordinary text in the instruction and are tokenized
@@ -255,21 +255,18 @@ tape either. Every generated token after prefill is still one `O(1)`
 incremental decode step (`model::block::gqa_chunk_step` at one new row, plus
 a single-row MoE/dense FFN pass), not a full re-run of the sequence.
 
-**Shaped for one decode row, but not yet sparse in its DISPATCHES.** Both of
-the decode path's dominant kernels now have a skinny-M tier selected against
-the device's own capabilities (`matmul_gemv` for the attention/shared-expert
-projections and the head, `moe_linear_gated_gemv` for the routed experts) -
-the element-per-thread kernels launch only `n` threads at one row, which on a
-P40 is fourteen warps against a 960-warp residency. What remains is that
-every MoE layer still DISPATCHES all 64 experts per row even though the
-kernel now skips the 58 dead ones without reading their weights.
-<!-- perf-number: where the remaining time goes, not a claim about how fast it is -->
-That is ~3785 dispatches per decode token, whose host-side bind-group cost is
-roughly 60% of a decode step's wall time. `model::moe::expert_fwd_grouped` - a
-device-side row permutation plus a grouped GEMM, already written and
-parity-gated in `crates/model/tests/moe_grouped_parity.rs` - is the standing
-fix; it needs this decoder's per-expert weight tensors concatenated per layer
-first. See `.agents/roadmap/deepseek2ocr.md`.
+**One grouped dispatch per MoE layer, not one per expert.** The checkpoint
+stores each MoE projection's 64 experts as ONE `[64, out, in]` tensor
+(`blk.N.ffn_*_exps.weight`); brain imports that layout unchanged instead of
+unpacking it into 64 separate parameters, so the whole routed half of a layer
+binds as three weight operands. Both prefill rounds and single-token decode
+then run it through `model::moe::expert_fwd_grouped`, which permutes the
+routed `(row, expert)` pairs into per-expert contiguous ranges on the device
+and issues ONE grouped GEMM per projection - about 9 dispatches per MoE layer
+regardless of expert count, against the `5 x 64 = 320` the per-expert loop
+issued for a top-6 router. It also stops a prefill round writing (and then
+discarding) an all-experts-by-all-rows activation slab: the grouped scratch is
+sized by `rows * top_k`, not `rows * n_experts`.
 
 For the actual measured numbers behind these changes - wall-clock deltas,
 per-kernel profiles, and the full history of what was tried and what didn't

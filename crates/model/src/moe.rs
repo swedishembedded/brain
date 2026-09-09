@@ -252,12 +252,29 @@ pub struct ExpertScratch<'a> {
     pub expert_out: &'a DeviceBuffer,
 }
 
+/// Element offset of expert `e_idx`'s `[out, in]` matrix inside a fused
+/// `[n_experts, out, in]` weight bank - what [`expert_fwd`]/[`expert_bwd`]'s
+/// `w_off` wants when a checkpoint stores a projection's experts back to back
+/// (llama.cpp's `ffn_{gate,up,down}_exps` convention, which `crates/gguf`
+/// imports verbatim) instead of one buffer per expert.
+///
+/// One value serves all three projections: gate/up are `[moe_ff, d_model]`
+/// and down is `[d_model, moe_ff]`, so every per-expert matrix holds the same
+/// `moe_ff * d_model` elements.
+pub fn bank_offset(shape: &MoeShape, e_idx: u32) -> u32 {
+    e_idx * shape.moe_ff * shape.d_model
+}
+
 /// One expert's gated SwiGLU FFN step, combined into `acc` - the sparse
 /// replacement for `crates/glm`'s dense per-expert loop body. `x` is the
 /// (already normed) hidden state shared by every expert; `gate_w`/`up_w`/
 /// `down_w` are expert `e_idx`'s own weights. `accumulate` is `false` only
 /// for the very first expert in the layer's loop (matching `scale_add.wgsl`'s
 /// own set-vs-add contract).
+///
+/// `w_off` is where expert `e_idx`'s matrix starts inside each of the three
+/// weight buffers, in elements: `0` when the caller holds one buffer per
+/// expert, [`bank_offset`] when all three are fused per-projection banks.
 #[allow(clippy::too_many_arguments)]
 pub fn expert_fwd(
     g: &Gpu,
@@ -271,9 +288,10 @@ pub fn expert_fwd(
     scratch: &ExpertScratch,
     acc: &DeviceBuffer,
     e_idx: u32,
+    w_off: u32,
     accumulate: bool,
 ) -> [Step; 5] {
-    expert_fwd_tiered(g, ids, None, shape, x, gate, gate_w, up_w, down_w, scratch, acc, e_idx, accumulate)
+    expert_fwd_tiered(g, ids, None, shape, x, gate, gate_w, up_w, down_w, scratch, acc, e_idx, w_off, accumulate)
 }
 
 /// [`expert_fwd`] with a second, skinny-M tier for its three projections:
@@ -311,15 +329,24 @@ pub fn expert_fwd_tiered(
     scratch: &ExpertScratch,
     acc: &DeviceBuffer,
     e_idx: u32,
+    w_off: u32,
     accumulate: bool,
 ) -> [Step; 5] {
     let (m, d, ff, e) = (shape.rows, shape.d_model, shape.moe_ff, shape.n_experts);
     let lin = |x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, k: u32, n: u32| {
-        let (kid, threads) = match linear_gated_gemv.zip(crate::block::gemv_tier(g, m, n)) {
-            Some((kid, threads)) => (kid, threads),
-            None => (ids.linear_gated, m * n),
-        };
-        g.step(kid, &[x, w, gate, out], &[m, k, n, e, e_idx], threads)
+        // The GEMV tier (`moe_linear_gated_gemv.wgsl`) has no `w_off` field: it
+        // addresses `w` from element 0, so it is only correct for a caller
+        // that holds one buffer per expert (`w_off == 0`, e.g. training's own
+        // per-expert loop when it is not reading a fused bank). A fused-bank
+        // caller (`w_off != 0`) always falls through to `ids.linear_gated`
+        // (`moe_linear_gated.wgsl`), the one of the two that gained `w_off` to
+        // address an expert's matrix inside a shared per-projection bank.
+        if w_off == 0 {
+            if let Some((kid, threads)) = linear_gated_gemv.zip(crate::block::gemv_tier(g, m, n)) {
+                return g.step(kid, &[x, w, gate, out], &[m, k, n, e, e_idx], threads);
+            }
+        }
+        g.step(ids.linear_gated, &[x, w, gate, out], &[m, k, n, e, e_idx, w_off], m * n)
     };
     [
         lin(x, gate_w, scratch.gate_pre, d, ff),
@@ -394,6 +421,23 @@ pub struct MoeIdsBwd {
     pub linear_gated: bool,
 }
 
+/// One expert's three projection weights, as [`moe_layer_bwd`] takes them.
+///
+/// The three handles may be that expert's own buffers (`w_off == 0`) or the
+/// three per-projection `[n_experts, out, in]` banks every expert shares, in
+/// which case `w_off` is [`bank_offset`] - the element offset of THIS
+/// expert's matrix. One offset serves all three because every projection's
+/// per-expert matrix holds the same `moe_ff * d_model` elements, and the
+/// gradient buffers in the matching [`ExpertGrads`] have the identical
+/// layout, so the same offset addresses those too.
+#[derive(Clone)]
+pub struct ExpertWeights {
+    pub gate_w: DeviceBuffer,
+    pub up_w: DeviceBuffer,
+    pub down_w: DeviceBuffer,
+    pub w_off: u32,
+}
+
 /// One expert's weight gradients - `None` skips that weight's dW entirely
 /// (a frozen weight, or a caller that only wants dX for this expert).
 #[derive(Clone, Copy)]
@@ -439,6 +483,12 @@ pub fn expert_dgate(g: &Gpu, ids: &MoeIdsBwd, shape: &MoeShape, saved: &ExpertSc
 /// projection just wrote, since both happen within this one expert's call.
 /// Every current caller passes `true` (the router's own backward, run first
 /// by [`moe_layer_bwd`], already established `d_x`'s base value).
+///
+/// `w_off` is [`expert_fwd`]'s, and addresses this expert's matrix inside
+/// BOTH the weight buffers and `gr`'s gradient buffers - a fused weight bank
+/// and its gradient have the same layout, so one offset covers both. The
+/// non-gated (`ids.linear_gated == false`) `matmul_dx`/`matmul_dw` fallback
+/// has no such field, so a caller on a fused bank must use the gated tier.
 #[allow(clippy::too_many_arguments)]
 pub fn expert_bwd(
     g: &Gpu,
@@ -455,21 +505,27 @@ pub fn expert_bwd(
     d_acc: &DeviceBuffer,
     d_x: &DeviceBuffer,
     e_idx: u32,
+    w_off: u32,
     accumulate: bool,
     steps: &mut Vec<Step>,
 ) {
     let (m, d, ff, e) = (shape.rows, shape.d_model, shape.moe_ff, shape.n_experts);
+    assert!(
+        w_off == 0 || ids.linear_gated,
+        "expert_bwd: a fused expert bank (w_off={w_off}) needs the gated kernel tier - \
+         matmul_dx/matmul_dw have no weight-offset field"
+    );
 
     let dx = |g: &Gpu, dy: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, k: u32, n: u32, acc: u32, steps: &mut Vec<Step>| {
         if ids.linear_gated {
-            steps.push(g.step(ids.linear_dx, &[dy, w, gate, out], &[m, k, n, e, e_idx, acc], m * k));
+            steps.push(g.step(ids.linear_dx, &[dy, w, gate, out], &[m, k, n, e, e_idx, acc, w_off], m * k));
         } else {
             steps.push(g.step(ids.linear_dx, &[dy, w, out], &[m, k, n, acc], m * k));
         }
     };
     let dw = |g: &Gpu, dy: &DeviceBuffer, xin: &DeviceBuffer, dwbuf: &DeviceBuffer, k: u32, n: u32, steps: &mut Vec<Step>| {
         if ids.linear_gated {
-            steps.push(g.step(ids.linear_dw, &[dy, xin, gate, dwbuf], &[m, k, n, e, e_idx], n * k));
+            steps.push(g.step(ids.linear_dw, &[dy, xin, gate, dwbuf], &[m, k, n, e, e_idx, w_off], n * k));
         } else {
             steps.push(g.step(ids.linear_dw, &[dy, xin, dwbuf], &[m, k, n], n * k));
         }
@@ -545,7 +601,7 @@ pub fn moe_layer_bwd(
     d_router_logits: &DeviceBuffer,
     router_weight_bwd: &[Step],
     x: &DeviceBuffer,
-    expert_weights: &[(DeviceBuffer, DeviceBuffer, DeviceBuffer)],
+    expert_weights: &[ExpertWeights],
     expert_grads: &[ExpertGrads],
     acts: &MoeActs,
     sb: &ExpertBwdScratch,
@@ -569,8 +625,26 @@ pub fn moe_layer_bwd(
 
     // Phase C: every expert's SwiGLU backward, accumulating into d_x (whose
     // base value router_weight_bwd's own dX write already established above).
-    for (e_idx, (gate_w, up_w, down_w)) in expert_weights.iter().enumerate() {
-        expert_bwd(g, expert_bwd_ids, shape, x, gate, gate_w, up_w, down_w, &expert_grads[e_idx], &acts.at(e_idx), sb, d_moe_acc, d_x, e_idx as u32, true, &mut steps);
+    for (e_idx, w) in expert_weights.iter().enumerate() {
+        expert_bwd(
+            g,
+            expert_bwd_ids,
+            shape,
+            x,
+            gate,
+            &w.gate_w,
+            &w.up_w,
+            &w.down_w,
+            &expert_grads[e_idx],
+            &acts.at(e_idx),
+            sb,
+            d_moe_acc,
+            d_x,
+            e_idx as u32,
+            w.w_off,
+            true,
+            &mut steps,
+        );
     }
 
     steps

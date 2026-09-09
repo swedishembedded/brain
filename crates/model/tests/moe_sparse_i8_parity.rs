@@ -96,7 +96,7 @@ fn int8_matches_fp32_sparse_within_quant_tolerance() {
     };
     let acc_fp32 = g.storage((m * d) as u64);
     for ei in 0..e {
-        let steps = expert_fwd(&g, &ids, &shape, &x, &gate, &gate_w[ei as usize], &up_w[ei as usize], &down_w[ei as usize], &scratch, &acc_fp32, ei, ei != 0);
+        let steps = expert_fwd(&g, &ids, &shape, &x, &gate, &gate_w[ei as usize], &up_w[ei as usize], &down_w[ei as usize], &scratch, &acc_fp32, ei, 0, ei != 0);
         g.submit(&[], &steps);
     }
 

@@ -146,15 +146,16 @@ fn without_router(full: &Report) -> Report {
     Report { checks: full.checks.iter().filter(|c| !c.param.ends_with("mlp.router.weight")).cloned().collect() }
 }
 
-/// One forward+backward: the loss, and the analytic gradient of a routed-expert
-/// weight (the tensor whose gradient the router's combine weight multiplies
-/// directly).
+/// One forward+backward: the loss, and the analytic gradient of the routed
+/// experts' down-projection BANK (the tensor whose gradient the router's
+/// combine weight multiplies directly). One tensor holds every expert's
+/// matrix, so this reads all of them at once.
 fn loss_and_expert_grad(cfg: DeepseekV2Config) -> (f32, Vec<f32>) {
     let m = harness(7, cfg);
     m.zero_grads();
     let loss = m.forward();
     m.backward();
-    (loss, m.read_grad("blocks.1.mlp.experts.0.down.weight"))
+    (loss, m.read_grad("blocks.1.mlp.experts.down.weight"))
 }
 
 fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {

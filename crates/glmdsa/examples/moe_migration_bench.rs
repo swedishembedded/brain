@@ -92,10 +92,12 @@ fn main() {
     let gate_pre_s = g.storage((rows_per_expert * MOE_FF) as u64);
     let up_s = g.storage((rows_per_expert * MOE_FF) as u64);
     let out_s = g.storage((rows_per_expert * D_MODEL) as u64);
+    // Params tail is `[n_experts, e_idx, w_off]`; `w_off = 0` because each
+    // weight here is its own buffer, not a slice of a fused expert bank.
     let sparse_steps = [
-        g.step(moe_linear_gated, &[&x_sparse, &gate_w, &gate_sparse, &gate_pre_s], &[rows_per_expert, D_MODEL, MOE_FF, 1, 0], rows_per_expert * MOE_FF),
-        g.step(moe_linear_gated, &[&x_sparse, &up_w, &gate_sparse, &up_s], &[rows_per_expert, D_MODEL, MOE_FF, 1, 0], rows_per_expert * MOE_FF),
-        g.step(moe_linear_gated, &[&up_s, &down_w, &gate_sparse, &out_s], &[rows_per_expert, MOE_FF, D_MODEL, 1, 0], rows_per_expert * D_MODEL),
+        g.step(moe_linear_gated, &[&x_sparse, &gate_w, &gate_sparse, &gate_pre_s], &[rows_per_expert, D_MODEL, MOE_FF, 1, 0, 0], rows_per_expert * MOE_FF),
+        g.step(moe_linear_gated, &[&x_sparse, &up_w, &gate_sparse, &up_s], &[rows_per_expert, D_MODEL, MOE_FF, 1, 0, 0], rows_per_expert * MOE_FF),
+        g.step(moe_linear_gated, &[&up_s, &down_w, &gate_sparse, &out_s], &[rows_per_expert, MOE_FF, D_MODEL, 1, 0, 0], rows_per_expert * D_MODEL),
     ];
     let sparse_time = best_of(&g, &sparse_steps);
 

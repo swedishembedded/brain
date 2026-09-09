@@ -75,10 +75,22 @@ pub fn paths() -> Option<(std::path::PathBuf, std::path::PathBuf)> {
 }
 
 /// The GGUF's fp32 expansion, converting it on first use.
-pub fn expanded(gguf: &std::path::Path, st: &std::path::Path) -> String {
+///
+/// A cached expansion whose tensor names are not the ones `cfg`'s manifest
+/// asks for is REBUILT rather than used: it is derived, so a stale one (left
+/// by a build with a different tensor layout) is a cache to refresh, not a
+/// checkpoint to refuse.
+pub fn expanded(gguf: &std::path::Path, st: &std::path::Path, cfg: &DeepseekV2Config) -> String {
     let st_s = st.to_str().expect("utf-8 path").to_string();
     if st.exists() {
-        return st_s;
+        let want = cfg.param_list();
+        match WeightReader::open(&st_s) {
+            Ok(r) if want.iter().all(|(n, _)| r.shape(n).is_some()) => return st_s,
+            _ => {
+                println!("  {st_s}: cached expansion does not match this build's tensor layout - rebuilding");
+                std::fs::remove_file(st).expect("removing the stale expansion");
+            }
+        }
     }
     println!("  expanding {} -> {} (once; ~12 GB)", gguf.display(), st.display());
     let stats = deepseek2::import::import_file(gguf.to_str().expect("utf-8 path"), &st_s, None)
@@ -108,6 +120,6 @@ pub fn open_on(t: u32, gpu: Gpu) -> Option<DeepseekV2> {
     };
     let cfg = deepseek2::import::config_from_file(gguf.to_str().expect("utf-8 path"), t).unwrap_or_else(|e| panic!("config_from_file: {e}"));
     assert_eq!(cfg, DeepseekV2Config::deepseek_ocr(t), "shipped file vs documented preset");
-    let src = WeightReader::open(&expanded(&gguf, &st)).unwrap_or_else(|e| panic!("open expansion: {e}"));
+    let src = WeightReader::open(&expanded(&gguf, &st, &cfg)).unwrap_or_else(|e| panic!("open expansion: {e}"));
     Some(DeepseekV2::new_on(gpu, cfg, 1, t, &src, false))
 }

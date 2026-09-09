@@ -37,6 +37,11 @@ struct Params {
     n_experts: u32,
     e_idx: u32,
     accumulate: u32,
+    // Element offset of this expert's `[n, k]` matrix inside `w` - 0 for a
+    // per-expert buffer, `e_idx * n * k` for a fused `[n_experts, n, k]`
+    // bank. See `moe_linear_gated.wgsl`'s header for why the offset is a
+    // Params field and not a bound-range offset.
+    w_off: u32,
 };
 
 @group(0) @binding(0) var<uniform> p: Params;
@@ -61,7 +66,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     }
     var acc = 0.0;
     for (var nn: u32 = 0u; nn < p.n; nn = nn + 1u) {
-        acc = acc + dy[row * p.n + nn] * w[nn * p.k + col];
+        acc = acc + dy[row * p.n + nn] * w[p.w_off + nn * p.k + col];
     }
     if (p.accumulate == 0u) { dx[idx] = acc; }
     else                    { dx[idx] = dx[idx] + acc; }

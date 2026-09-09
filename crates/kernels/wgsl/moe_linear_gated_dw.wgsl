@@ -29,6 +29,11 @@ struct Params {
     n: u32,
     n_experts: u32,
     e_idx: u32,
+    // Element offset of this expert's `[n, k]` gradient inside `dw` - 0 for a
+    // per-expert buffer, `e_idx * n * k` for a fused `[n_experts, n, k]`
+    // bank. See `moe_linear_gated.wgsl`'s header for why the offset is a
+    // Params field and not a bound-range offset.
+    w_off: u32,
 };
 
 @group(0) @binding(0) var<uniform> p: Params;
@@ -52,5 +57,6 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
         if (gate[mm * p.n_experts + p.e_idx] <= 0.0) { continue; }
         acc = acc + dy[mm * p.n + nn] * x[mm * p.k + col];
     }
-    dw[idx] = dw[idx] + acc;
+    let o = p.w_off + idx;
+    dw[o] = dw[o] + acc;
 }

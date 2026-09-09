@@ -136,8 +136,8 @@ use model::gdn::{gdn_causal_conv1d_step, gdn_recurrent_step, GdnBwdIds, GdnConvI
 pub use model::gdn::gdn_chunk_size;
 use model::moe::{
     expert_fwd, expert_fwd_i8, moe_layer_bwd, router_fwd_kind, shared_expert_fwd, ExpertBwdScratch, ExpertGrads,
-    ExpertScratch, ExpertScratch8, MoeActs, MoeIds, MoeIds8, MoeIdsBwd, MoeShape, RouterBwdIds, RouterKind,
-    SharedExpertIds, SharedExpertScratch,
+    ExpertScratch, ExpertScratch8, ExpertWeights, MoeActs, MoeIds, MoeIds8, MoeIdsBwd, MoeShape, RouterBwdIds,
+    RouterKind, SharedExpertIds, SharedExpertScratch,
 };
 use optim::Optim;
 
@@ -1688,6 +1688,10 @@ impl Qwen35 {
                     &acts.at(ei as usize),
                     &moe_acc,
                     ei,
+                    // Each expert owns its own weight tensors here (this
+                    // crate's import fans the GGUF stack out per expert), so
+                    // there is no bank offset to apply.
+                    0,
                     ei != 0,
                 ));
             }
@@ -1720,6 +1724,7 @@ impl Qwen35 {
                     &scratch,
                     &moe_acc,
                     ei,
+                    0,
                     ei != 0,
                 ));
             }
@@ -1880,6 +1885,7 @@ impl Qwen35 {
                 &scratch,
                 moe_acc,
                 ei,
+                0,
                 i != 0,
             ));
         }
@@ -2111,10 +2117,11 @@ impl Qwen35 {
             self.proj_bwd(&mut s, "router", &d_router_logits, &la.xn2, &p("mlp.router.weight"), &d_xn2, n, d, e, 0);
             s
         };
-        let expert_weights: Vec<(DeviceBuffer, DeviceBuffer, DeviceBuffer)> = (0..e)
+        let expert_weights: Vec<ExpertWeights> = (0..e)
             .map(|ei| {
                 let (gn, un, dn) = &self.moe_expert_names[l][ei as usize];
-                (self.w(gn).clone(), self.w(un).clone(), self.w(dn).clone())
+                // `w_off = 0`: one tensor per expert, not a fused bank.
+                ExpertWeights { gate_w: self.w(gn).clone(), up_w: self.w(un).clone(), down_w: self.w(dn).clone(), w_off: 0 }
             })
             .collect();
         // Never a LoRA target (per the standing LoRA task's own scope note:
@@ -2960,6 +2967,7 @@ mod decode_sparse_moe_tests {
                 &scratch,
                 &moe_acc,
                 ei,
+                0,
                 ei != 0,
             ));
         }

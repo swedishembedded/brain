@@ -18,7 +18,8 @@
 //! | RMSNorm fwd/bwd | `model::block::{rmsnorm_fwd, rmsnorm_bwd}` |
 //! | NEOX (half-split) RoPE fwd/bwd | `model::block::{rope_fwd, rope_bwd}` over `rope_base.wgsl` |
 //! | causal MHA fwd/bwd | `model::block::{gqa_fwd, gqa_bwd}` at `n_kv_heads == n_heads` |
-//! | routed experts + softmax router | `model::moe::{router_fwd_kind, expert_fwd, moe_layer_bwd}` |
+//! | routed experts, inference | `model::moe::{router_fwd_kind, expert_fwd_grouped}` (one grouped pass) |
+//! | routed experts, train fwd/bwd | `model::moe::{router_fwd_kind, expert_fwd, moe_layer_bwd}` (per expert) |
 //! | fused unweighted shared expert | `model::moe::{shared_expert_fwd, shared_expert_bwd}`, `None` arm |
 //! | SwiGLU, GEMMs, CE, AdamW | the shared kernel set every decoder in this tree uses |
 //!
@@ -75,8 +76,9 @@ use std::collections::HashMap;
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
 use model::block::{self, Gqa, KernelIds};
 use model::moe::{
-    self, ExpertBwdScratch, ExpertGrads, MoeActs, MoeIds, MoeIdsBwd, MoeShape, RouterBwdIds, RouterKind, SharedExpertActs, SharedExpertBwdIds,
-    SharedExpertBwdScratch, SharedExpertGrads, SharedExpertIds, SharedExpertScratch,
+    self, ExpertBwdScratch, ExpertGrads, ExpertWeights, GroupedExpertFwdIds, GroupedExpertScratch, MoeActs, MoeIds, MoeIdsBwd, MoeShape,
+    RouterBwdIds, RouterKind, SharedExpertActs, SharedExpertBwdIds, SharedExpertBwdScratch, SharedExpertGrads, SharedExpertIds,
+    SharedExpertScratch,
 };
 use optim::Optim;
 use paramstore::{ParamStore, Role};
@@ -175,14 +177,22 @@ const CONCAT_SPLIT: usize = 49;
 const MATMUL_GEMV: usize = 50;
 // The decode-regime twin of `moe_linear_gated`, same relationship
 // `matmul_gemv` has to `matmul`: one WORKGROUP per output column instead of
-// one thread per output element. At one decode row an expert projection
-// dispatches only `moe_ff` = 896 threads, fourteen warps against a Tesla
-// P40's 960-warp residency, and this decoder runs 2112 of those per token.
-// perf-number: same, the shortfall rather than a claim.
-// perf-number: 51% of the decode step's GPU kernel time, 0.91 GB of routed expert weights at ~10 GB/s against that card's ~346 GB/s roof.
-// Selected by `moe::expert_fwd_tiered` against the DEVICE's caps. Appended,
-// so every index above is unchanged.
+// one thread per output element. Still used by the per-expert training
+// forward/backward (which needs each expert's own saved activations); the
+// inference-only routed-expert half of a layer now runs through the grouped
+// MoE kernels below instead. Selected by `moe::expert_fwd_tiered` against the
+// DEVICE's caps. Appended, so every index above is unchanged.
 const MOE_LINEAR_GATED_GEMV: usize = 51;
+// Grouped MoE (`model::moe::expert_fwd_grouped`) - the whole routed-expert
+// half of an inference MoE layer in ~9 dispatches instead of `5 * n_experts`.
+// Appended, so every index above is unchanged.
+const ROUTER_TOPK_COMPACT: usize = 52;
+const MOE_GROUP_COUNTS: usize = 53;
+const SCAN_BLOCK: usize = 54;
+const SCAN_ADD: usize = 55;
+const MOE_GROUP_PERM_EMIT: usize = 56;
+const MATMUL_REG3_GROUPED: usize = 57;
+const MOE_GROUP_COMBINE: usize = 58;
 
 pub const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -259,6 +269,18 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("concat_split", kernels::CONCAT_SPLIT),
     ("matmul_gemv", kernels::MATMUL_GEMV),
     ("moe_linear_gated_gemv", kernels::MOE_LINEAR_GATED_GEMV),
+    // Grouped MoE: router top-k compaction, per-expert row/tile counts, the
+    // two device-side exclusive scans over them, the permutation emit, the
+    // one grouped GEMM per projection and the combine back into `[rows, d]`.
+    // `embed` (the row gather) and `silu_mul` are already registered above.
+    // Appended, so every index above is unchanged.
+    ("router_topk_compact", kernels::ROUTER_TOPK_COMPACT),
+    ("moe_group_counts", kernels::MOE_GROUP_COUNTS),
+    ("scan_block", kernels::SCAN_BLOCK),
+    ("scan_add", kernels::SCAN_ADD),
+    ("moe_group_perm_emit", kernels::MOE_GROUP_PERM_EMIT),
+    ("matmul_reg3_grouped", kernels::MATMUL_REG3_GROUPED),
+    ("moe_group_combine", kernels::MOE_GROUP_COMBINE),
 ];
 
 fn kernel_ids() -> KernelIds {
@@ -299,6 +321,24 @@ fn gqa_chunk_ids() -> block::GqaChunkIds {
 
 fn moe_ids() -> MoeIds {
     MoeIds { router_gate: ROUTER_GATE, linear_gated: MOE_LINEAR_GATED, silu_mul: SILU_MUL, scale_add: SCALE_ADD }
+}
+
+/// Kernel ids for the grouped routed-expert forward
+/// (`model::moe::expert_fwd_grouped`), which every INFERENCE MoE layer runs
+/// (`DeepseekV2::decode_rows`) in place of the `n_experts`-long per-expert
+/// dispatch loop the training tape still needs.
+fn grouped_expert_ids() -> GroupedExpertFwdIds {
+    GroupedExpertFwdIds {
+        router_topk_compact: ROUTER_TOPK_COMPACT,
+        group_counts: MOE_GROUP_COUNTS,
+        scan_block: SCAN_BLOCK,
+        scan_add: SCAN_ADD,
+        perm_emit: MOE_GROUP_PERM_EMIT,
+        gather: EMBED,
+        gemm_grouped: MATMUL_REG3_GROUPED,
+        silu_mul: SILU_MUL,
+        combine: MOE_GROUP_COMBINE,
+    }
 }
 
 fn moe_ids_bwd() -> MoeIdsBwd {
@@ -395,8 +435,9 @@ struct LayerBufs {
 /// per-layer copy except the persistent `kcache`/`vcache` (which must survive
 /// from one round to the next) and `res` (the residual stream snapshot each
 /// layer reads and the next layer writes). This mirrors `crates/gpt`'s
-/// `Decode` struct; the MoE scratch (`moe_acts` etc.) is the one addition
-/// this architecture's decoder needs over that plain-MLP shape.
+/// `Decode` struct; the MoE scratch (`grouped`, `router_logits`, `gate`, the
+/// shared expert's own buffers) is the one addition this architecture's
+/// decoder needs over that plain-MLP shape.
 ///
 /// A single-token [`DeepseekV2::step`] is the `chunk = 1` degenerate case of
 /// [`DeepseekV2::decode_rows`] - same buffers, same dispatches, `n = 1` -
@@ -428,7 +469,17 @@ struct Decode {
     // MoE scratch (shared by every MoE layer)
     router_logits: DeviceBuffer,
     gate: DeviceBuffer,
-    moe_acts: MoeActs,
+    /// The grouped routed-expert forward's own scratch, sized once for the
+    /// widest round this instance can take (`chunk * top_k` compacted rows)
+    /// and shared by every MoE layer.
+    ///
+    /// This REPLACED a `MoeActs` (every expert's own `gate_pre`/`up`/`h`/
+    /// `expert_out` at the full round width, which only a backward needs and
+    /// a decode instance never runs): at this checkpoint's 64 experts and a
+    /// 512-row round that was ~520 MB of buffers written and never read,
+    /// against ~65 MB here, because the grouped path allocates per COMPACTED
+    /// row (`rows * top_k`, top_k = 6) rather than per row per expert.
+    grouped: GroupedExpertScratch,
     sh_gate: DeviceBuffer,
     sh_up: DeviceBuffer,
     sh_h: DeviceBuffer,
@@ -451,16 +502,18 @@ pub struct DeepseekV2 {
     pub gpu: Gpu,
     pub cfg: DeepseekV2Config,
     ps: ParamStore,
-    /// `[layer][expert] -> (gate.weight, up.weight, down.weight)` name
-    /// triples for every MoE layer (empty `Vec` for a dense layer), built
-    /// ONCE here instead of `format!`ed by the per-expert dispatch loops in
-    /// [`Self::decode_at`] (and, for the one-time cost, [`Self::
-    /// build_forward`]/[`Self::build_backward`]) -- `decode_at` in
-    /// particular re-records its whole tape every generated token, so
-    /// re-formatting the SAME `n_experts` name triples there each time was a
-    /// real per-decode-step host allocation with no behavioural purpose,
-    /// since a weight's name never changes after construction.
-    moe_expert_names: Vec<Vec<(String, String, String)>>,
+    /// `[layer] -> (gate, up, down)` expert-BANK names for every MoE layer
+    /// (`None` for a dense layer), built ONCE here instead of `format!`ed by
+    /// the dispatch paths -- [`Self::decode_rows`] re-records its whole tape
+    /// every round, so re-formatting the same names there each time was a
+    /// real per-round host allocation with no behavioural purpose, since a
+    /// weight's name never changes after construction.
+    ///
+    /// One triple per LAYER, not per expert: each name addresses the whole
+    /// `[n_experts, out, in]` bank the checkpoint stores (see
+    /// `gguf::import::Mapped::expert_bank`). An individual expert is a
+    /// `model::moe::bank_offset` into it, never its own tensor.
+    moe_bank_names: Vec<Option<(String, String, String)>>,
     opt: Optim,
     b: u32,
     t: u32,
@@ -761,24 +814,17 @@ impl DeepseekV2 {
             });
         }
 
-        // See the field's own doc: computed once here so the per-expert
-        // dispatch loops index into it instead of `format!`ing the same
-        // names every call.
-        let moe_expert_names: Vec<Vec<(String, String, String)>> = (0..cfg.n_layers() as usize)
+        // See the field's own doc: computed once here so the dispatch paths
+        // index into it instead of `format!`ing the same names every call.
+        let moe_bank_names: Vec<Option<(String, String, String)>> = (0..cfg.n_layers() as usize)
             .map(|l| {
-                if cfg.is_moe_layer(l as u32) {
-                    (0..cfg.n_experts() as usize)
-                        .map(|ei| {
-                            (
-                                format!("blocks.{l}.mlp.experts.{ei}.gate.weight"),
-                                format!("blocks.{l}.mlp.experts.{ei}.up.weight"),
-                                format!("blocks.{l}.mlp.experts.{ei}.down.weight"),
-                            )
-                        })
-                        .collect()
-                } else {
-                    Vec::new()
-                }
+                cfg.is_moe_layer(l as u32).then(|| {
+                    (
+                        format!("blocks.{l}.mlp.experts.gate.weight"),
+                        format!("blocks.{l}.mlp.experts.up.weight"),
+                        format!("blocks.{l}.mlp.experts.down.weight"),
+                    )
+                })
             })
             .collect();
 
@@ -791,7 +837,7 @@ impl DeepseekV2 {
             batched,
             count: Cell::new(1.0),
             ps,
-            moe_expert_names,
+            moe_bank_names,
             opt,
             tokens: gpu.storage(n),
             targets: gpu.storage(n),
@@ -1030,11 +1076,20 @@ impl DeepseekV2 {
                     // selected experts, under THIS config's norm/scale policy.
                     self.mm(&mut s, &lb.xn2, &p("mlp.router.weight"), router_logits, n, d, e);
                     s.push(moe::router_fwd_kind(&self.gpu, &moe_ids(), self.router_kind(), &shape, router_logits, None, gate, None));
-                    // Routed experts: `moe_linear_gated` skips a row this expert
-                    // did not win before the K-reduction, so the cost is
-                    // proportional to the rows actually routed here.
+                    // Routed experts, one dispatch triple per expert against
+                    // its slice of the layer's three weight BANKS
+                    // (`moe::bank_offset`): `moe_linear_gated` skips a row
+                    // this expert did not win before the K-reduction, so the
+                    // cost is proportional to the rows actually routed here.
+                    //
+                    // This tape is the TRAINING one, so it stays per-expert
+                    // even though `decode_rows` runs the same layer through
+                    // the single grouped dispatch: the backward needs every
+                    // expert's own `gate_pre`/`up`/`h`/`expert_out` in
+                    // `MoeActs`, and the grouped forward writes compacted
+                    // activations that no expert owns.
+                    let (gn, un, dn) = self.moe_bank_names[l].as_ref().expect("MoE layer has bank names");
                     for ei in 0..e as usize {
-                        let (gn, un, dn) = &self.moe_expert_names[l][ei];
                         s.extend(moe::expert_fwd_tiered(
                             &self.gpu,
                             &moe_ids(),
@@ -1048,6 +1103,7 @@ impl DeepseekV2 {
                             &acts.at(ei),
                             &self.moe_acc,
                             ei as u32,
+                            moe::bank_offset(&shape, ei as u32),
                             ei != 0,
                         ));
                     }
@@ -1176,20 +1232,24 @@ impl DeepseekV2 {
                     let mut router_weight_bwd: Vec<Step> = Vec::new();
                     self.mm_bwd(&mut router_weight_bwd, &self.d_router_logits, &lb.xn2, &p("mlp.router.weight"), &self.d_xn, n, d, e, 1);
 
-                    let expert_weights: Vec<(DeviceBuffer, DeviceBuffer, DeviceBuffer)> = (0..e as usize)
-                        .map(|ei| {
-                            let (gn, un, dn) = &self.moe_expert_names[l][ei];
-                            (self.w(gn).clone(), self.w(un).clone(), self.w(dn).clone())
+                    // Every expert reads the SAME three per-projection banks;
+                    // `w_off` is what separates them, and it addresses the
+                    // gradient banks identically (same layout), so one
+                    // `ExpertGrads` triple serves every expert too.
+                    let (gn, un, dn) = self.moe_bank_names[l].as_ref().expect("MoE layer has bank names");
+                    let expert_weights: Vec<ExpertWeights> = (0..e)
+                        .map(|ei| ExpertWeights {
+                            gate_w: self.w(gn).clone(),
+                            up_w: self.w(un).clone(),
+                            down_w: self.w(dn).clone(),
+                            w_off: moe::bank_offset(&shape, ei),
                         })
                         .collect();
-                    let expert_grads: Vec<ExpertGrads> = (0..e as usize)
-                        .map(|ei| {
-                            let (gn, un, dn) = &self.moe_expert_names[l][ei];
-                            ExpertGrads {
-                                gate_w: self.trainable(gn).then(|| self.g(gn)),
-                                up_w: self.trainable(un).then(|| self.g(un)),
-                                down_w: self.trainable(dn).then(|| self.g(dn)),
-                            }
+                    let expert_grads: Vec<ExpertGrads> = (0..e)
+                        .map(|_| ExpertGrads {
+                            gate_w: self.trainable(gn).then(|| self.g(gn)),
+                            up_w: self.trainable(un).then(|| self.g(un)),
+                            down_w: self.trainable(dn).then(|| self.g(dn)),
                         })
                         .collect();
                     s.extend(moe::moe_layer_bwd(
@@ -1487,7 +1547,7 @@ impl DeepseekV2 {
             dense_h: st(chunk * dense_ff),
             router_logits: st(chunk * e),
             gate: st(chunk * e),
-            moe_acts: MoeActs::new(g, &moe_shape_chunk),
+            grouped: GroupedExpertScratch::new(g, &moe_shape_chunk),
             sh_gate: st(chunk * shared_ff),
             sh_up: st(chunk * shared_ff),
             sh_h: st(chunk * shared_ff),
@@ -1595,10 +1655,12 @@ impl DeepseekV2 {
     /// norm + `lm_head` (`kernels::CONCAT_SPLIT`), so a round that is not the
     /// final one never materializes `[n, vocab]` logits.
     ///
-    /// `n = 1` (what [`Self::step`] calls this with) reproduces the old
-    /// `decode_at`'s dispatches exactly: `gqa_chunk_step` at `n = 1` is
-    /// `gqa_decode_step` plus the same `kv_cache_fill_at` a bulk prefill used
-    /// to need a separate call for.
+    /// `n = 1` (what [`Self::step`] calls this with) needs no separate code
+    /// path: `gqa_chunk_step` at `n = 1` is a plain decode step plus the same
+    /// `kv_cache_fill_at` a bulk prefill would need a separate call for, and
+    /// the routed experts go through `model::moe::expert_fwd_grouped` at both
+    /// widths - its work is proportional to `n * top_k` compacted rows, so one
+    /// row is the cheap end of the same pass, not a case worth forking.
     fn decode_rows(&self, tokens: &[u32], pos_start: u32) -> Vec<f32> {
         let c = &self.cfg;
         let d = c.d_model();
@@ -1612,6 +1674,7 @@ impl DeepseekV2 {
         let g = &self.gpu;
         let ids = kernel_ids();
         let moe_kernel_ids = moe_ids();
+        let grouped_ids = grouped_expert_ids();
         let shared_ids = shared_expert_ids();
         let chunk_ids = gqa_chunk_ids();
         let n = tokens.len() as u32;
@@ -1672,30 +1735,34 @@ impl DeepseekV2 {
             if c.is_moe_layer(l as u32) {
                 self.mm(&mut s, &dec.xn2, &p("mlp.router.weight"), &dec.router_logits, n, d, e);
                 s.push(moe::router_fwd_kind(g, &moe_kernel_ids, self.router_kind(), &shape_n, &dec.router_logits, None, &dec.gate, None));
-                // Every expert dispatches every round regardless of `n` - see
-                // `decode_at`'s (this function's predecessor) own comment on
-                // why the per-row gate-skip trade measured worse. That
-                // argument was made at `n = 1`; a wide chunk amortizes the
-                // SAME fixed 64-dispatch cost over many more rows, so it
-                // applies even more strongly here, not less.
-                for ei in 0..e as usize {
-                    let (gn, un, dn) = &self.moe_expert_names[l][ei];
-                    s.extend(moe::expert_fwd_tiered(
-                        g,
-                        &moe_kernel_ids,
-                        Some(MOE_LINEAR_GATED_GEMV),
-                        &shape_n,
-                        &dec.xn2,
-                        &dec.gate,
-                        self.w(gn),
-                        self.w(un),
-                        self.w(dn),
-                        &dec.moe_acts.at(ei),
-                        &dec.moe_acc,
-                        ei as u32,
-                        ei != 0,
-                    ));
-                }
+                // ONE grouped pass over every routed expert, at both round
+                // widths this function serves: a prefill round of hundreds of
+                // rows and a single decode row. The old shape dispatched
+                // `5 * n_experts` kernels per MoE layer whatever `n` was - 320
+                // per layer at this checkpoint's 64 experts, of which the
+                // router only ever selects 6 - and at `n = 1` each of those
+                // did almost no arithmetic, so the layer's cost was launch
+                // overhead rather than work.
+                //
+                // `expert_fwd_grouped` permutes the `n * top_k` routed
+                // (row, expert) pairs into per-expert contiguous ranges ON THE
+                // DEVICE and runs one grouped GEMM per projection over them,
+                // so the work is proportional to the rows actually routed at
+                // both widths. It writes `moe_acc` outright (it already sums
+                // each row's `top_k` contributions), so nothing pre-zeroes it.
+                let (gn, un, dn) = self.moe_bank_names[l].as_ref().expect("MoE layer has bank names");
+                s.extend(moe::expert_fwd_grouped(
+                    g,
+                    &grouped_ids,
+                    &shape_n,
+                    &dec.xn2,
+                    &dec.gate,
+                    self.w(gn),
+                    self.w(un),
+                    self.w(dn),
+                    &dec.grouped,
+                    &dec.moe_acc,
+                ));
                 s.extend(moe::shared_expert_fwd_tiered(
                     g,
                     &shared_ids,
@@ -1785,12 +1852,10 @@ impl DeepseekV2 {
     /// `MoeActs` a batched tape's backward needs.
     ///
     /// A `batched = true` instance (every `new_on` caller today) should NOT
-    /// use this for a real prompt at `chunk = 1`: each round still dispatches
-    /// every expert regardless of round width (see `decode_rows`'s own
-    /// comment), so a narrow chunk multiplies that fixed per-round dispatch
-    /// count instead of amortizing it - exactly the "measured worse" trade
-    /// `decode_at`'s original comment already recorded, at prefill scale
-    /// instead of one decode step. `generate_greedy_kv_cb` therefore keeps
+    /// use this for a real prompt at `chunk = 1`: every round pays a fixed
+    /// per-layer dispatch count (attention, norms, the grouped MoE pass's own
+    /// ~9 steps) whatever its width, so a narrow chunk multiplies that count
+    /// instead of amortizing it. `generate_greedy_kv_cb` therefore keeps
     /// using `logits_all` (one dispatch pass over the WHOLE prompt) for a
     /// `batched = true` build and only calls this for `batched = false`,
     /// where a caller is expected to size `chunk` sensibly (hundreds of

@@ -280,7 +280,7 @@ fn moe_sublayer(g: &Gpu, cfg: &MoeTextConfig, w: &ThinkerLayerWeights, xmid: &De
                 expert_out: &g.storage((n * d) as u64),
             };
             for (e, (gw, uw, dw)) in w.experts.iter().enumerate() {
-                steps.extend(expert_fwd(g, &mids, &shape, &xn2, &gate, gw, uw, dw, &scratch, &moe_out, e as u32, e != 0));
+                steps.extend(expert_fwd(g, &mids, &shape, &xn2, &gate, gw, uw, dw, &scratch, &moe_out, e as u32, 0, e != 0));
             }
         }
         Some(store) => {

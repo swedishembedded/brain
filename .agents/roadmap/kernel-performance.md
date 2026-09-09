@@ -303,6 +303,12 @@ numerics. Verified via `check_qwen35moe`/`check_qwen35moe_lora` gradcheck,
 `deepseek2`'s 8 finite-difference tests, and both crates' full suites +
 clippy, all green. Commit `ca4b6c00`.
 
+**Superseded for `deepseek2` by M5.10a below**: that decoder no longer has a
+`[layer][expert]` name table, because it no longer has one parameter per
+expert - each projection is ONE `[n_experts, out, in]` bank per layer, so
+the table is `[layer] -> (gate, up, down)` and an expert is an offset into
+it. `qwen35moe`'s table is unchanged.
+
 ### M1.1's embed finding - `gpt2`'s untiled `EMBED` dispatch, tiled
 
 The bug M1.1's per-family verdict table named and scoped out as "a one-line
@@ -2356,6 +2362,77 @@ milestone can be called anything more than "builds, dispatches, and is
 correct." **Commits**: one (new kernels + `crates/model::moe::expert_fwd_
 grouped` + `GroupedExpertScratch` + tests, this ledger entry and M5.4's
 correction addendum above).
+
+### M5.10a - the production migration M5.10 deferred, on DeepSeek-OCR, with the wall-clock number
+
+M5.10's deferred item (2) was "the real production call-site migration ...
+`expert_fwd_grouped` needs each projection's weights as ONE buffer with
+every expert's matrix concatenated back to back, but the loader keeps
+per-expert `DeviceBuffer`s separate ... a real weight-layout change to a
+production model's loader". Done for `crates/deepseek2` (DeepSeek-OCR's
+decoder), plus the native CPU port item (1)'s sibling gap.
+
+**The layout change turned out to be a layout NON-change.** llama.cpp
+stores each MoE projection's experts as one `[n_experts, out, in]` tensor
+(`blk.N.ffn_*_exps.weight`) - exactly what the grouped GEMM binds - and
+`crates/gguf`'s importer was UNPACKING it into `n_experts` separate
+parameters at import time, purely so a per-expert dispatch loop had
+something to bind. `Mapped::expert_bank` keeps it fused instead
+(`Mapped::expert_stack`, the fan-out, stays for callers that still want
+it). One expert inside a bank is now addressed by a `w_off` Params field on
+`moe_linear_gated{,_dx,_dw}.wgsl` - a Params field and not a `step_sliced`
+binding offset because a storage binding must be 256-byte aligned and a toy
+config's `moe_ff * d_model` matrix is not, the same reasoning
+`matmul_reg3_grouped.wgsl` already recorded for its own weight base.
+
+**`matmul_reg3_grouped` got its native CPU path** (`@cpu no` ->
+`native-only`), which the migration required: the DeepSeek-OCR decoder is
+served on `Gpu::new_cpu`, and the JIT soft-skips a 3-barrier kernel, so
+dispatching it there would have panicked. The port loops each expert's
+compacted row range through the same AVX2 `fast_ops::matmul_abt` the whole
+`matmul*` family uses - IN PARALLEL across experts, which is the part that
+actually paid: `matmul_abt` parallelises over OUTPUT ROWS, and a decode
+round gives each routed expert exactly one row, so a sequential walk runs
+`top_k` bandwidth-bound GEMVs on one core. Gated by
+`backend-cpu/tests/matmul_family_native_fastpath.rs::grouped_matmul_native_
+fastpath_matches_per_expert_reference`.
+
+**Measured, one real page through `deepseek2ocr::caps::Session` (the served
+path), 2x Tesla P40 + 48-core host, idle, interleaved A/B of two prebuilt
+binaries with their own fp32 expansions, 6 pages per run so warm-up is
+separable:**
+
+| | before | after |
+|---|---|---|
+| 6-page batch mean | 24.7 s/page | **19.0 s/page** |
+| first page (cold) | 42.5-45.0 s | **20.3-24.0 s** |
+| fully warm (pages 4-6) | 18.75 s | **17.75 s** |
+| model load | 12.7 s | **11.2 s** |
+| decoder CPU kernel time, cold page | 35.4 s | **14.3 s** |
+| ... of which the routed experts | 27.1 s (`moe_linear_gated`) | **6.1 s** |
+| routed-expert dispatches per page | 116,556 | **3,993** |
+
+**The whole-pass win is much smaller than the per-kernel one, and that is
+the honest finding.** Removing 97% of the routed-expert dispatches is worth
+~5% once the process is fully warm, because `moe_linear_gated`'s per-row
+early exit already made a non-selected expert's dispatch nearly free - the
+same conclusion this file's DeepSeek-OCR entry reached when row-compaction
+was tried and reverted. What the migration actually bought is (a) the
+parallel-across-experts GEMM, which is only expressible once every expert is
+in ONE dispatch, and (b) a far smaller and less fragmented working set:
+`Decode` traded a `MoeActs` (every expert's activations at the full round
+width, ~520 MB at 64 experts x a 512-row round) for a `GroupedExpertScratch`
+sized by `rows * top_k` (~65 MB), and the decoder's parameter store went from
+2234 buffers to 155. That is where the halved cold-page time comes from.
+
+**Gates**: `crates/deepseek2/tests/generate.rs::real_lm_greedy_decode_
+matches_llamacpp` (real Q8_0 weights, token-for-token vs llama.cpp, and it
+drives BOTH the recompute path - per-expert, through the bank - and the
+KV-cached path - grouped - and demands identical ids);
+`deepseek2ocr/tests/real_weight.rs::chunked_and_batched_composites_agree_at_
+real_scale`; a new default-backend twin of `chunked_prefill.rs`'s
+independent cross-check so the grouped pass is checked against the
+per-expert one on the GPU too; `make gradcheck` on both backends.
 
 ### M5.5 - Q4/W4A8: `matmul_q4_dyn_reg` is a clean win, `matmul_q4_gemv_reg` is a killed hypothesis
 

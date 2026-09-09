@@ -494,7 +494,7 @@ mod tests {
         };
         let acc_fp32 = g.storage((m * d) as u64);
         for ei in 0..e as usize {
-            let steps = model::moe::expert_fwd(&g, &fp32_ids, &shape, &x, &gate, &gate_w[ei], &up_w[ei], &down_w[ei], &scratch, &acc_fp32, ei as u32, ei != 0);
+            let steps = model::moe::expert_fwd(&g, &fp32_ids, &shape, &x, &gate, &gate_w[ei], &up_w[ei], &down_w[ei], &scratch, &acc_fp32, ei as u32, 0, ei != 0);
             g.submit(&[], &steps);
         }
 

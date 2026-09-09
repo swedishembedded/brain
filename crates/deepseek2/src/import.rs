@@ -8,8 +8,9 @@
 //! (including the two that are NOT plain KV reads - `head_dim` derived from
 //! `blk.0.attn_q.weight`'s own shape, and `rotary_dim` resolving the file's
 //! `rope.dimension_count = 0` to the full head_dim), classifying all ~400
-//! tensor names into brain's layout, fanning the stacked `*_exps` tensors out
-//! per expert, keeping the shared experts fused, and proving two-way coverage
+//! tensor names into brain's layout, keeping the stacked `*_exps` tensors in
+//! the file's own fused layout, keeping the shared experts fused too, and
+//! proving two-way coverage
 //! (nothing planned missing, nothing in the file unaccounted for).
 //!
 //! Because [`crate::config::DeepseekV2Config`] *wraps* that loader's own config

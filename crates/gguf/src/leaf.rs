@@ -61,9 +61,10 @@ pub enum Role {
     FfnGateShexp,
     FfnUpShexp,
     FfnDownShexp,
-    /// `[n_experts, moe_ff, hidden]` - the caller fans this out per-expert
-    /// with [`super::import::Mapped::expert_stack`]; this table only says
-    /// which stack it is.
+    /// `[n_experts, moe_ff, hidden]` - the caller either keeps it fused
+    /// ([`super::import::Mapped::expert_bank`]) or fans it out per-expert
+    /// ([`super::import::Mapped::expert_stack`]); this table only says which
+    /// stack it is.
     FfnGateExps,
     FfnUpExps,
     FfnDownExps,

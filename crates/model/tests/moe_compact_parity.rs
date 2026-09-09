@@ -200,7 +200,7 @@ fn compact_matches_naive_sparse() {
         let steps = expert_fwd(
             &s.g, &s.moe_ids, &s.shape, &s.x, &s.gate,
             &s.gate_w[ei as usize], &s.up_w[ei as usize], &s.down_w[ei as usize],
-            &sparse_scratch, &acc_sparse, ei, ei != 0,
+            &sparse_scratch, &acc_sparse, ei, 0, ei != 0,
         );
         s.g.submit(&[], &steps);
     }

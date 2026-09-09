@@ -33,6 +33,12 @@ LM (`deepseek2-ocr` architecture):
   1792-wide SwiGLU MLP with no shared-expert gate tensor** -- they are summed
   unweighted, so the fused width IS the sum, not two separate 896-wide MLPs to
   reassemble at import time.
+- The 64 ROUTED experts stay fused at import too: `blk.N.ffn_*_exps.weight` is
+  already `[64, out, in]`, every expert's matrix back to back, and brain keeps
+  it as ONE parameter (`blocks.N.mlp.experts.{gate,up,down}.weight`). Inference
+  binds that bank straight to `model::moe::expert_fwd_grouped`; the training
+  forward/backward address one expert inside it through `expert_fwd`'s
+  `w_off`.
 - `expert_group_count=1`, `expert_group_used_count=1` (no group-limited
   routing).
 - **No `scoring_func`/`topk_method`/`norm_topk_prob`/`routed_scaling_factor`
@@ -2577,3 +2583,52 @@ concatenating `TensorSource` adapter so the bank streams straight out of the
 checkpoint), which every MoE decoder in the workspace would use -
 `qwen35moe`'s 256 experts far more than this one's 64. That is a design
 change, not a tuning pass, and it is deliberately not attempted here.
+
+**Superseded by Phase 11**: the premise above was wrong. The checkpoint
+already stores each projection's experts fused - the importer was the one
+throwing that layout away - so the fix needed no new `ParamStore` capability
+at all, just importing what the file already provides.
+
+## Phase 11: the expert fan-out the importer never needed
+
+- [x] **The importer was unpacking a layout the forward wanted fused.**
+      `blk.N.ffn_{gate,up,down}_exps.weight` is already `[64, out, in]` -
+      every expert's matrix back to back, which is exactly the operand
+      `model::moe::expert_fwd_grouped` binds - and
+      `gguf::deepseek_ocr::classify` was splitting each one into 64 separate
+      parameters (`Mapped::expert_stack`) so that a per-expert dispatch loop
+      had something to bind. The decoder's parameter store was 2234 tensors
+      where the file has 155.
+
+      Now `Mapped::expert_bank` keeps the file's own layout, the training
+      forward/backward reach one expert inside a bank through a `w_off` field
+      on `moe_linear_gated{,_dx,_dw}.wgsl`, and inference - `decode_rows`,
+      which serves BOTH chunked prefill and single-row decode - runs the whole
+      routed half of a layer through `expert_fwd_grouped` in ~9 dispatches
+      instead of `5 x 64`. `matmul_reg3_grouped` gained the native CPU path
+      that made this possible on the CPU-served decoder, and that port runs
+      the expert blocks in PARALLEL, which the per-expert-dispatch shape could
+      not.
+
+      Full numbers, gates and the honest "why the whole-pass win is smaller
+      than the per-kernel one" analysis live in
+      `.agents/roadmap/kernel-performance.md`'s M5.10a. Headline, measured on
+      an idle 2x Tesla P40 + 48-core host through
+      `deepseek2ocr::caps::Session` (interleaved A/B, 6 pages per run):
+      **24.7 -> 19.0 s/page batch mean, 42.5-45.0 -> 20.3-24.0 s on the cold
+      first page, 12.7 -> 11.2 s model load**, with the decoder's routed-expert
+      CPU kernel time 27.1 -> 6.1 s and its dispatch count 116,556 -> 3,993 per
+      page.
+
+      **Still open**: `crates/qwen35moe` imports its 256 experts through the
+      same `Mapped::expert_stack` fan-out and would gain proportionally more,
+      but it is a bigger piece of work than a classifier change - its
+      `q8.rs::is_i8_linear` parses the expert index out of the leaf NAME and
+      allocates one `Lin8` per expert through a 2-D-only `upload_quantized`,
+      and `moe_sublayer_decode_sparse` addresses only the routed experts by
+      name after a host readback. Both need designing against a fused bank
+      before the import can change. The shared plumbing this phase added
+      (`Mapped::expert_bank`, `expert_fwd`/`expert_bwd`'s `w_off`,
+      `moe::ExpertWeights`, the native CPU grouped GEMM) is model-agnostic and
+      already sits in `crates/gguf`/`crates/model`/`crates/backend-cpu`, so
+      that work is a call-site migration, not new infrastructure.

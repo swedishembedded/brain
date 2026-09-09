@@ -80,10 +80,10 @@ fn construction_order() {
         brain_testutil::skip("real DeepSeek-OCR checkpoint not in the model store");
         return;
     };
-    let st_path = real_lm::expanded(&gguf, &st);
-    let reader = WeightReader::open(&st_path).unwrap_or_else(|e| panic!("open expansion: {e}"));
     let cfg = deepseek2::import::config_from_file(gguf.to_str().expect("utf-8 path"), 512).unwrap_or_else(|e| panic!("config_from_file: {e}"));
     assert_eq!(cfg, DeepseekV2Config::deepseek_ocr(512));
+    let st_path = real_lm::expanded(&gguf, &st, &cfg);
+    let reader = WeightReader::open(&st_path).unwrap_or_else(|e| panic!("open expansion: {e}"));
     let names: Vec<String> = cfg.param_list().into_iter().map(|(n, _)| n).collect();
     scan(&reader, &names, "construction order (ParamStore's real upload order)");
 }
@@ -95,7 +95,7 @@ fn file_order() {
         brain_testutil::skip("real DeepSeek-OCR checkpoint not in the model store");
         return;
     };
-    let st_path = real_lm::expanded(&gguf, &st);
+    let st_path = real_lm::expanded(&gguf, &st, &DeepseekV2Config::deepseek_ocr(512));
     let reader = WeightReader::open(&st_path).unwrap_or_else(|e| panic!("open expansion: {e}"));
     let names: Vec<String> = reader.names().map(str::to_string).collect();
     scan(&reader, &names, "file order (physical safetensors layout)");
