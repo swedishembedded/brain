@@ -218,6 +218,12 @@ read by anything that ships): `BRAIN_TEST_HOST_WEIGHTS`,
 (deliberately never set - it is what "this machine has not configured it"
 looks like).
 
+**Resolver-migration test fixture** (`crates/cli/src/resolve.rs`'s
+`multi_role_fixture`, a hand-built `Arch` exercised through a seam that never
+resolves from the live registry, so it can never go stale as real
+architectures migrate onto the model-store resolver): `BRAIN_RESOLVETESTARCH_DIT`,
+`BRAIN_RESOLVETESTARCH_VAE` - never read outside that one fixture.
+
 **Model-weights-required test gates** (each enables a parity/import/training test
 that needs a real checkpoint; unset means the test skips):
 `BRAIN_EVA_CLIP`, `BRAIN_CONTROLNET`, `BRAIN_PULID`, `BRAIN_INSTANTID`,
@@ -232,6 +238,9 @@ read by `crates/qwen35`'s `streaming_forward` real-weight test, which self-skips
 when unset, and by the `import_profile` dev-benchmark binary, which panics if
 neither this variable nor an explicit shard path is given), `BRAIN_QWEN3OMNIMOE_IMPORT_OUT`,
 `BRAIN_MOONDREAM3_CKPT`, `BRAIN_QWEN3VL_CKPT`, `BRAIN_FASTVLM_CKPT`,
+`BRAIN_FASTVLM_WEIGHTS` (a second, narrower fixture var:
+`crates/fastvlm/src/captioner.rs`'s own real-image test reads this one
+directly, independent of `BRAIN_FASTVLM_CKPT`),
 `BRAIN_FASTVLM_TEST_IMG`, `BRAIN_VL_PARITY_OUT`, `BRAIN_REF_RECT`,
 `BRAIN_WAN_VAE`, `BRAIN_WAN_T5`, `BRAIN_WAN_TOKENIZER`, `BRAIN_WAN_GGUF` (a
 released `city96/Wan2.1-*-gguf` file for `crates/wan`'s `gguf_import_real`

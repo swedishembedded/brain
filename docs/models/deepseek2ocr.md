@@ -148,6 +148,11 @@ Reference client: [`examples/vision/deepseek-ocr/`](../../examples/vision/deepse
 | `max_new` | tokens to generate, default 2048 (`deepseek2ocr::caps::DEFAULT_MAX_NEW`). Decode is KV-cached and stops early on EOS - see below |
 | `weights` | override the model-store resolver's own pick for one request |
 
+`BRAIN_DEEPSEEK_OCR_NGRAM_SIZE` (default 30) and `BRAIN_DEEPSEEK_OCR_WINDOW_SIZE`
+(default 90) tune the decode loop's n-gram anti-repetition filter: a
+generated n-gram already seen within the trailing `WINDOW_SIZE` tokens is
+suppressed. Set `NGRAM_SIZE=0` to disable the filter entirely.
+
 The reserved markers are ordinary text in the instruction and are tokenized
 atomically: `<|grounding|>` turns on grounding mode (the model then emits
 `<|ref|>…<|/ref|><|det|>…<|/det|>` spans), and `<|ref|>`, `<|det|>` and the
