@@ -11,6 +11,7 @@ examples/forecast/forecast_client.py	run	--model mock exercises the forecast wir
 examples/imagegen/cancel_generation.py	run	--model mock with BRAIN_MOCK_DELAY_MS so the cancel race is observable
 examples/imagegen/edit_image.py	skip	needs real FLUX.2 weights; the mock model has no edit action
 examples/imagegen/generate.py	run	--model mock streams real denoise ticks and returns a real image blob
+examples/imagegen/identity_yolo_pipeline.sh	skip	needs real FLUX.1/PuLID/YOLOv8-COCO weights and hours of GPU time; the mock model has no identity-conditioned generate or a trainable detector
 examples/imagegen/lora_finetune.py	skip	needs real FLUX.2 weights; the mock model has no lora_train action
 examples/imagegen/portrait_from_refs.sh	skip	needs real FLUX.2 weights and a folder of photographs; the mock model has no reference-conditioned generate
 examples/imaging/edit_pipeline.py	skip	needs sam2 + restore (+ esrgan for the tail) weights; the mock model serves no imgpipe stage
