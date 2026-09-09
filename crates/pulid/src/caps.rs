@@ -57,7 +57,7 @@ use capability::{Action, ActionResult, ActionSpec, Invocation, Manifest, Outcome
 use clip::config::EvaVisionConfig;
 use clip::model::EvaVision;
 use flux1::config::Flux1Config;
-use flux1::pipeline::{Flux1, GenerateOptions};
+use flux1::pipeline::{Flux1, GenerateOptions, TrueCfg};
 use gpu_core::Gpu;
 use serde_json::json;
 
@@ -72,8 +72,11 @@ pub const MODEL: &str = "brain/flux1-pulid";
 /// FLUX.1 variants PuLID has been validated against a reference for (`dev`
 /// only - `crate`'s own docs: "it is built on FLUX.1-dev, not Kontext").
 /// `kontext-dev`/`schnell` are architecturally identical enough to run, but
-/// nothing here or upstream checks them.
-const VARIANTS: [&str; 3] = ["dev", "kontext-dev", "schnell"];
+/// nothing here or upstream checks them. `krea-dev` IS an upstream-supported
+/// PuLID combination (unlike kontext-dev/schnell, which are not) - but this
+/// crate still has neither the checkpoint nor a reference dump for it, so it
+/// carries the identical unvalidated status, not a stronger claim.
+const VARIANTS: [&str; 4] = ["dev", "kontext-dev", "krea-dev", "schnell"];
 
 const DEFAULT_MAX_LEN: u32 = 512;
 
@@ -82,21 +85,33 @@ const DEFAULT_MAX_LEN: u32 = 512;
 /// this action defaults the OTHER way).
 const PRECISIONS: [&str; 2] = ["fp32", "int8"];
 
+/// Optional auxiliary identity photos beyond the required `face_image`
+/// primary - upstream PuLID v1.1's own "one primary + up to three auxiliary"
+/// shape (see `Bundle::id_tokens`'s doc for how they are fused, and its
+/// honest caveat about NOT being upstream's own fusion algorithm).
+const EXTRA_FACE_REFS: [&str; 3] = ["face_image1", "face_image2", "face_image3"];
+
 fn text2image_spec() -> ActionSpec {
-    ActionSpec::new("text2image", "Generate an image from a text prompt, conditioned on a face's identity (PuLID + FLUX.1).")
+    let mut spec = ActionSpec::new("text2image", "Generate an image from a text prompt, conditioned on a face's identity (PuLID + FLUX.1).")
         .param(ParamSpec::new("prompt", ParamType::Str, "text description of the desired image").required())
         .param(ParamSpec::new("width", ParamType::Int, "output width, px (multiple of 16)").default(json!(1024)).min(256.0).max(2048.0).step(16.0))
         .param(ParamSpec::new("height", ParamType::Int, "output height, px (multiple of 16)").default(json!(1024)).min(256.0).max(2048.0).step(16.0))
         .param(ParamSpec::new("steps", ParamType::Int, "denoising steps; 0 = variant default").default(json!(0)).min(0.0).max(150.0).step(1.0))
         .param(ParamSpec::new("start_step", ParamType::Int, "denoising step at which identity injection begins; 0 = every step. Upstream PuLID-FLUX guidance: smaller injects identity sooner (more fidelity, less freedom for the base structure) -- ~4 for photorealism, ~0-1 for stylization").default(json!(0)).min(0.0).max(150.0).step(1.0))
-        .param(ParamSpec::new("guidance", ParamType::Float, "guidance_in scalar -- dev/kontext-dev only, schnell ignores it").default(json!(3.5)).min(0.0).max(10.0).step(0.1))
+        .param(ParamSpec::new("guidance", ParamType::Float, "guidance_in scalar -- dev/kontext-dev/krea-dev only, schnell ignores it").default(json!(3.5)).min(0.0).max(10.0).step(0.1))
         .param(ParamSpec::new("id_weight", ParamType::Float, "identity conditioning strength").default(json!(1.0)).min(0.0).max(3.0).step(0.05))
         .param(ParamSpec::new("max_len", ParamType::Int, "T5-XXL context length").default(json!(DEFAULT_MAX_LEN)).min(32.0).max(512.0).step(1.0))
         .param(ParamSpec::new("variant", ParamType::Enum(VARIANTS.iter().map(|s| s.to_string()).collect()), "FLUX.1 variant -- only dev is validated against a PuLID reference").default(json!("dev")))
         .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (omit for 0)"))
         .param(ParamSpec::new("precision", ParamType::Enum(PRECISIONS.iter().map(|s| s.to_string()).collect()), "DiT numeric tier -- int8 is what fits a 24 GiB card, fp32 needs ~48 GiB").default(json!("int8")))
-        .input(capability::BlobSpec::new("face_image", capability::Media::Image, "a photo of the identity to condition on").required())
-        .output(capability::BlobSpec::new("image", capability::Media::Image, "the generated image"))
+        .param(ParamSpec::new("negative_prompt", ParamType::Str, "negative conditioning for true CFG; ignored unless true_cfg > 0"))
+        .param(ParamSpec::new("true_cfg", ParamType::Float, "true classifier-free guidance scale on top of the distilled guidance scalar; 0 = disabled (default, single forward/step). Runs a SECOND, un-injected DiT forward per step from cfg_start_step onward -- doubles cost while active. NOT parity-gated against upstream's own true-CFG branch (no reference dump exists in this workspace)").default(json!(0.0)).min(0.0).max(10.0).step(0.1))
+        .param(ParamSpec::new("cfg_start_step", ParamType::Int, "denoising step at which true CFG begins; steps before it use the identity-conditioned prediction alone").default(json!(0)).min(0.0).max(150.0).step(1.0))
+        .input(capability::BlobSpec::new("face_image", capability::Media::Image, "a photo of the identity to condition on").required());
+    for r in EXTRA_FACE_REFS {
+        spec = spec.input(capability::BlobSpec::new(r, capability::Media::Image, "additional photo of the SAME identity (optional; mean-pooled with the others, see Bundle::id_tokens's doc on how)"));
+    }
+    spec.output(capability::BlobSpec::new("image", capability::Media::Image, "the generated image"))
 }
 
 /// The full, static capability manifest - safe to build with no weights loaded.
@@ -110,6 +125,7 @@ pub fn manifest() -> Manifest {
 
 struct Req {
     prompt: String,
+    negative_prompt: Option<String>,
     variant: String,
     opts: GenerateOptions,
     max_len: usize,
@@ -118,8 +134,10 @@ struct Req {
 }
 
 fn req_from(inv: &Invocation) -> Req {
+    let true_cfg_scale = inv.get_f64("true_cfg").unwrap_or(0.0) as f32;
     Req {
         prompt: inv.get_str("prompt").unwrap_or_default(),
+        negative_prompt: inv.get_str("negative_prompt").filter(|s| !s.is_empty()),
         variant: inv.get_str("variant").unwrap_or_else(|| "dev".into()),
         opts: GenerateOptions {
             steps: {
@@ -131,6 +149,8 @@ fn req_from(inv: &Invocation) -> Req {
             height: inv.get_i64("height").unwrap_or(1024).max(16) as u32,
             width: inv.get_i64("width").unwrap_or(1024).max(16) as u32,
             start_step: inv.get_i64("start_step").unwrap_or(0).max(0) as usize,
+            true_cfg: (true_cfg_scale > 0.0)
+                .then_some(TrueCfg { scale: true_cfg_scale, start_step: inv.get_i64("cfg_start_step").unwrap_or(0).max(0) as usize }),
         },
         max_len: inv.get_i64("max_len").unwrap_or(DEFAULT_MAX_LEN as i64).max(1) as usize,
         id_weight: inv.get_f64("id_weight").unwrap_or(1.0) as f32,
@@ -214,8 +234,14 @@ impl Bundle {
         Ok(Bundle { flux1, arcface, eva, idformer, adapter, pulid_cfg })
     }
 
-    /// Face photo (HWC RGB `[0,1]`) -> the 32 projected ID tokens.
-    fn id_tokens(&self, chw: &[f32], w: u32, h: u32) -> Result<Vec<f32>, String> {
+    /// One face photo (HWC->CHW RGB `[0,1]`, as `id_tokens` always fed it) ->
+    /// its raw ArcFace embedding and its EVA-CLIP L2-normalized CLS embedding
+    /// + 5 tapped hidden states - the per-image half of identity extraction,
+    /// split out so [`Bundle::id_tokens`] can average it over 1-4 references
+    /// (upstream PuLID v1.1's own "one primary + up to three auxiliary"
+    /// shape) before the ONE `idcond::compose` + `IdFormer` call every
+    /// request already made.
+    fn face_embeds(&self, chw: &[f32], w: u32, h: u32) -> Result<(Vec<f32>, Vec<f32>, Vec<Vec<f32>>), String> {
         let (arc_raw, _face) = self.arcface.embed_raw_chw(chw, w, h, true, true)?;
 
         // The documented preprocessing gap: a plain resize to EVA-CLIP-L/336's
@@ -229,10 +255,42 @@ impl Bundle {
         self.eva.set_pixels(&resized);
         self.eva.forward();
         let eva_cls = self.eva.read_cls_embed_l2norm();
+        let taps: Vec<Vec<f32>> = EvaVisionConfig::PULID_TAPS.iter().map(|&l| self.eva.read_x((l + 1) as usize)).collect();
+        Ok((arc_raw, eva_cls, taps))
+    }
+
+    /// 1-4 face photos (HWC RGB `[0,1]` each, primary first) -> the 32
+    /// projected ID tokens. With one photo this is bit-identical to the
+    /// original single-image path (mean of one vector is the vector).
+    ///
+    /// **Fusion is mean-pooling each per-image representation (raw ArcFace
+    /// embedding, L2-normalized EVA-CLIP CLS embedding, each of the 5 tapped
+    /// hidden states) elementwise across references, before the single
+    /// `idcond::compose` + `IdFormer` call.** This is the standard
+    /// multi-reference approach several community PuLID implementations use,
+    /// NOT a transcription of upstream PuLID v1.1's own SDXL-branch fusion
+    /// code (which this workspace has neither the source for nor a reference
+    /// dump to gate against) - so treat this as a real, useful capability,
+    /// not a claim of upstream-equivalence for the >1-image case. The
+    /// single-image case IS the parity-gated path (see `crate`'s own module
+    /// docs), unaffected by this generalization.
+    fn id_tokens(&self, faces: &[(Vec<f32>, u32, u32)]) -> Result<Vec<f32>, String> {
+        assert!(!faces.is_empty(), "pulid: id_tokens needs at least one face image");
+        let per_image: Vec<(Vec<f32>, Vec<f32>, Vec<Vec<f32>>)> =
+            faces.iter().map(|(chw, w, h)| self.face_embeds(chw, *w, *h)).collect::<Result<_, _>>()?;
+
+        let n = per_image.len() as f32;
+        let mean = |vs: Vec<&Vec<f32>>| -> Vec<f32> {
+            let len = vs[0].len();
+            (0..len).map(|i| vs.iter().map(|v| v[i]).sum::<f32>() / n).collect()
+        };
+        let arc_raw = mean(per_image.iter().map(|(a, _, _)| a).collect());
+        let eva_cls = mean(per_image.iter().map(|(_, e, _)| e).collect());
+        let n_taps = per_image[0].2.len();
+        let taps: Vec<Vec<f32>> =
+            (0..n_taps).map(|t| mean(per_image.iter().map(|(_, _, taps)| &taps[t]).collect())).collect();
 
         let cond = crate::idcond::compose(&self.pulid_cfg, &arc_raw, &eva_cls)?;
-
-        let taps: Vec<Vec<f32>> = EvaVisionConfig::PULID_TAPS.iter().map(|&l| self.eva.read_x((l + 1) as usize)).collect();
         self.idformer.set_inputs(&cond, &taps);
         self.idformer.forward();
         Ok(self.idformer.read_id_embedding())
@@ -241,7 +299,7 @@ impl Bundle {
     fn generate(&self, req: &Req, id: &[f32]) -> Result<Vec<f32>, String> {
         self.adapter.set_id(id);
         self.adapter.set_id_weight(req.id_weight);
-        self.flux1.generate_injected(&req.prompt, &req.opts, req.max_len, Some(&self.adapter))
+        self.flux1.generate_injected(&req.prompt, req.negative_prompt.as_deref(), &req.opts, req.max_len, Some(&self.adapter))
     }
 }
 
@@ -276,11 +334,17 @@ impl Session {
     fn text2image(&self, inv: &Invocation) -> ActionResult {
         let req = req_from(inv);
         let (h, w) = (req.opts.height, req.opts.width);
-        let (hwc, fw, fh, c) = capability::blob::decode_hwc(inv, "face_image")?;
-        if c != 3 {
-            return Err(format!("pulid: face_image must be RGB (3 channels), got {c}"));
+        let mut faces = Vec::new();
+        for name in std::iter::once("face_image").chain(EXTRA_FACE_REFS) {
+            if name != "face_image" && inv.get_blob(name).is_none() {
+                continue;
+            }
+            let (hwc, fw, fh, c) = capability::blob::decode_hwc(inv, name)?;
+            if c != 3 {
+                return Err(format!("pulid: {name} must be RGB (3 channels), got {c}"));
+            }
+            faces.push((imaging::pixels::hwc_to_chw(&hwc, 3, fh as usize, fw as usize), fw, fh));
         }
-        let chw = imaging::pixels::hwc_to_chw(&hwc, 3, fh as usize, fw as usize);
 
         let key = (req.variant.clone(), h, w, req.precision.name());
         let mut guard = self.built.lock().map_err(|_| "pulid: pipeline lock poisoned")?;
@@ -297,7 +361,7 @@ impl Session {
                 req.precision,
             )?),
         };
-        let id = b.id_tokens(&chw, fw, fh)?;
+        let id = b.id_tokens(&faces)?;
         let hwc_out = b.generate(&req, &id)?;
         Ok(Outcome::new().blob("image", capability::blob::image_blob(&hwc_out, w, h, 3)))
     }
