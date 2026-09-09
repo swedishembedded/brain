@@ -15,18 +15,30 @@ The image → `id_cond` path exists (`idcond::IdCond::from_image` /
 
 ## Not yet done
 
-Ordered by expected identity-quality impact per fix, not by ease - reference-
-grade preprocessing is upstream of the ENTIRE EVA-CLIP half of the identity
-representation (five tapped hidden states plus the CLS embedding), so it is
-listed first even though it is also the largest single item here.
-
-- [ ] Reference-grade face preprocessing. The served path resizes the face
-      crop straight to EVA-CLIP-L/336 instead of reproducing the reference's
-      RetinaFace + BiSeNet alignment/parsing (`caps.rs`'s module docs). This
-      is the one documented numeric divergence from upstream, and the
-      highest-leverage open item: BiSeNet face parsing is effectively a new
-      model port (weights, import, a parity ladder of its own) under this
-      repo's own porting discipline, not a small preprocessing tweak.
+- [x] Reference-grade face preprocessing - **`crates/bisenet`**, a new crate:
+      the real official `parsing_bisenet` weights (ResNet18 context path +
+      2 `AttentionRefinementModule`s + `FeatureFusionModule`, 19-class
+      output), imported via a re-serialization of facexlib's release
+      (`bisenet::import`'s module docs explain why - the released `.pth` is
+      torch's pre-1.6 legacy pickle format), plus the SAME FFHQ-512 5-point
+      alignment template and `grid_sample` warp `arcface::align` uses at its
+      own 112px template (`bisenet::align`), plus the background-whiten/
+      face-grayscale mask (`bisenet::mask`). `pulid::caps::Bundle::
+      face_embeds` now runs the full chain - SCRFD's own landmarks (already
+      computed for ArcFace's alignment) realigned to 512px, parsed, masked,
+      THEN bicubic-resized to EVA-CLIP-L/336 - replacing the old plain
+      resize. **Verified against real `facexlib` output on a real photo**
+      (`crates/bisenet/tests/parity.rs`): the BiSeNet forward itself is
+      cosine 1.0000000000 / 100.0000% per-pixel class agreement; the full
+      align+mask chain (which also carries the warp-interpolation/padding
+      divergence `arcface::align`'s own doc already documents at its
+      template) is cosine 0.9999958920 (alignment) and 0.9997812905 (the
+      final mask, where a hard argmax boundary pixel flip from that small
+      alignment difference shows up as a large per-pixel delta despite the
+      images being visually identical - not a bug). Needs `BRAIN_BISENET_DIR`
+      (a directory holding `parsing_bisenet.safetensors` -
+      `tools/goldens/pulid_face_parsing_dump_reference.py` produces one from
+      a real `facexlib` install, converting the legacy-format release once).
 - [x] `start_step` - `Flux1::generate_injected` now takes `GenerateOptions
       .start_step` (steps before it forward WITHOUT injection, identical to
       `inject: None`); `pulid::caps`'s `text2image` exposes it (default 0 =
@@ -37,23 +49,34 @@ listed first even though it is also the largest single item here.
       ArcFace-cosine method is the tool, no real run has swept it yet.
 - [ ] Full-depth conditioning run across all injection sites - only a
       reduced-depth run has been exercised; an int8 full-depth run is
-      possible in principle but has not been done
-- [ ] Multi-image identity conditioning - only a single reference embedding
-      per identity is supported (upstream's own PuLID v1.1 takes a primary
-      image plus up to three auxiliary ones)
-- [ ] True CFG - upstream PuLID-FLUX optionally runs a second, unconditioned
-      FLUX forward (negative prompt, negative T5/CLIP conditioning, an
-      unconditioned ID embedding, `timestep_to_start_cfg`) and combines
-      `negative + true_cfg * (positive - negative)`, on top of the cheaper
-      distilled guidance scalar this crate already has. `flux1::pipeline`
-      has no CFG branch of any kind to build this on today
-      (`pipeline.rs`'s own module docs). Upstream's own docs say the
-      distilled guidance alone is usually enough, which is why this sits
-      below full-depth/multi-image rather than above them.
-- [ ] `FLUX.1-Krea-dev` as a validated PuLID variant - upstream added this
-      combination; `pulid::caps::VARIANTS` lists `kontext-dev`/`schnell`
-      (architectural extrapolations, explicitly NOT upstream-supported
-      PuLID combinations) but not `krea-dev`.
+      possible in principle but has not been done. **Unblocked**: the
+      FLUX.1-dev checkpoint this needs is being fetched into
+      `BRAIN_FLUX1_DIR` for the first time in this workspace as of this
+      entry - run it once that lands.
+- [x] Multi-image identity conditioning - `pulid::caps::text2image` accepts
+      `face_image` (primary, required) plus up to three optional
+      `face_image1/2/3` auxiliary photos, mean-pooled per-representation
+      (raw ArcFace embedding, EVA-CLIP CLS, each of the 5 taps) before the
+      one `idcond::compose`/`IdFormer` call. Explicitly NOT a transcription
+      of upstream PuLID v1.1's own fusion algorithm (no source/reference for
+      that in this workspace) - a real, useful capability, not a parity
+      claim for the >1-image case. Single-image case is unaffected/still
+      parity-gated.
+- [x] True CFG - `flux1::pipeline::GenerateOptions.true_cfg` runs the second,
+      un-injected forward on a negative prompt's own conditioning and
+      combines `neg + scale*(pos-neg)`, gated by `cfg_start_step`; both
+      `flux1::caps` and `pulid::caps` expose `negative_prompt`/`true_cfg`/
+      `cfg_start_step` action params (0 = off, the default). No reference
+      dump for true CFG specifically exists in this workspace, so this is
+      NOT parity-gated against upstream's own true-CFG branch - a real,
+      structurally-correct implementation of the documented formula, not a
+      verified-equivalent one.
+- [x] `FLUX.1-Krea-dev` variant wired (`Flux1Config::krea_dev`, byte-identical
+      to `dev` per BFL's own release) into both crates' variant enums.
+      **Still NOT a validation claim** - neither crate has the Krea-dev
+      checkpoint or a reference dump; this only makes the variant name
+      accepted and architecturally plausible, same honest status
+      `kontext-dev`/`schnell` already carried before this.
 - [ ] Backward pass / gradient check for the adapter (`check_pulid`)
 - [ ] Batch > 1 - serial `run_batch`, same reason as `flux1`'s (one
       multi-step sample per request)

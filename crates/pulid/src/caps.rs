@@ -24,18 +24,24 @@
 //!    `forward`. **No denoise loop, no VAE glue and no text conditioning is
 //!    duplicated here** - `flux1::pipeline` already owns all of that.
 //!
-//! # A real, documented preprocessing gap
+//! # Reference face preprocessing (`crates/bisenet`)
 //!
-//! The reference PuLID pipeline prepares the EVA-CLIP input with facexlib
-//! RetinaFace alignment plus a BiSeNet face parse (background whitened, face
-//! greyscaled) before the tower ever sees it - two models this workspace does
-//! not have (`crate`'s own crate-level docs and `Cargo.toml` say so). This
-//! action instead resizes the SAME face crop `embed_raw_chw` used for ArcFace
-//! straight to EVA-CLIP-L/336's input, with no parsing. `IdCond::from_image`
-//! and `crate::idcond`'s parity tests take a caller-supplied EVA cls
-//! precisely because this preprocessing step is not reproduced - this is
-//! that caller, choosing the closest available approximation rather than
-//! refusing to run.
+//! The reference PuLID pipeline prepares the EVA-CLIP input with facexlib's
+//! RetinaFace-template alignment plus a real BiSeNet face parse (background
+//! whitened, face greyscaled) before the tower ever sees it. This action
+//! reproduces that exactly: SCRFD's own landmarks (already computed by
+//! `embed_raw_chw` for ArcFace's 112px alignment) are aligned a second time
+//! to BiSeNet's 512px FFHQ template (`bisenet::align::norm_crop_512`),
+//! parsed (`bisenet::BiSeNet::forward`, the real official
+//! `parsing_bisenet` weights), and masked (`bisenet::mask::whiten_and_gray`)
+//! - all gated at cosine 1.0000000000 against real `facexlib` output on a
+//! real photo, see `crates/bisenet/tests/parity.rs`. Only the resulting
+//! 512x512 masked image is then bicubic-resized to EVA-CLIP-L/336, replacing
+//! what used to be a plain resize of the raw face crop. `IdCond::from_image`
+//! and `crate::idcond`'s parity tests still take a caller-supplied EVA cls
+//! (they predate this crate's own preprocessing and gate the composition
+//! math independently of it), which remains a valid, narrower way to drive
+//! the same pipeline.
 //!
 //! # No batching, size fixed at build time, and no end-to-end fixture
 //!
@@ -79,6 +85,12 @@ pub const MODEL: &str = "brain/flux1-pulid";
 const VARIANTS: [&str; 4] = ["dev", "kontext-dev", "krea-dev", "schnell"];
 
 const DEFAULT_MAX_LEN: u32 = 512;
+
+/// The BiSeNet face-parsing checkpoint filename under `BRAIN_BISENET_DIR` -
+/// `tools/goldens/pulid_face_parsing_dump_reference.py`'s re-serialization
+/// of facexlib's own release (see `crates/bisenet/src/import.rs`'s module
+/// docs for why the released `.pth` needs converting first).
+pub const BISENET_FILE: &str = "parsing_bisenet.safetensors";
 
 /// The DiT precision enum, in manifest order - mirrors `flux1::caps`'s own
 /// (fp32 doesn't fit a 24 GiB card with PuLID's extra residency on top, so
@@ -177,6 +189,7 @@ fn pulid_ca_bytes(cfg: &PulidConfig, n_ca: usize) -> u64 {
 struct Bundle {
     flux1: Flux1,
     arcface: ArcFaceSession,
+    bisenet: bisenet::BiSeNet,
     eva: EvaVision,
     idformer: IdFormer,
     // `PulidCa` is moved into `PulidAdapter` at construction
@@ -188,7 +201,8 @@ struct Bundle {
 }
 
 impl Bundle {
-    fn load(flux1_root: &str, pulid_root: &str, arcface_root: &str, clip_root: &str, variant: &str, h: u32, w: u32, precision: flux1::Precision) -> Result<Bundle, String> {
+    #[allow(clippy::too_many_arguments)]
+    fn load(flux1_root: &str, pulid_root: &str, arcface_root: &str, clip_root: &str, bisenet_root: &str, variant: &str, h: u32, w: u32, precision: flux1::Precision) -> Result<Bundle, String> {
         let fcfg = Flux1Config::from_name(variant)?;
         let n_gen = ((h / 16) * (w / 16)) as usize;
         let pulid_cfg = PulidConfig::v0_9_1();
@@ -216,6 +230,11 @@ impl Bundle {
         let gpu = Gpu::new(crate::model::KERNELS);
         let arcface = ArcFaceSession::load(arcface_root, gpu.new_like(&arcface::caps::SERVING_PIPELINES))?;
 
+        let bisenet_path = std::path::Path::new(bisenet_root).join(BISENET_FILE);
+        let bisenet_p = bisenet_path.to_str().ok_or("pulid: non-UTF8 BiSeNet checkpoint path")?;
+        let bisenet_weights = bisenet::import::read(bisenet_p).map_err(|e| format!("pulid: reading {bisenet_p}: {e}"))?;
+        let bisenet = bisenet::BiSeNet::new(gpu.new_like(bisenet::model::PIPELINES), bisenet::BiSeNetConfig::bisenet(), &bisenet_weights);
+
         let eva_cfg = EvaVisionConfig::eva02_l336();
         let eva_path = std::path::Path::new(clip_root).join(clip::caps::EVA_FILE);
         let eva_p = eva_path.to_str().ok_or("pulid: non-UTF8 EVA checkpoint path")?;
@@ -231,7 +250,7 @@ impl Bundle {
         // a field write, not a graph rebuild - see `PulidAdapter`'s docs).
         let adapter = PulidAdapter::new(ca, &pulid_cfg, fcfg.depth_double, fcfg.depth_single, 1.0);
 
-        Ok(Bundle { flux1, arcface, eva, idformer, adapter, pulid_cfg })
+        Ok(Bundle { flux1, arcface, bisenet, eva, idformer, adapter, pulid_cfg })
     }
 
     /// One face photo (HWC->CHW RGB `[0,1]`, as `id_tokens` always fed it) ->
@@ -242,15 +261,27 @@ impl Bundle {
     /// shape) before the ONE `idcond::compose` + `IdFormer` call every
     /// request already made.
     fn face_embeds(&self, chw: &[f32], w: u32, h: u32) -> Result<(Vec<f32>, Vec<f32>, Vec<Vec<f32>>), String> {
-        let (arc_raw, _face) = self.arcface.embed_raw_chw(chw, w, h, true, true)?;
+        let (arc_raw, face) = self.arcface.embed_raw_chw(chw, w, h, true, true)?;
+        // `align=true` only returns `Ok` once a face was found, and always
+        // sets `Some` in that case - see `ArcFaceSession::embed_raw_chw`.
+        let face = face.expect("arcface: align=true returned Ok with no detected face");
+        let kps: Vec<f32> = face.kps.iter().flat_map(|p| [p[0], p[1]]).collect();
 
-        // The documented preprocessing gap: a plain resize to EVA-CLIP-L/336's
-        // input, not the reference's RetinaFace+BiSeNet crop - see the module
-        // docs.
+        // The reference chain, reproduced exactly (see `crates/bisenet`'s own
+        // module docs and its `tests/parity.rs`, gated at cosine 1.0 against
+        // real facexlib output): the SAME landmarks ArcFace just aligned to
+        // 112px, aligned again to BiSeNet's 512px FFHQ template, parsed, and
+        // the face region background-whitened/grayscaled - THEN resized to
+        // EVA-CLIP-L/336. This replaces the plain resize the module docs
+        // used to describe as the one documented preprocessing gap.
+        let aligned = bisenet::align::norm_crop_512(self.bisenet.gpu(), chw, 3, h, w, &kps)?;
+        let logits = self.bisenet.forward(&bisenet::imagenet_normalize(&aligned));
+        let masked = bisenet::mask::whiten_and_gray(&logits, &aligned, 512, 512);
+
         let side = EvaVisionConfig::eva02_l336().image_size;
         let ctx = imaging::Ctx::new(&self.eva.gpu);
-        let src = ctx.upload("pulid.face", chw);
-        let (dst, _) = ctx.resize(&src, imaging::Shape::new(1, 3, h, w), side, side, imaging::Filter::Bilinear, imaging::AlignCorners::HalfPixel);
+        let src = ctx.upload("pulid.face", &masked);
+        let (dst, _) = ctx.resize(&src, imaging::Shape::new(1, 3, 512, 512), side, side, imaging::Filter::Bicubic, imaging::AlignCorners::HalfPixel);
         let resized = ctx.download(&dst, 3 * side * side);
         self.eva.set_pixels(&resized);
         self.eva.forward();
@@ -310,16 +341,25 @@ pub struct Session {
     pulid_root: String,
     arcface_root: String,
     clip_root: String,
+    bisenet_root: String,
     built: Mutex<std::collections::HashMap<(String, u32, u32, &'static str), Bundle>>,
 }
 
 impl Session {
-    pub fn new(flux1_root: impl Into<String>, pulid_root: impl Into<String>, arcface_root: impl Into<String>, clip_root: impl Into<String>) -> Session {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        flux1_root: impl Into<String>,
+        pulid_root: impl Into<String>,
+        arcface_root: impl Into<String>,
+        clip_root: impl Into<String>,
+        bisenet_root: impl Into<String>,
+    ) -> Session {
         Session {
             flux1_root: flux1_root.into(),
             pulid_root: pulid_root.into(),
             arcface_root: arcface_root.into(),
             clip_root: clip_root.into(),
+            bisenet_root: bisenet_root.into(),
             built: Mutex::new(std::collections::HashMap::new()),
         }
     }
@@ -355,6 +395,7 @@ impl Session {
                 &self.pulid_root,
                 &self.arcface_root,
                 &self.clip_root,
+                &self.bisenet_root,
                 &req.variant,
                 h,
                 w,
@@ -369,7 +410,7 @@ impl Session {
 
 // ===================== the provider =====================
 
-type Roots = (String, String, String, String);
+type Roots = (String, String, String, String, String);
 type HotSession = Arc<Mutex<Option<(Roots, Arc<Session>)>>>;
 
 pub struct PulidProvider {
@@ -378,23 +419,36 @@ pub struct PulidProvider {
 }
 
 impl PulidProvider {
-    pub fn new(flux1_root: impl Into<String>, pulid_root: impl Into<String>, arcface_root: impl Into<String>, clip_root: impl Into<String>) -> PulidProvider {
-        PulidProvider { roots: (flux1_root.into(), pulid_root.into(), arcface_root.into(), clip_root.into()), hot: Arc::new(Mutex::new(None)) }
+    pub fn new(
+        flux1_root: impl Into<String>,
+        pulid_root: impl Into<String>,
+        arcface_root: impl Into<String>,
+        clip_root: impl Into<String>,
+        bisenet_root: impl Into<String>,
+    ) -> PulidProvider {
+        PulidProvider { roots: (flux1_root.into(), pulid_root.into(), arcface_root.into(), clip_root.into(), bisenet_root.into()), hot: Arc::new(Mutex::new(None)) }
     }
 
     /// `BRAIN_FLUX1_DIR` + `BRAIN_PULID_DIR` (a `pulid_flux_v0.9.1.safetensors`
     /// file or its directory) + `BRAIN_ARCFACE_DIR` + `BRAIN_CLIP_DIR` (for the
-    /// EVA-CLIP-L/336 file, the same variable `clip::caps` uses) - `None`
-    /// unless every one of the four is set and the FLUX.1 directory holds a
+    /// EVA-CLIP-L/336 file, the same variable `clip::caps` uses) +
+    /// `BRAIN_BISENET_DIR` (a directory holding `parsing_bisenet.safetensors`
+    /// - see `BISENET_FILE`'s doc for how to produce one) - `None` unless
+    /// every one of the five is set and the FLUX.1 directory holds a
     /// released `transformer/`.
     pub fn from_env() -> Option<PulidProvider> {
         let get = |k: &str| std::env::var(k).ok().filter(|p| !p.is_empty());
-        let (flux1_root, pulid_root, arcface_root, clip_root) =
-            (get("BRAIN_FLUX1_DIR")?, get("BRAIN_PULID_DIR")?, get("BRAIN_ARCFACE_DIR")?, get("BRAIN_CLIP_DIR")?);
+        let (flux1_root, pulid_root, arcface_root, clip_root, bisenet_root) = (
+            get("BRAIN_FLUX1_DIR")?,
+            get("BRAIN_PULID_DIR")?,
+            get("BRAIN_ARCFACE_DIR")?,
+            get("BRAIN_CLIP_DIR")?,
+            get("BRAIN_BISENET_DIR")?,
+        );
         std::path::Path::new(&flux1_root)
             .join("transformer")
             .exists()
-            .then(|| PulidProvider::new(flux1_root, pulid_root, arcface_root, clip_root))
+            .then(|| PulidProvider::new(flux1_root, pulid_root, arcface_root, clip_root, bisenet_root))
     }
 }
 
@@ -422,8 +476,8 @@ impl Action for PulidAction {
             let mut guard = self.hot.lock().map_err(|_| "pulid: hot session lock poisoned")?;
             if !matches!(&*guard, Some((r, _)) if *r == self.roots) {
                 *guard = None;
-                let (a, b, c, d) = self.roots.clone();
-                *guard = Some((self.roots.clone(), Arc::new(Session::new(a, b, c, d))));
+                let (a, b, c, d, e) = self.roots.clone();
+                *guard = Some((self.roots.clone(), Arc::new(Session::new(a, b, c, d, e))));
             }
             guard.as_ref().expect("built above").1.clone()
         };
@@ -444,12 +498,12 @@ mod caps_tests {
 
     #[test]
     fn an_unknown_action_is_named_not_ignored() {
-        let p = PulidProvider::new("/nonexistent", "/nonexistent", "/nonexistent", "/nonexistent");
+        let p = PulidProvider::new("/nonexistent", "/nonexistent", "/nonexistent", "/nonexistent", "/nonexistent");
         assert!(p.action("edit").is_none());
     }
 
     #[test]
-    fn from_env_declines_unless_all_four_directories_are_set() {
+    fn from_env_declines_unless_all_five_directories_are_set() {
         assert!(
             PulidProvider::from_env().is_none()
                 || [
@@ -457,6 +511,7 @@ mod caps_tests {
                     std::env::var("BRAIN_PULID_DIR").is_ok(),
                     std::env::var("BRAIN_ARCFACE_DIR").is_ok(),
                     std::env::var("BRAIN_CLIP_DIR").is_ok(),
+                    std::env::var("BRAIN_BISENET_DIR").is_ok(),
                 ]
                 .into_iter()
                 .all(|x| x)

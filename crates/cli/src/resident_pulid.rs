@@ -3,9 +3,9 @@
 
 //! PuLID-conditioned FLUX.1 behind the residency scheduler.
 //!
-//! `activate` builds a [`pulid::caps::Session`] rooted at the four checkpoint
+//! `activate` builds a [`pulid::caps::Session`] rooted at the five checkpoint
 //! directories `pulid::caps::PulidProvider::from_env` requires; each
-//! (variant, size) bundle - FLUX.1, ArcFace, EVA-CLIP, IDFormer, the
+//! (variant, size) bundle - FLUX.1, ArcFace, BiSeNet, EVA-CLIP, IDFormer, the
 //! `PulidAdapter` - is built lazily inside it. All of the work comes from
 //! `pulid::caps`, so this file holds no second copy of param decoding, the
 //! ID-conditioning composition, or the generation call.
@@ -19,16 +19,19 @@ use capability::{ActionResult, Invocation, Manifest, Progress};
 use pulid::caps::Session;
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 
-/// PuLID-conditioned FLUX.1 behind the scheduler. Four directories, all
+/// PuLID-conditioned FLUX.1 behind the scheduler. Five directories, all
 /// required: `BRAIN_FLUX1_DIR` (the backbone, same as `resident_flux1.rs`),
 /// `BRAIN_PULID_DIR` (`pulid_flux_v0.9.1.safetensors` or its directory),
 /// `BRAIN_ARCFACE_DIR` (same as `resident_arcface.rs`), `BRAIN_CLIP_DIR` (for
-/// the EVA-CLIP-L/336 file, same as `resident_clip.rs`).
+/// the EVA-CLIP-L/336 file, same as `resident_clip.rs`), `BRAIN_BISENET_DIR`
+/// (a directory holding `parsing_bisenet.safetensors` - see
+/// `pulid::caps::BISENET_FILE`'s doc for how to produce one).
 pub struct PulidResident {
     flux1_root: String,
     pulid_root: String,
     arcface_root: String,
     clip_root: String,
+    bisenet_root: String,
 }
 
 impl PulidResident {
@@ -37,9 +40,14 @@ impl PulidResident {
     /// fail is worse than not serving it.
     pub fn from_env() -> Option<PulidResident> {
         let get = |k: &str| std::env::var(k).ok().filter(|p| !p.is_empty());
-        let (flux1_root, pulid_root, arcface_root, clip_root) =
-            (get("BRAIN_FLUX1_DIR")?, get("BRAIN_PULID_DIR")?, get("BRAIN_ARCFACE_DIR")?, get("BRAIN_CLIP_DIR")?);
-        Self::new(flux1_root, pulid_root, arcface_root, clip_root)
+        let (flux1_root, pulid_root, arcface_root, clip_root, bisenet_root) = (
+            get("BRAIN_FLUX1_DIR")?,
+            get("BRAIN_PULID_DIR")?,
+            get("BRAIN_ARCFACE_DIR")?,
+            get("BRAIN_CLIP_DIR")?,
+            get("BRAIN_BISENET_DIR")?,
+        );
+        Self::new(flux1_root, pulid_root, arcface_root, clip_root, bisenet_root)
     }
 
     /// Direct constructor (no env round-trip) - see
@@ -49,13 +57,20 @@ impl PulidResident {
         pulid_root: impl Into<String>,
         arcface_root: impl Into<String>,
         clip_root: impl Into<String>,
+        bisenet_root: impl Into<String>,
     ) -> Option<PulidResident> {
         let flux1_root = flux1_root.into();
         if !std::path::Path::new(&flux1_root).join("transformer").exists() {
             eprintln!("brain: flux1-pulid not served ({flux1_root} holds no transformer/)");
             return None;
         }
-        Some(PulidResident { flux1_root, pulid_root: pulid_root.into(), arcface_root: arcface_root.into(), clip_root: clip_root.into() })
+        Some(PulidResident {
+            flux1_root,
+            pulid_root: pulid_root.into(),
+            arcface_root: arcface_root.into(),
+            clip_root: clip_root.into(),
+            bisenet_root: bisenet_root.into(),
+        })
     }
 }
 
@@ -80,7 +95,13 @@ impl ResidentModel for PulidResident {
         // `Gpu` lazily (the same shape `resident_flux1.rs`/`resident_sdxl.rs`
         // document) - every `run` call, not just `activate`, is device-scoped.
         Ok(Box::new(PulidInstance {
-            session: Session::new(self.flux1_root.clone(), self.pulid_root.clone(), self.arcface_root.clone(), self.clip_root.clone()),
+            session: Session::new(
+                self.flux1_root.clone(),
+                self.pulid_root.clone(),
+                self.arcface_root.clone(),
+                self.clip_root.clone(),
+                self.bisenet_root.clone(),
+            ),
             device,
         }))
     }

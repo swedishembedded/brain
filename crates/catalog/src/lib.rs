@@ -519,7 +519,7 @@ pub fn models() -> Vec<ModelEntry> {
             manifest: pulid::caps::manifest,
             provider: from_env!(
                 pulid::caps::PulidProvider::from_env,
-                "set BRAIN_FLUX1_DIR, BRAIN_PULID_DIR, BRAIN_ARCFACE_DIR and BRAIN_CLIP_DIR"
+                "set BRAIN_FLUX1_DIR, BRAIN_PULID_DIR, BRAIN_ARCFACE_DIR, BRAIN_CLIP_DIR and BRAIN_BISENET_DIR"
             ),
             resident: None,
         },
