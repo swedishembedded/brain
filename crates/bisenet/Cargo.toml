@@ -1,0 +1,23 @@
+[package]
+name = "brain-bisenet"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "BiSeNet face parsing (19-class): the facexlib/PuLID reference face-region segmentation network - ResNet18 context path + attention refinement + feature fusion."
+
+[lib]
+name = "bisenet"
+path = "src/lib.rs"
+
+[dependencies]
+brain-gpu-core.workspace = true
+brain-kernels.workspace = true
+brain-vision.workspace = true
+brain-checkpoint.workspace = true
+brain-paramstore.workspace = true
+brain-model.workspace = true
+bytemuck.workspace = true
+
+[dev-dependencies]
+brain-testutil.workspace = true
+brain-imaging.workspace = true
