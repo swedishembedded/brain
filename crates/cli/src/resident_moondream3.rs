@@ -42,6 +42,21 @@
 //! fp32 on a machine without room fails placement cleanly instead of evicting
 //! the working instance to build one that cannot fit.
 //!
+//! [`ResidentModel::estimate`] reads `self.dir`'s OWN `config.json`
+//! (`moondream3::config::MoondreamConfig::from_dir`, a small JSON parse - no
+//! weight tensor is touched) and runs it through
+//! `moondream3::footprint::estimate_vram_bytes` - the same per-field
+//! arithmetic a real build allocates, rather than the flat constants below.
+//! Unlike `crates/qwen3vl` (which ships several real checkpoint sizes a
+//! caller can point `--weights` at), `MoondreamConfig::from_json` already
+//! REJECTS BY NAME any checkpoint that is not the preview architecture (see
+//! that function's own doc) - so in practice this resident could never
+//! actually load a checkpoint the old flat constants under-budgeted for. The
+//! constants are now the FALLBACK for the rare case `self.dir`'s
+//! `config.json` cannot even be read - `estimate()` must never itself
+//! hard-fail - not a claim that a wrongly-sized checkpoint could reach this
+//! code path today.
+//!
 //! # Batching: real, on the vision half
 //!
 //! `run_batch` is overridden with a genuine batched forward, not a serial loop.
@@ -60,18 +75,15 @@ use moondream3::caps::{Session, MODEL};
 use moondream3::model::Precision;
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 
-/// Host bytes an int8 build holds while hot.
-///
-/// DERIVED from the released config, not measured - no checkpoint exists on the
-/// machine this was written on, and a fabricated "measured" figure is worse than
-/// an honest derivation. 8.8 B decoder parameters at one byte each is 8.2 GiB;
-/// one shared `BlockScratch` at the built context is ~0.6 GiB; the ViT,
-/// connector, embeddings and the `[seq, vocab]` logit slab add the rest. Replace
-/// this with a real `VmHWM` the first time it runs on real weights.
+/// Fallback int8 estimate for the rare case `self.dir`'s `config.json` cannot
+/// be read at `estimate()` time (see this module's doc) - the released
+/// preview-config figure `moondream3::footprint::estimate_vram_bytes` itself
+/// now produces for `MoondreamConfig::preview()` (~11 GiB; see that
+/// function's own tests for the arithmetic), not a substitute for it.
 const INT8_BYTES: u64 = 11u64 << 30;
 
-/// Host bytes an fp32 build holds while hot: ~32.8 GiB of weights plus ~10.3 GiB
-/// of per-block activation scratch, same derivation.
+/// Fallback fp32 estimate, same rationale as [`INT8_BYTES`] (~44 GiB for the
+/// preview config).
 const FP32_BYTES: u64 = 44u64 << 30;
 
 /// Moondream 3 behind the scheduler. `dir` (`config.json`, the safetensors
@@ -137,7 +149,19 @@ impl ResidentModel for Moondream3Resident {
         // falls a weight-holding model back to the CPU pool at the same figure
         // on a machine with no GPU, which is its own rule and the behaviour this
         // model wants.
-        let bytes = if key.config.ends_with("|fp32") { FP32_BYTES } else { INT8_BYTES };
+        let precision = if key.config.ends_with("|fp32") { Precision::Fp32 } else { Precision::Int8 };
+        // Read THIS resident's OWN checkpoint's config (never anything out of
+        // `key` - `self.dir` is the one this resident actually serves) and
+        // derive the real figure from it; only a config this resident cannot
+        // even read (a bad path, a malformed file) falls back to the
+        // hand-derived preview constant, which `activate` would refuse on
+        // anyway (`MoondreamConfig::from_dir` fails the same way there).
+        let bytes = moondream3::config::MoondreamConfig::from_dir(std::path::Path::new(&self.dir))
+            .map(|cfg| moondream3::footprint::estimate_vram_bytes(&cfg, precision, moondream3::caps::SEQ_LEN))
+            .unwrap_or(match precision {
+                Precision::Int8 => INT8_BYTES,
+                Precision::Fp32 => FP32_BYTES,
+            });
         MemCost::new(bytes, 0)
     }
 
@@ -227,6 +251,36 @@ mod tests {
         assert!(c8.vram > 0, "this model is GPU-placeable; a zero vram would hide it from the GPU class");
         assert_eq!(c8.npu, 0, "no NPU export path exists");
         assert!(c32.vram > c8.vram * 3, "fp32 should be ~4x int8, got {} vs {}", c32.vram, c8.vram);
+    }
+
+    /// THE regression test for this file's fix: `estimate()` must read
+    /// `self.dir`'s own `config.json` and answer `moondream3::footprint::
+    /// estimate_vram_bytes`'s real, derived figure - NOT the flat
+    /// [`FP32_BYTES`]/[`INT8_BYTES`] fallback constants, which now exist only
+    /// for the (untestable-via-`from_dir`, since `MoondreamConfig::from_json`
+    /// rejects any other shape by name) case a config cannot be read at all.
+    /// An empty `config.json` is what a real checkpoint's own file looks like
+    /// when it does not restate every field (`MoondreamConfig::from_json`
+    /// falls back to the preview values per-field, see that function's own
+    /// doc), so this is a REAL on-disk config read, not a synthetic shortcut.
+    #[test]
+    fn estimate_reads_the_real_checkpoints_own_config_not_the_fallback_constant() {
+        let dir = std::env::temp_dir().join(format!("brain-resident-moondream3-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.json"), b"{}").unwrap();
+
+        let r = Moondream3Resident { dir: dir.to_string_lossy().into_owned() };
+        let got_int8 = r.estimate(&r.instance_key("caption", &Invocation::new()));
+        let got_fp32 = r.estimate(&r.instance_key("caption", &Invocation::new().set("precision", serde_json::json!("fp32"))));
+
+        let cfg = moondream3::config::MoondreamConfig::preview();
+        let want_int8 = moondream3::footprint::estimate_vram_bytes(&cfg, Precision::Int8, moondream3::caps::SEQ_LEN);
+        let want_fp32 = moondream3::footprint::estimate_vram_bytes(&cfg, Precision::Fp32, moondream3::caps::SEQ_LEN);
+        assert_eq!(got_int8.vram, want_int8, "must equal the real derived preview-config figure, not the flat fallback constant");
+        assert_eq!(got_fp32.vram, want_fp32);
+        assert_ne!(got_fp32.vram, FP32_BYTES, "the real derivation is not expected to land on the old rounded constant exactly");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// An NPU assignment is refused by name. The placer never offers one (npu

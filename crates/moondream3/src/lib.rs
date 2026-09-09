@@ -7,6 +7,7 @@ pub mod config;
 /// directory satisfies Moondream 3's `dir` role.
 pub mod spec;
 pub mod decoder;
+pub mod footprint;
 pub mod import;
 pub mod model;
 #[cfg(test)]
