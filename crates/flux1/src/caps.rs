@@ -45,8 +45,9 @@ const PRECISIONS: [&str; 2] = ["fp32", "int8"];
 
 /// T5-XXL context length. FLUX.1-dev's released default is 512; schnell is
 /// commonly run at 256 for speed. A UI-rangeable param rather than baked in,
-/// same as `t5encoder::caps`'s `max_len`.
-const DEFAULT_MAX_LEN: u32 = 512;
+/// same as `t5encoder::caps`'s `max_len` - bounded by `pipeline::MAX_TXT_LEN`,
+/// the length every loaded `Flux1` is actually sized for.
+const DEFAULT_MAX_LEN: u32 = crate::pipeline::MAX_TXT_LEN;
 
 fn text2image_spec() -> ActionSpec {
     ActionSpec::new("text2image", "Generate an image from a text prompt (FLUX.1 dev/kontext-dev/krea-dev/schnell).")
@@ -55,7 +56,7 @@ fn text2image_spec() -> ActionSpec {
         .param(ParamSpec::new("height", ParamType::Int, "output height, px (multiple of 16)").default(json!(1024)).min(256.0).max(2048.0).step(16.0))
         .param(ParamSpec::new("steps", ParamType::Int, "denoising steps; 0 = variant default (4 schnell / 50 others)").default(json!(0)).min(0.0).max(150.0).step(1.0))
         .param(ParamSpec::new("guidance", ParamType::Float, "guidance_in scalar -- dev/kontext-dev/krea-dev only, schnell ignores it").default(json!(3.5)).min(0.0).max(10.0).step(0.1))
-        .param(ParamSpec::new("max_len", ParamType::Int, "T5-XXL context length").default(json!(DEFAULT_MAX_LEN)).min(32.0).max(512.0).step(1.0))
+        .param(ParamSpec::new("max_len", ParamType::Int, "T5-XXL context length").default(json!(DEFAULT_MAX_LEN)).min(32.0).max(crate::pipeline::MAX_TXT_LEN as f64).step(1.0))
         .param(ParamSpec::new("variant", ParamType::Enum(VARIANTS.iter().map(|s| s.to_string()).collect()), "model variant").default(json!("dev")))
         .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (omit for 0)"))
         .param(ParamSpec::new("precision", ParamType::Enum(PRECISIONS.iter().map(|s| s.to_string()).collect()), "DiT numeric tier -- int8 is what fits a 24 GiB card, fp32 is the parity reference").default(json!("fp32")))

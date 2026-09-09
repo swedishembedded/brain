@@ -195,6 +195,15 @@ pub fn dit_bytes(cfg: &Flux1Config, precision: Precision, n_joint: u64, dit_extr
     dit_weight_bytes(cfg, precision) + dit_scratch_bytes(cfg, precision, n_joint) + dit_extra_bytes
 }
 
+/// The hard cap on T5-XXL context length any `Flux1` built here can encode -
+/// BFL's own released default, and the upper bound both `flux1::caps` and
+/// `pulid::caps` set on their `max_len` param. [`Flux1::n_max`] reserves
+/// exactly this many joint-token rows for text on top of the image tokens,
+/// so a caller's param bound must never exceed this constant: raising one
+/// without the other either wastes VRAM headroom or reintroduces the "sized
+/// for N joint tokens, got M" panic this constant exists to prevent.
+pub const MAX_TXT_LEN: u32 = 512;
+
 /// T5-XXL's device footprint - always fp32 (`t5encoder` has no int8 tier) -
 /// weights plus the per-layer scratch `T5Encoder::new_on` allocates (see
 /// `crates/flux1/src/pipeline.rs`'s module docs on why this cannot share the
@@ -216,7 +225,7 @@ fn te_bytes(max_len: u64) -> u64 {
 pub fn part_needs(cfg: &Flux1Config, precision: Precision, n_joint: u64, dit_extra_bytes: u64) -> Vec<Need> {
     vec![
         Need::sized("dit", dit_bytes(cfg, precision, n_joint, dit_extra_bytes), 0).apart(),
-        Need::sized("te", te_bytes(512), 0).apart(),
+        Need::sized("te", te_bytes(MAX_TXT_LEN as u64), 0).apart(),
     ]
 }
 
@@ -391,7 +400,7 @@ impl Flux1 {
             return Err(format!("flux1: {w}x{h} is not a multiple of {scale}"));
         }
         let (lh, lw) = ((h / 16) as usize, (w / 16) as usize);
-        Ok((lh * lw) as u32) // no txt/refs headroom yet: text2image only
+        Ok((lh * lw) as u32 + MAX_TXT_LEN)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -400,13 +409,15 @@ impl Flux1 {
         let dit_dir = r.join("transformer");
         let dit_path = if dit_dir.exists() { dit_dir } else { r.to_path_buf() };
         let ts = read_dit_tensors(dit_path.to_str().ok_or("flux1: non-UTF8 transformer path")?, &cfg)?;
-        // txt_len is a pipeline argument, not baked into the config - the
-        // model is sized for the WORST case this pipeline ever calls it with
-        // (image tokens only, today; +txt_len when conditioning is threaded
-        // through `n_max` here matches `Flux1Model::new`'s own doc: "at most
-        // n_max joint tokens (txt + image + reference)"). Text2image submits
-        // `ctx` and `img_tokens` as separate arguments to `forward`, so
-        // `n_max` only needs to cover the image tokens this pipeline builds.
+        // `n_max` (image tokens + MAX_TXT_LEN) is sized for the WORST case
+        // this pipeline ever calls it with - matches `Flux1Model::new`'s own
+        // doc: "at most n_max joint tokens (txt + image + reference)".
+        // Text2image submits `ctx` and `img_tokens` as separate arguments to
+        // `forward`, which sums their row counts (`nt + ni`) and asserts it
+        // against `n_max` - so `n_max` must cover BOTH, not image tokens
+        // alone (an earlier version of this function omitted the text term
+        // entirely, panicking "sized for 1024 joint tokens, got 1536" on the
+        // first real T5-XXL-conditioned forward).
         let dit = Flux1Model::new_with(&cfg, &ts, gpu, n_max, precision);
 
         let vae_json = r.join("vae").join("config.json");

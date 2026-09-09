@@ -129,9 +129,9 @@ impl EvaSession {
         // `VISION_PIPELINES`, not `TEXT_PIPELINES` (`crates/clip/tests/parity.rs`
         // builds `EvaVision` against `VISION_PIPELINES` for exactly this reason);
         // `imaging::PIPELINES` is added for the resize this struct's own `embed`
-        // dispatches - a Gpu built from only one of the two produces a wrong
-        // kernel-id resolution for whichever half is missing, which surfaces as
-        // a wgpu bind-group-size mismatch rather than a clean "not registered".
+        // dispatches. Both sets resolve BY NAME, so a Gpu missing either half
+        // panics naming the absent kernel (see lesson #93 for what positional
+        // resolution did here instead).
         let kernels: Vec<(&str, &str)> = clip::model::VISION_PIPELINES.iter().chain(imaging::PIPELINES.iter()).copied().collect();
         let gpu = gpu_core::Gpu::new(&kernels);
         let side = cfg.image_size;

@@ -522,6 +522,20 @@ struct DeviceShared {
     #[cfg(not(target_arch = "wasm32"))]
     read_staging_allocs: std::sync::atomic::AtomicU64,
     pipelines: Vec<wgpu::ComputePipeline>,
+    /// Each kernel's registered name (parallel to `pipelines`), used to LABEL
+    /// every bind group this device builds.
+    ///
+    /// A dispatch names its pipeline by INDEX, so a caller that indexes into a
+    /// different kernel list than the one this device was built from binds a
+    /// real, valid, wrong pipeline. wgpu catches that only when the arities
+    /// happen to disagree, and reports it as a bare "Number of bindings in bind
+    /// group descriptor (3) does not match ... layout (5)" against whatever
+    /// call site was unlucky - which reads as a bug in that call site's own
+    /// kernel. The label puts the kernel wgpu actually resolved into the error
+    /// text, so a `bias_add` dispatch failing as `label = 'layernorm'` names
+    /// the mismatch instead of hiding it (and labels the bind groups for
+    /// RenderDoc/Nsight captures at the same time).
+    names: Vec<String>,
     /// Each kernel's declared `@workgroup_size` (parallel to `pipelines`). Almost
     /// every kernel is the engine's default 64; the register-tiled GEMMs use 256.
     /// The dispatch grid must be laid out with the kernel's OWN size, because the
@@ -735,6 +749,7 @@ impl DeviceShared {
             #[cfg(not(target_arch = "wasm32"))]
             read_staging_allocs: std::sync::atomic::AtomicU64::new(0),
             pipelines,
+            names: kernels.iter().map(|(n, _)| (*n).to_string()).collect(),
             wgsizes: backend_api::workgroup_sizes(kernels),
             caps,
             plcache,
@@ -1027,6 +1042,9 @@ impl WgpuBackend {
     fn pipelines(&self) -> &[wgpu::ComputePipeline] { &self.shared.pipelines }
     #[inline]
     fn wgsizes(&self) -> &[u32] { &self.shared.wgsizes }
+    /// The registered name of pipeline `kind` - see `DeviceShared::names`.
+    #[inline]
+    fn kernel_name(&self, kind: usize) -> &str { &self.shared.names[kind] }
 
     /// Bounded equivalent of `device.poll(PollType::wait_indefinitely())`.
     /// wgpu 29 supports a native timeout on `Wait`, so this needs no manual
@@ -2427,7 +2445,7 @@ impl WgpuBackend {
         }
         let layout = self.pipelines()[kind].get_bind_group_layout(0);
         let bg = self.device().create_bind_group(&wgpu::BindGroupDescriptor {
-            label: None,
+            label: Some(self.kernel_name(kind)),
             layout: &layout,
             entries: &entries,
         });
@@ -2468,7 +2486,7 @@ impl WgpuBackend {
             entries.push(wgpu::BindGroupEntry { binding: (i + 1) as u32, resource });
         }
         let layout = self.pipelines()[kind].get_bind_group_layout(0);
-        let bg = self.device().create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &layout, entries: &entries });
+        let bg = self.device().create_bind_group(&wgpu::BindGroupDescriptor { label: Some(self.kernel_name(kind)), layout: &layout, entries: &entries });
         self.stats_bg.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (gx, gy) = backend_api::grid_ws(threads, self.wgsizes()[kind]);
         (kind, bg, gx, gy, sliced)

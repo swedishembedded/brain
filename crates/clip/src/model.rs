@@ -758,6 +758,17 @@ pub enum TextTap {
 // EVA02 image tower
 // ---------------------------------------------------------------------------
 
+/// Positions in [`VISION_PIPELINES`], NOT raw `Gpu::step` arguments - they are
+/// remapped through [`EvaVision::k`] to the index the same kernel actually has
+/// on the device the tower was built on.
+///
+/// Every real caller shares ONE device between several towers, so the vision
+/// kernels do not start at pipeline index 0: `caps::Session` registers
+/// `TEXT_PIPELINES ++ VISION_PIPELINES ++ imaging::PIPELINES` for the text
+/// tower, the EVA tower and `embed_image`'s device-side resize alike, and
+/// `pulid::caps::Bundle` needs the EVA tower and that same resize on one
+/// handle. Indexing positionally against such a device binds a DIFFERENT
+/// kernel - see `tests/vision_kernel_ids.rs`.
 const V_CONV2D: usize = 0;
 const V_NCHW_NLC: usize = 1;
 const V_REGION_COPY: usize = 2;
@@ -813,6 +824,10 @@ pub struct EvaVision {
     pub gpu: Gpu,
     pub cfg: EvaVisionConfig,
     pub ps: ParamStore,
+    /// [`VISION_PIPELINES`] positions -> this handle's pipeline indices,
+    /// resolved by name once at build time. See the `V_*` constants above and
+    /// [`EvaVision::k`].
+    kernels: Vec<usize>,
     b: u32,
     pixels: DeviceBuffer,
     rope_cos: DeviceBuffer,
@@ -886,6 +901,14 @@ impl EvaVision {
             norm_out: gpu.storage(n * w),
             head_out: gpu.storage(b as u64 * cfg.embed_dim as u64),
             cls_l2: gpu.storage(b as u64 * cfg.embed_dim as u64),
+            kernels: VISION_PIPELINES
+                .iter()
+                .map(|(name, _)| {
+                    gpu.kernel_index(name).unwrap_or_else(|| {
+                        panic!("clip: EVA vision kernel `{name}` is not registered on this handle - add clip::model::VISION_PIPELINES to its Gpu::new/new_like kernel list")
+                    })
+                })
+                .collect(),
             gpu,
             cfg,
             ps,
@@ -899,8 +922,12 @@ impl EvaVision {
     fn w(&self, name: &str) -> &DeviceBuffer {
         self.ps.w(name)
     }
+    /// One `V_*` position -> this handle's pipeline index.
+    fn k(&self, v: usize) -> usize {
+        self.kernels[v]
+    }
     fn gemm(&self, m: u32, n: u32) -> (usize, u32) {
-        block::pick_gemm(m as usize, n as usize, V_MATMUL, V_MATMUL_REG3, false)
+        block::pick_gemm(m as usize, n as usize, self.k(V_MATMUL), self.k(V_MATMUL_REG3), false)
     }
 
     fn build_steps(&self) -> Vec<Step> {
@@ -915,16 +942,16 @@ impl EvaVision {
         let grid = c.grid();
         let hd = c.head_dim();
         let half = c.rope_half();
-        let ln = block::LayerNormIds::resolve_fwd(g, V_LAYERNORM);
+        let ln = block::LayerNormIds::resolve_fwd(g, self.k(V_LAYERNORM));
         // The four backward slots are deliberately unregistered in this
         // forward-only tower. `usize::MAX` makes any future `block::bidir_bwd`
         // call panic on the pipeline lookup instead of silently dispatching some
         // other kernel; the backward workstream registers the real indices.
         const UNREGISTERED: usize = usize::MAX;
         let bidir_ids = block::BidirIds {
-            scores: V_SCORES,
-            softmax: V_SOFTMAX,
-            apply: V_APPLY,
+            scores: self.k(V_SCORES),
+            softmax: self.k(V_SOFTMAX),
+            apply: self.k(V_APPLY),
             dscores: UNREGISTERED,
             dv: UNREGISTERED,
             dq: UNREGISTERED,
@@ -945,7 +972,7 @@ impl EvaVision {
         // ---- stem ----
         // `conv2d` Params: [N, Cin, H, W, Cout, K, stride, pad, Ho, Wo].
         s.push(g.step(
-            V_CONV2D,
+            self.k(V_CONV2D),
             &[&self.pixels, self.w("patch.weight"), &self.patch_nchw],
             &[b, 3, c.image_size, c.image_size, w, c.patch, c.patch, 0, grid, grid],
             b * w * grid * grid,
@@ -958,14 +985,14 @@ impl EvaVision {
             let dst = (si * seq as u64 + 1) * w as u64;
             // `nchw_nlc` Params: [total, c, hw].
             s.push(g.step_sliced(
-                V_NCHW_NLC,
+                self.k(V_NCHW_NLC),
                 &[&self.patch_nchw, &self.x[0]],
                 &[(src, 0), (dst, 0)],
                 &[w * npatch, w, npatch],
                 w * npatch,
             ));
             s.push(g.step_sliced(
-                V_BIAS_ADD,
+                self.k(V_BIAS_ADD),
                 &[&self.x[0], self.w("patch.bias")],
                 &[(dst, 0), (0, 0)],
                 &[npatch, w],
@@ -973,7 +1000,7 @@ impl EvaVision {
             ));
             // `region_copy` Params: [rows, width, row_stride, off] - one row.
             s.push(g.step_sliced(
-                V_REGION_COPY,
+                self.k(V_REGION_COPY),
                 &[self.w("cls_token"), &self.x[0]],
                 &[(0, 0), (si * seq as u64 * w as u64, 0)],
                 &[1, w, w, 0],
@@ -982,7 +1009,7 @@ impl EvaVision {
         }
         // pos_embed is [seq, W] and the batch is [b*seq, W]; `pos_add`'s row
         // modulo handles the broadcast. Params: [total, d_model, t].
-        s.push(g.step(V_POS_ADD, &[&self.x[0], self.w("pos_embed")], &[n * w, w, seq], n * w));
+        s.push(g.step(self.k(V_POS_ADD), &[&self.x[0], self.w("pos_embed")], &[n * w, w, seq], n * w));
 
         for l in 0..c.layers as usize {
             let bb = &self.blocks[l];
@@ -1000,7 +1027,7 @@ impl EvaVision {
             ));
             let (mk, mt) = self.gemm(n, 3 * w);
             s.push(g.step(mk, &[&bb.norm1, self.w(&format!("{p}.qkv.weight")), &bb.qkv], &[n, w, 3 * w], mt));
-            s.push(g.step(V_BIAS_ADD, &[&bb.qkv, self.w(&format!("{p}.qkv.bias"))], &[n, 3 * w], n * 3 * w));
+            s.push(g.step(self.k(V_BIAS_ADD), &[&bb.qkv, self.w(&format!("{p}.qkv.bias"))], &[n, 3 * w], n * 3 * w));
 
             // 2D RoPE on q and k, EXCLUDING the cls token: bind the fused qkv at
             // row 1 of each sample. `rope2d` Params:
@@ -1010,7 +1037,7 @@ impl EvaVision {
                 // region offsets within the fused row: q at 0, k at W.
                 for roff in [0u32, w] {
                     s.push(g.step_sliced(
-                        V_ROPE2D,
+                        self.k(V_ROPE2D),
                         &[&bb.qkv, &self.rope_cos, &self.rope_sin],
                         &[(off, 0), (0, 0), (0, 0)],
                         &[npatch, c.heads, half, 3 * w, roff, npatch, f(1.0)],
@@ -1037,8 +1064,8 @@ impl EvaVision {
             ));
             let (mk, mt) = self.gemm(n, w);
             s.push(g.step(mk, &[&bb.inner_ln, self.w(&format!("{p}.proj.weight")), &bb.attn_proj], &[n, w, w], mt));
-            s.push(g.step(V_BIAS_ADD, &[&bb.attn_proj, self.w(&format!("{p}.proj.bias"))], &[n, w], n * w));
-            s.push(g.step(V_ADD2, &[&self.x[l], &bb.attn_proj, &bb.res], &[n * w], n * w));
+            s.push(g.step(self.k(V_BIAS_ADD), &[&bb.attn_proj, self.w(&format!("{p}.proj.bias"))], &[n, w], n * w));
+            s.push(g.step(self.k(V_ADD2), &[&self.x[l], &bb.attn_proj, &bb.res], &[n * w], n * w));
 
             // ---- naive SwiGLU MLP with the interior ffn_ln ----
             s.push(block::layernorm_fwd(
@@ -1054,12 +1081,12 @@ impl EvaVision {
             ));
             let (mk, mt) = self.gemm(n, m);
             s.push(g.step(mk, &[&bb.norm2, self.w(&format!("{p}.w1.weight")), &bb.w1], &[n, w, m], mt));
-            s.push(g.step(V_BIAS_ADD, &[&bb.w1, self.w(&format!("{p}.w1.bias"))], &[n, m], n * m));
+            s.push(g.step(self.k(V_BIAS_ADD), &[&bb.w1, self.w(&format!("{p}.w1.bias"))], &[n, m], n * m));
             let (mk, mt) = self.gemm(n, m);
             s.push(g.step(mk, &[&bb.norm2, self.w(&format!("{p}.w2.weight")), &bb.w2], &[n, w, m], mt));
-            s.push(g.step(V_BIAS_ADD, &[&bb.w2, self.w(&format!("{p}.w2.bias"))], &[n, m], n * m));
+            s.push(g.step(self.k(V_BIAS_ADD), &[&bb.w2, self.w(&format!("{p}.w2.bias"))], &[n, m], n * m));
             // `silu_mul` Params: a SINGLE `total` (not [rows, cols]).
-            s.push(g.step(V_SILU_MUL, &[&bb.w1, &bb.w2, &bb.swiglu], &[n * m], n * m));
+            s.push(g.step(self.k(V_SILU_MUL), &[&bb.w1, &bb.w2, &bb.swiglu], &[n * m], n * m));
             s.push(block::layernorm_fwd(
                 g,
                 &ln,
@@ -1073,8 +1100,8 @@ impl EvaVision {
             ));
             let (mk, mt) = self.gemm(n, w);
             s.push(g.step(mk, &[&bb.ffn_ln, self.w(&format!("{p}.w3.weight")), &bb.mlp_out], &[n, m, w], mt));
-            s.push(g.step(V_BIAS_ADD, &[&bb.mlp_out, self.w(&format!("{p}.w3.bias"))], &[n, w], n * w));
-            s.push(g.step(V_ADD2, &[&bb.res, &bb.mlp_out, &self.x[l + 1]], &[n * w], n * w));
+            s.push(g.step(self.k(V_BIAS_ADD), &[&bb.mlp_out, self.w(&format!("{p}.w3.bias"))], &[n, w], n * w));
+            s.push(g.step(self.k(V_ADD2), &[&bb.res, &bb.mlp_out, &self.x[l + 1]], &[n * w], n * w));
         }
 
         s.push(block::layernorm_fwd(
@@ -1100,11 +1127,11 @@ impl EvaVision {
                 mt,
             ));
         }
-        s.push(g.step(V_BIAS_ADD, &[&self.head_out, self.w("head.bias")], &[b, c.embed_dim], b * c.embed_dim));
+        s.push(g.step(self.k(V_BIAS_ADD), &[&self.head_out, self.w("head.bias")], &[b, c.embed_dim], b * c.embed_dim));
         // PuLID's `id_cond_vit`: the L2-normalized cls embedding.
         // `l2norm_scale` Params: [n, d, eps(f32 bits)].
         s.push(g.step(
-            V_L2NORM,
+            self.k(V_L2NORM),
             &[&self.head_out, &self.l2_ones, &self.cls_l2],
             &[b, c.embed_dim, f(1e-12)],
             b * c.embed_dim,

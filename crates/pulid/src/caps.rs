@@ -84,7 +84,9 @@ pub const MODEL: &str = "brain/flux1-pulid";
 /// carries the identical unvalidated status, not a stronger claim.
 const VARIANTS: [&str; 4] = ["dev", "kontext-dev", "krea-dev", "schnell"];
 
-const DEFAULT_MAX_LEN: u32 = 512;
+/// Bounded by `flux1::pipeline::MAX_TXT_LEN`, the length every loaded
+/// `Flux1` (and hence every `Bundle`) is actually sized for.
+const DEFAULT_MAX_LEN: u32 = flux1::pipeline::MAX_TXT_LEN;
 
 /// The BiSeNet face-parsing checkpoint filename under `BRAIN_BISENET_DIR` -
 /// `tools/goldens/pulid_face_parsing_dump_reference.py`'s re-serialization
@@ -112,7 +114,7 @@ fn text2image_spec() -> ActionSpec {
         .param(ParamSpec::new("start_step", ParamType::Int, "denoising step at which identity injection begins; 0 = every step. Upstream PuLID-FLUX guidance: smaller injects identity sooner (more fidelity, less freedom for the base structure) -- ~4 for photorealism, ~0-1 for stylization").default(json!(0)).min(0.0).max(150.0).step(1.0))
         .param(ParamSpec::new("guidance", ParamType::Float, "guidance_in scalar -- dev/kontext-dev/krea-dev only, schnell ignores it").default(json!(3.5)).min(0.0).max(10.0).step(0.1))
         .param(ParamSpec::new("id_weight", ParamType::Float, "identity conditioning strength").default(json!(1.0)).min(0.0).max(3.0).step(0.05))
-        .param(ParamSpec::new("max_len", ParamType::Int, "T5-XXL context length").default(json!(DEFAULT_MAX_LEN)).min(32.0).max(512.0).step(1.0))
+        .param(ParamSpec::new("max_len", ParamType::Int, "T5-XXL context length").default(json!(DEFAULT_MAX_LEN)).min(32.0).max(flux1::pipeline::MAX_TXT_LEN as f64).step(1.0))
         .param(ParamSpec::new("variant", ParamType::Enum(VARIANTS.iter().map(|s| s.to_string()).collect()), "FLUX.1 variant -- only dev is validated against a PuLID reference").default(json!("dev")))
         .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (omit for 0)"))
         .param(ParamSpec::new("precision", ParamType::Enum(PRECISIONS.iter().map(|s| s.to_string()).collect()), "DiT numeric tier -- int8 is what fits a 24 GiB card, fp32 needs ~48 GiB").default(json!("int8")))
@@ -242,7 +244,14 @@ impl Bundle {
         let (eva_init, _report) = clip::import::import_eva_visual(eva_tensors, &eva_cfg)?;
         let eva_map: std::collections::HashMap<String, Vec<f32>> =
             eva_init.into_iter().map(|(k, (_, d))| (k, d)).collect();
-        let eva = EvaVision::new_on(gpu.new_like(clip::model::TEXT_PIPELINES), eva_cfg, 1, &eva_map);
+        // The EVA tower's kernels, plus `imaging`'s: `face_embeds` builds an
+        // `imaging::Ctx` on THIS handle to resize the parsed face to 336px, and
+        // both sets resolve by name, so one flat union is enough. The text
+        // tower's list has no place here - PuLID never runs it (FLUX.1's own
+        // T5/CLIP encoders live on the `te` device).
+        let eva_kernels: Vec<(&str, &str)> =
+            clip::model::VISION_PIPELINES.iter().chain(imaging::PIPELINES.iter()).copied().collect();
+        let eva = EvaVision::new_on(gpu.new_like(&eva_kernels), eva_cfg, 1, &eva_map);
 
         let idformer = IdFormer::new(gpu.new_like(crate::model::KERNELS), pulid_cfg.clone(), w_pulid.encoder);
         // `id_weight` given here is a placeholder; every request overwrites it
