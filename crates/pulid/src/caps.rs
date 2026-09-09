@@ -77,6 +77,11 @@ const VARIANTS: [&str; 3] = ["dev", "kontext-dev", "schnell"];
 
 const DEFAULT_MAX_LEN: u32 = 512;
 
+/// The DiT precision enum, in manifest order - mirrors `flux1::caps`'s own
+/// (fp32 doesn't fit a 24 GiB card with PuLID's extra residency on top, so
+/// this action defaults the OTHER way).
+const PRECISIONS: [&str; 2] = ["fp32", "int8"];
+
 fn text2image_spec() -> ActionSpec {
     ActionSpec::new("text2image", "Generate an image from a text prompt, conditioned on a face's identity (PuLID + FLUX.1).")
         .param(ParamSpec::new("prompt", ParamType::Str, "text description of the desired image").required())
@@ -88,6 +93,7 @@ fn text2image_spec() -> ActionSpec {
         .param(ParamSpec::new("max_len", ParamType::Int, "T5-XXL context length").default(json!(DEFAULT_MAX_LEN)).min(32.0).max(512.0).step(1.0))
         .param(ParamSpec::new("variant", ParamType::Enum(VARIANTS.iter().map(|s| s.to_string()).collect()), "FLUX.1 variant -- only dev is validated against a PuLID reference").default(json!("dev")))
         .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (omit for 0)"))
+        .param(ParamSpec::new("precision", ParamType::Enum(PRECISIONS.iter().map(|s| s.to_string()).collect()), "DiT numeric tier -- int8 is what fits a 24 GiB card, fp32 needs ~48 GiB").default(json!("int8")))
         .input(capability::BlobSpec::new("face_image", capability::Media::Image, "a photo of the identity to condition on").required())
         .output(capability::BlobSpec::new("image", capability::Media::Image, "the generated image"))
 }
@@ -107,6 +113,7 @@ struct Req {
     opts: GenerateOptions,
     max_len: usize,
     id_weight: f32,
+    precision: flux1::Precision,
 }
 
 fn req_from(inv: &Invocation) -> Req {
@@ -125,7 +132,17 @@ fn req_from(inv: &Invocation) -> Req {
         },
         max_len: inv.get_i64("max_len").unwrap_or(DEFAULT_MAX_LEN as i64).max(1) as usize,
         id_weight: inv.get_f64("id_weight").unwrap_or(0.8) as f32,
+        precision: flux1::Precision::from_name(&inv.get_str("precision").unwrap_or_else(|| "int8".into())).unwrap_or(flux1::Precision::Int8),
     }
+}
+
+/// `PulidCa`'s device footprint - resident for the whole DiT lifetime (unlike
+/// ArcFace/EVA-CLIP/IDFormer, which only run once per identity) - so it is
+/// folded into the "dit" placement `Need` via
+/// [`flux1::pipeline::plan_flux1`]'s `dit_extra_bytes`, never costed
+/// separately. Always fp32 (no kernel here is quantized, per the module docs).
+fn pulid_ca_bytes(cfg: &PulidConfig, n_ca: usize) -> u64 {
+    cfg.ca_manifest(n_ca).iter().map(|(_, shape)| shape.iter().product::<usize>() as u64 * 4).sum()
 }
 
 // ===================== the pipeline =====================
@@ -149,11 +166,31 @@ struct Bundle {
 }
 
 impl Bundle {
-    fn load(flux1_root: &str, pulid_root: &str, arcface_root: &str, clip_root: &str, variant: &str, h: u32, w: u32) -> Result<Bundle, String> {
-        let flux1 = Flux1::load(flux1_root, variant, h, w)?;
+    fn load(flux1_root: &str, pulid_root: &str, arcface_root: &str, clip_root: &str, variant: &str, h: u32, w: u32, precision: flux1::Precision) -> Result<Bundle, String> {
         let fcfg = Flux1Config::from_name(variant)?;
         let n_gen = ((h / 16) * (w / 16)) as usize;
+        let pulid_cfg = PulidConfig::v0_9_1();
+        let w_pulid = crate::import::read(pulid_root, &pulid_cfg)?;
 
+        // The DiT and PulidCa MUST share one `Gpu` built from
+        // `pulid::joint_kernels()` - a `Step` is only meaningful to the handle
+        // that created it (`flux1::inject`'s documented contract), so a
+        // `PulidCa` built on a device with a DIFFERENT kernel list resolves
+        // its injected steps against the wrong pipeline indices. Placed via
+        // the SAME plan `flux1::pipeline::load_with` would use for a bare
+        // FLUX.1, with PulidCa's own resident bytes folded into the "dit" part
+        // so the plan prices what actually gets built.
+        let dit_extra = pulid_ca_bytes(&pulid_cfg, w_pulid.num_ca);
+        let homes = flux1::pipeline::plan_flux1(&fcfg, precision, n_gen as u64, dit_extra)?;
+        eprintln!("pulid: placement {}", homes.describe());
+        let dit_gpu = homes.run("dit", || Gpu::new(crate::model::joint_kernels()))?;
+        let flux1 = Flux1::load_shared(flux1_root, variant, h, w, dit_gpu.share(), precision, homes)?;
+        let ca = PulidCa::new_on(dit_gpu, pulid_cfg.clone(), crate::model::joint_kernels(), w_pulid.num_ca, n_gen, w_pulid.ca);
+
+        // ArcFace/EVA-CLIP/IDFormer each run once per identity, not once per
+        // step - they keep their own independent kernel sets/devices (never
+        // pushed into the DiT's dispatch list, unlike `PulidCa`), so they are
+        // not part of the "dit"/"te" placement plan above.
         let gpu = Gpu::new(crate::model::KERNELS);
         let arcface = ArcFaceSession::load(arcface_root, gpu.new_like(&arcface::caps::SERVING_PIPELINES))?;
 
@@ -166,10 +203,7 @@ impl Bundle {
             eva_init.into_iter().map(|(k, (_, d))| (k, d)).collect();
         let eva = EvaVision::new_on(gpu.new_like(clip::model::TEXT_PIPELINES), eva_cfg, 1, &eva_map);
 
-        let pulid_cfg = PulidConfig::v0_9_1();
-        let w_pulid = crate::import::read(pulid_root, &pulid_cfg)?;
         let idformer = IdFormer::new(gpu.new_like(crate::model::KERNELS), pulid_cfg.clone(), w_pulid.encoder);
-        let ca = PulidCa::new(gpu.new_like(crate::model::KERNELS), pulid_cfg.clone(), w_pulid.num_ca, n_gen, w_pulid.ca);
         // `id_weight` given here is a placeholder; every request overwrites it
         // via `set_id_weight` before use (read at step-build time, so this is
         // a field write, not a graph rebuild - see `PulidAdapter`'s docs).
@@ -216,7 +250,7 @@ pub struct Session {
     pulid_root: String,
     arcface_root: String,
     clip_root: String,
-    built: Mutex<std::collections::HashMap<(String, u32, u32), Bundle>>,
+    built: Mutex<std::collections::HashMap<(String, u32, u32, &'static str), Bundle>>,
 }
 
 impl Session {
@@ -246,7 +280,7 @@ impl Session {
         }
         let chw = imaging::pixels::hwc_to_chw(&hwc, 3, fh as usize, fw as usize);
 
-        let key = (req.variant.clone(), h, w);
+        let key = (req.variant.clone(), h, w, req.precision.name());
         let mut guard = self.built.lock().map_err(|_| "pulid: pipeline lock poisoned")?;
         let b = match guard.entry(key) {
             std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
@@ -258,6 +292,7 @@ impl Session {
                 &req.variant,
                 h,
                 w,
+                req.precision,
             )?),
         };
         let id = b.id_tokens(&chw, fw, fh)?;
