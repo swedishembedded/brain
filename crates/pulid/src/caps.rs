@@ -222,14 +222,23 @@ impl Bundle {
         let homes = flux1::pipeline::plan_flux1(&fcfg, precision, n_gen as u64, dit_extra)?;
         eprintln!("pulid: placement {}", homes.describe());
         let dit_gpu = homes.run("dit", || Gpu::new(crate::model::joint_kernels()))?;
-        let flux1 = Flux1::load_shared(flux1_root, variant, h, w, dit_gpu.share(), precision, homes)?;
+        let flux1 = Flux1::load_shared(flux1_root, variant, h, w, dit_gpu.share(), precision, homes.clone())?;
         let ca = PulidCa::new_on(dit_gpu, pulid_cfg.clone(), crate::model::joint_kernels(), w_pulid.num_ca, n_gen, w_pulid.ca);
 
-        // ArcFace/EVA-CLIP/IDFormer each run once per identity, not once per
-        // step - they keep their own independent kernel sets/devices (never
+        // ArcFace/EVA-CLIP/IDFormer/BiSeNet each run once per identity, not
+        // once per step - they keep their own independent kernel sets (never
         // pushed into the DiT's dispatch list, unlike `PulidCa`), so they are
-        // not part of the "dit"/"te" placement plan above.
-        let gpu = Gpu::new(crate::model::KERNELS);
+        // not part of the "dit"/"te" `Need`s `plan_flux1` sizes. They still
+        // need an EXPLICIT home, though: left unscoped, `Gpu::new` lands on
+        // whatever the ambient default device is, which is not guaranteed to
+        // avoid "te" - on a 2-card box with a ~21 GiB fp32 T5-XXL resident
+        // there, an unpinned identity stack landing on the SAME card OOMs
+        // (confirmed: forcing the ambient device to the DiT's own card with
+        // `BRAIN_GPU_INDEX` removes the OOM). Pinning to "dit" instead is
+        // safe because this stack is modest - ArcFace + BiSeNet + EVA-CLIP-L
+        // + IDFormer together are well under the DiT part's own remaining
+        // headroom on a 24 GiB card.
+        let gpu = homes.run("dit", || Gpu::new(crate::model::KERNELS))?;
         let arcface = ArcFaceSession::load(arcface_root, gpu.new_like(&arcface::caps::SERVING_PIPELINES))?;
 
         let bisenet_path = std::path::Path::new(bisenet_root).join(BISENET_FILE);

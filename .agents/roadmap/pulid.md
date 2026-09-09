@@ -47,41 +47,52 @@ The image → `id_cond` path exists (`idcond::IdCond::from_image` /
       own 1.0/0..3 rather than an unexplained 0.8/0..2) against a real
       identity-fidelity metric - `examples/imagegen/identity_score.sh`'s
       ArcFace-cosine method is the tool, no real run has swept it yet.
-- [ ] Full-depth conditioning run across all injection sites - only a
-      reduced-depth run has been exercised. **The real FLUX.1-dev checkpoint
-      landed in this workspace for the first time and two real, pre-existing
-      defects surfaced on first contact** (neither caused by this session's
-      changes - both block a first real generation from completing at all,
-      independent of BiSeNet):
-      1. `data::unigram::UnigramTokenizer` does not implement SentencePiece's
-         `Precompiled` normalizer (`unigram.rs`'s own module docs and a test
-         already document this as a deliberate, known gap - reimplementing
-         sentencepiece's normalizer + its protobuf charsmap is a separate,
-         substantial undertaking, not attempted here). FLUX.1-dev's released
-         `tokenizer_2/tokenizer.json` (T5-XXL) uses exactly this normalizer,
-         so `brain flux1 text2image` fails at TOKENIZATION, before any
-         denoising step - this blocks EVERY flux1/pulid generation with the
-         real released tokenizer, not something specific to identity
-         conditioning.
-      2. Independent of (1): `pulid::caps::Bundle::load` panics inside
-         `clip::model::EvaVision::new_on` (a wgpu bind-group validation
-         error, "3 bindings vs a 5-binding layout") when built with real
-         weights. Diagnostic instrumentation confirmed this happens BEFORE
-         `bisenet::align::norm_crop_512` (or any other BiSeNet code) ever
-         runs - `EvaVision::new_on` merely uploads `ParamStore` weights, no
-         kernel dispatch of its own, so this is most likely a wgpu
-         asynchronous-error-reporting artifact surfacing a fault from an
-         EARLIER dispatch (elsewhere in `Bundle::load`'s sequence of
-         `gpu.new_like(...)` calls sharing one ambient device) at the next
-         GPU operation, not a bug in `EvaVision` itself. Not root-caused
-         further - `BRAIN_NO_KERNEL_UPGRADE=1` and swapping BiSeNet's
-         `new_like` for a fresh `Gpu::new` both leave it unchanged, ruling
-         out the kernel-upgrade table and BiSeNet-specific device sharing as
-         the cause.
-      Neither defect touches this crate's own parity-gated code (IDFormer/CA/
-      FLUX forward, or `crates/bisenet`'s own bit-exact-verified graph) -
-      both are pre-existing infrastructure gaps this workspace's first real
-      end-to-end run happened to be the first thing to reach.
+- [x] Full-depth conditioning run across all injection sites - the real
+      FLUX.1-dev + PuLID-FLUX checkpoints landed in this workspace for the
+      first time and THREE real, pre-existing infrastructure defects
+      surfaced in sequence on first contact (none in this crate's own
+      parity-gated code - IDFormer/CA/FLUX forward and `crates/bisenet`'s
+      bit-exact-verified graph were never at fault). All three are now
+      fixed:
+      1. `data::unigram::UnigramTokenizer` did not implement SentencePiece's
+         `Precompiled` normalizer (plus two other steps in the same
+         `Sequence` - `Strip` and a `" {2,}"` `Replace` whose content is
+         `U+2581`, not a space). FLUX.1-dev's released `tokenizer_2/
+         tokenizer.json` (T5-XXL) uses all three, so tokenization failed
+         before any denoising step. Fixed by a faithful port of HF's
+         `spm_precompiled`, verified 27/27 exact token-id parity against
+         real HuggingFace `tokenizers` output on the real tokenizer.
+      2. `pulid::caps::Bundle::load` built the EVA-CLIP vision tower on
+         `clip::model::TEXT_PIPELINES` instead of `VISION_PIPELINES` - every
+         index still resolved to a real (wrong) kernel, and the first arity
+         mismatch crashed wgpu's `create_bind_group` ("3 bindings vs a
+         5-binding layout") inside `EvaVision::new_on`. Fixed by resolving
+         `EvaVision`'s kernels BY NAME instead of positionally; bind groups
+         are now labelled with their kernel's name so this class of error
+         self-identifies.
+      3. `Flux1::n_max` sized the DiT for image tokens only ("no txt/refs
+         headroom yet"), but the forward asserts `nt + ni <= n_max` over the
+         JOINT sequence - the first real T5-XXL-conditioned forward panicked
+         "sized for 1024 joint tokens, got 1536". Fixed by adding the new
+         `flux1::pipeline::MAX_TXT_LEN` constant to `n_max`, which both
+         crates' `caps.rs` now also use for their `max_len` param's upper
+         bound instead of an independently hardcoded `512`.
+      4. `Bundle::load`'s identity-extraction stack (ArcFace/BiSeNet/
+         EVA-CLIP/IDFormer) built its `Gpu` unscoped, landing on whatever the
+         ambient default device was rather than an explicit home - on a
+         2-card box this coincided with "te" (a ~21 GiB fp32 T5-XXL), and
+         the two together OOM'd. Fixed by pinning this stack to "dit"'s home
+         via the same `Homes` `plan_flux1` already computed (real headroom:
+         an int8 DiT + resident `PulidCa` is ~17.5 GiB against 24).
+      With all four fixed, `brain pulid text2image` now runs a real
+      generation end to end for the first time: FLUX.1-dev `dev` + PuLID
+      v0.9.1, 512x512, 8 steps, int8 DiT on one P40, fp32 T5-XXL on the
+      other. Measured identity fidelity against the source photo (ArcFace
+      cosine, `examples/imagegen/identity_score.sh`): **0.5107** - per that
+      script's own documented anchors, "the same person to a human, most of
+      the time," not a coincidence and not "family resemblance." This is
+      the first real, numeric confirmation that PuLID's identity injection
+      does something in this workspace, not just that the glue compiles.
 - [x] Multi-image identity conditioning - `pulid::caps::text2image` accepts
       `face_image` (primary, required) plus up to three optional
       `face_image1/2/3` auxiliary photos, mean-pooled per-representation
