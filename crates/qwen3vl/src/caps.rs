@@ -146,7 +146,7 @@ impl Precision {
         }
     }
 
-    fn dtype(self) -> gpu_core::select::Dtype {
+    pub(crate) fn dtype(self) -> gpu_core::select::Dtype {
         match self {
             Precision::F32 => gpu_core::select::Dtype::F32,
             Precision::I8 => gpu_core::select::Dtype::I8,
@@ -372,15 +372,17 @@ pub struct Resident {
 
 impl Resident {
     /// [`load_resident`] on a chosen physical card (`gpu_core::devices`'
-    /// canonical index), or `None` for the CPU backend.
+    /// canonical index), or `None` to let [`load_gguf_resident`]/
+    /// [`load_hf_resident`] place it automatically (see [`place_and_build`]).
     ///
-    /// Placement is a SCOPED registry selection (`gpu_core::devices::with_gpu`),
-    /// never an env mutation - a server-lifetime resident must not change the
-    /// backend every other model builds on afterwards. `Qwen::
-    /// new_shard_dt_decode` (which `Qwen3Vl::new` calls) already documents
-    /// that it lands on "the ambient selection (`--device` / scoped
-    /// `with_gpu`)", so scoping the call here is sufficient - no device
-    /// parameter needs to thread through `crate::model`.
+    /// Placement for an explicit `gpu` is a SCOPED registry selection
+    /// (`gpu_core::devices::with_gpu`), never an env mutation - a
+    /// server-lifetime resident must not change the backend every other
+    /// model builds on afterwards. `Qwen::new_shard_dt_decode` (which
+    /// `Qwen3Vl::new` calls) already documents that it lands on "the ambient
+    /// selection (`--device` / scoped `with_gpu`)", so scoping the call here
+    /// is sufficient - no device parameter needs to thread through
+    /// `crate::model`.
     pub fn load_on(dir: &str, max_pixels: u32, precision: Precision, gpu: Option<u32>) -> Result<Resident, String> {
         match gpu {
             None => load_resident(dir, max_pixels, precision),
@@ -1080,33 +1082,99 @@ fn load_resident(dir: &str, max_pixels: u32, precision: Precision) -> Result<Res
     }
 }
 
+/// This checkpoint's config plus the derived KV-cache/DeepStack capacity a
+/// resident would actually be built with at `max_pixels` - everything
+/// [`crate::footprint::estimate_vram_bytes`] needs, read WITHOUT touching a
+/// single weight tensor (a GGUF header is a mmap, an HF `config.json` a small
+/// JSON parse - both cheap enough to call from a residency `estimate()`).
+/// `crates/cli/src/resident_qwen3vl.rs::Qwen3VlResident::estimate` calls this
+/// so a residency budgeting decision reflects the checkpoint actually named
+/// by `BRAIN_QWEN3VL_WEIGHTS`, not a constant hand-derived for one released
+/// size.
+pub fn config_and_capacity(weights: &str, max_pixels: u32) -> Result<(Qwen3VlConfig, u32, u32), String> {
+    let cfg = config_of(weights)?;
+    let n_visual_capacity = visual_capacity(&cfg, max_pixels);
+    let seq_len = resolved_ctx_len(&cfg);
+    Ok((cfg, n_visual_capacity, seq_len))
+}
+
+/// This checkpoint's [`Qwen3VlConfig`] alone, from either format
+/// `classify_source` recognizes - the config-only read [`load_hf_resident`]/
+/// [`load_gguf_resident`] and [`config_and_capacity`] share, so the direct
+/// build path and a pre-flight capacity estimate cannot read a checkpoint's
+/// shape two different ways.
+fn config_of(weights: &str) -> Result<Qwen3VlConfig, String> {
+    match classify_source(weights)? {
+        Source::HfDir(dir) => hf_config(&dir),
+        Source::Gguf(files) => Ok(gguf_config(&files)?.0),
+    }
+}
+
+fn hf_config(dir: &str) -> Result<Qwen3VlConfig, String> {
+    let cfg_path = format!("{dir}/config.json");
+    let cfg_text = std::fs::read_to_string(&cfg_path).map_err(|e| format!("qwenvl: cannot read {cfg_path}: {e}"))?;
+    let cfg_json: serde_json::Value = serde_json::from_str(&cfg_text).map_err(|e| format!("qwenvl: cannot parse {cfg_path}: {e}"))?;
+    Ok(Qwen3VlConfig::from_hf(&cfg_json))
+}
+
+fn gguf_config(files: &crate::gguf_import::GgufFiles) -> Result<(Qwen3VlConfig, data::qwen_tokenizer::QwenBpe), String> {
+    let tok = crate::gguf_import::tokenizer(files)?;
+    let lm = checkpoint::gguf::MmapGguf::open(files.lm.to_str().ok_or("qwenvl: non-UTF8 lm path")?)?;
+    let mmproj = checkpoint::gguf::MmapGguf::open(files.mmproj.to_str().ok_or("qwenvl: non-UTF8 mmproj path")?)?;
+    let cfg = crate::gguf_import::config(&lm, &mmproj, &tok)?;
+    Ok((cfg, tok))
+}
+
 /// Build from a two-file llama.cpp checkpoint. Both halves are named on the
 /// way in, because a run that silently used a different projector than the
 /// operator expected has no visible symptom.
 fn load_gguf_resident(weights: &str, files: crate::gguf_import::GgufFiles, max_pixels: u32, precision: Precision) -> Result<Resident, String> {
     eprintln!("qwenvl: gguf checkpoint: model {}, vision projector {}", files.lm.display(), files.mmproj.display());
-    let tok = crate::gguf_import::tokenizer(&files)?;
-    let lm = checkpoint::gguf::MmapGguf::open(files.lm.to_str().ok_or("qwenvl: non-UTF8 lm path")?)?;
-    let mmproj = checkpoint::gguf::MmapGguf::open(files.mmproj.to_str().ok_or("qwenvl: non-UTF8 mmproj path")?)?;
-    let cfg = crate::gguf_import::config(&lm, &mmproj, &tok)?;
-    drop(lm);
-    drop(mmproj);
+    let (cfg, tok) = gguf_config(&files)?;
     let n_visual_capacity = visual_capacity(&cfg, max_pixels);
     let seq_len = resolved_ctx_len(&cfg);
-    let w = crate::gguf_import::weights(&files, &cfg)?;
-    let model = Qwen3Vl::from_imported(
-        w,
-        cfg.vision.clone(),
-        cfg.text.clone(),
-        seq_len,
-        cfg.image_token_id,
-        0,
-        n_visual_capacity,
-        cfg.mrope_section,
-        precision.dtype(),
-    );
-    report_tier(&model, precision);
-    Ok(Resident { weights: weights.to_string(), max_pixels, precision, n_visual_capacity, seq_len, cfg, model, tok })
+    let bytes = crate::footprint::estimate_vram_bytes(&cfg, precision, seq_len, n_visual_capacity);
+    place_and_build(bytes, || {
+        let w = crate::gguf_import::weights(&files, &cfg)?;
+        let model = Qwen3Vl::from_imported(
+            w,
+            cfg.vision.clone(),
+            cfg.text.clone(),
+            seq_len,
+            cfg.image_token_id,
+            0,
+            n_visual_capacity,
+            cfg.mrope_section,
+            precision.dtype(),
+        );
+        report_tier(&model, precision);
+        Ok(Resident { weights: weights.to_string(), max_pixels, precision, n_visual_capacity, seq_len, cfg: cfg.clone(), model, tok })
+    })
+}
+
+/// This checkpoint's [`Qwen3VlConfig::text::n_layers`]-derived footprint,
+/// declared to [`gpu_core::devices::place`] before `f` builds anything, so an
+/// over-budget checkpoint is refused BY NAME (which part, how many bytes,
+/// what each card has free) instead of `f` dispatching a doomed device
+/// allocation that panics the backend mid-upload (see
+/// `crates/cli/src/placement.rs`'s own `an_impossible_model_is_refused_legibly`
+/// test for the shape of that refusal).
+///
+/// Skipped - `f` runs exactly as it always did - when a device is ALREADY
+/// pinned ([`gpu_core::devices::current_gpu`] is `Some`): an explicit
+/// `--device`, or [`Resident::load_on`]'s `Some(gpu)` arm (the
+/// residency-scheduled path, which has already run this same estimate
+/// through `crates/cli/src/resident_qwen3vl.rs::Qwen3VlResident::estimate`
+/// and `residency::place::pick_device` BEFORE calling `activate` - asking
+/// the automatic placer a second time here could only disagree with a
+/// decision already made and acted on).
+fn place_and_build<R>(bytes: u64, f: impl FnOnce() -> Result<R, String>) -> Result<R, String> {
+    if gpu_core::devices::current_gpu().is_some() {
+        return f();
+    }
+    let need = gpu_core::devices::Need::sized("qwen3vl", bytes, 0);
+    let homes = gpu_core::devices::place(&[need])?;
+    homes.run("qwen3vl", f)?
 }
 
 /// The KV-cache capacity to actually build a resident's decoder with:
@@ -1159,19 +1227,27 @@ fn visual_capacity(cfg: &Qwen3VlConfig, max_pixels: u32) -> u32 {
 }
 
 fn load_hf_resident(weights: &str, dir: &str, max_pixels: u32, precision: Precision) -> Result<Resident, String> {
-    let cfg_path = format!("{dir}/config.json");
-    let cfg_text = std::fs::read_to_string(&cfg_path).map_err(|e| format!("qwenvl: cannot read {cfg_path}: {e}"))?;
-    let cfg_json: serde_json::Value = serde_json::from_str(&cfg_text).map_err(|e| format!("qwenvl: cannot parse {cfg_path}: {e}"))?;
-    let cfg = Qwen3VlConfig::from_hf(&cfg_json);
+    let cfg = hf_config(dir)?;
     let tok = data::qwen_tokenizer::QwenBpe::from_dir(dir).map_err(|e| format!("qwenvl: tokenizer: {e}"))?;
 
     let n_visual_capacity = visual_capacity(&cfg, max_pixels);
     let seq_len = resolved_ctx_len(&cfg);
-    let model =
-        Qwen3Vl::from_hf(dir, cfg.vision.clone(), cfg.text.clone(), seq_len, cfg.image_token_id, 0, n_visual_capacity, cfg.mrope_section, precision.dtype())?;
-    report_tier(&model, precision);
-
-    Ok(Resident { weights: weights.to_string(), max_pixels, precision, n_visual_capacity, seq_len, cfg, model, tok })
+    let bytes = crate::footprint::estimate_vram_bytes(&cfg, precision, seq_len, n_visual_capacity);
+    place_and_build(bytes, || {
+        let model = Qwen3Vl::from_hf(
+            dir,
+            cfg.vision.clone(),
+            cfg.text.clone(),
+            seq_len,
+            cfg.image_token_id,
+            0,
+            n_visual_capacity,
+            cfg.mrope_section,
+            precision.dtype(),
+        )?;
+        report_tier(&model, precision);
+        Ok(Resident { weights: weights.to_string(), max_pixels, precision, n_visual_capacity, seq_len, cfg: cfg.clone(), model, tok })
+    })
 }
 
 /// Bilinear-resample interleaved-HWC `[0,1]` pixels from `(w,h)` to
@@ -1247,6 +1323,75 @@ mod tests {
 
         cfg.text.max_position_embeddings = 262144; // the real released config's declared ceiling
         assert_eq!(resolved_ctx_len(&cfg), default_ctx_len(), "a checkpoint with real headroom gets the operator's configured default, not a fixed 4096");
+    }
+
+    fn tmp_dir(tag: &str) -> std::path::PathBuf {
+        static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        std::env::temp_dir().join(format!("brain-qwen3vl-caps-test-{tag}-{}-{n}", std::process::id()))
+    }
+
+    /// A real HF `config.json` (every field [`Qwen3VlConfig::from_hf`]
+    /// requires) at the given `num_hidden_layers`/`hidden_size`, so a test can
+    /// write a checkpoint directory whose declared shape is NOT the built-in
+    /// 4B preset - the only way to prove [`config_and_capacity`] reads a
+    /// checkpoint's own dimensions rather than always answering the same
+    /// hand-derived figure.
+    fn write_hf_config(dir: &std::path::Path, num_hidden_layers: u64, hidden_size: u64, intermediate_size: u64) {
+        std::fs::create_dir_all(dir).unwrap();
+        let json = serde_json::json!({
+            "image_token_id": 151655,
+            "video_token_id": 151656,
+            "vision_start_token_id": 151652,
+            "vision_end_token_id": 151653,
+            "text_config": {
+                "vocab_size": 151936,
+                "num_hidden_layers": num_hidden_layers,
+                "hidden_size": hidden_size,
+                "num_attention_heads": 32,
+                "num_key_value_heads": 8,
+                "head_dim": 128,
+                "intermediate_size": intermediate_size,
+                "rope_theta": 5000000,
+                "rms_norm_eps": 1e-6,
+                "tie_word_embeddings": true,
+                "rope_scaling": {"mrope_interleaved": true, "mrope_section": [24, 20, 20], "rope_type": "default"}
+            },
+            "vision_config": {
+                "depth": 24, "hidden_size": 1024, "num_heads": 16, "intermediate_size": 4096,
+                "patch_size": 16, "temporal_patch_size": 2, "spatial_merge_size": 2,
+                "num_position_embeddings": 2304, "out_hidden_size": hidden_size, "in_channels": 3,
+                "deepstack_visual_indexes": [5, 11, 17]
+            }
+        });
+        std::fs::write(dir.join("config.json"), serde_json::to_vec(&json).unwrap()).unwrap();
+    }
+
+    /// THE regression test for the reported bug: `brain qwen3vl generate
+    /// --weights <an 8B-class GGUF>` OOM'd a 24 GiB card because nothing in
+    /// the placement path knew the checkpoint being loaded was bigger than
+    /// the 4B config `crates/cli/src/resident_qwen3vl.rs`'s footprint
+    /// constants were hand-derived for. [`config_and_capacity`] must read
+    /// EACH checkpoint's own `num_hidden_layers`, so a bigger one estimates a
+    /// bigger footprint instead of always answering the same number.
+    #[test]
+    fn config_and_capacity_reflects_the_real_checkpoints_own_layer_count() {
+        let small_dir = tmp_dir("small");
+        let big_dir = tmp_dir("big");
+        write_hf_config(&small_dir, 36, 2560, 9728); // the released 4B's own shape
+        write_hf_config(&big_dir, 72, 4096, 12288); // roughly 8B-class: more layers AND wider
+
+        let (small_cfg, small_nv, small_seq) = config_and_capacity(small_dir.to_str().unwrap(), DEFAULT_SERVE_MAX_PIXELS).expect("small config reads");
+        let (big_cfg, big_nv, big_seq) = config_and_capacity(big_dir.to_str().unwrap(), DEFAULT_SERVE_MAX_PIXELS).expect("big config reads");
+        assert_eq!(small_cfg.text.n_layers, 36);
+        assert_eq!(big_cfg.text.n_layers, 72);
+
+        let small_bytes = crate::footprint::estimate_vram_bytes(&small_cfg, Precision::F32, small_seq, small_nv);
+        let big_bytes = crate::footprint::estimate_vram_bytes(&big_cfg, Precision::F32, big_seq, big_nv);
+        assert!(big_bytes > small_bytes * 2, "a wider, deeper checkpoint must estimate a noticeably bigger footprint: small={small_bytes} big={big_bytes}");
+
+        std::fs::remove_dir_all(&small_dir).ok();
+        std::fs::remove_dir_all(&big_dir).ok();
     }
 
     /// [`decode_images`] reads contiguous from `image`: `image`+`image1` present

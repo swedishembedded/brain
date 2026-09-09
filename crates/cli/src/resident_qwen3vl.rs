@@ -27,13 +27,18 @@
 //!
 //! # The footprint, and why it is a derivation, not a measurement
 //!
-//! No real Qwen3-VL-4B checkpoint has been run through THIS resident on an
-//! accelerator on the machine this was written on, so [`FP32_BYTES`] and
-//! [`INT8_BYTES`] are derived from the released `Qwen3-VL-4B-Instruct`
-//! config arithmetic (`qwen3vl::config::Qwen3VlConfig::qwen3_vl_4b`), not
-//! measured - see those constants' own doc comments for the arithmetic.
-//! `crate::resident_moondream3`'s own doc explains why an honest derivation,
-//! shown, is preferred over a fabricated "measured" figure here.
+//! [`ResidentModel::estimate`] reads `self.dir`'s OWN config
+//! (`qwen3vl::caps::config_and_capacity`, a cheap metadata-only read - a GGUF
+//! header is a mmap, an HF `config.json` a small JSON parse) and runs it
+//! through `qwen3vl::footprint::estimate_vram_bytes` - the same arithmetic
+//! `qwen3vl::caps::load_hf_resident`/`load_gguf_resident` use to refuse an
+//! over-budget checkpoint on the direct `brain qwen3vl generate` path. A
+//! constant sized for one released checkpoint (the 4B) cannot tell an 8B
+//! checkpoint's decoder apart from a 4B's - which is exactly the gap that let
+//! a real 8B GGUF get budgeted at the 4B's own figure and OOM the driver
+//! instead of being refused (see [`FP32_BYTES`]/[`INT8_BYTES`]'s own doc:
+//! they are now the FALLBACK for the rare case `self.dir`'s config cannot be
+//! read - `estimate()` must never itself hard-fail, see this trait's doc).
 //!
 //! # Batching: the documented serial default
 //!
@@ -53,40 +58,15 @@ use capability::{ActionResult, Invocation, Manifest, Progress};
 use qwen3vl::caps::{Precision, Resident, DEFAULT_SERVE_MAX_PIXELS, DIR_VAR, MODEL};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 
-/// Host bytes an fp32 build holds while hot.
-///
-/// DERIVED from `Qwen3VlConfig::qwen3_vl_4b`, not measured (see this module's
-/// doc). Decoder: 36 layers, each `q_proj` (2560x4096) + `k_proj`/`v_proj`
-/// (2560x1024 each) + `o_proj` (4096x2560) = 26,214,400 attention params,
-/// plus a SwiGLU MLP (`d_ff` 9728: gate+up 2560x9728x2 + down 9728x2560) =
-/// 74,711,040 - 100,925,440 params/layer x 36 = 3,633,315,840. Tied
-/// embedding/`lm_head`: vocab 151936 x d_model 2560 = 388,956,160. Decoder
-/// total ~4.02B params x 4 bytes = ~14.98 GiB. Vision tower (ViT depth 24,
-/// hidden 1024, intermediate 4096): ~12.58M params/block x 24 =
-/// ~301.99M, plus patch embed (1536x1024), the learned 2304x1024 position
-/// table, and 4 PatchMergers (1 main + 3 DeepStack, ~17M params each) =
-/// ~374M params x 4 bytes = ~1.39 GiB (the vision tower is ALWAYS fp32 -
-/// `qwen3vl::caps`'s own doc: "a small fraction of the weights and none of
-/// the per-token bandwidth"). Weights alone: ~14.98 + ~1.39 = ~16.37 GiB,
-/// consistent with `Qwen3Vl::from_hf`'s own doc comment ("the released 4B
-/// checkpoint is ~16 GB in f32"). Add the KV cache at this resident's built
-/// context (`qwen3vl::caps::default_ctx_len()`, `$BRAIN_QWEN3VL_CTX` default
-/// 24576 - NOT the old fixed `SEQ_LEN=4096` this derivation used before
-/// `qwen3vl::caps` made context a checkpoint-clamped, operator-tunable
-/// default): 8 kv-heads x 128 head_dim x 2 (K,V) x 4 bytes/elem x 36 layers x
-/// 24576 tokens = exactly 6.75 GiB, plus DeepStack/splice scratch and the
-/// packed-patch/image-token buffers (~1 GiB, generous at the default
-/// `max_pixels`). Total: ~16.37 + 6.75 + ~1 = ~24.12 GiB, rounded up.
+/// Fallback fp32 estimate for the rare case `self.dir`'s config cannot be
+/// read at `estimate()` time (see this module's doc) - the released
+/// `Qwen3-VL-4B-Instruct` figure `qwen3vl::footprint::estimate_vram_bytes`
+/// itself now produces for `Qwen3VlConfig::qwen3_vl_4b` (~24 GiB; see that
+/// function's own tests for the arithmetic), not a substitute for it.
 const FP32_BYTES: u64 = 25u64 << 30;
 
-/// Host bytes an int8 build holds while hot: same derivation as
-/// [`FP32_BYTES`], but the DECODER linears (the ~4.02B params counted above)
-/// are one byte each instead of four - ~3.75 GiB - while the vision tower
-/// stays fp32 (~1.39 GiB, see [`FP32_BYTES`]'s doc). Weights: ~3.75 + ~1.39 =
-/// ~5.14 GiB. The KV cache is NOT quantized by this resident (`Qwen3Vl`'s
-/// `Precision` only selects the decoder LINEAR dtype), so it stays the same
-/// 6.75 GiB at the default built context, plus the same ~1 GiB of scratch.
-/// Total: ~5.14 + 6.75 + 1 = ~12.89 GiB, rounded up.
+/// Fallback int8 estimate, same rationale as [`FP32_BYTES`] (~13 GiB for the
+/// 4B config).
 const INT8_BYTES: u64 = 13u64 << 30;
 
 /// Qwen3-VL behind the scheduler. `BRAIN_QWEN3VL_WEIGHTS` names either an HF
@@ -163,11 +143,18 @@ impl ResidentModel for Qwen3VlResident {
         // `place::pick_device` falls a weight-holding model back to the CPU
         // pool at the same figure on a machine with no GPU, which is its own
         // rule and the behaviour this model wants.
-        let (_, _, precision) = parse_key(key).unwrap_or((String::new(), DEFAULT_SERVE_MAX_PIXELS, Precision::default()));
-        let bytes = match precision {
-            Precision::I8 => INT8_BYTES,
-            Precision::F32 => FP32_BYTES,
-        };
+        let (_, max_pixels, precision) = parse_key(key).unwrap_or((String::new(), DEFAULT_SERVE_MAX_PIXELS, Precision::default()));
+        // Read THIS checkpoint's own config (never the request's `dir` from
+        // `key` -- `self.dir` is the one this resident actually serves) and
+        // derive the real figure from it; only a config this resident cannot
+        // even read (a bad path, a malformed file) falls back to the
+        // hand-derived 4B constant, which `activate` would refuse on anyway.
+        let bytes = qwen3vl::caps::config_and_capacity(&self.dir, max_pixels)
+            .map(|(cfg, n_visual_capacity, seq_len)| qwen3vl::footprint::estimate_vram_bytes(&cfg, precision, seq_len, n_visual_capacity))
+            .unwrap_or(match precision {
+                Precision::I8 => INT8_BYTES,
+                Precision::F32 => FP32_BYTES,
+            });
         MemCost::new(bytes, 0)
     }
 

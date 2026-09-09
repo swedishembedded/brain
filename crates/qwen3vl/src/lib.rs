@@ -25,6 +25,7 @@ pub mod config;
 pub mod spec;
 pub mod encoder;
 pub mod finetune;
+pub mod footprint;
 pub mod gguf_import;
 pub mod import;
 pub mod model;
