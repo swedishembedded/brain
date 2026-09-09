@@ -54,6 +54,7 @@ use clip::config::ClipTextConfig;
 use clip::model::ClipText;
 use data::unigram::UnigramTokenizer;
 use diffusion::scheduler::time_shift_exponential;
+use gpu_core::devices::{Homes, Need};
 use gpu_core::Gpu;
 use t5encoder::config::T5Config;
 use t5encoder::model::T5Encoder;
@@ -61,7 +62,7 @@ use vae::config::VaeConfig;
 use vae::VaeDecoder;
 
 use crate::config::Flux1Config;
-use crate::model::{position_ids, Flux1Model, KERNELS};
+use crate::model::{position_ids, Flux1Model, Precision, KERNELS};
 
 /// How the latent is seeded and how many steps to take.
 #[derive(Clone, Debug)]
@@ -95,13 +96,136 @@ impl Default for GenerateOptions {
 /// and dropped, the same tiering `sdxlunet::pipeline::Sdxl` uses and for the
 /// same reason (documented on its `Sdxl` struct).
 pub struct Flux1 {
-    gpu: Gpu,
     root: String,
     cfg: Flux1Config,
     variant: String,
     dit: Flux1Model,
     vae_cfg: VaeConfig,
     hw: (u32, u32),
+    /// Where each part landed - `"te"` is read by [`Flux1::clip_l`]/[`Flux1::t5_xxl`]
+    /// so the text towers build on whichever card [`plan_flux1`] gave them,
+    /// never assumed to share the DiT's.
+    homes: Homes,
+}
+
+/// Bytes the DiT's own weights occupy at `precision`, closed-form from
+/// [`Flux1Config`] (no per-tensor manifest exists for this crate, unlike
+/// `flux2::pipeline::dit_bytes`'s `tensor_manifest()` route) - a double block
+/// carries independent img/txt weights (`qkv` + `proj` + a 2-layer MLP each),
+/// a single block fuses `qkv+mlp_in` and `proj+mlp_out` into shared linears.
+/// Only 2-D linears quantize under [`Precision::Int8`]; norm/mod tables stay
+/// f32 in both tiers, same rule `flux2::pipeline::weight_bytes` uses.
+///
+/// Pinned by `dit_weight_bytes_matches_measured_footprint` against the
+/// measured fp32 footprint (`AGENTS.md`/`dit_parity.rs`: ~11.9 B params ≈
+/// 47.6 GiB) - a PLACEMENT INPUT, not claimed exact.
+fn dit_weight_bytes(cfg: &Flux1Config, precision: Precision) -> u64 {
+    let d = cfg.hidden as u64;
+    let mlp = cfg.mlp_hidden() as u64;
+    let lin = |rows: u64, cols: u64| -> u64 {
+        let n = rows * cols;
+        let w = if precision == Precision::Int8 { 1 } else { 4 };
+        n * w + if precision == Precision::Int8 { n / 32 * 4 } else { 0 } // group-32 scales
+    };
+    // img + txt halves: qkv, proj, 2-layer MLP, and each stream's own
+    // `Modulation(dim, double=true)` (shift/scale/gate for BOTH the attn and
+    // mlp sub-layers = a [6d, d] linear) - omitting this term is what made an
+    // earlier version of this function undercount by 32% against the
+    // measured ~11.9 B params (see `dit_weight_bytes_matches_measured_footprint`).
+    let double_block = 2 * (lin(3 * d, d) + lin(d, d) + lin(mlp, d) + lin(d, mlp) + lin(6 * d, d));
+    // fused qkv+mlp_in, fused proj+mlp_out, and one `Modulation(dim,
+    // double=false)` ([3d, d] - single blocks share one modulation output
+    // across attn and mlp).
+    let single_block = lin(3 * d + mlp, d) + lin(d, d + mlp) + lin(3 * d, d);
+    let boundary = lin(d, cfg.in_channels as u64) // img_in
+        + lin(d, cfg.context_in_dim as u64) // txt_in
+        + lin(cfg.in_channels as u64, d) // final_layer.linear
+        + lin(d, cfg.vec_in_dim as u64) // vector_in (2-layer MLP, approximated as one)
+        + if cfg.guidance_embed { lin(d, 256) } else { 0 };
+    cfg.depth_double as u64 * double_block + cfg.depth_single as u64 * single_block + boundary
+}
+
+/// The DiT's device scratch for one joint (image-only, text2image) sequence -
+/// same shape as `flux2::pipeline::dit_scratch_bytes`, without FLUX.2's
+/// reference-token/batch axes this pipeline never fills.
+fn dit_scratch_bytes(cfg: &Flux1Config, precision: Precision, n_joint: u64) -> u64 {
+    let d = cfg.hidden as u64;
+    let mlp = cfg.mlp_hidden() as u64;
+    let hd = cfg.head_dim() as u64;
+    let attn_words = if precision == Precision::Int8 { 2 } else { 2 * cfg.n_heads as u64 * n_joint * n_joint };
+    let f32_words = n_joint * (16 * d + 3 * mlp + 2 * cfg.in_channels as u64 + hd) + attn_words + 17 * d;
+    let mut bytes = f32_words * 4;
+    if precision == Precision::Int8 {
+        bytes += n_joint * (4 + d + mlp);
+    }
+    bytes
+}
+
+/// The DiT part's total device footprint: its weights plus scratch, plus
+/// whatever the caller folds in on top (`dit_extra_bytes` - PuLID's resident
+/// `PulidCa` module, ~1.6 GB fp32, when this pipeline is conditioned).
+pub fn dit_bytes(cfg: &Flux1Config, precision: Precision, n_joint: u64, dit_extra_bytes: u64) -> u64 {
+    dit_weight_bytes(cfg, precision) + dit_scratch_bytes(cfg, precision, n_joint) + dit_extra_bytes
+}
+
+/// T5-XXL's device footprint - always fp32 (`t5encoder` has no int8 tier) -
+/// weights plus the per-layer scratch `T5Encoder::new_on` allocates (see
+/// `crates/flux1/src/pipeline.rs`'s module docs on why this cannot share the
+/// DiT's card at `max_len=512`).
+fn te_bytes(max_len: u64) -> u64 {
+    let c = T5Config::xxl();
+    let (d, ff, layers) = (c.d_model as u64, c.d_ff as u64, c.layers as u64);
+    let weights = (2 * d * ff + 4 * 64 * c.heads as u64 * d + 2 * d) * layers * 4 + d * c.vocab as u64 * 4;
+    let scratch = layers * max_len * (11 * d + 4 * ff) * 4;
+    weights + scratch
+}
+
+/// The two parts this pipeline ever needs placed: the DiT (`dit`, including
+/// any `dit_extra_bytes` a conditioning adapter adds) and T5-XXL (`te`,
+/// CLIP-L rides with the DiT - ~0.5 GB, not worth its own part). `.apart()`
+/// on both so the placer never puts them on one card when two are available;
+/// with one card (or none installed) [`gpu_core::devices::place`] falls back
+/// to the ambient device for everything, unchanged from today's behavior.
+pub fn part_needs(cfg: &Flux1Config, precision: Precision, n_joint: u64, dit_extra_bytes: u64) -> Vec<Need> {
+    vec![
+        Need::sized("dit", dit_bytes(cfg, precision, n_joint, dit_extra_bytes), 0).apart(),
+        Need::sized("te", te_bytes(512), 0).apart(),
+    ]
+}
+
+/// Ask the installed placement policy where the DiT and T5-XXL go. A caller
+/// conditioning the DiT (PuLID) folds its own extra device bytes in via
+/// `dit_extra_bytes` so the plan prices what will actually be built, not a
+/// bare FLUX.1 DiT.
+pub fn plan_flux1(cfg: &Flux1Config, precision: Precision, n_joint: u64, dit_extra_bytes: u64) -> Result<Homes, String> {
+    gpu_core::devices::place(&part_needs(cfg, precision, n_joint, dit_extra_bytes))
+}
+
+/// `BRAIN_FLUX1_TE_DEVICE` overrides the automatic T5-XXL/CLIP-L placement -
+/// the same escape hatch `BRAIN_FLUX2_TE_DEVICE`/`wan`'s T5 selector give an
+/// operator when the automatic plan doesn't fit some other box.
+fn te_device_override() -> Result<Option<gpu_core::devices::Home>, String> {
+    use gpu_core::devices::Home;
+    match std::env::var("BRAIN_FLUX1_TE_DEVICE") {
+        Err(_) => Ok(None),
+        Ok(s) if s == "cpu" => Ok(Some(Home::Cpu)),
+        Ok(s) => {
+            let i: u32 = s.strip_prefix("gpu").unwrap_or(&s).parse().map_err(|_| format!("flux1: BRAIN_FLUX1_TE_DEVICE={s:?} - expected cpu or gpu<N>"))?;
+            Ok(Some(Home::Gpu(i)))
+        }
+    }
+}
+
+/// Run `f` with the ambient device scoped to `home` - the `Home`-typed
+/// sibling of `Homes::run` (which resolves by NAME out of one `Homes`; this
+/// resolves a `Home` this function already picked, honoring
+/// `BRAIN_FLUX1_TE_DEVICE` over the plan). A `Home::Cpu` part runs unscoped,
+/// same as `Homes::run`.
+fn run_on_home<R>(home: gpu_core::devices::Home, f: impl FnOnce() -> R) -> Result<R, String> {
+    match home {
+        gpu_core::devices::Home::Gpu(i) if !gpu_core::devices::gpus().is_empty() => gpu_core::devices::with_gpu(i, f),
+        _ => Ok(f()),
+    }
 }
 
 /// Inverse of the DiT's token patchify: predicted/denoised tokens
@@ -204,17 +328,48 @@ impl Flux1 {
     /// max joint-token budget is sized for exactly this latent, so a
     /// different size needs a different `Flux1`.
     pub fn load(root: &str, variant: &str, h: u32, w: u32) -> Result<Flux1, String> {
+        Flux1::load_with(root, variant, h, w, Precision::F32)
+    }
+
+    /// [`Flux1::load`] at a numeric tier - `precision` only governs the DiT
+    /// (T5-XXL/CLIP-L have no int8 tier, per [`te_bytes`]'s doc). Places the
+    /// DiT and T5-XXL automatically via [`plan_flux1`] (`.apart()`, so a
+    /// two-card box never stacks both) and builds the DiT from `flux1::KERNELS`
+    /// on its own `Gpu` - the shared entry point for a caller (PuLID) that
+    /// needs its own kernel list on the SAME handle is [`Flux1::load_shared`].
+    pub fn load_with(root: &str, variant: &str, h: u32, w: u32, precision: Precision) -> Result<Flux1, String> {
         let cfg = Flux1Config::from_name(variant)?;
+        let n_max = Flux1::n_max(h, w)?;
+        let homes = plan_flux1(&cfg, precision, n_max as u64, 0)?;
+        eprintln!("flux1: placement {}", homes.describe());
+        let gpu = homes.run("dit", || Gpu::new(KERNELS))?;
+        Flux1::build(root, variant, h, w, cfg, n_max, gpu, precision, homes)
+    }
+
+    /// [`Flux1::load_with`] for a caller that owns the DiT's placement and
+    /// kernel list itself (PuLID's `Bundle::load`, sharing one `Gpu` built
+    /// from `pulid::joint_kernels()` between the DiT and `PulidCa` - see
+    /// `crates/flux1/src/inject.rs`'s "same `Gpu` handle" contract). `gpu` MUST
+    /// have been built under `homes.run("dit", ...)` (or the caller's own
+    /// equivalent scoping) so its device matches what `homes` planned.
+    pub fn load_shared(root: &str, variant: &str, h: u32, w: u32, gpu: Gpu, precision: Precision, homes: Homes) -> Result<Flux1, String> {
+        let cfg = Flux1Config::from_name(variant)?;
+        let n_max = Flux1::n_max(h, w)?;
+        Flux1::build(root, variant, h, w, cfg, n_max, gpu, precision, homes)
+    }
+
+    fn n_max(h: u32, w: u32) -> Result<u32, String> {
         let scale = 16u32; // VAE downscale 8 * DiT 2x2 patchify
         if !h.is_multiple_of(scale) || !w.is_multiple_of(scale) {
             return Err(format!("flux1: {w}x{h} is not a multiple of {scale}"));
         }
-        let r = Path::new(root);
         let (lh, lw) = ((h / 16) as usize, (w / 16) as usize);
-        let n_max = (lh * lw) as u32; // no txt/refs headroom yet: text2image only
+        Ok((lh * lw) as u32) // no txt/refs headroom yet: text2image only
+    }
 
-        let gpu = Gpu::new(KERNELS);
-
+    #[allow(clippy::too_many_arguments)]
+    fn build(root: &str, variant: &str, h: u32, w: u32, cfg: Flux1Config, n_max: u32, gpu: Gpu, precision: Precision, homes: Homes) -> Result<Flux1, String> {
+        let r = Path::new(root);
         let dit_dir = r.join("transformer");
         let dit_path = if dit_dir.exists() { dit_dir } else { r.to_path_buf() };
         let ts = read_dit_tensors(dit_path.to_str().ok_or("flux1: non-UTF8 transformer path")?, &cfg)?;
@@ -225,7 +380,7 @@ impl Flux1 {
         // n_max joint tokens (txt + image + reference)"). Text2image submits
         // `ctx` and `img_tokens` as separate arguments to `forward`, so
         // `n_max` only needs to cover the image tokens this pipeline builds.
-        let dit = Flux1Model::new(&cfg, &ts, gpu.share(), n_max);
+        let dit = Flux1Model::new_with(&cfg, &ts, gpu, n_max, precision);
 
         let vae_json = r.join("vae").join("config.json");
         let vae_cfg = if vae_json.exists() {
@@ -249,7 +404,14 @@ impl Flux1 {
             }
         };
 
-        Ok(Flux1 { gpu, root: root.into(), cfg, variant: variant.into(), dit, vae_cfg, hw: (h, w) })
+        Ok(Flux1 { root: root.into(), cfg, variant: variant.into(), dit, vae_cfg, hw: (h, w), homes })
+    }
+
+    /// T5-XXL/CLIP-L's home, honoring `BRAIN_FLUX1_TE_DEVICE` over the plan -
+    /// resolved once per call rather than cached, since it is cheap and an
+    /// operator may change the env var between requests.
+    fn te_home(&self) -> Result<gpu_core::devices::Home, String> {
+        Ok(te_device_override()?.unwrap_or_else(|| self.homes.of("te").unwrap_or(gpu_core::devices::Home::Cpu)))
     }
 
     fn clip_l(&self) -> Result<ClipText, String> {
@@ -258,7 +420,9 @@ impl Flux1 {
         let init = clip::import::import_text(t, &cfg)?;
         let map: std::collections::HashMap<String, Vec<f32>> =
             init.into_iter().map(|(k, (_, d))| (k, d)).collect();
-        Ok(ClipText::new_on(self.gpu.new_like(clip::model::TEXT_PIPELINES), cfg, 1, 77, &map))
+        // CLIP-L is small (~0.5 GB) - rides on whichever card T5-XXL landed on
+        // rather than costing its own placement slot.
+        run_on_home(self.te_home()?, || ClipText::new_on(Gpu::new(clip::model::TEXT_PIPELINES), cfg, 1, 77, &map))
     }
 
     fn t5_xxl(&self, max_len: usize) -> Result<T5Encoder, String> {
@@ -267,7 +431,7 @@ impl Flux1 {
         let tensors = t5encoder::import::read_encoder(&dir)?;
         let init: std::collections::HashMap<String, Vec<f32>> =
             t5encoder::import::import_hf(tensors, &cfg)?.into_iter().map(|(k, (_, d))| (k, d)).collect();
-        Ok(T5Encoder::new_on(self.gpu.new_like(t5encoder::model::PIPELINES), cfg, 1, max_len as u32, &init))
+        run_on_home(self.te_home()?, || T5Encoder::new_on(Gpu::new(t5encoder::model::PIPELINES), cfg, 1, max_len as u32, &init))
     }
 
     /// `(pooled[768], ctx[max_len*4096])` - CLIP-L's pooled EOS row (it does
@@ -367,5 +531,41 @@ fn read_any_safetensors(dir: &Path) -> Result<Vec<checkpoint::safetensors::StTen
         out.extend(checkpoint::safetensors::read(f.to_str().ok_or("flux1: non-UTF8 path")?)?);
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod placement_tests {
+    use super::*;
+
+    /// `dit_weight_bytes` is a closed-form PLACEMENT INPUT, not a real
+    /// tensor manifest (flux1 has none) - pinned against the measured fp32
+    /// footprint (`AGENTS.md`/`dit_parity.rs`: ~11.9 B params ≈ 47.6 GiB) so
+    /// a future architecture-formula bug (like the missing modulation
+    /// linears this test would have caught) shows up as a failing test, not
+    /// as a placement that silently doesn't fit.
+    #[test]
+    fn dit_weight_bytes_matches_measured_footprint() {
+        let cfg = Flux1Config::dev();
+        let gib = dit_weight_bytes(&cfg, Precision::F32) as f64 / (1024.0 * 1024.0 * 1024.0);
+        assert!((40.0..55.0).contains(&gib), "dit_weight_bytes = {gib:.2} GiB, expected ~47.6 GiB (measured)");
+    }
+
+    #[test]
+    fn int8_dit_weight_bytes_is_smaller_than_fp32() {
+        let cfg = Flux1Config::dev();
+        let f32_bytes = dit_weight_bytes(&cfg, Precision::F32);
+        let i8_bytes = dit_weight_bytes(&cfg, Precision::Int8);
+        assert!(i8_bytes < f32_bytes / 3, "int8 ({i8_bytes}) should be well under 1/3 of fp32 ({f32_bytes})");
+    }
+
+    /// `part_needs` keeps the DiT and T5-XXL `.apart()` so a 2-card box never
+    /// stacks a ~17 GB DiT and a ~21 GB T5-XXL on one card.
+    #[test]
+    fn dit_and_te_are_placed_apart() {
+        let cfg = Flux1Config::dev();
+        let needs = part_needs(&cfg, Precision::Int8, 1024, 0);
+        assert_eq!(needs.len(), 2);
+        assert!(needs.iter().all(|n| n.affinity == gpu_core::devices::Affinity::Apart));
+    }
 }
 

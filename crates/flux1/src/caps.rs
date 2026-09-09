@@ -39,6 +39,10 @@ pub const MODEL: &str = "brain/flux1";
 /// The variant enum, in manifest order.
 const VARIANTS: [&str; 3] = ["dev", "kontext-dev", "schnell"];
 
+/// The DiT precision enum, in manifest order - the CLI/capability names
+/// [`crate::model::Precision::from_name`] maps.
+const PRECISIONS: [&str; 2] = ["fp32", "int8"];
+
 /// T5-XXL context length. FLUX.1-dev's released default is 512; schnell is
 /// commonly run at 256 for speed. A UI-rangeable param rather than baked in,
 /// same as `t5encoder::caps`'s `max_len`.
@@ -54,6 +58,7 @@ fn text2image_spec() -> ActionSpec {
         .param(ParamSpec::new("max_len", ParamType::Int, "T5-XXL context length").default(json!(DEFAULT_MAX_LEN)).min(32.0).max(512.0).step(1.0))
         .param(ParamSpec::new("variant", ParamType::Enum(VARIANTS.iter().map(|s| s.to_string()).collect()), "model variant").default(json!("dev")))
         .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (omit for 0)"))
+        .param(ParamSpec::new("precision", ParamType::Enum(PRECISIONS.iter().map(|s| s.to_string()).collect()), "DiT numeric tier -- int8 is what fits a 24 GiB card, fp32 is the parity reference").default(json!("fp32")))
         .output(capability::BlobSpec::new("image", capability::Media::Image, "the generated image"))
 }
 
@@ -71,6 +76,7 @@ struct Req {
     variant: String,
     opts: GenerateOptions,
     max_len: usize,
+    precision: crate::model::Precision,
 }
 
 fn req_from(inv: &Invocation) -> Req {
@@ -88,6 +94,7 @@ fn req_from(inv: &Invocation) -> Req {
             width: inv.get_i64("width").unwrap_or(1024).max(16) as u32,
         },
         max_len: inv.get_i64("max_len").unwrap_or(DEFAULT_MAX_LEN as i64).max(1) as usize,
+        precision: crate::model::Precision::from_name(&inv.get_str("precision").unwrap_or_else(|| "fp32".into())).unwrap_or(crate::model::Precision::F32),
     }
 }
 
@@ -98,7 +105,7 @@ fn req_from(inv: &Invocation) -> Req {
 /// residency adapter (`crates/cli/src/resident_flux1.rs`).
 pub struct Session {
     root: String,
-    built: Mutex<std::collections::HashMap<(String, u32, u32), Flux1>>,
+    built: Mutex<std::collections::HashMap<(String, u32, u32, &'static str), Flux1>>,
 }
 
 impl Session {
@@ -117,12 +124,12 @@ impl Session {
     fn text2image(&self, inv: &Invocation) -> ActionResult {
         let req = req_from(inv);
         let (h, w) = (req.opts.height, req.opts.width);
-        let key = (req.variant.clone(), h, w);
+        let key = (req.variant.clone(), h, w, req.precision.name());
         let mut guard = self.built.lock().map_err(|_| "flux1: pipeline lock poisoned")?;
         let p = match guard.entry(key) {
             std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
             std::collections::hash_map::Entry::Vacant(e) => {
-                e.insert(Flux1::load(&self.root, &req.variant, h, w)?)
+                e.insert(Flux1::load_with(&self.root, &req.variant, h, w, req.precision)?)
             }
         };
         let hwc = p.generate(&req.prompt, &req.opts, req.max_len)?;
