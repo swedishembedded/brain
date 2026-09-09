@@ -843,6 +843,7 @@ name = "brain-data"
 version = "1.1.0"
 dependencies = [
  "brain-checkpoint",
+ "brain-events",
  "brain-testutil",
  "image",
  "imageproc",
@@ -851,6 +852,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_norway",
+ "unicode-segmentation",
 ]
 
 [[package]]

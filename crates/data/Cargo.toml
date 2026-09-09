@@ -22,6 +22,17 @@ minijinja-contrib.workspace = true
 # chat model can build its byte-level BPE (QwenBpe::from_gguf) with no sibling
 # tokenizer.json. checkpoint does not depend on data, so this adds no cycle.
 brain-checkpoint.workspace = true
+# `events::base64` is the workspace's ONE base64 codec (RFC 4648, dependency-free);
+# `unigram`'s SentencePiece `Precompiled` normalizer needs it to decode the
+# `precompiled_charsmap` field a tokenizer.json ships. Re-rolling a second
+# decoder here would be exactly the duplication AGENTS.md forbids. No cycle:
+# brain-events depends only on serde_json and brain-forecast.
+brain-events.workspace = true
+# Unicode extended grapheme clusters, for that same normalizer: sentencepiece
+# segments its input by grapheme before consulting the charsmap, and getting
+# that boundary wrong changes real token ids. Already in the workspace lock
+# (via the braintop TUI's unicode-truncate), so this adds no new build.
+unicode-segmentation.workspace = true
 # Synthetic object-detection scene rendering (gen_detect) draws shapes into
 # in-memory RGB buffers; the captioned-image dataset loader (imageset, hoisted
 # from zimage) additionally decodes JPEG/PNG/PPM training images — so exactly

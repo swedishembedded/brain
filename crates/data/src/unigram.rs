@@ -35,10 +35,19 @@
 //!
 //! ## The pipeline, in order
 //!
-//! 1. **Normalizer** - umT5 ships exactly one rule, `" {2,}" -> " "`. Anything
-//!    else (notably sentencepiece's `Precompiled` charsmap) is an error naming
-//!    what was found, never a silent skip: a normalizer that is quietly dropped
-//!    changes ids for a whole class of inputs and nothing downstream can tell.
+//! 1. **Normalizer** - a `Sequence` of rules read from the file itself. umT5
+//!    ships exactly one, `" {2,}" -> " "`; T5-XXL (FLUX.1's `tokenizer_2`)
+//!    ships three, `Precompiled` then `Strip{right}` then `" {2,}" -> "\u{2581}"`.
+//!    Anything else is an error naming what was found, never a silent skip: a
+//!    normalizer that is quietly dropped changes ids for a whole class of
+//!    inputs and nothing downstream can tell.
+//!
+//!    [`NormStep::Precompiled`] is sentencepiece's own charsmap - a Darts
+//!    double-array trie plus a blob of replacement strings, packed into one
+//!    base64 field. It is the NFKC-ish folding every released T5 depends on
+//!    (`\u{FB01}` -> `fi`, `\u{FF21}` -> `A`, `\u{2160}` -> `I`), so a reader that
+//!    rejects it cannot tokenize T5-XXL at all. See [`Precompiled`] for the
+//!    binary format and for why its grapheme loop looks the way it does.
 //! 2. **Added tokens** (`<pad>`, `</s>`, `<extra_id_0>`, ...) are matched
 //!    atomically, longest content first, and split the text into segments.
 //! 3. **Metaspace pre-tokenizer** - every space becomes `U+2581`, one is
@@ -57,6 +66,7 @@
 use std::collections::HashMap;
 
 use serde::Deserialize;
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::tokenizer::Tokenizer;
 
@@ -123,11 +133,202 @@ struct WireAdded {
 /// else is rejected by name rather than silently normalized differently.
 #[derive(Clone, Debug, PartialEq)]
 enum NormStep {
-    /// Collapse runs of two or more spaces into one (the `" {2,}"` regex umT5
-    /// ships, recognised as a rule rather than run through a regex engine).
-    CollapseSpaces,
+    /// Collapse each run of two or more spaces into the carried replacement
+    /// (the `" {2,}"` regex both umT5 and T5-XXL ship, recognised as a rule
+    /// rather than run through a regex engine). The replacement is NOT always
+    /// a space: umT5 writes `" "`, T5-XXL writes `"\u{2581}"`.
+    CollapseSpaces(String),
     /// Literal string replacement.
     Replace(String, String),
+    /// `tokenizers`' `Strip`: drop leading and/or trailing whitespace.
+    Strip { left: bool, right: bool },
+    /// SentencePiece's `Precompiled` charsmap.
+    Precompiled(Precompiled),
+}
+
+// ---------------------------------------------------------------------------
+// SentencePiece's `Precompiled` charsmap
+// ---------------------------------------------------------------------------
+
+/// SentencePiece's `Precompiled` normalizer, read from the base64
+/// `precompiled_charsmap` a `tokenizer.json` ships.
+///
+/// This is a **direct port** of HuggingFace's own `spm_precompiled` crate
+/// (v0.1.4), which is what their `tokenizers` uses in production for this
+/// normalizer, which in turn emulates `google/sentencepiece`'s
+/// `Darts::DoubleArray`. The binary format is:
+///
+/// ```text
+/// [u32 LE trie byte length][that many bytes of u32 LE trie units][normalized blob]
+/// ```
+///
+/// The trie keys on the input's BYTES and its values are byte offsets into the
+/// normalized blob, where each replacement string is terminated by `\0`. So the
+/// blob `"abc\0"` serves both the entry that maps to `"abc"` (offset 0) and the
+/// one that maps to `"bc"` (offset 1) - the replacements deliberately overlap.
+///
+/// The only deliberate departures from the reference are **bounds checks**: it
+/// indexes its arrays and slices its blob directly and therefore panics on a
+/// corrupt charsmap, whereas everything crossing into brain from a file is
+/// validated at the boundary. On a well-formed charsmap the two are identical -
+/// a check can only fire where the reference would already have panicked.
+/// Units are also kept at their on-file `u32` width (the reference widens every
+/// one to `usize` at parse time) and widened only inside the arithmetic, which
+/// halves the resident trie. That cannot change a result: `has_leaf`, `value`
+/// and `label` are masks of bits the unit already has, and `offset` widens
+/// BEFORE its shift, so its one shift-past-32-bits case is carried the same way
+/// the reference carries it.
+#[derive(Clone, PartialEq)]
+pub struct Precompiled {
+    /// The Darts double-array trie units, in file order.
+    trie: Vec<u32>,
+    /// The `\0`-separated replacement strings the trie's values index into.
+    normalized: String,
+}
+
+/// A trie unit carries four fields in its 32 bits. Transcribed from
+/// `spm_precompiled`'s `ArrayUnitTrait`; the constants are load-bearing.
+mod unit {
+    pub fn has_leaf(u: u32) -> bool {
+        (u >> 8) & 1 == 1
+    }
+
+    pub fn value(u: u32) -> usize {
+        (u & ((1u32 << 31) - 1)) as usize
+    }
+
+    /// Includes bit 31, so a unit with it set can never match a byte label.
+    pub fn label(u: u32) -> usize {
+        (u & ((1u32 << 31) | 0xFF)) as usize
+    }
+
+    pub fn offset(u: u32) -> usize {
+        ((u >> 10) as usize) << ((u & (1 << 9)) >> 6)
+    }
+}
+
+impl Precompiled {
+    /// Parse a decoded `precompiled_charsmap`.
+    pub fn from_charsmap(charsmap: &[u8]) -> Result<Precompiled, String> {
+        let Some(header) = charsmap.get(..4) else {
+            return Err(format!("precompiled_charsmap: {} bytes is too short for a header", charsmap.len()));
+        };
+        let trie_bytes = u32::from_le_bytes([header[0], header[1], header[2], header[3]]) as usize;
+        // The reference truncates with `trie_size / 4`; a ragged trie length is
+        // a corrupt file, so say so instead of silently dropping a partial unit.
+        if !trie_bytes.is_multiple_of(4) {
+            return Err(format!("precompiled_charsmap: trie length {trie_bytes} is not a multiple of 4"));
+        }
+        // `4 + trie_bytes` is computed once, checked: the header is attacker-
+        // controlled and `u32::MAX + 4` overflows a 32-bit `usize` (this crate
+        // builds for wasm32).
+        let blob_at = 4usize
+            .checked_add(trie_bytes)
+            .ok_or_else(|| format!("precompiled_charsmap: trie length {trie_bytes} overflows"))?;
+        let Some(trie_raw) = charsmap.get(4..blob_at) else {
+            return Err(format!(
+                "precompiled_charsmap: trie wants {trie_bytes} bytes but only {} follow the header",
+                charsmap.len().saturating_sub(4)
+            ));
+        };
+        if trie_raw.is_empty() {
+            // `common_prefix_search` starts by reading unit 0.
+            return Err("precompiled_charsmap: empty trie".into());
+        }
+        let trie: Vec<u32> =
+            trie_raw.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+        let normalized = String::from_utf8(charsmap[blob_at..].to_vec())
+            .map_err(|e| format!("precompiled_charsmap: normalized blob is not UTF-8: {e}"))?;
+        Ok(Precompiled { trie, normalized })
+    }
+
+    /// Every value on the trie walk over `key`'s bytes, in visit order.
+    ///
+    /// Stops at a NUL byte, and at the first byte whose label does not match -
+    /// so the returned offsets are those of the key's own prefixes, longest
+    /// last.
+    fn common_prefix_search(&self, key: &[u8]) -> Vec<usize> {
+        let mut results = Vec::new();
+        let mut node_pos = 0usize;
+        let Some(&first) = self.trie.first() else { return results };
+        node_pos ^= unit::offset(first);
+        for &c in key {
+            if c == 0 {
+                break;
+            }
+            node_pos ^= c as usize;
+            let Some(&u) = self.trie.get(node_pos) else { return results };
+            if unit::label(u) != c as usize {
+                return results;
+            }
+            node_pos ^= unit::offset(u);
+            if unit::has_leaf(u) {
+                let Some(&leaf) = self.trie.get(node_pos) else { return results };
+                results.push(unit::value(leaf));
+            }
+        }
+        results
+    }
+
+    /// The replacement for `chunk`, or `None` when the trie has no entry
+    /// starting at its first byte (i.e. leave `chunk` alone).
+    fn transform(&self, chunk: &str) -> Option<&str> {
+        let start = *self.common_prefix_search(chunk.as_bytes()).first()?;
+        let bytes = self.normalized.as_bytes();
+        if start > bytes.len() {
+            return None;
+        }
+        let end = start + bytes[start..].iter().position(|&b| b == 0).unwrap_or(bytes.len() - start);
+        self.normalized.get(start..end)
+    }
+
+    /// Apply the charsmap to a whole string.
+    ///
+    /// Future reader, from `spm_precompiled`'s @Narsil, on the shape of this
+    /// loop - a whole grapheme cluster tried first, but only under 6 bytes, and
+    /// otherwise a per-CHARACTER fallback:
+    ///
+    /// > Yes, this is weird, Yes, this seems broken, No, I don't know why
+    /// > Google did this. If you question this code, check this normalizer
+    /// > against XNLI database (all languages) with Unigram model against
+    /// > Mbart, XLMRoberta *AND* Marian. If you don't get 100% or break a
+    /// > single test. You don't pass.
+    ///
+    /// It is reproduced exactly rather than tidied, because it is what decides
+    /// real token ids. Halfwidth `\u{FF76}\u{FF9E}` is the case that shows why:
+    /// it is one grapheme of exactly 6 bytes, so it takes the per-character
+    /// path and comes out as `\u{30AB}` + combining `\u{3099}` rather than the
+    /// precomposed `\u{30AC}` its own grapheme entry would have given.
+    pub fn normalize_string(&self, original: &str) -> String {
+        let mut out = String::with_capacity(original.len());
+        for grapheme in original.graphemes(true) {
+            if grapheme.len() < 6 {
+                if let Some(norm) = self.transform(grapheme) {
+                    out.push_str(norm);
+                    continue;
+                }
+            }
+            for (at, c) in grapheme.char_indices() {
+                let part = &grapheme[at..at + c.len_utf8()];
+                match self.transform(part) {
+                    Some(norm) => out.push_str(norm),
+                    None => out.push(c),
+                }
+            }
+        }
+        out
+    }
+}
+
+/// Sizes only: the real trie is tens of thousands of units and the blob tens of
+/// kilobytes, so the derived `Debug` would bury whatever printed it.
+impl std::fmt::Debug for Precompiled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Precompiled")
+            .field("trie_units", &self.trie.len())
+            .field("normalized_bytes", &self.normalized.len())
+            .finish()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -305,26 +506,36 @@ impl UnigramTokenizer {
         let mut s = text.to_string();
         for step in &self.normalizer {
             s = match step {
-                NormStep::CollapseSpaces => {
+                NormStep::CollapseSpaces(to) => {
                     let mut out = String::with_capacity(s.len());
                     let mut run = 0usize;
+                    let flush = |run: usize, out: &mut String| match run {
+                        0 => {}
+                        // ONE space is not a run of two or more: the regex does
+                        // not match it, so it survives verbatim even when the
+                        // replacement is something else (T5-XXL's `U+2581`).
+                        1 => out.push(' '),
+                        _ => out.push_str(to),
+                    };
                     for c in s.chars() {
                         if c == ' ' {
                             run += 1;
                         } else {
-                            if run > 0 {
-                                out.push(' ');
-                            }
+                            flush(run, &mut out);
                             run = 0;
                             out.push(c);
                         }
                     }
-                    if run > 0 {
-                        out.push(' ');
-                    }
+                    flush(run, &mut out);
                     out
                 }
                 NormStep::Replace(from, to) => s.replace(from.as_str(), to.as_str()),
+                NormStep::Strip { left, right } => {
+                    let t = if *left { s.trim_start_matches(char::is_whitespace) } else { &s };
+                    let t = if *right { t.trim_end_matches(char::is_whitespace) } else { t };
+                    t.to_string()
+                }
+                NormStep::Precompiled(p) => p.normalize_string(&s),
             };
         }
         s
@@ -455,10 +666,27 @@ fn parse_normalizer(v: Option<&serde_json::Value>) -> Result<Vec<NormStep>, Stri
                 return Ok(vec![NormStep::Replace(s.to_string(), to)]);
             }
             let re = v["pattern"]["Regex"].as_str().ok_or("normalizer: Replace has no pattern")?;
-            if re == " {2,}" && to == " " {
-                return Ok(vec![NormStep::CollapseSpaces]);
+            if re == " {2,}" {
+                // The replacement is read from the file, not assumed: umT5
+                // writes a space here and T5-XXL writes `U+2581`.
+                return Ok(vec![NormStep::CollapseSpaces(to)]);
             }
             Err(format!("normalizer: Replace pattern {re:?} is not implemented"))
+        }
+        "Strip" => {
+            let flag = |k: &str| {
+                v[k].as_bool().ok_or_else(|| format!("normalizer: Strip has no boolean {k}"))
+            };
+            Ok(vec![NormStep::Strip { left: flag("strip_left")?, right: flag("strip_right")? }])
+        }
+        "Precompiled" => {
+            let b64 = v["precompiled_charsmap"]
+                .as_str()
+                .ok_or("normalizer: Precompiled has no precompiled_charsmap string")?;
+            let raw = events::base64::decode(b64)
+                .map_err(|e| format!("normalizer: Precompiled charsmap is not base64: {e}"))?;
+            let p = Precompiled::from_charsmap(&raw).map_err(|e| format!("normalizer: {e}"))?;
+            Ok(vec![NormStep::Precompiled(p)])
         }
         other => Err(format!("normalizer: {other:?} is not implemented")),
     }
@@ -701,9 +929,6 @@ mod tests {
         };
         assert!(bad(&|j| j["model"]["type"] = "BPE".into()).contains("Unigram"));
         assert!(bad(&|j| j["model"]["byte_fallback"] = true.into()).contains("byte_fallback"));
-        assert!(bad(&|j| j["normalizer"] = serde_json::json!(
-            {"type": "Precompiled", "precompiled_charsmap": "x"}))
-            .contains("Precompiled"));
         assert!(bad(&|j| j["pre_tokenizer"]["add_prefix_space"] = false.into())
             .contains("prefix space"));
         assert!(bad(&|j| j["pre_tokenizer"]["type"] = "Whitespace".into())
@@ -712,5 +937,173 @@ mod tests {
         // An unknown top-level key is a file this reader has not been checked
         // against, so serde's `deny_unknown_fields` refuses it.
         assert!(bad(&|j| j["surprise"] = 1.into()).contains("surprise"));
+
+        // `Precompiled` is implemented now, so what must be rejected is a
+        // MALFORMED one - the reference implementation indexes straight into
+        // its arrays and would panic on each of these.
+        let with_map = |b64: &str| -> String {
+            let b64 = b64.to_string();
+            bad(&move |j| {
+                j["normalizer"] =
+                    serde_json::json!({"type": "Precompiled", "precompiled_charsmap": b64})
+            })
+        };
+        assert!(with_map("!!!!").contains("not base64"));
+        assert!(with_map(&events::base64::encode(&[0u8, 0, 0])).contains("too short"));
+        // Header says the trie is 6 bytes: not a whole number of u32 units.
+        assert!(with_map(&events::base64::encode(&[6u8, 0, 0, 0, 1, 2, 3, 4, 5, 6]))
+            .contains("multiple of 4"));
+        // Header says 64 bytes of trie but only 4 follow.
+        assert!(with_map(&events::base64::encode(&[64u8, 0, 0, 0, 1, 2, 3, 4]))
+            .contains("only 4"));
+        assert!(with_map(&events::base64::encode(&[0u8; 4])).contains("empty trie"));
+        // A trie is present but the normalized blob is not UTF-8.
+        assert!(with_map(&events::base64::encode(&[4u8, 0, 0, 0, 0, 0, 0, 0, 0xFF]))
+            .contains("not UTF-8"));
+    }
+
+    // ---- the Precompiled charsmap ----------------------------------------
+
+    /// Build a Darts double-array holding `entries`, as
+    /// `(key bytes, offset into the normalized blob)`.
+    ///
+    /// This is a **test** builder, not a general one: it gives every trie node
+    /// its own 256-slot block, so no two children can ever collide and none of
+    /// the collision resolution a real sentencepiece builder does is needed.
+    /// The point is only to produce bytes in the released format, so the
+    /// reader's bit math is checked against a layout derived independently of
+    /// it rather than against its own output.
+    fn build_charsmap(entries: &[(&[u8], usize)], blob: &[u8]) -> Vec<u8> {
+        // Every prefix of every key is a node; node 0 is the root.
+        let mut nodes: Vec<Vec<u8>> = vec![Vec::new()];
+        for (key, _) in entries {
+            for n in 1..=key.len() {
+                let pre = key[..n].to_vec();
+                if !nodes.contains(&pre) {
+                    nodes.push(pre);
+                }
+            }
+        }
+        let idx = |p: &[u8]| nodes.iter().position(|n| n.as_slice() == p).expect("node");
+        // Node i owns array slots [256*(i+1), 256*(i+2)): its VALUE sits at the
+        // block's base and its children at `base ^ byte`, which cannot be the
+        // base itself because no key contains a NUL.
+        let base = |i: usize| 256 * (i + 1);
+        // A unit packs `offset << 10 | has_leaf << 8 | label`. Bit 9 is left
+        // clear throughout, so `offset()` is a plain `>> 10`.
+        let pack = |offset: usize, leaf: bool, label: u8| {
+            ((offset as u32) << 10) | (u32::from(leaf) << 8) | u32::from(label)
+        };
+
+        let mut trie = vec![0u32; base(nodes.len())];
+        // The root unit lives at index 0, outside every block.
+        trie[0] = pack(base(0), false, 0);
+        for (i, prefix) in nodes.iter().enumerate().skip(1) {
+            let last = prefix[prefix.len() - 1];
+            let slot = base(idx(&prefix[..prefix.len() - 1])) ^ (last as usize);
+            let terminal = entries.iter().any(|(k, _)| *k == prefix.as_slice());
+            trie[slot] = pack(slot ^ base(i), terminal, last);
+        }
+        for (key, value) in entries {
+            trie[base(idx(key))] = *value as u32;
+        }
+
+        let mut out = ((trie.len() * 4) as u32).to_le_bytes().to_vec();
+        for u in &trie {
+            out.extend_from_slice(&u.to_le_bytes());
+        }
+        out.extend_from_slice(blob);
+        out
+    }
+
+    /// The fixture the two tests below share.
+    ///
+    /// The blob's replacements deliberately OVERLAP - `"AB\0"` serves both
+    /// `"AB"` at offset 0 and `"B"` at offset 1 - because that overlap is the
+    /// whole reason the format stores an offset rather than an index, and a
+    /// reader that scanned to the wrong terminator would still look right on
+    /// non-overlapping data.
+    fn tiny_charsmap() -> Vec<u8> {
+        // "AB\0" "é\0"  ->  0:"AB"  1:"B"  3:"é"  5:""
+        let blob: &[u8] = b"AB\0\xc3\xa9\0";
+        build_charsmap(
+            &[
+                (b"a", 0),
+                (b"b", 1),
+                ("e\u{301}".as_bytes(), 3),
+                (b"z", 5), // maps to the empty string: a deletion
+            ],
+            blob,
+        )
+    }
+
+    #[test]
+    fn precompiled_walks_the_trie_and_reads_overlapping_replacements() {
+        let p = Precompiled::from_charsmap(&tiny_charsmap()).expect("charsmap parses");
+
+        // Single-byte keys, including the overlapping pair and the deletion.
+        assert_eq!(p.normalize_string("a"), "AB");
+        assert_eq!(p.normalize_string("b"), "B");
+        assert_eq!(p.normalize_string("z"), "");
+        // A byte with no entry is passed through untouched, as is a character
+        // whose first byte leads nowhere.
+        assert_eq!(p.normalize_string("q"), "q");
+        assert_eq!(p.normalize_string("cat"), "cABt");
+        assert_eq!(p.normalize_string("\u{1F600}"), "\u{1F600}");
+        assert_eq!(p.normalize_string(""), "");
+
+        // A 3-byte key reached over three trie hops, and the same bytes as a
+        // grapheme cluster: "e" has no entry of its own, so this can only work
+        // if the whole cluster was looked up.
+        assert_eq!(p.normalize_string("e\u{301}"), "é");
+        assert_eq!(p.normalize_string("ze\u{301}a"), "éAB");
+    }
+
+    /// The 6-byte threshold in [`Precompiled::normalize_string`] is not a
+    /// performance guard - it changes the OUTPUT, and sentencepiece's real
+    /// charsmaps depend on which side of it a cluster falls.
+    #[test]
+    fn precompiled_switches_from_grapheme_to_per_character_at_six_bytes() {
+        let p = Precompiled::from_charsmap(&tiny_charsmap()).expect("charsmap parses");
+
+        // One grapheme, 5 bytes: the WHOLE cluster is looked up, the trie's
+        // prefix search matches its leading "a", and the combining marks are
+        // dropped on the floor.
+        let short = "a\u{301}\u{302}";
+        assert_eq!(short.len(), 5);
+        assert_eq!(p.normalize_string(short), "AB");
+
+        // The same cluster one mark longer is 7 bytes, so each character is
+        // transformed on its own and the marks now survive.
+        let long = "a\u{301}\u{302}\u{303}";
+        assert_eq!(long.len(), 7);
+        assert_eq!(p.normalize_string(long), "AB\u{301}\u{302}\u{303}");
+    }
+
+
+    /// End to end through the tokenizer: a `Sequence` of all three steps a real
+    /// T5-XXL `tokenizer.json` ships, in its order.
+    #[test]
+    fn a_precompiled_strip_and_collapse_sequence_runs_in_order() {
+        let mut j: serde_json::Value = serde_json::from_str(&tiny_json()).unwrap();
+        j["normalizer"] = serde_json::json!({"type": "Sequence", "normalizers": [
+            {"type": "Precompiled",
+             "precompiled_charsmap": events::base64::encode(&tiny_charsmap())},
+            {"type": "Strip", "strip_left": false, "strip_right": true},
+            {"type": "Replace", "pattern": {"Regex": " {2,}"}, "content": "\u{2581}"}]});
+        let t = UnigramTokenizer::from_json_bytes(j.to_string().as_bytes()).unwrap();
+
+        // "za" -> Precompiled deletes the "z" and rewrites "a" -> "AB"; nothing
+        // in the tiny vocabulary covers "A"/"B", so the ids are unk-fused - the
+        // point here is the normalized STRING that reached the lattice.
+        assert_eq!(t.normalize("za"), "AB");
+        // Strip only touches the right, and only after the charsmap ran.
+        assert_eq!(t.normalize(" b \t"), " B");
+        // A single space survives; two or more become U+2581, not a space.
+        assert_eq!(t.normalize("b b"), "B B");
+        assert_eq!(t.normalize("b  b"), "B\u{2581}B");
+        assert_eq!(t.normalize("b   b"), "B\u{2581}B");
+        // The whole chain: charsmap, then right-strip, then collapse.
+        assert_eq!(t.normalize("ze\u{301}a  b   "), "éAB\u{2581}B");
     }
 }

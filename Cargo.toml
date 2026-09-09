@@ -307,6 +307,16 @@ serde_norway = "0.9.42"
 # isolated and does not change key order anywhere else in the workspace.
 minijinja = { version = "2", features = ["loop_controls", "json", "preserve_order"] }
 minijinja-contrib = { version = "2", features = ["pycompat"] }
+# Unicode extended grapheme clusters (UAX #29). Needed by crates/data's
+# SentencePiece `Precompiled` normalizer, which segments its input by grapheme
+# before consulting the charsmap - the same crate, and the same
+# `graphemes(true)`, that HuggingFace's own `spm_precompiled` uses, because the
+# boundaries decide real token ids and a hand-rolled approximation of UAX #29
+# would silently disagree on exactly the scripts the 32k/256k vocabularies
+# exist for. Already resolved in this workspace's lock as a transitive of the
+# braintop TUI's unicode-truncate, so promoting it to a direct dependency adds
+# no new crate to the build.
+unicode-segmentation = "1"
 # Safetensors read/write (HF's official pure-Rust container) + half for
 # f16/bf16<->f32. Both are wasm-compatible.
 safetensors = "0.8"
