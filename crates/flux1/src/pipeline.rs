@@ -211,7 +211,14 @@ pub const MAX_TXT_LEN: u32 = 512;
 fn te_bytes(max_len: u64) -> u64 {
     let c = T5Config::xxl();
     let (d, ff, layers) = (c.d_model as u64, c.d_ff as u64, c.layers as u64);
-    let weights = (2 * d * ff + 4 * 64 * c.heads as u64 * d + 2 * d) * layers * 4 + d * c.vocab as u64 * 4;
+    // The authoritative tensor manifest, not a hand-rolled re-derivation: a
+    // T5 block has THREE feed-forward matrices (`wi_0`/`wi_1`/`wo`), and a
+    // formula that only counted two silently undercounted real weight bytes
+    // by roughly one `d_ff x d_model` matrix per layer (~5 GiB for XXL) -
+    // `te` then planned onto a card with room for the underestimate, and the
+    // real `T5Encoder::new_on` allocation, sized off this same manifest,
+    // did not fit.
+    let weights = c.param_count() as u64 * 4;
     let scratch = layers * max_len * (11 * d + 4 * ff) * 4;
     weights + scratch
 }
@@ -648,6 +655,31 @@ mod placement_tests {
         let f32_bytes = dit_weight_bytes(&cfg, Precision::F32);
         let i8_bytes = dit_weight_bytes(&cfg, Precision::Int8);
         assert!(i8_bytes < f32_bytes / 3, "int8 ({i8_bytes}) should be well under 1/3 of fp32 ({f32_bytes})");
+    }
+
+    /// `te_bytes` used to hand-derive T5-XXL's weight bytes instead of
+    /// reading `T5Config::xxl().param_count()` (the crate's own count,
+    /// tested against a real reference dump: "4.762 B - matches the
+    /// reference dump"), and the hand-rolled formula counted only two of the
+    /// three feed-forward matrices a T5 block actually has
+    /// (`wi_0`/`wi_1`/`wo` - `t5encoder::config`'s own `tensor_manifest`),
+    /// undercounting real weight bytes by roughly one `d_ff x d_model`
+    /// matrix per layer (~5 GiB total). This is exactly the shape of the
+    /// production failure it caused: `te` planned onto a card with 22.9 GiB
+    /// free on an estimate that fit, and the real `T5Encoder::new_on`
+    /// allocation - correctly sized off the authoritative manifest - did
+    /// not. Pinned against this module's own "~21 GB T5-XXL" doc figure
+    /// (`dit_and_te_are_placed_apart`, above) rather than a fresh number, so
+    /// the two cannot silently drift apart again.
+    #[test]
+    fn te_bytes_weight_component_matches_the_authoritative_param_count() {
+        let measured_weight_bytes = t5encoder::config::T5Config::xxl().param_count() as u64 * 4;
+        let gib = te_bytes(0) as f64 / (1024.0 * 1024.0 * 1024.0);
+        let measured_gib = measured_weight_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+        assert!(
+            (measured_gib - 0.1..measured_gib + 0.1).contains(&gib),
+            "te_bytes(0) = {gib:.2} GiB, expected ~{measured_gib:.2} GiB (T5Config::xxl().param_count() * 4)"
+        );
     }
 
     /// `part_needs` keeps the DiT and T5-XXL `.apart()` so a 2-card box never
