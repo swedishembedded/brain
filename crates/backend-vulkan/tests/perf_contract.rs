@@ -265,3 +265,76 @@ fn a_write_after_read_hazard_gets_a_barrier() {
          value BEFORE dispatch 2 overwrote it)"
     );
 }
+
+/// `submit` used to accumulate an UNBOUNDED batch: `step`/`submit` never
+/// touch the queue by design (M6.2 - see this file's own header), so a
+/// caller that never calls `read`/`poll_wait`/`Backend::flush` between
+/// `submit`s (a legitimate pattern this file's own `frame_loop_submits_are_
+/// bounded_per_frame` explicitly wants for small kernels) could grow ONE
+/// un-synchronised command buffer without limit. Harmless for the catalogue's
+/// normal (fast, `@opt` 3-5) kernels even at hundreds of them - but a real
+/// Qwen3.5 GQA-layer forward (`qwen35_bench gqa 128 3`, `BRAIN_DEVICE=
+/// vulkan`) crashed the device outright (`ERROR_DEVICE_LOST`) this way: its
+/// own benchmark harness accumulates several real-shape `matmul.wgsl`
+/// dispatches (`@opt 2`, unblocked, ~3.3s EACH at this model's real
+/// `d_model=5120` q_proj shape on this workspace's Intel Arc iGPU) with zero
+/// host sync between them, and the resulting single, continuous, multi-
+/// dispatch GPU submission ran long enough to trip this driver's own hang-
+/// detection reset - independent of `record_dispatches`'s buffer-hazard
+/// correctness (confirmed unrelated: the identical crash reproduces from a
+/// sequence of `matmul` dispatches alone, no GQA attention pattern involved,
+/// and `barrier_count()` for the real GQA sequence already matches a full
+/// hand trace with zero gaps - see M6.9's ledger entry for the full
+/// isolation). Root cause is un-bounded ACCUMULATED dispatch size, not a
+/// missing barrier, so the fix is a size-based (not count-based - see
+/// `MAX_UNSYNCED_WORKGROUPS`'s own doc for why COUNT does not work here
+/// without breaking the bounded-submits contract this same file already
+/// tests) ceiling on how much can accumulate in `pending` before `submit`
+/// forces a real flush + host wait on its own.
+///
+/// This test cannot use an actually-slow kernel (multi-second, real-driver
+/// dependent, thermal-state dependent - exactly the fragility this repo's
+/// own measurement discipline warns against in a routine test) - it proves
+/// the MECHANISM instead: one `add2` dispatch (bounds-checked against
+/// `Params.total`, so a huge thread count over a 4-element buffer is safe,
+/// not a buffer overrun) sized far larger than the ceiling could plausibly
+/// be tuned to, but computationally trivial (O(1)/thread) so it completes
+/// fast regardless. If `submit` no longer bounds accumulation, this single
+/// call would cost zero queue submits until the next explicit sync (matching
+/// `step_creation_performs_no_queue_submits`'s own contract for a SMALL
+/// batch) - the regression signal is a submit happening with NO `read`/
+/// `poll_wait` call anywhere in this test.
+#[test]
+fn an_oversized_pending_batch_is_auto_flushed_without_an_explicit_sync() {
+    let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(be) = backend() else { return };
+    let a = be.storage_init("a", &[1.0, 2.0, 3.0, 4.0]);
+    let b = be.storage_init("b", &[10.0, 20.0, 30.0, 40.0]);
+    let out = be.storage(4);
+
+    // Warm-up: first-touch pipeline/descriptor-pool cost, not part of what
+    // this test measures.
+    be.submit(&[], &[be.step(0, &[&a, &b, &out], &[4], 4)]);
+    let _ = be.read(&out, 4);
+
+    // 2,097,152 threads = 32768 workgroups at this kernel's `@workgroup_size
+    // (64)` - 8x this crate's own `MAX_UNSYNCED_WORKGROUPS` ceiling (4096),
+    // so this stays a clear regression signal even if that ceiling is later
+    // retuned. `Params.total = 4` means all but the first 4 threads return
+    // immediately (`add2.wgsl`'s own bounds check) - fast on any device.
+    let huge = 4_096u32 * 64 * 8;
+    let step = be.step(0, &[&a, &b, &out], &[4], huge);
+
+    let base = be.queue_submits();
+    be.submit(&[], &[step]);
+    // Deliberately NO `read`/`poll_wait`/explicit `flush` call here.
+    let submits = be.queue_submits() - base;
+    assert_eq!(
+        submits, 1,
+        "a single dispatch far past the un-synchronised-accumulation ceiling did not trigger \
+         exactly one automatic flush with no explicit sync call ({submits} submits) - an \
+         unbounded batch of expensive dispatches can once again run long enough, uninterrupted, \
+         to trip this driver's own hang-detection reset (M6.9)"
+    );
+    assert_eq!(be.read(&out, 4), vec![11.0, 22.0, 33.0, 44.0], "the auto-flushed dispatch must still compute the right answer");
+}

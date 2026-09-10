@@ -299,6 +299,74 @@ struct OpCounters {
 /// dispatches), which is exactly what used to get zero attribution.
 const MAX_TIMED_DISPATCHES: usize = 8192;
 
+/// A ceiling on the total workgroup count (`sum of gx*gy`) [`VulkanBackend::
+/// submit`] lets accumulate in [`VulkanBackend::pending`] before forcing a
+/// flush + host wait, regardless of how many `read`/`poll_wait`/`flush` calls
+/// the caller makes on its own (M6.9).
+///
+/// Root cause this guards against: `flush`'s fast path (no `BRAIN_PROFILE`,
+/// no Intel-ANV sliced workaround) records EVERY step a caller has `submit`ted
+/// since the last flush into ONE command buffer and submits it asynchronously
+/// (`flush_async`) with no host wait - by design (M6.2's whole point is that
+/// `step`/`submit` never touch the queue). A caller that never calls `read`/
+/// `poll_wait`/`Backend::flush` between `submit`s (this crate's own hazard
+/// tracking has no opinion on that - it is a valid, even encouraged, calling
+/// pattern for a frame's worth of small dispatches; see `tests/
+/// perf_contract.rs`'s `frame_loop_submits_are_bounded_per_frame`, which
+/// explicitly wants 32 dispatches to cost ONE flush) can therefore build an
+/// UNBOUNDED single command buffer. That is harmless for the catalogue's
+/// normal (`@opt` 3-5) kernels, which are small per-dispatch even at hundreds
+/// of them. It is NOT harmless for a slow (`@opt` 1-2), unblocked kernel at a
+/// large real shape: `crates/kernels/wgsl/matmul.wgsl` (`@opt 2`, one thread
+/// per output element, serial K-loop, no tiling) measured ~3.3 SECONDS for
+/// ONE dispatch at `Qwen35Config::qwen38_27b()`'s q_proj shape
+/// (M=128,K=5120,N=12288) on this workspace's Intel Arc (Meteor Lake) iGPU -
+/// a caller that accumulates a HANDFUL of these with no host sync in between
+/// (exactly what `qwen35_bench gqa 128 3`'s own `report()` wall-clock loop
+/// does - `Gpu::submit` never auto-flushes, so `reps` full GQA layers, each
+/// issuing several such matmuls, all land in ONE un-synchronised command
+/// buffer) submits ONE continuous unit of GPU work that runs long enough to
+/// trip this driver's own hang-detection reset (`ERROR_DEVICE_LOST`),
+/// independent of `record_dispatches`'s buffer-hazard correctness (proven
+/// unrelated during this investigation: a standalone repro built directly
+/// against this backend reproduced the identical crash from a sequence of
+/// ONLY independent, zero-real-hazard `matmul` dispatches - no GQA attention
+/// pattern involved at all, and the real GQA sequence's own `barrier_count()`
+/// already matched a full hand trace with zero gaps - see M6.9's ledger
+/// entry for the isolation detail).
+///
+/// The threshold: `q_full`'s own dispatch alone is `128*12288/64 = 24576`
+/// workgroups; three-to-four such dispatches (the exact multiplicity that
+/// crashed) sum to ~150-200K. An initial `65536` (2^16) - roughly 1.3
+/// isolated-`matmul`-only reps, comfortably under the smallest accumulation
+/// this investigation measured surviving (16s at 153600) and the next step up
+/// that lost the device (~25-30s at 204800) - measurably helped (2 of 3
+/// repeated full-binary repro runs went from crashing to clean) but did NOT
+/// fully close it: a 3rd repeated run still lost the device even with that
+/// ceiling in place. This box is measured, repeatedly, elsewhere in this same
+/// workspace, to be thermally/contention-noisy (a shared box: an idle-to-
+/// fully-ramped integrated GPU has been measured here at roughly a 10x clock
+/// swing, and a co-resident CPU load has been measured costing roughly 3x on
+/// its own) - so a ceiling calibrated against one clean measurement session
+/// is not safe against a noisier one. `4096` gives a much larger margin: it sits
+/// UNDER even attention's own single largest dispatch (`gqa_scores`/
+/// `gqa_apply` at `nh*t*t/64 = 6144` workgroups at this shape), so in
+/// practice every dispatch at or above roughly attention-sized is its own
+/// synchronised unit, while staying far above what the "hundreds of small
+/// dispatches, one flush" contract (`frame_loop_submits_are_bounded_
+/// per_frame`: 32 dispatches at `gx*gy=1` each) will ever accumulate - a
+/// realistic frame's small kernels do not individually run long enough for
+/// their COUNT to matter here, only a size/duration outlier does. This is a
+/// heuristic proxy for "elapsed device time", not a measurement of it (this
+/// backend does not profile ahead of a dispatch) - it bounds the known
+/// failure with a wide margin, not a mathematical guarantee against every
+/// theoretically possible one (an even slower kernel, or enough of them
+/// under this ceiling, or a noisier moment still, could in principle
+/// accumulate past a hang-detection window). `BRAIN_VK_SERIAL=1` remains the
+/// maximally conservative escape hatch (a host wait after EVERY dispatch) for
+/// a shape this heuristic does not cover.
+const MAX_UNSYNCED_WORKGROUPS: u64 = 4_096;
+
 /// A sanity ceiling on a single dispatch's device time, used by
 /// [`VulkanBackend::record_timing`] to detect a corrupted or query-mechanism-
 /// perturbed timestamp readback rather than fold it into the accumulator as
@@ -396,6 +464,11 @@ pub struct VulkanBackend {
     pools: Mutex<Vec<vk::DescriptorPool>>,
     /// Accumulated dispatches, flushed as one command submission.
     pending: Mutex<Vec<VkStep>>,
+    /// Running `sum(gx*gy)` of everything currently in `pending` - compared
+    /// against [`MAX_UNSYNCED_WORKGROUPS`] on every `submit` to force a flush
+    /// before an unbounded, un-synchronised accumulation of dispatches (M6.9).
+    /// Reset to 0 wherever `pending` is drained (`flush`).
+    pending_workgroups: AtomicU64,
     /// Transient uniforms of steps built but not yet passed to `submit`.
     uniforms: Mutex<Vec<VkBuffer>>,
     /// Transient uniforms of submitted-but-not-yet-flushed steps. Moved from
@@ -774,6 +847,7 @@ impl VulkanBackend {
             stats: OpCounters::default(),
             pools: Mutex::new(vec![pool]),
             pending: Mutex::new(Vec::new()),
+            pending_workgroups: AtomicU64::new(0),
             uniforms: Mutex::new(Vec::new()),
             inflight_uniforms: Mutex::new(Vec::new()),
             free_uniforms: Mutex::new(std::collections::HashMap::new()),
@@ -1289,6 +1363,20 @@ impl VulkanBackend {
         // Uniforms of steps NOT yet submitted stay in `uniforms`, untouched by
         // a flush that races between their creation and their own submit.
         self.inflight_uniforms.lock().unwrap_or_else(|e| e.into_inner()).append(&mut self.uniforms.lock().unwrap_or_else(|e| e.into_inner()));
+
+        // M6.9 safety valve (see `MAX_UNSYNCED_WORKGROUPS`'s doc): a caller
+        // that never calls `read`/`poll_wait`/`Backend::flush` between
+        // `submit`s can otherwise grow `pending` into one unbounded command
+        // buffer. Force a real host-synchronised flush once accumulated
+        // dispatch SIZE (not count - see the doc for why) crosses the
+        // ceiling, so no single submission can run long enough to trip this
+        // driver's own hang-detection reset regardless of how the caller
+        // batches its own `submit`/`flush` calls.
+        let added: u64 = steps.iter().map(|s| s.gx as u64 * s.gy as u64).sum();
+        if self.pending_workgroups.fetch_add(added, Ordering::Relaxed) + added >= MAX_UNSYNCED_WORKGROUPS {
+            self.flush();
+            self.drain();
+        }
     }
 
     fn run_clears(&self, clears: &[&VkOwnedBuffer]) {
@@ -1324,6 +1412,10 @@ impl VulkanBackend {
     /// DIFFERENT, timeline-signalled submission.
     fn flush(&self) {
         let steps: Vec<VkStep> = std::mem::take(&mut *self.pending.lock().unwrap_or_else(|e| e.into_inner()));
+        // `pending` is now empty - keep `pending_workgroups` (M6.9) in sync
+        // regardless of who triggered this flush (an explicit caller call, or
+        // `submit`'s own safety-valve check).
+        self.pending_workgroups.store(0, Ordering::Relaxed);
         if steps.is_empty() {
             // This handle has nothing recorded; `reclaim_dead` still checks the
             // DEVICE-wide count before freeing. It is the only reclaim point a

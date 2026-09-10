@@ -3867,6 +3867,190 @@ claimed as fully solved.
 
 **Commit**: one.
 
+### M6.9 - `backend-vulkan`'s GQA `ERROR_DEVICE_LOST` was never a missing barrier - an unbounded, un-synchronised batch tripping this driver's own hang-detection reset
+
+Closes the crash M6.7 and M6.8 both left open: `qwen35_bench gqa 128 3`
+(`BRAIN_DEVICE=vulkan`) crashing the process with `ERROR_DEVICE_LOST` on its
+first real forward pass. Root-caused to something none of the three named
+candidate hypotheses (a missing `accesses`-tracking case, a hazard spanning
+an async-ring `flush()` boundary, a two-set dirty-tracking edge case) turned
+out to be - all three are explicitly, evidentially KILLED below - and fixed
+with a real architectural gap closed, though the specific numeric ceiling
+that closes it is a calibrated heuristic, not a mathematical guarantee (see
+"Honest framing" at the end).
+
+**Method, per this campaign's own rule (measure before touching code)**: a
+fast, hand-transcribed reproduction was built directly against `VulkanBackend`
+(bypassing `model`/`gpu_core` entirely so it stays a small, quick-compiling
+test binary), copying `qwen35_bench::bench_gqa` and `model::gqa_mixer::
+gqa_mixer_fwd`/`block::gqa_fwd`'s exact dispatch/buffer sequence at real
+`Qwen35Config::qwen38_27b()` attention dims (`n_heads=24, n_kv_heads=4,
+head_dim=256`). A full hand trace of that sequence's hazard graph (every
+buffer, every read/write, across `qkv_prepare` -> `gqa_fwd` -> `gate_ctx` ->
+`o_proj`) predicted exactly 14 barrier-worthy dependencies for one rep; the
+harness's own `barrier_count()` read exactly 14, and exactly `14*reps` for
+`reps` un-flushed repetitions accumulated into one batch (matching this
+codebase's own `Gpu::submit` never auto-flushing, so `report()`'s
+zero-synchronisation wall-clock loop really does glom `reps` full GQA layers
+into ONE `record_dispatches` call - confirmed independently by M6.8's own
+"16 matmul calls" figure: `4` reps (3 wall-clock + 1 device-timed) `* 4`
+matmul dispatches/rep). At a small `d_model` this reproduction never crashed,
+at ANY reps count tried. Only scaling `d_model` up toward the real `5120`
+(keeping the attention dims fixed) reproduced `ERROR_DEVICE_LOST` - and,
+decisively, an ISOLATION variant that deleted every GQA-specific dispatch
+(no `concat_split`/`rmsnorm`/`rope2d_partial`/`gqa_scores`/`attn_softmax`/
+`gqa_apply`/`sigmoid`/`mul` at all - just the four plain `matmul.wgsl`
+q/k/v/o-projection-shaped dispatches per rep, independent of each other,
+zero real hazards between most of them) reproduced the IDENTICAL crash at
+the same `reps` count. The defect has nothing to do with GQA's own buffer
+pattern.
+
+**Killed hypotheses (all three of this task's named candidates)**:
+- *(a) an access `accesses` never records*: ruled out by the hand trace
+  itself - every buffer `record_dispatches` sees matches what `record()`
+  populates from `rk.bindings`/`bufs` exactly; nothing is dispatched through
+  `step_native` anywhere in this path (`resolve_kernel` proves `kind < base`
+  always resolves the plain WGSL pipeline, never a native/coopmat
+  substitution - there is no shape-based auto-routing to miss).
+- *(b) a hazard spanning a `flush()`/ring boundary*: ruled out by measurement,
+  not assumption - `Gpu::submit`/`VulkanBackend::submit` never call `flush`
+  on their own, and nothing in `qkv_prepare`/`gqa_fwd`/`gate_ctx`/`bench_gqa`
+  calls `read`/`write`/`poll_wait`/`Backend::flush` either, so the ENTIRE
+  accumulated sequence (however many reps) is provably ONE `record_dispatches`
+  call, not several - there is no boundary for a cross-batch hazard to span.
+- *(c) the two-set dirty-tracking design losing an earlier reader once an
+  intermediate dispatch touches the same buffer*: ruled out by hand-tracing
+  every multi-touch buffer in the real sequence (`q_full`: write, read, read,
+  never touched again; `v`: write at position 2, first read at position 11,
+  correctly RAW-barriered) against `record_dispatches`'s actual removal
+  semantics - `dirty_write.remove`/`dirty_read.remove` are unconditional
+  (M6.7's own fix), and a Vulkan pipeline barrier's execution dependency is
+  NOT scoped to the named buffer - it serialises everything before it against
+  everything after it in that command buffer, so even an imprecise `needed`
+  set still produces a correct cut once any barrier is emitted at all. The
+  post-M6.7 two-set design is correct for every case this investigation could
+  construct; `barrier_count()` never read anything but the hand-derived
+  number, at any scale, for the GQA sequence specifically.
+
+**The actual mechanism**: `crates/kernels/wgsl/matmul.wgsl` is rated `@opt 2`
+in its own header (one thread per output element, serial K-loop, no tiling -
+the deliberately naive reference GEMM) and `bench_gqa`'s q/k/v/o projections
+dispatch it at REAL `d_model=5120` dimensions. Measured directly (one
+dispatch, flushed and read back immediately, fully host-synchronised before
+and after, no other dispatch involved): the q_proj-shaped call
+(M=128,K=5120,N=12288) took **3320 ms** on this workspace's Intel Arc
+(Meteor Lake) iGPU - a real, correctly-computing, but very slow dispatch, not
+a hang or a wrong answer. `VulkanBackend::submit`'s fast path (M6.2's own
+design: `step`/`submit` never touch the queue, a flush is only ever triggered
+by `read`/`poll_wait`/`Backend::flush`) then does exactly what it is
+documented to do: accumulates every dispatch a caller `submit`s, with no
+opinion on how large that gets, into ONE command buffer, submitted as ONE
+continuous, un-interrupted unit of GPU work. `report()`'s own wall-clock loop
+(`crates/qwen35/src/bin/qwen35_bench.rs`) never calls `poll_wait` between
+its `reps` iterations - itself a real, independent defect (it violates this
+repo's own measurement rule that a timed region must be bracketed by
+`poll_wait`, so its "wall ms/rep" number was measuring host-side recording
+cost, not GPU time; visible directly in this milestone's own repro output:
+`wall 10.704 ms/rep` alongside a device that had just spent seconds on a
+single dispatch) - so FOUR full GQA layers' worth of `matmul` dispatches
+(the "16 matmul calls" M6.8 already found) land in ONE submission. Bisected
+directly: an isolated sequence of raw `matmul` dispatches at this shape
+survived at `reps=3` (15 dispatches, ~16s of real device time) but lost the
+device at `reps=4` (20 dispatches, ~25-30s) - a device-driver hang-detection
+reset (`ERROR_DEVICE_LOST`, not a `VK_TIMEOUT` on this process's OWN
+`BRAIN_GPU_WAIT_S` wait ceiling - the driver itself decided the device was
+gone), tripped by cumulative un-interrupted GPU busy time, not by dispatch
+count or any specific buffer pattern. `BRAIN_VK_SERIAL=1` avoids it for the
+reason this reframes, not the reason M6.7 assumed: it does not add a barrier
+anywhere `record_dispatches` was missing one - it bypasses `record_dispatches`
+ENTIRELY (`flush`'s `force_serial` branch does a raw per-dispatch
+submit+fence loop) and so never lets more than ONE dispatch's worth of GPU
+time go un-checkpointed, regardless of how expensive that one dispatch is.
+
+**The fix**: `MAX_UNSYNCED_WORKGROUPS` (`crates/backend-vulkan/src/lib.rs`) -
+`VulkanBackend::submit` now tracks a running `sum(gx*gy)` of everything
+currently in `pending` (`pending_workgroups`, reset to 0 wherever `flush`
+drains `pending`) and forces a real `flush` + `drain` (a genuine host wait,
+not just a submit) once that sum crosses the ceiling - bounding how much
+un-synchronised GPU work ANY caller can accumulate, independent of how many
+`submit`/`read`/`poll_wait` calls it makes on its own. A SIZE-based (not
+count-based) ceiling is required: this same crate's own `tests/
+perf_contract.rs` (`frame_loop_submits_are_bounded_per_frame`) already
+requires 32 small, fast dispatches to cost exactly ONE flush - a dispatch-
+COUNT ceiling anywhere near what this bug needed (mid-teens) would have
+broken that contract outright, since it cannot distinguish "32 dispatches
+each touching 4 elements" from "20 dispatches each touching millions."
+Workgroup count is an imperfect but far more discriminating proxy: `add2`-
+scale kernels in the existing per-frame contract sum to a few dozen
+workgroups total; this milestone's own pathological `matmul` dispatch is
+24576 by itself.
+
+**Threshold calibration, honestly, including what did not work**: an initial
+`65536` (2^16) - chosen with what looked like a healthy ~2.3x margin under
+the measured 153600-workgroups-survived / 204800-lost boundary - measurably
+helped (`qwen35_bench gqa 128 3` run 3 times in a row: 2 clean, 1 still lost
+the device) but did NOT fully close the crash. This box's own noise
+explains why: repeated `qwen35_bench` runs at this SAME ceiling measured a
+roofline anywhere from 28 to 605 GFLOP/s run to run (a >20x spread) and this
+same workspace has separately measured up to a ~10x clock swing between an
+idle and a fully DVFS-ramped integrated GPU, plus roughly a 3x slowdown from
+a co-resident CPU load - so a ceiling calibrated against one measurement
+session's device speed is not safe against a slower one. Lowered to `4096`
+(roughly 1/6 of one `q_full` dispatch alone, and under attention's own
+largest single dispatch at this shape, `gqa_scores`/`gqa_apply` at 6144
+workgroups) for a much wider margin. `qwen35_bench gqa 128 3` then ran clean
+**13 times in a row** (10 back-to-back, plus 3 more after the mutation-verify
+rebuild below) - roofline still swinging 28-605 GFLOP/s across those runs,
+confirming the wider margin, not a quieter box, is what closed it.
+
+**Verified**: `cargo test --release --offline -p brain-backend-vulkan --lib
+--bins --tests` (all suites: `kernel_timing.rs`, `async_submit.rs`,
+`deferred_reclaim.rs`, `perf_contract.rs`), green - in particular
+`independent_dispatches_in_a_batch_cost_no_barrier` still reads exactly 1
+barrier (this fix adds a size-based flush, not a new barrier-analysis case,
+so the M6.1 contract is untouched) and `frame_loop_submits_are_bounded_per_
+frame` still holds (32 small dispatches stay far under the new ceiling).
+`cargo clippy --release --offline -p brain-backend-vulkan --all-targets
+--all-features -- -D warnings` clean. New test:
+`tests/perf_contract.rs`'s `an_oversized_pending_batch_is_auto_flushed_
+without_an_explicit_sync` - fast and deterministic (an `add2` dispatch with
+32768 workgroups over a 4-element buffer; bounds-checked in `add2.wgsl`, so
+correctness-safe and cheap regardless of thread count, sidestepping the need
+for an actually-slow, driver/thermal-state-dependent kernel in a routine
+test), asserting `queue_submits()` increases by exactly 1 with NO `read`/
+`poll_wait` call anywhere in the test. **Mutation-verified per this ledger's
+own F.8**: reverting just the `lib.rs` change (`git stash` on that file
+alone, keeping the new test) reproduced the exact predicted failure
+(`left: 0, right: 1` - no automatic flush happened), and separately, two
+repeats of the full `qwen35_bench gqa 128 3` binary against the reverted
+source lost the device again (one clean, one `ERROR_DEVICE_LOST`, matching
+this bug's own known intermittency); restoring the fix and rebuilding
+returned both to green (test) and the 13/13 clean run count above.
+
+**Honest framing**: this is a real root-cause diagnosis, not a guess dressed
+up as one - the mechanism (an unbounded un-synchronised batch of a
+legitimately, measurably slow kernel tripping this driver's own hang
+detection) is directly measured, not inferred, and the architectural gap it
+points at (`submit` had no ceiling at all on `pending`'s accumulated size)
+is real and is what this fix closes. What is NOT claimed: that
+`MAX_UNSYNCED_WORKGROUPS = 4096` is a mathematically airtight bound against
+every possible future case - it is a heuristic proxy for elapsed device time
+(this backend does not, and architecturally cannot cheaply, know a
+dispatch's real cost ahead of running it), calibrated with a wide safety
+margin against the SPECIFIC failure measured here. An even slower kernel, a
+longer un-synchronised chain under this ceiling, or a noisier moment on this
+shared box could in principle still accumulate past a hang-detection window;
+`BRAIN_VK_SERIAL=1` (a host wait after every single dispatch) remains the
+maximally conservative fallback for a shape this heuristic does not cover.
+Separately, and out of scope for this commit (a benchmark-harness fix, not a
+backend one): `qwen35_bench.rs`'s `report()` wall-clock loop still does not
+bracket its own timed region with `poll_wait`, so its "wall ms/rep" number
+for any multi-rep run remains dominated by host-side recording cost, not
+GPU time - a real, pre-existing, independently-fixable defect this
+investigation surfaced but did not touch.
+
+**Commit**: one.
+
 ### M7.1 - Phase 7 opens: `DataParallel::adamw_step` bucketed into one transfer per replica per direction
 
 Phase 7 (distributed) had zero milestones before this one. Scoped to the
