@@ -79,15 +79,50 @@ impl ResidentModel for PulidResident {
         pulid::caps::manifest()
     }
 
-    fn instance_key(&self, _action: &str, _inv: &Invocation) -> InstanceKey {
-        InstanceKey::new(pulid::caps::MODEL, "default")
+    fn instance_key(&self, _action: &str, inv: &Invocation) -> InstanceKey {
+        // `(variant, precision, size)` - EXACTLY the tuple
+        // `pulid::caps::Session` keys its own built bundles on. A single
+        // opaque "default" key made the two disagree: one scheduler-priced
+        // instance could hold an unbounded number of bundles built inside it,
+        // none of which the budget ever saw. Same shape (and same reason) as
+        // `resident_flux2.rs`'s key.
+        let variant = inv.get_str("variant").unwrap_or_else(|| "dev".into());
+        let precision = inv.get_str("precision").unwrap_or_else(|| "int8".into());
+        let w = inv.get_i64("width").unwrap_or(1024);
+        let h = inv.get_i64("height").unwrap_or(1024);
+        InstanceKey::new(pulid::caps::MODEL, format!("{variant}:{precision}:{w}x{h}"))
     }
 
-    fn estimate(&self, _key: &InstanceKey) -> MemCost {
-        // FLUX.1-dev's ~52 GB (`resident_flux1.rs`) plus ArcFace + EVA-CLIP-L
-        // (~1 GB combined, similar order to `resident_clip.rs`'s image tower)
-        // plus PuLID's own IDFormer/PulidCa (~140 M params, a few hundred MB).
-        MemCost::new(54u64 << 30, 0)
+    fn estimate(&self, key: &InstanceKey) -> MemCost {
+        // Read back out of "{variant}:{precision}:{w}x{h}" (see `instance_key`).
+        // The precision is what decides servability, and a flat figure sized
+        // for fp32 made EVERY request fail admission with
+        // `ClaimError::TooLarge` on any card smaller than the fp32 DiT -
+        // including the int8 build this action defaults to precisely because
+        // it is the one that fits a 24 GiB card (`pulid::caps`'s `precision`
+        // param doc).
+        let int8 = key.config.contains(":int8:");
+        // Measured at 512x512 int8: 21.9 GiB resident on the DiT's card. That
+        // is the int8 FLUX.1-dev DiT plus PuLID's whole identity stack -
+        // ArcFace, BiSeNet, EVA-CLIP-L, IDFormer and `PulidCa`, all of which
+        // `pulid::caps::Bundle::load` deliberately pins to the DiT's own card
+        // - plus the VAE and one sample's activations. The T5-XXL and CLIP-L
+        // text encoders are NOT in this figure: `flux1::pipeline::plan_flux1`
+        // places them itself, on their own device.
+        // fp32 is that same stack over the DiT's own ~47.6 GB of f32 weights;
+        // it genuinely does not fit a 24 GiB card, so it must keep being
+        // refused up front rather than admitted and then OOM mid-generation.
+        let base = if int8 { 22u64 << 30 } else { 54u64 << 30 };
+        // The baseline above is a 512x512 sample (1024 image tokens). A larger
+        // canvas only grows the activations, which scale with the joint token
+        // count - `MAX_TXT_LEN` text tokens plus (w/16)*(h/16) image tokens -
+        // over the DiT's 16 [n, hidden] + 3 [n, mlp] f32 working buffers
+        // (`resident_flux2.rs::estimate` prices its own the same way).
+        let (w, h) = size_from_key(&key.config);
+        let n = flux1::pipeline::MAX_TXT_LEN as u64 + (w / 16) * (h / 16);
+        let n_base = flux1::pipeline::MAX_TXT_LEN as u64 + (512 / 16) * (512 / 16);
+        let per_token = (16 * 3072u64 + 3 * 12288u64) * 4;
+        MemCost::new(base + n.saturating_sub(n_base) * per_token, 0)
     }
 
     fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
@@ -107,6 +142,14 @@ impl ResidentModel for PulidResident {
     }
 }
 
+/// `(w, h)` out of a `"{variant}:{precision}:{w}x{h}"` instance key, falling
+/// back to the action's own 1024x1024 default when the key does not parse (an
+/// unrecognisable key must not be priced at zero tokens).
+fn size_from_key(config: &str) -> (u64, u64) {
+    let parsed = config.rsplit(':').next().and_then(|wh| wh.split_once('x')).and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?)));
+    parsed.unwrap_or((1024, 1024))
+}
+
 struct PulidInstance {
     session: Session,
     device: Device,
@@ -115,5 +158,71 @@ struct PulidInstance {
 impl Instance for PulidInstance {
     fn run(&mut self, action: &str, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
         crate::resident_llm::on_device(self.device, || self.session.run(action, inv))?
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// A `PulidResident` over a directory that merely LOOKS like a released
+    /// FLUX.1 checkpoint - `new` only probes for `transformer/`, and neither
+    /// `instance_key` nor `estimate` reads a single weight.
+    fn resident(tag: &str) -> (PulidResident, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!("brain-cli-pulid-resident-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("transformer")).unwrap();
+        let r = PulidResident::new(root.to_str().unwrap(), "/pulid", "/arcface", "/clip", "/bisenet").unwrap();
+        (r, root)
+    }
+
+    /// The servability gate. `int8` is what this action DEFAULTS to, for the
+    /// stated reason that it is the tier which fits a 24 GiB card; a flat,
+    /// precision-blind estimate sized for the fp32 DiT therefore made every
+    /// served request - including that default one - fail admission outright
+    /// with `residency::ClaimError::TooLarge` (checked against each device's
+    /// usable budget individually, never their sum), so the model was
+    /// registered but structurally unreachable over every serving transport.
+    #[test]
+    fn the_default_int8_request_fits_one_24_gib_card() {
+        let (r, root) = resident("fits");
+        // What `brain serve --dbus` leaves usable on a 24 GiB card at its own
+        // default `--reserve-gb 2`.
+        let usable = (24u64 << 30) - (2u64 << 30);
+        let inv = Invocation::new().set("prompt", json!("x")).set("precision", json!("int8")).set("width", json!(512)).set("height", json!(512));
+        let cost = r.estimate(&r.instance_key("text2image", &inv));
+        assert!(cost.vram <= usable, "int8 512x512 estimates {} MiB, more than a 24 GiB card's {} MiB usable budget", cost.vram >> 20, usable >> 20);
+
+        // fp32 genuinely does not fit and must stay refused, not quietly
+        // shrunk to make this test pass.
+        let fp32 = Invocation::new().set("prompt", json!("x")).set("precision", json!("fp32")).set("width", json!(512)).set("height", json!(512));
+        assert!(r.estimate(&r.instance_key("text2image", &fp32)).vram > usable, "fp32 must remain correctly unservable on a 24 GiB card");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// `pulid::caps::Session` caches one built bundle per
+    /// `(variant, height, width, precision)`. The residency key must carry the
+    /// same tuple, or the scheduler prices one instance while that instance
+    /// silently accumulates several bundles' worth of weights.
+    #[test]
+    fn the_instance_key_carries_variant_precision_and_size() {
+        let (r, root) = resident("key");
+        let base = Invocation::new().set("prompt", json!("x")).set("precision", json!("int8")).set("width", json!(512)).set("height", json!(512));
+        let k = r.instance_key("text2image", &base);
+        assert_eq!(k.config, "dev:int8:512x512");
+
+        for differing in [
+            base.clone().set("precision", json!("fp32")),
+            base.clone().set("width", json!(1024)),
+            base.clone().set("variant", json!("schnell")),
+        ] {
+            assert_ne!(k.config, r.instance_key("text2image", &differing).config, "a differing bundle field must not share one instance");
+        }
+
+        // Repeat calls with the SAME bundle fields must share one instance -
+        // this is what makes a batch of generations pay the weight load once.
+        let same = base.clone().set("prompt", json!("a different prompt")).set("seed", json!(7));
+        assert_eq!(k.config, r.instance_key("text2image", &same).config);
+        std::fs::remove_dir_all(&root).ok();
     }
 }
