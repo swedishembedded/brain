@@ -101,6 +101,16 @@ fn run_toymoe(args: &[String]) {
 /// One row per architecture, each naming its own served model: the face pair
 /// (`scrfd` detection, `arcface` identity embedding) are two crates and two
 /// models, and `arcface embed`'s default path reaches the detector itself.
+/// `ARCH_TO_MODEL` ids with no `brain_arch::Arch` row: no-weights utility
+/// models (`imgpipe` composes OTHER architectures' own weights) with no
+/// crate-with-a-port story of their own, so no row makes sense for them.
+/// [`crate::supply::ensure_env_weights_with`] treats one of these as
+/// "nothing to fetch" rather than the dispatch-bug signal a genuinely
+/// unregistered id would be - a live `brain imageops draw_boxes` reaching
+/// that function with `attempt_fetch` true (a known verb makes
+/// `wants_weight_acquisition` true) is normal, not a mistake.
+pub(crate) const NO_ARCH_ROW: &[&str] = &["imageops", "demo", "imgpipe"];
+
 const ARCH_TO_MODEL: &[(&str, &str)] = &[
     ("s3dit", "brain/s3dit"),
     ("fastvlm", "brain/fastvlm"),
@@ -963,12 +973,8 @@ mod tests {
 
     #[test]
     fn every_arch_to_model_id_is_a_real_registry_entry() {
-        // `imageops`/`demo`/`imgpipe` are the documented exception (see
-        // `known_arch_id`'s doc comment): no-weights utility models (`imgpipe`
-        // composes OTHER architectures' own weights) with no crate-with-a-port
-        // story of their own, so no `brain_arch::Arch` row makes sense for
-        // them. Every other `ARCH_TO_MODEL` id is a real architecture.
-        const NO_ARCH_ROW: &[&str] = &["imageops", "demo", "imgpipe"];
+        // `NO_ARCH_ROW` is the documented exception (see its own doc comment):
+        // every other `ARCH_TO_MODEL` id is a real architecture.
         for (id, _) in ARCH_TO_MODEL {
             if NO_ARCH_ROW.contains(id) {
                 assert!(brain_arch::by_id(id).is_none(), "{id:?} was added to brain_arch::ARCHS -- remove it from NO_ARCH_ROW");

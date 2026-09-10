@@ -633,11 +633,16 @@ pub fn ensure_env_weights(arch: &str) {
 /// resolve. The `Err` case is exactly the fetching-off-and-not-pulled error
 /// the CLI prints and exits on.
 fn ensure_env_weights_with(arch: &str, store: &Store, hub: &dyn Hub) -> Result<(), String> {
-    // Unrecognized arch ids never reach here except by a bug in the CLI
-    // dispatch (a typo'd id string, or a new `arch!()` row that call site
-    // hasn't picked up) -- surfacing it by name here is what lets a
-    // developer find the mismatch, rather than the CLI silently behaving as
-    // if there were no weights to resolve at all.
+    // `crate::resolve::NO_ARCH_ROW` (imageops/demo/imgpipe) are real,
+    // dispatchable architectures with genuinely no `brain_arch::Arch` row -
+    // nothing to fetch, not a dispatch bug. Any OTHER unrecognized id
+    // reaching here really is one (a typo'd id string, or a new `arch!()`
+    // row that call site hasn't picked up) -- surfacing it by name is what
+    // lets a developer find the mismatch, rather than the CLI silently
+    // behaving as if there were no weights to resolve at all.
+    if crate::resolve::NO_ARCH_ROW.contains(&arch) {
+        return Ok(());
+    }
     let a = brain_arch::by_id(arch)
         .ok_or_else(|| format!("{arch}: unknown to brain_arch::by_id (bug: check the CLI dispatch for a typo'd or unregistered architecture id)"))?;
     if a.weights_env.is_empty() || a.weights_env.iter().all(|(var, _)| std::env::var_os(var).is_some_and(|v| !v.is_empty())) {
@@ -1017,6 +1022,24 @@ pub(crate) mod tests {
         let dir = store(&format!("supply-test-env-weights-wan-noop-{}", std::process::id()));
         std::env::remove_var("BRAIN_AUTO_FETCH");
         ensure_env_weights_with("wan", &dir, &FakeHub::new()).unwrap();
+    }
+
+    /// `imageops`/`demo`/`imgpipe` (`crate::resolve::NO_ARCH_ROW`) have no
+    /// `brain_arch::Arch` row at all - real, dispatchable no-weights utility
+    /// models, not a bug. `dispatch_arch` calls this function for any known
+    /// verb regardless of whether the architecture has a row (a live `brain
+    /// imageops draw_boxes` reaches here because `verb_is_known` is `Some(true)`
+    /// for it), so treating a missing row as the "unregistered id" bug case
+    /// made every real imageops/demo/imgpipe invocation fail before doing
+    /// anything - this pins that they no-op instead.
+    #[test]
+    fn ensure_env_weights_no_ops_for_architectures_with_no_arch_row() {
+        let _serial = env_lock();
+        let dir = store(&format!("supply-test-env-weights-no-arch-row-{}", std::process::id()));
+        for arch in crate::resolve::NO_ARCH_ROW {
+            assert!(brain_arch::by_id(arch).is_none(), "{arch} unexpectedly has a brain_arch row now");
+            ensure_env_weights_with(arch, &dir, &FakeHub::new()).unwrap();
+        }
     }
 
     /// A pulled ref resolves with fetching OFF and a hub holding NOTHING --
