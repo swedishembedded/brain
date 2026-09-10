@@ -299,6 +299,37 @@ struct OpCounters {
 /// dispatches), which is exactly what used to get zero attribution.
 const MAX_TIMED_DISPATCHES: usize = 8192;
 
+/// A sanity ceiling on a single dispatch's device time, used by
+/// [`VulkanBackend::record_timing`] to detect a corrupted or query-mechanism-
+/// perturbed timestamp readback rather than fold it into the accumulator as
+/// a real (and wildly wrong) number.
+///
+/// Root-caused on this workspace's Intel Arc (Meteor Lake, Xe-LPG) iGPU via
+/// `qwen35_bench gqa 128 3` (`BRAIN_DEVICE=vulkan BRAIN_VK_SERIAL=1`): the
+/// native `matmul` (cooperative-matrix) kernel's per-dispatch device-
+/// timestamp delta reported up to ~9219 ms for a single dispatch, though
+/// `end_and_wait`'s own host-side fence-wait timer (added temporarily to
+/// root-cause this, not part of the fix) agreed with the device number to
+/// within a few percent every time - so unlike `backend-wgpu`'s sibling
+/// defect (M6.6, a literal garbled readback), this is a real, driver-
+/// reproducible slowdown of the dispatch itself, triggered by combining a
+/// `vkCmdWriteTimestamp` pair with `backend-vulkan`'s Intel-ANV serialized
+/// (submit+fence-per-dispatch) path on this specific cooperative-matrix
+/// pipeline. A quantitative check against the SAME kernel confirms it is not
+/// simply "coopmat is slow on this iGPU": a synthetic dispatch with ~30x the
+/// real GQA matmul's FLOP count (128x4096x49152 vs. the ~1.7 GFLOP/call a
+/// real T=128 GQA layer actually issues) measured a consistent, repeatable
+/// ~517-567 ms/call (~100 GFLOP/s sustained) - so a REAL ~1.7 GFLOP/call
+/// dispatch finishing in multiple SECONDS is 300-500x slower than this same
+/// pipeline's own directly-measured achievable throughput, not a plausible
+/// real number. Whatever the exact driver mechanism, the effect on the
+/// report is identical to M6.6's: an implausible number must never be folded
+/// into the per-kernel total as if it were real. 2000ms (matching `backend-
+/// wgpu`'s own `IMPLAUSIBLE_DISPATCH_MS`) is deliberately generous - it must
+/// never reject a real slow dispatch, only the multi-order-of-magnitude
+/// anomaly this constant exists to catch (M6.8).
+pub const IMPLAUSIBLE_DISPATCH_MS: f64 = 2000.0;
+
 /// Per-kernel-kind device timing, mirroring `backend-wgpu`'s `GpuProfile`
 /// shape so `gpu_core::profile` gets the same `(name, ms, calls)` contract
 /// from either backend. `None`/`false` everywhere when this device's
@@ -309,6 +340,13 @@ struct VkProfile {
     /// Per pipeline index: (accumulated ms, calls).
     acc: Mutex<Vec<(f64, u64)>>,
     pool: Mutex<Option<vk::QueryPool>>,
+    /// Dispatches [`VulkanBackend::record_timing`] discarded because a
+    /// timestamp pair was unwritten or implausible (M6.8) - surfaced only as
+    /// a loud `eprintln!` at the discard site today (mirroring
+    /// `backend-wgpu`'s `unavailable_ticks`), kept here so a corrupted pass
+    /// reads as "N samples missing" in future diagnostics, never as a
+    /// silently wrong total.
+    discarded: std::sync::atomic::AtomicU64,
 }
 
 impl VkProfile {
@@ -317,6 +355,7 @@ impl VkProfile {
             enabled: std::sync::atomic::AtomicBool::new(backend_api::profile_enabled()),
             acc: Mutex::new(vec![(0.0, 0); n_kernels]),
             pool: Mutex::new(None),
+            discarded: std::sync::atomic::AtomicU64::new(0),
         }
     }
 }
@@ -1693,19 +1732,50 @@ impl VulkanBackend {
     /// registered [`coopmat::NativeEntry`] itself otherwise (see
     /// [`Self::native`]'s doc for why a native kernel's timing lives THERE
     /// rather than growing `profile.acc` in lockstep with a separate lock).
+    ///
+    /// Whole-BATCH, not per-entry (M6.8, mirroring `backend-wgpu`'s
+    /// `fold_ticks`, M6.6): the first pair that is unwritten (either side
+    /// reads exactly 0 - never a real GPU timestamp) or implausible (more
+    /// than [`IMPLAUSIBLE_DISPATCH_MS`] for one dispatch) discards every
+    /// pair in THIS call, not only the bad one - a neighbour that happens to
+    /// read a small number is not proof it is correct, only proof it did not
+    /// trip this particular ceiling, on the same driver, same submission
+    /// that just proved it cannot be trusted.
     fn record_timing(&self, kinds: &[usize], ts: &[u64]) {
         let period_ns = self.ctx.timestamp_period_ns;
         let base = self.native_base();
+        let mut deltas: Vec<(usize, f64)> = Vec::with_capacity(kinds.len());
+        for (i, &kind) in kinds.iter().enumerate() {
+            let (a, b) = (ts[i], ts[i + 1]);
+            if a == 0 || b == 0 {
+                self.profile.discarded.fetch_add(kinds.len() as u64, Ordering::Relaxed);
+                eprintln!(
+                    "brain: backend-vulkan timestamp query unavailable (unwritten) for dispatch {i} of {} - discarding this batch's {} pair(s) rather than folding a corrupted delta (M6.8)",
+                    kinds.len(),
+                    kinds.len()
+                );
+                return;
+            }
+            let dt_ms = b.saturating_sub(a) as f64 * period_ns / 1e6;
+            if dt_ms > IMPLAUSIBLE_DISPATCH_MS {
+                self.profile.discarded.fetch_add(kinds.len() as u64, Ordering::Relaxed);
+                eprintln!(
+                    "brain: backend-vulkan implausible device time {dt_ms:.1} ms for one dispatch (kind index {kind}) - discarding this whole {}-dispatch batch's timing as a corrupted timestamp-query readback, not a real number (M6.8)",
+                    kinds.len()
+                );
+                return;
+            }
+            deltas.push((kind, dt_ms));
+        }
         let mut acc = self.profile.acc.lock().unwrap_or_else(|e| e.into_inner());
         let mut native = self.native.lock().unwrap_or_else(|e| e.into_inner());
-        for (i, &kind) in kinds.iter().enumerate() {
-            let dt_ns = ts[i + 1].saturating_sub(ts[i]) as f64 * period_ns;
+        for (kind, dt_ms) in deltas {
             if kind < base {
                 let entry = &mut acc[kind];
-                entry.0 += dt_ns / 1e6;
+                entry.0 += dt_ms;
                 entry.1 += 1;
             } else if let Some(e) = native.get_mut(kind - base) {
-                e.ms += dt_ns / 1e6;
+                e.ms += dt_ms;
                 e.calls += 1;
             }
         }
@@ -1970,6 +2040,7 @@ impl Backend for VulkanBackend {
             e.ms = 0.0;
             e.calls = 0;
         }
+        self.profile.discarded.store(0, Ordering::Relaxed);
     }
 
     fn dump_profile(&self) {

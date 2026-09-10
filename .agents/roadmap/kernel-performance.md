@@ -3734,7 +3734,7 @@ full forced serialization (`BRAIN_VK_SERIAL=1`, so the crash itself is
 avoided), `backend-vulkan`'s OWN device-timestamp query mechanism reports
 an implausible `matmul` time (`~31618 ms` over 16 calls) - a sibling of
 M6.6's finding, in the OTHER backend crate, unfixed here, out of this
-milestone's scope too.
+milestone's scope too. Root-caused and fixed in M6.8, below.
 
 **Genuinely open, named for whoever picks this up next**: what hazard class
 remains uncaught. Candidates not yet ruled out: an access the per-buffer
@@ -3753,6 +3753,117 @@ recommended next step.
 --tests` (all suites, including this crate's own `kernel_timing.rs`,
 `async_submit.rs`, `deferred_reclaim.rs`), green. `cargo clippy -p
 brain-backend-vulkan --all-targets --all-features -- -D warnings` clean.
+
+**Commit**: one.
+
+### M6.8 - `backend-vulkan`'s device-timestamp queries also corrupt a number instead of losing it - a real driver slowdown, not a garbled readback, fixed the same way as M6.6
+
+The `backend-vulkan` sibling M6.7 named and left open: `qwen35_bench gqa 128
+3` (`BRAIN_DEVICE=vulkan BRAIN_VK_SERIAL=1`) reports a `matmul` row on the
+order of 30000 ms total across a handful of calls, while every other kernel
+in the same table is under a few milliseconds and the pass's own wall clock
+(printed alongside) is a tiny fraction of that. Confirmed reproducible, not
+a one-off: 3/3 repeated runs.
+
+**Root cause, via `record_timing` instrumentation (temporary, removed before
+this commit)**: printing the raw `ts[i]`/`ts[i+1]` pair for every dispatch
+showed real, monotonically increasing, internally-consistent tick values -
+never exactly 0, never a bit pattern unrelated to neighbouring reads, the
+computed period (`~52.08 ns/tick`) matching every other kernel's rows
+exactly. This is NOT `backend-wgpu`'s M6.6 mechanism (a literal garbled
+readback). A second instrument - a `std::time::Instant` wrapped around
+`end_and_wait` in the same serialized per-dispatch loop `record_timing`
+reads from - showed the HOST wall-clock wait for the same submit agreeing
+with the DEVICE timestamp delta to within a few percent, every time. So the
+dispatch itself really does take that long, on the device, when timed this
+way: a genuine, driver-reproducible slowdown triggered by combining a
+`vkCmdWriteTimestamp` pair with this backend's Intel-ANV serialized
+(submit+fence-per-dispatch) path on the native cooperative-matrix `matmul`
+pipeline specifically - plain WGSL catalogue kernels (`axpy`) dispatched
+through the identical serialized+timed path at a comparably large workgroup
+count (`gx=65535`) measured a small, correct ~1.85 ms/call, so this is not a
+generic "large dispatch + query" cost.
+
+**Quantitative check that this is still implausible, not "coopmat is just
+slow here"**: a synthetic `matmul_coopmat` dispatch built directly against
+this crate's own `coopmat` module (no model crate) at (M,K,N) =
+(128, 4096, 49152), tiles=24576 - roughly the real GQA layer's largest
+`matmul` dispatch by workgroup count, but ~30x its FLOP count (the whole
+GQA layer's own printed accounting is 26.844 GFLOP across all 16 `matmul`
+calls, ~1.68 GFLOP/call average) - measured a CONSISTENT, repeatable
+517-567 ms/call (~100 GFLOP/s sustained, 4/4 identical dispatches within a
+few percent of each other). A real ~1.68 GFLOP/call dispatch finishing in
+2000-9219 ms, as `qwen35_bench` reported, is 300-500x slower than this same
+pipeline's own directly-measured achievable rate for ~30x MORE work - not a
+plausible real number, whatever the exact driver mechanism behind it.
+
+**Killed hypothesis**: that the slowdown is purely a function of total FLOP
+count (`M*K*N`), making it "just how slow coopmat legitimately is at that
+much work" rather than a measurement artifact. Tested by holding
+`K*tiles` (proportional to FLOP) fixed while changing the `M`/`N` split: a
+"thin and wide" tile grid (`M=128, N=196608`, tiles=98304) reliably measured
+2000-2881 ms/call and tripped the new ceiling every run, while a BALANCED
+split of the identical total FLOP (`M=4096, N=6144`, same 98304 tiles, same
+`K=4096`) measured only ~485 ms/call - comfortably under the ceiling, same
+driver, same kernel, same submission pattern. Also tried: holding the same
+extreme `M`/`N` ratio while shrinking `K` (`K=1024` or `K=256` at the same
+tile count) - both measured small, plausible numbers (159 ms/call and
+104 ms/call respectively), so `K` clearly matters too. Neither "total FLOP"
+nor "tile-grid shape" alone explains the magnitude; some interaction of
+both, specific to this driver's handling of a `vkCmdWriteTimestamp` pair
+around a "thin and wide", `K`-heavy cooperative-matrix dispatch, is the
+actual mechanism - not chased further, as the observable defect (an
+implausible number reported as real) is what this milestone exists to fix,
+not the driver's internal scheduling.
+
+**The actual fix**: `record_timing` (`crates/backend-vulkan/src/lib.rs`),
+the single function both `flush`'s serialized-workaround branch (one
+dispatch, one `(ts[i], ts[i+1])` pair per call) and `flush_chunk` (many
+dispatches sharing one query pool, `n+1` timestamps bracketing `n`
+dispatches) already funnelled every timestamp pair through - no new call
+sites needed. Same philosophy as `backend-wgpu`'s `fold_ticks` (M6.6):
+WHOLE-BATCH, not per-entry. Two checks, in order: `ts[i]==0 ||
+ts[i+1]==0` (the unwritten-query sentinel - never observed on this
+hardware but checked anyway, matching the wgpu-side defect class) and
+`dt_ms > IMPLAUSIBLE_DISPATCH_MS` (2000ms, the exact same constant value as
+`backend-wgpu`'s own, now `pub` from `backend_vulkan` too, deliberately
+generous so a genuinely slow real dispatch is never rejected). Either trips,
+the WHOLE batch (all `kinds.len()` pairs passed to that one `record_timing`
+call) is discarded and a new `VkProfile::discarded` counter records it,
+loudly (`eprintln!`), rather than one bad entry being dropped while
+neighbours that happen to look small are kept.
+
+**New test**: `a_corrupted_timestamp_readback_is_discarded_not_reported`
+(`crates/backend-vulkan/tests/kernel_timing.rs`), mirroring `backend-wgpu`'s
+test of the same name. Builds the `matmul_coopmat` native kernel directly
+against `VulkanBackend`/`coopmat::spec()` (no model crate, no
+`qwen35_bench`) at the (128, 4096, 196608) shape found above to trigger the
+slowdown reliably on this box, dispatches it 4 times under
+`BRAIN_VK_SERIAL`, and asserts every `kernel_times()` row stays under
+`IMPLAUSIBLE_DISPATCH_MS` per call - a real device test against real driver
+state, for the same reason M6.6's own test is: a synthetic unit test of the
+arithmetic alone cannot reproduce a driver-level effect. **Mutation-verified
+per this ledger's own F.8**: with the `dt_ms > IMPLAUSIBLE_DISPATCH_MS`
+check disabled (`if false && ...`), the new test failed immediately and
+specifically - `native-spirv#main reported 9344.0 ms over 4 call(s)
+(2336.0 ms/call)` - restoring the check made it pass again, repeatably.
+
+**Verified**: `cargo test --release --offline -p brain-backend-vulkan --lib
+--bins --tests` (all suites, including this crate's own `kernel_timing.rs`,
+`async_submit.rs`, `deferred_reclaim.rs`, `perf_contract.rs`), green. `cargo
+clippy --release --offline -p brain-backend-vulkan --all-targets
+--all-features -- -D warnings` clean. `qwen35_bench gqa 128 3`
+(`BRAIN_DEVICE=vulkan BRAIN_VK_SERIAL=1`) run 3 times post-fix: the
+~30000ms-class corruption is gone every run (each discard now printed
+loudly instead, e.g. "implausible device time 4951.9 ms ... discarding");
+the reported `matmul` row still runs higher than the pass's own wall clock
+(hundreds of ms across the calls that survive the ceiling, versus a
+~11-24 ms/rep wall clock) - a real, honestly-reported residual imprecision
+from this same query-perturbation effect at a smaller magnitude, exactly as
+`IMPLAUSIBLE_DISPATCH_MS`'s deliberately generous 2000ms threshold predicts
+and exactly as `backend-wgpu`'s own M6.6 fix left unresolved for its own
+sub-threshold cases - not a regression this milestone introduced, and not
+claimed as fully solved.
 
 **Commit**: one.
 
