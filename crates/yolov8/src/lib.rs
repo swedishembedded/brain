@@ -17,6 +17,7 @@ pub mod caps;
 pub mod config;
 pub mod finetune;
 pub mod head;
+pub mod identity;
 pub mod import;
 pub mod infer;
 pub mod init;

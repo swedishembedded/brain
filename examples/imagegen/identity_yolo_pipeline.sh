@@ -18,10 +18,17 @@
 # gated on ArcFace similarity to the source photo. 4. Generate hard
 # negatives + backgrounds (plain FLUX.2, no identity conditioning).
 # 5. Auto-label person boxes with COCO YOLOv8n and pack `brain yolov8
-# train`'s flat binary format. 6. Train a from-scratch YOLOv8-tiny detector.
-# 7. Generate fresh held-out target + stranger images. 8. Validate: the
-# detector must fire on every held-out target and nowhere else. Exits
-# non-zero if any gate fails.
+# train`'s flat binary format. 6. Fine-tune the COCO YOLOv8n, appending the
+# target as class $TARGET_CLASS with all 80 COCO classes preserved exactly.
+# 7. Generate fresh held-out target + stranger images. 8. Validate the
+# TWO-STAGE recognizer - the detector finds any person, ArcFace decides which
+# one - and render labelled demo images into $OUT_DIR/demo. Exits non-zero if
+# any gate fails.
+#
+# Identity is a face-recognition problem, not a detection-class one, and stage
+# 8 is where that shows: a detection class head reads features trained to
+# separate CATEGORIES and cannot express WHICH person. So the class head finds
+# `person` and the face embedder names him. See stage 8's own comment block.
 #
 # All generation runs against ONE resident `brain serve --dbus` daemon
 # (stage 1b) instead of a fresh subprocess per image, so PuLID's ~27 GB and
@@ -73,7 +80,25 @@ TARGET_CLASS="${TARGET_CLASS:-80}"
 NUM_CLASSES=$((TARGET_CLASS + 1))
 TARGET_NAME="${TARGET_NAME:-einstein}"
 IDENTITY_FLOOR="${IDENTITY_FLOOR:-0.05}"   # ArcFace cosine floor: catches total conditioning failure, not a quality bar
-DETECT_CONF="${DETECT_CONF:-0.1}" DETECT_IOU="${DETECT_IOU:-0.45}"  # this repo's own proven combo for this tiny architecture
+DETECT_CONF="${DETECT_CONF:-0.25}" DETECT_IOU="${DETECT_IOU:-0.45}"
+# The resolution stage 8 RUNS the detector at, which is not the one stage 6
+# TRAINS at. The fine-tune records its own cheap `--input $TRAIN_SIZE` in the
+# checkpoint, and that then becomes the inference geometry for the 80
+# pretrained COCO classes too - at a scale they were never trained for.
+# Measured on the same bit-identical checkpoint: at 256 the base COCO
+# detections do not reproduce (chair becomes bench, three spurious cars appear,
+# and the added class fires on background at 0.21); at 640 they reproduce to
+# every printed digit. So stage 8 overrides it back to the COCO native side.
+DETECT_INPUT="${DETECT_INPUT:-640}"
+# Cosine floor for "this detected person IS the target". Measured on this
+# pipeline's own held-out set (see stage 8): the strangers' faces score at most
+# 0.12 against the reference, and every target face large enough to identify at
+# all scores 0.27 or better. 0.20 sits between the two with margin on each
+# side. It is deliberately below insightface's own ~0.4 convention because the
+# population being verified is GENERATED imagery whose identity fidelity is
+# itself partial, not camera originals - pick this from YOUR two distributions,
+# never from a remembered constant.
+IDENTITY_THRESHOLD="${IDENTITY_THRESHOLD:-0.20}"
 SURVIVE_FLOOR=$((N_TARGET * 8 / 10))       # 80% of N_TARGET must pass the identity gate to trust training
 
 # The served path resolves each of these from the model store on its own now
@@ -272,6 +297,33 @@ def cmd_person_box(argv):
     print(f"{x1:.2f} {y1:.2f} {x2:.2f} {y2:.2f} {conf_v:.4f}")
 
 
+def cmd_detect_verify(argv):
+    """<weights> <image> <conf> <input> <ref-embed> <name> <threshold> <boxes-out.json>
+
+    Runs the composed two-stage detector (`brain yolov8 detect --identity-ref`)
+    and writes its `detections:` line - already in `imageops draw_boxes`' own
+    box schema, `label` and all - to <boxes-out.json>. All the work is brain's;
+    this only moves one JSON line to a file and summarises it for the shell.
+
+    Prints: '<n_named> <n_person> <best_named_conf> <best_named_cosine>'."""
+    weights, img, conf, inp, ref, name, thr, out_json = argv[:8]
+    r = subprocess.run([BRAIN, "yolov8", "detect", "--weights", weights, "--image", img,
+                        "--conf", conf, "--iou", "0.45", "--input", inp,
+                        "--identity-ref", ref, "--identity-name", name, "--identity-threshold", thr],
+                       capture_output=True, text=True, timeout=600)
+    dets = []
+    for line in r.stdout.splitlines():
+        if line.startswith("detections:"):
+            dets = json.loads(line[len("detections:"):])
+    with open(out_json, "w") as f:
+        json.dump(dets, f)
+    named = [d for d in dets if d.get("label") == name]
+    person = [d for d in dets if int(d.get("class", -1)) == 0]
+    best = max((d["conf"] for d in named), default=0.0)
+    sim = max((d.get("similarity", -1.0) for d in named), default=-1.0)
+    print(f"{len(named)} {len(person)} {best:.4f} {sim:.4f}")
+
+
 def _letterbox(img, size):
     """Resize to size x size with grey padding, centered. Returns the
     transform (scale, pad_x, pad_y) a caller applies to box coords the same
@@ -282,11 +334,6 @@ def _letterbox(img, size):
     canvas = Image.new("RGB", (size, size), (114, 114, 114))
     canvas.paste(img.convert("RGB").resize((nw, nh), Image.BILINEAR), ((size - nw) // 2, (size - nh) // 2))
     return canvas, scale, (size - nw) // 2, (size - nh) // 2
-
-
-def cmd_letterbox(argv):
-    canvas, _, _, _ = _letterbox(Image.open(argv[0]), int(argv[1]))
-    canvas.save(argv[2])
 
 
 def cmd_pack_dataset(argv):
@@ -335,7 +382,7 @@ def cmd_pack_dataset(argv):
 
 
 COMMANDS = {"identity-score": cmd_identity_score, "save-ref-embed": cmd_save_ref_embed, "face-count": cmd_face_count,
-            "person-box": cmd_person_box, "letterbox": cmd_letterbox, "pack-dataset": cmd_pack_dataset}
+            "person-box": cmd_person_box, "detect-verify": cmd_detect_verify, "pack-dataset": cmd_pack_dataset}
 if __name__ == "__main__":
     COMMANDS[sys.argv[1]](sys.argv[2:])
 PY
@@ -607,52 +654,86 @@ done
 
 # ============================================================= stage 8: validate
 
-log "Stage 8: end-to-end validation"
+log "Stage 8: end-to-end validation (two-stage detect-then-verify)"
+
+# Identity is decided by the FACE, not by the detection class head. Stage 1 is
+# the COCO-preserving detector finding ANY person; stage 2 crops nothing and
+# downscales nothing - SCRFD searches the original full-resolution frame once,
+# each face is attributed to the person box its centre falls inside, and
+# ArcFace's cosine against $REF_EMBED decides who it is. Both stages are ONE
+# command (`brain yolov8 detect --identity-ref`); the shell only reads its
+# `detections:` JSON.
+#
+# Why not the class-$TARGET_CLASS head stage 6 trained: those features were
+# trained to separate CATEGORIES, so a frozen head on top of them is a linear
+# probe on a representation that has already discarded within-category
+# variation - which is exactly what personal identity is made of. Unfreezing
+# them to make room destroys the COCO preservation instead. The added class
+# stays in the checkpoint (it is what makes this a real added-class fine-tune,
+# and it is preserved exactly), but it is NOT what answers "is this him".
+#
+# NOTE the images go in at their own resolution. `Yolo::detect` letterboxes
+# internally and inverts the transform on the way out, so pre-letterboxing was
+# always redundant work - and it additionally destroyed the face resolution
+# stage 2 needs, since a face that survives at 512 does not survive at 256.
+
+DEMO_DIR="$OUT_DIR/demo"
+mkdir -p "$DEMO_DIR"
 
 PASS=1
 report() { printf '%-46s %-8s %s\n' "$1" "$2" "$3"; }
 report "image" "result" "detail"
 
-# gate <image> <class> <want:1=must-detect|0=must-not> <label>
+# gate <image> <want-identity:1|0> <want-person:1|0|-> <label>
 gate() {
-  local img="$1" cls="$2" want="$3" label="$4" lb det
-  lb="$img.lb.png"
-  [ -f "$lb" ] || pytool letterbox "$img" "$TRAIN_SIZE" "$lb"
-  det="$(pytool person-box "$WEIGHTS" "$lb" "$DETECT_CONF" "$cls")"
-  if { [ "$want" = 1 ] && [ "$det" != NONE ]; } || { [ "$want" = 0 ] && [ "$det" = NONE ]; }; then
-    report "$label" PASS "$([ "$det" = NONE ] && echo "correctly no class-$cls detection" || echo "$det")"
-  else
-    report "$label" FAIL "$([ "$det" = NONE ] && echo "no class-$cls detection" || echo "false-positive class-$cls detection $det")"
-    PASS=0
-  fi
+  local img="$1" want_id="$2" want_person="$3" label="$4"
+  local stem json n_id n_person best sim detail
+  stem="$(basename "$(dirname "$img")")-$(basename "$img" .png)"
+  json="$DEMO_DIR/$stem.boxes.json"
+  read -r n_id n_person best sim < <(pytool detect-verify \
+    "$WEIGHTS" "$img" "$DETECT_CONF" "$DETECT_INPUT" "$REF_EMBED" "$TARGET_NAME" "$IDENTITY_THRESHOLD" "$json")
+
+  # The demo image the operator actually looks at: real boxes, real names.
+  # `draw_boxes` renders the box's own `label` when it has one, so a verified
+  # detection reads "$TARGET_NAME:0.94" and a rejected one reads "person:0.91".
+  "$BRAIN" imageops draw_boxes --in image="$img" --boxes "$(cat "$json")" \
+    --out image="$DEMO_DIR/$stem.png" >/dev/null 2>&1 || true
+
+  detail="$n_id x $TARGET_NAME (best conf $best, cosine $sim), $n_person x person"
+  local ok=1
+  [ "$want_id" = 1 ] && [ "$n_id" -eq 0 ] && ok=0
+  [ "$want_id" = 0 ] && [ "$n_id" -gt 0 ] && ok=0
+  [ "$want_person" = 1 ] && [ "$n_person" -eq 0 ] && ok=0
+  if [ "$ok" = 1 ]; then report "$label" PASS "$detail"; else report "$label" FAIL "$detail"; PASS=0; fi
 }
 
-# The target must be found AS the new class.
+# The target must be found AND verified as the identity.
 while IFS= read -r img; do
-  gate "$img" "$TARGET_CLASS" 1 "holdout/target/$(basename "$img") [$TARGET_NAME]"
+  gate "$img" 1 1 "holdout/target/$(basename "$img") [$TARGET_NAME]"
 done < "$HOLDOUT_TARGETS"
 
 # A different real person is the actual discrimination test, and it has TWO
-# halves: the new class must not claim them, and COCO's `person` must still.
-# Checking only the first would pass a model that had simply forgotten people.
+# halves: the verifier must not claim them, and COCO's `person` must still
+# detect them. Checking only the first would pass a system that had simply
+# stopped seeing people.
 while IFS= read -r img; do
-  gate "$img" "$TARGET_CLASS" 0 "holdout/stranger/$(basename "$img") [not $TARGET_NAME]"
-  gate "$img" "$PERSON_CLASS" 1 "holdout/stranger/$(basename "$img") [still person]"
+  gate "$img" 0 1 "holdout/stranger/$(basename "$img") [not $TARGET_NAME, still person]"
 done < "$HOLDOUT_STRANGERS"
 
-# Backgrounds contain neither class.
+# Backgrounds hold nobody, so nothing may be verified as the identity.
 for img in "$OUT_DIR"/train/background/*.png; do
   [ -e "$img" ] || continue
-  case "$img" in *.lb.png) continue;; esac
-  gate "$img" "$TARGET_CLASS" 0 "background/$(basename "$img") [not $TARGET_NAME]"
+  gate "$img" 0 - "background/$(basename "$img") [not $TARGET_NAME]"
 done
 
 echo >&2
+echo "Rendered demo images (boxes labelled '$TARGET_NAME:<conf>' / 'person:<conf>'): $DEMO_DIR" >&2
 if [ "$PASS" = 1 ]; then
   echo "ALL GATES PASSED." >&2
-  echo "Trained detector: $WEIGHTS" >&2
-  echo "  $BRAIN yolov8 detect --weights $WEIGHTS --image <letterboxed-to-${TRAIN_SIZE}x${TRAIN_SIZE}.png> --conf $DETECT_CONF --iou $DETECT_IOU" >&2
-  echo "  (letterbox first: python3 $PY_TOOLS letterbox <src> $TRAIN_SIZE <out.png>)" >&2
+  echo "Detector: $WEIGHTS   reference identity: $REF_EMBED" >&2
+  echo "  $BRAIN yolov8 detect --weights $WEIGHTS --image <any.png> --conf $DETECT_CONF --iou $DETECT_IOU \\" >&2
+  echo "      --input $DETECT_INPUT --identity-ref $REF_EMBED --identity-name $TARGET_NAME --identity-threshold $IDENTITY_THRESHOLD" >&2
+  echo "  (no letterboxing: detect takes the image at its own resolution)" >&2
   exit 0
 else
   echo "ONE OR MORE GATES FAILED - see the scorecard above. Weights are still at $WEIGHTS but detection is not validated." >&2

@@ -42,6 +42,27 @@ use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 
 use crate::resolver_cli::RoleEnv;
 
+/// The directory holding `glintr100.onnx` (and `scrfd_10g_bnkps.onnx` beside it
+/// for the default aligned path): `BRAIN_ARCFACE_DIR` if the operator set it,
+/// else whatever the model-store resolver finds for
+/// `arcface::spec::ArcFaceSpec`'s `weights` role.
+///
+/// The resolver resolves that role to the released GRAPH while the variable
+/// names the DIRECTORY holding it; [`crate::resolver_cli::containing_dir`] is
+/// what makes either source produce the directory `ArcFaceSession::load` takes.
+///
+/// `None` when the store holds no released ArcFace graph, or holds more than
+/// one and nothing says which - see `crate::resolver_cli::served_assembly`.
+///
+/// Public because the embedder has a SECOND caller that is not a resident:
+/// `brain yolov8 detect --identity-ref` builds an `ArcFaceSession` in-process
+/// to verify who each detected person is. Both find the weights the same way,
+/// here, rather than each growing its own env/store precedence rules.
+pub fn dir_from_env() -> Option<String> {
+    let assembly = crate::resolver_cli::served_assembly("arcface", &arcface::spec::ArcFaceSpec, &[RoleEnv { role: "weights", var: "BRAIN_ARCFACE_DIR" }])?;
+    crate::resolver_cli::containing_dir(assembly.roles.get("weights")?)
+}
+
 /// The antelopev2 identity embedder behind the scheduler (`BRAIN_ARCFACE_DIR` =
 /// the directory holding `glintr100.onnx`, and `scrfd_10g_bnkps.onnx` beside it
 /// for the default aligned path).
@@ -50,21 +71,10 @@ pub struct ArcFaceResident {
 }
 
 impl ArcFaceResident {
-    /// `BRAIN_ARCFACE_DIR` if the operator set it, else whatever the
-    /// model-store resolver finds for `arcface::spec::ArcFaceSpec`'s `weights`
-    /// role - the same scan and candidate rules the one-shot CLI uses.
-    ///
-    /// The resolver resolves that role to the released GRAPH, while the
-    /// variable names the DIRECTORY holding it; `containing_dir` is what makes
-    /// either source produce the directory `ArcFaceSession::load` takes (it
-    /// joins `RELEASE_FILES` onto it, and the detector for the aligned path).
-    ///
-    /// `None` (not served, never a daemon startup failure) when the store
-    /// holds no released ArcFace graph, or holds more than one and nothing
-    /// says which - see `crate::resolver_cli::served_assembly`.
+    /// [`dir_from_env`]'s directory, checked for the released graph. `None`
+    /// (not served, never a daemon startup failure) when there is none.
     pub fn from_env() -> Option<ArcFaceResident> {
-        let assembly = crate::resolver_cli::served_assembly("arcface", &arcface::spec::ArcFaceSpec, &[RoleEnv { role: "weights", var: "BRAIN_ARCFACE_DIR" }])?;
-        Self::new(crate::resolver_cli::containing_dir(assembly.roles.get("weights")?)?)
+        Self::new(dir_from_env()?)
     }
 
     /// Direct constructor for callers that already hold the directory (e.g.

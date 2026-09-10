@@ -84,6 +84,16 @@ const fn serving_set() -> [(&'static str, &'static str); N_MODEL + 1] {
 /// release that renames the file cannot leave the two spellings disagreeing.
 const DETECTOR_FILE: &str = scrfd::caps::ScrfdProvider::RELEASE_FILES[0];
 
+/// The reference recipe's primary face: the LARGEST by box area, not the
+/// highest-scoring one (insightface's own rule, and PuLID's). Panics on an
+/// empty slice - every caller has already established there is a face.
+pub fn primary_face(faces: &[Face]) -> Face {
+    *faces
+        .iter()
+        .max_by(|a, b| a.area().partial_cmp(&b.area()).unwrap_or(std::cmp::Ordering::Equal))
+        .expect("primary_face: no faces")
+}
+
 /// A model's `(x − mean)/std` re-expressed for RGB f32 input in `[0,1]`.
 fn unit_norm(pre: &Preprocess) -> imaging::Normalization {
     imaging::Normalization { mean: [pre.mean / 255.0; 3], std: [pre.std / 255.0; 3] }
@@ -178,41 +188,59 @@ impl ArcFaceSession {
         align: bool,
         select_largest: bool,
     ) -> Result<(Vec<f32>, Option<Face>), String> {
-        let side = self.cfg.image_size;
-        let ctx = Ctx::new(&self.gpu);
-
-        let (aligned, face) = if align {
-            let det = self.det.as_ref().ok_or(
-                "arcface embed: align=true needs the SCRFD detector next to the embedder \
-                 (scrfd_10g_bnkps.onnx in the same directory); pass align=false for an \
-                 already-aligned 112x112 crop",
-            )?;
-            let faces = det.faces(chw, w, h);
-            if faces.is_empty() {
-                return Err("arcface embed: no face detected (pass align=false for an already-aligned 112x112 crop)".into());
-            }
-            // `faces` is score-sorted; "largest" re-picks by box area, which is
-            // the reference recipe's primary-face rule (and PuLID's).
-            let f = if select_largest {
-                *faces.iter().max_by(|a, b| a.area().partial_cmp(&b.area()).unwrap_or(std::cmp::Ordering::Equal)).expect("non-empty")
-            } else {
-                faces[0]
-            };
-            let lmk: Vec<f32> = f.kps.iter().flat_map(|p| [p[0], p[1]]).collect();
-            // Umeyama solve on the host + the `grid_sample` kernel - the crate's
-            // one alignment implementation.
-            let (crop, _m) = crate::align::norm_crop_chw(&self.gpu, chw, 3, h, w, &lmk, side)?;
-            (crop, Some(f))
-        } else {
+        if !align {
+            let side = self.cfg.image_size;
+            let ctx = Ctx::new(&self.gpu);
             let src = ctx.upload("arcface.caps.face", chw);
             let (small, sshape) = ctx.resize(&src, Shape::new(1, 3, h, w), side, side, Filter::Bilinear, AlignCorners::HalfPixel);
-            (ctx.download(&small, sshape.numel()), None)
-        };
+            return Ok((self.embed_aligned_chw(&ctx.download(&small, sshape.numel())), None));
+        }
+        let faces = self.detect_faces(chw, w, h)?;
+        if faces.is_empty() {
+            return Err("arcface embed: no face detected (pass align=false for an already-aligned 112x112 crop)".into());
+        }
+        // `faces` is score-sorted; "largest" re-picks by box area, which is
+        // the reference recipe's primary-face rule (and PuLID's).
+        let f = if select_largest { primary_face(&faces) } else { faces[0] };
+        Ok((self.embed_face_chw(chw, w, h, &f)?, Some(f)))
+    }
 
-        let shape = Shape::new(1, 3, side, side);
-        let up = ctx.upload("arcface.caps.aligned", &aligned);
+    /// Every face in a source-resolution CHW image, highest score first - the
+    /// detector half of [`Self::embed_raw_chw`], exposed on its own.
+    ///
+    /// A caller that must decide WHICH face to embed needs the list before it
+    /// can choose: `brain yolov8 detect --identity-ref` matches each face to
+    /// the person box it falls inside, which "the largest face in the frame"
+    /// cannot express when the frame holds several people.
+    pub fn detect_faces(&self, chw: &[f32], w: u32, h: u32) -> Result<Vec<Face>, String> {
+        let det = self.det.as_ref().ok_or(
+            "arcface embed: align=true needs the SCRFD detector next to the embedder \
+             (scrfd_10g_bnkps.onnx in the same directory); pass align=false for an \
+             already-aligned 112x112 crop",
+        )?;
+        Ok(det.faces(chw, w, h))
+    }
+
+    /// The RAW embedding of ONE already-located face, aligned from the
+    /// source-resolution pixels - the embedder half of [`Self::embed_raw_chw`].
+    ///
+    /// `face`'s landmarks are in `chw`'s own pixel coordinates, so alignment
+    /// samples the full-resolution image rather than any intermediate crop.
+    pub fn embed_face_chw(&self, chw: &[f32], w: u32, h: u32, face: &Face) -> Result<Vec<f32>, String> {
+        let lmk: Vec<f32> = face.kps.iter().flat_map(|p| [p[0], p[1]]).collect();
+        // Umeyama solve on the host + the `grid_sample` kernel - the crate's
+        // one alignment implementation.
+        let (crop, _m) = crate::align::norm_crop_chw(&self.gpu, chw, 3, h, w, &lmk, self.cfg.image_size)?;
+        Ok(self.embed_aligned_chw(&crop))
+    }
+
+    /// Normalise an already-aligned `image_size²` CHW face and run the network.
+    fn embed_aligned_chw(&self, aligned: &[f32]) -> Vec<f32> {
+        let ctx = Ctx::new(&self.gpu);
+        let shape = Shape::new(1, 3, self.cfg.image_size, self.cfg.image_size);
+        let up = ctx.upload("arcface.caps.aligned", aligned);
         let blob = ctx.normalize(&up, shape, &unit_norm(&self.cfg.pre));
-        Ok((self.arcface.embed_blob(&ctx.download(&blob, shape.numel())), face))
+        self.arcface.embed_blob(&ctx.download(&blob, shape.numel()))
     }
 
     /// Run one `embed` invocation.

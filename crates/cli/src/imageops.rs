@@ -32,7 +32,7 @@ pub fn manifest() -> Manifest {
         .output(BlobSpec::new("image", Media::Image, "the rendered image"));
 
     let draw_boxes = ActionSpec::new("draw_boxes", "draw labeled detection boxes onto an image (e.g. yolov8 detect's own output)")
-        .param(ParamSpec::new("boxes", ParamType::Str, "JSON array of {bbox:[x1,y1,x2,y2], conf, class} in image coords - yolov8 detect's exact output shape").required())
+        .param(ParamSpec::new("boxes", ParamType::Str, "JSON array of {bbox:[x1,y1,x2,y2], conf, class, label?} in image coords - yolov8 detect's exact output shape; the optional 'label' string is drawn instead of the numeric class (e.g. 'einstein:0.87')").required())
         .param(ParamSpec::new("thickness", ParamType::Int, "box edge thickness, px").default(json!(2)))
         .input(BlobSpec::new("image", Media::Image, "the image the boxes were detected on"))
         .output(BlobSpec::new("image", Media::Image, "the image with boxes and class/confidence labels drawn"));
@@ -122,10 +122,18 @@ impl Action for Gradient {
 /// it (`{"bbox":[x1,y1,x2,y2],"conf":...,"class":N}`) - parsed loosely (a
 /// missing/malformed entry is skipped, not a hard error) so a caller piping
 /// live model output straight through never has to pre-validate it.
+///
+/// `label` is OPTIONAL and additive. A detector emits a numeric class id
+/// because that is all a class head knows; a *composed* pipeline knows more -
+/// `yolov8 detect --identity-ref` runs ArcFace over each person box and can say
+/// `einstein` where the head could only say `0`. When it is absent the numeric
+/// class is rendered exactly as before, so every caller predating this field
+/// (`scripts/demo/quickstart.sh`, `examples/`) is unaffected.
 struct Box_ {
     bbox: [f32; 4],
     conf: f32,
     class: u32,
+    label: Option<String>,
 }
 
 impl Box_ {
@@ -138,7 +146,34 @@ impl Box_ {
         for (i, slot) in bbox.iter_mut().enumerate() {
             *slot = b[i].as_f64()? as f32;
         }
-        Some(Box_ { bbox, conf: v.get("conf").and_then(|c| c.as_f64()).unwrap_or(0.0) as f32, class: v.get("class").and_then(|c| c.as_u64()).unwrap_or(0) as u32 })
+        Some(Box_ {
+            bbox,
+            conf: v.get("conf").and_then(|c| c.as_f64()).unwrap_or(0.0) as f32,
+            class: v.get("class").and_then(|c| c.as_u64()).unwrap_or(0) as u32,
+            label: v.get("label").and_then(|c| c.as_str()).filter(|s| !s.is_empty()).map(str::to_string),
+        })
+    }
+
+    /// The annotation drawn above the box: the name when one was supplied, the
+    /// numeric class id otherwise, always with the confidence.
+    fn text(&self) -> String {
+        match &self.label {
+            Some(name) => format!("{name}:{:.2}", self.conf),
+            None => format!("{}:{:.2}", self.class, self.conf),
+        }
+    }
+
+    /// The palette slot. Named boxes are keyed on the NAME, not the class:
+    /// detect-then-verify leaves a verified identity and a rejected stranger
+    /// both at class 0 (a verified person is still a person), so colouring by
+    /// class alone would draw the two outcomes the demo exists to distinguish
+    /// in the same colour.
+    fn color(&self) -> [u8; 3] {
+        let slot = match &self.label {
+            Some(name) => name.bytes().fold(0usize, |h, b| h.wrapping_mul(31).wrapping_add(b as usize)),
+            None => self.class as usize,
+        };
+        BOX_PALETTE[slot % BOX_PALETTE.len()]
     }
 }
 
@@ -164,12 +199,11 @@ impl Action for DrawBoxes {
             .collect();
         progress(Progress::step(1, 1, format!("drawing {} box(es)", boxes.len())));
         for b in &boxes {
-            let color = BOX_PALETTE[b.class as usize % BOX_PALETTE.len()];
+            let color = b.color();
             let (x0, y0, x1, y1) = (b.bbox[0].round() as i64, b.bbox[1].round() as i64, b.bbox[2].round() as i64, b.bbox[3].round() as i64);
             draw_rect(&mut img.px, w, h, x0, y0, x1, y1, thickness, color);
-            let label = format!("{}:{:.2}", b.class, b.conf);
             let (lx, ly) = (x0.max(0) as u32, y0.saturating_sub(9).max(0) as u32);
-            imaging::viz::draw_text(&mut img.px, w, h, lx, ly, &label, 1, color);
+            imaging::viz::draw_text(&mut img.px, w, h, lx, ly, &b.text(), 1, color);
         }
         Ok(Outcome::new().set("boxes_drawn", json!(boxes.len())).blob("image", capability::blob::image_blob(&img.to_hwc_unit(), w, h, 3)))
     }
@@ -250,5 +284,41 @@ mod tests {
         let px: Vec<f32> = a.blobs["image"].bytes.chunks_exact(4).map(|q| f32::from_le_bytes([q[0], q[1], q[2], q[3]])).collect();
         assert_eq!(px.len(), 32 * 32 * 3);
         assert!(px.iter().all(|&v| (0.0..=1.0).contains(&v)));
+    }
+
+    /// `draw_boxes`' annotation is the box's `label` when it has one and its
+    /// numeric class when it does not. The fallback is the compatibility
+    /// contract: every caller written before `label` existed keeps rendering
+    /// byte-for-byte the same image.
+    #[test]
+    fn a_box_label_overrides_the_numeric_class_and_falls_back_to_it() {
+        let parse = |v: serde_json::Value| Box_::from_json(&v).expect("valid box");
+        let plain = parse(json!({"bbox": [1, 2, 30, 40], "conf": 0.873, "class": 0}));
+        assert_eq!(plain.text(), "0:0.87");
+        let named = parse(json!({"bbox": [1, 2, 30, 40], "conf": 0.873, "class": 0, "label": "einstein"}));
+        assert_eq!(named.text(), "einstein:0.87");
+        // An empty label is not a label - it would render as a bare ":0.87".
+        assert_eq!(parse(json!({"bbox": [1, 2, 30, 40], "conf": 0.873, "class": 7, "label": ""})).text(), "7:0.87");
+        // Two outcomes of the SAME class must be visually distinguishable:
+        // detect-then-verify leaves a verified identity and a rejected stranger
+        // both at class 0.
+        assert_ne!(named.color(), parse(json!({"bbox": [1, 2, 30, 40], "conf": 0.5, "class": 0, "label": "person"})).color());
+    }
+
+    /// The whole action, end to end, on both shapes: a labelled run and an
+    /// unlabelled one must both render, and must differ (the drawn text does).
+    #[test]
+    fn draw_boxes_accepts_labelled_and_unlabelled_boxes() {
+        let mut reg = Registry::new();
+        reg.register(Arc::new(ImageOps));
+        let img = || capability::blob::image_blob(&vec![0.5f32; 64 * 64 * 3], 64, 64, 3);
+        let run = |boxes: &str| {
+            reg.run(MODEL, "draw_boxes", Invocation::new().blob("image", img()).set("boxes", json!(boxes)), &mut |_| {}).unwrap()
+        };
+        let plain = run(r#"[{"bbox":[8,8,40,40],"conf":0.87,"class":0}]"#);
+        let named = run(r#"[{"bbox":[8,8,40,40],"conf":0.87,"class":0,"label":"einstein"}]"#);
+        assert_eq!(plain.outputs["boxes_drawn"], 1);
+        assert_eq!(named.outputs["boxes_drawn"], 1);
+        assert_ne!(plain.blobs["image"].bytes, named.blobs["image"].bytes, "the label must reach the rendered pixels");
     }
 }

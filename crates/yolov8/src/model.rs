@@ -177,8 +177,28 @@ impl Yolo {
     /// (sequence) seam is unused by detection so it is passed as 0. Mirrors
     /// [`gpt2::Gpt::load`].
     pub fn load(path: &str, b: u32) -> Yolo {
+        Yolo::load_at(path, b, 0)
+    }
+
+    /// [`Yolo::load`] with the inference input side overridden (`0` = the
+    /// checkpoint's own).
+    ///
+    /// The net is fully convolutional and the head builds its anchor grid from
+    /// the input side, so the SAME weights run at any multiple of the largest
+    /// stride - and the resolution they were *trained* at is not necessarily
+    /// the one they should be *run* at. A fine-tune that adds a class on a
+    /// small, cheap dataset records that small `input` in the checkpoint
+    /// config, which then silently becomes the inference geometry for the
+    /// pretrained classes too, at a scale they were never trained for. That is
+    /// a real, measured loss (COCO `person` recall on a held-out set fell from
+    /// 10/10 at 640 to 3/10 at 256 on weights that are bit-for-bit identical),
+    /// so the two are separable here rather than fused in the checkpoint.
+    pub fn load_at(path: &str, b: u32, input: u32) -> Yolo {
         let c = checkpoint::load(path);
-        let cfg = YoloConfig::from_json(&c.header["config"]);
+        let mut cfg = YoloConfig::from_json(&c.header["config"]);
+        if input > 0 {
+            cfg.input = input;
+        }
         let init = c.by_role("");
         Yolo::new(cfg, b, 0, &init)
     }
