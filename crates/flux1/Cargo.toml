@@ -26,6 +26,8 @@ bytemuck.workspace = true
 brain-data.workspace = true
 brain-capability.workspace = true
 serde_json.workspace = true
+# `spec.rs` - this architecture's rules for the model-store resolver.
+brain-modelstore.workspace = true
 
 [dev-dependencies]
 # `testutil::skip` / `skip_unavailable` - the two skip helpers, so an

@@ -14,6 +14,8 @@
 use capability::{ActionResult, Invocation, Manifest, Progress};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 
+use crate::resolver_cli::RoleEnv;
+
 /// FLUX.2 Klein resident model family, gated on the four weight env vars
 /// (`BRAIN_FLUX2_{DIT,VAE,TE,TOKENIZER}`).
 ///
@@ -41,11 +43,45 @@ pub struct Flux2Resident {
 }
 
 impl Flux2Resident {
-    /// `None` (not registered) unless all four `BRAIN_FLUX2_*` vars are set
-    /// AND the named DiT's own header sniffs cleanly - a misconfigured or
-    /// unreadable DiT must not silently masquerade as "not registered".
+    /// Each of the four components independently: its own `BRAIN_FLUX2_*`
+    /// variable if the operator set that one, else whatever the model-store
+    /// resolver finds for that role through `flux2::spec::Flux2Spec` - the
+    /// SAME spec, scan and candidate rules `brain flux2 generate` already
+    /// uses on the one-shot path, rather than a second mechanism that only
+    /// knew how to read four environment variables.
+    ///
+    /// FLUX.2 is the architecture most likely to stay genuinely ambiguous
+    /// here, and correctly so: a store holding both an official release and a
+    /// third-party re-quantization has two real candidates for the `dit` role,
+    /// and klein-vs-base is not recoverable from any tensor shape (see
+    /// `flux2::spec`'s `UnresolvedVariant`). Both are reported as candidates
+    /// with the variable that pins each, and the model is not served until one
+    /// is named - never guessed at.
+    ///
+    /// `None` (not registered) when nothing resolves, when the outcome is
+    /// ambiguous, or when the chosen DiT's own header does not sniff cleanly -
+    /// a misconfigured or unreadable DiT must not silently masquerade as "not
+    /// registered".
     pub fn from_env() -> Option<Flux2Resident> {
-        let paths = flux2::Paths::from_env().ok()?;
+        let assembly = crate::resolver_cli::served_assembly(
+            "flux2",
+            &flux2::spec::Flux2Spec,
+            &[
+                RoleEnv { role: "dit", var: "BRAIN_FLUX2_DIT" },
+                RoleEnv { role: "vae", var: "BRAIN_FLUX2_VAE" },
+                RoleEnv { role: "text_encoder", var: "BRAIN_FLUX2_TE" },
+                RoleEnv { role: "tokenizer", var: "BRAIN_FLUX2_TOKENIZER" },
+            ],
+        )?;
+        // `Paths::from_assembly` owns the role-name -> field mapping already;
+        // this must not carry a second copy of it.
+        let paths = match flux2::Paths::from_assembly(&assembly) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("brain: flux2-klein not served over the scheduler ({e})");
+                return None;
+            }
+        };
         match Flux2Resident::from_paths(flux2::caps::MODEL.to_string(), paths) {
             Ok(r) => Some(r),
             Err(e) => {

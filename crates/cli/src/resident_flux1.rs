@@ -22,19 +22,27 @@ use capability::{ActionResult, Invocation, Manifest, Progress};
 use flux1::caps::Session;
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 
-/// FLUX.1 behind the scheduler (`BRAIN_FLUX1_DIR` - a released diffusers
-/// FLUX.1 checkpoint root holding `transformer/`, `vae/`, `text_encoder/`,
-/// `text_encoder_2/`, `tokenizer/`, `tokenizer_2/`).
+use crate::resolver_cli::RoleEnv;
+
+/// FLUX.1 behind the scheduler. The checkpoint root - a released diffusers
+/// FLUX.1 directory holding `transformer/`, `vae/`, `text_encoder/`,
+/// `text_encoder_2/`, `tokenizer/`, `tokenizer_2/` - comes from
+/// `BRAIN_FLUX1_DIR` when set, and otherwise from the model-store resolver.
 pub struct Flux1Resident {
     root: String,
 }
 
 impl Flux1Resident {
-    /// `None` when the directory is unset or holds no `transformer/` -
-    /// registering a model whose every call would fail is worse than not
-    /// serving it.
+    /// `BRAIN_FLUX1_DIR` if the operator set it, else whatever the model-store
+    /// resolver finds - the same scan, the same `flux1::spec::Flux1Spec`, and
+    /// the same candidate rules `brain flux1 …` uses on the one-shot path.
+    ///
+    /// `None` (not served, never a daemon startup failure) when the store
+    /// holds no released FLUX.1 pipeline, or holds more than one and nothing
+    /// says which - see `crate::resolver_cli::served_assembly`.
     pub fn from_env() -> Option<Flux1Resident> {
-        Self::new(std::env::var("BRAIN_FLUX1_DIR").ok().filter(|p| !p.is_empty())?)
+        let assembly = crate::resolver_cli::served_assembly("flux1", &flux1::spec::Flux1Spec, &[RoleEnv { role: "root", var: "BRAIN_FLUX1_DIR" }])?;
+        Self::new(assembly.roles.get("root")?.to_string_lossy().into_owned())
     }
 
     /// Direct constructor (no env round-trip) - see

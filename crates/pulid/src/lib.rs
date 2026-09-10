@@ -64,6 +64,7 @@ pub mod config;
 pub mod idcond;
 pub mod import;
 pub mod model;
+pub mod spec;
 
 pub use adapter::PulidAdapter;
 pub use config::{PulidConfig, Site, Stream};

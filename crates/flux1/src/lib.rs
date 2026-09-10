@@ -32,6 +32,7 @@ pub mod import;
 pub mod inject;
 pub mod model;
 pub mod pipeline;
+pub mod spec;
 
 pub use config::Flux1Config;
 pub use import::{import_bfl, import_diffusers, truncate_to_depth, Tensors};

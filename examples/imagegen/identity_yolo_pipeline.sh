@@ -66,21 +66,24 @@ IDENTITY_FLOOR="${IDENTITY_FLOOR:-0.05}"   # ArcFace cosine floor: catches total
 DETECT_CONF="${DETECT_CONF:-0.1}" DETECT_IOU="${DETECT_IOU:-0.45}"  # this repo's own proven combo for this tiny architecture
 SURVIVE_FLOOR=$((N_TARGET * 8 / 10))       # 80% of N_TARGET must pass the identity gate to trust training
 
-# FLUX.1/PuLID have no store-based auto-resolver yet (brain pull does not
-# fetch them) - these directories are the actual, only way to point brain at
-# them. YOLOv8-COCO and FLUX.2-klein below DO fetch via `brain pull`.
+# The served path resolves each of these from the model store on its own now
+# (`resolver_cli::served_assembly`, the same resolver the one-shot CLI uses),
+# so these are overrides rather than the only way to point brain at them: each
+# variable still wins unconditionally for its own role when set. They stay
+# pinned here so a run is reproducible on a box whose store holds something
+# else. `brain pull` still does not fetch FLUX.1/PuLID themselves.
 FLUX1_DIR="${FLUX1_DIR:-$HOME/.local/share/brain/models/black-forest-labs/FLUX.1-dev}"
 PULID_FILE="${PULID_FILE:-$HOME/.local/share/brain/models/guozinan/PuLID/pulid_flux_v0.9.1.safetensors}"
 ARCFACE_DIR="${ARCFACE_DIR:-$HOME/.local/share/brain/models/DIAMONIK7777/antelopev2}"
 CLIP_DIR="${CLIP_DIR:-$HOME/.local/share/brain/models/QuanSun/EVA-CLIP}"
 YOLOV8_COCO_DIR="${YOLOV8_COCO_DIR:-$HOME/.local/share/brain/models/Ultralytics/YOLOv8}"
 BISENET_DIR="${BISENET_DIR:-$HOME/.local/share/brain/models/facexlib/pulid}"
-# `brain flux2 generate`'s CLI auto-resolves an unambiguous checkpoint per
-# role, but the served/resident path (`Flux2Resident::from_env`) has no such
-# fallback - it requires all four explicitly. Pinned outright rather than
-# left blank because this box has more than one real candidate per role
-# (a third-party re-quantization alongside the official release), which
-# would otherwise make every role ambiguous at daemon startup.
+# FLUX.2 is the one backend that genuinely still needs pinning here, and the
+# resolver agrees rather than disagrees: this box holds several real klein
+# candidates for the `dit` role (third-party re-quantizations alongside the
+# official release), so the served path reports all of them and serves
+# nothing until one is named - it will not guess. klein-vs-base is not
+# recoverable from any tensor shape either. Left explicit for both reasons.
 FLUX2_DIT="${FLUX2_DIT:-$HOME/.local/share/brain/models/black-forest-labs/FLUX.2-klein-9B/Flux-2-Klein-9B-KV-Q8_0.gguf}"
 FLUX2_VAE="${FLUX2_VAE:-$HOME/.local/share/brain/models/unsloth/flux2-vae.safetensors}"
 FLUX2_TE="${FLUX2_TE:-$HOME/.local/share/brain/models/Qwen/Qwen3-8B}"

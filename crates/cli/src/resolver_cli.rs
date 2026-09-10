@@ -25,8 +25,9 @@
 //! info@swedishembedded.com.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
-use brain_modelstore::resolve::{describe_ambiguity, describe_missing, ArchSpec, Resolution};
+use brain_modelstore::resolve::{describe_ambiguity, describe_missing, Ambiguity, ArchSpec, Question, Resolution};
 use capability::Assembly;
 
 /// Exit code for an unresolvable `Resolution::Ambiguous` - distinct from
@@ -79,14 +80,154 @@ impl std::fmt::Display for ResolveFailure {
 /// `crate::catalog::provider`'s "build me a runnable provider, or say why
 /// not" contract.
 pub fn try_resolve(arch: &str, spec: &dyn ArchSpec, overrides: &BTreeMap<String, String>) -> Result<Assembly, ResolveFailure> {
-    let root = crate::model_dir::resolve(None).ok_or_else(|| ResolveFailure::NoModelsDir(format!("{arch}: no models directory (set --models-dir, BRAIN_MODELS_DIR, or $HOME)")))?;
-    let records = brain_modelstore::inventory::scan(&root);
-    let specs: [&dyn ArchSpec; 1] = [spec];
-    match brain_modelstore::resolve::resolve(arch, &records, &specs, overrides) {
+    match resolve_structured(arch, spec, overrides).map_err(ResolveFailure::NoModelsDir)? {
         Resolution::Resolved(assembly) => Ok(*assembly),
         Resolution::Ambiguous(a) => Err(ResolveFailure::Ambiguous(describe_ambiguity(&a))),
         Resolution::Missing(m) => Err(ResolveFailure::Missing(describe_missing(&m))),
     }
+}
+
+/// [`try_resolve`]'s models-directory lookup, inventory scan and resolve, with
+/// the rendering left to the caller - for a caller that must report an
+/// `Ambiguous`/`Missing` outcome in its OWN vocabulary rather than in
+/// [`describe_ambiguity`]'s CLI-flag one. The served/resident path
+/// ([`served_roles`]) is that caller: a daemon's operator answers an ambiguity
+/// by exporting an environment variable before the next start, not by retyping
+/// a flag at a prompt that no longer exists.
+///
+/// `Err` is the one outcome that is not a resolution at all: no models
+/// directory is configured, so the resolver was never reached.
+pub fn resolve_structured(arch: &str, spec: &dyn ArchSpec, overrides: &BTreeMap<String, String>) -> Result<Resolution, String> {
+    let root = crate::model_dir::resolve(None).ok_or_else(|| format!("{arch}: no models directory (set --models-dir, BRAIN_MODELS_DIR, or $HOME)"))?;
+    let records = brain_modelstore::inventory::scan(&root);
+    let specs: [&dyn ArchSpec; 1] = [spec];
+    Ok(brain_modelstore::resolve::resolve(arch, &records, &specs, overrides))
+}
+
+// ===================== the served (resident) path =====================
+//
+// `crates/cli/src/resident_*.rs` used to read its weight paths straight out of
+// the environment (`std::env::var("BRAIN_FLUX1_DIR").ok()?`) and serve nothing
+// at all when a variable was unset - even with exactly one unambiguous
+// candidate for that role sitting in the model store the one-shot CLI would
+// have found on its own. That was a second, far weaker weight-resolution
+// mechanism living beside the real one. [`served_roles`] is the seam that
+// removes it: the served path now calls INTO the same resolver
+// (`brain_modelstore::resolve`, the same `ArchSpec`s, the same inventory scan)
+// instead of carrying its own rules, exactly as `crates/cli/src/placement.rs`
+// is the only thing that knows both halves of the GPU-placement split.
+
+/// The DIRECTORY an artifact lives in, as the `String` every resident's own
+/// constructor takes.
+///
+/// The two sources a role's path can come from do not agree on shape, and both
+/// are correct: an operator's `BRAIN_ARCFACE_DIR` names the DIRECTORY holding
+/// the released graph (that is what the variable has always meant), while the
+/// resolver's `weights` role resolves to the graph FILE itself (that is the
+/// artifact the inventory recorded and the classifier identified). A resident
+/// whose loader takes the directory - `ArcFaceSession::load`, `ScrfdSession::
+/// load`, PuLID's per-component roots, all of which join a known release
+/// filename onto it - needs the same answer from either, so the conversion
+/// lives here once rather than in each caller.
+///
+/// A path that is already a directory is returned unchanged; anything else
+/// yields its parent.
+pub fn containing_dir(path: &std::path::Path) -> Option<String> {
+    let dir = if path.is_dir() { path } else { path.parent()? };
+    Some(dir.to_string_lossy().into_owned())
+}
+
+/// One served role's binding to the environment variable that overrides it -
+/// what makes an operator's explicit `BRAIN_FLUX1_DIR` win over anything the
+/// store holds, unconditionally, for that role alone.
+pub struct RoleEnv {
+    /// A role name this architecture's [`ArchSpec::roles`] declares.
+    pub role: &'static str,
+    /// The variable whose value replaces whatever the resolver would pick.
+    pub var: &'static str,
+}
+
+/// An [`Ambiguity`] rendered for a daemon's startup log: each real candidate
+/// as the `VAR=<path>` assignment that would pin it, rather than
+/// [`describe_ambiguity`]'s `--flag <path>` (there is no interactive terminal
+/// to retype a flag at). Falls back to the shared CLI rendering for a
+/// [`Question::Variant`]/[`Question::Unverifiable`] question, which names no
+/// role and so has no variable to suggest.
+fn describe_served_ambiguity(a: &Ambiguity, bindings: &[RoleEnv]) -> String {
+    let Question::Role { role } = &a.question else { return describe_ambiguity(a) };
+    let Some(var) = bindings.iter().find(|b| b.role == role).map(|b| b.var) else { return describe_ambiguity(a) };
+    let mut s = format!("more than one candidate for '{role}' and nothing named which - set {var} to one of:\n");
+    for c in &a.choices {
+        for (_, value) in &c.selector {
+            s.push_str(&format!("  {var}={value}\n"));
+        }
+    }
+    s
+}
+
+/// Every role `spec` declares, resolved for a served model: each role's own
+/// environment variable first, then the model store.
+///
+/// Precedence, per role independently:
+/// 1. `bindings`' variable for that role, if set and non-empty - taken
+///    verbatim, NEVER re-derived, never checked against the store. An operator
+///    who names a path gets exactly that path, including one outside the model
+///    store entirely.
+/// 2. Otherwise whatever [`resolve_structured`] picks for it, from the same
+///    scan/classification the one-shot CLI runs.
+///
+/// `None` - the model is simply not served, which is never a hard startup
+/// failure for the whole daemon - when the store cannot answer:
+/// - `Missing`/no models directory: silent, matching the behavior an unset
+///   variable already had. A served model whose weights were never fetched
+///   must not take the other 30 models down with it.
+/// - `Ambiguous`: the store genuinely holds more than one candidate, so
+///   picking one would be a guess. Logged with every real candidate and the
+///   variable that pins it (see [`describe_served_ambiguity`]) - the daemon's
+///   own startup log being the only place an operator can read it.
+///
+/// Short-circuits the scan entirely when every REQUIRED role already has a
+/// variable set: a fully configured operator must pay nothing for a resolver
+/// they are not using, and must not be refused because the paths they named
+/// happen to live outside the store the scan covers.
+///
+/// Returns a real [`Assembly`] rather than a bare role map so that every
+/// retrofitted resident speaks the SAME currency as the ones already migrated
+/// off the environment entirely (`Qwen35Resident::from_assembly`,
+/// `Moondream3Resident::from_assembly`, `flux2::Paths::from_assembly`) - a
+/// resident should not need one path-extraction shape for the resolver and a
+/// different one for the environment.
+pub fn served_assembly(arch: &str, spec: &dyn ArchSpec, bindings: &[RoleEnv]) -> Option<Assembly> {
+    let named: BTreeMap<String, String> =
+        bindings.iter().filter_map(|b| std::env::var(b.var).ok().filter(|v| !v.is_empty()).map(|v| (b.role.to_string(), v))).collect();
+    let fully_named = spec.roles().iter().filter(|r| !spec.optional_roles().contains(r)).all(|r| named.contains_key(*r));
+    if fully_named {
+        let roles: BTreeMap<String, PathBuf> = named.iter().map(|(role, path)| (role.clone(), PathBuf::from(path))).collect();
+        let provenance = named.iter().map(|(role, path)| format!("{role}: {path} (named by the environment)")).collect();
+        return Some(Assembly { id: format!("local/{arch}"), arch: arch.to_string(), variant: None, roles, provenance });
+    }
+    let resolution = match resolve_structured(arch, spec, &named) {
+        Ok(r) => r,
+        // No models directory at all - the resolver was never reached, and an
+        // unset variable already meant "not served" here.
+        Err(_) => return None,
+    };
+    let mut assembly = match resolution {
+        Resolution::Resolved(assembly) => *assembly,
+        Resolution::Ambiguous(a) => {
+            eprintln!("brain: {arch} not served over the scheduler - {}", describe_served_ambiguity(&a, bindings));
+            return None;
+        }
+        Resolution::Missing(_) => return None,
+    };
+    // An explicitly named path outranks the resolver's pick for that role even
+    // when the resolver also found one - rule 1 above, applied last so it
+    // cannot be undone.
+    for (role, path) in named {
+        assembly.provenance.push(format!("{role}: {path} (named by the environment, overriding the store)"));
+        assembly.roles.insert(role, PathBuf::from(path));
+    }
+    Some(assembly)
 }
 
 /// [`try_resolve`], printing and exiting on `Ambiguous`/`Missing`/no-models-
@@ -255,5 +396,173 @@ mod tests {
         let (overrides, remaining) = extract_role_overrides(&spec, &args);
         assert!(overrides.is_empty());
         assert_eq!(remaining, args);
+    }
+
+    // ============ the served (resident) path: `served_assembly` ============
+    //
+    // A one-role architecture whose real artifact is a `.safetensors` file
+    // carrying a marker tensor, so `classify` reads genuine content the way
+    // every real spec does rather than matching on a path.
+
+    const MARKER: &str = "served.marker.weight";
+
+    struct ServedSpec;
+    impl ArchSpec for ServedSpec {
+        fn arch(&self) -> &'static str {
+            "servedtest"
+        }
+        fn roles(&self) -> &'static [&'static str] {
+            &["weights"]
+        }
+        fn classify(&self, records: &[ArtifactRecord], _root: &Path) -> Vec<(usize, String, Confidence)> {
+            records
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| {
+                    r.usable()
+                        && checkpoint::mmap::MmapSafetensors::open(r.path.to_string_lossy().as_ref()).is_ok_and(|m| m.shape(MARKER).is_some())
+                })
+                .map(|(i, _)| (i, "weights".to_string(), Confidence::Declared))
+                .collect()
+        }
+        fn assemble(&self, chosen: &BTreeMap<String, usize>, _records: &[ArtifactRecord], _overrides: &BTreeMap<String, String>) -> Result<AssembleOutcome, String> {
+            chosen.get("weights").ok_or("no weights")?;
+            Ok(AssembleOutcome::Assembled(AssembledVariant { id: "local/servedtest".to_string(), variant: None }))
+        }
+        fn validate(&self, _assembly: &Assembly) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    const SERVED_BINDINGS: &[RoleEnv] = &[RoleEnv { role: "weights", var: "BRAIN_SERVEDTEST_WEIGHTS" }];
+
+    fn store(tag: &str) -> std::path::PathBuf {
+        static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!("brain-served-assembly-{tag}-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    /// A real artifact the toy spec above will classify, at `<store>/<vendor>/<name>`.
+    fn write_candidate(store: &Path, vendor: &str, name: &str) -> std::path::PathBuf {
+        let path = store.join(vendor).join(name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        checkpoint::st::save_safetensors(path.to_str().unwrap(), &[(MARKER.to_string(), vec![1u64], vec![0.0f32])], &serde_json::json!({}), None).unwrap();
+        path
+    }
+
+    /// With no variable set, ONE unambiguous candidate in the store is found
+    /// on its own - the whole gap this seam closes. Before it, the served path
+    /// read a bare `std::env::var(...)` and served nothing at all here.
+    #[test]
+    fn an_unambiguous_store_candidate_is_found_with_no_env_var_set() {
+        let _serial = brain_testutil::env_lock();
+        let root = store("unambiguous");
+        let real = write_candidate(&root, "vendor", "model.safetensors");
+        std::env::set_var("BRAIN_MODELS_DIR", &root);
+        std::env::remove_var("BRAIN_SERVEDTEST_WEIGHTS");
+
+        let assembly = served_assembly("servedtest", &ServedSpec, SERVED_BINDINGS).expect("one candidate must resolve on its own");
+        assert_eq!(assembly.roles["weights"], real);
+
+        std::env::remove_var("BRAIN_MODELS_DIR");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The override is unconditional: an explicitly named path wins even when
+    /// the store holds a real, classifiable candidate that the resolver would
+    /// otherwise have picked - and even when the named path is somewhere the
+    /// scan does not cover at all. An operator who names a path must get
+    /// exactly that path.
+    #[test]
+    fn an_env_var_override_wins_over_a_different_store_candidate() {
+        let _serial = brain_testutil::env_lock();
+        let root = store("override");
+        let in_store = write_candidate(&root, "vendor", "model.safetensors");
+        // Deliberately OUTSIDE the store, so this can only come from the
+        // variable - a scan-based answer could never produce it.
+        let outside = store("override-elsewhere").join("hand-placed.safetensors");
+        std::fs::create_dir_all(outside.parent().unwrap()).unwrap();
+        std::fs::write(&outside, b"not even a real checkpoint").unwrap();
+
+        std::env::set_var("BRAIN_MODELS_DIR", &root);
+        std::env::set_var("BRAIN_SERVEDTEST_WEIGHTS", &outside);
+        let assembly = served_assembly("servedtest", &ServedSpec, SERVED_BINDINGS).expect("an explicitly named path must always resolve");
+        assert_eq!(assembly.roles["weights"], outside, "the variable must win over the store's own candidate");
+        assert_ne!(assembly.roles["weights"], in_store);
+
+        std::env::remove_var("BRAIN_SERVEDTEST_WEIGHTS");
+        std::env::remove_var("BRAIN_MODELS_DIR");
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(outside.parent().unwrap()).ok();
+    }
+
+    /// Two equally good candidates and nothing naming one is a genuine
+    /// question, so the model is NOT served - never a silent pick of whichever
+    /// the directory walk reached first, and never a crash. The refusal names
+    /// every real candidate and the variable that pins it, since a daemon's
+    /// startup log is the only place its operator can read it.
+    #[test]
+    fn genuine_ambiguity_refuses_to_serve_and_names_every_candidate() {
+        let _serial = brain_testutil::env_lock();
+        let root = store("ambiguous");
+        let a = write_candidate(&root, "vendor-a", "model.safetensors");
+        let b = write_candidate(&root, "vendor-b", "model.safetensors");
+        std::env::set_var("BRAIN_MODELS_DIR", &root);
+        std::env::remove_var("BRAIN_SERVEDTEST_WEIGHTS");
+
+        assert!(served_assembly("servedtest", &ServedSpec, SERVED_BINDINGS).is_none(), "two real candidates must not be silently collapsed to one");
+
+        // The message an operator actually gets: both paths, each as the
+        // assignment that would select it.
+        let records = brain_modelstore::inventory::scan(&root);
+        let specs: [&dyn ArchSpec; 1] = [&ServedSpec];
+        let Resolution::Ambiguous(amb) = brain_modelstore::resolve::resolve("servedtest", &records, &specs, &BTreeMap::new()) else {
+            panic!("expected the two candidates to be ambiguous");
+        };
+        let msg = describe_served_ambiguity(&amb, SERVED_BINDINGS);
+        assert!(msg.contains("BRAIN_SERVEDTEST_WEIGHTS="), "the message must name the variable to set: {msg}");
+        assert!(msg.contains(a.to_str().unwrap()), "{msg}");
+        assert!(msg.contains(b.to_str().unwrap()), "{msg}");
+
+        // ...and naming one of them resolves it, which is what makes the
+        // message actionable rather than merely informative.
+        std::env::set_var("BRAIN_SERVEDTEST_WEIGHTS", &a);
+        let assembly = served_assembly("servedtest", &ServedSpec, SERVED_BINDINGS).expect("naming one candidate must resolve the ambiguity");
+        assert_eq!(assembly.roles["weights"], a);
+
+        std::env::remove_var("BRAIN_SERVEDTEST_WEIGHTS");
+        std::env::remove_var("BRAIN_MODELS_DIR");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Nothing configured and nothing found is "not served", quietly - never a
+    /// hard failure. A daemon serves ~30 models; one whose weights were never
+    /// fetched must not take the other 29 down with it.
+    #[test]
+    fn nothing_configured_and_nothing_found_is_silently_not_served() {
+        let _serial = brain_testutil::env_lock();
+        let root = store("empty");
+        std::env::set_var("BRAIN_MODELS_DIR", &root);
+        std::env::remove_var("BRAIN_SERVEDTEST_WEIGHTS");
+        assert!(served_assembly("servedtest", &ServedSpec, SERVED_BINDINGS).is_none());
+        std::env::remove_var("BRAIN_MODELS_DIR");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// `containing_dir` is what lets a resident take either source: the
+    /// variable names the DIRECTORY, the resolver's role names the FILE inside
+    /// it, and the loader wants the directory in both cases.
+    #[test]
+    fn containing_dir_normalizes_a_file_role_and_a_directory_variable_to_the_same_answer() {
+        let root = store("containing");
+        let repo = root.join("DIAMONIK7777").join("antelopev2");
+        std::fs::create_dir_all(&repo).unwrap();
+        let graph = repo.join("glintr100.onnx");
+        std::fs::write(&graph, b"x").unwrap();
+        assert_eq!(containing_dir(&graph), containing_dir(&repo), "a role's file and an operator's directory must agree");
+        assert_eq!(containing_dir(&repo).as_deref(), repo.to_str());
+        std::fs::remove_dir_all(&root).ok();
     }
 }

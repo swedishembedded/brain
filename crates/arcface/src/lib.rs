@@ -56,6 +56,7 @@ pub mod config;
 pub mod import;
 pub mod model;
 pub mod train;
+pub mod spec;
 
 pub use align::{estimate_norm, norm_crop_chw, warp_grid};
 pub use config::{ArcFaceConfig, Preprocess, ARCFACE_DST_112};

@@ -27,5 +27,8 @@ brain-data.workspace = true
 brain-capability.workspace = true
 serde_json.workspace = true
 
+# `spec.rs` - this architecture's rules for the model-store resolver.
+brain-modelstore.workspace = true
+
 [dev-dependencies]
 brain-testutil.workspace = true

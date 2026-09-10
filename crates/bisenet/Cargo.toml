@@ -18,6 +18,11 @@ brain-paramstore.workspace = true
 brain-model.workspace = true
 bytemuck.workspace = true
 
+# `spec.rs` - this architecture's rules for the model-store resolver.
+brain-modelstore.workspace = true
+brain-capability.workspace = true # ArchSpec::validate's Assembly
+serde_json.workspace = true
+
 [dev-dependencies]
 brain-testutil.workspace = true
 brain-imaging.workspace = true

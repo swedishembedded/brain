@@ -32,6 +32,7 @@
 pub mod builder;
 pub mod conv;
 pub mod graph;
+pub mod header;
 pub mod onnx;
 pub mod read;
 pub mod walk;
@@ -39,6 +40,7 @@ pub mod walk;
 pub use builder::{GraphBuilder, DEFAULT_IR_VERSION, DEFAULT_OPSET};
 pub use conv::{conv_transpose1d_ref, conv_transpose_node, ConvTranspose1d};
 pub use graph::{Attr, AttrVal, Elem, Graph, Node, Tensor, TensorData, ValueInfo};
+pub use header::{has_initializer, read_initializers, InitializerHeader};
 pub use read::{initializers, read_file, OnnxTensor};
 pub use walk::{check_conv, Manifest, Tensors, Walk};
 
@@ -47,4 +49,16 @@ pub use walk::{check_conv, Manifest, Tensors, Walk};
 pub fn decode_model(bytes: &[u8]) -> Result<onnx::ModelProto, String> {
     use prost::Message;
     onnx::ModelProto::decode(bytes).map_err(|e| e.to_string())
+}
+
+/// Encode a [`onnx::ModelProto`] to serialized ONNX bytes - [`decode_model`]'s
+/// inverse, and `prost`-free at the call site for the same reason.
+///
+/// What lets an architecture's own `spec.rs` build a realistic ONNX fixture
+/// (a graph carrying exactly the initializer names its classifier keys on)
+/// without taking a `prost` dev-dependency of its own just to call
+/// `encode_to_vec`.
+pub fn encode_model(model: &onnx::ModelProto) -> Vec<u8> {
+    use prost::Message;
+    model.encode_to_vec()
 }

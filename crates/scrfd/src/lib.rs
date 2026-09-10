@@ -40,6 +40,7 @@ pub mod config;
 pub mod detect;
 pub mod import;
 pub mod model;
+pub mod spec;
 
 pub use config::{Preprocess, ScrfdConfig};
 pub use detect::{decode, nms, Face};

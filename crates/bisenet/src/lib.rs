@@ -16,6 +16,7 @@ pub mod config;
 pub mod import;
 pub mod mask;
 pub mod model;
+pub mod spec;
 
 pub use config::BiSeNetConfig;
 pub use model::{imagenet_normalize, BiSeNet};

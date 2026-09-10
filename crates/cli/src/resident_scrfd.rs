@@ -28,6 +28,8 @@ use capability::{ActionResult, Invocation, Manifest, Progress};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 use scrfd::caps::ScrfdSession;
 
+use crate::resolver_cli::RoleEnv;
+
 /// The antelopev2 face detector behind the scheduler (`BRAIN_SCRFD_DIR` = the
 /// directory holding `scrfd_10g_bnkps.onnx`).
 pub struct ScrfdResident {
@@ -35,11 +37,18 @@ pub struct ScrfdResident {
 }
 
 impl ScrfdResident {
-    /// `None` when the directory is unset or does not hold the released
-    /// graph - registering a model whose every call would fail is worse
-    /// than not serving it.
+    /// `BRAIN_SCRFD_DIR` if the operator set it, else whatever the model-store
+    /// resolver finds for `scrfd::spec::ScrfdSpec`'s `weights` role - the same
+    /// scan and candidate rules the one-shot CLI uses. See
+    /// `crate::resident_arcface::ArcFaceResident::from_env` for why the
+    /// resolved graph path becomes its containing directory here.
+    ///
+    /// `None` (not served, never a daemon startup failure) when the store
+    /// holds no released detector, or holds more than one and nothing says
+    /// which - see `crate::resolver_cli::served_assembly`.
     pub fn from_env() -> Option<ScrfdResident> {
-        Self::new(std::env::var("BRAIN_SCRFD_DIR").ok().filter(|p| !p.is_empty())?)
+        let assembly = crate::resolver_cli::served_assembly("scrfd", &scrfd::spec::ScrfdSpec, &[RoleEnv { role: "weights", var: "BRAIN_SCRFD_DIR" }])?;
+        Self::new(crate::resolver_cli::containing_dir(assembly.roles.get("weights")?)?)
     }
 
     /// Direct constructor for callers that already hold the directory (e.g.

@@ -42,6 +42,19 @@ pub enum ArtifactKind {
     /// bytes" figure this crate reads today, so a `.part` sibling is the
     /// completeness signal, not a declared-vs-actual byte extent.
     Torch,
+    /// A released ONNX graph (`.onnx`) - the format an upstream vendor ships a
+    /// model in when it never had a PyTorch/safetensors release at all
+    /// (insightface's antelopev2 pair, `glintr100.onnx` +
+    /// `scrfd_10g_bnkps.onnx`; CosyVoice's `speech_tokenizer_v2.onnx`; CAM++'s
+    /// `campplus.onnx`). Content classification reads the protobuf's own
+    /// graph/initializer names through `crates/onnx`, the same header-only
+    /// discipline `Gguf`/`Safetensors`/`Torch` classification already follows.
+    ///
+    /// Whole-file completeness only ([`probe_whole_file`]), for the same
+    /// reason `Torch` uses it: an ONNX protobuf carries no single "total
+    /// declared tensor bytes" figure this crate reads, so a `.part` sibling is
+    /// the completeness signal rather than a declared-vs-actual byte extent.
+    Onnx,
     /// A directory holding a foreign (non-brain) HF checkpoint: `config.json`
     /// plus one or more `model*.safetensors` files, or a
     /// `model.safetensors.index.json` shard set - the loader takes the
@@ -52,6 +65,19 @@ pub enum ArtifactKind {
     /// A bare `model_index.json` (diffusers pipeline manifest) - evidence
     /// that a pipeline lives nearby, never itself weights.
     PipelineIndex,
+    /// The DIRECTORY a [`ArtifactKind::PipelineIndex`] sits in: a diffusers
+    /// pipeline root, holding one subdirectory per component (`transformer/`,
+    /// `vae/`, `text_encoder/`, `tokenizer/`, ...).
+    ///
+    /// Recorded separately from the `model_index.json` file itself for the
+    /// same reason [`ArtifactKind::HfDir`] is one record rather than one per
+    /// shard: every loader that consumes a diffusers pipeline takes the
+    /// DIRECTORY (`flux1::caps::Session::new`, `sdxlunet`'s and `supir`'s
+    /// roots), so the directory is what an `ArchSpec` role must resolve to. A
+    /// role resolved to the manifest file instead would hand each of those
+    /// loaders a path it cannot open, and would print a `model_index.json` at
+    /// the operator where a directory belongs.
+    PipelineDir,
     /// One role's location as declared by a `brain.manifest.json` compound
     /// manifest (`crate::MANIFEST_FILE`) sitting in this record's own
     /// directory - a file or a directory, whichever that role's loader
@@ -233,6 +259,8 @@ fn kind_of_extension(fname: &str) -> Option<ArtifactKind> {
         Some(ArtifactKind::Safetensors)
     } else if fname.ends_with(".pt") || fname.ends_with(".pt.part") || fname.ends_with(".pth") || fname.ends_with(".pth.part") {
         Some(ArtifactKind::Torch)
+    } else if fname.ends_with(".onnx") || fname.ends_with(".onnx.part") {
+        Some(ArtifactKind::Onnx)
     } else {
         None
     }
@@ -361,6 +389,7 @@ fn walk_repo_dir(dir: &Path, scan_root: &Path, cache: &BTreeMap<PathBuf, CacheEn
         return;
     }
     let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let mut is_pipeline_root = false;
     for entry in entries.flatten() {
         if is_symlink(&entry) {
             continue;
@@ -377,7 +406,14 @@ fn walk_repo_dir(dir: &Path, scan_root: &Path, cache: &BTreeMap<PathBuf, CacheEn
             push_file_record(&path, scan_root, ArtifactKind::TokenizerJson, cache, probed, out);
         } else if fname == "model_index.json" {
             push_file_record(&path, scan_root, ArtifactKind::PipelineIndex, cache, probed, out);
+            is_pipeline_root = true;
         }
+    }
+    // The pipeline ROOT itself, alongside the manifest that identified it -
+    // see `ArtifactKind::PipelineDir` for why the directory has to be its own
+    // record rather than the caller deriving it from the file's parent.
+    if is_pipeline_root {
+        push_file_record(dir, scan_root, ArtifactKind::PipelineDir, cache, probed, out);
     }
 }
 
@@ -564,10 +600,47 @@ mod tests {
         let by_kind = |k: ArtifactKind| found.iter().filter(|r| r.kind == k).count();
         assert_eq!(by_kind(ArtifactKind::PipelineIndex), 1, "{found:?}");
         assert_eq!(by_kind(ArtifactKind::TokenizerJson), 1, "{found:?}");
+        // The pipeline ROOT is its own record, and it is the DIRECTORY - what
+        // every diffusers-pipeline loader in this workspace actually takes.
+        let dirs: Vec<&ArtifactRecord> = found.iter().filter(|r| r.kind == ArtifactKind::PipelineDir).collect();
+        assert_eq!(dirs.len(), 1, "{found:?}");
+        assert_eq!(dirs[0].path, repo, "the PipelineDir record must be the root directory, not its manifest");
         for r in &found {
             assert_eq!(r.completeness, Completeness::Complete, "{r:?}");
             assert!(r.usable());
         }
+    }
+
+    /// A released ONNX graph is a real artifact: insightface's antelopev2 pair
+    /// ships `.onnx` and nothing else, so before `kind_of_extension` knew the
+    /// extension those files were invisible to `scan` entirely - and an
+    /// `ArchSpec` can only classify what the inventory recorded. A vendor
+    /// directory with no `config.json` (so not an `HfDir`) holding only
+    /// `.onnx` files is exactly antelopev2's real shape.
+    #[test]
+    fn a_released_onnx_graph_is_scanned() {
+        let root = scratch_root("onnx-graph");
+        let repo = root.join("DIAMONIK7777").join("antelopev2");
+        std::fs::create_dir_all(&repo).unwrap();
+        for f in ["glintr100.onnx", "scrfd_10g_bnkps.onnx"] {
+            std::fs::write(repo.join(f), b"not really a protobuf; the inventory never reads past the extension").unwrap();
+        }
+
+        let found = scan(&root);
+        let onnx: Vec<&ArtifactRecord> = found.iter().filter(|r| r.kind == ArtifactKind::Onnx).collect();
+        assert_eq!(onnx.len(), 2, "{found:?}");
+        for r in &onnx {
+            assert_eq!(r.completeness, Completeness::Complete, "{r:?}");
+            assert!(r.usable());
+        }
+        // An interrupted download is caught by its `.part` sibling, exactly as
+        // for every other whole-file kind - there is no declared byte extent
+        // in an ONNX protobuf for this crate to check against.
+        std::fs::write(repo.join("glintr100.onnx.part"), b"partial").unwrap();
+        let found = scan(&root);
+        let part = found.iter().find(|r| r.path.extension().is_some_and(|e| e == "part")).expect("the .part sibling is recorded");
+        assert_eq!(part.kind, ArtifactKind::Onnx);
+        assert!(!part.usable(), "{part:?}");
     }
 
     /// A bare `torch.save` checkpoint (`.pth`) sitting vendor-flat, exactly the

@@ -19,12 +19,16 @@ use capability::{ActionResult, Invocation, Manifest, Progress};
 use pulid::caps::Session;
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 
-/// PuLID-conditioned FLUX.1 behind the scheduler. Five directories, all
-/// required: `BRAIN_FLUX1_DIR` (the backbone, same as `resident_flux1.rs`),
-/// `BRAIN_PULID_DIR` (`pulid_flux_v0.9.1.safetensors` or its directory),
-/// `BRAIN_ARCFACE_DIR` (same as `resident_arcface.rs`), `BRAIN_CLIP_DIR` (for
-/// the EVA-CLIP-L/336 file, same as `resident_clip.rs`), `BRAIN_BISENET_DIR`
-/// (a directory holding `parsing_bisenet.safetensors` - see
+use crate::resolver_cli::RoleEnv;
+
+/// PuLID-conditioned FLUX.1 behind the scheduler. Five components, all
+/// required, each resolved from its own environment variable when set and
+/// otherwise from the model store: the backbone (`BRAIN_FLUX1_DIR`, same as
+/// `resident_flux1.rs`), the PuLID adapter (`BRAIN_PULID_DIR`,
+/// `pulid_flux_v0.9.1.safetensors` or its directory), ArcFace
+/// (`BRAIN_ARCFACE_DIR`, same as `resident_arcface.rs`), the EVA-CLIP-L/336
+/// checkpoint's directory (`BRAIN_CLIP_DIR`) and a directory holding
+/// `parsing_bisenet.safetensors` (`BRAIN_BISENET_DIR` - see
 /// `pulid::caps::BISENET_FILE`'s doc for how to produce one).
 pub struct PulidResident {
     flux1_root: String,
@@ -35,19 +39,48 @@ pub struct PulidResident {
 }
 
 impl PulidResident {
-    /// `None` unless every directory is set and the FLUX.1 root holds a
-    /// released `transformer/` - registering a model whose every call would
-    /// fail is worse than not serving it.
+    /// Each of the five components independently: its own environment
+    /// variable if the operator set that one, else whatever the model-store
+    /// resolver finds for that role.
+    ///
+    /// The per-role independence is the point. PuLID's five components come
+    /// from four different vendors, and an operator commonly has a hand-placed
+    /// path for exactly one of them (a re-quantized backbone, say) and nothing
+    /// to say about the other four. Before this, naming one meant naming all
+    /// five or being served nothing at all.
+    ///
+    /// `pulid::spec::PulidSpec` classifies the adapter itself and delegates the
+    /// other four roles to the architectures that own them, so "what does a
+    /// released ArcFace look like" is answered identically here and in
+    /// `crate::resident_arcface`.
+    ///
+    /// `None` (not served, never a daemon startup failure) when the store
+    /// cannot answer for some role and nothing named it - see
+    /// `crate::resolver_cli::served_assembly`.
     pub fn from_env() -> Option<PulidResident> {
-        let get = |k: &str| std::env::var(k).ok().filter(|p| !p.is_empty());
-        let (flux1_root, pulid_root, arcface_root, clip_root, bisenet_root) = (
-            get("BRAIN_FLUX1_DIR")?,
-            get("BRAIN_PULID_DIR")?,
-            get("BRAIN_ARCFACE_DIR")?,
-            get("BRAIN_CLIP_DIR")?,
-            get("BRAIN_BISENET_DIR")?,
-        );
-        Self::new(flux1_root, pulid_root, arcface_root, clip_root, bisenet_root)
+        let assembly = crate::resolver_cli::served_assembly(
+            "pulid",
+            &pulid::spec::PulidSpec,
+            &[
+                RoleEnv { role: "flux1", var: "BRAIN_FLUX1_DIR" },
+                RoleEnv { role: "pulid", var: "BRAIN_PULID_DIR" },
+                RoleEnv { role: "arcface", var: "BRAIN_ARCFACE_DIR" },
+                RoleEnv { role: "clip", var: "BRAIN_CLIP_DIR" },
+                RoleEnv { role: "bisenet", var: "BRAIN_BISENET_DIR" },
+            ],
+        )?;
+        // `flux1` and `pulid` are taken as resolved: the backbone role is
+        // already a directory, and the adapter role is the checkpoint itself
+        // (`pulid::caps::Session` accepts the file or its directory). The
+        // other three name a directory their loader joins a known release
+        // filename onto - see `crate::resolver_cli::containing_dir`.
+        Self::new(
+            assembly.roles.get("flux1")?.to_string_lossy().into_owned(),
+            assembly.roles.get("pulid")?.to_string_lossy().into_owned(),
+            crate::resolver_cli::containing_dir(assembly.roles.get("arcface")?)?,
+            crate::resolver_cli::containing_dir(assembly.roles.get("clip")?)?,
+            crate::resolver_cli::containing_dir(assembly.roles.get("bisenet")?)?,
+        )
     }
 
     /// Direct constructor (no env round-trip) - see

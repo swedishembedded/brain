@@ -33,6 +33,8 @@ use clip::caps::Session;
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 use serde_json::json;
 
+use crate::resolver_cli::RoleEnv;
+
 /// The CLIP encoders behind the scheduler (`BRAIN_CLIP_DIR` = the released
 /// checkpoint root, in the SDXL layout: `text_encoder/`, `text_encoder_2/`,
 /// `tokenizer/`, `tokenizer_2/`).
@@ -41,11 +43,18 @@ pub struct ClipResident {
 }
 
 impl ClipResident {
-    /// `None` when the directory is unset or holds neither released tokenizer —
-    /// registering a model whose every call would fail is worse than not
-    /// serving it.
+    /// `BRAIN_CLIP_DIR` if the operator set it, else whatever the model-store
+    /// resolver finds for `clip::spec::ClipSpec`'s `towers` role - an
+    /// SDXL-layout checkpoint root, which is what this session loads.
+    ///
+    /// Note the resolver is deliberately strict here: a FLUX.1 root carries
+    /// the same four component directories but a T5 `text_encoder_2` rather
+    /// than OpenCLIP-bigG, so it is NOT a candidate (see
+    /// `clip::spec::is_sdxl_tower_root`). A store with no SDXL release simply
+    /// does not serve this model, exactly as an unset variable already meant.
     pub fn from_env() -> Option<ClipResident> {
-        Self::new(std::env::var("BRAIN_CLIP_DIR").ok().filter(|p| !p.is_empty())?)
+        let assembly = crate::resolver_cli::served_assembly("clip", &clip::spec::ClipSpec, &[RoleEnv { role: "towers", var: "BRAIN_CLIP_DIR" }])?;
+        Self::new(assembly.roles.get("towers")?.to_string_lossy().into_owned())
     }
 
     /// Direct constructor (no env round-trip) — see

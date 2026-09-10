@@ -405,6 +405,7 @@ dependencies = [
  "brain-imaging",
  "brain-kernels",
  "brain-model",
+ "brain-modelstore",
  "brain-onnx",
  "brain-paramstore",
  "brain-scrfd",
@@ -516,15 +517,18 @@ dependencies = [
 name = "brain-bisenet"
 version = "1.1.0"
 dependencies = [
+ "brain-capability",
  "brain-checkpoint",
  "brain-gpu-core",
  "brain-imaging",
  "brain-kernels",
  "brain-model",
+ "brain-modelstore",
  "brain-paramstore",
  "brain-testutil",
  "brain-vision",
  "bytemuck",
+ "serde_json",
 ]
 
 [[package]]
@@ -773,6 +777,7 @@ dependencies = [
  "brain-imaging",
  "brain-kernels",
  "brain-model",
+ "brain-modelstore",
  "brain-paramstore",
  "brain-testutil",
  "brain-vision",
@@ -1073,6 +1078,7 @@ dependencies = [
  "brain-imaging",
  "brain-kernels",
  "brain-model",
+ "brain-modelstore",
  "brain-t5encoder",
  "brain-testutil",
  "brain-vae",
@@ -1628,6 +1634,7 @@ dependencies = [
  "brain-imaging",
  "brain-kernels",
  "brain-model",
+ "brain-modelstore",
  "brain-paramstore",
  "brain-testutil",
  "serde_json",
@@ -1941,6 +1948,7 @@ dependencies = [
  "brain-imaging",
  "brain-kernels",
  "brain-model",
+ "brain-modelstore",
  "brain-onnx",
  "brain-paramstore",
  "brain-testutil",
