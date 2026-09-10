@@ -209,3 +209,59 @@ fn independent_dispatches_in_a_batch_cost_no_barrier() {
          (not minimal)"
     );
 }
+
+/// `record_dispatches`'s hazard analysis used to mark a buffer `dirty` only
+/// when a dispatch WROTE it, and insert a barrier only when a LATER dispatch
+/// touched a `dirty` buffer - catching read-after-write and write-after-
+/// write, but NOT write-AFTER-read: a dispatch that only READS buffer `x`
+/// never marked it dirty, so a LATER dispatch overwriting `x` got no barrier
+/// at all - the write could start before the earlier read had actually
+/// consumed the old value (M6.7).
+///
+/// This batch is 2 dispatches: `out1 = x + b` (reads `x`, does not write it),
+/// then `x = c + d` (overwrites `x` with unrelated values - a real
+/// dependency: dispatch 2 must not start until dispatch 1 has read `x`'s OLD
+/// value). Root-caused via a real Qwen3.5 GQA-layer forward on this
+/// workspace's Intel Arc (Meteor Lake) iGPU, where exactly this class of gap
+/// crashed the device outright (`ERROR_DEVICE_LOST`) rather than merely
+/// computing a wrong answer - `BRAIN_VK_SERIAL=1` (forcing a barrier before
+/// every dispatch, unconditionally) made the crash go away, which is what
+/// pointed at the hazard analysis rather than a driver bug unrelated to it.
+/// Before the fix this test's own `barrier_count()` assertion caught the gap
+/// directly (0 barriers for a real dependency); the tiny 4-element scale
+/// here did not reliably reproduce a wrong VALUE the way the real GQA
+/// traffic reproduced a crash, which is exactly why the barrier-count
+/// assertion is the load-bearing one, not the value check.
+#[test]
+fn a_write_after_read_hazard_gets_a_barrier() {
+    let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(be) = backend() else { return };
+    let x = be.storage_init("x", &[1.0, 1.0, 1.0, 1.0]);
+    let b = be.storage_init("b", &[10.0, 20.0, 30.0, 40.0]);
+    let c = be.storage_init("c", &[100.0, 200.0, 300.0, 400.0]);
+    let d = be.storage_init("d", &[1.0, 1.0, 1.0, 1.0]);
+    let out1 = be.storage(4);
+
+    let base = be.barrier_count();
+    let steps = vec![
+        be.step(0, &[&x, &b, &out1], &[4], 4), // out1 = x + b   (reads x)
+        be.step(0, &[&c, &d, &x], &[4], 4),    // x = c + d      (overwrites x - WAR on dispatch 1's read)
+    ];
+    be.submit(&[], &steps);
+    let got = be.read(&out1, 4);
+
+    let barriers = be.barrier_count() - base;
+    assert_eq!(
+        barriers, 1,
+        "expected exactly 1 buffer barrier (the write-after-read dependency on x) - got \
+         {barriers}; a regression here means dispatch 2's write can race dispatch 1's read again, \
+         the same class of gap that crashed the native Vulkan backend outright on real GQA-layer \
+         traffic (ERROR_DEVICE_LOST)"
+    );
+    assert_eq!(
+        got,
+        vec![11.0, 21.0, 31.0, 41.0],
+        "out1 = x + b computed the wrong answer ({got:?}, expected [11, 21, 31, 41] from x's \
+         value BEFORE dispatch 2 overwrote it)"
+    );
+}

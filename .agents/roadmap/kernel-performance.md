@@ -3486,6 +3486,70 @@ and out of this milestone's scope.
 
 **Commit**: one.
 
+### M6.7 - `backend-vulkan`'s hazard analysis was missing write-after-read detection; a real bug, a real fix, NOT the GQA `ERROR_DEVICE_LOST` root cause
+
+Opens where M6.6 left off: the native Vulkan backend's `ERROR_DEVICE_LOST`
+crash on a real Qwen3.5 GQA-layer forward, filed there as out of scope.
+Investigated one specific hypothesis to a real, useful conclusion, though not
+the one that closes the crash.
+
+**A real, independent gap found and fixed.** `record_dispatches`'s per-buffer
+hazard analysis (M6.1) marked a buffer `dirty` only when a dispatch WROTE it,
+and inserted a barrier only when a later dispatch touched a `dirty` buffer -
+catching read-after-write and write-after-write, never write-AFTER-read: a
+dispatch that only READS buffer `x` never marked it dirty, so a later
+dispatch overwriting `x` got no barrier at all. Confirmed directly and
+deterministically with a new two-dispatch synthetic test
+(`tests/perf_contract.rs`'s `a_write_after_read_hazard_gets_a_barrier`):
+`barrier_count()` read exactly 0 for a real write-after-read dependency
+before the fix. Fixed by splitting the single `dirty` set into `dirty_write`
+(RAW/WAW source, as before) and `dirty_read` (buffers read but not written -
+only a later WRITE against these needs a barrier; two concurrent reads never
+race, so a later read needs nothing). A buffer is invariantly in at most one
+set at a time (a write always wins and clears the buffer from `dirty_read`).
+Mutation-verified per this ledger's own F.8: reverting the fix and re-running
+the new test reproduces the pre-fix `left: 0, right: 1` failure exactly; the
+existing `independent_dispatches_in_a_batch_cost_no_barrier` test (the
+RAW-only synthetic case M6.1 originally added) still passes at exactly 1
+barrier, unchanged - the fix adds a missing hazard class without adding
+spurious barriers to cases that already worked.
+
+**Honestly, this was not the GQA crash's cause.** Re-running the original
+repro (`qwen35_bench gqa 128 3`, `BRAIN_DEVICE=vulkan`) with the fix built in
+still crashes with `ERROR_DEVICE_LOST`, 3/3 repeated runs, byte-identical
+symptom to before the fix. `BRAIN_VK_SERIAL=1` (forcing a barrier before
+every dispatch unconditionally, bypassing the hazard analysis entirely)
+still avoids the crash, exactly as it did before this fix - so the
+remaining defect is still some hazard/synchronization gap the current
+two-set (RAW/WAW + WAR) model does not cover, not a driver issue unrelated
+to barrier placement. What this session's own `qwen35_bench gqa`
+investigation additionally surfaced, independent of the crash: even under
+full forced serialization (`BRAIN_VK_SERIAL=1`, so the crash itself is
+avoided), `backend-vulkan`'s OWN device-timestamp query mechanism reports
+an implausible `matmul` time (`~31618 ms` over 16 calls) - a sibling of
+M6.6's finding, in the OTHER backend crate, unfixed here, out of this
+milestone's scope too.
+
+**Genuinely open, named for whoever picks this up next**: what hazard class
+remains uncaught. Candidates not yet ruled out: an access the per-buffer
+`accesses` array does not capture at all (a buffer touched through some path
+other than the `bufs`/`offsets` a `step`/`step_sliced` call declares); a
+hazard that spans a `flush()` boundary under the asynchronous ring path
+(M6.2) rather than within one `record_dispatches` batch; or something
+specific to GQA's own multi-buffer attention pattern (`gqa_scores` →
+`attn_softmax` → `gqa_apply`) that a 2-dispatch synthetic case does not
+exercise. `tests/perf_contract.rs`'s `barrier_count()` harness is the tool
+to keep using - a synthetic reproduction of GQA's actual buffer-reuse shape,
+not another guess-and-check pass against the full model, is the
+recommended next step.
+
+**Verified**: `cargo test --release -p brain-backend-vulkan --lib --bins
+--tests` (all suites, including this crate's own `kernel_timing.rs`,
+`async_submit.rs`, `deferred_reclaim.rs`), green. `cargo clippy -p
+brain-backend-vulkan --all-targets --all-features -- -D warnings` clean.
+
+**Commit**: one.
+
 ### M7.1 - Phase 7 opens: `DataParallel::adamw_step` bucketed into one transfer per replica per direction
 
 Phase 7 (distributed) had zero milestones before this one. Scoped to the
@@ -5473,7 +5537,11 @@ persisted `VkPipelineCache` (M6.5 above; F2 warm-start parity with
 own outline never named but a fresh re-derivation of the campaign surfaced:
 `backend-wgpu`'s device-timestamp-query corruption (M6.6 above, `fold_ticks`)
 - fixed, with a native `backend-vulkan` `ERROR_DEVICE_LOST` crash found
-alongside it and filed separately, unattempted. The outline's fourth item, **a
+alongside it. That crash is investigated but **still open**: M6.7 fixed a
+real, independently-confirmed write-after-read hazard-tracking gap in the
+same `record_dispatches` analysis, which turned out not to be this crash's
+cause (still reproduces 3/3 with the fix in place) - narrowed, not closed,
+with the next concrete step named in M6.7's own entry. The outline's fourth item, **a
 multi-tensor optimizer, remains open** - the one Phase-6 item nothing has
 been built for. Not attempted this session, on purpose: `crates/optim/
 src/lib.rs`'s own module doc already gives the honest reason. The optimizer

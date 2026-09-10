@@ -1507,14 +1507,40 @@ impl VulkanBackend {
     /// `chunk`'s descriptor sets/pipelines valid for it, `cmd` already begun.
     unsafe fn record_dispatches(&self, cmd: vk::CommandBuffer, chunk: &[VkStep], mut on_dispatch: impl FnMut(usize)) {
         let dev = &self.ctx.device;
-        let mut dirty: std::collections::HashSet<vk::Buffer> = std::collections::HashSet::new();
+        // `dirty_write`: buffers written by an earlier dispatch, not yet
+        // barriered - any later touch (read OR write) needs a barrier
+        // (read-after-write, write-after-write).
+        //
+        // `dirty_read`: buffers READ (not written) by an earlier dispatch,
+        // not yet barriered - only a later WRITE needs a barrier against
+        // these (write-after-read). Two concurrent reads never race, so a
+        // later read against a `dirty_read` buffer needs nothing.
+        //
+        // Missing `dirty_read` entirely was a real gap (M6.7): a dispatch
+        // that only reads buffer `x` never marked it dirty, so a LATER
+        // dispatch overwriting `x` got no barrier at all - the write could
+        // start before the earlier read had consumed the old value. Root-
+        // caused via a real Qwen3.5 GQA-layer forward on this workspace's
+        // Intel Arc (Meteor Lake) iGPU, where this exact gap produced an
+        // outright `ERROR_DEVICE_LOST`, not merely a wrong answer - see
+        // `tests/perf_contract.rs`'s `a_write_after_read_hazard_is_not_yet_
+        // detected` for the minimal reproduction (`barrier_count()` was 0
+        // for a real write-after-read dependency before this fix).
+        let mut dirty_write: std::collections::HashSet<vk::Buffer> = std::collections::HashSet::new();
+        let mut dirty_read: std::collections::HashSet<vk::Buffer> = std::collections::HashSet::new();
         let mut needed: Vec<vk::Buffer> = Vec::new();
         for (i, s) in chunk.iter().enumerate() {
             let accesses = &s.accesses[..s.n_access as usize];
             if i > 0 {
                 needed.clear();
                 for acc in accesses {
-                    if dirty.remove(&acc.buffer) {
+                    // Both `.remove()` calls run unconditionally (not
+                    // short-circuited) so a buffer that is - invariantly -
+                    // in at most one of the two sets still gets cleared from
+                    // whichever one it is actually in.
+                    let was_dirty_write = dirty_write.remove(&acc.buffer);
+                    let was_dirty_read = acc.write && dirty_read.remove(&acc.buffer);
+                    if was_dirty_write || was_dirty_read {
                         needed.push(acc.buffer);
                     }
                 }
@@ -1547,9 +1573,21 @@ impl VulkanBackend {
             dev.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::COMPUTE, rk.layout, 0, &[s.set], &[]);
             dev.cmd_dispatch(cmd, s.gx, s.gy, 1);
             on_dispatch(i);
+            // Writes first, and only THEN reads that no write in this same
+            // dispatch already claimed - an in-place read+write of one
+            // buffer (bound twice, or the same handle at two bindings) must
+            // land in `dirty_write` only, never straggle into `dirty_read`
+            // too (which would be redundant, not wrong, but breaks the "at
+            // most one set" invariant `needed`'s dedup above relies on).
             for acc in accesses {
                 if acc.write {
-                    dirty.insert(acc.buffer);
+                    dirty_write.insert(acc.buffer);
+                    dirty_read.remove(&acc.buffer);
+                }
+            }
+            for acc in accesses {
+                if !acc.write && !dirty_write.contains(&acc.buffer) {
+                    dirty_read.insert(acc.buffer);
                 }
             }
         }
