@@ -295,6 +295,11 @@ structurally and never parity-claimed here.
   timestamp query handling, not something this pass's own wall-clock +
   dispatch-count evidence (which was clean and consistent both times)
   depends on. Recorded here rather than silently worked around.
+  **Resolved**: `kernel-performance.md` M6.6 - the "Vulkan backend" naming
+  above was imprecise; it is `backend-wgpu`'s own deferred timestamp-query
+  path (not `backend-vulkan`'s), root-caused and fixed there (`fold_ticks`),
+  with a distinct, more serious `backend-vulkan` `ERROR_DEVICE_LOST` crash
+  found alongside it and filed separately, unattempted.
 
 - [x] M14: int8 (DP4A) weight tier. Unlike qwen35moe's own `q8.rs` (a
   bespoke, model-owned quantizer), this model dispatches every one of its 12

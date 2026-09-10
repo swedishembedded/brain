@@ -672,9 +672,32 @@ impl DeviceShared {
                 // Read off the DEVICE, not off a flag threaded down from the
                 // adapter: `new_like` compiles a second kernel set onto the same
                 // device and must reach the same conclusion.
+                //
+                // **Killed hypothesis (M6.6)**: gating this off for Intel
+                // (vendor 0x8086), on the theory that `flush_timed`'s mid-pass
+                // `write_timestamp` calls (with no barrier between them) were
+                // the specific thing this workspace's Intel Arc (Meteor Lake,
+                // Xe-LPG) iGPU drops writes from - `resolve_ticks`'s
+                // `ticks[i]==0` sentinel caught scattered mid-batch instances
+                // of that, e.g. 3 of 76 in one GDN-layer pass, root-caused via
+                // `qwen35_bench all 128 1`. Routing Intel onto `flush_profiled`
+                // instead broke `tests/kernel_timing.rs`'s async-flush
+                // contract (`flush_profiled` is a submit+map_async+read PER
+                // CHUNK, i.e. fully synchronous - its own doc already says
+                // so), AND `flush_profiled` turned out to have the identical
+                // class of defect anyway (dispatch 0 of every chunk,
+                // deterministically, 8/8 repeated runs). So this device's two
+                // timestamp mechanisms are not "one broken, one safe" - both
+                // are unreliable on this driver, and only `fold_ticks` (used
+                // by both `resolve_ticks` and `flush_profiled`'s own fold, see
+                // their comments) actually fixes it, by discarding a corrupted
+                // batch rather than folding it, regardless of which mechanism
+                // produced it. Left vendor-agnostic, reading the device
+                // feature directly, as it always was.
                 inside_passes: device
                     .features()
                     .contains(wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES),
+                unavailable_ticks: std::sync::atomic::AtomicU64::new(0),
                 on: std::sync::atomic::AtomicBool::new(
                     backend_api::profile_enabled(),
                 ),
@@ -997,6 +1020,90 @@ struct PendingTicks {
 #[cfg(not(target_arch = "wasm32"))]
 const MAX_PENDING_TICK_BATCHES: usize = 256;
 
+/// A sanity ceiling on a single dispatch's device time, used to detect a
+/// corrupted timestamp-query readback rather than fold it into the
+/// accumulator as a real (and wildly wrong) number.
+///
+/// Root-caused on this workspace's Intel Arc (Meteor Lake, Xe-LPG) iGPU via
+/// `qwen35_bench`: BOTH `flush_timed`'s mid-pass `write_timestamp` calls AND
+/// `flush_profiled`'s per-dispatch begin/end-of-pass writes intermittently
+/// resolve a wrong tick pair for one dispatch out of dozens - sometimes an
+/// unwritten query reading back as 0 (caught separately, see `ticks[i]==0`
+/// below), sometimes a tick that is simply wrong by 3-9 orders of magnitude
+/// with NEITHER side reading 0 (a single `scale_row` call folding to
+/// 55487 ms, or one `matmul` to 1.16e6 ms, in single-kernel-kind
+/// reproductions - this is the actual mechanism behind an earlier session's
+/// already-recorded "device timestamps ... ~1.5e15 ms" observation on this
+/// same model/hardware, previously left unchased). No real dispatch in this
+/// engine's own measured history (all sub-100ms per call even for the
+/// heaviest real matmuls) comes remotely close to this - a genuine
+/// multi-second single dispatch would itself be a separate, worse defect
+/// worth its own investigation, not a number to report as this pass's per-
+/// kernel time. 2000ms is deliberately generous: it must never reject a real
+/// slow dispatch, only the multi-order-of-magnitude driver glitch (M6.6).
+pub const IMPLAUSIBLE_DISPATCH_MS: f64 = 2000.0;
+
+/// Fold one batch's bracketing `ticks` into `acc`, keyed by `kinds[i]` for
+/// `ticks[base+i*stride]..ticks[base+i*stride+span]`. Shared by
+/// `flush_timed` (`stride=1, span=1, base=0`, ticks[i]/ticks[i+1] bracket
+/// dispatch i) and `flush_profiled` (`stride=2, span=1, base=0`, ticks[2i]/
+/// ticks[2i+1] bracket dispatch i, from `ComputePassTimestampWrites`).
+///
+/// Whole-BATCH, not per-entry: one implausible pair in a batch is evidence
+/// the timestamp queries for the WHOLE batch cannot be trusted, on the same
+/// driver, same submission - a neighbouring entry that happens to look
+/// plausible is not proof it is correct, only proof it did not trip this
+/// particular ceiling. Discarding only the one bad entry would silently keep
+/// folding numbers this box has already shown it cannot vouch for.
+///
+/// **Killed hypothesis**: routing this box's vendor (Intel) off
+/// `flush_timed` and onto `flush_profiled`, on the theory that the mid-pass
+/// `write_timestamp` mechanism specifically was the unreliable one. It
+/// was not, uniquely - `flush_profiled`'s begin/end-of-pass mechanism turned
+/// out to drop dispatch 0's write deterministically (8/8 repeated runs), and
+/// routing away from `flush_timed` broke `tests/kernel_timing.rs`'s
+/// async-flush contract (`flush_profiled` is fully synchronous per chunk, by
+/// its own doc). This function is the actual fix, used by both paths,
+/// leaving `inside_passes` reading the device feature exactly as before.
+fn fold_ticks(
+    acc: &mut [(f64, u64)],
+    unavailable: &std::sync::atomic::AtomicU64,
+    kinds: &[usize],
+    lo: impl Fn(usize) -> u64,
+    hi: impl Fn(usize) -> u64,
+    period_ns: f32,
+) {
+    let mut deltas: Vec<(usize, f64)> = Vec::with_capacity(kinds.len());
+    for (i, &kind) in kinds.iter().enumerate() {
+        let (a, b) = (lo(i), hi(i));
+        if a == 0 || b == 0 {
+            unavailable.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            eprintln!(
+                "brain: timestamp query unavailable (unwritten) for dispatch {i} of {} - discarding this batch's {} pair(s) rather than folding a corrupted delta",
+                kinds.len(),
+                kinds.len()
+            );
+            return;
+        }
+        let dt_ns = b.saturating_sub(a);
+        let dt_ms = dt_ns as f64 * period_ns as f64 / 1e6;
+        if dt_ms > IMPLAUSIBLE_DISPATCH_MS {
+            unavailable.fetch_add(kinds.len() as u64, std::sync::atomic::Ordering::Relaxed);
+            eprintln!(
+                "brain: implausible device time {dt_ms:.1} ms for one dispatch (kind index {kind}) - discarding this whole {}-dispatch batch's timing as a corrupted timestamp-query readback, not a real number (M6.6)",
+                kinds.len()
+            );
+            return;
+        }
+        deltas.push((kind, dt_ms));
+    }
+    for (kind, dt_ms) in deltas {
+        let e = &mut acc[kind];
+        e.0 += dt_ms;
+        e.1 += 1;
+    }
+}
+
 /// Per-kernel GPU-time accumulator for the `BRAIN_PROFILE` timestamp path.
 #[cfg(not(target_arch = "wasm32"))]
 struct GpuProfile {
@@ -1009,8 +1116,18 @@ struct GpuProfile {
     /// [`WgpuBackend::resolve_ticks`] for why the readback is deferred at all.
     pending: std::sync::Mutex<Vec<PendingTicks>>,
     /// The device can write timestamps between dispatches INSIDE one compute
-    /// pass, so the production single-pass flush can be timed as-is.
+    /// pass, so the production single-pass flush can be timed as-is. Read
+    /// straight off the device feature - see `Self::compile`'s own comment
+    /// for the killed hypothesis of gating this per-vendor (M6.6): both this
+    /// path and the `false` fallback (`flush_profiled`) turned out equally
+    /// unreliable on this workspace's Intel iGPU, so `fold_ticks` is what
+    /// actually protects the accumulator, not this flag.
     inside_passes: bool,
+    /// Timestamp pairs `resolve_ticks` discarded because one side never
+    /// resolved above 0 (an unwritten query, not a real 0ns device time) -
+    /// surfaced by `dump_profile`/`kernel_times` so a corrupted pass reads as
+    /// "N samples missing", never as a silently wrong total (M6.6).
+    unavailable_ticks: std::sync::atomic::AtomicU64,
     /// Whether flushes currently accumulate timings. Off unless BRAIN_PROFILE
     /// asked, or a profiler called `set_kernel_timing(true)`.
     on: std::sync::atomic::AtomicBool,
@@ -1934,6 +2051,7 @@ impl WgpuBackend {
         if batches.is_empty() {
             return;
         }
+        let before_unavailable = p.unavailable_ticks.load(std::sync::atomic::Ordering::Relaxed);
         let waits: Vec<_> = batches
             .iter()
             .map(|b| {
@@ -1992,14 +2110,25 @@ impl WgpuBackend {
                 // the DESTINATION instead (`&mut [u64]` viewed as bytes) is
                 // alignment-safe by construction and copies the same bytes.
                 let ticks = copy_pod_from_bytes::<u64>(&view);
-                for (i, kind) in b.kinds.iter().enumerate() {
-                    let dt = ticks[i + 1].saturating_sub(ticks[i]);
-                    let e = &mut acc[*kind];
-                    e.0 += dt as f64 * p.period_ns as f64 / 1e6;
-                    e.1 += 1;
-                }
+                // `flush_timed`'s single compute-pass path issues one
+                // `write_timestamp` per dispatch with no barrier between
+                // them; on this workspace's Intel ANV/Mesa iGPU that
+                // intermittently resolves a wrong tick pair for one dispatch
+                // out of dozens - root-caused via `qwen35_bench all`, see
+                // `fold_ticks`'s own doc for the full story (including the
+                // killed hypothesis of routing Intel off this path entirely).
+                // `fold_ticks` is the actual fix, shared with `flush_profiled`
+                // below for whichever driver hits the same class of bug there
+                // too (M6.6, `kernel-performance.md`).
+                fold_ticks(&mut acc, &p.unavailable_ticks, &b.kinds, |i| ticks[i], |i| ticks[i + 1], p.period_ns);
             }
             b.staging.unmap();
+        }
+        let skipped = p.unavailable_ticks.load(std::sync::atomic::Ordering::Relaxed) - before_unavailable;
+        if skipped > 0 {
+            eprintln!(
+                "brain: {skipped} timestamp reading(s) unavailable/implausible this resolve - discarded rather than folded as a corrupted delta, so the per-kernel profile is undercounting by that many calls (see fold_ticks's own comment)"
+            );
         }
     }
 
@@ -2016,6 +2145,22 @@ impl WgpuBackend {
         // Chunked to stay comfortably under the per-query-set limit (8192).
         for chunk in steps.chunks(2048) {
             let n = chunk.len() as u32;
+            // On this workspace's Intel ANV/Mesa iGPU, dispatch 0's own
+            // begin-of-pass write in THIS chunk's `QuerySet` consistently
+            // resolves as unwritten (`fold_ticks`'s `ticks[i]==0` guard below
+            // catches it every single time, never dispatch 1+ - confirmed
+            // over 5 repeated `qwen35_bench all` runs). **Killed hypothesis**:
+            // a disposable warm-up pass writing a throwaway query index
+            // BEFORE the real per-dispatch loop, on the theory that "the
+            // first write in this submission" was the unreliable one - it
+            // was not: the failure stayed pinned to real dispatch 0 even
+            // with the warm-up pass first, so whatever this driver does
+            // wrong is not "first write in the command buffer", and no
+            // further guess was spent chasing the exact mechanism. The
+            // `fold_ticks` whole-batch discard below is the actual fix: it
+            // has caught 100% of these across every run, so this device's
+            // per-kernel breakdown is honestly "unavailable" rather than
+            // silently wrong (M6.6, `kernel-performance.md`).
             let qs = self.device().create_query_set(&wgpu::QuerySetDescriptor {
                 label: Some("brain-profile"),
                 ty: wgpu::QueryType::Timestamp,
@@ -2078,11 +2223,22 @@ impl WgpuBackend {
             staging.unmap();
 
             let mut acc = p.acc.lock().unwrap_or_else(|e| e.into_inner());
-            for (i, (kind, ..)) in chunk.iter().enumerate() {
-                let dt = ticks[2 * i + 1].saturating_sub(ticks[2 * i]);
-                let e = &mut acc[*kind];
-                e.0 += dt as f64 * p.period_ns as f64 / 1e6;
-                e.1 += 1;
+            // Same `fold_ticks` backstop `resolve_ticks` uses - see its own
+            // doc. Root-caused via `qwen35_bench`: even this per-dispatch
+            // begin/end-of-pass mechanism (the standard `TIMESTAMP_QUERY`
+            // API, not `flush_timed`'s mid-pass writes) intermittently
+            // resolved an implausible delta for one dispatch on this
+            // workspace's Intel iGPU, with neither side reading exactly 0 -
+            // the reason `fold_ticks` also carries an implausible-magnitude
+            // check, not only the unwritten-query one (M6.6).
+            let kinds: Vec<usize> = chunk.iter().map(|(kind, ..)| *kind).collect();
+            let before = p.unavailable_ticks.load(std::sync::atomic::Ordering::Relaxed);
+            fold_ticks(&mut acc, &p.unavailable_ticks, &kinds, |i| ticks[2 * i], |i| ticks[2 * i + 1], p.period_ns);
+            let skipped = p.unavailable_ticks.load(std::sync::atomic::Ordering::Relaxed) - before;
+            if skipped > 0 {
+                eprintln!(
+                    "brain: {skipped} timestamp reading(s) unavailable/implausible this profiled flush - discarded rather than folded as a corrupted delta (see fold_ticks's own comment)"
+                );
             }
         }
     }
@@ -2586,6 +2742,7 @@ impl Backend for WgpuBackend {
             // fresh window they do not belong to.
             p.pending.lock().unwrap_or_else(|e| e.into_inner()).clear();
             p.acc.lock().unwrap_or_else(|e| e.into_inner()).iter_mut().for_each(|e| *e = (0.0, 0));
+            p.unavailable_ticks.store(0, std::sync::atomic::Ordering::Relaxed);
         }
     }
 

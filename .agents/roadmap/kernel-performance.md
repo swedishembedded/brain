@@ -3373,6 +3373,119 @@ per context) with no change to dispatch, barrier or submission logic, so no
 finite-difference/bit-identity claim applies here beyond "existing suites
 stay green," which they do. **Commit**: one.
 
+### M6.6 - `backend-wgpu`'s device timestamp queries corrupt a number instead of losing it; `fold_ticks` discards a bad batch instead of folding it
+
+Opens where the pasted external audit that triggered this session's re-derivation
+of the campaign named a P0: `.agents/roadmap/qwen35.md`'s M13 entry recorded
+`gpu.kernel_times()` returning zeros on the first two `report()` calls in one
+process, then a corrupted `~1.5e15 ms` on the third, "noted but not chased
+down." The audit assumed the native `backend-vulkan` (ash) query pool was the
+culprit; re-deriving from scratch against this box (Intel Arc, Meteor Lake
+Xe-LPG, the same iGPU M13 measured on) found the opposite: `backend-vulkan`
+alone is fine (`qwen35_bench gdn 128` survives repeatedly), the corruption is
+in `backend-wgpu`'s own deferred timestamp-query path, and it is worse than
+one bad number - a chained `qwen35_bench all 128` run **crashes the native
+Vulkan backend with `ERROR_DEVICE_LOST`** on the second `report()` call, a
+distinct and more serious defect out of this milestone's scope, filed
+separately below.
+
+**Root cause, reproduced 8/8 times with a real Qwen3.5 GDN-layer forward**
+(`qwen35_bench all 128 3`, `BRAIN_DEVICE=gpu`): `resolve_ticks`'s resolved
+`ticks[i]` reads exactly 0 - the reset-but-never-written sentinel - for
+scattered mid-batch dispatch indices (e.g. 2 of 76 in one GDN pass), and
+separately a `ticks[i+1]` reads a value simply wrong by 3-9 orders of
+magnitude with **neither** side reading 0 (one `scale_row` call folded to
+55487 ms, one `matmul` call to 1.16e6 ms in isolated single-kernel-kind
+reproductions - this IS the mechanism behind M13's "~1.5e15 ms"). Both
+`flush_timed` (the single-pass, `TIMESTAMP_QUERY_INSIDE_PASSES` production
+path) and `flush_profiled` (the per-dispatch begin/end-of-pass fallback) hit
+it independently - this driver's timestamp queries are unreliable through
+either wgpu mechanism, not a defect specific to one.
+
+**Killed hypothesis**: routing this box's vendor (Intel, 0x8086) off
+`flush_timed` and onto `flush_profiled`, on the theory that mid-pass
+`write_timestamp` calls with no barrier between them were the specific
+unreliable thing. They were not, uniquely: `flush_profiled` turned out to
+drop dispatch 0's write deterministically (8/8 repeated runs), and routing
+away from `flush_timed` broke `tests/kernel_timing.rs`'s async-flush
+contract (`flush_profiled` is fully synchronous per chunk, by its own doc) -
+`a_timed_flush_returns_before_the_device_has_finished` and
+`dropping_a_shared_handle_does_not_wait_for_the_device` both failed the
+moment the gate landed. A second killed hypothesis inside `flush_profiled`
+itself: priming a fresh `QuerySet` with one disposable warm-up write before
+the real per-dispatch loop, on the theory that "the first write in this
+submission" was what failed - the corruption stayed pinned to real dispatch
+0 even with the warm-up pass first, so whatever this driver does wrong is
+not simply "first write," and no further guess was spent chasing the exact
+mechanism. Both attempts reverted; `inside_passes` reads the device feature
+exactly as it always did.
+
+**The actual fix**: `fold_ticks` (`crates/backend-wgpu/src/lib.rs`), shared
+by both `resolve_ticks` and `flush_profiled`'s own fold. Two checks, WHOLE-
+BATCH not per-entry: `ticks[i]==0` (the unwritten-query sentinel) and
+`dt_ms > IMPLAUSIBLE_DISPATCH_MS` (2000ms - deliberately generous; no real
+dispatch in this engine's own measured history comes remotely close, a
+genuine multi-second single dispatch would be a separate, worse defect worth
+its own investigation). Either trips, the WHOLE batch is discarded and
+`unavailable_ticks` counts it, loudly (`eprintln!`), rather than one bad
+entry being dropped while neighbours that happen to look plausible are kept
+- a neighbour looking fine is not proof it is correct, only proof it did not
+trip this particular ceiling, on the same driver, same submission that just
+proved it cannot be trusted.
+
+**A real, pre-existing test assumption this exposed as false, not something
+this milestone broke**: `deferring_the_timestamp_readback_loses_no_dispatch`
+asserted "every dispatch always reaches the table," which held only because
+the pre-fix code folded a corrupted delta as if it were real, keeping the
+call count intact while the VALUE was silently wrong. Rewritten to check what
+is actually guaranteed now - the deferral mechanism never drops a batch's
+`pending` entry before folding it, `fold_ticks` is all-or-nothing per batch
+(so a surviving count is always a whole multiple of `PER_FLUSH`, never
+partial), and a run where hardware corruption happens to claim every batch is
+a soft skip, not a failure (observed in practice, not hypothetical).
+
+**New test**: `a_corrupted_timestamp_readback_is_discarded_not_reported`
+(`crates/backend-wgpu/tests/kernel_timing.rs`) drives several separate small
+flushes of `axpy` and asserts every `kernel_times()` row stays under
+`IMPLAUSIBLE_DISPATCH_MS` per call - a real device test, not a synthetic
+unit test of `fold_ticks` in isolation, because the corruption needs real
+driver state to reproduce and a pure-function test of the arithmetic alone
+would not have caught the actual defect. **Mutation-verified per this
+ledger's own F.8**: with both `fold_ticks` checks disabled, `qwen35_bench
+all 128 3` re-produced the corrupted `matmul` number immediately
+(2188970.79 ms/16 calls); restoring the checks removed it, repeatably. The
+small in-process repro (`a_corrupted_timestamp_readback_is_discarded_not_
+reported`, `deferring_the_timestamp_readback_loses_no_dispatch`) did not
+reliably re-trigger the defect on demand with the checks disabled - this
+box's own `probe.md` already documents why (thermal state and concurrent-
+process contention moving a reading several-fold between runs seconds
+apart) - so the mutation proof rests on the model-level harness, recorded
+honestly rather than claimed from a test that did not actually demonstrate it.
+
+**Verified**: `cargo test --release -p brain-backend-wgpu --test
+kernel_timing` (4/4, including the two async-contract tests the reverted
+Intel gate had broken), `--lib --bins --tests` for the whole crate, green,
+run repeatedly (6+ times) to confirm no flake either direction. `cargo
+clippy -p brain-backend-wgpu --all-targets --all-features -- -D warnings`
+clean (which required fixing an unrelated pre-existing doc-indentation lint
+in `crates/modelstore/src/inventory.rs` blocking the gate via a transitive
+dependency - two lines, no behaviour change, fixed on the spot per this
+repo's own standing rule). `qwen35_bench all 128 3` run 10+ times
+post-fix: zero corrupted numbers, every discard reported loudly. A
+pre-existing, box-noise-driven flake in `crates/gpu-core/tests/roofline.rs`
+(`measuring_twice_agrees`) was investigated and confirmed unrelated -
+reproduces identically on unmodified `main` via `git stash`, matching this
+campaign's own already-documented thermal-drift caveat, not a regression
+from this milestone.
+
+**Filed separately, not attempted here**: the native `backend-vulkan`
+`ERROR_DEVICE_LOST` crash on a chained `qwen35_bench all 128` run
+(reproduces on GQA alone, first call, no cross-call state needed) - a
+correctness/stability defect, plausibly worse than a wrong profiling number,
+and out of this milestone's scope.
+
+**Commit**: one.
+
 ### M7.1 - Phase 7 opens: `DataParallel::adamw_step` bucketed into one transfer per replica per direction
 
 Phase 7 (distributed) had zero milestones before this one. Scoped to the
@@ -5356,7 +5469,11 @@ entry above records why it does not transfer to `backend-wgpu`), asynchronous
 submission (M6.2), graph capture/replay (M6.3), plus a fourth close-out this
 session did not originally carry a number for but landed anyway - the
 persisted `VkPipelineCache` (M6.5 above; F2 warm-start parity with
-`backend-wgpu`'s already-existing `PlCache`). The outline's fourth item, **a
+`backend-wgpu`'s already-existing `PlCache`), plus a fifth item this phase's
+own outline never named but a fresh re-derivation of the campaign surfaced:
+`backend-wgpu`'s device-timestamp-query corruption (M6.6 above, `fold_ticks`)
+- fixed, with a native `backend-vulkan` `ERROR_DEVICE_LOST` crash found
+alongside it and filed separately, unattempted. The outline's fourth item, **a
 multi-tensor optimizer, remains open** - the one Phase-6 item nothing has
 been built for. Not attempted this session, on purpose: `crates/optim/
 src/lib.rs`'s own module doc already gives the honest reason. The optimizer

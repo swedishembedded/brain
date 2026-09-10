@@ -421,8 +421,8 @@ fn shard_filenames(dir: &Path) -> Vec<String> {
 /// `dir` holding a `brain.manifest.json` compound manifest: one record per
 /// declared role path (file or directory), tagged [`ArtifactKind::Compound`]
 /// - the manifest is a complete description of what lives in this directory
-/// on its own, so it REPLACES the generic per-file walk here rather than
-/// supplementing it (same shape as [`hfdir_record`]'s collapse-and-stop).
+///   on its own, so it REPLACES the generic per-file walk here rather than
+///   supplementing it (same shape as [`hfdir_record`]'s collapse-and-stop).
 ///
 /// `None` when `dir` carries no manifest at all, so the caller falls through
 /// to the ordinary walk exactly as before this existed. A role path that is
