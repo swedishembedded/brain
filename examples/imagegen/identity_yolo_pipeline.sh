@@ -164,9 +164,12 @@ serve_for() {
   local want="$1"
   [ "$SERVE_BACKEND" = "$want" ] && return 0
   stop_serve; rm -f "$SERVE_READY"
-  # --reserve-gb 1: PuLID's ~22 GiB estimate leaves no headroom under the
-  # default 2 GiB reserve on a 24 GiB card.
-  "$BRAIN" serve --dbus --reserve-gb 1 --ready-file "$SERVE_READY" > "$SERVE_LOG" 2>&1 &
+  # --reserve-gb 1 (PuLID's ~22 GiB resident estimate against a 24 GiB card)
+  # reproducibly OOM'd on a fully idle card: real peak usage during a
+  # generation - staging buffers, upload/download scratch - exceeds the
+  # steady-state resident figure the estimate is measured from. 3 GiB of
+  # headroom is what stopped it in practice on this hardware.
+  "$BRAIN" serve --dbus --reserve-gb "${SERVE_RESERVE_GB:-3}" --ready-file "$SERVE_READY" > "$SERVE_LOG" 2>&1 &
   SERVE_PID=$!
   for _ in $(seq 1 300); do
     [ -e "$SERVE_READY" ] && break
