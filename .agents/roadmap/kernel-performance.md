@@ -1835,6 +1835,57 @@ qwen3::serve (M4.3)` (the new kernel, `Engine::rms_quant`, the two
 `run_batched_steps` call-site rewrites, and the bit-identity test), this
 ledger entry.
 
+### M4.4 - Speculative decoding's verify loop stops shipping a full `[vocab]` block to the host per row
+
+`Engine::spec_decode`'s verify loop picked the target's greedy token for
+each proposed row (plus the bonus row) via `Self::argmax(&self.logits(&hidden
+[row]))` - `logits()` runs the head matmul, then reads back the WHOLE
+`[vocab]` logits row to the host (`self.gpu.read(&self.logits_dev, v)`), just
+to argmax it back down to one token id on the host. Up to `k+1` full-vocab
+PCIe/host round trips per accepted draft window, on what is meant to be the
+hot path speculative decoding exists to make fast.
+
+`admit_greedy` already exists in the same file, already used by admission
+elsewhere, doing the identical greedy pick entirely on the device (same head
+matmul via `head_steps`, then `submit_greedy_head`'s on-device argmax
+reduction into `argmax_dev`, read back as exactly ONE `u32` per call via
+`greedy_from_hidden`'s `self.gpu.read(&self.argmax_dev, bsz)` at `bsz=1`) -
+this was a wiring gap, not new kernel work: the two call sites in the verify
+loop now call `self.admit_greedy(&hidden[row*d..(row+1)*d])` instead of
+`Self::argmax(&self.logits(...))`. `Self::argmax`/`logits()` are unchanged
+and still used by `generate_greedy` (a different, non-speculative path, out
+of this milestone's narrower scope).
+
+**Correctness**: `spec_decode_matches_greedy` (already in the tree,
+unmodified) - `assert_eq!(out_oracle, greedy)` and `assert_eq!(out_bad,
+greedy)`, bit-identical token ids against plain greedy decode, at both an
+oracle draft (all proposals accepted) and a bad draft (mostly rejected, so
+the correction path - the same `admit_greedy` call, different branch - is
+exercised too), at both `kv_int8` states. Green, unchanged pass/fail shape
+from before this change (the test does not care which mechanism produces the
+greedy pick, only that it agrees with `generate_greedy`).
+
+**The readback this removes, read from the source rather than guessed**:
+`greedy_from_hidden` reads back `bsz` floats: exactly 1 per call at `bsz=1`.
+`logits()` reads back `v` floats - `cfg.vocab`, tens of thousands to ~150k
+on a real checkpoint. Per accepted verify window this is a reduction from
+`O((k+1)*vocab)` to `O(k+1)` floats crossing the host/device boundary.
+
+`cargo test -p brain-qwen3 --lib` green (137/140; the 3 pre-existing
+failures - `head_matmul_over_binding_cap_does_not_panic`,
+`head_matmul_tiled_matches_untiled_within_tolerance`,
+`embed_step_survives_a_vocab_table_that_exceeds_one_storage_binding` -
+reproduce identically on unmodified `main`, confirmed via `git stash`: this
+box's `max_buffer_size` (2047 MiB) is smaller than the >2 GiB buffers those
+tests deliberately probe, unrelated to this change). `cargo clippy -p
+brain-qwen3 --all-targets --all-features -- -D warnings` clean, which
+required fixing an unrelated pre-existing doc-indentation lint in
+`crates/model/src/block.rs` blocking the gate via a transitive dependency -
+three lines, no behaviour change, the same class of fix M6.6's entry already
+made once this session.
+
+**Commit**: one.
+
 ### M5.7 - Reductions/losses/router family: two real defects fixed (`ce_grad` in `arcface`, `router_gate_sigmoid`'s expert-count cap), one occupancy fix (`bias_grad`), the rest checked
 
 The table's "19 + 5 @opt-2" count for this family does not resolve against

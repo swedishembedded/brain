@@ -2244,9 +2244,9 @@ pub fn gemm_variant(v: GemmVariants, m: u32, n: u32) -> (usize, u32) {
 /// capability at RECORD time, never at dispatch time, is what keeps a
 /// build's kernel selection from silently changing between backends mid-run
 /// - the same discipline this workspace already applies for correctness
-/// (a workgroup-barrier reduction with no barrier-free sibling can otherwise
-/// return a silently wrong result on exactly one backend); it applies to a
-/// throughput choice for the same reason.
+///   (a workgroup-barrier reduction with no barrier-free sibling can otherwise
+///   return a silently wrong result on exactly one backend); it applies to a
+///   throughput choice for the same reason.
 ///
 /// Returning an `Option` rather than a whole tier decision is deliberate: a
 /// caller adopting the GEMV keeps its existing selection for every other

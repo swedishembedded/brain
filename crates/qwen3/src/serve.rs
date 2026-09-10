@@ -2743,11 +2743,20 @@ impl Engine {
 
             // hidden[j] gives the target distribution that should have produced
             // props[j]; accept while it matches, else take the target's own token.
+            //
+            // `admit_greedy`, not `argmax(logits(...))`: identical greedy pick
+            // (same head matmul, same argmax reduction - `admit_greedy`'s own
+            // doc), but entirely on the device. The verify loop used to ship a
+            // full `[vocab]` block to the host per row just to argmax it back
+            // down to one token id, once per proposed row PLUS the bonus row -
+            // a real per-token PCIe/host round-trip on a hot serving path, and
+            // exactly the primitive `admit_greedy` already exists to avoid
+            // (M4.4, `kernel-performance.md`).
             let mut accepted = 0usize;
             let correction;
             loop {
                 if accepted < kk as usize {
-                    let pred = Self::argmax(&self.logits(&hidden[accepted * d..(accepted + 1) * d]));
+                    let pred = self.admit_greedy(&hidden[accepted * d..(accepted + 1) * d]);
                     if pred == props[accepted] {
                         accepted += 1;
                         continue;
@@ -2756,7 +2765,7 @@ impl Engine {
                     break;
                 }
                 // All drafts accepted → the bonus token from the last position.
-                correction = Self::argmax(&self.logits(&hidden[kk as usize * d..(kk as usize + 1) * d]));
+                correction = self.admit_greedy(&hidden[kk as usize * d..(kk as usize + 1) * d]);
                 break;
             }
             for prop in props.iter().take(accepted) {
