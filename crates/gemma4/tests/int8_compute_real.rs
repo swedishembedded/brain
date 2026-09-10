@@ -120,13 +120,23 @@ fn real_q8_0_layer_int8_compute_matches_fp32_on_both_attention_types() {
             gemma4::LayerType::Full => &full_rope,
         };
 
-        let f32_layer = Gemma4Layer::on(gpu.share(), &cfg, &tensors, l, Precision::Fp32);
-        let (out_f32, attn_f32) = f32_layer.forward(&x, rope, t as u32);
-        drop(f32_layer);
+        // Each layer is a `gpu_core::Transient`, so its weights are reclaimed
+        // as it goes out of scope - the two tiers are deliberately built one
+        // after the other rather than side by side, since only one of them is
+        // needed at a time here.
+        let out_f32;
+        let attn_f32;
+        {
+            let f32_layer = Gemma4Layer::on(&gpu, &cfg, &tensors, l, Precision::Fp32);
+            (out_f32, attn_f32) = f32_layer.forward(&x, rope, t as u32);
+        }
 
-        let i8_layer = Gemma4Layer::on(gpu.share(), &cfg, &tensors, l, Precision::Int8);
-        let (out_i8, attn_i8) = i8_layer.forward(&x, rope, t as u32);
-        drop(i8_layer);
+        let out_i8;
+        let attn_i8;
+        {
+            let i8_layer = Gemma4Layer::on(&gpu, &cfg, &tensors, l, Precision::Int8);
+            (out_i8, attn_i8) = i8_layer.forward(&x, rope, t as u32);
+        }
 
         let (cos_out, rel_out) = cosine_and_rel_l2(&out_f32, &out_i8);
         let (cos_attn, rel_attn) = cosine_and_rel_l2(&attn_f32, &attn_i8);

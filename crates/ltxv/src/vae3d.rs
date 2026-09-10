@@ -60,7 +60,7 @@
 //!   `ltx_core`'s own docstring on `VideoEncoder.forward`), so this crate's
 //!   forward (mean only, no learned variance branch) is identical either way.
 
-use gpu_core::{DeviceBuffer, Gpu, Step};
+use gpu_core::{reclaiming, DeviceBuffer, Gpu, Step};
 use vae::blocks::Tensors;
 use vae::blocks3d::{Builder3d, Conv3d, DeviceWeights, T3, KERNELS};
 
@@ -1046,7 +1046,19 @@ impl<'a> LtxVaeTiledDecoder<'a> {
             // that half happens implicitly at a scope end where, by default,
             // nothing is measuring it.
             let t = std::time::Instant::now();
-            drop(dec);
+            match &shared_gpu {
+                // A shared device outlives this graph, so dropping the graph
+                // is only half the release: the bytes stay pending until the
+                // device is told the GPU is done with them, and that has to
+                // happen AFTER the drop, never before it (see
+                // `gpu_core::transient`). The next shape allocates
+                // immediately after this line.
+                Some(g) => reclaiming(g, || drop(dec)),
+                // A graph on a device of its own: the teardown that drops the
+                // device frees everything on it, so there is nothing left
+                // pending to reclaim.
+                None => drop(dec),
+            }
             gpu_core::profile::stage_time("ltxv vae tiled: graph drop (device teardown)", t);
         }
         let t = std::time::Instant::now();

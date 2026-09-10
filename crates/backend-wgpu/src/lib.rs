@@ -2340,18 +2340,43 @@ impl WgpuBackend {
     /// a real allocation fails with a generic, unlocalized "wgpu error: Out
     /// of Memory" hours into a run (see [`Self::pending_reclaim_bytes`]'s
     /// own doc for the real incidents this reproduces).
+    ///
+    /// `BRAIN_GPU_RECLAIM_CEILING` overrides the threshold (bytes) - the only
+    /// way to cross it without allocating gigabytes, which is what
+    /// `gpu_core::transient`'s own regression tests need. Production never
+    /// sets it; see `backend_api::hardware::reclaim_ceiling`.
     fn track(&self, buf: wgpu::Buffer) -> TrackedBuffer {
         let pending = self.shared.pending_reclaim_bytes.load(std::sync::atomic::Ordering::Relaxed);
-        let ceiling = self.device().limits().max_buffer_size;
+        let ceiling = self.reclaim_ceiling();
         assert!(
             pending <= ceiling,
             "brain gpu: {pending} bytes of device buffers were dropped without an intervening \
              poll_wait() (more than this device's own single-buffer ceiling of {ceiling} bytes). \
-             A loop that allocates fresh device buffers every iteration must call `poll_wait()` \
-             (or reuse buffers across iterations instead of allocating fresh ones) at least once \
-             per iteration - not only after the whole loop. See `WgpuBackend::poll_wait`'s own doc."
+             A loop that allocates fresh device buffers every iteration must reclaim them once \
+             per iteration - not only after the whole loop. Do NOT hand-write `poll_wait()` into \
+             the loop body: polling before the iteration's object is dropped reclaims nothing. \
+             Build the object through `gpu_core::Transient` (or wrap the body in \
+             `gpu_core::reclaiming`), which drops first and polls after."
         );
         TrackedBuffer { buf, pending: self.shared.pending_reclaim_bytes.clone() }
+    }
+
+    /// The [`Self::track`] threshold: this device's own single-buffer ceiling
+    /// unless `BRAIN_GPU_RECLAIM_CEILING` overrides it (tests only - see
+    /// `backend_api::hardware::reclaim_ceiling`, which does the one parse and
+    /// resolves it once per process, so this stays a plain load per
+    /// allocation).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn reclaim_ceiling(&self) -> u64 {
+        backend_api::hardware::reclaim_ceiling(self.device().limits().max_buffer_size)
+    }
+
+    /// [`Self::reclaim_ceiling`] in the browser, where `backend_api::hardware`
+    /// (a native-only module: it is about process-level device serialisation)
+    /// does not exist and there is no environment to read.
+    #[cfg(target_arch = "wasm32")]
+    fn reclaim_ceiling(&self) -> u64 {
+        self.device().limits().max_buffer_size
     }
 
     pub fn storage(&self, n: u64) -> TrackedBuffer {
@@ -2917,6 +2942,9 @@ impl Backend for WgpuBackend {
     fn flush(&self) {
         // Submit the accumulated compute pass; no wait - the point is overlap.
         WgpuBackend::flush(self);
+    }
+    fn pending_reclaim_bytes(&self) -> u64 {
+        self.shared.pending_reclaim_bytes.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 

@@ -361,15 +361,19 @@ fn run_layers(
             Pass::Decode { cache, pos } => layer_decode_step(g, cfg, &weights, &cache.layer(l), h, cos, sin, *pos, cache.cap, None),
         };
         // Replace the residual BEFORE the streamed weights are dropped, then
-        // force the submit+wait that lets the card actually reclaim them. Both
-        // halves are load-bearing: dropping without draining is exactly the
-        // unbounded accumulation that OOM'd a 24 GB card.
+        // reclaim them. Both halves are load-bearing: dropping without
+        // reclaiming is exactly the unbounded accumulation that OOM'd a 24 GB
+        // card, and reclaiming without dropping first hands back nothing at
+        // all (`gpu_core::transient`) - which is why the drop lives inside the
+        // closure and the reclaim after it, rather than as two statements
+        // whose order a later edit can quietly swap.
         let (cd, _, cos, sin) = cur.take().expect("a device is selected by now");
         cur = Some((cd, out, cos, sin));
-        if let Some((layer, mut up)) = streamed {
-            drop(layer);
-            let (_, h, ..) = cur.as_ref().expect("just set");
-            up.drain(h);
+        if let Some((layer, up)) = streamed {
+            gpu_core::reclaiming(g, || {
+                drop(layer);
+                drop(up);
+            });
         }
     }
 

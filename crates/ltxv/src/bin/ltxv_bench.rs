@@ -133,7 +133,7 @@ fn bench_dit(reps: usize, layers: u32, t: u32, ctx_len: u32) {
 
     let gpu = Gpu::open(Some("gpu"), &KERNELS);
     let t0 = Instant::now();
-    let blk = LtxBlock::on(gpu.share(), &cfg, &weights, "transformer_blocks.0", t, ctx_len);
+    let blk = LtxBlock::on(&gpu, &cfg, &weights, "transformer_blocks.0", t, ctx_len);
     eprintln!("one block built (weights uploaded) in {:.2} s", t0.elapsed().as_secs_f64());
 
     // RoPE tables + the per-token adaLN raw table - built once, shared by

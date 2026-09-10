@@ -196,7 +196,7 @@ fn ltxv_dit_tiny_gated_matches_reference() {
     // ---- 1: the connector alone -----------------------------------------
     let gpu = Gpu::open(None, &KERNELS);
     let connector = EmbeddingsConnector::on(
-        gpu,
+        &gpu,
         &w,
         "video_embeddings_connector",
         cfg.connector_inner_dim(),

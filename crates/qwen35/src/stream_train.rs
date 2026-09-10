@@ -936,55 +936,65 @@ impl StreamTrainer {
             padded_ids.resize(padded_t as usize, 0);
             let x0 = Self::embed_real(dir, &padded_ids, d)?;
 
-            let positions: Vec<[u32; 3]> = (0..padded_t).map(|ti| [ti, ti, ti]).collect();
-            let (cos, sin) = qwen3vl::mrope::mrope_tables(&positions, cfg.mrope_section, cfg.rotary_dim(), cfg.rope_theta);
-            let cos = g.storage_init("stream_train.gen.cos", &cos);
-            let sin = g.storage_init("stream_train.gen.sin", &sin);
+            // Every device buffer this step makes - the mrope tables, the
+            // residual chain, and the whole streamed layer window below - is
+            // scoped to this closure, so the step's footprint is dropped and
+            // THEN reclaimed before the next step allocates. Reclaiming
+            // before the drop (a `poll_wait` at the end of the loop body,
+            // say) would reclaim nothing: see `gpu_core::transient`.
+            let next = gpu_core::reclaiming(g, || {
+                let positions: Vec<[u32; 3]> = (0..padded_t).map(|ti| [ti, ti, ti]).collect();
+                let (cos, sin) = qwen3vl::mrope::mrope_tables(&positions, cfg.mrope_section, cfg.rotary_dim(), cfg.rope_theta);
+                let cos = g.storage_init("stream_train.gen.cos", &cos);
+                let sin = g.storage_init("stream_train.gen.sin", &sin);
 
-            let mut xres_buf = g.storage_init("stream_train.gen.x0", &x0);
-            let n_layers = cfg.n_layers;
-            let sched = weightset::Schedule::cyclic(n_layers, 1);
-            let mut ws = weightset::WeightSet::build(n_layers, self.window_budget, sched, Box::new(weightset::CyclicScan { lookahead: 1 }))
-                .unwrap_or_else(|e| panic!("stream_train::generate_greedy: WeightSet::build: {e}"));
-            let mut slots: Vec<Option<OwnedStreamedLayer>> = (0..self.window_budget).map(|_| None).collect();
-            for (i, slot) in ws.slot_contents().iter().enumerate() {
-                if let Some(gid) = slot {
-                    slots[i] = Some(loader(gid.0 as usize));
+                let mut xres_buf = g.storage_init("stream_train.gen.x0", &x0);
+                let n_layers = cfg.n_layers;
+                let sched = weightset::Schedule::cyclic(n_layers, 1);
+                let mut ws = weightset::WeightSet::build(n_layers, self.window_budget, sched, Box::new(weightset::CyclicScan { lookahead: 1 }))
+                    .unwrap_or_else(|e| panic!("stream_train::generate_greedy: WeightSet::build: {e}"));
+                let mut slots: Vec<Option<OwnedStreamedLayer>> = (0..self.window_budget).map(|_| None).collect();
+                for (i, slot) in ws.slot_contents().iter().enumerate() {
+                    if let Some(gid) = slot {
+                        slots[i] = Some(loader(gid.0 as usize));
+                    }
                 }
-            }
-            for cursor in 0..n_layers as usize {
-                let (slot_id, miss) = ws.advance(cursor);
-                let idx = slot_id.0 as usize;
-                if miss {
-                    slots[idx] = None;
-                    g.read(&xres_buf, 1);
-                    slots[idx] = Some(loader(cursor));
+                for cursor in 0..n_layers as usize {
+                    let (slot_id, miss) = ws.advance(cursor);
+                    let idx = slot_id.0 as usize;
+                    if miss {
+                        // Evict, reclaim, THEN upload the replacement - the
+                        // outgoing layer's bytes are what the incoming one's
+                        // upload needs back (`gpu_core::transient`).
+                        gpu_core::reclaiming(g, || slots[idx] = None);
+                        slots[idx] = Some(loader(cursor));
+                    }
+                    let layer = slots[idx].as_ref().expect("stream_train::generate_greedy: WeightSet says this slot is resident");
+                    let out = match layer {
+                        OwnedStreamedLayer::Linear(l) => gdn_layer_forward_lora(g, &self.ops, &self.ids, cfg, &self.lora, cursor, l, &xres_buf, padded_t, &self.ones_khd).0,
+                        OwnedStreamedLayer::Full(l) => gqa_layer_forward_lora(g, &self.ops, &self.ids, cfg, &self.lora, cursor, l, &xres_buf, padded_t, &cos, &sin).0,
+                    };
+                    xres_buf = out;
                 }
-                let layer = slots[idx].as_ref().expect("stream_train::generate_greedy: WeightSet says this slot is resident");
-                let out = match layer {
-                    OwnedStreamedLayer::Linear(l) => gdn_layer_forward_lora(g, &self.ops, &self.ids, cfg, &self.lora, cursor, l, &xres_buf, padded_t, &self.ones_khd).0,
-                    OwnedStreamedLayer::Full(l) => gqa_layer_forward_lora(g, &self.ops, &self.ids, cfg, &self.lora, cursor, l, &xres_buf, padded_t, &cos, &sin).0,
-                };
-                xres_buf = out;
-            }
 
-            let hidden_all = g.read(&xres_buf, (padded_t as usize) * d);
-            let last = (t - 1) as usize;
-            let last_row = &hidden_all[last * d..(last + 1) * d];
+                let hidden_all = g.read(&xres_buf, (padded_t as usize) * d);
+                let last = (t - 1) as usize;
+                let last_row = &hidden_all[last * d..(last + 1) * d];
 
-            let x = g.storage_init("stream_train.gen.row", last_row);
-            let normed = g.storage(d as u64);
-            g.submit(&[], &[rmsnorm_fwd(g, &self.ids.kernels, &x, &self.final_norm, &normed, d as u32, 1)]);
-            let vocab = cfg.vocab;
-            let logits_buf = g.storage(vocab as u64);
-            {
-                let mut s = Vec::new();
-                let act = self.ops.act(&mut s, &normed, 0, 1, d as u32);
-                self.ops.matmul(&mut s, &self.head, &act, &logits_buf, 0);
-                g.submit(&[], &s);
-            }
-            let logits = g.read(&logits_buf, vocab as usize);
-            let next = logits.iter().enumerate().fold((0usize, f32::NEG_INFINITY), |(bi, bv), (i, &v)| if v > bv { (i, v) } else { (bi, bv) }).0 as u32;
+                let x = g.storage_init("stream_train.gen.row", last_row);
+                let normed = g.storage(d as u64);
+                g.submit(&[], &[rmsnorm_fwd(g, &self.ids.kernels, &x, &self.final_norm, &normed, d as u32, 1)]);
+                let vocab = cfg.vocab;
+                let logits_buf = g.storage(vocab as u64);
+                {
+                    let mut s = Vec::new();
+                    let act = self.ops.act(&mut s, &normed, 0, 1, d as u32);
+                    self.ops.matmul(&mut s, &self.head, &act, &logits_buf, 0);
+                    g.submit(&[], &s);
+                }
+                let logits = g.read(&logits_buf, vocab as usize);
+                logits.iter().enumerate().fold((0usize, f32::NEG_INFINITY), |(bi, bv), (i, &v)| if v > bv { (i, v) } else { (bi, bv) }).0 as u32
+            });
 
             if eos.contains(&next) {
                 break;

@@ -660,7 +660,7 @@ fn route_context_through_connector(
     if !enabled {
         return (context.to_vec(), Vec::new());
     }
-    let connector = EmbeddingsConnector::on(gpu.share(), w, prefix, dim, heads, head_dim, num_layers, num_registers, gated, norm_output, theta, max_pos, eps);
+    let connector = EmbeddingsConnector::on(gpu, w, prefix, dim, heads, head_dim, num_layers, num_registers, gated, norm_output, theta, max_pos, eps);
     let out = connector.forward(context, valid, context_len);
     (out.clone(), out)
 }
@@ -934,7 +934,11 @@ impl LtxDit {
         let mut block_out = Vec::with_capacity((hi - lo) as usize);
         let mut taps = Vec::with_capacity((hi - lo) as usize);
         for l in lo..hi {
-            let blk = LtxBlock::on(gpu.share(), &self.cfg, &self.w, &format!("transformer_blocks.{l}"), t, context_len);
+            // `LtxBlock::on` hands back a `gpu_core::Transient`, so this
+            // block's freshly uploaded weights are reclaimed at the end of the
+            // iteration without this loop saying anything about it - see
+            // `gpu_core::transient` for what accumulates when they are not.
+            let blk = LtxBlock::on(gpu, &self.cfg, &self.w, &format!("transformer_blocks.{l}"), t, context_len);
             let (out, tp) = blk.forward(&xx, adaln_table, context, cos_bufs, sin_bufs, t);
             xx = out;
             block_out.push(xx.clone());
@@ -970,7 +974,7 @@ impl LtxDit {
         let mut block_out = Vec::with_capacity((hi - lo) as usize);
         let mut taps = Vec::with_capacity((hi - lo) as usize);
         for l in lo..hi {
-            let blk = LtxBlockQ::on(gpu.share(), &self.cfg, &self.w, &format!("transformer_blocks.{l}"), t, context_len, tier);
+            let blk = LtxBlockQ::on(gpu, &self.cfg, &self.w, &format!("transformer_blocks.{l}"), t, context_len, tier);
             let (out, tp) = blk.forward(&xx, adaln_table, context, cos_bufs, sin_bufs, t);
             xx = out;
             block_out.push(xx.clone());
@@ -2157,7 +2161,7 @@ impl LtxAvDit {
         let mut a_block_out = Vec::with_capacity(cap);
         let mut tap_out = Vec::with_capacity(cap);
         for l in lo..hi {
-            let blk = LtxAvBlock::on(gpu.share(), vcfg, acfg, &self.w, &format!("transformer_blocks.{l}"), (v_context.len() / vcfg.inner_dim as usize) as u32, (a_context.len() / acfg.inner_dim as usize) as u32);
+            let blk = LtxAvBlock::on(gpu, vcfg, acfg, &self.w, &format!("transformer_blocks.{l}"), (v_context.len() / vcfg.inner_dim as usize) as u32, (a_context.len() / acfg.inner_dim as usize) as u32);
             #[rustfmt::skip]
             let (vout, aout, tp) = blk.forward(
                 &vxx, &axx, v_adaln_table, a_adaln_table, v_context, a_context,

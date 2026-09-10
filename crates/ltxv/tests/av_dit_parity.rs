@@ -235,8 +235,9 @@ fn ltxv_av_dit_tiny_gated_matches_reference() {
 
     // ---- 1: each connector alone -----------------------------------------
     #[rustfmt::skip]
+    let vc_gpu = Gpu::open(None, &KERNELS);
     let video_connector = EmbeddingsConnector::on(
-        Gpu::open(None, &KERNELS), &w, "video_embeddings_connector",
+        &vc_gpu, &w, "video_embeddings_connector",
         cfg.video.connector_inner_dim(), cfg.video.connector_num_attention_heads, cfg.video.connector_attention_head_dim,
         cfg.video.connector_num_layers, cfg.video.connector_num_learnable_registers, cfg.video.connector_apply_gated_attention,
         cfg.video.connector_norm_output, cfg.video.positional_embedding_theta, &cfg.video.connector_positional_embedding_max_pos, cfg.video.norm_eps,
@@ -245,8 +246,9 @@ fn ltxv_av_dit_tiny_gated_matches_reference() {
     report_strict("video.connector_out", &v_connector_out, fx.get("video.connector_out"), MIN_COS);
 
     #[rustfmt::skip]
+    let ac_gpu = Gpu::open(None, &KERNELS);
     let audio_connector = EmbeddingsConnector::on(
-        Gpu::open(None, &KERNELS), &w, "audio_embeddings_connector",
+        &ac_gpu, &w, "audio_embeddings_connector",
         cfg.audio.connector_inner_dim(), cfg.audio.connector_num_attention_heads, cfg.audio.connector_attention_head_dim,
         cfg.video.connector_num_layers, cfg.video.connector_num_learnable_registers, cfg.video.connector_apply_gated_attention,
         cfg.video.connector_norm_output, cfg.video.positional_embedding_theta, &cfg.video.connector_positional_embedding_max_pos, cfg.video.norm_eps,
@@ -520,7 +522,7 @@ fn av_int8_block_tracks_the_fp32_av_block() {
 
     let gpu_f32 = Gpu::open(None, &KERNELS);
     let r = c.rope(&gpu_f32);
-    let blk = LtxAvBlock::on(gpu_f32.share(), vcfg, acfg, &c.w, "transformer_blocks.0", c.v_ctx_len, c.a_ctx_len);
+    let blk = LtxAvBlock::on(&gpu_f32, vcfg, acfg, &c.w, "transformer_blocks.0", c.v_ctx_len, c.a_ctx_len);
     #[rustfmt::skip]
     let (vf, af, tf) = blk.forward(&c.vx, &c.ax, &c.v_adaln, &c.a_adaln, &c.v_context, &c.a_context,
         &r.0, &r.1, &r.2, &r.3, &r.4, &r.5, &r.6, &r.7,
@@ -529,7 +531,7 @@ fn av_int8_block_tracks_the_fp32_av_block() {
     let gpu_q = Gpu::open(None, &KERNELS);
     let rq = c.rope(&gpu_q);
     let rope = AvRope { v_cos: &rq.0, v_sin: &rq.1, a_cos: &rq.2, a_sin: &rq.3, v_cross_cos: &rq.4, v_cross_sin: &rq.5, a_cross_cos: &rq.6, a_cross_sin: &rq.7 };
-    let blkq = LtxAvBlockQ::on(gpu_q.share(), vcfg, acfg, &c.w, "transformer_blocks.0", c.v_ctx_len, c.a_ctx_len, QTier::Int8);
+    let blkq = LtxAvBlockQ::on(&gpu_q, vcfg, acfg, &c.w, "transformer_blocks.0", c.v_ctx_len, c.a_ctx_len, QTier::Int8);
     #[rustfmt::skip]
     let (vq, aq, tq) = blkq.forward(&c.vx, &c.ax, &c.v_adaln, &c.a_adaln, &c.v_context, &c.a_context, rope,
         &c.v_ss, &c.a_ss, &c.a2v_gate, &c.v2a_gate, c.tv, c.ta);
@@ -561,7 +563,7 @@ fn device_derived_av_modulation_is_bit_identical_to_the_host_uploaded_form() {
     let gpu = Gpu::open(None, &KERNELS);
     let r = c.rope(&gpu);
     let rope = AvRope { v_cos: &r.0, v_sin: &r.1, a_cos: &r.2, a_sin: &r.3, v_cross_cos: &r.4, v_cross_sin: &r.5, a_cross_cos: &r.6, a_cross_sin: &r.7 };
-    let blk = LtxAvBlockQ::on(gpu.share(), vcfg, acfg, &c.w, "transformer_blocks.0", c.v_ctx_len, c.a_ctx_len, QTier::Int8);
+    let blk = LtxAvBlockQ::on(&gpu, vcfg, acfg, &c.w, "transformer_blocks.0", c.v_ctx_len, c.a_ctx_len, QTier::Int8);
 
     #[rustfmt::skip]
     let (v_host, a_host, _) = blk.forward(&c.vx, &c.ax, &c.v_adaln, &c.a_adaln, &c.v_context, &c.a_context, rope,
@@ -654,11 +656,11 @@ fn a_closed_cross_modal_gate_makes_the_gated_stream_independent_of_the_other() {
         let gpu = Gpu::open(None, &KERNELS);
         let r = c.rope(&gpu);
         let rope = AvRope { v_cos: &r.0, v_sin: &r.1, a_cos: &r.2, a_sin: &r.3, v_cross_cos: &r.4, v_cross_sin: &r.5, a_cross_cos: &r.6, a_cross_sin: &r.7 };
-        let q = LtxAvBlockQ::on(gpu.share(), &vcfg, &acfg, w, "transformer_blocks.0", c.v_ctx_len, c.a_ctx_len, QTier::Int8);
+        let q = LtxAvBlockQ::on(&gpu, &vcfg, &acfg, w, "transformer_blocks.0", c.v_ctx_len, c.a_ctx_len, QTier::Int8);
         #[rustfmt::skip]
         let (vq, aq, _) = q.forward(&c.vx, ax, &c.v_adaln, &c.a_adaln, &c.v_context, &c.a_context, rope,
             &c.v_ss, &c.a_ss, a2v_gate, v2a_gate, c.tv, c.ta);
-        let f = LtxAvBlock::on(gpu.share(), &vcfg, &acfg, w, "transformer_blocks.0", c.v_ctx_len, c.a_ctx_len);
+        let f = LtxAvBlock::on(&gpu, &vcfg, &acfg, w, "transformer_blocks.0", c.v_ctx_len, c.a_ctx_len);
         #[rustfmt::skip]
         let (vf, af, _) = f.forward(&c.vx, ax, &c.v_adaln, &c.a_adaln, &c.v_context, &c.a_context,
             &r.0, &r.1, &r.2, &r.3, &r.4, &r.5, &r.6, &r.7,
@@ -779,7 +781,7 @@ fn real_q8_0_av_block0_int8_compute_matches_fp32() {
     let (ac, as_) = upload_rope(&gpu_f32, &ar);
     let (vcc, vcs) = upload_rope(&gpu_f32, &vcr);
     let (acc, acs) = upload_rope(&gpu_f32, &acr);
-    let blk = LtxAvBlock::on(gpu_f32.share(), &vcfg, &acfg, &w, "transformer_blocks.0", v_ctx_len, a_ctx_len);
+    let blk = LtxAvBlock::on(&gpu_f32, &vcfg, &acfg, &w, "transformer_blocks.0", v_ctx_len, a_ctx_len);
     #[rustfmt::skip]
     let (vf, af, tf) = blk.forward(&vx, &ax, &v_adaln, &a_adaln, &v_context, &a_context,
         &vc, &vs, &ac, &as_, &vcc, &vcs, &acc, &acs, &v_ss, &a_ss, &a2v_gate, &v2a_gate, tv, ta, true);
@@ -791,7 +793,7 @@ fn real_q8_0_av_block0_int8_compute_matches_fp32() {
     let (vcc2, vcs2) = upload_rope(&gpu_q, &vcr);
     let (acc2, acs2) = upload_rope(&gpu_q, &acr);
     let rope = AvRope { v_cos: &vc2, v_sin: &vs2, a_cos: &ac2, a_sin: &as2, v_cross_cos: &vcc2, v_cross_sin: &vcs2, a_cross_cos: &acc2, a_cross_sin: &acs2 };
-    let blkq = LtxAvBlockQ::on(gpu_q.share(), &vcfg, &acfg, &w, "transformer_blocks.0", v_ctx_len, a_ctx_len, QTier::Int8);
+    let blkq = LtxAvBlockQ::on(&gpu_q, &vcfg, &acfg, &w, "transformer_blocks.0", v_ctx_len, a_ctx_len, QTier::Int8);
     #[rustfmt::skip]
     let (vq, aq, tq) = blkq.forward(&vx, &ax, &v_adaln, &a_adaln, &v_context, &a_context, rope,
         &v_ss, &a_ss, &a2v_gate, &v2a_gate, tv, ta);

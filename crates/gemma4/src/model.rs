@@ -118,7 +118,7 @@ impl Gemma4Model {
         let embed_out = embed(input_ids, embed_table, hidden);
         let norm_w = self.w.get("norm.weight").unwrap_or_else(|| panic!("gemma4: missing norm.weight")).1.clone();
         forward_core(cfg, self.device.as_deref(), input_ids.len() as u32, embed_out, &norm_w, |gpu, l| {
-            Gemma4Layer::on(gpu.share(), cfg, &self.w, l, Precision::Fp32)
+            Gemma4Layer::on(gpu, cfg, &self.w, l, Precision::Fp32)
         })
     }
 }
@@ -138,7 +138,7 @@ fn forward_core(
     t: u32,
     embed_out: Vec<f32>,
     norm_w: &[f32],
-    mut build_layer: impl FnMut(&Gpu, u32) -> Gemma4Layer,
+    mut build_layer: impl for<'g> FnMut(&'g Gpu, u32) -> gpu_core::Transient<'g, Gemma4Layer>,
 ) -> Gemma4Output {
     let hidden = cfg.hidden_size as usize;
     let n = cfg.num_hidden_layers;
@@ -161,6 +161,10 @@ fn forward_core(
 
     for l in 0..n {
         let t_layer = std::time::Instant::now();
+        // `build_layer` hands back a `gpu_core::Transient`, so this layer's
+        // streamed-in weights are reclaimed at the end of the iteration -
+        // before the next layer's are uploaded - without this loop having to
+        // say so. See `gpu_core::transient` for what accumulates otherwise.
         let layer = build_layer(&gpu, l);
         let build_ms = t_layer.elapsed().as_secs_f32() * 1000.0;
         let lt = layer.layer_type();
@@ -284,7 +288,7 @@ pub fn forward_streamed(
                 p
             }
         };
-        Gemma4Layer::on(gpu.share(), cfg, src, l, precision)
+        Gemma4Layer::on(gpu, cfg, src, l, precision)
     });
     Ok(out)
 }

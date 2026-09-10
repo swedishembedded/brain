@@ -168,12 +168,12 @@ fn real_q8_0_block0_int8_compute_matches_fp32() {
 
     let gpu_f32 = gpu_core::Gpu::open(None, &ltxv::block::KERNELS);
     let (cos_f32, sin_f32) = upload_rope(&gpu_f32, &rope);
-    let blk_f32 = ltxv::block::LtxBlock::on(gpu_f32.share(), &cfg, &tensors, "transformer_blocks.0", t as u32, context_len as u32);
+    let blk_f32 = ltxv::block::LtxBlock::on(&gpu_f32, &cfg, &tensors, "transformer_blocks.0", t as u32, context_len as u32);
     let (out_f32, _) = blk_f32.forward(&latent_padded(&cfg, &latent, t), &adaln_table, &context, &cos_f32, &sin_f32, t as u32);
 
     let gpu_i8 = gpu_core::Gpu::open(None, &ltxv::block::KERNELS);
     let (cos_i8, sin_i8) = upload_rope(&gpu_i8, &rope);
-    let blk_i8 = LtxBlockQ::on(gpu_i8.share(), &cfg, &tensors, "transformer_blocks.0", t as u32, context_len as u32, QTier::Int8);
+    let blk_i8 = LtxBlockQ::on(&gpu_i8, &cfg, &tensors, "transformer_blocks.0", t as u32, context_len as u32, QTier::Int8);
     let (out_i8, _) = blk_i8.forward(&latent_padded(&cfg, &latent, t), &adaln_table, &context, &cos_i8, &sin_i8, t as u32);
 
     let c = cosine(&out_f32, &out_i8);

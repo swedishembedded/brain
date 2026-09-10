@@ -69,7 +69,7 @@
 
 use crate::block::{cached_av_block_bytes, cached_block_bytes, BlockTimings, CachedQAvBlockWeights, CachedQBlockWeights, LtxAvBlockQ, LtxBlockQ, QTier, KERNELS};
 use crate::config::{LtxAvDitConfig, LtxDitConfig};
-use gpu_core::Gpu;
+use gpu_core::{reclaiming, Gpu};
 use std::sync::Mutex;
 use weightset::{CyclicScan, GroupId, Schedule, WeightSet};
 
@@ -307,6 +307,46 @@ pub fn slots_for(per_block: u64, num_layers: u32, t: usize, device: memauth::Dev
 /// three things every call site destructures.
 type RopeSlot = (u64, Vec<gpu_core::DeviceBuffer>, Vec<gpu_core::DeviceBuffer>);
 
+/// The device handle ONE forward call runs on - what
+/// [`DitSession::device_for_call`] and [`AvDitSession::device_for_call`] hand
+/// back.
+///
+/// Two shapes, and the difference between them is WHO reclaims what the call
+/// allocated:
+///
+/// * [`Self::Resident`] is a [`Gpu::share`] of the device this session keeps
+///   open. A handle owns real device memory of its own - its scratch replay
+///   arena (`gpu_core::scratch`) above all - and that memory is still on the
+///   card when the handle drops, so it has to be reclaimed on the session's
+///   OWN handle before the next call starts allocating. The
+///   `gpu_core::Transient` inside is what orders that: handle first, poll
+///   after. This is not a rounding error - at the real 22B width a forward's
+///   handle was measured abandoning **3.13 GB** this way, every step, which
+///   is what tripped `backend_wgpu::WgpuBackend::track`'s ceiling two steps
+///   into a two-stage generation.
+/// * [`Self::Owned`] is the transient session shape, where the handle IS the
+///   device. Dropping it tears the device down and frees everything on it, so
+///   there is nothing left pending and no other handle to reclaim it on.
+///
+/// Derefs to [`Gpu`], so a caller writes `&gpu` exactly as it did when this
+/// was a bare handle.
+pub enum CallDevice<'s> {
+    /// A share of a session-held device - reclaimed on that session's handle.
+    Resident(gpu_core::Transient<'s, Gpu>),
+    /// A device of this call's own - freed by its own teardown.
+    Owned(Gpu),
+}
+
+impl std::ops::Deref for CallDevice<'_> {
+    type Target = Gpu;
+    fn deref(&self) -> &Gpu {
+        match self {
+            CallDevice::Resident(g) => g,
+            CallDevice::Owned(g) => g,
+        }
+    }
+}
+
 #[derive(Default)]
 struct RopeCache {
     slots: Mutex<Vec<RopeSlot>>,
@@ -452,7 +492,7 @@ impl<B> BlockWindow<B> {
     /// before anything has been uploaded into it), and the outgoing occupant
     /// must drop BEFORE the incoming one allocates or a full window's peak is
     /// `slots + 1` blocks.
-    fn acquire(&mut self, l: usize, per_block: u64, device: memauth::Device, upload: impl FnOnce() -> B) -> (Option<usize>, bool, std::time::Duration) {
+    fn acquire(&mut self, gpu: &Gpu, l: usize, per_block: u64, device: memauth::Device, upload: impl FnOnce() -> B) -> (Option<usize>, bool, std::time::Duration) {
         let (slot, plan_miss) = self.ws.advance(l);
         debug_assert_eq!(self.ws.schedule().order[l], GroupId(l as u32), "the window's schedule must visit blocks in the forward's own order");
         let idx = slot.0 as usize;
@@ -462,13 +502,19 @@ impl<B> BlockWindow<B> {
             return (Some(idx), false, std::time::Duration::ZERO);
         }
         if !can_charge_a_block(device, per_block) {
-            self.slots[idx] = None;
+            reclaiming(gpu, || self.slots[idx] = None);
             self.refusals += 1;
             tracing::warn!(layer = l, per_block, "no VRAM budget headroom for a resident block; streaming this one instead");
             return (None, true, std::time::Duration::ZERO);
         }
         let s = std::time::Instant::now();
-        self.slots[idx] = None;
+        // Release the outgoing occupant and RECLAIM it before the incoming
+        // one allocates. Dropping first bounds the peak at `slots` blocks
+        // rather than `slots + 1`; reclaiming after that drop - never before
+        // it, see `gpu_core::transient` - is what makes the released bytes
+        // available to the upload on the next line instead of leaving a
+        // window's worth of evictions pending across the whole stack.
+        reclaiming(gpu, || self.slots[idx] = None);
         self.slots[idx] = Some((l as u32, upload()));
         self.uploads += 1;
         (Some(idx), true, s.elapsed())
@@ -539,14 +585,17 @@ impl DitSession {
         DitSession { gpu: Some(Gpu::open(device, &KERNELS)), device: device.map(str::to_string), window: Mutex::new(None), slots, rope: RopeCache::default() }
     }
 
-    /// This session's device handle for one forward call, plus whether it is
-    /// long-lived. A transient session opens (and, on return, drops) a fresh
-    /// one; a resident session hands back a `Gpu::share` of the one it holds,
-    /// which is the same adapter, queue and compiled pipelines.
-    pub fn device_for_call(&self) -> Gpu {
+    /// This session's device handle for one forward call. A transient session
+    /// opens (and, on return, drops) a fresh device; a resident session hands
+    /// back a `Gpu::share` of the one it holds, which is the same adapter,
+    /// queue and compiled pipelines - and, being a share rather than a device,
+    /// needs its own memory RECLAIMED when the call ends. See [`CallDevice`]
+    /// for which shape does which, and for the 3.13 GB a forward abandoned
+    /// before that distinction was drawn.
+    pub fn device_for_call(&self) -> CallDevice<'_> {
         match &self.gpu {
-            Some(g) => g.share(),
-            None => Gpu::open(self.device.as_deref(), &KERNELS),
+            Some(g) => CallDevice::Resident(gpu_core::Transient::on(g, g.share())),
+            None => CallDevice::Owned(Gpu::open(self.device.as_deref(), &KERNELS)),
         }
     }
 
@@ -597,7 +646,14 @@ impl DitSession {
             if guard.is_some() {
                 tracing::debug!(?shape, "device residency window rebuilt for a new forward shape");
             }
-            *guard = None;
+            // A whole window's worth of resident blocks goes here - gigabytes
+            // at the real 22B width - and the rebuild below starts uploading
+            // the replacement immediately. Reclaim after the drop, or the old
+            // window's bytes are still pending while the new one allocates:
+            // this is what a two-stage generation hits at its resolution
+            // change, and it fired the ceiling assertion at 9.8 GB pending
+            // before it was reclaimed here (`gpu_core::transient`).
+            reclaiming(scratch, || *guard = None);
             *guard = BlockWindow::build(shape, self.slots);
         }
         let Some(w) = guard.as_mut() else { return };
@@ -606,11 +662,13 @@ impl DitSession {
             return;
         }
         let s = std::time::Instant::now();
-        // A one-word probe to drain wgpu's `write_buffer` staging after every
-        // block - see `LtxBlockQ::forward_prod_dev` for the measured doubling
-        // this exists to stop accruing. Without it, uploading 48 blocks of
-        // 270 MB reaches 24392 MiB of a 24576 MiB card and aborts.
-        let probe = scratch.storage(1);
+        // Drain wgpu's `write_buffer` staging after every block - see
+        // `LtxBlockQ::forward_prod_dev` for the measured doubling this exists
+        // to stop accruing. Without it, uploading 48 blocks of 270 MB reaches
+        // 24392 MiB of a 24576 MiB card and aborts. `poll_wait` is the drain
+        // itself (`gpu_core::transient`); it used to be spelled as a one-word
+        // probe READBACK, which drains only as a side effect of the blocking
+        // map it does on top.
         for (idx, g) in pins {
             if !can_charge_a_block(scratch.memory_device(), per_block) {
                 tracing::warn!(slot = idx, "no VRAM budget headroom while pre-filling the resident window; the rest will stream");
@@ -618,9 +676,9 @@ impl DitSession {
                 break;
             }
             let cached = weights(g as usize);
-            w.slots[idx] = Some((g, LtxBlockQ::on_cached(scratch.share(), cfg, &cached, t as u32, context_len as u32, tier)));
+            w.slots[idx] = Some((g, LtxBlockQ::resident_on_cached(scratch.share(), cfg, &cached, t as u32, context_len as u32, tier)));
             w.uploads += 1;
-            let _ = scratch.read(&probe, 1);
+            scratch.poll_wait();
         }
         tracing::info!(resident = w.slots.iter().filter(|s| s.is_some()).count(), slots = w.slots.len(), ms = s.elapsed().as_secs_f32() * 1e3, "resident weight window pre-filled");
     }
@@ -723,7 +781,7 @@ impl DitSession {
             // than from a running counter also means an aborted forward
             // cannot leave the window's cursor out of step with the stack.
             let (slot_idx, uploaded, mut up_ms) = match guard.as_mut() {
-                Some(w) => w.acquire(l, per_block, scratch.memory_device(), || LtxBlockQ::on_cached(scratch.share(), cfg, &weights(l), t as u32, context_len as u32, tier)),
+                Some(w) => w.acquire(scratch, l, per_block, scratch.memory_device(), || LtxBlockQ::resident_on_cached(scratch.share(), cfg, &weights(l), t as u32, context_len as u32, tier)),
                 None => (None, true, std::time::Duration::ZERO),
             };
 
@@ -751,7 +809,7 @@ impl DitSession {
                     // stage at all.
                     let s = std::time::Instant::now();
                     let cached = weights(l);
-                    let blk = LtxBlockQ::on_cached(scratch.share(), cfg, &cached, t as u32, context_len as u32, tier);
+                    let blk = LtxBlockQ::on_cached(scratch, cfg, &cached, t as u32, context_len as u32, tier);
                     up_ms += s.elapsed();
                     blk.forward_prod_dev(scratch, &x_dev, &adaln_buf, &adaln_map_buf, &ctx_buf, cos_bufs, sin_bufs, t as u32, &mut bt)
                 }
@@ -846,10 +904,10 @@ impl AvDitSession {
         AvDitSession { gpu: Some(Gpu::open(device, &KERNELS)), device: device.map(str::to_string), window: Mutex::new(None), slots, rope: RopeCache::default() }
     }
 
-    pub fn device_for_call(&self) -> Gpu {
+    pub fn device_for_call(&self) -> CallDevice<'_> {
         match &self.gpu {
-            Some(g) => g.share(),
-            None => Gpu::open(self.device.as_deref(), &KERNELS),
+            Some(g) => CallDevice::Resident(gpu_core::Transient::on(g, g.share())),
+            None => CallDevice::Owned(Gpu::open(self.device.as_deref(), &KERNELS)),
         }
     }
 
@@ -888,7 +946,9 @@ impl AvDitSession {
             if guard.is_some() {
                 tracing::debug!(?shape, "audio+video residency window rebuilt for a new forward shape");
             }
-            *guard = None;
+            // See `DitSession::prefill`: the outgoing window is reclaimed
+            // before the incoming one uploads, never after.
+            reclaiming(scratch, || *guard = None);
             *guard = BlockWindow::build(shape, self.slots);
         }
         let Some(w) = guard.as_mut() else { return };
@@ -897,9 +957,8 @@ impl AvDitSession {
             return;
         }
         let s = std::time::Instant::now();
-        // A one-word probe read after every block, to drain wgpu's
-        // `write_buffer` staging - see `DitSession::prefill`.
-        let probe = scratch.storage(1);
+        // Drain wgpu's `write_buffer` staging after every block - see
+        // `DitSession::prefill`.
         for (idx, g) in pins {
             if !can_charge_a_block(scratch.memory_device(), per_block) {
                 tracing::warn!(slot = idx, "no VRAM budget headroom while pre-filling the AV resident window; the rest will stream");
@@ -907,9 +966,9 @@ impl AvDitSession {
                 break;
             }
             let cached = weights(g as usize);
-            w.slots[idx] = Some((g, LtxAvBlockQ::on_cached(scratch.share(), &cfg.video, &cfg.audio, &cached, v_context_len as u32, a_context_len as u32, tier)));
+            w.slots[idx] = Some((g, LtxAvBlockQ::resident_on_cached(scratch.share(), &cfg.video, &cfg.audio, &cached, v_context_len as u32, a_context_len as u32, tier)));
             w.uploads += 1;
-            let _ = scratch.read(&probe, 1);
+            scratch.poll_wait();
         }
         tracing::info!(resident = w.slots.iter().filter(|s| s.is_some()).count(), slots = w.slots.len(), ms = s.elapsed().as_secs_f32() * 1e3, "AV resident weight window pre-filled");
     }
@@ -980,10 +1039,10 @@ impl AvDitSession {
         let av = crate::block::AvModelTables { v_ss: &v_ss_buf, v_ss_map: &v_ss_map, a_ss: &a_ss_buf, a_ss_map: &a_ss_map, a2v_gate: &a2v_gate, v2a_gate: &v2a_gate };
 
         let (tv, ta) = (inp.tv as u32, inp.ta as u32);
-        let build = |scratch: &Gpu, c: &CachedQAvBlockWeights| LtxAvBlockQ::on_cached(scratch.share(), &cfg.video, &cfg.audio, c, inp.v_context_len as u32, inp.a_context_len as u32, tier);
+        let resident_build = |scratch: &Gpu, c: &CachedQAvBlockWeights| LtxAvBlockQ::resident_on_cached(scratch.share(), &cfg.video, &cfg.audio, c, inp.v_context_len as u32, inp.a_context_len as u32, tier);
         for l in 0..cfg.video.num_layers as usize {
             let (slot_idx, uploaded, mut up_ms) = match guard.as_mut() {
-                Some(w) => w.acquire(l, per_block, scratch.memory_device(), || build(scratch, &weights(l))),
+                Some(w) => w.acquire(scratch, l, per_block, scratch.memory_device(), || resident_build(scratch, &weights(l))),
                 None => (None, true, std::time::Duration::ZERO),
             };
             let mut bt = BlockTimings::default();
@@ -1001,7 +1060,7 @@ impl AvDitSession {
                     // states: an untimed upload on the arm that does nothing
                     // BUT upload reads as zero exactly when it dominates.
                     let s = std::time::Instant::now();
-                    let blk = build(scratch, &weights(l));
+                    let blk = LtxAvBlockQ::on_cached(scratch, &cfg.video, &cfg.audio, &weights(l), inp.v_context_len as u32, inp.a_context_len as u32, tier);
                     up_ms += s.elapsed();
                     blk.forward_prod_dev(scratch, &vx_dev, &ax_dev, &v_adaln_buf, &v_adaln_map, &a_adaln_buf, &a_adaln_map, &av, &v_ctx, &a_ctx, inp.rope, tv, ta, &mut bt)
                 }

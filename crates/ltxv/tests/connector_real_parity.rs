@@ -120,7 +120,7 @@ fn ltxv_real_connector_matches_reference() {
 
     let gpu = Gpu::open(Some("gpu"), &KERNELS);
     let connector = EmbeddingsConnector::on(
-        gpu,
+        &gpu,
         &w,
         PREFIX,
         cfg.connector_inner_dim(),

@@ -84,7 +84,7 @@
 
 use std::collections::HashMap;
 
-use gpu_core::{DeviceBuffer, Gpu, Step};
+use gpu_core::{DeviceBuffer, Gpu, Step, Transient};
 
 use crate::config::{Gemma4Config, LayerType};
 use crate::rope::{apply_rope_full, DeviceRope};
@@ -432,7 +432,12 @@ impl Gemma4Layer {
     /// Build layer `layer_idx` with its projections resident at `precision`.
     /// `weights` needs only THIS layer's tensors, which is what lets a
     /// caller stream a checkpoint layer by layer.
-    pub fn on(gpu: Gpu, cfg: &Gemma4Config, weights: &dyn checkpoint::TensorSource, layer_idx: u32, precision: Precision) -> Gemma4Layer {
+    ///
+    /// Streaming a layer at a time is exactly the shape that leaks the whole
+    /// model if each layer's device buffers are not reclaimed before the next
+    /// layer's are uploaded, so this hands back a [`Transient`] and the
+    /// reclaim is not the caller's to remember - see `gpu_core::transient`.
+    pub fn on<'g>(gpu: &'g Gpu, cfg: &Gemma4Config, weights: &dyn checkpoint::TensorSource, layer_idx: u32, precision: Precision) -> Transient<'g, Gemma4Layer> {
         let lt = cfg.layer_type(layer_idx);
         let head_dim = cfg.head_dim_for(lt);
         let k_eq_v = cfg.k_eq_v_for(lt);
@@ -440,11 +445,12 @@ impl Gemma4Layer {
         let q_dim = (cfg.num_attention_heads * head_dim) as usize;
         let kv_dim = (cfg.kv_heads_for(lt) * head_dim) as usize;
         let prefix = format!("layers.{layer_idx}");
-        let attn = AttnWeights::upload(&gpu, weights, &format!("{prefix}.self_attn"), head_dim, q_dim, kv_dim, hidden, k_eq_v, precision);
-        let mlp = MlpWeights::upload(&gpu, weights, &format!("{prefix}.mlp"), hidden, cfg.intermediate_size as usize, precision);
+        let g = gpu.share();
+        let attn = AttnWeights::upload(&g, weights, &format!("{prefix}.self_attn"), head_dim, q_dim, kv_dim, hidden, k_eq_v, precision);
+        let mlp = MlpWeights::upload(&g, weights, &format!("{prefix}.mlp"), hidden, cfg.intermediate_size as usize, precision);
         let layer_scalar = tget_owned(weights, &format!("{prefix}.layer_scalar"))[0];
-        Gemma4Layer {
-            gpu,
+        Transient::on(gpu, Gemma4Layer {
+            gpu: g,
             cfg: *cfg,
             lt,
             attn,
@@ -454,7 +460,7 @@ impl Gemma4Layer {
             pre_ff_ln: tget_owned(weights, &format!("{prefix}.pre_feedforward_layernorm.weight")),
             post_ff_ln: tget_owned(weights, &format!("{prefix}.post_feedforward_layernorm.weight")),
             layer_scalar,
-        }
+        })
     }
 
     pub fn layer_type(&self) -> LayerType {

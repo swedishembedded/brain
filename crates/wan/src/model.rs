@@ -272,7 +272,10 @@ impl WanDit {
         let mut x = pre.tokens;
         let mut out_taps = Vec::new();
         for l in 0..cfg.num_layers {
-            let blk = WanBlock::on(gpu.share(), cfg, &self.w, &format!("blocks.{l}"), pre.n_tokens as u32);
+            // `WanBlock::on` hands back a `gpu_core::Transient`: this block's
+            // uploaded weights are reclaimed at the end of the iteration,
+            // before the next block's are uploaded (`gpu_core::transient`).
+            let blk = WanBlock::on(&gpu, cfg, &self.w, &format!("blocks.{l}"), pre.n_tokens as u32);
             x = blk.forward(&x, &pre.e0, &pre.cos, &pre.sin, &pre.ctx);
             if taps.contains(&l) {
                 out_taps.push((l, x.clone()));

@@ -68,6 +68,12 @@ pub mod provider;
 /// Replay arena for the per-iteration scratch of a repeated pass.
 pub mod scratch;
 
+/// Per-iteration device objects that reclaim their own memory - the one
+/// correct shape for a loop that streams a layer at a time. See the module
+/// doc for why polling without dropping first is the trap it removes.
+pub mod transient;
+pub use transient::{reclaiming, Transient};
+
 /// Conv-as-GEMM lowering: the scratch budget and chunk arithmetic the 1D, 2D
 /// and 3D lowerings share.
 pub mod lower;
@@ -1028,6 +1034,18 @@ mod native_facade {
         }
         pub fn poll_wait(&self) {
             self.inner.poll_wait()
+        }
+        /// Bytes of device memory already dropped by their last host handle
+        /// but not yet reclaimed - what the next [`Self::poll_wait`] hands
+        /// back. `0` on a backend that frees on drop.
+        ///
+        /// The quantity a streaming loop leaks when it forgets to reclaim
+        /// between iterations, exposed so that behaviour is testable at
+        /// kilobyte scale rather than only at the multi-gigabyte ceiling
+        /// where `backend_wgpu::WgpuBackend::track` gives up. See
+        /// [`crate::transient`].
+        pub fn pending_reclaim_bytes(&self) -> u64 {
+            self.inner.pending_reclaim_bytes()
         }
         /// [`Self::poll_wait`], bounded: `false` on timeout instead of blocking
         /// forever. See `backend_api::Backend::poll_wait_timeout`'s doc for the

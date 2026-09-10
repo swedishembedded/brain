@@ -86,7 +86,7 @@ use data::qwen_tokenizer::QwenBpe;
 use data::rng::Rng;
 use data::tokenizer::Tokenizer;
 use gpu_core::select::Dtype;
-use gpu_core::{DeviceBuffer, Gpu};
+use gpu_core::{reclaiming, DeviceBuffer, Gpu};
 use model::block::{rmsnorm_fwd, swiglu_fwd, KernelIds};
 use model::gdn::{GdnBwdIds, GdnIds, GdnShape};
 use model::gdn_mixer::{gdn_mixer_fwd, GdnMixerIds, GdnMixerShape, GdnMixerWeights};
@@ -837,13 +837,14 @@ fn stream_all_layers(state: &StreamState, dir: &Path, cfg: &Qwen35Config, xres0:
         let (slot_id, miss) = ws.advance(cursor);
         let idx = slot_id.0 as usize;
         if miss {
-            // Drop the evicted occupant's device buffers, then force the
-            // submit+wait that actually reclaims them (lesson 1, this
-            // module's own doc) BEFORE the new layer's weights upload -
-            // otherwise both the outgoing and incoming layer's device
-            // memory can be live at once.
-            slots[idx] = None;
-            state.gpu.read(&xres, 1);
+            // Drop the evicted occupant's device buffers and reclaim them
+            // (lesson 1, this module's own doc) BEFORE the new layer's
+            // weights upload - otherwise both the outgoing and incoming
+            // layer's device memory can be live at once. The closure is what
+            // orders it: the eviction happens inside, the reclaim after (see
+            // `gpu_core::transient` for why the reverse silently does
+            // nothing).
+            reclaiming(&state.gpu, || slots[idx] = None);
             slots[idx] = Some(state.load_layer(dir, cfg, cursor));
         }
         let layer = slots[idx].as_ref().expect("stream: WeightSet says this slot is resident");
@@ -851,6 +852,13 @@ fn stream_all_layers(state: &StreamState, dir: &Path, cfg: &Qwen35Config, xres0:
         // this module's own doc) - safe to keep across `layer`'s later drop.
         xres = state.layer_forward(cfg, layer, &xres, n);
     }
+    // The window - up to `window_budget` layers' worth of streamed weights -
+    // goes out of scope with this call, and the caller (a decode loop) starts
+    // allocating for the next pass the moment it returns. Reclaim after that
+    // drop, here, rather than leaving a pass's whole window pending across
+    // the next one; `xres` is deliberately NOT in the closure, since it is
+    // the value the caller still needs.
+    reclaiming(&state.gpu, || drop(slots));
     xres
 }
 
@@ -1162,19 +1170,28 @@ pub fn generate_with_stats(
         // cost worth hoisting out of this loop; everything else a
         // `StreamState` builds is cheap next to one layer's own
         // weight-streaming cost, design decision 1).
-        let state = StreamState::new(gpu.share(), cfg, padded_t);
-        let xres0 = state.gpu.storage_init("stream.generate.x0", &x0);
-        let xres = stream_all_layers(&state, dir, cfg, xres0, padded_t, window_budget);
-        passes += 1;
+        // This step's WHOLE device footprint is scoped to the closure: the
+        // `StreamState`'s own tables, the residual buffers, and every layer
+        // window `stream_all_layers` opened and closed. They are therefore
+        // dropped when it returns and reclaimed immediately after - never
+        // before, which is the ordering that makes a per-step reclaim
+        // actually reclaim anything (`gpu_core::transient`). What comes back
+        // out is host floats, which the next step is free to keep.
+        let logits = reclaiming(&gpu, || {
+            let state = StreamState::new(gpu.share(), cfg, padded_t);
+            let xres0 = state.gpu.storage_init("stream.generate.x0", &x0);
+            let xres = stream_all_layers(&state, dir, cfg, xres0, padded_t, window_budget);
 
-        // Only the LAST REAL (non-padding) position's hidden state matters
-        // (design decision 2) - pull just that one row host-side rather than
-        // computing a `[padded_t, vocab]` logits matrix nobody reads past
-        // row `t-1`.
-        let hidden_all = state.gpu.read(&xres, (padded_t as usize) * d);
-        let last = (t - 1) as usize;
-        let last_row = hidden_all[last * d..(last + 1) * d].to_vec();
-        let logits = head_logits(&state, cfg, &final_norm_buf, &head, &last_row);
+            // Only the LAST REAL (non-padding) position's hidden state matters
+            // (design decision 2) - pull just that one row host-side rather than
+            // computing a `[padded_t, vocab]` logits matrix nobody reads past
+            // row `t-1`.
+            let hidden_all = state.gpu.read(&xres, (padded_t as usize) * d);
+            let last = (t - 1) as usize;
+            let last_row = hidden_all[last * d..(last + 1) * d].to_vec();
+            head_logits(&state, cfg, &final_norm_buf, &head, &last_row)
+        });
+        passes += 1;
 
         let next = sample_logits(&logits, temperature, top_k, top_p, &mut rng);
         if eos.contains(&next) {

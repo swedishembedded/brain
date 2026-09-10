@@ -104,6 +104,41 @@ pub fn wait_timeout_ns() -> u64 {
     wait_timeout().as_nanos().min(u64::MAX as u128) as u64
 }
 
+/// How many bytes of dropped-but-not-yet-reclaimed device memory a backend
+/// tolerates before it refuses the next allocation - `device_max` (the
+/// device's own single-buffer ceiling) unless `BRAIN_GPU_RECLAIM_CEILING`
+/// names a byte count.
+///
+/// The default is the right production number and is explained where the
+/// check lives (`backend_wgpu::WgpuBackend::track`). The override exists for
+/// ONE reason: the failure it guards against is only reachable in production
+/// at multi-gigabyte scale, so a test that must actually cross the ceiling
+/// would otherwise have to allocate gigabytes. Lowering the ceiling lets the
+/// same mechanism be crossed with megabyte buffers in a second - see
+/// `gpu_core::Transient`'s own tests.
+///
+/// Resolved ONCE per process (this is read on every device allocation; a
+/// `getenv` there would be a syscall-ish lookup per buffer), so a test that
+/// wants a different ceiling needs its own process - the same shape and same
+/// rationale as `memauth::limits`.
+pub fn reclaim_ceiling(device_max: u64) -> u64 {
+    static OVERRIDE: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    OVERRIDE
+        .get_or_init(|| parse_reclaim_ceiling(std::env::var("BRAIN_GPU_RECLAIM_CEILING").ok().as_deref()))
+        .unwrap_or(device_max)
+}
+
+/// [`reclaim_ceiling`]'s parsing rule as a pure function - same reason
+/// [`parse_wait_timeout`] is factored out: testable without mutating a
+/// process-global every other test in the binary would race.
+///
+/// Anything that is not a strictly positive integer is ignored rather than
+/// clamped, so a bad value falls back to the device's own ceiling instead of
+/// turning the check off (`0`) or making it fire immediately.
+fn parse_reclaim_ceiling(raw: Option<&str>) -> Option<u64> {
+    raw.and_then(|v| v.trim().parse::<u64>().ok()).filter(|v| *v > 0)
+}
+
 // ---- mutual exclusion over the physical device ------------------------------
 
 /// The GPU class: every logical device opened on a graphics card, whether
@@ -417,6 +452,18 @@ mod tests {
         }
         assert_eq!(parse_wait_timeout(Some("1200")), Duration::from_secs(1200));
         assert_eq!(parse_wait_timeout(Some("0.5")), Duration::from_millis(500));
+    }
+
+    /// A malformed reclaim ceiling must fall back to the device's own limit,
+    /// never disable the check (`0` would make every pending byte legal) and
+    /// never make it fire on the first allocation.
+    #[test]
+    fn a_bad_reclaim_ceiling_falls_back_to_the_device_limit() {
+        for bad in [None, Some(""), Some("0"), Some("-1"), Some("abc"), Some("1.5")] {
+            assert_eq!(parse_reclaim_ceiling(bad), None, "{bad:?} must not override the device limit");
+        }
+        assert_eq!(parse_reclaim_ceiling(Some("4194304")), Some(4 << 20));
+        assert_eq!(parse_reclaim_ceiling(Some(" 4194304 ")), Some(4 << 20));
     }
 
     /// The kernel-list shim must survive the round trip into a worker thread

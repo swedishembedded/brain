@@ -1186,6 +1186,24 @@ pub trait Backend: Send + Sync {
         u64::MAX
     }
 
+    /// Bytes of device memory whose last host handle has been DROPPED but
+    /// which the driver has not been told it may reclaim yet - i.e. what a
+    /// [`Self::poll_wait`] would hand back right now.
+    ///
+    /// Non-zero only on backends that defer reclaim to a completed poll
+    /// (`backend-wgpu`); the default `0` is the honest answer for a backend
+    /// that frees on drop, and a caller must read it as "nothing is waiting",
+    /// never as "this backend does not count".
+    ///
+    /// Exists so the accumulation this engine keeps re-introducing - a loop
+    /// that builds a fresh set of per-layer device buffers every iteration
+    /// and never polls - is OBSERVABLE in a test at kilobyte scale, instead
+    /// of only being detectable by the multi-gigabyte assertion that fires on
+    /// real checkpoints. See `gpu_core::Transient`.
+    fn pending_reclaim_bytes(&self) -> u64 {
+        0
+    }
+
     /// What this device can actually do - see [`DeviceCaps`]. Filled at
     /// construction; querying is a cached read, never a device round-trip.
     fn caps(&self) -> DeviceCaps;

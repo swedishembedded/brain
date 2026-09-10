@@ -137,7 +137,7 @@
 //! discipline), not a numerical one.
 
 use checkpoint::safetensors::StTensor;
-use gpu_core::{f, DeviceBuffer, Gpu, Step};
+use gpu_core::{f, DeviceBuffer, Gpu, Step, Transient};
 use vae::blocks::Tensors;
 
 use crate::import::validate_manifest;
@@ -616,8 +616,16 @@ struct DetBlockWeights {
     hidden: u32,
 }
 
-fn upload_det_block(gpu: &Gpu, w: &Tensors, prefix: &str, dim: u32, head_dim: u32) -> DetBlockWeights {
-    DetBlockWeights {
+/// One deterministic block's weights, uploaded for ONE iteration of
+/// [`run_det_stage`]'s block loop.
+///
+/// A [`Transient`], so the block that just ran hands its device memory back
+/// before the next block's upload asks for more - a stage's blocks are
+/// uploaded and thrown away one at a time, which is exactly the shape that
+/// accumulates a whole stage's weights on the card otherwise. See
+/// `gpu_core::transient`.
+fn upload_det_block<'g>(gpu: &'g Gpu, w: &Tensors, prefix: &str, dim: u32, head_dim: u32) -> Transient<'g, DetBlockWeights> {
+    Transient::on(gpu, DetBlockWeights {
         attn: upload_attn(gpu, w, &format!("{prefix}.attn"), head_dim),
         norm1: upload(gpu, tget(w, &format!("{prefix}.norm1.weight"))),
         norm2: upload(gpu, tget(w, &format!("{prefix}.norm2.weight"))),
@@ -625,7 +633,7 @@ fn upload_det_block(gpu: &Gpu, w: &Tensors, prefix: &str, dim: u32, head_dim: u3
         w_up: upload(gpu, tget(w, &format!("{prefix}.mlp.w_up.weight"))),
         w_down: upload(gpu, tget(w, &format!("{prefix}.mlp.w_down.weight"))),
         hidden: NaDecoderConfig::hidden(dim),
-    }
+    })
 }
 
 /// `NABlock.forward`: `x = x + attn(norm1(x)); x = x + swiglu(norm2(x))` -
@@ -836,8 +844,11 @@ struct DiffBlockWeights {
     scale_shift_table: Vec<f32>,
 }
 
-fn upload_diff_block(gpu: &Gpu, w: &Tensors, prefix: &str, dim: u32, head_dim: u32) -> DiffBlockWeights {
-    DiffBlockWeights {
+/// One diffusion block's weights, uploaded for ONE iteration of
+/// [`forward_diff`]'s block loop - a [`Transient`] for the same reason
+/// [`upload_det_block`] is one.
+fn upload_diff_block<'g>(gpu: &'g Gpu, w: &Tensors, prefix: &str, dim: u32, head_dim: u32) -> Transient<'g, DiffBlockWeights> {
+    Transient::on(gpu, DiffBlockWeights {
         attn: upload_attn(gpu, w, &format!("{prefix}.attn"), head_dim),
         norm1: upload(gpu, tget(w, &format!("{prefix}.norm1.weight"))),
         norm2: upload(gpu, tget(w, &format!("{prefix}.norm2.weight"))),
@@ -848,7 +859,7 @@ fn upload_diff_block(gpu: &Gpu, w: &Tensors, prefix: &str, dim: u32, head_dim: u
         context_proj_w: upload(gpu, tget(w, &format!("{prefix}.context_proj.weight"))),
         context_proj_b: upload(gpu, tget(w, &format!("{prefix}.context_proj.bias"))),
         scale_shift_table: tget(w, &format!("{prefix}.scale_shift_table")).to_vec(),
-    }
+    })
 }
 
 /// `CombinedDiffusionNABlock.forward_combined`: context injection (`x = x +

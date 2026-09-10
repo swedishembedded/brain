@@ -74,7 +74,7 @@
 //! is the match.
 
 
-use gpu_core::{f, DeviceBuffer, Gpu, Step};
+use gpu_core::{f, DeviceBuffer, Gpu, Step, Transient};
 use vae::blocks::Tensors;
 
 use crate::config::{LtxAudioDitConfig, LtxDitConfig};
@@ -1106,14 +1106,21 @@ fn mlp_sublayer(gpu: &Gpu, s: &mut Vec<Step>, w: &FfWeights, ones: &DeviceBuffer
 impl LtxBlock {
     /// `weights`: the checkpoint's tensors, keyed by canonical name (see
     /// `crate::dit::load_tiny_weights`). `prefix`: e.g. `"transformer_blocks.0"`.
-    pub fn on(gpu: Gpu, cfg: &LtxDitConfig, weights: &Tensors, prefix: &str, tokens: u32, context_len: u32) -> LtxBlock {
+    ///
+    /// Returns a [`Transient`], not a bare block: this block's weights are
+    /// uploaded into fresh device buffers here, and every caller builds one
+    /// per iteration of a block stack. The guard is what reclaims them at the
+    /// end of the iteration - see `gpu_core::transient` for the accumulation
+    /// that shape leaks when the reclaim is left to the caller to remember.
+    pub fn on<'g>(gpu: &'g Gpu, cfg: &LtxDitConfig, weights: &Tensors, prefix: &str, tokens: u32, context_len: u32) -> Transient<'g, LtxBlock> {
         cfg.assert_supported();
         let dim = cfg.inner_dim as usize;
-        let w = BlockWeights::upload(&gpu, weights, prefix, "", dim, cfg.apply_gated_attention);
-        let ones_t = gpu.storage(dim as u64);
-        wf(&gpu, &ones_t, &vec![1.0f32; dim]);
+        let g = gpu.share();
+        let w = BlockWeights::upload(&g, weights, prefix, "", dim, cfg.apply_gated_attention);
+        let ones_t = g.storage(dim as u64);
+        wf(&g, &ones_t, &vec![1.0f32; dim]);
         let _ = tokens;
-        LtxBlock { gpu, cfg: *cfg, w, context_len, ones_t }
+        Transient::on(gpu, LtxBlock { gpu: g, cfg: *cfg, w, context_len, ones_t })
     }
 
     /// One block forward.
@@ -1321,19 +1328,22 @@ pub struct LtxAvBlock {
 }
 
 impl LtxAvBlock {
-    /// `weights`/`prefix`: same convention as [`LtxBlock::on`].
-    pub fn on(gpu: Gpu, vcfg: &LtxDitConfig, acfg: &LtxAudioDitConfig, weights: &Tensors, prefix: &str, v_ctx_len: u32, a_ctx_len: u32) -> LtxAvBlock {
+    /// `weights`/`prefix`: same convention as [`LtxBlock::on`], including why
+    /// this hands back a [`Transient`] - and doubly so here, since an AV block
+    /// uploads BOTH streams' weights plus the cross-modal set per iteration.
+    pub fn on<'g>(gpu: &'g Gpu, vcfg: &LtxDitConfig, acfg: &LtxAudioDitConfig, weights: &Tensors, prefix: &str, v_ctx_len: u32, a_ctx_len: u32) -> Transient<'g, LtxAvBlock> {
         vcfg.assert_supported();
         let vdim = vcfg.inner_dim as usize;
         let adim = acfg.inner_dim as usize;
-        let vw = BlockWeights::upload(&gpu, weights, prefix, "", vdim, vcfg.apply_gated_attention);
-        let aw = BlockWeights::upload(&gpu, weights, prefix, "audio_", adim, vcfg.apply_gated_attention);
-        let avw = AvCrossWeights::upload(&gpu, weights, prefix, vdim, adim, vcfg.apply_gated_attention);
-        let ones_v = gpu.storage(vdim as u64);
-        wf(&gpu, &ones_v, &vec![1.0f32; vdim]);
-        let ones_a = gpu.storage(adim as u64);
-        wf(&gpu, &ones_a, &vec![1.0f32; adim]);
-        LtxAvBlock { gpu, vcfg: *vcfg, acfg: *acfg, vw, aw, avw, v_ctx_len, a_ctx_len, ones_v, ones_a }
+        let g = gpu.share();
+        let vw = BlockWeights::upload(&g, weights, prefix, "", vdim, vcfg.apply_gated_attention);
+        let aw = BlockWeights::upload(&g, weights, prefix, "audio_", adim, vcfg.apply_gated_attention);
+        let avw = AvCrossWeights::upload(&g, weights, prefix, vdim, adim, vcfg.apply_gated_attention);
+        let ones_v = g.storage(vdim as u64);
+        wf(&g, &ones_v, &vec![1.0f32; vdim]);
+        let ones_a = g.storage(adim as u64);
+        wf(&g, &ones_a, &vec![1.0f32; adim]);
+        Transient::on(gpu, LtxAvBlock { gpu: g, vcfg: *vcfg, acfg: *acfg, vw, aw, avw, v_ctx_len, a_ctx_len, ones_v, ones_a })
     }
 
     /// One AV block forward - see this struct's doc for the exact op order.
@@ -2241,7 +2251,7 @@ impl LtxBlockQ {
     /// come from a whole-model fp32 materialization: [`load_block_tensors_from_source`]
     /// builds exactly this one block's own tensors straight off a real GGUF
     /// `checkpoint::TensorSource` (`crate::gguf_src::LtxvGgufSource`).
-    pub fn on(gpu: Gpu, cfg: &LtxDitConfig, weights: &Tensors, prefix: &str, tokens: u32, context_len: u32, tier: QTier) -> LtxBlockQ {
+    pub fn on<'g>(gpu: &'g Gpu, cfg: &LtxDitConfig, weights: &Tensors, prefix: &str, tokens: u32, context_len: u32, tier: QTier) -> Transient<'g, LtxBlockQ> {
         cfg.assert_supported();
         let dim = cfg.inner_dim as usize;
         let cached = QBlockWeights::quantize_host(weights, prefix, dim, cfg.apply_gated_attention, tier);
@@ -2258,7 +2268,23 @@ impl LtxBlockQ {
     /// step that Phase 8 attributed to GGUF read+dequant+quantize into a one-time cost
     /// paid on a generation's first forward call instead of on every one of
     /// its ~20-50 steps.
-    pub fn on_cached(gpu: Gpu, cfg: &LtxDitConfig, cached: &CachedQBlockWeights, tokens: u32, context_len: u32, tier: QTier) -> LtxBlockQ {
+    pub fn on_cached<'g>(gpu: &'g Gpu, cfg: &LtxDitConfig, cached: &CachedQBlockWeights, tokens: u32, context_len: u32, tier: QTier) -> Transient<'g, LtxBlockQ> {
+        Transient::on(gpu, Self::resident_on_cached(gpu.share(), cfg, cached, tokens, context_len, tier))
+    }
+
+    /// [`Self::on_cached`] for a block that is deliberately KEPT - a
+    /// [`crate::devres`] residency slot, which holds its blocks across whole
+    /// forwards and re-uses them - so it hands back the bare block with no
+    /// reclaim guard attached.
+    ///
+    /// The distinction is the point: `on_cached` is the per-iteration
+    /// constructor and reclaims for you, this one names residency in its own
+    /// signature, and a caller that picks the wrong one is visible at the call
+    /// site rather than only under a 24 GiB checkpoint. A resident block's
+    /// device memory is reclaimed when its SLOT is released, which is the
+    /// window's job (`BlockWindow::acquire`), not a per-iteration concern.
+    #[allow(clippy::too_many_arguments)]
+    pub fn resident_on_cached(gpu: Gpu, cfg: &LtxDitConfig, cached: &CachedQBlockWeights, tokens: u32, context_len: u32, tier: QTier) -> LtxBlockQ {
         cfg.assert_supported();
         let dim = cfg.inner_dim as usize;
         let w = QBlockWeights::from_cached(&gpu, cached);
@@ -2925,16 +2951,24 @@ pub struct LtxAvBlockQ {
 impl LtxAvBlockQ {
     /// `weights`/`prefix`: same convention as [`LtxAvBlock::on`].
     #[allow(clippy::too_many_arguments)]
-    pub fn on(gpu: Gpu, vcfg: &LtxDitConfig, acfg: &LtxAudioDitConfig, weights: &Tensors, prefix: &str, v_ctx_len: u32, a_ctx_len: u32, tier: QTier) -> LtxAvBlockQ {
+    pub fn on<'g>(gpu: &'g Gpu, vcfg: &LtxDitConfig, acfg: &LtxAudioDitConfig, weights: &Tensors, prefix: &str, v_ctx_len: u32, a_ctx_len: u32, tier: QTier) -> Transient<'g, LtxAvBlockQ> {
         let cached = CachedQAvBlockWeights::quantize(weights, prefix, vcfg, acfg, tier);
         LtxAvBlockQ::on_cached(gpu, vcfg, acfg, &cached, v_ctx_len, a_ctx_len, tier)
     }
 
     /// [`Self::on`]'s cached twin - no GGUF read and no CPU quantization, only
-    /// device uploads of already-quantized host bytes. The constructor
-    /// [`crate::devres::AvDitSession`] uses on every (re-)upload.
+    /// device uploads of already-quantized host bytes.
     #[allow(clippy::too_many_arguments)]
-    pub fn on_cached(gpu: Gpu, vcfg: &LtxDitConfig, acfg: &LtxAudioDitConfig, cached: &CachedQAvBlockWeights, v_ctx_len: u32, a_ctx_len: u32, tier: QTier) -> LtxAvBlockQ {
+    pub fn on_cached<'g>(gpu: &'g Gpu, vcfg: &LtxDitConfig, acfg: &LtxAudioDitConfig, cached: &CachedQAvBlockWeights, v_ctx_len: u32, a_ctx_len: u32, tier: QTier) -> Transient<'g, LtxAvBlockQ> {
+        Transient::on(gpu, Self::resident_on_cached(gpu.share(), vcfg, acfg, cached, v_ctx_len, a_ctx_len, tier))
+    }
+
+    /// [`Self::on_cached`] for a KEPT block - the constructor
+    /// [`crate::devres::AvDitSession`]'s residency slots use on every
+    /// (re-)upload. See [`LtxBlockQ::resident_on_cached`] for why residency
+    /// gets its own named constructor instead of the guarded default.
+    #[allow(clippy::too_many_arguments)]
+    pub fn resident_on_cached(gpu: Gpu, vcfg: &LtxDitConfig, acfg: &LtxAudioDitConfig, cached: &CachedQAvBlockWeights, v_ctx_len: u32, a_ctx_len: u32, tier: QTier) -> LtxAvBlockQ {
         vcfg.assert_supported();
         let w = QAvBlockWeights::from_cached(&gpu, cached);
         let up = |v: &[f32]| -> DeviceBuffer {
@@ -3315,14 +3349,22 @@ impl EmbeddingsConnector {
     /// stream (`crate::config::LtxDitConfig::connector_attention_head_dim`'s
     /// doc).
     #[allow(clippy::too_many_arguments)]
-    pub fn on(gpu: Gpu, w: &Tensors, prefix: &str, dim: u32, heads: u32, head_dim: u32, num_layers: u32, num_registers: u32, gated: bool, norm_output: bool, theta: f64, max_pos: &[u32], eps: f32) -> EmbeddingsConnector {
+    ///
+    /// A [`Transient`] for the same reason [`LtxBlock::on`] is one: the whole
+    /// connector stack's weights are uploaded here, used for one call, and
+    /// thrown away - and it is built immediately BEFORE the block stack that
+    /// then allocates per block, so leaving its bytes unreclaimed is exactly
+    /// the head start the accumulation needs.
+    #[allow(clippy::too_many_arguments)]
+    pub fn on<'g>(gpu: &'g Gpu, w: &Tensors, prefix: &str, dim: u32, heads: u32, head_dim: u32, num_layers: u32, num_registers: u32, gated: bool, norm_output: bool, theta: f64, max_pos: &[u32], eps: f32) -> Transient<'g, EmbeddingsConnector> {
         assert_eq!(heads * head_dim, dim, "embeddings connector: heads*head_dim ({}) must equal dim ({dim})", heads * head_dim);
         let registers = tget(w, &format!("{prefix}.learnable_registers")).to_vec();
         assert_eq!(registers.len(), (num_registers * dim) as usize, "{prefix}.learnable_registers must be [num_registers, dim]");
-        let blocks = (0..num_layers).map(|l| ConnectorBlockWeights::upload(&gpu, w, &format!("{prefix}.transformer_1d_blocks.{l}"), gated)).collect();
-        let ones = gpu.storage(dim as u64);
-        wf(&gpu, &ones, &vec![1.0f32; dim as usize]);
-        EmbeddingsConnector { gpu, dim, heads, head_dim, num_registers, norm_output, theta, max_pos: max_pos.to_vec(), eps, registers, blocks, ones }
+        let g = gpu.share();
+        let blocks = (0..num_layers).map(|l| ConnectorBlockWeights::upload(&g, w, &format!("{prefix}.transformer_1d_blocks.{l}"), gated)).collect();
+        let ones = g.storage(dim as u64);
+        wf(&g, &ones, &vec![1.0f32; dim as usize]);
+        Transient::on(gpu, EmbeddingsConnector { gpu: g, dim, heads, head_dim, num_registers, norm_output, theta, max_pos: max_pos.to_vec(), eps, registers, blocks, ones })
     }
 
     /// `hidden`: `[s, dim]` raw (already `caption_projection`'d, per

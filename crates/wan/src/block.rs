@@ -40,7 +40,7 @@
 //! the flash kernel's barriers. `BRAIN_WAN_ATTN=flash|chunked` forces either,
 //! which is what lets one parity test prove both paths agree.
 
-use gpu_core::{f, DeviceBuffer, Gpu, Step};
+use gpu_core::{f, DeviceBuffer, Gpu, Step, Transient};
 use model::block::{chunked_bidir_fwd, flash_bidir_fwd, flash_gate, CrossIds, FlashIds, GemmVariants, LayerNormIds};
 
 // Kernel-table indices (order matches KERNELS).
@@ -918,14 +918,25 @@ pub struct WanBlock {
 }
 
 impl WanBlock {
+    /// A block on a device of its OWN - which is also what reclaims its
+    /// memory: the block holds the only handle to that device, so dropping it
+    /// tears the device down and every buffer with it. A block built on a
+    /// SHARED device has no such backstop and goes through [`Self::on`].
     pub fn new(cfg: &crate::WanConfig, t: &dyn checkpoint::TensorSource, prefix: &str, tokens: u32, device: Option<&str>) -> WanBlock {
-        let gpu = Gpu::open(device, &KERNELS);
-        Self::on(gpu, cfg, t, prefix, tokens)
+        Self::build(Gpu::open(device, &KERNELS), cfg, t, prefix, tokens)
     }
 
     /// [`WanBlock::new`] on an already-open device (so a caller running many
-    /// blocks does not open one per block).
-    pub fn on(gpu: Gpu, cfg: &crate::WanConfig, t: &dyn checkpoint::TensorSource, prefix: &str, tokens: u32) -> WanBlock {
+    /// blocks does not open one per block) - which is the streaming shape, so
+    /// this hands back a [`Transient`] that reclaims this block's uploaded
+    /// weights before the next block's are uploaded. See
+    /// `gpu_core::transient`.
+    pub fn on<'g>(gpu: &'g Gpu, cfg: &crate::WanConfig, t: &dyn checkpoint::TensorSource, prefix: &str, tokens: u32) -> Transient<'g, WanBlock> {
+        Transient::on(gpu, Self::build(gpu.share(), cfg, t, prefix, tokens))
+    }
+
+    /// The one construction body both shapes above share.
+    fn build(gpu: Gpu, cfg: &crate::WanConfig, t: &dyn checkpoint::TensorSource, prefix: &str, tokens: u32) -> WanBlock {
         let d = BlockDims::new(cfg);
         let sel = Sel::new(&gpu);
         let w = BlockWeights::upload(&gpu, t, prefix);
