@@ -760,6 +760,8 @@ pub const PRELU_BWD: &str = include_str!("../wgsl/prelu_bwd.wgsl");
 pub const PRELU_BWD_WG: &str = include_str!("../wgsl/prelu_bwd_wg.wgsl");
 /// `wgsl/qknorm_rope_append_fused.wgsl`
 pub const QKNORM_ROPE_APPEND_FUSED: &str = include_str!("../wgsl/qknorm_rope_append_fused.wgsl");
+/// `wgsl/qknorm_rope_at_fused.wgsl`
+pub const QKNORM_ROPE_AT_FUSED: &str = include_str!("../wgsl/qknorm_rope_at_fused.wgsl");
 /// `wgsl/qknorm_rope_base_fused.wgsl`
 pub const QKNORM_ROPE_BASE_FUSED: &str = include_str!("../wgsl/qknorm_rope_base_fused.wgsl");
 /// `wgsl/qknorm_rope_fused.wgsl`
@@ -1343,6 +1345,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("prelu_bwd", PRELU_BWD),
     ("prelu_bwd_wg", PRELU_BWD_WG),
     ("qknorm_rope_append_fused", QKNORM_ROPE_APPEND_FUSED),
+    ("qknorm_rope_at_fused", QKNORM_ROPE_AT_FUSED),
     ("qknorm_rope_base_fused", QKNORM_ROPE_BASE_FUSED),
     ("qknorm_rope_fused", QKNORM_ROPE_FUSED),
     ("quant_group_sum", QUANT_GROUP_SUM),

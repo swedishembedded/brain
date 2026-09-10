@@ -2009,7 +2009,8 @@ falling back to the original unfused pair on a device without that
 capability. `TalkerGen::step` (the incremental KV-cache decode path, which
 uses the separate `ROPE_AT`/position-uniform-refresh scheme for its cached
 tape) is **explicitly out of scope** - a second, smaller follow-up in the
-same shape M2.3/M2.4 already split, not attempted here.
+same shape M2.3/M2.4 already split, not attempted here. Resolved by M4.6:
+built, on the same test/mutation/clippy bar as this entry.
 
 **Correctness - bit-identical, not merely close**, the same argument M4.2's
 own test makes: normalizing then rotating the same values in the same order
@@ -2038,6 +2039,98 @@ exercise `forward()` through both branches without needing new fixtures).
 --all-features -- -D warnings` clean. `scripts/build/gen-kernel-table.py
 --check` (470 kernels, regenerated) and `check-kernel-selection.sh` both
 clean.
+
+**Commit**: one.
+
+### M4.6 - The decode-step follow-up M4.5 named: `TalkerGen::step`'s own fused QK-norm+RoPE, threaded through the cached decode tape
+
+M4.5 fused QK-norm+RoPE for `TalkerGen::forward_steps` (the prefill/full-
+recompute path) and named `TalkerGen::step` - the incremental KV-cache
+decode path - as a deliberate follow-up, because `step` uses a genuinely
+different mechanism: `build_dec_cache` records the step list ONCE and
+`decode_cached` reuses it for every subsequent token, rewriting a handful of
+position-dependent UNIFORM BUFFERS in place (`PosUniform`'s `RopeQ`/`RopeK`/
+`Append`/`Scores`/`Softmax`/`Apply` variants) rather than re-recording the
+tape per call. M4.5's own fused kernel (`qknorm_rope_base_fused.wgsl`) bakes
+its position into the recorded `Step`'s params array at record time (`pos =
+(row / heads) % tcols`, over rows re-derived from the token count) - the
+wrong shape for a cached tape that is recorded once and replayed at a
+different absolute position every call.
+
+Read `TalkerGen::step`, `build_dec_cache` and `decode_cached` in full before
+deciding anything. `step`'s own QK-norm+RoPE is already four dispatches per
+layer, not the two `forward_steps` had before M4.5: `block::rmsnorm_fwd`
+(baked, constant-shape) for Q and K, then `ROPE_AT` (the decode-step's own
+explicit-absolute-position RoPE kernel, `rope_at.wgsl`) for Q and K, each
+bound to a small reusable uniform buffer via `Gpu::step_buf` and rewritten
+by `pu_params(PosUniform::RopeQ/RopeK, pos)` every `decode_cached` call -
+already the exact rewritable-uniform mechanism this follow-up's central
+question turned on: could the M4.5 kernel's own `tcols` field be threaded
+through the same way, as a rewritable uniform instead of a baked dispatch
+parameter.
+
+**The answer: yes, cleanly, but not by reusing `qknorm_rope_base_fused.wgsl`
+as-is.** That kernel's `pos = (row / heads) % tcols` formula assumes many
+rows span many tokens (`forward_steps`'s prefill shape); a decode step has
+exactly one token per call (`rope_at.wgsl`'s own contract, matching the
+`n_rows = 1` already baked into every `RopeQ`/`RopeK` uniform), so every row
+(one row per head) shares ONE absolute position, not a per-row-derived one.
+Porting `tcols` onto a rewritable uniform unchanged would have kept a
+formula that always computes `pos = 0` for a single-token dispatch (`row /
+heads` truncates to `0` for every row when `heads == rows`) - silently
+wrong, not merely suboptimal, had it shipped uncaught. **New kernel**
+`qknorm_rope_at_fused.wgsl` instead: `qknorm_rope_base_fused.wgsl`'s same
+64-thread-workgroup-per-row, one-barrier, re-read-after-reduction
+normalization half, with `rope_at.wgsl`'s exact rotation math and an
+explicit `pos_base` field the caller writes directly (no row-derived formula
+at all) - a `Params` narrower than either parent (`rows, head_dim, eps,
+rope_base, pos_base`; no `heads`/`tcols` needed since position is constant
+across every row in this calling convention).
+
+**Wired** into `build_dec_cache` as two `QKNORM_ROPE_AT_FUSED` dispatches
+(`PosUniform::QkNormAtQ`/`QkNormAtK`, each a `step_buf`-bound reusable
+uniform refreshed by `pu_params` every `decode_cached` call exactly like
+`RopeQ`/`RopeK` already were), replacing the four separate
+`rmsnorm_fwd`/`ROPE_AT` dispatches, gated on `caps.workgroup_reductions`
+with the same unfused fallback every sibling in this family uses. Per-layer
+QK-norm+RoPE dispatch count in the decode tape: 4 -> 2. Across the real
+Talker's 28 layers (`TalkerConfig::n_layers: 28`), that is 56 fewer
+dispatches PER DECODED TOKEN - not a wall-clock claim, a dispatch-count one:
+`Gpu::step`'s own doc already establishes that at this per-token granularity
+(`n_rows = 1`) the loop is host-dispatch-bound, "tens of microseconds of
+driver work each," which is exactly why `build_dec_cache` itself exists
+(caching the tape once instead of re-recording it every token). Halving one
+of the four position-dependent dispatch categories that survive per token,
+per layer, is a real, mechanically-verified reduction in that same bound,
+independent of this box's thermal/contention noise.
+
+**Correctness - bit-identical, not merely close**, mirroring M4.5's own
+test for the decode-step shape. New test `gen::qk_norm_rope_at_fused_tests::
+qk_norm_rope_at_fused_is_bit_identical_to_the_unfused_pair` steps the cached
+tape forward THREE tokens (`pos` 0, 1, 2 - not only the `pos = 0` case a
+buggy row-derived formula could accidentally get right), then re-computes
+the last layer's Q and K via the unfused `rmsnorm_fwd` -> `ROPE_AT` pair at
+the SAME absolute position on the SAME `q_pre`/`k_pre` inputs the fused
+dispatch consumed, and asserts `assert_eq!` (exact, no tolerance) on both.
+Passed on the first run - the design reasoning above held. **Mutation-
+verified** per this ledger's own F.8: flipping one sign in the new kernel's
+rotation (`+x1*sn` for `-x1*sn`) reproduces an immediate, clear divergence
+(every compared element differs, starting at the first), confirmed by
+re-running the exact new test; reverting restores the exact match,
+confirmed by re-running it again.
+
+**Verified end to end**: `cargo test -p brain-qwen3tts --lib` is 65/65
+green (64 pre-existing + this milestone's one new test) on BOTH
+`BRAIN_DEVICE` values tested - the default (this box's Arc iGPU, where the
+fused kernel actually dispatches) and `cpu` (where `workgroup_reductions` is
+false and the fallback runs instead, so the two independent-oracle KV tests
+- `kv_step_matches_full_recompute`, `kv_step_matches_cpu_talker` - exercise
+`TalkerGen::step` through both branches without new fixtures, the same
+free coverage M4.5's own report noted for its fallback path). `cargo
+clippy -p brain-qwen3tts -p brain-kernels --all-targets --all-features --
+-D warnings` clean. `scripts/build/gen-kernel-table.py --check` (471
+kernels, regenerated via `make kernels-regen` then `make kernels-table`)
+and `check-kernel-selection.sh` both clean.
 
 **Commit**: one.
 

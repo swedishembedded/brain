@@ -57,6 +57,12 @@ const MATMUL_REG3: usize = 16;
 // sibling of qwen3::serve's `qknorm_rope_fused` (M4.2) - see
 // `qknorm_rope_base_fused.wgsl`'s own header for the derivation.
 const QKNORM_ROPE_BASE_FUSED: usize = 17;
+// M4.6: fuses RMSNORM_ROWS + ROPE_AT into one dispatch for the cached-tape
+// decode step - the incremental-decode sibling of QKNORM_ROPE_BASE_FUSED,
+// with an explicit rewritable `pos_base` uniform in place of a row-derived
+// position - see `qknorm_rope_at_fused.wgsl`'s own header for the
+// derivation.
+const QKNORM_ROPE_AT_FUSED: usize = 18;
 
 pub const PIPELINES: &[(&str, &str)] = &[
     ("matmul", kernels::MATMUL),
@@ -77,6 +83,7 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("matmul_gemv", kernels::MATMUL_GEMV),
     ("matmul_reg3", kernels::MATMUL_REG3),
     ("qknorm_rope_base_fused", kernels::QKNORM_ROPE_BASE_FUSED),
+    ("qknorm_rope_at_fused", kernels::QKNORM_ROPE_AT_FUSED),
 ];
 
 /// Which position-dependent uniform a cached decode step needs refreshed each token.
@@ -88,6 +95,12 @@ enum PosUniform {
     Scores,
     Softmax,
     Apply,
+    // M4.6: the fused QKNORM_ROPE_AT_FUSED dispatch's own uniform - same
+    // (buffer, kind) rewrite mechanism as RopeQ/RopeK, one field wider
+    // (rows/head_dim/eps/rope_base are rewritten too, same as RopeQ/RopeK
+    // already rewrite their own constant-across-steps fields every call).
+    QkNormAtQ,
+    QkNormAtK,
 }
 
 /// Per-layer / shared GPU scratch (reused across all layers since the forward is
@@ -525,13 +538,22 @@ impl TalkerGen {
             PosUniform::Scores => vec![nh, group, hd, t, cap, hkv, scale],
             PosUniform::Softmax => vec![nh, t, cap],
             PosUniform::Apply => vec![nh, group, hd, t, cap, hkv],
+            // qknorm_rope_at_fused.wgsl's Params: rows, head_dim, eps,
+            // rope_base, pos_base - rows is the head count in THIS buffer
+            // (nh for Q, nkv for K), matching rmsnorm_fwd's own row count
+            // for a one-token decode step.
+            PosUniform::QkNormAtQ => vec![nh, hd, gpu_core::f(1e-6), theta, pos],
+            PosUniform::QkNormAtK => vec![nkv, hd, gpu_core::f(1e-6), theta, pos],
         }
     }
 
     /// Build the decode tape ONCE: constant-shape steps bake their uniforms; the
-    /// seven position-dependent steps per layer bind reusable uniform buffers that
-    /// [`Self::decode_cached`] refreshes each token. Reused across all tokens, this
-    /// removes the per-token host tape-rebuild the profiler flagged.
+    /// position-dependent steps per layer (seven on a device without
+    /// `workgroup_reductions`, five when QKNORM_ROPE_AT_FUSED collapses the QK
+    /// norm+RoPE pair into two fused pos-dependent dispatches instead of four -
+    /// see M4.6) bind reusable uniform buffers that [`Self::decode_cached`]
+    /// refreshes each token. Reused across all tokens, this removes the
+    /// per-token host tape-rebuild the profiler flagged.
     fn build_dec_cache(&self) -> (Vec<Step>, Vec<(DeviceBuffer, PosUniform)>) {
         let c = &self.cfg;
         let (d, ff, hd) = (c.d_model, c.d_ff, c.head_dim);
@@ -563,10 +585,19 @@ impl TalkerGen {
             s.push(self.mm(tier, &sc.xn1, w(&p("attn.wq.weight")), &sc.q_pre, 1, d, hq));
             s.push(self.mm(tier, &sc.xn1, w(&p("attn.wk.weight")), &sc.k_pre, 1, d, hkv));
             s.push(self.mm(tier, &sc.xn1, w(&p("attn.wv.weight")), &sc.v, 1, d, hkv));
-            s.push(block::rmsnorm_fwd(g, &ids, &sc.q_pre, w(&p("attn.q_norm.weight")), &sc.q, hd, nh));
-            s.push(block::rmsnorm_fwd(g, &ids, &sc.k_pre, w(&p("attn.k_norm.weight")), &sc.k, hd, nkv));
-            add_pos(&mut s, &mut pus, posstep(ROPE_AT, 7, &[&sc.q], nh * half), PosUniform::RopeQ);
-            add_pos(&mut s, &mut pus, posstep(ROPE_AT, 7, &[&sc.k], nkv * half), PosUniform::RopeK);
+            // M4.6: fused QKNORM_ROPE_AT_FUSED (2 dispatches, both
+            // pos-dependent - see qknorm_rope_at_fused.wgsl's own header)
+            // when the device supports cooperative reductions, in place of
+            // the four separate rmsnorm_fwd/ROPE_AT dispatches below.
+            if g.caps().workgroup_reductions {
+                add_pos(&mut s, &mut pus, posstep(QKNORM_ROPE_AT_FUSED, 5, &[&sc.q_pre, w(&p("attn.q_norm.weight")), &sc.q], nh * 64), PosUniform::QkNormAtQ);
+                add_pos(&mut s, &mut pus, posstep(QKNORM_ROPE_AT_FUSED, 5, &[&sc.k_pre, w(&p("attn.k_norm.weight")), &sc.k], nkv * 64), PosUniform::QkNormAtK);
+            } else {
+                s.push(block::rmsnorm_fwd(g, &ids, &sc.q_pre, w(&p("attn.q_norm.weight")), &sc.q, hd, nh));
+                s.push(block::rmsnorm_fwd(g, &ids, &sc.k_pre, w(&p("attn.k_norm.weight")), &sc.k, hd, nkv));
+                add_pos(&mut s, &mut pus, posstep(ROPE_AT, 7, &[&sc.q], nh * half), PosUniform::RopeQ);
+                add_pos(&mut s, &mut pus, posstep(ROPE_AT, 7, &[&sc.k], nkv * half), PosUniform::RopeK);
+            }
             add_pos(&mut s, &mut pus, posstep(KV_APPEND, 2, &[&sc.k, &self.kcache[l]], hkv), PosUniform::Append);
             add_pos(&mut s, &mut pus, posstep(KV_APPEND, 2, &[&sc.v, &self.vcache[l]], hkv), PosUniform::Append);
             add_pos(&mut s, &mut pus, posstep(ATTN_DECODE_SCORES, 7, &[&sc.q, &self.kcache[l], &sc.scores], nh * cap), PosUniform::Scores);
@@ -834,6 +865,86 @@ mod qk_norm_rope_base_fused_tests {
         let fused_k = g.read(&tg.sc.k, (n_rows * nkv * hd) as usize);
         let ref_k = unfused(&tg.sc.k_pre, "attn.k_norm.weight", nkv);
         assert_eq!(fused_k, ref_k, "M4.5: fused K (norm+RoPE) must be bit-identical to the unfused pair");
+    }
+}
+
+/// M4.6: the cached-tape decode step's fused `QKNORM_ROPE_AT_FUSED` dispatch
+/// must be bit-identical to the unfused `rmsnorm_fwd` -> `ROPE_AT` pair it
+/// collapsed - the same argument `qk_norm_rope_base_fused_tests` makes for
+/// the prefill fused kernel, adapted to the decode-step/cached-tape shape:
+/// one row per head (`n_rows = 1`), an absolute `pos_base` rewritten between
+/// decode-tape reuses instead of a row-derived position. Steps the tape
+/// forward THREE tokens (`pos` 0, 1, 2) before comparing, so this is not
+/// exercising only the `pos = 0` case the fused kernel could special-case by
+/// accident.
+#[cfg(test)]
+mod qk_norm_rope_at_fused_tests {
+    use super::*;
+    use crate::config::TalkerConfig;
+    use data::rng::Rng;
+    use std::collections::HashMap;
+
+    fn random_decoder(cfg: &TalkerConfig, seed: u64) -> HashMap<String, Vec<f32>> {
+        let mut rng = Rng::new(seed);
+        let mut map = HashMap::new();
+        for (name, count) in TalkerGen::decoder_param_list(cfg) {
+            let v = if name.contains("ln") || name.ends_with("norm.weight") {
+                vec![1.0f32; count]
+            } else {
+                (0..count).map(|_| rng.next_gaussian() as f32 * 0.08).collect()
+            };
+            map.insert(name, v);
+        }
+        map
+    }
+
+    #[test]
+    fn qk_norm_rope_at_fused_is_bit_identical_to_the_unfused_pair() {
+        let cfg = TalkerConfig::tiny(); // d16 L2 GQA 4/2 hd8 ff32
+        let d = cfg.d_model as usize;
+        let max_t = 8u32;
+        let map = random_decoder(&cfg, 4242);
+        let tg = TalkerGen::from_decoder_map(cfg.clone(), &map, max_t);
+
+        tg.reset_cache();
+        let mut rng = Rng::new(7);
+        for _ in 0..3 {
+            let e: Vec<f32> = (0..d).map(|_| rng.next_gaussian() as f32).collect();
+            tg.step(&e);
+        }
+
+        // `sc.q_pre`/`sc.k_pre`/`sc.q`/`sc.k` are reused every layer AND every
+        // step, so after the loop above they still hold exactly the inputs/
+        // outputs the LAST layer's fused dispatch consumed/produced for the
+        // just-completed step, at `pos = cache_pos() - 1`.
+        let l = cfg.n_layers as usize - 1;
+        let (hd, nh, nkv) = (cfg.head_dim, cfg.n_heads, cfg.n_kv_heads);
+        let pos = tg.cache_pos() - 1;
+        let g = &tg.gpu;
+        let ids = only_fwd_ids();
+        let w = |name: &str| tg.ps.w(&format!("blocks.{l}.{name}"));
+        let theta = cfg.rope_theta;
+
+        // Unfused reference: rmsnorm_fwd then ROPE_AT at the SAME absolute
+        // position, on the SAME q_pre/k_pre inputs the fused dispatch read.
+        let unfused = |x: &DeviceBuffer, weight_name: &str, heads: u32| -> Vec<f32> {
+            let out = g.storage((heads * hd) as u64);
+            let rms_step = block::rmsnorm_fwd(g, &ids, x, w(weight_name), &out, hd, heads);
+            g.submit(&[], &[rms_step]);
+            g.poll_wait();
+            let rope_step = g.step(ROPE_AT, &[&out], &[1, heads, hd, heads * hd, 0, pos, gpu_core::f(theta)], heads * (hd / 2));
+            g.submit(&[], &[rope_step]);
+            g.poll_wait();
+            g.read(&out, (heads * hd) as usize)
+        };
+
+        let fused_q = g.read(&tg.sc.q, (nh * hd) as usize);
+        let ref_q = unfused(&tg.sc.q_pre, "attn.q_norm.weight", nh);
+        assert_eq!(fused_q, ref_q, "M4.6: fused decode-step Q (norm+RoPE-at) must be bit-identical to the unfused pair");
+
+        let fused_k = g.read(&tg.sc.k, (nkv * hd) as usize);
+        let ref_k = unfused(&tg.sc.k_pre, "attn.k_norm.weight", nkv);
+        assert_eq!(fused_k, ref_k, "M4.6: fused decode-step K (norm+RoPE-at) must be bit-identical to the unfused pair");
     }
 }
 
