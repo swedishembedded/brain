@@ -53,6 +53,10 @@ const RMSNORM_ROWS: usize = 14;
 // to the naive `MATMUL` they replace; only the thread mapping differs.
 const MATMUL_GEMV: usize = 15;
 const MATMUL_REG3: usize = 16;
+// M4.5: fuses RMSNORM_ROWS + ROPE_BASE into one dispatch, the non-paged
+// sibling of qwen3::serve's `qknorm_rope_fused` (M4.2) - see
+// `qknorm_rope_base_fused.wgsl`'s own header for the derivation.
+const QKNORM_ROPE_BASE_FUSED: usize = 17;
 
 pub const PIPELINES: &[(&str, &str)] = &[
     ("matmul", kernels::MATMUL),
@@ -72,6 +76,7 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("rmsnorm_rows", kernels::RMSNORM_ROWS),
     ("matmul_gemv", kernels::MATMUL_GEMV),
     ("matmul_reg3", kernels::MATMUL_REG3),
+    ("qknorm_rope_base_fused", kernels::QKNORM_ROPE_BASE_FUSED),
 ];
 
 /// Which position-dependent uniform a cached decode step needs refreshed each token.
@@ -386,6 +391,36 @@ impl TalkerGen {
         &self.codec_embedding[s..s + d]
     }
 
+    /// M4.5: fuses `rmsnorm_fwd` + `rope_fwd` into one dispatch
+    /// (`QKNORM_ROPE_BASE_FUSED`) when the device supports cooperative
+    /// reductions - the non-paged sibling of `qwen3::serve::Engine::
+    /// qk_norm_rope` (M4.2): this engine has no per-row `positions` buffer
+    /// (a plain forward computes every row's RoPE position directly from its
+    /// own row index, `rope_base.wgsl`'s own contract), so the fused kernel
+    /// reproduces that arithmetic instead of requiring one. Falls back to
+    /// the original unfused pair on a device without that capability (the
+    /// CPU JIT), exactly like every other kernel in this family - see
+    /// `qknorm_rope_base_fused.wgsl`'s own header for the derivation and the
+    /// bit-identity argument. `heads` is `nh` for Q, `nkv` for K (the SAME
+    /// `n * heads` flattening `block::rmsnorm_fwd`'s own row count already
+    /// assumes); `n` is this call's row/token count, matching both the
+    /// unfused `rope_fwd`'s `t` argument and this fused kernel's `tcols`.
+    #[allow(clippy::too_many_arguments)]
+    fn qk_norm_rope_base(&self, s: &mut Vec<Step>, ids: &KernelIds, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, hd: u32, heads: u32, n: u32, theta: f32) {
+        let g = &self.gpu;
+        if g.caps().workgroup_reductions {
+            s.push(g.step(
+                QKNORM_ROPE_BASE_FUSED,
+                &[x, w, out],
+                &[n * heads, heads, hd, gpu_core::f(1e-6), gpu_core::f(theta), n],
+                n * heads * 64,
+            ));
+        } else {
+            s.push(block::rmsnorm_fwd(g, ids, x, w, out, hd, n * heads));
+            s.push(block::rope_fwd(g, ids, out, n, heads, hd, heads * hd, n, theta));
+        }
+    }
+
     fn forward_steps(&self, n: u32) -> Vec<Step> {
         let c = &self.cfg;
         let d = c.d_model;
@@ -416,10 +451,10 @@ impl TalkerGen {
             s.push(self.mm(tier, &sc.xn1, w(&p("attn.wq.weight")), &sc.q_pre, n, d, hq));
             s.push(self.mm(tier, &sc.xn1, w(&p("attn.wk.weight")), &sc.k_pre, n, d, hkv));
             s.push(self.mm(tier, &sc.xn1, w(&p("attn.wv.weight")), &sc.v, n, d, hkv));
-            s.push(block::rmsnorm_fwd(g, &ids, &sc.q_pre, w(&p("attn.q_norm.weight")), &sc.q, hd, n * nh));
-            s.push(block::rmsnorm_fwd(g, &ids, &sc.k_pre, w(&p("attn.k_norm.weight")), &sc.k, hd, n * nkv));
-            s.push(block::rope_fwd(g, &ids, &sc.q, n, nh, hd, hq, n, theta));
-            s.push(block::rope_fwd(g, &ids, &sc.k, n, nkv, hd, hkv, n, theta));
+            // M4.5: fused QK-norm+RoPE (2 dispatches) in place of the four
+            // separate rmsnorm/rope pairs above.
+            self.qk_norm_rope_base(&mut s, &ids, &sc.q_pre, w(&p("attn.q_norm.weight")), &sc.q, hd, nh, n, theta);
+            self.qk_norm_rope_base(&mut s, &ids, &sc.k_pre, w(&p("attn.k_norm.weight")), &sc.k, hd, nkv, n, theta);
             s.extend(block::gqa_fwd(g, &ids, &ga, &sc.q, &sc.k, &sc.v, &sc.scores, &sc.probs, &sc.ctx));
             s.push(self.mm(tier, &sc.ctx, w(&p("attn.wo.weight")), &sc.proj, n, hq, d));
             s.push(g.step(ADD2, &[&self.res[l], &sc.proj, &sc.xmid], &[n * d], n * d));
@@ -727,6 +762,78 @@ mod kv_tests {
             let full_ms = t1.elapsed().as_secs_f64() * 1e3 / iters as f64;
             println!("ctx={ctx:>5}: KV step {kv_ms:>7.2} ms/tok ({:>6.1} tok/s)  |  full-recompute {full_ms:>8.2} ms/tok ({:>5.1} tok/s)  |  speedup {:.1}x", 1e3 / kv_ms, 1e3 / full_ms, full_ms / kv_ms);
         }
+    }
+}
+
+/// M4.5: `TalkerGen::qk_norm_rope_base`'s fused dispatch must be bit-
+/// identical to the unfused `rmsnorm_fwd` -> `rope_fwd` pair it collapsed -
+/// not merely close, since normalizing then rotating the same values in the
+/// same order is not a reassociation (the same argument `qwen3::serve`'s own
+/// M4.2 test makes for its paged sibling). Runs against the SAME `q_pre`/
+/// `k_pre` inputs a real `forward()` call's last layer already fused, so
+/// this is a real A/B on real activations, not a synthetic input.
+#[cfg(test)]
+mod qk_norm_rope_base_fused_tests {
+    use super::*;
+    use crate::config::TalkerConfig;
+    use data::rng::Rng;
+    use std::collections::HashMap;
+
+    fn random_decoder(cfg: &TalkerConfig, seed: u64) -> HashMap<String, Vec<f32>> {
+        let mut rng = Rng::new(seed);
+        let mut map = HashMap::new();
+        for (name, count) in TalkerGen::decoder_param_list(cfg) {
+            let v = if name.contains("ln") || name.ends_with("norm.weight") {
+                vec![1.0f32; count]
+            } else {
+                (0..count).map(|_| rng.next_gaussian() as f32 * 0.08).collect()
+            };
+            map.insert(name, v);
+        }
+        map
+    }
+
+    #[test]
+    fn qk_norm_rope_base_fused_is_bit_identical_to_the_unfused_pair() {
+        let cfg = TalkerConfig::tiny(); // d16 L2 GQA 4/2 hd8 ff32
+        let d = cfg.d_model as usize;
+        let max_t = 8u32;
+        let n_rows = 5u32;
+        let map = random_decoder(&cfg, 987);
+        let tg = TalkerGen::from_decoder_map(cfg.clone(), &map, max_t);
+
+        let mut rng = Rng::new(1);
+        let embeds: Vec<f32> = (0..n_rows as usize * d).map(|_| rng.next_gaussian() as f32).collect();
+        let _ = tg.forward(&embeds);
+
+        // `sc.q_pre`/`sc.k_pre`/`sc.q`/`sc.k` are reused every layer, so after
+        // `forward` they still hold exactly the inputs/outputs the LAST
+        // layer's fused dispatch consumed/produced.
+        let l = cfg.n_layers as usize - 1;
+        let (hd, nh, nkv) = (cfg.head_dim, cfg.n_heads, cfg.n_kv_heads);
+        let g = &tg.gpu;
+        let ids = only_fwd_ids();
+        let w = |name: &str| tg.ps.w(&format!("blocks.{l}.{name}"));
+        let theta = cfg.rope_theta;
+
+        let unfused = |x: &DeviceBuffer, weight_name: &str, heads: u32| -> Vec<f32> {
+            let out = g.storage((n_rows * heads * hd) as u64);
+            let rms_step = block::rmsnorm_fwd(g, &ids, x, w(weight_name), &out, hd, n_rows * heads);
+            g.submit(&[], &[rms_step]);
+            g.poll_wait();
+            let rope_step = block::rope_fwd(g, &ids, &out, n_rows, heads, hd, heads * hd, n_rows, theta);
+            g.submit(&[], &[rope_step]);
+            g.poll_wait();
+            g.read(&out, (n_rows * heads * hd) as usize)
+        };
+
+        let fused_q = g.read(&tg.sc.q, (n_rows * nh * hd) as usize);
+        let ref_q = unfused(&tg.sc.q_pre, "attn.q_norm.weight", nh);
+        assert_eq!(fused_q, ref_q, "M4.5: fused Q (norm+RoPE) must be bit-identical to the unfused pair");
+
+        let fused_k = g.read(&tg.sc.k, (n_rows * nkv * hd) as usize);
+        let ref_k = unfused(&tg.sc.k_pre, "attn.k_norm.weight", nkv);
+        assert_eq!(fused_k, ref_k, "M4.5: fused K (norm+RoPE) must be bit-identical to the unfused pair");
     }
 }
 

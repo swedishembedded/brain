@@ -1970,6 +1970,77 @@ made once this session.
 
 **Commit**: one.
 
+### M4.5 - `qwen3tts`'s Talker gets its own fused QK-norm+RoPE - a new kernel, not a wire-up
+
+Opens where the campaign's own re-derivation named a wiring gap: every
+decoder outside `qwen3::serve` still dispatches QK-norm and RoPE as four
+separate kernels per layer. Investigating `qwen3tts`'s Talker
+(`crates/qwen3tts/src/gen.rs`) found the premise half wrong: M4.2's fused
+kernel (`qknorm_rope_fused.wgsl`) is built for `qwen3::serve`'s PAGED
+continuous-batching contract - it reads one absolute position per row from
+a `positions` buffer, because a paged batch mixes independent sequences at
+independent positions in one dispatch. The Talker has no such buffer: its
+unfused `rmsnorm_fwd` + `rope_fwd` pair (`block::rope_fwd`, dispatching
+`rope_base.wgsl`) computes each row's position directly from its own row
+index. The existing fused kernel is not reusable here - reaching the same
+win needs a new kernel for the plain calling convention, confirmed by
+reading `rope.wgsl` (the WRONG file - interleaved pairs, hardcoded theta)
+before finding `rope_base.wgsl` (the RIGHT one, half-split pairs,
+configurable theta, matching `qknorm_rope_fused.wgsl`'s own math) actually
+backs `block::rope_fwd` here (`ROPE = 3` in `qwen3tts::gen`'s own pipeline
+table resolves to `kernels::ROPE_BASE`, not `kernels::ROPE`).
+
+**The kernel**: `qknorm_rope_base_fused.wgsl` - the same 64-thread-
+workgroup-per-row, one-barrier, re-read-after-reduction shape
+`qknorm_rope_fused.wgsl` uses for its normalization half, with
+`rope_base.wgsl`'s exact rotation math for the RoPE half, and `pos = (row /
+heads) % tcols` in place of a `positions[batch]` buffer read - algebraically
+the same address `rope_base.wgsl`'s own `pos = row % tcols` computes over
+its wider `[n_rows, heads*head_dim]` view of the identical bytes (verified,
+not assumed: `rmsnorm_fwd`'s per-head-flattened `[n*heads, head_dim]` output
+and `rope_fwd`'s per-token `[n, heads*head_dim]` input address the SAME
+physical layout, row-major with `head_dim` contiguous per head).
+
+**Wired** as `TalkerGen::qk_norm_rope_base`, replacing the four separate
+`rmsnorm_fwd`/`rope_fwd` calls in `forward_steps` (the prefill/training-
+shaped forward) with two calls to the fused method - one per Q and K - gated
+on `caps.workgroup_reductions` exactly like every sibling in this family,
+falling back to the original unfused pair on a device without that
+capability. `TalkerGen::step` (the incremental KV-cache decode path, which
+uses the separate `ROPE_AT`/position-uniform-refresh scheme for its cached
+tape) is **explicitly out of scope** - a second, smaller follow-up in the
+same shape M2.3/M2.4 already split, not attempted here.
+
+**Correctness - bit-identical, not merely close**, the same argument M4.2's
+own test makes: normalizing then rotating the same values in the same order
+is not a reassociation. New test
+`gen::qk_norm_rope_base_fused_tests::qk_norm_rope_base_fused_is_bit_
+identical_to_the_unfused_pair` runs a real `forward()` call, then
+re-computes the last layer's Q and K via the unfused pair on the SAME
+`q_pre`/`k_pre` inputs the fused dispatch consumed, and asserts `assert_eq!`
+(exact, no tolerance) on both. Passed on the first run - the design
+reasoning above held. **Mutation-verified** per this ledger's own F.8:
+flipping one sign in the WGSL rotation (`+x1*sn` for `-x1*sn`) reproduces a
+clear divergence immediately, on a real subset of elements rather than
+every one (consistent with `pos = 0` rows: `sin(0) = 0` makes the sign
+irrelevant there, so the earliest tokens still agree while later ones
+diverge - the mutation lands exactly where the reasoning predicts, not
+everywhere indiscriminately); reverting restores the exact match.
+
+**Verified end to end**, not just the new unit test: `cargo test -p
+brain-qwen3tts --lib` is 64/64 green on BOTH `BRAIN_DEVICE` values tested -
+the default (this box's Arc iGPU, where the fused kernel actually dispatches)
+and `cpu` (where `workgroup_reductions` is false and the fallback runs
+instead, so the SAME two independent-oracle tests this milestone did not
+write - `kv_step_matches_full_recompute`, `kv_step_matches_cpu_talker` -
+exercise `forward()` through both branches without needing new fixtures).
+`cargo clippy -p brain-qwen3tts -p brain-kernels --all-targets
+--all-features -- -D warnings` clean. `scripts/build/gen-kernel-table.py
+--check` (470 kernels, regenerated) and `check-kernel-selection.sh` both
+clean.
+
+**Commit**: one.
+
 ### M5.7 - Reductions/losses/router family: two real defects fixed (`ce_grad` in `arcface`, `router_gate_sigmoid`'s expert-count cap), one occupancy fix (`bias_grad`), the rest checked
 
 The table's "19 + 5 @opt-2" count for this family does not resolve against
