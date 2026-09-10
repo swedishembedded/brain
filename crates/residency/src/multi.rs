@@ -191,9 +191,13 @@ pub fn pick_devices(cost: &MultiDeviceCost, budgets: &Budgets, exclude: &HashSet
             return None;
         }
         let need = cost.on(d);
-        match budgets.get(d) {
-            Some(b) if b.fits(need) => {}
-            _ => return None,
+        // `fits_on`, not `Budget::fits`: only the former applies the
+        // unified-memory POOL clamp. On a box where the iGPU and the CPU are
+        // the same physical bytes, the raw per-device budget lets a
+        // multi-device claim book both halves of one pool independently -
+        // exactly the double-count `Budgets::set_pool` exists to prevent.
+        if budgets.get(d).is_none() || !budgets.fits_on(d, need) {
+            return None;
         }
     }
     Some(devices)

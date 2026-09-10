@@ -439,7 +439,14 @@ fn build_serving_executor(reserve_gb: u64, models_dir: Option<String>) -> crate:
     // Discover the GPUs' capacity so the scheduler can budget/evict against real VRAM,
     // then narrow to what `--device` made schedulable. With no `--device` the set is
     // every device, which is exactly the "use all the hardware wisely" default.
-    let mut all_gpus = query_gpu_mem();
+    // FREE bytes, not total. `--reserve-gb` is then carved out of what is
+    // actually available, so a card a neighbouring process is already holding
+    // 18 GiB of is budgeted at 6 GiB rather than 24. Budgeting from the card's
+    // SIZE is what let the daemon plan a placement the driver then refused -
+    // the scheduler's own accounting said the card was empty. Same probe the
+    // one-shot placer uses (`crate::capacity`), so the two halves of this
+    // process can no longer disagree about the same card at the same instant.
+    let mut all_gpus = crate::capacity::available_gpus();
     // No NVIDIA GPU, but the wgpu backend can drive an integrated GPU (e.g. Intel
     // Arc on Meteor Lake): budget it as a schedulable `Gpu` lane. Integrated GPUs
     // have no dedicated VRAM - they share system RAM - so size the budget like the
@@ -794,38 +801,16 @@ fn run_apis(a: RunApis) {
     brain_shutdown::exit_now(0);
 }
 
-/// Per-GPU `(canonical index, total_bytes)`.
+/// Per-GPU `(canonical index, total_bytes)` - the card's SIZE.
 ///
-/// Capacities come from `nvidia-smi` (NVML), but NVML enumeration order is not
-/// the placement order - budgets are keyed by **PCI bus id** through the device
-/// registry, so `Device::Gpu(i)` budgets provably describe the same physical
-/// card `gpu<i>` placement binds. Cards nvidia-smi does not report (or a
-/// missing nvidia-smi) fall back to the registry's own VRAM size; with no
-/// registry entries either (no GPU) the list is empty.
+/// Reporting only (`brain devices`, the perf suite's environment block).
+/// Budgets are NOT built from this: a card's size says nothing about how much
+/// of it a neighbouring process is already holding, and budgeting from it is
+/// what let `brain serve` place a 16 GiB model onto a card with 6 GiB
+/// physically free. See [`crate::capacity`], which is the one probe both this
+/// and the free-bytes figure come from.
 pub(crate) fn query_gpu_mem() -> Vec<(u32, u64)> {
-    let mut mem: Vec<(u32, u64)> =
-        gpu_core::devices::gpus().iter().map(|d| (d.index, d.identity.vram_bytes)).collect();
-    let out = std::process::Command::new("nvidia-smi")
-        .args(["--query-gpu=pci.bus_id,memory.total", "--format=csv,noheader,nounits"])
-        .output();
-    if let Ok(o) = out {
-        if o.status.success() {
-            for l in String::from_utf8_lossy(&o.stdout).lines() {
-                let mut it = l.split(',').map(str::trim);
-                let (Some(pci), Some(mib)) = (it.next(), it.next().and_then(|m| m.parse::<u64>().ok()))
-                else {
-                    continue;
-                };
-                if let Some(d) = gpu_core::devices::device_by_pci(pci) {
-                    if let Some(slot) = mem.iter_mut().find(|(i, _)| *i == d.index) {
-                        slot.1 = mib << 20;
-                    }
-                }
-            }
-        }
-    }
-    mem.retain(|&(_, bytes)| bytes > 0);
-    mem
+    crate::capacity::gpu_totals()
 }
 
 /// Old name for [`host_ram_available`], kept as a thin alias - `perf_cli.rs`

@@ -82,6 +82,23 @@ impl Residents {
         }
     }
 
+    /// Mark an instance most-recently-used WITHOUT counting another use.
+    ///
+    /// One job touches its instance twice - once when `claim` takes it, once
+    /// when `release` gives it back - so `uses` counted every job twice.
+    /// `CostAware::score` is `uses * bytes / age`, and while a uniform 2x
+    /// cancels out of the ordering, `uses` is also read as a popularity figure
+    /// in its own right, and "how many jobs has this served" should mean what
+    /// it says. The recency half of `release` is the part that matters (a job
+    /// that ran for ten minutes was in use for those ten minutes), so keep it
+    /// and drop the double count.
+    pub fn touch_recency(&mut self, key: &InstanceKey) {
+        let t = self.next_tick();
+        if let Some(e) = self.map.get_mut(key) {
+            e.last_use = t;
+        }
+    }
+
     /// Pin/unpin an instance (pinned while a job runs on it).
     pub fn set_pinned(&mut self, key: &InstanceKey, pinned: bool) {
         if let Some(e) = self.map.get_mut(key) {

@@ -40,9 +40,29 @@ impl Budget {
         bytes <= self.free()
     }
     pub fn alloc(&mut self, bytes: u64) {
+        // Over-subscription is silent everywhere else: `free()` clamps it to
+        // zero and `usable()` never sees it at all, so the SIZE of the
+        // overshoot is unrecoverable from this API. An eviction planner then
+        // computes its deficit against a free() of 0, evicts exactly the bytes
+        // it asked for, and restores the ACCOUNTING to "fits" while the
+        // physical device is still short by the whole overshoot - a budget
+        // reporting a successful placement onto a card that is about to OOM.
+        // Every production caller checks `fits_on` first, so this is a
+        // landmine rather than a live bug; loud in debug means a future
+        // regression is a test failure instead of silent drift.
+        debug_assert!(
+            self.used + bytes <= self.total.saturating_sub(self.reserved),
+            "Budget::alloc: over-subscribed - {bytes} on top of {} used exceeds the {} usable",
+            self.used,
+            self.total.saturating_sub(self.reserved)
+        );
         self.used += bytes;
     }
     pub fn release(&mut self, bytes: u64) {
+        // Same reasoning in the other direction: releasing more than was
+        // charged floors at zero and desyncs the budget permanently DOWNWARD,
+        // so the device looks emptier than it is forever after.
+        debug_assert!(bytes <= self.used, "Budget::release: releasing {bytes} but only {} is charged", self.used);
         self.used = self.used.saturating_sub(bytes);
     }
 }

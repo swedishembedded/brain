@@ -411,14 +411,22 @@ impl ResidencyManager {
                 return false;
             }
             let need = cost.on(d);
-            let b = match self.budgets.get(d) {
-                Some(b) => b,
-                None => return false,
-            };
-            if b.usable() < need {
+            if self.budgets.get(d).is_none() {
                 return false;
             }
-            if b.fits(need) {
+            // Pool-clamped (`usable_on`/`fits_on`), never the raw per-device
+            // `Budget` - see `multi::pick_devices` for why.
+            if self.budgets.usable_on(d) < need {
+                // PERMANENTLY too large for this device. Reporting that as
+                // "not placeable right now" is what `placeable`'s own escape
+                // hatch exists to avoid: the cost never changes, so every
+                // future round repeats the verdict and the group sits in the
+                // queue forever with no error and no reply. Let it through to
+                // `claim_multi`, which turns the same figure into a real
+                // per-job `ClaimError` - a clean failure instead of a hang.
+                return true;
+            }
+            if self.budgets.fits_on(d, need) {
                 return true;
             }
             let mut only_d = every_device.clone();
@@ -448,7 +456,7 @@ impl ResidencyManager {
         let mut placements: Vec<InstancePlacement> = self
             .residents
             .iter()
-            .map(|(k, e)| InstancePlacement { key: k.clone(), device: e.device, tier: e.tier, mem: e.cost.on(e.device) })
+            .map(|(k, e)| InstancePlacement { key: k.clone(), device: e.device, tier: e.tier, mem: e.cost.resident_on(e.device) })
             .collect();
         placements.sort_by(|a, b| (a.key.model.clone(), a.key.config.clone(), device_order(a.device)).cmp(&(b.key.model.clone(), b.key.config.clone(), device_order(b.device))));
         let mut multi_placements: Vec<MultiInstancePlacement> = self
@@ -576,21 +584,20 @@ impl ResidencyManager {
                             hot_cost.vram.max(hot_cost.ram).max(hot_cost.npu) >> 20
                         )));
                     }
-                    let plan = plan_eviction_with(&*self.eviction, &hot_cost, &self.budgets, &self.residents, std::slice::from_ref(&key), exclude)
-                        .ok_or_else(|| {
-                            ClaimError::NoCapacity(format!(
+                    let plan = plan_eviction_with(&*self.eviction, &hot_cost, &self.budgets, &self.residents, std::slice::from_ref(&key), exclude);
+                    match self.accelerator_before_host(plan, &hot_cost, exclude) {
+                        Some(d) => d,
+                        None => {
+                            return Err(ClaimError::NoCapacity(format!(
                                 "{key} ({} MiB) has no room right now - nothing currently evictable frees enough",
                                 hot_cost.vram.max(hot_cost.ram).max(hot_cost.npu) >> 20
-                            ))
-                        })?;
-                    for victim in &plan.victims {
-                        self.evict_entry(victim);
+                            )))
+                        }
                     }
-                    plan.device
                 }
             };
-            self.budgets.release(entry.device, entry.cost.on(entry.device));
-            self.budgets.alloc(device, hot_cost.on(device));
+            self.budgets.release(entry.device, entry.cost.resident_on(entry.device));
+            self.budgets.alloc(device, hot_cost.resident_on(device));
             self.residents.retier(&key, hot_cost, device, Tier::Hot);
             self.residents.set_pinned(&key, true);
             self.event(format!("promote {key} -> {device:?} (warm->hot)"));
@@ -625,20 +632,19 @@ impl ResidencyManager {
                         cost.vram.max(cost.ram).max(cost.npu) >> 20
                     )));
                 }
-                let plan = plan_eviction_with(&*self.eviction, &cost, &self.budgets, &self.residents, std::slice::from_ref(&key), exclude)
-                    .ok_or_else(|| {
-                        ClaimError::NoCapacity(format!(
+                let plan = plan_eviction_with(&*self.eviction, &cost, &self.budgets, &self.residents, std::slice::from_ref(&key), exclude);
+                match self.accelerator_before_host(plan, &cost, exclude) {
+                    Some(d) => d,
+                    None => {
+                        return Err(ClaimError::NoCapacity(format!(
                             "{key} ({} MiB) has no room right now - nothing currently evictable frees enough",
                             cost.vram.max(cost.ram).max(cost.npu) >> 20
-                        ))
-                    })?;
-                for victim in &plan.victims {
-                    self.evict_entry(victim);
+                        )))
+                    }
                 }
-                plan.device
             }
         };
-        self.budgets.alloc(device, cost.on(device));
+        self.budgets.alloc(device, cost.resident_on(device));
         self.residents.insert(key.clone(), cost, device);
         self.residents.set_pinned(&key, true);
         self.event(format!("promote {key} -> {device:?} (building)"));
@@ -657,7 +663,7 @@ impl ResidencyManager {
     /// The claim is over - do NOT also call [`release`](Self::release).
     pub fn build_failed(&mut self, key: &InstanceKey) {
         if let Some(entry) = self.residents.remove(key) {
-            self.budgets.release(entry.device, entry.cost.on(entry.device));
+            self.budgets.release(entry.device, entry.cost.resident_on(entry.device));
         }
         self.instances.remove(key);
         self.event(format!("build-failed {key}"));
@@ -666,7 +672,9 @@ impl ResidencyManager {
     /// Unpin an instance after a run and mark it most-recently-used.
     pub fn release(&mut self, key: &InstanceKey) {
         self.residents.set_pinned(key, false);
-        self.residents.touch(key);
+        // Recency only: `claim` already counted this job's use (see
+        // `Residents::touch_recency`).
+        self.residents.touch_recency(key);
     }
 
     /// [`Self::claim`]'s multi-device sibling - places (or finds hot) an
@@ -730,40 +738,74 @@ impl ResidencyManager {
                 // single-device eviction planner per device by excluding
                 // every other device, so it cannot "succeed" by picking a
                 // different one than the one actually needed.
+                // TWO passes, and the split is the whole point. The first pass
+                // only PLANS - it mutates nothing - so a device that turns out
+                // to be impossible is discovered before any resident has been
+                // destroyed for it. This loop used to evict device by device
+                // as it went, which meant a claim wanting `[(gpu0, 15 GiB),
+                // (gpu1, 30 GiB)]` on 24 GiB cards destroyed gpu0's 20 GiB
+                // resident and only THEN discovered gpu1 could never hold its
+                // share - and the executor's retry then did it again to
+                // whatever had taken its place. An eviction thrash loop that
+                // got worse on every retry, and the exact inverse of the
+                // invariant `too_large_for_any_device_fails_cleanly_without_
+                // evicting_anything` pins for the single-device path.
+                //
+                // Planning per device is exact rather than merely
+                // conservative: `only_d` restricts each plan to victims on
+                // that ONE device, so no two devices' plans can name the same
+                // victim and the plans cannot interfere.
                 let every_device: HashSet<Device> = self.budgets.devices().collect();
+                let mut victims: Vec<InstanceKey> = Vec::new();
                 for &d in &wanted {
                     if exclude.contains(&d) {
                         return Err(ClaimError::NoCapacity(format!("{key}: device {d:?} is excluded")));
                     }
                     let need = cost.on(d);
-                    let b = self
-                        .budgets
-                        .get(d)
-                        .ok_or_else(|| ClaimError::NoCapacity(format!("{key}: device {d:?} has no budget")))?;
-                    if b.usable() < need {
-                        return Err(ClaimError::NoCapacity(format!(
-                            "{key} ({} MiB on {d:?}) is too large for that device's usable budget",
+                    if self.budgets.get(d).is_none() {
+                        return Err(ClaimError::TooLarge(format!("{key}: device {d:?} has no budget")));
+                    }
+                    // Pool-clamped, so a unified-memory box cannot book the
+                    // same physical bytes twice (see `multi::pick_devices`).
+                    if self.budgets.usable_on(d) < need {
+                        // PERMANENT: no eviction, however aggressive, can make
+                        // this device hold this share. `TooLarge`, not
+                        // `NoCapacity` - the executor retries the latter
+                        // forever, and `placeable_multi` deliberately lets a
+                        // group through to here precisely so it gets a real,
+                        // final error instead of sitting in the queue.
+                        return Err(ClaimError::TooLarge(format!(
+                            "{key} ({} MiB on {d:?}) is too large for that device's usable budget even fully empty",
                             need >> 20
                         )));
                     }
-                    if b.fits(need) {
+                    if self.budgets.fits_on(d, need) {
                         continue; // already fits on this device, nothing to evict here
                     }
                     let mut only_d = every_device.clone();
                     only_d.remove(&d);
                     let plan = plan_eviction_with(&*self.eviction, &synth_cost_for(d, need), &self.budgets, &self.residents, &[], &only_d)
                         .ok_or_else(|| ClaimError::NoCapacity(format!("{key}: cannot free {} MiB on {d:?}", need >> 20)))?;
-                    for victim in &plan.victims {
-                        self.evict_entry(victim);
-                    }
+                    victims.extend(plan.victims);
+                }
+                // Every device is satisfiable; only now destroy anything.
+                for victim in &victims {
+                    self.evict_entry(victim);
                 }
                 pick_devices(&cost, &self.budgets, exclude)
                     .ok_or_else(|| ClaimError::NoCapacity(format!("{key}: does not fit even after eviction")))?
             }
         };
+        // The host bytes are a real charge and must FIT before anything is
+        // reserved - checked here rather than inside `charge_multi_host` so a
+        // refusal happens before the per-device budgets are touched.
+        if cost.ram() > 0 && !devices.contains(&Device::Cpu) && self.budgets.get(Device::Cpu).is_some() && !self.budgets.fits_on(Device::Cpu, cost.ram()) {
+            return Err(ClaimError::NoCapacity(format!("{key}: {} MiB of host RAM does not fit right now", cost.ram() >> 20)));
+        }
         for &d in &devices {
             self.budgets.alloc(d, cost.on(d));
         }
+        self.charge_multi_host(&cost, &devices);
         self.multi_residents.insert(key.clone(), MultiEntry { cost, devices: devices.clone(), pinned: true });
         self.event(format!("promote {key} -> {devices:?} (building, multi-device)"));
         Ok((ClaimedMulti::Build(m), devices, key))
@@ -784,6 +826,7 @@ impl ResidencyManager {
             for &d in &entry.devices {
                 self.budgets.release(d, entry.cost.on(d));
             }
+            self.refund_multi_host(&entry.cost, &entry.devices);
         }
         self.instances.remove(key);
         self.event(format!("build-failed {key} (multi-device)"));
@@ -823,6 +866,7 @@ impl ResidencyManager {
                 for &d in &entry.devices {
                     self.budgets.release(d, entry.cost.on(d));
                 }
+                self.refund_multi_host(&entry.cost, &entry.devices);
                 self.instances.remove(key);
                 self.evictions += 1;
                 self.event(format!("evict {key} <- {:?} (multi-device)", entry.devices));
@@ -880,6 +924,161 @@ impl ResidencyManager {
     /// Not pinned-checked: its only caller (the eviction-planner path above)
     /// already excludes pinned candidates before this ever runs - see
     /// [`Self::evict`] for the pinned-safe public entry point.
+    /// Re-size each accelerator's budget from a LIVE measurement of how much
+    /// of it is free, so a neighbouring process taking or releasing VRAM
+    /// changes what this scheduler believes it may use.
+    ///
+    /// `free` is `(device, bytes free right now)` as the driver reports it -
+    /// which already excludes both this process's own allocations and every
+    /// other process's. The budget's `total` is therefore set to
+    /// `used + free`: what we hold plus what is genuinely still available. Not
+    /// `free` alone, which would double-count our own residents (they are
+    /// already charged in `used` AND absent from `free`) and evict them one by
+    /// one on every refresh.
+    ///
+    /// The `reserved` headroom is preserved: it is a policy figure
+    /// (`--reserve-gb`), not a measurement.
+    ///
+    /// A device the probe does not report is left exactly as it is - a probe
+    /// that cannot see a card must not silently zero it. Likewise the host
+    /// tier, which this never touches: `Device::Cpu`'s budget is host RAM, a
+    /// different measurement with a different meaning.
+    ///
+    /// The budget can legitimately shrink BELOW what is already charged, when
+    /// a neighbour takes bytes we were counting on. That is not an error to
+    /// hide: `Budget::free` reports 0, nothing new is placed, and the eviction
+    /// planner starts reclaiming - which is the correct response to the card
+    /// having been taken out from under us.
+    pub fn refresh_accelerator_capacity(&mut self, free: &[(Device, u64)]) {
+        for &(d, free_now) in free {
+            if matches!(d, Device::Cpu) {
+                continue;
+            }
+            let Some(b) = self.budgets.get_mut(d) else { continue };
+            let want = b.used.saturating_add(free_now);
+            if want != b.total {
+                b.total = want;
+                b.reserved = b.reserved.min(b.total);
+            }
+        }
+    }
+
+    /// Execute an eviction plan, but try a CARD before accepting the host
+    /// tier.
+    ///
+    /// `plan_eviction_with` offers the host tier as its last class, which is
+    /// what makes "never fail" true. It is still the slowest possible answer,
+    /// so before taking it, try the one victim class that planner cannot see:
+    /// an unpinned multi-device resident sitting on a card
+    /// ([`Self::evict_multi_to_fit`]). Order of preference, fastest first:
+    /// single-device eviction on an accelerator, then multi-device eviction on
+    /// an accelerator, then the host tier.
+    fn accelerator_before_host(&mut self, plan: Option<crate::place::EvictionPlan>, cost: &MemCost, exclude: &HashSet<Device>) -> Option<Device> {
+        if let Some(p) = &plan {
+            if p.device != Device::Cpu {
+                let victims = p.victims.clone();
+                let device = p.device;
+                for victim in &victims {
+                    self.evict_entry(victim);
+                }
+                return Some(device);
+            }
+        }
+        if let Some(d) = self.evict_multi_to_fit(cost, exclude) {
+            return Some(d);
+        }
+        let p = plan?;
+        for victim in &p.victims {
+            self.evict_entry(victim);
+        }
+        Some(p.device)
+    }
+
+    /// Free a CARD for a single-device claim by dropping unpinned
+    /// multi-device residents that occupy it.
+    ///
+    /// `plan_eviction_with` reads `self.residents` only; `multi_residents` is
+    /// a separate map it has never seen. So once a large multi-device model
+    /// was resident, every later single-device claim that needed its card got
+    /// `NoCapacity` - forever, with no automatic recovery, because the only
+    /// thing that could release it was an explicit external
+    /// `Executor::evict_multi` call that nothing on the serving path makes.
+    ///
+    /// Plans before it destroys anything, same discipline as `claim_multi`.
+    /// Victims are taken cheapest-first (smallest bytes on that card), which
+    /// is the closest thing to a policy available here: `MultiEntry` carries
+    /// no recency or use count, so `EvictionPolicy` cannot score it. Taking
+    /// the least is at least a bounded, explicable loss. Wiring
+    /// multi-residents into `Residents` so the real policy applies to them is
+    /// the proper fix and is deliberately not attempted here.
+    fn evict_multi_to_fit(&mut self, cost: &MemCost, exclude: &HashSet<Device>) -> Option<Device> {
+        if cost.vram == 0 {
+            return None;
+        }
+        let mut cards: Vec<Device> = self.budgets.gpus().into_iter().filter(|d| !exclude.contains(d)).collect();
+        // Emptiest card first: fewest victims to reach the target.
+        cards.sort_by_key(|&d| (std::cmp::Reverse(self.budgets.free_on(d)), format!("{d:?}")));
+        for d in cards {
+            if self.budgets.usable_on(d) < cost.vram {
+                continue; // can never fit here, even emptied
+            }
+            let mut victims: Vec<(InstanceKey, u64)> = self
+                .multi_residents
+                .iter()
+                .filter(|(_, e)| !e.pinned && e.devices.contains(&d))
+                .map(|(k, e)| (k.clone(), e.cost.on(d)))
+                .collect();
+            victims.sort_by_key(|(k, bytes)| (*bytes, format!("{k}")));
+            // Dry run: how far down the list do we have to go, and is it enough?
+            let mut freed = 0u64;
+            let mut take = 0usize;
+            let deficit = cost.vram.saturating_sub(self.budgets.free_on(d));
+            for (_, bytes) in &victims {
+                if freed >= deficit {
+                    break;
+                }
+                freed += bytes;
+                take += 1;
+            }
+            if freed < deficit {
+                continue; // this card cannot be freed enough; destroy nothing
+            }
+            for (k, _) in victims.into_iter().take(take) {
+                self.evict_multi(&k);
+            }
+            if self.budgets.fits_on(d, cost.vram) {
+                return Some(d);
+            }
+        }
+        None
+    }
+
+    /// Host RAM a multi-device instance holds "regardless of accelerator
+    /// placement" - `MultiDeviceCost::ram`'s own words. It was declared by
+    /// every multi-device model in the repo and charged by nothing: the field
+    /// had no `alloc` call site anywhere, so a model staging GiB-scale bytes
+    /// on the host was invisible to the host budget and an unbounded number of
+    /// them could be admitted.
+    ///
+    /// Skipped when the cost already names `Device::Cpu` explicitly - that
+    /// entry is charged by the per-device loop, and charging both would
+    /// double-count one model's own host bytes.
+    fn charge_multi_host(&mut self, cost: &crate::multi::MultiDeviceCost, devices: &[Device]) {
+        let ram = cost.ram();
+        if ram > 0 && !devices.contains(&Device::Cpu) && self.budgets.get(Device::Cpu).is_some() {
+            self.budgets.alloc(Device::Cpu, ram);
+        }
+    }
+
+    /// The exact inverse of [`Self::charge_multi_host`] - same condition, so
+    /// the two cannot drift and leave the host budget permanently short.
+    fn refund_multi_host(&mut self, cost: &crate::multi::MultiDeviceCost, devices: &[Device]) {
+        let ram = cost.ram();
+        if ram > 0 && !devices.contains(&Device::Cpu) && self.budgets.get(Device::Cpu).is_some() {
+            self.budgets.release(Device::Cpu, ram);
+        }
+    }
+
     fn evict_entry(&mut self, key: &InstanceKey) {
         if let Some(entry) = self.residents.get(key).copied() {
             if entry.tier == Tier::Hot {
@@ -897,9 +1096,9 @@ impl ResidencyManager {
                     // a CPU-Hot instance, whose own Hot bytes are not counted
                     // as freed here; demoting CPU→CPU-warm is not a shape any
                     // current caller produces.)
-                    if self.budgets.fits_on(Device::Cpu, warm_cost.on(Device::Cpu)) && handle.lock().unwrap().demote(Tier::Warm).is_ok() {
-                        self.budgets.release(entry.device, entry.cost.on(entry.device));
-                        self.budgets.alloc(Device::Cpu, warm_cost.on(Device::Cpu));
+                    if self.budgets.fits_on(Device::Cpu, warm_cost.resident_on(Device::Cpu)) && handle.lock().unwrap().demote(Tier::Warm).is_ok() {
+                        self.budgets.release(entry.device, entry.cost.resident_on(entry.device));
+                        self.budgets.alloc(Device::Cpu, warm_cost.resident_on(Device::Cpu));
                         self.residents.retier(key, warm_cost, Device::Cpu, Tier::Warm);
                         self.event(format!("demote {key} <- {:?} (warm)", entry.device));
                         return;
@@ -911,7 +1110,7 @@ impl ResidencyManager {
         // `demote` isn't supported, the entry was already below Hot, or the
         // model/instance lookup above came up empty.
         if let Some(entry) = self.residents.remove(key) {
-            self.budgets.release(entry.device, entry.cost.on(entry.device));
+            self.budgets.release(entry.device, entry.cost.resident_on(entry.device));
             self.instances.remove(key); // drops the Instance → frees the GPU
             self.evictions += 1;
             self.event(format!("evict {key} <- {:?}", entry.device));
@@ -1381,5 +1580,184 @@ mod tests {
             self.live.fetch_add(1, Ordering::SeqCst);
             Ok(Box::new(FakeInst { live: self.live.clone() }))
         }
+    }
+
+    /// **Rollback.** `claim_multi` used to evict device by device as it went,
+    /// so a claim wanting `[(gpu0, 1 GB), (gpu1, 30 GB)]` destroyed gpu0's
+    /// resident and only THEN discovered gpu1 could never hold its share. The
+    /// executor retries `NoCapacity`, so every retry destroyed more - an
+    /// eviction thrash loop that got worse, not better. Nothing may be
+    /// evicted for a claim that cannot succeed.
+    #[test]
+    fn a_multi_device_claim_that_cannot_succeed_evicts_nothing_on_the_way() {
+        let live = Arc::new(AtomicU32::new(0));
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 24 * GB, 0).set(Device::Gpu(1), 24 * GB, 0);
+        let mut mgr = ResidencyManager::new(budgets);
+        // A single-device resident filling gpu0 - the victim the old code took.
+        mgr.register(Arc::new(Fake { name: "victim".into(), vram: 23 * GB, live: live.clone() }));
+        mgr.run("victim", "run", &Invocation::new(), &mut |_| {}).expect("victim resident");
+        assert_eq!(mgr.resident_count(), 1);
+
+        // ...and a multi model whose gpu0 share NEEDS that resident evicted
+        // (10 GB against 1 GB free) while its gpu1 share can never fit a
+        // 24 GB card at all. The old loop planned and evicted gpu0 first, then
+        // discovered gpu1, and returned with the victim already destroyed.
+        mgr.register_multi(Arc::new(MultiFakeRollback { live: live.clone() }));
+        let err = match claim_multi_built(&mut mgr, "rollback") {
+            Ok(_) => panic!("gpu1's 30 GB share can never fit a 24 GB card"),
+            Err(e) => e,
+        };
+        assert!(err.contains("too large"), "{err}");
+        assert_eq!(mgr.resident_count(), 1, "the impossible claim must not have destroyed the resident");
+    }
+
+    /// **Multi-device residents are eviction victims too.** `plan_eviction_with`
+    /// reads `residents` only; `multi_residents` is a separate map it has never
+    /// seen. So once a large multi-device model was resident, every later
+    /// single-device claim needing its card got `NoCapacity` forever, with no
+    /// automatic recovery - the only thing that could free it was an explicit
+    /// external `evict_multi` call the serving path never makes.
+    #[test]
+    fn a_resident_multi_device_model_can_be_evicted_for_a_single_device_claim() {
+        let live = Arc::new(AtomicU32::new(0));
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 24 * GB, 0).set(Device::Gpu(1), 24 * GB, 0);
+        let mut mgr = ResidencyManager::new(budgets);
+        mgr.register_multi(Arc::new(MultiFake { name: "spanner".into(), per_gpu: 20 * GB, live: live.clone() }));
+        let (_, mkey) = claim_multi_built(&mut mgr, "spanner").expect("multi resident");
+        mgr.release_multi(&mkey); // unpinned: a lane finished with it
+        assert_eq!(mgr.resident_multi_count(), 1);
+
+        // 16 GB fits neither card while the spanner holds 20 GB of each, and
+        // there is no single-device resident anywhere to evict.
+        mgr.register(Arc::new(Fake { name: "later".into(), vram: 16 * GB, live: live.clone() }));
+        mgr.run("later", "run", &Invocation::new(), &mut |_| {}).expect("the spanner must be evictable");
+        assert_eq!(mgr.resident_multi_count(), 0, "the multi-device resident was the only thing in the way");
+        let where_ = mgr.residents.get(&InstanceKey::new("later", "default")).map(|e| e.device);
+        assert!(matches!(where_, Some(Device::Gpu(_))), "the claim must get a CARD, not the host tier: {where_:?}");
+    }
+
+    /// ...but a PINNED one is never taken out from under a running lane.
+    #[test]
+    fn a_pinned_multi_device_resident_is_never_evicted() {
+        let live = Arc::new(AtomicU32::new(0));
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 24 * GB, 0).set(Device::Gpu(1), 24 * GB, 0);
+        budgets.set(Device::Cpu, 128 * GB, 0);
+        let mut mgr = ResidencyManager::new(budgets);
+        mgr.register_multi(Arc::new(MultiFake { name: "spanner".into(), per_gpu: 20 * GB, live: live.clone() }));
+        claim_multi_built(&mut mgr, "spanner").expect("multi resident"); // still pinned
+        mgr.register(Arc::new(Fake { name: "later".into(), vram: 16 * GB, live: live.clone() }));
+        mgr.run("later", "run", &Invocation::new(), &mut |_| {}).expect("the host tier absorbs it instead");
+        assert_eq!(mgr.resident_multi_count(), 1, "a pinned resident must survive");
+        assert_eq!(mgr.residents.get(&InstanceKey::new("later", "default")).map(|e| e.device), Some(Device::Cpu), "slower, but it ran");
+    }
+
+    /// **Host RAM declared by a multi-device model is charged.**
+    /// `MultiDeviceCost::ram` is documented as bytes held "regardless of
+    /// accelerator placement" and had no `alloc` call site anywhere, so an
+    /// unbounded number of GiB-scale host stagings could be admitted against a
+    /// host budget that never moved.
+    #[test]
+    fn a_multi_device_models_host_ram_is_charged_and_refunded() {
+        let live = Arc::new(AtomicU32::new(0));
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 24 * GB, 0).set(Device::Gpu(1), 24 * GB, 0);
+        budgets.set(Device::Cpu, 64 * GB, 0);
+        let mut mgr = ResidencyManager::new(budgets);
+        mgr.register_multi(Arc::new(MultiFakeHost { live: live.clone() }));
+        let (_, key) = claim_multi_built(&mut mgr, "hosty").expect("resident");
+        assert_eq!(mgr.budgets.get(Device::Cpu).unwrap().used, 10 * GB, "the declared host bytes must be charged");
+        mgr.release_multi(&key);
+        assert!(mgr.evict_multi(&key));
+        assert_eq!(mgr.budgets.get(Device::Cpu).unwrap().used, 0, "and released again, exactly");
+    }
+
+    /// gpu0's share needs an eviction to fit; gpu1's can never fit at all.
+    struct MultiFakeRollback {
+        live: Arc<AtomicU32>,
+    }
+    impl ResidentModel for MultiFakeRollback {
+        fn manifest(&self) -> Manifest {
+            Manifest::new("rollback", "fake", vec![ActionSpec::new("run", "run")])
+        }
+        fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+            InstanceKey::new("rollback", "default")
+        }
+        fn estimate(&self, _k: &InstanceKey) -> MemCost {
+            MemCost::new(0, 0)
+        }
+        fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn crate::Instance>, String> {
+            Err("not this model's contract".to_string())
+        }
+    }
+    impl crate::multi::MultiDeviceResidentModel for MultiFakeRollback {
+        fn estimate_multi(&self, _k: &InstanceKey) -> crate::multi::MultiDeviceCost {
+            crate::multi::MultiDeviceCost::new(vec![(Device::Gpu(0), 10 * GB), (Device::Gpu(1), 30 * GB)], 0)
+        }
+        fn activate_multi(&self, _k: &InstanceKey, _devices: &[Device]) -> Result<Box<dyn crate::Instance>, String> {
+            self.live.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::new(FakeInst { live: self.live.clone() }))
+        }
+    }
+
+    struct MultiFakeHost {
+        live: Arc<AtomicU32>,
+    }
+    impl ResidentModel for MultiFakeHost {
+        fn manifest(&self) -> Manifest {
+            Manifest::new("hosty", "fake", vec![ActionSpec::new("run", "run")])
+        }
+        fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+            InstanceKey::new("hosty", "default")
+        }
+        fn estimate(&self, _k: &InstanceKey) -> MemCost {
+            MemCost::new(0, 0)
+        }
+        fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn crate::Instance>, String> {
+            Err("not this model's contract".to_string())
+        }
+    }
+    impl crate::multi::MultiDeviceResidentModel for MultiFakeHost {
+        fn estimate_multi(&self, _k: &InstanceKey) -> crate::multi::MultiDeviceCost {
+            crate::multi::MultiDeviceCost::new(vec![(Device::Gpu(0), GB), (Device::Gpu(1), GB)], 10 * GB)
+        }
+        fn activate_multi(&self, _k: &InstanceKey, _devices: &[Device]) -> Result<Box<dyn crate::Instance>, String> {
+            self.live.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::new(FakeInst { live: self.live.clone() }))
+        }
+    }
+
+    /// **The daemon adapts to VRAM it does not own.** Budgets used to be frozen
+    /// at process start, from the card's TOTAL size, so every byte a
+    /// neighbouring process took or released was invisible: the scheduler
+    /// placed onto a card somebody else had filled, and never noticed when
+    /// they left. `refresh_accelerator_capacity` re-sizes each card from a
+    /// live measurement - what we hold plus what is genuinely still free.
+    #[test]
+    fn a_live_capacity_refresh_tracks_a_neighbouring_process_both_ways() {
+        let live = Arc::new(AtomicU32::new(0));
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 24 * GB, 2 * GB);
+        budgets.set(Device::Cpu, 128 * GB, 0);
+        let mut mgr = ResidencyManager::new(budgets);
+        mgr.register(Arc::new(Fake { name: "m".into(), vram: 8 * GB, live: live.clone() }));
+        mgr.run("m", "run", &Invocation::new(), &mut |_| {}).expect("8 GB fits an empty card");
+        assert_eq!(mgr.budgets.free_on(Device::Gpu(0)), 14 * GB);
+
+        // A neighbour takes 12 GB: 4 GB is really free, and we hold 8.
+        mgr.refresh_accelerator_capacity(&[(Device::Gpu(0), 4 * GB)]);
+        assert_eq!(mgr.budgets.free_on(Device::Gpu(0)), 2 * GB, "12 used by us+them, 2 GB reserve, 4 GB free -> 2 GB placeable");
+
+        // The neighbour exits. Capacity comes BACK without a restart - this is
+        // the "always recover again once vram becomes available again" half.
+        mgr.refresh_accelerator_capacity(&[(Device::Gpu(0), 16 * GB)]);
+        assert_eq!(mgr.budgets.free_on(Device::Gpu(0)), 14 * GB);
+
+        // A device the probe cannot see is left exactly as it was, and the
+        // host tier is never touched by an accelerator probe.
+        mgr.refresh_accelerator_capacity(&[(Device::Cpu, GB)]);
+        assert_eq!(mgr.budgets.get(Device::Cpu).unwrap().total, 128 * GB);
     }
 }

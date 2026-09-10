@@ -171,6 +171,46 @@ static ENV_AMBIENT: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new(
 
 std::thread_local! {
     static SCOPED: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// Nesting depth of [`with_host_tier`] scopes on this thread. A counter
+    /// rather than a flag so nested scopes (a pipeline part placed on the host
+    /// building a sub-part that also asks) restore correctly on the way out.
+    static HOST_TIER: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Run `f` with this thread building on the **CPU backend**, whatever the
+/// ambient `--device`/`BRAIN_DEVICE` selection says.
+///
+/// The host-tier counterpart of [`with_gpu`], and the thing that makes
+/// [`Home::Cpu`] mean anything. [`Homes::run`] used to match only
+/// `Some(Home::Gpu(i))` and let `Home::Cpu` fall through to a bare `f()` -
+/// which ran UNSCOPED, so every `Gpu::new` inside still built on whatever card
+/// was ambient (usually card 0, typically the most contended one). A part
+/// "placed on the CPU" therefore allocated exactly the VRAM the placer had
+/// just decided it could not have. `Home::Cpu` was a label, not a placement.
+///
+/// Thread-local, like [`with_gpu`], so concurrent residency lanes cannot race.
+/// It takes precedence over an explicit `--device gpu`: the host tier is only
+/// ever chosen when nothing else can hold the part, and honouring a card
+/// selection there would mean failing the run rather than running it slowly -
+/// the opposite of what the fallback exists for. `Gpu::new_wgpu` and
+/// `Gpu::new_on_index` are unaffected, being explicit requests for a card.
+pub fn with_host_tier<R>(f: impl FnOnce() -> R) -> R {
+    HOST_TIER.with(|d| d.set(d.get() + 1));
+    struct Pop;
+    impl Drop for Pop {
+        fn drop(&mut self) {
+            HOST_TIER.with(|d| d.set(d.get().saturating_sub(1)));
+        }
+    }
+    let _pop = Pop;
+    f()
+}
+
+/// True while this thread is inside a [`with_host_tier`] scope. Read by
+/// `gpu_core`'s backend resolution, which is the single place the choice of
+/// backend is made.
+pub fn on_host_tier() -> bool {
+    HOST_TIER.with(|d| d.get()) > 0
 }
 
 /// Record the `--device` pin (`Some(i)` for a single-card selection, `None` to
@@ -242,7 +282,15 @@ pub fn selected_device() -> Option<&'static DeviceId> {
         // live free VRAM through `residency`'s budget model). With no policy
         // installed, or one that declines, this is the historical
         // canonical-device-0 default, unchanged.
-        None => auto_gpu().and_then(|i| devs.get(i as usize)).or_else(|| devs.first()),
+        None => match auto_home() {
+            Some(Home::Gpu(i)) => devs.get(i as usize).or_else(|| devs.first()),
+            // The policy answered the HOST tier: there is no card to return.
+            // `Gpu::new` reads `auto_host_tier` and builds the CPU backend;
+            // returning `devs.first()` here (card 0 - typically the most
+            // contended one) is what silently un-did the policy's decision.
+            Some(Home::Cpu) => None,
+            None => devs.first(),
+        },
     }
 }
 
@@ -368,12 +416,15 @@ impl Homes {
     pub fn describe(&self) -> String {
         self.parts.iter().map(|(n, h)| format!("{n}={h}")).collect::<Vec<_>>().join(" ")
     }
-    /// Build `name`'s part with every `Gpu::new` under `f` landing on the
-    /// device this plan gave it. A `Home::Cpu` part runs unscoped (the host
-    /// tier has no card to pin), as does an unknown name.
+    /// Build `name`'s part with every `Gpu::new` under `f` landing where this
+    /// plan put it: on that card for a `Home::Gpu`, and on the **CPU backend**
+    /// for a `Home::Cpu` (see [`with_host_tier`] for why that is a real scope
+    /// and not a no-op). A name this plan does not know runs unscoped - the
+    /// caller expressed no preference for it.
     pub fn run<R>(&self, name: &str, f: impl FnOnce() -> R) -> Result<R, String> {
         match self.of(name) {
             Some(Home::Gpu(i)) if !gpus().is_empty() => with_gpu(i, f),
+            Some(Home::Cpu) => Ok(with_host_tier(f)),
             _ => Ok(f()),
         }
     }
@@ -391,14 +442,111 @@ pub trait Placer: Send + Sync {
 }
 
 static PLACER: std::sync::Mutex<Option<std::sync::Arc<dyn Placer>>> = std::sync::Mutex::new(None);
-/// The memoized no-preference default (see [`auto_gpu`]).
-static AUTO: std::sync::Mutex<Option<Option<u32>>> = std::sync::Mutex::new(None);
+/// The memoized no-preference default (see [`auto_home`]), with the instant it
+/// was taken - a NEGATIVE answer is only cached for [`AUTO_RETRY`].
+type AutoMemo = Option<(Option<Home>, std::time::Instant)>;
+static AUTO: std::sync::Mutex<AutoMemo> = std::sync::Mutex::new(None);
+
+/// How long a "no card is available" answer is believed before the machine is
+/// asked again.
+///
+/// A POSITIVE answer (a specific card) is cached for the process, deliberately
+/// and permanently: a pipeline makes many bare `Gpu::new` calls while it is
+/// built and they must all land on the SAME card, or one model ends up
+/// scattered across the machine by its own allocations.
+///
+/// A negative answer had the same permanence, and that was the bug. When every
+/// card was momentarily contended the memo recorded "no card" for the rest of
+/// the process, [`selected_device`] fell through to `devs.first()` - card 0,
+/// typically the MOST contended one, exactly backwards - and nothing ever
+/// re-asked, so a process could not benefit from VRAM a neighbour freed a
+/// second later. It is safe to re-ask precisely BECAUSE the answer was
+/// negative: there is no coherent card placement to scatter, since none was
+/// given. The interval keeps the probe off the hot path.
+const AUTO_RETRY: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Install the process-wide placement policy. Idempotent and replaceable;
 /// installing invalidates the memoized default, so a new policy takes effect.
 pub fn install_placer(p: std::sync::Arc<dyn Placer>) {
     *PLACER.lock().unwrap_or_else(|e| e.into_inner()) = Some(p);
     *AUTO.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+/// Forget the memoized no-preference default, so the next bare `Gpu::new`
+/// re-asks the machine. What a caller calls after an allocation failed and it
+/// is about to retry: the memo is the whole reason a retry would otherwise get
+/// the same answer that just failed.
+pub fn forget_auto_placement() {
+    *AUTO.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+/// How many times [`build_with_retry`] re-plans and rebuilds before giving up,
+/// and how long it waits between attempts. Three attempts over ~6 s: long
+/// enough for a neighbouring one-shot job to finish and release a card (the
+/// case this exists for - `examples/imagegen/identity_yolo_pipeline.sh` starts
+/// ~75 short-lived `brain` processes in one run, so two of them overlapping on
+/// one card is routine, not rare), short enough that a genuinely full machine
+/// still reaches its own fallback promptly.
+const BUILD_ATTEMPTS: usize = 3;
+const BUILD_BACKOFF: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Build a model, re-planning against freshly probed capacity if the build
+/// fails because the memory it planned for was taken.
+///
+/// # The problem
+///
+/// Placement reads free VRAM, then allocates. Between those two steps another
+/// process on the same machine can take the bytes just reported free. There is
+/// no machine-wide reservation in brain - every lock in the placement stack is
+/// in-process - so two concurrent `brain` processes both read "22 GiB free on
+/// gpu0" and both place ~14 GiB there. One of them loses.
+///
+/// # What this covers, and what it does not
+///
+/// It covers a losing build that fails by UNWINDING: the `memauth` ceiling's
+/// deliberate early refusal, and a backend that panics on a failed
+/// allocation. Between attempts it clears the memoized automatic placement
+/// (so the retry re-asks rather than repeating the answer that just failed)
+/// and waits, which is what lets a neighbour's short job finish.
+///
+/// It does NOT cover a driver that calls `abort()` - no Rust code runs after
+/// that - and it is NOT a reservation: two processes retrying in lockstep can
+/// still collide. Those need a real cross-process lease (a lock file or
+/// shared counter under a known path, held for the lifetime of a process's
+/// residency), which this is deliberately not. What it converts is the common
+/// case - a transient neighbour - from a dead run into a slower one.
+///
+/// `f` must be re-runnable: it is called from scratch on each attempt, and
+/// whatever a failed attempt built is dropped (freeing its device memory)
+/// before the next one starts.
+pub fn build_with_retry<T>(what: &str, mut f: impl FnMut() -> Result<T, String>) -> Result<T, String> {
+    let mut last = String::new();
+    for attempt in 1..=BUILD_ATTEMPTS {
+        let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(&mut f));
+        match built {
+            Ok(Ok(v)) => return Ok(v),
+            Ok(Err(e)) => return Err(e), // a real error from the model, not a capacity fault
+            Err(p) => {
+                last = panic_text(p.as_ref());
+                if attempt == BUILD_ATTEMPTS {
+                    break;
+                }
+                eprintln!(
+                    "brain: building {what} failed ({last}); another process may have taken the memory. Re-probing and retrying ({attempt}/{BUILD_ATTEMPTS})"
+                );
+                forget_auto_placement();
+                std::thread::sleep(BUILD_BACKOFF);
+            }
+        }
+    }
+    Err(format!("{what}: gave up after {BUILD_ATTEMPTS} attempts; last failure: {last}"))
+}
+
+fn panic_text(p: &(dyn std::any::Any + Send)) -> String {
+    p.downcast_ref::<&str>()
+        .map(|s| (*s).to_string())
+        .or_else(|| p.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "panic".to_string())
 }
 
 fn placer() -> Option<std::sync::Arc<dyn Placer>> {
@@ -423,33 +571,47 @@ pub fn place(needs: &[Need]) -> Result<Homes, String> {
     Ok(Homes::new(needs.iter().map(|n| (n.name.clone(), here)).collect()))
 }
 
-/// The card the no-preference default resolves to, memoized for the process.
+/// Where the no-preference default resolves to, memoized for the process (a
+/// card) or for [`AUTO_RETRY`] (anything else).
 ///
 /// Memoized deliberately: a bare `Gpu::new` may be called many times while a
 /// pipeline is built (DiT, then VAE, then a scratch device), and they must all
 /// land on the SAME card. Re-asking a live free-VRAM probe between them would
 /// scatter one model across the machine as its own allocations moved the
-/// answer. [`install_placer`] clears the memo.
-fn auto_gpu() -> Option<u32> {
+/// answer. [`install_placer`] and [`forget_auto_placement`] clear the memo.
+///
+/// `None` means "no policy installed, or it errored" - the caller falls back
+/// to the registry default. `Some(Home::Cpu)` is a real answer: no card can
+/// hold anything right now, and the host tier is where a bare `Gpu::new`
+/// belongs until that changes.
+fn auto_home() -> Option<Home> {
     let mut memo = AUTO.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(cached) = *memo {
-        return cached;
+    if let Some((cached, at)) = *memo {
+        // A card, once chosen, is the answer for the rest of the process.
+        // Anything else is re-asked, because the machine may have changed and
+        // there is no placement coherence to protect.
+        if matches!(cached, Some(Home::Gpu(_))) || at.elapsed() < AUTO_RETRY {
+            return cached;
+        }
     }
     let p = placer()?;
     let chosen = match p.place(&[Need::unsized_("model")]) {
-        Ok(h) => match h.first() {
-            Some(Home::Gpu(i)) => Some(*i),
-            // The host tier, or an empty answer: fall through to the
-            // registry default rather than inventing a card.
-            _ => None,
-        },
+        Ok(h) => h.first().copied(),
         Err(e) => {
             tracing::debug!(error = %e, "automatic placement unavailable; using the registry default");
             None
         }
     };
-    *memo = Some(chosen);
+    *memo = Some((chosen, std::time::Instant::now()));
     chosen
+}
+
+/// True when the installed placement policy says no card can hold a model
+/// right now and the host tier is where the no-preference default belongs.
+/// `Gpu::new` consults this so "the placer said CPU" is not silently answered
+/// with card 0.
+pub fn auto_host_tier() -> bool {
+    auto_home() == Some(Home::Cpu)
 }
 
 /// One requested class of compute, before it is resolved against real hardware.

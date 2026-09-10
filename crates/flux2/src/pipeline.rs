@@ -707,19 +707,29 @@ pub fn plan_parts(cfg: &Flux2Config, paths: &Paths, vae_cfg: &vae::VaeConfig, pr
         }
         return Ok((homes, TePlacement::here()));
     }
-    // Nothing fits even at int8. Fall back to the historical layout rather
-    // than refusing here - the operator may know something the estimate does
-    // not - but say WHY first, with the real numbers, so the driver OOM that
-    // probably follows is not the first news of it. A Cpu `Home` would merely
-    // leave `Gpu::new` unscoped; it is not host-resident DiT execution.
+    // Nothing fits even at int8 - and since `residency::plan::plan` offers the
+    // host tier whenever no card can hold a part, that now means the machine
+    // genuinely cannot hold this model anywhere, not merely that its cards are
+    // busy.
+    //
+    // This used to discard every `.apart()`/`.phase()` the model declared and
+    // assign ALL parts to `selected_device()`, in the stated hope that the
+    // operator knew something the estimate did not. It did not degrade; it
+    // aborted inside the driver, which is why its own comment conceded "the
+    // driver OOM that probably follows". Worse, `selected_device()` routed
+    // through the poisoned automatic memo, so "the historical ambient device"
+    // was in practice card 0 - typically the most contended one.
+    //
+    // The premise it rested on ("a Cpu `Home` would merely leave `Gpu::new`
+    // unscoped; it is not host-resident DiT execution") is no longer true:
+    // `Homes::run` scopes a `Home::Cpu` part onto the CPU backend, so the
+    // `homes.run("dit", ...)` calls below really do build a host-resident DiT.
+    // Slow, and said out loud - but a finished image beats an abort.
     if !why.is_empty() {
-        eprintln!("flux2: no automatic GPU placement fits ({why}); FLUX.2 has no host-resident DiT execution, so attempting the historical ambient-device fallback");
+        eprintln!("flux2: no automatic GPU placement fits ({why}); falling back to the host tier - this will be VERY slow, and will use a card again as soon as one has room");
     }
-    let here = gpu_core::devices::selected_device()
-        .map(|d| gpu_core::devices::Home::Gpu(d.index))
-        .unwrap_or(gpu_core::devices::Home::Cpu);
     Ok((
-        gpu_core::devices::Homes::new(needs.iter().map(|n| (n.name.clone(), here)).collect()),
+        gpu_core::devices::Homes::new(needs.iter().map(|n| (n.name.clone(), gpu_core::devices::Home::Cpu)).collect()),
         TePlacement::here(),
     ))
 }

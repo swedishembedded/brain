@@ -81,13 +81,21 @@ pub struct Part {
     pub phase: Option<u32>,
 }
 
-/// The cost an unsized part is *placed* by: the smallest possible non-zero
-/// device footprint. It routes through exactly the same
-/// [`pick_device`] class preference and most-free-wins rule every sized part
-/// uses (rather than a second, parallel notion of "the emptiest card"), and
-/// falls back to the host tier on a machine with no accelerator - while being
-/// small enough that it can never be the reason a plan is refused.
-const UNSIZED_PROBE: MemCost = MemCost { vram: 1, ram: 0, npu: 0, mapped: 0 };
+/// The device bytes a card must still have free before an UNSIZED part - one
+/// that holds real bytes nobody costed - is put on it.
+///
+/// An unsized part is charged nothing (an invented number would distort every
+/// sized part), which used to mean it was also *placed* by a 1-byte probe: a
+/// card holding a 23 GiB part out of 24 GiB still "fit" it, and the two were
+/// silently double-booked onto one card. Charging nothing is only safe if
+/// unsized groups are placed LAST (nothing follows them to distort - see the
+/// sort in [`plan`]) and only onto a card with real slack left. This constant
+/// is what "real slack" means: the same order of magnitude as
+/// `crates/cli`'s own `HEADROOM`, and for the same reason - a fresh `Gpu`
+/// handle's driver/context allocation plus a minimal activation scratch is
+/// already about this big before any weights are read. A card below it is
+/// full for practical purposes, and the part goes to the host tier instead.
+const UNSIZED_FLOOR: u64 = 1 << 30;
 
 impl Part {
     /// A part of known size, unconstrained.
@@ -250,6 +258,10 @@ pub fn plan(parts: &[Part], budgets: &Budgets) -> Result<Placement, Unplaceable>
         /// permanent bytes plus its heaviest single phase. At most
         /// `cost.vram` (the sum), and equal to it when nothing is phased.
         peak_vram: u64,
+        /// The device bytes this group holds in EVERY phase - the part of
+        /// `peak_vram` that is never handed back mid-run. The primary
+        /// placement-order key: see [`plan`]'s ordering note.
+        permanent_vram: u64,
         unsized_: bool,
         apart: bool,
     }
@@ -276,12 +288,41 @@ pub fn plan(parts: &[Part], budgets: &Budgets) -> Result<Placement, Unplaceable>
             let peak_vram = permanent + phases.values().copied().max().unwrap_or(0);
             let adds: Vec<(Option<u32>, u64)> =
                 members.iter().map(|&m| (parts[m].phase, parts[m].cost.vram)).collect();
-            Group { root: r, members, cost, adds, peak_vram, unsized_, apart }
+            Group { root: r, members, cost, adds, peak_vram, permanent_vram: permanent, unsized_, apart }
         })
         .collect();
-    // Largest first: the part with the least choice of homes must choose
-    // before the parts that fit anywhere take one.
-    groups.sort_by_key(|g| (std::cmp::Reverse(g.peak_vram.max(g.cost.ram).max(g.cost.npu)), g.root));
+    // The order groups get their pick of the cards, most-constrained first.
+    //
+    // 1. SIZED before unsized. An unsized group is charged nothing, so it must
+    //    see the final state of every card rather than distort it (see
+    //    [`UNSIZED_FLOOR`]).
+    // 2. PERMANENT device bytes, descending. A permanent part holds its card
+    //    for the whole run and cannot be moved once built; a phased one is
+    //    live for one stage and, if it has to take a slower tier, pays for
+    //    that once. Given a 14 GiB permanent DiT and a 18 GiB transient text
+    //    encoder against one 23 GiB card and one 8 GiB card, "biggest first"
+    //    puts the encoder on the only card that could have held the DiT and
+    //    strands it; permanent-first places the DiT and lets the encoder take
+    //    the host tier, which is exactly the "slower, never failing" outcome
+    //    the operator asked for. This is the real production failure that
+    //    printed `cannot place 'dit' ... after placing te=gpu0`.
+    // 3. Then the device PEAK, descending - the previous rule, and still what
+    //    orders two parts of the same permanence.
+    // 4. Then NPU bytes, then host bytes, purely to make the order total and
+    //    deterministic. Host bytes must NOT outrank device bytes: they are a
+    //    different budget on a different device, and comparing the two byte
+    //    counts as if they were interchangeable let a part that is large only
+    //    in host RAM take first pick of the emptiest CARD.
+    groups.sort_by_key(|g| {
+        (
+            g.unsized_,
+            std::cmp::Reverse(g.permanent_vram),
+            std::cmp::Reverse(g.peak_vram),
+            std::cmp::Reverse(g.cost.npu),
+            std::cmp::Reverse(g.cost.ram),
+            g.root,
+        )
+    });
 
     // A card's running residency, split by phase. `peak` is what is actually
     // live at the worst moment under the caller's eviction contract, and what
@@ -334,6 +375,36 @@ pub fn plan(parts: &[Part], budgets: &Budgets) -> Result<Placement, Unplaceable>
         best.map(|(d, _)| d)
     }
 
+    // The emptiest card with real slack left, for a group nobody costed. Not
+    // `pick_gpu` with a 1-byte probe: that "fits" a card with one free byte,
+    // which is how an uncosted part carrying real bytes ended up double-booked
+    // onto a card a 23 GiB part had already filled. See [`UNSIZED_FLOOR`].
+    fn pick_gpu_unsized(b: &Budgets, exclude: &HashSet<Device>) -> Option<Device> {
+        let mut best: Option<(Device, u64)> = None;
+        for d in b.gpus() {
+            if exclude.contains(&d) {
+                continue;
+            }
+            let free = b.free_on(d);
+            if free >= UNSIZED_FLOOR && best.is_none_or(|(_, f)| free > f) {
+                best = Some((d, free));
+            }
+        }
+        best.map(|(d, _)| d)
+    }
+
+    // Host bytes a group holds no matter where it lands, and whether the host
+    // tier can still take them. `MemCost::ram` is documented as "host bytes it
+    // will hold REGARDLESS of where it is placed", but only the device the
+    // group landed on was ever charged - so a part declaring 40 GiB of host
+    // staging RAM was placed happily on a card belonging to a box with 4 GiB
+    // of RAM free, and two such parts left the host tier reporting itself
+    // empty. An undeclared host tier is "unknown", not "infinite": it is not
+    // charged and not checked, exactly as before, so a `Budgets` that only
+    // names cards behaves unchanged.
+    let host_declared = b.get(Device::Cpu).is_some();
+    let host_ok = |b: &Budgets, ram: u64| !host_declared || ram == 0 || b.fits_on(Device::Cpu, ram);
+
     // 3. Place each group, charging it so the groups that follow see what is
     //    actually left.
     let mut placed: Vec<Option<Device>> = vec![None; parts.len()];
@@ -342,14 +413,45 @@ pub fn plan(parts: &[Part], budgets: &Budgets) -> Result<Placement, Unplaceable>
     for g in &groups {
         // What the group is placed BY on the flat paths (see `UNSIZED_PROBE`):
         // its peak, not its sum - the sum over phases is never live at once.
-        let probe = if g.unsized_ {
-            UNSIZED_PROBE
-        } else {
-            MemCost { vram: g.peak_vram, ram: g.cost.ram, npu: g.cost.npu, mapped: 0 }
-        };
-        let apart_pick = |exclude: &HashSet<Device>| {
+        let probe = MemCost { vram: g.peak_vram, ram: g.cost.ram, npu: g.cost.npu, mapped: 0 };
+        // `allow_host` is what keeps [`Affinity::Apart`] meaning what it says.
+        // Apart is a preference between CARDS ("do not stack the DiT and its
+        // text encoder"), and the host tier is not a card - it is the fallback
+        // tier. Letting the exclusion pass answer "the CPU" would satisfy
+        // Apart trivially and permanently, so a two-part model on a one-card
+        // box would put its second part on the CPU instead of sharing the
+        // card, which is the exact opposite of the intent (Apart is a
+        // preference, not a demand - one card still places every part). Only
+        // the final, unconstrained pass may reach for the host tier.
+        let pick = |exclude: &HashSet<Device>, allow_host: bool| {
+            // The host tier, last. `plan` has no eviction to fall back on -
+            // it is a one-shot "build this model now" answer - so refusing
+            // while RAM sits idle is not "let the caller free something", it
+            // is the whole run failing. This gate used to read
+            // `b.gpus().is_empty()`, copied from `place::pick_device` where
+            // the `None` really does mean "evict instead"; here it meant a
+            // box whose cards were momentarily busy was strictly WORSE off
+            // than a box with no cards at all.
+            let host = |exclude: &HashSet<Device>| allow_host.then(|| crate::place::spill_to_host(&probe, &b, exclude)).flatten();
+            if g.unsized_ {
+                return pick_gpu_unsized(&b, exclude).or_else(|| {
+                    (allow_host && b.get(Device::Cpu).is_some() && !exclude.contains(&Device::Cpu)).then_some(Device::Cpu)
+                });
+            }
+            if !host_ok(&b, g.cost.ram) {
+                // No device placement can rescue a group whose host bytes do
+                // not fit: it holds them wherever it runs.
+                return None;
+            }
             if g.cost.vram == 0 {
-                return pick_device(&probe, &b, exclude);
+                // A host-only or NPU-only group: `pick_device` already answers
+                // the host tier for it, so gate that answer on `allow_host`
+                // too rather than letting Apart be satisfied by the CPU.
+                return match pick_device(&probe, &b, exclude) {
+                    Some(Device::Cpu) if !allow_host => None,
+                    Some(d) => Some(d),
+                    None => host(exclude),
+                };
             }
             // An NPU-capable group keeps `pick_device`'s class order: its NPU
             // bytes are unphased, so where the NPU fits, the flat probe is
@@ -357,16 +459,12 @@ pub fn plan(parts: &[Part], budgets: &Budgets) -> Result<Placement, Unplaceable>
             if g.cost.npu > 0 && b.npus().iter().any(|d| b.fits_on(*d, probe.npu)) {
                 return pick_device(&probe, &b, exclude);
             }
-            pick_gpu(&g.adds, &b, &ledgers, exclude).or_else(|| {
-                // `pick_device`'s own CPU-spill rule: the host tier takes a
-                // VRAM group only when no GPU class exists to be evicted for.
-                b.gpus().is_empty().then(|| pick_device(&probe, &b, exclude)).flatten()
-            })
+            pick_gpu(&g.adds, &b, &ledgers, exclude).or_else(|| host(exclude))
         };
         let dev = if g.apart {
-            apart_pick(&used).or_else(|| apart_pick(&HashSet::new()))
+            pick(&used, false).or_else(|| pick(&HashSet::new(), true))
         } else {
-            apart_pick(&HashSet::new())
+            pick(&HashSet::new(), true)
         };
         let Some(dev) = dev else {
             let mut free: Vec<(Device, u64)> = b.devices().map(|d| (d, b.free_on(d))).collect();
@@ -391,7 +489,7 @@ pub fn plan(parts: &[Part], budgets: &Budgets) -> Result<Placement, Unplaceable>
             });
         };
         match dev {
-            Device::Gpu(_) => {
+            Device::Gpu(_) if !g.unsized_ => {
                 let ledger = ledgers.entry(dev).or_default();
                 let before = ledger.peak();
                 for &(phase, vram) in &g.adds {
@@ -399,9 +497,20 @@ pub fn plan(parts: &[Part], budgets: &Budgets) -> Result<Placement, Unplaceable>
                 }
                 b.alloc(dev, ledger.peak() - before);
             }
-            // Host RAM and NPU bytes are not phased (see `Group::adds`), so a
-            // group landing there is charged its full sum, as before.
-            _ => b.alloc(dev, g.cost.on(dev)),
+            // An unsized group is charged nothing on the card - the
+            // documented contract, and safe only because unsized groups are
+            // placed last and only onto a card with `UNSIZED_FLOOR` to spare.
+            Device::Gpu(_) => {}
+            // The host tier holds a spilled group's weights, not just its
+            // declared staging bytes (`MemCost::resident_on`); NPU bytes are
+            // unphased, so an NPU group is charged its full sum, as before.
+            _ => b.alloc(dev, g.cost.resident_on(dev)),
+        }
+        // Host RAM is charged wherever the group landed, because that is what
+        // `MemCost::ram` means. Not double-charged when the group IS on the
+        // host tier - `resident_on(Cpu)` already covers it.
+        if host_declared && g.cost.ram > 0 && dev != Device::Cpu {
+            b.alloc(Device::Cpu, g.cost.ram);
         }
         used.insert(dev);
         for &m in &g.members {

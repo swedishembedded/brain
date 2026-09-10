@@ -45,49 +45,38 @@ use residency::{Device, MemCost};
 /// transient activation scratch a weights-only estimate omits.
 const HEADROOM: u64 = 1 << 30;
 
+/// How long a capacity snapshot is reused before the machine is re-probed.
+///
+/// The snapshot cannot be per-call: a pipeline builds several parts, and
+/// re-asking a live free-VRAM probe between them would let one model's OWN
+/// allocations move the answer and scatter it across the machine. It also must
+/// not be forever, which is what it used to be: `brain serve` installs this
+/// placer once at startup and then places FLUX/Qwen sub-parts against
+/// process-start numbers for the daemon's entire life, so a card freed by a
+/// neighbour hours ago is still budgeted as busy - the exact opposite of
+/// "always recover again once vram becomes available again".
+///
+/// A few seconds is longer than any single model build's placement calls and
+/// far shorter than a neighbouring job's lifetime, so it keeps the former
+/// coherent while letting the latter be noticed.
+const SNAPSHOT_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Live per-GPU free bytes, `(canonical index, free)`.
 ///
-/// `nvidia-smi`'s `memory.free` is the only figure that sees ANOTHER
-/// process's allocations - which is the whole reported bug, a card with
-/// 18 GiB already taken by a neighbouring job. Keyed by PCI bus id through
-/// the device registry, never by NVML enumeration order, exactly as
-/// `run_cli::query_gpu_mem` does for totals.
-///
-/// When `nvidia-smi` is absent or silent about a card, that card falls back
-/// to the registry's own VRAM size - i.e. to today's capacity-blind
-/// behaviour for that card, never to a hard failure.
+/// A thin alias for [`crate::capacity::available_gpus`], which is the one
+/// probe of this machine's memory - see its module doc for why there is
+/// exactly one, and what it does and does not see.
 pub fn probe_free_vram() -> Vec<(u32, u64)> {
-    let mut mem: Vec<(u32, u64)> =
-        gpu_core::devices::gpus().iter().map(|d| (d.index, d.identity.vram_bytes)).collect();
-    if let Ok(o) = std::process::Command::new("nvidia-smi")
-        .args(["--query-gpu=pci.bus_id,memory.free", "--format=csv,noheader,nounits"])
-        .output()
-    {
-        if o.status.success() {
-            for l in String::from_utf8_lossy(&o.stdout).lines() {
-                let mut it = l.split(',').map(str::trim);
-                let (Some(pci), Some(mib)) = (it.next(), it.next().and_then(|m| m.parse::<u64>().ok())) else {
-                    continue;
-                };
-                if let Some(d) = gpu_core::devices::device_by_pci(pci) {
-                    if let Some(slot) = mem.iter_mut().find(|(i, _)| *i == d.index) {
-                        slot.1 = mib << 20;
-                    }
-                }
-            }
-        }
-    }
-    mem.retain(|&(_, bytes)| bytes > 0);
-    mem
+    crate::capacity::available_gpus()
 }
 
 /// Budgets for automatic placement: one per schedulable GPU sized to its FREE
 /// bytes less [`HEADROOM`], plus the host tier.
 ///
-/// The host tier is always declared. On a box with cards it changes nothing -
-/// `residency::place::pick_device` spills a device-resident model to the CPU
-/// only when no accelerator of that class exists at all - and on a GPU-less
-/// box it is what lets a model be placed instead of refused.
+/// The host tier is always declared: it is a real execution tier (the CPU
+/// backend), and `residency::plan::plan` falls back to it whenever no card can
+/// hold a part right now - on a GPU-less box, and equally on a box whose cards
+/// are momentarily full. Running slower is the requirement; failing is not.
 pub fn budgets(gpus: &[(u32, u64)], ram: u64) -> Budgets {
     let mut b = Budgets::new();
     let limits = memauth::limits();
@@ -99,18 +88,60 @@ pub fn budgets(gpus: &[(u32, u64)], ram: u64) -> Budgets {
 }
 
 /// [`Placer`] backed by [`residency::plan::plan`] over a snapshot of the
-/// machine's free capacity.
+/// machine's free capacity, refreshed every [`SNAPSHOT_TTL`].
 ///
-/// The snapshot is taken once, at install. Re-probing per call would let one
-/// model's own allocations move the answer between its parts, scattering a
-/// pipeline across the machine as it is built.
+/// The snapshot is per-build, not per-call and not per-process: re-probing
+/// between one model's own parts would scatter it across the machine as its
+/// own allocations moved the answer, while never re-probing means a daemon
+/// installed at boot places against boot-time numbers forever. The TTL sits
+/// between the two - long enough that one build sees one consistent machine,
+/// short enough that a neighbouring job finishing is noticed.
 pub struct BudgetPlacer {
-    budgets: Budgets,
+    /// `None` means "probe the machine, on a TTL". `Some` pins a fixed
+    /// snapshot, which is what the tests use and what a caller that has
+    /// already narrowed capacity by hand wants.
+    fixed: Option<Budgets>,
+    cached: std::sync::Mutex<Option<(Budgets, std::time::Instant)>>,
+    /// The `--device` narrowing, captured once: which cards are candidates is
+    /// a user decision that does not change while the process runs, unlike how
+    /// full they are.
+    gpus: Option<std::collections::HashSet<u32>>,
 }
 
 impl BudgetPlacer {
+    /// A placer pinned to `budgets` - never re-probes. Test-only: production
+    /// always probes, because a frozen capacity snapshot is precisely the
+    /// defect [`SNAPSHOT_TTL`] documents. Tests want a machine that holds
+    /// still, and get one here rather than by mocking `nvidia-smi`.
+    #[cfg(test)]
     pub fn new(budgets: Budgets) -> BudgetPlacer {
-        BudgetPlacer { budgets }
+        BudgetPlacer { fixed: Some(budgets), cached: std::sync::Mutex::new(None), gpus: None }
+    }
+
+    /// A placer that re-probes this machine's free VRAM every
+    /// [`SNAPSHOT_TTL`], restricted to the cards `--device` made schedulable.
+    pub fn probing(gpus: Option<std::collections::HashSet<u32>>) -> BudgetPlacer {
+        BudgetPlacer { fixed: None, cached: std::sync::Mutex::new(None), gpus }
+    }
+
+    /// The capacity to plan against right now.
+    fn budgets(&self) -> Budgets {
+        if let Some(b) = &self.fixed {
+            return b.clone();
+        }
+        let mut cached = self.cached.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((b, at)) = cached.as_ref() {
+            if at.elapsed() < SNAPSHOT_TTL {
+                return b.clone();
+            }
+        }
+        let free: Vec<(u32, u64)> = match &self.gpus {
+            Some(s) => probe_free_vram().into_iter().filter(|(i, _)| s.contains(i)).collect(),
+            None => probe_free_vram(),
+        };
+        let fresh = budgets(&free, crate::run_cli::query_ram_bytes());
+        *cached = Some((fresh.clone(), std::time::Instant::now()));
+        fresh
     }
 }
 
@@ -140,7 +171,8 @@ fn to_home(d: Device) -> Result<Home, String> {
 impl Placer for BudgetPlacer {
     fn place(&self, needs: &[Need]) -> Result<Vec<Home>, String> {
         let parts: Vec<Part> = needs.iter().map(to_part).collect();
-        let placement = plan::plan(&parts, &self.budgets).map_err(|e| e.to_string())?;
+        let budgets = self.budgets();
+        let placement = plan::plan(&parts, &budgets).map_err(|e| e.to_string())?;
         let homes = needs
             .iter()
             .map(|n| placement.of(&n.name).ok_or_else(|| format!("part {} unplaced", n.name)).and_then(to_home))
@@ -151,8 +183,8 @@ impl Placer for BudgetPlacer {
         // the historical default has nothing to explain.
         if needs.len() > 1 {
             let line: Vec<String> = needs.iter().zip(&homes).map(|(n, h)| format!("{}={h}", n.name)).collect();
-            eprintln!("brain: placement {} ({})", line.join(" "), self.free_summary());
-        } else if self.budgets.gpus().len() > 1 && !matches!(homes.first(), Some(Home::Gpu(0)) | Some(Home::Cpu) | None) {
+            eprintln!("brain: placement {} ({})", line.join(" "), free_summary(&budgets));
+        } else if budgets.gpus().len() > 1 && !matches!(homes.first(), Some(Home::Gpu(0)) | Some(Home::Cpu) | None) {
             // Only when there was a real choice to make and it did not land
             // on the historical default. One card, the host tier, or card 0
             // are all "what you would have got anyway" and have nothing to
@@ -160,7 +192,7 @@ impl Placer for BudgetPlacer {
             static ONCE: std::sync::Once = std::sync::Once::new();
             ONCE.call_once(|| {
                 if let Some(h) = homes.first() {
-                    eprintln!("brain: placement {h} ({})", self.free_summary());
+                    eprintln!("brain: placement {h} ({})", free_summary(&budgets));
                 }
             });
         }
@@ -168,18 +200,16 @@ impl Placer for BudgetPlacer {
     }
 }
 
-impl BudgetPlacer {
-    fn free_summary(&self) -> String {
-        let mut gpus = self.budgets.gpus();
-        gpus.sort_by_key(|d| match d {
-            Device::Gpu(i) => *i,
-            _ => u32::MAX,
-        });
-        gpus.iter()
-            .map(|&d| format!("{} {:.1} GiB free", plan::device_name(d), self.budgets.free_on(d) as f64 / (1u64 << 30) as f64))
-            .collect::<Vec<_>>()
-            .join(", ")
-    }
+fn free_summary(budgets: &Budgets) -> String {
+    let mut gpus = budgets.gpus();
+    gpus.sort_by_key(|d| match d {
+        Device::Gpu(i) => *i,
+        _ => u32::MAX,
+    });
+    gpus.iter()
+        .map(|&d| format!("{} {:.1} GiB free", plan::device_name(d), budgets.free_on(d) as f64 / (1u64 << 30) as f64))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Install the production placer for this process.
@@ -190,15 +220,13 @@ impl BudgetPlacer {
 /// `--device gpu<i>` the placer is never consulted - `gpu_core::devices::
 /// selected_device` only asks when the user expressed no preference.
 pub fn install() {
-    let free = probe_free_vram();
     // `--device` narrows the candidate set; with no `--device` every card is
-    // a candidate, which is the "use all the hardware" default.
-    let gpus: Vec<(u32, u64)> = match crate::compute_set() {
-        Some(s) => free.into_iter().filter(|(i, _)| s.gpus.contains(i)).collect(),
-        None => free,
-    };
-    let ram = crate::run_cli::query_ram_bytes();
-    gpu_core::devices::install_placer(Arc::new(BudgetPlacer::new(budgets(&gpus, ram))));
+    // a candidate, which is the "use all the hardware" default. How FULL those
+    // cards are is re-probed on a TTL by the placer itself (see
+    // `BudgetPlacer::probing`) rather than frozen here - `brain serve` calls
+    // this once at startup and then lives for weeks.
+    let gpus = crate::compute_set().map(|s| s.gpus.iter().copied().collect());
+    gpu_core::devices::install_placer(Arc::new(BudgetPlacer::probing(gpus)));
 }
 
 #[cfg(test)]
@@ -241,8 +269,12 @@ mod tests {
     /// The 9B-diffusion shape that motivated phases: a denoiser and a decode
     /// graph that cannot co-reside take turns on ONE card, because the
     /// pipeline evicts the denoiser before it builds the decode graph. The
-    /// same declaration without phases - a 24 GiB simultaneous resident on a
-    /// 23 GiB card - must still be refused.
+    /// same declaration without phases - 31 GiB simultaneously resident on a
+    /// 23 GiB card - must NOT all fit on that card. (It no longer fails
+    /// outright: what does not fit a card now takes the host tier, slowly,
+    /// rather than killing the run. What is being pinned here is that the
+    /// phased charge is real - drop the phases and the card genuinely cannot
+    /// hold the same parts.)
     #[test]
     fn phased_parts_take_turns_on_one_card() {
         let p = BudgetPlacer::new(budgets(&[(0, 23 * GIB)], 128 * GIB));
@@ -256,8 +288,8 @@ mod tests {
             vec![Home::Gpu(0), Home::Gpu(0), Home::Gpu(0)]
         );
         let unphased: Vec<Need> = needs.iter().cloned().map(|n| Need { phase: None, ..n }).collect();
-        let e = p.place(&unphased).expect_err("13 + 7 + 11 = 31 GiB live at once does not fit 23");
-        assert!(e.contains("dit"), "{e}");
+        let homes = p.place(&unphased).expect("the host tier absorbs what the card cannot hold");
+        assert!(homes.contains(&Home::Cpu), "13 + 7 + 11 = 31 GiB live at once does not fit 23: {homes:?}");
     }
 
     /// Nothing fits: the refusal names the part, its size and every card's

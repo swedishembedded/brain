@@ -120,6 +120,169 @@ fn an_impossible_plan_refuses_legibly_instead_of_oom() {
     }
 }
 
+/// **The reported production failure, in one assertion.** Two cards busy with
+/// somebody else's job, 45.6 GiB of host RAM idle, and a 14.3 GiB DiT: the run
+/// died with `cannot place 'dit' ... free: gpu0=4.9 GiB gpu1=7.8 GiB
+/// cpu=45.6 GiB`. The host tier is a documented execution tier, and the
+/// operator's requirement is explicit - "it may still run slower if all of a
+/// sudden vram is not available but it should never fail".
+///
+/// The CPU-spill gate used to read `budgets.gpus().is_empty()`, copied from
+/// `place::pick_device` where returning `None` really does mean "evict a card
+/// instead". `plan` has no eviction to fall back on, so there the same gate
+/// meant a machine whose cards were momentarily busy was strictly worse off
+/// than a machine with no cards at all.
+#[test]
+fn the_host_tier_takes_a_part_no_card_can_hold_right_now() {
+    let mut b = Budgets::new();
+    b.set(Device::Gpu(0), 4_900 * GIB / 1000, 0);
+    b.set(Device::Gpu(1), 7_800 * GIB / 1000, 0);
+    b.set(Device::Cpu, 45_600 * GIB / 1000, 0);
+    let parts = [Part::new("dit", MemCost::new(14_300 * GIB / 1000, 0))];
+    let p = plan(&parts, &b).expect("45.6 GiB of host RAM can hold a 14.3 GiB part");
+    assert_eq!(p.of("dit"), Some(Device::Cpu));
+}
+
+/// A card with ONE free byte must not be better or worse than a card with
+/// zero. It used to be strictly worse: `probe_free_vram` dropped a
+/// fully-consumed card from the GPU list entirely, which emptied `gpus()` and
+/// re-enabled the host tier - while a card with any free byte at all kept the
+/// GPU class "non-empty" and so forced the hard failure. A more-contended
+/// machine came out ahead of a less-contended one.
+#[test]
+fn a_uselessly_small_amount_of_free_vram_does_not_veto_the_host_tier() {
+    let parts = [Part::new("dit", MemCost::new(14 * GIB, 0))];
+
+    let mut no_cards = Budgets::new();
+    no_cards.set(Device::Cpu, 128 * GIB, 0);
+    assert_eq!(plan(&parts, &no_cards).unwrap().of("dit"), Some(Device::Cpu));
+
+    let mut one_byte = Budgets::new();
+    one_byte.set(Device::Gpu(0), 1, 0);
+    one_byte.set(Device::Cpu, 128 * GIB, 0);
+    assert_eq!(plan(&parts, &one_byte).unwrap().of("dit"), Some(Device::Cpu), "one useless free byte must not veto a 128 GiB host tier");
+}
+
+/// A part's declared host RAM is held wherever it is placed - `MemCost::ram`
+/// says so in as many words - but only the device it landed on was ever
+/// charged. So a part needing 40 GiB of host staging RAM was placed happily
+/// onto a card belonging to a box with 4 GiB of RAM free.
+#[test]
+fn host_ram_is_checked_even_when_the_part_lands_on_a_card() {
+    let mut b = Budgets::new();
+    b.set(Device::Gpu(0), 24 * GIB, 0);
+    b.set(Device::Cpu, 4 * GIB, 0);
+    let parts = [Part::new("streamer", MemCost::new(8 * GIB, 40 * GIB))];
+    assert!(plan(&parts, &b).is_err(), "40 GiB of host RAM against 4 GiB free is not placeable anywhere");
+
+    // ...and with the host RAM actually there, the card placement stands.
+    b.set(Device::Cpu, 64 * GIB, 0);
+    assert_eq!(plan(&parts, &b).expect("both dimensions fit").of("streamer"), Some(Device::Gpu(0)));
+}
+
+/// ...and it is CHARGED there too, so the parts that follow see it. Two
+/// GPU-placed parts holding 20 GiB of host RAM each used to leave the host
+/// tier reporting itself completely empty.
+#[test]
+fn host_ram_is_charged_even_when_the_part_lands_on_a_card() {
+    let mut b = Budgets::new();
+    b.set(Device::Gpu(0), 24 * GIB, 0);
+    b.set(Device::Gpu(1), 24 * GIB, 0);
+    b.set(Device::Cpu, 30 * GIB, 0);
+    let parts = [
+        Part::new("a", MemCost::new(8 * GIB, 20 * GIB)).apart(),
+        Part::new("b", MemCost::new(8 * GIB, 20 * GIB)).apart(),
+        Part::new("host_only", MemCost::new(0, 25 * GIB)),
+    ];
+    assert!(plan(&parts, &b).is_err(), "20 + 20 + 25 GiB of host RAM does not fit a 30 GiB host tier");
+}
+
+/// The placement order must not compare host-RAM bytes against VRAM bytes -
+/// they are different budgets on different devices. The old key was
+/// `peak_vram.max(cost.ram).max(cost.npu)`, so a part that is large only in
+/// host RAM sorted first and took the emptiest CARD, stranding the part that
+/// actually needed it, even though a valid plan existed the other way round.
+#[test]
+fn a_host_ram_heavy_part_does_not_take_the_card_the_vram_heavy_part_needs() {
+    let mut b = Budgets::new();
+    b.set(Device::Gpu(0), 15 * GIB, 0);
+    b.set(Device::Gpu(1), 7 * GIB, 0);
+    b.set(Device::Cpu, 128 * GIB, 0);
+    let parts = [
+        Part::new("te", MemCost::new(6 * GIB, 20 * GIB)),
+        Part::new("dit", MemCost::new(14 * GIB, 0)),
+    ];
+    let p = plan(&parts, &b).expect("dit(14)->gpu0, te(6)->gpu1 is a valid plan and must be found");
+    assert_eq!(p.of("dit"), Some(Device::Gpu(0)), "{p:?}");
+    assert_eq!(p.of("te"), Some(Device::Gpu(1)), "{p:?}");
+}
+
+/// A PERMANENT part gets its pick of the cards before a merely TRANSIENT one,
+/// even when the transient one is bigger. This is the FLUX.1 shape that
+/// produced the reported crash: a 14 GiB DiT that is resident for the whole
+/// run, and an 18 GiB T5-XXL that exists for one `encode()` call and is
+/// dropped. Biggest-first gave the encoder the only card that could hold the
+/// DiT; permanent-first places the DiT and lets the encoder take the (slower)
+/// host tier, which is the outcome the operator asked for.
+#[test]
+fn a_permanent_part_outranks_a_bigger_transient_one_for_the_cards() {
+    let mut b = Budgets::new();
+    b.set(Device::Gpu(0), 23 * GIB, 0);
+    b.set(Device::Gpu(1), 8 * GIB, 0);
+    b.set(Device::Cpu, 128 * GIB, 0);
+    let parts = [
+        Part::new("te", MemCost::new(18 * GIB, 0)).apart().phase(1),
+        Part::new("dit", MemCost::new(14 * GIB, 0)).apart(),
+    ];
+    let p = plan(&parts, &b).expect("dit on the big card, te on the host tier");
+    assert_eq!(p.of("dit"), Some(Device::Gpu(0)), "the permanent part must get the card: {p:?}");
+    assert_eq!(p.of("te"), Some(Device::Cpu), "the transient part takes the slower tier: {p:?}");
+}
+
+/// An UNSIZED part holds real device bytes nobody costed. It is charged
+/// nothing - an invented number would distort every sized part - which is only
+/// safe if it is placed LAST and only onto a card with real slack. Priced at
+/// one byte and placed in size order, it "fit" a card a 23.5 GiB part had
+/// already filled, and the two were silently double-booked.
+#[test]
+fn an_unsized_part_does_not_double_book_a_card_a_sized_part_filled() {
+    let mut b = Budgets::new();
+    b.set(Device::Gpu(0), 24 * GIB, 0);
+    b.set(Device::Cpu, 128 * GIB, 0);
+    let parts = [Part::unsized_("dit"), Part::new("te", MemCost::new(24 * GIB - (GIB / 2), 0))];
+    let p = plan(&parts, &b).expect("plans clean");
+    assert_eq!(p.of("te"), Some(Device::Gpu(0)));
+    assert_eq!(p.of("dit"), Some(Device::Cpu), "half a GiB of slack is not a home for an uncosted part: {p:?}");
+}
+
+/// ...and with room to spare it still takes the emptiest card, unchanged.
+#[test]
+fn an_unsized_part_still_takes_a_card_with_room_to_spare() {
+    let mut b = Budgets::new();
+    b.set(Device::Gpu(0), 24 * GIB, 0);
+    b.set(Device::Gpu(1), 24 * GIB, 0);
+    b.set(Device::Cpu, 128 * GIB, 0);
+    let parts = [Part::unsized_("dit"), Part::new("te", MemCost::new(20 * GIB, 0))];
+    let p = plan(&parts, &b).expect("plans clean");
+    assert!(matches!(p.of("dit"), Some(Device::Gpu(_))), "{p:?}");
+    assert_ne!(p.of("dit"), p.of("te"), "the emptier card was free: {p:?}");
+}
+
+/// With every card contended below the point where anything can be built on
+/// it, the no-preference default (the bare `Gpu::new` case) must still resolve
+/// somewhere rather than refuse - otherwise `gpu_core::devices::auto_gpu`
+/// memoizes a permanent "no card" and every later build in the process
+/// silently reverts to card 0, typically the most contended one.
+#[test]
+fn the_no_preference_default_resolves_even_with_every_card_contended() {
+    let mut b = Budgets::new();
+    b.set(Device::Gpu(0), 8 * GIB, 8 * GIB); // headroom clamps usable to 0
+    b.set(Device::Gpu(1), 8 * GIB, 8 * GIB);
+    b.set(Device::Cpu, 128 * GIB, 0);
+    let p = plan(&[Part::unsized_("model")], &b).expect("the default must resolve somewhere");
+    assert_eq!(p.of("model"), Some(Device::Cpu));
+}
+
 /// A single part with no declared cost (the "no preference, just give me a
 /// card" default every `Gpu::new` takes) still gets the emptiest card.
 #[test]

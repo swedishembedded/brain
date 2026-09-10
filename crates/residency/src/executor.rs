@@ -232,6 +232,32 @@ impl Executor {
     /// Build over a set of resident models + a policy, and start the dispatcher +
     /// one lane thread per device (GPUs + CPU).
     pub fn start(models: Vec<Arc<dyn ResidentModel>>, budgets: crate::budget::Budgets, policy: Policy) -> Executor {
+        Executor::start_with_probe(models, budgets, policy, None)
+    }
+
+    /// [`Self::start`] with a live **capacity probe**: a closure the dispatcher
+    /// calls on its idle tick to re-measure how much of each accelerator is
+    /// actually free, returning `(device, free bytes)`.
+    ///
+    /// Without one, a daemon's budgets are frozen at the figures it started
+    /// with. Every byte another process on the same machine takes or releases
+    /// is invisible: the scheduler cheerfully places a model onto a card a
+    /// neighbour has filled (and aborts inside the driver), and never notices
+    /// when that neighbour exits, because nothing in the system produces an
+    /// event for a foreign free. The operator's requirement - "a gpu may be
+    /// running other jobs that consume vram from time to time ... it should
+    /// always recover again once vram becomes available again" - cannot be met
+    /// by in-process accounting alone; something has to go and look.
+    ///
+    /// `crates/cli` supplies the one production implementation (`nvidia-smi`
+    /// through `crate::capacity`). `None` keeps the historical frozen-budget
+    /// behaviour, which is what every unit test wants.
+    pub fn start_with_probe(
+        models: Vec<Arc<dyn ResidentModel>>,
+        budgets: crate::budget::Budgets,
+        policy: Policy,
+        capacity: Option<CapacityProbe>,
+    ) -> Executor {
         let manifests: Vec<Manifest> = models.iter().map(|m| m.manifest()).collect();
         let devices: Vec<Device> = budgets.devices().collect();
         let mut mgr = ResidencyManager::new(budgets);
@@ -259,7 +285,7 @@ impl Executor {
         let disp_stats = stats.clone();
         let h = std::thread::Builder::new()
             .name("brain-dispatcher".into())
-            .spawn(move || dispatch_loop(rx, mgr, policy, lanes, disp_stats))
+            .spawn(move || dispatch_loop(rx, mgr, policy, lanes, disp_stats, capacity))
             .expect("spawn dispatcher");
         join_handles.push(h);
 
@@ -485,7 +511,23 @@ impl Executor {
 
 // ---------------------------------------------------------------- dispatcher
 
-fn dispatch_loop(rx: Receiver<Msg>, mut mgr: ResidencyManager, policy: Policy, lanes: HashMap<Device, Sender<RunReq>>, stats: Arc<Mutex<Stats>>) {
+/// A live measurement of how much of each accelerator is free RIGHT NOW,
+/// including bytes held by processes other than this one. See
+/// [`Executor::start_with_probe`].
+pub type CapacityProbe = Arc<dyn Fn() -> Vec<(Device, u64)> + Send + Sync>;
+
+/// How often the dispatcher wakes up on its own.
+///
+/// The loop used to block on `rx.recv()` with no timer at all, so the ONLY
+/// thing that ever re-ran scheduling was a message - in practice a job
+/// finishing. A group that could not be placed therefore waited for an event
+/// that, if the machine was idle, was never going to come; and a card freed by
+/// a foreign process produced no message and so no recovery. This tick is what
+/// makes "it should always recover again once vram becomes available again"
+/// true for causes originating outside this process.
+const IDLE_TICK: std::time::Duration = std::time::Duration::from_secs(2);
+
+fn dispatch_loop(rx: Receiver<Msg>, mut mgr: ResidencyManager, policy: Policy, lanes: HashMap<Device, Sender<RunReq>>, stats: Arc<Mutex<Stats>>, capacity: Option<CapacityProbe>) {
     let mut queue: Vec<Pending> = Vec::new();
     let mut running: HashSet<InstanceKey> = HashSet::new();
     let mut busy: HashSet<Device> = HashSet::new();
@@ -500,17 +542,27 @@ fn dispatch_loop(rx: Receiver<Msg>, mut mgr: ResidencyManager, policy: Policy, l
     // stats stream itself only samples at ~2 Hz).
     const METRICS_REFRESH: std::time::Duration = std::time::Duration::from_millis(250);
     let mut last_metrics: Option<Instant> = None;
+    /// How often the machine's real free VRAM is re-measured. Slower than
+    /// [`IDLE_TICK`] because the probe is a subprocess, and fast enough that a
+    /// neighbouring job's exit is noticed within seconds.
+    const CAPACITY_REFRESH: std::time::Duration = std::time::Duration::from_secs(5);
+    let mut last_capacity: Option<Instant> = None;
 
     loop {
         // Block for at least one message; a closed channel (every sender gone,
         // i.e. every Executor handle dropped) is real shutdown, not a panic --
         // stays outside the catch_unwind below so `return` here works normally.
-        let first = match rx.recv() {
-            Ok(msg) => msg,
-            Err(_) => return,
-        };
-        // Drain everything else pending before scheduling, same as before.
-        let mut msgs = vec![first];
+        // A timeout, not a plain block: see `IDLE_TICK`. A tick carries no
+        // message - it re-probes capacity and re-runs `assign`, which is
+        // exactly what a group stalled on `NoCapacity` needs.
+        let mut msgs = Vec::new();
+        match rx.recv_timeout(IDLE_TICK) {
+            Ok(msg) => msgs.push(msg),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            // A closed channel (every sender gone, i.e. every Executor handle
+            // dropped) is real shutdown, not a panic.
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+        }
         while let Ok(msg) = rx.try_recv() {
             msgs.push(msg);
         }
@@ -560,6 +612,20 @@ fn dispatch_loop(rx: Receiver<Msg>, mut mgr: ResidencyManager, policy: Policy, l
             assign(&mut queue, &mut mgr, &policy, &lanes, &mut running, &mut busy, &stats, &mut running_jobs);
         })) {
             eprintln!("[residency] dispatcher: panic during assign: {} -- continuing", panic_message(p.as_ref()));
+        }
+        // Re-measure the machine on a cadence, never per message: the probe
+        // shells out to `nvidia-smi`, and the dispatcher thread is the one
+        // thread the whole server's scheduling runs on.
+        if let Some(probe) = &capacity {
+            if last_capacity.is_none_or(|t: Instant| t.elapsed() >= CAPACITY_REFRESH) {
+                let free = probe();
+                if let Err(p) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    mgr.refresh_accelerator_capacity(&free);
+                })) {
+                    eprintln!("[residency] dispatcher: panic refreshing capacity: {} -- continuing", panic_message(p.as_ref()));
+                }
+                last_capacity = Some(Instant::now());
+            }
         }
         if last_metrics.is_none_or(|t| t.elapsed() >= METRICS_REFRESH) {
             if let Ok(mut s) = stats.lock() {
@@ -731,6 +797,18 @@ fn on_msg(msg: Msg, queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, runnin
 /// Assign as many runnable groups as there are free device lanes.
 #[allow(clippy::too_many_arguments)]
 fn assign(queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, policy: &Policy, lanes: &HashMap<Device, Sender<RunReq>>, running: &mut HashSet<InstanceKey>, busy: &mut HashSet<Device>, stats: &Arc<Mutex<Stats>>, running_jobs: &mut Vec<RunningJob>) {
+    // Groups whose claim came back `NoCapacity` THIS round. They are skipped
+    // for the rest of it, and reconsidered on the next one (a lane finishing,
+    // or the dispatcher's own idle tick).
+    //
+    // This used to `break` out of the entire assign loop instead, which meant
+    // one group that could not be placed stopped every OTHER group from being
+    // assigned - including ones on completely idle lanes, and including
+    // stateless CPU models that needed no card at all. `choose_next`
+    // force-picks the oldest overdue group, so the same group was picked
+    // again on the next round, and the next: the head of the queue blocked
+    // the whole server for as long as it was unplaceable.
+    let mut stalled: HashSet<InstanceKey> = HashSet::new();
     loop {
         // Groups whose key is not already running AND that can be placed on some
         // non-busy device (the scheduler policy then picks among them).
@@ -742,6 +820,7 @@ fn assign(queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, policy: &Policy,
         // `false` for it and its jobs would sit in the queue forever, silently.
         let placeable: Vec<Group> = rows
             .iter()
+            .filter(|r| !stalled.contains(&r.key))
             .filter(|r| if mgr.is_multi(&r.model) { mgr.placeable_multi(&r.key, &r.model, busy) } else { mgr.placeable(&r.key, &r.model, busy) })
             .map(|r| r.summary.clone())
             .collect();
@@ -775,7 +854,12 @@ fn assign(queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, policy: &Policy,
         };
         let (outcome, ckey) = match claim_result {
             Ok(x) => x,
-            Err(ClaimError::NoCapacity(_)) => break, // wait for a lane to free a device
+            Err(ClaimError::NoCapacity(_)) => {
+                // Transient: wait for a lane to free a device. Skip THIS group
+                // for the rest of the round and keep assigning the others.
+                stalled.insert(key.clone());
+                continue;
+            }
             Err(ClaimError::TooLarge(e)) | Err(ClaimError::Activate(e)) => {
                 // Both permanent for this group: FAIL its queued jobs now and
                 // keep scheduling the others. (The old code broke out of the

@@ -3711,3 +3711,104 @@ default. The general shape: a comment justifying why something is
 EXCLUDED from a sizing/placement decision is not the same claim as "this
 thing's location doesn't matter" - the first is often true while the
 second silently is not.
+
+## 96. A fallback tier that only exists when the fast tier is ABSENT is not a fallback
+
+`residency::place::pick_device` refuses to put a VRAM-costed model on the
+CPU whenever a GPU exists, and that is right: its `None` is the signal that
+makes `ResidencyManager::claim` EVICT a card rather than quietly park a
+model in RAM at a hundredth of the speed. The rule was written for a caller
+that has an eviction path.
+
+It was then copied, verbatim, into three callers that do not.
+`residency::plan::plan` gates its host-tier branch on
+`b.gpus().is_empty()`; `could_ever_fit` mirrors the same expression;
+`crates/cli`'s `probe_free_vram` dropped a card with zero free bytes from
+the GPU list entirely. Together those produced a machine that was strictly
+better off the MORE contended it was: with both cards fully consumed the
+GPU list emptied, `gpus().is_empty()` became true, and the host tier
+answered; with a single free byte on either card the GPU class stayed
+"non-empty" and the whole run died - `cannot place 'dit' (14.3 GiB device)
+... free: gpu0=4.9 GiB gpu1=7.8 GiB cpu=45.6 GiB`, with 45.6 GiB of host
+RAM sitting idle and a working CPU backend three function calls away.
+
+Two distinct questions had been collapsed into one predicate. "Should this
+go to the CPU *now*?" (no - evict a card, you have one) and "*Could* this
+ever run at all?" (yes - the CPU backend exists) have different answers,
+and `could_ever_fit`'s answer is what decides `TooLarge`, which the
+executor treats as permanent and uses to fail every queued job for that
+model forever. The general shape: when you copy a policy predicate into a
+new caller, copy the REASON with it and check the reason still holds. "No
+GPU exists" was never the real condition; "the caller has no way to make
+room" was.
+
+## 97. A sort key that maxes across units is a comparison between incompatible things
+
+`plan`'s largest-first ordering was
+`Reverse(peak_vram.max(cost.ram).max(cost.npu))`. It reads as "how big is
+this part", and it type-checks, because all three are `u64` bytes. But VRAM
+bytes, host bytes and NPU bytes are capacity in three different budgets on
+three different devices, and the number that decides who gets first pick of
+the CARDS must be made of card bytes only. A part declaring 6 GiB of VRAM
+and 20 GiB of host staging sorted ahead of a 14 GiB DiT and took the only
+card the DiT could have used - on a machine where `dit->gpu0, te->gpu1` was
+sitting right there.
+
+The same file had the mirror-image bug in its charging: `MemCost::ram` is
+documented as "host bytes it will hold REGARDLESS of where it is placed",
+and only `cost.on(device)` was ever charged - so a part landing on a card
+was charged its VRAM and its host RAM was neither checked nor charged
+against anything. Two GPU-placed parts holding 20 GiB of host RAM each left
+the host tier reporting itself completely empty.
+
+A multi-dimensional cost needs its dimensions kept apart in BOTH directions:
+each dimension charged to its own budget, and each ordering decision made
+from the dimension it is actually about. `u64` is not a unit.
+
+## 98. In-process accounting cannot see another process, and nothing about that is a rounding error
+
+`brain serve` budgeted every card from `nvidia-smi --query-gpu=memory.total`
+once, at startup, and then tracked only its own allocations. On a card with
+18 GiB held by a neighbouring job it therefore believed 22 GiB were usable,
+placed a 16 GiB model, and aborted inside the driver - with the scheduler's
+own accounting reporting a successful placement. The one-shot CLI path, in
+the same process at the same instant, read `memory.free` and budgeted the
+same card at 5 GiB. Two capacity models, both frozen, disagreeing by 17 GiB.
+
+Freezing was the deeper half. Because budgets were pure in-process
+integers, VRAM freed by a foreign process produced no message, no budget
+change, and no wake-up: the dispatcher blocked on `rx.recv()` with no
+timer, so the only thing that ever re-ran scheduling was one of this
+daemon's own jobs finishing. A daemon could sit for a week believing a card
+was full that a neighbour released in its first minute.
+
+Both halves are the same lesson: memory shared with the rest of the machine
+has to be MEASURED, repeatedly, not modelled once. What fixed it was one
+probe (`crates/cli/src/capacity.rs`) feeding both consumers, a TTL on the
+one-shot placer's snapshot, and an idle tick on the dispatcher that
+re-measures and re-assigns. Anything that only re-reads the world when its
+own work completes cannot recover from a change it did not cause.
+
+## 99. A placement is a label until something acts on it
+
+`Home::Cpu` was returned by the placer, printed in the placement line,
+asserted in tests - and did nothing. `Homes::run` matched `Some(Home::Gpu(i))`
+and let every other case fall through to `_ => Ok(f())`, which runs the
+closure UNSCOPED, so every `Gpu::new` inside still built on whatever card
+was ambient. A part "placed on the host tier" allocated exactly the VRAM
+the placer had just decided it could not have. `flux1::pipeline::run_on_home`
+had an identical `_ =>` arm, so `BRAIN_FLUX1_TE_DEVICE=cpu` did not put
+T5-XXL on the CPU either.
+
+It survived because the enum arm that does nothing and the enum arm that is
+not applicable look the same when both are spelled `_`. The GPU arm was
+tested (a part on card 1 while card 0 was ambient - an assertion that CAN
+fail if scoping is forgotten); the CPU arm was tested only for what the
+placer RETURNED, never for what running under it did.
+
+Two rules fall out. Match placement enums exhaustively, so "this variant
+has no implementation yet" is a compile error rather than a silent
+fall-through. And when testing a placement decision, assert on the
+OBSERVABLE consequence (which backend got built, which card the scope
+resolves to) rather than on the decision value - the value being right is
+what the bug looked like from the outside the whole time.

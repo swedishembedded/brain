@@ -216,16 +216,34 @@ fn te_bytes(max_len: u64) -> u64 {
     weights + scratch
 }
 
+/// The pipeline stage the text towers are live in. T5-XXL and CLIP-L are
+/// built inside [`Flux1::encode`], read once, and dropped when it returns -
+/// BEFORE the denoise loop starts (`t5` is a local variable there, and this
+/// struct's own doc says so: "the T5-XXL/CLIP-L towers and the VAE are built
+/// for one encode/decode and dropped"). The DiT, by contrast, is resident for
+/// the whole generation.
+///
+/// Declaring that difference is what stops an 18 GiB transient encoder taking
+/// the only card that could hold the 14 GiB permanent DiT - the shape behind
+/// the reported `cannot place 'dit' ... after placing te=gpu0` failure. See
+/// `residency::plan::plan`'s ordering note.
+const PHASE_ENCODE: u32 = 1;
+
 /// The two parts this pipeline ever needs placed: the DiT (`dit`, including
 /// any `dit_extra_bytes` a conditioning adapter adds) and T5-XXL (`te`,
 /// CLIP-L rides with the DiT - ~0.5 GB, not worth its own part). `.apart()`
 /// on both so the placer never puts them on one card when two are available;
 /// with one card (or none installed) [`gpu_core::devices::place`] falls back
 /// to the ambient device for everything, unchanged from today's behavior.
+///
+/// `te` declares [`PHASE_ENCODE`] and the DiT declares nothing (permanent),
+/// which is their real relationship: they DO coexist in VRAM while `encode`
+/// runs, so this is not a claim that the card is charged for only one of them
+/// - it is what tells the placer which of the two can afford a slower tier.
 pub fn part_needs(cfg: &Flux1Config, precision: Precision, n_joint: u64, dit_extra_bytes: u64) -> Vec<Need> {
     vec![
         Need::sized("dit", dit_bytes(cfg, precision, n_joint, dit_extra_bytes), 0).apart(),
-        Need::sized("te", te_bytes(MAX_TXT_LEN as u64), 0).apart(),
+        Need::sized("te", te_bytes(MAX_TXT_LEN as u64), 0).apart().phase(PHASE_ENCODE),
     ]
 }
 
@@ -255,11 +273,15 @@ fn te_device_override() -> Result<Option<gpu_core::devices::Home>, String> {
 /// Run `f` with the ambient device scoped to `home` - the `Home`-typed
 /// sibling of `Homes::run` (which resolves by NAME out of one `Homes`; this
 /// resolves a `Home` this function already picked, honoring
-/// `BRAIN_FLUX1_TE_DEVICE` over the plan). A `Home::Cpu` part runs unscoped,
-/// same as `Homes::run`.
+/// `BRAIN_FLUX1_TE_DEVICE` over the plan). A `Home::Cpu` part builds on the
+/// CPU backend, same as `Homes::run` - it used to run UNSCOPED, so a T5-XXL
+/// "placed on the host tier" (or an operator's explicit
+/// `BRAIN_FLUX1_TE_DEVICE=cpu`) still allocated ~18 GiB on whatever card was
+/// ambient.
 fn run_on_home<R>(home: gpu_core::devices::Home, f: impl FnOnce() -> R) -> Result<R, String> {
     match home {
         gpu_core::devices::Home::Gpu(i) if !gpu_core::devices::gpus().is_empty() => gpu_core::devices::with_gpu(i, f),
+        gpu_core::devices::Home::Cpu => Ok(gpu_core::devices::with_host_tier(f)),
         _ => Ok(f()),
     }
 }
@@ -374,12 +396,20 @@ impl Flux1 {
     /// on its own `Gpu` - the shared entry point for a caller (PuLID) that
     /// needs its own kernel list on the SAME handle is [`Flux1::load_shared`].
     pub fn load_with(root: &str, variant: &str, h: u32, w: u32, precision: Precision) -> Result<Flux1, String> {
-        let cfg = Flux1Config::from_name(variant)?;
-        let n_max = Flux1::n_max(h, w)?;
-        let homes = plan_flux1(&cfg, precision, n_max as u64, 0)?;
-        eprintln!("flux1: placement {}", homes.describe());
-        let gpu = homes.run("dit", || Gpu::new(KERNELS))?;
-        Flux1::build(root, variant, h, w, cfg, n_max, gpu, precision, homes)
+        // Plan AND build inside the retry: a lost VRAM race is only
+        // recoverable if the retry re-plans against freshly probed capacity
+        // rather than repeating the placement that just failed. See
+        // `gpu_core::devices::build_with_retry` for exactly what this covers
+        // (a transient neighbouring process) and what it does not (a driver
+        // `abort`, or a true cross-process reservation).
+        gpu_core::devices::build_with_retry("flux1", || {
+            let cfg = Flux1Config::from_name(variant)?;
+            let n_max = Flux1::n_max(h, w)?;
+            let homes = plan_flux1(&cfg, precision, n_max as u64, 0)?;
+            eprintln!("flux1: placement {}", homes.describe());
+            let gpu = homes.run("dit", || Gpu::new(KERNELS))?;
+            Flux1::build(root, variant, h, w, cfg, n_max, gpu, precision, homes)
+        })
     }
 
     /// [`Flux1::load_with`] for a caller that owns the DiT's placement and

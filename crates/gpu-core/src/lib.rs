@@ -325,6 +325,14 @@ mod native_facade {
     /// understand only `"cpu"`/`"vulkan"` and silently mangled everything
     /// else (`gpu0`, `npu`, `cpu0-7`, …) to "just use wgpu, ambient card".
     fn resolve_backend_name() -> &'static str {
+        // A part the placer put on the HOST TIER runs on the CPU backend, and
+        // that decision outranks the ambient selection: the host tier is only
+        // ever chosen when no card can hold the part, so honouring a `--device
+        // gpu` here would mean allocating exactly the VRAM the placer just
+        // decided was not available. See `devices::with_host_tier`.
+        if crate::devices::on_host_tier() {
+            return "cpu";
+        }
         match DEFAULT_BACKEND.load(Ordering::Relaxed) {
             1 => "wgpu",
             2 => "cpu",
@@ -502,7 +510,22 @@ mod native_facade {
         /// once), else canonical card 0. Explicit placement uses [`Gpu::new_on`].
         pub fn new(kernels: &[(&str, &str)]) -> Gpu {
             register_builtins();
-            let name = resolve_backend_name();
+            let mut name = resolve_backend_name();
+            // No preference was expressed AND the installed placement policy
+            // says no card can hold anything right now: build on the host tier
+            // rather than on card 0. `selected_device()` returns `None` in
+            // that case, which the wgpu arm below would otherwise read as "no
+            // physical card, use the backend's own default" - i.e. a GPU
+            // anyway. Announced once: automatic degradation must never be
+            // silent, since the whole run is about to be much slower.
+            if name != "cpu" && crate::devices::current_gpu().is_none() && crate::devices::auto_host_tier() {
+                static ONCE: std::sync::Once = std::sync::Once::new();
+                ONCE.call_once(|| {
+                    eprintln!("brain: no GPU has room right now; building on the CPU backend (slower, and it will return to the GPU once VRAM frees)");
+                });
+                name = "cpu";
+            }
+            let name = name;
             let kernels = &Self::expanded(kernels, name == "cpu");
             let inner: Box<dyn backend_api::Backend> = match name {
                 "wgpu" => Self::build_wgpu(kernels, crate::devices::selected_device()),

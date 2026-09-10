@@ -69,6 +69,45 @@ pub fn no_exclude() -> HashSet<Device> {
     HashSet::new()
 }
 
+/// Host bytes the CPU tier must hold to run a model of `cost` **there**.
+///
+/// A weight-holding model reports its footprint as `vram` (or `npu`); running
+/// it on the host means holding those same weights in RAM, alongside whatever
+/// host bytes it declared outright. They are the SAME bytes, not two copies -
+/// a model does not stage its own weights beside itself - so this is a `max`,
+/// not a sum, which is the convention [`pick_device`]'s CPU branch has always
+/// used.
+///
+/// This is the one definition of "what does the host tier cost", shared by
+/// [`pick_device`], [`spill_to_host`], [`could_ever_fit`] and
+/// [`plan_eviction_with`], so the four cannot disagree about whether a model
+/// fits in RAM.
+pub fn host_need(cost: &MemCost) -> u64 {
+    cost.ram.max(cost.vram).max(cost.npu)
+}
+
+/// The host tier as a **last resort**: `Some(Device::Cpu)` when RAM can hold
+/// `cost` right now.
+///
+/// Deliberately separate from [`pick_device`] rather than folded into it,
+/// because the two answer different questions. `pick_device` answers "where
+/// does this go if it goes somewhere fast", and its `None` is what tells
+/// `ResidencyManager::claim` to EVICT rather than quietly park a GPU model in
+/// RAM at a hundredth of the speed. This function answers the question after
+/// that one: eviction was tried and could not free enough (or there was
+/// nothing to evict), so the choice is now between the host tier and failing
+/// the request outright. The operator's requirement is explicit that it must
+/// be the host tier - "it may still run slower if all of a sudden vram is not
+/// available but it should never fail".
+pub fn spill_to_host(cost: &MemCost, budgets: &Budgets, exclude: &HashSet<Device>) -> Option<Device> {
+    let need = host_need(cost);
+    let ok = need > 0
+        && !exclude.contains(&Device::Cpu)
+        && budgets.get(Device::Cpu).is_some()
+        && budgets.fits_on(Device::Cpu, need);
+    ok.then_some(Device::Cpu)
+}
+
 /// Choose a device for a new instance of `cost` that fits **right now** (respecting
 /// each device's reserved headroom). Prefers the GPU with the most free bytes
 /// (spreads load); falls back to the CPU/RAM pool for a CPU-resident model. Devices
@@ -160,15 +199,18 @@ pub fn could_ever_fit(cost: &MemCost, budgets: &Budgets) -> bool {
             return true;
         }
     }
-    // Same CPU-fallback shape as pick_device: a weight-holding model spills to
-    // CPU only when the accelerator class it needs doesn't exist at all - an
-    // EXISTING but merely-full accelerator is not an invitation
-    // to spill to RAM, it is exactly the eviction case the caller must try.
-    let cpu_need = cost
-        .ram
-        .max(if budgets.gpus().is_empty() { cost.vram } else { 0 })
-        .max(if budgets.npus().is_empty() { cost.npu } else { 0 });
-    cpu_need > 0 && budgets.usable_on(Device::Cpu) >= cpu_need
+    // The host tier, unconditionally. This asks "could this model EVER run
+    // here", not "should it run here now", and brain can always run a model on
+    // the CPU backend - slowly. Gating this on `gpus().is_empty()` (which it
+    // used to do, mirroring `pick_device`'s deliberate refusal to spill while
+    // a card exists to be evicted for) conflated the two questions and made a
+    // model that is merely bigger than any single card `ClaimError::TooLarge`
+    // - which the executor treats as PERMANENT and uses to fail every queued
+    // job for that model, forever, on a machine with 45 GiB of idle RAM.
+    // `pick_device` still refuses (eviction stays preferred); what changes is
+    // that "no card will ever hold it" is no longer reported as "it can never
+    // run".
+    host_need(cost) > 0 && budgets.usable_on(Device::Cpu) >= host_need(cost)
 }
 
 /// The victims to evict from a device to fit `needed` bytes, and where to place the
@@ -193,11 +235,23 @@ pub fn plan_eviction(cost: &MemCost, budgets: &Budgets, residents: &Residents, k
 /// ascending score order. Pure over its inputs (`now` is the residents' tick),
 /// so policies are unit-testable without threads or a clock.
 pub fn plan_eviction_with(policy: &dyn EvictionPolicy, cost: &MemCost, budgets: &Budgets, residents: &Residents, keep: &[InstanceKey], exclude: &HashSet<Device>) -> Option<EvictionPlan> {
-    // Same class preference as `pick_device`: NPU (if the model has an NPU path) then
-    // GPU. Victim bytes are counted with the device-appropriate cost field
-    // (`entry.cost.on(d)`), so NPU eviction frees NPU bytes and GPU eviction frees
-    // VRAM. If any plan exists in the preferred class, it wins.
-    for (devices, need) in [(budgets.npus(), cost.npu), (budgets.gpus(), cost.vram)] {
+    // Same class preference as `pick_device`: NPU (if the model has an NPU path),
+    // then GPU, then - last - the HOST tier. Victim bytes are counted with the
+    // device-appropriate cost field (`entry.cost.on(d)`), so NPU eviction frees NPU
+    // bytes, GPU eviction frees VRAM and host eviction frees RAM. If any plan
+    // exists in the preferred class, it wins, so adding the host class cannot
+    // divert a model away from a card it could have had: it is only reached when
+    // no accelerator plan exists at all.
+    //
+    // The host class is not cosmetic. Without it `Device::Cpu` was not an
+    // eviction victim class ANYWHERE, so (a) a CPU-resident model that did not
+    // fit right now got `NoCapacity` forever - on a CPU-only box the residency
+    // system had no eviction at all, it filled up once and livelocked - and (b)
+    // every warm-demotion copy `evict_entry` parks on `Device::Cpu` was
+    // unreclaimable for the daemon's whole life, so the CPU `used` counter only
+    // ever went up and the demoted `Instance`s leaked.
+    let host: Vec<Device> = budgets.get(Device::Cpu).map(|_| vec![Device::Cpu]).unwrap_or_default();
+    for (devices, need) in [(budgets.npus(), cost.npu), (budgets.gpus(), cost.vram), (host, host_need(cost))] {
         if need == 0 {
             continue;
         }
@@ -232,7 +286,7 @@ pub fn plan_eviction_with(policy: &dyn EvictionPolicy, cost: &MemCost, budgets: 
                 if keep.contains(&key) {
                     continue;
                 }
-                let vbytes = entry.cost.on(d);
+                let vbytes = entry.cost.resident_on(d);
                 victims.push(key);
                 freed += vbytes;
                 if vbytes >= deficit {
@@ -349,9 +403,10 @@ mod tests {
         assert_eq!(pick_device(&vram(64), &cpu_only, &no_exclude()), None);
         // But on a host WITH a GPU that happens to be full, a vram model does NOT spill
         // to slow CPU — it returns None so the caller's eviction frees the GPU.
+        // Filled to their usable ceiling (24 GB card, 2 GB reserve).
         let mut b = two_gpus();
-        b.alloc(Device::Gpu(0), 23 * GB);
-        b.alloc(Device::Gpu(1), 23 * GB);
+        b.alloc(Device::Gpu(0), 22 * GB);
+        b.alloc(Device::Gpu(1), 22 * GB);
         assert_eq!(pick_device(&vram(6), &b, &no_exclude()), None);
     }
 
@@ -391,34 +446,89 @@ mod tests {
         assert_eq!(plan.victims, vec![ik("big_old")]);
     }
 
+    /// A model bigger than any card gets no GPU plan, however aggressive the
+    /// eviction - and lands on the host tier instead of nowhere. With no host
+    /// tier budgeted at all there is genuinely nowhere, and it says so.
     #[test]
-    fn too_big_for_any_card_is_none() {
-        let b = two_gpus(); // usable = 22 GB each
+    fn too_big_for_any_card_falls_to_the_host_tier_and_only_then_gives_up() {
+        let b = two_gpus(); // usable = 22 GB each, plus a 128 GB host tier
         let r = Residents::new();
-        assert!(plan_eviction(&vram(23), &b, &r, &[], &no_exclude()).is_none());
+        let plan = plan_eviction(&vram(23), &b, &r, &[], &no_exclude()).expect("the host tier can hold it");
+        assert_eq!(plan.device, Device::Cpu, "no card can ever hold 23 GB here");
+        assert!(plan.victims.is_empty(), "the host tier had room; nothing needed evicting");
+
+        let mut cards_only = Budgets::new();
+        cards_only.set(Device::Gpu(0), 24 * GB, 2 * GB).set(Device::Gpu(1), 24 * GB, 2 * GB);
+        assert!(plan_eviction(&vram(23), &cards_only, &r, &[], &no_exclude()).is_none(), "no host tier: nowhere at all");
+    }
+
+    /// The host tier is a real eviction victim class, not just a spill target.
+    /// Without this a warm-demotion copy parked on `Device::Cpu` could never be
+    /// reclaimed (the CPU `used` counter only ever went up) and a CPU-resident
+    /// model that did not fit right now got `NoCapacity` forever - on a
+    /// CPU-only box the residency system had no eviction at all.
+    #[test]
+    fn the_host_tier_evicts_its_own_residents() {
+        let mut cpu_only = Budgets::new();
+        cpu_only.set(Device::Cpu, 32 * GB, 0);
+        cpu_only.alloc(Device::Cpu, 30 * GB);
+        let mut r = Residents::new();
+        r.insert(ik("warm_leftover"), MemCost::new(0, 30 * GB), Device::Cpu);
+
+        let plan = plan_eviction(&MemCost::new(0, 20 * GB), &cpu_only, &r, &[], &no_exclude()).expect("a host-tier plan");
+        assert_eq!(plan.device, Device::Cpu);
+        assert_eq!(plan.victims, vec![ik("warm_leftover")], "the host tier's own resident is the victim");
+    }
+
+    /// ...and a GPU plan still WINS over the host tier whenever one exists, so
+    /// adding the host class cannot quietly divert a model off a card it could
+    /// have had by evicting something.
+    #[test]
+    fn an_evictable_card_beats_the_host_tier() {
+        let mut b = two_gpus();
+        b.alloc(Device::Gpu(0), 22 * GB);
+        b.alloc(Device::Gpu(1), 22 * GB);
+        let mut r = Residents::new();
+        r.insert(ik("old"), vram(22), Device::Gpu(1));
+        let plan = plan_eviction(&vram(20), &b, &r, &[], &no_exclude()).expect("a plan");
+        assert_eq!(plan.device, Device::Gpu(1), "evicting a card beats running on the CPU");
+        assert_eq!(plan.victims, vec![ik("old")]);
     }
 
     #[test]
     fn could_ever_fit_distinguishes_permanent_from_transient() {
-        let b = two_gpus(); // usable = 22 GB each, 24 GB total each.
+        let mut b = two_gpus(); // usable = 22 GB each, 24 GB total each.
+        b.set(Device::Cpu, 24 * GB, 0); // a host tier smaller than the pair of cards
         // Fits an EMPTY card -> could ever fit, even though nothing is free
         // right now in this test (budgets start empty here, so it's also
         // immediately placeable -- the "ever" question is what matters).
         assert!(could_ever_fit(&vram(22), &b));
-        // Bigger than the largest card's usable budget, even fully empty.
-        assert!(!could_ever_fit(&vram(23), &b));
+        // Bigger than the largest card's usable budget AND bigger than the
+        // host tier: this one genuinely can never run here.
+        assert!(!could_ever_fit(&vram(25), &b));
         // Stateless (all-zero cost) is always "ever fits".
         assert!(could_ever_fit(&MemCost::new(0, 0), &b));
     }
 
+    /// `could_ever_fit` answers "could this model EVER run here", which decides
+    /// `TooLarge` (permanent, fails every queued job for the model) against
+    /// `NoCapacity` (transient, wait and retry). It used to mirror
+    /// `pick_device`'s deliberate refusal to spill to the CPU while a card
+    /// exists - so a model merely bigger than any single card was reported as
+    /// unable to ever run, and its jobs were failed permanently, on a box with
+    /// tens of GiB of idle RAM and a working CPU backend. The two questions
+    /// are different: `pick_device` still refuses (eviction stays preferred).
     #[test]
-    fn could_ever_fit_does_not_offer_cpu_spill_when_the_gpu_class_exists() {
-        // A GPU-having host: a vram-costed model that's too big for the GPU
-        // must NOT be rescued by a CPU fallback (pick_device's own rule --
-        // spill to CPU only on a host with no accelerator of that class).
+    fn could_ever_fit_offers_the_host_tier_when_no_card_could_ever_hold_it() {
         let mut b = two_gpus();
         b.set(Device::Cpu, 512 * GB, 0);
-        assert!(!could_ever_fit(&vram(23), &b));
+        assert!(could_ever_fit(&vram(23), &b), "23 GB fits no card, but the CPU backend can run it");
+        // `pick_device` is unchanged: it still says "no", which is what makes
+        // the caller evict a card rather than park the model in RAM.
+        let mut full = two_gpus();
+        full.alloc(Device::Gpu(0), 22 * GB);
+        full.alloc(Device::Gpu(1), 22 * GB);
+        assert_eq!(pick_device(&vram(6), &full, &no_exclude()), None);
     }
 
     #[test]

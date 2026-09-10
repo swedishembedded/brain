@@ -148,6 +148,7 @@ fn with_arch_spec<R>(arch: &str, f: impl FnOnce(&dyn ArchSpec) -> R) -> Option<R
         "sam2" => Some(f(&sam2::spec::Sam2Spec)),
         "rrdbnet" => Some(f(&rrdbnet::spec::RrdbnetSpec)),
         "timesfm3" => Some(f(&timesfm3::spec::Timesfm3Spec)),
+        "s3dit" => Some(f(&s3dit::spec::S3ditSpec)),
         _ => None,
     }
 }
@@ -179,6 +180,21 @@ mod tests {
     use std::path::Path;
     use brain_modelstore::inventory::ArtifactRecord;
     use brain_modelstore::resolve::{AssembleOutcome, AssembledVariant, Confidence};
+
+    /// `s3dit` (Z-Image) has no dedicated `_cli.rs` of its own, so it can
+    /// only ever accept a `--dit`/`--vae`/`--text-encoder`/`--tokenizer`
+    /// disambiguation flag through THIS generic path - without a row here,
+    /// `crate::catalog::provider`'s `resolved_assembly_for` (which every
+    /// `brain s3dit <verb>` invocation goes through, since `s3dit` is on
+    /// `ARCH_TO_MODEL`) always resolves with an EMPTY override map, so an
+    /// `Ambiguous` outcome (e.g. two unrelated VAEs in the models directory)
+    /// can never be answered - the same flag the printed refusal message
+    /// itself suggests typing is silently unusable.
+    #[test]
+    fn s3dit_is_reachable_through_the_generic_dispatch_with_its_real_roles() {
+        let roles = with_arch_spec("s3dit", |spec| spec.roles().to_vec());
+        assert_eq!(roles, Some(vec!["dit", "vae", "text_encoder", "tokenizer"]));
+    }
 
     struct TwoRoleSpec;
     impl ArchSpec for TwoRoleSpec {

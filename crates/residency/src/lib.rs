@@ -104,6 +104,28 @@ impl MemCost {
             Device::Npu(_) => self.npu,
         }
     }
+
+    /// The bytes an instance **resident on** `device` charges that device.
+    ///
+    /// Identical to [`Self::on`] for an accelerator, and for a model that only
+    /// ever declared host bytes. It differs for the one case [`Self::on`] gets
+    /// wrong: a weight-holding model reports its footprint as `vram` (that is
+    /// what `est_vram` builds), and when such a model is placed on the HOST
+    /// tier - a GPU-less box, or a card too contended to hold it - those
+    /// weights are held in RAM. `on(Cpu)` reports its `ram` field, which for
+    /// such a model is `0`, so the host tier was charged NOTHING for a model
+    /// physically occupying tens of GiB of it and would accept an unbounded
+    /// number of them.
+    ///
+    /// It is a `max` rather than a sum for the reason
+    /// [`crate::place::host_need`] documents: a model does not stage a second
+    /// copy of itself beside itself.
+    pub fn resident_on(&self, device: Device) -> u64 {
+        match device {
+            Device::Cpu => self.ram.max(self.vram).max(self.npu),
+            d => self.on(d),
+        }
+    }
 }
 
 /// Residency tier of a model's weights.

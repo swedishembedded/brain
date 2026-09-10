@@ -294,7 +294,20 @@ pub fn build_executor(gpus: &[(u32, u64)], npus: &[(u32, u64)], unified_gpus: &[
         }
     }
 
-    let exec = Executor::start(models, budgets, policy);
+    // The live capacity probe: the dispatcher re-measures every card's real
+    // free VRAM on a cadence, so a neighbouring process taking or releasing
+    // bytes changes what this daemon believes it may use - and so a card that
+    // frees up is used again without a restart. Same `crate::capacity` probe
+    // the one-shot placer uses, which is what stops the two halves of this
+    // process disagreeing about the same card.
+    let exec = Executor::start_with_probe(
+        models,
+        budgets,
+        policy,
+        Some(std::sync::Arc::new(|| {
+            crate::capacity::available_gpus().into_iter().map(|(i, free)| (Device::Gpu(i), free)).collect()
+        })),
+    );
     // Multi-device models the catalog owns (today: DeepSeek-OCR, whose vision
     // tower is on wgpu while its decoder is on the CPU backend). They are
     // registered HERE rather than folded into `models` above because only
