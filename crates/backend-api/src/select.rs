@@ -945,13 +945,31 @@ pub fn candidates(op: Op, shape: OpShape, caps: &DeviceCaps) -> Vec<KernelVarian
         }
         // See this Op's own doc for the full measured story. `k = 1`
         // (causal-chunk prefill) at F32 KV storage is the only regime with a
-        // live, measured win (`paged_flash_prefill`) - every other (k,
-        // dtype) pair has either a measured non-win (decode, `k = 0`, every
-        // dtype) or no fused kernel at all yet (prefill at a non-F32 storage
-        // tier) and stays `Reference`-only, the module's own "a call site
-        // has no kernel for falls back to Reference" rule.
+        // live, measured win - every other (k, dtype) pair has either a
+        // measured non-win (decode, `k = 0`, every dtype) or no fused kernel
+        // at all yet (prefill at a non-F32 storage tier) and stays
+        // `Reference`-only, the module's own "a call site has no kernel for
+        // falls back to Reference" rule.
+        //
+        // `shape.n` is `head_dim`: the fused kernel is a SEPARATE WGSL file
+        // per head_dim TIER, not per exact value (M2.6, corrected after
+        // `qwen3::serve`'s OWN test suite caught the first version of this
+        // arm being too strict - `QwenConfig::tiny()`'s `head_dim` is 8, and
+        // `paged_flash_prefill` dispatches correctly there, so its own
+        // shared-memory tile is sized for "UP TO 128", not "EXACTLY 128" as
+        // qwen35.md's prose reads in isolation). `paged_flash_prefill_hd256`
+        // (M2.5) exists for exactly 256 - a real second file, not a bigger
+        // tile on the first one, because 256 exceeds what one `HD=128` tile
+        // can hold and is instead streamed as two 128-wide fragments. `n ==
+        // 0` is kept accepted for every pre-existing call site that predates
+        // this field mattering - callers written after M2.6 should pass
+        // their real head_dim rather than rely on that default. Same
+        // `FusedFlash` variant either way: which literal kernel constant to
+        // dispatch is still the caller's own shape-based choice, exactly as
+        // `causal_chunk` (via `shape.k`) already disambiguates prefill from
+        // decode within this one Op.
         Op::PagedAttentionFused => match (shape.k, shape.dtype) {
-            (1, Dtype::F32) => vec![FusedFlash, Reference],
+            (1, Dtype::F32) if shape.n <= 128 || shape.n == 256 => vec![FusedFlash, Reference],
             _ => vec![Reference],
         },
     };

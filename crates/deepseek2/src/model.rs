@@ -319,6 +319,10 @@ fn gqa_chunk_ids() -> block::GqaChunkIds {
         scores_batched: PAGED_DECODE_SCORES_BATCHED,
         softmax_batched: DECODE_SOFTMAX_BATCHED,
         apply_batched: PAGED_DECODE_APPLY_BATCHED,
+        // No fused kernel exists for this model's head_dim (M2.6 only built
+        // one for 256) - `gqa_chunk_step` always takes the triad above,
+        // unchanged from before this field existed.
+        fused_prefill_hd256: None,
     }
 }
 

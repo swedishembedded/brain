@@ -176,6 +176,10 @@ const STATIC_PIPELINES: &[(&str, &str)] = &[
     ("decode_softmax_batched", kernels::DECODE_SOFTMAX_BATCHED), // 88
     ("paged_decode_scores_batched", kernels::PAGED_DECODE_SCORES_BATCHED), // 89
     ("paged_decode_apply_batched", kernels::PAGED_DECODE_APPLY_BATCHED), // 90
+    // M2.6: real, dispatched - `gqa_chunk_ids`'s `fused_prefill_hd256` slot,
+    // `model::block::gqa_chunk_step`'s single-dispatch alternative to the
+    // three kernels just above, at this model's real `head_dim=256`.
+    ("paged_flash_prefill_hd256", kernels::PAGED_FLASH_PREFILL_HD256), // 91
 ];
 
 /// This model's FULL kernel set: `STATIC_PIPELINES` (every hand-numbered
@@ -360,6 +364,7 @@ const TOPK_EXTRACT_STEP: usize = 87;
 const DECODE_SOFTMAX_BATCHED: usize = 88;
 const PAGED_DECODE_SCORES_BATCHED: usize = 89;
 const PAGED_DECODE_APPLY_BATCHED: usize = 90;
+const PAGED_FLASH_PREFILL_HD256: usize = 91;
 
 /// Two-stage argmax reduction width for [`Qwen35::head_argmax_dev`]/
 /// [`Qwen35::head_topk_dev`] - matches `qwen3::serve::Engine`'s own
@@ -567,6 +572,12 @@ fn gqa_chunk_ids() -> model::block::GqaChunkIds {
         scores_batched: PAGED_DECODE_SCORES_BATCHED,
         softmax_batched: DECODE_SOFTMAX_BATCHED,
         apply_batched: PAGED_DECODE_APPLY_BATCHED,
+        // M2.6: this model's real head_dim (256) has a real fused kernel -
+        // `gqa_chunk_step` dispatches it instead of the triad above whenever
+        // `Op::PagedAttentionFused`'s selector agrees (`caps.
+        // workgroup_reductions`; always true on a real GPU, never on the CPU
+        // JIT, which keeps the triad exactly as before this existed).
+        fused_prefill_hd256: Some(PAGED_FLASH_PREFILL_HD256),
     }
 }
 

@@ -1854,7 +1854,7 @@ impl Engine {
                 // below already lives in `model::block` instead of here. KV
                 // storage dtype is always F32 in this branch (the `kv_int8`
                 // arm above never reaches here).
-                if model::block::paged_attention_fused(g, causal_chunk, false) {
+                if model::block::paged_attention_fused(g, causal_chunk, false, hd) {
                     // `paged_flash_prefill` (M2.3): one dispatch per (head,
                     // query-tile), no `scores`/`probs` at all - BR=64 is the
                     // kernel's own tile size, @workgroup_size(256) its own

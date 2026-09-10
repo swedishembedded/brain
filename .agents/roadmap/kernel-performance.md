@@ -1417,6 +1417,90 @@ non-comparable measurement.
 **Commit**: one (`paged_flash_prefill_hd256.wgsl` + catalogue regen + the
 correctness test).
 
+### M2.6 - `paged_flash_prefill_hd256` wired into `qwen35::serve`'s chunked prefill
+
+Closes M2.5's own named follow-up: the kernel existed, correctness-gated in
+isolation, but nothing dispatched it. `model::block::gqa_chunk_step` (the
+SHARED chunked-prefill attention primitive `qwen35` and `deepseek2` both
+call) always ran the three-kernel triad; it now branches, per chunk, on
+whether a real fused kernel exists for the caller's own `head_dim`.
+
+**`Op::PagedAttentionFused`'s selector gained a real bug, caught by an
+existing test, not shipped.** The first version of this change made the
+selector's `FusedFlash` arm require `shape.n` (head_dim) to be exactly 0,
+128 or 256 - reading `.agents/roadmap/qwen35.md`'s "`paged_flash_prefill`
+hardcodes `HD=128`" too literally. `qwen3::serve`'s OWN pre-existing test,
+`causal_chunk_fp32_kv_dispatches_the_fused_kernel_not_the_triad`, immediately
+caught it: `QwenConfig::tiny()`'s `head_dim` is 8, not 128, and that kernel
+has always dispatched correctly there - its shared-memory tile is sized for
+"up to 128", not "exactly 128". Corrected to `shape.n <= 128 || shape.n ==
+256`. Recorded as a real near-miss, not smoothed over: a stricter-than-
+necessary gate would have silently cost qwen3 its own fused-prefill win at
+every head_dim other than exactly 128, on every real checkpoint that isn't
+128-wide, with no test failure anywhere in `qwen35`'s own suite to catch
+it - `qwen3`'s test is what caught it, which is the whole reason a shared
+selector's every caller's existing gates get run before trusting a change
+to it.
+
+**The wiring itself.** `GqaChunkIds` gained one field,
+`fused_prefill_hd256: Option<usize>` - `None` for a caller with no fused
+kernel for its own head_dim (`deepseek2`, unchanged, confirmed by its own
+test suite staying green), `Some(PAGED_FLASH_PREFILL_HD256)` for `qwen35`
+(newly registered at pipeline index 91). `gqa_chunk_step` checks `Op::
+PagedAttentionFused` via `model::block::paged_attention_fused` (now taking
+`head_dim` as a real parameter every caller must pass explicitly, not
+inferred) exactly the same way `qwen3::serve`'s own M2.3/M2.4 wiring
+already does, and dispatches the fused kernel with the same degenerate
+one-physical-block convention (`block_ids` all zero, block size = the flat
+cache's own capacity, `max_bt = 1`) the triad already uses for `qwen35`'s
+flat per-layer KV cache - `paged_flash_prefill_hd256` is built on the same
+paged-attention addressing contract those kernels are, not a different one.
+
+**Correctness - a NEW test, because none of `qwen35`'s existing ones reach
+this shape.** Read from the source rather than assumed: `Qwen35Config::
+tiny()`'s `head_dim` is 40, `tiny_i8()`'s is 32 - neither is 128 or 256, so
+the fused branch was structurally unreachable from every existing test in
+that crate, and this change could not have regressed anything there (nor,
+conversely, could anything there have proven it correct). New file
+`crates/model/tests/gqa_chunk_step_hd256.rs` calls `gqa_chunk_step` directly
+at `head_dim=256` (same shape `paged.rs`'s own kernel-level gate uses -
+`start=17, n=130`, spanning three `BR=64` query tiles) twice - once with
+`fused_prefill_hd256: Some(...)`, once with `None` to force the triad on
+identical inputs - and asserts the two `ctx` outputs agree. Measured worst
+`maxabs = 1.79e-7`, comfortably inside the `1e-3` bound `paged_flash_
+prefill_hd256_matches_batched_triad_at_head_dim_256` already established for
+the kernel itself. A second test pins the dispatch-count shape (3 steps: 2
+cache appends + 1 fused dispatch, not the triad's 5). **Mutation-verified**:
+swapping the fused dispatch's `kcache`/`vcache` argument order reproduces a
+`maxabs = 0.71` failure immediately; reverting restores the `1.79e-7` pass.
+
+**Verified**: `cargo test -p brain-model --test gqa_chunk_step_hd256` (2/2).
+`cargo test -p brain-qwen3 --lib` (137/140 - the 3 failures are the
+pre-existing `max_buffer_size`-ceiling tests this ledger's M4.4 entry
+already confirmed unrelated, reconfirmed identical here). `cargo test -p
+brain-qwen35 --lib --bins --tests` (every suite green except the one
+pre-existing `forward_batched_topk_matches_an_independent_host_matvec_
+within_tolerance` float-bit-exactness flake, confirmed via `git stash`
+against unmodified `main` before this change - same failure, same values,
+unrelated to head_dim/attention wiring). `cargo test -p brain-deepseek2
+--lib --bins --tests` green (its own `gqa_chunk_ids` now explicit about
+having no fused kernel, behaviourally unchanged). `cargo clippy -p
+brain-model -p brain-qwen35 -p brain-deepseek2 -p brain-qwen3 -p
+brain-backend-api --all-targets --all-features -- -D warnings` clean.
+`scripts/build/gen-kernel-table.py --check` and `check-kernel-selection.sh`
+both clean (this change does not touch either's tracked surface, confirmed
+rather than assumed).
+
+**Not attempted here, named as the natural follow-up**: shrinking `scores`/
+`probs` scratch when the fused path is live, the way M2.4 did for `qwen3`'s
+own equivalent win (`gqa_mixer_chunk_fwd`'s caller still allocates the
+full-size triad scratch even on the fused path, since `gqa_chunk_step`'s
+signature still requires those buffers be passed in regardless of which
+branch uses them) - a real, separate, smaller change in the same shape
+M2.3/M2.4 already split.
+
+**Commit**: one.
+
 ### M3.2 - Device admission head, and `PagedDecoder::admit_greedy`/`admit_topk`
 
 `qwen3::serve::Engine` kept a SECOND, host-only copy of the LM head

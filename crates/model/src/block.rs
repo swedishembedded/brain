@@ -481,6 +481,14 @@ pub struct GqaChunkIds {
     pub softmax_batched: usize,
     /// `paged_decode_apply_batched.wgsl`.
     pub apply_batched: usize,
+    /// `paged_flash_prefill_hd256.wgsl` - one dispatch replacing
+    /// `scores_batched`/`softmax_batched`/`apply_batched` at `head_dim=256`
+    /// (M2.6), when the caller has it registered AND `Op::PagedAttentionFused`
+    /// selects it for the caller's own head_dim. `None` for a caller with no
+    /// fused kernel for its own head_dim (e.g. `deepseek2`, unchanged) -
+    /// [`gqa_chunk_step`] then always takes the triad, exactly as before this
+    /// field existed.
+    pub fused_prefill_hd256: Option<usize>,
 }
 
 /// One CHUNK of a prefill's GQA attention: append `n` already-QK-normed +
@@ -544,13 +552,35 @@ pub fn gqa_chunk_step(
     let scale = 1.0 / (head_dim as f32).sqrt();
     // `max_bt = 1`: one physical block backs the whole sequence (see this
     // function's own doc), so a row's block table is a single zero.
-    vec![
+    let mut steps = vec![
         kv_cache_fill_at(g, k.splice, k_new, kcache, start, n, n_kv_heads, head_dim),
         kv_cache_fill_at(g, k.splice, v_new, vcache, start, n, n_kv_heads, head_dim),
-        g.step(k.scores_batched, &[q, kcache, block_ids, seq_lens, scores], &[n, n_heads, group, head_dim, cap, hkv, t_max, 1, f(scale)], n * n_heads * t_max),
-        g.step(k.softmax_batched, &[scores, seq_lens, probs], &[n, n_heads, t_max], n * n_heads),
-        g.step(k.apply_batched, &[probs, vcache, block_ids, seq_lens, ctx], &[n, n_heads, group, head_dim, cap, hkv, t_max, 1], n * n_heads * head_dim),
-    ]
+    ];
+    // M2.6: one dispatch (no `scores`/`probs` at all) in place of the triad
+    // below, at whichever head_dim `k.fused_prefill_hd256` and `Op::
+    // PagedAttentionFused`'s selector both agree a real fused kernel exists
+    // for - `paged_attention_fused` is what makes that agreement (a caller
+    // with `fused_prefill_hd256: None`, or a device without `caps.
+    // workgroup_reductions`, always falls through to the triad unchanged).
+    // Same `block_ids`/`cap`-as-`bs`/`max_bt=1` degenerate-one-block
+    // convention the triad already uses below - `paged_flash_prefill_hd256`
+    // is built on the same paged-attention contract those two kernels are,
+    // not a different addressing scheme.
+    if let Some(fused) = k.fused_prefill_hd256 {
+        if paged_attention_fused(g, true, false, head_dim) {
+            steps.push(g.step(
+                fused,
+                &[q, kcache, vcache, block_ids, seq_lens, ctx],
+                &[n, n_heads, n_kv_heads, head_dim, group, cap, 1],
+                n_heads * n.div_ceil(64) * 256,
+            ));
+            return steps;
+        }
+    }
+    steps.push(g.step(k.scores_batched, &[q, kcache, block_ids, seq_lens, scores], &[n, n_heads, group, head_dim, cap, hkv, t_max, 1, f(scale)], n * n_heads * t_max));
+    steps.push(g.step(k.softmax_batched, &[scores, seq_lens, probs], &[n, n_heads, t_max], n * n_heads));
+    steps.push(g.step(k.apply_batched, &[probs, vcache, block_ids, seq_lens, ctx], &[n, n_heads, group, head_dim, cap, hkv, t_max, 1], n * n_heads * head_dim));
+    steps
 }
 
 // ---- the full GQA attention SUBLAYER (norm -> QKV -> QK-norm -> RoPE ->
@@ -1935,17 +1965,22 @@ pub fn paged_scores_variant(g: &Gpu, reference: usize, coop: Option<usize>, batc
 /// paged-attention dispatch over the multi-stage triad for this regime
 /// (`causal_chunk`: prefill's single-sequence causal chunks vs decode's
 /// independent-sequence rows - the two are different physical kernels the
-/// selector's shape alone cannot tell apart, see that Op's own doc) and KV
-/// storage dtype. Factored out of `qwen3::serve::Engine::run_batched_steps`
+/// selector's shape alone cannot tell apart, see that Op's own doc), KV
+/// storage dtype, and `head_dim` (M2.6: the fused kernel is a separate WGSL
+/// file per head_dim - `paged_flash_prefill` at 128, `paged_flash_prefill_
+/// hd256` at 256 - so a caller at a head_dim neither exists for must NOT get
+/// `true` here). Factored out of `qwen3::serve::Engine::run_batched_steps`
 /// as its own free function - not inlined there - so that function's own
 /// source never contains the literal identifier `KernelVariant`
 /// (`qwen3/tests/no_kernel_names.rs`'s own gate bans exactly that, the same
 /// reason `paged_scores_variant` above already lives here rather than in
-/// `run_batched_steps` itself).
-pub fn paged_attention_fused(g: &Gpu, causal_chunk: bool, kv_int8: bool) -> bool {
+/// `run_batched_steps` itself). `head_dim` is a genuine parameter, not
+/// inferred, because this function has no model config to read it from -
+/// every caller must pass its own real head_dim explicitly.
+pub fn paged_attention_fused(g: &Gpu, causal_chunk: bool, kv_int8: bool, head_dim: u32) -> bool {
     use gpu_core::select::{Dtype, KernelSelector, KernelVariant, Op, OpShape};
     let dtype = if kv_int8 { Dtype::I8 } else { Dtype::F32 };
-    let shape = OpShape { m: 0, n: 0, k: causal_chunk as u32, dtype };
+    let shape = OpShape { m: 0, n: head_dim, k: causal_chunk as u32, dtype };
     gpu_core::select::DefaultSelector.select(Op::PagedAttentionFused, shape, &g.caps()) == KernelVariant::FusedFlash
 }
 
