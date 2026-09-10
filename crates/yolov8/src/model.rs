@@ -82,6 +82,14 @@ pub struct Yolo {
     opt: Optim,
     b: u32,
     mode: Cell<LossMode>,
+    /// Backbone+neck frozen for a fine-tune (see [`Yolo::freeze_backbone`]).
+    /// Read by [`Yolo::set_eval`] / [`Yolo::set_update_running`] so the freeze
+    /// survives the mode toggles a training loop makes after it is set.
+    frozen_trunk: Cell<bool>,
+    /// Box/DFL head frozen for a fine-tune (see [`Yolo::freeze_reg_head`]).
+    frozen_reg: Cell<bool>,
+    /// Class branch's shared hidden convs frozen (see [`Yolo::freeze_cls_hidden`]).
+    frozen_cls_hidden: Cell<bool>,
 
     // input image buffer [N,3,H,W]
     img: DeviceBuffer,
@@ -158,6 +166,9 @@ pub struct Yolo {
     frozen: RefCell<Option<crate::loss::Assignment>>,
     /// Scalar detection loss from the most recent `detection_eval` (debug aid).
     det_loss: Cell<f32>,
+    /// Per-class gradient gate, `nc` long, `1.0` = learn (see
+    /// [`Yolo::train_only_classes`]). `None` = every class learns.
+    cls_grad_mask: RefCell<Option<Vec<f32>>>,
 }
 
 impl Yolo {
@@ -311,6 +322,9 @@ impl Yolo {
             opt,
             b,
             mode: Cell::new(LossMode::Proxy),
+            frozen_trunk: Cell::new(false),
+            frozen_reg: Cell::new(false),
+            frozen_cls_hidden: Cell::new(false),
             img,
             b_conv0,
             b_conv1,
@@ -360,11 +374,181 @@ impl Yolo {
             gts: RefCell::new(Vec::new()),
             frozen: RefCell::new(None),
             det_loss: Cell::new(0.0),
+            cls_grad_mask: RefCell::new(None),
         }
     }
 
     pub fn set_mode(&self, mode: LossMode) {
         self.mode.set(mode);
+    }
+
+    /// Is `name` a backbone/neck (shared feature-extractor) parameter?
+    fn is_trunk_param(name: &str) -> bool {
+        name.starts_with("backbone.") || name.starts_with("neck.")
+    }
+
+    /// Is `name` a box/DFL regression-head parameter?
+    fn is_reg_param(name: &str) -> bool {
+        name.starts_with("head.") && name.contains(".reg.")
+    }
+
+    /// Freeze the shared feature extractor (backbone + PAN-FPN neck) for a
+    /// fine-tune, returning how many parameters were frozen.
+    ///
+    /// This is what protects a pretrained detector's OTHER classes when it is
+    /// fine-tuned on a narrow dataset: teaching one new class on images that
+    /// contain only that class's subject would otherwise drag the shared
+    /// features away from what the untouched classes depend on.
+    ///
+    /// A backbone can drift by TWO independent routes, and freezing only the
+    /// first leaves a "frozen" backbone that still moves:
+    ///
+    /// 1. the optimiser applying gradients - stopped by
+    ///    [`paramstore::ParamStore::freeze_where`];
+    /// 2. BatchNorm running mean/variance, which the FORWARD pass updates with
+    ///    no gradient involved at all - stopped by pinning those modules to
+    ///    eval-mode BN with running-stat updates off.
+    ///
+    /// Both are applied here, and [`Yolo::set_eval`]/[`Yolo::set_update_running`]
+    /// keep honouring them afterwards, so a training loop that later flips the
+    /// whole network into train mode cannot silently unfreeze the trunk.
+    pub fn freeze_backbone(&mut self) -> usize {
+        self.frozen_trunk.set(true);
+        let n = self.ps.freeze_where(Yolo::is_trunk_param);
+        self.pin_frozen_norm();
+        n
+    }
+
+    /// Freeze the box/DFL regression branch of all 3 scale heads, returning how
+    /// many parameters were frozen.
+    ///
+    /// Sound for "add one class to a pretrained detector" because YOLOv8's box
+    /// head is CLASS-AGNOSTIC: each anchor emits one `4*reg_max` DFL box
+    /// distribution shared by every class, not a box per class. A pretrained
+    /// head already localises the new class's subject correctly (an added
+    /// person-like class is bounded exactly as `person` was), so retraining the
+    /// branch can only move the boxes the other classes rely on.
+    pub fn freeze_reg_head(&mut self) -> usize {
+        self.frozen_reg.set(true);
+        let n = self.ps.freeze_where(Yolo::is_reg_param);
+        self.pin_frozen_norm();
+        n
+    }
+
+    /// Is `name` one of the class branch's SHARED hidden convs (`head.{s}.cls.0`
+    /// / `.1`) - everything in the class branch except the final per-class 1x1?
+    fn is_cls_hidden_param(name: &str) -> bool {
+        name.starts_with("head.")
+            && name.contains(".cls.")
+            && !name.ends_with(".cls.2.weight")
+            && !name.ends_with(".cls.2.bias")
+    }
+
+    /// Freeze the class branch's two shared hidden convs, leaving ONLY the final
+    /// per-class 1x1 trainable. Returns how many parameters were frozen.
+    ///
+    /// This is what makes "the pretrained classes are preserved" a provable
+    /// claim rather than a hope. [`Yolo::train_only_classes`] pins a class's own
+    /// final-layer row, but that row reads the hidden convs' output, and those
+    /// are shared by every class - so training them on a narrow dataset changes
+    /// what every untouched class SEES even while its own weights sit
+    /// bit-identical, and its logits collapse anyway. With this freeze the
+    /// untouched classes are a function of frozen inputs and frozen weights end
+    /// to end, so their detections are bit-identical.
+    ///
+    /// The cost is capacity: an added class is then a linear probe on features
+    /// that were trained to separate the ORIGINAL classes, which is enough to
+    /// re-weight existing evidence but not to represent a distinction those
+    /// features never encoded. That trade - preservation against capacity - is
+    /// real and unavoidable here, so it is a caller's choice, not a default.
+    pub fn freeze_cls_hidden(&mut self) -> usize {
+        self.frozen_cls_hidden.set(true);
+        let n = self.ps.freeze_where(Yolo::is_cls_hidden_param);
+        self.pin_frozen_norm();
+        n
+    }
+
+    /// Restrict class learning to `classes`; every other class's loss gradient
+    /// is dropped where the head receives it.
+    ///
+    /// Needed whenever a pretrained detector is fine-tuned on data that does not
+    /// contain all of its classes. The detection loss scores BCE over the FULL
+    /// `[anchors x nc]` grid against a target that is zero everywhere except the
+    /// assigned `(anchor, class)` cells, so a class that never appears in the
+    /// data is not merely unsupervised - it is actively and relentlessly pushed
+    /// toward "never fire", on every anchor of every image. Fine-tuning a
+    /// COCO detector on person-only images therefore DESTROYS the other 78
+    /// classes unless their gradient is gated off, which is what this does.
+    ///
+    /// Gating here rather than at the optimiser also stops those classes from
+    /// reshaping anything UPSTREAM of them (the class branch's shared hidden
+    /// convs, and the trunk when it is not frozen).
+    ///
+    /// Note: this zeroes the GRADIENT. AdamW's decoupled weight decay is not a
+    /// gradient and still shrinks every element of a tensor it steps, so
+    /// bit-exact preservation of the gated classes additionally needs `wd = 0`.
+    pub fn train_only_classes(&self, classes: &[u32]) {
+        let mut mask = vec![0.0f32; self.cfg.nc as usize];
+        for &c in classes {
+            match mask.get_mut(c as usize) {
+                Some(m) => *m = 1.0,
+                None => panic!("train_only_classes: class {c} out of range for nc={}", self.cfg.nc),
+            }
+        }
+        *self.cls_grad_mask.borrow_mut() = Some(mask);
+    }
+
+    /// Re-assert eval-mode BN + no running-stat updates on whatever is frozen.
+    fn pin_frozen_norm(&self) {
+        if self.frozen_trunk.get() {
+            self.set_trunk_norm(true, false);
+        }
+        if self.frozen_reg.get() {
+            for s in &self.head.scales {
+                s.reg.set_eval(true);
+                s.reg.set_update_running(false);
+            }
+        }
+        if self.frozen_cls_hidden.get() {
+            // `Branch::set_eval` covers exactly the two hidden convs - the final
+            // 1x1 has no BatchNorm, so this cannot pin the trainable part.
+            for s in &self.head.scales {
+                s.cls.set_eval(true);
+                s.cls.set_update_running(false);
+            }
+        }
+    }
+
+    /// Set BN eval-mode / running-stat updates across the backbone + neck.
+    fn set_trunk_norm(&self, eval: bool, update_running: bool) {
+        for m in self.trunk_norm_targets() {
+            m.set_eval(eval);
+            m.set_update_running(update_running);
+        }
+    }
+
+    /// Every backbone + neck module carrying BatchNorm, as one list - so
+    /// `set_eval`, `set_update_running` and the freeze cannot disagree about
+    /// what "the trunk" is.
+    fn trunk_norm_targets(&self) -> [&dyn NormToggle; 16] {
+        [
+            &self.b_conv0,
+            &self.b_conv1,
+            &self.b_c2f0,
+            &self.b_conv2,
+            &self.b_c2f1,
+            &self.b_conv3,
+            &self.b_c2f2,
+            &self.b_conv4,
+            &self.b_c2f3,
+            &self.b_sppf,
+            &self.n_t4,
+            &self.n_n3,
+            &self.dn3,
+            &self.n_n4,
+            &self.dn4,
+            &self.n_n5,
+        ]
     }
 
     /// Flip the WHOLE network's BatchNorm between eval-mode (running stats, used
@@ -374,23 +558,12 @@ impl Yolo {
     /// safe to flip back and forth around an inference call. Training paths
     /// (the loss gradchecks) leave this untouched and stay in train-mode BN.
     pub fn set_eval(&self, eval: bool) {
-        self.b_conv0.set_eval(eval);
-        self.b_conv1.set_eval(eval);
-        self.b_c2f0.set_eval(eval);
-        self.b_conv2.set_eval(eval);
-        self.b_c2f1.set_eval(eval);
-        self.b_conv3.set_eval(eval);
-        self.b_c2f2.set_eval(eval);
-        self.b_conv4.set_eval(eval);
-        self.b_c2f3.set_eval(eval);
-        self.b_sppf.set_eval(eval);
-        self.n_t4.set_eval(eval);
-        self.n_n3.set_eval(eval);
-        self.dn3.set_eval(eval);
-        self.n_n4.set_eval(eval);
-        self.dn4.set_eval(eval);
-        self.n_n5.set_eval(eval);
+        for m in self.trunk_norm_targets() {
+            m.set_eval(eval);
+        }
         self.head.set_eval(eval);
+        // Anything frozen stays pinned regardless of what was just broadcast.
+        self.pin_frozen_norm();
     }
 
     /// Enable/disable the BN running-stat momentum EMA update across the WHOLE
@@ -399,23 +572,11 @@ impl Yolo {
     /// are what eval-mode BN (and hence [`Yolo::detect`]) reads. Left OFF for the
     /// gradchecks, whose finite-difference forward passes must stay deterministic.
     pub fn set_update_running(&self, on: bool) {
-        self.b_conv0.set_update_running(on);
-        self.b_conv1.set_update_running(on);
-        self.b_c2f0.set_update_running(on);
-        self.b_conv2.set_update_running(on);
-        self.b_c2f1.set_update_running(on);
-        self.b_conv3.set_update_running(on);
-        self.b_c2f2.set_update_running(on);
-        self.b_conv4.set_update_running(on);
-        self.b_c2f3.set_update_running(on);
-        self.b_sppf.set_update_running(on);
-        self.n_t4.set_update_running(on);
-        self.n_n3.set_update_running(on);
-        self.dn3.set_update_running(on);
-        self.n_n4.set_update_running(on);
-        self.dn4.set_update_running(on);
-        self.n_n5.set_update_running(on);
+        for m in self.trunk_norm_targets() {
+            m.set_update_running(on);
+        }
         self.head.set_update_running(on);
+        self.pin_frozen_norm();
     }
 
     /// Upload the image batch `[N*3*H*W]` (f32 CHW).
@@ -504,6 +665,12 @@ impl Yolo {
         let nc = self.cfg.nc as usize;
         let four_rm = 4 * self.cfg.reg_max as usize;
 
+        // Per-class gradient gate (see `train_only_classes`). Applied HERE, the
+        // one point every class gradient passes through on its way from the loss
+        // into the network.
+        let mask = self.cls_grad_mask.borrow();
+        let gate = |ch: usize| mask.as_ref().map_or(1.0, |m| m[ch]);
+
         let mut anchor_base = 0usize;
         for (s, scale) in self.head.scales.iter().enumerate() {
             let sh = scale.cls.out_shape; // [n, nc, h, w]
@@ -512,9 +679,13 @@ impl Yolo {
             let mut cls_nchw = vec![0.0f32; n * nc * hw];
             for nn in 0..n {
                 for ch in 0..nc {
+                    let g = gate(ch);
+                    if g == 0.0 {
+                        continue; // buffer is already zero
+                    }
                     for p in 0..hw {
                         let src = (nn * a + anchor_base + p) * nc + ch;
-                        cls_nchw[(nn * nc + ch) * hw + p] = d_cls[src];
+                        cls_nchw[(nn * nc + ch) * hw + p] = d_cls[src] * g;
                     }
                 }
             }
@@ -810,6 +981,29 @@ impl Yolo {
         checkpoint::save_carded(path, self.cfg.to_json(), &tensors, &checkpoint::st::ModelCard::new("brain/yolov8", "yolo"));
     }
 }
+
+/// The two BatchNorm mode toggles every backbone/neck block shares, so [`Yolo`]
+/// can address its trunk as ONE list instead of repeating the 16-module spelling
+/// per operation (where `set_eval` and `set_update_running` could drift apart,
+/// and a freeze could disagree with both about what "the trunk" is).
+trait NormToggle {
+    fn set_eval(&self, eval: bool);
+    fn set_update_running(&self, on: bool);
+}
+
+macro_rules! impl_norm_toggle {
+    ($($t:ty),* $(,)?) => {$(
+        impl NormToggle for $t {
+            fn set_eval(&self, eval: bool) {
+                <$t>::set_eval(self, eval)
+            }
+            fn set_update_running(&self, on: bool) {
+                <$t>::set_update_running(self, on)
+            }
+        }
+    )*};
+}
+impl_norm_toggle!(Conv, C2f, SPPF);
 
 /// A reproducible pseudo-random vector in (-1, 1) for the proxy loss.
 fn proxy_vec(seed: &mut u64, n: u32) -> Vec<f32> {

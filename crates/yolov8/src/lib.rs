@@ -15,6 +15,7 @@ pub mod blocks;
 pub mod boxmath;
 pub mod caps;
 pub mod config;
+pub mod finetune;
 pub mod head;
 pub mod import;
 pub mod infer;

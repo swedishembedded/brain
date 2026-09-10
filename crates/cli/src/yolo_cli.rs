@@ -7,10 +7,20 @@
 //! instantiates the CPU backend today, see `Yolo::new`).
 //!
 //!   brain yolov8 train <data_dir> --out F [--steps N --batch B --lr X --nc C
-//!                                          --input S --seed S]
+//!                                          --input S --seed S --arch tiny|yolov8n]
 //!   brain yolov8 eval  --weights F --data <dir> [--conf X --iou X]
 //!   brain yolov8 detect --weights F --image <path> [--conf X --iou X]
-//!   brain yolov8 fine-tune <data_dir> --weights F --out F [--freeze-backbone ...]
+//!   brain yolov8 fine-tune <data_dir> --weights F --out F [--nc C
+//!         --freeze-backbone --freeze-reg-head --freeze-cls-hidden
+//!         --train-classes a,b,...]
+//!
+//! `fine-tune` builds on the CHECKPOINT'S own architecture, and an `--nc` above
+//! the checkpoint's class count APPENDS classes: the pretrained ones keep their
+//! indices and their weights, the new ones get a fresh head (`yolov8::finetune`).
+//! The freeze flags and `--train-classes` are what keep the pretrained classes
+//! working while a new one is taught - see `Yolo::freeze_backbone` /
+//! `Yolo::freeze_cls_hidden` / `Yolo::train_only_classes` for what each one
+//! protects and why gradients alone are not enough.
 //!
 //! `infer` is accepted as an alias for `detect` - the canonical verb every
 //! architecture answers to.
@@ -72,20 +82,46 @@ struct TrainCfg {
     seed: u64,
     nc: u32,
     input: u32,
+    out: String,
+    weights: String,
+    /// `""` = auto: `tiny` when training from scratch, the CHECKPOINT'S OWN
+    /// layout when fine-tuning (so the pretrained tensors fit by construction).
+    arch: String,
+    freeze_backbone: bool,
+    freeze_reg_head: bool,
+    freeze_cls_hidden: bool,
+    /// Class ids allowed to learn; empty = all of them.
+    train_classes: Vec<u32>,
 }
 
 impl Default for TrainCfg {
     fn default() -> TrainCfg {
-        TrainCfg { steps: 200, batch: 4, lr: 1e-3, wd: 1e-2, seed: 1337, nc: 0, input: 0 }
+        TrainCfg {
+            steps: 200,
+            batch: 4,
+            lr: 1e-3,
+            wd: 1e-2,
+            seed: 1337,
+            nc: 0,
+            input: 0,
+            out: String::new(),
+            weights: String::new(),
+            arch: String::new(),
+            freeze_backbone: false,
+            freeze_reg_head: false,
+            freeze_cls_hidden: false,
+            train_classes: Vec::new(),
+        }
     }
 }
 
-fn parse_train_flags(args: &[String], start: usize, cfg: &mut TrainCfg, out: &mut String, weights: &mut String, freeze: &mut bool) {
+fn parse_train_flags(args: &[String], start: usize) -> TrainCfg {
+    let mut cfg = TrainCfg::default();
     let mut i = start;
     while i < args.len() {
         match args[i].as_str() {
-            "--out" => *out = val(args, &mut i, "--out"),
-            "--weights" => *weights = val(args, &mut i, "--weights"),
+            "--out" => cfg.out = val(args, &mut i, "--out"),
+            "--weights" => cfg.weights = val(args, &mut i, "--weights"),
             "--steps" => cfg.steps = val(args, &mut i, "--steps").parse().unwrap_or(cfg.steps),
             "--batch" => cfg.batch = val(args, &mut i, "--batch").parse().unwrap_or(cfg.batch),
             "--lr" => cfg.lr = val(args, &mut i, "--lr").parse().unwrap_or(cfg.lr),
@@ -93,18 +129,64 @@ fn parse_train_flags(args: &[String], start: usize, cfg: &mut TrainCfg, out: &mu
             "--seed" => cfg.seed = val(args, &mut i, "--seed").parse().unwrap_or(cfg.seed),
             "--nc" => cfg.nc = val(args, &mut i, "--nc").parse().unwrap_or(cfg.nc),
             "--input" => cfg.input = val(args, &mut i, "--input").parse().unwrap_or(cfg.input),
-            "--freeze-backbone" => *freeze = true,
+            "--arch" => cfg.arch = val(args, &mut i, "--arch"),
+            "--freeze-backbone" => cfg.freeze_backbone = true,
+            "--freeze-reg-head" => cfg.freeze_reg_head = true,
+            "--freeze-cls-hidden" => cfg.freeze_cls_hidden = true,
+            "--train-classes" => {
+                cfg.train_classes = val(args, &mut i, "--train-classes")
+                    .split(',')
+                    .filter(|s| !s.is_empty())
+                    .map(|s| {
+                        s.trim().parse::<u32>().unwrap_or_else(|_| {
+                            eprintln!("--train-classes: {s:?} is not a class id");
+                            std::process::exit(2);
+                        })
+                    })
+                    .collect()
+            }
             other => eprintln!("ignoring unknown flag {other:?}"),
         }
         i += 1;
     }
+    cfg
 }
 
-/// Build a tiny `Yolo` from a (possibly pretrained) init for the dataset's
-/// geometry. When `init` is `None`, weights are random-seeded.
-fn build_model(cfg: &TrainCfg, data: &DetectData) -> Yolo {
-    let nc = if cfg.nc > 0 { cfg.nc } else { data.nc.max(1) };
-    let mut ycfg = YoloConfig::tiny(nc);
+/// The architecture to build, before the class count / input size are applied.
+///
+/// Fine-tuning reads the layout off the PRETRAINED CHECKPOINT rather than
+/// guessing: `YoloConfig::tiny` deliberately uses different channel widths from
+/// the canonical `yolov8n`, so building `tiny` and then copying a real COCO
+/// checkpoint into it matches almost nothing and silently trains from scratch.
+fn base_config(cfg: &TrainCfg, pretrained: Option<&str>, data: &DetectData) -> YoloConfig {
+    // From scratch there is no checkpoint to inherit a class count from, so the
+    // dataset's own is the fallback (`--nc` still overrides, in `build_model`).
+    let scratch_nc = if cfg.nc > 0 { cfg.nc } else { data.nc.max(1) };
+    match cfg.arch.as_str() {
+        "yolov8n" => return YoloConfig::yolov8n(),
+        "tiny" => return YoloConfig::tiny(scratch_nc),
+        "" => {}
+        other => {
+            eprintln!("brain yolov8: unknown --arch {other:?} (expected tiny|yolov8n)");
+            std::process::exit(2);
+        }
+    }
+    match pretrained {
+        // The checkpoint carries its own config (`brain.config` metadata).
+        Some(path) => YoloConfig::from_json(&checkpoint::read_config(path)),
+        None => YoloConfig::tiny(scratch_nc),
+    }
+}
+
+/// Build a `Yolo` for the dataset's geometry from `base`, at the requested class
+/// count. Weights are random-seeded; `fine_tune` overwrites them from the
+/// checkpoint afterwards.
+fn build_model(base: YoloConfig, cfg: &TrainCfg, data: &DetectData) -> Yolo {
+    let mut ycfg = base;
+    if cfg.nc > 0 {
+        ycfg.nc = cfg.nc;
+    }
+    ycfg.nc = ycfg.nc.max(1);
     if cfg.input > 0 {
         ycfg.input = cfg.input;
     } else {
@@ -115,6 +197,47 @@ fn build_model(cfg: &TrainCfg, data: &DetectData) -> Yolo {
     }
     let init = <Yolo as model::Model>::init_weights(&ycfg, cfg.seed);
     Yolo::new(ycfg, cfg.batch, 0, &init)
+}
+
+/// Apply the requested freezes/gates, reporting what each one covered.
+fn apply_freezes(model: &mut Yolo, cfg: &TrainCfg, data: &DetectData) {
+    if cfg.freeze_backbone {
+        let n = model.freeze_backbone();
+        println!("froze {n} backbone+neck tensors (gradients AND BatchNorm running stats)");
+    }
+    if cfg.freeze_reg_head {
+        let n = model.freeze_reg_head();
+        println!("froze {n} box/DFL head tensors (the box head is class-agnostic)");
+    }
+    if cfg.freeze_cls_hidden {
+        let n = model.freeze_cls_hidden();
+        println!("froze {n} class-branch hidden tensors (only the final per-class 1x1 trains)");
+    }
+    if !cfg.train_classes.is_empty() {
+        model.train_only_classes(&cfg.train_classes);
+        println!("training only class(es) {:?}; every other class's gradient is gated off", cfg.train_classes);
+        if cfg.wd != 0.0 {
+            eprintln!(
+                "brain yolov8: WARNING --train-classes with --wd {} - AdamW's decoupled weight \
+                 decay is not a gradient and still shrinks the gated classes. Pass --wd 0 to keep \
+                 them bit-exact.",
+                cfg.wd
+            );
+        }
+    } else if model.cfg.nc as usize > used_classes(data).len() {
+        eprintln!(
+            "brain yolov8: WARNING this model has {} classes but the dataset only uses {}. The \
+             detection loss scores BCE over ALL classes against an all-zero target for the absent \
+             ones, so they will be trained to never fire. Pass --train-classes to gate them off.",
+            model.cfg.nc,
+            used_classes(data).len()
+        );
+    }
+}
+
+/// The distinct class ids that actually appear in the dataset's boxes.
+fn used_classes(data: &DetectData) -> std::collections::BTreeSet<u32> {
+    data.boxes.iter().flatten().map(|b| b.class).collect()
 }
 
 /// Run the shared training loop over the train split. Prints loss periodically
@@ -178,15 +301,11 @@ fn run_train_loop(model: &Yolo, data: &DetectData, cfg: &TrainCfg) -> (f32, f32)
 
 fn train(args: &[String], pretrained: Option<&str>) {
     let Some(dir) = args.first().cloned() else {
-        eprintln!("usage: brain yolov8 train <data_dir> --out F [--steps N --batch B --lr X --nc C --input S --seed S]");
+        eprintln!("usage: brain yolov8 train <data_dir> --out F [--steps N --batch B --lr X --nc C --input S --seed S --arch tiny|yolov8n]");
         return;
     };
-    let mut cfg = TrainCfg::default();
-    let mut out = String::new();
-    let mut weights = String::new();
-    let mut freeze = false;
-    parse_train_flags(args, 1, &mut cfg, &mut out, &mut weights, &mut freeze);
-    if out.is_empty() {
+    let cfg = parse_train_flags(args, 1);
+    if cfg.out.is_empty() {
         eprintln!("brain yolov8 train: --out <weights> is required");
         return;
     }
@@ -203,62 +322,62 @@ fn train(args: &[String], pretrained: Option<&str>) {
         data.n, split_at(data.n), data.w, data.h, data.nc, cfg.steps, cfg.batch, cfg.lr
     );
 
-    let model = build_model(&cfg, &data);
-    // Optional pretrained init for fine-tune: copy each matching tensor in.
+    let mut model = build_model(base_config(&cfg, pretrained, &data), &cfg, &data);
+    // Optional pretrained init for fine-tune: copy each matching tensor in,
+    // widening the class head when this run adds classes.
     if let Some(path) = pretrained {
-        load_pretrained_into(&model, path);
-    }
-    let (i0, i1) = run_train_loop(&model, &data, &cfg);
-    model.save(&out);
-    println!("done: train loss {i0:.4} -> {i1:.4}; saved {out}");
-}
-
-/// Fine-tune: load pretrained weights, then continue training the (whole)
-/// network on a new dataset. `--freeze-backbone` is accepted but, since the
-/// model exposes no per-parameter freeze API, it currently has no effect beyond
-/// a one-line notice (documented limitation).
-fn fine_tune(args: &[String]) {
-    // `fine-tune <data_dir> --weights <pretrained> --out F ...`
-    if args.is_empty() {
-        eprintln!("usage: brain yolov8 fine-tune <data_dir> --weights <pretrained> --out F [flags]");
-        return;
-    }
-    let mut cfg = TrainCfg::default();
-    let mut out = String::new();
-    let mut weights = String::new();
-    let mut freeze = false;
-    parse_train_flags(args, 1, &mut cfg, &mut out, &mut weights, &mut freeze);
-    if weights.is_empty() || out.is_empty() {
-        eprintln!("brain yolov8 fine-tune: --weights <pretrained> and --out <weights> are required");
-        return;
-    }
-    if freeze {
-        eprintln!(
-            "brain yolov8 fine-tune: --freeze-backbone has no effect (no per-param freeze \
-             API); fine-tuning the whole network from the pretrained init"
-        );
-    }
-    // Reuse the train path, seeding the model from the pretrained checkpoint.
-    train(args, Some(&weights));
-}
-
-/// Copy every tensor present in BOTH the checkpoint and the model into the
-/// model's weights (shape-matched by element count). Tensors that do not match
-/// (e.g. a different class count `nc`) are left at their random init.
-fn load_pretrained_into(model: &Yolo, path: &str) {
-    let c = checkpoint::load(path);
-    let init = c.by_role("");
-    let mut copied = 0usize;
-    for name in <Yolo as model::Model>::param_names(model) {
-        if let Some(w) = init.get(&name) {
-            let cur = model.read_weight(&name);
-            if cur.len() == w.len() {
-                model.write_weight(&name, w);
-                copied += 1;
+        let src = checkpoint::load(path).by_role("");
+        let rep = yolov8::finetune::load_pretrained(&model, &src, cfg.seed);
+        println!("fine-tune init from {path}: {}", rep.summary());
+        if !rep.transferred_anything() {
+            eprintln!(
+                "brain yolov8 fine-tune: the checkpoint shares NO tensor with this model - \
+                 that is a from-scratch run, not a fine-tune (architecture mismatch: pass \
+                 --arch matching the checkpoint, or drop --weights)"
+            );
+            std::process::exit(1);
+        }
+        if !rep.mismatched.is_empty() {
+            eprintln!("brain yolov8 fine-tune: {} tensor(s) left at random init:", rep.mismatched.len());
+            for (n, want, got) in rep.mismatched.iter().take(10) {
+                eprintln!("  {n}: model wants {want} elements, checkpoint has {got}");
             }
         }
     }
-    eprintln!("brain yolov8 fine-tune: loaded {copied} pretrained tensors from {path}");
+    apply_freezes(&mut model, &cfg, &data);
+    let (i0, i1) = run_train_loop(&model, &data, &cfg);
+    model.save(&cfg.out);
+    println!("done: train loss {i0:.4} -> {i1:.4}; saved {}", cfg.out);
+}
+
+/// Fine-tune: load pretrained weights, then continue training on a new dataset.
+///
+/// Builds on the CHECKPOINT'S OWN architecture (so a real COCO `yolov8n`
+/// actually loads), and `--nc` above the checkpoint's class count APPENDS
+/// classes - the pretrained ones keep their indices and their weights, the new
+/// ones get a fresh head (see `yolov8::finetune`).
+///
+/// `--freeze-backbone` / `--freeze-reg-head` are real: the named tensors are
+/// withdrawn from the optimiser AND pinned to eval-mode BatchNorm, so they are
+/// bit-for-bit unchanged by the run.
+fn fine_tune(args: &[String]) {
+    // `fine-tune <data_dir> --weights <pretrained> --out F ...`
+    if args.is_empty() {
+        eprintln!("usage: brain yolov8 fine-tune <data_dir> --weights <pretrained> --out F [--nc C --freeze-backbone --freeze-reg-head ...]");
+        return;
+    }
+    let cfg = parse_train_flags(args, 1);
+    if cfg.weights.is_empty() || cfg.out.is_empty() {
+        eprintln!("brain yolov8 fine-tune: --weights <pretrained> and --out <weights> are required");
+        return;
+    }
+    if !Path::new(&cfg.weights).exists() {
+        eprintln!("brain yolov8 fine-tune: --weights {} not found", cfg.weights);
+        std::process::exit(1);
+    }
+    // Reuse the train path, seeding the model from the pretrained checkpoint.
+    let weights = cfg.weights.clone();
+    train(args, Some(&weights));
 }
 
 fn eval(args: &[String]) {

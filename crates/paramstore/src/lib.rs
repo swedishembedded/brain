@@ -78,6 +78,14 @@ pub struct ParamStore {
     /// Params optimised off-device (grad on GPU, moments in RAM). Disjoint from
     /// `trainable`; the GPU optimiser skips these, `OffloadAdam` handles them.
     pub offload: Vec<(String, usize)>,
+    /// Parameters withdrawn from the optimiser AFTER construction - a fine-tune
+    /// freeze (see [`Self::freeze_where`]). Distinct from [`Role::Frozen`],
+    /// which is a construction-time decision that never allocates a gradient or
+    /// moment buffer at all and therefore cannot be backpropagated THROUGH.
+    /// These keep their gradient buffer, so the backward pass still runs and
+    /// still routes gradient past them to whatever is downstream; the AdamW step
+    /// simply never reads it, so the weight cannot move.
+    pub frozen: Vec<(String, usize)>,
     /// Per-tensor AdamW learning-rate multiplier (LoRA+: `B`'s effective lr
     /// is `lr_ratio * lr`). Absent = `1.0`, so every existing caller is
     /// unaffected. Set via [`Self::set_lr_mult`] after construction, then
@@ -212,7 +220,31 @@ impl ParamStore {
         let n_parts: u64 = trainable.iter().map(|(_, n)| gradnorm_parts(*n) as u64).sum();
         let norms = gpu.storage(n_parts.max(trainable.len() as u64).max(1));
         let clip_coef = gpu.storage(1);
-        ParamStore { params, trainable, weight, grad, adam_m, adam_v, norms, clip_coef, offload, lr_mult: HashMap::new() }
+        ParamStore { params, trainable, weight, grad, adam_m, adam_v, norms, clip_coef, offload, frozen: Vec::new(), lr_mult: HashMap::new() }
+    }
+
+    /// Withdraw every trainable parameter whose name satisfies `pred` from the
+    /// optimiser, returning how many were withdrawn. THE freeze mechanism: the
+    /// optimiser iterates [`Self::opt_params`], so a withdrawn tensor is never
+    /// stepped and its weight is bit-for-bit preserved across training.
+    ///
+    /// Gradients keep flowing (the buffers stay allocated and
+    /// [`Self::zero_grads`] keeps clearing them), which is what lets a caller
+    /// freeze a backbone while still training a head that sits above it.
+    ///
+    /// Note for callers freezing normalization layers: this covers the
+    /// GRADIENT path only. A BatchNorm's running mean/variance are updated by
+    /// the forward pass, not by the optimiser, so freezing a BN's `gamma`/
+    /// `beta` here does NOT stop its running stats from drifting - the module
+    /// must additionally be put in eval mode / have its running-stat update
+    /// disabled. Missing that leaves a "frozen" backbone that still moves.
+    pub fn freeze_where(&mut self, pred: impl Fn(&str) -> bool) -> usize {
+        let (frozen, keep): (Vec<_>, Vec<_>) =
+            std::mem::take(&mut self.trainable).into_iter().partition(|(n, _)| pred(n));
+        self.trainable = keep;
+        let n = frozen.len();
+        self.frozen.extend(frozen);
+        n
     }
 
     /// Give `name`'s AdamW step a per-tensor learning-rate multiplier
@@ -256,10 +288,14 @@ impl ParamStore {
         self.params.iter().find(|(n, _)| n == name).unwrap().1
     }
 
-    /// Zero every (trainable) gradient buffer (call once per effective batch,
-    /// before the accumulating backward passes).
+    /// Zero every gradient buffer the optimiser or the backward pass touches
+    /// (call once per effective batch, before the accumulating backward passes).
+    /// Includes [`Self::frozen`] tensors: the backward pass still ACCUMULATES
+    /// into their grad buffers, so skipping them would let a frozen tensor's
+    /// gradient grow without bound across a training run.
     pub fn zero_grads(&self, gpu: &Gpu) {
-        let clears: Vec<&gpu_core::DeviceBuffer> = self.trainable.iter().map(|(n, _)| self.g(n)).collect();
+        let clears: Vec<&gpu_core::DeviceBuffer> =
+            self.trainable.iter().chain(&self.frozen).map(|(n, _)| self.g(n)).collect();
         gpu.submit(&clears, &[]);
     }
 

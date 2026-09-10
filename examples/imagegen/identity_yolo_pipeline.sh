@@ -61,7 +61,17 @@ rand_seed() { echo $(( (RANDOM << 15) ^ RANDOM )); }
 
 GEN_SIZE="${GEN_SIZE:-512}" GEN_STEPS="${GEN_STEPS:-8}" TRAIN_SIZE="${TRAIN_SIZE:-256}"
 TRAIN_STEPS="${TRAIN_STEPS:-1500}" TRAIN_BATCH="${TRAIN_BATCH:-4}" TRAIN_LR="${TRAIN_LR:-3e-3}" TRAIN_SEED="${TRAIN_SEED:-1337}"
-N_TARGET="${N_TARGET:-50}" N_NEGATIVE="${N_NEGATIVE:-15}" N_BACKGROUND="${N_BACKGROUND:-5}" N_HOLDOUT="${N_HOLDOUT:-5}"
+N_TARGET="${N_TARGET:-50}" N_NEGATIVE="${N_NEGATIVE:-40}" N_BACKGROUND="${N_BACKGROUND:-10}" N_HOLDOUT="${N_HOLDOUT:-5}"
+
+# Class layout. This trains an ADDITIONAL class onto a COCO-pretrained
+# yolov8n rather than a single-class detector from scratch, so COCO's own 80
+# classes (0..79) keep their indices and their meaning, and the target person
+# is appended as class 80. `person` stays class 0 - a different real person is
+# still a person, which is exactly the distinction being taught.
+PERSON_CLASS=0
+TARGET_CLASS="${TARGET_CLASS:-80}"
+NUM_CLASSES=$((TARGET_CLASS + 1))
+TARGET_NAME="${TARGET_NAME:-einstein}"
 IDENTITY_FLOOR="${IDENTITY_FLOOR:-0.05}"   # ArcFace cosine floor: catches total conditioning failure, not a quality bar
 DETECT_CONF="${DETECT_CONF:-0.1}" DETECT_IOU="${DETECT_IOU:-0.45}"  # this repo's own proven combo for this tiny architecture
 SURVIVE_FLOOR=$((N_TARGET * 8 / 10))       # 80% of N_TARGET must pass the identity gate to trust training
@@ -280,11 +290,20 @@ def cmd_letterbox(argv):
 
 
 def cmd_pack_dataset(argv):
-    """<manifest.jsonl> <out-dir> <size> - manifest rows are {"image", "box":
-    [x1,y1,x2,y2] or null} in SOURCE pixel coords, in final dataset order.
-    Writes images.f32 (N*3*size*size LE f32 CHW RGB [0,1]), boxes.bin
-    ([u32 num] then num*(u32 class,f32 cx,cy,w,h) normalized), meta.json."""
+    """<manifest.jsonl> <out-dir> <size> <nc> - manifest rows are {"image",
+    "box": [x1,y1,x2,y2] or null, "class": int} in SOURCE pixel coords, in
+    final dataset order. Writes images.f32 (N*3*size*size LE f32 CHW RGB
+    [0,1]), boxes.bin ([u32 num] then num*(u32 class,f32 cx,cy,w,h)
+    normalized), meta.json.
+
+    The per-row class is what makes this a MULTI-class training set. A
+    hard-negative (a different real person) carries a real box at the ordinary
+    COCO `person` class, not zero boxes: the network then has a competing
+    hypothesis it must actively reject, instead of only an absence of positive
+    signal, which it can satisfy by latching onto any incidental correlate of
+    the target images (lighting, composition) rather than the subject."""
     manifest_path, out_dir, size = argv[0], argv[1], int(argv[2])
+    nc = int(argv[3]) if len(argv) > 3 else 1
     os.makedirs(out_dir, exist_ok=True)
     rows = [json.loads(l) for l in open(manifest_path) if l.strip()]
     images_f = open(os.path.join(out_dir, "images.f32"), "wb")
@@ -304,11 +323,14 @@ def cmd_pack_dataset(argv):
         if x2 <= x1 or y2 <= y1:
             boxes_f.write(struct.pack("<I", 0))
             continue
+        cls = int(row.get("class", 0))
+        if not 0 <= cls < nc:
+            raise SystemExit(f"row class {cls} out of range for nc={nc}: {row['image']}")
         boxes_f.write(struct.pack("<I", 1))
-        boxes_f.write(struct.pack("<Iffff", 0, (x1 + x2) / 2 / size, (y1 + y2) / 2 / size, (x2 - x1) / size, (y2 - y1) / size))
+        boxes_f.write(struct.pack("<Iffff", cls, (x1 + x2) / 2 / size, (y1 + y2) / 2 / size, (x2 - x1) / size, (y2 - y1) / size))
     images_f.close()
     boxes_f.close()
-    json.dump({"n": len(rows), "c": 3, "h": size, "w": size, "nc": 1}, open(os.path.join(out_dir, "meta.json"), "w"))
+    json.dump({"n": len(rows), "c": 3, "h": size, "w": size, "nc": nc}, open(os.path.join(out_dir, "meta.json"), "w"))
     print(f"packed {len(rows)} images -> {out_dir}", file=sys.stderr)
 
 
@@ -369,14 +391,23 @@ fi
 
 log "Stage 3: generating $N_TARGET target-identity training images"
 
-SETTINGS=(park office beach "city street" kitchen library "mountain trail" cafe "studio backdrop" garden)
+# Scene diversity matters more than angle diversity for what this detector can
+# latch onto: a scene/lighting condition with NO training example in EITHER
+# direction is where a false positive lands. The night/low-light entries are
+# here because the held-out set (stage 7) probes exactly that.
+SETTINGS=(park office beach "city street" kitchen library "mountain trail" cafe "studio backdrop" garden
+          "rooftop at night with city lights behind" "dimly lit bar" "street at night under neon signs" "snowy street at dusk")
 ANGLES=("front view" "3/4 left view" "3/4 right view" "profile view" "from above" "from below")
 SURVIVORS="$OUT_DIR/target_survivors.txt"
 [ -f "$SURVIVORS" ] || : > "$SURVIVORS"
 
+# ANGLE-major, not setting-major: the grid is capped at N_TARGET, and iterating
+# settings on the OUTER loop spent the whole budget on the first ceil(N_TARGET/
+# #ANGLES) settings and never generated the rest at all. Angle-major spreads a
+# budget smaller than the full grid across EVERY setting.
 idx=0
-for setting in "${SETTINGS[@]}"; do
-  for angle in "${ANGLES[@]}"; do
+for angle in "${ANGLES[@]}"; do
+  for setting in "${SETTINGS[@]}"; do
     idx=$((idx + 1))
     [ "$idx" -gt "$N_TARGET" ] && break 2
     out="$OUT_DIR/train/target/img-$(printf '%03d' "$idx").png"
@@ -413,7 +444,13 @@ echo "target survivors: $survive / $N_TARGET" >&2
 
 log "Stage 4: $N_NEGATIVE hard negatives + $N_BACKGROUND backgrounds"
 
-PEOPLE_DESC=("a young woman with short hair" "an elderly man with a beard" "a teenage boy" "a woman wearing glasses" "a man with curly hair")
+# Hard negatives now carry a REAL person-class box, so their job is to be a
+# competing hypothesis, not just filler - the more they cover the target's own
+# demographic range, the less room class $TARGET_CLASS has to settle for "an
+# older man with wild grey hair" instead of this specific one.
+PEOPLE_DESC=("a young woman with short hair" "an elderly man with a beard" "a teenage boy" "a woman wearing glasses"
+             "a man with curly hair" "an elderly man with wild grey hair and a moustache" "a middle-aged man with glasses and grey hair"
+             "an older man in a suit" "a bald man with a moustache" "a woman with long dark hair")
 NEG_POOL="$OUT_DIR/negative_pool.txt" BG_POOL="$OUT_DIR/background_pool.txt"
 [ -f "$NEG_POOL" ] || : > "$NEG_POOL"
 [ -f "$BG_POOL" ] || : > "$BG_POOL"
@@ -440,22 +477,41 @@ stop_serve  # hand the cards back before COCO auto-labeling / training start the
 
 MANIFEST="$OUT_DIR/manifest.jsonl"
 : > "$MANIFEST"
-row() { printf '{"image": %s, "box": %s}\n' "$(python3 -c "import json,sys;print(json.dumps(sys.argv[1]))" "$1")" "$2" >> "$MANIFEST"; }
+row() { printf '{"image": %s, "box": %s, "class": %s}\n' "$(python3 -c "import json,sys;print(json.dumps(sys.argv[1]))" "$1")" "$2" "${3:-0}" >> "$MANIFEST"; }
 
+# The COCO auto-labeler locates the person the same way for BOTH pools; only
+# the class written to the dataset differs. That is the whole "remapped from
+# person to einstein" mechanism: the target's box is class TARGET_CLASS, a
+# different real person's box stays ordinary COCO class PERSON_CLASS, so the
+# network must tell two populations of person-shaped boxes apart rather than
+# learning "person-shaped OR nothing".
 kept=0
 while IFS= read -r img; do
-  read -r bx1 by1 bx2 by2 _ < <(pytool person-box "$YOLO_COCO_WEIGHTS" "$img" 0.25 0 || echo NONE)
+  read -r bx1 by1 bx2 by2 _ < <(pytool person-box "$YOLO_COCO_WEIGHTS" "$img" 0.25 "$PERSON_CLASS" || echo NONE)
   if [ "$bx1" = "NONE" ]; then
     echo "$(basename "$img"): no COCO person detection - dropped" >&2
     continue
   fi
-  row "$img" "[$bx1, $by1, $bx2, $by2]"
+  row "$img" "[$bx1, $by1, $bx2, $by2]" "$TARGET_CLASS"
   kept=$((kept + 1))
 done < "$SURVIVORS"
-echo "auto-labeled target images: $kept" >&2
+echo "auto-labeled target images (class $TARGET_CLASS): $kept" >&2
 [ "$kept" -ge "$SURVIVE_FLOOR" ] || die "only $kept target images got a COCO person box (floor $SURVIVE_FLOOR)"
 
-while IFS= read -r img; do row "$img" null; done < "$NEG_POOL"
+neg_kept=0
+while IFS= read -r img; do
+  read -r bx1 by1 bx2 by2 _ < <(pytool person-box "$YOLO_COCO_WEIGHTS" "$img" 0.25 "$PERSON_CLASS" || echo NONE)
+  if [ "$bx1" = "NONE" ]; then
+    echo "$(basename "$img"): no COCO person detection in a hard negative - dropped" >&2
+    continue
+  fi
+  row "$img" "[$bx1, $by1, $bx2, $by2]" "$PERSON_CLASS"
+  neg_kept=$((neg_kept + 1))
+done < "$NEG_POOL"
+echo "auto-labeled hard negatives (class $PERSON_CLASS): $neg_kept" >&2
+[ "$neg_kept" -gt 0 ] || die "no hard negative got a COCO person box - the run would have no competing class"
+
+# Backgrounds genuinely contain neither class, so they stay boxless.
 while IFS= read -r img; do row "$img" null; done < "$BG_POOL"
 
 SHUFFLED="$OUT_DIR/manifest.shuffled.jsonl"
@@ -467,15 +523,56 @@ random.shuffle(rows)
 open('$SHUFFLED', 'w').writelines(rows)
 "
 POOL_DIR="$OUT_DIR/data/pool"
-pytool pack-dataset "$SHUFFLED" "$POOL_DIR" "$TRAIN_SIZE"
+pytool pack-dataset "$SHUFFLED" "$POOL_DIR" "$TRAIN_SIZE" "$NUM_CLASSES"
 
 # ============================================================= stage 6: train
 
-log "Stage 6: training the detector"
+log "Stage 6: fine-tuning the COCO detector with '$TARGET_NAME' as class $TARGET_CLASS"
 
-WEIGHTS="$OUT_DIR/person-detector.safetensors"
-"$BRAIN" yolov8 train "$POOL_DIR" --out "$WEIGHTS" --device gpu \
-  --steps "$TRAIN_STEPS" --batch "$TRAIN_BATCH" --lr "$TRAIN_LR" --nc 1 --input "$TRAIN_SIZE" --seed "$TRAIN_SEED"
+# Fine-tune, NOT train-from-scratch: the base is the same real COCO yolov8n
+# checkpoint stage 5 auto-labels with, so the run inherits all 80 COCO classes
+# and appends one. What each flag protects:
+#   --nc            one more class than the base; the class head is widened and
+#                   the pretrained 80 channels are copied in (yolov8::finetune).
+#   --freeze-backbone   the shared feature extractor cannot drift - gradients
+#                   AND BatchNorm running stats, since this dataset is people-only.
+#   --freeze-reg-head   YOLOv8's box head is class-agnostic; the pretrained one
+#                   already bounds the target correctly, so retraining it could
+#                   only move the boxes every other class relies on.
+#   --freeze-cls-hidden the class branch's two SHARED hidden convs. Without
+#                   this the other 80 classes' own weights stay bit-identical
+#                   but the features they READ change, and their detections
+#                   collapse anyway (measured: 83 of 99 COCO detections lost).
+#   --train-classes only the class this dataset adds. The detection loss scores
+#                   BCE over ALL classes against an all-zero target for absent
+#                   ones, so without this the other 80 COCO classes would be
+#                   trained to never fire.
+#   --wd 0          decoupled weight decay is not a gradient and would shrink
+#                   the gated classes anyway.
+#
+# Together these make preservation EXACT: every pretrained tensor and every
+# pretrained class channel is bit-for-bit unchanged, so all 80 COCO classes
+# produce identical detections (verified: 99/99 preserved, 0 lost, 0 gained).
+#
+# The cost is capacity, and it is a real ceiling, not a tuning problem: class
+# $TARGET_CLASS is then a linear probe on features trained to separate COCO's
+# OWN categories, which encode object category, not personal identity. It
+# learns "a person, weighted toward this one's typical scenes" rather than the
+# individual. Set FREEZE_CLS_HIDDEN=0 to trade preservation for capacity - but
+# note that measured WORSE on both axes (COCO collapsed AND the new class fired
+# on strangers), because the identity signal is not in these features at all.
+# A specific person is properly a face-recognition problem: this repo's
+# SCRFD + ArcFace stack (which stage 3 already uses to gate identity) is the
+# right tool, with the detector supplying the person box.
+FREEZE_CLS_HIDDEN="${FREEZE_CLS_HIDDEN:-1}"
+CLS_HIDDEN_FLAG=""; [ "$FREEZE_CLS_HIDDEN" = 1 ] && CLS_HIDDEN_FLAG="--freeze-cls-hidden"
+TRAIN_CLASSES="${TRAIN_CLASSES:-$TARGET_CLASS}"
+
+WEIGHTS="$OUT_DIR/$TARGET_NAME-detector.safetensors"
+"$BRAIN" yolov8 fine-tune "$POOL_DIR" --weights "$YOLO_COCO_WEIGHTS" --out "$WEIGHTS" --device gpu \
+  --steps "$TRAIN_STEPS" --batch "$TRAIN_BATCH" --lr "$TRAIN_LR" --wd 0 \
+  --nc "$NUM_CLASSES" --input "$TRAIN_SIZE" --seed "$TRAIN_SEED" \
+  --freeze-backbone --freeze-reg-head $CLS_HIDDEN_FLAG --train-classes "$TRAIN_CLASSES"
 echo "--- informational eval over the internal 90/10 split (stage 8 is the real validation) ---" >&2
 "$BRAIN" yolov8 eval --weights "$WEIGHTS" --data "$POOL_DIR" --conf "$DETECT_CONF" --iou "$DETECT_IOU" >&2 || true
 
@@ -516,22 +613,39 @@ PASS=1
 report() { printf '%-46s %-8s %s\n' "$1" "$2" "$3"; }
 report "image" "result" "detail"
 
-# gate <image> <want:1=must-detect|0=must-not> <label>
+# gate <image> <class> <want:1=must-detect|0=must-not> <label>
 gate() {
-  local img="$1" want="$2" label="$3" lb det
-  lb="$img.lb.png"; pytool letterbox "$img" "$TRAIN_SIZE" "$lb"
-  det="$(pytool person-box "$WEIGHTS" "$lb" "$DETECT_CONF" 0)"
+  local img="$1" cls="$2" want="$3" label="$4" lb det
+  lb="$img.lb.png"
+  [ -f "$lb" ] || pytool letterbox "$img" "$TRAIN_SIZE" "$lb"
+  det="$(pytool person-box "$WEIGHTS" "$lb" "$DETECT_CONF" "$cls")"
   if { [ "$want" = 1 ] && [ "$det" != NONE ]; } || { [ "$want" = 0 ] && [ "$det" = NONE ]; }; then
-    report "$label" PASS "$([ "$det" = NONE ] && echo "correctly no detection" || echo "$det")"
+    report "$label" PASS "$([ "$det" = NONE ] && echo "correctly no class-$cls detection" || echo "$det")"
   else
-    report "$label" FAIL "$([ "$det" = NONE ] && echo "no detection" || echo "false-positive detection $det")"
+    report "$label" FAIL "$([ "$det" = NONE ] && echo "no class-$cls detection" || echo "false-positive class-$cls detection $det")"
     PASS=0
   fi
 }
 
-while IFS= read -r img; do gate "$img" 1 "holdout/target/$(basename "$img")"; done < "$HOLDOUT_TARGETS"
-while IFS= read -r img; do gate "$img" 0 "holdout/stranger/$(basename "$img")"; done < "$HOLDOUT_STRANGERS"
-for img in "$OUT_DIR"/train/background/*.png; do [ -e "$img" ] && gate "$img" 0 "background/$(basename "$img")"; done
+# The target must be found AS the new class.
+while IFS= read -r img; do
+  gate "$img" "$TARGET_CLASS" 1 "holdout/target/$(basename "$img") [$TARGET_NAME]"
+done < "$HOLDOUT_TARGETS"
+
+# A different real person is the actual discrimination test, and it has TWO
+# halves: the new class must not claim them, and COCO's `person` must still.
+# Checking only the first would pass a model that had simply forgotten people.
+while IFS= read -r img; do
+  gate "$img" "$TARGET_CLASS" 0 "holdout/stranger/$(basename "$img") [not $TARGET_NAME]"
+  gate "$img" "$PERSON_CLASS" 1 "holdout/stranger/$(basename "$img") [still person]"
+done < "$HOLDOUT_STRANGERS"
+
+# Backgrounds contain neither class.
+for img in "$OUT_DIR"/train/background/*.png; do
+  [ -e "$img" ] || continue
+  case "$img" in *.lb.png) continue;; esac
+  gate "$img" "$TARGET_CLASS" 0 "background/$(basename "$img") [not $TARGET_NAME]"
+done
 
 echo >&2
 if [ "$PASS" = 1 ]; then

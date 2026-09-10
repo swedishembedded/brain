@@ -74,6 +74,11 @@ pub use offload::OffloadAdam;
 /// triggers a device reset after a few thousand iterations.
 struct Graph {
     clipped: bool,
+    /// How many tensors this graph was built for. `ParamStore::freeze_where` can
+    /// shrink that set between steps, and every stage here (grad-norm, the
+    /// clip-coefficient fold, the per-tensor AdamW dispatches) is baked against
+    /// it - so a change must force a rebuild, exactly like `clipped` does.
+    n_opt: usize,
     /// How many f32s the clip-coefficient stage folds: one per parameter tensor
     /// on the reference path, one per workgroup per tensor on the cooperative
     /// one. Written into the clip uniform every step.
@@ -199,7 +204,7 @@ impl Optim {
             const_unis.push(desc);
         }
 
-        Graph { clipped, n_norm_inputs, steps, clip_uni, hparams, _const_unis: const_unis }
+        Graph { clipped, n_opt: ps.opt_params().len(), n_norm_inputs, steps, clip_uni, hparams, _const_unis: const_unis }
     }
 
     /// The cooperative grad-norm pair `(gradnorm_part, clip_coef_wg)` for this
@@ -246,10 +251,11 @@ impl Optim {
         let bc2 = 1.0 - beta2.powi(t as i32);
         let clipped = clip.is_some();
 
-        // (Re)build the cached graph only if absent or the clip mode changed
-        // (the only thing that changes the dispatch SHAPE - see `build`).
+        // (Re)build the cached graph only if absent, the clip mode changed, or
+        // the optimised tensor set changed (the two things that change the
+        // dispatch SHAPE - see `build`).
         let need_build = match &*self.cache.borrow() {
-            Some(g) => g.clipped != clipped,
+            Some(g) => g.clipped != clipped || g.n_opt != ps.opt_params().len(),
             None => true,
         };
         if need_build {
@@ -474,6 +480,48 @@ mod tests {
         // 4x as far from its init as a did.
         let ratio = (1.0 - wb[0]) / (1.0 - wa[0]);
         assert!((ratio - 4.0).abs() < 1e-5, "expected exactly 4x, got {ratio}");
+    }
+
+    /// The freeze contract: a tensor withdrawn via `ParamStore::freeze_where`
+    /// must be BIT-FOR-BIT unchanged by a step that moves its neighbours, even
+    /// though its gradient buffer is full. Asserted on bits, not a tolerance -
+    /// "barely moved" is not frozen.
+    #[test]
+    fn a_frozen_tensor_is_bit_for_bit_unchanged_by_a_step() {
+        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+            return;
+        }
+        let gpu = gpu_core::testgpu::dev(KERNELS);
+        let opt = Optim::new(0, 1, 2, 3, 4);
+        let mut init = HashMap::new();
+        init.insert("keep".to_string(), vec![1.0f32; 4]);
+        init.insert("train".to_string(), vec![1.0f32; 4]);
+        let mut ps =
+            ParamStore::new(&gpu, vec![("keep".to_string(), 4), ("train".to_string(), 4)], &init);
+        assert_eq!(ps.freeze_where(|n| n == "keep"), 1);
+        assert_eq!(ps.opt_params().len(), 1, "the frozen tensor must leave the optimised set");
+        // Both carry a real gradient; only the unfrozen one may be applied.
+        for n in ["keep", "train"] {
+            gpu.write(ps.g(n), bytemuck::cast_slice(&[2.0f32; 4]));
+        }
+        let before = ps.read_weight(&gpu, "keep");
+        opt.step(&gpu, &ps, 1, 0.1, 0.01, 0.9, 0.999, 1e-8, Some(1.0), 1.0);
+        assert_eq!(
+            ps.read_weight(&gpu, "keep").iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            before.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            "a frozen tensor moved"
+        );
+        assert!(ps.read_weight(&gpu, "train")[0] < 0.95, "the unfrozen tensor must still be stepped");
+        // Weight decay is part of the AdamW step, so it must not reach a frozen
+        // tensor either - the subtle way a "frozen" weight still decays to zero.
+        for t in 2..6 {
+            opt.step(&gpu, &ps, t, 0.1, 0.5, 0.9, 0.999, 1e-8, Some(1.0), 1.0);
+        }
+        assert_eq!(ps.read_weight(&gpu, "keep"), before, "weight decay reached a frozen tensor");
+        // And the frozen tensor's gradient is still cleared each batch, so it
+        // cannot accumulate without bound across a run.
+        ps.zero_grads(&gpu);
+        assert_eq!(ps.read_grad(&gpu, "keep"), vec![0.0; 4]);
     }
 
     /// `lr_mult == 1.0` for every tensor (the default, unset case) must be
