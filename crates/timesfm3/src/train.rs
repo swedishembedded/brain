@@ -66,6 +66,7 @@ use std::collections::HashMap;
 
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
 use model::block;
+use optim::Optim;
 use paramstore::{ParamStore, Role};
 
 use crate::config::Timesfm3Config;
@@ -111,6 +112,12 @@ const K_UNPACK_QKV: usize = 30;
 // parameter, so the factor is applied to the intermediate instead) ----
 const K_AXPY: usize = 31;
 const K_GRAD_SCALE: usize = 32;
+// ---- the optimiser step (`optim::Optim`), so a trainer is still one device
+// handle ----
+const K_ADAMW: usize = 33;
+const K_GRADNORM_SQ: usize = 34;
+const K_CLIP_COEF: usize = 35;
+const K_GRAD_SCALE_BUF: usize = 36;
 
 /// Forward **and** backward kernels in one list, so a trainer is one device
 /// handle. Every name appears exactly once.
@@ -148,6 +155,10 @@ pub const TRAIN_PIPELINES: &[(&str, &str)] = &[
     ("unpack_qkv", kernels::UNPACK_QKV),
     ("axpy", kernels::AXPY),
     ("grad_scale", kernels::GRAD_SCALE),
+    ("adamw", kernels::ADAMW),
+    ("gradnorm_sq", kernels::GRADNORM_SQ),
+    ("clip_coef", kernels::CLIP_COEF),
+    ("grad_scale_buf", kernels::GRAD_SCALE_BUF),
 ];
 
 /// LoRA hyper-parameters for [`Timesfm3Train`]. `alpha/rank` is the delta
@@ -215,6 +226,25 @@ impl LoraCfg {
     fn hits(&self, weight_name: &str) -> bool {
         self.targets.iter().any(|t| weight_name.ends_with(t.as_str()))
     }
+}
+
+/// The two additive key masks one `patch_mask` implies: `[b*v*n]` in the
+/// sequence sublayer's own `(b,v,n)` order, and `[b*n*v]` transposed into the
+/// variate sublayer's. `MASK_NEG` where masked, `0.0` where visible - an
+/// ADDITIVE mask, so a visible key contributes nothing.
+fn kmasks(patch_mask: &[bool], b: usize, v: usize, n: usize) -> (Vec<f32>, Vec<f32>) {
+    let seq: Vec<f32> = patch_mask.iter().map(|&m| if m { MASK_NEG } else { 0.0 }).collect();
+    let mut var = vec![0.0f32; b * n * v];
+    for bi in 0..b {
+        for vi in 0..v {
+            for ni in 0..n {
+                if patch_mask[(bi * v + vi) * n + ni] {
+                    var[(bi * n + ni) * v + vi] = MASK_NEG;
+                }
+            }
+        }
+    }
+    (seq, var)
 }
 
 /// `[rank, in]` / `[out, rank]` under `{weight}.lora_a` / `{weight}.lora_b` -
@@ -352,15 +382,21 @@ struct TrainLayer {
 }
 
 /// A trainable TimesFM-3 core: the SSA forward and its reverse. See the
-/// module doc for exactly what "trainable" covers. Several fields
-/// (`resblock_input`/`seq_kmask`/`var_kmask`/`resblock_hidden_*`/
-/// `resblock_resid`/`resblock_out`/`layers`) are never read via `self.` -
-/// `build_backward` is called with the LOCAL variables from `new_on`
-/// directly, before this struct exists, rather than as a `&self` method the
-/// way `t5encoder::train::T5Trainer::build_bwd_steps` is. They stay struct
-/// fields anyway because something must own these buffers for as long as
+/// module doc for exactly what "trainable" covers.
+///
+/// The activation fields (`resblock_hidden_*`/`resblock_resid`/
+/// `resblock_out`/`layers`) are never read via `self.` - `build_backward` is
+/// called with the LOCAL variables from the constructor directly, before this
+/// struct exists, rather than as a `&self` method the way
+/// `t5encoder::train::T5Trainer::build_bwd_steps` is. They stay struct fields
+/// anyway because something must own these buffers for as long as
 /// `self.steps`/`self.bwd_steps` can still be resubmitted (repeated
 /// `forward()`/`backward()` calls across training steps).
+///
+/// `resblock_input`/`seq_kmask`/`var_kmask` are different: they are the
+/// model's INPUT rather than an activation, and [`Timesfm3Train::set_input`]
+/// rewrites all three in place so a training loop can move to the next batch
+/// without rebuilding the graph.
 #[allow(dead_code)]
 pub struct Timesfm3Train {
     pub gpu: Gpu,
@@ -403,6 +439,10 @@ pub struct Timesfm3Train {
     /// fine-tune and every dispatch below is bit-unchanged from before LoRA
     /// existed.
     lora: Option<LoraCfg>,
+    /// The on-device AdamW step. Held rather than constructed per call: it
+    /// caches the optimiser graph and rebuilds it only when the clip mode or
+    /// the trainable-parameter count changes.
+    opt: Optim,
 }
 
 impl Timesfm3Train {
@@ -481,19 +521,9 @@ impl Timesfm3Train {
         steps.push(linear(g, &ps, &resblock_input_buf, "pre_transformer_resblock.residual_layer.weight", &resid, rows, cfg.resblock_in_dim(), d));
         steps.push(g.step(K_ADD, &[&resblock_out, &resid], &[(rows * d) as u32], (rows * d) as u32));
 
-        // Additive key masks, both layouts - built once, reused by every
-        // layer, exactly like `core_forward`.
-        let seq_kmask_host: Vec<f32> = patch_mask.iter().map(|&m| if m { MASK_NEG } else { 0.0 }).collect();
-        let mut var_kmask_host = vec![0.0f32; b * n * v];
-        for bi in 0..b {
-            for vi in 0..v {
-                for ni in 0..n {
-                    if patch_mask[(bi * v + vi) * n + ni] {
-                        var_kmask_host[(bi * n + ni) * v + vi] = MASK_NEG;
-                    }
-                }
-            }
-        }
+        // Additive key masks, both layouts - reused by every layer, exactly
+        // like `core_forward`. Rebuilt (not reallocated) by `set_input`.
+        let (seq_kmask_host, var_kmask_host) = kmasks(patch_mask, b, v, n);
         let seq_kmask = g.storage_init("seq_kmask", &seq_kmask_host);
         let var_kmask = g.storage_init("var_kmask", &var_kmask_host);
 
@@ -660,6 +690,7 @@ impl Timesfm3Train {
             qgain_fold_temps,
             q_gains,
             lora,
+            opt: Optim::new(K_ADAMW, K_GRADNORM_SQ, K_GRAD_SCALE, K_CLIP_COEF, K_GRAD_SCALE_BUF),
         }
     }
 
@@ -671,6 +702,33 @@ impl Timesfm3Train {
         for (gain, scale, buf) in &self.q_gains {
             refresh_query_gain(&self.gpu, &self.ps, gain, scale, buf);
         }
+    }
+
+    /// Point the graph at a NEW batch, in place: the same shape `(b, v, n)`
+    /// this trainer was built for, a fresh `resblock_input` and a fresh
+    /// `patch_mask`.
+    ///
+    /// This is what makes a training loop possible at all. Every other buffer
+    /// in the graph is an activation the forward recomputes, so re-uploading
+    /// the model's own INPUT (and the two additive key masks its mask
+    /// implies) is the whole of "next batch"; rebuilding the trainer per
+    /// batch would rebuild several thousand `Step`s and reallocate every
+    /// activation to change two buffers.
+    pub fn set_input(&self, resblock_input: &[f32], patch_mask: &[bool]) {
+        let rows = self.b * self.v * self.n;
+        assert_eq!(resblock_input.len(), rows * self.cfg.resblock_in_dim(), "resblock_input is the shape this trainer was built for");
+        assert_eq!(patch_mask.len(), rows, "patch_mask is one flag per (b, v, patch)");
+        self.gpu.write_f32(&self.resblock_input, resblock_input);
+        let (seq, var) = kmasks(patch_mask, self.b, self.v, self.n);
+        self.gpu.write_f32(&self.seq_kmask, &seq);
+        self.gpu.write_f32(&self.var_kmask, &var);
+    }
+
+    /// One AdamW step over the trainable set, `t` 1-based. `clip`, when
+    /// given, is `clip_grad_norm_` semantics over the global gradient norm.
+    /// Entirely on-device, one submit, no host readback.
+    pub fn adamw_step(&self, t: u32, lr: f32, wd: f32, clip: Option<f32>) {
+        self.opt.step(&self.gpu, &self.ps, t, lr, wd, 0.9, 0.999, 1e-8, clip, 1.0);
     }
 
     pub fn forward(&self) {
@@ -1391,6 +1449,95 @@ mod tests {
     /// Asserted BITWISE against a trainer freshly constructed from the same
     /// updated weights, which is the only definition of "up to date" that does
     /// not restate the fold's formula a second time.
+    /// Moving to the next batch must be indistinguishable from having built
+    /// the trainer for that batch in the first place - BITWISE, because
+    /// anything less means a training run's later batches are being evaluated
+    /// on a graph subtly different from the one its first batch was.
+    ///
+    /// The mask is the part that can silently go stale: it is not uploaded
+    /// as-is but expanded host-side into two additive key masks in two
+    /// different axis orders, so a `set_input` that refreshed the input and
+    /// forgot the masks would keep training every later batch against the
+    /// FIRST batch's padding.
+    #[test]
+    fn set_input_moves_the_graph_to_a_new_batch() {
+        if skip() {
+            return;
+        }
+        let cfg = Timesfm3Config::tiny();
+        let weights = init_weights(&cfg, 7);
+        let (b, v, n) = (1usize, 2usize, 3usize);
+        let rows = b * v * n;
+        let first = fixed_input(&cfg, b, v, n, 7);
+        let first_mask = vec![false; rows];
+
+        let tr = Timesfm3Train::new_on(gpu_core::testgpu::dev(TRAIN_PIPELINES), cfg.clone(), &first, &first_mask, b, v, n, &weights);
+
+        // A different batch AND a different mask - masked leading patches on
+        // one (b, v) row only, so the two key-mask layouts disagree about
+        // which entries move and a single-layout refresh cannot pass.
+        let second = fixed_input(&cfg, b, v, n, 99);
+        let mut second_mask = vec![false; rows];
+        second_mask[0] = true;
+        second_mask[n] = true;
+        tr.set_input(&second, &second_mask);
+        tr.forward();
+        tr.poll_wait();
+        let got = tr.read_logits();
+
+        let fresh = Timesfm3Train::new_on(gpu_core::testgpu::dev(TRAIN_PIPELINES), cfg.clone(), &second, &second_mask, b, v, n, &weights);
+        fresh.forward();
+        fresh.poll_wait();
+        let want = fresh.read_logits();
+        assert_ne!(got, tr_logits_of(&cfg, &weights, &first, &first_mask, b, v, n), "the fixture is degenerate: the two batches produce the same logits");
+        assert_eq!(got, want, "a forward after set_input must match a trainer built for that batch");
+    }
+
+    fn tr_logits_of(cfg: &Timesfm3Config, weights: &HashMap<String, Vec<f32>>, x: &[f32], mask: &[bool], b: usize, v: usize, n: usize) -> Vec<f32> {
+        let tr = Timesfm3Train::new_on(gpu_core::testgpu::dev(TRAIN_PIPELINES), cfg.clone(), x, mask, b, v, n, weights);
+        tr.forward();
+        tr.poll_wait();
+        tr.read_logits()
+    }
+
+    /// The on-device AdamW step has to actually move the loss downhill on
+    /// this graph. Cheap to get wrong silently: `Optim` is driven by five
+    /// kernel INDICES into `TRAIN_PIPELINES`, and a mis-ordered index list
+    /// dispatches a real kernel with the wrong Params rather than failing.
+    #[test]
+    fn the_adamw_step_lowers_the_loss() {
+        if skip() {
+            return;
+        }
+        let cfg = Timesfm3Config::tiny();
+        let weights = init_weights(&cfg, 7);
+        let (b, v, n) = (1usize, 2usize, 3usize);
+        let rows = b * v * n;
+        let x = fixed_input(&cfg, b, v, n, 7);
+        let mask = vec![false; rows];
+        let tr = Timesfm3Train::new_on(gpu_core::testgpu::dev(TRAIN_PIPELINES), cfg.clone(), &x, &mask, b, v, n, &weights);
+
+        let mut state = 0x0bad_c0de_0bad_c0deu64;
+        let c: Vec<f32> = (0..rows * cfg.head_out_dim()).map(|_| lcg_next(&mut state) * 0.1).collect();
+        let loss = || {
+            tr.forward();
+            tr.poll_wait();
+            tr.read_logits().iter().zip(&c).map(|(&y, &ci)| y as f64 * ci as f64).sum::<f64>() as f32
+        };
+
+        let l0 = loss();
+        for t in 1..=8u32 {
+            tr.forward();
+            tr.poll_wait();
+            tr.zero_grads();
+            tr.backward(&c);
+            tr.adamw_step(t, 1e-2, 0.0, Some(1.0));
+            tr.poll_wait();
+        }
+        let l1 = loss();
+        assert!(l1 < l0, "8 AdamW steps did not lower the loss: {l0} -> {l1}");
+    }
+
     /// `zero_grads()` then `backward()` is the unit of a training step, and
     /// running it twice over unchanged weights has to produce the same
     /// gradients twice.
