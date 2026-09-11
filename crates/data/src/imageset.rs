@@ -47,17 +47,46 @@
 //! Images are decoded (JPEG/PNG/PPM), center-cropped to square, and resized to the
 //! training size, yielding interleaved-RGB HWC f32 in `[0,1]` - exactly what the VAE
 //! encoder consumes. An image with no caption entry is skipped (with a warning).
+//!
+//! ## Paired (reference → target) folders
+//!
+//! An **optional** `pairs.yaml` beside the captions turns the folder into a
+//! paired dataset: a mapping of `target filename: reference filename`, parsed
+//! into [`PairFile`] by the same real YAML parser the captions use.
+//!
+//! ```yaml
+//! # the model is shown `messy-01.jpg` and asked to produce `clean-01.jpg`
+//! clean-01.jpg: messy-01.jpg
+//! clean-02.jpg: messy-02.jpg
+//! ```
+//!
+//! The reference is an INPUT, never a sample of its own: it gets no caption
+//! entry and produces no [`Sample`]. A target the manifest does not mention
+//! stays caption-only, so paired and unpaired samples share one folder, and a
+//! folder with no `pairs.yaml` at all loads exactly as it always did
+//! ([`Sample::reference`] is `None` everywhere). A manifest entry whose
+//! reference file cannot be loaded drops its target with a warning rather than
+//! quietly training a declared pair as a caption-only sample - that would
+//! optimise a different objective than the one the manifest asked for.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// One training example: the pre-processed image (HWC f32 `[0,1]`, `size×size×3`)
-/// and its prompt.
+/// and its prompt, plus the reference image a paired folder attached to it.
 pub struct Sample {
     pub path: PathBuf,
     pub prompt: String,
     pub hwc: Vec<f32>,
     pub size: u32,
+    /// The reference (conditioning) image this target is paired with, in the
+    /// same layout and at the same size as [`Sample::hwc`]; `None` for a
+    /// caption-only sample, which is every sample of a folder with no
+    /// `pairs.yaml`.
+    pub reference: Option<Vec<f32>>,
+    /// Where [`Sample::reference`] was loaded from - for logs and errors that
+    /// have to name the file, not just the fact of a pair.
+    pub ref_path: Option<PathBuf>,
 }
 
 /// Load and pre-process every captioned image in `dir` to `size×size`. Errors only
@@ -69,6 +98,7 @@ pub fn load_dir(dir: &Path, size: u32, mut warn: impl FnMut(&str)) -> Result<Vec
     }
     let mut caps = read_captions_yaml(&dir.join("captions.yaml"), &mut warn);
     apply_jsonl_overrides(&dir.join("captions.jsonl"), &mut caps, &mut warn);
+    let pairs = read_pairs_yaml(&dir.join("pairs.yaml"), &mut warn);
     if caps.is_empty() {
         return Err(format!(
             "no captions in {}: add a captions.yaml (`filename: prompt` per line) or captions.jsonl",
@@ -91,8 +121,25 @@ pub fn load_dir(dir: &Path, size: u32, mut warn: impl FnMut(&str)) -> Result<Vec
             warn(&format!("{file} has no caption yet - skipping (re-run `brain label` to fill it in)"));
             continue;
         }
+        // The reference, if the manifest declared one. Loaded BEFORE the
+        // target so a broken pair costs nothing but the manifest lookup, and
+        // resolved with `dir.join` like every other entry - a manifest names
+        // files in its own folder.
+        let (reference, ref_path) = match pairs.get(file) {
+            None => (None, None),
+            Some(rf) => {
+                let rp = dir.join(rf);
+                match load_image_square(&rp, size) {
+                    Ok(r) => (Some(r), Some(rp)),
+                    Err(e) => {
+                        warn(&format!("{file}: reference {rf}: {e} - skipping the pair"));
+                        continue;
+                    }
+                }
+            }
+        };
         match load_image_square(&path, size) {
-            Ok(hwc) => samples.push(Sample { path, prompt: prompt.clone(), hwc, size }),
+            Ok(hwc) => samples.push(Sample { path, prompt: prompt.clone(), hwc, size, reference, ref_path }),
             Err(e) => warn(&format!("skipping {file}: {e}")),
         }
     }
@@ -116,6 +163,42 @@ pub struct CaptionFile(pub BTreeMap<String, String>);
 impl CaptionFile {
     pub fn into_inner(self) -> BTreeMap<String, String> {
         self.0
+    }
+}
+
+/// The `pairs.yaml` schema: a mapping of TARGET image file name to the
+/// REFERENCE image file name it is conditioned on.
+///
+/// Deliberately the same shape as [`CaptionFile`] - a flat `filename: value`
+/// mapping in the dataset folder, parsed by the same real YAML parser - so a
+/// folder's two manifests are one convention rather than two. Direction is
+/// target-keyed, matching `captions.yaml`: every manifest in the folder is
+/// keyed by the sample it describes, and a target has exactly one reference
+/// while one reference may legitimately serve several targets.
+#[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct PairFile(pub BTreeMap<String, String>);
+
+impl PairFile {
+    pub fn into_inner(self) -> BTreeMap<String, String> {
+        self.0
+    }
+}
+
+/// Read `pairs.yaml` into the target→reference map.
+///
+/// A missing file is an empty map, which is the unpaired folder every existing
+/// caller has; a present file that does not parse is reported through `warn`
+/// and also treated as empty, so a bad edit degrades to today's behaviour
+/// loudly instead of pairing whatever prefix happened to parse.
+pub fn read_pairs_yaml(path: &Path, warn: &mut impl FnMut(&str)) -> BTreeMap<String, String> {
+    let Ok(text) = std::fs::read_to_string(path) else { return BTreeMap::new() };
+    match serde_norway::from_str::<PairFile>(&text) {
+        Ok(f) => f.into_inner(),
+        Err(e) => {
+            warn(&format!("{}: {e}", path.display()));
+            BTreeMap::new()
+        }
     }
 }
 
