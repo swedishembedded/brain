@@ -21,7 +21,7 @@ use std::path::Path;
 
 use brain_modelstore::inventory::{ArtifactKind, ArtifactRecord};
 use brain_modelstore::plan::declared_architecture;
-use brain_modelstore::resolve::{classify_tokenizer_role, ArchSpec, AssembleOutcome, AssembledVariant, Confidence};
+use brain_modelstore::resolve::{classify_compound_manifest, classify_tokenizer_role, ArchSpec, AssembleOutcome, AssembledVariant, Confidence};
 use capability::Assembly;
 use checkpoint::gguf::MmapGguf;
 use checkpoint::mmap::MmapSafetensors;
@@ -34,11 +34,32 @@ const ROLES: &[&str] = &["dit", "vae", "text_encoder", "tokenizer"];
 
 /// Every tensor name + shape a DiT checkpoint declares, in the COMFY
 /// spelling [`dit_config_from_shapes`] itself expects - read from whichever
-/// header it actually has.
+/// header it actually has: a `.gguf`, a bare safetensors file, or a
+/// diffusers-sharded `transformer/` directory (Tongyi-MAI's own HF release
+/// layout - no rename needed, its tensor names already match brain's
+/// post-`import_comfy` spelling, verified against the released checkpoint).
+/// Mirrors `flux2::import::dit_shapes`'s own directory handling.
 fn dit_shapes(path: &Path) -> Result<Vec<(String, Vec<usize>)>, String> {
     if path.extension().is_some_and(|e| e == "gguf") {
         let g = MmapGguf::open(&path.to_string_lossy()).map_err(|e| format!("s3dit: opening dit {}: {e}", path.display()))?;
         Ok(g.all_shapes())
+    } else if path.is_dir() {
+        let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(path)
+            .map_err(|e| format!("s3dit: reading dit dir {}: {e}", path.display()))?
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "safetensors"))
+            .collect();
+        files.sort();
+        if files.is_empty() {
+            return Err(format!("s3dit: no .safetensors under {}", path.display()));
+        }
+        let mut shapes = Vec::new();
+        for f in &files {
+            let m = MmapSafetensors::open(f).map_err(|e| format!("s3dit: opening dit {}: {e}", f.display()))?;
+            shapes.extend(m.names().iter().map(|n| (n.clone(), m.shape(n).expect("name came from names()").to_vec())));
+        }
+        Ok(shapes)
     } else {
         let m = MmapSafetensors::open(path).map_err(|e| format!("s3dit: opening dit {}: {e}", path.display()))?;
         Ok(m.names().iter().map(|n| (n.clone(), m.shape(n).expect("name came from names()").to_vec())).collect())
@@ -124,6 +145,17 @@ impl ArchSpec for S3ditSpec {
 
     fn classify(&self, records: &[ArtifactRecord], inventory_root: &Path) -> Vec<(usize, String, Confidence)> {
         let mut out = Vec::new();
+        // A real conversion step (`crates/cli/src/supply.rs::convert_zimage`)
+        // writes a `brain.manifest.json` (family `"zimage"`, distinct from
+        // this crate's own `arch()` id) naming each role's path directly -
+        // `Confidence::Recorded` beats every content-sniffed guess below, so
+        // a manifest-declared sharded `transformer/` directory (which no
+        // per-file classifier below can single-handedly recognize: its own
+        // layer-count-derived config needs every shard's tensors at once,
+        // not one file's worth) still resolves unambiguously even when the
+        // rest of a shared model store carries other vae/text_encoder-shaped
+        // files this recipe never produced.
+        classify_compound_manifest(records, inventory_root, "zimage", &mut out);
         for (idx, rec) in records.iter().enumerate() {
             if !rec.usable() {
                 continue;
@@ -400,6 +432,104 @@ mod tests {
             Resolution::Resolved(a) => {
                 assert_eq!(a.variant, None);
                 assert!(a.roles.contains_key("dit") && a.roles.contains_key("vae") && a.roles.contains_key("text_encoder") && a.roles.contains_key("tokenizer"), "{a:?}");
+            }
+            other => panic!("expected Resolved, got {other:?}"),
+        }
+    }
+
+    /// `supply.rs::convert_zimage`'s own on-disk shape: a `brain.manifest.json`
+    /// (family `"zimage"`) naming a SHARDED `transformer/` directory as `dit` -
+    /// split across two files so that neither shard alone carries every
+    /// layer, reproducing why the real Tongyi-MAI/Z-Image-Turbo release could
+    /// not be auto-selected before `classify_compound_manifest` was wired in:
+    /// `dit_config_from_shapes` derives `n_layers` by counting `layers.N.*`
+    /// markers, which only the union of both shards provides. The store also
+    /// carries an UNRELATED vae/text_encoder-shaped pair the manifest never
+    /// produced (mirroring a shared model store with other packages already
+    /// in it), which must lose to the manifest's `Recorded` roles rather than
+    /// creating an ambiguity.
+    #[test]
+    fn resolves_a_manifest_declared_sharded_dit_over_unrelated_store_noise() {
+        let dir = tmp("manifest-sharded-dit");
+        let repo = dir.join("Tongyi-MAI").join("Z-Image-Turbo");
+        std::fs::create_dir_all(&repo).unwrap();
+
+        let cfg = crate::model::ZImageConfig::turbo();
+        let (dim, cap_feat_dim, head_dim) = (cfg.dim as usize, cfg.cap_feat_dim as usize, (cfg.dim / cfg.n_heads) as usize);
+        let patch_dim = (cfg.in_channels * cfg.patch_size * cfg.patch_size * cfg.f_patch_size) as usize;
+        let dit_dir = repo.join("transformer");
+        std::fs::create_dir_all(&dit_dir).unwrap();
+        checkpoint::st::save_safetensors(
+            dit_dir.join("shard1.safetensors").to_str().unwrap(),
+            &[
+                ("cap_embedder.0.weight".to_string(), vec![1], vec![0.0f32]),
+                ("cap_embedder.1.weight".to_string(), vec![dim as u64, cap_feat_dim as u64], vec![0.0f32; dim * cap_feat_dim]),
+                ("layers.0.attention.q_norm.weight".to_string(), vec![head_dim as u64], vec![0.0f32; head_dim]),
+                ("x_embedder.weight".to_string(), vec![dim as u64, patch_dim as u64], vec![0.0f32; dim * patch_dim]),
+            ],
+            &serde_json::json!({}),
+            None,
+        )
+        .unwrap();
+        let mut shard2: Vec<(String, Vec<u64>, Vec<f32>)> = Vec::new();
+        for prefix in ["layers", "noise_refiner", "context_refiner"] {
+            let n = if prefix == "layers" { cfg.n_layers } else { cfg.n_refiner_layers };
+            for l in 0..n {
+                shard2.push((format!("{prefix}.{l}.attention.qkv.weight"), vec![1], vec![0.0f32]));
+            }
+        }
+        checkpoint::st::save_safetensors(dit_dir.join("shard2.safetensors").to_str().unwrap(), &shard2, &serde_json::json!({}), None).unwrap();
+
+        let te_dir = repo.join("text_encoder");
+        write_qwen3_hfdir(&te_dir, cfg.cap_feat_dim as u64);
+        let vae_path = repo.join("vae.safetensors");
+        write_vae_safetensors(&vae_path);
+        let tok_path = repo.join("tokenizer.json");
+        write_tokenizer_json(&tok_path);
+
+        std::fs::write(
+            repo.join(brain_modelstore::MANIFEST_FILE),
+            serde_json::to_vec(&brain_modelstore::CompoundManifest {
+                id: "Tongyi-MAI/Z-Image-Turbo".to_string(),
+                family: "zimage".to_string(),
+                roles: [("dit", "transformer"), ("text_encoder", "text_encoder"), ("vae", "vae.safetensors"), ("tokenizer", "tokenizer.json")]
+                    .into_iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        // Unrelated store noise: a real (differently-shaped) vae/text_encoder
+        // pair this manifest never declared, at Declared confidence only.
+        let noise_vae = dir.join("other-vendor").join("vae.safetensors");
+        std::fs::create_dir_all(noise_vae.parent().unwrap()).unwrap();
+        write_vae_safetensors(&noise_vae);
+        let noise_te = dir.join("other-vendor").join("Qwen3-8B");
+        write_qwen3_hfdir(&noise_te, cfg.cap_feat_dim as u64);
+
+        let mut records = vec![
+            complete(dit_dir.clone(), ArtifactKind::HfDir),
+            complete(te_dir, ArtifactKind::HfDir),
+            complete(vae_path, ArtifactKind::Safetensors),
+            complete(tok_path, ArtifactKind::TokenizerJson),
+            complete(noise_vae, ArtifactKind::Safetensors),
+            complete(noise_te, ArtifactKind::HfDir),
+        ];
+        // A lone shard is NOT independently dit-classifiable (partial layer
+        // count) - assert that directly before checking the manifest carries
+        // the whole thing regardless.
+        let lone_shard = complete(dit_dir.join("shard1.safetensors"), ArtifactKind::Safetensors);
+        assert!(S3ditSpec.classify(&[lone_shard], &dir).is_empty());
+
+        let spec = S3ditSpec;
+        let specs: [&dyn ArchSpec; 1] = [&spec];
+        records.sort_by(|a, b| a.path.cmp(&b.path));
+        let out = resolve("s3dit", &records, &specs, &BTreeMap::new());
+        match out {
+            Resolution::Resolved(a) => {
+                assert_eq!(a.roles.get("dit").map(std::path::PathBuf::as_path), Some(dit_dir.as_path()));
             }
             other => panic!("expected Resolved, got {other:?}"),
         }

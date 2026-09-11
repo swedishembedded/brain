@@ -219,13 +219,34 @@ pub fn dit_config_from_shapes(shapes: &[(String, Vec<usize>)]) -> Result<ZImageC
     }
     let (dim, cap_feat_dim) = (cap1[0], cap1[1]);
 
-    let qn = need("layers.0.attention.q_norm.weight")?;
+    // The per-head RMSNorm gain: the raw source (Comfy/GGUF) spelling
+    // `q_norm`, or brain's OWN post-`import_comfy` spelling `norm_q` - a
+    // checkpoint already shaped that way needs no rename at all (Tongyi-MAI's
+    // own `Z-Image-Turbo` diffusers-layout HF release ships pre-renamed,
+    // verified against the real checkpoint: `layers.0.attention.norm_q.weight`,
+    // a split `to_q`/`to_k`/`to_v` rather than a fused `qkv`, and
+    // `all_x_embedder.{ps}-{pf}.weight` rather than `x_embedder.weight`).
+    let qn = get("layers.0.attention.q_norm.weight")
+        .or_else(|| get("layers.0.attention.norm_q.weight"))
+        .ok_or("z-image dit import: no layers.0.attention.q_norm.weight (source spelling) or layers.0.attention.norm_q.weight (already renamed) to derive the config from")?;
     let head_dim: usize = qn.iter().product();
     if head_dim == 0 || !dim.is_multiple_of(head_dim) {
         return Err(format!("z-image dit import: dim {dim} is not a whole number of {head_dim}-wide heads"));
     }
 
-    let count = |prefix: &str| shapes.iter().filter(|(k, _)| k.starts_with(prefix) && k.ends_with(".attention.qkv.weight")).count();
+    // Per-block marker: the source spelling fuses q/k/v into one
+    // `qkv.weight`; an already-renamed checkpoint has no such tensor at all,
+    // so count its `to_q.weight` instead - whichever suffix a PREFIX
+    // actually carries, since the two spellings are never mixed within one
+    // checkpoint.
+    let count = |prefix: &str| {
+        let fused = shapes.iter().filter(|(k, _)| k.starts_with(prefix) && k.ends_with(".attention.qkv.weight")).count();
+        if fused > 0 {
+            fused
+        } else {
+            shapes.iter().filter(|(k, _)| k.starts_with(prefix) && k.ends_with(".attention.to_q.weight")).count()
+        }
+    };
     let n_layers = count("layers.");
     let n_refiner_layers = count("noise_refiner.");
     let ctx = count("context_refiner.");
@@ -245,8 +266,12 @@ pub fn dit_config_from_shapes(shapes: &[(String, Vec<usize>)]) -> Result<ZImageC
 
     // The one thing that would otherwise be assumed silently: the patch
     // geometry is baked into the OUTPUT tensor NAMES, so getting it wrong
-    // produces a checkpoint the model cannot find its embedder in.
-    let xemb = need("x_embedder.weight")?;
+    // produces a checkpoint the model cannot find its embedder in. Same
+    // source-vs-renamed choice as `qn`/`count` above.
+    let renamed_xemb_name = format!("all_x_embedder.{}-{}.weight", cfg.patch_size, cfg.f_patch_size);
+    let xemb = get("x_embedder.weight")
+        .or_else(|| get(&renamed_xemb_name))
+        .ok_or_else(|| format!("z-image dit import: no x_embedder.weight (source spelling) or {renamed_xemb_name} (already renamed) to derive the config from"))?;
     let patch_dim = (cfg.in_channels * cfg.patch_size * cfg.patch_size * cfg.f_patch_size) as usize;
     if xemb.iter().product::<usize>() != dim * patch_dim {
         return Err(format!(
@@ -604,6 +629,27 @@ mod tests {
         let derived = dit_config_from_shapes(&src).expect("derive");
         assert_eq!((derived.dim, derived.n_heads, derived.n_layers, derived.n_refiner_layers, derived.cap_feat_dim), (1280, 10, 4, 1, 512));
         validate_dit_shapes(&resolve(&src, &derived).expect("resolve"), &derived).expect("covered");
+    }
+
+    /// A checkpoint already in brain's OWN post-rename spelling - not the
+    /// source (Comfy) spelling `comfy_shapes` above synthesizes, but the
+    /// exact naming [`dit_manifest`] itself produces (`norm_q`/`norm_k`, a
+    /// split `to_q`/`to_k`/`to_v`, `all_x_embedder.{ps}-{pf}.weight`) - the
+    /// real shape of Tongyi-MAI's own `Z-Image-Turbo` diffusers-layout HF
+    /// release (`transformer/diffusion_pytorch_model-*-of-00003.safetensors`),
+    /// verified against the actual checkpoint's tensor names. Before this,
+    /// `spec::S3ditSpec::classify`'s directory-merge could see every shard's
+    /// shapes and still fail to derive a config from them, because this
+    /// function only ever recognized the OTHER spelling.
+    #[test]
+    fn the_already_renamed_spelling_also_derives_the_config() {
+        let cfg = ZImageConfig::turbo();
+        let manifest = dit_manifest(&cfg);
+        let derived = dit_config_from_shapes(&manifest).expect("derive from the post-rename spelling");
+        assert_eq!(
+            (derived.dim, derived.n_heads, derived.n_layers, derived.n_refiner_layers, derived.cap_feat_dim),
+            (cfg.dim, cfg.n_heads, cfg.n_layers, cfg.n_refiner_layers, cfg.cap_feat_dim)
+        );
     }
 
     /// The three ways a file can fail to be the checkpoint it claims, each
