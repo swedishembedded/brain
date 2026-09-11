@@ -246,8 +246,8 @@ mod tests {
                 let (lg, out) = (&lg, &out);
                 s.spawn(move || {
                     let (coll, local) = lg.tp(r);
-                    let z = coll.all_reduce(local, vec![(r + 1) as f32, 10.0]);
-                    *out[r].lock().unwrap() = z;
+                    let z = pollster::block_on(coll.all_reduce(local, vec![(r + 1) as f32, 10.0].into())).unwrap();
+                    *out[r].lock().unwrap() = z.data;
                 });
             }
         });
@@ -267,7 +267,7 @@ mod tests {
                 let (lg, out) = (&lg, &out);
                 s.spawn(move || {
                     let (coll, local) = lg.tp(r);
-                    *out[r].lock().unwrap() = coll.all_reduce(local, vec![r as f32]);
+                    *out[r].lock().unwrap() = pollster::block_on(coll.all_reduce(local, vec![r as f32].into())).unwrap().data;
                 });
             }
         });

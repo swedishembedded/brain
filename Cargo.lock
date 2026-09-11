@@ -1444,6 +1444,7 @@ dependencies = [
  "brain-paramstore",
  "brain-testutil",
  "half",
+ "pollster",
  "serde_json",
 ]
 

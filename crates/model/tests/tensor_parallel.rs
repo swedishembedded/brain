@@ -16,6 +16,7 @@
 //! `SHARD_TEST_GPUS=1,1` pins both to one card. Skipped under `MOE_SKIP_GPU_TESTS`.
 
 use gpu_core::Gpu;
+use model::collective::Payload;
 use model::{Collective, HostCollective};
 
 const MATMUL: usize = 0;
@@ -210,8 +211,8 @@ fn tensor_parallel_mlp_matches_single_gpu() {
                 }
                 let z_partial = matmul(g, &y_r, &w_proj_r, m, half, d, false); // [m, d] partial
                 // combine partials: one all-reduce (Megatron `g` operator).
-                let z = coll.all_reduce(rank, z_partial);
-                *results[rank].lock().unwrap() = z;
+                let z = pollster::block_on(coll.all_reduce(rank, Payload::f32(z_partial))).unwrap();
+                *results[rank].lock().unwrap() = z.data;
             });
         }
     });
@@ -274,7 +275,7 @@ fn tensor_parallel_mlp_training_matches_single_gpu() {
                 }
                 let (_z, dx_p, dwfc_r, dwproj_r) = mlp_fwd_bwd(g, x, &w_fc_r, &w_proj_r, dz, m, d, ffl);
                 // f operator: all-reduce the input gradient.
-                let dx = coll.all_reduce(rank, dx_p);
+                let dx = pollster::block_on(coll.all_reduce(rank, Payload::f32(dx_p))).unwrap().data;
                 *out[rank].lock().unwrap() = (dx, dwfc_r, dwproj_r);
             });
         }
@@ -361,8 +362,8 @@ fn tensor_parallel_attention_matches_single_gpu() {
                     w_o_r[i * d_r..(i + 1) * d_r].copy_from_slice(&w_o[i * d + rank * d_r..i * d + rank * d_r + d_r]);
                 }
                 let z_partial = matmul(g, &ctx_r, &w_o_r, m, d_r, d, false); // [m, d] partial
-                let z = coll.all_reduce(rank, z_partial); // one all-reduce (Megatron g)
-                *results[rank].lock().unwrap() = z;
+                let z = pollster::block_on(coll.all_reduce(rank, Payload::f32(z_partial))).unwrap(); // one all-reduce (Megatron g)
+                *results[rank].lock().unwrap() = z.data;
             });
         }
     });

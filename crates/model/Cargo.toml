@@ -35,6 +35,18 @@ half.workspace = true
 # are the multi-GPU / offload paths that never run in a browser.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 brain-backend-cpu = { workspace = true }
+# `collective::Collective`'s ops are async (M7.2) so `dyn Collective` composes
+# into async call sites instead of forcing one; every existing call site here
+# is a plain OS thread, not an async task, so it drives that future the same
+# way this repo's own native async boundary already does -
+# `pollster::block_on` (`backend_wgpu::WgpuBackend::new` wrapping
+# `new_async`) - rather than pulling in a second async runtime. Gated non-wasm
+# because its one non-test caller (`distributed::FlatAdam::step`/
+# `fed_avg_flat`) is already wasm-gated (a thread-per-rank collective has no
+# business in a browser build) - this repo has no wasm test lane, so
+# `collective`/`grid`'s own (ungated) `#[cfg(test)]` modules using it too is
+# not a real wasm-build hazard in practice.
+pollster.workspace = true
 
 # brain-gradcheck depends on brain-model (its CheckModel impl for the
 # architecture-agnostic Model trait) -- this is the well-supported "tests

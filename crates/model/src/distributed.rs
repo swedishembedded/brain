@@ -23,6 +23,7 @@
 //! ([`FlatAdam`], [`fed_avg_flat`]) is split out and unit-tested against a
 //! collective directly; the `Model`-generic wrappers are thin flatten/scatter glue.
 
+use crate::collective::Payload;
 use crate::{Collective, Model};
 
 // ---- testable numeric core (operates on flat parameter vectors) ----------------
@@ -57,7 +58,14 @@ impl FlatAdam {
     #[allow(clippy::too_many_arguments)]
     pub fn step(&mut self, coll: &dyn Collective, rank: usize, local_grad: Vec<f32>, t: u32, lr: f32, wd: f32, clip: Option<f32>) -> &[f32] {
         assert_eq!(local_grad.len(), self.master.len(), "grad/param length mismatch");
-        let summed = coll.all_reduce(rank, local_grad);
+        // `Collective::all_reduce` is async and `Result`-based (M7.2); every
+        // caller here is a plain OS thread, not an async task, so this bridges
+        // the same way this repo's own native async boundary already does
+        // (`pollster::block_on`, see `collective`'s module doc) - a collective
+        // failure mid training-step is exactly as fatal as the old panic was,
+        // so `expect` rather than widening this fn's own signature to
+        // `Result` (real follow-up work, not this milestone's).
+        let summed = pollster::block_on(coll.all_reduce(rank, Payload::f32(local_grad))).expect("collective all_reduce failed").data;
         let world = coll.world_size() as f32;
         let mean_scale = 1.0 / world;
 
@@ -94,8 +102,8 @@ impl FlatAdam {
 /// all-reduce. Every rank receives the same averaged weights.
 pub fn fed_avg_flat(coll: &dyn Collective, rank: usize, weights: &[f32], local_samples: f32) -> Vec<f32> {
     let scaled: Vec<f32> = weights.iter().map(|&w| w * local_samples).collect();
-    let num = coll.all_reduce(rank, scaled);
-    let den = coll.all_reduce(rank, vec![local_samples])[0];
+    let num = pollster::block_on(coll.all_reduce(rank, Payload::f32(scaled))).expect("collective all_reduce failed").data;
+    let den = pollster::block_on(coll.all_reduce(rank, Payload::f32(vec![local_samples]))).expect("collective all_reduce failed").data[0];
     let inv = 1.0 / den.max(1e-12);
     num.iter().map(|&x| x * inv).collect()
 }
