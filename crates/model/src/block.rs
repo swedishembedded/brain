@@ -1663,7 +1663,20 @@ pub fn rmsnorm_eps_fwd(g: &Gpu, idx: usize, x: &DeviceBuffer, w: &DeviceBuffer, 
 /// `[d, rows, eps]`, so only the index and the thread count change - which is
 /// why this returns them instead of building the `Step`: callers bind whole
 /// buffers (`Gpu::step`) or slices (`Gpu::step_sliced`) and both must share one
-/// selection rule. The policy itself lives in `backend_api::select`
+/// selection rule.
+///
+/// That shared Params layout is a REQUIREMENT on `reference`, not a given.
+/// `rmsnorm` declares only `[d, rows]` and hardcodes a 1e-6 epsilon, so it is
+/// a valid `reference` for a model whose epsilon is [`RMSNORM_EPS`] and for no
+/// other: the third word `rmsnorm_rows` reads is one `rmsnorm` discards. Pass
+/// `rmsnorm_eps` (identical math, epsilon as a parameter) for any other
+/// epsilon. Otherwise the normalization silently depends on which variant the
+/// DEVICE selects, which is a cross-backend correctness bug, not a rounding
+/// difference - a model with an `f32::EPSILON` epsilon measured ~10% relative
+/// divergence in its forward output between a backend with workgroup
+/// reductions and one without.
+///
+/// The policy itself lives in `backend_api::select`
 /// (`Op::RmsNorm`) keyed on `DeviceCaps`, never on a backend name; the `*_rows`
 /// kernels are `@workgroup_size(64)`, at or below the WebGPU floor of 256, so
 /// no `max_workgroup_size` gate is needed on top of it.
