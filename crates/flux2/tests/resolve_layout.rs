@@ -25,13 +25,35 @@ use checkpoint::gguf_write::TensorOut;
 use flux2::spec::Flux2Spec;
 use flux2::Flux2Config;
 
-fn scratch_root() -> PathBuf {
+/// A fixture store that deletes itself when the test ends.
+///
+/// The store below is real GGUF and safetensors at real klein dimensions -
+/// ~200 MB per run - under a process-id-named directory nothing ever reuses.
+/// Removing it at the end of the test body only cleans up when the test
+/// PASSES; a failing run, which is the run most likely to be repeated, left
+/// its store behind every time. Dropping on the way out covers both.
+struct Scratch(PathBuf);
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.0).ok();
+    }
+}
+
+impl std::ops::Deref for Scratch {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+fn scratch_root() -> Scratch {
     static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!("brain-flux2-resolve-layout-{}-{n}", std::process::id()));
     std::fs::remove_dir_all(&dir).ok();
     std::fs::create_dir_all(&dir).unwrap();
-    dir
+    Scratch(dir)
 }
 
 fn f32_tensor(name: &str, shape: Vec<usize>) -> TensorOut {
@@ -126,7 +148,7 @@ fn write_vae_safetensors_flat(path: &Path) {
 /// pipeline snapshot (interrupted DiT download, wrong-size text encoder) next
 /// to a real `unsloth` GGUF release (vendor-flat DiT, VAE, and a second
 /// candidate text encoder) and a real canonical `Qwen/Qwen3-8B` checkpoint.
-fn build_store() -> PathBuf {
+fn build_store() -> Scratch {
     let root = scratch_root();
 
     // --- black-forest-labs/FLUX.2-klein-4B: a real diffusers pipeline
@@ -262,5 +284,4 @@ fn flux2_resolves_against_a_real_mixed_store_only_once_every_role_is_unambiguous
         other => panic!("step 4: expected Resolved, got {other:?}"),
     }
 
-    std::fs::remove_dir_all(&root).ok();
 }
