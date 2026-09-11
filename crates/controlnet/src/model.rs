@@ -59,7 +59,9 @@ use crate::adapter::{ControlSource, InjectionPoint, Residuals};
 use crate::config::ControlNetConfig;
 use crate::import::Tensors;
 
-/// The one kernel slot appended to `sdxlunet::model::KERNELS`.
+/// The one kernel slot appended to `sdxlunet::model::KERNELS`, registered as
+/// `"scale_chan_cond"` (see [`kernel_set`]'s doc for why the label differs
+/// from the kernel's own name).
 ///
 /// `pub(crate)` - `crate::train::ControlNetTrainer` (the training graph)
 /// needs this same slot index to hand to
@@ -68,7 +70,7 @@ pub(crate) const K_SCALE: usize = sdxlunet::model::KERNELS.len();
 
 /// This model's kernel set: **`sdxlunet::model::KERNELS` verbatim** (so the
 /// backbone's block recorder finds every slot at the index it resolved) plus
-/// `scale_chan` for `conditioning_scale`.
+/// `scale_chan_cond` for `conditioning_scale`.
 ///
 /// Being a strict prefix-extension is what lets one `Gpu` drive both models:
 /// `sdxlunet::Unet::new` requires only that its own slots are a prefix, exactly as
@@ -88,7 +90,19 @@ const fn kernel_set() -> [(&'static str, &'static str); sdxlunet::model::KERNELS
     // matters: the pre-scale zero-conv output is a parity tap. Device-resident
     // matters for the same reason `restore`'s fidelity dial is a buffer:
     // changing `conditioning_scale` is then a write, not a graph rebuild.
-    k[K_SCALE] = ("scale_chan", kernels::SCALE_CHAN);
+    //
+    // Registered as "scale_chan_cond", not "scale_chan": `crate::train::
+    // TRAIN_KERNELS` appends `vae::blocks::BWD_KERNELS`, which carries its OWN
+    // "scale_chan" slot (`Op::Gn`'s adjoint dispatches it internally, at a
+    // fixed offset the whole file's index arithmetic depends on, so that copy
+    // can never be dropped or renamed). Two entries named "scale_chan" in one
+    // kernel set compile fine on the GPU backend (each gets its own pipeline)
+    // but make the CPU backend's JIT reject the second with
+    // `DuplicateDefinition("scale_chan")`, since it declares one Cranelift
+    // function per registered NAME. Dispatch is always by this slot's NUMERIC
+    // index (`K_SCALE`), never by name, so renaming the label changes nothing
+    // about what runs - it only frees the string for `BWD_KERNELS`'s copy.
+    k[K_SCALE] = ("scale_chan_cond", kernels::SCALE_CHAN);
     k
 }
 
@@ -398,7 +412,8 @@ mod tests {
         for (i, k) in sdxlunet::model::KERNELS.iter().enumerate() {
             assert_eq!(super::KERNELS[i], *k, "slot {i}");
         }
-        assert_eq!(super::KERNELS[super::K_SCALE].0, "scale_chan");
+        assert_eq!(super::KERNELS[super::K_SCALE].0, "scale_chan_cond");
+        assert_eq!(super::KERNELS[super::K_SCALE].1, kernels::SCALE_CHAN, "same WGSL body as vae::blocks's own scale_chan, under a non-colliding name");
         assert!(super::KERNELS.iter().all(|(n, s)| !n.is_empty() && !s.is_empty()));
     }
 }

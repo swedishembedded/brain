@@ -96,8 +96,11 @@ use crate::config::ControlNetConfig;
 use crate::model::K_SCALE;
 
 /// Where [`vae::blocks::BWD_KERNELS`] sits in [`TRAIN_KERNELS`] - right after
-/// [`crate::model::KERNELS`] (the inference set, which already carries
-/// `scale_chan` at [`crate::model::K_SCALE`]).
+/// [`crate::model::KERNELS`] (the inference set, which already carries the
+/// same WGSL body under `"scale_chan_cond"` at [`crate::model::K_SCALE`] -
+/// registered under a different name than `BWD_KERNELS`'s own `"scale_chan"`
+/// entry precisely so both can coexist in this spliced set without the CPU
+/// JIT seeing two functions named `"scale_chan"`).
 const BWD_BASE: usize = crate::model::KERNELS.len();
 const TAIL: usize = BWD_BASE + vae::blocks::BWD_KERNELS.len();
 
