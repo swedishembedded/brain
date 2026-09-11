@@ -374,29 +374,14 @@ const PAGED_FLASH_PREFILL_HD256: usize = 91;
 /// is safe even though this crate carries no `KernelSelector` of its own.
 const HEAD_ARGMAX_CHUNKS: u32 = 256;
 
-/// How often [`Qwen35::run_prefill_chunk_stage`]'s layer loop BLOCKS on the
-/// device instead of merely flushing, bounding a round's live transient memory
-/// to that many layers' worth instead of the whole shard's.
-///
-/// A prefill round allocates every one of a layer's intermediates fresh from
-/// `n` and drops them at the end of the iteration - but wgpu cannot actually
-/// reclaim a buffer that submitted work still references, and nothing forces
-/// that reclaim until the queue is drained. A round that only drains at its
-/// terminal readback therefore peaks at `n_layers * per_layer_transient`,
-/// which is a DEPTH cost, not a chunk cost: measured on the real 27B
-/// (`d_model` 5120, `ff` 17408, `conv_dim` 10240) it was ~5 GiB for a 32-layer
-/// stage at `n = 256`, enough to OOM a 24 GiB P40 that already holds 13.5 GiB
-/// of INT8 weights - and a single-card 64-layer plan overruns it at half that
-/// `n`. See `crate::int8_gguf_resident::MAX_PREFILL_TOKENS` for the sweep.
-///
-/// The price is the host/device overlap given up at each drain, and 4 is where
-/// that is nearly free while the memory is still bounded 16x below the
-/// undrained peak. Measured with `bin/qwen35_prefill_profile` (real per-layer
-/// dims, synthetic weights, single P40, 512-token prompt at chunk 256):
-/// 851.9 tok/s draining never, 840.0 draining every 4 layers (-1.4%), 807.8
-/// draining every layer (-5.2%). At 2048 prompt tokens the every-4 cost is
-/// -3.5% (759.5 -> 732.8).
-const DRAIN_EVERY_N_LAYERS: usize = 4;
+// M6.10 (kernel-performance ledger) replaced the fixed-schedule constant
+// that used to live here (`DRAIN_EVERY_N_LAYERS`, a periodic BLOCKING drain
+// every 4 layers regardless of actual buffer liveness) with real liveness
+// tracking in `Qwen35::run_prefill_chunk_stage`'s layer loop: a
+// `gpu_core::scratch::Arena` scope per layer, with the device drain moved to
+// exactly the point that scope's buffer reuse requires one, rather than a
+// count of layers. See that function's own comments for the mechanism and
+// the ledger entry for the measured before/after.
 
 /// This model's RMSNorm epsilon. Exactly what `rmsnorm.wgsl` hardcodes, but it
 /// has to be passed explicitly here - see [`rms_step`].
@@ -2589,6 +2574,24 @@ impl Qwen35 {
         #[allow(clippy::needless_range_loop)]
         for l in self.shard.start..self.shard.end {
             let ty = types[l];
+
+            // M6.10: a replay arena, not a fixed drain schedule. Every layer's
+            // outer temporaries (`xn1`, `xmid`, `xn2`, `res_next`) are the
+            // same `[n, d_model]` size requested in the same call order
+            // whatever the layer's own TYPE, and each is read by exactly one
+            // downstream consumer within this same iteration - dead the
+            // moment that consumer's dispatch is recorded. That is exactly
+            // the repeated-shape pattern `gpu_core::scratch::Arena` exists
+            // for (see its module doc for the aliasing argument this scope
+            // relies on); `res` itself is the one value this loop carries
+            // ACROSS scopes (this iteration's `res` is still held by this
+            // binding when the next iteration's `res_next` asks for the same
+            // slot), which the arena's own `is_unique` check already handles
+            // for free - that slot gets a fresh allocation instead of
+            // aliasing the value this loop is still reading, with no special
+            // case needed here.
+            let _scope = g.scratch_scope();
+
             let xn1 = g.storage((n * d) as u64);
             g.submit(&[], &[rms_step(g, &res, self.w(&format!("blocks.{l}.ln1.weight")), &xn1, d, n)]);
 
@@ -2623,18 +2626,44 @@ impl Qwen35 {
             g.submit(&[], &[g.step(ADD2, &[&xmid, &mlp_out, &res_next], &[n * d], n * d)]);
             res = res_next;
 
-            // Per-layer flush, for the same measured reason `run_decode_step`
-            // flushes: `Gpu::submit` only appends to a pending list here, so
-            // without this the host records the whole round before the card
-            // starts any of it. Every `DRAIN_EVERY_N_LAYERS` layers the flush
-            // becomes a BLOCKING drain instead, which is what actually lets
-            // wgpu reclaim the layers already behind us - see that constant.
-            if (l + 1 - self.shard.start).is_multiple_of(DRAIN_EVERY_N_LAYERS) {
-                g.poll_wait();
-            } else {
-                g.flush();
-            }
+            // The liveness boundary itself: recording (the `g.submit` calls
+            // above) is not dispatching - a bind group names a buffer, it
+            // does not write it - so building this WHOLE layer's step
+            // sequence first, THEN draining, is what lets the host overlap
+            // this layer's CPU-side recording with the PREVIOUS layer's
+            // device work. What is not safe is letting this layer's writes
+            // reach the device (`flush`) before the dispatch that read the
+            // slot they may have just been handed back by the arena is
+            // confirmed complete - `poll_wait` is what proves that, and it
+            // has to run before `flush`, not after, or it drains nothing
+            // this layer just recorded. On the FIRST layer of this call
+            // there is nothing queued yet to drain (`poll_wait` on an idle
+            // queue returns immediately), so the ordering is unconditional
+            // rather than gated on a layer count. This IS a real cost at a
+            // small `n` (chunk row count) - not enough per-layer device work
+            // to hide a wait behind - which is why the production chunk size
+            // (`crate::int8_gguf_resident::MAX_PREFILL_TOKENS`, 256) is the
+            // one this scheme is measured against, not an arbitrarily small
+            // one. See M6.10's own kernel-performance ledger entry for the
+            // measured before/after at both scales.
+            g.poll_wait();
+            g.flush();
         }
+        if std::env::var("QWEN35_DEBUG_SCRATCH_HELD").is_ok() {
+            let (n_slots, words) = g.scratch_held();
+            eprintln!("qwen35::run_prefill_chunk_stage: arena holds {n_slots} slots, {words} words ({:.2} MiB) at round end (n_layers this shard={}, n={})", words as f64 * 4.0 / (1024.0 * 1024.0), self.shard.end - self.shard.start, n);
+        }
+        // The per-layer scratch pool this loop built is worth exactly as
+        // much as the layer count that reused it; a caller entering the next
+        // round at a different `n` (a ragged final chunk) would only see it
+        // mismatch on size and fall back to fresh allocation anyway, so
+        // there is nothing to gain by keeping it - and holding it would mean
+        // every decode step for the rest of this instance's life pays a
+        // permanently resident `~n_layers`-th of a round's scratch for
+        // buffers a decode step never touches. Release it here, the same
+        // point a `for` loop's locals would drop on their own if the arena
+        // did not deliberately outlive them.
+        g.scratch_release();
 
         // Head epilogue (final norm): head stage only - `run_decode_step`'s own
         // `shard.head` branch, at `n` rows. A non-head stage hands back its raw

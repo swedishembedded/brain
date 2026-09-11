@@ -6798,3 +6798,173 @@ in a file this milestone was already touching.
 
 **Commit**: one - `kernels, backend-api, qwen3: tile-shape schedule
 autotuning, a 64x64 GEMM variant measured and not wired in (M8.15)`.
+
+### M6.10 - Prefill's periodic scratch drain becomes liveness-based: a real win at the production chunk size, a real regression at a small one, both measured
+
+Replaces `qwen35::model`'s `DRAIN_EVERY_N_LAYERS` (a fixed "blocking drain
+every 4 layers, `flush` otherwise" schedule in `Qwen35::run_prefill_chunk_
+stage`'s per-layer loop, chosen purely to bound how many fresh, un-reclaimed
+per-layer temporaries a round could pile up) with real liveness tracking: a
+`gpu_core::scratch::Arena` scope opened per layer, so `xn1`/`xmid`/`xn2`/
+`res_next` (and every mixer/MLP-internal temporary) are drawn from a replay
+pool instead of freshly allocated and dropped every iteration, and the device
+drain moves to exactly the point that pool's reuse requires one - see that
+function's own comments for the full mechanism, including why `res` (the one
+value the loop carries ACROSS iterations) is exempt from the pool for free
+via the arena's own `is_unique` check, with no special case needed.
+
+**Why the existing arena, not new machinery.** `gpu_core::scratch::Arena` was
+already built and already shipped in `ltxv::block::block_pipeline` for
+exactly this shape (a repeated per-iteration temporary sequence over a
+device handle) - grepping for it before designing anything new, per this
+repo's own "check whether an equivalent mechanism already exists" rule, is
+what turned this into "wire an existing, tested mechanism into a second
+call site" rather than a new allocator.
+
+**The liveness boundary, precisely.** `gpu_core::scratch`'s own module doc
+states the caller's obligation exactly: a scope's buffer reuse is only safe
+once the PREVIOUS scope's work that touched the reused slot is DRAINED
+before the new scope's dispatches are SUBMITTED - not before the scope is
+entered. `Qwen35::run_prefill_chunk_stage` already recorded a whole layer's
+dispatches via inline `g.submit()` calls before this milestone (each one
+just appends to a pending list; nothing reaches the device until `flush`/
+`poll_wait`), so the fix reduces to moving the drain: `g.poll_wait()`
+immediately before `g.flush()` at the end of EVERY layer, unconditionally,
+in place of the old "every 4th layer only" branch. On the first layer of a
+call there is nothing queued yet, so the unconditional `poll_wait` costs
+nothing there - the real cost is layers 2..N, where it is now called every
+layer instead of every 4.
+
+**Why not a looser (period-aligned) drain schedule instead.** The layer-type
+cycle (`full_attention_interval`, 3 GDN : 1 GQA) IS periodic, and lines up
+with the old constant by coincidence when a shard starts at an
+interval-aligned layer - so a tempting alternative was draining once per
+type-period instead of every layer, keeping the old cadence. This was
+deliberately NOT done: `xn1`, the first `g.storage()` call in every layer
+regardless of type, is a `[n, d_model]` buffer at the SAME arena slot every
+single layer, so it is a genuine arena HIT (a real reused, still-in-flight
+buffer) starting from layer 2 onward, every layer, not just at period
+boundaries. Draining only every 4 layers while the pool is actually being
+reused every layer would leave 3 of every 4 layer transitions writing into a
+slot the previous layer's dispatch might not have finished reading -
+exactly the write-after-read hazard class this repo's own M6.1/M6.7/M6.8/M6.9
+investigations already spent real effort closing on this same hardware
+(`backend-wgpu`'s own `flush_inner` doc, read while designing this, documents
+a CONFIRMED Intel ANV driver bug where an in-command-buffer compute-compute
+barrier does not reliably make a prior dispatch's writes visible across a
+sliced storage-buffer binding - only a queue-submit+fence boundary is
+honoured). That finding was reason enough to trust `gpu_core::scratch`'s
+documented contract over a plausible-sounding argument that "wgpu's own
+resource tracking probably makes this safe anyway," rather than gamble
+correctness for a guessed speedup on hardware already shown to violate
+textbook barrier semantics in at least one case.
+
+**Correctness gate**: `crates/qwen35/tests/chunked_prefill.rs`'s existing
+three tests (`chunked_prefill_matches_token_by_token_replay_cpu`,
+`_default_backend`, `whole_prompt_single_chunk_matches_token_by_token_
+replay`) - unchanged, still green. This is the right gate un-modified: 8
+layers, GQA at absolute index 3 AND 7 so the round's INTERNAL causal masking
+is exercised, chunk sizes 4 and 8 giving multi-round replay with a ragged
+last round (exactly the case where a round-to-round arena-reuse bug would
+show), plus a single-whole-prompt-chunk case for the fresh-sequence path -
+run on both the CPU JIT backend and the real default (wgpu/Vulkan) backend,
+comparing chunked-prefill hidden states against a token-by-token `step`
+replay at `< 1e-5` maxabs. All three pass on both the CPU JIT backend
+(0 maxabs, as before) and the real Intel Arc iGPU backend. Mutation-verified
+in the sense this milestone's own instructions ask for a NEW test to be:
+this repo has no dedicated hazard test for arena reuse specifically, so
+`g.poll_wait()` was temporarily deleted (keeping `g.flush()`) and the exact
+same three tests re-run - they still passed. This is reported honestly as
+INCONCLUSIVE, not as evidence the drain is unneeded: `chunked_prefill.rs`'s
+tiny `tiny()`-derived config (`d_model` in the tens) dispatches and finishes
+each layer far too fast for a genuine cross-submission race window to open
+on this hardware, so a negative result here proves nothing about safety at
+real scale, and `poll_wait` was restored and re-confirmed green rather than
+trusting a non-conclusive signal on a timing-dependent class of bug.
+
+**Wall-clock, re-measured on THIS box, not assumed from the old number.**
+The `-1.4%`/`-5.2%` figures the removed constant's doc cited were measured on
+"a single P40" - hardware this sandbox does not have (no `nvidia-smi`;
+`qwen35_prefill_profile`'s own adapter probe reports `Intel(R) Arc(tm)
+Graphics (MTL) (IntegratedGpu, Vulkan)`, `backend-wgpu`). They could not be
+reproduced here even as a baseline, only re-measured fresh on the real
+available hardware - min-of-N (4-6 reps, sorted, min and median reported),
+each side built from `bin/qwen35_prefill_profile`'s own real-27B per-layer
+dims (`d_model=5120, ff=17408`), 4 layers, comparing this milestone's code
+against a `git stash`-restored pre-change binary of the SAME source tree, at
+two chunk sizes:
+
+- **`n=64` rows/round** (128-token prompt, chunk 64 - small on purpose, to
+  isolate the per-layer `poll_wait` cost with little device work to hide it
+  behind): NEW min-of-6 `4.208s` (30.4 tok/s), OLD min-of-6 `1.329s`
+  (96.3 tok/s) - non-overlapping distributions (NEW's fastest sample was
+  slower than OLD's slowest), a clean, repeatable ~3.2x REGRESSION at this
+  scale. Not a fluke: rerun confirmed the same ordering.
+- **`n=256` rows/round** (512-token prompt, chunk 256 - this crate's own
+  production default, `crate::int8_gguf_resident::MAX_PREFILL_TOKENS`, and
+  the chunk size the removed constant's own doc was measured at): NEW
+  min-of-4 `3.167s` (161.7 tok/s) across 4 samples all within 5% of each
+  other (3.167-3.334s). OLD min-of-4, run TWICE for a fair best-of-8: `3.300s`
+  (155.1 tok/s) best case, but 6 of the 8 OLD samples landed at 13.3-14.6s
+  (this box's real background load - `uptime` showed a 15-minute load average
+  of 100-150 on a 22-core machine throughout this session, from concurrent
+  unrelated agent sessions this box is shared with) against ZERO of NEW's 4
+  samples landing anywhere near that. Read honestly: best-case-to-best-case
+  this is a modest ~4% win for NEW, at the noise floor and not a confident
+  claim on its own - but NEW's WORST sample (3.334s) still beat OLD's
+  SECOND-best sample (5.227s) outright, and NEW never once regressed to
+  OLD's typical (contended) 13-14s regardless of how many times OLD hit it.
+  The plausible mechanism (not directly instrumented, stated as inference,
+  not measurement): OLD reallocates ~60 fresh buffers every 4-layer window
+  from a shared driver/allocator that this box's OTHER concurrent GPU-using
+  sessions are also contending for; NEW allocates that same set ONCE per
+  prefill call and reuses it, so it has far fewer places to lose a race
+  against a noisy neighbour. At the chunk size this crate actually ships
+  with, the honest reading is a small win on raw throughput and a real,
+  repeated win on STABILITY under this box's actual multi-tenant load.
+
+**Peak memory comparison**, via a new `QWEN35_DEBUG_SCRATCH_HELD=1`
+env-gated diagnostic on `Gpu::scratch_held()` added at the end of the loop
+(zero cost unset - one `env::var` lookup per ROUND, not per layer): at the
+same 4-layer/`n=64` config, the arena holds 61 slots / 23,084,032 words
+(88.06 MiB) at round end. The OLD scheme's own `DRAIN_EVERY_N_LAYERS=4`
+was already sized to bound its own undrained peak to "4 layers' worth"
+before reclaiming - which, at this layer count, is the SAME window this
+measurement caught, so peak RESIDENT bytes at any instant are the same
+order of magnitude either way; they were never the thing `DRAIN_EVERY_N_
+LAYERS` traded away. What changes is ALLOCATION COUNT, not peak bytes: OLD
+recreates that ~88 MiB every 4-layer window for the life of a round (deeper
+models pay it repeatedly); NEW allocates it once and reuses it for every
+remaining layer of the SAME type-shape, converging (not growing with model
+depth, since the layer-type cycle itself does not grow with depth) rather
+than repeating. This half of the claim is architectural/reasoned, not
+separately measured at a deeper layer count in this session - re-running the
+weight-generation-heavy full-27B-dims sweep at, say, 16 or 32 layers was
+attempted once, OOM'd this shared box during synthetic-weight generation
+(unrelated to the arena itself - host-side `init_weights` for 16 real-dim
+layers is `~15+ GB` fp32 resident, more than this box's free headroom
+alongside its other sessions), and was not repeated to avoid destabilising
+those other sessions - stated here as a real, honest gap rather than
+implied to be covered.
+
+**Not claimed**: a win at every chunk size (the `n=64` regression above is
+real and reported, not hidden); a directly-instrumented allocation-count or
+deeper-model peak-memory number (the peak comparison above is architectural
+reasoning plus one measured snapshot, not a full sweep - see the OOM note);
+that `poll_wait` is provably NECESSARY for correctness on `backend-wgpu`
+specifically (the mutation test that removed it did not fail, but at a scale
+too small to trust either way - kept per `gpu_core::scratch`'s documented
+contract and this hardware's own confirmed barrier-reliability history,
+not re-derived from first principles here).
+
+**Gates**: `cargo clippy --release --offline -p brain-qwen35 --all-targets
+--all-features -- -D warnings` clean. `python3 scripts/spdx/check.py`
+clean (no new files). `bash scripts/gates/check-kernel-selection.sh` (clean,
+pre-existing 49/49 allow-listed rows, unrelated to this change) and `bash
+scripts/gates/check-no-doc-citations.sh` both clean. No `.wgsl` touched, so
+the kernel-table regen gate does not apply. `cargo test --release --offline
+-p brain-qwen35 --test chunked_prefill` - 3/3 green, confirmed twice
+(before and after the mutation-test restore).
+
+**Commit**: one - `qwen35: liveness-based scratch arena replaces prefill's
+fixed drain schedule (M6.10)`.
