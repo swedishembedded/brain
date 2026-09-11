@@ -257,7 +257,7 @@ pub fn encode_samples(
     // tokens.
     let tokens_of = |hwc: &[f32]| -> Result<Vec<f32>, String> {
         let (chw, h, w) = crate::pipeline::ref_from_hwc(hwc, size, size)?;
-        let mean = enc.encode_mean(&chw, (h / 8) as u32, (w / 8) as u32);
+        let mean = enc.encode_mean(&chw, h / 8, w / 8);
         Ok(crate::refcond::pack_tokens(&mean, lh8, lw8, &bn_mean, &bn_var, vae_cfg.batch_norm_eps, fc.in_channels))
     };
     for (i, (s, ctx)) in samples.iter().zip(ctxs).enumerate() {

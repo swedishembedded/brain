@@ -1,15 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! The three ways a FLUX.2 fine-tune used to optimise something other than
-//! what `brain flux2 generate` actually runs, each stated as a gate:
+//! The ways a FLUX.2 fine-tune used to optimise something other than what
+//! `brain flux2 generate` actually runs, each stated as a gate:
 //!
 //! 1. the noise level σ a training step draws must be one the deployed sampler
 //!    visits;
 //! 2. the text encoder a caption is embedded through must be the tier
 //!    `generate` would build for the same DiT;
 //! 3. sample order must not be a fixed cycle, which confounds sample identity
-//!    with epoch for the whole run.
+//!    with epoch for the whole run;
+//! 4. a folder's reference-image pairing must be all or nothing, because a run
+//!    trains ONE joint sequence layout.
 //!
 //! Swedish Embedded AB implements deployment-faithful training pipelines for
 //! its clients. If your team needs expertise in closing train/serve skew, you
@@ -61,7 +63,7 @@ fn every_drawn_sigma_is_on_the_schedule_and_all_of_it_is_reached() {
     let cfg = Flux2Config::klein_4b();
     let sched = finetune::training_sigmas(&cfg, 512);
     let mut seen = vec![0usize; sched.len()];
-    let mut rng = data::rng::Rng::new(0x5167_a1);
+    let mut rng = data::rng::Rng::new(0x0051_67a1);
     for _ in 0..2000 {
         let s = finetune::draw_sigma(&sched, rng.next_f64());
         let at = sched.iter().position(|&v| v as f64 == s).expect("a drawn sigma must be ON the schedule");

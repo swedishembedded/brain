@@ -56,5 +56,5 @@ fn caption_only_training_is_bit_for_bit_what_it_was() {
 /// existed. Not a tolerance and not a target: it is the value this fixture
 /// produced, asserted bit-for-bit, because "the plain path is untouched" is an
 /// exact claim.
-const LOSS: f64 = 2.31704819316291832e-1;
-const DIGEST: f64 = -1.19128803062919411e-1;
+const LOSS: f64 = 0.23170481931629183;
+const DIGEST: f64 = -0.11912880306291941;
