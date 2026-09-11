@@ -27,6 +27,7 @@ pub mod weightio;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod gguf_src;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod license;
 pub mod load_progress;
 pub mod remap;
 pub mod split;

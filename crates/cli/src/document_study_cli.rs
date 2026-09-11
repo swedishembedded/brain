@@ -523,7 +523,18 @@ fn read_dataset(path: &Path) -> DocumentDataset {
 /// and consumer therefore agree by construction rather than by two spellings
 /// of one rule - and deleting an old adapter cannot shift a later version
 /// down onto a live one, the way a `read_dir().count()` would.
+///
+/// Refuses outright if the adapter's own card carries a licence brain must
+/// not republish under. An adapter is a derivative of the base it was trained
+/// against, so it inherits that base's redistribution terms; the check is on
+/// the card in the file rather than on any claim about provenance, so an
+/// adapter that lost its card is publishable and one that kept an NC licence
+/// is not.
 fn publish_adapter(src: &Path, dir: &Path) -> std::io::Result<PathBuf> {
+    let license = checkpoint::st::read_card(&src.to_string_lossy()).ok().flatten().and_then(|c| c.license);
+    if let Err(e) = checkpoint::license::redistributable(license.as_deref()) {
+        return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, format!("{}: {e}", src.display())));
+    }
     std::fs::create_dir_all(dir)?;
     let next = rl::improve::latest_adapter(dir)?.map(|(v, _)| v + 1).unwrap_or(0);
     let dst = dir.join(format!("adapter-{next:06}.safetensors"));
@@ -664,6 +675,39 @@ mod tests {
         let next = publish_adapter(&src, &used).expect("publish into a used directory");
         assert_eq!(next.file_name().unwrap(), "adapter-000004.safetensors", "the next version is one past the HIGHEST, not one past the newest");
         assert_eq!(rl::improve::latest_adapter(&used).unwrap(), Some((4, next)), "the watcher must adopt exactly what was just published");
+    }
+
+    /// Publishing is redistribution, so an artifact whose card carries a
+    /// licence that forbids redistribution must be refused rather than
+    /// copied. Asserted against a REAL safetensors file with a real card,
+    /// not against the predicate in isolation: the property under test is
+    /// that `publish_adapter` reads the card at all, and a unit test of
+    /// `checkpoint::license::redistributable` would pass whether or not this
+    /// function ever called it.
+    #[test]
+    fn an_adapter_under_a_non_redistributable_licence_is_not_published() {
+        let dir = tmp("publish-nc");
+        let out = dir.join("out");
+
+        let tensors = vec![("w".to_string(), vec![2u64], vec![1.0f32, 2.0])];
+        let mut card = checkpoint::st::ModelCard::new("test/ft", "timesfm3");
+        card.license = Some("timesfm-non-commercial-license-v1.0".into());
+        card.variant_of = Some("google/timesfm-3.0-pytorch".into());
+        let nc = dir.join("nc.safetensors");
+        checkpoint::st::save_safetensors(&nc.to_string_lossy(), &tensors, &serde_json::json!({}), Some(&card)).unwrap();
+
+        let err = publish_adapter(&nc, &out).expect_err("a non-redistributable artifact must not be published");
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(err.to_string().contains("timesfm-non-commercial-license-v1.0"), "{err}");
+        assert!(!out.join("adapter-000000.safetensors").exists(), "the refusal must not have copied anything");
+
+        // The same file without that licence publishes, so the refusal is
+        // about the licence and not about the file's shape.
+        let mut ok_card = checkpoint::st::ModelCard::new("test/ft", "timesfm3");
+        ok_card.license = Some("apache-2.0".into());
+        let okp = dir.join("ok.safetensors");
+        checkpoint::st::save_safetensors(&okp.to_string_lossy(), &tensors, &serde_json::json!({}), Some(&ok_card)).unwrap();
+        publish_adapter(&okp, &out).expect("an apache-2.0 artifact publishes");
     }
 
     /// The dataset is the one input brain did not produce, so serde is the

@@ -124,6 +124,10 @@ fn register_compound(local: &brain_modelstore::LocalModel, seen: &mut BTreeSet<S
             return;
         }
     };
+    if let Err(e) = checkpoint::license::redistributable(local.card.as_ref().and_then(|c| c.license.as_deref())) {
+        errors.push(DiscoveryError { dir: local.dir.clone(), family, reason: e });
+        return;
+    }
     if !seen.insert(id.clone()) {
         errors.push(DiscoveryError { dir: local.dir.clone(), family, reason: format!("duplicate model id '{id}'") });
         return;
@@ -248,6 +252,13 @@ fn register(weights: &Path, card: &Option<ModelCard>, dir: &Path, adapter: Optio
             return;
         }
     };
+    if let Err(e) = checkpoint::license::redistributable(card.license.as_deref()) {
+        // Publishing a model into the served catalog IS redistribution: every
+        // registered model is reachable over the API. The refusal names the
+        // file, because the card that carries the licence is inside it.
+        eprintln!("brain: skip {wp} ({e})");
+        return;
+    }
     if !seen.insert(card.id.clone()) {
         eprintln!("brain: skip {wp} (duplicate model id '{}')", card.id);
         return;
