@@ -8,6 +8,7 @@
 //! never `BRAIN_FLUX2_*`; `finetune` still reads those variables directly.
 //! Images in/out are binary PPM P6 (the CLI-wide convention).
 
+use crate::args::strip_out_name_prefix;
 use flux2::{AdapterSpec, Flux2Config, GenOpts, Paths, Pipeline};
 
 const HELP: &str = "brain flux2 <cmd>
@@ -287,7 +288,7 @@ fn generate(args: &[String]) -> Result<(), String> {
         };
         match args[i].as_str() {
             "--prompt" => prompt = Some(need(i)?.clone()),
-            "--out" => out = Some(need(i)?.clone()),
+            "--out" => out = Some(strip_out_name_prefix(need(i)?, "image").to_string()),
             "--width" => want_w = Some(need(i)?.parse().map_err(|e| format!("--width: {e}"))?),
             "--height" => want_h = Some(need(i)?.parse().map_err(|e| format!("--height: {e}"))?),
             "--steps" => o.steps = Some(need(i)?.parse().map_err(|e| format!("--steps: {e}"))?),
@@ -532,7 +533,7 @@ fn finetune(args: &[String]) -> Result<(), String> {
             args.get(i + 1).ok_or_else(|| format!("{} needs a value", args[i]))
         };
         match args[i].as_str() {
-            "--out" | "--save" => opts.save_path = need(i)?.clone(),
+            "--out" | "--save" => opts.save_path = strip_out_name_prefix(need(i)?, "adapter").to_string(),
             "--variant" => variant_name = need(i)?.clone(),
             "--steps" => opts.steps = need(i)?.parse().map_err(|e| format!("--steps: {e}"))?,
             "--rank" => opts.rank = need(i)?.parse().map_err(|e| format!("--rank: {e}"))?,
@@ -709,6 +710,20 @@ mod tests {
     // describe_ambiguity/describe_missing are now brain_modelstore::resolve's
     // own shared functions (imported above) - their behavior is tested there,
     // generically, not re-tested per architecture here.
+
+    /// `--out` on this dedicated command has always taken a bare path
+    /// (`--out out.png`), but `brain caps flux2` documents the generic
+    /// capability-manifest convention `--out image=<path>` (what `brain do`/
+    /// D-Bus actually use) - typing the documented form here silently wrote
+    /// a file literally named `image=out.png` with no error at all.
+    /// `crate::args::strip_out_name_prefix` (shared, tested there) is wired
+    /// in at both this crate's `--out` sites; this just pins that the wiring
+    /// itself did not regress.
+    #[test]
+    fn generate_out_accepts_the_documented_name_equals_path_form() {
+        assert_eq!(strip_out_name_prefix("image=out.png", "image"), "out.png");
+        assert_eq!(strip_out_name_prefix("adapter=my.brain", "adapter"), "my.brain");
+    }
 
     /// `Pipeline::build_dit` tells brain's own adapter container apart from a
     /// third-party ai-toolkit/ComfyUI one **by file extension**: a

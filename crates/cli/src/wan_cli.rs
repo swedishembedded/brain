@@ -188,7 +188,7 @@ fn t2v(args: &[String]) -> Result<(), String> {
             // `--out` is accepted because every other generative CLI in this
             // workspace spells it that way; `--output-path` is the spelling
             // the roadmap sets as the bar, so it leads in the help.
-            "--output-path" | "--out" => out = Some(need(i)?.clone()),
+            "--output-path" | "--out" => out = Some(crate::args::strip_out_name_prefix(need(i)?, "video").to_string()),
             "--negative-prompt" => o.negative_prompt = Some(need(i)?.clone()),
             "--frames" => o.frames = num(i, "--frames")?,
             "--width" => o.width = num(i, "--width")?,
@@ -307,7 +307,7 @@ fn finetune(args: &[String]) -> Result<(), String> {
         let need = |i: usize| -> Result<&String, String> { args.get(i + 1).ok_or_else(|| format!("{} needs a value", args[i])) };
         match args[i].as_str() {
             "--data" => data = Some(need(i)?.clone()),
-            "--save" => save = Some(need(i)?.clone()),
+            "--save" => save = Some(crate::args::strip_out_name_prefix(need(i)?, "adapter").to_string()),
             "--report" => report = Some(need(i)?.clone()),
             "--rank" => opts.rank = need(i)?.parse().map_err(|e| format!("--rank: {e}"))?,
             "--steps" => opts.steps = need(i)?.parse().map_err(|e| format!("--steps: {e}"))?,
@@ -386,5 +386,19 @@ mod tests {
         for (var, _) in wan::pipeline::PATH_VARS {
             assert!(super::HELP.contains(var), "{var} is read but not in --help");
         }
+    }
+
+    /// `t2v --output-path`/`--out` and `finetune --save` both took the
+    /// generic capability-manifest `name=path` form (documented by `brain
+    /// caps wan`, and what `brain do`/D-Bus actually send) literally,
+    /// writing a file named e.g. `adapter=my.brain` with no error. Both
+    /// sites are wired through `crate::args::strip_out_name_prefix` (shared,
+    /// tested there) against this crate's own declared output blob names -
+    /// `video` for `t2v`, `adapter` for `lora_train`/`finetune --save`; this
+    /// just pins that the wiring at each call site did not regress.
+    #[test]
+    fn out_and_save_accept_the_documented_name_equals_path_form() {
+        assert_eq!(crate::args::strip_out_name_prefix("video=clip.mp4", "video"), "clip.mp4");
+        assert_eq!(crate::args::strip_out_name_prefix("adapter=my.brain", "adapter"), "my.brain");
     }
 }

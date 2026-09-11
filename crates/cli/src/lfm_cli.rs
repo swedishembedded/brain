@@ -244,7 +244,7 @@ fn embed(argv: &[String]) {
     let tokenizer = a.take_str("--tokenizer");
     let text = a.take_str("--text");
     let input = a.take_str("--input");
-    let out = a.take_str("--out");
+    let out = a.take_str("--out").map(|s| crate::args::strip_out_name_prefix(&s, "embeddings").to_string());
     let seq = a.u32_or("--seq", 0);
     a.finish();
     let Some(tokenizer) = tokenizer else {
@@ -307,4 +307,19 @@ fn embed(argv: &[String]) {
         t_load.as_secs_f64(),
         t_fwd.as_secs_f64()
     );
+}
+
+#[cfg(test)]
+mod tests {
+    /// `embed --out` took the generic capability-manifest `name=path` form
+    /// (documented by `brain caps lfm2`, and what `brain do`/D-Bus actually
+    /// send) literally, writing a file named e.g. `embeddings=emb.f32` with
+    /// no error. That site is now wired through
+    /// `crate::args::strip_out_name_prefix` (shared, tested there) against
+    /// `embed`'s declared output blob name, `embeddings`; this just pins
+    /// that the wiring did not regress.
+    #[test]
+    fn embed_out_accepts_the_documented_name_equals_path_form() {
+        assert_eq!(crate::args::strip_out_name_prefix("embeddings=emb.f32", "embeddings"), "emb.f32");
+    }
 }

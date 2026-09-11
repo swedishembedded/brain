@@ -81,7 +81,7 @@ fn vec3(a: &mut Args, name: &str) -> Option<[f32; 3]> {
 fn render(argv: &[String]) {
     let mut a = Args::new(argv);
     let (path, s) = load(&mut a);
-    let out = a.str_or("--out", "out/splat.ppm");
+    let out = crate::args::strip_out_name_prefix(&a.str_or("--out", "out/splat.ppm"), "image").to_string();
     let width = a.u32_or("--width", 960);
     let height = a.u32_or("--height", 720);
     let fov = a.f32_or("--fov", 60.0);
@@ -391,7 +391,7 @@ fn fit_cmd(argv: &[String]) {
         eprintln!("--images <dir|a.ppm,b.ppm,…> is required");
         std::process::exit(2);
     });
-    let out = a.str_or("--out", "out/fitted.ply");
+    let out = crate::args::strip_out_name_prefix(&a.str_or("--out", "out/fitted.ply"), "scene").to_string();
     let iters = a.usize_or("--iters", 200);
     let lr = a.f32_or("--lr", 5e-3);
     a.finish();
@@ -490,4 +490,21 @@ pub fn write_ppm(path: &str, rgba: &[f32], w: usize, h: usize, normalize: bool) 
     let img = imaging::pixels::hwc_to_rgb8(&hwc, w as u32, h as u32, 3, imaging::ChannelPolicy::RequireRgb)
         .unwrap_or_else(|e| panic!("cannot write {path}: {e}"));
     imaging::save(path, &img).unwrap_or_else(|e| panic!("cannot write {path}: {e}"));
+}
+
+#[cfg(test)]
+mod tests {
+    /// `render --out` and `fit --out` both took the generic
+    /// capability-manifest `name=path` form (documented by `brain caps
+    /// splat`, and what `brain do`/D-Bus actually send) literally, writing a
+    /// file named e.g. `image=out.ppm` with no error. Both sites are wired
+    /// through `crate::args::strip_out_name_prefix` (shared, tested there)
+    /// against this crate's own declared output blob names for each
+    /// action - `image` for `render`, `scene` for `fit`; this just pins that
+    /// the wiring at each call site did not regress.
+    #[test]
+    fn render_and_fit_out_accept_the_documented_name_equals_path_form() {
+        assert_eq!(crate::args::strip_out_name_prefix("image=out.ppm", "image"), "out.ppm");
+        assert_eq!(crate::args::strip_out_name_prefix("scene=fitted.ply", "scene"), "fitted.ply");
+    }
 }

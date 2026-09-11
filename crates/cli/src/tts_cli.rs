@@ -245,7 +245,7 @@ fn parse_common(args: &[String]) -> (CommonArgs, std::collections::HashMap<Strin
         match args[i].as_str() {
             "--weights-dir" => weights_dir = Some(val(args, &mut i, "--weights-dir")),
             "--ckpt" => ckpt = Some(val(args, &mut i, "--ckpt")),
-            "--out" => out = val(args, &mut i, "--out"),
+            "--out" => out = crate::args::strip_out_name_prefix(&val(args, &mut i, "--out"), "audio").to_string(),
             "--lang" | "--language" => lang = val(args, &mut i, "--lang"),
             "--max-frames" => {
                 opts.max_frames = val(args, &mut i, "--max-frames").parse().unwrap_or(opts.max_frames)
@@ -494,4 +494,20 @@ fn write_wav(path: &str, wav: &[f32]) {
         wav.len(),
         wav.len() as f32 / 24000.0
     );
+}
+
+#[cfg(test)]
+mod tests {
+    /// `clone`/`synth`/`design` all parse `--out` through the shared
+    /// `parse_common`, which took the generic capability-manifest `name=path`
+    /// form (documented by `brain caps qwen3tts`, and what `brain do`/D-Bus
+    /// actually send) literally, writing a file named e.g. `audio=out.wav`
+    /// with no error. That site is now wired through
+    /// `crate::args::strip_out_name_prefix` (shared, tested there) against
+    /// this crate's own declared output blob name for all three actions -
+    /// `audio`; this just pins that the wiring did not regress.
+    #[test]
+    fn out_accepts_the_documented_name_equals_path_form() {
+        assert_eq!(crate::args::strip_out_name_prefix("audio=out.wav", "audio"), "out.wav");
+    }
 }

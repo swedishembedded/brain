@@ -237,7 +237,7 @@ fn infer(argv: &[String]) {
         eprintln!("--images <dir|a.ppm,b.ppm,…> is required");
         std::process::exit(2);
     });
-    let out_dir = a.str_or("--out", "out/mirror");
+    let out_dir = crate::args::strip_out_name_prefix(&a.str_or("--out", "out/mirror"), "scene").to_string();
     let ply = a.take_str("--ply");
     let maps = a.take_flag("--maps");
     let min_op = a.f32_or("--min-opacity", 0.01);
@@ -320,5 +320,22 @@ fn import(argv: &[String]) {
             eprintln!("import failed: {e}");
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// `infer --out` names the DIRECTORY `scene.ply`/`cameras.json`/depth
+    /// maps are written under, one per `reconstruct`'s declared output
+    /// blobs - but the generic capability-manifest `name=path` form
+    /// (documented by `brain caps worldmirror2`, and what `brain do`/D-Bus
+    /// actually send) was taken literally, creating a directory literally
+    /// named e.g. `scene=out/mirror` with no error. That site is now wired
+    /// through `crate::args::strip_out_name_prefix` (shared, tested there)
+    /// against `reconstruct`'s primary declared output blob name, `scene`;
+    /// this just pins that the wiring did not regress.
+    #[test]
+    fn infer_out_accepts_the_documented_name_equals_path_form() {
+        assert_eq!(crate::args::strip_out_name_prefix("scene=out/mirror", "scene"), "out/mirror");
     }
 }

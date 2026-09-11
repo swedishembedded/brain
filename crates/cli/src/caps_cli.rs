@@ -183,6 +183,10 @@ fn run_do_impl(argv: &[String], assembly: Option<&capability::Assembly>) -> i32 
             eprintln!("brain: --out must be name=path (got {spec_val:?})");
             return 2;
         };
+        if path.is_empty() {
+            eprintln!("brain: --out {spec_val:?} names no output path; write it as '--out {name}=<path>'");
+            return 2;
+        }
         out_paths.push((name.to_string(), path.to_string()));
     }
     let json_out = matches.get_flag("json");
@@ -477,5 +481,17 @@ mod tests {
 
         assert_eq!(blob.bytes, raw);
         assert!(blob.meta.get("sample_rate").is_none(), "no sample_rate invented for raw PCM: {}", blob.meta);
+    }
+
+    /// `--out result=` (the blob name with nothing after `=`) used to pass
+    /// `split_once('=')`'s check and run the whole action anyway, only to
+    /// fail deep inside [`save_blob`] on the empty path - or, for a blob
+    /// kind `save_blob` opens permissively, write a file literally named
+    /// after the flag. It is now refused up front, before the action runs
+    /// at all, the same way an unparseable `--out` already was.
+    #[test]
+    fn an_out_flag_with_no_path_is_refused_before_the_action_runs() {
+        let argv: Vec<String> = ["brain/demo", "echo", "--text", "hi", "--out", "result="].into_iter().map(str::to_string).collect();
+        assert_eq!(run_do(&argv), 2);
     }
 }

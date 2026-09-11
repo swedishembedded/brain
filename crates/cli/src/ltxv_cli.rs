@@ -575,7 +575,7 @@ fn t2v(args: &[String]) -> Result<(), String> {
                 prompt = Some(need(i)?.clone());
             }
             "--output-path" | "--out" => {
-                out = Some(need(i)?.clone());
+                out = Some(crate::args::strip_out_name_prefix(need(i)?, "video").to_string());
             }
             "--scene" => scene_specs.push(need(i)?.clone()),
             "--frames" => {
@@ -823,7 +823,7 @@ fn upscale(args: &[String]) -> Result<(), String> {
                 input = Some(need(i)?.clone());
             }
             "--output-path" | "--out" => {
-                out = Some(need(i)?.clone());
+                out = Some(crate::args::strip_out_name_prefix(need(i)?, "video").to_string());
             }
             "--factor" => o.factor = num(i, "--factor")?,
             "--refine-steps" => o.refine_steps = num(i, "--refine-steps")?,
@@ -952,7 +952,7 @@ fn v2v(args: &[String]) -> Result<(), String> {
             "--prompt" => prompt = Some(need(i)?.clone()),
             "--input" | "--in" => input = Some(need(i)?.clone()),
             "--mask" => o.mask_dir = need(i)?.clone(),
-            "--output-path" | "--out" => out = Some(need(i)?.clone()),
+            "--output-path" | "--out" => out = Some(crate::args::strip_out_name_prefix(need(i)?, "video").to_string()),
             "--strength" => o.strength = flt(i, "--strength")?,
             "--steps" => o.base.steps = num(i, "--steps")?,
             "--guidance" => o.base.guidance = flt(i, "--guidance")?,
@@ -1049,7 +1049,7 @@ fn dfr(args: &[String]) -> Result<(), String> {
                 prompt = Some(need(i)?.clone());
             }
             "--output-path" | "--out" => {
-                out = Some(need(i)?.clone());
+                out = Some(crate::args::strip_out_name_prefix(need(i)?, "video").to_string());
             }
             "--frames" => o.base.frames = num(i, "--frames")?,
             "--width" => o.base.width = num(i, "--width")?,
