@@ -750,7 +750,12 @@ fast and scalable kernel - not a naive one.
     RevIN, linear detrending, forecast stitching. Natively multivariate:
     target + past-only + known-future covariates all attend to each other in
     one forward pass. Imported exactly, parity-gated against the real
-    checkpoint. *(Weights are non-commercial-licensed; see its own page.)*
+    checkpoint. **Backward + gradcheck done** (`crates/timesfm3/src/train.rs`,
+    gated by `gradcheck::check_timesfm3{,_one_layer,_lora}` and the two
+    per-entry PerDimScale-fold checks, on both backends), with whole-matrix
+    LoRA and a gated fine-tune (`crates/timesfm3/src/finetune.rs`).
+    *(Weights are non-commercial-licensed, and so is anything fine-tuned from
+    them: `checkpoint::license` refuses to publish either. See its own page.)*
     All four sit behind the model-agnostic `forecast::ForecastModel` seam;
     `crates/fcbench` holds baselines + the rolling-origin backtester.
     `brain forecast {compare,serve,import,finetune}`.
@@ -1696,8 +1701,9 @@ a metric that isn't there was simply forgotten.
   imaging workstream's `check_sam2` (+ `_on`), `check_arcface`, `check_vqgan`
   (+ `_lowered`), `check_clip` (+ `_bigg`, `_tiled`),
   `check_t5` (+ `_one_block`, `_tiled`, `_rel_bias_elementwise`)
-  `check_codeformer` (+ `_one_layer`), and `check_rrdbnet`
-  (+ `_elementwise`). The authoritative list is
+  `check_codeformer` (+ `_one_layer`), `check_rrdbnet`
+  (+ `_elementwise`), and `check_timesfm3` (+ `_one_layer`, `_lora`,
+  `_per_dim_scale_elementwise`, `_query_ln_elementwise`). The authoritative list is
   `grep 'pub fn check_' crates/gradcheck/src/` - an entry point that is not
   wired into `crates/gradcheck/tests/` is not a gate. SSA-style forward (each stage
   writes a fresh buffer that doubles as the backprop activation cache) -
