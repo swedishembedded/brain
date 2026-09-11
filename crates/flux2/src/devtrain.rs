@@ -575,7 +575,7 @@ impl DeviceTrainer {
 
         // ---- loss (host: [n_gen, in_channels] is the only slab that crosses) ----
         let pred = self.engs[last].gpu().read(&self.pred, ng * cin);
-        let (loss, dpred) = crate::modelgrad::loss(&pred, &b.target);
+        let (loss, dpred) = crate::modelgrad::loss_weighted(&pred, &b.target, &b.w);
         self.engs[last].gpu().write_f32(&self.dpred, &dpred);
         tm.head += lap(&mut clock);
 

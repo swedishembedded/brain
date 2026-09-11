@@ -35,6 +35,45 @@ fn run_loss(c: &Cfg, w: &flux2::modelgrad::ModelWeights<f64>, b: &Batch<f64>) ->
     loss(&pred, &b.target).0
 }
 
+/// **An unweighted loss stays the unweighted loss, bit for bit.**
+///
+/// [`flux2::modelgrad::loss_weighted`] grew the region-aware weight a paired
+/// edit run can ask for, and `loss` is now written in terms of it. Every
+/// caller that does not ask for weights - the caption-only trainer, the device
+/// trainer, every gradcheck - must get exactly the numbers it got before: not
+/// "within a tolerance", identical, because a training trajectory that moved
+/// when an unrelated feature was added is a trajectory nobody can bisect
+/// afterwards. The empty weight is the contract that makes that true, and this
+/// is what says so.
+#[test]
+fn an_empty_weight_is_the_unweighted_loss_bit_for_bit() {
+    use flux2::modelgrad::loss_weighted;
+    let mut r = rng(0x10AD_ED01);
+    let pred: Vec<f64> = (0..512).map(|_| r()).collect();
+    let target: Vec<f64> = (0..512).map(|_| r()).collect();
+
+    let (la, da) = loss(&pred, &target);
+    let (lb, db) = loss_weighted(&pred, &target, &[]);
+    assert_eq!(la, lb, "loss is loss_weighted with no weights");
+    assert_eq!(da, db, "and so is its dpred");
+
+    // A weight of exactly one everywhere is the same objective mathematically
+    // but takes the multiplying branch, so it is allowed to differ in the last
+    // bits. What must hold is that it agrees to within float noise - which is
+    // what proves that branch computes the same thing, not a different thing
+    // that happens to land nearby.
+    let ones = vec![1.0f64; pred.len()];
+    let (lc, dc) = loss_weighted(&pred, &target, &ones);
+    assert!((la - lc).abs() < 1e-12 * la.abs().max(1.0), "unit weights must be the unweighted loss ({la} vs {lc})");
+    assert!(da.iter().zip(&dc).all(|(x, y)| (x - y).abs() < 1e-15));
+
+    // And a real weight must actually change the objective, or none of the
+    // above is testing anything.
+    let mut w = ones.clone();
+    w[7] = 4.0;
+    assert_ne!(loss_weighted(&pred, &target, &w).0, la);
+}
+
 #[test]
 fn full_model_gradcheck() {
     let c = Cfg::tiny();

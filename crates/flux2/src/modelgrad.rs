@@ -304,14 +304,45 @@ pub fn forward<T: Fp>(cfg: &Cfg, w: &ModelWeights<T>, img_tokens: &[T], ctx: &[T
 
 /// Velocity-MSE rectified-flow loss + its `dpred`: `L = mean((pred − v)²)`.
 pub fn loss<T: Fp>(pred: &[T], v_target: &[T]) -> (f64, Vec<T>) {
+    loss_weighted(pred, v_target, &[])
+}
+
+/// [`loss`] with a per-element weight: `L = Σᵢ wᵢ·(predᵢ − vᵢ)² / n`, and
+/// `dpredᵢ = 2·wᵢ·(predᵢ − vᵢ)/n`. An EMPTY `w` is the unweighted loss, bit for
+/// bit - the multiply is not merely by one, it is not performed.
+///
+/// **What the weight is for.** In a paired edit - declutter a room, relight a
+/// product, remove an object - the target latent is nearly the reference
+/// latent, so the great majority of tokens carry a velocity the model can hit
+/// by copying the reference across. A uniform mean over those tokens is
+/// dominated by that easy sub-problem: the gradient from the handful of tokens
+/// the edit actually changes is a small fraction of the total, and a loss that
+/// has flattened may simply be the loss of a competent copier. This is the
+/// defect a region-aware reweighting addresses (arXiv:2604.23763 §3.5, which
+/// states it as "the gradient is dominated by the easy 'predict zero velocity'
+/// sub-problem and the editor under-fits the small set of tokens that actually
+/// change", and measures L1 0.2132 → 0.1483 from the reweight alone).
+///
+/// The weights are the CALLER's to build and to normalise -
+/// [`crate::finetune::change_weights`] is the one that derives them from a
+/// pair. Keeping their mean at 1 is what leaves the reported loss on the same
+/// scale as an unweighted run's, which is the only reason the two are
+/// comparable at all.
+pub fn loss_weighted<T: Fp>(pred: &[T], v_target: &[T], w: &[T]) -> (f64, Vec<T>) {
+    debug_assert!(w.is_empty() || w.len() == pred.len(), "a loss weight covers every predicted element or none");
     let n = T::fr(pred.len() as f64);
     let two = T::fr(2.0);
     let mut l = 0.0;
     let mut dpred = vec![T::ZERO; pred.len()];
     for i in 0..pred.len() {
         let e = pred[i] - v_target[i];
-        l += (e * e / n).f64();
-        dpred[i] = two * e / n;
+        if w.is_empty() {
+            l += (e * e / n).f64();
+            dpred[i] = two * e / n;
+        } else {
+            l += (w[i] * e * e / n).f64();
+            dpred[i] = two * w[i] * e / n;
+        }
     }
     (l, dpred)
 }
@@ -493,6 +524,11 @@ pub struct Batch<T> {
     pub cos: Vec<T>,
     pub sin: Vec<T>,
     pub target: Vec<T>, // velocity v = ε − x₀, over the generated rows only
+    /// Per-element loss weight over the generated rows ([`loss_weighted`]), or
+    /// EMPTY for the plain unweighted mean. Built by
+    /// [`crate::finetune::change_weights`] for a paired run that asked for it;
+    /// empty everywhere else, including every caption-only batch.
+    pub w: Vec<T>,
 }
 
 /// Build one caption-only rectified-flow batch - [`make_flow_batch_paired`]
@@ -538,14 +574,14 @@ pub fn make_flow_batch_paired<T: Fp>(cfg: &Cfg, x0: &[T], refs: &[T], ctx: &[T],
 
     let tables = layout.rope(cfg.axes_dim, cfg.rope_theta);
     let cast = |v: &[f32]| -> Vec<T> { v.iter().map(|&x| T::fr(x as f64)).collect() };
-    Batch { img, ctx: ctx.to_vec(), t: sigma, cos: cast(&tables.cos), sin: cast(&tables.sin), target }
+    Batch { img, ctx: ctx.to_vec(), t: sigma, cos: cast(&tables.cos), sin: cast(&tables.sin), target, w: Vec::new() }
 }
 
 /// One training evaluation: forward + loss + backward. The f32 instantiation
 /// is the finetune trainer's step core.
 pub fn grads<T: Fp>(cfg: &Cfg, w: &ModelWeights<T>, b: &Batch<T>) -> (f64, ModelGrads<T>) {
     let (pred, cache) = forward(cfg, w, &b.img, &b.ctx, b.t, &b.cos, &b.sin);
-    let (l, dpred) = loss(&pred, &b.target);
+    let (l, dpred) = loss_weighted(&pred, &b.target, &b.w);
     (l, backward(cfg, w, &cache, &dpred))
 }
 
@@ -563,7 +599,7 @@ pub fn grads_into<T: Fp>(
     sink: &mut dyn GradSink<T>,
 ) -> (f64, ModelGrads<T>) {
     let (pred, cache) = forward(cfg, w, &b.img, &b.ctx, b.t, &b.cos, &b.sin);
-    let (l, dpred) = loss(&pred, &b.target);
+    let (l, dpred) = loss_weighted(&pred, &b.target, &b.w);
     (l, backward_into(cfg, w, &cache, &dpred, sink))
 }
 
