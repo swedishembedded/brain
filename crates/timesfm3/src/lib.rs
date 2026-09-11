@@ -23,6 +23,7 @@
 //! architecture. The checkpoint is never committed to this repository.
 
 pub mod config;
+pub mod finetune;
 pub mod forecaster;
 pub mod import;
 pub mod model;

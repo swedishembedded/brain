@@ -207,6 +207,10 @@ fn linear_detrend_fit(vals: &[f32], mask: &[bool], context: usize, threshold: f3
 /// both the context and (for a past-and-future covariate) the future part
 /// using the SAME fitted line evaluated at `t = 1..=horizon` normalized by
 /// context length (not `context+horizon`) - the reference's own convention.
+///
+/// `Copy`: three scalars, and `crate::finetune` splices per-window fits into
+/// one batch-wide `BuiltInput`.
+#[derive(Clone, Copy, Debug)]
 pub struct Trend {
     pub m: f32,
     pub c: f32,
