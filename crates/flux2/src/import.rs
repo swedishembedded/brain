@@ -279,27 +279,33 @@ pub fn dit_config_from_shapes(shapes: &[(String, Vec<usize>)]) -> Result<DitSize
     ))
 }
 
-/// Determine a DiT checkpoint's [`DitSize`] straight from its own weight
-/// file's header - no tensor bytes decoded, so this is cheap even against a
-/// multi-GB checkpoint. Reads the same three shapes [`read_dit_tensors`]
-/// loads for real:
+/// A DiT checkpoint's own tensor names (canonicalized onto BFL naming) and
+/// shapes, whatever format `path` actually is - no tensor bytes decoded, so
+/// this is cheap even against a multi-GB checkpoint. The one place that reads
+/// a dit path's header content; [`sniff_dit_size`] and `spec::Flux2Spec`
+/// (classification, `--dit` override assembly, and cross-role validation)
+/// all read a dit through this instead of each re-deriving their own subset
+/// of it, so a GGUF-vs-safetensors-vs-sharded-directory case handled here is
+/// handled everywhere at once:
 ///
 /// - a `.gguf` is already BFL-named on disk (the GGUF conversions carry the
 ///   reference names - see `read_dit_tensors`'s doc), so its header names and
-///   shapes go straight into [`dit_config_from_shapes`];
-/// - a single-file safetensors is a released BFL-named file, read the same
-///   way;
+///   shapes are returned as-is;
+/// - a single-file safetensors is canonicalized through [`diffusers_to_bfl`]
+///   the same way a directory is (a no-op for an already BFL-named release,
+///   real work for a diffusers-renamed one);
 /// - a diffusers `transformer/` directory is renamed onto BFL names through
 ///   [`diffusers_to_bfl`] the same way [`import_diffusers`] does, best-effort:
 ///   the split q/k/v projections it does not recognize (handled at import
 ///   time via `qkv_slot` instead, which needs bytes from three tensors at
-///   once) are simply left unmapped, which costs nothing here because none of
-///   the five numbers [`dit_config_from_shapes`] reads ever comes from one.
-pub fn sniff_dit_size(path: &str) -> Result<DitSize, String> {
+///   once) are simply left unmapped, which costs nothing to whichever of
+///   `dit_config_from_shapes`/a direct field lookup a caller runs over the
+///   result, since none of them ever comes from one of those.
+pub(crate) fn dit_shapes(path: &str) -> Result<Vec<(String, Vec<usize>)>, String> {
     let p = std::path::Path::new(path);
     if p.extension().is_some_and(|x| x == "gguf") {
         let g = checkpoint::gguf::MmapGguf::open(path)?;
-        return dit_config_from_shapes(&g.all_shapes());
+        return Ok(g.all_shapes());
     }
     let files: Vec<std::path::PathBuf> = if p.is_dir() {
         let mut files: Vec<_> = std::fs::read_dir(p)
@@ -325,7 +331,13 @@ pub fn sniff_dit_size(path: &str) -> Result<DitSize, String> {
             shapes.push((canon, shape));
         }
     }
-    dit_config_from_shapes(&shapes)
+    Ok(shapes)
+}
+
+/// Determine a DiT checkpoint's [`DitSize`] straight from its own weight
+/// file's header - see [`dit_shapes`] for the format handling this builds on.
+pub fn sniff_dit_size(path: &str) -> Result<DitSize, String> {
+    dit_config_from_shapes(&dit_shapes(path)?)
 }
 
 /// Import the diffusers `transformer/` folder layout: rename, re-fuse the

@@ -78,6 +78,14 @@ fn classify_hfdir(idx: usize, rec: &ArtifactRecord, out: &mut Vec<(usize, String
 /// tensor names FLUX.2's own VAE always carries (`crates/vae/src/decoder.rs`),
 /// present together in no other role's checkpoint, so this reads real header
 /// content exactly like `classify_gguf`/`classify_hfdir` do - never the name.
+///
+/// Also recognizes a bare vendor-flat DiT checkpoint (BFL's own
+/// `flux2-dev.safetensors` release: the full, undistilled "dev"/base model,
+/// shipped as one plain safetensors file, no GGUF at all) via
+/// `crate::import::dit_shapes` - the same canonicalizing shape reader
+/// [`dit_config_from_path`]/`validate()`'s `dit_context_in_dim` use, so a
+/// diffusers-renamed release classifies exactly as consistently as a
+/// BFL-named one, not through a second, narrower hand-rolled reader.
 fn classify_safetensors(idx: usize, rec: &ArtifactRecord, out: &mut Vec<(usize, String, Confidence)>) {
     let Ok(m) = checkpoint::mmap::MmapSafetensors::open(rec.path.to_string_lossy().as_ref()) else { return };
     // `decoder`/`encoder`.conv_in.weight are generic autoencoder tensor
@@ -89,15 +97,40 @@ fn classify_safetensors(idx: usize, rec: &ArtifactRecord, out: &mut Vec<(usize, 
     let is_2d_conv = |name: &str| m.shape(name).is_some_and(|s| s.len() == 4);
     if is_2d_conv("decoder.conv_in.weight") && is_2d_conv("encoder.conv_in.weight") {
         out.push((idx, "vae".to_string(), Confidence::Declared));
+        return;
+    }
+    let Ok(shapes) = crate::import::dit_shapes(&rec.path.to_string_lossy()) else { return };
+    // Shared with FLUX.1 (`classify_gguf`'s `"flux"` arm's own doc explains
+    // why: `dit_config_from_shapes` alone cannot tell the two apart, only
+    // `img_in.weight`'s channel count can), so this can never rise above
+    // Derived - the same rule, over canonicalized shapes instead of a GGUF's.
+    let in_channels = shapes.iter().find(|(n, _)| n == "img_in.weight").and_then(|(_, s)| s.get(1)).copied();
+    if in_channels != Some(flux2_in_channels()) {
+        return;
+    }
+    if dit_config_from_shapes(&shapes).is_ok() {
+        out.push((idx, "dit".to_string(), Confidence::Derived));
     }
 }
 
 /// `txt_in.weight`'s second dimension - a pure header shape lookup, zero
-/// tensor bytes read.
+/// tensor bytes read, over whichever format the dit path actually is (see
+/// `crate::import::dit_shapes`'s own doc: GGUF, a bare vendor-flat
+/// safetensors file, or a diffusers-renamed sharded directory).
 fn dit_context_in_dim(path: &Path) -> Result<usize, String> {
-    let g = MmapGguf::open(&path.to_string_lossy()).map_err(|e| format!("flux2 validate: opening dit {}: {e}", path.display()))?;
-    let shape = g.shape("txt_in.weight").ok_or_else(|| format!("flux2 validate: {} has no txt_in.weight", path.display()))?;
+    let shapes = crate::import::dit_shapes(&path.to_string_lossy()).map_err(|e| format!("flux2 validate: opening dit {}: {e}", path.display()))?;
+    let shape = shapes.iter().find(|(n, _)| n == "txt_in.weight").map(|(_, s)| s.as_slice()).ok_or_else(|| format!("flux2 validate: {} has no txt_in.weight", path.display()))?;
     shape.get(1).copied().ok_or_else(|| format!("flux2 validate: {} txt_in.weight has fewer than 2 dimensions", path.display()))
+}
+
+/// [`crate::import::sniff_dit_size`] over `dit_path` - the one place
+/// [`ArchSpec::assemble`] decides a chosen dit's shape class, so a GGUF, a
+/// bare safetensors file, and a diffusers-renamed sharded `transformer/`
+/// directory (BFL's own release shape for the undistilled "dev"/base model)
+/// are all handled the same way an explicit `--dit <path>` override forces
+/// one of, rather than a second, narrower reader that only knew the first two.
+fn dit_config_from_path(dit_path: &Path) -> Result<crate::import::DitSize, String> {
+    crate::import::sniff_dit_size(&dit_path.to_string_lossy())
 }
 
 /// A text encoder's hidden size, from whichever header it actually has: a
@@ -154,8 +187,7 @@ impl ArchSpec for Flux2Spec {
     fn assemble(&self, chosen: &BTreeMap<String, usize>, records: &[ArtifactRecord], overrides: &BTreeMap<String, String>) -> Result<AssembleOutcome, String> {
         let dit_idx = *chosen.get("dit").ok_or("flux2 assemble: no dit chosen")?;
         let dit_rec = &records[dit_idx];
-        let g = MmapGguf::open(&dit_rec.path.to_string_lossy()).map_err(|e| format!("flux2 assemble: opening dit {}: {e}", dit_rec.path.display()))?;
-        let size = dit_config_from_shapes(&g.all_shapes())?;
+        let size = dit_config_from_path(&dit_rec.path)?;
         let shape_class = size.as_str().to_string();
 
         if let Some(variant) = overrides.get("variant") {
@@ -259,6 +291,64 @@ mod tests {
     fn write_tokenizer_json(path: &std::path::Path) {
         let vocab: serde_json::Map<String, serde_json::Value> = (0..TOY_VOCAB).map(|i| (format!("t{i}"), serde_json::json!(i))).collect();
         std::fs::write(path, serde_json::to_vec(&serde_json::json!({"version": "1.0", "model": {"vocab": vocab}, "added_tokens": []})).unwrap()).unwrap();
+    }
+
+    /// A bare single-file BFL-named DiT safetensors release (`black-forest-
+    /// labs/FLUX.2-dev/flux2-dev.safetensors`'s own shape: no GGUF wrapper,
+    /// no diffusers `transformer_blocks.` renaming - the same
+    /// `img_in.weight`/`txt_in.weight`/`double_blocks.N.*`/`single_blocks.N.*`
+    /// names `write_dit_gguf` writes into a GGUF container). Only the tensors
+    /// [`crate::import::dit_config_from_shapes`] actually reads, mirroring
+    /// `write_dit_gguf`'s own minimal payload.
+    fn write_dit_safetensors(path: &std::path::Path, cfg: &Flux2Config) {
+        checkpoint::st::save_safetensors(
+            path.to_str().unwrap(),
+            &[
+                ("img_in.weight".to_string(), vec![cfg.hidden as u64, cfg.in_channels as u64], vec![0.0f32; cfg.hidden * cfg.in_channels]),
+                ("txt_in.weight".to_string(), vec![cfg.hidden as u64, cfg.context_in_dim as u64], vec![0.0f32; cfg.hidden * cfg.context_in_dim]),
+                ("double_blocks.0.img_attn.norm.query_norm.scale".to_string(), vec![cfg.head_dim() as u64], vec![0.0f32; cfg.head_dim()]),
+                (format!("double_blocks.{}.marker", cfg.depth_double - 1), vec![1], vec![0.0f32]),
+                (format!("single_blocks.{}.marker", cfg.depth_single - 1), vec![1], vec![0.0f32]),
+            ],
+            &serde_json::json!({}),
+            None,
+        )
+        .unwrap();
+    }
+
+    /// The same tensors [`write_dit_safetensors`] writes, split across two
+    /// files under `dir` - a sharded diffusers `transformer/` directory's
+    /// real on-disk shape (BFL's own undistilled "dev"/base release, when
+    /// downloaded from the diffusers repo rather than as one flat file).
+    /// `assemble()`'s `dit_config_from_path` used to unconditionally
+    /// `MmapGguf::open` the chosen dit - which cannot open a directory at
+    /// all - so a `--dit <this directory>` override crashed with "opening
+    /// dit ...: Is a directory" instead of resolving; it now delegates to
+    /// `crate::import::sniff_dit_size`, which already walks every
+    /// `.safetensors` file under a directory.
+    fn write_dit_safetensors_sharded(dir: &std::path::Path, cfg: &Flux2Config) {
+        std::fs::create_dir_all(dir).unwrap();
+        checkpoint::st::save_safetensors(
+            dir.join("shard-1.safetensors").to_str().unwrap(),
+            &[
+                ("img_in.weight".to_string(), vec![cfg.hidden as u64, cfg.in_channels as u64], vec![0.0f32; cfg.hidden * cfg.in_channels]),
+                ("txt_in.weight".to_string(), vec![cfg.hidden as u64, cfg.context_in_dim as u64], vec![0.0f32; cfg.hidden * cfg.context_in_dim]),
+            ],
+            &serde_json::json!({}),
+            None,
+        )
+        .unwrap();
+        checkpoint::st::save_safetensors(
+            dir.join("shard-2.safetensors").to_str().unwrap(),
+            &[
+                ("double_blocks.0.img_attn.norm.query_norm.scale".to_string(), vec![cfg.head_dim() as u64], vec![0.0f32; cfg.head_dim()]),
+                (format!("double_blocks.{}.marker", cfg.depth_double - 1), vec![1], vec![0.0f32]),
+                (format!("single_blocks.{}.marker", cfg.depth_single - 1), vec![1], vec![0.0f32]),
+            ],
+            &serde_json::json!({}),
+            None,
+        )
+        .unwrap();
     }
 
     /// A bare vendor-flat VAE safetensors file (`unsloth`'s own release
@@ -456,6 +546,169 @@ mod tests {
         let records = vec![complete(flux_vae_path, ArtifactKind::Safetensors), complete(video_vae_path, ArtifactKind::Safetensors)];
         let out = Flux2Spec.classify(&records, dir.as_path());
         assert_eq!(out, vec![(0, "vae".to_string(), Confidence::Declared)], "{out:?}");
+    }
+
+    /// A bare single-file BFL-named DiT safetensors release (BFL's own real
+    /// `FLUX.2-dev/flux2-dev.safetensors` - the undistilled "base" size class,
+    /// never shipped as GGUF) must classify as a "dit" candidate exactly like
+    /// its GGUF sibling does - `classify()`'s `ArtifactKind::Safetensors` arm
+    /// used to only ever recognize a VAE, so a real safetensors DiT was never
+    /// even offered as a candidate, regardless of an explicit `--dit`
+    /// override (which reads `chosen`/`records`, populated from `classify`'s
+    /// own output).
+    #[test]
+    fn classify_recognizes_a_bare_dit_safetensors_file() {
+        let dir = tmp("flat-dit-safetensors");
+        std::fs::create_dir_all(&dir).unwrap();
+        let dit_path = dir.join("flux2-dev.safetensors");
+        write_dit_safetensors(&dit_path, &Flux2Config::klein_9b());
+
+        let records = vec![complete(dit_path, ArtifactKind::Safetensors)];
+        let out = Flux2Spec.classify(&records, dir.as_path());
+        assert_eq!(out, vec![(0, "dit".to_string(), Confidence::Derived)], "{out:?}");
+    }
+
+    /// A decoy safetensors file shaped like the VAE, not the DiT (no
+    /// `img_in.weight`), must never be offered as a "dit" candidate -
+    /// classification reads real tensor names, not "any safetensors file
+    /// that isn't a VAE is a DiT".
+    #[test]
+    fn classify_does_not_misclassify_a_vae_safetensors_file_as_a_dit() {
+        let dir = tmp("flat-vae-not-dit");
+        std::fs::create_dir_all(&dir).unwrap();
+        let vae_path = dir.join("flux2-vae.safetensors");
+        write_vae_safetensors_flat(&vae_path);
+
+        let records = vec![complete(vae_path, ArtifactKind::Safetensors)];
+        let out = Flux2Spec.classify(&records, dir.as_path());
+        assert_eq!(out, vec![(0, "vae".to_string(), Confidence::Declared)], "{out:?}");
+    }
+
+    /// `assemble()` used to unconditionally open the chosen "dit" as GGUF
+    /// (`MmapGguf::open`, no extension check), so even an explicit `--dit
+    /// /path/to/some.safetensors` override crashed with `gguf: bad magic`
+    /// the moment assembly ran - found live trying to load BFL's real
+    /// `FLUX.2-dev/flux2-dev.safetensors`. Must resolve the same shape class
+    /// and variant options a GGUF dit at the same dimensions would.
+    #[test]
+    fn assemble_resolves_a_safetensors_dit_the_same_shape_class_as_its_gguf_sibling() {
+        let dir = tmp("assemble-safetensors-dit");
+        std::fs::create_dir_all(&dir).unwrap();
+        let dit_path = dir.join("flux2-dev.safetensors");
+        write_dit_safetensors(&dit_path, &Flux2Config::klein_9b());
+        let records = vec![complete(dit_path, ArtifactKind::Safetensors)];
+        let chosen = BTreeMap::from([("dit".to_string(), 0usize)]);
+
+        let mut overrides = BTreeMap::new();
+        overrides.insert("variant".to_string(), "base-9b".to_string());
+        let outcome = Flux2Spec.assemble(&chosen, &records, &overrides).unwrap();
+        match outcome {
+            AssembleOutcome::Assembled(v) => assert_eq!(v.variant.as_deref(), Some("base-9b")),
+            other => panic!("expected Assembled, got {other:?}"),
+        }
+
+        // Same file, no variant override: the shape class alone is ambiguous
+        // between klein and base, exactly as the GGUF path already tests -
+        // a safetensors dit must not silently default to klein either.
+        let outcome = Flux2Spec.assemble(&chosen, &records, &BTreeMap::new()).unwrap();
+        match outcome {
+            AssembleOutcome::UnresolvedVariant { shape_class, options } => {
+                assert_eq!(shape_class, "9b");
+                assert!(options.contains(&"klein-9b".to_string()) && options.contains(&"base-9b".to_string()), "{options:?}");
+            }
+            other => panic!("expected UnresolvedVariant, got {other:?}"),
+        }
+    }
+
+    /// THE regression this module's `dit_shapes` refactor exists for:
+    /// `assemble()` used to unconditionally `MmapGguf::open` the chosen dit,
+    /// which cannot open a directory - a sharded diffusers `transformer/`
+    /// release, force-selected via `--dit <dir>`, crashed with an "opening
+    /// dit ...: Is a directory" error instead of resolving. It must now
+    /// succeed identically to the single-file case.
+    #[test]
+    fn assemble_resolves_a_sharded_safetensors_dit_directory() {
+        let dir = tmp("assemble-sharded-safetensors-dit");
+        let dit_dir = dir.join("transformer");
+        write_dit_safetensors_sharded(&dit_dir, &Flux2Config::klein_9b());
+        let records = vec![complete(dit_dir, ArtifactKind::Safetensors)];
+        let chosen = BTreeMap::from([("dit".to_string(), 0usize)]);
+
+        let mut overrides = BTreeMap::new();
+        overrides.insert("variant".to_string(), "base-9b".to_string());
+        let outcome = Flux2Spec.assemble(&chosen, &records, &overrides).unwrap();
+        match outcome {
+            AssembleOutcome::Assembled(v) => assert_eq!(v.variant.as_deref(), Some("base-9b")),
+            other => panic!("expected Assembled, got {other:?}"),
+        }
+    }
+
+    /// [`classify_safetensors`]'s dit arm must recognize a bare safetensors
+    /// dit through `crate::import::dit_shapes`'s canonicalization, not only
+    /// a file already BFL-named - a diffusers-renamed single-file release
+    /// (the split q/k/v naming `diffusers_to_bfl` maps onto `img_in.weight`/
+    /// `txt_in.weight`/etc.) must classify exactly as a BFL-named one does.
+    #[test]
+    fn classify_recognizes_a_diffusers_renamed_dit_safetensors_file() {
+        let dir = tmp("classify-diffusers-renamed-dit");
+        std::fs::create_dir_all(&dir).unwrap();
+        let dit_path = dir.join("diffusion_pytorch_model.safetensors");
+        let cfg = Flux2Config::klein_9b();
+        // `diffusers_to_bfl`'s own mapping (verified against
+        // `crates/flux2/src/import.rs`): `x_embedder.weight` ->
+        // `img_in.weight`, `context_embedder.weight` -> `txt_in.weight`,
+        // `transformer_blocks.{i}.attn.norm_q.weight` ->
+        // `double_blocks.{i}.img_attn.norm.query_norm.scale`,
+        // `single_transformer_blocks.{i}.attn.norm_q.weight` ->
+        // `single_blocks.{i}.norm.query_norm.scale`. This is a full enough
+        // fixture (head-dim marker at block 0 plus a marker at the deepest
+        // double/single block) to satisfy `dit_config_from_shapes`'s depth
+        // and head-count detection under the diffusers names alone - a
+        // fixture too thin to do that (as an earlier version of this test
+        // was) can't tell "canonicalization worked but this fixture is
+        // incomplete" apart from "canonicalization never ran": both read as
+        // an empty `classify()` result.
+        checkpoint::st::save_safetensors(
+            dit_path.to_str().unwrap(),
+            &[
+                ("x_embedder.weight".to_string(), vec![cfg.hidden as u64, cfg.in_channels as u64], vec![0.0f32; cfg.hidden * cfg.in_channels]),
+                ("context_embedder.weight".to_string(), vec![cfg.hidden as u64, cfg.context_in_dim as u64], vec![0.0f32; cfg.hidden * cfg.context_in_dim]),
+                ("transformer_blocks.0.attn.norm_q.weight".to_string(), vec![cfg.head_dim() as u64], vec![0.0f32; cfg.head_dim()]),
+                (format!("transformer_blocks.{}.attn.norm_q.weight", cfg.depth_double - 1), vec![cfg.head_dim() as u64], vec![0.0f32; cfg.head_dim()]),
+                (format!("single_transformer_blocks.{}.attn.norm_q.weight", cfg.depth_single - 1), vec![cfg.head_dim() as u64], vec![0.0f32; cfg.head_dim()]),
+            ],
+            &serde_json::json!({}),
+            None,
+        )
+        .unwrap();
+        let records = vec![complete(dit_path, ArtifactKind::Safetensors)];
+        let out = Flux2Spec.classify(&records, dir.as_path());
+        assert_eq!(out, vec![(0, "dit".to_string(), Confidence::Derived)], "{out:?}");
+    }
+
+    /// [`dit_context_in_dim`] (what `validate()` calls) must read a
+    /// safetensors dit's `txt_in.weight` shape too, not only a GGUF's -
+    /// mirrors `a_9b_dit_with_a_4b_text_encoder_is_rejected_by_validate_
+    /// before_any_gpu_work` below, but for the safetensors path.
+    #[test]
+    fn a_9b_safetensors_dit_with_a_4b_text_encoder_is_rejected_by_validate() {
+        let dir = tmp("mismatched-validate-safetensors");
+        std::fs::create_dir_all(&dir).unwrap();
+        let dit_path = dir.join("flux2-dev.safetensors");
+        write_dit_safetensors(&dit_path, &Flux2Config::klein_9b());
+        let te_path = dir.join("Qwen3-4B");
+        write_qwen3_hfdir(&te_path, 2560);
+
+        let assembly = Assembly {
+            id: "local/flux2-base-9b".to_string(),
+            arch: "flux2".to_string(),
+            variant: Some("base-9b".to_string()),
+            roles: BTreeMap::from([("dit".to_string(), dit_path.clone()), ("text_encoder".to_string(), te_path.clone())]),
+            provenance: Vec::new(),
+        };
+        let err = Flux2Spec.validate(&assembly).unwrap_err();
+        assert!(err.contains("12288"), "{err}");
+        assert!(err.contains("2560"), "{err}");
     }
 
     #[test]
