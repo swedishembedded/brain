@@ -492,7 +492,16 @@ impl Timesfm3Train {
         let head_out = self.cfg.head_out_dim();
         assert_eq!(d_logits.len(), self.b * self.v * self.n * head_out);
         self.gpu.write_f32(&self.d_logits, d_logits);
-        self.gpu.submit(&[], &self.bwd_steps);
+        // Clear the fold temps HERE, per backward - not in `zero_grads`.
+        // `rmsnorm_dw` accumulates, and these buffers are not `ParamStore`
+        // tensors, so nothing else clears them. They also must not accumulate
+        // across the several backwards of one gradient-accumulation step the
+        // way a real grad buffer does: the host split below is linear in this
+        // temp and ADDS its result into the parameter gradient, so letting the
+        // temp carry over would fold each microbatch's running total in again
+        // instead of its own contribution.
+        let temps: Vec<&DeviceBuffer> = self.qgain_fold_temps.iter().map(|(_, _, t)| t).collect();
+        self.gpu.submit(&temps, &self.bwd_steps);
         self.gpu.poll_wait();
 
         for (gain_name, scale_name, d_temp) in &self.qgain_fold_temps {
@@ -615,6 +624,46 @@ fn refresh_query_gain(g: &Gpu, ps: &ParamStore, gain_name: &str, scale_name: &st
 /// construction bug, not a cache miss.
 fn query_gain_of<'a>(q_gains: &'a [(String, String, DeviceBuffer)], gain_name: &str) -> &'a DeviceBuffer {
     &q_gains.iter().find(|(n, _, _)| n == gain_name).unwrap_or_else(|| panic!("no folded query gain for {gain_name}")).2
+}
+
+// ==================================== fixtures ====================================
+//
+// Shared by this module's own forward-parity test and by
+// `gradcheck::timesfm3`'s harness, for the reason `t5encoder::train` exposes
+// the same pair: a gradient check whose fixture is written out a second time
+// in the checker is a check of a DIFFERENT model than the one the crate's own
+// tests lock down, and the two drift silently.
+
+/// A dependency-free LCG returning `[-1, 1)`. Enough determinism for a test
+/// fixture, and no new crate dependency for one helper.
+fn lcg_next(state: &mut u64) -> f32 {
+    *state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+    (((*state >> 33) as u32 % 20000) as f32 / 10000.0) - 1.0
+}
+
+/// Small deterministic weights for every tensor in `cfg.param_list()`, under
+/// the checkpoint's own names, UNFOLDED (see the module doc). `0.15` keeps
+/// the stack in its locally-linear region, which is what a central-difference
+/// check needs; `per_dim_scale` lands near zero, where `softplus` is ~0.69
+/// and its sigmoid derivative ~0.5, so neither half of the query-gain fold is
+/// numerically degenerate.
+pub fn init_weights(cfg: &Timesfm3Config, seed: u64) -> HashMap<String, Vec<f32>> {
+    let mut state = seed ^ 0x7143_f43d_0000_0001u64;
+    cfg.param_list()
+        .into_iter()
+        .map(|(name, shape)| {
+            let n: usize = shape.iter().product();
+            let data: Vec<f32> = (0..n).map(|_| lcg_next(&mut state) * 0.15).collect();
+            (name, data)
+        })
+        .collect()
+}
+
+/// A fixed `[b*v*n, resblock_in_dim]` resblock input - `core_forward`'s own
+/// first argument, i.e. what `preprocess.rs` hands the trainable graph.
+pub fn fixed_input(cfg: &Timesfm3Config, b: usize, v: usize, n: usize, seed: u64) -> Vec<f32> {
+    let mut state = seed ^ 0x1234_5678_9abc_def0u64;
+    (0..b * v * n * cfg.resblock_in_dim()).map(|_| lcg_next(&mut state) * 0.5).collect()
 }
 
 // ==================================== backward ====================================
@@ -1020,6 +1069,67 @@ mod tests {
     /// Asserted BITWISE against a trainer freshly constructed from the same
     /// updated weights, which is the only definition of "up to date" that does
     /// not restate the fold's formula a second time.
+    /// `zero_grads()` then `backward()` is the unit of a training step, and
+    /// running it twice over unchanged weights has to produce the same
+    /// gradients twice.
+    ///
+    /// The reverse pass writes one device temp per query-attention sublayer -
+    /// the `rmsnorm_dw` output for the EFFECTIVE query gain, which is not a
+    /// `ParamStore` tensor (it is split host-side into `query_ln.weight` and
+    /// `per_dim_scale` afterwards) and which `rmsnorm_dw` ACCUMULATES into.
+    /// `ParamStore::zero_grads` cannot reach a buffer it does not own, so a
+    /// temp left dirty makes every step after the first see a fold gradient
+    /// that is the running SUM over all steps so far.
+    ///
+    /// Both halves of the fold, on both attention kinds, at every layer, plus
+    /// two ordinary tensors as controls: the controls accumulate into
+    /// `ParamStore` buffers that `zero_grads` does clear, so if THEY regressed
+    /// the mechanism at fault would be a different one.
+    #[test]
+    fn repeated_backward_passes_are_not_cumulative() {
+        if skip() {
+            return;
+        }
+        let cfg = Timesfm3Config::tiny();
+        let weights = init_weights(&cfg, 7);
+        let (b, v, n) = (1usize, 2usize, 3usize);
+        let rows = b * v * n;
+        let resblock_input = fixed_input(&cfg, b, v, n, 7);
+        let mask = vec![false; rows];
+
+        let tr = Timesfm3Train::new_on(gpu_core::testgpu::dev(TRAIN_PIPELINES), cfg.clone(), &resblock_input, &mask, b, v, n, &weights);
+        let mut state = 0xfeed_face_dead_beefu64;
+        let c: Vec<f32> = (0..rows * cfg.head_out_dim()).map(|_| lcg_next(&mut state) * 0.1).collect();
+
+        let step = || {
+            tr.forward();
+            tr.poll_wait();
+            tr.zero_grads();
+            tr.backward(&c);
+            let mut g: Vec<(String, Vec<f32>)> = Vec::new();
+            for l in 0..cfg.num_layers {
+                for kind in ["seq_attn", "var_attn"] {
+                    for leaf in ["query_ln.weight", "per_dim_scale.per_dim_scale"] {
+                        let name = format!("transformer_stack.layers.{l}.{kind}.{leaf}");
+                        let v = tr.read_grad(&name);
+                        g.push((name, v));
+                    }
+                }
+            }
+            for name in ["transformer_stack.layers.0.seq_attn.key_ln.weight", "output_head.weight"] {
+                g.push((name.to_string(), tr.read_grad(name)));
+            }
+            g
+        };
+
+        let first = step();
+        let second = step();
+        for ((name, a), (_, b)) in first.iter().zip(&second) {
+            assert!(a.iter().any(|x| x.abs() > 1e-9), "{name}: gradient is identically zero, the comparison below would be vacuous");
+            assert_eq!(a, b, "{name}: a second zero_grads+backward must reproduce the first, not accumulate onto it");
+        }
+    }
+
     #[test]
     fn forward_tracks_weights_written_after_construction() {
         if skip() {
@@ -1060,13 +1170,6 @@ mod tests {
         let want = fresh.read_logits();
 
         assert_eq!(got, want, "a forward after write_weight must use the written weights, including the PerDimScale fold");
-    }
-
-    /// A tiny, dependency-free LCG - just enough determinism for a gradcheck
-    /// fixture, no new crate dependency for one test.
-    fn lcg_next(state: &mut u64) -> f32 {
-        *state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
-        (((*state >> 33) as u32 % 20000) as f32 / 10000.0) - 1.0 // [-1, 1)
     }
 
     /// Whole-model FD gradcheck: `L = dot(c, logits)` for a FIXED random `c`,
