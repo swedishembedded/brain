@@ -227,10 +227,48 @@ mod tests {
     use brain_modelstore::resolve::{resolve, Question, Resolution};
     use std::path::PathBuf;
 
-    fn tmp(tag: &str) -> PathBuf {
+    /// A fixture directory that deletes itself when the test ends.
+    ///
+    /// These fixtures are real GGUF/safetensors files at REAL klein
+    /// dimensions - `txt_in.weight` alone is `[4096, 12288]` fp32, ~200 MB -
+    /// and the directory name carries the process id, so nothing ever reused
+    /// or overwrote them. Every run of this module left its fixtures in the
+    /// system temp directory forever; on a machine that runs the suite often,
+    /// that is tens of gigabytes and eventually a build that fails with "no
+    /// space left on device". Dropping on the way out (panic included) is the
+    /// only version of this that stays correct while the tests keep their
+    /// per-run isolation.
+    struct TmpDir(PathBuf);
+
+    impl TmpDir {
+        fn as_path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TmpDir {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).ok();
+        }
+    }
+
+    impl std::ops::Deref for TmpDir {
+        type Target = std::path::Path;
+        fn deref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl AsRef<std::path::Path> for TmpDir {
+        fn as_ref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    fn tmp(tag: &str) -> TmpDir {
         static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        std::env::temp_dir().join(format!("brain-flux2-spec-test-{tag}-{}-{n}", std::process::id()))
+        TmpDir(std::env::temp_dir().join(format!("brain-flux2-spec-test-{tag}-{}-{n}", std::process::id())))
     }
 
     fn tiny_tensor(name: &str, shape: Vec<usize>) -> checkpoint::gguf_write::TensorOut {
