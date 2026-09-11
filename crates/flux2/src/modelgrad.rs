@@ -29,8 +29,8 @@ use crate::grad::{
 };
 
 /// Minimal config for the training reference - the [`Flux2Config`] fields the
-/// host path needs plus the training latent grid (`lh×lw` tokens, no
-/// reference images).
+/// host path needs plus the training latent grid (`lh×lw` tokens) and the
+/// reference images, if any, conditioning it.
 #[derive(Clone, Debug)]
 pub struct Cfg {
     pub in_channels: usize,
@@ -45,11 +45,27 @@ pub struct Cfg {
     pub lw: usize,
     pub axes_dim: [usize; 4],
     pub rope_theta: f64,
+    /// Each conditioning reference image's latent grid `(h, w)` in tokens, in
+    /// sequence order - the same list generation hands
+    /// [`crate::refcond::JointLayout`]. Empty is caption-only training, which
+    /// is what every `Cfg` was before paired training existed.
+    ///
+    /// The reference tokens ride in the image half of the joint sequence and
+    /// are attended over, but the head never predicts a velocity for them
+    /// ([`Cfg::n_gen`] against [`Cfg::n_img`]), so the loss stays the target
+    /// image's own flow-matching objective.
+    pub refs: Vec<(usize, usize)>,
 }
 
 impl Cfg {
-    /// Derive from a [`Flux2Config`] at latent grid `lh×lw`.
+    /// Derive from a [`Flux2Config`] at latent grid `lh×lw`, caption-only.
     pub fn from_flux2(c: &Flux2Config, lh: usize, lw: usize) -> Cfg {
+        Cfg::from_flux2_with_refs(c, lh, lw, Vec::new())
+    }
+
+    /// [`Cfg::from_flux2`] conditioned on reference images at latent grids
+    /// `refs` - the paired (reference → target) training layout.
+    pub fn from_flux2_with_refs(c: &Flux2Config, lh: usize, lw: usize, refs: Vec<(usize, usize)>) -> Cfg {
         Cfg {
             in_channels: c.in_channels,
             context_in_dim: c.context_in_dim,
@@ -63,7 +79,14 @@ impl Cfg {
             lw,
             axes_dim: c.axes_dim,
             rope_theta: c.rope_theta,
+            refs,
         }
+    }
+
+    /// The joint token layout this config evaluates - the SAME type
+    /// [`crate::pipeline`] builds its position ids and joint token slab from.
+    pub fn layout(&self) -> crate::refcond::JointLayout {
+        crate::refcond::JointLayout::with_refs(self.txt_len, self.lh, self.lw, self.refs.clone())
     }
 
     /// Tiny klein-topology config for gradchecks and unit tests (head_dim 8 =
@@ -83,11 +106,29 @@ impl Cfg {
             lw: 2,
             axes_dim: [2, 2, 2, 2],
             rope_theta: 2000.0,
+            refs: Vec::new(),
         }
     }
 
-    pub fn n_img(&self) -> usize {
+    /// [`Cfg::tiny`] conditioned on one 2×2 reference image - the paired
+    /// training topology, for gradchecks and unit tests.
+    pub fn tiny_paired() -> Cfg {
+        Cfg { refs: vec![(2, 2)], ..Cfg::tiny() }
+    }
+
+    /// Latent tokens of the image being TRAINED: the ones `x₀`, the noise, the
+    /// velocity target and the head's prediction are all sized in.
+    pub fn n_gen(&self) -> usize {
         self.lh * self.lw
+    }
+    /// Conditioning tokens the reference images contribute.
+    pub fn n_ref(&self) -> usize {
+        self.refs.iter().map(|&(h, w)| h * w).sum()
+    }
+    /// Rows in the image half of the joint sequence: generated **plus**
+    /// reference. Equal to [`Cfg::n_gen`] for caption-only training.
+    pub fn n_img(&self) -> usize {
+        self.n_gen() + self.n_ref()
     }
     pub fn n(&self) -> usize {
         self.txt_len + self.n_img()
@@ -187,13 +228,18 @@ pub struct ModelCache<T> {
     n_f: Vec<T>, // modulated final-LN output (the head's input)
 }
 
-/// Full forward. `img_tokens:[n_img·in_channels]` (packed latent tokens),
-/// `ctx:[txt_len·context_in_dim]`, `cos/sin:[n·head_dim/2]` (joint tables,
-/// text rows first). Returns the velocity prediction for ALL image tokens
-/// `[n_img·in_channels]` plus the cache.
+/// Full forward. `img_tokens:[n_img·in_channels]` (the target's packed latent
+/// tokens followed by every reference's - [`crate::refcond::JointLayout`]'s
+/// order), `ctx:[txt_len·context_in_dim]`, `cos/sin:[n·head_dim/2]` (joint
+/// tables, text rows first). Returns the velocity prediction for the
+/// GENERATED image tokens only `[n_gen·in_channels]` plus the cache: the
+/// reference rows condition the sequence through attention, and the head does
+/// not predict for them - exactly what `Flux2Model::forward_batch`'s `n_pred`
+/// does at inference.
 pub fn forward<T: Fp>(cfg: &Cfg, w: &ModelWeights<T>, img_tokens: &[T], ctx: &[T], t: f64, cos: &[T], sin: &[T]) -> (Vec<T>, ModelCache<T>) {
     let (d, cin) = (cfg.hidden, cfg.in_channels);
     let (nt, ni, n) = (cfg.txt_len, cfg.n_img(), cfg.n());
+    let ng = cfg.n_gen();
     assert_eq!(img_tokens.len(), ni * cin, "img tokens size");
     assert_eq!(ctx.len(), nt * cfg.context_in_dim, "ctx size");
     assert_eq!(cos.len(), n * cfg.head_dim() / 2, "rope table size");
@@ -236,15 +282,17 @@ pub fn forward<T: Fp>(cfg: &Cfg, w: &ModelWeights<T>, img_tokens: &[T], ctx: &[T
         sgl_c.push(c);
     }
 
-    // final layer on the image rows: modulated LN → linear to in_channels
-    let (xhat_f, inv_f) = layernorm(&x[nt * d..], ni, d);
-    let mut n_f = vec![T::ZERO; ni * d];
-    for r in 0..ni {
+    // final layer on the GENERATED image rows: modulated LN → linear to
+    // in_channels. The reference rows sit past them in the same slab and are
+    // deliberately not read - nothing predicts a velocity for a photograph.
+    let (xhat_f, inv_f) = layernorm(&x[nt * d..(nt + ng) * d], ng, d);
+    let mut n_f = vec![T::ZERO; ng * d];
+    for r in 0..ng {
         for c in 0..d {
             n_f[r * d + c] = (T::ONE + fin.scale[c]) * xhat_f[r * d + c] + fin.shift[c];
         }
     }
-    let pred = linear(&n_f, ni, d, &w.final_w, cin);
+    let pred = linear(&n_f, ng, d, &w.final_w, cin);
 
     let cache = ModelCache {
         te, hpre, h, vec_, sv, dmods, smod, fin,
@@ -331,13 +379,14 @@ pub fn backward_into<T: Fp>(
 ) -> ModelGrads<T> {
     let (d, cin) = (cfg.hidden, cfg.in_channels);
     let (nt, ni, n) = (cfg.txt_len, cfg.n_img(), cfg.n());
+    let ng = cfg.n_gen();
     let dims = cfg.dims();
 
-    // ---- final layer ----
-    let (dn_f, g_final_w) = linear_bwd(&cache.n_f, ni, d, &w.final_w, cin, dpred);
+    // ---- final layer (generated image rows only) ----
+    let (dn_f, g_final_w) = linear_bwd(&cache.n_f, ng, d, &w.final_w, cin, dpred);
     let mut fin_g = ModGrad::<T>::zeros(d); // gate slot unused for the final site
-    let mut dxhat_f = vec![T::ZERO; ni * d];
-    for r in 0..ni {
+    let mut dxhat_f = vec![T::ZERO; ng * d];
+    for r in 0..ng {
         for c in 0..d {
             let g = dn_f[r * d + c];
             fin_g.scale[c] += g * cache.xhat_f[r * d + c];
@@ -345,9 +394,12 @@ pub fn backward_into<T: Fp>(
             dxhat_f[r * d + c] = (T::ONE + cache.fin.scale[c]) * g;
         }
     }
-    let dx_img = layernorm_bwd(&cache.xhat_f, &cache.inv_f, ni, d, &dxhat_f);
+    let dx_img = layernorm_bwd(&cache.xhat_f, &cache.inv_f, ng, d, &dxhat_f);
+    // Text rows AND reference rows enter the block stack's backward at zero:
+    // the head reads neither. They pick up gradient from attention on the way
+    // down, which is how a reference conditions the trained weights at all.
     let mut dx = vec![T::ZERO; n * d];
-    dx[nt * d..].copy_from_slice(&dx_img);
+    dx[nt * d..(nt + ng) * d].copy_from_slice(&dx_img);
 
     // ---- single blocks (reverse), site grads accumulated across the stack ----
     let mut sgl_site = ModGrad::<T>::zeros(d);
@@ -432,36 +484,59 @@ pub fn backward_into<T: Fp>(
 /// One training example, ready for [`forward`].
 #[derive(Clone)]
 pub struct Batch<T> {
-    pub img: Vec<T>, // x_σ tokens [n_img·in_channels]
+    /// The image half of the joint sequence `[n_img·in_channels]`: the noised
+    /// target `x_σ` for the generated rows, then every reference's clean
+    /// tokens.
+    pub img: Vec<T>,
     pub ctx: Vec<T>,
     pub t: f64, // model time input (= σ; klein integrates σ 1→0)
     pub cos: Vec<T>,
     pub sin: Vec<T>,
-    pub target: Vec<T>, // velocity v = ε − x₀
+    pub target: Vec<T>, // velocity v = ε − x₀, over the generated rows only
 }
 
-/// Build one rectified-flow batch from a clean latent-token set `x0`
-/// (`[n_img·in_channels]`), caption features `ctx`, noise level `σ ∈ (0,1]`
-/// and standard-normal `noise` (same length as `x0`):
-/// `x_σ = (1−σ)·x₀ + σ·ε`, target `v = ε − x₀`, model time `t = σ` - exactly
-/// the convention [`crate::pipeline`]'s Euler integrator inverts
-/// (`x += dt·v` with σ stepping 1→0). RoPE tables come from
-/// [`crate::position_ids`] (no reference images) through `dit::rope`.
+/// Build one caption-only rectified-flow batch - [`make_flow_batch_paired`]
+/// with no reference images, which is what every `Cfg` without `refs`
+/// produces.
 pub fn make_flow_batch<T: Fp>(cfg: &Cfg, x0: &[T], ctx: &[T], sigma: f64, noise: &[T]) -> Batch<T> {
-    assert_eq!(x0.len(), cfg.n_img() * cfg.in_channels, "latent size");
+    make_flow_batch_paired(cfg, x0, &[], ctx, sigma, noise)
+}
+
+/// Build one rectified-flow batch from a clean TARGET latent-token set `x0`
+/// (`[n_gen·in_channels]`), the conditioning `refs` tokens
+/// (`[n_ref·in_channels]`, every reference concatenated in `cfg.refs` order),
+/// caption features `ctx`, noise level `σ ∈ (0,1]` and standard-normal `noise`
+/// (same length as `x0`): `x_σ = (1−σ)·x₀ + σ·ε`, target `v = ε − x₀`, model
+/// time `t = σ` - exactly the convention [`crate::pipeline`]'s Euler integrator
+/// inverts (`x += dt·v` with σ stepping 1→0).
+///
+/// **Only the target is noised.** A reference is a photograph the model is
+/// shown, not something it is asked to denoise, so its tokens enter the
+/// sequence clean at every σ - which is exactly what the sampler hands the
+/// model at every step of a `--ref` generation.
+///
+/// The joint sequence, its position ids and its RoPE tables all come from
+/// [`crate::refcond::JointLayout`], the same construction
+/// [`crate::pipeline`]'s `--ref` path uses. That sharing is the point: an
+/// adapter trained here is trained on the token layout generation actually
+/// presents, and the two cannot drift without the shared type changing under
+/// both.
+pub fn make_flow_batch_paired<T: Fp>(cfg: &Cfg, x0: &[T], refs: &[T], ctx: &[T], sigma: f64, noise: &[T]) -> Batch<T> {
+    let cin = cfg.in_channels;
+    assert_eq!(x0.len(), cfg.n_gen() * cin, "target latent size");
+    assert_eq!(refs.len(), cfg.n_ref() * cin, "reference token size");
     assert_eq!(noise.len(), x0.len(), "noise size");
     assert_eq!(ctx.len(), cfg.txt_len * cfg.context_in_dim, "caption size");
     let s = T::fr(sigma);
-    let img: Vec<T> = x0.iter().zip(noise).map(|(&x, &e)| (T::ONE - s) * x + s * e).collect();
+    let x_sigma: Vec<T> = x0.iter().zip(noise).map(|(&x, &e)| (T::ONE - s) * x + s * e).collect();
     let target: Vec<T> = x0.iter().zip(noise).map(|(&x, &e)| e - x).collect();
 
-    let ids = crate::model::position_ids(cfg.txt_len, cfg.lh, cfg.lw, &[]);
-    let rc = dit::rope::RopeConfig {
-        axes_dims: cfg.axes_dim.iter().map(|&a| a as u32).collect(),
-        axes_lens: vec![4096, 4096, 4096, 4096],
-        theta: cfg.rope_theta,
-    };
-    let tables = dit::rope::tables_for_ids(&rc, &ids, 4);
+    let layout = cfg.layout();
+    let mut img = x_sigma;
+    img.extend_from_slice(refs);
+    debug_assert_eq!(img.len(), layout.n_img() * cin);
+
+    let tables = layout.rope(cfg.axes_dim, cfg.rope_theta);
     let cast = |v: &[f32]| -> Vec<T> { v.iter().map(|&x| T::fr(x as f64)).collect() };
     Batch { img, ctx: ctx.to_vec(), t: sigma, cos: cast(&tables.cos), sin: cast(&tables.sin), target }
 }

@@ -28,7 +28,13 @@ const RANK: usize = 8;
 /// A tiny klein-topology config whose sliced binding offsets all land on the
 /// 256-byte (64-float) storage alignment: `txt_len·hidden`, `txt_len·mlp` and
 /// `n_max·{rank, n_heads}` are all multiples of 64.
-fn cfg() -> Cfg {
+///
+/// `refs` is the reference-image conditioning this config trains under: empty
+/// is caption-only, `[(4, 4)]` is the paired (reference → target) layout. Both
+/// run through every gate in this file, because the device head reads a
+/// different number of rows than the image stream carries in the paired case
+/// and that split is exactly where a device/host divergence would hide.
+fn cfg_with(refs: Vec<(usize, usize)>) -> Cfg {
     Cfg {
         in_channels: 8,
         context_in_dim: 12,
@@ -42,6 +48,7 @@ fn cfg() -> Cfg {
         lw: 4,
         axes_dim: [4, 4, 4, 4],
         rope_theta: 2000.0,
+        refs,
     }
 }
 
@@ -83,15 +90,21 @@ fn skip() -> bool {
     false
 }
 
-/// A batch and a base model at `cfg()`'s dims.
+/// A batch and a base model at [`cfg_with`]'s dims, caption-only.
 fn fixture(seed: u64) -> (Cfg, ModelWeights<f32>, modelgrad::Batch<f32>) {
-    let c = cfg();
+    fixture_with(Vec::new(), seed)
+}
+
+/// [`fixture`] conditioned on `refs` reference images.
+fn fixture_with(refs: Vec<(usize, usize)>, seed: u64) -> (Cfg, ModelWeights<f32>, modelgrad::Batch<f32>) {
+    let c = cfg_with(refs);
     let w = modelgrad::init_model::<f32>(&c, seed);
     let mut r = rng(seed ^ 0xbeef);
-    let x0 = vof(c.n_img() * c.in_channels, &mut r, 1.0);
+    let x0 = vof(c.n_gen() * c.in_channels, &mut r, 1.0);
+    let rf = vof(c.n_ref() * c.in_channels, &mut r, 1.0);
     let ctx = vof(c.txt_len * c.context_in_dim, &mut r, 1.0);
     let noise = vof(x0.len(), &mut r, 1.0);
-    let b = modelgrad::make_flow_batch(&c, &x0, &ctx, 0.37, &noise);
+    let b = modelgrad::make_flow_batch_paired(&c, &x0, &rf, &ctx, 0.37, &noise);
     (c, w, b)
 }
 
@@ -108,12 +121,28 @@ fn adapter(c: &Cfg, seed: u64) -> LoraAdapter {
     ad
 }
 
+/// **The device trainer computes what the FD-gradchecked host reference
+/// computes** - caption-only AND reference-conditioned.
+///
+/// The paired case is not a formality: the device head reads `n_gen` rows out
+/// of an image stream that carries `n_gen + n_ref`, and gradient reaches the
+/// reference rows through attention alone. Getting that split wrong on one of
+/// the two backends - a slab sized for the wrong row count, a `dx` region left
+/// uncleared - produces exactly the kind of silently-wrong gradient this
+/// comparison exists to catch.
 #[test]
 fn device_lora_grads_match_host() {
     if skip() {
         return;
     }
-    let (c, base, batch) = fixture(0x5eed_0001);
+    for refs in [Vec::new(), vec![(4usize, 4usize)]] {
+        device_matches_host(refs, 0x5eed_0001);
+    }
+}
+
+fn device_matches_host(refs: Vec<(usize, usize)>, seed: u64) {
+    let paired = !refs.is_empty();
+    let (c, base, batch) = fixture_with(refs, seed);
     let ad = adapter(&c, 0x77);
     let scale = ad.scale();
 
@@ -166,9 +195,13 @@ fn device_lora_grads_match_host() {
         cmp(format!("qk{i}.nq"), dnq, hnq);
         cmp(format!("qk{i}.nk"), dnk, hnk);
     }
-    eprintln!("FLUX.2 device model grads: {} tensors, worst cosine {wc:.9} ({wcn}), worst rel_l2 {wr:.3e} ({wrn})", 2 * (dg.lora.len() + dg.qk.len()));
-    assert!(wc > 0.9999999, "worst cosine {wc:.9} on {wcn}");
-    assert!(wr < 1e-5, "worst rel_l2 {wr:.3e} on {wrn}");
+    eprintln!(
+        "FLUX.2 device model grads ({}): {} tensors, worst cosine {wc:.9} ({wcn}), worst rel_l2 {wr:.3e} ({wrn})",
+        if paired { "paired" } else { "caption-only" },
+        2 * (dg.lora.len() + dg.qk.len())
+    );
+    assert!(wc > 0.9999999, "worst cosine {wc:.9} on {wcn} (paired={paired})");
+    assert!(wr < 1e-5, "worst rel_l2 {wr:.3e} on {wrn} (paired={paired})");
 }
 
 #[test]

@@ -920,37 +920,49 @@ impl BlockDev {
         self.gpu.poll_wait();
     }
 
-    /// Final layer over the image rows: modulated LN under [`SITE_FINAL`], then
-    /// the frozen `[cin, d]` head. Writes `pred [ni, cin]`.
-    pub fn head_forward(&self, final_w: &DeviceBuffer, x: &DeviceBuffer, dm: Dims, cin: usize, pred: &DeviceBuffer) {
-        let (nt, ni, d) = (dm.nt, dm.ni, dm.d);
+    /// Final layer over the GENERATED image rows: modulated LN under
+    /// [`SITE_FINAL`], then the frozen `[cin, d]` head. Writes
+    /// `pred [n_pred, cin]`.
+    ///
+    /// `n_pred` is the generated token count, which is `dm.ni` only when
+    /// nothing conditions the sequence. Under paired (reference → target)
+    /// training the image half carries the reference tokens past row `n_pred`,
+    /// and the head must not read them: it predicts a velocity for the image
+    /// being trained, never for the photograph conditioning it - the same
+    /// `n_pred` split `Flux2Model::forward_batch` applies at inference.
+    #[allow(clippy::too_many_arguments)]
+    pub fn head_forward(&self, final_w: &DeviceBuffer, x: &DeviceBuffer, dm: Dims, cin: usize, n_pred: usize, pred: &DeviceBuffer) {
+        let (nt, d) = (dm.nt, dm.d);
+        assert!(n_pred <= dm.ni, "n_pred {n_pred} past the image rows {}", dm.ni);
         let s = vec![
-            self.ln(x, nt, self.g("xh1"), ni),
-            self.film(self.g("xh1"), SITE_FINAL, self.g("n1"), nt, ni),
-            model::dispatch::mm_rows_off(&self.gpu, self.tier(), self.g("n1"), final_w, pred, nt as u32, 0, ni as u32, d as u32, cin as u32),
+            self.ln(x, nt, self.g("xh1"), n_pred),
+            self.film(self.g("xh1"), SITE_FINAL, self.g("n1"), nt, n_pred),
+            model::dispatch::mm_rows_off(&self.gpu, self.tier(), self.g("n1"), final_w, pred, nt as u32, 0, n_pred as u32, d as u32, cin as u32),
         ];
         self.gpu.submit(&[], &s);
         self.gpu.poll_wait();
     }
 
-    /// Final-layer backward from `dpred [ni, cin]` into `dx [n, d]`. The text
-    /// rows of `dx` are zero (the head only sees image rows) - cleared on the
-    /// device rather than uploaded.
+    /// Final-layer backward from `dpred [n_pred, cin]` into `dx [n, d]`. The
+    /// text rows of `dx` - and, under paired training, the reference rows past
+    /// `n_pred` - are zero (the head sees neither), cleared on the device
+    /// rather than uploaded.
     #[allow(clippy::too_many_arguments)]
-    pub fn head_backward(&self, final_w: &DeviceBuffer, x: &DeviceBuffer, dm: Dims, cin: usize, dpred: &DeviceBuffer, dx: &DeviceBuffer) {
-        let (nt, ni, d) = (dm.nt, dm.ni, dm.d);
+    pub fn head_backward(&self, final_w: &DeviceBuffer, x: &DeviceBuffer, dm: Dims, cin: usize, n_pred: usize, dpred: &DeviceBuffer, dx: &DeviceBuffer) {
+        let (nt, d) = (dm.nt, dm.d);
+        assert!(n_pred <= dm.ni, "n_pred {n_pred} past the image rows {}", dm.ni);
         let mut s = Vec::new();
         s.push(self.gpu.step_sliced(
             K_DX,
             &[dpred, final_w, self.g("dn1")],
-            &[(0, (ni * cin) as u64), (0, 0), self.sl(nt * d, ni * d)],
-            &[ni as u32, d as u32, cin as u32, 0],
-            d128(ni) * d128(d) * 256,
+            &[(0, (n_pred * cin) as u64), (0, 0), self.sl(nt * d, n_pred * d)],
+            &[n_pred as u32, d as u32, cin as u32, 0],
+            d128(n_pred) * d128(d) * 256,
         ));
-        self.site_dsb(&mut s, self.g("xh1"), self.g("dn1"), SITE_FINAL, nt, ni);
-        let off = self.sl(nt * d, ni * d);
-        s.push(self.gpu.step_sliced(K_FILM_DX, &[self.g("dn1"), self.g(&format!("sb{SITE_FINAL}")), self.g("dxh")], &[off, (0, 0), off], &[ni as u32, d as u32, ni as u32], (ni * d) as u32));
-        s.push(self.ln_dx(x, off, self.g("dxh"), off, dx, ni));
+        self.site_dsb(&mut s, self.g("xh1"), self.g("dn1"), SITE_FINAL, nt, n_pred);
+        let off = self.sl(nt * d, n_pred * d);
+        s.push(self.gpu.step_sliced(K_FILM_DX, &[self.g("dn1"), self.g(&format!("sb{SITE_FINAL}")), self.g("dxh")], &[off, (0, 0), off], &[n_pred as u32, d as u32, n_pred as u32], (n_pred * d) as u32));
+        s.push(self.ln_dx(x, off, self.g("dxh"), off, dx, n_pred));
         self.gpu.submit(&[dx], &s);
         self.gpu.poll_wait();
     }

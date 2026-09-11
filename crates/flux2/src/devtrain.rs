@@ -125,13 +125,14 @@ pub fn step_flops(cfg: &Cfg, rank: usize) -> StepFlops {
     let t = cfg.n() as u64;
     let blocks = (cfg.depth_double + cfg.depth_single) as u64;
     let (nt, ni, cin, cdim) = (cfg.txt_len as u64, cfg.n_img() as u64, cfg.in_channels as u64, cfg.context_in_dim as u64);
+    let ng = cfg.n_gen() as u64;
 
     let lin = blocks * 2 * t * d * (4 * d + 3 * m);
     let attn_f = blocks * 4 * t * t * d;
     let lora = blocks * 2 * t * r * (11 * d + 3 * m);
     // txt_in + img_in (forward only - frozen, and their inputs are data), the
     // head forward, and the head's dx.
-    let wrapper = 2 * nt * cdim * d + 2 * ni * cin * d + 2 * ni * d * cin + 2 * ni * cin * d;
+    let wrapper = 2 * nt * cdim * d + 2 * ni * cin * d + 2 * ng * d * cin + 2 * ng * cin * d;
     // time_in (256->d then d->d) + the three modulation linears (6d, 6d, 3d)
     // + the final adaLN (2d), all at m = 1.
     let host_cond = 2 * d * 256 + 2 * d * d + 2 * d * (6 * d + 6 * d + 3 * d + 2 * d);
@@ -358,10 +359,12 @@ impl DeviceTrainer {
         let img_in = first.storage_init("flux2 img_in", &w.img_in);
         let txt_in = first.storage_init("flux2 txt_in", &w.txt_in);
         let final_w = last.storage_init("flux2 final", &w.final_w);
+        // The token slab carries the whole image half (target + references);
+        // the prediction and its gradient carry the GENERATED rows only.
         let tok = first.storage((cfg.n_img() * cin) as u64);
         let ctx = first.storage((cfg.txt_len * cfg.context_in_dim) as u64);
-        let pred = last.storage((cfg.n_img() * cin) as u64);
-        let dpred = last.storage((cfg.n_img() * cin) as u64);
+        let pred = last.storage((cfg.n_gen() * cin) as u64);
+        let dpred = last.storage((cfg.n_gen() * cin) as u64);
         DeviceTrainer {
             engs,
             blk_eng,
@@ -525,7 +528,7 @@ impl DeviceTrainer {
     pub fn grads(&self, ad: &LoraAdapter, b: &Batch<f32>) -> (f64, StepGrads) {
         let cfg = &self.cfg;
         let cin = cfg.in_channels;
-        let ni = cfg.n_img();
+        let ng = cfg.n_gen();
         let dm = self.dims();
         let depth = self.blk_eng.len();
         let nd = self.dbl.len();
@@ -568,16 +571,16 @@ impl DeviceTrainer {
             self.carry(ei, out, to, &self.xs[i + 1]);
         }
         tm.forward += lap(&mut clock);
-        self.engs[last].head_forward(&self.final_w, &self.xs[depth], dm, cin, &self.pred);
+        self.engs[last].head_forward(&self.final_w, &self.xs[depth], dm, cin, ng, &self.pred);
 
-        // ---- loss (host: [n_img, in_channels] is the only slab that crosses) ----
-        let pred = self.engs[last].gpu().read(&self.pred, ni * cin);
+        // ---- loss (host: [n_gen, in_channels] is the only slab that crosses) ----
+        let pred = self.engs[last].gpu().read(&self.pred, ng * cin);
         let (loss, dpred) = crate::modelgrad::loss(&pred, &b.target);
         self.engs[last].gpu().write_f32(&self.dpred, &dpred);
         tm.head += lap(&mut clock);
 
         // ---- backward ----
-        self.engs[last].head_backward(&self.final_w, &self.xs[depth], dm, cin, &self.dpred, &self.dcur[last]);
+        self.engs[last].head_backward(&self.final_w, &self.xs[depth], dm, cin, ng, &self.dpred, &self.dcur[last]);
         // Ping-pong the incoming/outgoing grad slabs within a card; stage one
         // slab across when the stack crosses to the previous card.
         let (mut cur, mut alt) = (&self.dcur[last], &self.dnext[last]);

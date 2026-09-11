@@ -36,6 +36,7 @@ pub mod mask;
 pub mod model;
 pub mod modelgrad;
 pub mod pipeline;
+pub mod refcond;
 pub mod spec;
 pub mod weights;
 
@@ -43,5 +44,6 @@ pub use config::Flux2Config;
 pub use import::{dit_config_from_shapes, import_bfl, import_diffusers, sniff_dit_size, DitSize, Tensors};
 pub use mask::Mask;
 pub use model::{position_ids, Flux2Model, Precision, Sample, KERNELS};
+pub use refcond::JointLayout;
 pub use pipeline::{AdapterSpec, BatchRequest, GenOpts, Paths, Pipeline};
 pub use weights::{DitWeights, PendingLora};

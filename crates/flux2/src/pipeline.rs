@@ -12,7 +12,7 @@
 //! concatenated).
 
 use crate::config::Flux2Config;
-use crate::model::{position_ids, Flux2Model};
+use crate::model::Flux2Model;
 use data::Tokenizer;
 
 /// Qwen3 hidden-state taps concatenated per token (also used by
@@ -598,6 +598,24 @@ impl TePlacement {
     pub fn here() -> TePlacement {
         TePlacement { gpu_index: None, int8: false }
     }
+
+    /// The whole encoder, here, at the tier a DiT of `precision` asks for
+    /// ([`te_tier_int8`]) - what a caller with no placement in hand should
+    /// build when it wants the conditioning `generate` would produce.
+    pub fn here_for(precision: crate::Precision) -> TePlacement {
+        TePlacement { gpu_index: None, int8: te_tier_int8(precision) }
+    }
+}
+
+/// Whether a run at DiT `precision` asks for the **int8** text encoder.
+///
+/// The ONE place the rule is written. [`plan_parts`] tries this tier first (it
+/// falls back to int8 only when the f32 encoder does not fit anywhere), and
+/// [`crate::finetune`] builds the same tier for the same DiT - so an adapter
+/// is fitted against the conditioning vectors a real `generate` call produces,
+/// not against an f32 encoder's that an int8 deployment never sees.
+pub fn te_tier_int8(precision: crate::Precision) -> bool {
+    precision == crate::Precision::Int8
 }
 
 /// `BRAIN_FLUX2_TE_DEVICE=gpu<i>[:i8]`, if set. Kept as an OVERRIDE of the
@@ -694,7 +712,7 @@ pub fn plan_parts(cfg: &Flux2Config, paths: &Paths, vae_cfg: &vae::VaeConfig, pr
     let mut why = String::new();
     // The DiT's tier first, then the smaller one as a fallback. For an int8
     // run those are the same value, so the loop tries int8 once.
-    let tiers = if precision == crate::Precision::Int8 { [true, true] } else { [false, true] };
+    let tiers = if te_tier_int8(precision) { [true, true] } else { [false, true] };
     for int8 in tiers {
         let te = gpu_core::devices::Need::sized("te", te_bytes(&te_cfg, layers, cfg.txt_len as u64, int8), 0).apart();
         let mut all = vec![dit.clone(), te];
@@ -856,6 +874,12 @@ pub fn build_text_encoder_on(cfg: &Flux2Config, paths: &Paths, te: TePlacement) 
         // weights arriving one tensor at a time. A whole shard requires the
         // whole `param_list()`, so the coverage check here is identical to
         // the one this path always ran.
+        //
+        // The tier is still honoured. `TePlacement::here()` is f32, which is
+        // what a plain generation on an f32 DiT builds; `here_for(Int8)` is
+        // the int8 encoder an int8 DiT is served beside, and `finetune` asks
+        // for it so an adapter is fitted against the conditioning its
+        // deployment actually produces.
         None => {
             let shard = qwen3::Shard::whole(te_cfg.n_layers as usize);
             let streamed;
@@ -866,7 +890,11 @@ pub fn build_text_encoder_on(cfg: &Flux2Config, paths: &Paths, te: TePlacement) 
                     &streamed
                 }
             };
-            qwen3::Qwen::new_shard(te_cfg, 1, cfg.txt_len as u32, src, false, shard)
+            if te.int8 {
+                qwen3::Qwen::new_shard_i8(te_cfg, 1, cfg.txt_len as u32, src, shard)
+            } else {
+                qwen3::Qwen::new_shard(te_cfg, 1, cfg.txt_len as u32, src, false, shard)
+            }
         }
     })
 }
@@ -1191,19 +1219,11 @@ impl Pipeline {
         } else {
             self.encode_image_whole(chw, h, w)?
         };
-        let eps = self.vae_cfg.batch_norm_eps;
-        let packed = vae::latent::pack(&mean, 32, lh8, lw8, &self.bn_mean, &self.bn_var, eps);
-        // [128, lh, lw] -> tokens [lh*lw, 128]
-        let (lh, lw) = (lh8 / 2, lw8 / 2);
-        let mut tokens = vec![0.0f32; lh * lw * 128];
-        for c in 0..128 {
-            for y in 0..lh {
-                for x in 0..lw {
-                    tokens[(y * lw + x) * 128 + c] = packed[(c * lh + y) * lw + x];
-                }
-            }
-        }
-        Ok(tokens)
+        // The pack + transpose is `refcond::pack_tokens`, which is also how
+        // `finetune` turns a training image into tokens: one implementation, so
+        // an adapter cannot be fitted against a differently-packed latent than
+        // the one generation feeds it.
+        Ok(crate::refcond::pack_tokens(&mean, lh8, lw8, &self.bn_mean, &self.bn_var, self.vae_cfg.batch_norm_eps, self.cfg.in_channels))
     }
 
     /// One whole-image encode graph, cached across references of the same
@@ -1430,9 +1450,15 @@ fn generate_batch_on<D: Denoiser>(
     out
 }
 
-/// Validate one request and return its joint position ids (the key that
-/// decides which requests can share a batched forward).
-fn plan_on<D: Denoiser>(d: &D, r: &BatchRequest) -> Result<Vec<u32>, String> {
+/// The joint token layout one request evaluates - text rows, the generated
+/// image's tokens, then each reference's.
+///
+/// This is the SHARED [`crate::refcond::JointLayout`]: the training path builds
+/// the same type from its own `Cfg` and gets the same position ids and RoPE
+/// tables for the same reference grid, which is what keeps an adapter trained
+/// on a reference and a generation conditioned on one talking about the same
+/// sequence.
+fn layout_of(txt_len: usize, r: &BatchRequest) -> Result<crate::refcond::JointLayout, String> {
     let o = &r.opts;
     if !o.width.is_multiple_of(16) || !o.height.is_multiple_of(16) {
         return Err(format!("width/height must be multiples of 16 (got {}×{})", o.width, o.height));
@@ -1447,7 +1473,13 @@ fn plan_on<D: Denoiser>(d: &D, r: &BatchRequest) -> Result<Vec<u32>, String> {
         .flatten()
         .map(|(rh, rw)| ((rh / 16) as usize, (rw / 16) as usize))
         .collect();
-    Ok(position_ids(d.cfg().txt_len, lh, lw, &ref_dims))
+    Ok(crate::refcond::JointLayout::with_refs(txt_len, lh, lw, ref_dims))
+}
+
+/// Validate one request and return its joint position ids (the key that
+/// decides which requests can share a batched forward).
+fn plan_on<D: Denoiser>(d: &D, r: &BatchRequest) -> Result<Vec<u32>, String> {
+    Ok(layout_of(d.cfg().txt_len, r)?.ids())
 }
 
 /// The source content a masked lane preserves, in latent space.
@@ -1481,6 +1513,8 @@ fn denoise_group_on<D: Denoiser>(
         lh: usize,
         lw: usize,
         n_gen: usize,
+        /// This lane's joint token layout - what its slab is assembled from.
+        layout: crate::refcond::JointLayout,
         steps: usize,
         guidance: f32,
         ctx: Vec<f32>,
@@ -1499,8 +1533,15 @@ fn denoise_group_on<D: Denoiser>(
     for &i in members {
         let r = &reqs[i];
         let o = &r.opts;
-        let (lh, lw) = ((o.height / 16) as usize, (o.width / 16) as usize);
-        let n_gen = lh * lw;
+        let layout = match layout_of(cfg.txt_len, r) {
+            Ok(l) => l,
+            Err(e) => {
+                out[i] = Err(e);
+                continue;
+            }
+        };
+        let (lh, lw) = (layout.lh, layout.lw);
+        let n_gen = layout.n_gen();
         let steps = r.steps_for(cfg.distilled);
         progress(0, max_steps_hint + 2, "encoding prompt");
         let ctx = d.encode_prompt(&r.prompt);
@@ -1620,6 +1661,7 @@ fn denoise_group_on<D: Denoiser>(
             lh,
             lw,
             n_gen,
+            layout,
             steps: if zero { 0 } else { steps },
             guidance: o.guidance,
             ctx,
@@ -1661,10 +1703,10 @@ fn denoise_group_on<D: Denoiser>(
         let mut slots: Vec<(usize, bool, f32)> = Vec::new(); // (active index, is_uncond, t)
         for (a, &k) in active.iter().enumerate() {
             let l = &lanes[k];
-            let mut joint = Vec::with_capacity(l.lat.len() + l.ref_tokens.len());
-            joint.extend_from_slice(&l.lat);
-            joint.extend_from_slice(&l.ref_tokens);
-            joints.push(joint);
+            // The generated latent then every reference's tokens, through the
+            // shared layout - the same assembly `modelgrad::make_flow_batch`
+            // performs for a paired training sample.
+            joints.push(l.layout.joint_tokens(&l.lat, &l.ref_tokens, cfg.in_channels));
             slots.push((a, false, l.sigmas[i]));
             if l.ctx_uncond.is_some() {
                 slots.push((a, true, l.sigmas[i]));
@@ -1914,10 +1956,10 @@ mod tests {
     /// exact pixels, within a few pixels of a mask boundary.
     struct Stub {
         cfg: Flux2Config,
-        /// Every `(joint image sequence, position-id count)` the sampler
-        /// handed to the DiT. What the model *attends to* is not observable
-        /// from the returned image, so the gates below read it here.
-        seen: std::cell::RefCell<Vec<(Vec<f32>, usize)>>,
+        /// Every `(joint image sequence, position ids)` the sampler handed to
+        /// the DiT. What the model *attends to* is not observable from the
+        /// returned image, so the gates below read it here.
+        seen: std::cell::RefCell<Vec<(Vec<f32>, Vec<u32>)>>,
         /// Every sigma the sampler evaluated the DiT at, in order. What
         /// schedule a run integrates is not observable from the returned
         /// image either - see the gate that reads this.
@@ -1986,7 +2028,7 @@ mod tests {
             samples
                 .iter()
                 .map(|s| {
-                    self.seen.borrow_mut().push((s.img_tokens.to_vec(), ids.len()));
+                    self.seen.borrow_mut().push((s.img_tokens.to_vec(), ids.to_vec()));
                     self.sigmas.borrow_mut().push(s.t);
                     // The conditioning tail shifts the target's phase. Without
                     // this the stub's output is blind to the reference tokens
@@ -2278,9 +2320,9 @@ mod tests {
                 let want = n_gen + ref_tokens(&refs[..k], opts) as usize;
                 let seen = d.seen.borrow();
                 assert!(!seen.is_empty(), "case {n}/{k}: no forward ran");
-                for (joint, n_ids) in seen.iter() {
+                for (joint, ids) in seen.iter() {
                     assert_eq!(joint.len(), want * d.cfg.in_channels, "case {n}/{k}: joint tokens");
-                    assert_eq!(*n_ids, 4 * (d.cfg.txt_len + want), "case {n}/{k}: position ids");
+                    assert_eq!(ids.len(), 4 * (d.cfg.txt_len + want), "case {n}/{k}: position ids");
                 }
             }
         }
@@ -2345,6 +2387,100 @@ mod tests {
             let want = d.encode_image(&small, ch_px, cw_px).expect("stub encode");
             assert_eq!(tail, &want[..], "scale {scale}: the conditioning tail must BE the reference");
         }
+    }
+
+    /// **The train/inference conditioning gate.** For one reference image at
+    /// `--strength 1.0` - the way a reference-conditioned adapter is actually
+    /// used - the sequence the TRAINER builds must be the sequence the
+    /// SAMPLER builds: the same joint length, the same position ids (t-axis
+    /// offset included), the same RoPE tables, and the reference tokens in the
+    /// same rows carrying the same values.
+    ///
+    /// This is the defect, stated as a test. `modelgrad::make_flow_batch` used
+    /// to hand `position_ids` an empty reference list and `Cfg` had no slot
+    /// for a reference at all, so an adapter trained for a `--ref` workflow
+    /// was optimised against a sequence with no photograph in it and a
+    /// generated-image RoPE axis that the deployed path does not use. Both
+    /// sides now build `refcond::JointLayout`, and this asserts that they get
+    /// the same answer out of it rather than trusting that they do.
+    #[test]
+    fn training_and_generation_build_the_same_reference_conditioned_sequence() {
+        let (w, h) = (128u32, 96u32);
+        let (lh, lw) = ((h / 16) as usize, (w / 16) as usize);
+        let d = Stub::new();
+        let cin = d.cfg.in_channels;
+        let src = source(h, w);
+        let opts = GenOpts {
+            width: w,
+            height: h,
+            // Full strength: the reference conditions the DiT and nothing
+            // else, which is exactly how the adapter is used.
+            strength: Some(1.0),
+            steps: Some(1),
+            experimental_steps: true,
+            seed: 5,
+            ..GenOpts::default()
+        };
+        let req = BatchRequest {
+            prompt: "a decluttered living room".into(),
+            refs: vec![src.clone()],
+            opts,
+            cancel: Default::default(),
+        };
+        generate_batch_on(&d, std::slice::from_ref(&req), &mut |_, _, _| {})
+            .pop()
+            .unwrap()
+            .expect("stub generation");
+        let seen = d.seen.borrow();
+        let (joint, ids) = seen.first().expect("one forward ran");
+
+        // The training side: the same target grid, conditioned on the same
+        // reference, encoded by the same encoder.
+        let cfg = crate::modelgrad::Cfg::from_flux2_with_refs(&d.cfg, lh, lw, vec![(lh, lw)]);
+        let ref_tokens = d.encode_image(&src.0, h, w).expect("stub encode");
+        let x0 = vec![0.25f32; cfg.n_gen() * cin];
+        let ctx = vec![0.0f32; cfg.txt_len * cfg.context_in_dim];
+        let noise = vec![-0.5f32; x0.len()];
+        let sigma = 0.8840;
+        let b = crate::modelgrad::make_flow_batch_paired(&cfg, &x0, &ref_tokens, &ctx, sigma, &noise);
+
+        // 1. Same sequence shape, and it is genuinely conditioned.
+        assert_eq!(cfg.n_ref(), (lh * lw), "the reference contributes its whole grid");
+        assert_eq!(b.img.len(), joint.len(), "joint image sequence length");
+        assert!(cfg.n_ref() > 0 && joint.len() > cfg.n_gen() * cin, "a reference must actually be attended to");
+
+        // 2. Same position ids - the t-axis offset that separates a reference
+        //    token from the generated token at the same (h, w) included.
+        assert_eq!(&cfg.layout().ids(), ids, "position ids");
+
+        // 3. Same RoPE phase. Implied by (2), asserted anyway because it is
+        //    the thing the model actually consumes, and built here from the
+        //    ids the SAMPLER produced rather than from the training layout.
+        let rc = dit::rope::RopeConfig {
+            axes_dims: cfg.axes_dim.iter().map(|&a| a as u32).collect(),
+            axes_lens: vec![4096, 4096, 4096, 4096],
+            theta: cfg.rope_theta,
+        };
+        let t = dit::rope::tables_for_ids(&rc, ids, 4);
+        assert_eq!(b.cos, t.cos, "rope cos");
+        assert_eq!(b.sin, t.sin, "rope sin");
+
+        // 4. The reference occupies the same rows, with the same values, and
+        //    is NOT noised: a reference is a photograph the model is shown,
+        //    not something it is asked to denoise, at training time exactly as
+        //    at sampling time.
+        assert_eq!(&b.img[cfg.n_gen() * cin..], &joint[cfg.n_gen() * cin..], "the conditioning tail");
+        assert_eq!(&b.img[cfg.n_gen() * cin..], &ref_tokens[..], "the reference enters clean");
+
+        // 5. ... and the head still predicts for the target alone.
+        assert_eq!(b.target.len(), cfg.n_gen() * cin, "the loss is the target's own velocity");
+
+        // 6. Negative control, so (2) is a claim and not a coincidence: the
+        //    caption-only layout the trainer used to build for this same
+        //    dataset is NOT this sequence. If it were, the defect would never
+        //    have existed and this gate would prove nothing.
+        let unpaired = crate::modelgrad::Cfg::from_flux2(&d.cfg, lh, lw);
+        assert_ne!(&unpaired.layout().ids(), ids, "caption-only ids must differ from a --ref run's");
     }
 
     /// **Gate 7 - `strength == 1.0` is byte-for-byte what it always was.**

@@ -1131,23 +1131,10 @@ pub struct Sample<'a> {
 /// Text tokens: `(0,0,0,l)`; generated image: `(0,h,w,0)` raster-major; each
 /// reference image i: `(10·(i+1), h, w, 0)`. `refs` are (height, width) in
 /// latent-token units.
+///
+/// The construction itself lives in [`crate::refcond::JointLayout::ids`], where
+/// the training path reaches it too: this convention held in two places is the
+/// bug that module exists to make unreachable.
 pub fn position_ids(txt_len: usize, lh: usize, lw: usize, refs: &[(usize, usize)]) -> Vec<u32> {
-    let mut ids = Vec::with_capacity((txt_len + lh * lw) * 4);
-    for l in 0..txt_len {
-        ids.extend([0, 0, 0, l as u32]);
-    }
-    for h in 0..lh {
-        for w in 0..lw {
-            ids.extend([0, h as u32, w as u32, 0]);
-        }
-    }
-    for (i, &(rh, rw)) in refs.iter().enumerate() {
-        let t = 10 * (i as u32 + 1);
-        for h in 0..rh {
-            for w in 0..rw {
-                ids.extend([t, h as u32, w as u32, 0]);
-            }
-        }
-    }
-    ids
+    crate::refcond::JointLayout::with_refs(txt_len, lh, lw, refs.to_vec()).ids()
 }

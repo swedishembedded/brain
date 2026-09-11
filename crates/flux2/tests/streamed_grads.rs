@@ -204,6 +204,7 @@ fn a_host_step_costs_two_copies_of_the_model_not_three() {
         lw: 8,
         axes_dim: [32, 32, 32, 32],
         rope_theta: 2000.0,
+        refs: Vec::new(),
     };
     let base: ModelWeights<f32> = init_model(&c, 0x9911);
     // `param_bytes` is what `finetune::run` reports the host budget from, so
