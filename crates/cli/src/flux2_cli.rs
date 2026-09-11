@@ -46,6 +46,25 @@ const HELP: &str = "brain flux2 <cmd>
                                     # than the generation itself. Pass 0 for no bound. The
                                     # --strength/--mask init reference is never bounded -- its
                                     # size is pinned by that role; use --ref-resolution-scale for it.
+           [--tile-size N]          # denoise the canvas in overlapping NxN-pixel windows
+                                    # (MultiDiffusion) instead of in one forward, so the DiT's
+                                    # activation memory follows the WINDOW and not the canvas -
+                                    # which is what makes a resolution past what fits in one
+                                    # pass reachable at all. Multiple of 16. OFF by default,
+                                    # and 0 also means off: a canvas that fits is cheaper in
+                                    # one forward (every window repeats the text/reference
+                                    # conditioning), so this is a knob a caller who is buying
+                                    # resolution with time turns on. Turning it on below the
+                                    # budget is free and changes nothing: the plan is then a
+                                    # single window and the run is bit-for-bit the untiled one.
+                                    # Every window sees the same prompt, references and folded
+                                    # adapters, and carries the position ids its tokens have on
+                                    # the WHOLE canvas, so they compose one scene. NOTE the VAE
+                                    # still decodes the assembled canvas in one pass.
+           [--tile-overlap N]       # how much adjacent windows share, in pixels (default: a
+                                    # quarter of --tile-size). The blend across it is feathered,
+                                    # so this is the width a seam is spread over. Multiple of
+                                    # 16, smaller than --tile-size.
            [--mask <mask.png>]      # WHITE = regenerate, BLACK = preserve the first
                                     # --ref exactly (which must be at the output size);
                                     # greys blend. Omit = regenerate everything.
@@ -182,6 +201,26 @@ fn output_size(w: Option<u32>, h: Option<u32>, anchor: Option<(u32, u32)>) -> (u
     (w.unwrap_or(dw), h.unwrap_or(dh))
 }
 
+/// The tile plan `--tile-size`/`--tile-overlap` ask for, or `None` for the
+/// untiled path.
+///
+/// Off unless asked for, and `--tile-size 0` is also off - the same shape
+/// `--ref-size` gives its bound, so a script that computes the number can say
+/// "off" in the field instead of having to drop the flag. An overlap with no
+/// tile size is an error rather than a silently ignored word on the command
+/// line, exactly as a `--lora-scale` with no adapter is.
+fn tiling_from(size: Option<u32>, overlap: Option<u32>) -> Result<Option<flux2::Tiling>, String> {
+    match (size.filter(|&n| n > 0), overlap) {
+        (None, Some(_)) => Err("--tile-overlap needs --tile-size (tiling is off without it)".into()),
+        (None, None) => Ok(None),
+        (Some(n), ov) => {
+            let t = flux2::Tiling { overlap: ov.unwrap_or(flux2::Tiling::new(n).overlap), size: n };
+            t.check()?;
+            Ok(Some(t))
+        }
+    }
+}
+
 /// Long edge, in pixels, a reference is encoded at when the caller does not
 /// say. A reference costs `(w/16)*(h/16)` tokens and attention is quadratic in
 /// the joint sequence, so an unscaled camera photograph costs several times
@@ -299,6 +338,8 @@ fn generate(args: &[String]) -> Result<(), String> {
     let mut precision_was_explicit = false;
     let mut refs: Vec<String> = Vec::new();
     let mut ref_size: Option<u32> = None;
+    let mut tile_size: Option<u32> = None;
+    let mut tile_overlap: Option<u32> = None;
     let mut mask_path: Option<String> = None;
     // Repeatable, like `--ref` above: one entry per `--adapter`, in the order
     // they were typed, which is the order they fold in.
@@ -357,6 +398,16 @@ fn generate(args: &[String]) -> Result<(), String> {
                 }
                 ref_size = Some(n);
             }
+            // `--tile-size 0` is "no tiling", the same way `--ref-size 0` is
+            // "no bound": a script that computes the number gets to say "off"
+            // in the same field rather than having to drop the flag.
+            "--tile-size" => {
+                let n: u32 = need(i)?.parse().map_err(|e| format!("--tile-size: {e}"))?;
+                tile_size = Some(n);
+            }
+            "--tile-overlap" => {
+                tile_overlap = Some(need(i)?.parse().map_err(|e| format!("--tile-overlap: {e}"))?);
+            }
             "--mask" => mask_path = Some(need(i)?.clone()),
             "--adapter" => adapters.push(AdapterSpec::new(need(i)?.clone())),
             "--lora-scale" => {
@@ -403,6 +454,7 @@ fn generate(args: &[String]) -> Result<(), String> {
     }
     o.width = rw;
     o.height = rh;
+    o.tile = tiling_from(tile_size, tile_overlap)?;
 
     // The mask is over the OUTPUT canvas, so it is resampled to the latent grid
     // by the pipeline (area average, both axes independently) rather than being
@@ -470,8 +522,26 @@ fn generate(args: &[String]) -> Result<(), String> {
     for (n, a) in adapters.iter().enumerate() {
         eprintln!("flux2: adapter {n} {} at strength {}", a.path, a.scale);
     }
-    eprintln!("flux2: building pipeline ({n_gen} generated + {n_ref} reference tokens) ...");
-    let pipe = Pipeline::build_sized(&variant, &paths, n_gen + n_ref, n_gen, &adapters, precision, 1)?;
+    // What ONE forward sees. Untiled that is the whole canvas, as it always
+    // was; tiled it is the largest window, which is the entire point - the DiT
+    // is sized for the window while the VAE still decodes the full canvas,
+    // which is why `build_sized` takes the two ceilings separately.
+    let n_fwd = flux2::pipeline::gen_tokens_per_forward(&o);
+    if let Some(t) = o.tile {
+        let tiles = flux2::pipeline::plan_tiles((o.height / 16) as usize, (o.width / 16) as usize, Some(t));
+        eprintln!(
+            "flux2: tiled generation: {} window(s) of {}x{} px (overlap {}), {n_fwd} generated tokens per forward instead of {n_gen}",
+            tiles.len(),
+            (tiles[0].tw * 16) as u32,
+            (tiles[0].th * 16) as u32,
+            t.overlap
+        );
+        if tiles.len() == 1 {
+            eprintln!("flux2: the canvas fits one window - this run is the untiled one");
+        }
+    }
+    eprintln!("flux2: building pipeline ({n_fwd} generated + {n_ref} reference tokens per forward, {n_gen} decoded) ...");
+    let pipe = Pipeline::build_sized(&variant, &paths, n_fwd + n_ref, n_gen, &adapters, precision, 1)?;
     let t0 = std::time::Instant::now();
     // Per-phase wall clock: the callback fires immediately BEFORE each phase,
     // so the gap between two calls is the previous phase's duration. Text
@@ -780,6 +850,42 @@ mod tests {
         // an uppercase spelling really would take the brain route - but naming
         // it that way is still a trap for a human reading the folder.
         assert!(check_adapter_out("a/b.SAFETENSORS").is_err());
+    }
+}
+
+#[cfg(test)]
+mod tile_flag_tests {
+    use super::tiling_from;
+
+    /// Tiling is **opt-in and off by default**, and `--tile-size 0` is the
+    /// explicit off switch - the shape `--ref-size 0` already established, so a
+    /// script that computes the number can say "off" in the field.
+    #[test]
+    fn tiling_is_off_unless_asked_for() {
+        assert_eq!(tiling_from(None, None).unwrap(), None);
+        assert_eq!(tiling_from(Some(0), None).unwrap(), None);
+    }
+
+    /// The overlap has a default (a quarter of the tile) and is honoured when
+    /// stated, so `--tile-size` alone is a complete request.
+    #[test]
+    fn a_tile_size_alone_is_a_complete_request() {
+        assert_eq!(tiling_from(Some(1024), None).unwrap().unwrap().overlap, 256);
+        let t = tiling_from(Some(1024), Some(64)).unwrap().unwrap();
+        assert_eq!((t.size, t.overlap), (1024, 64));
+    }
+
+    /// A plan that cannot be expressed in whole latent tokens, or whose windows
+    /// would overlap entirely, is refused at the command line rather than deep
+    /// inside the sampler - and an overlap with no tile size is a typo, not a
+    /// word to swallow (the same rule `--lora-scale` with no `--adapter` gets).
+    #[test]
+    fn an_unworkable_tile_plan_is_refused_where_it_was_typed() {
+        assert!(tiling_from(Some(1000), None).is_err(), "not a multiple of 16");
+        assert!(tiling_from(Some(1024), Some(100)).is_err(), "overlap not a multiple of 16");
+        assert!(tiling_from(Some(512), Some(512)).is_err(), "overlap swallows the tile");
+        let err = tiling_from(None, Some(128)).unwrap_err();
+        assert!(err.contains("--tile-size"), "{err}");
     }
 }
 
