@@ -135,7 +135,14 @@ impl ForecastModel for Timesfm3Forecaster {
         fc.model_version = self.version.clone();
 
         let levels = if spec.quantile_levels.is_empty() { vec![0.1, 0.5, 0.9] } else { spec.quantile_levels.clone() };
+        let patch = cfg.input_patch_len;
 
+        // Pass 1: validate every item and compute its shape, before any
+        // device call - an item found invalid partway through the OLD
+        // per-item loop still failed the whole request (no partial result is
+        // ever returned), so validating everything up front changes nothing
+        // observable, only when the error is raised.
+        let mut plans: Vec<ItemPlan> = Vec::new();
         for item in &panel.items {
             let targets: Vec<&forecast::Variate> = item.variates.iter().filter(|v| matches!(v.role, Role::Target)).collect();
             let past_only: Vec<&forecast::Variate> = item.variates.iter().filter(|v| matches!(v.role, Role::PastCovariate)).collect();
@@ -152,72 +159,133 @@ impl ForecastModel for Timesfm3Forecaster {
                     return Err(ForecastError::bad_request(format!("timesfm3: target '{}' has no observed steps", t.name)));
                 }
             }
-            // Left-padding and a per-step gap are the same mechanism as far as
-            // `preprocess::build_input` is concerned: both become `f32::NAN`,
-            // which it masks and excludes from RevIN/detrend statistics (see
-            // its own doc). `context` is the padded length `build_input`
-            // requires (a multiple of `input_patch_len`); `pad` leading steps
-            // carry no real history at all.
-            let patch = cfg.input_patch_len;
-            let context = valid.div_ceil(patch).max(1) * patch;
-            let pad = context - valid;
-            let row = |v: &forecast::Variate| -> Vec<f32> {
-                let mut out = Vec::with_capacity(context);
-                out.resize(pad, f32::NAN);
-                out.extend((0..valid).map(|i| if Self::is_observed(v, i) { v.data[i] } else { f32::NAN }));
-                out
-            };
-
-            let mut target_data = Vec::with_capacity(targets.len() * context);
-            for t in &targets {
-                target_data.extend(row(t));
-            }
-            let mut past_only_data = Vec::with_capacity(past_only.len() * context);
-            for c in &past_only {
-                past_only_data.extend(row(c));
-            }
-            let mut past_future_data = Vec::with_capacity(known_future.len() * (context + spec.horizon));
             for c in &known_future {
                 let future = c.future.as_deref().ok_or_else(|| ForecastError::bad_request("timesfm3: known_future covariate is missing its future path"))?;
                 if future.len() != spec.horizon {
                     return Err(ForecastError::bad_request("timesfm3: known_future length must equal the horizon"));
                 }
-                past_future_data.extend(row(c));
-                past_future_data.extend_from_slice(future);
+            }
+            // Left-padding and a per-step gap are the same mechanism as far as
+            // `preprocess::build_input` is concerned: both become `f32::NAN`,
+            // which it masks and excludes from RevIN/detrend statistics (see
+            // its own doc). `context` is the padded length `build_input`
+            // requires (a multiple of `input_patch_len`); items whose raw
+            // history rounds up to the SAME padded context are batched
+            // together below even when their raw lengths differ.
+            let context = valid.div_ceil(patch).max(1) * patch;
+            plans.push(ItemPlan { item, targets, past_only, known_future, valid, context });
+        }
+
+        // Pass 2: group by padded context (the only per-item dimension
+        // `core_forward` needs uniform beyond horizon, which is spec-wide),
+        // batch one `core_forward` call per group, and pad variate counts up
+        // to the group's max with wholly-NaN rows. `build_input` already
+        // derives an all-masked (leading-cumprod) attention mask for a row
+        // that is NaN start to finish, so a padding row is excluded as a KEY
+        // in both attention sublayers with no dedicated masking logic here -
+        // see `preprocess::build_input`'s own doc.
+        let mut groups: std::collections::BTreeMap<usize, Vec<usize>> = std::collections::BTreeMap::new();
+        for (i, p) in plans.iter().enumerate() {
+            groups.entry(p.context).or_default().push(i);
+        }
+
+        let mut per_item_targets: Vec<Vec<TargetForecast>> = (0..plans.len()).map(|_| Vec::new()).collect();
+
+        for (&context, idxs) in &groups {
+            let max_t = idxs.iter().map(|&i| plans[i].targets.len()).max().unwrap();
+            let max_p = idxs.iter().map(|&i| plans[i].past_only.len()).max().unwrap();
+            let max_f = idxs.iter().map(|&i| plans[i].known_future.len()).max().unwrap();
+            let b = idxs.len();
+            let v = max_t + max_p + max_f;
+            // Padding relies on the softmax reduction combining the SAME real
+            // columns in the SAME order regardless of how many masked pad
+            // columns follow them - true within one workgroup pass, not
+            // guaranteed across a multi-tile reduction.
+            debug_assert!(v <= 64, "variate padding assumes the padded row width fits one softmax workgroup (v={v})");
+
+            let real_row = |var: &forecast::Variate, context: usize| -> Vec<f32> {
+                let valid = var.data.len();
+                let pad = context - valid;
+                let mut out = Vec::with_capacity(context);
+                out.resize(pad, f32::NAN);
+                out.extend((0..valid).map(|i| if Self::is_observed(var, i) { var.data[i] } else { f32::NAN }));
+                out
+            };
+            let pad_row = |n: usize| -> Vec<f32> { vec![f32::NAN; n] };
+
+            let mut target_data = Vec::with_capacity(b * max_t * context);
+            let mut past_only_data = Vec::with_capacity(b * max_p * context);
+            let mut past_future_data = Vec::with_capacity(b * max_f * (context + spec.horizon));
+            for &i in idxs {
+                let p = &plans[i];
+                for ti in 0..max_t {
+                    target_data.extend(if ti < p.targets.len() { real_row(p.targets[ti], context) } else { pad_row(context) });
+                }
+                for pi in 0..max_p {
+                    past_only_data.extend(if pi < p.past_only.len() { real_row(p.past_only[pi], context) } else { pad_row(context) });
+                }
+                for fi in 0..max_f {
+                    if fi < p.known_future.len() {
+                        let c = p.known_future[fi];
+                        past_future_data.extend(real_row(c, context));
+                        past_future_data.extend_from_slice(c.future.as_deref().expect("validated in pass 1"));
+                    } else {
+                        past_future_data.extend(pad_row(context + spec.horizon));
+                    }
+                }
             }
 
-            let shape = DecodeShape { batch: 1, num_target: targets.len(), num_past_only: past_only.len(), num_past_future: known_future.len(), context, horizon: spec.horizon };
+            let shape = DecodeShape { batch: b, num_target: max_t, num_past_only: max_p, num_past_future: max_f, context, horizon: spec.horizon };
             let built = preprocess::build_input(cfg, shape, &target_data, &past_only_data, &past_future_data);
             let n = built.num_context_patches + built.num_horizon_patches;
             let raw_logits = self.model.core_forward(&built.resblock_input, &built.patch_mask, shape.batch, shape.num_variates(), n);
             let mut out = preprocess::postprocess(cfg, shape, &built, &raw_logits);
             sort_quantiles_inplace(&mut out, cfg.num_quantiles);
 
-            for (ti, t) in targets.iter().enumerate() {
-                let native = &out[ti * spec.horizon * cfg.num_quantiles..(ti + 1) * spec.horizon * cfg.num_quantiles];
-                // Unobserved steps must not defeat the clamp: `t.data[i]` may
-                // be a stale or NaN placeholder there, so only observed steps
-                // are asked to justify it.
-                let nonneg = (0..valid).all(|i| !Self::is_observed(t, i) || t.data[i] >= 0.0);
-                let mut native = native.to_vec();
-                if nonneg {
-                    for v in &mut native {
-                        *v = v.max(0.0);
+            for (bi, &i) in idxs.iter().enumerate() {
+                let p = &plans[i];
+                for (ti, t) in p.targets.iter().enumerate() {
+                    let base = (bi * v + ti) * spec.horizon * cfg.num_quantiles;
+                    let native = &out[base..base + spec.horizon * cfg.num_quantiles];
+                    // Unobserved steps must not defeat the clamp: `t.data[i]`
+                    // may be a stale or NaN placeholder there, so only
+                    // observed steps are asked to justify it.
+                    let nonneg = (0..p.valid).all(|k| !Self::is_observed(t, k) || t.data[k] >= 0.0);
+                    let mut native = native.to_vec();
+                    if nonneg {
+                        for x in &mut native {
+                            *x = x.max(0.0);
+                        }
                     }
-                }
-                let mut q = Self::interp_levels(&native, &cfg.quantile_levels, spec.horizon, &levels);
-                if nonneg {
-                    for v in &mut q {
-                        *v = v.max(0.0);
+                    let mut q = Self::interp_levels(&native, &cfg.quantile_levels, spec.horizon, &levels);
+                    if nonneg {
+                        for x in &mut q {
+                            *x = x.max(0.0);
+                        }
                     }
+                    let mut tf = TargetForecast::new(p.item.item_id.clone(), t.name.clone());
+                    tf.quantiles = Some(Block::native(vec![spec.horizon, levels.len()], q));
+                    tf.levels = levels.clone();
+                    forecast::convert::ensure_representations(&mut tf, Representation::Quantiles, &spec.representations, &levels, spec.num_samples, spec.seed)?;
+                    per_item_targets[i].push(tf);
                 }
-                let mut tf = TargetForecast::new(item.item_id.clone(), t.name.clone());
-                tf.quantiles = Some(Block::native(vec![spec.horizon, levels.len()], q));
-                tf.levels = levels.clone();
-                forecast::convert::ensure_representations(&mut tf, Representation::Quantiles, &spec.representations, &levels, spec.num_samples, spec.seed)?;
-                fc.targets.push(tf);
             }
+        }
+
+        for targets in per_item_targets {
+            fc.targets.extend(targets);
         }
         Ok(fc)
     }
+}
+
+/// One `Panel` item's role split and padded shape, computed once in pass 1
+/// and consumed by every group it lands in during pass 2.
+struct ItemPlan<'a> {
+    item: &'a forecast::Item,
+    targets: Vec<&'a forecast::Variate>,
+    past_only: Vec<&'a forecast::Variate>,
+    known_future: Vec<&'a forecast::Variate>,
+    valid: usize,
+    context: usize,
 }

@@ -192,6 +192,77 @@ fn forecast_is_invariant_to_the_value_at_an_unobserved_step() {
     assert_eq!(qa.data, qb.data, "a value at an unobserved step must never affect the forecast");
 }
 
+/// A single-target `Variate` with `n` fully-observed steps, deterministic
+/// but distinct per `seed` so different items in one panel carry different
+/// data (and therefore, if the batching implementation ever let one item's
+/// data leak into another's output, a different result).
+fn series(seed: u32, n: usize) -> Vec<f32> {
+    (0..n).map(|i| ((seed * 131 + i as u32 * 17) % 23) as f32 - 11.0).collect()
+}
+
+#[test]
+fn batched_panel_forecast_matches_per_item_forecast_at_equal_shapes() {
+    let (cfg, model) = synthetic_tiny_model();
+    let forecaster = Timesfm3Forecaster::new(model);
+    let spec = ForecastSpec { horizon: 4, quantile_levels: cfg.quantile_levels.clone(), ..ForecastSpec::default() };
+
+    let n_items = 4;
+    let items: Vec<Item> = (0..n_items).map(|s| Item::new(format!("s{s}"), vec![Variate::target("t", series(s, 8))])).collect();
+    let batched = Panel { freq: "H".into(), start: None, items: items.clone() };
+    let fc = forecaster.forecast(&batched, &spec).expect("batched forecast");
+    assert_eq!(fc.targets.len(), n_items as usize);
+
+    for (s, item) in items.iter().enumerate() {
+        let single = Panel::single("H", item.item_id.clone(), item.variates.clone());
+        let want = forecaster.forecast(&single, &spec).expect("single forecast");
+        assert_eq!(fc.targets[s].quantiles, want.targets[0].quantiles, "item {s}: batched result must equal its own single-item forecast");
+        assert_eq!(fc.targets[s].item_id, item.item_id, "batched output must preserve the panel's own item order");
+    }
+}
+
+#[test]
+fn batched_panel_forecast_matches_per_item_forecast_with_mixed_variates_and_contexts() {
+    let (cfg, model) = synthetic_tiny_model();
+    let forecaster = Timesfm3Forecaster::new(model);
+    let spec = ForecastSpec { horizon: 4, quantile_levels: cfg.quantile_levels.clone(), ..ForecastSpec::default() };
+
+    // Three items: different target/covariate counts AND different context
+    // lengths (8 and 12, tiny()'s patch length is 4 so both are aligned but
+    // land in different groups) - exercises variate padding AND multi-group
+    // batching in one panel.
+    let item_a = Item::new("a", vec![Variate::target("t0", series(1, 8))]);
+    let item_b = Item::new(
+        "b",
+        vec![
+            Variate::target("t0", series(2, 8)),
+            Variate::target("t1", series(3, 8)),
+            {
+                let mut v = Variate::target("p0", series(4, 8));
+                v.role = Role::PastCovariate;
+                v
+            },
+        ],
+    );
+    let item_c = Item::new("c", vec![Variate::target("t0", series(5, 12))]);
+    let items = vec![item_a.clone(), item_b.clone(), item_c.clone()];
+    let batched = Panel { freq: "H".into(), start: None, items: items.clone() };
+    let fc = forecaster.forecast(&batched, &spec).expect("batched forecast");
+    assert_eq!(fc.targets.len(), 1 + 2 + 1, "item a: 1 target, item b: 2 targets, item c: 1 target");
+
+    let mut want_targets = Vec::new();
+    for item in &items {
+        let single = Panel::single("H", item.item_id.clone(), item.variates.clone());
+        let want = forecaster.forecast(&single, &spec).expect("single forecast");
+        want_targets.extend(want.targets);
+    }
+    assert_eq!(fc.targets.len(), want_targets.len());
+    for (got, want) in fc.targets.iter().zip(&want_targets) {
+        assert_eq!(got.item_id, want.item_id);
+        assert_eq!(got.name, want.name);
+        assert_eq!(got.quantiles, want.quantiles, "item {}/{}: batched result must equal its own single-item forecast, unaffected by other items or padding variates", got.item_id, got.name);
+    }
+}
+
 #[test]
 fn forecast_rejects_a_target_with_no_observed_steps() {
     let (cfg, model) = synthetic_tiny_model();
