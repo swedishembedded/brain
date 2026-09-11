@@ -1001,8 +1001,15 @@ impl ResidentModel for Timesfm3Resident {
     fn manifest(&self) -> Manifest {
         timesfm3_manifest()
     }
-    fn instance_key(&self, _action: &str, inv: &Invocation) -> InstanceKey {
-        InstanceKey::new(TIMESFM3_MODEL, format!("h{}", horizon_of(inv, 64)))
+    fn instance_key(&self, _action: &str, _inv: &Invocation) -> InstanceKey {
+        // NOT keyed on horizon: the key controls which weights are resident,
+        // and horizon does not change them - keying on it used to force N
+        // redundant 330M-parameter copies of the SAME weights and fragment
+        // the scheduler's same-key batching so two requests that only differ
+        // in horizon could never share a `run_batch` call. `run_batch` itself
+        // groups by horizon internally, where a shape difference actually is
+        // one.
+        InstanceKey::new(TIMESFM3_MODEL, String::new())
     }
     fn estimate(&self, _key: &InstanceKey) -> MemCost {
         let r = file_ram(&self.path);
@@ -1021,25 +1028,10 @@ struct Timesfm3Instance {
     forecaster: timesfm3::Timesfm3Forecaster,
 }
 
-impl Instance for Timesfm3Instance {
-    fn run(&mut self, _action: &str, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        let (context, _shape) = decode_f32(inv, "context")?;
-        let horizon = horizon_of(inv, 64);
-        let cfg = self.forecaster.config();
-        // The context must be a multiple of the patch length; a served request
-        // over an arbitrary-length series is truncated to its most recent
-        // patch-aligned tail rather than rejected (left-padding to a boundary
-        // is a ledgered gap, same as the CLI predict path).
-        let patch = cfg.input_patch_len;
-        let n = (context.len() / patch).max(1) * patch;
-        let ctx = context[context.len().saturating_sub(n)..].to_vec();
-        let levels = cfg.quantile_levels.clone();
-
-        let item = forecast::Item::new("series", vec![forecast::Variate::target("target", ctx)]);
-        let panel = forecast::Panel::single("", "series", item.variates);
-        let spec = forecast::ForecastSpec { horizon, quantile_levels: levels.clone(), ..forecast::ForecastSpec::default() };
-        let out = forecast::ForecastModel::forecast(&self.forecaster, &panel, &spec).map_err(|e| format!("timesfm3: {}", e.message))?;
-        let tf = out.targets.into_iter().next().ok_or_else(|| "timesfm3: no forecast produced".to_string())?;
+impl Timesfm3Instance {
+    /// Encode one target's quantiles into the wire `Outcome` - shared by
+    /// `run` and `run_batch`'s success path so the two cannot diverge.
+    fn outcome_from_target(horizon: usize, tf: forecast::TargetForecast, levels: &[f32]) -> ActionResult {
         let q = tf.quantiles.ok_or_else(|| "timesfm3: model returned no quantiles".to_string())?;
         Ok(Outcome::new()
             .set("model", json!(TIMESFM3_MODEL))
@@ -1053,7 +1045,87 @@ impl Instance for Timesfm3Instance {
             // Block's own [horizon, n_levels] convention. Same string, two
             // shapes, would silently transpose a reader expecting one for
             // the other.
-            .blob("forecast", encode_forecast(&q.data, q.shape, "quantiles_hq", &levels)))
+            .blob("forecast", encode_forecast(&q.data, q.shape, "quantiles_hq", levels)))
+    }
+}
+
+impl Instance for Timesfm3Instance {
+    fn run(&mut self, _action: &str, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        let (context, _shape) = decode_f32(inv, "context")?;
+        let horizon = horizon_of(inv, 64);
+        let levels = self.forecaster.config().quantile_levels.clone();
+
+        // The forecaster itself left-pads any context to the checkpoint's
+        // patch boundary (see Timesfm3Forecaster::forecast), so the FULL
+        // series is used - no truncation to a patch-aligned tail here.
+        let item = forecast::Item::new("series", vec![forecast::Variate::target("target", context)]);
+        let panel = forecast::Panel::single("", "series", item.variates);
+        let spec = forecast::ForecastSpec { horizon, quantile_levels: levels.clone(), ..forecast::ForecastSpec::default() };
+        let out = forecast::ForecastModel::forecast(&self.forecaster, &panel, &spec).map_err(|e| format!("timesfm3: {}", e.message))?;
+        let tf = out.targets.into_iter().next().ok_or_else(|| "timesfm3: no forecast produced".to_string())?;
+        Self::outcome_from_target(horizon, tf, &levels)
+    }
+
+    /// Group by horizon (the one dimension `Timesfm3Forecaster::forecast`
+    /// needs uniform across a `Panel` - it batches everything else, including
+    /// mixed context lengths and variate counts, internally) and issue one
+    /// forecast() per group, each item keyed by its own batch index so
+    /// results scatter back positionally. A malformed invocation gets its own
+    /// `Err` before ever entering a group. If a whole group's shared call
+    /// fails - one bad item can fail a Panel outright, e.g. an all-missing
+    /// target - that group is re-run one invocation at a time so a single bad
+    /// request never fails its batch-mates, mirroring `resident_asr`'s
+    /// offline_batch per-job isolation without needing forecast() itself to
+    /// return partial results.
+    fn run_batch(&mut self, action: &str, invs: &[Invocation], _progress: &mut dyn FnMut(usize, Progress)) -> Vec<ActionResult> {
+        let levels = self.forecaster.config().quantile_levels.clone();
+
+        struct Job {
+            context: Vec<f32>,
+            horizon: usize,
+        }
+        let mut jobs: Vec<Option<Job>> = Vec::with_capacity(invs.len());
+        let mut results: Vec<Option<ActionResult>> = vec![None; invs.len()];
+        for (i, inv) in invs.iter().enumerate() {
+            match decode_f32(inv, "context") {
+                Ok((context, _shape)) => jobs.push(Some(Job { context, horizon: horizon_of(inv, 64) })),
+                Err(e) => {
+                    jobs.push(None);
+                    results[i] = Some(Err(e));
+                }
+            }
+        }
+
+        let mut groups: std::collections::BTreeMap<usize, Vec<usize>> = std::collections::BTreeMap::new();
+        for (i, j) in jobs.iter().enumerate() {
+            if j.is_some() {
+                groups.entry(j.as_ref().unwrap().horizon).or_default().push(i);
+            }
+        }
+
+        for (&horizon, idxs) in &groups {
+            let items: Vec<forecast::Item> = idxs
+                .iter()
+                .map(|&i| forecast::Item::new(i.to_string(), vec![forecast::Variate::target("target", jobs[i].as_ref().unwrap().context.clone())]))
+                .collect();
+            let panel = forecast::Panel { freq: String::new(), start: None, items };
+            let spec = forecast::ForecastSpec { horizon, quantile_levels: levels.clone(), ..forecast::ForecastSpec::default() };
+            match forecast::ForecastModel::forecast(&self.forecaster, &panel, &spec) {
+                Ok(out) => {
+                    for tf in out.targets {
+                        let i: usize = tf.item_id.parse().expect("item_id is this batch's own index, set just above");
+                        results[i] = Some(Self::outcome_from_target(horizon, tf, &levels));
+                    }
+                }
+                Err(_) => {
+                    for &i in idxs {
+                        results[i] = Some(self.run(action, &invs[i], &mut |_| {}));
+                    }
+                }
+            }
+        }
+
+        results.into_iter().map(|r| r.expect("every invocation was either decoded into a job or given a decode error")).collect()
     }
 }
 
@@ -1076,6 +1148,57 @@ mod tests {
             assert!(a.outputs.iter().any(|b| b.name == "forecast"), "{}: forecast output", m.model);
             assert!(a.params.iter().any(|p| p.name == "horizon"), "{}: horizon param", m.model);
         }
+    }
+
+    /// A tiny checkpoint-free `Timesfm3Instance`, deterministic synthetic
+    /// weights - mirrors `crates/timesfm3/tests/forecaster.rs`'s own helper,
+    /// needing neither the golden manifest nor a real checkpoint.
+    fn synthetic_timesfm3_instance() -> Timesfm3Instance {
+        let cfg = timesfm3::Timesfm3Config::tiny();
+        let weights: HashMap<String, Vec<f32>> = cfg
+            .param_list()
+            .into_iter()
+            .enumerate()
+            .map(|(i, (k, s))| {
+                let n: usize = s.iter().product();
+                let data: Vec<f32> = (0..n).map(|j| (((i * 131 + j * 17) % 23) as f32 - 11.0) * 0.01).collect();
+                (k, data)
+            })
+            .collect();
+        let model = timesfm3::Timesfm3::from_weights(cfg, &weights).unwrap();
+        Timesfm3Instance { forecaster: timesfm3::Timesfm3Forecaster::new(model) }
+    }
+
+    fn timesfm3_context_invocation(seed: u32) -> Invocation {
+        let data: Vec<f32> = (0..8).map(|i| ((seed * 131 + i * 17) % 23) as f32 - 11.0).collect();
+        let bytes: Vec<u8> = data.iter().flat_map(|v| v.to_le_bytes()).collect();
+        Invocation::new().set("horizon", json!(4)).blob("context", Blob::new(Media::Bytes, bytes))
+    }
+
+    #[test]
+    fn timesfm3_run_batch_matches_run_called_individually() {
+        let mut inst = synthetic_timesfm3_instance();
+        let invs: Vec<Invocation> = (1..=3).map(timesfm3_context_invocation).collect();
+
+        let batched = inst.run_batch("forecast", &invs, &mut |_, _| {});
+        assert_eq!(batched.len(), invs.len());
+        for (i, inv) in invs.iter().enumerate() {
+            let single = inst.run("forecast", inv, &mut |_| {}).expect("run");
+            let got = batched[i].as_ref().expect("run_batch result");
+            assert_eq!(got.blobs["forecast"].bytes, single.blobs["forecast"].bytes, "invocation {i}: run_batch must match run() bit-for-bit");
+        }
+    }
+
+    #[test]
+    fn timesfm3_run_batch_isolates_a_malformed_invocation() {
+        let mut inst = synthetic_timesfm3_instance();
+        let bad = Invocation::new().set("horizon", json!(4)); // no "context" blob
+        let invs = vec![timesfm3_context_invocation(1), bad, timesfm3_context_invocation(3)];
+
+        let out = inst.run_batch("forecast", &invs, &mut |_, _| {});
+        assert!(out[0].is_ok(), "invocation 0 is well-formed and must succeed");
+        assert!(out[1].is_err(), "invocation 1 is missing its context blob");
+        assert!(out[2].is_ok(), "invocation 2 is well-formed and must succeed despite invocation 1's failure");
     }
 
     #[test]
