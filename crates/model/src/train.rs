@@ -79,18 +79,86 @@ impl Default for FitOpts {
     }
 }
 
-/// Cosine LR schedule with linear warmup (nanogpt's `get_lr`). Moved verbatim
-/// from `gpt2::train::cosine_lr`.
+/// A learning rate as a function of the step number: linear warmup to `peak`,
+/// `hold` steps at `peak`, then cosine decay to `floor` by `decay_iters`,
+/// holding `floor` after that. nanogpt's `get_lr` (which is the `hold == 0`
+/// case) - this tree already computed that curve inside [`cosine_lr`] and,
+/// separately spelled, inside `lfm2::train`, so it is named here as its own
+/// value a trainer that does not go through [`fit`]'s `FitOpts` can hold.
+///
+/// **Why a run decays at all.** Adam at a CONSTANT rate does not converge to a
+/// minimum on a stochastic objective; it converges to a ball around one whose
+/// radius is set by the step size times the gradient noise. The visible
+/// signature is a fast initial descent and then a flat line at a loss ABOVE
+/// what the same trajectory reaches once the rate comes down.
+///
+/// **Why `hold` exists, rather than cosine from step 0.** Hägele et al.
+/// (arXiv:2405.18392) measure constant-rate training followed by a short
+/// COOLDOWN against a full cosine and find the two scale "predictably and
+/// reliably" alike, with the cooldown's benefit saturating at roughly 20% of
+/// the run. That shape has a property a full cosine does not: the rate for
+/// most of the run does not depend on the step budget, so a run that is later
+/// extended has not already annealed itself on the strength of a total it was
+/// going to beat. Cosine from step 0 bakes the budget into every step.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LrSchedule {
+    /// The rate the warmup ramps up to, is held at, and the decay starts from.
+    pub peak: f32,
+    /// The rate held from `decay_iters` on. Never 0 by default: a rate that
+    /// reaches exactly zero stops training some steps before the run ends.
+    pub floor: f32,
+    /// Steps of linear ramp `peak/warmup .. peak`. `0` starts at `peak`.
+    pub warmup: u32,
+    /// Steps held AT `peak` after the warmup and before the cooldown starts.
+    /// `0` is the plain warmup-then-cosine curve.
+    pub hold: u32,
+    /// The step by which the decay has reached `floor` - normally the run's
+    /// total step count, so the LAST trained step is the slowest one.
+    pub decay_iters: u32,
+}
+
+impl LrSchedule {
+    /// The rate `lr` at every step - no warmup, no decay.
+    pub fn constant(lr: f32) -> LrSchedule {
+        LrSchedule { peak: lr, floor: lr, warmup: 0, hold: 0, decay_iters: 0 }
+    }
+
+    /// The step the cooldown starts at.
+    pub fn decay_start(&self) -> u32 {
+        self.warmup + self.hold
+    }
+
+    /// The rate at `step` (0-based, and GLOBAL: a resumed run passes the step
+    /// it is actually on, so it continues the curve instead of warming up a
+    /// second time).
+    pub fn at(&self, step: u32) -> f32 {
+        if step < self.warmup {
+            return self.peak * (step + 1) as f32 / self.warmup.max(1) as f32;
+        }
+        let start = self.decay_start();
+        if step < start {
+            return self.peak;
+        }
+        if step >= self.decay_iters {
+            return self.floor;
+        }
+        let ratio = (step - start) as f32 / (self.decay_iters - start).max(1) as f32;
+        let coeff = 0.5 * (1.0 + (std::f32::consts::PI * ratio).cos());
+        self.floor + coeff * (self.peak - self.floor)
+    }
+}
+
+impl From<&FitOpts> for LrSchedule {
+    fn from(o: &FitOpts) -> LrSchedule {
+        LrSchedule { peak: o.lr, floor: o.min_lr, warmup: o.warmup, hold: 0, decay_iters: o.decay_iters }
+    }
+}
+
+/// Cosine LR schedule with linear warmup (nanogpt's `get_lr`) - [`LrSchedule`]
+/// built from a [`FitOpts`], kept as a free function for the callers (and the
+/// `gpt2::train::cosine_lr` re-export) that already spell it this way.
 pub fn cosine_lr(it: u32, opts: &FitOpts) -> f32 {
-    if it < opts.warmup {
-        return opts.lr * (it + 1) as f32 / opts.warmup.max(1) as f32;
-    }
-    if it >= opts.decay_iters {
-        return opts.min_lr;
-    }
-    let ratio = (it - opts.warmup) as f32 / (opts.decay_iters - opts.warmup).max(1) as f32;
-    let coeff = 0.5 * (1.0 + (std::f32::consts::PI * ratio).cos());
-    opts.min_lr + coeff * (opts.lr - opts.min_lr)
+    LrSchedule::from(opts).at(it)
 }
 
 /// A loaded char/BPE dataset: train/val token splits + optional vocab metadata.
@@ -426,6 +494,65 @@ mod tests {
         assert!(cosine_lr(0, &o) < cosine_lr(5, &o)); // ramping up
         assert!((cosine_lr(9, &o) - 1.0).abs() < 0.11); // near peak at end of warmup
         assert!((cosine_lr(200, &o) - 0.1).abs() < 1e-6); // floor after decay
+    }
+
+    /// [`LrSchedule`] is the schedule [`cosine_lr`] always computed, named as
+    /// its own value so a trainer that is not `fit` can hold one. The two must
+    /// stay the SAME numbers, bit for bit, at every step - that equality is
+    /// what makes this a hoist rather than a second schedule.
+    #[test]
+    fn the_named_schedule_is_the_one_cosine_lr_computes() {
+        let o = FitOpts { lr: 3e-4, min_lr: 3e-5, warmup: 17, decay_iters: 250, ..Default::default() };
+        let s = LrSchedule::from(&o);
+        for it in 0..400 {
+            assert_eq!(s.at(it), cosine_lr(it, &o), "step {it}");
+        }
+    }
+
+    /// The three properties a caller picks this schedule FOR, stated as
+    /// numbers rather than left to the shape of the curve: the ramp starts
+    /// below peak and reaches it, the decay is monotone down, and it lands
+    /// exactly on the floor - the last being the one that matters for a
+    /// short run, where "cosine" that never actually arrives is just a
+    /// slightly smaller constant rate.
+    #[test]
+    fn warmup_ramps_decay_is_monotone_and_the_floor_is_reached() {
+        let s = LrSchedule { peak: 1e-4, floor: 1e-5, warmup: 10, hold: 0, decay_iters: 200 };
+        assert!(s.at(0) < s.peak, "a warmup must start below peak");
+        assert!((s.at(9) - s.peak).abs() < 1e-6 * s.peak, "the ramp must reach peak at the end of warmup");
+        for it in 10..200 {
+            assert!(s.at(it) >= s.at(it + 1), "decay must be monotone at step {it}");
+        }
+        assert!((s.at(199) - s.floor).abs() < 2e-7, "the last trained step must be at the floor");
+        assert_eq!(s.at(500), s.floor, "past the horizon the floor holds");
+
+        // A run that asked for no schedule gets exactly the rate it asked for,
+        // at every step - the previous behaviour, expressible.
+        let c = LrSchedule::constant(1e-4);
+        assert!((0..500).all(|it| c.at(it) == 1e-4));
+    }
+
+    /// `hold` is the constant-then-cooldown shape (Hägele et al.
+    /// arXiv:2405.18392): the rate for every step before the cooldown is the
+    /// peak and does NOT depend on the step budget, which is the property that
+    /// makes a run safe to extend. Only the tail is a function of the total.
+    #[test]
+    fn a_held_peak_is_budget_independent_until_the_cooldown_starts() {
+        let short = LrSchedule { peak: 1e-4, floor: 1e-5, warmup: 0, hold: 160, decay_iters: 200 };
+        let long = LrSchedule { peak: 1e-4, floor: 1e-5, warmup: 0, hold: 1600, decay_iters: 2000 };
+        assert_eq!(short.decay_start(), 160);
+        for step in 0..160 {
+            assert_eq!(short.at(step), 1e-4, "the held phase is the peak rate at step {step}");
+            assert_eq!(long.at(step), short.at(step), "the held phase does not know the budget");
+        }
+        // The cosine's own first sample is the peak, so the rate leaves it on
+        // the step after the hold ends - not on it.
+        assert!((short.at(160) - 1e-4).abs() < 1e-6 * 1e-4);
+        assert!(short.at(161) < short.at(160), "the cooldown starts where the hold ends");
+        for step in 160..199 {
+            assert!(short.at(step) >= short.at(step + 1), "the cooldown must be monotone at {step}");
+        }
+        assert!(short.at(199) < short.floor + 0.01 * (short.peak - short.floor));
     }
 
     fn tmp(name: &str) -> std::path::PathBuf {

@@ -42,14 +42,11 @@ impl Default for MlmTrainOpts {
     }
 }
 
-/// Cosine LR with linear warmup (floor at a tenth of the peak rate).
+/// Cosine LR with linear warmup (floor at a tenth of the peak rate) -
+/// [`model::LrSchedule`], which is the one implementation of this curve in the
+/// tree.
 fn lr_at(step: u32, o: &MlmTrainOpts) -> f32 {
-    if step < o.warmup {
-        return o.lr * (step + 1) as f32 / o.warmup.max(1) as f32;
-    }
-    let p = (step - o.warmup) as f32 / (o.steps - o.warmup).max(1) as f32;
-    let min = 0.1 * o.lr;
-    min + 0.5 * (o.lr - min) * (1.0 + (std::f32::consts::PI * p).cos())
+    model::LrSchedule { peak: o.lr, floor: 0.1 * o.lr, warmup: o.warmup, hold: 0, decay_iters: o.steps }.at(step)
 }
 
 /// Mean masked-CE over `batches` random val windows (pseudo-ppl = exp of this).

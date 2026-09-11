@@ -85,7 +85,7 @@ pub use plan::{plan_tp, Hardware, ModelShape, TpPlan};
 pub use shard::{plan_balanced, Pipeline, Shard, ShardCost, Shardable, StreamPlan};
 
 pub use objective::Objective;
-pub use train::{cosine_lr, generate, FitOpts, IGNORE};
+pub use train::{cosine_lr, generate, FitOpts, LrSchedule, IGNORE};
 #[cfg(not(target_arch = "wasm32"))]
 pub use train::{build_or_resume, fit, fit_with, load_dataset, load_dataset_with_itos};
 
