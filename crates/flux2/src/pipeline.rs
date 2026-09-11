@@ -3978,6 +3978,78 @@ mod tests {
         );
     }
 
+    /// **Tiling gate 9 - at the production geometry, every window paints where
+    /// it is conditioned.** Gate 7 proves the crop is the right one through the
+    /// sampler; this proves the MAPPING holds at the real canvas, which is
+    /// 2048x1360 - a NON-SQUARE canvas whose two axes tile differently (five
+    /// columns, four rows) and whose token grid is 85x128, so `lh` and `lw` can
+    /// never be swapped for one another without the swap showing.
+    ///
+    /// The failure this exists for is a transposed or mis-strided gather: a
+    /// window told to paint the canvas cell `(cy, cx)` but handed the reference
+    /// token for `(cx, cy)`, or for a cell one row off, would render a corner
+    /// of the room in the middle of it and nothing about the token COUNTS would
+    /// look wrong. So the reference token here carries its own coordinates and
+    /// the gate reads them back: for every cell of every window, the crop row
+    /// must be `[cy, cx]`, the generated row's id must be the canvas id, and
+    /// the crop's id must be the one the single full-canvas forward gives that
+    /// cell.
+    #[test]
+    fn every_window_of_the_production_canvas_is_conditioned_on_its_own_cells() {
+        use crate::refcond::JointLayout;
+        let (lh, lw, cin, nt) = (85usize, 128usize, 2usize, 3usize); // 2048x1360
+        let canvas = JointLayout::with_refs(nt, lh, lw, vec![(lh, lw)]).register_aligned_refs();
+        assert!(canvas.refs[0].registered, "a canvas-sized reference is the edit target");
+        // Reference token (y, x) IS [y, x]: asymmetric, so no transposition can
+        // coincide with the right answer off the diagonal.
+        let refs: Vec<f32> =
+            (0..lh).flat_map(|y| (0..lw).flat_map(move |x| [y as f32, x as f32])).collect();
+        let full_ids = canvas.ids();
+
+        let tiles = plan_tiles(lh, lw, Some(Tiling { size: 512, overlap: 128 }));
+        assert_eq!(
+            (tiles.iter().map(|t| t.y0).collect::<std::collections::BTreeSet<_>>().len(), tiles.len()),
+            (4, 20),
+            "the gate wants the real plan: four rows of five columns"
+        );
+        let mut hits = vec![0u32; lh * lw];
+        for t in &tiles {
+            let win = canvas.window(t.y0, t.x0, t.th, t.tw);
+            let joint = win.joint_tokens(&vec![0.0f32; win.n_gen() * cin], &refs, cin);
+            let ids = win.ids();
+            for y in 0..t.th {
+                for x in 0..t.tw {
+                    let (cy, cx) = (t.y0 + y, t.x0 + x);
+                    let m = win.n_gen() + y * t.tw + x;
+                    assert_eq!(
+                        &joint[m * cin..][..cin],
+                        &[cy as f32, cx as f32],
+                        "window at ({},{}) paints canvas ({cy},{cx}) from the wrong reference cell",
+                        t.y0,
+                        t.x0
+                    );
+                    assert_eq!(
+                        &ids[(nt + y * t.tw + x) * 4..][..4],
+                        &[0, cy as u32, cx as u32, 0],
+                        "window at ({},{}) gives canvas ({cy},{cx}) the wrong id",
+                        t.y0,
+                        t.x0
+                    );
+                    assert_eq!(
+                        &ids[(nt + m) * 4..][..4],
+                        &full_ids[(nt + lh * lw + cy * lw + cx) * 4..][..4],
+                        "window at ({},{}) puts the reference for ({cy},{cx}) at the wrong id",
+                        t.y0,
+                        t.x0
+                    );
+                    // The scatter offset the sampler folds this row back at.
+                    hits[cy * lw + cx] += 1;
+                }
+            }
+        }
+        assert!(hits.iter().all(|&h| h > 0), "a canvas cell is owned by no window");
+    }
+
     /// FNV-1a 64 over the rendered bytes. A whole reference image is too large
     /// to inline and a tolerance would defeat the purpose, so the fence is a
     /// digest - written here rather than pulled in as a dependency because a
