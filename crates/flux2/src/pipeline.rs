@@ -399,26 +399,36 @@ pub struct Feather {
     pub right: usize,
 }
 
-/// Window starts along one axis, in latent tokens: `0, step, 2·step, …` and
-/// then one final window flush against the far edge.
+/// Window starts along one axis, in latent tokens: as many windows as
+/// `overlap` asks for, spread EVENLY from the near edge to the far one.
 ///
-/// The last window is *pinned* to the end rather than left to fall wherever
-/// the stride lands, so the canvas is always fully covered and no window ever
-/// hangs off the edge at a size the model was not built for. The price is that
-/// the final overlap can be wider than `overlap`; a wider overlap only blends
-/// more, so it is the safe direction.
+/// `overlap` decides the count - `ceil((total − overlap) / (tile − overlap))`
+/// windows is the fewest that can cover `total` while sharing at least that
+/// much - and then the windows are spaced at `(total − tile) / (n − 1)`. Every
+/// window lands inside the canvas at the full tile size, the cover is complete,
+/// and every pair shares the SAME width, which is at least the `overlap` the
+/// count was derived from.
+///
+/// The evenness is the point, not tidiness. Walking a fixed stride and pinning
+/// one last window flush against the far edge covers the canvas just as well,
+/// but it leaves one oddball pair sharing whatever was left over while every
+/// other pair shares `overlap` - at 1360 px with 512 px windows and a 128 px
+/// overlap, three pairs share 128 px and the last shares 432 px. A seam that
+/// wide is a wide crossfade between two independent denoisings across a strip
+/// of the picture, which is where the ghosting is worst even once the feather
+/// is cut to it ([`tile_weights`]). Spreading the same four windows evenly
+/// makes every seam 224-240 px and costs not one extra forward. It is also
+/// what the established tiled-diffusion implementations do: they derive the
+/// tile count from the requested overlap and then re-space the tiles at a
+/// fractional stride, and treat irregular edge tiles as a known artifact
+/// source.
 pub fn tile_starts(total: usize, tile: usize, overlap: usize) -> Vec<usize> {
     if tile == 0 || total <= tile {
         return vec![0];
     }
     let step = tile.saturating_sub(overlap).max(1);
-    let mut starts = Vec::new();
-    let mut y = 0;
-    while y + tile < total {
-        starts.push(y);
-        y += step;
-    }
-    starts.push(total - tile);
+    let n = total.saturating_sub(overlap).div_ceil(step).max(2);
+    let mut starts: Vec<usize> = (0..n).map(|i| i * (total - tile) / (n - 1)).collect();
     starts.dedup();
     starts
 }
@@ -3886,15 +3896,14 @@ mod tests {
     }
 
     /// **Tiling gate 8 - the feather spans what the windows actually SHARE.**
-    /// [`tile_starts`] pins the last window flush against the far edge, so its
-    /// overlap with the window before it is whatever is left over and is
-    /// routinely far wider than `Tiling::overlap` - at 1360 px with 512 px
-    /// windows and a 128 px overlap the last two rows share 432 px, not 128.
-    /// A feather cut to the NOMINAL overlap leaves both windows at full weight
-    /// across the remaining 300 px, and a normalized blend of two full-weight
-    /// windows is a flat 50/50 average of two independent denoisings - a
-    /// semi-transparent double exposure over a full-width strip, which is the
-    /// ghosting the feather exists to prevent.
+    /// `Tiling::overlap` decides how MANY windows an axis gets; what any two
+    /// of them really share is whatever [`tile_starts`] then spaced them at,
+    /// and at 1360 px with 512 px windows and a 128 px overlap that is 224-240
+    /// px, not 128. A feather cut to the NOMINAL overlap leaves both windows at
+    /// full weight across the remaining 100-odd px, and a normalized blend of
+    /// two full-weight windows is a flat 50/50 average of two independent
+    /// denoisings - a semi-transparent double exposure over a full-width strip,
+    /// which is the ghosting the feather exists to prevent.
     ///
     /// Two properties pin the ramp to the real width. Locally, a window's
     /// weight on the last row it shares with its neighbour is `1/(r+1)` for the
@@ -3910,11 +3919,19 @@ mod tests {
         let (lh, lw) = (85usize, 32usize);
         let t = Tiling { size: 512, overlap: 128 };
         let tiles = plan_tiles(lh, lw, Some(t));
-        assert_eq!(tiles.iter().map(|q| q.y0).collect::<Vec<_>>(), vec![0, 24, 48, 53]);
+        assert_eq!(tiles.iter().map(|q| q.y0).collect::<Vec<_>>(), vec![0, 17, 35, 53]);
         assert!(tiles.iter().all(|q| q.x0 == 0 && q.tw == lw), "the gate wants one column");
         let shares: Vec<usize> =
             (1..tiles.len()).map(|i| tiles[i - 1].y0 + tiles[i - 1].th - tiles[i].y0).collect();
-        assert_eq!(shares, vec![8, 8, 27], "the pinned last window really does share more than 8");
+        // Four windows, evenly spread: no pinned oddball sharing 27 rows with
+        // its neighbour while the other pairs share 8. Every seam is the same
+        // width and every one is wider than the 8 asked for.
+        assert_eq!(shares, vec![15, 14, 14]);
+        assert!(shares.iter().all(|&r| r >= 8), "a seam is narrower than the requested overlap");
+        assert!(
+            shares.iter().max().unwrap() - shares.iter().min().unwrap() <= 1,
+            "the seams are not evenly spread: {shares:?}"
+        );
 
         let col: Vec<Vec<f32>> =
             tiles.iter().map(|q| (0..q.th).map(|y| tile_weights(q)[y * q.tw]).collect()).collect();
