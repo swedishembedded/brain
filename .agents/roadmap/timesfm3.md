@@ -29,8 +29,9 @@ redistributable) - see `docs/models/timesfm3.md`.
       QK-norm, FF, the resblock, the output head), whole-model directional
       FD-gradchecked (`train::tests::backward_matches_finite_difference_
       across_representative_tensors`) tight across every tensor kind, at
-      1/2/3 layers, on the default (Vulkan) backend. Two real bugs were
-      caught and fixed by that gate before it passed: `attn_bwd_dq_bidir`/
+      1/2/3 layers, on the default (Vulkan) backend AND on
+      `BRAIN_DEVICE=cpu`. Three real bugs were
+      caught and fixed by that gate: `attn_bwd_dq_bidir`/
       `dk_bidir` hardcode the conventional `1/sqrt(head_dim)` attention
       scale internally (no scale param), which is wrong for a model that
       always folds attention scale to 1.0 - fixed by using `dq_bias`/
@@ -42,20 +43,29 @@ redistributable) - see `docs/models/timesfm3.md`.
       buffer's own - `region_copy` is for same-shape/same-stride sub-region
       copies only, `unpack_qkv` (the real, purpose-built inverse of
       `pack_qkv`) is the fix.
-      **NOT yet verified on `BRAIN_DEVICE=cpu`**: that backend shows a
-      numerical divergence between the analytic and FD gradient that GROWS
-      with layer count (clean at 1 layer, exceeding the tolerance by 2-3)
-      even though the forward is bitwise-identical to `core_forward` on
-      that same backend. Zero-initialization of freshly allocated buffers
-      was checked and ruled out (`backend-cpu`'s own `CpuBuffer::zeros`).
-      Root cause not yet isolated. The FD test is a real, unconditional gate
-      on the default backend and a named, loud, `BRAIN_REQUIRE_FIXTURES=1`-
-      escalating skip on CPU specifically - see the test's own doc. Until
-      this is resolved, per this repo's own hard constraint ("gradient-
-      faithful, proven on BOTH the CPU and GPU backends"), this backward is
-      NOT to be treated as trustworthy for a real training run - it is
-      trustworthy today only on the backend the FD check actually ran on.
-      Still open after that: `impl model::Model` was considered and
+      The third was not in the backward at all: both this model's forward and
+      its training tape registered the fixed-epsilon `rmsnorm` kernel as
+      `block::rms_variant`'s REFERENCE index while pairing it with the
+      cooperative `rmsnorm_rows`. Those two are not interchangeable -
+      `rmsnorm.wgsl` declares `Params { d_model, seq_len }` and hardcodes a
+      1e-6 epsilon, `rmsnorm_rows.wgsl` declares `Params { d, rows, eps }` and
+      reads the caller's. `rms_variant` picks between them purely from
+      `DeviceCaps::workgroup_reductions`, so the GPU backend normalized at
+      this model's own `f32::EPSILON` while the CPU backend silently
+      normalized every norm in the graph at 1e-6 - an epsilon roughly an order
+      of magnitude larger, on a model whose QK-norm rows are `head_dim` wide.
+      Pure inference `core_forward` therefore disagreed between the two
+      backends by 1.76e-2 against a 1.76e-1 output scale on a 3-layer tiny
+      model, and the FD gradcheck's divergence grew with layer count because
+      the error compounds per norm. The fix is to register `rmsnorm_eps` (the
+      same per-element reference with the epsilon as a parameter) instead of
+      `rmsnorm` in both `model::PIPELINES` and `train::TRAIN_PIPELINES`; the
+      GPU path is bit-unchanged, the CPU path now matches it to 4.5e-8.
+      `timesfm3/tests/kernels.rs`'s
+      `both_registered_rmsnorm_kernels_honour_the_configured_epsilon` gates
+      BOTH registered indices against a host reference at this model's own
+      epsilon, so the pairing cannot silently regress.
+      Still open: `impl model::Model` was considered and
       REJECTED - that trait is LM-shaped (`vocab()`/`block_size()`) and only
       implemented by token-sequence models; the repo's own precedent for a
       non-LM port is a bespoke trainer (`RrdbTrainer`, `T5Trainer`), which

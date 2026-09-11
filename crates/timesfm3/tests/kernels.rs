@@ -110,3 +110,54 @@ fn swap_axes12_vec_moves_the_variate_axis_next_to_batch() {
         }
     }
 }
+
+/// Both RMSNorm kernels this model registers must honour the epsilon the
+/// model actually passes.
+///
+/// `block::rms_variant` picks between the per-element reference kernel and the
+/// cooperative one-workgroup-per-row kernel purely from device capabilities,
+/// so a device that reports `workgroup_reductions` runs a different kernel
+/// than one that does not - and TimesFM-3's RMSNorm epsilon is
+/// `f32::EPSILON`, roughly an order of magnitude below the 1e-6 that
+/// `rmsnorm.wgsl` hardcodes. A reference kernel that ignored the epsilon
+/// parameter would therefore normalize differently on a CPU backend than on a
+/// GPU one, silently, for the same weights and input.
+///
+/// So this gates BOTH registered indices, not whichever one the current device
+/// would select, and against a HOST reference rather than against each other
+/// (two kernels wrong the same way would agree). The `dim`s are the two this
+/// model's tapes actually dispatch at: `model_dims` for the sublayer norms and
+/// `head_dim` for QK-norm, where a small row width makes the epsilon's
+/// contribution largest.
+#[test]
+fn both_registered_rmsnorm_kernels_honour_the_configured_epsilon() {
+    if skip() {
+        return;
+    }
+    const RMSNORM: usize = 5;
+    const RMSNORM_ROWS: usize = 6;
+    let cfg = timesfm3::Timesfm3Config::tiny();
+    let gpu = gpu_core::testgpu::dev(timesfm3::model::PIPELINES);
+    // A row scale small enough that `mean(x^2)` is comparable to the epsilon
+    // itself: that is where an epsilon of 1e-6 instead of `f32::EPSILON`
+    // changes the answer by percent, not by rounding.
+    for &(rows, dim) in &[(4usize, cfg.model_dims), (8, cfg.head_dim)] {
+        let x: Vec<f32> = (0..rows * dim).map(|i| 1.0e-3 * (i as f32 * 0.7 + 0.1).sin()).collect();
+        let w: Vec<f32> = (0..dim).map(|i| 0.5 * (i as f32 * 0.31 + 0.2).cos()).collect();
+        let want = model::hostmath::rmsnorm_rows(&x, &w, rows, dim, cfg.rms_norm_eps);
+        let scale = want.iter().fold(0.0f32, |m, v| m.max(v.abs())).max(1e-6);
+
+        let xb = gpu.storage_init("rms_eps_x", &x);
+        let wb = gpu.storage_init("rms_eps_w", &w);
+        for &(kind, threads, what) in
+            &[(RMSNORM, rows as u32, "reference"), (RMSNORM_ROWS, rows as u32 * 64, "cooperative")]
+        {
+            let ob = gpu.storage((rows * dim) as u64);
+            let params = [dim as u32, rows as u32, gpu_core::f(cfg.rms_norm_eps)];
+            gpu.submit(&[], &[gpu.step(kind, &[&xb, &wb, &ob], &params, threads)]);
+            let got = gpu.read(&ob, rows * dim);
+            let e = got.iter().zip(&want).fold(0.0f32, |m, (a, b)| m.max((a - b).abs())) / scale;
+            assert!(e <= 2e-5, "{what} rmsnorm ({rows}x{dim}): relative error {e:e} exceeds 2e-5");
+        }
+    }
+}

@@ -3,14 +3,10 @@
 
 //! TimesFM-3 **training** graph: the SSA forward and a hand-written reverse.
 //!
-//! Verified so far by [`tests::backward_matches_finite_difference_across_representative_tensors`]
-//! - a whole-model directional FD gradcheck, tight on the default (Vulkan)
-//! backend across every tensor kind this model has, at 1/2/3 layers. NOT yet
-//! verified on `BRAIN_DEVICE=cpu`: that backend shows a numerical divergence
-//! that grows with layer count, root cause not yet isolated (see that test's
-//! own doc for what has already been ruled out). Do not treat this backward
-//! as trustworthy for a real training run until that is resolved; it is
-//! trustworthy today only on the GPU backend the FD check actually ran on.
+//! Verified by [`tests::backward_matches_finite_difference_across_representative_tensors`],
+//! a whole-model directional FD gradcheck, tight across every tensor kind
+//! this model has, at 1/2/3 layers, on the default (Vulkan) backend AND on
+//! `BRAIN_DEVICE=cpu`.
 //!
 //! # Scope: `core_forward` only, patch-aligned, one output patch
 //!
@@ -81,7 +77,7 @@ const K_MATMUL_REG3: usize = 1;
 const K_BIAS_ADD: usize = 2;
 const K_RELU: usize = 3;
 const K_ADD: usize = 4;
-const K_RMSNORM: usize = 5;
+const K_RMSNORM_EPS: usize = 5;
 const K_RMSNORM_ROWS: usize = 6;
 const K_ROPE_PARTIAL: usize = 7;
 const K_ATTN_SCORES_QK_KMASK: usize = 8;
@@ -119,7 +115,7 @@ pub const TRAIN_PIPELINES: &[(&str, &str)] = &[
     ("bias_add", kernels::BIAS_ADD),
     ("relu_inplace", kernels::RELU_INPLACE),
     ("add_inplace", kernels::ADD_INPLACE),
-    ("rmsnorm", kernels::RMSNORM),
+    ("rmsnorm_eps", kernels::RMSNORM_EPS),
     ("rmsnorm_rows", kernels::RMSNORM_ROWS),
     ("rope_partial", kernels::ROPE_PARTIAL),
     ("attn_scores_qk_kmask", kernels::ATTN_SCORES_QK_KMASK),
@@ -500,9 +496,12 @@ fn linear(g: &Gpu, ps: &ParamStore, x: &DeviceBuffer, weight_name: &str, out: &D
     g.step(kind, &[x, ps.w(weight_name), out], &[m as u32, k as u32, n as u32], threads)
 }
 
+/// The reference index is `rmsnorm_eps`, never the fixed-1e-6 `rmsnorm` - see
+/// `crate::model::Timesfm3::rmsnorm` for why pairing the latter with
+/// `rmsnorm_rows` makes the epsilon depend on the device.
 fn rmsnorm_w(g: &Gpu, x: &DeviceBuffer, weight: &DeviceBuffer, out: &DeviceBuffer, dim: usize, rows: usize, eps: f32) -> Step {
     let coop = Some(K_RMSNORM_ROWS);
-    let (kind, threads) = block::rms_variant(g, K_RMSNORM, coop, rows as u32, dim as u32);
+    let (kind, threads) = block::rms_variant(g, K_RMSNORM_EPS, coop, rows as u32, dim as u32);
     g.step(kind, &[x, weight, out], &[dim as u32, rows as u32, f(eps)], threads)
 }
 
@@ -974,27 +973,13 @@ mod tests {
     /// gradcheck floor (playbook Sec3): h=5e-3, atol=4e-3, rtol=8e-2, never
     /// loosened.
     ///
-    /// KNOWN OPEN GAP: this passes tightly on the default (Vulkan) backend
-    /// at every layer count tried
-    /// (1/2/3), but on `BRAIN_DEVICE=cpu` the divergence between the analytic
-    /// and FD gradient GROWS with layer count (clean at 1 layer, exceeding
-    /// tolerance by 2-3) even though the forward is bitwise-identical to
-    /// `core_forward` on that same backend. Root cause not yet isolated -
-    /// zero-initialization of fresh buffers was checked and ruled out
-    /// (`CpuBuffer::zeros`). This is NOT a "missing fixture" skip: the CPU
-    /// backend genuinely has not been proven gradient-faithful yet, which
-    /// this repo's own hard constraint requires before the backward can be
-    /// trusted for a real training run. Skipped here (named, loud, and
-    /// promoted to a hard failure under `BRAIN_REQUIRE_FIXTURES=1`, exactly
-    /// like an absent golden) rather than silently asserted against a
-    /// backend it has not actually been proven on.
+    /// Unconditional on every backend: the tape is device-independent, so a
+    /// gate that only ran where workgroup reductions are available would be
+    /// gating half the contract. It passes at 1/2/3 layers on both the
+    /// default (Vulkan) and `BRAIN_DEVICE=cpu` backends.
     #[test]
     fn backward_matches_finite_difference_across_representative_tensors() {
         if skip() {
-            return;
-        }
-        if std::env::var("BRAIN_DEVICE").as_deref() == Ok("cpu") {
-            brain_testutil::skip("timesfm3 backward FD gradcheck has a known, unresolved numerical divergence on the CPU backend that grows with layer count - see this test's own doc for what has already been ruled out");
             return;
         }
         let cfg = Timesfm3Config::tiny();
