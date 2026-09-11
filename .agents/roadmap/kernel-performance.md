@@ -4423,6 +4423,97 @@ still fully ahead of it.
 **Commits**: one - `model, backend-cpu: bucket DataParallel's gradient
 transfers into one buffer per replica per direction (M7.1)`.
 
+### M7.3 - `TpPlan`/`plan_tp` get a real consumer: qwen3's SwiGLU MLP, tensor-sharded and planned end to end
+
+M7.1's own entry (above) and the Phase 7 status note both named this
+explicitly: `crates/model/src/plan.rs`'s `TpPlan`/`plan_tp` predicted a
+tensor-parallel degree and whether a model fits, but nothing in the repo
+actually consumed the prediction to shard a model's weights and execute it
+TP-style through the M7.2-redesigned `Collective` trait. Re-confirmed before
+starting: `grep -rn "plan_tp\|TpPlan"` outside `plan.rs` itself matched only
+its own `pub use` re-export in `crates/model/src/lib.rs` - zero consumers,
+exactly as both notes said.
+
+**What's wired, concretely** (`crates/qwen3/src/tp.rs`, new module): Qwen3's
+SwiGLU MLP (`mlp.{gate,up,down}.weight`, the same tensor names/shapes
+`crates/qwen3/src/model.rs` loads - `gate`/`up` are `[d_ff, d_model]`,
+`down` is `[d_model, d_ff]`, row-major) split Megatron-style (Shoeybi et
+al., arXiv:1909.08053 §3 - the same authoritative source
+`crates/model/tests/tensor_parallel.rs`'s existing generic TP proof cites):
+`gate`/`up` column-parallel (each rank owns a contiguous `d_ff/world_size`
+slice of output rows, so `SiLU`/elementwise-multiply need no
+communication), `down` row-parallel on the matching contracting dimension
+(each rank's product is a partial sum over `d_ff`), combined by exactly
+ONE `Collective::all_reduce`. `run_tp_mlp` is the actual end-to-end wire:
+it builds a `model::plan::ModelShape` from the real weight/activation byte
+counts for this MLP, calls `plan_tp(hw, &shape)` to get a `TpPlan`, and
+then shards and executes at `plan.degree` - the degree used to run is
+`plan_tp`'s own prediction, not a hardcoded test parameter.
+
+**What was already there, and what's new relative to it**:
+`crates/model/tests/tensor_parallel.rs` already proved the generic TP
+mechanic (column+row split, `Collective::all_reduce`) on a toy MLP/attention
+shape across two real GPUs - it predates this milestone and is unrelated to
+`plan_tp`. This milestone's addition is narrower and different: a real
+model's own weight tensor layout (qwen3's `mlp.*` naming/shape convention,
+not an arbitrary toy shape) sharded at a degree `plan_tp` itself chose, not
+one the caller picked.
+
+**Correctness gate**: `mlp_forward_reference` (unsharded, same
+`linear_rows`/`silu_slice` host-math primitives `hostmath.rs` already is
+this repo's one implementation of) vs `run_tp_mlp`'s combined output, on the
+same seeded real-shaped weights/input, tolerance `1e-4` relative. Three
+tests in `crates/qwen3/src/tp.rs`: `world_size` 2 and 4 (forced via a
+`Hardware.mem_bytes` that only fits the sharded state, so `plan_tp` is
+exercised at a real N>1 degree rather than defaulting to TP=1), plus a
+`world_size=1` degenerate case. All green. A fourth, narrower test
+(`shard_mlp_down_projection_columns_are_exact`) pins the one non-contiguous
+split (`down`'s column gather) byte-for-byte against the unsharded matrix.
+
+**Mutation-verified**: temporarily changed `mlp_forward_tp` to return each
+rank's own partial sum uncombined (skipping the `all_reduce` step) -
+`tp_sharded_mlp_matches_unsharded_reference_n2` and `_n4` both failed
+exactly as predicted (`index 0: got 280.7998, want 158.68192` at N=2,
+similarly at N=4), the degenerate `world_size=1` test and the down-gather
+test stayed green (as expected - neither exercises the combine step).
+Reverted; all four tests green again.
+
+**What this does and does NOT validate - stated plainly per this
+milestone's own instruction**: there is no real multi-GPU hardware in this
+environment. Every "rank" here is a real OS thread in ONE process on the
+ONE real device this box has, communicating through
+`model::collective::HostCollective` (host-RAM-staged, `Barrier`-
+synchronised). This is a legitimate proof that the SHARDING MATH and the
+`plan_tp`-to-`Collective` WIRING are correct - the mutation test above shows
+the equivalence gate actually catches a broken combine - but it validates
+NONE of: network transport, real device-to-device transfer, or
+multi-process concurrency. A green test here is NOT evidence TP works on
+real multi-GPU deployment.
+
+**Scoped narrowly, named explicitly (per this milestone's own scoping
+allowance)**: only the SwiGLU MLP is sharded, not attention's QKV/O
+projections, and NOT `qwen3::model::Qwen`'s actual GPU dispatch tape -
+`crates/qwen3/src/tp.rs` is a standalone module computing the identical
+math (same weight shapes/names, same `SiLU(gate)*up` formula
+`model::block::swiglu_fwd`'s WGSL kernel also computes) via
+`model::hostmath`'s host primitives, not a modification of `model.rs`'s
+`Qwen::forward`/`serve.rs`'s served batched-decode tape. Wiring TP into the
+ACTUAL served forward pass - `Qwen`'s `DeviceBuffer`-resident weights, its
+`ops_linear`/LoRA dispatch, `serve.rs`'s paged-KV batched loop - would mean
+threading a `Collective`/rank/shard-plan through every one of those call
+sites, which is real, larger follow-up work correctly out of scope for one
+milestone; not attempted here, and the door is left open by `tp.rs` sharing
+the exact weight-tensor names/shapes/math `model.rs` already uses, so
+grafting the plan/shard/combine steps onto the real dispatch tape is future
+work with a known correct target, not a redesign. Attention's QKV/O split
+is unattempted here too - `tensor_parallel.rs`'s existing
+`tensor_parallel_attention_matches_single_gpu` already proves the generic
+mechanic works for it on a toy shape, so the qwen3-real-weight-layout
+version would follow the same pattern this entry used for the MLP.
+
+**Commits**: one - `model, qwen3: wire TpPlan/plan_tp through qwen3's
+SwiGLU MLP, tensor-sharded via Collective (M7.3)`.
+
 ### M5.9 - GDN's UT-transform GEMM-ified: forward substitution replaced by repeated squaring
 
 M5.8 closed GDN's two cumsum loops and left its own "not yet done" note
@@ -6375,17 +6466,25 @@ every model's parameter store buys a training step less than its refactor
 cost, which should be checked with a profile before, not after, fifteen
 crates change shape.
 
-**Phase 7 status.** Opened, not closed. `M7.1` (`DataParallel::adamw_step`
-gradient-transfer bucketing) is the only milestone landed - a host-side,
-API-stable fix removing an easy inefficiency in one training path. Every
-harder item this phase is actually named for remains fully open: the
-`Collective` trait's signature (still owned `Vec<f32>` in/out, no dtype
-parameter, no async handle, no error channel - `crates/model/src/
-collective.rs`, unchanged), any device-resident collective, tensor-parallel
-wiring end-to-end (`crates/model/src/plan.rs`'s `TpPlan` still has zero
-consumers - a real planner with nothing plugged into it), expert
-parallelism, ZeRO/FSDP-style parameter sharding. None of these were
-attempted; M7.1's own entry names them explicitly as out of scope, not
+**Phase 7 status.** Opened, not closed. Landed: `M7.1`
+(`DataParallel::adamw_step` gradient-transfer bucketing, a host-side
+API-stable fix in one training path); `M7.2` (`Collective` redesigned to
+move a `Payload{dtype,data}` and return `CollectiveResult`, `async` end to
+end via a hand-boxed `CollectiveFuture` - closes audit F34's "no error
+channel" gap, so the line this status note used to carry about the trait
+being unchanged is stale and is corrected here); `M7.3` (`plan_tp`/`TpPlan`
+get a real, if narrowly-scoped, consumer - qwen3's SwiGLU MLP sharded
+Megatron-style at the degree `plan_tp` itself predicts, combined through
+`Collective::all_reduce`, equivalence-gated N=2/N=4 - but validated only via
+IN-PROCESS multi-rank simulation on this box's one real device, NOT real
+multi-GPU, and not wired into `qwen3::model::Qwen`'s actual served dispatch
+tape; see that entry for exactly what is and is not covered). Still fully
+open: any device-resident (non-host-staged) collective; tensor-parallel
+wiring of the REST of qwen3 (attention QKV/O, and grafting M7.3's shard/plan
+mechanic onto the real served forward pass rather than a standalone
+equivalence-checked module); any other model; expert parallelism;
+ZeRO/FSDP-style parameter sharding. None of these were attempted; each
+landed milestone's own entry names its remaining scope explicitly, not
 silently deferred.
 
 **Phase 8 status.** M8.0 through M8.14 are all landed (see each entry

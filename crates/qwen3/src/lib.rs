@@ -21,6 +21,7 @@ pub mod finetune;
 pub mod lora;
 pub mod shard;
 pub mod toolcall_eval;
+pub mod tp;
 
 pub use config::{LoraCfg, QwenConfig};
 pub use init::init_weights;
