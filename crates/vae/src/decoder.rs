@@ -21,7 +21,7 @@
 
 use gpu_core::{DeviceBuffer, Gpu, Step};
 
-use crate::blocks::{BlockNames, Builder};
+use crate::blocks::{BlockNames, Builder, GnStats};
 use crate::config::VaeConfig;
 
 pub use crate::blocks::{Tensors, KERNELS};
@@ -30,6 +30,23 @@ pub use crate::blocks::{Tensors, KERNELS};
 /// buffers, so it disables the activation pool).
 fn taps_enabled() -> bool {
     std::env::var("BRAIN_VAE_TAPS").is_ok()
+}
+
+/// A second handle onto `gpu`, for one more graph on the device it is already
+/// on.
+///
+/// NOT a bare `Gpu::share_or_new`: that falls back to `Gpu::new`, which
+/// re-resolves the AMBIENT backend selection from the environment. On a
+/// backend that cannot share - the CPU JIT - a graph asked for "here" would
+/// then land on whatever card `BRAIN_DEVICE` happens to name, which is the
+/// one thing an `_on` constructor exists to rule out. A CPU parent therefore
+/// gets a CPU child explicitly.
+fn share(gpu: &Gpu) -> Gpu {
+    if gpu.kind() == "cpu" {
+        Gpu::new_cpu(&KERNELS)
+    } else {
+        gpu.share_or_new(&KERNELS)
+    }
 }
 
 /// A decode graph for a fixed input latent size, with weights resident.
@@ -42,13 +59,32 @@ pub struct VaeDecoder {
     out_len: usize,
     taps: Vec<(String, DeviceBuffer, usize)>,
     device_bytes: u64,
+    gn: GnSites,
+}
+
+/// Every GroupNorm's statistics buffer in a graph built under
+/// [`GnStats::Collect`] or [`GnStats::Inject`], with the length they all
+/// share. Empty under [`GnStats::Local`].
+struct GnSites {
+    bufs: Vec<DeviceBuffer>,
+    words: usize,
+}
+
+impl GnSites {
+    fn of(b: &Builder<'_>, cfg: &VaeConfig) -> GnSites {
+        GnSites { bufs: b.gn_sites().to_vec(), words: 2 * cfg.norm_num_groups as usize }
+    }
+
+    fn read(&self, gpu: &Gpu) -> Vec<Vec<f32>> {
+        self.bufs.iter().map(|b| gpu.read(b, self.words)).collect()
+    }
 }
 
 impl VaeDecoder {
     /// Build the decode graph for an input latent `[latent_ch, h, w]` and upload
     /// all decoder weights. `device`: `Some("cpu")` | `Some("gpu")` | `None`.
     pub fn from_diffusers(cfg: VaeConfig, tensors: &Tensors, h: u32, w: u32, device: Option<&str>) -> VaeDecoder {
-        VaeDecoder::build(Gpu::open(device, &KERNELS), cfg, tensors, h, w)
+        VaeDecoder::build(Gpu::open(device, &KERNELS), cfg, tensors, h, w, GnStats::Local)
     }
 
     /// [`VaeDecoder::from_diffusers`] on an EXISTING device: a second handle
@@ -63,12 +99,21 @@ impl VaeDecoder {
     /// the number of real devices a process holds stays answerable by reading
     /// the code.
     pub fn from_diffusers_on(gpu: &Gpu, cfg: VaeConfig, tensors: &Tensors, h: u32, w: u32) -> VaeDecoder {
-        VaeDecoder::build(gpu.share_or_new(&KERNELS), cfg, tensors, h, w)
+        VaeDecoder::build(share(gpu), cfg, tensors, h, w, GnStats::Local)
     }
 
-    fn build(gpu: Gpu, cfg: VaeConfig, tensors: &Tensors, h: u32, w: u32) -> VaeDecoder {
+    /// [`VaeDecoder::from_diffusers_on`] with the GroupNorm statistics seam
+    /// [`crate::tiled`] needs: `Collect` to learn what this graph's norms saw,
+    /// `Inject` to hand them what a wider extent saw. [`GnStats::Local`] is
+    /// the ordinary graph.
+    pub fn from_diffusers_on_gn(gpu: &Gpu, cfg: VaeConfig, tensors: &Tensors, h: u32, w: u32, gn: GnStats) -> VaeDecoder {
+        VaeDecoder::build(share(gpu), cfg, tensors, h, w, gn)
+    }
+
+    fn build(gpu: Gpu, cfg: VaeConfig, tensors: &Tensors, h: u32, w: u32, gn: GnStats) -> VaeDecoder {
         let mut b =
             Builder::new(&gpu, tensors, cfg.norm_eps, cfg.norm_num_groups, BlockNames::diffusers(), taps_enabled());
+        b.set_gn_stats(gn);
 
         let z_in = gpu.storage((cfg.latent_channels * h * w) as u64);
         let rc = cfg.reversed_channels();
@@ -155,8 +200,9 @@ impl VaeDecoder {
         // added explicitly: the total has to be what the GRAPH costs, not what
         // one of its two allocators happened to see.
         let device_bytes = b.allocated_bytes() + (cfg.latent_channels * h * w) as u64 * 4;
+        let gn = GnSites::of(&b, &cfg);
         let (steps, taps) = b.finish();
-        VaeDecoder { gpu, cfg, steps, z_in, out, out_len, taps, device_bytes }
+        VaeDecoder { gpu, cfg, steps, z_in, out, out_len, taps, device_bytes, gn }
     }
 
     /// Decode a latent `[latent_ch·h·w]` (row-major NCHW, batch 1) into the
@@ -171,6 +217,13 @@ impl VaeDecoder {
     /// Read a named intermediate tap after a `decode` (parity debugging).
     pub fn read_tap(&self, name: &str) -> Option<Vec<f32>> {
         self.taps.iter().find(|(n, _, _)| n == name).map(|(_, buf, len)| self.gpu.read(buf, *len))
+    }
+
+    /// Every GroupNorm's `[mean, rstd]` per group, in graph order, as the last
+    /// [`VaeDecoder::decode`] computed them. Empty unless the graph was built
+    /// under [`GnStats::Collect`] or [`GnStats::Inject`].
+    pub fn read_gn_stats(&self) -> Vec<Vec<f32>> {
+        self.gn.read(&self.gpu)
     }
 
     pub fn config(&self) -> &VaeConfig {
@@ -212,6 +265,7 @@ pub struct VaeEncoder {
     out_len: usize,
     taps: Vec<(String, DeviceBuffer, usize)>,
     device_bytes: u64,
+    gn: GnSites,
 }
 
 impl VaeEncoder {
@@ -219,18 +273,25 @@ impl VaeEncoder {
     /// NOT latent size) and upload all encoder weights. `device`: `Some("cpu")` |
     /// `Some("gpu")` | `None`.
     pub fn from_diffusers(cfg: VaeConfig, tensors: &Tensors, h: u32, w: u32, device: Option<&str>) -> VaeEncoder {
-        VaeEncoder::build(Gpu::open(device, &KERNELS), cfg, tensors, h, w)
+        VaeEncoder::build(Gpu::open(device, &KERNELS), cfg, tensors, h, w, GnStats::Local)
     }
 
     /// [`VaeEncoder::from_diffusers`] on an EXISTING device - see
     /// [`VaeDecoder::from_diffusers_on`] for why sharing matters here.
     pub fn from_diffusers_on(gpu: &Gpu, cfg: VaeConfig, tensors: &Tensors, h: u32, w: u32) -> VaeEncoder {
-        VaeEncoder::build(gpu.share_or_new(&KERNELS), cfg, tensors, h, w)
+        VaeEncoder::build(share(gpu), cfg, tensors, h, w, GnStats::Local)
     }
 
-    fn build(gpu: Gpu, cfg: VaeConfig, tensors: &Tensors, h: u32, w: u32) -> VaeEncoder {
+    /// [`VaeEncoder::from_diffusers_on`] with the GroupNorm statistics seam -
+    /// see [`VaeDecoder::from_diffusers_on_gn`].
+    pub fn from_diffusers_on_gn(gpu: &Gpu, cfg: VaeConfig, tensors: &Tensors, h: u32, w: u32, gn: GnStats) -> VaeEncoder {
+        VaeEncoder::build(share(gpu), cfg, tensors, h, w, gn)
+    }
+
+    fn build(gpu: Gpu, cfg: VaeConfig, tensors: &Tensors, h: u32, w: u32, gn: GnStats) -> VaeEncoder {
         let mut b =
             Builder::new(&gpu, tensors, cfg.norm_eps, cfg.norm_num_groups, BlockNames::diffusers(), taps_enabled());
+        b.set_gn_stats(gn);
 
         let img_in = gpu.storage((cfg.in_channels * h * w) as u64);
         let ch = &cfg.block_out_channels;
@@ -289,8 +350,9 @@ impl VaeEncoder {
 
         // `img_in` is allocated outside the builder - see the decoder's note.
         let device_bytes = b.allocated_bytes() + (cfg.in_channels * h * w) as u64 * 4;
+        let gn = GnSites::of(&b, &cfg);
         let (steps, taps) = b.finish();
-        VaeEncoder { gpu, cfg, steps, img_in, out, out_len, taps, device_bytes }
+        VaeEncoder { gpu, cfg, steps, img_in, out, out_len, taps, device_bytes, gn }
     }
 
     /// Encode an image `[in_channels·H·W]` (row-major NCHW, batch 1) into the
@@ -318,6 +380,12 @@ impl VaeEncoder {
 
     pub fn read_tap(&self, name: &str) -> Option<Vec<f32>> {
         self.taps.iter().find(|(n, _, _)| n == name).map(|(_, buf, len)| self.gpu.read(buf, *len))
+    }
+
+    /// Every GroupNorm's `[mean, rstd]` per group - see
+    /// [`VaeDecoder::read_gn_stats`].
+    pub fn read_gn_stats(&self) -> Vec<Vec<f32>> {
+        self.gn.read(&self.gpu)
     }
 }
 

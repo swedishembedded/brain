@@ -164,6 +164,65 @@ fn activations_dominate_weights_at_a_real_output_size() {
     );
 }
 
+/// The tiled reservation must describe the graph a TILED decode really
+/// builds: one tile's, whatever the image is. The untiled estimate is already
+/// gated above at tile-sized shapes; what this adds is that
+/// `decoder_device_bytes_tiled` picks the right shape out of a cover of an
+/// image far too large to build whole.
+#[test]
+fn the_tiled_reservation_describes_one_real_tile() {
+    let Some(dev) = card_with_room(6144) else {
+        eprintln!("skip: no GPU with room");
+        return;
+    };
+    let c = VaeConfig::flux2();
+    let ts = zeros::decoder(&c);
+    // 2048x2048 out: ~43 GiB whole, which no card here has.
+    let pred = vae::decoder_device_bytes_tiled(&c, 256, 256, vae::Tiling::AUTO);
+    let (tile, _) = vae::Tiling::AUTO.latent(c.upscale_factor());
+    let real = VaeDecoder::from_diffusers(c.clone(), &ts, tile as u32, tile as u32, Some(&dev)).device_bytes();
+    println!("tiled 2048x2048: predicted {:.1} MiB, one {tile}x{tile}-latent tile really allocates {:.1} MiB", mib(pred), mib(real));
+    assert!(pred >= real, "the tiled estimate must never under-report: {:.1} < {:.1} MiB", mib(pred), mib(real));
+    assert!(pred <= real * 5 / 4, "and must be close, not merely safe: {:.1} vs {:.1} MiB", mib(pred), mib(real));
+    // The point of the whole mechanism, on the real numbers: the tile is a
+    // small fraction of what the same image costs in one pass.
+    let whole = vae::decoder_device_bytes(&c, 256, 256);
+    assert!(whole > pred * 4, "tiling must actually bound the cost: {:.1} MiB whole vs {:.1} MiB tiled", mib(whole), mib(pred));
+}
+
+/// The end of the argument, on the hardware: a 2048x2048 decode - which no
+/// whole-image graph on a 24 GiB card can hold - runs to completion through
+/// the tiled path.
+///
+/// Ignored by default because it builds 25 real tile graphs and takes minutes,
+/// not because it is optional: run it after any change to the cover, the
+/// per-shape grouping or the graph teardown, which is what stops peak VRAM
+/// from being the image's.
+#[test]
+#[ignore = "builds 25 real tile graphs on a card; run explicitly after touching the tiled path"]
+fn a_tiled_decode_runs_at_a_size_no_whole_graph_could_hold() {
+    let Some(dev) = card_with_room(8192) else {
+        eprintln!("skip: no GPU with room");
+        return;
+    };
+    let c = VaeConfig::flux2();
+    let ts = zeros::decoder(&c);
+    let (lh, lw) = (256u32, 256u32);
+    assert!(
+        vae::tiled::should_tile_decode(&c, (lh as u64 * 8) * (lw as u64 * 8)),
+        "2048x2048 must be past the whole-graph threshold, or this test proves nothing"
+    );
+    let gpu = vae::device(Some(&dev));
+    let dec = vae::VaeTiledDecoder::auto(&gpu, c.clone(), &ts, lh, lw);
+    println!("tiles: {}, waste {:.3}x", dec.plan().tiles().len(), dec.plan().overlap_waste());
+    let z = vec![0.0f32; (c.latent_channels * lh * lw) as usize];
+    let t = std::time::Instant::now();
+    let out = dec.decode_with(&z, |done, total| eprintln!("tile {done}/{total}"));
+    println!("2048x2048 tiled decode in {:.1}s", t.elapsed().as_secs_f64());
+    assert_eq!(out.len(), (c.out_channels * lh * 8 * lw * 8) as usize);
+    assert!(out.iter().all(|v| v.is_finite()), "a decode that OOMs or races produces non-finite pixels");
+}
+
 /// The weight figures are summed from the same schedule the builder uploads,
 /// so they must agree with what a built graph reports for its weights - the
 /// whole-graph total minus what the activations of a deliberately tiny graph

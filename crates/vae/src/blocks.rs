@@ -692,6 +692,43 @@ pub struct Builder<'a> {
     /// gets every block's buffers and dispatches sized for `n` images, one
     /// graph, no per-image replay.
     n: u32,
+    /// Where each recorded GroupNorm takes its statistics from - see
+    /// [`GnStats`]. [`GnStats::Local`] for every caller except a tiled one.
+    gn_stats: GnStats,
+    /// Each recorded GroupNorm's statistics buffer, in record order. Empty
+    /// under [`GnStats::Local`] (those buffers go back to the pool).
+    gn_sites: Vec<DeviceBuffer>,
+}
+
+/// Where a recorded GroupNorm's per-group `[mean, rstd]` comes from.
+///
+/// GroupNorm normalises over the extent it is handed, which is exactly what
+/// makes a NAIVELY tiled convolutional autoencoder produce visible per-tile
+/// brightness and contrast steps: every tile normalises over itself, so each
+/// one lands on a different affine transform of the same content, and the
+/// error is a near-uniform shift across a tile's whole interior rather than a
+/// seam the overlap blend could hide. Measured on the real FLUX.2 VAE at a
+/// 512x512 decode in nine tiles, the per-tile DC shift is ~0.15 on a `[-1,1]`
+/// image - a visible block, not a rounding error.
+///
+/// The fix is the one every serious tiled-VAE implementation converges on:
+/// run the cover once to learn what the WHOLE image's statistics are, then run
+/// it again with those statistics handed to every tile. This enum is that
+/// seam, and it lives on the shared builder because that is where the
+/// statistics are computed - `crates/vae/src/tiled.rs` is its only consumer,
+/// and every other graph keeps [`GnStats::Local`] and is untouched.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub enum GnStats {
+    /// Each norm computes its own, over the extent it is given. The default,
+    /// and the only correct choice for a whole-image graph.
+    #[default]
+    Local,
+    /// The same, but the statistics buffers survive the submit so a caller can
+    /// read them back ([`Builder::gn_sites`]) - the first of the two passes.
+    Collect,
+    /// The statistics kernels are not recorded at all; each norm is handed the
+    /// values at its own index, uploaded as a constant. The second pass.
+    Inject(Vec<Vec<f32>>),
 }
 
 /// Ceiling on the im2col scratch, in f32 words (512 MiB). The lowered conv
@@ -748,6 +785,8 @@ impl<'a> Builder<'a> {
             scale_chan_ids: None,
             packed: None,
             n: 1,
+            gn_stats: GnStats::Local,
+            gn_sites: Vec::new(),
         }
     }
 
@@ -846,6 +885,29 @@ impl<'a> Builder<'a> {
     /// combined trunk+adaptors+backbone build (see that crate's `int8.rs`).
     pub fn set_packed(&mut self, p: &'a PackedTensors) {
         self.packed = Some(p);
+    }
+
+    /// Where every subsequently-recorded GroupNorm gets its statistics - see
+    /// [`GnStats`]. Set this BEFORE recording any block, like
+    /// [`Builder::set_train`] and for the same reason.
+    pub fn set_gn_stats(&mut self, mode: GnStats) {
+        assert!(self.steps.is_empty(), "vae::blocks: set_gn_stats must precede the first block");
+        assert!(
+            !self.train || matches!(mode, GnStats::Local),
+            "vae::blocks: GroupNorm statistics may only be collected or injected on an inference graph - \
+             the backward reads the statistics the forward computed"
+        );
+        self.gn_stats = mode;
+    }
+
+    /// Every GroupNorm's statistics buffer, in the order the graph records
+    /// them: `[mean, rstd]` per group, `2 * groups * batch` floats each.
+    ///
+    /// Populated under [`GnStats::Collect`] and [`GnStats::Inject`] (empty
+    /// under [`GnStats::Local`], where the buffers are pooled and gone). Read
+    /// them back after a submit to learn what each norm actually saw.
+    pub fn gn_sites(&self) -> &[DeviceBuffer] {
+        &self.gn_sites
     }
 
     /// Record the reverse-mode tape (see [`Builder::train`]). Set this BEFORE
@@ -1299,7 +1361,27 @@ impl<'a> Builder<'a> {
         let gbn = gb_name.to_string();
         let g = self.groups;
         let n = self.n;
-        let stats = self.act((n * 2 * g) as u64);
+        // Statistics handed in from a wider extent than this graph can see
+        // (see [`GnStats`]) replace both statistics kernels with a constant
+        // upload: nothing is measured here, so nothing about this graph's own
+        // extent reaches the result.
+        let site = self.gn_sites.len();
+        let injected: Option<Vec<f32>> = match &self.gn_stats {
+            GnStats::Inject(v) => Some(
+                v.get(site)
+                    .unwrap_or_else(|| panic!("vae::blocks: GroupNorm {site} has no injected statistics ({} provided)", v.len()))
+                    .clone(),
+            ),
+            _ => None,
+        };
+        let stats = match &injected {
+            Some(vals) => {
+                assert_eq!(vals.len(), (n * 2 * g) as usize, "vae::blocks: GroupNorm {site} statistics must be [mean, rstd] x {} groups", n * g);
+                let vals = vals.clone();
+                self.dev_fused(&format!("__gn_stats.{site}"), &vals)
+            }
+            None => self.act((n * 2 * g) as u64),
+        };
         let y = self.act((n as u64) * (c * h * w) as u64);
         // Statistics: one WORKGROUP per (n,g) group where the device can run a
         // workgroup reduction (`gn_stats_wg`), else the per-group reference
@@ -1307,7 +1389,9 @@ impl<'a> Builder<'a> {
         // elements, measured as a large share of a 512² FLUX.2 VAE decode; the
         // cooperative kernel is the same two-pass math, coalesced and 32-way
         // parallel (see `gn_stats_wg.wgsl`).
-        if self.coop {
+        if injected.is_some() {
+            // Nothing to record: `stats` is already the answer.
+        } else if self.coop {
             self.steps.push(self.gpu.step(
                 K_GN_STATS_WG,
                 &[x, &stats],
@@ -1359,7 +1443,13 @@ impl<'a> Builder<'a> {
                 y: y.clone(),
             });
         }
-        self.free((n * 2 * g) as u64, stats); // last read was GN_APPLY above
+        match self.gn_stats {
+            // Pooled and gone: nothing outside the graph reads it.
+            GnStats::Local => self.free((n * 2 * g) as u64, stats), // last read was GN_APPLY above
+            // Kept alive so the caller can read it back after the submit
+            // (`Collect`), or because it is a constant upload (`Inject`).
+            GnStats::Collect | GnStats::Inject(_) => self.gn_sites.push(stats),
+        }
         y
     }
 

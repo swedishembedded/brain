@@ -16,6 +16,13 @@
 //! the bidirectional self-attention trio — the same primitives the DIAMOND UNet
 //! (`crates/diamond`) already validates.
 //!
+//! [`tiled`] runs either direction as an overlapping cover of tiles, so peak
+//! VRAM is bounded by the tile and not by the image - the difference between a
+//! 2048x2048 decode that fits a card and one that cannot. It engages
+//! automatically past a device-budget threshold, and a cover that does not
+//! split is the whole-image path bit for bit. [`tiling2d`] is its geometry,
+//! and is deliberately a projection of [`tiling3d`]'s (one blend, not two).
+//!
 //! [`blocks3d`] is the sibling builder for **3D causal video** autoencoders
 //! (`[C, T, H, W]` volumes, causal `conv3d`, cross-chunk `FeatCache`). It is
 //! deliberately a sibling and not a widening of [`blocks`]: five consumers
@@ -27,6 +34,8 @@ pub mod blocks3d;
 pub mod config;
 pub mod decoder;
 pub mod latent;
+pub mod tiled;
+pub mod tiling2d;
 pub mod tiling3d;
 
 pub use config::VaeConfig;
@@ -34,4 +43,8 @@ pub use decoder::{
     decoder_device_bytes, decoder_device_bytes_for_pixels, decoder_weight_bytes, encoder_device_bytes,
     encoder_device_bytes_for_pixels, encoder_weight_bytes,
     device, level_bytes_per_pixel, Tensors, VaeDecoder, VaeEncoder,
+};
+pub use tiled::{
+    decoder_device_bytes_for_pixels_planned, decoder_device_bytes_tiled, encoder_device_bytes_for_pixels_planned,
+    encoder_device_bytes_tiled, Tiling, VaeTiledDecoder, VaeTiledEncoder,
 };
