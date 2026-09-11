@@ -135,9 +135,9 @@ use model::gdn::{gdn_causal_conv1d_step, gdn_recurrent_step, GdnBwdIds, GdnConvI
 // were never used outside this module even before they lived here.
 pub use model::gdn::gdn_chunk_size;
 use model::moe::{
-    expert_fwd, expert_fwd_i8, moe_layer_bwd, router_fwd_kind, shared_expert_fwd, ExpertBwdScratch, ExpertGrads,
-    ExpertScratch, ExpertScratch8, ExpertWeights, MoeActs, MoeIds, MoeIds8, MoeIdsBwd, MoeShape, RouterBwdIds,
-    RouterKind, SharedExpertIds, SharedExpertScratch,
+    expert_fwd, expert_fwd_grouped, expert_fwd_i8, moe_layer_bwd, router_fwd_kind, shared_expert_fwd, ExpertBwdScratch,
+    ExpertGrads, ExpertScratch, ExpertScratch8, ExpertWeights, GroupedExpertFwdIds, GroupedExpertScratch, MoeActs,
+    MoeIds, MoeIds8, MoeIdsBwd, MoeShape, RouterBwdIds, RouterKind, SharedExpertIds, SharedExpertScratch,
 };
 use optim::Optim;
 
@@ -271,6 +271,21 @@ const STATIC_PIPELINES: &[(&str, &str)] = &[
     // `block::rmsnorm_bwd`. Appended at the true end, same convention as the
     // tiers above, so every const stays put.
     ("rmsnorm_dx_rows", kernels::RMSNORM_DX_ROWS),               // 95
+    // -- prefill/inference grouped-GEMM MoE dispatch (M5.12) -- device-side
+    // top-k routing + histogram/scan/permute + one grouped GEMM per
+    // projection, replacing the `n_experts`-long dense per-expert loop for
+    // every non-training, non-int8 forward with `rows > 1` (decode's `rows
+    // == 1` path above already has its own, cheaper, host-readback-based
+    // sparse dispatch). See `Self::moe_sublayer`'s grouped-forward branch and
+    // `model::moe::expert_fwd_grouped`'s own module doc (M5.10, first landed
+    // for `crates/deepseek2`) for the full pipeline. Appended at the true
+    // end, same convention as every tier above.
+    ("moe_group_counts", kernels::MOE_GROUP_COUNTS),             // 96
+    ("scan_block", kernels::SCAN_BLOCK),                         // 97
+    ("scan_add", kernels::SCAN_ADD),                             // 98
+    ("moe_group_perm_emit", kernels::MOE_GROUP_PERM_EMIT),       // 99
+    ("matmul_reg3_grouped", kernels::MATMUL_REG3_GROUPED),       // 100
+    ("moe_group_combine", kernels::MOE_GROUP_COMBINE),           // 101
 ];
 
 /// This model's FULL kernel set: `STATIC_PIPELINES` (every hand-numbered
@@ -455,6 +470,12 @@ const SPLICE: usize = 90;
 const SPLICE_BWD: usize = 91;
 const AXPY: usize = 92;
 const ROUTER_TOPK_COMPACT: usize = 93;
+const MOE_GROUP_COUNTS: usize = 96;
+const SCAN_BLOCK: usize = 97;
+const SCAN_ADD: usize = 98;
+const MOE_GROUP_PERM_EMIT: usize = 99;
+const MATMUL_REG3_GROUPED: usize = 100;
+const MOE_GROUP_COMBINE: usize = 101;
 
 /// Every slot is a REAL kernel now (backward is wired, see [`Qwen35::backward`]):
 /// `rope`/`rope_bwd` still point at `rmsnorm` (index 0) because qwen35 never
@@ -511,6 +532,25 @@ fn gdn_ids() -> GdnIds {
 
 fn moe_ids() -> MoeIds {
     MoeIds { router_gate: ROUTER_GATE, linear_gated: MOE_LINEAR_GATED, silu_mul: SILU_MUL, scale_add: SCALE_ADD }
+}
+
+/// Kernel ids for [`model::moe::expert_fwd_grouped`] -- the `rows > 1`
+/// prefill/inference sibling of [`moe_ids`]'s per-expert dense loop, wired
+/// exactly like `crates/deepseek2/src/model.rs::grouped_expert_ids` (same
+/// kernel set, same field-for-field mapping -- no new kernel this crate
+/// adds).
+fn grouped_expert_ids() -> GroupedExpertFwdIds {
+    GroupedExpertFwdIds {
+        router_topk_compact: ROUTER_TOPK_COMPACT,
+        group_counts: MOE_GROUP_COUNTS,
+        scan_block: SCAN_BLOCK,
+        scan_add: SCAN_ADD,
+        perm_emit: MOE_GROUP_PERM_EMIT,
+        gather: EMBED,
+        gemm_grouped: MATMUL_REG3_GROUPED,
+        silu_mul: SILU_MUL,
+        combine: MOE_GROUP_COMBINE,
+    }
 }
 
 /// [`model::gdn::gdn_causal_conv1d_step`]'s kernel id -- the streaming
@@ -700,6 +740,25 @@ struct TrainActs {
     xn_final: DeviceBuffer,
 }
 
+/// Per-layer fused expert-weight banks plus the shared scratch
+/// [`model::moe::expert_fwd_grouped`] needs - built ONCE in
+/// [`Qwen35::new_impl_on`] by concatenating the per-expert `blocks.{l}.mlp.
+/// experts.{ei}.{gate,up,down}.weight` buffers [`Qwen35::moe_expert_names`]
+/// already names (a host round-trip, done once at construction, not per
+/// forward call: this crate's import keeps the per-expert fan-out layout
+/// `model::moe::expert_fwd`/[`Qwen35::moe_sublayer_decode_sparse`] both still
+/// need, unlike `crates/deepseek2`, which imports the fused bank straight off
+/// the GGUF `ffn_*_exps` tensor and so needs no such copy - see the
+/// `Qwen35::moe_grouped` field's own doc for exactly which instances get
+/// one). `banks[l]` is `Some` only for a layer this shard owns
+/// ([`Shard::owns`]); `scratch` is sized for `shape.rows = b*t` - the only
+/// row count [`Qwen35::run_forward`] ever drives `moe_sublayer` with for
+/// `n > 1` (decode's `n==1` step never reaches the grouped branch).
+struct MoeGrouped {
+    banks: Vec<Option<(DeviceBuffer, DeviceBuffer, DeviceBuffer)>>,
+    scratch: GroupedExpertScratch,
+}
+
 /// Qwen3.5-35B-A3B hybrid decoder - forward/inference only (see module doc).
 pub struct Qwen35 {
     pub gpu: Gpu,
@@ -736,6 +795,13 @@ pub struct Qwen35 {
     /// no behavioural purpose since a weight's name never changes after
     /// construction.
     moe_expert_names: Vec<Vec<(String, String, String)>>,
+    /// Prefill/inference (`rows > 1`, fp32, non-training) grouped-GEMM MoE
+    /// infra - `Some` on exactly the instances [`Self::moe_sublayer`]'s
+    /// grouped branch runs on (`!is_train && q8.is_none()`, the SAME
+    /// condition [`Self::new_impl_on`] builds this under), `None` for a
+    /// training or int8 build, which keep the per-expert dense/int8 loops
+    /// unchanged. See [`MoeGrouped`]'s own doc.
+    moe_grouped: Option<MoeGrouped>,
     /// The `model::ops` façade - see [`Qwen35::ops_linear`]'s own doc.
     ops: Ops,
     /// Per-layer GDN/GQA mixer linears (the 9 leaves `Qwen35Q8::
@@ -1110,6 +1176,43 @@ impl Qwen35 {
         // MoE experts only; the mixer linears build `weights` below instead).
         let q8 = if i8_on { Some(Qwen35Q8::build(&gpu, src, &cfg, b * t, MAX_ABS_ROW, QUANT_PACK)) } else { None };
 
+        // Prefill/inference grouped-GEMM MoE infra (M5.12) -- built for
+        // exactly the instances `moe_sublayer`'s grouped branch runs on: not
+        // training (that tape needs `MoeActs`-shaped per-expert saves for
+        // `moe_sublayer_bwd`, which the grouped/permuted layout does not
+        // produce -- `expert_fwd_grouped` has no backward yet, see its own
+        // module doc) and not int8 (the packed-dot path has its own combine,
+        // untouched by this change). See `MoeGrouped`'s own doc for why this
+        // is a host round-trip over already-uploaded per-expert weights
+        // rather than a change to this crate's (fan-out) import layout.
+        let moe_grouped = if !train && q8.is_none() {
+            let (d, moe_ff, e) = (cfg.d_model, cfg.moe_intermediate_size, cfg.n_experts);
+            let per_expert = (moe_ff * d) as usize;
+            let banks: Vec<Option<(DeviceBuffer, DeviceBuffer, DeviceBuffer)>> = (0..cfg.n_layers as usize)
+                .map(|l| {
+                    if !shard.owns(l) {
+                        return None;
+                    }
+                    let mut gate_bank = Vec::with_capacity(per_expert * e as usize);
+                    let mut up_bank = Vec::with_capacity(per_expert * e as usize);
+                    let mut down_bank = Vec::with_capacity(per_expert * e as usize);
+                    for (gn, un, dn) in &moe_expert_names[l] {
+                        gate_bank.extend(gpu.read(ps.w(gn), per_expert));
+                        up_bank.extend(gpu.read(ps.w(un), per_expert));
+                        down_bank.extend(gpu.read(ps.w(dn), per_expert));
+                    }
+                    let gate_buf = gpu.storage_init(&format!("blocks.{l}.mlp.experts.bank.gate"), &gate_bank);
+                    let up_buf = gpu.storage_init(&format!("blocks.{l}.mlp.experts.bank.up"), &up_bank);
+                    let down_buf = gpu.storage_init(&format!("blocks.{l}.mlp.experts.bank.down"), &down_bank);
+                    Some((gate_buf, up_buf, down_buf))
+                })
+                .collect();
+            let shape = MoeShape { rows: b * t, d_model: d, moe_ff, n_experts: e, top_k: cfg.top_k };
+            Some(MoeGrouped { banks, scratch: GroupedExpertScratch::new(&gpu, &shape) })
+        } else {
+            None
+        };
+
         // Per-layer GDN/GQA mixer linears: every layer this shard owns
         // gets its own leaves (GDN: in_proj_{qkv,z,b,a}/out_proj; GQA:
         // {q,k,v,o}_proj) as a `model::ops::Weight`, built ONCE here. `i8`
@@ -1255,6 +1358,7 @@ impl Qwen35 {
             ps,
             q8,
             moe_expert_names,
+            moe_grouped,
             ops,
             weights,
             b,
@@ -1698,36 +1802,39 @@ impl Qwen35 {
             Some(acts)
         } else if n == 1 {
             // Decode's sparse dispatch -- see `Self::moe_sublayer_decode_sparse`'s
-            // own doc. Batched/prefill (`n > 1`, the `else` arm below) is left
-            // completely alone: per-dispatch overhead is amortised there, so
-            // this optimisation only pays off at decode's single row.
+            // own doc (cheaper than the grouped path below at a single row:
+            // a direct host readback of the exact few experts that fired
+            // beats the grouped path's histogram/scan/permute machinery).
             self.moe_sublayer_decode_sparse(l, &mut steps, &shape, &xn2, &gate, &moe_acc);
             None
         } else {
-            let scratch = ExpertScratch {
-                gate_pre: &g.storage((n * moe_ff) as u64),
-                up: &g.storage((n * moe_ff) as u64),
-                h: &g.storage((n * moe_ff) as u64),
-                expert_out: &g.storage((n * d) as u64),
-            };
-            for ei in 0..e {
-                let (gn, un, dn) = &self.moe_expert_names[l][ei as usize];
-                steps.extend(expert_fwd(
-                    g,
-                    &moe_ids(),
-                    &shape,
-                    &xn2,
-                    &gate,
-                    self.w(gn),
-                    self.w(un),
-                    self.w(dn),
-                    &scratch,
-                    &moe_acc,
-                    ei,
-                    0,
-                    ei != 0,
-                ));
-            }
+            // Batched/prefill (`n > 1`) inference: device-side grouped-GEMM
+            // dispatch (M5.12), replacing the `n_experts`-long dense
+            // per-expert loop this branch used before -- see `MoeGrouped`'s
+            // own doc and `model::moe::expert_fwd_grouped`'s module doc for
+            // the full pipeline. `moe_grouped` is `Some` here by
+            // construction: this arm is reached only when `!is_train &&
+            // self.q8.is_none()`, exactly `Self::new_impl_on`'s own build
+            // condition for it.
+            let mg = self
+                .moe_grouped
+                .as_ref()
+                .expect("qwen35: moe_grouped must be built for every non-training, non-int8 instance");
+            let (gate_bank, up_bank, down_bank) = mg.banks[l]
+                .as_ref()
+                .unwrap_or_else(|| panic!("qwen35: moe_grouped bank missing for owned layer {l}"));
+            steps.extend(expert_fwd_grouped(
+                g,
+                &grouped_expert_ids(),
+                &shape,
+                &xn2,
+                &gate,
+                gate_bank,
+                up_bank,
+                down_bank,
+                &mg.scratch,
+                &moe_acc,
+            ));
             None
         };
 
@@ -3171,6 +3278,253 @@ mod decode_sparse_moe_tests {
             cfg.d_model,
             cfg.moe_intermediate_size,
             dense_best / sparse_best
+        );
+    }
+}
+
+/// Prefill/inference (`n > 1`) grouped-GEMM MoE dispatch (M5.12a) - the
+/// batched sibling of `decode_sparse_moe_tests` above, gating
+/// `Self::moe_sublayer`'s grouped-forward branch (`MoeGrouped` /
+/// `model::moe::expert_fwd_grouped`) against the exact dense per-expert loop
+/// it replaced. Unlike the decode test's bit-identical bar, this compares
+/// two genuinely different kernels (`moe_linear_gated.wgsl`'s per-row-gated
+/// naive accumulation vs `matmul_reg3_grouped.wgsl`'s tiled register GEMM) -
+/// the SAME "mathematically equivalent, not textually identical" tolerance
+/// category `crates/model/tests/moe_grouped_parity.rs` already establishes
+/// for `expert_fwd_grouped` itself (see [`TOLERANCE`]'s own doc for the
+/// measured numbers this crate's wiring adds on top).
+#[cfg(test)]
+mod grouped_moe_tests {
+    use super::*;
+    use crate::config::Qwen35Config;
+
+    /// The exact dense per-expert loop `moe_sublayer`'s prefill (`n>1`)
+    /// `else` arm used before this task's grouped-GEMM branch replaced it -
+    /// reimplemented standalone as the independent baseline (mirrors
+    /// `decode_sparse_moe_tests::moe_out_dense_reference`'s own doc: any
+    /// future edit to the real dense loop must be mirrored here or this test
+    /// stops being an honest baseline). Generalized over `n` (this module
+    /// only ever calls it with `n>1`; `decode_sparse_moe_tests`'s own copy
+    /// stays pinned at the `n==1` decode shape it tests).
+    fn moe_out_dense_reference_batched(m: &Qwen35, l: usize, xmid: &DeviceBuffer, n: u32) -> Vec<f32> {
+        let g = &m.gpu;
+        let c = &m.cfg;
+        let d = c.d_model;
+        let e = c.n_experts;
+        let moe_ff = c.moe_intermediate_size;
+        let shared_ff = c.shared_expert_intermediate_size;
+        let p = |s: &str| format!("blocks.{l}.{s}");
+
+        let xn2 = g.storage((n * d) as u64);
+        let router_logits = g.storage((n * e) as u64);
+        let mut steps = vec![
+            rmsnorm_fwd(g, &kernel_ids(), xmid, m.w(&p("ln2.weight")), &xn2, d, n),
+            g.step(MATMUL, &[&xn2, m.w(&p("mlp.router.weight")), &router_logits], &[n, d, e], n * e),
+        ];
+        let shape = MoeShape { rows: n, d_model: d, moe_ff, n_experts: e, top_k: c.top_k };
+        let gate = g.storage((n * e) as u64);
+        steps.push(router_fwd_kind(
+            g,
+            &moe_ids(),
+            RouterKind::Softmax { aux_coef: 0.0, z_coef: 0.0, norm_topk_prob: true, routed_scaling: 1.0 },
+            &shape,
+            &router_logits,
+            None,
+            &gate,
+            None,
+        ));
+
+        let moe_acc = g.storage((n * d) as u64);
+        let scratch = ExpertScratch {
+            gate_pre: &g.storage((n * moe_ff) as u64),
+            up: &g.storage((n * moe_ff) as u64),
+            h: &g.storage((n * moe_ff) as u64),
+            expert_out: &g.storage((n * d) as u64),
+        };
+        for ei in 0..e {
+            let ep = |s: &str| format!("blocks.{l}.mlp.experts.{ei}.{s}");
+            steps.extend(expert_fwd(
+                g,
+                &moe_ids(),
+                &shape,
+                &xn2,
+                &gate,
+                m.w(&ep("gate.weight")),
+                m.w(&ep("up.weight")),
+                m.w(&ep("down.weight")),
+                &scratch,
+                &moe_acc,
+                ei,
+                0,
+                ei != 0,
+            ));
+        }
+
+        let moe_out = g.storage((n * d) as u64);
+        let sh_gate_pre = g.storage((n * shared_ff) as u64);
+        let sh_up = g.storage((n * shared_ff) as u64);
+        let sh_h = g.storage((n * shared_ff) as u64);
+        let sh_mlp_out = g.storage((n * d) as u64);
+        let sh_gate_logits = g.storage(n as u64);
+        let sh_gate_scalar = g.storage(n as u64);
+        let sh_scaled = g.storage((n * d) as u64);
+        let sh_scratch = SharedExpertScratch {
+            gate_pre: &sh_gate_pre,
+            up: &sh_up,
+            h: &sh_h,
+            mlp_out: &sh_mlp_out,
+            gate_logits: &sh_gate_logits,
+            gate_scalar: &sh_gate_scalar,
+            scaled: &sh_scaled,
+        };
+        steps.extend(shared_expert_fwd(
+            g,
+            &shared_expert_ids(),
+            n,
+            d,
+            shared_ff,
+            &xn2,
+            m.w(&p("mlp.shared_expert.gate.weight")),
+            m.w(&p("mlp.shared_expert.up.weight")),
+            m.w(&p("mlp.shared_expert.down.weight")),
+            Some(m.w(&p("mlp.shared_expert_gate.weight"))),
+            &sh_scratch,
+            &moe_acc,
+            &moe_out,
+        ));
+
+        g.submit(&[], &steps);
+        g.read(&moe_out, (n * d) as usize)
+    }
+
+    /// Relative L2 (`||grouped - dense|| / ||dense||`), NOT an absolute
+    /// tolerance: this model's `tiny()` MoE output lands at magnitude
+    /// ~1e-9-1e-8 (small `N(0, 0.02)` weights through several unselected-
+    /// expert-masked SwiGLU stages), so an absolute bound loose enough to
+    /// give real headroom over the two kernels' legitimate rounding
+    /// difference would ALSO trivially pass a genuinely wrong wiring, whose
+    /// output at this scale is just as small.
+    ///
+    /// Both numbers below are MEASURED, not assumed - mutation-verified
+    /// against swapping the `gate_bank`/`up_bank` arguments into
+    /// `expert_fwd_grouped` (a real wiring bug: gate/up feed different
+    /// projections of the SwiGLU, `h = silu(gate) * up`).
+    ///
+    /// Genuine agreement (unmutated): `rel_l2` 1.7e-8 - 4.1e-8 at every layer
+    /// (`matmul_reg3_grouped.wgsl`'s tiled reduction order vs
+    /// `moe_linear_gated.wgsl`'s per-row-gated naive one - the SAME
+    /// "different kernel, same math" tolerance category `crates/model/
+    /// tests/moe_grouped_parity.rs`'s own `TOLERANCE` documents).
+    ///
+    /// The swapped-bank mutation: `rel_l2` 3.6e-4 - 7.3e-4 at every layer -
+    /// four orders of magnitude above genuine agreement, but NOT ~1.0: at
+    /// `tiny()`'s small `N(0, 0.02)` weight scale `silu(x) ~= x/2` for both
+    /// operands, so `silu(gate)*up` and `silu(up)*gate` agree to FIRST order
+    /// and only diverge in the second-order term - a smaller effect than a
+    /// naive "wrong direction entirely" bug would produce, but still 10000x
+    /// the genuine noise floor.
+    ///
+    /// `1e-5` sits two orders of magnitude above the measured genuine
+    /// agreement and one order below the measured mutation - real headroom
+    /// on both sides, not a number backed into passing.
+    const TOLERANCE: f32 = 1e-5;
+
+    fn run(gpu: Gpu) {
+        let cfg = Qwen35Config::tiny();
+        let b = 1u32;
+        let t = cfg.block_size;
+        let d = cfg.d_model as usize;
+        let init = crate::init::init_weights(&cfg, 13);
+        let m = Qwen35::new_on(gpu, cfg.clone(), b, t, &init);
+
+        // Arbitrary but deterministic multi-row hidden state (`t=24` rows)
+        // fed straight into `moe_sublayer`, isolating the MoE dispatch from
+        // the rest of the layer stack exactly like the decode test above.
+        let n = (b * t) as usize;
+        let xvals: Vec<f32> = (0..n * d).map(|i| ((i as f32) * 0.013 - 5.0).sin()).collect();
+        let xmid = m.gpu.storage_init("grouped_prefill_test_xmid", &xvals);
+
+        for l in 0..cfg.n_layers as usize {
+            let dense = moe_out_dense_reference_batched(&m, l, &xmid, b * t);
+            let (grouped_buf, _) = m.moe_sublayer(l, &xmid, b * t);
+            let grouped = m.gpu.read(&grouped_buf, n * d);
+            assert_eq!(dense.len(), grouped.len(), "layer {l}: dense/grouped moe_out length mismatch");
+
+            let mut sq_diff = 0.0f64;
+            let mut sq_dense = 0.0f64;
+            for (a, bv) in grouped.iter().zip(dense.iter()) {
+                sq_diff += ((*a - *bv) as f64).powi(2);
+                sq_dense += (*bv as f64).powi(2);
+            }
+            assert!(sq_dense.sqrt() > 1e-12, "layer {l}: oracle output is all-zero - the test shape routes nothing");
+            let rel_l2 = (sq_diff.sqrt() / sq_dense.sqrt()) as f32;
+            assert!(
+                rel_l2 < TOLERANCE,
+                "layer {l}: grouped-GEMM prefill MoE diverged from the dense per-expert \
+                 loop it replaces: rel_l2={rel_l2} (tolerance={TOLERANCE}) \
+                 grouped[..4]={:?} dense[..4]={:?}",
+                &grouped[..4.min(grouped.len())],
+                &dense[..4.min(dense.len())],
+            );
+        }
+    }
+
+    /// Pin the CPU JIT explicitly regardless of `BRAIN_DEVICE`, mirroring
+    /// `decode_sparse_moe_tests`'s own convention.
+    #[test]
+    fn moe_sublayer_grouped_prefill_matches_dense_loop_cpu() {
+        run(Gpu::new_cpu(pipelines()));
+    }
+
+    /// `Gpu::new` honours `BRAIN_DEVICE` when set and defaults to the wgpu
+    /// backend otherwise - run this under both `BRAIN_DEVICE=cpu` and unset.
+    #[test]
+    fn moe_sublayer_grouped_prefill_matches_dense_loop_default_backend() {
+        run(Gpu::new(pipelines()));
+    }
+
+    /// The actual claim behind this task ("fewer GPU dispatches per prefill
+    /// layer, at real expert scale"), measured via `Gpu::stats()`, mirroring
+    /// `decode_sparse_moe_tests::moe_sublayer_decode_sparse_cuts_gpu_dispatches_at_real_expert_scale`'s
+    /// own rationale exactly (`dispatches`, not `submits` - both paths queue
+    /// their whole layer through exactly one `Gpu::submit`).
+    #[test]
+    fn moe_sublayer_grouped_prefill_cuts_gpu_dispatches_at_real_expert_scale() {
+        let mut cfg = Qwen35Config::tiny();
+        cfg.n_experts = 256;
+        cfg.top_k = 8;
+        cfg.n_layers = 1;
+        let b = 1u32;
+        let t = cfg.block_size;
+        let gpu = Gpu::new_cpu(pipelines());
+        let init = crate::init::init_weights(&cfg, 9);
+        let m = Qwen35::new_on(gpu, cfg.clone(), b, t, &init);
+        let d = cfg.d_model as usize;
+        let n = (b * t) as usize;
+        let xvals: Vec<f32> = (0..n * d).map(|i| ((i as f32) * 0.029 + 2.0).cos()).collect();
+        let xmid = m.gpu.storage_init("grouped_dispatch_count_test_xmid", &xvals);
+
+        let before_dense = m.gpu.stats().expect("cpu backend reports device stats");
+        let _dense = moe_out_dense_reference_batched(&m, 0, &xmid, b * t);
+        let after_dense = m.gpu.stats().unwrap();
+
+        let before_grouped = m.gpu.stats().unwrap();
+        let (_grouped_buf, _) = m.moe_sublayer(0, &xmid, b * t);
+        let after_grouped = m.gpu.stats().unwrap();
+
+        let dense_dispatches = after_dense.dispatches - before_dense.dispatches;
+        let grouped_dispatches = after_grouped.dispatches - before_grouped.dispatches;
+        println!(
+            "moe_sublayer prefill dispatch @ rows={n} n_experts={} top_k={}: dense={dense_dispatches} \
+             dispatches, grouped={grouped_dispatches} dispatches ({:.1}x fewer)",
+            cfg.n_experts,
+            cfg.top_k,
+            dense_dispatches as f64 / grouped_dispatches.max(1) as f64
+        );
+        assert!(
+            grouped_dispatches < dense_dispatches,
+            "grouped prefill dispatch ({grouped_dispatches} dispatches) did not beat the dense \
+             per-expert loop ({dense_dispatches} dispatches)"
         );
     }
 }

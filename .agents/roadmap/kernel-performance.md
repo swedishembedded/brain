@@ -6301,3 +6301,138 @@ their pre-change baseline (no new kernel usage, no `.wgsl` touched, so no
 
 **Commit**: one - `model: GEMM-ify GDN's UT-transform backward via closed
 form (M5.11)`.
+
+### M5.12a - qwen35moe's prefill/inference MoE dispatch migrates to the grouped GEMM (forward only)
+
+M5.10 built `model::moe::expert_fwd_grouped` (device-side top-k routing +
+histogram/scan/permute + one grouped GEMM per projection, zero host
+readback) and landed it on `crates/deepseek2`'s inference path; its own
+"deliberately deferred" item (2) named the production migration onto a
+model whose weight loader keeps per-expert `DeviceBuffer`s separate (not
+GGUF's already-fused `ffn_*_exps` bank) as a real, separate piece of work.
+This milestone is that migration, on `crates/qwen35moe`: `Qwen35::
+moe_sublayer`'s batched/prefill (`rows > 1`, non-training, non-int8) `else`
+arm - a dense loop calling `model::moe::expert_fwd` once per expert,
+UNCONDITIONALLY, for all `n_experts` (256 at the real 35B-A3B shape) -
+replaced with one `expert_fwd_grouped` call, mirroring `crates/deepseek2`'s
+own `grouped_expert_ids()`/call-site shape exactly (same kernel set, same
+field-for-field mapping, no new kernel this crate adds). Decode's `rows==1`
+step (`Qwen35::moe_sublayer_decode_sparse`, landed separately, already
+GPU-sparse) and the training tape's per-expert loop (needs `MoeActs`-shaped
+per-expert saves `moe_sublayer_bwd` reads - `expert_fwd_grouped` has no
+backward yet, see M5.10's own note) are both left untouched, exactly like
+`crates/deepseek2`'s own inference-vs-train split.
+
+**The architectural friction, named as asked rather than pushed through
+silently.** `expert_fwd_grouped` needs each projection's weights as ONE
+buffer with every expert's `[out,in]` matrix concatenated back to back
+(`matmul_reg3_grouped.wgsl`'s own doc explains why: a per-expert base
+offset is then plain arithmetic against a single binding, not a lookup
+table or several bindings). `crates/deepseek2` gets this for free - GGUF's
+own `ffn_{gate,up,down}_exps` tensor already ships pre-fused, so its import
+just keeps that layout (`gguf::import::Mapped::expert_bank`). `crates/
+qwen35moe`'s import deliberately does the OPPOSITE (`import.rs`'s own "fan-
+out expert stack" doc): it SLICES the same fused GGUF tensor into 256
+separate per-expert tensors at load time, because every other consumer in
+this file (`expert_fwd`'s training/prefill-dense/decode-sparse loops,
+`Qwen35Q8`'s int8 tier, LoRA) is written against that per-expert shape.
+Re-fusing at import would have meant re-deriving the weight-addressing
+convention for ALL of those call sites, not just the one this milestone
+targets - exactly the "touching many structurally unrelated call-sites for
+one new piece of information" shape this repo's own standing instruction
+asks to flag rather than push through. The migration taken instead is
+additive, not a re-plumb: `Qwen35::new_impl_on` builds a NEW `MoeGrouped`
+(per-owned-layer `(gate_bank, up_bank, down_bank)` `DeviceBuffer`s plus one
+shared `GroupedExpertScratch`) by reading back each already-uploaded
+per-expert weight buffer (`Gpu::read`) and re-uploading the concatenation
+(`Gpu::storage_init`) - a ONE-TIME host round trip at construction, done
+only for the exact instances the grouped branch runs on (`!is_train &&
+q8.is_none()`, checked in both places), leaving every existing weight
+buffer, name, and consumer untouched. **Cost, not claimed away**: this
+doubles this instance's resident MoE-weight VRAM (both the per-expert
+buffers, still needed for decode's sparse path, AND the new fused banks
+coexist) and pays a host round trip proportional to total MoE parameter
+count at construction time - real at real 35B-A3B scale (256 experts x 3
+projections x 40 layers), NOT measured or claimed fixed by this milestone;
+a follow-up that instead teaches `import.rs` to emit BOTH layouts straight
+from the GGUF source tensor (skipping the round trip, and the VRAM
+duplication if the per-expert layout is ever dropped for the branches that
+still need it) is the natural next step, same shape as M5.10a's own
+DeepSeek-OCR migration, not attempted here.
+
+**Correctness - `crates/qwen35moe/src/model.rs`'s new `grouped_moe_tests`
+module**, mirroring the existing `decode_sparse_moe_tests` module's own
+shape: `moe_out_dense_reference_batched` reimplements the exact `n>1` dense
+per-expert loop this milestone's branch replaced, standalone, as the
+independent baseline. Unlike the decode module's bit-identical bar (same
+`moe_linear_gated.wgsl` kernel on both sides there), this compares two
+GENUINELY DIFFERENT kernels - `moe_linear_gated.wgsl`'s per-row-gated naive
+accumulation (dense) vs `matmul_reg3_grouped.wgsl`'s tiled register GEMM
+(grouped) - so the comparison is `rel_l2 = ||grouped - dense|| /
+||dense||`, a scale-invariant metric, not an absolute bound: `tiny()`'s MoE
+output lands at magnitude ~1e-9-1e-8 (small `N(0,0.02)` weights through
+several unselected-expert-masked SwiGLU stages), so an absolute tolerance
+loose enough for the two kernels' legitimate rounding difference would
+ALSO trivially pass a genuinely wrong wiring, whose output at this scale is
+just as small - this was caught, not assumed: an earlier draft of this test
+used an absolute `1e-4` bound and it passed even with `gate_bank`/`up_bank`
+swapped into `expert_fwd_grouped` (a real bug - gate/up feed different
+SwiGLU projections), because both the correct and the swapped output sit
+at the same ~1e-9 scale. **Measured, mutation-verified**: genuine agreement
+(unmutated) is `rel_l2` 1.7e-8 - 4.1e-8 at every one of `tiny()`'s 8
+layers; the swapped-bank mutation moves every layer to `rel_l2` 3.6e-4 -
+7.3e-4 - four orders of magnitude above genuine agreement (not ~1.0,
+because at this small a weight scale `silu(x) ~= x/2` for both operands,
+so `silu(gate)*up` and `silu(up)*gate` agree to first order and only
+diverge in the second-order term - a real but SMALLER effect than a
+"wrong direction entirely" bug would produce at a larger weight scale, and
+still caught). The test's `TOLERANCE = 1e-5` sits two orders of magnitude
+above genuine agreement and one order below the measured mutation - real
+headroom on both sides, restored and re-verified green after the mutation
+check. `moe_sublayer_grouped_prefill_cuts_gpu_dispatches_at_real_expert_
+scale` pins the actual claim via `Gpu::stats().dispatches` at
+`n_experts=256, top_k=8, rows=24`: dense 1291 dispatches, grouped 22 (58.7x
+fewer) - both queued through exactly one `Gpu::submit`, matching M5.10's
+own accounting convention (`dispatches`, not `submits`, is what per-
+dispatch overhead means here). All 3 new tests green on both the CPU JIT
+and the default wgpu backend (Intel Arc Meteor Lake iGPU, Vulkan/Mesa
+ANV). Full existing suite re-run for regression coverage, all green:
+`cargo test --release --offline -p brain-qwen35moe --lib` (27/27, CPU +
+default backend where each test has both variants),
+`--test {model_smoke,model_i8_smoke,shard_parity,lora_freezes_base,
+decode_step,vl,sample_generate,sample_stream,serve}` (every one, including
+`decode_step_matches_full_prefill_{cpu,default_backend}` - the strongest
+existing end-to-end signal that this migration did not perturb the model's
+real forward output, since decode's own KV-cache path is compared token-
+by-token against a from-scratch prefill that now runs through the grouped
+branch). `cargo check --release --offline --workspace` clean. Backward
+untouched (`Qwen35::new_train` builds `is_train=true`, so `moe_grouped` is
+never built and `moe_sublayer_bwd`/`expert_bwd` still read the untouched
+per-expert dense-loop acts) - `gradcheck::check_qwen35moe` unaffected by
+construction, not re-run as a correctness gate for a forward-only,
+non-backward-touching change (this repo's own gate rule 3 only requires it
+for backward-touching changes).
+
+**Gates**: `cargo clippy --release --offline -p brain-qwen35moe
+--all-targets --all-features -- -D warnings` clean. `python3
+scripts/spdx/check.py` clean (no new files, one file touched already
+SPDX-headed). `bash scripts/gates/check-kernel-selection.sh` and `bash
+scripts/gates/check-no-doc-citations.sh` both clean. `python3
+scripts/build/gen-kernel-table.py --check` clean (471 kernels, no new
+`.wgsl` this session - every kernel this milestone dispatches already
+existed from M5.10).
+
+**Not claimed**: dX (input gradient) and dW (weight gradient) through the
+grouped/permuted layout - `expert_fwd_grouped` itself has no backward yet
+(M5.10's own note), so extending training onto this path needs that
+written and gradchecked FIRST, out of scope for this session; qwen35moe's
+training tape keeps running the dense per-expert loop unchanged, exactly
+as before this milestone. Real 35B-A3B-scale wall-clock/VRAM measurement -
+this session's sandbox has no discrete GPU matching that hardware; the
+dispatch-count reduction above is the mechanism-level number this
+milestone stands on, per this ledger's own decision 4 convention, not a
+fabricated wall-clock. The host-round-trip construction cost and per-
+instance VRAM doubling noted above are real and unmeasured at real scale.
+
+**Commit**: one - `qwen35moe: migrate prefill/inference MoE dispatch to
+the grouped GEMM (M5.12a)`.
