@@ -1128,6 +1128,28 @@ fn main() {
     // that can actually hold it instead of unconditionally on card 0. An
     // explicit selection never consults it.
     placement::install();
+    // A one-shot CLI verb (every arm below except `serve`) has nothing else
+    // running in the process that needs to survive a panic - unlike
+    // `serve`'s own request-isolating `catch_unwind`
+    // (`crates/residency/src/executor.rs::lane_loop`, untouched: this hook
+    // is never installed for that arm). The default unwind is actively
+    // dangerous here instead: it runs every live GPU device's `Drop` while
+    // the panicking thread's own driver call may still be on the stack -
+    // exactly the teardown race `drain_before_exit` exists to avoid (see its
+    // own doc) - and a `wgpu::Error::OutOfMemory` from
+    // `device.on_uncaptured_error` (`crates/backend-wgpu/src/lib.rs`) panics
+    // by design. Measured production failure: `brain pulid text2image
+    // --precision fp32` panicked on a genuine T5-XXL OOM and the unwind
+    // segfaulted (exit 139) instead of the clean, non-zero exit this hook
+    // produces. The default hook still runs first, so `RUST_BACKTRACE`
+    // keeps working exactly as before.
+    if argv.get(1).map(String::as_str) != Some("serve") {
+        let default_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            default_hook(info);
+            drain_before_exit(101);
+        }));
+    }
     match argv.get(1).map(|s| s.as_str()) {
         Some("data") => data_cli::run_data(&argv[2..]),
         Some("devices") => devices_cli::run_devices(&argv[2..]),
