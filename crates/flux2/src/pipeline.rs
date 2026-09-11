@@ -312,9 +312,12 @@ pub fn img2img_sigmas(strength: f32, steps: usize, n_gen: usize) -> Vec<f32> {
 // Tiling spends passes instead of memory: the canvas is denoised in
 // overlapping windows, each one a forward sized to a resolution that is known
 // to fit, and the predictions are averaged over the overlap. Every window sees
-// the SAME conditioning (prompt, references, folded adapters) and carries the
-// position ids it has on the WHOLE canvas (`model::position_ids_tile`), so the
-// windows compose one scene rather than a grid of independent ones. The
+// the same prompt and the same folded adapters, and carries the position ids it
+// has on the WHOLE canvas (`model::position_ids_tile`), so the windows compose
+// one scene rather than a grid of independent ones. A reference registered to
+// the canvas is narrowed to the window's own region of it
+// (`refcond::JointLayout::window`) for the same reason the ids are absolute:
+// a window told only "this is the room" paints a whole room. The
 // averaging happens on the VELOCITY at every step, not on finished images:
 // that is MultiDiffusion, and it is what keeps the windows agreeing as the
 // trajectory descends instead of letting them diverge and be cross-faded at
@@ -430,6 +433,30 @@ pub fn plan_tiles(lh: usize, lw: usize, tiling: Option<Tiling>) -> Vec<Tile> {
 pub fn gen_tokens_per_forward(opts: &GenOpts) -> u32 {
     let (lh, lw) = ((opts.height / 16) as usize, (opts.width / 16) as usize);
     plan_tiles(lh, lw, opts.tile).iter().map(|t| (t.th * t.tw) as u32).max().unwrap_or(0)
+}
+
+/// Reference tokens ONE DiT forward sees under `opts` - the companion of
+/// [`gen_tokens_per_forward`], and the other half of what a tiled pipeline has
+/// to be **sized** for.
+///
+/// Untiled, and for any reference that is not registered to the canvas, this is
+/// [`ref_tokens`] unchanged: the whole reference set enters every forward. A
+/// reference at the canvas's own token grid is carried per window
+/// ([`crate::refcond::JointLayout::window`]), so it costs one window's worth
+/// rather than the whole canvas's - which is what lets tiling bound the cost of
+/// an EDIT and not only of a text-to-image canvas. At 2048x1360 with 512px
+/// tiles a canvas-sized reference is 10 880 tokens against a window's 1 024:
+/// left whole it is the forward, not the canvas, that fails to fit.
+pub fn ref_tokens_per_forward(refs: &[(Vec<f32>, u32, u32)], opts: &GenOpts) -> u32 {
+    let (lh, lw) = ((opts.height / 16) as usize, (opts.width / 16) as usize);
+    // An unplannable request is sized for the whole reference set and refused
+    // later, where the message can say what is wrong with it.
+    let Ok(canvas) = canvas_layout(0, refs, opts) else { return ref_tokens(refs, opts) };
+    plan_tiles(lh, lw, opts.tile)
+        .iter()
+        .map(|t| canvas.window(t.y0, t.x0, t.th, t.tw).n_ref() as u32)
+        .max()
+        .unwrap_or(0)
 }
 
 /// Per-token blend weight of one window over its own tokens: a trapezoid that
@@ -1632,8 +1659,24 @@ fn generate_batch_on<D: Denoiser>(
 /// on a reference and a generation conditioned on one talking about the same
 /// sequence. A tiled run takes [`crate::refcond::JointLayout::window`]s of this
 /// one, so its windows inherit that agreement rather than restating it.
+///
+/// The canvas layout is also where a reference's **spatial registration** is
+/// decided ([`crate::refcond::JointLayout::register_aligned_refs`]): a
+/// reference encoded at the canvas's own token grid is the picture being
+/// edited, so a window of the canvas is conditioned on the matching window of
+/// it. Nothing else in the pipeline needs to know - the layout carries it.
 fn layout_of(txt_len: usize, r: &BatchRequest) -> Result<crate::refcond::JointLayout, String> {
-    let o = &r.opts;
+    canvas_layout(txt_len, &r.refs, &r.opts)
+}
+
+/// [`layout_of`] over the parts of a request that decide the layout, so the
+/// sizing entry points ([`ref_tokens_per_forward`]) build the SAME layout the
+/// sampler runs rather than a second reading of the same rules.
+fn canvas_layout(
+    txt_len: usize,
+    refs: &[(Vec<f32>, u32, u32)],
+    o: &GenOpts,
+) -> Result<crate::refcond::JointLayout, String> {
     if !o.width.is_multiple_of(16) || !o.height.is_multiple_of(16) {
         return Err(format!("width/height must be multiples of 16 (got {}×{})", o.width, o.height));
     }
@@ -1645,12 +1688,12 @@ fn layout_of(txt_len: usize, r: &BatchRequest) -> Result<crate::refcond::JointLa
     // ids at the size its CONDITIONING copy is encoded at, which under
     // `strength` is a downscale of the first reference rather than its own
     // dimensions.
-    let ref_dims: Vec<(usize, usize)> = cond_sizes(&r.refs, o)
+    let ref_dims: Vec<(usize, usize)> = cond_sizes(refs, o)
         .into_iter()
         .flatten()
         .map(|(rh, rw)| ((rh / 16) as usize, (rw / 16) as usize))
         .collect();
-    Ok(crate::refcond::JointLayout::with_refs(txt_len, lh, lw, ref_dims))
+    Ok(crate::refcond::JointLayout::with_refs(txt_len, lh, lw, ref_dims).register_aligned_refs())
 }
 
 /// One window of a denoise: where it sits on the canvas, the shared layout
@@ -1687,8 +1730,10 @@ fn plan_on<D: Denoiser>(d: &D, r: &BatchRequest) -> Result<Vec<TilePlan>, String
         .map(|tile| {
             // The window of the SHARED layout, not a parallel construction of
             // one: the text rows and every reference's t-axis id come across
-            // untouched, so each window conditions on the whole reference set
-            // exactly as the untiled run - and as a paired training step - does.
+            // untouched, and a reference registered to the canvas is narrowed
+            // to this window's region of it - so each window is conditioned on
+            // exactly the rows the untiled run - and a paired training step -
+            // puts at those positions.
             let layout = canvas.window(tile.y0, tile.x0, tile.th, tile.tw);
             TilePlan { ids: layout.ids(), layout, w: tile_weights(&tile, lh, lw, ov), tile }
         })
@@ -1924,13 +1969,15 @@ fn denoise_group_on<D: Denoiser>(
             let mut slots: Vec<(usize, bool, f32)> = Vec::new(); // (active index, is_uncond, t)
             for (a, &k) in active.iter().enumerate() {
                 let l = &lanes[k];
-                // This window's rows out of the canvas, then every reference's
-                // tokens - both through the window's own shared layout, which
-                // is also what assigned `tp.ids`, and the same assembly
+                // This window's rows out of the canvas, then the reference
+                // rows - both through the window's own shared layout, which is
+                // also what assigned `tp.ids`, and the same assembly
                 // `modelgrad::make_flow_batch_paired` performs for a paired
-                // training sample. Every window is conditioned on the whole
-                // reference set: the references are what the image is OF, not a
-                // property of which part of it is being predicted.
+                // training sample. `l.ref_tokens` is always the WHOLE encoded
+                // reference set, once per request: which slice of it this
+                // window is conditioned on is the layout's decision, so a
+                // reference is never re-encoded per window and two windows
+                // cannot disagree about what the photograph contains.
                 let win = tp.layout.window_tokens(&l.lat, l.lw, ch);
                 joints.push(tp.layout.joint_tokens(&win, &l.ref_tokens, ch));
                 slots.push((a, false, l.sigmas[i]));
@@ -3336,26 +3383,26 @@ mod tests {
         }
     }
 
-    /// **Tiling gate 6 - tiling and reference conditioning compose.** The
-    /// production case is "declutter this 2048x2048 room from a `--ref`
-    /// photograph": it needs tiling to fit the canvas in a card AND the
-    /// reference conditioning a paired-trained adapter was fitted against, at
-    /// the same time. Those are the two properties that were written
-    /// independently, and either one implemented beside the other rather than
-    /// on top of it would pass its own gate and fail this one.
+    /// **Tiling gate 6 - an UNREGISTERED reference is carried whole by every
+    /// window.** A reference that is not at the canvas's own token grid - here
+    /// a `--ref-resolution-scale 0.5` conditioning copy, and equally any
+    /// photograph of something other than the canvas - has no per-window region
+    /// to crop to: token `(h, w)` of it is not a picture of canvas cell
+    /// `(h, w)`. Such a reference is generic guidance, so every window must
+    /// receive all of it, at the same ids and the same values the single
+    /// full-canvas forward uses. This is the fallback that gate 7 below must
+    /// not break while it crops the registered case.
     ///
-    /// Gate 2 above proves the id ARITHMETIC composes. This proves the
-    /// SAMPLER does: a real `--strength 1.0` request, whose reference is
-    /// encoded at the downscale `cond_sizes` picks rather than at its own
-    /// dimensions, is driven through the actual request path, and every
-    /// sequence the DiT was handed is checked against the single full-canvas
-    /// forward the same request makes untiled. Each window must carry, for its
-    /// own image rows, exactly the ids that forward assigns that absolute
-    /// region - and, for the shared reference tail, exactly its ids and
-    /// exactly its token values, because a photograph is what the picture is
-    /// OF and not a property of which part of it is being painted.
+    /// Gate 2 above proves the id ARITHMETIC composes. This proves the SAMPLER
+    /// does: a real `--strength 1.0` request, whose reference is encoded at the
+    /// downscale `cond_sizes` picks rather than at its own dimensions, is driven
+    /// through the actual request path, and every sequence the DiT was handed is
+    /// checked against the single full-canvas forward the same request makes
+    /// untiled. Each window must carry, for its own image rows, exactly the ids
+    /// that forward assigns that absolute region - and, for the shared reference
+    /// tail, exactly its ids and exactly its token values.
     #[test]
-    fn a_tiled_reference_conditioned_canvas_carries_the_untiled_sequence() {
+    fn a_tiled_unregistered_reference_is_carried_whole_by_every_window() {
         let (w, h) = (512u32, 384u32);
         let (lh, lw) = ((h / 16) as usize, (w / 16) as usize);
         let tiling = Tiling { size: 256, overlap: 64 };
@@ -3366,6 +3413,10 @@ mod tests {
             // is the model's only source of "what room is this", which is
             // exactly the configuration a paired-trained adapter deploys in.
             strength: Some(1.0),
+            // Half resolution, so the conditioning copy is 16x12 tokens against
+            // the canvas's 32x24 and there is no cell-for-cell correspondence
+            // to crop along - the case this gate is about.
+            ref_resolution_scale: 0.5,
             steps: Some(1),
             experimental_steps: true,
             seed: 7,
@@ -3391,6 +3442,7 @@ mod tests {
         let nt = one.cfg.txt_len;
         let n_ref = full_joint.len() / cin - lh * lw;
         assert!(n_ref > 0, "the gate needs a reference that really conditions the forward");
+        assert_ne!(n_ref, lh * lw, "the gate needs a reference that is NOT at the canvas grid");
 
         // The same request, tiled.
         let many = Stub::new();
@@ -3436,6 +3488,151 @@ mod tests {
         let distinct: std::collections::HashSet<&[u32]> =
             seen.iter().map(|(_, ids)| &ids[nt * 4..(nt + tiles[0].th * tiles[0].tw) * 4]).collect();
         assert_eq!(distinct.len(), tiles.len(), "windows share image ids - they are positioned locally, not on the canvas");
+    }
+
+    /// **Tiling gate 7 - a window is conditioned on ITS OWN region of a
+    /// registered reference.** The production case is "declutter this 2048x1360
+    /// room from a `--ref` photograph of it at `--strength 1.0`": the reference
+    /// and the canvas are the same picture in the same framing, pinned there by
+    /// the anchoring rule, so reference token `(y, x)` IS canvas cell `(y, x)`.
+    ///
+    /// Handing every window the whole reference is not a harmless excess of
+    /// context, it is the bug that produced a repeating grid of duplicated
+    /// furniture on a real klein-9b run: twelve windows each told "this is the
+    /// room" with nothing to say which corner of it they were painting, each
+    /// painting a plausible whole room. So each window's reference tail must be
+    /// the CROP of the reference that matches its own canvas region - the same
+    /// tokens, at the same canvas-absolute ids, the single full-canvas forward
+    /// puts there - and overlapping windows must agree on the reference exactly
+    /// where they overlap on the image, so the crop blends the way the image
+    /// content does.
+    ///
+    /// The stub cannot see whether the picture improves - that is a real-model
+    /// question - but it can see the whole of what the model is told, which is
+    /// where the duplication came from.
+    #[test]
+    fn a_tiled_window_carries_only_its_own_crop_of_a_registered_reference() {
+        let (w, h) = (512u32, 384u32);
+        let (lh, lw) = ((h / 16) as usize, (w / 16) as usize);
+        let tiling = Tiling { size: 256, overlap: 64 };
+        let base = GenOpts {
+            width: w,
+            height: h,
+            // The deployed configuration of a paired-trained edit adapter: the
+            // init latent is pure noise and the reference, at the canvas's own
+            // size and framing, is the only source of "what room is this".
+            strength: Some(1.0),
+            steps: Some(1),
+            experimental_steps: true,
+            seed: 7,
+            ..GenOpts::default()
+        };
+        let req = |tile: Option<Tiling>| BatchRequest {
+            prompt: "a decluttered living room".into(),
+            refs: vec![source(h, w)],
+            opts: GenOpts { tile, ..base.clone() },
+            cancel: Default::default(),
+        };
+
+        // The single full-canvas forward the same request makes untiled: the
+        // reference tail there is the whole reference, cell for cell under the
+        // canvas.
+        let one = Stub::new();
+        let cin = one.cfg.in_channels;
+        let nt = one.cfg.txt_len;
+        generate_batch_on(&one, std::slice::from_ref(&req(None)), &mut |_, _, _| {})
+            .pop()
+            .unwrap()
+            .expect("untiled stub generation");
+        let untiled = one.seen.borrow();
+        let (full_joint, full_ids) = untiled.first().expect("one full-canvas forward");
+        assert_eq!(full_joint.len(), 2 * lh * lw * cin, "the gate needs a canvas-sized reference");
+
+        let many = Stub::new();
+        generate_batch_on(&many, std::slice::from_ref(&req(Some(tiling))), &mut |_, _, _| {})
+            .pop()
+            .unwrap()
+            .expect("tiled stub generation");
+        let tiles = plan_tiles(lh, lw, Some(tiling));
+        assert!(tiles.len() > 1, "the gate needs a canvas that actually tiles (got {})", tiles.len());
+        let seen = many.seen.borrow();
+        assert_eq!(seen.len(), tiles.len(), "one forward per window at one step, in plan order");
+
+        for (t, (joint, ids)) in tiles.iter().zip(seen.iter()) {
+            let n_gen = t.th * t.tw;
+            // The reference costs one WINDOW, not one canvas - which is what
+            // makes tiling bound the cost of an edit and not only of a
+            // text-to-image canvas.
+            assert_eq!(joint.len(), 2 * n_gen * cin, "tile at ({},{}) token count", t.y0, t.x0);
+            assert_eq!(ids.len(), (nt + 2 * n_gen) * 4, "tile at ({},{}) sequence length", t.y0, t.x0);
+            assert!(joint.len() < full_joint.len(), "the whole reference is still being repeated");
+            for y in 0..t.th {
+                for x in 0..t.tw {
+                    // Reference row `(y, x)` of this window against the
+                    // untiled forward's reference row for the same canvas cell:
+                    // same token, same canvas-absolute id.
+                    let (mine, theirs) = (n_gen + y * t.tw + x, lh * lw + (t.y0 + y) * lw + t.x0 + x);
+                    assert_eq!(
+                        &joint[mine * cin..][..cin],
+                        &full_joint[theirs * cin..][..cin],
+                        "tile at ({},{}), reference token ({y},{x})",
+                        t.y0,
+                        t.x0
+                    );
+                    assert_eq!(
+                        &ids[(nt + mine) * 4..][..4],
+                        &full_ids[(nt + theirs) * 4..][..4],
+                        "tile at ({},{}), reference id ({y},{x})",
+                        t.y0,
+                        t.x0
+                    );
+                }
+            }
+        }
+
+        // Overlapping windows agree on the reference exactly where they overlap
+        // on the image, so the reference's overlap blends with the image
+        // content's instead of against it.
+        let mut shared = 0usize;
+        for (a, ta) in tiles.iter().enumerate() {
+            for (b, tb) in tiles.iter().enumerate().skip(a + 1) {
+                for cy in ta.y0.max(tb.y0)..(ta.y0 + ta.th).min(tb.y0 + tb.th) {
+                    for cx in ta.x0.max(tb.x0)..(ta.x0 + ta.tw).min(tb.x0 + tb.tw) {
+                        let at = ta.th * ta.tw + (cy - ta.y0) * ta.tw + (cx - ta.x0);
+                        let bt = tb.th * tb.tw + (cy - tb.y0) * tb.tw + (cx - tb.x0);
+                        assert_eq!(
+                            &seen[a].0[at * cin..][..cin],
+                            &seen[b].0[bt * cin..][..cin],
+                            "windows {a} and {b} disagree about reference cell ({cy},{cx})"
+                        );
+                        shared += 1;
+                    }
+                }
+            }
+        }
+        assert!(shared > 0, "the gate needs windows that really overlap");
+
+        // Negative control: the crops must actually DIFFER between windows.
+        // Repeating the whole reference - the bug - satisfies every equality
+        // above that is about the overlap and none of this one.
+        let tails: std::collections::HashSet<Vec<u32>> = seen
+            .iter()
+            .zip(&tiles)
+            .map(|((j, _), t)| j[(t.th * t.tw) * cin..].iter().map(|v| v.to_bits()).collect())
+            .collect();
+        assert_eq!(tails.len(), tiles.len(), "windows share a reference tail - the reference was not cropped");
+
+        // And the sizing entry point knows it, so a tiled edit reserves DiT
+        // scratch for a window's reference rather than the canvas's.
+        let opts = GenOpts { tile: Some(tiling), ..base };
+        let refs = vec![source(h, w)];
+        assert_eq!(ref_tokens_per_forward(&refs, &opts), (tiles[0].th * tiles[0].tw) as u32);
+        assert_eq!(ref_tokens(&refs, &opts), (lh * lw) as u32, "the whole reference is still encoded once");
+        assert_eq!(
+            ref_tokens_per_forward(&refs, &GenOpts { tile: None, ..opts }),
+            (lh * lw) as u32,
+            "without tiling the whole reference enters the one forward, as before"
+        );
     }
 
     /// **Tiling gate 3 - the cost per forward is bounded by the budget, not by

@@ -52,15 +52,19 @@ const HELP: &str = "brain flux2 <cmd>
                                     # which is what makes a resolution past what fits in one
                                     # pass reachable at all. Multiple of 16. OFF by default,
                                     # and 0 also means off: a canvas that fits is cheaper in
-                                    # one forward (every window repeats the text/reference
-                                    # conditioning), so this is a knob a caller who is buying
-                                    # resolution with time turns on. Turning it on below the
-                                    # budget is free and changes nothing: the plan is then a
-                                    # single window and the run is bit-for-bit the untiled one.
-                                    # Every window sees the same prompt, references and folded
-                                    # adapters, and carries the position ids its tokens have on
-                                    # the WHOLE canvas, so they compose one scene. NOTE the VAE
-                                    # still decodes the assembled canvas in one pass.
+                                    # one forward (every window repeats the text conditioning),
+                                    # so this is a knob a caller who is buying resolution with
+                                    # time turns on. Turning it on below the budget is free and
+                                    # changes nothing: the plan is then a single window and the
+                                    # run is bit-for-bit the untiled one. Every window sees the
+                                    # same prompt and folded adapters, and carries the position
+                                    # ids its tokens have on the WHOLE canvas, so they compose
+                                    # one scene. A --ref at the output size and framing (what
+                                    # --strength pins it to) is an EDIT target, so each window
+                                    # is conditioned on its own matching region of it rather
+                                    # than on the whole photograph; a reference at any other
+                                    # size is generic guidance and every window sees all of it.
+                                    # NOTE the VAE still decodes the canvas in one pass.
            [--tile-overlap N]       # how much adjacent windows share, in pixels (default: a
                                     # quarter of --tile-size). The blend across it is feathered,
                                     # so this is the width a seam is spread over. Multiple of
@@ -580,6 +584,13 @@ fn generate(args: &[String]) -> Result<(), String> {
     // is sized for the window while the VAE still decodes the full canvas,
     // which is why `build_sized` takes the two ceilings separately.
     let n_fwd = flux2::pipeline::gen_tokens_per_forward(&o);
+    // And the other half of it: a reference pinned to the output size is an
+    // edit target, so a window is conditioned on its own region of it and the
+    // reference cost follows the window too. Sizing for the whole reference
+    // would reserve the canvas's worth on every forward - at 2048x1360 with
+    // 512px tiles that is ten times the window's own tokens, and it is the
+    // forward rather than the canvas that then fails to fit.
+    let n_ref_fwd = flux2::pipeline::ref_tokens_per_forward(&ref_imgs, &o);
     if let Some(t) = o.tile {
         let tiles = flux2::pipeline::plan_tiles((o.height / 16) as usize, (o.width / 16) as usize, Some(t));
         eprintln!(
@@ -591,10 +602,14 @@ fn generate(args: &[String]) -> Result<(), String> {
         );
         if tiles.len() == 1 {
             eprintln!("flux2: the canvas fits one window - this run is the untiled one");
+        } else if n_ref_fwd < n_ref {
+            eprintln!(
+                "flux2: a reference at the output size is an edit target - each window is conditioned on its own {n_ref_fwd} of the {n_ref} reference tokens"
+            );
         }
     }
-    eprintln!("flux2: building pipeline ({n_fwd} generated + {n_ref} reference tokens per forward, {n_gen} decoded) ...");
-    let pipe = Pipeline::build_sized(&variant, &paths, n_fwd + n_ref, n_gen, &adapters, precision, 1)?;
+    eprintln!("flux2: building pipeline ({n_fwd} generated + {n_ref_fwd} reference tokens per forward, {n_gen} decoded) ...");
+    let pipe = Pipeline::build_sized(&variant, &paths, n_fwd + n_ref_fwd, n_gen, &adapters, precision, 1)?;
     let t0 = std::time::Instant::now();
     // Per-phase wall clock: the callback fires immediately BEFORE each phase,
     // so the gap between two calls is the previous phase's duration. Text

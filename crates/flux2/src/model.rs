@@ -1155,6 +1155,13 @@ pub fn position_ids(txt_len: usize, lh: usize, lw: usize, refs: &[(usize, usize)
 /// of which part of the canvas is being predicted, so the window shares them
 /// with every other window.
 ///
+/// `refs` here are whole, **unregistered** references - the whole photograph on
+/// every window. A reference that is the canvas itself, at the canvas's own
+/// framing, is instead cropped to the window it conditions
+/// ([`crate::refcond::JointLayout::register_aligned_refs`]), and the sampler
+/// builds its ids from that layout rather than from here; this entry point
+/// takes grids, not a canvas, so it is in no position to tell the two apart.
+///
 /// Like [`position_ids`], this is [`crate::refcond::JointLayout::ids`] - of
 /// [`crate::refcond::JointLayout::window`] rather than of the canvas - so a
 /// tile and a full forward cannot drift from each other, and neither can drift
