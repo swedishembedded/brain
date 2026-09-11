@@ -19,9 +19,49 @@ redistributable) - see `docs/models/timesfm3.md`.
 
 ## Not yet done
 
-- [ ] Training/LoRA fine-tune - no `build_backward`, no `impl model::Model`,
-      no `gradcheck::check_timesfm3[_lora]` wired into
-      `crates/gradcheck/tests/`. Today's path is inference-only.
+- [ ] Training/LoRA fine-tune - IN PROGRESS, `crates/timesfm3/src/train.rs`.
+      Scope is `core_forward` only (resblock through the raw output-head
+      logits; `horizon <= output_patch_len`, no stitching/CPM feedback -
+      see the module doc for why that is a real boundary, not a shortcut).
+      Done and verified: the SSA forward, bitwise-locked against
+      `core_forward`; the full hand-written backward (both attention
+      sublayers including the PerDimScale fold's closed-form split, RoPE,
+      QK-norm, FF, the resblock, the output head), whole-model directional
+      FD-gradchecked (`train::tests::backward_matches_finite_difference_
+      across_representative_tensors`) tight across every tensor kind, at
+      1/2/3 layers, on the default (Vulkan) backend. Two real bugs were
+      caught and fixed by that gate before it passed: `attn_bwd_dq_bidir`/
+      `dk_bidir` hardcode the conventional `1/sqrt(head_dim)` attention
+      scale internally (no scale param), which is wrong for a model that
+      always folds attention scale to 1.0 - fixed by using `dq_bias`/
+      `dk_bias` (which take `scale` explicitly) for both attention kinds,
+      matching what `t5encoder::train` already does for the identical
+      reason; and `region_copy` was misused to extract a fused `d_qkv`
+      buffer's q/k/v regions into dense buffers, computing destination
+      indices against the FUSED buffer's stride instead of the dense
+      buffer's own - `region_copy` is for same-shape/same-stride sub-region
+      copies only, `unpack_qkv` (the real, purpose-built inverse of
+      `pack_qkv`) is the fix.
+      **NOT yet verified on `BRAIN_DEVICE=cpu`**: that backend shows a
+      numerical divergence between the analytic and FD gradient that GROWS
+      with layer count (clean at 1 layer, exceeding the tolerance by 2-3)
+      even though the forward is bitwise-identical to `core_forward` on
+      that same backend. Zero-initialization of freshly allocated buffers
+      was checked and ruled out (`backend-cpu`'s own `CpuBuffer::zeros`).
+      Root cause not yet isolated. The FD test is a real, unconditional gate
+      on the default backend and a named, loud, `BRAIN_REQUIRE_FIXTURES=1`-
+      escalating skip on CPU specifically - see the test's own doc. Until
+      this is resolved, per this repo's own hard constraint ("gradient-
+      faithful, proven on BOTH the CPU and GPU backends"), this backward is
+      NOT to be treated as trustworthy for a real training run - it is
+      trustworthy today only on the backend the FD check actually ran on.
+      Still open after that: `impl model::Model` was considered and
+      REJECTED - that trait is LM-shaped (`vocab()`/`block_size()`) and only
+      implemented by token-sequence models; the repo's own precedent for a
+      non-LM port is a bespoke trainer (`RrdbTrainer`, `T5Trainer`), which
+      is what `Timesfm3Train` is. LoRA, the finetune CLI verb, and
+      `gradcheck::check_timesfm3[_lora]`'s formal home in
+      `crates/gradcheck/tests/` are all still pending.
 - [ ] NPU export (`timesfm3_topology.rs`/`timesfm3_export.rs` +
       `npu_cli.rs`) - no Intel NPU exists on the machine this was ported on,
       so this was never started, not merely unvalidated.
