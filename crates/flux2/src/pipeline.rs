@@ -209,6 +209,18 @@ pub struct GenOpts {
     /// full-size copy of a same-size reference doubles the image half of the
     /// joint sequence, and attention is quadratic in that.
     pub ref_resolution_scale: f32,
+    /// Denoise the canvas in overlapping windows of at most this size instead
+    /// of in one forward ([`Tiling`]), so the DiT's activation memory follows
+    /// the window rather than the canvas and a resolution past what fits in
+    /// one pass becomes reachable.
+    ///
+    /// `None` is the untiled path. Opt-in, not a threshold: a canvas that fits
+    /// is cheaper and better in ONE forward - every window costs a full pass
+    /// over the text and reference conditioning - so the caller who is buying
+    /// resolution with time says so. Turning it on below the budget costs
+    /// nothing either: the plan is then a single window and the run is
+    /// bit-for-bit the untiled one ([`plan_tiles`]).
+    pub tile: Option<Tiling>,
 }
 
 /// Default [`GenOpts::ref_resolution_scale`]: the first reference conditions
@@ -231,6 +243,7 @@ impl Default for GenOpts {
             seed: 0,
             mask: None,
             ref_resolution_scale: DEFAULT_REF_RESOLUTION_SCALE,
+            tile: None,
         }
     }
 }
@@ -285,6 +298,164 @@ pub fn init_cond_size(scale: f32, h: u32, w: u32) -> Option<(u32, u32)> {
 ///   sigma by more than `δ`.
 pub fn img2img_sigmas(strength: f32, steps: usize, n_gen: usize) -> Vec<f32> {
     diffusion::scheduler::klein_sigmas(steps, n_gen).into_iter().map(|s| strength * s).collect()
+}
+
+// ---- tiled generation (MultiDiffusion) -------------------------------------
+//
+// A DiT forward costs memory in the total token count: attention is flash (so
+// the scores are never materialized), but the per-token linear activations -
+// q/k/v, the MLP hidden - are not, and they scale with the joint sequence.
+// A canvas four times the area of a native run is four times those buffers,
+// which is how a resolution that the attention math would happily serve still
+// fails to fit a card.
+//
+// Tiling spends passes instead of memory: the canvas is denoised in
+// overlapping windows, each one a forward sized to a resolution that is known
+// to fit, and the predictions are averaged over the overlap. Every window sees
+// the SAME conditioning (prompt, references, folded adapters) and carries the
+// position ids it has on the WHOLE canvas (`model::position_ids_tile`), so the
+// windows compose one scene rather than a grid of independent ones. The
+// averaging happens on the VELOCITY at every step, not on finished images:
+// that is MultiDiffusion, and it is what keeps the windows agreeing as the
+// trajectory descends instead of letting them diverge and be cross-faded at
+// the end.
+
+/// Tiled generation: the canvas is denoised in overlapping windows of at most
+/// `size`, so one DiT forward's cost follows `size` rather than the canvas.
+///
+/// Both fields are in **output pixels** - the unit `--width`/`--height`/
+/// `--ref-size` already speak - and both must be multiples of 16 (one latent
+/// token). `None` on [`GenOpts::tile`] is the untiled path, and a canvas that
+/// fits inside `size` is one window, which [`plan_tiles`] makes bit-for-bit
+/// that same path.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Tiling {
+    /// Largest window edge, in pixels. Pick a resolution the model is known to
+    /// run comfortably at - 1024 is FLUX.2's native size and what its memory
+    /// estimates are written against.
+    pub size: u32,
+    /// How much adjacent windows share, in pixels. The blend is feathered
+    /// across it, so this is the width the seam is spread over: too little and
+    /// the seam shows, too much and the run pays for windows it did not need.
+    pub overlap: u32,
+}
+
+impl Tiling {
+    /// A tile budget of `size` pixels with the default overlap: a quarter of
+    /// the tile, floored to a whole latent token. A quarter is wide enough that
+    /// the feather has room to hide a seam and narrow enough that a 2x2 tiling
+    /// is still four forwards rather than nine.
+    pub fn new(size: u32) -> Tiling {
+        Tiling { size, overlap: (size / 4 / 16 * 16).max(16) }
+    }
+
+    /// Reject a budget that is not expressible in whole latent tokens, or an
+    /// overlap that would leave adjacent windows no ground of their own.
+    pub fn check(&self) -> Result<(), String> {
+        if self.size < 16 || !self.size.is_multiple_of(16) {
+            return Err(format!("tile size must be a multiple of 16 and at least 16 (got {})", self.size));
+        }
+        if !self.overlap.is_multiple_of(16) {
+            return Err(format!("tile overlap must be a multiple of 16 (got {})", self.overlap));
+        }
+        if self.overlap >= self.size {
+            return Err(format!("tile overlap {} must be smaller than the tile size {}", self.overlap, self.size));
+        }
+        Ok(())
+    }
+}
+
+/// One window of the generated canvas, in latent tokens: its top-left corner
+/// and its extent.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Tile {
+    pub y0: usize,
+    pub x0: usize,
+    pub th: usize,
+    pub tw: usize,
+}
+
+/// Window starts along one axis, in latent tokens: `0, step, 2·step, …` and
+/// then one final window flush against the far edge.
+///
+/// The last window is *pinned* to the end rather than left to fall wherever
+/// the stride lands, so the canvas is always fully covered and no window ever
+/// hangs off the edge at a size the model was not built for. The price is that
+/// the final overlap can be wider than `overlap`; a wider overlap only blends
+/// more, so it is the safe direction.
+pub fn tile_starts(total: usize, tile: usize, overlap: usize) -> Vec<usize> {
+    if tile == 0 || total <= tile {
+        return vec![0];
+    }
+    let step = tile.saturating_sub(overlap).max(1);
+    let mut starts = Vec::new();
+    let mut y = 0;
+    while y + tile < total {
+        starts.push(y);
+        y += step;
+    }
+    starts.push(total - tile);
+    starts.dedup();
+    starts
+}
+
+/// Split an `lh x lw` latent canvas into overlapping windows under `tiling`.
+///
+/// `None` - and any canvas that already fits the budget - is ONE window
+/// covering the whole canvas: the untiled path written in the tiled path's own
+/// terms, so there is no second denoise loop to drift and "tiling on" at a
+/// small size is provably a no-op rather than approximately one.
+pub fn plan_tiles(lh: usize, lw: usize, tiling: Option<Tiling>) -> Vec<Tile> {
+    let Some(t) = tiling else {
+        return vec![Tile { y0: 0, x0: 0, th: lh, tw: lw }];
+    };
+    let (tile, ov) = ((t.size / 16) as usize, (t.overlap / 16) as usize);
+    let (th, tw) = (tile.min(lh), tile.min(lw));
+    let mut out = Vec::new();
+    for y0 in tile_starts(lh, th, ov) {
+        for x0 in tile_starts(lw, tw, ov) {
+            out.push(Tile { y0, x0, th, tw });
+        }
+    }
+    out
+}
+
+/// Generated latent tokens ONE DiT forward sees under `opts`: the whole canvas
+/// untiled, the largest window when tiling is on.
+///
+/// This is what a pipeline has to be **sized** for, and it is the reason
+/// tiling buys anything: `Pipeline::build_sized` takes the forward ceiling and
+/// the output size separately, so a tiled run reserves DiT scratch for one
+/// window while still decoding the full canvas.
+pub fn gen_tokens_per_forward(opts: &GenOpts) -> u32 {
+    let (lh, lw) = ((opts.height / 16) as usize, (opts.width / 16) as usize);
+    plan_tiles(lh, lw, opts.tile).iter().map(|t| (t.th * t.tw) as u32).max().unwrap_or(0)
+}
+
+/// Per-token blend weight of one window over its own tokens: a trapezoid that
+/// ramps up across `ov` tokens on any side that has a neighbour and holds at 1
+/// on any side that is a canvas edge.
+///
+/// Positive everywhere (the ramp starts at `1/(ov+1)`, never 0), so every
+/// canvas token has weight to normalize by; and **exactly** 1 everywhere for a
+/// window that covers the whole canvas, which is what makes a one-window plan
+/// the untiled prediction bit for bit.
+fn tile_weights(t: &Tile, lh: usize, lw: usize, ov: usize) -> Vec<f32> {
+    let axis = |start: usize, len: usize, total: usize| -> Vec<f32> {
+        (0..len)
+            .map(|j| {
+                let up = if start == 0 { 1.0 } else { (j + 1) as f32 / (ov + 1) as f32 };
+                let down = if start + len == total { 1.0 } else { (len - j) as f32 / (ov + 1) as f32 };
+                up.min(down).min(1.0)
+            })
+            .collect()
+    };
+    let (wy, wx) = (axis(t.y0, t.th, lh), axis(t.x0, t.tw, lw));
+    let mut w = Vec::with_capacity(t.th * t.tw);
+    for vy in &wy {
+        w.extend(wx.iter().map(|vx| vy * vx));
+    }
+    w
 }
 
 /// Bilinear resize of a reference image (`[-1,1]` CHW, the layout
@@ -1433,35 +1604,41 @@ fn generate_batch_on<D: Denoiser>(
     progress: &mut dyn FnMut(u32, u32, &str),
 ) -> Vec<BatchOutcome> {
     let mut out: Vec<BatchOutcome> = (0..reqs.len()).map(|_| Err("not run".to_string())).collect();
-    // Partition by position ids: one slab layout per group.
-    let mut groups: Vec<(Vec<u32>, Vec<usize>)> = Vec::new();
+    // Partition by tile plan: one slab layout per group. Untiled requests plan
+    // to a single whole-canvas window, so the key is the joint position ids it
+    // always was.
+    let mut groups: Vec<(Vec<TilePlan>, Vec<usize>)> = Vec::new();
     for (i, r) in reqs.iter().enumerate() {
         match plan_on(d, r) {
             Err(e) => out[i] = Err(e),
-            Ok(ids) => match groups.iter_mut().find(|(g, _)| *g == ids) {
+            Ok(plan) => match groups.iter_mut().find(|(g, _)| *g == plan) {
                 Some((_, v)) => v.push(i),
-                None => groups.push((ids, vec![i])),
+                None => groups.push((plan, vec![i])),
             },
         }
     }
-    for (ids, members) in groups {
-        denoise_group_on(d, reqs, &ids, &members, &mut out, progress);
+    for (plan, members) in groups {
+        denoise_group_on(d, reqs, &plan, &members, &mut out, progress);
     }
     out
 }
 
-/// The joint token layout one request evaluates - text rows, the generated
-/// image's tokens, then each reference's.
+/// The joint token layout one request evaluates over the WHOLE canvas - text
+/// rows, the generated image's tokens, then each reference's.
 ///
 /// This is the SHARED [`crate::refcond::JointLayout`]: the training path builds
 /// the same type from its own `Cfg` and gets the same position ids and RoPE
 /// tables for the same reference grid, which is what keeps an adapter trained
 /// on a reference and a generation conditioned on one talking about the same
-/// sequence.
+/// sequence. A tiled run takes [`crate::refcond::JointLayout::window`]s of this
+/// one, so its windows inherit that agreement rather than restating it.
 fn layout_of(txt_len: usize, r: &BatchRequest) -> Result<crate::refcond::JointLayout, String> {
     let o = &r.opts;
     if !o.width.is_multiple_of(16) || !o.height.is_multiple_of(16) {
         return Err(format!("width/height must be multiples of 16 (got {}×{})", o.width, o.height));
+    }
+    if let Some(t) = o.tile {
+        t.check()?;
     }
     let (lh, lw) = ((o.height / 16) as usize, (o.width / 16) as usize);
     // Keep in step with the token builder: a reference contributes position
@@ -1476,10 +1653,46 @@ fn layout_of(txt_len: usize, r: &BatchRequest) -> Result<crate::refcond::JointLa
     Ok(crate::refcond::JointLayout::with_refs(txt_len, lh, lw, ref_dims))
 }
 
-/// Validate one request and return its joint position ids (the key that
-/// decides which requests can share a batched forward).
-fn plan_on<D: Denoiser>(d: &D, r: &BatchRequest) -> Result<Vec<u32>, String> {
-    Ok(layout_of(d.cfg().txt_len, r)?.ids())
+/// One window of a denoise: where it sits on the canvas, the shared layout
+/// evaluated AT that window, and its blend weights.
+///
+/// Built once per group rather than per step: the plan depends only on the
+/// canvas, the reference layout and the tile budget, all of which are what the
+/// group key already is.
+#[derive(Clone, PartialEq)]
+struct TilePlan {
+    tile: Tile,
+    /// This window's own [`crate::refcond::JointLayout`] - the canvas layout
+    /// windowed at `tile`. It is what sizes the forward, gathers the window's
+    /// rows out of the canvas latent and supplies the joint position ids, so
+    /// those three cannot disagree about which tokens this window is.
+    layout: crate::refcond::JointLayout,
+    /// Joint 4-axis ids for this window ([`crate::refcond::JointLayout::ids`]).
+    /// Cached off `layout` because every step of every lane in the group needs
+    /// them and none of them changes it.
+    ids: Vec<u32>,
+    /// One blend weight per window token ([`tile_weights`]).
+    w: Vec<f32>,
+}
+
+/// Validate one request and return its tile plan (the key that decides which
+/// requests can share a batched forward).
+fn plan_on<D: Denoiser>(d: &D, r: &BatchRequest) -> Result<Vec<TilePlan>, String> {
+    let o = &r.opts;
+    let canvas = layout_of(d.cfg().txt_len, r)?;
+    let (lh, lw) = (canvas.lh, canvas.lw);
+    let ov = o.tile.map_or(0, |t| (t.overlap / 16) as usize);
+    Ok(plan_tiles(lh, lw, o.tile)
+        .into_iter()
+        .map(|tile| {
+            // The window of the SHARED layout, not a parallel construction of
+            // one: the text rows and every reference's t-axis id come across
+            // untouched, so each window conditions on the whole reference set
+            // exactly as the untiled run - and as a paired training step - does.
+            let layout = canvas.window(tile.y0, tile.x0, tile.th, tile.tw);
+            TilePlan { ids: layout.ids(), layout, w: tile_weights(&tile, lh, lw, ov), tile }
+        })
+        .collect())
 }
 
 /// The source content a masked lane preserves, in latent space.
@@ -1501,7 +1714,7 @@ struct Preserve {
 fn denoise_group_on<D: Denoiser>(
     d: &D,
     reqs: &[BatchRequest],
-    ids: &[u32],
+    plan: &[TilePlan],
     members: &[usize],
     out: &mut [BatchOutcome],
     progress: &mut dyn FnMut(u32, u32, &str),
@@ -1513,8 +1726,6 @@ fn denoise_group_on<D: Denoiser>(
         lh: usize,
         lw: usize,
         n_gen: usize,
-        /// This lane's joint token layout - what its slab is assembled from.
-        layout: crate::refcond::JointLayout,
         steps: usize,
         guidance: f32,
         ctx: Vec<f32>,
@@ -1661,7 +1872,6 @@ fn denoise_group_on<D: Denoiser>(
             lh,
             lw,
             n_gen,
-            layout,
             steps: if zero { 0 } else { steps },
             guidance: o.guidance,
             ctx,
@@ -1697,45 +1907,81 @@ fn denoise_group_on<D: Denoiser>(
         }
         progress(i as u32 + 1, max_steps as u32 + 2, "denoising");
 
-        // Build one slot per DiT evaluation: (lane, ctx, t). CFG adds the
-        // unconditional pass as a second slot at the same timestep.
-        let mut joints: Vec<Vec<f32>> = Vec::with_capacity(active.len());
-        let mut slots: Vec<(usize, bool, f32)> = Vec::new(); // (active index, is_uncond, t)
-        for (a, &k) in active.iter().enumerate() {
-            let l = &lanes[k];
-            // The generated latent then every reference's tokens, through the
-            // shared layout - the same assembly `modelgrad::make_flow_batch`
-            // performs for a paired training sample.
-            joints.push(l.layout.joint_tokens(&l.lat, &l.ref_tokens, cfg.in_channels));
-            slots.push((a, false, l.sigmas[i]));
-            if l.ctx_uncond.is_some() {
-                slots.push((a, true, l.sigmas[i]));
+        // MultiDiffusion: one forward per window per lane, the velocities
+        // averaged over the canvas with the windows' feathered weights. The
+        // accumulator starts at **−0.0**, the additive identity that preserves
+        // the sign of a single contribution, so a one-window plan sums to that
+        // window's prediction bit for bit and the untiled path is untouched.
+        let ch = cfg.in_channels;
+        let mut acc: Vec<Vec<f32>> =
+            active.iter().map(|&k| vec![-0.0f32; lanes[k].n_gen * ch]).collect();
+        let mut wsum: Vec<Vec<f32>> = active.iter().map(|&k| vec![0.0f32; lanes[k].n_gen]).collect();
+        for tp in plan {
+            let n_tile = tp.tile.th * tp.tile.tw;
+            // Build one slot per DiT evaluation: (lane, ctx, t). CFG adds the
+            // unconditional pass as a second slot at the same timestep.
+            let mut joints: Vec<Vec<f32>> = Vec::with_capacity(active.len());
+            let mut slots: Vec<(usize, bool, f32)> = Vec::new(); // (active index, is_uncond, t)
+            for (a, &k) in active.iter().enumerate() {
+                let l = &lanes[k];
+                // This window's rows out of the canvas, then every reference's
+                // tokens - both through the window's own shared layout, which
+                // is also what assigned `tp.ids`, and the same assembly
+                // `modelgrad::make_flow_batch_paired` performs for a paired
+                // training sample. Every window is conditioned on the whole
+                // reference set: the references are what the image is OF, not a
+                // property of which part of it is being predicted.
+                let win = tp.layout.window_tokens(&l.lat, l.lw, ch);
+                joints.push(tp.layout.joint_tokens(&win, &l.ref_tokens, ch));
+                slots.push((a, false, l.sigmas[i]));
+                if l.ctx_uncond.is_some() {
+                    slots.push((a, true, l.sigmas[i]));
+                }
+            }
+            // One forward per chunk of at most `max_batch` slots.
+            let mut preds: Vec<Vec<f32>> = Vec::with_capacity(slots.len());
+            for chunk in slots.chunks(cap) {
+                let samples: Vec<crate::model::Sample<'_>> = chunk
+                    .iter()
+                    .map(|&(a, unc, t)| {
+                        let l = &lanes[active[a]];
+                        let ctx = if unc { l.ctx_uncond.as_ref().unwrap() } else { &l.ctx };
+                        crate::model::Sample { img_tokens: &joints[a], ctx, t }
+                    })
+                    .collect();
+                preds.extend(d.forward_batch(&samples, &tp.ids, n_tile));
+            }
+            // Fold CFG and scatter this window's velocity onto the canvas.
+            for (a, &k) in active.iter().enumerate() {
+                let cond = slots.iter().position(|&(sa, unc, _)| sa == a && !unc).expect("cond slot");
+                let pred: Vec<f32> = match slots.iter().position(|&(sa, unc, _)| sa == a && unc) {
+                    None => preds[cond].clone(),
+                    Some(u) => preds[cond].iter().zip(&preds[u]).map(|(&c, &un)| un + lanes[k].guidance * (c - un)).collect(),
+                };
+                let lw = lanes[k].lw;
+                for y in 0..tp.tile.th {
+                    for x in 0..tp.tile.tw {
+                        let (src, dst) = (y * tp.tile.tw + x, (tp.tile.y0 + y) * lw + tp.tile.x0 + x);
+                        let w = tp.w[src];
+                        wsum[a][dst] += w;
+                        for c in 0..ch {
+                            acc[a][dst * ch + c] += w * pred[src * ch + c];
+                        }
+                    }
+                }
             }
         }
-        // One forward per chunk of at most `max_batch` slots.
-        let mut preds: Vec<Vec<f32>> = Vec::with_capacity(slots.len());
-        for chunk in slots.chunks(cap) {
-            let samples: Vec<crate::model::Sample<'_>> = chunk
-                .iter()
-                .map(|&(a, unc, t)| {
-                    let l = &lanes[active[a]];
-                    let ctx = if unc { l.ctx_uncond.as_ref().unwrap() } else { &l.ctx };
-                    crate::model::Sample { img_tokens: &joints[a], ctx, t }
-                })
-                .collect();
-            preds.extend(d.forward_batch(&samples, ids, lanes[active[0]].n_gen));
-        }
-        // Fold CFG and take the Euler step, per lane.
+        // Normalize the blend and take the Euler step, per lane.
         for (a, &k) in active.iter().enumerate() {
-            let cond = slots.iter().position(|&(sa, unc, _)| sa == a && !unc).expect("cond slot");
-            let pred: Vec<f32> = match slots.iter().position(|&(sa, unc, _)| sa == a && unc) {
-                None => preds[cond].clone(),
-                Some(u) => preds[cond].iter().zip(&preds[u]).map(|(&c, &un)| un + lanes[k].guidance * (c - un)).collect(),
-            };
             let l = &mut lanes[k];
             let dt = l.sigmas[i + 1] - l.sigmas[i];
-            for (x, v) in l.lat.iter_mut().zip(&pred) {
-                *x += dt * v;
+            for tok in 0..l.n_gen {
+                // Weights are strictly positive, so this divides by at least
+                // one window's share; at one window it divides by exactly 1.
+                let total = wsum[a][tok];
+                for c in 0..ch {
+                    l.lat[tok * ch + c] += dt * (acc[a][tok * ch + c] / total);
+                }
             }
             // Blended latent diffusion. Outside the mask the latent is not
             // *guided* toward the source, it IS the source renoised to the
@@ -2107,6 +2353,7 @@ mod tests {
             seed: 11,
             mask,
             ref_resolution_scale: DEFAULT_REF_RESOLUTION_SCALE,
+            tile: None,
         };
         let req = BatchRequest {
             prompt: "a staged living room".into(),
@@ -2993,6 +3240,394 @@ mod tests {
         let (cos, rel) = brain_testutil::parity::compare(&chw, &want);
         assert!(cos > 0.9999, "downscale is not the ramp: cosine {cos}, rel_l2 {rel}");
         assert!(rel < 2e-3, "downscale is not the ramp: cosine {cos}, rel_l2 {rel}");
+    }
+
+    // ---- tiled (MultiDiffusion) generation ---------------------------------
+
+    /// One stub generation under `tile`, returning the rendered bytes AND
+    /// every joint sequence the sampler handed to the DiT.
+    ///
+    /// The DiT calls are part of the observable behaviour here: what a tiled
+    /// run must keep is not only the picture but the *shape* of the forwards it
+    /// took to get there, and neither gate below can see that from the pixels.
+    fn tiled_run(
+        tile: Option<Tiling>,
+        w: u32,
+        h: u32,
+        refs: Vec<(Vec<f32>, u32, u32)>,
+        steps: u32,
+    ) -> (Vec<u8>, Vec<(Vec<f32>, Vec<u32>)>) {
+        let d = Stub::new();
+        let opts = GenOpts {
+            width: w,
+            height: h,
+            steps: Some(steps),
+            experimental_steps: true,
+            seed: 11,
+            tile,
+            ..GenOpts::default()
+        };
+        let req = BatchRequest {
+            prompt: "a wide mountain valley".into(),
+            refs,
+            opts,
+            cancel: Default::default(),
+        };
+        let rgb = generate_batch_on(&d, std::slice::from_ref(&req), &mut |_, _, _| {})
+            .pop()
+            .unwrap()
+            .expect("stub generation")
+            .0;
+        (rgb, d.seen.into_inner())
+    }
+
+    /// **Tiling gate 1 - one tile is the untiled path.** A canvas that already
+    /// fits inside the tile budget must denoise EXACTLY as it did before
+    /// tiling existed: the same DiT inputs, the same position ids, the same
+    /// bytes out. This is the baseline the whole feature rests on - a blend
+    /// that is not the identity at one tile is a silent regression for every
+    /// run that never asked for tiles.
+    #[test]
+    fn a_single_tile_canvas_is_bit_for_bit_the_untiled_run() {
+        let (w, h) = (256u32, 192u32);
+        let refs = vec![source(h, w)];
+        let plain = tiled_run(None, w, h, refs.clone(), 4);
+        // 512 px of tile budget over a 256x192 canvas: tiling engages and
+        // produces exactly one tile.
+        let tiled = tiled_run(Some(Tiling { size: 512, overlap: 128 }), w, h, refs, 4);
+        assert_eq!(
+            plan_tiles((h / 16) as usize, (w / 16) as usize, Some(Tiling { size: 512, overlap: 128 })).len(),
+            1,
+            "this canvas must fit one tile, or the gate is testing something else"
+        );
+        assert_eq!(plain.1, tiled.1, "one tile changed what the DiT was asked");
+        assert_eq!(plain.0, tiled.0, "one tile changed the image");
+    }
+
+    /// **Tiling gate 2 - a tile's tokens sit where they sit on the CANVAS.**
+    /// Every image row of a tile's position ids must be the row a full-canvas
+    /// run would have given that same absolute (h, w) cell, and the text and
+    /// reference rows must be untouched by the tiling. This is the property the
+    /// whole feature exists to get right: tile-local (0-based) ids would make
+    /// every tile hallucinate its own independent scene at the canvas origin.
+    #[test]
+    fn a_tile_carries_the_canvas_absolute_position_ids() {
+        let (lh, lw, nt) = (12usize, 10usize, 3usize);
+        let refs = [(2usize, 3usize), (1usize, 1usize)];
+        let full = crate::model::position_ids(nt, lh, lw, &refs);
+        let tiles = plan_tiles(lh, lw, Some(Tiling { size: 6 * 16, overlap: 2 * 16 }));
+        assert!(tiles.len() > 1, "the gate needs a canvas that actually tiles");
+        for t in &tiles {
+            let ids = crate::model::position_ids_tile(nt, t.y0, t.x0, t.th, t.tw, &refs);
+            assert_eq!(ids.len(), (nt + t.th * t.tw + 7) * 4);
+            assert_eq!(&ids[..nt * 4], &full[..nt * 4], "text rows moved");
+            for y in 0..t.th {
+                for x in 0..t.tw {
+                    let mine = &ids[(nt + y * t.tw + x) * 4..][..4];
+                    let theirs = &full[(nt + (t.y0 + y) * lw + t.x0 + x) * 4..][..4];
+                    assert_eq!(mine, theirs, "tile at ({},{}), token ({y},{x})", t.y0, t.x0);
+                }
+            }
+            assert_eq!(
+                &ids[(nt + t.th * t.tw) * 4..],
+                &full[(nt + lh * lw) * 4..],
+                "reference rows moved with the tile"
+            );
+        }
+    }
+
+    /// **Tiling gate 6 - tiling and reference conditioning compose.** The
+    /// production case is "declutter this 2048x2048 room from a `--ref`
+    /// photograph": it needs tiling to fit the canvas in a card AND the
+    /// reference conditioning a paired-trained adapter was fitted against, at
+    /// the same time. Those are the two properties that were written
+    /// independently, and either one implemented beside the other rather than
+    /// on top of it would pass its own gate and fail this one.
+    ///
+    /// Gate 2 above proves the id ARITHMETIC composes. This proves the
+    /// SAMPLER does: a real `--strength 1.0` request, whose reference is
+    /// encoded at the downscale `cond_sizes` picks rather than at its own
+    /// dimensions, is driven through the actual request path, and every
+    /// sequence the DiT was handed is checked against the single full-canvas
+    /// forward the same request makes untiled. Each window must carry, for its
+    /// own image rows, exactly the ids that forward assigns that absolute
+    /// region - and, for the shared reference tail, exactly its ids and
+    /// exactly its token values, because a photograph is what the picture is
+    /// OF and not a property of which part of it is being painted.
+    #[test]
+    fn a_tiled_reference_conditioned_canvas_carries_the_untiled_sequence() {
+        let (w, h) = (512u32, 384u32);
+        let (lh, lw) = ((h / 16) as usize, (w / 16) as usize);
+        let tiling = Tiling { size: 256, overlap: 64 };
+        let base = GenOpts {
+            width: w,
+            height: h,
+            // Full strength: the init latent is pure noise and the reference
+            // is the model's only source of "what room is this", which is
+            // exactly the configuration a paired-trained adapter deploys in.
+            strength: Some(1.0),
+            steps: Some(1),
+            experimental_steps: true,
+            seed: 7,
+            ..GenOpts::default()
+        };
+        let req = |tile: Option<Tiling>| BatchRequest {
+            prompt: "a decluttered living room".into(),
+            refs: vec![source(h, w)],
+            opts: GenOpts { tile, ..base.clone() },
+            cancel: Default::default(),
+        };
+
+        // The hypothetical single full-canvas forward: run the same request
+        // untiled and read what the DiT was actually given.
+        let one = Stub::new();
+        let cin = one.cfg.in_channels;
+        generate_batch_on(&one, std::slice::from_ref(&req(None)), &mut |_, _, _| {})
+            .pop()
+            .unwrap()
+            .expect("untiled stub generation");
+        let untiled = one.seen.borrow();
+        let (full_joint, full_ids) = untiled.first().expect("one full-canvas forward");
+        let nt = one.cfg.txt_len;
+        let n_ref = full_joint.len() / cin - lh * lw;
+        assert!(n_ref > 0, "the gate needs a reference that really conditions the forward");
+
+        // The same request, tiled.
+        let many = Stub::new();
+        generate_batch_on(&many, std::slice::from_ref(&req(Some(tiling))), &mut |_, _, _| {})
+            .pop()
+            .unwrap()
+            .expect("tiled stub generation");
+        let tiles = plan_tiles(lh, lw, Some(tiling));
+        assert!(tiles.len() > 1, "the gate needs a canvas that actually tiles (got {})", tiles.len());
+        let seen = many.seen.borrow();
+        assert_eq!(seen.len(), tiles.len(), "one forward per window at one step, in plan order");
+
+        for (t, (joint, ids)) in tiles.iter().zip(seen.iter()) {
+            let n_gen = t.th * t.tw;
+            assert_eq!(ids.len(), (nt + n_gen + n_ref) * 4, "tile at ({},{}) sequence length", t.y0, t.x0);
+            assert_eq!(joint.len(), (n_gen + n_ref) * cin, "tile at ({},{}) token count", t.y0, t.x0);
+            // Text conditioning is shared, untouched by the window.
+            assert_eq!(&ids[..nt * 4], &full_ids[..nt * 4], "text rows moved");
+            // Every image row sits where the untiled forward put it - and
+            // CARRIES what the untiled forward carried there. The ids and the
+            // gather are two halves of one claim: a window given the right
+            // positions but its neighbour's pixels renders somebody else's
+            // part of the picture, and the ids alone cannot see that.
+            for y in 0..t.th {
+                for x in 0..t.tw {
+                    let (mine, theirs) = (nt + y * t.tw + x, nt + (t.y0 + y) * lw + t.x0 + x);
+                    assert_eq!(&ids[mine * 4..][..4], &full_ids[theirs * 4..][..4], "tile at ({},{}), id ({y},{x})", t.y0, t.x0);
+                    let (m, h) = ((mine - nt) * cin, (theirs - nt) * cin);
+                    assert_eq!(&joint[m..m + cin], &full_joint[h..h + cin], "tile at ({},{}), token ({y},{x})", t.y0, t.x0);
+                }
+            }
+            // The reference tail: same ids AND the same tokens, on every
+            // window. A window that re-encoded or re-positioned the reference
+            // would condition on a different photograph than its neighbour.
+            assert_eq!(&ids[(nt + n_gen) * 4..], &full_ids[(nt + lh * lw) * 4..], "reference ids moved with the tile");
+            assert_eq!(&joint[n_gen * cin..], &full_joint[lh * lw * cin..], "reference tokens moved with the tile");
+        }
+
+        // Negative control, so the equalities above are a claim and not an
+        // artefact of every window looking alike: windows at different canvas
+        // offsets must carry DIFFERENT image ids. Window-local ids would make
+        // them all identical and every assertion above would still hold.
+        let distinct: std::collections::HashSet<&[u32]> =
+            seen.iter().map(|(_, ids)| &ids[nt * 4..(nt + tiles[0].th * tiles[0].tw) * 4]).collect();
+        assert_eq!(distinct.len(), tiles.len(), "windows share image ids - they are positioned locally, not on the canvas");
+    }
+
+    /// **Tiling gate 3 - the cost per forward is bounded by the budget, not by
+    /// the canvas.** A 4096x4096 request must become many tiles of the
+    /// configured size, never one giant one, and the sampler must actually hand
+    /// the DiT those tile-sized sequences. The planner also has to COVER the
+    /// canvas: a token no tile owns would be left at its init noise.
+    #[test]
+    fn tiles_bound_the_tokens_per_forward_at_any_canvas_size() {
+        let t = Tiling { size: 1024, overlap: 128 };
+        let budget = 64 * 64; // 1024x1024 in latent tokens
+        let (lh, lw) = (256usize, 256usize); // 4096x4096
+        let tiles = plan_tiles(lh, lw, Some(t));
+        assert!(tiles.len() > 16, "4096x4096 must really tile (got {})", tiles.len());
+        assert!(
+            tiles.iter().all(|q| q.th * q.tw <= budget),
+            "a tile exceeded the budget: {:?}",
+            tiles.iter().map(|q| q.th * q.tw).max()
+        );
+        let mut hits = vec![0u32; lh * lw];
+        for q in &tiles {
+            for y in 0..q.th {
+                for x in 0..q.tw {
+                    hits[(q.y0 + y) * lw + q.x0 + x] += 1;
+                }
+            }
+        }
+        assert!(hits.iter().all(|&n| n >= 1), "the tiling leaves canvas tokens uncovered");
+        assert!(hits.iter().any(|&n| n > 1), "the tiles do not overlap");
+
+        // What a pipeline has to be sized for follows the budget, not the canvas.
+        let big = GenOpts { width: 4096, height: 4096, tile: Some(t), ..GenOpts::default() };
+        assert_eq!(gen_tokens_per_forward(&big), budget as u32);
+        assert_eq!(
+            gen_tokens_per_forward(&GenOpts { tile: None, ..big.clone() }),
+            256 * 256,
+            "without tiling the whole canvas is one forward, as before"
+        );
+
+        // And the sampler honours it: no forward ever sees more than one
+        // tile's worth of generated tokens.
+        let ch = Stub::new().cfg.in_channels;
+        let (_, seen) = tiled_run(Some(t), 2048, 1536, Vec::new(), 1);
+        assert!(seen.len() > 1, "a 2048x1536 canvas must take several forwards");
+        assert!(
+            seen.iter().all(|(j, _)| j.len() <= budget * ch),
+            "a forward saw {} floats, past the {} the budget allows",
+            seen.iter().map(|(j, _)| j.len()).max().unwrap(),
+            budget * ch
+        );
+    }
+
+    /// A denoiser whose velocity at a token is a function of that token's
+    /// **canvas** position - read out of the position ids it is handed - and
+    /// nothing else.
+    ///
+    /// Such a field is the one case where tiled and untiled runs have to agree
+    /// exactly: every window predicts the same velocity for the same canvas
+    /// cell, so any convex blend of the windows is that velocity again. It is
+    /// therefore the gate on everything the blend does that a picture cannot
+    /// show - that the normalization by the total weight is there at all, that
+    /// a window's prediction lands at the canvas offset it came from, and that
+    /// the ids reaching the model are absolute. [`Stub`]'s own velocity cannot
+    /// serve: it is a function of the token's INDEX in the sequence handed to
+    /// the forward, which is window-local by construction.
+    struct Canvas {
+        stub: Stub,
+        /// The latent the sampler finally handed to the decoder. The gate
+        /// compares latents, not pixels: the stub decoder clamps to `[-1,1]`
+        /// and quantizes to 8 bits, which would hide exactly the drift being
+        /// fenced.
+        out: std::cell::RefCell<Vec<f32>>,
+    }
+
+    impl Denoiser for Canvas {
+        fn cfg(&self) -> &Flux2Config {
+            self.stub.cfg()
+        }
+        fn encode_prompt(&self, prompt: &str) -> Vec<f32> {
+            self.stub.encode_prompt(prompt)
+        }
+        fn encode_image(&self, chw: &[f32], h: u32, w: u32) -> Result<Vec<f32>, String> {
+            self.stub.encode_image(chw, h, w)
+        }
+        fn decode_tokens(&self, tokens: &[f32], lh: usize, lw: usize) -> Result<Vec<u8>, String> {
+            *self.out.borrow_mut() = tokens.to_vec();
+            self.stub.decode_tokens(tokens, lh, lw)
+        }
+        fn max_batch(&self) -> u32 {
+            self.stub.max_batch()
+        }
+        fn forward_batch(&self, samples: &[crate::model::Sample<'_>], ids: &[u32], n_pred: usize) -> Vec<Vec<f32>> {
+            let (ch, nt) = (self.stub.cfg.in_channels, self.stub.cfg.txt_len);
+            // Independent of the latent on purpose: a self-correcting velocity
+            // (the stub's `(x − g)/σ`) lands on its target from any trajectory,
+            // which would make the comparison below pass however the windows
+            // were weighted.
+            let v: Vec<f32> = (0..n_pred)
+                .flat_map(|p| {
+                    let (y, x) = (ids[(nt + p) * 4 + 1] as f32, ids[(nt + p) * 4 + 2] as f32);
+                    (0..ch).map(move |c| (y * 0.13 + x * 0.07 + c as f32 * 0.5).sin() * 0.8)
+                })
+                .collect();
+            samples.iter().map(|_| v.clone()).collect()
+        }
+    }
+
+    fn canvas_run(tile: Option<Tiling>, w: u32, h: u32) -> Vec<f32> {
+        let d = Canvas { stub: Stub::new(), out: Default::default() };
+        let opts = GenOpts {
+            width: w,
+            height: h,
+            steps: Some(4),
+            experimental_steps: true,
+            seed: 7,
+            tile,
+            ..GenOpts::default()
+        };
+        let req = BatchRequest {
+            prompt: "a long coastline".into(),
+            refs: Vec::new(),
+            opts,
+            cancel: Default::default(),
+        };
+        generate_batch_on(&d, std::slice::from_ref(&req), &mut |_, _, _| {})
+            .pop()
+            .unwrap()
+            .expect("stub generation");
+        d.out.into_inner()
+    }
+
+    /// **Tiling gate 4 - the windows compose into ONE canvas.** A velocity
+    /// field determined by canvas position must integrate to the same latent
+    /// whether it was evaluated in one forward or in sixteen overlapping ones.
+    /// This is the property the feature exists for, and the only one that fails
+    /// if the overlap is summed instead of averaged, if a window's prediction
+    /// is scattered to the wrong offset, or if the ids are window-local.
+    #[test]
+    fn a_tiled_canvas_integrates_the_same_velocity_field_as_one_forward() {
+        let (w, h) = (1024u32, 768u32);
+        let t = Tiling { size: 512, overlap: 128 };
+        assert!(
+            plan_tiles((h / 16) as usize, (w / 16) as usize, Some(t)).len() >= 4,
+            "the gate needs a real tiling"
+        );
+        let one = canvas_run(None, w, h);
+        let many = canvas_run(Some(t), w, h);
+        assert_eq!(one.len(), many.len());
+        let worst = one.iter().zip(&many).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+        let (cos, rel) = brain_testutil::parity::compare(&one, &many);
+        assert!(worst < 1e-5, "tiled latent drifts from the untiled one by {worst}");
+        assert!(cos > 0.999999 && rel < 1e-5, "cosine {cos}, rel_l2 {rel}");
+    }
+
+    /// **Tiling gate 5 - the overlap is a feathered convex blend.** Weights are
+    /// strictly positive everywhere (so no token divides by zero), reach 1 at a
+    /// canvas edge (an edge tile owns its border outright) and decay toward a
+    /// seam, so two tiles meeting in the middle each contribute part of it
+    /// rather than one of them winning abruptly.
+    #[test]
+    fn the_overlap_between_tiles_is_a_feathered_blend() {
+        let (lh, lw, ov) = (24usize, 24usize, 4usize);
+        let tiles = plan_tiles(lh, lw, Some(Tiling { size: 16 * 16, overlap: (ov * 16) as u32 }));
+        assert!(tiles.len() > 1);
+        let mut total = vec![0.0f32; lh * lw];
+        for q in &tiles {
+            let w = tile_weights(q, lh, lw, ov);
+            assert!(w.iter().all(|&v| v > 0.0), "a tile weight is not positive");
+            // The corner that sits on the canvas corner is owned outright.
+            if q.y0 == 0 && q.x0 == 0 {
+                assert_eq!(w[0], 1.0);
+            }
+            for y in 0..q.th {
+                for x in 0..q.tw {
+                    total[(q.y0 + y) * lw + q.x0 + x] += w[y * q.tw + x];
+                }
+            }
+        }
+        assert!(total.iter().all(|&v| v > 0.0), "a canvas token has no weight at all");
+
+        // A seam column really is shared: the first interior tile's leading
+        // edge is feathered down, not held at full strength.
+        let seam = tiles.iter().find(|q| q.x0 > 0).expect("an interior tile");
+        let w = tile_weights(seam, lh, lw, ov);
+        assert!(w[0] < 1.0, "the leading edge of an interior tile is not feathered");
+        assert!(w[0] > 0.0);
+
+        // A whole-canvas tile is weight 1 everywhere - the identity the
+        // one-tile gate above depends on.
+        let one = plan_tiles(lh, lw, None);
+        assert_eq!(one.len(), 1);
+        assert!(tile_weights(&one[0], lh, lw, ov).iter().all(|&v| v == 1.0));
     }
 
     /// FNV-1a 64 over the rendered bytes. A whole reference image is too large

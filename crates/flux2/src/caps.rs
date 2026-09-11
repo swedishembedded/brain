@@ -163,6 +163,12 @@ pub fn gen_params_from(inv: &Invocation) -> Result<GenParams, String> {
         // resolution it cannot pick is the `strength` init latent - which is
         // exactly the one this default is for.
         ref_resolution_scale: crate::pipeline::DEFAULT_REF_RESOLUTION_SCALE,
+        // No wire parameter: tiled generation trades passes for activation
+        // memory, and how much memory a served instance has is a residency
+        // decision this side of the wire, not the caller's to make. Declared
+        // here rather than hidden behind `..Default::default()` so the gap is
+        // visible at the decode site.
+        tile: None,
     };
     // `lora_scale` is ComfyUI's `strength_model`, not a value read from the
     // adapter file - third-party LoRAs carry no alpha, so this is the dial.

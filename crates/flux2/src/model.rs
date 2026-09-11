@@ -1138,3 +1138,38 @@ pub struct Sample<'a> {
 pub fn position_ids(txt_len: usize, lh: usize, lw: usize, refs: &[(usize, usize)]) -> Vec<u32> {
     crate::refcond::JointLayout::with_refs(txt_len, lh, lw, refs.to_vec()).ids()
 }
+
+/// [`position_ids`] for a `th x tw` **window** of the generated canvas whose
+/// top-left latent token sits at `(y0, x0)`.
+///
+/// The image rows carry the position the token has on the WHOLE canvas -
+/// `(0, y0+h, x0+w, 0)` - not a fresh 0-based indexing local to the window, so
+/// a window at `(32, 0)` gets exactly the ids a single full-canvas forward
+/// would have assigned to that region. That is what lets a canvas be denoised
+/// in windows at all: RoPE is the only thing that tells the model where a token
+/// is, so window-local ids would put every window's content at the canvas
+/// origin and each would compose its own independent scene.
+///
+/// Everything else is unchanged by the window: the text rows and each
+/// reference's `10·(i+1)` t-axis offset are properties of the conditioning, not
+/// of which part of the canvas is being predicted, so the window shares them
+/// with every other window.
+///
+/// Like [`position_ids`], this is [`crate::refcond::JointLayout::ids`] - of
+/// [`crate::refcond::JointLayout::window`] rather than of the canvas - so a
+/// tile and a full forward cannot drift from each other, and neither can drift
+/// from the reference conditioning a paired training run was fitted against.
+pub fn position_ids_tile(
+    txt_len: usize,
+    y0: usize,
+    x0: usize,
+    th: usize,
+    tw: usize,
+    refs: &[(usize, usize)],
+) -> Vec<u32> {
+    // The canvas extent is not an input here: a window's ids depend only on
+    // where it starts and how far it reaches. Sizing the notional canvas to the
+    // window's own far corner keeps `window`'s containment check meaningful
+    // without inventing a bound the caller did not give.
+    crate::refcond::JointLayout::with_refs(txt_len, y0 + th, x0 + tw, refs.to_vec()).window(y0, x0, th, tw).ids()
+}

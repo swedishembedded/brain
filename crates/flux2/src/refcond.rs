@@ -42,13 +42,33 @@
 /// (`Flux2Model::forward_batch`'s `n_pred`), so a layout that put references
 /// first would predict a velocity for the photograph instead of for the image
 /// being generated.
+///
+/// An evaluation need not cover the whole canvas. [`JointLayout::window`]
+/// returns the layout of one tile of a larger canvas: same text rows, same
+/// references, the same type and therefore the same [`JointLayout::ids`] and
+/// [`JointLayout::rope`] construction - only `lh×lw` shrinks to the window and
+/// [`JointLayout::origin`] records where on the canvas it sits. That is what
+/// lets tiled generation and reference conditioning compose instead of being
+/// two parallel spellings of the same convention.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct JointLayout {
     /// Text conditioning rows (the model's fixed text window).
     pub txt_len: usize,
-    /// The generated image's latent grid, in tokens (pixels / 16 per axis).
+    /// The generated image's latent grid **for this evaluation**, in tokens
+    /// (pixels / 16 per axis). The whole canvas for an untiled run and for all
+    /// training; one window of it under [`JointLayout::window`].
     pub lh: usize,
     pub lw: usize,
+    /// Where this evaluation's grid sits on the canvas it belongs to, as the
+    /// `(y, x)` latent token of its top-left corner. `(0, 0)` for a
+    /// whole-canvas evaluation.
+    ///
+    /// This is a RoPE property, not bookkeeping: the image rows are given the
+    /// ids they hold on the CANVAS, so a window at `(32, 0)` gets exactly what
+    /// a single full-canvas forward would have assigned that region. Ids local
+    /// to the window would put every window's content at the canvas origin and
+    /// each would compose its own independent scene.
+    pub origin: (usize, usize),
     /// Each reference image's latent grid `(h, w)` in tokens, in sequence
     /// order. Empty is the plain caption-only / text-to-image layout.
     pub refs: Vec<(usize, usize)>,
@@ -58,12 +78,31 @@ impl JointLayout {
     /// A layout with no reference images - text-to-image, and caption-only
     /// training.
     pub fn unpaired(txt_len: usize, lh: usize, lw: usize) -> JointLayout {
-        JointLayout { txt_len, lh, lw, refs: Vec::new() }
+        JointLayout { txt_len, lh, lw, origin: (0, 0), refs: Vec::new() }
     }
 
     /// A layout conditioned on `refs`, each a latent grid `(h, w)` in tokens.
     pub fn with_refs(txt_len: usize, lh: usize, lw: usize, refs: Vec<(usize, usize)>) -> JointLayout {
-        JointLayout { txt_len, lh, lw, refs }
+        JointLayout { txt_len, lh, lw, origin: (0, 0), refs }
+    }
+
+    /// The layout of one `th×tw` **window** of this canvas, whose top-left
+    /// latent token is the canvas token `(y0, x0)`.
+    ///
+    /// Everything except the image grid is carried over untouched: the text
+    /// rows and each reference's `10·(i+1)` t-axis offset describe the
+    /// CONDITIONING, which is a property of what the image is of and not of
+    /// which part of it is being predicted, so every window of a canvas shares
+    /// them. A tiled `--ref` generation therefore conditions each window on the
+    /// whole reference set, at the same reference ids the untiled run uses and
+    /// the same ids a paired training step was fitted against.
+    ///
+    /// The offsets are canvas-absolute, so windowing a window is not a
+    /// composition of offsets and is not what this is for; take windows of the
+    /// canvas layout.
+    pub fn window(&self, y0: usize, x0: usize, th: usize, tw: usize) -> JointLayout {
+        debug_assert!(y0 + th <= self.lh && x0 + tw <= self.lw, "window must lie inside the canvas");
+        JointLayout { txt_len: self.txt_len, lh: th, lw: tw, origin: (y0, x0), refs: self.refs.clone() }
     }
 
     /// Tokens of the image being generated - the rows the head predicts a
@@ -91,18 +130,21 @@ impl JointLayout {
 
     /// The 4-axis position ids, text rows first.
     ///
-    /// Text tokens: `(0,0,0,l)`; generated image: `(0,h,w,0)` raster-major;
-    /// reference `i`: `(10·(i+1), h, w, 0)`. The t-axis offset is what keeps a
-    /// reference token from colliding with the generated token at the same
-    /// spatial position.
+    /// Text tokens: `(0,0,0,l)`; generated image: `(0, y₀+h, x₀+w, 0)`
+    /// raster-major, where `(y₀, x₀)` is [`JointLayout::origin`] - the position
+    /// the token holds on the canvas, which for a whole-canvas layout is just
+    /// `(0, h, w, 0)`; reference `i`: `(10·(i+1), h, w, 0)`. The t-axis offset
+    /// is what keeps a reference token from colliding with the generated token
+    /// at the same spatial position.
     pub fn ids(&self) -> Vec<u32> {
+        let (y0, x0) = self.origin;
         let mut ids = Vec::with_capacity(self.n() * 4);
         for l in 0..self.txt_len {
             ids.extend([0, 0, 0, l as u32]);
         }
         for h in 0..self.lh {
             for w in 0..self.lw {
-                ids.extend([0, h as u32, w as u32, 0]);
+                ids.extend([0, (y0 + h) as u32, (x0 + w) as u32, 0]);
             }
         }
         for (i, &(rh, rw)) in self.refs.iter().enumerate() {
@@ -140,6 +182,25 @@ impl JointLayout {
         let mut out = Vec::with_capacity(self.n_img() * cin);
         out.extend_from_slice(gen);
         out.extend_from_slice(refs);
+        out
+    }
+
+    /// This layout's generated rows gathered out of a whole-canvas latent
+    /// `[canvas_lh · canvas_lw · cin]` that is `canvas_lw` tokens wide.
+    ///
+    /// Raster-major within the window, which is the order [`JointLayout::ids`]
+    /// hands out this window's ids in - the gather and the ids are written next
+    /// to each other because a window whose rows are collected in one order and
+    /// positioned in another is not a crash, it is a tile that quietly renders
+    /// somebody else's part of the picture. A whole-canvas layout gathers the
+    /// canvas unchanged.
+    pub fn window_tokens(&self, canvas: &[f32], canvas_lw: usize, cin: usize) -> Vec<f32> {
+        let (y0, x0) = self.origin;
+        let mut out = Vec::with_capacity(self.n_gen() * cin);
+        for y in 0..self.lh {
+            let row = ((y0 + y) * canvas_lw + x0) * cin;
+            out.extend_from_slice(&canvas[row..row + self.lw * cin]);
+        }
         out
     }
 }
