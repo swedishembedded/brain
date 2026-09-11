@@ -543,8 +543,16 @@ pub fn te_bytes(te_cfg: &qwen3::QwenConfig, layers: usize, seq: u64, int8: bool)
 /// sequence's, which also carries reference conditioning that is encoded but
 /// never decoded); one token is a 16x16 pixel patch, so the output is at most
 /// `256 * n_out_max` pixels.
+///
+/// Past the size where a whole-image decode no longer fits a card,
+/// [`Pipeline::decode_tokens`] runs `vae::VaeTiledDecoder` instead, whose
+/// resident set is one TILE's - so the figure declared here is the tiled one
+/// (`vae::decoder_device_bytes_for_pixels_planned` makes that decision from
+/// the same config and the same threshold the decode itself will). Declaring
+/// the whole-image cost for a run that will be tiled would refuse, on a busy
+/// machine, a generation the hardware can do.
 pub fn vae_decoder_bytes(vae_cfg: &vae::VaeConfig, n_out_max: u64) -> u64 {
-    vae::decoder_device_bytes_for_pixels(vae_cfg, 256 * n_out_max)
+    vae::decoder_device_bytes_for_pixels_planned(vae_cfg, 256 * n_out_max)
 }
 
 /// The VAE ENCODE graph's device footprint, priced at the output size: a
@@ -557,8 +565,11 @@ pub fn vae_decoder_bytes(vae_cfg: &vae::VaeConfig, n_out_max: u64) -> u64 {
 /// denoiser is evicted. Encode and decode are therefore never resident
 /// together - the planner charges them in their own phases and
 /// [`evict_denoiser_before_decode`] frees the space the decode needs.
+///
+/// Tiled past the same threshold, for the same reason - see
+/// [`vae_decoder_bytes`].
 pub fn vae_encoder_bytes(vae_cfg: &vae::VaeConfig, n_out_max: u64) -> u64 {
-    vae::encoder_device_bytes_for_pixels(vae_cfg, 256 * n_out_max)
+    vae::encoder_device_bytes_for_pixels_planned(vae_cfg, 256 * n_out_max)
 }
 
 /// Whether the decode graph can only be built in the denoiser's PLACE: the
@@ -1168,6 +1179,36 @@ impl Pipeline {
     /// VAE-encode an RGB image (`[-1,1]` CHW) to packed+normalized latent
     /// tokens `[lh*lw, 128]` (row-major, matching `position_ids`).
     pub fn encode_image(&self, chw: &[f32], h: u32, w: u32) -> Result<Vec<f32>, String> {
+        let (lh8, lw8) = ((h / 8) as usize, (w / 8) as usize);
+        // A reference large enough that one whole-image encode graph does not
+        // fit goes through the tiled path, which holds one tile at a time.
+        // Nothing is cached for it: the tiled encoder owns no device graph
+        // between calls, which is exactly what makes it cheap to build.
+        let mean = if vae::tiled::should_tile_encode(&self.vae_cfg, h as u64 * w as u64) {
+            let enc = vae::VaeTiledEncoder::auto(&self.vae_gpu, self.vae_cfg.clone(), &self.vae_tensors, h, w);
+            eprintln!("flux2: VAE encode tiled - {h}x{w} over {} tiles", enc.plan().tiles().len());
+            self.homes.run("vae_dec", || enc.encode_mean(chw))?
+        } else {
+            self.encode_image_whole(chw, h, w)?
+        };
+        let eps = self.vae_cfg.batch_norm_eps;
+        let packed = vae::latent::pack(&mean, 32, lh8, lw8, &self.bn_mean, &self.bn_var, eps);
+        // [128, lh, lw] -> tokens [lh*lw, 128]
+        let (lh, lw) = (lh8 / 2, lw8 / 2);
+        let mut tokens = vec![0.0f32; lh * lw * 128];
+        for c in 0..128 {
+            for y in 0..lh {
+                for x in 0..lw {
+                    tokens[(y * lw + x) * 128 + c] = packed[(c * lh + y) * lw + x];
+                }
+            }
+        }
+        Ok(tokens)
+    }
+
+    /// One whole-image encode graph, cached across references of the same
+    /// size, returning the posterior mean `[32, h/8, w/8]`.
+    fn encode_image_whole(&self, chw: &[f32], h: u32, w: u32) -> Result<Vec<f32>, String> {
         let mut slot = self.enc_cache.lock().unwrap_or_else(|e| e.into_inner());
         if slot.as_ref().is_none_or(|((ch, cw), _)| (*ch, *cw) != (h, w)) {
             // Drop the previous graph BEFORE building the next one, so two
@@ -1184,21 +1225,7 @@ impl Pipeline {
             *slot = Some(((h, w), built));
         }
         let enc = &slot.as_ref().expect("just populated").1;
-        let (lh8, lw8) = ((h / 8) as usize, (w / 8) as usize);
-        let mean = enc.encode_mean(chw, lh8 as u32, lw8 as u32);
-        let eps = self.vae_cfg.batch_norm_eps;
-        let packed = vae::latent::pack(&mean, 32, lh8, lw8, &self.bn_mean, &self.bn_var, eps);
-        // [128, lh, lw] -> tokens [lh*lw, 128]
-        let (lh, lw) = (lh8 / 2, lw8 / 2);
-        let mut tokens = vec![0.0f32; lh * lw * 128];
-        for c in 0..128 {
-            for y in 0..lh {
-                for x in 0..lw {
-                    tokens[(y * lw + x) * 128 + c] = packed[(c * lh + y) * lw + x];
-                }
-            }
-        }
-        Ok(tokens)
+        Ok(enc.encode_mean(chw, h / 8, w / 8))
     }
 
     /// Whether the denoiser's weights are currently resident. False once a
@@ -1247,10 +1274,23 @@ impl Pipeline {
         if evict_denoiser_before_decode(&self.homes) {
             *self.model.lock().unwrap_or_else(|e| e.into_inner()) = None;
         }
-        let dec = self.homes.run("vae_dec", || {
-            vae::VaeDecoder::from_diffusers_on(&self.vae_gpu, self.vae_cfg.clone(), &self.vae_tensors, (lh * 2) as u32, (lw * 2) as u32)
-        })?;
-        let chw = dec.decode(&unpacked);
+        // Past the size where one whole-image decode graph no longer fits a
+        // card, the same latent is decoded as an overlapping cover of tiles -
+        // one graph resident at a time, so peak VRAM is the tile's. Below it
+        // this is the identical whole-image call it has always been, and
+        // `vae_decoder_bytes` reserved for whichever of the two this is.
+        let chw = if vae::tiled::should_tile_decode(&self.vae_cfg, h as u64 * w as u64) {
+            let dec =
+                vae::VaeTiledDecoder::auto(&self.vae_gpu, self.vae_cfg.clone(), &self.vae_tensors, (lh * 2) as u32, (lw * 2) as u32);
+            let total = dec.plan().tiles().len();
+            eprintln!("flux2: VAE decode tiled - {h}x{w} over {total} tiles");
+            self.homes.run("vae_dec", || dec.decode(&unpacked))?
+        } else {
+            let dec = self.homes.run("vae_dec", || {
+                vae::VaeDecoder::from_diffusers_on(&self.vae_gpu, self.vae_cfg.clone(), &self.vae_tensors, (lh * 2) as u32, (lw * 2) as u32)
+            })?;
+            dec.decode(&unpacked)
+        };
         // clamp FIRST, then rescale (reference order — reversed produces artifacts)
         let n = (h * w) as usize;
         let mut out = vec![0u8; n * 3];
