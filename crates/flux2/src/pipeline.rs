@@ -321,7 +321,25 @@ pub fn img2img_sigmas(strength: f32, steps: usize, n_gen: usize) -> Vec<f32> {
 // averaging happens on the VELOCITY at every step, not on finished images:
 // that is MultiDiffusion, and it is what keeps the windows agreeing as the
 // trajectory descends instead of letting them diverge and be cross-faded at
-// the end.
+// the end. Averaging the velocity and averaging the denoised estimate are the
+// same average here - the windows share one canvas latent `x`, so
+// `x0 = x − σ·v` is affine in `v` at fixed `σ` with everything else common -
+// which is why the reference implementations that fuse `x0` and this one that
+// fuses `v` are the same algorithm.
+//
+// How well that reconciliation works is a function of the STEP COUNT, and a
+// distilled sampler has very few. `klein_sigmas` spends its first three
+// 4-step sigmas descending 1.0 -> 0.7685 and then covers the remaining 77% of
+// the trajectory in one leap to zero: three rounds in which a window can see
+// what its neighbour did to their shared cells and correct, followed by a step
+// that lands most of the picture on an average nothing reconciles afterwards.
+// A many-step schedule has both a smaller final leap and more rounds before
+// it, so the same overlap hides much more. `--steps` past the distilled
+// default (`resolved_steps`, behind `--experimental-steps`) is therefore the
+// dial that matters most for a tiled edit, and no blend weight can substitute
+// for it: this is the published failure mode of MultiDiffusion under
+// accelerated samplers, where too few steps remain after each window has
+// committed to its own structure.
 
 /// Tiled generation: the canvas is denoised in overlapping windows of at most
 /// `size`, so one DiT forward's cost follows `size` rather than the canvas.
