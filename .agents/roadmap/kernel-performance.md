@@ -6194,3 +6194,110 @@ are planned; the next real hardware-dependent step is validating M8.9's
 coopmat kernel and M8.12's AVX-512-VNNI kernel on real Turing+/VNNI
 hardware, which needs that hardware to exist, not more source-level work
 on this box.
+
+### M5.11 - GDN backward UT-transform, closed form: the 126-dispatch reverse sweep collapses to two batched GEMMs
+
+Closes the W1c follow-up M5.9's own entry deliberately deferred (the forward
+half of the same UT-transform was GEMM-ified there via repeated squaring;
+the backward half, `gdn_ut_bwd_dattn0.wgsl` + `gdn_ut_bwd_dtmat.wgsl` run
+`i` from `c-1` down to `1` - a `2*(c-1)`-dispatch sequential reverse sweep,
+`126` dispatches at Qwen3.8-27B's real `c=64` shape - was left as a named
+follow-up with its closed form already derived, not landed).
+
+**The closed form, re-confirmed against M5.9's own derivation before
+touching code.** `T_mat = (I - attn0)^-1` is a matrix inverse; its standard
+reverse-mode adjoint is `dL/dM = -Y^T @ dL/dY @ Y^T` for `Y = M^-1`. `M = I -
+attn0` is affine in `attn0` with Jacobian `-I`, so `dL/dattn0 = -dL/dM =
+T_mat^T @ d_t_mat @ T_mat^T` - two batched GEMMs (`bmm.wgsl`, `trans_a=1`
+then `trans_b=1`, `GdnBwdScratch::mul_scratch_cc` - free by this point in
+the reverse sweep, its item-14 result already committed into `d_decay_mask`
+- holding the `T_mat^T @ d_t_mat` intermediate) replacing the `gdn_ut_bwd_
+dattn0.wgsl`/`gdn_ut_bwd_dtmat.wgsl` loop in `gdn_chunk_bwd` (`crates/
+model/src/gdn.rs`, item 15). Both superseded kernels are left registered
+and still exercised by `gdn_mixer_equivalence.rs`'s pipeline setup - same
+precedent as `gdn_ut_step.wgsl` after M5.9, not deleted, just off this call
+path (`GdnBwdIds::ut_bwd_dattn0`/`ut_bwd_dtmat`'s own doc comments now say
+so explicitly).
+
+**The masking-boundary question M5.9 left open, resolved empirically, not
+assumed.** The dense `T_mat^T @ d_t_mat @ T_mat^T` product populates
+`d_attn0`'s full `[c,c]` extent, including the diagonal and strict-upper
+cells that `attn0` itself has no freedom at (`attn0` is strictly lower
+triangular by construction - those closed-form cells are simply the
+`-dL/dM` adjoint evaluated where `attn0` has no corresponding real
+parameter, since `d_t_mat` itself is dense: the `w = T_mat @ k_beta_decay`/
+`u = T_mat @ v_beta` `bmm` backwards write/accumulate into every cell of
+`d_t_mat`, not just the strictly-lower ones `t_mat`'s own forward value is
+non-trivial at). Traced `d_attn0`'s only consumer, `gdn_mask_strict_lower_
+bwd.wgsl` (item 16, right below): it already gates every read of `d_attn0`
+on `j < i`, computed from its own `i`/`j` indices, never touching `d_attn0`
+outside that mask at all - so whatever the closed form leaves in `d_attn0`'s
+diagonal/upper cells is provably never read. **No explicit re-mask kernel
+was added.** This was verified, not assumed: `gdn_chunk_bwd_gradcheck`
+(below) is green with the two bare `bmm` dispatches and nothing else
+inserted between them and item 16 - if a re-mask had been mathematically
+necessary, the finite-difference check would have caught it (every
+`d_key`/`d_beta`/`d_raw_g` gradient routes back through `d_raw_attn0`, which
+item 16 derives directly from `d_attn0`).
+
+**Correctness - `gdn_chunk_bwd_gradcheck`** (`crates/model/tests/
+gdn_chunk_bwd.rs`), same tiny synthetic shape M5.9 used
+(`B=1,H=2,T=8,Dk=3,Dv=4,C=4`, two chunks), run FIRST unmodified against the
+pre-change 126-dispatch-shaped path to establish the baseline (green: worst
+abs `7.00e-7`, worst rel `5.64e-6`, matching M5.9's own recorded baseline
+exactly - confirming no drift before touching anything), then again after
+the closed form landed:
+
+| backend | worst abs | worst rel |
+|---|---|---|
+| GPU (`BRAIN_DEVICE` default, Arc iGPU/Vulkan) | 7.00e-7 | 3.02e-5 |
+| CPU (`BRAIN_DEVICE=cpu`, Cranelift JIT) | 4.98e-7 | 3.02e-5 |
+
+Both well inside the test's own `abs<1e-3 || rel<1e-3` gate. Honestly
+flagged, not hidden: the worst-case REL error moved (GPU `5.64e-6 ->
+3.02e-5`, CPU `5.97e-5 -> 3.02e-5`) - a real, expected floating-point
+reassociation effect (two `O(c^3)`-per-batch dense GEMM reductions replacing
+a per-row serial recurrence with a different summation order), not a
+correctness regression; both directions still land almost two orders of
+magnitude inside the gate. `gdn_mixer_equivalence.rs`'s bit-identical
+cross-pipeline test (`BRAIN_DEVICE=cpu`, Cranelift JIT, 22 threads) also
+stayed green, 2/2, unmodified.
+
+**Mutation-verified.** Flipped the first `bmm`'s `trans_a` from `true` to
+`false` (logically: `T_mat @ d_t_mat` instead of `T_mat^T @ d_t_mat`) and
+reran `gdn_chunk_bwd_gradcheck` - failed exactly as predicted, on the very
+first checked value: `d_key: got -0.5209303498268127 want -0.4910206200370304
+(abs 2.99e-2, rel 6.09e-2)`, an order of magnitude past the `1e-3` gate.
+Restored the correct `trans_a=true` and reran - green again (same numbers as
+the table above), confirming the fix is load-bearing, not a test that would
+pass regardless.
+
+**Dispatch count.** At the gradcheck's own tiny shape (`c=4`): item 15's
+loop dispatched `2*(c-1) = 6` times; the closed form dispatches `2`,
+independent of `c` - `gdn_chunk_bwd`'s own total step count moved `77 ->
+73` (`77 - 6 + 2`), pinned by `gdn_chunk_bwd.rs`'s own `assert_eq!` (updated
+in the same commit, with the arithmetic spelled out in its comment). At
+Qwen3.8-27B's real `c=64` shape - this ledger's own stated production
+target, matching this milestone's own brief - the same mechanism collapses
+`2*(c-1) = 126 -> 2`, a **98.4%** reduction in this one recurrence's
+dispatch count, GUARANTEED by the closed form's own shape (independent of
+`c` entirely, not a measured-on-this-shape number that could drift).
+No wall-clock number is reported for this milestone: `qwen35_bench`'s
+`bench_gdn` target (the harness M5.9's own wall-clock numbers came from)
+exercises only the forward pass (`gdn_mixer_fwd`), not `gdn_chunk_bwd` -
+building a backward-path bench binary was judged out of scope for this
+milestone (no production caller of `gdn_chunk_bwd` exists in this repo yet
+either - GDN training is not wired into any `brain qwen35 ...` subcommand -
+so there is no real end-to-end path to benchmark against yet); the
+dispatch-count reduction is reported as the guaranteed, mechanism-level
+number, per decision 4, rather than fabricating a shape to measure against.
+
+**Gates**: `cargo clippy --release --offline -p brain-model --all-targets
+--all-features -- -D warnings` clean. `python3 scripts/spdx/check.py`
+clean (no new files). `bash scripts/gates/check-kernel-selection.sh` and
+`bash scripts/gates/check-no-doc-citations.sh` both clean, unchanged from
+their pre-change baseline (no new kernel usage, no `.wgsl` touched, so no
+`make kernels-table` regeneration was needed).
+
+**Commit**: one - `model: GEMM-ify GDN's UT-transform backward via closed
+form (M5.11)`.

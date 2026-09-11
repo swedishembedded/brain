@@ -1037,9 +1037,13 @@ pub struct GdnBwdIds {
     pub scale_add: usize,
     /// `gdn_chunk_reverse_cumsum_step.wgsl`.
     pub reverse_cumsum_step: usize,
-    /// `gdn_ut_bwd_dattn0.wgsl`.
+    /// `gdn_ut_bwd_dattn0.wgsl` - superseded on [`gdn_chunk_bwd`]'s own call
+    /// path by M5.11's closed-form `bmm`-pair (`dL/dattn0 = T_mat^T @
+    /// d_t_mat @ T_mat^T`); kept registered/tested, same precedent as
+    /// [`GdnIds::ut_step`] after M5.9.
     pub ut_bwd_dattn0: usize,
-    /// `gdn_ut_bwd_dtmat.wgsl`.
+    /// `gdn_ut_bwd_dtmat.wgsl` - same M5.11 status as
+    /// [`GdnBwdIds::ut_bwd_dattn0`].
     pub ut_bwd_dtmat: usize,
     /// `gdn_mask_strict_lower_bwd.wgsl`.
     pub mask_strict_lower_bwd: usize,
@@ -1211,10 +1215,13 @@ pub struct GdnBwdScratch<'a> {
     /// `[bhc,c]` - 2 sources (`q_scaled`'s per-chunk row-scale,
     /// `k_cumdecay`'s whole-tensor row-scale). MUST be zeroed.
     pub d_exp_g_cs: &'a DeviceBuffer,
-    /// `[bhc,c,c]` - 3 sources: two direct linear uses of `t_mat` (`u`'s and
-    /// `w`'s own backward, the first a plain `bmm` overwrite so no zero is
-    /// needed before it) plus the UT-transform's own internal recurrence
-    /// scatter (`gdn_ut_bwd_dtmat.wgsl`). Needs no explicit zero: the first
+    /// `[bhc,c,c]` - 2 sources: the two direct linear uses of `t_mat` (`u`'s
+    /// and `w`'s own backward, the first a plain `bmm` overwrite so no zero
+    /// is needed before it). Before M5.11's closed form this also had a
+    /// third source, the UT-transform's own internal recurrence scatter
+    /// (`gdn_ut_bwd_dtmat.wgsl`) - the closed form only READS `d_t_mat` (as
+    /// a `bmm` operand) rather than scattering further contributions into
+    /// it, so that third source is gone. Needs no explicit zero: the first
     /// producer (`w`'s backward, item 10) is a plain overwrite.
     pub d_t_mat: &'a DeviceBuffer,
     /// `[bhc,c,dv]` - single producer (`v_new`'s identity pass-through,
@@ -1243,7 +1250,10 @@ pub struct GdnBwdScratch<'a> {
     pub dot_scratch: &'a DeviceBuffer,
     /// `[bhc*c]` - `mul.wgsl`'s `exp_g_cs` backward output (item 13).
     pub mul_scratch: &'a DeviceBuffer,
-    /// `[bhc*c*c]` - `mul.wgsl`'s `decay_mask` backward output (item 14).
+    /// `[bhc*c*c]` - `mul.wgsl`'s `decay_mask` backward output (item 14),
+    /// then reused (its item-14 result is fully committed into
+    /// `d_decay_mask` by the time item 15 starts) as item 15's `T_mat^T @
+    /// d_t_mat` intermediate (M5.11's closed-form UT-transform backward).
     pub mul_scratch_cc: &'a DeviceBuffer,
 }
 
@@ -1286,10 +1296,12 @@ pub struct GdnBwdScratch<'a> {
 /// `d_k_beta_decay`/`d_v_beta`; `k_beta_decay`'s row-scale backward into
 /// `d_k_beta`/`d_exp_g_cs`; `exp_g_cs`'s backward into `d_g_cs`; the
 /// `intra_scores` precompute's backward into `d_raw_intra`/`d_decay_mask`
-/// and (accumulating) `d_query`/`d_key`; the UT-transform's OWN reverse
-/// sweep (`i` from `c-1` down to `1`, two kernels per `i` - see
-/// `gdn_ut_bwd_dattn0.wgsl`/`gdn_ut_bwd_dtmat.wgsl`'s own docs, this is the
-/// hardest part) completing `d_attn0`; `attn0`'s mask-multiply backward into
+/// and (accumulating) `d_query`/`d_key`; the UT-transform's OWN backward,
+/// `dL/dattn0 = T_mat^T @ d_t_mat @ T_mat^T` (M5.11's closed form, two
+/// batched `bmm`s, replacing a former `2*(c-1)`-dispatch reverse sweep -
+/// `gdn_ut_bwd_dattn0.wgsl`/`gdn_ut_bwd_dtmat.wgsl`, still registered/tested
+/// but no longer on this call path, kernel-performance.md M5.11) completing
+/// `d_attn0`; `attn0`'s mask-multiply backward into
 /// `d_raw_attn0`/`d_decay_mask`; `raw_attn0`'s producing `bmm` backward
 /// (accumulating into `d_k_beta`/`d_key`); `decay_mask`'s backward (a
 /// row-sum AND a column-sum over the same `[bhc,c,c]` tensor, since
@@ -1459,11 +1471,36 @@ pub fn gdn_chunk_bwd(
     steps.push(bmm(ids.bmm_acc, bhc, c, c, dk, false, false, scale, bwd.d_raw_intra, 0, key, 0, d_query, 0));
     steps.push(bmm(ids.bmm_acc, bhc, c, c, dk, true, false, scale, bwd.d_raw_intra, 0, query, 0, d_key, 0));
 
-    // ---- item 15: UT-transform backward -- reverse sweep, i from c-1 downto 1 ----
-    for i in (1..c).rev() {
-        steps.push(g.step(bwd_ids.ut_bwd_dattn0, &[saved.t_mat, bwd.d_t_mat, bwd.d_attn0], &[bhc, c, i], bhc * i));
-        steps.push(g.step(bwd_ids.ut_bwd_dtmat, &[saved.attn0, bwd.d_t_mat], &[bhc, c, i], bhc * i));
-    }
+    // ---- item 15: UT-transform backward -- closed form (M5.11) ----
+    // T_mat = (I - attn0)^-1, so its reverse-mode adjoint is the standard
+    // matrix-inverse adjoint dL/dM = -Y^T @ dL/dY @ Y^T (Y = M^-1), and
+    // M = I - attn0 is affine with Jacobian -I, so dL/dattn0 = -dL/dM =
+    // T_mat^T @ d_t_mat @ T_mat^T -- two batched GEMMs (`bmm.wgsl`,
+    // `trans_a`/`trans_b` picking out each transpose) replacing the former
+    // `2*(c-1)`-dispatch reverse sweep (`i` from `c-1` downto `1`, one
+    // `gdn_ut_bwd_dattn0.wgsl` + one `gdn_ut_bwd_dtmat.wgsl` per `i` -- both
+    // kernels remain registered/tested, just off this call path now, same
+    // precedent as `gdn_ut_step.wgsl` after M5.9). `bwd.mul_scratch_cc` is
+    // free here (its last producer/consumer pair was item 14's `mul.wgsl` +
+    // `splice_add.wgsl` into `d_decay_mask`, both already committed above)
+    // and holds the intermediate `T_mat^T @ d_t_mat`.
+    //
+    // No explicit re-mask of the dense `[c,c]` product to strictly-lower is
+    // applied here, DELIBERATELY: `d_t_mat` itself is dense (the `w`/`u`
+    // `bmm` backwards above write/accumulate into every cell, including the
+    // diagonal and strict upper, which are structurally-constant `1`/`0` in
+    // `t_mat`'s forward value but still carry a well-defined local partial
+    // derivative that the correct closed-form input must include), and the
+    // resulting `d_attn0`'s own diagonal/strict-upper cells are simply
+    // un-physical -- `attn0` has no freedom there, so nothing may ever read
+    // them back out. Item 16 (`gdn_mask_strict_lower_bwd.wgsl`, right below)
+    // is the ONLY consumer of `d_attn0`, and it already gates every read on
+    // `j < i` on its own (seeded from `attn0`'s own strict-lower mask, not
+    // from anything this step produced) -- confirmed empirically, not
+    // assumed: `gdn_chunk_bwd_gradcheck` is green with no re-mask kernel
+    // inserted here (see kernel-performance.md M5.11).
+    steps.push(bmm(ids.bmm, bhc, c, c, c, true, false, 1.0, saved.t_mat, 0, bwd.d_t_mat, 0, bwd.mul_scratch_cc, 0));
+    steps.push(bmm(ids.bmm, bhc, c, c, c, false, true, 1.0, bwd.mul_scratch_cc, 0, saved.t_mat, 0, bwd.d_attn0, 0));
 
     // ---- item 16: attn0 = raw_attn0 * decay_mask, masked j<i, backward ----
     steps.push(g.step(
