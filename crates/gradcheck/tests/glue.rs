@@ -31,6 +31,8 @@ static KERNELS: &[(&str, &str)] = &[
     ("crop2d", kernels::CROP2D),           // 6
     ("nchw_nlc", kernels::NCHW_NLC),       // 7
     ("nlc_nchw", kernels::NLC_NCHW),       // 8
+    ("pinball_value_w", kernels::PINBALL_VALUE_W), // 9
+    ("pinball_grad_w", kernels::PINBALL_GRAD_W),   // 10
 ];
 const K_MUL: usize = 0;
 const K_SCALE_ROW: usize = 1;
@@ -41,6 +43,8 @@ const K_PAD2D: usize = 5;
 const K_CROP2D: usize = 6;
 const K_NCHW_NLC: usize = 7;
 const K_NLC_NCHW: usize = 8;
+const K_PINBALL_VALUE_W: usize = 9;
+const K_PINBALL_GRAD_W: usize = 10;
 
 /// Generic single-step dispatch: inputs (in §8 buffer order), fresh output
 /// buffer last, one submit, read back. Every call allocates FRESH buffers.
@@ -110,6 +114,50 @@ fn k_mse_grad_w(gpu: &Gpu, pred: &[f32], tgt: &[f32], w: &[f32], m: usize, scale
         total,
         total as u32,
     )
+}
+
+/// `pinball_value_w`: out[k] = w[k]*Σ_{t,j} pinball(pred,tgt,tau)/(H*Q);
+/// params [n, h, q]; n (ROW) threads. `pred` is `[n,h,q]`, `tgt` is `[n,h]`,
+/// `levels` is `[q]`.
+fn k_pinball_value_w(gpu: &Gpu, pred: &[f32], tgt: &[f32], levels: &[f32], w: &[f32], h: usize) -> Vec<f32> {
+    let n = w.len();
+    let q = levels.len();
+    assert_eq!(pred.len(), n * h * q);
+    assert_eq!(tgt.len(), n * h);
+    let in_bufs = [
+        gpu.storage_init("pred", pred),
+        gpu.storage_init("tgt", tgt),
+        gpu.storage_init("levels", levels),
+        gpu.storage_init("w", w),
+    ];
+    let out = gpu.storage(n as u64);
+    let bufs: Vec<&DeviceBuffer> = in_bufs.iter().chain(std::iter::once(&out)).collect();
+    let st = gpu.step(K_PINBALL_VALUE_W, &bufs, &[n as u32, h as u32, q as u32], n as u32);
+    gpu.submit(&[], &[st]);
+    gpu.poll_wait();
+    gpu.read(&out, n)
+}
+
+/// `pinball_grad_w`: dpred[i] = w[i/(h*q)]*dpinball/dpr /(H*Q)*scale;
+/// params [total, h, q, f(scale)].
+fn k_pinball_grad_w(gpu: &Gpu, pred: &[f32], tgt: &[f32], levels: &[f32], w: &[f32], h: usize, scale: f32) -> Vec<f32> {
+    let n = w.len();
+    let q = levels.len();
+    let total = pred.len();
+    assert_eq!(total, n * h * q);
+    assert_eq!(tgt.len(), n * h);
+    let in_bufs = [
+        gpu.storage_init("pred", pred),
+        gpu.storage_init("tgt", tgt),
+        gpu.storage_init("levels", levels),
+        gpu.storage_init("w", w),
+    ];
+    let out = gpu.storage(total as u64);
+    let bufs: Vec<&DeviceBuffer> = in_bufs.iter().chain(std::iter::once(&out)).collect();
+    let st = gpu.step(K_PINBALL_GRAD_W, &bufs, &[total as u32, h as u32, q as u32, f(scale)], total as u32);
+    gpu.submit(&[], &[st]);
+    gpu.poll_wait();
+    gpu.read(&out, total)
 }
 
 /// `pad2d`: x is [NC, h, w] (unpadded); output [NC, h+t+b, w+l+r].
@@ -599,4 +647,107 @@ fn glue_m1_per_element_rows() {
     assert_close(&out, &[0.5, 0.0, 0.5], 1e-6, "mse_value_w M=1");
     let dpred = k_mse_grad_w(&gpu, &pred, &tgt, &w, 1, 0.5);
     assert_close(&dpred, &[1.0, 0.0, -0.5], 1e-6, "mse_grad_w M=1");
+}
+
+// ---- §9.14 pinball_value_w / pinball_grad_w (timesfm3 training loss) -----------------------
+
+#[test]
+fn glue_pinball_value_w_matches_hand_reference() {
+    // N=2 rows, H=2 steps, Q=2 levels (tau=[0.25,0.75]).
+    // Row 0: tgt=[10,20], pred=[[9,11],[19,22]], w=1.0.
+    //   t=0,tau=0.25: e=1  -> max(0.25,-0.75)=0.25
+    //   t=0,tau=0.75: e=-1 -> max(-0.75,0.25)=0.25
+    //   t=1,tau=0.25: e=1  -> max(0.25,-0.75)=0.25
+    //   t=1,tau=0.75: e=-2 -> max(-1.5,0.5)=0.5
+    //   sum=1.25, /4=0.3125, *w=0.3125
+    // Row 1: tgt=[0,0], pred=[[1,-1],[2,-2]], w=2.0.
+    //   t=0,tau=0.25: e=-1 -> max(-0.25,0.75)=0.75
+    //   t=0,tau=0.75: e=1  -> max(0.75,-0.25)=0.75
+    //   t=1,tau=0.25: e=-2 -> max(-0.5,1.5)=1.5
+    //   t=1,tau=0.75: e=2  -> max(1.5,-0.5)=1.5
+    //   sum=4.5, /4=1.125, *w=2.25
+    let gpu = gpu_core::testgpu::dev(KERNELS);
+    let levels = [0.25f32, 0.75];
+    let tgt = [10.0f32, 20.0, 0.0, 0.0];
+    let pred = [9.0f32, 11.0, 19.0, 22.0, 1.0, -1.0, 2.0, -2.0];
+    let w = [1.0f32, 2.0];
+
+    let out = k_pinball_value_w(&gpu, &pred, &tgt, &levels, &w, 2);
+    assert_close(&out, &[0.3125, 2.25], 1e-6, "pinball_value_w out");
+}
+
+#[test]
+fn glue_pinball_grad_w_matches_hand_reference() {
+    // Same inputs as the value test, scale=0.5 (deliberately not 1.0, so the
+    // test proves scale is read from params via bitcast<f32>). factor[k] =
+    // w[k]/(H*Q)*scale: row0 factor=0.125, row1 factor=0.25.
+    let gpu = gpu_core::testgpu::dev(KERNELS);
+    let levels = [0.25f32, 0.75];
+    let tgt = [10.0f32, 20.0, 0.0, 0.0];
+    let pred = [9.0f32, 11.0, 19.0, 22.0, 1.0, -1.0, 2.0, -2.0];
+    let w = [1.0f32, 2.0];
+
+    let dpred = k_pinball_grad_w(&gpu, &pred, &tgt, &levels, &w, 2, 0.5);
+    let want = [
+        -0.03125, 0.03125, -0.03125, 0.03125, // row 0: pr<y -> -tau; pr>y -> 1-tau
+        0.1875, -0.1875, 0.1875, -0.1875, // row 1: pr>y -> 1-tau; pr<y -> -tau
+    ];
+    assert_close(&dpred, &want, 1e-6, "pinball_grad_w dpred");
+}
+
+/// Scalar loss L(pred) = scale * Σ_n out[n] via pinball_value_w + host plain sum.
+fn pinball_loss_w(gpu: &Gpu, pred: &[f32], tgt: &[f32], levels: &[f32], w: &[f32], h: usize, scale: f32) -> f32 {
+    scale * k_pinball_value_w(gpu, pred, tgt, levels, w, h).iter().sum::<f32>()
+}
+
+#[test]
+fn glue_fd_pinball_grad_w() {
+    // N=3, H=4, Q=5 (tiny()'s own quantile count), LCG pred/tgt in [-1,1],
+    // w in [0.25, 2], scale = 0.7. Global gradcheck tolerances (playbook
+    // §3): h = 5e-3, atol = 4e-3, rtol = 8e-2 - NEVER loosened. Pinball's
+    // derivative is piecewise-constant with a kink exactly at pred==tgt;
+    // LCG-drawn pred/tgt land off that kink with probability 1, so the FD
+    // approximation is not degraded by it (unlike a naive grid sweep would
+    // risk).
+    let gpu = gpu_core::testgpu::dev(KERNELS);
+    let (n, hh, q) = (3usize, 4usize, 5usize);
+    let total = n * hh * q;
+    let scale = 0.7f32;
+    let mut st = Lcg::new(0xF00D_5EEDu64);
+    let pred = st.vec(total);
+    let tgt = st.vec(n * hh);
+    let levels: Vec<f32> = (0..q).map(|i| (i as f32 + 1.0) / (q as f32 + 1.0)).collect(); // (0,1) exclusive, distinct
+    // w in [0.25, 2): positive, bounded away from 0.
+    let w: Vec<f32> = (0..n).map(|_| 1.125 + 0.875 * st.signed()).collect();
+
+    // GUARD: a zero-stub forward must NOT let the FD check pass trivially.
+    let l0 = pinball_loss_w(&gpu, &pred, &tgt, &levels, &w, hh, scale);
+    assert!(
+        l0.abs() > 1e-3,
+        "FD guard: unperturbed loss |{l0}| <= 1e-3 - degenerate problem or zero-stub forward"
+    );
+
+    let analytic = k_pinball_grad_w(&gpu, &pred, &tgt, &levels, &w, hh, scale);
+    assert_eq!(analytic.len(), total);
+
+    let h = 5e-3f32;
+    let (atol, rtol) = (4e-3f32, 8e-2f32);
+    for dir in 0..2 {
+        let v = st.vec(total);
+        let a = dot(&analytic, &v);
+
+        let plus: Vec<f32> = pred.iter().zip(v.iter()).map(|(&p, &vi)| p + h * vi).collect();
+        let minus: Vec<f32> = pred.iter().zip(v.iter()).map(|(&p, &vi)| p - h * vi).collect();
+        let lp = pinball_loss_w(&gpu, &plus, &tgt, &levels, &w, hh, scale);
+        let lm = pinball_loss_w(&gpu, &minus, &tgt, &levels, &w, hh, scale);
+        let num = (lp - lm) / (2.0 * h);
+
+        let tol = atol + rtol * a.abs().max(num.abs());
+        println!("glue FD dir {dir}: analytic {a:.6e}, numeric {num:.6e}, tol {tol:.3e}");
+        assert!(
+            (a - num).abs() <= tol,
+            "pinball_grad_w FD dir {dir}: |{a} - {num}| = {} > {tol}",
+            (a - num).abs()
+        );
+    }
 }
