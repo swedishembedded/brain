@@ -43,7 +43,19 @@ use residency::{Device, MemCost};
 /// resident models never pack it to the brim). It covers what a model's own
 /// figure does not: the driver/context allocation a fresh `Gpu` makes, and
 /// transient activation scratch a weights-only estimate omits.
-const HEADROOM: u64 = 1 << 30;
+///
+/// 1 GiB measured too thin for a real large model: FLUX.2 klein-9B's
+/// `dit`+`vae_enc` (13,154,417,928 + 2,220,175,360 bytes, measured off this
+/// repo's own checkpoint) landed on a card reporting 15.4 GiB free - the plan
+/// judged that a fit at 1 GiB headroom (14.32 GiB needed vs 14.4 GiB budget,
+/// 0.08 GiB to spare) and the real wgpu allocation then hit an actual
+/// out-of-memory panic, because real allocator overhead (alignment, bind
+/// group padding, the scratch this estimate approximates rather than derives
+/// exactly) exceeded 0.08 GiB. 2 GiB gives a real, measured model room to be
+/// wrong by more than a rounding error without turning into a driver panic -
+/// see `a_near_ceiling_plan_does_not_ride_the_edge_of_a_single_card` for the
+/// regression this closes.
+const HEADROOM: u64 = 2 << 30;
 
 /// How long a capacity snapshot is reused before the machine is re-probed.
 ///
@@ -290,6 +302,32 @@ mod tests {
         let unphased: Vec<Need> = needs.iter().cloned().map(|n| Need { phase: None, ..n }).collect();
         let homes = p.place(&unphased).expect("the host tier absorbs what the card cannot hold");
         assert!(homes.contains(&Home::Cpu), "13 + 7 + 11 = 31 GiB live at once does not fit 23: {homes:?}");
+    }
+
+    /// The real failure this headroom exists to catch: FLUX.2 klein-9b's
+    /// `dit`+`vae_enc` (phase 1, real bytes measured off this repo's own
+    /// checkpoint: 13,154,417,928 + 2,220,175,360) landed on a card reporting
+    /// 15.4 GiB free. At the old 1 GiB headroom the plan judged that a fit
+    /// (14.32 GiB needed vs 14.4 GiB budget - 0.08 GiB to spare) and the real
+    /// wgpu allocation then OOM'd, because HEADROOM's own doc says it covers
+    /// exactly this gap (driver/context allocation, transient scratch a
+    /// weights-only estimate omits) and 1 GiB was not enough margin for a
+    /// ~14 GiB combined load. The card must be refused, not accepted on a
+    /// razor's edge - forcing the plan onto the OTHER (fully free) card,
+    /// which is what a real two-P40 box has available in this exact case.
+    #[test]
+    fn a_near_ceiling_plan_does_not_ride_the_edge_of_a_single_card() {
+        const NEAR_FULL: u64 = 15 * GIB + 410 * (1 << 20); // ~15.4 GiB free, as measured
+        const FULLY_FREE: u64 = 24 * GIB;
+        let p = BudgetPlacer::new(budgets(&[(0, NEAR_FULL), (1, FULLY_FREE)], 128 * GIB));
+        let homes = p
+            .place(&[
+                Need::sized("dit", 13_154_417_928, 0).apart().phase(1),
+                Need::sized("te", 11_494_894_592, 0).apart(),
+                Need::sized("vae_enc", 2_220_175_360, 0).with("dit").phase(1),
+            ])
+            .expect("the fully-free card holds it");
+        assert_ne!(homes[0], Home::Gpu(0), "dit must not ride the near-ceiling card's edge: {homes:?}");
     }
 
     /// Nothing fits: the refusal names the part, its size and every card's
