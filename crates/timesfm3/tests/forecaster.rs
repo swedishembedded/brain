@@ -16,6 +16,27 @@ use forecast::{Capabilities, CovariateSupport, ForecastModel, ForecastSpec, Item
 use timesfm3::preprocess::{self, DecodeShape};
 use timesfm3::{Timesfm3, Timesfm3Config, Timesfm3Forecaster};
 
+/// A tiny model over deterministic synthetic weights, needing neither the
+/// golden manifest nor a real checkpoint - for the left-padding/missing-value
+/// tests below, which check *wiring behavior* (accepted vs rejected, and
+/// invariance to what a mask hides), not specific numeric parity against the
+/// reference (that is `tests/parity.rs`'s job).
+fn synthetic_tiny_model() -> (Timesfm3Config, Timesfm3) {
+    let cfg = Timesfm3Config::tiny();
+    let weights: HashMap<String, Vec<f32>> = cfg
+        .param_list()
+        .into_iter()
+        .enumerate()
+        .map(|(i, (k, s))| {
+            let n: usize = s.iter().product();
+            let data: Vec<f32> = (0..n).map(|j| (((i * 131 + j * 17) % 23) as f32 - 11.0) * 0.01).collect();
+            (k, data)
+        })
+        .collect();
+    let m = Timesfm3::from_weights(cfg.clone(), &weights).unwrap();
+    (cfg, m)
+}
+
 fn read_golden() -> Option<serde_json::Value> {
     let path = brain_testutil::testdata_path("golden/timesfm3/manifest.json");
     if !path.exists() {
@@ -131,4 +152,54 @@ fn forecast_over_a_panel_matches_the_equivalent_direct_decode_call() {
             }
         }
     }
+}
+
+#[test]
+fn forecast_left_pads_a_context_that_is_not_patch_aligned() {
+    let (cfg, model) = synthetic_tiny_model();
+    let forecaster = Timesfm3Forecaster::new(model);
+    // tiny() input_patch_len is 4; 6 is deliberately not a multiple of it.
+    let target = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+    let item = Item::new("s", vec![Variate::target("t", target)]);
+    let panel = Panel::single("H", "s", item.variates);
+    let spec = ForecastSpec { horizon: 4, quantile_levels: cfg.quantile_levels.clone(), ..ForecastSpec::default() };
+    let fc = forecaster.forecast(&panel, &spec).expect("a non-patch-aligned context must be accepted (left-padded), not rejected");
+    assert_eq!(fc.targets.len(), 1);
+    assert_eq!(fc.targets[0].quantiles.as_ref().unwrap().shape, vec![4, cfg.quantile_levels.len()]);
+}
+
+#[test]
+fn forecast_is_invariant_to_the_value_at_an_unobserved_step() {
+    let (cfg, model_a) = synthetic_tiny_model();
+    let forecaster_a = Timesfm3Forecaster::new(model_a);
+    let (_, model_b) = synthetic_tiny_model();
+    let forecaster_b = Timesfm3Forecaster::new(model_b);
+
+    let observed = vec![1.0, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0]; // index 3 unobserved
+    let mut target_a = Variate::target("t", vec![1.0, 2.0, 3.0, 5.0, 5.0, 6.0, 7.0, 8.0]);
+    target_a.observed = Some(observed.clone());
+    let mut target_b = Variate::target("t", vec![1.0, 2.0, 3.0, 999_999.0, 5.0, 6.0, 7.0, 8.0]);
+    target_b.observed = Some(observed);
+
+    let spec = ForecastSpec { horizon: 4, quantile_levels: cfg.quantile_levels.clone(), ..ForecastSpec::default() };
+    let panel_a = Panel::single("H", "s", vec![target_a]);
+    let panel_b = Panel::single("H", "s", vec![target_b]);
+    let fc_a = forecaster_a.forecast(&panel_a, &spec).expect("forecast a");
+    let fc_b = forecaster_b.forecast(&panel_b, &spec).expect("forecast b");
+
+    let qa = fc_a.targets[0].quantiles.as_ref().unwrap();
+    let qb = fc_b.targets[0].quantiles.as_ref().unwrap();
+    assert_eq!(qa.data, qb.data, "a value at an unobserved step must never affect the forecast");
+}
+
+#[test]
+fn forecast_rejects_a_target_with_no_observed_steps() {
+    let (cfg, model) = synthetic_tiny_model();
+    let forecaster = Timesfm3Forecaster::new(model);
+    let mut target = Variate::target("t", vec![1.0, 2.0, 3.0, 4.0]);
+    target.observed = Some(vec![0.0, 0.0, 0.0, 0.0]);
+    let panel = Panel::single("H", "s", vec![target]);
+    let spec = ForecastSpec { horizon: 4, quantile_levels: cfg.quantile_levels.clone(), ..ForecastSpec::default() };
+    let err = forecaster.forecast(&panel, &spec).expect_err("a wholly-unobserved target must be rejected, not silently forecast from padding");
+    assert_eq!(err.code, "bad_request");
 }

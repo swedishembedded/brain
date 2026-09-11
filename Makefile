@@ -1186,7 +1186,8 @@ PARITY_STRICT_SUITES ?= \
         brain-ltxv:vae_parity,audio_parity,upsampler_parity,duration_head_parity,na_decoder_parity \
         brain-gemma4:parity \
         brain-mimi:decode,encode \
-        brain-ecapatdnn:encoder
+        brain-ecapatdnn:encoder \
+        brain-timesfm3:parity
 
 parity/strict:
 	@fail=0; \

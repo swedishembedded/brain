@@ -101,12 +101,15 @@ BRAIN_TIMESFM3=/path/to/timesfm3.safetensors dbus-run-session -- bash -c '
 
 - CPU/GPU only - no NPU export yet.
 - No training/LoRA path yet - inference only.
-- **Left-padding is not implemented**: the context length must already be a
-  multiple of the checkpoint's `input_patch_len` (32 for the published
-  checkpoint). A served or CLI request with an arbitrary-length series is
-  truncated to its most recent patch-aligned tail rather than left-padded.
-- No per-step missing-value (NaN) interpolation yet - every context value is
-  treated as observed.
+- **Left-padding and per-step missing values are handled by one mechanism**:
+  a non-finite value in a variate's data (or a `0.0` in its `observed` mask)
+  is treated as missing, excluded from RevIN/detrend statistics, and zeroed
+  before reaching the transformer. `Timesfm3Forecaster::forecast` left-pads
+  any context to the checkpoint's own `input_patch_len` boundary this way, so
+  an arbitrary-length series is used in full rather than truncated. There is
+  no interior-NaN *interpolation* - an interior gap is masked through
+  (excluded from the running stats it would otherwise contribute to), not
+  filled in from neighboring values.
 - Forecaster-level postprocessing implements quantile sorting and a
   positivity clamp; symmetric averaging, z-normalization and 32-variate
   chunking (needed to match the reference's own benchmark numbers exactly on

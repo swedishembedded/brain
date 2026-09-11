@@ -40,12 +40,22 @@ redistributable) - see `docs/models/timesfm3.md`.
       full z-normalization bookkeeping and 32-variate chunking (needed to
       match the reference's own published benchmark numbers exactly on
       panels wider than the model's 32-variate limit) are not implemented.
-- [ ] No per-step missing-value (NaN) interpolation - every context value is
-      treated as observed.
-- [ ] Left-padding is not implemented - the context length must already be a
-      multiple of `input_patch_len` (32 for the published checkpoint); a
-      served or CLI request with an arbitrary-length series is truncated to
-      its most recent patch-aligned tail rather than left-padded.
+- [x] Left-padding and per-step missing values (`Variate::observed`, or a
+      non-finite value in `Variate::data`) - `preprocess::build_input` masks
+      and zeroes any non-finite step, excluding it from RevIN/detrend stats;
+      `Timesfm3Forecaster::forecast` left-pads any context to the checkpoint's
+      `input_patch_len` boundary the same way, so the CLI no longer rounds a
+      context down and silently drops history (`forecast_cli.rs`'s `predict`).
+      Interior gaps are masked through, not interpolated - no attempt to
+      reproduce the reference wrapper's own interior-NaN interpolation, if it
+      has one; that remains a ledgered gap if a future comparison needs it.
+- [ ] Numerical parity is not continuously enforced: `brain-timesfm3` is not
+      in the `Makefile`'s `PARITY_STRICT_SUITES`, and `scripts/data/
+      fetch-testdata.sh` does not provision its goldens, so `BRAIN_REQUIRE_
+      FIXTURES=1` cannot turn its skips into failures the way it does for
+      wan/ltxv/s3dit. Committing the golden manifest itself is deliberately
+      NOT the fix (see `715c4112`, "never commit large/regenerable numeric
+      goldens").
 - [ ] The D-Bus/CLI `predict` wire carries one series only, so served
       forecasting is always target-only even though the model is natively
       multivariate - full covariate support needs the library API

@@ -182,6 +182,50 @@ fn real_checkpoint_decode_end_to_end_from_raw_inputs_matches_the_reference() {
 /// this caught a real bug the end-to-end test alone could not localize (the
 /// anchor prediction grid updates on every patch, context included, not only
 /// CPM ones - see `cpm_iterative_revin_refine`'s doc comment).
+/// Left-padding and per-step missing values, over the SAME tiny model/weights
+/// `tiny_config_decode_end_to_end_from_raw_inputs_matches_the_reference` uses
+/// (`dump_masked` in the golden dumper reuses `dump_tiny`'s own model) - a
+/// partial leading pad (`padtiny`), a wholly-masked leading patch i.e. real
+/// left-padding (`padtiny_full`), and interior gaps in both the target and
+/// the past-future covariate (`nantiny`). Unlike `decode_end_to_end`, these do
+/// NOT assert an all-false `patch_mask` - masking is exactly the behavior
+/// under test.
+#[test]
+fn masked_and_padded_tiny_configs_match_the_reference() {
+    let Some(g) = read_golden() else { return; };
+    let cfg = Timesfm3Config::from_hf_config_json(&g["tiny_config"]).unwrap();
+    let weights: HashMap<String, Vec<f32>> =
+        g["tiny_weights"].as_object().unwrap().iter().map(|(k, v)| (k.clone(), farr(v))).collect();
+    let model = Timesfm3::from_weights_on(gpu_core::testgpu::dev(timesfm3::model::PIPELINES), cfg.clone(), &weights).unwrap();
+    let shape = DecodeShape { batch: 1, num_target: 1, num_past_only: 1, num_past_future: 1, context: 8, horizon: 8 };
+
+    for prefix in ["padtiny", "padtiny_full", "nantiny"] {
+        let target = farr(&g[format!("{prefix}.input.target")]["full"]);
+        let past_only = farr(&g[format!("{prefix}.input.past_only")]["full"]);
+        let past_future = farr(&g[format!("{prefix}.input.past_future")]["full"]);
+
+        let built = preprocess::build_input(&cfg, shape, &target, &past_only, &past_future);
+        let n = built.num_context_patches + built.num_horizon_patches;
+        let raw_logits = model.core_forward(&built.resblock_input, &built.patch_mask, shape.batch, shape.num_variates(), n);
+        let out = preprocess::postprocess(&cfg, shape, &built, &raw_logits);
+
+        let want = farr(&g[format!("{prefix}.horizon_logits")]["full"]);
+        let (cos, rel_l2) = cos_and_rel_l2(&out, &want);
+        eprintln!("timesfm3 {prefix} masked decode parity: cosine={cos:.9} rel_l2={rel_l2:.6}");
+        assert!(cos > 0.999_9, "{prefix} horizon_logits cosine {cos} too low");
+        assert!(rel_l2 < 0.02, "{prefix} horizon_logits relative L2 {rel_l2} too large");
+    }
+
+    // padtiny_full's own patch 0 is the case that actually distinguishes this
+    // test from `decode_end_to_end`'s: it must be attention-masked, unlike
+    // every case gated elsewhere in this file.
+    let target = farr(&g["padtiny_full.input.target"]["full"]);
+    let past_only = farr(&g["padtiny_full.input.past_only"]["full"]);
+    let past_future = farr(&g["padtiny_full.input.past_future"]["full"]);
+    let built = preprocess::build_input(&cfg, shape, &target, &past_only, &past_future);
+    assert!(built.patch_mask[0], "padtiny_full's wholly-missing leading patch must be attention-masked");
+}
+
 #[test]
 fn cpm_refine_alone_matches_the_golden_exactly() {
     let Some(g) = read_golden() else { return; };

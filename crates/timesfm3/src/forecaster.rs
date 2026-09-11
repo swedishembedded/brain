@@ -48,6 +48,18 @@ impl Timesfm3Forecaster {
         self.model.config()
     }
 
+    /// A variate's step `i` is observed if `Variate::observed[i] != 0.0` when
+    /// that mask is present, else if the raw value itself is finite -
+    /// `observed` wins when both could apply, matching a caller that sets
+    /// both consistently and letting one that only ever sets one of them work
+    /// unsurprisingly either way.
+    fn is_observed(v: &forecast::Variate, i: usize) -> bool {
+        match &v.observed {
+            Some(o) => o[i] != 0.0,
+            None => v.data[i].is_finite(),
+        }
+    }
+
     /// Interpolate the requested `levels` from the native quantile matrix
     /// `native` (`[horizon, native_levels.len()]`, step-major - `postprocess`'s
     /// own output layout), against THIS model's actual quantile levels
@@ -131,24 +143,38 @@ impl ForecastModel for Timesfm3Forecaster {
             if targets.is_empty() {
                 continue;
             }
-            let context = targets[0].data.len();
-            if !context.is_multiple_of(cfg.input_patch_len) {
-                return Err(ForecastError::bad_request(format!(
-                    "timesfm3: context length {context} is not a multiple of input_patch_len {} (left-padding to a patch boundary is not implemented yet)",
-                    cfg.input_patch_len
-                )));
-            }
-            if targets.iter().chain(&past_only).any(|v| v.data.len() != context) {
+            let valid = targets[0].data.len();
+            if targets.iter().chain(&past_only).any(|v| v.data.len() != valid) {
                 return Err(ForecastError::bad_request("timesfm3: every target/past-covariate must share the target's context length"));
             }
+            for t in &targets {
+                if (0..valid).all(|i| !Self::is_observed(t, i)) {
+                    return Err(ForecastError::bad_request(format!("timesfm3: target '{}' has no observed steps", t.name)));
+                }
+            }
+            // Left-padding and a per-step gap are the same mechanism as far as
+            // `preprocess::build_input` is concerned: both become `f32::NAN`,
+            // which it masks and excludes from RevIN/detrend statistics (see
+            // its own doc). `context` is the padded length `build_input`
+            // requires (a multiple of `input_patch_len`); `pad` leading steps
+            // carry no real history at all.
+            let patch = cfg.input_patch_len;
+            let context = valid.div_ceil(patch).max(1) * patch;
+            let pad = context - valid;
+            let row = |v: &forecast::Variate| -> Vec<f32> {
+                let mut out = Vec::with_capacity(context);
+                out.resize(pad, f32::NAN);
+                out.extend((0..valid).map(|i| if Self::is_observed(v, i) { v.data[i] } else { f32::NAN }));
+                out
+            };
 
             let mut target_data = Vec::with_capacity(targets.len() * context);
             for t in &targets {
-                target_data.extend_from_slice(&t.data);
+                target_data.extend(row(t));
             }
             let mut past_only_data = Vec::with_capacity(past_only.len() * context);
             for c in &past_only {
-                past_only_data.extend_from_slice(&c.data);
+                past_only_data.extend(row(c));
             }
             let mut past_future_data = Vec::with_capacity(known_future.len() * (context + spec.horizon));
             for c in &known_future {
@@ -156,7 +182,7 @@ impl ForecastModel for Timesfm3Forecaster {
                 if future.len() != spec.horizon {
                     return Err(ForecastError::bad_request("timesfm3: known_future length must equal the horizon"));
                 }
-                past_future_data.extend_from_slice(&c.data);
+                past_future_data.extend(row(c));
                 past_future_data.extend_from_slice(future);
             }
 
@@ -169,7 +195,10 @@ impl ForecastModel for Timesfm3Forecaster {
 
             for (ti, t) in targets.iter().enumerate() {
                 let native = &out[ti * spec.horizon * cfg.num_quantiles..(ti + 1) * spec.horizon * cfg.num_quantiles];
-                let nonneg = t.data.iter().all(|&x| x >= 0.0);
+                // Unobserved steps must not defeat the clamp: `t.data[i]` may
+                // be a stale or NaN placeholder there, so only observed steps
+                // are asked to justify it.
+                let nonneg = (0..valid).all(|i| !Self::is_observed(t, i) || t.data[i] >= 0.0);
                 let mut native = native.to_vec();
                 if nonneg {
                     for v in &mut native {

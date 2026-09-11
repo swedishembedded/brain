@@ -126,13 +126,12 @@ fn predict(args: &[String]) {
             }
         };
         // Single-pass, non-autoregressive: no KV-cache window to slide, unlike
-        // kronos - but the context must still be a multiple of the model's
-        // patch length, so round down rather than error on an arbitrary CSV
-        // length.
-        let patch = m.config().input_patch_len;
+        // kronos. The forecaster left-pads any context to the model's own
+        // patch boundary internally, so an arbitrary CSV length is used in
+        // full rather than rounded down and losing up to a patch's worth of
+        // real history.
         let max_context = forecast::ForecastModel::capabilities(&m).max_context;
-        let want = if context == 0 { max_context.min(512) } else { context };
-        let context = (want / patch).max(1) * patch;
+        let context = if context == 0 { max_context.min(512) } else { context.min(max_context) };
         (Box::new(m), "timesfm3", context)
     } else {
         // Weights: `--kronos-tokenizer`/`--kronos-decoder` (when given) are

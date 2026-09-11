@@ -388,13 +388,19 @@ pub fn cpm_iterative_revin_refine(raw_logits: &[f32], running_n: &[f32], running
 /// Build `core_forward`'s input from raw (unpatched) target / past-only /
 /// past-and-future covariate panels: linear detrend, patch, running RevIN,
 /// future-covariate rolling, and the `[values | future | mask | future_mask]`
-/// concatenation `pre_transformer_resblock` expects. No left-padding path yet
-/// (`context` must already be a multiple of `input_patch_len` - the ledgered
-/// gap; every context this crate is tested against today satisfies it).
+/// concatenation `pre_transformer_resblock` expects.
 ///
 /// `target`/`past_only`/`past_future` are `[b, num_*, context]` (`past_future`
-/// is `[b, num_past_future, context+horizon]`); all fully observed (no NaNs) -
-/// per-step missing-value masking is a further ledgered gap.
+/// is `[b, num_past_future, context+horizon]`). A **non-finite value is a
+/// missing observation** - the caller's contract, not just an internal detail:
+/// `Timesfm3Forecaster::forecast` materializes both left-padding (steps before
+/// the caller's real history) and any per-step gap (`Variate::observed` /
+/// unobserved) as `f32::NAN` before calling here, so this one mechanism
+/// handles both. A masked value is excluded from RevIN/detrend statistics
+/// (`masked_patch_stats`) and zeroed before being fed to the transformer.
+/// `context` must already be a multiple of `input_patch_len` - the caller's
+/// job, checked here only as a `debug_assert` (an internal invariant, not a
+/// user-facing validation).
 pub struct BuiltInput {
     pub resblock_input: Vec<f32>,
     pub patch_mask: Vec<bool>,
@@ -408,7 +414,7 @@ pub struct BuiltInput {
 
 pub fn build_input(cfg: &Timesfm3Config, shape: DecodeShape, target: &[f32], past_only: &[f32], past_future: &[f32]) -> BuiltInput {
     let (b, context, horizon) = (shape.batch, shape.context, shape.horizon);
-    assert_eq!(context % cfg.input_patch_len, 0, "left-padding to a patch boundary is not implemented yet");
+    debug_assert_eq!(context % cfg.input_patch_len, 0, "caller must pad context to a patch boundary before calling build_input");
     let v = shape.num_variates();
     let patch_len = cfg.input_patch_len;
     let rolls = cfg.rolls();
@@ -430,7 +436,15 @@ pub fn build_input(cfg: &Timesfm3Config, shape: DecodeShape, target: &[f32], pas
             ctx[(bi * v + vi) * context..(bi * v + vi) * context + context].copy_from_slice(&past_future[src..src + context]);
         }
     }
-    let ctx_mask = vec![false; b * v * context]; // no NaNs supported yet - see the struct doc
+    // A non-finite value (left-padding or a per-step gap - see the fn doc) is
+    // missing: mask it and zero it, so downstream stats never see the NaN.
+    let mut ctx_mask = vec![false; b * v * context];
+    for (x, m) in ctx.iter_mut().zip(ctx_mask.iter_mut()) {
+        if !x.is_finite() {
+            *m = true;
+            *x = 0.0;
+        }
+    }
 
     let stitch_extract_len = cfg.stitch_extract_len();
     let overlap = stitch_extract_len - patch_len;
@@ -452,22 +466,21 @@ pub fn build_input(cfg: &Timesfm3Config, shape: DecodeShape, target: &[f32], pas
                 let fi = vi - shape.num_target - shape.num_past_only;
                 let src = (bi * shape.num_past_future + fi) * (context + horizon) + context;
                 let mut fut: Vec<f32> = past_future[src..src + horizon].to_vec();
-                let fut_mask = vec![false; horizon];
-                let t = fit_and_apply_detrend(&mut c, &ctx_mask[off..off + context], Some(&mut fut), Some(&fut_mask), context, cfg.linear_detrending_threshold);
-                if t.applied {
-                    let hoff = (bi * v + vi) * padded_horizon;
-                    future_hor[hoff..hoff + horizon].copy_from_slice(&fut);
-                    for k in 0..horizon {
-                        future_hor_mask[hoff + k] = false;
-                    }
-                } else {
-                    let hoff = (bi * v + vi) * padded_horizon;
-                    let fut_orig = &past_future[src..src + horizon];
-                    future_hor[hoff..hoff + horizon].copy_from_slice(fut_orig);
-                    for k in 0..horizon {
-                        future_hor_mask[hoff + k] = false;
+                let mut fut_mask = vec![false; horizon];
+                for (x, m) in fut.iter_mut().zip(fut_mask.iter_mut()) {
+                    if !x.is_finite() {
+                        *m = true;
+                        *x = 0.0;
                     }
                 }
+                let t = fit_and_apply_detrend(&mut c, &ctx_mask[off..off + context], Some(&mut fut), Some(&fut_mask), context, cfg.linear_detrending_threshold);
+                // `fut` already holds the right values whether or not the
+                // trend was applied: `fit_and_apply_detrend` only mutates
+                // unmasked positions in place when `applied`, and leaves it
+                // as the (already NaN-zeroed) original otherwise.
+                let hoff = (bi * v + vi) * padded_horizon;
+                future_hor[hoff..hoff + horizon].copy_from_slice(&fut);
+                future_hor_mask[hoff..hoff + horizon].copy_from_slice(&fut_mask);
                 t
             } else {
                 fit_and_apply_detrend(&mut c, &ctx_mask[off..off + context], None, None, context, cfg.linear_detrending_threshold)
@@ -694,6 +707,71 @@ mod tests {
         let preds = vec![1.0, 2.0, 3.0];
         let out = stitch_patches(&preds, 1, 1, 1, 3, 2, 1);
         assert_eq!(out, preds);
+    }
+
+    #[test]
+    fn build_input_masks_nan_values_and_excludes_them_from_running_stats() {
+        // patch 0 = [NaN, NaN, 5, 6]: only PARTIALLY masked, so RevIN stats
+        // must average {5,6} alone, and the patch must not be attention-masked
+        // (only a WHOLLY masked leading patch is - see the leading-cumprod
+        // rule below).
+        // `linear_detrending_threshold: 0.0` disables detrending unconditionally
+        // (`std_det < 0.0` never holds) - `use_linear_detrending` itself is NOT
+        // read anywhere in build_input/fit_and_apply_detrend today, a separate,
+        // pre-existing gap noted but out of scope here (the real checkpoint's
+        // config always has it `true`, so this is inert for every model this
+        // crate actually serves).
+        let cfg = Timesfm3Config { linear_detrending_threshold: 0.0, ..Timesfm3Config::tiny() };
+        let shape = DecodeShape { batch: 1, num_target: 1, num_past_only: 0, num_past_future: 0, context: 8, horizon: 8 };
+        let target = [f32::NAN, f32::NAN, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
+        let built = build_input(&cfg, shape, &target, &[], &[]);
+        assert!((built.running_mu[0] - 5.5).abs() < 1e-5, "running_mu[0] = {}", built.running_mu[0]);
+        assert!((built.running_sigma[0] - 0.5).abs() < 1e-5, "running_sigma[0] = {}", built.running_sigma[0]);
+        assert!(!built.patch_mask[0], "a partially-observed patch must not be attention-masked");
+    }
+
+    #[test]
+    fn build_input_masks_a_wholly_nan_leading_patch_as_left_padding() {
+        // patch 0 = [NaN,NaN,NaN,NaN]: this IS left-padding (the caller
+        // materializes it as NaN, per Timesfm3Forecaster::forecast), and must
+        // be excluded entirely: zero running stats for patch 0, and marked as
+        // an attention-masked leading patch, unlike the partial case above.
+        // threshold 0.0 disables detrending unconditionally - see the note above.
+        let cfg = Timesfm3Config { linear_detrending_threshold: 0.0, ..Timesfm3Config::tiny() };
+        let shape = DecodeShape { batch: 1, num_target: 1, num_past_only: 0, num_past_future: 0, context: 8, horizon: 8 };
+        let target = [f32::NAN, f32::NAN, f32::NAN, f32::NAN, 5.0, 6.0, 7.0, 8.0];
+        let built = build_input(&cfg, shape, &target, &[], &[]);
+        assert_eq!(built.running_mu[0], 0.0);
+        assert_eq!(built.running_sigma[0], 0.0);
+        assert!(built.patch_mask[0], "a wholly-masked leading patch must be attention-masked");
+        assert!(!built.patch_mask[1], "the first real-data patch must not be masked");
+        assert!((built.running_mu[1] - 6.5).abs() < 1e-5, "running_mu[1] = {}", built.running_mu[1]);
+    }
+
+    #[test]
+    fn build_input_excludes_an_interior_nan_gap_from_running_stats() {
+        // threshold 0.0 disables detrending unconditionally - see the note above.
+        let cfg = Timesfm3Config { linear_detrending_threshold: 0.0, ..Timesfm3Config::tiny() };
+        let shape = DecodeShape { batch: 1, num_target: 1, num_past_only: 0, num_past_future: 0, context: 8, horizon: 8 };
+        let target = [1.0, 2.0, f32::NAN, 4.0, 5.0, 6.0, 7.0, 8.0];
+        let built = build_input(&cfg, shape, &target, &[], &[]);
+        // patch 0 = [1,2,NaN,4]: mean of {1,2,4} = 7/3, NOT poisoned by the NaN.
+        assert!((built.running_mu[0] - 7.0 / 3.0).abs() < 1e-5, "running_mu[0] = {}", built.running_mu[0]);
+        assert!(!built.patch_mask[0], "a partially-observed interior gap must not be attention-masked");
+    }
+
+    #[test]
+    fn build_input_masks_nan_in_a_known_future_covariates_context_and_horizon() {
+        // threshold 0.0 disables detrending unconditionally - see the note above.
+        let cfg = Timesfm3Config { linear_detrending_threshold: 0.0, ..Timesfm3Config::tiny() };
+        let shape = DecodeShape { batch: 1, num_target: 1, num_past_only: 0, num_past_future: 1, context: 8, horizon: 4 };
+        let target = [1.0; 8];
+        // past_future is [context+horizon] = 12 long: one interior context NaN, one horizon NaN.
+        let past_future = [10.0, f32::NAN, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, /* horizon: */ 20.0, f32::NAN, 22.0, 23.0];
+        let built = build_input(&cfg, shape, &target, &[], &past_future);
+        // variate index 1 is the past-future covariate (index 0 is the target).
+        let n_patches = built.num_context_patches + built.num_horizon_patches;
+        assert!((built.running_mu[n_patches] - (10.0 + 12.0 + 13.0) / 3.0).abs() < 1e-5, "the covariate's own patch 0 running mean must exclude its interior NaN");
     }
 
     #[test]

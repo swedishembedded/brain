@@ -4,7 +4,7 @@
 
 """Dump TimesFM-3 reference forwards for the brain parity ladder.
 
-Two independent dumps, dumped before any Rust exists (goldens come first, so
+Four independent dumps, dumped before any Rust exists (goldens come first, so
 the Rust side has a real target to gate against instead of a guess):
 
   A. A CHECKPOINT-FREE tiny config where every dimension differs from every
@@ -19,10 +19,21 @@ the Rust side has a real target to gate against instead of a guess):
   B. A REAL-CHECKPOINT single-forward decode, multivariate: one target, one
      past-only covariate, one past-future covariate - exercising every `Role`
      brain's `Panel` will map onto this model.
+  C. Two CHECKPOINT-FREE cases over the SAME tiny model as A, reusing its own
+     weights (no second random draw): `padtiny` (a partial leading pad patch -
+     the first context patch is NOT fully missing) and `padtiny_full` (a
+     wholly-missing leading patch, i.e. real left-padding). Both exercise
+     brain's mask derivation (`!is_finite -> mask + zero`) and the
+     leading-only cumprod attention-mask rule.
+  D. One CHECKPOINT-FREE case, `nantiny`, with an INTERIOR (non-leading) gap in
+     both the target and the past-future covariate's context - proves masking
+     excludes an interior gap from RevIN/detrend the same way it excludes a
+     leading one, without conflating the two.
 
-Both dumps exercise sequence attention, variate attention, RoPE, QK-norm,
+Both A/B dumps exercise sequence attention, variate attention, RoPE, QK-norm,
 RevIN, iterative CPM refinement, linear detrending and stitching - every stage
-a faithful Rust port has to reproduce.
+a faithful Rust port has to reproduce. C/D reuse A's model and weights and
+exist only to gate the mask/left-padding path added on top of that forward.
 
 Taps captured via forward hooks + one function wrap, never by
 hand-reassembling intermediate math from the outputs alone - hooking the
@@ -209,19 +220,18 @@ def run_case(model, prefix, store, taps_manifest, *, target, past_only, past_fut
     return horizon_logits
 
 
-def dump_tiny(store, manifest):
-    """Part A: checkpoint-free, every dim pairwise distinct and pairwise
-    coprime so a head-count/head-width or seq/variate-attention axis swap
-    cannot pass by shape coincidence the way it could at the real 1280/16/80
-    (all three share common factors there)."""
-    # Every dimension pairwise distinct (and head_dim kept EVEN - RoPE's
-    # split-half rotation divides it in two, so an odd head_dim is not a
-    # tiny-config choice, it is a shape error): layers 3, heads 2, head_dim 6
-    # -> model_dims 12, hidden_dims 14, patch_in 4, patch_out 8, quantiles 5,
-    # max_variates 9. At the real 1280/16/80 shape several of these numbers
-    # share factors (1280 = 16*80); here none of them do, so a head-count/
-    # head-width swap or a sequence/variate axis swap cannot pass by shape
-    # coincidence.
+def build_tiny_model():
+    """Construct part A's checkpoint-free tiny model - shared by `dump_tiny`
+    and `dump_masked` (part C/D), which reuse its exact weights rather than
+    drawing a second random model. Every dimension pairwise distinct (and
+    head_dim kept EVEN - RoPE's split-half rotation divides it in two, so an
+    odd head_dim is not a tiny-config choice, it is a shape error): layers 3,
+    heads 2, head_dim 6 -> model_dims 12, hidden_dims 14, patch_in 4,
+    patch_out 8, quantiles 5, max_variates 9. At the real 1280/16/80 shape
+    several of these numbers share factors (1280 = 16*80); here none of them
+    do, so a head-count/head-width swap or a sequence/variate axis swap
+    cannot pass by shape coincidence. Fully deterministic (fixed seeds
+    throughout), so every caller gets bit-identical weights."""
     torch.manual_seed(SEED)
     residual_cfg = timesfm3.ResidualBlockConfig(
         hidden_dims=12, output_dims=12, use_bias=False, activation="relu"
@@ -262,7 +272,18 @@ def dump_tiny(store, manifest):
     gen = torch.Generator().manual_seed(SEED)
     for p in model.parameters():
         p.data = torch.randn(p.shape, generator=gen) * 0.05
+    return model
 
+
+def dump_tiny(store, manifest):
+    """Part A: checkpoint-free, every dim pairwise distinct and pairwise
+    coprime so a head-count/head-width or seq/variate-attention axis swap
+    cannot pass by shape coincidence the way it could at the real 1280/16/80
+    (all three share common factors there). Returns `(model, identity)` -
+    `dump_masked` reuses the model."""
+    model = build_tiny_model()
+
+    gen = torch.Generator().manual_seed(SEED)
     batch, context, horizon = 2, 16, 8  # 4 context patches of 4, 1 forecast patch of 8 (no horizon padding)
     target = torch.randn(batch, 2, context, generator=gen)
     past_only = torch.randn(batch, 1, context, generator=gen)
@@ -286,11 +307,57 @@ def dump_tiny(store, manifest):
     # gate actually LOAD a model and run `core_forward`, rather than only
     # checking shapes against `tiny_weight_names`.
     manifest["tiny_weights"] = {name: arr.reshape(-1).astype(np.float64).tolist() for name, arr in weights.items()}
-    return {
+    identity = {
         "input_patch_len": 4, "output_patch_len": 8, "num_quantiles": 5,
         "num_layers": 3, "num_heads": 2, "model_dims": 12, "hidden_dims": 14,
         "context": context, "horizon": horizon, "batch": batch,
     }
+    return model, identity
+
+
+def dump_masked(model, tiny_identity, store, manifest):
+    """Part C/D: mask/left-padding cases over the SAME tiny model/weights as
+    `dump_tiny` (no second random draw) - `padtiny` (a partial leading pad
+    patch - the first context patch is NOT fully missing), `padtiny_full` (a
+    wholly-missing leading patch: real left-padding), and `nantiny` (interior,
+    non-leading gaps in both the target and the past-future covariate).
+
+    ASSUMPTION TO VERIFY ON FIRST REAL RUN (porting.md SS6 - settle with the
+    live reference, don't guess from memory): a NaN placed directly in
+    `target`/`past_future_covariates` is read by `model.decode()`'s own
+    preprocessing as a missing observation - matching TimesFM's public
+    NaN-as-missing convention and brain's own `!is_finite()` rule - rather
+    than requiring a separate mask kwarg `decode()` doesn't otherwise take
+    here. If this produces a NaN-poisoned (not masked) `horizon_logits`, or
+    `decode()` raises, that assumption is wrong: check `model.py`'s own
+    preprocessing/masking source before changing brain's side to match it.
+    """
+    batch, context, horizon = 1, 8, 8
+    gen = torch.Generator().manual_seed(SEED + 1)  # a stream distinct from dump_tiny's own inputs
+
+    def run(prefix, target_gaps=(), future_ctx_gaps=(), future_hor_gaps=()):
+        target = torch.randn(batch, 1, context, generator=gen)
+        past_only = torch.randn(batch, 1, context, generator=gen)
+        past_future = torch.randn(batch, 1, context + horizon, generator=gen)
+        for i in target_gaps:
+            target[:, :, i] = float("nan")
+        for i in future_ctx_gaps:
+            past_future[:, :, i] = float("nan")
+        for i in future_hor_gaps:
+            past_future[:, :, context + i] = float("nan")
+        with torch.no_grad():
+            run_case(model, prefix, store, manifest, target=target, past_only=past_only, past_future=past_future, horizon=horizon, full=True)
+        tap(store, manifest, f"{prefix}.input.target", target, full=True)
+        tap(store, manifest, f"{prefix}.input.past_only", past_only, full=True)
+        tap(store, manifest, f"{prefix}.input.past_future", past_future, full=True)
+
+    run("padtiny", target_gaps=[2, 3])  # patch 0 = [x,x,NaN,NaN]: partially masked, not a leading pad.
+    run("padtiny_full", target_gaps=[0, 1, 2, 3])  # patch 0 wholly NaN: real left-padding.
+    run("nantiny", target_gaps=[5], future_ctx_gaps=[1], future_hor_gaps=[2])  # interior gaps only.
+
+    identity = dict(tiny_identity)
+    identity.update(context=context, horizon=horizon, batch=batch)
+    return identity
 
 
 def dump_real(checkpoint_dir, store, manifest):
@@ -335,12 +402,14 @@ def main():
     store = {}
     manifest = {"versions": {"torch": torch.__version__, "numpy": np.__version__, "python": sys.version.split()[0]}}
 
-    tiny_identity = dump_tiny(store, manifest)
+    tiny_model, tiny_identity = dump_tiny(store, manifest)
+    masked_identity = dump_masked(tiny_model, tiny_identity, store, manifest)
     real_identity = dump_real(args.checkpoint_dir, store, manifest)
 
     weights_file = os.path.join(args.checkpoint_dir, "model.safetensors")
     manifest["source"] = {
         "tiny": source_block(identity=tiny_identity, checkpoint="checkpoint-free (random seeded weights)"),
+        "masked": source_block(identity=masked_identity, checkpoint="checkpoint-free (reuses dump_tiny's own weights)"),
         "real": source_block(identity=real_identity, checkpoint="google/timesfm-3.0-pytorch", files=(weights_file,)),
     }
 
