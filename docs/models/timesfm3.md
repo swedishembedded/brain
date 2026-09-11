@@ -27,8 +27,8 @@ other - a target plus measured (past-only) and scheduled/forecast
 | LoRA fine-tune | [ ] |
 | CLI (`brain <arch> <action>`) | [x] |
 | HTTP API | [ ] |
-| D-Bus | [x] (target-only - see below) |
-| Batched serving | [ ] |
+| D-Bus | [x] (native multivariate + covariates - see below) |
+| Batched serving | [x] (`run_batch`; a panel's own items also batch internally) |
 
 ## Getting the weights
 
@@ -74,11 +74,16 @@ schedule-driven load, forecast against a physics observer and a seasonal-naive
 baseline) and `examples/forecast/cooling_loop.sh`/`.py` for the shell/served
 variants.
 
-D-Bus action `forecast`: input `context` (a raw f32 series, with its shape in
-the request metadata), parameter `horizon`, output `forecast` (shape
-`[horizon, 9]`, kind `quantiles_hq` - the model's 9 native quantiles,
-horizon-major). This wire carries only ONE series, so a served request is
-always target-only, even though the model itself is multivariate.
+D-Bus action `forecast`: input `context`, raw f32 with its shape in the
+request metadata - `[T]` for one target (the original wire shape) or
+`[num_target, T]` for the model's native multivariate capability, reachable
+over this wire directly, not only the library API. Optional inputs
+`past_covariates` (`[T]`/`[P,T]`) and `known_future` (`[T+horizon]`/
+`[K,T+horizon]`) add covariate variates; optional `observed` (same shape as
+`context`) marks missing steps. Output `forecast`: `[horizon, 9]`, kind
+`quantiles_hq`, for one target (byte-identical to the original single-series
+contract); `[num_target, horizon, 9]`, kind `quantiles_thq`, plus a `names`
+meta array, for more than one.
 
 ```bash
 BRAIN_TIMESFM3=/path/to/timesfm3.safetensors dbus-run-session -- bash -c '
@@ -91,8 +96,9 @@ BRAIN_TIMESFM3=/path/to/timesfm3.safetensors dbus-run-session -- bash -c '
 ## Options
 
 - `predict`: `--timesfm3 <weights>` selects this model instead of Kronos;
-  `--horizon`, `--context` (rounds down to a multiple of the checkpoint's
-  32-step patch length), `--gnuplot <path>`.
+  `--horizon`, `--context` (the full requested length is used - the
+  forecaster left-pads to the checkpoint's 32-step patch boundary itself,
+  it no longer rounds down and drops history), `--gnuplot <path>`.
 - `compare`/`serve`: `--timesfm3 <weights>`, same flags as the other
   foundation models.
 - D-Bus `forecast` action: `horizon` (default 64).
@@ -114,5 +120,11 @@ BRAIN_TIMESFM3=/path/to/timesfm3.safetensors dbus-run-session -- bash -c '
   positivity clamp; symmetric averaging, z-normalization and 32-variate
   chunking (needed to match the reference's own benchmark numbers exactly on
   panels wider than the model's 32-variate limit) are not implemented.
-- The D-Bus/HTTP wire carries one series only - native multivariate/covariate
-  forecasting needs the library API (see above), not the served path.
+- `Timesfm3Forecaster::forecast` batches a panel's own items internally
+  (grouped by padded context length, padded to a shared variate count where
+  they differ) and `Timesfm3Instance::run_batch` batches queued D-Bus/JSONL
+  requests the same way, grouped by horizon - both verified bit-identical to
+  running each item/request alone, not just close. No measured throughput
+  number is published here: it needs the real checkpoint on hardware not
+  shared with other work, neither of which was available where this was
+  written (see `.agents/roadmap/timesfm3.md`).
