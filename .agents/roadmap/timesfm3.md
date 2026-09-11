@@ -49,15 +49,47 @@ redistributable) - see `docs/models/timesfm3.md`.
       Interior gaps are masked through, not interpolated - no attempt to
       reproduce the reference wrapper's own interior-NaN interpolation, if it
       has one; that remains a ledgered gap if a future comparison needs it.
-- [ ] Numerical parity is not continuously enforced: `brain-timesfm3` is not
-      in the `Makefile`'s `PARITY_STRICT_SUITES`, and `scripts/data/
-      fetch-testdata.sh` does not provision its goldens, so `BRAIN_REQUIRE_
-      FIXTURES=1` cannot turn its skips into failures the way it does for
-      wan/ltxv/s3dit. Committing the golden manifest itself is deliberately
-      NOT the fix (see `715c4112`, "never commit large/regenerable numeric
-      goldens").
-- [ ] The D-Bus/CLI `predict` wire carries one series only, so served
-      forecasting is always target-only even though the model is natively
-      multivariate - full covariate support needs the library API
-      (`Timesfm3Forecaster::forecast` over a `Panel`), demonstrated in
-      `crates/timesfm3/examples/cooling_loop.rs`.
+- [ ] Numerical parity's always-on WIRING is in place (`brain-timesfm3:parity`
+      in the `Makefile`'s `PARITY_STRICT_SUITES`, a `golden_tree "timesfm3"`
+      entry in `scripts/data/fetch-testdata.sh`) but is UNVERIFIED: it was
+      added on a box with neither `BRAIN_TIMESFM3_REF` (a
+      `google-research/timesfm` checkout) nor the real checkpoint, so
+      `make parity/strict` has never actually run this suite's real
+      comparisons end to end, only been confirmed to hard-fail correctly when
+      the fixture is absent (`BRAIN_REQUIRE_FIXTURES=1`). The new
+      `padtiny`/`padtiny_full`/`nantiny` dumper cases (left-padding/missing-
+      value masking) carry the same caveat, plus one unverified assumption
+      spelled out in `dump_masked`'s own docstring: that a NaN placed
+      directly in `target`/`past_future_covariates` is read by `decode()` as
+      a missing observation, not a separate mask kwarg. Run the dumper on a
+      box with both before trusting any of this. Committing the golden
+      manifest itself is deliberately NOT the fix (see `715c4112`, "never
+      commit large/regenerable numeric goldens").
+- [x] Batched serving and native multivariate/covariate forecasting over the
+      wire. `Timesfm3Forecaster::forecast` groups a panel's items by padded
+      context length and issues one `core_forward` per group (mixed variate
+      counts padded with wholly-NaN rows, which `build_input`'s existing
+      leading-cumprod mask rule excludes as attention keys with no new
+      masking logic - verified bit-identical to N single-item calls, not just
+      close); `Timesfm3Instance::run_batch` groups queued D-Bus/JSONL
+      invocations by horizon the same way, and its `instance_key` no longer
+      forces one weight copy per horizon. `item_from_invocation` (`resident_
+      forecast.rs`) reads `context` as `[T]` or `[num_target,T]` plus optional
+      `past_covariates`/`known_future`/`observed`, so the model's headline
+      multivariate capability is reachable over `Run`, not just the library
+      API - output is `quantiles_hq` for one target (byte-identical to the
+      original wire contract) or `quantiles_thq` (`[num_target,horizon,9]` +
+      a `names` array) for more than one. `fcbench::score::score_windows` is
+      an opt-in batched sibling of `score_split`, not yet wired into
+      `backtest::run`. NOT done: a measured throughput number - this box has
+      neither the real checkpoint nor representative hardware isolation
+      (other processes were observed contending for the same GPU during this
+      work), and this repo's own `check-no-perf-numbers.sh` gate exists
+      specifically to keep an unmeasured number out of committed docs/
+      comments, so none is claimed here. Run `brain perf run sweep --target
+      timesfm3:<real weights> --ladder 1,2,4,8,16` (sweeping
+      `BRAIN_SCHED_MAX_BATCH`) on real hardware to get one.
+- [ ] Symmetric averaging, z-normalization, configurable `make_positive`, and
+      32-variate chunking (the reference evaluator's own knobs) still have no
+      home - `forecast::ForecastSpec` carries no per-request flags for them,
+      and `Timesfm3Forecaster` has no builder-side equivalents yet either.
