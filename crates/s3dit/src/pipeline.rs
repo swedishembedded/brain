@@ -35,6 +35,135 @@ use crate::{ZImageConfig, ZImageDitI8, ZImageDitShard, ZImageDitWindowed};
 /// (same id `flux2::pipeline::PAD_TOKEN` uses for the same tokenizer family).
 const PAD_TOKEN: u32 = 151643;
 
+/// The whole Qwen-4B encoder's int8 DP4A device footprint - [`Encoder::Gpu8`]'s
+/// own doc measures it at ~9.5 GB resident; rounded up here for the placement
+/// seam's headroom, which already reserves 1 GiB per card on top of this.
+const ENCODER_GPU8_BYTES: u64 = 10 << 30;
+
+/// The caption-token **capacity** a Z-Image pipeline is built for when a caller
+/// names none (the `cap_len` param of `crate::caps`'s `text2image` /
+/// `lora_train`).
+///
+/// A build-time capacity, not a per-request length: every stage graph is
+/// recorded once over `n_img + cap_len` joint tokens, so one resident answers
+/// any prompt without rebuilding. A prompt under it is masked-padded; a prompt
+/// OVER it is refused by name ([`fit_caption`]), never conditioned on a prefix.
+///
+/// 512 because real descriptive prompts run into the hundreds of tokens: one
+/// paragraph of scene description (~1.5 kB of English) measures **324** ids
+/// through this model's own Qwen chat template, and the capacity this replaces
+/// (64) conditioned such a prompt on roughly its first sentence. 512 clears
+/// that with ~58% headroom and stays cheap, because `cap_len` reaches the DiT
+/// only through `ntot = n_img + cap_len` and `n_img` is 4096 at 1024x1024 - so
+/// 64 -> 512 grows the quadratic joint sequence by 11%, not by a multiple.
+pub const DEFAULT_CAP_LEN: u32 = 512;
+
+/// The largest caption capacity `cfg` can be built for over `n_frames` latent
+/// frames.
+///
+/// Caption token `i` takes RoPE id `1+i` on axis 0 and image row `f` takes
+/// `cap_len+1+f`, so every id must land inside the axis-0 table (`axes_lens[0]`
+/// - 1536 at Z-Image-Turbo's shape). `dit::rope::tables_for_ids` enforces that
+/// with an assert, i.e. a panic in the middle of a multi-gigabyte build, which
+/// is why [`check_cap_len`] rejects an impossible capacity up front instead.
+///
+/// The binding id is the IMAGE stream's: over `n_frames` frames the last one
+/// used is `cap_len + n_frames`, so the last capacity that fits is
+/// `axes_lens[0] − n_frames − 1`, not `axes_lens[0] − n_frames`. Dropping that
+/// `− 1` advertised a maximum that panicked the very assert this exists to
+/// replace - and did so through the `cap_len` param AND through any
+/// image2image/inpaint/outpaint prompt that happened to tokenize to exactly
+/// that length, since those derive `cap_len` from the prompt itself.
+pub fn max_cap_len(cfg: &ZImageConfig, n_frames: u32) -> u32 {
+    cfg.axes_lens[0].saturating_sub(n_frames.max(1) + 1)
+}
+
+/// The largest `(width, height)` in pixels `cfg`'s image-axis RoPE tables can
+/// address.
+///
+/// An image token at latent row `hi`, column `wi` takes RoPE id `hi` on axis 1
+/// and `wi` on axis 2, and a `px`-pixel side yields `px / (8 · patch_size)` of
+/// them (the VAE's stride-8 downsample, then the DiT's own patch). So the last
+/// id used on each axis is one below that count, and it must land inside
+/// `axes_lens[1]` / `axes_lens[2]` - 512 patches, i.e. 8192 px, at
+/// Z-Image-Turbo's shape.
+pub fn max_image_size(cfg: &ZImageConfig) -> (u32, u32) {
+    let per_token = 8 * cfg.patch_size;
+    (cfg.axes_lens[2] * per_token, cfg.axes_lens[1] * per_token)
+}
+
+/// Reject an output size this DiT cannot be built for, before any weight is
+/// read: [`max_image_size`]'s RoPE bound, plus the `8 · patch_size` (16 px)
+/// grid the VAE downsample and the patchify step share.
+///
+/// The grid rule was checked and the RoPE bound was not, so a perfectly valid
+/// multiple of 16 one step past the table (8208 at Turbo's shape) reached
+/// `dit::rope::tables_for_ids` and asserted there - the same panic-instead-of-
+/// error [`check_cap_len`] exists to prevent on the caption axis.
+pub fn check_image_size(cfg: &ZImageConfig, width: u32, height: u32) -> Result<(), String> {
+    let per_token = 8 * cfg.patch_size;
+    if width == 0 || height == 0 || !width.is_multiple_of(per_token) || !height.is_multiple_of(per_token) {
+        return Err(format!("z-image: width/height must be positive multiples of {per_token} (got {width}x{height})"));
+    }
+    let (mw, mh) = max_image_size(cfg);
+    if width > mw || height > mh {
+        return Err(format!(
+            "z-image: {width}x{height} exceeds this DiT's addressable size of {mw}x{mh} (its image RoPE tables are {}x{} latent patches long)",
+            cfg.axes_lens[2], cfg.axes_lens[1]
+        ));
+    }
+    Ok(())
+}
+
+/// Every build-shape check a Z-Image pipeline makes before it reads a single
+/// weight, callable on its own.
+///
+/// A caller that already holds resident weights runs this FIRST: `crate::caps`'
+/// hot cache must drop a ~20 GB pipeline before it can build its replacement
+/// (two do not fit one card), so a request that can never be served has to be
+/// refused before that point, or one bad `cap_len` costs every caller after it
+/// a full reload.
+pub fn check_build_shape(dit_path: &str, width: u32, height: u32, cap_len: u32) -> Result<(), String> {
+    let cfg = dit_config(dit_path);
+    check_image_size(&cfg, width, height)?;
+    check_cap_len(&cfg, cap_len, 1)
+}
+
+/// Reject a caption capacity this DiT cannot be built for, before any weight is
+/// read. See [`max_cap_len`] for the bound.
+pub fn check_cap_len(cfg: &ZImageConfig, cap_len: u32, n_frames: u32) -> Result<(), String> {
+    let max = max_cap_len(cfg, n_frames);
+    match cap_len {
+        0 => Err("z-image: cap_len must be at least 1 caption token".to_string()),
+        c if c > max => Err(format!("z-image: cap_len {c} exceeds this DiT's caption capacity of {max} (axis-0 RoPE table is {} long)", cfg.axes_lens[0])),
+        _ => Ok(()),
+    }
+}
+
+/// Fit an encoded caption to a pipeline built for `cap_len` tokens: masked-pad
+/// it out to the capacity, or REFUSE. Returns `(padded ids, true content
+/// length)` - the pad rows past `content` are excluded as attention keys, so
+/// the caption features never depend on how many pads the encoder saw.
+///
+/// Refusing is the contract, not an inconvenience. A caption that does not fit
+/// used to be truncated with a printed warning, which silently conditioned the
+/// image on a PREFIX of what the user asked for - the same failure `qwen3vl`'s
+/// visual-token capacity refuses by name rather than cropping. The capacity is
+/// a build-time property, so the caller's recourse is a bigger `cap_len` (which
+/// rebuilds the graphs) or a shorter prompt; both are named in the message.
+pub fn fit_caption(mut tokens: Vec<u32>, cap_len: usize) -> Result<(Vec<u32>, usize), String> {
+    if tokens.len() > cap_len {
+        return Err(format!(
+            "z-image: this prompt is {} caption tokens but this pipeline was built for cap_len {cap_len}; \
+             raise 'cap_len' (a build-time capacity - a larger one rebuilds the pipeline) or shorten the prompt",
+            tokens.len()
+        ));
+    }
+    let content = tokens.len();
+    tokens.resize(cap_len, PAD_TOKEN);
+    Ok((tokens, content))
+}
+
 #[derive(Clone, Debug)]
 pub struct Paths {
     pub dit: String,
@@ -212,6 +341,88 @@ pub fn int8_cache_bytes_estimate(cfg: &ZImageConfig) -> u64 {
     packed_per_block * blocks
 }
 
+/// Image tokens at `width×height`: one token is `8·patch_size` pixels per
+/// side (the VAE's stride-8 downsample, then the DiT's own patch) - the same
+/// `per_token` [`max_image_size`]/[`check_image_size`] use, so a caller never
+/// re-derives this ratio.
+fn image_token_count(cfg: &ZImageConfig, width: u32, height: u32) -> u64 {
+    let per_token = (8 * cfg.patch_size) as u64;
+    (width as u64 / per_token) * (height as u64 / per_token)
+}
+
+/// The plain-int8 DiT's device footprint FOR PLACEMENT: [`int8_cache_bytes_estimate`]'s
+/// weights plus a scratch allowance for the forward's activation buffers, which
+/// that function deliberately omits (see its own doc - it backs an
+/// observability estimate, not a hard device-fit decision; this one now backs
+/// one, so it cannot leave the dominant scratch term out the way that one does).
+///
+/// Not byte-exact - `windowed_dit_vram_bytes`'s own "generous flat overhead"
+/// is this file's established bar for a placement-facing number, and this
+/// follows it: **8 dim-wide fp32 buffers per token** (residual stream, plus
+/// attention Q/K/V/out and FFN intermediate scratch a block holds across its
+/// own forward) covers the dominant per-token cost with headroom, scaled by
+/// the real sequence length (image tokens + caption tokens) since that is
+/// what actually varies run to run - a flat allowance the way the windowed
+/// engine uses one would silently under-count a large image.
+pub fn int8_dit_device_bytes(cfg: &ZImageConfig, width: u32, height: u32, cap_len: u32) -> u64 {
+    let dim = cfg.block_dims().dim as u64;
+    let seq = image_token_count(cfg, width, height) + cap_len as u64;
+    let scratch = seq * dim * 8 * 4;
+    int8_cache_bytes_estimate(cfg) + scratch
+}
+
+/// Real, budget-aware DiT+encoder+VAE card placement over
+/// `gpu_core::devices::{Need,Placer}` - the same seam `flux2`/`flux1`/`qwen35`
+/// consume, backed by `crates/cli/src/placement.rs::BudgetPlacer`, which plans
+/// against ACTUALLY MEASURED free VRAM (`residency::plan::plan`), never a bare
+/// GPU count the way the superseded `default_bulk_gpu`/`encoder_on_demand`
+/// pair (still used by the opt-in `BRAIN_S3DIT_ENCODER_FP32SPLIT` path only,
+/// whose own fp32 sizing this seam does not model) did.
+///
+/// All three parts are declared in ONE joint call rather than `vae` following
+/// a `Need::with` anchor onto `dit`/`te`: an anchor only resolves against
+/// another part in the SAME `plan()` call (`residency::plan::plan`'s own
+/// `index_of(anchor)` searches `parts`, nothing carried over from an earlier
+/// call), and a `HotPipeline` keeps `dit`, the GPU-resident encoder tier (if
+/// any) and `vae` all resident for its whole life - never staggered phases -
+/// so declaring them together lets the planner see every resident byte at
+/// once and naturally prefer whichever card has the most room left, which is
+/// what the retired hand-written "VAE follows the encoder's now-idle card"
+/// rule was approximating without ever checking real bytes.
+///
+/// `.apart()` on `dit`/`te` means the placer only puts them on the same card
+/// when nothing else fits - exactly the signal [`Encoder::OnDemand`] exists to
+/// handle (never resident together, so the ~9.5 GB encoder and the DiT never
+/// compete for one card's budget at once). `vae` carries no affinity of its
+/// own, so it lands wherever real remaining budget is best after `dit`/`te`
+/// reserve theirs.
+///
+/// Returns `(dit_gpu, enc_gpu, vae_gpu)`: `enc_gpu` is `None` when the
+/// encoder's own `Need` landed on `Home::Cpu` - the caller reads that the
+/// same way an explicit "no GPU" choice reads today. `dit_gpu`/`vae_gpu` are
+/// refused as an error if they resolve anywhere but a GPU - neither has a CPU
+/// tier at these shapes, so a `Home::Cpu` there is a policy bug worth
+/// surfacing loudly rather than silently misread as GPU 0.
+fn place_pipeline_parts(dit_bytes: u64, enc_gpu8_bytes: u64, vae_bytes: u64, enc_gpu_explicit: Option<u32>) -> Result<(u32, Option<u32>, u32), String> {
+    use gpu_core::devices::{Home, Need};
+    let gpu_home = |homes: &gpu_core::devices::Homes, name: &str| match homes.of(name) {
+        Some(Home::Gpu(i)) => Ok(i),
+        other => Err(format!("s3dit: {name} placement produced {other:?}, expected a GPU")),
+    };
+    if let Some(g) = enc_gpu_explicit {
+        // An explicit choice always wins outright - place dit+vae only.
+        let homes = gpu_core::devices::place(&[Need::sized("dit", dit_bytes, 0).apart(), Need::sized("vae", vae_bytes, 0)])?;
+        return Ok((gpu_home(&homes, "dit")?, Some(g), gpu_home(&homes, "vae")?));
+    }
+    let needs = [Need::sized("dit", dit_bytes, 0).apart(), Need::sized("te", enc_gpu8_bytes, 0).apart(), Need::sized("vae", vae_bytes, 0)];
+    let homes = gpu_core::devices::place(&needs)?;
+    let enc_gpu = match homes.of("te") {
+        Some(Home::Gpu(i)) => Some(i),
+        _ => None, // Cpu, or unplaced -> the CPU encoder tier
+    };
+    Ok((gpu_home(&homes, "dit")?, enc_gpu, gpu_home(&homes, "vae")?))
+}
+
 impl DitEngine {
     fn build(hifi: bool, cfg: ZImageConfig, weights: crate::block::Tensors, lh: u32, lw: u32, cap_len: u32) -> DitEngine {
         // The adapter/LoRA-folding path (the only caller of `build`) has no
@@ -322,9 +533,12 @@ fn build_dit_engine(paths: &Paths, hifi: bool, adapter: Option<&str>, dit_gpu: u
 /// ONCE for a fixed output size and caption length, then reused across many
 /// generations — no ~20 GB reload per image. Each model keeps its own device
 /// handle from build time, so [`generate`](Self::generate) just runs forwards.
-/// Captions are padded/truncated to `cap_len` so the built graphs stay valid for
-/// any prompt (masked pad: `<|endoftext|>` pad tokens, excluded as attention
-/// keys past the true content length — HF attention_mask semantics).
+/// A caption shorter than `cap_len` is masked-padded out to it so the built
+/// graphs stay valid (`<|endoftext|>` pad tokens, excluded as attention keys
+/// past the true content length - HF attention_mask semantics); one LONGER
+/// than `cap_len` is refused by name ([`fit_caption`]), never cropped to fit,
+/// because conditioning on a prefix of the prompt silently produces an image
+/// of a fragment of what was asked for.
 /// `BRAIN_S3DIT_ENCODER_RESIDENT=1`: opt back into a resident encoder even
 /// when it shares the DiT's card (a box with room for both). Pure function
 /// of the environment so [`encoder_on_demand`]'s decision stays testable.
@@ -343,17 +557,28 @@ fn encoder_on_demand(bulk: u32, dit_gpu: u32, resident_override: bool) -> bool {
 }
 
 /// The encoder's GPU card, defaulted when the caller gave no explicit
-/// `BRAIN_S3DIT_ENCODER_GPU`. On a box with more than one GPU, which card
-/// should host the encoder is a real choice (a second, otherwise-idle card
-/// vs. sharing the DiT's) that only the caller can make — `None` (CPU) stays
-/// the conservative default there, unchanged. On a box with exactly one GPU
-/// there is no second card to choose, so CPU-by-default would only be
-/// trading a smaller, on-demand int8 encoder for a larger, permanently
-/// resident fp32 one — defaulting to sharing the DiT's card is strictly
-/// better and is what makes memory residency automatic rather than a flag
-/// the caller has to know to set.
-fn default_bulk_gpu(explicit: Option<u32>, dit_gpu: u32, gpu_count: usize) -> Option<u32> {
-    explicit.or(if gpu_count == 1 { Some(dit_gpu) } else { None })
+/// `BRAIN_S3DIT_ENCODER_GPU`.
+///
+/// - **One GPU total**: no second card to choose, so CPU-by-default would
+///   only be trading a smaller, on-demand int8 encoder for a larger,
+///   permanently resident fp32 one - defaulting to sharing the DiT's card is
+///   strictly better and is what makes memory residency automatic rather
+///   than a flag the caller has to know to set.
+/// - **Exactly two GPUs total**: which card is "the other one" is NOT
+///   ambiguous - `gpus` minus `dit_gpu` leaves exactly one candidate - so
+///   defaulting to it keeps the encode on GPU (measured "a small fraction"
+///   of the CPU path's multi-minute Qwen-4B forward, see [`Encoder`]'s own
+///   doc) instead of silently falling back to CPU while a second card sits
+///   idle. A caller who wants that card free for something else still
+///   overrides with an explicit `BRAIN_S3DIT_ENCODER_GPU`/`--device`.
+/// - **Three or more GPUs**: genuinely ambiguous (which of the N-1 remaining
+///   cards), so CPU stays the conservative default.
+fn default_bulk_gpu(explicit: Option<u32>, dit_gpu: u32, gpus: &[u32]) -> Option<u32> {
+    explicit.or_else(|| match gpus.len() {
+        1 => Some(dit_gpu),
+        2 => gpus.iter().find(|&&g| g != dit_gpu).copied(),
+        _ => None,
+    })
 }
 
 /// Where/how the Qwen-4B text encoder runs.
@@ -478,9 +703,7 @@ impl HotPipeline {
     /// the DiT weights before the (int8/fp32) engine is built — so the resident
     /// pipeline generates adapter-conditioned images with no other change.
     pub fn build_adapted(paths: &Paths, width: u32, height: u32, cap_len: u32, hifi: bool, adapter: Option<&str>, mut progress: impl FnMut(&str)) -> Result<HotPipeline, String> {
-        if !width.is_multiple_of(16) || !height.is_multiple_of(16) {
-            return Err("width/height must be multiples of 16".into());
-        }
+        check_build_shape(&paths.dit, width, height, cap_len)?;
         let (lh, lw) = (height / 8, width / 8);
 
         progress("loading tokenizer");
@@ -511,13 +734,25 @@ impl HotPipeline {
             .filter(|s| !s.is_empty())
             .map(|s| s.parse::<u32>().map_err(|_| format!("bad BRAIN_S3DIT_ENCODER_GPU {s:?}")))
             .transpose()?;
-        // The DiT/VAE card: the ambient selection (`--device gpu<i>`, the
-        // residency-assigned scope, or BRAIN_GPU_INDEX), canonical card 0 otherwise.
-        let dit_gpu: u32 = gpu_core::devices::current_gpu().unwrap_or(0);
-        // See default_bulk_gpu's doc: on a single-GPU box, defaulting to CPU
-        // would only trade a smaller on-demand int8 encoder for a larger,
-        // permanently resident fp32 one -- share the DiT's card instead.
-        let enc_gpu = default_bulk_gpu(enc_gpu_explicit, dit_gpu, gpu_core::devices::schedulable_gpu_count());
+        // dit/encoder/VAE card placement. `BRAIN_S3DIT_ENCODER_FP32SPLIT` keeps
+        // its own index-based math untouched below (its ~16 GB fp32 sizing is
+        // not what `place_pipeline_parts`'s int8-shaped `Need`s model); every
+        // other path goes through the real, budget-aware seam.
+        let fp32split = !hifi && std::env::var("BRAIN_S3DIT_ENCODER_FP32SPLIT").ok().as_deref() == Some("1");
+        let (dit_gpu, enc_gpu, vae_gpu): (u32, Option<u32>, u32) = if fp32split {
+            let dit_gpu = gpu_core::devices::current_gpu().unwrap_or(0);
+            let enc_gpu = default_bulk_gpu(enc_gpu_explicit, dit_gpu, &gpu_core::devices::ambient_compute_set().gpus);
+            (dit_gpu, enc_gpu, dit_gpu)
+        } else {
+            let dit_cfg = dit_config(&paths.dit);
+            let dit_bytes = if hifi {
+                hifi_cost_bytes(gpu_core::devices::ambient_compute_set().gpus.len()).0
+            } else {
+                int8_dit_device_bytes(&dit_cfg, width, height, cap_len)
+            };
+            let vae_bytes = vae::decoder_device_bytes_for_pixels(&zimage_vae_config(), width as u64 * height as u64);
+            place_pipeline_parts(dit_bytes, ENCODER_GPU8_BYTES, vae_bytes, enc_gpu_explicit)?
+        };
 
         // For the 2-card encoder split we interleave the builds: bulk shard on the
         // empty GPU `bulk`, THEN the DiT on GPU `dit_gpu` (while that card is still
@@ -527,7 +762,7 @@ impl HotPipeline {
         // resident bytes. `split` carries the params needed to finish after the DiT.
         let mut split: Option<(Qwen, usize, usize, u32)> = None; // (s0, cut, n, di)
         let enc_cpu = match (enc_gpu, hifi) {
-            (Some(bulk), false) if std::env::var("BRAIN_S3DIT_ENCODER_FP32SPLIT").ok().as_deref() == Some("1") => {
+            (Some(bulk), false) if fp32split => {
                 let n = qcfg.n_layers as usize;
                 // fp32 2-card split (opt-in; needs a large-binding / ReBAR card — it
                 // does NOT fit two P40s). Cut point: layers 0..cut (+ embedding) on
@@ -595,44 +830,20 @@ impl HotPipeline {
         drop(qsrc);
         drop(qreader);
 
-        // VAE placement: with the int8 GPU encoder, the encoder card is idle during
-        // decode (encode is step 1, decode is the last step — never concurrent), so
-        // put the VAE there. That frees the DiT card of the VAE's multi-GB decode
-        // activations, raising the max image size (GPU 0 = DiT only). The latent
-        // crosses DiT→VAE through host memory already, so no cross-device GPU copy.
-        // CPU/fp32-split encoders keep the VAE on the DiT card (unchanged) - UNLESS
-        // that card is the 2-GPU fp32 `Shard` engine's: measured on a real 24 GB
-        // P40 (`nvidia-smi` during the real Z-Image-Turbo checkpoint's `Shard`
-        // build) each card lands within half a GB of its 24 GB ceiling from the
-        // DiT shard's weights ALONE - the default wgpu backend's doubling of
-        // real VRAM per uploaded BYTE on this non-ReBAR card (a property of wgpu's
-        // Vulkan HAL, not the hardware; the fix is a different device backend,
-        // which this code path does not take) applied to "half the ~33 GB fp32
-        // checkpoint" already consumes essentially the whole 24 GB, independent of
-        // how the `cut` between the two cards is chosen (shifting blocks from one
-        // to the other does not create headroom - the SUM is already at the
-        // ceiling). There is no room left on EITHER card for the VAE's own weight
-        // upload (same per-byte cost), so it decodes on the CPU instead, exactly
-        // the reasoning `hifi`'s Qwen-4B encoder already applies to itself above,
-        // extended to the other GPU-resident piece of this same pipeline.
-        let vae_on_cpu = matches!(dit, DitEngine::Shard(_));
-        let vae_card = match &enc {
-            Encoder::Gpu8(_) if !vae_on_cpu => enc_gpu.unwrap_or(dit_gpu),
-            _ => dit_gpu,
-        };
-        progress(&format!("building VAE decoder ({})", if vae_on_cpu { "CPU".to_string() } else { format!("GPU {vae_card}") }));
+        // VAE placement: `vae_gpu` already came out of the same joint
+        // `place_pipeline_parts` call as `dit_gpu`/`enc_gpu` above (or, on the
+        // fp32-split path, is pinned to `dit_gpu` - unchanged from before),
+        // so it already accounts for real remaining budget on every card
+        // rather than a hand-written "follow the encoder's idle card" rule.
+        progress(&format!("building VAE decoder (GPU {vae_gpu})"));
         // `VaeDecoder::from_diffusers`'s `Some("cpu")`/`Some("gpu")` already pick
         // the device explicitly regardless of the ambient default backend, so no
         // `set_default_backend` toggle is needed here (unlike the encoder above,
         // whose `Qwen::new_shard` has no such explicit-device parameter).
         let vtensors = tensors_map(read_component_tensors(&paths.vae).map_err(|e| format!("read vae: {e}"))?);
-        let vae = if vae_on_cpu {
-            VaeDecoder::from_diffusers(zimage_vae_config(), &vtensors, lh, lw, Some("cpu"))
-        } else {
-            gpu_core::devices::with_gpu(vae_card, || {
-                VaeDecoder::from_diffusers(zimage_vae_config(), &vtensors, lh, lw, Some("gpu"))
-            })?
-        };
+        let vae = gpu_core::devices::with_gpu(vae_gpu, || {
+            VaeDecoder::from_diffusers(zimage_vae_config(), &vtensors, lh, lw, Some("gpu"))
+        })?;
 
         Ok(HotPipeline { tok, enc, dit, vae, cap_len, lh, lw, width, height, hifi })
     }
@@ -648,9 +859,7 @@ impl HotPipeline {
     /// function's adapter/hifi generality needs its own, unmodified path,
     /// never sharing code with a promote-only feature.
     fn assemble_int8_pipeline(paths: &Paths, width: u32, height: u32, cap_len: u32, build_dit: impl FnOnce(u32, u32, u32) -> Result<DitEngine, String>, mut progress: impl FnMut(&str)) -> Result<HotPipeline, String> {
-        if !width.is_multiple_of(16) || !height.is_multiple_of(16) {
-            return Err("width/height must be multiples of 16".into());
-        }
+        check_build_shape(&paths.dit, width, height, cap_len)?;
         let (lh, lw) = (height / 8, width / 8);
 
         progress("loading tokenizer");
@@ -664,8 +873,9 @@ impl HotPipeline {
             .filter(|s| !s.is_empty())
             .map(|s| s.parse::<u32>().map_err(|_| format!("bad BRAIN_S3DIT_ENCODER_GPU {s:?}")))
             .transpose()?;
-        let dit_gpu: u32 = gpu_core::devices::current_gpu().unwrap_or(0);
-        let enc_gpu = default_bulk_gpu(enc_gpu_explicit, dit_gpu, gpu_core::devices::schedulable_gpu_count());
+        let dit_bytes = int8_dit_device_bytes(&dit_config(&paths.dit), width, height, cap_len);
+        let vae_bytes = vae::decoder_device_bytes_for_pixels(&zimage_vae_config(), width as u64 * height as u64);
+        let (dit_gpu, enc_gpu, vae_gpu) = place_pipeline_parts(dit_bytes, ENCODER_GPU8_BYTES, vae_bytes, enc_gpu_explicit)?;
 
         // Same three arms as build_adapted's !hifi cases (no fp32-split arm
         // -- that one only ever applies when hifi, which these entry points
@@ -696,14 +906,10 @@ impl HotPipeline {
 
         let dit = build_dit(dit_gpu, lh, lw)?;
 
-        let vae_card = match &enc {
-            Encoder::Gpu8(_) => enc_gpu.unwrap_or(dit_gpu),
-            _ => dit_gpu,
-        };
-        progress(&format!("building VAE decoder (GPU {vae_card})"));
+        progress(&format!("building VAE decoder (GPU {vae_gpu})"));
         gpu_core::set_default_backend(gpu_core::Backend::Wgpu);
         let vtensors = tensors_map(read_component_tensors(&paths.vae).map_err(|e| format!("read vae: {e}"))?);
-        let vae = gpu_core::devices::with_gpu(vae_card, || VaeDecoder::from_diffusers(zimage_vae_config(), &vtensors, lh, lw, Some("gpu")))?;
+        let vae = gpu_core::devices::with_gpu(vae_gpu, || VaeDecoder::from_diffusers(zimage_vae_config(), &vtensors, lh, lw, Some("gpu")))?;
 
         Ok(HotPipeline { tok, enc, dit, vae, cap_len, lh, lw, width, height, hifi: false })
     }
@@ -754,28 +960,19 @@ impl HotPipeline {
         )
     }
 
-    /// Tokenize `prompt`, pad/truncate to `cap_len`, and run encode → DiT sampling
-    /// → VAE decode — all on the resident models. Fast (no weight loads).
+    /// Tokenize `prompt`, masked-pad it to `cap_len` - or REFUSE it when it is
+    /// longer than the capacity this pipeline was built for, never crop it -
+    /// and run encode → DiT sampling → VAE decode on the resident models.
+    /// Fast (no weight loads).
     /// `cancel` is polled between sampling steps: a cancelled token aborts with
     /// `Err("cancelled")` (pass an unarmed `Default` token to run uninterrupted).
     pub fn generate(&self, prompt: &str, seed: u64, steps: u32, cancel: &capability::CancelToken, mut progress: impl FnMut(u32, u32, &str)) -> Result<Image, String> {
         let steps = steps.max(1);
         let total = steps + 2;
 
-        // 1. tokenize + pad/truncate to the built cap_len.
-        progress(1, total, "encoding prompt (Qwen-4B, CPU)");
-        let templated = self.tok.apply_chat_template(&[("user", prompt)], true);
-        let mut tokens = self.tok.encode(&templated);
-        let cl = self.cap_len as usize;
-        if tokens.len() > cl {
-            // Loud, not silent: the image is conditioned on a PREFIX of the
-            // user's prompt (audit F18).
-            let msg = format!("warning: prompt is {} tokens but this resident was built for cap_len {} -- conditioning on the first {} tokens only", tokens.len(), cl, cl);
-            eprintln!("zimage: {msg}");
-            progress(1, total, &msg);
-            tokens.truncate(cl);
-        }
-        let content = tokens.len().min(cl);
+        // 1. tokenize, then fit to the built capacity -- masked-padded when it
+        // fits, REFUSED when it does not (see `fit_caption`: conditioning on a
+        // prefix of the user's prompt behind a warning is not an option).
         // Masked-pad, like flux2's encoder path: a dedicated PAD token,
         // excluded as an attention KEY past the true content length (HF
         // attention_mask semantics). The old scheme repeated the LAST token
@@ -783,7 +980,9 @@ impl HotPipeline {
         // the S3-DiT attends unmasked -- depended on how many copies of the
         // final token the encoder saw (the unsoundness class the LFM ledger
         // documents; audit F17).
-        tokens.resize(cl, PAD_TOKEN);
+        progress(1, total, "encoding prompt (Qwen-4B, CPU)");
+        let templated = self.tok.apply_chat_template(&[("user", prompt)], true);
+        let (tokens, content) = fit_caption(self.tok.encode(&templated), self.cap_len as usize)?;
         let cap = self.enc.encode(&tokens, content)?; // [cap_len · 2560]
 
         // 2. seeded latent + scheduler.
@@ -972,16 +1171,19 @@ pub fn generate_img(prompt: &str, opts: &Opts, paths: &Paths, init: Init, progre
 /// step.
 fn generate_core(prompt: &str, opts: &Opts, paths: &Paths, init: Option<Init>, mut progress: impl FnMut(u32, u32, &str)) -> Result<Image, String> {
     let total = opts.steps + 2; // encode + N sampling + decode
-    if !opts.width.is_multiple_of(16) || !opts.height.is_multiple_of(16) {
-        return Err("width/height must be multiples of 16".into());
-    }
+    let zcfg = dit_config(&paths.dit);
+    check_image_size(&zcfg, opts.width, opts.height)?;
     let (lh, lw) = (opts.height / 8, opts.width / 8); // VAE downscale 8
 
     // 1. tokenize (chat template) --------------------------------------------
     let tok = QwenBpe::from_file(&paths.tokenizer)?;
     let templated = tok.apply_chat_template(&[("user", prompt)], true);
     let tokens = tok.encode(&templated);
+    // These actions build the DiT per call, so the caption length IS the
+    // prompt's own -- nothing is padded and nothing is truncated. It still has
+    // to be a length the DiT's RoPE table can address.
     let cap_len = tokens.len() as u32;
+    check_cap_len(&zcfg, cap_len, 1)?;
 
     // 2. Qwen-4B encode → caption features (penultimate hidden). Dropped after. -
     //
@@ -1087,7 +1289,6 @@ fn generate_core(prompt: &str, opts: &Opts, paths: &Paths, init: Option<Init>, m
     // 5. flow-match sampling over the DiT ------------------------------------
     // int8 on one P40 (default), or full-precision fp32 sharded across both P40s
     // when `hifi` — no quantisation error, at the cost of a second card.
-    let zcfg = dit_config(&paths.dit);
     // Streaming: peak host allocation for the DiT is one tensor, not the
     // whole ~24 GB checkpoint (see `build_adapted`'s identical fix, above).
     let dreader = open_component(&paths.dit).map_err(|e| format!("open dit: {e}"))?;
@@ -1254,16 +1455,21 @@ mod encoder_scheduling_tests {
     /// sharing the DiT's own card (smaller int8 footprint, on-demand, and
     /// dropped before the DiT builds) -- this is the "automatic regardless
     /// of machine shape" requirement, not a magic env var the caller must
-    /// know to set. A box with more than one GPU keeps today's behaviour
-    /// (CPU by default) unchanged: there a real bulk-card choice exists and
-    /// picking one automatically would be guessing.
+    /// know to set. A box with exactly two GPUs is the same story: the
+    /// non-DiT card is not a guess (there is exactly one), so it defaults
+    /// there too, rather than leaving it idle while the encoder runs a
+    /// multi-minute CPU forward. Three or more GPUs is where a real
+    /// multi-way choice exists and picking one automatically would be
+    /// guessing, so that keeps today's CPU default.
     #[test]
-    fn default_bulk_gpu_shares_the_dits_card_when_theres_only_one_gpu() {
-        assert_eq!(default_bulk_gpu(None, 0, 1), Some(0), "one GPU total -> share it with the DiT");
-        assert_eq!(default_bulk_gpu(None, 2, 1), Some(2), "one GPU total -> that GPU is dit_gpu, share it");
-        assert_eq!(default_bulk_gpu(None, 0, 2), None, "two GPUs -> ambiguous, keep the CPU default");
-        assert_eq!(default_bulk_gpu(None, 0, 0), None, "no GPU probed -> nothing to default to");
-        assert_eq!(default_bulk_gpu(Some(1), 0, 1), Some(1), "an explicit choice is never overridden");
+    fn default_bulk_gpu_prefers_an_unambiguous_gpu_over_cpu() {
+        assert_eq!(default_bulk_gpu(None, 0, &[0]), Some(0), "one GPU total -> share it with the DiT");
+        assert_eq!(default_bulk_gpu(None, 2, &[2]), Some(2), "one GPU total -> that GPU is dit_gpu, share it");
+        assert_eq!(default_bulk_gpu(None, 0, &[0, 1]), Some(1), "two GPUs -> the other one is unambiguous");
+        assert_eq!(default_bulk_gpu(None, 1, &[0, 1]), Some(0), "two GPUs, DiT on the second -> default to the first");
+        assert_eq!(default_bulk_gpu(None, 0, &[0, 1, 2]), None, "three+ GPUs -> genuinely ambiguous, keep the CPU default");
+        assert_eq!(default_bulk_gpu(None, 0, &[]), None, "no GPU probed -> nothing to default to");
+        assert_eq!(default_bulk_gpu(Some(1), 0, &[0]), Some(1), "an explicit choice is never overridden");
     }
 
     /// The number the residency layer budgets against must be the number
@@ -1294,6 +1500,70 @@ mod encoder_scheduling_tests {
         assert_eq!(windowed_dit_vram_bytes(&cfg, 999), want);
     }
 
+    #[test]
+    fn image_token_count_matches_the_per_token_pixel_ratio_check_image_size_uses() {
+        let cfg = ZImageConfig::turbo();
+        // 960x640 at patch_size 2 -> per_token = 16px -> 60x40 tokens.
+        assert_eq!(image_token_count(&cfg, 960, 640), 60 * 40);
+        assert_eq!(image_token_count(&cfg, 1024, 1024), 64 * 64);
+    }
+
+    /// [`int8_dit_device_bytes`] must be strictly larger than the weights-only
+    /// [`int8_cache_bytes_estimate`] (it adds scratch, never subtracts) and
+    /// must grow with resolution/caption length - a placement-facing number
+    /// that does not react to the actual output size would silently under-cost
+    /// a large image the way the pre-fix `vae_on_cpu` heuristic silently
+    /// over-corrected for one.
+    #[test]
+    fn int8_dit_device_bytes_grows_with_output_size_and_exceeds_weights_alone() {
+        let cfg = ZImageConfig::turbo();
+        let weights = int8_cache_bytes_estimate(&cfg);
+        let small = int8_dit_device_bytes(&cfg, 512, 512, 128);
+        let large = int8_dit_device_bytes(&cfg, 1024, 1024, 512);
+        assert!(small > weights, "must add scratch on top of weights: {small} vs {weights}");
+        assert!(large > small, "a bigger image + longer caption must cost more: {large} vs {small}");
+    }
+
+    /// `place_pipeline_parts` with no policy installed (this test's own
+    /// process, like any other unit test in this crate) falls back to
+    /// `gpu_core::devices::place`'s own documented no-placer behaviour: every
+    /// part lands on the SAME device the caller would have got anyway - a
+    /// real GPU index if this machine has one and it is the ambient default,
+    /// `Home::Cpu` otherwise, which `place_pipeline_parts` then REFUSES for
+    /// `dit`/`vae` (neither has a CPU tier at these shapes) rather than
+    /// silently misreading it as GPU 0. Both outcomes are legitimate
+    /// depending on whether this process sees a GPU, so this only checks the
+    /// one property that must hold in EITHER case: when it does resolve,
+    /// `dit`/`te`/`vae` all agree on the SAME single device, since the
+    /// no-placer fallback has no way to tell them apart. The real
+    /// budget-aware routing through `crates/cli/src/placement.rs::
+    /// BudgetPlacer` is gated at ITS OWN layer (see that module's tests) and
+    /// by the real-hardware run this change was validated against.
+    #[test]
+    fn place_pipeline_parts_with_no_policy_installed_agrees_with_the_ambient_default() {
+        match place_pipeline_parts(1 << 30, 1 << 30, 1 << 20, None) {
+            Ok((dit_gpu, enc_gpu, vae_gpu)) => {
+                assert_eq!(enc_gpu, Some(dit_gpu), "no-placer fallback must not split parts across devices it cannot tell apart");
+                assert_eq!(vae_gpu, dit_gpu);
+            }
+            Err(e) => assert!(e.contains("dit") || e.contains("vae"), "a refusal must name which part landed on Cpu: {e}"),
+        }
+    }
+
+    /// An explicit `BRAIN_S3DIT_ENCODER_GPU` always wins outright, without
+    /// even asking the placer to consider the encoder - `enc_gpu` echoes it
+    /// back verbatim regardless of cost or a `BudgetPlacer`'s own opinion.
+    #[test]
+    fn place_pipeline_parts_never_overrides_an_explicit_encoder_choice() {
+        match place_pipeline_parts(1 << 30, 1 << 30, 1 << 20, Some(7)) {
+            Ok((_, enc_gpu, _)) => assert_eq!(enc_gpu, Some(7)),
+            // No adapter in this test process -> `dit`/`vae` refuse Cpu, same
+            // as the sibling test above; either outcome proves the explicit
+            // value was never routed through cost-based placement.
+            Err(e) => assert!(e.contains("dit") || e.contains("vae"), "{e}"),
+        }
+    }
+
     /// `hifi_cost_bytes` picks the windowed estimate on a one-GPU box and
     /// the unchanged 2-GPU-shard estimate otherwise; the encoder's RAM
     /// figure is the same either way (the hifi path's encoder is
@@ -1317,5 +1587,122 @@ mod encoder_scheduling_tests {
         let bytes = int8_cache_bytes_estimate(&ZImageConfig::turbo());
         assert!(bytes > 4 << 30, "expected multiple GB, got {} bytes", bytes);
         assert!(bytes < 8 << 30, "expected the DOMINANT term only, not double-counted, got {} bytes", bytes);
+    }
+}
+
+#[cfg(test)]
+mod caption_capacity_tests {
+    use super::*;
+
+    /// The invariant this pipeline owes its callers: a prompt too long for the
+    /// resident's built capacity is REFUSED, by name, with both numbers in the
+    /// message - never conditioned on its first `cap_len` tokens behind a
+    /// warning, which produced an image of a fragment of what was asked for.
+    #[test]
+    fn an_over_capacity_prompt_is_refused_not_truncated() {
+        let err = fit_caption(vec![7u32; 65], 64).unwrap_err();
+        for needle in ["65", "64", "cap_len"] {
+            assert!(err.contains(needle), "refusal must name {needle}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_prompt_within_capacity_is_masked_padded_to_it() {
+        let (ids, content) = fit_caption(vec![1, 2, 3], 6).unwrap();
+        assert_eq!((content, ids), (3, vec![1, 2, 3, PAD_TOKEN, PAD_TOKEN, PAD_TOKEN]));
+        // Exactly at capacity is not an overflow: no padding, no refusal.
+        let (ids, content) = fit_caption(vec![1, 2, 3], 3).unwrap();
+        assert_eq!((ids.len(), content), (3, 3));
+    }
+
+    /// The default capacity has to fit the prompts this model is actually
+    /// given. One paragraph of scene description measures **324** caption
+    /// tokens through Z-Image-Turbo's own Qwen chat template (the measurement
+    /// that exposed the truncation), so the default must clear that with room
+    /// left for a longer one.
+    #[test]
+    fn the_default_capacity_covers_a_real_descriptive_prompt_with_headroom() {
+        const MEASURED: usize = 324;
+        assert!(fit_caption(vec![9; MEASURED], DEFAULT_CAP_LEN as usize).is_ok());
+        assert!(
+            DEFAULT_CAP_LEN as usize >= MEASURED + MEASURED / 4,
+            "DEFAULT_CAP_LEN {DEFAULT_CAP_LEN} leaves under 25% headroom over a measured {MEASURED}-token prompt"
+        );
+    }
+
+    /// The capacity is bounded by the DiT's own axis-0 RoPE table, and
+    /// `dit::rope::tables_for_ids` ASSERTS that bound - a panic mid-build, not
+    /// an error a caller can act on - so the build path must reject an
+    /// impossible capacity itself, before allocating anything.
+    #[test]
+    fn a_capacity_past_the_rope_axis_is_rejected_by_name() {
+        let cfg = ZImageConfig::turbo();
+        let max = max_cap_len(&cfg, 1);
+        assert!(check_cap_len(&cfg, max, 1).is_ok());
+        assert!(check_cap_len(&cfg, 0, 1).is_err(), "a zero-token caption capacity is not buildable");
+        let err = check_cap_len(&cfg, max + 1, 1).unwrap_err();
+        assert!(err.contains("cap_len") && err.contains(&max.to_string()), "{err}");
+        assert!(DEFAULT_CAP_LEN <= max, "the default must be buildable");
+    }
+
+    /// The axis-0 RoPE ids `crate::model::preprocess` assigns for `n_frames`
+    /// latent frames at capacity `cap_len`: caption token `i` → `1+i`, image
+    /// row `fi` → `cap_len+1+fi`. One frame's worth is enough to expose the
+    /// bound, because the IMAGE stream is what reaches furthest.
+    fn axis0_ids(cap_len: u32, n_frames: u32) -> Vec<u32> {
+        let mut ids: Vec<u32> = (0..cap_len).flat_map(|i| [1 + i, 0, 0]).collect();
+        ids.extend((0..n_frames.max(1)).flat_map(|fi| [cap_len + 1 + fi, 0, 0]));
+        ids
+    }
+
+    /// An advertised maximum must be one that actually BUILDS. The furthest
+    /// axis-0 id is an image token's `cap_len+1+fi`, not a caption's own
+    /// `1+i`, so the last usable capacity is one *below* `axes_lens[0] -
+    /// n_frames`. Advertising that value instead panicked
+    /// `dit::rope::tables_for_ids` on the first forward - the exact failure
+    /// `check_cap_len` exists to replace with a named refusal, reachable both
+    /// through the `cap_len` param and through any edit-action prompt that
+    /// happens to tokenize to exactly that length.
+    #[test]
+    fn the_advertised_max_capacity_is_one_the_rope_tables_actually_accept() {
+        let cfg = ZImageConfig::turbo();
+        let rope = cfg.rope();
+        for frames in [1u32, 2, 3] {
+            let max = max_cap_len(&cfg, frames);
+            // Must not panic: this is the graph a build at `max` records.
+            dit::rope::tables_for_ids(&rope, &axis0_ids(max, frames), 3);
+            assert!(check_cap_len(&cfg, max, frames).is_ok());
+            assert!(check_cap_len(&cfg, max + 1, frames).is_err(), "max+1 must be refused, not left to assert");
+            assert_eq!(
+                max + 1 + frames,
+                cfg.axes_lens[0],
+                "max+1 is exactly the first capacity whose last image-token id lands outside the axis-0 table"
+            );
+        }
+    }
+
+    /// The image axes are bounded the same way and were not checked at all:
+    /// `width`/`height` were only required to be multiples of 16, so a
+    /// perfectly valid multiple of 16 one step past the table tripped the same
+    /// `pos < axes_lens[a]` assert.
+    #[test]
+    fn an_output_size_past_the_image_rope_axes_is_rejected_by_name() {
+        let cfg = ZImageConfig::turbo();
+        let (mw, mh) = max_image_size(&cfg);
+        let per_token = 8 * cfg.patch_size; // VAE stride 8, then the DiT patch
+        assert_eq!((mw / per_token, mh / per_token), (cfg.axes_lens[2], cfg.axes_lens[1]));
+
+        assert!(check_image_size(&cfg, mw, mh).is_ok(), "the advertised maximum must be buildable");
+        // The last ids a build at that size records - must not panic.
+        dit::rope::tables_for_ids(&cfg.rope(), &[1, mh / per_token - 1, mw / per_token - 1], 3);
+
+        for (w, h) in [(mw + per_token, mh), (mw, mh + per_token)] {
+            let err = check_image_size(&cfg, w, h).unwrap_err();
+            assert!(err.contains(&mw.to_string()) || err.contains(&mh.to_string()), "the refusal must name the bound: {err}");
+        }
+        // The multiple-of-16 rule this subsumes still holds, and zero is not a size.
+        assert!(check_image_size(&cfg, 1000, 1024).is_err());
+        assert!(check_image_size(&cfg, 1024, 0).is_err());
+        assert!(check_image_size(&cfg, 1024, 1024).is_ok());
     }
 }

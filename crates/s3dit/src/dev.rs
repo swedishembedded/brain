@@ -14,8 +14,8 @@
 use gpu_core::{DeviceBuffer, Gpu, Step};
 
 use crate::block::{
-    build_block_steps, build_block_steps_i8, read_named, wf, BlockDims, BlockWeights, HostInt8Block, Int8Scratch,
-    Int8Weights, NormBufs, NormHostCache, Scratch, Tensors, KERNELS,
+    build_block_steps, build_block_steps_i8, read_named, shared_scratch, wf, BlockDims, BlockWeights, HostInt8Block,
+    Int8Scratch, Int8Weights, NormBufs, NormHostCache, Scratch, Tensors, KERNELS,
 };
 use crate::model::{postprocess, preprocess, timestep_cond, HostLookup};
 use crate::ZImageConfig;
@@ -95,8 +95,10 @@ impl HostLookup for HostWeights {
 }
 
 /// One stage: a chain of blocks recorded into a single graph with resident
-/// weights, run with one submit. Intermediates come from a single reused
-/// [`Scratch`]; the residual double-buffers between two slabs (`input`/`_resb`).
+/// weights, run with one submit. Intermediates come from a [`Scratch`] the
+/// stage does not own - one slab is shared by every stage of the DiT (see
+/// [`Scratch::shared`]) - and the residual double-buffers between two slabs
+/// (`input`/`_resb`).
 struct Phase {
     input: DeviceBuffer,
     output: DeviceBuffer,
@@ -106,27 +108,26 @@ struct Phase {
     _weights: Vec<BlockWeights>, // kept resident (referenced by steps)
     norms: Vec<NormBufs>,
     t: u32,
-    _scr: Scratch,
     _resb: DeviceBuffer,
 }
 
+/// Record one stage into `scr`, which must have been allocated for at least
+/// `t` tokens and for this stage's `flash` choice ([`shared_scratch`] does
+/// both from the same expression this passes to [`build_block_steps`]).
 #[allow(clippy::too_many_arguments)]
-fn build_phase(gpu: &Gpu, tensors: &dyn checkpoint::TensorSource, prefixes: &[String], bd: BlockDims, t: u32, modulation: bool, reg_gemm: bool) -> Phase {
+fn build_phase(gpu: &Gpu, tensors: &dyn checkpoint::TensorSource, prefixes: &[String], bd: BlockDims, t: u32, modulation: bool, reg_gemm: bool, scr: &Scratch) -> Phase {
     let half = bd.head_dim / 2;
     let resa = gpu.storage((t * bd.dim) as u64);
     let resb = gpu.storage((t * bd.dim) as u64);
     let cos = gpu.storage((t * half) as u64);
     let sin = gpu.storage((t * half) as u64);
-    // Flash only on the GPU (reg_gemm ⇒ GPU; the CPU JIT can't compile the barrier);
-    // Scratch must match so it skips the [nh·t·t] buffers under flash.
-    let scr = Scratch::new_maybe_flash(gpu, bd, t, reg_gemm && crate::block::use_flash(gpu, bd.n_heads, t));
     let (mut weights, mut norms, mut steps) = (Vec::new(), Vec::new(), Vec::new());
     // Double-buffer the residual: block reads `cur_in`, writes `cur_out`, swap.
     let (mut cur_in, mut cur_out) = (resa.clone(), resb.clone());
     for p in prefixes {
         let w = BlockWeights::upload(gpu, tensors, p);
         let nb = NormBufs::new(gpu, tensors, p, bd.dim, modulation);
-        build_block_steps(gpu, &mut steps, &w, &nb, &cur_in, &cur_out, &scr, &cos, &sin, bd, t, reg_gemm);
+        build_block_steps(gpu, &mut steps, &w, &nb, &cur_in, &cur_out, scr, &cos, &sin, bd, t, reg_gemm);
         weights.push(w);
         norms.push(nb);
         std::mem::swap(&mut cur_in, &mut cur_out);
@@ -134,7 +135,7 @@ fn build_phase(gpu: &Gpu, tensors: &dyn checkpoint::TensorSource, prefixes: &[St
         // accumulating on top of the resident weights.
         gpu.poll_wait();
     }
-    Phase { input: resa, output: cur_in, cos, sin, steps, _weights: weights, norms, t, _scr: scr, _resb: resb }
+    Phase { input: resa, output: cur_in, cos, sin, steps, _weights: weights, norms, t, _resb: resb }
 }
 
 impl Phase {
@@ -163,6 +164,9 @@ pub struct ZImageDit {
     noise: Phase,
     context: Phase,
     main: Phase,
+    /// The one scratch slab all three stages record against - owned here, not
+    /// per stage, which is the whole point (see [`Scratch::shared`]).
+    _scr: Scratch,
 }
 
 impl ZImageDit {
@@ -195,11 +199,12 @@ impl ZImageDit {
         let np: Vec<String> = (0..cfg.n_refiner_layers).map(|l| format!("noise_refiner.{l}")).collect();
         let cp: Vec<String> = (0..cfg.n_refiner_layers).map(|l| format!("context_refiner.{l}")).collect();
         let mp: Vec<String> = (0..cfg.n_layers).map(|l| format!("layers.{l}")).collect();
-        let noise = build_phase(&gpu, src, &np, bd, n_img, true, reg_gemm);
-        let context = build_phase(&gpu, src, &cp, bd, cap_len, false, reg_gemm);
-        let main = build_phase(&gpu, src, &mp, bd, ntot, true, reg_gemm);
+        let scr = shared_scratch(&gpu, bd, &[n_img, cap_len, ntot], reg_gemm);
+        let noise = build_phase(&gpu, src, &np, bd, n_img, true, reg_gemm, &scr);
+        let context = build_phase(&gpu, src, &cp, bd, cap_len, false, reg_gemm, &scr);
+        let main = build_phase(&gpu, src, &mp, bd, ntot, true, reg_gemm, &scr);
         let w = HostWeights::from_source(&cfg, src);
-        ZImageDit { gpu, cfg, w, f, h, wd, cap_len, noise, context, main }
+        ZImageDit { gpu, cfg, w, f, h, wd, cap_len, noise, context, main, _scr: scr }
     }
 
     /// One DiT forward for the built size. `latent`: `[C·F·H·W]`; `cap`:
@@ -241,6 +246,10 @@ pub struct ZImageDitShard {
     context: Phase,
     main0: Phase,
     main1: Phase,
+    /// One shared slab per CARD: card 0 carries noise+context+main0, card 1
+    /// only main1, and a `Scratch` is device-local so they cannot be one.
+    _scr0: Scratch,
+    _scr1: Scratch,
 }
 
 impl ZImageDitShard {
@@ -274,12 +283,14 @@ impl ZImageDitShard {
         let cp: Vec<String> = (0..cfg.n_refiner_layers).map(|l| format!("context_refiner.{l}")).collect();
         let mp0: Vec<String> = (0..cut).map(|l| format!("layers.{l}")).collect();
         let mp1: Vec<String> = (cut..cfg.n_layers as usize).map(|l| format!("layers.{l}")).collect();
-        let noise = build_phase(&gpu0, src, &np, bd, n_img, true, true);
-        let context = build_phase(&gpu0, src, &cp, bd, cap_len, false, true);
-        let main0 = build_phase(&gpu0, src, &mp0, bd, ntot, true, true);
-        let main1 = build_phase(&gpu1, src, &mp1, bd, ntot, true, true);
+        let scr0 = shared_scratch(&gpu0, bd, &[n_img, cap_len, ntot], true);
+        let scr1 = shared_scratch(&gpu1, bd, &[ntot], true);
+        let noise = build_phase(&gpu0, src, &np, bd, n_img, true, true, &scr0);
+        let context = build_phase(&gpu0, src, &cp, bd, cap_len, false, true, &scr0);
+        let main0 = build_phase(&gpu0, src, &mp0, bd, ntot, true, true, &scr0);
+        let main1 = build_phase(&gpu1, src, &mp1, bd, ntot, true, true, &scr1);
         let w = HostWeights::from_source(&cfg, src);
-        ZImageDitShard { gpu0, gpu1, cfg, w, f, h, wd, cap_len, noise, context, main0, main1 }
+        ZImageDitShard { gpu0, gpu1, cfg, w, f, h, wd, cap_len, noise, context, main0, main1, _scr0: scr0, _scr1: scr1 }
     }
 
     pub fn forward(&self, latent: &[f32], cap: &[f32], t: f32) -> Vec<f32> {
@@ -313,34 +324,46 @@ struct Int8Phase {
     sin: DeviceBuffer,
     steps: Vec<Step>,
     _weights: Vec<Int8Weights>,
-    _scr: Scratch,
-    _i8: Int8Scratch,
     _resb: DeviceBuffer,
     norms: Vec<NormBufs>,
     t: u32,
 }
 
-fn build_phase_i8(gpu: &Gpu, tensors: &dyn checkpoint::TensorSource, prefixes: &[String], bd: BlockDims, t: u32, modulation: bool) -> Int8Phase {
+/// The scratch every int8 stage of one DiT shares: the f32 block slab plus the
+/// activation-quantization slab, each sized for the largest stage. See
+/// [`Scratch::shared`] for why one is enough.
+struct Int8Stage {
+    scr: Scratch,
+    i8: Int8Scratch,
+}
+
+impl Int8Stage {
+    /// `ts`: every stage's token count. The int8 path is GPU-only, so `flash`
+    /// follows the plain heuristic (`reg_gemm` is always true here).
+    fn shared(gpu: &Gpu, bd: BlockDims, ts: &[u32]) -> Int8Stage {
+        Int8Stage { scr: shared_scratch(gpu, bd, ts, true), i8: Int8Scratch::new(gpu, bd, ts.iter().copied().max().unwrap_or(1)) }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_phase_i8(gpu: &Gpu, tensors: &dyn checkpoint::TensorSource, prefixes: &[String], bd: BlockDims, t: u32, modulation: bool, sh: &Int8Stage) -> Int8Phase {
     let half = bd.head_dim / 2;
     let resa = gpu.storage((t * bd.dim) as u64);
     let resb = gpu.storage((t * bd.dim) as u64);
     let cos = gpu.storage((t * half) as u64);
     let sin = gpu.storage((t * half) as u64);
-    // int8 path is GPU-only, so flash follows the plain heuristic.
-    let scr = Scratch::new_maybe_flash(gpu, bd, t, crate::block::use_flash(gpu, bd.n_heads, t));
-    let i8 = Int8Scratch::new(gpu, bd, t);
     let (mut weights, mut norms, mut steps) = (Vec::new(), Vec::new(), Vec::new());
     let (mut cur_in, mut cur_out) = (resa.clone(), resb.clone());
     for p in prefixes {
         let w = Int8Weights::upload(gpu, tensors, p, bd);
         let nb = NormBufs::new(gpu, tensors, p, bd.dim, modulation);
-        build_block_steps_i8(gpu, &mut steps, &w, &nb, &cur_in, &cur_out, &scr, &i8, &cos, &sin, bd, t);
+        build_block_steps_i8(gpu, &mut steps, &w, &nb, &cur_in, &cur_out, &sh.scr, &sh.i8, &cos, &sin, bd, t);
         weights.push(w);
         norms.push(nb);
         std::mem::swap(&mut cur_in, &mut cur_out);
         gpu.poll_wait();
     }
-    Int8Phase { input: resa, output: cur_in, cos, sin, steps, _weights: weights, _scr: scr, _i8: i8, _resb: resb, norms, t }
+    Int8Phase { input: resa, output: cur_in, cos, sin, steps, _weights: weights, _resb: resb, norms, t }
 }
 
 /// [`build_phase_i8`], but retaining each block's [`crate::block::HostInt8Block`]/
@@ -352,53 +375,58 @@ fn build_phase_i8(gpu: &Gpu, tensors: &dyn checkpoint::TensorSource, prefixes: &
 /// never the default `build_phase_i8` path: retaining it is an explicit
 /// choice by whoever calls this, not a hidden side effect of building at
 /// all (see `ZImageDitI8::build_from_source_with_cache`'s doc).
-fn build_phase_i8_with_cache(gpu: &Gpu, tensors: &dyn checkpoint::TensorSource, prefixes: &[String], bd: BlockDims, t: u32, modulation: bool) -> (Int8Phase, Vec<(HostInt8Block, NormHostCache)>) {
+#[allow(clippy::too_many_arguments)]
+fn build_phase_i8_with_cache(
+    gpu: &Gpu,
+    tensors: &dyn checkpoint::TensorSource,
+    prefixes: &[String],
+    bd: BlockDims,
+    t: u32,
+    modulation: bool,
+    sh: &Int8Stage,
+) -> (Int8Phase, Vec<(HostInt8Block, NormHostCache)>) {
     let half = bd.head_dim / 2;
     let resa = gpu.storage((t * bd.dim) as u64);
     let resb = gpu.storage((t * bd.dim) as u64);
     let cos = gpu.storage((t * half) as u64);
     let sin = gpu.storage((t * half) as u64);
-    let scr = Scratch::new_maybe_flash(gpu, bd, t, crate::block::use_flash(gpu, bd.n_heads, t));
-    let i8 = Int8Scratch::new(gpu, bd, t);
     let (mut weights, mut norms, mut steps, mut cache) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let (mut cur_in, mut cur_out) = (resa.clone(), resb.clone());
     for p in prefixes {
         let (w, host_w) = Int8Weights::upload_with_cache(gpu, tensors, p, bd);
         let nb = NormBufs::new(gpu, tensors, p, bd.dim, modulation);
         let host_n = nb.host_cache();
-        build_block_steps_i8(gpu, &mut steps, &w, &nb, &cur_in, &cur_out, &scr, &i8, &cos, &sin, bd, t);
+        build_block_steps_i8(gpu, &mut steps, &w, &nb, &cur_in, &cur_out, &sh.scr, &sh.i8, &cos, &sin, bd, t);
         weights.push(w);
         norms.push(nb);
         cache.push((host_w, host_n));
         std::mem::swap(&mut cur_in, &mut cur_out);
         gpu.poll_wait();
     }
-    (Int8Phase { input: resa, output: cur_in, cos, sin, steps, _weights: weights, _scr: scr, _i8: i8, _resb: resb, norms, t }, cache)
+    (Int8Phase { input: resa, output: cur_in, cos, sin, steps, _weights: weights, _resb: resb, norms, t }, cache)
 }
 
 /// [`build_phase_i8_with_cache`], rebuilding entirely from `cache` instead
 /// of a `TensorSource` — no checkpoint read, no re-quantization. The fast
 /// half of a `promote`.
-fn rebuild_phase_i8_from_cache(gpu: &Gpu, cache: &[(HostInt8Block, NormHostCache)], bd: BlockDims, t: u32) -> Int8Phase {
+fn rebuild_phase_i8_from_cache(gpu: &Gpu, cache: &[(HostInt8Block, NormHostCache)], bd: BlockDims, t: u32, sh: &Int8Stage) -> Int8Phase {
     let half = bd.head_dim / 2;
     let resa = gpu.storage((t * bd.dim) as u64);
     let resb = gpu.storage((t * bd.dim) as u64);
     let cos = gpu.storage((t * half) as u64);
     let sin = gpu.storage((t * half) as u64);
-    let scr = Scratch::new_maybe_flash(gpu, bd, t, crate::block::use_flash(gpu, bd.n_heads, t));
-    let i8 = Int8Scratch::new(gpu, bd, t);
     let (mut weights, mut norms, mut steps) = (Vec::new(), Vec::new(), Vec::new());
     let (mut cur_in, mut cur_out) = (resa.clone(), resb.clone());
     for (host_w, host_n) in cache {
         let w = Int8Weights::upload_from_cache(gpu, host_w);
         let nb = NormBufs::from_cache(gpu, bd.dim, host_n.clone());
-        build_block_steps_i8(gpu, &mut steps, &w, &nb, &cur_in, &cur_out, &scr, &i8, &cos, &sin, bd, t);
+        build_block_steps_i8(gpu, &mut steps, &w, &nb, &cur_in, &cur_out, &sh.scr, &sh.i8, &cos, &sin, bd, t);
         weights.push(w);
         norms.push(nb);
         std::mem::swap(&mut cur_in, &mut cur_out);
         gpu.poll_wait();
     }
-    Int8Phase { input: resa, output: cur_in, cos, sin, steps, _weights: weights, _scr: scr, _i8: i8, _resb: resb, norms, t }
+    Int8Phase { input: resa, output: cur_in, cos, sin, steps, _weights: weights, _resb: resb, norms, t }
 }
 
 impl Int8Phase {
@@ -427,6 +455,9 @@ pub struct ZImageDitI8 {
     noise: Int8Phase,
     context: Int8Phase,
     main: Int8Phase,
+    /// The one scratch pair all three stages record against (see
+    /// [`Scratch::shared`]) - owned here, not once per stage.
+    _sh: Int8Stage,
 }
 
 impl ZImageDitI8 {
@@ -447,11 +478,12 @@ impl ZImageDitI8 {
         let np: Vec<String> = (0..cfg.n_refiner_layers).map(|l| format!("noise_refiner.{l}")).collect();
         let cp: Vec<String> = (0..cfg.n_refiner_layers).map(|l| format!("context_refiner.{l}")).collect();
         let mp: Vec<String> = (0..cfg.n_layers).map(|l| format!("layers.{l}")).collect();
-        let noise = build_phase_i8(&gpu, src, &np, bd, n_img, true);
-        let context = build_phase_i8(&gpu, src, &cp, bd, cap_len, false);
-        let main = build_phase_i8(&gpu, src, &mp, bd, ntot, true);
+        let sh = Int8Stage::shared(&gpu, bd, &[n_img, cap_len, ntot]);
+        let noise = build_phase_i8(&gpu, src, &np, bd, n_img, true, &sh);
+        let context = build_phase_i8(&gpu, src, &cp, bd, cap_len, false, &sh);
+        let main = build_phase_i8(&gpu, src, &mp, bd, ntot, true, &sh);
         let w = HostWeights::from_source(&cfg, src);
-        ZImageDitI8 { gpu, cfg, w, f, h, wd, cap_len, noise, context, main }
+        ZImageDitI8 { gpu, cfg, w, f, h, wd, cap_len, noise, context, main, _sh: sh }
     }
 
     pub fn forward(&self, latent: &[f32], cap: &[f32], t: f32) -> Vec<f32> {
@@ -489,11 +521,12 @@ impl ZImageDitI8 {
         let np: Vec<String> = (0..cfg.n_refiner_layers).map(|l| format!("noise_refiner.{l}")).collect();
         let cp: Vec<String> = (0..cfg.n_refiner_layers).map(|l| format!("context_refiner.{l}")).collect();
         let mp: Vec<String> = (0..cfg.n_layers).map(|l| format!("layers.{l}")).collect();
-        let (noise, noise_cache) = build_phase_i8_with_cache(&gpu, src, &np, bd, n_img, true);
-        let (context, context_cache) = build_phase_i8_with_cache(&gpu, src, &cp, bd, cap_len, false);
-        let (main, main_cache) = build_phase_i8_with_cache(&gpu, src, &mp, bd, ntot, true);
+        let sh = Int8Stage::shared(&gpu, bd, &[n_img, cap_len, ntot]);
+        let (noise, noise_cache) = build_phase_i8_with_cache(&gpu, src, &np, bd, n_img, true, &sh);
+        let (context, context_cache) = build_phase_i8_with_cache(&gpu, src, &cp, bd, cap_len, false, &sh);
+        let (main, main_cache) = build_phase_i8_with_cache(&gpu, src, &mp, bd, ntot, true, &sh);
         let w = HostWeights::from_source(&cfg, src);
-        let dit = ZImageDitI8 { gpu, cfg: cfg.clone(), w: w.clone(), f, h, wd, cap_len, noise, context, main };
+        let dit = ZImageDitI8 { gpu, cfg: cfg.clone(), w: w.clone(), f, h, wd, cap_len, noise, context, main, _sh: sh };
         let cache = DitI8Cache { cfg, w, noise: noise_cache, context: context_cache, main: main_cache };
         (dit, cache)
     }
@@ -510,10 +543,11 @@ impl ZImageDitI8 {
         let (ps, pf) = (cfg.patch_size, cfg.f_patch_size);
         let n_img = (f / pf) * (h / ps) * (wd / ps);
         let ntot = n_img + cap_len;
-        let noise = rebuild_phase_i8_from_cache(&gpu, &cache.noise, bd, n_img);
-        let context = rebuild_phase_i8_from_cache(&gpu, &cache.context, bd, cap_len);
-        let main = rebuild_phase_i8_from_cache(&gpu, &cache.main, bd, ntot);
-        ZImageDitI8 { gpu, cfg, w: cache.w.clone(), f, h, wd, cap_len, noise, context, main }
+        let sh = Int8Stage::shared(&gpu, bd, &[n_img, cap_len, ntot]);
+        let noise = rebuild_phase_i8_from_cache(&gpu, &cache.noise, bd, n_img, &sh);
+        let context = rebuild_phase_i8_from_cache(&gpu, &cache.context, bd, cap_len, &sh);
+        let main = rebuild_phase_i8_from_cache(&gpu, &cache.main, bd, ntot, &sh);
+        ZImageDitI8 { gpu, cfg, w: cache.w.clone(), f, h, wd, cap_len, noise, context, main, _sh: sh }
     }
 }
 
@@ -573,13 +607,13 @@ struct WindowedPhase {
 /// `WeightSet` assigns it a group, and the initial pin is exactly such an
 /// assignment even though it never surfaces as an `advance` miss.
 #[allow(clippy::too_many_arguments)]
-fn build_windowed_phase(gpu: &Gpu, src: &dyn checkpoint::TensorSource, prefixes: Vec<String>, bd: BlockDims, t: u32, modulation: bool, reg_gemm: bool, window: u32) -> WindowedPhase {
+fn build_windowed_phase(gpu: &Gpu, src: &dyn checkpoint::TensorSource, prefixes: Vec<String>, bd: BlockDims, t: u32, modulation: bool, reg_gemm: bool, window: u32, scr: &Scratch) -> WindowedPhase {
     let half = bd.head_dim / 2;
     let input = gpu.storage((t * bd.dim) as u64);
     let resb = gpu.storage((t * bd.dim) as u64);
     let cos = gpu.storage((t * half) as u64);
     let sin = gpu.storage((t * half) as u64);
-    let scr = Scratch::new_maybe_flash(gpu, bd, t, reg_gemm && crate::block::use_flash(gpu, bd.n_heads, t));
+    let scr = scr.clone(); // aliases the DiT's one shared slab, never a second one
     let n_groups = prefixes.len() as u32;
     let budget = window.clamp(1, n_groups.max(1));
     let slot_w: Vec<BlockWeights> = (0..budget).map(|_| BlockWeights::alloc(gpu, bd)).collect();
@@ -687,9 +721,10 @@ impl ZImageDitWindowed {
         let np: Vec<String> = (0..cfg.n_refiner_layers).map(|l| format!("noise_refiner.{l}")).collect();
         let cp: Vec<String> = (0..cfg.n_refiner_layers).map(|l| format!("context_refiner.{l}")).collect();
         let mp: Vec<String> = (0..cfg.n_layers).map(|l| format!("layers.{l}")).collect();
-        let noise = build_phase(&gpu, src, &np, bd, n_img, true, reg_gemm);
-        let context = build_phase(&gpu, src, &cp, bd, cap_len, false, reg_gemm);
-        let main = build_windowed_phase(&gpu, src, mp, bd, ntot, true, reg_gemm, window);
+        let scr = shared_scratch(&gpu, bd, &[n_img, cap_len, ntot], reg_gemm);
+        let noise = build_phase(&gpu, src, &np, bd, n_img, true, reg_gemm, &scr);
+        let context = build_phase(&gpu, src, &cp, bd, cap_len, false, reg_gemm, &scr);
+        let main = build_windowed_phase(&gpu, src, mp, bd, ntot, true, reg_gemm, window, &scr);
         let w = HostWeights::from_source(&cfg, src);
         ZImageDitWindowed { gpu, cfg, w, f, h, wd, cap_len, noise, context, main: std::cell::RefCell::new(main) }
     }

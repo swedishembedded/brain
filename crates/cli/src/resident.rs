@@ -516,6 +516,18 @@ impl ZImageResident {
         let provider = Arc::new(s3dit::caps::ZImageProvider::from_paths(paths.clone()));
         Ok(ZImageResident { id: id.into(), paths, provider })
     }
+
+    /// The caption capacity a request asks for. An absent, negative or
+    /// out-of-`u32` value falls back to the default rather than wrapping,
+    /// because `instance_key` cannot return a `Result` and `activate` reads
+    /// this back out of the key it produced - the two must never disagree
+    /// about which build a request names (`resident_qwen3vl::precision_of`
+    /// resolves the same tension the same way). A capacity that is in range
+    /// but unbuildable for this DiT is refused by name inside
+    /// `HotPipeline::build_adapted`, where the config is known.
+    fn cap_len_of(inv: &Invocation) -> u32 {
+        inv.get_i64("cap_len").and_then(|v| u32::try_from(v).ok()).unwrap_or(s3dit::pipeline::DEFAULT_CAP_LEN)
+    }
 }
 
 impl ResidentModel for ZImageResident {
@@ -531,7 +543,16 @@ impl ResidentModel for ZImageResident {
             let h = inv.get_i64("height").unwrap_or(1024);
             let prec = if inv.get_str("precision").as_deref() == Some("fp32") { "fp32" } else { "int8" };
             let adapter = inv.get_str("adapter").unwrap_or_default();
-            InstanceKey::new(&self.id, format!("{w}x{h}:{prec}:{adapter}"))
+            // `cap_len` is a build-shape param like the other four: it fixes
+            // the caption capacity every graph in the pipeline is recorded
+            // over. `activate` gets nothing but this key, so leaving it out
+            // meant activate had to hardcode the default - a caller who set
+            // `cap_len=1024` got a pipeline built for 512 and was then refused
+            // a 700-token prompt "because this pipeline was built for cap_len
+            // 512", with no sign the param had been dropped. Same rule
+            // `resident_qwen3vl` follows for `max_pixels`/`precision`.
+            let cap_len = Self::cap_len_of(inv);
+            InstanceKey::new(&self.id, format!("{w}x{h}:{prec}:{cap_len}:{adapter}"))
         } else {
             // Editing/training actions build fresh per call — one transient instance.
             InstanceKey::new(&self.id, format!("edit:{action}"))
@@ -572,7 +593,7 @@ impl ResidentModel for ZImageResident {
             // keep the plain estimate.
             Tier::Hot => {
                 let mut cost = self.estimate(key);
-                let (_, _, hifi, adapter) = parse_key(&key.config);
+                let (_, _, hifi, _, adapter) = parse_key(&key.config);
                 let adapter = if adapter.is_empty() { None } else { Some(adapter.as_str()) };
                 if !key.config.starts_with("edit:") && retains_int8_cache(hifi, adapter) {
                     cost.ram += cache_ram();
@@ -595,9 +616,8 @@ impl ResidentModel for ZImageResident {
             // No persistent pipeline — the provider builds fresh per call.
             return Ok(Box::new(ZImageInstance { pipe: None, dit_cache: None, provider: self.provider.clone(), paths: self.paths.clone(), width: 0, height: 0, cap_len: 0 }));
         }
-        let (w, h, hifi, adapter) = parse_key(&key.config);
+        let (w, h, hifi, cap_len, adapter) = parse_key(&key.config);
         let adapter = if adapter.is_empty() { None } else { Some(adapter.as_str()) };
-        let cap_len = 64;
         // Place the DiT on the assigned card (scoped registry selection); the
         // encoder card is z-image's own (BRAIN_S3DIT_ENCODER_GPU) and left as
         // configured.
@@ -690,14 +710,16 @@ impl Instance for ZImageInstance {
     }
 }
 
-/// Parse a `"WxH:precision:adapter"` instance key.
-fn parse_key(config: &str) -> (u32, u32, bool, String) {
-    let mut parts = config.splitn(3, ':');
+/// Parse a `"WxH:precision:cap_len:adapter"` instance key. The adapter is last
+/// because it is a filesystem path and may itself contain a ':'.
+fn parse_key(config: &str) -> (u32, u32, bool, u32, String) {
+    let mut parts = config.splitn(4, ':');
     let wh = parts.next().unwrap_or("1024x1024");
     let prec = parts.next().unwrap_or("int8");
+    let cap_len = parts.next().and_then(|s| s.parse().ok()).unwrap_or(s3dit::pipeline::DEFAULT_CAP_LEN);
     let adapter = parts.next().unwrap_or("").to_string();
     let (w, h) = wh.split_once('x').unwrap_or(("1024", "1024"));
-    (w.parse().unwrap_or(1024), h.parse().unwrap_or(1024), prec == "fp32", adapter)
+    (w.parse().unwrap_or(1024), h.parse().unwrap_or(1024), prec == "fp32", cap_len, adapter)
 }
 
 /// Wrap a generated [`Image`] as an image-output [`Outcome`] (the shared
@@ -736,6 +758,71 @@ mod tests {
             std::ptr::eq(Arc::as_ptr(&handle) as *const (), Arc::as_ptr(&models[0]) as *const ()),
             "the concrete handle and the registered erased one must be the same allocation, or set_adapter writes where no activate reads"
         );
+    }
+
+    /// `cap_len` is a BUILD-SHAPE param: it fixes the caption capacity every
+    /// graph in the pipeline is recorded over, exactly as `width`/`height`/
+    /// `precision`/`adapter` do. It was missing from the instance key, so
+    /// `activate` had nothing to read it from and hardcoded the default - a
+    /// served caller who explicitly asked for `cap_len=1024` got a pipeline
+    /// built for 512 and was then refused a 700-token prompt "because this
+    /// pipeline was built for cap_len 512", with no acknowledgement the param
+    /// had been ignored. Same rule `resident_qwen3vl` follows for `max_pixels`.
+    #[test]
+    fn cap_len_is_part_of_the_text2image_instance_identity() {
+        let r = ZImageResident::from_paths(s3dit::caps::MODEL, unresolvable_paths()).expect("no weights are read to build a resident");
+        let key = |inv: Invocation| r.instance_key("text2image", &inv);
+        let k_default = key(Invocation::new());
+        let k_big = key(Invocation::new().set("cap_len", json!(1024)));
+        assert_ne!(k_default, k_big, "two capacities are two different builds");
+        assert_eq!(parse_key(&k_default.config).3, s3dit::pipeline::DEFAULT_CAP_LEN);
+        assert_eq!(parse_key(&k_big.config).3, 1024, "activate must build for what the caller asked, not a constant");
+        // An out-of-range value falls back to the default rather than wrapping,
+        // so `instance_key` and `activate` can never disagree about the build.
+        assert_eq!(key(Invocation::new().set("cap_len", json!(1i64 << 40))), k_default);
+        assert_eq!(key(Invocation::new().set("cap_len", json!(-5))), k_default);
+        // The other build-shape params still key apart, and an adapter path
+        // (which may itself contain a ':') still round-trips out of the key.
+        assert_ne!(key(Invocation::new().set("width", json!(512))), k_default);
+        assert_ne!(key(Invocation::new().set("precision", json!("fp32"))), k_default);
+        let k_ad = key(Invocation::new().set("adapter", json!("a:b/c.brain")));
+        assert_eq!(parse_key(&k_ad.config), (1024, 1024, false, s3dit::pipeline::DEFAULT_CAP_LEN, "a:b/c.brain".to_string()));
+    }
+
+    fn unresolvable_paths() -> Paths {
+        let p = |role: &str| format!("no-such-z-image-{role}");
+        Paths { dit: p("dit"), vae: p("vae"), qwen: p("qwen"), tokenizer: p("tokenizer") }
+    }
+
+    /// The served half of the same contract, on real weights: a caller who
+    /// asks for a bigger capacity must actually GET one. With `cap_len`
+    /// missing from the instance key, `activate` built at the compiled-in
+    /// default and this prompt - deliberately longer than that default -
+    /// came back refused "because this pipeline was built for cap_len 512",
+    /// contradicting the request the resident was keyed on.
+    #[test]
+    #[ignore = "slow: real checkpoint + GPU; set BRAIN_S3DIT_* and run with --ignored"]
+    fn a_served_request_that_raises_cap_len_gets_a_pipeline_built_for_it() {
+        let paths = match Paths::from_env() {
+            Ok(p) => p,
+            Err(e) => return brain_testutil::skip(&format!("Z-Image checkpoint paths not set: {e}")),
+        };
+        let model = ZImageResident::from_paths(s3dit::caps::MODEL, paths).expect("BRAIN_S3DIT_* all resolved");
+        // ~700 caption tokens: over the 512 default, under the 1024 asked for.
+        let prompt = "a red fox in deep snow at dawn, long telephoto photograph, soft rim light, ".repeat(40);
+        let inv = Invocation::new()
+            .set("prompt", json!(prompt))
+            .set("cap_len", json!(1024))
+            .set("width", json!(256))
+            .set("height", json!(256))
+            .set("steps", json!(2))
+            .set("seed", json!(42));
+
+        let key = model.instance_key("text2image", &inv);
+        assert_eq!(parse_key(&key.config).3, 1024, "the request's capacity must reach activate through the key");
+        let mut inst = model.activate(&key, Device::Gpu(0)).expect("activate at the requested capacity");
+        let out = inst.run("text2image", &inv, &mut |_| {}).expect("a prompt past the DEFAULT capacity must generate at the capacity that was asked for");
+        assert!(out.blobs.contains_key("image"));
     }
 
     /// Real end-to-end proof that demote/promote works against the actual

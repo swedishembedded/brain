@@ -422,6 +422,12 @@ pub(crate) fn fold_adaln(nb: &NormBufs, c: &[f32], dim: usize, cdim: usize) -> (
 /// Allocated ONCE per stage and reused across its blocks (a forward needs no
 /// per-block SSA), cutting a 30-layer stack from ~660 buffers to ~24 — wgpu's
 /// block allocator otherwise wastes ~1.6× rounding each small buffer up.
+///
+/// `Clone` is an alias, not a copy: every field is a [`DeviceBuffer`], whose
+/// clone is an `Arc` bump onto the SAME allocation. That is what lets one slab
+/// be shared by every stage of a DiT ([`Scratch::shared`]) while each stage
+/// still owns a handle keeping it alive.
+#[derive(Clone)]
 pub(crate) struct Scratch {
     n1: DeviceBuffer,
     q: DeviceBuffer,
@@ -456,10 +462,36 @@ impl Scratch {
     /// the whole memory win — at high `t` those are gigabytes and hit the 2 GiB
     /// per-binding limit.
     pub fn new_maybe_flash(gpu: &Gpu, d: BlockDims, t: u32, flash: bool) -> Scratch {
+        Scratch::alloc(gpu, d, t, attn_mat_elems(d.n_heads, t, flash))
+    }
+
+    /// ONE scratch slab for every stage of a DiT, instead of one per stage.
+    ///
+    /// A DiT's stages (`noise` over the image tokens, `context` over the caption
+    /// tokens, `main` over both) run strictly one after another - each stage's
+    /// `run` submits and then reads its output back to the host before the next
+    /// one is touched - and every buffer here is a pure intra-block intermediate
+    /// that no stage reads across that boundary. So the largest stage's slab
+    /// serves all of them, and the smaller stages' allocations were pure
+    /// duplication: at Z-Image-Turbo's shape (`dim` 3840, `hidden` 10240) a
+    /// stage costs `18·t·dim + 3·t·hidden` floats ≈ 390 KiB per token, so a
+    /// 1024×1024 generation was paying ~1.6 GiB for the `noise` stage's slab on
+    /// top of the `main` stage's near-identical one.
+    ///
+    /// `stages` is `(tokens, flash)` per stage, with `flash` decided exactly as
+    /// the stage's own [`build_block_steps`] will decide it - the materialised
+    /// `[nh·t·t]` attention buffers must fit the largest stage that does NOT
+    /// take the fused path.
+    pub fn shared(gpu: &Gpu, d: BlockDims, stages: &[(u32, bool)]) -> Scratch {
+        let t_max = stages.iter().map(|&(t, _)| t).max().unwrap_or(1);
+        let attn_mat = stages.iter().map(|&(t, flash)| attn_mat_elems(d.n_heads, t, flash)).max().unwrap_or(1);
+        Scratch::alloc(gpu, d, t_max, attn_mat)
+    }
+
+    fn alloc(gpu: &Gpu, d: BlockDims, t: u32, attn_mat: u64) -> Scratch {
         let td = (t * d.dim) as u64;
         let th = (t * d.hidden) as u64;
         let a = |n: u64| gpu.storage(n);
-        let attn_mat = if flash { 1 } else { (d.n_heads * t * t) as u64 };
         Scratch {
             n1: a(td), q: a(td), k: a(td), v: a(td), qn: a(td), kn: a(td), qr: a(td), kr: a(td),
             qkv: a((t * 3 * d.dim) as u64),
@@ -468,6 +500,34 @@ impl Scratch {
             g: a(th), u: a(th), hsw: a(th), ff: a(td), f2: a(td),
         }
     }
+}
+
+/// Elements the materialised `scores`/`probs` buffers need for `nh` heads over
+/// `t` tokens - one dummy element under `flash`, which allocates neither.
+/// Computed in `u64`: `nh·t²` overflows a `u32` past ~12k tokens.
+fn attn_mat_elems(nh: u32, t: u32, flash: bool) -> u64 {
+    if flash {
+        1
+    } else {
+        (nh as u64) * (t as u64) * (t as u64)
+    }
+}
+
+/// Narrow a dispatch's thread count to the `u32` `Gpu::step` takes, computing
+/// it in `u64` first.
+///
+/// The materialised attention covers `[nh·t·t]` score elements, one thread
+/// each, and that product passes `u32::MAX` past t ≈ 11966 at Z-Image-Turbo's
+/// 30 heads. A release build has overflow checks off, so a `u32` expression
+/// wraps SILENTLY to a small count - and because the buffer itself is sized in
+/// `u64` (see [`attn_mat_elems`]) there is no out-of-bounds write to catch it:
+/// the kernel would simply cover a sliver of the scores and corrupt the output
+/// with nothing raised anywhere. A dispatch cannot carry more than `u32::MAX`
+/// threads at all, so a graph that needs one is refused by name instead.
+fn dispatch_threads(n: u64, what: &str) -> Result<u32, String> {
+    u32::try_from(n).map_err(|_| {
+        format!("z-image: the {what} dispatch needs {n} threads, past the {} a dispatch can carry; this sequence length only runs on the fused flash path", u32::MAX)
+    })
 }
 
 /// Whether to use flash attention (fused, O(t·hd) memory) instead of the
@@ -494,6 +554,16 @@ pub(crate) fn use_flash(gpu: &Gpu, nh: u32, t: u32) -> bool {
     scores > gpu.max_storage_binding_bytes() * 9 / 10
 }
 
+/// [`Scratch::shared`] for stages of `ts` tokens each, deciding every stage's
+/// `flash` with the SAME expression [`build_block_steps`] uses to record it -
+/// so the slab can never be sized for one path while the graph runs the other.
+/// Flash only on the GPU (`reg_gemm` ⇒ GPU; the CPU JIT cannot compile the
+/// barrier), which is why the flag is part of the decision and not just `t`.
+pub(crate) fn shared_scratch(gpu: &Gpu, d: BlockDims, ts: &[u32], reg_gemm: bool) -> Scratch {
+    let stages: Vec<(u32, bool)> = ts.iter().map(|&t| (t, reg_gemm && use_flash(gpu, d.n_heads, t))).collect();
+    Scratch::shared(gpu, d, &stages)
+}
+
 /// Append the self-attention (scores→softmax→apply) for one block, from the packed
 /// `qkv` into `ctx`. `flash` fuses it into one tiled online-softmax kernel with
 /// O(t·hd) memory; otherwise the materialised trio.
@@ -516,9 +586,14 @@ pub(crate) fn push_attention(gpu: &Gpu, s: &mut Vec<Step>, scr: &Scratch, nh: u3
             &scr.ctx,
         ));
     } else {
-        s.push(gpu.step(K_SCORES, &[&scr.qkv, &scr.scores], &[1, nh, t, hd, 3 * dim, 0, dim], nh * t * t));
-        s.push(gpu.step(K_SOFTMAX, &[&scr.scores, &scr.probs], &[1, nh, t], nh * t));
-        s.push(gpu.step(K_APPLY, &[&scr.probs, &scr.qkv, &scr.ctx], &[1, nh, t, hd, 3 * dim, 2 * dim, dim], nh * t * hd));
+        // Every one of these counts is derived in u64 and narrowed once: the
+        // scores dispatch covers `[nh·t·t]` elements and wraps a u32 past
+        // t ≈ 12k, silently, in a release build (see `dispatch_threads`).
+        let (nh64, t64, hd64) = (nh as u64, t as u64, hd as u64);
+        let th = |n: u64, what: &str| dispatch_threads(n, what).unwrap_or_else(|e| panic!("{e}"));
+        s.push(gpu.step(K_SCORES, &[&scr.qkv, &scr.scores], &[1, nh, t, hd, 3 * dim, 0, dim], th(nh64 * t64 * t64, "attention scores")));
+        s.push(gpu.step(K_SOFTMAX, &[&scr.scores, &scr.probs], &[1, nh, t], th(nh64 * t64, "attention softmax")));
+        s.push(gpu.step(K_APPLY, &[&scr.probs, &scr.qkv, &scr.ctx], &[1, nh, t, hd, 3 * dim, 2 * dim, dim], th(nh64 * t64 * hd64, "attention apply")));
     }
 }
 
@@ -699,6 +774,10 @@ impl HostInt8Block {
 /// Per-stage int8 activation-quantization scratch (reused across blocks): the
 /// max-abs partials, the dynamic scale, and packed-activation buffers for the
 /// dim-width (q/k/v/out, w1/w3) and hidden-width (w2) inputs.
+///
+/// `Clone` aliases the same allocations, exactly as [`Scratch`]'s does, and for
+/// the same reason: one slab sized for the largest stage serves every stage.
+#[derive(Clone)]
 pub(crate) struct Int8Scratch {
     sx: DeviceBuffer, // [t] per-token activation scale
     xq_dim: DeviceBuffer,
@@ -815,5 +894,34 @@ impl ZImageBlock {
         wf(&self.gpu, &self.sin, sin);
         self.gpu.submit(&[], &self.steps);
         self.gpu.read(&self.out, (self.t * self.d.dim) as usize)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The materialised attention dispatch covers `[nh·t·t]` score elements,
+    /// one thread each. Computed in `u32` that product WRAPS at Z-Image-Turbo's
+    /// 30 heads past t ≈ 11966 - and a release build has overflow checks off,
+    /// so it wraps silently to a small, entirely plausible count. The buffer is
+    /// sized correctly (`attn_mat_elems` is `u64`), so there is no out-of-bounds
+    /// write to catch it: the kernel would just cover a sliver of the scores and
+    /// corrupt every image with nothing raised anywhere.
+    #[test]
+    fn the_materialised_attention_thread_count_never_wraps_a_u32() {
+        const NH: u32 = 30; // Z-Image-Turbo
+        let t = 11_966u64;
+        let want = (NH as u64) * t * t;
+        assert!(want > u32::MAX as u64, "this is the first token count past the u32 ceiling at {NH} heads");
+        // What a u32 computation produced instead: a small, plausible count.
+        let wrapped = NH.wrapping_mul(t as u32).wrapping_mul(t as u32);
+        assert!((wrapped as u64) < want / 1000, "the wrap is silent and enormous: {wrapped} vs {want}");
+
+        let e = dispatch_threads(want, "attention scores").unwrap_err();
+        assert!(e.contains("attention scores") && e.contains(&want.to_string()), "{e}");
+        // Everything that fits passes through unchanged.
+        assert_eq!(dispatch_threads((NH as u64) * 4096 * 4096, "attention scores").unwrap(), NH * 4096 * 4096);
+        assert_eq!(dispatch_threads(u32::MAX as u64, "x").unwrap(), u32::MAX);
     }
 }

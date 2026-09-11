@@ -17,6 +17,23 @@ use serde_json::json;
 /// The model id used on the CLI (`brain do z-image …`) and the event API.
 pub const MODEL: &str = "brain/s3dit";
 
+/// The caption-capacity param, shared by the two actions that build a pipeline
+/// for a fixed one. Mirrors `qwen3vl`'s `max_pixels`: a resident CAPACITY the
+/// caller may raise, whose overflow is an error by name and never a silent
+/// crop. See [`crate::pipeline::DEFAULT_CAP_LEN`] for why the default is what
+/// it is.
+fn cap_len_param() -> ParamSpec {
+    ParamSpec::new(
+        "cap_len",
+        ParamType::Int,
+        "resident capacity: caption tokens the pipeline's graphs are BUILT for; a longer prompt errors -- it is never truncated. Raising it rebuilds the pipeline.",
+    )
+    .default(json!(crate::pipeline::DEFAULT_CAP_LEN))
+    .min(1.0)
+    .max(crate::pipeline::max_cap_len(&crate::ZImageConfig::turbo(), 1) as f64)
+    .step(1.0)
+}
+
 /// Shared generation params (steps / guidance / seed / size).
 fn gen_params(spec: ActionSpec) -> ActionSpec {
     spec.param(ParamSpec::new("steps", ParamType::Int, "denoising steps (Turbo≈8)").default(json!(8)).min(1.0).max(150.0).step(1.0))
@@ -36,6 +53,7 @@ pub fn manifest() -> Manifest {
     let text2image = gen_params(ActionSpec::new("text2image", "generate an image from a text prompt (posters, photos, art; strong at English/Chinese typography)").streaming())
         .param(prompt())
         .param(neg())
+        .param(cap_len_param())
         .param(ParamSpec::new("adapter", ParamType::Str, "path to a trained LoRA adapter (from lora_train) to apply"))
         .output(image_out());
 
@@ -73,6 +91,7 @@ pub fn manifest() -> Manifest {
         .param(ParamSpec::new("steps", ParamType::Int, "training steps").default(json!(500)))
         .param(ParamSpec::new("size", ParamType::Int, "training square size, px").default(json!(512)))
         .param(ParamSpec::new("lr", ParamType::Float, "learning rate").default(json!(1e-4)))
+        .param(cap_len_param())
         .param(ParamSpec::new("one_gpu", ParamType::Bool, "train on a single GPU (default: shard the 6B across both)").default(json!(false)))
         .output(BlobSpec::new("adapter", Media::Bytes, "the trained LoRA adapter checkpoint"));
 
@@ -90,10 +109,11 @@ use std::sync::{Arc, Mutex};
 use capability::{Action, ActionResult, Invocation, Outcome, Progress, Provider};
 
 /// Cache key for a resident text-to-image pipeline: everything that fixes the
-/// built graphs. The caption length is a *property* of the built pipeline (not the
-/// key) — prompts are padded/truncated to it, so any prompt reuses the same hot
-/// weights.
-type HotKey = (u32, u32, bool, Option<String>); // (width, height, hifi, adapter path)
+/// built graphs. The caption CAPACITY is one of them - prompts are masked-padded
+/// up to it (and refused past it, never truncated), so any prompt that fits
+/// reuses the same hot weights, but a caller asking for a different capacity is
+/// asking for different graphs.
+type HotKey = (u32, u32, bool, Option<String>, u32); // (width, height, hifi, adapter path, cap_len)
 
 /// The executable Z-Image model behind the manifest. Holds a **hot pipeline
 /// cache** so a long-lived process (`brain run` / the event server) loads the
@@ -154,26 +174,27 @@ impl Action for ZAction {
         let mut on = |step, total, message: &str| progress(Progress::step(step, total, message.to_string()));
         match self.name.as_str() {
             "text2image" => {
-                // Hot path: build the resident pipeline once per (size, precision),
+                // Hot path: build the resident pipeline once per build shape,
                 // reuse across calls so a long-lived server generates fast.
-                let width = inv.get_i64("width").unwrap_or(1024) as u32;
-                let height = inv.get_i64("height").unwrap_or(1024) as u32;
-                let hifi = inv.get_str("precision").as_deref() == Some("fp32");
+                //
+                // The shape is settled and VALIDATED before the cache lock is
+                // taken: `ensure_hot` must free the old resident before it can
+                // build a replacement, so a request this DiT cannot serve has
+                // to be refused here or it destroys ~20 GB of working weights
+                // for every caller after it.
+                let key = text2image_key(paths, inv)?;
                 let seed = inv.get_i64("seed").unwrap_or(42).max(0) as u64;
                 let steps = inv.get_i64("steps").unwrap_or(8).max(1) as u32;
-                let adapter = inv.get_str("adapter").filter(|s| !s.is_empty());
-                let key: HotKey = (width, height, hifi, adapter.clone());
 
                 let mut guard = self.hot.lock().map_err(|_| "hot pipeline lock poisoned")?;
-                let rebuild = !matches!(&*guard, Some((k, _)) if *k == key);
-                if rebuild {
-                    *guard = None; // free the old resident weights before building new
+                let (width, height, hifi, adapter, cap_len) = key.clone();
+                ensure_hot(&mut guard, key, || {
                     on(0, 1, "loading weights (first call for this size)");
-                    // A fixed caption length so any prompt reuses the built graphs.
-                    let pipe = crate::pipeline::HotPipeline::build_adapted(paths, width, height, 64, hifi, adapter.as_deref(), |m| on(0, 1, m))?;
-                    *guard = Some((key, pipe));
-                }
-                let pipe = &guard.as_ref().unwrap().1;
+                    // A fixed caption CAPACITY so any prompt that fits reuses the
+                    // built graphs; one that does not is refused, not cropped.
+                    crate::pipeline::HotPipeline::build_adapted(paths, width, height, cap_len, hifi, adapter.as_deref(), |m| on(0, 1, m))
+                })?;
+                let pipe = &guard.as_ref().expect("ensure_hot leaves the slot filled on success").1;
                 emit(pipe.generate(&prompt, seed, steps, &inv.cancel, &mut on)?)
             }
             "image2image" => {
@@ -209,8 +230,11 @@ impl Action for ZAction {
                     steps: inv.get_i64("steps").unwrap_or(500).max(1) as u32,
                     rank: inv.get_i64("rank").unwrap_or(16).max(1) as usize,
                     lr: inv.get_f64("lr").unwrap_or(1e-4) as f32,
-                    size: inv.get_i64("size").unwrap_or(512).max(16) as u32,
-                    cap_len: 64,
+                    // Checked conversions, not `as u32`: both fix the shape
+                    // every graph in the run is built for, and `finetune::run`
+                    // refuses an unbuildable one by name at its own entry.
+                    size: u32_param(inv, "size", 512)?,
+                    cap_len: u32_param(inv, "cap_len", crate::pipeline::DEFAULT_CAP_LEN)?,
                     seed: inv.get_i64("seed").unwrap_or(0).max(0) as u64,
                     two_gpu: !inv.get_bool("one_gpu").unwrap_or(false),
                     save_path: save.clone(),
@@ -231,6 +255,58 @@ impl Action for ZAction {
             other => Err(format!("z-image '{other}': unknown action")),
         }
     }
+}
+
+/// An invocation's integer param as a `u32`, REFUSED rather than wrapped when
+/// it does not fit.
+///
+/// `Invocation` carries JSON numbers as `i64` and every build-shape param this
+/// model takes is a `u32`, so each one crosses that boundary. `as u32`
+/// truncates: `cap_len = 2^32 + 500` is positive, so it survived a `.max(1)`
+/// floor and then became a perfectly ordinary-looking `500` - a malformed
+/// request silently served at a capacity nobody asked for. The capability
+/// layer cannot catch this for us: `ParamSpec::min`/`max` are advisory and
+/// `ActionSpec::validate` never enforces them.
+fn u32_param(inv: &Invocation, name: &str, default: u32) -> Result<u32, String> {
+    match inv.get_i64(name) {
+        None => Ok(default),
+        Some(v) => u32::try_from(v).map_err(|_| format!("z-image: '{name}' must be between 0 and {} (got {v})", u32::MAX)),
+    }
+}
+
+/// The hot-cache key a `text2image` invocation asks for, with its build shape
+/// validated.
+///
+/// Called BEFORE the cache lock is taken, on purpose: [`ensure_hot`] drops the
+/// resident pipeline before it can build a replacement, so every reason a
+/// build can be refused up front has to be settled here - otherwise a single
+/// unbuildable request evicts ~20 GB of working weights and every caller after
+/// it pays the reload.
+fn text2image_key(paths: &crate::pipeline::Paths, inv: &Invocation) -> Result<HotKey, String> {
+    let width = u32_param(inv, "width", 1024)?;
+    let height = u32_param(inv, "height", 1024)?;
+    let cap_len = u32_param(inv, "cap_len", crate::pipeline::DEFAULT_CAP_LEN)?;
+    let hifi = inv.get_str("precision").as_deref() == Some("fp32");
+    let adapter = inv.get_str("adapter").filter(|s| !s.is_empty());
+    crate::pipeline::check_build_shape(&paths.dit, width, height, cap_len)?;
+    Ok((width, height, hifi, adapter, cap_len))
+}
+
+/// Make `slot` hold a pipeline built for `key`, building one only when the
+/// cached entry is for a different key.
+///
+/// The cached pipeline is dropped BEFORE `build` runs, because two full
+/// Z-Image residents (~20 GB each) do not fit one card. That is only safe
+/// because [`text2image_key`] has already settled every up-front reason the
+/// build could be refused, so `build` is reached only for a shape this DiT can
+/// actually be built for.
+fn ensure_hot<K: PartialEq, P>(slot: &mut Option<(K, P)>, key: K, build: impl FnOnce() -> Result<P, String>) -> Result<(), String> {
+    if matches!(slot, Some((k, _)) if *k == key) {
+        return Ok(());
+    }
+    *slot = None; // free the old resident weights before building new
+    *slot = Some((key, build()?));
+    Ok(())
 }
 
 /// Build [`crate::pipeline::Opts`] from an invocation, with an explicit output size.
@@ -305,6 +381,92 @@ mod tests {
         // the whole manifest round-trips to JSON for discovery.
         let j = m.to_json();
         assert_eq!(j["actions"].as_array().unwrap().len(), 5);
+    }
+
+    /// The caption capacity is a declared, caller-settable resident capacity -
+    /// on the two actions that BUILD a pipeline for a fixed one - and its
+    /// description says overflow errors, because a caller reading the manifest
+    /// is exactly who needs to know the prompt is not silently cropped.
+    #[test]
+    fn the_caption_capacity_is_a_declared_settable_param() {
+        let m = manifest();
+        for action in ["text2image", "lora_train"] {
+            let a = m.actions.iter().find(|a| a.name == action).unwrap();
+            let p = a.params.iter().find(|p| p.name == "cap_len").unwrap_or_else(|| panic!("{action} declares no cap_len"));
+            assert_eq!(p.default, Some(json!(crate::pipeline::DEFAULT_CAP_LEN)));
+            assert_eq!(p.min, Some(1.0));
+            assert_eq!(p.max, Some(crate::pipeline::max_cap_len(&crate::ZImageConfig::turbo(), 1) as f64));
+            assert!(p.help.contains("errors"), "{}", p.help);
+        }
+        // The per-call edit actions build at the prompt's own length, so they
+        // have no capacity to declare.
+        for action in ["image2image", "inpaint", "outpaint"] {
+            let a = m.actions.iter().find(|a| a.name == action).unwrap();
+            assert!(!a.params.iter().any(|p| p.name == "cap_len"), "{action} builds per call and needs no cap_len");
+        }
+    }
+
+    fn unresolvable_paths() -> crate::pipeline::Paths {
+        let p = |role: &str| format!("no-such-z-image-{role}");
+        crate::pipeline::Paths { dit: p("dit"), vae: p("vae"), qwen: p("qwen"), tokenizer: p("tokenizer") }
+    }
+
+    /// `cap_len` crosses an `i64 → u32` boundary here. `as u32` TRUNCATES:
+    /// `2^32 + 500` is positive, so it survived the `.max(1)` floor and then
+    /// became a perfectly plausible-looking `500` - a malformed request
+    /// silently served at a capacity nobody asked for. A checked conversion
+    /// refuses it instead, for every param that makes the same crossing.
+    #[test]
+    fn an_out_of_range_integer_param_is_refused_not_truncated() {
+        let paths = unresolvable_paths();
+        for name in ["cap_len", "width", "height"] {
+            let inv = Invocation::new().set(name, json!(4_294_967_796i64));
+            let e = text2image_key(&paths, &inv).unwrap_err();
+            assert!(e.contains(name), "the refusal must name the param: {e}");
+            assert!(e.contains("4294967796"), "and the value it was given: {e}");
+        }
+        // A negative one is out of range the other way, and used to be clamped.
+        let e = text2image_key(&paths, &Invocation::new().set("cap_len", json!(-1))).unwrap_err();
+        assert!(e.contains("cap_len"), "{e}");
+    }
+
+    /// The build shape is validated BEFORE the hot cache is consulted. The
+    /// eviction that precedes a rebuild is unconditional (two ~20 GB residents
+    /// do not fit one card), so a request this pipeline can never serve has to
+    /// be refused before it reaches that point - otherwise one bad `cap_len`
+    /// dropped a working resident and every caller after it paid a full
+    /// ~20 GB reload.
+    #[test]
+    fn an_unbuildable_request_is_refused_before_the_hot_cache_is_touched() {
+        let paths = unresolvable_paths();
+        let over = crate::pipeline::max_cap_len(&crate::ZImageConfig::turbo(), 1) + 1;
+        let e = text2image_key(&paths, &Invocation::new().set("cap_len", json!(over))).unwrap_err();
+        assert!(e.contains("cap_len"), "{e}");
+        let e = text2image_key(&paths, &Invocation::new().set("width", json!(8208))).unwrap_err();
+        assert!(e.contains("8208") || e.contains("8192"), "{e}");
+        // A buildable shape yields the key it will be cached under.
+        let k = text2image_key(&paths, &Invocation::new().set("cap_len", json!(1024))).unwrap();
+        assert_eq!(k, (1024, 1024, false, None, 1024));
+    }
+
+    /// The cache slot itself: a matching key must not rebuild (that is the
+    /// whole point of a resident), and a rebuild must replace what it evicted.
+    #[test]
+    fn a_matching_key_reuses_the_resident_instead_of_rebuilding() {
+        let mut builds = 0;
+        let mut slot: Option<(u32, &str)> = None;
+        let build = |slot: &mut Option<(u32, &'static str)>, key: u32, builds: &mut u32| {
+            ensure_hot(slot, key, || {
+                *builds += 1;
+                Ok("weights")
+            })
+        };
+        build(&mut slot, 1, &mut builds).unwrap();
+        build(&mut slot, 1, &mut builds).unwrap();
+        assert_eq!(builds, 1, "a matching key must reuse the resident, not reload it");
+        build(&mut slot, 2, &mut builds).unwrap();
+        assert_eq!(builds, 2);
+        assert_eq!(slot, Some((2, "weights")));
     }
 
     #[test]

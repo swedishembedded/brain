@@ -116,18 +116,24 @@ pub fn make_flow_batch(cfg: &Cfg, rope: &RopeConfig, latent: &[f64], cap: &[f64]
     }
 }
 
-/// Tokenize `prompt` with the chat template and pad/truncate to `cap_len` (the
-/// exact caption tokenization [`crate::pipeline`] uses at generation time).
-fn tokenize_pad(tok: &QwenBpe, prompt: &str, cap_len: usize) -> Vec<u32> {
+/// Tokenize `prompt` with the chat template and pad it to `cap_len`, or REFUSE
+/// when it does not fit - never train on a truncated caption, for the same
+/// reason generation never conditions on one (see
+/// [`crate::pipeline::fit_caption`]): an adapter learned from a caption's first
+/// sentence has silently learned the wrong association.
+fn tokenize_pad(tok: &QwenBpe, prompt: &str, cap_len: usize) -> Result<Vec<u32>, String> {
     let templated = tok.apply_chat_template(&[("user", prompt)], true);
     let mut tokens = tok.encode(&templated);
     if tokens.len() > cap_len {
-        tokens.truncate(cap_len);
-    } else if tokens.len() < cap_len {
-        let pad = *tokens.last().unwrap_or(&0);
-        tokens.resize(cap_len, pad);
+        let head: String = prompt.chars().take(48).collect();
+        return Err(format!("z-image lora_train: caption \"{head}...\" is {} tokens, over this run's cap_len {cap_len}; raise 'cap_len' or shorten the caption", tokens.len()));
     }
-    tokens
+    // Padding repeats the last token, unmasked, because this trainer's encoder
+    // call is the unmasked one; the generation path's masked PAD is a different
+    // contract and mixing the two would change what an adapter is trained on.
+    let pad = *tokens.last().unwrap_or(&0);
+    tokens.resize(cap_len, pad);
+    Ok(tokens)
 }
 
 /// Encode every dataset sample once: caption → Qwen features, image → DiT-space
@@ -166,7 +172,7 @@ pub fn encode_samples(
                 return Err("cancelled".into());
             }
             progress(i, n, "encoding captions (Qwen-4B int8)");
-            let tokens = tokenize_pad(&tok, &s.prompt, cap_len as usize);
+            let tokens = tokenize_pad(&tok, &s.prompt, cap_len as usize)?;
             out.push(enc.encode(&tokens).iter().map(|&x| x as f64).collect());
         }
         out
@@ -246,9 +252,21 @@ pub fn run(
     cancel: &capability::CancelToken,
     mut progress: impl FnMut(u32, u32, String),
 ) -> Result<Vec<NamedTensor>, String> {
-    if !opts.size.is_multiple_of(16) {
-        return Err("size must be a multiple of 16".into());
-    }
+    // 0. refuse an unbuildable shape FIRST, before a byte of it is sunk.
+    //
+    // Everything below is expensive and irreversible-in-cost: the dataset is
+    // loaded, every caption goes through the Qwen-4B encoder and every image
+    // through the VAE, and the ~24 GB DiT checkpoint is read - and only then
+    // does the first step's `make_flow_batch` build RoPE tables, where an
+    // out-of-range `cap_len` or `size` asserts inside `tables_for_ids` with no
+    // adapter saved. Nothing upstream catches it either: the capability
+    // layer's `ParamSpec::min`/`max` are advisory, and `ActionSpec::validate`
+    // enforces neither. So the same guards the generation paths run at their
+    // own entry belong here, at this one.
+    let zcfg = ZImageConfig::turbo();
+    crate::pipeline::check_image_size(&zcfg, opts.size, opts.size)?;
+    crate::pipeline::check_cap_len(&zcfg, opts.cap_len, 1)?;
+
     // 1. dataset
     let samples = crate::dataset::load_dir(dir, opts.size, |w| progress(0, opts.steps + 1, format!("dataset: {w}")))?;
     progress(0, opts.steps + 1, format!("loaded {} images from {}", samples.len(), dir.display()));
@@ -263,7 +281,6 @@ pub fn run(
 
     // 3. base weights → training format
     progress(0, opts.steps + 1, "loading DiT weights".into());
-    let zcfg = ZImageConfig::turbo();
     let tensors = crate::import::import_comfy(checkpoint::safetensors::read(&paths.dit).map_err(|e| format!("read dit: {e}"))?, &zcfg);
     let (lh, lw) = (opts.size / 8, opts.size / 8);
     let cfg = train_cfg(&zcfg, lh, lw, opts.cap_len);
@@ -373,6 +390,49 @@ mod tests {
         // RoPE tables sized [n_pos · head_dim/2] = [n · 64].
         assert_eq!(b.img_cos.len(), cfg.n_img() * 64);
         assert_eq!(b.cap_cos.len(), cfg.ncap * 64);
+    }
+
+    /// Paths that resolve to nothing: any error naming a file means the guard
+    /// under test did NOT run first.
+    fn unreadable_paths() -> Paths {
+        let p = |role: &str| format!("no-such-z-image-{role}");
+        Paths { dit: p("dit"), vae: p("vae"), qwen: p("qwen"), tokenizer: p("tokenizer") }
+    }
+
+    fn opts_with(size: u32, cap_len: u32) -> TrainOpts {
+        TrainOpts { steps: 1, rank: 4, lr: 1e-4, size, cap_len, seed: 0, two_gpu: false, save_path: "unused.brain".into(), ckpt_every: 0 }
+    }
+
+    /// `lora_train` had no ceiling on `cap_len` anywhere: the capability
+    /// layer's `ParamSpec::min`/`max` are advisory (`ActionSpec::validate`
+    /// never enforces them), so an impossible capacity reached `run`, which
+    /// loaded the dataset, ran every caption through the Qwen-4B encoder and
+    /// every image through the VAE, and read the ~24 GB DiT checkpoint before
+    /// the first step's `make_flow_batch` asserted inside the RoPE tables with
+    /// no adapter saved. The same guard the generation paths have must run
+    /// first, before any of that sunk work.
+    #[test]
+    fn an_unbuildable_cap_len_is_refused_before_any_dataset_or_weight_is_read() {
+        let zcfg = ZImageConfig::turbo();
+        let over = crate::pipeline::max_cap_len(&zcfg, 1) + 1;
+        let e = run(&unreadable_paths(), Path::new("no-such-dataset-dir"), &opts_with(512, over), &Default::default(), |_, _, _| {}).unwrap_err();
+        assert!(e.contains("cap_len"), "must be refused by name, got: {e}");
+        assert!(!e.contains("no-such"), "nothing may be opened before the guard runs: {e}");
+    }
+
+    /// Same for the training square: `size` was checked only for being a
+    /// multiple of 16, never against the image RoPE axes it has to fit.
+    #[test]
+    fn an_unbuildable_training_size_is_refused_before_any_dataset_or_weight_is_read() {
+        let zcfg = ZImageConfig::turbo();
+        let (mw, _) = crate::pipeline::max_image_size(&zcfg);
+        let opts = opts_with(mw + 8 * zcfg.patch_size, crate::pipeline::DEFAULT_CAP_LEN);
+        let e = run(&unreadable_paths(), Path::new("no-such-dataset-dir"), &opts, &Default::default(), |_, _, _| {}).unwrap_err();
+        assert!(e.contains(&mw.to_string()), "must name the bound, got: {e}");
+        assert!(!e.contains("no-such"), "nothing may be opened before the guard runs: {e}");
+        // and the multiple-of-16 rule it subsumes still refuses.
+        let e = run(&unreadable_paths(), Path::new("no-such-dataset-dir"), &opts_with(500, 64), &Default::default(), |_, _, _| {}).unwrap_err();
+        assert!(e.contains("16"), "{e}");
     }
 
     #[test]
