@@ -487,7 +487,20 @@ hooks/install:
 # genuinely cannot be provisioned, narrow the list explicitly and visibly
 # (`make test/full PARITY_STRICT_SUITES="..."`) rather than dropping the
 # target - a narrowed list still says which comparisons were certified.
-test/full: test test/doc test/slow test/e2e check/scripts check/spdx check/paths check/files kernels-table/check parity/strict
+#
+# `parity` (bare, not `/strict`) is in this list for a different reason: it is
+# the ONLY target here that runs the gradcheck suite under BRAIN_DEVICE=cpu.
+# `test`/`gradcheck` run on the default (Vulkan) backend only, so a model
+# whose CPU path silently diverges from its GPU path - a kernel pairing that
+# assumes a shared Params contract neither kernel actually shares, two kernel
+# table entries the CPU JIT's single function namespace collides on - stayed
+# green on every routine run and was only ever caught by someone remembering
+# to invoke `make parity` by hand. It found exactly that failure mode twice
+# in one sitting once someone finally ran it (timesfm3's RMSNorm epsilon,
+# controlnet's duplicate `scale_chan` registration - see `.agents/rules/
+# lessons.md`). Needs no external fixtures, so unlike `parity/strict` it
+# carries no narrowing knob and no "green because skipped" risk.
+test/full: test test/doc test/slow test/e2e check/scripts check/spdx check/paths check/files kernels-table/check parity parity/strict
 
 # Rank every test binary by wall time; --budget fails if any exceeds it. This is
 # what keeps the fast lane fast.
