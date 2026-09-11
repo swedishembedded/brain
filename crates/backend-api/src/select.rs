@@ -968,8 +968,37 @@ pub fn candidates(op: Op, shape: OpShape, caps: &DeviceCaps) -> Vec<KernelVarian
         // dispatch is still the caller's own shape-based choice, exactly as
         // `causal_chunk` (via `shape.k`) already disambiguates prefill from
         // decode within this one Op.
+        //
+        // M2.7's decode arm (`k = 0`): M2.1/M2.2 measured the UNSPLIT fused
+        // decode kernel (`paged_flash_decode`) losing to the triad at every
+        // batch size on a Tesla P40, so decode stayed `Reference`-only ever
+        // since. A genuinely fresh profile on THIS repo's Intel Arc Xe-LPG
+        // iGPU (decision-4: stale results from different hardware are not a
+        // blocker), interleaved min-of-N against both the triad and the
+        // unsplit kernel with a DVFS ramp
+        // (`crates/gpu-core/tests/paged_flash_decode_split_speed_bench.rs`),
+        // found the SPLIT-key two-pass kernel (`paged_flash_decode_split` ->
+        // `paged_flash_decode_combine`) a real, repeatable win over the
+        // triad ONLY at `batch (shape.m) == 1`, confirmed across three
+        // independent measurement runs at both `seq=512` and `seq=4096`
+        // (the measured ratios are recorded in this milestone's own
+        // roadmap ledger entry, not duplicated here - a number nothing
+        // re-checks is a number that goes stale). `batch == 2` was
+        // measured MIXED (a marginal win at `seq=512`, a marginal loss at
+        // `seq=4096`) and `batch >= 4` a clear, growing loss - the triad's
+        // own far larger per-score parallelism (M2.1's own root-cause
+        // finding) still wins once there is more than one sequence's
+        // independent workgroups to fill the device with. `shape.m == 1`
+        // is therefore the gate, not "decode, unconditionally" - a
+        // narrower win than prefill's, stated honestly rather than rounded
+        // up. `shape.n` reuses the SAME
+        // head_dim ceiling `paged_flash_decode`'s own `HD=128` tile has
+        // (`paged_flash_decode_split` shares that exact tile) - no `n=256`
+        // arm exists for decode (no such kernel was built; M2.5's own
+        // hd256 sibling is prefill-only).
         Op::PagedAttentionFused => match (shape.k, shape.dtype) {
             (1, Dtype::F32) if shape.n <= 128 || shape.n == 256 => vec![FusedFlash, Reference],
+            (0, Dtype::F32) if shape.m == 1 && shape.n <= 128 => vec![FusedFlash, Reference],
             _ => vec![Reference],
         },
     };

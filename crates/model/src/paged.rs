@@ -730,6 +730,8 @@ mod flash_tests {
         ("paged_decode_apply_batched", kernels::PAGED_DECODE_APPLY_BATCHED),
         ("paged_flash_decode", kernels::PAGED_FLASH_DECODE),
         ("paged_flash_decode_i8", kernels::PAGED_FLASH_DECODE_I8),
+        ("paged_flash_decode_split", kernels::PAGED_FLASH_DECODE_SPLIT),
+        ("paged_flash_decode_combine", kernels::PAGED_FLASH_DECODE_COMBINE),
     ];
 
     fn fb(x: f32) -> u32 {
@@ -834,6 +836,120 @@ mod flash_tests {
         println!("paged_flash_decode vs batched triad: worst maxabs = {worst:e}");
         assert!(worst > 0.0, "sanity: q/k/v are not all-zero, so a real match should not be a trivial 0==0");
         assert!(worst < 1e-3, "paged_flash_decode vs batched triad maxabs={worst}");
+    }
+
+    /// M2.7's split-key two-pass FlashDecode (`paged_flash_decode_split` ->
+    /// `paged_flash_decode_combine`) against the SAME three-stage batched
+    /// triad reference `paged_flash_decode_matches_batched_triad` gates
+    /// against - same scenario (shapes, GQA group, scrambled shared-pool
+    /// block tables, the `[1, 7, 8, 9, 41, 100]` lengths straddling the
+    /// kernel's own `BC=8` tile boundary), so any divergence is attributable
+    /// to the split/combine change, not a different fixture.
+    ///
+    /// `tiles_per_split = 2` (16 tokens/split) is deliberately SMALL relative
+    /// to every length in `lens` - `len=100` needs `ceil(13/2) = 7` splits,
+    /// the largest in the batch, so `n_splits = 7` is dispatched for EVERY
+    /// sequence in the batch; `len=1` (`ntiles=1`) only fills split 0, so
+    /// splits 1..6 exercise `paged_flash_decode_split`'s own documented
+    /// degenerate path (`kt0 >= ntiles`, the tile loop runs zero times) for
+    /// six of this test's fourteen (2 short-length x 6 excess-split)
+    /// combinations - not just the "one real split" case a larger
+    /// `tiles_per_split` would collapse every length in this fixture down
+    /// to.
+    ///
+    /// Same `1e-3` absolute-error bound every other fused-vs-triad gate in
+    /// this file uses (`paged_flash_decode_matches_batched_triad`'s own
+    /// comment names why: a reassociated online-softmax reduction is never
+    /// bit-exact against the triad's exact-max-then-single-pass reference) -
+    /// the split/combine two-pass merge is YET ANOTHER reassociation of the
+    /// identical reduction (per-split instead of per-tile), so the same
+    /// tolerance class applies, not a tighter or looser one.
+    #[test]
+    fn paged_flash_decode_split_matches_batched_triad() {
+        let g = gpu_core::testgpu::dev(PIPES);
+        let (nh, nkv, hd) = (4u32, 2u32, 8u32);
+        let group = nh / nkv;
+        let (hkv, hq) = (nkv * hd, nh * hd);
+        let scale = 1.0f32 / (hd as f32).sqrt();
+        let lens = [1u32, 7, 8, 9, 41, 100];
+        let batch = lens.len() as u32;
+        let bs = 4u32;
+        let num_blocks = 256u32;
+        let max_bt = 26u32; // >= ceil(100/4)
+        let cap = max_bt * bs;
+
+        let mut rng = Rng::new(29);
+        let qflat: Vec<f32> = (0..batch * hq).map(|_| rng.next_gaussian() as f32).collect();
+        let ks: Vec<Vec<f32>> = lens.iter().map(|&t| (0..t * hkv).map(|_| rng.next_gaussian() as f32).collect()).collect();
+        let vs: Vec<Vec<f32>> = lens.iter().map(|&t| (0..t * hkv).map(|_| rng.next_gaussian() as f32).collect()).collect();
+
+        let tables: Vec<Vec<u32>> = (0..batch).map(|b| (0..max_bt).map(|i| b + i * batch).collect()).collect();
+
+        let mut pk = vec![0f32; (num_blocks * bs * hkv) as usize];
+        let mut pv = vec![0f32; (num_blocks * bs * hkv) as usize];
+        for b in 0..batch as usize {
+            for tok in 0..lens[b] {
+                let phys = tables[b][(tok / bs) as usize];
+                let dst = ((phys * bs + tok % bs) * hkv) as usize;
+                let src = (tok * hkv) as usize;
+                pk[dst..dst + hkv as usize].copy_from_slice(&ks[b][src..src + hkv as usize]);
+                pv[dst..dst + hkv as usize].copy_from_slice(&vs[b][src..src + hkv as usize]);
+            }
+        }
+
+        let qb = g.storage_init("q", &qflat);
+        let poolk = g.storage_init("pk", &pk);
+        let poolv = g.storage_init("pv", &pv);
+        let btflat: Vec<u32> = (0..batch as usize).flat_map(|b| tables[b].clone()).collect();
+        let bt = g.storage((batch * max_bt) as u64);
+        g.write(&bt, &btflat);
+        let sl = g.storage(batch as u64);
+        g.write(&sl, &lens);
+
+        // --- reference: the three-stage batched triad ---
+        let sc = g.storage((batch * nh * cap) as u64);
+        let pr = g.storage((batch * nh * cap) as u64);
+        let ctx_ref_buf = g.storage((batch * hq) as u64);
+        let steps = vec![
+            g.step(0, &[&qb, &poolk, &bt, &sl, &sc], &[batch, nh, group, hd, bs, hkv, cap, max_bt, fb(scale)], batch * nh * cap),
+            g.step(1, &[&sc, &sl, &pr], &[batch, nh, cap], batch * nh),
+            g.step(2, &[&pr, &poolv, &bt, &sl, &ctx_ref_buf], &[batch, nh, group, hd, bs, hkv, cap, max_bt], batch * nh * hd),
+        ];
+        g.submit(&[], &steps);
+        let ctx_ref = g.read(&ctx_ref_buf, (batch * hq) as usize);
+
+        // --- split phase: partial (m, l, o) per (sequence, head, split) ---
+        let tiles_per_split = 2u32;
+        let bc = 8u32; // paged_flash_decode_split's own const BC
+        let max_ntiles = lens.iter().map(|&t| t.div_ceil(bc)).max().unwrap();
+        let n_splits = max_ntiles.div_ceil(tiles_per_split);
+
+        let part_m = g.storage((batch * nh * n_splits) as u64);
+        let part_l = g.storage((batch * nh * n_splits) as u64);
+        let part_o = g.storage((batch * nh * n_splits * hd) as u64);
+        let split_steps = vec![g.step(
+            5,
+            &[&qb, &poolk, &poolv, &bt, &sl, &part_m, &part_l, &part_o],
+            &[batch, nh, nkv, hd, group, bs, max_bt, n_splits, tiles_per_split],
+            batch * nh * n_splits * 64, // 64 = paged_flash_decode_split's own @workgroup_size
+        )];
+        g.submit(&[], &split_steps);
+
+        // --- combine phase: merge the n_splits partials into one context ---
+        let ctx_split_buf = g.storage((batch * hq) as u64);
+        let combine_steps = vec![g.step(
+            6,
+            &[&part_m, &part_l, &part_o, &ctx_split_buf],
+            &[batch, nh, hd, n_splits],
+            batch * nh * 128, // 128 = paged_flash_decode_combine's own @workgroup_size
+        )];
+        g.submit(&[], &combine_steps);
+        let ctx_split = g.read(&ctx_split_buf, (batch * hq) as usize);
+
+        let worst = ctx_ref.iter().zip(&ctx_split).fold(0f32, |m, (a, b)| m.max((a - b).abs()));
+        println!("paged_flash_decode_split+combine vs batched triad: worst maxabs = {worst:e} (n_splits={n_splits})");
+        assert!(worst > 0.0, "sanity: q/k/v are not all-zero, so a real match should not be a trivial 0==0");
+        assert!(worst < 1e-3, "paged_flash_decode_split+combine vs batched triad maxabs={worst}");
     }
 
     /// Whole-tensor `rel_l2` (f64-accumulated sum-of-squares ratio) - the

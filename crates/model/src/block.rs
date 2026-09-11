@@ -567,7 +567,10 @@ pub fn gqa_chunk_step(
     // is built on the same paged-attention contract those two kernels are,
     // not a different addressing scheme.
     if let Some(fused) = k.fused_prefill_hd256 {
-        if paged_attention_fused(g, true, false, head_dim) {
+        // `bsz: 0` - prefill's `k = 1` arm never reads `m` (this Op's own
+        // doc on `paged_attention_fused` names why decode's arm is the only
+        // one batch-dependent).
+        if paged_attention_fused(g, true, false, head_dim, 0) {
             steps.push(g.step(
                 fused,
                 &[q, kcache, vcache, block_ids, seq_lens, ctx],
@@ -1990,10 +1993,20 @@ pub fn paged_scores_variant(g: &Gpu, reference: usize, coop: Option<usize>, batc
 /// `run_batched_steps` itself). `head_dim` is a genuine parameter, not
 /// inferred, because this function has no model config to read it from -
 /// every caller must pass its own real head_dim explicitly.
-pub fn paged_attention_fused(g: &Gpu, causal_chunk: bool, kv_int8: bool, head_dim: u32) -> bool {
+///
+/// `bsz` (M2.7): the selector's decode arm (`k = 0`, `shape.m`) is gated on
+/// the REAL per-dispatch batch size, unlike prefill's `k = 1` arm which
+/// never reads `m` at all - decode's split-key win (`paged_flash_decode_
+/// split` -> `paged_flash_decode_combine`) only holds at `batch == 1`
+/// (`Op::PagedAttentionFused`'s own doc has the measured A/B). A
+/// `causal_chunk = true` caller may pass any value here (prefill's arm
+/// ignores `m`); a `causal_chunk = false` (decode) caller MUST pass its own
+/// real batch size, not a cached/sentinel one - decode's availability is not
+/// a load-time constant the way prefill's is.
+pub fn paged_attention_fused(g: &Gpu, causal_chunk: bool, kv_int8: bool, head_dim: u32, bsz: u32) -> bool {
     use gpu_core::select::{Dtype, KernelSelector, KernelVariant, Op, OpShape};
     let dtype = if kv_int8 { Dtype::I8 } else { Dtype::F32 };
-    let shape = OpShape { m: 0, n: head_dim, k: causal_chunk as u32, dtype };
+    let shape = OpShape { m: bsz, n: head_dim, k: causal_chunk as u32, dtype };
     gpu_core::select::DefaultSelector.select(Op::PagedAttentionFused, shape, &g.caps()) == KernelVariant::FusedFlash
 }
 

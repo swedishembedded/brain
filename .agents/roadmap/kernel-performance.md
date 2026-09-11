@@ -1501,6 +1501,212 @@ M2.3/M2.4 already split.
 
 **Commit**: one.
 
+### M2.7 - Split-key FlashDecode: a genuinely fresh profile on this Intel Arc iGPU, and a real (narrow) win
+
+Reopens the "split-key-then-combine" occupancy fix M2.1's own entry named and
+M2.5's entry explicitly deferred (that session had no P40, only an Arc iGPU +
+software `llvmpipe`) - per this ledger's own decision-4 convention, the P40
+regression M2.1/M2.4 measured for the UNSPLIT `paged_flash_decode` does not
+carry forward as a blocker to a structurally different design on different
+hardware, so this got the fresh profile decision-4 requires, not a
+skip-by-precedent.
+
+**The kernel.** Two new files, not an edit of the disabled
+`paged_flash_decode.wgsl` (left untouched, still unreachable through the
+selector at every shape a real model uses it at - M2.2's bf16/int8 tiers
+inherit its own non-win unchanged, same as before this milestone):
+`paged_flash_decode_split.wgsl` runs the SAME per-workgroup algorithm
+`paged_flash_decode` already uses (`BC=8` key tiles, `LANES=8`-way head_dim
+split, online-softmax) but bounded to a `tiles_per_split`-tile RANGE of one
+sequence's key history, writing a PARTIAL `(m, l, o)` state instead of a
+normalised context; `paged_flash_decode_combine.wgsl` merges `n_splits`
+partials per (sequence, head) with the textbook two-term online-softmax
+merge identity (the same reassociation `paged_flash_decode`'s own per-tile
+rescale already is, one level up - no barrier, no shared memory, so unlike
+its `@cpu no` split-phase sibling this one is `@cpu yes`). This is the same
+two-pass split/reduce shape `flash-decoding` (Dao et al.) and vLLM's
+`paged_attention_v2` use for the identical low-batch-occupancy reason; no
+code from either is transcribed (both headers say so explicitly), only the
+same well-known merge identity, independently re-derived from this repo's
+own existing per-tile update. `tiles_per_split` is a RUNTIME `Params` field,
+not a compile constant - it changes the tile-loop trip count only, never the
+~8.8 KiB shared-memory footprint `paged_flash_decode` already has, so
+sweeping it needs no recompile. `make kernels-table` / `gen-kernel-table.py
+--check` clean (both kernels' `@cpu`/`@gpu`/`@opt` are mechanically derived
+from their own barrier count and `var<workgroup>` presence, not hand-typed).
+
+**Correctness gate**: `crates/model/src/paged.rs::flash_tests::
+paged_flash_decode_split_matches_batched_triad` - same fixture
+`paged_flash_decode_matches_batched_triad` (M2.1) uses (GQA, scrambled
+shared-pool block tables, `lens = [1, 7, 8, 9, 41, 100]` straddling the
+kernel's own `BC=8` tile boundary), `tiles_per_split = 2` chosen deliberately
+SMALL so `len=100` needs `n_splits = 7` - dispatched for every sequence in
+the batch, so the short lengths (`len=1`, `ntiles=1`) exercise the split
+kernel's own documented degenerate path (`kt0 >= ntiles`, the tile loop runs
+zero times) for six of fourteen length/split combinations, not just the
+"one real split" case a larger `tiles_per_split` would collapse every length
+down to. Same `1e-3` absolute-error bound every fused-vs-triad gate in this
+file uses. Measured maxabs on this box: `2.3841858e-7` on both `wgpu` and
+`BRAIN_DEVICE=vulkan` (this kernel's two GPU backends, `@cpu no` deliberately
+excluding the CPU JIT) - identical to M2.1's own recorded value for the
+UNSPLIT kernel against the same triad, exactly what a correct reassociation
+of the same reduction should produce. **Mutation-verified**: dropping the
+combine kernel's `corr_i` rescale factor from its `l` update
+(`l = l * corr + pl` instead of `l = l * corr + pl * corr_i`) reproduces a
+`maxabs = 0.765` failure immediately; reverting restores the `2.38e-7` pass.
+
+**Measurement: interleaved round-robin min-of-20, `poll_wait`-bracketed, a
+3 s DVFS ramp before any shape is timed** - `crates/gpu-core/tests/
+paged_flash_decode_split_speed_bench.rs` (`kq_gemv_reg_speed_bench.rs`'s own
+`ramp` verbatim), following `bench_matmul.rs`'s own `time_arms` discipline
+(triad/flash/split round-robin, not back-to-back per-arm batches - this
+box's own documented run-to-run variance, up to 4.6x, otherwise attributes
+drift entirely to whichever arm runs last). Three independent process runs
+at Qwen3-0.6B's real decode-head shape (`n_heads=16, n_kv_heads=8,
+head_dim=128`), `desired_splits=8` (`Engine::decode_split_shape`'s own
+choice - a FIXED split count, not a fixed tokens-per-split, so the boost
+does not mechanically shrink as `cap` grows), swept over `batch in
+{1,2,4,8,32,128}` x `seq in {512,4096}`:
+
+```
+run (clean, --test-threads=1):
+seq= 512 batch=  1  triad  11.2604 ms  flash  24.0238 ms  split   8.9006 ms   split/triad 0.79x  split/flash 0.37x
+seq= 512 batch=  8  triad  12.2594 ms  flash  38.4630 ms  split  51.3529 ms   split/triad 4.19x  split/flash 1.34x
+seq= 512 batch= 32  triad  38.8361 ms  flash 128.0296 ms  split 196.9189 ms   split/triad 5.07x  split/flash 1.54x
+seq= 512 batch=128  triad   7.4176 ms  flash  33.5704 ms  split  32.1147 ms   split/triad 4.33x  split/flash 0.96x
+seq=4096 batch=  1  triad   7.7591 ms  flash  20.4009 ms  split   4.6796 ms   split/triad 0.60x  split/flash 0.23x
+seq=4096 batch=  8  triad  10.3004 ms  flash  29.8818 ms  split  24.7515 ms   split/triad 2.40x  split/flash 0.83x
+seq=4096 batch= 32  triad  10.8434 ms  flash  50.7041 ms  split  44.9090 ms   split/triad 4.14x  split/flash 0.89x
+seq=4096 batch=128  triad  36.8555 ms  flash 186.8712 ms  split 171.5041 ms   split/triad 4.65x  split/flash 0.92x
+
+second clean run, batch in {1,2,4,8,32,128}:
+seq= 512 batch=  1  triad   0.6763 ms  flash   1.5659 ms  split   0.5599 ms   split/triad 0.83x  split/flash 0.36x
+seq= 512 batch=  2  triad   0.9941 ms  flash   1.8695 ms  split   0.8085 ms   split/triad 0.81x  split/flash 0.43x
+seq= 512 batch=  4  triad   1.1496 ms  flash   2.1475 ms  split   1.5872 ms   split/triad 1.38x  split/flash 0.74x
+seq= 512 batch=  8  triad   1.3428 ms  flash   3.1747 ms  split   2.6469 ms   split/triad 1.97x  split/flash 0.83x
+seq=4096 batch=  1  triad   7.1437 ms  flash  18.4824 ms  split   4.2182 ms   split/triad 0.59x  split/flash 0.23x
+seq=4096 batch=  2  triad   8.5072 ms  flash  20.9995 ms  split   9.2102 ms   split/triad 1.08x  split/flash 0.44x
+seq=4096 batch=  4  triad  11.5499 ms  flash  27.7289 ms  split  19.6166 ms   split/triad 1.70x  split/flash 0.71x
+```
+
+Absolute times vary run to run by as much as 10x on this shared, often-loaded
+box (documented elsewhere in this ledger) - the RATIOS, computed within one
+interleaved round-robin pass, are the load-bearing signal, and they agree
+across every run: **`batch == 1` is a real, repeatable win** (`0.59x-0.83x`
+of the triad, `0.23x-0.43x` of the disabled unsplit kernel, at BOTH `seq=512`
+and `seq=4096`), **`batch == 2` is genuinely mixed** (a marginal win at
+`seq=512`, a marginal loss at `seq=4096` - `0.81x`/`1.08x`), and **`batch >=
+4` is a clear, growing loss** (`1.38x` at `batch=4` up to `5.07x` at
+`batch=32`). A separate granularity sweep at the worst-case shape
+(`batch=1, seq=4096`, the longest serialised tile walk) across
+`desired_splits in {2,4,8,16,32,64}` found the win largely INSENSITIVE to the
+exact split count in that regime (`split/triad` between `0.41x` and `1.27x`,
+most settling `0.65x-0.77x`) - `desired_splits=8` is a reasonable default,
+not a value needing its own exhaustive per-shape tuning to land this.
+
+**Root cause, matching M2.1's own diagnosis rather than contradicting it.**
+M2.1 found the unsplit kernel loses because ONE workgroup per (sequence,
+head) serialises `cap/BC` barrier-synced tile iterations with too little
+total parallelism to hide global-memory latency behind, at every batch size
+tried (even `batch=128`, since the triad's OWN parallelism scales with batch
+too - `batch*n_heads*cap/16` score-kernel workgroups against decode's
+`batch*n_heads`). Splitting the key range multiplies decode's own workgroup
+count by `n_splits` REGARDLESS of batch, so at `batch=1` (the true
+worst-occupancy case - as few workgroups as one sequence-head pair can ever
+supply) it closes most of that parallelism gap; at `batch>=4` the triad's OWN
+parallelism has already grown past the point where more decode workgroups
+help, and the split kernel's extra combine dispatch (plus the doubled
+dispatch count generally) is pure overhead on top of a regime the triad
+already wins comfortably.
+
+**Wired in, gated narrowly (`bsz == 1` exactly), not "decode,
+unconditionally".** `Op::PagedAttentionFused`'s selector gained a `(0,
+Dtype::F32)` arm (`k=0` is decode, `k=1` is causal-chunk prefill - the SAME
+disambiguation M2.1-M2.6 already established) requiring `shape.m == 1`
+(this Op's decode arm is the first to read `shape.m` at all - prefill's own
+arm never has) and `shape.n <= 128` (no `head_dim=256` decode kernel was
+built - M2.5's hd256 sibling is prefill-only). `model::block::
+paged_attention_fused` gained a `bsz: u32` parameter so a `causal_chunk =
+false` (decode) caller passes its own REAL per-dispatch batch size, not a
+load-time sentinel the way prefill's availability check does (decode's
+availability is genuinely per-step, since `bsz` varies as sessions join/leave
+a serving engine). `qwen3::serve::Engine::batched_tape`'s decode branch now
+asks this ONE selector call and, on `true`, dispatches `paged_flash_decode_
+split` -> `paged_flash_decode_combine` (two dispatches, no `scores`/`probs`
+slab) against new `Scratch::{part_m,part_l,part_o}` buffers - sized for
+`bsz == 1` only (`Engine::decode_split_shape(cap)`, the ONE place the
+`n_splits`/`tiles_per_split` arithmetic lives, shared by construction-time
+sizing and dispatch-time parameters so they cannot drift apart), since
+`bsz == 1` is the only batch size the selector's own gate ever answers `true`
+at. `Scratch::{scores,probs}` is NOT shrunk (that comment's stale claim -
+"decode never gets a fused kernel" - is corrected in place): every OTHER
+batch size the same engine serves still runs the triad and still needs the
+full slab, so `bsz == 1` only skips WRITING into it that one step, never
+frees it.
+
+**Dispatch-count pin, both directions.**
+`decode_bsz_one_dispatches_the_split_key_fused_kernel_not_the_triad` (new):
+`bsz=1` decode dispatches exactly one `paged_flash_decode_split` and one
+`paged_flash_decode_combine` PER LAYER, zero triad kernels.
+`decode_regime_above_bsz_one_never_dispatches_a_fused_kernel` (renamed from
+`decode_regime_never_dispatches_the_fused_kernel`, its own pre-M2.7 name no
+longer a universally true claim): `bsz=3` still dispatches zero fused
+kernels of EITHER kind (prefill's or decode's split-key pair), triad only -
+pinning that M2.1's original finding still holds above `bsz=1`, not silently
+relaxed by this milestone.
+
+**Verified**: `cargo test --release --offline -p brain-model --lib
+paged::flash_tests::paged_flash_decode_split_matches_batched_triad` green
+(`wgpu` AND `BRAIN_DEVICE=vulkan`, maxabs `2.3841858e-7` on both). `cargo
+test --release --offline -p brain-model --lib paged::` (this crate's whole
+paged-attention suite, one binary, per this repo's own "small isolated
+tests" preference): 16/16 green. `cargo test --release --offline -p
+brain-qwen3 --lib`: 138/141 green - the 3 failures are the pre-existing
+`max_buffer_size`-ceiling tests M2.6's own entry already confirmed unrelated
+to attention wiring, reconfirmed identical here (the ONLY count that moved
+against M2.6's own 137/140 is this milestone's own new test). Targeted runs
+of the four dispatch-shape tests (`decode_bsz_one_dispatches_the_split_key_
+fused_kernel_not_the_triad`, `decode_regime_above_bsz_one_never_dispatches_
+a_fused_kernel`, `causal_chunk_fp32_kv_dispatches_the_fused_kernel_not_the_
+triad`, `causal_chunk_int8_kv_still_uses_the_triad`) individually green.
+**Mutation-verified, both new tests**: the kernel-level gate's mutation is
+recorded above; for the dispatch-count pin, flipping the selector's decode
+gate from `shape.m == 1` to `shape.m == 999` reproduces `decode_bsz_one_
+dispatches_the_split_key_fused_kernel_not_the_triad` failing immediately
+(`left: 0, right: 2` - zero split dispatches where two were expected);
+reverting restores the green result. `cargo clippy --release --offline -p
+brain-kernels -p brain-model -p brain-qwen3 -p brain-backend-api -p
+brain-gpu-core --all-targets --all-features -- -D warnings` clean - catching
+and fixing, on the spot, one genuinely pre-existing `clippy::type_
+complexity` violation in `crates/gpu-core/tests/step_cache.rs` (a file this
+milestone otherwise never touches) that `--all-targets` on `brain-gpu-core`
+surfaced only because this milestone's own new speed-bench test lives in
+that same crate. `python3 scripts/spdx/check.py` clean on every new/touched
+file. `make kernels-table` / `gen-kernel-table.py --check` clean (473
+kernels). `bash scripts/gates/check-kernel-selection.sh` clean (30 flagged
+kernels, all 49 allow-listed, no new unallowed violation). `bash
+scripts/gates/check-no-doc-citations.sh` clean. `cargo test --release
+--offline -p brain-wgsl-cpu --test compile_all` clean (both new kernels
+parse under the CPU JIT, as every kernel in the catalogue must).
+
+**Killed, narrower than the headline**: a decode-shaped win at ANY batch
+size (M2.1's own open question) is NOT what this measured - `batch >= 2` is
+confirmed, not merely unconfirmed, a loss or a wash on this hardware too;
+only `batch == 1` lands. **Not attempted**: wiring this into `qwen35`/
+`qwen35moe`/`deepseek2`/`glmdsa`'s own decode paths - none of them route
+decode through `Op::PagedAttentionFused` at all today (only `qwen3::serve`
+and `model::block::gqa_chunk_step`'s PREFILL arm call `paged_attention_
+fused`; no decode-step call site exists outside `qwen3::serve`), so there is
+nothing this milestone's wiring could extend there without first giving
+those models the same selector call `qwen3::serve` already had from M2.4 - a
+separate, real follow-up, not silently skipped. An int8-KV decode tier
+(`paged_flash_decode_i8`, M2.2) was NOT re-measured with the split-key
+design - M2.2's own caution ("occupancy not independently re-confirmed for
+either sibling") still applies unchanged to a hypothetical split-i8 variant,
+which was not built.
+
+**Commit**: one.
+
 ### M3.2 - Device admission head, and `PagedDecoder::admit_greedy`/`admit_topk`
 
 `qwen3::serve::Engine` kept a SECOND, host-only copy of the LM head
@@ -6105,13 +6311,20 @@ entirely (correctness-gated, `1e-3` bound, same as M2.3), but is NOT wired
 into `qwen35::serve` yet - that needs its own selector-shape work and
 `qwen35`-side gradcheck re-verification, named as a follow-up in M2.5's own
 entry, the same split M2.3/M2.4 already used for the HD=128 kernel. Decode's
-"split-key-then-combine" occupancy fix M2.1 named and this campaign's own
-W4b asked to reopen was NOT attempted (M2.5's own entry): the box available
-for that session had no Tesla P40 (an Intel Arc iGPU + `llvmpipe` software
-Vulkan only), and W4b's own hard bar requires measuring against this
-ledger's own hardware to mean anything - a design note for whoever next has
-that hardware is filed in M2.5's own entry rather than a fabricated or
-non-comparable number. **Phase 4 (M4.1-M4.3) is closed** - fused QKV/gate-up, fused
+"split-key-then-combine" occupancy fix M2.1 named was NOT attempted at M2.5
+(that session had no Tesla P40, an Intel Arc iGPU + `llvmpipe` software
+Vulkan only, and W4b's own hard bar requires measuring against this
+ledger's own hardware to mean anything). **M2.7 picked it up on this exact
+iGPU and found a real, narrow win**: `paged_flash_decode_split` ->
+`paged_flash_decode_combine` beats the triad ONLY at `bsz == 1`
+(`0.59x-0.83x` its time, repeatable across independent runs) - `bsz >= 2` is
+a confirmed loss or wash, not merely unconfirmed, so `Op::PagedAttentionFused`
+gates it at `shape.m == 1` exactly and `qwen3::serve` dispatches it only at
+that one batch size (M2.7's own entry has the full A/B and the wiring).
+`qwen35`/`qwen35moe`/`deepseek2`/`glmdsa` still have no decode-side
+`Op::PagedAttentionFused` call site at all, so none of them can reach this
+kernel yet - a separate, real follow-up M2.7's own entry names, not silently
+skipped. **Phase 4 (M4.1-M4.3) is closed** - fused QKV/gate-up, fused
 QK-norm+RoPE+KV-append, and fused RMSNorm+int8 activation quant, each a
 kept (not killed) real dispatch-count and per-kernel device-time reduction
 with a correspondingly modest whole-pass effect at this hardware/shape,

@@ -49,11 +49,15 @@ const MISS_PIPES: &[(&str, &str)] = &[("add2", kernels::ADD2), ("axpy", kernels:
 const ADD2: usize = 0;
 const N: usize = 64;
 
+/// A named handle factory - `Gpu` is not `Clone`, so each device is a
+/// closure rebuilding it on demand rather than a stored instance.
+type DeviceFactory = (&'static str, Box<dyn Fn() -> Gpu>);
+
 /// Both backends, as handle factories over `pipes`: `Gpu` is not `Clone`, and
 /// the default device's handle comes from the pool rather than a fresh
 /// `Gpu::new` (which deadlocks the driver under `--test-threads`).
-fn devices(pipes: &'static [(&'static str, &'static str)]) -> Vec<(&'static str, Box<dyn Fn() -> Gpu>)> {
-    let mut v: Vec<(&'static str, Box<dyn Fn() -> Gpu>)> = Vec::new();
+fn devices(pipes: &'static [(&'static str, &'static str)]) -> Vec<DeviceFactory> {
+    let mut v: Vec<DeviceFactory> = Vec::new();
     if std::env::var("MOE_SKIP_GPU_TESTS").is_err() {
         v.push(("default", Box::new(move || gpu_core::testgpu::dev(pipes))));
     } else {

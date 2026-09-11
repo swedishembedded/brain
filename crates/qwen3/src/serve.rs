@@ -138,6 +138,14 @@ const EMBED_TILE: usize = 37;
 // reason; this ports it here, generalised to `m > 1` rows (a batched decode
 // step's `bsz`, not just a single decode row).
 const MATMUL_TILE: usize = 38;
+// M2.7: split-key two-pass FlashDecode - `paged_flash_decode_split` writes a
+// PARTIAL online-softmax state per (sequence, head, key-split),
+// `paged_flash_decode_combine` merges them into the normalised context. Live
+// ONLY at `bsz == 1` (`Op::PagedAttentionFused`'s own doc has the measured
+// A/B: a real, repeatable win over the triad there, a clear loss at
+// `bsz >= 4`) - see `Engine::batched_tape`'s own decode dispatch.
+const PAGED_FLASH_DECODE_SPLIT: usize = 39;
+const PAGED_FLASH_DECODE_COMBINE: usize = 40;
 
 const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -179,6 +187,8 @@ const PIPELINES: &[(&str, &str)] = &[
     ("kv_block_scatter", kernels::KV_BLOCK_SCATTER),
     ("embed_tile", kernels::EMBED_TILE),
     ("matmul_tile", kernels::MATMUL_TILE),
+    ("paged_flash_decode_split", kernels::PAGED_FLASH_DECODE_SPLIT),
+    ("paged_flash_decode_combine", kernels::PAGED_FLASH_DECODE_COMBINE),
 ];
 
 /// The `model::ops::Ops` façade's required kernel set (B7), registered on a
@@ -426,10 +436,13 @@ pub fn kv_pool_bytes(cfg: &QwenConfig, block_size: u32, num_blocks: u32, kv_int8
 /// Device bytes `Scratch::{scores,probs}` costs at this sizing (M2.4) - the
 /// single largest serving scratch buffer before this milestone (this
 /// campaign's own audit finding). Decode's own worst case (`max_batch *
-/// n_heads * cap`) is UNCONDITIONAL: decode never gets `paged_flash_prefill`'s
-/// fused kernel (`Op::PagedAttentionFused`'s own doc - M2.1/M2.2's own
-/// measured non-win for the decode-shaped fused kernels, inherited at every
-/// dtype). Causal-chunk prefill's own worst case (`max_prefill^2 * n_heads`,
+/// n_heads * cap`) is UNCONDITIONAL: even after M2.7 wired a fused decode
+/// kernel in at `bsz == 1` (`Op::PagedAttentionFused`'s own doc has the
+/// measured A/B), `Scratch::{scores,probs}` still has to cover every OTHER
+/// batch size the SAME engine serves (`bsz >= 2` still runs the triad, which
+/// still needs the full `[bsz, nh, cap]` slab) - `bsz == 1` never shrinks
+/// this buffer, it only skips writing into it that one step. Causal-chunk
+/// prefill's own worst case (`max_prefill^2 * n_heads`,
 /// the `[nh,N,N]` shape this function's own call site originally derived it
 /// from) is only shed when `fused_prefill_available` - the SAME condition
 /// `run_batched_steps`'s own dispatch gates on
@@ -449,6 +462,24 @@ pub fn paged_attn_scratch_bytes(cfg: &QwenConfig, max_batch: u32, max_prefill: u
         (b * nh * cap as u64).max(max_prefill as u64 * max_prefill as u64 * nh)
     };
     words * 2 * 4 // scores + probs, 4 bytes/word
+}
+
+/// M2.7: `(n_splits, tiles_per_split)` for `paged_flash_decode_split`'s key
+/// range at this engine's `cap` - the ONE place this arithmetic lives, so
+/// `Engine::from_map_with_gpu`'s scratch sizing and `Engine::batched_tape`'s
+/// dispatch parameters can never drift apart (the same discipline
+/// `kv_pool_words` already uses for the KV pool). `desired_splits = 8`
+/// targets a roughly FIXED split count regardless of `cap` (not a fixed
+/// tokens-per-split, which would silently shrink the occupancy boost as
+/// `cap` grows) - the same choice `paged_flash_decode_split_speed_bench.rs`'s
+/// own main sweep measured this milestone's A/B with.
+fn decode_split_shape(cap: u32) -> (u32, u32) {
+    const BC: u32 = 8; // paged_flash_decode_split's own const BC
+    const DESIRED_SPLITS: u32 = 8;
+    let ntiles = cap.div_ceil(BC).max(1);
+    let tiles_per_split = ntiles.div_ceil(DESIRED_SPLITS).max(1);
+    let n_splits = ntiles.div_ceil(tiles_per_split).max(1);
+    (n_splits, tiles_per_split)
 }
 
 /// Whether `cfg` can take int8 KV at all: the append kernels pack 4 int8
@@ -502,6 +533,13 @@ struct Scratch {
     xn_final: DeviceBuffer,
     scores: DeviceBuffer,
     probs: DeviceBuffer,
+    /// M2.7: `paged_flash_decode_split`'s partial online-softmax state,
+    /// sized for `bsz == 1` only (`[n_heads, n_splits]`/`[n_heads, n_splits,
+    /// head_dim]`) - the ONLY batch size `Op::PagedAttentionFused`'s decode
+    /// arm ever picks the fused kernel at, per [`decode_split_shape`].
+    part_m: DeviceBuffer,
+    part_l: DeviceBuffer,
+    part_o: DeviceBuffer,
     // per-step metadata (uploaded each iteration)
     tok_buf: DeviceBuffer,
     pos_buf: DeviceBuffer,
@@ -777,6 +815,7 @@ impl Engine {
         // bytes/word" to recover the per-buffer WORD count `st` (below) wants.
         let scratch_bytes_val = paged_attn_scratch_bytes(&cfg, max_batch, max_prefill, cap, fused_prefill_available);
         let bcap = scratch_bytes_val / 2 / 4;
+        let (decode_split_n_splits, _) = decode_split_shape(cap);
         let st = |x: u64| gpu.storage(x);
 
         let mut res = Vec::new();
@@ -839,6 +878,9 @@ impl Engine {
             xn_final: st(b * d),
             scores: st(bcap),
             probs: st(bcap),
+            part_m: st(cfg.n_heads as u64 * decode_split_n_splits as u64),
+            part_l: st(cfg.n_heads as u64 * decode_split_n_splits as u64),
+            part_o: st(cfg.n_heads as u64 * decode_split_n_splits as u64 * cfg.head_dim as u64),
             tok_buf: st(b),
             pos_buf: st(b),
             seqlen_buf: st(b),
@@ -1844,8 +1886,8 @@ impl Engine {
                 // `self.pool_k[l]` gets the same values at their paged slot.
                 self.qk_norm_rope_append(&mut s, &sc.k_pre, w(&p("attn.k_norm.weight")), &sc.k, &self.pool_k[l], hd, nkv, b * nkv, theta, bs);
                 s.push(g.step(KV_APPEND_B, &[&sc.v, &sc.blk_buf, &sc.off_buf, &self.pool_v[l]], &[b, hkv, bs], b * hkv));
-                // M2.4: whole-triad-vs-single-fused-dispatch choice, through
-                // `Op::PagedAttentionFused` (a SEPARATE Op from
+                // M2.4/M2.7: whole-triad-vs-single-fused-dispatch choice,
+                // through `Op::PagedAttentionFused` (a SEPARATE Op from
                 // `Op::PagedAttention` below - see its own doc for why),
                 // factored into `model::block::paged_attention_fused` rather
                 // than inlined here - `no_kernel_names.rs`'s own gate bans
@@ -1853,8 +1895,15 @@ impl Engine {
                 // enum directly, the same reason `paged_scores_variant`
                 // below already lives in `model::block` instead of here. KV
                 // storage dtype is always F32 in this branch (the `kv_int8`
-                // arm above never reaches here).
-                if model::block::paged_attention_fused(g, causal_chunk, false, hd) {
+                // arm above never reaches here). One selector call either
+                // way (`causal_chunk` decides which PHYSICAL kernel(s) a
+                // `true` answer means, per that Op's own doc - prefill's
+                // single fused dispatch vs decode's split-key PAIR) rather
+                // than asking twice, since the selector is pure per
+                // `(Op, OpShape)` but a call still costs a `DeviceCaps`
+                // filter.
+                let fused = model::block::paged_attention_fused(g, causal_chunk, false, hd, b);
+                if fused && causal_chunk {
                     // `paged_flash_prefill` (M2.3): one dispatch per (head,
                     // query-tile), no `scores`/`probs` at all - BR=64 is the
                     // kernel's own tile size, @workgroup_size(256) its own
@@ -1866,6 +1915,24 @@ impl Engine {
                         &[b, nh, nkv, hd, group, bs, mbt],
                         nh * ntiles_q * 256,
                     ));
+                } else if fused {
+                    // M2.7: split-key FlashDecode - the selector's decode
+                    // arm only ever answers `true` at `bsz == 1` (`Op::
+                    // PagedAttentionFused`'s own doc has the measured A/B:
+                    // a real, repeatable win there, a clear loss at
+                    // `bsz >= 4`), so `sc.part_{m,l,o}` (sized for `bsz == 1`
+                    // at construction, `Engine::decode_split_shape`) are
+                    // always wide enough here. Two dispatches replace the
+                    // triad's three, and neither materialises a
+                    // `[bsz, nh, cap]` scores/probs slab.
+                    let (n_splits, tiles_per_split) = decode_split_shape(cap);
+                    s.push(g.step(
+                        PAGED_FLASH_DECODE_SPLIT,
+                        &[&sc.q, &self.pool_k[l], &self.pool_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.part_m, &sc.part_l, &sc.part_o],
+                        &[b, nh, nkv, hd, group, bs, mbt, n_splits, tiles_per_split],
+                        b * nh * n_splits * 64,
+                    ));
+                    s.push(g.step(PAGED_FLASH_DECODE_COMBINE, &[&sc.part_m, &sc.part_l, &sc.part_o, &sc.ctx], &[b, nh, hd, n_splits], b * nh * 128));
                 } else {
                     // One workgroup per score where the device runs workgroup
                     // reductions: the per-element kernel's lanes are `kv_stride`
@@ -5138,8 +5205,14 @@ mod tests {
         assert_eq!(triad, 0, "the triad must not run when the fused kernel does");
     }
 
+    /// M2.1's own finding (the unsplit fused decode kernel never wins) still
+    /// holds at every `bsz` M2.7's fresh profile did NOT find a split-key win
+    /// at (`bsz >= 2` - see `Op::PagedAttentionFused`'s own doc for the
+    /// measured A/B) - `bsz == 1` is `decode_bsz_one_dispatches_the_split_
+    /// key_fused_kernel_not_the_triad` below, a different regime with a
+    /// different expected dispatch, not a relaxation of this one.
     #[test]
-    fn decode_regime_never_dispatches_the_fused_kernel() {
+    fn decode_regime_above_bsz_one_never_dispatches_a_fused_kernel() {
         let cfg = QwenConfig::tiny();
         let map = tiny_weights(&cfg);
         let eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 64, 4, 8, 32, false, false);
@@ -5147,16 +5220,46 @@ mod tests {
         // `causal_chunk_metadata`'s own construction happens to build valid
         // decode metadata too (one row per position, its own block), which is
         // exactly the point: only the CALL SITE's own `causal_chunk` flag
-        // decides the regime, not anything inferable from the shape alone
-        // (M2.1's own finding: the fused decode kernel never wins here).
+        // decides the regime, not anything inferable from the shape alone.
+        // `cc = 3` (bsz = 3): deliberately ABOVE the split-key kernel's own
+        // `bsz == 1` gate, so this pins the "still no fused kernel" regime
+        // distinctly from the new `bsz == 1` one.
         let cc = 3u32;
         let (positions, seqlens, blocks, offsets, bt) = causal_chunk_metadata(cc);
         let tokens: Vec<u32> = (0..cc).map(|i| i % cfg.vocab).collect();
         let (steps, _) = eng.run_batched_steps(cc, Input::Tokens(&tokens), &positions, &seqlens, &blocks, &offsets, &bt, false);
         let kinds: Vec<usize> = steps.iter().filter_map(|s| s.meta().map(|m| m.kernel)).collect();
-        assert_eq!(kinds.iter().filter(|&&k| k == PAGED_FLASH_PREFILL).count(), 0, "decode must never pick the fused kernel");
+        assert_eq!(kinds.iter().filter(|&&k| k == PAGED_FLASH_PREFILL).count(), 0, "decode must never pick the prefill fused kernel");
+        assert_eq!(kinds.iter().filter(|&&k| k == PAGED_FLASH_DECODE_SPLIT || k == PAGED_FLASH_DECODE_COMBINE).count(), 0, "bsz=3 must not pick the split-key decode kernel (M2.7's own gate is bsz==1 only)");
         let triad = kinds.iter().filter(|&&k| k == SCORES_B || k == SCORES_B_WG || k == SOFTMAX_B || k == APPLY_B).count();
         assert!(triad > 0, "decode must still run the triad");
+    }
+
+    /// M2.7: `bsz == 1` decode dispatches the split-key fused kernel PAIR
+    /// (`paged_flash_decode_split` -> `paged_flash_decode_combine`, one of
+    /// each per layer) instead of the triad - the dispatch-count pin this
+    /// milestone's own gate requires, matching `causal_chunk_fp32_kv_
+    /// dispatches_the_fused_kernel_not_the_triad`'s own idiom for prefill.
+    /// The kernel-level numerical agreement is already gated separately
+    /// (`model::paged::flash_tests::paged_flash_decode_split_matches_
+    /// batched_triad`); this test's whole job is proving `batched_tape`
+    /// actually PICKS the split-key pair at this one batch size.
+    #[test]
+    fn decode_bsz_one_dispatches_the_split_key_fused_kernel_not_the_triad() {
+        let cfg = QwenConfig::tiny();
+        let map = tiny_weights(&cfg);
+        let eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 64, 4, 8, 32, false, false);
+        let cc = 1u32;
+        let (positions, seqlens, blocks, offsets, bt) = causal_chunk_metadata(cc);
+        let tokens: Vec<u32> = (0..cc).map(|i| i % cfg.vocab).collect();
+        let (steps, _) = eng.run_batched_steps(cc, Input::Tokens(&tokens), &positions, &seqlens, &blocks, &offsets, &bt, false);
+        let kinds: Vec<usize> = steps.iter().filter_map(|s| s.meta().map(|m| m.kernel)).collect();
+        let split = kinds.iter().filter(|&&k| k == PAGED_FLASH_DECODE_SPLIT).count();
+        let combine = kinds.iter().filter(|&&k| k == PAGED_FLASH_DECODE_COMBINE).count();
+        assert_eq!(split, cfg.n_layers as usize, "one split dispatch per layer, bsz=1 decode");
+        assert_eq!(combine, cfg.n_layers as usize, "one combine dispatch per layer, bsz=1 decode");
+        let triad = kinds.iter().filter(|&&k| k == SCORES_B || k == SCORES_B_WG || k == SOFTMAX_B || k == APPLY_B).count();
+        assert_eq!(triad, 0, "the triad must not run when the split-key fused kernel does");
     }
 
     #[test]

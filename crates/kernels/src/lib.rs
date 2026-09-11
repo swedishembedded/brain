@@ -732,6 +732,10 @@ pub const PAGED_DECODE_SCORES_WG: &str = include_str!("../wgsl/paged_decode_scor
 pub const PAGED_FLASH_DECODE: &str = include_str!("../wgsl/paged_flash_decode.wgsl");
 /// `wgsl/paged_flash_decode_i8.wgsl`
 pub const PAGED_FLASH_DECODE_I8: &str = include_str!("../wgsl/paged_flash_decode_i8.wgsl");
+/// `wgsl/paged_flash_decode_split.wgsl`
+pub const PAGED_FLASH_DECODE_SPLIT: &str = include_str!("../wgsl/paged_flash_decode_split.wgsl");
+/// `wgsl/paged_flash_decode_combine.wgsl`
+pub const PAGED_FLASH_DECODE_COMBINE: &str = include_str!("../wgsl/paged_flash_decode_combine.wgsl");
 /// `wgsl/paged_flash_prefill.wgsl`
 pub const PAGED_FLASH_PREFILL: &str = include_str!("../wgsl/paged_flash_prefill.wgsl");
 /// `wgsl/paged_flash_prefill_hd256.wgsl`
@@ -1337,6 +1341,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("paged_decode_scores_wg", PAGED_DECODE_SCORES_WG),
     ("paged_flash_decode", PAGED_FLASH_DECODE),
     ("paged_flash_decode_i8", PAGED_FLASH_DECODE_I8),
+    ("paged_flash_decode_split", PAGED_FLASH_DECODE_SPLIT),
+    ("paged_flash_decode_combine", PAGED_FLASH_DECODE_COMBINE),
     ("paged_flash_prefill", PAGED_FLASH_PREFILL),
     ("paged_flash_prefill_hd256", PAGED_FLASH_PREFILL_HD256),
     ("paged_kv_append", PAGED_KV_APPEND),
