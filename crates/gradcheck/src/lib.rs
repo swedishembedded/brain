@@ -93,7 +93,7 @@ pub use deepseekocr2::check_deepseekocr2;
 /// `Timesfm3Train`, not the blanket `model::Model` impl: that trait is
 /// LM-shaped (`vocab()`/`block_size()`) and this is a forecaster.
 pub mod timesfm3;
-pub use timesfm3::{check_timesfm3, check_timesfm3_one_layer};
+pub use timesfm3::{check_timesfm3, check_timesfm3_lora, check_timesfm3_one_layer};
 
 /// A model the checker can drive: a fixed batch must already be set.
 pub trait CheckModel {

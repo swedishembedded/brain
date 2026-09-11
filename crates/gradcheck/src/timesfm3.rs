@@ -115,7 +115,7 @@ use std::cell::Cell;
 use data::rng::Rng;
 
 use timesfm3::config::Timesfm3Config;
-use timesfm3::train::{Timesfm3Train, TRAIN_PIPELINES};
+use timesfm3::train::{LoraCfg, Timesfm3Train, TRAIN_PIPELINES};
 
 use crate::{directional_check, CheckModel, Report};
 
@@ -143,20 +143,52 @@ impl Timesfm3Harness {
     /// itself is locked by `timesfm3::train`'s own bitwise forward-parity
     /// test, which runs a non-trivial mask against `core_forward`.
     fn new(cfg: Timesfm3Config, b: usize, v: usize, n: usize, seed: u64) -> Timesfm3Harness {
+        Timesfm3Harness::build(cfg, None, b, v, n, seed)
+    }
+
+    fn build(cfg: Timesfm3Config, lora: Option<LoraCfg>, b: usize, v: usize, n: usize, seed: u64) -> Timesfm3Harness {
         let init = timesfm3::train::init_weights(&cfg, seed);
         let x = timesfm3::train::fixed_input(&cfg, b, v, n, seed);
         let mask = vec![false; b * v * n];
         let rows = b * v * n;
         let head_out = cfg.head_out_dim();
-        let m = Timesfm3Train::new_on(gpu_core::testgpu::dev(TRAIN_PIPELINES), cfg, &x, &mask, b, v, n, &init);
+        let dev = gpu_core::testgpu::dev(TRAIN_PIPELINES);
+        let m = match lora {
+            None => Timesfm3Train::new_on(dev, cfg, &x, &mask, b, v, n, &init),
+            Some(lc) => Timesfm3Train::new_lora_on(dev, cfg, lc, &x, &mask, b, v, n, &init),
+        };
         let mut rng = Rng::new(seed ^ 0x713);
         Timesfm3Harness { c: (0..rows * head_out).map(|_| rng.next_f32() - 0.5).collect(), m, fwd_done: Cell::new(false) }
+    }
+
+    /// Plain gradient descent on the trainable set, host-side. Used to move
+    /// the adapters off their `B = 0` init before the finite-difference
+    /// comparison: at `B = 0` the adapter contributes nothing, `dA` is
+    /// identically zero, and a check there would confirm only that zero
+    /// equals zero.
+    fn descend(&self, steps: usize, lr: f32) {
+        for _ in 0..steps {
+            self.m.forward();
+            self.m.poll_wait();
+            self.m.zero_grads();
+            self.m.backward(&self.c);
+            for name in self.m.param_names() {
+                let (w, g) = (self.m.read_weight(&name), self.m.read_grad(&name));
+                let stepped: Vec<f32> = w.iter().zip(&g).map(|(&wi, &gi)| wi - lr * gi).collect();
+                self.m.write_weight(&name, &stepped);
+            }
+        }
+        self.fwd_done.set(false);
     }
 }
 
 impl CheckModel for Timesfm3Harness {
     fn param_names(&self) -> Vec<String> {
-        self.m.ps.params.iter().map(|(n, _)| n.clone()).collect()
+        // The TRAINABLE set, which is every checkpoint tensor for a full
+        // fine-tune and only the adapters under LoRA. A frozen base has no
+        // gradient buffer at all, so walking `params` would ask for one that
+        // was never allocated.
+        self.m.param_names()
     }
     fn read_weight(&self, name: &str) -> Vec<f32> {
         self.m.read_weight(name)
@@ -271,3 +303,29 @@ pub fn check_timesfm3_eps_sweep(seed: u64) -> Vec<(f32, f32)> {
         .collect()
 }
 
+
+/// **The LoRA gate.** The same graph with every checkpoint tensor frozen and
+/// whole-matrix adapters on all ten attention/feedforward projections per
+/// layer plus the quantile head; the checker walks only `*.lora_a`/
+/// `*.lora_b`.
+///
+/// A few gradient-descent steps run first. At construction `B` is exactly
+/// zero (that is what makes a fresh adapter a bit-exact no-op), and with
+/// `B = 0` the adapter contributes nothing to the forward AND `dA = scale·dY·B`
+/// is identically zero, so a finite-difference check at the init point would
+/// compare zero against zero on half the trainable tensors and report a clean
+/// pass for any `dA` implementation whatsoever. Descending first puts both
+/// factors somewhere generic.
+///
+/// What this covers that [`check_timesfm3`] cannot: the adapter forward
+/// (two GEMMs into shared scratch plus the `axpy` that folds the delta onto
+/// the base projection's OUTPUT) and its reverse - `dB` against the scaled
+/// `x·Aᵀ`, `dA` against the scaled `dY·B`, and the second `dX` contribution
+/// the adapter adds on top of the frozen base's own.
+pub fn check_timesfm3_lora(seed: u64) -> Report {
+    let cfg = Timesfm3Config::tiny();
+    let lc = LoraCfg::attn(2, 4.0).with_output_head();
+    let h = Timesfm3Harness::build(cfg, Some(lc), 1, 2, 3, seed);
+    h.descend(6, 2e-2);
+    directional_check(&h, 5e-4, 4, seed ^ 0x1234)
+}

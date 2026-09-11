@@ -106,6 +106,11 @@ const K_DK_BIAS: usize = 27;
 const K_DSCORES_BIDIR: usize = 28;
 const K_DV_BIDIR: usize = 29;
 const K_UNPACK_QKV: usize = 30;
+// ---- LoRA: the fused adapter delta on a projection's OUTPUT, and the scaled
+// copy its backward needs (the `attn_bwd_*`/`matmul_*` family has no scale
+// parameter, so the factor is applied to the intermediate instead) ----
+const K_AXPY: usize = 31;
+const K_GRAD_SCALE: usize = 32;
 
 /// Forward **and** backward kernels in one list, so a trainer is one device
 /// handle. Every name appears exactly once.
@@ -141,7 +146,162 @@ pub const TRAIN_PIPELINES: &[(&str, &str)] = &[
     ("attn_bwd_dscores_bidir", kernels::ATTN_BWD_DSCORES_BIDIR),
     ("attn_bwd_dv_bidir", kernels::ATTN_BWD_DV_BIDIR),
     ("unpack_qkv", kernels::UNPACK_QKV),
+    ("axpy", kernels::AXPY),
+    ("grad_scale", kernels::GRAD_SCALE),
 ];
+
+/// LoRA hyper-parameters for [`Timesfm3Train`]. `alpha/rank` is the delta
+/// scale, matching every other adapter in the workspace.
+///
+/// `targets` are matched by weight-name SUFFIX against
+/// [`Timesfm3Config::param_list`]'s own checkpoint names, so one entry covers
+/// the same leaf in every layer (`kronos::train::LoraCfg`'s rule; the
+/// bare-leaf matching `qwen3` uses does not transfer, because this model's
+/// leaves repeat across two different attention sublayers).
+#[derive(Clone, Debug)]
+pub struct LoraCfg {
+    pub rank: usize,
+    pub alpha: f32,
+    pub targets: Vec<String>,
+}
+
+/// Every projection [`LoraCfg::attn`] adapts: the four square `[D, D]`
+/// projections of BOTH mixing sublayers, plus the two feedforward matrices.
+/// Ten per layer, each a whole-matrix placement - this architecture fuses no
+/// QKV, so there is no packed region to slice.
+pub const LORA_TARGETS: &[&str] = &[
+    "seq_attn.query_proj.weight",
+    "seq_attn.key_proj.weight",
+    "seq_attn.value_proj.weight",
+    "seq_attn.out_proj.weight",
+    "var_attn.query_proj.weight",
+    "var_attn.key_proj.weight",
+    "var_attn.value_proj.weight",
+    "var_attn.out_proj.weight",
+    "ff0.weight",
+    "ff1.weight",
+];
+
+impl LoraCfg {
+    /// The default surface: [`LORA_TARGETS`].
+    ///
+    /// The norm gains (`pre_*_ln`, `post_*_ln`, `query_ln`, `key_ln`) and
+    /// `per_dim_scale` are deliberately absent and are not adaptable at all.
+    /// A LoRA factorisation of a `[head_dim]` or `[D]` VECTOR is not a
+    /// low-rank anything - the product `B·A` for `out = 1` is a rank-1
+    /// reparameterisation with more parameters than the tensor it replaces.
+    /// The PerDimScale fold additionally makes `query_ln.weight` and
+    /// `per_dim_scale` a product of two live tensors rather than a linear
+    /// map, which is not the object LoRA is defined over.
+    pub fn attn(rank: usize, alpha: f32) -> LoraCfg {
+        LoraCfg { rank, alpha, targets: LORA_TARGETS.iter().map(|s| s.to_string()).collect() }
+    }
+
+    /// [`LoraCfg::attn`] plus the quantile output head. Optional because the
+    /// head is the one target whose output width is the horizon rather than
+    /// `model_dims`: adapting it changes how quantiles are read out, which is
+    /// what a fine-tune onto a new quantile regime wants and what a fine-tune
+    /// that only re-mixes an existing representation does not.
+    pub fn with_output_head(mut self) -> LoraCfg {
+        self.targets.push("output_head.weight".into());
+        self
+    }
+
+    /// The delta scale, `alpha/rank`.
+    pub fn scale(&self) -> f32 {
+        self.alpha / self.rank as f32
+    }
+
+    fn hits(&self, weight_name: &str) -> bool {
+        self.targets.iter().any(|t| weight_name.ends_with(t.as_str()))
+    }
+}
+
+/// `[rank, in]` / `[out, rank]` under `{weight}.lora_a` / `{weight}.lora_b` -
+/// the workspace-wide adapter spelling (`model::adapter::device::
+/// is_adapter_param` is the one predicate that recognises them).
+fn adapter_names(weight: &str) -> (String, String) {
+    (format!("{weight}.lora_a"), format!("{weight}.lora_b"))
+}
+
+/// Every parameter's role under `lc`: the checkpoint's own tensors Frozen,
+/// two adapters Trainable for each targeted weight. The adapters are
+/// interleaved directly after the weight they adapt so the store's iteration
+/// order stays readable next to `param_list`'s.
+fn adapter_roles(cfg: &Timesfm3Config, lc: &LoraCfg) -> Vec<(String, usize, Role)> {
+    let mut roles = Vec::new();
+    for (name, shape) in cfg.param_list() {
+        let numel: usize = shape.iter().product();
+        roles.push((name.clone(), numel, Role::Frozen));
+        if lc.hits(&name) {
+            // `param_list` gives every adapted weight as `[out, in]`, which is
+            // a PyTorch `nn.Linear` weight and exactly what `linear` expects.
+            let (out, inn) = (shape[0], shape[1]);
+            let (a, bnm) = adapter_names(&name);
+            roles.push((a, lc.rank * inn, Role::Trainable));
+            roles.push((bnm, out * lc.rank, Role::Trainable));
+        }
+    }
+    roles
+}
+
+/// Fill in any adapter tensor `init` does not already carry. `B` is exactly
+/// zero, so `W + (alpha/r)·B·A == W` and a freshly built adapter is a
+/// bit-exact no-op; `A` is a small deterministic draw, because a zero `A`
+/// alongside a zero `B` would leave `dB` identically zero and the adapter
+/// would never leave the origin.
+fn seed_adapters(cfg: &Timesfm3Config, lc: &LoraCfg, init: &mut HashMap<String, Vec<f32>>) {
+    let mut state = 0x51a7_7143_0000_0001u64;
+    for (name, shape) in cfg.param_list() {
+        if !lc.hits(&name) {
+            continue;
+        }
+        let (out, inn) = (shape[0], shape[1]);
+        let (a, bnm) = adapter_names(&name);
+        init.entry(a).or_insert_with(|| (0..lc.rank * inn).map(|_| lcg_next(&mut state) * 0.01).collect());
+        init.entry(bnm).or_insert_with(|| vec![0.0f32; out * lc.rank]);
+    }
+}
+
+/// The adapter wiring both passes share: the config, and the three scratch
+/// buffers they reuse.
+///
+/// Shared rather than SSA, matching `kronos::train` and `qwen3::model`: the
+/// reverse RECOMPUTES `x·Aᵀ` from the forward's own (SSA) input activation
+/// instead of reading a cached copy, so no adapter intermediate has to
+/// survive past the three consecutive steps that produce and consume it.
+struct LoraWiring {
+    cfg: Option<LoraCfg>,
+    /// `[rows * rank]` - `x·Aᵀ`, and in the reverse the same product scaled.
+    mid: DeviceBuffer,
+    /// `[rows * rank]` - `d(x·Aᵀ)`.
+    dmid: DeviceBuffer,
+    /// `[rows * max_out]` - the adapter's own contribution to a projection's
+    /// output, before the `axpy` folds it in.
+    out: DeviceBuffer,
+}
+
+impl LoraWiring {
+    /// `(rank, alpha/rank)` if `weight` carries an adapter.
+    fn of(&self, weight: &str) -> Option<(u32, f32)> {
+        self.cfg.as_ref().filter(|lc| lc.hits(weight)).map(|lc| (lc.rank as u32, lc.scale()))
+    }
+}
+
+/// `y += (alpha/r)·(x·Aᵀ)·Bᵀ` for an adapted projection; nothing at all
+/// otherwise, so a non-LoRA graph is bit-unchanged. Must be wired at exactly
+/// the projections [`proj_bwd`] adapts, or the forward and the reverse
+/// disagree about which weights are frozen.
+#[allow(clippy::too_many_arguments)]
+fn lora_fwd(g: &Gpu, ps: &ParamStore, lw: &LoraWiring, weight: &str, x: &DeviceBuffer, y: &DeviceBuffer, m: usize, k: usize, nout: usize) -> Vec<Step> {
+    let Some((r, scale)) = lw.of(weight) else { return Vec::new() };
+    let (a, bnm) = adapter_names(weight);
+    vec![
+        g.step(K_MATMUL, &[x, ps.w(&a), &lw.mid], &[m as u32, k as u32, r], (m * r as usize) as u32),
+        g.step(K_MATMUL, &[&lw.mid, ps.w(&bnm), &lw.out], &[m as u32, r, nout as u32], (m * nout) as u32),
+        g.step(K_AXPY, &[y, &lw.out], &[(m * nout) as u32, f(scale)], (m * nout) as u32),
+    ]
+}
 
 /// One mixing layer's SSA activations - every buffer the reverse pass needs
 /// to read back (`build_backward` takes these as its own local parameters
@@ -239,6 +399,10 @@ pub struct Timesfm3Train {
     /// forward's `rmsnorm_w` and the reverse's `rmsnorm_bwd`, so a refresh
     /// cannot leave the two disagreeing about which weights they differentiate.
     q_gains: Vec<(String, String, DeviceBuffer)>,
+    /// The adapter config, when this is a LoRA trainer. `None` is a full
+    /// fine-tune and every dispatch below is bit-unchanged from before LoRA
+    /// existed.
+    lora: Option<LoraCfg>,
 }
 
 impl Timesfm3Train {
@@ -248,16 +412,60 @@ impl Timesfm3Train {
     /// keyed by `Timesfm3Config::param_list()`'s own (checkpoint) names,
     /// UNFOLDED - see the module doc.
     pub fn new_on(gpu: Gpu, cfg: Timesfm3Config, resblock_input: &[f32], patch_mask: &[bool], b: usize, v: usize, n: usize, init: &HashMap<String, Vec<f32>>) -> Timesfm3Train {
+        Timesfm3Train::build(gpu, cfg, None, resblock_input, patch_mask, b, v, n, init)
+    }
+
+    /// A LoRA trainer over the same graph: every checkpoint tensor is FROZEN
+    /// and only the `.lora_a`/`.lora_b` adapters on `lora.targets` are
+    /// trainable. `init` supplies the base checkpoint; the adapters are
+    /// seeded here if absent (`A` small and deterministic, `B` exactly zero,
+    /// so the adapter is an exact no-op at construction), which is what lets
+    /// a caller hand this the same weight map an inference load would use.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_lora_on(gpu: Gpu, cfg: Timesfm3Config, lora: LoraCfg, resblock_input: &[f32], patch_mask: &[bool], b: usize, v: usize, n: usize, init: &HashMap<String, Vec<f32>>) -> Timesfm3Train {
+        Timesfm3Train::build(gpu, cfg, Some(lora), resblock_input, patch_mask, b, v, n, init)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build(gpu: Gpu, cfg: Timesfm3Config, lora: Option<LoraCfg>, resblock_input: &[f32], patch_mask: &[bool], b: usize, v: usize, n: usize, init: &HashMap<String, Vec<f32>>) -> Timesfm3Train {
         let rows = b * v * n;
         assert_eq!(resblock_input.len(), rows * cfg.resblock_in_dim());
         assert_eq!(patch_mask.len(), rows);
 
-        let roles: Vec<(String, usize, Role)> = cfg.param_list().into_iter().map(|(name, shape)| (name, shape.iter().product::<usize>(), Role::Trainable)).collect();
+        // Under LoRA the base is Frozen (weights only, no gradient and no
+        // optimiser moments) and the adapters are the whole trainable set -
+        // `kronos::train`'s and `qwen3::model`'s identical split. Without it
+        // every tensor is Trainable and this is an ordinary full fine-tune.
+        let mut init2;
+        let init: &HashMap<String, Vec<f32>> = match &lora {
+            None => init,
+            Some(lc) => {
+                init2 = init.clone();
+                seed_adapters(&cfg, lc, &mut init2);
+                &init2
+            }
+        };
+        let roles: Vec<(String, usize, Role)> = match &lora {
+            None => cfg.param_list().into_iter().map(|(name, shape)| (name, shape.iter().product::<usize>(), Role::Trainable)).collect(),
+            Some(lc) => adapter_roles(&cfg, lc),
+        };
         let ps = ParamStore::new_with_roles(&gpu, roles, init);
 
         let d = cfg.model_dims;
         let g = &gpu;
         let mut steps = Vec::new();
+
+        // One set of adapter scratch buffers for the whole graph. `out` is
+        // sized for the WIDEST adapted projection, which is the quantile head
+        // when it is targeted and the feedforward hidden otherwise.
+        let rank = lora.as_ref().map(|lc| lc.rank).unwrap_or(0);
+        let widest = d.max(cfg.hidden_dims).max(cfg.head_out_dim());
+        let lw = LoraWiring {
+            cfg: lora.clone(),
+            mid: g.storage((rows * rank.max(1)) as u64),
+            dmid: g.storage((rows * rank.max(1)) as u64),
+            out: g.storage((rows * widest) as u64),
+        };
 
         let resblock_input_buf = g.storage_init("resblock_input", resblock_input);
 
@@ -315,8 +523,11 @@ impl Timesfm3Train {
             steps.push(rmsnorm(g, &ps, &h_in, &format!("{p}.pre_seq_attn_ln.weight"), &seq_in, d, rows, cfg.rms_norm_eps));
             let (q, k, vv) = (g.storage((rows * d) as u64), g.storage((rows * d) as u64), g.storage((rows * d) as u64));
             steps.push(linear(g, &ps, &seq_in, &format!("{p}.seq_attn.query_proj.weight"), &q, rows, d, d));
+            steps.extend(lora_fwd(g, &ps, &lw, &format!("{p}.seq_attn.query_proj.weight"), &seq_in, &q, rows, d, d));
             steps.push(linear(g, &ps, &seq_in, &format!("{p}.seq_attn.key_proj.weight"), &k, rows, d, d));
+            steps.extend(lora_fwd(g, &ps, &lw, &format!("{p}.seq_attn.key_proj.weight"), &seq_in, &k, rows, d, d));
             steps.push(linear(g, &ps, &seq_in, &format!("{p}.seq_attn.value_proj.weight"), &vv, rows, d, d));
+            steps.extend(lora_fwd(g, &ps, &lw, &format!("{p}.seq_attn.value_proj.weight"), &seq_in, &vv, rows, d, d));
             steps.push(rope_seq(g, &cfg, &q, rows, n));
             steps.push(rope_seq(g, &cfg, &k, rows, n));
             let (qn, kn) = (g.storage((rows * d) as u64), g.storage((rows * d) as u64));
@@ -328,6 +539,7 @@ impl Timesfm3Train {
             steps.extend(attention(g, &cfg, &qn, &kn, &vv, &seq_kmask, &probs_seq, &ctx, b * v, n, true));
             let seq_out = g.storage((rows * d) as u64);
             steps.push(linear(g, &ps, &ctx, &format!("{p}.seq_attn.out_proj.weight"), &seq_out, rows, d, d));
+            steps.extend(lora_fwd(g, &ps, &lw, &format!("{p}.seq_attn.out_proj.weight"), &ctx, &seq_out, rows, d, d));
             let seq_normed = g.storage((rows * d) as u64);
             steps.push(rmsnorm(g, &ps, &seq_out, &format!("{p}.post_seq_attn_ln.weight"), &seq_normed, d, rows, cfg.rms_norm_eps));
             steps.push(g.step(K_ADD, &[&seq_normed, &h_in], &[(rows * d) as u32], (rows * d) as u32));
@@ -338,8 +550,11 @@ impl Timesfm3Train {
             steps.push(rmsnorm(g, &ps, &h1, &format!("{p}.pre_var_attn_ln.weight"), &var_in, d, rows, cfg.rms_norm_eps));
             let (q2, k2, v2) = (g.storage((rows * d) as u64), g.storage((rows * d) as u64), g.storage((rows * d) as u64));
             steps.push(linear(g, &ps, &var_in, &format!("{p}.var_attn.query_proj.weight"), &q2, rows, d, d));
+            steps.extend(lora_fwd(g, &ps, &lw, &format!("{p}.var_attn.query_proj.weight"), &var_in, &q2, rows, d, d));
             steps.push(linear(g, &ps, &var_in, &format!("{p}.var_attn.key_proj.weight"), &k2, rows, d, d));
+            steps.extend(lora_fwd(g, &ps, &lw, &format!("{p}.var_attn.key_proj.weight"), &var_in, &k2, rows, d, d));
             steps.push(linear(g, &ps, &var_in, &format!("{p}.var_attn.value_proj.weight"), &v2, rows, d, d));
+            steps.extend(lora_fwd(g, &ps, &lw, &format!("{p}.var_attn.value_proj.weight"), &var_in, &v2, rows, d, d));
             let (q2n, k2n) = (g.storage((rows * d) as u64), g.storage((rows * d) as u64));
             let q2_gain = query_gain_of(&q_gains, &format!("{p}.var_attn.query_ln.weight"));
             steps.push(rmsnorm_w(g, &q2, q2_gain, &q2n, cfg.head_dim, rows * cfg.num_heads, cfg.rms_norm_eps));
@@ -355,6 +570,7 @@ impl Timesfm3Train {
             steps.push(swap12(g, &ctx2t, &ctx2, b, n, v, d));
             let var_out = g.storage((rows * d) as u64);
             steps.push(linear(g, &ps, &ctx2, &format!("{p}.var_attn.out_proj.weight"), &var_out, rows, d, d));
+            steps.extend(lora_fwd(g, &ps, &lw, &format!("{p}.var_attn.out_proj.weight"), &ctx2, &var_out, rows, d, d));
             let var_normed = g.storage((rows * d) as u64);
             steps.push(rmsnorm(g, &ps, &var_out, &format!("{p}.post_var_attn_ln.weight"), &var_normed, d, rows, cfg.rms_norm_eps));
             steps.push(g.step(K_ADD, &[&var_normed, &h1], &[(rows * d) as u32], (rows * d) as u32));
@@ -365,11 +581,13 @@ impl Timesfm3Train {
             steps.push(rmsnorm(g, &ps, &h2, &format!("{p}.pre_ff_ln.weight"), &ff_in, d, rows, cfg.rms_norm_eps));
             let ff_h_pre = g.storage((rows * cfg.hidden_dims) as u64);
             steps.push(linear(g, &ps, &ff_in, &format!("{p}.ff0.weight"), &ff_h_pre, rows, d, cfg.hidden_dims));
+            steps.extend(lora_fwd(g, &ps, &lw, &format!("{p}.ff0.weight"), &ff_in, &ff_h_pre, rows, d, cfg.hidden_dims));
             let ff_h_act = g.storage((rows * cfg.hidden_dims) as u64);
             steps.push(g.step(K_REGION_COPY, &[&ff_h_pre, &ff_h_act], &[rows as u32, cfg.hidden_dims as u32, cfg.hidden_dims as u32, 0], (rows * cfg.hidden_dims) as u32));
             steps.push(g.step(K_RELU, &[&ff_h_act], &[(rows * cfg.hidden_dims) as u32], (rows * cfg.hidden_dims) as u32));
             let ff_out = g.storage((rows * d) as u64);
             steps.push(linear(g, &ps, &ff_h_act, &format!("{p}.ff1.weight"), &ff_out, rows, cfg.hidden_dims, d));
+            steps.extend(lora_fwd(g, &ps, &lw, &format!("{p}.ff1.weight"), &ff_h_act, &ff_out, rows, cfg.hidden_dims, d));
             let ff_normed = g.storage((rows * d) as u64);
             steps.push(rmsnorm(g, &ps, &ff_out, &format!("{p}.post_ff_ln.weight"), &ff_normed, d, rows, cfg.rms_norm_eps));
             steps.push(g.step(K_ADD, &[&ff_normed, &h2], &[(rows * d) as u32], (rows * d) as u32));
@@ -414,10 +632,11 @@ impl Timesfm3Train {
         let head_out = cfg.head_out_dim();
         let logits = g.storage((rows * head_out) as u64);
         steps.push(linear(g, &ps, &h_in, "output_head.weight", &logits, rows, d, head_out));
+        steps.extend(lora_fwd(g, &ps, &lw, "output_head.weight", &h_in, &logits, rows, d, head_out));
         steps.push(g.step(K_BIAS_ADD, &[&logits, ps.w("output_head.bias")], &[rows as u32, head_out as u32], (rows * head_out) as u32));
 
         let d_logits = g.storage((rows * head_out) as u64);
-        let (bwd_steps, qgain_fold_temps) = build_backward(g, &cfg, &ps, &q_gains, &layers, &resblock_input_buf, &hidden_pre, &hidden_act, &h_in, &d_logits, b, v, n);
+        let (bwd_steps, qgain_fold_temps) = build_backward(g, &cfg, &ps, &lw, &q_gains, &layers, &resblock_input_buf, &hidden_pre, &hidden_act, &h_in, &d_logits, b, v, n);
 
         Timesfm3Train {
             gpu,
@@ -440,6 +659,7 @@ impl Timesfm3Train {
             bwd_steps,
             qgain_fold_temps,
             q_gains,
+            lora,
         }
     }
 
@@ -536,6 +756,61 @@ impl Timesfm3Train {
     pub fn write_weight(&self, name: &str, data: &[f32]) {
         assert_eq!(data.len(), self.ps.numel(name), "{name}: weight size");
         self.gpu.write_f32(self.ps.w(name), data);
+    }
+
+    /// The names the optimiser actually steps: every checkpoint tensor for a
+    /// full fine-tune, and ONLY `*.lora_a`/`*.lora_b` under LoRA. A frozen
+    /// base has no gradient buffer, so this is also the exact set
+    /// [`Timesfm3Train::read_grad`] may be called with.
+    pub fn param_names(&self) -> Vec<String> {
+        self.ps.opt_params().iter().map(|(n, _)| n.clone()).collect()
+    }
+
+    /// The adapter config, if this is a LoRA trainer.
+    pub fn lora(&self) -> Option<&LoraCfg> {
+        self.lora.as_ref()
+    }
+
+    /// Every tensor of [`Timesfm3Config::param_list`] under its own
+    /// CHECKPOINT name, with any LoRA delta folded in
+    /// (`W += (alpha/r)·B·A`) and no adapter tensors left over.
+    ///
+    /// This, not an adapter sidecar, is what a TimesFM-3 fine-tune writes:
+    /// this module's own doc records that the saved checkpoint has to keep
+    /// the reference's tensors under the reference's names so the SAME
+    /// importer loads a fine-tuned and a stock checkpoint. `kronos::train`
+    /// saves through the identical shape for the identical reason.
+    pub fn to_reference_weights(&self) -> HashMap<String, Vec<f32>> {
+        let mut out = HashMap::new();
+        for (name, shape) in self.cfg.param_list() {
+            let mut w = self.read_weight(&name);
+            if let Some(lc) = self.lora.as_ref().filter(|lc| lc.hits(&name)) {
+                let (a_name, b_name) = adapter_names(&name);
+                let (a, b) = (self.read_weight(&a_name), self.read_weight(&b_name));
+                fold_delta(&mut w, &a, &b, lc.rank, shape[1], lc.scale());
+            }
+            out.insert(name, w);
+        }
+        out
+    }
+}
+
+/// `W[o,i] += scale·Σ_k B[o,k]·A[k,i]` over a `[out, in]` row-major weight,
+/// `A` `[r, in]`, `B` `[out, r]`. The same contraction
+/// `model::lora::device_adapter::fold_adapter_into` performs when it reads an
+/// adapter file back, kept here because this model folds from LIVE device
+/// tensors (there is no adapter sidecar - see
+/// [`Timesfm3Train::to_reference_weights`]).
+fn fold_delta(w: &mut [f32], a: &[f32], b: &[f32], r: usize, inn: usize, scale: f32) {
+    let out = w.len() / inn;
+    for o in 0..out {
+        for i in 0..inn {
+            let mut acc = 0.0f32;
+            for k in 0..r {
+                acc += b[o * r + k] * a[k * inn + i];
+            }
+            w[o * inn + i] += scale * acc;
+        }
     }
 }
 
@@ -693,6 +968,54 @@ fn linear_dw(g: &Gpu, dy: &DeviceBuffer, x: &DeviceBuffer, dw: &DeviceBuffer, m:
     g.step(K_MATMUL_DW, &[dy, x, dw], &[m as u32, k as u32, n as u32], (n * k) as u32)
 }
 
+/// `name`'s gradient buffer, or `None` when it has none. A `Role::Frozen`
+/// parameter allocates no gradient at all, so every `_dw`/`bias_grad`
+/// dispatch below has to ask first rather than assume: under LoRA that is
+/// EVERY checkpoint tensor.
+fn grad_of<'a>(ps: &'a ParamStore, name: &str) -> Option<&'a DeviceBuffer> {
+    ps.grad.get(name)
+}
+
+/// The adjoint of [`linear`] for a weight that may be frozen and may carry an
+/// adapter. Three cases, and `dX` flows in all of them because a frozen
+/// weight still has to pass gradient to whatever produced its input:
+///
+/// * **trainable, no adapter** - `dW` and `dX`, exactly as before LoRA;
+/// * **frozen, no adapter** - `dX` only;
+/// * **adapted** - `dX` through the frozen base, plus `dA`/`dB`. The scale
+///   `alpha/r` belongs on the adapter's intermediate rather than on either
+///   gradient: `matmul_dw`/`matmul_dx` take no scale parameter, and putting
+///   it on `mid` (for `dB`) and on `dmid` (for `dA` and for the adapter's own
+///   contribution to `dX`) reaches all three with one `grad_scale` each.
+#[allow(clippy::too_many_arguments)]
+fn proj_bwd(g: &Gpu, ps: &ParamStore, lw: &LoraWiring, weight: &str, dy: &DeviceBuffer, x: &DeviceBuffer, dx: &DeviceBuffer, m: usize, k: usize, nout: usize, accumulate: bool) -> Vec<Step> {
+    let mut steps = Vec::new();
+    match lw.of(weight) {
+        Some((r, scale)) => {
+            let (a, bnm) = adapter_names(weight);
+            let (mr, rn) = ((m * r as usize) as u32, f(scale));
+            // Frozen base: dX only.
+            steps.push(linear_dx(g, dy, ps.w(weight), dx, m, k, nout, accumulate));
+            // dB = dYᵀ·(scale·x·Aᵀ)
+            steps.push(g.step(K_MATMUL, &[x, ps.w(&a), &lw.mid], &[m as u32, k as u32, r], mr));
+            steps.push(g.step(K_GRAD_SCALE, &[&lw.mid], &[mr, rn], mr));
+            steps.push(linear_dw(g, dy, &lw.mid, ps.g(&bnm), m, r as usize, nout));
+            // dmid = scale·dY·B, then dA = dmidᵀ·x and dX += dmid·A
+            steps.push(linear_dx(g, dy, ps.w(&bnm), &lw.dmid, m, r as usize, nout, false));
+            steps.push(g.step(K_GRAD_SCALE, &[&lw.dmid], &[mr, rn], mr));
+            steps.push(linear_dw(g, &lw.dmid, x, ps.g(&a), m, k, r as usize));
+            steps.push(linear_dx(g, &lw.dmid, ps.w(&a), dx, m, k, r as usize, true));
+        }
+        None => {
+            if let Some(dw) = grad_of(ps, weight) {
+                steps.push(linear_dw(g, dy, x, dw, m, k, nout));
+            }
+            steps.push(linear_dx(g, dy, ps.w(weight), dx, m, k, nout, accumulate));
+        }
+    }
+    steps
+}
+
 /// `out[i] = a[i] + b[i]`, out-of-place - the two-path convergence every
 /// residual junction needs (see the section doc).
 fn add2(g: &Gpu, a: &DeviceBuffer, b: &DeviceBuffer, out: &DeviceBuffer, total: usize) -> Step {
@@ -801,6 +1124,7 @@ fn attn_sublayer_bwd(
     g: &Gpu,
     cfg: &Timesfm3Config,
     ps: &ParamStore,
+    lw: &LoraWiring,
     q_gains: &[(String, String, DeviceBuffer)],
     prefix: &str,
     is_seq: bool,
@@ -836,11 +1160,10 @@ fn attn_sublayer_bwd(
     // = `ctx`/`ctx2`, a DIFFERENT buffer earlier in the same chain - conflating
     // the two here was a real bug this function used to have).
     let d_attn_out = g.storage((rows * d) as u64);
-    steps.extend(rmsnorm_bwd(g, sub_out, ps.w(&post_ln), d_h_next, &d_attn_out, Some(ps.g(&post_ln)), d, rows, cfg.rms_norm_eps));
+    steps.extend(rmsnorm_bwd(g, sub_out, ps.w(&post_ln), d_h_next, &d_attn_out, grad_of(ps, &post_ln), d, rows, cfg.rms_norm_eps));
 
     let d_ctx = g.storage((rows * d) as u64);
-    steps.push(linear_dw(g, &d_attn_out, ctx_val, ps.g(&out_proj), rows, d, d));
-    steps.push(linear_dx(g, &d_attn_out, ps.w(&out_proj), &d_ctx, rows, d, d, false));
+    steps.extend(proj_bwd(g, ps, lw, &out_proj, &d_attn_out, ctx_val, &d_ctx, rows, d, d, false));
 
     // Variate attention swaps to (b,n,v) order around its own attention
     // call; sequence attention does not.
@@ -889,13 +1212,22 @@ fn attn_sublayer_bwd(
     // weights, so `forward()`'s refresh reaches this dispatch too.
     let q_gain = query_gain_of(q_gains, &query_ln);
     let d_q_dx = g.storage((rows * d) as u64);
+    // Both halves of the fold are trainable together or frozen together (they
+    // are never LoRA targets, so under LoRA they are simply frozen). When
+    // frozen, the `rmsnorm_dw` half of the trio is skipped outright and no
+    // fold temp is registered, which is what keeps `backward`'s host-side
+    // split from reaching for a gradient buffer that was never allocated.
+    let gain_trainable = grad_of(ps, &query_ln).is_some();
     let d_gain_eff = g.storage(cfg.head_dim as u64);
-    steps.extend(rmsnorm_bwd(g, q_pre_norm, q_gain, &d_qn, &d_q_dx, Some(&d_gain_eff), cfg.head_dim, rows * cfg.num_heads, cfg.rms_norm_eps));
-    folds.push((query_ln.clone(), per_dim_scale.clone(), d_gain_eff));
+    let dw = gain_trainable.then_some(&d_gain_eff);
+    steps.extend(rmsnorm_bwd(g, q_pre_norm, q_gain, &d_qn, &d_q_dx, dw, cfg.head_dim, rows * cfg.num_heads, cfg.rms_norm_eps));
+    if gain_trainable {
+        folds.push((query_ln.clone(), per_dim_scale.clone(), d_gain_eff));
+    }
 
     // k_normed = rmsnorm(k_pre_norm, key_ln.weight) - a normal trainable weight.
     let d_k_dx = g.storage((rows * d) as u64);
-    steps.extend(rmsnorm_bwd(g, k_pre_norm, ps.w(&key_ln), &d_kn, &d_k_dx, Some(ps.g(&key_ln)), cfg.head_dim, rows * cfg.num_heads, cfg.rms_norm_eps));
+    steps.extend(rmsnorm_bwd(g, k_pre_norm, ps.w(&key_ln), &d_kn, &d_k_dx, grad_of(ps, &key_ln), cfg.head_dim, rows * cfg.num_heads, cfg.rms_norm_eps));
 
     // Sequence attention RoPE'd q/k AFTER the projection, BEFORE qk-norm -
     // the backward undoes qk-norm first, then RoPE, in place.
@@ -906,17 +1238,16 @@ fn attn_sublayer_bwd(
 
     // q/k/v = linear(sub_in, {query,key,value}_proj.weight) - sub_in is read
     // by all three, so their dx accumulates (matmul_dx's own accumulate flag).
-    steps.push(linear_dw(g, &d_q_dx, sub_in, ps.g(&query_proj), rows, d, d));
-    steps.push(linear_dw(g, &d_k_dx, sub_in, ps.g(&key_proj), rows, d, d));
-    steps.push(linear_dw(g, &d_v, sub_in, ps.g(&value_proj), rows, d, d));
+    // `sub_in` feeds all three projections, so their `dX` accumulate onto one
+    // buffer - the first assigns, the other two add.
     let d_sub_in = g.storage((rows * d) as u64);
-    steps.push(linear_dx(g, &d_q_dx, ps.w(&query_proj), &d_sub_in, rows, d, d, false));
-    steps.push(linear_dx(g, &d_k_dx, ps.w(&key_proj), &d_sub_in, rows, d, d, true));
-    steps.push(linear_dx(g, &d_v, ps.w(&value_proj), &d_sub_in, rows, d, d, true));
+    steps.extend(proj_bwd(g, ps, lw, &query_proj, &d_q_dx, sub_in, &d_sub_in, rows, d, d, false));
+    steps.extend(proj_bwd(g, ps, lw, &key_proj, &d_k_dx, sub_in, &d_sub_in, rows, d, d, true));
+    steps.extend(proj_bwd(g, ps, lw, &value_proj, &d_v, sub_in, &d_sub_in, rows, d, d, true));
 
     // sub_in = rmsnorm(h_prev_val, pre_ln.weight) - the sublayer's own input norm.
     let d_h_prev_from_norm = g.storage((rows * d) as u64);
-    steps.extend(rmsnorm_bwd(g, h_prev_val, ps.w(&pre_ln), &d_sub_in, &d_h_prev_from_norm, Some(ps.g(&pre_ln)), d, rows, cfg.rms_norm_eps));
+    steps.extend(rmsnorm_bwd(g, h_prev_val, ps.w(&pre_ln), &d_sub_in, &d_h_prev_from_norm, grad_of(ps, &pre_ln), d, rows, cfg.rms_norm_eps));
 
     // h_prev is read by BOTH this sublayer's own residual add (contributing
     // d_h_next unchanged) and pre_ln above - the two-path convergence.
@@ -936,6 +1267,7 @@ fn build_backward(
     g: &Gpu,
     cfg: &Timesfm3Config,
     ps: &ParamStore,
+    lw: &LoraWiring,
     q_gains: &[(String, String, DeviceBuffer)],
     layers: &[TrainLayer],
     resblock_input: &DeviceBuffer,
@@ -954,10 +1286,11 @@ fn build_backward(
     let mut folds = Vec::new();
 
     // ---- output head: logits = linear(h_final, output_head.weight) + bias ----
-    steps.push(g.step(K_BIAS_GRAD, &[d_logits, ps.g("output_head.bias")], &[rows as u32, head_out as u32], head_out as u32));
-    steps.push(linear_dw(g, d_logits, h_final, ps.g("output_head.weight"), rows, d, head_out));
+    if let Some(db) = grad_of(ps, "output_head.bias") {
+        steps.push(g.step(K_BIAS_GRAD, &[d_logits, db], &[rows as u32, head_out as u32], head_out as u32));
+    }
     let mut d_h = g.storage((rows * d) as u64);
-    steps.push(linear_dx(g, d_logits, ps.w("output_head.weight"), &d_h, rows, d, head_out, false));
+    steps.extend(proj_bwd(g, ps, lw, "output_head.weight", d_logits, h_final, &d_h, rows, d, head_out, false));
 
     for l in (0..cfg.num_layers).rev() {
         let ly = &layers[l];
@@ -965,27 +1298,25 @@ fn build_backward(
 
         // ---- feedforward, in reverse ----
         let d_ff_out = g.storage((rows * d) as u64);
-        steps.extend(rmsnorm_bwd(g, &ly.ff_out, ps.w(&format!("{prefix}.post_ff_ln.weight")), &d_h, &d_ff_out, Some(ps.g(&format!("{prefix}.post_ff_ln.weight"))), d, rows, cfg.rms_norm_eps));
+        steps.extend(rmsnorm_bwd(g, &ly.ff_out, ps.w(&format!("{prefix}.post_ff_ln.weight")), &d_h, &d_ff_out, grad_of(ps, &format!("{prefix}.post_ff_ln.weight")), d, rows, cfg.rms_norm_eps));
         let d_ff_h_act = g.storage((rows * cfg.hidden_dims) as u64);
-        steps.push(linear_dw(g, &d_ff_out, &ly.ff_h_act, ps.g(&format!("{prefix}.ff1.weight")), rows, cfg.hidden_dims, d));
-        steps.push(linear_dx(g, &d_ff_out, ps.w(&format!("{prefix}.ff1.weight")), &d_ff_h_act, rows, cfg.hidden_dims, d, false));
+        steps.extend(proj_bwd(g, ps, lw, &format!("{prefix}.ff1.weight"), &d_ff_out, &ly.ff_h_act, &d_ff_h_act, rows, cfg.hidden_dims, d, false));
         let d_ff_h_pre = g.storage((rows * cfg.hidden_dims) as u64);
         steps.push(g.step(K_LEAKY_RELU_BWD, &[&ly.ff_h_pre, &d_ff_h_act, &d_ff_h_pre], &[(rows * cfg.hidden_dims) as u32, f(0.0)], (rows * cfg.hidden_dims) as u32));
         let d_ff_in = g.storage((rows * d) as u64);
-        steps.push(linear_dw(g, &d_ff_h_pre, &ly.ff_in, ps.g(&format!("{prefix}.ff0.weight")), rows, d, cfg.hidden_dims));
-        steps.push(linear_dx(g, &d_ff_h_pre, ps.w(&format!("{prefix}.ff0.weight")), &d_ff_in, rows, d, cfg.hidden_dims, false));
+        steps.extend(proj_bwd(g, ps, lw, &format!("{prefix}.ff0.weight"), &d_ff_h_pre, &ly.ff_in, &d_ff_in, rows, d, cfg.hidden_dims, false));
         let d_ff_in_dx = g.storage((rows * d) as u64);
-        steps.extend(rmsnorm_bwd(g, &ly.h2, ps.w(&format!("{prefix}.pre_ff_ln.weight")), &d_ff_in, &d_ff_in_dx, Some(ps.g(&format!("{prefix}.pre_ff_ln.weight"))), d, rows, cfg.rms_norm_eps));
+        steps.extend(rmsnorm_bwd(g, &ly.h2, ps.w(&format!("{prefix}.pre_ff_ln.weight")), &d_ff_in, &d_ff_in_dx, grad_of(ps, &format!("{prefix}.pre_ff_ln.weight")), d, rows, cfg.rms_norm_eps));
         let d_h2 = g.storage((rows * d) as u64);
         steps.push(add2(g, &d_h, &d_ff_in_dx, &d_h2, rows * d));
 
         // ---- variate attention, in reverse ----
-        let (var_steps, d_h1, var_folds) = attn_sublayer_bwd(g, cfg, ps, q_gains, &prefix, false, &ly.h1, &ly.var_in, &ly.q2, &ly.k2, &ly.v2, &ly.q2n, &ly.k2n, &ly.probs_var, &ly.ctx2, &ly.var_out, &d_h2, b, v, n, rows);
+        let (var_steps, d_h1, var_folds) = attn_sublayer_bwd(g, cfg, ps, lw, q_gains, &prefix, false, &ly.h1, &ly.var_in, &ly.q2, &ly.k2, &ly.v2, &ly.q2n, &ly.k2n, &ly.probs_var, &ly.ctx2, &ly.var_out, &d_h2, b, v, n, rows);
         steps.extend(var_steps);
         folds.extend(var_folds);
 
         // ---- sequence attention, in reverse ----
-        let (seq_steps, d_h_in, seq_folds) = attn_sublayer_bwd(g, cfg, ps, q_gains, &prefix, true, &ly.h_in, &ly.seq_in, &ly.q, &ly.k, &ly.vv, &ly.qn, &ly.kn, &ly.probs_seq, &ly.ctx, &ly.seq_out, &d_h1, b, v, n, rows);
+        let (seq_steps, d_h_in, seq_folds) = attn_sublayer_bwd(g, cfg, ps, lw, q_gains, &prefix, true, &ly.h_in, &ly.seq_in, &ly.q, &ly.k, &ly.vv, &ly.qn, &ly.kn, &ly.probs_seq, &ly.ctx, &ly.seq_out, &d_h1, b, v, n, rows);
         steps.extend(seq_steps);
         folds.extend(seq_folds);
 
@@ -996,13 +1327,16 @@ fn build_backward(
     // d_h is now the gradient into resblock_out; both branches read it
     // directly (neither is mutated by what follows), no copy needed.
     let resblock_in_dim = cfg.resblock_in_dim();
-    steps.push(linear_dw(g, &d_h, resblock_input, ps.g("pre_transformer_resblock.residual_layer.weight"), rows, resblock_in_dim, d));
+    if let Some(dw) = grad_of(ps, "pre_transformer_resblock.residual_layer.weight") {
+        steps.push(linear_dw(g, &d_h, resblock_input, dw, rows, resblock_in_dim, d));
+    }
     let d_hidden_act = g.storage((rows * d) as u64);
-    steps.push(linear_dw(g, &d_h, resblock_hidden_act, ps.g("pre_transformer_resblock.output_layer.weight"), rows, d, d));
-    steps.push(linear_dx(g, &d_h, ps.w("pre_transformer_resblock.output_layer.weight"), &d_hidden_act, rows, d, d, false));
+    steps.extend(proj_bwd(g, ps, lw, "pre_transformer_resblock.output_layer.weight", &d_h, resblock_hidden_act, &d_hidden_act, rows, d, d, false));
     let d_hidden_pre = g.storage((rows * d) as u64);
     steps.push(g.step(K_LEAKY_RELU_BWD, &[resblock_hidden_pre, &d_hidden_act, &d_hidden_pre], &[(rows * d) as u32, f(0.0)], (rows * d) as u32));
-    steps.push(linear_dw(g, &d_hidden_pre, resblock_input, ps.g("pre_transformer_resblock.hidden_layer.weight"), rows, resblock_in_dim, d));
+    if let Some(dw) = grad_of(ps, "pre_transformer_resblock.hidden_layer.weight") {
+        steps.push(linear_dw(g, &d_hidden_pre, resblock_input, dw, rows, resblock_in_dim, d));
+    }
     // No d_resblock_input needed: it is the model's own input, not a trainable weight.
 
     (steps, folds)

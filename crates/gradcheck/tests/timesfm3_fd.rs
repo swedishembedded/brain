@@ -74,6 +74,25 @@ fn timesfm3_per_dim_scale_fold_splits_correctly_per_entry() {
     gate(tfm::check_timesfm3_query_ln_elementwise(7), "TimesFM-3 query_ln (per entry)");
 }
 
+/// The adapter gate. Only `*.lora_a`/`*.lora_b` are walked - the base is
+/// frozen and has no gradient at all - and the adapters are descended off
+/// their `B = 0` init first, without which half the trainable tensors would
+/// be compared as zero against zero.
+#[test]
+fn timesfm3_lora_analytic_grads_match_finite_differences() {
+    if skip_gpu() {
+        brain_testutil::skip_unavailable("check_timesfm3_lora: MOE_SKIP_GPU_TESTS set");
+        return;
+    }
+    let report = tfm::check_timesfm3_lora(7);
+    assert!(
+        report.checks.iter().all(|c| c.param.ends_with(".lora_a") || c.param.ends_with(".lora_b")),
+        "the LoRA check must walk adapters only, got {:?}",
+        report.checks.iter().map(|c| &c.param).filter(|n| !n.ends_with(".lora_a") && !n.ends_with(".lora_b")).collect::<Vec<_>>()
+    );
+    gate(report, "TimesFM-3 LoRA adapters");
+}
+
 /// The eps probe, run as a gate rather than left as a comment: it asserts
 /// that the chosen `5e-4` is not sitting on a knee, i.e. that the max
 /// relative error there is no worse than at the decade on either side. If a
