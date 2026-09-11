@@ -96,12 +96,24 @@ pub fn encode_samples(
     // copy that used to live here also slurped the whole encoder as an fp32
     // `HashMap` before uploading it, the largest single host allocation the
     // run made.
+    // Keyed by the exact prompt STRING, not by sample index: the encoder's
+    // output depends on nothing else, so two samples that happen to share a
+    // caption (a fixed-prompt/single-concept dataset does this for every
+    // sample) get the encode done once and the identical result reused. A
+    // dataset where every caption differs pays exactly what it paid before -
+    // this is a cache miss on first sight of each string, never a behavior
+    // change on what gets encoded.
     let ctxs: Vec<Vec<f32>> = {
         let te = crate::pipeline::build_text_encoder(fc, paths)?;
+        let mut cache: std::collections::HashMap<&str, Vec<f32>> = std::collections::HashMap::new();
         let mut out = Vec::with_capacity(n);
         for (i, s) in samples.iter().enumerate() {
             if cancel.is_cancelled() {
                 return Err("cancelled".into());
+            }
+            if let Some(ctx) = cache.get(s.prompt.as_str()) {
+                out.push(ctx.clone());
+                continue;
             }
             progress(i, n, "encoding captions (Qwen)");
             let templated = tok.apply_chat_template_no_think(&[("user", s.prompt.as_str())]);
@@ -117,6 +129,7 @@ pub fn encode_samples(
                     ctx.extend_from_slice(&tap[row * d..(row + 1) * d]);
                 }
             }
+            cache.insert(s.prompt.as_str(), ctx.clone());
             out.push(ctx);
         }
         out
