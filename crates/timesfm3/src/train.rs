@@ -230,6 +230,15 @@ pub struct Timesfm3Train {
     /// into. Processed host-side, after `bwd_steps` runs - see
     /// [`Timesfm3Train::backward`] and the module doc's PerDimScale section.
     qgain_fold_temps: Vec<(String, String, DeviceBuffer)>,
+    /// Per query-attention-sublayer: `(query_ln name, per_dim_scale name, the
+    /// ONE buffer holding their fold)`. The effective query gain is not a
+    /// tensor of its own - it is a function of two live parameters - so it
+    /// cannot be bound once and left alone the way every other weight in this
+    /// graph is: [`Timesfm3Train::forward`] recomputes all of them from the
+    /// current `ps` before submitting. One buffer per sublayer, shared by the
+    /// forward's `rmsnorm_w` and the reverse's `rmsnorm_bwd`, so a refresh
+    /// cannot leave the two disagreeing about which weights they differentiate.
+    q_gains: Vec<(String, String, DeviceBuffer)>,
 }
 
 impl Timesfm3Train {
@@ -280,6 +289,22 @@ impl Timesfm3Train {
         let seq_kmask = g.storage_init("seq_kmask", &seq_kmask_host);
         let var_kmask = g.storage_init("var_kmask", &var_kmask_host);
 
+        // One folded-gain buffer per query-attention sublayer, allocated here
+        // and refreshed by every `forward()` - see the `q_gains` field doc.
+        // The reverse pass looks its own up by `query_ln` name rather than
+        // folding a second time, so forward and backward can never drift onto
+        // different gains.
+        let mut q_gains: Vec<(String, String, DeviceBuffer)> = Vec::with_capacity(2 * cfg.num_layers);
+        for l in 0..cfg.num_layers {
+            let p = format!("transformer_stack.layers.{l}");
+            for kind in ["seq_attn", "var_attn"] {
+                let (gain, scale) = (format!("{p}.{kind}.query_ln.weight"), format!("{p}.{kind}.per_dim_scale.per_dim_scale"));
+                let buf = g.storage(cfg.head_dim as u64);
+                refresh_query_gain(g, &ps, &gain, &scale, &buf);
+                q_gains.push((gain, scale, buf));
+            }
+        }
+
         let mut layers = Vec::with_capacity(cfg.num_layers);
         let mut h_in = resblock_out.clone();
         for l in 0..cfg.num_layers {
@@ -295,8 +320,8 @@ impl Timesfm3Train {
             steps.push(rope_seq(g, &cfg, &q, rows, n));
             steps.push(rope_seq(g, &cfg, &k, rows, n));
             let (qn, kn) = (g.storage((rows * d) as u64), g.storage((rows * d) as u64));
-            let q_gain = folded_query_gain(g, &ps, &format!("{p}.seq_attn.query_ln.weight"), &format!("{p}.seq_attn.per_dim_scale.per_dim_scale"));
-            steps.push(rmsnorm_w(g, &q, &q_gain, &qn, cfg.head_dim, rows * cfg.num_heads, cfg.rms_norm_eps));
+            let q_gain = query_gain_of(&q_gains, &format!("{p}.seq_attn.query_ln.weight"));
+            steps.push(rmsnorm_w(g, &q, q_gain, &qn, cfg.head_dim, rows * cfg.num_heads, cfg.rms_norm_eps));
             steps.push(rmsnorm(g, &ps, &k, &format!("{p}.seq_attn.key_ln.weight"), &kn, cfg.head_dim, rows * cfg.num_heads, cfg.rms_norm_eps));
             let ctx = g.storage((rows * d) as u64);
             let probs_seq = g.storage((b * v * cfg.num_heads * n * n) as u64);
@@ -316,8 +341,8 @@ impl Timesfm3Train {
             steps.push(linear(g, &ps, &var_in, &format!("{p}.var_attn.key_proj.weight"), &k2, rows, d, d));
             steps.push(linear(g, &ps, &var_in, &format!("{p}.var_attn.value_proj.weight"), &v2, rows, d, d));
             let (q2n, k2n) = (g.storage((rows * d) as u64), g.storage((rows * d) as u64));
-            let q2_gain = folded_query_gain(g, &ps, &format!("{p}.var_attn.query_ln.weight"), &format!("{p}.var_attn.per_dim_scale.per_dim_scale"));
-            steps.push(rmsnorm_w(g, &q2, &q2_gain, &q2n, cfg.head_dim, rows * cfg.num_heads, cfg.rms_norm_eps));
+            let q2_gain = query_gain_of(&q_gains, &format!("{p}.var_attn.query_ln.weight"));
+            steps.push(rmsnorm_w(g, &q2, q2_gain, &q2n, cfg.head_dim, rows * cfg.num_heads, cfg.rms_norm_eps));
             steps.push(rmsnorm(g, &ps, &k2, &format!("{p}.var_attn.key_ln.weight"), &k2n, cfg.head_dim, rows * cfg.num_heads, cfg.rms_norm_eps));
             let (q2t, k2t, v2t) = (g.storage((rows * d) as u64), g.storage((rows * d) as u64), g.storage((rows * d) as u64));
             steps.push(swap12(g, &q2n, &q2t, b, v, n, d));
@@ -392,7 +417,7 @@ impl Timesfm3Train {
         steps.push(g.step(K_BIAS_ADD, &[&logits, ps.w("output_head.bias")], &[rows as u32, head_out as u32], (rows * head_out) as u32));
 
         let d_logits = g.storage((rows * head_out) as u64);
-        let (bwd_steps, qgain_fold_temps) = build_backward(g, &cfg, &ps, &layers, &resblock_input_buf, &hidden_pre, &hidden_act, &h_in, &d_logits, b, v, n);
+        let (bwd_steps, qgain_fold_temps) = build_backward(g, &cfg, &ps, &q_gains, &layers, &resblock_input_buf, &hidden_pre, &hidden_act, &h_in, &d_logits, b, v, n);
 
         Timesfm3Train {
             gpu,
@@ -414,10 +439,22 @@ impl Timesfm3Train {
             d_logits,
             bwd_steps,
             qgain_fold_temps,
+            q_gains,
+        }
+    }
+
+    /// Refold every effective query gain from the weights `ps` holds RIGHT
+    /// NOW. Called by [`Timesfm3Train::forward`]; the only reason it is
+    /// separate is that the reverse pass reads the same buffers, so the
+    /// contract is "the gain matches the weights the last forward saw".
+    fn refresh_query_gains(&self) {
+        for (gain, scale, buf) in &self.q_gains {
+            refresh_query_gain(&self.gpu, &self.ps, gain, scale, buf);
         }
     }
 
     pub fn forward(&self) {
+        self.refresh_query_gains();
         self.gpu.submit(&[], &self.steps);
     }
 
@@ -487,6 +524,10 @@ impl Timesfm3Train {
     pub fn read_weight(&self, name: &str) -> Vec<f32> {
         self.ps.read_weight(&self.gpu, name)
     }
+    pub fn write_weight(&self, name: &str, data: &[f32]) {
+        assert_eq!(data.len(), self.ps.numel(name), "{name}: weight size");
+        self.gpu.write_f32(self.ps.w(name), data);
+    }
 }
 
 /// `out[m,n] = x[m,k] @ w[n,k]^T` (`w` is a PyTorch `nn.Linear` weight,
@@ -552,17 +593,28 @@ fn swap12(g: &Gpu, src: &DeviceBuffer, dst: &DeviceBuffer, a0: usize, a1: usize,
     g.step(K_SWAP_AXES12_VEC, &[src, dst], &[a0 as u32, a1 as u32, a2 as u32, d as u32], (a0 * a1 * a2 * d) as u32)
 }
 
-/// The effective query gain (`query_ln.weight * 1.442695 *
-/// softplus(per_dim_scale)`), recomputed fresh via a `[head_dim]` host
-/// round-trip - see the module doc for why this cannot be folded once like
-/// inference does. `gain_name`/`scale_name` are the checkpoint's own
+/// Recompute the effective query gain (`query_ln.weight * 1.442695 *
+/// softplus(per_dim_scale)`) from the CURRENT weights, into an
+/// already-allocated `[head_dim]` buffer - see the module doc for why this
+/// cannot be folded once at load time like inference does, and the `q_gains`
+/// field doc for why it has to be redone per forward rather than per
+/// construction. `gain_name`/`scale_name` are the checkpoint's own
 /// `query_ln.weight` / `per_dim_scale.per_dim_scale` names for one attention
-/// sublayer.
-fn folded_query_gain(g: &Gpu, ps: &ParamStore, gain_name: &str, scale_name: &str) -> DeviceBuffer {
+/// sublayer. A `[head_dim]` host round-trip, negligible next to the matmuls
+/// it feeds.
+fn refresh_query_gain(g: &Gpu, ps: &ParamStore, gain_name: &str, scale_name: &str, out: &DeviceBuffer) {
     let gain = g.read(ps.w(gain_name), ps.numel(gain_name));
     let scale = g.read(ps.w(scale_name), ps.numel(scale_name));
     let folded: Vec<f32> = gain.iter().zip(&scale).map(|(&gi, &si)| gi * 1.442_695_1 * softplus(si)).collect();
-    g.storage_init("q_gain_eff", &folded)
+    g.write_f32(out, &folded);
+}
+
+/// The one folded-gain buffer belonging to the sublayer whose query norm is
+/// `gain_name`. Panics rather than folding a fresh one: a miss means the
+/// forward and the reverse disagree about which sublayers exist, which is a
+/// construction bug, not a cache miss.
+fn query_gain_of<'a>(q_gains: &'a [(String, String, DeviceBuffer)], gain_name: &str) -> &'a DeviceBuffer {
+    &q_gains.iter().find(|(n, _, _)| n == gain_name).unwrap_or_else(|| panic!("no folded query gain for {gain_name}")).2
 }
 
 // ==================================== backward ====================================
@@ -700,6 +752,7 @@ fn attn_sublayer_bwd(
     g: &Gpu,
     cfg: &Timesfm3Config,
     ps: &ParamStore,
+    q_gains: &[(String, String, DeviceBuffer)],
     prefix: &str,
     is_seq: bool,
     h_prev_val: &DeviceBuffer,
@@ -783,10 +836,12 @@ fn attn_sublayer_bwd(
 
     // q_normed = rmsnorm(q_pre_norm, fold(query_ln, per_dim_scale)) - the
     // fold-split happens host-side later; here we only need d_q_pre_norm.
-    let q_gain = folded_query_gain(g, ps, &query_ln, &per_dim_scale);
+    // The gain is the forward's OWN buffer, not a second fold of the same two
+    // weights, so `forward()`'s refresh reaches this dispatch too.
+    let q_gain = query_gain_of(q_gains, &query_ln);
     let d_q_dx = g.storage((rows * d) as u64);
     let d_gain_eff = g.storage(cfg.head_dim as u64);
-    steps.extend(rmsnorm_bwd(g, q_pre_norm, &q_gain, &d_qn, &d_q_dx, Some(&d_gain_eff), cfg.head_dim, rows * cfg.num_heads, cfg.rms_norm_eps));
+    steps.extend(rmsnorm_bwd(g, q_pre_norm, q_gain, &d_qn, &d_q_dx, Some(&d_gain_eff), cfg.head_dim, rows * cfg.num_heads, cfg.rms_norm_eps));
     folds.push((query_ln.clone(), per_dim_scale.clone(), d_gain_eff));
 
     // k_normed = rmsnorm(k_pre_norm, key_ln.weight) - a normal trainable weight.
@@ -832,6 +887,7 @@ fn build_backward(
     g: &Gpu,
     cfg: &Timesfm3Config,
     ps: &ParamStore,
+    q_gains: &[(String, String, DeviceBuffer)],
     layers: &[TrainLayer],
     resblock_input: &DeviceBuffer,
     resblock_hidden_pre: &DeviceBuffer,
@@ -875,12 +931,12 @@ fn build_backward(
         steps.push(add2(g, &d_h, &d_ff_in_dx, &d_h2, rows * d));
 
         // ---- variate attention, in reverse ----
-        let (var_steps, d_h1, var_folds) = attn_sublayer_bwd(g, cfg, ps, &prefix, false, &ly.h1, &ly.var_in, &ly.q2, &ly.k2, &ly.v2, &ly.q2n, &ly.k2n, &ly.probs_var, &ly.ctx2, &ly.var_out, &d_h2, b, v, n, rows);
+        let (var_steps, d_h1, var_folds) = attn_sublayer_bwd(g, cfg, ps, q_gains, &prefix, false, &ly.h1, &ly.var_in, &ly.q2, &ly.k2, &ly.v2, &ly.q2n, &ly.k2n, &ly.probs_var, &ly.ctx2, &ly.var_out, &d_h2, b, v, n, rows);
         steps.extend(var_steps);
         folds.extend(var_folds);
 
         // ---- sequence attention, in reverse ----
-        let (seq_steps, d_h_in, seq_folds) = attn_sublayer_bwd(g, cfg, ps, &prefix, true, &ly.h_in, &ly.seq_in, &ly.q, &ly.k, &ly.vv, &ly.qn, &ly.kn, &ly.probs_seq, &ly.ctx, &ly.seq_out, &d_h1, b, v, n, rows);
+        let (seq_steps, d_h_in, seq_folds) = attn_sublayer_bwd(g, cfg, ps, q_gains, &prefix, true, &ly.h_in, &ly.seq_in, &ly.q, &ly.k, &ly.vv, &ly.qn, &ly.kn, &ly.probs_seq, &ly.ctx, &ly.seq_out, &d_h1, b, v, n, rows);
         steps.extend(seq_steps);
         folds.extend(seq_folds);
 
@@ -951,6 +1007,59 @@ mod tests {
 
         assert_eq!(got.len(), want.len());
         assert_eq!(got, want, "Timesfm3Train's forward must match Timesfm3::core_forward bitwise");
+    }
+
+    /// Weights move BETWEEN forwards - that is what an optimiser step is, and
+    /// what a finite-difference harness's perturbation is. The effective query
+    /// gain is a FOLD of two live parameters rather than a tensor of its own,
+    /// so it has to be recomputed from them each time; a gain captured once at
+    /// construction silently pins `query_ln.weight` and `per_dim_scale` to
+    /// their initial values for the rest of the run, while their gradients keep
+    /// being computed and their optimiser state keeps moving.
+    ///
+    /// Asserted BITWISE against a trainer freshly constructed from the same
+    /// updated weights, which is the only definition of "up to date" that does
+    /// not restate the fold's formula a second time.
+    #[test]
+    fn forward_tracks_weights_written_after_construction() {
+        if skip() {
+            return;
+        }
+        let cfg = Timesfm3Config::tiny();
+        let mut weights = tiny_weights(&cfg);
+        let (b, v, n) = (1usize, 2usize, 2usize);
+        let rows = b * v * n;
+        let resblock_input: Vec<f32> = (0..rows * cfg.resblock_in_dim()).map(|i| ((i % 13) as f32 - 6.0) * 0.1).collect();
+        let mask = vec![false; rows];
+
+        let tr = Timesfm3Train::new_on(gpu_core::testgpu::dev(TRAIN_PIPELINES), cfg.clone(), &resblock_input, &mask, b, v, n, &weights);
+
+        // Both halves of the fold, on both attention kinds, plus one ordinary
+        // tensor as a control: the ordinary one is read live from the
+        // ParamStore already, so if IT regressed the mechanism at fault would
+        // be something else entirely.
+        let moved = [
+            "transformer_stack.layers.0.seq_attn.query_ln.weight",
+            "transformer_stack.layers.0.seq_attn.per_dim_scale.per_dim_scale",
+            "transformer_stack.layers.1.var_attn.query_ln.weight",
+            "transformer_stack.layers.1.var_attn.per_dim_scale.per_dim_scale",
+            "transformer_stack.layers.2.ff0.weight",
+        ];
+        for name in moved {
+            let updated: Vec<f32> = weights[name].iter().enumerate().map(|(i, &w)| w + 0.25 + 0.01 * i as f32).collect();
+            tr.write_weight(name, &updated);
+            weights.insert(name.to_string(), updated);
+        }
+        tr.forward();
+        tr.poll_wait();
+        let got = tr.read_logits();
+
+        let fresh = Timesfm3Train::new_on(gpu_core::testgpu::dev(TRAIN_PIPELINES), cfg.clone(), &resblock_input, &mask, b, v, n, &weights);
+        fresh.forward();
+        fresh.poll_wait();
+        let want = fresh.read_logits();
+
+        assert_eq!(got, want, "a forward after write_weight must use the written weights, including the PerDimScale fold");
     }
 
     /// A tiny, dependency-free LCG - just enough determinism for a gradcheck
