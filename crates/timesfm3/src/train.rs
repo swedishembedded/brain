@@ -1017,28 +1017,16 @@ mod tests {
         std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
     }
 
-    fn tiny_weights(cfg: &Timesfm3Config) -> HashMap<String, Vec<f32>> {
-        cfg.param_list()
-            .into_iter()
-            .enumerate()
-            .map(|(i, (k, s))| {
-                let n: usize = s.iter().product();
-                let data: Vec<f32> = (0..n).map(|j| (((i * 131 + j * 17) % 23) as f32 - 11.0) * 0.01).collect();
-                (k, data)
-            })
-            .collect()
-    }
-
     #[test]
     fn trainer_forward_matches_inference_core_forward() {
         if skip() {
             return;
         }
         let cfg = Timesfm3Config::tiny();
-        let weights = tiny_weights(&cfg);
+        let weights = init_weights(&cfg, 7);
         let (b, v, n) = (2usize, 3usize, 4usize);
         let rows = b * v * n;
-        let resblock_input: Vec<f32> = (0..rows * cfg.resblock_in_dim()).map(|i| ((i % 13) as f32 - 6.0) * 0.1).collect();
+        let resblock_input = fixed_input(&cfg, b, v, n, 7);
         // A non-trivial mask (some leading patches masked for one (b,v) row)
         // so the trainer's kmask construction is exercised too, not just the
         // all-visible smoke shape `model.rs`'s own test uses.
@@ -1136,10 +1124,10 @@ mod tests {
             return;
         }
         let cfg = Timesfm3Config::tiny();
-        let mut weights = tiny_weights(&cfg);
+        let mut weights = init_weights(&cfg, 7);
         let (b, v, n) = (1usize, 2usize, 2usize);
         let rows = b * v * n;
-        let resblock_input: Vec<f32> = (0..rows * cfg.resblock_in_dim()).map(|i| ((i % 13) as f32 - 6.0) * 0.1).collect();
+        let resblock_input = fixed_input(&cfg, b, v, n, 7);
         let mask = vec![false; rows];
 
         let tr = Timesfm3Train::new_on(gpu_core::testgpu::dev(TRAIN_PIPELINES), cfg.clone(), &resblock_input, &mask, b, v, n, &weights);
@@ -1172,98 +1160,7 @@ mod tests {
         assert_eq!(got, want, "a forward after write_weight must use the written weights, including the PerDimScale fold");
     }
 
-    /// Whole-model FD gradcheck: `L = dot(c, logits)` for a FIXED random `c`,
-    /// so `dL/dlogits == c` exactly and `backward(c)` must reproduce every
-    /// parameter's true gradient of THIS functional - the standard
-    /// directional FD pattern `crates/gradcheck/tests/glue.rs` uses per
-    /// kernel, applied here to the whole training graph at once. Covers one
-    /// representative tensor from every kind this model has: both attention
-    /// projections, both norm kinds (a plain gain and the PerDimScale-folded
-    /// query gain, whose analytic gradient is the host-side fold-split - the
-    /// highest-risk part of this backward), the FFN, and the resblock/head
-    /// tensors outside the layer loop. Tolerances match the repo-wide
-    /// gradcheck floor (playbook Sec3): h=5e-3, atol=4e-3, rtol=8e-2, never
-    /// loosened.
-    ///
-    /// Unconditional on every backend: the tape is device-independent, so a
-    /// gate that only ran where workgroup reductions are available would be
-    /// gating half the contract. It passes at 1/2/3 layers on both the
-    /// default (Vulkan) and `BRAIN_DEVICE=cpu` backends.
-    #[test]
-    fn backward_matches_finite_difference_across_representative_tensors() {
-        if skip() {
-            return;
-        }
-        let cfg = Timesfm3Config::tiny();
-        let mut weights = tiny_weights(&cfg);
-        let (b, v, n) = (1usize, 2usize, 2usize); // small, but v>1 and n>1 exercise both attention kinds
-        let rows = b * v * n;
-        let mut state = 0x1234_5678_9abc_def0u64;
-        let resblock_input: Vec<f32> = (0..rows * cfg.resblock_in_dim()).map(|_| lcg_next(&mut state) * 0.5).collect();
-        let mask = vec![false; rows];
 
-        let tr = Timesfm3Train::new_on(gpu_core::testgpu::dev(TRAIN_PIPELINES), cfg.clone(), &resblock_input, &mask, b, v, n, &weights);
-        tr.forward();
-        tr.poll_wait();
-        let logits = tr.read_logits();
-        let c: Vec<f32> = (0..logits.len()).map(|_| lcg_next(&mut state) * 0.1).collect();
-        let l0: f32 = c.iter().zip(&logits).map(|(&ci, &li)| ci * li).sum();
-        assert!(l0.abs() > 1e-4, "FD guard: unperturbed L |{l0}| too small - degenerate fixture or zero-stub forward");
-
-        tr.zero_grads();
-        tr.backward(&c);
-
-        let h = 5e-3f32;
-        let (atol, rtol) = (4e-3f32, 8e-2f32);
-        let targets = [
-            "pre_transformer_resblock.hidden_layer.weight",
-            "pre_transformer_resblock.output_layer.weight",
-            "pre_transformer_resblock.residual_layer.weight",
-            "transformer_stack.layers.0.seq_attn.query_proj.weight",
-            "transformer_stack.layers.0.seq_attn.query_ln.weight",
-            "transformer_stack.layers.0.seq_attn.per_dim_scale.per_dim_scale",
-            "transformer_stack.layers.0.seq_attn.key_ln.weight",
-            "transformer_stack.layers.0.seq_attn.out_proj.weight",
-            "transformer_stack.layers.0.var_attn.query_proj.weight",
-            "transformer_stack.layers.0.var_attn.per_dim_scale.per_dim_scale",
-            "transformer_stack.layers.0.ff0.weight",
-            "transformer_stack.layers.0.ff1.weight",
-            "transformer_stack.layers.0.post_ff_ln.weight",
-            "transformer_stack.layers.1.pre_seq_attn_ln.weight",
-            "transformer_stack.layers.2.var_attn.out_proj.weight",
-            "output_head.weight",
-            "output_head.bias",
-        ];
-
-        for name in targets {
-            let base = weights.get(name).unwrap().clone();
-            let dirv: Vec<f32> = (0..base.len()).map(|_| lcg_next(&mut state)).collect();
-            let analytic = tr.read_grad(name);
-            assert_eq!(analytic.len(), base.len(), "{name}: grad shape");
-            let a: f32 = analytic.iter().zip(&dirv).map(|(&gi, &di)| gi * di).sum();
-
-            let plus: Vec<f32> = base.iter().zip(&dirv).map(|(&w, &d)| w + h * d).collect();
-            weights.insert(name.to_string(), plus);
-            let tr_p = Timesfm3Train::new_on(gpu_core::testgpu::dev(TRAIN_PIPELINES), cfg.clone(), &resblock_input, &mask, b, v, n, &weights);
-            tr_p.forward();
-            tr_p.poll_wait();
-            let lp: f32 = c.iter().zip(tr_p.read_logits()).map(|(&ci, li)| ci * li).sum();
-
-            let minus: Vec<f32> = base.iter().zip(&dirv).map(|(&w, &d)| w - h * d).collect();
-            weights.insert(name.to_string(), minus);
-            let tr_m = Timesfm3Train::new_on(gpu_core::testgpu::dev(TRAIN_PIPELINES), cfg.clone(), &resblock_input, &mask, b, v, n, &weights);
-            tr_m.forward();
-            tr_m.poll_wait();
-            let lm: f32 = c.iter().zip(tr_m.read_logits()).map(|(&ci, li)| ci * li).sum();
-
-            weights.insert(name.to_string(), base); // restore before the next target
-
-            let num = (lp - lm) / (2.0 * h);
-            let tol = atol + rtol * a.abs().max(num.abs());
-            println!("timesfm3 FD {name}: analytic {a:.6e} numeric {num:.6e} tol {tol:.3e}");
-            assert!((a - num).abs() <= tol, "{name}: FD mismatch |{a} - {num}| = {} > {tol}", (a - num).abs());
-        }
-    }
 }
 
 

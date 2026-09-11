@@ -68,6 +68,9 @@ brain-cosyvoice.workspace = true
 # resampler (the prefix-LM-masked Qwen2 GQA tower + projector).
 brain-deepseekocr2.workspace = true
 brain-sam1.workspace = true
+# `check_timesfm3` (+ `_one_layer`, `_lora`, the elementwise fold checks) -
+# TimesFM-3's sequence+variate mixing transformer training graph.
+brain-timesfm3.workspace = true
 
 [dev-dependencies]
 brain-testutil.workspace = true

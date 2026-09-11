@@ -86,6 +86,15 @@ pub use bf16_train::{check_matmul_bf16_weight, check_matmul_bf16_weight_eps_swee
 pub mod deepseekocr2;
 pub use deepseekocr2::check_deepseekocr2;
 
+/// TimesFM-3's stacked mixing transformer (`crates/timesfm3`) - the causal
+/// sequence attention and the non-causal cross-VARIATE attention on one
+/// residual stream, plus the PerDimScale query-gain fold that has no kernel
+/// of its own. A bespoke [`CheckModel`] harness over the crate's own
+/// `Timesfm3Train`, not the blanket `model::Model` impl: that trait is
+/// LM-shaped (`vocab()`/`block_size()`) and this is a forecaster.
+pub mod timesfm3;
+pub use timesfm3::{check_timesfm3, check_timesfm3_one_layer};
+
 /// A model the checker can drive: a fixed batch must already be set.
 pub trait CheckModel {
     fn param_names(&self) -> Vec<String>;

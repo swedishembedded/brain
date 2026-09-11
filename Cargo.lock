@@ -1237,6 +1237,7 @@ dependencies = [
  "brain-supir",
  "brain-t5encoder",
  "brain-testutil",
+ "brain-timesfm3",
  "brain-toyautoencoder",
  "brain-toymoe",
  "brain-toypid",
