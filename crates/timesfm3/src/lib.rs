@@ -28,6 +28,7 @@ pub mod import;
 pub mod model;
 pub mod preprocess;
 pub mod spec;
+pub mod train;
 
 pub use config::{Timesfm3Config, Param, QUANTILES};
 pub use forecaster::Timesfm3Forecaster;

@@ -84,14 +84,14 @@ pub const PIPELINES: &[(&str, &str)] = &[
 ];
 
 /// RoPE base (theta) the reference hardcodes for sequence-attention rotation.
-const ROPE_THETA: f32 = 10000.0;
+pub(crate) const ROPE_THETA: f32 = 10000.0;
 
 /// A masked-out key's additive score contribution, matching the reference's
 /// own manual (non-SDPA) masked-attention constant exactly (`model.py`'s
 /// `-1e9` fill, not `attn_scores_qk_kmask`'s own `-3.4e38` causal constant -
 /// the two are numerically indistinguishable after softmax in f32, but this
 /// is the value that actually reproduces the reference's masking path).
-const MASK_NEG: f32 = -1.0e9;
+pub(crate) const MASK_NEG: f32 = -1.0e9;
 
 /// A loaded TimesFM-3 model ready for inference.
 pub struct Timesfm3 {
@@ -377,7 +377,7 @@ impl Timesfm3 {
 
 /// `log(1 + exp(x))`, numerically stable for large `|x|` - the reference's
 /// `torch.nn.functional.softplus` default (`beta=1, threshold=20`).
-fn softplus(x: f32) -> f32 {
+pub(crate) fn softplus(x: f32) -> f32 {
     if x > 20.0 {
         x
     } else {
