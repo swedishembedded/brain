@@ -632,6 +632,8 @@ pub const MATMUL_REG: &str = include_str!("../wgsl/matmul_reg.wgsl");
 pub const MATMUL_REG2: &str = include_str!("../wgsl/matmul_reg2.wgsl");
 /// `wgsl/matmul_reg3.wgsl`
 pub const MATMUL_REG3: &str = include_str!("../wgsl/matmul_reg3.wgsl");
+/// `wgsl/matmul_reg3_64.wgsl`
+pub const MATMUL_REG3_64: &str = include_str!("../wgsl/matmul_reg3_64.wgsl");
 /// `wgsl/matmul_reg3_grouped.wgsl`
 pub const MATMUL_REG3_GROUPED: &str = include_str!("../wgsl/matmul_reg3_grouped.wgsl");
 /// `wgsl/matmul_reg3_splitk.wgsl`
@@ -730,12 +732,12 @@ pub const PAGED_DECODE_SCORES_I8_BATCHED: &str = include_str!("../wgsl/paged_dec
 pub const PAGED_DECODE_SCORES_WG: &str = include_str!("../wgsl/paged_decode_scores_wg.wgsl");
 /// `wgsl/paged_flash_decode.wgsl`
 pub const PAGED_FLASH_DECODE: &str = include_str!("../wgsl/paged_flash_decode.wgsl");
+/// `wgsl/paged_flash_decode_combine.wgsl`
+pub const PAGED_FLASH_DECODE_COMBINE: &str = include_str!("../wgsl/paged_flash_decode_combine.wgsl");
 /// `wgsl/paged_flash_decode_i8.wgsl`
 pub const PAGED_FLASH_DECODE_I8: &str = include_str!("../wgsl/paged_flash_decode_i8.wgsl");
 /// `wgsl/paged_flash_decode_split.wgsl`
 pub const PAGED_FLASH_DECODE_SPLIT: &str = include_str!("../wgsl/paged_flash_decode_split.wgsl");
-/// `wgsl/paged_flash_decode_combine.wgsl`
-pub const PAGED_FLASH_DECODE_COMBINE: &str = include_str!("../wgsl/paged_flash_decode_combine.wgsl");
 /// `wgsl/paged_flash_prefill.wgsl`
 pub const PAGED_FLASH_PREFILL: &str = include_str!("../wgsl/paged_flash_prefill.wgsl");
 /// `wgsl/paged_flash_prefill_hd256.wgsl`
@@ -1291,6 +1293,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("matmul_reg", MATMUL_REG),
     ("matmul_reg2", MATMUL_REG2),
     ("matmul_reg3", MATMUL_REG3),
+    ("matmul_reg3_64", MATMUL_REG3_64),
     ("matmul_reg3_grouped", MATMUL_REG3_GROUPED),
     ("matmul_reg3_splitk", MATMUL_REG3_SPLITK),
     ("matmul_reg4", MATMUL_REG4),
@@ -1340,9 +1343,9 @@ pub const ALL: &[(&str, &str)] = &[
     ("paged_decode_scores_i8_batched", PAGED_DECODE_SCORES_I8_BATCHED),
     ("paged_decode_scores_wg", PAGED_DECODE_SCORES_WG),
     ("paged_flash_decode", PAGED_FLASH_DECODE),
+    ("paged_flash_decode_combine", PAGED_FLASH_DECODE_COMBINE),
     ("paged_flash_decode_i8", PAGED_FLASH_DECODE_I8),
     ("paged_flash_decode_split", PAGED_FLASH_DECODE_SPLIT),
-    ("paged_flash_decode_combine", PAGED_FLASH_DECODE_COMBINE),
     ("paged_flash_prefill", PAGED_FLASH_PREFILL),
     ("paged_flash_prefill_hd256", PAGED_FLASH_PREFILL_HD256),
     ("paged_kv_append", PAGED_KV_APPEND),

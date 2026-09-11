@@ -6649,3 +6649,152 @@ instance VRAM doubling noted above are real and unmeasured at real scale.
 
 **Commit**: one - `qwen35moe: migrate prefill/inference MoE dispatch to
 the grouped GEMM (M5.12a)`.
+
+### M8.15 - Tile-shape schedule autotuning: a 64x64 GEMM tile variant, measured and NOT wired in (killed hypothesis)
+
+`backend_api::select::Schedule` (M8.4) had exactly one tunable field,
+`split_k`. This milestone widened it with a second, genuinely orthogonal
+axis - `TileShape { Wide128, Narrow64 }` - and built the whole chain a real
+tile-shape search needs: a new kernel, its catalogue registration, its
+correctness gate, and its wiring into `AutoTuner::resolve_schedule`'s
+candidate generation and dispatch. The honest outcome, after measuring on
+real hardware, is that the new tile shape is NOT wired into the live
+autotuner search - a killed hypothesis, with the numbers below, exactly the
+valid outcome this milestone's own instructions asked for.
+
+**What was built.** `crates/kernels/wgsl/matmul_reg3_64.wgsl`: `matmul_
+reg3.wgsl`'s IDENTICAL algorithm (same `Params`, same `@workgroup_size(256)`,
+same padded-shared / interleaved-register layout), mechanically retiled from
+a 128x128 output tile to 64x64 - each thread's register block shrinks from
+8x8 (64 accumulators) to 4x4 (16), the per-K-chunk staging loop from 4
+elements/thread to 2, and the padded shared stride from 129 to 65 (shared
+usage 4160 B vs 8256 B, both far under this iGPU's 32 KiB ceiling). The
+motivating idea: `matmul_reg3`'s tile grid is `ceil(m/128)*ceil(n/128)`, so a
+prefill chunk whose row count is not a multiple of 128 wastes real lanes - a
+48-row chunk on a 128-row tile computes 80 wasted rows (62.5%) - and a 64-row
+tile would halve that waste while roughly quadrupling the (cheaper) tile
+count. Registered in the catalogue (`kernels-regen`, 474 kernels now,
+`gen-kernel-table.py --check` clean) and in `qwen3::serve::Engine`'s own
+`PIPELINES` table, appended at the END (index 41) - inserting it anywhere
+else would have silently shifted every subsequent `const NAME: usize = N`
+pipeline index in that file, a mistake caught and corrected before it ever
+compiled.
+
+**Correctness gate, before any measurement** (this milestone's own explicit
+order): `crates/gpu-core/tests/kernel_catalog_validation.rs`'s `matmul_
+family_is_correct_and_lands_on_gpu_when_hardware_available` extended with a
+`matmul_reg3_64` case, a `[37, 64, 41]` shape (not a multiple of 64 on any of
+`m`/`k`/`n`, so a masking or stride slip on the smaller tile would show)
+against the from-first-principles host GEMM: `rel < 5e-4` on this real Intel
+Arc iGPU. Mutation-verified: swapping the fourth row-group's stride
+(`row0+ty+48` -> `row0+ty+32`, duplicating the third) moved the relative
+error to `9.974e-1` (essentially uncorrelated output on that row group) -
+caught, then reverted and re-confirmed green.
+
+**Schedule/TileShape API** (`crates/backend-api/src/select.rs`): `Schedule`
+gained a `tile: TileShape` field; `Schedule::UNSPLIT` now pins
+`TileShape::Wide128` explicitly, `Schedule::NARROW_TILE` is the new
+`{ split_k: 1, tile: Narrow64 }` constant, and `Schedule::splitk(k)` is a new
+convenience constructor for the (still far more common) "vary split-K only,
+stay Wide128" call sites - `as_str`/`parse_str` extended and round-trip-
+tested for both tile values. `qwen3::serve::Engine::splitk_slices` (which
+returned only `Option<u32>`, discarding any tile choice) is renamed `gemm_
+schedule` and returns the full `Option<Schedule>`; `Engine::mm_into` now
+matches on `sched.tile` and would dispatch `matmul_reg3_64` (one dispatch,
+no fold - no `matmul_reg3_64_splitk` kernel exists, so `Narrow64` only ever
+pairs with `split_k == 1`) if a measurement ever chose it.
+`Engine::measure_splitk` dispatches whichever kernel the `Schedule` it is
+handed actually names. This refactor is PROVABLY behaviour-preserving for
+the only path production ever takes (`TileShape::Wide128`): `tiles = m.
+div_ceil(128)` is constant across an entire `m.next_power_of_two()` bucket
+(both are powers of two, so `ceil(m/128)` cannot change within one bucket's
+half-open dyadic range), so the old code's "check `guess <= 1` against the
+REAL `m` before ever consulting the tuned table" and the new code's "consult
+the tuned table first, unconditionally" agree on every input - confirmed by
+the full existing `qwen3::serve::tests` suite staying at the same 55
+passed / 3 pre-existing-and-unrelated-failed count before and after.
+
+**Measurement** (the milestone's own required gate before wiring anything
+in): a new `#[ignore]`d test, `narrow_tile_vs_wide_tile_measured_at_real_
+model_shapes`, interleaved min-of-5 per shape, each candidate preceded by
+its own 2s DVFS ramp (`kq_gemv_reg_speed_bench.rs`'s own template for this
+exact Intel Arc Meteor Lake iGPU), at two REAL shapes:
+
+- `m=128, k=1024, n=2048` (Qwen3-0.6B's qkv projection, `matmul_reg3_
+  splitk.wgsl`'s own documented worked example) - `m` an exact multiple of
+  128, so `Wide128` wastes nothing: the control. Six repeat runs, ratio
+  (wide/narrow, >1 means narrow is faster) `0.519, 0.600, 0.617, 0.543,
+  0.657, 0.638` - narrow64 measured 1.5x-2x SLOWER every single time, never
+  once close to parity. A clean, repeatable REGRESSION.
+- `m=48, k=1024, n=3072` (Qwen3-0.6B's gate/up MLP projection at a 48-row
+  prefill chunk just above `DECODE_REGIME_MAX_ROWS`=32 - wasting 80 of 128
+  wide-tile rows vs 16 of 64 narrow-tile rows) - the shape the narrow tile's
+  whole argument is FOR. Six repeat runs, ratio `1.150, 1.061, 0.955, 1.190,
+  0.961, 1.087` - narrow64 faster in 4 of 6 (up to +19%), slower in 2 of 6
+  (down to -4.5%): the measured ratio crossed 1.0 in BOTH directions across
+  the six trials. M8.4's own split-K A/B (this same file, above) required
+  four rounds that never once flipped direction before calling a margin
+  "real, repeatable"; this result does not clear that bar - it is
+  indistinguishable from this box's own documented thermal/load noise.
+
+**Killed hypothesis**: that a 64x64 register tile beats the existing 128x128
+one anywhere in this repo's real model shapes, on this hardware. Ruled out
+at the control shape decisively (a repeatable, large loss); left genuinely
+undecided (not a win) at the one shape hand-picked to favour it. Consequence:
+`gemm_schedule_candidates` does NOT append `Schedule::NARROW_TILE` to its
+output (reverted to producing only `TileShape::Wide128` split-K candidates,
+exactly M8.4's shape, `mid.iter().all(|s| s.tile == TileShape::Wide128)`
+pinned by a dedicated assertion), and `Engine::tune_splitk`'s build-time
+search does not offer it either (reverted to the exact M8.4 `if guess <= 1
+|| !fits(guess) { continue; }` gate, `source_fingerprint` back to only the
+two split-K kernel sources) - so `self.tuned_splitk` can never contain a
+`Narrow64` entry in production, and `Engine::mm_into`'s `Narrow64` dispatch
+arm, while correct and reachable in principle, is never exercised by a real
+serving engine today. The kernel, the correctness gate, and the `Schedule`/
+`TileShape` API stay in the tree as real, tested, available infrastructure -
+a future device, a future model shape, or a future `matmul_reg3_64_splitk`
+sibling could reopen this without redoing the plumbing - but nothing in the
+live default path changed behaviour.
+
+**Not claimed**: a repeatable win for `TileShape::Narrow64` anywhere - this
+session looked for one at two real shapes and did not find one. Every other
+`m`/`n`/`k` combination this repo's models actually dispatch is unmeasured;
+a different shape (e.g. a much narrower `n`, or an `m` deep inside a bucket
+rather than near its floor) could plausibly measure differently, and is
+exactly the kind of follow-up `gemm_schedule_candidates`'s own doc comment
+now points at. No `matmul_reg3_64_splitk` variant was built (`Narrow64` only
+ever pairs with `split_k == 1`) - combining the two axes remains a real,
+unbuilt follow-up. Backward/gradient paths untouched (this is a forward-only
+inference-serving GEMM path; `gradcheck` not re-run, per this ledger's own
+"only required for backward-touching changes" convention, e.g. M5.12a
+above).
+
+**Gates**: `cargo clippy --release --offline -p brain-backend-api -p
+brain-qwen3 -p brain-kernels -p brain-gpu-core --all-targets --all-features
+-- -D warnings` clean. `python3 scripts/spdx/check.py` clean on every
+touched/new file. `python3 scripts/build/gen-kernel-table.py --check` clean
+(474 kernels). `bash scripts/gates/check-kernel-selection.sh` and `bash
+scripts/gates/check-no-doc-citations.sh` both clean.
+`cargo test --release --offline -p brain-backend-api --lib` 60/60 green
+(also fixed one genuinely pre-existing, unrelated failure found on the spot
+below). `cargo test --release --offline -p brain-qwen3 --lib serve::` 55
+passed, the same 3 pre-existing environment-specific failures as on a clean
+checkout (this sandbox's `max_buffer_size` is smaller than three tests' giant
+synthetic vocab tables - confirmed via `git stash`, unrelated to this
+milestone, not attempted here). `cargo test -p brain-gpu-core --test
+kernel_catalog_validation` and `cargo test -p brain-wgsl-cpu --test
+compile_all` both green.
+
+**Fixed on the spot**: `crates/backend-api/src/select.rs`'s
+`paged_attention_fused_only_offers_the_fused_kernel_at_causal_chunk_f32`
+test was already red on a clean checkout (confirmed via `git stash`) -
+the immediately-preceding M2.7 commit added a real `Op::PagedAttentionFused`
+decode arm (`FusedFlash` at `shape.m == 1 && shape.n <= 128 &&
+Dtype::F32`, a measured win at bsz==1) but never updated this test's blanket
+"decode always stays Reference" assertion to match. Updated the test (and
+its stale doc comment) to assert the CURRENT, intentional M2.7 selection
+rule instead of the pre-M2.7 one, rather than leaving an unrelated red test
+in a file this milestone was already touching.
+
+**Commit**: one - `kernels, backend-api, qwen3: tile-shape schedule
+autotuning, a 64x64 GEMM variant measured and not wired in (M8.15)`.

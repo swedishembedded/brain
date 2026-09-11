@@ -1050,55 +1050,117 @@ impl KernelVariant {
     }
 }
 
+/// Which PHYSICAL output-tile size a register-tiled GEMM's [`Schedule`]
+/// dispatches (M8.15) - the retiling BM/BN axis [`Schedule`]'s own doc names
+/// as a real, documented follow-up: `matmul_reg3.wgsl`'s 128x128 tile
+/// (`Wide128`, the only shape that existed through M8.4) and `matmul_reg3_
+/// 64.wgsl`'s 64x64 retiling of the IDENTICAL algorithm (`Narrow64`, M8.15) -
+/// see that kernel's own header for why a smaller tile can win (less wasted
+/// tile area on an M/N that does not fill a 128-row/col tile). Unlike
+/// split-K, a tile-shape change needs a DIFFERENT compiled kernel (the
+/// register block size is baked into the WGSL text, not a runtime `Params`
+/// field), so widening this enum means shipping a new kernel variant, not
+/// just a new dispatch argument - `Narrow64` only ever pairs with
+/// `split_k == 1` today (no `matmul_reg3_64_splitk` exists yet - see
+/// `gemm_schedule_candidates`'s own doc for why that is a deliberately
+/// unbuilt combination, not an oversight).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum TileShape {
+    /// `matmul_reg3`/`matmul_reg3_splitk`'s 128x128 output tile, 8x8
+    /// register block per thread - the only shape before M8.15.
+    Wide128,
+    /// `matmul_reg3_64`'s 64x64 output tile, 4x4 register block per thread
+    /// (M8.15) - more, cheaper workgroups; wins where `Wide128`'s tile
+    /// grid wastes a lot of a 128-row/col tile on a shape that does not
+    /// fill it (see that kernel's own header for the worked argument).
+    Narrow64,
+}
+
 /// A SCHEDULE choice for an already-selected [`KernelVariant`] (M8.4) - which
 /// PHYSICAL dispatch of that implementation family runs, once tuning widens
-/// past "which variant" to "which schedule". Only the register-tiled GEMM
-/// family's split-K factor is populated today: `matmul_reg3`-shaped kernels
+/// past "which variant" to "which schedule". Two axes are populated today
+/// (M8.15 added the second): the register-tiled GEMM family's split-K factor
+/// (M8.4) and its output-[`TileShape`] (M8.15). `matmul_reg3`-shaped kernels
 /// hand-unroll their tile/register-block/staging-loop literals from BM/BN/BK/
 /// workgroup-thread-count (see `matmul_reg3.wgsl`'s own `As`/`Bs` shared
 /// arrays, sized as a fixed literal derived from those consts, and the
 /// staging loop's hardcoded `4`-element-per-thread trip count) rather than
 /// deriving them from `kernels::template`'s tunable consts at compile time -
-/// so genuinely retiling BM/BN/BK/vector-width/pipeline-depth needs new
-/// kernel engineering (deriving those literals from their consts, sizing the
-/// shared arrays to a safe upper bound across the grid) that is a real,
-/// documented follow-up, not attempted here. Split-K is different: `matmul_
-/// reg3_splitk.wgsl` already takes its slice count as a RUNTIME `Params`
-/// field (`p.slices`), so varying it needs no recompilation and carries none
-/// of that array-bound risk - genuinely orthogonal to correctness (any
-/// `slices >= 1` produces the same answer, only the dispatch shape and the
-/// fold's read amplification change), which is exactly what makes it safe to
-/// widen the search over.
+/// so a genuinely GENERAL retiling (an arbitrary BM/BN/BK/vector-width/
+/// pipeline-depth, derived from tunable consts rather than a second hand-
+/// unrolled kernel file) needs new kernel-generation engineering that is
+/// still a real, documented follow-up, not attempted here; M8.15 instead
+/// ships ONE additional hand-written tile size (`TileShape::Narrow64`,
+/// `matmul_reg3_64.wgsl`) rather than an exhaustive search space. Split-K is
+/// different: `matmul_reg3_splitk.wgsl` already takes its slice count as a
+/// RUNTIME `Params` field (`p.slices`), so varying it needs no recompilation
+/// and carries none of that array-bound risk - genuinely orthogonal to
+/// correctness (any `slices >= 1` produces the same answer, only the
+/// dispatch shape and the fold's read amplification change), which is
+/// exactly what makes it safe to widen the search over.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Schedule {
     /// How many workgroups the contraction (`k`) is split across before a
     /// reduce pass folds the partials - `matmul_reg3_splitk` + a
     /// `dw_splitk_reduce`-shaped fold at `slices > 1`, the plain unsplit
-    /// `matmul_reg3` at `slices == 1`.
+    /// `matmul_reg3` at `slices == 1`. Only meaningful at `tile ==
+    /// TileShape::Wide128` today - see [`TileShape::Narrow64`]'s own doc.
     pub split_k: u32,
+    /// Which output-tile size to dispatch (M8.15) - see [`TileShape`].
+    pub tile: TileShape,
 }
 
 impl Schedule {
-    /// The unsplit schedule - what every `RegisterTiled` GEMM dispatches
-    /// before this milestone, and what a device/shape with no schedule
-    /// tuning applied to it keeps dispatching.
-    pub const UNSPLIT: Schedule = Schedule { split_k: 1 };
+    /// The unsplit, wide-tile schedule - what every `RegisterTiled` GEMM
+    /// dispatched before M8.4/M8.15, and what a device/shape with no
+    /// schedule tuning applied to it keeps dispatching.
+    pub const UNSPLIT: Schedule = Schedule { split_k: 1, tile: TileShape::Wide128 };
+
+    /// The narrow-tile schedule (M8.15): `matmul_reg3_64`, unsplit -
+    /// correctness-gated, real, dispatchable, but NOT manufactured by
+    /// [`gemm_schedule_candidates`]'s live search (see that function's own
+    /// doc for the measured reason). A caller that wants to measure or
+    /// dispatch it explicitly still can - `qwen3::serve::Engine::
+    /// measure_splitk`/`Engine::mm_into` both handle `TileShape::Narrow64`
+    /// correctly, it is simply never offered to the automatic build-time
+    /// tuning search.
+    pub const NARROW_TILE: Schedule = Schedule { split_k: 1, tile: TileShape::Narrow64 };
+
+    /// A wide-tile schedule at a given split-K factor - the M8.4-era
+    /// candidates, now spelled with the M8.15 `tile` field pinned to
+    /// `Wide128` so call sites that only ever vary split-K stay one field
+    /// wide.
+    pub fn splitk(split_k: u32) -> Schedule {
+        Schedule { split_k, tile: TileShape::Wide128 }
+    }
 
     /// Stable name for persistence (the tune cache stores these) - mirrors
     /// [`KernelVariant::as_str`]'s convention.
     pub fn as_str(self) -> String {
-        format!("split_k={}", self.split_k)
+        let tile = match self.tile {
+            TileShape::Wide128 => "wide128",
+            TileShape::Narrow64 => "narrow64",
+        };
+        format!("tile={tile}/split_k={}", self.split_k)
     }
 
     /// Inverse of [`Schedule::as_str`].
     pub fn parse_str(s: &str) -> Option<Schedule> {
-        Some(Schedule { split_k: s.strip_prefix("split_k=")?.parse().ok()? })
+        let rest = s.strip_prefix("tile=")?;
+        let (tile, rest) = rest.split_once('/')?;
+        let tile = match tile {
+            "wide128" => TileShape::Wide128,
+            "narrow64" => TileShape::Narrow64,
+            _ => return None,
+        };
+        let split_k = rest.strip_prefix("split_k=")?.parse().ok()?;
+        Some(Schedule { split_k, tile })
     }
 }
 
 /// The bounded, explicit split-K grid to measure for a register-tiled GEMM
 /// whose STATIC policy already picked `guess` slices (e.g. `qwen3::serve::
-/// Engine::splitk_slices`'s own occupancy-target heuristic, itself measured
+/// Engine::gemm_schedule`'s own occupancy-target heuristic, itself measured
 /// against real hardware per that function's own doc) - `guess` is ALWAYS
 /// first, so a device/shape where nothing measures faster keeps today's exact
 /// behaviour (the same "static default is the head" invariant [`candidates`]
@@ -1108,13 +1170,28 @@ impl Schedule {
 /// directions a starved-occupancy heuristic can most plausibly have gotten
 /// wrong, not an exhaustive sweep of every slice count up to `max_slices`.
 /// At most 3 candidates, by construction.
+///
+/// Every candidate this returns is `TileShape::Wide128` -
+/// [`Schedule::NARROW_TILE`] (M8.15, `matmul_reg3_64`) is deliberately NOT
+/// offered here: a real-hardware A/B (`qwen3::serve::Engine::
+/// tune_splitk`'s own doc has the measured numbers) found it a clean,
+/// repeatable LOSS at an M aligned to 128 and, at the one ragged-M shape it
+/// was hypothesised to help, a result too close to this box's own
+/// documented noise floor to call a genuine win - direction flipped across
+/// repeat trials, unlike split-K's own A/B above which never flipped once.
+/// `Schedule::NARROW_TILE` and its dispatch (`matmul_reg3_64` is correctness-
+/// gated and registered in the catalogue) stay real, available API - a
+/// caller may still construct and measure it directly - but this function,
+/// the one `Engine::tune_splitk`'s live build-time search actually calls,
+/// does not manufacture it, per this milestone's own "only wire in a
+/// measured win" rule.
 pub fn gemm_schedule_candidates(guess: u32, max_slices: u32) -> Vec<Schedule> {
     let max_slices = max_slices.max(1);
-    let mut out = vec![Schedule { split_k: guess.clamp(1, max_slices) }];
+    let mut out = vec![Schedule::splitk(guess.clamp(1, max_slices))];
     for cand in [guess / 2, guess.saturating_mul(2)] {
         let cand = cand.clamp(1, max_slices);
         if !out.iter().any(|s| s.split_k == cand) {
-            out.push(Schedule { split_k: cand });
+            out.push(Schedule::splitk(cand));
         }
     }
     out
@@ -1705,15 +1782,22 @@ mod tests {
         assert_eq!(s.select(Op::PagedAttention, i8_shape, &cpu_caps()), KernelVariant::Reference);
     }
 
-    /// M2.4's own Op: `FusedFlash` is reachable ONLY at `k = 1` (causal-chunk
-    /// prefill) and `Dtype::F32` - `paged_flash_prefill`'s own measured win
-    /// (`qwen_bench flash-prefill`) and its only storage tier. Every other
-    /// `(k, dtype)` pair - decode (`k = 0`) at ANY dtype, inheriting M2.1/
-    /// M2.2's own measured non-win unconditionally, and prefill at a
-    /// non-F32 storage tier, which has no fused kernel yet - stays
-    /// `Reference`-only, on both a GPU and the CPU JIT (the CPU JIT could
-    /// never run `FusedFlash` anyway - `workgroup_reductions` is false
-    /// there, the SAME correctness gate `Op::PagedAttention`'s own
+    /// M2.4's own Op: `FusedFlash` is reachable at `k = 1` (causal-chunk
+    /// prefill), `Dtype::F32`, `n <= 128 || n == 256` -
+    /// `paged_flash_prefill`'s own measured win (`qwen_bench flash-prefill`)
+    /// and its only storage tier and `n` ceiling (`paged_flash_prefill_
+    /// hd256`'s own M2.6 sibling, prefill-only). A prefill `n` outside that
+    /// set, and every non-F32 prefill storage tier (no fused kernel exists
+    /// there yet), stays `Reference`-only. Decode (`k = 0`) inherited M2.1/
+    /// M2.2's own measured non-win unconditionally UNTIL M2.7's split-key
+    /// `paged_flash_decode_split`/`_combine` pair reopened it and found a
+    /// real, repeatable win at `bsz == 1` specifically (a clear loss at
+    /// `bsz >= 4`, mixed at `bsz == 2` - see that match arm's own doc above
+    /// [`candidates`]'s `Op::PagedAttentionFused` case) - so decode is
+    /// `FusedFlash` only at `shape.m == 1 && shape.n <= 128 &&
+    /// dtype == Dtype::F32`, `Reference` everywhere else. Every `FusedFlash`
+    /// case stays `Reference` on the CPU JIT (`workgroup_reductions` is
+    /// false there, the SAME correctness gate `Op::PagedAttention`'s own
     /// `WorkgroupPerOutput` arm uses).
     #[test]
     fn paged_attention_fused_only_offers_the_fused_kernel_at_causal_chunk_f32() {
@@ -1721,9 +1805,10 @@ mod tests {
         for m in [1u32, 128, 2048] {
             for n in [16u32, 512, 8192] {
                 let prefill_f32 = shape(m, n, 1, Dtype::F32);
+                let prefill_wins = n <= 128 || n == 256;
                 assert_eq!(
                     s.select(Op::PagedAttentionFused, prefill_f32, &gpu_caps()),
-                    KernelVariant::FusedFlash,
+                    if prefill_wins { KernelVariant::FusedFlash } else { KernelVariant::Reference },
                     "m={m} n={n}"
                 );
                 assert_eq!(
@@ -1739,12 +1824,16 @@ mod tests {
                         "m={m} n={n} dtype={dtype:?}: no fused prefill kernel at this storage tier yet"
                     );
                 }
+                // M2.7: decode wins ONLY at bsz==1 (`shape.m == 1`), n<=128,
+                // F32 - the split-key FlashDecode pair's one measured regime.
+                let decode_wins = m == 1 && n <= 128;
                 for dtype in [Dtype::F32, Dtype::BF16, Dtype::F16, Dtype::I8, Dtype::Q4] {
                     let decode = shape(m, n, 0, dtype);
+                    let want = if decode_wins && dtype == Dtype::F32 { KernelVariant::FusedFlash } else { KernelVariant::Reference };
                     assert_eq!(
                         s.select(Op::PagedAttentionFused, decode, &gpu_caps()),
-                        KernelVariant::Reference,
-                        "m={m} n={n} dtype={dtype:?}: decode's fused kernels never measured a win"
+                        want,
+                        "m={m} n={n} dtype={dtype:?}: decode's fused kernels only measured a win at bsz==1, n<=128, F32 (M2.7)"
                     );
                 }
             }
@@ -2097,41 +2186,48 @@ mod tests {
     #[test]
     fn schedule_round_trips_through_persistence() {
         for split_k in [1u32, 2, 4, 8, 48] {
-            let s = Schedule { split_k };
-            assert_eq!(Schedule::parse_str(&s.as_str()), Some(s), "{s:?}");
+            for tile in [TileShape::Wide128, TileShape::Narrow64] {
+                let s = Schedule { split_k, tile };
+                assert_eq!(Schedule::parse_str(&s.as_str()), Some(s), "{s:?}");
+            }
         }
         assert_eq!(Schedule::parse_str("garbage"), None);
-        assert_eq!(Schedule::parse_str("split_k=nope"), None);
+        assert_eq!(Schedule::parse_str("tile=wide128/split_k=nope"), None);
+        assert_eq!(Schedule::parse_str("tile=huge256/split_k=1"), None);
     }
 
     /// The split-K grid is bounded (at most 3 candidates, never exhaustive),
     /// always contains the static `guess` FIRST (the same "static default is
     /// the head" invariant `candidates_head_is_the_default_policy` already
     /// requires of `KernelVariant`), stays clamped inside `[1, max_slices]`
-    /// even when `guess`'s neighbours would fall outside it, and never
+    /// even when `guess`'s neighbours would fall outside it, never
     /// duplicates a candidate (the `guess=1` case, where `guess/2` rounds
-    /// back down to the same `1` the clamp already produced).
+    /// back down to the same `1` the clamp already produced), and every
+    /// candidate is `TileShape::Wide128` - M8.15's `Schedule::NARROW_TILE`
+    /// is deliberately NOT manufactured here (see this function's own doc
+    /// for the measured reason).
     #[test]
     fn gemm_schedule_candidates_are_bounded_and_guess_first() {
         let mid = gemm_schedule_candidates(8, 48);
-        assert_eq!(mid[0], Schedule { split_k: 8 }, "the static guess must be first");
-        assert_eq!(mid, vec![Schedule { split_k: 8 }, Schedule { split_k: 4 }, Schedule { split_k: 16 }]);
+        assert_eq!(mid[0], Schedule::splitk(8), "the static guess must be first");
+        assert_eq!(mid, vec![Schedule::splitk(8), Schedule::splitk(4), Schedule::splitk(16)]);
         assert!(mid.len() <= 3, "the grid must never be exhaustive");
+        assert!(mid.iter().all(|s| s.tile == TileShape::Wide128), "M8.15's narrow tile is not auto-offered - a measured non-win");
 
         // guess=1: guess/2 == 0, clamped to 1 -- must not duplicate the head.
         let low = gemm_schedule_candidates(1, 48);
-        assert_eq!(low, vec![Schedule { split_k: 1 }, Schedule { split_k: 2 }]);
+        assert_eq!(low, vec![Schedule::splitk(1), Schedule::splitk(2)]);
 
         // guess at the ceiling: guess*2 clamps back down to max_slices,
         // which must not duplicate a candidate either.
         let high = gemm_schedule_candidates(48, 48);
-        assert_eq!(high, vec![Schedule { split_k: 48 }, Schedule { split_k: 24 }]);
+        assert_eq!(high, vec![Schedule::splitk(48), Schedule::splitk(24)]);
 
         // A caller-supplied guess above max_slices is clamped, not trusted
         // verbatim -- the tuner must never be asked to measure a slice count
         // the scratch buffer was not sized for.
         let over = gemm_schedule_candidates(96, 48);
-        assert_eq!(over[0], Schedule { split_k: 48 });
+        assert_eq!(over[0], Schedule::splitk(48));
     }
 
     /// [`AutoTuner::resolve_schedule`]: the exact `resolve` proof
@@ -2177,8 +2273,8 @@ mod tests {
             calls += 1;
             Some(if s.split_k == 2 { 1.0 } else { 2.0 })
         };
-        assert_eq!(t.resolve_schedule(Op::MatMul, sh, &cands, &mut measure), Schedule { split_k: 2 });
-        assert_eq!(t.resolve_schedule(Op::MatMul, sh, &cands, &mut measure), Schedule { split_k: 2 });
+        assert_eq!(t.resolve_schedule(Op::MatMul, sh, &cands, &mut measure), Schedule::splitk(2));
+        assert_eq!(t.resolve_schedule(Op::MatMul, sh, &cands, &mut measure), Schedule::splitk(2));
         assert_eq!(calls, 2, "both candidates measured once; the second resolve is a memo hit");
 
         let t2 = AutoTuner {
@@ -2188,7 +2284,7 @@ mod tests {
             schedule_memo: Default::default(),
         };
         let mut no_measure = |_: Schedule| -> Option<f64> { panic!("stored winner must be reused") };
-        assert_eq!(t2.resolve_schedule(Op::MatMul, sh, &cands, &mut no_measure), Schedule { split_k: 2 });
+        assert_eq!(t2.resolve_schedule(Op::MatMul, sh, &cands, &mut no_measure), Schedule::splitk(2));
 
         // The persisted schedule key must not collide with `resolve`'s own
         // KernelVariant key for the identical (op, shape) -- storing a
@@ -2203,7 +2299,7 @@ mod tests {
         let mut no_measure2 = |_: Schedule| -> Option<f64> { panic!("disabled tuner must not measure") };
         assert_eq!(
             td.resolve_schedule(Op::MatMul, sh, &cands, &mut no_measure2),
-            Schedule { split_k: 1 },
+            Schedule::splitk(1),
             "disabled = the static guess (candidates[0])"
         );
     }

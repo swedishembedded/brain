@@ -16,7 +16,7 @@ use std::collections::HashMap;
 
 use gpu_core::select::{
     AutoTuner, CachedSelector, DefaultSelector, Dtype, KernelSelector, KernelVariant, Op, OpShape,
-    Schedule, gemm_schedule_candidates, DECODE_REGIME_MAX_ROWS,
+    Schedule, TileShape, gemm_schedule_candidates, DECODE_REGIME_MAX_ROWS,
 };
 use gpu_core::{DeviceBuffer, DeviceCaps, Gpu, Step};
 use model::block::{self, KernelIds};
@@ -146,6 +146,12 @@ const MATMUL_TILE: usize = 38;
 // `bsz >= 4`) - see `Engine::batched_tape`'s own decode dispatch.
 const PAGED_FLASH_DECODE_SPLIT: usize = 39;
 const PAGED_FLASH_DECODE_COMBINE: usize = 40;
+// M8.15: `matmul_reg3`'s IDENTICAL register-tiled algorithm retiled to a
+// 64x64 output tile (`Schedule`/`TileShape::Narrow64`) - fewer wasted lanes
+// on an M/N that does not fill a 128-row/col tile, traded against more
+// (cheaper) workgroups. Measured, not assumed - see `Engine::gemm_schedule`'s
+// own doc for the actual numbers.
+const MATMUL_REG3_64: usize = 41;
 
 const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -189,6 +195,7 @@ const PIPELINES: &[(&str, &str)] = &[
     ("matmul_tile", kernels::MATMUL_TILE),
     ("paged_flash_decode_split", kernels::PAGED_FLASH_DECODE_SPLIT),
     ("paged_flash_decode_combine", kernels::PAGED_FLASH_DECODE_COMBINE),
+    ("matmul_reg3_64", kernels::MATMUL_REG3_64),
 ];
 
 /// The `model::ops::Ops` façade's required kernel set (B7), registered on a
@@ -1307,29 +1314,36 @@ impl Engine {
     /// Checked ahead of split-K, not after: a weight too large for one
     /// binding at all is a correctness gap, not a performance choice, and
     /// `Self::mm_tiled_into`'s only real caller (the LM head) dispatches at
-    /// decode row counts anyway, where `Self::splitk_slices` already declines
+    /// decode row counts anyway, where `Self::gemm_schedule` already declines
     /// (`m <= DECODE_REGIME_MAX_ROWS`).
     fn mm_into(&self, s: &mut Vec<Step>, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, m: u32, k: u32, n: u32) {
         if !self.fits_one_binding(k, n) {
             self.mm_tiled_into(s, x, w, out, m, k, n);
             return;
         }
-        match self.splitk_slices(m, k, n) {
-            Some(slices) => {
+        match self.gemm_schedule(m, k, n) {
+            // M8.15: the narrow tile is unsplit by construction (see
+            // `TileShape::Narrow64`'s own doc - no `matmul_reg3_64_splitk`
+            // kernel exists), so it is ONE dispatch, no fold.
+            Some(sched) if sched.tile == TileShape::Narrow64 => {
+                let tiles64 = m.div_ceil(64) * n.div_ceil(64);
+                s.push(self.gpu.step(MATMUL_REG3_64, &[x, w, out], &[m, k, n], tiles64 * 256));
+            }
+            Some(sched) => {
                 let tiles = m.div_ceil(128) * n.div_ceil(128);
                 let part = self.splitk_part.as_ref().expect("split-K chosen without a scratch buffer");
                 s.push(self.gpu.step(
                     MATMUL_REG3_SPLITK,
                     &[x, w, part],
-                    &[m, k, n, slices],
-                    slices * tiles * 256,
+                    &[m, k, n, sched.split_k],
+                    sched.split_k * tiles * 256,
                 ));
                 // acc = 0: a forward GEMM owns its output and ASSIGNS, so the
                 // destination needs no clear (unlike a parameter gradient).
                 s.push(self.gpu.step(
                     SPLITK_REDUCE,
                     &[part, out],
-                    &[m * n, slices, 0],
+                    &[m * n, sched.split_k, 0],
                     (m * n).div_ceil(64) * 64,
                 ));
             }
@@ -1337,37 +1351,50 @@ impl Engine {
         }
     }
 
-    /// How many k-slices to split this GEMM into, or `None` for the plain
-    /// kernel. `None` whenever the device has no scratch, the tile grid already
-    /// fills the card, the shape is in the GEMV regime, or the partials would
-    /// not fit the scratch - the last one keeps this from silently allocating.
-    fn splitk_slices(&self, m: u32, k: u32, n: u32) -> Option<u32> {
+    /// The [`Schedule`] to dispatch this GEMM with, or `None` for the plain
+    /// unsplit wide-tile kernel via `Self::mm`. `None` whenever the device has
+    /// no split-K scratch, the shape is in the GEMV regime, or neither a
+    /// measurement nor the occupancy-target heuristic has anything better to
+    /// offer than the plain kernel for this shape.
+    ///
+    /// M8.15 widened this past split-K alone (`Self::splitk_slices`'s old
+    /// name and `Option<u32>` return): the measured table
+    /// (`self.tuned_splitk`) is now consulted FIRST, unconditionally - not
+    /// only when the static split-K guess clears its own `guess <= 1` bar -
+    /// because `TileShape::Narrow64` targets a DIFFERENT failure of the wide
+    /// tile (wasted tile area on a small M/N) that the split-K heuristic has
+    /// no opinion on at all; a shape the split-K guess would decline on can
+    /// still have a measured narrow-tile win. Falls back to the plain
+    /// occupancy-target split-K guess (`TileShape::Wide128` only - M8.15 has
+    /// no STATIC heuristic for when the narrow tile wins, only measurement
+    /// picks it, see `Self::tune_splitk`) for any shape/bucket the table has
+    /// no measurement for - a device this milestone never measured keeps
+    /// today's exact M8.4 behaviour.
+    fn gemm_schedule(&self, m: u32, k: u32, n: u32) -> Option<Schedule> {
         if !self.caps.workgroup_reductions || m <= DECODE_REGIME_MAX_ROWS {
             return None;
         }
         let cap = self.splitk_cap?;
+        let bucket = m.next_power_of_two();
+        if let Some(&sched) = self.tuned_splitk.get(&(bucket, n, k)) {
+            return match sched.tile {
+                TileShape::Narrow64 => Some(sched),
+                TileShape::Wide128 => {
+                    let need = (m as u64) * (n as u64) * (sched.split_k as u64);
+                    (sched.split_k > 1 && need <= cap).then_some(sched)
+                }
+            };
+        }
+        // No measurement for this shape/bucket: the occupancy-target
+        // heuristic, exactly as M8.4 left it.
         let tiles = m.div_ceil(128) * n.div_ceil(128);
         // Enough k to split at all: each slice must still hold whole BK chunks.
         let guess = SPLITK_TARGET_WGS.div_ceil(tiles).min(k / 64).clamp(1, SPLITK_MAX_SLICES);
         if guess <= 1 {
             return None;
         }
-        // M8.4: the schedule-space autotuner's MEASURED slice count for this
-        // device beats the occupancy-target heuristic where one exists (S5,
-        // tuned once at build, keyed by row bucket) - the exact `Self::mm8` /
-        // `self.tuned_i8` shape (a plain lookup table, heuristic fallback for
-        // any shape it has no measurement for), widened from "which
-        // `KernelVariant`" to "which `Schedule`". `guess` stays the fallback
-        // (and the only answer whenever `BRAIN_NO_AUTOTUNE=1` emptied this
-        // table at build) so a device this milestone never measured keeps
-        // today's exact prior behaviour.
-        let bucket = m.next_power_of_two();
-        let slices = self.tuned_splitk.get(&(bucket, n, k)).map_or(guess, |s| s.split_k);
-        let need = (m as u64) * (n as u64) * (slices as u64);
-        if slices <= 1 || need > cap {
-            return None;
-        }
-        Some(slices)
+        let need = (m as u64) * (n as u64) * (guess as u64);
+        (need <= cap).then_some(Schedule::splitk(guess))
     }
 
     /// The fp32 GEMM tier for this device - the SAME rule `flux1`, `flux2` and
@@ -1567,16 +1594,31 @@ impl Engine {
 
     /// M8.4: measure the split-K schedule for every distinct fp32 linear
     /// shape on THIS device, at a small ladder of row buckets above the
-    /// decode regime (`Self::splitk_slices` never fires at or below
+    /// decode regime (`Self::gemm_schedule` never fires at or below
     /// `DECODE_REGIME_MAX_ROWS`, so nothing below it is worth measuring) - the
     /// exact `Self::tune_i8` shape, widened from `KernelVariant` to
     /// [`Schedule`]. Only runs for an all-fp32 engine (`weights` here holds
     /// `Weight::F32` linears - an all-I8 engine's GEMMs never reach `Self::
-    /// mm_into`/`Self::splitk_slices` at all, see `Self::linear`). A shape/
+    /// mm_into`/`Self::gemm_schedule` at all, see `Self::linear`). A shape/
     /// bucket the occupancy-target heuristic itself would decline (`guess <=
     /// 1`, or the guessed partials would not fit `splitk_cap`) is skipped
-    /// entirely - nothing to widen the search for there, `Self::splitk_slices`
-    /// already falls back to the plain kernel.
+    /// entirely - nothing to widen the search for there, `Self::
+    /// gemm_schedule`'s heuristic fallback already picks the plain kernel.
+    ///
+    /// M8.15 added a SECOND schedule axis, [`TileShape`] - `matmul_reg3_64`,
+    /// registered and correctness-gated - but a real-hardware A/B
+    /// (interleaved min-of-5, DVFS-ramped, this crate's `narrow_tile_vs_
+    /// wide_tile_measured_at_real_model_shapes` test) found it a clean,
+    /// repeatable LOSS at an M aligned to 128 and, at the one ragged-M shape
+    /// it was hypothesised to help (a 48-row chunk wasting 80 of a 128-row
+    /// tile's rows), a result too close to this box's own documented
+    /// thermal/load noise to call a genuine win: the measured ratio crossed
+    /// 1.0 in both directions across six repeat trials, unlike split-K's own
+    /// A/B above which never once flipped direction across its four rounds.
+    /// This loop therefore does NOT offer [`Schedule::NARROW_TILE`] as a
+    /// candidate - a deliberately killed hypothesis, not an oversight; see
+    /// [`gemm_schedule_candidates`]'s own doc for the same reasoning at the
+    /// candidate-generator level.
     fn tune_splitk(gpu: &Gpu, weights: &HashMap<String, Weight>, splitk_part: &DeviceBuffer, splitk_cap: u64, max_rows: u32) -> HashMap<(u32, u32, u32), Schedule> {
         let fp = gpu_core::tune::source_fingerprint(&[kernels::MATMUL_REG3_SPLITK, kernels::DW_SPLITK_REDUCE]);
         let store = gpu_core::tune::FileTuneStore::for_adapter(fp)
@@ -1617,24 +1659,29 @@ impl Engine {
         out
     }
 
-    /// Time one split-K schedule on real buffers: REPS dispatches in one
-    /// submission, mean milliseconds per dispatch. `split_k == 1` dispatches
-    /// the plain unsplit `matmul_reg3`; every other candidate dispatches
-    /// `matmul_reg3_splitk` + the `dw_splitk_reduce`-shaped fold at `acc = 0`
-    /// (the forward GEMM ASSIGNS - `Self::mm_into`'s own composition,
-    /// reused verbatim). `None` = not measurable.
+    /// Time one GEMM schedule on real buffers: REPS dispatches in one
+    /// submission, mean milliseconds per dispatch. `TileShape::Narrow64`
+    /// dispatches `matmul_reg3_64` (unsplit - see that variant's own doc);
+    /// `Wide128` at `split_k == 1` dispatches the plain unsplit `matmul_
+    /// reg3`; every other `Wide128` candidate dispatches `matmul_reg3_splitk`
+    /// plus the `dw_splitk_reduce`-shaped fold at `acc = 0` (the forward GEMM
+    /// ASSIGNS - `Self::mm_into`'s own composition, reused verbatim). `None`
+    /// means not measurable.
     fn measure_splitk(gpu: &Gpu, x: &DeviceBuffer, w: &DeviceBuffer, part: &DeviceBuffer, m: u32, k: u32, n: u32, s: Schedule) -> Option<f64> {
         const REPS: usize = 8;
         let out = gpu.storage(m as u64 * n as u64);
         let tiles = m.div_ceil(128) * n.div_ceil(128);
         let step = |_: usize| -> Vec<Step> {
-            if s.split_k <= 1 {
-                vec![gpu.step(MATMUL_REG3, &[x, w, &out], &[m, k, n], tiles * 256)]
-            } else {
-                vec![
+            match s.tile {
+                TileShape::Narrow64 => {
+                    let tiles64 = m.div_ceil(64) * n.div_ceil(64);
+                    vec![gpu.step(MATMUL_REG3_64, &[x, w, &out], &[m, k, n], tiles64 * 256)]
+                }
+                TileShape::Wide128 if s.split_k <= 1 => vec![gpu.step(MATMUL_REG3, &[x, w, &out], &[m, k, n], tiles * 256)],
+                TileShape::Wide128 => vec![
                     gpu.step(MATMUL_REG3_SPLITK, &[x, w, part], &[m, k, n, s.split_k], s.split_k * tiles * 256),
                     gpu.step(SPLITK_REDUCE, &[part, &out], &[m * n, s.split_k, 0], (m * n).div_ceil(64) * 64),
-                ]
+                ],
             }
         };
         // Warm-up (pipeline residency, first-touch allocations), then timed.
@@ -4006,7 +4053,7 @@ mod tests {
             (0..5).map(|_| Engine::measure_splitk(&g, &x, &w, &part, m, k, n, s).unwrap()).fold(f64::INFINITY, f64::min)
         };
         let cost_unsplit = best_of_5(Schedule::UNSPLIT);
-        let cost_split8 = best_of_5(Schedule { split_k: 8 });
+        let cost_split8 = best_of_5(Schedule::splitk(8));
         eprintln!(
             "M8.4 split-K schedule at m={m} k={k} n={n}: unsplit={cost_unsplit:.4}ms split_k=8={cost_split8:.4}ms"
         );
@@ -4025,16 +4072,82 @@ mod tests {
         // "compiles both but does not choose" failure this proves did not
         // happen.
         let tuner = AutoTuner::new(None);
-        let cands = [Schedule::UNSPLIT, Schedule { split_k: 8 }];
+        let cands = [Schedule::UNSPLIT, Schedule::splitk(8)];
         let shape = OpShape { m, n, k, dtype: Dtype::F32 };
         let mut measure = |s: Schedule| Engine::measure_splitk(&g, &x, &w, &part, m, k, n, s);
         let picked = tuner.resolve_schedule(Op::MatMul, shape, &cands, &mut measure);
-        let expected = if cost_split8 < cost_unsplit { Schedule { split_k: 8 } } else { Schedule::UNSPLIT };
+        let expected = if cost_split8 < cost_unsplit { Schedule::splitk(8) } else { Schedule::UNSPLIT };
         assert_eq!(
             picked, expected,
             "the tuner must pick whichever schedule measured faster (unsplit={cost_unsplit:.4}ms \
              split_k=8={cost_split8:.4}ms), not the static guess"
         );
+    }
+
+    /// M8.15: does the narrow (64x64) tile beat the wide (128x128) one on a
+    /// REAL shape from this repo's actual models? Two shapes, both real:
+    ///
+    ///  - `m=128, k=1024, n=2048`: the SAME Qwen3-0.6B qkv-projection shape
+    ///    `schedule_tuner_picks_the_faster_splitk_factor_on_real_hardware`
+    ///    above measures - `m` is an exact multiple of 128, so the WIDE tile
+    ///    wastes nothing on the M axis. This is the control: a shape the
+    ///    narrow tile has no waste-reduction argument for, only MORE (cheaper)
+    ///    workgroups doing the same total work with less per-workgroup data
+    ///    reuse.
+    ///  - `m=48, k=1024, n=3072`: Qwen3-0.6B's gate/up MLP projection
+    ///    (`d_model=1024`, `d_ff=3072`) at a 48-row prefill chunk just above
+    ///    `DECODE_REGIME_MAX_ROWS` (32) - a real, not cherry-picked, row count
+    ///    a short prompt's tail chunk or a small batched prefill step lands
+    ///    on. The wide tile wastes 128-48=80 of its 128 rows (62.5%); the
+    ///    narrow tile wastes only 64-48=16 of its 64 (25%) - this is the
+    ///    shape the narrow tile's whole argument (`matmul_reg3_64.wgsl`'s own
+    ///    header) is FOR.
+    ///
+    /// Interleaved min-of-5 (this box's own documented thermal/load noise),
+    /// each preceded by a 2s DVFS ramp on ITS OWN kernel (`kq_gemv_reg_speed_
+    /// bench.rs`'s own template for ramping this exact Intel Arc iGPU - a
+    /// single warm-up dispatch pays pipeline creation but not DVFS). This
+    /// test only REPORTS the measured ratio at each shape (`eprintln!`, run
+    /// with `--nocapture` to see it) - it does not assert a winner either
+    /// way, because the milestone's own honest outcome is "wire it in only
+    /// where it wins", which this measurement is WHAT DECIDES, not what
+    /// gates a fixed expectation.
+    #[test]
+    #[ignore = "real-hardware timing; run explicitly with --ignored (this box has documented thermal/load noise)"]
+    fn narrow_tile_vs_wide_tile_measured_at_real_model_shapes() {
+        let g = gpu_core::testgpu::dev(PIPELINES);
+        if !g.caps().workgroup_reductions {
+            brain_testutil::skip_unavailable("no workgroup_reductions on this backend; the register-tiled GEMMs are never selected here");
+            return;
+        }
+        let ramp = |steps: &[Step], dur: std::time::Duration| {
+            let t0 = std::time::Instant::now();
+            while t0.elapsed() < dur {
+                g.submit(&[], steps);
+                g.poll_wait();
+            }
+        };
+        for (m, k, n, label) in [(128u32, 1024u32, 2048u32, "qkv projection, m aligned to 128 (control)"), (48u32, 1024u32, 3072u32, "gate/up MLP at a 48-row prefill chunk")] {
+            let x = g.storage((m * k) as u64);
+            let w = g.storage((n * k) as u64);
+            let part = g.storage((SPLITK_MAX_SLICES * m * n) as u64); // unused by either candidate here, kept for a uniform call shape
+            let tiles128 = m.div_ceil(128) * n.div_ceil(128);
+            let wide_steps = [g.step(MATMUL_REG3, &[&x, &w, &g.storage((m * n) as u64)], &[m, k, n], tiles128 * 256)];
+            let tiles64 = m.div_ceil(64) * n.div_ceil(64);
+            let narrow_steps = [g.step(MATMUL_REG3_64, &[&x, &w, &g.storage((m * n) as u64)], &[m, k, n], tiles64 * 256)];
+            ramp(&wide_steps, std::time::Duration::from_secs(2));
+            ramp(&narrow_steps, std::time::Duration::from_secs(2));
+            let best_of_5 = |s: Schedule| -> f64 {
+                (0..5).map(|_| Engine::measure_splitk(&g, &x, &w, &part, m, k, n, s).unwrap()).fold(f64::INFINITY, f64::min)
+            };
+            let cost_wide = best_of_5(Schedule::UNSPLIT);
+            let cost_narrow = best_of_5(Schedule::NARROW_TILE);
+            let ratio = cost_wide / cost_narrow; // > 1.0 means the narrow tile is FASTER
+            eprintln!(
+                "M8.15 tile-shape schedule at m={m} k={k} n={n} ({label}): \
+                 wide128={cost_wide:.4}ms narrow64={cost_narrow:.4}ms ratio(wide/narrow)={ratio:.3}"
+            );
+        }
     }
 
     /// M4.2, fp32-KV branch: `Self::qk_norm_rope`/`Self::qk_norm_rope_append`

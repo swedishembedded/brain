@@ -224,6 +224,25 @@ fn matmul_family_is_correct_and_lands_on_gpu_when_hardware_available() {
         let (dabs, drel) = diff(&want_f32, &got);
         assert!(drel < TOL_F32, "matmul_reg3: diverges from scalar reference (rel {drel:.3e}, abs {dabs:.3e})");
     }
+    // M8.15: matmul_reg3_64 is `matmul_reg3`'s IDENTICAL algorithm retiled to
+    // a 64x64 output tile (smaller register block, more/cheaper workgroups) -
+    // the correctness gate this milestone's own instructions require BEFORE
+    // any measurement: bit-tolerant-identical to the scalar reference on a
+    // shape that is not a multiple of 64 on ANY axis (m, k and n all cross a
+    // tile/chunk boundary mid-tile), so a masking or stride slip on the
+    // smaller tile would show.
+    {
+        let kind = gpu.kernel_index("matmul_reg3_64").expect("matmul_reg3_64 registered");
+        let ab = gpu.storage_init("a", &a);
+        let bb = gpu.storage_init("b", &b);
+        let ob = gpu.storage((m * n) as u64);
+        let threads = (m.div_ceil(64) * n.div_ceil(64) * 256) as u32;
+        let s = gpu.step(kind, &[&ab, &bb, &ob], &[m as u32, k as u32, n as u32], threads);
+        gpu.submit(&[], &[s]);
+        let got = gpu.read(&ob, m * n);
+        let (dabs, drel) = diff(&want_f32, &got);
+        assert!(drel < TOL_F32, "matmul_reg3_64: diverges from scalar reference (rel {drel:.3e}, abs {dabs:.3e})");
+    }
 
     // matmul_i8_dyn / matmul_q4_dyn: any-M tiled quantized GEMMs.
     {
