@@ -376,6 +376,27 @@ pub struct Tile {
     pub x0: usize,
     pub th: usize,
     pub tw: usize,
+    /// How many tokens this window shares with its neighbour on each side -
+    /// the width the blend is feathered over ([`tile_weights`]), 0 on a side
+    /// that is a canvas edge.
+    pub feather: Feather,
+}
+
+/// The shared width, in latent tokens, on each side of one window.
+///
+/// This is what the window and its neighbour REALLY overlap, which is not
+/// [`Tiling::overlap`]: [`tile_starts`] pins the last window flush against the
+/// far edge, so the last pair shares whatever is left over. At 1360 px with
+/// 512 px windows and a 128 px overlap the last two rows share 432 px, not
+/// 128, and feathering that pair over the nominal 128 leaves both of them at
+/// full weight across the remaining 304 - a flat 50/50 average of two
+/// independent denoisings, over a 176 px full-width strip of canvas.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Feather {
+    pub top: usize,
+    pub bottom: usize,
+    pub left: usize,
+    pub right: usize,
 }
 
 /// Window starts along one axis, in latent tokens: `0, step, 2·step, …` and
@@ -410,17 +431,41 @@ pub fn tile_starts(total: usize, tile: usize, overlap: usize) -> Vec<usize> {
 /// small size is provably a no-op rather than approximately one.
 pub fn plan_tiles(lh: usize, lw: usize, tiling: Option<Tiling>) -> Vec<Tile> {
     let Some(t) = tiling else {
-        return vec![Tile { y0: 0, x0: 0, th: lh, tw: lw }];
+        return vec![Tile { y0: 0, x0: 0, th: lh, tw: lw, feather: Feather::default() }];
     };
     let (tile, ov) = ((t.size / 16) as usize, (t.overlap / 16) as usize);
     let (th, tw) = (tile.min(lh), tile.min(lw));
+    let (ys, xs) = (tile_starts(lh, th, ov), tile_starts(lw, tw, ov));
+    let (fy, fx) = (axis_feather(&ys, th), axis_feather(&xs, tw));
     let mut out = Vec::new();
-    for y0 in tile_starts(lh, th, ov) {
-        for x0 in tile_starts(lw, tw, ov) {
-            out.push(Tile { y0, x0, th, tw });
+    for (iy, &y0) in ys.iter().enumerate() {
+        for (ix, &x0) in xs.iter().enumerate() {
+            let feather =
+                Feather { top: fy[iy].0, bottom: fy[iy].1, left: fx[ix].0, right: fx[ix].1 };
+            out.push(Tile { y0, x0, th, tw, feather });
         }
     }
     out
+}
+
+/// The shared width on each side of every window along one axis: what a window
+/// really overlaps its previous / next neighbour by, 0 at the ends.
+///
+/// Derived from the starts [`tile_starts`] chose rather than from
+/// `Tiling::overlap`, because those two are not the same number - the pinned
+/// last window shares whatever is left over, and that is the width its blend
+/// has to cross, not the width that was asked for.
+fn axis_feather(starts: &[usize], tile: usize) -> Vec<(usize, usize)> {
+    starts
+        .iter()
+        .enumerate()
+        .map(|(i, &s)| {
+            let before = if i == 0 { 0 } else { (starts[i - 1] + tile).saturating_sub(s) };
+            let after =
+                if i + 1 == starts.len() { 0 } else { (s + tile).saturating_sub(starts[i + 1]) };
+            (before, after)
+        })
+        .collect()
 }
 
 /// Generated latent tokens ONE DiT forward sees under `opts`: the whole canvas
@@ -460,24 +505,38 @@ pub fn ref_tokens_per_forward(refs: &[(Vec<f32>, u32, u32)], opts: &GenOpts) -> 
 }
 
 /// Per-token blend weight of one window over its own tokens: a trapezoid that
-/// ramps up across `ov` tokens on any side that has a neighbour and holds at 1
-/// on any side that is a canvas edge.
+/// ramps up across the tokens it SHARES with the neighbour on each side
+/// ([`Tile::feather`]) and holds at 1 on any side that is a canvas edge.
 ///
-/// Positive everywhere (the ramp starts at `1/(ov+1)`, never 0), so every
-/// canvas token has weight to normalize by; and **exactly** 1 everywhere for a
-/// window that covers the whole canvas, which is what makes a one-window plan
-/// the untiled prediction bit for bit.
-fn tile_weights(t: &Tile, lh: usize, lw: usize, ov: usize) -> Vec<f32> {
-    let axis = |start: usize, len: usize, total: usize| -> Vec<f32> {
+/// The ramp width is the shared width and not `Tiling::overlap`, and that is
+/// the whole of what makes the seam a crossfade. Two consecutive windows
+/// sharing `r` tokens get `(r−j)/(r+1)` on the way out against `(j+1)/(r+1)` on
+/// the way in, which sums to exactly 1 across the shared span: the pair is a
+/// partition of unity, one window hands over to the other monotonically, and
+/// the two tie at a single line. Cut the ramp to a NARROWER nominal overlap
+/// instead - which is what a pinned last window gets, since it shares far more
+/// than was asked for - and both windows sit at full weight across the excess,
+/// where the normalization turns them into a flat 50/50 average of two
+/// independent denoisings. That is not a blend, it is a double exposure: two
+/// plausible but different renderings of the same furniture at half opacity
+/// each, which is a ghost rim on every edge in the strip.
+///
+/// Positive everywhere (the ramp starts at `1/(r+1)`, never 0), so every canvas
+/// token has weight to normalize by; and **exactly** 1 everywhere for a window
+/// with no neighbours, which is what makes a one-window plan the untiled
+/// prediction bit for bit.
+fn tile_weights(t: &Tile) -> Vec<f32> {
+    let axis = |len: usize, (before, after): (usize, usize)| -> Vec<f32> {
         (0..len)
             .map(|j| {
-                let up = if start == 0 { 1.0 } else { (j + 1) as f32 / (ov + 1) as f32 };
-                let down = if start + len == total { 1.0 } else { (len - j) as f32 / (ov + 1) as f32 };
+                let up = if before == 0 { 1.0 } else { (j + 1) as f32 / (before + 1) as f32 };
+                let down = if after == 0 { 1.0 } else { (len - j) as f32 / (after + 1) as f32 };
                 up.min(down).min(1.0)
             })
             .collect()
     };
-    let (wy, wx) = (axis(t.y0, t.th, lh), axis(t.x0, t.tw, lw));
+    let f = t.feather;
+    let (wy, wx) = (axis(t.th, (f.top, f.bottom)), axis(t.tw, (f.left, f.right)));
     let mut w = Vec::with_capacity(t.th * t.tw);
     for vy in &wy {
         w.extend(wx.iter().map(|vx| vy * vx));
@@ -1724,7 +1783,6 @@ fn plan_on<D: Denoiser>(d: &D, r: &BatchRequest) -> Result<Vec<TilePlan>, String
     let o = &r.opts;
     let canvas = layout_of(d.cfg().txt_len, r)?;
     let (lh, lw) = (canvas.lh, canvas.lw);
-    let ov = o.tile.map_or(0, |t| (t.overlap / 16) as usize);
     Ok(plan_tiles(lh, lw, o.tile)
         .into_iter()
         .map(|tile| {
@@ -1735,7 +1793,7 @@ fn plan_on<D: Denoiser>(d: &D, r: &BatchRequest) -> Result<Vec<TilePlan>, String
             // exactly the rows the untiled run - and a paired training step -
             // puts at those positions.
             let layout = canvas.window(tile.y0, tile.x0, tile.th, tile.tw);
-            TilePlan { ids: layout.ids(), layout, w: tile_weights(&tile, lh, lw, ov), tile }
+            TilePlan { ids: layout.ids(), layout, w: tile_weights(&tile), tile }
         })
         .collect())
 }
@@ -3799,7 +3857,7 @@ mod tests {
         assert!(tiles.len() > 1);
         let mut total = vec![0.0f32; lh * lw];
         for q in &tiles {
-            let w = tile_weights(q, lh, lw, ov);
+            let w = tile_weights(q);
             assert!(w.iter().all(|&v| v > 0.0), "a tile weight is not positive");
             // The corner that sits on the canvas corner is owned outright.
             if q.y0 == 0 && q.x0 == 0 {
@@ -3816,7 +3874,7 @@ mod tests {
         // A seam column really is shared: the first interior tile's leading
         // edge is feathered down, not held at full strength.
         let seam = tiles.iter().find(|q| q.x0 > 0).expect("an interior tile");
-        let w = tile_weights(seam, lh, lw, ov);
+        let w = tile_weights(seam);
         assert!(w[0] < 1.0, "the leading edge of an interior tile is not feathered");
         assert!(w[0] > 0.0);
 
@@ -3824,7 +3882,83 @@ mod tests {
         // one-tile gate above depends on.
         let one = plan_tiles(lh, lw, None);
         assert_eq!(one.len(), 1);
-        assert!(tile_weights(&one[0], lh, lw, ov).iter().all(|&v| v == 1.0));
+        assert!(tile_weights(&one[0]).iter().all(|&v| v == 1.0));
+    }
+
+    /// **Tiling gate 8 - the feather spans what the windows actually SHARE.**
+    /// [`tile_starts`] pins the last window flush against the far edge, so its
+    /// overlap with the window before it is whatever is left over and is
+    /// routinely far wider than `Tiling::overlap` - at 1360 px with 512 px
+    /// windows and a 128 px overlap the last two rows share 432 px, not 128.
+    /// A feather cut to the NOMINAL overlap leaves both windows at full weight
+    /// across the remaining 300 px, and a normalized blend of two full-weight
+    /// windows is a flat 50/50 average of two independent denoisings - a
+    /// semi-transparent double exposure over a full-width strip, which is the
+    /// ghosting the feather exists to prevent.
+    ///
+    /// Two properties pin the ramp to the real width. Locally, a window's
+    /// weight on the last row it shares with its neighbour is `1/(r+1)` for the
+    /// shared width `r` - the ramp reaches the far end of the overlap and no
+    /// sooner. Globally, on the production canvas the two windows may tie at a
+    /// single row, never across a band: a run of evenly-split rows IS the
+    /// double exposure.
+    #[test]
+    fn the_feather_crosses_over_the_overlap_the_windows_really_share() {
+        // 512 px windows over a 1360x512 canvas: the y axis tiles and pins its
+        // last window, the x axis is a single column, so the tile weights ARE
+        // the y-axis weights.
+        let (lh, lw) = (85usize, 32usize);
+        let t = Tiling { size: 512, overlap: 128 };
+        let tiles = plan_tiles(lh, lw, Some(t));
+        assert_eq!(tiles.iter().map(|q| q.y0).collect::<Vec<_>>(), vec![0, 24, 48, 53]);
+        assert!(tiles.iter().all(|q| q.x0 == 0 && q.tw == lw), "the gate wants one column");
+        let shares: Vec<usize> =
+            (1..tiles.len()).map(|i| tiles[i - 1].y0 + tiles[i - 1].th - tiles[i].y0).collect();
+        assert_eq!(shares, vec![8, 8, 27], "the pinned last window really does share more than 8");
+
+        let col: Vec<Vec<f32>> =
+            tiles.iter().map(|q| (0..q.th).map(|y| tile_weights(q)[y * q.tw]).collect()).collect();
+        for (i, &r) in shares.iter().enumerate() {
+            let (a, b) = (&tiles[i], &tiles[i + 1]);
+            let far = 1.0 / (r + 1) as f32;
+            // The outgoing window's last row and the incoming window's first
+            // row are the two ends of the same crossfade, so both sit one step
+            // in from zero on a ramp `r` wide. Cut to the nominal 8 instead and
+            // the 27-wide seam reads 1/9 at both ends and 1 across the middle.
+            assert!(
+                (col[i][a.th - 1] - far).abs() < 1e-6,
+                "window at {} ends its {r}-row seam at {}, not {far}",
+                a.y0,
+                col[i][a.th - 1]
+            );
+            assert!(
+                (col[i + 1][0] - far).abs() < 1e-6,
+                "window at {} starts its {r}-row seam at {}, not {far}",
+                b.y0,
+                col[i + 1][0]
+            );
+        }
+
+        // And on the real canvas the tie is a line, not a band: no two adjacent
+        // canvas rows may both be split evenly between two windows.
+        let (lh, lw) = (85usize, 128usize);
+        let plan = plan_tiles(lh, lw, Some(t));
+        let even: Vec<bool> = (0..lh)
+            .map(|y| {
+                let mut ws: Vec<f32> = plan
+                    .iter()
+                    .filter(|q| q.x0 == 0 && (q.y0..q.y0 + q.th).contains(&y))
+                    .map(|q| tile_weights(q)[(y - q.y0) * q.tw])
+                    .collect();
+                ws.sort_by(|a, b| b.partial_cmp(a).unwrap());
+                ws.len() > 1 && (ws[0] - ws[1]).abs() < 1e-6
+            })
+            .collect();
+        assert!(
+            !even.windows(2).any(|r| r.iter().all(|&v| v)),
+            "a band of canvas rows is a flat 50/50 average of two windows: {:?}",
+            (0..lh).filter(|&y| even[y]).collect::<Vec<_>>()
+        );
     }
 
     /// FNV-1a 64 over the rendered bytes. A whole reference image is too large
