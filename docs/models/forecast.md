@@ -70,8 +70,19 @@ See each model's page for its exact import command.
 - **`import`** - convert an upstream checkpoint into the brain
   `.safetensors` format Chronos-2, FinCast and TimesFM-3 serve from (see
   their pages for the exact form).
-- **`finetune`** - Kronos-only; see [its page](kronos.md) and
+- **`finetune`** - Kronos or TimesFM-3, selected by which checkpoint flag is
+  given (`--kronos-decoder` vs `--timesfm3`); naming both is refused. Same
+  flags, same promotion-gate line and same exit codes either way. See
+  [Kronos](kronos.md), [TimesFM-3](timesfm3.md) and
   [Fine-tuning a forecaster](../training/forecast-finetune.md).
+
+  TimesFM-3 additionally enforces `--horizon <= stitch_extract_len` (64 for
+  the published checkpoint), because at that horizon the forecast is a single
+  patch and the output-side map is affine; and every checkpoint it writes
+  carries `timesfm-non-commercial-license-v1.0` plus the upstream it derives
+  from, which makes it non-publishable by
+  `brain serve`'s model discovery. A fine-tune of those weights is a
+  derivative of them.
 
 Every resident exposes one `forecast` D-Bus action: input blob `context`
 (a raw f32 series with its shape given in the request metadata), parameter

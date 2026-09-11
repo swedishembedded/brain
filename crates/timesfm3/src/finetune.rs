@@ -359,6 +359,36 @@ pub const UPSTREAM: &str = "google/timesfm-3.0-pytorch";
 /// The one-line warning a run that touches these weights prints at start.
 pub const LICENSE_NOTICE: &str = "timesfm3: the TimesFM-3 3.0 weights are timesfm-non-commercial-license-v1.0 (non-commercial, non-production); a fine-tuned checkpoint is a DERIVATIVE and may not be redistributed";
 
+/// Read a base checkpoint's config and weights, host-side - the same two
+/// layouts [`crate::model::Timesfm3::load_on`] accepts (a reference HF
+/// directory, or a brain container), but WITHOUT building a device model:
+/// a fine-tune builds its own trainer and would otherwise pay for a second,
+/// inference-shaped copy of every tensor in VRAM.
+pub fn load_base(path: &str) -> Result<(Timesfm3Config, HashMap<String, Vec<f32>>), String> {
+    if std::path::Path::new(path).is_dir() {
+        let cfg = crate::import::load_config(path)?;
+        let weights = crate::import::load_hf(&cfg, path)?;
+        return Ok((cfg, weights));
+    }
+    // `checkpoint::load` PANICS on an unreadable file, and a mistyped path is
+    // an ordinary user error that deserves an exit code and a sentence.
+    if !std::path::Path::new(path).is_file() {
+        return Err(format!("{path}: not a readable checkpoint file or reference directory"));
+    }
+    let c = checkpoint::load(path);
+    let cfg = Timesfm3Config::from_json(&c.header["config"])?;
+    let weights = c.by_role("");
+    for (name, shape) in cfg.param_list() {
+        let want: usize = shape.iter().product();
+        match weights.get(&name) {
+            None => return Err(format!("{path}: missing tensor {name}")),
+            Some(v) if v.len() != want => return Err(format!("{path}: {name} has {} elements, expected {want}", v.len())),
+            Some(_) => {}
+        }
+    }
+    Ok((cfg, weights))
+}
+
 /// Write a fine-tuned checkpoint: the reference's own tensor names and
 /// shapes, plus a [`checkpoint::st::ModelCard`] carrying the upstream licence
 /// and the base it derives from.

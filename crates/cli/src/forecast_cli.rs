@@ -838,10 +838,56 @@ fn load_universe_or_exit(dir: &str, label: &str, min_rows: usize, skip_invalid: 
     }
 }
 
-/// `brain forecast finetune` — weekly gated fine-tune of the Kronos decoder over a
-/// universe of OHLCV CSVs. Fine-tunes on the past, and writes a promoted checkpoint
-/// ONLY if it beats the base on a held-out (embargoed) split.
+/// `brain forecast finetune` - weekly gated fine-tune of a forecasting model
+/// over a universe of OHLCV CSVs. Fine-tunes on the past, and writes a
+/// promoted checkpoint ONLY if it beats the base on a held-out (embargoed)
+/// split.
+///
+/// Which model runs is inferred from the flags rather than named separately:
+/// `--timesfm3 <weights>` selects TimesFM-3, `--kronos-decoder <dir>` selects
+/// Kronos. That keeps every existing Kronos invocation working unchanged, and
+/// it is the same inference `predict`/`compare`/`serve` already make from the
+/// same flag.
 fn finetune(args: &[String]) {
+    // The discriminators are peeked, not consumed: each handler parses the
+    // FULL argument list itself, so neither is written in terms of what the
+    // dispatcher happened to take first.
+    match finetune_model(args) {
+        Ok(FinetuneModel::Timesfm3) => finetune_timesfm3(args),
+        Ok(FinetuneModel::Kronos) => finetune_kronos(args),
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(2);
+        }
+    }
+}
+
+/// Which model `brain forecast finetune` was asked for.
+#[derive(Debug, PartialEq, Eq)]
+enum FinetuneModel {
+    Kronos,
+    Timesfm3,
+}
+
+/// Decide from the flags present, without consuming them.
+///
+/// Naming both models is refused rather than silently preferring one: they
+/// take different checkpoints and write different artifacts, so a command
+/// line asking for both is a mistake whichever one we picked. Naming neither
+/// falls through to Kronos, the incumbent, so a bare `brain forecast
+/// finetune` keeps printing exactly the usage block it always did.
+fn finetune_model(args: &[String]) -> Result<FinetuneModel, String> {
+    let has = |flag: &str| args.iter().any(|a| a == flag);
+    match (has("--timesfm3"), has("--kronos-decoder") || has("--kronos-tokenizer")) {
+        (true, true) => Err("brain forecast finetune: --timesfm3 and --kronos-decoder/--kronos-tokenizer select different models; pass one or the other".into()),
+        (true, false) => Ok(FinetuneModel::Timesfm3),
+        (false, _) => Ok(FinetuneModel::Kronos),
+    }
+}
+
+/// The Kronos fine-tune: same flags, same output, same exit codes as before
+/// the verb learned a second model.
+fn finetune_kronos(args: &[String]) {
     let mut a = Args::new(args);
     let tok = a.str_or("--kronos-tokenizer", "");
     let dec = a.str_or("--kronos-decoder", "");
@@ -941,6 +987,121 @@ fn finetune(args: &[String]) {
     }
 }
 
+/// The TimesFM-3 fine-tune. Same flags, same gate line and same exit codes as
+/// [`finetune_kronos`]; the differences are the checkpoint it loads, the
+/// horizon limit it enforces, and the licence it stamps on what it writes.
+fn finetune_timesfm3(args: &[String]) {
+    let mut a = Args::new(args);
+    let weights = a.str_or("--timesfm3", "");
+    let data = a.str_or("--data", "");
+    let out = a.take_str("--out");
+    let holdout = a.take_str("--holdout-data");
+    let context = a.usize_or("--context", 180);
+    let horizon = a.usize_or("--horizon", 5);
+    let epochs = a.usize_or("--epochs", 8) as u32;
+    let lr = a.f32_or("--lr", 4e-5);
+    let lora_rank = a.usize_or("--lora", 0);
+    let embargo = a.usize_or("--embargo", horizon);
+    let batch = a.usize_or("--batch", 1).max(1) as u32;
+    let skip_invalid = a.take_flag("--skip-invalid");
+    a.finish();
+
+    // Printed before anything else, and before any work: an operator who is
+    // about to spend hours producing an artifact they may not redistribute
+    // should learn that in the first line, not from the model card afterwards.
+    eprintln!("{}", timesfm3::finetune::LICENSE_NOTICE);
+
+    if weights.is_empty() || data.is_empty() {
+        eprintln!("usage: brain forecast finetune --timesfm3 <weights> --data <csv-dir> \\");
+        eprintln!("         [--out <ckpt>] [--context 180] [--horizon 5] [--epochs 8] [--lr 4e-5] [--lora RANK] [--embargo N] [--batch B]");
+        eprintln!("         [--holdout-data <csv-dir>] [--skip-invalid]");
+        eprintln!();
+        eprintln!("Each <TICKER>.csv is Date,open,high,low,close,volume, and the close is what is");
+        eprintln!("forecast and scored. Every file is validated before anything is loaded.");
+        std::process::exit(2);
+    }
+    if context < 2 || horizon == 0 {
+        eprintln!("brain forecast finetune: --context {context} --horizon {horizon}: need --context >= 2 and --horizon >= 1");
+        std::process::exit(2);
+    }
+
+    let min_rows = context + horizon;
+    let series = load_universe_or_exit(&data, "finetune --data", min_rows, skip_invalid);
+    if series.len() < 2 {
+        eprintln!("brain forecast finetune: {data}: {} usable series, need >= 2 to fine-tune a universe", series.len());
+        std::process::exit(1);
+    }
+    let holdout_series = holdout.as_ref().map(|hd| load_universe_or_exit(hd, "finetune --holdout-data", min_rows, skip_invalid));
+
+    let (cfg, base) = match timesfm3::finetune::load_base(&weights) {
+        Ok(x) => x,
+        Err(e) => {
+            eprintln!("brain forecast finetune: load timesfm3 from {weights}: {e}");
+            std::process::exit(1);
+        }
+    };
+    // Checked against the LOADED config, not a constant: the limit is
+    // `stitch_extract_len()`, which a differently configured checkpoint moves.
+    if let Err(e) = timesfm3::finetune::supported_horizon(&cfg, horizon) {
+        eprintln!("brain forecast finetune: {e}");
+        std::process::exit(2);
+    }
+
+    eprintln!(
+        "finetune: timesfm3 · {} names · context {context} · horizon {horizon} · epochs {epochs} · lr {lr}{}",
+        series.len(),
+        if lora_rank > 0 { format!(" · LoRA r{lora_rank}") } else { " · full".into() }
+    );
+    let split = forecast::train_data::SplitConfig { train_frac: 0.7, val_frac: 0.15, embargo };
+    let lora = (lora_rank > 0).then(|| timesfm3::train::LoraCfg::attn(lora_rank, (lora_rank * 2) as f32));
+    let opts = timesfm3::finetune::FinetuneOpts { epochs, lr, wd: 0.1, clip: 3.0, lora, batch, progress: true };
+    let (rep, weights_out) = timesfm3::finetune::finetune_universe(&cfg, &base, &series, context, horizon, split, &opts);
+
+    // Zero steps is not a verdict - the same distinction `finetune_kronos`
+    // draws, for the same reason.
+    if rep.steps == 0 {
+        eprintln!("brain forecast finetune: 0 training steps - the {} series in {data} yielded no TRAIN windows", series.len());
+        eprintln!("  after the embargoed temporal split (train_frac 0.7, embargo {embargo} bars). Supply longer series,");
+        eprintln!("  or shorten --context/--horizon/--embargo.");
+        std::process::exit(1);
+    }
+    // Nor is an empty VALIDATION slice. The split clears an embargo band on
+    // both sides of each calendar cut, so a universe whose series are short
+    // relative to the embargo can train and still have nothing to be judged
+    // on; printing "KEEP BASE" for that would read as "the fine-tune lost".
+    if !rep.base_val.is_finite() || !rep.ft_val.is_finite() {
+        eprintln!("brain forecast finetune: trained {} steps but the embargoed split left no VALIDATION window", rep.steps);
+        eprintln!("  (val_frac 0.15, embargo {embargo} bars, batch {batch}), so there is no held-out verdict to report.");
+        eprintln!("  Supply longer series, or shorten --embargo/--batch.");
+        std::process::exit(1);
+    }
+    println!(
+        "\ngate (INCLUDED names, held-out future): base_val {:.4} → ft_val {:.4}  ({} steps)  ⇒  {}",
+        rep.base_val,
+        rep.ft_val,
+        rep.steps,
+        if rep.promoted { "PROMOTE (fine-tune beats base out-of-sample)" } else { "KEEP BASE (no held-out improvement)" }
+    );
+    let w = weights_out.expect("weights always returned");
+    if rep.promoted {
+        let path = out.unwrap_or_else(|| "timesfm3-ft.safetensors".into());
+        timesfm3::finetune::save_weights(&cfg, &w, &path);
+        println!("promoted checkpoint → {path}");
+        println!("  license: {} (derived from {}) - NOT redistributable", timesfm3::finetune::WEIGHTS_LICENSE, timesfm3::finetune::UPSTREAM);
+    } else {
+        println!("not promoted → no checkpoint written (base kept)");
+    }
+    if let Some(hs) = holdout_series {
+        let base_h = timesfm3::finetune::eval_universe_loss(&cfg, &base, &hs, context, horizon);
+        let ft_h = timesfm3::finetune::eval_universe_loss(&cfg, &w, &hs, context, horizon);
+        println!(
+            "held-out NAMES ({} names, never fine-tuned): base {base_h:.4} → ft {ft_h:.4}  ⇒  {}",
+            hs.len(),
+            if ft_h < base_h { "GENERALIZES (more accurate on unseen instruments)" } else { "no gain on unseen names" }
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -992,6 +1153,31 @@ mod tests {
         assert_eq!(u.rejected.len(), 1, "{file} should be rejected exactly once");
         assert_eq!(u.rejected[0].file, file, "the rejection must name the file");
         u.rejected[0].reason.clone()
+    }
+
+    /// `brain forecast finetune` dispatches on the flags it was given, and
+    /// every existing Kronos invocation keeps selecting Kronos.
+    ///
+    /// The `--timesfm3` arm is what stops the verb from being Kronos-only:
+    /// before this, `--timesfm3` was an unrecognised flag, so the run fell
+    /// through to the Kronos usage block and exited 2 complaining about a
+    /// missing `--kronos-decoder`.
+    #[test]
+    fn finetune_selects_its_model_from_the_flags_it_was_given() {
+        let argv = |s: &str| -> Vec<String> { s.split_whitespace().map(str::to_string).collect() };
+
+        assert_eq!(finetune_model(&argv("--timesfm3 w.safetensors --data d")).unwrap(), FinetuneModel::Timesfm3);
+
+        // Every shape an existing Kronos command line takes, including the
+        // bare one whose whole job is to print the usage block.
+        for cmd in ["--kronos-tokenizer t --kronos-decoder d --data csv", "--kronos-decoder d --data csv", "--data csv", ""] {
+            assert_eq!(finetune_model(&argv(cmd)).unwrap(), FinetuneModel::Kronos, "{cmd:?} must still select kronos");
+        }
+
+        // Both is a mistake, not a preference.
+        let e = finetune_model(&argv("--timesfm3 w --kronos-decoder d --data csv")).expect_err("naming both models must be refused");
+        assert!(e.contains("--timesfm3"), "{e}");
+        assert!(e.contains("--kronos-decoder"), "{e}");
     }
 
     #[test]
