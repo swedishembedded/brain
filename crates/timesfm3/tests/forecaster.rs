@@ -20,7 +20,11 @@ use timesfm3::{Timesfm3, Timesfm3Config, Timesfm3Forecaster};
 /// golden manifest nor a real checkpoint - for the left-padding/missing-value
 /// tests below, which check *wiring behavior* (accepted vs rejected, and
 /// invariance to what a mask hides), not specific numeric parity against the
-/// reference (that is `tests/parity.rs`'s job).
+/// reference (that is `tests/parity.rs`'s job). Built on the POOLED test
+/// device (`gpu_core::testgpu::dev`), like `load_tiny_model` above - this
+/// helper is called once per test, and `Timesfm3::from_weights`'s own plain
+/// `Gpu::new` creates a brand-new real device each time, which is exactly the
+/// per-test-binary sharing `testgpu` exists to avoid (see its own module doc).
 fn synthetic_tiny_model() -> (Timesfm3Config, Timesfm3) {
     let cfg = Timesfm3Config::tiny();
     let weights: HashMap<String, Vec<f32>> = cfg
@@ -33,7 +37,7 @@ fn synthetic_tiny_model() -> (Timesfm3Config, Timesfm3) {
             (k, data)
         })
         .collect();
-    let m = Timesfm3::from_weights(cfg.clone(), &weights).unwrap();
+    let m = Timesfm3::from_weights_on(gpu_core::testgpu::dev(timesfm3::model::PIPELINES), cfg.clone(), &weights).unwrap();
     (cfg, m)
 }
 
