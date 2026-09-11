@@ -176,13 +176,26 @@ fn output_size(w: Option<u32>, h: Option<u32>, anchor: Option<(u32, u32)>) -> (u
 /// expensive part of the run.
 pub const DEFAULT_REF_EDGE: u32 = 512;
 
+/// `refs[0]` seeds the init latent - and so must be pinned to the output size,
+/// never bounded - whenever a `--strength` was given at all, or under `--mask`.
+/// `Some(1.0)` still counts: the option's own semantics treat 1.0 as "full
+/// redraw from the anchor," not "no anchor" (`GenOpts::strength`'s documented
+/// range is `(0, 1]`), so this must not use `s < 1.0` - that strict cutoff
+/// silently drops anchoring at exactly 1.0, falling back to the default
+/// `(512, 512)` canvas and an unbounded-but-uncropped `refs[0]` instead of one
+/// pinned to the reference's own size, which breaks the reference's geometry
+/// even though it still conditions the model as tokens.
+fn is_anchored(strength: Option<f32>, has_mask: bool) -> bool {
+    strength.is_some() || has_mask
+}
+
 /// The long-edge bound for reference `i`, or `None` to encode it at its own
 /// resolution.
 ///
-/// `anchored` is true when `refs[0]` seeds the init latent - under
-/// `--strength < 1` or `--mask`. That reference is then pinned to the output
-/// size and must never be bounded; a caller wanting ITS conditioning cost down
-/// has `--ref-resolution-scale`, which exists for exactly this asymmetry.
+/// `anchored` is true when `refs[0]` seeds the init latent - see
+/// [`is_anchored`]. That reference is then pinned to the output size and must
+/// never be bounded; a caller wanting ITS conditioning cost down has
+/// `--ref-resolution-scale`, which exists for exactly this asymmetry.
 fn ref_bound(i: usize, anchored: bool, ref_size: Option<u32>) -> Option<u32> {
     if i == 0 && anchored {
         return None;
@@ -352,7 +365,7 @@ fn generate(args: &[String]) -> Result<(), String> {
     // one full-resolution photograph cannot outspend the whole generation.
     // `--ref-size` absent takes the bound-free path, unchanged.
     let mut ref_imgs: Vec<(Vec<f32>, u32, u32)> = Vec::new();
-    let anchored = o.strength.is_some_and(|s| s < 1.0) || mask_path.is_some();
+    let anchored = is_anchored(o.strength, mask_path.is_some());
     for (i, r) in refs.iter().enumerate() {
         let (hwc, w, h) = crate::image_io::load_image(r)?;
         let bound = ref_bound(i, anchored, ref_size);
@@ -428,7 +441,7 @@ fn generate(args: &[String]) -> Result<(), String> {
     let sizes = flux2::pipeline::cond_sizes(&ref_imgs, &o);
     let n_ref = flux2::pipeline::ref_tokens(&ref_imgs, &o);
     for (i, (size, (_, rh, rw))) in sizes.iter().zip(&ref_imgs).enumerate() {
-        let role = if i == 0 && o.strength.is_some_and(|s| s < 1.0) { ", also the init latent" } else { "" };
+        let role = if i == 0 && anchored { ", also the init latent" } else { "" };
         match size {
             Some((ch, cw)) => eprintln!(
                 "flux2: ref {i} {rw}x{rh} -> conditions at {cw}x{ch} = {} tokens{role}",
@@ -748,12 +761,12 @@ mod tests {
 
 #[cfg(test)]
 mod ref_size_tests {
-    use super::ref_bound;
+    use super::{is_anchored, ref_bound};
 
     /// `--ref-size` exists so one full-resolution photograph cannot outspend
     /// the whole generation. It must not touch the **init** reference.
     ///
-    /// Under `--strength < 1` (and under `--mask`) `refs[0]` is not merely
+    /// Under any `--strength` (and under `--mask`) `refs[0]` is not merely
     /// conditioning: it is VAE-encoded into the starting latent, and that role
     /// pins it to the output size. Shrinking it there is not a cost saving,
     /// it is a broken run - and the caller who wants that reference's
@@ -792,6 +805,20 @@ mod ref_size_tests {
     fn ref_size_zero_means_unbounded() {
         assert_eq!(ref_bound(1, true, Some(0)), None);
         assert_eq!(ref_bound(0, false, Some(0)), None);
+    }
+
+    /// `--strength 1.0` means "full redraw from the anchor," not "no anchor" -
+    /// the option's own documented range is `(0, 1]`. A strict `s < 1.0` cutoff
+    /// here used to fall out of anchoring at exactly 1.0, silently switching
+    /// the output canvas to the free-generation default and unbounding
+    /// `refs[0]` instead of pinning it to the reference's own size - breaking
+    /// the reference's geometry even though it still conditions the model.
+    #[test]
+    fn strength_one_still_counts_as_anchored() {
+        assert!(is_anchored(Some(1.0), false));
+        assert!(is_anchored(Some(0.5), false));
+        assert!(is_anchored(None, true)); // --mask alone
+        assert!(!is_anchored(None, false));
     }
 }
 
