@@ -45,25 +45,109 @@ use std::path::Path;
 use crate::config::Flux2Config;
 use crate::devtrain::DeviceTrainer;
 use crate::lora::{save_adapter, LoraAdapter};
-use crate::modelgrad::{self, make_flow_batch, Batch, Cfg, ModelWeights};
+use crate::modelgrad::{self, make_flow_batch_paired, Batch, Cfg, ModelWeights};
 use crate::pipeline::{Paths, PAD_TOKEN, TAP_LAYERS};
 use model::adapter::TargetHp;
 use data::qwen_tokenizer::QwenBpe;
 use data::Tokenizer;
 
 /// Build the training [`Cfg`] for a checkpoint at latent grid `lh×lw`
-/// (latent tokens = image pixels / 16).
+/// (latent tokens = image pixels / 16), caption-only.
 pub fn train_cfg(fc: &Flux2Config, lh: usize, lw: usize) -> Cfg {
     Cfg::from_flux2(fc, lh, lw)
 }
 
-/// A dataset sample after encoding: clean packed latent tokens `x₀`
-/// (`[n_img·in_channels]`) and caption conditioning
-/// (`[txt_len·context_in_dim]`).
+/// A dataset sample after encoding: clean packed latent tokens `x₀` for the
+/// TARGET image (`[n_gen·in_channels]`), the reference image's tokens if the
+/// dataset paired one with it (`[n_ref·in_channels]`, empty otherwise), and
+/// the caption conditioning (`[txt_len·context_in_dim]`).
 #[derive(Clone)]
 pub struct Encoded {
     pub x0: Vec<f32>,
+    /// The reference image's packed latent tokens, built by the same
+    /// [`crate::refcond::pack_tokens`] the `--ref` generation path uses.
+    /// Empty for a caption-only sample.
+    pub refs: Vec<f32>,
     pub ctx: Vec<f32>,
+}
+
+/// The σ values a run at `size` pixels will actually be sampled at when the
+/// adapter is deployed: this variant's own inference schedule
+/// (`diffusion::scheduler::klein_sigmas`), minus its terminal 0.
+///
+/// **Why a schedule and not `U(0,1)`.** klein is a step-distilled sampler with
+/// a FIXED step count ([`crate::pipeline::resolved_steps`]), so a generation
+/// evaluates the DiT at a handful of discrete σ and nowhere else - at 512 px,
+/// four of them, all above 0.71. Drawing σ uniformly spent most of every
+/// training step optimising a regime the deployed sampler never enters, and
+/// under-sampled the band it does. The schedule is resolution-dependent
+/// (`empirical_mu` shifts with the token count), so this takes the size the
+/// run is configured for rather than a constant.
+///
+/// The terminal 0 is dropped because it is not a model input: it exists to
+/// close the last Euler interval, and `x_σ` at σ = 0 carries no noise for the
+/// network to have an opinion about.
+pub fn training_sigmas(fc: &Flux2Config, size: u32) -> Vec<f32> {
+    let n_gen = ((size / 16) * (size / 16)) as usize;
+    let steps = crate::pipeline::resolved_steps(&crate::pipeline::GenOpts::default(), fc.distilled) as usize;
+    let mut s = diffusion::scheduler::klein_sigmas(steps, n_gen);
+    s.pop();
+    s
+}
+
+/// Pick one σ out of [`training_sigmas`] from a uniform draw `u ∈ [0,1)`.
+///
+/// Uniform over the schedule's entries: every σ generation visits is trained
+/// at, none more than another. A schedule entry is used verbatim, never
+/// jittered - the point is that the training σ IS an inference σ.
+pub fn draw_sigma(sched: &[f32], u: f64) -> f64 {
+    debug_assert!(!sched.is_empty(), "the schedule always has at least one entry");
+    let i = ((u * sched.len() as f64) as usize).min(sched.len() - 1);
+    sched[i] as f64
+}
+
+/// Which sample a run trains on at `step`, over `n` samples.
+///
+/// **Random without replacement, per pass.** The old `encoded[step % n]`
+/// confounded sample identity with epoch for a whole run: sample `i` was only
+/// ever seen at steps `i`, `i+n`, `i+2n`, always in the same order and always
+/// at the same phase of every other per-step stream. This keeps the property
+/// that made the cycle attractive - each sample is seen exactly once per `n`
+/// steps, so none starves and none is over-weighted - and drops the fixed
+/// order: each pass is its own permutation, derived from the run's seed and
+/// the epoch index.
+///
+/// Derived rather than stateful, so a resumed run replays exactly the order it
+/// would have walked had it never stopped.
+pub fn sample_index(n: usize, step: u64, seed: u64) -> usize {
+    assert!(n > 0, "a dataset with no samples cannot be trained on");
+    let epoch = step / n as u64;
+    let k = (step % n as u64) as usize;
+    // Fisher-Yates over 0..n, seeded by (run seed, epoch). Only the k-th
+    // element is needed, but the shuffle is O(n) on a dataset of a few dozen
+    // images and stating it plainly is worth more than the saving.
+    let mut rng = data::rng::Rng::new(seed ^ 0x5a4f_1e00 ^ epoch.wrapping_mul(0x9e37_79b9_7f4a_7c15));
+    let mut perm: Vec<usize> = (0..n).collect();
+    for i in (1..n).rev() {
+        let j = (rng.next_f64() * (i + 1) as f64) as usize;
+        perm.swap(i, j.min(i));
+    }
+    perm[k]
+}
+
+/// The text-encoder placement a fine-tune should build for a DiT at `path`,
+/// given the precision the adapter will be **deployed** at.
+///
+/// Resolved exactly as `brain flux2 generate` resolves it
+/// ([`crate::pipeline::effective_dit_precision`] then
+/// [`crate::pipeline::te_tier_int8`]), so a `.gguf` DiT - which generation
+/// always runs int8 - trains against the int8 encoder without the caller
+/// having to know that. Training used to hard-code the full f32 encoder
+/// regardless, which meant the context vectors an adapter was fitted against
+/// were not the ones its deployment produces.
+pub fn text_encoder_placement(dit: &str, requested: crate::Precision) -> Result<crate::pipeline::TePlacement, String> {
+    let effective = crate::pipeline::effective_dit_precision(dit, requested, false)?;
+    Ok(crate::pipeline::TePlacement::here_for(effective))
 }
 
 /// Encode every dataset sample once: caption → Qwen 3-tap features (the
@@ -78,6 +162,7 @@ pub fn encode_samples(
     paths: &Paths,
     samples: &[data::imageset::Sample],
     size: u32,
+    te: crate::pipeline::TePlacement,
     cancel: &capability::CancelToken,
     mut progress: impl FnMut(usize, usize, &str),
 ) -> Result<Vec<Encoded>, String> {
@@ -104,7 +189,7 @@ pub fn encode_samples(
     // this is a cache miss on first sight of each string, never a behavior
     // change on what gets encoded.
     let ctxs: Vec<Vec<f32>> = {
-        let te = crate::pipeline::build_text_encoder(fc, paths)?;
+        let te = crate::pipeline::build_text_encoder_on(fc, paths, te)?;
         let mut cache: std::collections::HashMap<&str, Vec<f32>> = std::collections::HashMap::new();
         let mut out = Vec::with_capacity(n);
         for (i, s) in samples.iter().enumerate() {
@@ -163,37 +248,63 @@ pub fn encode_samples(
     }
     let enc = vae::VaeEncoder::from_diffusers(vae_cfg.clone(), &map, size, size, None);
     let (lh8, lw8) = ((size / 8) as usize, (size / 8) as usize);
-    let (lh, lw) = (lh8 / 2, lw8 / 2);
-    let sz = size as usize;
     let mut encoded = Vec::with_capacity(n);
+    // One image → packed DiT tokens. The pixel conversion is
+    // `pipeline::ref_from_hwc` (HWC `[0,1]` → CHW `[-1,1]`, the layout
+    // `Pipeline::generate` takes a `--ref` in) and the latent packing is
+    // `refcond::pack_tokens` - both shared with generation, so a training
+    // image and a `--ref` photograph of the same pixels become the same
+    // tokens.
+    let tokens_of = |hwc: &[f32]| -> Result<Vec<f32>, String> {
+        let (chw, h, w) = crate::pipeline::ref_from_hwc(hwc, size, size)?;
+        let mean = enc.encode_mean(&chw, (h / 8) as u32, (w / 8) as u32);
+        Ok(crate::refcond::pack_tokens(&mean, lh8, lw8, &bn_mean, &bn_var, vae_cfg.batch_norm_eps, fc.in_channels))
+    };
     for (i, (s, ctx)) in samples.iter().zip(ctxs).enumerate() {
         if cancel.is_cancelled() {
             return Err("cancelled".into());
         }
         progress(i, n, "encoding images (VAE)");
-        // HWC [0,1] → CHW [-1,1] (the VAE encoder's expected input range).
-        let mut chw = vec![0f32; 3 * sz * sz];
-        for c in 0..3 {
-            for y in 0..sz {
-                for x in 0..sz {
-                    chw[(c * sz + y) * sz + x] = s.hwc[(y * sz + x) * 3 + c] * 2.0 - 1.0;
-                }
-            }
-        }
-        let mean = enc.encode_mean(&chw, lh8 as u32, lw8 as u32);
-        let packed = vae::latent::pack(&mean, 32, lh8, lw8, &bn_mean, &bn_var, vae_cfg.batch_norm_eps);
-        // [128, lh, lw] → tokens [lh·lw, 128] (row-major, matching position_ids)
-        let mut x0 = vec![0.0f32; lh * lw * fc.in_channels];
-        for c in 0..fc.in_channels {
-            for y in 0..lh {
-                for x in 0..lw {
-                    x0[(y * lw + x) * fc.in_channels + c] = packed[(c * lh + y) * lw + x];
-                }
-            }
-        }
-        encoded.push(Encoded { x0, ctx });
+        let x0 = tokens_of(&s.hwc)?;
+        let refs = match &s.reference {
+            Some(r) => tokens_of(r)?,
+            None => Vec::new(),
+        };
+        encoded.push(Encoded { x0, refs, ctx });
     }
     Ok(encoded)
+}
+
+/// The reference grids a dataset trains under, or an error naming the samples
+/// that disagree.
+///
+/// A run builds ONE trainer sized for ONE joint sequence, so every sample has
+/// to present the same reference layout. A folder that pairs some of its
+/// targets and not others is a dataset mistake, not a mode: training the
+/// unpaired ones with a blank reference would teach "no photograph here", and
+/// silently dropping them would train on a subset the operator did not choose.
+/// Both are worse than saying so.
+pub fn dataset_refs(samples: &[data::imageset::Sample], lh: usize, lw: usize) -> Result<Vec<(usize, usize)>, String> {
+    let paired = samples.iter().filter(|s| s.reference.is_some()).count();
+    if paired == 0 {
+        return Ok(Vec::new());
+    }
+    if paired != samples.len() {
+        let missing: Vec<String> = samples
+            .iter()
+            .filter(|s| s.reference.is_none())
+            .take(5)
+            .map(|s| s.path.file_name().unwrap_or(s.path.as_os_str()).to_string_lossy().into_owned())
+            .collect();
+        return Err(format!(
+            "{paired} of {} samples are paired: a run trains one joint sequence layout, so pairs.yaml must cover every captioned image or none. Unpaired: {} ...",
+            samples.len(),
+            missing.join(", ")
+        ));
+    }
+    // Every image in this loader is square at `size`, target and reference
+    // alike, so one grid covers them all.
+    Ok(vec![(lh, lw)])
 }
 
 /// Which of the two gradient implementations a run uses. They compute the same
@@ -261,6 +372,16 @@ pub struct TrainOpts {
     pub lr_ratio: f32,
     /// LoRA-FA: freeze `A` at its random init: only `B` trains.
     pub freeze_a: bool,
+    /// The DiT precision the trained adapter will be **deployed** at.
+    ///
+    /// It does not change what is differentiated - the frozen base is fp32 on
+    /// both trainers either way - it selects the TEXT ENCODER tier the
+    /// captions are embedded through ([`text_encoder_placement`]), which is
+    /// the input the adapter is actually keyed on. `generate` picks the
+    /// encoder's tier from the DiT's, so training has to resolve it the same
+    /// way or the adapter is fitted against conditioning vectors its
+    /// deployment does not produce.
+    pub precision: crate::Precision,
 }
 
 /// Fine-tune a LoRA adapter on `dir` (a captioned-image folder — see
@@ -279,19 +400,38 @@ pub fn run(
 ) -> Result<LoraAdapter, String> {
     // 1. dataset
     let samples = data::imageset::load_dir(dir, opts.size, |w| progress(0, opts.steps + 1, format!("dataset: {w}")))?;
-    progress(0, opts.steps + 1, format!("loaded {} images from {}", samples.len(), dir.display()));
+    let (lh, lw) = ((opts.size / 16) as usize, (opts.size / 16) as usize);
+    let refs = dataset_refs(&samples, lh, lw)?;
+    progress(
+        0,
+        opts.steps + 1,
+        format!(
+            "loaded {} images from {} ({})",
+            samples.len(),
+            dir.display(),
+            if refs.is_empty() { "caption-only".to_string() } else { format!("paired: each target conditioned on its pairs.yaml reference, +{} tokens", lh * lw) }
+        ),
+    );
 
-    // 2. encode (encoders dropped inside before returning)
+    // 2. encode (encoders dropped inside before returning). The text encoder
+    //    is built at the tier `generate` would use for this DiT, so the
+    //    conditioning the adapter is fitted against is the conditioning its
+    //    deployment produces.
     let n_samples = samples.len();
-    let encoded = encode_samples(fc, paths, &samples, opts.size, cancel, |i, tot, stage| {
+    let te_place = text_encoder_placement(&paths.dit, opts.precision)?;
+    progress(
+        0,
+        opts.steps + 1,
+        format!("text encoder: {} (matching what generate builds for this DiT)", if te_place.int8 { "int8" } else { "fp32" }),
+    );
+    let encoded = encode_samples(fc, paths, &samples, opts.size, te_place, cancel, |i, tot, stage| {
         progress(0, opts.steps + 1, format!("{stage} {}/{tot}", i + 1))
     })?;
     drop(samples);
 
     // 3. frozen base → host training weights (fused checkpoint split)
     progress(0, opts.steps + 1, "loading DiT weights".into());
-    let (lh, lw) = ((opts.size / 16) as usize, (opts.size / 16) as usize);
-    let cfg = train_cfg(fc, lh, lw);
+    let cfg = Cfg::from_flux2_with_refs(fc, lh, lw, refs);
     // `from_tensors` REMOVES as it converts, so the fused map shrinks while the
     // split one grows: the peak is one copy of the model, not two. At klein-9B
     // that is the difference between fitting this box and not.
@@ -390,15 +530,27 @@ pub fn run(
     for _ in 0..done {
         let _ = rng.next_f64();
     }
+    // The σ band this run's deployment actually samples at - not U(0,1).
+    let sched = training_sigmas(fc, opts.size);
+    progress(
+        done,
+        opts.steps + 1,
+        format!(
+            "sigma schedule ({} steps at {}px): {}",
+            sched.len(),
+            opts.size,
+            sched.iter().map(|s| format!("{s:.4}")).collect::<Vec<_>>().join(", ")
+        ),
+    );
     for step in done..opts.steps {
         if cancel.is_cancelled() {
             return Err("cancelled".into());
         }
         let t0 = std::time::Instant::now();
-        let s = &encoded[step as usize % n_samples];
-        let sigma = rng.next_f64().clamp(1e-3, 1.0);
+        let s = &encoded[sample_index(n_samples, step as u64, opts.seed)];
+        let sigma = draw_sigma(&sched, rng.next_f64());
         let noise = model::hostmath::randn(s.x0.len(), opts.seed ^ (0xa5a5 + step as u64));
-        let batch: Batch<f32> = make_flow_batch(&cfg, &s.x0, &s.ctx, sigma, &noise);
+        let batch: Batch<f32> = make_flow_batch_paired(&cfg, &s.x0, &s.refs, &s.ctx, sigma, &noise);
         let loss = match (&dev, &host) {
             (Some(t), _) => t.step(&mut adapter, &batch, opts.lr),
             (None, Some(b)) => {

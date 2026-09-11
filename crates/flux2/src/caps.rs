@@ -313,6 +313,15 @@ pub fn train_action(paths: &Paths, inv: &Invocation, progress: &mut dyn FnMut(Pr
         rank_stabilized: inv.get_str("method").unwrap_or_else(|| "lora".into()) == "rslora",
         lr_ratio: inv.get_f64("lr_ratio").unwrap_or(1.0) as f32,
         freeze_a: inv.get_bool("freeze_a").unwrap_or(false),
+        // The tier this adapter will be SERVED at, which is what selects the
+        // text encoder the captions are embedded through. `fp32` is the
+        // served pipeline's own default request; a `.gguf` DiT overrides it
+        // to int8 the same way `generate` does.
+        precision: match inv.get_str("precision").as_deref() {
+            Some("int8") => crate::Precision::Int8,
+            Some("fp32") | None => crate::Precision::F32,
+            Some(other) => return Err(format!("lora_train: unknown precision {other} (fp32|int8)")),
+        },
     };
     let mut prog = |step: u32, total: u32, message: String| progress(Progress::step(step, total, message));
     let adapter = crate::finetune::run(&cfg, paths, std::path::Path::new(&dir), &opts, &inv.cancel, &mut prog)?;

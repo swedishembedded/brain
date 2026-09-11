@@ -91,10 +91,19 @@ const HELP: &str = "brain flux2 <cmd>
   finetune <data_dir> --out <adapter.brain> [--variant V] [--steps N] [--rank R] [--lr X]
            [--size S] [--seed K] [--ckpt-every N] [--resume] [--trainer device|host] [--cards N]
            [--text-encoder <path>] [--method lora|rslora] [--lr-ratio X] [--freeze-a]
+           [--precision fp32|int8]
            # Train a LoRA on a folder of captioned images (see data::imageset for
            # the caption formats; `brain label` writes one). The adapter it writes
            # is what `generate --adapter` loads. Do NOT name it '.safetensors':
            # that extension is how --adapter recognises a THIRD-PARTY LoRA.
+           #
+           # PAIRED training: add a pairs.yaml to the folder (one
+           # 'target.jpg: reference.jpg' per line) and each target trains CONDITIONED on
+           # its reference, through the same joint token layout and t-axis RoPE
+           # offset `generate --ref ... --strength 1.0` builds. That is the
+           # adapter to train for a reference-image workflow; a folder without
+           # pairs.yaml trains the caption-only concept LoRA it always did. The
+           # manifest must cover every captioned image or none.
            #   --size S        square training size in px, multiple of 16 (default 512)
            #   --rank R        LoRA rank (default 16)
            #   --steps N       training steps (default 200)
@@ -121,6 +130,11 @@ const HELP: &str = "brain flux2 <cmd>
            #   --lr-ratio X    LoRA+: B's effective lr is lr-ratio*lr (default
            #                   1.0, plain LoRA)
            #   --freeze-a      LoRA-FA: freeze A at its random init, train only B
+           #   --precision P   the DiT tier this adapter will be GENERATED with
+           #                   (default fp32; a .gguf DiT forces int8). It picks
+           #                   the text-encoder tier the captions are embedded
+           #                   through, so the conditioning trained against is
+           #                   the conditioning the deployment produces.
            # Both trainers run the same op sequence; the device one keeps the
            # frozen base on the card and differentiates only the low-rank
            # factors. Which one ran is printed at the top of every run.
@@ -539,6 +553,9 @@ fn finetune(args: &[String]) -> Result<(), String> {
         rank_stabilized: false,
         lr_ratio: 1.0,
         freeze_a: false,
+        // What `generate` would run this adapter at. fp32 is generate's own
+        // default request; `effective_dit_precision` overrides it for a .gguf.
+        precision: flux2::Precision::F32,
     };
     let mut i = 0;
     while i < args.len() {
@@ -572,6 +589,13 @@ fn finetune(args: &[String]) -> Result<(), String> {
                 }
             }
             "--lr-ratio" => opts.lr_ratio = need(i)?.parse().map_err(|e| format!("--lr-ratio: {e}"))?,
+            "--precision" => {
+                opts.precision = match need(i)?.as_str() {
+                    "fp32" | "f32" => flux2::Precision::F32,
+                    "int8" | "i8" => flux2::Precision::Int8,
+                    other => return Err(format!("--precision: {other} is not one of fp32, int8")),
+                }
+            }
             "--freeze-a" => {
                 opts.freeze_a = true;
                 i += 1;
