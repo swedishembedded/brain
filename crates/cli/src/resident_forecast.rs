@@ -58,6 +58,15 @@ fn decode_f32(inv: &Invocation, name: &str) -> Result<(Vec<f32>, Vec<usize>), St
     Ok((data, shape))
 }
 
+/// `decode_f32`, but `Ok(None)` when the named blob is simply absent - an
+/// optional wire input, not an error.
+fn decode_f32_opt(inv: &Invocation, name: &str) -> Result<Option<(Vec<f32>, Vec<usize>)>, String> {
+    if inv.get_blob(name).is_none() {
+        return Ok(None);
+    }
+    decode_f32(inv, name).map(Some)
+}
+
 /// Decode an optional u32-LE blob (e.g. kronos calendar stamps).
 fn decode_u32_opt(inv: &Invocation, name: &str) -> Option<Vec<u32>> {
     let blob = inv.get_blob(name)?;
@@ -69,6 +78,16 @@ fn encode_forecast(data: &[f32], shape: Vec<usize>, kind: &str, levels: &[f32]) 
     let bytes: Vec<u8> = data.iter().flat_map(|v| v.to_le_bytes()).collect();
     Blob::new(Media::Bytes, bytes).with_meta(json!({
         "shape": shape, "dtype": "f32le", "kind": kind, "levels": levels,
+    }))
+}
+
+/// [`encode_forecast`] plus a `names` meta entry - one name per leading-axis
+/// slice, for a multi-target tensor where position alone does not say which
+/// target is which.
+fn encode_named_forecast(data: &[f32], shape: Vec<usize>, kind: &str, levels: &[f32], names: &[String]) -> Blob {
+    let bytes: Vec<u8> = data.iter().flat_map(|v| v.to_le_bytes()).collect();
+    Blob::new(Media::Bytes, bytes).with_meta(json!({
+        "shape": shape, "dtype": "f32le", "kind": kind, "levels": levels, "names": names,
     }))
 }
 
@@ -967,14 +986,18 @@ impl kronos::generate::CachedCores for KronosCachedNpu {
 // ================================= timesfm3 =================================
 
 /// TimesFM-3 behind the scheduler. `BRAIN_TIMESFM3` = the brain-format
-/// weights. Served over the SAME single-series wire contract every foundation
-/// model here uses (`context` blob, no covariates) - the model's native
-/// multivariate/covariate forecasting is reachable through the library API
-/// (`timesfm3::Timesfm3Forecaster::forecast` over a `forecast::Panel`) and the
-/// `brain forecast predict --timesfm3` CLI path, but the shared `Run` wire
-/// protocol here has no way to carry more than one named series, so a served
-/// request is always target-only. CPU/GPU only, like kronos above - no NPU
-/// export for this model yet.
+/// weights. Unlike the other three foundation models here, this wire DOES
+/// carry the model's native multivariate/covariate capability: `context` is
+/// `[T]` (one target, byte-identical to the original single-series contract)
+/// or `[num_target, T]`; optional `past_covariates` (`[T]`/`[P,T]`) and
+/// `known_future` (`[T+horizon]`/`[K,T+horizon]`) add covariate variates; an
+/// optional `observed` mask (same shape as `context`) marks missing steps,
+/// honored end to end since `Timesfm3Forecaster::forecast` started reading
+/// `forecast::Variate::observed`. `forecast` is `[horizon, 9]` for one target
+/// (`kind:"quantiles_hq"`, unchanged) or `[num_target, horizon, 9]` for more
+/// than one (`kind:"quantiles_thq"`, plus a `names` meta array - position
+/// alone does not say which target is which). CPU/GPU only, like kronos
+/// above - no NPU export for this model yet.
 pub struct Timesfm3Resident {
     path: String,
 }
@@ -988,13 +1011,19 @@ impl Timesfm3Resident {
         Timesfm3Resident { path: path.to_string() }
     }
     fn spec() -> ActionSpec {
-        base_forecast_spec("univariate forecast (TimesFM-3, target-only over this wire); forecast blob is [horizon, 9] (9 native quantiles)")
+        base_forecast_spec(
+            "multivariate forecast (TimesFM-3, 9 native quantiles); context is [T] or [num_target,T], \
+             optional past_covariates/known_future/observed add covariates/masking",
+        )
+        .input(BlobSpec::new("past_covariates", Media::Bytes, "past-only covariate series as raw f32-LE; meta {shape: [T] or [P,T]}"))
+        .input(BlobSpec::new("known_future", Media::Bytes, "known-future covariate series as raw f32-LE; meta {shape: [T+horizon] or [K,T+horizon]}"))
+        .input(BlobSpec::new("observed", Media::Bytes, "1.0/0.0 per-step observed mask, same shape as context, as raw f32-LE"))
     }
 }
 
 /// The static (weights-free) TimesFM-3 manifest - see [`chronos2_manifest`].
 pub(crate) fn timesfm3_manifest() -> Manifest {
-    Manifest::new(TIMESFM3_MODEL, "time-series forecasting (TimesFM-3); 9 native quantiles, univariate over this wire", vec![Timesfm3Resident::spec()])
+    Manifest::new(TIMESFM3_MODEL, "time-series forecasting (TimesFM-3); 9 native quantiles, native multivariate + covariates over this wire", vec![Timesfm3Resident::spec()])
 }
 
 impl ResidentModel for Timesfm3Resident {
@@ -1024,71 +1053,140 @@ impl ResidentModel for Timesfm3Resident {
     }
 }
 
+/// `[T]` -> `(1, T)`, `[N, T]` -> `(N, T)`; anything else is a wire error
+/// naming the offending field.
+fn parse_series_shape(shape: &[usize], field: &str) -> Result<(usize, usize), String> {
+    match shape {
+        [t] => Ok((1, *t)),
+        [n, t] => Ok((*n, *t)),
+        _ => Err(format!("timesfm3: {field} shape {shape:?} must be [T] or [N, T]")),
+    }
+}
+
+/// Decode one invocation's forecasting inputs into an `Item`, native
+/// multivariate/covariate shapes and all - shared by `run` and `run_batch` so
+/// a served request reaches the same capability either way. `context` is
+/// `[T]` (one target) or `[num_target, T]`; `past_covariates`/`known_future`
+/// are optional and follow the same `[T]`/`[N,T]` convention (`known_future`
+/// carries `horizon` extra steps); `observed`, if present, must share
+/// `context`'s exact shape and becomes each target's `Variate::observed`.
+fn item_from_invocation(inv: &Invocation, item_id: String, horizon: usize) -> Result<forecast::Item, String> {
+    let (context, shape) = decode_f32(inv, "context")?;
+    let (num_target, t) = parse_series_shape(&shape, "context")?;
+    let observed = decode_f32_opt(inv, "observed")?;
+    if let Some((_, oshape)) = &observed {
+        if *oshape != shape {
+            return Err(format!("timesfm3: observed shape {oshape:?} must match context shape {shape:?}"));
+        }
+    }
+
+    let mut variates = Vec::with_capacity(num_target);
+    for i in 0..num_target {
+        let mut v = forecast::Variate::target(format!("t{i}"), context[i * t..(i + 1) * t].to_vec());
+        if let Some((data, _)) = &observed {
+            v.observed = Some(data[i * t..(i + 1) * t].to_vec());
+        }
+        variates.push(v);
+    }
+    if let Some((data, pshape)) = decode_f32_opt(inv, "past_covariates")? {
+        let (np, pt) = parse_series_shape(&pshape, "past_covariates")?;
+        if pt != t {
+            return Err(format!("timesfm3: past_covariates length {pt} must equal context length {t}"));
+        }
+        for i in 0..np {
+            let mut v = forecast::Variate::target(format!("p{i}"), data[i * pt..(i + 1) * pt].to_vec());
+            v.role = forecast::Role::PastCovariate;
+            variates.push(v);
+        }
+    }
+    if let Some((data, fshape)) = decode_f32_opt(inv, "known_future")? {
+        let (nf, ft) = parse_series_shape(&fshape, "known_future")?;
+        if ft != t + horizon {
+            return Err(format!("timesfm3: known_future length {ft} must equal context length {t} + horizon {horizon}"));
+        }
+        for i in 0..nf {
+            let mut v = forecast::Variate::target(format!("f{i}"), data[i * ft..i * ft + t].to_vec());
+            v.role = forecast::Role::KnownFuture;
+            v.future = Some(data[i * ft + t..(i + 1) * ft].to_vec());
+            variates.push(v);
+        }
+    }
+    Ok(forecast::Item::new(item_id, variates))
+}
+
 struct Timesfm3Instance {
     forecaster: timesfm3::Timesfm3Forecaster,
 }
 
 impl Timesfm3Instance {
-    /// Encode one target's quantiles into the wire `Outcome` - shared by
-    /// `run` and `run_batch`'s success path so the two cannot diverge.
-    fn outcome_from_target(horizon: usize, tf: forecast::TargetForecast, levels: &[f32]) -> ActionResult {
-        let q = tf.quantiles.ok_or_else(|| "timesfm3: model returned no quantiles".to_string())?;
-        Ok(Outcome::new()
-            .set("model", json!(TIMESFM3_MODEL))
-            .set("horizon", json!(horizon))
-            .set("device", json!("gpu_core"))
-            // "quantiles_hq" (horizon-major, [horizon, levels]), deliberately
-            // distinct from chronos2's "quantiles" kind - that one is the raw
-            // NATIVE [levels, horizon] (quantile-major) array from the
-            // low-level model, bypassing forecast::Block entirely, while this
-            // goes through the generic ForecastModel adapter and inherits
-            // Block's own [horizon, n_levels] convention. Same string, two
-            // shapes, would silently transpose a reader expecting one for
-            // the other.
-            .blob("forecast", encode_forecast(&q.data, q.shape, "quantiles_hq", levels)))
+    /// Encode a request's target(s) into the wire `Outcome` - shared by `run`
+    /// and `run_batch`'s success path so the two cannot diverge. One target
+    /// is `kind:"quantiles_hq"` `[horizon, levels]`, byte-identical to the
+    /// original single-series contract; more than one is
+    /// `kind:"quantiles_thq"` `[num_target, horizon, levels]` plus a `names`
+    /// meta array, since position alone would not say which target is which.
+    fn outcome_from_targets(horizon: usize, targets: &[forecast::TargetForecast], levels: &[f32]) -> ActionResult {
+        let mut data = Vec::with_capacity(targets.len() * horizon * levels.len());
+        let mut names = Vec::with_capacity(targets.len());
+        for tf in targets {
+            let q = tf.quantiles.as_ref().ok_or_else(|| "timesfm3: model returned no quantiles".to_string())?;
+            data.extend_from_slice(&q.data);
+            names.push(tf.name.clone());
+        }
+        let blob = if targets.len() == 1 {
+            encode_forecast(&data, vec![horizon, levels.len()], "quantiles_hq", levels)
+        } else {
+            encode_named_forecast(&data, vec![targets.len(), horizon, levels.len()], "quantiles_thq", levels, &names)
+        };
+        Ok(Outcome::new().set("model", json!(TIMESFM3_MODEL)).set("horizon", json!(horizon)).set("device", json!("gpu_core")).blob("forecast", blob))
     }
 }
 
 impl Instance for Timesfm3Instance {
     fn run(&mut self, _action: &str, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        let (context, _shape) = decode_f32(inv, "context")?;
         let horizon = horizon_of(inv, 64);
         let levels = self.forecaster.config().quantile_levels.clone();
 
-        // The forecaster itself left-pads any context to the checkpoint's
-        // patch boundary (see Timesfm3Forecaster::forecast), so the FULL
-        // series is used - no truncation to a patch-aligned tail here.
-        let item = forecast::Item::new("series", vec![forecast::Variate::target("target", context)]);
+        // `item_from_invocation` reads native multivariate/covariate shapes;
+        // `Timesfm3Forecaster::forecast` itself left-pads any context to the
+        // checkpoint's patch boundary, so the FULL series is used, no
+        // truncation to a patch-aligned tail here.
+        let item = item_from_invocation(inv, "series".to_string(), horizon)?;
         let panel = forecast::Panel::single("", "series", item.variates);
         let spec = forecast::ForecastSpec { horizon, quantile_levels: levels.clone(), ..forecast::ForecastSpec::default() };
         let out = forecast::ForecastModel::forecast(&self.forecaster, &panel, &spec).map_err(|e| format!("timesfm3: {}", e.message))?;
-        let tf = out.targets.into_iter().next().ok_or_else(|| "timesfm3: no forecast produced".to_string())?;
-        Self::outcome_from_target(horizon, tf, &levels)
+        if out.targets.is_empty() {
+            return Err("timesfm3: no forecast produced".to_string());
+        }
+        Self::outcome_from_targets(horizon, &out.targets, &levels)
     }
 
     /// Group by horizon (the one dimension `Timesfm3Forecaster::forecast`
     /// needs uniform across a `Panel` - it batches everything else, including
-    /// mixed context lengths and variate counts, internally) and issue one
-    /// forecast() per group, each item keyed by its own batch index so
-    /// results scatter back positionally. A malformed invocation gets its own
-    /// `Err` before ever entering a group. If a whole group's shared call
-    /// fails - one bad item can fail a Panel outright, e.g. an all-missing
-    /// target - that group is re-run one invocation at a time so a single bad
-    /// request never fails its batch-mates, mirroring `resident_asr`'s
-    /// offline_batch per-job isolation without needing forecast() itself to
-    /// return partial results.
+    /// mixed context lengths, variate counts, and multi-target items,
+    /// internally) and issue one forecast() per group, each item keyed by its
+    /// own batch index so results scatter back positionally (an item may
+    /// itself carry several targets, grouped back together by that index
+    /// before encoding). A malformed invocation gets its own `Err` before
+    /// ever entering a group. If a whole group's shared call fails - one bad
+    /// item can fail a Panel outright, e.g. an all-missing target - that
+    /// group is re-run one invocation at a time so a single bad request never
+    /// fails its batch-mates, mirroring `resident_asr`'s offline_batch
+    /// per-job isolation without needing forecast() itself to return partial
+    /// results.
     fn run_batch(&mut self, action: &str, invs: &[Invocation], _progress: &mut dyn FnMut(usize, Progress)) -> Vec<ActionResult> {
         let levels = self.forecaster.config().quantile_levels.clone();
 
         struct Job {
-            context: Vec<f32>,
+            item: forecast::Item,
             horizon: usize,
         }
         let mut jobs: Vec<Option<Job>> = Vec::with_capacity(invs.len());
         let mut results: Vec<Option<ActionResult>> = vec![None; invs.len()];
         for (i, inv) in invs.iter().enumerate() {
-            match decode_f32(inv, "context") {
-                Ok((context, _shape)) => jobs.push(Some(Job { context, horizon: horizon_of(inv, 64) })),
+            let horizon = horizon_of(inv, 64);
+            match item_from_invocation(inv, i.to_string(), horizon) {
+                Ok(item) => jobs.push(Some(Job { item, horizon })),
                 Err(e) => {
                     jobs.push(None);
                     results[i] = Some(Err(e));
@@ -1098,23 +1196,24 @@ impl Instance for Timesfm3Instance {
 
         let mut groups: std::collections::BTreeMap<usize, Vec<usize>> = std::collections::BTreeMap::new();
         for (i, j) in jobs.iter().enumerate() {
-            if j.is_some() {
-                groups.entry(j.as_ref().unwrap().horizon).or_default().push(i);
+            if let Some(j) = j {
+                groups.entry(j.horizon).or_default().push(i);
             }
         }
 
         for (&horizon, idxs) in &groups {
-            let items: Vec<forecast::Item> = idxs
-                .iter()
-                .map(|&i| forecast::Item::new(i.to_string(), vec![forecast::Variate::target("target", jobs[i].as_ref().unwrap().context.clone())]))
-                .collect();
+            let items: Vec<forecast::Item> = idxs.iter().map(|&i| jobs[i].as_ref().unwrap().item.clone()).collect();
             let panel = forecast::Panel { freq: String::new(), start: None, items };
             let spec = forecast::ForecastSpec { horizon, quantile_levels: levels.clone(), ..forecast::ForecastSpec::default() };
             match forecast::ForecastModel::forecast(&self.forecaster, &panel, &spec) {
                 Ok(out) => {
+                    let mut by_item: std::collections::BTreeMap<usize, Vec<forecast::TargetForecast>> = std::collections::BTreeMap::new();
                     for tf in out.targets {
                         let i: usize = tf.item_id.parse().expect("item_id is this batch's own index, set just above");
-                        results[i] = Some(Self::outcome_from_target(horizon, tf, &levels));
+                        by_item.entry(i).or_default().push(tf);
+                    }
+                    for (i, targets) in by_item {
+                        results[i] = Some(Self::outcome_from_targets(horizon, &targets, &levels));
                     }
                 }
                 Err(_) => {
@@ -1152,7 +1251,11 @@ mod tests {
 
     /// A tiny checkpoint-free `Timesfm3Instance`, deterministic synthetic
     /// weights - mirrors `crates/timesfm3/tests/forecaster.rs`'s own helper,
-    /// needing neither the golden manifest nor a real checkpoint.
+    /// needing neither the golden manifest nor a real checkpoint. Built on
+    /// the POOLED test device (`gpu_core::testgpu::dev`): this helper is
+    /// called once per test in this file, and `Timesfm3::from_weights`'s own
+    /// plain `Gpu::new` creates a brand-new real device every time, which is
+    /// exactly the per-test-binary sharing `testgpu` exists to avoid.
     fn synthetic_timesfm3_instance() -> Timesfm3Instance {
         let cfg = timesfm3::Timesfm3Config::tiny();
         let weights: HashMap<String, Vec<f32>> = cfg
@@ -1165,7 +1268,7 @@ mod tests {
                 (k, data)
             })
             .collect();
-        let model = timesfm3::Timesfm3::from_weights(cfg, &weights).unwrap();
+        let model = timesfm3::Timesfm3::from_weights_on(gpu_core::testgpu::dev(timesfm3::model::PIPELINES), cfg, &weights).unwrap();
         Timesfm3Instance { forecaster: timesfm3::Timesfm3Forecaster::new(model) }
     }
 
@@ -1199,6 +1302,62 @@ mod tests {
         assert!(out[0].is_ok(), "invocation 0 is well-formed and must succeed");
         assert!(out[1].is_err(), "invocation 1 is missing its context blob");
         assert!(out[2].is_ok(), "invocation 2 is well-formed and must succeed despite invocation 1's failure");
+    }
+
+    fn f32_blob(data: &[f32], shape: &[usize]) -> Blob {
+        let bytes: Vec<u8> = data.iter().flat_map(|v| v.to_le_bytes()).collect();
+        Blob::new(Media::Bytes, bytes).with_meta(json!({"shape": shape}))
+    }
+
+    #[test]
+    fn timesfm3_single_target_output_is_unchanged_by_the_multivariate_refactor() {
+        let mut inst = synthetic_timesfm3_instance();
+        let out = inst.run("forecast", &timesfm3_context_invocation(1), &mut |_| {}).expect("run");
+        let blob = &out.blobs["forecast"];
+        assert_eq!(blob.meta["kind"], "quantiles_hq");
+        assert_eq!(blob.meta["shape"], json!([4, 5])); // tiny() has 5 native quantile levels
+        assert!(blob.meta.get("names").is_none(), "a single target must not grow a names array");
+    }
+
+    #[test]
+    fn timesfm3_multivariate_context_produces_named_quantiles_thq() {
+        let mut inst = synthetic_timesfm3_instance();
+        let data: Vec<f32> = (0..16).map(|i| ((131 * i) % 23) as f32 - 11.0).collect(); // [2 targets, 8 steps]
+        let inv = Invocation::new().set("horizon", json!(4)).blob("context", f32_blob(&data, &[2, 8]));
+        let out = inst.run("forecast", &inv, &mut |_| {}).expect("run");
+        let blob = &out.blobs["forecast"];
+        assert_eq!(blob.meta["kind"], "quantiles_thq");
+        assert_eq!(blob.meta["shape"], json!([2, 4, 5]));
+        assert_eq!(blob.meta["names"], json!(["t0", "t1"]));
+        assert_eq!(blob.bytes.len(), 2 * 4 * 5 * 4);
+    }
+
+    #[test]
+    fn timesfm3_observed_mask_over_the_wire_is_invariant_to_the_masked_value() {
+        let mut inst = synthetic_timesfm3_instance();
+        let observed = [1.0f32, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0]; // step 3 unobserved
+        let a: Vec<f32> = vec![1.0, 2.0, 3.0, 5.0, 5.0, 6.0, 7.0, 8.0];
+        let b: Vec<f32> = vec![1.0, 2.0, 3.0, 999_999.0, 5.0, 6.0, 7.0, 8.0];
+        let inv_of = |data: &[f32]| {
+            Invocation::new()
+                .set("horizon", json!(4))
+                .blob("context", f32_blob(data, &[8]))
+                .blob("observed", f32_blob(&observed, &[8]))
+        };
+        let out_a = inst.run("forecast", &inv_of(&a), &mut |_| {}).expect("run a");
+        let out_b = inst.run("forecast", &inv_of(&b), &mut |_| {}).expect("run b");
+        assert_eq!(out_a.blobs["forecast"].bytes, out_b.blobs["forecast"].bytes, "the value at an unobserved wire step must never affect the forecast");
+    }
+
+    #[test]
+    fn timesfm3_rejects_an_observed_mask_whose_shape_does_not_match_context() {
+        let mut inst = synthetic_timesfm3_instance();
+        let inv = Invocation::new()
+            .set("horizon", json!(4))
+            .blob("context", f32_blob(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], &[8]))
+            .blob("observed", f32_blob(&[1.0, 1.0, 1.0, 1.0], &[4])); // wrong length
+        let err = inst.run("forecast", &inv, &mut |_| {}).expect_err("mismatched observed shape must be rejected");
+        assert!(err.contains("observed"), "error should name the offending field: {err}");
     }
 
     #[test]
