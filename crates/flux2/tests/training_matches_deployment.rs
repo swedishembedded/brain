@@ -63,9 +63,8 @@ fn every_drawn_sigma_is_on_the_schedule_and_all_of_it_is_reached() {
     let cfg = Flux2Config::klein_4b();
     let sched = finetune::training_sigmas(&cfg, 512);
     let mut seen = vec![0usize; sched.len()];
-    let mut rng = data::rng::Rng::new(0x0051_67a1);
-    for _ in 0..2000 {
-        let s = finetune::draw_sigma(&sched, rng.next_f64());
+    for step in 0..2000u64 {
+        let s = finetune::step_sigma(&sched, step, 0x0051_67a1);
         let at = sched.iter().position(|&v| v as f64 == s).expect("a drawn sigma must be ON the schedule");
         seen[at] += 1;
     }

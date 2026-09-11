@@ -110,7 +110,8 @@ const HELP: &str = "brain flux2 <cmd>
   finetune <data_dir> --out <adapter.brain> [--variant V] [--steps N] [--rank R] [--lr X]
            [--size S] [--seed K] [--ckpt-every N] [--resume] [--trainer device|host] [--cards N]
            [--text-encoder <path>] [--method lora|rslora] [--lr-ratio X] [--freeze-a]
-           [--precision fp32|int8]
+           [--precision fp32|int8] [--warmup N] [--min-lr X]
+           [--edit-weight A] [--ref-dropout P]
            # Train a LoRA on a folder of captioned images (see data::imageset for
            # the caption formats; `brain label` writes one). The adapter it writes
            # is what `generate --adapter` loads. Do NOT name it '.safetensors':
@@ -126,7 +127,59 @@ const HELP: &str = "brain flux2 <cmd>
            #   --size S        square training size in px, multiple of 16 (default 512)
            #   --rank R        LoRA rank (default 16)
            #   --steps N       training steps (default 200)
-           #   --lr X          learning rate (default 1e-4)
+           #   --lr X          PEAK learning rate (default 1e-4, which is what
+           #                   every published FLUX LoRA recipe and BFL's own
+           #                   klein guidance use). Held flat for the first 80%
+           #                   of the run, then cosine-cooled to --min-lr.
+           #   --min-lr X      the rate the cooldown lands on at the last step
+           #                   (default --lr/10). Adam at a CONSTANT rate does
+           #                   not converge on a stochastic objective, it
+           #                   orbits the minimum at a radius set by the rate
+           #                   times the gradient noise - at batch size 1 that
+           #                   is wide. The cooldown closes it. Constant +
+           #                   ~20% cooldown tracks a full cosine and does not
+           #                   bake --steps into every step, so a run that is
+           #                   later extended has not already annealed itself
+           #                   against the shorter budget. `--min-lr <same as
+           #                   --lr>` restores a flat rate.
+           #   --edit-weight A region-aware flow loss for a PAIRED run
+           #                   (default 0 = off; the published value is 2).
+           #                   Weights each target token's squared error by
+           #                   1 + A*(its |target-reference| change, normalised
+           #                   by the largest one), rescaled to mean 1 so the
+           #                   reported loss stays comparable. In a declutter
+           #                   or removal pair the target latent equals the
+           #                   reference latent almost everywhere, so a uniform
+           #                   mean - and the gradient under it - is dominated
+           #                   by tokens the model can hit by copying the
+           #                   reference across, and a flat loss may just be a
+           #                   competent copier. Only correct for SPATIALLY
+           #                   ALIGNED pairs; every paired run prints the share
+           #                   of tokens that actually differ, which is the
+           #                   number that says whether yours are.
+           #   --ref-dropout P probability a PAIRED step trains with its
+           #                   reference tokens BLANKED (default 0; reach for
+           #                   0.1). When a target and its reference differ
+           #                   only locally, an adapter can drive the loss a
+           #                   long way down by learning to copy the reference
+           #                   across - a real solution, with a loss curve that
+           #                   descends and then flattens, whose deployed
+           #                   output reproduces the reference's own lighting,
+           #                   grain and colour instead of transforming them.
+           #                   Blanking the reference on some steps removes the
+           #                   thing being copied, so the adapter has to learn
+           #                   what a finished target looks like. It is not
+           #                   free: klein is guidance-distilled, so unlike
+           #                   InstructPix2Pix's 5% there is no null branch at
+           #                   inference for those steps to be training, and
+           #                   they come out of the same step budget.
+           #   --warmup N      steps of linear LR warmup (default 0). A LoRA
+           #                   starts at B=0, so its branch output and the
+           #                   gradient through it start at zero and there is
+           #                   no early instability for a warmup to protect
+           #                   against; every mainstream FLUX LoRA trainer
+           #                   defaults to none. The curve is a function of the
+           #                   GLOBAL step, so --resume continues it.
            #   --ckpt-every N  checkpoint every N steps (default 100; 0 = final only).
            #                   Each write is atomic (temp file + rename), so an
            #                   interrupted write cannot damage the last good one.
@@ -623,6 +676,24 @@ fn finetune(args: &[String]) -> Result<(), String> {
         rank_stabilized: false,
         lr_ratio: 1.0,
         freeze_a: false,
+        // Absent, not spelled out: `TrainOpts::lr_schedule` owns the default
+        // curve so the CLI and the served `lora_train` action cannot drift on
+        // it - and so it stays derived from whatever --steps turns out to be,
+        // which is not known until the whole argument list is parsed.
+        warmup: None,
+        min_lr: None,
+        // Off by default: the region-aware loss is only correct for pairs
+        // whose two images are spatially registered, and the trainer cannot
+        // tell that from a folder. Every paired run PRINTS the measurement
+        // that decides it (the share of target tokens that differ from their
+        // reference), so the choice is informed rather than guessed.
+        edit_weight: 0.0,
+        // Also off by default, and for a sharper reason: klein is
+        // guidance-distilled, so there is no null branch at inference for
+        // dropped steps to be training. They buy regularisation against the
+        // copy shortcut and nothing else, which is worth paying for on a
+        // dataset whose pairs are near-identical and not otherwise.
+        ref_dropout: 0.0,
         // What `generate` would run this adapter at. fp32 is generate's own
         // default request; `effective_dit_precision` overrides it for a .gguf.
         precision: flux2::Precision::F32,
@@ -638,6 +709,10 @@ fn finetune(args: &[String]) -> Result<(), String> {
             "--steps" => opts.steps = need(i)?.parse().map_err(|e| format!("--steps: {e}"))?,
             "--rank" => opts.rank = need(i)?.parse().map_err(|e| format!("--rank: {e}"))?,
             "--lr" => opts.lr = need(i)?.parse().map_err(|e| format!("--lr: {e}"))?,
+            "--warmup" => opts.warmup = Some(need(i)?.parse().map_err(|e| format!("--warmup: {e}"))?),
+            "--edit-weight" => opts.edit_weight = need(i)?.parse().map_err(|e| format!("--edit-weight: {e}"))?,
+            "--ref-dropout" => opts.ref_dropout = need(i)?.parse().map_err(|e| format!("--ref-dropout: {e}"))?,
+            "--min-lr" => opts.min_lr = Some(need(i)?.parse().map_err(|e| format!("--min-lr: {e}"))?),
             "--size" => opts.size = need(i)?.parse().map_err(|e| format!("--size: {e}"))?,
             "--seed" => opts.seed = need(i)?.parse().map_err(|e| format!("--seed: {e}"))?,
             "--ckpt-every" => opts.ckpt_every = need(i)?.parse().map_err(|e| format!("--ckpt-every: {e}"))?,
@@ -715,14 +790,17 @@ fn finetune(args: &[String]) -> Result<(), String> {
     flux2::caps::check_license(&variant_name)?; // 9B = FLUX Non-Commercial license
     let cfg = Flux2Config::from_name(&variant_name)?;
 
+    let lr_curve = opts.lr_schedule();
     eprintln!(
-        "flux2 finetune: {variant_name} {} trainer, rank {} ({}) steps {} size {} lr {} (x{} on B) seed {} ckpt-every {}{}{} -> {}",
+        "flux2 finetune: {variant_name} {} trainer, rank {} ({}) steps {} size {} lr {:.3e} held to step {} then cooled to {:.3e} (x{} on B) seed {} ckpt-every {}{}{} -> {}",
         opts.trainer.name(),
         opts.rank,
         if opts.rank_stabilized { "rslora" } else { "lora" },
         opts.steps,
         opts.size,
-        opts.lr,
+        lr_curve.peak,
+        lr_curve.decay_start(),
+        lr_curve.floor,
         opts.lr_ratio,
         opts.seed,
         opts.ckpt_every,

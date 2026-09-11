@@ -95,15 +95,47 @@ pub fn training_sigmas(fc: &Flux2Config, size: u32) -> Vec<f32> {
     s
 }
 
-/// Pick one σ out of [`training_sigmas`] from a uniform draw `u ∈ [0,1)`.
+/// The σ a run trains `step` at: **systematic (stratified) sampling** over
+/// [`training_sigmas`] - each block of `sched.len()` consecutive steps is a
+/// fresh random permutation of the whole schedule, so every σ is visited
+/// exactly once per block.
 ///
-/// Uniform over the schedule's entries: every σ generation visits is trained
-/// at, none more than another. A schedule entry is used verbatim, never
-/// jittered - the point is that the training σ IS an inference σ.
-pub fn draw_sigma(sched: &[f32], u: f64) -> f64 {
-    debug_assert!(!sched.is_empty(), "the schedule always has at least one entry");
-    let i = ((u * sched.len() as f64) as usize).min(sched.len() - 1);
-    sched[i] as f64
+/// Uniform over the schedule's entries, as the i.i.d. draw this replaced was:
+/// every σ generation visits is trained at, none more than another, and a
+/// schedule entry is used verbatim rather than jittered - the point is that
+/// the training σ IS an inference σ. What changes is only the variance.
+///
+/// **Why not an i.i.d. draw.** klein at 512 px evaluates four σ, and the loss
+/// at the largest of them is close to twice the loss at the smallest (the
+/// velocity target `ε − x₀` is far harder to predict when the input still
+/// carries some `x₀` to separate out). With one sample per step, the σ mix
+/// inside any short window is therefore the single biggest term in what a
+/// window of reported losses - or a window of gradients - actually averages
+/// to. Drawn i.i.d. that mix is binomial and swings by ±1 count in every
+/// window, including the ~10-step window Adam's β₁ = 0.9 momentum is an
+/// average over; drawn systematically it is exactly uniform in every aligned
+/// block. Same marginal distribution, same "training σ IS an inference σ"
+/// property, strictly less variance - textbook stratified sampling, applied to
+/// strata the deployed sampler handed us.
+///
+/// The order **within** a block is shuffled from `(seed, block)` rather than
+/// fixed, for the reason [`sample_index`] drops `step % n`: a fixed cycle locks
+/// each σ to a fixed phase of every other per-step stream for a whole run.
+///
+/// Derived, not stateful - so a resumed run replays exactly the σ sequence it
+/// would have walked had it never stopped.
+pub fn step_sigma(sched: &[f32], step: u64, seed: u64) -> f64 {
+    assert!(!sched.is_empty(), "the schedule always has at least one entry");
+    let k = sched.len() as u64;
+    let block = step / k;
+    let i = (step % k) as usize;
+    let mut rng = data::rng::Rng::new(seed ^ 0x5169_0a00 ^ block.wrapping_mul(0x9e37_79b9_7f4a_7c15));
+    let mut perm: Vec<usize> = (0..sched.len()).collect();
+    for a in (1..perm.len()).rev() {
+        let b = (rng.next_f64() * (a + 1) as f64) as usize;
+        perm.swap(a, b.min(a));
+    }
+    sched[perm[i]] as f64
 }
 
 /// Which sample a run trains on at `step`, over `n` samples.
@@ -133,6 +165,158 @@ pub fn sample_index(n: usize, step: u64, seed: u64) -> usize {
         perm.swap(i, j.min(i));
     }
     perm[k]
+}
+
+/// Does `step` train with its reference **blanked**? A pure function of the
+/// global step, so a resumed run replays the same sequence of dropped steps -
+/// the property [`sample_index`] and [`step_sigma`] are written for.
+///
+/// **The failure this exists for.** A reference image reaches the DiT by being
+/// concatenated into the same attention sequence as the noised target. When
+/// the two images differ only locally - declutter a room, remove an object -
+/// the flow-matching loss can be driven a long way down by an adapter that
+/// learns to COPY the reference across and nothing else. That solution is
+/// real, it is reachable, and its loss curve looks like training: it descends
+/// and then flattens, and the flattening is not a capacity limit, it is the
+/// copy running out of room. The deployed adapter then reproduces the
+/// reference's own lighting, grain and colour instead of transforming them.
+/// This is shortcut learning in the sense of arXiv:2510.20887 - a
+/// reconstruction loss "indiscriminately incentiviz[es] the adapter to
+/// reproduce all visual factors present in the image" rather than isolating
+/// the one the task is about. OminiControl (arXiv:2411.15098) reports the same
+/// thing from the data side: pairs too alike make a model "simply reproduce
+/// the input".
+///
+/// Blanking the reference on a fraction of steps removes the copy source on
+/// those steps, so the adapter has to represent what a finished target looks
+/// like from the caption and its own prior - capacity it otherwise never has
+/// to spend, and the half of the task the copy solution never learns.
+///
+/// **It is not free, and it is not what the field defaults to.** No mainstream
+/// reference-conditioned trainer (diffusers' Kontext and FLUX.2 img2img
+/// examples, ai-toolkit, SimpleTuner, kohya-ss, musubi-tuner) drops the
+/// conditioning IMAGE; the one that does is InstructPix2Pix (arXiv:2211.09800
+/// §3.2.1, 5%/5%/5% over text, image, and both), and it does so to train the
+/// null branch its classifier-free guidance evaluates at inference. klein is
+/// guidance-distilled - it runs one forward at guidance 1.0 and has no null
+/// branch - so here the dropped steps buy regularisation only, and they spend
+/// part of a step budget on a mode the sampler never enters. That is why this
+/// is off by default and why the rate to reach for is small.
+pub fn ref_dropped(step: u64, seed: u64, p: f32) -> bool {
+    if p <= 0.0 {
+        return false;
+    }
+    if p >= 1.0 {
+        return true;
+    }
+    let mut rng = data::rng::Rng::new(seed ^ 0xd2_0b_0f_00 ^ step.wrapping_mul(0xa076_1d64_78bd_642f));
+    (rng.next_f64() as f32) < p
+}
+
+/// Blank a batch's reference tokens in place - the `∅_I` of [`ref_dropped`].
+///
+/// The reference rows are ZEROED rather than removed: a run builds one trainer
+/// sized for one joint sequence, and this is also exactly what the reference
+/// implementation does (diffusers' `train_instruct_pix2pix.py` multiplies the
+/// conditioning latents by a 0/1 mask, it does not shorten anything). The
+/// position ids therefore still describe a reference at the same t-axis
+/// offset; what is gone is its content.
+///
+/// The velocity target is untouched - it is a property of the sample, not of
+/// what the model was shown.
+pub fn blank_references<T: crate::grad::Fp>(b: &mut Batch<T>, cfg: &Cfg) {
+    let n_gen = cfg.n_gen() * cfg.in_channels;
+    for v in &mut b.img[n_gen..] {
+        *v = T::ZERO;
+    }
+}
+
+/// Per-element flow-loss weights that concentrate a PAIRED run's gradient on
+/// the tokens its edit actually changes: `w_j = 1 + α·‖x₀_j − ref_j‖/max_j‖·‖`
+/// over tokens, rescaled to mean 1 and broadcast across each token's channels.
+/// `α = 0`, a reference of a different length than the target (more than one
+/// reference, or a differently-sized grid), or a pair with no change at all all
+/// return an EMPTY weight - the plain unweighted mean.
+///
+/// **What it is for.** In an edit pair - declutter a room, remove an object -
+/// the target latent equals the reference latent almost everywhere, so almost
+/// every token's velocity can be hit by copying the reference across. Averaged
+/// uniformly, that easy sub-problem is most of the loss AND most of the
+/// gradient, and a run whose loss has flattened may just have become a
+/// competent copier: the tokens carrying the edit are a small enough fraction
+/// that fitting them barely moves the mean. arXiv:2604.23763 §3.5 states this
+/// defect for instruction editing and measures L1 0.2132 → 0.1483 from the
+/// reweight alone, at `α = 2`.
+///
+/// **It requires a SPATIALLY ALIGNED pair**, which a declutter/relight/removal
+/// dataset is and a subject-driven one is not: the mask is `|target −
+/// reference|` at matching token positions, so if the two images are not
+/// registered, every token "changed" and the weight is noise with no signal in
+/// it. That is why this is opt-in rather than the default - the trainer cannot
+/// tell the two kinds of dataset apart, but [`change_stats`] reports the number
+/// the operator can.
+///
+/// **Rescaled to mean 1** so a weighted run's reported loss is on the same
+/// scale as an unweighted one's. Without that the reweighting would show up as
+/// a loss-level shift and be indistinguishable from training progress.
+pub fn change_weights(x0: &[f32], refs: &[f32], cin: usize, alpha: f32) -> Vec<f32> {
+    if alpha <= 0.0 || refs.len() != x0.len() || x0.is_empty() {
+        return Vec::new();
+    }
+    let n_tok = x0.len() / cin;
+    let mut m: Vec<f32> = (0..n_tok)
+        .map(|j| {
+            let (a, b) = (&x0[j * cin..(j + 1) * cin], &refs[j * cin..(j + 1) * cin]);
+            a.iter().zip(b).map(|(&p, &q)| (p - q) * (p - q)).sum::<f32>().sqrt()
+        })
+        .collect();
+    let peak = m.iter().copied().fold(0.0f32, f32::max);
+    if peak <= 0.0 {
+        // Target and reference are the same image. Nothing to weight toward,
+        // and dividing by the peak would be a NaN in every gradient.
+        return Vec::new();
+    }
+    let mut sum = 0.0f32;
+    for v in &mut m {
+        *v = 1.0 + alpha * (*v / peak);
+        sum += *v;
+    }
+    let mean = sum / n_tok as f32;
+    let mut w = Vec::with_capacity(x0.len());
+    for v in m {
+        let scaled = v / mean;
+        for _ in 0..cin {
+            w.push(scaled);
+        }
+    }
+    w
+}
+
+/// What fraction of a pair's tokens carry a change of at least a tenth of the
+/// largest one - the number that says whether a dataset is the spatially
+/// aligned, small-region kind [`change_weights`] is for.
+///
+/// A declutter or removal set reads as a few percent: most of the picture is
+/// identical and the edit is local. A set whose pairs are not registered to
+/// each other reads as most of the tokens, and weighting toward "the changed
+/// region" would then be weighting toward nothing. Reported rather than acted
+/// on: the trainer states the measurement, the operator decides.
+pub fn change_stats(x0: &[f32], refs: &[f32], cin: usize) -> Option<f32> {
+    if refs.len() != x0.len() || x0.is_empty() {
+        return None;
+    }
+    let n_tok = x0.len() / cin;
+    let m: Vec<f32> = (0..n_tok)
+        .map(|j| {
+            let (a, b) = (&x0[j * cin..(j + 1) * cin], &refs[j * cin..(j + 1) * cin]);
+            a.iter().zip(b).map(|(&p, &q)| (p - q) * (p - q)).sum::<f32>().sqrt()
+        })
+        .collect();
+    let peak = m.iter().copied().fold(0.0f32, f32::max);
+    if peak <= 0.0 {
+        return Some(0.0);
+    }
+    Some(m.iter().filter(|&&v| v >= 0.1 * peak).count() as f32 / n_tok as f32)
 }
 
 /// The text-encoder placement a fine-tune should build for a DiT at `path`,
@@ -339,7 +523,26 @@ impl Trainer {
 pub struct TrainOpts {
     pub steps: u32,
     pub rank: usize,
+    /// The **peak** learning rate - what the warmup ramps to and the decay
+    /// starts from, not the rate every step runs at. See [`Self::lr_schedule`].
     pub lr: f32,
+    /// Steps of linear LR warmup. `None` selects the default,
+    /// [`WARMUP_FRACTION`] of `steps`.
+    pub warmup: Option<u32>,
+    /// The rate the decay lands on at `steps`. `None` selects the default,
+    /// [`MIN_LR_FRACTION`] of `lr`; `Some(lr)` with `warmup: Some(0)` is a
+    /// constant rate.
+    pub min_lr: Option<f32>,
+    /// Region-aware flow loss for a PAIRED run: `α` in
+    /// [`change_weights`]'s `1 + α·(normalised per-token change)`. `0.0` (the
+    /// default) is the plain unweighted mean; `2.0` is the published value.
+    /// Ignored by a caption-only run, which has no reference to difference
+    /// against.
+    pub edit_weight: f32,
+    /// Probability that a step trains with its reference tokens **blanked** -
+    /// see [`ref_dropped`] for the copy-shortcut failure this exists for, and
+    /// for why it is `0.0` by default on a guidance-distilled variant.
+    pub ref_dropout: f32,
     /// Host reference or device (WGSL) gradients - see [`Trainer`].
     pub trainer: Trainer,
     /// How many GPUs the device trainer spreads the block stack over. One card
@@ -384,6 +587,62 @@ pub struct TrainOpts {
     pub precision: crate::Precision,
 }
 
+/// Default cooldown, as a fraction of the run's step budget: the rate is held
+/// at the peak until the last fifth, then cosine-decays to the floor.
+///
+/// A fifth is Hägele et al.'s measured saturation point (arXiv:2405.18392):
+/// constant-then-cooldown tracks a full cosine, and lengthening the cooldown
+/// past ~20% of the run stops buying anything. The shape matters more than the
+/// number here - every step before the cooldown runs at the rate the caller
+/// asked for, whatever `--steps` says, so a run that turns out to need three
+/// times the budget has not already annealed itself against the short one.
+pub const COOLDOWN_FRACTION: f32 = 0.2;
+
+/// Default floor, as a fraction of the peak rate. A tenth: low enough that the
+/// last steps are refining rather than exploring, above zero so the run does
+/// not stop training some steps before it ends.
+pub const MIN_LR_FRACTION: f32 = 0.1;
+
+impl TrainOpts {
+    /// The learning-rate curve this run follows: [`Self::lr`] held flat, then
+    /// a cosine cooldown to the floor over the last [`COOLDOWN_FRACTION`] of
+    /// the run. No warmup by default.
+    ///
+    /// **Why it cools down.** Adam on a stochastic objective does not converge
+    /// to a minimum at a constant step size; it converges to a ball around one
+    /// whose radius is set by the step size times the gradient noise. At batch
+    /// size 1 - one image, one σ, one noise draw per step - that noise is
+    /// large, so the ball is wide, and a run that never drops its rate stays
+    /// in it. The cooldown is what closes it, and it is the shape the field
+    /// has measured against a full cosine (arXiv:2405.18392) rather than a
+    /// curve picked for its looks.
+    ///
+    /// **Why there is no warmup by default.** Warmup exists to let a net
+    /// survive a rate above its instability threshold early on; Kalra &
+    /// Barkeshli (arXiv:2406.09405) find it unnecessary below that threshold.
+    /// A LoRA is initialised at `B = 0`, so its branch output - and the
+    /// gradient through it - starts at exactly zero and the early sharpness
+    /// pathology warmup addresses is largely absent. Every mainstream FLUX
+    /// LoRA trainer (diffusers, kohya-ss, ai-toolkit) defaults to no warmup
+    /// for the same reason. `--warmup` is there for a caller who measures
+    /// otherwise.
+    ///
+    /// The curve is a function of the GLOBAL step, so `--resume` continues it
+    /// instead of starting over - the same property [`sample_index`] and
+    /// [`step_sigma`] are written for.
+    pub fn lr_schedule(&self) -> model::LrSchedule {
+        let warmup = self.warmup.unwrap_or(0);
+        let cooldown = ((self.steps as f32 * COOLDOWN_FRACTION) as u32).max(1);
+        model::LrSchedule {
+            peak: self.lr,
+            floor: self.min_lr.unwrap_or(self.lr * MIN_LR_FRACTION),
+            warmup,
+            hold: self.steps.saturating_sub(warmup + cooldown),
+            decay_iters: self.steps,
+        }
+    }
+}
+
 /// Fine-tune a LoRA adapter on `dir` (a captioned-image folder — see
 /// `data::imageset` for the caption formats). Returns the trained adapter.
 /// `progress(step, total, msg)` streams encoding + per-step loss and step time
@@ -412,6 +671,32 @@ pub fn run(
             if refs.is_empty() { "caption-only".to_string() } else { format!("paired: each target conditioned on its pairs.yaml reference, +{} tokens", lh * lw) }
         ),
     );
+    // How many times the run will see each image. At batch size 1 a step IS a
+    // sample, so this is the number that decides whether a run is long enough,
+    // and it is not the number the operator typed. Said out loud because the
+    // published recipes for reference-conditioned FLUX training - diffusers'
+    // own FLUX.2 img2img and FLUX.1-Kontext examples, ai-toolkit's Kontext
+    // config, In-Context LoRA, BFL's own klein guidance - all sit between 1000
+    // and 20000 sample-gradients, and a run an order of magnitude under that
+    // has a flat loss curve because it has barely started, not because it has
+    // converged.
+    if !samples.is_empty() {
+        progress(
+            0,
+            opts.steps + 1,
+            format!(
+                "{} steps over {} samples = {:.1} passes over the dataset{}",
+                opts.steps,
+                samples.len(),
+                opts.steps as f32 / samples.len() as f32,
+                if opts.steps < 1000 {
+                    " (the published recipes for reference-conditioned FLUX training use 1000-3000 steps and up)"
+                } else {
+                    ""
+                }
+            ),
+        );
+    }
 
     // 2. encode (encoders dropped inside before returning). The text encoder
     //    is built at the tier `generate` would use for this DiT, so the
@@ -428,6 +713,46 @@ pub fn run(
         progress(0, opts.steps + 1, format!("{stage} {}/{tot}", i + 1))
     })?;
     drop(samples);
+
+    // How local this dataset's edit is: the share of target tokens that differ
+    // measurably from their reference, averaged over the pairs. Reported for
+    // every paired run, whether or not `--edit-weight` is on, because it is
+    // what says which of the two things a flat loss curve means. A few percent
+    // says the edit is a small region of an otherwise-copied picture, so most
+    // of a uniform loss - and most of the gradient - is the copy; a large
+    // share says the pairs are not spatially registered and the region-aware
+    // weighting has nothing to aim at.
+    let local: Vec<f32> = encoded.iter().filter_map(|e| change_stats(&e.x0, &e.refs, fc.in_channels)).collect();
+    if !local.is_empty() {
+        let mean = local.iter().sum::<f32>() / local.len() as f32;
+        let mut note = String::new();
+        if opts.edit_weight > 0.0 {
+            note.push_str(&format!("; --edit-weight {} concentrates the loss there", opts.edit_weight));
+        }
+        if opts.ref_dropout > 0.0 {
+            note.push_str(&format!("; --ref-dropout {} blanks the reference on some steps", opts.ref_dropout));
+        }
+        // The configuration that produces a copy, named while it can still be
+        // changed. A target that is mostly its own reference, weighted
+        // uniformly, with the reference always present, is a task an adapter
+        // can solve by copying - and the loss curve of that solution looks
+        // like training working.
+        if mean < 0.3 && opts.edit_weight == 0.0 && opts.ref_dropout == 0.0 {
+            note.push_str(
+                "; with a uniform loss and the reference on every step, copying it is a low-loss solution here \
+                 - see --edit-weight and --ref-dropout",
+            );
+        }
+        progress(
+            0,
+            opts.steps + 1,
+            format!(
+                "paired dataset: {:.1}% of target tokens differ from their reference (mean over {} pairs){note}",
+                100.0 * mean,
+                local.len()
+            ),
+        );
+    }
 
     // 3. frozen base → host training weights (fused checkpoint split)
     progress(0, opts.steps + 1, "loading DiT weights".into());
@@ -522,24 +847,34 @@ pub fn run(
         };
         (LoraAdapter::new_with_hp(&cfg, hp, opts.seed), 0)
     };
-    let mut rng = data::rng::Rng::new(opts.seed ^ 0x5eed_f10c);
-    // Advance the sigma stream past the steps already taken. `sigma` is one
-    // draw per step, so a resumed run that restarted this at zero would
-    // replay the first steps' sigmas against a different sample phase - the
-    // schedule is part of the run, not a per-step detail.
-    for _ in 0..done {
-        let _ = rng.next_f64();
-    }
-    // The σ band this run's deployment actually samples at - not U(0,1).
+    // The σ band this run's deployment actually samples at - not U(0,1) - and
+    // the rate curve it walks. Both are pure functions of the global step
+    // ([`step_sigma`], [`model::LrSchedule::at`]), so neither needs advancing
+    // past a resume's `done`: they replay what an uninterrupted run would have
+    // walked.
     let sched = training_sigmas(fc, opts.size);
+    let lr = opts.lr_schedule();
     progress(
         done,
         opts.steps + 1,
         format!(
-            "sigma schedule ({} steps at {}px): {}",
+            "sigma schedule ({} steps at {}px, stratified - each block of {} steps covers all of it): {}",
             sched.len(),
             opts.size,
+            sched.len(),
             sched.iter().map(|s| format!("{s:.4}")).collect::<Vec<_>>().join(", ")
+        ),
+    );
+    progress(
+        done,
+        opts.steps + 1,
+        format!(
+            "learning rate: {:.3e}{}, held to step {}, then cosine-cooled to {:.3e} at step {}",
+            lr.peak,
+            if lr.warmup > 0 { format!(" after {} warmup steps", lr.warmup) } else { String::new() },
+            lr.decay_start(),
+            lr.floor,
+            lr.decay_iters
         ),
     );
     for step in done..opts.steps {
@@ -548,11 +883,29 @@ pub fn run(
         }
         let t0 = std::time::Instant::now();
         let s = &encoded[sample_index(n_samples, step as u64, opts.seed)];
-        let sigma = draw_sigma(&sched, rng.next_f64());
+        let sigma = step_sigma(&sched, step as u64, opts.seed);
+        let lr_now = lr.at(step);
         let noise = model::hostmath::randn(s.x0.len(), opts.seed ^ (0xa5a5 + step as u64));
-        let batch: Batch<f32> = make_flow_batch_paired(&cfg, &s.x0, &s.refs, &s.ctx, sigma, &noise);
+        let mut batch: Batch<f32> = make_flow_batch_paired(&cfg, &s.x0, &s.refs, &s.ctx, sigma, &noise);
+        let dropped = !s.refs.is_empty() && ref_dropped(step as u64, opts.seed, opts.ref_dropout);
+        if dropped {
+            blank_references(&mut batch, &cfg);
+        }
+        // Region-aware weights, if this run asked for them. Per step rather
+        // than cached per sample: it is one pass over the target latent
+        // against a forward+backward through the whole DiT.
+        //
+        // NOT on a dropped step: the weights say "spend the gradient where
+        // this pair's edit is", and a step with no reference has no edit to
+        // speak of - it is being asked to produce the whole target, so every
+        // token of it counts the same.
+        batch.w = if dropped {
+            Vec::new()
+        } else {
+            change_weights(&s.x0, &s.refs, cfg.in_channels, opts.edit_weight)
+        };
         let loss = match (&dev, &host) {
-            (Some(t), _) => t.step(&mut adapter, &batch, opts.lr),
+            (Some(t), _) => t.step(&mut adapter, &batch, lr_now),
             (None, Some(b)) => {
                 let w_eff = adapter.apply(b);
                 // Streamed, not collected. A LoRA step reduces each block's
@@ -563,16 +916,34 @@ pub fn run(
                 // beside the frozen base and its effective copy, and one that
                 // does not. `grads_into` runs the identical backward and hands
                 // each block over as it completes.
-                let mut step = adapter.stepper(opts.lr);
+                let mut step = adapter.stepper(lr_now);
                 let (loss, _globals) = modelgrad::grads_into(&cfg, &w_eff, &batch, &mut step);
                 loss
             }
             (None, None) => unreachable!("one of the two trainers is always built"),
         };
+        // σ is on the line because a single step's loss is not comparable to
+        // the next one's without it. The velocity target `ε − x₀` gets harder
+        // to predict as σ falls and the input still carries some x₀ to
+        // separate out, so ONE adapter evaluated at klein's four scheduled σ
+        // produces four quite different losses - a spread that can rival what
+        // a whole short run moves the mean by. A log carrying only the number
+        // therefore invites reading a σ draw as progress. With σ on the line,
+        // a run's log can be stratified after the fact, which at batch size 1
+        // is the only way to see a trend rather than a draw.
         progress(
             step + 1,
             opts.steps + 1,
-            format!("step {}/{}  loss {loss:.5}  ({:.1} s)", step + 1, opts.steps, t0.elapsed().as_secs_f64()),
+            format!(
+                "step {}/{}  loss {loss:.5}  sigma {sigma:.4}  lr {lr_now:.3e}{}  ({:.1} s)",
+                step + 1,
+                opts.steps,
+                // A dropped step's loss is a different quantity - no reference
+                // to condition on - so it is marked, not silently averaged in
+                // with the rest by whoever reads the log.
+                if dropped { "  [ref dropped]" } else { "" },
+                t0.elapsed().as_secs_f64()
+            ),
         );
         // periodic checkpoint so a long run is resumable / inspectable mid-flight
         if opts.ckpt_every > 0 && (step + 1) % opts.ckpt_every == 0 && step + 1 < opts.steps {

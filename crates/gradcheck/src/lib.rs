@@ -753,14 +753,37 @@ pub fn check_flux2(seed: u64) -> Report {
 /// them. A backward that silently dropped that route would still pass the
 /// caption-only check, because there are no reference rows there to drop.
 pub fn check_flux2_paired(seed: u64) -> Report {
-    check_flux2_on(&flux2::modelgrad::Cfg::tiny_paired(), seed)
+    check_flux2_on_weighted(&flux2::modelgrad::Cfg::tiny_paired(), seed, 0.0)
+}
+
+/// [`check_flux2_paired`] under the **region-aware** flow loss
+/// ([`flux2::modelgrad::loss_weighted`], weights from
+/// [`flux2::finetune::change_weights`] at `α = 2`): every token's squared error
+/// carries its own multiplier instead of an equal share of one mean.
+///
+/// A separate entry point because the weight enters the backward exactly once,
+/// in `dpred`, and every gradient in the model is downstream of it. A weight
+/// applied to the loss but not to `dpred` - or applied twice - is not a crash
+/// and not a NaN: it is a run that descends a different objective than the one
+/// it reports, which is precisely the class of defect an FD check exists to
+/// refuse. The weights are deliberately NON-uniform here; a uniform one would
+/// make the check pass against the unweighted backward.
+pub fn check_flux2_paired_region_weighted(seed: u64) -> Report {
+    check_flux2_on_weighted(&flux2::modelgrad::Cfg::tiny_paired(), seed, 2.0)
 }
 
 /// The shared FD recipe behind [`check_flux2`] and [`check_flux2_paired`]:
 /// one random ±1 direction per parameter tensor, compared against a central
 /// difference of the SAME forward the backward was derived from.
 fn check_flux2_on(cfg: &flux2::modelgrad::Cfg, seed: u64) -> Report {
-    use flux2::modelgrad::{backward, forward, grad_views, init_model, loss, make_flow_batch_paired, params_mut};
+    check_flux2_on_weighted(cfg, seed, 0.0)
+}
+
+/// [`check_flux2_on`] with the region-aware loss weight `edit_weight`
+/// ([`flux2::finetune::change_weights`]); `0.0` is the unweighted loss and
+/// produces an EMPTY weight, i.e. the original recipe bit for bit.
+fn check_flux2_on_weighted(cfg: &flux2::modelgrad::Cfg, seed: u64, edit_weight: f32) -> Report {
+    use flux2::modelgrad::{backward, forward, grad_views, init_model, loss_weighted, make_flow_batch_paired, params_mut};
     let w0 = init_model::<f64>(cfg, seed);
     let mut rng = Rng::new(seed ^ 0xF1u64);
     let mut rf = || rng.next_f64() - 0.5;
@@ -768,14 +791,21 @@ fn check_flux2_on(cfg: &flux2::modelgrad::Cfg, seed: u64) -> Report {
     let refs: Vec<f64> = (0..cfg.n_ref() * cfg.in_channels).map(|_| rf()).collect();
     let ctx: Vec<f64> = (0..cfg.txt_len * cfg.context_in_dim).map(|_| rf()).collect();
     let noise: Vec<f64> = (0..x0.len()).map(|_| rf()).collect();
-    let b = make_flow_batch_paired(cfg, &x0, &refs, &ctx, 0.45, &noise);
+    let mut b = make_flow_batch_paired(cfg, &x0, &refs, &ctx, 0.45, &noise);
+    // The f32 weight builder the trainer runs, promoted - one implementation,
+    // so a weight the check passes is the weight a run applies.
+    let f32s = |v: &[f64]| -> Vec<f32> { v.iter().map(|&x| x as f32).collect() };
+    b.w = flux2::finetune::change_weights(&f32s(&x0), &f32s(&refs), cfg.in_channels, edit_weight)
+        .into_iter()
+        .map(|x| x as f64)
+        .collect();
 
     let run_loss = |w: &flux2::modelgrad::ModelWeights<f64>| -> f64 {
         let (pred, _) = forward(cfg, w, &b.img, &b.ctx, b.t, &b.cos, &b.sin);
-        loss(&pred, &b.target).0
+        loss_weighted(&pred, &b.target, &b.w).0
     };
     let (pred, cache) = forward(cfg, &w0, &b.img, &b.ctx, b.t, &b.cos, &b.sin);
-    let (_l, dpred) = loss(&pred, &b.target);
+    let (_l, dpred) = loss_weighted(&pred, &b.target, &b.w);
     let g = backward(cfg, &w0, &cache, &dpred);
     let analytic: Vec<(String, Vec<f64>)> = grad_views(&g).into_iter().map(|(n, v)| (n, v.clone())).collect();
 
@@ -1920,6 +1950,56 @@ mod tests {
             fails.iter().map(|c| (&c.param, c.abs_err, c.rel_err)).collect::<Vec<_>>()
         );
         assert!(report.dead_gradients().is_empty(), "dead gradients: {:?}", report.dead_gradients());
+    }
+
+    /// The region-aware flow loss is a change to the OBJECTIVE, so it is
+    /// gated the way every other objective in this tree is: the analytic
+    /// gradient of the weighted loss against a central difference OF THE
+    /// WEIGHTED LOSS. The weights are non-uniform, so an implementation that
+    /// weighted the reported loss but not `dpred` - a run silently descending
+    /// the unweighted objective while reporting the weighted one - fails here
+    /// rather than at the end of a training run.
+    #[test]
+    fn flux2_region_weighted_analytic_grads_match_finite_differences() {
+        let report = check_flux2_paired_region_weighted(7);
+        report.print();
+        let (atol, rtol) = (1e-6, 1e-4);
+        let fails = report.failures(atol, rtol);
+        assert!(
+            fails.is_empty(),
+            "FLUX.2 region-weighted gradient check failed for {:?}",
+            fails.iter().map(|c| (&c.param, c.abs_err, c.rel_err)).collect::<Vec<_>>()
+        );
+        assert!(report.dead_gradients().is_empty(), "dead gradients: {:?}", report.dead_gradients());
+    }
+
+    /// The weights must actually BITE: a reweighting that came out uniform
+    /// would make the check above pass while testing nothing. Stated against
+    /// the weight builder directly - a spatially aligned edit has a few loud
+    /// tokens and a lot of quiet ones, and the weight must separate them.
+    #[test]
+    fn the_region_weights_are_non_uniform_and_average_to_one() {
+        let cin = 4;
+        let n_tok = 16;
+        // A "target" that equals its "reference" everywhere except one token -
+        // the shape of a local edit.
+        let refs = vec![0.25f32; n_tok * cin];
+        let mut x0 = refs.clone();
+        for c in 0..cin {
+            x0[3 * cin + c] += 1.0;
+        }
+        let w = flux2::finetune::change_weights(&x0, &refs, cin, 2.0);
+        assert_eq!(w.len(), x0.len());
+        let mean = w.iter().sum::<f32>() / w.len() as f32;
+        assert!((mean - 1.0).abs() < 1e-5, "weights must average to 1 so the loss stays comparable (got {mean})");
+        assert!(w[3 * cin] > 2.5 * w[0], "the changed token must carry far more weight than an unchanged one");
+        assert!(w[0] > 0.0, "an unchanged token still trains - the weight concentrates, it does not mask");
+
+        // Off, an identical pair, and a mismatched reference all mean "no
+        // weights", which `loss_weighted` reads as the plain mean.
+        assert!(flux2::finetune::change_weights(&x0, &refs, cin, 0.0).is_empty());
+        assert!(flux2::finetune::change_weights(&refs, &refs, cin, 2.0).is_empty());
+        assert!(flux2::finetune::change_weights(&x0, &refs[..cin], cin, 2.0).is_empty());
     }
 
     #[test]
