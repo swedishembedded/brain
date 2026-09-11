@@ -727,23 +727,47 @@ pub fn check_seq2seq(seed: u64) -> Report {
 /// velocity-MSE loss - same directional-derivative recipe as
 /// [`directional_check`], in f64.
 pub fn check_flux2(seed: u64) -> Report {
-    use flux2::modelgrad::{backward, forward, grad_views, init_model, loss, make_flow_batch, params_mut, Cfg};
-    let cfg = Cfg::tiny();
-    let w0 = init_model::<f64>(&cfg, seed);
+    check_flux2_on(&flux2::modelgrad::Cfg::tiny(), seed)
+}
+
+/// Gradient-check the FLUX.2 Klein host training reference in its **paired**
+/// (reference → target) configuration: the same model and the same
+/// rectified-flow velocity-MSE loss, but with a reference image's latent
+/// tokens concatenated into the image half of the joint sequence under their
+/// own t-axis RoPE offset ([`flux2::refcond::JointLayout`]), exactly as a
+/// `--ref` generation presents them.
+///
+/// A separate entry point rather than a parameter of [`check_flux2`] because
+/// the two cover different code: the paired forward reads a longer image
+/// stream than it predicts for, and the paired backward must route gradient
+/// into the reference rows through attention **only** - the head never touches
+/// them. A backward that silently dropped that route would still pass the
+/// caption-only check, because there are no reference rows there to drop.
+pub fn check_flux2_paired(seed: u64) -> Report {
+    check_flux2_on(&flux2::modelgrad::Cfg::tiny_paired(), seed)
+}
+
+/// The shared FD recipe behind [`check_flux2`] and [`check_flux2_paired`]:
+/// one random ±1 direction per parameter tensor, compared against a central
+/// difference of the SAME forward the backward was derived from.
+fn check_flux2_on(cfg: &flux2::modelgrad::Cfg, seed: u64) -> Report {
+    use flux2::modelgrad::{backward, forward, grad_views, init_model, loss, make_flow_batch_paired, params_mut};
+    let w0 = init_model::<f64>(cfg, seed);
     let mut rng = Rng::new(seed ^ 0xF1u64);
     let mut rf = || rng.next_f64() - 0.5;
-    let x0: Vec<f64> = (0..cfg.n_img() * cfg.in_channels).map(|_| rf()).collect();
+    let x0: Vec<f64> = (0..cfg.n_gen() * cfg.in_channels).map(|_| rf()).collect();
+    let refs: Vec<f64> = (0..cfg.n_ref() * cfg.in_channels).map(|_| rf()).collect();
     let ctx: Vec<f64> = (0..cfg.txt_len * cfg.context_in_dim).map(|_| rf()).collect();
     let noise: Vec<f64> = (0..x0.len()).map(|_| rf()).collect();
-    let b = make_flow_batch(&cfg, &x0, &ctx, 0.45, &noise);
+    let b = make_flow_batch_paired(cfg, &x0, &refs, &ctx, 0.45, &noise);
 
     let run_loss = |w: &flux2::modelgrad::ModelWeights<f64>| -> f64 {
-        let (pred, _) = forward(&cfg, w, &b.img, &b.ctx, b.t, &b.cos, &b.sin);
+        let (pred, _) = forward(cfg, w, &b.img, &b.ctx, b.t, &b.cos, &b.sin);
         loss(&pred, &b.target).0
     };
-    let (pred, cache) = forward(&cfg, &w0, &b.img, &b.ctx, b.t, &b.cos, &b.sin);
+    let (pred, cache) = forward(cfg, &w0, &b.img, &b.ctx, b.t, &b.cos, &b.sin);
     let (_l, dpred) = loss(&pred, &b.target);
-    let g = backward(&cfg, &w0, &cache, &dpred);
+    let g = backward(cfg, &w0, &cache, &dpred);
     let analytic: Vec<(String, Vec<f64>)> = grad_views(&g).into_iter().map(|(n, v)| (n, v.clone())).collect();
 
     let eps = 1e-5;
@@ -1863,6 +1887,30 @@ mod tests {
             "FLUX.2 gradient check failed for {:?}",
             fails.iter().map(|c| (&c.param, c.abs_err, c.rel_err)).collect::<Vec<_>>()
         );
+    }
+
+    /// The paired (reference → target) training forward+backward, checked the
+    /// same way and to the same gate as the caption-only one above.
+    ///
+    /// `dead_gradients` is asserted here and not there on purpose: the risk
+    /// this configuration adds is a route that goes *missing*. The reference
+    /// rows reach the trained weights only through attention - the head skips
+    /// them - so a backward that dropped that route would leave a parameter's
+    /// gradient at exactly zero while the loss still moves, which the relative
+    /// tolerance cannot see and this can.
+    #[test]
+    fn flux2_paired_analytic_grads_match_finite_differences() {
+        // Pure host f64 - no GPU, so no MOE_SKIP_GPU_TESTS gate.
+        let report = check_flux2_paired(7);
+        report.print();
+        let (atol, rtol) = (1e-6, 1e-4);
+        let fails = report.failures(atol, rtol);
+        assert!(
+            fails.is_empty(),
+            "FLUX.2 paired gradient check failed for {:?}",
+            fails.iter().map(|c| (&c.param, c.abs_err, c.rel_err)).collect::<Vec<_>>()
+        );
+        assert!(report.dead_gradients().is_empty(), "dead gradients: {:?}", report.dead_gradients());
     }
 
     #[test]
