@@ -15,9 +15,13 @@
 //!                     --block T --models-dir DIR]
 //!   brain qwen3 calib --weights BASE --jsonl FILE [--report --out kv_calib.json
 //!                     --models-dir DIR]
+//!   brain qwen3 lora_gate --weights BASE --adapter ADAPTER.safetensors
+//!                     --probes PROBES.jsonl [--anchor ANCHOR.jsonl]
+//!                     [--tokenizer TOK --max-new N]
 
 use std::path::{Path, PathBuf};
 
+use capability::{Blob, Invocation, Media, Progress};
 use data::rng::Rng;
 use data::tokenizer::Tokenizer;
 use qwen3::config::QwenConfig;
@@ -36,8 +40,9 @@ pub fn run_qwen(args: &[String]) {
         Some("toolcall") => toolcall(&args[1..]),
         Some("eval") => eval_chat(&args[1..]),
         Some("calib") => calib(&args[1..]),
+        Some("lora_gate") => lora_gate(&args[1..]),
         other => {
-            eprintln!("usage: brain qwen3 <import|infer|export|precompile|train|finetune|toolcall|eval|calib> ...  (got {other:?})")
+            eprintln!("usage: brain qwen3 <import|infer|export|precompile|train|finetune|toolcall|eval|calib|lora_gate> ...  (got {other:?})")
         }
     }
 }
@@ -1189,6 +1194,124 @@ fn calib(args: &[String]) {
     }
 }
 
+/// Parsed `--flag` arguments for [`lora_gate`], split out from the function
+/// itself so the "did the caller pass the required flags" question is
+/// testable with no model, no filesystem and no `capability::Invocation`.
+struct GateArgs {
+    weights: String,
+    tokenizer: Option<String>,
+    adapter: String,
+    probes: String,
+    anchor: Option<String>,
+    max_new: Option<i64>,
+}
+
+/// `None` when a required flag (`--weights`, `--adapter`, `--probes`) is
+/// missing; the caller prints the usage line in that case.
+fn parse_gate_args(args: &[String]) -> Option<GateArgs> {
+    let mut weights = String::new();
+    let mut tokenizer: Option<String> = None;
+    let mut adapter = String::new();
+    let mut probes = String::new();
+    let mut anchor: Option<String> = None;
+    let mut max_new: Option<i64> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--weights" => weights = val(args, &mut i, "--weights"),
+            "--tokenizer" => tokenizer = Some(val(args, &mut i, "--tokenizer")),
+            "--adapter" => adapter = val(args, &mut i, "--adapter"),
+            "--probes" => probes = val(args, &mut i, "--probes"),
+            "--anchor" => anchor = Some(val(args, &mut i, "--anchor")),
+            "--max-new" => max_new = val(args, &mut i, "--max-new").parse().ok(),
+            other => eprintln!("ignoring unknown flag {other:?}"),
+        }
+        i += 1;
+    }
+    if weights.is_empty() || adapter.is_empty() || probes.is_empty() {
+        return None;
+    }
+    Some(GateArgs { weights, tokenizer, adapter, probes, anchor, max_new })
+}
+
+/// `brain qwen3 lora_gate --weights BASE --adapter ADAPTER.safetensors
+///     --probes PROBES.jsonl [--anchor ANCHOR.jsonl] [--tokenizer TOK]
+///     [--max-new N]`
+///
+/// The local CLI entry point for the SAME `capability::Action` `brain serve
+/// --dbus` reaches (`qwen3::caps::gate_lora`) - this calls that function
+/// directly rather than re-deriving the gate, so the CLI and the served
+/// surface can never disagree about what "promote" means. `--adapter` is
+/// exactly `lora_train`'s (or `brain qwen3 finetune --lora`'s) output
+/// safetensors blob; `--probes`/`--anchor` are JSONL, one
+/// `{fact, probe_question, expected_answer}` per line (see
+/// `promote::document::FactProbe::from_jsonl`).
+fn lora_gate(args: &[String]) {
+    let Some(a) = parse_gate_args(args) else {
+        eprintln!(
+            "usage: brain qwen3 lora_gate --weights BASE --adapter ADAPTER.safetensors --probes PROBES.jsonl \
+             [--anchor ANCHOR.jsonl] [--tokenizer TOK] [--max-new N]"
+        );
+        return;
+    };
+
+    let adapter_bytes = match std::fs::read(&a.adapter) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("{}: {e}", a.adapter);
+            return;
+        }
+    };
+    let probes_bytes = match std::fs::read(&a.probes) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("{}: {e}", a.probes);
+            return;
+        }
+    };
+    let anchor_bytes = match a.anchor.as_ref().map(std::fs::read) {
+        Some(Ok(b)) => Some(b),
+        Some(Err(e)) => {
+            eprintln!("{}: {e}", a.anchor.as_deref().unwrap_or_default());
+            return;
+        }
+        None => None,
+    };
+
+    let mut inv = Invocation::new().set("weights", serde_json::json!(a.weights));
+    if let Some(t) = &a.tokenizer {
+        inv = inv.set("tokenizer", serde_json::json!(t));
+    }
+    if let Some(n) = a.max_new {
+        inv = inv.set("max_new", serde_json::json!(n));
+    }
+    inv = inv.blob("adapter", Blob::new(Media::Bytes, adapter_bytes));
+    inv = inv.blob("probes", Blob::new(Media::Bytes, probes_bytes));
+    if let Some(bytes) = anchor_bytes {
+        inv = inv.blob("anchor", Blob::new(Media::Bytes, bytes));
+    }
+
+    let mut progress = |p: Progress| {
+        if p.total > 0 {
+            eprint!("\r\x1b[2K lora_gate [{}/{}] {}", p.step, p.total, p.message);
+            let _ = std::io::Write::flush(&mut std::io::stderr());
+        }
+    };
+    match qwen3::caps::gate_lora(&inv, &mut progress) {
+        Ok(outcome) => {
+            eprintln!();
+            match outcome.blobs.get("report") {
+                Some(b) => println!("{}", String::from_utf8_lossy(&b.bytes)),
+                None => println!("{}", outcome.outputs),
+            }
+        }
+        Err(e) => {
+            eprintln!("\nbrain qwen3 lora_gate: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
 #[cfg(test)]
 mod lora_finetune_cli_tests {
     use super::*;
@@ -1282,5 +1405,54 @@ mod lora_finetune_cli_tests {
         let dir = tmp("store-ref-missing");
         let err = resolve_base("Qwen/Qwen3-0.6B", Some(&dir)).unwrap_err();
         assert!(err.contains("not found in the model store"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod lora_gate_cli_tests {
+    use super::*;
+
+    fn s(v: &[&str]) -> Vec<String> {
+        v.iter().map(|x| x.to_string()).collect()
+    }
+
+    /// `--weights`, `--adapter` and `--probes` are required (mirrors
+    /// `gate_lora`'s own required params/inputs); `--anchor` is not, since
+    /// `qwen3::caps::gate_lora` runs with no anchor bar when it is omitted.
+    #[test]
+    fn parse_gate_args_requires_weights_adapter_and_probes() {
+        assert!(parse_gate_args(&s(&["--adapter", "a.safetensors", "--probes", "p.jsonl"])).is_none(), "missing --weights");
+        assert!(parse_gate_args(&s(&["--weights", "base.st", "--probes", "p.jsonl"])).is_none(), "missing --adapter");
+        assert!(parse_gate_args(&s(&["--weights", "base.st", "--adapter", "a.safetensors"])).is_none(), "missing --probes");
+
+        let a = parse_gate_args(&s(&["--weights", "base.st", "--adapter", "a.safetensors", "--probes", "p.jsonl"])).expect("all required flags present");
+        assert_eq!(a.weights, "base.st");
+        assert_eq!(a.adapter, "a.safetensors");
+        assert_eq!(a.probes, "p.jsonl");
+        assert!(a.anchor.is_none());
+        assert!(a.tokenizer.is_none());
+        assert!(a.max_new.is_none());
+    }
+
+    #[test]
+    fn parse_gate_args_reads_the_optional_flags() {
+        let a = parse_gate_args(&s(&[
+            "--weights",
+            "base.st",
+            "--adapter",
+            "a.safetensors",
+            "--probes",
+            "p.jsonl",
+            "--anchor",
+            "anc.jsonl",
+            "--tokenizer",
+            "tok.json",
+            "--max-new",
+            "16",
+        ]))
+        .expect("all required flags present");
+        assert_eq!(a.anchor.as_deref(), Some("anc.jsonl"));
+        assert_eq!(a.tokenizer.as_deref(), Some("tok.json"));
+        assert_eq!(a.max_new, Some(16));
     }
 }

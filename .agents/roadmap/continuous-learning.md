@@ -165,17 +165,17 @@ No CLI change needed - `brain qwen3 finetune --lora` is untouched, this
 milestone only makes the existing training loop visible as a capability.
 **Commit:** one.
 
-### B3b - qwen3 `lora_gate` as a `capability::Action` (ON HOLD)
-**On hold pending a real decision about whether whale scheduling is wanted
-at all.** An attempt hit a hard Cargo cycle (`brain-qwen3 → brain-rl →
-brain-bench → brain-qwen3`) - the gate machinery sits ABOVE qwen3 in the
-layering, so reaching it from qwen3's own manifest needs crate surgery, not
-a wiring fix. The product decision since taken is that the core learning
-loop works with sven+brain alone and whale is an optional later scale-out,
-so nothing downstream is blocked: `B9` gives the same study a plain CLI
-entry point from `crates/cli`, which legally depends on both crates. Resume
-this only when a whale graph is actually being built, and decide the crate
-surgery then rather than forcing it now.
+### B3b - qwen3 `lora_gate` as a `capability::Action` (DONE)
+The Cargo cycle this was on hold for (`brain-qwen3 → brain-rl → brain-bench →
+brain-qwen3`) is gone: `B2b` hoisted the gate machinery into the new leaf
+crate `crates/promote`, which sits below `crates/qwen3` in the layering, so
+`qwen3::caps` reaches `promote::gate`/`promote::document` directly with no
+crate surgery. `lora_gate` is implemented in `crates/qwen3/src/caps.rs`
+(`gate_lora`/`LoraGateAction`), registered in the manifest returned by
+`qwen3::caps::manifest`, and reachable both over D-Bus (`brain serve
+--dbus`) and locally as `brain qwen3 lora_gate --weights BASE --adapter
+ADAPTER.safetensors --probes PROBES.jsonl [--anchor ANCHOR.jsonl]`
+(`crates/cli/src/qwen_cli.rs`).
 
 Wraps `B2`'s gate: candidate adapter blob + probe-set blob in, a
 `GateReport` + promote/reject decision out. This is what makes the whale
