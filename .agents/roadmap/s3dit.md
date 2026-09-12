@@ -7,6 +7,34 @@ loaded whole. Forward and backward parity against the reference are verified.
 
 ## Not yet done
 
+- [ ] **An adapter is still FOLDED into the int8 DiT, which discards most of
+      it.** `pipeline::build_dit_engine` materializes the whole checkpoint,
+      calls `finetune::load_adapter_folded` (→ `lora::fold_into_comfy` →
+      `model::lora::fold_placements`) and hands the folded map to
+      `DitEngine::build(hifi=false, …)`, whose `block::quantize_block` then
+      requantizes it through `model::int8::quantize_from`. INT8 has 256 levels
+      and a trained delta is typically a fraction of one, so most adapted
+      weights round straight back to the base code and the adapter is
+      discarded - measured on two other architectures' own fixtures
+      (`flux2/tests/lora_requant_int8.rs`: 94.8% of weights unchanged, cosine
+      0.44; `wan/tests/lora_int8_delivery.rs`: 100% at 0.11 steps of delta).
+      The `hifi` (fp32) path is unaffected: a dense fold is exact.
+
+      The fix is already built and shared - `flux2` and `wan` both run it.
+      `model::adapter::AdapterSet::delivery(BaseStorage::Quantized, …)` returns
+      a `model::lora::RuntimeLora`; `model::dispatch::LoraW` +
+      `lora_rows_off` + `lora_delta.wgsl` upload and dispatch it. What is left
+      is this crate's own wiring, and it is the same shape as `wan::block`'s:
+      remap each `LinearSite` name to its `comfy_key` (this crate's fold
+      targets a third naming, which is exactly the part that legitimately
+      differs), claim the seven per-block rectangles in `quantize_block`, give
+      `Int8Scratch` a `[t, r]` buffer, register `kernels::LORA_DELTA` in
+      `block::KERNELS`, and append the correction after each `mm8`.
+      `build_dit_engine`'s adapter branch can then take the STREAMING
+      `build_from_source` route the no-adapter branch already uses, because
+      there is nothing left to fold into an owned map - the same ~24 GB
+      materialization flux2's fix removed. Left unmigrated only because it
+      cannot be validated without the real 6B checkpoint on a free card.
 - [ ] A true batched `run_batch` for the serving contract
 - [ ] A runnable examples client over D-Bus
 - [ ] Native lower-precision (bf16) device weight binding for the windowed

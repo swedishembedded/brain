@@ -53,6 +53,19 @@ this port:
 
 ## Not yet done
 
+- [ ] **A trained adapter does not reach inference at all.** Both
+      `lora::LoraAdapter::fold_into_tensors` and its A/V twin in `av_lora.rs`
+      have NO production call site - only their own tests - so there is no
+      `--adapter` path into either generation route. They now state their base
+      storage (`model::adapter::BaseStorage::Dense`, which is what an fp32
+      tensor map is), so whoever wires them cannot reach the fold-then-quantize
+      trap `flux2` and `wan` were both in: this crate's quantized route
+      (`int8.rs`/`weightcache.rs`) must take
+      `AdapterSet::delivery`'s `Delivery::Runtime` arm - the shared
+      `model::dispatch::LoraW` + `lora_delta.wgsl` pair `wan::block` wires in
+      about eighty lines - rather than be pointed at a folded map. Folding a
+      delta into weights that are then requantized rounds it onto the base
+      weight's own 256-level grid and discards most of it.
 - [ ] **`ltxv` arch row + resource fetch** - `crates/arch/src/lib.rs` `ARCHS` row
       (`id`/`gguf` both `"ltxv"`, `hf: &["AVTransformer3DModel"]`,
       `default_ref: Lightricks/LTX-2.5`), this ledger, `docs/models/ltxv.md`,
