@@ -143,7 +143,7 @@ const HELP: &str = "brain flux2 <cmd>
            [--size S] [--seed K] [--ckpt-every N] [--resume] [--trainer device|host] [--cards N]
            [--text-encoder <path>] [--method lora|rslora] [--lr-ratio X] [--freeze-a]
            [--precision fp32|int8] [--warmup N] [--min-lr X]
-           [--edit-weight A] [--ref-dropout P]
+           [--edit-weight A] [--detail-weight B] [--ref-dropout P]
            # Train a LoRA on a folder of captioned images (see data::imageset for
            # the caption formats; `brain label` writes one). The adapter it writes
            # is what `generate --adapter` loads. Do NOT name it '.safetensors':
@@ -189,6 +189,22 @@ const HELP: &str = "brain flux2 <cmd>
            #                   ALIGNED pairs; every paired run prints the share
            #                   of tokens that actually differ, which is the
            #                   number that says whether yours are.
+           #   --detail-weight B
+           #                   detail-aware flow loss (default 0 = off; reach
+           #                   for 2). Weights each target token's squared
+           #                   error by 1 + B*(its local detail, normalised by
+           #                   the largest one), rescaled to mean 1. Reach for
+           #                   it when the caption asks for SMOOTHING - remove
+           #                   clutter, remove photo noise, clean it up. Under
+           #                   a uniform loss the smoothest prediction is the
+           #                   cheapest one, so such an adapter learns to hand
+           #                   the decoder unusually flat latents, and a flat
+           #                   latent is what lifts the frozen VAE decoder's
+           #                   own 4-pixel cell structure out of the noise
+           #                   floor and into the picture as a grid on walls
+           #                   and carpet. This makes flattening cost
+           #                   something. Needs no reference, so it applies to
+           #                   unpaired runs and to dropped steps as well.
            #   --ref-dropout P probability a PAIRED step trains with its
            #                   reference tokens BLANKED (default 0; reach for
            #                   0.1). When a target and its reference differ
@@ -766,6 +782,12 @@ fn finetune(args: &[String]) -> Result<(), String> {
         // that decides it (the share of target tokens that differ from their
         // reference), so the choice is informed rather than guessed.
         edit_weight: 0.0,
+        // Off by default too. It costs nothing to be wrong about on a dataset
+        // that is not a smoothing task, but it is not free either - it spends
+        // gradient on texture at the expense of everything else - so it is the
+        // caller's call, made when the caption says "remove noise" or the
+        // output shows the decoder's grid.
+        detail_weight: 0.0,
         // Also off by default, and for a sharper reason: klein is
         // guidance-distilled, so there is no null branch at inference for
         // dropped steps to be training. They buy regularisation against the
@@ -789,6 +811,9 @@ fn finetune(args: &[String]) -> Result<(), String> {
             "--lr" => opts.lr = need(i)?.parse().map_err(|e| format!("--lr: {e}"))?,
             "--warmup" => opts.warmup = Some(need(i)?.parse().map_err(|e| format!("--warmup: {e}"))?),
             "--edit-weight" => opts.edit_weight = need(i)?.parse().map_err(|e| format!("--edit-weight: {e}"))?,
+            "--detail-weight" => {
+                opts.detail_weight = need(i)?.parse().map_err(|e| format!("--detail-weight: {e}"))?
+            }
             "--ref-dropout" => opts.ref_dropout = need(i)?.parse().map_err(|e| format!("--ref-dropout: {e}"))?,
             "--min-lr" => opts.min_lr = Some(need(i)?.parse().map_err(|e| format!("--min-lr: {e}"))?),
             "--size" => opts.size = need(i)?.parse().map_err(|e| format!("--size: {e}"))?,

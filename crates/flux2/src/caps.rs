@@ -84,6 +84,7 @@ pub fn manifest() -> Manifest {
         .param(ParamSpec::new("warmup", ParamType::Int, "steps of linear learning-rate warmup; absent = none, which is what every mainstream FLUX LoRA trainer defaults to (a LoRA starts at B=0, so there is no early instability for a warmup to protect against). A function of the global step, so a resumed run continues the curve").min(0.0))
         .param(ParamSpec::new("min_lr", ParamType::Float, "the rate the cooldown lands on at the last step; absent = lr/10. The peak is held flat until the last fifth of the run and then cosine-cooled to this. Adam at a constant rate orbits the minimum at a radius set by the rate times the gradient noise - at batch size 1 that is wide, and the cooldown is what closes it. Set equal to lr for a flat rate").min(0.0))
         .param(ParamSpec::new("edit_weight", ParamType::Float, "region-aware flow loss for a PAIRED run: weight each token by 1 + this * its normalised |target - reference| change, rescaled to mean 1. 0 (default) is the plain mean; 2 is the published value. Only meaningful for spatially aligned pairs (declutter, removal, relight) - not for subject-driven ones").default(json!(0.0)).min(0.0).max(8.0))
+        .param(ParamSpec::new("detail_weight", ParamType::Float, "detail-aware flow loss: weight each token by 1 + this * its normalised local detail, rescaled to mean 1. 0 (default) is off; 2 is the value to reach for on a SMOOTHING objective (remove clutter, remove noise), where the cheapest prediction under a uniform loss is the flattest one and a flat latent lifts the frozen VAE decoder's own 4-pixel cell structure into the picture as a grid. Needs no reference, so it applies to unpaired runs too").default(json!(0.0)).min(0.0).max(8.0))
         .param(ParamSpec::new("ref_dropout", ParamType::Float, "probability a PAIRED step trains with its reference tokens blanked (InstructPix2Pix's null image conditioning). 0 (default) never drops. Denies the adapter the 'just copy the reference' solution a near-identical pair makes available, at the cost of steps spent on a mode a guidance-distilled sampler never runs; 0.1 is the rate to reach for").default(json!(0.0)).min(0.0).max(1.0))
         .param(ParamSpec::new("seed", ParamType::Int, "RNG seed - required, see text2image's own seed param doc for why").required())
         .param(ParamSpec::new("cards", ParamType::Int, "GPUs the device trainer spreads the block stack over (klein-9b's fp32 frozen base does not fit one 24 GiB card)").default(json!(1)))
@@ -313,6 +314,7 @@ pub fn train_action(paths: &Paths, inv: &Invocation, progress: &mut dyn FnMut(Pr
         warmup: inv.get_i64("warmup").map(|v| v.max(0) as u32),
         min_lr: inv.get_f64("min_lr").map(|v| v as f32),
         edit_weight: inv.get_f64("edit_weight").unwrap_or(0.0).max(0.0) as f32,
+        detail_weight: inv.get_f64("detail_weight").unwrap_or(0.0).max(0.0) as f32,
         ref_dropout: inv.get_f64("ref_dropout").unwrap_or(0.0).clamp(0.0, 1.0) as f32,
         // Served runs default to the device trainer for the same reason the
         // CLI does: the host one is the oracle, not a production path. A

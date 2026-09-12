@@ -1802,6 +1802,7 @@ impl Pipeline {
         }
         let eps = self.vae_cfg.batch_norm_eps;
         let unpacked = vae::latent::unpack(&packed, 32, lh * 2, lw * 2, &self.bn_mean, &self.bn_var, eps);
+        dump_latent(&unpacked, lh * 2, lw * 2);
         let (h, w) = ((lh * 16) as u32, (lw * 16) as u32);
         // Two releases, both before the decode allocates, because the decode
         // is the largest graph the pipeline ever builds:
@@ -1907,6 +1908,30 @@ impl Pipeline {
         progress: &mut dyn FnMut(u32, u32, &str),
     ) -> Vec<BatchOutcome> {
         generate_batch_on(self, reqs, progress)
+    }
+}
+
+/// Write the latent the decoder is about to consume to `BRAIN_FLUX2_DUMP_LATENT`,
+/// when that names a path.
+///
+/// The DiT's output is otherwise unobservable from outside - a generation only
+/// ever yields the decoded image - which leaves latent-space questions about a
+/// *generated* latent answerable only through the decode that is itself under
+/// suspicion. The file is [`crate::latentops::Latent`]'s, so `flux2_latent
+/// stats` and every `op` read it directly. A failed write is reported and
+/// ignored: a diagnostic must never cost a caller its picture.
+fn dump_latent(z: &[f32], lh: usize, lw: usize) {
+    let Ok(path) = std::env::var("BRAIN_FLUX2_DUMP_LATENT") else {
+        return;
+    };
+    if path.is_empty() {
+        return;
+    }
+    let saved = crate::latentops::Latent::new(crate::latentops::Kind::VaeMean, 32, lh, lw, z.to_vec())
+        .and_then(|l| l.save(&path));
+    match saved {
+        Ok(()) => eprintln!("flux2: wrote latent {path} [32,{lh},{lw}]"),
+        Err(e) => eprintln!("flux2: could not write latent {path}: {e}"),
     }
 }
 

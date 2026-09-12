@@ -55,6 +55,7 @@ fn opts(steps: u32, lr: f32) -> TrainOpts {
         warmup: None,
         min_lr: None,
         edit_weight: 0.0,
+        detail_weight: 0.0,
         ref_dropout: 0.0,
     }
 }

@@ -1599,20 +1599,59 @@ it fall to the smoothest solution is the shape of it. That only reaches
 adapters trained after it lands - the existing weights would have to be
 retrained to benefit.
 
-### The one link still measured only indirectly
+### The adapted latent, measured
 
-Everything above about the decoder is measured directly. The last step of the
-chain - that the adapted DiT really does hand the decoder the kind of latent
-that wakes the grid - is inferred from the decoded images, not from the latent
-itself, because nothing in `flux2 generate` writes the latent out. Local detail
-in the decoded picture does fall monotonically as `--lora-scale` rises (median
-|detail| 8.11 → 7.17 → 7.32 → 5.70 over 0, 0.25, 0.5, 1.0), which is consistent,
-but text-to-image does not separate on that statistic alone - both arms are
-already very flat there - so the image is a proxy for the latent and not a
-substitute.
+`BRAIN_FLUX2_DUMP_LATENT=path` writes the latent the decoder is about to consume,
+which is the only way to see a *generated* latent at all - a generation otherwise
+yields nothing but the decode that is itself under suspicion. Three runs, one
+seed, one prompt, text-to-image, `--device gpu`; local detail is each latent
+cell's distance to the mean of its 3x3 neighbourhood, the same statistic
+`finetune::detail_weights` is built on:
 
-Closing it needs the latent of an adapted and an unadapted generation at the
-same seed, compared for structure at scales just above the cell size. That is
-one generation each plus `flux2_latent stats`, once a card is free. Pass
-`--device gpu` explicitly on those runs: without it the scheduler may consider
-a CPU fallback, and a silently-CPU arm would not be the comparison intended.
+| arm | latent std | mean local detail | near-flat cells | grid x | grid y | floor |
+|---|---|---|---|---|---|---|
+| no adapter | 1.673 | 4.316 | 0.0% | 0.072 | 0.120 | 0.095 |
+| `--lora-scale 0.5` | 1.427 | 2.738 | 4.5% | 0.587 | 0.397 | 0.129 |
+| `--lora-scale 1.0` | 1.352 | 2.261 | 7.3% | 0.682 | 0.910 | 0.107 |
+
+The adapter removes almost half the latent's local structure at full strength,
+monotonically, and opens flat regions where the base model leaves none - and the
+grid rises in exact lockstep, from the floor to eight times it. That closes the
+chain: the adapter flattens the latent, and the flat latent is what the frozen
+decoder renders its own cell structure into.
+
+### `--detail-weight`, and what it does not fix
+
+`finetune::detail_weights` is the countermeasure, hung off the same per-token
+mechanism `--edit-weight` already uses: weight each target token's squared error
+by `1 + β·(its local detail, normalised)`, rescaled to mean 1 so turning it on
+does not also change the step size. Under a uniform flow loss the smoothest
+prediction is the cheapest one, and a caption that asks for clutter and photo
+noise to be removed gives an adapter every reason to take it; this makes
+flattening the target's texture cost something. It needs no reference, so unlike
+`--edit-weight` it applies to unpaired runs and to `--ref-dropout` steps too, and
+the two compose as a renormalised product.
+
+It is a **training-time** term. It changes what a newly trained adapter learns
+and can do nothing for weights that already exist - an adapter trained without it
+has already learned the flat solution, and only a retrain reaches that. Nothing
+measured here helps the existing weights at decode time: latent dither does not
+(above), and subtracting the measured grid-locked profile from the finished image
+recovers only about half of it, because the correction is a fraction of a level
+and the 8-bit output quantises it away.
+
+### Whether other adapters do it too is not answerable from what is on disk
+
+The obvious control - run an unrelated adapter and see whether it grids - has no
+subject. Of the five third-party FLUX LoRAs to hand, none is loadable on
+klein-9b: one is FLUX.2-dev (hidden 6144 against klein-9b's 4096), one is a
+kohya-named FLUX.1 adapter, one is a 24-block architecture that is neither, and
+the one genuine klein-4b adapter reaches klein-4b's build with 60 of its 160
+rectangles unapplied and panics rather than generating. Both base models on their
+own sit at the floor (klein-9b 0.072/0.120 against 0.095, klein-4b 0.185/0.077
+against 0.181), so the grid is not something the base produces.
+
+The control is in any case no longer the load-bearing evidence. The autoencoder
+experiments above establish the mechanism causally and without any adapter at
+all - a smooth latent from any source wakes the grid, a pure sinusoid included -
+which is a stronger statement than a second adapter agreeing would have been.

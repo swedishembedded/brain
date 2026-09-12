@@ -292,6 +292,103 @@ pub fn change_weights(x0: &[f32], refs: &[f32], cin: usize, alpha: f32) -> Vec<f
     w
 }
 
+/// Per-token flow-loss weights from how much **local structure** the target
+/// carries: `1 + β·(normalised per-token detail)`, mean-normalised, one value
+/// per element of `x0`. `β <= 0` returns empty, the trainer's "unweighted".
+///
+/// This exists because the smoothest prediction is otherwise the cheapest one.
+/// A uniform flow loss is indifferent between reproducing a wall's texture and
+/// replacing it with the wall's average, and an adapter whose caption asks it to
+/// remove clutter and photo noise has every reason to take the average. The
+/// result is a latent with large, unusually flat regions - and a flat latent is
+/// what drives the frozen VAE decoder's own 4-pixel cell structure up out of the
+/// noise floor and into the picture, as the faint grid that shows on walls and
+/// carpet. Weighting the loss toward the tokens that carry detail makes
+/// flattening them cost something.
+///
+/// Detail is the distance from a token to the mean of its 3x3 token
+/// neighbourhood, edge-clamped: zero on a featureless region, largest where the
+/// latent changes fastest. It is a property of the TARGET alone, so unlike
+/// [`change_weights`] it is just as meaningful on a step whose reference was
+/// dropped, and on an unpaired run.
+pub fn detail_weights(x0: &[f32], cin: usize, lh: usize, lw: usize, beta: f32) -> Vec<f32> {
+    if beta <= 0.0 || cin == 0 || x0.is_empty() || x0.len() != lh * lw * cin {
+        return Vec::new();
+    }
+    let n_tok = lh * lw;
+    let mut nbr = vec![0.0f32; cin];
+    let mut d = vec![0.0f32; n_tok];
+    for y in 0..lh {
+        for x in 0..lw {
+            nbr.iter_mut().for_each(|v| *v = 0.0);
+            let mut n = 0.0f32;
+            for ny in y.saturating_sub(1)..(y + 2).min(lh) {
+                for nx in x.saturating_sub(1)..(x + 2).min(lw) {
+                    let k = (ny * lw + nx) * cin;
+                    for (c, v) in nbr.iter_mut().enumerate() {
+                        *v += x0[k + c];
+                    }
+                    n += 1.0;
+                }
+            }
+            let base = (y * lw + x) * cin;
+            d[y * lw + x] = (0..cin)
+                .map(|c| {
+                    let e = x0[base + c] - nbr[c] / n;
+                    e * e
+                })
+                .sum::<f32>()
+                .sqrt();
+        }
+    }
+    let peak = d.iter().copied().fold(0.0f32, f32::max);
+    if peak <= 0.0 {
+        // A featureless target: nothing to weight toward, and normalising by a
+        // zero peak would put a NaN in every gradient.
+        return Vec::new();
+    }
+    let mut sum = 0.0f32;
+    for v in &mut d {
+        *v = 1.0 + beta * (*v / peak);
+        sum += *v;
+    }
+    let mean = sum / n_tok as f32;
+    let mut w = Vec::with_capacity(x0.len());
+    for v in d {
+        let scaled = v / mean;
+        for _ in 0..cin {
+            w.push(scaled);
+        }
+    }
+    w
+}
+
+/// Compose two per-element weightings into one: their product, renormalised to
+/// mean 1 so that turning a second one on still does not change the step size.
+///
+/// An absent weighting (the empty vector every producer here returns when it is
+/// off) is the identity, which is what lets the caller compose unconditionally
+/// instead of branching on which of them a run asked for. Two weightings of
+/// DIFFERENT lengths cannot both be describing the same batch, so that returns
+/// unweighted rather than guessing which one to believe.
+pub fn combine_weights(a: &[f32], b: &[f32]) -> Vec<f32> {
+    if a.is_empty() {
+        return b.to_vec();
+    }
+    if b.is_empty() {
+        return a.to_vec();
+    }
+    if a.len() != b.len() {
+        return Vec::new();
+    }
+    let mut w: Vec<f32> = a.iter().zip(b).map(|(&p, &q)| p * q).collect();
+    let mean = w.iter().sum::<f32>() / w.len() as f32;
+    if mean > 0.0 {
+        w.iter_mut().for_each(|v| *v /= mean);
+    }
+    w
+}
+
 /// What fraction of a pair's tokens carry a change of at least a tenth of the
 /// largest one - the number that says whether a dataset is the spatially
 /// aligned, small-region kind [`change_weights`] is for.
@@ -539,6 +636,12 @@ pub struct TrainOpts {
     /// Ignored by a caption-only run, which has no reference to difference
     /// against.
     pub edit_weight: f32,
+    /// Detail-aware flow loss: `β` in [`detail_weights`]'s `1 + β·(normalised
+    /// per-token detail)`. `0.0` (the default) is off. Unlike
+    /// [`Self::edit_weight`] this needs no reference, and it is what keeps a
+    /// smoothing objective from paying for flat output with the frozen decoder's
+    /// 4-pixel grid.
+    pub detail_weight: f32,
     /// Probability that a step trains with its reference tokens **blanked** -
     /// see [`ref_dropped`] for the copy-shortcut failure this exists for, and
     /// for why it is `0.0` by default on a guidance-distilled variant.
@@ -732,6 +835,9 @@ pub fn run(
         if opts.ref_dropout > 0.0 {
             note.push_str(&format!("; --ref-dropout {} blanks the reference on some steps", opts.ref_dropout));
         }
+        if opts.detail_weight > 0.0 {
+            note.push_str(&format!("; --detail-weight {} holds the target's texture", opts.detail_weight));
+        }
         // The configuration that produces a copy, named while it can still be
         // changed. A target that is mostly its own reference, weighted
         // uniformly, with the reference always present, is a task an adapter
@@ -899,11 +1005,16 @@ pub fn run(
         // this pair's edit is", and a step with no reference has no edit to
         // speak of - it is being asked to produce the whole target, so every
         // token of it counts the same.
-        batch.w = if dropped {
+        let edit = if dropped {
             Vec::new()
         } else {
             change_weights(&s.x0, &s.refs, cfg.in_channels, opts.edit_weight)
         };
+        // Detail weighting is a property of the target alone, so it applies on a
+        // dropped step too - the target still has texture that the flow loss
+        // would otherwise let the adapter average away.
+        let detail = detail_weights(&s.x0, cfg.in_channels, lh, lw, opts.detail_weight);
+        batch.w = combine_weights(&edit, &detail);
         let loss = match (&dev, &host) {
             (Some(t), _) => t.step(&mut adapter, &batch, lr_now),
             (None, Some(b)) => {
