@@ -290,31 +290,38 @@ fn the_dit_cost_follows_the_architecture_and_the_numeric_tier() {
 /// a full-frame output is several times that. A decode's cost is dominated by
 /// activations that scale with the image, so a constant is wrong at every size
 /// except by accident.
+///
+/// Stated on a card with room for the whole-image graph, because that is the
+/// claim: what the reservation is made of. On a card that has less than the
+/// graph wants, `vae::tiled` reserves one tile instead - which is that
+/// module's own gate, not this one's.
 #[test]
 fn the_vae_reservation_covers_a_full_frame_decode() {
     let vc = vae::VaeConfig::flux2();
     // 768x1024 out = 48 x 64 latent tokens - the size that failed.
     let full_frame = 48 * 64;
-    let got = flux2::pipeline::vae_decoder_bytes(&vc, full_frame);
-    assert!(
-        gib(got) > 6.0,
-        "a full-frame decode needs far more than the flat 2 GiB this used to reserve: {:.2} GiB",
-        gib(got)
-    );
-    // ...and it has to be the IMAGE that drives it, not a bigger constant.
-    let quarter = flux2::pipeline::vae_decoder_bytes(&vc, full_frame / 4);
-    assert!(
-        got > quarter + (got - quarter) / 2,
-        "the reservation must grow with the output: {:.2} GiB at a quarter frame vs {:.2} GiB full",
-        gib(quarter),
-        gib(got)
-    );
-    assert!(
-        got - quarter > (1u64 << 30),
-        "four times the pixels must cost GiBs more, not megabytes: {:.2} -> {:.2} GiB",
-        gib(quarter),
-        gib(got)
-    );
+    gpu_core::capacity::with_available(Some(vae::tiled::WHOLE_GRAPH_MAX_BYTES), || {
+        let got = flux2::pipeline::vae_decoder_bytes(&vc, full_frame);
+        assert!(
+            gib(got) > 6.0,
+            "a full-frame decode needs far more than the flat 2 GiB this used to reserve: {:.2} GiB",
+            gib(got)
+        );
+        // ...and it has to be the IMAGE that drives it, not a bigger constant.
+        let quarter = flux2::pipeline::vae_decoder_bytes(&vc, full_frame / 4);
+        assert!(
+            got > quarter + (got - quarter) / 2,
+            "the reservation must grow with the output: {:.2} GiB at a quarter frame vs {:.2} GiB full",
+            gib(quarter),
+            gib(got)
+        );
+        assert!(
+            got - quarter > (1u64 << 30),
+            "four times the pixels must cost GiBs more, not megabytes: {:.2} -> {:.2} GiB",
+            gib(quarter),
+            gib(got)
+        );
+    });
 }
 
 /// Reference images enlarge the DiT's joint sequence; they do not enlarge the
@@ -323,6 +330,12 @@ fn the_vae_reservation_covers_a_full_frame_decode() {
 /// that turns a placeable run into a refusal.
 #[test]
 fn references_grow_the_dit_but_not_the_decode() {
+    gpu_core::capacity::with_available(Some(vae::tiled::WHOLE_GRAPH_MAX_BYTES), references_grow_the_dit_but_not_the_decode_within);
+}
+
+/// The body of [`references_grow_the_dit_but_not_the_decode`], on a card with
+/// room for a whole-image decode - the graph whose size the claim is about.
+fn references_grow_the_dit_but_not_the_decode_within() {
     let c = flux2::Flux2Config::klein_4b();
     let vc = vae::VaeConfig::flux2();
     let n_out = 48 * 64; // 768x1024 generated

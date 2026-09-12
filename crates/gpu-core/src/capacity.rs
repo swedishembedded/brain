@@ -190,6 +190,9 @@ pub const HEADROOM: u64 = 2 << 30;
 /// so the figure errs low, which makes a caller choose the cheaper path rather
 /// than the one that aborts.
 pub fn available_here() -> Option<u64> {
+    if let Some(pinned) = PINNED.with(|p| p.borrow().last().copied()) {
+        return pinned;
+    }
     let dev = crate::devices::selected_device()?;
     let mem = probe_gpus();
     let card = mem.iter().find(|g| g.index == dev.index)?;
@@ -197,6 +200,41 @@ pub fn available_here() -> Option<u64> {
         return None;
     }
     Some(card.available().saturating_sub(HEADROOM))
+}
+
+thread_local! {
+    /// Scoped answers for [`available_here`], innermost first.
+    static PINNED: std::cell::RefCell<Vec<Option<u64>>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Run `f` with `bytes` as [`available_here`]'s answer on this thread: `Some`
+/// to state a device with that much to spend, `None` to state one nothing can
+/// measure.
+///
+/// Thread-local and scoped, the same shape as
+/// [`crate::devices::with_gpu`] and for the same reason: a concurrent scope on
+/// another thread (a residency lane, a second test) cannot see it, so there is
+/// no process-wide switch for one caller to leave flipped.
+///
+/// Two callers. A test that has to state a machine rather than run on one -
+/// "this graph fits and that one does not" is a claim about a budget, and a
+/// suite that reads the real card asserts something different on every host.
+/// And a caller that has ALREADY been granted a budget (an executor handing a
+/// model its slice of a card) and wants the graphs built under it to size
+/// themselves to that grant rather than to whatever the card happens to have
+/// free at the instant they are built.
+pub fn with_available<R>(bytes: Option<u64>, f: impl FnOnce() -> R) -> R {
+    PINNED.with(|p| p.borrow_mut().push(bytes));
+    struct Pop;
+    impl Drop for Pop {
+        fn drop(&mut self) {
+            PINNED.with(|p| {
+                p.borrow_mut().pop();
+            });
+        }
+    }
+    let _pop = Pop;
+    f()
 }
 
 #[cfg(test)]

@@ -270,59 +270,128 @@ const MIB: f64 = (1u64 << 20) as f64;
 #[test]
 fn the_planned_estimate_is_bounded_by_the_tile_not_the_image() {
     let cfg = VaeConfig::flux2();
-    let mut prev_untiled = 0u64;
-    let mut planned = Vec::new();
-    // 1 MP (a stock FLUX.2 frame) up to 64 MP (8192x8192).
-    for mp in [1u64, 2, 4, 8, 16, 32, 64] {
-        let px = mp * 1_000_000;
-        let untiled = vae::decoder_device_bytes_for_pixels(&cfg, px);
-        let plan = vae::decoder_device_bytes_for_pixels_planned(&cfg, px);
-        println!("{mp:>3} MP: untiled {:>9.0} MiB  planned {:>9.0} MiB", untiled as f64 / MIB, plan as f64 / MIB);
-        assert!(untiled > prev_untiled, "the untiled formula is the thing that grows");
-        prev_untiled = untiled;
-        assert!(plan <= untiled, "the planned figure may never exceed the untiled one");
-        planned.push(plan);
-    }
-    let worst = *planned.iter().max().expect("non-empty");
-    assert!(
-        worst <= vae::tiled::WHOLE_GRAPH_MAX_BYTES,
-        "the planned figure must stay inside the budget that decides to tile: {:.0} MiB",
-        worst as f64 / MIB
-    );
-    // Bounded, not merely slower-growing: beyond the threshold the tile is the
-    // same tile however large the image gets.
-    assert_eq!(planned[4], planned[6], "16 MP and 64 MP must cost the same tiled decode");
-    assert!(
-        vae::encoder_device_bytes_for_pixels_planned(&cfg, 16_000_000)
-            == vae::encoder_device_bytes_for_pixels_planned(&cfg, 64_000_000),
-        "the encode estimate must be bounded the same way"
-    );
+    let budget = vae::tiled::WHOLE_GRAPH_MAX_BYTES;
+    gpu_core::capacity::with_available(Some(budget), || {
+        let mut prev_untiled = 0u64;
+        let mut planned = Vec::new();
+        // 1 MP (a stock FLUX.2 frame) up to 64 MP (8192x8192).
+        for mp in [1u64, 2, 4, 8, 16, 32, 64] {
+            let px = mp * 1_000_000;
+            let untiled = vae::decoder_device_bytes_for_pixels(&cfg, px);
+            let plan = vae::decoder_device_bytes_for_pixels_planned(&cfg, px);
+            println!("{mp:>3} MP: untiled {:>9.0} MiB  planned {:>9.0} MiB", untiled as f64 / MIB, plan as f64 / MIB);
+            assert!(untiled > prev_untiled, "the untiled formula is the thing that grows");
+            prev_untiled = untiled;
+            assert!(plan <= untiled, "the planned figure may never exceed the untiled one");
+            planned.push(plan);
+        }
+        let worst = *planned.iter().max().expect("non-empty");
+        assert!(
+            worst <= budget,
+            "the planned figure must stay inside the budget that decides to tile: {:.0} MiB",
+            worst as f64 / MIB
+        );
+        // Bounded, not merely slower-growing: beyond the threshold the tile is
+        // the same tile however large the image gets.
+        assert_eq!(planned[4], planned[6], "16 MP and 64 MP must cost the same tiled decode");
+        assert!(
+            vae::encoder_device_bytes_for_pixels_planned(&cfg, 16_000_000)
+                == vae::encoder_device_bytes_for_pixels_planned(&cfg, 64_000_000),
+            "the encode estimate must be bounded the same way"
+        );
+    });
 }
 
 /// Zero behaviour change where nothing needed to change: at the sizes FLUX.2
 /// actually generates, the decision is "do not tile" and the number is the
 /// one that was already gated in `tests/footprint.rs`.
+///
+/// Stated against an explicit budget rather than the live machine, because the
+/// live machine is the variable: the same image is a whole-image graph on an
+/// idle card and a tiled one on a busy one, and that is the point of
+/// [`vae::tiled::should_tile_decode`]. What is fixed - and what this pins - is
+/// the POLICY: given this many bytes to spend, here is the path taken.
 #[test]
 fn a_normal_resolution_run_is_untouched() {
     let cfg = VaeConfig::flux2();
-    for (h, w) in [(512u64, 512u64), (768, 1024), (1024, 1024), (1024, 1536)] {
-        let px = h * w;
-        assert!(!vae::tiled::should_tile_decode(&cfg, px), "{h}x{w} must stay on the whole-image decode");
-        assert!(!vae::tiled::should_tile_encode(&cfg, px), "{h}x{w} must stay on the whole-image encode");
-        assert_eq!(
-            vae::decoder_device_bytes_for_pixels_planned(&cfg, px),
-            vae::decoder_device_bytes_for_pixels(&cfg, px),
-            "{h}x{w}: the reservation must be the untiled one"
+    gpu_core::capacity::with_available(Some(vae::tiled::WHOLE_GRAPH_MAX_BYTES), || {
+        for (h, w) in [(512u64, 512u64), (768, 1024), (1024, 1024), (1024, 1536)] {
+            let px = h * w;
+            assert!(!vae::tiled::should_tile_decode(&cfg, px), "{h}x{w} must stay on the whole-image decode");
+            assert!(!vae::tiled::should_tile_encode(&cfg, px), "{h}x{w} must stay on the whole-image encode");
+            assert_eq!(
+                vae::decoder_device_bytes_for_pixels_planned(&cfg, px),
+                vae::decoder_device_bytes_for_pixels(&cfg, px),
+                "{h}x{w}: the reservation must be the untiled one"
+            );
+            assert_eq!(
+                vae::encoder_device_bytes_for_pixels_planned(&cfg, px),
+                vae::encoder_device_bytes_for_pixels(&cfg, px)
+            );
+        }
+        // ...and the sizes that motivated tiling do engage it.
+        for (h, w) in [(2048u64, 2048u64), (1536, 2048), (4096, 4096)] {
+            assert!(vae::tiled::should_tile_decode(&cfg, h * w), "{h}x{w} must tile");
+        }
+    });
+}
+
+/// The out-of-memory this closes, as arithmetic.
+///
+/// A 2048x1152 img2img encode predicts ~17.4 GiB - comfortably INSIDE the
+/// card-sized constant, so the old decision ran it as one whole-image graph -
+/// and it cannot run at all on a 24 GiB card that is already carrying a
+/// quantised 9.4 GiB DiT, which is what every `--ref`/`--strength` generation
+/// puts there. The graph's own size was never the thing in doubt; what the
+/// decision was missing is what the DEVICE has left.
+#[test]
+fn a_graph_the_constant_allows_is_tiled_when_the_card_is_already_full() {
+    let cfg = VaeConfig::flux2();
+    let px = 2048u64 * 1152;
+    let want = vae::encoder_device_bytes_for_pixels(&cfg, px);
+    assert!(
+        want < vae::tiled::WHOLE_GRAPH_MAX_BYTES,
+        "this reproduction needs a graph the constant lets through: {:.0} MiB",
+        want as f64 / MIB
+    );
+    // What a 24 GiB card really offers with that DiT resident, less the
+    // headroom between an estimate and a real allocation.
+    let budget = (24u64 << 30) - (9536u64 << 20) - (2u64 << 30);
+    assert!(budget < want, "the reproduction needs a card with less room than the graph wants");
+    gpu_core::capacity::with_available(Some(budget), || {
+        assert!(
+            vae::tiled::should_tile_encode(&cfg, px),
+            "a graph bigger than the device has left must tile, whatever the constant says"
         );
-        assert_eq!(
-            vae::encoder_device_bytes_for_pixels_planned(&cfg, px),
-            vae::encoder_device_bytes_for_pixels(&cfg, px)
+        assert!(vae::tiled::should_tile_decode(&cfg, px), "the decode direction has the same bug");
+        assert!(
+            vae::encoder_device_bytes_for_pixels_planned(&cfg, px) <= budget,
+            "and the reservation must be the one the tiled path will really spend"
         );
-    }
-    // ...and the sizes that motivated tiling do engage it.
-    for (h, w) in [(2048u64, 2048u64), (1536, 2048), (4096, 4096)] {
-        assert!(vae::tiled::should_tile_decode(&cfg, h * w), "{h}x{w} must tile");
-    }
+    });
+}
+
+/// The other half of the same claim, and what stops this from being a smaller
+/// hardcoded constant: a card with MORE room than the constant assumed runs
+/// the whole-image graph at a size the constant would have tiled. The exact
+/// path is the better one wherever it fits, and where it fits is a property of
+/// the machine.
+#[test]
+fn a_card_with_more_room_than_the_constant_keeps_the_exact_path() {
+    let cfg = VaeConfig::flux2();
+    let px = 2048u64 * 2048;
+    let want = vae::decoder_device_bytes_for_pixels(&cfg, px);
+    assert!(want > vae::tiled::WHOLE_GRAPH_MAX_BYTES, "2048x2048 is the size the constant refuses");
+    gpu_core::capacity::with_available(Some(want), || {
+        assert!(!vae::tiled::should_tile_decode(&cfg, px), "a budget that fits the graph must run the graph");
+    });
+    gpu_core::capacity::with_available(Some(want - 1), || {
+        assert!(vae::tiled::should_tile_decode(&cfg, px), "one byte short is not a fit");
+    });
+    // A device nothing can measure is the one case the constant still answers.
+    gpu_core::capacity::with_available(None, || {
+        assert!(vae::tiled::should_tile_decode(&cfg, px), "with no measurement, the documented fallback decides");
+    });
 }
 
 // ------------------------------------------------- the real thing, measured

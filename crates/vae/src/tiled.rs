@@ -147,25 +147,30 @@ impl Tiling {
     }
 }
 
-/// The device budget one whole-image VAE graph may predict before the tiled
-/// path takes over.
+/// The budget a whole-image VAE graph is measured against when the device
+/// cannot be measured at all - a GPU-less box, a card no driver tool can read,
+/// a run the placer sent to the host tier.
 ///
 /// A card-sized constant, and it says so: 18 GiB is what leaves real headroom
-/// on the 24 GiB Tesla P40s this repo's imaging work is measured on, once the
-/// driver's own context and the pipeline's other resident parts are counted.
-/// It is deliberately compared against [`crate::decoder_device_bytes_for_pixels`]
-/// rather than against a pixel count, so the decision follows the CONFIG - a
-/// VAE with a different channel schedule gets a different threshold for free,
-/// which a hardcoded resolution could not do.
+/// on a 24 GiB card once the driver's own context and the pipeline's other
+/// resident parts are counted. At FLUX.2's schedule it keeps 1024x1024
+/// (10.9 GiB) and 1024x1536 (15.9 GiB) on the exact path and sends 1536x1536
+/// (23.4 GiB) and 2048x2048 (40.8 GiB) to the tiled one.
 ///
-/// At FLUX.2's schedule this keeps every size the pipeline generates today on
-/// the exact path (1024x1024 predicts 10.9 GiB, 1024x1536 15.9 GiB) and sends
-/// 1536x1536 (23.4 GiB) and 2048x2048 (40.8 GiB) to the tiled one.
+/// It is a FALLBACK, not the policy. A constant cannot see what a card is
+/// already carrying, and the failure that taught us so is specific: a
+/// 2048x1152 img2img encode predicts ~17.4 GiB, passes this ceiling, and then
+/// cannot allocate on a 24 GiB card holding a quantised 9.4 GiB DiT - which is
+/// what every `--ref`/`--strength` generation puts there. Model sizes,
+/// quantisation and hardware all move; what a device has free right now is the
+/// only figure that moves with them, so [`whole_graph_budget`] reads it and
+/// this number is what is left when there is nothing to read.
 pub const WHOLE_GRAPH_MAX_BYTES: u64 = 18 << 30;
 
 /// `BRAIN_VAE_TILE=1`/`0` forces tiling on/off; anything else (or unset) is
-/// the [`WHOLE_GRAPH_MAX_BYTES`] policy below. Forcing it ON at a size that
-/// already fits is the supported way to compare the two paths.
+/// the [`whole_graph_budget`] policy below. Forcing it ON at a size that
+/// already fits is the supported way to compare the two paths, and forcing it
+/// OFF is how a caller who knows better than the probe overrides it.
 fn forced() -> Option<bool> {
     match std::env::var("BRAIN_VAE_TILE").ok().as_deref() {
         Some("1") | Some("on") | Some("true") => Some(true),
@@ -174,14 +179,44 @@ fn forced() -> Option<bool> {
     }
 }
 
-/// Whether a decode producing `px` output pixels should take the tiled path.
-pub fn should_tile_decode(cfg: &VaeConfig, px: u64) -> bool {
-    forced().unwrap_or_else(|| crate::decoder_device_bytes_for_pixels(cfg, px) > WHOLE_GRAPH_MAX_BYTES)
+/// The bytes a whole-image VAE graph may claim on the device this thread would
+/// build it on, right now: what that card has FREE less the headroom between a
+/// byte estimate and a real allocation, or [`WHOLE_GRAPH_MAX_BYTES`] when
+/// nothing about the device can be measured.
+///
+/// Two things it deliberately does not do. It does not subtract the graph's own
+/// weights a second time when they are already uploaded (the estimate counts
+/// them and the driver already sees them), and it does not add back memory a
+/// backend allocator is holding for reuse. Both make the figure err LOW, which
+/// costs a tiled path where a whole-image one would have fitted - the cheap
+/// direction to be wrong in, against a driver-level out-of-memory in the last
+/// stage of a generation that has already paid for every denoise step.
+pub fn whole_graph_budget() -> u64 {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        gpu_core::capacity::available_here().unwrap_or(WHOLE_GRAPH_MAX_BYTES)
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        WHOLE_GRAPH_MAX_BYTES
+    }
 }
 
-/// Whether an encode reading `px` input pixels should take the tiled path.
+/// Whether a decode producing `px` output pixels should take the tiled path:
+/// `BRAIN_VAE_TILE` if it says so, else the graph's own size against what the
+/// device has left ([`whole_graph_budget`]).
+///
+/// To decide against a stated budget rather than the live one - a test, or a
+/// caller already holding a grant - wrap the call in
+/// `gpu_core::capacity::with_available`.
+pub fn should_tile_decode(cfg: &VaeConfig, px: u64) -> bool {
+    forced().unwrap_or_else(|| crate::decoder_device_bytes_for_pixels(cfg, px) > whole_graph_budget())
+}
+
+/// Whether an encode reading `px` input pixels should take the tiled path -
+/// see [`should_tile_decode`].
 pub fn should_tile_encode(cfg: &VaeConfig, px: u64) -> bool {
-    forced().unwrap_or_else(|| crate::encoder_device_bytes_for_pixels(cfg, px) > WHOLE_GRAPH_MAX_BYTES)
+    forced().unwrap_or_else(|| crate::encoder_device_bytes_for_pixels(cfg, px) > whole_graph_budget())
 }
 
 /// Output pixels one [`Tiling::AUTO`] tile covers - the cap a tiled estimate
