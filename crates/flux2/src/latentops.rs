@@ -581,6 +581,130 @@ fn pearson(a: &[f64], b: &[f64]) -> f64 {
     sab / (saa.sqrt() * sbb.sqrt())
 }
 
+/// How strongly a decoded image carries a bias locked to the pixel grid, at a
+/// chosen period, in 8-bit levels peak-to-peak. See [`grid_bias`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GridBias {
+    pub period: usize,
+    /// Peak-to-peak of the mean residual as a function of `x % period`.
+    pub x: f64,
+    /// The same as a function of `y % period`.
+    pub y: f64,
+    /// The identical statistic at a period coprime to `period`, where no decoder
+    /// cell lands. This is the chance level the two above are read against: a
+    /// real grid clears it by an order of magnitude, content sits on it.
+    pub floor: f64,
+}
+
+/// Measure a **grid-locked** periodic bias: how much brighter or darker a pixel
+/// is purely as a function of its coordinate modulo `period`, once local image
+/// content is removed.
+///
+/// A conv decoder's upsampling stack has its own cell size, and the learned
+/// convolutions after each nearest-neighbour doubling do not treat the cell's
+/// sub-positions identically. The residue is a fixed profile repeated across the
+/// whole image, phase-locked to the sampling grid. Scene content is not
+/// phase-locked - a grating in the picture sits wherever the picture puts it -
+/// so averaging every pixel of one residue class together keeps the decoder's
+/// contribution and cancels the scene's. That separation, and not raw spectral
+/// power at the period, is what this measures: a spectrum cannot tell a decoder
+/// artifact from a picket fence, and this can.
+///
+/// For the FLUX.2 autoencoder the periods that mean something are `8` (one
+/// conv-latent cell) and `4` (the 128->256 upsample cell, two per latent cell),
+/// and it is `4` that carries the fundamental.
+///
+/// `px` is interleaved RGB u8; the statistic runs on Rec.601 luma. The content
+/// removed is a separable box mean of width `8·period + 1` - wide enough to
+/// average whole periods of the grid and so pass it through nearly intact, and
+/// narrow enough to take real structure out.
+pub fn grid_bias(px: &[u8], h: usize, w: usize, period: usize) -> Result<GridBias, String> {
+    if period < 2 {
+        return Err(format!("grid_bias: period {period} must be at least 2"));
+    }
+    if px.len() != h * w * 3 {
+        return Err(format!("grid_bias: {} bytes for {w}x{h} RGB", px.len()));
+    }
+    let r = 4 * period;
+    if h <= 2 * r || w <= 2 * r {
+        return Err(format!("grid_bias: {w}x{h} is too small for period {period}"));
+    }
+    let luma: Vec<f64> = (0..h * w)
+        .map(|i| 0.299 * px[3 * i] as f64 + 0.587 * px[3 * i + 1] as f64 + 0.114 * px[3 * i + 2] as f64)
+        .collect();
+    let hp = highpass(&luma, h, w, r);
+    // The smallest period above this one sharing no factor with it, so its
+    // residue classes cut across every decoder cell rather than tracking one.
+    let coprime = (period + 1..).find(|&q| gcd(q, period) == 1).expect("a coprime always exists");
+    Ok(GridBias {
+        period,
+        x: phase_ptp(&hp, h, w, period, Axis::X),
+        y: phase_ptp(&hp, h, w, period, Axis::Y),
+        floor: phase_ptp(&hp, h, w, coprime, Axis::X).max(phase_ptp(&hp, h, w, coprime, Axis::Y)),
+    })
+}
+
+#[derive(Clone, Copy)]
+enum Axis {
+    X,
+    Y,
+}
+
+/// Peak-to-peak of the mean of `v` over each residue class of the coordinate
+/// along `axis` modulo `period`.
+fn phase_ptp(v: &[f64], h: usize, w: usize, period: usize, axis: Axis) -> f64 {
+    let (mut sum, mut cnt) = (vec![0.0f64; period], vec![0usize; period]);
+    for y in 0..h {
+        for x in 0..w {
+            let k = match axis {
+                Axis::X => x % period,
+                Axis::Y => y % period,
+            };
+            sum[k] += v[y * w + x];
+            cnt[k] += 1;
+        }
+    }
+    let means = sum.iter().zip(&cnt).map(|(&s, &c)| if c > 0 { s / c as f64 } else { 0.0 });
+    let (lo, hi) = means.fold((f64::MAX, f64::MIN), |(l, g), m| (l.min(m), g.max(m)));
+    hi - lo
+}
+
+/// `v` minus a separable box mean of width `2r+1`, edge-clamped.
+fn highpass(v: &[f64], h: usize, w: usize, r: usize) -> Vec<f64> {
+    let mut lo = v.to_vec();
+    for axis in [Axis::X, Axis::Y] {
+        let (outer, inner, stride) = match axis {
+            Axis::X => (h, w, 1usize),
+            Axis::Y => (w, h, w),
+        };
+        let mut next = lo.clone();
+        for o in 0..outer {
+            let base = match axis {
+                Axis::X => o * w,
+                Axis::Y => o,
+            };
+            let at = |i: usize| lo[base + i.min(inner - 1) * stride];
+            // Running sum over the clamped window, advanced one step at a time.
+            let mut acc: f64 = (0..=r).map(at).sum::<f64>() + at(0) * r as f64;
+            let n = (2 * r + 1) as f64;
+            for i in 0..inner {
+                next[base + i * stride] = acc / n;
+                acc += at(i + r + 1) - at(i.saturating_sub(r));
+            }
+        }
+        lo = next;
+    }
+    v.iter().zip(&lo).map(|(&a, &b)| a - b).collect()
+}
+
+fn gcd(a: usize, b: usize) -> usize {
+    if b == 0 {
+        a
+    } else {
+        gcd(b, a % b)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -793,5 +917,62 @@ mod tests {
         assert!(m.edge_corr.abs() < 0.9, "edge_corr {} should not survive a flip", m.edge_corr);
 
         assert!(compare(&base, &base[..10], h, w).is_err());
+    }
+
+    /// A `w`x`h` RGB image built from a luma function.
+    fn gray(h: usize, w: usize, f: impl Fn(usize, usize) -> f64) -> Vec<u8> {
+        let mut px = vec![0u8; h * w * 3];
+        for y in 0..h {
+            for x in 0..w {
+                let v = f(y, x).round().clamp(0.0, 255.0) as u8;
+                px[(y * w + x) * 3..(y * w + x) * 3 + 3].fill(v);
+            }
+        }
+        px
+    }
+
+    /// The metric's reason to exist: report the amplitude of a bias locked to
+    /// the pixel grid, and only that. A planted period-4 profile comes back at
+    /// its own peak-to-peak size on the axis it varies along, and the other
+    /// axis stays down at the chance floor.
+    #[test]
+    fn grid_bias_recovers_a_planted_grid_locked_profile() {
+        // A multiple of both 4 and its coprime 5, so the floor's residue classes
+        // cover whole periods of the planted grid and it cannot leak into them.
+        let (h, w) = (140, 140);
+        let prof = [-1.5f64, -3.0, 1.5, 3.0]; // ptp 6.0
+        // A smooth background for the high-pass to remove, plus the grid-locked
+        // term that the metric is supposed to find underneath it.
+        let px = gray(h, w, |y, x| {
+            128.0 + 30.0 * ((x as f64 / 40.0).sin() + (y as f64 / 33.0).cos()) + prof[x % 4]
+        });
+        let g = grid_bias(&px, h, w, 4).unwrap();
+        // The box mean spans 8 whole periods plus one sample, so it keeps 1/33
+        // of the grid and the remaining 32/33 survives the high-pass.
+        assert!((g.x - 6.0 * 32.0 / 33.0).abs() < 0.3, "planted x ptp 6.0, measured {}", g.x);
+        assert!(g.y < g.x / 5.0, "no grid was planted along y, got {} against x {}", g.y, g.x);
+        assert!(g.x > 10.0 * g.floor, "a planted grid must clear the floor: {} vs {}", g.x, g.floor);
+    }
+
+    /// The discriminating property: power at the grid period is NOT enough - the
+    /// artifact is phase-locked and ordinary content is not. A slanted grating of
+    /// period 4, whose phase walks a full turn down the image, carries the same
+    /// spectral power at the same period and must still read as floor.
+    #[test]
+    fn grid_bias_ignores_period_4_content_that_is_not_phase_locked() {
+        let (h, w) = (140, 140);
+        let px = gray(h, w, |y, x| {
+            let phase = std::f64::consts::TAU * y as f64 / h as f64;
+            128.0 + 20.0 * (std::f64::consts::TAU * x as f64 / 4.0 + phase).sin()
+        });
+        let g = grid_bias(&px, h, w, 4).unwrap();
+        assert!(g.x < 0.5, "unlocked period-4 content must not read as a grid: {} (floor {})", g.x, g.floor);
+    }
+
+    #[test]
+    fn grid_bias_rejects_a_bad_period_or_buffer() {
+        let px = gray(16, 16, |_, _| 128.0);
+        assert!(grid_bias(&px, 16, 16, 1).is_err());
+        assert!(grid_bias(&px[..10], 16, 16, 4).is_err());
     }
 }

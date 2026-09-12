@@ -23,6 +23,7 @@
 //!   flux2_latent lat2img --out F.png LAT                       .lat (RGB) -> image
 //!   flux2_latent stats   LAT                                   per-channel mean/std
 //!   flux2_latent metrics A.png B.png                           A against reference B
+//!   flux2_latent grid    [--period N] IMG...                   decoder grid-locked bias
 //!   flux2_latent thumb   --outdir D --width N IMG...           contact-sheet tiles
 //!   flux2_latent op OP [flags] --out F.lat                     see `op` below
 //! ```
@@ -127,9 +128,10 @@ fn run() -> Result<(), String> {
         "lat2img" => lat2img(&a),
         "stats" => stats(&a),
         "metrics" => metrics(&a),
+        "grid" => grid(&a),
         "thumb" => thumb(&a),
         "op" => op(&a),
-        _ => Err("usage: flux2_latent {encode|decode|img2lat|lat2img|stats|metrics|thumb|op} ... \
+        _ => Err("usage: flux2_latent {encode|decode|img2lat|lat2img|stats|metrics|grid|thumb|op} ... \
                   (see the module docs)"
             .into()),
     }
@@ -339,6 +341,38 @@ fn metrics(a: &Args) -> Result<(), String> {
         "{}\t{}\tmad={:.4}\trel_l2={:.6}\tcosine={:.8}\tedge_corr={:.6}",
         a.pos[0], a.pos[1], m.mad, m.rel_l2, m.cosine, m.edge_corr
     );
+    Ok(())
+}
+
+/// Report each image's grid-locked periodic bias at the decoder's cell periods.
+///
+/// `--period N` measures one period instead of the default `4,8`. What to read
+/// is `x`/`y` against `floor`: content sits on the floor, a decoder artifact
+/// clears it by an order of magnitude.
+fn grid(a: &Args) -> Result<(), String> {
+    if a.pos.is_empty() {
+        return Err("grid wants at least one image".into());
+    }
+    let periods: Vec<usize> = match a.opt("period") {
+        Some(s) => vec![s.parse().map_err(|_| format!("grid: bad --period {s}"))?],
+        None => vec![4, 8],
+    };
+    for input in &a.pos {
+        let (px, h, w) = load_image(input)?;
+        for &p in &periods {
+            let g = latentops::grid_bias(&px, h, w, p)?;
+            let rel = |v: f64| v / g.floor.max(1e-6);
+            println!(
+                "{input}\tperiod={}\tx={:.3}\ty={:.3}\tfloor={:.3}\tx/floor={:.1}\ty/floor={:.1}",
+                g.period,
+                g.x,
+                g.y,
+                g.floor,
+                rel(g.x),
+                rel(g.y)
+            );
+        }
+    }
     Ok(())
 }
 

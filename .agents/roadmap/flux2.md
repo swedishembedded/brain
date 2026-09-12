@@ -1500,3 +1500,119 @@ differ (bald onto long grey hair) leaves the target's hair and skull outline
 framing a face that is no longer theirs. Growing the mask trades that against
 having to regenerate plausible hair. For a swap between similar head shapes
 this is much easier than the case measured here.
+
+## The 4-pixel grid on decluttered output is the VAE decoder, not the adapter
+
+A LoRA trained to strip clutter and photo noise from room photographs
+(klein-9b, rank 16, 512px) puts a faint but visible grid texture on smooth
+surfaces - walls, carpet, ceilings. It scales with `--lora-scale`, it appears
+in plain text-to-image with no `--ref`, and it appears at the training
+resolution, so it is not an editing artifact and not a resolution artifact.
+
+**It is also not the int8 requantization bug.** Folding the LoRA delta into the
+int8 weights and applying it beside the matmul give the same grid to three
+digits (2.597 vs 2.573 levels on x, 5.273 vs 5.344 on y). That bug was real and
+worth fixing; it never caused this.
+
+### Measuring it
+
+A radially-averaged spectrum finds the period but cannot tell a decoder
+artifact from a picket fence, and its peak-to-neighbour ratio moves with
+whatever else is in the picture. `latentops::grid_bias` measures the property
+that actually distinguishes the two: the artifact is **phase-locked to the
+pixel grid**, so averaging every pixel of one residue class `x % P` together
+keeps it and cancels scene content. It is read against the same statistic at a
+period coprime to `P`, where no decoder cell lands - that is the chance level.
+`flux2_latent grid IMG...` reports it; units are 8-bit levels peak-to-peak.
+
+The fundamental is **P = 4**, in both axes, with no diagonal term - a separable
+axis-aligned grid, not a true checkerboard. The P=8 profile is the P=4 profile
+written twice. Four pixels is the cell of the decoder's 128→256 upsample, two
+of them per 8x8-pixel latent cell.
+
+Adapter strength against the grid at P=4 (x / y, chance floor in parens):
+
+| adapter | x | y | floor |
+|---|---|---|---|
+| none | 0.489 | 0.531 | 0.097 |
+| `--lora-scale 0.25` | 0.912 | 2.225 | 0.284 |
+| `--lora-scale 0.5` | 1.572 | 4.303 | 0.220 |
+| `--lora-scale 1.0` | 2.573 | 5.344 | 0.350 |
+| none, text-to-image | 0.443 | 0.225 | 0.303 |
+| full, text-to-image | 1.113 | 1.212 | 0.416 |
+
+### What actually produces it
+
+The autoencoder alone, on the host, with no DiT and no adapter anywhere -
+encode a photograph, edit the latent, decode, measure. Same table, 512x512:
+
+| latent fed to the decoder | x | y | floor |
+|---|---|---|---|
+| a photograph, unmodified | 0.169 | 0.517 | 0.189 |
+| constant per channel | 0.014 | 0.026 | 0.019 |
+| + white noise, 0.1 to 1.0 of channel std | 0.16-0.23 | 0.53-0.75 | 0.17-0.19 |
+| contrast x1.25 to x2.0 about the channel mean | 0.30-0.68 | 1.11-2.23 | 0.53-1.15 |
+| box mean, radius 2 | 0.318 | 0.742 | 0.013 |
+| median filter, size 5 | 0.283 | 0.726 | 0.034 |
+| Gaussian blur, contrast restored | 1.169 | 1.457 | 0.077 |
+| one low-frequency sinusoid | 0.099 | 0.575 | 0.011 |
+
+An ordinary latent decodes at the floor: the decoder adds nothing measurable.
+Pushing the latent off the manifold does not wake the grid either - white noise
+and contrast scaling both stay at or below their own floor. **Smoothing the
+latent is the one edit that wakes it**, and a pure low-frequency sinusoid -
+no photograph, no noise, nothing but a smooth ramp in every channel - decodes
+with the grid 30x over floor. Smooth with the contrast put back, which is what
+a decluttered room is (flat walls, crisp edges), is the strongest reproduction
+short of the adapter itself.
+
+So the chain is: the adapter's whole objective is to empty the picture of local
+detail while keeping its large-scale contrast; that is exactly the latent the
+frozen decoder renders its own cell structure into; with no real texture left,
+the structure is no longer masked.
+
+### Not a defect in the graph
+
+A constant latent decodes to a constant image - interior peak-to-peak 0.0002
+levels at P=4. The decode is translation-equivariant, `upsample2` is a plain
+nearest-neighbour double, and each doubling is followed by its own 3x3 conv,
+which is already the resize-conv arrangement that exists to avoid this. The
+grid is what the checkpoint's convolutions do with a sub-cell input they were
+never fitted on, and brain reproduces the reference architecture faithfully.
+
+### Latent dither does not help
+
+The obvious deployment-side band-aid fails. Adding white noise to a latent that
+is already showing the grid leaves it where it was (0.318 -> 0.361 -> 0.299 on
+x for 0, 0.15 and 0.3 of channel std). The grid is a deterministic bias, and
+noise adds variance on top of a bias rather than removing it - it buys visible
+grain and no reduction. No decoder-side or decode-time mitigation measured here
+helps the weights that already exist.
+
+### What a fix would take
+
+The decoder is frozen and parity-gated, so its arithmetic is not available to
+change. That leaves the training side: an adapter that is never rewarded for
+collapsing local latent variance does not drive the decoder there in the first
+place. A loss term that holds the target's local variance rather than letting
+it fall to the smoothest solution is the shape of it. That only reaches
+adapters trained after it lands - the existing weights would have to be
+retrained to benefit.
+
+### The one link still measured only indirectly
+
+Everything above about the decoder is measured directly. The last step of the
+chain - that the adapted DiT really does hand the decoder the kind of latent
+that wakes the grid - is inferred from the decoded images, not from the latent
+itself, because nothing in `flux2 generate` writes the latent out. Local detail
+in the decoded picture does fall monotonically as `--lora-scale` rises (median
+|detail| 8.11 → 7.17 → 7.32 → 5.70 over 0, 0.25, 0.5, 1.0), which is consistent,
+but text-to-image does not separate on that statistic alone - both arms are
+already very flat there - so the image is a proxy for the latent and not a
+substitute.
+
+Closing it needs the latent of an adapted and an unadapted generation at the
+same seed, compared for structure at scales just above the cell size. That is
+one generation each plus `flux2_latent stats`, once a card is free. Pass
+`--device gpu` explicitly on those runs: without it the scheduler may consider
+a CPU fallback, and a silently-CPU arm would not be the comparison intended.
