@@ -174,8 +174,14 @@ pub fn activation_reserve_bytes(t: usize, backend: &str) -> u64 {
 
 /// Bytes this process may still put on `device`.
 ///
-/// With no `--limit-vram-total` ceiling published, the card's own largest
-/// DEVICE_LOCAL heap is the honest bound and each card is independent.
+/// With no `--limit-vram-total` ceiling published it is what the card has FREE
+/// right now (`gpu_core::capacity`), less that probe's headroom, and each card
+/// is independent. The card's SIZE is not the bound: a denoise window sized to
+/// an empty card is planned wrong on every card that is not empty - another
+/// model resident beside this one, a stage of this same pipeline that has not
+/// released - and what it buys for being wrong is a driver-level abort. A card
+/// nothing can measure keeps its size, which is the best available answer
+/// there and is why the fraction cap below exists.
 ///
 /// With a ceiling published it is the authority's real headroom, **divided by
 /// the number of schedulable cards**, and that division is not conservatism for
@@ -193,7 +199,8 @@ fn usable_vram(device: memauth::Device) -> u64 {
         return auth.headroom(device) / cards;
     }
     match device {
-        memauth::Device::Gpu(i) => gpu_core::devices::device(i).map(|d| d.identity.vram_bytes).unwrap_or(0),
+        memauth::Device::Gpu(i) => gpu_core::capacity::available_for(i)
+            .unwrap_or_else(|| gpu_core::devices::device(i).map(|d| d.identity.vram_bytes).unwrap_or(0)),
         // The CPU backend's "device memory" is host RAM, and a resident window
         // there buys nothing (there is no upload to skip). Reported as zero so
         // the policy declines residency rather than reasoning about host RAM
@@ -1079,6 +1086,32 @@ impl AvDitSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The window must be planned against the card as it IS, not against the
+    /// card's size. A card that already carries something else - a second
+    /// model, a decode that has not released - affords fewer resident blocks,
+    /// and planning as if it were empty is how a budget formula becomes a
+    /// driver-level abort. This module already carries a card-fraction cap
+    /// fitted to exactly one such abort; the cap bounds the fraction of a card
+    /// this window takes, and this bounds the card.
+    #[test]
+    fn a_card_another_job_is_already_using_affords_fewer_resident_blocks() {
+        let cfg = LtxDitConfig::ltx25_22b();
+        std::env::remove_var("BRAIN_LTXV_RESIDENT_BLOCKS");
+        let per_block = cached_block_bytes(&cfg, QTier::Int8);
+        let (t, dev) = (3520usize, memauth::Device::Gpu(0));
+        let slots = |free: u64| {
+            gpu_core::capacity::with_available(Some(free), || slots_for(per_block, cfg.num_layers, t, dev, "wgpu"))
+        };
+        let idle = slots(24 << 30);
+        assert!(idle > 0, "an idle 24 GiB card must afford a window at a production width");
+        assert!(
+            slots(6 << 30) < idle,
+            "a card with 6 GiB left must be planned smaller than one with 24: {} against {idle}",
+            slots(6 << 30)
+        );
+        assert_eq!(slots(0), 0, "a card with nothing left affords no resident block at all");
+    }
 
     /// The policy must be monotone in every input that matters and must never
     /// promise more slots than the model has layers - the two ways a budget

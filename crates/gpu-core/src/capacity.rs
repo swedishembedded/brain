@@ -193,9 +193,16 @@ pub fn available_here() -> Option<u64> {
     if let Some(pinned) = PINNED.with(|p| p.borrow().last().copied()) {
         return pinned;
     }
-    let dev = crate::devices::selected_device()?;
-    let mem = probe_gpus();
-    let card = mem.iter().find(|g| g.index == dev.index)?;
+    available_for(crate::devices::selected_device()?.index)
+}
+
+/// [`available_here`] for a NAMED card - what a graph placed on `index` may
+/// spend right now. Same three `None` cases, same snapshot caveats.
+pub fn available_for(index: u32) -> Option<u64> {
+    if let Some(pinned) = PINNED.with(|p| p.borrow().last().copied()) {
+        return pinned;
+    }
+    let card = probe_gpus().into_iter().find(|g| g.index == index)?;
     if !card.measured {
         return None;
     }
@@ -207,9 +214,10 @@ thread_local! {
     static PINNED: std::cell::RefCell<Vec<Option<u64>>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// Run `f` with `bytes` as [`available_here`]'s answer on this thread: `Some`
-/// to state a device with that much to spend, `None` to state one nothing can
-/// measure.
+/// Run `f` with `bytes` as [`available_here`]'s and [`available_for`]'s answer
+/// on this thread: `Some` to state a device with that much to spend, `None` to
+/// state one nothing can measure. It answers for every card, because what it
+/// states is the situation the code under it runs in, not one card's row.
 ///
 /// Thread-local and scoped, the same shape as
 /// [`crate::devices::with_gpu`] and for the same reason: a concurrent scope on
