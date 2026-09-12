@@ -639,17 +639,18 @@ pub fn gate_lora(inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> Action
         None => Vec::new(),
     };
 
-    let batch = guarded("probes", || FactBatch::new(probe_rows))?;
-    // Called for its two structural assertions - the >= 48 held-out floor and
+    let batch = FactBatch::new(probe_rows).map_err(|e| format!("qwen lora_gate: 'probes': {e}"))?;
+    // Called for its two structural checks - the >= 48 held-out floor and
     // the train/probe task-id disjointness - not for the training half, which
     // a gate run never decodes.
-    guarded("probes", || {
-        let _ = train_probe_split(&batch, &tok);
-    })?;
+    train_probe_split(&batch, &tok).map_err(|e| format!("qwen lora_gate: 'probes': {e}"))?;
     let probe_tasks: Vec<Task> = tasks_of(&batch, &tok);
     let n_probes = probe_tasks.len();
 
-    let anchor_batch = if anchor_rows.is_empty() { None } else { Some(guarded("anchor", || FactBatch::new(anchor_rows))?) };
+    let anchor_batch = match anchor_rows.is_empty() {
+        true => None,
+        false => Some(FactBatch::new(anchor_rows).map_err(|e| format!("qwen lora_gate: 'anchor': {e}"))?),
+    };
     let anchor_tasks: Vec<Task> = anchor_batch.as_ref().map(|b| tasks_of(b, &tok)).unwrap_or_default();
     // A retention suite that IS the primary suite cannot detect forgetting:
     // the same task would be counted as both the thing being improved and the
@@ -884,13 +885,17 @@ fn cause_name(cause: Cause) -> &'static str {
 
 /// Run `f`, converting a panic into a clean error naming what failed.
 ///
-/// `promote::document`'s contract checks panic BY DESIGN, and correctly so:
-/// every one of them is a defect in whatever produced the batch, and
-/// continuing produces a flattering number. But those checks run here against
-/// input that arrived over D-Bus or HTTP from a caller who is not standing on
-/// this machine, where all request input is hostile - a malformed probe set
-/// must fail this ONE request, with the message that names the offending
-/// record, rather than unwinding the worker thread that is serving it.
+/// `promote::document`'s own dataset checks (`FactBatch::new`,
+/// `train_probe_split`) return a named `Result::Err` rather than panicking,
+/// so this action reports those with a plain `.map_err` instead of going
+/// through here. What remains is a check that still panics by design -
+/// `crate::lora::fold_adapter_into`'s tensor-shape validation, for instance:
+/// every one of them is a defect in whatever produced the input, and
+/// continuing produces a flattering number. But it runs here against input
+/// that arrived over D-Bus or HTTP from a caller across a process boundary,
+/// where all request input is hostile - a malformed adapter must fail this
+/// ONE request, with the message that names the offending record, rather
+/// than unwinding the worker thread that is serving it.
 fn guarded<T>(what: &str, f: impl FnOnce() -> T) -> Result<T, String> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).map_err(|e| {
         let msg = e

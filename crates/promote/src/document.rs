@@ -75,9 +75,92 @@ use std::collections::{BTreeMap, HashSet};
 use data::tokenizer::Tokenizer;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use thiserror::Error;
 
 use crate::env::{Environment, Reward, Step, Task, Verifier};
 use crate::gate::GateConfig;
+
+/// Why [`FactBatch::new`] or [`train_probe_split`] refused a dataset, naming
+/// exactly which rule failed and on which record.
+///
+/// A malformed document-study dataset is untrusted input crossing a process
+/// boundary - a served capability action, a CLI `--dataset` load, sven's own
+/// shell-out to `brain document-study` - and every variant here used to be an
+/// `assert!`/`panic!`. Panicking mid-training (deep past where a checkpoint
+/// has already started loading) leaves a caller with a Rust panic tail as its
+/// only diagnostic and no way to check a dataset up front; a named,
+/// `Display`-able `Result::Err` is what lets a caller report the SAME defect
+/// as a clean message and, separately, validate a dataset before paying for
+/// an expensive training run at all.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum DocumentError {
+    /// An empty fact batch has nothing to train and nothing to score.
+    #[error("an empty fact batch has nothing to train and nothing to score")]
+    EmptyBatch,
+
+    /// Triple `index`'s `field` is blank after [`normalize`].
+    #[error("triple {index} has a blank `{field}`")]
+    BlankField {
+        /// Index into the batch's triples.
+        index: usize,
+        /// Which of `fact`/`probe_question`/`expected_answer` was blank.
+        field: &'static str,
+    },
+
+    /// Two triples share one [`normalize`]d `probe_question` - a probe set
+    /// smaller than it reports.
+    #[error(
+        "triple {index}'s probe question {probe_question:?} already appears in this batch - two probes sharing one identity make \
+         the probe set smaller than it reports"
+    )]
+    DuplicateProbeQuestion {
+        /// Index of the triple whose probe question repeats an earlier one.
+        index: usize,
+        /// The repeated probe question, as written (not normalized).
+        probe_question: String,
+    },
+
+    /// Triple `index`'s [`normalize`]d `probe_question` appears inside a
+    /// trained `fact` - a memorisation test wearing a generalisation test's
+    /// clothes.
+    #[error(
+        "triple {index}'s probe question {probe_question:?} appears inside the trained fact {fact:?} - a probe whose own question \
+         is in the training span measures memorisation, not learning"
+    )]
+    ProbeInTrainingSpan {
+        /// Index of the offending triple.
+        index: usize,
+        /// The probe question, as written (not normalized).
+        probe_question: String,
+        /// The trained fact whose text contains it, as written.
+        fact: String,
+    },
+
+    /// Fewer than [`MIN_HELD_OUT_PROBES`] triples in the batch
+    /// [`train_probe_split`] was asked to split.
+    #[error(
+        "{count} held-out probes is below the pre-registered floor of {floor} - below it the sign test has too few discordant \
+         pairs to reach p <= alpha at all"
+    )]
+    TooFewHeldOutProbes {
+        /// How many triples the batch actually carried.
+        count: usize,
+        /// [`MIN_HELD_OUT_PROBES`].
+        floor: usize,
+    },
+
+    /// A probe question's [`task_id`] collides with a training row's -
+    /// [`train_probe_split`]'s belt-and-braces check that the content-derived
+    /// id namespace actually held disjoint.
+    #[error(
+        "probe question(s) {questions:?} are also training rows - a held-out score is only honest if the policy never trained on \
+         the task it is scored against"
+    )]
+    ProbeTrainOverlap {
+        /// Every probe question whose task id collided with a training row's.
+        questions: Vec<String>,
+    },
+}
 
 /// One `{fact, probe_question, expected_answer}` triple, exactly as the
 /// extracting agent froze it.
@@ -181,7 +264,7 @@ pub struct FactBatch {
 }
 
 impl FactBatch {
-    /// Validate `triples` and take ownership of them. Panics, naming the
+    /// Validate `triples` and take ownership of them. Refuses, naming the
     /// offending record, on any of:
     ///
     /// - an empty batch, or a blank field in any triple;
@@ -191,25 +274,29 @@ impl FactBatch {
     /// - a probe question that appears inside a fact the model will be
     ///   trained on (see this module's doc comment).
     ///
-    /// A panic rather than a `Result` for the same reason
-    /// `rl::improve::explore_anchor_split` panics: every one of these is
-    /// a defect in whatever produced the batch, and continuing produces a
-    /// flattering number, which is strictly worse than stopping.
-    pub fn new(triples: Vec<FactProbe>) -> FactBatch {
-        assert!(!triples.is_empty(), "promote::document::FactBatch::new: an empty fact batch has nothing to train and nothing to score");
+    /// Returns [`DocumentError`] rather than panicking, for the same reason
+    /// `rl::improve::explore_anchor_split` used to panic and no longer does:
+    /// every one of these is a defect in whatever produced the batch, and
+    /// continuing would produce a flattering number - but the process
+    /// checking a caller-supplied dataset must report that defect, not crash
+    /// over it.
+    pub fn new(triples: Vec<FactProbe>) -> Result<FactBatch, DocumentError> {
+        if triples.is_empty() {
+            return Err(DocumentError::EmptyBatch);
+        }
         for (i, t) in triples.iter().enumerate() {
             for (field, value) in [("fact", &t.fact), ("probe_question", &t.probe_question), ("expected_answer", &t.expected_answer)] {
-                assert!(!normalize(value).is_empty(), "promote::document::FactBatch::new: triple {i} has a blank `{field}`");
+                if normalize(value).is_empty() {
+                    return Err(DocumentError::BlankField { index: i, field });
+                }
             }
         }
 
         let mut seen_questions: HashSet<String> = HashSet::new();
         for (i, t) in triples.iter().enumerate() {
-            assert!(
-                seen_questions.insert(normalize(&t.probe_question)),
-                "promote::document::FactBatch::new: triple {i}'s probe question {:?} already appears in this batch - two probes sharing one identity make the probe set smaller than it reports",
-                t.probe_question
-            );
+            if !seen_questions.insert(normalize(&t.probe_question)) {
+                return Err(DocumentError::DuplicateProbeQuestion { index: i, probe_question: t.probe_question.clone() });
+            }
         }
 
         let mut facts: Vec<String> = Vec::new();
@@ -223,15 +310,13 @@ impl FactBatch {
         for (i, t) in triples.iter().enumerate() {
             let q = normalize(&t.probe_question);
             for f in &facts {
-                assert!(
-                    !normalize(f).contains(&q),
-                    "promote::document::FactBatch::new: triple {i}'s probe question {:?} appears inside the trained fact {f:?} - a probe whose own question is in the training span measures memorisation, not learning",
-                    t.probe_question
-                );
+                if normalize(f).contains(&q) {
+                    return Err(DocumentError::ProbeInTrainingSpan { index: i, probe_question: t.probe_question.clone(), fact: f.clone() });
+                }
             }
         }
 
-        FactBatch { triples, facts }
+        Ok(FactBatch { triples, facts })
     }
 
     /// Every frozen probe triple, in batch order.
@@ -368,26 +453,23 @@ impl<T: Tokenizer> Verifier for DocumentVerifier<'_, T> {
 ///    makes for an explore/anchor split. The content-derived id namespace
 ///    already makes a collision structurally impossible; this is the
 ///    belt-and-braces check that it actually held.
-pub fn train_probe_split<'a, T: Tokenizer>(batch: &'a FactBatch, tok: &'a T) -> (DocumentEnv<'a, T>, DocumentEnv<'a, T>) {
-    assert!(
-        batch.triples.len() >= MIN_HELD_OUT_PROBES,
-        "promote::document::train_probe_split: {} held-out probes is below the pre-registered floor of {MIN_HELD_OUT_PROBES} - below it the sign test has too few discordant pairs to reach p <= alpha at all",
-        batch.triples.len()
-    );
+pub fn train_probe_split<'a, T: Tokenizer>(batch: &'a FactBatch, tok: &'a T) -> Result<(DocumentEnv<'a, T>, DocumentEnv<'a, T>), DocumentError> {
+    if batch.triples.len() < MIN_HELD_OUT_PROBES {
+        return Err(DocumentError::TooFewHeldOutProbes { count: batch.triples.len(), floor: MIN_HELD_OUT_PROBES });
+    }
     let train = DocumentEnv::new(batch, FactSplit::Train, tok);
     let probe = DocumentEnv::new(batch, FactSplit::Probe, tok);
     let train_ids: HashSet<String> = batch.facts.iter().map(|f| task_id(f)).collect();
-    let overlap: Vec<&str> = batch
+    let overlap: Vec<String> = batch
         .triples
         .iter()
-        .map(|t| t.probe_question.as_str())
+        .map(|t| t.probe_question.clone())
         .filter(|q| train_ids.contains(&task_id(q)))
         .collect();
-    assert!(
-        overlap.is_empty(),
-        "promote::document::train_probe_split: probe question(s) {overlap:?} are also training rows - a held-out score is only honest if the policy never trained on the task it is scored against"
-    );
-    (train, probe)
+    if !overlap.is_empty() {
+        return Err(DocumentError::ProbeTrainOverlap { questions: overlap });
+    }
+    Ok((train, probe))
 }
 
 /// One fact's own promote/reject verdict for a cycle, independent of the
@@ -505,7 +587,7 @@ mod tests {
                 })
             })
             .collect();
-        FactBatch::new(triples)
+        FactBatch::new(triples).expect("a well-formed batch must construct")
     }
 
     fn tokenizer_over(batch: &FactBatch) -> CharTokenizer {
@@ -513,11 +595,22 @@ mod tests {
         CharTokenizer::from_corpus(&corpus)
     }
 
+    /// `Result::unwrap_err` requires the `Ok` side to be `Debug` (it formats
+    /// that value on the panic path), and neither `FactBatch` nor
+    /// `DocumentEnv` implements it - correctly so, neither is a debugging
+    /// aid. This does the same job without that bound.
+    fn expect_document_err<T>(r: Result<T, DocumentError>) -> DocumentError {
+        match r {
+            Ok(_) => panic!("expected Err, got Ok"),
+            Err(e) => e,
+        }
+    }
+
     #[test]
     fn the_probe_split_is_disjoint_from_the_training_split_by_task_id() {
         let batch = batch_of_twenty_facts();
         let tok = tokenizer_over(&batch);
-        let (train, probe) = train_probe_split(&batch, &tok);
+        let (train, probe) = train_probe_split(&batch, &tok).expect("a batch above the held-out floor with disjoint ids must split");
 
         let train_ids: HashSet<String> = (0..train.len() as u64).map(|s| train.tasks(s).remove(0).id).collect();
         let probe_ids: HashSet<String> = (0..probe.len() as u64).map(|s| probe.tasks(s).remove(0).id).collect();
@@ -530,9 +623,10 @@ mod tests {
 
     /// The disjointness above is a property of the CONTENT, not of how the
     /// two id prefixes were spelled: a batch whose probe question IS a
-    /// trained fact is refused at construction, so the assertion can fail.
+    /// trained fact is refused at construction with a NAMED error, not a
+    /// panic, so a caller across a process boundary can report the exact
+    /// defect instead of losing the process.
     #[test]
-    #[should_panic(expected = "appears inside the trained fact")]
     fn a_probe_question_that_sits_in_the_training_span_is_refused() {
         let mut triples: Vec<FactProbe> = (0..60)
             .map(|i| FactProbe {
@@ -542,14 +636,22 @@ mod tests {
             })
             .collect();
         triples[7].probe_question = triples[7].fact.clone();
-        let _ = FactBatch::new(triples);
+        let expected_fact = triples[7].fact.clone();
+        match expect_document_err(FactBatch::new(triples)) {
+            DocumentError::ProbeInTrainingSpan { index, probe_question, fact } => {
+                assert_eq!(index, 7, "must name the offending triple");
+                assert_eq!(probe_question, expected_fact);
+                assert_eq!(fact, expected_fact);
+            }
+            other => panic!("expected ProbeInTrainingSpan, got {other:?}"),
+        }
     }
 
     #[test]
     fn a_probe_verifies_by_programmatic_exact_match_against_its_expected_answer() {
         let batch = batch_of_twenty_facts();
         let tok = tokenizer_over(&batch);
-        let (_, probe) = train_probe_split(&batch, &tok);
+        let (_, probe) = train_probe_split(&batch, &tok).expect("a batch above the held-out floor with disjoint ids must split");
         let verifier = DocumentVerifier::new(&tok);
 
         let task = probe.tasks(0).remove(0);
@@ -576,7 +678,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "below the pre-registered floor of 48")]
     fn a_probe_set_below_the_held_out_floor_is_refused() {
         let triples: Vec<FactProbe> = (0..MIN_HELD_OUT_PROBES - 1)
             .map(|i| FactProbe {
@@ -585,9 +686,89 @@ mod tests {
                 expected_answer: format!("{} volts", 10 + i),
             })
             .collect();
-        let batch = FactBatch::new(triples);
+        let batch = FactBatch::new(triples).expect("a batch below the held-out floor still constructs - the floor is train_probe_split's rule");
         let tok = tokenizer_over(&batch);
-        let _ = train_probe_split(&batch, &tok);
+        match expect_document_err(train_probe_split(&batch, &tok)) {
+            DocumentError::TooFewHeldOutProbes { count, floor } => {
+                assert_eq!(count, MIN_HELD_OUT_PROBES - 1);
+                assert_eq!(floor, MIN_HELD_OUT_PROBES);
+            }
+            other => panic!("expected TooFewHeldOutProbes, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_empty_batch_is_refused() {
+        assert_eq!(expect_document_err(FactBatch::new(Vec::new())), DocumentError::EmptyBatch);
+    }
+
+    #[test]
+    fn a_blank_field_after_normalization_is_refused() {
+        let mut triples: Vec<FactProbe> = (0..MIN_HELD_OUT_PROBES)
+            .map(|i| FactProbe {
+                fact: format!("relay {i} closes at {} volts", 10 + i),
+                probe_question: format!("question about relay {i}"),
+                expected_answer: format!("{} volts", 10 + i),
+            })
+            .collect();
+        // Whitespace-only, not literally empty: only `normalize`d blankness
+        // is the rule, not a bare `String::is_empty()`.
+        triples[3].expected_answer = "   ".to_string();
+        assert_eq!(expect_document_err(FactBatch::new(triples)), DocumentError::BlankField { index: 3, field: "expected_answer" });
+    }
+
+    #[test]
+    fn two_triples_sharing_one_probe_question_are_refused() {
+        let mut triples: Vec<FactProbe> = (0..MIN_HELD_OUT_PROBES)
+            .map(|i| FactProbe {
+                fact: format!("relay {i} closes at {} volts", 10 + i),
+                probe_question: format!("question about relay {i}"),
+                expected_answer: format!("{} volts", 10 + i),
+            })
+            .collect();
+        // Differs only by case/spacing from triple 2's question: it is the
+        // NORMALIZED identity that must collide.
+        triples[9].probe_question = "  Question  About Relay 2  ".to_string();
+        match expect_document_err(FactBatch::new(triples)) {
+            DocumentError::DuplicateProbeQuestion { index, probe_question } => {
+                assert_eq!(index, 9, "must name the LATER triple, the one whose identity was already taken");
+                assert_eq!(probe_question, "  Question  About Relay 2  ");
+            }
+            other => panic!("expected DuplicateProbeQuestion, got {other:?}"),
+        }
+    }
+
+    /// [`train_probe_split`]'s probe/train task-id overlap check is
+    /// belt-and-braces: [`FactBatch::new`]'s own substring check already
+    /// makes this state unreachable through the public constructor (an exact
+    /// match is trivially a substring match). Constructed directly here,
+    /// bypassing `new`, to exercise that second, independent enforcement of
+    /// the same invariant on its own - exactly what its doc comment claims
+    /// it does.
+    #[test]
+    fn train_probe_split_refuses_a_probe_task_id_that_collides_with_a_training_one_even_bypassing_fact_batch_new() {
+        let mut triples: Vec<FactProbe> = (0..MIN_HELD_OUT_PROBES)
+            .map(|i| FactProbe {
+                fact: format!("relay {i} closes at {} volts", 10 + i),
+                probe_question: format!("question about relay {i}"),
+                expected_answer: format!("{} volts", 10 + i),
+            })
+            .collect();
+        let colliding = triples[0].fact.clone();
+        triples[5].probe_question = colliding.clone();
+        let facts: Vec<String> = triples.iter().map(|t| t.fact.clone()).collect();
+        // A private-field literal, reachable because `tests` is a child
+        // module of `document` - deliberately skips `FactBatch::new`'s own
+        // validation so `train_probe_split`'s independent check is what is
+        // under test, not the constructor's.
+        let batch = FactBatch { triples, facts };
+        let tok = tokenizer_over(&batch);
+        match expect_document_err(train_probe_split(&batch, &tok)) {
+            DocumentError::ProbeTrainOverlap { questions } => {
+                assert_eq!(questions, vec![colliding]);
+            }
+            other => panic!("expected ProbeTrainOverlap, got {other:?}"),
+        }
     }
 
     /// 250 paired probes, candidate wins 5 and loses none: significant
@@ -655,7 +836,8 @@ mod tests {
                 probe_question: "what is the third relay threshold".to_string(),
                 expected_answer: "13 volts".to_string(),
             },
-        ]);
+        ])
+        .expect("a well-formed batch must construct");
         assert_eq!(batch.facts().len(), 1, "two spellings of one fact are ONE trained row - that is what makes this a single verdict");
 
         let by_task: Vec<(String, f64)> =

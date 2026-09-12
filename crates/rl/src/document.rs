@@ -24,6 +24,7 @@
 use std::path::{Path, PathBuf};
 
 use model::Model;
+use thiserror::Error;
 
 use data::chat::{ChatMessage, ChatSample, ENDOFTEXT};
 use data::chat_template::ChatTemplate;
@@ -34,6 +35,41 @@ use data::tokenizer::Tokenizer;
 pub use promote::document::*;
 
 use crate::continual::{self, Curriculum, GatePolicy, Regime, SftConfig, SftSource, StudyConfig, StudyReport, StudySpec};
+
+/// Why [`DocumentCurriculum::new`] refused a study's inputs: its own three
+/// checks, plus each cycle's [`promote::document::DocumentError`] passed
+/// through unchanged and named to the cycle it came from.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum CurriculumError {
+    /// No cycles at all - a study needs at least one cycle's fact batch.
+    #[error("a study needs at least one cycle's fact batch")]
+    NoCycles,
+    /// The behavioural anchor suite is empty.
+    #[error(
+        "the anchor suite is empty - Regime::Sft mixes it into EVERY cycle's draw, and without it cycle 1's training distribution \
+         is one document alone, which is the cue-independent shortcut continual::rehearsal_pool exists to remove"
+    )]
+    NoAnchors,
+    /// `vocab` does not span [`data::chat::ENDOFTEXT`].
+    #[error(
+        "vocab {vocab} does not span data::chat::ENDOFTEXT ({endoftext}), the record separator every prepare_chat_samples dataset \
+         carries - a model trained on one would index past its own embedding table"
+    )]
+    VocabTooSmall {
+        /// The vocabulary size actually given.
+        vocab: usize,
+        /// [`data::chat::ENDOFTEXT`].
+        endoftext: u32,
+    },
+    /// Cycle `cycle`'s own batch failed [`train_probe_split`].
+    #[error("cycle {cycle}: {source}")]
+    Cycle {
+        /// Index into `cycles`.
+        cycle: usize,
+        #[source]
+        source: promote::document::DocumentError,
+    },
+}
 
 /// A document/fact [`Curriculum`]: one validated [`FactBatch`] per cycle over
 /// one tokenizer, plus the behavioural anchor suite every cycle rehearses
@@ -71,7 +107,7 @@ pub struct DocumentCurriculum<'a> {
 impl<'a> DocumentCurriculum<'a> {
     /// Validate the whole study up front and take the borrows.
     ///
-    /// Panics, naming what failed, on any of:
+    /// Returns [`CurriculumError`], naming what failed, on any of:
     ///
     /// - no cycles, or no anchor suite ([`crate::continual::run_study`] refuses
     ///   a zero-length rehearsal pool under `Regime::Sft` anyway; failing here
@@ -86,26 +122,34 @@ impl<'a> DocumentCurriculum<'a> {
     ///   by construction" a checked property of this curriculum rather than a
     ///   promise about how the batches were built.
     ///
+    /// A `Result` rather than a panic for the same reason
+    /// [`promote::document::FactBatch::new`] returns one: this runs against a
+    /// caller-supplied dataset, and the process checking it must report a
+    /// defect, not crash over it.
+    ///
     /// [`Curriculum::shape`] is DERIVED, over every row of every environment
     /// this curriculum can present: the longest presented text and the longest
     /// expected completion, in tokens. Deriving it is what makes it identical
     /// across cycles - the invariance the plasticity ratio depends on - instead
     /// of a number a caller has to keep true by hand.
-    pub fn new(cycles: &'a [FactBatch], anchors: &'a [FactBatch], tok: &'a QwenBpe, tmpl: &'a ChatTemplate, vocab: usize) -> DocumentCurriculum<'a> {
-        assert!(!cycles.is_empty(), "rl::document::DocumentCurriculum::new: a study needs at least one cycle's fact batch");
-        assert!(
-            !anchors.is_empty(),
-            "rl::document::DocumentCurriculum::new: the anchor suite is empty - Regime::Sft mixes it into EVERY cycle's draw, \
-             and without it cycle 1's training distribution is one document alone, which is the cue-independent shortcut \
-             continual::rehearsal_pool exists to remove"
-        );
-        assert!(
-            vocab > ENDOFTEXT as usize,
-            "rl::document::DocumentCurriculum::new: vocab {vocab} does not span data::chat::ENDOFTEXT ({ENDOFTEXT}), the record \
-             separator every prepare_chat_samples dataset carries - a model trained on one would index past its own embedding table"
-        );
-        for batch in cycles {
-            let _ = train_probe_split(batch, tok);
+    pub fn new(
+        cycles: &'a [FactBatch],
+        anchors: &'a [FactBatch],
+        tok: &'a QwenBpe,
+        tmpl: &'a ChatTemplate,
+        vocab: usize,
+    ) -> Result<DocumentCurriculum<'a>, CurriculumError> {
+        if cycles.is_empty() {
+            return Err(CurriculumError::NoCycles);
+        }
+        if anchors.is_empty() {
+            return Err(CurriculumError::NoAnchors);
+        }
+        if vocab <= ENDOFTEXT as usize {
+            return Err(CurriculumError::VocabTooSmall { vocab, endoftext: ENDOFTEXT });
+        }
+        for (cycle, batch) in cycles.iter().enumerate() {
+            train_probe_split(batch, tok).map_err(|source| CurriculumError::Cycle { cycle, source })?;
         }
 
         let mut prompt_len = 0usize;
@@ -123,7 +167,7 @@ impl<'a> DocumentCurriculum<'a> {
             }
         }
 
-        DocumentCurriculum { cycles, anchors, tok, tmpl, vocab, shape: (prompt_len, completion_len) }
+        Ok(DocumentCurriculum { cycles, anchors, tok, tmpl, vocab, shape: (prompt_len, completion_len) })
     }
 
     /// Cycle `k`'s batch, panicking with the study's own bounds rather than a

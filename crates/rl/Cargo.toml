@@ -36,6 +36,11 @@ brain-qwen3 = { workspace = true, optional = true }
 brain-bench.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# `document::CurriculumError` - named, `Display`-able variants for
+# `DocumentCurriculum::new`'s own checks plus the per-cycle
+# `promote::document::DocumentError` it wraps, matching `brain-promote`'s own
+# convention for a crate-local validation error enum.
+thiserror.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

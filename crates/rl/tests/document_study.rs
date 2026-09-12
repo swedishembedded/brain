@@ -80,7 +80,7 @@ fn cycle_batch(cycle: usize) -> FactBatch {
             })
         })
         .collect();
-    FactBatch::new(triples)
+    FactBatch::new(triples).expect("a well-formed batch must construct")
 }
 
 /// The anchor suite: behaviours the base already has and no document cycle
@@ -105,6 +105,7 @@ fn anchor_batch() -> FactBatch {
             expected_answer: "tool clock now".to_string(),
         },
     ])
+    .expect("a well-formed batch must construct")
 }
 
 /// A byte-level `QwenBpe` with no merges at all: every input byte is its own
@@ -181,7 +182,7 @@ fn no_probe_answer_appears_in_any_trained_span() {
     let anchors = vec![anchor_batch()];
     let tok = byte_tokenizer();
     let tmpl = line_template();
-    let curr = DocumentCurriculum::new(&cycles, &anchors, &tok, &tmpl, VOCAB as usize);
+    let curr = DocumentCurriculum::new(&cycles, &anchors, &tok, &tmpl, VOCAB as usize).expect("a well-formed curriculum must construct");
 
     let dir = tmp("sft-dataset");
     let sources = [SftSource::Cycle(0), SftSource::Cycle(1), SftSource::Rehearsal(0)];
@@ -290,7 +291,7 @@ fn a_document_curriculum_runs_a_full_study_and_emits_a_retention_matrix() {
     let anchors = vec![anchor_batch()];
     let tok = byte_tokenizer();
     let tmpl = line_template();
-    let curr = DocumentCurriculum::new(&cycles, &anchors, &tok, &tmpl, VOCAB as usize);
+    let curr = DocumentCurriculum::new(&cycles, &anchors, &tok, &tmpl, VOCAB as usize).expect("a well-formed curriculum must construct");
 
     let dir = tmp("study");
     let cfg = study_config();
