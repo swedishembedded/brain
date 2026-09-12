@@ -66,6 +66,86 @@ impl LinW {
     }
 }
 
+/// One linear's RUNTIME low-rank (LoRA) correction: `y = W·x + B·(A·x)`,
+/// evaluated beside the base matmul instead of being folded into `W`.
+///
+/// ## Why a runtime correction exists at all
+///
+/// Folding is the obvious deployment: rebuild `W' = W + s·B·A` once, quantize
+/// it, and the forward is unchanged. That is correct at fp32 and **silently
+/// destructive at int8**. An int8 weight has 256 levels; a trained adapter's
+/// delta is typically a fraction of ONE level, so requantizing `W + s·B·A`
+/// rounds the overwhelming majority of the adapted weights straight back to
+/// the base code - the correction is discarded - while the minority that do
+/// move deliver a badly distorted version of it. `flux2`'s
+/// `tests/lora_requant_int8.rs` measures both halves of that on fixtures:
+/// at a delta 0.5% of the weight magnitude, 94.8% of weights round back
+/// unchanged and the delivered delta's cosine to the intended one is 0.44.
+/// The residue is a token-CONSTANT bias in the matmul output, which is what
+/// turns into a visible periodic artifact once a VAE decoder's upsampling
+/// stages get hold of it.
+///
+/// Keeping the base weight exactly as the checkpoint quantized it and adding
+/// `s·B·(A·x)` in fp32 at runtime has no such failure mode: nothing is ever
+/// requantized, and the correction arrives in full. It costs one extra skinny
+/// GEMM (`n = r`) plus one accumulate pass over the output - rank is 8-32
+/// against hidden dims of 3072-12288, so a few percent of the linear's work.
+///
+/// ## Layout
+///
+/// `a` is `A [r, k]` row-major - already a GEMM weight in this engine's
+/// `out = x @ Wᵀ` convention, so `A·x` needs no new kernel. `bt` is `B [n, r]`
+/// stored **transposed** as `[r, n]`, with the adapter's `α/r` scale and the
+/// caller's strength already multiplied in, which is what makes the
+/// accumulate kernel's `B` read coalesced (see `lora_delta.wgsl`).
+///
+/// A STACK of adapters over the same linear is ONE `LoraW`, not several:
+/// `Σᵢ sᵢ·Bᵢ·Aᵢ = [s₁B₁ | s₂B₂ | …]·[A₁; A₂; …]`, so the pairs concatenate
+/// along the rank axis and the sum the fold documents falls out of a single
+/// rank-`Σrᵢ` correction.
+pub struct LoraW {
+    /// `A [r, k]`, row-major.
+    pub a: DeviceBuffer,
+    /// `B [n, r]` transposed to `[r, n]`, scale folded in.
+    pub bt: DeviceBuffer,
+    /// The (possibly concatenated) rank.
+    pub r: u32,
+}
+
+/// Record the two steps of one runtime LoRA correction over rows
+/// `xr0..xr0+m` of `x` `[.., k]`, accumulating into the `m·n` floats of `o` at
+/// float offset `ooff` - the same row/offset contract as [`mm_rows_off`], so a
+/// correction lands exactly where its base linear wrote.
+///
+/// `tscr` is a `[rows, r]` scratch the caller owns; rows `0..m` of it are
+/// overwritten and consumed by the second step, so ONE buffer serves every
+/// corrected linear in a forward (the steps of one correction are adjacent in
+/// the submitted list, like [`I8Scratch`]'s packed activation).
+///
+/// `tier` is the fp32 GEMM family for `A·x`; `lora_kernel` is the index the
+/// caller registered `kernels::LORA_DELTA` at.
+#[allow(clippy::too_many_arguments)]
+pub fn lora_rows_off(
+    g: &Gpu,
+    tier: GemmVariants,
+    lora_kernel: usize,
+    lo: &LoraW,
+    tscr: &DeviceBuffer,
+    x: &DeviceBuffer,
+    o: &DeviceBuffer,
+    xr0: u32,
+    ooff: u64,
+    m: u32,
+    k: u32,
+    n: u32,
+) -> [Step; 2] {
+    let proj = mm_rows_off(g, tier, x, &lo.a, tscr, xr0, 0, m, k, lo.r);
+    let oo = (ooff, m as u64 * n as u64);
+    let to = (0u64, m as u64 * lo.r as u64);
+    let add = g.step_sliced(lora_kernel, &[o, tscr, &lo.bt], &[oo, to, (0, 0)], &[m, n, lo.r], m * n);
+    [proj, add]
+}
+
 /// Int8 activation-quantization scratch: the per-token dynamic scale plus one
 /// packed-activation buffer per contraction width. ONE quant feeds every
 /// linear reading that activation. The widths are distinct within a model,

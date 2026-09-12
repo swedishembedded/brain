@@ -568,6 +568,8 @@ pub const LN_HEAD_DX: &str = include_str!("../wgsl/ln_head_dx.wgsl");
 pub const LN_STATS: &str = include_str!("../wgsl/ln_stats.wgsl");
 /// `wgsl/ln_stats_rows.wgsl`
 pub const LN_STATS_ROWS: &str = include_str!("../wgsl/ln_stats_rows.wgsl");
+/// `wgsl/lora_delta.wgsl`
+pub const LORA_DELTA: &str = include_str!("../wgsl/lora_delta.wgsl");
 /// `wgsl/lstm_gates.wgsl`
 pub const LSTM_GATES: &str = include_str!("../wgsl/lstm_gates.wgsl");
 /// `wgsl/lstm_gates_bwd.wgsl`
@@ -1253,6 +1255,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("ln_head_dx", LN_HEAD_DX),
     ("ln_stats", LN_STATS),
     ("ln_stats_rows", LN_STATS_ROWS),
+    ("lora_delta", LORA_DELTA),
     ("lstm_gates", LSTM_GATES),
     ("lstm_gates_bwd", LSTM_GATES_BWD),
     ("masked_l1", MASKED_L1),

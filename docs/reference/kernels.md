@@ -314,6 +314,7 @@ load of it must already be bare-identifier-indexed.
 | [`ln_head_dx`](../../crates/kernels/wgsl/ln_head_dx.wgsl) | Strided per-head LayerNorm backward (input grad), the ln_head companion | one thread per output element, 4 nested serial reductions | 1/5 | ✓ | ✓ | - | - | f32 |
 | [`ln_stats`](../../crates/kernels/wgsl/ln_stats.wgsl) | LayerNorm helper: per-row mean and inverse-std | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | - | - | f32 |
 | [`ln_stats_rows`](../../crates/kernels/wgsl/ln_stats_rows.wgsl) | LayerNorm per-row mean + inverse-std, one WORKGROUP per row | 64-thread workgroup tile, 1 barrier | 4/5 | ✓ | ✓ | - | - | f32 |
+| [`lora_delta`](../../crates/kernels/wgsl/lora_delta.wgsl) | Low-rank adapter epilogue: out += t @ bt, t [m,r] the already-computed A·x, bt [r,n] the transposed scaled B | one thread per output element, serial reduction over the rank axis | 2/5 | ✓ | ✓ | ✓ | - | f32 |
 | [`lstm_gates`](../../crates/kernels/wgsl/lstm_gates.wgsl) | Fused LSTM cell gate activation (PyTorch nn.LSTM layout) | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
 | [`lstm_gates_bwd`](../../crates/kernels/wgsl/lstm_gates_bwd.wgsl) | Backward of lstm_gates.wgsl | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
 | [`masked_l1`](../../crates/kernels/wgsl/masked_l1.wgsl) | Masked L1, per element:  out = /pred - tgt/ * mask | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |

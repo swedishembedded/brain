@@ -65,6 +65,9 @@ pub const KERNELS: &[(&str, &str)] = &[
     ("matmul_i8_dyn", kernels::MATMUL_I8_DYN),
     ("flash_attn_bidir_reg", kernels::FLASH_ATTN_BIDIR_REG),
     ("flash_attn_bidir_reg2", kernels::FLASH_ATTN_BIDIR_REG2),
+    // Runtime LoRA epilogue (`y += B·(A·x)`), dispatched only for a linear an
+    // adapter targets on a quantized build - see `LinA`.
+    ("lora_delta", kernels::LORA_DELTA),
 ];
 const K_LN: usize = 0;
 const K_MATMUL: usize = 1;
@@ -88,6 +91,7 @@ const K_MATMUL_I8: usize = 16;
 /// the device's queried caps.
 const K_FLASH_REG: usize = 17;
 const K_FLASH_REG2: usize = 18;
+const K_LORA: usize = 19;
 
 const EPS: f32 = 1e-6;
 
@@ -100,32 +104,58 @@ fn f(x: f32) -> u32 {
 // K-keyed activation scratch, DP4A dispatch) is shared with flux1 via
 // `model::dispatch` — this file keeps only the FLUX.2-specific graph.
 pub use model::dispatch::Precision;
-use model::dispatch::LinW as Lin;
+use model::dispatch::{LinW as Lin, LoraW};
+
+/// One linear as the forward actually evaluates it: the resident base weight,
+/// plus the runtime low-rank correction of any adapter that targets it.
+///
+/// `lo` is `None` for every linear in an unadapted build, and for an adapted
+/// one whose base is fp32 - there the adapter's delta was folded straight into
+/// the weight at build time, which is exact and costs nothing at runtime. It is
+/// `Some` exactly where folding would be lossy: a base the build is about to
+/// QUANTIZE. See [`model::dispatch::LoraW`] for what folding into an int8 grid
+/// actually does to a trained delta, and `crate::lora::runtime_adapters` for
+/// the build-level decision.
+struct LinA {
+    w: Lin,
+    lo: Option<LoraW>,
+}
+
+impl LinA {
+    /// A linear no adapter touches.
+    fn plain(w: Lin) -> LinA {
+        LinA { w, lo: None }
+    }
+
+    fn is_i8(&self) -> bool {
+        self.w.is_i8()
+    }
+}
 
 /// One attention/MLP weight set (a double block holds two: img and txt).
 struct StreamW {
-    wq: Lin,
-    wk: Lin,
-    wv: Lin,
+    wq: LinA,
+    wk: LinA,
+    wv: LinA,
     nq: DeviceBuffer,
     nk: DeviceBuffer,
-    wo: Lin,
-    w1: Lin,
-    w3: Lin,
-    w2: Lin,
+    wo: LinA,
+    w1: LinA,
+    w3: LinA,
+    w2: LinA,
 }
 
 struct SingleW {
-    wq: Lin,
-    wk: Lin,
-    wv: Lin,
+    wq: LinA,
+    wk: LinA,
+    wv: LinA,
     nq: DeviceBuffer,
     nk: DeviceBuffer,
-    w1: Lin,
-    w3: Lin,
+    w1: LinA,
+    w3: LinA,
     /// linear2 column-split: `out = wo_a @ attn_ctx + wo_b @ mlp_act`.
-    wo_a: Lin,
-    wo_b: Lin,
+    wo_a: LinA,
+    wo_b: LinA,
 }
 
 /// The six modulated-LN sites and five gates, in upload order. Each buffer is
@@ -165,6 +195,10 @@ struct Scratch {
     mlp: DeviceBuffer,
     scores: DeviceBuffer,
     probs: DeviceBuffer,
+    /// `[rows, r_max]` - one runtime LoRA correction's `A·x`, consumed by the
+    /// accumulate step recorded right after it. Zero-sized when nothing is
+    /// corrected at runtime, which is every unadapted build.
+    lt: DeviceBuffer,
     out: DeviceBuffer,
     cos: DeviceBuffer,
     sin: DeviceBuffer,
@@ -191,9 +225,9 @@ pub struct Flux2Model {
     i8scr: Option<I8Scratch>,
     dbl: Vec<(StreamW, StreamW)>,
     sgl: Vec<SingleW>,
-    img_in: Lin,
-    txt_in: Lin,
-    final_w: Lin,
+    img_in: LinA,
+    txt_in: LinA,
+    final_w: LinA,
     modb: ModBufs,
     scr: Scratch,
     // host-side conditioning weights
@@ -238,6 +272,36 @@ impl Flux2Model {
     /// int8 without ever building the fp32 model - bit-identical to the round
     /// trip, see `crate::weights`.
     pub fn new_from(cfg: &Flux2Config, src: &crate::weights::DitWeights, gpu: Gpu, n_max: u32, b_max: u32, precision: Precision) -> Flux2Model {
+        Flux2Model::new_adapted(cfg, src, gpu, n_max, b_max, precision, None)
+    }
+
+    /// [`Flux2Model::new_from`] with LoRA adapters applied as **runtime
+    /// corrections** instead of being folded into the weights beforehand.
+    ///
+    /// Every linear an adapter targets gets `y = W·x + B·(A·x)`: the base `W`
+    /// is whatever the checkpoint says, untouched (so a Q8_0 tensor still takes
+    /// the bit-exact direct route), and the low-rank correction runs beside it
+    /// in fp32. That is not an optimisation - folding first and quantizing
+    /// after is LOSSY in a way that discards most of a trained adapter, which
+    /// [`model::dispatch::LoraW`] documents with the measured numbers.
+    ///
+    /// A linear that will be uploaded at fp32 anyway (the double blocks'
+    /// `mlp.2`, the three boundary linears, anything held back by
+    /// `BRAIN_FLUX2_I8_KEEP_F32`, and every linear of an fp32 build) takes the
+    /// fold instead: it is exact there, and costs nothing per forward.
+    ///
+    /// Every rectangle the adapter set describes must be claimed by exactly one
+    /// linear of this build; one that is not is a panic naming it, never a
+    /// silently unadapted weight.
+    pub fn new_adapted(
+        cfg: &Flux2Config,
+        src: &crate::weights::DitWeights,
+        gpu: Gpu,
+        n_max: u32,
+        b_max: u32,
+        precision: Precision,
+        lora: Option<&model::lora::RuntimeLora>,
+    ) -> Flux2Model {
         assert!(b_max >= 1, "b_max must be >= 1");
         assert!(!cfg.guidance_embed, "guidance-embedded variants not supported");
         let d = cfg.hidden;
@@ -347,37 +411,80 @@ impl Flux2Model {
             write_ns.set(write_ns.get() + tw.elapsed().as_nanos());
             Lin::I8(pb, sb)
         };
-        // ONE rectangle of a stored tensor -> one `Lin`. `store` is the
+        // Whether a linear's base will be quantized. The fold-vs-correct
+        // decision hangs on exactly this: folding into an fp32 destination is
+        // exact, folding into one that is about to be requantized is not.
+        let quantized = |label: &str| precision == Precision::Int8 && !keeps.iter().any(|s| label.contains(s.as_str()));
+        // Any adapter delta over this exact rectangle, marked applied.
+        let claim = |key: &str, stride: usize, r0: usize, n_out: usize, c0: usize, k: usize| {
+            lora.and_then(|l| l.claim(key, stride, r0, n_out, c0, k))
+        };
+        // `A [r,k]` and `Bᵀ [r,n]` (scale already folded into B) resident.
+        let up_lora = |d: &model::lora::RuntimeDelta| -> LoraW {
+            LoraW { a: upv(&d.pair.a), bt: upv(&d.b_transposed()), r: d.pair.r as u32 }
+        };
+        // The `[n_out, k]` rectangle of a stored tensor, owned.
+        let rect_of = |store: &str, stride: usize, r0: usize, n_out: usize, c0: usize, k: usize| -> Vec<f32> {
+            src.with_f32(store, |w| {
+                let tsp = std::time::Instant::now();
+                let mut blk = vec![0f32; n_out * k];
+                backend_cpu::par::rows_mut(&mut blk, k, |i, dst| {
+                    let e0 = (r0 + i) * stride + c0;
+                    dst.copy_from_slice(&w[e0..e0 + k]);
+                });
+                split_ns.set(split_ns.get() + tsp.elapsed().as_nanos());
+                blk
+            })
+        };
+        // ONE rectangle of a stored tensor -> one `LinA`. `store` is the
         // checkpoint tensor, `label` what BRAIN_FLUX2_I8_KEEP_F32 matches.
-        // Tries the direct Q8_0 -> int8 route first; `try_i8_rect` declines
-        // (returning None) for anything it cannot serve exactly, and the fp32
-        // route below is then the same code the map path has always run.
-        let lin_rect = |store: &str, label: &str, stride: usize, r0: usize, n_out: usize, c0: usize, k: usize| -> Lin {
-            if precision == Precision::Int8 && !keeps.iter().any(|s| label.contains(s.as_str())) {
+        //
+        // Unadapted, this is unchanged: the direct Q8_0 -> int8 route first
+        // (`try_i8_rect` declines, returning None, for anything it cannot
+        // serve exactly), then the fp32 route the map path has always run.
+        // An ADAPTED rectangle splits on where its base is headed - fp32
+        // destinations fold the delta in (exact), quantized ones keep the
+        // checkpoint's own bytes and carry the delta as a runtime correction.
+        let lin_rect = |store: &str, label: &str, stride: usize, r0: usize, n_out: usize, c0: usize, k: usize| -> LinA {
+            let delta = claim(store, stride, r0, n_out, c0, k);
+            if let Some(d) = delta.filter(|_| !quantized(label)) {
+                let mut blk = rect_of(store, stride, r0, n_out, c0, k);
+                d.fold_into(&mut blk);
+                return LinA::plain(lin_n(label, &blk, n_out, k));
+            }
+            let lo = delta.map(&up_lora);
+            if quantized(label) {
                 let tq = std::time::Instant::now();
                 let direct = src.try_i8_rect(store, stride, r0, n_out, c0, k);
                 quant_ns.set(quant_ns.get() + tq.elapsed().as_nanos());
                 if let Some((packed, sw)) = direct {
-                    return up_i8(packed, sw);
+                    return LinA { w: up_i8(packed, sw), lo };
                 }
             }
-            src.with_f32(store, |w| {
-                if c0 == 0 && k == stride {
-                    lin_n(label, &w[r0 * stride..(r0 + n_out) * stride], n_out, k)
-                } else {
-                    let tsp = std::time::Instant::now();
-                    let mut blk = vec![0f32; n_out * k];
-                    backend_cpu::par::rows_mut(&mut blk, k, |i, dst| {
-                        let e0 = (r0 + i) * stride + c0;
-                        dst.copy_from_slice(&w[e0..e0 + k]);
-                    });
-                    split_ns.set(split_ns.get() + tsp.elapsed().as_nanos());
-                    lin_n(label, &blk, n_out, k)
-                }
-            })
+            let w = if c0 == 0 && k == stride {
+                // Row-contiguous: the rectangle is a slice of the lend, no copy.
+                src.with_f32(store, |w| lin_n(label, &w[r0 * stride..(r0 + n_out) * stride], n_out, k))
+            } else {
+                let blk = rect_of(store, stride, r0, n_out, c0, k);
+                lin_n(label, &blk, n_out, k)
+            };
+            LinA { w, lo }
         };
         // A whole stored tensor as one linear.
-        let lin = |name: &str, n_out: usize, k: usize| -> Lin { lin_rect(name, name, k, 0, n_out, 0, k) };
+        let lin = |name: &str, n_out: usize, k: usize| -> LinA { lin_rect(name, name, k, 0, n_out, 0, k) };
+        // A whole stored tensor as one linear kept at fp32 at EVERY tier, with
+        // any adapter delta folded straight in - exact, because nothing
+        // requantizes it afterwards.
+        let lin_f32 = |name: &str, n_out: usize, k: usize| -> LinA {
+            match claim(name, k, 0, n_out, 0, k) {
+                None => LinA::plain(Lin::F32(up(name))),
+                Some(d) => {
+                    let mut blk = src.with_f32(name, <[f32]>::to_vec);
+                    d.fold_into(&mut blk);
+                    LinA::plain(Lin::F32(upv(&blk)))
+                }
+            }
+        };
 
         let stream = |p: &str| -> StreamW {
             let qkv_n = format!("{p}_attn.qkv.weight");
@@ -400,7 +507,7 @@ impl Flux2Model {
                 // measured cosine 0.9965 (int8 w2) → 0.9989 (fp32 w2) on the
                 // parity fixture. The single-block hs consumer (wo_b) measured
                 // insensitive (+0.0002 for 3 GB) and stays int8.
-                w2: Lin::F32(up(&format!("{p}_mlp.2.weight"))),
+                w2: lin_f32(&format!("{p}_mlp.2.weight"), d, mlp),
             }
         };
         let dbl: Vec<(StreamW, StreamW)> = (0..cfg.depth_double)
@@ -431,6 +538,23 @@ impl Flux2Model {
                 }
             })
             .collect();
+
+        // The three boundary linears stay fp32 at every tier (~97 MB -
+        // negligible). Measured on the parity fixture (t2i, 1536 tokens):
+        // quantizing txt_in costs cosine 0.9946 → 0.9843 alone - its input
+        // is raw concatenated Qwen3 hidden states whose channel outliers
+        // (the ~6e3 magnitudes the masking experiment measured) crush a
+        // per-token int8 scale. img_in/final_layer are cheap insurance at
+        // the in/out boundaries (0.9946 → 0.9955 together).
+        let img_in_w = lin_f32("img_in.weight", d, cfg.in_channels);
+        let txt_in_w = lin_f32("txt_in.weight", d, cfg.context_in_dim);
+        let final_w_w = lin_f32("final_layer.linear.weight", cfg.in_channels, d);
+        // Every adapter rectangle must have been claimed by one of the linears
+        // above. One that was not would be a weight the user believes is
+        // adapted and is not - the same silent no-op `fold_placements` refuses.
+        if let Some(l) = lora {
+            l.assert_fully_applied();
+        }
 
         // Scratch spans the whole batch slab: b_max samples of n_max joint rows.
         let n = n_max as u64 * b_max as u64;
@@ -463,6 +587,12 @@ impl Flux2Model {
             mlp: a(n * du),
             scores: a(attn_mat),
             probs: a(attn_mat),
+            // One correction's `A·x` at a time; the accumulate step that
+            // consumes it is recorded immediately after, so the widest rank in
+            // the adapter set sizes it once for the whole forward. Unadapted
+            // builds allocate one float rather than a zero-sized buffer, which
+            // no backend has to accept.
+            lt: a(n * lora.map_or(0, model::lora::RuntimeLora::max_rank) as u64 + 1),
             out: a(n * cfg.in_channels as u64),
             cos: a(n * (hd as u64 / 2)),
             sin: a(n * (hd as u64 / 2)),
@@ -502,16 +632,9 @@ impl Flux2Model {
             i8scr,
             dbl,
             sgl,
-            // The three boundary linears stay fp32 at every tier (~97 MB —
-            // negligible). Measured on the parity fixture (t2i, 1536 tokens):
-            // quantizing txt_in costs cosine 0.9946 → 0.9843 alone — its input
-            // is raw concatenated Qwen3 hidden states whose channel outliers
-            // (the ~6e3 magnitudes the masking experiment measured) crush a
-            // per-token int8 scale. img_in/final_layer are cheap insurance at
-            // the in/out boundaries (0.9946 → 0.9955 together).
-            img_in: Lin::F32(up("img_in.weight")),
-            txt_in: Lin::F32(up("txt_in.weight")),
-            final_w: Lin::F32(up("final_layer.linear.weight")),
+            img_in: img_in_w,
+            txt_in: txt_in_w,
+            final_w: final_w_w,
             modb,
             scr,
             time_in_a: getv("time_in.in_layer.weight"),
@@ -681,30 +804,43 @@ impl Flux2Model {
         model::dispatch::mm8_rows_off(&self.gpu, tier, i8s, wq, sw, o, xr0, or0 as u64 * n as u64, m, k, n)
     }
 
-    /// One linear over rows `r0..r1` at the model's tier: fp32 [`Self::mm_rows`]
-    /// or the DP4A GEMM over the activation [`Self::quant_rows`] pre-packed.
+    /// The runtime LoRA correction of `w`, if it has one: `o += B·(A·x)` over
+    /// the same rows the base linear just wrote. Nothing at all for an
+    /// unadapted linear, so an unadapted build records exactly the dispatch
+    /// sequence it always did.
     #[allow(clippy::too_many_arguments)]
-    fn lin_rows(&self, x: &DeviceBuffer, w: &Lin, o: &DeviceBuffer, r0: u32, r1: u32, k: u32, n: u32) -> Step {
-        self.lin_rows_at(x, w, o, r0, r0, r1 - r0, k, n)
+    fn push_lora(&self, s: &mut Vec<Step>, x: &DeviceBuffer, w: &LinA, o: &DeviceBuffer, xr0: u32, ooff: u64, m: u32, k: u32, n: u32) {
+        let Some(lo) = w.lo.as_ref() else { return };
+        s.extend(model::dispatch::lora_rows_off(&self.gpu, self.gemm_tier(), K_LORA, lo, &self.scr.lt, x, o, xr0, ooff, m, k, n));
     }
 
-    /// [`Self::lin_rows`] with independent input/output row bases
+    /// One linear over rows `r0..r1` at the model's tier: fp32 [`Self::mm_rows_at`]
+    /// or the DP4A GEMM over the activation [`Self::quant_rows`] pre-packed,
+    /// then any runtime adapter correction.
+    #[allow(clippy::too_many_arguments)]
+    fn push_lin_rows(&self, s: &mut Vec<Step>, x: &DeviceBuffer, w: &LinA, o: &DeviceBuffer, r0: u32, r1: u32, k: u32, n: u32) {
+        self.push_lin_rows_at(s, x, w, o, r0, r0, r1 - r0, k, n);
+    }
+
+    /// [`Self::push_lin_rows`] with independent input/output row bases
     /// ([`Self::mm_rows_at`]).
     #[allow(clippy::too_many_arguments)]
-    fn lin_rows_at(&self, x: &DeviceBuffer, w: &Lin, o: &DeviceBuffer, xr0: u32, or0: u32, m: u32, k: u32, n: u32) -> Step {
-        match w {
+    fn push_lin_rows_at(&self, s: &mut Vec<Step>, x: &DeviceBuffer, w: &LinA, o: &DeviceBuffer, xr0: u32, or0: u32, m: u32, k: u32, n: u32) {
+        s.push(match &w.w {
             Lin::F32(wb) => self.mm_rows_at(x, wb, o, xr0, or0, m, k, n),
             Lin::I8(wq, sw) => self.mm8(wq, sw, o, xr0, or0, m, k, n),
-        }
+        });
+        self.push_lora(s, x, w, o, xr0, or0 as u64 * n as u64, m, k, n);
     }
 
     /// Whole-slab linear (`m` rows from row 0) at the model's tier — the fp32
     /// arm is the plain unsliced [`Self::mm`] (byte-identical to before).
-    fn lin_full(&self, x: &DeviceBuffer, w: &Lin, o: &DeviceBuffer, m: u32, k: u32, n: u32) -> Step {
-        match w {
+    fn push_lin_full(&self, s: &mut Vec<Step>, x: &DeviceBuffer, w: &LinA, o: &DeviceBuffer, m: u32, k: u32, n: u32) {
+        s.push(match &w.w {
             Lin::F32(wb) => self.mm(x, wb, o, m, k, n),
             Lin::I8(wq, sw) => self.mm8(wq, sw, o, 0, 0, m, k, n),
-        }
+        });
+        self.push_lora(s, x, w, o, 0, 0, m, k, n);
     }
 
     /// Modulated LayerNorm over rows `r0..r1` under sample `b`'s modulation:
@@ -964,8 +1100,8 @@ impl Flux2Model {
         for b in 0..bsz {
             let base = b * n;
             let ctx_r0 = b * nt; // ctx_in is [B*txt_len, context_in_dim]
-            s.push(self.lin_rows_at(&scr.ctx_in, &self.txt_in, &scr.x0, ctx_r0, base, nt, cfg.context_in_dim as u32, d));
-            s.push(self.lin_rows_at(&scr.tok_in, &self.img_in, &scr.x0, b * ni, base + nt, ni, cin, d));
+            self.push_lin_rows_at(&mut s, &scr.ctx_in, &self.txt_in, &scr.x0, ctx_r0, base, nt, cfg.context_in_dim as u32, d);
+            self.push_lin_rows_at(&mut s, &scr.tok_in, &self.img_in, &scr.x0, b * ni, base + nt, ni, cin, d);
         }
 
         let (mut xa, mut xb) = (&scr.x0, &scr.x1);
@@ -979,16 +1115,16 @@ impl Flux2Model {
                 if txt_w.wq.is_i8() {
                     self.quant_rows(&mut s, &scr.n1, t0, t1, d);
                 }
-                s.push(self.lin_rows(&scr.n1, &txt_w.wq, &scr.q, t0, t1, d, d));
-                s.push(self.lin_rows(&scr.n1, &txt_w.wk, &scr.k, t0, t1, d, d));
-                s.push(self.lin_rows(&scr.n1, &txt_w.wv, &scr.v, t0, t1, d, d));
+                self.push_lin_rows(&mut s, &scr.n1, &txt_w.wq, &scr.q, t0, t1, d, d);
+                self.push_lin_rows(&mut s, &scr.n1, &txt_w.wk, &scr.k, t0, t1, d, d);
+                self.push_lin_rows(&mut s, &scr.n1, &txt_w.wv, &scr.v, t0, t1, d, d);
                 s.push(self.ln_rows(xa, 0, &scr.n1, b, i0, i1)); // img norm1
                 if img_w.wq.is_i8() {
                     self.quant_rows(&mut s, &scr.n1, i0, i1, d);
                 }
-                s.push(self.lin_rows(&scr.n1, &img_w.wq, &scr.q, i0, i1, d, d));
-                s.push(self.lin_rows(&scr.n1, &img_w.wk, &scr.k, i0, i1, d, d));
-                s.push(self.lin_rows(&scr.n1, &img_w.wv, &scr.v, i0, i1, d, d));
+                self.push_lin_rows(&mut s, &scr.n1, &img_w.wq, &scr.q, i0, i1, d, d);
+                self.push_lin_rows(&mut s, &scr.n1, &img_w.wk, &scr.k, i0, i1, d, d);
+                self.push_lin_rows(&mut s, &scr.n1, &img_w.wv, &scr.v, i0, i1, d, d);
                 s.push(self.qknorm_rows(&scr.q, &txt_w.nq, &scr.qn, t0, t1));
                 s.push(self.qknorm_rows(&scr.k, &txt_w.nk, &scr.kn, t0, t1));
                 s.push(self.qknorm_rows(&scr.q, &img_w.nq, &scr.qn, i0, i1));
@@ -1002,8 +1138,8 @@ impl Flux2Model {
             for b in 0..bsz {
                 let (t0, t1) = (b * n, b * n + nt);
                 let (i0, i1) = (b * n + nt, (b + 1) * n);
-                s.push(self.lin_rows(&scr.ctx, &txt_w.wo, &scr.proj, t0, t1, d, d));
-                s.push(self.lin_rows(&scr.ctx, &img_w.wo, &scr.proj, i0, i1, d, d));
+                self.push_lin_rows(&mut s, &scr.ctx, &txt_w.wo, &scr.proj, t0, t1, d, d);
+                self.push_lin_rows(&mut s, &scr.ctx, &img_w.wo, &scr.proj, i0, i1, d, d);
                 s.push(self.gate_rows(xa, 2, &scr.proj, xb, b, t0, t1));
                 s.push(self.gate_rows(xa, 0, &scr.proj, xb, b, i0, i1));
             }
@@ -1016,14 +1152,14 @@ impl Flux2Model {
                 if txt_w.w1.is_i8() {
                     self.quant_rows(&mut s, &scr.n1, t0, t1, d);
                 }
-                s.push(self.lin_rows(&scr.n1, &txt_w.w1, &scr.h1, t0, t1, d, mlp));
-                s.push(self.lin_rows(&scr.n1, &txt_w.w3, &scr.h2, t0, t1, d, mlp));
+                self.push_lin_rows(&mut s, &scr.n1, &txt_w.w1, &scr.h1, t0, t1, d, mlp);
+                self.push_lin_rows(&mut s, &scr.n1, &txt_w.w3, &scr.h2, t0, t1, d, mlp);
                 s.push(self.ln_rows(xa, 1, &scr.n1, b, i0, i1)); // img norm2
                 if img_w.w1.is_i8() {
                     self.quant_rows(&mut s, &scr.n1, i0, i1, d);
                 }
-                s.push(self.lin_rows(&scr.n1, &img_w.w1, &scr.h1, i0, i1, d, mlp));
-                s.push(self.lin_rows(&scr.n1, &img_w.w3, &scr.h2, i0, i1, d, mlp));
+                self.push_lin_rows(&mut s, &scr.n1, &img_w.w1, &scr.h1, i0, i1, d, mlp);
+                self.push_lin_rows(&mut s, &scr.n1, &img_w.w3, &scr.h2, i0, i1, d, mlp);
             }
             s.push(self.gpu.step(K_SILU_MUL, &[&scr.h1, &scr.h2, &scr.hs], &[rows * mlp], rows * mlp));
             if txt_w.w2.is_i8() || img_w.w2.is_i8() {
@@ -1032,8 +1168,8 @@ impl Flux2Model {
             for b in 0..bsz {
                 let (t0, t1) = (b * n, b * n + nt);
                 let (i0, i1) = (b * n + nt, (b + 1) * n);
-                s.push(self.lin_rows(&scr.hs, &txt_w.w2, &scr.mlp, t0, t1, mlp, d));
-                s.push(self.lin_rows(&scr.hs, &img_w.w2, &scr.mlp, i0, i1, mlp, d));
+                self.push_lin_rows(&mut s, &scr.hs, &txt_w.w2, &scr.mlp, t0, t1, mlp, d);
+                self.push_lin_rows(&mut s, &scr.hs, &img_w.w2, &scr.mlp, i0, i1, mlp, d);
                 s.push(self.gate_rows(xa, 3, &scr.mlp, xb, b, t0, t1));
                 s.push(self.gate_rows(xa, 1, &scr.mlp, xb, b, i0, i1));
             }
@@ -1052,25 +1188,25 @@ impl Flux2Model {
             if w.wq.is_i8() || w.w1.is_i8() {
                 self.quant_rows(&mut s, &scr.n1, 0, rows, d);
             }
-            s.push(self.lin_full(&scr.n1, &w.wq, &scr.q, rows, d, d));
-            s.push(self.lin_full(&scr.n1, &w.wk, &scr.k, rows, d, d));
-            s.push(self.lin_full(&scr.n1, &w.wv, &scr.v, rows, d, d));
+            self.push_lin_full(&mut s, &scr.n1, &w.wq, &scr.q, rows, d, d);
+            self.push_lin_full(&mut s, &scr.n1, &w.wk, &scr.k, rows, d, d);
+            self.push_lin_full(&mut s, &scr.n1, &w.wv, &scr.v, rows, d, d);
             s.push(self.qknorm_rows(&scr.q, &w.nq, &scr.qn, 0, rows));
             s.push(self.qknorm_rows(&scr.k, &w.nk, &scr.kn, 0, rows));
             self.push_attn_core(&mut s, bsz, n);
-            s.push(self.lin_full(&scr.n1, &w.w1, &scr.h1, rows, d, mlp));
-            s.push(self.lin_full(&scr.n1, &w.w3, &scr.h2, rows, d, mlp));
+            self.push_lin_full(&mut s, &scr.n1, &w.w1, &scr.h1, rows, d, mlp);
+            self.push_lin_full(&mut s, &scr.n1, &w.w3, &scr.h2, rows, d, mlp);
             s.push(self.gpu.step(K_SILU_MUL, &[&scr.h1, &scr.h2, &scr.hs], &[rows * mlp], rows * mlp));
             // linear2 over cat(attn, mlp): two column-split matmuls, summed.
             // ctx is quantized only now — after w1/w3 consumed the n1 packing.
             if w.wo_a.is_i8() {
                 self.quant_rows(&mut s, &scr.ctx, 0, rows, d);
             }
-            s.push(self.lin_full(&scr.ctx, &w.wo_a, &scr.proj, rows, d, d));
+            self.push_lin_full(&mut s, &scr.ctx, &w.wo_a, &scr.proj, rows, d, d);
             if w.wo_b.is_i8() {
                 self.quant_rows(&mut s, &scr.hs, 0, rows, mlp);
             }
-            s.push(self.lin_full(&scr.hs, &w.wo_b, &scr.mlp, rows, mlp, d));
+            self.push_lin_full(&mut s, &scr.hs, &w.wo_b, &scr.mlp, rows, mlp, d);
             // y = x + gate ⊙ proj ; then y += gate ⊙ mlp (two gated adds), each
             // one dispatch over the batch via `rows_per_cond = n` groups.
             s.push(self.gate_grouped(xa, 4, &scr.proj, xb, rows, n));
@@ -1084,10 +1220,10 @@ impl Flux2Model {
             let p0 = b * n + nt;
             let p1 = p0 + n_pred as u32;
             s.push(self.ln_rows(xa, 5, &scr.n1, b, p0, p1));
-            if matches!(self.final_w, Lin::I8(..)) {
+            if self.final_w.is_i8() {
                 self.quant_rows(&mut s, &scr.n1, p0, p1, d);
             }
-            s.push(self.lin_rows_at(&scr.n1, &self.final_w, &scr.out, p0, b * n_pred as u32, n_pred as u32, d, cin));
+            self.push_lin_rows_at(&mut s, &scr.n1, &self.final_w, &scr.out, p0, b * n_pred as u32, n_pred as u32, d, cin);
         }
 
         // debug aid: SMOKE_STEPS=k submits only the first k steps

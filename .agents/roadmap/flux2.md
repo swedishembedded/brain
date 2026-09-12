@@ -310,6 +310,64 @@ touches 112 of 201 tensors and 96% of the parameters, which is why "fold only
 what the adapter touches" is not by itself a saving - handling them ONE AT A
 TIME is. `BRAIN_FLUX2_NO_STREAM=1` forces the map route for A/B.
 
+## A LoRA is never folded into an int8 weight grid (2026-09-12)
+
+An adapted int8 build used to rebuild `W' = W + s·B·A` and quantize THAT.
+`tests/lora_requant_int8.rs` measures what the requantization does to a
+trained delta: at a delta 0.5% of the weight magnitude, **94.8% of the
+adapted weights round straight back to their base code** and the surviving
+remainder has cosine **0.44** to the delta that was intended. An int8 weight
+has 256 levels and a trained delta is a fraction of one, so most of an adapter
+simply did not reach the device.
+
+It now does. Every linear an adapter targets keeps the checkpoint's own
+quantization, bit for bit, and the correction is evaluated beside the base
+matmul in fp32: `y = W·x + s·B·(A·x)`. `crate::lora::runtime_adapters` reads
+the adapters as `model::lora::RuntimeDelta`s over the same rectangles
+`LoraAdapter::placements` describes, `Flux2Model::new_adapted` uploads each
+one's `A [r,k]` and scaled `Bᵀ [r,n]`, and the forward records two extra steps
+per adapted linear - a skinny GEMM for `A·x` and `kernels::lora_delta`, which
+accumulates `B·(A·x)` into the output the base matmul just wrote. A stack over
+one linear is ONE correction: the pairs concatenate on the rank axis, so the
+deltas sum exactly. A linear headed for an **fp32** upload still folds - that
+is exact, and free per forward - which covers the double blocks' `mlp.2`, the
+three boundary linears, and anything held back by `BRAIN_FLUX2_I8_KEEP_F32`.
+
+Gated exactly, one linear at a time, in `crates/model/tests/lora_runtime_delta.rs`
+(the activation quantization is held identical across the two deployments, so
+the comparison is noise-free): the delta delivered at runtime is **rel_l2
+5.1e-6** against an f64 oracle; the same delta folded is **rel_l2 7.4e-1**.
+`crates/flux2/tests/lora_runtime_int8.rs` gates the wiring end to end and that
+the runtime description matches the fold's rectangles bit for bit.
+
+**Route consequence**: brain's own `.brain` container now takes the streamed
+Q8_0 path too. It never could before, because folding it needed the whole map,
+so a `.brain` adapter on a GGUF checkpoint dequantized the entire DiT to fp32
+(36.3 GB on klein-9b), folded, and requantized. With nothing to fold, the
+checkpoint's tensors are not touched at all and every base weight - adapted or
+not - takes the bit-exact `try_i8_rect` route. Measured on klein-9b with a
+280-linear rank-16 adapter at 672x448: the build loads the 9.3 GiB GGUF
+directly, and denoise costs **21.9 s against 19.9 s folded** (+10%) for the
+two extra dispatches per adapted linear. Adapter factors add ~210 MB resident.
+
+`BRAIN_FLUX2_LORA_FOLD=1` puts a build back on the fold route. Unlike
+`BRAIN_FLUX2_NO_STREAM` it is NOT two ways to the same bytes - it reproduces
+the lossy deployment, for A/B on a real checkpoint.
+
+**Negative result, and it matters**: this does NOT remove the ~4-pixel
+axis-aligned grid texture a `declutter-v2.brain` generation shows. Measured on
+one image (672x448, seed 1234, same prompt and reference), radially averaged
+power at 0.25 cycles/px over its neighbours: no adapter **1.11**, adapter
+folded **3.75**, adapter at runtime **3.77**, and it scales with the adapter's
+own strength (0.25 → **1.31**, 0.5 → **2.77**, 1.0 → **3.77**) and is present
+at the 512x512 training size too (**3.18**). The source photographs and the
+`-flux9b` training targets carry none of it (0.92-1.11, at native size and
+resampled to 512 alike), so the adapter did not copy it out of its data. The
+period is below the VAE's own latent cell, so it cannot be carried in the
+latent at all - the decoder's upsampling stages generate it, and the adapter
+drives them there. Requantization was a real defect and is fixed; it was not
+the cause of that texture, and the remaining work is on the training side.
+
 ## Corrections to earlier entries in this file
 
 - "**a second query row per thread in the flash-attention kernel**" is

@@ -52,7 +52,7 @@ use model::adapter::{AdapterKind, AdapterSet, KeyStyle, LinearSite, TargetHp, Ta
 // keeps only the FLUX.2-specific block walk, fused-tensor offsets and
 // serialization naming. `LoraCfg` is re-exported for existing callers.
 pub use model::lora::{ExternalFold, LoraCfg};
-use model::lora::{fold_placements, LoraGrads, LoraPair, Pair, Placement};
+use model::lora::{fold_placements, LoraGrads, LoraPair, Pair, Placement, RuntimeDelta, RuntimeLora};
 
 /// How FLUX.2 names itself in a wrong-base-model adapter error. One spelling,
 /// because that message is the one a user reads when an adapter trained for
@@ -410,6 +410,18 @@ impl LoraAdapter {
         fold_placements(ts, self.scale() * strength, &self.placements())
     }
 
+    /// Every pair as a [`RuntimeDelta`] over the fused inference layout - the
+    /// same rectangles [`Self::placements`] describes, at the same
+    /// `α/r · strength` scale, but carried as the factors so an int8 build can
+    /// evaluate `y = W·x + B·(A·x)` instead of requantizing a folded weight.
+    ///
+    /// One walk feeds both dispositions, so a folded adapter and a
+    /// runtime-corrected one target exactly the same linears by construction.
+    pub fn runtime_deltas_at(&self, strength: f32) -> Vec<RuntimeDelta> {
+        let s = self.scale() * strength;
+        self.placements().iter().map(|p| RuntimeDelta::from_placement(p, s)).collect()
+    }
+
     /// Where every pair's delta lands in the BFL-named fused layout - the
     /// FLUX.2-specific half of a fold, and the only half this crate owns
     /// ([`model::lora::fold_placements`] owns the validation contract and the
@@ -513,6 +525,77 @@ pub fn fold_adapters(
         ad.fold_into_tensors_at(ts, strength)?;
         Ok((ad.pairs().len(), ad.rank()))
     })
+}
+
+/// Read EVERY adapter in `adapters` as **runtime corrections** rather than
+/// folding them - the int8 counterpart of [`fold_adapters`], and the seam
+/// `Pipeline::build_dit` takes whenever the DiT will be quantized.
+///
+/// ## Why an int8 build must not fold
+///
+/// Folding rebuilds `W' = W + s·B·A` and then quantizes it. An int8 weight has
+/// 256 levels and a trained adapter's delta is typically a fraction of one, so
+/// requantizing rounds the overwhelming majority of adapted weights straight
+/// back to their base code: the correction is discarded for most of the model,
+/// and arrives distorted for the rest (`tests/lora_requant_int8.rs` measures
+/// 94.8% unchanged and cosine 0.44 on the delivered remainder at a delta 0.5%
+/// of the weight magnitude). The surviving residue is a token-constant bias in
+/// every adapted matmul, which is what a VAE decoder's upsampling stages turn
+/// into visible periodic texture. Keeping the checkpoint's own quantization
+/// and adding `s·B·(A·x)` in fp32 at runtime has no such loss.
+///
+/// ## What this returns
+///
+/// `Ok(None)` means the stack cannot be expressed this way and the caller
+/// should fold as before. Exactly one family does that: **LoKr**, whose delta
+/// is a Kronecker product and full rank in general, so there is no low-rank
+/// product to evaluate at runtime. Mixing is not split down the middle - one
+/// LoKr target anywhere sends the whole stack down the fold route, the same
+/// all-or-nothing rule `build_dit` already uses for the streamed path, because
+/// a half-runtime half-folded stack is a third behaviour nothing tests.
+///
+/// Ordering does not matter here the way it does for a fold: deltas over one
+/// linear are concatenated on the rank axis and therefore SUM exactly, which
+/// is the semantics [`fold_adapters`] documents reached without float
+/// reassociation. An empty list returns `Ok(None)` - there is nothing to
+/// correct, and the caller's unadapted path is byte-for-byte what it was.
+pub fn runtime_adapters(
+    cfg: &crate::Flux2Config,
+    adapters: &[crate::AdapterSpec],
+) -> Result<Option<(RuntimeLora, Vec<model::lora::FoldReport>)>, String> {
+    if adapters.is_empty() {
+        return Ok(None);
+    }
+    let tcfg = crate::modelgrad::Cfg::from_flux2(cfg, 1, 1);
+    let mut deltas = Vec::new();
+    let mut reports = Vec::new();
+    for spec in adapters {
+        let (path, strength) = (spec.path.as_str(), spec.scale);
+        if path.ends_with(".safetensors") {
+            let pairs = model::lora::read_external_adapter(path)?;
+            let mut file = Vec::with_capacity(pairs.len());
+            for p in &pairs {
+                match p.runtime_delta(strength) {
+                    Some(d) => file.push(d),
+                    // A family with no low-rank form - fold the whole stack.
+                    None => return Ok(None),
+                }
+            }
+            reports.push(model::lora::FoldReport {
+                path: path.to_string(),
+                family: "lora",
+                pairs: pairs.len(),
+                rank: pairs.iter().map(|p| p.r).max().unwrap_or(0),
+                strength,
+            });
+            deltas.extend(file);
+        } else {
+            let ad = load_adapter(path, &tcfg)?;
+            reports.push(model::lora::FoldReport { path: path.to_string(), family: "brain", pairs: ad.pairs().len(), rank: ad.rank(), strength });
+            deltas.extend(ad.runtime_deltas_at(strength));
+        }
+    }
+    Ok(Some((RuntimeLora::new(deltas), reports)))
 }
 
 /// One in-flight optimisation step, opened by [`LoraAdapter::stepper`]: it

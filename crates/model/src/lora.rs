@@ -317,6 +317,27 @@ impl ExternalPair {
         }
     }
 
+    /// This pair as a [`RuntimeDelta`] over the whole `[out, in]` tensor, or
+    /// `None` for a family that HAS no low-rank form.
+    ///
+    /// LoKr is that family: its delta is a Kronecker product, full rank in
+    /// general, so there is no `B·(A·x)` to evaluate beside the base matmul -
+    /// it can only be folded. Saying so by returning `None` (rather than
+    /// approximating it) keeps the caller's choice explicit: a stack
+    /// containing a LoKr folds, as it always did.
+    pub fn runtime_delta(&self, strength: f32) -> Option<RuntimeDelta> {
+        let ExternalDelta::Lora { r, a, b } = &self.delta else { return None };
+        let s = strength * self.alpha_mult;
+        Some(RuntimeDelta {
+            key: self.base_key.clone(),
+            row0: 0,
+            row_stride: self.inn,
+            col0: 0,
+            elems: self.out * self.inn,
+            pair: Pair::from_ab(self.out, self.inn, *r, a.clone(), b.iter().map(|v| v * s).collect()),
+        })
+    }
+
     /// Add `scale · alpha_mult · ΔW` into `w`, the base tensor's row-major
     /// `[out, in]` data.
     pub fn add_delta(&self, scale: f32, w: &mut [f32]) {
@@ -633,6 +654,199 @@ impl<'a> Placement<'a> {
     /// `row_stride`, starting at `(row0, col0)`.
     pub fn fused(key: impl Into<String>, pair: &'a Pair, elems: usize, row0: usize, row_stride: usize, col0: usize) -> Placement<'a> {
         Placement { key: key.into(), pair, elems, row0, row_stride, col0 }
+    }
+}
+
+/// The RUNTIME counterpart of a [`Placement`]: the same rectangle of the same
+/// base tensor, but carried as the low-rank factors themselves so a forward can
+/// evaluate `y = W·x + B·(A·x)` instead of the weight being rebuilt as
+/// `W + s·B·A`.
+///
+/// The two are interchangeable at fp32 and emphatically NOT at int8, which is
+/// the whole reason this type exists - see [`crate::dispatch::LoraW`] for the
+/// measured failure mode of folding into a quantized weight grid. A build
+/// therefore picks per linear: fold where the destination is fp32 (exact, and
+/// free at runtime), correct at runtime where the destination is quantized.
+///
+/// `pair.b` carries the adapter's `α/r` scale and the caller's strength
+/// ALREADY multiplied in, so both consumers - [`Self::fold_into`] and a device
+/// upload - use it as-is and cannot disagree about the scale.
+pub struct RuntimeDelta {
+    /// The base tensor this corrects.
+    pub key: String,
+    /// First row of the rectangle within the base tensor.
+    pub row0: usize,
+    /// The base tensor's row length (`pair.inn` for an unfused linear).
+    pub row_stride: usize,
+    /// First column of the rectangle within a row.
+    pub col0: usize,
+    /// How many values the base tensor holds IN TOTAL - the same
+    /// wrong-variant check [`Placement::elems`] is there for.
+    pub elems: usize,
+    /// `A [r, inn]` / `B [out, r]`, scale folded into `B`.
+    pub pair: Pair,
+}
+
+impl RuntimeDelta {
+    /// The runtime form of one placement at `scale` (the adapter's `α/r`
+    /// times the caller's strength).
+    pub fn from_placement(p: &Placement<'_>, scale: f32) -> RuntimeDelta {
+        RuntimeDelta {
+            key: p.key.clone(),
+            row0: p.row0,
+            row_stride: p.row_stride,
+            col0: p.col0,
+            elems: p.elems,
+            pair: Pair::from_ab(p.pair.out, p.pair.inn, p.pair.r, p.pair.a.clone(), p.pair.b.iter().map(|v| v * scale).collect()),
+        }
+    }
+
+    /// Does this delta correct exactly the rectangle a build is about to
+    /// upload? Every field must agree: a partial match is a different linear,
+    /// and applying a delta to the wrong rows is worse than not applying it.
+    pub fn covers(&self, key: &str, row_stride: usize, row0: usize, out: usize, col0: usize, inn: usize) -> bool {
+        self.key == key && self.row_stride == row_stride && self.row0 == row0 && self.col0 == col0 && self.pair.out == out && self.pair.inn == inn
+    }
+
+    /// Absorb a second adapter's delta over the SAME rectangle by
+    /// concatenating on the rank axis: `s₁B₁A₁ + s₂B₂A₂ = [s₁B₁ | s₂B₂] ·
+    /// [A₁; A₂]`. That is the documented stacking semantics (deltas over one
+    /// linear SUM) reached with one rank-`r₁+r₂` correction rather than two
+    /// passes over the output.
+    pub fn absorb(&mut self, other: &Pair) {
+        assert_eq!((self.pair.out, self.pair.inn), (other.out, other.inn), "RuntimeDelta::absorb: shapes differ");
+        let (r1, r2) = (self.pair.r, other.r);
+        let mut b = Vec::with_capacity(self.pair.out * (r1 + r2));
+        for o in 0..self.pair.out {
+            b.extend_from_slice(&self.pair.b[o * r1..(o + 1) * r1]);
+            b.extend_from_slice(&other.b[o * r2..(o + 1) * r2]);
+        }
+        let mut a = std::mem::take(&mut self.pair.a);
+        a.extend_from_slice(&other.a);
+        self.pair = Pair::from_ab(self.pair.out, self.pair.inn, r1 + r2, a, b);
+    }
+
+    /// Fold this delta into the base weight after all - what a build does for
+    /// a linear it is going to upload at **fp32**, where folding is exact and a
+    /// runtime correction would only cost dispatches.
+    ///
+    /// `w` is the `[out, inn]` rectangle ALREADY EXTRACTED from the fused
+    /// tensor (the shape a build hands to its uploader), not the fused tensor
+    /// itself - the rectangle's own offsets are therefore zero here, and
+    /// [`Self::row0`]/[`Self::col0`] describe where a caller found it, not how
+    /// to index what it passes. The ONE `B·A` implementation
+    /// ([`Pair::delta_strided`], via [`Pair::delta`]) does the arithmetic, so
+    /// the two dispositions of the same delta cannot drift.
+    pub fn fold_into(&self, w: &mut [f32]) {
+        assert_eq!(w.len(), self.pair.out * self.pair.inn, "RuntimeDelta::fold_into wants the extracted [out, inn] rectangle");
+        self.pair.delta(1.0, w);
+    }
+
+    /// `B [out, r]` transposed to `[r, out]` - the layout
+    /// [`crate::dispatch::LoraW`] uploads, so the accumulate kernel's `B` read
+    /// is coalesced.
+    pub fn b_transposed(&self) -> Vec<f32> {
+        let (out, r) = (self.pair.out, self.pair.r);
+        let mut bt = vec![0.0f32; r * out];
+        for o in 0..out {
+            for k in 0..r {
+                bt[k * out + o] = self.pair.b[o * r + k];
+            }
+        }
+        bt
+    }
+}
+
+/// Every [`RuntimeDelta`] a model build must apply, with **consumption
+/// tracking**.
+///
+/// The tracking is the point. A fold validates every target against the tensor
+/// map before writing anything, so an adapter aimed at a tensor this variant
+/// does not have is a named error. A runtime correction is claimed by the
+/// build as it walks its own linears, and a rectangle nothing claims would
+/// otherwise vanish in silence - returning base-model output from a run the
+/// user believes is adapted, the exact failure `fold_placements` refuses to
+/// allow. [`Self::unapplied`] is what a build asserts on when it is done.
+pub struct RuntimeLora {
+    deltas: Vec<RuntimeDelta>,
+    used: Vec<std::cell::Cell<bool>>,
+}
+
+impl RuntimeLora {
+    /// Collect deltas, merging any two that cover the same rectangle (an
+    /// adapter stack) into one rank-concatenated correction.
+    pub fn new(deltas: Vec<RuntimeDelta>) -> RuntimeLora {
+        let mut merged: Vec<RuntimeDelta> = Vec::with_capacity(deltas.len());
+        for d in deltas {
+            match merged.iter_mut().find(|m| m.covers(&d.key, d.row_stride, d.row0, d.pair.out, d.col0, d.pair.inn)) {
+                Some(m) => m.absorb(&d.pair),
+                None => merged.push(d),
+            }
+        }
+        let used = merged.iter().map(|_| std::cell::Cell::new(false)).collect();
+        RuntimeLora { deltas: merged, used }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.deltas.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.deltas.len()
+    }
+
+    /// The largest rank any single correction carries - what sizes a build's
+    /// `[rows, r]` activation scratch.
+    pub fn max_rank(&self) -> usize {
+        self.deltas.iter().map(|d| d.pair.r).max().unwrap_or(0)
+    }
+
+    /// Every correction, after stack merging - what a caller checks an
+    /// adapter's coverage against without having to re-derive the
+    /// architecture's own walk.
+    pub fn deltas(&self) -> &[RuntimeDelta] {
+        &self.deltas
+    }
+
+    /// The delta for exactly this rectangle, marked applied. `None` when the
+    /// build's linear is not an adapter target, which is the common case.
+    pub fn claim(&self, key: &str, row_stride: usize, row0: usize, out: usize, col0: usize, inn: usize) -> Option<&RuntimeDelta> {
+        let i = self.deltas.iter().position(|d| d.covers(key, row_stride, row0, out, col0, inn))?;
+        self.used[i].set(true);
+        Some(&self.deltas[i])
+    }
+
+    /// Every rectangle no linear claimed, as `key[row0..][col0..]` labels -
+    /// empty when the build covered the adapter completely.
+    pub fn unapplied(&self) -> Vec<String> {
+        self.deltas
+            .iter()
+            .zip(&self.used)
+            .filter(|(_, u)| !u.get())
+            .map(|(d, _)| format!("{} rows {}..{} cols {}..{}", d.key, d.row0, d.row0 + d.pair.out, d.col0, d.col0 + d.pair.inn))
+            .collect()
+    }
+
+    /// Panic naming every rectangle the build failed to apply. Called once a
+    /// build has walked all of its linears.
+    pub fn assert_fully_applied(&self) {
+        let missed = self.unapplied();
+        assert!(missed.is_empty(), "lora: {} adapter rectangles were never applied by the model build: {}", missed.len(), missed.join(", "));
+    }
+
+    /// Validate every delta's target against the checkpoint's own declared
+    /// shapes BEFORE a build starts - the same "a rejected adapter changes
+    /// nothing" contract [`fold_placements`] gives, expressed against shapes
+    /// rather than a materialized map.
+    pub fn validate(&self, numel: &dyn Fn(&str) -> Option<usize>) -> Result<(), String> {
+        for d in &self.deltas {
+            match numel(&d.key) {
+                None => return Err(format!("lora: base tensor {} missing", d.key)),
+                Some(n) if n != d.elems => return Err(format!("lora: {} is {n} elems, adapter expects {}", d.key, d.elems)),
+                Some(_) => {}
+            }
+        }
+        Ok(())
     }
 }
 

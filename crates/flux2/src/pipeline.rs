@@ -1476,18 +1476,29 @@ impl Pipeline {
     /// either way - see `crate::weights` for why that is provable rather than
     /// approximate - so this is a pure cost decision, not a fidelity one.
     ///
-    /// A third-party LoRA still needs a float domain, but per tensor rather
-    /// than over a resident map, so it rides the same streamed path. brain's
-    /// own adapter container does not: it folds through
-    /// `LoraAdapter::fold_into_tensors`, which is written against the whole
-    /// map. Safetensors, diffusers dirs, and the fp32 tier take the map route;
-    /// a GGUF with a non-Q8_0 DiT linear is rejected during placement rather
-    /// than silently converted.
+    /// ## Adapters at the int8 tier are never folded
     ///
-    /// With SEVERAL adapters the streamed route is taken only when every one
-    /// of them is third-party, for that same reason - one brain-native
-    /// container anywhere in the stack sends the whole stack down the map
-    /// route, where both families fold identically.
+    /// Folding rebuilds `W' = W + s·B·A` and then quantizes it, which is the
+    /// order ComfyUI uses and is exact only while the destination is fp32. At
+    /// int8 it destroys most of the adapter: a weight has 256 levels, a trained
+    /// delta is typically a fraction of one, and requantizing rounds the
+    /// majority of adapted weights straight back to the base code (measured in
+    /// `tests/lora_requant_int8.rs`). So at `Precision::Int8` every adapter
+    /// this codebase can express as a low-rank product becomes a RUNTIME
+    /// correction instead - `crate::lora::runtime_adapters` - and the
+    /// checkpoint's own tensors are not touched at all.
+    ///
+    /// That also collapses the old route split. The streamed Q8_0 path used to
+    /// be reachable only by a third-party `.safetensors` adapter, because
+    /// folding brain's own container needed the whole map; with nothing to
+    /// fold, ANY adapter family rides the streamed path, and every base weight
+    /// - adapted or not - takes the bit-exact direct Q8_0 route. LoKr is the
+    /// one exception: its delta is a Kronecker product with no low-rank form,
+    /// so a stack containing one still folds, exactly as before.
+    ///
+    /// Safetensors, diffusers dirs, and the fp32 tier take the map route; a
+    /// GGUF with a non-Q8_0 DiT linear is rejected during placement rather than
+    /// silently converted.
     fn build_dit(
         cfg: &Flux2Config,
         paths: &Paths,
@@ -1497,6 +1508,37 @@ impl Pipeline {
         max_batch: u32,
         gpu: gpu_core::Gpu,
     ) -> Result<Flux2Model, String> {
+        // Read the adapters as runtime corrections, which is the only way a
+        // quantized build may carry them. `None` means either no adapter at
+        // all or a family with no low-rank form (LoKr), and the fold below
+        // then runs exactly as it always has.
+        // `BRAIN_FLUX2_LORA_FOLD=1` puts an int8 build back on the fold route.
+        // Unlike `BRAIN_FLUX2_NO_STREAM` this is NOT two ways to the same
+        // bytes: it reproduces the pre-fix deployment, in which the adapter is
+        // baked into the weights and then requantized. It exists so the
+        // difference can be seen on a real checkpoint - run a generation with
+        // and without it and compare the images - and for a stack that somehow
+        // cannot be served at runtime. It is not a tier a user should ship.
+        let fold_i8 = std::env::var("BRAIN_FLUX2_LORA_FOLD").is_ok_and(|v| v != "0");
+        let runtime = match precision == crate::Precision::Int8 && !fold_i8 {
+            true => crate::lora::runtime_adapters(cfg, adapters)?,
+            false => None,
+        };
+        if fold_i8 && !adapters.is_empty() {
+            eprintln!("flux2: BRAIN_FLUX2_LORA_FOLD is set - folding adapters into the weights before quantization, which is the LOSSY deployment this build otherwise avoids");
+        }
+        let (runtime, rt_reports) = match runtime {
+            Some((rt, reports)) => (Some(rt), reports),
+            None => (None, Vec::new()),
+        };
+        for r in &rt_reports {
+            // Loud on success: a run that claims to be adapted should say how
+            // much of the model it moved, and by which mechanism.
+            eprintln!(
+                "flux2: {} adapter {} - {} linears, rank {}, strength {} (runtime low-rank correction; base weights keep the checkpoint's own quantization)",
+                r.family, r.path, r.pairs, r.rank, r.strength
+            );
+        }
         let all_external = adapters.iter().all(|a| a.path.ends_with(".safetensors"));
         // `BRAIN_FLUX2_NO_STREAM=1` forces the fp32-map route. Both produce
         // the same bytes, so this is not a correctness switch - it is what
@@ -1507,7 +1549,7 @@ impl Pipeline {
         if no_stream && paths.dit.ends_with(".gguf") {
             return Err("flux2: BRAIN_FLUX2_NO_STREAM is incompatible with a .gguf DiT; whole-map loading would decode its quantized tensors before construction".to_string());
         }
-        let streamable = precision == crate::Precision::Int8 && paths.dit.ends_with(".gguf") && all_external;
+        let streamable = precision == crate::Precision::Int8 && paths.dit.ends_with(".gguf") && (runtime.is_some() || all_external);
         if streamable {
             let g = checkpoint::gguf::MmapGguf::open(&paths.dit)?;
             // Two-way coverage still has to hold, and it has to hold BEFORE
@@ -1515,7 +1557,13 @@ impl Pipeline {
             // skipping it because the load got cheaper would trade the one
             // check that matters for the saving.
             crate::import::validate_manifest(&|n| g.shape(n).map(<[usize]>::to_vec), g.names(), cfg)?;
-            let lora = match adapters.is_empty() {
+            // A runtime correction is validated against the checkpoint's own
+            // declared shapes before a single weight is read, so a
+            // wrong-base-model adapter fails the build rather than the image.
+            if let Some(rt) = &runtime {
+                rt.validate(&|n| g.shape(n).map(|s| s.iter().product()))?;
+            }
+            let lora = match runtime.is_some() || adapters.is_empty() {
                 true => None,
                 false => {
                     let l = crate::weights::PendingLora::open_all(adapters, &|n| g.shape(n).map(<[usize]>::to_vec))?;
@@ -1529,18 +1577,24 @@ impl Pipeline {
                 }
             };
             let src = crate::weights::DitWeights::gguf_adapted(&g, lora.as_ref());
-            return Ok(Flux2Model::new_from(cfg, &src, gpu, n_max, max_batch, precision));
+            return Ok(Flux2Model::new_adapted(cfg, &src, gpu, n_max, max_batch, precision, runtime.as_ref()));
         }
 
         let mut dit_ts = read_dit_tensors(&paths.dit, cfg)?;
         // Both adapter families fold into this one f32 map, in list order -
         // see `crate::lora::fold_adapters` for the family split and for what
         // stacking does to a linear more than one of them adapts. An empty
-        // list returns without touching `dit_ts`.
-        for r in crate::lora::fold_adapters(cfg, &mut dit_ts, adapters)? {
-            eprintln!("flux2: {r}");
+        // list returns without touching `dit_ts`. Skipped entirely when the
+        // adapters are being applied as runtime corrections instead: the map
+        // then IS the checkpoint, and the deltas never enter a weight.
+        if runtime.is_none() {
+            for r in crate::lora::fold_adapters(cfg, &mut dit_ts, adapters)? {
+                eprintln!("flux2: {r}");
+            }
         }
-        let model = Flux2Model::new_batched(cfg, &dit_ts, gpu, n_max, max_batch, precision);
+        let src = crate::weights::DitWeights::Map(&dit_ts);
+        let model = Flux2Model::new_adapted(cfg, &src, gpu, n_max, max_batch, precision, runtime.as_ref());
+        drop(src);
         drop(dit_ts);
         Ok(model)
     }
