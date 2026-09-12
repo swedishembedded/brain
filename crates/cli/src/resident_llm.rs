@@ -348,7 +348,7 @@ impl QwenResident {
     /// effect for the next `activate` - pair with `Executor::evict(self.
     /// instance_key(...))` (or just `Executor::evict(InstanceKey::new(&self.
     /// id, "default"))`) so a cached Hot/Warm instance from the OLD adapter
-    /// isn't reused first. `crate::continuous_train::hot_swap_cycle` does
+    /// isn't reused first. `crate::continuous_train::swap_in_adapter` does
     /// exactly that pairing.
     pub fn set_adapter(&self, adapter: Option<String>) {
         *self.adapter.write().unwrap() = adapter.filter(|a| !a.is_empty());

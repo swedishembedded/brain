@@ -33,8 +33,6 @@
 
 pub mod atif;
 pub mod continual;
-#[cfg(feature = "qwen3")]
-pub mod continuous;
 pub mod curriculum;
 pub mod document;
 pub mod improve;

@@ -1,28 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! One continuous-training hot-swap cycle: rl::continuous::run_cycle, then
-//! (only if it actually produced a new adapter) QwenResident::set_adapter +
-//! residency::Executor::evict, so the NEXT claim against `key` rebuilds with
-//! the new adapter folded in -- an in-flight request is never interrupted
-//! (`evict`'s own pinned-refusal contract).
+//! The hot-swap half of the self-improve loop: point an already-registered
+//! `QwenResident` at a new LoRA adapter file and evict its stale instance so
+//! the NEXT claim against that resident's key rebuilds with the adapter
+//! folded in -- an in-flight request is never interrupted (`evict`'s own
+//! pinned-refusal contract).
 //!
-//! This is the glue self-improve roadmap P4/P5 flagged as the one gap left
-//! before a resident can actually be hot-swapped: `rl::continuous::
-//! run_cycle` (crate `rl`, generic-ish but qwen3-shaped) produces adapter
-//! files; `resident_llm::QwenResident::set_adapter` (crate `cli`) and
-//! `residency::Executor::evict` (crate `residency`) are the two halves
-//! that make an already-registered resident pick one up -- nothing
-//! previously called all three together.
-//!
-//! [`AdapterWatcher`] is the other half, and the one that runs against a
-//! LIVE server: `brain serve --watch-adapters DIR` polls `DIR` for the
-//! highest-versioned adapter a publisher has dropped there (whoever
-//! produced it -- `run_cycle` above, a scheduled `lora_train` capability
-//! run, a promotion gate on another machine) and applies it through the
-//! same [`swap_in_adapter`] pairing, with no restart and no
-//! re-registration. Both callers share that one swap, so the unattended
-//! path and the in-process one cannot drift.
+//! [`swap_in_adapter`] is the pairing itself: `resident_llm::QwenResident::
+//! set_adapter` (crate `cli`) + `residency::Executor::evict` (crate
+//! `residency`). [`AdapterWatcher`] drives it unattended against a LIVE
+//! server: `brain serve --watch-adapters DIR` polls `DIR` for the
+//! highest-versioned adapter a publisher has dropped there -- a gated
+//! promotion (`rl::improve::cycle`) run elsewhere, a scheduled `lora_train`
+//! capability run, a promotion on another machine -- and applies it through
+//! [`swap_in_adapter`], with no restart and no re-registration.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -30,50 +22,7 @@ use std::sync::Arc;
 
 use crate::resident_llm::QwenResident;
 use capability::Invocation;
-use data::chat_template::ChatTemplate;
-use data::qwen_tokenizer::QwenBpe;
 use residency::{Executor, InstanceKey, ResidentModel};
-
-/// Run one cycle; returns `true` iff a new adapter was produced AND the
-/// hot-swap (`set_adapter` + `evict`) actually took effect. `false` covers
-/// two different, both-fine outcomes callers may want to tell apart via
-/// logging: nothing new to train on ([`rl::continuous::run_cycle`] itself
-/// returned `None`), or a new adapter WAS produced but eviction was
-/// refused because a request is actively in flight against `key` right
-/// now -- the swap is simply deferred to the next call, not lost (the
-/// adapter file survives on disk; `resident.set_adapter` already pointed
-/// at it before the evict attempt, so the very next successful evict of
-/// this key, from any cause, picks it up).
-// Parked scaffolding, not dead weight, and the reason is now narrower than
-// it was: the background loop this waited for EXISTS (`spawn_adapter_watcher`
-// below, wired into `run_cli::run_apis`), but it adopts an adapter someone
-// else already trained and promoted rather than training one in-process --
-// which is the split the whole cross-repo loop is built on. What still has no
-// caller is the TRAINING half's trigger: nothing in `brain serve` stamps a
-// reward onto the trajectories this would ingest, so a server-side timer
-// driving it would train on unscored data. The `tests` module below exercises
-// both of its outcomes, so it is covered, just not yet reachable from `main`.
-#[allow(dead_code)]
-#[allow(clippy::too_many_arguments)]
-pub fn hot_swap_cycle(
-    resident: &QwenResident,
-    key: &InstanceKey,
-    executor: &Executor,
-    trajectories_dir: &Path,
-    base_checkpoint: &Path,
-    training_checkpoint: &Path,
-    adapter_out_dir: &Path,
-    tok: &QwenBpe,
-    tmpl: &ChatTemplate,
-    lora_rank: u32,
-    lora_alpha: f32,
-    opts: &model::FitOpts,
-) -> std::io::Result<bool> {
-    let Some(adapter_path) = rl::continuous::run_cycle(trajectories_dir, base_checkpoint, training_checkpoint, adapter_out_dir, tok, tmpl, lora_rank, lora_alpha, opts)? else {
-        return Ok(false);
-    };
-    Ok(swap_in_adapter(resident, key, executor, &adapter_path))
-}
 
 /// Point `resident` at `adapter` and drop the stale instance so the NEXT
 /// claim against `key` rebuilds with it folded in. Returns whether an
@@ -219,6 +168,7 @@ fn is_resident(executor: &Executor, key: &InstanceKey) -> bool {
 mod tests {
     use super::*;
     use checkpoint::st::ModelCard;
+    use data::chat_template::ChatTemplate;
     use qwen3::config::QwenConfig;
     use residency::{budget::Budgets, Device, Policy};
     use std::sync::Arc;
@@ -235,14 +185,8 @@ mod tests {
     }
 
     /// Same tiny (vocab 23, a handful of layers) shape `resident_llm.rs`'s
-    /// own tests already use -- deliberately small so this runs on the CPU
-    /// backend without touching a real checkpoint.
-    fn write_tiny_base(path: &std::path::Path, seed: u64) {
-        write_tiny_base_cfg(path, seed, QwenConfig::tiny());
-    }
-
-    /// [`write_tiny_base`] at a caller-chosen config -- the live-serving test
-    /// below needs a vocabulary wide enough for a real byte tokenizer.
+    /// own tests already use, at a caller-chosen vocab -- the live-serving
+    /// test below needs one wide enough for a real byte tokenizer.
     fn write_tiny_base_cfg(path: &std::path::Path, seed: u64, cfg: QwenConfig) {
         let init = qwen3::init_weights(&cfg, seed);
         let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = cfg
@@ -251,23 +195,6 @@ mod tests {
             .map(|(name, n)| (name.clone(), vec![n as u64], init.get(&name).unwrap_or_else(|| panic!("init missing {name}")).clone()))
             .collect();
         checkpoint::save(path.to_str().unwrap(), cfg.to_json(), &tensors);
-    }
-
-    fn tiny_tok() -> data::qwen_tokenizer::QwenBpe {
-        use checkpoint::gguf::GgufTokenizer;
-        let gt = GgufTokenizer {
-            model: "gpt2".into(),
-            pre: Some("qwen2".into()),
-            tokens: vec!["<|endoftext|>".into(), "<|im_start|>".into(), "<|im_end|>".into(), "h".into(), "i".into(), "hi".into()],
-            merges: vec!["h i".into()],
-            token_types: vec![3, 3, 3, 1, 1, 1],
-            bos: Some(0),
-            eos: Some(2),
-            unk: None,
-            pad: None,
-            ..Default::default()
-        };
-        data::qwen_tokenizer::QwenBpe::from_gguf(&gt).unwrap()
     }
 
     fn tiny_tmpl() -> ChatTemplate {
@@ -296,10 +223,10 @@ mod tests {
         path
     }
 
-    /// One ATIF trajectory with a reward, the input `rl::continuous::
-    /// run_cycle` ingests -- long enough (and repetitive enough) that a few
-    /// hundred LoRA steps on a tiny model move the weights somewhere a greedy
-    /// decode can see.
+    /// One ATIF trajectory with a reward, the input [`stage_adapter`]
+    /// ingests -- long enough (and repetitive enough) that a few hundred
+    /// LoRA steps on a tiny model move the weights somewhere a greedy decode
+    /// can see.
     fn write_trajectory(dir: &std::path::Path) {
         std::fs::create_dir_all(dir).unwrap();
         let traj = serde_json::json!({
@@ -312,6 +239,48 @@ mod tests {
             ]
         });
         std::fs::write(dir.join("t1.json"), serde_json::to_string(&traj).unwrap()).unwrap();
+    }
+
+    /// Train and save a real, versioned LoRA adapter file straight to
+    /// `adapter_out_dir`, for the live-serve test below to drop into a
+    /// watched directory. Deliberately NOT `rl::improve::cycle`: it does
+    /// its own gating, and what this fixture stands in for is "some other
+    /// process already gated this and published the file" -- the property
+    /// under test here is [`AdapterWatcher`]'s live-swap behavior, not
+    /// promotion.
+    fn stage_adapter(
+        trajectories_dir: &std::path::Path,
+        base_checkpoint: &std::path::Path,
+        training_checkpoint: &std::path::Path,
+        adapter_out_dir: &std::path::Path,
+        tok: &data::qwen_tokenizer::QwenBpe,
+        tmpl: &ChatTemplate,
+        lora_rank: u32,
+        lora_alpha: f32,
+        opts: &model::FitOpts,
+    ) -> std::io::Result<PathBuf> {
+        let base = checkpoint::load(base_checkpoint.to_str().expect("utf-8 path"));
+        let vocab = QwenConfig::from_json(&base.header["config"]).vocab;
+
+        let dataset_dir = training_checkpoint.parent().unwrap_or_else(|| std::path::Path::new(".")).join("dataset");
+        let count = rl::atif::ingest_dir(trajectories_dir, tok, tmpl, vocab as usize, &dataset_dir)?;
+        assert!(count > 0, "stage_adapter: the fixture trajectory must ingest to a non-empty dataset");
+
+        let mut cfg = QwenConfig::from_json(&base.header["config"]);
+        cfg.lora = Some(qwen3::config::LoraCfg::attn(lora_rank, lora_alpha));
+        rl::fit_weighted::<qwen3::model::Qwen>(&dataset_dir, cfg, opts, Some(training_checkpoint))?;
+
+        let trained = checkpoint::load(training_checkpoint.to_str().expect("utf-8 path"));
+        let trained_cfg = QwenConfig::from_json(&trained.header["config"]);
+        let init = trained.by_role("");
+        let block = trained_cfg.block_size;
+        let model = qwen3::model::Qwen::new(trained_cfg, 1, block, &init);
+
+        std::fs::create_dir_all(adapter_out_dir)?;
+        let version = rl::improve::latest_adapter(adapter_out_dir)?.map(|(v, _)| v + 1).unwrap_or(0);
+        let adapter_path = adapter_out_dir.join(format!("adapter-{version:06}.safetensors"));
+        qwen3::lora::save_adapter(adapter_path.to_str().expect("utf-8 path"), &model, &format!("adapter-{version:06}"), "base", None)?;
+        Ok(adapter_path)
     }
 
     /// The watcher is OPT-IN: `brain serve` without `--watch-adapters` must
@@ -367,9 +336,8 @@ mod tests {
         write_trajectory(&trajectories);
         let staging = dir.join("staging");
         let opts = model::FitOpts { steps: 60, batch_size: 4, block_size: 8, lr: 3e-2, warmup: 0, decay_iters: 60, ..Default::default() };
-        let promoted = rl::continuous::run_cycle(&trajectories, &base, &dir.join("train.safetensors"), &staging, &tok, &tiny_tmpl(), 4, 8.0, &opts)
-            .expect("run_cycle")
-            .expect("a trajectory with a reward must produce an adapter");
+        let promoted =
+            stage_adapter(&trajectories, &base, &dir.join("train.safetensors"), &staging, &tok, &tiny_tmpl(), 4, 8.0, &opts).expect("stage_adapter");
 
         // The live server: one resident, one executor, the real OpenAI router.
         let card = ModelCard::new("brain/qwen3", "qwen");
@@ -458,106 +426,5 @@ mod tests {
         let (status, after) = content(app.clone(), post("what colour is the sky", 16));
         assert_eq!(status, axum::http::StatusCode::OK, "the swapped-in adapter must still serve");
         assert_ne!(after, before, "the next request after a promoted adapter landed must answer from the new weights, with no restart");
-    }
-
-    #[test]
-    fn hot_swap_cycle_is_false_with_nothing_to_train_on_and_leaves_the_resident_untouched() {
-        if skip() {
-            return;
-        }
-        let dir = tmp("empty");
-        let trajectories = dir.join("trajectories");
-        std::fs::create_dir_all(&trajectories).unwrap();
-        let base = dir.join("base.safetensors");
-        write_tiny_base(&base, 1);
-
-        let card = ModelCard::new("brain/qwen-hot-swap-test-empty", "qwen");
-        let resident = Arc::new(QwenResident::from_card(base.to_str().unwrap(), &card, Some("unused.json"), None));
-        let key = InstanceKey::new(&card.id, "default");
-        let mut budgets = Budgets::new();
-        budgets.set(Device::Cpu, 8 << 30, 0);
-        let models: Vec<Arc<dyn residency::ResidentModel>> = vec![resident.clone()];
-        let executor = Executor::start(models, budgets, Policy::default());
-
-        let did_swap = hot_swap_cycle(
-            &resident,
-            &key,
-            &executor,
-            &trajectories,
-            &base,
-            &dir.join("train.safetensors"),
-            &dir.join("adapters"),
-            &tiny_tok(),
-            &tiny_tmpl(),
-            2,
-            4.0,
-            &model::FitOpts::default(),
-        )
-        .expect("hot_swap_cycle");
-        assert!(!did_swap, "no trajectories waiting must not swap anything");
-    }
-
-    #[test]
-    fn hot_swap_cycle_produces_and_points_the_resident_at_a_new_adapter_even_before_anything_ever_claimed_it() {
-        if skip() {
-            return;
-        }
-        let dir = tmp("real");
-        let trajectories = dir.join("trajectories");
-        std::fs::create_dir_all(&trajectories).unwrap();
-        let base = dir.join("base.safetensors");
-        write_tiny_base(&base, 1);
-
-        let traj_json = serde_json::json!({
-            "schema_version": "ATIF-v1.7",
-            "agent": {"name": "test-agent", "version": "0.0.1"},
-            "final_metrics": {"extra": {"reward": 1.0}},
-            "steps": [
-                {"step_id": 1, "source": "user", "message": "hihihihihi"},
-                {"step_id": 2, "source": "agent", "message": "hihihihihihihihihi"}
-            ]
-        });
-        std::fs::write(trajectories.join("t1.json"), serde_json::to_string(&traj_json).unwrap()).unwrap();
-
-        let card = ModelCard::new("brain/qwen-hot-swap-test-real", "qwen");
-        let resident = Arc::new(QwenResident::from_card(base.to_str().unwrap(), &card, Some("unused.json"), None));
-        let key = InstanceKey::new(&card.id, "default");
-        let mut budgets = Budgets::new();
-        budgets.set(Device::Cpu, 8 << 30, 0);
-        let models: Vec<Arc<dyn residency::ResidentModel>> = vec![resident.clone()];
-        let executor = Executor::start(models, budgets, Policy::default());
-
-        let opts = model::FitOpts { steps: 5, batch_size: 2, block_size: 4, ..Default::default() };
-        let did_swap = hot_swap_cycle(
-            &resident,
-            &key,
-            &executor,
-            &trajectories,
-            &base,
-            &dir.join("train.safetensors"),
-            &dir.join("adapters"),
-            &tiny_tok(),
-            &tiny_tmpl(),
-            2,
-            4.0,
-            &opts,
-        )
-        .expect("hot_swap_cycle");
-        // `did_swap` is `false` here -- correctly, not a bug: this resident
-        // was only REGISTERED with the executor, never actually claimed by
-        // any request, so `Executor::evict` refuses for the documented
-        // "isn't resident at all" reason, the same as it would for any
-        // never-yet-claimed key. That's a fact about `evict` already
-        // covered by residency's own test suite, not something this test
-        // needs to re-prove. What this test verifies is the two effects
-        // that DID have to happen before `evict` was ever reached: a real
-        // adapter file on disk, and `resident.set_adapter` having pointed
-        // at it -- both of which persist regardless of whether the evict
-        // that would apply them lands now or on some later, successful
-        // call, per this function's own doc comment on deferred-not-lost
-        // swaps.
-        assert!(!did_swap, "evict must refuse for a never-claimed key, same as for a pinned one");
-        let adapters: Vec<_> = std::fs::read_dir(dir.join("adapters")).unwrap().collect();
-        assert_eq!(adapters.len(), 1, "exactly one adapter version must have been produced and pointed at, even though the evict step deferred");
     }
 }

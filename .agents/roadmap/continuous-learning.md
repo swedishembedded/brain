@@ -222,32 +222,27 @@ oracle, `continual.rs:1204`) is post-MVP.
 (ii) the `run_study` wiring + the report surface (`B8`'s per-fact rows hang
 off this).
 
-### B7 - wire the existing hot-swap into a live `brain serve`
+### B7 - wire the existing hot-swap into a live `brain serve` - DONE (watch half only)
 `QwenResident.adapter: RwLock<Option<String>>` + `set_adapter` +
 `Executor::evict` (`crates/cli/src/resident_llm.rs:282,314-316,577-598`) is
-already built, pinned-safe (refuses to evict mid-flight-request), and unit-
-tested via `continuous_train.rs::hot_swap_cycle` (`:47-64`) - but "zero
-cycles have ever run unattended… against a live serving process" (this
-file's own prior entry, `self-improve.md:280-297`), and the function is
-currently `#[allow(dead_code)]`, unreachable from `main`.
+built, pinned-safe (refuses to evict mid-flight-request), and reachable
+from `main`: `crates/cli/src/continuous_train.rs::AdapterWatcher` /
+`spawn_adapter_watcher` is wired into `run_apis`
+(`crates/cli/src/run_cli.rs`) behind `brain serve --watch-adapters DIR`,
+and `a_promoted_adapter_changes_a_live_serve_response_without_restart`
+covers the literal "never run unattended against a live process" gap this
+milestone set out to close.
 
-Wire an opt-in watcher into `run_apis` (`crates/cli/src/run_cli.rs:629`):
-keep a **concrete** `Arc<QwenResident>` handle alongside the type-erased
-`Arc<dyn ResidentModel>`, since `set_adapter` is inherent, not on the trait
-(`resident_llm.rs:314`) - the type-erased handle alone cannot call it.
-
-**Test-first:**
-- flag off ⇒ `run_apis` returns no watcher handle (unit);
-- `a_promoted_adapter_changes_a_live_serve_response_without_restart` -
-  start `brain serve --openai` on the tiny fixture with the watcher pointed
-  at a temp adapter directory, hold a request in flight, drop a real
-  promoted adapter in mid-flight, assert the in-flight request completes
-  uncorrupted **and** the next request reflects the new adapter. This is the
-  literal closing of the "never run unattended against a live process" gap.
-**Commit boundary: two** - (i) keep the concrete `QwenResident` handle
-alongside the erased one, (ii) the opt-in watcher itself - drop the two
-`#[allow(dead_code)]` in `continuous_train.rs:47` in this commit, where they
-stop being true.
+What this section originally proposed wiring in as the adapter's SOURCE -
+`continuous_train.rs::hot_swap_cycle` (training in-process, then calling
+the same swap) - has since been deleted rather than wired in: it trained
+and wrote an adapter straight into the directory the watcher above polls
+with no gate, no incumbent-vs-candidate scoring and no lineage stamp,
+duplicating what P18's `rl::improve::cycle` (`self-improve.md`) already
+does correctly and gated. The watcher's job was always to *adopt* an
+adapter someone else already trained and promoted, not to train one
+itself; a future training-side trigger for this loop must publish through
+`rl::improve::cycle`, not reintroduce an ungated shortcut.
 
 ### B8 - per-fact promote/reject reporting
 `StudyReport::matrix_table()` (`continual.rs:596`) reports per-*cycle*

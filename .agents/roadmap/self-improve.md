@@ -1911,11 +1911,19 @@ None of the following moved. They are listed so the rollup above is not
 mistaken for closing them.
 
 - **Live, timed or unattended operation (P6a, unchanged).** Nothing calls
-  `hot_swap_cycle` on a timer or watch loop, and it is still not wired into
-  `brain serve`'s startup path (`run_apis` in `crates/cli/src/run_cli.rs`).
-  Every cycle counted above was driven synchronously by a test binary or an
-  example a human started. Zero cycles have ever run unattended, and zero
-  have ever swapped an adapter into a live serving process.
+  a training cycle on a timer or watch loop, and no such trigger is wired
+  into `brain serve`'s startup path (`run_apis` in
+  `crates/cli/src/run_cli.rs`). Every cycle counted above was driven
+  synchronously by a test binary or an example a human started. Zero
+  cycles have ever run unattended, and zero have ever swapped an adapter
+  into a live serving process. `rl::continuous::run_cycle` and
+  `continuous_train.rs::hot_swap_cycle` - the training-then-swap path this
+  bullet originally described - were later deleted: they wrote adapters
+  straight into the directory `brain serve --watch-adapters` polls with no
+  gate, no incumbent-vs-candidate scoring and no lineage stamp, duplicating
+  what P18's `rl::improve::cycle` already does correctly and gated. Any
+  future timer/trigger for this half must call `rl::improve::cycle`, not
+  reintroduce an ungated shortcut.
 - **Real sven-driven trajectories (P0/P6, unchanged, out of brain's repo by
   design).** Every task in every number above is procedurally generated
   inside brain with an in-process oracle. The reward stamp (P0) does not

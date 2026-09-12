@@ -232,9 +232,8 @@ pub fn latest_adapter(dir: &Path) -> std::io::Result<Option<(u32, PathBuf)>> {
 /// One `adapter-{n:06}.safetensors` version past the highest one already in
 /// `dir` (0 if none yet). Deliberately NOT `read_dir().count()` - deleting an
 /// old adapter must not shift every later version down and silently
-/// overwrite the next one produced. Shared by [`cycle`] and (behind the
-/// `qwen3` feature) `crate::continuous::run_cycle`, which used to carry its
-/// own copy of exactly this logic.
+/// overwrite the next one produced. Used by [`cycle`] to version each newly
+/// promoted adapter.
 pub(crate) fn next_adapter_version(dir: &Path) -> std::io::Result<u32> {
     Ok(latest_adapter(dir)?.map(|(v, _)| v + 1).unwrap_or(0))
 }
