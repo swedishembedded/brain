@@ -13,7 +13,6 @@
 //! Run `brain help` for the full usage with examples.
 
 mod args;
-mod capacity;
 mod caps_cli;
 mod catalog;
 mod data_cli;

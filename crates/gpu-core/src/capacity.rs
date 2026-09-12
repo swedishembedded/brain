@@ -102,7 +102,7 @@ impl GpuMem {
 /// contended one. Capacity is what decides whether a card exists; occupancy is
 /// what decides whether anything fits on it.
 pub fn probe_gpus() -> Vec<GpuMem> {
-    let mut mem: Vec<GpuMem> = gpu_core::devices::gpus()
+    let mut mem: Vec<GpuMem> = crate::devices::gpus()
         .iter()
         .map(|d| GpuMem { index: d.index, total: d.identity.vram_bytes, free: d.identity.vram_bytes, measured: false })
         .collect();
@@ -120,7 +120,7 @@ pub fn probe_gpus() -> Vec<GpuMem> {
                 ) else {
                     continue;
                 };
-                if let Some(d) = gpu_core::devices::device_by_pci(pci) {
+                if let Some(d) = crate::devices::device_by_pci(pci) {
                     if let Some(slot) = mem.iter_mut().find(|g| g.index == d.index) {
                         slot.total = total << 20;
                         slot.free = free << 20;
@@ -144,6 +144,59 @@ pub fn available_gpus() -> Vec<(u32, u64)> {
 /// the perf suite's environment block). Never a budget input.
 pub fn gpu_totals() -> Vec<(u32, u64)> {
     probe_gpus().into_iter().map(|g| (g.index, g.total)).collect()
+}
+
+/// Headroom kept free on a card by anything budgeting from [`GpuMem::available`],
+/// on top of the bytes another process already holds.
+///
+/// Budgets here are built from **free** VRAM, not total, so this is not the
+/// serving path's `--reserve-gb` (which carves a slice out of a whole card so
+/// resident models never pack it to the brim). It covers what a model's own
+/// figure does not: the driver/context allocation a fresh `Gpu` makes, and
+/// transient activation scratch a weights-only estimate omits.
+///
+/// 1 GiB measured too thin for a real large model: FLUX.2 klein-9B's
+/// `dit`+`vae_enc` (13,154,417,928 + 2,220,175,360 bytes, measured off this
+/// repo's own checkpoint) landed on a card reporting 15.4 GiB free - the plan
+/// judged that a fit at 1 GiB headroom (14.32 GiB needed vs 14.4 GiB budget,
+/// 0.08 GiB to spare) and the real wgpu allocation then hit an actual
+/// out-of-memory panic, because real allocator overhead (alignment, bind
+/// group padding, the scratch this estimate approximates rather than derives
+/// exactly) exceeded 0.08 GiB. 2 GiB gives a real, measured model room to be
+/// wrong by more than a rounding error without turning into a driver panic -
+/// see `a_near_ceiling_plan_does_not_ride_the_edge_of_a_single_card` in
+/// `crates/cli/src/placement.rs` for the regression this closes.
+pub const HEADROOM: u64 = 2 << 30;
+
+/// What a graph built on THIS thread's device may spend right now: the card a
+/// `Gpu::new` here would land on ([`crate::devices::selected_device`]), less
+/// [`HEADROOM`] - or `None` when there is no card whose free bytes were really
+/// measured.
+///
+/// `None` is the honest answer in three cases, and every one of them means
+/// "decide from something else": a GPU-less box or a run the placer sent to the
+/// host tier (there is no device memory to report, only host RAM); a card
+/// `nvidia-smi` could not read (a non-NVIDIA GPU, no driver tool on `$PATH`);
+/// and a probe that saw no card at the selected index at all. A caller MUST NOT
+/// read `None` as "plenty" - the whole point of this function is that assuming
+/// an empty card is what produces driver-level out-of-memory aborts.
+///
+/// # What the number does and does not see
+///
+/// It is a SNAPSHOT of the driver's view, so it counts every allocation this
+/// process has ALREADY made on that card (a resident DiT, weights uploaded a
+/// moment ago) as well as another process's. It cannot see what is about to be
+/// freed: memory a backend allocator is still holding for reuse reads as used,
+/// so the figure errs low, which makes a caller choose the cheaper path rather
+/// than the one that aborts.
+pub fn available_here() -> Option<u64> {
+    let dev = crate::devices::selected_device()?;
+    let mem = probe_gpus();
+    let card = mem.iter().find(|g| g.index == dev.index)?;
+    if !card.measured {
+        return None;
+    }
+    Some(card.available().saturating_sub(HEADROOM))
 }
 
 #[cfg(test)]

@@ -444,9 +444,9 @@ fn build_serving_executor(reserve_gb: u64, models_dir: Option<String>) -> crate:
     // 18 GiB of is budgeted at 6 GiB rather than 24. Budgeting from the card's
     // SIZE is what let the daemon plan a placement the driver then refused -
     // the scheduler's own accounting said the card was empty. Same probe the
-    // one-shot placer uses (`crate::capacity`), so the two halves of this
+    // one-shot placer uses (`gpu_core::capacity`), so the two halves of this
     // process can no longer disagree about the same card at the same instant.
-    let mut all_gpus = crate::capacity::available_gpus();
+    let mut all_gpus = gpu_core::capacity::available_gpus();
     // No NVIDIA GPU, but the wgpu backend can drive an integrated GPU (e.g. Intel
     // Arc on Meteor Lake): budget it as a schedulable `Gpu` lane. Integrated GPUs
     // have no dedicated VRAM - they share system RAM - so size the budget like the
@@ -807,10 +807,10 @@ fn run_apis(a: RunApis) {
 /// Budgets are NOT built from this: a card's size says nothing about how much
 /// of it a neighbouring process is already holding, and budgeting from it is
 /// what let `brain serve` place a 16 GiB model onto a card with 6 GiB
-/// physically free. See [`crate::capacity`], which is the one probe both this
+/// physically free. See [`gpu_core::capacity`], which is the one probe both this
 /// and the free-bytes figure come from.
 pub(crate) fn query_gpu_mem() -> Vec<(u32, u64)> {
-    crate::capacity::gpu_totals()
+    gpu_core::capacity::gpu_totals()
 }
 
 /// Old name for [`host_ram_available`], kept as a thin alias - `perf_cli.rs`

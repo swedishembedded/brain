@@ -81,6 +81,13 @@ pub mod lower;
 /// `--device` parsing and resolution: which compute is *schedulable*.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod devices;
+
+/// What memory each card has FREE right now - the one live hardware probe
+/// every budget in brain is built from. Lives beside the device registry
+/// because it is keyed by it, and so that any crate that can name a device can
+/// also ask what that device has left.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod capacity;
 #[cfg(not(target_arch = "wasm32"))]
 pub use devices::{
     ambient_compute_set, publish_compute_set, published_compute_set, ComputeSet, DeviceSpec,

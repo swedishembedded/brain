@@ -33,29 +33,13 @@ use std::sync::Arc;
 use gpu_core::devices::{Home, Need, Placer};
 use residency::budget::Budgets;
 use residency::plan::{self, Part};
+// The headroom automatic placement keeps free on every card is the ONE margin
+// between a byte estimate and a real allocation, so it is defined beside the
+// probe it is subtracted from - see `gpu_core::capacity::HEADROOM` for why it
+// is 2 GiB and what it covers.
+use gpu_core::capacity::HEADROOM;
 use residency::{Device, MemCost};
 
-/// Headroom kept free on every card by automatic placement, on top of the
-/// bytes another process already holds.
-///
-/// Budgets here are built from **free** VRAM, not total, so this is not the
-/// serving path's `--reserve-gb` (which carves a slice out of a whole card so
-/// resident models never pack it to the brim). It covers what a model's own
-/// figure does not: the driver/context allocation a fresh `Gpu` makes, and
-/// transient activation scratch a weights-only estimate omits.
-///
-/// 1 GiB measured too thin for a real large model: FLUX.2 klein-9B's
-/// `dit`+`vae_enc` (13,154,417,928 + 2,220,175,360 bytes, measured off this
-/// repo's own checkpoint) landed on a card reporting 15.4 GiB free - the plan
-/// judged that a fit at 1 GiB headroom (14.32 GiB needed vs 14.4 GiB budget,
-/// 0.08 GiB to spare) and the real wgpu allocation then hit an actual
-/// out-of-memory panic, because real allocator overhead (alignment, bind
-/// group padding, the scratch this estimate approximates rather than derives
-/// exactly) exceeded 0.08 GiB. 2 GiB gives a real, measured model room to be
-/// wrong by more than a rounding error without turning into a driver panic -
-/// see `a_near_ceiling_plan_does_not_ride_the_edge_of_a_single_card` for the
-/// regression this closes.
-const HEADROOM: u64 = 2 << 30;
 
 /// How long a capacity snapshot is reused before the machine is re-probed.
 ///
@@ -75,11 +59,11 @@ const SNAPSHOT_TTL: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Live per-GPU free bytes, `(canonical index, free)`.
 ///
-/// A thin alias for [`crate::capacity::available_gpus`], which is the one
+/// A thin alias for [`gpu_core::capacity::available_gpus`], which is the one
 /// probe of this machine's memory - see its module doc for why there is
 /// exactly one, and what it does and does not see.
 pub fn probe_free_vram() -> Vec<(u32, u64)> {
-    crate::capacity::available_gpus()
+    gpu_core::capacity::available_gpus()
 }
 
 /// Budgets for automatic placement: one per schedulable GPU sized to its FREE
