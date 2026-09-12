@@ -22,7 +22,8 @@ const HELP: &str = "brain flux2 <cmd>
            [--precision fp32|int8]  # int8 = DP4A DiT (~4x smaller, GPU only);
                                     # .gguf defaults to int8 and rejects explicit fp32
            [--strength S]           # brain extension: img2img anchoring dial, 0..1, on the
-                                    # first --ref (which must then be at the output size).
+                                    # first --ref (which untiled must be at the output size;
+                                    # under --tile-size it is resampled to it).
                                     # 1.0 = free generation conditioned on the reference;
                                     # lower anchors progressively more of the source; 0 IS
                                     # the source (exact codec round trip, no denoise step).
@@ -31,6 +32,9 @@ const HELP: &str = "brain flux2 <cmd>
                                     # distilled few-step sampler cannot survive - so the
                                     # same sampler runs at every value and 0.99 is a hair
                                     # from 1.0. The reference conditions at EVERY strength.
+                                    # Under --tile-size with NO --ref it is the same dial on
+                                    # the internally drafted anchor - how much of each window
+                                    # starts from the draft - and defaults to 0.4 there.
            [--ref-resolution-scale S]
                                     # linear size of the conditioning copy of the FIRST --ref,
                                     # 0..1, the same at every strength (default 1.0 = the
@@ -38,7 +42,13 @@ const HELP: &str = "brain flux2 <cmd>
                                     # (cheapest: the reference then reaches the model only
                                     # through the init latent). Lower it to buy tokens back;
                                     # the conditioning sequence never changes with --strength.
-           [--ref <in.ppm>]...      # reference images => editing mode
+                                    # REFUSED below 1.0 under a tiling that really windows: the
+                                    # first reference is then the anchor and has to stay at the
+                                    # canvas's own token grid to be one.
+           [--ref <in.ppm>]...      # reference images => editing mode. Under --tile-size the
+                                    # FIRST one is the run's anchor and is resampled to the
+                                    # canvas (never bounded by --ref-size); the rest stay
+                                    # generic guidance and every window sees all of them.
            [--ref-size N]           # long edge each --ref is encoded at, before the /16
                                     # crop, preserving aspect. Never upscales. DEFAULT 512:
                                     # a reference costs (w/16)*(h/16) tokens and attention is
@@ -56,21 +66,39 @@ const HELP: &str = "brain flux2 <cmd>
                                     # so this is a knob a caller who is buying resolution with
                                     # time turns on. Turning it on below the budget is free and
                                     # changes nothing: the plan is then a single window and the
-                                    # run is bit-for-bit the untiled one. Every window sees the
-                                    # same prompt and folded adapters, and carries the position
-                                    # ids its tokens have on the WHOLE canvas, so they compose
-                                    # one scene. A --ref at the output size and framing (what
-                                    # --strength pins it to) is an EDIT target, so each window
-                                    # is conditioned on its own matching region of it rather
-                                    # than on the whole photograph; a reference at any other
-                                    # size is generic guidance and every window sees all of it.
+                                    # run is bit-for-bit the untiled one.
+                                    # A canvas that REALLY tiles is always TWO-STAGE. A window
+                                    # sees a fraction of the picture, and windows given only the
+                                    # prompt each compose their own whole version of it - a
+                                    # named landmark comes out drawn once per window - so before
+                                    # any window is denoised there is always a full-canvas
+                                    # anchor, and each window is conditioned on its own region
+                                    # of that one composition:
+                                    #   no --ref: the composition is DRAFTED in one forward at
+                                    #     the largest size this run's own per-forward budget
+                                    #     allows (same prompt, seed and sampler), upscaled to
+                                    #     the canvas, then refined window by window at
+                                    #     --strength (default 0.4);
+                                    #   with --ref: that reference IS the anchor, resampled to
+                                    #     the canvas when it is not already there - so an
+                                    #     upscale-this-photo run needs no pre-resize by hand.
+                                    # Every window sees the same prompt and folded adapters and
+                                    # carries the position ids its tokens have on the WHOLE
+                                    # canvas, so they compose one scene. References past the
+                                    # first are generic guidance and every window sees all of
+                                    # them whole. The anchor roughly doubles the joint sequence
+                                    # per window, which is what --tile-size is sized against;
+                                    # --ref-resolution-scale below 1 is refused here, because
+                                    # shrinking the anchor's conditioning copy is exactly what
+                                    # stops it anchoring anything.
                                     # NOTE the VAE still decodes the canvas in one pass.
            [--tile-overlap N]       # how much adjacent windows share, in pixels (default: a
                                     # quarter of --tile-size). The blend across it is feathered,
                                     # so this is the width a seam is spread over. Multiple of
                                     # 16, smaller than --tile-size.
            [--mask <mask.png>]      # WHITE = regenerate, BLACK = preserve the first
-                                    # --ref exactly (which must be at the output size);
+                                    # --ref exactly (which must be at the output size, or
+                                    # under --tile-size is resampled to it);
                                     # greys blend. Omit = regenerate everything.
            [--text-encoder <path>]  # state the text encoder outright: an HF directory, or a
                                     # single .safetensors/.gguf FILE, exactly as the models
@@ -302,12 +330,16 @@ fn is_anchored(strength: Option<f32>, has_mask: bool) -> bool {
 /// The long-edge bound for reference `i`, or `None` to encode it at its own
 /// resolution.
 ///
-/// `anchored` is true when `refs[0]` seeds the init latent - see
-/// [`is_anchored`]. That reference is then pinned to the output size and must
-/// never be bounded; a caller wanting ITS conditioning cost down has
-/// `--ref-resolution-scale`, which exists for exactly this asymmetry.
-fn ref_bound(i: usize, anchored: bool, ref_size: Option<u32>) -> Option<u32> {
-    if i == 0 && anchored {
+/// `pinned` is true when `refs[0]` is pinned to the canvas: it seeds the init
+/// latent (see [`is_anchored`]), or it is a windowed run's anchor, which the
+/// pipeline resamples to the canvas so every window can be conditioned on its
+/// own region of it. Either way that reference must never be bounded on the way
+/// in - the bound would decide the canvas's own resolution. A caller wanting
+/// ITS conditioning cost down has `--ref-resolution-scale`, which exists for
+/// exactly this asymmetry (and which a windowed run refuses, because shrinking
+/// the anchor's conditioning copy is what un-registers it).
+fn ref_bound(i: usize, pinned: bool, ref_size: Option<u32>) -> Option<u32> {
+    if i == 0 && pinned {
         return None;
     }
     match ref_size {
@@ -482,29 +514,21 @@ fn generate(args: &[String]) -> Result<(), String> {
     let prompt = prompt.ok_or("--prompt is required")?;
     let out = out.ok_or("--out is required")?;
 
-    // load refs as [-1,1] CHW, center-cropped to /16 (shared helper - the
-    // capability provider uses the same one), optionally downscaled first so
-    // one full-resolution photograph cannot outspend the whole generation.
-    // `--ref-size` absent takes the bound-free path, unchanged.
-    let mut ref_imgs: Vec<(Vec<f32>, u32, u32)> = Vec::new();
+    // Read every reference's pixels BEFORE any of them is bounded: the canvas
+    // has to be settled first. A windowed run's first reference is the anchor
+    // every window is conditioned on, the pipeline resamples it to the canvas,
+    // and bounding it on the way in would hand that resample a thumbnail to
+    // enlarge.
+    let loaded: Vec<(Vec<f32>, u32, u32)> =
+        refs.iter().map(|r| crate::image_io::load_image(r)).collect::<Result<_, String>>()?;
     let anchored = is_anchored(o.strength, mask_path.is_some());
-    for (i, r) in refs.iter().enumerate() {
-        let (hwc, w, h) = crate::image_io::load_image(r)?;
-        let bound = ref_bound(i, anchored, ref_size);
-        if let Some(m) = bound {
-            let (tw, th) = flux2::pipeline::fit_long_edge(w, h, m);
-            if (tw, th) != (w, h) {
-                eprintln!("flux2: ref {r} {w}x{h} -> resampled to {tw}x{th} (--ref-size {m})");
-            }
-        } else if i == 0 && anchored {
-            eprintln!("flux2: ref {r} {w}x{h} kept at full size - it seeds the init latent");
-        }
-        ref_imgs.push(flux2::pipeline::ref_from_hwc_bounded(&hwc, w, h, bound)?);
-    }
 
     // The init reference is the canvas, so an anchored run inherits its size
     // rather than making the caller read the file and echo its dimensions.
-    let anchor = if anchored { ref_imgs.first().map(|&(_, h, w)| (w, h)) } else { None };
+    // It is the /16 crop the conversion below takes, not the file's own size.
+    let anchor = anchored
+        .then(|| loaded.first().map(|&(_, w, h)| flux2::pipeline::ref_crop_size(w, h)))
+        .flatten();
     let (rw, rh) = output_size(want_w, want_h, anchor);
     if (rw, rh) != (o.width, o.height) && anchor.is_some() && (want_w.is_none() || want_h.is_none()) {
         eprintln!("flux2: output {rw}x{rh}, taken from the init reference");
@@ -512,6 +536,32 @@ fn generate(args: &[String]) -> Result<(), String> {
     o.width = rw;
     o.height = rh;
     o.tile = tiling_from(tile_size, tile_overlap)?;
+    // Whether this canvas really denoises in more than one window, which is
+    // what pins the first reference to the canvas and what makes a prompt-only
+    // run draft an anchor of its own.
+    let windowed = flux2::pipeline::runs_in_windows(&o);
+
+    // Now convert: [-1,1] CHW, center-cropped to /16 (shared helper - the
+    // capability provider uses the same one), optionally downscaled first so
+    // one full-resolution photograph cannot outspend the whole generation.
+    // `--ref-size` absent takes the bound-free path, unchanged.
+    let mut ref_imgs: Vec<(Vec<f32>, u32, u32)> = Vec::new();
+    for (i, ((hwc, w, h), r)) in loaded.iter().zip(&refs).enumerate() {
+        let (w, h) = (*w, *h);
+        let bound = ref_bound(i, anchored || windowed, ref_size);
+        if let Some(m) = bound {
+            let (tw, th) = flux2::pipeline::fit_long_edge(w, h, m);
+            if (tw, th) != (w, h) {
+                eprintln!("flux2: ref {r} {w}x{h} -> resampled to {tw}x{th} (--ref-size {m})");
+            }
+        } else if i == 0 && (anchored || windowed) {
+            // Why it was NOT bounded, which is a decision and not the absence
+            // of one: `--ref-size 0` reaches here too and says nothing.
+            let why = if anchored { "it seeds the init latent" } else { "it anchors every window" };
+            eprintln!("flux2: ref {r} {w}x{h} kept at full size - {why}");
+        }
+        ref_imgs.push(flux2::pipeline::ref_from_hwc_bounded(hwc, w, h, bound)?);
+    }
 
     // The mask is over the OUTPUT canvas, so it is resampled to the latent grid
     // by the pipeline (area average, both axes independently) rather than being
@@ -600,12 +650,25 @@ fn generate(args: &[String]) -> Result<(), String> {
             (tiles[0].th * 16) as u32,
             t.overlap
         );
-        if tiles.len() == 1 {
-            eprintln!("flux2: the canvas fits one window - this run is the untiled one");
-        } else if n_ref_fwd < n_ref {
-            eprintln!(
-                "flux2: a reference at the output size is an edit target - each window is conditioned on its own {n_ref_fwd} of the {n_ref} reference tokens"
-            );
+        // How this canvas gets the whole-canvas anchor its windows are
+        // conditioned on. Never nothing: windows that see only the prompt each
+        // compose their own version of it, which at this geometry is a
+        // landmark drawn three times over.
+        match flux2::pipeline::anchor_for(&ref_imgs, &o) {
+            flux2::pipeline::Anchor::Whole => {
+                eprintln!("flux2: the canvas fits one window - this run is the untiled one")
+            }
+            flux2::pipeline::Anchor::Given => eprintln!(
+                "flux2: the reference is the canvas - each window is conditioned on its own {n_ref_fwd} of its {n_ref} tokens"
+            ),
+            flux2::pipeline::Anchor::Resampled { from: (rh, rw) } => eprintln!(
+                "flux2: ref 0 {rw}x{rh} -> resampled to the {}x{} canvas, so each window can be conditioned on its own {n_ref_fwd} of its {n_ref} tokens",
+                o.width, o.height
+            ),
+            flux2::pipeline::Anchor::Draft { size: (dw, dh), strength } => eprintln!(
+                "flux2: no reference: drafting the composition at {dw}x{dh} in ONE forward, then refining it in {} windows at strength {strength} (each conditioned on its own {n_ref_fwd} tokens of the upscaled draft)",
+                tiles.len()
+            ),
         }
     }
     eprintln!("flux2: building pipeline ({n_fwd} generated + {n_ref_fwd} reference tokens per forward, {n_gen} decoded) ...");
@@ -979,6 +1042,36 @@ mod tile_flag_tests {
         assert!(tiling_from(Some(512), Some(512)).is_err(), "overlap swallows the tile");
         let err = tiling_from(None, Some(128)).unwrap_err();
         assert!(err.contains("--tile-size"), "{err}");
+    }
+
+    /// A run that really denoises in windows must not let `--ref-size` bound
+    /// its first reference: that one is the ANCHOR, the pipeline resamples it
+    /// to the canvas so every window can be conditioned on its own region of
+    /// it, and bounding it on the way in would hand that resample a 512 px
+    /// thumbnail to enlarge to a 2048 px canvas.
+    ///
+    /// The `--ref-size` default is the reason this has to be explicit: it
+    /// applies unless something says otherwise, so "upscale this photo" would
+    /// silently upscale a downscale of it.
+    #[test]
+    fn a_windowed_run_never_bounds_the_reference_that_anchors_it() {
+        use super::{ref_bound, DEFAULT_REF_EDGE};
+        let o = flux2::GenOpts {
+            width: 2048,
+            height: 1152,
+            tile: tiling_from(Some(512), None).unwrap(),
+            ..flux2::GenOpts::default()
+        };
+        let windowed = flux2::pipeline::runs_in_windows(&o);
+        assert!(windowed, "a 2048x1152 canvas in 512 px windows really tiles");
+        assert_eq!(ref_bound(0, windowed, Some(512)), None, "the anchor was bounded");
+        assert_eq!(ref_bound(0, windowed, None), None, "the default bound reached the anchor");
+        // Guidance references past the first are not anchors and keep the bound.
+        assert_eq!(ref_bound(1, windowed, None), Some(DEFAULT_REF_EDGE));
+        // And a tiling that plans to ONE window changes nothing at all.
+        let small = flux2::GenOpts { width: 512, height: 512, ..o };
+        assert!(!flux2::pipeline::runs_in_windows(&small));
+        assert_eq!(ref_bound(0, false, None), Some(DEFAULT_REF_EDGE));
     }
 }
 
