@@ -23,6 +23,14 @@ use gpu_core::devices::{install_placer, Placer};
 use std::sync::{Arc, Mutex, OnceLock};
 use flux2::Precision;
 
+/// `install_placer` sets one process-wide global, so every test that calls it
+/// must serialize against every OTHER such test, not just against repeat
+/// calls of its own - a `static` declared inside a test function body is a
+/// separate item per function, so two tests each locking their own
+/// function-local mutex do not exclude each other at all. One shared,
+/// module-level lock is what actually makes that true.
+static PLACER_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
 const GIB: f64 = (1u64 << 30) as f64;
 fn gib(b: u64) -> f64 {
     b as f64 / GIB
@@ -198,7 +206,6 @@ fn gguf_plan_uses_the_header_cost_and_the_int8_build_precision() {
             ])
         }
     }
-    static PLACER_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     let _serial = PLACER_TEST_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
     let (cfg, g, path) = tiny_q8_dit();
     let expected = gguf_dit_device_bytes(&g, &cfg, 96, 1).unwrap();
@@ -422,4 +429,33 @@ fn the_decode_evicts_the_denoiser_only_when_they_share_a_card() {
         "host residency holds no device weights to evict"
     );
     assert!(!evict_denoiser_before_decode(&h(vec![("dit", Home::Gpu(0))])), "no decode placement, no contract");
+}
+
+/// When NO device can hold the int8 parts, the planner used to fall back to
+/// an all-`Home::Cpu` placement anyway - "a finished image beats an abort".
+/// That premise is false for an int8 build: `Flux2Model::new_from` hard-`assert!`s
+/// int8 requires `gpu.caps().workgroup_reductions`, which the CPU backend does
+/// not have, so this fallback is not slow-but-working, it is a guaranteed
+/// panic several calls later with no mention of *why* a GPU was needed. The
+/// planner already knows both facts (it chose `int8` because it costed this
+/// model as a GGUF/int8 build, and it is the one deciding to fall back to
+/// `Cpu`) - it must not hand the caller a placement it knows cannot execute.
+#[test]
+fn int8_that_fits_nowhere_is_a_placement_error_not_a_doomed_cpu_fallback() {
+    struct NothingFits;
+    impl Placer for NothingFits {
+        fn place(&self, _needs: &[gpu_core::devices::Need]) -> Result<Vec<gpu_core::devices::Home>, String> {
+            Err("no card has room".to_string())
+        }
+    }
+    let _serial = PLACER_TEST_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+    install_placer(Arc::new(NothingFits));
+    let (cfg, g, path) = tiny_q8_dit();
+    let _ = &g;
+    let paths = flux2::Paths { dit: path.clone(), vae: "unused".to_string(), te: "unused".to_string(), tokenizer: "unused".to_string() };
+    let vae = vae::VaeConfig::flux2();
+    let err = plan_parts(&cfg, &paths, &vae, Precision::Int8, 96, 32, 1)
+        .expect_err("no device fits and int8 cannot run on the host tier - this must be a reported error, not a silent Cpu placement");
+    assert!(err.contains("int8") && err.contains("GPU"), "error should say why the host-tier fallback was refused: {err}");
+    let _ = std::fs::remove_file(path);
 }
