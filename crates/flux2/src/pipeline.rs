@@ -90,14 +90,23 @@ impl Paths {
 /// References 1.. are encoded at whatever size they were supplied at;
 /// `--ref-size` bounds those before they get here.
 ///
+/// A **windowed** run ([`runs_in_windows`]) reads its first reference off
+/// [`anchored_ref_sizes`] rather than off the file the caller passed: that
+/// reference is the run's anchor and is pinned to the canvas, whether the
+/// caller supplied it, supplied a differently-sized one, or supplied none at
+/// all. So this stays the one rule for what the model is handed, and it covers
+/// the tokens a tiled run's anchor costs before the anchor exists as pixels -
+/// which is what the sizing entry points have to know.
+///
 /// This is the ONE place the rule is written. The sizing entry point
 /// ([`ref_tokens`]), the position-id builder and the denoise loop all read it,
 /// so a pipeline cannot be sized for a sequence different from the one it is
 /// handed.
 pub fn cond_sizes(refs: &[(Vec<f32>, u32, u32)], opts: &GenOpts) -> Vec<Option<(u32, u32)>> {
-    refs.iter()
+    anchored_ref_sizes(refs, opts)
+        .into_iter()
         .enumerate()
-        .map(|(i, &(_, h, w))| {
+        .map(|(i, (h, w))| {
             if i == 0 {
                 init_cond_size(opts.ref_resolution_scale, h, w)
             } else {
@@ -105,6 +114,40 @@ pub fn cond_sizes(refs: &[(Vec<f32>, u32, u32)], opts: &GenOpts) -> Vec<Option<(
             }
         })
         .collect()
+}
+
+/// True when the denoise really runs in more than one window - the only
+/// configuration the anchoring guarantee is about.
+///
+/// [`GenOpts::tile`] alone is not it: a canvas that fits inside the budget
+/// plans to a single window, which [`plan_tiles`] makes bit-for-bit the untiled
+/// path. A single forward over the whole canvas has already seen the whole
+/// composition, so there is nothing for an anchor to add and nothing for two
+/// windows to disagree about.
+pub fn runs_in_windows(o: &GenOpts) -> bool {
+    o.tile.is_some()
+        && plan_tiles((o.height / 16) as usize, (o.width / 16) as usize, o.tile).len() > 1
+}
+
+/// The pixel size `(h, w)` of every reference the run really evaluates.
+///
+/// Untiled - and for a tiled canvas that fits one window - this is exactly what
+/// the caller supplied. A **windowed** run always evaluates a first reference
+/// at the canvas's own size, because that is the one thing that makes
+/// [`crate::refcond::JointLayout::register_aligned_refs`] register it and
+/// therefore makes each window see its own region of it ([`Anchor`]). The
+/// entry is here even when the caller supplied nothing, because a synthesized
+/// anchor costs exactly the same tokens as a supplied one and the pipeline is
+/// sized from these numbers before any anchor exists as pixels.
+pub fn anchored_ref_sizes(refs: &[(Vec<f32>, u32, u32)], o: &GenOpts) -> Vec<(u32, u32)> {
+    let mut sizes: Vec<(u32, u32)> = refs.iter().map(|&(_, h, w)| (h, w)).collect();
+    if runs_in_windows(o) {
+        match sizes.first_mut() {
+            Some(first) => *first = (o.height, o.width),
+            None => sizes.push((o.height, o.width)),
+        }
+    }
+    sizes
 }
 
 /// Conditioning tokens `refs` actually contribute under `opts` -- what a
@@ -220,6 +263,14 @@ pub struct GenOpts {
     /// resolution with time says so. Turning it on below the budget costs
     /// nothing either: the plan is then a single window and the run is
     /// bit-for-bit the untiled one ([`plan_tiles`]).
+    ///
+    /// A plan that really windows is **always two-stage** ([`Anchor`]): before
+    /// the first window is denoised there is a full-canvas anchor at the
+    /// canvas's own token grid, and each window is conditioned on its own
+    /// region of it. Supplied as the first reference (resampled to the canvas
+    /// if it is not already there) or drafted in one forward from the prompt -
+    /// but never absent, because windows that see only the prompt each compose
+    /// their own whole scene.
     pub tile: Option<Tiling>,
 }
 
@@ -340,6 +391,14 @@ pub fn img2img_sigmas(strength: f32, steps: usize, n_gen: usize) -> Vec<f32> {
 // for it: this is the published failure mode of MultiDiffusion under
 // accelerated samplers, where too few steps remain after each window has
 // committed to its own structure.
+//
+// Which is why the composition is not left to that reconciliation at all. A
+// windowed run is ALWAYS anchored on a full-canvas picture at the canvas's own
+// token grid (`Anchor`, `anchor_for`) - supplied, resampled, or drafted in one
+// forward from the prompt - so every window is conditioned on its own region of
+// ONE global layout and the windows have nothing structural left to agree on.
+// What they still reconcile through the shared latent is local detail, which is
+// what three rounds are enough for.
 
 /// Tiled generation: the canvas is denoised in overlapping windows of at most
 /// `size`, so one DiT forward's cost follows `size` rather than the canvas.
@@ -530,6 +589,116 @@ pub fn ref_tokens_per_forward(refs: &[(Vec<f32>, u32, u32)], opts: &GenOpts) -> 
         .map(|t| canvas.window(t.y0, t.x0, t.th, t.tw).n_ref() as u32)
         .max()
         .unwrap_or(0)
+}
+
+/// How a windowed run gets the full-canvas anchor every one of its windows is
+/// conditioned on - the decision [`crate::pipeline`] takes before any tiled
+/// denoising happens, and the reason a naive tiled run is not a reachable
+/// state.
+///
+/// A window is a forward that sees a fraction of the canvas. Position ids tell
+/// it *where* it sits ([`crate::refcond::JointLayout::window`]), but nothing in
+/// them says what the rest of the picture already contains, and klein's four
+/// distilled steps leave the windows almost no rounds to reconcile through the
+/// shared canvas latent (see the note on [`Tiling`]). Handed only a prompt,
+/// each window therefore composes its own plausible whole scene: a real
+/// 2048x1152 from-scratch run drew the same canal-and-campanile vista three
+/// times over, in three different windows, none of them a copy of another.
+///
+/// The fix is that every window must be conditioned on the SAME picture of the
+/// whole canvas, at the canvas's own token grid so that each window can be
+/// cropped to its own region of it. Where that picture comes from is this
+/// enum's four cases, and only the last of them costs a model call.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Anchor {
+    /// One forward covers the whole canvas (untiled, or a tiling that plans to
+    /// a single window), so the composition is already decided globally.
+    /// Nothing to anchor, and nothing is changed.
+    Whole,
+    /// The caller's first reference is already at the canvas resolution - the
+    /// edit/declutter case, where the reference IS the picture being repainted.
+    /// It is used exactly as supplied.
+    Given,
+    /// The caller's first reference, resampled from `from` to the canvas.
+    ///
+    /// A plain pixel resize, not a generative step: the reference is already a
+    /// coherent whole-canvas composition (it is a photograph), it is simply not
+    /// at the resolution the caller asked the canvas to be. Without this,
+    /// "upscale this room photo" fails the exact-grid test that registers a
+    /// reference and silently falls back to handing every window the whole
+    /// photograph - the duplication bug, for the most ordinary request there
+    /// is.
+    Resampled { from: (u32, u32) },
+    /// Nothing was supplied: draft the canvas at `size` in ONE forward, upscale
+    /// the draft to the canvas, and refine from it at `strength`.
+    ///
+    /// The draft is what makes the composition global - a single forward sees
+    /// all of it, so there is one canal and one campanile by construction - and
+    /// the refine is what makes it the requested resolution, each window adding
+    /// detail to a layout it is not free to reinvent.
+    Draft { size: (u32, u32), strength: f32 },
+}
+
+/// [`GenOpts::strength`] a synthesized draft anchor is refined at when the
+/// caller states none.
+///
+/// The refine starts from `x_σ = (1−σ)·x₀ + σ·ε` at `σ = 0.4` over the
+/// upscaled draft and integrates the schedule compressed into `[0, 0.4]`
+/// ([`img2img_sigmas`]), so the number is a budget shared between two
+/// requirements that pull opposite ways: the draft's layout has to survive the
+/// refine (which wants a low value), and each window has to be able to paint
+/// detail an upscale cannot invent - a 2x Lanczos/bilinear enlargement is
+/// structurally complete and locally soft - which wants a high one. 0.4 is
+/// what a hand-verified 1024x576 → 2048x1152 klein-9b run reconciled the two
+/// at: the landmark stayed singular and in place while the windows resolved
+/// stonework the draft never had. `--strength` overrides it, and means the
+/// same thing it always did - how much of the denoise starts from the first
+/// reference - because the draft IS that reference.
+pub const DEFAULT_DRAFT_ANCHOR_STRENGTH: f32 = 0.4;
+
+/// Which [`Anchor`] a request takes, from its geometry alone.
+///
+/// Pure, and decided before anything is loaded: the CLI prints it, the sizing
+/// entry points are consistent with it ([`anchored_ref_sizes`]), and
+/// [`Pipeline::generate_batch`] executes it.
+pub fn anchor_for(refs: &[(Vec<f32>, u32, u32)], o: &GenOpts) -> Anchor {
+    if !runs_in_windows(o) {
+        return Anchor::Whole;
+    }
+    match refs.first() {
+        Some(&(_, h, w)) if (h, w) == (o.height, o.width) => Anchor::Given,
+        Some(&(_, h, w)) => Anchor::Resampled { from: (h, w) },
+        None => Anchor::Draft {
+            size: draft_size(o),
+            strength: o.strength.unwrap_or(DEFAULT_DRAFT_ANCHOR_STRENGTH),
+        },
+    }
+}
+
+/// The canvas a draft anchor is generated at, as `(width, height)` in pixels:
+/// the target aspect ratio, as large as ONE forward of this run's own budget
+/// allows.
+///
+/// Priced for a run whose only reference is the anchor itself, which is the
+/// only case that drafts ([`Anchor::Draft`]).
+///
+/// The budget is not a constant and not a second opinion about what the card
+/// can do - it is `gen_tokens_per_forward + ref_tokens_per_forward`, the joint
+/// image sequence one window of the refine pass already evaluates, which is
+/// exactly what [`Pipeline::build_sized`]'s caller sized the DiT's scratch for.
+/// So a draft can never be the pass that fails to fit: a pipeline built for the
+/// tiled run it belongs to is built for it too.
+///
+/// Both axes are floored to whole latent tokens independently, so the aspect
+/// ratio is preserved to within one token and flooring alone keeps the product
+/// under the budget. A canvas that already fits is drafted at its own size -
+/// there is nothing to gain from drafting smaller than the model can see.
+pub fn draft_size(o: &GenOpts) -> (u32, u32) {
+    let budget = (gen_tokens_per_forward(o) + ref_tokens_per_forward(&[], o)).max(1) as f64;
+    let (lh, lw) = ((o.height / 16).max(1) as f64, (o.width / 16).max(1) as f64);
+    let s = (budget / (lh * lw)).sqrt().min(1.0);
+    let q = |d: f64| ((d * s) as u32).max(1) * 16;
+    (q(lw).min(o.width), q(lh).min(o.height))
 }
 
 /// Per-token blend weight of one window over its own tokens: a trapezoid that
@@ -1711,6 +1880,132 @@ impl Denoiser for Pipeline {
     }
 }
 
+/// A request whose [`Anchor`] has been established: if it denoises in windows
+/// at all, its FIRST reference exists and is at the canvas resolution, so
+/// [`crate::refcond::JointLayout::register_aligned_refs`] registers it and every
+/// window is conditioned on its own region of one global composition.
+///
+/// The type is the guarantee. [`plan_on`] and [`denoise_group_on`] take an
+/// `Anchored` and nothing else, [`Anchored::of`] is the only way to make one,
+/// and it is the step that drafts or resamples the anchor - so "tiled denoising
+/// against a wrong-sized reference, or against nothing at all" is not a state
+/// this module can be put into by a later edit that forgets the rule. That
+/// state is where the duplicated-landmark bug lives ([`Anchor`]), and a flag
+/// or a convention would only have made it discouraged.
+struct Anchored(BatchRequest);
+
+impl std::ops::Deref for Anchored {
+    type Target = BatchRequest;
+    fn deref(&self) -> &BatchRequest {
+        &self.0
+    }
+}
+
+impl Anchored {
+    /// Establish `r`'s anchor, generating the draft if that is what
+    /// [`anchor_for`] asks for.
+    ///
+    /// `drafted` is the already-rendered draft for a [`Anchor::Draft`] request
+    /// (rgb8 HWC with its size), because a batch drafts all of its requests
+    /// through ONE nested [`generate_batch_on`] rather than one call each -
+    /// drafts are ordinary untiled generations and batch like any other.
+    fn of(r: &BatchRequest, drafted: Option<(Vec<u8>, u32, u32)>) -> Result<Anchored, String> {
+        let (w, h) = (r.opts.width, r.opts.height);
+        let mut req = r.clone();
+        match anchor_for(&r.refs, &r.opts) {
+            Anchor::Whole | Anchor::Given => {}
+            Anchor::Resampled { from: (rh, rw) } => {
+                let chw = resize_ref(&r.refs[0].0, rh, rw, h, w);
+                req.refs[0] = (chw, h, w);
+            }
+            Anchor::Draft { strength, .. } => {
+                let (rgb, dw, dh) = drafted.ok_or("flux2: a drafted anchor was not rendered")?;
+                // Pixels, not latents: the draft is enlarged the way any image
+                // is and then re-encoded at the canvas grid, which is what
+                // makes it a reference the existing machinery already knows how
+                // to crop per window.
+                let hwc: Vec<f32> = rgb.iter().map(|&b| b as f32 / 255.0).collect();
+                let up = imaging::resize_bilinear_hwc(&hwc, 3, dw, dh, w, h);
+                req.refs = vec![ref_from_hwc(&up, w, h)?];
+                // The draft IS the first reference, so `strength` keeps its one
+                // meaning - how much of the denoise starts from it - and the
+                // caller's own `--strength` (if any) already chose this value.
+                req.opts.strength = Some(strength);
+            }
+        }
+        if runs_in_windows(&req.opts) && req.refs.first().map(|&(_, rh, rw)| (rh, rw)) != Some((h, w)) {
+            return Err(format!(
+                "flux2: internal: a {w}x{h} windowed canvas reached the denoiser without its \
+                 canvas-resolution anchor"
+            ));
+        }
+        Ok(Anchored(req))
+    }
+}
+
+/// The untiled generation whose result becomes `r`'s anchor: the same prompt,
+/// seed and sampler, at [`draft_size`], in ONE forward.
+///
+/// One forward is the entire point - the DiT sees the whole composition, so the
+/// scene it lays out is globally consistent by construction rather than by
+/// agreement between windows that cannot see each other. Everything that could
+/// make the draft a different picture from the one being asked for is dropped:
+/// no tiling (it would recurse), no mask (a mask preserves a source the draft
+/// does not have), and no `strength` (there is nothing to start from yet).
+fn draft_request(r: &BatchRequest, size: (u32, u32)) -> BatchRequest {
+    BatchRequest {
+        prompt: r.prompt.clone(),
+        refs: Vec::new(),
+        opts: GenOpts {
+            width: size.0,
+            height: size.1,
+            tile: None,
+            mask: None,
+            strength: None,
+            ..r.opts.clone()
+        },
+        cancel: r.cancel.clone(),
+    }
+}
+
+/// Establish every request's [`Anchor`], rendering all the drafts a batch needs
+/// through ONE nested [`generate_batch_on`] so they batch the way canvases do.
+fn anchor_all_on<D: Denoiser>(
+    d: &D,
+    reqs: &[BatchRequest],
+    progress: &mut dyn FnMut(u32, u32, &str),
+) -> Vec<Result<Anchored, String>> {
+    let wanted: Vec<usize> = reqs
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| matches!(anchor_for(&r.refs, &r.opts), Anchor::Draft { .. }))
+        .map(|(i, _)| i)
+        .collect();
+    let mut drafts: Vec<BatchOutcome> = Vec::new();
+    if !wanted.is_empty() {
+        let jobs: Vec<BatchRequest> = wanted
+            .iter()
+            .map(|&i| match anchor_for(&reqs[i].refs, &reqs[i].opts) {
+                Anchor::Draft { size, .. } => draft_request(&reqs[i], size),
+                _ => unreachable!("filtered to drafting requests"),
+            })
+            .collect();
+        // Renamed on the way out so a caller's phase accounting can tell the
+        // anchor pass from the refine pass it pays for.
+        drafts = generate_batch_on(d, &jobs, &mut |s, t, m| progress(s, t, &format!("draft: {m}")));
+    }
+    let mut rendered: std::collections::HashMap<usize, BatchOutcome> =
+        wanted.into_iter().zip(drafts).collect();
+    reqs.iter()
+        .enumerate()
+        .map(|(i, r)| match rendered.remove(&i) {
+            Some(Err(e)) => Err(e),
+            Some(Ok(img)) => Anchored::of(r, Some(img)),
+            None => Anchored::of(r, None),
+        })
+        .collect()
+}
+
 /// [`Pipeline::generate_batch`] over any [`Denoiser`].
 fn generate_batch_on<D: Denoiser>(
     d: &D,
@@ -1718,12 +2013,15 @@ fn generate_batch_on<D: Denoiser>(
     progress: &mut dyn FnMut(u32, u32, &str),
 ) -> Vec<BatchOutcome> {
     let mut out: Vec<BatchOutcome> = (0..reqs.len()).map(|_| Err("not run".to_string())).collect();
+    // Before anything is denoised: every windowed request gets the
+    // canvas-resolution anchor its windows are conditioned on.
+    let anchored = anchor_all_on(d, reqs, progress);
     // Partition by tile plan: one slab layout per group. Untiled requests plan
     // to a single whole-canvas window, so the key is the joint position ids it
     // always was.
     let mut groups: Vec<(Vec<TilePlan>, Vec<usize>)> = Vec::new();
-    for (i, r) in reqs.iter().enumerate() {
-        match plan_on(d, r) {
+    for (i, r) in anchored.iter().enumerate() {
+        match r.as_ref().map_err(|e| e.clone()).and_then(|r| plan_on(d, r)) {
             Err(e) => out[i] = Err(e),
             Ok(plan) => match groups.iter_mut().find(|(g, _)| *g == plan) {
                 Some((_, v)) => v.push(i),
@@ -1732,7 +2030,7 @@ fn generate_batch_on<D: Denoiser>(
         }
     }
     for (plan, members) in groups {
-        denoise_group_on(d, reqs, &plan, &members, &mut out, progress);
+        denoise_group_on(d, &anchored, &plan, &members, &mut out, progress);
     }
     out
 }
@@ -1752,7 +2050,7 @@ fn generate_batch_on<D: Denoiser>(
 /// reference encoded at the canvas's own token grid is the picture being
 /// edited, so a window of the canvas is conditioned on the matching window of
 /// it. Nothing else in the pipeline needs to know - the layout carries it.
-fn layout_of(txt_len: usize, r: &BatchRequest) -> Result<crate::refcond::JointLayout, String> {
+fn layout_of(txt_len: usize, r: &Anchored) -> Result<crate::refcond::JointLayout, String> {
     canvas_layout(txt_len, &r.refs, &r.opts)
 }
 
@@ -1769,6 +2067,21 @@ fn canvas_layout(
     }
     if let Some(t) = o.tile {
         t.check()?;
+    }
+    // A windowed run's first reference is its anchor, and an anchor only
+    // anchors anything if it is registered to the canvas - which is exact grid
+    // equality. `ref_resolution_scale` below 1 shrinks precisely that copy, so
+    // the two options cannot both be honoured; say so rather than quietly
+    // dropping one of them and reproducing the failure the anchor exists to
+    // prevent.
+    if runs_in_windows(o) && o.ref_resolution_scale < 1.0 {
+        return Err(format!(
+            "--ref-resolution-scale {} cannot be combined with a windowed (tiled) run: each window \
+             is conditioned on its own region of the first reference, which requires that \
+             reference at the canvas's own token grid. Drop --ref-resolution-scale, or drop \
+             --tile-size.",
+            o.ref_resolution_scale
+        ));
     }
     let (lh, lw) = ((o.height / 16) as usize, (o.width / 16) as usize);
     // Keep in step with the token builder: a reference contributes position
@@ -1807,7 +2120,7 @@ struct TilePlan {
 
 /// Validate one request and return its tile plan (the key that decides which
 /// requests can share a batched forward).
-fn plan_on<D: Denoiser>(d: &D, r: &BatchRequest) -> Result<Vec<TilePlan>, String> {
+fn plan_on<D: Denoiser>(d: &D, r: &Anchored) -> Result<Vec<TilePlan>, String> {
     let o = &r.opts;
     let canvas = layout_of(d.cfg().txt_len, r)?;
     let (lh, lw) = (canvas.lh, canvas.lw);
@@ -1844,7 +2157,7 @@ struct Preserve {
 /// One id-group's shared denoise loop.
 fn denoise_group_on<D: Denoiser>(
     d: &D,
-    reqs: &[BatchRequest],
+    reqs: &[Result<Anchored, String>],
     plan: &[TilePlan],
     members: &[usize],
     out: &mut [BatchOutcome],
@@ -1870,10 +2183,12 @@ fn denoise_group_on<D: Denoiser>(
         /// trajectory bit-for-bit what it was before masking existed.
         preserve: Option<Preserve>,
     }
-    let max_steps_hint = members.iter().map(|&i| reqs[i].steps_for(cfg.distilled)).max().unwrap_or(0) as u32;
+    // Only anchored requests are ever grouped, so every member is `Ok` here.
+    let req = |i: usize| -> &Anchored { reqs[i].as_ref().expect("a group only carries anchored members") };
+    let max_steps_hint = members.iter().map(|&i| req(i).steps_for(cfg.distilled)).max().unwrap_or(0) as u32;
     let mut lanes: Vec<Lane> = Vec::new();
     for &i in members {
-        let r = &reqs[i];
+        let r = req(i);
         let o = &r.opts;
         let layout = match layout_of(cfg.txt_len, r) {
             Ok(l) => l,
@@ -2024,7 +2339,7 @@ fn denoise_group_on<D: Denoiser>(
         // Cancellation is per request: a cancelled lane leaves the batch and
         // the others keep going (the scheduler handed us N independent jobs).
         lanes.retain(|l| {
-            if reqs[l.idx].cancel.is_cancelled() {
+            if req(l.idx).cancel.is_cancelled() {
                 out[l.idx] = Err("cancelled".into());
                 false
             } else {
@@ -2130,7 +2445,7 @@ fn denoise_group_on<D: Denoiser>(
 
     progress(max_steps as u32 + 2, max_steps as u32 + 2, "decoding");
     for l in &lanes {
-        let o = &reqs[l.idx].opts;
+        let o = &req(l.idx).opts;
         out[l.idx] = d.decode_tokens(&l.lat, l.lh, l.lw).map(|rgb| (rgb, o.width, o.height));
     }
 }
@@ -2179,8 +2494,19 @@ impl BatchRequest {
 /// **center-cropped** to multiples of 16. Returns `(chw, h, w)` with the
 /// cropped dims — the ONE implementation shared by the CLI and the capability
 /// provider.
+/// The size `(w, h)` a `w x h` reference is center-cropped to on the way in:
+/// whole latent tokens on each axis.
+///
+/// Stated once, here, because a caller that has to predict a reference's final
+/// geometry before converting it - the CLI decides the canvas from the init
+/// reference, and it has to decide it before it bounds anything - would
+/// otherwise restate the rule and be wrong by up to 15 px the day it changes.
+pub fn ref_crop_size(w: u32, h: u32) -> (u32, u32) {
+    (w - w % 16, h - h % 16)
+}
+
 pub fn ref_from_hwc(hwc: &[f32], w: u32, h: u32) -> Result<(Vec<f32>, u32, u32), String> {
-    let (cw, ch) = (w - w % 16, h - h % 16);
+    let (cw, ch) = ref_crop_size(w, h);
     if cw == 0 || ch == 0 {
         return Err(format!("reference image {w}×{h} is smaller than 16×16"));
     }
@@ -3470,23 +3796,24 @@ mod tests {
     }
 
     /// **Tiling gate 6 - an UNREGISTERED reference is carried whole by every
-    /// window.** A reference that is not at the canvas's own token grid - here
-    /// a `--ref-resolution-scale 0.5` conditioning copy, and equally any
-    /// photograph of something other than the canvas - has no per-window region
-    /// to crop to: token `(h, w)` of it is not a picture of canvas cell
-    /// `(h, w)`. Such a reference is generic guidance, so every window must
-    /// receive all of it, at the same ids and the same values the single
-    /// full-canvas forward uses. This is the fallback that gate 7 below must
-    /// not break while it crops the registered case.
+    /// window.** A windowed run's FIRST reference is its anchor and is pinned to
+    /// the canvas ([`Anchor`]), but a SECOND one is a photograph of something
+    /// else: token `(h, w)` of it is not a picture of canvas cell `(h, w)`, so
+    /// it has no per-window region to crop to. Such a reference is generic
+    /// guidance, and every window must receive all of it, at the same ids and
+    /// the same values the single full-canvas forward uses. This is the
+    /// fallback that gate 7 below must not break while it crops the registered
+    /// case, and the two must compose inside ONE request - a run with both an
+    /// anchor and a guidance photograph has to crop the first and repeat the
+    /// second.
     ///
     /// Gate 2 above proves the id ARITHMETIC composes. This proves the SAMPLER
-    /// does: a real `--strength 1.0` request, whose reference is encoded at the
-    /// downscale `cond_sizes` picks rather than at its own dimensions, is driven
+    /// does: a real `--strength 1.0` request with two references is driven
     /// through the actual request path, and every sequence the DiT was handed is
     /// checked against the single full-canvas forward the same request makes
     /// untiled. Each window must carry, for its own image rows, exactly the ids
-    /// that forward assigns that absolute region - and, for the shared reference
-    /// tail, exactly its ids and exactly its token values.
+    /// that forward assigns that absolute region - and, for the guidance
+    /// reference's tail, exactly its ids and exactly its token values.
     #[test]
     fn a_tiled_unregistered_reference_is_carried_whole_by_every_window() {
         let (w, h) = (512u32, 384u32);
@@ -3495,22 +3822,21 @@ mod tests {
         let base = GenOpts {
             width: w,
             height: h,
-            // Full strength: the init latent is pure noise and the reference
-            // is the model's only source of "what room is this", which is
+            // Full strength: the init latent is pure noise and the references
+            // are the model's only source of "what room is this", which is
             // exactly the configuration a paired-trained adapter deploys in.
             strength: Some(1.0),
-            // Half resolution, so the conditioning copy is 16x12 tokens against
-            // the canvas's 32x24 and there is no cell-for-cell correspondence
-            // to crop along - the case this gate is about.
-            ref_resolution_scale: 0.5,
             steps: Some(1),
             experimental_steps: true,
             seed: 7,
             ..GenOpts::default()
         };
+        // The anchor at the canvas grid, then a guidance photograph at 160x96 -
+        // 10x6 tokens against the canvas's 32x24, with no cell-for-cell
+        // correspondence to crop along, which is the case this gate is about.
         let req = |tile: Option<Tiling>| BatchRequest {
             prompt: "a decluttered living room".into(),
-            refs: vec![source(h, w)],
+            refs: vec![source(h, w), source(96, 160)],
             opts: GenOpts { tile, ..base.clone() },
             cancel: Default::default(),
         };
@@ -3526,9 +3852,9 @@ mod tests {
         let untiled = one.seen.borrow();
         let (full_joint, full_ids) = untiled.first().expect("one full-canvas forward");
         let nt = one.cfg.txt_len;
-        let n_ref = full_joint.len() / cin - lh * lw;
-        assert!(n_ref > 0, "the gate needs a reference that really conditions the forward");
-        assert_ne!(n_ref, lh * lw, "the gate needs a reference that is NOT at the canvas grid");
+        // The guidance reference's own tokens, whatever the window.
+        let n_guide = (96 / 16) * (160 / 16);
+        assert_eq!(full_joint.len() / cin, 2 * lh * lw + n_guide, "the gate needs an anchor AND a guidance reference");
 
         // The same request, tiled.
         let many = Stub::new();
@@ -3543,8 +3869,11 @@ mod tests {
 
         for (t, (joint, ids)) in tiles.iter().zip(seen.iter()) {
             let n_gen = t.th * t.tw;
-            assert_eq!(ids.len(), (nt + n_gen + n_ref) * 4, "tile at ({},{}) sequence length", t.y0, t.x0);
-            assert_eq!(joint.len(), (n_gen + n_ref) * cin, "tile at ({},{}) token count", t.y0, t.x0);
+            // The anchor is cropped to the window; the guidance reference is
+            // not, so the tail is one window of the first plus all of the
+            // second.
+            assert_eq!(ids.len(), (nt + 2 * n_gen + n_guide) * 4, "tile at ({},{}) sequence length", t.y0, t.x0);
+            assert_eq!(joint.len(), (2 * n_gen + n_guide) * cin, "tile at ({},{}) token count", t.y0, t.x0);
             // Text conditioning is shared, untouched by the window.
             assert_eq!(&ids[..nt * 4], &full_ids[..nt * 4], "text rows moved");
             // Every image row sits where the untiled forward put it - and
@@ -3560,11 +3889,19 @@ mod tests {
                     assert_eq!(&joint[m..m + cin], &full_joint[h..h + cin], "tile at ({},{}), token ({y},{x})", t.y0, t.x0);
                 }
             }
-            // The reference tail: same ids AND the same tokens, on every
-            // window. A window that re-encoded or re-positioned the reference
-            // would condition on a different photograph than its neighbour.
-            assert_eq!(&ids[(nt + n_gen) * 4..], &full_ids[(nt + lh * lw) * 4..], "reference ids moved with the tile");
-            assert_eq!(&joint[n_gen * cin..], &full_joint[lh * lw * cin..], "reference tokens moved with the tile");
+            // The guidance reference's tail: same ids AND the same tokens, on
+            // every window. A window that re-encoded or re-positioned it would
+            // condition on a different photograph than its neighbour.
+            assert_eq!(
+                &ids[(nt + 2 * n_gen) * 4..],
+                &full_ids[(nt + 2 * lh * lw) * 4..],
+                "guidance reference ids moved with the tile"
+            );
+            assert_eq!(
+                &joint[2 * n_gen * cin..],
+                &full_joint[2 * lh * lw * cin..],
+                "guidance reference tokens moved with the tile"
+            );
         }
 
         // Negative control, so the equalities above are a claim and not an
@@ -3758,16 +4095,22 @@ mod tests {
             "without tiling the whole canvas is one forward, as before"
         );
 
-        // And the sampler honours it: no forward ever sees more than one
-        // tile's worth of generated tokens.
+        // And the sampler honours it: no forward - the anchor's draft pass
+        // included - ever sees more than the joint sequence the pipeline is
+        // sized for. That is a window's generated tokens PLUS its own crop of
+        // the canvas anchor, which is the price of every window knowing what
+        // the rest of the picture contains.
         let ch = Stub::new().cfg.in_channels;
+        let real = GenOpts { width: 2048, height: 1536, tile: Some(t), ..GenOpts::default() };
+        let joint = (gen_tokens_per_forward(&real) + ref_tokens_per_forward(&[], &real)) as usize;
+        assert_eq!(joint, 2 * budget, "a window carries its own crop of the anchor and nothing more");
         let (_, seen) = tiled_run(Some(t), 2048, 1536, Vec::new(), 1);
         assert!(seen.len() > 1, "a 2048x1536 canvas must take several forwards");
         assert!(
-            seen.iter().all(|(j, _)| j.len() <= budget * ch),
+            seen.iter().all(|(j, _)| j.len() <= joint * ch),
             "a forward saw {} floats, past the {} the budget allows",
             seen.iter().map(|(j, _)| j.len()).max().unwrap(),
-            budget * ch
+            joint * ch
         );
     }
 
@@ -3837,9 +4180,16 @@ mod tests {
             tile,
             ..GenOpts::default()
         };
+        // A canvas-sized reference, so the comparison is between two runs of
+        // the SAME configuration: a windowed run is always anchored on one
+        // ([`Anchor`]), and supplying it here is what keeps the untiled arm
+        // the same request rather than a differently-conditioned one. The
+        // velocity below reads only position ids, so what the reference
+        // contains cannot affect the equality - only whether both arms have
+        // one.
         let req = BatchRequest {
             prompt: "a long coastline".into(),
-            refs: Vec::new(),
+            refs: vec![source(h, w)],
             opts,
             cancel: Default::default(),
         };
@@ -4066,6 +4416,249 @@ mod tests {
             }
         }
         assert!(hits.iter().all(|&h| h > 0), "a canvas cell is owned by no window");
+    }
+
+    /// **Tiling gate 10 - a windowed canvas is never denoised without a
+    /// full-canvas anchor, even with nothing to anchor it TO.** Gate 7 fixed
+    /// the seam between windows that share a reference; this is the failure
+    /// that is left when there is no reference at all.
+    ///
+    /// A prompt-only tiled canvas is the case where every window is told "a
+    /// canal, a campanile, a bridge" and nothing else. Each one is a plausible
+    /// rendering of that sentence, none of them knows another window has
+    /// already claimed the campanile, and klein's four distilled steps leave
+    /// no room for the windows to reconcile through the shared canvas - so a
+    /// 2048x1152 from-scratch run really does draw the same vista three times
+    /// over, verified on the real weights. The blend is innocent: the
+    /// duplication is in what the windows were *told*.
+    ///
+    /// So a windowed run with no reference must first DRAFT the canvas in one
+    /// forward - the composition decided globally, where the DiT can see all
+    /// of it - and then refine from that draft, each window conditioned on its
+    /// own region of it. The shape of the forwards is the whole claim: one
+    /// draft pass small enough to fit a single forward, then one pass per
+    /// window, each carrying its own window-sized crop of the anchor.
+    #[test]
+    fn a_windowed_prompt_only_run_is_anchored_on_a_drafted_canvas() {
+        let (w, h) = (1024u32, 768u32);
+        let t = Tiling { size: 256, overlap: 64 };
+        let (lh, lw) = ((h / 16) as usize, (w / 16) as usize);
+        let tiles = plan_tiles(lh, lw, Some(t));
+        assert!(tiles.len() > 1, "the gate needs a canvas that actually tiles");
+        let cin = Stub::new().cfg.in_channels;
+        let (_, seen) = tiled_run(Some(t), w, h, Vec::new(), 1);
+
+        // One draft forward over the WHOLE composition, then one forward per
+        // window. Anything else is a window painting from nothing.
+        assert_eq!(
+            seen.len(),
+            1 + tiles.len(),
+            "expected one draft forward plus one per window, got {} forwards",
+            seen.len()
+        );
+        let draft_tokens = seen[0].0.len() / cin;
+        assert!(
+            draft_tokens < lh * lw,
+            "the draft is {draft_tokens} tokens against the canvas's {} - it must fit ONE forward",
+            lh * lw
+        );
+        assert!(
+            draft_tokens <= (gen_tokens_per_forward(&GenOpts { width: w, height: h, tile: Some(t), ..GenOpts::default() })
+                + ref_tokens_per_forward(&[], &GenOpts { width: w, height: h, tile: Some(t), ..GenOpts::default() })) as usize,
+            "the draft forward is bigger than the budget the tiled run is sized for"
+        );
+        for (q, (joint, _)) in tiles.iter().zip(seen[1..].iter()) {
+            assert_eq!(
+                joint.len(),
+                2 * q.th * q.tw * cin,
+                "window at ({},{}) denoised without its own crop of the anchor",
+                q.y0,
+                q.x0
+            );
+        }
+    }
+
+    /// **Tiling gate 11 - a reference that is not at the canvas resolution is
+    /// resampled to it, not left to re-engage the old failure.**
+    /// [`crate::refcond::JointLayout::register_aligned_refs`] registers a
+    /// reference by exact grid equality, so "upscale this room photo to
+    /// 2048x1360" - a reference at its own native size under a larger canvas -
+    /// silently fell back to handing every window the whole photograph, which
+    /// is gate 7's bug for the most ordinary request there is.
+    ///
+    /// The resample is a plain pixel resize of the reference the caller gave,
+    /// so the anchor is that photograph and not a redrawing of it: no draft is
+    /// generated, and every window's reference tail is the crop of the resized
+    /// reference that matches its own canvas region.
+    #[test]
+    fn a_windowed_run_resamples_an_off_size_reference_to_the_canvas() {
+        let (w, h) = (512u32, 384u32);
+        let t = Tiling { size: 256, overlap: 64 };
+        let (lh, lw) = ((h / 16) as usize, (w / 16) as usize);
+        let tiles = plan_tiles(lh, lw, Some(t));
+        assert!(tiles.len() > 1, "the gate needs a canvas that actually tiles");
+        let small = source(h / 2, w / 2);
+        let (_, seen) = tiled_run(Some(t), w, h, vec![small.clone()], 1);
+        assert_eq!(seen.len(), tiles.len(), "a supplied reference needs no draft forward");
+
+        // What the anchor must BE: the caller's reference, resized to the
+        // canvas and encoded there.
+        let d = Stub::new();
+        let cin = d.cfg.in_channels;
+        let up = resize_ref(&small.0, small.1, small.2, h, w);
+        let anchor = d.encode_image(&up, h, w).expect("stub encode");
+        assert_eq!(anchor.len(), lh * lw * cin);
+        for (q, (joint, _)) in tiles.iter().zip(&seen) {
+            assert_eq!(
+                joint.len(),
+                2 * q.th * q.tw * cin,
+                "window at ({},{}) carries a reference that is not its own crop of the canvas",
+                q.y0,
+                q.x0
+            );
+            for y in 0..q.th {
+                for x in 0..q.tw {
+                    let mine = (q.th * q.tw + y * q.tw + x) * cin;
+                    let theirs = ((q.y0 + y) * lw + q.x0 + x) * cin;
+                    assert_eq!(
+                        &joint[mine..mine + cin],
+                        &anchor[theirs..theirs + cin],
+                        "window at ({},{}) was conditioned on something other than the resized reference at ({y},{x})",
+                        q.y0,
+                        q.x0
+                    );
+                }
+            }
+        }
+    }
+
+    /// **Tiling gate 12 - a reference already at the canvas resolution is
+    /// carried through untouched.** No draft forward, and no resample: the
+    /// anchor is the caller's own pixels, encoded exactly as they were before
+    /// anchoring existed. This is the edit/declutter path, and the cost of the
+    /// guarantee on it must be zero.
+    #[test]
+    fn a_canvas_sized_reference_is_neither_redrawn_nor_resampled() {
+        let (w, h) = (512u32, 384u32);
+        let t = Tiling { size: 256, overlap: 64 };
+        let (lh, lw) = ((h / 16) as usize, (w / 16) as usize);
+        let tiles = plan_tiles(lh, lw, Some(t));
+        assert!(tiles.len() > 1, "the gate needs a canvas that actually tiles");
+        let given = source(h, w);
+        let (_, seen) = tiled_run(Some(t), w, h, vec![given.clone()], 1);
+        assert_eq!(seen.len(), tiles.len(), "a canvas-sized reference needs no draft forward");
+        let d = Stub::new();
+        let cin = d.cfg.in_channels;
+        let anchor = d.encode_image(&given.0, h, w).expect("stub encode");
+        for (q, (joint, _)) in tiles.iter().zip(&seen) {
+            for y in 0..q.th {
+                for x in 0..q.tw {
+                    let mine = (q.th * q.tw + y * q.tw + x) * cin;
+                    let theirs = ((q.y0 + y) * lw + q.x0 + x) * cin;
+                    assert_eq!(
+                        &joint[mine..mine + cin],
+                        &anchor[theirs..theirs + cin],
+                        "window at ({},{}) resampled a reference that was already the canvas",
+                        q.y0,
+                        q.x0
+                    );
+                }
+            }
+        }
+    }
+
+    /// **Tiling gate 13 - the untiled path is untouched by all of it.** A run
+    /// that never asked for `--tile-size` sees ONE forward per step over the
+    /// whole canvas, with no reference rows, exactly as it did before the
+    /// anchoring guarantee existed. The guarantee is a property of windowed
+    /// denoising; a single forward over the whole canvas already has the only
+    /// thing it buys.
+    #[test]
+    fn an_untiled_run_gains_no_anchor() {
+        let (w, h) = (256u32, 192u32);
+        let (lh, lw) = ((h / 16) as usize, (w / 16) as usize);
+        let cin = Stub::new().cfg.in_channels;
+        let (_, seen) = tiled_run(None, w, h, Vec::new(), 3);
+        assert_eq!(seen.len(), 3, "one forward per step over the whole canvas");
+        assert!(
+            seen.iter().all(|(j, _)| j.len() == lh * lw * cin),
+            "an untiled forward grew a reference tail it never asked for"
+        );
+    }
+
+    /// **Tiling gate 14 - the anchoring decision is a value, and an unanchored
+    /// windowed request is not representable.** [`anchor_for`] reads the four
+    /// cases off the geometry alone, before anything is loaded, so the CLI can
+    /// print the plan and the sizing entry points can price it; and
+    /// [`Anchored::of`] - the only constructor of the only type
+    /// [`denoise_group_on`] accepts - refuses a windowed request that somehow
+    /// arrives without its canvas-resolution first reference.
+    ///
+    /// That refusal is meant to be unreachable. It is gated anyway, because
+    /// "unreachable" is a claim about today's call graph and this is the state
+    /// the duplicated-landmark bug lives in.
+    #[test]
+    fn the_anchor_decision_is_explicit_and_an_unanchored_window_is_refused() {
+        let (w, h) = (2048u32, 1152u32);
+        let t = Tiling { size: 512, overlap: 128 };
+        let windowed = GenOpts { width: w, height: h, tile: Some(t), ..GenOpts::default() };
+        let canvas = vec![source(h, w)];
+
+        // Untiled, and a tiling that plans to a single window, are the same
+        // case: one forward already sees the whole composition.
+        assert_eq!(anchor_for(&[], &GenOpts { tile: None, ..windowed.clone() }), Anchor::Whole);
+        let small = GenOpts { width: 256, height: 256, tile: Some(t), ..GenOpts::default() };
+        assert_eq!(plan_tiles(16, 16, Some(t)).len(), 1, "the gate needs a canvas inside the budget");
+        assert_eq!(anchor_for(&[], &small), Anchor::Whole);
+
+        // A canvas-sized reference is used as it is; an off-size one is
+        // resampled; nothing at all is drafted.
+        assert_eq!(anchor_for(&canvas, &windowed), Anchor::Given);
+        assert_eq!(anchor_for(&[source(h / 2, w / 2)], &windowed), Anchor::Resampled { from: (h / 2, w / 2) });
+        let Anchor::Draft { size: (dw, dh), strength } = anchor_for(&[], &windowed) else {
+            panic!("a windowed prompt-only run must draft its anchor")
+        };
+        assert_eq!(strength, DEFAULT_DRAFT_ANCHOR_STRENGTH);
+        assert_eq!(
+            anchor_for(&[], &GenOpts { strength: Some(0.25), ..windowed.clone() }),
+            Anchor::Draft { size: (dw, dh), strength: 0.25 },
+            "--strength states how much of the refine starts from the draft"
+        );
+        // The draft fits ONE forward of the budget the tiled run is sized for,
+        // and keeps the canvas's aspect ratio to within a latent token.
+        let budget = gen_tokens_per_forward(&windowed) + ref_tokens_per_forward(&[], &windowed);
+        assert!((dw / 16) * (dh / 16) <= budget, "the draft is {dw}x{dh}, past the {budget}-token budget");
+        assert!(dw < w && dh < h, "a 2048x1152 canvas cannot be drafted at its own size");
+        // Both axes floor to whole latent tokens independently, so the aspect
+        // ratio survives to within one token on the short axis - the same
+        // convention `init_cond_size` uses for a conditioning copy.
+        let (want, got) = (w as f32 / h as f32, dw as f32 / dh as f32);
+        let tol = want / (dh as f32 / 16.0 - 1.0);
+        assert!((want - got).abs() <= tol, "draft {dw}x{dh} is {got} wide, not {want}");
+
+        // And the state the whole guarantee is about: a windowed request whose
+        // first reference is not the canvas cannot be handed to the sampler.
+        let bare = BatchRequest {
+            prompt: "a canal at dawn".into(),
+            refs: Vec::new(),
+            opts: windowed.clone(),
+            cancel: Default::default(),
+        };
+        let Err(e) = Anchored::of(&bare, None) else {
+            panic!("an unanchored windowed request must be refused")
+        };
+        assert!(e.contains("anchor"), "the refusal must say what is missing: {e}");
+        // The same request WITH its anchor is accepted, so the refusal is
+        // about the anchor and not about windowing.
+        assert!(Anchored::of(&BatchRequest { refs: canvas, ..bare }, None).is_ok(), "an anchored request stands");
+
+        // A dial that would shrink the anchor's conditioning copy below the
+        // canvas grid is refused outright rather than silently ignored - a
+        // reference at any other grid is not registered, which is exactly the
+        // fallback the guarantee exists to remove.
+        let scaled = GenOpts { ref_resolution_scale: 0.5, ..windowed };
+        let e = canvas_layout(0, &[source(h, w)], &scaled).expect_err("scale + windows must be refused");
+        assert!(e.contains("--ref-resolution-scale"), "{e}");
     }
 
     /// FNV-1a 64 over the rendered bytes. A whole reference image is too large

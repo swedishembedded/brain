@@ -45,5 +45,5 @@ pub use import::{dit_config_from_shapes, import_bfl, import_diffusers, sniff_dit
 pub use mask::Mask;
 pub use model::{position_ids, position_ids_tile, Flux2Model, Precision, Sample, KERNELS};
 pub use refcond::JointLayout;
-pub use pipeline::{AdapterSpec, BatchRequest, GenOpts, Paths, Pipeline, Tile, Tiling};
+pub use pipeline::{AdapterSpec, Anchor, BatchRequest, GenOpts, Paths, Pipeline, Tile, Tiling};
 pub use weights::{DitWeights, PendingLora};
