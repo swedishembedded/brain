@@ -92,7 +92,7 @@ use rl::improve::AdapterMeta;
 
 const USAGE: &str = "usage: brain document-study --arch NAME --weights BASE --dataset FILE.json --adapter-dir DIR --report FILE.json \
      [--work-dir DIR --lora RANK --alpha A --eval-per-cycle N --steps N --seqs N --batch B --lr X --seed S --null-gate-seed S \
-      --models-dir DIR --quiet]";
+      --models-dir DIR --quiet]\n   or: brain document-study --dataset FILE.json --dry-run";
 
 /// The architecture a study runs against when `--arch` is omitted. Named,
 /// not silent: the study's measured recipe (`SftConfig::default`) was tuned
@@ -327,9 +327,23 @@ pub fn run(args: &[String]) {
     let null_gate_seed = a.u64_or("--null-gate-seed", DocumentStudyConfig::default().null_gate_seed);
     let models_dir = a.take_str("--models-dir");
     let quiet = a.take_flag("--quiet");
+    let dry_run = a.take_flag("--dry-run");
     a.finish();
 
-    if weights.is_empty() || dataset.is_empty() || adapter_dir.is_empty() || report_path.is_empty() {
+    if dataset.is_empty() {
+        eprintln!("{USAGE}");
+        std::process::exit(2);
+    }
+    if dry_run {
+        // No weights resolution, no checkpoint load, no device - just the
+        // dataset through the same validation the real run applies before
+        // it does any of those. The seam a caller (sven's own shell-out to
+        // this command) uses to check a dataset up front, before paying for
+        // the expensive, GPU-bound training run.
+        run_dry_run(Path::new(&dataset));
+        return;
+    }
+    if weights.is_empty() || adapter_dir.is_empty() || report_path.is_empty() {
         eprintln!("{USAGE}");
         std::process::exit(2);
     }
@@ -348,8 +362,14 @@ pub fn run(args: &[String]) {
     // on its own: a batch that would be refused after a multi-minute model
     // load is a batch that should have been refused at the first read.
     let raw = read_dataset(Path::new(&dataset));
-    let cycles: Vec<FactBatch> = raw.cycles.into_iter().map(FactBatch::new).collect();
-    let anchors = vec![FactBatch::new(raw.anchors)];
+    let cycles = match validate_cycles(raw.cycles) {
+        Ok(c) => c,
+        Err(e) => fail(&format!("{dataset}: {e}")),
+    };
+    let anchors = match FactBatch::new(raw.anchors) {
+        Ok(b) => vec![b],
+        Err(e) => fail(&format!("{dataset}: anchors: {e}")),
+    };
 
     // ---- The base, its tokenizer and its chat template -------------------
     let store_root = crate::model_dir::resolve(models_dir.as_deref());
@@ -452,7 +472,7 @@ fn run_for<A: StudyArch>(i: &Inputs) -> std::io::Result<DocumentStudyReport> {
         )));
     }
 
-    let curr = DocumentCurriculum::new(i.cycles, i.anchors, i.tok, i.tmpl, vocab as usize);
+    let curr = DocumentCurriculum::new(i.cycles, i.anchors, i.tok, i.tmpl, vocab as usize).map_err(std::io::Error::other)?;
 
     // The study's own base: the caller's weights plus a ZERO adapter.
     // `overlay_adapter` copies every parameter the base has into the
@@ -511,6 +531,62 @@ fn read_dataset(path: &Path) -> DocumentDataset {
         ));
     }
     ds
+}
+
+/// Every cycle's batch through [`FactBatch::new`], naming which cycle failed
+/// rather than which triple alone - shared between the real run and
+/// [`run_dry_run`], so the two can never come to validate a dataset
+/// differently.
+fn validate_cycles(raw: Vec<Vec<FactProbe>>) -> Result<Vec<FactBatch>, String> {
+    raw.into_iter().enumerate().map(|(i, c)| FactBatch::new(c).map_err(|e| format!("cycle {i}: {e}"))).collect()
+}
+
+/// Validate a dataset exactly as the real study would, and nothing else: no
+/// weights resolution, no checkpoint load, no device. This is the seam a
+/// caller that did not produce the dataset itself - sven's own shell-out to
+/// this command among them - uses to know in advance whether an extracted
+/// dataset is well-formed, before paying for the real, GPU-bound training
+/// run this command otherwise goes straight into.
+///
+/// Runs the exact SAME two checks the real run applies before it resolves a
+/// base checkpoint at all: [`read_dataset`]'s structural pass (this is also
+/// where an empty cycle list or anchor suite is caught), then
+/// [`FactBatch::new`] and [`document::train_probe_split`] per cycle - the
+/// four-plus-two dataset preconditions Task 1 turned into named `Result`s.
+/// `train_probe_split` takes a tokenizer only to hand it to the
+/// `DocumentEnv`s it constructs - it never encodes anything - so a
+/// throwaway tokenizer built from the dataset's own text runs the identical
+/// validation [`DocumentCurriculum::new`] would, with no real tokenizer, no
+/// checkpoint and no device anywhere in reach.
+fn run_dry_run(path: &Path) {
+    let raw = read_dataset(path);
+    let n_cycles = raw.cycles.len();
+    let n_anchors = raw.anchors.len();
+
+    let cycles = match validate_cycles(raw.cycles) {
+        Ok(c) => c,
+        Err(e) => fail(&format!("{}: {e}", path.display())),
+    };
+    let anchors = match FactBatch::new(raw.anchors) {
+        Ok(b) => b,
+        Err(e) => fail(&format!("{}: anchors: {e}", path.display())),
+    };
+
+    let corpus: String = cycles
+        .iter()
+        .flat_map(|b| b.triples())
+        .chain(anchors.triples())
+        .map(|t| format!("{}{}{}", t.fact, t.probe_question, t.expected_answer))
+        .collect();
+    let tok = data::tokenizer::CharTokenizer::from_corpus(&corpus);
+    for (i, batch) in cycles.iter().enumerate() {
+        if let Err(e) = document::train_probe_split(batch, &tok) {
+            fail(&format!("{}: cycle {i}: {e}", path.display()));
+        }
+    }
+
+    let n_triples: usize = cycles.iter().map(|b| b.triples().len()).sum();
+    println!("dataset OK: {n_cycles} cycle(s), {n_triples} triple(s), {n_anchors} anchor(s)");
 }
 
 /// Copy `src` into `dir` as the next `adapter-{n:06}.safetensors` version -

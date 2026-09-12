@@ -183,6 +183,13 @@ fn run(arch: &str, dir: &Path, weights: &Path, dataset: &Path, adapters: &Path, 
         .expect("run brain document-study")
 }
 
+/// `--dry-run` takes only `--dataset` - no `--weights`, no `--adapter-dir`,
+/// no `--report` - because it never resolves a base, loads a checkpoint or
+/// touches a device at all.
+fn run_dry_run(dataset: &Path) -> std::process::Output {
+    Command::new(bin()).args(["document-study", "--dataset"]).arg(dataset).arg("--dry-run").output().expect("run brain document-study --dry-run")
+}
+
 /// One full round trip: a dataset of frozen triples in, a gated study with
 /// its null-gate control arm run for real, a machine-readable report out,
 /// and - only if the gate promoted - an adapter published under the name the
@@ -298,4 +305,56 @@ fn an_unregistered_architecture_is_refused_and_names_the_registered_ones() {
     for known in ["qwen3", "qwen35", "qwen35moe"] {
         assert!(stderr.contains(known), "the refusal must list {known}, got:\n{stderr}");
     }
+}
+
+/// `--dry-run` runs a dataset through the same `FactBatch::new`/
+/// `document::train_probe_split` checks the real study applies before it
+/// resolves a base checkpoint at all - the seam sven's own shell-out to this
+/// command uses to validate an extracted dataset before paying for the
+/// real, GPU-bound training run. Only `--dataset` is given here: no
+/// `--weights` is passed, and nothing besides the dataset file itself is
+/// ever written under `dir` - if this mode touched a checkpoint at all, it
+/// would fail looking for one that was never created.
+#[test]
+fn a_dry_run_reports_a_well_formed_dataset_ok_without_touching_a_checkpoint() {
+    let dir = tmp("dry-run-ok");
+    let dataset = dir.join("dataset.json");
+    std::fs::write(&dataset, serde_json::json!({"cycles": [triples()], "anchors": anchors()}).to_string()).unwrap();
+
+    let out = run_dry_run(&dataset);
+    assert!(out.status.success(), "a well-formed dataset must pass --dry-run: {}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("dataset OK"), "must report a clear pass, got:\n{stdout}");
+    assert!(stdout.contains("1 cycle"), "must report the cycle count, got:\n{stdout}");
+    assert!(stdout.contains(&format!("{} triple", FACTS_PER_CYCLE * PROBES_PER_FACT)), "must report the triple count, got:\n{stdout}");
+    assert!(stdout.contains("3 anchor"), "must report the anchor count, got:\n{stdout}");
+}
+
+/// The exact failure Task 1's `Result`-returning validation produces,
+/// surfaced through `--dry-run` instead of discovered mid-training: a cycle
+/// below `promote::document::MIN_HELD_OUT_PROBES` (48) is refused by name,
+/// with a non-zero exit. Again no `--weights` is given - a malformed
+/// dataset must be refused before the command would ever look for one.
+#[test]
+fn a_dry_run_reports_the_specific_failure_and_exits_non_zero_without_touching_a_checkpoint() {
+    let dir = tmp("dry-run-bad");
+    // Ten triples: below the held-out floor, worded like `triples()` so no
+    // field is a substring of another.
+    let few: Vec<serde_json::Value> = (0..10)
+        .map(|id| {
+            serde_json::json!({
+                "fact": format!("r{id} ends at v{id}"),
+                "probe_question": format!("where does r{id} stop"),
+                "expected_answer": format!("v{id} is the end"),
+            })
+        })
+        .collect();
+    let dataset = dir.join("dataset.json");
+    std::fs::write(&dataset, serde_json::json!({"cycles": [few], "anchors": anchors()}).to_string()).unwrap();
+
+    let out = run_dry_run(&dataset);
+    assert!(!out.status.success(), "a cycle below the held-out floor must fail --dry-run");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("held-out probes"), "the failure must name the specific rule, got:\n{stderr}");
+    assert!(stderr.contains("below the pre-registered floor of 48"), "the failure must name the floor, got:\n{stderr}");
 }
