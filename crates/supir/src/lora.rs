@@ -146,7 +146,13 @@ impl SupirLora {
     /// points, where a base map missing a targeted linear is a construction
     /// bug rather than user input.
     pub fn fold_into(&self, base: &mut Tensors) {
-        self.set.fold_into(base, 1.0).unwrap_or_else(|e| panic!("supir lora: {e}"));
+        // `BaseStorage::Dense` is the honest answer for every caller of this:
+        // the trunk weights it folds into are consumed as the fp32 tensors
+        // they are (`apply` feeds the host trainer). SUPIR's `crate::int8` is
+        // a separate base-model inference route that never reads this map - if
+        // that ever changes, the new caller has to name `Quantized` here and
+        // will be refused a fold, which is the point.
+        self.set.fold_into(base, model::adapter::BaseStorage::Dense, 1.0).unwrap_or_else(|e| panic!("supir lora: {e}"));
     }
 
     /// A cloned copy of `base` with every targeted delta added - see the

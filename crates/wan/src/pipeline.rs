@@ -463,16 +463,41 @@ fn run(
         progress(1, total, "load transformer");
         *hot = None; // free the old resident weights BEFORE building new
 
+        // **How the adapter reaches this build, decided once from the tier its
+        // base weights will be stored at.** A dense tier folds the delta into
+        // the weights; a quantized tier must not, because the quantizer would
+        // re-round the sum onto the base weight's own 256-level grid and
+        // discard most of the correction (`tests/lora_int8_delivery.rs`), so
+        // it takes the low-rank correction at runtime instead. The shared
+        // `model::adapter` layer owns that decision - this is a `match` on its
+        // answer, not a second copy of the rule.
+        let adapter = match &o.adapter {
+            None => None,
+            Some(path) => {
+                let tcfg = crate::modelgrad::Cfg::from_wan(cfg, lf, lh, lw);
+                Some(crate::lora::load_adapter(path, &tcfg).map_err(|e| format!("wan: loading adapter {path}: {e}"))?)
+            }
+        };
+        let (mut fold, mut runtime) = (None, None);
+        if let Some(ad) = &adapter {
+            match ad.delivery(o.dit_dtype.base_storage(), 1.0).map_err(|e| format!("wan: adapter: {e}"))? {
+                model::adapter::Delivery::Fold(f) => fold = Some(f),
+                model::adapter::Delivery::Runtime(d) => runtime = Some(d),
+            }
+        }
+
         let is_gguf = std::path::Path::new(&paths.dit).extension().is_some_and(|e| e.eq_ignore_ascii_case("gguf"));
         let dit_weights: DitWeights = if is_gguf {
-            if o.adapter.is_some() {
+            if fold.is_some() {
                 // A read-only mmap has nothing to fold a LoRA delta INTO: the
                 // host `Tensors` map every other path builds is exactly what
                 // `import_gguf` (the ahead-of-time converter) produces for
                 // finetune/LoRA use - convert once, then run with `--dit` on
-                // the converted safetensors.
+                // the converted safetensors. A QUANTIZED tier never reaches
+                // this: it folds nothing, so the mmap serves it unchanged and
+                // the correction rides beside the packed weights.
                 return Err(format!(
-                    "wan: --adapter is not supported with a .gguf transformer ({}) - convert it first with `brain import`, then pass the converted safetensors as --dit",
+                    "wan: --adapter with a .gguf transformer ({}) needs --dit-dtype int8 or int4, which applies the adapter beside the weights instead of folding it into them - or convert the checkpoint with `brain import` and pass the converted safetensors as --dit",
                     paths.dit
                 ));
             }
@@ -489,10 +514,8 @@ fn run(
         } else {
             let raw = read_any(&paths.dit)?;
             let mut weights = crate::import::import_dit(raw, cfg)?;
-            if let Some(path) = &o.adapter {
-                let tcfg = crate::modelgrad::Cfg::from_wan(cfg, lf, lh, lw);
-                let adapter = crate::lora::load_adapter(path, &tcfg).map_err(|e| format!("wan: loading adapter {path}: {e}"))?;
-                adapter.fold_into_tensors(&mut weights).map_err(|e| format!("wan: folding adapter {path}: {e}"))?;
+            if let Some(f) = fold.take() {
+                f.into_tensors(&mut weights).map_err(|e| format!("wan: folding adapter: {e}"))?;
             }
             DitWeights::Host(weights)
         };
@@ -510,7 +533,7 @@ fn run(
             let data = data.expect("with_tensor found the tensor, so it must have set data");
             text_mlp.insert(name.to_string(), (vec![data.len()], data));
         }
-        let dev = WanDitDev::build_dtype(cfg, src, lf as u32, lh as u32, lw as u32, o.device.as_deref(), &[], o.dit_dtype);
+        let dev = WanDitDev::build_adapted(cfg, src, lf as u32, lh as u32, lw as u32, o.device.as_deref(), &[], o.dit_dtype, runtime.as_ref())?;
         *hot = Some(HotDit { key, dev, text_mlp });
     }
     let resident = hot.as_ref().expect("just built");

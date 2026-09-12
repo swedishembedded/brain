@@ -279,7 +279,10 @@ impl LoraAdapter {
     /// this generically, the same shared fold the video-only adapter next
     /// door uses, differing only in [`LEAVES`].
     pub fn fold_into_tensors(&self, ts: &mut vae::blocks::Tensors) -> Result<(), String> {
-        self.set.fold_into(ts, 1.0)
+        // Dense, for the same reason spelled out on `crate::lora`'s twin: this
+        // map is read as fp32 tensors, and the quantized route may not be
+        // pointed at a folded one.
+        self.set.fold_into(ts, model::adapter::BaseStorage::Dense, 1.0)
     }
 }
 

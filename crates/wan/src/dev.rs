@@ -33,6 +33,10 @@ use crate::block::{
 use crate::config::WanConfig;
 use crate::model::{self, Tensors};
 use crate::rope::tables;
+// `model` is this crate's OWN module here (`crate::model`), so the shared
+// engine's adapter seam has to be reached under its own name.
+use ::model::adapter::BaseStorage;
+use ::model::lora::RuntimeLora;
 
 /// Storage dtype for the DiT's linear weights. Compute stays fp32 throughout
 /// (this repo's core-compute-only invariant) - what varies is how each weight
@@ -94,6 +98,23 @@ impl WanDtype {
     /// with a clear error rather than failing deep inside kernel dispatch.
     pub fn gpu_only(self) -> bool {
         matches!(self, WanDtype::Int8)
+    }
+
+    /// Whether a LoRA delta may be folded into the weights this tier stores.
+    ///
+    /// `F32`/`F16` hand the weights to the device as the floats they already
+    /// are, so a fold is exact. `Int8`/`Int4` re-derive a per-group scale and
+    /// re-round **every** value in the group, and a trained delta is typically
+    /// a fraction of one of the 256 levels - so folding into them rounds most
+    /// of the adapter back onto the base weight's own code and discards it.
+    /// Those tiers take the correction at runtime instead
+    /// ([`model::adapter::Delivery::Runtime`], wired through
+    /// [`WanDitDev::build_adapted`]).
+    pub fn base_storage(self) -> BaseStorage {
+        match self {
+            WanDtype::F32 | WanDtype::F16 => BaseStorage::Dense,
+            WanDtype::Int8 | WanDtype::Int4 => BaseStorage::Quantized,
+        }
     }
 }
 
@@ -200,6 +221,69 @@ impl WanDitDev {
         taps: &[usize],
         dtype: WanDtype,
     ) -> WanDitDev {
+        Self::build_adapted(cfg, src, f, h, w, device, taps, dtype, None).expect("an unadapted build has no adapter to reject")
+    }
+
+    /// [`Self::build_dtype`] with a LoRA adapter delivered as a **runtime
+    /// correction** beside the quantized weights, rather than folded into
+    /// them.
+    ///
+    /// `lora` is `model::adapter::Delivery::Runtime`'s payload: one
+    /// `model::lora::RuntimeDelta` per adapted linear, carrying the `A`/`B`
+    /// factors with the delta scale already in `B`. `src` is the checkpoint
+    /// **untouched** - the weights uploaded here are byte-identical to an
+    /// unadapted build's, which is the whole point (see
+    /// `model::dispatch::LoraW`). `None` is exactly today's build, dispatch
+    /// for dispatch.
+    ///
+    /// Errors (rather than panicking) on an adapter this engine cannot place:
+    /// one offered to a DENSE build, which must fold instead and has no
+    /// runtime path here, or one naming a tensor this variant does not have.
+    /// A rectangle the block walk never claims panics from
+    /// `RuntimeLora::assert_fully_applied` - a target silently dropped would
+    /// serve base-model video from a run the user believes is adapted.
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_adapted(
+        cfg: &WanConfig,
+        src: &dyn checkpoint::TensorSource,
+        f: u32,
+        h: u32,
+        w: u32,
+        device: Option<&str>,
+        taps: &[usize],
+        dtype: WanDtype,
+        lora: Option<&RuntimeLora>,
+    ) -> Result<WanDitDev, String> {
+        let lora = lora.filter(|l| !l.is_empty());
+        if let Some(l) = lora {
+            if dtype.base_storage() != BaseStorage::Quantized {
+                return Err(format!(
+                    "wan: a runtime LoRA correction is only for a quantized base; --dit-dtype {} stores dense weights and must fold the adapter instead",
+                    dtype.key()
+                ));
+            }
+            // Shapes first, from the checkpoint's own manifest, so an adapter
+            // built for a different variant is a named error BEFORE a device
+            // is opened and 5.7 GB of weights are read.
+            let shapes: HashMap<String, usize> =
+                crate::import::dit_manifest(cfg).into_iter().map(|(n, s)| (n, s.iter().product())).collect();
+            l.validate(&|k| shapes.get(k).copied()).map_err(|e| format!("wan: {e}"))?;
+        }
+        Ok(Self::build_inner(cfg, src, f, h, w, device, taps, dtype, lora))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_inner(
+        cfg: &WanConfig,
+        src: &dyn checkpoint::TensorSource,
+        f: u32,
+        h: u32,
+        w: u32,
+        device: Option<&str>,
+        taps: &[usize],
+        dtype: WanDtype,
+        lora: Option<&RuntimeLora>,
+    ) -> WanDitDev {
         if dtype.gpu_only() && device == Some("cpu") {
             panic!("wan: --dit-dtype {} has no CPU-JIT lowering (DP4A) - build on a GPU device", dtype.key());
         }
@@ -255,8 +339,20 @@ impl WanDitDev {
             WanDtype::Int8 | WanDtype::Int4 => {
                 let tier = if dtype == WanDtype::Int8 { QTier::Int8 } else { QTier::Int4 };
                 let blocks: Vec<QBlockWeights> =
-                    (0..cfg.num_layers).map(|l| QBlockWeights::upload(&gpu, src, &format!("blocks.{l}"), d, tier)).collect();
-                let qscr = QScratch::new(&gpu, d, tokens);
+                    (0..cfg.num_layers).map(|l| QBlockWeights::upload(&gpu, src, &format!("blocks.{l}"), d, tier, lora)).collect();
+                // Every rectangle the adapter carries must have been claimed
+                // by one of those ten-linear walks. One that was not is a
+                // target this engine cannot place, and shipping it silently
+                // would mean base-model video from an adapted run.
+                if let Some(l) = lora {
+                    l.assert_fully_applied();
+                }
+                // One `h` scratch for the whole stack, sized for the widest
+                // rank any correction carries - `[t, r]` is ~2 MB at 32,760
+                // tokens and rank 16, so there is nothing to gain from a
+                // per-block one and a real cost to 40 of them.
+                let rank = lora.map_or(0, RuntimeLora::max_rank) as u32;
+                let qscr = QScratch::new(&gpu, d, tokens, rank);
                 for l in 0..cfg.num_layers {
                     let out = Self::next_out(&mut pool, &mut tap_idx, taps, l, cur, td, &gpu);
                     build_block_steps_q(&gpu, &mut steps, &sel, tier, &blocks[l], &mods[l], &pool[cur], &pool[out], &scr, &qscr, &cos, &sin, &ctx, d, tokens);

@@ -407,9 +407,9 @@ fn a_concept_lora_moves_held_out_generation_toward_the_concept_more_than_a_match
     let mut base_clone = base_tensors.clone();
     let base_clips = generate_variant(&base_clone);
     let mut adapted_tensors = base_tensors.clone();
-    adapter.fold_into_tensors(&mut adapted_tensors).expect("fold trained");
+    adapter.fold_into_tensors(&mut adapted_tensors, model::adapter::BaseStorage::Dense).expect("fold trained");
     let adapted_clips = generate_variant(&adapted_tensors);
-    control.fold_into_tensors(&mut base_clone).expect("fold control - reuses the untouched base_clone");
+    control.fold_into_tensors(&mut base_clone, model::adapter::BaseStorage::Dense).expect("fold control - reuses the untouched base_clone");
     let control_clips = generate_variant(&base_clone);
 
     let score = |rgb: &[Vec<f32>]| -> f32 {

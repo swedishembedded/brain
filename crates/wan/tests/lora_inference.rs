@@ -90,7 +90,7 @@ fn folding_a_trained_adapter_changes_exactly_the_ten_targeted_leaves_per_block()
     let ad = trained_adapter(&cfg, &base, 4);
 
     let mut folded = ts.clone();
-    ad.fold_into_tensors(&mut folded).expect("fold");
+    ad.fold_into_tensors(&mut folded, model::adapter::BaseStorage::Dense).expect("fold");
 
     let mut expected: std::collections::HashSet<String> = std::collections::HashSet::new();
     for l in 0..cfg.n_layers {

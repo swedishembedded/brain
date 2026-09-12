@@ -1330,6 +1330,13 @@ impl crate::adapter::AdapterKind for LoraPair {
         ]
     }
 
+    /// LoRA's delta IS a product of two small factors, so the runtime form is
+    /// the same `A`/`B` the fold would multiply out - handed over unmultiplied
+    /// so a quantized base never has to see the dense `B·A` at all.
+    fn low_rank(&self) -> Option<crate::adapter::LowRank<'_>> {
+        Some(crate::adapter::LowRank { a: &self.pair.a, b: &self.pair.b, rank: self.pair.r, scale: self.hp.scale() })
+    }
+
     fn load_tensors(&mut self, get: &dyn Fn(&str) -> Option<(Vec<usize>, Vec<f32>)>) -> Result<(), String> {
         // An EMPTY shape means the source genuinely does not carry one (e.g.
         // ltxv's checkpoint round-trip loses shape - `crate::checkpoint`'s

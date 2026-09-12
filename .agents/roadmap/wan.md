@@ -940,6 +940,51 @@ opinion, ComfyUI-GGUF = arch detection) is cloned under
         measurement-led change.
       * Not wired to a `lora_train` capability action yet (flux2 and s3dit both
         expose theirs that way); `finetune::run` is the entry point.
+- [x] **An adapter is never folded into a QUANTIZED base.** The fold site
+      (`pipeline::run`) and the quantize site (`dev::WanDitDev`'s `Int8`/`Int4`
+      branch) were written independently and neither knew about the other, so
+      an adapted int8 build quantized weights that already had the delta in
+      them. INT8 has 256 levels and a trained delta is a fraction of one:
+      `tests/lora_int8_delivery.rs` sweeps the strength dial on wan's own
+      weights and its own fold and measures **100% of adapted weights keeping
+      the BASE int8 code at 0.11 steps of delta** (cosine 0.059 between the
+      intended delta and what survives), still 65% at 1.1 steps. In output
+      space over 20 real block linears the fold delivers cosine 0.48 where the
+      runtime correction delivers 1.000000.
+      * **The decision moved to the shared layer**, not to a second copy in
+        this crate. `model::adapter::AdapterSet::delivery(BaseStorage, …)` is
+        the one place it is made: `Dense` yields a `Folder` (the only type that
+        can fold, and it has no other constructor), `Quantized` yields a
+        `model::lora::RuntimeLora` -- the SAME carrier flux2's fix built, so
+        both models share one upload layout (`model::dispatch::LoraW`), one
+        dispatch pair (`lora_rows_off`), one epilogue kernel
+        (`lora_delta.wgsl`) and one "every rectangle must be claimed"
+        check. `AdapterSet::fold_into` still exists for a dense-only crate but
+        now takes the storage and REFUSES `Quantized` by name, so no model can
+        reach the old path by forgetting about it. `WanDtype::base_storage` is
+        the mapping; nothing re-derives it.
+      * **What wan adds is the ten leaves and their names**, nothing else:
+        `QBlockLora::claim` pulls `blocks.{l}.{leaf}.weight` out of the
+        `RuntimeLora` and uploads `A [r,k]` plus the scaled `Bᵀ [r,n]`, and
+        `qlinear` appends the shared two-step correction after the bias. The
+        packed weights are read from the checkpoint untouched, so an adapted
+        and an unadapted int8 build hold byte-identical weights -
+        `tests/lora_runtime_dev.rs` asserts a zero-strength adapter reproduces
+        the unadapted forward **bit for bit**, which is only true if that
+        holds.
+      * **Device-gated end to end** (same file): on the P40, the adapter's own
+        effect (adapted forward minus base forward, which subtracts out the
+        int8-vs-fp32 difference that has nothing to do with the adapter)
+        reaches **cosine 0.956 at the right magnitude** against the fp32
+        reference, where the folded build reaches **0.083 and keeps 19% of the
+        magnitude**. The residual against 1.0 is the two forwards evaluating
+        the same delta at two different operating points, not a defect in the
+        correction.
+      * **`--adapter` with a `.gguf` transformer now works at int8/int4.** It
+        was refused outright because a read-only mmap has nothing to fold into;
+        with nothing to fold, the mmap serves the adapted build unchanged. The
+        refusal stands for the dense tiers, which still fold, and now says
+        which flag fixes it.
 - [ ] **I2V branch**: 36-channel input (16 latent + 4 mask + 16 conditioning
       frame) and the CLIP ViT-H/14 vision tower's 257 tokens through `img_emb`.
       Only `clip.visual(...)` is used -- the checkpoint's XLM-RoBERTa text side

@@ -42,6 +42,8 @@
 
 use gpu_core::{f, DeviceBuffer, Gpu, Step, Transient};
 use model::block::{chunked_bidir_fwd, flash_bidir_fwd, flash_gate, CrossIds, FlashIds, GemmVariants, LayerNormIds};
+use model::dispatch::LoraW;
+use model::lora::RuntimeLora;
 
 // Kernel-table indices (order matches KERNELS).
 pub(crate) const K_LAYERNORM: usize = 0;
@@ -81,10 +83,17 @@ pub(crate) const K_MAX_ABS_ROW: usize = 23;
 pub(crate) const K_QUANT_PACK: usize = 24;
 pub(crate) const K_MATMUL_I8_DYN: usize = 25;
 pub(crate) const K_MATMUL_Q4_DYN: usize = 26;
+/// The epilogue of a runtime LoRA correction, `out += (A·x)·Bt`. The first
+/// half (`A·x`) is the ordinary fp32 GEMM already in this table, so this is
+/// the only kernel the adapter path adds - and it is `model::dispatch`'s, the
+/// same one flux2 dispatches. Appended, like every tier above it, so no
+/// existing index moves; unused (and free) on an unadapted build and on the
+/// dense tiers, which fold instead - see [`QBlockLora`].
+pub(crate) const K_LORA_DELTA: usize = 27;
 
 /// Every kernel the DiT dispatches. Nothing here is new: the whole model is
 /// existing kernels at Wan's shapes.
-pub const KERNELS: [(&str, &str); 27] = [
+pub const KERNELS: [(&str, &str); 28] = [
     ("layernorm", kernels::LAYERNORM),
     ("rmsnorm_eps", kernels::RMSNORM_EPS),
     ("matmul", kernels::MATMUL),
@@ -124,6 +133,7 @@ pub const KERNELS: [(&str, &str); 27] = [
     ("quant_pack", kernels::QUANT_PACK),
     ("matmul_i8_dyn", kernels::MATMUL_I8_DYN),
     ("matmul_q4_dyn", kernels::MATMUL_Q4_DYN),
+    ("lora_delta", kernels::LORA_DELTA),
 ];
 
 /// Shape parameters of one Wan block.
@@ -696,6 +706,82 @@ impl QLinear {
     }
 }
 
+/// **One block's LoRA corrections, resident beside its QUANTIZED weights.**
+///
+/// A quantized base has no safe fold: the quantizer re-derives a per-group
+/// scale and re-rounds every value, and a trained delta is typically a
+/// fraction of one of the 256 int8 levels, so a folded delta is rounded back
+/// onto the base weight's own code and discarded
+/// (`tests/lora_int8_delivery.rs` measures how much on wan's own weights;
+/// [`model::dispatch::LoraW`] carries the general statement). So the weights
+/// stay exactly what the checkpoint says - bit-identical to an unadapted
+/// build - and the correction runs beside them in fp32:
+///
+/// ```text
+/// y = dequant(quant(x)·Q(W)ᵀ) + b  +  B·(A·x)
+/// ```
+///
+/// Both GEMMs read the **fp32** activation `x`, not its int8 quantization, so
+/// neither the weight grid nor the activation grid can swallow the adapter.
+/// The uploaded layout, the dispatch pair and the epilogue kernel are all
+/// `model::dispatch`'s, shared with flux2 - only which ten linears exist, and
+/// what they are called, is this crate's.
+///
+/// Every slot is independently optional: a partial adapter (one that targets
+/// only the FFN, say) leaves the rest at the base weight, which is the same
+/// thing as a zero correction but costs no dispatches.
+#[derive(Default)]
+pub(crate) struct QBlockLora {
+    sq: Option<LoraW>,
+    sk: Option<LoraW>,
+    sv: Option<LoraW>,
+    so: Option<LoraW>,
+    cq: Option<LoraW>,
+    ck: Option<LoraW>,
+    cv: Option<LoraW>,
+    co: Option<LoraW>,
+    ff1: Option<LoraW>,
+    ff2: Option<LoraW>,
+}
+
+impl QBlockLora {
+    /// Claim this block's ten linears out of `lora` and upload what it holds
+    /// for them. `prefix` is `blocks.{l}`, matching the `blocks.{l}.{leaf}
+    /// .weight` keys `crate::lora`'s sites carry.
+    ///
+    /// Wan fuses nothing this adapter targets, so every claim is a whole
+    /// `[out, in]` tensor at offset 0. A rectangle no block claims is caught
+    /// by `RuntimeLora::assert_fully_applied` once the stack is built - which
+    /// is the check that matters here, because a target this engine silently
+    /// dropped would serve base-model video from a run the user believes is
+    /// adapted.
+    fn claim(gpu: &Gpu, lora: Option<&RuntimeLora>, prefix: &str, d: BlockDims) -> QBlockLora {
+        let (dim, ffn) = (d.dim as usize, d.ffn_dim as usize);
+        let take = |leaf: &str, out: usize, inn: usize| -> Option<LoraW> {
+            let key = format!("{prefix}.{leaf}.weight");
+            let delta = lora?.claim(&key, inn, 0, out, 0, inn)?;
+            let ab = gpu.storage(delta.pair.a.len() as u64);
+            wf(gpu, &ab, &delta.pair.a);
+            let bt = delta.b_transposed();
+            let btb = gpu.storage(bt.len() as u64);
+            wf(gpu, &btb, &bt);
+            Some(LoraW { a: ab, bt: btb, r: delta.pair.r as u32 })
+        };
+        QBlockLora {
+            sq: take("self_attn.q", dim, dim),
+            sk: take("self_attn.k", dim, dim),
+            sv: take("self_attn.v", dim, dim),
+            so: take("self_attn.o", dim, dim),
+            cq: take("cross_attn.q", dim, dim),
+            ck: take("cross_attn.k", dim, dim),
+            cv: take("cross_attn.v", dim, dim),
+            co: take("cross_attn.o", dim, dim),
+            ff1: take("ffn.0", ffn, dim),
+            ff2: take("ffn.2", dim, ffn),
+        }
+    }
+}
+
 /// Resident quantized weights of one block - the [`BlockWeights`] analogue for
 /// the int8/int4 tier. Ten linears are packed (self/cross attention's q/k/v/o
 /// plus the two FFN linears); the QK-norm weights and the affine cross-attn
@@ -717,14 +803,32 @@ pub(crate) struct QBlockWeights {
     xnorm_b: DeviceBuffer,
     ff1: QLinear,
     ff2: QLinear,
+    /// This block's runtime LoRA corrections, empty on an unadapted build.
+    /// They ride BESIDE the quantized weights above, which are uploaded from
+    /// the checkpoint untouched either way - so an adapted and an unadapted
+    /// int8 build hold byte-identical weights and differ only by these.
+    lora: QBlockLora,
 }
 
 impl QBlockWeights {
-    pub fn upload(gpu: &Gpu, t: &dyn checkpoint::TensorSource, prefix: &str, d: BlockDims, tier: QTier) -> QBlockWeights {
+    /// Upload one block's packed weights, plus `lora`'s runtime corrections
+    /// (empty on an unadapted build). The WEIGHTS are read from `t`
+    /// untouched either way - an adapted and an unadapted build at the same
+    /// tier hold byte-identical packed weights, and differ only by what rides
+    /// beside them.
+    pub fn upload(
+        gpu: &Gpu,
+        t: &dyn checkpoint::TensorSource,
+        prefix: &str,
+        d: BlockDims,
+        tier: QTier,
+        lora: Option<&RuntimeLora>,
+    ) -> QBlockWeights {
         let (dim, ffn) = (d.dim as usize, d.ffn_dim as usize);
         let qlin = |n: &str, out_dim: usize, in_dim: usize| QLinear::upload(gpu, t, &format!("{prefix}.{n}"), tier, out_dim, in_dim);
         let dev = |n: &str| upload_named(gpu, t, &format!("{prefix}.{n}"));
         QBlockWeights {
+            lora: QBlockLora::claim(gpu, lora, prefix, d),
             sq: qlin("self_attn.q", dim, dim),
             sk: qlin("self_attn.k", dim, dim),
             sv: qlin("self_attn.v", dim, dim),
@@ -743,6 +847,7 @@ impl QBlockWeights {
             ff2: qlin("ffn.2", dim, ffn),
         }
     }
+
 }
 
 /// Reused dynamic-activation-quantization scratch for the quantized block
@@ -765,16 +870,30 @@ pub(crate) struct QScratch {
     /// `sx_t` is reused for its per-row scale (same `t` rows, only the width
     /// differs, and a scale is one value per row regardless of width).
     xq_t_ffn: DeviceBuffer,
+    /// `[t·rank]` / `[text_len·rank]` - the LoRA intermediate `h = x·Aᵀ`, one
+    /// per ROW COUNT for the same reason `sx_t`/`sx_te` are two buffers. Both
+    /// are `[_, 0]` (and allocate nothing) on an unadapted build, and are
+    /// sized for the WIDEST rank any target uses, so one pair serves every
+    /// linear in the stack. Reused sequentially, exactly like the quantization
+    /// scratch above: `h` is dead the moment its `matmul_acc_t` has read it.
+    h_t: DeviceBuffer,
+    h_te: DeviceBuffer,
 }
 
 impl QScratch {
-    pub fn new(gpu: &Gpu, d: BlockDims, t: u32) -> QScratch {
+    /// `rank` is the widest runtime LoRA rank the stack uses - 0 on an
+    /// unadapted build, which then allocates no `h` at all.
+    pub fn new(gpu: &Gpu, d: BlockDims, t: u32, rank: u32) -> QScratch {
         QScratch {
             sx_t: gpu.storage(t as u64),
             xq_t_dim: gpu.storage((t * d.dim / 4) as u64),
             sx_te: gpu.storage(d.text_len as u64),
             xq_te_dim: gpu.storage((d.text_len * d.dim / 4) as u64),
             xq_t_ffn: gpu.storage((t * d.ffn_dim / 4) as u64),
+            // `.max(1)`: a zero-length storage buffer is not a thing every
+            // backend will hand out, and an unadapted build never binds these.
+            h_t: gpu.storage((t * rank).max(1) as u64),
+            h_te: gpu.storage((d.text_len * rank).max(1) as u64),
         }
     }
 }
@@ -786,11 +905,43 @@ fn qquant(gpu: &Gpu, s: &mut Vec<Step>, x: &DeviceBuffer, xq: &DeviceBuffer, sx:
     s.push(gpu.step(K_QUANT_PACK, &[x, sx, xq], &[rows, k], rows * k / 4));
 }
 
-/// `out = dequant(xq @ Wᵀ) + b`: one quantized linear, tier-dispatched.
-/// `xq`/`sx` must already hold `x`'s quantization at this `(rows, k)` shape
-/// (from [`qquant`]).
+/// `out = dequant(xq @ Wᵀ) + b + h·Bt`, `h = x·Aᵀ`: one quantized linear plus
+/// its runtime LoRA correction, if it has one. `xq`/`sx` must already hold
+/// `x`'s quantization at this `(rows, k)` shape (from [`qquant`]); `x` itself
+/// is the **fp32** activation, which is what the correction reads.
+///
+/// The correction is appended after the bias rather than folded into the
+/// weight for the reason [`QLoraLinear`] spells out: folding it would put the
+/// delta on the weight's int8 grid, where most of it rounds away.
 #[allow(clippy::too_many_arguments)]
-fn qlinear(gpu: &Gpu, s: &mut Vec<Step>, tier: QTier, xq: &DeviceBuffer, sx: &DeviceBuffer, w: &QLinear, out: &DeviceBuffer, rows: u32, k: u32, n: u32) {
+fn qlinear(
+    gpu: &Gpu,
+    s: &mut Vec<Step>,
+    sel: &Sel,
+    tier: QTier,
+    x: &DeviceBuffer,
+    xq: &DeviceBuffer,
+    sx: &DeviceBuffer,
+    w: &QLinear,
+    lora: Option<&LoraW>,
+    h: &DeviceBuffer,
+    out: &DeviceBuffer,
+    rows: u32,
+    k: u32,
+    n: u32,
+) {
+    qlinear_base(gpu, s, tier, xq, sx, w, out, rows, k, n);
+    if let Some(l) = lora {
+        // Whole tensors at offset 0 in both operands - wan fuses nothing this
+        // adapter targets - so the row/offset arguments are all zero and the
+        // shared pair records exactly `h = x·Aᵀ` then `out += h·Bt`.
+        s.extend(model::dispatch::lora_rows_off(gpu, sel.gemm, K_LORA_DELTA, l, h, x, out, 0, 0, rows, k, n));
+    }
+}
+
+/// The quantized linear on its own - [`qlinear`] without the adapter tail.
+#[allow(clippy::too_many_arguments)]
+fn qlinear_base(gpu: &Gpu, s: &mut Vec<Step>, tier: QTier, xq: &DeviceBuffer, sx: &DeviceBuffer, w: &QLinear, out: &DeviceBuffer, rows: u32, k: u32, n: u32) {
     match tier {
         QTier::Int8 => s.push(gpu.step(
             K_MATMUL_I8_DYN,
@@ -835,9 +986,9 @@ pub(crate) fn build_block_steps_q(
     // --- self-attention -------------------------------------------------
     s.push(model::block::layernorm_fwd(gpu, &sel.ln, x_in, &m.ln1_g, &m.ln1_b, &scr.n1, dim, t, d.eps));
     qquant(gpu, s, &scr.n1, &q.xq_t_dim, &q.sx_t, t, dim);
-    qlinear(gpu, s, tier, &q.xq_t_dim, &q.sx_t, &w.sq, &scr.q, t, dim, dim);
-    qlinear(gpu, s, tier, &q.xq_t_dim, &q.sx_t, &w.sk, &scr.k, t, dim, dim);
-    qlinear(gpu, s, tier, &q.xq_t_dim, &q.sx_t, &w.sv, &scr.v, t, dim, dim);
+    qlinear(gpu, s, sel, tier, &scr.n1, &q.xq_t_dim, &q.sx_t, &w.sq, w.lora.sq.as_ref(), &q.h_t, &scr.q, t, dim, dim);
+    qlinear(gpu, s, sel, tier, &scr.n1, &q.xq_t_dim, &q.sx_t, &w.sk, w.lora.sk.as_ref(), &q.h_t, &scr.k, t, dim, dim);
+    qlinear(gpu, s, sel, tier, &scr.n1, &q.xq_t_dim, &q.sx_t, &w.sv, w.lora.sv.as_ref(), &q.h_t, &scr.v, t, dim, dim);
     qk_norm(gpu, s, sel, &scr.q, &w.snq, &scr.qn, t, dim, d.eps);
     qk_norm(gpu, s, sel, &scr.k, &w.snk, &scr.kn, t, dim, d.eps);
     s.push(gpu.step(K_ROPE, &[&scr.qn, cos, sin, &scr.qr], &[t, nh, hd, half], t * nh * half));
@@ -869,34 +1020,34 @@ pub(crate) fn build_block_steps_q(
         ),
     }
     qquant(gpu, s, &scr.ctx, &q.xq_t_dim, &q.sx_t, t, dim);
-    qlinear(gpu, s, tier, &q.xq_t_dim, &q.sx_t, &w.so, &scr.ao, t, dim, dim);
+    qlinear(gpu, s, sel, tier, &scr.ctx, &q.xq_t_dim, &q.sx_t, &w.so, w.lora.so.as_ref(), &q.h_t, &scr.ao, t, dim, dim);
     s.push(gpu.step(K_GATE_ROW, &[x_in, &m.gate1, &scr.ao, &scr.x1], &[t, dim, t], t * dim));
 
     // --- cross-attention into the text encoding --------------------------
     s.push(model::block::layernorm_fwd(gpu, &sel.ln, &scr.x1, &w.xnorm_w, &w.xnorm_b, &scr.n3, dim, t, d.eps));
     qquant(gpu, s, &scr.n3, &q.xq_t_dim, &q.sx_t, t, dim);
-    qlinear(gpu, s, tier, &q.xq_t_dim, &q.sx_t, &w.cq, &scr.xq, t, dim, dim);
+    qlinear(gpu, s, sel, tier, &scr.n3, &q.xq_t_dim, &q.sx_t, &w.cq, w.lora.cq.as_ref(), &q.h_t, &scr.xq, t, dim, dim);
     // `ctx` is shared by every block (the embedded text encoding does not
     // change), so this re-quantizes it once per block - wasteful next to
     // hoisting it out of the stack, but correct, and int8 here is a memory
     // play, not a speed one (see the module doc).
     qquant(gpu, s, ctx, &q.xq_te_dim, &q.sx_te, te, dim);
-    qlinear(gpu, s, tier, &q.xq_te_dim, &q.sx_te, &w.ck, &scr.xk, te, dim, dim);
-    qlinear(gpu, s, tier, &q.xq_te_dim, &q.sx_te, &w.cv, &scr.xv, te, dim, dim);
+    qlinear(gpu, s, sel, tier, ctx, &q.xq_te_dim, &q.sx_te, &w.ck, w.lora.ck.as_ref(), &q.h_te, &scr.xk, te, dim, dim);
+    qlinear(gpu, s, sel, tier, ctx, &q.xq_te_dim, &q.sx_te, &w.cv, w.lora.cv.as_ref(), &q.h_te, &scr.xv, te, dim, dim);
     qk_norm(gpu, s, sel, &scr.xq, &w.cnq, &scr.xqn, t, dim, d.eps);
     qk_norm(gpu, s, sel, &scr.xk, &w.cnk, &scr.xkn, te, dim, d.eps);
     push_cross(gpu, s, sel, scr, d, t, &scr.xqn, &scr.xkn, &scr.xv, &scr.xctx);
     qquant(gpu, s, &scr.xctx, &q.xq_t_dim, &q.sx_t, t, dim);
-    qlinear(gpu, s, tier, &q.xq_t_dim, &q.sx_t, &w.co, &scr.xo, t, dim, dim);
+    qlinear(gpu, s, sel, tier, &scr.xctx, &q.xq_t_dim, &q.sx_t, &w.co, w.lora.co.as_ref(), &q.h_t, &scr.xo, t, dim, dim);
     s.push(gpu.step(K_ADD2, &[&scr.x1, &scr.xo, &scr.x2], &[t * dim], t * dim));
 
     // --- FFN -------------------------------------------------------------
     s.push(model::block::layernorm_fwd(gpu, &sel.ln, &scr.x2, &m.ln2_g, &m.ln2_b, &scr.n2, dim, t, d.eps));
     qquant(gpu, s, &scr.n2, &q.xq_t_dim, &q.sx_t, t, dim);
-    qlinear(gpu, s, tier, &q.xq_t_dim, &q.sx_t, &w.ff1, &scr.h1, t, dim, ff);
+    qlinear(gpu, s, sel, tier, &scr.n2, &q.xq_t_dim, &q.sx_t, &w.ff1, w.lora.ff1.as_ref(), &q.h_t, &scr.h1, t, dim, ff);
     s.push(gpu.step(K_GELU, &[&scr.h1, &scr.hg], &[t * ff], t * ff));
     qquant(gpu, s, &scr.hg, &q.xq_t_ffn, &q.sx_t, t, ff);
-    qlinear(gpu, s, tier, &q.xq_t_ffn, &q.sx_t, &w.ff2, &scr.ff, t, ff, dim);
+    qlinear(gpu, s, sel, tier, &scr.hg, &q.xq_t_ffn, &q.sx_t, &w.ff2, w.lora.ff2.as_ref(), &q.h_t, &scr.ff, t, ff, dim);
     s.push(gpu.step(K_GATE_ROW, &[&scr.x2, &m.gate2, &scr.ff, out], &[t, dim, t], t * dim));
 }
 

@@ -113,7 +113,7 @@ fn folding_into_the_inference_tensors_equals_applying_to_the_training_weights() 
 
     let applied = ad.apply(&base);
     let mut folded_ts = ts.clone();
-    ad.fold_into_tensors(&mut folded_ts).expect("fold");
+    ad.fold_into_tensors(&mut folded_ts, model::adapter::BaseStorage::Dense).expect("fold");
     let folded = ModelWeights::from_tensors(&cfg, &folded_ts).expect("host weights");
     assert!(applied == folded, "fold-into-tensors and apply-to-weights must be bit-equal");
     // ...and the adapter really did move something (guards against a
@@ -127,7 +127,7 @@ fn folding_into_the_inference_tensors_equals_applying_to_the_training_weights() 
     let mut broken = ts.clone();
     broken.remove("blocks.1.cross_attn.v.weight");
     let before = broken.clone();
-    let e = ad.fold_into_tensors(&mut broken).expect_err("a missing tensor must fail");
+    let e = ad.fold_into_tensors(&mut broken, model::adapter::BaseStorage::Dense).expect_err("a missing tensor must fail");
     assert!(e.contains("blocks.1.cross_attn.v.weight"), "{e}");
     assert!(broken == before, "a rejected fold must leave every other tensor untouched");
 }

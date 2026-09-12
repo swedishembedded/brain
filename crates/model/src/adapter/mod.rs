@@ -233,6 +233,114 @@ pub trait AdapterKind: Sized + Send {
     /// `get(canonical_suffix)` returns the tensor this adapter should load
     /// for that suffix, if present in the source file.
     fn load_tensors(&mut self, get: &dyn Fn(&str) -> Option<TensorShapeAndData>) -> Result<(), String>;
+
+    /// This kind's correction as an operator on the linear's **input
+    /// activation**, `Δy = scale·B·(A·x)`, when it has one - the form that
+    /// can be delivered beside an unmodified base weight instead of being
+    /// folded into it. `None` says the kind has no such form, which
+    /// [`AdapterSet::delivery`] turns into a refusal rather than a fold onto
+    /// a quantized grid.
+    fn low_rank(&self) -> Option<LowRank<'_>>;
+}
+
+/// One target's low-rank correction, borrowed from the adapter that owns it:
+/// `Δy = scale·B·(A·x)` with `A [rank, inn]` and `B [out, rank]`, both
+/// row-major. `scale` is the kind's own `α/r` already multiplied by the
+/// caller's strength.
+#[derive(Clone, Copy, Debug)]
+pub struct LowRank<'a> {
+    pub a: &'a [f32],
+    pub b: &'a [f32],
+    pub rank: usize,
+    pub scale: f32,
+}
+
+/// The precision a model will STORE the base weights at - the one fact that
+/// decides whether an adapter may be folded into them.
+///
+/// This exists because the two halves of the decision used to live in
+/// different files that did not know about each other: a pipeline folded the
+/// delta into a host tensor map, and a builder several calls later quantized
+/// that map. INT8 has 256 levels and a trained LoRA delta is typically a
+/// fraction of one, so `round((w + δ)/s)` returned the BASE code for most
+/// weights and the adapter was discarded - silently, on a run that reported
+/// the adapter as loaded (`crates/flux2/tests/lora_requant_int8.rs` and
+/// `crates/wan/tests/lora_int8_delivery.rs` measure it).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BaseStorage {
+    /// The base weights reach the device as the floats they already are
+    /// (f32/f16). A fold is exact here: nothing re-rounds the sum.
+    Dense,
+    /// The base weights are re-quantized on the way to the device (INT8,
+    /// INT4, ...). A fold would put the delta on the weight grid, so there
+    /// is no safe fold and [`AdapterSet::delivery`] does not offer one.
+    Quantized,
+}
+
+/// The fold half of a [`Delivery`]: an adapter bound to a base storage that
+/// can absorb its delta exactly.
+///
+/// [`AdapterSet::delivery`] is its ONLY constructor and hands one out only for
+/// [`BaseStorage::Dense`], so the fold-then-quantize path is not merely
+/// discouraged - a quantized build has no value of this type to call
+/// [`Folder::into_tensors`] with. Same shape as `flux2::pipeline`'s `Anchored`
+/// newtype: the guarantee is the type, not a comment asking callers to
+/// remember.
+pub struct Folder<'a, K: AdapterKind> {
+    set: &'a AdapterSet<K>,
+    strength: f32,
+}
+
+impl<K: AdapterKind> Folder<'_, K> {
+    /// Add every target's delta into `dst`, validating that each destination
+    /// exists and is long enough BEFORE writing any of them - so a rejected
+    /// adapter leaves the map exactly as it was rather than half folded.
+    ///
+    /// An absent or short target is an error naming the tensor, never a skip:
+    /// a fold that quietly drops a target returns base-model output from a run
+    /// the user believes is adapted.
+    pub fn into_tensors(self, dst: &mut HashMap<String, (Vec<usize>, Vec<f32>)>) -> Result<(), String> {
+        for (site, _) in &self.set.entries {
+            let (_, data) = dst.get(&site.name).ok_or_else(|| format!("adapter fold: missing base tensor {:?}", site.name))?;
+            if data.len() < site.spec.dest_len() {
+                return Err(format!("adapter fold: {:?} has {} elements, need at least {}", site.name, data.len(), site.spec.dest_len()));
+            }
+        }
+        for (site, k) in &self.set.entries {
+            let (_, data) = dst.get_mut(&site.name).expect("validated above");
+            k.delta_into(self.strength, data);
+        }
+        Ok(())
+    }
+
+    /// How many targets this fold covers - what a caller logs to say how much
+    /// of the model an adapted run actually changed.
+    pub fn targets(&self) -> usize {
+        self.set.entries.len()
+    }
+}
+
+/// How an adapter reaches inference, decided once by the base storage.
+///
+/// Both arms must be handled - that is the point of returning an enum rather
+/// than a `fold_into` a caller can reach unconditionally. A model that has no
+/// runtime path yet must say so at the `Runtime` arm, loudly, instead of
+/// falling through to a fold the quantizer then erases.
+pub enum Delivery<'a, K: AdapterKind> {
+    /// Dense base: fold the delta into the weights. Exact, and free at
+    /// inference.
+    Fold(Folder<'a, K>),
+    /// Quantized base: leave the weights exactly as the checkpoint says (the
+    /// same bit-exact tensors the no-adapter path uses) and apply these
+    /// corrections to the activations at runtime.
+    ///
+    /// [`crate::lora::RuntimeLora`] is the shared carrier `flux2` already
+    /// builds and `model::dispatch::lora_rows_off` already dispatches, so a
+    /// model reaching this arm gets the same upload, the same
+    /// `lora_delta.wgsl` epilogue, and the same "every rectangle must be
+    /// claimed by some linear" check as every other model - not a second
+    /// mechanism shaped like the first.
+    Runtime(crate::lora::RuntimeLora),
 }
 
 /// A tensor's shape alongside its flat row-major data, exactly what
@@ -348,28 +456,74 @@ impl<K: AdapterKind> AdapterSet<K> {
         });
     }
 
-    /// Validate every target's destination exists and is long enough
-    /// BEFORE writing any delta - flux2's `fold_into_tensors` two-pass
-    /// shape, made mechanical by [`TargetSpec::dest_len`].
-    pub fn fold_into(&self, dst: &mut HashMap<String, (Vec<usize>, Vec<f32>)>, strength: f32) -> Result<(), String> {
-        for (site, _) in &self.entries {
-            let (_, data) = dst
-                .get(&site.name)
-                .ok_or_else(|| format!("adapter fold: missing base tensor {:?}", site.name))?;
-            if data.len() < site.spec.dest_len() {
-                return Err(format!(
-                    "adapter fold: {:?} has {} elements, need at least {}",
-                    site.name,
-                    data.len(),
-                    site.spec.dest_len()
-                ));
+    /// **How this adapter must reach inference**, given the precision its
+    /// base weights will be stored at. The single decision point for the
+    /// fold-vs-runtime question in this workspace.
+    ///
+    /// * [`BaseStorage::Dense`] -> [`Delivery::Fold`], carrying the only
+    ///   [`Folder`] that exists. Nothing re-rounds a dense sum, so folding is
+    ///   exact and costs nothing at inference.
+    /// * [`BaseStorage::Quantized`] -> [`Delivery::Runtime`], one
+    ///   [`RuntimeDelta`] per target, in this set's canonical order. The base
+    ///   weights stay untouched and quantize bit-exactly, exactly as they do
+    ///   with no adapter at all.
+    ///
+    /// The error case is a kind with no [`AdapterKind::low_rank`] form against
+    /// a quantized base: there is then neither a safe fold nor a runtime
+    /// correction, and saying so is the only honest answer.
+    pub fn delivery(&self, storage: BaseStorage, strength: f32) -> Result<Delivery<'_, K>, String> {
+        match storage {
+            BaseStorage::Dense => Ok(Delivery::Fold(Folder { set: self, strength })),
+            BaseStorage::Quantized => {
+                let mut out = Vec::with_capacity(self.entries.len());
+                for (site, k) in &self.entries {
+                    let lr = k.low_rank().ok_or_else(|| {
+                        format!(
+                            "adapter: {} has no low-rank runtime form, and folding it into a quantized base would round the delta onto the weight grid ({:?})",
+                            K::kind_name(),
+                            site.name
+                        )
+                    })?;
+                    let s = lr.scale * strength;
+                    out.push(crate::lora::RuntimeDelta {
+                        key: site.name.clone(),
+                        row0: site.spec.row0,
+                        row_stride: site.spec.row_stride,
+                        col0: site.spec.col0,
+                        elems: site.spec.dest_len(),
+                        // `B` carries the scale, exactly as `RuntimeDelta`
+                        // defines it, so the upload and a late fold cannot
+                        // disagree about it.
+                        pair: crate::lora::Pair::from_ab(
+                            site.spec.out,
+                            site.spec.inn,
+                            lr.rank,
+                            lr.a.to_vec(),
+                            lr.b.iter().map(|v| v * s).collect(),
+                        ),
+                    });
+                }
+                Ok(Delivery::Runtime(crate::lora::RuntimeLora::new(out)))
             }
         }
-        for (site, k) in &self.entries {
-            let (_, data) = dst.get_mut(&site.name).expect("validated above");
-            k.delta_into(strength, data);
+    }
+
+    /// [`Self::delivery`] for a caller that only ever folds: the one-liner for
+    /// a model whose base weights are consumed as the floats they are.
+    ///
+    /// `storage` is not decoration. Pass [`BaseStorage::Quantized`] and this
+    /// refuses by name instead of folding, because a delta folded into weights
+    /// that are then re-quantized is rounded onto the base weight's own grid
+    /// and largely discarded. A caller that reaches that refusal wants
+    /// [`Self::delivery`] and the [`Delivery::Runtime`] arm.
+    pub fn fold_into(&self, dst: &mut HashMap<String, (Vec<usize>, Vec<f32>)>, storage: BaseStorage, strength: f32) -> Result<(), String> {
+        match self.delivery(storage, strength)? {
+            Delivery::Fold(f) => f.into_tensors(dst),
+            Delivery::Runtime(_) => Err(format!(
+                "adapter: a {storage:?} base has no safe fold - {} targets must be delivered as a runtime correction beside the quantized weights (AdapterSet::delivery)",
+                self.entries.len()
+            )),
         }
-        Ok(())
     }
 
     pub fn to_tensors(&self) -> Vec<(String, Vec<usize>, Vec<f32>)> {

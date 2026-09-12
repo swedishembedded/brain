@@ -251,18 +251,33 @@ impl LoraAdapter {
         Ok(LoraAdapter { set, hp, n_blocks: cfg.n_layers })
     }
 
+    /// **How this adapter must reach a build whose base weights are stored at
+    /// `storage`** - [`model::adapter::AdapterSet::delivery`], with wan's own
+    /// sites already resolved.
+    ///
+    /// `WanDtype::F32`/`F16` is [`model::adapter::BaseStorage::Dense`] and
+    /// folds; `Int8`/`Int4` is [`model::adapter::BaseStorage::Quantized`] and
+    /// does not, because the quantizer would round the delta onto the base
+    /// weight's own grid (`tests/lora_int8_delivery.rs` measures how much of
+    /// it that loses). [`crate::dev::WanDtype::base_storage`] is the mapping,
+    /// so no caller re-derives it.
+    pub fn delivery(&self, storage: model::adapter::BaseStorage, strength: f32) -> Result<model::adapter::Delivery<'_, LoraPair>, String> {
+        self.set.delivery(storage, strength)
+    }
+
     /// Fold this adapter into an **inference** tensor map (what
     /// [`crate::WanDit`] / [`crate::WanDitDev`] build from), so the unchanged
     /// generation path produces adapter-conditioned video. Errors by name if a
-    /// targeted tensor is absent or the wrong size.
+    /// targeted tensor is absent or the wrong size - and errors outright for a
+    /// quantized base, which has no safe fold.
     ///
     /// Every targeted linear is an UNFUSED whole tensor here (wan's
     /// checkpoint stores `q`/`k`/`v` separately), so this is a table of
     /// whole-tensor placements and nothing else - the validation contract and
-    /// the `B·A` arithmetic are [`model::lora::fold_placements`]'s, shared
-    /// with every other architecture's fold.
-    pub fn fold_into_tensors(&self, ts: &mut crate::model::Tensors) -> Result<(), String> {
-        self.set.fold_into(ts, 1.0)
+    /// the `B·A` arithmetic are the shared engine's, shared with every other
+    /// architecture's fold.
+    pub fn fold_into_tensors(&self, ts: &mut crate::model::Tensors, storage: model::adapter::BaseStorage) -> Result<(), String> {
+        self.set.fold_into(ts, storage, 1.0)
     }
 }
 

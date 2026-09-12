@@ -196,8 +196,16 @@ impl LoraAdapter {
     /// `[out, in]` tensor at offset 0 keyed by its site name - exactly what
     /// [`model::adapter::AdapterSet::fold_into`] already does generically,
     /// validating every target before writing any of them.
+    ///
+    /// [`model::adapter::BaseStorage::Dense`] is what this map is: it is read
+    /// as fp32 tensors. LTX-2.5's quantized inference route
+    /// (`crate::int8`/`crate::weightcache`) does not consume it, and must not
+    /// be pointed at it - a delta folded into weights that are then
+    /// re-quantized is rounded onto the base weight's own grid and largely
+    /// discarded. That route needs `AdapterSet::delivery`'s
+    /// `Delivery::Runtime` arm, the way `wan::dev` wires it.
     pub fn fold_into_tensors(&self, ts: &mut vae::blocks::Tensors) -> Result<(), String> {
-        self.set.fold_into(ts, 1.0)
+        self.set.fold_into(ts, model::adapter::BaseStorage::Dense, 1.0)
     }
 }
 
