@@ -284,10 +284,22 @@ impl WanDitDev {
         dtype: WanDtype,
         lora: Option<&RuntimeLora>,
     ) -> WanDitDev {
-        if dtype.gpu_only() && device == Some("cpu") {
-            panic!("wan: --dit-dtype {} has no CPU-JIT lowering (DP4A) - build on a GPU device", dtype.key());
-        }
         let gpu = Gpu::open(device, &KERNELS);
+        // Against what was OPENED, not against what was spelled. The old check
+        // was `device == Some("cpu")`, which a caller that named no device at
+        // all walked straight past - and `None` resolves to the CPU JIT on any
+        // box with no usable card. The DP4A GEMM would then be dispatched to a
+        // backend that cannot run it, which is the silent-fallback shape this
+        // whole file's adapter work exists to remove. `workgroup_reductions`
+        // is the same capability `Sel` gates the fast tier on, and the CPU JIT
+        // reports it false.
+        if dtype.gpu_only() && !gpu.caps().workgroup_reductions {
+            panic!(
+                "wan: --dit-dtype {} needs DP4A and workgroup barriers, which {} does not have - name a GPU device explicitly",
+                dtype.key(),
+                gpu.kind()
+            );
+        }
         let d = BlockDims::new(cfg);
         let sel = Sel::new(&gpu);
         let grid = model::patch_grid(cfg, f, h, w);

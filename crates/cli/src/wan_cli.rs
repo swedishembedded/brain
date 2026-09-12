@@ -68,8 +68,18 @@ Sampling (defaults from WanConfig, i.e. upstream's own generate.py defaults):
   --fps <N>                frame rate written into the container (default 16)
   --variant <name>         t2v-1.3B (default) | t2v-14B
 
-  --adapter <path>         fold in a trained LoRA adapter (from `finetune`)
-                           before generating
+  --adapter <path>         apply a trained LoRA adapter (from `finetune`).
+                           How it is applied follows --dit-dtype, and is not
+                           a choice: f32/f16 fold the delta into the weights,
+                           which is exact there. int8/int4 do NOT - an int8
+                           weight has 256 levels and a trained delta is
+                           typically a fraction of one, so folding would
+                           round most of the adapter back onto the base
+                           weight and discard it - they apply the low-rank
+                           correction beside the weights at runtime instead.
+                           A .gguf transformer therefore works at int8/int4
+                           (nothing is folded into the read-only mapping) and
+                           not at f32/f16
 
 Weights: `t2v` resolves dit/vae/text_encoder/tokenizer from the models
 directory (--models-dir / BRAIN_MODELS_DIR) - --dit/--vae/--t5/--tokenizer

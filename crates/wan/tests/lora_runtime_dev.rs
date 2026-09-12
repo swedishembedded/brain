@@ -117,11 +117,18 @@ fn diff(a: &[f32], b: &[f32]) -> Vec<f32> {
     a.iter().zip(b).map(|(x, y)| x - y).collect()
 }
 
-/// This engine's INT8 tier is DP4A (`matmul_i8_dyn`) and the correction's
-/// second GEMM stages through workgroup memory, so both need a device with
-/// workgroup barriers. `Sel` gates the whole fast tier on the same cap.
+/// The device every build below names. Never `None`: leaving it unspecified
+/// lets the scheduler fall back to the CPU JIT, which cannot run the DP4A
+/// GEMM this test is about - a silent fallback would turn a real failure into
+/// a confusing panic deep inside dispatch.
+const DEVICE: Option<&str> = Some("gpu");
+
+/// This engine's INT8 tier is DP4A (`matmul_i8_dyn`), so it needs a device
+/// with workgroup barriers. `Sel` gates the whole fast tier on the same cap,
+/// and `WanDitDev::build_adapted` panics rather than dispatch without it - so
+/// a box with no usable card skips here instead of failing.
 fn gpu_tier_available() -> bool {
-    gpu_core::Gpu::open(None, &wan::block::KERNELS).caps().workgroup_reductions
+    gpu_core::Gpu::open(DEVICE, &wan::block::KERNELS).caps().workgroup_reductions
 }
 
 struct Fixture {
@@ -174,7 +181,7 @@ impl Fixture {
 
     fn dev_forward(&self, w: &Tensors, lora: Option<&RuntimeLora>) -> Vec<f32> {
         let (lf, lh, lw) = self.cfg.latent;
-        let d = WanDitDev::build_adapted(&self.wc, w, lf as u32, lh as u32, lw as u32, None, &[], WanDtype::Int8, lora)
+        let d = WanDitDev::build_adapted(&self.wc, w, lf as u32, lh as u32, lw as u32, DEVICE, &[], WanDtype::Int8, lora)
             .expect("build");
         d.set_context(&self.ctx, self.ctx_rows);
         d.forward(&self.latent, 500.0)
@@ -266,7 +273,7 @@ fn a_zero_strength_correction_reproduces_the_unadapted_int8_build_bit_for_bit() 
 fn a_dense_build_refuses_a_runtime_correction() {
     let fx = fixture(2, 1);
     let (lf, lh, lw) = fx.cfg.latent;
-    let Err(err) = WanDitDev::build_adapted(&fx.wc, &fx.ts, lf as u32, lh as u32, lw as u32, None, &[], WanDtype::F32, Some(&fx.runtime(1.0)))
+    let Err(err) = WanDitDev::build_adapted(&fx.wc, &fx.ts, lf as u32, lh as u32, lw as u32, DEVICE, &[], WanDtype::F32, Some(&fx.runtime(1.0)))
     else {
         panic!("a dense build must refuse a runtime correction")
     };
