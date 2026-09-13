@@ -463,6 +463,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-backend-cuda"
+version = "1.1.0"
+dependencies = [
+ "brain-backend-api",
+ "libloading",
+ "tracing",
+]
+
+[[package]]
 name = "brain-backend-vulkan"
 version = "1.1.0"
 dependencies = [
@@ -1195,6 +1204,7 @@ version = "1.1.0"
 dependencies = [
  "brain-backend-api",
  "brain-backend-cpu",
+ "brain-backend-cuda",
  "brain-backend-vulkan",
  "brain-backend-wgpu",
  "brain-data",

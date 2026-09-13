@@ -70,16 +70,25 @@ pub struct DeviceId {
 
 pub struct DeviceRegistry {
     devices: Vec<DeviceId>,
-    /// Which enumeration established identity: `"vulkan"` (ash) or `"wgpu"`.
+    /// Which enumeration established identity: `"vulkan"` (ash), `"wgpu"`, or
+    /// `"cuda"` (the driver-only fallback - see [`registry`]).
     source: &'static str,
 }
 
 static REGISTRY: std::sync::OnceLock<DeviceRegistry> = std::sync::OnceLock::new();
 
 /// The registry, enumerated on first use.
+///
+/// Three sources, in precedence order: native Vulkan, then wgpu, then CUDA.
+/// CUDA is last and is a *fallback*, not a preference - a headless box with
+/// the NVIDIA kernel driver but no Vulkan ICD enumerates nothing through
+/// either of the first two, and would otherwise have an empty registry and no
+/// `gpu0` at all. Whichever source answers, identity is the same 16-byte
+/// device UUID, so the canonical index means the same physical card either
+/// way (see [`cuda_identities`]).
 pub fn registry() -> &'static DeviceRegistry {
     REGISTRY.get_or_init(|| {
-        let (ids, source) = match backend_vulkan::enumerate_physical_gpus() {
+        let (mut ids, mut source) = match backend_vulkan::enumerate_physical_gpus() {
             Ok(v) if !v.is_empty() => (v, "vulkan"),
             Err(e) => {
                 tracing::debug!(error = %e, "native Vulkan enumeration unavailable; falling back to wgpu");
@@ -87,10 +96,47 @@ pub fn registry() -> &'static DeviceRegistry {
             }
             Ok(_) => (backend_wgpu::enumerate_gpus(), "wgpu"),
         };
+        if ids.is_empty() {
+            match cuda_identities() {
+                Ok(v) if !v.is_empty() => {
+                    ids = v;
+                    source = "cuda";
+                }
+                Ok(_) => {}
+                Err(e) => tracing::debug!(error = %e, "CUDA enumeration unavailable too"),
+            }
+        }
         let reg = DeviceRegistry::from_identities(ids, source);
         tracing::info!(source, gpus = reg.devices().len(), "device registry built (one-time, process lifetime)");
         reg
     })
+}
+
+/// Every CUDA-visible device, as an identity, in CUDA ordinal order - the
+/// THIRD registry source, enumerated once per process (failure cached too, so
+/// a box with no NVIDIA driver does not `dlopen` repeatedly).
+///
+/// `Err` carries the concrete reason the CUDA driver is unusable (no
+/// `libcuda.so.1`, a missing entry point, a `cuInit` status). That is an
+/// ordinary outcome on most machines, which is why it is a `Result` and not a
+/// log line: an explicit `--backend cuda` has to be able to report *why*.
+pub fn cuda_identities() -> Result<Vec<GpuIdentity>, String> {
+    static CUDA: std::sync::OnceLock<Result<Vec<GpuIdentity>, String>> = std::sync::OnceLock::new();
+    CUDA.get_or_init(backend_cuda::enumerate_physical_gpus).clone()
+}
+
+/// The CUDA ordinal naming the same physical card as canonical index `index`,
+/// or `None` when CUDA cannot see that card (or cannot be loaded at all).
+///
+/// This is the direction a CUDA backend needs - `gpu0` -> which `CUdevice` to
+/// open - and it goes through [`GpuIdentity::same_device`] (UUID first), never
+/// through either enumeration's position. CUDA orders devices by its own
+/// policy and `CUDA_VISIBLE_DEVICES` renumbers them, so "CUDA ordinal 0 is
+/// gpu0" is false in general even though it is usually true.
+pub fn cuda_ordinal(index: u32) -> Option<u32> {
+    let want = &registry().devices().iter().find(|d| d.index == index)?.identity;
+    let cuda = cuda_identities().ok()?;
+    cuda.iter().position(|c| c.same_device(want)).map(|p| p as u32)
 }
 
 impl DeviceRegistry {
@@ -878,12 +924,57 @@ fn npu_count() -> u32 {
     n
 }
 
-/// Which host backend a resolved set implies.
+/// **How** the selected hardware is driven - the `--backend` axis.
+///
+/// Orthogonal to [`DeviceSpec`], which says *which* hardware is schedulable.
+/// A resolved [`ComputeSet`] implies a default here, and `--backend` overrides
+/// it ([`ComputeSet::set_backend`]) without changing the device set.
+///
+/// Note the `--device` grammar still accepts `vulkan`/`wgpu` as
+/// backend-setting device tokens. That overlap is deliberate and temporary:
+/// `BRAIN_DEVICE=vulkan` is load-bearing in the parity gate and documented as
+/// a performance instruction for cards without resizable BAR, so retiring the
+/// tokens is a change of its own, not a side effect of adding this flag.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Backend {
     Wgpu,
     Cpu,
     Vulkan,
+    /// Native CUDA Driver API. Device identity only so far - see
+    /// `backend_cuda`'s crate doc for exactly what it can and cannot do.
+    Cuda,
+}
+
+impl Backend {
+    /// The `--backend` token for this backend - also what
+    /// `gpu_core::backend_name()` reports and what the backend registry keys
+    /// on, so all three spellings are this one function.
+    pub fn name(self) -> &'static str {
+        match self {
+            Backend::Wgpu => "wgpu",
+            Backend::Cpu => "cpu",
+            Backend::Vulkan => "vulkan",
+            Backend::Cuda => "cuda",
+        }
+    }
+
+    /// Parse a `--backend` value. Total and pure; case- and
+    /// whitespace-tolerant like [`DeviceSpec::parse`].
+    pub fn parse(s: &str) -> Result<Backend, String> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "wgpu" => Ok(Backend::Wgpu),
+            "cpu" => Ok(Backend::Cpu),
+            "vulkan" => Ok(Backend::Vulkan),
+            "cuda" => Ok(Backend::Cuda),
+            other => Err(format!("unknown backend {other:?} - expected wgpu | vulkan | cuda | cpu")),
+        }
+    }
+}
+
+impl fmt::Display for Backend {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
 }
 
 /// The resolved, schedulable compute.
@@ -922,6 +1013,25 @@ impl ComputeSet {
     /// registry's ambient device selection (see [`set_ambient_gpu`]).
     pub fn single_gpu(&self) -> Option<u32> {
         (self.gpus.len() == 1).then(|| self.gpus[0])
+    }
+
+    /// Apply an explicit `--backend` over the backend this set implied.
+    ///
+    /// The device set is untouched: `--backend` answers "how is the selected
+    /// hardware driven", not "which hardware". The one combination refused is
+    /// a GPU backend over a set with no schedulable GPU - the request is
+    /// unsatisfiable, and the alternative to an error is the silent demotion
+    /// that makes a run's real backend undiscoverable. An explicitly
+    /// requested backend is a hard contract.
+    pub fn set_backend(&mut self, b: Backend) -> Result<(), String> {
+        if b != Backend::Cpu && !self.gpu_enabled() {
+            return Err(format!(
+                "--backend {b} needs a GPU, but --device {:?} selects no GPU",
+                self.source
+            ));
+        }
+        self.backend = b;
+        Ok(())
     }
 }
 
@@ -967,6 +1077,7 @@ impl ComputeSet {
             Backend::Wgpu => crate::Backend::Wgpu,
             Backend::Cpu => crate::Backend::Cpu,
             Backend::Vulkan => crate::Backend::Vulkan,
+            Backend::Cuda => crate::Backend::Cuda,
         });
 
         // One card selected: pin it in the registry's ambient selection, so
@@ -1058,26 +1169,39 @@ pub fn published_compute_set() -> Option<&'static ComputeSet> {
 #[cfg(not(target_arch = "wasm32"))]
 pub fn ambient_compute_set() -> &'static ComputeSet {
     AMBIENT_COMPUTE.get_or_init(|| {
-        let text = std::env::var("BRAIN_DEVICE").unwrap_or_default();
-        let probe = Inventory::probe();
-        let resolved = DeviceSpec::parse(&text).and_then(|spec| spec.resolve(&probe));
-        let set = match resolved {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!(
-                    "brain: BRAIN_DEVICE={text:?}: {e}; falling back to the default all-devices set"
-                );
-                DeviceSpec::default()
-                    .resolve(&probe)
-                    .expect("the empty/default device spec always resolves")
-            }
-        };
+        let set = resolve_ambient_compute_set();
         // Best-effort: only the backend/GPU-pin half applies here (see the
         // doc above); a failure has nothing more to do than leave the
         // process on whatever backend it already had.
         let _ = set.apply_backend();
         set
     })
+}
+
+/// Resolve `BRAIN_DEVICE` into a fresh, unpublished [`ComputeSet`] - the body
+/// [`ambient_compute_set`] caches, exposed so `crates/cli` can layer its
+/// `--backend` flag onto the set BEFORE publishing it.
+///
+/// **CLI-only**, exactly like [`publish_compute_set`]: every other caller must
+/// go through [`ambient_compute_set`], which resolves once and caches. Calling
+/// this a second time re-reads the environment and produces a second opinion,
+/// which is the whole failure mode `check-device-env-single-source.sh` exists
+/// to prevent. It is here, in the one file that reads `BRAIN_DEVICE`, so that
+/// the CLI does not grow a second parser to apply a backend override.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn resolve_ambient_compute_set() -> ComputeSet {
+    let text = std::env::var("BRAIN_DEVICE").unwrap_or_default();
+    let probe = Inventory::probe();
+    let resolved = DeviceSpec::parse(&text).and_then(|spec| spec.resolve(&probe));
+    match resolved {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("brain: BRAIN_DEVICE={text:?}: {e}; falling back to the default all-devices set");
+            DeviceSpec::default()
+                .resolve(&probe)
+                .expect("the empty/default device spec always resolves")
+        }
+    }
 }
 
 /// How many GPUs a machine-shape decision may actually use RIGHT NOW - the
@@ -1335,6 +1459,57 @@ mod tests {
         let set = resolve("vulkan", inv(2, 48, 0)).unwrap();
         assert_eq!(set.backend, Backend::Vulkan);
         assert_eq!(set.gpus, vec![0, 1]);
+    }
+
+    // ---- `--backend`: HOW the selected hardware is driven --------------
+    //
+    // A separate axis from `--device`, over the `backend` field `ComputeSet`
+    // has always carried. The `--device` grammar is deliberately untouched
+    // here: `vulkan`/`wgpu` keep parsing as backend-setting device tokens
+    // (BRAIN_DEVICE=vulkan is load-bearing in the parity gate and documented
+    // as a performance instruction), and retiring them is its own change.
+
+    #[test]
+    fn backend_names_round_trip_the_flags_four_values() {
+        for (text, b) in [
+            ("wgpu", Backend::Wgpu),
+            ("vulkan", Backend::Vulkan),
+            ("cuda", Backend::Cuda),
+            ("cpu", Backend::Cpu),
+        ] {
+            assert_eq!(Backend::parse(text).unwrap(), b, "{text}");
+            assert_eq!(b.name(), text);
+        }
+        let e = Backend::parse("rocm").unwrap_err();
+        assert!(e.contains("rocm"), "the error must quote what was typed: {e}");
+        assert!(e.contains("cuda"), "the error should teach the grammar: {e}");
+    }
+
+    #[test]
+    fn backend_overrides_how_work_runs_without_touching_which_hardware() {
+        let mut set = resolve("gpu0,cpu0-3", inv(2, 48, 0)).unwrap();
+        assert_eq!(set.backend, Backend::Wgpu);
+        set.set_backend(Backend::Cuda).unwrap();
+        assert_eq!(set.backend, Backend::Cuda);
+        assert_eq!(set.gpus, vec![0], "--backend must not change the device set");
+        assert_eq!(set.cpu_cores, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn a_gpu_backend_over_a_gpuless_set_is_an_error_not_a_silent_demotion() {
+        let mut set = resolve("cpu", inv(2, 48, 0)).unwrap();
+        for b in [Backend::Cuda, Backend::Vulkan, Backend::Wgpu] {
+            let e = set.set_backend(b).unwrap_err();
+            assert!(e.contains(b.name()) && e.contains("no GPU"), "{e}");
+        }
+        assert_eq!(set.backend, Backend::Cpu, "a rejected request must leave the set alone");
+        set.set_backend(Backend::Cpu).unwrap();
+    }
+
+    #[test]
+    fn cuda_is_a_backend_token_not_a_device_token() {
+        let e = DeviceSpec::parse("cuda").unwrap_err();
+        assert!(e.contains("unknown device"), "--device's grammar is unchanged by --backend: {e}");
     }
 
     #[test]

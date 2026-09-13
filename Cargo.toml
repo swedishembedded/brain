@@ -17,6 +17,7 @@ default-members = [
     "crates/backend-wgpu",
     "crates/backend-cpu",
     "crates/backend-vulkan",
+    "crates/backend-cuda",
     "crates/wgsl-cpu",
     "crates/gpu-core",
     "crates/kernels",
@@ -155,6 +156,7 @@ brain-backend-api = { path = "crates/backend-api" }
 brain-backend-wgpu = { path = "crates/backend-wgpu" }
 brain-backend-cpu = { path = "crates/backend-cpu" }
 brain-backend-vulkan = { path = "crates/backend-vulkan" }
+brain-backend-cuda = { path = "crates/backend-cuda" }
 brain-gpu-core = { path = "crates/gpu-core" }
 brain-kernels = { path = "crates/kernels" }
 brain-arch = { path = "crates/arch" }
@@ -323,6 +325,12 @@ safetensors = "0.8"
 half = "2"
 clap = { version = "4", default-features = false, features = ["std", "help", "error-context", "string"] }
 ash = { version = "0.38" }
+# CUDA Driver API, reached by `dlopen`ing `libcuda.so.1` at run time rather
+# than linking it. The driver library ships with the NVIDIA kernel driver, not
+# with the CUDA toolkit, and a box with neither must still build and test
+# green - so nothing in the build path may reference a CUDA symbol. See
+# `crates/backend-cuda`.
+libloading = "0.8"
 naga = { version = "29", features = ["wgsl-in", "spv-out"] }
 # ONNX export (pure-Rust serializer); only `prost` runtime is needed at build.
 prost = "0.14"

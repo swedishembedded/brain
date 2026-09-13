@@ -38,6 +38,11 @@ brain-memauth.workspace = true
 brain-backend-wgpu.workspace = true
 brain-backend-cpu.workspace = true
 brain-backend-vulkan.workspace = true
+# The THIRD source of physical-device identity (`cuDeviceGetUuid`), for the
+# headless driver-only box where the Vulkan/wgpu enumerations are both empty.
+# Adds no build-time CUDA dependency: the crate `dlopen`s `libcuda.so.1` and
+# reports an ordinary `Err` when it is absent.
+brain-backend-cuda.workspace = true
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 brain-backend-wgpu.workspace = true

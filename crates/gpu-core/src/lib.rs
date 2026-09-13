@@ -222,9 +222,13 @@ mod native_facade {
         /// Native Vulkan compute (ash + naga WGSL->SPIR-V). Falls back to wgpu if
         /// no Vulkan device/ICD is present.
         Vulkan,
+        /// Native CUDA driver API. Device enumeration only so far - selecting
+        /// it is an error at build time rather than a fall-back to another
+        /// backend (see `Gpu::cuda_not_executable`).
+        Cuda,
     }
 
-    static DEFAULT_BACKEND: AtomicU8 = AtomicU8::new(0); // 0=unset, 1=Wgpu, 2=Cpu, 3=Vulkan
+    static DEFAULT_BACKEND: AtomicU8 = AtomicU8::new(0); // 0=unset, 1=Wgpu, 2=Cpu, 3=Vulkan, 4=Cuda
 
     /// Bytes a `storage(n)`/`storage_init(data)` call really reserves: `n`
     /// four-byte words, with the backends' minimum of one word for `n == 0`
@@ -249,6 +253,7 @@ mod native_facade {
                 Backend::Wgpu => 1,
                 Backend::Cpu => 2,
                 Backend::Vulkan => 3,
+                Backend::Cuda => 4,
             },
             Ordering::Relaxed,
         );
@@ -263,7 +268,7 @@ mod native_facade {
     }
 
     /// The registry name of the backend that will be (or was) selected -
-    /// `"wgpu" | "cpu" | "vulkan"`. Public so callers that record *what actually
+    /// `"wgpu" | "cpu" | "vulkan" | "cuda"`. Public so callers that record *what actually
     /// ran* (the perf suite's result fingerprint) don't have to re-derive it.
     pub fn backend_name() -> &'static str {
         resolve_backend_name()
@@ -350,11 +355,8 @@ mod native_facade {
             1 => "wgpu",
             2 => "cpu",
             3 => "vulkan",
-            _ => match crate::devices::ambient_compute_set().backend {
-                crate::devices::Backend::Wgpu => "wgpu",
-                crate::devices::Backend::Cpu => "cpu",
-                crate::devices::Backend::Vulkan => "vulkan",
-            },
+            4 => "cuda",
+            _ => crate::devices::ambient_compute_set().backend.name(),
         }
     }
 
@@ -556,6 +558,7 @@ mod native_facade {
                         }
                     }
                 }
+                "cuda" => Self::cuda_not_executable(),
                 _ => match backend_api::create_backend(name, kernels) {
                     Ok(inner) => inner,
                     Err(e) => panic!("failed to build backend '{name}': {e}"),
@@ -563,6 +566,23 @@ mod native_facade {
             };
             record_caps(inner.as_ref());
             Gpu::wrap(inner, Self::kernel_names(kernels))
+        }
+
+        /// An explicitly selected `cuda` backend that cannot execute the
+        /// kernel catalogue yet: refuse, loudly, naming what is missing.
+        ///
+        /// `backend-cuda` enumerates devices and nothing else so far - no
+        /// buffers, no kernel compilation, no dispatch. Falling through to
+        /// wgpu here (which is what an unmatched arm would do) is exactly the
+        /// silent demotion that makes a run's real backend undiscoverable, so
+        /// the request fails instead. This disappears the moment the CUDA
+        /// `Backend` impl lands; until then a wrong answer is worse than none.
+        fn cuda_not_executable() -> ! {
+            panic!(
+                "brain: the CUDA backend cannot run kernels yet - backend-cuda enumerates \
+                 devices only (no buffers, no kernel compilation, no dispatch). Re-run with \
+                 --backend wgpu, vulkan or cpu; brain will not silently substitute one."
+            )
         }
 
         /// wgpu backend on `dev` (identity-matched) or wgpu's own default when
@@ -595,6 +615,7 @@ mod native_facade {
                         Box::new(backend_wgpu::WgpuBackend::new_on(kernels, &dev.identity))
                     }
                 },
+                "cuda" => Self::cuda_not_executable(),
                 _ => Box::new(backend_wgpu::WgpuBackend::new_on(kernels, &dev.identity)),
             };
             record_caps(inner.as_ref());

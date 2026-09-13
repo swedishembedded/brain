@@ -149,6 +149,18 @@ boots), shared by --device gpuN, shard placement and residency budgets.
 `brain devices` prints the table (index, PCI bus, UUID, VRAM, backends) and what
 the ambient selection resolves to.
 
+--backend selects HOW THAT HARDWARE IS DRIVEN - a separate axis from --device,
+which picks the hardware itself. Omit it for wgpu.
+
+  wgpu      portable WebGPU/wgpu path (default)
+  vulkan    native Vulkan compute (ash, WGSL -> SPIR-V)
+  cuda      native CUDA driver API - DEVICE ENUMERATION ONLY so far; it cannot
+            run kernels yet and says so rather than running somewhere else
+  cpu       native CPU backend
+
+An explicitly named backend is a hard contract: if it cannot be built, brain
+fails and names the reason instead of quietly substituting another one.
+
 MEMORY CEILINGS (global - valid on any subcommand)
   --limit-vram-total <SIZE> hard cap on the GPU memory brain may hold, as ONE
                             total across every card (not a per-card cap).
@@ -525,10 +537,25 @@ EXAMPLES
 Or drive everything via the Makefile:  make data/calculator train/gpt/calculator eval/gpt/calculator
 ";
 
-/// Extract a global `--device cpu|gpu` flag from anywhere in the args and select
-/// the compute backend, returning the remaining args. `BRAIN_DEVICE=cpu` does the
-/// same without a flag. Both backends are compiled into every build; this only
-/// chooses which one each model instantiates at runtime.
+/// Extract the two global compute flags from anywhere in the args and select
+/// the compute set, returning the remaining args.
+///
+/// * `--device` (`BRAIN_DEVICE`) - **which hardware** is schedulable:
+///   `cpu | gpu | npu | gpu0 | cpu0-7 | gpu1,cpu0-3`, unions of those.
+/// * `--backend` - **how that hardware is driven**:
+///   `wgpu` (default) `| vulkan | cuda | cpu`.
+///
+/// Two axes, and only the first one picks hardware. `--backend` writes the
+/// `backend` field the resolved `ComputeSet` has always carried, leaving the
+/// device set alone, so `--device gpu1 --backend vulkan` is expressible and
+/// means what it reads as. Every backend is compiled into every build; both
+/// flags only choose what each model instantiates at run time.
+///
+/// `--device vulkan`/`--device wgpu` still parse, as backend-setting device
+/// tokens, and are unaffected by this flag. That overlap goes away in a change
+/// of its own - `BRAIN_DEVICE=vulkan` is load-bearing in the parity gate and
+/// documented as a performance instruction, so it cannot be retired as a side
+/// effect of adding `--backend`.
 fn select_backend(argv: Vec<String>) -> Vec<String> {
     let mut argv = argv;
     // `brain npu …` subcommands used to have their OWN `--device` (the
@@ -557,6 +584,7 @@ fn select_backend(argv: Vec<String>) -> Vec<String> {
     }
     let mut out = Vec::with_capacity(argv.len());
     let mut spec_text: Option<String> = None;
+    let mut backend_text: Option<String> = None;
     let mut i = 0;
     while i < argv.len() {
         if argv[i] == "--device" {
@@ -570,24 +598,47 @@ fn select_backend(argv: Vec<String>) -> Vec<String> {
                 }
             }
             i += 2;
+        } else if argv[i] == "--backend" {
+            match argv.get(i + 1) {
+                Some(v) => backend_text = Some(v.clone()),
+                None => {
+                    eprintln!("brain: --backend needs a value (wgpu | vulkan | cuda | cpu)");
+                    std::process::exit(2);
+                }
+            }
+            i += 2;
         } else {
             out.push(argv[i].clone());
             i += 1;
         }
     }
 
+    let backend = backend_text.map(|text| match gpu_core::devices::Backend::parse(&text) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("brain: --backend: {e}");
+            std::process::exit(2);
+        }
+    });
+
     // An explicit `--device` flag takes precedence over `BRAIN_DEVICE` and is
     // resolved directly (still hard-exiting on a bad value - the user just
     // typed it). With no flag, `BRAIN_DEVICE` - if any - is resolved by
-    // `gpu_core::ambient_compute_set()`, the ONE place `BRAIN_DEVICE` is read
-    // (shared with every non-CLI caller: test binaries, library callers with
-    // no CLI in the loop). `apply()` still runs here either way for the
+    // `gpu_core::devices::resolve_ambient_compute_set()`, which is the body of
+    // `ambient_compute_set()` and lives in the ONE file that reads
+    // `BRAIN_DEVICE` (shared with every non-CLI caller: test binaries, library
+    // callers with no CLI in the loop). `apply()` runs here either way for the
     // CLI-only half `ambient_compute_set()` deliberately skips (rayon pool
     // sizing / CPU affinity - see `ComputeSet::apply`'s doc).
-    // The resolved set is only needed for its side effects here (`apply()`,
-    // `publish_compute_set`) - callers read it back via
-    // `gpu_core::ambient_compute_set()`/`compute_set()`, not this binding.
-    let _set = match spec_text {
+    //
+    // One resolution, then one optional `--backend` override on top of it,
+    // then publish - in that order, because `--backend` must reach the set
+    // BEFORE it is published or the process's ambient set and the flag the
+    // user typed disagree (that `OnceLock` is first-writer-wins by design).
+    // Publishing is what makes the resolution readable again: callers get it
+    // back through `gpu_core::ambient_compute_set()`/`compute_set()`, never
+    // from this binding.
+    let mut set = match spec_text {
         Some(text) => {
             let spec = match gpu_core::DeviceSpec::parse(&text) {
                 Ok(s) => s,
@@ -596,32 +647,31 @@ fn select_backend(argv: Vec<String>) -> Vec<String> {
                     std::process::exit(2);
                 }
             };
-            let set = match spec.resolve(&gpu_core::Inventory::probe()) {
+            match spec.resolve(&gpu_core::Inventory::probe()) {
                 Ok(s) => s,
                 Err(e) => {
                     eprintln!("brain: --device: {e}");
                     std::process::exit(2);
                 }
-            };
-            if let Err(e) = set.apply() {
-                eprintln!("brain: --device: {e}");
-                std::process::exit(2);
             }
-            // Publish explicitly: `ambient_compute_set()` was never called
-            // above (an explicit --device skips its BRAIN_DEVICE read), so
-            // its OnceLock still needs this process's actual resolution.
-            gpu_core::publish_compute_set(set.clone());
-            set
         }
-        None => {
-            let set = gpu_core::ambient_compute_set();
-            if let Err(e) = set.apply() {
-                eprintln!("brain: --device: {e}");
-                std::process::exit(2);
-            }
-            set.clone()
-        }
+        None => gpu_core::devices::resolve_ambient_compute_set(),
     };
+
+    // An unsatisfiable `--backend` is a hard error, never a quiet demotion to
+    // whatever else happens to be present.
+    if let Some(b) = backend {
+        if let Err(e) = set.set_backend(b) {
+            eprintln!("brain: {e}");
+            std::process::exit(2);
+        }
+    }
+
+    if let Err(e) = set.apply() {
+        eprintln!("brain: --device: {e}");
+        std::process::exit(2);
+    }
+    gpu_core::publish_compute_set(set);
     out
 }
 

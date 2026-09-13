@@ -1,0 +1,21 @@
+[package]
+name = "brain-backend-cuda"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Native CUDA Driver API backend for brain (runtime-loaded libcuda.so.1; no build-time CUDA dependency)."
+
+[lib]
+name = "backend_cuda"
+path = "src/lib.rs"
+
+# Native only, and deliberately dependency-light: the CUDA Driver API is
+# reached by `dlopen`ing `libcuda.so.1` at run time, so this crate builds and
+# its tests run on a box with no NVIDIA driver and no CUDA toolkit installed.
+[dependencies]
+brain-backend-api.workspace = true
+libloading.workspace = true
+# The `tracing` FACADE only - never a subscriber, matching backend-vulkan and
+# gpu-core. With no subscriber installed every macro below is a
+# predictable-branch no-op; `--trace-gpu <0-5>` turns them on.
+tracing.workspace = true
