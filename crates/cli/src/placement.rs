@@ -67,19 +67,29 @@ pub fn probe_free_vram() -> Vec<(u32, u64)> {
 }
 
 /// Budgets for automatic placement: one per schedulable GPU sized to its FREE
-/// bytes less [`HEADROOM`], plus the host tier.
+/// bytes less [`HEADROOM`], plus the host tier when `cpu_allowed`.
 ///
-/// The host tier is always declared: it is a real execution tier (the CPU
-/// backend), and `residency::plan::plan` falls back to it whenever no card can
-/// hold a part right now - on a GPU-less box, and equally on a box whose cards
-/// are momentarily full. Running slower is the requirement; failing is not.
-pub fn budgets(gpus: &[(u32, u64)], ram: u64) -> Budgets {
+/// The host tier, when declared, is a real execution tier (the CPU backend),
+/// and `residency::plan::plan` falls back to it whenever no card can hold a
+/// part right now - on a GPU-less box, and equally on a box whose cards are
+/// momentarily full. Running slower is the requirement; failing is not - but
+/// only on a tier the user has not explicitly excluded. `cpu_allowed` is
+/// [`gpu_core::devices::ComputeSet::cpu_enabled`]: an explicit `--device gpu` (or
+/// `gpu<i>`) means CPU must never be silently offered as a fallback, because
+/// some model parts (an int8-quantized DiT) cannot even execute there - the
+/// caller asked for GPU-only and is entitled to a legible refusal instead of
+/// a panic three layers down. Leaving `Device::Cpu` out of `Budgets` entirely
+/// is what makes `residency::plan::plan` treat the host tier as absent rather
+/// than merely full (see its own `host_declared` check).
+pub fn budgets(gpus: &[(u32, u64)], ram: u64, cpu_allowed: bool) -> Budgets {
     let mut b = Budgets::new();
     let limits = memauth::limits();
     for &(i, free) in gpus {
         b.set(Device::Gpu(i), limits.clamp(Device::Gpu(i), free), HEADROOM.min(free));
     }
-    b.set(Device::Cpu, limits.clamp(Device::Cpu, ram), 0);
+    if cpu_allowed {
+        b.set(Device::Cpu, limits.clamp(Device::Cpu, ram), 0);
+    }
     b
 }
 
@@ -102,6 +112,10 @@ pub struct BudgetPlacer {
     /// a user decision that does not change while the process runs, unlike how
     /// full they are.
     gpus: Option<std::collections::HashSet<u32>>,
+    /// Whether CPU may be offered as a fallback tier at all - `false` for an
+    /// explicit `--device gpu`/`gpu<i>`. See [`budgets`]'s doc for why this
+    /// must reach every re-probe, not just the first one.
+    cpu_allowed: bool,
 }
 
 impl BudgetPlacer {
@@ -111,13 +125,17 @@ impl BudgetPlacer {
     /// still, and get one here rather than by mocking `nvidia-smi`.
     #[cfg(test)]
     pub fn new(budgets: Budgets) -> BudgetPlacer {
-        BudgetPlacer { fixed: Some(budgets), cached: std::sync::Mutex::new(None), gpus: None }
+        // Irrelevant once `fixed` is set - `self.budgets()` returns `fixed`
+        // straight back and never calls the free `budgets()` fn again - but
+        // `true` keeps a fixed-snapshot placer's behaviour exactly what the
+        // `Budgets` it was handed already says, rather than second-guessing it.
+        BudgetPlacer { fixed: Some(budgets), cached: std::sync::Mutex::new(None), gpus: None, cpu_allowed: true }
     }
 
     /// A placer that re-probes this machine's free VRAM every
     /// [`SNAPSHOT_TTL`], restricted to the cards `--device` made schedulable.
-    pub fn probing(gpus: Option<std::collections::HashSet<u32>>) -> BudgetPlacer {
-        BudgetPlacer { fixed: None, cached: std::sync::Mutex::new(None), gpus }
+    pub fn probing(gpus: Option<std::collections::HashSet<u32>>, cpu_allowed: bool) -> BudgetPlacer {
+        BudgetPlacer { fixed: None, cached: std::sync::Mutex::new(None), gpus, cpu_allowed }
     }
 
     /// The capacity to plan against right now.
@@ -135,7 +153,7 @@ impl BudgetPlacer {
             Some(s) => probe_free_vram().into_iter().filter(|(i, _)| s.contains(i)).collect(),
             None => probe_free_vram(),
         };
-        let fresh = budgets(&free, crate::run_cli::query_ram_bytes());
+        let fresh = budgets(&free, crate::run_cli::query_ram_bytes(), self.cpu_allowed);
         *cached = Some((fresh.clone(), std::time::Instant::now()));
         fresh
     }
@@ -222,7 +240,15 @@ pub fn install() {
     // `BudgetPlacer::probing`) rather than frozen here - `brain serve` calls
     // this once at startup and then lives for weeks.
     let gpus = crate::compute_set().map(|s| s.gpus.iter().copied().collect());
-    gpu_core::devices::install_placer(Arc::new(BudgetPlacer::probing(gpus)));
+    // `--device gpu`/`gpu<i>` must keep CPU out of every later re-probe too,
+    // not just this first snapshot - the reported bug was exactly this:
+    // `--device gpu` excluded CPU from the candidate SET but `budgets()` kept
+    // adding a CPU tier anyway, so a part too big for the GPUs landed on
+    // `Home::Cpu` and then panicked inside a model that cannot run int8 there
+    // at all. No `--device` (`compute_set()` still `None` this early, or a
+    // ComputeSet with CPU enabled) keeps the historical "everything" default.
+    let cpu_allowed = crate::compute_set().map(|s| s.cpu_enabled()).unwrap_or(true);
+    gpu_core::devices::install_placer(Arc::new(BudgetPlacer::probing(gpus, cpu_allowed)));
 }
 
 #[cfg(test)]
@@ -235,7 +261,7 @@ mod tests {
     /// neighbour, gpu1 free, no `--device`. The placer must answer gpu1.
     #[test]
     fn a_loaded_card_is_not_offered_to_a_model_that_cannot_fit_on_it() {
-        let p = BudgetPlacer::new(budgets(&[(0, 5 * GIB), (1, 24 * GIB)], 128 * GIB));
+        let p = BudgetPlacer::new(budgets(&[(0, 5 * GIB), (1, 24 * GIB)], 128 * GIB, true));
         let homes = p.place(&[Need::sized("dit", 16 * GIB, 0)]).expect("plan");
         assert_eq!(homes, vec![Home::Gpu(1)]);
     }
@@ -244,9 +270,9 @@ mod tests {
     /// rule, because it is the same policy.
     #[test]
     fn the_no_preference_default_follows_free_capacity() {
-        let p = BudgetPlacer::new(budgets(&[(0, 2 * GIB), (1, 24 * GIB)], 128 * GIB));
+        let p = BudgetPlacer::new(budgets(&[(0, 2 * GIB), (1, 24 * GIB)], 128 * GIB, true));
         assert_eq!(p.place(&[Need::unsized_("model")]).expect("plan"), vec![Home::Gpu(1)]);
-        let q = BudgetPlacer::new(budgets(&[(0, 24 * GIB), (1, 24 * GIB)], 128 * GIB));
+        let q = BudgetPlacer::new(budgets(&[(0, 24 * GIB), (1, 24 * GIB)], 128 * GIB, true));
         assert_eq!(q.place(&[Need::unsized_("model")]).expect("plan"), vec![Home::Gpu(0)], "an idle box keeps card 0");
     }
 
@@ -254,7 +280,7 @@ mod tests {
     /// model naming one.
     #[test]
     fn a_pipeline_spreads_without_any_model_naming_a_card() {
-        let p = BudgetPlacer::new(budgets(&[(0, 24 * GIB), (1, 24 * GIB)], 128 * GIB));
+        let p = BudgetPlacer::new(budgets(&[(0, 24 * GIB), (1, 24 * GIB)], 128 * GIB, true));
         let homes = p
             .place(&[Need::sized("dit", 14 * GIB, 0).apart(), Need::sized("te", 7 * GIB, 0).apart(), Need::sized("vae", 2 * GIB, 0).with("dit")])
             .expect("plan");
@@ -273,7 +299,7 @@ mod tests {
     /// hold the same parts.)
     #[test]
     fn phased_parts_take_turns_on_one_card() {
-        let p = BudgetPlacer::new(budgets(&[(0, 23 * GIB)], 128 * GIB));
+        let p = BudgetPlacer::new(budgets(&[(0, 23 * GIB)], 128 * GIB, true));
         let needs = [
             Need::sized("dit", 13 * GIB, 0).apart().phase(1),
             Need::sized("te", 7 * GIB, 0).apart(),
@@ -303,7 +329,7 @@ mod tests {
     fn a_near_ceiling_plan_does_not_ride_the_edge_of_a_single_card() {
         const NEAR_FULL: u64 = 15 * GIB + 410 * (1 << 20); // ~15.4 GiB free, as measured
         const FULLY_FREE: u64 = 24 * GIB;
-        let p = BudgetPlacer::new(budgets(&[(0, NEAR_FULL), (1, FULLY_FREE)], 128 * GIB));
+        let p = BudgetPlacer::new(budgets(&[(0, NEAR_FULL), (1, FULLY_FREE)], 128 * GIB, true));
         let homes = p
             .place(&[
                 Need::sized("dit", 13_154_417_928, 0).apart().phase(1),
@@ -318,7 +344,7 @@ mod tests {
     /// free bytes, instead of letting the driver report a bare OOM later.
     #[test]
     fn an_impossible_model_is_refused_legibly() {
-        let p = BudgetPlacer::new(budgets(&[(0, 5 * GIB), (1, 6 * GIB)], 8 * GIB));
+        let p = BudgetPlacer::new(budgets(&[(0, 5 * GIB), (1, 6 * GIB)], 8 * GIB, true));
         let e = p.place(&[Need::sized("dit", 40 * GIB, 0)]).expect_err("40 GiB fits nothing");
         for want in ["dit", "40", "gpu0", "gpu1"] {
             assert!(e.contains(want), "refusal must name {want:?}; got {e}");
@@ -328,7 +354,7 @@ mod tests {
     /// A GPU-less box places on the host tier rather than refusing.
     #[test]
     fn a_gpu_less_box_places_on_the_host_tier() {
-        let p = BudgetPlacer::new(budgets(&[], 128 * GIB));
+        let p = BudgetPlacer::new(budgets(&[], 128 * GIB, true));
         assert_eq!(p.place(&[Need::sized("dit", 16 * GIB, 0)]).expect("plan"), vec![Home::Cpu]);
     }
 
@@ -338,11 +364,37 @@ mod tests {
     /// what a one-shot CLI build is told. One capacity model, two consumers.
     #[test]
     fn the_serving_path_and_the_cli_agree_on_where_a_model_goes() {
-        let b = budgets(&[(0, 5 * GIB), (1, 24 * GIB)], 128 * GIB);
+        let b = budgets(&[(0, 5 * GIB), (1, 24 * GIB)], 128 * GIB, true);
         let cost = MemCost::new(16 * GIB, 0);
         let served = residency::place::pick_device(&cost, &b, &residency::place::no_exclude());
         let built = BudgetPlacer::new(b).place(&[Need::sized("dit", 16 * GIB, 0)]).expect("plan");
         assert_eq!(served, Some(Device::Gpu(1)));
         assert_eq!(built, vec![Home::Gpu(1)]);
+    }
+
+    /// The reported bug: `--device gpu` explicitly excludes CPU
+    /// (`ComputeSet::cpu_enabled() == false`), a real image size needs more
+    /// activation memory than either card has free, and the plan must REFUSE
+    /// - legibly, before any model code runs - rather than silently landing
+    /// on `Home::Cpu`, which then panics deep inside a model that cannot
+    /// actually execute int8 on the CPU backend at all. Running slower on a
+    /// tier the user excluded is not "slower" - it is doing the opposite of
+    /// what `--device gpu` asked for.
+    #[test]
+    fn cpu_excluded_by_device_gpu_is_never_a_fallback() {
+        let b = budgets(&[(0, 5 * GIB), (1, 5 * GIB)], 128 * GIB, false);
+        let err = BudgetPlacer::new(b).place(&[Need::sized("dit", 16 * GIB, 0)]).unwrap_err();
+        assert!(!err.contains("cpu"), "must not silently mention landing on cpu: {err}");
+        assert!(err.contains("cannot place"), "must be the legible Unplaceable refusal: {err}");
+    }
+
+    /// The same exclusion must not appear as a phantom fallback even when
+    /// GPUs are entirely absent - `--device gpu` on a GPU-less box is a user
+    /// error to report, not a silent drop to the host tier.
+    #[test]
+    fn cpu_excluded_and_no_gpus_at_all_still_refuses() {
+        let b = budgets(&[], 128 * GIB, false);
+        let err = BudgetPlacer::new(b).place(&[Need::sized("dit", 1 * GIB, 0)]).unwrap_err();
+        assert!(err.contains("cannot place"), "{err}");
     }
 }
