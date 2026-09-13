@@ -4197,3 +4197,54 @@ inventing one - fabricating it would corrupt `same_device`'s weakest key for
 everyone else. And the device registry's Vulkan and wgpu sources are BOTH
 empty on a headless driver-only box, where CUDA is the only source that sees
 the cards at all - hence CUDA as a third source, last in precedence.
+
+## 109. A coverage ratchet written BEFORE the thing it ratchets exists cannot be a floor
+
+This engine's proven answer to "a number nothing checks goes stale" is a
+covered/total floor (`gpu_core::cost`'s per-kernel cost-formula ratchet). Build
+the same instrumentation before the first item exists and the floor starts at
+zero, where `assert!(covered >= 0)` on an unsigned count is not merely weak -
+it is a deny-by-default clippy lint (`absurd_extreme_comparisons`), so it does
+not compile in a gated workspace. The lint is right: a comparison against a
+type's minimum asserts nothing.
+
+Two spellings work, and the choice is a statement about the data. An EQUALITY
+(`assert_eq!(covered, N)`) is right where each item is a deliberate, rare,
+individually-reviewed commitment - a performance contract, a supported format -
+because then having to edit the number is the point: it makes a deletion
+visible. A floor is right where items land constantly and incidentally, like a
+cost formula per new kernel, where forcing a test edit per addition is friction
+with no signal in it. Starting a floor at 1 instead - "one item exists, so the
+comparison is non-trivial" - is the worst of both: it ratchets nothing and
+reads like it does.
+
+## 110. `include_str!` proves registry -> file, never file -> registry
+
+A source-only kernel registry (`kernels`, `kernels-cuda`) embeds each kernel
+with `include_str!`, which makes a registry entry naming a missing file a
+compile error. The opposite direction has no checker at all: a `.cu`/`.wgsl`
+file that no entry embeds compiles, tests and ships as a file nothing
+dispatches, nothing validates and nothing can delete safely, while looking
+exactly like working functionality to the next reader.
+
+Nothing in Rust can see it - the crate's own tests only ever walk the table.
+The check has to be a script that walks the DIRECTORY and intersects it with
+the table, which is one more reason a kernel catalogue gate reads the source
+tree rather than trusting the registry it renders.
+
+## 111. Record why a candidate was skipped where the skip happens, not by asking again afterwards
+
+`ProviderRegistry::resolve` chose an implementation with a loop that `continue`d
+past every provider that was disabled, whose requirements the device did not
+meet, or that declined the request - and returned only the winner. The reasons
+existed, for one stack frame, and were thrown away; the failure mode is that
+"the tuned provider declined this shape", "the device cannot satisfy it" and
+"someone disabled it in the environment" become one indistinguishable silence
+whose only symptom is being slower than expected.
+
+Reconstructing that afterwards by re-asking each provider is worse than useless:
+`accepts` may consult measured state that has since changed, so the answer you
+report is not the answer that was acted on, and you pay for the whole chain
+twice. Have the loop that makes the decision emit the record as it makes it -
+the cost is one `Vec` that stays empty (no allocation) in the common case where
+the first candidate takes the work.

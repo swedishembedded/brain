@@ -62,7 +62,7 @@
 
 use std::sync::OnceLock;
 
-use backend_api::{select, DType, NativeSpec};
+use backend_api::{select, DType, ImplSource, NativeSpec};
 
 use super::{LowerCtx, Lowered, OpRequest, OperatorProvider, Role};
 
@@ -104,7 +104,7 @@ impl CpuIsaProvider {
             .step_native(id, &bufs, req.attrs, threads)
             .ok_or_else(|| "CpuIsaProvider::lower_matmul_f32: step_native returned None".to_string())?;
         ctx.steps.push(step);
-        Ok(Lowered { pushed: 1, kernels: vec!["cpu_matmul_abt"] })
+        Ok(Lowered::new(1, vec!["cpu_matmul_abt"]))
     }
 
     /// M8.11: `Op::MatMul` at `Dtype::I8` - `fast_ops::matmul_i8_dyn`.
@@ -133,13 +133,20 @@ impl CpuIsaProvider {
             .step_native(id, &bufs, req.attrs, threads)
             .ok_or_else(|| "CpuIsaProvider::lower_matmul_i8: step_native returned None".to_string())?;
         ctx.steps.push(step);
-        Ok(Lowered { pushed: 1, kernels: vec!["cpu_matmul_i8_dyn"] })
+        Ok(Lowered::new(1, vec!["cpu_matmul_i8_dyn"]))
     }
 }
 
 impl OperatorProvider for CpuIsaProvider {
     fn name(&self) -> &'static str {
         "cpu-isa"
+    }
+
+    fn source(&self, _req: &OpRequest) -> ImplSource {
+        // Hand-written AVX2 GEMMs reached through `register_native`, chosen
+        // against a runtime ISA probe - the CPU's equivalent of an
+        // architecture-specialised kernel.
+        ImplSource::Tuned
     }
 
     fn requires(&self, _req: &OpRequest) -> select::Requirement {

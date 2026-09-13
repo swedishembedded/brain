@@ -37,7 +37,7 @@
 
 use std::sync::Mutex;
 
-use backend_api::{select, DType, NativeId};
+use backend_api::{select, DType, ImplSource, NativeId};
 
 use super::{LowerCtx, Lowered, OpRequest, OperatorProvider, Pass, Role};
 
@@ -98,6 +98,13 @@ impl OperatorProvider for CoopMatProvider {
         "coopmat"
     }
 
+    fn source(&self, _req: &OpRequest) -> ImplSource {
+        // A hand-written SPIR-V pipeline against a matrix-engine shape the
+        // device was QUERIED to support - specialised to real hardware, not
+        // a translation of the reference.
+        ImplSource::Tuned
+    }
+
     fn requires(&self, _req: &OpRequest) -> select::Requirement {
         select::Requirement {
             matrix: Some(select::MatShapeReq { a: DType::F16, b: DType::F16, accum: DType::F32 }),
@@ -149,7 +156,7 @@ impl OperatorProvider for CoopMatProvider {
         // identifier (no bare `[a-z0-9_]+` name for a catalogue-cross-
         // referencing gate script to mistake for an unregistered catalogue
         // kernel).
-        Ok(Lowered { pushed: 1, kernels: vec!["native:coopmat"] })
+        Ok(Lowered::new(1, vec!["native:coopmat"]))
     }
 }
 

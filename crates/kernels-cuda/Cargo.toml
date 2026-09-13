@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+[package]
+name = "brain-kernels-cuda"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Hand-written CUDA C++ kernel sources and their tier metadata - a registry of its own, deliberately separate from the WGSL catalogue."
+
+[lib]
+name = "kernels_cuda"
+path = "src/lib.rs"
+
+# Source text only: the `.cu` bodies are `include_str!`ed and compiled at run
+# time by the backend (NVRTC or a prebuilt cubin), so this crate has no CUDA
+# build dependency and stays buildable on any target, including wasm.
+# `brain-backend-api` supplies `select::Op` and `ImplSource` - the vocabulary
+# the WGSL catalogue and a tier policy are already stated in - and is itself
+# dependency-free, so this remains a leaf.
+[dependencies]
+brain-backend-api.workspace = true

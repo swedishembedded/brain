@@ -57,7 +57,7 @@
 //! never merely "nothing calls this backward today."
 
 use backend_api::arch::{ArchDesc, TierLevel, TierSupport};
-use backend_api::{select, DType};
+use backend_api::{select, DType, ImplSource};
 
 use super::{LowerCtx, Lowered, OpRequest, OperatorProvider, Pass, Role};
 use crate::Gpu;
@@ -179,13 +179,21 @@ impl NativeF16Provider {
         }
 
         ctx.steps.push(ctx.gpu.step_sliced(kind, &bufs, &offsets, req.attrs, threads));
-        Ok(Lowered { pushed: 1, kernels: vec![KERNEL_NAME] })
+        Ok(Lowered::new(1, vec![KERNEL_NAME]))
     }
 }
 
 impl OperatorProvider for NativeF16Provider {
     fn name(&self) -> &'static str {
         "native-f16"
+    }
+
+    fn source(&self, _req: &OpRequest) -> ImplSource {
+        // A hand-written kernel variant selected only where this provider
+        // MEASURED the narrower arithmetic to be fast on the device in
+        // front of it - a tuned alternative to the reference GEMM, not the
+        // reference itself.
+        ImplSource::Tuned
     }
 
     fn requires(&self, _req: &OpRequest) -> select::Requirement {

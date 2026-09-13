@@ -77,7 +77,7 @@ YOLO_IOU   ?= 0.45
 
 SHAKE_URL := https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt
 
-.PHONY: check/workspace help build/debug build/release deb deb/debug deb/release test/doc test/slow test/full test/times test/capability-report wm/play wm-fixtures test test/rl gradcheck kernels-regen kernels-table kernels-table/check parity requirements environment environment/openvino npu-diagnose bench bench/char bench/eval bench/scale bench/advise bench/compare perf perf/compare perf/smoke clean federated-demo depth/demo depth/smoke depth/camera train/zipdepth mirror/import mirror/infer mirror/demo splat/view \
+.PHONY: check/workspace help build/debug build/release deb deb/debug deb/release test/doc test/slow test/full test/times test/capability-report wm/play wm-fixtures test test/rl gradcheck kernels-regen kernels-table kernels-table/check cuda-table cuda-table/check parity requirements environment environment/openvino npu-diagnose bench bench/char bench/eval bench/scale bench/advise bench/compare perf perf/compare perf/smoke clean federated-demo depth/demo depth/smoke depth/camera train/zipdepth mirror/import mirror/infer mirror/demo splat/view \
         data/calculator data/reverser data/wordcalc data/timeseries \
         data/shakespeare_char data/gpt data/detect data/tts \
         train/yolo eval/yolo detect/yolo train/qwen/lora \
@@ -126,6 +126,8 @@ help:
 	@echo "  make qwen/serving-perf-gate  qwen serving perf regression gate (vs baselines)"
 	@echo "  make kernels-table           regenerate docs/reference/kernels.md from the .wgsl sources"
 	@echo "  make kernels-table/check     fail if that catalogue has drifted (part of test/full)"
+	@echo "  make cuda-table              regenerate docs/reference/kernels-cuda.md from crates/kernels-cuda"
+	@echo "  make cuda-table/check        fail if THAT catalogue drifted, or a .cu is unregistered"
 	@echo "  make data/<name>             generate a dataset (calculator|reverser|wordcalc|"
 	@echo "                               timeseries|shakespeare_char|gpt) into $(DATA)/<name>"
 	@echo "  make train/gpt/<name>        train GPT on a dataset -> $(OUT)/gpt-<name>.safetensors"
@@ -500,7 +502,7 @@ hooks/install:
 # controlnet's duplicate `scale_chan` registration - see `.agents/rules/
 # lessons.md`). Needs no external fixtures, so unlike `parity/strict` it
 # carries no narrowing knob and no "green because skipped" risk.
-test/full: test test/doc test/slow test/e2e check/scripts check/spdx check/paths check/files kernels-table/check parity parity/strict
+test/full: test test/doc test/slow test/e2e check/scripts check/spdx check/paths check/files kernels-table/check cuda-table/check parity parity/strict
 
 # Rank every test binary by wall time; --budget fails if any exceeds it. This is
 # what keeps the fast lane fast.
@@ -685,6 +687,22 @@ kernels-table:
 
 kernels-table/check:
 	scripts/build/gen-kernel-table.py --check
+
+# Regenerate the NATIVE CUDA catalogue from crates/kernels-cuda's own registry.
+# A sibling of the WGSL pair above, not a mode of it: that generator derives
+# const names from .wgsl stems, compiles every entry on the test device and
+# cross-checks five metadata fields against shader text - none of which can
+# read CUDA C++. This one also fails when a .cu file exists that no registry
+# entry embeds, which `include_str!` cannot catch (it proves registry -> file,
+# never file -> registry). The other half of the CUDA tier contract - that an
+# operator the policy declares tuned never runs as generated - is a Rust test
+# (`brain-gpu-core`'s cuda_impl_policy), because it needs the real dispatch
+# record, not the table.
+cuda-table:
+	scripts/build/gen-cuda-kernel-table.py
+
+cuda-table/check:
+	scripts/build/gen-cuda-kernel-table.py --check
 
 # Regenerate the DIAMOND parity fixtures (gitignored - never committed) from
 # the reference implementation (resources/world-models/repos/diamond, or set

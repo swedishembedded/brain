@@ -22,6 +22,12 @@
 //! named error rather than quietly running somewhere else - an explicitly
 //! requested backend is a hard contract.
 //!
+//! It also states the **tier policy** ([`policy`]): which operators are
+//! required to reach which implementation tier, on which queried compute
+//! capability. That lands before any kernel does, so the first native kernel
+//! arrives into something that checks the claim it makes about itself -
+//! every tier computes the same answers, so nothing else would.
+//!
 //! # Nothing about the hardware is compiled in
 //!
 //! Device count, compute capability, VRAM and SM count are queried per device.
@@ -29,6 +35,7 @@
 //! constant, and never a permanent ceiling - see [`driver::CudaDevice`].
 
 pub mod driver;
+pub mod policy;
 
 pub use driver::{driver, CudaDevice};
 

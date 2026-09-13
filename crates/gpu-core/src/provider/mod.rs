@@ -40,6 +40,7 @@ use std::sync::Arc;
 
 use backend_api::select;
 use backend_api::DeviceCaps;
+use backend_api::ImplSource;
 
 use crate::{DeviceBuffer, Gpu, Step};
 
@@ -161,6 +162,95 @@ pub struct LowerCtx<'a> {
 pub struct Lowered {
     pub pushed: usize,
     pub kernels: Vec<&'static str>,
+    /// Which implementation family answered this request and why every other
+    /// provider did not - filled by [`ProviderRegistry::dispatch`], which is
+    /// the only place that knows the whole chain. A provider's own `lower`
+    /// leaves it `None` (see [`Lowered::new`]); it cannot report on the
+    /// providers it never saw.
+    pub choice: Option<ImplChoice>,
+}
+
+impl Lowered {
+    /// What a provider returns: the steps it pushed and the kernels it
+    /// named. The dispatch record is attached afterwards, by the registry.
+    pub fn new(pushed: usize, kernels: Vec<&'static str>) -> Lowered {
+        Lowered { pushed, kernels, choice: None }
+    }
+}
+
+/// The device architecture a dispatch was resolved FOR, in the smallest form
+/// that can be carried per dispatch.
+///
+/// Every field is queried, never assumed. `compute_capability` is `None`
+/// wherever the backend that produced the [`DeviceCaps`] has no such concept
+/// (every backend today: it is a CUDA notion, and the CUDA backend does not
+/// publish caps yet) - `None` means *not reported*, and no consumer may read
+/// it as a version, a floor or a default.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ArchTag {
+    pub class: backend_api::DeviceClass,
+    /// `(major, minor)` as the driver reports the two halves.
+    pub compute_capability: Option<(u32, u32)>,
+}
+
+impl ArchTag {
+    /// The tag for a device, read off its capabilities - the single place
+    /// that mapping lives, so a backend that starts reporting a compute
+    /// capability is wired in once.
+    pub fn of(caps: &DeviceCaps) -> ArchTag {
+        ArchTag { class: caps.class, compute_capability: None }
+    }
+}
+
+/// Why one provider in the chain did not run.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum DeclineReason {
+    /// Named in `BRAIN_NO_PROVIDER` - skipped before it was asked anything.
+    Disabled,
+    /// Its [`OperatorProvider::requires`] is not satisfied by this device's
+    /// capabilities. Carries the requirement so the record says WHAT was
+    /// missing, not merely that something was.
+    CapsUnmet(select::Requirement),
+    /// Capable in principle, but [`OperatorProvider::accepts`] said no to
+    /// this request (an operator it does not implement, a shape it does not
+    /// cover, or a capture it cannot record replayably).
+    NotAccepted,
+    /// It accepted the request and then failed to lower it, so the work ran
+    /// on the reference provider instead. The one case with a message, and
+    /// the one that used to leave no trace but a `tracing::warn`.
+    LowerFailed(String),
+}
+
+/// One provider that did not run, and why.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Decline {
+    pub provider: &'static str,
+    pub reason: DeclineReason,
+}
+
+/// The per-dispatch record: which implementation family actually answered an
+/// operator, on what architecture, and why every other candidate did not.
+///
+/// This is the datum that makes a silent performance fallback impossible to
+/// miss. Numerically the tiers are interchangeable, so nothing downstream
+/// can otherwise tell a hand-tuned kernel from a mechanical translation of
+/// the portable one - a backend serving the bottom tier where the top one
+/// was promised is indistinguishable from a backend that is simply slower
+/// than expected. With the tier and the decline reasons recorded, a policy
+/// can assert on it (see `backend_cuda::policy`).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ImplChoice {
+    pub op: select::Op,
+    pub shape: select::OpShape,
+    /// [`OperatorProvider::name`] of the provider that RAN - which, after a
+    /// failed lower, is the reference provider and not the one first chosen.
+    pub provider: &'static str,
+    pub source: ImplSource,
+    pub arch: ArchTag,
+    /// Chain order, preferred providers first. Empty is the common case (the
+    /// first provider took the request), so the record costs no allocation
+    /// when nothing declined.
+    pub declined: Vec<Decline>,
 }
 
 /// One implementation family for a whole operator.
@@ -174,6 +264,17 @@ pub trait OperatorProvider: Send + Sync {
     /// lifetime; a rename is a breaking change for anyone disabling it by
     /// name.
     fn name(&self) -> &'static str;
+
+    /// Which implementation family this provider would answer `req` with -
+    /// the tier a performance policy is stated in, recorded on every
+    /// dispatch as [`ImplChoice::source`].
+    ///
+    /// Deliberately per-request and deliberately NOT defaulted: a provider
+    /// may hold hand-written kernels for some operators and fall back to a
+    /// generated one for the rest, and a default would let a new provider
+    /// inherit a claim nobody made about it. Answer what this provider would
+    /// actually run for THIS request.
+    fn source(&self, req: &OpRequest) -> ImplSource;
 
     /// What this provider would need from the device to run `req`, checked
     /// against real [`DeviceCaps`] by [`ProviderRegistry::resolve`] before
@@ -258,30 +359,88 @@ impl ProviderRegistry {
     /// reference provider always qualifies, so this never falls through
     /// empty.
     pub fn resolve(&self, req: &OpRequest, caps: &DeviceCaps, capture: bool) -> &dyn OperatorProvider {
+        self.resolve_choice(req, caps, capture).0
+    }
+
+    /// [`Self::resolve`], plus the record of HOW that answer was reached:
+    /// the tier the chosen provider will run, the architecture it was
+    /// resolved for, and one [`Decline`] per provider that was skipped -
+    /// each with its own reason.
+    ///
+    /// The decline list is the datum this seam did not have. Without it,
+    /// "the tuned provider declined this shape", "the device cannot satisfy
+    /// what it needs" and "somebody disabled it in the environment" are one
+    /// indistinguishable silence, and the only visible effect is that things
+    /// are slower than they were supposed to be.
+    ///
+    /// Pure: it asks providers what they would do and touches no device, so
+    /// a policy gate can run it with nothing attached.
+    pub fn resolve_choice<'a>(
+        &'a self,
+        req: &OpRequest,
+        caps: &DeviceCaps,
+        capture: bool,
+    ) -> (&'a dyn OperatorProvider, ImplChoice) {
+        let mut declined: Vec<Decline> = Vec::new();
         for p in &self.chain {
             if self.disabled.iter().any(|d| d == p.name()) {
+                declined.push(Decline { provider: p.name(), reason: DeclineReason::Disabled });
                 continue;
             }
-            if p.requires(req).satisfied_by(caps) && p.accepts(req, capture) {
-                return p.as_ref();
+            let requirement = p.requires(req);
+            if !requirement.satisfied_by(caps) {
+                declined.push(Decline { provider: p.name(), reason: DeclineReason::CapsUnmet(requirement) });
+                continue;
             }
+            if !p.accepts(req, capture) {
+                declined.push(Decline { provider: p.name(), reason: DeclineReason::NotAccepted });
+                continue;
+            }
+            let choice = ImplChoice {
+                op: req.op,
+                shape: req.shape,
+                provider: p.name(),
+                source: p.source(req),
+                arch: ArchTag::of(caps),
+                declined,
+            };
+            return (p.as_ref(), choice);
         }
         // Unreachable in practice: the reference provider is never disabled
         // by construction of `disabled` alone (a caller CAN disable it by
         // name), never fails `requires`, and always `accepts`. If every
         // entry (including a disabled reference) is skipped, fall back to
         // the reference regardless - refusing to dispatch at all would be
-        // worse than ignoring a misconfigured `BRAIN_NO_PROVIDER=wgsl`.
-        self.chain.last().expect("ProviderRegistry::reference always seeds one entry").as_ref()
+        // worse than ignoring a misconfigured `BRAIN_NO_PROVIDER=wgsl`. The
+        // reference's own decline stays on the record: it ran despite being
+        // disabled, and that is exactly the kind of thing a record is for.
+        let reference = self.chain.last().expect("ProviderRegistry::reference always seeds one entry");
+        let choice = ImplChoice {
+            op: req.op,
+            shape: req.shape,
+            provider: reference.name(),
+            source: reference.source(req),
+            arch: ArchTag::of(caps),
+            declined,
+        };
+        (reference.as_ref(), choice)
     }
 
     /// Resolve a provider for `req` and lower it, falling back to the
     /// reference provider (and RECORDING that fallback, never silently) if
     /// the resolved provider's `lower` returns `Err`.
+    ///
+    /// The returned [`Lowered`] always carries its [`ImplChoice`], naming
+    /// the provider that actually RAN - after a failed lower that is the
+    /// reference provider, with the failure itself recorded as that
+    /// provider's decline.
     pub fn dispatch(&self, ctx: &mut LowerCtx, req: &OpRequest) -> Lowered {
-        let chosen = self.resolve(req, ctx.caps, ctx.capture);
+        let (chosen, mut choice) = self.resolve_choice(req, ctx.caps, ctx.capture);
         match chosen.lower(ctx, req) {
-            Ok(l) => l,
+            Ok(mut l) => {
+                l.choice = Some(choice);
+                l
+            }
             Err(e) => {
                 let reference = self.chain.last().expect("ProviderRegistry::reference always seeds one entry");
                 if std::ptr::eq(chosen, reference.as_ref()) {
@@ -303,9 +462,17 @@ impl ProviderRegistry {
                     error = %e,
                     "provider failed to lower request, falling back to the reference WGSL provider"
                 );
-                reference
+                choice.declined.push(Decline {
+                    provider: chosen.name(),
+                    reason: DeclineReason::LowerFailed(e),
+                });
+                choice.provider = reference.name();
+                choice.source = reference.source(req);
+                let mut l = reference
                     .lower(ctx, req)
-                    .expect("reference provider must never fail to lower a request it accepted")
+                    .expect("reference provider must never fail to lower a request it accepted");
+                l.choice = Some(choice);
+                l
             }
         }
     }
@@ -400,6 +567,9 @@ mod tests {
         impl OperatorProvider for Dummy {
             fn name(&self) -> &'static str {
                 self.0
+            }
+            fn source(&self, _req: &OpRequest) -> ImplSource {
+                ImplSource::Tuned
             }
             fn requires(&self, _req: &OpRequest) -> select::Requirement {
                 select::Requirement::default()

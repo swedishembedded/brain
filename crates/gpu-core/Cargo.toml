@@ -54,6 +54,12 @@ libc.workspace = true
 
 [dev-dependencies]
 brain-testutil.workspace = true
+# The CUDA tier ratchet (`tests/cuda_impl_policy.rs`) reads the native kernel
+# registry the CUDA tier policy is checked against. Dev-only and one-way: the
+# policy lives in `brain-backend-cuda`, which cannot depend on this crate (the
+# dependency already runs the other way), so the test that joins the policy to
+# the `ImplChoice` record this crate produces has to live here.
+brain-kernels-cuda.workspace = true
 # The shared deterministic test PRNG (AGENTS.md: never a hand-rolled one).
 # `brain-data` does not depend on `brain-gpu-core`, so this is dev-only and
 # acyclic.

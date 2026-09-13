@@ -49,6 +49,7 @@ framework. This is its full documentation — what's on the website and what
 ## Reference
 
 - [Kernel catalogue](reference/kernels.md) — every WGSL compute kernel brain ships, generated from source.
+- [Native CUDA kernel catalogue](reference/kernels-cuda.md) - the hand-written CUDA kernels, generated from their own registry.
 
 ## About
 

@@ -37,6 +37,10 @@ pub mod arch;
 /// Kernel selection: which implementation of an op runs, given shape + device.
 pub mod select;
 
+/// Which implementation FAMILY answered a dispatch (portable reference,
+/// generated, hand-tuned) - the tier a performance policy is stated in.
+pub mod impl_source;
+
 /// Shared device-contention and wedge-containment primitives: the one
 /// cross-thread AND cross-process lock around device create/destroy, and the
 /// one bound on driver calls that cannot be cancelled. Every backend uses
@@ -1434,6 +1438,8 @@ mod registry {
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use registry::{backend_registered, create_backend, register_backend, Factory};
+
+pub use impl_source::ImplSource;
 
 #[cfg(test)]
 mod tests {

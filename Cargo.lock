@@ -1209,6 +1209,7 @@ dependencies = [
  "brain-backend-wgpu",
  "brain-data",
  "brain-kernels",
+ "brain-kernels-cuda",
  "brain-memauth",
  "brain-testutil",
  "bytemuck",
@@ -1305,6 +1306,13 @@ dependencies = [
 
 [[package]]
 name = "brain-kernels"
+version = "1.1.0"
+dependencies = [
+ "brain-backend-api",
+]
+
+[[package]]
+name = "brain-kernels-cuda"
 version = "1.1.0"
 dependencies = [
  "brain-backend-api",

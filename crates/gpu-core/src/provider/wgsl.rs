@@ -30,6 +30,7 @@
 use std::sync::Arc;
 
 use backend_api::select::{self, Dtype, KernelSelector, KernelVariant};
+use backend_api::ImplSource;
 
 use super::{LowerCtx, Lowered, OpRequest, OperatorProvider, Role};
 
@@ -99,13 +100,20 @@ impl WgslProvider {
         }
 
         ctx.steps.push(ctx.gpu.step_sliced(kind, &bufs, &offsets, req.attrs, threads));
-        Ok(Lowered { pushed: 1, kernels: vec![name] })
+        Ok(Lowered::new(1, vec![name]))
     }
 }
 
 impl OperatorProvider for WgslProvider {
     fn name(&self) -> &'static str {
         "wgsl"
+    }
+
+    fn source(&self, _req: &OpRequest) -> ImplSource {
+        // The portable reference, by definition: this provider dispatches
+        // the WGSL catalogue every other tier is measured and checked
+        // against.
+        ImplSource::Reference
     }
 
     fn requires(&self, _req: &OpRequest) -> select::Requirement {
