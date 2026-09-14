@@ -46,7 +46,7 @@ pub mod exec;
 pub mod nvrtc;
 pub mod policy;
 
-pub use backend::CudaBackend;
+pub use backend::{CudaBackend, LaunchStats};
 pub use driver::{driver, CudaDevice};
 
 /// Every CUDA-visible device as a brain [`backend_api::GpuIdentity`], in CUDA

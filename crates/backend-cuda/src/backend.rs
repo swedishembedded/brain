@@ -115,6 +115,43 @@ struct Counters {
     readbacks: AtomicU64,
     uniform_allocs: AtomicU64,
     writes: AtomicU64,
+    host_launches: AtomicU64,
+    host_nanos: AtomicU64,
+}
+
+/// What submitting cost the **host**, as distinct from what the host asked the
+/// device to do.
+///
+/// [`DeviceStats`] answers the second question only: `dispatches` counts
+/// recorded steps, which is a property of the model's graph and does not move
+/// however the backend chooses to issue them. The quantity this engine's CUDA
+/// work is actually chasing is the first one - per-launch driver cost, which on
+/// a decode step of a few thousand dispatches is a large fraction of the step -
+/// and no counter in this tree measured it.
+///
+/// Two fields therefore exist that [`DeviceStats`] has no room for:
+///
+/// - `host_launches` - how many individual launch calls the host made into the
+///   driver. It equals `dispatches` when every step is issued one at a time,
+///   and is the number that must *stop growing* for a batched submission
+///   mechanism to be doing anything at all.
+/// - `host_nanos` - wall-clock spent inside
+///   [`backend_api::Backend::submit`], which is host time by construction:
+///   `submit` is asynchronous, so it returns without waiting for the device.
+///
+/// Both are cumulative over the handle's life, so a caller measures an interval
+/// by differencing two reads.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LaunchStats {
+    /// `submit` calls.
+    pub submits: u64,
+    /// Recorded steps launched - the same quantity [`DeviceStats::dispatches`]
+    /// reports.
+    pub dispatches: u64,
+    /// Individual launch calls made into the driver.
+    pub host_launches: u64,
+    /// Cumulative wall-clock nanoseconds spent inside `submit`.
+    pub host_nanos: u64,
 }
 
 /// A brain compute device driven by the CUDA Driver API.
@@ -362,6 +399,18 @@ impl CudaBackend {
             .launch_at(&f, (gx, gy, 1), (c.block_dim, 1, 1), &args)
             .unwrap_or_else(|e| panic!("backend-cuda: launching kernel '{name}' failed: {e}"));
         self.counters.dispatches.fetch_add(1, Ordering::Relaxed);
+        self.counters.host_launches.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// What this handle's submissions have cost the host so far - see
+    /// [`LaunchStats`].
+    pub fn launch_stats(&self) -> LaunchStats {
+        LaunchStats {
+            submits: self.counters.submits.load(Ordering::Relaxed),
+            dispatches: self.counters.dispatches.load(Ordering::Relaxed),
+            host_launches: self.counters.host_launches.load(Ordering::Relaxed),
+            host_nanos: self.counters.host_nanos.load(Ordering::Relaxed),
+        }
     }
 
     fn module_entry<'a>(&self, c: &'a Compiled) -> Result<exec::Function<'a>, String> {
@@ -620,6 +669,11 @@ impl backend_api::Backend for CudaBackend {
     }
 
     fn submit(&self, clears: &[&DeviceBuffer], steps: &[Step]) {
+        // Wall-clock across the whole call, because that is what the host pays.
+        // `submit` never waits for the device (see the module doc on
+        // ordering), so this is host time by construction, not a device
+        // measurement smuggled in under a host name.
+        let t0 = std::time::Instant::now();
         self.counters.submits.fetch_add(1, Ordering::Relaxed);
         for c in clears {
             self.ctx
@@ -629,6 +683,7 @@ impl backend_api::Backend for CudaBackend {
         for s in steps {
             self.launch(s.downcast_ref::<CudaStep>());
         }
+        self.counters.host_nanos.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
 
     fn read(&self, buf: &DeviceBuffer, n: usize) -> Vec<f32> {

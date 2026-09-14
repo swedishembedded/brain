@@ -231,3 +231,47 @@ fn a_kernel_compiles_on_first_dispatch_and_only_once() {
     // still be uncompiled - that is the whole claim.
     assert_eq!(KERNELS.len(), 3);
 }
+
+/// The host-cost counter counts HOST work, and it is a different quantity from
+/// the recorded dispatch count even while the two happen to be equal.
+///
+/// `DeviceStats::dispatches` is a property of the model's graph: it is the same
+/// number however the backend chooses to issue those steps. `host_launches` and
+/// `host_nanos` are properties of how the *host* issued them, and they are what
+/// any batched-submission mechanism has to move. Pinning the relation now -
+/// one launch call per recorded step, and a submit that costs measurable host
+/// time - is what makes a later divergence between the two readable as a
+/// result rather than as a bug.
+#[test]
+fn the_host_cost_of_a_submit_is_counted_separately_from_its_dispatches() {
+    let Some(b) = backend() else { return };
+    let a = b.storage_init("a", &[1.0, 2.0, 3.0, 4.0]);
+    let c = b.storage_init("c", &[10.0, 20.0, 30.0, 40.0]);
+    let out = b.storage(4);
+
+    let before = b.launch_stats();
+    const ROUNDS: u64 = 8;
+    const PER_SUBMIT: u64 = 3;
+    for _ in 0..ROUNDS {
+        let steps: Vec<_> = (0..PER_SUBMIT).map(|_| b.step(ADD2, &[&a, &c, &out], &[4], 4)).collect();
+        b.submit(&[], &steps);
+    }
+    b.poll_wait();
+    let after = b.launch_stats();
+
+    assert_eq!(after.submits - before.submits, ROUNDS);
+    assert_eq!(after.dispatches - before.dispatches, ROUNDS * PER_SUBMIT);
+    assert_eq!(
+        after.host_launches - before.host_launches,
+        ROUNDS * PER_SUBMIT,
+        "one driver launch call per recorded step is what an unbatched submission does"
+    );
+    assert!(
+        after.host_nanos > before.host_nanos,
+        "submitting {} dispatches was recorded as costing the host no time at all",
+        ROUNDS * PER_SUBMIT
+    );
+    // The read-back proves the counted launches were real work and not a
+    // counter incremented next to a launch that never happened.
+    assert_eq!(b.read(&out, 4), vec![11.0, 22.0, 33.0, 44.0]);
+}
