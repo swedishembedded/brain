@@ -493,7 +493,7 @@ pub fn paged_attn_scratch_bytes(cfg: &QwenConfig, max_batch: u32, max_prefill: u
 /// [`PIPELINES`] carries only the `HD = 128` tier - `paged_flash_prefill`,
 /// `paged_flash_prefill_i8`, and the `paged_flash_decode_split`/`_combine`
 /// pair, all of which size their shared K/V tile for "up to 128".
-const FUSED_MAX_HEAD_DIM: u32 = 128;
+pub const FUSED_MAX_HEAD_DIM: u32 = 128;
 
 /// [`model::block::paged_attention_fused`] narrowed to the head_dim tier THIS
 /// engine registers a kernel for.
