@@ -230,6 +230,53 @@ pub fn served_assembly(arch: &str, spec: &dyn ArchSpec, bindings: &[RoleEnv]) ->
     Some(assembly)
 }
 
+/// [`served_assembly`]'s multi-instance counterpart: every real, independent
+/// candidate of `spec.instance_role()` (see that method's own doc) becomes
+/// its OWN served [`Assembly`], addressed by its real vendor/repo id.
+/// `default_id` is used instead whenever there is exactly one instance for a
+/// reason OTHER than a real, distinct candidate - every role already named
+/// by the environment, or the store holding no real instance-role candidate
+/// at all - so a fully-configured or single-checkpoint operator keeps
+/// [`served_assembly`]'s exact historical id (the caller's own well-known
+/// constant, e.g. `flux2::caps::MODEL`), not a resolver-internal placeholder.
+///
+/// An `Ambiguous`/`Missing` OTHER role on one candidate (a `dit` this store
+/// has no matching `vae` size for, say) is logged and that ONE candidate is
+/// dropped - it never takes every other real, independently-servable
+/// candidate down with it.
+pub fn served_assemblies(arch: &str, spec: &dyn ArchSpec, bindings: &[RoleEnv], default_id: &str) -> Vec<Assembly> {
+    let named: BTreeMap<String, String> =
+        bindings.iter().filter_map(|b| std::env::var(b.var).ok().filter(|v| !v.is_empty()).map(|v| (b.role.to_string(), v))).collect();
+    let fully_named = spec.roles().iter().filter(|r| !spec.optional_roles().contains(r)).all(|r| named.contains_key(*r));
+    if fully_named {
+        let roles: BTreeMap<String, PathBuf> = named.iter().map(|(role, path)| (role.clone(), PathBuf::from(path))).collect();
+        let provenance = named.iter().map(|(role, path)| format!("{role}: {path} (named by the environment)")).collect();
+        return vec![Assembly { id: default_id.to_string(), arch: arch.to_string(), variant: None, roles, provenance }];
+    }
+    let Some(root) = crate::model_dir::resolve(None) else { return Vec::new() };
+    let records = brain_modelstore::inventory::scan(&root);
+    let specs: [&dyn ArchSpec; 1] = [spec];
+    let placeholder = format!("local/{arch}");
+    let mut out = Vec::new();
+    for (id, resolution) in brain_modelstore::resolve::resolve_all(arch, &records, &specs, &named) {
+        let mut assembly = match resolution {
+            Resolution::Resolved(assembly) => *assembly,
+            Resolution::Ambiguous(a) => {
+                eprintln!("brain: {id} ({arch}) not served over the scheduler - {}", describe_served_ambiguity(&a, bindings));
+                continue;
+            }
+            Resolution::Missing(_) => continue,
+        };
+        assembly.id = if id == placeholder { default_id.to_string() } else { id };
+        for (role, path) in &named {
+            assembly.provenance.push(format!("{role}: {path} (named by the environment, overriding the store)"));
+            assembly.roles.insert(role.clone(), PathBuf::from(path));
+        }
+        out.push(assembly);
+    }
+    out
+}
+
 /// [`try_resolve`], printing and exiting on `Ambiguous`/`Missing`/no-models-
 /// directory instead of returning an `Err` - neither is recoverable within a
 /// single command invocation, and resolving is never a place to guess. What
@@ -547,6 +594,97 @@ mod tests {
         std::env::set_var("BRAIN_MODELS_DIR", &root);
         std::env::remove_var("BRAIN_SERVEDTEST_WEIGHTS");
         assert!(served_assembly("servedtest", &ServedSpec, SERVED_BINDINGS).is_none());
+        std::env::remove_var("BRAIN_MODELS_DIR");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // ============ the multi-instance served path: `served_assemblies` ============
+
+    /// [`ServedSpec`] with its one role opted into instance-per-candidate
+    /// resolution - the FLUX.2 `dit` shape, reusing `ServedSpec`'s own
+    /// marker-tensor classify so both fixtures stay real content checks.
+    struct MultiServedSpec;
+    impl ArchSpec for MultiServedSpec {
+        fn arch(&self) -> &'static str {
+            "servedtest"
+        }
+        fn roles(&self) -> &'static [&'static str] {
+            &["weights"]
+        }
+        fn classify(&self, records: &[ArtifactRecord], root: &Path) -> Vec<(usize, String, Confidence)> {
+            ServedSpec.classify(records, root)
+        }
+        fn assemble(&self, chosen: &BTreeMap<String, usize>, records: &[ArtifactRecord], overrides: &BTreeMap<String, String>) -> Result<AssembleOutcome, String> {
+            ServedSpec.assemble(chosen, records, overrides)
+        }
+        fn validate(&self, assembly: &Assembly) -> Result<(), String> {
+            ServedSpec.validate(assembly)
+        }
+        fn instance_role(&self) -> Option<&'static str> {
+            Some("weights")
+        }
+    }
+
+    /// Two genuinely independent candidates, opted into instance-per-
+    /// candidate resolution, must each become their OWN served `Assembly` -
+    /// the exact case `served_assembly` (single-instance) refuses outright
+    /// as `genuine_ambiguity_refuses_to_serve_and_names_every_candidate`
+    /// above pins.
+    #[test]
+    fn served_assemblies_serves_every_real_candidate_under_its_own_id() {
+        let _serial = brain_testutil::env_lock();
+        let root = store("multi-instance");
+        let a = write_candidate(&root, "vendor-a", "model.safetensors");
+        let b = write_candidate(&root, "vendor-b", "model.safetensors");
+        std::env::set_var("BRAIN_MODELS_DIR", &root);
+        std::env::remove_var("BRAIN_SERVEDTEST_WEIGHTS");
+
+        let mut got = served_assemblies("servedtest", &MultiServedSpec, SERVED_BINDINGS, "default/servedtest");
+        got.sort_by(|x, y| x.id.cmp(&y.id));
+        assert_eq!(got.len(), 2, "{:?}", got.iter().map(|a| &a.id).collect::<Vec<_>>());
+        assert_eq!(got[0].id, "vendor-a/model");
+        assert_eq!(got[0].roles["weights"], a);
+        assert_eq!(got[1].id, "vendor-b/model");
+        assert_eq!(got[1].roles["weights"], b);
+
+        std::env::remove_var("BRAIN_MODELS_DIR");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Every role already named by the environment still collapses to
+    /// exactly ONE instance, under `default_id` - never fanned out into
+    /// per-candidate instances just because the spec opted its role in.
+    #[test]
+    fn served_assemblies_uses_default_id_when_every_role_is_named_by_the_environment() {
+        let _serial = brain_testutil::env_lock();
+        let root = store("multi-instance-named");
+        let named = write_candidate(&root, "vendor", "model.safetensors");
+        std::env::set_var("BRAIN_MODELS_DIR", &root);
+        std::env::set_var("BRAIN_SERVEDTEST_WEIGHTS", &named);
+
+        let got = served_assemblies("servedtest", &MultiServedSpec, SERVED_BINDINGS, "default/servedtest");
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0].id, "default/servedtest");
+        assert_eq!(got[0].roles["weights"], named);
+
+        std::env::remove_var("BRAIN_SERVEDTEST_WEIGHTS");
+        std::env::remove_var("BRAIN_MODELS_DIR");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// An empty store falls back to `resolve_all`'s own single-instance
+    /// path, which resolves to `Missing` exactly as `served_assembly`'s own
+    /// "nothing configured and nothing found" case does - silently not
+    /// served, never a hard failure.
+    #[test]
+    fn served_assemblies_serves_nothing_when_the_store_holds_nothing() {
+        let _serial = brain_testutil::env_lock();
+        let root = store("multi-instance-empty");
+        std::env::set_var("BRAIN_MODELS_DIR", &root);
+        std::env::remove_var("BRAIN_SERVEDTEST_WEIGHTS");
+
+        assert!(served_assemblies("servedtest", &MultiServedSpec, SERVED_BINDINGS, "default/servedtest").is_empty(), "nothing on disk must serve nothing");
+
         std::env::remove_var("BRAIN_MODELS_DIR");
         std::fs::remove_dir_all(&root).ok();
     }

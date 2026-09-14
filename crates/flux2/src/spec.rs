@@ -159,6 +159,16 @@ impl ArchSpec for Flux2Spec {
         ROLES
     }
 
+    /// A store commonly holds several real, independent `dit` checkpoints at
+    /// once - an official release, a third-party re-quantization of the same
+    /// size, an unrelated size entirely - each servable under its own real
+    /// vendor/repo name rather than pooled into one ambiguous choice. `vae`/
+    /// `text_encoder`/`tokenizer` stay pooled store-wide per instance, so a
+    /// `dit`-only checkpoint still shares whichever copy of those is on disk.
+    fn instance_role(&self) -> Option<&'static str> {
+        Some("dit")
+    }
+
     fn classify(&self, records: &[ArtifactRecord], inventory_root: &Path) -> Vec<(usize, String, Confidence)> {
         let mut out = Vec::new();
         // Pass 1: dit/vae/text_encoder - every one of these reads real

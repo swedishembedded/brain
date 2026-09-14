@@ -165,12 +165,16 @@ pub fn build_executor(gpus: &[(u32, u64)], npus: &[(u32, u64)], unified_gpus: &[
     } else {
         eprintln!("brain: lfm not served over the scheduler (set BRAIN_LFM2 + BRAIN_LFM2_TOKENIZER)");
     }
-    // FLUX.2 Klein (BRAIN_FLUX2_{DIT,VAE,TE,TOKENIZER}): text-to-image,
+    // FLUX.2 Klein (BRAIN_FLUX2_{DIT,VAE,TE,TOKENIZER}, else every
+    // independent `dit` checkpoint the model store holds, each its own
+    // resident under its real vendor/repo id): text-to-image,
     // reference-image editing, LoRA training (see resident_flux2.rs).
-    if let Some(f) = crate::resident_flux2::Flux2Resident::from_env() {
+    let flux2_residents = crate::resident_flux2::Flux2Resident::all_from_store();
+    if flux2_residents.is_empty() {
+        eprintln!("brain: flux2-klein not served over the scheduler (set BRAIN_FLUX2_DIT/_VAE/_TE/_TOKENIZER, or place a checkpoint under the model dir)");
+    }
+    for f in flux2_residents {
         models.push(Arc::new(f));
-    } else {
-        eprintln!("brain: flux2-klein not served over the scheduler (set BRAIN_FLUX2_DIT/_VAE/_TE/_TOKENIZER)");
     }
     // Wan2.1 text-to-video (BRAIN_WAN_{DIT,VAE,T5,TOKENIZER}): a resident
     // transformer per (variant, frames, size) - see resident_wan.rs.

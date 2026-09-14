@@ -91,6 +91,51 @@ impl Flux2Resident {
         }
     }
 
+    /// [`Self::from_env`]'s multi-instance counterpart: one resident per
+    /// real, independent `dit` checkpoint the store holds - see
+    /// `flux2::spec::Flux2Spec::instance_role`'s own doc for why several
+    /// tied `dit` candidates are not necessarily one ambiguous choice.
+    /// Reduces to `from_env`'s exact single result (as `vec![]` or `vec![_]`)
+    /// when every role is already named by the environment, or the store
+    /// holds at most one real `dit` candidate.
+    ///
+    /// One candidate's own failure (a `dit` size this store's `vae` cannot
+    /// match, an unsniffable checkpoint) is logged and that ONE instance is
+    /// skipped - it never drops every other real, independently-servable
+    /// checkpoint with it.
+    pub fn all_from_store() -> Vec<Flux2Resident> {
+        crate::resolver_cli::served_assemblies(
+            "flux2",
+            &flux2::spec::Flux2Spec,
+            &[
+                RoleEnv { role: "dit", var: "BRAIN_FLUX2_DIT" },
+                RoleEnv { role: "vae", var: "BRAIN_FLUX2_VAE" },
+                RoleEnv { role: "text_encoder", var: "BRAIN_FLUX2_TE" },
+                RoleEnv { role: "tokenizer", var: "BRAIN_FLUX2_TOKENIZER" },
+            ],
+            flux2::caps::MODEL,
+        )
+        .into_iter()
+        .filter_map(|assembly| {
+            let id = assembly.id.clone();
+            let paths = match flux2::Paths::from_assembly(&assembly) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("brain: {id} not served over the scheduler ({e})");
+                    return None;
+                }
+            };
+            match Flux2Resident::from_paths(id.clone(), paths) {
+                Ok(r) => Some(r),
+                Err(e) => {
+                    eprintln!("brain: {id} not served over the scheduler ({e})");
+                    None
+                }
+            }
+        })
+        .collect()
+    }
+
     /// Bind a resident to real, explicitly-named weights. `id` is the
     /// registration name (see the struct doc); `variant` is fixed HERE, from
     /// `paths.dit`'s own tensor shapes combined with `BRAIN_FLUX2_FAMILY`

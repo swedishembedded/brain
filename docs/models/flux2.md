@@ -31,6 +31,24 @@ export BRAIN_FLUX2_TE=…/FLUX.2-klein-4B/text_encoder
 export BRAIN_FLUX2_TOKENIZER=…/FLUX.2-klein-4B/tokenizer/tokenizer.json
 ```
 
+### Serving more than one checkpoint at once
+
+`brain serve` does not require the `BRAIN_FLUX2_*` variables at all: with the
+model dir holding one or more real `dit` checkpoints (a diffusers-layout
+directory or a GGUF), each becomes its own served resident, addressed by its
+real `<vendor>/<repo>` id - e.g. a store holding both
+`black-forest-labs/FLUX.2-klein-9B` and `unsloth/FLUX.2-klein-4B-GGUF` serves
+both, simultaneously, under those two names. This is `dit` specifically: two
+or more `dit` checkpoints are genuinely independent models, never one
+ambiguous choice, and each is resolved against the SAME shared `vae`/
+`text_encoder`/`tokenizer` pool found anywhere in the store, so a `dit`-only
+checkpoint (nothing else in its own directory) still serves as long as a
+compatible VAE/text-encoder/tokenizer exists somewhere on disk.
+
+`BRAIN_FLUX2_DIT` (and the other three variables) still work exactly as
+before when set - they pin one exact instance, the same single-resident
+behavior this section's example above always had.
+
 ## Running it
 
 ```bash
