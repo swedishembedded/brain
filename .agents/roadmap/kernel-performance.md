@@ -1707,6 +1707,153 @@ which was not built.
 
 **Commit**: one.
 
+### M2.8 - `paged_flash_prefill_i8`: the int8-KV tier that made the SERVING DEFAULT stop paying for the triad
+
+M2.4's own wiring note ("`paged_flash_prefill` has no int8-KV tier yet, so a
+`kv_int8` engine still runs causal-chunk prefill through the triad and needs
+the SAME scratch this milestone shrinks for fp32") described the DEFAULT
+configuration, not an edge case: `cli::resident_llm::QwenServeConfig::
+default` ships `kv_int8: true`. So every default serving run both ran the
+three-dispatch int8 triad for prefill AND allocated the unshrunk
+`Scratch::{scores,probs}`.
+
+**§F.3 first, and it nearly ended the work early.** `paged_flash_decode_i8`
+(M2.2) already existed and already solved the hard half: dequantize each
+packed byte against its per-`(token slot, kv head)` scale WHILE STAGING the
+K/V tile into shared memory, and every stage downstream is byte-for-byte the
+fp32 kernel's code. That is why the online-softmax numerics are not harder at
+int8 - the reduction never sees a quantized value, only a dequantized f32
+tile, so int8 is a pure STORAGE tier here. `paged_flash_prefill_i8.wgsl` is
+therefore `paged_flash_prefill.wgsl` with exactly that one loop swapped in:
+same `BR=64` query tiling, same `LANES=4`/`CH=32` lane split, same causal
+early-exit, same per-row masking, same 3 barriers per K tile, same 16 KiB of
+shared memory. Two extra bindings (`scales_k`, `scales_v`) bring it to 8
+storage buffers - exactly the WebGPU floor, the same ceiling
+`paged_flash_decode_i8` already sits at.
+
+**Correctness, on a Tesla P40, on BOTH GPU backends** (`wgpu` and
+`BRAIN_DEVICE=vulkan`, identical numbers on each; `@cpu no`, three barriers,
+so the CPU JIT is excluded by construction and `compile_all` still parses
+it). One test, two references at one shape (`start=17` prefix + `cc=130`
+rows spanning three `BR=64` tiles, scrambled block table, GQA 4/2):
+
+| vs | number |
+|---|---|
+| the INT8 triad it replaces, over the IDENTICAL quantized pool | worst maxabs `4.172325e-7` (reassociation only - quantization is common-mode) |
+| the fp32 fused kernel over the unquantized pool | `rel_l2 = 0.005636`, `cosine = 0.99998415` (pure int8 quantization noise) |
+
+**Mutation-verified twice**, both against the tight triad bound: rotating the
+K byte lane (`elem % 4` -> `(elem+1) % 4`) gives `1.2462425`; dropping the
+kv-head from the V scale index gives `0.29632992`. The packing and the GQA
+scale mapping are each load-bearing, separately.
+
+**Speed - a win at every shape swept, no crossover to find** (`qwen_bench
+flash-prefill-i8`, min-of-N, Qwen3-0.6B head shape, P40):
+
+| shape | int8 triad | `paged_flash_prefill_i8` | ratio |
+|---|---|---|---|
+| start=512 cc=64   |   2.4327 ms |  0.5287 ms |  4.60x |
+| start=512 cc=128  |   4.5314 ms |  0.7913 ms |  5.73x |
+| start=0   cc=512  |   7.5177 ms |  1.0593 ms |  7.10x |
+| start=512 cc=512  |  22.1217 ms |  2.3468 ms |  9.43x |
+| start=1024 cc=512 |  37.4385 ms |  3.7710 ms |  9.93x |
+| start=4096 cc=512 | 130.4101 ms | 12.2740 ms | 10.62x |
+| start=512 cc=2048 | 224.2928 ms | 14.4867 ms | 15.48x |
+
+The margin grows with both axes, so §F.6's sweep found no threshold to gate
+on - the I8 arm is unconditional within its `n <= 128` tier. At the same
+shape the fp32 fused kernel runs 2.3502 ms against the int8 twin's 2.3468 ms:
+at prefill widths this kernel family is not KV-bandwidth-bound, so the
+storage tier costs it nothing.
+
+**Whole-pass, which is what decides it (§F.1).** `qwen_bench serve-prefill` is
+new this milestone precisely because no harness could produce this number:
+`qwen_bench serve` only ever builds `causal_chunk = false` tapes. The full
+28-layer int8-KV serving tape, one 512-row chunk after 512 cached tokens:
+
+| | whole pass | attention share | tok/s |
+|---|---|---|---|
+| int8 triad | 730.63 ms | 615.2 ms (84.3%), both stages flagged DEFECT at ~19% of the memory roof | 701 |
+| `paged_flash_prefill_i8` | 175.88 ms | 62.8 ms (35.4%) | 2911 |
+
+**4.15x on the whole prefill step**, and the top row moves from attention to
+`matmul_reg3` (37.1%) - §F.9's "the bottleneck moves, and that is the point".
+
+**The memory, which is the larger finding.** `Scratch::{scores,probs}`'s
+`fused_prefill_available` branch now reaches int8 KV, so the default
+configuration sheds its causal-chunk term. At the real operator shape
+(Qwen3-8B, `ctx=24576`, `max_batch=16`, `max_prefill=512` - the serving
+defaults, `n_heads=32`), pinned exactly by
+`paged_attn_scratch_at_the_real_8b_serving_default_shape`:
+
+    triad   3_221_225_472 B  (exactly 3.00 GiB - of an 18.41 GiB device total)
+    fused     100_663_296 B  (96.00 MiB)
+    saved   3_120_562_176 B  (2.906 GiB, a 32.0x reduction = max_prefill/max_batch)
+
+The factor is `max_prefill / max_batch` and is independent of `cap`; the
+ABSOLUTE saving scales linearly with context, which is what made this the
+largest per-token-scaling term in the engine.
+
+**Two defects fixed on the way, both of the F.7b "the shrink must ask the
+same question the dispatch asks" class M2.4 already caught once here.**
+
+1. `Engine::from_map_with_gpu` asked the selector at `OpShape { n: 0 }`,
+   documented as "m/n irrelevant to that Op". `n` IS `head_dim` and that arm
+   genuinely gates on it, so at any `head_dim` outside the fused tiers the
+   sizing promised a shrink the dispatch would not deliver. It now passes the
+   real `cfg.head_dim`.
+2. `Op::PagedAttentionFused` answers `FusedFlash` at `head_dim == 256` too
+   (`paged_flash_prefill_hd256`), and `qwen3::serve` registers no such
+   kernel - it would have dispatched the `HD=128` kernel at a 256-wide head.
+   Both the sizing and the dispatch now go through one new
+   `serve::fused_paged_attention`, which narrows the selector's answer to
+   `FUSED_MAX_HEAD_DIM`, so they cannot disagree.
+
+**`KernelVariant::requires`'s `FusedFlash` arm gained an `I8` case** returning
+`workgroup_reductions` only, not `dtype_storage_requirement(I8)`'s blanket
+`int8_dot`. Checked against the source rather than inherited: neither
+`paged_flash_prefill_i8` nor `paged_flash_decode_i8` contains a
+`dot4I8Packed` - both shift/mask a byte and multiply in f32 - so DP4A is not
+a correctness condition, the same distinction the FP8 storage tier already
+draws. Pinned by a `no_dp4a` arm in the selector's own test.
+
+**Verified**: `brain-model --lib paged::` 17/17 green on `wgpu` AND
+`BRAIN_DEVICE=vulkan`; `brain-backend-api` 63/63; `brain-qwen3 --lib`
+154 passed / 0 failed / 3 ignored on `wgpu`. `brain-wgsl-cpu --test
+compile_all` green (the new kernel parses under the JIT, as every catalogue
+kernel must). `make kernels-regen` (478 kernels) + `make kernels-table`
+clean. `check-kernel-selection.sh`, `check-no-doc-citations.sh`,
+`check-no-machine-paths.sh`, `scripts/spdx/check.py` clean. Per-crate
+`clippy --all-targets --all-features -- -D warnings` clean on every touched
+crate.
+
+**Investigated and confirmed UNRELATED, not silently ignored**: three
+`brain-qwen3 --lib serve::tests` fail under `BRAIN_DEVICE=vulkan`
+(`batched_serving_matches_reference`,
+`a_demoted_and_restored_sequence_decodes_identically`,
+`scheduler_dynamic_admission_matches_reference`). Reproduced with
+`fused_paged_attention` stubbed to `false` - i.e. with NO fused kernel
+dispatched anywhere, at `kv_int8 = false` - so it is a native-Vulkan-backend
+defect in a path this milestone does not touch. The same suite is fully green
+on `wgpu` on the same card. Running that module multi-threaded on the Vulkan
+backend fails 35 of 56; single-threaded it fails 3, which is its own separate
+finding about that backend's device sharing under test concurrency.
+
+**Not attempted, named rather than skipped**: an int8 tier for
+`paged_flash_prefill_hd256` (no int8 hd256 kernel exists, so the I8 arm has
+no `n == 256` tier); an int8 DECODE tier (`Op::PagedAttentionFused`'s decode
+arm still has no int8 candidate - M2.1/M2.2's measured non-win, and M2.7's
+split-key redesign was never re-measured at int8, so nothing here reopens
+it); a `gpu_core::cost` formula for the new kernel (neither
+`paged_flash_prefill` nor `paged_flash_decode` has one either, so the
+profiler prints "rate unavailable" for the new row exactly as it already did
+for its fp32 sibling); and narrowing `cli::resident_llm`'s four
+`paged_attn_scratch_bytes(.., false)` PRE-PLACEMENT estimates, which are
+deliberately the never-under bound because no target `DeviceCaps` exists at
+that point - still correct, but now over-reserves ~2.9 GiB on a
+fused-capable device and will pick a lower `AUTO_CTX_TIERS` rung than the
+card can actually serve. That is a real, separable follow-up.
+
 ### M3.2 - Device admission head, and `PagedDecoder::admit_greedy`/`admit_topk`
 
 `qwen3::serve::Engine` kept a SECOND, host-only copy of the LM head

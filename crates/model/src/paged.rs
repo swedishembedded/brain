@@ -1285,6 +1285,135 @@ mod flash_tests {
         assert!(worst < 1e-3, "paged_flash_prefill vs batched triad maxabs={worst}");
     }
 
+    /// `paged_flash_prefill_i8` - the INT8-KV twin of `paged_flash_prefill`,
+    /// gated against BOTH references that matter, in one test at one shape so
+    /// the two bounds describe the same scenario:
+    ///
+    /// 1. **the int8 triad it actually replaces** (`paged_decode_scores_i8_
+    ///    batched` -> `decode_softmax_batched` -> `paged_decode_apply_i8_
+    ///    batched`, which is what `qwen3::serve`'s `kv_int8` causal-chunk
+    ///    prefill dispatches today). Both sides read the IDENTICAL quantized
+    ///    pool, so quantization is common-mode and the only residual is the
+    ///    online softmax's reassociation - the same `1e-3` absolute bound
+    ///    `paged_flash_prefill_matches_batched_triad` uses against the fp32
+    ///    triad, for the identical reason.
+    /// 2. **the fp32 fused kernel** over the unquantized pool - the
+    ///    `rel_l2`/`cosine < 0.01` form `paged_flash_decode_int8_matches_fp32_
+    ///    fused_kernel` establishes for the int8 decode twin, which bounds the
+    ///    genuine int8 quantization error rather than the reassociation.
+    ///
+    /// Same scenario as `paged_flash_prefill_matches_batched_triad` above -
+    /// a `start = 17` prefix already in the pool, a `cc = 130` row chunk
+    /// spanning THREE `BR=64` query tiles, a scrambled block table shared by
+    /// every row - so a divergence here is attributable to the int8 staging
+    /// path and nothing else. The pool is quantized with [`quantize_pool_i8`]
+    /// (the real production scale/round/clamp scheme), never a synthetic one.
+    #[test]
+    fn paged_flash_prefill_int8_matches_the_int8_triad_and_the_fp32_fused_kernel() {
+        static PREFILL_I8_PIPES: &[(&str, &str)] = &[
+            ("paged_decode_scores_i8_batched", kernels::PAGED_DECODE_SCORES_I8_BATCHED),
+            ("decode_softmax_batched", kernels::DECODE_SOFTMAX_BATCHED),
+            ("paged_decode_apply_i8_batched", kernels::PAGED_DECODE_APPLY_I8_BATCHED),
+            ("paged_flash_prefill_i8", kernels::PAGED_FLASH_PREFILL_I8),
+            ("paged_flash_prefill", kernels::PAGED_FLASH_PREFILL),
+        ];
+        let g = gpu_core::testgpu::dev(PREFILL_I8_PIPES);
+        let (nh, nkv, hd) = (4u32, 2u32, 8u32); // head_dim % 4 == 0: the packed-word contract
+        let group = nh / nkv;
+        let (kv_stride, hq) = (nkv * hd, nh * hd);
+        let scale = 1.0f32 / (hd as f32).sqrt();
+
+        let start = 17u32;
+        let cc = 130u32; // spans 3 BR=64 query tiles
+        let total = start + cc;
+        let bs = 4u32;
+        let num_blocks = 64u32;
+        let max_bt = (total.div_ceil(bs) + 4).max(8);
+        let cap = total;
+
+        let mut rng = Rng::new(53);
+        let qflat: Vec<f32> = (0..cc * hq).map(|_| rng.next_gaussian() as f32).collect();
+        let kflat: Vec<f32> = (0..total * kv_stride).map(|_| rng.next_gaussian() as f32).collect();
+        let vflat: Vec<f32> = (0..total * kv_stride).map(|_| rng.next_gaussian() as f32).collect();
+
+        let table: Vec<u32> = (0..max_bt).map(|lb| num_blocks - 1 - lb).collect();
+        let mut pk = vec![0f32; (num_blocks * bs * kv_stride) as usize];
+        let mut pv = vec![0f32; (num_blocks * bs * kv_stride) as usize];
+        for tok in 0..total {
+            let phys = table[(tok / bs) as usize];
+            let dst = ((phys * bs + tok % bs) * kv_stride) as usize;
+            let src = (tok * kv_stride) as usize;
+            pk[dst..dst + kv_stride as usize].copy_from_slice(&kflat[src..src + kv_stride as usize]);
+            pv[dst..dst + kv_stride as usize].copy_from_slice(&vflat[src..src + kv_stride as usize]);
+        }
+
+        let seqlens: Vec<u32> = (0..cc).map(|i| start + i + 1).collect();
+        let btflat: Vec<u32> = (0..cc as usize).flat_map(|_| table.clone()).collect();
+
+        let qb = g.storage_init("q", &qflat);
+        let bt = g.storage((cc * max_bt) as u64);
+        g.write(&bt, &btflat);
+        let sl = g.storage(cc as u64);
+        g.write(&sl, &seqlens);
+
+        let (pk_words, sk) = quantize_pool_i8(&pk, nkv, hd);
+        let (pv_words, sv) = quantize_pool_i8(&pv, nkv, hd);
+        let poolk_i8 = g.storage(pk_words.len() as u64);
+        g.write(&poolk_i8, &pk_words);
+        let poolv_i8 = g.storage(pv_words.len() as u64);
+        g.write(&poolv_i8, &pv_words);
+        let scales_k = g.storage_init("sk", &sk);
+        let scales_v = g.storage_init("sv", &sv);
+
+        // --- reference 1: the int8 triad, over the SAME quantized pool ---
+        let sc = g.storage((cc * nh * cap) as u64);
+        let pr = g.storage((cc * nh * cap) as u64);
+        let ctx_triad_buf = g.storage((cc * hq) as u64);
+        let triad = vec![
+            g.step(0, &[&qb, &poolk_i8, &bt, &sl, &scales_k, &sc], &[cc, nh, group, hd, bs, kv_stride, cap, max_bt, fb(scale)], cc * nh * cap),
+            g.step(1, &[&sc, &sl, &pr], &[cc, nh, cap], cc * nh),
+            g.step(2, &[&pr, &poolv_i8, &bt, &sl, &scales_v, &ctx_triad_buf], &[cc, nh, group, hd, bs, kv_stride, cap, max_bt], cc * nh * hd),
+        ];
+        g.submit(&[], &triad);
+        let ctx_triad = g.read(&ctx_triad_buf, (cc * hq) as usize);
+
+        // --- the fused int8 dispatch, no scores/probs at all ---
+        let ctx_i8_buf = g.storage((cc * hq) as u64);
+        let ntiles_q = cc.div_ceil(64); // BR = paged_flash_prefill_i8's own tile size
+        let fused = vec![g.step(
+            3,
+            &[&qb, &poolk_i8, &poolv_i8, &scales_k, &scales_v, &bt, &sl, &ctx_i8_buf],
+            &[cc, nh, nkv, hd, group, bs, max_bt],
+            nh * ntiles_q * 256, // 256 = its own @workgroup_size
+        )];
+        g.submit(&[], &fused);
+        let ctx_i8 = g.read(&ctx_i8_buf, (cc * hq) as usize);
+
+        let worst = ctx_triad.iter().zip(&ctx_i8).fold(0f32, |m, (a, b)| m.max((a - b).abs()));
+        println!("paged_flash_prefill_i8 vs int8 triad: worst maxabs = {worst:e}");
+        assert!(worst > 0.0, "sanity: q/k/v are not all-zero, so a real match should not be a trivial 0==0");
+        assert!(worst < 1e-3, "paged_flash_prefill_i8 vs int8 triad maxabs={worst}");
+
+        // --- reference 2: the fp32 fused kernel over the UNQUANTIZED pool ---
+        let poolk_f32 = g.storage_init("pk", &pk);
+        let poolv_f32 = g.storage_init("pv", &pv);
+        let ctx_fp32_buf = g.storage((cc * hq) as u64);
+        let fp32 = vec![g.step(
+            4,
+            &[&qb, &poolk_f32, &poolv_f32, &bt, &sl, &ctx_fp32_buf],
+            &[cc, nh, nkv, hd, group, bs, max_bt],
+            nh * ntiles_q * 256,
+        )];
+        g.submit(&[], &fp32);
+        let ctx_fp32 = g.read(&ctx_fp32_buf, (cc * hq) as usize);
+
+        let l2 = rel_l2(&ctx_fp32, &ctx_i8);
+        let cos = crate::hostmath::cosine(&ctx_fp32, &ctx_i8);
+        println!("paged_flash_prefill_i8 vs fp32 fused: rel_l2={l2:.6} cosine={cos:.8}");
+        assert!(l2 < 0.01, "paged_flash_prefill_i8 vs fp32 fused: rel_l2={l2} too high");
+        assert!((1.0 - cos) < 0.01, "paged_flash_prefill_i8 vs fp32 fused: cosine={cos} too low");
+    }
+
     /// M2.5: `paged_flash_prefill_hd256` (a SEPARATE kernel file from
     /// `paged_flash_prefill`, see its own header for why) streams two
     /// `HD0=128`-wide head_dim fragments through the same `ksh`/`vsh`
