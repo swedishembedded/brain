@@ -106,6 +106,18 @@ use gpu_core::{DeviceBuffer, DeviceCaps, Gpu, Step};
 
 use crate::dispatch::I8Scratch;
 
+/// The [`Operand::range`] meaning "bind the whole buffer" - `Gpu::step_sliced`
+/// reads `(0, 0)` as the entire binding, which is exactly what an unsliced
+/// `Gpu::step` does.
+///
+/// Named, because the four façade methods that carry it were dispatching
+/// through plain `Gpu::step` before they moved onto the `OperatorProvider`
+/// seam, and a *computed* extent there would have been a new claim rather
+/// than a move: a caller is free to hand any of them a buffer larger than
+/// the logical tensor (a scratch arena, a slab shared with the next layer),
+/// and a binding sized to `m * n` would have started refusing those.
+const WHOLE: (u64, u64) = (0, 0);
+
 /// The exact kernel-name spellings this façade dispatches by. Defined ONCE so
 /// [`Ops::new`]'s registration check and [`Ops::bind`]'s (variant, dtype) →
 /// name table can never spell one differently from the other.
@@ -923,10 +935,10 @@ pub struct Ops {
     /// bypassing both [`Ops::new`] and [`Ops::with_selector`]) where this
     /// field's policy can differ from what `providers` actually runs.
     selector: Arc<dyn KernelSelector>,
-    /// What [`Ops::matmul`] (`Op::MatMul` only - see `gpu_core::provider`'s
-    /// module doc for this seam's current scope) actually dispatches
-    /// through. `Ops::embed`/`moe_linear`/`matmul_dx`/`matmul_dw` are not
-    /// migrated onto this seam yet and do not consult it.
+    /// What [`Ops::matmul`], [`Ops::embed`], [`Ops::moe_linear`],
+    /// [`Ops::matmul_dx`] and [`Ops::matmul_dw`] dispatch through - see
+    /// `gpu_core::provider`'s module doc for this seam's scope, and for
+    /// which of this façade's other methods are deliberately outside it.
     providers: ProviderRegistry,
 }
 
@@ -1424,14 +1436,42 @@ impl Ops {
     /// later" precedent).
     pub fn embed(&self, s: &mut Vec<Step>, table: &Weight, tokens: &DeviceBuffer, seq_len: u32, out: &DeviceBuffer) {
         let d_model = table.k();
+        let dt = table.dtype();
         // `bind_embed` already panics loudly for `I8`/`Q4` before the match
         // below is ever reached, so those two arms there are unreachable by
         // construction, not merely by convention.
-        let kind = self.idx[Self::bind_embed(table.dtype())];
-        let threads = seq_len * d_model;
+        // Resolved HERE, not inside the closure: `bind_embed` is what panics
+        // by name for a dtype with no embed kernel, and the provider calls
+        // the closure only after this method's own match has already
+        // committed to an arm - so a lazy resolution would reach the
+        // `unreachable!` below instead, with a message saying a panic that
+        // never happened already had.
+        let kname = Self::bind_embed(dt);
+        let bind = |_: KernelVariant| -> (usize, &'static str) { (self.idx[kname], kname) };
         match table {
             Weight::F32 { w, .. } | Weight::BF16 { w, .. } | Weight::F16 { w, .. } => {
-                s.push(self.gpu.step(kind, &[tokens, w, out], &[d_model, seq_len], threads));
+                let operands = [
+                    // The token buffer holds u32 row INDICES, not numbers the
+                    // kernel does arithmetic on. `Role::Aux` says so (it is
+                    // neither an activation nor a weight), and the `dtype`
+                    // field - informational, read by no provider for this
+                    // operand - records the 32-bit storage width rather than
+                    // claiming an arithmetic tier `DType` has no spelling for.
+                    Operand { role: Role::Aux(0), buf: tokens, range: WHOLE, dtype: Dtype::F32 },
+                    Operand { role: Role::Weight, buf: w, range: WHOLE, dtype: dt },
+                    Operand { role: Role::Out, buf: out, range: WHOLE, dtype: Dtype::F32 },
+                ];
+                let attrs = [d_model, seq_len];
+                let req = OpRequest {
+                    op: Op::Embed,
+                    shape: OpShape { m: seq_len, n: d_model, k: table.n(), dtype: dt },
+                    pass: Pass::Forward,
+                    operands: &operands,
+                    attrs: &attrs,
+                    bind: &bind,
+                };
+                let mut ctx = LowerCtx { gpu: &self.gpu, caps: &self.caps, steps: s, capture: false };
+                self.providers.dispatch(&mut ctx, &req);
             }
             Weight::I8 { .. } | Weight::Q4 { .. } | Weight::KQuant { .. } => {
                 unreachable!("Ops::embed: bind_embed already panicked for this dtype above")
@@ -1483,14 +1523,37 @@ impl Ops {
         out: &DeviceBuffer,
     ) {
         let (n, k) = (w.n(), w.k());
+        let dt = w.dtype();
         // `bind_moe_linear` already panics loudly for `I8`/`Q4` before the
         // match below is ever reached, so that arm there is unreachable by
         // construction, not merely by convention.
-        let kind = self.idx[Self::bind_moe_linear(w.dtype())];
-        let threads = m * n;
+        // Eagerly resolved, for the reason `Ops::embed` states: this is the
+        // call that panics by name for an unsupported dtype, and it has to
+        // happen before the match rather than inside the provider's callback.
+        let kname = Self::bind_moe_linear(dt);
+        let bind = |_: KernelVariant| -> (usize, &'static str) { (self.idx[kname], kname) };
         match w {
             Weight::F32 { w: wb, .. } | Weight::BF16 { w: wb, .. } | Weight::F16 { w: wb, .. } => {
-                s.push(self.gpu.step(kind, &[x, wb, gate, out], &[m, k, n, n_experts, e_idx], threads));
+                let operands = [
+                    Operand { role: Role::Act, buf: x, range: WHOLE, dtype: Dtype::F32 },
+                    Operand { role: Role::Weight, buf: wb, range: WHOLE, dtype: dt },
+                    // The routing gate: `[rows, n_experts]`, read to decide
+                    // whether this expert owns a row at all. Neither an
+                    // activation the kernel multiplies nor a weight.
+                    Operand { role: Role::Aux(0), buf: gate, range: WHOLE, dtype: Dtype::F32 },
+                    Operand { role: Role::Out, buf: out, range: WHOLE, dtype: Dtype::F32 },
+                ];
+                let attrs = [m, k, n, n_experts, e_idx];
+                let req = OpRequest {
+                    op: Op::MoeExpertLinear,
+                    shape: OpShape { m, n, k, dtype: dt },
+                    pass: Pass::Forward,
+                    operands: &operands,
+                    attrs: &attrs,
+                    bind: &bind,
+                };
+                let mut ctx = LowerCtx { gpu: &self.gpu, caps: &self.caps, steps: s, capture: false };
+                self.providers.dispatch(&mut ctx, &req);
             }
             Weight::I8 { .. } | Weight::Q4 { .. } | Weight::KQuant { .. } => {
                 unreachable!("Ops::moe_linear: bind_moe_linear already panicked for this dtype above")
@@ -1710,11 +1773,32 @@ impl Ops {
     /// kernel is templatized this phase, so this binds directly by dtype.
     pub fn matmul_dx(&self, s: &mut Vec<Step>, w: &Weight, dy: &DeviceBuffer, m: u32, dx: &DeviceBuffer, accumulate: bool) {
         let (n, k) = (w.n(), w.k());
-        let kind = self.idx[Self::bind_matmul_dx(w.dtype())];
-        let threads = m * k;
+        let dt = w.dtype();
+        // Eagerly resolved, for the reason `Ops::embed` states.
+        let kname = Self::bind_matmul_dx(dt);
+        let bind = |_: KernelVariant| -> (usize, &'static str) { (self.idx[kname], kname) };
         match w {
             Weight::F32 { w: wb, .. } | Weight::BF16 { w: wb, .. } => {
-                s.push(self.gpu.step(kind, &[dy, wb, dx], &[m, k, n, accumulate as u32], threads));
+                let operands = [
+                    // `dY`, the incoming gradient: the per-sample operand of
+                    // this dispatch, in the position the forward pass's
+                    // activation occupies. `Role` has no gradient spelling,
+                    // and inventing one would only rename this.
+                    Operand { role: Role::Act, buf: dy, range: WHOLE, dtype: Dtype::F32 },
+                    Operand { role: Role::Weight, buf: wb, range: WHOLE, dtype: dt },
+                    Operand { role: Role::Out, buf: dx, range: WHOLE, dtype: Dtype::F32 },
+                ];
+                let attrs = [m, k, n, accumulate as u32];
+                let req = OpRequest {
+                    op: Op::MatMulDx,
+                    shape: OpShape { m, n, k, dtype: dt },
+                    pass: Pass::Backward,
+                    operands: &operands,
+                    attrs: &attrs,
+                    bind: &bind,
+                };
+                let mut ctx = LowerCtx { gpu: &self.gpu, caps: &self.caps, steps: s, capture: false };
+                self.providers.dispatch(&mut ctx, &req);
             }
             Weight::F16 { .. } | Weight::I8 { .. } | Weight::Q4 { .. } | Weight::KQuant { .. } => {
                 unreachable!("Ops::matmul_dx: bind_matmul_dx already panicked for this dtype above")
@@ -1737,9 +1821,36 @@ impl Ops {
     /// `clears` list).
     #[allow(clippy::too_many_arguments)]
     pub fn matmul_dw(&self, s: &mut Vec<Step>, x: &DeviceBuffer, dy: &DeviceBuffer, m: u32, n: u32, k: u32, dw: &DeviceBuffer) {
-        let kind = self.idx[kname::MATMUL_DW];
-        let threads = n * k;
-        s.push(self.gpu.step(kind, &[dy, x, dw], &[m, k, n], threads));
+        let bind = |_: KernelVariant| -> (usize, &'static str) { (self.idx[kname::MATMUL_DW], kname::MATMUL_DW) };
+        let operands = [
+            Operand { role: Role::Act, buf: dy, range: WHOLE, dtype: Dtype::F32 },
+            // `X`, the forward activation. A second always-f32 input rather
+            // than a weight - `matmul_dw` never reads a weight at all, which
+            // is what makes this Op's accumulation f32 by construction.
+            Operand { role: Role::Aux(0), buf: x, range: WHOLE, dtype: Dtype::F32 },
+            // `dW` is ACCUMULATED into, never overwritten (`matmul_dw.wgsl`'s
+            // own always-add contract) - the one operand in this façade whose
+            // role is `Accum` rather than `Out`... except that
+            // `WgslProvider::lower` requires the LAST operand to be the
+            // output, since that is the bind position `Gpu::step_sliced`
+            // gives it. So `Out` it is, and the accumulate semantics stay
+            // where they already were: in the kernel.
+            Operand { role: Role::Out, buf: dw, range: WHOLE, dtype: Dtype::F32 },
+        ];
+        let attrs = [m, k, n];
+        let req = OpRequest {
+            op: Op::MatMulDw,
+            // `dtype` is `F32` unconditionally and is NOT a weight tier here:
+            // this Op has no weight (see `Op::MatMulDw`'s own doc), so there
+            // is no storage tier for a shape to carry.
+            shape: OpShape { m, n, k, dtype: Dtype::F32 },
+            pass: Pass::Backward,
+            operands: &operands,
+            attrs: &attrs,
+            bind: &bind,
+        };
+        let mut ctx = LowerCtx { gpu: &self.gpu, caps: &self.caps, steps: s, capture: false };
+        self.providers.dispatch(&mut ctx, &req);
     }
 
     /// Which kernel [`Self::matmul`] would dispatch for this weight at `m`

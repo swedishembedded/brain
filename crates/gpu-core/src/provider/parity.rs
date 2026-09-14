@@ -79,7 +79,112 @@ fn seeded_f32(seed: u64, n: usize) -> Vec<f32> {
 pub fn assert_provider_parity(gpu: &Gpu, p: &dyn OperatorProvider, case: &ParityCase) {
     match case.op {
         select::Op::MatMul => assert_matmul_parity(gpu, p, case),
+        select::Op::MatMulDx | select::Op::MatMulDw => assert_backward_gemm_parity(gpu, p, case),
         other => panic!("parity::assert_provider_parity: no case builder wired for {other:?} yet"),
+    }
+}
+
+/// [`select::Op::MatMulDx`] and [`select::Op::MatMulDw`] - the two backward
+/// GEMMs of one linear, which share a shape and differ in which axis they
+/// contract over and therefore in what each of their three buffers is.
+///
+/// Both are plain f32 with a fixed kernel per op and no sub-range binding
+/// (neither `Ops::matmul_dx` nor `Ops::matmul_dw` offsets anything), so this
+/// builder is deliberately simpler than the forward one - it does not
+/// reproduce the row-offset regime, because there is no call site that
+/// exercises one.
+fn assert_backward_gemm_parity(gpu: &Gpu, p: &dyn OperatorProvider, case: &ParityCase) {
+    let (m, n, k) = (case.shape.m, case.shape.n, case.shape.k);
+    let dy = gpu.storage_init("parity_dy", &seeded_f32(case.seed, (m * n) as usize));
+    // `dX` reads the WEIGHT `[n, k]`; `dW` reads the forward ACTIVATION
+    // `[m, k]`. Same slot, different tensor - which is exactly why these are
+    // two `Op`s and not one Op at two passes.
+    let second_len = match case.op {
+        select::Op::MatMulDx => (n * k) as usize,
+        _ => (m * k) as usize,
+    };
+    let second = gpu.storage_init("parity_second", &seeded_f32(case.seed ^ 1, second_len));
+    let out_len = match case.op {
+        select::Op::MatMulDx => (m * k) as u64,
+        _ => (n * k) as u64,
+    };
+    // `matmul_dw` ACCUMULATES into its output, so both sides must start from
+    // the same value - which `Gpu::storage`'s zero fill gives them.
+    let out_ref = gpu.storage(out_len);
+    let out_got = gpu.storage(out_len);
+
+    let (kname, attrs): (&'static str, Vec<u32>) = match case.op {
+        // `accumulate = 0`: overwrite, so the comparison is of the GEMM and
+        // not of whatever happened to be in the buffer.
+        select::Op::MatMulDx => ("matmul_dx", vec![m, k, n, 0]),
+        _ => ("matmul_dw", vec![m, k, n]),
+    };
+    let bind = move |v: select::KernelVariant| -> (usize, &'static str) {
+        assert_eq!(
+            v,
+            select::KernelVariant::Reference,
+            "the backward GEMMs have exactly one kernel shape per dtype; a second variant means \
+             `candidates` grew one without a kernel to bind it to"
+        );
+        (gpu.kernel_index(kname).unwrap_or_else(|| panic!("parity harness: '{kname}' must be registered on gpu")), kname)
+    };
+
+    let reference_selector: Arc<dyn select::KernelSelector> =
+        Arc::new(select::CachedSelector::new(select::AlwaysReference));
+    let reference = WgslProvider::new(reference_selector);
+    let caps = gpu.caps();
+
+    let run = |provider: &dyn OperatorProvider, out: &crate::DeviceBuffer| {
+        let operands = [
+            Operand { role: Role::Act, buf: &dy, range: (0, (m * n) as u64), dtype: DType::F32 },
+            Operand {
+                role: if case.op == select::Op::MatMulDx { Role::Weight } else { Role::Aux(0) },
+                buf: &second,
+                range: (0, second_len as u64),
+                dtype: DType::F32,
+            },
+            Operand { role: Role::Out, buf: out, range: (0, out_len), dtype: DType::F32 },
+        ];
+        let req = OpRequest {
+            op: case.op,
+            shape: case.shape,
+            pass: case.pass,
+            operands: &operands,
+            attrs: &attrs,
+            bind: &bind,
+        };
+        let mut steps = Vec::new();
+        {
+            let mut ctx = LowerCtx { gpu, caps: &caps, steps: &mut steps, capture: false };
+            provider.lower(&mut ctx, &req).expect("provider must lower this ParityCase (or decline it before this call)");
+        }
+        gpu.submit(&[], &steps);
+    };
+    run(&reference, &out_ref);
+    run(p, &out_got);
+
+    compare(gpu.read(&out_ref, out_len as usize), gpu.read(&out_got, out_len as usize), case);
+}
+
+/// Assert two providers' outputs agree within `case.tol` - the one place the
+/// comparison is spelled, so every case builder holds its provider to the
+/// same bar.
+fn compare(expect: Vec<f32>, got: Vec<f32>, case: &ParityCase) {
+    match case.tol {
+        Tolerance::BitIdentical => {
+            assert_eq!(expect, got, "parity mismatch (BitIdentical) for {:?} at shape {:?}", case.op, case.shape);
+        }
+        Tolerance::Numeric { atol, rtol, cosine_min } => {
+            for (i, (a, b)) in expect.iter().zip(got.iter()).enumerate() {
+                let d = (a - b).abs();
+                assert!(d <= atol + rtol * a.abs(), "parity mismatch at element {i}: expect {a}, got {b}, diff {d}");
+            }
+            let dot: f64 = expect.iter().zip(got.iter()).map(|(a, b)| f64::from(*a) * f64::from(*b)).sum();
+            let na: f64 = expect.iter().map(|a| f64::from(*a) * f64::from(*a)).sum::<f64>().sqrt();
+            let nb: f64 = got.iter().map(|b| f64::from(*b) * f64::from(*b)).sum::<f64>().sqrt();
+            let cosine = if na > 0.0 && nb > 0.0 { dot / (na * nb) } else { 1.0 };
+            assert!(cosine >= cosine_min, "parity cosine similarity {cosine} below floor {cosine_min}");
+        }
     }
 }
 
@@ -155,40 +260,84 @@ fn assert_matmul_parity(gpu: &Gpu, p: &dyn OperatorProvider, case: &ParityCase) 
     }
     gpu.submit(&[], &steps_got);
 
-    let expect = gpu.read(&y_ref, (m * n) as usize);
-    let got = gpu.read(&y_got, (m * n) as usize);
-    match case.tol {
-        Tolerance::BitIdentical => {
-            assert_eq!(
-                expect, got,
-                "parity mismatch (BitIdentical) for {:?} at shape {:?}, xr0={xr0}",
-                case.op, case.shape
-            );
-        }
-        Tolerance::Numeric { atol, rtol, cosine_min } => {
-            for (i, (a, b)) in expect.iter().zip(got.iter()).enumerate() {
-                let d = (a - b).abs();
-                assert!(d <= atol + rtol * a.abs(), "parity mismatch at element {i}: expect {a}, got {b}, diff {d}");
-            }
-            let dot: f64 = expect.iter().zip(got.iter()).map(|(a, b)| f64::from(*a) * f64::from(*b)).sum();
-            let na: f64 = expect.iter().map(|a| f64::from(*a) * f64::from(*a)).sum::<f64>().sqrt();
-            let nb: f64 = got.iter().map(|b| f64::from(*b) * f64::from(*b)).sum::<f64>().sqrt();
-            let cosine = if na > 0.0 && nb > 0.0 { dot / (na * nb) } else { 1.0 };
-            assert!(cosine >= cosine_min, "parity cosine similarity {cosine} below floor {cosine_min}");
-        }
-    }
+    compare(gpu.read(&y_ref, (m * n) as usize), gpu.read(&y_got, (m * n) as usize), case);
 }
 
 /// The fixed case table for `op` - decode-shaped (small `m`), the GEMM tile
 /// crossover, a large multi-tile shape, a non-tile-multiple shape, and (via
 /// `assert_matmul_parity`'s own `xr0` derivation) a non-zero row offset.
 /// Empty for any `Op` this harness has no case builder for yet.
+///
+/// # What is covered, and what is not
+///
+/// `model::ops::Ops` routes five operators through the
+/// [`super::OperatorProvider`] seam; this table has fixtures for three. The
+/// two backward GEMMs are here because they are plain f32 over three storage
+/// buffers, which this harness's seeding and comparison already express
+/// exactly. [`select::Op::Embed`] and [`select::Op::MoeExpertLinear`] are
+/// deliberately NOT, and the reason is that a fixture for either would be a
+/// second implementation of its semantics rather than a shape:
+///
+/// - `Embed` gathers by u32 token INDICES, so a fixture has to seed an
+///   integer buffer bounded by a vocabulary it also invents - a seeding path
+///   nothing else here needs, for an operator whose f32 tier is an addressed
+///   copy.
+/// - `MoeExpertLinear` needs a routing gate `[rows, n_experts]` plus an
+///   expert index, and which rows it writes at all depends on that gate's
+///   VALUES - so a fixture that seeded it randomly would be asserting parity
+///   over whatever subset happened to route.
+///
+/// Both already have a host-oracle test against the `Ops` façade in
+/// `crates/model` covering exactly the tiers they ship, which is where the
+/// real correctness question about them lives. When a non-WGSL provider
+/// claims either, the fixture it needs should be written then, against that
+/// provider's actual operand bundle.
 pub fn cases_for(op: select::Op) -> &'static [ParityCase] {
     match op {
         select::Op::MatMul => &MATMUL_CASES,
+        select::Op::MatMulDx => &MATMUL_DX_CASES,
+        select::Op::MatMulDw => &MATMUL_DW_CASES,
         _ => &[],
     }
 }
+
+/// The backward GEMMs, at the forward linear's own `(m, n, k)`. Two shapes
+/// each: one that divides the kernels' work-group size evenly and one that
+/// divides nothing, since an off-by-one in the thread count shows up only in
+/// the tail.
+static MATMUL_DX_CASES: [ParityCase; 2] = [
+    ParityCase {
+        op: select::Op::MatMulDx,
+        shape: select::OpShape { m: 64, n: 64, k: 64, dtype: select::Dtype::F32 },
+        pass: Pass::Backward,
+        seed: 11,
+        tol: Tolerance::BitIdentical,
+    },
+    ParityCase {
+        op: select::Op::MatMulDx,
+        shape: select::OpShape { m: 37, n: 53, k: 17, dtype: select::Dtype::F32 },
+        pass: Pass::Backward,
+        seed: 12,
+        tol: Tolerance::BitIdentical,
+    },
+];
+
+static MATMUL_DW_CASES: [ParityCase; 2] = [
+    ParityCase {
+        op: select::Op::MatMulDw,
+        shape: select::OpShape { m: 64, n: 64, k: 64, dtype: select::Dtype::F32 },
+        pass: Pass::Backward,
+        seed: 13,
+        tol: Tolerance::BitIdentical,
+    },
+    ParityCase {
+        op: select::Op::MatMulDw,
+        shape: select::OpShape { m: 37, n: 53, k: 17, dtype: select::Dtype::F32 },
+        pass: Pass::Backward,
+        seed: 14,
+        tol: Tolerance::BitIdentical,
+    },
+];
 
 static MATMUL_CASES: [ParityCase; 4] = [
     // Decode-shaped: one row. seed%3==1 -> xr0=16 (a non-zero row offset).
@@ -231,24 +380,109 @@ mod tests {
     use super::*;
     use crate::testgpu;
 
-    static KERNELS: &[(&str, &str)] = &[("matmul", kernels::MATMUL)];
+    static KERNELS: &[(&str, &str)] = &[
+        ("matmul", kernels::MATMUL),
+        ("matmul_dx", kernels::MATMUL_DX),
+        ("matmul_dw", kernels::MATMUL_DW),
+    ];
 
-    /// The harness proves itself: every registered `Op::MatMul` case, run
-    /// through the reference provider on BOTH sides, is bit-identical to
-    /// itself - the plumbing (seeding, dispatch, readback, compare) is sound
-    /// before any real second provider ever calls this.
+    /// The harness proves itself: every registered case, run through the
+    /// reference provider on BOTH sides, is bit-identical to itself - the
+    /// plumbing (seeding, dispatch, readback, compare) is sound before any
+    /// real second provider ever calls this.
     #[test]
-    fn reference_provider_is_self_parity_clean_on_every_matmul_case() {
+    fn reference_provider_is_self_parity_clean_on_every_case() {
         let gpu = testgpu::dev(KERNELS);
         let selector: Arc<dyn select::KernelSelector> = Arc::new(select::CachedSelector::new(select::AlwaysReference));
         let reference = WgslProvider::new(selector);
-        for case in cases_for(select::Op::MatMul) {
-            assert_provider_parity(&gpu, &reference, case);
+        for op in [select::Op::MatMul, select::Op::MatMulDx, select::Op::MatMulDw] {
+            let cases = cases_for(op);
+            assert!(!cases.is_empty(), "{op:?} is routed through the seam but has no parity fixture");
+            for case in cases {
+                assert_provider_parity(&gpu, &reference, case);
+            }
+        }
+    }
+
+    /// The backward GEMMs must actually COMPUTE what they claim, not merely
+    /// agree with themselves - a thread count that under-dispatches leaves
+    /// the tail of the output at its initial value on both sides, and a
+    /// self-parity assertion cannot see that. Held against a host oracle at
+    /// the non-tile-multiple shape, where a tail exists.
+    #[test]
+    fn the_backward_gemms_match_a_host_oracle_through_the_seam() {
+        let gpu = testgpu::dev(KERNELS);
+        let selector: Arc<dyn select::KernelSelector> = Arc::new(select::CachedSelector::new(select::AlwaysReference));
+        let reference = WgslProvider::new(selector);
+        let caps = gpu.caps();
+        let (m, n, k) = (37usize, 53usize, 17usize);
+        let dy = seeded_f32(21, m * n);
+        let second = seeded_f32(22, (n * k).max(m * k));
+
+        for op in [select::Op::MatMulDx, select::Op::MatMulDw] {
+            let (second_len, out_len) = match op {
+                select::Op::MatMulDx => (n * k, m * k),
+                _ => (m * k, n * k),
+            };
+            let dy_buf = gpu.storage_init("dy", &dy);
+            let second_buf = gpu.storage_init("second", &second[..second_len]);
+            let out = gpu.storage(out_len as u64);
+            let (kname, attrs): (&str, Vec<u32>) = match op {
+                select::Op::MatMulDx => ("matmul_dx", vec![m as u32, k as u32, n as u32, 0]),
+                _ => ("matmul_dw", vec![m as u32, k as u32, n as u32]),
+            };
+            let bind = |_v: select::KernelVariant| -> (usize, &'static str) {
+                let i = gpu.kernel_index(kname).expect("registered");
+                (i, if kname == "matmul_dx" { "matmul_dx" } else { "matmul_dw" })
+            };
+            let operands = [
+                Operand { role: Role::Act, buf: &dy_buf, range: (0, (m * n) as u64), dtype: DType::F32 },
+                Operand { role: Role::Weight, buf: &second_buf, range: (0, second_len as u64), dtype: DType::F32 },
+                Operand { role: Role::Out, buf: &out, range: (0, out_len as u64), dtype: DType::F32 },
+            ];
+            let req = OpRequest {
+                op,
+                shape: select::OpShape { m: m as u32, n: n as u32, k: k as u32, dtype: select::Dtype::F32 },
+                pass: Pass::Backward,
+                operands: &operands,
+                attrs: &attrs,
+                bind: &bind,
+            };
+            let mut steps = Vec::new();
+            {
+                let mut ctx = LowerCtx { gpu: &gpu, caps: &caps, steps: &mut steps, capture: false };
+                reference.lower(&mut ctx, &req).expect("reference lowers both backward GEMMs");
+            }
+            gpu.submit(&[], &steps);
+            let got = gpu.read(&out, out_len);
+
+            // dX[i, j] = sum_c dY[i, c] * W[c, j]; dW[i, j] = sum_r dY[r, i] * X[r, j].
+            let (rows, cols, inner) = match op {
+                select::Op::MatMulDx => (m, k, n),
+                _ => (n, k, m),
+            };
+            for i in 0..rows {
+                for j in 0..cols {
+                    let want: f32 = (0..inner)
+                        .map(|t| match op {
+                            select::Op::MatMulDx => dy[i * n + t] * second[t * k + j],
+                            _ => dy[t * n + i] * second[t * k + j],
+                        })
+                        .sum();
+                    let d = (want - got[i * cols + j]).abs();
+                    assert!(d <= 1e-4 * want.abs().max(1.0), "{op:?} at [{i},{j}]: want {want}, got {}", got[i * cols + j]);
+                }
+            }
         }
     }
 
     #[test]
     fn cases_for_is_empty_for_an_unimplemented_op() {
         assert!(cases_for(select::Op::RmsNorm).is_empty());
+        // Routed through the seam, but deliberately without a fixture here -
+        // see `cases_for`'s own doc for why, and where their correctness is
+        // actually asserted.
+        assert!(cases_for(select::Op::Embed).is_empty());
+        assert!(cases_for(select::Op::MoeExpertLinear).is_empty());
     }
 }

@@ -25,16 +25,18 @@
 //!
 //! ## Scope, stated plainly
 //!
-//! Only `Op::MatMul` is wired through this seam this milestone - 
-//! `model::ops::Ops::matmul` is the one façade method this session moved.
-//! `Ops::embed`/`Ops::moe_linear`/`Ops::matmul_dx`/`Ops::matmul_dw` keep
-//! dispatching exactly as they did before this change; they are candidates
-//! for a follow-up migration onto this same seam, not done here. `model::
-//! block`'s attention/softmax/paged-attention gates and `qwen3::serve`'s
-//! manual GEMM dispatch region (a deliberate M1.2 exception - see that
-//! ledger entry) stay entirely outside this seam's reach, exactly as before.
-//! A later provider therefore does not speed up either of those simply by
-//! existing.
+//! Five `model::ops::Ops` façade methods dispatch through this seam:
+//! `matmul` (`Op::MatMul`), `embed` (`Op::Embed`), `moe_linear`
+//! (`Op::MoeExpertLinear`), `matmul_dx` (`Op::MatMulDx`) and `matmul_dw`
+//! (`Op::MatMulDw`). The last four have exactly ONE kernel shape per dtype
+//! in the WGSL catalogue, so migrating them changed no dispatch and no
+//! number - what it changed is that a non-WGSL provider CAN now answer them,
+//! which it could not before however capable it was.
+//!
+//! `model::block`'s attention/softmax/paged-attention gates and
+//! `qwen3::serve`'s manual GEMM dispatch region (a deliberate M1.2 exception
+//! - see that ledger entry) stay entirely outside this seam's reach. A
+//! provider therefore does not speed up either of those simply by existing.
 
 use std::sync::Arc;
 
@@ -63,12 +65,15 @@ pub mod native_f16;
 pub mod parity;
 pub mod wgsl;
 
-/// Which half of a training step a dispatch belongs to. `Op::MatMul`
-/// requests from `Ops::matmul` are always [`Pass::Forward`] - the backward
-/// GEMMs (`Ops::matmul_dx`/`matmul_dw`) are separate, not-yet-migrated `Ops`
-/// methods (see this module's doc comment) - but the field exists now so a
-/// provider written against this ABI does not need a breaking change when
-/// they migrate.
+/// Which half of a training step a dispatch belongs to.
+///
+/// It is NOT how a provider tells two operators apart: the backward GEMMs
+/// are their own `Op`s (`Op::MatMulDx`/`Op::MatMulDw`), because they are
+/// different computations over different operands rather than one operator
+/// run backwards. What this field carries is the safety question - whether
+/// a gradient flows through this dispatch - and that is what a reduced-
+/// precision provider refuses on (`coopmat`, `native_f16`), never a
+/// dispatch decision.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Pass {
     Forward,
@@ -489,14 +494,15 @@ impl ProviderRegistry {
                 if std::ptr::eq(chosen, reference.as_ref()) {
                     // The reference provider is expected to accept every op
                     // by construction (see `OperatorProvider::accepts`'s doc
-                    // comment), but `lower` for an `Op` this milestone has
-                    // not yet moved onto the seam (everything except
-                    // `Op::MatMul` - see this module's top-level scope note)
-                    // returns `Err` rather than silently doing nothing.
-                    // Nothing in this tree calls `dispatch` for any other op
-                    // yet, so this is unreached in production; a caller that
-                    // DOES reach it needs the real error immediately, not a
-                    // swallowed fallback.
+                    // comment), but `lower` for an `Op` outside the set this
+                    // seam covers (see this module's top-level scope note)
+                    // returns `Err` rather than silently doing nothing. Every
+                    // `dispatch` call in this tree names an op the reference
+                    // provider implements, so this is unreached in
+                    // production; a caller that DOES reach it - by building
+                    // an `OpRequest` for an unmigrated op - needs the real
+                    // error immediately, not a swallowed fallback that
+                    // computes nothing and says nothing.
                     panic!("ProviderRegistry::dispatch: the reference WGSL provider could not lower op {:?}: {e}", req.op);
                 }
                 tracing::warn!(

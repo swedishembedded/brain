@@ -17,15 +17,24 @@
 //! `super::OpRequest::bind`'s doc comment for why kernel NAME resolution
 //! could not move down the same way and stays a caller-supplied closure.
 //!
-//! ## Scope this milestone
+//! ## Scope
 //!
-//! `lower` implements `Op::MatMul` only - the operator `Ops::matmul` itself
-//! covers, including every weight tier that method dispatches (`F32`/`BF16`/
-//! `F16`/`I8`/`Q4`/affine K-quant). Every other `select::Op` variant returns
-//! `Err` from `lower` (never reached in this tree today - nothing yet builds
-//! an [`super::OpRequest`] for any of them); widening this provider to
-//! `Ops::embed`/`moe_linear`/`matmul_dx`/`matmul_dw` is a real follow-up, not
-//! attempted here (see the crate-level `provider` module doc for why).
+//! `lower` implements the five operators `model::ops::Ops` routes through
+//! this seam: `Op::MatMul` (every weight tier that method dispatches -
+//! `F32`/`BF16`/`F16`/`I8`/`Q4`/affine K-quant), plus `Op::Embed`,
+//! `Op::MoeExpertLinear`, `Op::MatMulDx` and `Op::MatMulDw`.
+//!
+//! The split between `lower_matmul` and `lower_fixed` is not about which
+//! operators matter: `Op::MatMul` is the one with a real WGSL variant
+//! CHOICE, and so with a thread count that depends on which variant the
+//! selector returned. The other four have one kernel shape per dtype, so
+//! their thread count is a function of the output's extent alone. Both still
+//! ask the selector, so a cooperative sibling landing for any of them is a
+//! `candidates` arm plus a `bind` arm and nothing here.
+//!
+//! Every other `select::Op` variant returns `Err` from `lower` - never
+//! reached in this tree, since nothing builds an [`super::OpRequest`] for
+//! one.
 
 use std::sync::Arc;
 
@@ -83,24 +92,64 @@ impl WgslProvider {
         }
     }
 
-    fn lower_matmul(&self, ctx: &mut LowerCtx, req: &OpRequest) -> Result<Lowered, String> {
-        let variant = self.selector.select(req.op, req.shape, ctx.caps);
-        let (kind, name) = (req.bind)(variant);
-        let threads = Self::threads(variant, req.shape.dtype, req.shape.m, req.shape.n);
+    /// Dispatch invocation count for the operators that have exactly one
+    /// kernel shape per dtype and therefore no variant to switch on.
+    ///
+    /// Each formula is the one its `Ops` façade method already computed at its
+    /// own call site before it moved here - not a re-derivation. An
+    /// UNDER-count is the failure mode that matters (real output elements
+    /// never written, silent corruption rather than a crash), which is why
+    /// each is stated against the OUTPUT's own extent:
+    ///
+    /// - `Embed` writes `[tokens, d_model]`,
+    /// - `MoeExpertLinear` writes `[m, n]`,
+    /// - `MatMulDx` writes `dX[m, k]`,
+    /// - `MatMulDw` writes `dW[n, k]`.
+    fn fixed_threads(op: select::Op, shape: select::OpShape) -> u32 {
+        match op {
+            select::Op::Embed | select::Op::MoeExpertLinear => shape.m * shape.n,
+            select::Op::MatMulDx => shape.m * shape.k,
+            select::Op::MatMulDw => shape.n * shape.k,
+            other => unreachable!("wgsl::WgslProvider::fixed_threads: {other:?} is not a fixed-shape op"),
+        }
+    }
 
+    /// The one dispatch body all of this provider's operators share: resolve
+    /// a variant, bind it, bind every operand's own sub-range, push one step.
+    fn lower_one(&self, ctx: &mut LowerCtx, req: &OpRequest, threads: u32, variant: KernelVariant) -> Result<Lowered, String> {
+        let (kind, name) = (req.bind)(variant);
+        if req.operands.last().map(|o| o.role) != Some(Role::Out) {
+            return Err(format!(
+                "wgsl::WgslProvider::lower: an OpRequest for {:?} must end with the Role::Out \
+                 operand -- Gpu::step_sliced binds the output buffer last",
+                req.op
+            ));
+        }
         let bufs: Vec<&backend_api::DeviceBuffer> = req.operands.iter().map(|o| o.buf).collect();
         let offsets: Vec<(u64, u64)> = req.operands.iter().map(|o| o.range).collect();
-
-        if req.operands.last().map(|o| o.role) != Some(Role::Out) {
-            return Err(
-                "wgsl::WgslProvider::lower_matmul: OpRequest::operands must end with the Role::Out \
-                 operand -- Gpu::step_sliced binds the output buffer last"
-                    .to_string(),
-            );
-        }
-
         ctx.steps.push(ctx.gpu.step_sliced(kind, &bufs, &offsets, req.attrs, threads));
         Ok(Lowered::new(1, vec![name]))
+    }
+
+    fn lower_matmul(&self, ctx: &mut LowerCtx, req: &OpRequest) -> Result<Lowered, String> {
+        let variant = self.selector.select(req.op, req.shape, ctx.caps);
+        let threads = Self::threads(variant, req.shape.dtype, req.shape.m, req.shape.n);
+        self.lower_one(ctx, req, threads, variant)
+    }
+
+    /// `Op::Embed`/`Op::MoeExpertLinear`/`Op::MatMulDx`/`Op::MatMulDw`.
+    ///
+    /// The selector is still consulted, even though every one of these has a
+    /// single candidate today: the caller's `bind` closure maps whatever
+    /// comes back to a kernel name, so a cooperative sibling landing for any
+    /// of them is a `candidates` arm plus a `bind` arm, with nothing to
+    /// change here. Skipping the selector would instead hard-wire
+    /// `Reference` at this layer, which is the thing this layer exists not to
+    /// do.
+    fn lower_fixed(&self, ctx: &mut LowerCtx, req: &OpRequest) -> Result<Lowered, String> {
+        let variant = self.selector.select(req.op, req.shape, ctx.caps);
+        let threads = Self::fixed_threads(req.op, req.shape);
+        self.lower_one(ctx, req, threads, variant)
     }
 }
 
@@ -141,9 +190,13 @@ impl OperatorProvider for WgslProvider {
     fn lower(&self, ctx: &mut LowerCtx, req: &OpRequest) -> Result<Lowered, String> {
         match req.op {
             select::Op::MatMul => self.lower_matmul(ctx, req),
+            select::Op::Embed
+            | select::Op::MoeExpertLinear
+            | select::Op::MatMulDx
+            | select::Op::MatMulDw => self.lower_fixed(ctx, req),
             other => Err(format!(
-                "wgsl::WgslProvider::lower: {other:?} is not yet migrated onto the OperatorProvider \
-                 seam (M8.3 wired Op::MatMul only -- see the `provider` module's top-level doc comment)"
+                "wgsl::WgslProvider::lower: {other:?} is not migrated onto the OperatorProvider \
+                 seam -- see the `provider` module's top-level doc comment for which operators are"
             )),
         }
     }

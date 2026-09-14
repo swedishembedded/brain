@@ -513,6 +513,67 @@ checked on hardware that admits it, and none of the three has one.
 Largest allocation in the whole file is 1 MiB; the timed region is a few
 milliseconds of device time.
 
+### Four more operators onto the `OperatorProvider` seam
+
+`Ops::embed`, `Ops::moe_linear`, `Ops::matmul_dx` and `Ops::matmul_dw` now
+dispatch through `providers.dispatch` instead of calling `Gpu::step` by hand,
+joining `Ops::matmul`. Three new `select::Op` variants carry them: `Embed`,
+`MatMulDx`, `MatMulDw` (`MoeExpertLinear` already existed for the selector's
+own use).
+
+**This changed no dispatch and no number**, and that is the point: each of
+the four has exactly ONE physical kernel shape per dtype in the WGSL
+catalogue - no cooperative sibling, no register-tiled sibling, nothing for a
+shape gate to switch between - so `candidates` returns `vec![Reference]` for
+all three new Ops and the bound kernel is the one each `bind_*` already
+picked. What changed is that a NON-WGSL provider can now answer them, which
+it could not before however capable it was. WGSL remains the fallback for all
+four, and `CudaProvider` declines every one of them today.
+
+Two deliberate choices worth not re-deriving:
+
+- **`MatMulDx` and `MatMulDw` are separate `Op`s, not `Op::MatMul` at
+  `Pass::Backward`.** The two backward GEMMs of one linear are different
+  computations over different operands - `dX` contracts over `n` against the
+  weight, `dW` over `m` against the activation - so a provider asked for
+  "MatMul, backward" could only tell them apart by inspecting the operand
+  bundle, which is exactly the kind of implicit contract this seam exists to
+  replace.
+- **Every operand binds the WHOLE buffer (`range == (0, 0)`).** All four were
+  on unsliced `Gpu::step` before, and a computed extent would have been a new
+  claim rather than a move: a caller may legitimately hand any of them a
+  buffer larger than the logical tensor, and a binding sized to `m * n` would
+  have started refusing those.
+
+`WgslProvider` grew `lower_fixed` alongside `lower_matmul`. The split is
+about variant CHOICE, not importance: `Op::MatMul`'s thread count depends on
+which variant the selector returned, the other four's is a function of the
+output's extent alone. Both still ask the selector, so a cooperative sibling
+landing for any of them is a `candidates` arm plus a `bind` arm and nothing
+in the provider.
+
+### Parity fixtures - what is covered and what deliberately is not
+
+`provider::parity::cases_for` gained `Op::MatMulDx` and `Op::MatMulDw` (two
+shapes each: one that divides the work-group size evenly and one that divides
+nothing, since an off-by-one in the thread count only shows in the tail), and
+the per-case comparison moved into one `compare` so every builder holds its
+provider to the same bar. A host-oracle test sits alongside the self-parity
+one: two providers can agree on a tail neither of them wrote, and only an
+oracle sees that.
+
+`Op::Embed` and `Op::MoeExpertLinear` have NO fixture, on purpose. A fixture
+for either would be a second implementation of its semantics rather than a
+shape - `Embed` needs a u32 index buffer bounded by a vocabulary the fixture
+would also have to invent, and `MoeExpertLinear`'s output depends on the
+VALUES of a routing gate, so a randomly seeded one would assert parity over
+whatever subset happened to route. Both already have a host-oracle test
+against the `Ops` façade in `crates/model` covering exactly the tiers they
+ship, and `Ops::matmul_dx`/`matmul_dw` are additionally exercised by
+`brain-gradcheck`'s finite-difference suite, which is on the parity gate.
+When a non-WGSL provider claims either, the fixture it needs should be
+written then, against that provider's actual operand bundle.
+
 ## Not delivered - what is still missing
 
 **One model's forward, one tuned kernel. Backward, breadth and every other
@@ -677,8 +738,10 @@ tuned kernel are deferred.**
   that scans source text reads the header prose as code), #119 (a hand-written
   kernel can be much faster without reassociating anything) and #120
   (`threads` means invocations to a catalogue kernel and blocks to a native
-  one) came out of this work and are the things most likely to be re-learned
-  the hard way.
+  one), #121 (two providers agreeing on a tail neither of them wrote is not
+  parity) and #122 (moving a call site onto a dispatch seam must not narrow
+  its bindings) came out of this work and are the things most likely to be
+  re-learned the hard way.
 - Adding a tuned kernel is: the `.cu` file, its `kernels-cuda` registry entry,
   `make cuda-table`, and - once `PolicyEntry` has a dtype axis - the `POLICY`
   entry plus the contract count in the ratchet test. Doing the policy entry

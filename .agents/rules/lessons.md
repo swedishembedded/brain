@@ -4419,3 +4419,35 @@ bounds itself, so the result is not a crash or a fault: it is an output whose
 tail is simply never written. Any backend implementing both paths has to
 branch on which kind of kernel a recorded step names, and the branch belongs
 at the single point the grid is computed rather than at each caller.
+
+## 121. Two providers agreeing on a tail neither of them wrote is not parity
+
+A cross-provider parity harness compares two implementations' output buffers
+over seeded inputs. It cannot see an output element that NEITHER side wrote:
+both buffers start zeroed, so an under-dispatched thread count leaves the
+same zeros on both sides and the comparison passes. That failure mode is
+precisely the one a dispatch-count formula has - it is silent corruption, not
+a crash, because every kernel in this catalogue bounds itself.
+
+So a self-parity fixture proves the harness's plumbing and nothing about the
+formula. The operators added to such a harness need at least one case held
+against a HOST oracle, at a shape whose extent is not a multiple of the
+work-group size, so that a tail exists for an under-count to leave behind.
+Same reasoning as the existing rule that an over-dispatched grid is invisible
+where every kernel self-masks: the discriminating case is always the one that
+under-covers.
+
+## 122. Moving a call site onto a dispatch seam must not narrow its bindings
+
+Four façade methods moved from `Gpu::step` (which binds every buffer whole)
+onto a seam whose operands carry an explicit `(offset, len)` range. Writing
+the logical extent - `m * n` words for an output - reads like an improvement
+and is a behaviour change: callers legitimately hand these methods buffers
+larger than the tensor (a scratch arena, a slab shared with the next stage),
+and a binding sized to the tensor starts refusing those. The range convention
+already has a spelling for "whole buffer", and a pure move uses it.
+
+The general shape: when a migration introduces a field the old call site did
+not have, the faithful value is the one that reproduces the old behaviour,
+not the most informative one available. Tightening it is a separate change
+with its own reason and its own test.

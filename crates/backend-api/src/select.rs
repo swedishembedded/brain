@@ -198,6 +198,47 @@ pub enum Op {
     /// `m` = output positions (`Ho·Wo`), `n` = `Cout`, `k` = the contraction
     /// (`Cin·K·K`).
     Conv2dBackward,
+    /// Embedding-table gather (`embed.wgsl`'s dtype family: `embed_bf16`,
+    /// `embed_f16`) - `x[t, c] = table[token[t], c]`.
+    ///
+    /// The dtype/storage tier ONLY, exactly like [`Op::MoeExpertLinear`]:
+    /// there is one physical kernel shape per dtype (one thread per output
+    /// element, an ordinary gather, no reduction and no barrier anywhere),
+    /// so there is no cooperative or register-tiled sibling at any dtype and
+    /// no shape gate - see [`candidates`]. This Op exists so an embedding
+    /// gather can be answered by a provider other than the portable WGSL one,
+    /// not because there is a choice to make within WGSL.
+    ///
+    /// Shape: `m` = tokens in the sequence, `n` = `d_model`, `k` = the
+    /// table's own row count (the vocabulary). `k` is carried because it is
+    /// what makes an embedding table large enough for its storage tier to
+    /// matter, and is read by nothing today.
+    Embed,
+    /// Backward GEMM through the WEIGHT of a linear: `dX[m, k] = sum_n
+    /// dY[m, n] * W[n, k]` (`matmul_dx.wgsl`'s dtype family).
+    ///
+    /// A separate Op from [`Op::MatMul`], rather than `Op::MatMul` marked as
+    /// the backward pass, because the two backward
+    /// GEMMs of one linear are DIFFERENT computations over different
+    /// operands - `dX` contracts over `n` against the weight, `dW`
+    /// ([`Op::MatMulDw`]) contracts over `m` against the activation - and a
+    /// provider asked for "MatMul, backward" would have no way to tell them
+    /// apart but by inspecting the operand bundle. Shape: the FORWARD
+    /// linear's `(m, n, k)`, so a caller does not have to re-derive it.
+    ///
+    /// One kernel shape per dtype today (F32/BF16), no variant choice - see
+    /// [`candidates`].
+    MatMulDx,
+    /// Backward GEMM through the ACTIVATION of a linear: `dW[n, k] += sum_m
+    /// dY[m, n] * X[m, k]` (`matmul_dw.wgsl`).
+    ///
+    /// See [`Op::MatMulDx`] for why the two backward GEMMs are separate Ops.
+    /// Unlike every other Op here this one has no dtype axis in practice:
+    /// `matmul_dw` never reads the weight (both its inputs are always-f32
+    /// activations), so a weight's storage tier cannot affect it - the
+    /// accumulation is always f32 by construction. Shape: the forward
+    /// linear's `(m, n, k)`.
+    MatMulDw,
 }
 
 /// Element type an op runs over - an alias for the engine's ONE dtype enum
@@ -855,6 +896,20 @@ pub fn candidates(op: Op, shape: OpShape, caps: &DeviceCaps) -> Vec<KernelVarian
             Dtype::F32 | Dtype::BF16 | Dtype::F16 | Dtype::F8E4M3 | Dtype::F8E5M2 => vec![Reference],
             Dtype::I8 | Dtype::Q4 | Dtype::Q4K | Dtype::Q8K | Dtype::NF4 | Dtype::F4E2M1 => vec![PackedInt8],
         },
+        // An embedding gather and the two backward GEMMs each have exactly
+        // ONE physical kernel shape per dtype in this catalogue - no
+        // cooperative sibling, no register-tiled sibling, and therefore
+        // nothing for a shape gate to switch between. They are `Op`s so that
+        // a NON-WGSL provider can answer them (which is the question the
+        // `OperatorProvider` seam asks, one level above this selector), not
+        // because there is a WGSL choice here. Offering a variant that no
+        // kernel implements would make `Ops::bind_*` panic on a name that
+        // does not exist, so the list stays exactly what ships.
+        //
+        // `matmul_dw` genuinely has no dtype axis at all (it never reads a
+        // weight - see `Op::MatMulDw`), which is why its arm ignores
+        // `shape.dtype` rather than matching on it.
+        Op::Embed | Op::MatMulDx | Op::MatMulDw => vec![Reference],
         // The 1D convolutions. `conv1d`/`convtr1d` are one-thread-per-output
         // kernels with a serial `Cin*K` reduction, i.e. the classic "wrong
         // kernel, not a slow one": profiled in the MiniMax-Music-3 vocoder,
