@@ -152,6 +152,14 @@ const PAGED_FLASH_DECODE_COMBINE: usize = 40;
 // (cheaper) workgroups. Measured, not assumed - see `Engine::gemm_schedule`'s
 // own doc for the actual numbers.
 const MATMUL_REG3_64: usize = 41;
+// The INT8-KV twin of `PAGED_FLASH_PREFILL`, dispatched by causal-chunk
+// prefill when `kv_int8` - the SERVING DEFAULT, so this is the arm most
+// served requests actually take. Same selector (`Op::PagedAttentionFused` via
+// `model::block::paged_attention_fused`, asked at `Dtype::I8`), same one-
+// dispatch-per-(head, query-tile) shape, and the same consequence for
+// `Scratch::{scores,probs}`: with it reachable, `paged_attn_scratch_bytes`
+// sheds the `max_prefill^2 * n_heads` causal-chunk term at int8 KV too.
+const PAGED_FLASH_PREFILL_I8: usize = 42;
 
 const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -196,6 +204,7 @@ const PIPELINES: &[(&str, &str)] = &[
     ("paged_flash_decode_split", kernels::PAGED_FLASH_DECODE_SPLIT),
     ("paged_flash_decode_combine", kernels::PAGED_FLASH_DECODE_COMBINE),
     ("matmul_reg3_64", kernels::MATMUL_REG3_64),
+    ("paged_flash_prefill_i8", kernels::PAGED_FLASH_PREFILL_I8),
 ];
 
 /// The `model::ops::Ops` façade's required kernel set (B7), registered on a
@@ -452,14 +461,22 @@ pub fn kv_pool_bytes(cfg: &QwenConfig, block_size: u32, num_blocks: u32, kv_int8
 /// prefill's own worst case (`max_prefill^2 * n_heads`,
 /// the `[nh,N,N]` shape this function's own call site originally derived it
 /// from) is only shed when `fused_prefill_available` - the SAME condition
-/// `run_batched_steps`'s own dispatch gates on
-/// (`Op::PagedAttentionFused`'s selector, i.e. F32 KV storage AND
-/// `caps.workgroup_reductions`), computed by the ONE call site that has both
-/// `kv_int8` and `caps` (`Engine::from_map_with_gpu`), not re-derived here:
-/// a device without `workgroup_reductions` (the CPU JIT) falls back to the
-/// triad for causal-chunk prefill exactly as it always did, so shrinking this
-/// buffer there would be an out-of-bounds write waiting to happen, not a
-/// memory saving.
+/// `run_batched_steps`'s own dispatch gates on, through the SAME
+/// [`fused_paged_attention`] call (`Op::PagedAttentionFused`'s selector plus
+/// this engine's registered head_dim tier), computed by the ONE call site
+/// that has both `kv_int8` and the device (`Engine::from_map_with_gpu`) and
+/// never re-derived here: a device without `workgroup_reductions` (the CPU
+/// JIT) falls back to the triad for causal-chunk prefill exactly as it always
+/// did, so shrinking this buffer there would be an out-of-bounds write
+/// waiting to happen, not a memory saving.
+///
+/// BOTH KV storage tiers now shed the causal-chunk term - the fused prefill
+/// kernel has an int8 twin (`paged_flash_prefill_i8`), so `kv_int8`, which is
+/// this engine's serving DEFAULT, is no longer the arm that pays the full
+/// unshrunk size. The term this drops is `max_prefill^2 * n_heads` OR
+/// `max_prefill * n_heads * cap`, whichever the `max()` above selected;
+/// at a real long-context sizing the second dominates and the shrink is by
+/// the factor `max(max_batch, max_prefill) / max_batch`.
 pub fn paged_attn_scratch_bytes(cfg: &QwenConfig, max_batch: u32, max_prefill: u32, cap: u32, fused_prefill_available: bool) -> u64 {
     let nh = cfg.n_heads as u64;
     let words = if fused_prefill_available {
@@ -469,6 +486,31 @@ pub fn paged_attn_scratch_bytes(cfg: &QwenConfig, max_batch: u32, max_prefill: u
         (b * nh * cap as u64).max(max_prefill as u64 * max_prefill as u64 * nh)
     };
     words * 2 * 4 // scores + probs, 4 bytes/word
+}
+
+/// The largest `head_dim` this engine has a fused paged-attention kernel
+/// registered for. The fused family is one WGSL file per head_dim TIER, and
+/// [`PIPELINES`] carries only the `HD = 128` tier - `paged_flash_prefill`,
+/// `paged_flash_prefill_i8`, and the `paged_flash_decode_split`/`_combine`
+/// pair, all of which size their shared K/V tile for "up to 128".
+const FUSED_MAX_HEAD_DIM: u32 = 128;
+
+/// [`model::block::paged_attention_fused`] narrowed to the head_dim tier THIS
+/// engine registers a kernel for.
+///
+/// The selector answers `FusedFlash` for causal-chunk prefill at
+/// `head_dim == 256` as well (`paged_flash_prefill_hd256`, a SEPARATE WGSL
+/// file that streams two 128-wide fragments), and mapping that answer to a
+/// literal kernel constant is the CALLER's job, per that Op's own doc. This
+/// engine registers no such kernel, so it must not claim a `true` it would
+/// then serve with a tile too narrow for the head.
+///
+/// One function for both consumers - `Engine::batched_tape`'s dispatch and
+/// `Scratch::{scores,probs}`'s sizing in `Engine::from_map_with_gpu` - so the
+/// shrink can never outrun the kernel that justifies it (the F.7b defect
+/// class this milestone's own predecessor already caught once here).
+fn fused_paged_attention(g: &Gpu, causal_chunk: bool, kv_int8: bool, head_dim: u32, bsz: u32) -> bool {
+    head_dim <= FUSED_MAX_HEAD_DIM && model::block::paged_attention_fused(g, causal_chunk, kv_int8, head_dim, bsz)
 }
 
 /// M2.7: `(n_splits, tiles_per_split)` for `paged_flash_decode_split`'s key
@@ -807,17 +849,19 @@ impl Engine {
         // [nh,N,N] too unless the fused kernel actually replaces the triad
         // there - see `paged_attn_scratch_bytes`'s own doc for the M2.4
         // shrink. `fused_prefill_available` asks `Op::PagedAttentionFused`'s
-        // OWN selector (the exact same call `run_batched_steps`'s dispatch
-        // makes, m/n irrelevant to that Op - see its own `candidates()` arm)
-        // rather than hand-duplicating its dtype/capability rule here, so
-        // the two can never drift apart: a device without `caps.
-        // workgroup_reductions` (the CPU JIT) or an int8-KV engine both
-        // correctly keep the full, unshrunk size.
-        let fused_prefill_available = DefaultSelector.select(
-            Op::PagedAttentionFused,
-            OpShape { m: 0, n: 0, k: 1, dtype: if kv_int8 { Dtype::I8 } else { Dtype::F32 } },
-            &caps,
-        ) == KernelVariant::FusedFlash;
+        // OWN selector rather than hand-duplicating its dtype/capability rule
+        // here, so the two can never drift apart: a device without
+        // `caps.workgroup_reductions` (the CPU JIT) correctly keeps the full,
+        // unshrunk size.
+        //
+        // Asked through the SAME [`fused_paged_attention`] the dispatch
+        // itself calls, at the real `head_dim` - never a placeholder shape.
+        // `head_dim` genuinely gates that Op (the fused kernels are one file
+        // per head_dim tier), so a `0` here would promise a shrink at a
+        // config the dispatch would then have to serve with the triad; `bsz`
+        // is the only field prefill's arm never reads (decode's is the
+        // batch-dependent one), so it alone is a placeholder.
+        let fused_prefill_available = fused_paged_attention(&gpu, true, kv_int8, cfg.head_dim, 0);
         // `/2/4` undoes `paged_attn_scratch_bytes`'s own "scores+probs, 4
         // bytes/word" to recover the per-buffer WORD count `st` (below) wants.
         let scratch_bytes_val = paged_attn_scratch_bytes(&cfg, max_batch, max_prefill, cap, fused_prefill_available);
@@ -1916,15 +1960,31 @@ impl Engine {
                 // as bit-identical to the old unclipped twin.
                 s.push(g.step(APPEND_I8_CLIPPED, &[&sc.k, &sc.blk_buf, &sc.off_buf, &self.clip_k[l], &self.pool_k[l], &self.scales_k[l]], &[b, hkv, bs, hd], b * nkv));
                 s.push(g.step(APPEND_I8_CLIPPED, &[&sc.v, &sc.blk_buf, &sc.off_buf, &self.clip_v[l], &self.pool_v[l], &self.scales_v[l]], &[b, hkv, bs, hd], b * nkv));
-                // No `Op::PagedAttentionFused` check here: `paged_flash_
-                // prefill` has no int8-KV tier yet (its own `@dtype f32`
-                // header), and decode's fused kernels never measured a win at
-                // any dtype (M2.1/M2.2) - every candidate this Op could
-                // return at `Dtype::I8` is `Reference` (see its own doc), so
-                // asking would be a dead call.
-                s.push(g.step(SCORES_I8, &[&sc.q, &self.pool_k[l], &sc.bt_buf, &sc.seqlen_buf, &self.scales_k[l], &sc.scores], &[b, nh, group, hd, bs, hkv, cap, mbt, fb(scale)], b * nh * cap));
-                s.push(g.step(SOFTMAX_B, &[&sc.scores, &sc.seqlen_buf, &sc.probs], &[b, nh, cap], b * nh));
-                s.push(g.step(APPLY_I8, &[&sc.probs, &self.pool_v[l], &sc.bt_buf, &sc.seqlen_buf, &self.scales_v[l], &sc.ctx], &[b, nh, group, hd, bs, hkv, cap, mbt], b * nh * hd));
+                // The SAME `Op::PagedAttentionFused` question the fp32 branch
+                // below asks, only at `Dtype::I8` - `paged_flash_prefill_i8`
+                // gives causal-chunk prefill an int8-KV tier, so this arm is
+                // no longer a dead call. Decode still has no int8 candidate
+                // (that Op's own doc has the measured reason), so the `fused`
+                // answer here is `true` only for a causal chunk; asking once
+                // and branching mirrors the fp32 arm exactly.
+                let fused = fused_paged_attention(g, causal_chunk, true, hd, b);
+                if fused && causal_chunk {
+                    // One dispatch per (head, query-tile), no `scores`/`probs`
+                    // at all - BR=64 is the kernel's own tile size,
+                    // @workgroup_size(256) its own launch shape (both pinned
+                    // in its own WGSL header), identical to the fp32 twin.
+                    let ntiles_q = b.div_ceil(64);
+                    s.push(g.step(
+                        PAGED_FLASH_PREFILL_I8,
+                        &[&sc.q, &self.pool_k[l], &self.pool_v[l], &self.scales_k[l], &self.scales_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.ctx],
+                        &[b, nh, nkv, hd, group, bs, mbt],
+                        nh * ntiles_q * 256,
+                    ));
+                } else {
+                    s.push(g.step(SCORES_I8, &[&sc.q, &self.pool_k[l], &sc.bt_buf, &sc.seqlen_buf, &self.scales_k[l], &sc.scores], &[b, nh, group, hd, bs, hkv, cap, mbt, fb(scale)], b * nh * cap));
+                    s.push(g.step(SOFTMAX_B, &[&sc.scores, &sc.seqlen_buf, &sc.probs], &[b, nh, cap], b * nh));
+                    s.push(g.step(APPLY_I8, &[&sc.probs, &self.pool_v[l], &sc.bt_buf, &sc.seqlen_buf, &self.scales_v[l], &sc.ctx], &[b, nh, group, hd, bs, hkv, cap, mbt], b * nh * hd));
+                }
             } else {
                 // K's norm+RoPE+append collapse into ONE dispatch here (the
                 // fp32-KV branch has no quantization reduction blocking the
@@ -1949,7 +2009,7 @@ impl Engine {
                 // than asking twice, since the selector is pure per
                 // `(Op, OpShape)` but a call still costs a `DeviceCaps`
                 // filter.
-                let fused = model::block::paged_attention_fused(g, causal_chunk, false, hd, b);
+                let fused = fused_paged_attention(g, causal_chunk, false, hd, b);
                 if fused && causal_chunk {
                     // `paged_flash_prefill` (M2.3): one dispatch per (head,
                     // query-tile), no `scores`/`probs` at all - BR=64 is the
@@ -3259,10 +3319,12 @@ mod tests {
     /// is the REDUCTION shape, which round numbers make easy to verify by
     /// hand): `max_batch=128, max_prefill=512, n_heads=16, cap=2048`.
     ///
-    /// An int8-KV engine gets NO reduction - documented, not assumed:
-    /// `paged_flash_prefill` has no int8-KV tier yet, so a `kv_int8` engine
-    /// still runs causal-chunk prefill through the triad and needs the SAME
-    /// scratch this milestone shrinks for fp32.
+    /// The `false` arm is no longer "int8 KV": `paged_flash_prefill_i8` gives
+    /// the int8 tier the same fused path and the same reduction, so what is
+    /// left there is a device that cannot run a barrier-shaped kernel at all
+    /// (the CPU JIT, pinned directly by `paged_attn_scratch_shrinks_only_
+    /// when_fused_prefill_is_actually_reachable` below) or a `head_dim`
+    /// outside the tier this engine registers ([`FUSED_MAX_HEAD_DIM`]).
     #[test]
     fn paged_attn_scratch_shrinks_once_the_fused_prefill_path_replaces_the_triad() {
         let mut cfg = QwenConfig::tiny();
@@ -3285,34 +3347,73 @@ mod tests {
         assert_eq!(old_bytes / new_fp32, 4, "exactly 4x at this shape (matches max_prefill^2/(max_batch*cap))");
 
         let new_unavailable = paged_attn_scratch_bytes(&cfg, max_batch, max_prefill, cap, false);
-        assert_eq!(new_unavailable, old_bytes, "fused prefill unavailable (int8 KV, or no workgroup_reductions): no reduction");
+        assert_eq!(new_unavailable, old_bytes, "fused prefill unavailable (no workgroup_reductions, or an unregistered head_dim tier): no reduction");
+    }
+
+    /// The same reduction priced at the REAL operator shape rather than at
+    /// round numbers - Qwen3-8B, `ctx = 24576`, and the serving DEFAULTS
+    /// `cli::resident_llm::QwenServeConfig::default` ships (`max_batch = 16`,
+    /// `max_prefill_cap = 512`, `kv_int8 = true`), with `block_size = 16` and
+    /// `cap = ctx` from `QwenResident::pool_sizing`. This is the configuration
+    /// whose scratch was 3.00 GiB of an 18.41 GiB device total, and it was the
+    /// `kv_int8` DEFAULT that paid it, because the fused prefill path had no
+    /// int8 tier.
+    ///
+    /// Both arms are pinned exactly, not as a ratio: the shrunk size is
+    /// `max_batch` where the unshrunk one is `max_prefill`, so the factor is
+    /// `max_prefill / max_batch` and grows with neither `cap` nor `n_heads` -
+    /// while the ABSOLUTE saving scales linearly with `cap`, which is what
+    /// makes this the largest per-token-scaling term in the engine.
+    #[test]
+    fn paged_attn_scratch_at_the_real_8b_serving_default_shape() {
+        let cfg = QwenConfig::qwen3_8b();
+        assert_eq!(cfg.n_heads, 32, "sanity: the real 8B head count this arithmetic is pinned at");
+        let (max_batch, max_prefill, cap) = (16u32, 512u32, 24576u32);
+
+        let triad = paged_attn_scratch_bytes(&cfg, max_batch, max_prefill, cap, false);
+        assert_eq!(triad, 3_221_225_472, "the unshrunk size: max_prefill * n_heads * cap words, scores+probs");
+        assert_eq!(triad, 3 << 30, "= exactly 3.00 GiB");
+
+        let fused = paged_attn_scratch_bytes(&cfg, max_batch, max_prefill, cap, true);
+        assert_eq!(fused, 100_663_296, "the shrunk size: max_batch * n_heads * cap words, scores+probs");
+        assert_eq!(triad / fused, 32, "= max_prefill / max_batch exactly");
+        assert_eq!(triad - fused, 3_120_562_176, "2.906 GiB of device memory the fused prefill path sheds");
     }
 
     /// [`paged_attn_scratch_bytes`] (pure arithmetic) must match what
     /// [`Engine::paged_attn_scratch_bytes`] recorded at construction, the same
     /// identity `kv_pool_bytes_identity_holds_at_the_real_shape` pins for the
     /// KV pool. `fused_prefill_available` is derived through the SAME
-    /// `Op::PagedAttentionFused` selector call `Engine::from_map_with_gpu`
-    /// itself makes, not assumed from `kv_int8` alone - on a device without
-    /// `caps.workgroup_reductions` this would need to stay `false` even at
-    /// fp32 KV, which `paged_attn_scratch_shrinks_only_when_fused_prefill_is_
-    /// actually_reachable` below pins directly.
+    /// [`fused_paged_attention`] call `Engine::from_map_with_gpu` itself
+    /// makes, at the real `head_dim`, not assumed from `kv_int8` alone - on a
+    /// device without `caps.workgroup_reductions` this would need to stay
+    /// `false` even at fp32 KV, which
+    /// `paged_attn_scratch_shrinks_only_when_fused_prefill_is_actually_
+    /// reachable` below pins directly.
+    ///
+    /// The two KV dtypes must land on the SAME number on any device that can
+    /// run the fused kernels at all: `paged_flash_prefill_i8` gives int8 KV
+    /// the identical fused path, so the sizing no longer differs by storage
+    /// tier. Asserted here rather than assumed, since this is precisely the
+    /// arm that was asymmetric before the int8 kernel existed.
     #[test]
     fn engine_paged_attn_scratch_bytes_matches_the_free_function() {
         let cfg = QwenConfig::tiny();
         let map = tiny_weights(&cfg);
+        let mut recorded = Vec::new();
         for kv_int8 in [false, true] {
             let (bs, num_blocks, max_batch, mbt, max_prefill) = (4u32, 64u32, 4u32, 8u32, 16u32);
             let eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, bs, num_blocks, max_batch, mbt, max_prefill, kv_int8, false);
             let cap = mbt * bs;
-            let dtype = if kv_int8 { Dtype::I8 } else { Dtype::F32 };
-            let fused_prefill_available = DefaultSelector.select(Op::PagedAttentionFused, OpShape { m: 0, n: 0, k: 1, dtype }, &eng.gpu().caps()) == KernelVariant::FusedFlash;
+            let fused_prefill_available = fused_paged_attention(eng.gpu(), true, kv_int8, cfg.head_dim, 0);
             assert_eq!(
                 eng.paged_attn_scratch_bytes(),
                 paged_attn_scratch_bytes(&cfg, max_batch, max_prefill, cap, fused_prefill_available),
                 "kv_int8={kv_int8}"
             );
+            recorded.push(eng.paged_attn_scratch_bytes());
         }
+        assert_eq!(recorded[0], recorded[1], "fp32-KV and int8-KV engines now size this buffer identically");
     }
 
     /// The capability gate itself (M2.4's own correctness fix, caught before
@@ -5375,8 +5476,17 @@ mod tests {
         assert_eq!(triad, 0, "the triad must not run when the split-key fused kernel does");
     }
 
+    /// The int8-KV twin of `causal_chunk_fp32_kv_dispatches_the_fused_kernel_
+    /// not_the_triad`: `kv_int8` is this engine's serving DEFAULT, so this is
+    /// the arm most served prefills take. One `paged_flash_prefill_i8`
+    /// dispatch per layer and none of the int8 triad's three - the fp32
+    /// kernel must not appear either, since it would read the packed pool as
+    /// plain f32. The kernel-level numerical agreement is gated separately
+    /// (`model::paged::flash_tests::paged_flash_prefill_int8_matches_the_int8_
+    /// triad_and_the_fp32_fused_kernel`); this test's whole job is proving
+    /// `batched_tape` actually PICKS it.
     #[test]
-    fn causal_chunk_int8_kv_still_uses_the_triad() {
+    fn causal_chunk_int8_kv_dispatches_the_fused_kernel_not_the_triad() {
         let cfg = QwenConfig::tiny();
         let map = tiny_weights(&cfg);
         let eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 64, 4, 8, 32, true, false);
@@ -5385,8 +5495,35 @@ mod tests {
         let tokens: Vec<u32> = (0..cc).map(|i| i % cfg.vocab).collect();
         let (steps, _) = eng.run_batched_steps(cc, Input::Tokens(&tokens), &positions, &seqlens, &blocks, &offsets, &bt, true);
         let kinds: Vec<usize> = steps.iter().filter_map(|s| s.meta().map(|m| m.kernel)).collect();
-        assert_eq!(kinds.iter().filter(|&&k| k == PAGED_FLASH_PREFILL).count(), 0, "paged_flash_prefill has no int8-KV tier yet");
-        assert!(kinds.contains(&SCORES_I8), "causal-chunk int8 KV must still run the int8 triad");
+        let fused = kinds.iter().filter(|&&k| k == PAGED_FLASH_PREFILL_I8).count();
+        assert_eq!(fused, cfg.n_layers as usize, "one fused int8 dispatch per layer, causal-chunk int8 KV");
+        assert_eq!(kinds.iter().filter(|&&k| k == PAGED_FLASH_PREFILL).count(), 0, "the fp32 kernel would read the packed pool as f32");
+        let triad = kinds.iter().filter(|&&k| k == SCORES_I8 || k == SOFTMAX_B || k == APPLY_I8).count();
+        assert_eq!(triad, 0, "the int8 triad must not run when the fused int8 kernel does");
+    }
+
+    /// Decode under int8 KV keeps the triad at EVERY batch size, `bsz == 1`
+    /// included: `Op::PagedAttentionFused`'s decode arm has no int8
+    /// candidate at all (M2.1/M2.2's measured non-win, never re-opened for
+    /// this storage tier), so the int8 prefill kernel this milestone added
+    /// must not leak into the decode regime through a shared `fused`
+    /// boolean. The fp32 twin of this pin is `decode_bsz_one_dispatches_the_
+    /// split_key_fused_kernel_not_the_triad` above, which expects the
+    /// opposite answer at the same batch size - which is the point.
+    #[test]
+    fn decode_int8_kv_never_dispatches_a_fused_kernel_at_any_batch_size() {
+        let cfg = QwenConfig::tiny();
+        let map = tiny_weights(&cfg);
+        let eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 64, 4, 8, 32, true, false);
+        for cc in [1u32, 3] {
+            let (positions, seqlens, blocks, offsets, bt) = causal_chunk_metadata(cc);
+            let tokens: Vec<u32> = (0..cc).map(|i| i % cfg.vocab).collect();
+            let (steps, _) = eng.run_batched_steps(cc, Input::Tokens(&tokens), &positions, &seqlens, &blocks, &offsets, &bt, false);
+            let kinds: Vec<usize> = steps.iter().filter_map(|s| s.meta().map(|m| m.kernel)).collect();
+            let fused = kinds.iter().filter(|&&k| k == PAGED_FLASH_PREFILL_I8 || k == PAGED_FLASH_PREFILL || k == PAGED_FLASH_DECODE_SPLIT || k == PAGED_FLASH_DECODE_COMBINE).count();
+            assert_eq!(fused, 0, "bsz={cc}: int8-KV decode has no fused candidate");
+            assert!(kinds.contains(&SCORES_I8), "bsz={cc}: int8-KV decode must still run the int8 triad");
+        }
     }
 
     /// A config whose `tok.weight` is deliberately sized past `wgpu`'s
