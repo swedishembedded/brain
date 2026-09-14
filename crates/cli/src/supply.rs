@@ -879,7 +879,14 @@ impl StoreSupplier {
         // resolved reference is what `Store::local` finds the fetched bytes
         // under. Identical to `r` for every recipe that makes no choice.
         let local = self.store.local(&plan.reference).ok_or_else(|| format!("{model}: fetched but not found on disk (unexpected)"))?;
-        let resident = crate::model_dir::resident_for_local(&local).map_err(|e| format!("{model}: {e}"))?;
+        // `QwenServeConfig::default()`, not the live server's real `--qwen-*`
+        // flags/VRAM budget: this supplier is built before `brain serve`'s own
+        // device probe runs (`run_cli::build_auto_fetch_supplier` predates
+        // `build_serving_executor`), so a model first served via on-demand
+        // auto-fetch gets the historical 24576 default rather than
+        // auto-sized context, unlike one already on disk at startup
+        // (`model_dir::discover`, which DOES receive the real config).
+        let resident = crate::model_dir::resident_for_local(&local, crate::resident_llm::QwenServeConfig::default()).map_err(|e| format!("{model}: {e}"))?;
         exec.register_if_absent(resident);
         Ok(())
     }

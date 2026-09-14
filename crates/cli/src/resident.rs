@@ -287,7 +287,7 @@ pub fn build_executor(gpus: &[(u32, u64)], npus: &[(u32, u64)], unified_gpus: &[
     // on its own when no dir is configured or the scan finds nothing.
     if let Some(dir) = models_dir {
         let existing: std::collections::BTreeSet<String> = models.iter().map(|m| m.manifest().model).collect();
-        let (discovered, errors) = crate::model_dir::discover(dir);
+        let (discovered, errors) = crate::model_dir::discover(dir, qwen_cfg);
         for r in discovered {
             let id = r.manifest().model;
             if existing.contains(&id) {
