@@ -184,7 +184,12 @@ fn banner(gpu: &Gpu) -> Option<Roofs> {
 /// good the kernels are. Stating it first is what makes the profile
 /// interpretable: a kernel-level fix that cannot move this number is not a
 /// throughput fix.
-fn weight_budget(cfg: &QwenConfig, roofs: Option<Roofs>) {
+/// Total weight element count at `cfg`'s shape - the ONE place this
+/// accounting lives, shared by [`weight_budget`]'s own report and the
+/// `serve` mode's pool-size guard message (which used to hardcode "2.4 GB
+/// weights", a literal left over from before `--model` existed - correct
+/// only at the 0.6B default, silently wrong at every other `--model`).
+fn total_params(cfg: &QwenConfig) -> u64 {
     let (d, ff, l) = (cfg.d_model as u64, cfg.d_ff as u64, cfg.n_layers as u64);
     let (hq, hkv) = (cfg.q_dim() as u64, cfg.kv_dim() as u64);
     let attn = d * hq + 2 * (d * hkv) + hq * d;
@@ -193,7 +198,17 @@ fn weight_budget(cfg: &QwenConfig, roofs: Option<Roofs>) {
     let embed = cfg.vocab as u64 * d;
     // Tied embeddings mean the head IS the embedding table — counted once as
     // resident bytes, but read twice per step (gather + head GEMV).
-    let total = l * per_layer + embed * if cfg.tie_embeddings { 1 } else { 2 };
+    l * per_layer + embed * if cfg.tie_embeddings { 1 } else { 2 }
+}
+
+fn weight_budget(cfg: &QwenConfig, roofs: Option<Roofs>) {
+    let (d, ff, l) = (cfg.d_model as u64, cfg.d_ff as u64, cfg.n_layers as u64);
+    let (hq, hkv) = (cfg.q_dim() as u64, cfg.kv_dim() as u64);
+    let attn = d * hq + 2 * (d * hkv) + hq * d;
+    let mlp = 2 * (d * ff) + ff * d;
+    let per_layer = attn + mlp;
+    let embed = cfg.vocab as u64 * d;
+    let total = total_params(cfg);
 
     println!(
         "\n{} params = {:.2} GB fp32 / {:.2} GB int8   (layers {:.1} M x {l}, embed/head {:.1} M{})",
@@ -356,19 +371,33 @@ fn main() {
             // than a wgpu "Out of Memory" panic ten seconds later.
             let seq: u32 = a.get(4).and_then(|s| s.parse().ok()).unwrap_or(256);
             let mbs = seq.div_ceil(bs);
-            let blk_bytes =
-                2 * cfg.n_layers as u64 * bs as u64 * cfg.kv_dim() as u64 * 4;
-            let pool_gb = (rows as u64 * mbs as u64) as f64 * blk_bytes as f64 / 1e9;
+            // `qwen3::serve::kv_pool_bytes` - the ONE place this layout
+            // lives - not a re-derived fp32-only estimate: that stale
+            // estimate used to ignore `kv8` entirely, printing (and
+            // guarding against) a pool ~4x the real int8 one at Qwen3's
+            // `head_dim=128` (see that function's own doc for the exact
+            // ratio), refusing perfectly real int8 shapes early.
+            let num_blocks = rows * mbs;
+            let pool_bytes = qwen3::serve::kv_pool_bytes(&cfg, bs, num_blocks, kv8);
+            let pool_gb = pool_bytes as f64 / 1e9;
+            let weight_gb = total_params(&cfg) as f64 * if i8w { 1.0 } else { 4.0 } / 1e9;
             eprintln!(
-                "paged pool: {} blocks x {:.1} MB = {:.1} GB (+2.4 GB weights)",
-                rows * mbs,
-                blk_bytes as f64 / 1e6,
-                pool_gb
+                "paged pool: {num_blocks} blocks x {:.1} MB = {:.1} GB (+{:.1} GB weights)",
+                pool_bytes as f64 / num_blocks as f64 / 1e6,
+                pool_gb,
+                weight_gb,
             );
-            if pool_gb > 18.0 {
+            // Guard against pool + weights together, not the pool alone -
+            // the old check only compared `pool_gb` to a threshold sized for
+            // the 0.6B default's ~2.4 GB of weights, so an over-large 8B/4B
+            // request could pass a pool-only check and still not fit once
+            // its (much larger) weights are added. 22.0 GB leaves ~2 GB
+            // headroom on a 24 GB card, matching `--reserve-gb`'s own default.
+            if pool_gb + weight_gb > 22.0 {
                 eprintln!(
-                    "refusing: that pool will not fit. Lower `rows` or the 4th arg (context, \
-                     default 256): qwen_bench serve <rows> <reps> <ctx>"
+                    "refusing: that pool ({pool_gb:.1} GB) + weights ({weight_gb:.1} GB) will not \
+                     fit. Lower `rows` or the 4th arg (context, default 256): qwen_bench serve \
+                     <rows> <reps> <ctx>"
                 );
                 return;
             }
