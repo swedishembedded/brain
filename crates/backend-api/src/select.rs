@@ -155,14 +155,22 @@ pub enum Op {
     /// ledger entry, reproduced via `qwen_bench flash-decode`) - inherited
     /// unconditionally by the I8/bf16 siblings too (M2.2's own entry:
     /// correctness-gated only, occupancy never independently re-measured) -
-    /// so [`candidates`] never offers `FusedFlash` for `k = 0`; `Reference`
-    /// (the triad) is the only candidate there until a design that wins
-    /// occupancy replaces it. Causal-chunk prefill's `k = 1` arm is where
-    /// `FusedFlash` is actually reachable: `paged_flash_prefill` measured
+    /// so [`candidates`] never offers `FusedFlash` for `k = 0` at any dtype
+    /// but `F32` with `m == 1`; `Reference` (the triad) is the only candidate
+    /// there until a design that wins occupancy replaces it.
+    ///
+    /// Causal-chunk prefill's `k = 1` arm is where `FusedFlash` is actually
+    /// reachable, at BOTH KV storage tiers: `paged_flash_prefill` measured
     /// substantially FASTER than the triad across a `start`/`cc` sweep on the
-    /// same hardware (reproduce via `qwen_bench flash-prefill`), and has no
-    /// int8-KV tier yet (its own `@dtype f32` header), so `FusedFlash` is
-    /// offered only at `Dtype::F32`.
+    /// same hardware (reproduce via `qwen_bench flash-prefill`), and its int8
+    /// twin `paged_flash_prefill_i8` measured the same way against the INT8
+    /// triad (`qwen_bench flash-prefill-i8`) - a win at every `start` and
+    /// every chunk length swept, widening with both, so no crossover gates
+    /// the I8 arm either. That tier matters disproportionately because
+    /// `kv_int8` is `qwen3::serve`'s DEFAULT: before it existed, every
+    /// default serving run both ran the triad AND paid the unshrunk
+    /// `Scratch::{scores,probs}` its `max_prefill^2 * n_heads` term implies
+    /// (see `qwen3::serve::paged_attn_scratch_bytes`).
     PagedAttentionFused,
     /// Forward 3D convolution, NCTHW (`conv3d` direct vs the `im2col3d_at` +
     /// `matmul_reg3` + `nlc_bias_nchw` GEMM lowering) - the exact
@@ -424,9 +432,20 @@ impl KernelVariant {
             KernelVariant::RegisterTiled => {
                 Requirement { workgroup_reductions: true, ..dtype_storage_requirement(dt) }
             }
-            KernelVariant::FusedFlash => {
-                Requirement { workgroup_reductions: true, ..dtype_storage_requirement(dt) }
-            }
+            // The fused paged-attention kernels' INT8 tier (`paged_flash_
+            // prefill_i8`, `paged_flash_decode_i8`) reads its packed pool with
+            // a shift/mask per byte and multiplies the sign-extended value by
+            // a per-`(token slot, kv head)` f32 scale while staging a tile -
+            // there is no `dot4I8Packed` anywhere in either body, so DP4A
+            // execution (`caps.numeric.int8_dot`) is not a correctness
+            // condition here. Same distinction [`dtype_storage_requirement`]
+            // already draws for the FP8 tier: packed bytes decoded with plain
+            // integer WGSL are a STORAGE tier, not a packed-dot one. Every
+            // other dtype keeps that function's blanket storage rule.
+            KernelVariant::FusedFlash => match dt {
+                Dtype::I8 => Requirement { workgroup_reductions: true, ..Requirement::default() },
+                _ => Requirement { workgroup_reductions: true, ..dtype_storage_requirement(dt) },
+            },
         }
     }
 }
@@ -999,12 +1018,12 @@ pub fn candidates(op: Op, shape: OpShape, caps: &DeviceCaps) -> Vec<KernelVarian
             }
         }
         // See this Op's own doc for the full measured story. `k = 1`
-        // (causal-chunk prefill) at F32 KV storage is the only regime with a
-        // live, measured win - every other (k, dtype) pair has either a
-        // measured non-win (decode, `k = 0`, every dtype) or no fused kernel
-        // at all yet (prefill at a non-F32 storage tier) and stays
-        // `Reference`-only, the module's own "a call site has no kernel for
-        // falls back to Reference" rule.
+        // (causal-chunk prefill) is the only regime with a live, measured
+        // win, at BOTH the F32 and the I8 KV storage tier; decode (`k = 0`)
+        // has a measured non-win at every dtype but `F32`+`m == 1`, and
+        // every remaining (k, dtype) pair has no fused kernel at all and
+        // stays `Reference`-only, the module's own "a call site has no
+        // kernel for falls back to Reference" rule.
         //
         // `shape.n` is `head_dim`: the fused kernel is a SEPARATE WGSL file
         // per head_dim TIER, not per exact value (M2.6, corrected after
@@ -1051,8 +1070,14 @@ pub fn candidates(op: Op, shape: OpShape, caps: &DeviceCaps) -> Vec<KernelVarian
         // (`paged_flash_decode_split` shares that exact tile) - no `n=256`
         // arm exists for decode (no such kernel was built; M2.5's own
         // hd256 sibling is prefill-only).
+        // The I8 prefill arm has NO `n == 256` tier: `paged_flash_prefill_i8`
+        // is the int8 twin of the `HD=128` kernel only, and M2.5's streamed
+        // two-fragment hd256 sibling has no int8 counterpart - so a
+        // `head_dim = 256` int8 engine correctly keeps the triad rather than
+        // being handed a kernel whose tile cannot hold its head.
         Op::PagedAttentionFused => match (shape.k, shape.dtype) {
             (1, Dtype::F32) if shape.n <= 128 || shape.n == 256 => vec![FusedFlash, Reference],
+            (1, Dtype::I8) if shape.n <= 128 => vec![FusedFlash, Reference],
             (0, Dtype::F32) if shape.m == 1 && shape.n <= 128 => vec![FusedFlash, Reference],
             _ => vec![Reference],
         },
@@ -1838,12 +1863,15 @@ mod tests {
     }
 
     /// M2.4's own Op: `FusedFlash` is reachable at `k = 1` (causal-chunk
-    /// prefill), `Dtype::F32`, `n <= 128 || n == 256` -
-    /// `paged_flash_prefill`'s own measured win (`qwen_bench flash-prefill`)
-    /// and its only storage tier and `n` ceiling (`paged_flash_prefill_
-    /// hd256`'s own M2.6 sibling, prefill-only). A prefill `n` outside that
-    /// set, and every non-F32 prefill storage tier (no fused kernel exists
-    /// there yet), stays `Reference`-only. Decode (`k = 0`) inherited M2.1/
+    /// prefill) at two storage tiers - `Dtype::F32` with `n <= 128 || n ==
+    /// 256` (`paged_flash_prefill`'s own measured win plus
+    /// `paged_flash_prefill_hd256`'s M2.6 sibling) and `Dtype::I8` with
+    /// `n <= 128` (`paged_flash_prefill_i8`'s own measured win against the
+    /// INT8 triad, `qwen_bench flash-prefill-i8`; no hd256 int8 kernel
+    /// exists, hence the missing `n == 256` tier there). A prefill `n`
+    /// outside those sets, and every remaining prefill storage tier (no
+    /// fused kernel exists there), stays `Reference`-only. Decode (`k = 0`)
+    /// inherited M2.1/
     /// M2.2's own measured non-win unconditionally UNTIL M2.7's split-key
     /// `paged_flash_decode_split`/`_combine` pair reopened it and found a
     /// real, repeatable win at `bsz == 1` specifically (a clear loss at
@@ -1854,8 +1882,14 @@ mod tests {
     /// case stays `Reference` on the CPU JIT (`workgroup_reductions` is
     /// false there, the SAME correctness gate `Op::PagedAttention`'s own
     /// `WorkgroupPerOutput` arm uses).
+    ///
+    /// The I8 prefill tier additionally pins that it does NOT depend on
+    /// `caps.numeric.int8_dot`: `paged_flash_prefill_i8` unpacks its pool
+    /// with shifts and masks and never issues `dot4I8Packed`, so a device
+    /// with workgroup reductions but no DP4A must still reach it - see
+    /// [`KernelVariant::requires`]'s own `FusedFlash` arm.
     #[test]
-    fn paged_attention_fused_only_offers_the_fused_kernel_at_causal_chunk_f32() {
+    fn paged_attention_fused_only_offers_the_fused_kernel_at_causal_chunk_f32_or_i8() {
         let s = DefaultSelector;
         for m in [1u32, 128, 2048] {
             for n in [16u32, 512, 8192] {
@@ -1871,7 +1905,28 @@ mod tests {
                     KernelVariant::Reference,
                     "m={m} n={n}: CPU JIT cannot run a barrier-shaped kernel"
                 );
-                for dtype in [Dtype::BF16, Dtype::F16, Dtype::I8, Dtype::Q4] {
+                // The I8 prefill tier: `paged_flash_prefill_i8`, `n <= 128`
+                // only (no int8 hd256 kernel exists, unlike F32's).
+                let prefill_i8 = shape(m, n, 1, Dtype::I8);
+                let i8_wins = n <= 128;
+                assert_eq!(
+                    s.select(Op::PagedAttentionFused, prefill_i8, &gpu_caps()),
+                    if i8_wins { KernelVariant::FusedFlash } else { KernelVariant::Reference },
+                    "m={m} n={n}: int8-KV causal-chunk prefill"
+                );
+                let mut no_dp4a = gpu_caps();
+                no_dp4a.numeric.int8_dot = false;
+                assert_eq!(
+                    s.select(Op::PagedAttentionFused, prefill_i8, &no_dp4a),
+                    if i8_wins { KernelVariant::FusedFlash } else { KernelVariant::Reference },
+                    "m={m} n={n}: the int8 fused prefill kernel issues no dot4I8Packed, so DP4A is not a gate"
+                );
+                assert_eq!(
+                    s.select(Op::PagedAttentionFused, prefill_i8, &cpu_caps()),
+                    KernelVariant::Reference,
+                    "m={m} n={n}: CPU JIT cannot run a barrier-shaped kernel at any dtype"
+                );
+                for dtype in [Dtype::BF16, Dtype::F16, Dtype::Q4] {
                     let prefill_other = shape(m, n, 1, dtype);
                     assert_eq!(
                         s.select(Op::PagedAttentionFused, prefill_other, &gpu_caps()),
