@@ -833,7 +833,9 @@ impl Engine {
             .filter(|(n, _)| !(is_fused_source_leaf(n) || (w8_on && crate::q8::Q8::is_i8_linear(n))))
             .map(|(n, c)| (n, c, paramstore::Role::Frozen))
             .collect();
+        let stage_t0 = std::time::Instant::now();
         let ps = ParamStore::new_with_roles(&gpu, roles, weights);
+        gpu_core::profile::stage_time("qwen engine build: fp32 paramstore upload", stage_t0);
         let head = weights.get(cfg.head_weight()).cloned().unwrap_or_else(|| weights.get("tok.weight").cloned().expect("head weight"));
 
         let (d, ff) = (cfg.d_model as u64, cfg.d_ff as u64);
@@ -880,6 +882,7 @@ impl Engine {
         let bcap = scratch_bytes_val / 2 / 4;
         let (decode_split_n_splits, _) = decode_split_shape(cap);
         let st = |x: u64| gpu.storage(x);
+        let stage_t0 = std::time::Instant::now();
 
         let mut res = Vec::new();
         for _ in 0..=cfg.n_layers {
@@ -961,6 +964,8 @@ impl Engine {
             sched_buf: st((DECODE_WINDOW as u64 - 1) * max_batch as u64 * 3),
             hist_buf: st(DECODE_WINDOW as u64 * max_batch as u64),
         };
+        gpu_core::profile::stage_time("qwen engine build: kv pool + scratch buffer alloc", stage_t0);
+        let stage_t0 = std::time::Instant::now();
         // Per-linear weights (B7): every layer's 7 projections plus the LM
         // head, as `model::ops::Weight` - `Weight::upload`'s own `want.
         // promote(caps.numeric)` is the ONE capability gate for int8 (agrees
@@ -1040,11 +1045,14 @@ impl Engine {
             // - see `fused_qkv_and_gateup_are_bit_identical_to_split` for
             // both dtypes.
             let fused_weight = |leaves: &[&str], n_total: usize| -> Weight {
-                let mut raw = Vec::with_capacity(n_total * dm);
-                for leaf in leaves {
-                    let name = format!("blocks.{l}.{leaf}");
-                    raw.extend_from_slice(weights.get(&name).unwrap_or_else(|| panic!("serve: missing weight {name}")));
-                }
+                let parts: Vec<&[f32]> = leaves
+                    .iter()
+                    .map(|leaf| {
+                        let name = format!("blocks.{l}.{leaf}");
+                        weights.get(&name).unwrap_or_else(|| panic!("serve: missing weight {name}")).as_slice()
+                    })
+                    .collect();
+                let raw = model::ops::concat_rows_parallel(&parts);
                 Weight::upload(&ops, &raw, n_total, dm, want)
             };
             lin_weights.insert(format!("blocks.{l}.{WQKV}"), fused_weight(&["attn.wq.weight", "attn.wk.weight", "attn.wv.weight"], hqm + 2 * hkvm));
@@ -1058,6 +1066,8 @@ impl Engine {
         // fresh, exactly the cost the old `head_dev = gpu.storage_init(...)`
         // this replaces already paid.
         lin_weights.insert(head_name, Weight::upload(&ops, &head, cfg.vocab as usize, cfg.d_model as usize, want));
+        gpu_core::profile::stage_time("qwen engine build: per-layer linear weight quantize+upload", stage_t0);
+        let stage_t0 = std::time::Instant::now();
         // Int8 activation-quantization scratch (`model::dispatch::I8Scratch`,
         // the same struct `Ops::act` wraps) - one slot per distinct K width
         // among the 7 linears (`d`/`hq`/`ff`; the head shares `d`), reused
@@ -1073,6 +1083,8 @@ impl Engine {
             Some(scratch) => Self::tune_i8(&gpu, &caps, &lin_weights, scratch, b as u32),
             None => HashMap::new(),
         };
+        gpu_core::profile::stage_time("qwen engine build: tune_i8 (int8 GEMV/tile autotune sweep)", stage_t0);
+        let stage_t0 = std::time::Instant::now();
         // M8.4: the fp32 GEMM's split-K schedule, measured the same way -
         // only where this is an all-fp32 engine (`splitk_slices`/`mm_into`
         // are unreachable from an all-I8 engine, see `Self::linear`) and the
@@ -1081,6 +1093,7 @@ impl Engine {
             (Some(part), Some(cap)) if !w8_on => Self::tune_splitk(&gpu, &lin_weights, part, cap, b as u32),
             _ => HashMap::new(),
         };
+        gpu_core::profile::stage_time("qwen engine build: tune_splitk (fp32 split-k autotune sweep)", stage_t0);
         // Decode-side head/logits. Sized by max_batch (NOT the prefill row
         // count): only decode rows need logits, and [max_prefill, vocab]
         // would be gigabytes.

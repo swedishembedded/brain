@@ -814,10 +814,13 @@ impl ResidentModel for QwenResident {
         // depend on `residency` just for this), a handful of stage markers so
         // `-v -v` shows SOMETHING moving during a cold activate that can take
         // over a minute, without turning into a per-layer scroll.
+        let stage_t0 = std::time::Instant::now();
         residency::log::info(&format!("{}: step 1/3 opening checkpoint", self.id));
         // Stream weights from the mmap (see GptResident::activate). Open first so
         // a GGUF can supply its own embedded tokenizer.
         let reader = checkpoint::weightio::WeightReader::open(&self.path).map_err(|e| format!("qwen: {e}"))?;
+        gpu_core::profile::stage_time(&format!("{}: open checkpoint", self.id), stage_t0);
+        let stage_t0 = std::time::Instant::now();
         residency::log::info(&format!("{}: step 2/3 loading tokenizer", self.id));
         // Tokenizer precedence: an explicit sibling `tokenizer.json` (safetensors
         // path, or an override) wins; else a `.gguf` builds from its embedded
@@ -830,6 +833,8 @@ impl ResidentModel for QwenResident {
             return Err("qwen: no tokenizer (set BRAIN_QWEN_TOKENIZER, or use a GGUF with an embedded tokenizer)".to_string());
         };
         let eos = tok.encode("<|im_end|>").first().copied();
+        gpu_core::profile::stage_time(&format!("{}: load tokenizer", self.id), stage_t0);
+        let stage_t0 = std::time::Instant::now();
         residency::log::info(&format!("{}: step 3/3 building engine (uploading weights to {device:?})", self.id));
         let ctx = self.ctx;
         // `qwen3::serve::Engine` (the paged, continuous-batching serving engine --
@@ -926,7 +931,9 @@ impl ResidentModel for QwenResident {
                     // load-tensors-then-`from_map` shape the adapter branch
                     // already uses so both branches share one cfg mutation
                     // point.
-                    let tensors = checkpoint::load(&self.path).by_role("");
+                    let load_t0 = std::time::Instant::now();
+                    let tensors = checkpoint::load(&self.path).into_by_role("");
+                    gpu_core::profile::stage_time(&format!("{}: re-load checkpoint tensors for engine build", self.id), load_t0);
                     let mut cfg = checkpoint_cfg.clone();
                     Self::apply_yarn_if_serving_past_native(&mut cfg, ctx);
                     qwen3::serve::Engine::from_map(cfg, &tensors, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, weights_int8)
@@ -936,7 +943,7 @@ impl ResidentModel for QwenResident {
                 // is an ordinary frozen base, zero extra inference cost versus
                 // the base once folded.
                 Some(a) => {
-                    let mut tensors = checkpoint::load(&self.path).by_role("");
+                    let mut tensors = checkpoint::load(&self.path).into_by_role("");
                     let mut cfg = qwen3::config::QwenConfig::from_json(&reader.config());
                     qwen3::lora::fold_adapter_into(&mut tensors, a).map_err(|e| format!("qwen: folding adapter {a}: {e}"))?;
                     cfg.lora = None;
@@ -968,6 +975,7 @@ impl ResidentModel for QwenResident {
             eng.set_kv_offload_bytes(self.kv_offload_bytes);
             Ok(QwenEngineKind::Batched(Box::new(model::serve::Scheduler::new(eng, max_batch as usize))))
         })??;
+        gpu_core::profile::stage_time(&format!("{}: build engine (total, on_device)", self.id), stage_t0);
         Ok(Box::new(QwenInstance { tok, eos, engine }))
     }
 }
