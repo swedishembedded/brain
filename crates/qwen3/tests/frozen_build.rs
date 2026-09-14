@@ -38,6 +38,7 @@ fn tiny() -> QwenConfig {
         qk_norm: true,
         attn_bias: false,
         lora: None,
+        rope_scaling: None,
     }
     .with_defaults()
 }

@@ -200,6 +200,9 @@ pub fn config_from_kv(kv: &ArchKv, mg: &MmapGguf) -> Result<QwenConfig, String> 
         qk_norm: true,
         attn_bias: mg.names().iter().any(|n| n.ends_with("attn_q.bias")),
         lora: None,
+        // GGUF spells YaRN as its own `rope.scaling.*` key family, which this
+        // importer does not read - a GGUF-sourced config is plain RoPE.
+        rope_scaling: None,
     }
     .with_defaults())
 }

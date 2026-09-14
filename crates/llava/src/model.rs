@@ -235,6 +235,7 @@ mod tests {
             qk_norm: false,
             attn_bias: false,
             lora: None,
+            rope_scaling: None,
         };
         let dweights = qwen3::init_weights(&dcfg, 3);
 

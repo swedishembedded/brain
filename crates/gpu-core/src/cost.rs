@@ -556,8 +556,10 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             f(4 * n, 8 * n)
         }
         // params: [n_rows, n_heads, head_dim, row_stride, base] — in-place RoPE
-        // on the newly appended token of each sequence.
-        "rope_paged" => {
+        // on the newly appended token of each sequence. The `_yarn` twin shares
+        // the first three params and does the same work per element, reading its
+        // angle from a table instead of computing a pow.
+        "rope_paged" | "rope_paged_yarn" => {
             let n = p(0)? * p(1)? * p(2)?;
             f(4 * n, 8 * n)
         }
@@ -1724,7 +1726,7 @@ mod tests {
             "matmul_reg3_splitk",
             // the served paged tape
             "paged_decode_scores_batched", "paged_decode_scores_wg", "paged_decode_apply_batched",
-            "paged_kv_append_batched", "decode_softmax_batched", "rope_paged",
+            "paged_kv_append_batched", "decode_softmax_batched", "rope_paged", "rope_paged_yarn",
             "paged_decode_scores_i8_batched", "paged_decode_apply_i8_batched",
             "paged_kv_append_i8_clipped_batched",
         ] {

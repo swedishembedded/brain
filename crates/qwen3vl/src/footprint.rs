@@ -220,6 +220,7 @@ mod tests {
             qk_norm: false,
             attn_bias: false,
             lora: None,
+            rope_scaling: None,
         };
         // Every one of the 7 linears is [32,32] at this shape (q/k/v/o all
         // n=k=32 since n_heads=n_kv_heads=1, head_dim=32=d_model; d_ff=32=d_model).

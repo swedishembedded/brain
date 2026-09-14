@@ -241,6 +241,7 @@ fn kv_geometry_of_qwen3_8b(vocab: u32) -> QwenConfig {
         qk_norm: true,
         attn_bias: false,
         lora: None,
+        rope_scaling: None,
     }
 }
 

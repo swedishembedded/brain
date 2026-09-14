@@ -69,6 +69,7 @@ mod tests {
             // proving the production loop converges, so it should have the
             // production loop's own capacity.
             lora: Some(LoraCfg { rank: 8, alpha: 16.0, targets: crate::finetune::lora_targets() }),
+            rope_scaling: None,
         };
 
         // --- vision + merger weights (frozen; a fixed random tower) ---

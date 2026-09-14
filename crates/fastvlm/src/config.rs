@@ -144,6 +144,7 @@ impl FastVlmConfig {
                 qk_norm: false, // Qwen2
                 attn_bias: c["attention_bias"].as_bool().unwrap_or(true),
                 lora: None,
+                rope_scaling: None,
             },
             image_token_index: -200,
             vision,

@@ -1141,6 +1141,7 @@ mod tests {
             qk_norm: true,
             attn_bias: false,
             lora: None,
+            rope_scaling: None,
         };
 
         // Vision + merger weights.
@@ -1265,6 +1266,7 @@ mod tests {
             qk_norm: true,
             attn_bias: false,
             lora: None,
+            rope_scaling: None,
         };
 
         let (c, pv, mlp) = (vcfg.hidden as usize, vcfg.patch_vec_dim() as usize, vcfg.intermediate as usize);
@@ -1422,6 +1424,7 @@ mod tests {
             qk_norm: true,
             attn_bias: false,
             lora: None,
+            rope_scaling: None,
         };
 
         let (c, pv, mlp) = (vcfg.hidden as usize, vcfg.patch_vec_dim() as usize, vcfg.intermediate as usize);
@@ -1542,6 +1545,7 @@ mod tests {
             qk_norm: true,
             attn_bias: false,
             lora: None,
+            rope_scaling: None,
         };
 
         let (c, pv, mlp) = (vcfg.hidden as usize, vcfg.patch_vec_dim() as usize, vcfg.intermediate as usize);
@@ -1638,6 +1642,7 @@ mod tests {
             qk_norm: true,
             attn_bias: false,
             lora: None,
+            rope_scaling: None,
         };
 
         let (c, pv, mlp) = (vcfg.hidden as usize, vcfg.patch_vec_dim() as usize, vcfg.intermediate as usize);
@@ -1742,6 +1747,7 @@ mod tests {
                 qk_norm: true,
                 attn_bias: false,
                 lora: None,
+                rope_scaling: None,
             },
             rand_map(Rng::new(11), &vspecs),
             rand_map(
@@ -1787,6 +1793,7 @@ mod tests {
                     qk_norm: true,
                     attn_bias: false,
                     lora: None,
+                    rope_scaling: None,
                 },
                 13,
             ),
@@ -1872,6 +1879,7 @@ mod tests {
             qk_norm: true,
             attn_bias: false,
             lora: None,
+            rope_scaling: None,
         };
 
         let (c, pv, mlp) = (vcfg.hidden as usize, vcfg.patch_vec_dim() as usize, vcfg.intermediate as usize);
@@ -2029,6 +2037,7 @@ mod tests {
             qk_norm: true,
             attn_bias: false,
             lora: None,
+            rope_scaling: None,
         };
 
         let (c, pv, mlp) = (vcfg.hidden as usize, vcfg.patch_vec_dim() as usize, vcfg.intermediate as usize);
@@ -2179,6 +2188,7 @@ mod tests {
             qk_norm: true,
             attn_bias: false,
             lora: Some(qwen3::LoraCfg::attn(2, 4.0)),
+            rope_scaling: None,
         };
 
         let (c, pv, mlp) = (vcfg.hidden as usize, vcfg.patch_vec_dim() as usize, vcfg.intermediate as usize);

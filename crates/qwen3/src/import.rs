@@ -75,6 +75,7 @@ pub fn config_from_hf(json: &str) -> Result<QwenConfig, String> {
         qk_norm: true,
         attn_bias: false,
         lora: None,
+        rope_scaling: None,
     }
     .with_defaults();
     Ok(cfg)

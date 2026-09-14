@@ -222,6 +222,7 @@ mod tests {
             qk_norm: true,
             attn_bias: false,
             lora: None,
+            rope_scaling: None,
         }
     }
 
@@ -287,6 +288,7 @@ mod tests {
             qk_norm: false,
             attn_bias: false,
             lora: None,
+            rope_scaling: None,
         };
         let one_linear_i8 = (32u64 * 32 / 4) * 4 + model::int8::scale_len(32, 32) as u64 * 4;
         let shard = Shard::whole(3);

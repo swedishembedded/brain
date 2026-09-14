@@ -275,6 +275,7 @@ mod tests {
                 qk_norm: true,
                 attn_bias: false,
                 lora: None,
+                rope_scaling: None,
             },
             mrope_section: [4, 2, 2],
             image_token_id: 5,

@@ -160,6 +160,10 @@ const MATMUL_REG3_64: usize = 41;
 // `Scratch::{scores,probs}`: with it reachable, `paged_attn_scratch_bytes`
 // sheds the `max_prefill^2 * n_heads` causal-chunk term at int8 KV too.
 const PAGED_FLASH_PREFILL_I8: usize = 42;
+// `ROPE_PAGED`'s YaRN twin, taking its per-channel angular frequencies from a
+// `head_dim/2` table (`Engine::yarn`) instead of an analytic base theta. Only
+// reachable when the config carries `rope_scaling` - see `Engine::qk_norm_rope`.
+const ROPE_PAGED_YARN: usize = 43;
 
 const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -205,6 +209,7 @@ const PIPELINES: &[(&str, &str)] = &[
     ("paged_flash_decode_combine", kernels::PAGED_FLASH_DECODE_COMBINE),
     ("matmul_reg3_64", kernels::MATMUL_REG3_64),
     ("paged_flash_prefill_i8", kernels::PAGED_FLASH_PREFILL_I8),
+    ("rope_paged_yarn", kernels::ROPE_PAGED_YARN),
 ];
 
 /// The `model::ops::Ops` façade's required kernel set (B7), registered on a
@@ -671,6 +676,13 @@ pub struct Engine {
     /// `kv_int8`; MAX-sentinel-filled until a real calibration is installed).
     clip_k: Vec<DeviceBuffer>,
     clip_v: Vec<DeviceBuffer>,
+    /// YaRN's `(inv_freq table, attention_factor)`, uploaded once at
+    /// construction from `cfg.yarn_scaling()` - `[head_dim/2]` f32s every row
+    /// and head share. `None` unless the config carries `rope_scaling`, and
+    /// that `None` is what keeps every existing engine on the analytic
+    /// `ROPE_PAGED`/fused-QK-norm path it took before this field existed;
+    /// `Some` is the only thing that can select `ROPE_PAGED_YARN`.
+    yarn: Option<(DeviceBuffer, f32)>,
     /// Int8 WEIGHT path (A0): every linear this engine dispatches - the 7
     /// per-layer projections (`blocks.<l>.<leaf>`) plus the LM head
     /// (`cfg.head_weight()`) - as a `model::ops::Weight` (B7), packed 4/u32
@@ -906,6 +918,14 @@ impl Engine {
                 clip_v.push(cv);
             }
         }
+        // One upload for the whole engine: the schedule is per-CHANNEL, not
+        // per-position, so every row, head, layer and step reads this same
+        // `head_dim/2` table.
+        let yarn = cfg.yarn_scaling().map(|(inv_freq, attention_factor)| {
+            let b = st(inv_freq.len() as u64);
+            gpu.write(&b, bytemuck::cast_slice(&inv_freq));
+            (b, attention_factor)
+        });
         let kv_pool_bytes_val = cfg.n_layers as u64 * 2 * (pool_words + scale_words) * 4;
         let block_words = kv_block_words(&cfg, block_size, kv_int8);
         let sc = Scratch {
@@ -1097,6 +1117,7 @@ impl Engine {
             kv_calib: None,
             clip_k,
             clip_v,
+            yarn,
             lin_weights,
             i8_scratch,
             tuned_i8,
@@ -1805,7 +1826,10 @@ impl Engine {
     #[allow(clippy::too_many_arguments)]
     fn qk_norm_rope(&self, s: &mut Vec<Step>, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, hd: u32, heads: u32, rows: u32, theta: f32) {
         let g = &self.gpu;
-        if self.caps.workgroup_reductions {
+        if let Some((inv_freq, af)) = &self.yarn {
+            s.push(self.rms(x, w, out, hd, rows));
+            s.push(self.rope_yarn(out, inv_freq, *af, hd, heads, rows));
+        } else if self.caps.workgroup_reductions {
             s.push(g.step(
                 QKNORM_ROPE_FUSED,
                 &[x, w, &self.sc.pos_buf, out],
@@ -1819,6 +1843,27 @@ impl Engine {
         }
     }
 
+    /// The `ROPE_PAGED_YARN` dispatch both QK-norm+RoPE helpers share when
+    /// `self.yarn` is set: same in-place rotation over the same `sc.pos_buf`
+    /// positions as `ROPE_PAGED`, reading its per-channel angle from the
+    /// uploaded table and scaling cos/sin by `attention_factor`.
+    ///
+    /// YaRN takes the two-dispatch (norm, then rotate) shape rather than the
+    /// fused one because the fused kernels compute the analytic
+    /// `pow(theta, -2m/head_dim)` internally and have no table binding; the
+    /// pair is already pinned bit-identical to the fused path
+    /// (`qk_norm_rope_fused_is_bit_identical_to_the_unfused_pair`), so this
+    /// costs an extra dispatch on the opt-in path only.
+    fn rope_yarn(&self, out: &DeviceBuffer, inv_freq: &DeviceBuffer, attention_factor: f32, hd: u32, heads: u32, rows: u32) -> Step {
+        let b = rows / heads;
+        self.gpu.step(
+            ROPE_PAGED_YARN,
+            &[out, &self.sc.pos_buf, inv_freq],
+            &[b, heads, hd, heads * hd, fb(attention_factor)],
+            rows * (hd / 2),
+        )
+    }
+
     /// M4.2: `Self::qk_norm_rope`'s K-only sibling, additionally folding the
     /// fp32 paged KV append into the same fused dispatch - `out` still
     /// receives the normalized+rotated K (mirroring `Self::rms` + `ROPE_PAGED`'s
@@ -1829,7 +1874,12 @@ impl Engine {
     #[allow(clippy::too_many_arguments)]
     fn qk_norm_rope_append(&self, s: &mut Vec<Step>, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, pool: &DeviceBuffer, hd: u32, heads: u32, rows: u32, theta: f32, block_size: u32) {
         let g = &self.gpu;
-        if self.caps.workgroup_reductions {
+        if let Some((inv_freq, af)) = &self.yarn {
+            let b = rows / heads;
+            s.push(self.rms(x, w, out, hd, rows));
+            s.push(self.rope_yarn(out, inv_freq, *af, hd, heads, rows));
+            s.push(g.step(KV_APPEND_B, &[out, &self.sc.blk_buf, &self.sc.off_buf, pool], &[b, heads * hd, block_size], rows * hd));
+        } else if self.caps.workgroup_reductions {
             s.push(g.step(
                 QKNORM_ROPE_APPEND_FUSED,
                 &[x, w, &self.sc.pos_buf, &self.sc.blk_buf, &self.sc.off_buf, out, pool],
@@ -3149,6 +3199,7 @@ mod tests {
             qk_norm: true,
             attn_bias: false,
             lora: None,
+            rope_scaling: None,
         }
     }
 
@@ -3264,6 +3315,7 @@ mod tests {
             qk_norm: true,
             attn_bias: false,
             lora: None,
+            rope_scaling: None,
         }
     }
 
@@ -4310,6 +4362,111 @@ mod tests {
             let got = &pool[slot * hkv as usize..(slot + 1) * hkv as usize];
             assert_eq!(got, want, "M4.2: pool_k row {r} (slot {slot}) must match the unfused reference");
         }
+    }
+
+    /// A config without `rope_scaling` - every checkpoint that exists today -
+    /// must never upload a YaRN table nor put `ROPE_PAGED_YARN` on the tape.
+    /// The `Some` half is asserted too, so a bug that made the kernel
+    /// unreachable for everyone could not pass this as a vacuous truth.
+    #[test]
+    fn rope_scaling_none_never_dispatches_the_yarn_kernel() {
+        let plain = QwenConfig::tiny();
+        assert!(plain.rope_scaling.is_none(), "tiny() is the unopted-in fixture");
+        assert!(QwenConfig::qwen3_8b().rope_scaling.is_none(), "a real published shape must not opt into YaRN either");
+
+        let kinds = |cfg: QwenConfig| -> Vec<usize> {
+            let map = tiny_weights(&cfg);
+            let eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg, &map, 4, 32, 1, 12, 8, false, false);
+            let has_table = eng.yarn.is_some();
+            let tape = eng.batched_tape(1, Input::Tokens(&[1]), false);
+            let k: Vec<usize> = tape.iter().filter_map(|s| s.meta().map(|m| m.kernel)).collect();
+            assert_eq!(has_table, k.contains(&ROPE_PAGED_YARN), "the uploaded table and the dispatched kernel must agree");
+            k
+        };
+
+        assert!(!kinds(plain).contains(&ROPE_PAGED_YARN), "an unscaled config must not reach the YaRN kernel");
+
+        let mut scaled = QwenConfig::tiny();
+        scaled.rope_scaling = Some(model::yarn::YarnConfig::new(4.0, 12));
+        let yarn_kinds = kinds(scaled);
+        assert!(yarn_kinds.contains(&ROPE_PAGED_YARN), "a scaled config must reach the YaRN kernel");
+        assert!(!yarn_kinds.contains(&ROPE_PAGED), "the scaled path must not also run the analytic RoPE over the same rows");
+    }
+
+    /// The one test that proves the new kernel's table lookup AND its
+    /// `attention_factor` multiply are wired correctly: rotate the engine's
+    /// own normalized Q on the host, using `model::yarn::scaled_inv_freq`
+    /// directly as the oracle, and require the GPU to agree.
+    ///
+    /// Takes the engine's device `rms` output as the rotation input so the
+    /// comparison isolates RoPE rather than re-deriving RMSNorm on the host.
+    #[test]
+    fn yarn_rope_matches_an_independent_host_recomputation() {
+        let mut cfg = QwenConfig::tiny();
+        cfg.rope_scaling = Some(model::yarn::YarnConfig::new(4.0, 12));
+        let map = tiny_weights(&cfg);
+        let mut eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 32, 1, 12, 8, false, false);
+        let mut table = BlockTable::new();
+        let prompt = [1u32, 5, 3];
+        let _ = eng.prefill(&mut table, &prompt);
+        let rows = prompt.len() as u32;
+
+        let (hd, nh) = (cfg.head_dim, cfg.n_heads);
+        let half = (hd / 2) as usize;
+        let g = &eng.gpu;
+        let l = cfg.n_layers as usize - 1;
+
+        // The engine's own normalized (pre-rotation) Q for the last layer.
+        let w = g.storage_init("t_yarn_w", &map[&format!("blocks.{l}.attn.q_norm.weight")]);
+        let normed_buf = g.storage((rows * nh * hd) as u64);
+        let rms_step = eng.rms(&eng.sc.q_pre, &w, &normed_buf, hd, rows * nh);
+        g.submit(&[], &[rms_step]);
+        g.poll_wait();
+        let normed = g.read(&normed_buf, (rows * nh * hd) as usize);
+
+        let (inv_freq, attention_factor) = cfg.yarn_scaling().expect("rope_scaling was set");
+        assert_eq!(inv_freq.len(), half);
+        assert!(attention_factor > 1.0, "factor 4.0 must scale attention magnitude, got {attention_factor}");
+        let positions: Vec<u32> = g.read(&eng.sc.pos_buf, rows as usize).iter().map(|f| f.to_bits()).collect();
+
+        let mut want = normed.clone();
+        for (r, &pos_u) in positions.iter().enumerate() {
+            let pos = pos_u as f32;
+            for h in 0..nh as usize {
+                let base = r * (nh * hd) as usize + h * hd as usize;
+                for m in 0..half {
+                    let angle = pos * inv_freq[m];
+                    let (c, s) = (angle.cos() * attention_factor, angle.sin() * attention_factor);
+                    let (x0, x1) = (normed[base + m], normed[base + m + half]);
+                    want[base + m] = x0 * c - x1 * s;
+                    want[base + m + half] = x1 * c + x0 * s;
+                }
+            }
+        }
+
+        let got = g.read(&eng.sc.q, (rows * cfg.q_dim()) as usize);
+        assert_eq!(got.len(), want.len());
+        for (i, (gv, wv)) in got.iter().zip(&want).enumerate() {
+            let tol = wv.abs() * 1e-3 + 1e-8;
+            assert!((gv - wv).abs() <= tol, "yarn Q[{i}]: got {gv:e}, want {wv:e} (tol {tol:e})");
+        }
+
+        // The table must actually bend the schedule: an engine that ignored
+        // `inv_freq`/`attention_factor` and ran the analytic kernel would
+        // still pass a tolerance check against ITSELF, so pin the difference.
+        let plain_out = g.storage((rows * nh * hd) as u64);
+        let rms2 = eng.rms(&eng.sc.q_pre, &w, &plain_out, hd, rows * nh);
+        g.submit(&[], &[rms2]);
+        g.poll_wait();
+        let rope_step =
+            g.step(ROPE_PAGED, &[&plain_out, &eng.sc.pos_buf], &[rows, nh, hd, nh * hd, fb(cfg.rope_theta)], rows * nh * (hd / 2));
+        g.submit(&[], &[rope_step]);
+        g.poll_wait();
+        let plain = g.read(&plain_out, (rows * nh * hd) as usize);
+        assert!(
+            got.iter().zip(&plain).any(|(y, p)| (y - p).abs() > 1e-4),
+            "YaRN output is indistinguishable from the analytic schedule - the table is not being applied"
+        );
     }
 
     /// M4.2, int8-KV branch: the fused Q/K norm+RoPE pass must stay
@@ -5553,6 +5710,7 @@ mod tests {
             qk_norm: true,
             attn_bias: false,
             lora: None,
+            rope_scaling: None,
         }
     }
 

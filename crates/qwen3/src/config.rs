@@ -67,6 +67,15 @@ pub struct QwenConfig {
     /// Bias on the q/k/v projections. `false` for Qwen3 (bias-free); `true` for
     /// Qwen2 (q/k/v carry a bias, o/gate/up/down do not).
     pub attn_bias: bool,
+    /// YaRN long-context RoPE scaling (`model::yarn`), parsed from the
+    /// checkpoint's `rope_scaling: {"type": "yarn", "factor": ...,
+    /// "original_max_position_embeddings": ...}` - `None` (the default for
+    /// every existing checkpoint's `config.json`, which has no such key) means
+    /// "plain, unscaled RoPE", byte-identical to before this field existed
+    /// (see `model::yarn::scaled_inv_freq`'s own `factor <= 1.0` identity gate
+    /// for why `Some` at `factor == 1.0` would ALSO be a no-op, not just
+    /// `None`).
+    pub rope_scaling: Option<model::yarn::YarnConfig>,
     /// `Some` selects LoRA fine-tuning (frozen base + adapters); `None` is a
     /// full (all-parameter) model.
     pub lora: Option<LoraCfg>,
@@ -93,6 +102,7 @@ impl QwenConfig {
             qk_norm: true,
             attn_bias: false,
             lora: None,
+            rope_scaling: None,
         }
     }
 
@@ -130,6 +140,7 @@ impl QwenConfig {
             qk_norm: true,
             attn_bias: false,
             lora: None,
+            rope_scaling: None,
         }
     }
 
@@ -153,6 +164,7 @@ impl QwenConfig {
             qk_norm: true,
             attn_bias: false,
             lora: None,
+            rope_scaling: None,
         }
     }
 
@@ -176,6 +188,7 @@ impl QwenConfig {
             qk_norm: true,
             attn_bias: false,
             lora: None,
+            rope_scaling: None,
         }
     }
 
@@ -200,6 +213,7 @@ impl QwenConfig {
             qk_norm: true,
             attn_bias: false,
             lora: None,
+            rope_scaling: None,
         }
     }
 
@@ -229,6 +243,7 @@ impl QwenConfig {
             qk_norm: false,
             attn_bias: false,
             lora: None,
+            rope_scaling: None,
         }
     }
 
@@ -261,6 +276,17 @@ impl QwenConfig {
         }
     }
 
+    /// This config's YaRN-scaled per-channel inverse-frequency table and its
+    /// attention-magnitude correction - `None` if `self.rope_scaling` is
+    /// unset, which is the SAME "plain analytic RoPE" path the engine took
+    /// before this field existed. Qwen3 rotates the full `head_dim` (no
+    /// partial rotary factor), so that is the `dim` handed to
+    /// `model::yarn::scaled_inv_freq`; the returned table is `head_dim / 2`
+    /// long, one entry per `(cos, sin)` channel pair.
+    pub fn yarn_scaling(&self) -> Option<(Vec<f32>, f32)> {
+        self.rope_scaling.as_ref().map(|y| model::yarn::scaled_inv_freq(self.head_dim, self.rope_theta, y))
+    }
+
     pub fn to_json(&self) -> Value {
         let mut v = serde_json::json!({
             "model": "qwen",
@@ -277,6 +303,16 @@ impl QwenConfig {
         if let Some(l) = &self.lora {
             v["lora"] = serde_json::json!({
                 "rank": l.rank, "alpha": l.alpha, "targets": l.targets,
+            });
+        }
+        if let Some(y) = &self.rope_scaling {
+            v["rope_scaling"] = serde_json::json!({
+                "type": "yarn",
+                "factor": y.factor,
+                "original_max_position_embeddings": y.original_max_position_embeddings,
+                "beta_fast": y.beta_fast,
+                "beta_slow": y.beta_slow,
+                "attention_factor": y.attention_factor,
             });
         }
         v
@@ -325,6 +361,21 @@ impl QwenConfig {
         let g = |k: &str, d: u32| c[k].as_u64().map(|v| v as u32).unwrap_or(d);
         let gf = |k: &str, d: f32| c[k].as_f64().map(|v| v as f32).unwrap_or(d);
         let block_size = g("block_size", 12);
+        // Only `"type": "yarn"` is implemented (this workspace's one
+        // long-context scaling scheme so far); any other/missing type -
+        // including a `config.json` with no `rope_scaling` key at all, every
+        // checkpoint before this field existed - is `None`, i.e. plain
+        // unscaled RoPE.
+        let rope_scaling = c["rope_scaling"]
+            .as_object()
+            .filter(|o| o.get("type").and_then(|t| t.as_str()) == Some("yarn"))
+            .map(|o| model::yarn::YarnConfig {
+                factor: o.get("factor").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32,
+                original_max_position_embeddings: o.get("original_max_position_embeddings").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                beta_fast: o.get("beta_fast").and_then(|v| v.as_f64()).unwrap_or(32.0) as f32,
+                beta_slow: o.get("beta_slow").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32,
+                attention_factor: o.get("attention_factor").and_then(|v| v.as_f64()).map(|v| v as f32),
+            });
         QwenConfig {
             vocab: g("vocab_size", 23),
             block_size,
@@ -351,6 +402,7 @@ impl QwenConfig {
                     .map(|a| a.iter().filter_map(|t| t.as_str().map(String::from)).collect())
                     .unwrap_or_default(),
             }),
+            rope_scaling,
         }
         .with_defaults()
     }
@@ -374,6 +426,7 @@ impl QwenConfig {
             qk_norm: false,
             attn_bias: true,
             lora: None,
+            rope_scaling: None,
         }
     }
 
@@ -520,5 +573,58 @@ mod tests {
         for optional in ["max_position_embeddings", "tie_word_embeddings", "qk_norm", "attention_bias", "lora"] {
             assert!(!QwenConfig::SHAPE_KEYS.contains(&optional), "{optional:?} must stay optional, not become a hard requirement");
         }
+    }
+
+    #[test]
+    fn rope_scaling_defaults_to_none_and_round_trips_absent_through_json() {
+        let cfg = QwenConfig::tiny();
+        assert!(cfg.rope_scaling.is_none(), "an unconfigured checkpoint must not silently opt into YaRN");
+        let json = cfg.to_json();
+        assert!(json.get("rope_scaling").is_none(), "a None rope_scaling must not serialize a key at all");
+        let back = QwenConfig::from_json(&json);
+        assert!(back.rope_scaling.is_none());
+    }
+
+    #[test]
+    fn rope_scaling_yarn_parses_from_config_json_and_round_trips() {
+        let mut cfg = QwenConfig::tiny();
+        cfg.rope_scaling = Some(model::yarn::YarnConfig::new(4.0, 32768));
+        let json = cfg.to_json();
+        assert_eq!(json["rope_scaling"]["type"], "yarn");
+        assert_eq!(json["rope_scaling"]["factor"], 4.0);
+        assert_eq!(json["rope_scaling"]["original_max_position_embeddings"], 32768);
+
+        let back = QwenConfig::from_json(&json);
+        let y = back.rope_scaling.expect("rope_scaling must round-trip");
+        assert_eq!(y.factor, 4.0);
+        assert_eq!(y.original_max_position_embeddings, 32768);
+        assert_eq!(y.beta_fast, 32.0);
+        assert_eq!(y.beta_slow, 1.0);
+        assert_eq!(y.attention_factor, None);
+    }
+
+    #[test]
+    fn rope_scaling_ignores_a_non_yarn_type() {
+        // Only "yarn" is implemented; an unrecognized `rope_scaling.type` must
+        // not silently apply YaRN's formula under a different name.
+        let c = serde_json::json!({
+            "vocab_size": 23, "block_size": 12, "n_layers": 2, "d_model": 16,
+            "n_heads": 4, "n_kv_heads": 2, "head_dim": 8, "d_ff": 32,
+            "rope_theta": 1.0e6, "rms_norm_eps": 1e-6,
+            "rope_scaling": {"type": "linear", "factor": 4.0, "original_max_position_embeddings": 32768},
+        });
+        assert!(QwenConfig::from_json(&c).rope_scaling.is_none());
+    }
+
+    #[test]
+    fn yarn_scaling_is_none_by_default_and_some_shaped_correctly_when_set() {
+        let cfg = QwenConfig::tiny();
+        assert!(cfg.yarn_scaling().is_none());
+
+        let mut scaled = cfg.clone();
+        scaled.rope_scaling = Some(model::yarn::YarnConfig::new(4.0, 16));
+        let (inv_freq, attention_factor) = scaled.yarn_scaling().expect("rope_scaling set -> Some");
+        assert_eq!(inv_freq.len(), (scaled.head_dim / 2) as usize);
+        assert!(attention_factor > 1.0, "factor=4.0 must produce an attention_factor > 1.0, got {attention_factor}");
     }
 }

@@ -150,6 +150,7 @@ fn export_mtp_decode(mtp_path: &str, out_path: &str, cap: usize, quant: bool) ->
         qk_norm: true,
         attn_bias: false,
         lora: None,
+        rope_scaling: None,
     };
     let mut g = GraphBuilder::new("qwen_mtp_decode");
     crate::qwen_topology::build_talker_decode_graph(&cfg, &reader, cap, crate::qwen_topology::Quant::from_bool(quant), &mut g);
@@ -181,6 +182,7 @@ pub fn export_mtp_fused(mtp_path: &str, out_path: &str) -> std::io::Result<()> {
         qk_norm: true,
         attn_bias: false,
         lora: None,
+        rope_scaling: None,
     };
     let emb = gu("embedding_dim", gu("d_model", 1024)) as usize;
     let vocab = gu("vocab_size", 2048) as usize;
