@@ -534,10 +534,11 @@ impl QwenResident {
     /// `cfg.ctx` verbatim when the operator named one explicitly
     /// (`--qwen-ctx`); else, when `cfg.auto_budget_bytes` names a real
     /// device budget (only `brain serve`'s own caller ever does), the
-    /// largest [`AUTO_CTX_TIERS`] entry whose real total fits it, capped at
-    /// the checkpoint's own trained `max_position_embeddings` (this crate
-    /// has no YaRN-style extension beyond it yet, so sizing past it buys
-    /// nothing); else the historical 24576 default, unchanged. Must never
+    /// largest [`AUTO_CTX_TIERS`] entry whose real total fits it - no longer
+    /// capped at the checkpoint's own trained `max_position_embeddings`
+    /// (see [`apply_yarn_if_serving_past_native`], called from `activate`,
+    /// for what makes serving past it a real, not just a memory-shaped,
+    /// capability); else the historical 24576 default, unchanged. Must never
     /// itself hard-fail - a checkpoint this can't open just falls back to
     /// the historical default and defers the real, specific error to
     /// `activate`'s own open, exactly like `estimate` already does.
@@ -553,8 +554,33 @@ impl QwenResident {
         let Ok(reader) = checkpoint::weightio::WeightReader::open(path) else { return HISTORICAL_DEFAULT };
         let checkpoint_cfg = qwen3::config::QwenConfig::from_json(&reader.config());
         let weight_bytes = if cfg.weights_int8 { weights_int8_bytes(&checkpoint_cfg) } else { est_vram(path).vram };
-        let native_cap = (checkpoint_cfg.max_position_embeddings as u32).max(1);
-        auto_ctx_for_budget(weight_bytes, budget, &checkpoint_cfg, cfg.max_batch.max(1), cfg.max_prefill_cap.clamp(1, 512), cfg.kv_int8).min(native_cap)
+        auto_ctx_for_budget(weight_bytes, budget, &checkpoint_cfg, cfg.max_batch.max(1), cfg.max_prefill_cap.clamp(1, 512), cfg.kv_int8)
+    }
+
+    /// Give `cfg` a derived [`model::yarn::YarnConfig`] when `ctx` (the KV
+    /// pool `activate` is actually about to build - `self.ctx`, whether from
+    /// `--qwen-ctx` or auto-sizing) exceeds the checkpoint's own trained
+    /// `max_position_embeddings` and nothing already named a scaling - the
+    /// same `extended / original` ratio HF's own `config.json` producers use
+    /// for `rope_scaling.factor`. A checkpoint that already declares its own
+    /// `rope_scaling` (a real long-context release) is never second-guessed.
+    ///
+    /// A DELIBERATE, resident-level decision, not something `qwen3::serve`
+    /// derives on its own from its pool-sizing parameters: an `Engine`
+    /// constructed directly (a test fixture, `qwen_bench`, `perf_cli`) sizes
+    /// its pool however is numerically convenient for THAT caller, with no
+    /// relation to "please extend this checkpoint's real context" - inferring
+    /// intent from bare pool geometry there would auto-opt every such caller
+    /// into YaRN by accident. Only `activate`'s own `ctx` - `resolve_ctx`'s
+    /// real output, `--qwen-ctx`/auto-sizing's own answer - means that.
+    fn apply_yarn_if_serving_past_native(cfg: &mut qwen3::config::QwenConfig, ctx: u32) {
+        if cfg.rope_scaling.is_some() {
+            return;
+        }
+        let native = cfg.max_position_embeddings.max(1);
+        if ctx > native {
+            cfg.rope_scaling = Some(model::yarn::YarnConfig::new(ctx as f32 / native as f32, native));
+        }
     }
 
     /// Point this ALREADY-registered resident at a different (or no) LoRA
@@ -893,7 +919,18 @@ impl ResidentModel for QwenResident {
             // must not hold up a concurrent `set_adapter` either.
             let adapter_path = self.adapter.read().unwrap().clone();
             let mut eng = match &adapter_path {
-                None => qwen3::serve::Engine::load(&self.path, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, weights_int8),
+                None => {
+                    // `Engine::load` re-derives its own `QwenConfig` straight
+                    // from the file, with no seam for `ctx`'s own YaRN
+                    // decision below to reach it -- go through the same
+                    // load-tensors-then-`from_map` shape the adapter branch
+                    // already uses so both branches share one cfg mutation
+                    // point.
+                    let tensors = checkpoint::load(&self.path).by_role("");
+                    let mut cfg = checkpoint_cfg.clone();
+                    Self::apply_yarn_if_serving_past_native(&mut cfg, ctx);
+                    qwen3::serve::Engine::from_map(cfg, &tensors, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, weights_int8)
+                }
                 // Fold the adapter's delta into the base tensors first (the same
                 // fold `qwen3::eval::score_chat` uses to score one) -- the result
                 // is an ordinary frozen base, zero extra inference cost versus
@@ -903,6 +940,7 @@ impl ResidentModel for QwenResident {
                     let mut cfg = qwen3::config::QwenConfig::from_json(&reader.config());
                     qwen3::lora::fold_adapter_into(&mut tensors, a).map_err(|e| format!("qwen: folding adapter {a}: {e}"))?;
                     cfg.lora = None;
+                    Self::apply_yarn_if_serving_past_native(&mut cfg, ctx);
                     qwen3::serve::Engine::from_map(cfg, &tensors, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, weights_int8)
                 }
             };
@@ -1185,6 +1223,50 @@ mod tests {
         assert_eq!(cfg.kv_offload_gb, 0.0);
         assert!(!cfg.weights_int8, "int8 weights must default OFF");
         assert_eq!(cfg.max_prefill_cap, 512);
+    }
+
+    /// `ctx` at or under the checkpoint's own trained window is a pure no-op
+    /// - the overwhelming default (auto-sizing rarely needs to go past
+    /// native, an explicit `--qwen-ctx` usually doesn't either) must never
+    /// perturb `rope_scaling` from `None`.
+    #[test]
+    fn apply_yarn_if_serving_past_native_is_a_no_op_at_or_under_the_native_window() {
+        let mut cfg = qwen3::config::QwenConfig::qwen3_8b();
+        let native = cfg.max_position_embeddings;
+        for ctx in [1u32, native / 2, native] {
+            cfg.rope_scaling = None;
+            QwenResident::apply_yarn_if_serving_past_native(&mut cfg, ctx);
+            assert!(cfg.rope_scaling.is_none(), "ctx={ctx} is within the native window - must not opt into YaRN");
+        }
+    }
+
+    /// `ctx` past the native window derives a real `YarnConfig` whose
+    /// `factor` is exactly `ctx / native` (HF's own `config.json` ratio) and
+    /// whose `original_max_position_embeddings` is the checkpoint's real
+    /// native window, not the requested `ctx`.
+    #[test]
+    fn apply_yarn_if_serving_past_native_derives_the_extended_over_original_ratio() {
+        let mut cfg = qwen3::config::QwenConfig::qwen3_8b();
+        let native = cfg.max_position_embeddings;
+        cfg.rope_scaling = None;
+        let ctx = native * 4;
+        QwenResident::apply_yarn_if_serving_past_native(&mut cfg, ctx);
+        let y = cfg.rope_scaling.expect("ctx past native must derive a YarnConfig");
+        assert_eq!(y.factor, 4.0);
+        assert_eq!(y.original_max_position_embeddings, native);
+    }
+
+    /// A checkpoint that already names its own `rope_scaling` (a real
+    /// published long-context release) must never be second-guessed, even
+    /// when `ctx` also exceeds its native window.
+    #[test]
+    fn apply_yarn_if_serving_past_native_never_overrides_an_already_declared_scaling() {
+        let mut cfg = qwen3::config::QwenConfig::qwen3_8b();
+        let native = cfg.max_position_embeddings;
+        let declared = model::yarn::YarnConfig::new(2.0, native);
+        cfg.rope_scaling = Some(declared);
+        QwenResident::apply_yarn_if_serving_past_native(&mut cfg, native * 10);
+        assert_eq!(cfg.rope_scaling, Some(declared), "an already-declared rope_scaling must survive untouched");
     }
 
     #[test]
