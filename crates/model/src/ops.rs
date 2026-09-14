@@ -100,6 +100,34 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// Concatenate `parts` end to end into one freshly allocated buffer, copying
+/// each part in parallel chunks rather than one `extend_from_slice` call per
+/// part.
+///
+/// A fresh multi-hundred-MB-to-GB allocation is virtual until touched, and a
+/// serial `Vec::extend_from_slice` loop is exactly one thread doing that
+/// first touch - measured as the dominant cost of building qwen3's fused
+/// QKV/gate-up weights at real model scale (M4.1's row-concat-then-quantize
+/// shape), independent of how little CPU work the copy itself needs.
+/// Faulting (and copying) each part's range in parallel keeps that cost at
+/// the pool's, not one core's - the same fix, and the same reason, as
+/// `checkpoint::mmap`'s F32 tensor decode.
+pub fn concat_rows_parallel(parts: &[&[f32]]) -> Vec<f32> {
+    const CHUNK: usize = 1 << 16;
+    let total: usize = parts.iter().map(|p| p.len()).sum();
+    let mut out = vec![0f32; total];
+    let mut offset = 0usize;
+    for p in parts {
+        let len = p.len();
+        backend_cpu::par::chunks_mut(&mut out[offset..offset + len], CHUNK, |c, dst| {
+            let s = c * CHUNK;
+            dst.copy_from_slice(&p[s..s + dst.len()]);
+        });
+        offset += len;
+    }
+    out
+}
+
 use gpu_core::provider::{LowerCtx, Operand, OpRequest, Pass, ProviderRegistry, Role};
 use gpu_core::select::{self, Dtype, KernelSelector, KernelVariant, Op, OpShape};
 use gpu_core::{DeviceBuffer, DeviceCaps, Gpu, Step};
@@ -1875,6 +1903,28 @@ impl Ops {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Matches plain sequential concatenation for an arbitrary set of part
+    /// lengths, including ones that straddle `concat_rows_parallel`'s own
+    /// chunk boundary (`CHUNK = 1 << 16`) - a part shorter than, equal to,
+    /// and spanning several chunks all in the same call.
+    #[test]
+    fn concat_rows_parallel_matches_sequential_concat_across_chunk_boundaries() {
+        let a: Vec<f32> = (0..5).map(|i| i as f32).collect();
+        let b: Vec<f32> = (0..(1 << 16) + 10).map(|i| i as f32 * 0.5).collect();
+        let c: Vec<f32> = (0..3).map(|i| 100.0 + i as f32).collect();
+        let got = concat_rows_parallel(&[&a, &b, &c]);
+        let mut want = Vec::new();
+        want.extend_from_slice(&a);
+        want.extend_from_slice(&b);
+        want.extend_from_slice(&c);
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn concat_rows_parallel_of_nothing_is_empty() {
+        assert_eq!(concat_rows_parallel(&[]), Vec::<f32>::new());
+    }
 
     /// `Ops::bind`'s `(PackedInt8, Dtype::Q4)` arm must resolve to the M5.5
     /// register-tiled kernel, `matmul_q4_dyn_reg` - NOT the naive
