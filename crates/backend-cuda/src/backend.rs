@@ -32,16 +32,29 @@
 //!
 //! # Ordering
 //!
-//! Every launch and every transfer goes on the context's default stream, which
-//! serialises them against each other, so a dispatch sees the writes of every
-//! dispatch recorded before it - the same guarantee the wgpu backend gets from
-//! the barriers it inserts between passes. `submit` is eager (it launches
-//! immediately and returns without waiting); `read`/`poll_wait` are where the
-//! host actually synchronises.
+//! Every launch and every clear goes on one stream, which serialises them
+//! against each other, so a dispatch sees the writes of every dispatch
+//! recorded before it - the same guarantee the wgpu backend gets from the
+//! barriers it inserts between passes. `submit` returns without waiting for
+//! the device; `read`/`poll_wait` are where the host actually synchronises.
+//!
+//! That stream is created rather than being the legacy default one, because
+//! the legacy stream cannot be captured into a graph. It is created
+//! *blocking*, so the synchronous host transfers that still use the legacy
+//! stream (`write_at`, `read`, `storage_init`) stay ordered against it exactly
+//! as they were when everything shared one stream.
+//!
+//! # Batched submission
+//!
+//! A submission whose shape repeats is recorded into a CUDA graph and
+//! thereafter replayed with a single driver call - see [`crate::graph`], which
+//! states what "the same shape" means and what a replay is allowed to change.
+//! It changes nothing about what the device computes; `tests/cuda_graphs.rs`
+//! is what holds it to that.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, Weak};
 
 use backend_api::arch::{ArchDesc, TierLevel, TierSupport};
 use backend_api::{
@@ -49,8 +62,9 @@ use backend_api::{
     GpuIdentity, Step,
 };
 
-use crate::driver::CuDevicePtr;
+use crate::driver::{CuDevicePtr, CuFunction};
 use crate::exec;
+use crate::graph::{GraphCache, GraphCounters, NodeSig, Plan, Resolved, SubmitSig};
 
 /// One device allocation, behind an `Arc` so a [`DeviceBuffer`] clone and a
 /// recorded [`Step`] both keep it alive - `DeviceBuffer` aliasing is by design
@@ -74,9 +88,18 @@ impl CudaBuf {
 pub struct CudaStep {
     kind: usize,
     threads: u32,
-    /// The uniform stream, already on the device. `None` only for a kernel
-    /// that declares no uniform block.
+    /// The uniform stream's device allocation - **shared** between every step
+    /// of the same shape, not private to this one.
+    ///
+    /// `None` only for a kernel that declares no uniform block. See
+    /// [`CudaBackend::uniform_for`] for why this is keyed on the dispatch's
+    /// structure rather than allocated per step, and why writing the
+    /// parameters into it is therefore deferred to `submit`.
     uniform: Option<Arc<exec::DeviceMem>>,
+    /// This step's own parameter words, carried rather than uploaded at record
+    /// time. Empty when the caller supplied the uniform buffer itself
+    /// (`step_buf`), in which case this backend has nothing to copy into it.
+    params: Vec<u32>,
     /// `(allocation, byte offset)` per storage binding, in binding order. The
     /// offset is how a sliced step expresses its sub-range: a kernel argument
     /// is a bare pointer, so the slice IS the address.
@@ -84,18 +107,80 @@ pub struct CudaStep {
 }
 
 /// One compiled kernel, cached under its `kind`.
-struct Compiled {
-    module: exec::Module,
-    entry: String,
+pub(crate) struct Compiled {
+    /// The entry point, resolved once when the module was loaded rather than
+    /// at every dispatch. `cuModuleGetFunction` is a driver call, and a
+    /// submission of a few thousand steps was paying one per step for an
+    /// answer that cannot change while the module is loaded - which this
+    /// struct guarantees, because it owns the module.
+    pub(crate) func: CuFunction,
+    /// Owned, never read: `func` is a handle INTO this module and is valid
+    /// only while it stays loaded, so the module's lifetime is the whole
+    /// reason it is here.
+    _module: exec::Module,
     /// Threads per block. For a catalogue kernel this is the WGSL
     /// `@workgroup_size` and for a native one the block size the source's own
     /// index arithmetic is written against - never a tuning knob either way.
-    block_dim: u32,
+    pub(crate) block_dim: u32,
     n_bindings: usize,
     takes_uniform: bool,
     /// Diagnostic name, so a launch failure says which kernel failed whether
     /// it came from the WGSL catalogue or from a provider's own registry.
     name: String,
+}
+
+/// What a uniform allocation is shared by: the dispatch's **structure**, with
+/// its parameter VALUES and its thread count deliberately left out.
+///
+/// Excluding the values is the whole basis of graph replay - see
+/// [`CudaBackend::uniform_for`]. Excluding the thread count is the less
+/// obvious half and matters just as much: the grid is not a property of the
+/// storage, and keying on it would hand every advancing sequence position a
+/// fresh uniform address, which is precisely the event
+/// `cuGraphExecKernelNodeSetParams` exists to survive. The parameter *length*
+/// is in the key because it is the allocation's size, which is structure.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct UniformKey {
+    kind: usize,
+    words: usize,
+    bufs: Vec<(usize, u64)>,
+}
+
+/// A cached uniform allocation, plus proof that the key still means what it
+/// meant.
+///
+/// The key identifies buffers by the address of their `Arc`. A raw address is
+/// only an identity while the thing at it is alive, so the weak handles are
+/// what make the key safe to trust: a `Weak` reserves the allocation's slot,
+/// so no later `Arc` can occupy that address, and a dead one says this entry
+/// describes buffers that no longer exist.
+struct UniformSlot {
+    mem: Arc<exec::DeviceMem>,
+    keep: Vec<Weak<exec::DeviceMem>>,
+}
+
+/// Page-locked host blocks the unbatched path stages its parameters through.
+///
+/// It exists because the obvious alternative is a trap. A *synchronous*
+/// host-to-device copy runs on the legacy default stream, and the legacy
+/// stream is ordered against every blocking stream in the context - so one
+/// synchronous uniform upload per dispatch does not merely cost a driver call,
+/// it drains the device between every pair of dispatches. That was measured:
+/// eight back-to-back dispatches of one kernel took an order of magnitude
+/// longer that way than as eight launches with the uploads already done.
+///
+/// So the upload is enqueued on the dispatch stream instead, which requires
+/// page-locked source memory that stays untouched until the copy runs. A block
+/// is lent to a submission and only returns to the pool once the device has
+/// drained - `read`/`poll_wait`, which a decode step performs every token.
+#[derive(Default)]
+struct StagingPool {
+    /// Available blocks, keyed by exact length in words so a lent block is
+    /// always the size the copy it serves expects.
+    free: HashMap<usize, Vec<exec::PinnedMem>>,
+    /// Blocks a submission has used, whose copies the device may not have run
+    /// yet. Reusing one of these would overwrite a pending upload's source.
+    lent: Vec<exec::PinnedMem>,
 }
 
 /// What the handle knows about one registered kernel before anything compiles
@@ -117,6 +202,7 @@ struct Counters {
     writes: AtomicU64,
     host_launches: AtomicU64,
     host_nanos: AtomicU64,
+    graph: GraphCounters,
 }
 
 /// What submitting cost the **host**, as distinct from what the host asked the
@@ -152,11 +238,24 @@ pub struct LaunchStats {
     pub host_launches: u64,
     /// Cumulative wall-clock nanoseconds spent inside `submit`.
     pub host_nanos: u64,
+    /// Submissions recorded into a CUDA graph. One per distinct repeated
+    /// shape; a number that keeps climbing says the shape is not actually
+    /// repeating, or that something keeps invalidating it.
+    pub graph_captures: u64,
+    /// Submissions answered by replaying an already captured graph. This is
+    /// the count `host_launches` stops growing in exchange for.
+    pub graph_replays: u64,
+    /// Kernel nodes re-pointed at a new grid inside an already instantiated
+    /// graph - a sequence length advancing, in the loop this exists for.
+    pub grid_updates: u64,
+    /// Replays that had to wait for the device before overwriting their
+    /// parameter staging. Zero whenever the caller reads between submissions,
+    /// which a decoder does every token.
+    pub staging_waits: u64,
 }
 
 /// A brain compute device driven by the CUDA Driver API.
 pub struct CudaBackend {
-    ctx: exec::Context,
     kernels: Vec<KernelSrc>,
     /// `kind` -> compiled kernel, populated on first dispatch. The lock is
     /// held across the NVRTC compile: a duplicate compile of the same kernel
@@ -178,9 +277,32 @@ pub struct CudaBackend {
     /// panic three dispatches later, by which time the provider has already
     /// promised to serve the request.
     native: Mutex<Vec<Arc<Compiled>>>,
+    /// Uniform allocations shared by every step of the same shape - see
+    /// [`UniformKey`].
+    uniforms: Mutex<HashMap<UniformKey, UniformSlot>>,
+    /// Page-locked staging for the unbatched path - see [`StagingPool`].
+    staging: Mutex<StagingPool>,
+    /// The capture state machine. `None` when this handle will never capture:
+    /// either the caller turned it off, or this driver has no graph entry
+    /// points, which costs launch batching and nothing else.
+    graph: Option<Mutex<GraphCache>>,
+    /// Set only while a stream capture is open. `read`/`poll_wait` refuse
+    /// while it is: a synchronising call from a capturing thread aborts the
+    /// capture, and a capture is open for a few microseconds inside one
+    /// `submit`, so anything that sees this flag is on another thread and is
+    /// about to corrupt a graph rather than read a buffer.
+    capturing: AtomicBool,
     caps: DeviceCaps,
     identity: GpuIdentity,
     counters: Counters,
+    /// **Last field on purpose.** Rust drops a struct's fields in declaration
+    /// order, and every other field above either holds device memory, a loaded
+    /// module or an instantiated graph - all of which are resources OF this
+    /// context and must be released before it is. With the context first, its
+    /// release ran while those were still live, and tearing down a context out
+    /// from under its own resources faults inside the driver rather than
+    /// returning an error anything could report.
+    ctx: exec::Context,
 }
 
 impl CudaBackend {
@@ -193,6 +315,13 @@ impl CudaBackend {
         let ctx = exec::Context::open(ordinal)?;
         let caps = query_caps(&ctx)?;
         let identity = ctx.device_info().identity();
+        let graph = match ctx.graphs() {
+            Ok(_) => Some(Mutex::new(GraphCache::default())),
+            Err(e) => {
+                tracing::info!(reason = %e, "backend-cuda: this driver cannot capture graphs; every dispatch will be launched on its own");
+                None
+            }
+        };
         Ok(CudaBackend {
             kernels: kernels
                 .iter()
@@ -205,10 +334,39 @@ impl CudaBackend {
             ctx,
             compiled: Mutex::new(HashMap::new()),
             native: Mutex::new(Vec::new()),
+            uniforms: Mutex::new(HashMap::new()),
+            staging: Mutex::new(StagingPool::default()),
+            graph,
+            capturing: AtomicBool::new(false),
             caps,
             identity,
             counters: Counters::default(),
         })
+    }
+
+    /// Turn submission capture off (or back on) for this handle.
+    ///
+    /// On by default where the driver supports it. The knob exists because the
+    /// two paths must be comparable: the claim "replaying costs the host less"
+    /// is only measurable against the same handle type doing the same work
+    /// without it, and a mechanism whose benefit cannot be measured cannot be
+    /// shown to have regressed either.
+    pub fn with_graph_capture(mut self, on: bool) -> CudaBackend {
+        // Turning it off discards whatever was captured, which is why the
+        // teardown wait belongs here as well as in `Drop`: a captured graph's
+        // pinned staging must not be freed while the device might still be
+        // reading it.
+        if !on && self.graph.is_some() {
+            let _ = self.ctx.sync();
+        }
+        if on {
+            if self.graph.is_none() && self.ctx.graphs().is_ok() {
+                self.graph = Some(Mutex::new(GraphCache::default()));
+            }
+        } else {
+            self.graph = None;
+        }
+        self
     }
 
     /// Open the first CUDA device this driver exposes.
@@ -306,13 +464,16 @@ impl CudaBackend {
         let module = self.ctx.compile(&gen.source, &gen.entry).unwrap_or_else(|e| {
             panic!("backend-cuda: NVRTC rejected the generated source for kernel '{}': {e}", k.name)
         });
+        let func = module.function(&gen.entry).unwrap_or_else(|e| {
+            panic!("backend-cuda: generated kernel '{}' has no entry point '{}': {e}", k.name, gen.entry)
+        });
         let c = Arc::new(Compiled {
-            module,
-            entry: gen.entry,
+            func: func.raw(),
             block_dim: gen.block_dim,
             n_bindings: gen.bindings.len(),
             takes_uniform: gen.uniform_bytes > 0,
             name: k.name.clone(),
+            _module: module,
         });
         tracing::debug!(kernel = %k.name, block_dim = c.block_dim, "backend-cuda compiled a kernel");
         cache.insert(kind, c.clone());
@@ -325,33 +486,65 @@ impl CudaBackend {
             .unwrap_or_else(|e| panic!("backend-cuda: allocating {bytes} bytes for {what} failed: {e}"))
     }
 
-    /// A single-use uniform allocation holding `params`.
+    /// The uniform allocation every step of this shape shares.
     ///
-    /// Per step, deliberately: `Backend::step`'s contract is a fresh uniform
-    /// per dispatch, and a shared one would be overwritten by the next
-    /// recorded step before the first had run. Recycling these is what the
-    /// graph-capture work needs and is not attempted here.
-    fn uniform(&self, params: &[u32]) -> Arc<exec::DeviceMem> {
-        self.counters.uniform_allocs.fetch_add(1, Ordering::Relaxed);
-        let bytes = (params.len() * 4).max(4) as u64;
-        let mem = self.alloc(bytes, "a step's uniform stream");
-        if !params.is_empty() {
-            self.ctx
-                .upload(&mem, bytemuck_words(params))
-                .unwrap_or_else(|e| panic!("backend-cuda: uploading a step's uniform failed: {e}"));
+    /// Not one per step, and the reason is the whole basis of graph capture: a
+    /// graph node holds a device *address*, so a uniform allocated afresh per
+    /// dispatch would give every token a new address and no submission would
+    /// ever be replayable. The key is therefore the dispatch's structure - the
+    /// kernel, the buffers it binds and the size of its parameter block - with
+    /// the parameter VALUES excluded, so that a position advancing by one
+    /// reuses the same storage rather than invalidating everything.
+    ///
+    /// What that buys is paid for in `submit` rather than here: two steps of
+    /// the same shape in one submission now share storage, so the parameters
+    /// cannot be uploaded when the step is recorded (the second would
+    /// overwrite the first before either had run). They are uploaded in stream
+    /// order between the two dispatches instead, which is correct for the same
+    /// reason the dispatches themselves are ordered.
+    fn uniform_for(&self, kind: usize, bufs: &[(Arc<exec::DeviceMem>, u64)], words: usize) -> Arc<exec::DeviceMem> {
+        let key = UniformKey {
+            kind,
+            words,
+            bufs: bufs.iter().map(|(m, o)| (Arc::as_ptr(m) as usize, *o)).collect(),
+        };
+        let mut cache = self.uniforms.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(slot) = cache.get(&key) {
+            if slot.keep.iter().all(|w| w.strong_count() > 0) {
+                return slot.mem.clone();
+            }
+            // The key's addresses no longer name the buffers they were formed
+            // from, so the entry is meaningless rather than stale.
+            cache.remove(&key);
         }
-        Arc::new(mem)
+        // Entries whose buffers are gone are the only thing that can make this
+        // map grow without bound, and they can only be found by looking, so
+        // the sweep is here rather than on a timer.
+        if cache.len() >= 4096 {
+            cache.retain(|_, s| s.keep.iter().all(|w| w.strong_count() > 0));
+        }
+        self.counters.uniform_allocs.fetch_add(1, Ordering::Relaxed);
+        let mem = Arc::new(self.alloc((words * 4).max(4) as u64, "a step's uniform stream"));
+        // Zeroed: a kernel that declares a uniform block wider than the
+        // parameters a caller supplied would otherwise read whatever the last
+        // tenant of this address left, and `cuMemAlloc` promises nothing.
+        self.ctx.zero(&mem).unwrap_or_else(|e| panic!("backend-cuda: zeroing a uniform failed: {e}"));
+        cache.insert(
+            key,
+            UniformSlot { mem: mem.clone(), keep: bufs.iter().map(|(m, _)| Arc::downgrade(m)).collect() },
+        );
+        mem
     }
 
     fn record(
         &self,
         kind: usize,
-        ubuf: Option<Arc<exec::DeviceMem>>,
         bufs: &[&DeviceBuffer],
         offsets: Option<&[(u64, u64)]>,
+        params: &[u32],
         threads: u32,
     ) -> Step {
-        let bufs = bufs
+        let bufs: Vec<_> = bufs
             .iter()
             .enumerate()
             .map(|(i, b)| {
@@ -359,10 +552,17 @@ impl CudaBackend {
                 (CudaBuf::of(b).mem.clone(), off_words * 4)
             })
             .collect();
-        Step::new(CudaStep { kind, threads, uniform: ubuf, bufs })
+        let uniform = Some(self.uniform_for(kind, &bufs, params.len()));
+        Step::new(CudaStep { kind, threads, uniform, params: params.to_vec(), bufs })
     }
 
-    fn launch(&self, st: &CudaStep) {
+    /// Everything a dispatch needs, resolved before anything is issued.
+    ///
+    /// Compilation and entry-point lookup happen HERE rather than at launch,
+    /// because both may run NVRTC and load a module, and neither is a stream
+    /// operation - performing either inside an open capture is the class of
+    /// call a capture rejects.
+    fn resolve(&self, st: &CudaStep) -> Resolved {
         let c = self.compiled_for(st.kind);
         let name = &c.name;
         assert_eq!(
@@ -373,15 +573,19 @@ impl CudaBackend {
             st.bufs.len()
         );
         let mut args: Vec<CuDevicePtr> = Vec::with_capacity(st.bufs.len() + 1);
-        if c.takes_uniform {
+        let uniform = if c.takes_uniform {
             let u = st.uniform.as_ref().unwrap_or_else(|| {
                 panic!("backend-cuda: kernel '{name}' declares a uniform block but the dispatch bound none")
             });
             args.push(u.device_ptr());
-        }
+            Some(u.clone())
+        } else {
+            None
+        };
         for (mem, off) in &st.bufs {
             args.push(mem.device_ptr() + off);
         }
+        let func = c.func;
         // A catalogue dispatch counts INVOCATIONS and the grid is laid out by
         // dividing them across the kernel's declared work-group size; a
         // native dispatch counts BLOCKS directly (see
@@ -391,30 +595,154 @@ impl CudaBackend {
         // `block_dim` times too few blocks and silently leave most of the
         // output unwritten.
         let per_block = if st.kind >= self.native_base() { 1 } else { c.block_dim };
-        let (gx, gy) = grid_ws(st.threads, per_block);
-        let f = self
-            .module_entry(&c)
-            .unwrap_or_else(|e| panic!("backend-cuda: kernel '{name}' has no entry point '{}': {e}", c.entry));
-        self.ctx
-            .launch_at(&f, (gx, gy, 1), (c.block_dim, 1, 1), &args)
-            .unwrap_or_else(|e| panic!("backend-cuda: launching kernel '{name}' failed: {e}"));
-        self.counters.dispatches.fetch_add(1, Ordering::Relaxed);
+        Resolved {
+            func,
+            args,
+            per_block,
+            threads: st.threads,
+            params: st.params.clone(),
+            uniform,
+            bufs: st.bufs.clone(),
+            compiled: c,
+        }
+    }
+
+    /// A page-locked block of exactly `words`, lent until the device drains.
+    ///
+    /// The device-drain condition is what makes reuse safe, and it is checked
+    /// rather than assumed: a block only returns to the pool through
+    /// [`Self::recycle_staging`], which is called where the host has just
+    /// synchronised. If a caller never synchronises, the pool grows until the
+    /// cap below forces a synchronise of its own - slow, but never wrong.
+    fn staging_for(&self, words: &[u32]) -> exec::PinnedMem {
+        /// Enough lent blocks to say the caller is not synchronising at all.
+        /// A decode step returns everything it borrowed every token.
+        const CAP: usize = 8192;
+        let mut pool = self.staging.lock().unwrap_or_else(|e| e.into_inner());
+        if pool.lent.len() >= CAP && pool.free.get(&words.len()).is_none_or(Vec::is_empty) {
+            drop(pool);
+            self.ctx.sync().unwrap_or_else(|e| panic!("backend-cuda: device synchronise failed: {e}"));
+            self.recycle_staging();
+            pool = self.staging.lock().unwrap_or_else(|e| e.into_inner());
+        }
+        let block = match pool.free.get_mut(&words.len()).and_then(Vec::pop) {
+            Some(b) => b,
+            None => self
+                .ctx
+                .pinned(words.len())
+                .unwrap_or_else(|e| panic!("backend-cuda: page-locked staging of {} words: {e}", words.len())),
+        };
+        block.fill(words);
+        block
+    }
+
+    /// Hand a used staging block back to the pool as lent.
+    fn lend_staging(&self, block: exec::PinnedMem) {
+        self.staging.lock().unwrap_or_else(|e| e.into_inner()).lent.push(block);
+    }
+
+    /// The device has drained, so every lent block's copy has run.
+    fn recycle_staging(&self) {
+        let mut pool = self.staging.lock().unwrap_or_else(|e| e.into_inner());
+        let lent = std::mem::take(&mut pool.lent);
+        for b in lent {
+            pool.free.entry(b.words()).or_default().push(b);
+        }
+    }
+
+    /// Issue one resolved dispatch on its own - the unbatched path, and the
+    /// answer whenever a submission's shape is new.
+    fn issue(&self, r: &Resolved) {
+        if let (Some(u), false) = (r.uniform.as_ref(), r.params.is_empty()) {
+            // Enqueued on the dispatch stream, NOT performed synchronously.
+            // A synchronous copy would run on the legacy stream and therefore
+            // drain the device between every pair of dispatches - see
+            // `StagingPool`. On the stream it is simply ordered: the previous
+            // step's kernel has read this shared uniform before the next step
+            // overwrites it.
+            let stage = self.staging_for(&r.params);
+            self.ctx
+                .upload_async(u, &stage)
+                .unwrap_or_else(|e| panic!("backend-cuda: uploading a step's uniform failed: {e}"));
+            self.lend_staging(stage);
+        }
+        let (gx, gy) = grid_ws(r.threads, r.per_block);
+        // SAFETY: `r.func` was resolved from `r.compiled`'s module, which `r`
+        // holds an `Arc` to, and `r.args` is that entry point's argument list.
+        unsafe { self.ctx.launch_raw(r.func, (gx, gy, 1), (r.compiled.block_dim, 1, 1), &r.args) }
+            .unwrap_or_else(|e| panic!("backend-cuda: launching kernel '{}' failed: {e}", r.compiled.name));
         self.counters.host_launches.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// The structure of a submission, as [`SubmitSig`] defines it.
+    fn signature(&self, clears: &[Arc<exec::DeviceMem>], steps: &[Resolved]) -> SubmitSig {
+        SubmitSig {
+            clears: clears.iter().map(|m| Arc::as_ptr(m) as usize).collect(),
+            nodes: steps
+                .iter()
+                .map(|r| NodeSig {
+                    kernel: Arc::as_ptr(&r.compiled) as usize,
+                    uniform: r.uniform.as_ref().map(|u| Arc::as_ptr(u) as usize).unwrap_or(0),
+                    words: r.params.len(),
+                    bufs: r.bufs.iter().map(|(m, off)| (Arc::as_ptr(m) as usize, *off)).collect(),
+                })
+                .collect(),
+        }
     }
 
     /// What this handle's submissions have cost the host so far - see
     /// [`LaunchStats`].
     pub fn launch_stats(&self) -> LaunchStats {
+        let g = &self.counters.graph;
         LaunchStats {
             submits: self.counters.submits.load(Ordering::Relaxed),
             dispatches: self.counters.dispatches.load(Ordering::Relaxed),
             host_launches: self.counters.host_launches.load(Ordering::Relaxed),
             host_nanos: self.counters.host_nanos.load(Ordering::Relaxed),
+            graph_captures: g.captures.load(Ordering::Relaxed),
+            graph_replays: g.replays.load(Ordering::Relaxed),
+            grid_updates: g.grid_updates.load(Ordering::Relaxed),
+            staging_waits: g.staging_waits.load(Ordering::Relaxed),
         }
     }
 
-    fn module_entry<'a>(&self, c: &'a Compiled) -> Result<exec::Function<'a>, String> {
-        c.module.function(&c.entry)
+    /// Refuse a synchronising call that arrived while a capture is open.
+    ///
+    /// A capture is open for a few microseconds inside one `submit`, so an
+    /// in-thread violation is structurally impossible - which is exactly why
+    /// this check earns its place: what it catches is another thread reaching
+    /// the same handle, where the consequence is not a slow read but a capture
+    /// aborted mid-recording and a graph that silently never forms.
+    fn refuse_during_capture(&self, what: &str) {
+        assert!(
+            !self.capturing.load(Ordering::Acquire),
+            "backend-cuda: {what} was called while this handle was capturing a submission. A \
+             synchronising call from inside a capture invalidates it; capture is confined to one \
+             `submit`, so this came from another thread sharing the handle."
+        );
+    }
+
+}
+
+// `Compiled` owns a loaded module and the entry-point handle resolved out of
+// it. Both are opaque driver handles that are used under `cuCtxSetCurrent`,
+// and the struct is immutable once built.
+unsafe impl Send for Compiled {}
+unsafe impl Sync for Compiled {}
+
+impl Drop for CudaBackend {
+    /// Wait for the device before anything this handle owns is released.
+    ///
+    /// `submit` does not wait, so a handle can be dropped with work still
+    /// running, and among the things dropped are page-locked staging blocks a
+    /// captured graph's copy nodes may not have read yet. Freeing host memory
+    /// that a transfer is reading is a fault or a corruption, not an error
+    /// code - and unlike an instantiated graph (which the driver holds until
+    /// its pending launches finish) nothing defers it.
+    fn drop(&mut self) {
+        if let Err(e) = self.ctx.sync() {
+            tracing::warn!(reason = %e, "backend-cuda: synchronising before tearing a handle down failed");
+        }
     }
 }
 
@@ -526,8 +854,7 @@ impl backend_api::Backend for CudaBackend {
     }
 
     fn step(&self, kind: usize, bufs: &[&DeviceBuffer], params: &[u32], threads: u32) -> Step {
-        let u = self.uniform(params);
-        self.record(kind, Some(u), bufs, None, threads)
+        self.record(kind, bufs, None, params, threads)
     }
 
     fn step_sliced(
@@ -545,13 +872,17 @@ impl backend_api::Backend for CudaBackend {
             offsets.len(),
             bufs.len()
         );
-        let u = self.uniform(params);
-        self.record(kind, Some(u), bufs, Some(offsets), threads)
+        self.record(kind, bufs, Some(offsets), params, threads)
     }
 
+    /// The caller owns the uniform buffer here, so this backend has no
+    /// parameters of its own to copy into it: `params` stays empty and no copy
+    /// node is recorded for this step. Whatever the caller writes into that
+    /// buffer is what the kernel reads, replay or not.
     fn step_buf(&self, kind: usize, ubuf: &DeviceBuffer, bufs: &[&DeviceBuffer], threads: u32) -> Step {
-        let u = CudaBuf::of(ubuf).mem.clone();
-        self.record(kind, Some(u), bufs, None, threads)
+        let uniform = Some(CudaBuf::of(ubuf).mem.clone());
+        let bufs = bufs.iter().map(|b| (CudaBuf::of(b).mem.clone(), 0)).collect();
+        Step::new(CudaStep { kind, threads, uniform, params: Vec::new(), bufs })
     }
 
     /// Compile and keep a provider's OWN CUDA C++ kernel, for the compute
@@ -604,14 +935,18 @@ impl backend_api::Backend for CudaBackend {
         // Resolve the entry point NOW. A name that is not in the module is a
         // defect in the kernel's own registry metadata, and finding it at
         // registration means the provider gets a `None` it can fall back
-        // from instead of a panic at the first dispatch.
-        if let Err(e) = module.function(entry) {
-            tracing::info!(entry = %entry, reason = %e, "backend-cuda: a native kernel has no such entry point");
-            return None;
-        }
+        // from instead of a panic at the first dispatch. The handle is kept:
+        // it cannot change while the module is loaded, and this struct owns
+        // the module.
+        let func = match module.function(entry) {
+            Ok(f) => f.raw(),
+            Err(e) => {
+                tracing::info!(entry = %entry, reason = %e, "backend-cuda: a native kernel has no such entry point");
+                return None;
+            }
+        };
         let c = Arc::new(Compiled {
-            module,
-            entry: (*entry).to_string(),
+            func,
             block_dim: *block_dim,
             // STORAGE bindings only - the uniform is counted separately
             // below, exactly as it is for a generated kernel (whose
@@ -622,6 +957,7 @@ impl backend_api::Backend for CudaBackend {
             // it is for a generated one.
             takes_uniform: bindings.contains(&backend_api::BindKind::Uniform),
             name: format!("native:{entry}"),
+            _module: module,
         });
         let mut native = self.native.lock().unwrap_or_else(|e| e.into_inner());
         native.push(c);
@@ -664,8 +1000,7 @@ impl backend_api::Backend for CudaBackend {
             // wrong kernel.
             return None;
         }
-        let u = self.uniform(params);
-        Some(self.record(kind, Some(u), bufs, Some(offsets), threads))
+        Some(self.record(kind, bufs, Some(offsets), params, threads))
     }
 
     fn submit(&self, clears: &[&DeviceBuffer], steps: &[Step]) {
@@ -675,18 +1010,85 @@ impl backend_api::Backend for CudaBackend {
         // measurement smuggled in under a host name.
         let t0 = std::time::Instant::now();
         self.counters.submits.fetch_add(1, Ordering::Relaxed);
-        for c in clears {
-            self.ctx
-                .zero(&CudaBuf::of(c).mem)
-                .unwrap_or_else(|e| panic!("backend-cuda: clearing a buffer failed: {e}"));
+        let clears: Vec<Arc<exec::DeviceMem>> = clears.iter().map(|c| CudaBuf::of(c).mem.clone()).collect();
+        // Resolved up front, before anything is issued and before any capture
+        // opens - compiling a kernel is not a stream operation.
+        let resolved: Vec<Resolved> = steps.iter().map(|s| self.resolve(s.downcast_ref::<CudaStep>())).collect();
+        self.counters.dispatches.fetch_add(resolved.len() as u64, Ordering::Relaxed);
+
+        let mut handled = false;
+        let mut give_up = false;
+        if let Some(cache) = &self.graph {
+            let mut cache = cache.lock().unwrap_or_else(|e| e.into_inner());
+            let sig = self.signature(&clears, &resolved);
+            // Read AFTER the signature is built: every allocation the
+            // signature names is held by a `Resolved`, so nothing it describes
+            // can be freed between the two.
+            let epoch = self.ctx.alloc_epoch();
+            let plan = cache.plan(&self.ctx, &sig, epoch);
+            let outcome = match plan {
+                Plan::Eager => Ok(false),
+                Plan::Replay(at) => cache.replay(&self.ctx, at, &resolved, &self.counters.graph).map(|()| true),
+                Plan::Capture => {
+                    self.capturing.store(true, Ordering::Release);
+                    let mut r = cache.capture(
+                        &self.ctx,
+                        &sig,
+                        epoch,
+                        &clears,
+                        &resolved,
+                        &self.counters.graph,
+                    );
+                    self.capturing.store(false, Ordering::Release);
+                    if r.is_ok() {
+                        // Recording a launch IS a launch call into the driver;
+                        // it just does not execute. Counting it keeps
+                        // `host_launches` the honest total of what the host
+                        // paid, so a capture reads as a one-off cost rather
+                        // than as free.
+                        self.counters.host_launches.fetch_add(resolved.len() as u64, Ordering::Relaxed);
+                        // Index 0 is the capture that just happened - a
+                        // capture records the work but does not run it, so the
+                        // submission is still owed its execution.
+                        r = cache.replay(&self.ctx, 0, &resolved, &self.counters.graph);
+                    }
+                    r.map(|()| true)
+                }
+            };
+            match outcome {
+                Ok(done) => handled = done,
+                Err(e) => {
+                    // Capture is an optimisation and nothing else, so a
+                    // failure costs batching rather than the submission: the
+                    // recorded work was swallowed by the capture rather than
+                    // executed, so falling through re-issues all of it.
+                    tracing::warn!(reason = %e, "backend-cuda: submission capture failed; launching each dispatch");
+                    give_up = cache.forget(&self.ctx);
+                }
+            }
         }
-        for s in steps {
-            self.launch(s.downcast_ref::<CudaStep>());
+
+        if give_up {
+            tracing::warn!(
+                "backend-cuda: submission capture has failed repeatedly on this handle and will not be \
+                 attempted again; every dispatch will be launched on its own"
+            );
+        }
+        if !handled {
+            for c in &clears {
+                self.ctx
+                    .zero_async(c)
+                    .unwrap_or_else(|e| panic!("backend-cuda: clearing a buffer failed: {e}"));
+            }
+            for r in &resolved {
+                self.issue(r);
+            }
         }
         self.counters.host_nanos.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
 
     fn read(&self, buf: &DeviceBuffer, n: usize) -> Vec<f32> {
+        self.refuse_during_capture("read");
         self.counters.readbacks.fetch_add(1, Ordering::Relaxed);
         // A launch reports only the errors it can see BEFORE running, so this
         // synchronise is where a faulting kernel is actually reported - and it
@@ -702,8 +1104,19 @@ impl backend_api::Backend for CudaBackend {
         out
     }
 
+    /// Block until the device has finished everything submitted so far.
+    ///
+    /// This is also the point the capture machinery learns the device has
+    /// drained, which is what lets a replay overwrite its parameter staging
+    /// without waiting: a decoder reads its logits between submissions, so the
+    /// wait has already happened by the time the next one is built.
     fn poll_wait(&self) {
+        self.refuse_during_capture("poll_wait");
         self.ctx.sync().unwrap_or_else(|e| panic!("backend-cuda: device synchronise failed: {e}"));
+        self.recycle_staging();
+        if let Some(cache) = &self.graph {
+            cache.lock().unwrap_or_else(|e| e.into_inner()).drained();
+        }
     }
 
     fn kind(&self) -> &'static str {

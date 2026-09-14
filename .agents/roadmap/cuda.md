@@ -574,6 +574,112 @@ ship, and `Ops::matmul_dx`/`matmul_dw` are additionally exercised by
 When a non-WGSL provider claims either, the fixture it needs should be
 written then, against that provider's actual operand bundle.
 
+### CUDA Graphs - a repeated submission is captured once and replayed
+
+`submit` no longer issues one driver call per dispatch when the submission's
+shape repeats. The second identical submission is recorded into a CUDA graph;
+every one after that is a single `cuGraphLaunch`.
+
+**What that is worth, measured rather than assumed.** The driver-call
+collapse is exact and asserted: at 64 dispatches per submission the host makes
+128 calls (a parameter upload and a launch each) on the unbatched path and one
+on the replay path. The host-TIME saving is smaller than that ratio, because
+the calls are no longer the largest term: both paths first resolve every step
+to its kernel and argument list and build the submission's signature to
+compare against the captured one, and at this shape that bookkeeping now costs
+more than the driver calls did. Replaying has measured between 0.62 and 0.78
+of the unbatched host time, repeatably, and the test's bar is 0.9. Reducing
+the bookkeeping - it allocates per step, per submission - is where the next
+host-cost work is, and it would benefit both paths.
+
+Four things had to be true, and each is asserted in
+`crates/backend-cuda/tests/cuda_graphs.rs` rather than argued for:
+
+1. **A per-step parameter change must not move a device address.** The uniform
+   allocation is keyed on `(kind, buffers+offsets, parameter word count)` -
+   the dispatch's structure, with the parameter VALUES excluded - and each
+   step's first graph node copies that step's own parameters into it from
+   page-locked host staging. Pinned because a copy from pageable memory is
+   rejected during capture. The key also excludes `threads`, which the plan
+   listed: the grid is not a property of the storage, and keying on it would
+   hand every advancing position a fresh uniform address, which is exactly
+   the event the next point exists to survive.
+2. **A grid that grows must not force a second graph.** It is re-pointed with
+   `cuGraphExecKernelNodeSetParams` inside the already instantiated graph.
+   Node handles come from `cuStreamGetCaptureInfo_v2` read immediately after
+   each recorded launch - `cuGraphGetNodes` returns nodes in an unspecified
+   order and cannot say which node came from which launch.
+3. **A free must invalidate the graph.** `Context` carries an `alloc_epoch`
+   bumped in `DeviceMem`'s `Drop` - the one place a free actually happens -
+   and a captured graph records the epoch it was captured at. The guard is
+   coarse on purpose: any free at all, not an analysis of which addresses
+   moved.
+4. **`read`/`poll_wait` must never land inside a captured region.** Capture
+   begins and ends inside one `submit`, so a read can only fall between two
+   submissions; kernel compilation, module loading and entry-point resolution
+   are hoisted out of the region for the same reason. The confinement is
+   checked, not asserted in prose: the backend refuses a `read` or a
+   `poll_wait` that arrives while the capture flag is set (which can only be
+   another thread), and one test drives the read-per-submission loop a decoder
+   actually performs. Capture uses `CU_STREAM_CAPTURE_MODE_THREAD_LOCAL`, so
+   the restriction never reaches brain's other threads, devices or backends.
+
+The capture stream is created (`cuStreamCreate` with `CU_STREAM_DEFAULT`)
+rather than being the legacy default stream, which cannot be captured. It is
+created *blocking* so the synchronous host transfers that still use the legacy
+stream stay ordered against it exactly as they were when everything shared one
+stream.
+
+Capture is **on by default** where the driver exposes the entry points, and
+`CudaBackend::with_graph_capture(false)` turns it off. It is validated end to
+end, not only in isolation: `crates/gpt2/tests/cuda_backend_parity.rs` runs a
+real forward through this path and still reports `maxabs 8.940697e-8` against
+both the CPU and the Vulkan backends, unchanged from before graphs existed.
+
+Two counters that did not exist were built first, because the claim is not
+observable without them: `CudaBackend::launch_stats` reports `host_launches`
+(driver launch calls the host actually made, which `DeviceStats::dispatches`
+cannot distinguish) and `host_nanos` (wall-clock inside `submit`, which never
+waits for the device), alongside `graph_captures`, `graph_replays`,
+`grid_updates` and `staging_waits`.
+
+**`staging_waits` is the honest cost, and it is counted rather than hidden.**
+A replay that must CHANGE something the in-flight graph is still using - new
+parameter words in a staging block, or a new grid in the instantiated graph -
+has to wait for the device first. Neither loop this exists for pays it: a
+decoder's parameters change every token but it reads its logits between
+submissions, which already drains the device, and a loop that resubmits an
+unchanged shape has nothing to change. The counter is what makes a third kind
+of caller - one that changes parameters every submission and never reads -
+visible as a number rather than as unexplained slowness; it gets correct
+answers at roughly the unbatched cost.
+
+A handle keeps up to four captured graphs rather than one, and that is a
+measurement rather than a preference: instantiating costs milliseconds, so a
+caller alternating between two shapes with a single slot re-instantiates on
+every switch and ends up slower than launching each dispatch.
+
+Two defects were found and fixed while doing this, both in code that predates
+it: `CudaBackend` listed its `Context` as its FIRST field, so Rust dropped the
+context before the device memory, modules and graphs that are resources of it
+(it now drops last, and the field carries the reason); and every dispatch paid
+a `cuModuleGetFunction` for an answer that cannot change while the module is
+loaded, which is now resolved once at compile time.
+
+A third was introduced by this work and caught by a whole-suite run rather
+than a targeted one, which is worth recording because the targeted run could
+not have caught it. Sharing the uniform allocation means the parameters can no
+longer be uploaded when a step is recorded, so they moved into `submit` - and
+a *synchronous* host-to-device copy runs on the legacy default stream, which
+is ordered against every blocking stream in the context. One of those per
+dispatch does not cost a driver call, it drains the device between every pair
+of dispatches, and eight back-to-back dispatches of one kernel took an order
+of magnitude longer than before. The uploads are now enqueued on the dispatch
+stream from a pool of page-locked blocks that are lent to a submission and
+returned when the device next drains (`StagingPool`). The unbatched path is
+now faster than it was before this work, not slower: it also no longer
+allocates a device uniform per step.
+
 ## Not delivered - what is still missing
 
 **One model's forward, one tuned kernel. Backward, breadth and every other
@@ -677,6 +783,32 @@ tuned kernel are deferred.**
   (`crates/gpu-core/src/devices.rs`, for `BRAIN_DEVICE`). If one is added it
   owes `docs/using/configuration.md` an entry (`check-env-docs.sh`) and must
   be read in that same single file.
+- **Four captured graphs at most, per handle.** Instantiation costs
+  milliseconds, so it only pays amortised over many replays; a caller
+  alternating between more than four shapes evicts and re-instantiates, and
+  would be slower than launching each dispatch. The number is a judgement,
+  not a measurement of where the knee is.
+- **Graph capture has no CLI or environment surface.** It is on by default and
+  `CudaBackend::with_graph_capture(false)` is the only way off, which is a
+  Rust call - fine for a test, not for someone bisecting a suspected capture
+  bug on a running system. Adding a flag owes the same two gates
+  `BRAIN_BACKEND` would.
+- **Nothing reports capture state to a human.** `brain devices` does not say
+  whether a device is batching submissions, `braintop` shows no
+  `graph_replays`, and `launch_stats` is reachable only from Rust. The
+  `staging_waits` counter in particular is a field diagnostic that currently
+  nothing in the field can read.
+- **A submission with two same-shaped steps carrying different parameters is
+  correct but serialising.** They share one uniform allocation, so the copy
+  of the second must wait for the first's kernel; the replay path expresses
+  that as graph edges, which is right, but a submission full of such pairs
+  has less parallelism available than one with private uniforms would. Not
+  observed to matter, not measured either.
+- **Graph capture is validated on one model's forward.** `gpt2`'s tiny
+  cross-backend parity runs through it and still agrees to `8.940697e-8`, and
+  `cuda_graphs.rs` covers the mechanism directly. No decode loop, no backward
+  pass and no long run has been driven through it, so "correct across a couple
+  of positions and one forward" is the whole of the evidence.
 - **CUDA is not in `scripts/gates/parity-gate.sh`**, and must not be until the
   catalogue and the backward kernels support it.
 - **No cost formulas** for CUDA steps in `gpu-core/src/cost.rs` (a coverage
@@ -708,11 +840,23 @@ tuned kernel are deferred.**
 - **Tier policy is a `const` + ratchet test, not a `.toml`.** A tier table is a
   status ledger; those live in `.agents/`, and a number nothing checks goes
   stale.
-- **CUDA Graphs land last.** Keying the uniform allocation on
-  `(kind, bufs, threads)` *excluding* params, with a pinned-staging
-  `cuMemcpyHtoDAsync` as each step's first graph node and
-  `cuGraphExecKernelNodeSetParams` for grid growth. Note `read()`/`poll_wait()`
-  are illegal inside a captured region and brain reads logits every token.
+- **CUDA Graphs are keyed on the dispatch's structure, not its parameters.**
+  Done, with one deliberate departure from the plan's wording: the uniform
+  key excludes `threads` as well as the parameter values. Including it would
+  give every advancing sequence position a fresh uniform address and so
+  invalidate the graph at precisely the boundary
+  `cuGraphExecKernelNodeSetParams` exists to survive - the grid is a property
+  of the launch, not of the storage. Everything else stands: pinned staging
+  and a `cuMemcpyHtoDAsync` as each step's first node, exec-update rather than
+  one instantiated graph per position, `CU_STREAM_CAPTURE_MODE_THREAD_LOCAL`,
+  and `read`/`poll_wait` kept out of the captured region by confining capture
+  to a single `submit`.
+- **Capture is triggered by a repeated submission SHAPE, never by a step-cache
+  hit streak.** The rejected trigger could not fire: `StepCache::Key` includes
+  the parameters, and the position-carrying steps can never repeat. The shape
+  of a submission - its kernels, its buffers and its parameter block sizes -
+  repeats every token by construction, and it is also the exact thing a graph
+  records, so it is both a trigger that fires and one that means something.
 
 ## Notes for whoever picks this up
 
@@ -720,6 +864,19 @@ tuned kernel are deferred.**
   `make test CARGO_TEST="cargo test --release --offline -p brain-gpu-core" TEST_THREADS="1 cuda"`.
 - Keep GPU tests at the existing tiny-shape gradcheck/parity scale. This is a
   shared box; a sustained benchmark contends with whatever else is resident.
+- **`cuda_provider_matmul`'s speedup floor is sensitive to the FIRST run of a
+  freshly built binary.** Measured, not suspected: back-to-back alternating
+  runs with graph capture forced on and forced off gave 5.57 / 5.13 on the
+  first pair and then 34.80 / 36.21 and 34.87 / 37.11 - the two settings agree
+  with each other every time, and the first invocation after a rebuild is slow
+  whichever one is in force. Five trials and a median are not enough to
+  absorb it, because the whole test is about a second long and all five trials
+  land inside the slow window. If that test fails at around 5x, re-run it
+  before concluding anything; the floor has NOT been lowered to accommodate
+  this, because a floor moved to fit a flake stops being a floor.
+- Captured graphs are keyed on `Arc` identity, so a test that wants to force a
+  re-capture must actually free a buffer (`drop`), not merely build a
+  same-shaped submission.
 - The generated tier answers everything EXCEPT plain f32 `Op::MatMul`, which
   the tuned kernel now takes. Anything else that looks slow on this backend is
   expected to be: see the refused-kernel list above - every fast GEMM and
@@ -736,11 +893,15 @@ tuned kernel are deferred.**
   the MEASURED list of mutations it does not catch), #117 (some contract
   assertions cannot be given teeth, and must say so), #118 (a metadata gate
   that scans source text reads the header prose as code), #119 (a hand-written
-  kernel can be much faster without reassociating anything) and #120
+  kernel can be much faster without reassociating anything) #120
   (`threads` means invocations to a catalogue kernel and blocks to a native
   one), #121 (two providers agreeing on a tail neither of them wrote is not
-  parity) and #122 (moving a call site onto a dispatch seam must not narrow
-  its bindings) came out of this work and are the things most likely to be
+  parity), #122 (moving a call site onto a dispatch seam must not narrow
+  its bindings), #123 (a shared allocation makes a record-time upload a
+  write-after-write race), #124 (`_v2` in a `dlopen`ed C API cuts both ways),
+  #125 (Rust drops struct fields in declaration order, and a device context
+  is a resource's parent) and #126 (a batching win has to be measured in the
+  pattern the caller actually uses) came out of this work and are the things most likely to be
   re-learned the hard way.
 - Adding a tuned kernel is: the `.cu` file, its `kernels-cuda` registry entry,
   `make cuda-table`, and - once `PolicyEntry` has a dtype axis - the `POLICY`

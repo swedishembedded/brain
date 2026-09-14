@@ -42,6 +42,10 @@ type CuResult = c_int;
 pub type CuContext = *mut c_void;
 pub type CuModule = *mut c_void;
 pub type CuFunction = *mut c_void;
+pub type CuStream = *mut c_void;
+pub type CuGraph = *mut c_void;
+pub type CuGraphExec = *mut c_void;
+pub type CuGraphNode = *mut c_void;
 /// `CUdeviceptr` - an integer device address, NOT a host pointer. It is 64-bit
 /// on every 64-bit platform the driver supports, and passing it to
 /// `cuLaunchKernel` means passing a pointer TO this integer, never the integer
@@ -90,6 +94,9 @@ pub struct Driver {
     /// driver that is missing one of them: a failure here is "this box cannot
     /// execute", not "this box has no CUDA".
     exec: Result<ExecFns, String>,
+    /// The graph entry points, resolved separately again: a driver too old to
+    /// capture graphs still runs every dispatch one at a time.
+    graph: Result<GraphFns, String>,
 }
 
 /// The context / memory / module / launch half of the Driver API.
@@ -133,6 +140,94 @@ pub struct ExecFns {
         *mut *mut c_void,
         *mut *mut c_void,
     ) -> CuResult,
+    /// `cuStreamCreate(&s, 0)` - `CU_STREAM_DEFAULT`, i.e. a **blocking**
+    /// stream. Not `CU_STREAM_NON_BLOCKING`: the synchronous transfers this
+    /// backend still performs outside a submission (`cuMemcpyHtoD_v2`,
+    /// `cuMemcpyDtoH_v2`) run on the legacy default stream, and only a
+    /// blocking stream is implicitly ordered against that one. A
+    /// non-blocking stream would let a host write race a dispatch that
+    /// reads the buffer it wrote.
+    pub(crate) stream_create: unsafe extern "C" fn(*mut CuStream, u32) -> CuResult,
+    pub(crate) stream_destroy: unsafe extern "C" fn(CuStream) -> CuResult,
+    pub(crate) memcpy_htod_async:
+        unsafe extern "C" fn(CuDevicePtr, *const c_void, usize, CuStream) -> CuResult,
+    pub(crate) memset_d8_async: unsafe extern "C" fn(CuDevicePtr, u8, usize, CuStream) -> CuResult,
+    /// Page-locked host memory. A copy whose source is ordinary pageable
+    /// memory is illegal inside a stream capture, so a staging block that a
+    /// captured copy node reads from has to come from here.
+    pub(crate) mem_alloc_host: unsafe extern "C" fn(*mut *mut c_void, usize) -> CuResult,
+    pub(crate) mem_free_host: unsafe extern "C" fn(*mut c_void) -> CuResult,
+}
+
+/// `CUDA_KERNEL_NODE_PARAMS`, **version 1**.
+///
+/// The `_v2` rule in this module's header runs the other way for this one, and
+/// getting that backwards silently corrupts every field after the block
+/// dimensions. CUDA 12 introduced a `CUDA_KERNEL_NODE_PARAMS_v2` with two
+/// extra trailing members and `#define`d the unsuffixed *function* names onto
+/// `_v2` entry points that take it. The driver keeps exporting the unsuffixed
+/// `cuGraphExecKernelNodeSetParams` at the **v1** ABI for binaries compiled
+/// before that change - which is exactly what a `dlsym` of the unsuffixed name
+/// binds. So: unsuffixed symbol, v1 struct, and the two must be changed
+/// together or not at all.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct CuKernelNodeParams {
+    pub func: CuFunction,
+    pub grid_dim_x: u32,
+    pub grid_dim_y: u32,
+    pub grid_dim_z: u32,
+    pub block_dim_x: u32,
+    pub block_dim_y: u32,
+    pub block_dim_z: u32,
+    pub shared_mem_bytes: u32,
+    /// One pointer per kernel argument, each pointing AT the argument's value,
+    /// which is the same indirection `cuLaunchKernel` takes. The driver copies
+    /// the values during the call, so this may point at caller stack storage.
+    pub kernel_params: *mut *mut c_void,
+    pub extra: *mut *mut c_void,
+}
+
+/// `CU_STREAM_CAPTURE_MODE_THREAD_LOCAL`.
+///
+/// Not `_GLOBAL` (0): a global capture makes potentially-unsafe API calls
+/// *anywhere in the process* an error for the duration, and brain runs other
+/// devices, other backends and its own host work on other threads throughout a
+/// decode. Thread-local confines the restriction to the thread that is
+/// actually recording, which is the only thread that can violate it.
+pub const CAPTURE_MODE_THREAD_LOCAL: c_int = 1;
+
+/// `CUstreamCaptureStatus::CU_STREAM_CAPTURE_STATUS_ACTIVE`.
+pub const CAPTURE_STATUS_ACTIVE: c_int = 1;
+
+/// The CUDA Graphs entry points, resolved as their own group.
+///
+/// Separate from [`ExecFns`] for the same reason `ExecFns` is separate from
+/// device identity: a driver that cannot capture graphs must still run
+/// everything else. A missing symbol here disables capture and nothing more.
+pub struct GraphFns {
+    pub(crate) stream_begin_capture: unsafe extern "C" fn(CuStream, c_int) -> CuResult,
+    pub(crate) stream_end_capture: unsafe extern "C" fn(CuStream, *mut CuGraph) -> CuResult,
+    /// Used for exactly one thing: reading back the node a launch just
+    /// recorded. `cuGraphGetNodes` returns a graph's nodes in an unspecified
+    /// order, so it cannot say WHICH node came from which launch; the capture
+    /// stream's current dependency set, read immediately after a launch, can.
+    #[allow(clippy::type_complexity)]
+    pub(crate) stream_get_capture_info: unsafe extern "C" fn(
+        CuStream,
+        *mut c_int,
+        *mut u64,
+        *mut CuGraph,
+        *mut *const CuGraphNode,
+        *mut usize,
+    ) -> CuResult,
+    pub(crate) graph_instantiate: unsafe extern "C" fn(*mut CuGraphExec, CuGraph, u64) -> CuResult,
+    pub(crate) graph_launch: unsafe extern "C" fn(CuGraphExec, CuStream) -> CuResult,
+    /// See [`CuKernelNodeParams`] on why this is the unsuffixed name.
+    pub(crate) graph_exec_kernel_node_set_params:
+        unsafe extern "C" fn(CuGraphExec, CuGraphNode, *const CuKernelNodeParams) -> CuResult,
+    pub(crate) graph_destroy: unsafe extern "C" fn(CuGraph) -> CuResult,
+    pub(crate) graph_exec_destroy: unsafe extern "C" fn(CuGraphExec) -> CuResult,
 }
 
 // Every field is either a mapped `Library` (which `libloading` already
@@ -176,8 +271,10 @@ fn load() -> Result<Driver, String> {
         let get_error_string = sym(&lib, b"cuGetErrorString\0").ok();
 
         let exec = load_exec(&lib);
+        let graph = load_graph(&lib);
         let d = Driver {
             exec,
+            graph,
             device_get_count: sym(&lib, b"cuDeviceGetCount\0")?,
             device_get: sym(&lib, b"cuDeviceGet\0")?,
             device_get_name: sym(&lib, b"cuDeviceGetName\0")?,
@@ -222,6 +319,31 @@ unsafe fn load_exec(lib: &libloading::Library) -> Result<ExecFns, String> {
         module_unload: sym(lib, b"cuModuleUnload\0")?,
         module_get_function: sym(lib, b"cuModuleGetFunction\0")?,
         launch_kernel: sym(lib, b"cuLaunchKernel\0")?,
+        stream_create: sym(lib, b"cuStreamCreate\0")?,
+        stream_destroy: sym(lib, b"cuStreamDestroy_v2\0")?,
+        memcpy_htod_async: sym(lib, b"cuMemcpyHtoDAsync_v2\0")?,
+        memset_d8_async: sym(lib, b"cuMemsetD8Async\0")?,
+        mem_alloc_host: sym(lib, b"cuMemAllocHost_v2\0")?,
+        mem_free_host: sym(lib, b"cuMemFreeHost\0")?,
+    })
+}
+
+/// Resolve the graph half. A missing symbol disables capture only.
+///
+/// # Safety
+/// Same contract as [`load_exec`]: each name is bound at the signature
+/// `cuda.h` declares for it, and the pointers live as long as `lib` is mapped.
+unsafe fn load_graph(lib: &libloading::Library) -> Result<GraphFns, String> {
+    Ok(GraphFns {
+        stream_begin_capture: sym(lib, b"cuStreamBeginCapture_v2\0")?,
+        stream_end_capture: sym(lib, b"cuStreamEndCapture\0")?,
+        stream_get_capture_info: sym(lib, b"cuStreamGetCaptureInfo_v2\0")?,
+        graph_instantiate: sym(lib, b"cuGraphInstantiateWithFlags\0")?,
+        graph_launch: sym(lib, b"cuGraphLaunch\0")?,
+        // Unsuffixed on purpose - see `CuKernelNodeParams`.
+        graph_exec_kernel_node_set_params: sym(lib, b"cuGraphExecKernelNodeSetParams\0")?,
+        graph_destroy: sym(lib, b"cuGraphDestroy\0")?,
+        graph_exec_destroy: sym(lib, b"cuGraphExecDestroy\0")?,
     })
 }
 
@@ -245,6 +367,12 @@ impl Driver {
     /// The execution entry points, or why this driver cannot run anything.
     pub fn exec(&self) -> Result<&ExecFns, &str> {
         self.exec.as_ref().map_err(|e| e.as_str())
+    }
+
+    /// The graph entry points, or why this driver cannot capture one. An `Err`
+    /// is an ordinary answer that costs launch batching and nothing else.
+    pub fn graph(&self) -> Result<&GraphFns, &str> {
+        self.graph.as_ref().map_err(|e| e.as_str())
     }
 
     /// A `CUdevice` handle for an ordinal, for callers that go on to open a

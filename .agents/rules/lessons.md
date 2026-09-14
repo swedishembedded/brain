@@ -4451,3 +4451,101 @@ The general shape: when a migration introduces a field the old call site did
 not have, the faithful value is the one that reproduces the old behaviour,
 not the most informative one available. Tightening it is a separate change
 with its own reason and its own test.
+
+## 123. A shared allocation makes a record-time upload a write-after-write race
+
+A dispatch-recording API where each step carries its own parameters invites
+uploading them when the step is recorded. That is only correct while every
+step's parameter storage is private to it. The moment that storage is shared
+between steps of the same shape - which is what any address-stability scheme
+needs, graph capture most obviously - a record-time upload becomes a host
+write that races the device: two steps recorded before the submission runs
+both write the same buffer, and the second wins for both.
+
+The upload has to move to where the ordering already exists, between the two
+dispatches in the queue that separates them. The tell is not a crash. Both
+steps compute, with the same parameters, and the wrong one of the two is the
+survivor - so the failure looks like a model that is subtly off rather than a
+backend that is broken.
+
+## 124. `_v2` in a dlopen'ed C API cuts both ways
+
+The rule that a header's `#define`d `_v2` suffix must be spelled out for
+`dlsym` has a mirror image that is easier to get wrong, because the fix for
+the first one makes it feel solved. CUDA 12 grew a second version of the
+kernel-node parameter struct and pointed the unsuffixed *function* names at
+entry points taking it. The driver keeps exporting the unsuffixed symbols at
+the OLD ABI, for binaries compiled before that change - which is exactly what
+a `dlsym` of the unsuffixed name binds.
+
+So resolving the unsuffixed name is right, and it obliges the caller to pass
+the OLD struct. Symbol name and struct layout are one decision, and a
+comment saying so belongs on the struct: a later reader who knows only the
+first half of the rule will "fix" the name and silently corrupt every field
+past the point the two layouts diverge.
+
+## 125. Rust drops struct fields in declaration order, and a device context is a resource's parent
+
+A handle that owns a driver context plus the allocations, modules and graphs
+made ON that context has a drop order obligation that no type signature
+states. With the context declared first it is released first, and the driver
+then tears down a context whose resources are still live - which faults inside
+the driver rather than returning a code anything could report or log.
+
+Nothing warns. The order is only visible as a segfault during teardown, often
+only once something new (here, an instantiated graph) joins the set of
+resources that outlive the release. A parent resource belongs in the LAST
+field, with the reason written next to it, because the ordering is otherwise
+invisible at the point someone adds field number eleven.
+
+## 126. A batching win has to be measured in the pattern the caller actually uses
+
+Replacing many driver calls with one only pays if the host is not made to wait
+somewhere else instead. Here the somewhere else is parameter staging: a replay
+overwrites host memory the previous replay's copy nodes may not have read yet,
+so a caller that submits in a tight loop without ever synchronising pays a
+device wait per submission and measures roughly no improvement at all.
+
+The same code in the loop the mechanism exists for - a decode step, which
+reads its logits every token and has therefore already drained - pays nothing
+and shows the full saving. Both numbers are true, and quoting either one
+without the pattern is meaningless. The resolution is to count the wait
+(`staging_waits`) so the two cases are distinguishable in the field, assert it
+is zero in the test that claims the speedup, and say in the ledger which loop
+the number belongs to.
+
+## 127. A synchronous host copy is a device-wide drain, not a driver call
+
+Moving a parameter upload from record time into submit time looks like a
+scheduling detail and is a serialisation. A synchronous host-to-device copy
+runs on the legacy default stream, and the legacy stream is ordered against
+every blocking stream in the context - so one per dispatch does not cost a
+driver call each, it drains the device between every pair of dispatches.
+Measured: eight back-to-back dispatches of one kernel took an order of
+magnitude longer that way than with the uploads already done.
+
+The fix is to enqueue the copy on the same stream the dispatches use, which
+obliges the source to be page-locked and to stay untouched until the copy
+runs - so a pool with an explicit "returned once the device has drained"
+rule, not a `Vec` handed to an async copy.
+
+The general shape: on an API with a legacy-default-stream rule, "synchronous"
+does not mean "blocks this one operation". It means a global ordering point,
+and a per-dispatch ordering point is a per-dispatch stall.
+
+## 128. Some regressions are only visible in the whole suite, and an A/B can be blind to them
+
+Two things happened together here and both are worth keeping. The regression
+above passed every targeted run of the affected test and failed only inside a
+full-package run, because on an idle box the stall it introduced is cheap and
+under load it is not. A test that passes standalone and fails in the suite is
+evidence about the code, not only about the machine, and is worth bisecting
+rather than re-running.
+
+And the A/B that was supposed to isolate the cause reported "no difference"
+and was right: the flag it toggled was the new feature, while the regression
+was in a *supporting* change the flag did not touch. An A/B only exonerates
+what its switch actually switches. Before concluding "not my change", check
+that the control path is the old code and not merely the new code with one
+feature disabled - here the honest control was the previous commit's files,
+restored into the tree and run in the same context.

@@ -43,6 +43,7 @@
 pub mod backend;
 pub mod driver;
 pub mod exec;
+mod graph;
 pub mod nvrtc;
 pub mod policy;
 

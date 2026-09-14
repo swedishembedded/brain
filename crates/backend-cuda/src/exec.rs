@@ -34,8 +34,13 @@
 //! cubin compiled for a capability the device does not have is either rejected
 //! at module load or, worse, silently mis-scheduled.
 
-use crate::driver::{CuContext, CuDevicePtr, CuFunction, CuModule, Driver, ExecFns};
-use std::ffi::{c_void, CString};
+use crate::driver::{
+    CuContext, CuDevicePtr, CuFunction, CuGraph, CuGraphExec, CuGraphNode, CuKernelNodeParams,
+    CuModule, CuStream, Driver, ExecFns, GraphFns, CAPTURE_MODE_THREAD_LOCAL, CAPTURE_STATUS_ACTIVE,
+};
+use std::ffi::{c_int, c_void, CString};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 /// A compiled cubin, and whether it came back from the on-disk cache.
 pub struct Cubin {
@@ -55,6 +60,20 @@ pub struct Context {
     cc: (u32, u32),
     name: String,
     info: crate::driver::CudaDevice,
+    /// Every dispatch and every clear this context issues goes here rather
+    /// than on the legacy default stream, for one reason: the legacy stream
+    /// cannot be captured. It is created blocking, so the synchronous host
+    /// transfers that still use the legacy stream stay ordered against it.
+    stream: CuStream,
+    /// Incremented every time a device allocation is freed.
+    ///
+    /// A freed address may be handed straight back out by the next
+    /// `cuMemAlloc`, so anything that recorded a device address and expects to
+    /// reuse it later has to be able to ask whether any free has happened
+    /// since. That is a question about the allocator, not about any one
+    /// allocation, which is why the counter lives on the context and is
+    /// bumped in `DeviceMem`'s `Drop` - the one place a free actually occurs.
+    alloc_epoch: Arc<AtomicU64>,
 }
 
 // The context handle is used under `cuCtxSetCurrent` before every call, so it
@@ -82,7 +101,7 @@ impl Context {
         // SAFETY: `ctx` is a valid out-parameter and `dev` came from
         // `cuDeviceGet`. The retain is released in `Drop`.
         d.check(unsafe { (fns.primary_ctx_retain)(&mut ctx, dev) }, "cuDevicePrimaryCtxRetain")?;
-        let c = Context {
+        let mut c = Context {
             d,
             fns,
             dev,
@@ -90,9 +109,27 @@ impl Context {
             cc: (info.cc_major, info.cc_minor),
             name: info.name.clone(),
             info: info.clone(),
+            stream: std::ptr::null_mut(),
+            alloc_epoch: Arc::new(AtomicU64::new(0)),
         };
         c.make_current()?;
+        // SAFETY: `stream` is a valid out-parameter and the context is
+        // current. Flag 0 is `CU_STREAM_DEFAULT` - see `ExecFns::stream_create`
+        // on why it must not be the non-blocking one.
+        d.check(unsafe { (fns.stream_create)(&mut c.stream, 0) }, "cuStreamCreate")?;
         Ok(c)
+    }
+
+    /// How many device allocations this context has freed. See
+    /// [`Context::alloc_epoch`]'s field doc: a caller that cached a device
+    /// address compares this against what it saw when it cached.
+    pub fn alloc_epoch(&self) -> u64 {
+        self.alloc_epoch.load(Ordering::Acquire)
+    }
+
+    /// The stream every dispatch and clear runs on.
+    pub fn stream(&self) -> CuStream {
+        self.stream
     }
 
     /// Everything the driver answered about this device, queried once when the
@@ -140,7 +177,30 @@ impl Context {
         // SAFETY: `ptr` is a valid out-parameter; the `_v2` entry point takes
         // a 64-bit size.
         self.d.check(unsafe { (self.fns.mem_alloc)(&mut ptr, bytes.max(1)) }, "cuMemAlloc")?;
-        Ok(DeviceMem { d: self.d, fns: self.fns, ctx: self.ctx, ptr, len: bytes })
+        Ok(DeviceMem {
+            d: self.d,
+            fns: self.fns,
+            ctx: self.ctx,
+            ptr,
+            len: bytes,
+            epoch: self.alloc_epoch.clone(),
+        })
+    }
+
+    /// Page-locked host staging of `words` u32s.
+    ///
+    /// The only reason this exists rather than a `Vec<u32>`: a copy whose
+    /// source is ordinary pageable memory is rejected during a stream capture,
+    /// because the driver cannot defer a staging copy it would otherwise make
+    /// synchronously. A captured host->device copy node therefore has to name
+    /// host memory that is already pinned.
+    pub fn pinned(&self, words: usize) -> Result<PinnedMem, String> {
+        self.make_current()?;
+        let bytes = (words * 4).max(4);
+        let mut p: *mut c_void = std::ptr::null_mut();
+        // SAFETY: `p` is a valid out-parameter; the block is released in Drop.
+        self.d.check(unsafe { (self.fns.mem_alloc_host)(&mut p, bytes) }, "cuMemAllocHost")?;
+        Ok(PinnedMem { d: self.d, fns: self.fns, ctx: self.ctx, ptr: p as *mut u32, words })
     }
 
     /// Copy host bytes into a device allocation.
@@ -199,6 +259,51 @@ impl Context {
         self.make_current()?;
         // SAFETY: `mem.ptr` names `mem.len` bytes allocated on this context.
         self.d.check(unsafe { (self.fns.memset_d8)(mem.ptr, 0, mem.len) }, "cuMemsetD8")
+    }
+
+    /// [`Self::zero`] enqueued on [`Self::stream`] instead of executed on the
+    /// legacy stream.
+    ///
+    /// This is the form a submission's clears use, and it is not an
+    /// optimisation: a legacy-stream operation issued from a thread that is
+    /// capturing is one of the "potentially unsafe API calls" a capture
+    /// rejects, so a clear that must be *inside* a graph has nowhere else to
+    /// go. Outside capture it is the same operation one queue later.
+    pub fn zero_async(&self, mem: &DeviceMem) -> Result<(), String> {
+        if mem.len == 0 {
+            return Ok(());
+        }
+        self.make_current()?;
+        // SAFETY: `mem.ptr` names `mem.len` bytes on this context, and `mem`
+        // outlives the enqueue; the caller keeps it alive until the stream has
+        // drained (every caller here holds an `Arc` to it).
+        self.d.check(
+            unsafe { (self.fns.memset_d8_async)(mem.ptr, 0, mem.len, self.stream) },
+            "cuMemsetD8Async",
+        )
+    }
+
+    /// Enqueue a copy of `src`'s words into `mem` on [`Self::stream`].
+    ///
+    /// `src` must stay alive and unmodified until the stream reaches the copy,
+    /// which is why it is a [`PinnedMem`] rather than a slice: the pinning is
+    /// what a capture requires, and the ownership is what makes the lifetime
+    /// statable.
+    pub fn upload_async(&self, mem: &DeviceMem, src: &PinnedMem) -> Result<(), String> {
+        let bytes = src.words * 4;
+        if bytes > mem.len {
+            return Err(format!("async upload of {bytes} bytes into a {}-byte allocation", mem.len));
+        }
+        if bytes == 0 {
+            return Ok(());
+        }
+        self.make_current()?;
+        // SAFETY: `src` owns `bytes` page-locked bytes and the bound above
+        // proves the destination holds at least that many.
+        self.d.check(
+            unsafe { (self.fns.memcpy_htod_async)(mem.ptr, src.ptr as *const c_void, bytes, self.stream) },
+            "cuMemcpyHtoDAsync",
+        )
     }
 
     /// Copy device bytes back to the host.
@@ -283,18 +388,39 @@ impl Context {
         block: (u32, u32, u32),
         args: &[CuDevicePtr],
     ) -> Result<(), String> {
+        // SAFETY: `f` borrows the module that defines it, so it is loaded.
+        unsafe { self.launch_raw(f.f, grid, block, args) }
+    }
+
+    /// [`Self::launch_at`] against an already-resolved entry point.
+    ///
+    /// The resolution is hoisted out for one reason: a launch that is being
+    /// recorded into a graph should be a launch and nothing else, so the
+    /// module lookup happens before the capture opens rather than inside it.
+    ///
+    /// # Safety
+    /// `f` must name an entry point of a module that is still loaded in this
+    /// context, and `args` must be exactly the arguments it takes.
+    pub unsafe fn launch_raw(
+        &self,
+        f: CuFunction,
+        grid: (u32, u32, u32),
+        block: (u32, u32, u32),
+        args: &[CuDevicePtr],
+    ) -> Result<(), String> {
         self.make_current()?;
         let mut values: Vec<CuDevicePtr> = args.to_vec();
         let mut params: Vec<*mut c_void> =
             values.iter_mut().map(|v| v as *mut CuDevicePtr as *mut c_void).collect();
         // SAFETY: `params` names `args.len()` valid pointers to device
         // addresses that outlive the call, the function belongs to a module
-        // still loaded in this context, and no dynamic shared memory is
-        // requested (the generated kernels declare theirs statically).
+        // still loaded in this context (the caller's obligation), and no
+        // dynamic shared memory is requested (the generated kernels declare
+        // theirs statically).
         self.d.check(
             unsafe {
                 (self.fns.launch_kernel)(
-                    f.f,
+                    f,
                     grid.0,
                     grid.1,
                     grid.2,
@@ -302,12 +428,83 @@ impl Context {
                     block.1,
                     block.2,
                     0,
-                    std::ptr::null_mut(),
+                    self.stream,
                     params.as_mut_ptr(),
                     std::ptr::null_mut(),
                 )
             },
             "cuLaunchKernel",
+        )
+    }
+
+    /// Whether this driver exposes the CUDA Graphs entry points at all, and if
+    /// not, why. An `Err` costs launch batching and nothing else.
+    pub fn graphs(&self) -> Result<&'static GraphFns, &'static str> {
+        self.d.graph()
+    }
+
+    /// Begin capturing [`Self::stream`] into a graph.
+    ///
+    /// The returned guard ends the capture whatever happens next, including a
+    /// panic: a stream left in capture mode swallows every subsequent
+    /// operation on it silently, so a dropped capture is not a leak but a
+    /// device that stops computing.
+    pub fn begin_capture(&self) -> Result<Capture<'_>, String> {
+        let g = self.graphs().map_err(str::to_string)?;
+        self.make_current()?;
+        // SAFETY: the context is current and `self.stream` was created on it.
+        // The mode is thread-local, so this constrains only this thread.
+        self.d.check(
+            unsafe { (g.stream_begin_capture)(self.stream, CAPTURE_MODE_THREAD_LOCAL) },
+            "cuStreamBeginCapture",
+        )?;
+        Ok(Capture { ctx: self, g, ended: false })
+    }
+
+    /// Instantiate `graph` into an executable one.
+    pub fn instantiate(&self, graph: &Graph) -> Result<GraphExec, String> {
+        let g = self.graphs().map_err(str::to_string)?;
+        self.make_current()?;
+        let mut e: CuGraphExec = std::ptr::null_mut();
+        // SAFETY: `e` is a valid out-parameter and `graph` is a complete graph
+        // built on this context. No instantiation flags are requested.
+        self.d.check(unsafe { (g.graph_instantiate)(&mut e, graph.graph, 0) }, "cuGraphInstantiate")?;
+        Ok(GraphExec { d: self.d, g, ctx: self.ctx, e })
+    }
+
+    /// Enqueue a whole instantiated graph on [`Self::stream`] - one driver
+    /// call in place of every launch it contains.
+    pub fn launch_graph(&self, e: &GraphExec) -> Result<(), String> {
+        let g = self.graphs().map_err(str::to_string)?;
+        self.make_current()?;
+        // SAFETY: `e` was instantiated on this context and every buffer its
+        // nodes name is kept alive by the caller for as long as `e` lives.
+        self.d.check(unsafe { (g.graph_launch)(e.e, self.stream) }, "cuGraphLaunch")
+    }
+
+    /// Re-point one already-instantiated kernel node at a new grid (and, if it
+    /// moved, new arguments), without rebuilding or re-instantiating anything.
+    ///
+    /// This is what makes a captured graph survive a dispatch whose thread
+    /// count grew - a sequence length advancing, most often. The alternative,
+    /// one instantiated graph per grid size, costs more in instantiation than
+    /// the batching saves.
+    ///
+    /// # Safety
+    /// `node` must be a node of the graph `e` was instantiated from, and
+    /// `params.kernel_params` must name exactly the arguments the node's
+    /// function takes. The driver copies the argument values during the call.
+    pub unsafe fn set_kernel_node_grid(
+        &self,
+        e: &GraphExec,
+        node: CuGraphNode,
+        params: &CuKernelNodeParams,
+    ) -> Result<(), String> {
+        let g = self.graphs().map_err(str::to_string)?;
+        self.make_current()?;
+        self.d.check(
+            (g.graph_exec_kernel_node_set_params)(e.e, node, params),
+            "cuGraphExecKernelNodeSetParams",
         )
     }
 
@@ -323,14 +520,216 @@ impl Context {
 
 impl Drop for Context {
     fn drop(&mut self) {
-        // SAFETY: balances the retain in `open`. The primary context is
-        // reference-counted, so this does not tear down a context another
+        // SAFETY: the stream was created on this context and is destroyed
+        // once; the release balances the retain in `open`. The primary context
+        // is reference-counted, so this does not tear down a context another
         // holder is still using.
         unsafe {
+            if !self.stream.is_null() && (self.fns.ctx_set_current)(self.ctx) == 0 {
+                (self.fns.stream_destroy)(self.stream);
+            }
             (self.fns.primary_ctx_release)(self.dev);
         }
     }
 }
+
+/// An in-progress stream capture. Ending it is [`Capture::finish`]; dropping it
+/// without finishing ends the capture anyway and discards the graph.
+///
+/// The unconditional end in `Drop` is the important part. `cuStreamEndCapture`
+/// is the ONLY way out of capture mode, and a stream still in capture mode
+/// accepts every subsequent operation and executes none of them - so an error
+/// path that forgot to end the capture would not leak a handle, it would
+/// silently stop the device from computing anything for the rest of the
+/// process.
+pub struct Capture<'a> {
+    ctx: &'a Context,
+    g: &'static GraphFns,
+    ended: bool,
+}
+
+impl Capture<'_> {
+    /// The node the launch just recorded on the capture stream.
+    ///
+    /// Read as the stream's current dependency set, which after a single
+    /// recorded operation is exactly that operation's node.
+    /// `cuGraphGetNodes` cannot answer this: it returns a graph's nodes in an
+    /// unspecified order and so cannot say which node came from which launch.
+    pub fn last_node(&self) -> Result<CuGraphNode, String> {
+        let mut status: c_int = 0;
+        let mut id: u64 = 0;
+        let mut graph: CuGraph = std::ptr::null_mut();
+        let mut deps: *const CuGraphNode = std::ptr::null();
+        let mut n: usize = 0;
+        // SAFETY: every out-parameter is valid for the call, and
+        // `dependencies_out` borrows driver-owned storage that stays valid
+        // until the next operation is recorded on this stream - it is read
+        // below, before anything else is recorded.
+        self.ctx.d.check(
+            unsafe {
+                (self.g.stream_get_capture_info)(
+                    self.ctx.stream,
+                    &mut status,
+                    &mut id,
+                    &mut graph,
+                    &mut deps,
+                    &mut n,
+                )
+            },
+            "cuStreamGetCaptureInfo",
+        )?;
+        if status != CAPTURE_STATUS_ACTIVE {
+            return Err(format!("the capture stream is no longer capturing (status {status})"));
+        }
+        if n != 1 || deps.is_null() {
+            // More than one would mean the launch was not the only thing
+            // recorded since the last read, which is a defect in this file's
+            // own bookkeeping rather than a driver condition.
+            return Err(format!("a single recorded launch left {n} capture dependencies, not 1"));
+        }
+        // SAFETY: `n == 1` and `deps` is non-null, so `deps[0]` is in bounds.
+        Ok(unsafe { *deps })
+    }
+
+    /// End the capture and take the graph that was recorded.
+    pub fn finish(mut self) -> Result<Graph, String> {
+        self.ended = true;
+        let mut graph: CuGraph = std::ptr::null_mut();
+        // SAFETY: `graph` is a valid out-parameter; the stream is the one
+        // `begin_capture` started on.
+        self.ctx
+            .d
+            .check(unsafe { (self.g.stream_end_capture)(self.ctx.stream, &mut graph) }, "cuStreamEndCapture")?;
+        if graph.is_null() {
+            return Err("cuStreamEndCapture produced no graph".into());
+        }
+        Ok(Graph { d: self.ctx.d, g: self.g, graph })
+    }
+}
+
+impl Drop for Capture<'_> {
+    fn drop(&mut self) {
+        if self.ended {
+            return;
+        }
+        let mut graph: CuGraph = std::ptr::null_mut();
+        // SAFETY: ends the capture begun on this same stream. The graph it
+        // hands back is discarded immediately - this path is reached only
+        // when the capture is being abandoned.
+        unsafe {
+            if (self.g.stream_end_capture)(self.ctx.stream, &mut graph) == 0 && !graph.is_null() {
+                (self.g.graph_destroy)(graph);
+            }
+        }
+    }
+}
+
+/// A recorded, not yet executable, graph.
+pub struct Graph {
+    d: &'static Driver,
+    g: &'static GraphFns,
+    graph: CuGraph,
+}
+
+impl Drop for Graph {
+    fn drop(&mut self) {
+        // SAFETY: destroyed once; an instantiated `GraphExec` made from it
+        // stays valid, the driver documents the two lifetimes as independent.
+        unsafe {
+            let rc = (self.g.graph_destroy)(self.graph);
+            if rc != 0 {
+                tracing::warn!("cuGraphDestroy failed: {}", self.d.error_text(rc));
+            }
+        }
+    }
+}
+
+unsafe impl Send for Graph {}
+unsafe impl Sync for Graph {}
+
+/// An instantiated graph: the launchable form.
+pub struct GraphExec {
+    d: &'static Driver,
+    g: &'static GraphFns,
+    ctx: CuContext,
+    e: CuGraphExec,
+}
+
+impl Drop for GraphExec {
+    fn drop(&mut self) {
+        // SAFETY: the exec was instantiated on this context and is destroyed
+        // once.
+        unsafe {
+            let rc = (self.g.graph_exec_destroy)(self.e);
+            if rc != 0 {
+                tracing::warn!("cuGraphExecDestroy failed: {}", self.d.error_text(rc));
+            }
+            let _ = self.ctx;
+        }
+    }
+}
+
+unsafe impl Send for GraphExec {}
+unsafe impl Sync for GraphExec {}
+
+/// A page-locked host block of `words` u32s.
+pub struct PinnedMem {
+    d: &'static Driver,
+    fns: &'static ExecFns,
+    ctx: CuContext,
+    ptr: *mut u32,
+    words: usize,
+}
+
+impl PinnedMem {
+    /// Length in u32 words.
+    pub fn words(&self) -> usize {
+        self.words
+    }
+
+    /// Overwrite the block with `src`.
+    ///
+    /// `&self` rather than `&mut self`: the block is reachable through an
+    /// `Arc` shared with a recorded graph node, and the node holds only the
+    /// ADDRESS. Writing here is how a replay supplies new parameters, and it
+    /// is the caller's obligation - stated on every caller in this crate - to
+    /// do it while the stream that reads it has drained.
+    ///
+    /// # Panics
+    /// If `src` is longer than the block.
+    pub fn fill(&self, src: &[u32]) {
+        assert!(
+            src.len() <= self.words,
+            "backend-cuda: {} words written into a {}-word pinned staging block",
+            src.len(),
+            self.words
+        );
+        // SAFETY: the block owns `self.words` u32s, the bound above proves
+        // `src` fits, and the two regions cannot overlap (one is page-locked
+        // driver memory, the other is the caller's).
+        unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), self.ptr, src.len()) };
+    }
+}
+
+impl Drop for PinnedMem {
+    fn drop(&mut self) {
+        // SAFETY: the block came from `cuMemAllocHost` on this context and is
+        // freed once.
+        unsafe {
+            if (self.fns.ctx_set_current)(self.ctx) == 0 {
+                let rc = (self.fns.mem_free_host)(self.ptr as *mut c_void);
+                if rc != 0 {
+                    tracing::warn!("cuMemFreeHost failed: {}", self.d.error_text(rc));
+                }
+            }
+        }
+    }
+}
+
+// Same reasoning as `DeviceMem`: the context is made current before use, and
+// page-locked host memory is not thread-affine.
+unsafe impl Send for PinnedMem {}
+unsafe impl Sync for PinnedMem {}
 
 /// One device allocation, freed when dropped.
 pub struct DeviceMem {
@@ -339,6 +738,9 @@ pub struct DeviceMem {
     ctx: CuContext,
     ptr: CuDevicePtr,
     len: usize,
+    /// The context's free counter, bumped here - see
+    /// [`Context::alloc_epoch`]'s field doc.
+    epoch: Arc<AtomicU64>,
 }
 
 impl DeviceMem {
@@ -369,6 +771,10 @@ impl Drop for DeviceMem {
                 }
             }
         }
+        // AFTER the free, and unconditionally: from here on the driver may
+        // hand this address to anyone, so anything caching device addresses
+        // must be able to see that it happened even if the free itself failed.
+        self.epoch.fetch_add(1, Ordering::Release);
     }
 }
 
@@ -420,4 +826,13 @@ unsafe impl Sync for Module {}
 pub struct Function<'a> {
     f: CuFunction,
     _module: &'a Module,
+}
+
+impl Function<'_> {
+    /// The raw handle, for a caller that keeps the owning [`Module`] alive by
+    /// some other means than this borrow - a recorded graph node names a
+    /// `CUfunction` and must outlive the resolution that produced it.
+    pub fn raw(&self) -> CuFunction {
+        self.f
+    }
 }

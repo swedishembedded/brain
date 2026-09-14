@@ -242,9 +242,14 @@ fn a_kernel_compiles_on_first_dispatch_and_only_once() {
 /// one launch call per recorded step, and a submit that costs measurable host
 /// time - is what makes a later divergence between the two readable as a
 /// result rather than as a bug.
+///
+/// Capture is off here deliberately. The relation this pins is the *unbatched*
+/// one, and the whole point of `host_launches` is that batched submission
+/// breaks it: `tests/cuda_graphs.rs` is where the divergence is asserted.
 #[test]
 fn the_host_cost_of_a_submit_is_counted_separately_from_its_dispatches() {
     let Some(b) = backend() else { return };
+    let b = b.with_graph_capture(false);
     let a = b.storage_init("a", &[1.0, 2.0, 3.0, 4.0]);
     let c = b.storage_init("c", &[10.0, 20.0, 30.0, 40.0]);
     let out = b.storage(4);
