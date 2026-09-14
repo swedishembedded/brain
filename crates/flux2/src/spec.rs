@@ -198,9 +198,14 @@ impl ArchSpec for Flux2Spec {
         }
 
         // klein-vs-base is not a weight - identical tensor shapes either way
-        // (see `import::dit_config_from_shapes`'s doc) - so nothing on disk
-        // can ever answer this. Never default to klein.
-        Ok(AssembleOutcome::UnresolvedVariant { shape_class: shape_class.clone(), options: vec![format!("klein-{shape_class}"), format!("base-{shape_class}")] })
+        // (see `import::dit_config_from_shapes`'s doc), so nothing on disk
+        // can PROVE which one a given checkpoint is. Klein (the
+        // guidance-distilled, 4-step variant) is the default every other
+        // FLUX.2 entry point already assumes (`caps::VARIANTS`'s own
+        // `default(json!("klein-4b"))`) - base is real and correct, and is
+        // reached by naming it explicitly: `--variant base-{shape_class}`.
+        let variant = format!("klein-{shape_class}");
+        Ok(AssembleOutcome::Assembled(AssembledVariant { id: format!("local/flux2-{variant}"), variant: Some(variant) }))
     }
 
     fn validate(&self, assembly: &Assembly) -> Result<(), String> {
@@ -645,16 +650,13 @@ mod tests {
             other => panic!("expected Assembled, got {other:?}"),
         }
 
-        // Same file, no variant override: the shape class alone is ambiguous
-        // between klein and base, exactly as the GGUF path already tests -
-        // a safetensors dit must not silently default to klein either.
+        // Same file, no variant override: klein is the default (base is
+        // real and correct, but must be named explicitly) - a safetensors
+        // dit must default exactly like the GGUF path already does.
         let outcome = Flux2Spec.assemble(&chosen, &records, &BTreeMap::new()).unwrap();
         match outcome {
-            AssembleOutcome::UnresolvedVariant { shape_class, options } => {
-                assert_eq!(shape_class, "9b");
-                assert!(options.contains(&"klein-9b".to_string()) && options.contains(&"base-9b".to_string()), "{options:?}");
-            }
-            other => panic!("expected UnresolvedVariant, got {other:?}"),
+            AssembleOutcome::Assembled(v) => assert_eq!(v.variant.as_deref(), Some("klein-9b")),
+            other => panic!("expected Assembled, got {other:?}"),
         }
     }
 
@@ -771,21 +773,32 @@ mod tests {
     }
 
     #[test]
-    fn variant_is_ambiguous_without_a_stated_klein_or_base() {
-        let dir = tmp("variant-ambiguous");
+    fn resolves_to_klein_by_default_without_a_stated_variant() {
+        let dir = tmp("variant-default");
         let records = nine_b_fixture(&dir);
         let spec = Flux2Spec;
         let specs: Vec<&dyn ArchSpec> = vec![&spec];
         let out = resolve("flux2", &records, &specs, &BTreeMap::new());
         match out {
-            Resolution::Ambiguous(a) => {
-                assert_eq!(a.question, Question::Variant { shape_class: "9b".to_string() });
-                assert_eq!(a.choices.len(), 2);
-                let selectors: Vec<(String, String)> = a.choices.iter().flat_map(|c| c.selector.clone()).collect();
-                assert!(selectors.contains(&("--variant".to_string(), "klein-9b".to_string())), "{selectors:?}");
-                assert!(selectors.contains(&("--variant".to_string(), "base-9b".to_string())), "{selectors:?}");
-            }
-            other => panic!("expected Ambiguous, got {other:?}"),
+            Resolution::Resolved(a) => assert_eq!(a.variant.as_deref(), Some("klein-9b")),
+            other => panic!("expected Resolved (klein is the default variant), got {other:?}"),
+        }
+    }
+
+    /// Base is real and correct - it just requires stating it, since nothing
+    /// on disk can prove klein-vs-base on its own (identical tensor shapes).
+    #[test]
+    fn base_is_reached_by_stating_it_explicitly() {
+        let dir = tmp("variant-explicit-base");
+        let records = nine_b_fixture(&dir);
+        let spec = Flux2Spec;
+        let specs: Vec<&dyn ArchSpec> = vec![&spec];
+        let mut overrides = BTreeMap::new();
+        overrides.insert("variant".to_string(), "base-9b".to_string());
+        let out = resolve("flux2", &records, &specs, &overrides);
+        match out {
+            Resolution::Resolved(a) => assert_eq!(a.variant.as_deref(), Some("base-9b")),
+            other => panic!("expected Resolved, got {other:?}"),
         }
     }
 
