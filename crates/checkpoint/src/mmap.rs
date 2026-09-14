@@ -42,11 +42,53 @@ pub struct MmapSafetensors {
 
 impl MmapSafetensors {
     /// Open + mmap `path` and parse only its header (no tensor bytes are read).
+    ///
+    /// Lazy: pages fault in one at a time, the first time some later reader
+    /// actually touches them. Right for the common caller here - an
+    /// architecture probe that reads one marker tensor's shape, or a
+    /// streaming importer that wants bounded memory - which is most of this
+    /// type's call sites. A caller that is about to read EVERY tensor anyway
+    /// (a full checkpoint load) wants [`Self::open_populated`] instead; see
+    /// its own doc for why.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<MmapSafetensors, String> {
+        Self::open_impl(path, false)
+    }
+
+    /// [`Self::open`], but the mapping is populated (`MAP_POPULATE`) as part
+    /// of the `mmap()` syscall itself: the kernel faults every page in with
+    /// its own bulk readahead, in one shot, instead of leaving each page to
+    /// fault in individually the first time some later reader touches it.
+    ///
+    /// Only worth it for a caller that is about to touch nearly the whole
+    /// file anyway (`checkpoint::load`'s "read every tensor as f32" path) -
+    /// for the lazy/bounded callers [`Self::open`] serves, this would turn a
+    /// cheap header-only open into an eager whole-file read.
+    ///
+    /// Measured on a real 32 GB fp32 checkpoint: without this, decoding every
+    /// tensor from many threads at once turned into millions of individual
+    /// minor page faults contending on this process's mmap lock and page
+    /// tables - the dominant cost of the whole load, independent of how
+    /// cheap the per-byte decode work itself is (a bulk-copy decode and a
+    /// per-element one paid the identical wall time, which is the signature
+    /// of a bottleneck neither touches). Reproduce with `BRAIN_PROFILE=1
+    /// brain serve --qwen-weights-int8`'s `re-load checkpoint tensors for
+    /// engine build` stage.
+    pub fn open_populated<P: AsRef<Path>>(path: P) -> Result<MmapSafetensors, String> {
+        Self::open_impl(path, true)
+    }
+
+    fn open_impl<P: AsRef<Path>>(path: P, populate: bool) -> Result<MmapSafetensors, String> {
         let path = path.as_ref();
         let file = std::fs::File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
         // SAFETY: weight files are treated as immutable for the mapping's lifetime.
-        let mmap = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| format!("mmap {}: {e}", path.display()))?;
+        let mmap = unsafe {
+            let mut opts = memmap2::MmapOptions::new();
+            if populate {
+                opts.populate();
+            }
+            opts.map(&file)
+        }
+        .map_err(|e| format!("mmap {}: {e}", path.display()))?;
         if mmap.len() < 8 {
             return Err("safetensors: file too short".into());
         }
@@ -412,6 +454,56 @@ fn decode(raw: &[u8], width: usize, f: fn(&[u8]) -> f32, out: &mut Vec<f32>) {
     crate::safetensors::decode_elems_into(raw, width, f, out)
 }
 
+/// F32's own decode is a no-op conversion - the on-disk bytes already ARE the
+/// f32 values, little-endian. Routing it through [`decode`] like every other
+/// dtype still paid a real per-element indirect-function-pointer call (an
+/// un-inlinable `fn` across the parallel loop in `decode_elems_into`) for
+/// work that is really just a bulk byte copy - profiled as the dominant cost
+/// of loading a real multi-GB fp32 checkpoint end to end (`brain serve`'s own
+/// cold-activation path: `BRAIN_PROFILE=1 brain serve --qwen-weights-int8`,
+/// the `stage ...: re-load checkpoint tensors for engine build` line). This
+/// bypasses the per-element path entirely on the little-endian targets this
+/// engine actually ships for.
+#[cfg(target_endian = "little")]
+fn decode_f32(raw: &[u8], out: &mut Vec<f32>) {
+    // Large enough that the per-chunk dispatch is noise, small enough that a
+    // lopsided tensor still spreads over the pool - matches
+    // `decode_elems_into`'s own `CHUNK` for the same reason.
+    const CHUNK: usize = 1 << 16;
+    let n = raw.len() / 4;
+    // `vec![0f32; n]` (zeroed-pages allocator path, not `Vec::with_capacity`
+    // + `set_len`): a fresh multi-GB allocation is virtual until touched, and
+    // the FIRST touch is what faults pages in. A single-threaded bulk copy
+    // was measured slower end to end than the per-element path it replaced,
+    // even though the per-byte work is trivial - it serialised exactly the
+    // page-fault cost `chunks_mut` below still pays, but on one core instead
+    // of the pool. Faulting (and copying) in parallel keeps that cost at the
+    // pool's, not one core's.
+    if out.len() != n {
+        *out = vec![0f32; n];
+    }
+    backend_cpu::par::chunks_mut(out, CHUNK, |c, dst| {
+        let start = c * CHUNK * 4;
+        let nbytes = dst.len() * 4;
+        // SAFETY: `dst` is this chunk's `f32` slice (>= 4*dst.len() bytes,
+        // aligned by `Vec<f32>`'s own allocation); `raw[start..start+nbytes]`
+        // is the matching byte range of the SAME tensor `decode_elems_into`'s
+        // per-element path would have read one element at a time. A raw byte
+        // copy is correct here specifically because f32's little-endian
+        // in-memory layout on this target already IS the safetensors on-disk
+        // layout.
+        unsafe { std::ptr::copy_nonoverlapping(raw[start..start + nbytes].as_ptr(), dst.as_mut_ptr().cast::<u8>(), nbytes) };
+    });
+}
+
+/// Portable fallback for a big-endian host, where the fast path's raw byte
+/// copy would silently read every value byte-swapped. `f32::from_le_bytes`
+/// does the swap `decode_f32` above skips on little-endian.
+#[cfg(not(target_endian = "little"))]
+fn decode_f32(raw: &[u8], out: &mut Vec<f32>) {
+    decode(raw, 4, |b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]), out)
+}
+
 fn decode_into(name: &str, dtype: &str, raw: &[u8], out: &mut Vec<f32>) {
     out.clear();
     // Every fixed-width arm goes through the SHARED, host-parallel
@@ -423,7 +515,7 @@ fn decode_into(name: &str, dtype: &str, raw: &[u8], out: &mut Vec<f32>) {
     // look like a memory-for-time trade when most of the "time" was an idle
     // thread pool.
     match dtype {
-        "F32" => decode(raw, 4, |b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]), out),
+        "F32" => decode_f32(raw, out),
         "F16" => decode(raw, 2, |b| f16_to_f32(u16::from_le_bytes([b[0], b[1]])), out),
         "BF16" => decode(raw, 2, |b| bf16_to_f32(u16::from_le_bytes([b[0], b[1]])), out),
         "I64" => decode(raw, 8, |b| i64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]) as f32, out),

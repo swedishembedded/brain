@@ -354,7 +354,11 @@ pub fn parse_safetensors(bytes: &[u8]) -> Result<StModel, String> {
 /// and the release happens only after the tensor has been decoded.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn load_safetensors(path: &str) -> io::Result<StModel> {
-    let m = crate::mmap::MmapSafetensors::open(path)
+    // `open_populated`, not `open`: every tensor in the file is about to be
+    // decoded (the loop below), so the mapping should be pre-faulted in one
+    // bulk kernel readahead rather than one page at a time as the parallel
+    // decode below touches it - see that constructor's own doc.
+    let m = crate::mmap::MmapSafetensors::open_populated(path)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     let mut tensors = HashMap::with_capacity(m.names().len());
     for name in m.names() {

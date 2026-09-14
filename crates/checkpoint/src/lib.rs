@@ -228,11 +228,34 @@ pub struct Container {
 
 impl Container {
     /// Tensors whose role matches `role`, keyed by name.
+    ///
+    /// Clones every matching tensor's data - the only option with a `&self`
+    /// receiver. A caller that already owns the `Container` and is about to
+    /// drop it right after this call (`checkpoint::load(path).by_role("")`,
+    /// by far the most common shape) wants [`Self::into_by_role`] instead:
+    /// same result, no second copy of the whole checkpoint.
     pub fn by_role(&self, role: &str) -> HashMap<String, Vec<f32>> {
         self.tensors
             .iter()
             .filter(|t| t.role == role)
             .map(|t| (t.name.clone(), t.data.clone()))
+            .collect()
+    }
+    /// [`Self::by_role`], consuming `self` instead of cloning: each matching
+    /// tensor's `Vec<f32>` is MOVED into the result rather than copied.
+    ///
+    /// Measured on a real 32.76 GB fp32 checkpoint (`brain serve`'s Qwen3-8B
+    /// activation, `BRAIN_PROFILE=1`'s `re-load checkpoint tensors for engine
+    /// build` stage): the clone in `by_role` was, on its own, a bigger cost
+    /// than reading and decoding the entire file - a single-threaded copy of
+    /// data nothing keeps a second reference to. `checkpoint::load(path)`
+    /// only ever exists to feed straight into `by_role("")` at most call
+    /// sites in this tree; this is the zero-copy shape of that exact chain.
+    pub fn into_by_role(self, role: &str) -> HashMap<String, Vec<f32>> {
+        self.tensors
+            .into_iter()
+            .filter(|t| t.role == role)
+            .map(|t| (t.name, t.data))
             .collect()
     }
     pub fn find(&self, name: &str, role: &str) -> Option<&Vec<f32>> {
@@ -424,6 +447,28 @@ mod tests {
         assert_eq!(map["b"], vec![0.1, 0.2, 0.3]);
         assert_eq!(c.find("a", "").unwrap().len(), 4);
         assert!(c.find("a", "init").is_none()); // role filter works
+        std::fs::remove_file(p).ok();
+    }
+
+    /// `into_by_role` must return exactly what `by_role` would for the same
+    /// container and role - the whole point is a cheaper route to the
+    /// identical result, never a different one.
+    #[test]
+    fn into_by_role_matches_by_role_then_consumes_the_container() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("into_by_role_test_{}.bin", std::process::id()));
+        let p = path.to_str().unwrap();
+        let cfg = serde_json::json!({});
+        let tensors = vec![
+            ("a".to_string(), vec![2u64, 2], vec![1.0f32, -2.5, 3.25, 4.0]),
+            ("b".to_string(), vec![3u64], vec![0.1f32, 0.2, 0.3]),
+        ];
+        save(p, cfg, &tensors);
+        let by_ref = load(p).by_role("");
+        let consumed = load(p).into_by_role("");
+        assert_eq!(by_ref, consumed);
+        assert_eq!(consumed["a"], vec![1.0, -2.5, 3.25, 4.0]);
+        assert!(load(p).into_by_role("init").is_empty(), "role filter must still apply");
         std::fs::remove_file(p).ok();
     }
 
