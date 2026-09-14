@@ -1996,6 +1996,52 @@ rather than infer it is pre-existing.
 gate, the selector wiring, and the dispatch site plus the bench tooling that
 found and measured all of the above.
 
+### M2.10 - GQA head-group sharing for `paged_flash_decode_split_i8` - measured, and REVERTED (killed hypothesis)
+
+M2.9's own "not attempted" named the redundancy: under grouped-query
+attention, `group` query heads sharing one KV head each independently
+reload and redequantize the SAME key/value tile. The fix looked
+mechanical - one workgroup per (sequence, KV head, split) instead of per
+(sequence, query head, split), staging each tile once and looping every
+sharing head against it before moving to the next tile - and it IS
+byte-for-byte the same arithmetic per head (the correctness gate's worst
+maxabs was identical to the digit, `2.682209e-7`, before and after;
+mutation-verified the same way as M2.9's own gate).
+
+**Measured a regression, not a win, at the real shape this milestone
+exists for.** `qwen_bench serve 1 5 2048 i8w kv8 --model 8b` (Qwen3-8B's
+real `group = 4`): the attention kernel's own share went from 15.3 ms to
+20.5 ms. Not an isolated-microbench artifact either - the isolated A/B
+(`qwen_bench flash-decode-i8`, which hardcodes a smaller `group = 2` shape
+neither matches Qwen3-8B nor was fixed to match it before measuring) showed
+the same direction of loss at every context length swept (512-8192).
+
+**Why, read from the design rather than re-measured further**: the fix
+trades `group`x fewer tile loads for `group`x more per-thread accumulator
+state (`o`/`m`/`l` sized for up to 8 heads instead of 1) and 8x the
+`qsh`/`part`/`sc` shared-memory footprint - fewer, richer workgroups instead
+of more, smaller ones. On this hardware, at this kernel's existing
+register/occupancy balance, the occupancy cost of that trade outweighs the
+bandwidth saved from not re-staging the tile. The redundant-load fix is a
+real, published pattern elsewhere; it did not transfer to this kernel on
+this hardware, and the honest reading is that it needed independent
+re-measurement here rather than being assumed to carry over - the same
+"confident hypothesis, wrong, the profile was right" caution `.agents/
+rules/kernels.md`'s own §E table already carries several entries of.
+
+**Reverted before landing** - the working tree was returned to M2.9's exact
+committed state (`git checkout` on the four touched files) and rebuilt to
+confirm. Nothing from this entry shipped; it is recorded so the same idea
+is not re-attempted from a cold start.
+
+**Not attempted, named rather than skipped**: a version sized for the REAL
+`group = 4` specifically (`MAX_GROUP = 4` instead of 8, half the shared-
+memory/register cost this attempt paid) - untried, and plausibly still a
+loss given the direction was already wrong at every length swept, but not
+ruled out by this entry's own measurement; profiling which SPECIFIC
+resource (register spill vs shared-memory-limited occupancy) actually
+capped this attempt, rather than reasoning about it from the design alone.
+
 ### M3.2 - Device admission head, and `PagedDecoder::admit_greedy`/`admit_topk`
 
 `qwen3::serve::Engine` kept a SECOND, host-only copy of the LM head
