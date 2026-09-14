@@ -848,7 +848,10 @@ front-end to depend on.
 | `backend-wgpu` | wgpu (Vulkan/Metal/DX12/GL/WebGPU) eager backend - **the default** |
 | `backend-cpu` | native CPU backend: WGSL → Cranelift JIT across cores, AVX2 fast paths |
 | `backend-vulkan` | native Vulkan (ash + naga WGSL→SPIR-V) eager backend |
+| `backend-cuda` | native CUDA Driver API eager backend (`libcuda.so.1` `dlopen`ed at run time, so there is no build-time CUDA dependency and a box with no NVIDIA driver still builds green). Compiles each kernel through `wgsl-cuda` + NVRTC **on first dispatch of that kernel**, never for the catalogue at construction. A kernel outside `wgsl-cuda`'s supported subset is refused by name - never approximated, never diverted to another device |
 | `wgsl-cpu` | the CPU backend's compiler: WGSL → naga IR → Cranelift JIT |
+| `wgsl-cuda` | the CUDA backend's compiler: WGSL → naga IR → CUDA C++ text. The **generated** (`ImplSource::Generated`) tier - it inherits the WGSL execution model and reports itself as such, so a hand-written kernel cannot be quietly replaced by it |
+| `kernels-cuda` | hand-written CUDA kernels and their metadata (name, op, tier, compute-capability floor, entry point), with its own registry and its own `make cuda-table/check`. A source-only leaf, so it builds anywhere including wasm |
 | `vulkan` | **optional, non-default** `VK_KHR_cooperative_matrix` matmul path (excluded from `default-members`; build with `-p brain-vulkan` / cli feature `vulkan-coopmat`) |
 | `paramstore` / `optim` | param/grad/Adam buffers; AdamW + global grad-norm clip |
 | `arch` | **the canonical model-architecture registry** (`ARCHS`). brain used to have four drifting answers to "which architecture is this" (the CLI's subcommand names, `modelstore::plan`'s HF-class substring scan, the GGUF importer table, `ModelCard::family`); all four read this table now. The `[a-z0-9]+` naming rule - llama.cpp's `LLM_ARCH_*` vocabulary where one exists, the upstream paper/repo name otherwise - lives here. **Adding a model means adding its row here**, not inventing a name at a call site |

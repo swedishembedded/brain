@@ -46,16 +46,23 @@ Six layers. Each may depend only on layers above it.
  ─── 2. the accelerator seam ───────────────────────────────────────────────
    backend-api    Backend/GraphBackend traits + neutral buffer/step handles
                   + registry. A NEW BACKEND DEPENDS ONLY ON THIS.
-        ▲   ▲   ▲
-        │   │   └── backend-vulkan   ash + naga (WGSL -> SPIR-V)
-        │   └────── backend-cpu      wgsl-cpu (naga IR -> Cranelift JIT),
-        │                            rayon across cores, AVX2 fast paths
-        └────────── backend-wgpu     wgpu: Vulkan/Metal/DX12/GL/WebGPU  [default]
+        ▲   ▲   ▲   ▲
+        │   │   │   └── backend-cuda   CUDA Driver API (libcuda.so.1 dlopen'ed
+        │   │   │                      at run time - no build-time CUDA dep).
+        │   │   │                      wgsl-cuda (naga IR -> CUDA C++) + NVRTC,
+        │   │   │                      compiled lazily per kernel on first
+        │   │   │                      dispatch; kernels-cuda holds the
+        │   │   │                      hand-written tier and its registry
+        │   │   └────── backend-vulkan ash + naga (WGSL -> SPIR-V)
+        │   └────────── backend-cpu    wgsl-cpu (naga IR -> Cranelift JIT),
+        │                              rayon across cores, AVX2 fast paths
+        └────────────── backend-wgpu   wgpu: Vulkan/Metal/DX12/GL/WebGPU [default]
                             │
    gpu-core       ◄─────────┘  device facade: ONE Gpu/DeviceBuffer/Step API.
-                  Picks a backend at runtime (--device / BRAIN_DEVICE); all
-                  three are compiled into every native build. This is the ONLY
-                  thing abstracted - there is no per-backend model code.
+                  Picks a backend at runtime (--device / --backend /
+                  BRAIN_DEVICE); all four are compiled into every native
+                  build. This is the ONLY thing abstracted - there is no
+                  per-backend model code.
 
  ─── 3. training substrate ─────────────────────────────────────────────────
    paramstore ⇄ optim      param/grad/Adam buffers; AdamW + global grad clip
