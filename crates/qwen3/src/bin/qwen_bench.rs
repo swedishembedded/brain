@@ -59,6 +59,21 @@
 //!                                          # `start`, so a nonzero `start`
 //!                                          # is the regime this kernel
 //!                                          # targets
+//!   qwen_bench serve-prefill [cc] [reps] [start] [i8w] [kv8]
+//!                                          # the WHOLE serving tape in the
+//!                                          # causal-chunk PREFILL regime
+//!                                          # (`causal_chunk = true`), which
+//!                                          # `qwen_bench serve` never
+//!                                          # exercises - the whole-pass
+//!                                          # denominator for any
+//!                                          # attention-kernel change
+//!   qwen_bench flash-prefill-i8 [start] [cc] [reps]
+//!                                          # the same A/B one storage tier
+//!                                          # down: `paged_flash_prefill_i8`
+//!                                          # against the INT8 triad
+//!                                          # `qwen3::serve::prefill`
+//!                                          # dispatches per CHUNK when
+//!                                          # `kv_int8` (the serving default)
 
 use std::time::Instant;
 
@@ -181,6 +196,20 @@ fn main() {
         let cc: u32 = a.get(3).and_then(|s| s.parse().ok()).unwrap_or(512);
         let reps: usize = a.get(4).and_then(|s| s.parse().ok()).unwrap_or(20);
         flash_prefill_bench(start, cc, reps);
+        return;
+    }
+    if mode == "serve-prefill" {
+        let cc: u32 = a.get(2).and_then(|s| s.parse().ok()).unwrap_or(512);
+        let reps: usize = a.get(3).and_then(|s| s.parse().ok()).unwrap_or(5);
+        let start: u32 = a.get(4).and_then(|s| s.parse().ok()).unwrap_or(512);
+        serve_prefill_bench(&cfg, cc, start, reps, a.iter().any(|x| x == "i8w"), a.iter().any(|x| x == "kv8"));
+        return;
+    }
+    if mode == "flash-prefill-i8" {
+        let start: u32 = a.get(2).and_then(|s| s.parse().ok()).unwrap_or(512);
+        let cc: u32 = a.get(3).and_then(|s| s.parse().ok()).unwrap_or(512);
+        let reps: usize = a.get(4).and_then(|s| s.parse().ok()).unwrap_or(20);
+        flash_prefill_i8_bench(start, cc, reps);
         return;
     }
 
@@ -604,4 +633,178 @@ pub fn flash_prefill_bench(start: u32, cc: u32, reps: usize) {
         pct(t_ref).map(|p| format!("{p:.1}% of mem roof")).unwrap_or_else(|| "roof unmeasured".into()),
         pct(t_flash).map(|p| format!("{p:.1}% of mem roof")).unwrap_or_else(|| "roof unmeasured".into()),
     );
+}
+
+/// Per-`(token slot, kv head)` symmetric int8 quantization of a flat
+/// `[num_slots, n_kv*head_dim]` pool, packed 4-per-`u32` - the same
+/// `absmax/127` scheme `paged_kv_append_i8_clipped_batched` writes and every
+/// int8 paged kernel reads. Bench-local because only the LAYOUT matters here:
+/// neither kernel branches on a value, so the timings below are independent of
+/// what the bytes actually hold.
+fn quantize_pool_i8(pool: &[f32], n_kv: u32, hd: u32) -> (Vec<u32>, Vec<f32>) {
+    let kv_stride = (n_kv * hd) as usize;
+    let num_slots = pool.len() / kv_stride;
+    let mut bytes = vec![0u8; pool.len()];
+    let mut scales = vec![0f32; num_slots * n_kv as usize];
+    for slot in 0..num_slots {
+        for h in 0..n_kv as usize {
+            let base = slot * kv_stride + h * hd as usize;
+            let row = &pool[base..base + hd as usize];
+            let absmax = row.iter().fold(0f32, |m, &v| m.max(v.abs()));
+            let sc = if absmax == 0.0 { 1.0 } else { absmax / 127.0 };
+            scales[slot * n_kv as usize + h] = sc;
+            for (d, &v) in row.iter().enumerate() {
+                bytes[base + d] = ((v / sc).round().clamp(-127.0, 127.0) as i32 as i8) as u8;
+            }
+        }
+    }
+    let words = bytes.chunks(4).map(|c| c.iter().enumerate().fold(0u32, |w, (i, &b)| w | (u32::from(b) << (8 * i)))).collect();
+    (words, scales)
+}
+
+/// [`flash_prefill_bench`]'s A/B one storage tier down: `paged_flash_prefill_i8`
+/// against the INT8 triad (`paged_decode_scores_i8_batched` ->
+/// `decode_softmax_batched` -> `paged_decode_apply_i8_batched`) that
+/// `qwen3::serve::prefill` dispatches per CHUNK under `kv_int8` - the SERVING
+/// DEFAULT, so this is the arm that decides whether the default configuration
+/// gets the fused path (and with it the `Scratch::{scores,probs}` shrink
+/// `paged_attn_scratch_bytes` gates on `fused_prefill_available`) at all.
+///
+/// Same shape, same `start`/`cc` semantics and the same Qwen3-0.6B head shape
+/// as the fp32 bench above, so the two runs are directly comparable; only the
+/// KV storage tier and therefore the kernels differ. The triad's own cost is
+/// `O(cap)` per row regardless of `start` (it walks every capacity slot,
+/// masking with `seq_lens`) where the fused kernel's is `O(start+cc)`, exactly
+/// as at fp32.
+///
+/// `qwen_bench flash-prefill-i8 [start] [cc] [reps]`.
+pub fn flash_prefill_i8_bench(start: u32, cc: u32, reps: usize) {
+    let gpu = Gpu::new(&[
+        ("paged_decode_scores_i8_batched", kernels::PAGED_DECODE_SCORES_I8_BATCHED),
+        ("decode_softmax_batched", kernels::DECODE_SOFTMAX_BATCHED),
+        ("paged_decode_apply_i8_batched", kernels::PAGED_DECODE_APPLY_I8_BATCHED),
+        ("paged_flash_prefill_i8", kernels::PAGED_FLASH_PREFILL_I8),
+    ]);
+    let roofs = banner(&gpu);
+
+    let (n_heads, n_kv_heads, head_dim, bs) = (16u32, 8u32, 128u32, 16u32);
+    let group = n_heads / n_kv_heads;
+    let kv_stride = n_kv_heads * head_dim;
+    let hq = n_heads * head_dim;
+    let total = start + cc;
+    let max_bt = total.div_ceil(bs);
+    let cap = max_bt * bs;
+    let scale = 1.0f32 / (head_dim as f32).sqrt();
+
+    let mut rng = data::rng::Rng::new(29);
+    let q: Vec<f32> = (0..cc * hq).map(|_| rng.next_gaussian() as f32).collect();
+    let pool_len = (max_bt * bs * kv_stride) as usize;
+    let pk: Vec<f32> = (0..pool_len).map(|_| rng.next_gaussian() as f32).collect();
+    let pv: Vec<f32> = (0..pool_len).map(|_| rng.next_gaussian() as f32).collect();
+    let (pk_words, sk) = quantize_pool_i8(&pk, n_kv_heads, head_dim);
+    let (pv_words, sv) = quantize_pool_i8(&pv, n_kv_heads, head_dim);
+    let table: Vec<u32> = (0..max_bt).collect(); // one sequence, contiguous blocks
+    let bt: Vec<u32> = (0..cc as usize).flat_map(|_| table.clone()).collect();
+    let seq_lens: Vec<u32> = (0..cc).map(|i| start + i + 1).collect(); // causal
+
+    let qb = gpu.storage_init("q", &q);
+    let poolk = gpu.storage(pk_words.len() as u64);
+    gpu.write(&poolk, &pk_words);
+    let poolv = gpu.storage(pv_words.len() as u64);
+    gpu.write(&poolv, &pv_words);
+    let scales_k = gpu.storage_init("sk", &sk);
+    let scales_v = gpu.storage_init("sv", &sv);
+    let btb = gpu.storage((cc * max_bt) as u64);
+    gpu.write(&btb, &bt);
+    let sl = gpu.storage(cc as u64);
+    gpu.write(&sl, &seq_lens);
+
+    let sc = gpu.storage((cc * n_heads * cap) as u64);
+    let pr = gpu.storage((cc * n_heads * cap) as u64);
+    let ctx_ref = gpu.storage((cc * hq) as u64);
+    let ref_steps = vec![
+        gpu.step(0, &[&qb, &poolk, &btb, &sl, &scales_k, &sc], &[cc, n_heads, group, head_dim, bs, kv_stride, cap, max_bt, scale.to_bits()], cc * n_heads * cap),
+        gpu.step(1, &[&sc, &sl, &pr], &[cc, n_heads, cap], cc * n_heads),
+        gpu.step(2, &[&pr, &poolv, &btb, &sl, &scales_v, &ctx_ref], &[cc, n_heads, group, head_dim, bs, kv_stride, cap, max_bt], cc * n_heads * head_dim),
+    ];
+    let t_ref = gpu_core::profile::best_of(&gpu, &ref_steps, reps);
+
+    let ctx_flash = gpu.storage((cc * hq) as u64);
+    let ntiles_q = cc.div_ceil(64); // BR = paged_flash_prefill_i8's own tile size
+    let flash_steps = vec![gpu.step(
+        3,
+        &[&qb, &poolk, &poolv, &scales_k, &scales_v, &btb, &sl, &ctx_flash],
+        &[cc, n_heads, n_kv_heads, head_dim, group, bs, max_bt],
+        n_heads * ntiles_q * 256, // 256 = its own @workgroup_size
+    )];
+    let t_flash = gpu_core::profile::best_of(&gpu, &flash_steps, reps);
+
+    // Bytes moved reading K+V once each over every LIVE key (`total`, not
+    // `cap`) - ONE byte per element now, not four; the triad reads `cap` per
+    // row regardless of `total`, so this underestimates the triad's bytes and
+    // its utilisation % below is an UPPER bound on the triad's real
+    // efficiency, making any measured gap conservative. Same convention as
+    // the fp32 bench above.
+    //
+    // READ THE FUSED COLUMN AS A RATIO, NOT A UTILISATION: this is per-QUERY-
+    // ROW traffic, and the fused kernel stages each K/V tile ONCE per (head,
+    // BR=64 query-row tile) and reuses it across all 64 rows, so its real DRAM
+    // traffic is up to 64x below what this counts. Its percentage therefore
+    // reads well ABOVE 100% of the roof - which is the tile reuse being
+    // measured, not §E.0's host-timing tell (both arms are `best_of`,
+    // `poll_wait()`-bracketed, on the same buffers). The triad has no such
+    // reuse, so ITS column is a real utilisation.
+    let bytes = (cc * n_heads * total * head_dim) as u64 * 2;
+    let pct = |secs: f64| roofs.and_then(|r| r.utilisation_of(0, 0, bytes, secs));
+    println!(
+        "\npaged attention prefill INT8 KV @ start={start} cc={cc}: int8 triad (scores+softmax+apply) {:>8.4} ms  vs  paged_flash_prefill_i8 {:>8.4} ms  ({:.2}x)",
+        t_ref * 1e3,
+        t_flash * 1e3,
+        t_ref / t_flash,
+    );
+    println!(
+        "triad {}  |  flash {}",
+        pct(t_ref).map(|p| format!("{p:.1}% of mem roof")).unwrap_or_else(|| "roof unmeasured".into()),
+        pct(t_flash).map(|p| format!("{p:.1}% of mem roof")).unwrap_or_else(|| "roof unmeasured".into()),
+    );
+}
+
+/// The whole serving TAPE in the causal-chunk PREFILL regime - the whole-pass
+/// denominator §F.1 requires beside `flash-prefill{,-i8}`'s per-kernel A/B.
+/// `qwen_bench serve` only ever builds `causal_chunk = false` tapes, so before
+/// this mode existed no harness in the tree could report what fraction of a
+/// real prefill step the fused attention kernel actually moves.
+///
+/// `start` tokens are already cached (an Nth chunk of a longer prompt), `cc`
+/// fresh causally-increasing rows land in this one dispatch, all one sequence
+/// sharing one block table - exactly `Engine::prefill`'s own construction, and
+/// exactly the contract `paged_flash_prefill{,_i8}` documents.
+///
+/// `qwen_bench serve-prefill [cc] [reps] [start] [i8w] [kv8]`.
+fn serve_prefill_bench(cfg: &QwenConfig, cc: u32, start: u32, reps: usize, i8w: bool, kv8: bool) {
+    let bs = 16u32;
+    let total = start + cc;
+    let mbs = total.div_ceil(bs);
+    // One sequence, so the pool needs one sequence's blocks plus headroom.
+    let num_blocks = mbs + bs;
+    eprintln!(
+        "qwen_bench serve-prefill: Qwen3-0.6B, cc={cc} rows after start={start} cached, {reps} reps (random weights{}{})",
+        if i8w { ", int8 weights" } else { "" },
+        if kv8 { ", int8 KV" } else { "" }
+    );
+    let init = init_weights(cfg, 7);
+    let eng = qwen3::serve::Engine::from_map(cfg.clone(), &init, bs, num_blocks, cc.max(8), mbs, cc.max(8), kv8, i8w);
+    let gpu = eng.gpu().share();
+    let roofs = banner(&gpu);
+
+    let positions: Vec<u32> = (start..start + cc).collect();
+    let seqlens: Vec<u32> = (0..cc).map(|i| start + i + 1).collect();
+    let blocks: Vec<u32> = positions.iter().map(|&p| p / bs).collect();
+    let offsets: Vec<u32> = positions.iter().map(|&p| p % bs).collect();
+    let bt: Vec<u32> = (0..cc).flat_map(|_| 0..mbs).collect();
+    let tokens: Vec<u32> = (0..cc).map(|i| (i * 131 + 7) % cfg.vocab).collect();
+
+    let steps = eng.steps_for_profile(cc, &tokens, &positions, &seqlens, &blocks, &offsets, &bt, true);
+    let secs = report(&gpu, &format!("SERVE-PREFILL cc={cc} start={start}"), &steps, reps, roofs);
+    println!("\none prefill chunk of {cc} rows at start={start}: {:.2} ms  ->  {:.0} tok/s", secs * 1e3, cc as f64 / secs);
 }
