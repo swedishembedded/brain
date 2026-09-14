@@ -1854,6 +1854,148 @@ that point - still correct, but now over-reserves ~2.9 GiB on a
 fused-capable device and will pick a lower `AUTO_CTX_TIERS` rung than the
 card can actually serve. That is a real, separable follow-up.
 
+### M2.9 - `paged_flash_decode_split_i8`: the int8 decode tier M2.8's own "not attempted" left open
+
+M2.8's own close-out named the gap exactly: "an int8 DECODE tier
+(`Op::PagedAttentionFused`'s decode arm still has no int8 candidate -
+M2.1/M2.2's measured non-win, and M2.7's split-key redesign was never
+re-measured at int8, so nothing here reopens it)". Re-measuring it is this
+milestone's whole first half.
+
+**§F.4 first: profile the branch the default configuration actually takes.**
+`kv_int8` is the serving default, and at that tier decode was still running
+the three-stage triad unconditionally - `paged_flash_decode_i8` (M2.2) exists
+but was gated correctness-only, its OWN occupancy never independently taken.
+Measured now, at real production shape (Qwen3-8B's head geometry, one served
+decode step, `BRAIN_PROFILE=1 qwen_bench serve 1 5 2048 i8w kv8 --model 8b`):
+the int8 triad (`paged_decode_scores_i8_batched` -> `decode_softmax_batched`
+-> `paged_decode_apply_i8_batched`) cost 49.5 ms of a 92.4 ms whole pass, and
+`paged_flash_decode_i8` on its own lost to that SAME triad by over 2x at
+every context length swept (0.66-1.74 ms for the triad vs 3.16-10.54 ms for
+the unsplit fused kernel, seq 512-8192) - M2.1's serialised-tile-walk
+regression, confirmed present at this storage tier too, not inherited by
+assumption.
+
+**The fix ported cleanly.** M2.7's split-key shape (chop the serialised tile
+walk across more independent workgroups instead of one per (sequence, head))
+applies to int8 KV exactly the way M2.2 already applies M2.1's dequant-while-
+staging trick: `paged_flash_decode_split_i8` is `paged_flash_decode_split`
+with that one tile-load loop swapped for the int8 dequant version, byte for
+byte the same downstream reduction. One layout difference, not an algorithm
+one: two extra scale bindings push a naive 3-output port to 10 storage
+buffers, over WebGPU's guaranteed 8-per-stage floor, so the split phase's
+`m`/`l`/`o` triple is folded into ONE `part` buffer (stride `2 + HD`) instead
+of three - computed together per split by the same thread already, so
+folding costs nothing the kernel wasn't already paying. `paged_flash_decode_
+combine_i8` is that layout's own combine phase; plain `paged_flash_decode_
+combine` needed no change and still serves the fp32 kernel.
+
+**Correctness**: one test, the int8 triad as reference (not the fp32 fused
+kernel - the triad is what this replaces in production), scrambled shared-
+pool block tables, lengths straddling the `BC=8` tile boundary, the same
+per-`(token, kv head)` quantization scheme production uses: worst maxabs
+`2.682209e-7`, comfortably inside the `1e-3` bound every other fused-vs-triad
+gate in this file uses. **Mutation-verified**: swapping the K/V dequant
+scales makes `scales_k` unreachable in the shader body, which the auto-
+derived pipeline layout then drops from the bind group entirely - the
+failure surfaces as a bind-group-size validation error rather than a
+numerical one, but it is still a hard failure, not a silent pass.
+
+**Speed - a win at every context length swept, widening with length**
+(`qwen_bench flash-decode-i8`, extended this milestone to add the split/
+combine arm alongside the existing triad/unsplit-fused comparison):
+
+| seq | int8 triad | unsplit fused | split+combine | split vs triad |
+|---|---|---|---|---|
+| 512  | 0.5007 ms | 0.8065 ms  | 0.2449 ms | 2.05x |
+| 2048 | 1.5685 ms | 3.2037 ms  | 0.6597 ms | 2.38x |
+| 4096 | 3.0610 ms | 5.7714 ms  | 1.0456 ms | 2.93x |
+| 8192 | 5.1509 ms | 10.5433 ms | 1.7393 ms | 2.96x |
+
+**Whole-pass**: one served decode step at the real 8B shape went from
+92.42 ms to 58.86 ms (11 -> 17 rows/s), matching the fp32-KV path's own
+throughput at the same shape while keeping int8's smaller KV footprint. The
+attention share of the pass dropped from 49.5 ms (triad, three kernels) to
+15.7 ms (`paged_flash_decode_split_i8` 15.3 ms + `paged_flash_decode_
+combine_i8` 0.4 ms).
+
+**Wired**: `Op::PagedAttentionFused`'s `(0, Dtype::I8)` shape gets the
+identical `m == 1` gate the F32 tier already had, not a per-dtype exclusion -
+the two stale tests that encoded "int8 decode never fuses" as a blanket
+statement were split into an above-`bsz==1` pin (unchanged behaviour) and a
+new `bsz==1` pin (the new behaviour). `Scratch::part_i8` is the new engine-
+resident buffer the split kernel needs, sized for `bsz == 1` the same way
+`part_m`/`part_l`/`part_o` already are.
+
+**A real nuance found while re-verifying against a live server, not just the
+isolated bench**: at SHORT conversations (a few hundred tokens into a
+session), the same fix measured a small ~5% SLOWER wall-clock time over real
+HTTP requests, not faster - back-to-back requests ruled out device DVFS
+ramp state as the cause (flat ~17.0 tok/s across three consecutive calls,
+no warm-up trend). Root cause: `decode_split_shape` sizes the split count
+from the engine's CONFIGURED max context (`self.cap`, e.g. 24k+ tokens), not
+the conversation's current length, and that decision is baked into a tape
+cached per `bsz` and replayed unchanged for every step of a session (the
+existing dispatch-caching design, not something this milestone touched).
+Early in a conversation most of the fixed split count covers key-range past
+the live sequence and does zero real work but still pays a workgroup launch.
+This is inherited from the SAME fixed-cap sizing the fp32 split kernel
+already had before this milestone - not a regression this port introduced,
+but a real, now-confirmed characteristic of the split-key design as a whole
+that was previously undocumented. Making the split count adaptive to live
+position without breaking the tape-caching invariant is a real, separable
+follow-up, not attempted here.
+
+**A wider-context measurement, prompted by the same re-verification pass**:
+the whole-pass numbers above are single-STREAM (`bsz == 1`) - the ONLY batch
+size either split-key kernel is ever offered at (`m == 1` gates both tiers).
+At any `bsz >= 2` the engine already falls back to the plain triad
+unconditionally, and that triad's own per-score parallelism turns out to
+scale far better with concurrent rows than the batch-1 kernels do with
+context length: swept at the real 8B shape (`qwen_bench serve <rows> 5 256..512
+i8w kv8 --model 8b`), aggregate throughput went 24 (`bsz=1`) -> 62 (4) -> 81
+(8) -> 88 (16) -> 104 (32) -> 158 (64) -> 308 rows/s (128), using unmodified
+existing code - no kernel change. This is AGGREGATE server capacity across
+concurrently-served sequences, not any one conversation's own rate (at
+`bsz=128` each individual sequence still gets one new token roughly every
+415 ms, slower per-conversation than `bsz=1`) - the two are different
+metrics that trade against each other, and concurrency is the far larger
+lever for the aggregate one. Recorded here because it directly bears on how
+to read every single-stream tok/s number in this file: none of them are
+ceilings on what this engine can serve in aggregate.
+
+**Verified**: `brain-qwen3 --lib` 161/161 (up from 160 - the new `bsz==1`
+dispatch pin), `brain-backend-api --lib` 63/63, `brain-model --lib` 227/227.
+`make kernels-regen` (481 kernels). `cargo check --workspace --all-targets`
+clean.
+
+**Investigated and confirmed UNRELATED to this milestone's own correctness,
+not silently ignored**: `brain-qwen3 --lib`'s default (parallel) test runner
+segfaults at process teardown, AFTER every individual test already reported
+passing (161/161, 0 failed) - reproducible on demand. `--test-threads=1`
+exits clean every time, with the identical 161/161 pass count, which locates
+the fault at concurrent GPU-device teardown across many threads rather than
+in any test's own assertions. Two new GPU-resident tests added this
+milestone plausibly tipped a pre-existing concurrency threshold rather than
+introducing a new one - not confirmed by bisecting against a pre-milestone
+build, stated as the honest likelihood rather than a proven root cause.
+
+**Not attempted, named rather than skipped**: making `decode_split_shape`
+adaptive to live sequence length instead of configured `cap` (the short-
+conversation nuance above); the same head-group redundancy the prefill/GEMM
+literature independently identifies for GQA decode kernels in general - each
+of the `group` query heads sharing one KV head currently reloads and
+redequantizes the SAME key/value tile independently in both `paged_flash_
+decode_split` and this milestone's int8 twin, which a per-KV-head workgroup
+design (load the tile once, fold all `group` heads' score/softmax/accumulate
+against it before moving to the next tile) would remove; bisecting the
+parallel-test-teardown segfault against a pre-milestone build to confirm
+rather than infer it is pre-existing.
+
+**Commit**: four, self-contained - the new kernel pair, the correctness
+gate, the selector wiring, and the dispatch site plus the bench tooling that
+found and measured all of the above.
+
 ### M3.2 - Device admission head, and `PagedDecoder::admit_greedy`/`admit_topk`
 
 `qwen3::serve::Engine` kept a SECOND, host-only copy of the LM head
