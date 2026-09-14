@@ -217,6 +217,22 @@ pub trait ArchSpec: Send + Sync {
     fn missing_doc(&self, role: &str) -> String {
         format!("no artifact classifies as {role} for arch {}", self.arch())
     }
+
+    /// The role whose distinct candidates are DIFFERENT SERVABLE MODELS, not
+    /// one ambiguous choice among equivalents - FLUX.2's `dit` is the
+    /// motivating case: a store holding a real black-forest-labs release, an
+    /// unsloth re-quantization of the same size, and an unrelated 4B klein
+    /// GGUF has three genuine, independent checkpoints tied for the same
+    /// role, not three guesses at one. [`resolve_all`] resolves the OTHER
+    /// roles independently once per candidate of this role (still pooled
+    /// store-wide, so a `dit`-only checkpoint can share a `vae`/`tokenizer`
+    /// published elsewhere) instead of asking a human to pick exactly one.
+    ///
+    /// Default `None`: every existing `ArchSpec` keeps [`resolve`]'s
+    /// single-instance behavior unless it opts in.
+    fn instance_role(&self) -> Option<&'static str> {
+        None
+    }
 }
 
 /// Shared wording for [`ArchSpec::missing_doc`] on a role with no on-disk
@@ -235,8 +251,8 @@ pub fn no_default_checkpoint_doc(arch: &str, role: &str) -> String {
 /// Every artifact's own path is already absolute (see
 /// [`ArtifactRecord::path`]), so today's specs derive everything from a
 /// record's own path instead; this exists for a future spec that needs the
-/// scan root itself.
-fn common_root(records: &[ArtifactRecord]) -> PathBuf {
+/// scan root itself, and for [`resolve_all`]'s own per-candidate model id.
+pub fn common_root(records: &[ArtifactRecord]) -> PathBuf {
     let mut paths = records.iter().map(|r| r.path.as_path());
     let Some(first) = paths.next() else { return PathBuf::new() };
     let mut common: Vec<std::path::Component> = first.components().collect();
@@ -519,6 +535,78 @@ pub fn resolve(arch: &str, records: &[ArtifactRecord], specs: &[&dyn ArchSpec], 
         }
         Err(e) => Resolution::Missing(Box::new(Missing { arch: arch.to_string(), roles: vec![MissingRole { role: "assemble".to_string(), doc: e, near_misses: Vec::new() }] })),
     }
+}
+
+/// A `<vendor>/<repo>` (or, for a loose file with no repo subdirectory,
+/// `<vendor>/<file-stem>`) id from `path`'s own position under `root` - the
+/// same identity a real HF release publishes under, and what
+/// `crate::inventory`'s store-layout scan already keys a plain single-file
+/// model's own [`crate::LocalModel::id`] with. `None` if `path` is not under
+/// `root` at all, or names `root` itself.
+///
+/// [`resolve_all`]'s own per-instance id: an operator with several real,
+/// independent checkpoints for one architecture's instance role (FLUX.2's
+/// `dit`) needs each one servable and addressable under the name they
+/// already recognize it by (`black-forest-labs/FLUX.2-klein-9B`), not a
+/// single generic `local/<arch>` every candidate would otherwise collide on.
+pub fn model_id_from_path(path: &Path, root: &Path) -> Option<String> {
+    let rel = path.strip_prefix(root).ok()?;
+    let comps: Vec<&std::ffi::OsStr> = rel.components().filter_map(|c| match c { std::path::Component::Normal(s) => Some(s), _ => None }).collect();
+    match comps.len() {
+        0 => None,
+        1 => Some(comps[0].to_string_lossy().into_owned()),
+        2 => Some(format!("{}/{}", comps[0].to_string_lossy(), Path::new(comps[1]).file_stem()?.to_string_lossy())),
+        _ => Some(format!("{}/{}", comps[0].to_string_lossy(), comps[1].to_string_lossy())),
+    }
+}
+
+/// [`resolve`], but every distinct candidate of `spec.instance_role()` (when
+/// it declares one, and the caller has not already pinned that role via
+/// `overrides`) resolved independently as its OWN model, instead of being
+/// pooled into one ambiguous choice - see [`ArchSpec::instance_role`]'s own
+/// doc for why that distinction is real. Every OTHER role is still resolved
+/// against the WHOLE store, so a `dit`-only checkpoint shares a `vae`/
+/// `tokenizer` published anywhere else exactly as [`resolve`] already lets
+/// it.
+///
+/// Falls back to `vec![(format!("local/{arch}"), resolve(...))]` - today's
+/// exact single-instance behavior, unchanged - when `spec` names no instance
+/// role, or the caller already named one via `overrides` (an operator who
+/// pinned it explicitly gets exactly that one, not a scan of every other
+/// candidate on disk).
+///
+/// # Panics
+/// Same as [`resolve`]: `specs` must name an `ArchSpec` for `arch`.
+pub fn resolve_all(arch: &str, records: &[ArtifactRecord], specs: &[&dyn ArchSpec], overrides: &BTreeMap<String, String>) -> Vec<(String, Resolution)> {
+    let spec = *specs.iter().find(|s| s.arch() == arch).unwrap_or_else(|| panic!("resolve_all: no ArchSpec registered for arch {arch:?}"));
+    let single = || vec![(format!("local/{arch}"), resolve(arch, records, specs, overrides))];
+    let Some(instance_role) = spec.instance_role() else { return single() };
+    if overrides.contains_key(instance_role) {
+        return single();
+    }
+
+    let root = common_root(records);
+    let mut seen: BTreeSet<&Path> = BTreeSet::new();
+    let mut candidates: Vec<usize> = spec
+        .classify(records, &root)
+        .into_iter()
+        .filter(|(_, role, conf)| role == instance_role && *conf > Confidence::Guessed)
+        .filter_map(|(idx, _, _)| seen.insert(records[idx].path.as_path()).then_some(idx))
+        .collect();
+    candidates.sort_by_key(|&idx| records[idx].path.clone());
+    if candidates.is_empty() {
+        return single();
+    }
+
+    candidates
+        .into_iter()
+        .map(|idx| {
+            let mut forced = overrides.clone();
+            forced.insert(instance_role.to_string(), records[idx].path.to_string_lossy().into_owned());
+            let id = model_id_from_path(&records[idx].path, &root).unwrap_or_else(|| format!("local/{arch}"));
+            (id, resolve(arch, records, specs, &forced))
+        })
+        .collect()
 }
 
 // ===================== shared tokenizer-role classification =====================
@@ -1371,5 +1459,120 @@ mod tests {
         let mut out = Vec::new();
         classify_compound_manifest(&records, &dir, "qwen3tts", &mut out);
         assert!(out.is_empty(), "{out:?}");
+    }
+
+    #[test]
+    fn model_id_from_path_derives_vendor_repo_from_a_two_level_store_layout() {
+        let root = Path::new("/models");
+        let path = root.join("black-forest-labs").join("FLUX.2-klein-9B").join("Flux-2-Klein-9B-KV-Q8_0.gguf");
+        assert_eq!(model_id_from_path(&path, root), Some("black-forest-labs/FLUX.2-klein-9B".to_string()));
+    }
+
+    /// A loose file directly under a vendor directory (no repo subdirectory
+    /// at all - a real, if unusual, on-disk shape) gets `<vendor>/<file
+    /// stem>`, dropping the extension - the exact id a real store already
+    /// keys a plain single-file model under.
+    #[test]
+    fn model_id_from_path_derives_vendor_file_stem_for_a_loose_file() {
+        let root = Path::new("/models");
+        let path = root.join("unsloth").join("flux-2-klein-9b-Q8_0.gguf");
+        assert_eq!(model_id_from_path(&path, root), Some("unsloth/flux-2-klein-9b-Q8_0".to_string()));
+    }
+
+    /// Nesting deeper than `<vendor>/<repo>/<file>` (a diffusers-style
+    /// per-role subdirectory) still keys on the first two components only -
+    /// the id is the REPO, not the file's own position within it.
+    #[test]
+    fn model_id_from_path_ignores_nesting_past_vendor_repo() {
+        let root = Path::new("/models");
+        let path = root.join("unsloth").join("FLUX.2-klein-4B-GGUF").join("subdir").join("Q8_0.gguf");
+        assert_eq!(model_id_from_path(&path, root), Some("unsloth/FLUX.2-klein-4B-GGUF".to_string()));
+    }
+
+    #[test]
+    fn model_id_from_path_is_none_outside_root() {
+        assert_eq!(model_id_from_path(Path::new("/elsewhere/f.gguf"), Path::new("/models")), None);
+    }
+
+    /// The instance-role opt-in itself: a spec declaring no `instance_role`
+    /// (every existing `ArchSpec`, including [`ToySpec`]) must get exactly
+    /// [`resolve`]'s own single answer back, unchanged - here, the SAME
+    /// `Ambiguous` two tied `dit` candidates already produce today.
+    #[test]
+    fn resolve_all_is_single_instance_when_the_spec_names_no_instance_role() {
+        let dir = tmp("resolve-all-no-instance-role");
+        let records = vec![rec(dir.join("a.dit").to_str().unwrap()), rec(dir.join("b.dit").to_str().unwrap())];
+        let spec = ToySpec { classify_confidence: Confidence::Declared, validate_ok: true };
+        let specs: [&dyn ArchSpec; 1] = [&spec];
+        let got = resolve_all("toy", &records, &specs, &BTreeMap::new());
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert!(matches!(got[0].1, Resolution::Ambiguous(_)), "must match resolve()'s own single-instance answer: {got:?}");
+    }
+
+    /// A toy single-role arch identical to [`ToySpec`] except it opts a
+    /// `dit`-shaped role INTO instance-per-candidate resolution - the
+    /// FLUX.2 shape (several genuinely independent checkpoints tied for one
+    /// role) without any of FLUX.2's own klein/base/vae machinery.
+    struct InstanceRoleSpec;
+    impl ArchSpec for InstanceRoleSpec {
+        fn arch(&self) -> &'static str {
+            "toy"
+        }
+        fn roles(&self) -> &'static [&'static str] {
+            &["dit"]
+        }
+        fn classify(&self, records: &[ArtifactRecord], _root: &Path) -> Vec<(usize, String, Confidence)> {
+            records.iter().enumerate().filter(|(_, r)| r.path.to_string_lossy().contains("dit")).map(|(i, _)| (i, "dit".to_string(), Confidence::Declared)).collect()
+        }
+        fn assemble(&self, chosen: &BTreeMap<String, usize>, records: &[ArtifactRecord], _overrides: &BTreeMap<String, String>) -> Result<AssembleOutcome, String> {
+            let idx = *chosen.get("dit").ok_or("no dit")?;
+            Ok(AssembleOutcome::Assembled(AssembledVariant { id: format!("local/toy-{}", records[idx].path.display()), variant: None }))
+        }
+        fn validate(&self, _assembly: &Assembly) -> Result<(), String> {
+            Ok(())
+        }
+        fn instance_role(&self) -> Option<&'static str> {
+            Some("dit")
+        }
+    }
+
+    /// The real bug this closes: two genuinely independent `dit` candidates
+    /// (different vendors, both real) must each become their OWN `Resolved`
+    /// entry, addressed by their real vendor/repo id - never one ambiguous
+    /// choice a human has to break.
+    #[test]
+    fn resolve_all_resolves_one_instance_per_distinct_candidate_with_its_own_id() {
+        let dir = tmp("resolve-all-instance-role");
+        let a = dir.join("black-forest-labs").join("FLUX.2-klein-9B").join("model.dit.gguf");
+        let b = dir.join("unsloth").join("FLUX.2-klein-4B-GGUF").join("model.dit.gguf");
+        let records = vec![rec(a.to_str().unwrap()), rec(b.to_str().unwrap())];
+        let spec = InstanceRoleSpec;
+        let specs: [&dyn ArchSpec; 1] = [&spec];
+        let mut got = resolve_all("toy", &records, &specs, &BTreeMap::new());
+        got.sort_by(|x, y| x.0.cmp(&y.0));
+        assert_eq!(got.len(), 2, "{:?}", got.iter().map(|(id, _)| id).collect::<Vec<_>>());
+        assert_eq!(got[0].0, "black-forest-labs/FLUX.2-klein-9B");
+        assert_eq!(got[1].0, "unsloth/FLUX.2-klein-4B-GGUF");
+        for (id, resolution) in &got {
+            assert!(matches!(resolution, Resolution::Resolved(_)), "{id}: expected Resolved, got {resolution:?}");
+        }
+    }
+
+    /// An operator who already pinned the instance role explicitly (an
+    /// override, e.g. `--dit`/`BRAIN_FLUX2_DIT`) gets exactly that one
+    /// instance, not a scan of every other candidate on disk - the same
+    /// "an explicit override outranks the resolver" rule every other role
+    /// already follows.
+    #[test]
+    fn resolve_all_respects_an_explicit_instance_role_override() {
+        let dir = tmp("resolve-all-override");
+        let a = dir.join("black-forest-labs").join("FLUX.2-klein-9B").join("model.dit.gguf");
+        let b = dir.join("unsloth").join("FLUX.2-klein-4B-GGUF").join("model.dit.gguf");
+        let records = vec![rec(a.to_str().unwrap()), rec(b.to_str().unwrap())];
+        let spec = InstanceRoleSpec;
+        let specs: [&dyn ArchSpec; 1] = [&spec];
+        let overrides = BTreeMap::from([("dit".to_string(), a.to_str().unwrap().to_string())]);
+        let got = resolve_all("toy", &records, &specs, &overrides);
+        assert_eq!(got.len(), 1, "an explicit override must not fan out into per-candidate instances: {got:?}");
     }
 }
