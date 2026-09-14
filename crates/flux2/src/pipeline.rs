@@ -1491,10 +1491,10 @@ impl Pipeline {
     /// That also collapses the old route split. The streamed Q8_0 path used to
     /// be reachable only by a third-party `.safetensors` adapter, because
     /// folding brain's own container needed the whole map; with nothing to
-    /// fold, ANY adapter family rides the streamed path, and every base weight
-    /// - adapted or not - takes the bit-exact direct Q8_0 route. LoKr is the
-    /// one exception: its delta is a Kronecker product with no low-rank form,
-    /// so a stack containing one still folds, exactly as before.
+    /// fold, ANY adapter family rides the streamed path, and every base
+    /// weight (adapted or not) takes the bit-exact direct Q8_0 route. LoKr is
+    /// the one exception: its delta is a Kronecker product with no low-rank
+    /// form, so a stack containing one still folds, exactly as before.
     ///
     /// Safetensors, diffusers dirs, and the fp32 tier take the map route; a
     /// GGUF with a non-Q8_0 DiT linear is rejected during placement rather than
