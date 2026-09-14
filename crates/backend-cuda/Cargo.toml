@@ -14,6 +14,10 @@ path = "src/lib.rs"
 # its tests run on a box with no NVIDIA driver and no CUDA toolkit installed.
 [dependencies]
 brain-backend-api.workspace = true
+# The generated (T0) tier. This is the edge that makes `step` executable:
+# WGSL in, CUDA C++ out, compiled here by NVRTC. One-way by construction -
+# `wgsl-cuda` depends on naga and nothing else, so it never sees a driver.
+brain-wgsl-cuda.workspace = true
 libloading.workspace = true
 # The `tracing` FACADE only - never a subscriber, matching backend-vulkan and
 # gpu-core. With no subscriber installed every macro below is a
@@ -30,7 +34,6 @@ sha2.workspace = true
 # directions: nothing in this crate's own code depends on either, so the
 # eventual production edge (backend -> generator) stays one-way.
 [dev-dependencies]
-brain-wgsl-cuda.workspace = true
 brain-wgsl-cpu.workspace = true
 brain-kernels.workspace = true
 brain-testutil.workspace = true

@@ -4316,3 +4316,49 @@ there, exactly as the Cranelift path does. Hoisting those variable
 DECLARATIONS to function scope additionally means no `goto` (WGSL's `continue`
 is not C's - the continuing block still has to run) can ever jump across an
 initialisation, which C++ forbids.
+
+## 116. A whole-model parity test is weak evidence about a backend's plumbing
+
+A cross-backend forward-logit comparison is the strongest statement available
+about a backend's *arithmetic*, and it was: a dense decoder's forward agreed
+with both the CPU JIT and Vulkan to 8.9e-8 the first time it ran. It is a much
+weaker statement about everything around the arithmetic, and this was measured,
+not assumed. With each of these applied one at a time, that model test still
+passed:
+
+* storage handed back unzeroed (the model writes every buffer before reading);
+* a sub-range binding's offset dropped (the shape never binds a sub-range);
+* the dispatch grid laid out at a hardcoded 64 rather than the kernel's own
+  work-group size (every kernel the shape touches declares 64, and an
+  OVER-dispatch is harmless anyway - every kernel self-masks);
+* a `write_at` offset dropped (the shape only ever writes from word 0);
+* `--fmad=false` flipped to `true` (at a tiny shape one rounding versus two is
+  far below the 1e-6 floor the assertion uses - the per-kernel golden gate does
+  catch it).
+
+A model-level test covers the paths that model, at that shape, happens to
+exercise, and the tempting conclusion "it runs a real model, so the backend
+works" is the mistake. Each mechanism a backend implements needs an assertion
+that fails when the mechanism is removed - and the removal has to be tried,
+because four of these five looked covered.
+
+Corollaries worth keeping: an over-dispatched grid is invisible in a catalogue
+where every kernel bounds itself, so the discriminating mutation is the one
+that UNDER-dispatches; and a 256-wide kernel launched with 64 threads still
+computes the right answer whenever the data fits inside one stride, so the
+shape has to be wider than the wrong block before the test has any teeth.
+
+## 117. Some contract assertions cannot be given teeth, and should say so
+
+`cuMemAlloc` guarantees nothing about its contents, every other backend in this
+engine hands back zeroed storage, and model code depends on it - so the CUDA
+backend zeroes explicitly. The test for it cannot be made to fail: with the
+zeroing removed, the driver still returned zeros across twenty dirty-free-
+reallocate rounds, because it scrubs a freed allocation before reissuing it.
+That is a driver's courtesy, not an API guarantee, so the zeroing stays.
+
+The thing to avoid is letting such an assertion sit in the suite looking like
+evidence. Either it says in its own doc comment that it was NOT shown to
+discriminate, or a later reader counts it among the tests that prove something.
+This is lesson 113's failure mode one level up: there, dirtying the memory gave
+the test teeth; here, dirtying it was tried and the teeth still are not there.

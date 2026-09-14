@@ -61,6 +61,9 @@ const VENDOR_NVIDIA: u32 = 0x10de;
 // `CUdevice_attribute` discriminants, transcribed from `cuda.h`. These are a
 // stable public ABI enumeration, not hardware facts - each one names a
 // QUESTION asked of whatever card is present.
+const ATTR_MAX_THREADS_PER_BLOCK: c_int = 1;
+const ATTR_MAX_SHARED_MEMORY_PER_BLOCK: c_int = 8;
+const ATTR_WARP_SIZE: c_int = 10;
 const ATTR_INTEGRATED: c_int = 18;
 const ATTR_PCI_BUS_ID: c_int = 33;
 const ATTR_PCI_DEVICE_ID: c_int = 34;
@@ -103,6 +106,13 @@ pub struct ExecFns {
     pub(crate) ctx_synchronize: unsafe extern "C" fn() -> CuResult,
     pub(crate) mem_alloc: unsafe extern "C" fn(*mut CuDevicePtr, usize) -> CuResult,
     pub(crate) mem_free: unsafe extern "C" fn(CuDevicePtr) -> CuResult,
+    /// `cuMemsetD8` rather than `cuMemsetD32`: a clear is expressed in BYTES
+    /// here, and the only value this backend clears to is zero, whose byte and
+    /// word spellings coincide. A byte-wise memset also carries no alignment
+    /// precondition, which a sub-range clear would otherwise have to prove.
+    pub(crate) memset_d8: unsafe extern "C" fn(CuDevicePtr, u8, usize) -> CuResult,
+    /// `cuMemGetInfo` - (free, total) bytes on the CURRENT context's device.
+    pub(crate) mem_get_info: unsafe extern "C" fn(*mut usize, *mut usize) -> CuResult,
     pub(crate) memcpy_htod: unsafe extern "C" fn(CuDevicePtr, *const c_void, usize) -> CuResult,
     pub(crate) memcpy_dtoh: unsafe extern "C" fn(*mut c_void, CuDevicePtr, usize) -> CuResult,
     pub(crate) module_load_data: unsafe extern "C" fn(*mut CuModule, *const c_void) -> CuResult,
@@ -204,6 +214,8 @@ unsafe fn load_exec(lib: &libloading::Library) -> Result<ExecFns, String> {
         ctx_synchronize: sym(lib, b"cuCtxSynchronize\0")?,
         mem_alloc: sym(lib, b"cuMemAlloc_v2\0")?,
         mem_free: sym(lib, b"cuMemFree_v2\0")?,
+        memset_d8: sym(lib, b"cuMemsetD8_v2\0")?,
+        mem_get_info: sym(lib, b"cuMemGetInfo_v2\0")?,
         memcpy_htod: sym(lib, b"cuMemcpyHtoD_v2\0")?,
         memcpy_dtoh: sym(lib, b"cuMemcpyDtoH_v2\0")?,
         module_load_data: sym(lib, b"cuModuleLoadData\0")?,
@@ -334,6 +346,9 @@ impl Driver {
             cc_minor: self.attribute(dev, ATTR_COMPUTE_CAPABILITY_MINOR)? as u32,
             integrated: self.attribute(dev, ATTR_INTEGRATED)? != 0,
             multiprocessors: self.attribute(dev, ATTR_MULTIPROCESSOR_COUNT)?.max(0) as u32,
+            max_threads_per_block: self.attribute(dev, ATTR_MAX_THREADS_PER_BLOCK)?.max(0) as u32,
+            shared_mem_per_block: self.attribute(dev, ATTR_MAX_SHARED_MEMORY_PER_BLOCK)?.max(0) as u32,
+            warp_size: self.attribute(dev, ATTR_WARP_SIZE)?.max(0) as u32,
         })
     }
 
@@ -367,6 +382,17 @@ pub struct CudaDevice {
     pub integrated: bool,
     /// SM count, for occupancy/grid sizing decisions that must be queried.
     pub multiprocessors: u32,
+    /// `CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK` - the ceiling a WGSL
+    /// `@workgroup_size` must fit under, since one work-group is one block.
+    pub max_threads_per_block: u32,
+    /// `CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK`, bytes - what a
+    /// `var<workgroup>` declaration is measured against.
+    pub shared_mem_per_block: u32,
+    /// `CU_DEVICE_ATTRIBUTE_WARP_SIZE` - the subgroup width, asked for rather
+    /// than assumed. Every NVIDIA part shipped so far answers 32; a backend
+    /// that writes that number down instead of asking is wrong the day one
+    /// does not.
+    pub warp_size: u32,
 }
 
 impl CudaDevice {
@@ -427,6 +453,9 @@ mod tests {
             cc_minor: 0,
             integrated: false,
             multiprocessors: 0,
+            max_threads_per_block: 0,
+            shared_mem_per_block: 0,
+            warp_size: 0,
         };
         assert_eq!(d.pci_bus_id(), "0000:82:00.0");
     }

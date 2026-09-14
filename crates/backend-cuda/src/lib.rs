@@ -10,17 +10,23 @@
 //!
 //! # What this crate does today
 //!
-//! **Device identity only.** It loads `libcuda.so.1` at run time
-//! ([`driver`]), enumerates the devices that driver exposes, and reports each
-//! one as a [`backend_api::GpuIdentity`] keyed on `cuDeviceGetUuid` - the same
-//! 16 bytes Vulkan reports as `deviceUUID`, which is what lets a CUDA ordinal
-//! resolve to brain's canonical `gpu<i>` index without trusting either
-//! enumeration's order.
+//! It loads `libcuda.so.1` at run time ([`driver`]), enumerates the devices
+//! that driver exposes, and reports each one as a
+//! [`backend_api::GpuIdentity`] keyed on `cuDeviceGetUuid` - the same 16 bytes
+//! Vulkan reports as `deviceUUID`, which is what lets a CUDA ordinal resolve
+//! to brain's canonical `gpu<i>` index without trusting either enumeration's
+//! order.
 //!
-//! It does **not** implement [`backend_api::Backend`] yet: no buffers, no
-//! kernel compilation, no dispatch. `--backend cuda` therefore fails with a
-//! named error rather than quietly running somewhere else - an explicitly
-//! requested backend is a hard contract.
+//! On top of that it implements [`backend_api::Backend`]
+//! ([`backend::CudaBackend`]): device allocations, host transfers, dispatches
+//! whose CUDA source is generated from the registered WGSL and compiled by
+//! NVRTC **on first use of each kernel**, and a capability report built from
+//! device queries. What it does NOT have is a hand-written kernel: every
+//! dispatch it serves today is the generated (`ImplSource::Generated`) tier,
+//! and a kernel outside that generator's supported subset is refused by name
+//! at the dispatch that needed it - never approximated and never diverted to
+//! another device, because an explicitly requested backend is a hard
+//! contract.
 //!
 //! It also states the **tier policy** ([`policy`]): which operators are
 //! required to reach which implementation tier, on which queried compute
@@ -34,11 +40,13 @@
 //! A card's properties are an answer this crate asks for at run time, never a
 //! constant, and never a permanent ceiling - see [`driver::CudaDevice`].
 
+pub mod backend;
 pub mod driver;
 pub mod exec;
 pub mod nvrtc;
 pub mod policy;
 
+pub use backend::CudaBackend;
 pub use driver::{driver, CudaDevice};
 
 /// Every CUDA-visible device as a brain [`backend_api::GpuIdentity`], in CUDA

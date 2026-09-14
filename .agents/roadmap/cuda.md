@@ -75,10 +75,10 @@ device set and refuses a GPU backend over a GPU-less set rather than demoting
 silently. The CLI resolves the device set, applies the override, then
 publishes - in that order, because the ambient `OnceLock` is first-writer-wins.
 
-**An explicitly requested backend is a hard contract**: `--backend cuda` panics
-naming exactly what is missing (no buffers, no kernel compilation, no dispatch)
-instead of falling through to wgpu. That wrong-but-quiet fall-through was what
-an unmatched match arm did before.
+**An explicitly requested backend is a hard contract**: `--backend cuda` builds
+the CUDA backend or panics naming the driver's own reason it could not, never
+falling through to wgpu. That wrong-but-quiet fall-through was what an
+unmatched match arm did before.
 
 The `--device` grammar is deliberately UNCHANGED: `vulkan`/`wgpu` still parse
 as backend-setting device tokens. `BRAIN_DEVICE=vulkan` is load-bearing in
@@ -275,15 +275,143 @@ on the unfixed compiler. Neither was reachable from a model run today (the CPU
 backend dispatches exactly `n_wg` work-groups, and the kernels in the tree
 write every slot they read), which is why they survived.
 
+### `backend_api::Backend` on the CUDA Driver API
+
+`crates/backend-cuda/src/backend.rs` - `CudaBackend`. Allocations
+(`storage`/`storage_init`/`buffer`/`uniform_dynamic`), host transfers
+(`write`/`write_at`/`read`), recorded dispatches
+(`step`/`step_sliced`/`step_buf`/`submit`), `poll_wait`, `kind` = `"cuda"`,
+`identity` (the UUID-keyed one M0 established) and `caps`.
+
+`Gpu::try_new_cuda` builds one; `--backend cuda` now builds one too, on the
+card `--device gpu<i>` pinned if any. The placeholder that panicked
+"cannot run kernels yet" is gone - the panic that replaced it fires only when
+the backend genuinely cannot be built, and names the driver's own reason.
+
+**Compilation is lazy per `kind`, and that is the point.** `backend-vulkan`
+builds a pipeline for the whole registered catalogue at `Factory` time; a few
+hundred NVRTC invocations up front would be minutes of cold start before the
+first token. `CudaBackend` reads each kernel's `@workgroup_size` at
+registration and compiles nothing; the first dispatch of a `kind` runs
+`wgsl-cuda` -> NVRTC -> `cuModuleLoadData` and caches the module under that
+`kind`, in front of the existing on-disk cubin cache. A kernel the generator
+refuses is a **panic naming the kernel and the construct** at the dispatch that
+needed it - not a fallback to another device, not an approximation.
+
+Ordering is the context's default stream: every launch and every transfer
+serialises against the ones before it, which is the same guarantee the wgpu
+backend gets from the barriers it inserts between passes. `submit` is eager;
+`read`/`poll_wait` are where the host synchronises.
+
+Three questions the driver is asked that it was not asked before
+(`cuDeviceGetAttribute` for max threads per block, shared memory per block and
+warp size) plus `cuMemsetD8` and `cuMemGetInfo`. Nothing about a card is
+written down.
+
+### Caps - two different ceilings, deliberately answered differently
+
+`max_storage_binding_bytes` stays the portable `2 GiB - 1`. It is read as a
+tile-budget **divisor** (`model::block::tile_budget_words_for`, and the same
+shape in `wan` and `s3dit`), so reporting a large card's real memory there does
+not unlock a bigger binding - it makes those pipelines size slabs the device
+cannot allocate.
+
+`max_buffer_bytes` answers the other question (the largest single allocation)
+and has no divisor semantics attached, so it reports `cuMemGetInfo`'s free
+figure honestly.
+
+Everything else in `DeviceCaps`/`ArchDesc` is a query: SM count, max threads
+per block, shared memory per block, warp size, integrated-or-discrete.
+`workgroup_reductions` is `true` (one work-group is one block; `__syncthreads`
+is what a `workgroupBarrier` becomes). The roofline fields stay `None` -
+measured, never queried. `f32` is `Native`; `i8` is **`Emulated`**, not
+`Native`: `wgsl-cuda` writes `dot4I8Packed` out as a four-lane loop valid on
+every capability rather than emitting the card's DP4A instruction, and
+reporting `Native` would tell a selector this backend has dedicated int8
+hardware behind that kernel when what it has is a loop. `f16` stays `Absent` -
+the generator refuses `enable f16;` outright rather than widening it to fp32,
+so no f16 arithmetic runs here whatever the card could do.
+
+### Gate - one model's forward, on every backend this box has
+
+`crates/gpt2/tests/cuda_backend_parity.rs` -
+`the_cuda_forward_agrees_with_every_other_backend_on_this_box`. A dense GPT
+decoder at `GptConfig::tiny()` (vocab 65, 2 layers, d_model 32, 4 heads, ff
+128) over `b=1, t=6`, forward logits only, compared CPU vs CUDA and Vulkan vs
+CUDA at maxabs < 1e-6, plus per-position argmax equality. **Measured: 8.94e-8
+on both pairs**, over 390 logits. Skip-if-absent on both the CUDA driver and
+the Vulkan ICD.
+
+Why that model and that shape: `wgsl-cuda` refuses the register-blocked GEMMs
+and the flash-attention family (a barrier inside a loop has no sound
+guarded-body form), and `b * t` below `select::GEMM_TILE_MIN_ROWS` makes every
+linear select the naive `matmul` **without the test forcing a kernel choice**.
+The whole forward - `embed`, `pos_add`, `ln_stats`/`layernorm`, `matmul`,
+`bias_add`, `attn_scores`/`attn_softmax`/`attn_apply`, `gelu`, `add2` - then
+lands inside the supported subset. It is the smallest complete forward pass in
+the workspace that does. Nothing is wired into `make parity`.
+
+The generator's real reach turned out to be much wider than the six kernels M2
+golden-tested: **448 of the 474** catalogue kernels generate. The 26 that do
+not are 25 with a barrier inside a loop (every `matmul_*_reg*`/`matmul_tiled`/
+`matmul_i8`/`flash_attn_*`/`paged_flash_*`) and one with a function call
+(`matmul_kq_gemv_reg`). "Generates" is not "is correct" - only the six golden
+kernels and this one model's forward have been held to the reference - but it
+does mean breadth is now a validation problem rather than an emitter problem.
+
+### Gate - the plumbing the model test cannot see
+
+`crates/backend-cuda/tests/backend_contract.rs`, five assertions, added because
+the model test above was MEASURED to be blind to four separate mutations of
+this backend (see lessons #116). Four have verified teeth - each fails when the
+mechanism it names is removed:
+
+| assertion | mutation that makes it fail |
+|---|---|
+| a sliced step binds its sub-range, not the head | drop the `+ 4 * word_offset` |
+| ... and the grid covers the whole window | lay the grid out at 256 instead of the kernel's 64 (an UNDER-dispatch; over-dispatching is invisible, every kernel self-masks) |
+| a 256-wide kernel is launched 256 wide | launch `(64,1,1)` - and the group has to be wider than 64 elements, or a 64-thread block still reduces the right total |
+| `write_at` starts at its word offset | drop the offset |
+| new storage is zeroed | **none found** - see below |
+| a kernel compiles on first dispatch and only once | (a regression to eager compilation is otherwise invisible) |
+
+The zeroing assertion is stated honestly in its own doc comment as NOT known to
+discriminate: with the zeroing removed the driver still returned zeros across
+twenty dirty-free-reallocate rounds, because it scrubs a freed allocation
+before reissuing it. That is a driver's courtesy, not an API guarantee, so the
+zeroing stays and the test says what it is worth (lesson #117).
+
 ## Not delivered - what is still missing
 
-**Device identity only. Everything that executes work is deferred.**
+**One model's forward, only. Backward, breadth and every tuned kernel are
+deferred.**
 
-- **No `backend_api::Backend` impl.** No buffers, no `write`/`read`, no
-  `step`, no caps. `--backend cuda` cannot run a model and says so.
-- **No kernel source and no compilation.** `crates/kernels-cuda` exists but
-  its registry is empty, and nothing compiles CUDA at all: no NVRTC path, no
-  cubin cache, no lazy per-`kind` compilation. `make cuda-table/check` is
+- **Forward only, and one model.** `crates/gpt2/tests/cuda_backend_parity.rs`
+  is the whole of what has been proved against a model: `GptConfig::tiny()`,
+  `b=1, t=6`, forward logits. No backward pass, no decode/KV tape, no MoE, no
+  attention variant beyond `attn_scores`/`attn_softmax`/`attn_apply`, no
+  quantized weights, no second model. Everything the generator refuses -
+  `matmul_*_reg*`, `matmul_tiled`, `matmul_i8`, `flash_attn_*`,
+  `paged_flash_*`, `matmul_kq_gemv_reg` - is unreachable on this backend, so
+  any shape that selects one of them fails by name at that dispatch. `b * t >=
+  select::GEMM_TILE_MIN_ROWS` with an output width >= `GEMM_TILE_MIN_COLS` is
+  exactly such a shape, which is why this gate's own shape is small.
+- **448 of 474 kernels GENERATE; 7 have been checked against the reference.**
+  The six of M2's golden gate plus what this model's forward touches. Assume
+  nothing about the other 441: they emit plausible CUDA and nobody has compared
+  the numbers. Breadth from here is a validation problem, not an emitter one.
+- **No allocator and no uniform reuse.** Every `step` does a `cuMemAlloc` +
+  `cuMemcpyHtoD` for its uniform stream and frees it when the step drops, and
+  every buffer is its own `cuMemAlloc`. Correct, and the wrong shape for a
+  decode loop; it is also what CUDA Graphs cannot capture (the plan's keyed
+  `(kind, bufs, threads)` uniform with pinned staging is the replacement).
+- **`cuModuleGetFunction` per launch.** The module is cached under its `kind`,
+  the entry-point lookup inside it is not. A symbol lookup per dispatch is
+  cheap next to a launch and free to fix; it is named here so it is not
+  rediscovered as a mystery.
+- **No hand-written kernel source.** `crates/kernels-cuda`'s registry is still
+  empty: every dispatch this backend serves is `Generated`, and there is no
+  `Tuned` entry for any op on any capability. `make cuda-table/check` is
   therefore a structure gate only - a declared kernel failing to COMPILE under
   NVRTC for its own declared floor is the check the plan wants there, and it
   needs a toolkit, so it is an addition to the existing checks, never a
@@ -302,25 +430,22 @@ write every slot they read), which is why they survived.
   `Ops::matmul` routes through the seam, and `Ops::with_providers` remains
   test-only - so the `ImplChoice` now attached to every `Lowered` describes
   real dispatches only in tests. Wiring it up is the provider milestone's job.
-- **The generator covers 6 of 474 kernels.** Everything with a vector or
-  matrix type, a texture, an atomic, a `switch`, a function call, a
-  multi-dimensional `@workgroup_size`, a barrier under control flow, a `return`
-  inside a loop in a barrier-using kernel, or f16 is refused with a message
-  naming the construct - refused, not approximated, but refused all the same.
-  Vectors are the first thing any breadth work needs: the emitter is
-  scalar-only today.
-- **Nothing DISPATCHES a generated kernel.** The golden gate compiles and
-  launches them directly; there is no provider, no `kind` -> kernel mapping, no
-  lazy per-`kind` compilation cache in front of the cubin cache, and
-  `kernels_cuda::ALL` is still empty (these are generated, not hand-written, so
-  they do not belong in that registry).
+- **The generator refuses 26 of 474 kernels.** 25 for a barrier inside a loop
+  (`matmul_reg`/`reg2`/`reg3`/`reg4` and their `splitk`/`grouped`/`tn`
+  variants, `matmul_tiled`, `matmul_dx_reg`, `matmul_dw_reg*`, `matmul_i8`,
+  `matmul_i8_dyn`, `matmul_kq_dyn`, `matmul_q4_dyn_reg`, every `flash_attn_*`
+  and every `paged_flash_*`), one for a function call
+  (`matmul_kq_gemv_reg`). Refused by name, never approximated - but refused all
+  the same, and they are precisely the fast kernels, so the generated tier is
+  slower than Vulkan by construction. A barrier inside a loop needs a guarded
+  form the emitter does not have; a `Call` needs function emission.
 - **`make cuda-table/check` still does not compile anything under NVRTC.** The
   machinery now exists (`nvrtc::compile`), but wiring a compile check into the
   gate means deciding what a box without a toolkit does, which is a gate
   question rather than a code one.
 - **No ahead-of-time cubins.** NVRTC is the only compilation path, so a
   deployment with a driver and no toolkit cannot run the generated tier at all.
-- **No provider wiring, no CUDA Graphs, no allocator.**
+- **No provider wiring and no CUDA Graphs.**
 - **`brain devices` does not show CUDA visibility per card.** The backends
   column still reports only `vulkan`/`wgpu`. The data is available
   (`devices::cuda_ordinal`); the column is not wired.
@@ -330,19 +455,19 @@ write every slot they read), which is why they survived.
   (`crates/gpu-core/src/devices.rs`, for `BRAIN_DEVICE`). If one is added it
   owes `docs/using/configuration.md` an entry (`check-env-docs.sh`) and must
   be read in that same single file.
-- **The CUDA crates are not in the workspace overview yet.** Neither
-  `AGENTS.md`'s crate table nor the layer diagram in `.agents/rules/architecture.md`
-  names `backend-cuda`, `kernels-cuda` or `wgsl-cuda`. That is deliberate for
-  now - those documents describe what a reader can USE, and none of the three
-  runs a model - but it is an edit owed at the point the backend does.
 - **CUDA is not in `scripts/gates/parity-gate.sh`**, and must not be until the
   catalogue and the backward kernels support it.
 - **No cost formulas** for CUDA steps in `gpu-core/src/cost.rs` (a coverage
   ratchet), and `step_native` carries no `StepMeta`, so profiling would show
   `<no-meta>`.
 - **memauth**: a CUDA device on the same physical card as a Vulkan device must
-  share a `PoolId` or VRAM is double-counted. Not yet arranged - no CUDA
-  allocation exists to double-count.
+  share a `PoolId` or VRAM is double-counted. Still not arranged, and now it
+  MATTERS: this backend allocates, so a process holding both handles on one
+  card double-counts under `--limit-vram-total`. `Gpu::try_new_cuda` goes
+  through `Gpu::wrap`, which resolves the pool from the ambient selection; a
+  CUDA handle built on an explicitly pinned card does get `Device::Gpu(i)`
+  through `Gpu::new_on`, but the two paths have not been reconciled with the
+  Vulkan handle for the same card.
 
 ## Design decisions worth not re-litigating
 
@@ -373,15 +498,21 @@ write every slot they read), which is why they survived.
   `make test CARGO_TEST="cargo test --release --offline -p brain-gpu-core" TEST_THREADS="1 cuda"`.
 - Keep GPU tests at the existing tiny-shape gradcheck/parity scale. This is a
   shared box; a sustained benchmark contends with whatever else is resident.
+- The generated tier is the ONLY tier. Anything that looks slow on this
+  backend is expected to be: see the refused-kernel list above - every fast
+  GEMM and every flash-attention kernel is among them.
 - `.agents/rules/lessons.md` #107 (the `_v2` symbol-name trap in any `dlopen`ed
   C API), #108 (why a CUDA ordinal is not an identity), #109 (why a ratchet
   that starts at zero cannot be a floor), #110 (`include_str!` proves registry
   -> file and never the reverse), #111 (record a skip where it happens), #112
   (the two WGSL work-group guarantees no target gives for free), #113 (an idle
   device makes an uninitialised-memory test pass), #114 (a generated tier is
-  held to the REFERENCE's answer, not the language's) and #115 (materialise
-  generated expressions where the IR says they are evaluated) came out of this
-  work and are the things most likely to be re-learned the hard way.
+  held to the REFERENCE's answer, not the language's), #115 (materialise
+  generated expressions where the IR says they are evaluated), #116 (a
+  whole-model parity test is weak evidence about a backend's plumbing - with
+  the MEASURED list of mutations it does not catch) and #117 (some contract
+  assertions cannot be given teeth, and must say so) came out of this work and
+  are the things most likely to be re-learned the hard way.
 - Adding the first tuned kernel is four edits, in this order: the `.cu` file,
   its `kernels-cuda` registry entry, `make cuda-table`, then the `POLICY` entry
   plus the contract count in the ratchet test. Doing the policy entry first

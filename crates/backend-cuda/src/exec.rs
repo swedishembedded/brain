@@ -54,6 +54,7 @@ pub struct Context {
     ctx: CuContext,
     cc: (u32, u32),
     name: String,
+    info: crate::driver::CudaDevice,
 }
 
 // The context handle is used under `cuCtxSetCurrent` before every call, so it
@@ -88,9 +89,31 @@ impl Context {
             ctx,
             cc: (info.cc_major, info.cc_minor),
             name: info.name.clone(),
+            info: info.clone(),
         };
         c.make_current()?;
         Ok(c)
+    }
+
+    /// Everything the driver answered about this device, queried once when the
+    /// context was opened. The ONE source a capability report may be built
+    /// from - no field of it is written down anywhere in this crate.
+    pub fn device_info(&self) -> &crate::driver::CudaDevice {
+        &self.info
+    }
+
+    /// `cuMemGetInfo` on this device: `(free, total)` bytes, right now.
+    ///
+    /// The free figure moves while other processes run, so a caller that puts
+    /// it in a cached capability must say when it was asked - see
+    /// [`crate::backend::CudaBackend::caps`], which reads it once at
+    /// construction on purpose rather than re-querying per call.
+    pub fn mem_info(&self) -> Result<(u64, u64), String> {
+        self.make_current()?;
+        let (mut free, mut total) = (0usize, 0usize);
+        // SAFETY: both are valid out-parameters for the duration of the call.
+        self.d.check(unsafe { (self.fns.mem_get_info)(&mut free, &mut total) }, "cuMemGetInfo")?;
+        Ok((free as u64, total as u64))
     }
 
     /// Compute capability of THIS device, as the driver reported it. Every
@@ -132,6 +155,50 @@ impl Context {
             unsafe { (self.fns.memcpy_htod)(mem.ptr, src.as_ptr() as *const c_void, src.len()) },
             "cuMemcpyHtoD",
         )
+    }
+
+    /// Copy host bytes into a device allocation starting `offset` bytes in.
+    ///
+    /// The offset form exists so a bounded host upload can be split into
+    /// chunks (`backend_api::Backend::write_at`) instead of one call sized to
+    /// a whole multi-gigabyte tensor.
+    pub fn upload_at(&self, mem: &DeviceMem, offset: usize, src: &[u8]) -> Result<(), String> {
+        let end = offset.checked_add(src.len()).ok_or("upload offset + length overflows")?;
+        if end > mem.len {
+            return Err(format!(
+                "upload of {} bytes at offset {offset} into a {}-byte allocation",
+                src.len(),
+                mem.len
+            ));
+        }
+        if src.is_empty() {
+            return Ok(());
+        }
+        self.make_current()?;
+        // SAFETY: `src` is valid for `src.len()` bytes, and the bound above
+        // proves the destination range lies inside the allocation.
+        self.d.check(
+            unsafe {
+                (self.fns.memcpy_htod)(mem.ptr + offset as CuDevicePtr, src.as_ptr() as *const c_void, src.len())
+            },
+            "cuMemcpyHtoD",
+        )
+    }
+
+    /// Zero the whole allocation.
+    ///
+    /// Storage a caller asked for is zeroed on every other backend in this
+    /// engine (wgpu maps buffers zero-filled, the CPU backend allocates a
+    /// zeroed `Vec`), and model code relies on it - an accumulator buffer is
+    /// allocated and then added into. `cuMemAlloc` returns whatever the last
+    /// tenant left, so the zeroing is explicit here or it does not happen.
+    pub fn zero(&self, mem: &DeviceMem) -> Result<(), String> {
+        if mem.len == 0 {
+            return Ok(());
+        }
+        self.make_current()?;
+        // SAFETY: `mem.ptr` names `mem.len` bytes allocated on this context.
+        self.d.check(unsafe { (self.fns.memset_d8)(mem.ptr, 0, mem.len) }, "cuMemsetD8")
     }
 
     /// Copy device bytes back to the host.
@@ -195,8 +262,29 @@ impl Context {
         block: (u32, u32, u32),
         args: &[&DeviceMem],
     ) -> Result<(), String> {
+        let ptrs: Vec<CuDevicePtr> = args.iter().map(|a| a.ptr).collect();
+        self.launch_at(f, grid, block, &ptrs)
+    }
+
+    /// [`Self::launch`] against raw device addresses rather than whole
+    /// allocations - what a sub-range binding needs.
+    ///
+    /// A WGSL `step_sliced` binds `(word_offset, word_len)` of a buffer, which
+    /// on this API is just the base address plus `4 * word_offset`: a kernel
+    /// argument is a bare pointer, so the slice is expressed by the address
+    /// handed in and nothing else. The LENGTH is deliberately not passed -
+    /// the generated kernel bounds itself from its own uniform, exactly as the
+    /// WGSL does, and a binding size would be a second, redundant source of
+    /// truth about the same range.
+    pub fn launch_at(
+        &self,
+        f: &Function,
+        grid: (u32, u32, u32),
+        block: (u32, u32, u32),
+        args: &[CuDevicePtr],
+    ) -> Result<(), String> {
         self.make_current()?;
-        let mut values: Vec<CuDevicePtr> = args.iter().map(|a| a.ptr).collect();
+        let mut values: Vec<CuDevicePtr> = args.to_vec();
         let mut params: Vec<*mut c_void> =
             values.iter_mut().map(|v| v as *mut CuDevicePtr as *mut c_void).collect();
         // SAFETY: `params` names `args.len()` valid pointers to device
@@ -260,6 +348,11 @@ impl DeviceMem {
     }
     pub fn is_empty(&self) -> bool {
         self.len == 0
+    }
+    /// The device address of this allocation, for a caller building a
+    /// sub-range binding - see [`Context::launch_at`].
+    pub fn device_ptr(&self) -> CuDevicePtr {
+        self.ptr
     }
 }
 

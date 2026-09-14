@@ -558,7 +558,7 @@ mod native_facade {
                         }
                     }
                 }
-                "cuda" => Self::cuda_not_executable(),
+                "cuda" => Self::build_cuda(kernels, crate::devices::selected_device()),
                 _ => match backend_api::create_backend(name, kernels) {
                     Ok(inner) => inner,
                     Err(e) => panic!("failed to build backend '{name}': {e}"),
@@ -568,21 +568,32 @@ mod native_facade {
             Gpu::wrap(inner, Self::kernel_names(kernels))
         }
 
-        /// An explicitly selected `cuda` backend that cannot execute the
-        /// kernel catalogue yet: refuse, loudly, naming what is missing.
+        /// An explicitly selected `cuda` backend, on `dev` when a card was
+        /// pinned and on whatever the driver exposes first otherwise.
         ///
-        /// `backend-cuda` enumerates devices and nothing else so far - no
-        /// buffers, no kernel compilation, no dispatch. Falling through to
-        /// wgpu here (which is what an unmatched arm would do) is exactly the
-        /// silent demotion that makes a run's real backend undiscoverable, so
-        /// the request fails instead. This disappears the moment the CUDA
-        /// `Backend` impl lands; until then a wrong answer is worse than none.
-        fn cuda_not_executable() -> ! {
-            panic!(
-                "brain: the CUDA backend cannot run kernels yet - backend-cuda enumerates \
-                 devices only (no buffers, no kernel compilation, no dispatch). Re-run with \
-                 --backend wgpu, vulkan or cpu; brain will not silently substitute one."
-            )
+        /// Failure PANICS naming the reason rather than falling through to
+        /// wgpu: an explicitly requested backend is a hard contract, and a
+        /// silent demotion is exactly what makes a run's real backend
+        /// undiscoverable afterwards. The reason carried through is the
+        /// driver's own - no such library, `cuInit` refusing, no device, a
+        /// missing entry point - so the message says what is actually wrong
+        /// rather than merely that something failed.
+        fn build_cuda(
+            kernels: &[(&str, &str)],
+            dev: Option<&crate::devices::DeviceId>,
+        ) -> Box<dyn backend_api::Backend> {
+            let built = match dev {
+                Some(d) => backend_cuda::CudaBackend::try_new_on(kernels, &d.identity),
+                None => backend_cuda::CudaBackend::try_new(kernels),
+            };
+            match built {
+                Ok(b) => Box::new(b),
+                Err(e) => panic!(
+                    "brain: the CUDA backend was requested explicitly and could not be built: {e}. \
+                     brain will not silently substitute another backend - re-run with \
+                     --backend wgpu, vulkan or cpu if that is what you want."
+                ),
+            }
         }
 
         /// wgpu backend on `dev` (identity-matched) or wgpu's own default when
@@ -615,7 +626,7 @@ mod native_facade {
                         Box::new(backend_wgpu::WgpuBackend::new_on(kernels, &dev.identity))
                     }
                 },
-                "cuda" => Self::cuda_not_executable(),
+                "cuda" => Self::build_cuda(kernels, Some(dev)),
                 _ => Box::new(backend_wgpu::WgpuBackend::new_on(kernels, &dev.identity)),
             };
             record_caps(inner.as_ref());
@@ -857,6 +868,28 @@ mod native_facade {
             let kernels = &Self::expanded(kernels, false);
             backend_vulkan::VulkanBackend::try_new(kernels)
                 .map(|g| Gpu::wrap(Box::new(g), Self::kernel_names(kernels)))
+        }
+
+        /// Build on the native CUDA backend, or `Err` naming why this box
+        /// cannot: no `libcuda.so.1`, `cuInit` refusing, no device at that
+        /// ordinal, or a driver missing an execution entry point.
+        ///
+        /// `Err` is an ordinary, expected outcome - most machines are not
+        /// NVIDIA machines - so a caller that wants CUDA *or nothing* uses
+        /// this, while a caller that asked for it on the command line goes
+        /// through [`Gpu::new`], which turns the same failure into a hard
+        /// error rather than a silent demotion.
+        ///
+        /// `Ok` does NOT mean a kernel can be compiled. NVRTC ships with the
+        /// toolkit rather than the driver, and this backend compiles on first
+        /// dispatch of each kernel, so a box with a driver and no toolkit gets
+        /// a handle here and fails at the first `step` that needs one - named,
+        /// not silently.
+        pub fn try_new_cuda(kernels: &[(&str, &str)]) -> Result<Gpu, String> {
+            let kernels = &Self::expanded(kernels, false);
+            let inner = backend_cuda::CudaBackend::try_new(kernels)?;
+            record_caps(&inner);
+            Ok(Gpu::wrap(Box::new(inner), Self::kernel_names(kernels)))
         }
 
         // ---- allocation, and the process-wide ceiling it is charged to -----
