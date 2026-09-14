@@ -23,6 +23,9 @@
 //! not a hardcoded peak — so the same table is meaningful on any device.
 //!
 //! Usage:
+//!   ... --model NAME                # any mode: 0.6b (default) | 1.7b | 4b | 8b -
+//!                                    # random weights of that shape (cost depends
+//!                                    # on shape, not values), no checkpoint needed
 //!   qwen_bench                      # prefill T=512 + decode, fp32, at 0.6B
 //!   qwen_bench prefill [T] [reps]
 //!   qwen_bench decode  [ctx] [reps]
@@ -46,6 +49,11 @@
 //!                                          # shape and `qwen_bench serve`'s
 //!                                          # own steady-state seq_len==cap
 //!                                          # regime
+//!   qwen_bench flash-decode-i8 [seq] [reps] # the same A/B one storage tier
+//!                                          # down: `paged_flash_decode_i8`
+//!                                          # against the INT8 triad - never
+//!                                          # independently measured before
+//!                                          # (only correctness-gated, M2.2)
 //!   qwen_bench flash-prefill [start] [cc] [reps]
 //!                                          # M2.4's per-kernel delta:
 //!                                          # `paged_flash_prefill` (M2.3)
@@ -79,7 +87,60 @@ use std::time::Instant;
 
 use gpu_core::roof::Roofs;
 use gpu_core::Gpu;
-use qwen3::{init_weights, Qwen, QwenConfig};
+use qwen3::{Qwen, QwenConfig};
+
+/// [`qwen3::init_weights`], but every tensor is generated on its own thread
+/// instead of one `Rng` walked serially across all of them.
+///
+/// `qwen3::init_weights` is shared with training/gradcheck, where the exact
+/// value sequence for a fixed seed is part of the contract (this file's own
+/// module doc: "cost depends on shape, not values" - callers here never
+/// check a value), so it stays serial and untouched rather than risk two
+/// callers quietly depending on a stream this function would reorder.
+///
+/// At a real 8B-class shape, the serial generator is single-core Gaussian
+/// draws over ~8 billion elements - minutes before any device work starts,
+/// on every single bench invocation. Sharding by TENSOR (each already
+/// independent - `cfg.param_list()`'s units) across the available cores, each
+/// with its own seed, cuts that to the one slowest tensor's share instead of
+/// the sum of all of them.
+fn init_weights_fast(cfg: &QwenConfig, seed: u64) -> std::collections::HashMap<String, Vec<f32>> {
+    use std::sync::{Arc, Mutex};
+    let std_dev = 0.02f32;
+    let proj_std = 0.02f32 / ((2.0 * cfg.n_layers as f32).sqrt());
+    let is_norm_gain = |name: &str| {
+        name == "norm.weight" || name.ends_with("ln1.weight") || name.ends_with("ln2.weight") || name.ends_with("q_norm.weight") || name.ends_with("k_norm.weight")
+    };
+    let is_residual_proj = |name: &str| name.ends_with("attn.wo.weight") || name.ends_with("mlp.down.weight");
+
+    let params = cfg.param_list();
+    let out: Arc<Mutex<std::collections::HashMap<String, Vec<f32>>>> = Arc::new(Mutex::new(std::collections::HashMap::with_capacity(params.len())));
+    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    std::thread::scope(|scope| {
+        for t in 0..threads {
+            let out = Arc::clone(&out);
+            let params = &params;
+            scope.spawn(move || {
+                for (i, (name, numel)) in params.iter().enumerate() {
+                    if i % threads != t {
+                        continue;
+                    }
+                    let mut rng = data::rng::Rng::new(seed ^ (i as u64).wrapping_mul(0x9E3779B97F4A7C15));
+                    let v = if is_norm_gain(name) {
+                        vec![1.0; *numel]
+                    } else if name.ends_with(".lora_b") {
+                        vec![0.0; *numel]
+                    } else {
+                        let s = if is_residual_proj(name) { proj_std } else { std_dev };
+                        (0..*numel).map(|_| (rng.next_gaussian() as f32) * s).collect()
+                    };
+                    out.lock().unwrap_or_else(|e| e.into_inner()).insert(name.clone(), v);
+                }
+            });
+        }
+    });
+    Arc::try_unwrap(out).unwrap().into_inner().unwrap_or_else(|e| e.into_inner())
+}
 
 /// One §F.1 pass profile against the device's measured roofline, plus the rows
 /// that sit below their class's floor.
@@ -155,16 +216,33 @@ fn weight_budget(cfg: &QwenConfig, roofs: Option<Roofs>) {
     }
 }
 
+/// Which real Qwen3 shape to benchmark, selected by `--model NAME` anywhere
+/// in argv (default `0.6b`, unchanged from before this existed - no existing
+/// invocation's behaviour moves). Random weights throughout every mode below
+/// (this file's own module doc): cost depends on shape, not values, so
+/// picking a config here is enough to get a real model's real throughput
+/// without loading (or even having) its actual checkpoint.
+fn model_config(a: &[String]) -> (QwenConfig, &'static str) {
+    let name = a.iter().position(|x| x == "--model").and_then(|i| a.get(i + 1)).map(|s| s.as_str()).unwrap_or("0.6b");
+    match name {
+        "0.6b" => (QwenConfig::qwen3_0_6b(), "Qwen3-0.6B"),
+        "1.7b" => (QwenConfig::qwen3_1_7b(), "Qwen3-1.7B"),
+        "4b" => (QwenConfig::qwen3_4b(), "Qwen3-4B"),
+        "8b" => (QwenConfig::qwen3_8b(), "Qwen3-8B"),
+        other => panic!("qwen_bench: unknown --model '{other}' (known: 0.6b, 1.7b, 4b, 8b)"),
+    }
+}
+
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     let mode = a.get(1).map(|s| s.as_str()).unwrap_or("all");
 
-    let cfg = QwenConfig::qwen3_0_6b();
+    let (cfg, model_name) = model_config(&a);
 
     if mode == "cost" {
         // Offline accounting only — no device, no probe, no weights uploaded.
         let t = 128u32;
-        let init = init_weights(&cfg, 7);
+        let init = init_weights_fast(&cfg, 7);
         let m = Qwen::new(cfg.clone(), 1, t, &init);
         let c = m.cost_fwd();
         println!("{c}");
@@ -191,6 +269,12 @@ fn main() {
         flash_decode_bench(seq, reps);
         return;
     }
+    if mode == "flash-decode-i8" {
+        let seq: u32 = a.get(2).and_then(|s| s.parse().ok()).unwrap_or(512);
+        let reps: usize = a.get(3).and_then(|s| s.parse().ok()).unwrap_or(20);
+        flash_decode_i8_bench(seq, reps);
+        return;
+    }
     if mode == "flash-prefill" {
         let start: u32 = a.get(2).and_then(|s| s.parse().ok()).unwrap_or(512);
         let cc: u32 = a.get(3).and_then(|s| s.parse().ok()).unwrap_or(512);
@@ -202,7 +286,7 @@ fn main() {
         let cc: u32 = a.get(2).and_then(|s| s.parse().ok()).unwrap_or(512);
         let reps: usize = a.get(3).and_then(|s| s.parse().ok()).unwrap_or(5);
         let start: u32 = a.get(4).and_then(|s| s.parse().ok()).unwrap_or(512);
-        serve_prefill_bench(&cfg, cc, start, reps, a.iter().any(|x| x == "i8w"), a.iter().any(|x| x == "kv8"));
+        serve_prefill_bench(&cfg, model_name, cc, start, reps, a.iter().any(|x| x == "i8w"), a.iter().any(|x| x == "kv8"));
         return;
     }
     if mode == "flash-prefill-i8" {
@@ -218,9 +302,9 @@ fn main() {
     match mode {
         "decode" => {
             let ctx: u32 = a.get(2).and_then(|s| s.parse().ok()).unwrap_or(512);
-            eprintln!("qwen_bench decode: Qwen3-0.6B, ctx {ctx}, {reps} reps (random weights)");
+            eprintln!("qwen_bench decode: {model_name}, ctx {ctx}, {reps} reps (random weights)");
             let t0 = Instant::now();
-            let init = init_weights(&cfg, 7);
+            let init = init_weights_fast(&cfg, 7);
             let m = Qwen::from_tensors_decode(cfg.clone(), &init, ctx);
             eprintln!("built in {:.1}s\n", t0.elapsed().as_secs_f32());
             let gpu = m.gpu().share();
@@ -256,12 +340,12 @@ fn main() {
             let i8w = a.iter().any(|x| x == "i8w");
             let kv8 = a.iter().any(|x| x == "kv8");
             eprintln!(
-                "qwen_bench serve: Qwen3-0.6B, {rows} rows, {reps} reps (random weights\
+                "qwen_bench serve: {model_name}, {rows} rows, {reps} reps (random weights\
                  {}{})",
                 if i8w { ", int8 weights" } else { "" },
                 if kv8 { ", int8 KV" } else { "" }
             );
-            let init = init_weights(&cfg, 7);
+            let init = init_weights_fast(&cfg, 7);
             let bs = 16u32;
             // Context per sequence. Every row gets its OWN blocks (see below),
             // so the paged pool is `rows * mbs` blocks and grows with BOTH —
@@ -329,9 +413,9 @@ fn main() {
         // prefill is the default bench.
         _ => {
             let t: u32 = a.get(2).and_then(|s| s.parse().ok()).unwrap_or(512);
-            eprintln!("qwen_bench prefill: Qwen3-0.6B, T={t}, {reps} reps (random weights)");
+            eprintln!("qwen_bench prefill: {model_name}, T={t}, {reps} reps (random weights)");
             let t0 = Instant::now();
-            let init = init_weights(&cfg, 7);
+            let init = init_weights_fast(&cfg, 7);
             let m = Qwen::new(cfg.clone(), 1, t, &init);
             eprintln!("built in {:.1}s\n", t0.elapsed().as_secs_f32());
             let gpu = m.gpu().share();
@@ -662,6 +746,131 @@ fn quantize_pool_i8(pool: &[f32], n_kv: u32, hd: u32) -> (Vec<u32>, Vec<f32>) {
     (words, scales)
 }
 
+/// [`flash_decode_bench`]'s A/B one storage tier down: `paged_flash_decode_i8`
+/// against the INT8 triad (`paged_decode_scores_i8_batched` ->
+/// `decode_softmax_batched` -> `paged_decode_apply_i8_batched`) that
+/// `qwen3::serve`'s decode tape dispatches under `kv_int8` today - the
+/// SERVING DEFAULT. `Op::PagedAttentionFused`'s own doc names this exact gap:
+/// `paged_flash_decode_i8` was gated correctness-only (M2.2) and never
+/// independently measured for occupancy the way its F32 sibling was (M2.1,
+/// the regression that keeps `FusedFlash` off the table for `k=0` at every
+/// dtype but F32/`m==1`) - this is that measurement.
+///
+/// Same shape as [`flash_decode_bench`] (batch=1, Qwen3-0.6B's real
+/// decode-head shape, steady-state `seq_len == cap`); only the KV storage
+/// tier and therefore the kernels differ, so the two runs are directly
+/// comparable.
+///
+/// `qwen_bench flash-decode-i8 [seq] [reps]`.
+pub fn flash_decode_i8_bench(seq: u32, reps: usize) {
+    let gpu = Gpu::new(&[
+        ("paged_decode_scores_i8_batched", kernels::PAGED_DECODE_SCORES_I8_BATCHED),
+        ("decode_softmax_batched", kernels::DECODE_SOFTMAX_BATCHED),
+        ("paged_decode_apply_i8_batched", kernels::PAGED_DECODE_APPLY_I8_BATCHED),
+        ("paged_flash_decode_i8", kernels::PAGED_FLASH_DECODE_I8),
+        ("paged_flash_decode_split_i8", kernels::PAGED_FLASH_DECODE_SPLIT_I8),
+        ("paged_flash_decode_combine_i8", kernels::PAGED_FLASH_DECODE_COMBINE_I8),
+    ]);
+    let roofs = banner(&gpu);
+
+    let (batch, n_heads, n_kv_heads, head_dim, bs) = (1u32, 16u32, 8u32, 128u32, 16u32);
+    let group = n_heads / n_kv_heads;
+    let kv_stride = n_kv_heads * head_dim;
+    let mbs = seq.div_ceil(bs);
+    let cap = mbs * bs;
+    let scale = 1.0f32 / (head_dim as f32).sqrt();
+
+    let mut rng = data::rng::Rng::new(17);
+    let q: Vec<f32> = (0..batch * n_heads * head_dim).map(|_| rng.next_gaussian() as f32).collect();
+    let pool_len = (mbs * bs * kv_stride) as usize;
+    let pk: Vec<f32> = (0..pool_len).map(|_| rng.next_gaussian() as f32).collect();
+    let pv: Vec<f32> = (0..pool_len).map(|_| rng.next_gaussian() as f32).collect();
+    let (pk_words, sk) = quantize_pool_i8(&pk, n_kv_heads, head_dim);
+    let (pv_words, sv) = quantize_pool_i8(&pv, n_kv_heads, head_dim);
+    let bt: Vec<u32> = (0..mbs).collect(); // one sequence, blocks laid out contiguously
+    let seq_lens = [cap];
+
+    let qb = gpu.storage_init("q", &q);
+    let poolk = gpu.storage(pk_words.len() as u64);
+    gpu.write(&poolk, &pk_words);
+    let poolv = gpu.storage(pv_words.len() as u64);
+    gpu.write(&poolv, &pv_words);
+    let scales_k = gpu.storage_init("sk", &sk);
+    let scales_v = gpu.storage_init("sv", &sv);
+    let btb = gpu.storage(mbs as u64);
+    gpu.write(&btb, &bt);
+    let sl = gpu.storage(1);
+    gpu.write(&sl, &seq_lens);
+
+    let sc = gpu.storage((n_heads * cap) as u64);
+    let pr = gpu.storage((n_heads * cap) as u64);
+    let ctx_ref = gpu.storage((n_heads * head_dim) as u64);
+    let ref_steps = vec![
+        gpu.step(
+            0,
+            &[&qb, &poolk, &btb, &sl, &scales_k, &sc],
+            &[batch, n_heads, group, head_dim, bs, kv_stride, cap, mbs, scale.to_bits()],
+            batch * n_heads * cap,
+        ),
+        gpu.step(1, &[&sc, &sl, &pr], &[batch, n_heads, cap], batch * n_heads),
+        gpu.step(
+            2,
+            &[&pr, &poolv, &btb, &sl, &scales_v, &ctx_ref],
+            &[batch, n_heads, group, head_dim, bs, kv_stride, cap, mbs],
+            batch * n_heads * head_dim,
+        ),
+    ];
+    let t_ref = gpu_core::profile::best_of(&gpu, &ref_steps, reps);
+
+    let ctx_flash = gpu.storage((n_heads * head_dim) as u64);
+    let flash_steps = vec![gpu.step(
+        3,
+        &[&qb, &poolk, &poolv, &scales_k, &scales_v, &btb, &sl, &ctx_flash],
+        &[batch, n_heads, n_kv_heads, head_dim, group, bs, mbs],
+        batch * n_heads * 64, // 64 = paged_flash_decode_i8's own @workgroup_size
+    )];
+    let t_flash = gpu_core::profile::best_of(&gpu, &flash_steps, reps);
+
+    // M2.7's split-key design, ported to int8 (`decode_split_shape`'s own
+    // formula, `qwen3::serve`'s ONE place this arithmetic lives - duplicated
+    // here for the same reason `flash_decode_bench`'s reproducer already
+    // duplicates `PAGED_SCORES_PER_WORKGROUP`: this crate cannot depend on
+    // `brain-qwen3`, `brain-qwen3` depends on this).
+    const BC: u32 = 8;
+    const DESIRED_SPLITS: u32 = 8;
+    let ntiles = cap.div_ceil(BC).max(1);
+    let tiles_per_split = ntiles.div_ceil(DESIRED_SPLITS).max(1);
+    let n_splits = ntiles.div_ceil(tiles_per_split).max(1);
+    let part_stride = 2u32 + 128u32; // PART_STRIDE = 2 + HD
+    let part = gpu.storage((batch * n_heads * n_splits * part_stride) as u64);
+    let ctx_split = gpu.storage((n_heads * head_dim) as u64);
+    let split_steps = vec![
+        gpu.step(
+            4,
+            &[&qb, &poolk, &poolv, &scales_k, &scales_v, &btb, &sl, &part],
+            &[batch, n_heads, n_kv_heads, head_dim, group, bs, mbs, n_splits, tiles_per_split],
+            batch * n_heads * n_splits * 64, // 64 = paged_flash_decode_split_i8's own @workgroup_size
+        ),
+        gpu.step(5, &[&part, &ctx_split], &[batch, n_heads, head_dim, n_splits], batch * n_heads * 128),
+    ];
+    let t_split = gpu_core::profile::best_of(&gpu, &split_steps, reps);
+
+    let bytes = (batch * n_heads * cap * head_dim) as u64 * 2; // int8: 1 byte/element, K+V once each
+    let pct = |secs: f64| roofs.and_then(|r| r.utilisation_of(0, 0, bytes, secs));
+    println!(
+        "\npaged attention int8 @ seq={seq}: triad (scores_i8+softmax+apply_i8) {:>8.4} ms  vs  paged_flash_decode_i8 {:>8.4} ms  vs  split_i8+combine_i8 ({n_splits} splits) {:>8.4} ms",
+        t_ref * 1e3,
+        t_flash * 1e3,
+        t_split * 1e3,
+    );
+    println!(
+        "triad {}  |  flash {}  |  split {}",
+        pct(t_ref).map(|p| format!("{p:.1}% of mem roof")).unwrap_or_else(|| "roof unmeasured".into()),
+        pct(t_flash).map(|p| format!("{p:.1}% of mem roof")).unwrap_or_else(|| "roof unmeasured".into()),
+        pct(t_split).map(|p| format!("{p:.1}% of mem roof")).unwrap_or_else(|| "roof unmeasured".into()),
+    );
+}
+
 /// [`flash_prefill_bench`]'s A/B one storage tier down: `paged_flash_prefill_i8`
 /// against the INT8 triad (`paged_decode_scores_i8_batched` ->
 /// `decode_softmax_batched` -> `paged_decode_apply_i8_batched`) that
@@ -781,18 +990,18 @@ pub fn flash_prefill_i8_bench(start: u32, cc: u32, reps: usize) {
 /// exactly the contract `paged_flash_prefill{,_i8}` documents.
 ///
 /// `qwen_bench serve-prefill [cc] [reps] [start] [i8w] [kv8]`.
-fn serve_prefill_bench(cfg: &QwenConfig, cc: u32, start: u32, reps: usize, i8w: bool, kv8: bool) {
+fn serve_prefill_bench(cfg: &QwenConfig, model_name: &str, cc: u32, start: u32, reps: usize, i8w: bool, kv8: bool) {
     let bs = 16u32;
     let total = start + cc;
     let mbs = total.div_ceil(bs);
     // One sequence, so the pool needs one sequence's blocks plus headroom.
     let num_blocks = mbs + bs;
     eprintln!(
-        "qwen_bench serve-prefill: Qwen3-0.6B, cc={cc} rows after start={start} cached, {reps} reps (random weights{}{})",
+        "qwen_bench serve-prefill: {model_name}, cc={cc} rows after start={start} cached, {reps} reps (random weights{}{})",
         if i8w { ", int8 weights" } else { "" },
         if kv8 { ", int8 KV" } else { "" }
     );
-    let init = init_weights(cfg, 7);
+    let init = init_weights_fast(cfg, 7);
     let eng = qwen3::serve::Engine::from_map(cfg.clone(), &init, bs, num_blocks, cc.max(8), mbs, cc.max(8), kv8, i8w);
     let gpu = eng.gpu().share();
     let roofs = banner(&gpu);

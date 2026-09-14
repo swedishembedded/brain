@@ -164,6 +164,13 @@ const PAGED_FLASH_PREFILL_I8: usize = 42;
 // `head_dim/2` table (`Engine::yarn`) instead of an analytic base theta. Only
 // reachable when the config carries `rope_scaling` - see `Engine::qk_norm_rope`.
 const ROPE_PAGED_YARN: usize = 43;
+// The int8-KV twin of `PAGED_FLASH_DECODE_SPLIT`/`_COMBINE` - the M2.7
+// split-key occupancy fix, ported to `kv_int8` (previously the one storage
+// tier `Op::PagedAttentionFused`'s decode arm had no candidate for at all -
+// see that Op's own doc and `paged_flash_decode_split_i8.wgsl`'s header for
+// the gap this closes and the measured A/B against the int8 triad).
+const PAGED_FLASH_DECODE_SPLIT_I8: usize = 44;
+const PAGED_FLASH_DECODE_COMBINE_I8: usize = 45;
 
 const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -210,6 +217,8 @@ const PIPELINES: &[(&str, &str)] = &[
     ("matmul_reg3_64", kernels::MATMUL_REG3_64),
     ("paged_flash_prefill_i8", kernels::PAGED_FLASH_PREFILL_I8),
     ("rope_paged_yarn", kernels::ROPE_PAGED_YARN),
+    ("paged_flash_decode_split_i8", kernels::PAGED_FLASH_DECODE_SPLIT_I8),
+    ("paged_flash_decode_combine_i8", kernels::PAGED_FLASH_DECODE_COMBINE_I8),
 ];
 
 /// The `model::ops::Ops` façade's required kernel set (B7), registered on a
@@ -594,6 +603,11 @@ struct Scratch {
     part_m: DeviceBuffer,
     part_l: DeviceBuffer,
     part_o: DeviceBuffer,
+    /// `paged_flash_decode_split_i8`'s own merged partial state
+    /// (`[n_heads, n_splits, 2 + HD]`, that kernel's own header explains the
+    /// merge) - the int8-KV twin of `part_m`/`part_l`/`part_o` above, same
+    /// `bsz == 1`-only sizing.
+    part_i8: DeviceBuffer,
     // per-step metadata (uploaded each iteration)
     tok_buf: DeviceBuffer,
     pos_buf: DeviceBuffer,
@@ -955,6 +969,14 @@ impl Engine {
             part_m: st(cfg.n_heads as u64 * decode_split_n_splits as u64),
             part_l: st(cfg.n_heads as u64 * decode_split_n_splits as u64),
             part_o: st(cfg.n_heads as u64 * decode_split_n_splits as u64 * cfg.head_dim as u64),
+            // `paged_flash_decode_split_i8`'s own fixed `PART_STRIDE = 2 +
+            // HD` (that kernel's own HD=128 tile width, not `cfg.head_dim` -
+            // `Op::PagedAttentionFused`'s decode arm never fires above
+            // `head_dim = 128` in the first place, so the two are equal for
+            // every config that reaches here, and sizing against the
+            // kernel's own constant is what stays correct if that ever
+            // stops being true).
+            part_i8: st(cfg.n_heads as u64 * decode_split_n_splits as u64 * (2 + 128)),
             tok_buf: st(b),
             pos_buf: st(b),
             seqlen_buf: st(b),
@@ -2025,11 +2047,11 @@ impl Engine {
                 s.push(g.step(APPEND_I8_CLIPPED, &[&sc.v, &sc.blk_buf, &sc.off_buf, &self.clip_v[l], &self.pool_v[l], &self.scales_v[l]], &[b, hkv, bs, hd], b * nkv));
                 // The SAME `Op::PagedAttentionFused` question the fp32 branch
                 // below asks, only at `Dtype::I8` - `paged_flash_prefill_i8`
-                // gives causal-chunk prefill an int8-KV tier, so this arm is
-                // no longer a dead call. Decode still has no int8 candidate
-                // (that Op's own doc has the measured reason), so the `fused`
-                // answer here is `true` only for a causal chunk; asking once
-                // and branching mirrors the fp32 arm exactly.
+                // gives causal-chunk prefill an int8-KV tier, and (M2.7's
+                // int8 port) `paged_flash_decode_split_i8` gives `bsz == 1`
+                // decode one too, so `fused` answers `true` in both regimes
+                // now, not just the causal-chunk one; asking once and
+                // branching mirrors the fp32 arm exactly.
                 let fused = fused_paged_attention(g, causal_chunk, true, hd, b);
                 if fused && causal_chunk {
                     // One dispatch per (head, query-tile), no `scores`/`probs`
@@ -2043,6 +2065,26 @@ impl Engine {
                         &[b, nh, nkv, hd, group, bs, mbt],
                         nh * ntiles_q * 256,
                     ));
+                } else if fused {
+                    // M2.7's split-key FlashDecode, ported to int8 KV: the
+                    // selector's decode arm only answers `true` at `bsz == 1`
+                    // for either storage tier (`Op::PagedAttentionFused`'s
+                    // own doc has the measured A/B), so `sc.part_i8` (sized
+                    // for `bsz == 1` at construction, `Engine::
+                    // decode_split_shape`) is always wide enough here. Two
+                    // dispatches replace the int8 triad's three - one merged
+                    // partial-state buffer, not three, per `paged_flash_
+                    // decode_split_i8`'s own header (two extra dequant-scale
+                    // inputs vs the fp32 split kernel push a naive 3-output
+                    // port over WebGPU's 8-storage-buffer floor).
+                    let (n_splits, tiles_per_split) = decode_split_shape(cap);
+                    s.push(g.step(
+                        PAGED_FLASH_DECODE_SPLIT_I8,
+                        &[&sc.q, &self.pool_k[l], &self.pool_v[l], &self.scales_k[l], &self.scales_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.part_i8],
+                        &[b, nh, nkv, hd, group, bs, mbt, n_splits, tiles_per_split],
+                        b * nh * n_splits * 64,
+                    ));
+                    s.push(g.step(PAGED_FLASH_DECODE_COMBINE_I8, &[&sc.part_i8, &sc.ctx], &[b, nh, hd, n_splits], b * nh * 128));
                 } else {
                     s.push(g.step(SCORES_I8, &[&sc.q, &self.pool_k[l], &sc.bt_buf, &sc.seqlen_buf, &self.scales_k[l], &sc.scores], &[b, nh, group, hd, bs, hkv, cap, mbt, fb(scale)], b * nh * cap));
                     s.push(g.step(SOFTMAX_B, &[&sc.scores, &sc.seqlen_buf, &sc.probs], &[b, nh, cap], b * nh));
@@ -5672,28 +5714,56 @@ mod tests {
         assert_eq!(triad, 0, "the int8 triad must not run when the fused int8 kernel does");
     }
 
-    /// Decode under int8 KV keeps the triad at EVERY batch size, `bsz == 1`
-    /// included: `Op::PagedAttentionFused`'s decode arm has no int8
-    /// candidate at all (M2.1/M2.2's measured non-win, never re-opened for
-    /// this storage tier), so the int8 prefill kernel this milestone added
-    /// must not leak into the decode regime through a shared `fused`
-    /// boolean. The fp32 twin of this pin is `decode_bsz_one_dispatches_the_
-    /// split_key_fused_kernel_not_the_triad` above, which expects the
-    /// opposite answer at the same batch size - which is the point.
+    /// Decode under int8 KV at `bsz >= 2` keeps the triad, same as fp32
+    /// (`decode_regime_above_bsz_one_never_dispatches_a_fused_kernel`'s own
+    /// pin): `Op::PagedAttentionFused`'s decode arm's `m == 1` gate applies
+    /// to `Dtype::I8` exactly the way it does to `Dtype::F32`, not a blanket
+    /// per-dtype exclusion - see `decode_int8_kv_bsz_one_dispatches_the_
+    /// split_key_fused_kernel_not_the_triad` below for the `bsz == 1` arm,
+    /// which now expects the OPPOSITE answer (M2.7's int8 port).
     #[test]
-    fn decode_int8_kv_never_dispatches_a_fused_kernel_at_any_batch_size() {
+    fn decode_int8_kv_above_bsz_one_never_dispatches_a_fused_kernel() {
         let cfg = QwenConfig::tiny();
         let map = tiny_weights(&cfg);
         let eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 64, 4, 8, 32, true, false);
-        for cc in [1u32, 3] {
-            let (positions, seqlens, blocks, offsets, bt) = causal_chunk_metadata(cc);
-            let tokens: Vec<u32> = (0..cc).map(|i| i % cfg.vocab).collect();
-            let (steps, _) = eng.run_batched_steps(cc, Input::Tokens(&tokens), &positions, &seqlens, &blocks, &offsets, &bt, false);
-            let kinds: Vec<usize> = steps.iter().filter_map(|s| s.meta().map(|m| m.kernel)).collect();
-            let fused = kinds.iter().filter(|&&k| k == PAGED_FLASH_PREFILL_I8 || k == PAGED_FLASH_PREFILL || k == PAGED_FLASH_DECODE_SPLIT || k == PAGED_FLASH_DECODE_COMBINE).count();
-            assert_eq!(fused, 0, "bsz={cc}: int8-KV decode has no fused candidate");
-            assert!(kinds.contains(&SCORES_I8), "bsz={cc}: int8-KV decode must still run the int8 triad");
-        }
+        let cc = 3u32;
+        let (positions, seqlens, blocks, offsets, bt) = causal_chunk_metadata(cc);
+        let tokens: Vec<u32> = (0..cc).map(|i| i % cfg.vocab).collect();
+        let (steps, _) = eng.run_batched_steps(cc, Input::Tokens(&tokens), &positions, &seqlens, &blocks, &offsets, &bt, false);
+        let kinds: Vec<usize> = steps.iter().filter_map(|s| s.meta().map(|m| m.kernel)).collect();
+        let fused = kinds
+            .iter()
+            .filter(|&&k| k == PAGED_FLASH_PREFILL_I8 || k == PAGED_FLASH_PREFILL || k == PAGED_FLASH_DECODE_SPLIT_I8 || k == PAGED_FLASH_DECODE_COMBINE_I8)
+            .count();
+        assert_eq!(fused, 0, "bsz={cc}: int8-KV decode has no fused candidate above bsz==1");
+        assert!(kinds.contains(&SCORES_I8), "bsz={cc}: int8-KV decode must still run the int8 triad");
+    }
+
+    /// M2.7's int8 port: `bsz == 1` decode under `kv_int8` dispatches the
+    /// split-key fused kernel PAIR (`paged_flash_decode_split_i8` ->
+    /// `paged_flash_decode_combine_i8`, one of each per layer) instead of the
+    /// int8 triad - the same dispatch-count pin `decode_bsz_one_dispatches_
+    /// the_split_key_fused_kernel_not_the_triad` makes for the fp32 tier.
+    /// The kernel-level numerical agreement is gated separately
+    /// (`model::paged::flash_tests::paged_flash_decode_split_i8_matches_
+    /// int8_triad`); this test's whole job is proving `batched_tape`
+    /// actually PICKS the pair at this one batch size.
+    #[test]
+    fn decode_int8_kv_bsz_one_dispatches_the_split_key_fused_kernel_not_the_triad() {
+        let cfg = QwenConfig::tiny();
+        let map = tiny_weights(&cfg);
+        let eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 64, 4, 8, 32, true, false);
+        let cc = 1u32;
+        let (positions, seqlens, blocks, offsets, bt) = causal_chunk_metadata(cc);
+        let tokens: Vec<u32> = (0..cc).map(|i| i % cfg.vocab).collect();
+        let (steps, _) = eng.run_batched_steps(cc, Input::Tokens(&tokens), &positions, &seqlens, &blocks, &offsets, &bt, false);
+        let kinds: Vec<usize> = steps.iter().filter_map(|s| s.meta().map(|m| m.kernel)).collect();
+        let split = kinds.iter().filter(|&&k| k == PAGED_FLASH_DECODE_SPLIT_I8).count();
+        let combine = kinds.iter().filter(|&&k| k == PAGED_FLASH_DECODE_COMBINE_I8).count();
+        assert_eq!(split, cfg.n_layers as usize, "one int8 split dispatch per layer, bsz=1 decode");
+        assert_eq!(combine, cfg.n_layers as usize, "one int8 combine dispatch per layer, bsz=1 decode");
+        let triad = kinds.iter().filter(|&&k| k == SCORES_I8 || k == SOFTMAX_B || k == APPLY_I8).count();
+        assert_eq!(triad, 0, "the int8 triad must not run when the int8 split-key fused kernel does");
     }
 
     /// A config whose `tok.weight` is deliberately sized past `wgpu`'s
