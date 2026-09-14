@@ -823,6 +823,92 @@ tuned kernel are deferred.**
   through `Gpu::new_on`, but the two paths have not been reconciled with the
   Vulkan handle for the same card.
 
+## Roadmap to full, extremely fast coverage (M6+)
+
+M0-M5 proved the mechanism end to end (identity, tier reporting, a generated
+tier, a `Backend`, one tuned kernel, graph replay) on one model's forward.
+What is missing is BREADTH (every op, forward and backward, every dtype) and
+DEPTH (the fast kernel families the generator refuses, and whatever a queried
+card's generation can do that a portable kernel cannot). Both must ship
+without weakening the rule already built and gated: an op this backend cannot
+answer at the tier its policy demands is a named, recorded gap, never a
+quiet drop to a slower tier or another device.
+
+### The resolution principle that keeps duplication down while chasing peak speed
+
+Three ways to answer one `Op`, ranked by preferring whichever is both
+correct and fastest for the capability actually queried, cheapest to add
+last:
+
+1. **Library** - a vendor's own tuned kernel (cuBLASLt, cuDNN, NCCL) for
+   whatever generation the driver reports, reached by `dlopen` exactly like
+   NVRTC - optional, declined cleanly where the shared object is absent, and
+   never linked at build time. This is the mechanism that gets tensor-core
+   and per-generation tuning "for free" - the vendor has already written and
+   tuned the kernel for every architecture brain would otherwise have to
+   hand-port one at a time.
+2. **Tuned (native)** - brain's own hand-written `.cu`, for whatever a
+   library does not cover well: brain's own `PagedAttention` KV layout,
+   decode-shaped GEMV the general GEMM libraries do not specialise for, or
+   any op a library simply has no kernel for.
+3. **Generated** - the existing `wgsl-cuda` T0 path, the correctness floor
+   every op already has today.
+
+This is a **provider chain ordering**, not a change to how a chain resolves -
+`ProviderRegistry` already tries providers in order and records a `Decline`
+per skip (`resolve_choice`, delivered in M1). A library provider is simply
+placed before the native `CudaProvider`; on any box without the library it
+declines every op it would have claimed, in the record, and `CudaProvider`
+or the generated tier answers instead - never a silent gap. `ImplSource`
+gains a fourth value, **`Library`**, ranked above `Tuned` (`Reference <
+Generated < Tuned < Library`): tier reporting must be able to say "a vendor
+kernel answered this," not fold it into the same bucket as a hand-written
+one, because the two have different maintenance and portability properties.
+
+Net effect on duplication: brain hand-writes a kernel only for what a queried
+card's library does not already do well - not one kernel per architecture
+generation, and not a WGSL translation for anything performance-critical.
+
+### Milestones
+
+| M | Deliverable | Genuine red test |
+|---|---|---|
+| **6** | Real allocator: a suballocating arena per device, replacing one `cuMemAlloc` per step/buffer; `cuModuleGetFunction` cached at compile time, not per launch | an allocation-churn test asserting no repeated `cuMemAlloc` for a repeated size class across N churn cycles, plus a graph-replay run across a churn cycle that stays within one `alloc_epoch` |
+| **7** | Backward pass: `brain-gradcheck`'s finite-difference suite runs on `--backend cuda` (skip-if-absent) for every op the forward gate already covers | the suite, currently unable to select CUDA at all, turns green for the covered subset and is wired into `.agents/roadmap/cuda.md`'s ledger the same commit it turns green |
+| **8** | `CudaLibraryProvider`: cuBLASLt for the GEMM family (plain, register-tiled, and quantized), `dlopen`ed and declined cleanly where absent | golden agreement vs the WGSL reference at the project's 1e-6 floor, skip-if-library-absent, plus a decline-is-recorded test with the library deliberately not loaded |
+| **9** | Attention family: cuDNN's fused attention where the operand layout matches its contract; a hand-written flash-attention/paged-attention T2 kernel as the fallback that always exists, retiring every `flash_attn_*`/`paged_flash_*` refusal | decode-shaped and long-context shapes at 1e-6 vs the WGSL reference, run through whichever of the two answered, recorded distinctly in the dispatch trace |
+| **10** | Quantized tiers: `PolicyEntry` grows a dtype axis; a DP4A int8 T2 kernel; Q4/K-quant register-tiled kernels mirroring their WGSL counterparts | parity fixtures at each dtype's existing WGSL tolerance (not 1e-6 - the quant tiers already accept a looser bar there), plus the now-non-empty `POLICY` ratchet exercising a real entry for the first time |
+| **11** | Per-generation tensor-core packs (WMMA sm_70+, MMA sm_80+, WGMMA/TMA sm_90+) for the hottest kernels, each a `kernels-cuda` entry with its own `min_cc` floor, resolved automatically by `best_for` - no branch anywhere names an architecture | `make cuda-table/check` gains an NVRTC/nvcc compile-only check per declared floor via `-arch=compute_XX`, including floors above any card present; a numeric golden test runs wherever hardware exists to run it and the entry is marked "compiles, unverified numerically" otherwise - never claimed as verified `Tuned` parity that never ran |
+| **12** | Multi-GPU: NCCL as a `dlopen`ed provider for `Collective`; `Shard.gpu_index`/`check-multi-gpu-sharding.sh` cover CUDA-identified devices; one `memauth::PoolId` shared between a CUDA and a Vulkan handle on the same physical card | a two-device collective test (skip-if-fewer-than-2) and a memauth test asserting one `PoolId` per physical card across both backend handles, so `--limit-vram-total` stops double-counting |
+| **13** | Surfacing and gate graduation: `brain devices` per-op tier column and per-card CUDA visibility; `--trace-impl`; `braintop`'s `DeviceBudget`-side field; cost formulas for CUDA steps in `gpu-core/src/cost.rs`; `StepMeta` for `step_native`; CI-built AOT cubins alongside the NVRTC dev path; CUDA joins `scripts/gates/parity-gate.sh` as a real line, not a skip | `cost.rs`'s existing coverage ratchet extended to CUDA steps and made red before the formulas land; `parity-gate.sh`'s CUDA line green on a full run, gated on M7-M11 landing first |
+
+Ordering rationale: the allocator (M6) is a prerequisite for everything after
+it - graph replay, backward's extra live buffers and every library call all
+need address-stable, reusable memory, not a `cuMemAlloc` per step. Backward
+(M7) comes before the fast hand-written kernels so correctness gates exist
+before anything gets exotic. Library providers (M8-M9) precede the
+hand-written quantized/tensor-core work (M10-M11) because a vendor's kernel
+is the cheapest correct answer wherever it applies, and only writing brain's
+own kernel for what a library leaves uncovered keeps hand-ported surface
+area to the minimum the "no silent slow fallback" rule can still make fast.
+Multi-GPU (M12) is largely independent of M8-M11 but depends on the settled
+device-identity and allocator work, so it is sequenced after both. Surfacing
+and gate graduation (M13) is last because it reports coverage that does not
+exist yet, and because promoting CUDA into `parity-gate.sh` before backward
+and the fast kernel families land would either gate a partial backend or
+silently skip the parts that are not ready - exactly what this whole effort
+exists to make impossible.
+
+Every milestone owes the same repo obligations M0-M5 did: SPDX +
+`Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>` on every new
+file, a `.agents/rules/lessons.md` entry in the same commit as any
+non-obvious finding, build only through the Makefile, zero warnings
+including pre-existing ones in touched files, and one self-contained commit
+per verified milestone on a linear history. No milestone may name a card,
+a compute capability as a permanent ceiling, or a measured number as a
+promise for different hardware - every threshold is a queried fact, checked
+again at the point it is used.
+
 ## Design decisions worth not re-litigating
 
 - **CUDA kernels will live in `crates/kernels-cuda`, not `crates/kernels/cuda/`.**
