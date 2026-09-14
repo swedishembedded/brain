@@ -125,16 +125,37 @@ incrementally continues a previous run.
 
 ## Options
 
+Which checkpoint/tokenizer to serve is still selected through env vars
+(`BRAIN_QWEN_WEIGHTS`, `BRAIN_QWEN_TOKENIZER`, `BRAIN_FLUX2_TE`, above) -
+everything about HOW to serve it is a `brain serve` flag:
+
 - `--lora N` - LoRA rank for `finetune`.
 - `--device cpu|gpu|vulkan` - backend selection.
-- `BRAIN_QWEN_CTX` - built context length (default 24576).
-- `BRAIN_QWEN_MAX_BATCH` - concurrent serving batch slots (default 16).
-- `BRAIN_QWEN_KV_INT8` - int8 KV cache, on by default; `--kv-fp32` or
-  `BRAIN_QWEN_KV_INT8=0` opts out.
-- `BRAIN_QWEN_KV_CALIB` - per-head KV clip ranges produced by `brain qwen3
-  calib` (unset by default).
-- `BRAIN_QWEN_KV_OFFLOAD_GB` - host RAM the serving engine may use to park
+- `--qwen-ctx N` - built context length. Unset by default: the resident
+  auto-sizes it to the target device's real usable VRAM instead of a fixed
+  number, so raising the ceiling normally means freeing VRAM (or adding a
+  card), not passing this flag. Set it to pin an exact value instead of the
+  auto-picked one.
+- `--qwen-max-batch N` - concurrent serving batch slots (default 16).
+- `--qwen-kv-fp32` - opt out of the default int8 KV cache.
+- `--qwen-kv-calib` - opt in to per-head KV clip ranges produced by `brain
+  qwen3 calib` (off by default).
+- `--qwen-kv-offload-gb N` - host RAM the serving engine may use to park
   preempted sessions' KV cache (default `0`, off). See below.
+- `--qwen-weights-int8` - quantize the 7 per-layer linears to int8
+  (default off). Opt in when fp32 weights alone do not fit any card's
+  budget - at the real Qwen3-8B config, this shrinks the weight term from
+  ~20.8 GiB to ~11.9 GiB. A device with no packed-int8 dot path (the CPU
+  backend, or an unusual GPU) degrades to fp32 with a printed warning
+  rather than failing.
+- `--qwen-max-prefill N` - cap the chunked-prefill row count below its
+  512 default (clamped to `1..=512`; can only shrink it). The scores/probs
+  scratch buffer this bounds is the single largest per-token-scaling cost
+  in the whole engine - larger than the KV pool itself - and shrinks
+  LINEARLY with this value: 512→128 saves ~2.25 GiB at ctx=24576 on the
+  real Qwen3-8B config, with no effect on decode throughput or the KV
+  pool's own size (only the prefill chunk shape changes: more, smaller
+  passes over the same prompt).
 
 ## Serving more sessions than the KV pool holds
 
@@ -153,7 +174,7 @@ produce are identical to the ones it would have produced had it never been
 preempted. That is a tested property, not an aspiration.
 
 ```bash
-BRAIN_QWEN_KV_OFFLOAD_GB=16 brain serve --openai 8080
+brain serve --openai 8080 --qwen-kv-offload-gb 16
 ```
 
 What this buys is **concurrency**, not a longer single context. A session

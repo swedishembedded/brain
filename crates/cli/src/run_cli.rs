@@ -29,6 +29,7 @@
 //!     `$XDG_DATA_HOME/brain/models` else `$HOME/.local/share/brain/models`.
 
 use std::io::{BufRead, Write};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
 use events::Envelope;
@@ -68,10 +69,20 @@ USAGE:
   brain serve --stdio                     # the event-driven stdio JSONL loop
   brain serve                             # NO surface flag: same as --stdio
 
-HTTP INFERENCE APIS  (each on its own localhost port, each behind its own key)
-  --openai [PORT]        OpenAI-compatible dialect       (default port 8788)
-  --openrouter [PORT]    OpenRouter-compatible dialect   (default port 8789)
-  --anthropic [PORT]     Anthropic Messages dialect      (default port 8787)
+HTTP INFERENCE APIS  (each behind its own key)
+  --openai [ADDR]        OpenAI-compatible dialect       (default port 8788)
+  --openrouter [ADDR]    OpenRouter-compatible dialect   (default port 8789)
+  --anthropic [ADDR]     Anthropic Messages dialect      (default port 8787)
+
+  ADDR is optional; when given it is a bare PORT (bind stays 127.0.0.1, same
+  as always), a HOST:PORT (bind that one interface instead), a bare HOST (that
+  interface, on the dialect's default port), or a comma-separated list of any
+  of those to listen on SEVERAL interfaces at once for the SAME dialect - one
+  key is generated per dialect regardless of how many addresses it binds, not
+  one per address:
+      brain serve --openai 0.0.0.0:8788                    # every interface
+      brain serve --openai 192.168.1.5:8788,127.0.0.1:8788  # two, explicitly
+      brain serve --openai 9000                             # old bare-port form
 
   BASE URL - for OpenAI and OpenRouter, BOTH of these work, because every route
   is registered with and without the /v1 prefix:
@@ -88,7 +99,9 @@ HTTP INFERENCE APIS  (each on its own localhost port, each behind its own key)
   A fresh key per surface per launch, printed on stdout as
   `APIKEY <provider> <key>`; --api-keys-out writes the same keys as JSON, 0600.
 
-  Surfaces ALWAYS bind 127.0.0.1. There is no --listen / --host / --bind flag.
+  With no ADDR given, a surface binds 127.0.0.1 (unchanged default). There is
+  no --listen / --host / --bind flag -- the address goes directly after the
+  dialect flag it names, as ADDR above.
 
 D-BUS CONTROL SURFACE
   --dbus                 serve com.swedishembedded.Brain1 on the session bus
@@ -124,6 +137,27 @@ SERVING OPTIONS
                          The file is empty and not a secret: it holds no key, no
                          pid and no address.
 
+QWEN3 SERVING TUNABLES  (which checkpoint to serve stays BRAIN_QWEN_WEIGHTS/
+                         BRAIN_QWEN_TOKENIZER; everything about HOW is a flag)
+  --qwen-ctx N           built context length. Default: auto-sized to the
+                         target device's real free VRAM (minus --reserve-gb),
+                         capped at the checkpoint's own trained
+                         max_position_embeddings. Give this to pin an exact
+                         value instead.
+  --qwen-max-batch N     concurrent decode slots (default 16).
+  --qwen-kv-fp32         opt OUT of int8 KV (on by default).
+  --qwen-kv-calib        opt IN to a kv_calib.json beside the checkpoint
+                         (off by default).
+  --qwen-kv-offload-gb N host RAM for preempted sessions' KV, fractional
+                         allowed (default 0, off).
+  --qwen-weights-int8    quantize the 7 per-layer linears to int8 (off by
+                         default) - for a checkpoint whose fp32 weights
+                         alone do not fit any card's budget.
+  --qwen-max-prefill N   cap the chunked-prefill row count below its 512
+                         default (clamped 1..=512) - shrinks the paged-
+                         attention scratch buffer linearly, the single
+                         largest per-token-scaling cost in the engine.
+
 STDIO CONTROLLER  (the default, with no surface flag)
   --gpt PATH             GPT checkpoint (else $BRAIN_GPT2; else a fake echo model)
   --yolo PATH             YOLO checkpoint (else $BRAIN_YOLOV8; else a fake detector)
@@ -132,11 +166,13 @@ STDIO CONTROLLER  (the default, with no surface flag)
   Reads JSONL events on stdin, writes JSONL events on stdout, one per line.
   Example: printf '{\"event\":\"user_text\",\"text\":\"hi\"}\\n' | brain serve --stdio
 
-MODEL CONFIGURATION (env-only - there is no config file)
+MODEL CONFIGURATION (WHICH models: env vars; HOW to serve one: flags)
   Which models this server actually serves is chosen ENTIRELY by BRAIN_* env
   vars (BRAIN_QWEN_WEIGHTS, BRAIN_LFM2, BRAIN_NEMOTRONASR, ...): a model whose
-  weights var is unset is simply not served. Run `brain serve --help` for the
-  full reference table of every serving variable.
+  weights var is unset is simply not served. Tuning an already-selected
+  model (context length, batching, precision, ...) is a flag where one
+  exists - see QWEN3 SERVING TUNABLES above for Qwen3's. Run `brain serve
+  --help` for the full reference table of every serving variable.
 
   FETCHING: a request for a model that is not pulled errors with zero network
   I/O unless --autofetch (or $BRAIN_AUTO_FETCH=1) was passed; `brain pull`
@@ -164,6 +200,7 @@ EXAMPLES
   brain serve --openai                       # OpenAI API on http://127.0.0.1:8788
   brain serve --openai 9000 --api-keys-out /run/brain/keys.json \\
               --ready-file /run/brain/ready
+  brain serve --openai 0.0.0.0:8788          # OpenAI API on every interface
   brain serve --dbus --anthropic --openrouter
 ";
 
@@ -196,6 +233,56 @@ fn parsed<T: std::str::FromStr>(args: &[String], i: &mut usize, flag: &str) -> T
         eprint!("{HELP}");
         std::process::exit(2);
     })
+}
+
+/// Parse the optional ADDR value that may follow `--anthropic` / `--openai`
+/// / `--openrouter` (see HELP's ADDR paragraph): a comma-separated list where
+/// each item is a `HOST:PORT`, a bare `HOST` (bound on `default_port`), or a
+/// bare `PORT` (bound on loopback) - so the pre-existing bare-port spelling
+/// keeps meaning exactly what it always did. `None` if `spec` does not parse
+/// as such a list AT ALL (not even one item), which is what lets
+/// [`take_addrs`] tell "a real address list was given" apart from "the next
+/// token is unrelated" (typically the next flag) without erroring on the
+/// latter.
+fn parse_listen_addrs(spec: &str, default_port: u16) -> Option<Vec<SocketAddr>> {
+    let mut out = Vec::new();
+    for tok in spec.split(',') {
+        let tok = tok.trim();
+        if tok.is_empty() {
+            return None;
+        }
+        let addr = if let Ok(a) = tok.parse::<SocketAddr>() {
+            a
+        } else if let Ok(port) = tok.parse::<u16>() {
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)
+        } else if let Ok(ip) = tok.parse::<IpAddr>() {
+            SocketAddr::new(ip, default_port)
+        } else {
+            return None;
+        };
+        out.push(addr);
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+/// The address list that must follow a dialect flag, when one was actually
+/// given: peeks at the next token and consumes it only if
+/// [`parse_listen_addrs`] accepts it whole, otherwise leaves it untouched (it
+/// is the next flag, e.g. `--openai --dbus`) and returns the single loopback
+/// default. Mirrors the old bare-port `take_port` closure's peek-without-
+/// consuming contract exactly, widened from one `u16` to a `Vec<SocketAddr>`.
+fn take_addrs(args: &[String], i: &mut usize, default_port: u16) -> Vec<SocketAddr> {
+    match args.get(*i + 1).and_then(|s| parse_listen_addrs(s, default_port)) {
+        Some(addrs) => {
+            *i += 1;
+            addrs
+        }
+        None => vec![SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), default_port)],
+    }
 }
 
 /// Fill the controller's text-to-speech seam, when this build has one.
@@ -245,12 +332,19 @@ pub fn run_serve(args: &[String]) {
     // silently reloads its weights because a file appeared on disk is not
     // something an operator should get without asking for it.
     let mut watch_adapters: Option<String> = None;
-    // HTTP inference APIs (`--anthropic|--openai|--openrouter [PORT]`), each on its own
-    // localhost port with a per-provider key generated at startup. All share the one
-    // executor (with D-Bus, if also selected). `--api-keys-out FILE` writes the keys as
-    // JSON for scripted clients / the e2e test.
-    let (mut anthropic, mut openai, mut openrouter): (Option<u16>, Option<u16>, Option<u16>) =
-        (None, None, None);
+    // Every `--qwen-*` flag, built up as its own arm below is matched -
+    // `crate::resident_llm::QwenServeConfig`'s own `Default` is every
+    // historical env-var default, byte for byte.
+    let mut qwen_cfg = crate::resident_llm::QwenServeConfig::default();
+    // HTTP inference APIs (`--anthropic|--openai|--openrouter [ADDR]`), each
+    // bound on one or more addresses (127.0.0.1 by default) with ONE
+    // per-dialect key generated at startup regardless of how many addresses
+    // it binds. All share the one executor (with D-Bus, if also selected).
+    // `--api-keys-out FILE` writes the keys as JSON for scripted clients /
+    // the e2e test.
+    let mut anthropic: Option<Vec<SocketAddr>> = None;
+    let mut openai: Option<Vec<SocketAddr>> = None;
+    let mut openrouter: Option<Vec<SocketAddr>> = None;
     let mut api_keys_out: Option<String> = None;
     let mut ready_file: Option<String> = None;
     // Diagnostic verbosity (`-v`/`--verbose [0-3]`, else $BRAIN_VERBOSE) -- see
@@ -258,15 +352,6 @@ pub fn run_serve(args: &[String]) {
     // (`main::install_verbosity`, run before any subcommand including this
     // one), so by the time this loop runs, `-v`/`--verbose` are already
     // stripped from `args` -- no local state or match arms needed here.
-    // Optional PORT immediately following an API flag (else the provider default).
-    let take_port = |args: &[String], i: &mut usize, default: u16| -> u16 {
-        if let Some(p) = args.get(*i + 1).and_then(|s| s.parse::<u16>().ok()) {
-            *i += 1;
-            p
-        } else {
-            default
-        }
-    };
 
     let mut i = 0;
     while i < args.len() {
@@ -294,9 +379,16 @@ pub fn run_serve(args: &[String]) {
             "--reserve-gb" => dbus_reserve_gb = parsed(args, &mut i, "--reserve-gb"),
             "--models-dir" => models_dir = Some(val(args, &mut i, "--models-dir")),
             "--watch-adapters" => watch_adapters = Some(val(args, &mut i, "--watch-adapters")),
-            "--anthropic" => anthropic = Some(take_port(args, &mut i, 8787)),
-            "--openai" => openai = Some(take_port(args, &mut i, 8788)),
-            "--openrouter" => openrouter = Some(take_port(args, &mut i, 8789)),
+            "--qwen-ctx" => qwen_cfg.ctx = Some(parsed(args, &mut i, "--qwen-ctx")),
+            "--qwen-max-batch" => qwen_cfg.max_batch = parsed(args, &mut i, "--qwen-max-batch"),
+            "--qwen-kv-fp32" => qwen_cfg.kv_int8 = false,
+            "--qwen-kv-calib" => qwen_cfg.kv_calib_opt_in = true,
+            "--qwen-kv-offload-gb" => qwen_cfg.kv_offload_gb = parsed(args, &mut i, "--qwen-kv-offload-gb"),
+            "--qwen-weights-int8" => qwen_cfg.weights_int8 = true,
+            "--qwen-max-prefill" => qwen_cfg.max_prefill_cap = parsed(args, &mut i, "--qwen-max-prefill"),
+            "--anthropic" => anthropic = Some(take_addrs(args, &mut i, 8787)),
+            "--openai" => openai = Some(take_addrs(args, &mut i, 8788)),
+            "--openrouter" => openrouter = Some(take_addrs(args, &mut i, 8789)),
             "--api-keys-out" => api_keys_out = Some(val(args, &mut i, "--api-keys-out")),
             "--ready-file" => ready_file = Some(val(args, &mut i, "--ready-file")),
             "--help" | "-h" => {
@@ -321,8 +413,12 @@ pub fn run_serve(args: &[String]) {
         eprintln!("brain serve: no --seed given, using random seed {} (pass --seed {} to reproduce)", cfg.seed, cfg.seed);
     }
 
-    let surfaces_requested =
-        dbus as usize + anthropic.is_some() as usize + openai.is_some() as usize + openrouter.is_some() as usize;
+    // Each bound ADDRESS reports its own `Gate::bound` call (`apiserve::serve_all`
+    // spawns one listener per address), not each dialect flag - so a dialect
+    // bound on N interfaces counts N times here, or `--ready-file` would wait
+    // past the point every requested listener is actually up.
+    let addr_count = |a: &Option<Vec<SocketAddr>>| a.as_ref().map_or(0, Vec::len);
+    let surfaces_requested = dbus as usize + addr_count(&anthropic) + addr_count(&openai) + addr_count(&openrouter);
     // The stdio loop counts as one "surface" too, so --ready-file means the same
     // thing in both modes: it fires at the same point the loop already emits
     // `events::Event::Ready`.
@@ -352,6 +448,7 @@ pub fn run_serve(args: &[String]) {
             api_keys_out,
             ready,
             watch_adapters,
+            qwen_cfg,
         });
     }
 
@@ -439,7 +536,7 @@ pub fn run_serve(args: &[String]) {
 /// Returns `crate::resident::Serving`, not a bare `Executor`: the
 /// continuous-learning hot swap needs the CONCRETE `QwenResident` handle
 /// alongside the type-erased one the executor holds - see that type's doc.
-fn build_serving_executor(reserve_gb: u64, models_dir: Option<String>) -> crate::resident::Serving {
+fn build_serving_executor(reserve_gb: u64, models_dir: Option<String>, qwen_cfg: crate::resident_llm::QwenServeConfig) -> crate::resident::Serving {
     // Discover the GPUs' capacity so the scheduler can budget/evict against real VRAM,
     // then narrow to what `--device` made schedulable. With no `--device` the set is
     // every device, which is exactly the "use all the hardware wisely" default.
@@ -561,7 +658,7 @@ fn build_serving_executor(reserve_gb: u64, models_dir: Option<String>) -> crate:
         }
         eprintln!("brain serve: scanning model dir {}", d.display());
     }
-    crate::resident::build_executor(&gpus, &npus, &unified_gpus, reserved, cpu_compute_ram, ram, dir.as_deref(), residency::Policy::from_env())
+    crate::resident::build_executor(&gpus, &npus, &unified_gpus, reserved, cpu_compute_ram, ram, dir.as_deref(), residency::Policy::from_env(), qwen_cfg)
 }
 
 /// Live host RAM this process could actually get right now: `MemAvailable`
@@ -585,9 +682,9 @@ struct RunApis {
     dbus_name: Option<String>,
     reserve_gb: u64,
     models_dir: Option<String>,
-    anthropic: Option<u16>,
-    openai: Option<u16>,
-    openrouter: Option<u16>,
+    anthropic: Option<Vec<SocketAddr>>,
+    openai: Option<Vec<SocketAddr>>,
+    openrouter: Option<Vec<SocketAddr>>,
     api_keys_out: Option<String>,
     /// Notified once per bound surface (HTTP + D-Bus); disabled unless
     /// `--ready-file` was given. See `brain_shutdown::ready::Gate`.
@@ -595,6 +692,9 @@ struct RunApis {
     /// `--watch-adapters DIR`: the continuous-learning hot-swap watcher's
     /// directory, `None` (no watcher) unless the flag was given.
     watch_adapters: Option<String>,
+    /// Every `--qwen-*` flag, parsed once here - see
+    /// `resident_llm::QwenServeConfig`'s own doc for each field.
+    qwen_cfg: crate::resident_llm::QwenServeConfig,
 }
 
 /// Build the one shared executor and bring up the requested surfaces: D-Bus
@@ -658,11 +758,24 @@ fn build_auto_fetch_supplier(models_dir: Option<&str>) -> Option<Arc<dyn residen
 }
 
 fn run_apis(a: RunApis) {
+    // Captured before `build_serving_executor` below moves `a.models_dir`.
+    let models_dir_for_heal = a.models_dir.clone();
     let supplier = build_auto_fetch_supplier(a.models_dir.as_deref());
-    let crate::resident::Serving { executor, qwen } = build_serving_executor(a.reserve_gb, a.models_dir);
+    let crate::resident::Serving { executor, qwen } = build_serving_executor(a.reserve_gb, a.models_dir, a.qwen_cfg);
     let manifests = executor.manifests();
     let served: Vec<&str> = manifests.iter().map(|m| m.model.as_str()).collect();
     eprintln!("brain serve: models: {}", served.join(", "));
+
+    // `--autofetch` also proactively heals what the scan above already found
+    // broken (an interrupted download, a GGUF still needing its one-time
+    // conversion) in the background, instead of only fixing it the next time
+    // a client happens to request that exact model. `supplier` is already
+    // `None` unless auto-fetch is enabled, so no separate check is needed here.
+    if let Some(sup) = &supplier {
+        if let Some(dir) = crate::model_dir::resolve(models_dir_for_heal.as_deref()) {
+            crate::supply::heal_missing_models_in_background(dir, sup.clone(), executor.clone());
+        }
+    }
 
     let http = a.anthropic.is_some() || a.openai.is_some() || a.openrouter.is_some();
 
@@ -716,17 +829,23 @@ fn run_apis(a: RunApis) {
     };
 
     if http {
-        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-        let local = |port: u16| SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+        // ONE key per DIALECT, shared across every address it binds - a
+        // client using the OpenAI surface must keep working with the same
+        // key regardless of which of its bound interfaces it connects
+        // through, and `--api-keys-out`'s `{provider: key}` map (keyed by
+        // dialect, not by address) has nowhere to put a second key anyway.
         let mut surfaces = Vec::new();
-        if let Some(p) = a.anthropic {
-            surfaces.push(apiserve::Surface::generate(apiserve::Provider::Anthropic, local(p)));
-        }
-        if let Some(p) = a.openai {
-            surfaces.push(apiserve::Surface::generate(apiserve::Provider::OpenAI, local(p)));
-        }
-        if let Some(p) = a.openrouter {
-            surfaces.push(apiserve::Surface::generate(apiserve::Provider::OpenRouter, local(p)));
+        for (addrs, provider) in [
+            (a.anthropic, apiserve::Provider::Anthropic),
+            (a.openai, apiserve::Provider::OpenAI),
+            (a.openrouter, apiserve::Provider::OpenRouter),
+        ] {
+            if let Some(addrs) = addrs {
+                let key = apiserve::surface::random_key();
+                for addr in addrs {
+                    surfaces.push(apiserve::Surface::new(provider, addr, key.clone()));
+                }
+            }
         }
         // ORDER IS THE CONTRACT: announce() and --api-keys-out both run BEFORE
         // any listener binds, and --ready-file is touched only from inside the
@@ -734,8 +853,15 @@ fn run_apis(a: RunApis) {
         // what lets a script wait on the ready file ALONE and then read the
         // keys with no retry. Do not move write_keys below serve_all.
         // Gate: tests/e2e/ready.bats.
+        // One APIKEY line per DIALECT (never per address): every surface in
+        // a dialect's group carries the identical key built above, so a
+        // second, third, ... address would only reprint the same line.
+        let mut announced: Vec<apiserve::Provider> = Vec::new();
         for s in &surfaces {
-            s.announce();
+            if !announced.contains(&s.provider) {
+                s.announce();
+                announced.push(s.provider);
+            }
         }
         if let Some(path) = &a.api_keys_out {
             if let Err(e) = apiserve::write_keys(&surfaces, std::path::Path::new(path)) {
@@ -904,5 +1030,86 @@ mod tests {
     #[test]
     fn help_states_there_is_no_listen_flag() {
         assert!(HELP.contains("no --listen"));
+    }
+
+    use super::{parse_listen_addrs, take_addrs};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    fn local(port: u16) -> SocketAddr {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)
+    }
+
+    /// The pre-existing bare-port spelling (`--openai 9000`) must keep
+    /// meaning exactly what it always did: loopback, that port.
+    #[test]
+    fn parse_listen_addrs_accepts_a_bare_port_as_loopback() {
+        assert_eq!(parse_listen_addrs("9000", 8788), Some(vec![local(9000)]));
+    }
+
+    /// The new `HOST:PORT` spelling binds the named interface, not loopback.
+    #[test]
+    fn parse_listen_addrs_accepts_host_colon_port() {
+        assert_eq!(parse_listen_addrs("0.0.0.0:8788", 8788), Some(vec![SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 8788)]));
+        assert_eq!(parse_listen_addrs("192.168.1.5:9000", 8788), Some(vec![SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 5)), 9000)]));
+    }
+
+    /// A bare host with no port takes the dialect's own default port.
+    #[test]
+    fn parse_listen_addrs_accepts_a_bare_host_using_the_default_port() {
+        assert_eq!(parse_listen_addrs("0.0.0.0", 8788), Some(vec![SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 8788)]));
+    }
+
+    /// A comma-separated list binds every interface named, in order - the
+    /// "OR more than one interface" case.
+    #[test]
+    fn parse_listen_addrs_accepts_a_comma_separated_list() {
+        let got = parse_listen_addrs("0.0.0.0:8788,127.0.0.1:9000", 8788).unwrap();
+        assert_eq!(got, vec![SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 8788), local(9000)]);
+    }
+
+    /// Garbage, or an empty item in the list, must not parse at all - the
+    /// caller (`take_addrs`) is what decides what "not a valid list" means
+    /// (leave the token alone, fall back to the default), not this function
+    /// guessing a partial answer.
+    #[test]
+    fn parse_listen_addrs_rejects_garbage_and_empty_items() {
+        assert_eq!(parse_listen_addrs("not-an-address", 8788), None);
+        assert_eq!(parse_listen_addrs("0.0.0.0:8788,", 8788), None);
+        assert_eq!(parse_listen_addrs("", 8788), None);
+    }
+
+    /// `take_addrs` consumes the next token and uses it verbatim when it
+    /// parses as an address list.
+    #[test]
+    fn take_addrs_consumes_a_valid_address_list() {
+        let args = vec!["--openai".to_string(), "0.0.0.0:9000,127.0.0.1:9001".to_string()];
+        let mut i = 0;
+        let got = take_addrs(&args, &mut i, 8788);
+        assert_eq!(got, vec![SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 9000), local(9001)]);
+        assert_eq!(i, 1, "the address token must be consumed");
+    }
+
+    /// With no value (the next token is unrelated, e.g. the next flag),
+    /// `take_addrs` must NOT consume it and must fall back to the single
+    /// loopback default on the dialect's own port - same contract the old
+    /// bare-port `take_port` closure had.
+    #[test]
+    fn take_addrs_falls_back_to_loopback_default_without_consuming_an_unrelated_next_token() {
+        let args = vec!["--openai".to_string(), "--dbus".to_string()];
+        let mut i = 0;
+        let got = take_addrs(&args, &mut i, 8788);
+        assert_eq!(got, vec![local(8788)]);
+        assert_eq!(i, 0, "an unrelated next token must not be consumed");
+    }
+
+    /// End of args (the flag is the last token) must behave exactly like an
+    /// unrelated next token: the default, nothing consumed.
+    #[test]
+    fn take_addrs_falls_back_to_loopback_default_at_end_of_args() {
+        let args = vec!["--openai".to_string()];
+        let mut i = 0;
+        let got = take_addrs(&args, &mut i, 8788);
+        assert_eq!(got, vec![local(8788)]);
+        assert_eq!(i, 0);
     }
 }

@@ -78,7 +78,7 @@ fn register_qwen(models: &mut Vec<Arc<dyn ResidentModel>>, qwen: Option<QwenResi
 /// a 10s admission timeout and a generic 429, since a claim failure never fires
 /// `on_admit`. The physical RAM does not disappear just because CPU-side compute is
 /// disabled, so `pool_ram` must always be the real, ungated host RAM figure.
-pub fn build_executor(gpus: &[(u32, u64)], npus: &[(u32, u64)], unified_gpus: &[u32], reserved: u64, cpu_ram: u64, pool_ram: u64, models_dir: Option<&std::path::Path>, policy: Policy) -> Serving {
+pub fn build_executor(gpus: &[(u32, u64)], npus: &[(u32, u64)], unified_gpus: &[u32], reserved: u64, cpu_ram: u64, pool_ram: u64, models_dir: Option<&std::path::Path>, policy: Policy, qwen_cfg: crate::resident_llm::QwenServeConfig) -> Serving {
     let mut budgets = residency::budget::Budgets::new();
     // The process-wide ceiling (`--limit-vram-total`/`--limit-ram-total`) is
     // applied to EVERY budget below, so the advisory placement layer and the
@@ -131,7 +131,14 @@ pub fn build_executor(gpus: &[(u32, u64)], npus: &[(u32, u64)], unified_gpus: &[
     }
     // The one resident kept BOTH ways: erased for the executor, concrete for
     // the hot-swap path's inherent `set_adapter` -- see `Serving::qwen`.
-    let qwen = register_qwen(&mut models, QwenResident::from_env());
+    // `auto_budget_bytes` is filled in HERE, from this call's own real
+    // per-card free VRAM (never the caller's business - only this function
+    // ever sees `gpus`/`reserved`), regardless of whether `qwen_cfg.ctx`
+    // was ALSO given explicitly: `QwenResident::resolve_ctx` checks the
+    // explicit value first, so filling this in unconditionally is harmless
+    // when it is, and is what makes auto-sizing real when it is not.
+    let qwen_cfg = crate::resident_llm::QwenServeConfig { auto_budget_bytes: gpus.iter().map(|&(_, total)| total.saturating_sub(reserved)).max(), ..qwen_cfg };
+    let qwen = register_qwen(&mut models, QwenResident::from_env(qwen_cfg));
     // Qwen3.5-35B-A3B hybrid Gated-DeltaNet/GQA sparse-MoE decoder
     // (BRAIN_QWEN35MOE_WEIGHTS + BRAIN_QWEN35MOE_TOKENIZER) -- single-GPU,
     // fp32 weights + KV only (see resident_qwen35moe.rs's own module doc for
