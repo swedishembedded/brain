@@ -43,6 +43,11 @@ brain-backend-vulkan.workspace = true
 # Adds no build-time CUDA dependency: the crate `dlopen`s `libcuda.so.1` and
 # reports an ordinary `Err` when it is absent.
 brain-backend-cuda.workspace = true
+# The native CUDA kernel registry `provider::cuda::CudaProvider` dispatches
+# from. Source text and metadata only (no CUDA build dependency), but there is
+# no driver to register it with on wasm, so the provider and this edge are
+# both native-only.
+brain-kernels-cuda.workspace = true
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 brain-backend-wgpu.workspace = true
@@ -54,12 +59,6 @@ libc.workspace = true
 
 [dev-dependencies]
 brain-testutil.workspace = true
-# The CUDA tier ratchet (`tests/cuda_impl_policy.rs`) reads the native kernel
-# registry the CUDA tier policy is checked against. Dev-only and one-way: the
-# policy lives in `brain-backend-cuda`, which cannot depend on this crate (the
-# dependency already runs the other way), so the test that joins the policy to
-# the `ImplChoice` record this crate produces has to live here.
-brain-kernels-cuda.workspace = true
 # The shared deterministic test PRNG (AGENTS.md: never a hand-rolled one).
 # `brain-data` does not depend on `brain-gpu-core`, so this is dev-only and
 # acyclic.

@@ -52,13 +52,24 @@ pub struct PolicyEntry {
 
 /// brain's CUDA tier requirements.
 ///
-/// **Empty, and deliberately so.** The native backend cannot compile or
-/// launch a kernel yet, so there is no operator of which a tuned
-/// implementation can honestly be required - a populated table here would be
-/// a list of things that are supposed to be true, which is precisely the
-/// artefact this design exists to avoid. The mechanism lands first; entries
-/// are added by the milestone that makes each one true, together with the
-/// kernel that satisfies it.
+/// **Still empty, and for a precise reason that is not "no kernel exists".**
+/// A hand-written `Op::MatMul` kernel now ships and is dispatched, but it
+/// covers exactly ONE weight tier - plain f32. Every quantized tier
+/// (`I8`/`Q4`/K-quant) and both backward GEMMs are still answered by the
+/// generated tier, correctly and by design.
+///
+/// A [`PolicyEntry`] has no dtype axis, so the only entry that could be
+/// written here - "`Op::MatMul` must reach `Tuned`" - would also demand it of
+/// those, and would therefore be false the first time a quantized linear
+/// dispatched. Writing it anyway would make this table exactly the list of
+/// things that are *supposed* to be true that the whole design exists to
+/// avoid.
+///
+/// So the next change here is not an entry, it is the dtype axis that makes
+/// the first entry statable; it lands with the kernel that widens the tuned
+/// tier past f32, not before. Until then the mechanism is exercised by its
+/// own tests against fixture tables, and the shipped table honestly demands
+/// nothing of any device.
 pub const POLICY: &[PolicyEntry] = &[];
 
 /// What `policy` requires of `op` on a device of compute capability `cc`:

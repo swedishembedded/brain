@@ -174,15 +174,39 @@ pub struct ArchDesc {
     tiers: [TierSupport; DTYPE_COUNT],
     pub matrix: Option<MatrixEngine>,
     pub isa: IsaFeatures,
+    /// The instruction-set version the DRIVER reported for this device, as
+    /// the `(major, minor)` pair it reports the two halves of - CUDA's
+    /// "compute capability".
+    ///
+    /// `None` means *not reported*, and no consumer may read it as a
+    /// version, a floor or a default. It is `None` on every backend whose
+    /// API has no such concept, which is every backend except CUDA: Vulkan,
+    /// WebGPU and the CPU JIT describe what they can do by feature bits
+    /// (already carried by [`Self::tiers`]/[`Self::matrix`]/[`Self::isa`]),
+    /// not by a single ordered version number.
+    ///
+    /// This is the ONE fact a native-kernel tier can be resolved against -
+    /// `kernels_cuda::best_for` picks the highest kernel floor at or below
+    /// it - which is exactly why it is a queried field on a device
+    /// descriptor rather than a constant anywhere: a kernel states what its
+    /// own text needs, a device states what it is, and the two meet at run
+    /// time.
+    pub compute_capability: Option<(u32, u32)>,
 }
 
 impl Default for ArchDesc {
-    /// Every tier `Absent`, no matrix engine, no ISA feature - the same
-    /// portable floor [`NumericSupport::BASELINE`] describes, and
-    /// [`Self::numeric_view`] maps this value to exactly that constant (see
+    /// Every tier `Absent`, no matrix engine, no ISA feature, no reported
+    /// instruction-set version - the same portable floor
+    /// [`NumericSupport::BASELINE`] describes, and [`Self::numeric_view`]
+    /// maps this value to exactly that constant (see
     /// [`tests::default_arch_numeric_view_is_the_baseline`]).
     fn default() -> Self {
-        ArchDesc { tiers: [TierSupport::default(); DTYPE_COUNT], matrix: None, isa: IsaFeatures::default() }
+        ArchDesc {
+            tiers: [TierSupport::default(); DTYPE_COUNT],
+            matrix: None,
+            isa: IsaFeatures::default(),
+            compute_capability: None,
+        }
     }
 }
 

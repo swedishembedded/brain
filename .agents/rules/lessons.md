@@ -4362,3 +4362,60 @@ evidence. Either it says in its own doc comment that it was NOT shown to
 discriminate, or a later reader counts it among the tests that prove something.
 This is lesson 113's failure mode one level up: there, dirtying the memory gave
 the test teeth; here, dirtying it was tried and the teeth still are not there.
+
+## 118. A metadata gate that scans source text reads the header prose as code
+
+`kernels-cuda`'s registry check refuses a kernel whose source contains
+`__restrict__`, because brain's device buffers alias by design. The first
+hand-written kernel to land failed that check - for a sentence in its own
+header explaining that it deliberately carries no aliasing promise, and why.
+The scan could not tell an explanation from a declaration.
+
+This repo had already made and fixed the identical mistake one layer over:
+`workgroup_size_of` used to take the first `@workgroup_size` anywhere in a
+WGSL file and therefore read the number out of ten kernels' header prose. The
+fix is the same both times - strip `//` comments and scan what is left - and
+the generalisation is that any gate keyed on "does this source mention X"
+must decide, explicitly, whether prose counts. The tempting alternative
+(reword the comment until the gate is quiet) trades a documented design
+decision for a green check, and the next kernel that genuinely needs to
+explain the same thing hits it again.
+
+## 119. A hand-written kernel can be much faster without reassociating anything
+
+The CUDA milestone was planned around a tuned matmul agreeing with the
+portable reference only to a tolerance, on the reasoning that a `__shfl`
+reduction tree reassociates the fp32 sum and so bit-identity is unachievable.
+That reasoning is sound for a reduction tree and it did not apply here: the
+generated tier's problem at this shape is not its arithmetic but that
+neighbouring threads read the weight matrix K floats apart, so every lane of
+a warp touches a different cache line on every iteration of the reduction.
+Staging both operands through shared memory and giving each thread a register
+block fixes the ACCESS pattern while leaving the reduction exactly as it was -
+one accumulator, k ascending - and the measured delta over a quarter of a
+million outputs was zero.
+
+Two things worth carrying forward. Where a kernel is bound by memory
+behaviour rather than by arithmetic, the fastest available rewrite may cost
+no numerical agreement at all, so reach for the reassociating one only when
+the access pattern is already fixed. And the assertion should still be the
+tolerance the project asserts everywhere else, not the zero that happened to
+come out: pinning the observed value would make the next tuned kernel - which
+may legitimately reassociate - look like a regression.
+
+## 120. `threads` means invocations to a catalogue kernel and blocks to a native one
+
+`Backend::step` counts INVOCATIONS and each backend divides them by the
+kernel's declared work-group size to lay out a grid. A kernel registered
+through `register_native` has no such declaration to read - CUDA C++ has no
+`@workgroup_size` attribute and SPIR-V's is not what the caller was thinking
+in - so `step_native` takes the WORK-GROUP COUNT directly instead, the
+convention `backend-vulkan` already established for its own native path.
+
+The two conventions look identical at the call site and differ by a factor of
+the block size. Dividing a block count by the block size a second time
+launches a fraction of the blocks needed, and every kernel in this engine
+bounds itself, so the result is not a crash or a fault: it is an output whose
+tail is simply never written. Any backend implementing both paths has to
+branch on which kind of kernel a recorded step names, and the branch belongs
+at the single point the grid is computed rather than at each caller.

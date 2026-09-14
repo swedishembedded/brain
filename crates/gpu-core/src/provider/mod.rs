@@ -49,6 +49,12 @@ use crate::{DeviceBuffer, Gpu, Step};
 // (like every other Vulkan/ash path in this workspace) cannot target wasm.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod coopmat;
+/// Hand-written CUDA kernels (`brain-kernels-cuda`'s registry), resolved
+/// against the compute capability the driver reported. Native-only: it
+/// registers CUDA C++ source through `Backend::register_native`, which no
+/// wasm target has a driver for.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod cuda;
 /// CPU ISA-pack provider (AVX2 F32 GEMM hoist + AVX2 int8 GEMM) -
 /// `kernel-performance.md` M8.10/M8.11, this ABI's first non-reference
 /// provider.
@@ -183,9 +189,9 @@ impl Lowered {
 ///
 /// Every field is queried, never assumed. `compute_capability` is `None`
 /// wherever the backend that produced the [`DeviceCaps`] has no such concept
-/// (every backend today: it is a CUDA notion, and the CUDA backend does not
-/// publish caps yet) - `None` means *not reported*, and no consumer may read
-/// it as a version, a floor or a default.
+/// (every backend but CUDA: it is a CUDA notion, and the others describe
+/// themselves by feature bits instead) - `None` means *not reported*, and no
+/// consumer may read it as a version, a floor or a default.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct ArchTag {
     pub class: backend_api::DeviceClass,
@@ -198,7 +204,7 @@ impl ArchTag {
     /// that mapping lives, so a backend that starts reporting a compute
     /// capability is wired in once.
     pub fn of(caps: &DeviceCaps) -> ArchTag {
-        ArchTag { class: caps.class, compute_capability: None }
+        ArchTag { class: caps.class, compute_capability: caps.arch.compute_capability }
     }
 }
 
@@ -342,6 +348,43 @@ impl ProviderRegistry {
     /// builds exactly this today.
     pub fn reference(selector: Arc<dyn select::KernelSelector>) -> ProviderRegistry {
         ProviderRegistry { chain: vec![Arc::new(wgsl::WgslProvider::new(selector))], disabled: disabled_providers() }
+    }
+
+    /// **The production registry**: the reference provider, plus whichever
+    /// specialised providers `gpu`'s own device actually supports.
+    ///
+    /// This is what every model's `Ops` is built with, and it is the ONE
+    /// place a non-reference provider enters a real run. Everything it adds
+    /// is gated on a queried device fact rather than on a build flag or an
+    /// environment variable, so the same binary on the same box picks the
+    /// same chain whoever launched it:
+    ///
+    /// - [`cuda::CudaProvider`] when this handle's device reports a compute
+    ///   capability at all ([`ArchTag::compute_capability`]). A device that
+    ///   reports one but whose backend cannot compile CUDA C++ still
+    ///   declines - one layer down, at `register_native` - and the decline is
+    ///   RECORDED in the dispatch's [`ImplChoice`] rather than being
+    ///   invisible. Adding it unconditionally on that one fact, instead of
+    ///   asking `gpu.kind() == "cuda"`, keeps the rule a property of the
+    ///   device rather than of a backend name.
+    ///
+    /// Providers that exist but are NOT added here, and why: `coopmat` and
+    /// `native_f16` were built against synthetic call sites and have never
+    /// been proven against a real model's operand bundles on hardware that
+    /// admits them (no box this campaign has run on does), and `cpu_isa`
+    /// belongs to the CPU backend's own dispatch path. Adding a provider to
+    /// this chain is a claim that a real forward pass through it was
+    /// checked; none of those three has one yet.
+    pub fn for_gpu(gpu: &crate::Gpu, selector: Arc<dyn select::KernelSelector>) -> ProviderRegistry {
+        let reg = ProviderRegistry::reference(selector);
+        #[cfg(not(target_arch = "wasm32"))]
+        let reg = match cuda::CudaProvider::for_gpu(gpu) {
+            Some(p) => reg.prefer(Arc::new(p)),
+            None => reg,
+        };
+        #[cfg(target_arch = "wasm32")]
+        let _ = gpu;
+        reg
     }
 
     /// Add a preferred provider ahead of the reference provider - checked

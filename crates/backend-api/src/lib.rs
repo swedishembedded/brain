@@ -350,6 +350,27 @@ pub enum NativeSpec {
     /// pipeline): entry point name and the storage-binding layout it expects,
     /// in bind order.
     SpirV { code: &'static [u8], entry: &'static str, bindings: &'static [BindKind] },
+    /// CUDA C++ **source text** (`brain-kernels-cuda`'s registry): the
+    /// backend that accepts it compiles it for the compute capability IT
+    /// queried from its own device, which is why no architecture is named
+    /// here and no pre-compiled image is carried.
+    ///
+    /// `block_dim` is threads per block, a property of the kernel's own index
+    /// arithmetic rather than a tuning knob the backend may change - the same
+    /// role WGSL's `@workgroup_size` plays for a catalogue kernel, stated
+    /// explicitly because CUDA C++ has no attribute a backend could read it
+    /// off.
+    Cuda {
+        src: &'static str,
+        entry: &'static str,
+        block_dim: u32,
+        bindings: &'static [BindKind],
+        /// Static `__shared__` bytes the kernel declares, so a backend can
+        /// refuse a kernel its device cannot host BEFORE the driver does -
+        /// the shared-memory limit is a queried device property, not a
+        /// constant anywhere.
+        shared_bytes: u32,
+    },
     /// A host-native compute path (a CPU ISA-pack provider's own function),
     /// named for diagnostics/profiling only - the backend that accepts this
     /// decides how it actually runs.
@@ -1283,9 +1304,9 @@ pub trait Backend: Send + Sync {
     /// [`Step`] like any other - pushed onto the caller's tape by
     /// `gpu_core::provider::LowerCtx`, submitted and timed by the same
     /// machinery every WGSL dispatch already uses, never executed out of
-    /// band. No backend implements real native compilation yet; these are
-    /// the trait methods a wave-2 provider (native f16, cooperative-matrix,
-    /// a CPU ISA pack) needs to exist before it can be written at all.
+    /// band. These are the trait methods a non-WGSL provider (native f16,
+    /// cooperative-matrix, a CPU ISA pack, a hand-written CUDA kernel) needs
+    /// to exist before it can be written at all.
     fn register_native(&self, _spec: &NativeSpec) -> Option<NativeId> {
         None
     }
@@ -1293,11 +1314,48 @@ pub trait Backend: Send + Sync {
     /// Record a dispatch of a kernel registered via
     /// [`Backend::register_native`] - the native-pipeline analogue of
     /// [`Backend::step`]. `None` when this backend does not recognise `id`
-    /// (every backend today, since none can produce one); see
+    /// (every backend that cannot produce one); see
     /// [`Backend::register_native`]'s doc comment for why a provider must
     /// route through this rather than dispatching `id` itself.
+    ///
+    /// `threads` here is the WORK-GROUP (block) COUNT directly, not a
+    /// per-invocation count a backend divides by a reflected work-group
+    /// size: a native kernel's launch geometry is its own, and there is no
+    /// `@workgroup_size` attribute in its source for a backend to read.
     fn step_native(&self, _id: NativeId, _bufs: &[&DeviceBuffer], _params: &[u32], _threads: u32) -> Option<Step> {
         None
+    }
+
+    /// [`Backend::step_native`] binding a sub-RANGE of each buffer - the
+    /// native analogue of [`Backend::step_sliced`], with the identical
+    /// `(offset_words, len_words)` convention.
+    ///
+    /// A provider needs this because slicing is the normal case, not an
+    /// exotic one: a model's activations live at a row offset inside one
+    /// buffer and its outputs at a column offset inside another, so a native
+    /// provider restricted to whole buffers could only ever serve a
+    /// synthetic call site.
+    ///
+    /// The default implementation is deliberately narrow rather than
+    /// "ignore the offsets": it forwards to [`Backend::step_native`] when
+    /// every offset is zero (where the two calls mean exactly the same
+    /// thing) and answers `None` otherwise. A backend that has not
+    /// implemented native slicing therefore DECLINES a sliced request and
+    /// the provider falls back to the portable path - it never silently
+    /// reads from the head of the buffer instead of the range it was
+    /// handed, which would be a wrong answer rather than a missing feature.
+    fn step_native_sliced(
+        &self,
+        id: NativeId,
+        bufs: &[&DeviceBuffer],
+        offsets: &[(u64, u64)],
+        params: &[u32],
+        threads: u32,
+    ) -> Option<Step> {
+        if offsets.iter().any(|(off, _)| *off != 0) {
+            return None;
+        }
+        self.step_native(id, bufs, params, threads)
     }
 
     /// Whether THIS device was granted the WGSL `enable f16;` native-compute

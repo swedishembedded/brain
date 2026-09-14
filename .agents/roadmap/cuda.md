@@ -120,10 +120,12 @@ exists in the text, a floor consistent with the instructions used (a body using
 instruction), and no `__restrict__` unless deliberately exempted, since brain's
 device buffers alias by design.
 
-`ALL` is **empty**. Nothing can compile or launch a kernel yet, so a `.cu` file
-here would be source nothing builds, runs or checks - the unverified claim this
-whole mechanism exists to prevent. The registry, its invariants and its gate
-exist first so the first real kernel lands into something that checks it.
+`ALL` was **empty** at this point, on purpose: nothing could compile or launch
+a kernel yet, so a `.cu` file would have been source nothing built, ran or
+checked. The registry, its invariants and its gate existed first so the first
+real kernel landed into something that checked it - which is what then
+happened (see the tuned-tier section below, and lesson #118 for the invariant
+that caught the first kernel for a sentence in its own header).
 
 **`ImplChoice` on the `OperatorProvider` seam** - `gpu-core`'s
 `ProviderRegistry::resolve_choice` now returns, alongside the chosen provider,
@@ -381,10 +383,169 @@ twenty dirty-free-reallocate rounds, because it scrubs a freed allocation
 before reissuing it. That is a driver's courtesy, not an API guarantee, so the
 zeroing stays and the test says what it is worth (lesson #117).
 
+### The first tuned (T2) kernel, and the provider that dispatches it
+
+`crates/kernels-cuda/cu/matmul_f32_tiled.cu` - fp32 `out = x @ Wt`, the
+hand-written form of the portable `matmul.wgsl`, reading the identical
+buffers and the identical `[m, k, n]` uniform. 64x64 output tile per block,
+16-deep staged reduction, 256 threads each owning a 4x4 register block; both
+operands staged through `__shared__` with one float of row padding so the
+transposing stores do not serialise on a bank.
+
+**Measured, on this box's cards (2x Tesla P40, cc 6.1, one of them also
+running an unrelated job throughout), 512x512x512 f32, median of five trials
+of eight dispatches:** the generated tier took 33.6 ms and the tuned kernel
+779 us - a **43.1x** ratio. A second run under heavier contention measured
+27.4x. The gate asserts a floor of 8x, well under both, because the number
+worth defending is "the hand-written kernel was worth writing", not one box's
+best minute; both sides contend equally so the RATIO is far steadier than
+either absolute.
+
+**And the delta was exactly 0 over 262144 outputs.** Not the tolerance the
+milestone was planned around. The generated tier's problem at this shape is
+not its arithmetic: neighbouring threads differ in the output COLUMN, so
+their weight addresses are `k` floats apart and every lane of a warp touches
+a different cache line on each of the `k` iterations. Fixing the access
+pattern needed no reassociation, so the tuned kernel accumulates in exactly
+the reference's order - one register, k ascending - and both tiers compile
+with the same `--fmad=false`. The assertion is still the project-wide 1e-6
+absolute bar rather than the zero observed: a later tuned kernel may
+legitimately reassociate, and pinning the observed value would make that look
+like a regression (lesson #119).
+
+Registry metadata grew what a launcher needs and cannot read out of CUDA C++:
+`block_dim`, the output `tile` a block covers, declared `shared_bytes`, and
+`reported` (the `native:`-qualified name a dispatch record shows, pinned by
+`check_table` to match `name`). The capability floor is
+`BASELINE_MIN_CC` = 5.0 - the lowest a CUDA 12.x toolchain emits for at all,
+and an honest statement about what this source uses rather than about any
+card. `min_cc` may now be written as a NAMED constant; the catalogue
+generator resolves `pub const NAME: Cc = (a, b);` from the registry itself.
+
+### `gpu_core::provider::cuda::CudaProvider`
+
+`OperatorProvider` for `Op::MatMul`, forward, plain f32 only. Modelled on
+`coopmat` (the closest existing non-WGSL provider) but reaching the device
+through a new `NativeSpec::Cuda { src, entry, block_dim, bindings,
+shared_bytes }` - source text, never a pre-compiled image, because the
+capability it is compiled for is whatever the backend queried from its own
+device.
+
+Three gates decide whether it runs, and the DEVICE answers all three: the
+compute capability the driver reported (met against each kernel's declared
+floor by `kernels_cuda::best_for`, highest eligible floor first); the
+device's own queried threads-per-block and shared-memory-per-block limits;
+and whether the backend can compile CUDA C++ at all. The last needs no
+backend-name check - every other backend answers `None` to a
+`NativeSpec::Cuda`, which is a recorded decline rather than a silence.
+
+`accepts` refuses structurally, on the operand bundle, not just on the
+declared dtype: a quantized tier binds five operands with two scale planes,
+and feeding those to a three-pointer kernel would read a scale plane as
+weights.
+
+### `ArchDesc::compute_capability` - the queried fact this all keys on
+
+`ArchDesc` grew `compute_capability: Option<(u32, u32)>`, filled by the CUDA
+backend from `cuDeviceGetAttribute` and `None` on every other backend (they
+describe themselves by feature bits; none has an ordered version number).
+`provider::ArchTag::of` now reports it, so every `ImplChoice` carries the
+capability its dispatch was resolved FOR - which is what the M1 tier ratchet
+was built to read and previously could only get from a fixture.
+
+### Native kernels are `Step`s like any other
+
+`backend-cuda` implements `register_native`/`step_native`, plus a new
+`Backend::step_native_sliced`. Slicing is not exotic - a model's activations
+live at a row offset inside one buffer - so a native provider without it
+could only ever serve a synthetic call site. The trait's DEFAULT declines any
+non-zero offset rather than ignoring it: a backend with no native slicing
+path answers `None` and the provider falls back, instead of silently reading
+from the head of the buffer.
+
+Native kernels occupy `kind` values from `kernels.len()` upward. Two things
+that differ from the catalogue path and bit once each:
+
+- `threads` is the BLOCK count for a native step and the INVOCATION count for
+  a catalogue one. Dividing a block count by `block_dim` a second time
+  launches a fraction of the blocks and leaves the output's tail unwritten -
+  no crash, since every kernel self-masks (lesson #120).
+- `n_bindings` counts STORAGE bindings only. A `NativeSpec`'s `bindings` list
+  includes the uniform and a generated kernel's does not, so counting it made
+  every dispatch look one buffer short.
+
+Unlike the catalogue, a native kernel compiles EAGERLY inside
+`register_native` - a compile failure has to be answerable with "this device
+declined it", and by first dispatch the provider has already promised to
+serve the request.
+
+### Production wiring - `ProviderRegistry::for_gpu`
+
+`Ops::with_selector` (and therefore `Ops::new`, and therefore every model)
+now builds `ProviderRegistry::for_gpu` instead of `::reference`. It is the
+ONE place a non-reference provider enters a real run, and everything it adds
+is gated on a queried device fact rather than a build flag or an environment
+variable. Today that is the CUDA provider, added whenever the device reports
+a compute capability at all. On every device that reports none - the CPU JIT,
+wgpu, Vulkan - the chain is still exactly the reference provider and the
+constructor's behaviour is unchanged bit-for-bit.
+
+`coopmat`, `native_f16` and `cpu_isa` are deliberately NOT in that chain:
+adding a provider to it is a claim that a real forward pass through it was
+checked on hardware that admits it, and none of the three has one.
+
+### Gate - the tuned tier earns its place
+
+`crates/gpu-core/tests/cuda_provider_matmul.rs`, three tests, skip-if-absent:
+
+- the speedup floor AND the 1e-6 agreement, in one test, because a tuned
+  kernel that is wrong is worthless and one that is right but no faster is a
+  maintenance cost with a `Tuned` claim attached;
+- the shared `provider::parity` case table (decode-shaped, the tile
+  crossover, a multi-tile shape, a non-tile-multiple shape, a non-zero row
+  offset), driven through the tuned provider against the WGSL oracle;
+- the PRODUCTION registry, asserted from the dispatch record - `provider ==
+  "cuda"`, `source == Tuned`, `arch.compute_capability` equal to what the
+  device was queried for, `kernels == ["native:matmul_f32_tiled"]` - plus a
+  host oracle on the output, because a record naming a kernel that produced
+  garbage is worse than no record.
+
+Largest allocation in the whole file is 1 MiB; the timed region is a few
+milliseconds of device time.
+
 ## Not delivered - what is still missing
 
-**One model's forward, only. Backward, breadth and every tuned kernel are
-deferred.**
+**One model's forward, one tuned kernel. Backward, breadth and every other
+tuned kernel are deferred.**
+
+- **The tuned tier is ONE operator at ONE dtype.** Plain f32 `Op::MatMul`,
+  forward. Every quantized weight tier (`I8`/`Q4`/K-quant), both backward
+  GEMMs and every other operator are still answered by the generated tier -
+  correctly, and visibly so in the dispatch record.
+- **No DP4A / int8 tuned kernel.** The milestone was named for one. It was not
+  written, and the reason is worth stating rather than leaving as an omission:
+  the gate this tier had to clear is agreement with the fp32 WGSL reference to
+  1e-6, which an int8 path does not answer at all, and the quantized operand
+  bundle (five operands, two scale planes, a per-dtype `k` convention that
+  differs between the i8 and q4 families) is a second, independent piece of
+  work from the launch/registration plumbing this milestone built. The
+  plumbing now exists and is proven, so a DP4A kernel is an addition to it -
+  `DP4A_MIN_CC` is already the floor its registry entry would declare, and
+  `best_for` would then prefer it over the f32 kernel on any card at or above
+  that capability, which is the first time the capability-keyed resolution
+  becomes observable in production rather than only in its own test.
+- **`POLICY` is still empty, and now for a different reason than before.** A
+  tuned kernel exists, but `PolicyEntry` has no dtype axis, so the only entry
+  that could be written - "`Op::MatMul` must reach `Tuned`" - would also
+  demand it of the quantized tiers and be false at the first quantized linear.
+  The next change there is the dtype axis, not an entry. Until then the
+  M1 ratchet stays exercised only against fixture tables, and
+  `the_shipped_policy_is_backed_by_the_shipped_cuda_registry`'s `CONTRACTS`
+  stays 0.
+- **The tuned kernel is not in `make parity`.** It is covered by its own
+  gate and by `parity-gate.sh`'s CUDA line (which runs that gate), not by the
+  gradcheck package - that would demand the full catalogue and backward
+  kernels, which this backend does not have.
 
 - **Forward only, and one model.** `crates/gpt2/tests/cuda_backend_parity.rs`
   is the whole of what has been proved against a model: `GptConfig::tiny()`,
@@ -498,9 +659,10 @@ deferred.**
   `make test CARGO_TEST="cargo test --release --offline -p brain-gpu-core" TEST_THREADS="1 cuda"`.
 - Keep GPU tests at the existing tiny-shape gradcheck/parity scale. This is a
   shared box; a sustained benchmark contends with whatever else is resident.
-- The generated tier is the ONLY tier. Anything that looks slow on this
-  backend is expected to be: see the refused-kernel list above - every fast
-  GEMM and every flash-attention kernel is among them.
+- The generated tier answers everything EXCEPT plain f32 `Op::MatMul`, which
+  the tuned kernel now takes. Anything else that looks slow on this backend is
+  expected to be: see the refused-kernel list above - every fast GEMM and
+  every flash-attention kernel is among them.
 - `.agents/rules/lessons.md` #107 (the `_v2` symbol-name trap in any `dlopen`ed
   C API), #108 (why a CUDA ordinal is not an identity), #109 (why a ratchet
   that starts at zero cannot be a floor), #110 (`include_str!` proves registry
@@ -510,13 +672,19 @@ deferred.**
   held to the REFERENCE's answer, not the language's), #115 (materialise
   generated expressions where the IR says they are evaluated), #116 (a
   whole-model parity test is weak evidence about a backend's plumbing - with
-  the MEASURED list of mutations it does not catch) and #117 (some contract
-  assertions cannot be given teeth, and must say so) came out of this work and
-  are the things most likely to be re-learned the hard way.
-- Adding the first tuned kernel is four edits, in this order: the `.cu` file,
-  its `kernels-cuda` registry entry, `make cuda-table`, then the `POLICY` entry
-  plus the contract count in the ratchet test. Doing the policy entry first
-  makes the ratchet red, which is the correct order to discover in.
+  the MEASURED list of mutations it does not catch), #117 (some contract
+  assertions cannot be given teeth, and must say so), #118 (a metadata gate
+  that scans source text reads the header prose as code), #119 (a hand-written
+  kernel can be much faster without reassociating anything) and #120
+  (`threads` means invocations to a catalogue kernel and blocks to a native
+  one) came out of this work and are the things most likely to be re-learned
+  the hard way.
+- Adding a tuned kernel is: the `.cu` file, its `kernels-cuda` registry entry,
+  `make cuda-table`, and - once `PolicyEntry` has a dtype axis - the `POLICY`
+  entry plus the contract count in the ratchet test. Doing the policy entry
+  first makes the ratchet red, which is the correct order to discover in. The
+  `CudaProvider` needs an edit only if the kernel serves an operator or an
+  operand bundle it does not already accept.
 - Pre-existing and NOT caused by this work, so a run that shows them is still
   clean: `brain-backend-api`'s
   `select::tests::paged_attention_fused_only_offers_the_fused_kernel_at_causal_chunk_f32`

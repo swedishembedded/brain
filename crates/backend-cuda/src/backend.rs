@@ -87,11 +87,15 @@ pub struct CudaStep {
 struct Compiled {
     module: exec::Module,
     entry: String,
-    /// Threads per block. This is the WGSL `@workgroup_size`, not a tuning
-    /// knob - the kernel's own index arithmetic is written against it.
+    /// Threads per block. For a catalogue kernel this is the WGSL
+    /// `@workgroup_size` and for a native one the block size the source's own
+    /// index arithmetic is written against - never a tuning knob either way.
     block_dim: u32,
     n_bindings: usize,
     takes_uniform: bool,
+    /// Diagnostic name, so a launch failure says which kernel failed whether
+    /// it came from the WGSL catalogue or from a provider's own registry.
+    name: String,
 }
 
 /// What the handle knows about one registered kernel before anything compiles
@@ -121,6 +125,22 @@ pub struct CudaBackend {
     /// held across the NVRTC compile: a duplicate compile of the same kernel
     /// is pure waste, and first dispatch of a given `kind` happens once.
     compiled: Mutex<HashMap<usize, Arc<Compiled>>>,
+    /// Kernels a provider registered with
+    /// [`backend_api::Backend::register_native`]: its OWN source, not a
+    /// translation of anything in the WGSL catalogue.
+    ///
+    /// They occupy `kind` values from [`Self::native_base`] upward, which is
+    /// past the end of `kernels` and therefore can never collide with a
+    /// catalogue index (the catalogue's length is fixed at construction, long
+    /// before a provider can register anything).
+    ///
+    /// Unlike the catalogue these compile EAGERLY, inside `register_native`:
+    /// a provider registers exactly the kernel it is about to dispatch, and
+    /// a compile failure has to be answerable with `None` - "this device
+    /// declined it, use the portable path" - rather than surfacing as a
+    /// panic three dispatches later, by which time the provider has already
+    /// promised to serve the request.
+    native: Mutex<Vec<Arc<Compiled>>>,
     caps: DeviceCaps,
     identity: GpuIdentity,
     counters: Counters,
@@ -147,6 +167,7 @@ impl CudaBackend {
                 .collect(),
             ctx,
             compiled: Mutex::new(HashMap::new()),
+            native: Mutex::new(Vec::new()),
             caps,
             identity,
             counters: Counters::default(),
@@ -192,8 +213,26 @@ impl CudaBackend {
         })
     }
 
+    /// The first `kind` value that names a [`backend_api::Backend::register_native`]d
+    /// kernel rather than a WGSL catalogue entry.
+    fn native_base(&self) -> usize {
+        self.kernels.len()
+    }
+
     /// The compiled form of `kind`, compiling it on first use.
     fn compiled_for(&self, kind: usize) -> Arc<Compiled> {
+        if kind >= self.native_base() {
+            let native = self.native.lock().unwrap_or_else(|e| e.into_inner());
+            return native
+                .get(kind - self.native_base())
+                .unwrap_or_else(|| {
+                    panic!(
+                        "backend-cuda: native kernel index {kind} is out of range ({} registered on this handle)",
+                        native.len()
+                    )
+                })
+                .clone();
+        }
         let mut cache = self.compiled.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(c) = cache.get(&kind) {
             return c.clone();
@@ -236,6 +275,7 @@ impl CudaBackend {
             block_dim: gen.block_dim,
             n_bindings: gen.bindings.len(),
             takes_uniform: gen.uniform_bytes > 0,
+            name: k.name.clone(),
         });
         tracing::debug!(kernel = %k.name, block_dim = c.block_dim, "backend-cuda compiled a kernel");
         cache.insert(kind, c.clone());
@@ -287,7 +327,7 @@ impl CudaBackend {
 
     fn launch(&self, st: &CudaStep) {
         let c = self.compiled_for(st.kind);
-        let name = &self.kernel(st.kind).name;
+        let name = &c.name;
         assert_eq!(
             c.n_bindings,
             st.bufs.len(),
@@ -305,7 +345,16 @@ impl CudaBackend {
         for (mem, off) in &st.bufs {
             args.push(mem.device_ptr() + off);
         }
-        let (gx, gy) = grid_ws(st.threads, c.block_dim);
+        // A catalogue dispatch counts INVOCATIONS and the grid is laid out by
+        // dividing them across the kernel's declared work-group size; a
+        // native dispatch counts BLOCKS directly (see
+        // `backend_api::Backend::step_native`'s own contract - there is no
+        // `@workgroup_size` in CUDA C++ for a caller to have divided by).
+        // Dividing a block count by `block_dim` a second time would launch
+        // `block_dim` times too few blocks and silently leave most of the
+        // output unwritten.
+        let per_block = if st.kind >= self.native_base() { 1 } else { c.block_dim };
+        let (gx, gy) = grid_ws(st.threads, per_block);
         let f = self
             .module_entry(&c)
             .unwrap_or_else(|e| panic!("backend-cuda: kernel '{name}' has no entry point '{}': {e}", c.entry));
@@ -349,6 +398,12 @@ fn query_caps(ctx: &exec::Context) -> Result<DeviceCaps, String> {
     // exists to prevent. A hand-written tuned kernel that really does issue
     // the instruction is what raises this, on the capability that was queried.
     arch.set_tier(DType::I8, TierSupport { level: TierLevel::Emulated, ..TierSupport::default() });
+    // The instruction-set version, straight from the driver. This is the one
+    // fact a native kernel's capability floor is resolved against
+    // (`kernels_cuda::best_for`), and it is published here rather than being
+    // asked for again at each dispatch so that every consumer sees the SAME
+    // answer the compiler was given for this device.
+    arch.compute_capability = Some(ctx.compute_capability());
     // f16 is left `Absent`: the generator refuses `enable f16;` outright
     // rather than widening it to fp32, so no f16 arithmetic runs on this
     // backend at all - whatever the attached card's ALUs could do.
@@ -448,6 +503,120 @@ impl backend_api::Backend for CudaBackend {
     fn step_buf(&self, kind: usize, ubuf: &DeviceBuffer, bufs: &[&DeviceBuffer], threads: u32) -> Step {
         let u = CudaBuf::of(ubuf).mem.clone();
         self.record(kind, Some(u), bufs, None, threads)
+    }
+
+    /// Compile and keep a provider's OWN CUDA C++ kernel, for the compute
+    /// capability THIS handle's device reported.
+    ///
+    /// `None` rather than a panic on every refusal - a wrong-shaped spec, a
+    /// kernel this card cannot host, no NVRTC on the box, or source NVRTC
+    /// rejects. Each of those is an ordinary answer to "can you run this?",
+    /// and the provider that asked has a portable path to fall back to; a
+    /// panic here would turn a capability question into a crash. It is the
+    /// one place in this backend where a compile failure is NOT fatal, and
+    /// that is precisely because nothing has promised to run it yet.
+    ///
+    /// The two capability checks are read off [`Self::caps`], which was built
+    /// from device queries at construction - a kernel is refused because THIS
+    /// card answered that it has fewer threads per block or less shared
+    /// memory than the kernel declares, never because of anything written
+    /// down about any architecture.
+    fn register_native(&self, spec: &backend_api::NativeSpec) -> Option<backend_api::NativeId> {
+        let backend_api::NativeSpec::Cuda { src, entry, block_dim, bindings, shared_bytes } = spec else {
+            // SPIR-V is a Vulkan pipeline image and `HostFn` is a CPU
+            // provider's own function; neither is source this driver can
+            // compile. See `NativeSpec`'s own doc.
+            tracing::info!("backend-cuda: register_native accepts only NativeSpec::Cuda");
+            return None;
+        };
+        if *block_dim > self.caps.max_workgroup_size {
+            tracing::info!(
+                block_dim = *block_dim,
+                limit = self.caps.max_workgroup_size,
+                "backend-cuda: declining a native kernel that wants more threads per block than this device reported"
+            );
+            return None;
+        }
+        if *shared_bytes > self.caps.workgroup_mem_bytes {
+            tracing::info!(
+                shared_bytes = *shared_bytes,
+                limit = self.caps.workgroup_mem_bytes,
+                "backend-cuda: declining a native kernel that wants more shared memory than this device reported"
+            );
+            return None;
+        }
+        let module = match self.ctx.compile(src, entry) {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::info!(entry = %entry, reason = %e, "backend-cuda: this device declined a native kernel");
+                return None;
+            }
+        };
+        // Resolve the entry point NOW. A name that is not in the module is a
+        // defect in the kernel's own registry metadata, and finding it at
+        // registration means the provider gets a `None` it can fall back
+        // from instead of a panic at the first dispatch.
+        if let Err(e) = module.function(entry) {
+            tracing::info!(entry = %entry, reason = %e, "backend-cuda: a native kernel has no such entry point");
+            return None;
+        }
+        let c = Arc::new(Compiled {
+            module,
+            entry: (*entry).to_string(),
+            block_dim: *block_dim,
+            // STORAGE bindings only - the uniform is counted separately
+            // below, exactly as it is for a generated kernel (whose
+            // `bindings` list never includes it). Counting it here would
+            // make every dispatch look one buffer short.
+            n_bindings: bindings.iter().filter(|b| **b != backend_api::BindKind::Uniform).count(),
+            // The uniform (if any) is the kernel's first argument, exactly as
+            // it is for a generated one.
+            takes_uniform: bindings.contains(&backend_api::BindKind::Uniform),
+            name: format!("native:{entry}"),
+        });
+        let mut native = self.native.lock().unwrap_or_else(|e| e.into_inner());
+        native.push(c);
+        Some(backend_api::NativeId((self.native_base() + native.len() - 1) as u32))
+    }
+
+    /// Record a dispatch of a [`Self::register_native`]d kernel. `threads` is
+    /// the BLOCK count (see the trait's own contract).
+    fn step_native(
+        &self,
+        id: backend_api::NativeId,
+        bufs: &[&DeviceBuffer],
+        params: &[u32],
+        threads: u32,
+    ) -> Option<Step> {
+        self.step_native_sliced(id, bufs, &vec![(0, 0); bufs.len()], params, threads)
+    }
+
+    /// [`Self::step_native`] binding a sub-range of each buffer.
+    ///
+    /// Implemented for real rather than left at the trait's decline-on-any-
+    /// offset default: a kernel argument here IS a bare device address, so a
+    /// range is expressed by the address handed in and costs nothing - the
+    /// same mechanism `step_sliced` already uses for a catalogue kernel.
+    fn step_native_sliced(
+        &self,
+        id: backend_api::NativeId,
+        bufs: &[&DeviceBuffer],
+        offsets: &[(u64, u64)],
+        params: &[u32],
+        threads: u32,
+    ) -> Option<Step> {
+        let kind = id.0 as usize;
+        let base = self.native_base();
+        let live = kind >= base && (kind - base) < self.native.lock().unwrap_or_else(|e| e.into_inner()).len();
+        if !live || offsets.len() != bufs.len() {
+            // An id from a different handle (or a different backend) names
+            // nothing here. Answering `None` lets the provider fall back;
+            // launching whatever happened to be at that index would run the
+            // wrong kernel.
+            return None;
+        }
+        let u = self.uniform(params);
+        Some(self.record(kind, Some(u), bufs, Some(offsets), threads))
     }
 
     fn submit(&self, clears: &[&DeviceBuffer], steps: &[Step]) {

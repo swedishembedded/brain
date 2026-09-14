@@ -156,10 +156,14 @@ impl NativeEntry {
 /// for the measurement.
 pub(crate) fn build_pipeline(ctx: &VkContext, spec: &NativeSpec) -> Result<NativeEntry, String> {
     let NativeSpec::SpirV { code, entry, bindings } = spec else {
-        // `HostFn` is a CPU-ISA-pack provider's shape, not this GPU backend's -
-        // see `NativeSpec::HostFn`'s own doc ("the backend that accepts this
-        // decides how it actually runs").
-        return Err("VulkanBackend::register_native: NativeSpec::HostFn has no GPU dispatch path".to_string());
+        // Every other `NativeSpec` shape belongs to a different backend -
+        // `HostFn` to the CPU ISA pack, `Cuda` to the CUDA driver backend -
+        // and each carries source this one cannot consume (see
+        // `NativeSpec`'s own doc: "the backend that accepts this decides how
+        // it actually runs"). SPIR-V is the only kernel image Vulkan loads.
+        return Err(
+            "VulkanBackend::register_native: only NativeSpec::SpirV has a Vulkan dispatch path".to_string()
+        );
     };
     if !code.len().is_multiple_of(4) {
         return Err(format!("SPIR-V blob is not word-aligned ({} bytes)", code.len()));

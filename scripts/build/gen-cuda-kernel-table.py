@@ -64,11 +64,16 @@ ENTRY = re.compile(
     r"CudaKernel\s*\{(?P<body>[^{}]*?)\}",
     re.S,
 )
+# `pub const NAME: Cc = (major, minor);` - a capability floor stated as the
+# instruction-set fact that justifies it (`DP4A_MIN_CC`, `BASELINE_MIN_CC`)
+# rather than as a bare pair. Resolving them here keeps the registry free to
+# say WHY a floor is what it is; a literal pair is still accepted.
+CC_CONST = re.compile(r"pub const (\w+): Cc = \((\d+)\s*,\s*(\d+)\);")
 FIELD = {
     "name": re.compile(r'name:\s*"([^"]*)"'),
     "op": re.compile(r"op:\s*Op::(\w+)"),
     "source": re.compile(r"source:\s*ImplSource::(\w+)"),
-    "min_cc": re.compile(r"min_cc:\s*\((\d+)\s*,\s*(\d+)\)"),
+    "min_cc": re.compile(r"min_cc:\s*(?:\((\d+)\s*,\s*(\d+)\)|(\w+))"),
     "entry": re.compile(r'entry:\s*"([^"]*)"'),
     "what": re.compile(r'what:\s*"((?:[^"\\]|\\.)*)"'),
     "src": re.compile(r'src:\s*include_str!\("([^"]*)"\)'),
@@ -77,6 +82,7 @@ FIELD = {
 
 def parse_registry(text):
     """Every entry of `ALL`, as dicts, in declaration order."""
+    cc_consts = {m.group(1): (m.group(2), m.group(3)) for m in CC_CONST.finditer(text)}
     block = ALL_BLOCK.search(text)
     if block is None:
         sys.exit("gen-cuda-kernel-table: no `pub const ALL: &[CudaKernel]` in the registry")
@@ -89,12 +95,20 @@ def parse_registry(text):
             if hit is None:
                 sys.exit(f"gen-cuda-kernel-table: a registry entry has no `{field}`:\n{body}")
             row[field] = hit.groups()
+        major, minor, named = row["min_cc"]
+        if named is not None:
+            if named not in cc_consts:
+                sys.exit(
+                    f'gen-cuda-kernel-table: {row["name"][0]} declares min_cc `{named}`, which is '
+                    "not a `pub const <NAME>: Cc = (major, minor);` in the registry"
+                )
+            major, minor = cc_consts[named]
         entries.append(
             {
                 "name": row["name"][0],
                 "op": row["op"][0],
                 "source": row["source"][0],
-                "min_cc": f"{row['min_cc'][0]}.{row['min_cc'][1]}",
+                "min_cc": f"{major}.{minor}",
                 "entry": row["entry"][0],
                 "what": row["what"][0],
                 "src": row["src"][0],

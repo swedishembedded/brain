@@ -959,13 +959,22 @@ impl Ops {
     /// can also be kept by the caller and reused for its own dispatch, the
     /// way `qwen3::serve::Engine` does).
     ///
-    /// Internally this is now [`Ops::with_providers`]`(gpu,
-    /// ProviderRegistry::reference(selector.clone()))` (M8.3) - an EMPTY
-    /// registry (nothing preferred beyond the WGSL reference provider) IS
-    /// today's behaviour, so this constructor's own contract - and every
-    /// existing call site's - is unchanged bit-for-bit.
+    /// Internally this is [`ProviderRegistry::for_gpu`] - **the production
+    /// provider chain**, not a bare reference registry.
+    ///
+    /// That is the one behavioural difference this constructor has ever had.
+    /// Which providers `for_gpu` puts ahead of the WGSL reference is decided
+    /// entirely by what `gpu`'s own device reports about itself, so on every
+    /// device that reports nothing extra (the CPU JIT, wgpu, Vulkan) the
+    /// chain still contains exactly the reference provider and this
+    /// constructor's contract is unchanged bit-for-bit. On a device that
+    /// does - today, one reporting a compute capability - a specialised
+    /// provider is asked FIRST, may decline, and whatever happens is
+    /// recorded in that dispatch's `ImplChoice`. See `ProviderRegistry::
+    /// for_gpu`'s own doc comment for the gating rule and for which
+    /// providers are deliberately still absent from it.
     pub fn with_selector(gpu: Gpu, selector: Arc<dyn KernelSelector>) -> Result<Ops, String> {
-        let providers = ProviderRegistry::reference(selector.clone());
+        let providers = ProviderRegistry::for_gpu(&gpu, selector.clone());
         Self::build(gpu, selector, providers)
     }
 

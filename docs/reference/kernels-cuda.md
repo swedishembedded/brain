@@ -23,7 +23,9 @@ fact, not a silent slowdown.
 
 Every column is stated by the kernel's own registry entry in `crates/kernels-cuda` - nothing here is inferred. `make cuda-table` regenerates this block; `make cuda-table/check` fails when a kernel source is not registered, or when this table has drifted from the registry. Edit the registry, never the row.
 
-**No hand-written CUDA kernel ships yet.** The native CUDA backend enumerates devices and states its tier policy, but cannot yet compile or launch anything, so there is no kernel to list. This page, its registry and its gate exist first on purpose: the first kernel to land arrives into something that checks what it claims about itself.
+| kernel | op | tier | min cc | entry point | what |
+|---|---|---|---|---|---|
+| `matmul_f32_tiled` | MatMul | tuned | 5.0 | `brain_matmul_f32_tiled` | fp32 out = x @ W^T; 64x64 shared tile, 4x4 register block, reference reduction order |
 
 **tier** - `tuned` is hand-written for this backend, optionally specialised to a queried device capability. It is the only tier a file in this tree can claim: a `generated` kernel is emitted from the portable WGSL reference at run time and has no source file here, and the `reference` tier IS that WGSL.
 

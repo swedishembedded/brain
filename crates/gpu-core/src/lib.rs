@@ -1325,6 +1325,25 @@ mod native_facade {
             self.inner.step_native(id, bufs, params, threads)
         }
 
+        /// [`backend_api::Backend::step_native_sliced`] - [`Self::step_native`]
+        /// binding a sub-range of each buffer, with the same
+        /// `(offset_words, len_words)` convention [`Self::step_sliced`] uses.
+        /// Carries no [`StepMeta`], for the same reason `step_native` does
+        /// not. `None` when this backend does not recognise `id`, or has no
+        /// native slicing path (the trait's default declines any non-zero
+        /// offset rather than quietly dropping it).
+        pub fn step_native_sliced(
+            &self,
+            id: backend_api::NativeId,
+            bufs: &[&DeviceBuffer],
+            offsets: &[(u64, u64)],
+            params: &[u32],
+            threads: u32,
+        ) -> Option<Step> {
+            crate::assert_no_output_alias(bufs);
+            self.inner.step_native_sliced(id, bufs, offsets, params, threads)
+        }
+
         pub fn submit(&self, clears: &[&DeviceBuffer], steps: &[Step]) {
             // Only when armed (see `cost_enabled`): tallying is a mutex lock
             // plus a per-dispatch string match - measurement machinery, not a

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-# Cross-backend parity gate (#10): CPU == Vulkan == NPU.
+# Cross-backend parity gate (#10): CPU == Vulkan == NPU == CUDA's tuned tier.
 #
 #   1. The gradcheck suite passes on the CPU backend (analytic grads == finite
 #      differences) — CPU is correct.
@@ -14,6 +14,10 @@
 #      NPU == CPU for inference. Runs on the OpenVINO CPU device by default (set
 #      BRAIN_QWEN3TTS_NPU_DEVICE=npu to exercise the real NPU); skipped without codec
 #      weights.
+#   4. The CUDA backend's hand-written (tuned) kernels agree with the WGSL
+#      reference provider on the same device - CUDA's second implementation of
+#      an operator == the portable one. Skips itself where no CUDA device is
+#      present, which is most machines.
 #
 # Usage:  scripts/gates/parity-gate.sh
 set -u
@@ -53,6 +57,22 @@ run "model FD suites (MoE/ViT backward) — Vulkan backend" \
 run "qwen serve suite — CPU backend (int8 KV is the serving default)" \
                                        env BRAIN_DEVICE=cpu    cargo test --release -q -p brain-qwen3 --lib serve::
 
+# The CUDA backend's hand-written kernels are a SECOND implementation of
+# operators the WGSL catalogue already implements, so "CPU == Vulkan" is no
+# longer the whole parity question on an NVIDIA box: a tuned kernel that
+# disagrees with the reference produces plausible numbers everywhere else in
+# this gate. These tests compare the tuned tier against the WGSL reference
+# provider on the same device, in one process, and skip themselves silently
+# where there is no CUDA device - so this line is green on every machine, and
+# meaningful on the ones it can be.
+#
+# NOT the gradcheck package (the other five lines): that would demand the full
+# kernel catalogue and the backward kernels, and this backend has neither. The
+# tuned kernel is held to the reference by its own gate instead, which is where
+# the measured speedup floor is asserted too.
+run "CUDA tuned kernels == WGSL reference (skips without a CUDA device)" \
+    cargo test --release -q -p brain-gpu-core --test cuda_provider_matmul
+
 codec="${BRAIN_MIMI_WEIGHTS:-$PWD/out/tts-1b7/codec.weights}"
 if [ -f "$codec" ]; then
     run "TTS codec: NPU graph == CPU reference" \
@@ -62,7 +82,7 @@ else
 fi
 
 if [ "$fail" -eq 0 ]; then
-    echo "PARITY GATE: PASS (CPU == Vulkan == NPU)"
+    echo "PARITY GATE: PASS (CPU == Vulkan == NPU == CUDA tuned)"
 else
     echo "PARITY GATE: FAIL"
 fi
