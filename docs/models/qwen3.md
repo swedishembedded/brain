@@ -135,7 +135,12 @@ everything about HOW to serve it is a `brain serve` flag:
   auto-sizes it to the target device's real usable VRAM instead of a fixed
   number, so raising the ceiling normally means freeing VRAM (or adding a
   card), not passing this flag. Set it to pin an exact value instead of the
-  auto-picked one.
+  auto-picked one. Neither the auto-sized nor an explicit value is capped at
+  the checkpoint's own trained context: going past it derives a YaRN
+  (arXiv 2309.00071) RoPE scaling automatically (`factor = ctx / native`,
+  the same ratio a real long-context checkpoint's own `rope_scaling` key
+  would carry) - a checkpoint that already declares one is never
+  second-guessed.
 - `--qwen-max-batch N` - concurrent serving batch slots (default 16).
 - `--qwen-kv-fp32` - opt out of the default int8 KV cache.
 - `--qwen-kv-calib` - opt in to per-head KV clip ranges produced by `brain
