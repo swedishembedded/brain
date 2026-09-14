@@ -732,6 +732,10 @@ mod flash_tests {
         ("paged_flash_decode_i8", kernels::PAGED_FLASH_DECODE_I8),
         ("paged_flash_decode_split", kernels::PAGED_FLASH_DECODE_SPLIT),
         ("paged_flash_decode_combine", kernels::PAGED_FLASH_DECODE_COMBINE),
+        ("paged_decode_scores_i8_batched", kernels::PAGED_DECODE_SCORES_I8_BATCHED),
+        ("paged_decode_apply_i8_batched", kernels::PAGED_DECODE_APPLY_I8_BATCHED),
+        ("paged_flash_decode_split_i8", kernels::PAGED_FLASH_DECODE_SPLIT_I8),
+        ("paged_flash_decode_combine_i8", kernels::PAGED_FLASH_DECODE_COMBINE_I8),
     ];
 
     fn fb(x: f32) -> u32 {
@@ -950,6 +954,118 @@ mod flash_tests {
         println!("paged_flash_decode_split+combine vs batched triad: worst maxabs = {worst:e} (n_splits={n_splits})");
         assert!(worst > 0.0, "sanity: q/k/v are not all-zero, so a real match should not be a trivial 0==0");
         assert!(worst < 1e-3, "paged_flash_decode_split+combine vs batched triad maxabs={worst}");
+    }
+
+    /// The INT8-KV twin of `paged_flash_decode_split_matches_batched_triad`:
+    /// `paged_flash_decode_split_i8` -> `paged_flash_decode_combine_i8`
+    /// (its own combine phase, over the merged `[m, l, o]` partial-state
+    /// layout the split kernel's own header explains - NOT plain
+    /// `paged_flash_decode_combine`, which reads three separate buffers) -
+    /// against the int8 triad (`paged_decode_scores_i8_batched` ->
+    /// `decode_softmax_batched` -> `paged_decode_apply_i8_batched`)
+    /// `qwen3::serve` actually dispatches under `kv_int8` today. Same
+    /// shapes/lengths/scrambled block tables as the fp32 split test, and the
+    /// same real production quantization scheme (`quantize_pool_i8`)
+    /// `paged_flash_decode_int8_matches_fp32_fused_kernel` already uses, so
+    /// the only source of disagreement is genuine int8 quantization noise
+    /// plus the split/combine reassociation - comfortably inside the same
+    /// `1e-3` bound every other fused-vs-triad gate in this file uses.
+    #[test]
+    fn paged_flash_decode_split_i8_matches_int8_triad() {
+        let g = gpu_core::testgpu::dev(PIPES);
+        let (nh, nkv, hd) = (4u32, 2u32, 8u32);
+        let group = nh / nkv;
+        let (hkv, hq) = (nkv * hd, nh * hd);
+        let scale = 1.0f32 / (hd as f32).sqrt();
+        let lens = [1u32, 7, 8, 9, 41, 100];
+        let batch = lens.len() as u32;
+        let bs = 4u32;
+        let num_blocks = 256u32;
+        let max_bt = 26u32; // >= ceil(100/4)
+        let cap = max_bt * bs;
+
+        let mut rng = Rng::new(29);
+        let qflat: Vec<f32> = (0..batch * hq).map(|_| rng.next_gaussian() as f32).collect();
+        let ks: Vec<Vec<f32>> = lens.iter().map(|&t| (0..t * hkv).map(|_| rng.next_gaussian() as f32).collect()).collect();
+        let vs: Vec<Vec<f32>> = lens.iter().map(|&t| (0..t * hkv).map(|_| rng.next_gaussian() as f32).collect()).collect();
+
+        let tables: Vec<Vec<u32>> = (0..batch).map(|b| (0..max_bt).map(|i| b + i * batch).collect()).collect();
+
+        let mut pk = vec![0f32; (num_blocks * bs * hkv) as usize];
+        let mut pv = vec![0f32; (num_blocks * bs * hkv) as usize];
+        for b in 0..batch as usize {
+            for tok in 0..lens[b] {
+                let phys = tables[b][(tok / bs) as usize];
+                let dst = ((phys * bs + tok % bs) * hkv) as usize;
+                let src = (tok * hkv) as usize;
+                pk[dst..dst + hkv as usize].copy_from_slice(&ks[b][src..src + hkv as usize]);
+                pv[dst..dst + hkv as usize].copy_from_slice(&vs[b][src..src + hkv as usize]);
+            }
+        }
+
+        let qb = g.storage_init("q", &qflat);
+        let btflat: Vec<u32> = (0..batch as usize).flat_map(|b| tables[b].clone()).collect();
+        let bt = g.storage((batch * max_bt) as u64);
+        g.write(&bt, &btflat);
+        let sl = g.storage(batch as u64);
+        g.write(&sl, &lens);
+
+        let (pk_words, sk) = quantize_pool_i8(&pk, nkv, hd);
+        let (pv_words, sv) = quantize_pool_i8(&pv, nkv, hd);
+        let poolk = g.storage(pk_words.len() as u64);
+        g.write(&poolk, &pk_words);
+        let poolv = g.storage(pv_words.len() as u64);
+        g.write(&poolv, &pv_words);
+        let scales_k = g.storage_init("sk", &sk);
+        let scales_v = g.storage_init("sv", &sv);
+
+        // --- reference: the int8 triad qwen3::serve actually dispatches ---
+        let sc = g.storage((batch * nh * cap) as u64);
+        let pr = g.storage((batch * nh * cap) as u64);
+        let ctx_ref_buf = g.storage((batch * hq) as u64);
+        let steps = vec![
+            g.step(7, &[&qb, &poolk, &bt, &sl, &scales_k, &sc], &[batch, nh, group, hd, bs, hkv, cap, max_bt, fb(scale)], batch * nh * cap),
+            g.step(1, &[&sc, &sl, &pr], &[batch, nh, cap], batch * nh),
+            g.step(8, &[&pr, &poolv, &bt, &sl, &scales_v, &ctx_ref_buf], &[batch, nh, group, hd, bs, hkv, cap, max_bt], batch * nh * hd),
+        ];
+        g.submit(&[], &steps);
+        let ctx_ref = g.read(&ctx_ref_buf, (batch * hq) as usize);
+
+        // --- split phase: ONE merged partial-state buffer per (sequence,
+        // head, split): [m, l, o_0..o_127] - see paged_flash_decode_split_i8's
+        // own header for why (two extra dequant-scale inputs vs the fp32
+        // split kernel push a naive 3-output port over WebGPU's 8-storage-
+        // buffer floor).
+        let tiles_per_split = 2u32;
+        let bc = 8u32; // paged_flash_decode_split_i8's own const BC
+        let part_stride = 2u32 + 128u32; // PART_STRIDE = 2 + HD (kernel's own HD, not this test's hd)
+        let max_ntiles = lens.iter().map(|&t| t.div_ceil(bc)).max().unwrap();
+        let n_splits = max_ntiles.div_ceil(tiles_per_split);
+
+        let part = g.storage((batch * nh * n_splits * part_stride) as u64);
+        let split_steps = vec![g.step(
+            9,
+            &[&qb, &poolk, &poolv, &scales_k, &scales_v, &bt, &sl, &part],
+            &[batch, nh, nkv, hd, group, bs, max_bt, n_splits, tiles_per_split],
+            batch * nh * n_splits * 64, // 64 = paged_flash_decode_split_i8's own @workgroup_size
+        )];
+        g.submit(&[], &split_steps);
+
+        // --- combine phase: paged_flash_decode_combine_i8, this layout's own ---
+        let ctx_split_buf = g.storage((batch * hq) as u64);
+        let combine_steps = vec![g.step(
+            10,
+            &[&part, &ctx_split_buf],
+            &[batch, nh, hd, n_splits],
+            batch * nh * 128, // 128 = paged_flash_decode_combine_i8's own @workgroup_size
+        )];
+        g.submit(&[], &combine_steps);
+        let ctx_split = g.read(&ctx_split_buf, (batch * hq) as usize);
+
+        let worst = ctx_ref.iter().zip(&ctx_split).fold(0f32, |m, (a, b)| m.max((a - b).abs()));
+        println!("paged_flash_decode_split_i8+combine vs int8 triad: worst maxabs = {worst:e} (n_splits={n_splits})");
+        assert!(worst > 0.0, "sanity: q/k/v are not all-zero, so a real match should not be a trivial 0==0");
+        assert!(worst < 1e-3, "paged_flash_decode_split_i8+combine vs int8 triad maxabs={worst}");
     }
 
     /// Whole-tensor `rel_l2` (f64-accumulated sum-of-squares ratio) - the
