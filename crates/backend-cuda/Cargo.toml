@@ -19,3 +19,18 @@ libloading.workspace = true
 # gpu-core. With no subscriber installed every macro below is a
 # predictable-branch no-op; `--trace-gpu <0-5>` turns them on.
 tracing.workspace = true
+# Cubin cache keys. The key must cover everything that can change the compiled
+# output (source, compute capability, NVRTC version, compile flags, entry
+# name), so a collision would serve code compiled for something else.
+sha2.workspace = true
+
+# The golden gate runs ONE WGSL source through two independent code
+# generators - `wgsl-cpu`'s Cranelift JIT and `wgsl-cuda` -> NVRTC -> a real
+# device - and holds them to a numerical contract. Test-only in both
+# directions: nothing in this crate's own code depends on either, so the
+# eventual production edge (backend -> generator) stays one-way.
+[dev-dependencies]
+brain-wgsl-cuda.workspace = true
+brain-wgsl-cpu.workspace = true
+brain-kernels.workspace = true
+brain-testutil.workspace = true

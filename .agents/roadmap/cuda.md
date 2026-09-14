@@ -186,6 +186,95 @@ names from `.wgsl` stems, compiles every entry on the test device, demands a
 cost formula per entry and cross-checks five WGSL-text-specific fields - none of
 which can read CUDA C++.
 
+### `crates/wgsl-cuda` - the generated (T0) tier, for a named subset
+
+A new leaf crate: naga IR in, CUDA C++ text out. It depends on `naga` and
+nothing else - no driver, no toolkit - so it builds and its tests run on any
+box, and the dependency edge to the backend stays one-way (backend -> generator).
+
+One WGSL work-group is one CUDA block, so no index rewriting happens:
+`blockDim = (@workgroup_size, 1, 1)`, `gridDim = (grid_x, grid_y, 1)`,
+`local_invocation_id = threadIdx`, `workgroup_id = blockIdx`,
+`num_workgroups = gridDim`. The entry point is `extern "C" __global__` (a flat
+symbol table has no mangling to undo) and takes the uniform stream first, then
+one pointer per storage binding in ascending binding order.
+
+**Covered kernels (6 of 474):** `add2`, `mul`, `gelu`, `add_inplace`,
+`quant_group_sum`, `gradnorm_part`. That is the milestone's bar and not a
+coverage claim - breadth was the explicitly adjustable dial, and correctness on
+a small set was spent instead. The six were chosen to reach every mechanism the
+emitter has: elementwise f32, a math intrinsic (`tanh`), an aliasing in-place
+binding, packed int8 with `dot4I8Packed` and u32/i32 arithmetic, and a
+cooperative reduction with `var<workgroup>`, a barrier and a pre-barrier early
+return. Anything outside the supported IR subset is an error naming what was
+found; nothing is approximated.
+
+### The six codegen hazards - which were EXERCISED and which were reasoned about
+
+All six are handled, and five are held by a test that fails when the handling
+is removed (verified by removing it, not by inspection):
+
+| Hazard | Handling | Exercised by |
+|---|---|---|
+| early `return` before a barrier | guard flag + re-guarded statements, barriers outside the guard; plus a post-condition that a barrier-using kernel contains no `return` at all | **yes** - a padded grid where surplus work-groups return; caught by dropping the guard (measured: they wrote their output) |
+| uniform layout | every member read at naga's own byte offset; no struct is transliterated | **yes** - a `vec3<u32>` member forces WGSL offset 28 where C++ packs to 16; caught by using a naive offset |
+| shift semantics | `(amount) & 31u` written into the emitted code | **yes** - shift amounts straddling the word width; caught by removing the mask |
+| FMA contraction | `--fmad=false`, and WGSL's explicit `fma()` still emits `fmaf` | **yes** - inputs asserted on the host to distinguish one rounding from two; caught by flipping the flag |
+| `var<workgroup>` zero-init | zeroed by the whole block at entry, published by a barrier | **yes** - a reduction whose tail lanes never write their slot, run after a kernel that deliberately dirties the same shared window; caught by removing the zeroing |
+| `__restrict__` | never emitted for any generated kernel | **partly** - the emitted text is asserted to carry none (caught by adding one), and an aliased-binding run agrees with the reference. A run that would MISCOMPILE under `__restrict__` needs a cross-invocation alias, which no kernel in the covered subset has, so that half is reasoned about rather than measured |
+
+### Gate - golden agreement against the CPU reference
+
+`crates/backend-cuda/tests/wgsl_cuda_golden.rs`: one WGSL source, two
+independent code generators - `wgsl-cpu`'s Cranelift JIT and `wgsl-cuda` ->
+NVRTC -> a real device - compared per kernel and per shape, at a whole-workgroup
+shape and at one with a partial tail. Elementwise and packed-int8 results are
+required to be **bit-identical** (tolerance 0); `tanh` and the reduction are
+held to maxabs < 1e-6, the same floor the cross-backend parity assertions use.
+Skip-if-absent, so a box with no driver or no NVRTC is unaffected.
+
+### `backend-cuda` grew an execution substrate (not a `Backend`)
+
+- `driver.rs`: the context/memory/module/launch entry points, resolved
+  SEPARATELY from the identity ones and allowed to fail on their own - a driver
+  missing one of them must still report device identity. `_v2` names where
+  `cuda.h` defines them.
+- `exec.rs`: `Context` (primary context retained per device, made current
+  before every call), `DeviceMem`, `Module`, `Function`. `cuLaunchKernel` takes
+  pointers TO the argument values, so a buffer argument is a pointer to the
+  `CUdeviceptr`.
+- `nvrtc.rs`: `libnvrtc` dlopened (it ships with the toolkit, not the driver,
+  so a box that can RUN CUDA cannot necessarily compile it), compiling to a
+  **cubin** for the capability the device reported - never a written-down one.
+  The compile log is part of the error, because a generated kernel that does
+  not compile is a defect in the generator.
+
+The cubin cache key is a sha256 over length-prefixed fields: source, entry
+name, compute capability, NVRTC version, and the exact compile flags. Files are
+published with `rename(2)` from a process-unique temporary. `backend_api::cache_dir()`
+is now the one cache-directory ladder; `gpu_core::tune::cache_dir` delegates to
+it rather than keeping a second copy, since a backend crate cannot depend on
+`gpu-core`.
+
+### Two defects in the CPU reference, found by the comparison and fixed
+
+The golden gate is only as good as the side it compares against, and it
+immediately found `wgsl-cpu` wrong about the same two WGSL guarantees the CUDA
+emitter has to handle:
+
+- an invocation that returned before the barrier still ran the segment AFTER
+  it, so every padded-grid guard was ineffective past the barrier. Fixed with a
+  per-invocation "still running" mask in work-group scratch (a per-invocation
+  SSA local cannot survive the split, which is what the existing `f6` check
+  refuses);
+- `var<workgroup>` was a stack slot allocated once and reused, so the second
+  work-group read the first one's values. Fixed by zeroing it per work-group.
+
+Both are pinned by `crates/wgsl-cpu/tests/workgroup_semantics.rs`, which fails
+on the unfixed compiler. Neither was reachable from a model run today (the CPU
+backend dispatches exactly `n_wg` work-groups, and the kernels in the tree
+write every slot they read), which is why they survived.
+
 ## Not delivered - what is still missing
 
 **Device identity only. Everything that executes work is deferred.**
@@ -213,12 +302,24 @@ which can read CUDA C++.
   `Ops::matmul` routes through the seam, and `Ops::with_providers` remains
   test-only - so the `ImplChoice` now attached to every `Lowered` describes
   real dispatches only in tests. Wiring it up is the provider milestone's job.
-- **No WGSL -> CUDA generator**, and so none of its six known
-  silent-wrong-number hazards is handled yet (early `return` before
-  `__syncthreads` on the barrier-using kernels; WGSL 16-byte uniform layout vs
-  C++ default; PTX shift clamping vs Cranelift's mask; NVRTC's default
-  `--fmad=true` against a 1e-6 parity assertion; `__restrict__` vs deliberately
-  aliasing `DeviceBuffer` clones; `var<workgroup>` zero-init vs `__shared__`).
+- **The generator covers 6 of 474 kernels.** Everything with a vector or
+  matrix type, a texture, an atomic, a `switch`, a function call, a
+  multi-dimensional `@workgroup_size`, a barrier under control flow, a `return`
+  inside a loop in a barrier-using kernel, or f16 is refused with a message
+  naming the construct - refused, not approximated, but refused all the same.
+  Vectors are the first thing any breadth work needs: the emitter is
+  scalar-only today.
+- **Nothing DISPATCHES a generated kernel.** The golden gate compiles and
+  launches them directly; there is no provider, no `kind` -> kernel mapping, no
+  lazy per-`kind` compilation cache in front of the cubin cache, and
+  `kernels_cuda::ALL` is still empty (these are generated, not hand-written, so
+  they do not belong in that registry).
+- **`make cuda-table/check` still does not compile anything under NVRTC.** The
+  machinery now exists (`nvrtc::compile`), but wiring a compile check into the
+  gate means deciding what a box without a toolkit does, which is a gate
+  question rather than a code one.
+- **No ahead-of-time cubins.** NVRTC is the only compilation path, so a
+  deployment with a driver and no toolkit cannot run the generated tier at all.
 - **No provider wiring, no CUDA Graphs, no allocator.**
 - **`brain devices` does not show CUDA visibility per card.** The backends
   column still reports only `vulkan`/`wgpu`. The data is available
@@ -229,6 +330,11 @@ which can read CUDA C++.
   (`crates/gpu-core/src/devices.rs`, for `BRAIN_DEVICE`). If one is added it
   owes `docs/using/configuration.md` an entry (`check-env-docs.sh`) and must
   be read in that same single file.
+- **The CUDA crates are not in the workspace overview yet.** Neither
+  `AGENTS.md`'s crate table nor the layer diagram in `.agents/rules/architecture.md`
+  names `backend-cuda`, `kernels-cuda` or `wgsl-cuda`. That is deliberate for
+  now - those documents describe what a reader can USE, and none of the three
+  runs a model - but it is an edit owed at the point the backend does.
 - **CUDA is not in `scripts/gates/parity-gate.sh`**, and must not be until the
   catalogue and the backward kernels support it.
 - **No cost formulas** for CUDA steps in `gpu-core/src/cost.rs` (a coverage
@@ -270,9 +376,12 @@ which can read CUDA C++.
 - `.agents/rules/lessons.md` #107 (the `_v2` symbol-name trap in any `dlopen`ed
   C API), #108 (why a CUDA ordinal is not an identity), #109 (why a ratchet
   that starts at zero cannot be a floor), #110 (`include_str!` proves registry
-  -> file and never the reverse) and #111 (record a skip where it happens)
-  came out of this work and are the things most likely to be re-learned the
-  hard way.
+  -> file and never the reverse), #111 (record a skip where it happens), #112
+  (the two WGSL work-group guarantees no target gives for free), #113 (an idle
+  device makes an uninitialised-memory test pass), #114 (a generated tier is
+  held to the REFERENCE's answer, not the language's) and #115 (materialise
+  generated expressions where the IR says they are evaluated) came out of this
+  work and are the things most likely to be re-learned the hard way.
 - Adding the first tuned kernel is four edits, in this order: the `.cu` file,
   its `kernels-cuda` registry entry, `make cuda-table`, then the `POLICY` entry
   plus the contract count in the ratchet test. Doing the policy entry first

@@ -4276,3 +4276,43 @@ the SOURCE language makes that the target does not, and write a test per
 guarantee - the kernels themselves will not tell you, because they are written
 assuming the guarantee holds.
 
+
+## 113. An idle device makes an uninitialised-memory test pass
+
+The first version of the `__shared__` zero-init gate read zeros with the
+zeroing removed, because on a quiet GPU the block was the first tenant of that
+scratch and the memory happened to be zero. A test for "this memory is not
+initialised for you" has to DIRTY the memory first - here, a preceding kernel
+declaring the same amount of `__shared__` and filling every element of it -
+otherwise it measures how busy the device was, and reports that as correctness.
+The same trap applies to any freshly-mapped host allocation.
+
+## 114. A generated tier is held to the reference's answer, not to the language's
+
+The PTX ISA clamps a shift amount at or above the word width (`x << 32` is 0);
+x86, and so the Cranelift reference, masks it modulo 32 (`x << 32` is `x`).
+WGSL itself calls that range indeterminate, so there is no "correct" answer to
+inherit - which is exactly why a generated backend may not inherit whichever
+behaviour its target happens to have. It has to reproduce what the portable
+reference computes, explicitly (`(b) & 31u` written into the emitted code), or
+the two tiers disagree on an input no kernel is supposed to produce and every
+comparison between them becomes negotiable.
+
+The same reasoning picks `1.0f / sqrtf(x)` over `rsqrtf`, `rintf` over `roundf`
+(WGSL rounds halves to even), the spec's own `mix` composition over the
+algebraically equal one, and `--fmad=false`: each is a case where the faster or
+more natural target idiom is a DIFFERENT function, and the difference is
+invisible until a parity assertion fails somewhere unrelated.
+
+## 115. Materialise generated expressions at their emit point, not at their use
+
+Translating a naga expression DAG to C++ text by substituting each expression's
+text into its users is wrong in a way that only shows up with mutation: a
+`Load` inlined at its use site floats past any store to the same location that
+was emitted in between, so the kernel reads the new value where the source
+reads the old one. naga marks evaluation order explicitly with `Statement::Emit`
+ranges, and the fix is to bind each emitted expression to its own variable
+there, exactly as the Cranelift path does. Hoisting those variable
+DECLARATIONS to function scope additionally means no `goto` (WGSL's `continue`
+is not C's - the continuing block still has to run) can ever jump across an
+initialisation, which C++ forbids.

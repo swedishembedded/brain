@@ -467,7 +467,12 @@ name = "brain-backend-cuda"
 version = "1.1.0"
 dependencies = [
  "brain-backend-api",
+ "brain-kernels",
+ "brain-testutil",
+ "brain-wgsl-cpu",
+ "brain-wgsl-cuda",
  "libloading",
+ "sha2",
  "tracing",
 ]
 
@@ -2282,6 +2287,14 @@ dependencies = [
  "cranelift-jit",
  "cranelift-module",
  "cranelift-native",
+ "naga",
+]
+
+[[package]]
+name = "brain-wgsl-cuda"
+version = "1.1.0"
+dependencies = [
+ "brain-kernels",
  "naga",
 ]
 

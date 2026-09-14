@@ -33,11 +33,20 @@
 //! name here would silently bind the v1 entry point and write 4 bytes where 8
 //! are expected - so the suffixed name is what this file asks for.
 
-use std::ffi::{c_char, c_int, CStr};
+use std::ffi::{c_char, c_int, c_void, CStr};
 
 /// `CUresult`. `CUDA_SUCCESS` is 0; every other value is an error whose text
 /// comes from the driver itself via `cuGetErrorString`.
 type CuResult = c_int;
+/// `CUcontext`/`CUmodule`/`CUfunction`/`CUstream` are all opaque handles.
+pub type CuContext = *mut c_void;
+pub type CuModule = *mut c_void;
+pub type CuFunction = *mut c_void;
+/// `CUdeviceptr` - an integer device address, NOT a host pointer. It is 64-bit
+/// on every 64-bit platform the driver supports, and passing it to
+/// `cuLaunchKernel` means passing a pointer TO this integer, never the integer
+/// itself.
+pub type CuDevicePtr = u64;
 /// `CUdevice` - an opaque device handle, not an index. It happens to be an
 /// `int`, but it is obtained from `cuDeviceGet(ordinal)` and never formed by
 /// casting an ordinal.
@@ -73,6 +82,47 @@ pub struct Driver {
     device_get_uuid: unsafe extern "C" fn(*mut u8, CuDevice) -> CuResult,
     device_total_mem: unsafe extern "C" fn(*mut usize, CuDevice) -> CuResult,
     device_get_attribute: unsafe extern "C" fn(*mut c_int, c_int, CuDevice) -> CuResult,
+    /// The entry points needed to RUN something, resolved separately and
+    /// allowed to fail on their own. Device identity must keep working on a
+    /// driver that is missing one of them: a failure here is "this box cannot
+    /// execute", not "this box has no CUDA".
+    exec: Result<ExecFns, String>,
+}
+
+/// The context / memory / module / launch half of the Driver API.
+///
+/// Note which names carry `_v2`. `cuda.h` `#define`s those onto the versioned
+/// entry point for a C compiler; `dlsym` does no such rewriting, so asking for
+/// the bare name here would bind a different ABI - for `cuMemAlloc` the v1
+/// entry takes a 32-bit size, which silently truncates every allocation above
+/// 4 GiB instead of failing.
+pub struct ExecFns {
+    pub(crate) primary_ctx_retain: unsafe extern "C" fn(*mut CuContext, CuDevice) -> CuResult,
+    pub(crate) primary_ctx_release: unsafe extern "C" fn(CuDevice) -> CuResult,
+    pub(crate) ctx_set_current: unsafe extern "C" fn(CuContext) -> CuResult,
+    pub(crate) ctx_synchronize: unsafe extern "C" fn() -> CuResult,
+    pub(crate) mem_alloc: unsafe extern "C" fn(*mut CuDevicePtr, usize) -> CuResult,
+    pub(crate) mem_free: unsafe extern "C" fn(CuDevicePtr) -> CuResult,
+    pub(crate) memcpy_htod: unsafe extern "C" fn(CuDevicePtr, *const c_void, usize) -> CuResult,
+    pub(crate) memcpy_dtoh: unsafe extern "C" fn(*mut c_void, CuDevicePtr, usize) -> CuResult,
+    pub(crate) module_load_data: unsafe extern "C" fn(*mut CuModule, *const c_void) -> CuResult,
+    pub(crate) module_unload: unsafe extern "C" fn(CuModule) -> CuResult,
+    pub(crate) module_get_function:
+        unsafe extern "C" fn(*mut CuFunction, CuModule, *const c_char) -> CuResult,
+    #[allow(clippy::type_complexity)]
+    pub(crate) launch_kernel: unsafe extern "C" fn(
+        CuFunction,
+        u32,
+        u32,
+        u32,
+        u32,
+        u32,
+        u32,
+        u32,
+        *mut c_void,
+        *mut *mut c_void,
+        *mut *mut c_void,
+    ) -> CuResult,
 }
 
 // Every field is either a mapped `Library` (which `libloading` already
@@ -115,7 +165,9 @@ fn load() -> Result<Driver, String> {
         // explain its own error codes.
         let get_error_string = sym(&lib, b"cuGetErrorString\0").ok();
 
+        let exec = load_exec(&lib);
         let d = Driver {
+            exec,
             device_get_count: sym(&lib, b"cuDeviceGetCount\0")?,
             device_get: sym(&lib, b"cuDeviceGet\0")?,
             device_get_name: sym(&lib, b"cuDeviceGetName\0")?,
@@ -138,6 +190,29 @@ fn load() -> Result<Driver, String> {
     }
 }
 
+/// Resolve the execution half. Separate from `load` so a missing symbol here
+/// disables only execution.
+///
+/// # Safety
+/// Each name is resolved at the exact signature `cuda.h` declares for it, and
+/// the pointers stay valid for as long as `lib` (owned by `Driver`) is mapped.
+unsafe fn load_exec(lib: &libloading::Library) -> Result<ExecFns, String> {
+    Ok(ExecFns {
+        primary_ctx_retain: sym(lib, b"cuDevicePrimaryCtxRetain\0")?,
+        primary_ctx_release: sym(lib, b"cuDevicePrimaryCtxRelease_v2\0")?,
+        ctx_set_current: sym(lib, b"cuCtxSetCurrent\0")?,
+        ctx_synchronize: sym(lib, b"cuCtxSynchronize\0")?,
+        mem_alloc: sym(lib, b"cuMemAlloc_v2\0")?,
+        mem_free: sym(lib, b"cuMemFree_v2\0")?,
+        memcpy_htod: sym(lib, b"cuMemcpyHtoD_v2\0")?,
+        memcpy_dtoh: sym(lib, b"cuMemcpyDtoH_v2\0")?,
+        module_load_data: sym(lib, b"cuModuleLoadData\0")?,
+        module_unload: sym(lib, b"cuModuleUnload\0")?,
+        module_get_function: sym(lib, b"cuModuleGetFunction\0")?,
+        launch_kernel: sym(lib, b"cuLaunchKernel\0")?,
+    })
+}
+
 /// Resolve one NUL-terminated symbol name AT the type the caller expects,
 /// yielding the bare function pointer.
 ///
@@ -155,9 +230,21 @@ unsafe fn sym<T: Copy>(lib: &libloading::Library, name: &[u8]) -> Result<T, Stri
 }
 
 impl Driver {
+    /// The execution entry points, or why this driver cannot run anything.
+    pub fn exec(&self) -> Result<&ExecFns, &str> {
+        self.exec.as_ref().map_err(|e| e.as_str())
+    }
+
+    /// A `CUdevice` handle for an ordinal, for callers that go on to open a
+    /// context on it. Deliberately the only way out of this module to a device
+    /// handle: an ordinal is not an identity and must be resolved each time.
+    pub fn device_handle(&self, ordinal: u32) -> Result<c_int, String> {
+        self.device(ordinal)
+    }
+
     /// The driver's own text for a `CUresult`, or the bare code when this
     /// driver is too old to expose `cuGetErrorString`.
-    fn error_text(&self, rc: CuResult) -> String {
+    pub(crate) fn error_text(&self, rc: CuResult) -> String {
         if let Some(f) = self.get_error_string {
             let mut p: *const c_char = std::ptr::null();
             // SAFETY: `p` is a valid out-parameter; the driver returns a
@@ -171,7 +258,7 @@ impl Driver {
         format!("CUresult {rc}")
     }
 
-    fn check(&self, rc: CuResult, what: &str) -> Result<(), String> {
+    pub(crate) fn check(&self, rc: CuResult, what: &str) -> Result<(), String> {
         if rc == CUDA_SUCCESS {
             Ok(())
         } else {

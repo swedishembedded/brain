@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+[package]
+name = "brain-wgsl-cuda"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Translate brain's WGSL compute kernels to CUDA C++ text via naga IR - the generated (T0) implementation tier."
+
+[lib]
+name = "wgsl_cuda"
+path = "src/lib.rs"
+
+# Text in, text out: this crate never touches a GPU, a driver or a toolkit, so
+# it builds and its tests run anywhere. Compiling the emitted source and
+# launching it belongs to `brain-backend-cuda`, which keeps the dependency
+# edge one-way (backend -> generator) and this crate testable with nothing
+# attached.
+[dependencies]
+# The same naga front-end the wgpu/vulkan/wgsl-cpu paths parse WGSL with, so
+# all four tiers read one source of truth and cannot disagree about what a
+# kernel says.
+naga.workspace = true
+
+[dev-dependencies]
+brain-kernels.workspace = true

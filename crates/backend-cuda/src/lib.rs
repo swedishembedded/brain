@@ -35,6 +35,8 @@
 //! constant, and never a permanent ceiling - see [`driver::CudaDevice`].
 
 pub mod driver;
+pub mod exec;
+pub mod nvrtc;
 pub mod policy;
 
 pub use driver::{driver, CudaDevice};

@@ -48,6 +48,7 @@ brain-backend-wgpu
 brain-backend-cpu
 brain-backend-vulkan
 brain-wgsl-cpu
+brain-wgsl-cuda
 brain-gpu-core
 brain-paramstore
 brain-optim

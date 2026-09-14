@@ -19,6 +19,7 @@ default-members = [
     "crates/backend-vulkan",
     "crates/backend-cuda",
     "crates/wgsl-cpu",
+    "crates/wgsl-cuda",
     "crates/gpu-core",
     "crates/kernels",
     "crates/kernels-cuda",
@@ -272,6 +273,7 @@ brain-runtime = { path = "crates/runtime" }
 brain-server = { path = "crates/server" }
 brain-vulkan = { path = "crates/vulkan" }
 brain-wgsl-cpu = { path = "crates/wgsl-cpu" }
+brain-wgsl-cuda = { path = "crates/wgsl-cuda" }
 
 # Third-party. fp32-only, core-compute-only GPU stack - see crates/kernels.
 # wgpu/pollster: ONE workspace pin for the native GPU stack - the version was
