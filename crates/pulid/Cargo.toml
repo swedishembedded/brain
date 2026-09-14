@@ -25,6 +25,7 @@ path = "src/lib.rs"
 # have. `IdCond::from_image` therefore takes the prepared EVA cls as an argument
 # rather than pretending to reproduce that preprocessing.
 [dependencies]
+brain-data.workspace = true       # data::rng::random_seed for caps.rs's served "seed" default
 brain-gpu-core.workspace = true   # Gpu, DeviceBuffer, Step, testgpu, select
 brain-kernels.workspace = true    # the WGSL sources registered in model::KERNELS
 brain-model.workspace = true      # model::block::{gemm_variant, GemmVariants}

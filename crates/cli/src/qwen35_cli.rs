@@ -117,6 +117,10 @@ fn infer(args: &[String]) {
         }
         i += 1;
     }
+    if !args.iter().any(|a| a == "--seed") {
+        seed = data::rng::random_seed();
+        eprintln!("qwen35 infer: no --seed given, using random seed {seed} (pass --seed {seed} to reproduce)");
+    }
 
     // `--weights`/(`--tokenizer` or `--gguf`) named explicitly is the
     // existing, unchanged manual path (a caller who already knows exactly
@@ -245,7 +249,7 @@ fn parse_finetune(args: &[String]) -> Result<FinetuneArgs, String> {
         grad_clip: a.f32_or("--grad-clip", d.grad_clip),
         grad_accum: a.u32_or("--grad-accum", d.grad_accum),
         checkpoint_secs: a.u64_or("--save-secs", d.checkpoint_secs),
-        seed: a.u64_or("--seed", d.seed),
+        seed: if args.iter().any(|s| s == "--seed") { a.u64_or("--seed", d.seed) } else { data::rng::random_seed() },
         mask_before: mask,
         mask_per_line: mask.is_some(),
         align_to_lines: a.take_flag("--align"),
@@ -329,12 +333,20 @@ mod finetune_cli_tests {
     /// shared `FitOpts::default()` value rather than a qwen35-private one.
     #[test]
     fn a_bare_finetune_is_a_full_finetune_on_the_shared_fitopts_defaults() {
-        let ft = parse_finetune(&argv(&["corpus", "--base", "base.safetensors", "--out", "tuned.safetensors"])).unwrap();
+        // `--seed` is pinned explicitly to the struct default's OWN value:
+        // everything else here checks that an omitted flag falls back to
+        // `FitOpts::default()`, but `--seed` is the one flag whose omission is
+        // deliberately NOT the struct default any more (it randomizes) - see
+        // `data::rng::random_seed`. Pinning it keeps this test's premise
+        // (every field ends up at `d`'s value) true without hardcoding `d.seed`
+        // twice.
+        let d = model::FitOpts::default();
+        let seed_str = d.seed.to_string();
+        let ft = parse_finetune(&argv(&["corpus", "--base", "base.safetensors", "--out", "tuned.safetensors", "--seed", &seed_str])).unwrap();
         assert_eq!(ft.data_dir, "corpus");
         assert_eq!(ft.base, "base.safetensors");
         assert_eq!(ft.out, "tuned.safetensors");
         assert!(matches!(ft.mode, qwen35::finetune::Mode::FullOffload), "{:?}", ft.mode);
-        let d = model::FitOpts::default();
         assert_eq!(ft.opts.steps, d.steps);
         assert_eq!(ft.opts.batch_size, d.batch_size);
         assert_eq!(ft.opts.block_size, d.block_size);

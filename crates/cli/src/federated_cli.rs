@@ -54,6 +54,10 @@ fn train_expert(args: &[String]) {
         eprintln!("usage: brain federated train-expert --base <base.safetensors> --expert E --out <dir> [--steps N --batch B --block T --lr X --seed S]");
         return;
     }
+    if !args.iter().any(|a| a == "--seed") {
+        seed = data::rng::random_seed();
+        eprintln!("federated train-expert: no --seed given, using random seed {seed} (pass --seed {seed} to reproduce)");
+    }
 
     let out_dir = Path::new(&out);
     if let Err(e) = std::fs::create_dir_all(out_dir) {

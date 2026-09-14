@@ -155,9 +155,7 @@ impl TtsInstance {
         opts.sampling.top_k = inv.get_i64("top_k").map(|k| k.max(0) as usize);
         opts.sampling.top_p = inv.get_f64("top_p").map(|p| p as f32);
         opts.sampling.repetition_penalty = inv.get_f64("repetition_penalty").map(|r| r as f32);
-        if let Some(s) = inv.get_i64("seed") {
-            opts.seed = s.max(0) as u64;
-        }
+        opts.seed = inv.get_i64("seed").map(|s| s.max(0) as u64).unwrap_or_else(data::rng::random_seed);
         if let Some(f) = inv.get_i64("max_frames") {
             opts.max_frames = f.max(1) as usize;
         }

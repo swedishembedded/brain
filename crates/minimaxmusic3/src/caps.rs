@@ -56,7 +56,7 @@ pub fn generate_spec() -> ActionSpec {
         .param(ParamSpec::new("caption", ParamType::Str, "structured music description: genre, BPM, vocal timbre, instrumentation, arrangement").required())
         .param(ParamSpec::new("duration_seconds", ParamType::Float, "target song length in seconds (the AR stage may stop earlier)").default(json!(d.duration_seconds)))
         .param(ParamSpec::new("num_inference_steps", ParamType::Int, "Euler steps per denoise chunk").default(json!(d.num_inference_steps as i64)))
-        .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (reproducible run)").default(json!(0)))
+        .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (reproducible run; omit for random)"))
         .output(BlobSpec::new("audio", Media::Audio, "the generated song: a complete 44.1 kHz stereo WAV").required())
 }
 
@@ -85,7 +85,7 @@ fn opts_from(inv: &Invocation) -> GenOpts {
     GenOpts {
         duration_seconds: inv.get_f64("duration_seconds").map(|v| v as f32).unwrap_or(d.duration_seconds).max(0.1),
         num_inference_steps: inv.get_i64("num_inference_steps").unwrap_or(d.num_inference_steps as i64).max(1) as usize,
-        seed: inv.get_i64("seed").unwrap_or(0).max(0) as u64,
+        seed: inv.get_i64("seed").map(|s| s.max(0) as u64).unwrap_or_else(data::rng::random_seed),
         // Deliberately not a param: `--device` is a GLOBAL flag in this
         // workspace, not a per-action knob, so the served path inherits
         // the ambient selection. `GenOpts::device` exists for in-process

@@ -106,7 +106,7 @@ fn synth_spec() -> ActionSpec {
     .param(ParamSpec::new("text", ParamType::Str, "the target text to synthesize").required())
     .param(ParamSpec::new("ref_text", ParamType::Str, "the reference clip's own transcript").required())
     .param(ParamSpec::new("variant", ParamType::Str, "cosyvoice2 or cosyvoice3 (the BRAIN_COSYVOICE_* dirs must hold that generation's checkpoint)").default(json!("cosyvoice2")))
-    .param(ParamSpec::new("seed", ParamType::Int, "RNG seed for the LM sampler and HiFT NSF noise (reproducible on this port, not bit-exact vs the python reference)").default(json!(0)))
+    .param(ParamSpec::new("seed", ParamType::Int, "RNG seed for the LM sampler and HiFT NSF noise (reproducible on this port, not bit-exact vs the python reference; omit for random)"))
     .param(
         ParamSpec::new("n_timesteps", ParamType::Int, "Euler steps the flow decoder's CFM solver takes")
             .default(json!(d.n_timesteps as i64))
@@ -199,7 +199,7 @@ pub fn synth_action(paths: &CosyVoicePaths, inv: &Invocation, _progress: &mut dy
     // `n_timesteps` gets that generation's own value rather than CosyVoice 2's.
     let d = GenOpts::for_variant(variant);
     let opts = GenOpts {
-        seed: inv.get_i64("seed").unwrap_or(0).max(0) as u64,
+        seed: inv.get_i64("seed").map(|s| s.max(0) as u64).unwrap_or_else(data::rng::random_seed),
         n_timesteps: inv.get_i64("n_timesteps").unwrap_or(d.n_timesteps as i64).max(1) as usize,
         ..d
     };

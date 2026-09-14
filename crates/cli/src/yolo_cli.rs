@@ -172,6 +172,10 @@ fn parse_train_flags(args: &[String], start: usize) -> TrainCfg {
         }
         i += 1;
     }
+    if !args.iter().any(|a| a == "--seed") {
+        cfg.seed = data::rng::random_seed();
+        println!("yolov8 train: no --seed given, using random seed {} (pass --seed {} to reproduce)", cfg.seed, cfg.seed);
+    }
     cfg
 }
 

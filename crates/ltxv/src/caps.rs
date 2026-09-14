@@ -70,7 +70,7 @@ pub fn manifest() -> Manifest {
     .param(ParamSpec::new("height", ParamType::Int, "output height, px (multiple of 32)").default(json!(d.height)))
     .param(ParamSpec::new("steps", ParamType::Int, "denoise steps").default(json!(d.steps)))
     .param(ParamSpec::new("guidance", ParamType::Float, "classifier-free guidance; <= 1.0 runs ONE forward per step instead of two").default(json!(d.guidance)))
-    .param(ParamSpec::new("seed", ParamType::Int, "initial-noise/weight/context seed (omit for 0)").default(json!(0)))
+    .param(ParamSpec::new("seed", ParamType::Int, "initial-noise/weight/context seed (omit for random)"))
     .param(ParamSpec::new("fps", ParamType::Int, "frame rate reported with the clip").default(json!(d.fps)))
     .param(ParamSpec::new("base_shift", ParamType::Float, "LTX2Scheduler token-count shift anchor at 1024 tokens").default(json!(d.base_shift)))
     .param(ParamSpec::new("max_shift", ParamType::Float, "LTX2Scheduler token-count shift anchor at 4096 tokens").default(json!(d.max_shift)))
@@ -105,7 +105,7 @@ pub fn manifest() -> Manifest {
     .param(ParamSpec::new("height", ParamType::Int, "output height, px (multiple of 64)").default(json!(d.height)))
     .param(ParamSpec::new("steps", ParamType::Int, "denoise steps per stage/tile").default(json!(d.steps)))
     .param(ParamSpec::new("guidance", ParamType::Float, "classifier-free guidance; <= 1.0 runs ONE forward per step instead of two").default(json!(d.guidance)))
-    .param(ParamSpec::new("seed", ParamType::Int, "initial-noise/weight/context seed (omit for 0)").default(json!(0)))
+    .param(ParamSpec::new("seed", ParamType::Int, "initial-noise/weight/context seed (omit for random)"))
     .param(ParamSpec::new("fps", ParamType::Int, "stage-1 frame rate; the reported fps is this times 2^temporal_upsample_rounds").default(json!(d.fps)))
     .param(ParamSpec::new("base_shift", ParamType::Float, "LTX2Scheduler token-count shift anchor at 1024 tokens").default(json!(d.base_shift)))
     .param(ParamSpec::new("max_shift", ParamType::Float, "LTX2Scheduler token-count shift anchor at 4096 tokens").default(json!(d.max_shift)))
@@ -153,7 +153,7 @@ pub fn gen_params_from(inv: &Invocation) -> Result<GenParams, String> {
         height: inv.get_i64("height").unwrap_or(d.height as i64).max(32) as usize,
         steps: inv.get_i64("steps").unwrap_or(d.steps as i64).max(1) as usize,
         guidance: inv.get_f64("guidance").unwrap_or(d.guidance as f64) as f32,
-        seed: inv.get_i64("seed").unwrap_or(0).max(0) as u64,
+        seed: inv.get_i64("seed").map(|s| s.max(0) as u64).unwrap_or_else(data::rng::random_seed),
         fps: inv.get_i64("fps").unwrap_or(d.fps as i64).max(1) as usize,
         base_shift: inv.get_f64("base_shift").unwrap_or(d.base_shift),
         max_shift: inv.get_f64("max_shift").unwrap_or(d.max_shift),
@@ -228,7 +228,7 @@ pub fn dfr_params_from(inv: &Invocation) -> Result<DfrParams, String> {
         height: inv.get_i64("height").unwrap_or(d.height as i64).max(64) as usize,
         steps: inv.get_i64("steps").unwrap_or(d.steps as i64).max(1) as usize,
         guidance: inv.get_f64("guidance").unwrap_or(d.guidance as f64) as f32,
-        seed: inv.get_i64("seed").unwrap_or(0).max(0) as u64,
+        seed: inv.get_i64("seed").map(|s| s.max(0) as u64).unwrap_or_else(data::rng::random_seed),
         fps: inv.get_i64("fps").unwrap_or(d.fps as i64).max(1) as usize,
         base_shift: inv.get_f64("base_shift").unwrap_or(d.base_shift),
         max_shift: inv.get_f64("max_shift").unwrap_or(d.max_shift),
@@ -405,7 +405,10 @@ mod tests {
         assert_eq!(def("height"), Some(json!(64)));
         assert_eq!(def("steps"), Some(json!(4)));
         assert_eq!(def("guidance"), Some(json!(1.0)));
-        assert_eq!(def("seed"), Some(json!(0)));
+        // No declared default any more: an omitted seed resolves to a random
+        // value at the resolver (`data::rng::random_seed`), not a fixed 0 -
+        // see `gen_params_from`.
+        assert_eq!(def("seed"), None);
         assert_eq!(def("fps"), Some(json!(8)));
         assert_eq!(def("dit_config"), Some(json!("tiny")));
         let ty = |name: &str| t2v.params.iter().find(|p| p.name == name).unwrap().ty.clone();

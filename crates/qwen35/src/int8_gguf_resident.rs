@@ -1404,7 +1404,7 @@ impl ResidentModel for Qwen35GgufResident {
         .param(ParamSpec::new("temp", ParamType::Float, "sampling temperature (<= 0 = greedy)").default(json!(0.0)))
         .param(ParamSpec::new("top_k", ParamType::Int, "top-k filter (0 or negative = disabled)").default(json!(40)))
         .param(ParamSpec::new("top_p", ParamType::Float, "nucleus sampling threshold (>= 1 = disabled)").default(json!(1.0)))
-        .param(ParamSpec::new("seed", ParamType::Int, "RNG seed").default(json!(0)))
+        .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (omit for random)"))
         .param(ParamSpec::new("stop", ParamType::Str, "JSON array of stop strings"))
         .param(ParamSpec::new("tools", ParamType::Str, "JSON array of tool definitions (OpenAI function-calling schema)"))
         .param(ParamSpec::new("tool_choice", ParamType::Str, "tool_choice directive, raw JSON text (\"auto\"|\"none\"|\"required\"|{\"type\":\"function\",...}); none withholds tool schemas, required/named are enforced post-generation (finish_reason \"tool_choice_unmet\" when unmet)"))

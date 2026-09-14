@@ -77,7 +77,7 @@ fn restore_spec() -> ActionSpec {
     .param(ParamSpec::new("s_churn", ParamType::Float, "stochastic churn strength").default(json!(d.s_churn)).min(0.0).max(40.0))
     .param(ParamSpec::new("s_noise", ParamType::Float, "churn noise scale").default(json!(d.s_noise)).min(0.5).max(1.5))
     .param(ParamSpec::new("restore_cfg", ParamType::Float, "s_stage1: restoration guidance strength toward the clean re-encode; negative is OFF (upstream's own default)").default(json!(d.restore_cfg)))
-    .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (omit for 0)"))
+    .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (omit for random)"))
     .input(capability::BlobSpec::new("image", capability::Media::Image, "the degraded (LQ) image, HWC f32 in [0,1]").required())
     .output(capability::BlobSpec::new("image", capability::Media::Image, "the restored image"))
 }
@@ -97,7 +97,7 @@ fn opts_from(inv: &Invocation, caption: String) -> RestoreOptions {
         s_churn: inv.get_f64("s_churn").unwrap_or(d.s_churn as f64) as f32,
         s_noise: inv.get_f64("s_noise").unwrap_or(d.s_noise as f64) as f32,
         restore_cfg: inv.get_f64("restore_cfg").unwrap_or(d.restore_cfg as f64) as f32,
-        seed: inv.get_i64("seed").unwrap_or(0).max(0) as u64,
+        seed: inv.get_i64("seed").map(|s| s.max(0) as u64).unwrap_or_else(data::rng::random_seed),
         caption,
         positive_suffix: inv.get_str("positive_suffix").unwrap_or(d.positive_suffix),
         negative_prompt: inv.get_str("negative_prompt").unwrap_or(d.negative_prompt),

@@ -104,6 +104,10 @@ fn infer(args: &[String]) {
         }
         i += 1;
     }
+    if !args.iter().any(|a| a == "--seed") {
+        seed = data::rng::random_seed();
+        eprintln!("qwen35moe infer: no --seed given, using random seed {seed} (pass --seed {seed} to reproduce)");
+    }
     if weights.is_empty() || (tokenizer.is_empty() && gguf_for_tok.is_empty()) {
         eprintln!(
             "usage: brain qwen35moe infer --weights F (--tokenizer tokenizer.json | --gguf original.gguf) --prompt \"...\" \

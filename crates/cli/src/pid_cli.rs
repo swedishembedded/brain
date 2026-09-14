@@ -113,6 +113,10 @@ fn parse_train(args: &[String]) -> TrainCfg {
         }
         i += 2;
     }
+    if !args.iter().any(|a| a == "--seed") {
+        c.seed = data::rng::random_seed();
+        println!("pid train: no --seed given, using random seed {} (pass --seed {} to reproduce)", c.seed, c.seed);
+    }
     c
 }
 

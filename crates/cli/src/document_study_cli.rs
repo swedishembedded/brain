@@ -323,8 +323,16 @@ pub fn run(args: &[String]) {
     let seqs = a.usize_or("--seqs", SftConfig::default().seqs);
     let batch = a.u32_or("--batch", SftConfig::default().batch);
     let lr = a.f32_or("--lr", SftConfig::default().lr);
-    let seed = a.u64_or("--seed", DocumentStudyConfig::default().seed);
-    let null_gate_seed = a.u64_or("--null-gate-seed", DocumentStudyConfig::default().null_gate_seed);
+    let mut seed = a.u64_or("--seed", DocumentStudyConfig::default().seed);
+    let mut null_gate_seed = a.u64_or("--null-gate-seed", DocumentStudyConfig::default().null_gate_seed);
+    if !args.iter().any(|s| s == "--seed") {
+        seed = data::rng::random_seed();
+        eprintln!("document study: no --seed given, using random seed {seed} (pass --seed {seed} to reproduce)");
+    }
+    if !args.iter().any(|s| s == "--null-gate-seed") {
+        null_gate_seed = data::rng::random_seed();
+        eprintln!("document study: no --null-gate-seed given, using random seed {null_gate_seed} (pass --null-gate-seed {null_gate_seed} to reproduce)");
+    }
     let models_dir = a.take_str("--models-dir");
     let quiet = a.take_flag("--quiet");
     let dry_run = a.take_flag("--dry-run");

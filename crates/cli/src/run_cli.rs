@@ -316,6 +316,10 @@ pub fn run_serve(args: &[String]) {
         }
         i += 1;
     }
+    if !args.iter().any(|a| a == "--seed") {
+        cfg.seed = data::rng::random_seed();
+        eprintln!("brain serve: no --seed given, using random seed {} (pass --seed {} to reproduce)", cfg.seed, cfg.seed);
+    }
 
     let surfaces_requested =
         dbus as usize + anthropic.is_some() as usize + openai.is_some() as usize + openrouter.is_some() as usize;

@@ -529,6 +529,10 @@ fn generate(args: &[String]) -> Result<(), String> {
     }
     let prompt = prompt.ok_or("--prompt is required")?;
     let out = out.ok_or("--out is required")?;
+    if !args.iter().any(|a| a == "--seed") {
+        o.seed = data::rng::random_seed();
+        eprintln!("flux2: no --seed given, using random seed {} (pass --seed {} to reproduce)", o.seed, o.seed);
+    }
 
     // Read every reference's pixels BEFORE any of them is bounded: the canvas
     // has to be settled first. A windowed run's first reference is the anchor
@@ -869,6 +873,9 @@ fn finetune(args: &[String]) -> Result<(), String> {
     let data_dir = data_dir.ok_or("the dataset directory is required (a positional argument)")?;
     if opts.save_path.is_empty() {
         return Err("--out is required".into());
+    }
+    if !args.iter().any(|a| a == "--seed") {
+        opts.seed = data::rng::random_seed();
     }
     check_adapter_out(&opts.save_path)?;
     // `encode_samples` enforces this too, but only after the whole dataset has

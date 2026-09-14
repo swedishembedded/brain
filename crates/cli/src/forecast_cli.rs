@@ -55,7 +55,7 @@ fn predict(args: &[String]) {
     let context = a.usize_or("--context", 0); // 0 = the model's own max_context
     let samples = a.usize_or("--samples", 1);
     let origins = a.usize_or("--origins", 1);
-    let seed = a.u64_or("--seed", 7);
+    let mut seed = a.u64_or("--seed", 7);
     let season = a.usize_or("--season", DEFAULT_SEASON);
     let item = a.str_or("--item", "series");
     let freq = a.str_or("--freq", "1h");
@@ -66,6 +66,10 @@ fn predict(args: &[String]) {
     let kronos_dec = a.take_str("--kronos-decoder");
     let timesfm3_weights = a.take_str("--timesfm3");
     a.finish();
+    if !args.iter().any(|s| s == "--seed") {
+        seed = data::rng::random_seed();
+        eprintln!("brain forecast predict: no --seed given, using random seed {seed} (pass --seed {seed} to reproduce)");
+    }
 
     // The two sampling knobs that set how WIDE the predicted band is. Left
     // unset, the model keeps the reference defaults; the coverage line below is

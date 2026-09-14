@@ -108,8 +108,11 @@ fn finetune(args: &[String]) {
     if out.is_empty() {
         out = if full { "out/tts/talker_full.safetensors".to_string() } else { "out/tts/talker_lora.safetensors".to_string() };
     }
+    if !args.iter().any(|a| a == "--seed") {
+        o.seed = data::rng::random_seed();
+    }
     let mode = if full { "full".to_string() } else { format!("LoRA r={} α={}", o.rank, o.alpha) };
-    eprintln!("tts finetune [{mode}]: base={base} data={data_dir} steps={} lr={} -> {out}", o.steps, o.lr);
+    eprintln!("tts finetune [{mode}]: base={base} data={data_dir} steps={} lr={} seed={} -> {out}", o.steps, o.lr, o.seed);
     let result = if full {
         qwen3tts::sft::finetune_full(&base, std::path::Path::new(&data_dir), &out, &o)
     } else {
@@ -296,6 +299,10 @@ fn parse_common(args: &[String]) -> (CommonArgs, std::collections::HashMap<Strin
             other => eprintln!("ignoring unknown flag {other:?}"),
         }
         i += 1;
+    }
+    if !args.iter().any(|a| a == "--seed") {
+        opts.seed = data::rng::random_seed();
+        eprintln!("tts: no --seed given, using random seed {} (pass --seed {} to reproduce)", opts.seed, opts.seed);
     }
     let mut overrides = std::collections::BTreeMap::new();
     if let Some(w) = weights_dir {

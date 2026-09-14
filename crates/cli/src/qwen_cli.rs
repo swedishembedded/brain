@@ -308,6 +308,10 @@ fn infer(args: &[String]) {
         eprintln!("usage: brain qwen3 infer --weights F --tokenizer tokenizer.json --prompt \"...\" [--max-new N --temp X --top-k K --chat]");
         return;
     }
+    if !args.iter().any(|a| a == "--seed") {
+        seed = data::rng::random_seed();
+        eprintln!("qwen3 infer: no --seed given, using random seed {seed} (pass --seed {seed} to reproduce)");
+    }
     let tok = match data::qwen_tokenizer::QwenBpe::from_file(&tokenizer) {
         Ok(t) => t,
         Err(e) => {
@@ -421,6 +425,10 @@ fn train(args: &[String], base: Option<&str>) {
     if data_dir.is_empty() {
         eprintln!("usage: brain qwen3 {{train|finetune}} <data_dir> --out F [--steps N --batch B --block T --lr X --mask = --align]");
         return;
+    }
+    if !args.iter().any(|a| a == "--seed") {
+        seed = data::rng::random_seed();
+        println!("qwen3 train: no --seed given, using random seed {seed} (pass --seed {seed} to reproduce)");
     }
     // A small default architecture for from-scratch training; finetune reads the
     // architecture from the base checkpoint instead.
@@ -625,6 +633,10 @@ fn finetune_lora(args: &[String]) {
         return;
     }
     let alpha = alpha.unwrap_or(rank as f32 * 2.0);
+    if !args.iter().any(|a| a == "--seed") {
+        seed = data::rng::random_seed();
+        println!("qwen3 finetune (lora): no --seed given, using random seed {seed} (pass --seed {seed} to reproduce)");
+    }
 
     let store_root = crate::model_dir::resolve(models_dir.as_deref());
     let (base_weights_path, base_dir, base_id) = match resolve_base(&base, store_root.as_deref()) {

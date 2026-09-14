@@ -73,7 +73,7 @@ fn checkpoint_and_sampling_params(spec: ActionSpec) -> ActionSpec {
             ParamType::Float,
             &format!("repetition penalty (1.0 = disabled; the resolved value is what keeps codebook-0 out of a silent repetition loop); {RESOLVED} 1.05"),
         ))
-        .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (reproducible run)").default(json!(0)))
+        .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (reproducible run; omit for random)"))
 }
 
 /// [`checkpoint_and_sampling_params`] plus the single-request `text`, shared
@@ -96,9 +96,7 @@ fn gen_opts_from(inv: &Invocation) -> GenOpts {
     opts.sampling.top_k = inv.get_i64("top_k").map(|k| k.max(0) as usize);
     opts.sampling.top_p = inv.get_f64("top_p").map(|p| p as f32);
     opts.sampling.repetition_penalty = inv.get_f64("repetition_penalty").map(|r| r as f32);
-    if let Some(s) = inv.get_i64("seed") {
-        opts.seed = s.max(0) as u64;
-    }
+    opts.seed = inv.get_i64("seed").map(|s| s.max(0) as u64).unwrap_or_else(data::rng::random_seed);
     opts
 }
 
@@ -185,7 +183,7 @@ pub fn speak_spec() -> ActionSpec {
         .param(ParamSpec::new("lang", ParamType::Str, "synthesis language").default(json!("english")))
         .param(ParamSpec::new("temp", ParamType::Float, "sampling temperature").default(json!(0.9)))
         .param(ParamSpec::new("top_k", ParamType::Int, "top-k sampling cutoff").default(json!(50)))
-        .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (reproducible run)").default(json!(0)))
+        .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (reproducible run; omit for random)"))
         .param(ParamSpec::new("max_frames", ParamType::Int, "max codec frames (length cap)").default(json!(256)))
         .output(BlobSpec::new("audio", Media::Audio, "the synthesized speech: raw mono f32 little-endian PCM at 24 kHz"))
 }
@@ -204,7 +202,7 @@ pub fn design_spec() -> ActionSpec {
         .param(ParamSpec::new("speaker", ParamType::Str, "CustomVoice preset speaker name").default(json!("")))
         .param(ParamSpec::new("temp", ParamType::Float, "sampling temperature").default(json!(0.9)))
         .param(ParamSpec::new("top_k", ParamType::Int, "top-k sampling cutoff").default(json!(50)))
-        .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (reproducible run)").default(json!(0)))
+        .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (reproducible run; omit for random)"))
         .param(ParamSpec::new("max_frames", ParamType::Int, "max codec frames (length cap)").default(json!(256)))
         .output(BlobSpec::new("audio", Media::Audio, "the designed-voice speech: raw mono f32 little-endian PCM at 24 kHz"))
 }

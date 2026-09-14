@@ -44,7 +44,7 @@ pub(crate) fn generate_spec(summary: &str, chat: bool) -> ActionSpec {
         .param(ParamSpec::new("max_new", ParamType::Int, "number of new tokens to generate").default(json!(128)))
         .param(ParamSpec::new("temp", ParamType::Float, "sampling temperature (<= 0 = greedy)").default(json!(0.8)))
         .param(ParamSpec::new("top_k", ParamType::Int, "top-k filter (40 = standard; 1 = greedy; 0 or negative = disabled)").default(json!(40)))
-        .param(ParamSpec::new("seed", ParamType::Int, "RNG seed").default(json!(0)));
+        .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (omit for random)"));
     if chat {
         s = s
             .streaming()

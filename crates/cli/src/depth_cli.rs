@@ -716,6 +716,10 @@ fn run_train(args: &[String]) {
         eprintln!("brain zipdepth train: --size must be multiples of 32 (got {w}x{h})");
         std::process::exit(2);
     }
+    if !args.iter().any(|a| a == "--seed") {
+        seed = data::rng::random_seed();
+        println!("zipdepth train: no --seed given, using random seed {seed} (pass --seed {seed} to reproduce)");
+    }
 
     // Fine-tuning a released checkpoint must build the MATCHING variant; fresh
     // training defaults to the base (unfold-upsampler) layout.

@@ -630,6 +630,9 @@ fn t2v(args: &[String]) -> Result<(), String> {
         }
         i += 2;
     }
+    if !args.iter().any(|a| a == "--seed") {
+        o.seed = data::rng::random_seed();
+    }
     // One scene is what a `--prompt`/`--frames` run always was, so the whole
     // command below has exactly one shape to handle.
     let scenes: Vec<ltxv::longform::Scene> = if scene_specs.is_empty() {
@@ -846,6 +849,9 @@ fn upscale(args: &[String]) -> Result<(), String> {
         }
         i += 2;
     }
+    if !args.iter().any(|a| a == "--seed") {
+        o.base.seed = data::rng::random_seed();
+    }
     let input = input.ok_or("--input is required")?;
     let out = out.ok_or("--output-path is required")?;
     let paths = resolve_ltxv(&overrides, upsampler_spatial.as_deref())?;
@@ -967,6 +973,9 @@ fn v2v(args: &[String]) -> Result<(), String> {
             other => return Err(format!("unknown flag {other}\n\n{V2V_HELP}")),
         }
         i += 2;
+    }
+    if !args.iter().any(|a| a == "--seed") {
+        o.base.seed = data::rng::random_seed();
     }
     let input = input.ok_or("--input is required")?;
     let out = out.ok_or("--output-path is required")?;
@@ -1091,6 +1100,9 @@ fn dfr(args: &[String]) -> Result<(), String> {
             other => return Err(format!("unknown flag {other}\n\n{DFR_HELP}")),
         }
         i += 2;
+    }
+    if !args.iter().any(|a| a == "--seed") {
+        o.base.seed = data::rng::random_seed();
     }
     let prompt = prompt.ok_or("--prompt is required")?;
     let out = out.ok_or("--output-path is required")?;

@@ -76,6 +76,10 @@ fn train(args: &[String]) {
     cfg.d_model = a.u32_or("--d-model", cfg.d_model);
     cfg.n_heads = a.u32_or("--heads", cfg.n_heads);
     o.seed = a.u64_or("--seed", o.seed);
+    if !args.iter().any(|s| s == "--seed") {
+        o.seed = data::rng::random_seed();
+        println!("gpt train: no --seed given, using random seed {} (pass --seed {} to reproduce)", o.seed, o.seed);
+    }
     if let Some(m) = a.char_opt("--mask") {
         o.mask_before = Some(m);
         o.mask_per_line = true;
@@ -104,11 +108,15 @@ fn gen(args: &[String]) {
     let max_new = a.usize_or("--max-new", 200);
     let temp = a.f32_or("--temp", 0.8);
     let top_k = a.usize_or("--top-k", 40);
-    let seed = a.u64_or("--seed", 1234);
+    let mut seed = a.u64_or("--seed", 1234);
     a.finish();
     if weights.is_empty() {
         eprintln!("usage: brain gpt infer --weights F [--data <dir>] [--prompt ... --max-new N --temp X --top-k K]");
         return;
+    }
+    if !args.iter().any(|s| s == "--seed") {
+        seed = data::rng::random_seed();
+        eprintln!("gpt infer: no --seed given, using random seed {seed} (pass --seed {seed} to reproduce)");
     }
     let itos = match gpt2::model::Gpt::load_itos(&weights) {
         Some(itos) => itos,

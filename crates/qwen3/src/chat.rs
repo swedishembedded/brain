@@ -241,11 +241,17 @@ pub fn find_stop(text: &str, stops: &[String]) -> Option<usize> {
 }
 
 /// Read the four shared sampling params (with the spec defaults).
+///
+/// `seed` is the one param that is NOT a fixed spec default: a request that
+/// omits it gets a real random seed ([`data::rng::random_seed`]), not a
+/// hardcoded `0` - two back-to-back unseeded requests must not decode the
+/// same sequence. A caller that wants a reproducible decode passes `seed`
+/// explicitly, same as today.
 pub fn sampling_params(inv: &Invocation) -> (usize, f32, usize, u64) {
     let max_new = inv.get_i64("max_new").unwrap_or(128).max(0) as usize;
     let temp = inv.get_f64("temp").unwrap_or(0.8) as f32;
     let top_k = inv.get_i64("top_k").unwrap_or(40).max(0) as usize;
-    let seed = inv.get_i64("seed").unwrap_or(0).max(0) as u64;
+    let seed = inv.get_i64("seed").map(|s| s.max(0) as u64).unwrap_or_else(data::rng::random_seed);
     (max_new, temp, top_k, seed)
 }
 

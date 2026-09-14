@@ -235,7 +235,7 @@ impl Action for ZAction {
                     // refuses an unbuildable one by name at its own entry.
                     size: u32_param(inv, "size", 512)?,
                     cap_len: u32_param(inv, "cap_len", crate::pipeline::DEFAULT_CAP_LEN)?,
-                    seed: inv.get_i64("seed").unwrap_or(0).max(0) as u64,
+                    seed: inv.get_i64("seed").map(|s| s.max(0) as u64).unwrap_or_else(data::rng::random_seed),
                     two_gpu: !inv.get_bool("one_gpu").unwrap_or(false),
                     save_path: save.clone(),
                     ckpt_every: 100,

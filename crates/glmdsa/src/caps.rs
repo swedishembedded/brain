@@ -78,7 +78,7 @@ pub fn manifest() -> Manifest {
         .param(ParamSpec::new("max_new", ParamType::Int, "number of new tokens to generate").default(json!(128)))
         .param(ParamSpec::new("temp", ParamType::Float, "sampling temperature (<= 0 = greedy)").default(json!(0.8)))
         .param(ParamSpec::new("top_k", ParamType::Int, "top-k filter (40 = standard; 1 = greedy; 0 or negative = disabled)").default(json!(40)))
-        .param(ParamSpec::new("seed", ParamType::Int, "RNG seed").default(json!(0)))
+        .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (omit for random)"))
         .output(BlobSpec::new("text", Media::Text, "the generated text"));
     Manifest::new(MODEL, "GLM-5.2 decoder (MLA + sigmoid noaux_tc MoE + DSA indexer): char-level text generation.", vec![generate])
 }
@@ -104,7 +104,7 @@ pub fn sampling(inv: &Invocation) -> (usize, f32, usize, u64) {
         inv.get_i64("max_new").unwrap_or(128).max(0) as usize,
         inv.get_f64("temp").unwrap_or(0.8) as f32,
         inv.get_i64("top_k").unwrap_or(40).max(0) as usize,
-        inv.get_i64("seed").unwrap_or(0).max(0) as u64,
+        inv.get_i64("seed").map(|s| s.max(0) as u64).unwrap_or_else(data::rng::random_seed),
     )
 }
 
@@ -227,7 +227,7 @@ mod tests {
     /// the values agree perfectly at the precision the sampler uses.
     #[test]
     fn the_read_defaults_match_the_declared_defaults() {
-        let (max_new, temp, top_k, seed) = sampling(&Invocation::default());
+        let (max_new, temp, top_k, _seed) = sampling(&Invocation::default());
         let spec = &manifest().actions[0];
         let declared = |name: &str| {
             spec.params.iter().find(|p| p.name == name).and_then(|p| p.default.clone()).unwrap_or_else(|| panic!("'{name}' declares no default"))
@@ -236,7 +236,26 @@ mod tests {
         assert_eq!(declared("max_new").as_i64(), Some(max_new as i64));
         assert_eq!(declared("temp").as_f64().map(|v| v as f32), Some(temp));
         assert_eq!(declared("top_k").as_i64(), Some(top_k as i64));
-        assert_eq!(declared("seed").as_i64(), Some(seed as i64));
+        // `seed` is deliberately excluded from this "read matches declared"
+        // check: it is the one param with NO declared default any more (an
+        // omitted seed must randomize, not silently repeat `0` - see
+        // `random_seed_differs_across_consecutive_calls` below), so there is
+        // no fixed value here to pin against.
+        assert!(
+            spec.params.iter().find(|p| p.name == "seed").and_then(|p| p.default.clone()).is_none(),
+            "'seed' must not declare a fixed default"
+        );
+    }
+
+    /// The shape of "randomized": two back-to-back reads of an omitted seed
+    /// must not collide. Not a distribution test - just "not deterministically
+    /// equal" - see `data::rng::random_seed`'s own doc for why this is not
+    /// flaky (a per-process counter is mixed in).
+    #[test]
+    fn random_seed_differs_across_consecutive_calls() {
+        let (_, _, _, a) = sampling(&Invocation::default());
+        let (_, _, _, b) = sampling(&Invocation::default());
+        assert_ne!(a, b, "two consecutive unseeded reads must not collide");
     }
 
     #[test]

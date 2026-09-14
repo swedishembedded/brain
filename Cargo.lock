@@ -1655,6 +1655,7 @@ dependencies = [
  "brain-capability",
  "brain-checkpoint",
  "brain-clip",
+ "brain-data",
  "brain-flux1",
  "brain-gpu-core",
  "brain-imaging",

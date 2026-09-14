@@ -86,8 +86,12 @@ fn run_finetune(rest: &[String]) {
     let lr = a.f32_or("--lr", 1e-4);
     let wd = a.f32_or("--wd", 1e-2);
     let clip = a.f32_or("--clip", 1.0);
-    let seed = a.u64_or("--seed", 7);
+    let mut seed = a.u64_or("--seed", 7);
     let device = a.take_str("--device");
+    if !rest.iter().any(|s| s == "--seed") {
+        seed = data::rng::random_seed();
+        println!("wm finetune: no --seed given, using random seed {seed} (pass --seed {seed} to reproduce)");
+    }
 
     let (cfg, tensors) = diamond::import::load(&weights).unwrap_or_else(|e| {
         eprintln!("cannot load {weights}: {e}");
@@ -349,7 +353,7 @@ fn run_play(rest: &[String]) {
     let model_name = a.str_or("--model", "fake");
     let fps = a.u32_or("--fps", 15);
     let scale = a.u32_or("--scale", 10);
-    let seed = a.u64_or("--seed", 7);
+    let mut seed = a.u64_or("--seed", 7);
     let headless = a.take_flag("--headless");
     let frames = a.u64_or("--frames", 0);
     let adaptive = a.take_flag("--adaptive");
@@ -363,6 +367,10 @@ fn run_play(rest: &[String]) {
     let onnx = a.take_str("--onnx");
     let seed_ctx = a.take_str("--seed-context");
     let denoise_steps = a.u32_or("--denoise-steps", 0); // 0 = model default
+    if !rest.iter().any(|s| s == "--seed") {
+        seed = data::rng::random_seed();
+        eprintln!("wm play: no --seed given, using random seed {seed} (pass --seed {seed} to reproduce)");
+    }
     let mut model =
         build_model(&model_name, seed, weights.as_deref(), device.as_deref(), onnx.as_deref());
     if denoise_steps > 0 {

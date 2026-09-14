@@ -232,6 +232,9 @@ fn t2v(args: &[String]) -> Result<(), String> {
     }
     let prompt = prompt.ok_or("--prompt is required")?;
     let out = out.ok_or("--output-path is required")?;
+    if !args.iter().any(|a| a == "--seed") {
+        o.seed = data::rng::random_seed();
+    }
     let paths = resolve_wan(dit.as_deref(), vae.as_deref(), t5.as_deref(), tokenizer.as_deref())?;
     // Flag wins over the environment variable, same precedence as every other
     // wan CLI option that has both (see `Paths::resolve`'s own doc).
@@ -340,6 +343,9 @@ fn finetune(args: &[String]) -> Result<(), String> {
     let data = data.ok_or("--data is required")?;
     let save = save.ok_or("--save is required")?;
     opts.save_path = save.clone();
+    if !args.iter().any(|a| a == "--seed") {
+        opts.seed = data::rng::random_seed();
+    }
     let cfg = match variant.as_str() {
         "t2v-1.3B" | "1.3b" | "1.3B" => WanConfig::t2v_1_3b(),
         "t2v-14B" | "14b" | "14B" => WanConfig::t2v_14b(),
@@ -347,7 +353,10 @@ fn finetune(args: &[String]) -> Result<(), String> {
     };
     let paths = Paths::from_env()?;
 
-    eprintln!("wan finetune: {} rank {} steps {} frames {} samples {} lr {} -> {}", cfg.name, opts.rank, opts.steps, opts.frames, opts.samples, opts.lr, save);
+    eprintln!(
+        "wan finetune: {} rank {} steps {} frames {} samples {} lr {} seed {} -> {}",
+        cfg.name, opts.rank, opts.steps, opts.frames, opts.samples, opts.lr, opts.seed, save
+    );
     let cancel = capability::CancelToken::default();
     let t0 = std::time::Instant::now();
     let mut losses: Vec<(u32, f32)> = Vec::new();

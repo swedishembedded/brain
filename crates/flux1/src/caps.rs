@@ -58,7 +58,7 @@ fn text2image_spec() -> ActionSpec {
         .param(ParamSpec::new("guidance", ParamType::Float, "guidance_in scalar -- dev/kontext-dev/krea-dev only, schnell ignores it").default(json!(3.5)).min(0.0).max(10.0).step(0.1))
         .param(ParamSpec::new("max_len", ParamType::Int, "T5-XXL context length").default(json!(DEFAULT_MAX_LEN)).min(32.0).max(crate::pipeline::MAX_TXT_LEN as f64).step(1.0))
         .param(ParamSpec::new("variant", ParamType::Enum(VARIANTS.iter().map(|s| s.to_string()).collect()), "model variant").default(json!("dev")))
-        .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (omit for 0)"))
+        .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (omit for random)"))
         .param(ParamSpec::new("precision", ParamType::Enum(PRECISIONS.iter().map(|s| s.to_string()).collect()), "DiT numeric tier -- int8 is what fits a 24 GiB card, fp32 is the parity reference").default(json!("fp32")))
         .param(ParamSpec::new("negative_prompt", ParamType::Str, "negative conditioning for true CFG; ignored unless true_cfg > 0"))
         .param(ParamSpec::new("true_cfg", ParamType::Float, "true classifier-free guidance scale on top of the distilled guidance scalar; 0 = disabled (default, single forward/step). Runs a SECOND DiT forward per step from cfg_start_step onward -- doubles cost while active").default(json!(0.0)).min(0.0).max(10.0).step(0.1))
@@ -96,7 +96,7 @@ fn req_from(inv: &Invocation) -> Req {
                 (s > 0).then_some(s as usize)
             },
             guidance: inv.get_f64("guidance").unwrap_or(3.5) as f32,
-            seed: inv.get_i64("seed").unwrap_or(0) as u64,
+            seed: inv.get_i64("seed").map(|s| s as u64).unwrap_or_else(data::rng::random_seed),
             height: inv.get_i64("height").unwrap_or(1024).max(16) as u32,
             width: inv.get_i64("width").unwrap_or(1024).max(16) as u32,
             start_step: 0, // meaningless here: plain flux1 never conditions (inject is always None)

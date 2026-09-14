@@ -118,7 +118,7 @@ pub fn manifest() -> Manifest {
         .param(ParamSpec::new("temp", ParamType::Float, "sampling temperature (<= 0 = greedy)").default(json!(0.0)).min(0.0).max(2.0).step(0.01))
         .param(ParamSpec::new("top_k", ParamType::Int, "top-k filter (40 = standard; 1 = greedy; 0 or negative = disabled)").default(json!(40)).min(0.0).max(1000.0).step(1.0))
         .param(ParamSpec::new("top_p", ParamType::Float, "nucleus sampling threshold (>= 1 = disabled)").default(json!(1.0)).min(0.0).max(1.0).step(0.01))
-        .param(ParamSpec::new("seed", ParamType::Int, "RNG seed").default(json!(0)))
+        .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (omit for random)"))
         .param(
             ParamSpec::new("precision", ParamType::Str, "model precision: fp32, or int8 (group-wise 32-element weight scales + dynamic activation quant)")
                 .default(json!("fp32")),
@@ -302,7 +302,7 @@ impl Action for GenerateAction {
                 let temp = inv.get_f64("temp").unwrap_or(0.0) as f32;
                 let top_k = inv.get_i64("top_k").unwrap_or(40).max(0) as usize;
                 let top_p = inv.get_f64("top_p").unwrap_or(1.0) as f32;
-                let seed = inv.get_i64("seed").unwrap_or(0).max(0) as u64;
+                let seed = inv.get_i64("seed").map(|s| s.max(0) as u64).unwrap_or_else(data::rng::random_seed);
                 let ids: Vec<u32> = prompt
                     .split(|c: char| c == ',' || c.is_whitespace())
                     .filter(|s| !s.is_empty())

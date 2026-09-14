@@ -510,7 +510,7 @@ impl KronosResident {
         base_forecast_spec("OHLCV forecast; context is [T, feat] bars, forecast is [horizon, feat] samples")
             .param(ParamSpec::new("temperature", ParamType::Float, "sampling temperature (0 or argmax=true => deterministic)").default(json!(1.0)))
             .param(ParamSpec::new("argmax", ParamType::Bool, "deterministic argmax decode").default(json!(true)))
-            .param(ParamSpec::new("seed", ParamType::Int, "RNG seed when sampling").default(json!(0)))
+            .param(ParamSpec::new("seed", ParamType::Int, "RNG seed when sampling (omit for random)"))
             .param(ParamSpec::new("samples", ParamType::Int, "sampled paths sharing one prefill (out [N,horizon,feat])").default(json!(1)))
             .param(ParamSpec::new("checkpoint", ParamType::Str,
                 "decoder checkpoint path override (.safetensors file or HF dir); \
@@ -651,7 +651,7 @@ fn kronos_opts(inv: &Invocation) -> kronos::generate::GenOpts {
     kronos::generate::GenOpts {
         temperature: inv.get_f64("temperature").unwrap_or(1.0) as f32,
         argmax: inv.get_bool("argmax").unwrap_or(true),
-        seed: inv.get_i64("seed").unwrap_or(0) as u64,
+        seed: inv.get_i64("seed").map(|s| s as u64).unwrap_or_else(data::rng::random_seed),
         ..Default::default()
     }
 }

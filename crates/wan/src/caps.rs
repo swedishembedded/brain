@@ -79,7 +79,7 @@ pub fn manifest() -> Manifest {
     .param(ParamSpec::new("steps", ParamType::Int, "denoise steps").default(json!(d.steps)))
     .param(ParamSpec::new("shift", ParamType::Float, "flow-matching sigma shift").default(json!(d.shift)))
     .param(ParamSpec::new("guidance", ParamType::Float, "classifier-free guidance; <= 1.0 runs ONE forward per step instead of two").default(json!(d.guidance)))
-    .param(ParamSpec::new("seed", ParamType::Int, "initial-noise seed (omit for 0)").default(json!(0)))
+    .param(ParamSpec::new("seed", ParamType::Int, "initial-noise seed (omit for random)"))
     .param(ParamSpec::new("fps", ParamType::Int, "frame rate reported with the clip").default(json!(d.fps)))
     .param(ParamSpec::new("solver", ParamType::Enum(SOLVERS.iter().map(|s| s.to_string()).collect()), "multistep flow-matching solver").default(json!("unipc")))
     .param(ParamSpec::new("variant", ParamType::Enum(VARIANTS.iter().map(|s| s.to_string()).collect()), "model variant; the checkpoint at BRAIN_WAN_DIT must match").default(json!("t2v-1.3B")))
@@ -143,7 +143,7 @@ pub fn gen_params_from(inv: &Invocation) -> Result<GenParams, String> {
         steps: inv.get_i64("steps").unwrap_or(d.steps as i64).max(1) as usize,
         shift: inv.get_f64("shift").unwrap_or(d.shift as f64) as f32,
         guidance: inv.get_f64("guidance").unwrap_or(d.guidance as f64) as f32,
-        seed: inv.get_i64("seed").unwrap_or(0).max(0) as u64,
+        seed: inv.get_i64("seed").map(|s| s.max(0) as u64).unwrap_or_else(data::rng::random_seed),
         // Absent = upstream's own negative prompt; an explicitly empty string
         // is a real request for none, so it must survive as `Some("")`.
         negative_prompt: inv.get_str("negative_prompt"),
@@ -327,7 +327,10 @@ mod tests {
         assert_eq!(def("steps"), Some(json!(50)));
         assert_eq!(def("shift"), Some(json!(5.0)));
         assert_eq!(def("guidance"), Some(json!(5.0)));
-        assert_eq!(def("seed"), Some(json!(0)));
+        // No declared default any more: an omitted seed resolves to a random
+        // value at the resolver (`data::rng::random_seed`), not a fixed 0 -
+        // see `gen_params_from`.
+        assert_eq!(def("seed"), None);
         assert_eq!(def("fps"), Some(json!(16)));
         assert_eq!(def("solver"), Some(json!("unipc")));
         assert_eq!(def("variant"), Some(json!("t2v-1.3B")));

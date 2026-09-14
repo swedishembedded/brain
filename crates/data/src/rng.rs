@@ -71,6 +71,60 @@ impl Rng {
     }
 }
 
+/// A real (non-reproducible) `u64` seed for the ONE case [`Rng::new`]'s
+/// deterministic contract must not cover: a CLI flag or a served request's
+/// `seed` field left unset. Every model's `--seed`/`seed` used to default the
+/// missing case to a hardcoded `0`, which made two back-to-back unseeded runs
+/// byte-identical - indistinguishable from a caller who deliberately asked
+/// for `--seed 0`. This is the ONE shared source of entropy for that "no seed
+/// given" resolution, called at the CLI argument-parsing boundary or the
+/// served-request boundary - never from a library `Default` impl, which must
+/// stay on the deterministic `0` every existing test and library caller
+/// already relies on.
+///
+/// `std`-only (no `rand`/`getrandom` dependency): mixes wall-clock
+/// nanoseconds, the process id and a per-process atomic counter (so two calls
+/// in the same nanosecond-resolution tick, or two processes started in the
+/// same tick, still diverge) through the same SplitMix64 finalizer as
+/// [`Rng::next_u64`], additionally XORing in 8 bytes from `/dev/urandom` on
+/// Unix when available - best-effort, so a chroot/container without it still
+/// returns a value instead of panicking.
+///
+/// NOT reproducible and not itself a PRNG: a caller who needs a fixed stream
+/// still seeds [`Rng::new`] (or the model's own generator) explicitly, either
+/// with a value of their own or with the one this function just produced
+/// (callers print it for exactly that reason).
+pub fn random_seed() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let pid = std::process::id() as u64;
+    let count = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mut mixed = nanos ^ pid.rotate_left(17) ^ count.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+
+    #[cfg(unix)]
+    {
+        use std::io::Read;
+        if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+            let mut buf = [0u8; 8];
+            if f.read_exact(&mut buf).is_ok() {
+                mixed ^= u64::from_le_bytes(buf);
+            }
+        }
+    }
+
+    // SplitMix64 finalizer (same as `Rng::next_u64`) so the mixed bits are
+    // well-distributed rather than passed straight through.
+    let mut z = mixed;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
 /// The deterministic LCG that fixtures, parity probes and kernel tests use to
 /// fill buffers without pulling in `rand` — and the sanctioned home for
 /// PRODUCTION deterministic init too (e.g. seeding a LoRA/adapter weight):
@@ -217,5 +271,16 @@ mod tests {
             let f = r.next_f64();
             assert!((0.0..1.0).contains(&f));
         }
+    }
+
+    /// The one property that matters for "was `--seed` explicitly given":
+    /// two back-to-back resolutions of an unset seed must NOT be
+    /// deterministically equal. The per-process counter this mixes in makes
+    /// that a guarantee, not a statistical hope, so this is not a flaky test.
+    #[test]
+    fn random_seed_differs_across_consecutive_calls() {
+        let a = super::random_seed();
+        let b = super::random_seed();
+        assert_ne!(a, b, "two consecutive unseeded resolutions must not collide");
     }
 }
