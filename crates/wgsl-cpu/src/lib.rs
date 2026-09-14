@@ -527,6 +527,7 @@ fn compile_one(
         powf_ref,
         loop_stack: Vec::new(),
         latch,
+        active_addr: None,
     };
     // Apply constant local initialisers now that the translator exists.
     let inits: Vec<(Handle<naga::LocalVariable>, Handle<Expression>)> = tr
@@ -735,6 +736,14 @@ fn compile_one_wg(
     let mut buf_base: HashMap<u32, Value> = HashMap::new();
     let mut uniform_binding = None;
     let mut wg_mem: HashMap<Handle<naga::GlobalVariable>, (Value, Ty)> = HashMap::new();
+    // Every `var<workgroup>` array, with the element count that has to be
+    // re-zeroed at the start of EVERY work-group. The stack slot is allocated
+    // once and reused for all of them, so without this a slot no invocation
+    // writes on this pass reads back the previous work-group's value - and
+    // WGSL guarantees it reads zero. A reduction whose tail lanes are inactive
+    // folds that stale value into its sum and reports a plausible wrong
+    // number, which is why this is not left to "the kernels always write it".
+    let mut wg_fill: Vec<(Value, Ty, i64)> = Vec::new();
     for (h, gv) in nmod.global_variables.iter() {
         match gv.space {
             AddressSpace::Uniform => uniform_binding = gv.binding.as_ref().map(|b| b.binding),
@@ -754,6 +763,7 @@ fn compile_one_wg(
                 ));
                 let base = builder.ins().stack_addr(ptr_ty, slot, 0);
                 wg_mem.insert(h, (base, elem));
+                wg_fill.push((base, elem, count as i64));
             }
             other => return Err(format!("unsupported address space {other:?}")),
         }
@@ -804,14 +814,37 @@ fn compile_one_wg(
     builder.ins().brif(wg_done, exit, &[], wg_body, &[]);
 
     builder.switch_to_block(wg_body);
+    // WGSL zero-initialises `var<workgroup>` at the start of every work-group;
+    // a reused stack slot does not, so do it explicitly here, once per
+    // work-group, before either segment runs.
+    for (base, elem, count) in &wg_fill {
+        let zero = match elem {
+            Ty::F32 => builder.ins().f32const(0.0),
+            t => builder.ins().iconst(cl_ty(*t), 0),
+        };
+        emit_fill(&mut builder, *base, *count, zero);
+    }
+    // The per-invocation "still running" mask. An invocation that returns
+    // before the barrier has left the kernel for good - WGSL's uniformity rule
+    // is what makes a pre-barrier return legal, and it means the invocation
+    // does no further work AT ALL, not merely none before the barrier. The two
+    // segments are separate loops here, so the fact has to be carried across
+    // them in work-group scratch; a per-invocation SSA local could not survive
+    // the split (that is exactly what `f6` refuses).
+    let active_slot = builder.create_sized_stack_slot(StackSlotData::new(
+        StackSlotKind::ExplicitSlot,
+        (wgsize as u32) * 4,
+        2,
+    ));
+    let active_base = builder.ins().stack_addr(ptr_ty, active_slot, 0);
     // The work-group / global ids are recomputed inside each invocation loop from
     // `wg` (the loop-header param) so every operand is block-local — avoids
     // cross-block dominance issues for values shared by both segment loops.
     let bx = WgBuiltins { wg, gx, gy, wgsize: wgsize as i32 };
-    for (seg, c) in [(&seg_before, &no_carried), (&seg_after, &carried)] {
+    for (seg, c, first) in [(&seg_before, &no_carried, true), (&seg_after, &carried, false)] {
         emit_invocation_loop(
             &mut builder, nmod, func, seg, c, &ba, &wg_mem, &buf_base, uniform_ptr,
-            uniform_binding, &unary_refs, powf_ref, &bx,
+            uniform_binding, &unary_refs, powf_ref, &bx, active_base, first,
         )?;
     }
     builder.ins().jump(wg_latch, &[]);
@@ -825,6 +858,33 @@ fn compile_one_wg(
     builder.seal_all_blocks();
     builder.finalize();
     Ok(())
+}
+
+/// Emit `for i in 0..count { base[i] = value }` for a 4-byte-strided array,
+/// leaving control at the loop-exit block. `value` must be defined in a block
+/// that dominates this one.
+fn emit_fill(builder: &mut FunctionBuilder, base: Value, count: i64, value: Value) {
+    let header = builder.create_block();
+    builder.append_block_param(header, types::I64);
+    let body = builder.create_block();
+    let exit = builder.create_block();
+    let zero = builder.ins().iconst(types::I64, 0);
+    builder.ins().jump(header, &[BlockArg::from(zero)]);
+
+    builder.switch_to_block(header);
+    let i = builder.block_params(header)[0];
+    let n = builder.ins().iconst(types::I64, count);
+    let done = builder.ins().icmp(IntCC::UnsignedGreaterThanOrEqual, i, n);
+    builder.ins().brif(done, exit, &[], body, &[]);
+
+    builder.switch_to_block(body);
+    let off = builder.ins().imul_imm(i, 4);
+    let addr = builder.ins().iadd(base, off);
+    builder.ins().store(MemFlags::trusted(), value, addr, 0);
+    let next = builder.ins().iadd_imm(i, 1);
+    builder.ins().jump(header, &[BlockArg::from(next)]);
+
+    builder.switch_to_block(exit);
 }
 
 /// Per-workgroup builtin inputs shared by both segment loops. `wg` is the flat
@@ -853,6 +913,11 @@ fn emit_invocation_loop(
     unary_refs: &HashMap<&'static str, cranelift_codegen::ir::FuncRef>,
     powf_ref: cranelift_codegen::ir::FuncRef,
     bx: &WgBuiltins,
+    // Base of the per-invocation "still running" mask (one i32 per lane).
+    active_base: Value,
+    // True for the segment BEFORE the barrier, which arms the mask and may
+    // clear it; false for the segment after, which honours it.
+    first: bool,
 ) -> Result<(), String> {
     let lid_header = builder.create_block();
     builder.append_block_param(lid_header, types::I32);
@@ -886,6 +951,25 @@ fn emit_invocation_loop(
     let wgid = [wgid_x, wgid_y, z];
     let nwg = [bx.gx, bx.gy, one];
     let gid = [gid_x, wgid_y, z];
+
+    // This lane's slot in the mask.
+    let lid64 = builder.ins().uextend(types::I64, lid);
+    let active_off = builder.ins().imul_imm(lid64, 4);
+    let active_addr = builder.ins().iadd(active_base, active_off);
+    if first {
+        let alive = builder.ins().iconst(types::I32, 1);
+        builder.ins().store(MemFlags::trusted(), alive, active_addr, 0);
+    } else {
+        // An invocation that returned before the barrier does not run this
+        // segment either. Without this the surplus invocations of a padded
+        // grid - exactly the ones every `if (w >= p.n_wg) { return; }` guard
+        // exists to exclude - would write their output anyway.
+        let a = builder.ins().load(types::I32, MemFlags::trusted(), active_addr, 0);
+        let dead = builder.ins().icmp_imm(IntCC::Equal, a, 0);
+        let run = builder.create_block();
+        builder.ins().brif(dead, lid_latch, &[], run, &[]);
+        builder.switch_to_block(run);
+    }
 
     // Per-invocation scalar locals (SSA, re-initialised here each iteration).
     let mut locals: HashMap<Handle<naga::LocalVariable>, LocalSlot> = HashMap::new();
@@ -925,6 +1009,7 @@ fn emit_invocation_loop(
             powf_ref,
             loop_stack: Vec::new(),
             latch: lid_latch,
+            active_addr: if first { Some(active_addr) } else { None },
         };
         // Apply each local's initialiser expression (e.g. `var i = lid.x`).
         let inits: Vec<(Handle<naga::LocalVariable>, Handle<Expression>)> =
@@ -1029,6 +1114,11 @@ struct Tr<'a, 'b> {
     powf_ref: cranelift_codegen::ir::FuncRef,
     loop_stack: Vec<(cranelift_codegen::ir::Block, cranelift_codegen::ir::Block)>, // (continue, break)
     latch: cranelift_codegen::ir::Block,
+    /// Address of this invocation's slot in the work-group "still running"
+    /// mask, for the segment BEFORE the barrier. `None` everywhere else: the
+    /// one-output-per-invocation path has no segment after a barrier to
+    /// suppress, and the after-segment has already honoured the mask on entry.
+    active_addr: Option<Value>,
 }
 
 impl<'a, 'b> Tr<'a, 'b> {
@@ -1063,7 +1153,13 @@ impl<'a, 'b> Tr<'a, 'b> {
                     }
                 }
                 Statement::Return { .. } => {
-                    // Per-invocation early-out: skip to the next invocation.
+                    // Per-invocation early-out: skip to the next invocation -
+                    // and, in a work-group kernel, record that this lane is
+                    // done so the segment after the barrier skips it too.
+                    if let Some(addr) = self.active_addr {
+                        let dead = self.b.ins().iconst(types::I32, 0);
+                        self.b.ins().store(MemFlags::trusted(), dead, addr, 0);
+                    }
                     self.b.ins().jump(self.latch, &[]);
                     return Ok(false);
                 }
