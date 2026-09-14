@@ -20,7 +20,7 @@
 //! your team needs deterministic, never-silently-guessing model assembly, you
 //! can procure our services by emailing info@swedishembedded.com.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use capability::Assembly;
@@ -248,11 +248,30 @@ fn common_root(records: &[ArtifactRecord]) -> PathBuf {
     common.into_iter().collect()
 }
 
-fn near_misses(records: &[ArtifactRecord]) -> Vec<String> {
+/// Near-misses (an interrupted download, say) SCOPED to this arch: only a
+/// partial artifact sharing a [`vendor_dir`] with something `classify`
+/// actually recognized as one of this arch's OWN roles (at any confidence,
+/// any role - `classifications` is the spec's raw, pre-filter output) is
+/// surfaced. With nothing classified for this arch anywhere in the store,
+/// `relevant` is empty and this returns nothing at all, rather than every
+/// interrupted download in the entire store: an unscoped version of this
+/// once attached the SAME store-wide list of every `.part` file anywhere to
+/// EVERY unrelated architecture's `Missing` error (a FLUX.2 checkpoint's
+/// interrupted download printed under `fastvlm`'s "no artifact classifies"
+/// message, which shares nothing with FLUX.2 at all) - implying a
+/// connection that does not exist is worse than naming no near-miss.
+fn near_misses(records: &[ArtifactRecord], root: &Path, classifications: &[(usize, String, Confidence)]) -> Vec<String> {
+    let relevant: BTreeSet<PathBuf> = classifications.iter().filter_map(|(idx, _, _)| vendor_dir(&records[*idx].path, root)).collect();
+    if relevant.is_empty() {
+        return Vec::new();
+    }
     records
         .iter()
         .filter_map(|r| match &r.completeness {
-            Completeness::Partial { final_path } => Some(format!("an interrupted download exists at {}", final_path.display())),
+            Completeness::Partial { final_path } => {
+                let vendor = vendor_dir(&r.path, root)?;
+                relevant.contains(&vendor).then(|| format!("an interrupted download exists at {}", final_path.display()))
+            }
             _ => None,
         })
         .collect()
@@ -263,6 +282,68 @@ fn build_assembly(spec: &dyn ArchSpec, av: &AssembledVariant, chosen: &BTreeMap<
     let mut provenance: Vec<String> = chosen.iter().map(|(role, &idx)| format!("{role}: {}", records[idx].path.display())).collect();
     provenance.sort();
     Assembly { id: av.id.clone(), arch: spec.arch().to_string(), variant: av.variant.clone(), roles, provenance }
+}
+
+/// A search over every combination of the tied candidates across ALL
+/// currently-ambiguous roles at once, bounded by [`MAX_AUTO_RESOLVE_COMBINATIONS`]
+/// so a store with several roles each carrying several tied candidates
+/// cannot turn this into an unbounded search. A combination counts as a real
+/// success only if `spec.assemble` returns [`AssembleOutcome::Assembled`]
+/// AND `spec.validate` then accepts it - the exact bar [`resolve`]'s own
+/// success path holds every candidate to, never a looser one invented here.
+///
+/// Returns `Some` only when EXACTLY ONE combination succeeds - "nothing on
+/// disk answers this role except by naming one file among several that
+/// happen to share a filename shape" is a real, common situation (three of
+/// four tied checkpoints are missing a companion role, or are the wrong size
+/// for the ones that DID resolve), and picking the one candidate that
+/// actually assembles and validates is not a guess between real
+/// alternatives - there IS only one real alternative once the other tied
+/// candidates are checked against what is actually on disk. Two or more
+/// successes means two or more genuinely complete, independent checkpoints
+/// exist (e.g. a real 4B and a real 9B model, each with its own matching
+/// vae/te/tokenizer) - `None` in that case, same as hitting the bound, so
+/// the caller falls back to [`role_ambiguity`] and asks rather than guesses
+/// which of two real models the operator meant.
+const MAX_AUTO_RESOLVE_COMBINATIONS: usize = 4096;
+
+fn try_auto_resolve(spec: &dyn ArchSpec, ambiguous: &[(&'static str, &Vec<(usize, Confidence)>)], base_chosen: &BTreeMap<String, usize>, records: &[ArtifactRecord], overrides: &BTreeMap<String, String>) -> Option<(AssembledVariant, BTreeMap<String, usize>)> {
+    let total: usize = ambiguous.iter().map(|(_, c)| c.len()).product();
+    if total == 0 || total > MAX_AUTO_RESOLVE_COMBINATIONS {
+        return None;
+    }
+    let mut success: Option<(AssembledVariant, BTreeMap<String, usize>)> = None;
+    let mut indices = vec![0usize; ambiguous.len()];
+    loop {
+        let mut chosen = base_chosen.clone();
+        for (slot, &(role, cands)) in ambiguous.iter().enumerate() {
+            chosen.insert(role.to_string(), cands[indices[slot]].0);
+        }
+        if let Ok(AssembleOutcome::Assembled(av)) = spec.assemble(&chosen, records, overrides) {
+            let assembly = build_assembly(spec, &av, &chosen, records);
+            if spec.validate(&assembly).is_ok() {
+                if success.is_some() {
+                    return None; // a second genuinely complete option - ask, never guess
+                }
+                success = Some((av, chosen));
+            }
+        }
+        // Mixed-radix odometer increment across every ambiguous role's own
+        // candidate count; carrying out of the last slot means every
+        // combination has been tried.
+        let mut slot = 0;
+        loop {
+            if slot == indices.len() {
+                return success;
+            }
+            indices[slot] += 1;
+            if indices[slot] < ambiguous[slot].1.len() {
+                break;
+            }
+            indices[slot] = 0;
+            slot += 1;
+        }
+    }
 }
 
 /// One candidate per remaining ambiguous role, each carrying a COMPLETE
@@ -362,7 +443,7 @@ pub fn resolve(arch: &str, records: &[ArtifactRecord], specs: &[&dyn ArchSpec], 
     let missing: Vec<MissingRole> = per_role
         .iter()
         .filter(|(role, r)| matches!(r, RoleResult::None) && !optional.contains(role))
-        .map(|(role, _)| MissingRole { role: role.to_string(), doc: spec.missing_doc(role), near_misses: near_misses(records) })
+        .map(|(role, _)| MissingRole { role: role.to_string(), doc: spec.missing_doc(role), near_misses: near_misses(records, &root, &classifications) })
         .collect();
     if !missing.is_empty() {
         return Resolution::Missing(Box::new(Missing { arch: arch.to_string(), roles: missing }));
@@ -385,6 +466,22 @@ pub fn resolve(arch: &str, records: &[ArtifactRecord], specs: &[&dyn ArchSpec], 
                 chosen.insert(role.to_string(), cands[0].0);
             }
             RoleResult::None => {}
+        }
+    }
+
+    // Before asking a human: several tied candidates for a role are not
+    // necessarily a REAL choice between distinct checkpoints - one of them
+    // may simply be the only one whose companion roles actually assemble
+    // AND validate together (real production e.g.: four `dit` GGUFs tied at
+    // the same confidence, three of them sized for a different `vae`/`te`
+    // than what's on disk). Never picks between two genuinely complete,
+    // independent checkpoints - see [`try_auto_resolve`]'s own doc.
+    let ambiguous_roles: Vec<(&'static str, &Vec<(usize, Confidence)>)> =
+        per_role.iter().filter_map(|(role, r)| match r { RoleResult::Ambiguous(c) => Some((*role, c)), _ => None }).collect();
+    if !ambiguous_roles.is_empty() {
+        if let Some((av, picked)) = try_auto_resolve(spec, &ambiguous_roles, &chosen, records, overrides) {
+            let assembly = build_assembly(spec, &av, &picked, records);
+            return Resolution::Resolved(Box::new(assembly));
         }
     }
 
@@ -843,6 +940,24 @@ mod tests {
         }
     }
 
+    /// The bug this scoping exists to fix: an arch with ZERO classified
+    /// candidates anywhere in the store must not surface an interrupted
+    /// download that belongs to a totally unrelated vendor as a near-miss -
+    /// that implies a connection ("this is why YOUR role is empty") that
+    /// does not exist. Before scoping, `near_misses` listed every `.part`
+    /// file in the ENTIRE store under every architecture's `Missing` error
+    /// regardless of relevance.
+    #[test]
+    fn near_misses_are_empty_when_nothing_classifies_for_this_arch_at_all() {
+        let records = vec![partial_rec("/models/unrelated-vendor/unrelated-model.bin.part", "/models/unrelated-vendor/unrelated-model.bin")];
+        let spec = NoAcquisitionSpec;
+        let specs: Vec<&dyn ArchSpec> = vec![&spec];
+        match resolve("noacq", &records, &specs, &BTreeMap::new()) {
+            Resolution::Missing(m) => assert!(m.roles[0].near_misses.is_empty(), "{:?}", m.roles[0].near_misses),
+            other => panic!("expected Missing, got {other:?}"),
+        }
+    }
+
     #[test]
     fn a_guessed_only_candidate_never_resolves_on_its_own() {
         let records = vec![rec("/models/toy/dit.bin")];
@@ -932,6 +1047,88 @@ mod tests {
             }
             other => panic!("expected Ambiguous, got {other:?}"),
         }
+    }
+
+    /// A toy TWO-role arch ("dit", tied at the same confidence across
+    /// several candidates, plus a fixed "vae") whose `validate` accepts only
+    /// the `dit` candidate whose path contains a chosen marker substring -
+    /// the toy stand-in for a real cross-role shape/size compatibility check
+    /// (flux2's dit-vs-vae/te shapes, in production): several files tie for
+    /// one role, but only one of them is actually compatible with what the
+    /// OTHER role already resolved to.
+    struct CompatCheckSpec {
+        compatible_marker: &'static str,
+    }
+    impl ArchSpec for CompatCheckSpec {
+        fn arch(&self) -> &'static str {
+            "compat"
+        }
+        fn roles(&self) -> &'static [&'static str] {
+            &["dit", "vae"]
+        }
+        fn classify(&self, records: &[ArtifactRecord], _root: &Path) -> Vec<(usize, String, Confidence)> {
+            records
+                .iter()
+                .enumerate()
+                .filter_map(|(i, r)| {
+                    let s = r.path.to_string_lossy();
+                    if s.contains("vae") {
+                        Some((i, "vae".to_string(), Confidence::Declared))
+                    } else if s.contains("dit") {
+                        Some((i, "dit".to_string(), Confidence::Declared))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        }
+        fn assemble(&self, chosen: &BTreeMap<String, usize>, records: &[ArtifactRecord], _overrides: &BTreeMap<String, String>) -> Result<AssembleOutcome, String> {
+            let dit = *chosen.get("dit").ok_or("no dit")?;
+            chosen.get("vae").ok_or("no vae")?;
+            Ok(AssembleOutcome::Assembled(AssembledVariant { id: format!("local/compat-{}", records[dit].path.display()), variant: None }))
+        }
+        fn validate(&self, assembly: &Assembly) -> Result<(), String> {
+            let dit = assembly.roles.get("dit").ok_or("no dit in assembly")?;
+            if dit.to_string_lossy().contains(self.compatible_marker) {
+                Ok(())
+            } else {
+                Err("toy validate: incompatible shapes".to_string())
+            }
+        }
+    }
+
+    /// The gap this whole mechanism closes: several `dit` candidates tie at
+    /// the same confidence, but only ONE of them actually validates against
+    /// the already-resolved `vae` - there is only one REAL alternative once
+    /// the others are checked against what is actually on disk, so `resolve`
+    /// must serve it directly instead of asking the operator to pick between
+    /// options that were never really options.
+    #[test]
+    fn exactly_one_ambiguous_candidate_that_actually_validates_auto_resolves_instead_of_asking() {
+        let records = vec![rec("/models/toy/vae.bin"), rec("/models/toy/dit-GOOD.bin"), rec("/models/toy/dit-BAD.bin")];
+        let spec = CompatCheckSpec { compatible_marker: "GOOD" };
+        let specs: Vec<&dyn ArchSpec> = vec![&spec];
+        let out = resolve("compat", &records, &specs, &BTreeMap::new());
+        match out {
+            Resolution::Resolved(a) => assert_eq!(a.roles["dit"], PathBuf::from("/models/toy/dit-GOOD.bin")),
+            other => panic!("expected an unambiguous auto-resolve since only one candidate actually validates, got {other:?}"),
+        }
+    }
+
+    /// The other half of the same bar: when TWO tied candidates both
+    /// genuinely validate (two real, independent, complete checkpoints),
+    /// `resolve` must still ask rather than silently pick one - auto-resolve
+    /// only fires when there is exactly one real alternative, never when
+    /// there are several.
+    #[test]
+    fn two_ambiguous_candidates_that_both_validate_still_ask_rather_than_guess() {
+        let records = vec![rec("/models/toy/vae.bin"), rec("/models/toy/dit-a.bin"), rec("/models/toy/dit-b.bin")];
+        // Both dit files contain "dit", so both pass this marker check -
+        // both are genuinely "compatible", the two-real-checkpoints case.
+        let spec = CompatCheckSpec { compatible_marker: "dit" };
+        let specs: Vec<&dyn ArchSpec> = vec![&spec];
+        let out = resolve("compat", &records, &specs, &BTreeMap::new());
+        assert!(matches!(out, Resolution::Ambiguous(_)), "two genuinely valid candidates must still be asked about, never guessed: {out:?}");
     }
 
     #[test]

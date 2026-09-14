@@ -430,6 +430,82 @@ pub fn auto_fetch_enabled() -> bool {
     })
 }
 
+/// Walk `models_dir` for every `<vendor>/<repo>` entry not already served by
+/// `exec`, and run [`ModelSupplier::ensure`] on each in one detached
+/// background thread - the exact fetch/convert/register path a live request
+/// already takes for an unresolved model (an interrupted download re-fetched,
+/// a GGUF that needs the one-time import step converted), just run
+/// proactively at startup instead of waiting for a client to hit it.
+///
+/// The ONLY caller (`run_cli.rs::run_apis`) gates this behind `--autofetch`:
+/// this does real, unprompted network I/O and disk writes, which is exactly
+/// what that flag exists to require consent for - `crate::supply` never
+/// calls this on its own.
+///
+/// Every entry is attempted independently and its own failure is logged and
+/// skipped, never aborting the walk: a model with no serving adapter written
+/// yet (`Supply`'s own doc: "not fetchable... with a reason a caller can
+/// surface directly") fails here exactly as it would on a live request, at
+/// startup instead of on first use, and every OTHER entry still gets its
+/// turn. `ensure` is documented idempotent and single-flight, so running it
+/// again for an already-healthy model (nothing to fetch, already registered)
+/// is safe, if slightly wasteful - the model list is not large enough for
+/// that cost to matter, and it is simpler and more honest than trying to
+/// pre-guess which entries are "broken" ourselves and duplicating `ensure`'s
+/// own resolution logic to do it.
+pub fn heal_missing_models_in_background(models_dir: std::path::PathBuf, supplier: Arc<dyn ModelSupplier>, exec: Executor) {
+    let spawned = std::thread::Builder::new().name("brain-model-healer".to_string()).spawn(move || heal_all(&models_dir, supplier.as_ref(), &exec));
+    if let Err(e) = spawned {
+        residency::log::warn(&format!("model healer: could not spawn its background thread: {e}"));
+    }
+}
+
+/// Every `<vendor>/<repo>` id under `models_dir` that is not already in
+/// `already` - pulled out of [`heal_all`] so "which ids need healing" is
+/// testable without a real `Executor`/[`ModelSupplier`], and returned as an
+/// owned, sorted list rather than driven from inside the directory walk, so
+/// the order the caller attempts them in is deterministic.
+fn heal_candidates(models_dir: &Path, already: &std::collections::HashSet<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    let Ok(vendors) = std::fs::read_dir(models_dir) else { return out };
+    for vendor in vendors.flatten() {
+        let vendor_path = vendor.path();
+        if !vendor_path.is_dir() {
+            continue;
+        }
+        let Some(vendor_name) = vendor_path.file_name().and_then(|n| n.to_str()) else { continue };
+        let Ok(repos) = std::fs::read_dir(&vendor_path) else { continue };
+        for repo in repos.flatten() {
+            let repo_path = repo.path();
+            if !repo_path.is_dir() {
+                continue;
+            }
+            let Some(repo_name) = repo_path.file_name().and_then(|n| n.to_str()) else { continue };
+            let id = format!("{vendor_name}/{repo_name}");
+            if !already.contains(&id) {
+                out.push(id);
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// The synchronous walk [`heal_missing_models_in_background`] runs on its
+/// background thread - pulled out on its own so it can be driven directly
+/// (a fake [`ModelSupplier`], a temp directory, no real thread/network) rather
+/// than only ever observable by joining a background thread.
+fn heal_all(models_dir: &Path, supplier: &dyn ModelSupplier, exec: &Executor) {
+    let already: std::collections::HashSet<String> = exec.manifests().iter().map(|m| m.model.clone()).collect();
+    for id in heal_candidates(models_dir, &already) {
+        residency::log::info(&format!("model healer: attempting {id}"));
+        match supplier.ensure(&id, exec, &mut |_, _, _| {}) {
+            Ok(()) => residency::log::info(&format!("model healer: {id} is now servable")),
+            Err(e) => residency::log::warn(&format!("model healer: {id}: {e}")),
+        }
+    }
+}
+
 /// Auto-fetch `arch`'s [`brain_arch::Arch::default_ref`] checkpoint into the
 /// model store (fetching + converting exactly as [`StoreSupplier::ensure`]
 /// does for a server request), and return the path to its
@@ -1630,6 +1706,70 @@ pub(crate) mod tests {
         // Registered exactly once despite 8 concurrent callers.
         let names: Vec<String> = e.manifests().iter().map(|m| m.model.clone()).collect();
         assert_eq!(names, vec!["toy-qwen-gguf".to_string()]);
+    }
+
+    fn mkdir_all_under(root: &Path, rel: &str) {
+        std::fs::create_dir_all(root.join(rel)).unwrap();
+    }
+
+    #[test]
+    fn heal_candidates_skips_already_served_ids_and_sorts_the_rest() {
+        let s = store("brain-supply-heal-candidates");
+        mkdir_all_under(s.root(), "vendor/repoA");
+        mkdir_all_under(s.root(), "vendor/repoB");
+        mkdir_all_under(s.root(), "other/repoC");
+        // A loose file directly under a vendor dir (not a repo directory)
+        // must not be mistaken for a repo - only real subdirectories count.
+        std::fs::write(s.root().join("vendor").join("loose-file.txt"), b"x").unwrap();
+
+        let mut already = std::collections::HashSet::new();
+        already.insert("vendor/repoA".to_string());
+        let got = heal_candidates(s.root(), &already);
+        assert_eq!(got, vec!["other/repoC".to_string(), "vendor/repoB".to_string()]);
+    }
+
+    #[test]
+    fn heal_candidates_is_empty_for_a_fully_served_store() {
+        let s = store("brain-supply-heal-candidates-empty");
+        mkdir_all_under(s.root(), "vendor/repoA");
+        let mut already = std::collections::HashSet::new();
+        already.insert("vendor/repoA".to_string());
+        assert!(heal_candidates(s.root(), &already).is_empty());
+    }
+
+    /// Records every id it was asked to `ensure`, in call order, and fails
+    /// deterministically for any id containing "bad" - the toy stand-in for
+    /// a real family with no serving adapter written yet.
+    struct RecordingSupplier {
+        calls: Mutex<Vec<String>>,
+    }
+    impl ModelSupplier for RecordingSupplier {
+        fn classify(&self, _model: &str) -> Supply {
+            Supply::Fetchable
+        }
+        fn ensure(&self, model: &str, _exec: &Executor, _progress: &mut dyn FnMut(&str, u32, u32)) -> Result<(), String> {
+            self.calls.lock().unwrap().push(model.to_string());
+            if model.contains("bad") {
+                Err(format!("{model}: deliberately broken"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    /// REGRESSION target: one candidate failing (a family with no import
+    /// path, exactly like `Supply`'s own doc describes) must never abort the
+    /// walk - every OTHER candidate still gets its own attempt.
+    #[test]
+    fn heal_all_attempts_every_candidate_even_after_an_earlier_one_fails() {
+        let s = store("brain-supply-heal-all");
+        mkdir_all_under(s.root(), "vendor/bad-repo");
+        mkdir_all_under(s.root(), "vendor/good-repo");
+        let sup = RecordingSupplier { calls: Mutex::new(Vec::new()) };
+        heal_all(s.root(), &sup, &exec());
+        let mut calls = sup.calls.lock().unwrap().clone();
+        calls.sort();
+        assert_eq!(calls, vec!["vendor/bad-repo".to_string(), "vendor/good-repo".to_string()]);
     }
 
     /// A minimal GGUF (one f32 tensor) with a `qwen` family card, mirroring
