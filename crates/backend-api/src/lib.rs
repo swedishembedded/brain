@@ -1333,6 +1333,27 @@ pub fn profile_enabled() -> bool {
     std::env::var("BRAIN_PROFILE").map(|v| v != "0").unwrap_or(false)
 }
 
+/// Where derived, re-creatable data is persisted between runs -
+/// `BRAIN_PIPELINE_CACHE_DIR`, else `XDG_CACHE_HOME/brain`, else
+/// `~/.cache/brain`. `None` means there is nowhere to persist, which is always
+/// survivable: everything under it can be recomputed.
+///
+/// It lives here, in the crate a backend depends on and nothing else, because
+/// a compiled-shader cache is a thing EVERY backend needs a directory for -
+/// pipeline blobs, autotune records, cubins - and a second copy of this ladder
+/// is a second answer to "where is the cache", which shows up as a cache that
+/// silently stops being read after an environment change.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn cache_dir() -> Option<std::path::PathBuf> {
+    if let Ok(d) = std::env::var("BRAIN_PIPELINE_CACHE_DIR") {
+        return Some(d.into());
+    }
+    if let Ok(d) = std::env::var("XDG_CACHE_HOME") {
+        return Some(std::path::Path::new(&d).join("brain"));
+    }
+    std::env::var("HOME").ok().map(|h| std::path::Path::new(&h).join(".cache/brain"))
+}
+
 /// Per-handle device-op counters - the queryable form of what
 /// `BRAIN_PROFILE` used to print only to stderr. What a benchmark records so
 /// "how many submits/readbacks did this run cost" is machine-readable.

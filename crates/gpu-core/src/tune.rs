@@ -36,16 +36,15 @@ pub fn source_fingerprint(sources: &[&str]) -> u64 {
 /// `XDG_CACHE_HOME/brain` > `~/.cache/brain`) — shared with `roof`'s persist
 /// layer, which used to carry a verbatim copy, and re-exported as
 /// `gpu_core::cache_dir` for anything else in the workspace that needs a
-/// place to persist derived data. Public so a second copy of this ladder
-/// never gets written.
+/// place to persist derived data.
+///
+/// The ladder itself now lives in `backend_api`, one layer down: a backend
+/// crate needs the same directory for its compiled-kernel cache and may not
+/// depend on `gpu-core` (it is the other way round), so keeping the resolution
+/// here would have forced a second copy of it. This stays as the name the rest
+/// of the workspace already calls.
 pub fn cache_dir() -> Option<PathBuf> {
-    if let Ok(d) = std::env::var("BRAIN_PIPELINE_CACHE_DIR") {
-        return Some(d.into());
-    }
-    if let Ok(d) = std::env::var("XDG_CACHE_HOME") {
-        return Some(std::path::Path::new(&d).join("brain"));
-    }
-    std::env::var("HOME").ok().map(|h| std::path::Path::new(&h).join(".cache/brain"))
+    backend_api::cache_dir()
 }
 
 impl FileTuneStore {
