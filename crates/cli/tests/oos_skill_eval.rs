@@ -26,6 +26,8 @@
 //!   CHRONOS2_WEIGHTS                          — chronos2 `.safetensors` (optional)
 //!   BRAIN_KRONOS_TOKENIZER, BRAIN_KRONOS_DECODER  - kronos checkpoints (optional)
 //!   BRAIN_TIMESFM3 - timesfm3 checkpoint dir or .safetensors (optional)
+//!   OOS_UNIVARIATE=1 - force a bare close target for every model, even ones
+//!                      that accept covariates (for a like-for-like comparison)
 //!   FINCAST_WEIGHTS                           — fincast `.safetensors` (optional)
 //!   OOS_DATA      — dir of `<TICKER>.csv` (Date,open,high,low,close,volume) (required)
 //!   OOS_OUT       — output JSON path (required)
@@ -39,7 +41,7 @@
 //!   BRAIN_DEVICE  — cpu|gpu|vulkan (recorded in meta; selects the backend)
 
 use forecast::{
-    Forecast, ForecastModel, ForecastSpec, Item, Kind, Panel, Representation, Role, Variate,
+    CovariateSupport, Forecast, ForecastModel, ForecastSpec, Item, Kind, Panel, Representation, Role, Variate,
 };
 use std::fmt::Write as _;
 use std::time::Instant;
@@ -143,13 +145,29 @@ fn build_models() -> Vec<(String, Box<dyn ForecastModel>)> {
     models
 }
 
-/// Build the capability-appropriate panel for one context window. A model that
-/// requires OHLCV variates (Kronos) gets a six-column bar item; a univariate model
-/// (Chronos-2, FinCast) gets a single `close` target — chosen from the model's own
-/// advertised capabilities, so the driver stays model-agnostic.
+/// Build the capability-appropriate panel for one context window.
+///
+/// The choice is driven by what a model CAN use, not by what it demands.
+/// `requires_variates` is a requirement, not a preference: a model that
+/// accepts any target set leaves it empty, so keying the panel off it handed
+/// the bare close series to exactly the models with the best covariate
+/// support (timesfm3 and chronos2 both declare `requires_variates: []` and
+/// `covariates: Full`) while Kronos, whose covariate support is calendar-only,
+/// got the full OHLCV item because it insists on one. The most capable models
+/// were being measured with the least information.
+///
+/// So: a model that requires named variates gets them, and so does any model
+/// that advertises covariate support or joint multivariate forecasting. Only a
+/// genuinely univariate model (no covariates, nothing required) gets the bare
+/// close target. Set `OOS_UNIVARIATE=1` to force the old behaviour for an
+/// apples-to-apples comparison against a univariate run.
 fn build_panel(model: &dyn ForecastModel, ctx: &[[f32; 5]]) -> Panel {
     let caps = model.capabilities();
-    if caps.requires_variates.is_empty() {
+    let forced_univariate = std::env::var("OOS_UNIVARIATE").map(|v| v != "0").unwrap_or(false);
+    let wants_covariates = !caps.requires_variates.is_empty()
+        || caps.covariates != CovariateSupport::None
+        || caps.multivariate;
+    if forced_univariate || !wants_covariates {
         // univariate close target.
         let close: Vec<f32> = ctx.iter().map(|b| b[3]).collect();
         Panel::single("1d", "X", vec![Variate::target("close", close)])
@@ -224,6 +242,19 @@ fn oos_skill_eval() {
     if models.is_empty() {
         brain_testutil::skip("no models loaded (set CHRONOS2_WEIGHTS / KRONOS_*_DIR / FINCAST_WEIGHTS)");
         return;
+    }
+
+    // Say which panel each model will actually see. Without this the
+    // difference between a bare close target and a full OHLCV item is
+    // invisible in the output, and the two answer different questions.
+    for (name, m) in &models {
+        let caps = m.capabilities();
+        let shape = match build_panel(m.as_ref(), &[[1.0; 5]; 2]).items[0].variates.len() {
+            1 => "univariate (close only)".to_string(),
+            n => format!("{n} variates (close target + OHLV past-covariates)"),
+        };
+        eprintln!("panel for {name}: {shape}  [covariates={}, multivariate={}, requires={:?}]",
+                  caps.covariates.as_str(), caps.multivariate, caps.requires_variates);
     }
 
     // universe: all *.csv in OOS_DATA (drop any ^index).
