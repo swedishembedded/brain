@@ -76,7 +76,7 @@ def export_gspc(db: str, dest: str) -> None:
         "SELECT Date, Open, High, Low, Close, Volume FROM stock_data "
         "WHERE Ticker='^gspc' AND Close IS NOT NULL ORDER BY Date ASC").fetchall()
     if not rows:
-        sys.exit("no ^gspc rows in the db — run `trademiner update` first")
+        sys.exit("no ^gspc rows in the db - refresh it before running the sweep")
     with open(dest, "w") as f:
         f.write("Date,open,high,low,close,volume\n")
         for d, o, h, l, c, v in rows:

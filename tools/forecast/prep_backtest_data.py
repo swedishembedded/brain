@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-"""Prepare a leak-free walk-forward split from trademiner's stocks.db:
+"""Prepare a leak-free walk-forward split from an OHLCV sqlite database:
 
   - FT (fine-tune): HALF the universe, liquidity-stratified random split
     (seeded), recent history ENDING at T0 — the model sees nothing after T0.

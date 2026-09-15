@@ -2,12 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-"""Export a training universe of daily OHLCV from trademiner's `stocks.db` (or any
+"""Export a training universe of daily OHLCV from an OHLCV SQLite database (any
 SQLite with a `stock_data(Ticker,Date,Open,High,Low,Close,Volume)` table) into the
 per-ticker CSV directory `brain forecast finetune --data <dir>` expects
 (`Date,open,high,low,close,volume`, one file per name).
 
-This is the bridge between the data fetcher (trademiner `make update`, which refreshes
+This is the bridge between whatever fetches your bars (which refreshes
 the DB from Yahoo Finance) and the fine-tuner. Selects the most-liquid, fresh, long-
 enough names so the cross-sectional fine-tune has breadth.
 
@@ -21,7 +21,7 @@ import sqlite3
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--db", required=True, help="path to trademiner stocks.db")
+    ap.add_argument("--db", required=True, help="sqlite db with a stock_data table")
     ap.add_argument("--out", required=True, help="output CSV directory")
     ap.add_argument("--max", type=int, default=150, help="cap universe to the N most liquid (0 = all)")
     ap.add_argument("--min-history", type=int, default=400, help="require >= this many bars")
@@ -32,7 +32,7 @@ def main():
     cur = con.cursor()
     # A Ticker index makes per-name queries fast (the composite (Date,Ticker) unique
     # constraint's index is Date-leftmost, so it doesn't help WHERE Ticker=?). Safe,
-    # additive, one-time; also speeds up trademiner's own queries.
+    # additive, one-time; also speeds up the owning application's queries.
     cur.execute("CREATE INDEX IF NOT EXISTS idx_stock_ticker ON stock_data(Ticker)")
     con.commit()
 

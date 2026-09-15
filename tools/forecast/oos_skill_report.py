@@ -17,7 +17,7 @@ Per model (+ a shuffled-prediction NEGATIVE CONTROL and a naive last-value basel
     fine-tune is graded on names it never trained on
   - with --ft-model/--base-model: the paired per-week IC difference (promotion
     gate) and a mechanical VERDICT block against the pre-registered criteria
-    (from trademiner)
+    (supplied by the caller)
 
 Leak-safety is the harness's job (post-cutoff origins, past-only normalization).
 This step only ranks and scores what it produced. Small samples are noise-dominated:
@@ -47,7 +47,7 @@ ap.add_argument("--split-manifest", default=None, help="split_manifest.json from
 ap.add_argument("--ft-model", default=None, help="model name of the fine-tuned entry (e.g. kronos_ft)")
 ap.add_argument("--base-model", default=None, help="model name of the base entry (e.g. kronos)")
 ap.add_argument("--summary-out", default=None,
-                help="also write a trademiner-compatible backtest_summary.json here")
+                help="also write the flat backtest_summary.json superset here")
 ap.add_argument("--min-weeks", type=int, default=40, help="pre-registered sample-size criterion")
 args = ap.parse_args()
 
@@ -303,7 +303,7 @@ if args.ft_model and args.base_model and \
 json.dump(out, open(args.out_json, "w"), indent=2)
 print("wrote", args.out_json)
 
-# ---- trademiner-compatible superset summary ---------------------------------
+# ---- flat superset summary for downstream consumers ---------------------------------
 if args.summary_out and args.ft_model and args.base_model:
     ft = out["models"].get(args.ft_model, {})
     base = out["models"].get(args.base_model, {})

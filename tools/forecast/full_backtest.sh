@@ -3,13 +3,13 @@
 # Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 # Full-universe walk-forward validation: prep -> fine-tune (<= T0) -> sharded
-# base+ft sweep -> scored report + trademiner-compatible summary.
+# base+ft sweep -> scored report + flat summary for downstream consumers.
 #
 # Replaces the old tools/backtest.sh orchestration (rankic_eval was INDEX-keyed
 # and silently misaligns calendars at full-universe scale; the oos_skill_eval
 # harness keys origins by date).
 #
-# Env (defaults follow the pre-registered protocol in trademiner):
+# Env (defaults follow a 52-weekly-origin pre-registered protocol):
 #   DB=stocks.db  OUT=out/bt  TOK=<tokenizer dir>  BASE_DEC=<decoder dir>
 #   NAMES=0 (full universe)  BT_BARS=400  FT_BARS=400  OOS_BARS=260  EMBARGO=10
 #   SEED=7  CTX=120  HOR=5  STEP=5  NSAMPLES=3  START=<auto: manifest first_origin>
