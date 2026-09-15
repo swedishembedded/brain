@@ -108,6 +108,44 @@ self-consistent.
     a standard `[Cg,N]@[N,Cg]->[Cg,Cg]` GEMM per group, contracting over N.
     Not attempted yet - flagged rather than rushed, given the numerical
     stakes of getting a transposed-attention scale/layout wrong silently.
+
+    **Worked-out GEMM-based design (option (b) above), not yet implemented**:
+    `model::block`'s generic `matmul`/`gemm_step` computes `out[m,n] =
+    sum_k A[m,k] * B[n,k]` (confirmed from a real call site,
+    `arcface::train`'s cosine-similarity matmul) - i.e. `A @ B^T`, the same
+    "second operand pre-transposed" convention `matmul_rows` uses for
+    Linear layers. That convention maps DIRECTLY onto channel attention's
+    two GEMMs if both operands are prepared right:
+    - Scores: transpose BOTH Q_g and K_g from their natural `[N,Cg]` to
+      `[Cg,N]` (via `nlc_nchw`-style transpose, scale folded into Q_g
+      beforehand as `Q_g * N^-0.5`). Then `matmul(A=Q_g^T[Cg,N],
+      B=K_g^T[Cg,N], contract=N) = Q_g^T @ (K_g^T)^T = Q_g^T @ K_g` -
+      exactly the reference's `q.transpose(-1,-2) @ k`, output `[Cg,Cg]`.
+    - Softmax: row-wise over `[Cg,Cg]`, non-causal - `attn_softmax`
+      (distinct from `attn_softmax_cross`) is a general row-wise
+      causal-optional softmax, "also serves dense MHA" per its own
+      backend-cpu doc comment - fits without a new kernel.
+    - Context: `matmul(A=attention[Cg,Cg], B=V_g[N,Cg] UNTRANSPOSED,
+      contract=Cg) = attention @ V_g^T`, output `[Cg,N]` - matches the
+      reference's `(attention @ v.transpose(-1,-2))` exactly, because the
+      kernel's own `B[n,k]^T` convention already supplies the needed
+      transpose on V for free. One more `nchw_nlc`-style transpose back to
+      `[N,Cg]` per group, written into the group's column slice of the
+      final `[N,C]` context buffer, completes it.
+    - `Cg = C/groups = 32` at every stage (dim_embed/num_groups is 32
+      throughout), so this is `groups` (4/8/16/32) small GEMM dispatches
+      per attention call - each `[32, N] @ [32, N]^T -> [32,32]`, skewed
+      but not unusual for a GEMM kernel.
+
+    **What's still unverified before implementing this**: extracting each
+    group's `[N,Cg]` Q/K/V slice out of the fused `[N,3C]` qkv buffer (or
+    computing it directly via a per-group WEIGHT row-slice instead of
+    slicing the fused output) needs a sub-buffer view by row/byte offset -
+    `crates/model/src/vit.rs`'s own header comment names a `step_sliced`
+    mechanism for exactly this ("Same-buffer q/kv views are bound via
+    `step_sliced`") but its exact signature/alignment constraints haven't
+    been checked yet. That is the one remaining unknown standing between
+    this design and a working implementation.
   - Full stage assembly (chaining `depths[i]` block pairs + the 4 patch
     embeds into one `DaViT` forward) waits on ChannelBlock.
 
