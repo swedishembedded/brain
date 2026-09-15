@@ -124,6 +124,7 @@ default-members = [
     "crates/runtime",
     "crates/server",
     "crates/loader",
+    "crates/sdk",
     "crates/cli",
     "crates/dbus",
     "crates/memauth",
@@ -217,6 +218,9 @@ brain-capability = { path = "crates/capability" }
 brain-capability-mock = { path = "crates/capability-mock" }
 brain-catalog = { path = "crates/catalog" }
 brain-loader = { path = "crates/loader" }
+# `brain` (crates/sdk), not `brain-sdk`: the public SDK facade package is
+# named literally `brain` on purpose -- see crates/sdk/Cargo.toml.
+brain = { path = "crates/sdk" }
 brain-captioner = { path = "crates/captioner" }
 brain-memauth = { path = "crates/memauth" }
 brain-weightset = { path = "crates/weightset" }

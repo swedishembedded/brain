@@ -130,6 +130,11 @@ Six layers. Each may depend only on layers above it.
    events/hfsm ──> runtime      JSONL event protocol + event-driven HSM controller
    server         one protocol, three transports: stdio, TCP, unix socket
    dbus           zbus surface over capability::Registry (fd-passed frames)
+   sdk (pkg `brain`)  the public embeddable SDK facade - `ImagePipeline` over
+                  flux2 via `loader`'s resolver, no CLI process and no
+                  capability-dispatch machinery in the loop. Package name is
+                  a deliberate, sole exception to `brain-<short>` (commented
+                  in root Cargo.toml and in the crate's own Cargo.toml).
    cli            the `brain` binary - aggregates everything
    web            wasm32+WebGPU toypid demo; compiles to nothing off wasm32
    vulkan         optional coopmat matmul (`vulkan-coopmat`); NOT a default

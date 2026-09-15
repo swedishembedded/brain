@@ -367,6 +367,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc0b364ead1874514c8c2855ab558056ebfeb775653e7ae45ff72f28f8f3166c"
 
 [[package]]
+name = "brain"
+version = "1.1.0"
+dependencies = [
+ "brain-capability",
+ "brain-checkpoint",
+ "brain-flux2",
+ "brain-gpu-core",
+ "brain-imaging",
+ "brain-loader",
+ "brain-model",
+ "brain-modelref",
+ "brain-modelstore",
+ "brain-testutil",
+ "serde_json",
+]
+
+[[package]]
 name = "brain-apiserve"
 version = "1.1.0"
 dependencies = [

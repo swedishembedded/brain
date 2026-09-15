@@ -1,0 +1,31 @@
+[package]
+# `brain` (never `brain-sdk`) is a DELIBERATE, SOLE exception to this
+# workspace's `brain-<short>` package-naming convention: this crate is the
+# public embeddable SDK facade, and `use brain::ImagePipeline;` is the whole
+# point of it -- see this crate's own `src/lib.rs` module doc. The name was
+# free to take: the `brain` CLI binary is produced by the `brain-cli`
+# package, not by any library crate.
+name = "brain"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The public brain SDK: a small, stable, embeddable facade (ImagePipeline and friends) over brain's model backends, with no CLI binary and no capability-dispatch machinery in the loop."
+
+[lib]
+name = "brain"
+path = "src/lib.rs"
+
+[dependencies]
+brain-capability.workspace = true
+brain-flux2.workspace = true
+brain-gpu-core.workspace = true
+brain-imaging.workspace = true
+brain-loader.workspace = true
+brain-model.workspace = true
+brain-modelref.workspace = true
+brain-modelstore.workspace = true
+
+[dev-dependencies]
+brain-checkpoint.workspace = true
+brain-testutil.workspace = true
+serde_json.workspace = true
