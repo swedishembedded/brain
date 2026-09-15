@@ -201,6 +201,12 @@ tuned from the environment instead of a recompile.
 - `BRAIN_NPU_DEVICE` - selects the NPU device for npu-crate tests.
 - `MOE_SKIP_GPU_TESTS` - skips device-dependent tests on a machine with no GPU.
 - `SHARD_TEST_GPUS` - how many GPUs a pipeline/tensor-parallel sharding test should assume.
+- `BRAIN_GPU_RECLAIM_CEILING` - overrides `backend_api::hardware::reclaim_ceiling`'s
+  dropped-but-not-yet-reclaimed-memory threshold (bytes) so a test can cross it
+  with megabyte buffers instead of the multi-gigabyte scale the real ceiling
+  only becomes reachable at in production - see `gpu_core::Transient`'s own
+  tests. Resolved once per process, so a test wanting a different ceiling
+  needs its own process.
 
 **Benchmark knobs:**
 - `BRAIN_BENCH_REPS` - repetition count for a benchmark harness.
@@ -223,6 +229,12 @@ looks like).
 resolves from the live registry, so it can never go stale as real
 architectures migrate onto the model-store resolver): `BRAIN_RESOLVETESTARCH_DIT`,
 `BRAIN_RESOLVETESTARCH_VAE` - never read outside that one fixture.
+
+**Served-path resolver test fixture** (`crates/cli/src/resolver_cli.rs`'s
+`ServedSpec`, a hand-built one-role `ArchSpec` for exercising the served
+(resident) assembly path the same way `multi_role_fixture` above exercises
+the general one): `BRAIN_SERVEDTEST_WEIGHTS` - never read outside that one
+fixture.
 
 **Model-weights-required test gates** (each enables a parity/import/training test
 that needs a real checkpoint; unset means the test skips):
@@ -394,7 +406,11 @@ losing arm of another bit-identical A/B),
 skips by default because 22.72 GB of fp32 weights exceed a 24 GB card),
 `BRAIN_LTXV_LATENT_DUMP` (write the final denoised latent to the given path
 before decode, on the real `brain ltxv` generation path; a write failure is
-traced, never fatal), and, read only by the `ltxv_bench` profiling binary
+traced, never fatal), `BRAIN_FLUX2_DUMP_LATENT` (the same shape for FLUX.2:
+write the latent the decoder is about to consume, so `flux2_latent stats`/`op`
+can inspect a *generated* latent instead of only ones fed back in; a write
+failure is reported and ignored, never fatal), and, read only by the
+`ltxv_bench` profiling binary
 (`crates/ltxv/src/bin/ltxv_bench.rs`, not the production pipeline):
 `BRAIN_LTXV_DECODE_LF_SUBST` (`dst=src` overwrites latent frame `dst` with
 latent frame `src` before decoding, to isolate a latent frame's temporal
