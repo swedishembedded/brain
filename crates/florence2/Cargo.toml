@@ -1,0 +1,17 @@
+[package]
+name = "brain-florence2"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Florence-2-base: DaViT vision encoder + BART-style encoder-decoder, native text-conditioned open-vocabulary detection/phrase grounding. Chosen as brain's first UI-element visual-grounding oracle for its small footprint (0.23B params, CPU-viable on hardware too small for a 4B+ VLM)."
+
+[lib]
+name = "florence2"
+path = "src/lib.rs"
+
+[dependencies]
+brain-data.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+brain-testutil.workspace = true

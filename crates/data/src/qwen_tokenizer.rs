@@ -302,6 +302,32 @@ impl QwenBpe {
         self.specials.iter().find(|(c, _)| c == content).map(|(_, id)| *id)
     }
 
+    /// Append new special/added tokens past the current vocabulary, in the
+    /// given order - each gets the next sequential id (`vocab_size`,
+    /// `vocab_size + 1`, ...). Mirrors HF `PreTrainedTokenizer.add_special_
+    /// tokens`'s behavior: a content already present keeps its existing id
+    /// (not re-added, not re-ordered). Needed for checkpoints (Florence-2)
+    /// whose custom `*Processor.__init__` adds task-prompt/location tokens
+    /// programmatically at load time rather than shipping them in
+    /// `tokenizer.json`'s `added_tokens` - see `florence2::tokenizer` for
+    /// the caller that needs this.
+    pub fn add_special_tokens(&mut self, contents: &[&str]) {
+        for &content in contents {
+            if self.encoder.contains_key(content) {
+                continue;
+            }
+            let id = self.vocab_size as u32;
+            self.encoder.insert(content.to_string(), id);
+            self.decoder.insert(id, content.to_string());
+            self.specials.push((content.to_string(), id));
+            self.vocab_size += 1;
+        }
+        // Longest content first, same invariant `from_json_bytes`/`from_gguf`
+        // establish - a longer added token must match before a shorter one
+        // that happens to be one of its prefixes.
+        self.specials.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+    }
+
     /// Number of distinct ids this tokenizer can produce (max id + 1,
     /// covering added tokens beyond the base vocab table) - the embedding /
     /// LM-head row count a checkpoint built against this tokenizer needs.
@@ -707,6 +733,48 @@ mod tests {
         assert_eq!(t.encode("brain"), vec![53060]);
         assert_eq!(t.encode("  spaced"), vec![220, 63828]);
         assert_eq!(t.encode("def main():\n\tpass"), vec![750, 1887, 3932, 41431]);
+    }
+
+    /// A minimal, self-contained tokenizer (no external file/env var
+    /// needed) - just enough base vocab to prove `add_special_tokens`
+    /// behavior in isolation: sequential ids past the base table, existing
+    /// content keeps its id, and a newly-added special is matched atomically
+    /// by `encode()` before BPE, the same as a checkpoint-declared one.
+    fn minimal_tok() -> QwenBpe {
+        let json = serde_json::json!({
+            "model": { "vocab": {"a": 0u32, "b": 1u32}, "merges": [] },
+            "added_tokens": [{"content": "<pad>", "id": 2u32}],
+        });
+        QwenBpe::from_json_bytes(json.to_string().as_bytes()).unwrap()
+    }
+
+    #[test]
+    fn add_special_tokens_assigns_sequential_ids_past_vocab_size() {
+        let mut t = minimal_tok();
+        assert_eq!(t.vocab_size(), 3); // ids 0,1,2 used above
+        t.add_special_tokens(&["<loc_0>", "<loc_1>", "<od>"]);
+        assert_eq!(t.special_id("<loc_0>"), Some(3));
+        assert_eq!(t.special_id("<loc_1>"), Some(4));
+        assert_eq!(t.special_id("<od>"), Some(5));
+        assert_eq!(t.vocab_size(), 6);
+    }
+
+    #[test]
+    fn add_special_tokens_is_idempotent_for_existing_content() {
+        let mut t = minimal_tok();
+        let pad_id_before = t.special_id("<pad>");
+        t.add_special_tokens(&["<pad>", "<new>"]);
+        assert_eq!(t.special_id("<pad>"), pad_id_before, "existing token must keep its id");
+        assert_eq!(t.special_id("<new>"), Some(3));
+        assert_eq!(t.vocab_size(), 4, "only the genuinely new token grows vocab_size");
+    }
+
+    #[test]
+    fn newly_added_special_is_matched_atomically_by_encode() {
+        let mut t = minimal_tok();
+        t.add_special_tokens(&["<loc_5>"]);
+        let id = t.special_id("<loc_5>").unwrap();
+        assert_eq!(t.encode("<loc_5>"), vec![id]);
     }
 
     fn lfm_tok() -> Option<QwenBpe> {

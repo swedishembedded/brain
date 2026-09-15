@@ -1116,6 +1116,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-florence2"
+version = "1.1.0"
+dependencies = [
+ "brain-data",
+ "brain-testutil",
+ "serde_json",
+]
+
+[[package]]
 name = "brain-flux1"
 version = "1.1.0"
 dependencies = [
