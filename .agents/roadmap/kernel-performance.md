@@ -4978,6 +4978,122 @@ commit.
 **Commit**: one - `model, kernels: GEMM-ify GDN's UT-transform via repeated
 squaring, forward (M5.9)`.
 
+**Superseded by M5.9a below - this optimization was reverted on numerical
+grounds, and the revert measured FASTER than the optimization it undid.**
+
+### M5.9a - M5.9 reverted: the UT-transform's repeated squaring is exact in exact arithmetic and unusable in fp32, and forward substitution was never the slower option
+
+M5.9 replaced `gdn_chunk_fwd_prefix`'s step-7 forward substitution with the
+repeated-squaring Neumann series, on the strength of an identity that is
+genuinely exact and a dispatch count that genuinely dropped (64 -> 17 per GDN
+layer call at `c = 64`). Every correctness gate in the suite stayed green.
+All of those gates drive the recurrence with RANDOM weights, and that is
+precisely the regime the identity is safe in - so the suite could not see
+what had been broken.
+
+**The symptom, on the real checkpoint.** `crates/qwen35`'s GGUF-resident
+INT8 (two-card) and Q4 (one-card) stacks degenerated into repeating garbage
+once a prompt needed more than about two `MAX_PREFILL_TOKENS = 256` chunked-
+prefill rounds. Same prompt shape, increasing length, one loaded instance
+(`where_does_the_real_checkpoint_start_producing_garbage`):
+
+```
+repeats= 6 prompt_tokens=  456 ok=true  text=" Paris, which is also the largest urban"
+repeats= 9 prompt_tokens=  681 ok=false text="/mysql/mysql.\n\n++++"
+repeats=16 prompt_tokens= 1206 ok=false text="ajariajariajariajariajariSEL..."
+repeats=23 prompt_tokens= 1731 ok=false text="-regexp-regexp-regexp-regexp-regexp..."
+repeats=27 prompt_tokens= 2031 ok=false text="xedaxedaxedaxedaxedaxedaxedaxeda"
+```
+
+**The mechanism.** `attn0[i,j] = -beta_i*(k_i.k_j)*exp(g_cs_i - g_cs_j)` for
+`j < i`. The keys are L2-normalized by the caller and `beta` is a sigmoid, so
+every entry is bounded by 1 - but how close it gets to 1 is a property of the
+CONTENT, not of the shape, the tiling, the sharding or the decay strength
+(all four of which had already been cleared by their own regression tests).
+Independent keys in `Dk` dimensions are near-orthogonal, `k_i.k_j ~
+1/sqrt(Dk)`, leaving `|attn0| << 1` - the powers decay and both evaluations
+agree to round-off. Repetitive natural-language text drives `k_i.k_j` towards
+1 for most pairs in a chunk, and at `|attn0| -> 1` the isolated powers behave
+like the strictly-lower all-ones matrix, whose entries are binomial
+coefficients: `attn0^(c/2)` reaches `~C(c-2, c/2-1) ~ 1e17` at `c = 64`,
+while the alternating sum they telescope into stays `O(1)`. Recovering an
+`O(1)` result from `1e17` intermediates needs ~24 significant digits.
+
+Measured on device, at `c = 64` with near-parallel keys:
+
+```
+|attn0| = 9.86e-1   max intermediate power = 1.36e17   resulting |t_mat| = 2.15e10
+```
+
+`|t_mat|`'s true value is `1.0`. This is not an fp32-precision problem that a
+wider accumulator would fix - an f64 host reimplementation of the same
+product fails the same way, just further along the correlation axis. The
+instability is in the reformulation.
+
+**Why it looked like a round-boundary carry bug.** The corrupted `t_mat`
+lands in `u` and `w`, hence in `v_new`, hence in the chunk's own
+`final_state` - which a chunked prefill then carries into the NEXT round as
+`initial_state`, where it multiplies `attn_inter = q_scaled @ state` for
+every token. Token-by-token replay never reproduced it because `c = 1` there
+makes `attn0` a 1x1 zero matrix and `T_mat` plain `I`: the whole triangular
+solve is skipped, so that path is immune to this defect by construction, for
+any content and any weights.
+
+**The fix**: revert step 7 to the reference's own forward substitution
+(`gdn_ut_step.wgsl`, kept registered and tested throughout M5.9 precisely so
+this was a revert and not a rewrite), then `+= I`. Forward substitution never
+forms a power of `attn0` at all - every intermediate it holds is already an
+entry of the bounded answer. M5.9's three `[bhc,c,c]` scratch buffers
+(`ut_pow_a`/`ut_pow_b`/`ut_prod`) are removed with it. `gdn_chunk_bwd`'s
+closed-form UT backward (M5.11, `T_mat^T @ d_t_mat @ T_mat^T`) is NOT
+affected and is unchanged: it forms products of the bounded `T_mat`, never
+powers of `attn0`.
+
+**The performance claim M5.9 rested on does not survive measurement.**
+Dispatch count per GDN layer call does go back up (17 -> 64 for the
+UT-transform), but the 47 recovered dispatches are tiny triangular kernels
+(`bhc*i` threads, at most `i` MACs each; `sum_i i^2/2 ~ c^3/6` total) while
+the 5 they replace are full `c x c x c` batched GEMMs plus 5 whole-buffer
+copies (`10 * bhc * c^3`, a ~60x FLOP difference). Real-checkpoint prefill,
+Qwen3.8-27B Q8_0 -> INT8 across two Tesla P40s, 1731-token prompt,
+`prefill_throughput_at_a_real_long_context`, one sample each:
+
+```
+repeated squaring (M5.9):     22.83 s   75.84 tok/s   (and wrong: "-regexp-regexp-regexp-regexp")
+forward substitution (M5.9a): 21.78 s   79.48 tok/s   (" Paris. It is")
+```
+
+One sample each on a shared box, so treat the 4.8% as "no measurable
+regression" rather than as a win - but the direction is the mechanism's own
+prediction, and it rules out the trade M5.9 believed it was making.
+
+**Regression test**, and the reason the old one could not catch this:
+`crates/model/tests/gdn_chunk_fwd.rs` gained
+`gdn_chunk_fwd_matches_host_oracle_with_near_parallel_keys` - the same f64
+host oracle, at the PRODUCTION chunk width `c = 64` (the existing case runs
+`c = 4`, where `n_factors = 2` and the series never squares far enough to
+diverge), driven with keys that all point in nearly the same direction. It
+needs no checkpoint and runs in 0.3 s. Red against M5.9's code with `t_mat`
+entries of `2.15e10`; green after at worst `|delta| = 4.73e-7` (GPU) /
+`6.14e-7` (CPU JIT). The oracle comparison also now reports the WORST element
+rather than the first one over tolerance: a conditioning failure is spread
+unevenly across the output, and the first violation in index order understated
+this one by seven orders of magnitude.
+
+**Same defect, same fix, in the ONNX exporter**:
+`crates/npu/src/qwen35moe_topology.rs`'s step 12 built the same series by
+accumulating isolated powers (`p <- attn0 @ p; T <- T + p`), which has the
+identical failure. Changed to Horner form (`T <- I + attn0 @ T`): same
+`MatMul`+`Add` node count, same result in exact arithmetic, and stable in
+fp32 for the same reason forward substitution is - every intermediate is
+already a truncated `(I-attn0)^-1`, bounded by the answer. That crate has no
+in-repo ONNX evaluator (its tests check graph well-formedness and, behind
+`BRAIN_OV_PROBE`, finiteness), so this rests on the identity plus the
+host-side numerical comparison, not on a runtime gate.
+
+**Commit**: one - `model, npu: GDN's UT-transform stops evaluating a
+triangular inverse through 1e17 intermediates`.
+
 ### M8.0 - The CPU JIT stops silently mis-executing native f16
 
 A narrow structural fix landed AHEAD of the rest of Phase 8's precision-tier

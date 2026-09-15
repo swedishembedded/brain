@@ -257,6 +257,144 @@ fn to_chunk_major(b: usize, h: usize, c: usize, i: usize, hn: usize, cn: usize, 
     bhc * cn + i
 }
 
+/// Natural `[b,h,t,d]` host inputs -> `model::gdn`'s chunk-major device
+/// layout, for the five per-token buffers `gdn_chunk_fwd` reads.
+fn pack_chunk_major(shape: &GdnShape, q_h: &[f32], k_h: &[f32], v_h: &[f32], g_h: &[f32], beta_h: &[f32]) -> [Vec<f32>; 5] {
+    let (bn, hn, tn) = (shape.b as usize, shape.h as usize, shape.t as usize);
+    let (dk, dv, cn) = (shape.dk as usize, shape.dv as usize, shape.chunk as usize);
+    let (bh, bhc) = (shape.bh() as usize, shape.bhc() as usize);
+    let mut q_cm = vec![0f32; bhc * cn * dk];
+    let mut k_cm = vec![0f32; bhc * cn * dk];
+    let mut v_cm = vec![0f32; bhc * cn * dv];
+    let mut g_cm = vec![0f32; bhc * cn];
+    let mut beta_cm = vec![0f32; bhc * cn];
+    for b in 0..bn {
+        for h in 0..hn {
+            for c in 0..tn / cn {
+                for i in 0..cn {
+                    let t = c * cn + i;
+                    for d in 0..dk {
+                        q_cm[to_chunk_major_d(b, h, c, i, d, hn, cn, bh, dk)] = q_h[((b * hn + h) * tn + t) * dk + d];
+                        k_cm[to_chunk_major_d(b, h, c, i, d, hn, cn, bh, dk)] = k_h[((b * hn + h) * tn + t) * dk + d];
+                    }
+                    for d in 0..dv {
+                        v_cm[to_chunk_major_d(b, h, c, i, d, hn, cn, bh, dv)] = v_h[((b * hn + h) * tn + t) * dv + d];
+                    }
+                    g_cm[to_chunk_major(b, h, c, i, hn, cn, bh)] = g_h[(b * hn + h) * tn + t];
+                    beta_cm[to_chunk_major(b, h, c, i, hn, cn, bh)] = beta_h[(b * hn + h) * tn + t];
+                }
+            }
+        }
+    }
+    [q_cm, k_cm, v_cm, g_cm, beta_cm]
+}
+
+/// Allocate this module's scratch at `shape`, run [`gdn_chunk_fwd`] over the
+/// chunk-major inputs and read `(out, final_state)` back, along with the
+/// dispatch count the step list came to (pinned by the caller).
+///
+/// Scratch buffer sizes are documented here at the point of allocation, per
+/// `GdnScratch`'s own doc: `bhc = B*H*n_chunks`, `bh = B*H`, `c = chunk`.
+fn run_chunk_fwd(g: &Gpu, ids: &GdnIds, shape: &GdnShape, cm: &[Vec<f32>; 5], init_state_h: &[f32]) -> (Vec<f32>, Vec<f32>, usize) {
+    let (dk, dv, cn) = (shape.dk as usize, shape.dv as usize, shape.chunk as usize);
+    let (bh, bhc) = (shape.bh() as usize, shape.bhc() as usize);
+
+    let query = g.storage_init("query", &cm[0]);
+    let key = g.storage_init("key", &cm[1]);
+    let value = g.storage_init("value", &cm[2]);
+    let raw_g = g.storage_init("raw_g", &cm[3]);
+    let beta = g.storage_init("beta", &cm[4]);
+    let initial_state = g.storage_init("initial_state", init_state_h);
+
+    let g_cs = g.storage((bhc * cn) as u64);
+    let exp_g_cs = g.storage((bhc * cn) as u64);
+    let k_beta = g.storage((bhc * cn * dk) as u64);
+    let v_beta = g.storage((bhc * cn * dv) as u64);
+    let k_beta_decay = g.storage((bhc * cn * dk) as u64);
+    let decay_mask = g.storage((bhc * cn * cn) as u64);
+    let raw_attn0 = g.storage((bhc * cn * cn) as u64);
+    let attn0 = g.storage((bhc * cn * cn) as u64);
+    let t_mat = g.storage((bhc * cn * cn) as u64);
+    let u = g.storage((bhc * cn * dv) as u64);
+    let w = g.storage((bhc * cn * dk) as u64);
+    let raw_intra = g.storage((bhc * cn * cn) as u64);
+    let intra_scores = g.storage((bhc * cn * cn) as u64);
+    let q_scaled = g.storage((bh * cn * dk) as u64);
+    let decay_scale = g.storage((bh * cn) as u64);
+    let decayed_k = g.storage((bh * cn * dk) as u64);
+    let v_prime = g.storage((bh * cn * dv) as u64);
+    let v_new = g.storage((bh * cn * dv) as u64);
+
+    let scratch = GdnScratch {
+        g_cs: &g_cs,
+        exp_g_cs: &exp_g_cs,
+        k_beta: &k_beta,
+        v_beta: &v_beta,
+        k_beta_decay: &k_beta_decay,
+        decay_mask: &decay_mask,
+        raw_attn0: &raw_attn0,
+        attn0: &attn0,
+        t_mat: &t_mat,
+        u: &u,
+        w: &w,
+        raw_intra: &raw_intra,
+        intra_scores: &intra_scores,
+        q_scaled: &q_scaled,
+        decay_scale: &decay_scale,
+        decayed_k: &decayed_k,
+        v_prime: &v_prime,
+        v_new: &v_new,
+    };
+
+    let out = g.storage((bhc * cn * dv) as u64);
+    let final_state = g.storage((bh * dk * dv) as u64);
+    let steps = gdn_chunk_fwd(g, ids, shape, &query, &key, &value, &raw_g, &beta, &initial_state, &scratch, &out, &final_state);
+    let n_steps = steps.len();
+    // t_mat MUST be cleared before the UT-transform loop -- see gdn_chunk_fwd's doc.
+    g.submit(&[&t_mat], &steps);
+
+    (g.read(&out, bhc * cn * dv), g.read(&final_state, bh * dk * dv), n_steps)
+}
+
+/// Compare a device `(out, final_state)` against the host oracle's own
+/// natural-layout result, converting the device's chunk-major `out` back.
+///
+/// Reports the WORST element, not the first one over `tol`: this comparison
+/// guards a numerical-conditioning property, and a conditioning failure is
+/// spread unevenly over the output (worst where the triangular solve's
+/// intermediate terms are largest), so the first violation in index order can
+/// be orders of magnitude milder than the real damage.
+fn check(name: &str, shape: &GdnShape, got_out_cm: &[f32], got_state: &[f32], want_out: &[f64], want_state: &[f64], tol: f64) {
+    let (bn, hn, tn) = (shape.b as usize, shape.h as usize, shape.t as usize);
+    let (dv, cn, bh) = (shape.dv as usize, shape.chunk as usize, shape.bh() as usize);
+    let mut worst = (0f64, String::new());
+    let mut note = |delta: f64, what: String| {
+        if delta > worst.0 {
+            worst = (delta, what);
+        }
+    };
+    for b in 0..bn {
+        for h in 0..hn {
+            for c in 0..tn / cn {
+                for i in 0..cn {
+                    let t = c * cn + i;
+                    for d in 0..dv {
+                        let got = got_out_cm[to_chunk_major_d(b, h, c, i, d, hn, cn, bh, dv)] as f64;
+                        let want = want_out[((b * hn + h) * tn + t) * dv + d];
+                        note((got - want).abs(), format!("out[b={b},h={h},t={t},d={d}]: got {got} want {want}"));
+                    }
+                }
+            }
+        }
+    }
+    for (i, (&got, &want)) in got_state.iter().zip(want_state).enumerate() {
+        note((got as f64 - want).abs(), format!("final_state[{i}]: got {got} want {want}"));
+    }
+    let (delta, what) = worst;
+    assert!(delta < tol, "{name}: worst |delta| = {delta:e} (tol {tol:e}) at {what}");
+    eprintln!("{name}: worst |delta| = {delta:e}");
+}
+
 #[test]
 fn gdn_chunk_fwd_matches_host_oracle() {
     let g = gpu_core::testgpu::dev(PIPES);
@@ -297,138 +435,82 @@ fn gdn_chunk_fwd_matches_host_oracle() {
     );
 
     // ---- device buffers, laid out chunk-major per model::gdn's contract ----
-    let mut q_cm = vec![0f32; bhc * cn * dk];
-    let mut k_cm = vec![0f32; bhc * cn * dk];
-    let mut v_cm = vec![0f32; bhc * cn * dv];
-    let mut g_cm = vec![0f32; bhc * cn];
-    let mut beta_cm = vec![0f32; bhc * cn];
-    for b in 0..bn {
-        for h in 0..hn {
-            for c in 0..n_chunks {
-                for i in 0..cn {
-                    let t = c * cn + i;
-                    for d in 0..dk {
-                        q_cm[to_chunk_major_d(b, h, c, i, d, hn, cn, bh, dk)] = q_h[((b * hn + h) * tn + t) * dk + d];
-                        k_cm[to_chunk_major_d(b, h, c, i, d, hn, cn, bh, dk)] = k_h[((b * hn + h) * tn + t) * dk + d];
-                    }
-                    for d in 0..dv {
-                        v_cm[to_chunk_major_d(b, h, c, i, d, hn, cn, bh, dv)] = v_h[((b * hn + h) * tn + t) * dv + d];
-                    }
-                    g_cm[to_chunk_major(b, h, c, i, hn, cn, bh)] = g_h[(b * hn + h) * tn + t];
-                    beta_cm[to_chunk_major(b, h, c, i, hn, cn, bh)] = beta_h[(b * hn + h) * tn + t];
-                }
-            }
-        }
-    }
-
-    let query = g.storage_init("query", &q_cm);
-    let key = g.storage_init("key", &k_cm);
-    let value = g.storage_init("value", &v_cm);
-    let raw_g = g.storage_init("raw_g", &g_cm);
-    let beta = g.storage_init("beta", &beta_cm);
-    let initial_state = g.storage_init("initial_state", &init_state_h);
-
     let shape = GdnShape { b: bn as u32, h: hn as u32, t: tn as u32, dk: dk as u32, dv: dv as u32, chunk: cn as u32 };
     assert_eq!(shape.n_chunks() as usize, n_chunks);
     assert_eq!(shape.bh() as usize, bh);
     assert_eq!(shape.bhc() as usize, bhc);
 
-    // Scratch buffer sizes -- documented here at the point of allocation, per
-    // `GdnScratch`'s own doc: bhc = B*H*n_chunks, bh = B*H, c = chunk.
-    let g_cs = g.storage((bhc * cn) as u64);
-    let exp_g_cs = g.storage((bhc * cn) as u64);
-    let k_beta = g.storage((bhc * cn * dk) as u64);
-    let v_beta = g.storage((bhc * cn * dv) as u64);
-    let k_beta_decay = g.storage((bhc * cn * dk) as u64);
-    let decay_mask = g.storage((bhc * cn * cn) as u64);
-    let raw_attn0 = g.storage((bhc * cn * cn) as u64);
-    let attn0 = g.storage((bhc * cn * cn) as u64);
-    let t_mat = g.storage((bhc * cn * cn) as u64);
-    let u = g.storage((bhc * cn * dv) as u64);
-    let w = g.storage((bhc * cn * dk) as u64);
-    let raw_intra = g.storage((bhc * cn * cn) as u64);
-    let intra_scores = g.storage((bhc * cn * cn) as u64);
-    let ut_pow_a = g.storage((bhc * cn * cn) as u64);
-    let ut_pow_b = g.storage((bhc * cn * cn) as u64);
-    let ut_prod = g.storage((bhc * cn * cn) as u64);
-    let q_scaled = g.storage((bh * cn * dk) as u64);
-    let decay_scale = g.storage((bh * cn) as u64);
-    let decayed_k = g.storage((bh * cn * dk) as u64);
-    let v_prime = g.storage((bh * cn * dv) as u64);
-    let v_new = g.storage((bh * cn * dv) as u64);
+    let cm = pack_chunk_major(&shape, &q_h, &k_h, &v_h, &g_h, &beta_h);
+    let (got_out_cm, got_state, n_steps) = run_chunk_fwd(&g, &ids, &shape, &cm, &init_state_h);
 
-    let scratch = GdnScratch {
-        g_cs: &g_cs,
-        exp_g_cs: &exp_g_cs,
-        k_beta: &k_beta,
-        v_beta: &v_beta,
-        k_beta_decay: &k_beta_decay,
-        decay_mask: &decay_mask,
-        raw_attn0: &raw_attn0,
-        attn0: &attn0,
-        t_mat: &t_mat,
-        u: &u,
-        w: &w,
-        raw_intra: &raw_intra,
-        intra_scores: &intra_scores,
-        ut_pow_a: &ut_pow_a,
-        ut_pow_b: &ut_pow_b,
-        ut_prod: &ut_prod,
-        q_scaled: &q_scaled,
-        decay_scale: &decay_scale,
-        decayed_k: &decayed_k,
-        v_prime: &v_prime,
-        v_new: &v_new,
-    };
-
-    let out = g.storage((bhc * cn * dv) as u64);
-    let final_state = g.storage((bh * dk * dv) as u64);
-
-    let steps = gdn_chunk_fwd(&g, &ids, &shape, &query, &key, &value, &raw_g, &beta, &initial_state, &scratch, &out, &final_state);
     // Pins step 4's cumsum at ONE fused dispatch (was `c-1 = 3` separate
     // per-row-index dispatches before M5.8's fusion) so a future change
     // silently re-introducing that host loop is caught here rather than only
     // showing up as a latency regression in `qwen35_bench`. Step 7's
-    // UT-transform is now also GEMM-ified (M5.9): at `c=4` (`n_factors =
-    // log2(4) = 2`) that is 2 base dispatches (`region_copy` + `add_identity`
-    // seeding `P_0 = I+attn0`) plus `3*(n_factors-1) = 3` more (one squaring,
-    // one `region_copy`, one `bmm_acc` per remaining factor) = 5 dispatches,
-    // replacing the former `(c-1)+1 = 4` (`gdn_ut_step`*3 + `gdn_add_identity`)
-    // -- net +1 at this tiny test shape, where `n_factors` is small enough
-    // that GEMM-ifying barely pays for its own setup; the real win is at
-    // `c=64` (`n_factors=6`, giving 17 dispatches vs. 64) where FLOPs, not
-    // dispatch count, dominate. See kernel-performance.md M5.9.
-    assert_eq!(steps.len(), 37, "gdn_chunk_fwd dispatch count regressed -- see step 4's cumsum fusion and step 7's GEMM-ified UT-transform (M5.9)");
-    // t_mat MUST be cleared before the UT-transform loop -- see gdn_chunk_fwd's doc.
-    g.submit(&[&t_mat], &steps);
+    // UT-transform is `(c-1)+1 = 4` dispatches at this `c=4` shape
+    // (`gdn_ut_step`*3 + `gdn_add_identity`) -- see that step's own comment in
+    // `gdn_chunk_fwd_prefix` for why it is a sequential forward substitution
+    // and not the cheaper repeated-squaring Neumann series.
+    assert_eq!(n_steps, 36, "gdn_chunk_fwd dispatch count regressed -- see step 4's cumsum fusion and step 7's UT-transform");
 
-    let got_out_cm = g.read(&out, bhc * cn * dv);
-    let got_state = g.read(&final_state, bh * dk * dv);
+    check("gdn_chunk_fwd_matches_host_oracle", &shape, &got_out_cm, &got_state, &want_out, &want_state, 1e-4);
+}
 
-    // Compare "out" by converting the device's chunk-major layout back to
-    // natural [b,h,t,d] to match the oracle's own layout.
-    let tol = 1e-4;
-    let mut worst = 0f64;
-    for b in 0..bn {
-        for h in 0..hn {
-            for c in 0..n_chunks {
-                for i in 0..cn {
-                    let t = c * cn + i;
-                    for d in 0..dv {
-                        let got = got_out_cm[to_chunk_major_d(b, h, c, i, d, hn, cn, bh, dv)] as f64;
-                        let want = want_out[((b * hn + h) * tn + t) * dv + d];
-                        let delta = (got - want).abs();
-                        worst = worst.max(delta);
-                        assert!(delta < tol, "out[b={b},h={h},t={t},d={d}]: got {got} want {want} (delta {delta})");
-                    }
-                }
+/// The same oracle comparison at the PRODUCTION chunk width (`c = 64`, what
+/// [`model::gdn::gdn_chunk_size`] picks at every real prefill shape) with
+/// **near-parallel keys**: every token's key points in almost the same
+/// direction, which is what a real checkpoint's GDN layer actually produces
+/// for repetitive natural-language text once its own L2-norm has run.
+///
+/// Why this shape and not the tiny one above: `attn0[i,j] =
+/// -beta_i*(k_i.k_j)*decay` is what step 7 inverts, and its entries are only
+/// large when the keys are CORRELATED. Independent random keys in `Dk`
+/// dimensions are near-orthogonal (`k_i.k_j ~ 1/sqrt(Dk)`), so every
+/// random-weight test - including the one above - leaves `|attn0| << 1`, where
+/// any way of forming `(I-attn0)^-1` agrees. Near-parallel keys push
+/// `|attn0|` towards `beta` (i.e. towards 1), and THAT is the regime where
+/// the intermediate powers `attn0^k` of a Neumann-series evaluation reach
+/// `~1e17` while the result they sum to stays `~1` - unrecoverable
+/// cancellation in fp32, which on a real checkpoint corrupts the recurrent
+/// state a chunked prefill carries into its next round. Forward substitution
+/// never forms those powers and is accurate here to ~1e-7.
+#[test]
+fn gdn_chunk_fwd_matches_host_oracle_with_near_parallel_keys() {
+    let g = gpu_core::testgpu::dev(PIPES);
+    let ids = ids(&g);
+
+    let (bn, hn, tn, dk, dv, cn) = (1usize, 2usize, 128usize, 16usize, 8usize, 64usize);
+    let bh = bn * hn;
+
+    let mut rng = Lcg::new(20260915);
+    let q_h: Vec<f32> = rng.vec_scaled(bn * hn * tn * dk, 1.0);
+    let v_h: Vec<f32> = rng.vec_scaled(bn * hn * tn * dv, 1.0);
+    // Keys: one direction per (b,h), every token a small perturbation of it,
+    // L2-normalized exactly as the GDN mixer normalizes its own keys.
+    let mut k_h = vec![0f32; bn * hn * tn * dk];
+    for bhi in 0..bh {
+        let base: Vec<f32> = rng.vec(dk);
+        for t in 0..tn {
+            let row: Vec<f32> = (0..dk).map(|d| base[d] + rng.scaled(0.06)).collect();
+            let norm = row.iter().map(|x| x * x).sum::<f32>().sqrt();
+            for d in 0..dk {
+                k_h[(bhi * tn + t) * dk + d] = row[d] / norm;
             }
         }
     }
-    for (i, (&got, &want)) in got_state.iter().zip(&want_state).enumerate() {
-        let delta = (got as f64 - want).abs();
-        worst = worst.max(delta);
-        assert!(delta < tol, "final_state[{i}]: got {got} want {want} (delta {delta})");
-    }
-    eprintln!("gdn_chunk_fwd_matches_host_oracle: worst |delta| = {worst:e}");
+    // Long-memory decay (a real GDN head's `-exp(A_log)*softplus(.)` is small
+    // and negative) and a near-saturated `beta`, the regime that makes
+    // `|attn0|` largest.
+    let g_h: Vec<f32> = (0..bn * hn * tn).map(|_| rng.scaled(0.002) - 0.002).collect();
+    let beta_h: Vec<f32> = (0..bn * hn * tn).map(|_| 0.97 + rng.scaled(0.02)).collect();
+    let init_state_h: Vec<f32> = rng.vec_scaled(bh * dk * dv, 0.5);
+
+    let to_f64 = |v: &[f32]| -> Vec<f64> { v.iter().map(|&x| x as f64).collect() };
+    let (want_out, want_state) = host_oracle(bn, hn, tn, dk, dv, cn, &to_f64(&q_h), &to_f64(&k_h), &to_f64(&v_h), &to_f64(&g_h), &to_f64(&beta_h), &to_f64(&init_state_h));
+
+    let shape = GdnShape { b: bn as u32, h: hn as u32, t: tn as u32, dk: dk as u32, dv: dv as u32, chunk: cn as u32 };
+    let cm = pack_chunk_major(&shape, &q_h, &k_h, &v_h, &g_h, &beta_h);
+    let (got_out_cm, got_state, _) = run_chunk_fwd(&g, &ids, &shape, &cm, &init_state_h);
+
+    check("gdn_chunk_fwd_matches_host_oracle_with_near_parallel_keys", &shape, &got_out_cm, &got_state, &want_out, &want_state, 1e-4);
 }

@@ -39,7 +39,10 @@
 //!   (`attn0^C = 0` for a `C x C` matrix), so `(I-attn0)^-1` has the EXACT
 //!   closed-form Neumann series `I + attn0 + attn0^2 + ... + attn0^(C-1)` -
 //!   computed here as `C-1` statically unrolled `MatMul`+`Add` pairs (`C` =
-//!   the GDN chunk size, fixed at export time by [`qwen35moe::model::gdn_chunk_size`]);
+//!   the GDN chunk size, fixed at export time by [`qwen35moe::model::gdn_chunk_size`]),
+//!   in HORNER form (`T <- I + attn0 @ T`) rather than by accumulating
+//!   isolated powers, which is the same node count but the only one of the two
+//!   that survives fp32 at real weights - see that step's own comment below;
 //! - **step 10 (the sequential across-chunk state recurrence)**: unrolled
 //!   into `n_chunks` static blocks threading the recurrent `state` tensor
 //!   forward, the same "unroll a known-small sequential loop at export time"
@@ -495,14 +498,37 @@ impl<'a> Topo<'a> {
         let attn0_masked = self.mul_t(&raw_attn0, &decay_mask);
         let attn0 = self.mul_t(&attn0_masked, &stril);
 
-        // ---- 12. UT-transform via the exact Neumann series ----
-        let mut p_name = ident.clone();
-        let mut t_name = ident.clone();
+        // ---- 12. UT-transform: the exact Neumann series, in HORNER form ----
+        // `T = sum_{k=0}^{C-1} attn0^k`, evaluated as `T <- I + attn0 @ T`,
+        // `C-1` times. The `MatMul`+`Add` node count is identical to the
+        // obvious `p <- attn0 @ p; T <- T + p` accumulation, and in exact
+        // arithmetic so is the result - but the accumulation form is
+        // numerically unusable at real weights and this one is not.
+        //
+        // `attn0[i,j] = -beta_i*(k_i.k_j)*decay` is bounded by 1 (the keys are
+        // L2-normalized, `beta` is a sigmoid), but how close it gets to 1 is a
+        // property of the CONTENT: independent keys are near-orthogonal and
+        // leave `|attn0| << 1`, while repetitive text drives `k_i.k_j` towards
+        // 1 for most pairs. At `|attn0| -> 1` the isolated powers behave like
+        // the strictly-lower all-ones matrix, whose entries are binomial
+        // coefficients - `attn0^(C/2)` reaches `~1e17` at `C = 64`, while the
+        // alternating sum they telescope into stays `O(1)`. The accumulation
+        // form materialises each of those powers as its own tensor, so fp32's
+        // ~7 digits cannot recover the `O(1)` answer from them. Horner never
+        // holds an isolated power: every intermediate it carries is already a
+        // truncated `(I-attn0)^-1`, bounded by the answer itself.
+        //
+        // `model::gdn`'s own step 7 makes the same trade for the same reason
+        // (there as a forward substitution, which suits a per-row kernel
+        // dispatch the way Horner suits a statically unrolled graph); see
+        // `gdn_chunk_fwd_prefix`'s comment there for the full argument and
+        // `crates/model/tests/gdn_chunk_fwd.rs`'s near-parallel-keys case for
+        // the regression test that pins it.
+        let mut t_mat = ident.clone();
         for _ in 1..chunk {
-            p_name = self.matmul(&attn0, &p_name);
-            t_name = self.add_t(&t_name, &p_name);
+            let step = self.matmul(&attn0, &t_mat);
+            t_mat = self.add_t(&ident, &step);
         }
-        let t_mat = t_name;
 
         // ---- 13/14. u, w (k_cumdecay) ----
         let u = self.matmul(&t_mat, &v_beta); // [1,nc,nvh,C,vhd]
