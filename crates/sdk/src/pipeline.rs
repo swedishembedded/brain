@@ -197,8 +197,13 @@ fn apply_device(device: &Device) -> Result<()> {
 /// method matches on it once, at the top; nothing downstream of that match
 /// (image normalization, `.save()`) differs by backend at all.
 enum Backend {
-    Flux2(Flux2Backend),
-    S3dit(S3ditBackend),
+    // Boxed: `Flux2Backend`/`S3ditBackend` differ enough in inline size
+    // (flux2's `Pipeline`/`Flux2Config` carry far more state by value than
+    // s3dit's `HotPipeline`) that leaving them unboxed makes every
+    // `ImagePipeline` pay the larger variant's stack/enum size regardless of
+    // which backend it resolved to (clippy::large_enum_variant).
+    Flux2(Box<Flux2Backend>),
+    S3dit(Box<S3ditBackend>),
 }
 
 struct Flux2Backend {
@@ -493,7 +498,7 @@ impl ImagePipelineBuilder {
                 let n = default_forward_tokens();
                 let pipe = flux2::Pipeline::build_sized(&cfg, &paths, n, n, &[], precision, 1).map_err(Error::Backend)?;
 
-                Ok(ImagePipeline { backend: Backend::Flux2(Flux2Backend { pipe, cfg, paths, precision, adapter: None }) })
+                Ok(ImagePipeline { backend: Backend::Flux2(Box::new(Flux2Backend { pipe, cfg, paths, precision, adapter: None })) })
             }
             ResolvedArch::S3dit(assembly) => {
                 let paths = s3dit::pipeline::Paths::from_assembly(&assembly).map_err(Error::Backend)?;
@@ -502,7 +507,7 @@ impl ImagePipelineBuilder {
 
                 let pipe = s3dit::pipeline::HotPipeline::build_adapted(&paths, width, height, s3dit::pipeline::DEFAULT_CAP_LEN, hifi, None, |_| {}).map_err(Error::Backend)?;
 
-                Ok(ImagePipeline { backend: Backend::S3dit(S3ditBackend { pipe, paths, width, height, hifi, adapter: None }) })
+                Ok(ImagePipeline { backend: Backend::S3dit(Box::new(S3ditBackend { pipe, paths, width, height, hifi, adapter: None })) })
             }
         }
     }

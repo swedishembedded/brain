@@ -372,10 +372,10 @@ mod tests {
     /// The reported bug: `--device gpu` explicitly excludes CPU
     /// (`ComputeSet::cpu_enabled() == false`), a real image size needs more
     /// activation memory than either card has free, and the plan must REFUSE
-    /// - legibly, before any model code runs - rather than silently landing
+    /// -- legibly, before any model code runs -- rather than silently landing
     /// on `Home::Cpu`, which then panics deep inside a model that cannot
     /// actually execute int8 on the CPU backend at all. Running slower on a
-    /// tier the user excluded is not "slower" - it is doing the opposite of
+    /// tier the user excluded is not "slower" -- it is doing the opposite of
     /// what `--device gpu` asked for.
     #[test]
     fn cpu_excluded_by_device_gpu_is_never_a_fallback() {
@@ -391,7 +391,7 @@ mod tests {
     #[test]
     fn cpu_excluded_and_no_gpus_at_all_still_refuses() {
         let b = budgets(&[], 128 * GIB, false);
-        let err = BudgetPlacer::new(b).place(&[Need::sized("dit", 1 * GIB, 0)]).unwrap_err();
+        let err = BudgetPlacer::new(b).place(&[Need::sized("dit", GIB, 0)]).unwrap_err();
         assert!(err.contains("cannot place"), "{err}");
     }
 }

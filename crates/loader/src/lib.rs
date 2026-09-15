@@ -17,7 +17,7 @@
 //! itself (see that crate's own module doc). This crate is the same split
 //! applied to what `catalog`'s doc calls "the whole point" the OTHER way
 //! round: not "how a model is served", but "how a model is FOUND and LOADED"
-//! - the resolver, the models directory, automatic placement, and the
+//! -- the resolver, the models directory, automatic placement, and the
 //! default-checkpoint auto-fetch policy. Every function here is exactly what
 //! it was inside `crates/cli` before this crate existed; nothing moved is new
 //! behavior except [`supply::DownloadPolicy`], which makes explicit a choice

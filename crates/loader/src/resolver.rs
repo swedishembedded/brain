@@ -126,7 +126,7 @@ mod tests {
         std::env::remove_var("BRAIN_MODELS_DIR");
         std::env::remove_var("XDG_DATA_HOME");
         std::env::remove_var("HOME");
-        let err = try_resolve("loadertest", &OneRoleSpec, &BTreeMap::new()).err().expect("no models dir must fail");
+        let err = try_resolve("loadertest", &OneRoleSpec, &BTreeMap::new()).expect_err("no models dir must fail");
         assert!(matches!(err, ResolveFailure::NoModelsDir(_)));
         assert_eq!(err.exit_code(), 1);
     }
@@ -141,7 +141,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         std::env::set_var("BRAIN_MODELS_DIR", &root);
 
-        let err = try_resolve("loadertest", &OneRoleSpec, &BTreeMap::new()).err().expect("an empty store must not resolve");
+        let err = try_resolve("loadertest", &OneRoleSpec, &BTreeMap::new()).expect_err("an empty store must not resolve");
         assert!(matches!(err, ResolveFailure::Missing(_)));
         assert_eq!(err.exit_code(), MISSING_EXIT);
 
