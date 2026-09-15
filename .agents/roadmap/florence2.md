@@ -1,8 +1,8 @@
 # florence2
 
-**Status: M1 done. M2 mostly done (patch embed + SpatialBlock verified
-against real weights; ChannelBlock is the one remaining piece, see below).
-M4 done. M3/M5/M6/M7 not started.**
+**Status: M1 done. M2 done (patch embed, SpatialBlock, ChannelBlock, full
+DaViT tower, and the vision-token projection wrapper all verified against
+real weights end to end - see below). M4 done. M3/M5/M6/M7 not started.**
 
 ## Goal
 
@@ -75,11 +75,11 @@ self-consistent.
   51289-id vocab, gated on `FLORENCE2_DIR` (skips cleanly when unset).
   `cargo check --workspace` clean, clippy clean on touched crates.
 
-- **M2 (DaViT vision encoder) - mostly done**:
-  - **Patch embed (done, verified)**: `vision/patch_embed.rs` - all 4 stages'
+- **M2 (DaViT vision encoder) - done**:
+  - **Patch embed (verified)**: `vision/patch_embed.rs` - all 4 stages'
     conv+LayerNorm match the real checkpoint at cosine >=0.999
     (`davit_patch_embed_parity` test).
-  - **SpatialBlock (done, verified)**: `vision/{dwconv,mlp,window_attn,block}.rs` -
+  - **SpatialBlock (verified)**: `vision/{dwconv,mlp,window_attn,block}.rs` -
     dwconv residual + window attention (`model::vit::WindowPlan::new` +
     `chunked_attn_fwd`, standard `1/sqrt(head_dim)` scale) + dwconv residual +
     MLP. Matches stage 0's real spatial-block output at cosine >=0.999
@@ -87,67 +87,59 @@ self-consistent.
     is correct for this checkpoint specifically - asserted, not assumed:
     Florence-2-base's 4 stage grids (192/96/48/24) are all exact multiples
     of `window_size=12`.
-  - **ChannelBlock - NOT done, and NOT a drop-in `chunked_bidir_fwd` reuse**
-    the way window attention was (correcting the original plan's assumption).
-    The reference's `ChannelAttention` computes `attention = (q*N^-0.5).
-    transpose(-1,-2) @ k` over `q,k: [B,groups,N,Cg]` - i.e. **channel-groups
-    attend to each other, contracting over the spatial-token axis N**, the
-    inverse of `chunked_bidir_fwd`'s assumption (tokens attend to tokens,
-    contracting over head_dim). `chunked_bidir_fwd`'s fused-qkv buffer
-    convention is `[rows, 3C]` with q/k/v **interleaved per row** (each
-    token's row holds all its channels); a `nlc_nchw`-style transpose of
-    that buffer produces `[3C, N]` with q/k/v occupying **disjoint blocks of
-    rows** instead - not the same layout, so the existing engine cannot be
-    fed a transposed buffer directly. Real options for whoever picks this
-    up: (a) a genuinely new small kernel/dispatch pair for the transposed
-    contraction, or (b) an explicit per-group GEMM loop (groups are small -
-    4/8/16/32 across the 4 stages, and `Cg = C/groups = 32` constant at
-    every stage since `num_groups == dim_embed/32` throughout) using the
-    existing generic `matmul`/`gemm_step` primitive with Q transposed to
-    `[Cg,N]` (via `nlc_nchw`) and K/V left in their natural `[N,Cg]` form -
-    a standard `[Cg,N]@[N,Cg]->[Cg,Cg]` GEMM per group, contracting over N.
-    Not attempted yet - flagged rather than rushed, given the numerical
-    stakes of getting a transposed-attention scale/layout wrong silently.
-
-    **Worked-out GEMM-based design (option (b) above), not yet implemented**:
-    `model::block`'s generic `matmul`/`gemm_step` computes `out[m,n] =
-    sum_k A[m,k] * B[n,k]` (confirmed from a real call site,
-    `arcface::train`'s cosine-similarity matmul) - i.e. `A @ B^T`, the same
-    "second operand pre-transposed" convention `matmul_rows` uses for
-    Linear layers. That convention maps DIRECTLY onto channel attention's
-    two GEMMs if both operands are prepared right:
-    - Scores: transpose BOTH Q_g and K_g from their natural `[N,Cg]` to
-      `[Cg,N]` (via `nlc_nchw`-style transpose, scale folded into Q_g
-      beforehand as `Q_g * N^-0.5`). Then `matmul(A=Q_g^T[Cg,N],
-      B=K_g^T[Cg,N], contract=N) = Q_g^T @ (K_g^T)^T = Q_g^T @ K_g` -
-      exactly the reference's `q.transpose(-1,-2) @ k`, output `[Cg,Cg]`.
-    - Softmax: row-wise over `[Cg,Cg]`, non-causal - `attn_softmax`
-      (distinct from `attn_softmax_cross`) is a general row-wise
-      causal-optional softmax, "also serves dense MHA" per its own
-      backend-cpu doc comment - fits without a new kernel.
-    - Context: `matmul(A=attention[Cg,Cg], B=V_g[N,Cg] UNTRANSPOSED,
-      contract=Cg) = attention @ V_g^T`, output `[Cg,N]` - matches the
-      reference's `(attention @ v.transpose(-1,-2))` exactly, because the
-      kernel's own `B[n,k]^T` convention already supplies the needed
-      transpose on V for free. One more `nchw_nlc`-style transpose back to
-      `[N,Cg]` per group, written into the group's column slice of the
-      final `[N,C]` context buffer, completes it.
-    - `Cg = C/groups = 32` at every stage (dim_embed/num_groups is 32
-      throughout), so this is `groups` (4/8/16/32) small GEMM dispatches
-      per attention call - each `[32, N] @ [32, N]^T -> [32,32]`, skewed
-      but not unusual for a GEMM kernel.
-
-    **What's still unverified before implementing this**: extracting each
-    group's `[N,Cg]` Q/K/V slice out of the fused `[N,3C]` qkv buffer (or
-    computing it directly via a per-group WEIGHT row-slice instead of
-    slicing the fused output) needs a sub-buffer view by row/byte offset -
-    `crates/model/src/vit.rs`'s own header comment names a `step_sliced`
-    mechanism for exactly this ("Same-buffer q/kv views are bound via
-    `step_sliced`") but its exact signature/alignment constraints haven't
-    been checked yet. That is the one remaining unknown standing between
-    this design and a working implementation.
-  - Full stage assembly (chaining `depths[i]` block pairs + the 4 patch
-    embeds into one `DaViT` forward) waits on ChannelBlock.
+  - **ChannelBlock (verified)**: `vision/channel_attn.rs` +
+    `vision/block.rs`'s `ChannelBlock`. NOT a drop-in `chunked_bidir_fwd`
+    reuse (correcting the original plan's assumption) - the reference's
+    `ChannelAttention` computes `attention = (q*N^-0.5).transpose(-1,-2) @
+    k` over `q,k: [B,groups,N,Cg]`, i.e. **channel-groups attend to each
+    other, contracting over the spatial-token axis N**, the inverse of
+    `chunked_bidir_fwd`'s assumption. Built instead from a per-group GEMM
+    loop over the existing generic `matmul` primitive: one whole-buffer
+    `nlc_nchw` transpose turns the fused `[N,3C]` qkv into `[3C,N]`
+    (contiguous per-group row ranges via `step_sliced`), two GEMMs per
+    group (`matmul`'s confirmed `A@B^T` convention maps directly onto both),
+    `attn_softmax_cross` for the row-wise non-causal softmax. **Real bug
+    caught by the parity gate**: `attn_softmax` looked like the right
+    kernel (same math description) but its WGSL source hardcodes causal
+    masking (`for j in 0..=i`, no toggle) - silently zeroed half of every
+    `[Cg,Cg]` score matrix and cost a real cosine-0.987 failure before being
+    caught and fixed by switching to `attn_softmax_cross` (genuinely
+    non-causal). `1/sqrt(N)` scale folded into the qkv weight's Q-rows at
+    `ParamStore`-construction time (N is a compile-time-known per-stage
+    constant) - documented as the caller's obligation in
+    `ChannelAttn::new`'s doc. Matches stage 0's real channel-block output at
+    cosine >=0.999 (`davit_channel_block_parity` test).
+  - **Full DaViT tower (verified)**: `vision/davit.rs`'s `Davit` chains all
+    4 stages' patch embeds and all 12 `(SpatialBlock, ChannelBlock)` pairs
+    into `forward_features_unpool`. Matches the real checkpoint's `unpooled`
+    golden end to end at cosine >=0.999 (`davit_full_forward_parity` test) -
+    the strongest single check, since no prior test chained every stage and
+    block type together.
+  - **Vision-token projection (verified)**: `vision/project.rs`'s
+    `ImageProject` is `_encode_image`'s tail - everything after
+    `forward_features_unpool`. Learned 2D position embed
+    (`image_pos_embed.{row,column}_embeddings`, `[50,512]` each) added per
+    token, cosine 1D temporal embed added as a per-channel bias (at `T=1`
+    the reference indexes only row 0 of `visual_temporal_embed`'s
+    `[100,1024]` table - already a contiguous 1024-float run at that
+    tensor's own offset 0, used directly, no transform needed), spatial
+    mean-pool via a constant `1/N` row-vector `matmul`, concatenated
+    `[pooled(1); tokens(576)]` via two `row_scatter` calls (matches
+    `image_feature_source=["spatial_avg_pool","temporal_avg_pool"]`'s real
+    order), projected `1024->768` (bare `nn.Parameter` matmul, no bias) +
+    LayerNorm. Two host-side pre-transforms the caller must do before
+    `ParamStore` construction (`vision/project.rs`'s module doc, same
+    "caller's obligation" convention as `ChannelAttn::new`'s qkv
+    pre-scale): materialize the static `[24,24,1024]` position table
+    (`build_pos_embed_table`, column/row broadcast-concat) and transpose
+    `image_projection` from the checkpoint's `[in,out]` to `matmul_rows`'
+    `[out,in]` convention (`transpose_2d`) - both kept crate-namespaced
+    (`florence2::vision::project::*`), not re-exported at `vision`'s flat
+    API, matching how `sam2::hostpe`'s equivalent host-math helpers are
+    reached only via their own module, never flattened into that crate's
+    root. Matches the real checkpoint's `projected` golden (the actual
+    `[577,768]` input the BART encoder consumes) at cosine >=0.999
+    (`davit_image_project_parity` test).
 
 - **M3**: BART-style shared encoder-decoder + generation. NOT built by
   extending `crates/toyseq2seq` (real gaps there: pre-LN not post-LN,
