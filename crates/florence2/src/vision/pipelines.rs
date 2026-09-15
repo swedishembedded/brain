@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Kernel registration list for the DaViT vision tower - resolved by NAME
-//! (`vision::ids::ConvKernelIds::resolve`, `model::vit::VitKernelIds`
-//! fields) against whichever subset a given forward actually dispatches.
-//! Modeled directly on `fastvlm::encoder::PIPELINES`, the closest existing
-//! model (conv stages + NCHW<->sequence attention stages).
+//! Kernel registration list for the whole crate (DaViT vision tower AND the
+//! BART-style text encoder-decoder - both need one shared `Gpu` handle, so
+//! one table) - resolved by NAME (`vision::ids::ConvKernelIds::resolve`,
+//! `model::vit::VitKernelIds` fields) against whichever subset a given
+//! forward actually dispatches. Modeled directly on
+//! `fastvlm::encoder::PIPELINES`, the closest existing model (conv stages +
+//! NCHW<->sequence attention stages).
 
 pub const PIPELINES: &[(&str, &str)] = &[
     // --- conv / bias ---
@@ -34,4 +36,6 @@ pub const PIPELINES: &[(&str, &str)] = &[
     // --- window partition/reverse row permutation ---
     ("embed", kernels::EMBED),
     ("row_scatter", kernels::ROW_SCATTER),
+    // --- text::attn's causal decoder self-attention softmax ---
+    ("attn_softmax", kernels::ATTN_SOFTMAX),
 ];

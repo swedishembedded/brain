@@ -2,7 +2,9 @@
 
 **Status: M1 done. M2 done (patch embed, SpatialBlock, ChannelBlock, full
 DaViT tower, and the vision-token projection wrapper all verified against
-real weights end to end - see below). M4 done. M3/M5/M6/M7 not started.**
+real weights end to end - see below). M3 done (BART encoder-decoder +
+greedy generation, verified against real weights). M4 done. M5/M6/M7 not
+started.**
 
 ## Goal
 
@@ -141,23 +143,73 @@ self-consistent.
     `[577,768]` input the BART encoder consumes) at cosine >=0.999
     (`davit_image_project_parity` test).
 
-- **M3**: BART-style shared encoder-decoder + generation. NOT built by
-  extending `crates/toyseq2seq` (real gaps there: pre-LN not post-LN,
+- **M3 (done)**: BART-style shared encoder-decoder + greedy generation,
+  `crates/florence2/src/text/{config,attn,encoder,decoder,lm}.rs`. NOT built
+  by extending `crates/toyseq2seq` (real gaps there: pre-LN not post-LN,
   untied not tied `lm_head`, fused not separate qkv, and critically no
-  generation path/KV-cache/padding-mask at all) - built from
-  `model::block::CrossIds`/`KeyMinor` (the same cross-attention-over-fixed-
-  encoder-output builder every diffusion DiT here already uses) + Kronos's
-  KV-cached prefill/decode-step pattern + `model::vlm::splice_fwd` (the
-  vision+text concat, same mechanism DeepSeek-OCR's `layout.rs` already
-  uses) for the image-token/text-token merge. **Real gap found while
-  generating M2's goldens, not yet resolved**: the checkpoint's language
-  model reports `encoder.embed_tokens.weight`/`decoder.embed_tokens.weight`/
-  `lm_head.weight` as MISSING on load (current `transformers` didn't
-  auto-map them) - the real tensor exists under a DIFFERENT name,
-  `language_model.model.shared.weight [51289, 768]`, a single embedding
-  tied across encoder input, decoder input, AND the LM head (standard BART
-  weight tying). M3's import must map `shared.weight` to all three uses,
-  not expect three separate tensors.
+  generation path at all) - built instead from ONE shared attention block
+  (`text::attn::BartAttn`) covering all three of BART's attention flavors
+  (encoder bidirectional self-attn, decoder causal self-attn, decoder
+  cross-attn over the fixed encoder memory), composed entirely from the
+  EXISTING generic cross-attention kernels
+  (`attn_scores_cross`/`attn_softmax{,_cross}`/`attn_apply_cross`) rather
+  than a fused-qkv builder: those kernels' `q_stride`/`kv_stride`/`*_off`
+  params are already general enough to read three independent `[T,d_model]`
+  buffers directly (`attn_scores_cross` only ever touches its `kv`
+  argument's K region, `attn_apply_cross` only ever touches its `kv`
+  argument's V region, so passing K and V as two DIFFERENT physical buffers
+  to that one generic slot needs no fused layout at all) - `causal` swaps
+  only the softmax kernel. **No KV cache** (a deliberate, tracked gap, not
+  an oversight - see below).
+
+  **Real gap found while generating M2's goldens, now resolved**: the
+  checkpoint's language model reports `encoder.embed_tokens.weight`/
+  `decoder.embed_tokens.weight`/`lm_head.weight` as MISSING on load (current
+  `transformers` doesn't auto-map them) - the real tensor exists under a
+  DIFFERENT name, `language_model.model.shared.weight [51289, 768]`, tied
+  across encoder input, decoder input, AND the LM head (standard BART weight
+  tying). `brain`'s own `text::lm::Florence2Lm` always reads `shared.weight`
+  directly for all three uses, so this was never actually a gap for the
+  Rust side - but it WAS a live bug in the golden-generation reference
+  itself: without forcing the tie explicitly
+  (`tools/goldens/florence2_dump_reference.py`'s `main()`, right after
+  load), the Python reference would have silently validated `brain`'s
+  correct implementation against untrained random embeddings instead of the
+  checkpoint. Confirmed via a direct `torch.equal(shared.weight,
+  encoder.embed_tokens.weight)` check before/after the fix (`False` then
+  `True`) - caught before it ever produced a wrong golden, not after.
+
+  **Second real bug the parity gate caught**: `Gpu::step`'s
+  `assert_no_output_alias` (a real wgpu `STORAGE_READ_WRITE` exclusivity
+  rule, not CPU-only pedantry) rejected an early draft of `text::encoder`/
+  `text::decoder` that bound the same scratch buffer as both an `add2`/
+  `layernorm_fwd` input AND its output (to save a buffer allocation per
+  sublayer) - fixed by giving every residual-sum and post-LN step its own
+  distinct buffer (`text::encoder`'s module doc has the full accounting),
+  and using `add_inplace` (a genuinely single read_write binding plus one
+  plain read-only operand) for the position-embedding add specifically,
+  since that one case has a legitimate two-buffer-only shape.
+
+  **Validation**: `crates/florence2/tests/text_lm_parity.rs` - encoder
+  output and one decoder step's teacher-forced logits (fixed `PROMPT_IDS`/
+  `DECODER_IDS`, not real tokenizer output - see the dump script's own doc)
+  against `tools/goldens/florence2_dump_reference.py::dump_encdec`'s golden,
+  both at cosine >=0.999. A third assertion cross-checks
+  `Florence2Lm::generate`'s first greedy token against the golden's row-0
+  argmax directly (not just cosine-close) - this specifically catches a
+  causal-masking leak that a whole-tensor cosine could hide (a later
+  position's context leaking into row 0 would barely move the AGGREGATE
+  cosine while still corrupting that one row's argmax).
+
+  **No KV cache - tracked as a real, intentional gap**: every
+  `Florence2Lm::decode`/`generate` step recomputes the WHOLE decoder prefix
+  (including re-projecting cross-attention K/V from the encoder memory,
+  which never changes within one generation). Correct, and cheap enough for
+  this crate's actual use case (`ground`'s outputs are a handful of
+  `<loc_N>` tokens plus a short phrase - generation lengths in the tens, not
+  hundreds), but a real optimization gap versus Kronos's KV-cached
+  prefill/decode-step pattern - left for whoever profiles the `ground`
+  capability action (M5) and finds it worth doing.
 
 - **M4 (done)**: location-token sequence -> bbox parser
   (`grounding.rs::parse_boxes`, `phrase<loc_a><loc_b><loc_c><loc_d>` ->

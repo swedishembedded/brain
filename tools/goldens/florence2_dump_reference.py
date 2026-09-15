@@ -75,6 +75,39 @@ def fixed_image(batch=1):
     return torch.from_numpy(img)
 
 
+PROMPT_IDS = [100, 200, 300, 400, 500, 600]
+DECODER_IDS = [2, 10, 20, 30]  # starts with decoder_start_token_id=2
+
+
+def dump_encdec(model, image_features, out_dir, manifest):
+    """The BART-style encoder-decoder: encoder output over a fixed
+    vision+text input, and one decoder step's logits (teacher-forced, fixed
+    target ids) - `brain`'s `text::lm::Florence2Lm` does not build a
+    tokenizer-dependent prompt here, so neither does this dump: PROMPT_IDS/
+    DECODER_IDS are arbitrary FIXED in-vocab integers, shared verbatim with
+    the Rust parity test, so both sides feed the literal same numbers rather
+    than depending on either side's tokenizer agreeing.
+    """
+    lm = model.language_model
+    prompt_ids = torch.tensor([PROMPT_IDS])
+    decoder_ids = torch.tensor([DECODER_IDS])
+
+    with torch.no_grad():
+        # scale_embedding=False in this checkpoint, so this IS the raw
+        # embedding lookup - no sqrt(d_model) scale to account for.
+        text_embeds = lm.get_input_embeddings()(prompt_ids)
+        inputs_embeds = torch.cat([image_features, text_embeds], dim=1)
+        encoder_out = lm.model.encoder(inputs_embeds=inputs_embeds).last_hidden_state
+        outputs = lm(inputs_embeds=inputs_embeds, decoder_input_ids=decoder_ids, use_cache=False)
+
+    tensors = {
+        "inputs_embeds": inputs_embeds,
+        "encoder_out": encoder_out,
+        "decoder_logits": outputs.logits,
+    }
+    save(out_dir, "encdec/step.safetensors", tensors, manifest)
+
+
 def dump_davit(model, pixel_values, out_dir, manifest):
     # The real instantiated Florence2ForConditionalGeneration flattens the
     # projection layers (image_projection, image_pos_embed,
@@ -136,6 +169,7 @@ def dump_davit(model, pixel_values, out_dir, manifest):
     for name, out in sub_outputs.items():
         tensors[name] = out
     save(out_dir, "davit/stages.safetensors", tensors, manifest)
+    return projected
 
 
 def main():
@@ -153,9 +187,23 @@ def main():
     model.eval()
     model.float()  # checkpoint ships fp16; goldens are fp32 (brain's safetensors reader is F32/F16/BF16-only)
 
+    # HF's own weight-tying silently FAILS to alias these three onto the
+    # checkpoint's real `language_model.model.shared.weight` (confirmed: the
+    # loader reports all three MISSING/newly-initialized, and a direct
+    # `torch.equal` check against `shared.weight` after load is False).
+    # `brain`'s own import path reads `shared.weight` directly for all three
+    # uses, so the reference model must be forced to do the same or this
+    # dump would silently validate against untrained random embeddings
+    # instead of the checkpoint.
+    lm = model.language_model
+    lm.model.encoder.embed_tokens.weight = lm.model.shared.weight
+    lm.model.decoder.embed_tokens.weight = lm.model.shared.weight
+    lm.lm_head.weight = lm.model.shared.weight
+
     manifest = {"config": model.config.to_dict(), "seed": SEED}
     pixel_values = fixed_image(batch=1)
-    dump_davit(model, pixel_values, args.out, manifest)
+    image_features = dump_davit(model, pixel_values, args.out, manifest)
+    dump_encdec(model, image_features, args.out, manifest)
 
     with open(os.path.join(args.out, "manifest.json"), "w") as f:
         json.dump(manifest, f, indent=2)
