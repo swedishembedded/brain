@@ -399,6 +399,16 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             let (m, k, nt) = (p(0)?, p(1)?, p(4)?);
             f(2 * m * k * nt, 4 * (m * k + nt * k + m * nt))
         }
+        // LoRA delta epilogue: out[m,n] += t[m,r]@bt[r,n], contraction length
+        // r (the adapter rank) rather than k - `2*m*n*r` FLOPs, matching the
+        // `matmul` family's `2*m*k*n` convention with r in k's place. `out`
+        // is read-modify-write (accumulates into a buffer another kernel
+        // already wrote), hence `2*m*n` bytes for it rather than `matmul`'s
+        // write-only `m*n`.
+        "lora_delta" => {
+            let (m, n, r) = (p(0)?, p(1)?, p(2)?);
+            f(2 * m * n * r, 4 * (m * r + r * n + 2 * m * n))
+        }
         // Sparse-MoE expert linear: params [m, k, n, n_experts, e_idx] - same
         // (m, k, n) GEMM shape as `matmul` in the first three slots, plus two
         // routing params that do not change the dispatch shape. A non-routed
