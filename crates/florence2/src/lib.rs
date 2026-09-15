@@ -13,3 +13,4 @@
 //! which existing piece it reuses.
 
 pub mod tokenizer;
+pub mod vision;
