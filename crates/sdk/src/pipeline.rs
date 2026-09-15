@@ -1,15 +1,23 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! [`ImagePipeline`]: the flux2-backed vertical slice of `brain`'s image
-//! surface.
+//! [`ImagePipeline`]: `brain`'s image surface, over TWO structurally
+//! different backends behind one public type -- flux2 (a per-call-sizeable
+//! `flux2::Pipeline`, `generate` returning `(Vec<u8> RGB8, u32, u32)`) and
+//! s3dit (a build-time-sized `s3dit::pipeline::HotPipeline`, `generate`
+//! returning a float HWC `Image { hwc: Vec<f32> in [0,1], w, h }`).
 //!
-//! `load()` replicates the decisions `crates/cli/src/flux2_cli.rs`'s own
-//! `generate` command makes inline (resolve, license-gate, pick the DiT
+//! [`ImagePipelineBuilder::load`] replicates the decisions
+//! `crates/cli/src/flux2_cli.rs`/`s3dit::caps::ZAction` each make inline
+//! (resolve, license-gate where the architecture has one, pick the DiT
 //! precision, size the pipeline) against `crates/loader`'s resolver -- the
 //! SAME resolver the CLI uses, never a parallel path -- so a checkpoint that
-//! resolves for `brain flux2 generate` resolves here too, with no
-//! environment variable and no CLI process in the loop.
+//! resolves for `brain flux2 generate` / `brain do z-image text2image`
+//! resolves here too, with no environment variable and no CLI process in the
+//! loop. Which backend gets built is decided ONCE, by
+//! [`resolve_arch`] reading the resolved [`capability::Assembly::arch`] back
+//! -- everything past that point (`generate`/`generate_with`/`.save()`) is
+//! uniform: see [`Backend`].
 
 use std::collections::BTreeMap;
 
@@ -24,9 +32,38 @@ pub use gpu_core::devices::DeviceSpec as Device;
 /// own `Pipeline::build_sized` takes (`model::dispatch::Precision`).
 pub use model::dispatch::Precision as DType;
 
-/// Generation knobs layered over flux2's own [`flux2::GenOpts`] defaults --
-/// every field left unset here keeps whatever `GenOpts::default()` (or, on a
-/// distilled variant, [`flux2::pipeline::resolved_steps`]) already says.
+/// Generation knobs layered over flux2's own [`flux2::GenOpts`] defaults on
+/// a flux2-backed pipeline -- every field left unset here keeps whatever
+/// `GenOpts::default()` (or, on a distilled variant,
+/// [`flux2::pipeline::resolved_steps`]) already says.
+///
+/// On an s3dit-backed pipeline the SAME type means something asymmetric,
+/// because s3dit couples size to the built pipeline
+/// (`s3dit::pipeline::HotPipeline::build_adapted` records its DiT/VAE graphs
+/// for one `width x height` at BUILD time, unlike flux2's per-call-sizeable
+/// `Pipeline::generate`): [`ImageGenerationOptions::size`] here is VALIDATED
+/// against the load-time size ([`ImagePipelineBuilder::size`]), not applied
+/// -- a caller who asks for a different size than the pipeline was built for
+/// gets a clear [`Error::Backend`] naming both sizes and how to fix it
+/// ([`check_s3dit_size`]), never a silent resize or a silent ignore. `steps`
+/// and `seed` still apply, at s3dit's own defaults (8 steps, seed 42 --
+/// [`s3dit::caps`]'s own `text2image` defaults) when unset; `guidance` has
+/// no s3dit counterpart at all (Z-Image-Turbo is a 0-guidance distilled
+/// model, like flux2's klein variants) and is silently unused on that
+/// backend.
+///
+/// `steps` has NO upper bound anywhere in this call chain: neither this
+/// type, nor flux2's [`flux2::pipeline::resolved_steps`], nor s3dit's
+/// `HotPipeline::generate` (which only floors it to `.max(1)`) refuses an
+/// absurd value -- a caller who passes `steps(u32::MAX)` gets a denoise loop
+/// that many iterations long, not a clean refusal. `width`/`height` (via
+/// [`ImagePipelineBuilder::size`] on the s3dit side) and the prompt's own
+/// token length DO have real, pre-existing bounds in each backend's own
+/// code (flux2's build-time forward-token ceiling; s3dit's
+/// `check_build_shape`/`fit_caption`) -- `steps` is the one caller-facing
+/// knob with none. Pre-existing in both backends, not introduced or masked
+/// here -- deliberately not given an SDK-only clamp, which would hide the
+/// same gap from every OTHER caller of `flux2`/`s3dit` directly.
 #[derive(Clone, Debug, Default)]
 pub struct ImageGenerationOptions {
     width: Option<u32>,
@@ -100,6 +137,43 @@ fn default_forward_tokens() -> u32 {
     flux2::pipeline::gen_tokens_per_forward(&flux2::GenOpts::default())
 }
 
+/// The s3dit-backed pipeline's build-time size default, when
+/// [`ImagePipelineBuilder::size`] is never called: flux2's own default
+/// canvas ([`flux2::GenOpts::default`]) so the two backends agree on "the
+/// size you get if you never ask" even though WHEN that size is fixed
+/// differs between them.
+const S3DIT_DEFAULT_SIZE: (u32, u32) = (1024, 1024);
+/// s3dit's own `text2image` defaults (`s3dit::caps::gen_params`) --
+/// mirrored here rather than re-derived, so an unset
+/// [`ImageGenerationOptions::steps`]/`seed` on an s3dit-backed pipeline
+/// produces the SAME image a `brain do z-image text2image` call with no
+/// `steps`/`seed` argument would.
+const S3DIT_DEFAULT_STEPS: u32 = 8;
+const S3DIT_DEFAULT_SEED: u64 = 42;
+
+/// [`ImagePipeline::generate_with`]'s size gate on an s3dit-backed pipeline,
+/// factored out so it is testable with no real pipeline in hand: `requested`
+/// is [`ImageGenerationOptions`]'s own `(width, height)` (`None` when the
+/// caller left both unset, which always matches); `built` is the size the
+/// pipeline was actually constructed for
+/// ([`ImagePipelineBuilder::size`]/[`S3DIT_DEFAULT_SIZE`]). A mismatch is a
+/// clean, named [`Error::Backend`] -- s3dit has no per-call resize to fall
+/// back to (see this module's doc), and silently generating at the WRONG
+/// size, or silently ignoring the caller's request with no signal at all,
+/// are both worse than refusing by name.
+fn check_s3dit_size(built: (u32, u32), requested: (Option<u32>, Option<u32>)) -> Result<()> {
+    let (w, h) = requested;
+    if let (Some(w), Some(h)) = (w, h) {
+        if (w, h) != built {
+            return Err(Error::Backend(format!(
+                "s3dit: this pipeline was built for {}x{} (ImagePipelineBuilder::size), but generate_with asked for {w}x{h} -- s3dit's DiT/VAE graphs are sized at BUILD time (HotPipeline::build_adapted), so a different size cannot be honored per call; build a new pipeline with .size({w}, {h}) instead",
+                built.0, built.1
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Apply a device/backend selection to this process, the same way
 /// `crates/cli/src/main.rs` applies `--device` before any model builds:
 /// resolve it against the real hardware inventory, publish it as the
@@ -118,30 +192,66 @@ fn apply_device(device: &Device) -> Result<()> {
     Ok(())
 }
 
-/// A FLUX.2 text-to-image pipeline, resolved and built from a local model
-/// store.
-pub struct ImagePipeline {
+/// The backend-specific state one resolved architecture built --
+/// [`ImagePipeline`] itself carries only a [`Backend`], and every public
+/// method matches on it once, at the top; nothing downstream of that match
+/// (image normalization, `.save()`) differs by backend at all.
+enum Backend {
+    Flux2(Flux2Backend),
+    S3dit(S3ditBackend),
+}
+
+struct Flux2Backend {
     pipe: flux2::Pipeline,
     cfg: flux2::Flux2Config,
     paths: flux2::Paths,
     precision: DType,
-    /// The one adapter [`ImagePipeline::load_lora`] has folded in, if any --
-    /// flux2's `Pipeline` only takes adapters at BUILD time
-    /// (`Pipeline::build_sized`'s `adapters: &[AdapterSpec]`; there is no
-    /// post-construction "add an adapter" call on a built `Pipeline`), so
-    /// `load_lora` rebuilds the pipeline from `cfg`/`paths` with this
-    /// adapter folded in, rather than mutating the one already built.
+    /// The one adapter folded in, if any -- flux2's `Pipeline` only takes
+    /// adapters at BUILD time (`Pipeline::build_sized`'s `adapters:
+    /// &[AdapterSpec]`; there is no post-construction "add an adapter" call
+    /// on a built `Pipeline`), so [`ImagePipeline::load_lora`] rebuilds the
+    /// pipeline from `cfg`/`paths` with this adapter folded in, rather than
+    /// mutating the one already built.
     adapter: Option<flux2::AdapterSpec>,
 }
 
-/// Hand-written, not derived: `flux2::pipeline::Pipeline` itself carries no
-/// `Debug` impl (it holds live GPU device handles), so a derive here would
-/// not compile. A short summary is still worth printing -- and worth having
-/// at all, since `Result<ImagePipeline, Error>` needs SOME `Debug` bound to
-/// be usable with `.unwrap()`/`.expect()` the way any other `Result` is.
+struct S3ditBackend {
+    pipe: s3dit::pipeline::HotPipeline,
+    paths: s3dit::pipeline::Paths,
+    /// The size this pipeline was BUILT for -- see this module's doc for why
+    /// s3dit has no per-call sizing to fall back on. Set once, in
+    /// [`ImagePipelineBuilder::load`]/[`ImagePipelineBuilder::size`], and
+    /// read back by [`check_s3dit_size`] on every `generate_with` call.
+    width: u32,
+    height: u32,
+    hifi: bool,
+    /// The one adapter folded in, if any -- same reason as
+    /// [`Flux2Backend::adapter`]: `HotPipeline::build_adapted`'s `adapter:
+    /// Option<&str>` only takes one at BUILD time.
+    adapter: Option<String>,
+}
+
+/// `brain`'s image-generation pipeline: `ImagePipeline::from_pretrained(...)`
+/// resolves a local model store and builds a real, resident model behind
+/// this ONE type, whichever of the two structurally different backends
+/// (flux2 or s3dit -- see this module's doc) the resolved store actually
+/// turned out to hold.
+pub struct ImagePipeline {
+    backend: Backend,
+}
+
+/// Hand-written, not derived: neither `flux2::pipeline::Pipeline` nor
+/// `s3dit::pipeline::HotPipeline` carries a `Debug` impl (both hold live GPU
+/// device handles), so a derive here would not compile. A short summary is
+/// still worth printing -- and worth having at all, since `Result<
+/// ImagePipeline, Error>` needs SOME `Debug` bound to be usable with
+/// `.unwrap()`/`.expect()` the way any other `Result` is.
 impl std::fmt::Debug for ImagePipeline {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ImagePipeline").field("cfg", &self.cfg).field("paths", &self.paths).field("precision", &self.precision).field("adapter", &self.adapter).finish()
+        match &self.backend {
+            Backend::Flux2(b) => f.debug_struct("ImagePipeline").field("backend", &"flux2").field("cfg", &b.cfg).field("paths", &b.paths).field("precision", &b.precision).field("adapter", &b.adapter).finish(),
+            Backend::S3dit(b) => f.debug_struct("ImagePipeline").field("backend", &"s3dit").field("paths", &b.paths).field("width", &b.width).field("height", &b.height).field("hifi", &b.hifi).field("adapter", &b.adapter).finish(),
+        }
     }
 }
 
@@ -152,36 +262,43 @@ impl ImagePipeline {
     }
 
     pub fn builder(model_id: impl AsRef<str>) -> ImagePipelineBuilder {
-        ImagePipelineBuilder { model_id: model_id.as_ref().to_string(), device: Device::default(), dtype: DType::F32 }
+        ImagePipelineBuilder { model_id: model_id.as_ref().to_string(), device: Device::default(), dtype: DType::F32, size: None }
     }
 
     /// Fold a LoRA adapter in, from THIS milestone's one supported source: a
     /// literal filesystem path to brain's own trained checkpoint, or a
     /// third-party ai-toolkit/ComfyUI/LyCORIS `.safetensors` (mirrors
-    /// today's `flux2::AdapterSpec { path, scale: 1.0 }`, exactly what `brain
-    /// flux2 generate --adapter <path>` builds).
+    /// today's `flux2::AdapterSpec { path, scale: 1.0 }` /
+    /// `s3dit::pipeline::HotPipeline::build_adapted`'s `adapter: Option<&str>`
+    /// -- exactly what `brain flux2 generate --adapter <path>` / `brain do
+    /// z-image text2image adapter=<path>` build).
     ///
     /// An `owner/name`-shaped store reference is a REAL, confirmed gap, not
-    /// an oversight: `loader`'s `model_dir::resident_for` only wires
-    /// store-resolved adapters for the "qwen" residency arm, and neither
-    /// `flux2::spec::Flux2Spec` nor `s3dit`'s own spec declares an adapter
-    /// role at all -- there is nothing for a store reference to resolve
-    /// against yet for an image model, so this returns a clear
-    /// [`Error::Backend`] naming the gap rather than silently trying (and
-    /// failing) to treat it as a path.
+    /// an oversight: `crates/cli/src/model_dir.rs`'s `resident_for` only
+    /// wires a store-resolved adapter for the "qwen" residency arm, and
+    /// neither `flux2::spec::Flux2Spec` nor `s3dit::spec::S3ditSpec`
+    /// declares an adapter role at all -- there is nothing for a store
+    /// reference to resolve against yet for an image model, so this returns
+    /// a clear [`Error::Backend`] naming the gap rather than silently trying
+    /// (and failing) to treat it as a path.
     ///
-    /// Rebuilds the pipeline (see [`ImagePipeline::adapter`]'s doc for why),
-    /// so this is exactly as expensive as [`ImagePipelineBuilder::load`]
-    /// itself.
+    /// Rebuilds the pipeline (see [`Flux2Backend::adapter`]/
+    /// [`S3ditBackend::adapter`]'s docs for why), so this is exactly as
+    /// expensive as [`ImagePipelineBuilder::load`] itself.
     pub fn load_lora(&mut self, source: impl AsRef<str>) -> Result<()> {
-        self.adapter = Some(adapter_source_path(source.as_ref())?);
-        self.rebuild()
-    }
-
-    fn rebuild(&mut self) -> Result<()> {
-        let adapters: Vec<flux2::AdapterSpec> = self.adapter.iter().cloned().collect();
-        let n = default_forward_tokens();
-        self.pipe = flux2::Pipeline::build_sized(&self.cfg, &self.paths, n, n, &adapters, self.precision, 1).map_err(Error::Backend)?;
+        let spec = adapter_source_path(source.as_ref())?;
+        match &mut self.backend {
+            Backend::Flux2(b) => {
+                b.adapter = Some(spec);
+                let adapters: Vec<flux2::AdapterSpec> = b.adapter.iter().cloned().collect();
+                let n = default_forward_tokens();
+                b.pipe = flux2::Pipeline::build_sized(&b.cfg, &b.paths, n, n, &adapters, b.precision, 1).map_err(Error::Backend)?;
+            }
+            Backend::S3dit(b) => {
+                b.adapter = Some(spec.path);
+                b.pipe = s3dit::pipeline::HotPipeline::build_adapted(&b.paths, b.width, b.height, s3dit::pipeline::DEFAULT_CAP_LEN, b.hifi, b.adapter.as_deref(), |_| {}).map_err(Error::Backend)?;
+            }
+        }
         Ok(())
     }
 
@@ -191,23 +308,97 @@ impl ImagePipeline {
         self.generate_with(prompt, ImageGenerationOptions::default())
     }
 
+    /// The one place flux2's `(Vec<u8> RGB8, u32, u32)` and s3dit's float HWC
+    /// `Image { hwc, w, h }` both normalize into [`Image`] -- see this
+    /// module's doc and [`Image::from_hwc_unit`]'s doc.
     pub fn generate_with(&self, prompt: &str, opts: ImageGenerationOptions) -> Result<Image> {
-        let o = opts.into_gen_opts();
-        let (rgb, w, h) = self
-            .pipe
-            .generate(prompt, &[], &o, &capability::CancelToken::default(), |_step, _total, _msg| {})
-            .map_err(|e| if e == "cancelled" { Error::Cancelled } else { Error::Backend(e) })?;
-        Image::from_rgb8(w, h, rgb)
+        match &self.backend {
+            Backend::Flux2(b) => {
+                let o = opts.into_gen_opts();
+                let (rgb, w, h) = b
+                    .pipe
+                    .generate(prompt, &[], &o, &capability::CancelToken::default(), |_step, _total, _msg| {})
+                    .map_err(|e| if e == "cancelled" { Error::Cancelled } else { Error::Backend(e) })?;
+                Image::from_rgb8(w, h, rgb)
+            }
+            Backend::S3dit(b) => {
+                check_s3dit_size((b.width, b.height), (opts.width, opts.height))?;
+                let steps = opts.steps.unwrap_or(S3DIT_DEFAULT_STEPS);
+                let seed = opts.seed.unwrap_or(S3DIT_DEFAULT_SEED);
+                let img = b
+                    .pipe
+                    .generate(prompt, seed, steps, &capability::CancelToken::default(), |_step, _total, _msg| {})
+                    .map_err(|e| if e == "cancelled" { Error::Cancelled } else { Error::Backend(e) })?;
+                Image::from_hwc_unit(img.w as u32, img.h as u32, &img.hwc)
+            }
+        }
     }
 }
 
-/// Builds an [`ImagePipeline`]. `.device(...)`/`.dtype(...)` are the only
-/// knobs this milestone exposes; every other decision follows flux2's own
-/// defaults.
+/// Which backend [`ImagePipelineBuilder::load`] should build, decided ONCE
+/// by [`resolve_arch`] -- everything downstream (`generate`/`generate_with`/
+/// `.save()`) is uniform past this point; see this module's doc.
+enum ResolvedArch {
+    Flux2(capability::Assembly),
+    S3dit(capability::Assembly),
+}
+
+/// Resolve `model_id`'s components against BOTH known image architectures --
+/// flux2 first (`flux2::spec::Flux2Spec`; today's only pre-D2 backend, kept
+/// as the tie-break so a store that happens to satisfy both specs at once
+/// behaves exactly as it did before s3dit support existed and skips the
+/// second, unnecessary resolve pass entirely), then s3dit
+/// (`s3dit::spec::S3ditSpec`) only when flux2 did not resolve. Whichever one
+/// actually [`brain_modelstore::resolve::Resolution::Resolved`]s becomes the
+/// [`ResolvedArch`] [`ImagePipelineBuilder::load`] builds against --
+/// `capability::Assembly::arch` on the winning [`capability::Assembly`] is
+/// what actually decided it, per this milestone's dispatch requirement.
+///
+/// A store that resolves NEITHER reports whichever attempt found REAL (if
+/// ambiguous) evidence of its own architecture over one that found nothing
+/// at all: an `Ambiguous` outcome is a strictly more useful answer to hand a
+/// caller than a `Missing` one from whichever architecture happened to be
+/// tried first. Two `Missing`s report flux2's -- an arbitrary tie-break
+/// (flux2 was tried first), not a claim that flux2 is the more likely
+/// answer; a caller who needs to know WHY neither architecture matched a
+/// truly foreign store already has [`Error::Missing`]'s structured `roles`
+/// to read either way.
+fn resolve_arch(overrides: &BTreeMap<String, String>) -> Result<ResolvedArch> {
+    use brain_modelstore::resolve::Resolution;
+
+    let flux2_outcome = loader::resolve_structured("flux2", &flux2::spec::Flux2Spec, overrides).map_err(Error::Backend)?;
+    if matches!(flux2_outcome, Resolution::Resolved(_)) {
+        let Resolution::Resolved(a) = flux2_outcome else { unreachable!("just matched") };
+        return Ok(ResolvedArch::Flux2(*a));
+    }
+
+    let s3dit_outcome = loader::resolve_structured("s3dit", &s3dit::spec::S3ditSpec, overrides).map_err(Error::Backend)?;
+    if matches!(s3dit_outcome, Resolution::Resolved(_)) {
+        let Resolution::Resolved(a) = s3dit_outcome else { unreachable!("just matched") };
+        return Ok(ResolvedArch::S3dit(*a));
+    }
+
+    // Both `Resolved` cases already returned above; only `Ambiguous`/
+    // `Missing` combinations can reach here.
+    match (flux2_outcome, s3dit_outcome) {
+        (Resolution::Ambiguous(a), _) => Err(Error::Ambiguous(a)),
+        (_, Resolution::Ambiguous(a)) => Err(Error::Ambiguous(a)),
+        (f, _) => match f {
+            Resolution::Missing(m) => Err(Error::Missing(m)),
+            Resolution::Resolved(_) => unreachable!("Resolved handled above"),
+            Resolution::Ambiguous(_) => unreachable!("Ambiguous handled above"),
+        },
+    }
+}
+
+/// Builds an [`ImagePipeline`]. `.device(...)`/`.dtype(...)`/`.size(...)`
+/// are the only knobs this milestone exposes; every other decision follows
+/// each backend's own defaults.
 pub struct ImagePipelineBuilder {
     model_id: String,
     device: Device,
     dtype: DType,
+    size: Option<(u32, u32)>,
 }
 
 impl ImagePipelineBuilder {
@@ -221,6 +412,27 @@ impl ImagePipelineBuilder {
         self
     }
 
+    /// The pipeline's build-time size.
+    ///
+    /// On a flux2-backed pipeline this is currently UNUSED: flux2 stays
+    /// sized at its own conservative default ceiling
+    /// ([`default_forward_tokens`]) regardless, and per-call sizing keeps
+    /// working through [`ImageGenerationOptions::size`] up to that ceiling,
+    /// exactly as it did before this method existed. Accepted (not refused)
+    /// on a flux2-backed builder anyway, so calling code that does not yet
+    /// know which backend it will get does not have to special-case it.
+    ///
+    /// On an s3dit-backed pipeline this IS the build shape
+    /// (`HotPipeline::build_adapted`'s `width`/`height`) -- s3dit has no
+    /// other way to be sized, since its DiT/VAE graphs are recorded once, at
+    /// construction (see this module's doc). Defaults to
+    /// [`S3DIT_DEFAULT_SIZE`] (1024x1024, flux2's own default canvas) when
+    /// never called.
+    pub fn size(mut self, width: u32, height: u32) -> Self {
+        self.size = Some((width, height));
+        self
+    }
+
     /// Resolve `model_id` and build a real [`ImagePipeline`].
     ///
     /// 1. [`Device`] is applied to this process (see [`apply_device`]).
@@ -229,28 +441,29 @@ impl ImagePipelineBuilder {
     ///    [`loader::DownloadPolicy`]'s own doc for the other two), fetched
     ///    only when nothing local already resolves it: a checkpoint already
     ///    on disk is never re-checked against the network.
-    /// 3. `crates/loader`'s resolver ([`loader::resolve_structured`]) scans
-    ///    the models directory for FLUX.2's four roles (`dit`/`vae`/
-    ///    `text_encoder`/`tokenizer`), with no role override stated -- the
-    ///    same resolver `brain flux2 generate` calls with no `--dit`/
-    ///    `--variant`/... flags typed.
-    /// 4. The resolved [`capability::Assembly`] becomes real
-    ///    [`flux2::pipeline::Paths`], the license gate runs
+    /// 3. [`resolve_arch`] tries `crates/loader`'s resolver against each
+    ///    known image architecture's roles, with no role override stated --
+    ///    the same resolver `brain flux2 generate` / `brain do z-image
+    ///    text2image` call with no `--dit`/`--variant`/... flags typed.
+    /// 4. The resolved [`capability::Assembly`] becomes real backend
+    ///    `Paths`, the license gate runs where the backend has one
     ///    ([`flux2::caps::check_license`] -- the 9B weights are
-    ///    Non-Commercial-licensed), the variant's [`flux2::Flux2Config`] is
-    ///    looked up, and the DiT's EXECUTABLE precision is resolved
-    ///    ([`flux2::pipeline::effective_dit_precision`]: a `.gguf` source
-    ///    always executes through FLUX.2's packed-int8 path, whatever
-    ///    [`DType`] was requested).
-    /// 5. [`flux2::pipeline::Pipeline::build_sized`] builds the pipeline, at
-    ///    this milestone's conservative defaults: no adapters, a 1024x1024
-    ///    (flux2's own default canvas) forward/output ceiling, and
-    ///    `max_batch = 1`.
+    ///    Non-Commercial-licensed; s3dit's Z-Image-Turbo has none), the
+    ///    variant/config is looked up, and the executable precision is
+    ///    resolved (flux2: [`flux2::pipeline::effective_dit_precision`], a
+    ///    `.gguf` source always executes through FLUX.2's packed-int8 path
+    ///    whatever [`DType`] was requested; s3dit: `hifi = dtype ==
+    ///    DType::F32`, the literal "fp32 execution" reading of `DType::F32`).
+    /// 5. The backend's own `build_sized`/`build_adapted` builds the
+    ///    pipeline: flux2 at this milestone's conservative defaults (no
+    ///    adapters, a 1024x1024 forward/output ceiling, `max_batch = 1`);
+    ///    s3dit at [`ImagePipelineBuilder::size`]'s width/height (no
+    ///    adapter, [`s3dit::pipeline::DEFAULT_CAP_LEN`] caption capacity).
     ///
     /// Every failure path returns a typed [`Error`] -- never a panic on a
     /// caller-reachable input.
     pub fn load(self) -> Result<ImagePipeline> {
-        let ImagePipelineBuilder { model_id, device, dtype } = self;
+        let ImagePipelineBuilder { model_id, device, dtype, size } = self;
 
         apply_device(&device)?;
 
@@ -268,23 +481,30 @@ impl ImagePipelineBuilder {
         }
 
         let overrides: BTreeMap<String, String> = BTreeMap::new();
-        let assembly = match loader::resolve_structured("flux2", &flux2::spec::Flux2Spec, &overrides).map_err(Error::Backend)? {
-            brain_modelstore::resolve::Resolution::Resolved(assembly) => *assembly,
-            brain_modelstore::resolve::Resolution::Ambiguous(a) => return Err(Error::Ambiguous(a)),
-            brain_modelstore::resolve::Resolution::Missing(m) => return Err(Error::Missing(m)),
-        };
+        match resolve_arch(&overrides)? {
+            ResolvedArch::Flux2(assembly) => {
+                let paths = flux2::Paths::from_assembly(&assembly).map_err(Error::Backend)?;
+                let variant_name = assembly.variant.clone().ok_or_else(|| Error::Backend(format!("flux2: resolved assembly {:?} has no variant", assembly.id)))?;
+                flux2::caps::check_license(&variant_name).map_err(Error::Backend)?;
+                let cfg = flux2::Flux2Config::from_name(&variant_name).map_err(Error::Backend)?;
 
-        let paths = flux2::Paths::from_assembly(&assembly).map_err(Error::Backend)?;
-        let variant_name = assembly.variant.clone().ok_or_else(|| Error::Backend(format!("flux2: resolved assembly {:?} has no variant", assembly.id)))?;
-        flux2::caps::check_license(&variant_name).map_err(Error::Backend)?;
-        let cfg = flux2::Flux2Config::from_name(&variant_name).map_err(Error::Backend)?;
+                let precision = flux2::pipeline::effective_dit_precision(&paths.dit, dtype, false).map_err(Error::Backend)?;
 
-        let precision = flux2::pipeline::effective_dit_precision(&paths.dit, dtype, false).map_err(Error::Backend)?;
+                let n = default_forward_tokens();
+                let pipe = flux2::Pipeline::build_sized(&cfg, &paths, n, n, &[], precision, 1).map_err(Error::Backend)?;
 
-        let n = default_forward_tokens();
-        let pipe = flux2::Pipeline::build_sized(&cfg, &paths, n, n, &[], precision, 1).map_err(Error::Backend)?;
+                Ok(ImagePipeline { backend: Backend::Flux2(Flux2Backend { pipe, cfg, paths, precision, adapter: None }) })
+            }
+            ResolvedArch::S3dit(assembly) => {
+                let paths = s3dit::pipeline::Paths::from_assembly(&assembly).map_err(Error::Backend)?;
+                let (width, height) = size.unwrap_or(S3DIT_DEFAULT_SIZE);
+                let hifi = dtype == DType::F32;
 
-        Ok(ImagePipeline { pipe, cfg, paths, precision, adapter: None })
+                let pipe = s3dit::pipeline::HotPipeline::build_adapted(&paths, width, height, s3dit::pipeline::DEFAULT_CAP_LEN, hifi, None, |_| {}).map_err(Error::Backend)?;
+
+                Ok(ImagePipeline { backend: Backend::S3dit(S3ditBackend { pipe, paths, width, height, hifi, adapter: None }) })
+            }
+        }
     }
 }
 
@@ -339,5 +559,33 @@ mod tests {
         assert_eq!(o.seed, 7);
         // Untouched fields keep flux2's own default.
         assert_eq!(o.guidance, flux2::GenOpts::default().guidance);
+    }
+
+    /// [`check_s3dit_size`]: a caller who never sets
+    /// [`ImageGenerationOptions::size`] always matches, at every built size.
+    #[test]
+    fn check_s3dit_size_always_matches_when_the_caller_leaves_size_unset() {
+        assert!(check_s3dit_size((512, 768), (None, None)).is_ok());
+        assert!(check_s3dit_size((1024, 1024), (None, None)).is_ok());
+    }
+
+    /// A per-call size that matches the build-time size is accepted.
+    #[test]
+    fn check_s3dit_size_accepts_a_matching_request() {
+        assert!(check_s3dit_size((768, 768), (Some(768), Some(768))).is_ok());
+    }
+
+    /// The real, confirmed asymmetry Part 1 documents rather than hides:
+    /// s3dit couples size to the built pipeline, so a per-call size that
+    /// DIFFERS from what the pipeline was built for is a named, actionable
+    /// [`Error::Backend`] -- never a silent resize and never a silent
+    /// ignore.
+    #[test]
+    fn check_s3dit_size_refuses_a_mismatched_request_by_name() {
+        let err = check_s3dit_size((512, 512), (Some(768), Some(768))).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("512x512"), "{msg}");
+        assert!(msg.contains("768x768"), "{msg}");
+        assert!(matches!(err, Error::Backend(_)));
     }
 }

@@ -24,6 +24,7 @@ brain-loader.workspace = true
 brain-model.workspace = true
 brain-modelref.workspace = true
 brain-modelstore.workspace = true
+brain-s3dit.workspace = true
 
 [dev-dependencies]
 brain-checkpoint.workspace = true

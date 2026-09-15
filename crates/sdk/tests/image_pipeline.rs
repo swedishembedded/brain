@@ -1,12 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! End-to-end coverage of `ImagePipeline::from_pretrained`'s resolution path
-//! against a local, synthetic, fully offline models-directory fixture --
-//! mirroring `crates/flux2/tests/resolve_layout.rs`'s fixture pattern, but
-//! driven through THIS crate's public facade rather than by constructing
-//! `flux2::Paths`/`capability::Assembly` directly, so what is actually under
-//! test is the facade's own resolution wiring.
+//! End-to-end coverage of `ImagePipeline::from_pretrained`'s resolution +
+//! backend-dispatch path against a local, synthetic, fully offline
+//! models-directory fixture -- mirroring `crates/flux2/tests/
+//! resolve_layout.rs`'s fixture pattern (and, for the s3dit half,
+//! `crates/cli/src/resident.rs`'s own `ZImageResident::from_store` synthetic
+//! fixture), but driven through THIS crate's public facade rather than by
+//! constructing `flux2::Paths`/`s3dit::pipeline::Paths`/`capability::Assembly`
+//! directly, so what is actually under test is the facade's own resolution
+//! and backend-dispatch (`pipeline::resolve_arch`, private to `brain`)
+//! wiring.
 //!
 //! ## Why this stops short of a successful `.generate()?.save()`
 //!
@@ -23,19 +27,33 @@
 //! and is not the kind of fixture an ordinary `cargo test` run on a shared,
 //! disk-constrained box should have to pay for.
 //!
-//! So this file proves everything UP TO that real, unavoidable ceiling: the
-//! facade reaches `crates/loader`'s resolver against a real local fixture
-//! with zero network access, resolves a full `capability::Assembly`, passes
-//! the license gate, looks up the variant's real `Flux2Config`, resolves the
-//! DiT's executable precision, and reaches
-//! `flux2::pipeline::Pipeline::build_sized` -- which then fails CLEANLY (a
-//! typed `brain::Error`, never a panic, never a silent partial success) on a
-//! deliberately-incomplete DiT tensor set, the same "five classification
-//! tensors, not the full manifest" fixture shape
-//! `crates/flux2/tests/resolve_layout.rs`/`placement.rs` already use for
-//! exactly this reason. `Image::save`'s own reuse of the shared `imaging`
-//! codec, and `ImagePipeline::load_lora`'s path-vs-store-reference gate, are
-//! covered directly as unit tests in `crates/sdk/src/image.rs` and
+//! s3dit's ceiling is the SAME shape, for an even more rigid reason:
+//! `s3dit::pipeline`'s `dit_config`/`QwenConfig::qwen3_4b` are hardcoded to
+//! the one shipped Z-Image-Turbo/Qwen3-4B shape at every `HotPipeline::build*`
+//! call site (`crates/s3dit/src/pipeline.rs`'s own `dit_config` doc, audit
+//! F44) -- there is no config-injection seam AT ALL, not even the kind
+//! flux2's `Pipeline::build_with(cfg: &Flux2Config, ...)` offers past
+//! `from_name`'s four names. A real DiT+encoder pair at that shape is tens
+//! of gigabytes; there is no way to make s3dit's OWN construction "tiny"
+//! today, SDK or no SDK.
+//!
+//! So this file proves everything UP TO that real, unavoidable ceiling, for
+//! BOTH backends: the facade reaches `crates/loader`'s resolver against a
+//! real local fixture with zero network access, `resolve_arch` picks the
+//! right backend off the resolved `capability::Assembly::arch`, the
+//! architecture-specific `Paths::from_assembly` reads every role back, the
+//! license gate runs where the backend has one (flux2 only), the
+//! variant/config is looked up, the executable precision/hifi decision is
+//! made, and the backend's own `build_sized`/`build_adapted` is reached --
+//! which then fails CLEANLY (a typed `brain::Error`, never a panic, never a
+//! silent partial success) on a deliberately-incomplete weight-tensor set,
+//! the same "just the classification tensors, not the full manifest"
+//! fixture shape `crates/flux2/tests/resolve_layout.rs`/`crates/s3dit/src/
+//! spec.rs`'s own `turbo_fixture` test helper already use for exactly this
+//! reason. `Image::save`'s own reuse of the shared `imaging` codec,
+//! `Image::from_hwc_unit`'s float-HWC normalization, and
+//! `ImagePipeline::load_lora`'s path-vs-store-reference gate, are covered
+//! directly as unit tests in `crates/sdk/src/image.rs` and
 //! `crates/sdk/src/pipeline.rs` -- neither needs a real model in hand.
 
 use std::path::{Path, PathBuf};
@@ -157,16 +175,17 @@ fn write_vae_safetensors_flat(path: &Path) {
 /// `ImagePipelineBuilder::load`'s `DownloadPolicy::IfMissing` check reads
 /// before it would otherwise attempt a fetch. Deliberately decoupled from
 /// the role-resolver fixture below: `Store::local` and
-/// `loader::resolve_structured`/`Flux2Spec::classify` are two independent
-/// mechanisms (see `crates/sdk/src/pipeline.rs`'s `load` doc), and this is
-/// only the former.
-fn mark_locally_present(root: &Path, vendor: &str, repo: &str) {
+/// `loader::resolve_structured`/`Flux2Spec::classify`/`S3ditSpec::classify`
+/// are two independent mechanisms (see `crates/sdk/src/pipeline.rs`'s `load`
+/// doc), and this is only the former -- `family` is unread by `Store::local`
+/// itself, so it is a plain label here, not a second dispatch key.
+fn mark_locally_present(root: &Path, vendor: &str, repo: &str, family: &str) {
     let dir = root.join(vendor).join(repo);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("weights.stub"), b"stub").unwrap();
     std::fs::write(
         dir.join("brain.manifest.json"),
-        serde_json::to_vec(&serde_json::json!({"id": format!("{vendor}/{repo}"), "family": "flux2", "roles": {"weights": "weights.stub"}})).unwrap(),
+        serde_json::to_vec(&serde_json::json!({"id": format!("{vendor}/{repo}"), "family": family, "roles": {"weights": "weights.stub"}})).unwrap(),
     )
     .unwrap();
 }
@@ -219,7 +238,7 @@ fn from_pretrained_rejects_an_unparseable_model_id() {
 #[test]
 fn from_pretrained_names_every_missing_role_when_the_store_is_otherwise_empty() {
     let root = scratch_root("missing");
-    mark_locally_present(&root, "local", "flux2-empty-test");
+    mark_locally_present(&root, "local", "flux2-empty-test", "flux2");
 
     let err = with_models_dir(&root, || brain::ImagePipeline::from_pretrained("local/flux2-empty-test").unwrap_err());
     match &err {
@@ -247,7 +266,7 @@ fn from_pretrained_names_every_missing_role_when_the_store_is_otherwise_empty() 
 #[test]
 fn from_pretrained_resolves_a_real_local_fixture_with_no_network_access() {
     let root = build_unambiguous_store();
-    mark_locally_present(&root, "local", "flux2-sdk-test");
+    mark_locally_present(&root, "local", "flux2-sdk-test", "flux2");
 
     let err = with_models_dir(&root, || brain::ImagePipeline::from_pretrained("local/flux2-sdk-test").unwrap_err());
     match &err {
@@ -256,6 +275,125 @@ fn from_pretrained_resolves_a_real_local_fixture_with_no_network_access() {
         // succeeded -- only `Pipeline::build_sized` itself, reached last,
         // can still fail. `Ambiguous`/`Missing` here would mean the fixture
         // (or the facade's resolver call) regressed.
+        brain::Error::Backend(msg) => assert!(!msg.is_empty(), "must name what went wrong"),
+        other => panic!("expected a clean Error::Backend from incomplete DiT construction, got {other:?}"),
+    }
+}
+
+// ===================== s3dit-backed dispatch =====================
+//
+// Mirrors `crates/cli/src/resident.rs`'s own `ZImageResident::from_store`
+// synthetic-store test (`write_from_store_dit`/`_text_encoder`/`_vae`/
+// `_tokenizer`) and `crates/s3dit/src/spec.rs`'s own `turbo_fixture` test
+// helper: only the tensors `s3dit::import::dit_config_from_shapes` (DiT
+// classification) and `S3ditSpec::validate` (the text-encoder hidden-size
+// cross-check) actually read, at real `ZImageConfig::turbo()` dimensions --
+// not the full per-layer weight manifest, which at real dimensions would be
+// tens of gigabytes (see this file's module doc).
+
+/// Only the tensors `s3dit::import::dit_config_from_shapes` actually reads
+/// for CLASSIFICATION, at real `ZImageConfig::turbo()` dimensions.
+fn write_s3dit_dit(path: &Path) {
+    let cfg = s3dit::ZImageConfig::turbo();
+    let (dim, cap_feat_dim, head_dim) = (cfg.dim as usize, cfg.cap_feat_dim as usize, (cfg.dim / cfg.n_heads) as usize);
+    let patch_dim = (cfg.in_channels * cfg.patch_size * cfg.patch_size * cfg.f_patch_size) as usize;
+    let mut tensors: Vec<(String, Vec<u64>, Vec<f32>)> = vec![
+        // The DISCRIMINATOR tensor `S3ditSpec::classify` gates a `dit`
+        // candidate on (`cap_embedder.0.weight` --
+        // `crate::import::DISCRIMINATOR_TENSOR`, `pub(crate)` to `s3dit`, so
+        // named literally here rather than imported).
+        ("cap_embedder.0.weight".to_string(), vec![1], vec![0.0f32]),
+        ("cap_embedder.1.weight".to_string(), vec![dim as u64, cap_feat_dim as u64], vec![0.0f32; dim * cap_feat_dim]),
+        ("layers.0.attention.q_norm.weight".to_string(), vec![head_dim as u64], vec![0.0f32; head_dim]),
+        ("x_embedder.weight".to_string(), vec![dim as u64, patch_dim as u64], vec![0.0f32; dim * patch_dim]),
+    ];
+    for prefix in ["layers", "noise_refiner", "context_refiner"] {
+        let n = if prefix == "layers" { cfg.n_layers } else { cfg.n_refiner_layers };
+        for l in 0..n {
+            tensors.push((format!("{prefix}.{l}.attention.qkv.weight"), vec![1], vec![0.0f32]));
+        }
+    }
+    checkpoint::st::save_safetensors(path.to_str().unwrap(), &tensors, &serde_json::json!({}), None).unwrap();
+}
+
+/// A canonical `<vendor>/<repo>` HF text-encoder directory: `config.json`
+/// declaring `Qwen3ForCausalLM` at `hidden` (must equal the DiT's own
+/// `cap_feat_dim` for `S3ditSpec::validate` to accept the pair), plus a real
+/// (tiny) shard and its index -- the shape `brain_modelstore::inventory::
+/// scan` collapses to one `HfDir` record.
+fn write_s3dit_text_encoder(dir: &Path, hidden: u64) {
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(dir.join("config.json"), serde_json::to_vec(&serde_json::json!({"architectures": ["Qwen3ForCausalLM"], "hidden_size": hidden, "vocab_size": TOY_VOCAB})).unwrap()).unwrap();
+    write_shard(&dir.join("model-00001-of-00001.safetensors"));
+    write_index(dir, "model-00001-of-00001.safetensors");
+}
+
+/// Real Z-Image VAE shape: the same generic `decoder`/`encoder`.conv_in.weight
+/// autoencoder names FLUX.2's own VAE carries, at a 2D-conv (4-dim) shape --
+/// `S3ditSpec::classify_safetensors`'s rank guard is what tells it apart
+/// from an unrelated causal 3D video VAE at the same tensor names.
+fn write_s3dit_vae(path: &Path) {
+    checkpoint::st::save_safetensors(
+        path.to_str().unwrap(),
+        &[
+            ("decoder.conv_in.weight".to_string(), vec![512, 32, 3, 3], vec![0.0f32; 512 * 32 * 3 * 3]),
+            ("encoder.conv_in.weight".to_string(), vec![128, 3, 3, 3], vec![0.0f32; 128 * 3 * 3 * 3]),
+        ],
+        &serde_json::json!({}),
+        None,
+    )
+    .unwrap();
+}
+
+/// A minimal, UNAMBIGUOUS real s3dit store: exactly one DiT (turbo shape),
+/// one VAE, one compatible text encoder, one co-located tokenizer -- so
+/// `loader::resolve_structured("s3dit", ...)` (which `resolve_arch` tries
+/// once flux2 does not resolve, exactly like `brain do z-image text2image`
+/// with no role override typed) resolves cleanly on the first try, with no
+/// `Ambiguous` question to answer, and nothing flux2-shaped anywhere in the
+/// store for `resolve_arch`'s flux2-first attempt to pick up instead.
+fn build_unambiguous_s3dit_store() -> Scratch {
+    let root = scratch_root("s3dit-resolve");
+    let cap_feat_dim = s3dit::ZImageConfig::turbo().cap_feat_dim as u64;
+
+    let vendor = root.join("Tongyi-MAI");
+    std::fs::create_dir_all(&vendor).unwrap();
+    write_s3dit_dit(&vendor.join("dit.safetensors"));
+    write_s3dit_text_encoder(&vendor.join("Qwen3-4B"), cap_feat_dim);
+    write_s3dit_vae(&vendor.join("vae.safetensors"));
+    // A vendor-flat loose `tokenizer.json` sitting one level under a
+    // repo-shaped directory (`classify_tokenizer_role`'s co-location check,
+    // and `walk_vendor_dir`'s "one level deeper" rule -- see
+    // `crates/cli/src/resident.rs`'s own `from_store` fixture test, which
+    // notes the exact same rule).
+    let tok_dir = vendor.join("Qwen3-4B-tokenizer");
+    std::fs::create_dir_all(&tok_dir).unwrap();
+    write_tokenizer_json(&tok_dir.join("tokenizer.json"));
+
+    root
+}
+
+/// The full facade path against a real local s3dit fixture, with no network
+/// access at any point: reference parses, `Store::local` resolves it (no
+/// fetch attempted), `resolve_arch` tries flux2 first (finds nothing --
+/// there is nothing flux2-shaped in this store), then tries s3dit and finds
+/// exactly one candidate per role, `s3dit::pipeline::Paths::from_assembly`
+/// reads every role back (s3dit has no license gate to run), `hifi = dtype
+/// == DType::F32` resolves -- then, and only then, `HotPipeline::
+/// build_adapted` itself fails cleanly on the fixture's deliberately
+/// incomplete tensor set (see this file's module doc for why a REAL tensor
+/// set is infeasible here, for s3dit even more rigidly than for flux2).
+#[test]
+fn from_pretrained_dispatches_to_s3dit_and_resolves_a_real_local_fixture_with_no_network_access() {
+    let root = build_unambiguous_s3dit_store();
+    mark_locally_present(&root, "local", "s3dit-sdk-test", "zimage");
+
+    let err = with_models_dir(&root, || brain::ImagePipeline::from_pretrained("local/s3dit-sdk-test").unwrap_err());
+    match &err {
+        // A `Backend` error this deep means `resolve_arch` correctly picked
+        // s3dit (not flux2, and not an `Ambiguous`/`Missing` regression) and
+        // `Paths::from_assembly` succeeded -- only `HotPipeline::
+        // build_adapted` itself, reached last, can still fail.
         brain::Error::Backend(msg) => assert!(!msg.is_empty(), "must name what went wrong"),
         other => panic!("expected a clean Error::Backend from incomplete DiT construction, got {other:?}"),
     }

@@ -13,8 +13,10 @@ use crate::{Error, Result};
 /// One generated image: interleaved 8-bit RGB pixels plus their size.
 ///
 /// Produced by [`crate::ImagePipeline::generate`]/`generate_with`, which
-/// normalize flux2's own `(Vec<u8>, u32, u32)` `generate()` return into this
-/// type.
+/// normalize each backend's own generation output into this ONE type --
+/// flux2's `(Vec<u8>, u32, u32)` via [`Image::from_rgb8`], s3dit's float HWC
+/// `[0,1]` `s3dit::pipeline::Image` via [`Image::from_hwc_unit`] -- so a
+/// caller never sees which backend actually ran.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Image(imaging::Rgb8);
 
@@ -23,6 +25,16 @@ impl Image {
     /// `Pipeline::generate` output shape).
     pub(crate) fn from_rgb8(width: u32, height: u32, pixels: Vec<u8>) -> Result<Image> {
         Ok(Image(imaging::Rgb8::new(width, height, pixels).map_err(Error::Backend)?))
+    }
+
+    /// Normalize an interleaved HWC `f32` buffer in `[0,1]` (s3dit's own
+    /// `s3dit::pipeline::Image { hwc, w, h }` shape) into RGB8 -- via
+    /// [`imaging::hwc_to_rgb8`], the SAME clamp-and-quantize helper every
+    /// other f32-HWC-to-u8 writer in this workspace already uses
+    /// (`crates/imaging/src/pixels.rs`), not a second copy of that rounding
+    /// rule written here.
+    pub(crate) fn from_hwc_unit(width: u32, height: u32, hwc: &[f32]) -> Result<Image> {
+        Ok(Image(imaging::pixels::hwc_to_rgb8(hwc, width, height, 3, imaging::ChannelPolicy::RequireRgb).map_err(Error::Backend)?))
     }
 
     pub fn width(&self) -> u32 {
@@ -84,5 +96,24 @@ mod tests {
         let err = img.save(&out).unwrap_err();
         assert!(matches!(err, Error::Backend(_)), "{err:?}");
         assert!(!out.exists());
+    }
+
+    /// [`Image::from_hwc_unit`]: s3dit's own float-HWC `[0,1]` shape
+    /// normalizes to the SAME RGB8 a caller would get from the flux2
+    /// backend -- clamped and quantized via `imaging::pixels::hwc_to_rgb8`,
+    /// not a second, hand-rolled rounding rule.
+    #[test]
+    fn from_hwc_unit_normalizes_float_hwc_to_rgb8() {
+        // 1x2 pixels, RGB: black and (over-range, clamped) white.
+        let hwc = [0.0f32, 0.0, 0.0, 2.0, -1.0, 0.5];
+        let img = Image::from_hwc_unit(2, 1, &hwc).unwrap();
+        assert_eq!(img.pixels(), &[0, 0, 0, 255, 0, 128]);
+    }
+
+    /// A mismatched HWC buffer is a clean [`Error::Backend`], never a panic.
+    #[test]
+    fn from_hwc_unit_refuses_a_mismatched_buffer_length_cleanly() {
+        let err = Image::from_hwc_unit(2, 2, &[0.0f32; 3]).unwrap_err();
+        assert!(matches!(err, Error::Backend(_)), "{err:?}");
     }
 }

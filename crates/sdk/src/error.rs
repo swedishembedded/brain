@@ -17,6 +17,22 @@
 //! flattening the resolver's own structured answer to a bare string, which
 //! would throw away exactly the information a caller needs to act on it
 //! (which flag to pass, which file is missing).
+//!
+//! ## Error hygiene, for a caller re-exposing this type
+//!
+//! [`Error::Backend`]/[`Error::Download`] carry the underlying flux2/s3dit/
+//! modelstore crate's own message VERBATIM (see that variant's doc) -- which
+//! routinely includes real on-disk paths (a checkpoint file, a models
+//! directory). That is the correct, intended contract for an IN-PROCESS
+//! caller, who already has filesystem access and needs the real reason a
+//! build failed to act on it. It is exactly what a NETWORK-facing surface
+//! must never do (`crates/apiserve`/`crates/dbus` both collapse every
+//! internal error to a generic, path-free body before it reaches a client)
+//! -- this crate has no such collapsing layer, and is not meant to. A caller who
+//! turns `Error`'s `Display` straight into a response for an untrusted
+//! network client inherits that path-disclosure surface and must add their
+//! own translation layer, the same way `apiserve`/`dbus` do in front of
+//! everything else in this workspace.
 
 use brain_modelstore::resolve::{describe_ambiguity, describe_missing, Ambiguity, Missing};
 

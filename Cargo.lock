@@ -379,6 +379,7 @@ dependencies = [
  "brain-model",
  "brain-modelref",
  "brain-modelstore",
+ "brain-s3dit",
  "brain-testutil",
  "serde_json",
 ]
