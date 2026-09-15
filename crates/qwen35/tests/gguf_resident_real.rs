@@ -655,3 +655,53 @@ fn where_does_the_real_checkpoint_start_producing_garbage() {
         println!("repeats={repeats:2} prompt_tokens={prompt_tokens:5} ok={ok:5} text={text:?}");
     }
 }
+
+/// Diagnostic (not gated - prints, does not assert): a clean, single-
+/// instance sweep of DECODE tok/s as a function of context depth, now that
+/// [`where_does_the_real_checkpoint_start_producing_garbage`]'s bug is
+/// fixed and the numbers it prints are trustworthy. One loaded instance,
+/// `max_new = 32` at every length (enough decode steps to average out
+/// per-call noise), real prompt tokens from ~100 to ~3800 - the real curve
+/// this crate's own `layer_decode_state_bytes` doc already predicts the
+/// SHAPE of (GDN layers are `O(1)` in context, GQA layers are `O(context)`
+/// KV-read), measured rather than assumed.
+#[test]
+fn decode_tok_per_s_across_context_depth() {
+    let Some(path) = gguf_path() else { return };
+    let devices = real_devices();
+    if devices.is_empty() {
+        brain_testutil::skip_unavailable("this gate wants at least one usable GPU");
+        return;
+    }
+    let cap: u32 = 4096;
+    let r = Qwen35GgufResident::new(path, devices, cap, TierPolicy::uniform(Dtype::I8));
+    let key = r.instance_key("generate", &capability::Invocation::new());
+    let placed: Vec<Device> = r.estimate_multi(&key).devices().collect();
+    println!("placed on {} device(s): {placed:?}", placed.len());
+    let mut inst = r.activate_multi(&key, &placed).expect("activate the real checkpoint");
+
+    let para = "France is a country in Western Europe. Its territory stretches from the Rhine to the Atlantic \
+                Ocean, and its people speak French. The country is known for its cuisine, its literature and \
+                its long history. Many travellers visit each year to see its museums, its cathedrals and its \
+                countryside. The Seine flows through the north of the country and past its largest urban area. ";
+    for repeats in [1usize, 3, 6, 9, 12, 16, 20, 25, 30, 35, 40, 48, 54] {
+        let mut prompt = String::new();
+        for _ in 0..repeats {
+            prompt.push_str(para);
+        }
+        prompt.push_str("The capital city of France is");
+        let inv = capability::Invocation::new()
+            .set("prompt", serde_json::json!(prompt))
+            .set("chat", serde_json::json!(false))
+            .set("max_new", serde_json::json!(32))
+            .set("temp", serde_json::json!(0.0));
+        let out = inst.run("generate", &inv, &mut |_| {}).expect("generate on the real checkpoint");
+        let prompt_tokens = out.outputs["prompt_tokens"].as_i64().unwrap_or(0);
+        let text = out.outputs["text"].as_str().unwrap_or_default().to_string();
+        let metrics: std::collections::HashMap<String, serde_json::Value> = inst.metrics().into_iter().collect();
+        let prefill_tok_s = metrics.get("prefill_tok_per_s").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let decode_tok_s = metrics.get("decode_tok_per_s").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let ok = text.contains("Paris");
+        println!("prompt_tokens={prompt_tokens:5} prefill_tok_s={prefill_tok_s:7.2} decode_tok_s={decode_tok_s:6.3} ok={ok:5}");
+    }
+}
