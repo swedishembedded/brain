@@ -1,12 +1,15 @@
 # florence2
 
-**Status: M1 done. M2 done (patch embed, SpatialBlock, ChannelBlock, full
-DaViT tower, and the vision-token projection wrapper all verified against
-real weights end to end - see below). M3 done (BART encoder-decoder +
-greedy generation, verified against real weights). M4 done. M5 done
-(`ground` capability action + real import path + CLI/residency/model-store
-registry wiring, verified end to end including a real GPU run). M6/M7 not
-started.**
+**Status: M1-M5 and M7 done. M1: tokenizer. M2: DaViT vision tower
+(patch embed, SpatialBlock, ChannelBlock, full tower, vision-token
+projection - all verified against real weights end to end). M3: BART
+encoder-decoder + greedy generation, verified against real weights. M4:
+location-token -> bbox parser. M5: `ground` capability action + real import
+path + CLI/residency/model-store registry wiring, verified end to end
+including a real GPU run - `brain do florence2 ground` is a real, reachable
+command. M7: model docs + README entry. M6 (LoRA training) is scoped with
+concrete research recorded below but not yet implemented - the only
+milestone remaining, and inference-irrelevant for `ground`.**
 
 ## Goal
 
