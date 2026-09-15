@@ -8,5 +8,8 @@
 //! `model::block::chunked_bidir_fwd`) and is the next piece to land.
 
 pub mod config;
+pub mod patch_embed;
+pub mod pipelines;
 
 pub use config::{DavitConfig, DavitPatchSpec, DavitStageSpec};
+pub use patch_embed::{PatchEmbed, PatchEmbedKernelIds};
