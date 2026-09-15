@@ -62,6 +62,9 @@ fn resident_ctor_for(model_id: &str) -> Option<ResidentCtor> {
     if model_id == scrfd::caps::MODEL {
         return catalog::resident!(crate::resident_scrfd::ScrfdResident::from_env);
     }
+    if model_id == florence2::caps::MODEL {
+        return catalog::resident!(crate::resident_florence2::Florence2Resident::from_env);
+    }
     if model_id == arcface::caps::MODEL {
         return catalog::resident!(crate::resident_arcface::ArcFaceResident::from_env);
     }
@@ -454,6 +457,7 @@ mod tests {
         let patched = [
             sam2::caps::MODEL,
             scrfd::caps::MODEL,
+            florence2::caps::MODEL,
             arcface::caps::MODEL,
             vqgan::caps::MODEL,
             codeformer::caps::MODEL,

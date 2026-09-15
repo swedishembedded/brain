@@ -487,6 +487,12 @@ pub const ARCHS: &[Arch] = &[
     arch!("arcface", "ArcFace IResNet-100 face embedding", Vision, Brain, "brain-arcface"),
     arch!("clip", "CLIP-L / OpenCLIP-bigG / EVA-CLIP text+image towers", Vision, LlamaCpp, "brain-clip"),
     arch!("zipdepth", "ZipDepth monocular depth (pure-conv)", Vision, Brain, "brain-zipdepth"),
+    // No GGUF/llama.cpp conversion exists upstream for Florence-2 (an open,
+    // unresolved llama.cpp issue) - `gguf` is left unset, so `id` itself
+    // ("florence2", the checkpoint's own real `config.json` model_type)
+    // stands as the reserved spelling if one is ever authored.
+    arch!("florence2", "Florence-2 visual grounding (DaViT + BART)", Vision, Brain, "brain-florence2",
+        hf: &["Florence2ForConditionalGeneration"], default_ref: Some("microsoft/Florence-2-base")),
     // -- Image generation / restoration --------------------------------
     // `families: &["zimage"]` - `ZimageRecipe::id()` (and the
     // `CompoundManifest::family` it writes at pull/finish time) is

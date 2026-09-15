@@ -412,6 +412,14 @@ pub fn models() -> Vec<ModelEntry> {
             resident: None,
         },
         ModelEntry {
+            manifest: florence2::caps::manifest,
+            provider: from_env!(
+                florence2::caps::Florence2Provider::from_env,
+                "set BRAIN_FLORENCE2_DIR to a directory holding config.json, model.safetensors and tokenizer.json"
+            ),
+            resident: None,
+        },
+        ModelEntry {
             manifest: arcface::caps::manifest,
             provider: from_env!(
                 arcface::caps::ArcFaceProvider::from_env,

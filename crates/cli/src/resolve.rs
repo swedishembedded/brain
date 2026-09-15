@@ -118,6 +118,7 @@ const ARCH_TO_MODEL: &[(&str, &str)] = &[
     ("qwen3vl", "brain/qwen3vl"),
     ("sam2", "brain/sam2"),
     ("scrfd", "brain/scrfd"),
+    ("florence2", "brain/florence2"),
     ("arcface", "brain/arcface"),
     ("vqgan", "brain/vqgan"),
     ("codeformer", "brain/codeformer"),

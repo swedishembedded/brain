@@ -15,6 +15,7 @@
 pub mod caps;
 pub mod grounding;
 pub mod import;
+pub mod spec;
 pub mod text;
 pub mod tokenizer;
 pub mod vision;
