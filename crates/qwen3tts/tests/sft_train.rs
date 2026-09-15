@@ -94,7 +94,7 @@ fn talker_lora_finetune_decreases_loss() {
     let out = tmp("lora_out").join("talker_lora.safetensors");
     // rank = d_model (16): a full-capacity attention adapter so the decrease is
     // unambiguous even with the embeddings/head frozen.
-    let fopts = FinetuneOpts { steps: 500, batch: 32, block, lr: 5e-3, rank: 16, alpha: 16.0, seed: 9 };
+    let fopts = FinetuneOpts { steps: 500, batch: 32, block, lr: 5e-3, rank: 16, alpha: 16.0, seed: 9, ..Default::default() };
     let (initial, final_loss) =
         qwen3tts::sft::finetune_lora(base.to_str().unwrap(), &dir, out.to_str().unwrap(), &fopts).expect("finetune");
     eprintln!("lora finetune: initial {initial:.4} -> final {final_loss:.4}");

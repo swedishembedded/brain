@@ -130,13 +130,30 @@ pub fn ce_batch(logits: &[f32], targets: &[u32], vocab: usize) -> (f32, Vec<f32>
 // LoRA fine-tune (single-speaker SFT): reuse the gradient-checked Qwen LoRA.
 // ---------------------------------------------------------------------------
 
-/// Knobs for [`finetune_lora`].
+/// Knobs for [`finetune_lora`]/[`finetune_full`]. Field-for-field a subset of
+/// [`model::FitOpts`] (see [`FinetuneOpts::to_fit_opts`]) plus the two
+/// LoRA-specific knobs (`rank`/`alpha`) - kept as its own type rather than
+/// `model::FitOpts` directly so this crate's CLI surface (`brain qwen3tts
+/// finetune`) stays independent of the generic engine's full option set.
 #[derive(Clone, Debug)]
 pub struct FinetuneOpts {
     pub steps: u32,
     pub batch: u32,
     pub block: u32,
     pub lr: f32,
+    /// Floor the cosine decay holds after `decay_iters` (`model::FitOpts::min_lr`).
+    pub min_lr: f32,
+    /// Steps of linear warmup before `lr` is reached (`model::FitOpts::warmup`).
+    pub warmup: u32,
+    /// Step by which the decay has reached `min_lr` (`model::FitOpts::decay_iters`).
+    pub decay_iters: u32,
+    pub weight_decay: f32,
+    pub grad_clip: f32,
+    /// Micro-batches averaged into one optimizer step (`model::FitOpts::grad_accum`).
+    pub grad_accum: u32,
+    /// Wall-clock checkpoint cadence in seconds, `0` disables periodic saves
+    /// (only the final checkpoint is written) - `model::FitOpts::checkpoint_secs`.
+    pub checkpoint_secs: u64,
     pub rank: u32,
     pub alpha: f32,
     pub seed: u64,
@@ -144,13 +161,60 @@ pub struct FinetuneOpts {
 
 impl Default for FinetuneOpts {
     fn default() -> Self {
-        FinetuneOpts { steps: 200, batch: 16, block: 16, lr: 1e-3, rank: 8, alpha: 16.0, seed: 1337 }
+        let steps = 200;
+        FinetuneOpts {
+            steps,
+            batch: 16,
+            block: 16,
+            lr: 1e-3,
+            min_lr: 1e-4,
+            warmup: steps / 10,
+            decay_iters: steps,
+            weight_decay: 0.0,
+            grad_clip: 1.0,
+            grad_accum: 1,
+            checkpoint_secs: 600,
+            rank: 8,
+            alpha: 16.0,
+            seed: 1337,
+        }
+    }
+}
+
+impl FinetuneOpts {
+    /// Lift these opts into the generic engine's [`model::FitOpts`] -
+    /// [`run_finetune`] hands the result straight to [`model::fit_with`].
+    /// Every field not exposed on `FinetuneOpts` (masking, eval cadence) is a
+    /// no-op default: this crate's dataset carries no mask/vocab metadata
+    /// (see [`run_finetune`]'s doc) and prints no periodic eval line, matching
+    /// this loop's behaviour before it was collapsed onto `fit_with`.
+    fn to_fit_opts(&self) -> model::FitOpts {
+        model::FitOpts {
+            steps: self.steps,
+            batch_size: self.batch,
+            block_size: self.block,
+            lr: self.lr,
+            min_lr: self.min_lr,
+            warmup: self.warmup,
+            decay_iters: self.decay_iters,
+            weight_decay: self.weight_decay,
+            grad_clip: self.grad_clip,
+            grad_accum: self.grad_accum,
+            eval_interval: 0,
+            eval_batches: 0,
+            seed: self.seed,
+            checkpoint_secs: self.checkpoint_secs,
+            mask_before: None,
+            mask_per_line: false,
+            align_to_lines: false,
+        }
     }
 }
 
 /// LoRA fine-tune a Talker decoder (`base` checkpoint) on a `text->codes` token
-/// dataset in `dir` (`train.u32.bin`/`val.u32.bin`/`meta.json`, e.g. from
-/// `data::gen_tts`). The pretrained weights are frozen; only the attention LoRA
+/// dataset in `dir` (`train.u32.bin`/`val.u32.bin`, e.g. from `data::gen_tts` -
+/// no `meta.json`/mask needed, every position is scored). The pretrained
+/// weights are frozen; only the attention LoRA
 /// adapters (`*.lora_a`/`*.lora_b`) train. Writes the adapted checkpoint to `out`
 /// and returns `(initial_loss, final_loss)`.
 ///
@@ -217,7 +281,21 @@ pub fn finetune_full(base: &str, dir: &Path, out: &str, opts: &FinetuneOpts) -> 
 /// The training loop shared by [`finetune_lora`]/[`finetune_full`]: the only
 /// difference between the two modes is how `cfg`/`init` are built above (a
 /// LoRA-extended config with the base frozen vs. the base config with every
-/// tensor trainable) - the loop over the dataset is identical either way.
+/// tensor trainable) - the dataset/optimizer loop is identical either way, so
+/// it is [`model::fit_with`] over the shared causal-LM [`model::causal_lm`]
+/// objective rather than a fourth hand-rolled copy of it.
+///
+/// Deliberately does **not** go through [`model::load_dataset`]: this crate's
+/// `text->codes` datasets (`data::gen_tts`) carry no `meta.json`/`.mask.bin` -
+/// every position is scored, unmasked - so the [`data::loader::BatchConfig`]
+/// is built by hand here with masking off, exactly as this loop already did
+/// before the collapse onto `fit_with`.
+///
+/// Returns `model::fit_with`'s own `(initial_train, last_train)` - the
+/// 5-micro-step train-split estimate and the final step's train loss, NOT
+/// the previous `(initial_val_eval, min(final_val_eval, last_train))` this
+/// loop used to compute by hand. Callers reading the returned pair (the CLI's
+/// printed summary) were updated for this at the same time.
 #[cfg(not(target_arch = "wasm32"))]
 fn run_finetune(
     cfg: qwen3::QwenConfig,
@@ -227,7 +305,6 @@ fn run_finetune(
     opts: &FinetuneOpts,
 ) -> std::io::Result<(f32, f32)> {
     use data::loader::{BatchConfig, TokenDataset};
-    use data::rng::Rng;
     use qwen3::Qwen;
 
     let model = Qwen::new(cfg, opts.batch, opts.block, &init);
@@ -244,33 +321,8 @@ fn run_finetune(
     };
     let train_ds = TokenDataset::new(train, &bcfg);
     let val_ds = TokenDataset::new(val, &bcfg);
-    let mut rng = Rng::new(opts.seed ^ 0xA5A5_5A5A);
-
-    let to_u32 = |y: &[i32]| -> Vec<u32> { y.iter().map(|&v| if v < 0 { IGNORE } else { v as u32 }).collect() };
-    let eval = |m: &Qwen, ds: &TokenDataset, rng: &mut Rng, n: u32| -> f32 {
-        let mut s = 0.0;
-        for _ in 0..n.max(1) {
-            let (x, y) = ds.get_batch(&bcfg, rng);
-            m.set_batch(&x, &to_u32(&y));
-            s += m.forward();
-        }
-        s / n.max(1) as f32
-    };
-
-    let initial = eval(&model, &val_ds, &mut rng.clone(), 5);
-    let mut last = initial;
-    for step in 0..opts.steps {
-        model.zero_grads();
-        let (x, y) = train_ds.get_batch(&bcfg, &mut rng);
-        model.set_batch(&x, &to_u32(&y));
-        last = model.forward();
-        model.backward();
-        model.adamw_step(step + 1, opts.lr, 0.0, Some(1.0), 1.0);
-        model.poll_wait();
-    }
-    let final_eval = eval(&model, &val_ds, &mut rng.clone(), 5);
-    model.save(out);
-    Ok((initial, final_eval.min(last)))
+    let obj = model::causal_lm::<Qwen>(train_ds, val_ds, bcfg, None);
+    model::fit_with(model, obj, &opts.to_fit_opts(), Some(Path::new(out)))
 }
 
 #[cfg(test)]
@@ -379,21 +431,19 @@ mod tests {
         std::fs::write(path, bytes).unwrap();
     }
 
-    /// The whole point of having two fine-tune modes: `finetune_full` must
-    /// actually move the base decoder weights (that's what "full" means),
-    /// while `finetune_lora` must leave them bit-for-bit untouched (the base
-    /// stays frozen; only the adapters train). A tiny synthetic checkpoint +
-    /// dataset, no real Qwen3-TTS weights needed - this is a contract test on
-    /// the two training modes, not a quality test on real speech.
-    #[test]
-    fn full_finetune_moves_base_weights_lora_does_not() {
+    /// Build a tiny base checkpoint + a `text->codes`-shaped synthetic dataset
+    /// (`train.u32.bin`/`val.u32.bin`, no `meta.json`) under a fresh tmp dir -
+    /// the fixture every `run_finetune`-driving test below shares. `tag`
+    /// disambiguates the tmp dir between tests running in the same process.
+    fn setup(tag: &str) -> (std::path::PathBuf, String) {
         use qwen3::{Qwen, QwenConfig};
 
         let cfg = QwenConfig::tiny();
         let init = qwen3::init_weights(&cfg, 7);
         let base_model = Qwen::new(cfg.clone(), 1, cfg.block_size, &init);
 
-        let dir = std::env::temp_dir().join(format!("qwen3tts-sft-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("qwen3tts-sft-test-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let base_path = dir.join("base.safetensors").to_str().unwrap().to_string();
         base_model.save(&base_path);
@@ -404,7 +454,21 @@ mod tests {
         write_u32_bin(&dir.join("train.u32.bin"), &toks);
         write_u32_bin(&dir.join("val.u32.bin"), &toks);
 
-        let opts = FinetuneOpts { steps: 2, batch: 2, block: 4, lr: 1e-2, rank: 2, alpha: 4.0, seed: 11 };
+        (dir, base_path)
+    }
+
+    /// The whole point of having two fine-tune modes: `finetune_full` must
+    /// actually move the base decoder weights (that's what "full" means),
+    /// while `finetune_lora` must leave them bit-for-bit untouched (the base
+    /// stays frozen; only the adapters train). A tiny synthetic checkpoint +
+    /// dataset, no real Qwen3-TTS weights needed - this is a contract test on
+    /// the two training modes, not a quality test on real speech.
+    #[test]
+    fn full_finetune_moves_base_weights_lora_does_not() {
+        let (dir, base_path) = setup("full-vs-lora");
+        let init = qwen3::init_weights(&qwen3::QwenConfig::tiny(), 7);
+
+        let opts = FinetuneOpts { steps: 2, batch: 2, block: 4, lr: 1e-2, rank: 2, alpha: 4.0, seed: 11, ..Default::default() };
         let key = "blocks.0.attn.wq.weight";
         let original = init[key].clone();
 
@@ -419,6 +483,164 @@ mod tests {
         let lora_w = checkpoint::load(&lora_out).by_role("");
         let lora_diff: f32 = lora_w[key].iter().zip(&original).map(|(a, b)| (a - b).abs()).sum();
         assert_eq!(lora_diff, 0.0, "LoRA finetune must leave base weights untouched (diff={lora_diff})");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The defect this collapse onto `fit_with` fixes (a): the hand-rolled
+    /// loop applied `opts.lr` as a flat constant rate at every step, ignoring
+    /// `warmup`/`min_lr`/`decay_iters` entirely. Two single-step runs, same
+    /// seed/data/model, differing only in `warmup`: at step 0 a `warmup: 0`
+    /// run trains at the full peak rate, a `warmup: 1000` run trains at
+    /// `peak/1000` (`LrSchedule::at`). AdamW's first-step update magnitude is
+    /// ~`lr` per parameter (bias-corrected `v_hat` ≈ `grad^2`, so
+    /// `m_hat/(sqrt(v_hat)+eps)` ≈ `sign(grad)`), so the warmed-down run's
+    /// adapter movement must come out roughly 1000x smaller. Before the
+    /// collapse this held identically regardless of `warmup` - RED.
+    #[test]
+    fn lora_finetune_lr_follows_the_warmup_schedule_not_a_constant_rate() {
+        let (dir, base_path) = setup("lr-schedule");
+
+        let no_warmup = FinetuneOpts {
+            steps: 1,
+            batch: 2,
+            block: 4,
+            lr: 1e-1,
+            min_lr: 1e-1,
+            warmup: 0,
+            decay_iters: 1,
+            rank: 2,
+            alpha: 4.0,
+            seed: 11,
+            ..Default::default()
+        };
+        let out_a = dir.join("no_warmup.safetensors").to_str().unwrap().to_string();
+        finetune_lora(&base_path, &dir, &out_a, &no_warmup).expect("finetune (no warmup)");
+
+        let long_warmup = FinetuneOpts { warmup: 1000, ..no_warmup };
+        let out_b = dir.join("long_warmup.safetensors").to_str().unwrap().to_string();
+        finetune_lora(&base_path, &dir, &out_b, &long_warmup).expect("finetune (warmup=1000)");
+
+        let key = "blocks.0.attn.wq.weight.lora_b"; // zero-init - any nonzero value is training-induced movement
+        let move_a: f32 = checkpoint::load(&out_a).by_role("")[key].iter().map(|v| v.abs()).sum();
+        let move_b: f32 = checkpoint::load(&out_b).by_role("")[key].iter().map(|v| v.abs()).sum();
+
+        assert!(move_a > 0.0, "the no-warmup run must move the adapter at all: {move_a}");
+        assert!(
+            move_b < move_a * 0.1,
+            "a step-0 rate of peak/1000 (warmup=1000) must move the adapter far less than the \
+             full peak rate (warmup=0); got no-warmup={move_a}, warmup=1000={move_b} - the LR \
+             schedule is not being applied"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The defect this collapse fixes (b): the hand-rolled loop drew exactly
+    /// one micro-batch per step no matter what `grad_accum` said. Two
+    /// single-step runs, same seed/data/model, differing only in
+    /// `grad_accum`: `fit_with` returns the step's average forward loss
+    /// (`last_train`) over however many micro-batches it actually drew.
+    /// `grad_accum: 1` scores one (fixed, seed-determined) batch; `grad_accum:
+    /// 4` must score FOUR different batches drawn off the same rng stream and
+    /// average their loss - a different number, almost certainly, from the
+    /// one-batch loss. Before the collapse both returned the identical
+    /// single-batch loss regardless of `grad_accum` - RED.
+    #[test]
+    fn lora_finetune_grad_accum_actually_accumulates_multiple_micro_batches() {
+        let (dir, base_path) = setup("grad-accum");
+
+        let single = FinetuneOpts {
+            steps: 1,
+            batch: 2,
+            block: 4,
+            lr: 1e-2,
+            min_lr: 1e-2,
+            warmup: 0,
+            decay_iters: 1,
+            grad_accum: 1,
+            rank: 2,
+            alpha: 4.0,
+            seed: 23,
+            ..Default::default()
+        };
+        let out_1 = dir.join("accum1.safetensors").to_str().unwrap().to_string();
+        let (_, last_1) = finetune_lora(&base_path, &dir, &out_1, &single).expect("finetune (grad_accum=1)");
+
+        let accumulated = FinetuneOpts { grad_accum: 4, ..single };
+        let out_4 = dir.join("accum4.safetensors").to_str().unwrap().to_string();
+        let (_, last_4) = finetune_lora(&base_path, &dir, &out_4, &accumulated).expect("finetune (grad_accum=4)");
+
+        assert!(
+            (last_1 - last_4).abs() > 1e-4,
+            "grad_accum=4 must average the forward loss over 4 micro-batches drawn from the \
+             SAME rng stream grad_accum=1 draws only its first batch from, not silently behave \
+             like grad_accum=1 (accum=1 loss {last_1}, accum=4 loss {last_4} are suspiciously \
+             identical) - grad_accum is not being read"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The defect this collapse fixes (c): the hand-rolled loop never saved a
+    /// checkpoint until the run finished, no matter how long it took - a slow
+    /// or interrupted run had nothing to resume from. A background thread
+    /// polls `out`'s mtime while a long-enough (`checkpoint_secs: 1`,
+    /// thousands of tiny steps) run is still in flight; it must observe the
+    /// file written more than once - a periodic save plus the always-present
+    /// final save - proving a save happened BEFORE the run completed. Before
+    /// the collapse this always saw exactly one write (the final one) - RED.
+    #[test]
+    fn full_finetune_writes_a_periodic_checkpoint_before_the_run_completes() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use std::time::{Duration, SystemTime};
+
+        let (dir, base_path) = setup("periodic-checkpoint");
+        let out = dir.join("periodic.safetensors");
+        let out_watch = out.clone();
+
+        let writes = Arc::new(AtomicUsize::new(0));
+        let writes2 = writes.clone();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop2 = stop.clone();
+        let watcher = std::thread::spawn(move || {
+            let mut last: Option<SystemTime> = None;
+            while !stop2.load(Ordering::Relaxed) {
+                if let Ok(meta) = std::fs::metadata(&out_watch) {
+                    if let Ok(mtime) = meta.modified() {
+                        if last != Some(mtime) {
+                            last = Some(mtime);
+                            writes2.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        });
+
+        let opts = FinetuneOpts {
+            steps: 20_000,
+            batch: 2,
+            block: 4,
+            lr: 1e-2,
+            checkpoint_secs: 1,
+            rank: 2,
+            alpha: 4.0,
+            seed: 41,
+            ..Default::default()
+        };
+        finetune_lora(&base_path, &dir, out.to_str().unwrap(), &opts).expect("finetune");
+
+        stop.store(true, Ordering::Relaxed);
+        watcher.join().unwrap();
+
+        assert!(
+            writes.load(Ordering::Relaxed) >= 2,
+            "expected at least one periodic checkpoint save plus the final save before the run \
+             completed (checkpoint_secs=1, a multi-second run); saw {} distinct write(s)",
+            writes.load(Ordering::Relaxed)
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }

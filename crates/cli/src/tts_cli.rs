@@ -119,7 +119,10 @@ fn finetune(args: &[String]) {
         qwen3tts::sft::finetune_lora(&base, std::path::Path::new(&data_dir), &out, &o)
     };
     match result {
-        Ok((i0, i1)) => println!("finetune done: loss {i0:.4} -> {i1:.4}  saved -> {out}"),
+        // `(initial_train, last_train)` - model::fit_with's own convention
+        // (a 5-micro-step train-split estimate, then the final step's train
+        // loss), not the val-split estimate this used to print.
+        Ok((initial_train, last_train)) => println!("finetune done: loss {initial_train:.4} -> {last_train:.4}  saved -> {out}"),
         Err(e) => {
             eprintln!("finetune failed: {e}");
             std::process::exit(1);

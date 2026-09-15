@@ -330,6 +330,22 @@ struct CausalLm {
     itos: Option<Vec<char>>,
 }
 
+/// Build the ordinary causal-LM [`Objective`] any [`Model`] can plug into
+/// [`fit_with`] - the same objective [`fit`] itself uses, exposed so callers
+/// with their own resume/offload/LoRA setup around model construction (e.g.
+/// `qwen3::finetune`, `qwen3tts::sft`, `qwen35::finetune`) can still run the
+/// one shared loop instead of copy-pasting it a fourth time. Takes exactly
+/// the four fields [`load_dataset_with_itos`] returns.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn causal_lm<M: Model>(
+    train: TokenDataset,
+    val: TokenDataset,
+    batch_cfg: BatchConfig,
+    itos: Option<Vec<char>>,
+) -> impl Objective<M> {
+    CausalLm { train, val, batch_cfg, itos }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 impl<M: Model> Objective<M> for CausalLm {
     fn regime(&self) -> &'static str {
