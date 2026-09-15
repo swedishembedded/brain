@@ -81,8 +81,8 @@ served, with no error.
 | `BRAIN_GPT2_WEIGHTS` | char-level GPT baseline | checkpoint (embeds its vocab) |
 | `BRAIN_GLMDSA_WEIGHTS` | GLM decoder | checkpoint (char-level) |
 | `BRAIN_LFM2` + `BRAIN_LFM2_TOKENIZER` | LFM2.5-Encoder (`fill-mask`/`embed`) | weights + `tokenizer.json` |
-| `BRAIN_FLUX2_DIT`, `BRAIN_FLUX2_VAE`, `BRAIN_FLUX2_TE`, `BRAIN_FLUX2_TOKENIZER` | FLUX.2 Klein text2image/edit | the four component paths (all required). `BRAIN_FLUX2_TE` takes either an HF text-encoder directory or a Qwen3 `.gguf` file -- sniffed, not declared |
-| `BRAIN_S3DIT_DIT`, `BRAIN_S3DIT_VAE`, `BRAIN_S3DIT_QWEN`, `BRAIN_S3DIT_TOKENIZER` | Z-Image text2image/edit | the four component paths (all required) |
+| `BRAIN_FLUX2_DIT`, `BRAIN_FLUX2_VAE`, `BRAIN_FLUX2_TE`, `BRAIN_FLUX2_TOKENIZER` | FLUX.2 Klein text2image/edit/finetune | optional overrides, one per component -- unset, each is resolved from the model store instead (`flux2::spec::Flux2Spec`); set, it pins that exact file. `BRAIN_FLUX2_TE` takes either an HF text-encoder directory or a Qwen3 `.gguf` file -- sniffed, not declared |
+| `BRAIN_S3DIT_DIT`, `BRAIN_S3DIT_VAE`, `BRAIN_S3DIT_QWEN`, `BRAIN_S3DIT_TOKENIZER` | Z-Image text2image/edit | optional overrides, one per component -- unset, each is resolved from the model store instead (`s3dit::spec::S3ditSpec`); set, it pins that exact file |
 | `BRAIN_YOLOV8` | YOLOv8 detection | checkpoint |
 | `BRAIN_ZIPDEPTH_WEIGHTS` | ZipDepth monocular depth | `.pth` checkpoint |
 | `BRAIN_SAM2_WEIGHTS` | SAM 2.1 segmentation | `sam2.1_hiera_*.pt` checkpoint |

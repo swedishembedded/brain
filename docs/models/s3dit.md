@@ -29,6 +29,13 @@ The slower, non-distilled `Tongyi-MAI/Z-Image` base model auto-fetches the
 same way when requested by name (also opt-in) (use it with a higher `guidance` and more
 `steps`).
 
+`brain serve` does not require `BRAIN_S3DIT_*` either: the statically
+registered resident resolves its four components from the model store, the
+same `s3dit::spec::S3ditSpec` scan/candidate rules a one-shot import uses.
+`BRAIN_S3DIT_DIT`, `_VAE`, `_QWEN`, `_TOKENIZER` still work exactly as
+before when set - each pins that one component outright, overriding whatever
+the store would otherwise pick.
+
 ### From a GGUF
 
 `brain import-gguf` also accepts a quantized Z-Image DiT (unsloth publishes

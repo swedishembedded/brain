@@ -258,11 +258,12 @@ const HELP: &str = "brain flux2 <cmd>
            # Both trainers run the same op sequence; the device one keeps the
            # frozen base on the card and differentiates only the low-rank
            # factors. Which one ran is printed at the top of every run.
-Weights: `generate` resolves dit/vae/text_encoder/tokenizer from the models
-directory (--models-dir / BRAIN_MODELS_DIR) - --dit/--text-encoder/--variant
-name a role outright, and an ambiguous or missing outcome prints every real
-candidate and exits rather than guessing. `finetune` still reads
-BRAIN_FLUX2_{DIT,VAE,TE,TOKENIZER}.
+Weights: both `generate` and `finetune` resolve dit/vae/text_encoder/tokenizer
+from the models directory (--models-dir / BRAIN_MODELS_DIR) -
+--dit/--text-encoder/--variant (--variant only, on `finetune`) name a role
+outright, and an ambiguous or missing outcome prints every real candidate and
+exits rather than guessing. BRAIN_FLUX2_{DIT,VAE,TE,TOKENIZER} still work too,
+as overrides into that same resolver rather than a separate required path.
 Text-encoder placement (env): BRAIN_FLUX2_TE_DEVICE=gpu<i>[:i8] (truncated shard on that card)";
 
 pub fn run_flux2(args: &[String]) {
@@ -756,6 +757,11 @@ fn check_adapter_out(path: &str) -> Result<(), String> {
 fn finetune(args: &[String]) -> Result<(), String> {
     let mut data_dir: Option<String> = None;
     let mut variant_name = "klein-4b".to_string();
+    // Only a caller-typed `--variant` is passed into `resolve_flux2` as an
+    // override - the default above must never pin the store to klein-4b when
+    // the caller said nothing, exactly as `generate`'s own `variant_explicit`
+    // works.
+    let mut variant_explicit = false;
     let mut ft_text_encoder: Option<String> = None;
     let mut opts = flux2::finetune::TrainOpts {
         steps: 200,
@@ -809,7 +815,10 @@ fn finetune(args: &[String]) -> Result<(), String> {
         };
         match args[i].as_str() {
             "--out" | "--save" => opts.save_path = strip_out_name_prefix(need(i)?, "adapter").to_string(),
-            "--variant" => variant_name = need(i)?.clone(),
+            "--variant" => {
+                variant_name = need(i)?.clone();
+                variant_explicit = true;
+            }
             "--steps" => opts.steps = need(i)?.parse().map_err(|e| format!("--steps: {e}"))?,
             "--rank" => opts.rank = need(i)?.parse().map_err(|e| format!("--rank: {e}"))?,
             "--lr" => opts.lr = need(i)?.parse().map_err(|e| format!("--lr: {e}"))?,
@@ -886,13 +895,16 @@ fn finetune(args: &[String]) -> Result<(), String> {
     if opts.rank == 0 || opts.steps == 0 {
         return Err("--rank and --steps must both be at least 1".into());
     }
-    let mut paths = Paths::from_env()?;
-    // Training and generation must be able to name the SAME encoder: an
-    // adapter learns against the conditioning it was shown, so training on one
-    // encoder and generating on another silently degrades every result.
-    if let Some(te) = ft_text_encoder {
-        paths.te = te;
-    }
+    // Resolved through the same model-store resolver `generate`/`infer` use
+    // (`resolve_flux2`), not a second `Paths::from_env()` construction path -
+    // `BRAIN_FLUX2_{DIT,VAE,TE,TOKENIZER}` still work, now as overrides into
+    // that resolver rather than the only way to name these four weights.
+    // `--text-encoder` is passed the same way: training and generation must
+    // be able to name the SAME encoder (an adapter learns against the
+    // conditioning it was shown, so training on one encoder and generating on
+    // another silently degrades every result), and the resolver's own
+    // override contract is exactly "name this role outright".
+    let (paths, _assembly) = resolve_flux2(None, None, ft_text_encoder.as_deref(), None, variant_explicit.then_some(variant_name.as_str()))?;
     // Bound against the frozen base's own shapes, not trusted as `--variant`
     // stated it - see `bind_variant`'s doc. `variant_name` is reassigned to
     // the bound truth so the log line below names what is actually training.

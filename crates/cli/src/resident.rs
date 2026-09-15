@@ -20,6 +20,7 @@ use serde_json::{json, Value};
 use s3dit::pipeline::{HotPipeline, Image, Paths};
 
 use crate::resident_llm::QwenResident;
+use crate::resolver_cli::RoleEnv;
 
 /// The one shared serving [`Executor`], plus the CONCRETE model handles a
 /// caller needs for an inherent method the erased `Arc<dyn ResidentModel>`
@@ -111,10 +112,12 @@ pub fn build_executor(gpus: &[(u32, u64)], npus: &[(u32, u64)], unified_gpus: &[
     }
 
     let mut models: Vec<Arc<dyn ResidentModel>> = Vec::new();
-    // z-image if its weights are configured (BRAIN_ZIMAGE_*).
-    match ZImageResident::from_env() {
-        Ok(z) => models.push(Arc::new(z)),
-        Err(e) => eprintln!("brain: z-image not served over the scheduler ({e})"),
+    // z-image (BRAIN_S3DIT_{DIT,VAE,QWEN,TOKENIZER}, else whatever the model
+    // store resolves through `s3dit::spec::S3ditSpec` - see `ZImageResident::
+    // from_store`'s own doc).
+    match ZImageResident::from_store() {
+        Some(z) => models.push(Arc::new(z)),
+        None => eprintln!("brain: z-image not served over the scheduler (set BRAIN_S3DIT_DIT/_VAE/_QWEN/_TOKENIZER, or place a checkpoint under the model dir)"),
     }
     // yolo object detection if a checkpoint is configured (BRAIN_YOLOV8).
     if let Some(y) = YoloResident::from_env() {
@@ -514,6 +517,50 @@ impl ZImageResident {
         Self::from_paths(s3dit::caps::MODEL, Paths::from_env()?)
     }
 
+    /// Each of the four components independently: its own `BRAIN_S3DIT_*`
+    /// variable if the operator set that one, else whatever the model-store
+    /// resolver finds for that role through `s3dit::spec::S3ditSpec` - the
+    /// SAME spec/scan/candidate rules a one-shot resolver-backed command
+    /// would use, rather than [`Self::from_env`]'s four-variables-or-nothing
+    /// mechanism. Mirrors `crate::resident_flux2::Flux2Resident::from_env`
+    /// exactly - the same `served_assembly` seam, the other architecture
+    /// already migrated onto it.
+    ///
+    /// `None` when nothing resolves, or the outcome is ambiguous (logged) -
+    /// never a hard startup failure for the whole daemon. [`Self::from_env`]
+    /// stays as it is: a lower-level escape hatch other callers (`brain perf
+    /// run zimage`, the `#[ignore]`d real-checkpoint tests) still use when
+    /// they deliberately want every path named outright.
+    pub fn from_store() -> Option<ZImageResident> {
+        let assembly = crate::resolver_cli::served_assembly(
+            "s3dit",
+            &s3dit::spec::S3ditSpec,
+            &[
+                RoleEnv { role: "dit", var: "BRAIN_S3DIT_DIT" },
+                RoleEnv { role: "vae", var: "BRAIN_S3DIT_VAE" },
+                RoleEnv { role: "text_encoder", var: "BRAIN_S3DIT_QWEN" },
+                RoleEnv { role: "tokenizer", var: "BRAIN_S3DIT_TOKENIZER" },
+            ],
+        )?;
+        // `Paths::from_assembly` owns the role-name -> field mapping already
+        // (including `text_encoder` -> `qwen`); this must not carry a second
+        // copy of it.
+        let paths = match Paths::from_assembly(&assembly) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("brain: z-image not served over the scheduler ({e})");
+                return None;
+            }
+        };
+        match Self::from_paths(s3dit::caps::MODEL, paths) {
+            Ok(r) => Some(r),
+            Err(e) => {
+                eprintln!("brain: z-image not served over the scheduler ({e})");
+                None
+            }
+        }
+    }
+
     /// Built from an already-resolved [`Paths`] rather than the environment,
     /// under `id` rather than the compiled-in `s3dit::caps::MODEL` -- what
     /// `crate::model_dir::resident_for_local` uses for a compound
@@ -803,6 +850,133 @@ mod tests {
     fn unresolvable_paths() -> Paths {
         let p = |role: &str| format!("no-such-z-image-{role}");
         Paths { dit: p("dit"), vae: p("vae"), qwen: p("qwen"), tokenizer: p("tokenizer") }
+    }
+
+    // -------- ZImageResident::from_store: a synthetic store, no env vars --------
+    //
+    // Mirrors `s3dit::spec`'s own `turbo_fixture` test helper (same tensor
+    // names/shapes `S3ditSpec::classify`/`validate` actually read) and
+    // `crates/flux2/tests/resolve_layout.rs`'s HF-checkpoint fixture (a real
+    // `config.json` + one shard + its index - `hfdir_record` in
+    // `brain_modelstore::inventory` refuses to collapse a directory with no
+    // real shard file into an `HfDir` record at all), so the resolver's own
+    // real `brain_modelstore::inventory::scan` recognizes every role exactly
+    // as it would on a real fetched store.
+
+    const FROM_STORE_TOY_VOCAB: usize = 100;
+
+    fn scratch_store(tag: &str) -> std::path::PathBuf {
+        static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("brain-cli-resident-{tag}-{}-{n}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Only the tensors `s3dit::import::dit_config_from_shapes` actually
+    /// reads, at real `ZImageConfig::turbo()` dimensions.
+    fn write_from_store_dit(path: &std::path::Path) {
+        let cfg = s3dit::model::ZImageConfig::turbo();
+        let (dim, cap_feat_dim, head_dim) = (cfg.dim as usize, cfg.cap_feat_dim as usize, (cfg.dim / cfg.n_heads) as usize);
+        let patch_dim = (cfg.in_channels * cfg.patch_size * cfg.patch_size * cfg.f_patch_size) as usize;
+        let mut tensors: Vec<(String, Vec<u64>, Vec<f32>)> = vec![
+            ("cap_embedder.0.weight".to_string(), vec![1], vec![0.0f32]),
+            ("cap_embedder.1.weight".to_string(), vec![dim as u64, cap_feat_dim as u64], vec![0.0f32; dim * cap_feat_dim]),
+            ("layers.0.attention.q_norm.weight".to_string(), vec![head_dim as u64], vec![0.0f32; head_dim]),
+            ("x_embedder.weight".to_string(), vec![dim as u64, patch_dim as u64], vec![0.0f32; dim * patch_dim]),
+        ];
+        for prefix in ["layers", "noise_refiner", "context_refiner"] {
+            let n = if prefix == "layers" { cfg.n_layers } else { cfg.n_refiner_layers };
+            for l in 0..n {
+                tensors.push((format!("{prefix}.{l}.attention.qkv.weight"), vec![1], vec![0.0f32]));
+            }
+        }
+        checkpoint::st::save_safetensors(path.to_str().unwrap(), &tensors, &json!({}), None).unwrap();
+    }
+
+    /// A canonical `<vendor>/<repo>` HF text-encoder directory: `config.json`
+    /// declaring `Qwen3ForCausalLM` at `hidden`, plus a real (tiny) shard and
+    /// its index - the shape `brain_modelstore::inventory::scan` collapses to
+    /// one `HfDir` record.
+    fn write_from_store_text_encoder(dir: &std::path::Path, hidden: u64) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("config.json"), serde_json::to_vec(&json!({"architectures": ["Qwen3ForCausalLM"], "hidden_size": hidden, "vocab_size": FROM_STORE_TOY_VOCAB})).unwrap()).unwrap();
+        checkpoint::st::save_safetensors(dir.join("model-00001-of-00001.safetensors").to_str().unwrap(), &[("w".to_string(), vec![1], vec![0.0f32])], &json!({}), None).unwrap();
+        std::fs::write(dir.join("model.safetensors.index.json"), serde_json::to_vec(&json!({"weight_map": {"w": "model-00001-of-00001.safetensors"}})).unwrap()).unwrap();
+    }
+
+    fn write_from_store_vae(path: &std::path::Path) {
+        checkpoint::st::save_safetensors(
+            path.to_str().unwrap(),
+            &[
+                ("decoder.conv_in.weight".to_string(), vec![512, 32, 3, 3], vec![0.0f32; 512 * 32 * 3 * 3]),
+                ("encoder.conv_in.weight".to_string(), vec![128, 3, 3, 3], vec![0.0f32; 128 * 3 * 3 * 3]),
+            ],
+            &json!({}),
+            None,
+        )
+        .unwrap();
+    }
+
+    fn write_from_store_tokenizer(path: &std::path::Path) {
+        let vocab: serde_json::Map<String, serde_json::Value> = (0..FROM_STORE_TOY_VOCAB).map(|i| (format!("t{i}"), json!(i))).collect();
+        std::fs::write(path, serde_json::to_vec(&json!({"version": "1.0", "model": {"vocab": vocab}, "added_tokens": []})).unwrap()).unwrap();
+    }
+
+    /// Milestone C's own acceptance case: with every `BRAIN_S3DIT_*` variable
+    /// unset, `ZImageResident::from_store()` must still resolve a complete
+    /// assembly purely from local discovery against a synthetic model-store
+    /// fixture - the whole point of routing the static resident registration
+    /// through the resolver instead of [`ZImageResident::from_env`]'s
+    /// four-variables-or-nothing mechanism.
+    #[test]
+    fn from_store_resolves_a_synthetic_store_with_no_brain_s3dit_env_vars_set() {
+        let _serial = brain_testutil::env_lock();
+        let root = scratch_store("s3dit-from-store");
+        let vendor = root.join("Tongyi-MAI");
+        std::fs::create_dir_all(&vendor).unwrap();
+        write_from_store_dit(&vendor.join("dit.safetensors"));
+        let cap_feat_dim = s3dit::model::ZImageConfig::turbo().cap_feat_dim as u64;
+        write_from_store_text_encoder(&vendor.join("Qwen3-4B"), cap_feat_dim);
+        write_from_store_vae(&vendor.join("vae.safetensors"));
+        // A vendor-flat loose `tokenizer.json` (sitting directly under the
+        // vendor directory, not a `<vendor>/<repo>` walk) is never scanned
+        // for the tokenizer role at all - `brain_modelstore::inventory::
+        // walk_vendor_dir` only recognizes `tokenizer.json` by filename one
+        // level deeper, inside a repo-shaped directory (see
+        // `crates/flux2/tests/resolve_layout.rs`'s own tokenizer fixture,
+        // which notes the same rule). A real fetched tokenizer always sits
+        // in its own repo directory, so this is what makes the fixture real.
+        let tok_dir = vendor.join("Qwen3-4B-tokenizer");
+        std::fs::create_dir_all(&tok_dir).unwrap();
+        write_from_store_tokenizer(&tok_dir.join("tokenizer.json"));
+        // A second, unrelated top-level vendor directory - without it every
+        // record lives under `root/Tongyi-MAI/...` alone, so `resolve()`'s
+        // own `common_root` (the deepest ancestor common to every record)
+        // collapses all the way down to the vendor directory itself, and
+        // `classify_tokenizer_role`'s vendor-co-location check then computes
+        // a DIFFERENT "vendor" for the tokenizer file than for the
+        // text_encoder directory (see `vendor_dir`'s doc) - exactly the
+        // shape `s3dit::spec`'s own `turbo_fixture` test helper works around
+        // the same way, with its own `other-vendor/unrelated.bin`. A real
+        // model store always holds more than one vendor, so this is not an
+        // artifact of the test - it is what makes the fixture a real
+        // multi-vendor store rather than a store of exactly one model.
+        std::fs::create_dir_all(root.join("other-vendor")).unwrap();
+        checkpoint::st::save_safetensors(root.join("other-vendor").join("unrelated.safetensors").to_str().unwrap(), &[("w".to_string(), vec![1], vec![0.0f32])], &json!({}), None).unwrap();
+
+        for v in ["BRAIN_S3DIT_DIT", "BRAIN_S3DIT_VAE", "BRAIN_S3DIT_QWEN", "BRAIN_S3DIT_TOKENIZER"] {
+            std::env::remove_var(v);
+        }
+        std::env::set_var("BRAIN_MODELS_DIR", &root);
+
+        let resident = ZImageResident::from_store();
+
+        std::env::remove_var("BRAIN_MODELS_DIR");
+        std::fs::remove_dir_all(&root).ok();
+
+        assert!(resident.is_some(), "must resolve purely from local discovery with no BRAIN_S3DIT_* set");
     }
 
     /// The served half of the same contract, on real weights: a caller who

@@ -49,6 +49,11 @@ compatible VAE/text-encoder/tokenizer exists somewhere on disk.
 before when set - they pin one exact instance, the same single-resident
 behavior this section's example above always had.
 
+`brain flux2 finetune` resolves its four weights the same way as `generate`/
+`infer` (`--text-encoder`/`--variant` name a role outright, same as
+`generate`'s `--dit`/`--text-encoder`/`--variant`); `BRAIN_FLUX2_*` work as
+the same overrides there too, not a separate required path.
+
 ## Running it
 
 ```bash
