@@ -298,6 +298,16 @@ impl Qwen35Config {
     pub fn linear_group(&self) -> u32 {
         self.linear_num_value_heads / self.linear_num_key_heads
     }
+    /// Words in ONE Gated-DeltaNet layer's persistent recurrent state,
+    /// `[bh, dk, dv]` flattened (48*128*128 = 786432 at the real scale).
+    pub fn gdn_state_len(&self) -> u64 {
+        self.linear_num_value_heads as u64 * self.linear_key_head_dim as u64 * self.linear_value_head_dim as u64
+    }
+    /// Words in ONE Gated-DeltaNet layer's causal-conv history tail,
+    /// `[conv_dim, K-1]` flattened.
+    pub fn gdn_hist_len(&self) -> u64 {
+        self.linear_conv_dim() as u64 * self.linear_conv_kernel_dim.saturating_sub(1) as u64
+    }
 
     /// The `(suffix, n, k)` triple for every quantizable per-layer leaf of
     /// `ty`: the 5 GDN or 4 GQA mixer-adjacent leaves, plus the 3 dense-MLP
@@ -416,11 +426,7 @@ impl Qwen35Config {
     pub fn layer_decode_state_bytes(&self, ty: LayerType, cap: u32) -> u64 {
         match ty {
             LayerType::Full => 2 * cap as u64 * self.kv_dim() as u64 * 4,
-            LayerType::Linear => {
-                let state = self.linear_num_value_heads as u64 * self.linear_key_head_dim as u64 * self.linear_value_head_dim as u64;
-                let hist = self.linear_conv_dim() as u64 * self.linear_conv_kernel_dim.saturating_sub(1) as u64;
-                (state + hist) * 4
-            }
+            LayerType::Linear => (self.gdn_state_len() + self.gdn_hist_len()) * 4,
         }
     }
 

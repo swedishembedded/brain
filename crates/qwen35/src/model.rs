@@ -941,6 +941,49 @@ pub(crate) struct BatchDecodeCaches<'a> {
     pub seqs: &'a [BatchSeq<'a>],
 }
 
+/// Cold copies of every Gated-DeltaNet layer's recurrent state and conv
+/// history, taken before a speculative verify pass so a rejected tail can be
+/// undone - see [`Qwen35::spec_decode_greedy`] and the section comment above
+/// it for why the recurrent layers need this and the GQA layers do not.
+/// Indexed by ABSOLUTE layer index, with 1-word dummies at GQA indices, the
+/// same convention as every other per-layer cache here.
+pub struct GdnSnapshot {
+    pub(crate) state: Vec<DeviceBuffer>,
+    pub(crate) hist: Vec<DeviceBuffer>,
+}
+
+/// What a speculative run actually cost, which is the only way to know
+/// whether the drafter was worth running. `accepted / rounds` is the number
+/// that decides it: the expected tokens per round is that plus one (the
+/// target's own correction or bonus token always lands), against the one
+/// token per forward plain decoding gets.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SpecDecodeStats {
+    /// Verify chunks dispatched, plus the re-commit chunks a partial
+    /// rejection forces. This is the cost, in units of "one plain decode
+    /// step", because a memory-bound decode's chunk of `k+1` rows streams the
+    /// same weights a single row does.
+    pub target_forwards: usize,
+    /// Draft tokens offered across all rounds.
+    pub proposed: usize,
+    /// Draft tokens the target agreed with, i.e. the ones that were NOT
+    /// re-derived from a target forward of their own.
+    pub accepted: usize,
+    /// Verify rounds run.
+    pub rounds: usize,
+}
+
+impl SpecDecodeStats {
+    /// Mean draft tokens accepted per round - the model/workload-dependent
+    /// number that determines whether speculative decoding pays here at all.
+    pub fn accepted_per_round(&self) -> f64 {
+        if self.rounds == 0 {
+            return 0.0;
+        }
+        self.accepted as f64 / self.rounds as f64
+    }
+}
+
 /// The device a shard runs on: `shard.gpu_index`'s canonical physical card,
 /// or the ambient selection for [`Shard::ANY_GPU`]. Written once so every
 /// shard constructor places the same way (they used to carry a byte-identical
@@ -1325,9 +1368,7 @@ impl Qwen35 {
         let mut gqa_vcache = Vec::with_capacity(cfg.n_layers as usize);
         let mut gdn_state = Vec::with_capacity(cfg.n_layers as usize);
         let mut gdn_hist = Vec::with_capacity(cfg.n_layers as usize);
-        let gdn_bh = cfg.linear_num_value_heads as u64;
-        let gdn_state_len = gdn_bh * cfg.linear_key_head_dim as u64 * cfg.linear_value_head_dim as u64;
-        let gdn_hist_len = cfg.linear_conv_dim() as u64 * cfg.linear_conv_kernel_dim.saturating_sub(1) as u64;
+        let (gdn_state_len, gdn_hist_len) = (cfg.gdn_state_len(), cfg.gdn_hist_len());
         // A layer this shard does not own never runs its decode step
         // (`run_decode_step` loops only `shard.start..shard.end`), so its
         // cache/state/history buffers are dead weight - a full-size GQA KV
@@ -2968,6 +3009,258 @@ impl Qwen35 {
         self.gpu.read(&hidden, self.cfg.d_model as usize)
     }
 
+    /// One Gated-DeltaNet layer's recurrent state, `[bh, dk, dv]` flattened -
+    /// parity-debugging introspection only, and the buffer
+    /// `tests/spec_decode.rs` compares directly rather than through its
+    /// effect on a sampled token. Panics at a GQA layer index, where the
+    /// buffer is a 1-word dummy and reading it would silently compare
+    /// nothing.
+    pub fn debug_gdn_state(&self, l: usize) -> Vec<f32> {
+        assert_eq!(self.cfg.layer_types()[l], LayerType::Linear, "layer {l} is GQA and has no recurrent state");
+        self.gpu.read(&self.gdn_state[l], self.cfg.gdn_state_len() as usize)
+    }
+
+    // =========================================================================
+    // Speculative decoding.
+    //
+    // The verify pass is a CHUNK, not a decode step: `k+1` rows of ONE
+    // sequence at consecutive positions, which is exactly
+    // `run_prefill_chunk_stage`'s shape and exactly NOT `run_decode_batch`'s
+    // (that one is `k` rows of `k` different sequences). Reusing the chunk
+    // path is what makes a verify cost roughly one decode step - the weight
+    // stream dominates, and scoring a few more positions against it is close
+    // to free on a memory-bound decode.
+    //
+    // The part that is not textbook is the rollback. This decoder is three
+    // quarters recurrent (`full_attention_interval = 4`), and the two kinds
+    // of layer fail differently when a speculative tail is rejected:
+    //
+    //   * GQA layers need NO rollback. The verify chunk writes KV rows
+    //     `pos_start..pos_start+n`, but a later step's attention is bounded
+    //     by its own `seq_lens`, so rows past the committed position are
+    //     never read - the same argument `reset_decode_cache` already makes
+    //     for leaving a stale KV pool alone.
+    //   * GDN layers need a real one. The recurrent state and the conv
+    //     history are single buffers that the verify pass has already
+    //     advanced through every row it was given, rejected ones included.
+    //     There is no "row past the position" to leave behind, so the only
+    //     honest options are to snapshot before and restore after, or to
+    //     teach the chunk kernel to emit per-row intermediate states.
+    //
+    // This takes the first: snapshot (a device-side `REGION_COPY`, no host
+    // round trip), and on a partial rejection restore and re-run the accepted
+    // prefix as its own small chunk. The cost is a second target forward in
+    // any round that rejects, which is why the break-even is two accepted
+    // draft tokens per round rather than one. A round that accepts EVERY
+    // proposal skips the restore entirely - its state is already correct for
+    // all `k+1` rows - so a drafter that is usually right pays nothing.
+    //
+    // The alternative (per-row intermediate states out of `gdn_chunk_fwd`)
+    // would remove that second forward, at the price of a new kernel output
+    // and `k+1` times the state memory per GDN layer. Left undone
+    // deliberately: it is an optimization to the accept path, not a
+    // correctness question, and it should be measured against a real
+    // acceptance rate before it is paid for.
+    // =========================================================================
+
+    /// Scratch mirroring every recurrent layer's `state`/`hist`, allocated
+    /// once per speculative run and reused every round. Indexed by ABSOLUTE
+    /// layer index like every other per-layer cache in this file; GQA layer
+    /// slots hold 1-word dummies and are never touched.
+    pub(crate) fn new_gdn_snapshot(&self) -> GdnSnapshot {
+        let (state_len, hist_len) = (self.cfg.gdn_state_len(), self.cfg.gdn_hist_len());
+        let mut snap = GdnSnapshot { state: Vec::new(), hist: Vec::new() };
+        for ty in self.cfg.layer_types() {
+            let linear = ty == LayerType::Linear;
+            snap.state.push(self.gpu.storage(if linear { state_len } else { 1 }));
+            snap.hist.push(self.gpu.storage(if linear { hist_len } else { 1 }));
+        }
+        snap
+    }
+
+    /// Copy every recurrent layer's live state into (`save`) or out of
+    /// (`!save`) `snap`, device-side. `REGION_COPY` at `off = 0`,
+    /// `width = row_stride = len` is a whole-buffer `dst[i] = src[i]`.
+    pub(crate) fn gdn_snapshot_xfer(&self, caches: &DecodeCaches, snap: &GdnSnapshot, save: bool) {
+        let (state_len, hist_len) = (self.cfg.gdn_state_len(), self.cfg.gdn_hist_len());
+        let mut steps = Vec::new();
+        for (l, ty) in self.cfg.layer_types().into_iter().enumerate() {
+            if ty != LayerType::Linear || !self.shard.owns(l) {
+                continue;
+            }
+            for (live, cold, len) in [(&caches.gdn_state[l], &snap.state[l], state_len), (&caches.gdn_hist[l], &snap.hist[l], hist_len)] {
+                let (src, dst) = if save { (live, cold) } else { (cold, live) };
+                let n = len as u32;
+                steps.push(self.gpu.step(REGION_COPY, &[src, dst], &[1, n, n, 0], n));
+            }
+        }
+        self.gpu.submit(&[], &steps);
+    }
+
+    /// Take a copy of every recurrent layer's state and conv history, as they
+    /// stand right now, against THIS instance's own decode caches - the
+    /// operation a speculative round performs before a verify pass it may
+    /// have to undo. Device-side; nothing crosses the host.
+    pub fn gdn_snapshot(&self) -> GdnSnapshot {
+        let snap = self.new_gdn_snapshot();
+        self.gdn_snapshot_xfer(&self.own_caches(), &snap, true);
+        snap
+    }
+
+    /// Put a [`Self::gdn_snapshot`] back, discarding whatever the recurrent
+    /// state has absorbed since it was taken.
+    pub fn gdn_restore(&self, snap: &GdnSnapshot) {
+        self.gdn_snapshot_xfer(&self.own_caches(), snap, false);
+    }
+
+    /// This instance's own single-sequence caches, as `run_*` wants them -
+    /// the same literal `step`/`prefill_chunked` build, factored out because
+    /// the speculative loop needs it in three places.
+    fn own_caches(&self) -> DecodeCaches<'_> {
+        DecodeCaches {
+            gqa_kcache: &self.gqa_kcache,
+            gqa_vcache: &self.gqa_vcache,
+            gqa_cap: self.dec_cap,
+            gqa_base_row: 0,
+            gdn_state: &self.gdn_state,
+            gdn_hist: &self.gdn_hist,
+        }
+    }
+
+    /// **Speculative decoding**, greedy, against this instance's own
+    /// single-sequence decode state. `draft(ctx, want) -> tokens` proposes up
+    /// to `want` continuations of `ctx`; `argmax_of` projects one `[d_model]`
+    /// final-norm hidden state to its greedy token id (this crate keeps the
+    /// vocab head off-device, so the caller owns that matvec - see
+    /// [`Self::decode_step_stage`]'s doc for why).
+    ///
+    /// The output is IDENTICAL to plain greedy decoding through
+    /// [`Self::step`], whatever the drafter proposes - a rejected proposal
+    /// costs time, never correctness. `tests/spec_decode.rs` gates that on
+    /// both a perfect and an adversarial drafter, and gates the recurrent
+    /// rollback directly against the state buffers.
+    pub fn spec_decode_greedy(
+        &self,
+        prompt: &[u32],
+        max_new: usize,
+        k: u32,
+        argmax_of: &dyn Fn(&[f32]) -> u32,
+        draft: &mut dyn FnMut(&[u32], u32) -> Vec<u32>,
+    ) -> (Vec<u32>, SpecDecodeStats) {
+        let (toks, _, stats) = self.spec_decode_inner(prompt, max_new, k, argmax_of, draft, false);
+        (toks, stats)
+    }
+
+    /// [`Self::spec_decode_greedy`], additionally returning the `[d_model]`
+    /// final-norm hidden state each emitted token was argmaxed from. Token
+    /// equality is a step function over these, so a gate that wants to see a
+    /// small state error rather than only a changed id compares them instead.
+    pub fn spec_decode_greedy_hidden(
+        &self,
+        prompt: &[u32],
+        max_new: usize,
+        k: u32,
+        argmax_of: &dyn Fn(&[f32]) -> u32,
+        draft: &mut dyn FnMut(&[u32], u32) -> Vec<u32>,
+    ) -> (Vec<u32>, Vec<Vec<f32>>) {
+        let (toks, hidden, _) = self.spec_decode_inner(prompt, max_new, k, argmax_of, draft, true);
+        (toks, hidden)
+    }
+
+    fn spec_decode_inner(
+        &self,
+        prompt: &[u32],
+        max_new: usize,
+        k: u32,
+        argmax_of: &dyn Fn(&[f32]) -> u32,
+        draft: &mut dyn FnMut(&[u32], u32) -> Vec<u32>,
+        want_hidden: bool,
+    ) -> (Vec<u32>, Vec<Vec<f32>>, SpecDecodeStats) {
+        assert_eq!(self.b, 1, "qwen35::spec_decode_greedy requires b==1 (single sequence)");
+        assert!(!prompt.is_empty(), "qwen35::spec_decode_greedy: empty prompt");
+        assert!(k >= 1, "qwen35::spec_decode_greedy: k must be at least 1");
+        let d = self.cfg.d_model as usize;
+        let caches = self.own_caches();
+        let snap = self.new_gdn_snapshot();
+
+        // Replay all but the last prompt token; the last is the first row of
+        // the first verify chunk, exactly as it is the first `pending` of the
+        // textbook loop. A one-token prompt replays nothing and starts at 0.
+        self.reset_decode_cache();
+        if prompt.len() > 1 {
+            self.prefill_chunked(&prompt[..prompt.len() - 1], self.dec_cap.min(256));
+        }
+        let mut pending = *prompt.last().expect("non-empty (asserted above)");
+        let mut ctx: Vec<u32> = prompt.to_vec();
+        let (mut out, mut out_hidden) = (Vec::new(), Vec::new());
+        let mut stats = SpecDecodeStats::default();
+
+        while out.len() < max_new {
+            let want = ((max_new - out.len()) as u32).min(k);
+            let mut props = draft(&ctx, want);
+            props.truncate(want as usize);
+            let kk = props.len();
+            assert!(props.iter().all(|&t| t < self.cfg.vocab), "drafter proposed a token outside the vocab");
+            stats.rounds += 1;
+            stats.proposed += kk;
+
+            let base = self.dec_pos.get();
+            let rows: Vec<u32> = std::iter::once(pending).chain(props.iter().copied()).collect();
+            assert!(base + rows.len() as u32 <= self.dec_cap, "qwen35::spec_decode_greedy: verify chunk ends at {} past capacity {}", base + rows.len() as u32, self.dec_cap);
+
+            // Only a round that can REJECT can need the state back.
+            if kk > 0 {
+                self.gdn_snapshot_xfer(&caches, &snap, true);
+            }
+            let hidden = self.prefill_chunk_stage(&rows, base, &caches, None);
+            stats.target_forwards += 1;
+
+            // Row `j` holds the distribution that should have produced
+            // `props[j]`. Accept while it agrees; the first row that does not
+            // supplies the target's OWN token instead, which is what makes
+            // the result identical to plain greedy rather than merely close.
+            let mut accepted = 0usize;
+            while accepted < kk && argmax_of(&hidden[accepted * d..(accepted + 1) * d]) == props[accepted] {
+                accepted += 1;
+            }
+            let correction = argmax_of(&hidden[accepted * d..(accepted + 1) * d]);
+
+            if accepted == kk {
+                // Every proposal survived, so the chunk's own end state is
+                // the correct state for all `kk+1` committed rows: no
+                // restore, no second forward.
+                self.dec_pos.set(base + kk as u32 + 1);
+            } else {
+                // Rows `0..=accepted` of that chunk were computed from
+                // genuinely accepted context and are already correct; it is
+                // only the recurrent state, which absorbed the rejected tail
+                // too, that has to be rewound and re-advanced.
+                self.gdn_snapshot_xfer(&caches, &snap, false);
+                self.prefill_chunk_stage(&rows[..=accepted], base, &caches, None);
+                stats.target_forwards += 1;
+                self.dec_pos.set(base + accepted as u32 + 1);
+            }
+
+            stats.accepted += accepted;
+            for j in 0..accepted {
+                out.push(props[j]);
+                ctx.push(props[j]);
+                if want_hidden {
+                    out_hidden.push(hidden[j * d..(j + 1) * d].to_vec());
+                }
+            }
+            out.push(correction);
+            ctx.push(correction);
+            if want_hidden {
+                out_hidden.push(hidden[accepted * d..(accepted + 1) * d].to_vec());
+            }
+            pending = correction;
+        }
+        out.truncate(max_new);
+        out_hidden.truncate(max_new);
+        (out, out_hidden, stats)
+    }
+
     /// [`Self::run_decode_step`] staged to the HOST - the one call a
     /// multi-stage decode driver (`crate::int8_gguf_resident`) needs per stage
     /// per token. Returns `[d_model]`: this stage's last-layer residual, ready
@@ -3670,10 +3963,10 @@ mod tests {
     /// [`two_shard_chunked_prefill_matches_token_by_token_replay`], which
     /// only ever ran at FP32 (`Qwen35::new_fp32_shard_src`) with chunks of 4
     /// rows, far short of `matmul_i8_dyn`/`matmul_q4_dyn_reg`'s 128-row tile
-    /// - so a defect specific to the multi-tile dispatch path (real
-    /// production rounds are 256 rows, `int8_gguf_resident::
-    /// MAX_PREFILL_TOKENS`) had no gate at any tier that actually dispatches
-    /// that kernel family.
+    ///   - so a defect specific to the multi-tile dispatch path (real
+    ///   production rounds are 256 rows, `int8_gguf_resident::
+    ///   MAX_PREFILL_TOKENS`) had no gate at any tier that actually
+    ///   dispatches that kernel family.
     #[test]
     fn chunked_prefill_at_int8_matches_token_by_token_past_one_gemm_tile() {
         let cfg = Qwen35Config { block_size: 320, max_position_embeddings: 320, ..Qwen35Config::tiny_i8() };

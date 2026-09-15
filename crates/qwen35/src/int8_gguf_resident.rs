@@ -152,7 +152,7 @@ use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 use serde_json::json;
 
 use crate::config::{LayerType, Qwen35Config};
-use crate::model::{BatchDecodeCaches, BatchSeq, DecodeCaches, Qwen35};
+use crate::model::{BatchDecodeCaches, BatchSeq, DecodeCaches, Qwen35, SpecDecodeStats};
 
 /// Catalog id. Names the real upstream release this resident loads, exactly
 /// (`https://huggingface.co/unsloth/Qwen3.8-27B-GGUF`, the `Q8_0` file) -
@@ -699,8 +699,7 @@ impl ShardCaches {
     fn new(gpu: &Gpu, cfg: &Qwen35Config, shard: &Shard, cap: u32, slots: u32) -> ShardCaches {
         assert!(slots > 0, "{MODEL}: ShardCaches needs at least one slot");
         let kv = cfg.kv_dim() as u64;
-        let state = cfg.linear_num_value_heads as u64 * cfg.linear_key_head_dim as u64 * cfg.linear_value_head_dim as u64;
-        let hist = cfg.linear_conv_dim() as u64 * cfg.linear_conv_kernel_dim.saturating_sub(1) as u64;
+        let (state, hist) = (cfg.gdn_state_len(), cfg.gdn_hist_len());
         let n = cfg.n_layers as usize;
         let types = cfg.layer_types();
         let (mut gqa_k, mut gqa_v) = (Vec::with_capacity(n), Vec::with_capacity(n));
@@ -758,6 +757,19 @@ impl ShardCaches {
             .map(|(i, &pos)| BatchSeq { phys: i as u32, pos, gdn_state: &self.gdn_state[i], gdn_hist: &self.gdn_hist[i] })
             .collect()
     }
+}
+
+/// The same generated positions scored by both of this crate's decode tapes -
+/// what [`Qwen35GgufInstance::tape_comparison_trace`] returns. One `[vocab]`
+/// row per position in each of `decode` and `chunk`, and the token sequence
+/// they were taken along.
+pub struct TapeTrace {
+    /// Logits from the one-token-per-dispatch decode tape (`run_decode_batch`).
+    pub decode: Vec<Vec<f32>>,
+    /// Logits from the chunk tape (`run_prefill_chunk_stage`) at one row.
+    pub chunk: Vec<Vec<f32>>,
+    /// The greedy continuation both traces followed.
+    pub ids: Vec<u32>,
 }
 
 /// One card's stage: the [`Qwen35`] instance holding that card's layer range,
@@ -938,7 +950,30 @@ impl Qwen35GgufInstance {
     fn stack_prefill_chunk(&self, tokens: &[u32], pos_start: u32, slot: u32) -> Result<Vec<f32>, String> {
         let d = self.cfg.d_model as usize;
         let n = tokens.len();
-        assert!(n > 0, "{MODEL}: stack_prefill_chunk on an empty round");
+        let (carry, per_stage_rms) = self.stack_chunk_carry(tokens, pos_start, slot)?;
+        let last = self.shards.last().expect("a plan always has at least one stage");
+        let logits =
+            crate::stream::head_logits_on(&last.qwen35.gpu, &self.head.ops, &self.cfg, &self.head.norm, &self.head.w, &carry[(n - 1) * d..]);
+        self.debug_step(pos_start + n as u32 - 1, &per_stage_rms, &logits);
+        Ok(logits)
+    }
+
+    /// The layer half of a chunk round: `tokens` through every stage in order,
+    /// leaving each stage's K/V and GDN state exactly as a token-by-token
+    /// replay would, and returning the `[n, d_model]` final-norm block plus
+    /// the per-stage residual RMS the debug dump wants.
+    ///
+    /// Split out from [`Self::stack_prefill_chunk`] because a prompt round and
+    /// a speculative VERIFY round want different halves of the same work: a
+    /// prompt round projects only its last row (the rest exists to have been
+    /// computed), a verify round must score every row. The layer pass is
+    /// identical, and having one copy of it is what makes "a verify is
+    /// structurally a prefill round" true in the code and not just in a
+    /// comment.
+    fn stack_chunk_carry(&self, tokens: &[u32], pos_start: u32, slot: u32) -> Result<(Vec<f32>, Vec<f32>), String> {
+        let d = self.cfg.d_model as usize;
+        let n = tokens.len();
+        assert!(n > 0, "{MODEL}: stack_chunk_carry on an empty round");
         let mut carry = self.embed_rows(tokens)?;
         let debug = std::env::var_os("BRAIN_QWEN35_GGUF_DEBUG").is_some();
         let mut per_stage_rms = Vec::new();
@@ -952,11 +987,29 @@ impl Qwen35GgufInstance {
                 per_stage_rms.push((last.iter().map(|v| v * v).sum::<f32>() / last.len() as f32).sqrt());
             }
         }
+        Ok((carry, per_stage_rms))
+    }
+
+    /// **The speculative verify pass**: `tokens` at consecutive positions from
+    /// `pos_start`, scored to `[vocab]` logits at EVERY row rather than only
+    /// the last. One head projection for the whole block, exactly as
+    /// [`Self::stack_step_batch`] does it - the head is this model's largest
+    /// single weight and projecting it once per row instead of once per block
+    /// would hand back most of what speculation buys.
+    fn stack_verify_chunk(&self, tokens: &[u32], pos_start: u32, slot: u32) -> Result<Vec<Vec<f32>>, String> {
+        let (carry, _) = self.stack_chunk_carry(tokens, pos_start, slot)?;
         let last = self.shards.last().expect("a plan always has at least one stage");
-        let logits =
-            crate::stream::head_logits_on(&last.qwen35.gpu, &self.head.ops, &self.cfg, &self.head.norm, &self.head.w, &carry[(n - 1) * d..]);
-        self.debug_step(pos_start + n as u32 - 1, &per_stage_rms, &logits);
-        Ok(logits)
+        let v = self.cfg.vocab as usize;
+        let flat = crate::stream::head_logits_rows_on(
+            &last.qwen35.gpu,
+            &self.head.ops,
+            &self.cfg,
+            &self.head.norm,
+            &self.head.w,
+            &carry,
+            tokens.len() as u32,
+        );
+        Ok(flat.chunks(v).map(|r| r.to_vec()).collect())
     }
 
     /// **One decode token for EVERY live sequence**, through every stage in
@@ -1128,6 +1181,212 @@ impl Qwen35GgufInstance {
         Ok(out)
     }
 
+    /// **Diagnostic**: score the SAME positions of the same continuation with
+    /// both of this crate's decode tapes, so the numerical distance between
+    /// them can be measured on a real checkpoint instead of argued about.
+    ///
+    /// Both runs share the same chunked prompt replay and the same token
+    /// sequence (greedy on the decode tape), so the only difference between
+    /// the two traces is which dispatch shape computed each generated
+    /// position: `run_decode_batch` at one row, versus
+    /// `run_prefill_chunk_stage` at one row.
+    ///
+    /// Why it matters: a speculative decoder verifies on the chunk tape, so
+    /// wherever the two tapes' argmaxes differ, speculative and plain decoding
+    /// pick different tokens for reasons that have nothing to do with the
+    /// accept/reject logic. `tests/decode_step.rs` gates that crossing at
+    /// `tiny()` dims; this measures it at the real one.
+    pub fn tape_comparison_trace(&self, prompt: &[u32], steps: u32) -> Result<TapeTrace, String> {
+        if prompt.is_empty() {
+            return Err(format!("{MODEL}: empty prompt"));
+        }
+        self.reset();
+        let (mut logits, mut pos) = self.replay_prompt(prompt, 0)?;
+        let (mut dec, mut ids) = (Vec::new(), Vec::new());
+        for _ in 0..steps {
+            dec.push(logits.clone());
+            let next = crate::sample::argmax(&logits) as u32;
+            ids.push(next);
+            logits = self.stack_step(next, pos, 0)?;
+            pos += 1;
+        }
+
+        self.reset();
+        let (mut logits, mut pos) = self.replay_prompt(prompt, 0)?;
+        let mut chunk = Vec::new();
+        for &id in &ids {
+            chunk.push(logits.clone());
+            logits = self.stack_prefill_chunk(&[id], pos, 0)?;
+            pos += 1;
+        }
+        Ok(TapeTrace { decode: dec, chunk, ids })
+    }
+
+    /// **Real SPECULATIVE generation** of one sequence, greedy, across every
+    /// stage - [`Self::generate`]'s sibling, not its replacement, and
+    /// byte-for-byte identical to it at `temp = 0` whatever `draft` proposes.
+    ///
+    /// Why this is a different lever from [`Self::generate_batch`]: batching
+    /// amortizes the weight stream over several INDEPENDENT sequences and does
+    /// nothing for one of them, while this amortizes it over several
+    /// candidate continuations of the SAME sequence. Both attack the same
+    /// bound (a decode step reads every weight in the model to produce one
+    /// token) and they do not compose for free - a speculative round inside a
+    /// batch slot makes each slot's row count vary per step, which
+    /// [`Self::stack_step_batch`]'s one-row-per-slot contract does not admit.
+    ///
+    /// `draft(ctx, want) -> tokens` proposes up to `want` continuations of
+    /// `ctx`. Nothing is assumed about it: a wrong proposal costs a round, not
+    /// correctness. Returns the generated ids and what the run cost - read
+    /// [`SpecDecodeStats::accepted_per_round`] before believing any speedup,
+    /// since that is the number the technique lives or dies on.
+    ///
+    /// Greedy only, deliberately. Lossless SAMPLED speculation needs the
+    /// drafter's own per-token distribution to build the residual-rejection
+    /// correction; a drafter that hands back only token ids cannot supply it,
+    /// and helping ourselves to the target's distribution instead would change
+    /// the sampled distribution while looking like it worked.
+    ///
+    /// **Known floor, measured.** Every round verifies through the chunk
+    /// path, including a round whose drafter proposed nothing. A one-row
+    /// verify chunk is slower than the one-row decode step it stands in for -
+    /// 3.7 tok/s against 6.6 on the real checkpoint and cards - so a drafter
+    /// that never fires makes this ~0.6x plain decode rather than 1.0x. It is
+    /// left uniform on purpose: routing the `kk == 0` round to
+    /// [`Self::stack_step`] would fix the floor and would also put different
+    /// rounds of one generation on different tapes, which forfeits the one
+    /// exact real-checkpoint equivalence gate this path has
+    /// (`tests/gguf_resident_spec_real.rs`, which holds the tape fixed and
+    /// varies only the speculation). For the drafter this exists to serve -
+    /// one that proposes a full block every round - the two are the same code
+    /// path anyway. Revisit it behind that measurement, not before.
+    pub fn generate_speculative(
+        &self,
+        prompt: &[u32],
+        max_new: u32,
+        k: u32,
+        draft: &mut dyn FnMut(&[u32], u32) -> Vec<u32>,
+        on_token: &mut dyn FnMut(&[u32]) -> bool,
+    ) -> Result<(Vec<u32>, SpecDecodeStats), String> {
+        if prompt.is_empty() {
+            return Err(format!("{MODEL}: empty prompt"));
+        }
+        if k == 0 {
+            return Err(format!("{MODEL}: speculative decode needs k >= 1"));
+        }
+        // The verify chunk is `k+1` rows long and lands past the last
+        // generated token, so the capacity check is one row wider than
+        // `generate`'s.
+        let need = prompt.len() as u64 + max_new as u64 + k as u64;
+        if need > self.cap as u64 {
+            return Err(format!(
+                "{MODEL}: prompt ({}) + max_new ({max_new}) + speculation window ({k}) = {need} exceeds this instance's context capacity {}",
+                prompt.len(),
+                self.cap
+            ));
+        }
+        if let Some(bad) = prompt.iter().find(|&&t| t >= self.cfg.vocab) {
+            return Err(format!("{MODEL}: prompt token id {bad} is outside vocab {}", self.cfg.vocab));
+        }
+        self.reset();
+        let snaps: Vec<_> = self.shards.iter().map(|s| s.qwen35.new_gdn_snapshot()).collect();
+        let t0 = std::time::Instant::now();
+
+        // All but the last prompt token; the last is the first verify row,
+        // exactly as it is the first `pending` of the textbook loop.
+        let mut pos = 0u32;
+        if prompt.len() > 1 {
+            let (_, p) = self.replay_prompt(&prompt[..prompt.len() - 1], 0)?;
+            pos = p;
+        }
+        let prefill_s = t0.elapsed().as_secs_f64();
+        let t1 = std::time::Instant::now();
+
+        let mut pending = *prompt.last().expect("non-empty (checked above)");
+        let mut ctx: Vec<u32> = prompt.to_vec();
+        let mut out: Vec<u32> = Vec::with_capacity(max_new as usize);
+        let mut stats = SpecDecodeStats::default();
+        let mut stop = "length";
+
+        'outer: while (out.len() as u32) < max_new {
+            let want = (max_new - out.len() as u32).min(k);
+            let mut props = draft(&ctx, want);
+            props.truncate(want as usize);
+            // A drafter is untrusted input. Cut at the FIRST out-of-vocab
+            // proposal rather than filtering them out: the proposals are a
+            // SEQUENCE, and dropping one from the middle would silently
+            // splice two unrelated continuations together and then verify
+            // that, which is a wrong answer dressed as a rejected one.
+            if let Some(bad) = props.iter().position(|&t| t >= self.cfg.vocab) {
+                props.truncate(bad);
+            }
+            let kk = props.len();
+            stats.rounds += 1;
+            stats.proposed += kk;
+
+            let rows: Vec<u32> = std::iter::once(pending).chain(props.iter().copied()).collect();
+
+            // Only a round that can REJECT needs the recurrent state
+            // preserved, and the copy is ~150 MB at the real shape, so it is
+            // paid only when it could be used.
+            if kk > 0 {
+                for (s, snap) in self.shards.iter().zip(&snaps) {
+                    s.qwen35.gdn_snapshot_xfer(&s.caches.view(0), snap, true);
+                }
+            }
+            let logits = self.stack_verify_chunk(&rows, pos, 0)?;
+            stats.target_forwards += 1;
+
+            let mut accepted = 0usize;
+            while accepted < kk && crate::sample::argmax(&logits[accepted]) as u32 == props[accepted] {
+                accepted += 1;
+            }
+            let correction = crate::sample::argmax(&logits[accepted]) as u32;
+
+            if accepted == kk {
+                // Nothing was rejected, so the round's own end state is the
+                // right state for every committed row: no restore, no second
+                // forward. This is the path a good drafter spends its time on.
+                pos += kk as u32 + 1;
+            } else {
+                // The recurrent layers absorbed the rejected tail and have to
+                // be rewound; the GQA layers do not, their stale rows past
+                // `pos` are simply never read again.
+                for (s, snap) in self.shards.iter().zip(&snaps) {
+                    s.qwen35.gdn_snapshot_xfer(&s.caches.view(0), snap, false);
+                }
+                self.stack_prefill_chunk(&rows[..=accepted], pos, 0)?;
+                stats.target_forwards += 1;
+                pos += accepted as u32 + 1;
+            }
+            stats.accepted += accepted;
+
+            // Emit in order and stop at the first stop id: a round can produce
+            // several tokens at once, and everything after an EOS in the same
+            // round was never really generated.
+            for tok in props.iter().take(accepted).copied().chain(std::iter::once(correction)) {
+                if self.eos.contains(&tok) {
+                    stop = "eos";
+                    break 'outer;
+                }
+                out.push(tok);
+                ctx.push(tok);
+                if out.len() as u32 == max_new {
+                    break 'outer;
+                }
+                if on_token(&out) {
+                    stop = "caller";
+                    break 'outer;
+                }
+            }
+            pending = correction;
+        }
+
+        self.last.set(Timings { prefill_s, prefill_tokens: prompt.len() as u32, decode_s: t1.elapsed().as_secs_f64(), decode_tokens: out.len() as u32 });
+        self.stop.set(stop);
+        Ok((out, stats))
+    }
+
     /// **Real BATCHED generation**: `reqs.len()` independent sequences, each
     /// with its own prompt and sampling settings, decoded TOGETHER - one row
     /// of one dispatch set per step ([`Self::stack_step_batch`]).
@@ -1256,6 +1515,13 @@ impl Qwen35GgufInstance {
     /// going through `qwen3::chat`'s whole request parser.
     pub fn tokenize(&self, text: &str) -> Vec<u32> {
         self.tok.encode(text)
+    }
+
+    /// [`Self::tokenize`]'s inverse, with the same checkpoint-embedded
+    /// tokenizer - what a gate comparing two decode paths needs to claim they
+    /// produced the same TEXT and not merely the same ids.
+    pub fn detokenize(&self, ids: &[u32]) -> String {
+        self.tok.decode(ids)
     }
 
     /// Drain every stage's queue, so a wall clock taken around a decode region
