@@ -8,6 +8,7 @@
 //! `model::block::chunked_bidir_fwd`) and is the next piece to land.
 
 pub mod block;
+pub mod channel_attn;
 pub mod config;
 pub mod dwconv;
 pub mod mlp;
@@ -15,6 +16,7 @@ pub mod patch_embed;
 pub mod pipelines;
 pub mod window_attn;
 
-pub use block::{SpatialBlock, SpatialBlockKernelIds};
+pub use block::{ChannelBlock, ChannelBlockKernelIds, SpatialBlock, SpatialBlockKernelIds};
+pub use channel_attn::{ChannelAttn, ChannelAttnKernelIds};
 pub use config::{DavitConfig, DavitPatchSpec, DavitStageSpec};
 pub use patch_embed::{PatchEmbed, PatchEmbedKernelIds};
