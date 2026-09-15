@@ -51,8 +51,8 @@ fn render_line(label: &str, file: &str, done: u64, total: u64) -> String {
     let pct = done.min(total) * 100 / total.max(1);
     format!(
         "{label} load {file} {pct}% ({}/{})",
-        crate::pull_cli::human_bytes(done),
-        crate::pull_cli::human_bytes(total)
+        loader::progress::human_bytes(done),
+        loader::progress::human_bytes(total)
     )
 }
 

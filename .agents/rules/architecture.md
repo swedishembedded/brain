@@ -121,6 +121,12 @@ Six layers. Each may depend only on layers above it.
                   CLI-local residency adapters on top (see its own
                   `catalog.rs` module doc for why that split exists)
    residency      weight tiering GPU/RAM/disk (LRU + budget) + job scheduling
+   loader         the resolver core, models-directory lookup, GPU/CPU
+                  placement, and default-checkpoint auto-fetch (behind an
+                  explicit DownloadPolicy) - depending on nothing CLI-local,
+                  same split as `catalog`; `cli` calls it instead of owning
+                  the implementation, and it is what a public SDK loads a
+                  model through without linking `cli` itself
    events/hfsm ──> runtime      JSONL event protocol + event-driven HSM controller
    server         one protocol, three transports: stdio, TCP, unix socket
    dbus           zbus surface over capability::Registry (fd-passed frames)

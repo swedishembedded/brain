@@ -3,10 +3,13 @@
 
 //! The global model directory scan — brain's catalog source of truth.
 //!
-//! [`resolve`] picks the directory (`--models-dir` / `BRAIN_MODELS_DIR`, else
-//! `$XDG_DATA_HOME/brain/models`, else `$HOME/.local/share/brain/models` — no
-//! absolute-path literal, always computed from env). [`discover`] scans it and
-//! turns every servable weight file into its OWN [`ResidentModel`], keyed by its
+//! The directory itself is found by `loader::model_dir::resolve`
+//! (`--models-dir` / `BRAIN_MODELS_DIR`, else `$XDG_DATA_HOME/brain/models`,
+//! else `$HOME/.local/share/brain/models` - no absolute-path literal, always
+//! computed from env) - moved there because it is pure "which directory"
+//! logic with no CLI-local type in sight, unlike everything else in this
+//! file: [`discover`] scans it and turns every servable weight file into its
+//! OWN [`ResidentModel`], keyed by its
 //! model-card id, so a base model and a finetune/LoRA sitting side by side are
 //! two distinct selectable models.
 //!
@@ -55,18 +58,6 @@ use std::sync::{Arc, Once};
 
 use checkpoint::st::{self, ModelCard};
 use residency::ResidentModel;
-
-/// Resolve the models directory. Precedence: the `--models-dir` flag, then
-/// [`brain_modelstore::default_root`] (`BRAIN_MODELS_DIR`, then
-/// `$XDG_DATA_HOME/brain/models`, then `$HOME/.local/share/brain/models`).
-/// `None` only when the flag and all three env vars are unset (no HOME) — the
-/// scan is then simply skipped.
-pub fn resolve(flag: Option<&str>) -> Option<PathBuf> {
-    if let Some(p) = flag.filter(|s| !s.is_empty()) {
-        return Some(PathBuf::from(p));
-    }
-    brain_modelstore::default_root()
-}
 
 /// A [`LocalModel`](brain_modelstore::LocalModel) [`discover`] could not turn
 /// into a resident -- today, only a compound (`roles.is_some()`) model,
@@ -441,7 +432,7 @@ fn resident_for_compound(card: &ModelCard, roles: &std::collections::BTreeMap<St
 
 /// Build a `s3dit::pipeline::Paths` from a compound manifest's roles --
 /// reads the SAME role names `brain_modelstore::recipe::ZimageRecipe::ROLES`
-/// writes, from a `brain.manifest.json` this crate's `supply::convert`
+/// writes, from a `brain.manifest.json` `loader::supply::convert`
 /// (`"zimage"` arm) produced.
 fn zimage_paths_from_roles(roles: &std::collections::BTreeMap<String, PathBuf>) -> Result<s3dit::pipeline::Paths, String> {
     let get = |role: &str| roles.get(role).and_then(|p| p.to_str()).map(str::to_string).ok_or_else(|| format!("compound manifest missing role {role:?}"));
@@ -450,7 +441,7 @@ fn zimage_paths_from_roles(roles: &std::collections::BTreeMap<String, PathBuf>) 
 
 /// Build a `wan::Paths` from a compound manifest's roles -- the SAME role
 /// names `brain_modelstore::recipe::WanRecipe::ROLES` writes, from a
-/// `brain.manifest.json` this crate's `supply::convert_wan` produced. The
+/// `brain.manifest.json` `loader::supply::convert_wan` produced. The
 /// `text_encoder` role is umT5-XXL rather than z-image's Qwen, but the role
 /// NAMES are deliberately the same four as zimage's, so the two compound
 /// families read alike.
@@ -767,12 +758,6 @@ mod tests {
     }
 
     #[test]
-    fn resolve_prefers_the_flag() {
-        // The explicit flag wins over env/default; empty flag falls through.
-        assert!(resolve(Some("flagdir")).unwrap().ends_with("flagdir"));
-    }
-
-    #[test]
     fn store_layout_scans_vendor_repo_dirs_with_independent_tokenizers() {
         // Regression test for the shared-tokenizer bug: two different
         // <vendor>/<repo> dirs each own their sibling tokenizer.json, so one
@@ -855,7 +840,7 @@ mod tests {
     }
 
     /// A `brain.manifest.json` naming `family` with the four wan-shaped roles
-    /// (dit/vae/text_encoder/tokenizer), same layout `supply::convert_wan`
+    /// (dit/vae/text_encoder/tokenizer), same layout `loader::supply::convert_wan`
     /// writes -- content is never opened at construction (`WanResident::
     /// from_paths` reads lazily at `activate()`), so stub bytes are enough.
     fn write_compound_fixture(dir: &Path, vendor: &str, repo: &str, family: &str) {

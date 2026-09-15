@@ -717,6 +717,7 @@ dependencies = [
  "brain-kronos",
  "brain-lfm2",
  "brain-llava",
+ "brain-loader",
  "brain-ltxv",
  "brain-memauth",
  "brain-mimi",
@@ -1380,6 +1381,30 @@ dependencies = [
  "brain-qwen3",
  "brain-testutil",
  "bytemuck",
+ "serde_json",
+]
+
+[[package]]
+name = "brain-loader"
+version = "1.1.0"
+dependencies = [
+ "brain-arch",
+ "brain-capability",
+ "brain-checkpoint",
+ "brain-ecapatdnn",
+ "brain-glmdsa",
+ "brain-gpu-core",
+ "brain-lfm2",
+ "brain-memauth",
+ "brain-mimi",
+ "brain-modelref",
+ "brain-modelstore",
+ "brain-qwen3",
+ "brain-qwen3omnimoe",
+ "brain-qwen3tts",
+ "brain-residency",
+ "brain-testutil",
+ "brain-yolov8",
  "serde_json",
 ]
 

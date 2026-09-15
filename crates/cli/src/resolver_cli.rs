@@ -18,6 +18,14 @@
 //! `crate::caps_cli::run_do_with_assembly` so a migrated architecture needs
 //! one row in its own `with_arch_spec` match, not a hand-written command.
 //!
+//! The non-exiting resolver core ([`try_resolve`]/[`resolve_structured`]/
+//! [`ResolveFailure`]) now lives in `loader::resolver` - any embedder
+//! wants the same "resolve, or say exactly why not" contract, not just this
+//! CLI - and is re-exported here so every existing caller in this crate is
+//! unaffected. [`resolve_or_exit`] (calls `std::process::exit`, a
+//! process-lifetime decision with no meaning off a CLI) is what stays
+//! CLI-only, as a thin wrapper over the moved core.
+//!
 //! Swedish Embedded AB implements CLI plumbing like this for clients whose
 //! own tools need to expose a typed resolver's ambiguity/missing outcomes
 //! consistently across many subcommands. If your team needs the same
@@ -27,82 +35,16 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use brain_modelstore::resolve::{describe_ambiguity, describe_missing, Ambiguity, ArchSpec, Question, Resolution};
+use brain_modelstore::resolve::{describe_ambiguity, Ambiguity, ArchSpec, Question, Resolution};
 use capability::Assembly;
-
-/// Exit code for an unresolvable `Resolution::Ambiguous` - distinct from
-/// [`MISSING_EXIT`] so a script can tell "name one more thing" apart from
-/// "nothing here at all" without parsing the message.
-pub const AMBIGUOUS_EXIT: i32 = 3;
-/// Exit code for `Resolution::Missing`.
-pub const MISSING_EXIT: i32 = 4;
-
-/// [`try_resolve`]'s failure shapes, each carrying its own already-rendered
-/// message - kept distinct (rather than one `String`) so a caller that must
-/// exit the process ([`resolve_or_exit`]) can still pick the right exit code,
-/// while a caller that cannot (`crate::catalog::provider`) can collapse it to
-/// one message via [`ResolveFailure::message`].
-pub enum ResolveFailure {
-    /// No models directory is configured at all - not a resolver outcome,
-    /// a precondition the resolver was never reached to evaluate.
-    NoModelsDir(String),
-    Ambiguous(String),
-    Missing(String),
-}
-
-impl ResolveFailure {
-    /// The rendered message, regardless of which shape this is.
-    pub fn message(&self) -> &str {
-        match self {
-            ResolveFailure::NoModelsDir(m) | ResolveFailure::Ambiguous(m) | ResolveFailure::Missing(m) => m,
-        }
-    }
-    /// The process exit code a CLI caller should use for this outcome.
-    pub fn exit_code(&self) -> i32 {
-        match self {
-            ResolveFailure::NoModelsDir(_) => 1,
-            ResolveFailure::Ambiguous(_) => AMBIGUOUS_EXIT,
-            ResolveFailure::Missing(_) => MISSING_EXIT,
-        }
-    }
-}
-
-impl std::fmt::Display for ResolveFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.message())
-    }
-}
-
-/// Resolve `arch`'s roles through the model-store resolver: scans the models
-/// directory itself (`crate::model_dir::resolve`) and reports every
-/// non-`Resolved` outcome as an [`ResolveFailure`] instead of exiting - for a
-/// caller that cannot exit the process on failure, such as
-/// `crate::catalog::provider`'s "build me a runnable provider, or say why
-/// not" contract.
-pub fn try_resolve(arch: &str, spec: &dyn ArchSpec, overrides: &BTreeMap<String, String>) -> Result<Assembly, ResolveFailure> {
-    match resolve_structured(arch, spec, overrides).map_err(ResolveFailure::NoModelsDir)? {
-        Resolution::Resolved(assembly) => Ok(*assembly),
-        Resolution::Ambiguous(a) => Err(ResolveFailure::Ambiguous(describe_ambiguity(&a))),
-        Resolution::Missing(m) => Err(ResolveFailure::Missing(describe_missing(&m))),
-    }
-}
-
-/// [`try_resolve`]'s models-directory lookup, inventory scan and resolve, with
-/// the rendering left to the caller - for a caller that must report an
-/// `Ambiguous`/`Missing` outcome in its OWN vocabulary rather than in
-/// [`describe_ambiguity`]'s CLI-flag one. The served/resident path
-/// ([`served_roles`]) is that caller: a daemon's operator answers an ambiguity
-/// by exporting an environment variable before the next start, not by retyping
-/// a flag at a prompt that no longer exists.
-///
-/// `Err` is the one outcome that is not a resolution at all: no models
-/// directory is configured, so the resolver was never reached.
-pub fn resolve_structured(arch: &str, spec: &dyn ArchSpec, overrides: &BTreeMap<String, String>) -> Result<Resolution, String> {
-    let root = crate::model_dir::resolve(None).ok_or_else(|| format!("{arch}: no models directory (set --models-dir, BRAIN_MODELS_DIR, or $HOME)"))?;
-    let records = brain_modelstore::inventory::scan(&root);
-    let specs: [&dyn ArchSpec; 1] = [spec];
-    Ok(brain_modelstore::resolve::resolve(arch, &records, &specs, overrides))
-}
+// `ResolveFailure`/`AMBIGUOUS_EXIT`/`MISSING_EXIT` are used here only through
+// `try_resolve`'s return type - a caller that needs them by name reaches for
+// `loader::resolver` (or the `loader` crate root) directly. `try_resolve`
+// itself is re-exported (several `resident_*.rs`/`catalog.rs`/`label_cli.rs`
+// call sites still spell it `crate::resolver_cli::try_resolve`);
+// `resolve_structured` is used only inside this module, so a plain `use`.
+pub use loader::resolver::try_resolve;
+use loader::resolver::resolve_structured;
 
 // ===================== the served (resident) path =====================
 //
@@ -253,7 +195,7 @@ pub fn served_assemblies(arch: &str, spec: &dyn ArchSpec, bindings: &[RoleEnv], 
         let provenance = named.iter().map(|(role, path)| format!("{role}: {path} (named by the environment)")).collect();
         return vec![Assembly { id: default_id.to_string(), arch: arch.to_string(), variant: None, roles, provenance }];
     }
-    let Some(root) = crate::model_dir::resolve(None) else { return Vec::new() };
+    let Some(root) = loader::model_dir::resolve(None) else { return Vec::new() };
     let records = brain_modelstore::inventory::scan(&root);
     let specs: [&dyn ArchSpec; 1] = [spec];
     let placeholder = format!("local/{arch}");

@@ -639,7 +639,7 @@ fn finetune_lora(args: &[String]) {
         println!("qwen3 finetune (lora): no --seed given, using random seed {seed} (pass --seed {seed} to reproduce)");
     }
 
-    let store_root = crate::model_dir::resolve(models_dir.as_deref());
+    let store_root = loader::model_dir::resolve(models_dir.as_deref());
     let (base_weights_path, base_dir, base_id) = match resolve_base(&base, store_root.as_deref()) {
         Ok(t) => t,
         Err(e) => {
@@ -901,7 +901,7 @@ fn eval_chat(args: &[String]) {
         return;
     }
 
-    let store_root = crate::model_dir::resolve(models_dir.as_deref());
+    let store_root = loader::model_dir::resolve(models_dir.as_deref());
     let (base_weights_path, base_dir, base_id) = match resolve_base(&base, store_root.as_deref()) {
         Ok(t) => t,
         Err(e) => {
@@ -1071,7 +1071,7 @@ fn calib(args: &[String]) {
         return;
     }
 
-    let store_root = crate::model_dir::resolve(models_dir.as_deref());
+    let store_root = loader::model_dir::resolve(models_dir.as_deref());
     let (weights_path, base_dir, base_id) = match resolve_base(&weights, store_root.as_deref()) {
         Ok(t) => t,
         Err(e) => {

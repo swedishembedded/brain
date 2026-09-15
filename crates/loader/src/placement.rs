@@ -1,0 +1,397 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+
+//! **The one production placement policy.** Turns the machine brain is
+//! actually running on into a `residency::budget::Budgets`, and answers
+//! `gpu_core::devices::Placer` from it.
+//!
+//! Moved out of `crates/cli/src/placement.rs` verbatim, so `Device::Auto` has
+//! a library-side answer for any embedder, not just the `brain` binary --
+//! `crates/cli` now calls [`install_default_placer`] instead of owning this
+//! implementation.
+//!
+//! Swedish Embedded AB implements automatic multi-device model placement for
+//! its clients. If your team needs expertise in getting large models onto the
+//! accelerators a machine really has - and a legible refusal when they do not
+//! fit - you can procure our services by sending an email to
+//! info@swedishembedded.com.
+//!
+//! # Why this lives here
+//!
+//! `crates/gpu-core` (which every model crate depends on) and
+//! `crates/residency` (which owns the capacity model, and which
+//! `crates/stats` depends on precisely because it pulls no GPU code) must not
+//! depend on each other. So the placement seam is dependency-inverted:
+//! `gpu-core` DECLARES [`gpu_core::devices::Placer`] and asks it; `residency`
+//! OWNS the decision (`residency::plan::plan` over `budget::Budgets` and
+//! `place::pick_device`); and this module - which may depend on both - is
+//! the only thing that knows both halves exist.
+//!
+//! Nothing here re-derives what fits where. It probes hardware, builds
+//! budgets, and delegates.
+
+use std::sync::Arc;
+
+use gpu_core::devices::{Home, Need, Placer};
+use memauth::PoolProbe;
+use residency::budget::Budgets;
+use residency::plan::{self, Part};
+// The headroom automatic placement keeps free on every card is the ONE margin
+// between a byte estimate and a real allocation, so it is defined beside the
+// probe it is subtracted from - see `gpu_core::capacity::HEADROOM` for why it
+// is 2 GiB and what it covers.
+use gpu_core::capacity::HEADROOM;
+use residency::{Device, MemCost};
+
+/// How long a capacity snapshot is reused before the machine is re-probed.
+///
+/// The snapshot cannot be per-call: a pipeline builds several parts, and
+/// re-asking a live free-VRAM probe between them would let one model's OWN
+/// allocations move the answer and scatter it across the machine. It also must
+/// not be forever, which is what it used to be: `brain serve` installs this
+/// placer once at startup and then places FLUX/Qwen sub-parts against
+/// process-start numbers for the daemon's entire life, so a card freed by a
+/// neighbour hours ago is still budgeted as busy - the exact opposite of
+/// "always recover again once vram becomes available again".
+///
+/// A few seconds is longer than any single model build's placement calls and
+/// far shorter than a neighbouring job's lifetime, so it keeps the former
+/// coherent while letting the latter be noticed.
+const SNAPSHOT_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Live per-GPU free bytes, `(canonical index, free)`.
+///
+/// A thin alias for [`gpu_core::capacity::available_gpus`], which is the one
+/// probe of this machine's memory - see its module doc for why there is
+/// exactly one, and what it does and does not see.
+pub fn probe_free_vram() -> Vec<(u32, u64)> {
+    gpu_core::capacity::available_gpus()
+}
+
+/// Live host RAM this process could actually get right now: `MemAvailable`
+/// intersected with any cgroup v2 limit (see `memauth::HostProbe`), then with
+/// `--limit-ram-total` if one was published via [`memauth::limits`].
+pub fn host_ram_available() -> u64 {
+    let live = memauth::HostProbe::new(memauth::HOST_POOL).available(memauth::HOST_POOL);
+    memauth::limits().clamp(memauth::Device::Cpu, live)
+}
+
+/// Budgets for automatic placement: one per schedulable GPU sized to its FREE
+/// bytes less [`HEADROOM`], plus the host tier when `cpu_allowed`.
+///
+/// The host tier, when declared, is a real execution tier (the CPU backend),
+/// and `residency::plan::plan` falls back to it whenever no card can hold a
+/// part right now - on a GPU-less box, and equally on a box whose cards are
+/// momentarily full. Running slower is the requirement; failing is not - but
+/// only on a tier the user has not explicitly excluded. `cpu_allowed` is
+/// [`gpu_core::devices::ComputeSet::cpu_enabled`]: an explicit `--device gpu` (or
+/// `gpu<i>`) means CPU must never be silently offered as a fallback, because
+/// some model parts (an int8-quantized DiT) cannot even execute there - the
+/// caller asked for GPU-only and is entitled to a legible refusal instead of
+/// a panic three layers down. Leaving `Device::Cpu` out of `Budgets` entirely
+/// is what makes `residency::plan::plan` treat the host tier as absent rather
+/// than merely full (see its own `host_declared` check).
+pub fn budgets(gpus: &[(u32, u64)], ram: u64, cpu_allowed: bool) -> Budgets {
+    let mut b = Budgets::new();
+    let limits = memauth::limits();
+    for &(i, free) in gpus {
+        b.set(Device::Gpu(i), limits.clamp(Device::Gpu(i), free), HEADROOM.min(free));
+    }
+    if cpu_allowed {
+        b.set(Device::Cpu, limits.clamp(Device::Cpu, ram), 0);
+    }
+    b
+}
+
+/// [`Placer`] backed by [`residency::plan::plan`] over a snapshot of the
+/// machine's free capacity, refreshed every [`SNAPSHOT_TTL`].
+///
+/// The snapshot is per-build, not per-call and not per-process: re-probing
+/// between one model's own parts would scatter it across the machine as its
+/// own allocations moved the answer, while never re-probing means a daemon
+/// installed at boot places against boot-time numbers forever. The TTL sits
+/// between the two - long enough that one build sees one consistent machine,
+/// short enough that a neighbouring job finishing is noticed.
+pub struct BudgetPlacer {
+    /// `None` means "probe the machine, on a TTL". `Some` pins a fixed
+    /// snapshot, which is what the tests use and what a caller that has
+    /// already narrowed capacity by hand wants.
+    fixed: Option<Budgets>,
+    cached: std::sync::Mutex<Option<(Budgets, std::time::Instant)>>,
+    /// The `--device` narrowing, captured once: which cards are candidates is
+    /// a user decision that does not change while the process runs, unlike how
+    /// full they are.
+    gpus: Option<std::collections::HashSet<u32>>,
+    /// Whether CPU may be offered as a fallback tier at all - `false` for an
+    /// explicit `--device gpu`/`gpu<i>`. See [`budgets`]'s doc for why this
+    /// must reach every re-probe, not just the first one.
+    cpu_allowed: bool,
+}
+
+impl BudgetPlacer {
+    /// A placer pinned to `budgets` - never re-probes. Test-only: production
+    /// always probes, because a frozen capacity snapshot is precisely the
+    /// defect [`SNAPSHOT_TTL`] documents. Tests want a machine that holds
+    /// still, and get one here rather than by mocking `nvidia-smi`.
+    #[cfg(test)]
+    pub fn new(budgets: Budgets) -> BudgetPlacer {
+        // Irrelevant once `fixed` is set - `self.budgets()` returns `fixed`
+        // straight back and never calls the free `budgets()` fn again - but
+        // `true` keeps a fixed-snapshot placer's behaviour exactly what the
+        // `Budgets` it was handed already says, rather than second-guessing it.
+        BudgetPlacer { fixed: Some(budgets), cached: std::sync::Mutex::new(None), gpus: None, cpu_allowed: true }
+    }
+
+    /// A placer that re-probes this machine's free VRAM every
+    /// [`SNAPSHOT_TTL`], restricted to the cards `--device` made schedulable.
+    pub fn probing(gpus: Option<std::collections::HashSet<u32>>, cpu_allowed: bool) -> BudgetPlacer {
+        BudgetPlacer { fixed: None, cached: std::sync::Mutex::new(None), gpus, cpu_allowed }
+    }
+
+    /// The capacity to plan against right now.
+    fn budgets(&self) -> Budgets {
+        if let Some(b) = &self.fixed {
+            return b.clone();
+        }
+        let mut cached = self.cached.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((b, at)) = cached.as_ref() {
+            if at.elapsed() < SNAPSHOT_TTL {
+                return b.clone();
+            }
+        }
+        let free: Vec<(u32, u64)> = match &self.gpus {
+            Some(s) => probe_free_vram().into_iter().filter(|(i, _)| s.contains(i)).collect(),
+            None => probe_free_vram(),
+        };
+        let fresh = budgets(&free, host_ram_available(), self.cpu_allowed);
+        *cached = Some((fresh.clone(), std::time::Instant::now()));
+        fresh
+    }
+}
+
+/// `gpu_core`'s wire type -> `residency`'s. Data only; no policy crosses here.
+fn to_part(n: &Need) -> Part {
+    let mut p = if n.unsized_ { Part::unsized_(n.name.clone()) } else { Part::new(n.name.clone(), MemCost::new(n.vram, n.ram)) };
+    if let Some(k) = n.phase {
+        p = p.phase(k);
+    }
+    match &n.affinity {
+        gpu_core::devices::Affinity::Any => p,
+        gpu_core::devices::Affinity::With(a) => p.with(a.clone()),
+        gpu_core::devices::Affinity::Apart => p.apart(),
+    }
+}
+
+fn to_home(d: Device) -> Result<Home, String> {
+    match d {
+        Device::Gpu(i) => Ok(Home::Gpu(i)),
+        Device::Cpu => Ok(Home::Cpu),
+        // Never budgeted by `budgets()`, so unreachable in practice; loud
+        // rather than silently mapped onto the wrong tier if that changes.
+        Device::Npu(i) => Err(format!("automatic placement produced npu{i}, which has no build path here")),
+    }
+}
+
+impl Placer for BudgetPlacer {
+    fn place(&self, needs: &[Need]) -> Result<Vec<Home>, String> {
+        let parts: Vec<Part> = needs.iter().map(to_part).collect();
+        let budgets = self.budgets();
+        let placement = plan::plan(&parts, &budgets).map_err(|e| e.to_string())?;
+        let homes = needs
+            .iter()
+            .map(|n| placement.of(&n.name).ok_or_else(|| format!("part {} unplaced", n.name)).and_then(to_home))
+            .collect::<Result<Vec<Home>, String>>()?;
+        // Say what it did. A multi-part plan is reported in full; the
+        // single-part default (every bare `Gpu::new`) is reported once, and
+        // only when it lands somewhere other than card 0 - a run that took
+        // the historical default has nothing to explain.
+        if needs.len() > 1 {
+            let line: Vec<String> = needs.iter().zip(&homes).map(|(n, h)| format!("{}={h}", n.name)).collect();
+            eprintln!("brain: placement {} ({})", line.join(" "), free_summary(&budgets));
+        } else if budgets.gpus().len() > 1 && !matches!(homes.first(), Some(Home::Gpu(0)) | Some(Home::Cpu) | None) {
+            // Only when there was a real choice to make and it did not land
+            // on the historical default. One card, the host tier, or card 0
+            // are all "what you would have got anyway" and have nothing to
+            // explain.
+            static ONCE: std::sync::Once = std::sync::Once::new();
+            ONCE.call_once(|| {
+                if let Some(h) = homes.first() {
+                    eprintln!("brain: placement {h} ({})", free_summary(&budgets));
+                }
+            });
+        }
+        Ok(homes)
+    }
+}
+
+fn free_summary(budgets: &Budgets) -> String {
+    let mut gpus = budgets.gpus();
+    gpus.sort_by_key(|d| match d {
+        Device::Gpu(i) => *i,
+        _ => u32::MAX,
+    });
+    gpus.iter()
+        .map(|&d| format!("{} {:.1} GiB free", plan::device_name(d), budgets.free_on(d) as f64 / (1u64 << 30) as f64))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Install the production placer for this process.
+///
+/// `gpus`/`cpu_allowed` are the `--device` narrowing already resolved by the
+/// caller (`None`/`true` means "every card, plus the host tier" - the
+/// "use all the hardware" default). How FULL those cards are is re-probed on
+/// a TTL by the placer itself (see [`BudgetPlacer::probing`]) rather than
+/// frozen here - a caller installs this once at startup and then lives for
+/// weeks.
+pub fn install_default_placer(gpus: Option<std::collections::HashSet<u32>>, cpu_allowed: bool) {
+    gpu_core::devices::install_placer(Arc::new(BudgetPlacer::probing(gpus, cpu_allowed)));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const GIB: u64 = 1 << 30;
+
+    /// The reported bug, at the layer that fixes it: gpu0 loaded by a
+    /// neighbour, gpu1 free, no `--device`. The placer must answer gpu1.
+    #[test]
+    fn a_loaded_card_is_not_offered_to_a_model_that_cannot_fit_on_it() {
+        let p = BudgetPlacer::new(budgets(&[(0, 5 * GIB), (1, 24 * GIB)], 128 * GIB, true));
+        let homes = p.place(&[Need::sized("dit", 16 * GIB, 0)]).expect("plan");
+        assert_eq!(homes, vec![Home::Gpu(1)]);
+    }
+
+    /// ...and the bare `Gpu::new` default (no cost known) follows the same
+    /// rule, because it is the same policy.
+    #[test]
+    fn the_no_preference_default_follows_free_capacity() {
+        let p = BudgetPlacer::new(budgets(&[(0, 2 * GIB), (1, 24 * GIB)], 128 * GIB, true));
+        assert_eq!(p.place(&[Need::unsized_("model")]).expect("plan"), vec![Home::Gpu(1)]);
+        let q = BudgetPlacer::new(budgets(&[(0, 24 * GIB), (1, 24 * GIB)], 128 * GIB, true));
+        assert_eq!(q.place(&[Need::unsized_("model")]).expect("plan"), vec![Home::Gpu(0)], "an idle box keeps card 0");
+    }
+
+    /// A pipeline whose parts do not co-reside gets two cards without any
+    /// model naming one.
+    #[test]
+    fn a_pipeline_spreads_without_any_model_naming_a_card() {
+        let p = BudgetPlacer::new(budgets(&[(0, 24 * GIB), (1, 24 * GIB)], 128 * GIB, true));
+        let homes = p
+            .place(&[Need::sized("dit", 14 * GIB, 0).apart(), Need::sized("te", 7 * GIB, 0).apart(), Need::sized("vae", 2 * GIB, 0).with("dit")])
+            .expect("plan");
+        assert_ne!(homes[0], homes[1], "dit and te must not share: {homes:?}");
+        assert_eq!(homes[0], homes[2], "vae must follow the dit: {homes:?}");
+    }
+
+    /// The 9B-diffusion shape that motivated phases: a denoiser and a decode
+    /// graph that cannot co-reside take turns on ONE card, because the
+    /// pipeline evicts the denoiser before it builds the decode graph. The
+    /// same declaration without phases - 31 GiB simultaneously resident on a
+    /// 23 GiB card - must NOT all fit on that card. (It no longer fails
+    /// outright: what does not fit a card now takes the host tier, slowly,
+    /// rather than killing the run. What is being pinned here is that the
+    /// phased charge is real - drop the phases and the card genuinely cannot
+    /// hold the same parts.)
+    #[test]
+    fn phased_parts_take_turns_on_one_card() {
+        let p = BudgetPlacer::new(budgets(&[(0, 23 * GIB)], 128 * GIB, true));
+        let needs = [
+            Need::sized("dit", 13 * GIB, 0).apart().phase(1),
+            Need::sized("te", 7 * GIB, 0).apart(),
+            Need::sized("vae_dec", 11 * GIB, 0).with("dit").phase(2),
+        ];
+        assert_eq!(
+            p.place(&needs).expect("peak = 7 + max(13, 11) = 20 GiB: fits"),
+            vec![Home::Gpu(0), Home::Gpu(0), Home::Gpu(0)]
+        );
+        let unphased: Vec<Need> = needs.iter().cloned().map(|n| Need { phase: None, ..n }).collect();
+        let homes = p.place(&unphased).expect("the host tier absorbs what the card cannot hold");
+        assert!(homes.contains(&Home::Cpu), "13 + 7 + 11 = 31 GiB live at once does not fit 23: {homes:?}");
+    }
+
+    /// The real failure this headroom exists to catch: FLUX.2 klein-9b's
+    /// `dit`+`vae_enc` (phase 1, real bytes measured off this repo's own
+    /// checkpoint: 13,154,417,928 + 2,220,175,360) landed on a card reporting
+    /// 15.4 GiB free. At the old 1 GiB headroom the plan judged that a fit
+    /// (14.32 GiB needed vs 14.4 GiB budget - 0.08 GiB to spare) and the real
+    /// wgpu allocation then OOM'd, because HEADROOM's own doc says it covers
+    /// exactly this gap (driver/context allocation, transient scratch a
+    /// weights-only estimate omits) and 1 GiB was not enough margin for a
+    /// ~14 GiB combined load. The card must be refused, not accepted on a
+    /// razor's edge - forcing the plan onto the OTHER (fully free) card,
+    /// which is what a real two-P40 box has available in this exact case.
+    #[test]
+    fn a_near_ceiling_plan_does_not_ride_the_edge_of_a_single_card() {
+        const NEAR_FULL: u64 = 15 * GIB + 410 * (1 << 20); // ~15.4 GiB free, as measured
+        const FULLY_FREE: u64 = 24 * GIB;
+        let p = BudgetPlacer::new(budgets(&[(0, NEAR_FULL), (1, FULLY_FREE)], 128 * GIB, true));
+        let homes = p
+            .place(&[
+                Need::sized("dit", 13_154_417_928, 0).apart().phase(1),
+                Need::sized("te", 11_494_894_592, 0).apart(),
+                Need::sized("vae_enc", 2_220_175_360, 0).with("dit").phase(1),
+            ])
+            .expect("the fully-free card holds it");
+        assert_ne!(homes[0], Home::Gpu(0), "dit must not ride the near-ceiling card's edge: {homes:?}");
+    }
+
+    /// Nothing fits: the refusal names the part, its size and every card's
+    /// free bytes, instead of letting the driver report a bare OOM later.
+    #[test]
+    fn an_impossible_model_is_refused_legibly() {
+        let p = BudgetPlacer::new(budgets(&[(0, 5 * GIB), (1, 6 * GIB)], 8 * GIB, true));
+        let e = p.place(&[Need::sized("dit", 40 * GIB, 0)]).expect_err("40 GiB fits nothing");
+        for want in ["dit", "40", "gpu0", "gpu1"] {
+            assert!(e.contains(want), "refusal must name {want:?}; got {e}");
+        }
+    }
+
+    /// A GPU-less box places on the host tier rather than refusing.
+    #[test]
+    fn a_gpu_less_box_places_on_the_host_tier() {
+        let p = BudgetPlacer::new(budgets(&[], 128 * GIB, true));
+        assert_eq!(p.place(&[Need::sized("dit", 16 * GIB, 0)]).expect("plan"), vec![Home::Cpu]);
+    }
+
+    /// The placer and the SERVING path decide from the same policy. Given the
+    /// same budgets, `residency::place::pick_device` - what
+    /// `ResidencyManager::claim` uses to place a resident model - agrees with
+    /// what a one-shot CLI build is told. One capacity model, two consumers.
+    #[test]
+    fn the_serving_path_and_the_cli_agree_on_where_a_model_goes() {
+        let b = budgets(&[(0, 5 * GIB), (1, 24 * GIB)], 128 * GIB, true);
+        let cost = MemCost::new(16 * GIB, 0);
+        let served = residency::place::pick_device(&cost, &b, &residency::place::no_exclude());
+        let built = BudgetPlacer::new(b).place(&[Need::sized("dit", 16 * GIB, 0)]).expect("plan");
+        assert_eq!(served, Some(Device::Gpu(1)));
+        assert_eq!(built, vec![Home::Gpu(1)]);
+    }
+
+    /// The reported bug: `--device gpu` explicitly excludes CPU
+    /// (`ComputeSet::cpu_enabled() == false`), a real image size needs more
+    /// activation memory than either card has free, and the plan must REFUSE
+    /// - legibly, before any model code runs - rather than silently landing
+    /// on `Home::Cpu`, which then panics deep inside a model that cannot
+    /// actually execute int8 on the CPU backend at all. Running slower on a
+    /// tier the user excluded is not "slower" - it is doing the opposite of
+    /// what `--device gpu` asked for.
+    #[test]
+    fn cpu_excluded_by_device_gpu_is_never_a_fallback() {
+        let b = budgets(&[(0, 5 * GIB), (1, 5 * GIB)], 128 * GIB, false);
+        let err = BudgetPlacer::new(b).place(&[Need::sized("dit", 16 * GIB, 0)]).unwrap_err();
+        assert!(!err.contains("cpu"), "must not silently mention landing on cpu: {err}");
+        assert!(err.contains("cannot place"), "must be the legible Unplaceable refusal: {err}");
+    }
+
+    /// The same exclusion must not appear as a phantom fallback even when
+    /// GPUs are entirely absent - `--device gpu` on a GPU-less box is a user
+    /// error to report, not a silent drop to the host tier.
+    #[test]
+    fn cpu_excluded_and_no_gpus_at_all_still_refuses() {
+        let b = budgets(&[], 128 * GIB, false);
+        let err = BudgetPlacer::new(b).place(&[Need::sized("dit", 1 * GIB, 0)]).unwrap_err();
+        assert!(err.contains("cannot place"), "{err}");
+    }
+}

@@ -4,7 +4,7 @@
 //! `brain flux2 …` - FLUX.2 Klein text-to-image + image editing.
 //!
 //! `generate`'s weights come from [`resolve_flux2`] (the model-store
-//! resolver over the models directory - see [`crate::model_dir::resolve`]),
+//! resolver over the models directory - see [`loader::model_dir::resolve`]),
 //! never `BRAIN_FLUX2_*`; `finetune` still reads those variables directly.
 //! Images in/out are binary PPM P6 (the CLI-wide convention).
 

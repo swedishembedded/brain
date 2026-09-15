@@ -380,7 +380,7 @@ pub fn run(args: &[String]) {
     };
 
     // ---- The base, its tokenizer and its chat template -------------------
-    let store_root = crate::model_dir::resolve(models_dir.as_deref());
+    let store_root = loader::model_dir::resolve(models_dir.as_deref());
     let (base_weights, base_dir, base_id) = match crate::qwen_cli::resolve_base(&weights, store_root.as_deref()) {
         Ok(t) => t,
         Err(e) => fail(&e),

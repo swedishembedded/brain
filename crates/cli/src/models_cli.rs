@@ -91,7 +91,7 @@ pub fn run_models(args: &[String]) -> i32 {
 
 fn open_store(a: &mut Args) -> Option<Store> {
     let dir = a.take_str("--models-dir");
-    crate::model_dir::resolve(dir.as_deref()).map(Store::new)
+    loader::model_dir::resolve(dir.as_deref()).map(Store::new)
 }
 
 fn resolve_arch(l: &LocalModel) -> Option<&'static brain_arch::Arch> {
@@ -168,7 +168,7 @@ fn resolve_gguf_arch(family: &str, path: Option<&str>) -> Option<&'static brain_
 }
 
 fn human_bytes(n: u64) -> String {
-    crate::pull_cli::human_bytes(n)
+    loader::progress::human_bytes(n)
 }
 
 /// Bytes on disk for whatever `local` actually points at - a single file for

@@ -1,0 +1,35 @@
+[package]
+name = "brain-loader"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The library half of what used to live only inside the `brain` CLI binary: the model-store resolver's non-exiting core, the models-directory lookup, automatic GPU/CPU placement, default-checkpoint auto-fetch (behind an explicit DownloadPolicy), and fetch/convert progress rendering -- so an embedder (an SDK, a service, a second binary) can resolve and load a model without linking crates/cli."
+
+[lib]
+name = "loader"
+path = "src/lib.rs"
+
+[dependencies]
+brain-arch.workspace = true
+brain-capability.workspace = true
+brain-checkpoint.workspace = true
+brain-modelref.workspace = true
+brain-modelstore.workspace = true
+brain-residency.workspace = true
+brain-memauth.workspace = true
+brain-gpu-core.workspace = true
+# The `convert` dispatch's finish-step importers -- one per family it can
+# fetch and convert on an embedder's behalf, mirroring `brain-cli`'s own
+# dependency on each (this is a pure move of that dispatch, not new scope).
+brain-qwen3.workspace = true
+brain-glmdsa.workspace = true
+brain-lfm2.workspace = true
+brain-qwen3omnimoe.workspace = true
+brain-qwen3tts.workspace = true
+brain-mimi.workspace = true
+brain-ecapatdnn.workspace = true
+brain-yolov8.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+brain-testutil.workspace = true

@@ -123,6 +123,7 @@ default-members = [
     "crates/npu",
     "crates/runtime",
     "crates/server",
+    "crates/loader",
     "crates/cli",
     "crates/dbus",
     "crates/memauth",
@@ -215,6 +216,7 @@ brain-modelcost = { path = "crates/modelcost" }
 brain-capability = { path = "crates/capability" }
 brain-capability-mock = { path = "crates/capability-mock" }
 brain-catalog = { path = "crates/catalog" }
+brain-loader = { path = "crates/loader" }
 brain-captioner = { path = "crates/captioner" }
 brain-memauth = { path = "crates/memauth" }
 brain-weightset = { path = "crates/weightset" }

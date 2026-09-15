@@ -103,6 +103,10 @@ brain-capability.workspace = true
 # `catalog.rs` is a thin CLI-local extension over this (patches back the
 # residency adapters that must stay CLI-local, see that file's module doc).
 brain-catalog.workspace = true
+# The resolver core, models-directory lookup, GPU/CPU placement, and
+# default-checkpoint auto-fetch -- library pieces this binary now calls into
+# rather than owns, so an SDK/embedder can use them without `brain-cli`.
+brain-loader.workspace = true
 # `--trace-<family>`/`--trace-format`/`--trace-output`: the family registry and
 # the ONE global `tracing_subscriber` install. Only this binary installs one;
 # every library crate emits through the plain `tracing` facade.

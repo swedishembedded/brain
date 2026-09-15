@@ -189,7 +189,7 @@ fn list_unprofiled_local_model_reports_not_profiled_not_a_missing_column() {
 #[test]
 fn list_empty_or_missing_store_is_not_an_error() {
     // A store directory that does not exist on disk is not the same as "no
-    // store configured at all" (`crate::model_dir::resolve` returning
+    // store configured at all" (`loader::model_dir::resolve` returning
     // `None`, which DOES render nothing - see `run_list`'s early return):
     // `BRAIN_MODELS_DIR` is set, so `list` still has an answer to "what
     // COULD be pulled here" from the declared registry alone. What it must

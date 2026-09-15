@@ -155,7 +155,7 @@ fn tensor_nodes(mg: &MmapGguf) -> Vec<Node> {
     for name in mg.names() {
         let shape = mg.shape(name).map(|s| format!("{s:?}")).unwrap_or_else(|| "?".to_string());
         let dtype = mg.dtype(name).unwrap_or("?");
-        let size = mg.raw_tensor_bytes(name).map(|(bytes, _ty)| crate::pull_cli::human_bytes(bytes.len() as u64)).unwrap_or_else(|| "?".to_string());
+        let size = mg.raw_tensor_bytes(name).map(|(bytes, _ty)| loader::progress::human_bytes(bytes.len() as u64)).unwrap_or_else(|| "?".to_string());
         let line = format!("{name}  {dtype}  {shape}  {size}");
         let segs: Vec<&str> = name.split('.').collect();
         let mut cur = &mut root;

@@ -33,7 +33,6 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
 use events::Envelope;
-use memauth::PoolProbe;
 use runtime::{
     Controller, DetectModel, Emit, FakeDetectModel, FakeInferModel, GenConfig, GptInfer, Registry,
     YoloDetect,
@@ -647,7 +646,7 @@ fn build_serving_executor(reserve_gb: u64, models_dir: Option<String>, qwen_cfg:
     );
     // Resolve the global model directory (flag > BRAIN_MODELS_DIR > XDG default);
     // its scan appends every carded file as its own catalog entry.
-    let dir = crate::model_dir::resolve(models_dir.as_deref());
+    let dir = loader::model_dir::resolve(models_dir.as_deref());
     if let Some(d) = &dir {
         // First run on a fresh install: the dir doesn't exist yet. Create it so
         // the scan is clean (an empty catalog, not an ENOENT warning) - models
@@ -662,17 +661,15 @@ fn build_serving_executor(reserve_gb: u64, models_dir: Option<String>, qwen_cfg:
 }
 
 /// Live host RAM this process could actually get right now: `MemAvailable`
-/// intersected with any cgroup v2 limit - see `memauth::HostProbe`, whose
-/// doc carries the `MemAvailable`-over-`MemTotal` rationale this used to
-/// duplicate locally - and then with `--limit-ram-total` if one was published.
-/// The ceiling belongs HERE, at the one function that answers "how much host
-/// RAM may this process use": a caller that bounded itself by RAM before the
-/// flag existed is bounded by the flag too, with nothing to remember.
-/// `query_ram_bytes` (the old name, kept public within the crate since
-/// `perf_cli.rs` calls it by that name) is now a thin alias.
+/// intersected with any cgroup v2 limit, then with `--limit-ram-total` if one
+/// was published. A thin alias over `loader::placement::
+/// host_ram_available` - the same probe the production placer's own re-probe
+/// path uses, so there is exactly one implementation of "how much host RAM
+/// may this process use", not a second copy living here. `query_ram_bytes`
+/// (the old name, kept public within the crate since `perf_cli.rs` calls it
+/// by that name) is a further thin alias over this.
 pub(crate) fn host_ram_available() -> u64 {
-    let live = memauth::HostProbe::new(memauth::HOST_POOL).available(memauth::HOST_POOL);
-    memauth::limits().clamp(memauth::Device::Cpu, live)
+    loader::placement::host_ram_available()
 }
 
 /// Which serving surfaces to bring up and their config (see `run_apis`).
@@ -751,7 +748,7 @@ fn build_auto_fetch_supplier(models_dir: Option<&str>) -> Option<Arc<dyn residen
     // The SAME models directory `build_serving_executor`'s startup scan
     // resolved, so a freshly auto-fetched model lands exactly where a restart's
     // scan would find it again.
-    let dir = crate::model_dir::resolve(models_dir)?;
+    let dir = loader::model_dir::resolve(models_dir)?;
     let store = brain_modelstore::Store::new(dir);
     let hub: Box<dyn brain_modelstore::Hub> = Box::new(brain_modelstore::HfHub::new());
     Some(Arc::new(crate::supply::StoreSupplier::new(store, hub)))
@@ -772,7 +769,7 @@ fn run_apis(a: RunApis) {
     // a client happens to request that exact model. `supplier` is already
     // `None` unless auto-fetch is enabled, so no separate check is needed here.
     if let Some(sup) = &supplier {
-        if let Some(dir) = crate::model_dir::resolve(models_dir_for_heal.as_deref()) {
+        if let Some(dir) = loader::model_dir::resolve(models_dir_for_heal.as_deref()) {
             crate::supply::heal_missing_models_in_background(dir, sup.clone(), executor.clone());
         }
     }

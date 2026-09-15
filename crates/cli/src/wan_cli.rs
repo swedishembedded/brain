@@ -10,7 +10,7 @@
 //! ```
 //!
 //! `t2v`'s weights come from [`resolve_wan`] (the model-store resolver over
-//! the models directory - see [`crate::model_dir::resolve`]), never
+//! the models directory - see [`loader::model_dir::resolve`]), never
 //! `BRAIN_WAN_*`; `finetune` still reads those variables directly, same as
 //! `flux2_cli::run_flux2`'s own split. Everything else defaults from
 //! `WanConfig`, so a run that names only a prompt and an output path is
