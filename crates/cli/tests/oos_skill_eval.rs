@@ -25,6 +25,7 @@
 //! Env:
 //!   CHRONOS2_WEIGHTS                          — chronos2 `.safetensors` (optional)
 //!   BRAIN_KRONOS_TOKENIZER, BRAIN_KRONOS_DECODER  - kronos checkpoints (optional)
+//!   BRAIN_TIMESFM3 - timesfm3 checkpoint dir or .safetensors (optional)
 //!   FINCAST_WEIGHTS                           — fincast `.safetensors` (optional)
 //!   OOS_DATA      — dir of `<TICKER>.csv` (Date,open,high,low,close,volume) (required)
 //!   OOS_OUT       — output JSON path (required)
@@ -114,6 +115,20 @@ fn build_models() -> Vec<(String, Box<dyn ForecastModel>)> {
                 }
                 Err(e) => eprintln!("kronos_ft load failed: {e}"),
             }
+        }
+    }
+    // BRAIN_TIMESFM3: the raw `brain pull google/timesfm-3.0-pytorch` directory
+    // (config.json + model.safetensors, imported on load) or an already-imported
+    // brain .safetensors. Univariate here: it advertises no required variates,
+    // so build_panel hands it a bare close target, the same panel chronos2 and
+    // fincast see. That is what makes the cross-model comparison fair.
+    if let Ok(w) = std::env::var("BRAIN_TIMESFM3") {
+        match timesfm3::Timesfm3Forecaster::load(&w) {
+            Ok(m) => {
+                models.push(("timesfm3".into(), Box::new(m)));
+                eprintln!("loaded timesfm3 from {w}");
+            }
+            Err(e) => eprintln!("timesfm3 load failed: {e}"),
         }
     }
     if let Ok(w) = std::env::var("FINCAST_WEIGHTS") {
