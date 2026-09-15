@@ -12,5 +12,6 @@
 //! than new from-scratch kernel authoring - see each module's own doc for
 //! which existing piece it reuses.
 
+pub mod grounding;
 pub mod tokenizer;
 pub mod vision;

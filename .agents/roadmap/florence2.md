@@ -1,6 +1,8 @@
 # florence2
 
-**Status: M1 (resources + tokenizer) done. M2-M7 not started.**
+**Status: M1 done. M2 mostly done (patch embed + SpatialBlock verified
+against real weights; ChannelBlock is the one remaining piece, see below).
+M4 done. M3/M5/M6/M7 not started.**
 
 ## Goal
 
@@ -72,15 +74,43 @@ self-consistent.
   skeleton, tokenizer (`tokenizer.rs`) loading + extending to the real
   51289-id vocab, gated on `FLORENCE2_DIR` (skips cleanly when unset).
   `cargo check --workspace` clean, clippy clean on touched crates.
-- **M2**: DaViT vision encoder. Reuses `WindowPlan` (windowed attention -
-  already anticipates "DaViT's local window stage" in its own doc),
-  `nchw_nlc`/`nlc_nchw` transpose kernels + `chunked_bidir_fwd` for channel
-  attention (one real gap: `attn_scores_cross.wgsl`'s hardcoded softmax
-  scale needs a new `CrossIds` variant wired to the already-existing
-  scale-configurable `attn_scores_qk.wgsl`), FastVLM's `PatchEmbed`
-  (overlapping inter-stage downsample) and `repcpe` (depthwise-conv
-  positional encoding) as direct precedent, SAM2's `config.rs` stage-table
-  shape as the schedule-struct template.
+
+- **M2 (DaViT vision encoder) - mostly done**:
+  - **Patch embed (done, verified)**: `vision/patch_embed.rs` - all 4 stages'
+    conv+LayerNorm match the real checkpoint at cosine >=0.999
+    (`davit_patch_embed_parity` test).
+  - **SpatialBlock (done, verified)**: `vision/{dwconv,mlp,window_attn,block}.rs` -
+    dwconv residual + window attention (`model::vit::WindowPlan::new` +
+    `chunked_attn_fwd`, standard `1/sqrt(head_dim)` scale) + dwconv residual +
+    MLP. Matches stage 0's real spatial-block output at cosine >=0.999
+    (`davit_spatial_block_parity` test). `WindowPlan::new` (not `::padded`)
+    is correct for this checkpoint specifically - asserted, not assumed:
+    Florence-2-base's 4 stage grids (192/96/48/24) are all exact multiples
+    of `window_size=12`.
+  - **ChannelBlock - NOT done, and NOT a drop-in `chunked_bidir_fwd` reuse**
+    the way window attention was (correcting the original plan's assumption).
+    The reference's `ChannelAttention` computes `attention = (q*N^-0.5).
+    transpose(-1,-2) @ k` over `q,k: [B,groups,N,Cg]` - i.e. **channel-groups
+    attend to each other, contracting over the spatial-token axis N**, the
+    inverse of `chunked_bidir_fwd`'s assumption (tokens attend to tokens,
+    contracting over head_dim). `chunked_bidir_fwd`'s fused-qkv buffer
+    convention is `[rows, 3C]` with q/k/v **interleaved per row** (each
+    token's row holds all its channels); a `nlc_nchw`-style transpose of
+    that buffer produces `[3C, N]` with q/k/v occupying **disjoint blocks of
+    rows** instead - not the same layout, so the existing engine cannot be
+    fed a transposed buffer directly. Real options for whoever picks this
+    up: (a) a genuinely new small kernel/dispatch pair for the transposed
+    contraction, or (b) an explicit per-group GEMM loop (groups are small -
+    4/8/16/32 across the 4 stages, and `Cg = C/groups = 32` constant at
+    every stage since `num_groups == dim_embed/32` throughout) using the
+    existing generic `matmul`/`gemm_step` primitive with Q transposed to
+    `[Cg,N]` (via `nlc_nchw`) and K/V left in their natural `[N,Cg]` form -
+    a standard `[Cg,N]@[N,Cg]->[Cg,Cg]` GEMM per group, contracting over N.
+    Not attempted yet - flagged rather than rushed, given the numerical
+    stakes of getting a transposed-attention scale/layout wrong silently.
+  - Full stage assembly (chaining `depths[i]` block pairs + the 4 patch
+    embeds into one `DaViT` forward) waits on ChannelBlock.
+
 - **M3**: BART-style shared encoder-decoder + generation. NOT built by
   extending `crates/toyseq2seq` (real gaps there: pre-LN not post-LN,
   untied not tied `lm_head`, fused not separate qkv, and critically no
@@ -89,12 +119,25 @@ self-consistent.
   encoder-output builder every diffusion DiT here already uses) + Kronos's
   KV-cached prefill/decode-step pattern + `model::vlm::splice_fwd` (the
   vision+text concat, same mechanism DeepSeek-OCR's `layout.rs` already
-  uses) for the image-token/text-token merge.
-- **M4**: location-token sequence -> bbox parser (`<loc_a><loc_b><loc_c><loc_d>`
-  -> normalized `[x0,y0,x1,y1]`). New, small, no existing kernel involved -
-  decide `<CAPTION_TO_PHRASE_GROUNDING>` vs `<OPEN_VOCABULARY_DETECTION>`
-  from real-weight output quality on real UI screenshots, not from the
-  paper alone.
+  uses) for the image-token/text-token merge. **Real gap found while
+  generating M2's goldens, not yet resolved**: the checkpoint's language
+  model reports `encoder.embed_tokens.weight`/`decoder.embed_tokens.weight`/
+  `lm_head.weight` as MISSING on load (current `transformers` didn't
+  auto-map them) - the real tensor exists under a DIFFERENT name,
+  `language_model.model.shared.weight [51289, 768]`, a single embedding
+  tied across encoder input, decoder input, AND the LM head (standard BART
+  weight tying). M3's import must map `shared.weight` to all three uses,
+  not expect three separate tensors.
+
+- **M4 (done)**: location-token sequence -> bbox parser
+  (`grounding.rs::parse_boxes`, `phrase<loc_a><loc_b><loc_c><loc_d>` ->
+  normalized `[x0,y0,x1,y1]` + phrase text) - covers both
+  `<CAPTION_TO_PHRASE_GROUNDING>` and `<OD>`/`<DENSE_REGION_CAPTION>`'s
+  output shape (same `box_pattern` in the reference's own post-processor).
+  Hand-written scanner over decoded text, no regex dependency, no Gpu/model
+  dependency - 7 unit tests, no real-checkpoint gate needed since it has no
+  checkpoint dependency at all.
+
 - **M5**: `florence2::caps::ground` capability action (`scrfd::caps`'s
   `detect` shape: `Outcome` JSON, no output blob), CLI (`brain florence2
   {import,infer,ground}`), residency + cost-aware scheduler wiring.
