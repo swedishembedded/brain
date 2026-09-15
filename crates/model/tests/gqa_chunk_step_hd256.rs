@@ -89,7 +89,7 @@ fn fused_prefill_hd256_matches_the_triad_through_gqa_chunk_step() {
         let probs = g.storage((n * nh * cap) as u64);
         let ctx = g.storage((n * hq) as u64);
 
-        let steps = gqa_chunk_step(&g, ids, nh, nkv, hd, start, n, cap, &qb, &kb, &vb, &kcache, &vcache, &bt, &sl, &scores, &probs, &ctx);
+        let steps = gqa_chunk_step(&g, ids, nh, nkv, hd, 0, start, n, cap, &qb, &kb, &vb, &kcache, &vcache, &bt, &sl, &scores, &probs, &ctx);
         g.submit(&[], &steps);
         g.read(&ctx, (n * hq) as usize)
     };
@@ -162,7 +162,7 @@ fn fused_prefill_hd256_matches_the_triad_at_a_real_long_context_depth() {
         let probs = g.storage((n * nh * cap) as u64);
         let ctx = g.storage((n * hq) as u64);
 
-        let steps = gqa_chunk_step(&g, ids, nh, nkv, hd, start, n, cap, &qb, &kb, &vb, &kcache, &vcache, &bt, &sl, &scores, &probs, &ctx);
+        let steps = gqa_chunk_step(&g, ids, nh, nkv, hd, 0, start, n, cap, &qb, &kb, &vb, &kcache, &vcache, &bt, &sl, &scores, &probs, &ctx);
         g.submit(&[], &steps);
         g.read(&ctx, (n * hq) as usize)
     };
@@ -216,6 +216,6 @@ fn the_fused_branch_really_dispatches_one_kernel_not_the_triad() {
         apply_batched: idx(&g, "paged_decode_apply_batched"),
         fused_prefill_hd256: Some(fused_idx),
     };
-    let steps = gqa_chunk_step(&g, &ids, nh, nkv, hd, start, n, cap, &qb, &kb, &vb, &kcache, &vcache, &bt, &sl, &scores, &probs, &ctx);
+    let steps = gqa_chunk_step(&g, &ids, nh, nkv, hd, 0, start, n, cap, &qb, &kb, &vb, &kcache, &vcache, &bt, &sl, &scores, &probs, &ctx);
     assert_eq!(steps.len(), 3, "2 appends + 1 fused dispatch - got {} steps, the triad's 5 (or something else) ran instead", steps.len());
 }

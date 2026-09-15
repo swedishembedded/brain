@@ -703,6 +703,9 @@ impl ShardCaches {
             gqa_kcache: &self.gqa_k,
             gqa_vcache: &self.gqa_v,
             gqa_cap: self.cap,
+            // A dedicated per-sequence cache, not a pool window - see
+            // `DecodeCaches::gqa_base_row`.
+            gqa_base_row: 0,
             gdn_state: &self.gdn_state,
             gdn_hist: &self.gdn_hist,
         }

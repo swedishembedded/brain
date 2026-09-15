@@ -439,6 +439,109 @@ pub fn gqa_decode_step(
     ]
 }
 
+/// Kernel-pipeline indices [`gqa_decode_batched_step`] dispatches - the
+/// CROSS-SEQUENCE sibling of [`GqaDecodeIds`], and the decode-shaped sibling of
+/// [`GqaChunkIds`].
+#[derive(Clone, Copy)]
+pub struct GqaDecodeBatchedIds {
+    /// `paged_kv_append_batched.wgsl` - the batched twin of [`GqaDecodeIds::
+    /// kv_append`]: one dispatch places EVERY sequence's new K (or V) row into
+    /// its own `(block, offset)` slot of the shared pool.
+    pub kv_append_batched: usize,
+    /// `paged_decode_scores_batched.wgsl`.
+    pub scores_batched: usize,
+    /// `decode_softmax_batched.wgsl`.
+    pub softmax_batched: usize,
+    /// `paged_decode_apply_batched.wgsl`.
+    pub apply_batched: usize,
+}
+
+/// One decode step for a BATCH of independent sequences sharing one physical
+/// paged-KV pool - five dispatches total, whatever the batch size.
+///
+/// This is [`gqa_decode_step`] generalised across SEQUENCES exactly as
+/// [`gqa_chunk_step`] generalises it across a chunk's TOKENS, and it is the
+/// primitive a continuous-batching engine needs: every row of the batch is a
+/// different request, at a different context length, whose cached history lives
+/// in whatever physical blocks the allocator handed it. There is no
+/// relationship at all between a row's position in the batch and where its
+/// history sits in the pool - the two `[batch]`/`[batch, max_bt]` index buffers
+/// are what carries it.
+///
+/// Buffer contracts:
+/// * `q` is `[batch, n_heads*head_dim]`, `k_new`/`v_new` are
+///   `[batch, n_kv_heads*head_dim]` - one row per sequence, this step's own
+///   new token.
+/// * `pool_k`/`pool_v` are the shared `[num_blocks*block_size,
+///   n_kv_heads*head_dim]` pools. A flat per-sequence cache is the degenerate
+///   `num_blocks = 1` case of one.
+/// * `blocks`/`offsets` are `[batch]` u32: where sequence `b`'s NEW token is
+///   written (`BlockTable::append`'s own return value). The append overwrites,
+///   so a slot recycled from a finished sequence carries nothing stale.
+/// * `block_tables` is `[batch, max_bt]` u32 - sequence `b`'s whole physical
+///   block list, row-major, padded to `max_bt`. Entries past
+///   `ceil(seq_lens[b]/block_size)` are never read.
+/// * `seq_lens` is `[batch]` u32 and must COUNT THE NEW TOKEN
+///   (`seq_lens[b] == offsets[b] + block_index*block_size + 1`): it is both the
+///   causal bound and the softmax's own normalisation width.
+/// * `cap` is the `scores`/`probs` row stride and must be `>=` every
+///   `seq_lens[b]`; `scores`/`probs` are `[batch, n_heads, cap]`. It is pure
+///   addressing, not a compute bound - a caller may size it for its engine's
+///   whole per-sequence capacity while the live sequences are much shorter.
+/// * `ctx` is `[batch, n_heads*head_dim]`, this step's attention output.
+///
+/// `blocks`/`offsets`/`block_tables`/`seq_lens` are caller-owned because one
+/// batch's four index buffers are shared unchanged by every attention layer in
+/// that step - rebuilding them per layer would be `n_full` identical host
+/// writes per token.
+pub fn gqa_decode_batched_step(
+    g: &Gpu,
+    k: &GqaDecodeBatchedIds,
+    n_heads: u32,
+    n_kv_heads: u32,
+    head_dim: u32,
+    batch: u32,
+    block_size: u32,
+    max_bt: u32,
+    cap: u32,
+    q: &DeviceBuffer,
+    k_new: &DeviceBuffer,
+    v_new: &DeviceBuffer,
+    pool_k: &DeviceBuffer,
+    pool_v: &DeviceBuffer,
+    blocks: &DeviceBuffer,
+    offsets: &DeviceBuffer,
+    block_tables: &DeviceBuffer,
+    seq_lens: &DeviceBuffer,
+    scores: &DeviceBuffer,
+    probs: &DeviceBuffer,
+    ctx: &DeviceBuffer,
+) -> Vec<Step> {
+    assert!(batch > 0, "gqa_decode_batched_step: empty batch");
+    assert!(max_bt > 0, "gqa_decode_batched_step: max_bt must be >= 1");
+    assert!(cap <= max_bt * block_size, "gqa_decode_batched_step: cap {cap} exceeds the addressable pool window {} per sequence", max_bt * block_size);
+    let group = n_heads / n_kv_heads;
+    let hkv = n_kv_heads * head_dim;
+    let scale = 1.0 / (head_dim as f32).sqrt();
+    vec![
+        g.step(k.kv_append_batched, &[k_new, blocks, offsets, pool_k], &[batch, hkv, block_size], batch * hkv),
+        g.step(k.kv_append_batched, &[v_new, blocks, offsets, pool_v], &[batch, hkv, block_size], batch * hkv),
+        g.step(
+            k.scores_batched,
+            &[q, pool_k, block_tables, seq_lens, scores],
+            &[batch, n_heads, group, head_dim, block_size, hkv, cap, max_bt, f(scale)],
+            batch * n_heads * cap,
+        ),
+        g.step(k.softmax_batched, &[scores, seq_lens, probs], &[batch, n_heads, cap], batch * n_heads),
+        g.step(
+            k.apply_batched,
+            &[probs, pool_v, block_tables, seq_lens, ctx],
+            &[batch, n_heads, group, head_dim, block_size, hkv, cap, max_bt],
+            batch * n_heads * head_dim,
+        ),
+    ]
+}
+
 /// Bulk-fill a KV cache's rows `0..n` from a batched prefill's contiguous
 /// `k`/`v` output - see [`gqa_decode_step`]'s doc for why one `kv_append`
 /// dispatch suffices (a flat prefix copy, since the cache and the batched
@@ -507,13 +610,20 @@ pub struct GqaChunkIds {
 /// Buffer contracts:
 /// * `q` is `[n, n_heads*head_dim]`, `k_new`/`v_new` are
 ///   `[n, n_kv_heads*head_dim]` - the chunk's own dense rows.
-/// * `kcache`/`vcache` are the FLAT `[cap, n_kv_heads*head_dim]` per-layer
-///   caches [`gqa_decode_step`] already takes, unchanged. The two batched
+/// * `kcache`/`vcache` are either the FLAT `[cap, n_kv_heads*head_dim]`
+///   per-layer cache [`gqa_decode_step`] takes, or one sequence's window of a
+///   shared `[num_blocks*cap, n_kv_heads*head_dim]` pool. The two batched
 ///   attention kernels are block-table-indexed (they were written for a paged
-///   pool), so this builder binds the degenerate table a flat cache is:
-///   `block_size = cap` and one block per sequence, which makes their slot
-///   arithmetic `(0*cap + j)*kv_stride` - plain flat addressing, no
-///   indirection. `block_ids` must therefore be `[n]` u32 ZEROS.
+///   pool), so their slot arithmetic is `(block_ids[i]*cap + j)*kv_stride`:
+///   `block_ids` must be `[n]` u32 all holding this sequence's own physical
+///   block (ZEROS for a flat dedicated cache, which is the `num_blocks = 1`
+///   case of a pool), and `base_row` must be `block_id*cap` to match - it is
+///   where the bulk K/V fill writes, and the one coordinate the two attention
+///   kernels derive themselves rather than being told.
+/// * `base_row` is a POOL row, `start` a position WITHIN the sequence: the
+///   chunk's rows are filled at pool rows `base_row+start .. +n` and attend
+///   sequence positions `0..=start+i`. They coincide (both `start`) only for a
+///   flat dedicated cache.
 /// * `seq_lens` must be `[n]` u32 with `seq_lens[i] == start+i+1`, and
 ///   `t_max == start+n` must be `<= cap`.
 /// * `scores`/`probs` are `[n, n_heads, t_max]`-strided scratch. This is the
@@ -531,6 +641,7 @@ pub fn gqa_chunk_step(
     n_heads: u32,
     n_kv_heads: u32,
     head_dim: u32,
+    base_row: u32,
     start: u32,
     n: u32,
     cap: u32,
@@ -549,12 +660,14 @@ pub fn gqa_chunk_step(
     let hkv = n_kv_heads * head_dim;
     let t_max = start + n;
     assert!(t_max <= cap, "gqa_chunk_step: chunk end {t_max} exceeds the cache capacity {cap}");
+    assert!(base_row.is_multiple_of(cap), "gqa_chunk_step: base_row {base_row} is not a whole number of {cap}-row blocks, so no block_ids value can address it");
     let scale = 1.0 / (head_dim as f32).sqrt();
     // `max_bt = 1`: one physical block backs the whole sequence (see this
-    // function's own doc), so a row's block table is a single zero.
+    // function's own doc), so a row's block table is a single entry, holding
+    // `base_row / cap` for every row.
     let mut steps = vec![
-        kv_cache_fill_at(g, k.splice, k_new, kcache, start, n, n_kv_heads, head_dim),
-        kv_cache_fill_at(g, k.splice, v_new, vcache, start, n, n_kv_heads, head_dim),
+        kv_cache_fill_at(g, k.splice, k_new, kcache, base_row + start, n, n_kv_heads, head_dim),
+        kv_cache_fill_at(g, k.splice, v_new, vcache, base_row + start, n, n_kv_heads, head_dim),
     ];
     // M2.6: one dispatch (no `scores`/`probs` at all) in place of the triad
     // below, at whichever head_dim `k.fused_prefill_hd256` and `Op::

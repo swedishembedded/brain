@@ -3,15 +3,16 @@
 
 //! Single-GPU, correctness-first `model::serve::PagedDecoder` for Qwen3.5-35B-A3B.
 //!
-//! Builds on `Qwen35::step`/`reset_decode_cache`/`decode_pos` (P11b,
-//! `crates/qwen35moe/src/model.rs`) -- the single-sequence incremental decode
-//! primitive this whole module is a thin multi-request wrapper around.
-//! Scope, deliberately: **one truly-active sequence at a time** on the GPU
-//! (every dispatch here processes exactly one sequence's one token; several
-//! sequences can be RESIDENT and interleaved by the [`model::serve::Scheduler`]
-//! across iterations, but never batched together into one GPU dispatch). This
-//! is explicitly NOT `qwen3::serve::Engine`'s production feature set --
-//! see "Deliberately deferred" at the end of this doc for the exact list.
+//! Builds on `Qwen35::run_decode_batch` (`crates/qwen35moe/src/model.rs`) --
+//! one decode token for each of several sequences, in one set of dispatches.
+//!
+//! Scope: steady-state decode is genuinely MULTI-SEQUENCE - one iteration's
+//! dispatch set carries one row per resident sequence, so the weight reads
+//! that dominate a decode step are paid once for the whole batch instead of
+//! once per request. PREFILL is still one sequence, one token at a time (see
+//! below). This is still not `qwen3::serve::Engine`'s full production feature
+//! set -- see "Deliberately deferred" at the end of this doc for the exact
+//! list.
 //!
 //! # The one real design problem: two kinds of per-sequence state, one trait slot
 //!
@@ -43,46 +44,43 @@
 //! [`Engine::release_table`] (which still calls `BlockTable::release` for the
 //! GQA side -- the GDN map is an ADDITION, not a replacement).
 //!
-//! # The GQA side: a real per-block-id pool, not `Qwen35::step`'s single toy cache
+//! # The GQA side: one shared pool per layer, block-table addressed
 //!
-//! `Qwen35::step` (P11b) decodes exactly one persistent sequence, into
+//! `Qwen35::step` decodes exactly one persistent sequence, into
 //! `self.gqa_kcache`/`self.gqa_vcache` -- fields that exist once per `Qwen35`
 //! instance, not once per admitted request. A paged multi-request engine
-//! needs that same per-layer KV cache to be addressable PER SEQUENCE. This
-//! module's `Engine` refactors `Qwen35::run_decode_step`'s decode-step
-//! plumbing to take the GQA cache + GDN state/hist as an explicit parameter
-//! (`crate::model::DecodeCaches`, see its own doc) instead of reading
-//! `self.gqa_kcache`/`self.gdn_state` -- `Qwen35::step` itself is now a thin
-//! wrapper passing its OWN fields as a `DecodeCaches`, so P11b's behaviour
-//! (and its `decode_step.rs` test) is unchanged bit-for-bit.
+//! needs that same per-layer KV cache to be addressable PER SEQUENCE, so
+//! `Qwen35::run_decode_batch`/`run_decode_step` take the GQA pool + GDN
+//! state/hist as an explicit parameter (`crate::model::BatchDecodeCaches`/
+//! `DecodeCaches`, see their own docs) instead of reading
+//! `self.gqa_kcache`/`self.gdn_state` -- `Qwen35::step` itself is a thin
+//! wrapper passing its OWN fields as a `DecodeCaches`, so its behaviour (and
+//! its `decode_step.rs` test) is unchanged.
 //!
-//! With that seam in place, this `Engine` preallocates, at construction, a
-//! REAL pool: `num_blocks` dedicated `[block_size, kv_dim]` buffers per GQA
-//! layer ([`Engine::gqa_k`]/[`Engine::gqa_v`], indexed `[physical block
-//! id][layer]`) -- `num_blocks * n_full_layers * 2` device buffers, real and
-//! resident from construction, not lazily grown. `block_size == max_seq_len`
-//! is the choice that makes this a genuine "one physical block backs one
-//! sequence's whole KV history" pool rather than needing block-indirect
-//! (scatter/gather) attention kernels: `model::block::gqa_decode_step` --
-//! this pass's decode primitive, reused UNCHANGED, not modified (`block.rs`
-//! is out of scope for this task) -- takes a flat `[cap, kv_dim]`
-//! `kcache`/`vcache` with no block-table indirection at all, so pointing it
-//! at "sequence S's cache" only works if that sequence's positions live in
-//! ONE contiguous buffer. A single big `[num_blocks*block_size, kv_dim]`
-//! buffer with per-call byte-offset addressing (`Gpu::step_sliced`) was
-//! considered and rejected for this pass: `gqa_decode_step` itself always
-//! binds its buffers whole (`Gpu::step`, not `step_sliced`) and cannot be
-//! changed to do otherwise without editing `model::block` (frozen by this
-//! task's constraints) -- so "the pool" here is `num_blocks` separate
-//! same-shape allocations rather than one large buffer sliced per sequence.
-//! The device byte cost is identical either way; see [`Engine::kv_pool_bytes`].
+//! With that seam in place, this `Engine` preallocates, at construction, ONE
+//! `[num_blocks*block_size, kv_dim]` pool per GQA layer
+//! ([`Engine::gqa_k`]/[`Engine::gqa_v`], indexed `[layer]`) -- real and
+//! resident from construction, not lazily grown. Physical block `p` owns rows
+//! `p*block_size .. +block_size`, so every attention dispatch reaches a
+//! sequence's history through the paged kernels' own block table rather than
+//! through which buffer it bound.
+//!
+//! That indirection is what makes cross-sequence batching possible at all: a
+//! batched decode dispatch carries every sequence's query row against ONE
+//! bound pool, and the `[batch]`/`[batch, max_bt]` index buffers are the only
+//! thing that says whose keys are whose. `block_size == max_seq_len` means a
+//! sequence's entire lifetime fits one physical block, so `max_bt == 1` and a
+//! block table is a single entry per row - the simplest non-degenerate case of
+//! `model::block::gqa_decode_batched_step`'s general contract, not a special
+//! case of it. The device byte cost is what it always was; see
+//! [`Engine::kv_pool_bytes`].
 //!
 //! # `prefill`
 //!
 //! Loops over the prompt ONE TOKEN AT A TIME, calling
 //! `Qwen35::run_decode_step` per token against this sequence's own
-//! `DecodeCaches` (the pool slice for its physical block id, and its
-//! `GdnSlot`). This is NOT `qwen3::serve::Engine`'s chunked, multi-token-per-
+//! `DecodeCaches` (the whole pool, plus the base row that selects its physical
+//! block, and its `GdnSlot`). This is NOT `qwen3::serve::Engine`'s chunked, multi-token-per-
 //! dispatch prefill -- a per-token loop is the explicitly-sanctioned
 //! correctness-first shape for this pass
 //! ("correct-then-freeze" -- the same
@@ -94,15 +92,29 @@
 //!
 //! # `forward_batched_greedy`/`_window`/`forward_batched_topk`
 //!
-//! Given the "one truly-active sequence at a time" scope, these are thin
-//! loops over the (in practice length-1, but handled generally)
-//! `tables`/`inputs` slices, each iteration calling the same per-token decode
-//! step and sampling greedily/top-k ON THE HOST from the returned logits. No
-//! real multi-sequence GPU-batched dispatch is built (that is
-//! `qwen3::serve::Engine`'s own, much larger, achievement) -- if the
-//! `Scheduler` has several requests running concurrently, each iteration
-//! still serves them with N independent sequential dispatches, not one
-//! batched one.
+//! One [`Engine::decode_batch`] call -- one set of GPU dispatches carrying
+//! every `(table, input)` pair's row -- and then greedy/top-k sampling ON THE
+//! HOST from the returned logits (the head itself is still a host matvec here,
+//! see [`Engine::head`]). Nothing loops over sequences on the device side: the
+//! whole batch's projections are single `[bsz, d] x [d, *]` GEMMs, its
+//! full-attention layers one pooled
+//! `model::block::gqa_decode_batched_step`, its Gated-DeltaNet layers one
+//! `model::gdn_mixer::gdn_mixer_decode_fwd` over the `b*h` axis those kernels
+//! already have, and its MoE sublayer one grouped-GEMM dispatch over all
+//! `bsz*top_k` routed rows. `bsz == 1` is that same path at one row, so a
+//! solitary request is not on a different code path from a busy one.
+//!
+//! These are the SAME shared primitives `qwen35::serve::Engine` drives, which
+//! is the point: a caller batching this model gets the same behaviour and the
+//! same contract as one batching the dense model.
+//!
+//! What the batch buys is throughput, not latency: a decode step is dominated
+//! by reading every weight the step touches, and those reads are what the
+//! batch shares.
+//!
+//! `forward_batched_greedy_window` is still host-orchestrated ACROSS window
+//! positions (one batched step per position), since this engine has no
+//! on-device multi-step schedule -- see "Deliberately deferred".
 //!
 //! # Deliberately deferred (not built in this pass)
 //!
@@ -110,8 +122,8 @@
 //!   returning 0, [`Engine::prefix_stats`] always reports `(0, 0, 0)`.
 //! - **Chunked / batched prefill**: prompts are replayed one token at a time
 //!   (see above).
-//! - **Multi-sequence GPU batching**: `forward_batched_*` loop sequentially
-//!   (see above).
+//! - **Batched PREFILL**: prompts are replayed one token at a time, one
+//!   sequence at a time (decode is batched; prefill is not).
 //! - **int8/int4 paged KV, weight quantization, speculative decode**: not
 //!   implemented; this `Engine` only ever builds a plain fp32 `Qwen35`
 //!   (`Qwen35::new_on`, never `new_on_i8`).
@@ -129,7 +141,7 @@ use model::paged::{BlockAllocator, BlockTable};
 use model::serve::PagedDecoder;
 
 use crate::config::{LayerType, Qwen35Config};
-use crate::model::{pipelines, DecodeCaches, Qwen35};
+use crate::model::{pipelines, BatchDecodeCaches, BatchSeq, DecodeCaches, Qwen35};
 
 /// [`Engine::forward_batched_greedy_window`]'s host-side window cap. No
 /// on-device windowing is built in this pass (see module doc) -- 1 keeps
@@ -190,10 +202,12 @@ pub struct Engine {
     /// see module doc for why this makes each physical block a whole
     /// sequence's entire KV history rather than a fixed-size page of it.
     block_size: u32,
-    /// `[physical block id][layer]`: real, preallocated GQA KV cache, a
-    /// size-1 dummy at GDN-layer indices. See module doc "The GQA side".
-    gqa_k: Vec<Vec<DeviceBuffer>>,
-    gqa_v: Vec<Vec<DeviceBuffer>>,
+    /// `[layer]`: ONE real, preallocated `[num_blocks*block_size, kv_dim]` GQA
+    /// KV pool per full-attention layer, a size-1 dummy at GDN-layer indices.
+    /// Physical block `p` owns rows `p*block_size .. +block_size`. See module
+    /// doc "The GQA side".
+    gqa_k: Vec<DeviceBuffer>,
+    gqa_v: Vec<DeviceBuffer>,
     /// GDN recurrent state / conv history, keyed by `BlockTable::blocks()[0]`
     /// -- see module doc for why this is a private map rather than a trait
     /// parameter. Populated in [`Engine::prefill`], removed in
@@ -226,33 +240,35 @@ impl Engine {
     fn from_map_with_gpu(gpu: Gpu, cfg: Qwen35Config, weights: &HashMap<String, Vec<f32>>, max_seq_len: u32, max_concurrent: u32) -> Engine {
         assert!(max_seq_len > 0, "max_seq_len must be > 0");
         assert!(max_concurrent > 0, "max_concurrent must be > 0");
-        // b=1, t=1: this instance's own P11b decode-state fields are dead
-        // weight for `Engine` (see `Engine::model`'s own doc) -- t=1 is the
-        // smallest legal prefill length (`gdn_chunk_size(1) == 1`, so
-        // `t % chunk == 0` holds for every config).
-        let model = Qwen35::new_on(gpu, cfg.clone(), 1, 1, weights);
+        // `b=1, t=max_concurrent`: this instance's own decode-state fields are
+        // dead weight for `Engine` (see `Engine::model`'s own doc), so `t`
+        // exists here only as the row count the instance's FIXED-SIZE scratch
+        // is built for - and the widest row count this engine can ever submit
+        // is one decode token per resident sequence. The grouped-GEMM MoE
+        // scratch (`model::moe::GroupedExpertScratch`, sized `b*t*top_k` and
+        // asserted against at dispatch) is what makes that a hard requirement
+        // rather than a preference: a batched decode step of `max_concurrent`
+        // rows routes `max_concurrent*top_k` compacted rows through it.
+        // Everything else `t` sizes is O(t*d_model) and so negligible next to
+        // the KV pool below.
+        let model = Qwen35::new_on(gpu, cfg.clone(), 1, max_concurrent, weights);
         let kv_dim = cfg.kv_dim() as u64;
         let n_layers = cfg.n_layers as usize;
         let types = cfg.layer_types();
-        let mut gqa_k: Vec<Vec<DeviceBuffer>> = Vec::with_capacity(max_concurrent as usize);
-        let mut gqa_v: Vec<Vec<DeviceBuffer>> = Vec::with_capacity(max_concurrent as usize);
-        for _ in 0..max_concurrent {
-            let mut kl = Vec::with_capacity(n_layers);
-            let mut vl = Vec::with_capacity(n_layers);
-            for ty in &types {
-                match ty {
-                    LayerType::Full => {
-                        kl.push(model.gpu.storage(max_seq_len as u64 * kv_dim));
-                        vl.push(model.gpu.storage(max_seq_len as u64 * kv_dim));
-                    }
-                    LayerType::Linear => {
-                        kl.push(model.gpu.storage(1));
-                        vl.push(model.gpu.storage(1));
-                    }
+        let pool_rows = max_concurrent as u64 * max_seq_len as u64;
+        let mut gqa_k: Vec<DeviceBuffer> = Vec::with_capacity(n_layers);
+        let mut gqa_v: Vec<DeviceBuffer> = Vec::with_capacity(n_layers);
+        for ty in &types {
+            match ty {
+                LayerType::Full => {
+                    gqa_k.push(model.gpu.storage(pool_rows * kv_dim));
+                    gqa_v.push(model.gpu.storage(pool_rows * kv_dim));
+                }
+                LayerType::Linear => {
+                    gqa_k.push(model.gpu.storage(1));
+                    gqa_v.push(model.gpu.storage(1));
                 }
             }
-            gqa_k.push(kl);
-            gqa_v.push(vl);
         }
         let head = weights
             .get(cfg.head_weight())
@@ -276,34 +292,54 @@ impl Engine {
     /// prefilled (or one already released) is a caller bug, not a runtime
     /// condition to degrade gracefully from.
     fn caches_for(&self, phys: u32) -> DecodeCaches<'_> {
-        let slot = self.gdn_slots.get(&phys).unwrap_or_else(|| {
-            panic!("qwen35moe::serve::Engine: no GdnSlot for physical block {phys} (table not prefilled by this engine, or already released)")
-        });
+        let slot = self.gdn_slot(phys);
         DecodeCaches {
-            gqa_kcache: &self.gqa_k[phys as usize],
-            gqa_vcache: &self.gqa_v[phys as usize],
+            gqa_kcache: &self.gqa_k,
+            gqa_vcache: &self.gqa_v,
             gqa_cap: self.block_size,
+            gqa_base_row: phys * self.block_size,
             gdn_state: &slot.state,
             gdn_hist: &slot.hist,
         }
     }
 
-    /// One decode step for an ALREADY-PREFILLED sequence: append one token
-    /// position to `table` (never allocates a second physical block, see
-    /// module doc -- `block_size == max_seq_len` means a sequence's total
-    /// length can never cross a block boundary) and run
-    /// `Qwen35::run_decode_step` against its own `DecodeCaches`. `offset ==
+    fn gdn_slot(&self, phys: u32) -> &GdnSlot {
+        self.gdn_slots.get(&phys).unwrap_or_else(|| {
+            panic!("qwen35moe::serve::Engine: no GdnSlot for physical block {phys} (table not prefilled by this engine, or already released)")
+        })
+    }
+
+    /// ONE decode step for every `(table, input)` pair at once - the engine's
+    /// whole steady-state decode path, and a single set of GPU dispatches
+    /// whatever the batch size (`Qwen35::run_decode_batch`).
+    ///
+    /// Each table gets its own position appended first (never a second
+    /// physical block, see module doc -- `block_size == max_seq_len` means a
+    /// sequence's total length can never cross a block boundary). `offset ==
     /// pos`: since `block_size == max_seq_len` there is exactly one block per
     /// sequence, so the position WITHIN that block already IS the absolute
     /// decode position.
-    fn decode_one(&mut self, table: &mut BlockTable, input: u32) -> Vec<f32> {
-        let (_block, offset) = table.append(&mut self.alloc).expect("qwen35moe::serve::Engine: KV pool exhausted mid-decode");
-        let phys = table.blocks()[0];
-        let hidden = {
-            let caches = self.caches_for(phys);
-            self.model.run_decode_step(input, offset, &caches)
-        };
-        self.model.gpu.read(&hidden, self.model.cfg.d_model as usize)
+    ///
+    /// Returns one `[d_model]` hidden row per sequence, in batch order.
+    fn decode_batch(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32]) -> Vec<Vec<f32>> {
+        assert_eq!(tables.len(), inputs.len(), "qwen35moe::serve::Engine::decode_batch: tables/inputs length mismatch");
+        assert!(!tables.is_empty(), "qwen35moe::serve::Engine::decode_batch: empty batch");
+        let mut coords: Vec<(u32, u32)> = Vec::with_capacity(tables.len());
+        for t in tables.iter_mut() {
+            let (_block, offset) = t.append(&mut self.alloc).expect("qwen35moe::serve::Engine: KV pool exhausted mid-decode");
+            coords.push((t.blocks()[0], offset));
+        }
+        let d = self.model.cfg.d_model as usize;
+        let slots: Vec<&GdnSlot> = coords.iter().map(|&(phys, _)| self.gdn_slot(phys)).collect();
+        let seqs: Vec<BatchSeq> = coords
+            .iter()
+            .zip(&slots)
+            .map(|(&(phys, offset), slot)| BatchSeq { phys, pos: offset, gdn_state: &slot.state, gdn_hist: &slot.hist })
+            .collect();
+        let caches = BatchDecodeCaches { gqa_kpool: &self.gqa_k, gqa_vpool: &self.gqa_v, gqa_cap: self.block_size, seqs: &seqs };
+        let hidden = self.model.run_decode_batch(inputs, &caches);
+        let flat = self.model.gpu.read(&hidden, inputs.len() * d);
+        flat.chunks(d).map(|r| r.to_vec()).collect()
     }
 
     /// `logits = hidden @ head^T` on the host -- see [`Engine::head`]'s doc
@@ -443,16 +479,15 @@ impl Engine {
         hidden
     }
 
-    /// One greedy decode step per (table, input) pair, sequentially -- see
-    /// module doc for why this is a loop, not a batched GPU dispatch.
+    /// One greedy decode step for the WHOLE batch in one set of dispatches
+    /// (`Qwen35::run_decode_batch`); the head itself stays host-side in this
+    /// pass, see [`Engine::head`]'s doc.
     pub fn forward_batched_greedy(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32]) -> Vec<u32> {
         assert_eq!(tables.len(), inputs.len(), "forward_batched_greedy: tables/inputs length mismatch");
-        let mut out = Vec::with_capacity(tables.len());
-        for (t, &inp) in tables.iter_mut().zip(inputs) {
-            let hidden = self.decode_one(t, inp);
-            out.push(argmax(&self.logits(&hidden)));
+        if tables.is_empty() {
+            return Vec::new();
         }
-        out
+        self.decode_batch(tables, inputs).iter().map(|h| argmax(&self.logits(h))).collect()
     }
 
     /// [`Engine::forward_batched_greedy`], repeated `k` times per sequence,
@@ -476,24 +511,26 @@ impl Engine {
         out
     }
 
-    /// One decode step per (table, input) pair, returning each row's
-    /// top-`k` (token id, logit) candidates -- sorted host-side from the
-    /// FULL logits vector (no on-device top-K extraction in this pass, see
-    /// [`Engine::topk_capacity`]'s doc), `k` clamped to this engine's own
-    /// capacity.
+    /// One batched decode step, returning each row's top-`k` (token id, logit)
+    /// candidates -- sorted host-side from the FULL logits vector (no
+    /// on-device top-K extraction in this pass, see [`Engine::topk_capacity`]'s
+    /// doc), `k` clamped to this engine's own capacity.
     pub fn forward_batched_topk(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32], k: usize) -> Vec<Vec<(u32, f32)>> {
         let k = k.clamp(1, self.topk_capacity());
         assert_eq!(tables.len(), inputs.len(), "forward_batched_topk: tables/inputs length mismatch");
-        let mut out = Vec::with_capacity(tables.len());
-        for (t, &inp) in tables.iter_mut().zip(inputs) {
-            let hidden = self.decode_one(t, inp);
-            let logits = self.logits(&hidden);
-            let mut cand: Vec<(u32, f32)> = logits.iter().enumerate().map(|(i, &v)| (i as u32, v)).collect();
-            cand.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-            cand.truncate(k);
-            out.push(cand);
+        if tables.is_empty() {
+            return Vec::new();
         }
-        out
+        self.decode_batch(tables, inputs)
+            .iter()
+            .map(|hidden| {
+                let logits = self.logits(hidden);
+                let mut cand: Vec<(u32, f32)> = logits.iter().enumerate().map(|(i, &v)| (i as u32, v)).collect();
+                cand.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+                cand.truncate(k);
+                cand
+            })
+            .collect()
     }
 }
 

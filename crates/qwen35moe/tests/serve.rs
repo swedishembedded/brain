@@ -23,7 +23,7 @@ use std::collections::HashMap;
 
 use data::rng::Rng;
 use gpu_core::Gpu;
-use model::serve::Request;
+use model::serve::{PagedDecoder, Request};
 use qwen35moe::config::Qwen35Config;
 use qwen35moe::model::{Qwen35, pipelines};
 use qwen35moe::serve::{Engine, Scheduler};
@@ -80,4 +80,79 @@ fn scheduler_decode_matches_step_cpu() {
 #[test]
 fn scheduler_decode_matches_step_default_backend() {
     run(Gpu::new);
+}
+
+/// **The batched-decode spec.** Several concurrent sequences, at DIFFERENT
+/// prompt lengths, decoded through one `Engine::forward_batched_greedy` call
+/// per step - one set of GPU dispatches carrying every sequence's row - must
+/// produce exactly the tokens each sequence produces when it is the only
+/// request the engine has.
+///
+/// The `qwen35moe` twin of `qwen35/tests/serve.rs`'s gate of the same name, on
+/// the same shared primitives (`model::block::gqa_decode_batched_step` for the
+/// pooled full-attention KV, `model::gdn_mixer::gdn_mixer_decode_fwd` for the
+/// recurrent state and conv window) - which is the point: a caller batching
+/// this model gets the same contract as one batching the dense model, so both
+/// have to be gated the same way. What this file adds over its twin is the
+/// sparse MoE sublayer under the batch: the router picks experts PER ROW, so a
+/// batched step routes rows wanting different experts through one dispatch.
+///
+/// Different prompt lengths are the point, not incidental: equal lengths make
+/// a stale-`seq_lens` or off-by-one causal bound invisible, because every row
+/// would then want the same bound anyway. The greedy token ids are compared
+/// EXACTLY - they are discrete, so this is a strictly sharper statement than
+/// any tolerance on the hidden states would be.
+#[test]
+fn batched_decode_matches_each_sequence_decoded_alone() {
+    let cfg = Qwen35Config::tiny();
+    let init = init_weights(&cfg, 23);
+    let prompts: Vec<Vec<u32>> = vec![vec![1u32, 5, 3], vec![2u32, 8], vec![4u32, 6, 1, 7, 3], vec![9u32, 2, 5, 8]];
+    let steps = 5usize;
+    let max_seq_len = 16u32;
+
+    // Reference: each sequence ALONE in its own engine, one at a time.
+    let mut want: Vec<Vec<u32>> = Vec::new();
+    for p in &prompts {
+        let mut engine = Engine::from_map(cfg.clone(), &init, max_seq_len, 1);
+        let mut t = model::paged::BlockTable::new();
+        let hidden = engine.prefill(&mut t, p);
+        let mut tok = engine.admit_greedy(&hidden);
+        let mut out = vec![tok];
+        for _ in 1..steps {
+            tok = engine.forward_batched_greedy(&mut [&mut t], &[tok]).pop().expect("one row");
+            out.push(tok);
+        }
+        want.push(out);
+    }
+
+    // Under test: all of them resident at once, decoded together.
+    let mut engine = Engine::from_map(cfg.clone(), &init, max_seq_len, prompts.len() as u32);
+    let mut tables: Vec<model::paged::BlockTable> = Vec::new();
+    let mut cur: Vec<u32> = Vec::new();
+    let mut got: Vec<Vec<u32>> = vec![Vec::new(); prompts.len()];
+    for p in &prompts {
+        let mut t = model::paged::BlockTable::new();
+        let hidden = engine.prefill(&mut t, p);
+        cur.push(engine.admit_greedy(&hidden));
+        tables.push(t);
+    }
+    for (o, &tok) in got.iter_mut().zip(&cur) {
+        o.push(tok);
+    }
+    for _ in 1..steps {
+        let mut refs: Vec<&mut model::paged::BlockTable> = tables.iter_mut().collect();
+        cur = engine.forward_batched_greedy(&mut refs, &cur);
+        for (o, &tok) in got.iter_mut().zip(&cur) {
+            o.push(tok);
+        }
+    }
+
+    for (b, (g, w)) in got.iter().zip(&want).enumerate() {
+        assert_eq!(g, w, "sequence {b} (prompt len {}) decoded differently in a batch of {} than alone", prompts[b].len(), prompts.len());
+    }
+    println!(
+        "batched decode of {} sequences (prompt lens {:?}) matches each decoded alone over {steps} steps",
+        prompts.len(),
+        prompts.iter().map(|p| p.len()).collect::<Vec<_>>()
+    );
 }

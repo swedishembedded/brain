@@ -1843,7 +1843,7 @@ impl DeepseekV2 {
             s.push(g.step(ROPE_AT, &[&dec.q], &[n, nh, hd, d, 0, pos_start, f(theta)], n * nh * (hd / 2)));
             s.push(g.step(ROPE_AT, &[&dec.k], &[n, nh, hd, d, 0, pos_start, f(theta)], n * nh * (hd / 2)));
             s.extend(block::gqa_chunk_step(
-                g, &chunk_ids, nh, nh, hd, pos_start, n, cap, &dec.q, &dec.k, &dec.v, &dec.kcache[l], &dec.vcache[l], &dec.block_ids, &dec.seq_lens, &dec.scores, &dec.probs, &dec.ctx,
+                g, &chunk_ids, nh, nh, hd, 0, pos_start, n, cap, &dec.q, &dec.k, &dec.v, &dec.kcache[l], &dec.vcache[l], &dec.block_ids, &dec.seq_lens, &dec.scores, &dec.probs, &dec.ctx,
             ));
             self.mm(&mut s, &dec.ctx, &p("self_attn.o_proj.weight"), &dec.proj, n, d, d);
             s.push(g.step(ADD2, &[&dec.res[l], &dec.proj, &dec.xmid], &[n * d], n * d));

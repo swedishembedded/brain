@@ -26,7 +26,8 @@ use audio::conv::{conv1d_bwd, conv1d_fwd, Conv1d, ConvKernels};
 
 use crate::block::{kv_expand_bwd, kv_expand_fwd, rmsnorm_bwd, rmsnorm_fwd, KernelIds};
 use crate::gdn::{
-    gdn_chunk_bwd, gdn_chunk_fwd, gdn_chunk_fwd_train, GdnBwdIds, GdnBwdScratchBufs, GdnIds, GdnScratchBufs, GdnScratchTrainBufs, GdnShape,
+    gdn_chunk_bwd, gdn_chunk_fwd, gdn_chunk_fwd_train, gdn_recurrent_step, GdnBwdIds, GdnBwdScratchBufs, GdnIds, GdnRecurrentScratch, GdnScratchBufs,
+    GdnScratchTrainBufs, GdnShape,
 };
 
 /// Kernel-pipeline indices [`gdn_mixer_fwd`]/[`gdn_mixer_bwd`] dispatch,
@@ -453,6 +454,197 @@ pub fn gdn_mixer_stream_fwd(
         z_silu,
     });
     (gated, acts)
+}
+
+/// Kernel-pipeline indices the DECODE entry point
+/// ([`gdn_mixer_decode_fwd`]) needs beyond [`GdnMixerIds`]. Kept separate
+/// rather than folded into that struct because the whole-sequence forward and
+/// its backward - every other caller of [`GdnMixerIds`] - dispatch neither of
+/// these, and a slot a caller must fill but can never use is exactly the
+/// [`crate::block::UNREGISTERED`] hazard.
+#[derive(Clone, Copy)]
+pub struct GdnMixerDecodeIds {
+    /// `causal_conv1d_step.wgsl` - the streaming, one-token-per-sequence conv
+    /// that replaces the whole-sequence `conv1d_fwd` in decode.
+    pub conv: crate::gdn::GdnConvIds,
+    /// `splice.wgsl` - stages one sequence's persistent recurrent state / conv
+    /// history into its row of the batch slab, and writes the updated row back
+    /// (see [`gdn_mixer_decode_fwd`]'s own doc for why a batch needs staging at
+    /// all). Never dispatched at `b == 1`.
+    pub splice: usize,
+}
+
+/// ONE decode token for each of `shape.gdn.b` INDEPENDENT sequences, in one
+/// set of dispatches - the batched, decode-shaped sibling of
+/// [`gdn_mixer_stream_fwd`], and the Gated-DeltaNet half of a hybrid decoder's
+/// batched decode step.
+///
+/// Takes the caller's already-projected `mixed_qkv`/`bproj`/`aproj`/`z`
+/// (`[b, conv_dim]`/`[b, h]`/`[b, h]`/`[b, value_dim]`, one row per sequence)
+/// and returns `gated` (`[b, value_dim]`), ready for the caller's own
+/// `out_proj` - the same contract [`gdn_mixer_fwd`] has, at `t = 1` and `b`
+/// genuinely distinct requests instead of one batch of training rows.
+///
+/// `streams` holds one [`GdnStream`] per batch row, in batch-row order, and
+/// every one is read as this token's input state and OVERWRITTEN with its
+/// output state - the same in-place convention the single-sequence primitives
+/// use, so a caller may freely mix batched steps, single steps and
+/// [`gdn_mixer_stream_fwd`] prefill rounds on the same buffers.
+///
+/// **Why the state is staged.** Both stateful kernels
+/// ([`crate::gdn::gdn_causal_conv1d_step`] and
+/// [`crate::gdn::gdn_recurrent_step`]) address the batch through one flat
+/// axis - `[N, C, K-1]` and `[b*h, dk, dv]` - so they need the batch's state
+/// CONTIGUOUS, while a serving engine owns one buffer per resident sequence and
+/// gets an arbitrary subset of them in an arbitrary order each step. This
+/// gathers the rows in, runs the batch, and scatters them back. It is real
+/// traffic, but it is `b * (state + hist)` words each way against a step that
+/// reads every projection weight in the layer, and the alternative - a
+/// slot-indirected state binding - is a change to five kernels for a saving
+/// that does not show up next to the weight reads.
+///
+/// At `b == 1` there is nothing to gather: the caller's own buffers are bound
+/// directly and the staging dispatches do not exist, so a single-sequence
+/// decode step through this function is dispatch-for-dispatch what it was
+/// before the function was batched.
+///
+/// Requires `shape.gdn.t == 1` (one token per sequence) and
+/// `streams.len() == shape.gdn.b`.
+pub fn gdn_mixer_decode_fwd(
+    g: &Gpu,
+    ids: &GdnMixerIds,
+    dec: &GdnMixerDecodeIds,
+    shape: &GdnMixerShape,
+    w: &GdnMixerWeights,
+    mixed_qkv: &DeviceBuffer,
+    bproj: &DeviceBuffer,
+    aproj: &DeviceBuffer,
+    z: &DeviceBuffer,
+    streams: &[GdnStream],
+) -> DeviceBuffer {
+    let gdn = shape.gdn;
+    let (conv_dim, key_dim, value_dim, group) = (shape.conv_dim(), shape.key_dim(), shape.value_dim(), shape.group());
+    let (nkh, nvh, khd, vhd, kw) = (shape.nkh, gdn.h, gdn.dk, gdn.dv, shape.conv_kernel);
+    let b = gdn.b;
+    assert_eq!(gdn.t, 1, "gdn_mixer_decode_fwd is a DECODE step: exactly one token per sequence (got t={})", gdn.t);
+    assert_eq!(streams.len(), b as usize, "gdn_mixer_decode_fwd: {} GdnStreams for a batch of {b}", streams.len());
+    let state_len = nvh * khd * vhd;
+    let hist_len = conv_dim * (kw - 1);
+
+    // Stage the batch's persistent state contiguously - see this function's
+    // own doc. `b == 1` binds the caller's buffers directly instead.
+    let staged = b > 1;
+    let (state, hist) = if staged {
+        let st = g.storage((b * state_len) as u64);
+        let hi = g.storage((b * hist_len).max(1) as u64);
+        let mut s = Vec::with_capacity(2 * b as usize);
+        for (i, sm) in streams.iter().enumerate() {
+            let row = i as u32;
+            s.push(g.step(dec.splice, &[sm.state, &st], &[state_len, row * state_len], state_len));
+            if hist_len > 0 {
+                s.push(g.step(dec.splice, &[sm.hist, &hi], &[hist_len, row * hist_len], hist_len));
+            }
+        }
+        g.submit(&[], &s);
+        (st, hi)
+    } else {
+        (streams[0].state.clone(), streams[0].hist.clone())
+    };
+
+    // 1. Streaming causal conv1d + SiLU (activation after the conv). No
+    // NLC/NCHW round trip: `gdn_causal_conv1d_step`'s x/y are `[N, C]`, which
+    // is already `mixed_qkv`'s own layout at one token per sequence.
+    let conv_out = g.storage((b * conv_dim) as u64);
+    let conv_shape = crate::gdn::GdnConvShape { n: b, c: conv_dim, k: kw };
+    g.submit(&[], &[crate::gdn::gdn_causal_conv1d_step(g, &dec.conv, &conv_shape, mixed_qkv, w.conv1d_weight, &hist, &conv_out)]);
+    let mixed_act = g.storage((b * conv_dim) as u64);
+    g.submit(&[], &[g.step(ids.silu, &[&conv_out, &mixed_act], &[b * conv_dim], b * conv_dim)]);
+
+    // 2. Split each row into query/key/value - a whole-row split, so the row
+    // count is the only thing the batch changes.
+    let query = g.storage((b * key_dim) as u64);
+    let key = g.storage((b * key_dim) as u64);
+    let value = g.storage((b * value_dim) as u64);
+    g.submit(
+        &[],
+        &[
+            g.step(ids.concat_split, &[&mixed_act, &query], &[b, conv_dim, key_dim, 0, 1, 1], b * key_dim),
+            g.step(ids.concat_split, &[&mixed_act, &key], &[b, conv_dim, key_dim, key_dim, 1, 1], b * key_dim),
+            g.step(ids.concat_split, &[&mixed_act, &value], &[b, conv_dim, value_dim, 2 * key_dim, 1, 1], b * value_dim),
+        ],
+    );
+
+    // 3. Per-head L2-normalize query/key.
+    let query_n = g.storage((b * key_dim) as u64);
+    let key_n = g.storage((b * key_dim) as u64);
+    g.submit(
+        &[],
+        &[
+            g.step(ids.l2norm_scale, &[&query, w.ones_khd, &query_n], &[b * nkh, khd, f(1e-6)], b * key_dim),
+            g.step(ids.l2norm_scale, &[&key, w.ones_khd, &key_n], &[b * nkh, khd, f(1e-6)], b * key_dim),
+        ],
+    );
+
+    // 4. beta = sigmoid(bproj); g_decay = decay-gate(aproj).
+    let beta = g.storage((b * nvh) as u64);
+    let g_decay = g.storage((b * nvh) as u64);
+    g.submit(
+        &[],
+        &[
+            g.step(ids.sigmoid, &[bproj, &beta], &[b * nvh], b * nvh),
+            g.step(ids.gdn_decay_gate, &[aproj, w.a_log, w.dt_bias, &g_decay], &[b, nvh], b * nvh),
+        ],
+    );
+
+    // 5. Repeat query/key from the key-head count to the value-head count.
+    let query_w = g.storage((b * nvh * khd) as u64);
+    let key_w = g.storage((b * nvh * khd) as u64);
+    g.submit(
+        &[],
+        &[
+            kv_expand_fwd(g, ids.kv_expand, &query_n, &query_w, b, nvh, group, khd, nvh * khd, 0),
+            kv_expand_fwd(g, ids.kv_expand, &key_n, &key_w, b, nvh, group, khd, nvh * khd, 0),
+        ],
+    );
+
+    // 6. The recurrent state update. `gdn_recurrent_step` consumes only
+    // `bh = b*h`, so a batch row is indistinguishable from an extra head to
+    // every kernel it dispatches - which is exactly why the staging above has
+    // to get the row order right, and why this module's own decode test
+    // compares per-sequence state, not just the layer's output.
+    let bh = gdn.bh();
+    let kv_mem = g.storage((bh * vhd) as u64);
+    let sub_out = g.storage((bh * vhd) as u64);
+    let scratch = GdnRecurrentScratch { kv_mem: &kv_mem, sub_out: &sub_out };
+    let out_bh = g.storage((bh * vhd) as u64);
+    g.submit(&[], &gdn_recurrent_step(g, &ids.chunk, &gdn, &query_w, &key_w, &value, &g_decay, &beta, &state, &scratch, &out_bh));
+
+    // 7. Gated RMSNorm (norm before gate).
+    let normed = g.storage((b * value_dim) as u64);
+    let z_silu = g.storage((b * value_dim) as u64);
+    let gated = g.storage((b * value_dim) as u64);
+    g.submit(
+        &[],
+        &[
+            rmsnorm_fwd(g, &ids.kernels, &out_bh, w.norm_weight, &normed, vhd, bh),
+            g.step(ids.silu, &[z, &z_silu], &[b * value_dim], b * value_dim),
+            g.step(ids.mul, &[&normed, &z_silu, &gated], &[b * value_dim], b * value_dim),
+        ],
+    );
+
+    // Return each sequence's evolved state to its own buffer.
+    if staged {
+        let mut s = Vec::with_capacity(2 * b as usize);
+        for (i, sm) in streams.iter().enumerate() {
+            let row = i as u32;
+            s.push(g.step(ids.concat_split, &[&state, sm.state], &[1, b * state_len, state_len, row * state_len, 1, 1], state_len));
+            if hist_len > 0 {
+                s.push(g.step(ids.concat_split, &[&hist, sm.hist], &[1, b * hist_len, hist_len, row * hist_len, 1, 1], hist_len));
+            }
+        }
+        g.submit(&[], &s);
+    }
+    gated
 }
 
 /// Reverse of [`gdn_mixer_fwd`]: `d_gated` (the caller's own `out_proj`

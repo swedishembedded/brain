@@ -127,8 +127,8 @@ use model::Shard;
 use paramstore::{ParamStore, Role};
 
 use audio::conv::ConvKernels;
-use model::block::{self, gqa_decode_step, kv_expand_fwd, rmsnorm_bwd, rmsnorm_fwd, rope2d_partial_fwd, swiglu_bwd, GqaDecodeIds, KernelIds};
-use model::gdn::{gdn_causal_conv1d_step, gdn_recurrent_step, GdnBwdIds, GdnConvIds, GdnConvShape, GdnIds, GdnRecurrentScratch, GdnShape};
+use model::block::{self, rmsnorm_bwd, rmsnorm_fwd, swiglu_bwd, KernelIds};
+use model::gdn::{GdnBwdIds, GdnConvIds, GdnIds, GdnShape};
 // Re-exported (not just imported): `qwen35moe::model::gdn_chunk_size` is part
 // of this crate's own public API (`crates/npu`'s topology export and several
 // test crates call it as such), unlike the scratch-buffer types above, which
@@ -286,6 +286,17 @@ const STATIC_PIPELINES: &[(&str, &str)] = &[
     ("moe_group_perm_emit", kernels::MOE_GROUP_PERM_EMIT),       // 99
     ("matmul_reg3_grouped", kernels::MATMUL_REG3_GROUPED),       // 100
     ("moe_group_combine", kernels::MOE_GROUP_COMBINE),           // 101
+    // -- batched (cross-sequence) paged decode tier -- see
+    // `model::block::gqa_decode_batched_step`, dispatched by
+    // `Qwen35::run_decode_batch`. The first three used to be appended by name
+    // in `pipelines()` below purely to satisfy `Ops::REQUIRED_KERNELS`; the
+    // batched decode path dispatches them directly, so they get hand-numbered
+    // consts like every other kernel it uses. Appended at the true end, same
+    // convention as every tier above.
+    ("paged_kv_append_batched", kernels::PAGED_KV_APPEND_BATCHED),   // 102
+    ("paged_decode_scores_batched", kernels::PAGED_DECODE_SCORES_BATCHED), // 103
+    ("paged_decode_apply_batched", kernels::PAGED_DECODE_APPLY_BATCHED),   // 104
+    ("decode_softmax_batched", kernels::DECODE_SOFTMAX_BATCHED),     // 105
 ];
 
 /// This model's FULL kernel set: `STATIC_PIPELINES` (every hand-numbered
@@ -324,7 +335,6 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
             v.push(kernels::template::dtype_variant("embed", kernels::EMBED, "emb", dt).unwrap());
             v.push(kernels::template::dtype_variant("moe_linear_gated", kernels::MOE_LINEAR_GATED, "w", dt).unwrap());
         }
-        v.push(("paged_kv_append_batched", kernels::PAGED_KV_APPEND_BATCHED));
         v.push(
             kernels::template::dtype_variant_store(
                 "paged_kv_append_batched_word",
@@ -334,7 +344,6 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
             )
             .unwrap(),
         );
-        v.push(("paged_decode_scores_batched", kernels::PAGED_DECODE_SCORES_BATCHED));
         v.push(
             kernels::template::dtype_variant(
                 "paged_decode_scores_batched",
@@ -344,7 +353,6 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
             )
             .unwrap(),
         );
-        v.push(("paged_decode_apply_batched", kernels::PAGED_DECODE_APPLY_BATCHED));
         v.push(
             kernels::template::dtype_variant(
                 "paged_decode_apply_batched",
@@ -462,10 +470,6 @@ const GRAD_SCALE_BUF: usize = 82;
 const EMB_BWD: usize = 83;
 const CE_GRAD: usize = 84;
 const CAUSAL_CONV1D_STEP: usize = 85;
-const KV_APPEND: usize = 86;
-const ATTN_DECODE_SCORES: usize = 87;
-const DECODE_SOFTMAX: usize = 88;
-const ATTN_DECODE_APPLY: usize = 89;
 const SPLICE: usize = 90;
 const SPLICE_BWD: usize = 91;
 const AXPY: usize = 92;
@@ -476,6 +480,10 @@ const SCAN_ADD: usize = 98;
 const MOE_GROUP_PERM_EMIT: usize = 99;
 const MATMUL_REG3_GROUPED: usize = 100;
 const MOE_GROUP_COMBINE: usize = 101;
+const PAGED_KV_APPEND_BATCHED: usize = 102;
+const PAGED_DECODE_SCORES_BATCHED: usize = 103;
+const PAGED_DECODE_APPLY_BATCHED: usize = 104;
+const DECODE_SOFTMAX_BATCHED: usize = 105;
 
 /// Every slot is a REAL kernel now (backward is wired, see [`Qwen35::backward`]):
 /// `rope`/`rope_bwd` still point at `rmsnorm` (index 0) because qwen35 never
@@ -554,19 +562,31 @@ fn grouped_expert_ids() -> GroupedExpertFwdIds {
 }
 
 /// [`model::gdn::gdn_causal_conv1d_step`]'s kernel id -- the streaming
-/// causal-conv decode step, dispatched by [`Qwen35::layer_gdn_decode_step`]
-/// in place of `layer_gdn_fwd`'s whole-sequence `conv1d_fwd`.
+/// causal-conv decode step, dispatched by
+/// [`model::gdn_mixer::gdn_mixer_decode_fwd`] in place of a whole-sequence
+/// `conv1d_fwd`.
 fn gdn_conv_ids() -> GdnConvIds {
     GdnConvIds { causal_conv1d_step: CAUSAL_CONV1D_STEP }
 }
 
-/// [`model::block::gqa_decode_step`]'s kernel ids -- the incremental
-/// KV-cache-append-and-attend decode step, dispatched by
-/// [`Qwen35::layer_gqa_decode_step`] in place of `layer_gqa_fwd`'s
-/// whole-sequence `gqa_fwd`. Same four kernels `qwen3::Qwen::decode_ids`
-/// resolves, hoisted through `model::block` for exactly this reuse.
-fn gqa_decode_ids() -> GqaDecodeIds {
-    GqaDecodeIds { kv_append: KV_APPEND, attn_decode_scores: ATTN_DECODE_SCORES, decode_softmax: DECODE_SOFTMAX, attn_decode_apply: ATTN_DECODE_APPLY }
+/// [`model::block::gqa_decode_batched_step`]'s kernel ids -- every resident
+/// sequence's one new token appended to, and attended against, ONE shared
+/// paged KV pool per layer in a single dispatch set. Dispatched by
+/// [`Qwen35::run_decode_batch`] in place of `layer_gqa_fwd`'s whole-sequence
+/// `gqa_fwd`; the same ids `qwen35::model::gqa_decode_batched_ids` resolves,
+/// through the same shared `model::block` primitive.
+fn gqa_decode_batched_ids() -> model::block::GqaDecodeBatchedIds {
+    model::block::GqaDecodeBatchedIds {
+        kv_append_batched: PAGED_KV_APPEND_BATCHED,
+        scores_batched: PAGED_DECODE_SCORES_BATCHED,
+        softmax_batched: DECODE_SOFTMAX_BATCHED,
+        apply_batched: PAGED_DECODE_APPLY_BATCHED,
+    }
+}
+
+/// [`model::gdn_mixer::gdn_mixer_decode_fwd`]'s decode-only kernel ids.
+fn gdn_mixer_decode_ids() -> model::gdn_mixer::GdnMixerDecodeIds {
+    model::gdn_mixer::GdnMixerDecodeIds { conv: gdn_conv_ids(), splice: SPLICE }
 }
 
 /// int8 counterpart of [`moe_ids`], for [`model::moe::expert_fwd_i8`].
@@ -894,14 +914,6 @@ pub struct Qwen35 {
     /// `logits_all` and `step`), not a hard limitation of the per-layer decode
     /// math itself, which only needs `dec_cap` as an upper bound on `pos`.
     dec_cap: u32,
-    /// One-token input buffer for the decode-path `EMBED` gather.
-    dec_tokens: DeviceBuffer,
-    /// Decode-path M-RoPE: a single-row `[rotary_dim/2]` cos/sin table,
-    /// rewritten every [`Self::layer_gqa_decode_step`] call for that step's
-    /// absolute position -- see that function's own doc for why a fresh
-    /// 1-row table (not a slice into `Self::cos`/`Self::sin`) is required.
-    dec_cos: DeviceBuffer,
-    dec_sin: DeviceBuffer,
     /// Per-layer plain (non-paged) KV cache for GQA layers, `[dec_cap,
     /// kv_dim]`; a size-1 dummy at GDN layer indices (never dispatched into,
     /// mirrors `qwen3::Qwen::new_impl`'s own `dummy_layer`/`hd_or_dummy`
@@ -972,6 +984,56 @@ pub struct Qwen35 {
 /// `gqa_kcache`/`gdn_state` fields already use (mirroring
 /// `qwen3::Qwen::new_impl`'s `dummy_layer` idea), so a caller building one of
 /// these for a new sequence can reuse that same construction loop.
+/// What one BATCHED DECODE step hands [`Qwen35::layer_gqa_fwd`]. `paged`/
+/// `cos`/`sin` are built ONCE per step and shared unchanged by every GQA layer;
+/// the two pools are per layer, so they are rebound each time round the layer
+/// loop. The `qwen35moe` twin of `qwen35::model::GqaDecodeCtx` - both are thin
+/// holders for the same shared `model::gqa_mixer::PagedDecodeBatch`.
+pub(crate) struct GqaDecodeCtx<'a> {
+    pub paged: &'a model::gqa_mixer::PagedDecodeBatch<'a>,
+    pub pool_k: &'a DeviceBuffer,
+    pub pool_v: &'a DeviceBuffer,
+    /// `[bsz, rotary_dim/2]` M-RoPE tables - row `b` is sequence `b`'s OWN
+    /// decode position, and the rows of one batch are unrelated positions.
+    pub cos: &'a DeviceBuffer,
+    pub sin: &'a DeviceBuffer,
+}
+
+/// One sequence's coordinates in a [`Qwen35::run_decode_batch`] call: where its
+/// KV history lives, where this step's token goes, and its own Gated-DeltaNet
+/// state. The batched counterpart of the per-sequence half of
+/// [`DecodeCaches`]: the GQA POOL is shared by the whole batch
+/// ([`BatchDecodeCaches`]), this is everything that is not.
+pub(crate) struct BatchSeq<'a> {
+    /// The physical block backing this sequence's whole KV history, so its rows
+    /// are `phys*gqa_cap .. +gqa_cap` of every layer's pool.
+    pub phys: u32,
+    /// Absolute decode position of this step's token for this sequence. The
+    /// rows of one batch are unrelated positions.
+    pub pos: u32,
+    /// Per-layer recurrent state / conv history, indexed by ABSOLUTE layer
+    /// index with a dummy at full-attention indices - [`DecodeCaches`]'s own
+    /// convention, and the same buffers.
+    pub gdn_state: &'a [DeviceBuffer],
+    pub gdn_hist: &'a [DeviceBuffer],
+}
+
+/// What one [`Qwen35::run_decode_batch`] call reads and updates: the shared
+/// per-layer paged KV pool plus one [`BatchSeq`] per sequence.
+pub(crate) struct BatchDecodeCaches<'a> {
+    /// Per-layer `[num_blocks*gqa_cap, kv_dim]` KV pool for the full-attention
+    /// layers (a dummy at GDN indices). A sequence's own `[gqa_cap, kv_dim]`
+    /// window is rows `phys*gqa_cap..`; a caller with one dedicated cache per
+    /// sequence is the `num_blocks = 1`, `phys = 0` case.
+    pub gqa_kpool: &'a [DeviceBuffer],
+    pub gqa_vpool: &'a [DeviceBuffer],
+    /// Pool rows one physical block spans - the per-sequence KV capacity, and
+    /// the paged kernels' `block_size`.
+    pub gqa_cap: u32,
+    /// One entry per batch row, in the same order as the `tokens` argument.
+    pub seqs: &'a [BatchSeq<'a>],
+}
+
 pub(crate) struct DecodeCaches<'a> {
     /// Per-layer `[cap, kv_dim]` KV cache for GQA layers (dummy at GDN
     /// indices) -- `model::block::gqa_decode_step`'s own `kcache`/`vcache`.
@@ -980,6 +1042,15 @@ pub(crate) struct DecodeCaches<'a> {
     /// Cache row capacity, shared by every GQA layer's cache in this call
     /// (one per-sequence capacity, not a per-layer one).
     pub gqa_cap: u32,
+    /// Where this sequence's `gqa_cap` rows START in the bound buffer. `0` -
+    /// the only value every caller but a paged serving engine ever uses --
+    /// means the buffers above are this sequence's own dedicated flat cache. A
+    /// serving engine that keeps ONE pool per layer instead
+    /// (`crate::serve::Engine`) binds the whole pool and sets this to
+    /// `physical_block * gqa_cap`; it must be a whole multiple of `gqa_cap`,
+    /// since it is also what the paged attention kernels' single-entry block
+    /// table is derived from.
+    pub gqa_base_row: u32,
     /// Per-layer Gated-DeltaNet recurrent `state`/conv `hist` for GDN layers
     /// (dummy at GQA indices) -- `gdn_recurrent_step`'s `state`,
     /// `gdn_causal_conv1d_step`'s `hist`.
@@ -1322,10 +1393,6 @@ impl Qwen35 {
         // doc and the struct fields' own docs for what each buffer holds.
         // `dec_cap = t`: this pass's decode capacity is this instance's own
         // fixed prefill length (see `dec_cap`'s own doc).
-        let dec_tokens = gpu.storage(1);
-        let dec_half = (cfg.rotary_dim() / 2).max(1) as u64;
-        let dec_cos = gpu.storage(dec_half);
-        let dec_sin = gpu.storage(dec_half);
         let kv_dim = cfg.kv_dim() as u64;
         let mut gqa_kcache = Vec::with_capacity(cfg.n_layers as usize);
         let mut gqa_vcache = Vec::with_capacity(cfg.n_layers as usize);
@@ -1382,9 +1449,6 @@ impl Qwen35 {
             ce_grad_uni,
             dec_pos: Cell::new(0),
             dec_cap: t,
-            dec_tokens,
-            dec_cos,
-            dec_sin,
             gqa_kcache,
             gqa_vcache,
             gdn_state,
@@ -1583,7 +1647,7 @@ impl Qwen35 {
 
     // ---- one Gated DeltaNet (Linear) layer --------------------------------
 
-    fn layer_gdn_fwd(&self, l: usize, xn1: &DeviceBuffer, n: u32) -> (DeviceBuffer, Option<GdnLayerActs>) {
+    fn layer_gdn_fwd(&self, l: usize, xn1: &DeviceBuffer, n: u32, decode: Option<&[model::gdn_mixer::GdnStream]>) -> (DeviceBuffer, Option<GdnLayerActs>) {
         let g = &self.gpu;
         let c = &self.cfg;
         let d = c.d_model;
@@ -1627,12 +1691,16 @@ impl Qwen35 {
         }
 
         // conv+split+l2norm+decay-gate+recurrence+gated-norm - LoRA/dtype-
-        // agnostic, shared with `crates/qwen35` (`model::gdn_mixer`).
-        let shape = model::gdn_mixer::GdnMixerShape {
-            gdn: GdnShape { b: self.b, h: nvh, t: self.t, dk: khd, dv: vhd, chunk: self.chunk },
-            nkh: c.linear_num_key_heads,
-            conv_kernel: c.linear_conv_kernel_dim,
+        // agnostic, shared with `crates/qwen35` (`model::gdn_mixer`). A
+        // batched DECODE step is `n` DIFFERENT sequences' one token each, each
+        // continuing its own recurrent state and conv window; the
+        // whole-sequence forward keeps this instance's shape and starts from
+        // zero state.
+        let gdn = match decode {
+            None => GdnShape { b: self.b, h: nvh, t: self.t, dk: khd, dv: vhd, chunk: self.chunk },
+            Some(_) => GdnShape { b: n, h: nvh, t: 1, dk: khd, dv: vhd, chunk: 1 },
         };
+        let shape = model::gdn_mixer::GdnMixerShape { gdn, nkh: c.linear_num_key_heads, conv_kernel: c.linear_conv_kernel_dim };
         let weights = model::gdn_mixer::GdnMixerWeights {
             conv1d_weight: self.w(&p("conv1d.weight")),
             a_log: self.w(&p("A_log")),
@@ -1640,7 +1708,13 @@ impl Qwen35 {
             norm_weight: self.w(&p("norm.weight")),
             ones_khd: &self.ones_khd,
         };
-        let (gated, internals) = model::gdn_mixer::gdn_mixer_fwd(g, &gdn_mixer_ids(), &shape, &weights, &mixed_qkv, &bproj, &aproj, &z, n, self.is_train);
+        let (gated, internals) = match decode {
+            None => model::gdn_mixer::gdn_mixer_fwd(g, &gdn_mixer_ids(), &shape, &weights, &mixed_qkv, &bproj, &aproj, &z, n, self.is_train),
+            Some(streams) => (
+                model::gdn_mixer::gdn_mixer_decode_fwd(g, &gdn_mixer_ids(), &gdn_mixer_decode_ids(), &shape, &weights, &mixed_qkv, &bproj, &aproj, &z, streams),
+                None,
+            ),
+        };
 
         // out_proj (LoRA/int8 dispatch stays local). Fresh `Ops::act` call:
         // `gated` is a different activation from `xn1` above.
@@ -1660,7 +1734,7 @@ impl Qwen35 {
 
     // ---- one GQA (Full) layer ----------------------------------------------
 
-    fn layer_gqa_fwd(&self, l: usize, xn1: &DeviceBuffer, n: u32) -> (DeviceBuffer, Option<GqaLayerActs>) {
+    fn layer_gqa_fwd(&self, l: usize, xn1: &DeviceBuffer, n: u32, decode: Option<&GqaDecodeCtx>) -> (DeviceBuffer, Option<GqaLayerActs>) {
         let g = &self.gpu;
         let c = &self.cfg;
         let d = c.d_model;
@@ -1687,10 +1761,34 @@ impl Qwen35 {
         g.submit(&[], &s1);
 
         // split+qknorm+rope+attention+gating - LoRA/dtype-agnostic, shared
-        // with `crates/qwen35` (`model::gqa_mixer`).
+        // with `crates/qwen35` (`model::gqa_mixer`). A batched DECODE step
+        // supplies its OWN M-RoPE table (one row per sequence, at that
+        // sequence's own absolute position) and attends the shared paged KV
+        // pool instead of an isolated `[T,T]` causal block - see
+        // `GqaDecodeCtx`.
         let shape = model::gqa_mixer::GqaMixerShape { b: self.b, t: self.t, n_heads: nh, n_kv_heads: nkv, head_dim: hd, rotary_half: c.rotary_dim() / 2 };
-        let weights = model::gqa_mixer::GqaMixerWeights { q_norm: self.w(&p("q_norm.weight")), k_norm: self.w(&p("k_norm.weight")), cos: &self.cos, sin: &self.sin };
-        let (ctx_gated, internals) = model::gqa_mixer::gqa_mixer_fwd(g, &gqa_mixer_ids(), &shape, &weights, &q_full, &k, &v, n, self.is_train);
+        let (cos, sin) = decode.map_or((&self.cos, &self.sin), |dc| (dc.cos, dc.sin));
+        let weights = model::gqa_mixer::GqaMixerWeights { q_norm: self.w(&p("q_norm.weight")), k_norm: self.w(&p("k_norm.weight")), cos, sin };
+        let (ctx_gated, internals) = match decode {
+            None => model::gqa_mixer::gqa_mixer_fwd(g, &gqa_mixer_ids(), &shape, &weights, &q_full, &k, &v, n, self.is_train),
+            Some(dc) => (
+                model::gqa_mixer::gqa_mixer_decode_batched_fwd(
+                    g,
+                    &gqa_mixer_ids(),
+                    &gqa_decode_batched_ids(),
+                    &shape,
+                    &weights,
+                    &q_full,
+                    &k,
+                    &v,
+                    dc.pool_k,
+                    dc.pool_v,
+                    n,
+                    dc.paged,
+                ),
+                None,
+            ),
+        };
 
         // o_proj (LoRA/int8 dispatch stays local). Fresh `Ops::act` call:
         // `ctx_gated` is a different activation from `xn1` above.
@@ -2044,11 +2142,11 @@ impl Qwen35 {
 
             let (attn_out, mixer_acts) = match ty {
                 LayerType::Linear => {
-                    let (o, a) = self.layer_gdn_fwd(l, &xn1, n);
+                    let (o, a) = self.layer_gdn_fwd(l, &xn1, n, None);
                     (o, a.map(|a| MixerActs::Gdn(Box::new(a))))
                 }
                 LayerType::Full => {
-                    let (o, a) = self.layer_gqa_fwd(l, &xn1, n);
+                    let (o, a) = self.layer_gqa_fwd(l, &xn1, n, None);
                     (o, a.map(MixerActs::Gqa))
                 }
             };
@@ -2478,21 +2576,26 @@ impl Qwen35 {
     // `run_forward`/`logits_all` above. Text-only, fp32 only (no int8 decode
     // in this pass -- see `crate::q8`'s module doc for the separate int8
     // tier), single persistent sequence (no paging/continuous batching --
-    // that is `model::serve::PagedDecoder`, separate later work built on top
-    // of this). Structure mirrors `qwen3::Qwen`'s own `reset_cache`/`step`/
-    // `decode_at`/`decode_submit`/`decode_steps` (`crates/qwen3/src/model.rs`)
-    // at `n=1`, adjusted for this model's own per-layer math:
-    // `layer_gdn_decode_step`/`layer_gqa_decode_step` are the single-token
-    // siblings of `layer_gdn_fwd`/`layer_gqa_fwd` above, composed by
-    // `run_decode_step` the same way `run_forward` composes the batched pair.
+    // that is `model::serve::PagedDecoder`, built on top of this).
+    //
+    // `run_decode_batch` is the whole of the decode tape - one token for each
+    // of `bsz` INDEPENDENT sequences, in one dispatch set per layer - and
+    // `step`/`run_decode_step` are its one-row case, not a separate tape.
+    // There is no decode-specific per-layer code: a decode step is
+    // `layer_gdn_fwd`/`layer_gqa_fwd`/`moe_sublayer` at `n = bsz` rows, with
+    // the two stateful mixers in their DECODE arm (`model::gdn_mixer::
+    // gdn_mixer_decode_fwd` over the recurrent state and conv window,
+    // `model::gqa_mixer::gqa_mixer_decode_batched_fwd` over the shared paged
+    // KV pool) - the same pair `qwen35::model::Qwen35::run_decode_batch`
+    // drives, so "a batched decode step" means the same thing for both models.
     // =========================================================================
 
     /// Reset decode state for a fresh sequence: the position counter and
     /// every GDN layer's persistent recurrent `state`/conv `hist` (both must
     /// start at zero for a fresh sequence -- see `model::gdn::gdn_recurrent_step`
     /// and `gdn_causal_conv1d_step`'s own docs). GQA layers' KV caches are
-    /// deliberately left untouched: `layer_gqa_decode_step` only ever reads
-    /// cache rows `0..=pos` (`model::block::gqa_decode_step`'s own doc), so
+    /// deliberately left untouched: a decode step's attention only ever reads
+    /// cache rows `0..=pos` (its `seq_lens` bound), so
     /// stale rows beyond the new sequence's own length are never read -- the
     /// same reasoning `qwen3::Qwen::reset_cache` relies on to not re-zero its
     /// own `kcache`/`vcache`.
@@ -2536,6 +2639,9 @@ impl Qwen35 {
             gqa_kcache: &self.gqa_kcache,
             gqa_vcache: &self.gqa_vcache,
             gqa_cap: self.dec_cap,
+            // This instance's own caches are dedicated per-sequence buffers,
+            // not a pool window -- see `DecodeCaches::gqa_base_row`.
+            gqa_base_row: 0,
             gdn_state: &self.gdn_state,
             gdn_hist: &self.gdn_hist,
         };
@@ -2553,294 +2659,122 @@ impl Qwen35 {
     /// this exact function per admitted request against its own paged/GdnSlot
     /// resources instead of a single instance-wide decode state.
     pub(crate) fn run_decode_step(&self, token_id: u32, pos: u32, caches: &DecodeCaches) -> DeviceBuffer {
+        assert!(
+            caches.gqa_cap > 0 && caches.gqa_base_row.is_multiple_of(caches.gqa_cap),
+            "qwen35moe::run_decode_step: gqa_base_row {} is not a whole number of {}-row blocks",
+            caches.gqa_base_row,
+            caches.gqa_cap
+        );
+        let seqs = [BatchSeq { phys: caches.gqa_base_row / caches.gqa_cap, pos, gdn_state: caches.gdn_state, gdn_hist: caches.gdn_hist }];
+        let batch = BatchDecodeCaches { gqa_kpool: caches.gqa_kcache, gqa_vpool: caches.gqa_vcache, gqa_cap: caches.gqa_cap, seqs: &seqs };
+        self.run_decode_batch(&[token_id], &batch)
+    }
+
+    /// [`Self::run_decode_step`] for a BATCH of independent sequences -- one
+    /// decode token each, all in one set of dispatches per layer.
+    ///
+    /// This is the function [`Self::run_decode_step`] is the `bsz = 1` case of,
+    /// and the reason a serving engine can raise aggregate throughput without
+    /// raising per-sequence latency: a decode step's cost is dominated by
+    /// reading every weight the step touches, and those reads are what the
+    /// batch shares. Per layer the projections become `[bsz, d] x [d, *]` GEMMs
+    /// instead of `bsz` separate `m = 1` GEMVs against the same weights, and
+    /// the two stateful mixers each take the whole batch in one dispatch set --
+    /// full attention through one shared paged KV pool
+    /// ([`model::block::gqa_decode_batched_step`]), Gated-DeltaNet through the
+    /// `b*h` axis its kernels already have
+    /// ([`model::gdn_mixer::gdn_mixer_decode_fwd`]). Both are the SAME shared
+    /// primitives `qwen35::model::Qwen35::run_decode_batch` drives, which is
+    /// what makes a batched decode step mean the same thing for both models.
+    ///
+    /// `tokens` is one token id per sequence, in `caches.seqs` order; the
+    /// return value is the `[bsz, d_model]` final-norm hidden block.
+    pub(crate) fn run_decode_batch(&self, tokens: &[u32], caches: &BatchDecodeCaches) -> DeviceBuffer {
         let g = &self.gpu;
-        let d = self.cfg.d_model;
-
-        g.write(&self.dec_tokens, &[token_id]);
-        let mut res = g.storage(d as u64);
-        g.submit(&[], &[g.step(EMBED, &[&self.dec_tokens, self.w("tok.weight"), &res], &[d, 1], d)]);
-
-        for (l, ty) in self.cfg.layer_types().iter().enumerate() {
-            let xn1 = g.storage(d as u64);
-            g.submit(&[], &[rmsnorm_fwd(g, &kernel_ids(), &res, self.w(&format!("blocks.{l}.ln1.weight")), &xn1, d, 1)]);
-
-            let attn_out = match ty {
-                LayerType::Linear => self.layer_gdn_decode_step(l, &xn1, &caches.gdn_state[l], &caches.gdn_hist[l]),
-                LayerType::Full => self.layer_gqa_decode_step(l, &xn1, pos, &caches.gqa_kcache[l], &caches.gqa_vcache[l], caches.gqa_cap),
-            };
-
-            let xmid = g.storage(d as u64);
-            g.submit(&[], &[g.step(ADD2, &[&res, &attn_out, &xmid], &[d], d)]);
-
-            // Same `moe_sublayer` this file's batched path uses -- only the
-            // row count (`n=1`) differs, so no decode-specific MoE function
-            // is needed at all (per this change's own scope note).
-            let (moe_out, _) = self.moe_sublayer(l, &xmid, 1);
-            let res_next = g.storage(d as u64);
-            g.submit(&[], &[g.step(ADD2, &[&xmid, &moe_out, &res_next], &[d], d)]);
-            res = res_next;
+        let c = &self.cfg;
+        let d = c.d_model;
+        let bsz = tokens.len() as u32;
+        assert!(bsz > 0, "qwen35moe::run_decode_batch: empty batch");
+        assert_eq!(tokens.len(), caches.seqs.len(), "qwen35moe::run_decode_batch: {} tokens for {} sequences", tokens.len(), caches.seqs.len());
+        for s in caches.seqs {
+            assert!(s.pos < caches.gqa_cap, "qwen35moe::run_decode_batch: decode position {} exceeds the per-sequence capacity {}", s.pos, caches.gqa_cap);
         }
 
-        let xn_final = g.storage(d as u64);
-        g.submit(&[], &[rmsnorm_fwd(g, &kernel_ids(), &res, self.w("norm.weight"), &xn_final, d, 1)]);
+        let tok_buf = g.storage(bsz as u64);
+        g.write(&tok_buf, tokens);
+        let mut res = g.storage((bsz * d) as u64);
+        g.submit(&[], &[g.step(EMBED, &[&tok_buf, self.w("tok.weight"), &res], &[d, bsz], bsz * d)]);
+
+        // Built ONCE per step and shared by every layer in it: the batch's
+        // M-RoPE table at each sequence's OWN position, and the four paged-KV
+        // index buffers. The rows of one batch are unrelated positions in
+        // unrelated physical blocks, which is the whole difference from a
+        // single sequence's many tokens.
+        let positions: Vec<[u32; 3]> = caches.seqs.iter().map(|s| [s.pos, s.pos, s.pos]).collect();
+        let (cos_rows, sin_rows) = qwen3vl::mrope::mrope_tables(&positions, c.mrope_section, c.rotary_dim(), c.rope_theta);
+        let cos = g.storage_init("qwen35moe.decode_batch.cos", &cos_rows);
+        let sin = g.storage_init("qwen35moe.decode_batch.sin", &sin_rows);
+        let blocks = g.storage(bsz as u64);
+        g.write(&blocks, &caches.seqs.iter().map(|s| s.phys).collect::<Vec<u32>>());
+        let offsets = g.storage(bsz as u64);
+        g.write(&offsets, &caches.seqs.iter().map(|s| s.pos).collect::<Vec<u32>>());
+        // `max_bt = 1`: this engine gives a sequence ONE physical block for its
+        // whole KV history, so its block table is a single entry.
+        let block_tables = g.storage(bsz as u64);
+        g.write(&block_tables, &caches.seqs.iter().map(|s| s.phys).collect::<Vec<u32>>());
+        let seq_lens = g.storage(bsz as u64);
+        g.write(&seq_lens, &caches.seqs.iter().map(|s| s.pos + 1).collect::<Vec<u32>>());
+        let paged = model::gqa_mixer::PagedDecodeBatch {
+            blocks: &blocks,
+            offsets: &offsets,
+            block_tables: &block_tables,
+            seq_lens: &seq_lens,
+            block_size: caches.gqa_cap,
+            max_bt: 1,
+            // The scores/probs stride, sized to the batch's longest LIVE
+            // sequence rather than the engine's configured ceiling: it is pure
+            // addressing, not a compute bound (see `gqa_decode_batched_step`).
+            cap: caches.seqs.iter().map(|s| s.pos + 1).max().unwrap_or(1),
+        };
+
+        for (l, ty) in c.layer_types().iter().enumerate() {
+            let xn1 = g.storage((bsz * d) as u64);
+            g.submit(&[], &[rmsnorm_fwd(g, &kernel_ids(), &res, self.w(&format!("blocks.{l}.ln1.weight")), &xn1, d, bsz)]);
+
+            let attn_out = match ty {
+                LayerType::Linear => {
+                    let streams: Vec<model::gdn_mixer::GdnStream> =
+                        caches.seqs.iter().map(|s| model::gdn_mixer::GdnStream { state: &s.gdn_state[l], hist: &s.gdn_hist[l] }).collect();
+                    self.layer_gdn_fwd(l, &xn1, bsz, Some(&streams)).0
+                }
+                LayerType::Full => {
+                    let dctx = GqaDecodeCtx { paged: &paged, pool_k: &caches.gqa_kpool[l], pool_v: &caches.gqa_vpool[l], cos: &cos, sin: &sin };
+                    self.layer_gqa_fwd(l, &xn1, bsz, Some(&dctx)).0
+                }
+            };
+
+            let xmid = g.storage((bsz * d) as u64);
+            g.submit(&[], &[g.step(ADD2, &[&res, &attn_out, &xmid], &[bsz * d], bsz * d)]);
+
+            // Same `moe_sublayer` this file's batched path uses -- only the
+            // row count differs, so no decode-specific MoE function is needed
+            // at all.
+            let (moe_out, _) = self.moe_sublayer(l, &xmid, bsz);
+            let res_next = g.storage((bsz * d) as u64);
+            g.submit(&[], &[g.step(ADD2, &[&xmid, &moe_out, &res_next], &[bsz * d], bsz * d)]);
+            res = res_next;
+
+            // Hand this layer to the device NOW and keep building the next one:
+            // `Gpu::submit` appends to a pending list rather than submitting, so
+            // without this the whole step is recorded on the host before the
+            // card starts any of it. At decode row counts the host side of that
+            // is not small next to the device side.
+            g.flush();
+        }
+
+        let xn_final = g.storage((bsz * d) as u64);
+        g.submit(&[], &[rmsnorm_fwd(g, &kernel_ids(), &res, self.w("norm.weight"), &xn_final, d, bsz)]);
         xn_final
-    }
-
-    /// One Gated DeltaNet layer's decode step -- the single-token sibling of
-    /// [`Self::layer_gdn_fwd`]. Same 11-step math at `n=1`, EXCEPT: step 2
-    /// dispatches [`gdn_causal_conv1d_step`] directly on the token-major
-    /// `[1, conv_dim]` buffer (no `nlc_nchw`/`nchw_nlc` round trip -- that
-    /// conversion exists only because `conv1d_fwd` is NCL-shaped;
-    /// `gdn_causal_conv1d_step`'s own `x`/`y` are already `[N,C]`, see its
-    /// doc), and steps 6-9 (kv_expand, chunk-major permute, `gdn_chunk_fwd`,
-    /// permute back) become: `kv_expand_fwd` (STILL needed -- repeats
-    /// `linear_num_key_heads` up to `linear_num_value_heads`, exactly as in
-    /// `layer_gdn_fwd`) followed directly by [`gdn_recurrent_step`] on the
-    /// already `[bh,...]`-shaped buffers -- no chunk-major permute at all,
-    /// since `gdn_recurrent_step` takes no chunk axis. `query`/`key` are
-    /// passed UNSCALED (`gdn_recurrent_step` applies `1/sqrt(dk)` itself, see
-    /// its doc).
-    ///
-    /// `state`/`hist` are THIS call's recurrent state / conv history buffers
-    /// (layer `l`'s slice of whichever [`DecodeCaches`] the caller is
-    /// driving) -- not necessarily `self.gdn_state[l]`/`self.gdn_hist[l]`,
-    /// see [`DecodeCaches`]'s own doc for why.
-    fn layer_gdn_decode_step(&self, l: usize, xn1: &DeviceBuffer, state: &DeviceBuffer, hist: &DeviceBuffer) -> DeviceBuffer {
-        let g = &self.gpu;
-        let c = &self.cfg;
-        let d = c.d_model;
-        let conv_dim = c.linear_conv_dim();
-        let key_dim = c.linear_key_dim();
-        let value_dim = c.linear_value_dim();
-        let nkh = c.linear_num_key_heads;
-        let nvh = c.linear_num_value_heads;
-        let khd = c.linear_key_head_dim;
-        let vhd = c.linear_value_head_dim;
-        let group = c.linear_group();
-        let kw = c.linear_conv_kernel_dim;
-        let p = |s: &str| format!("blocks.{l}.linear_attn.{s}");
-
-        // 1. mixed_qkv = in_proj_qkv(xn1).
-        let mixed_qkv = g.storage(conv_dim as u64);
-        g.submit(&[], &[g.step(MATMUL, &[xn1, self.w(&p("in_proj_qkv.weight")), &mixed_qkv], &[1, d, conv_dim], conv_dim)]);
-
-        // 2. Streaming causal conv1d + SiLU (activation after the conv, same
-        // as prefill) -- gdn_causal_conv1d_step's x/y are already [N=1,C],
-        // exactly mixed_qkv's own layout, so no NLC/NCL conversion is needed.
-        let conv_out = g.storage(conv_dim as u64);
-        let conv_shape = GdnConvShape { n: 1, c: conv_dim, k: kw };
-        g.submit(&[], &[gdn_causal_conv1d_step(g, &gdn_conv_ids(), &conv_shape, &mixed_qkv, self.w(&p("conv1d.weight")), hist, &conv_out)]);
-        let mixed_act = g.storage(conv_dim as u64);
-        g.submit(&[], &[g.step(SILU, &[&conv_out, &mixed_act], &[conv_dim], conv_dim)]);
-
-        // 3. Split into query/key/value -- same whole-row split as prefill, n=1.
-        let query = g.storage(key_dim as u64);
-        let key = g.storage(key_dim as u64);
-        let value = g.storage(value_dim as u64);
-        g.submit(
-            &[],
-            &[
-                g.step(CONCAT_SPLIT, &[&mixed_act, &query], &[1, conv_dim, key_dim, 0, 1, 1], key_dim),
-                g.step(CONCAT_SPLIT, &[&mixed_act, &key], &[1, conv_dim, key_dim, key_dim, 1, 1], key_dim),
-                g.step(CONCAT_SPLIT, &[&mixed_act, &value], &[1, conv_dim, value_dim, 2 * key_dim, 1, 1], value_dim),
-            ],
-        );
-
-        // 4. L2-normalize query/key -- bare l2norm, same as prefill.
-        let query_n = g.storage(key_dim as u64);
-        let key_n = g.storage(key_dim as u64);
-        g.submit(
-            &[],
-            &[
-                g.step(L2NORM_SCALE, &[&query, &self.ones_khd, &query_n], &[nkh, khd, f(1e-6)], key_dim),
-                g.step(L2NORM_SCALE, &[&key, &self.ones_khd, &key_n], &[nkh, khd, f(1e-6)], key_dim),
-            ],
-        );
-
-        // 5. beta = sigmoid(in_proj_b(xn1)); g = decay-gate(in_proj_a(xn1));
-        // z = in_proj_z(xn1) -- same as prefill.
-        let bproj = g.storage(nvh as u64);
-        let aproj = g.storage(nvh as u64);
-        let z = g.storage(value_dim as u64);
-        g.submit(
-            &[],
-            &[
-                g.step(MATMUL, &[xn1, self.w(&p("in_proj_b.weight")), &bproj], &[1, d, nvh], nvh),
-                g.step(MATMUL, &[xn1, self.w(&p("in_proj_a.weight")), &aproj], &[1, d, nvh], nvh),
-                g.step(MATMUL, &[xn1, self.w(&p("in_proj_z.weight")), &z], &[1, d, value_dim], value_dim),
-            ],
-        );
-        let beta = g.storage(nvh as u64);
-        let g_decay = g.storage(nvh as u64);
-        g.submit(
-            &[],
-            &[
-                g.step(SIGMOID, &[&bproj, &beta], &[nvh], nvh),
-                g.step(GDN_DECAY_GATE, &[&aproj, self.w(&p("A_log")), self.w(&p("dt_bias")), &g_decay], &[1, nvh], nvh),
-            ],
-        );
-
-        // 6. Repeat query/key from linear_num_key_heads to linear_num_value_heads.
-        let query_w = g.storage((nvh * khd) as u64);
-        let key_w = g.storage((nvh * khd) as u64);
-        g.submit(
-            &[],
-            &[
-                kv_expand_fwd(g, KV_EXPAND, &query_n, &query_w, 1, nvh, group, khd, nvh * khd, 0),
-                kv_expand_fwd(g, KV_EXPAND, &key_n, &key_w, 1, nvh, group, khd, nvh * khd, 0),
-            ],
-        );
-
-        // 7. gdn_recurrent_step -- the persistent single-token state update,
-        // in place of gdn_chunk_fwd (no chunk-major permute either side).
-        let shape = GdnShape { b: 1, h: nvh, t: 1, dk: khd, dv: vhd, chunk: 1 };
-        let kv_mem = g.storage((nvh * vhd) as u64);
-        let sub_out = g.storage((nvh * vhd) as u64);
-        let scratch = GdnRecurrentScratch { kv_mem: &kv_mem, sub_out: &sub_out };
-        let out_bh = g.storage((nvh * vhd) as u64);
-        g.submit(
-            &[],
-            &gdn_recurrent_step(g, &gdn_ids(), &shape, &query_w, &key_w, &value, &g_decay, &beta, state, &scratch, &out_bh),
-        );
-
-        // 8. Gated RMSNorm (norm before gate, same as prefill).
-        let normed = g.storage(value_dim as u64);
-        let z_silu = g.storage(value_dim as u64);
-        let gated = g.storage(value_dim as u64);
-        g.submit(
-            &[],
-            &[
-                rmsnorm_fwd(g, &kernel_ids(), &out_bh, self.w(&p("norm.weight")), &normed, vhd, nvh),
-                g.step(SILU, &[&z, &z_silu], &[value_dim], value_dim),
-                g.step(MUL, &[&normed, &z_silu, &gated], &[value_dim], value_dim),
-            ],
-        );
-
-        // 9. out_proj.
-        let out = g.storage(d as u64);
-        g.submit(&[], &[g.step(MATMUL, &[&gated, self.w(&p("out_proj.weight")), &out], &[1, value_dim, d], d)]);
-        out
-    }
-
-    /// One GQA layer's decode step -- the single-token sibling of
-    /// [`Self::layer_gqa_fwd`]: q/k/v-proj, per-head QK-norm, single-position
-    /// partial M-RoPE, append this token's k/v into the persistent per-layer
-    /// KV cache and attend over `0..=pos` (`model::block::gqa_decode_step`,
-    /// the same primitive `qwen3::Qwen::decode_steps` calls), sigmoid output
-    /// gate, `o_proj`.
-    ///
-    /// M-RoPE at a single position: `rope2d_partial_fwd`'s table lookup is
-    /// `row % tmod` with `tmod` always equal to the dispatch's own row count
-    /// (`model::block::rope2d_fwd`'s doc, "tmod = rows: an exact per-token
-    /// table, no frame-repeat") -- at `rows=1` that is always table row 0, so
-    /// a slice into the construction-time whole-sequence `Self::cos`/`Self
-    /// ::sin` table at row `pos` cannot be addressed this way. Instead this
-    /// recomputes a fresh 1-row table for `pos` (`qwen3vl::mrope::mrope_tables`
-    /// with `[pos,pos,pos]`, mirroring this file's own text-only construction
-    /// convention) into the persistent `Self::dec_cos`/`Self::dec_sin`
-    /// buffers and rewrites it every call -- exactly `qwen3::Qwen::step_mrope`
-    /// / `write_decode_mrope_table`'s own pattern for the identical structural
-    /// reason. This is the one piece of this change with no exact
-    /// qwen35moe-internal precedent to copy verbatim (qwen3's `Qwen` has no
-    /// GDN layers and qwen35moe's own prefill path never decodes one position
-    /// at a time) -- see this change's final report for that call-out.
-    ///
-    /// `kcache`/`vcache`/`cap` are THIS call's KV cache buffers and capacity
-    /// (layer `l`'s slice of whichever [`DecodeCaches`] the caller is
-    /// driving, and that same call's shared per-sequence capacity) -- not
-    /// necessarily `self.gqa_kcache[l]`/`self.gqa_vcache[l]`/`self.dec_cap`,
-    /// see [`DecodeCaches`]'s own doc for why.
-    fn layer_gqa_decode_step(&self, l: usize, xn1: &DeviceBuffer, pos: u32, kcache: &DeviceBuffer, vcache: &DeviceBuffer, cap: u32) -> DeviceBuffer {
-        let g = &self.gpu;
-        let c = &self.cfg;
-        let d = c.d_model;
-        let (nh, nkv, hd) = (c.n_heads, c.n_kv_heads, c.head_dim);
-        let (qpd, qd, kvd) = (c.q_proj_dim(), c.q_dim(), c.kv_dim());
-        let p = |s: &str| format!("blocks.{l}.self_attn.{s}");
-
-        let q_full = g.storage(qpd as u64);
-        let k = g.storage(kvd as u64);
-        let v = g.storage(kvd as u64);
-        g.submit(
-            &[],
-            &[
-                g.step(MATMUL, &[xn1, self.w(&p("q_proj.weight")), &q_full], &[1, d, qpd], qpd),
-                g.step(MATMUL, &[xn1, self.w(&p("k_proj.weight")), &k], &[1, d, kvd], kvd),
-                g.step(MATMUL, &[xn1, self.w(&p("v_proj.weight")), &v], &[1, d, kvd], kvd),
-            ],
-        );
-
-        // Per-head de-interleaved [query|gate] split -- same as prefill, n=1.
-        let q_value = g.storage(qd as u64);
-        let q_gate = g.storage(qd as u64);
-        g.submit(
-            &[],
-            &[
-                g.step(CONCAT_SPLIT, &[&q_full, &q_value], &[nh, 2 * hd, hd, 0, 1, 1], nh * hd),
-                g.step(CONCAT_SPLIT, &[&q_full, &q_gate], &[nh, 2 * hd, hd, hd, 1, 1], nh * hd),
-            ],
-        );
-
-        let q_normed = g.storage(qd as u64);
-        let k_normed = g.storage(kvd as u64);
-        g.submit(
-            &[],
-            &[
-                rmsnorm_fwd(g, &kernel_ids(), &q_value, self.w(&p("q_norm.weight")), &q_normed, hd, nh),
-                rmsnorm_fwd(g, &kernel_ids(), &k, self.w(&p("k_norm.weight")), &k_normed, hd, nkv),
-            ],
-        );
-
-        // Single-position partial M-RoPE -- see this function's own doc.
-        let half = c.rotary_dim() / 2;
-        let (cos_row, sin_row) = qwen3vl::mrope::mrope_tables(&[[pos, pos, pos]], c.mrope_section, c.rotary_dim(), c.rope_theta);
-        g.write_f32(&self.dec_cos, &cos_row);
-        g.write_f32(&self.dec_sin, &sin_row);
-        g.submit(
-            &[],
-            &[
-                rope2d_partial_fwd(g, ROPE2D_PARTIAL, &q_normed, &self.dec_cos, &self.dec_sin, 1, nh, half, qd, 0, hd),
-                rope2d_partial_fwd(g, ROPE2D_PARTIAL, &k_normed, &self.dec_cos, &self.dec_sin, 1, nkv, half, kvd, 0, hd),
-            ],
-        );
-
-        // Append k/v into this layer's persistent cache and attend over 0..=pos.
-        let scores = g.storage((nh * cap) as u64);
-        let probs = g.storage((nh * cap) as u64);
-        let ctx = g.storage(qd as u64);
-        g.submit(
-            &[],
-            &gqa_decode_step(
-                g,
-                &gqa_decode_ids(),
-                nh,
-                nkv,
-                hd,
-                pos,
-                cap,
-                &q_normed,
-                &k_normed,
-                &v,
-                kcache,
-                vcache,
-                &scores,
-                &probs,
-                &ctx,
-            ),
-        );
-
-        let gate = g.storage(qd as u64);
-        let ctx_gated = g.storage(qd as u64);
-        let out = g.storage(d as u64);
-        g.submit(
-            &[],
-            &[
-                g.step(SIGMOID, &[&q_gate, &gate], &[qd], qd),
-                g.step(MUL, &[&ctx, &gate, &ctx_gated], &[qd], qd),
-                g.step(MATMUL, &[&ctx_gated, self.w(&p("o_proj.weight")), &out], &[1, qd, d], d),
-            ],
-        );
-        out
     }
 
     pub fn poll_wait(&self) {
@@ -3551,9 +3485,11 @@ mod rmsnorm_variant_agreement {
     #[test]
     fn the_decode_tape_norms_match_the_host_reference() {
         let c = crate::config::Qwen35Config::qwen35_35b_a3b();
-        // Every `(rows, dim)` `run_decode_step`, `layer_gqa_decode_step` and
-        // `layer_gdn_decode_step` dispatch an RMSNorm at, read off the config
-        // rather than written down.
+        // Every `(rows, dim)` a decode step dispatches an RMSNorm at, read off
+        // the config rather than written down. Row counts are per SEQUENCE: a
+        // batched step multiplies each of them by the batch size, which
+        // `block::rms_variant`'s own selector already handles as just a wider
+        // dispatch.
         let shapes = [
             (1, c.d_model, "ln1/ln2/final norm: one residual row"),
             (c.n_heads, c.head_dim, "GQA q_norm"),

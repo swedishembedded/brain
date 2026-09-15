@@ -162,6 +162,7 @@ pub fn gqa_mixer_chunk_fwd(
     k: &DeviceBuffer,
     v: &DeviceBuffer,
     n: u32,
+    base_row: u32,
     start: u32,
     cap: u32,
     kcache: &DeviceBuffer,
@@ -186,6 +187,7 @@ pub fn gqa_mixer_chunk_fwd(
             nh,
             nkv,
             hd,
+            base_row,
             start,
             n,
             cap,
@@ -203,6 +205,101 @@ pub fn gqa_mixer_chunk_fwd(
     );
 
     gate_ctx(g, ids, &ctx, &prep.q_gate, n, qd).1
+}
+
+/// The paged-KV coordinates one batched decode step needs - the four
+/// `[batch]`/`[batch, max_bt]` index buffers plus the two pool dims, bundled
+/// because one batch's set is shared UNCHANGED by every full-attention layer
+/// in that step (unlike [`gqa_mixer_chunk_fwd`]'s two loose coordinates, which
+/// are plain integers).
+///
+/// See [`crate::block::gqa_decode_batched_step`] for each buffer's exact
+/// contract - this struct only carries them.
+/// The pools themselves are NOT here: they are per LAYER, while everything in
+/// this struct is per STEP.
+pub struct PagedDecodeBatch<'a> {
+    /// `[batch]` physical block / in-block offset of each sequence's new token.
+    pub blocks: &'a DeviceBuffer,
+    pub offsets: &'a DeviceBuffer,
+    /// `[batch, max_bt]` per-sequence block table, and `[batch]` live-key
+    /// counts INCLUDING this step's new token.
+    pub block_tables: &'a DeviceBuffer,
+    pub seq_lens: &'a DeviceBuffer,
+    pub block_size: u32,
+    pub max_bt: u32,
+    /// The `scores`/`probs` row stride; `>=` every `seq_lens` entry.
+    pub cap: u32,
+}
+
+/// [`gqa_mixer_fwd`] for one DECODE token of each of `batch` INDEPENDENT
+/// sequences - the cross-sequence sibling of [`gqa_mixer_chunk_fwd`], and the
+/// full-attention half of a hybrid decoder's batched decode step.
+///
+/// Identical projections-to-`ctx_gated` pipeline; only the attention differs,
+/// running [`crate::block::gqa_decode_batched_step`] against one shared paged
+/// pool instead of one sequence's own flat cache. `q_full`/`k`/`v` are
+/// `[batch, ...]` with one row per sequence, and so is the returned
+/// `ctx_gated`.
+///
+/// `w.cos`/`w.sin` must be a `[batch, rotary_half]` table whose row `b` is
+/// sequence `b`'s OWN absolute decode position - the rows of one batch are
+/// unrelated positions, which is the one thing that differs from a chunk's
+/// contiguous `start..start+n` table. (`rope2d_partial_fwd`'s lookup is
+/// `row % rows`, so at `rows = batch` row `b` always reads table row `b`.)
+///
+/// Inference only, for the same reason [`gqa_mixer_chunk_fwd`] is:
+/// [`gqa_mixer_bwd`] reconstructs its gradient from a whole-sequence `[T,T]`
+/// `probs` slab that no cached-KV path materialises.
+pub fn gqa_mixer_decode_batched_fwd(
+    g: &Gpu,
+    ids: &GqaMixerIds,
+    decode_ids: &crate::block::GqaDecodeBatchedIds,
+    shape: &GqaMixerShape,
+    w: &GqaMixerWeights,
+    q_full: &DeviceBuffer,
+    k: &DeviceBuffer,
+    v: &DeviceBuffer,
+    pool_k: &DeviceBuffer,
+    pool_v: &DeviceBuffer,
+    batch: u32,
+    paged: &PagedDecodeBatch,
+) -> DeviceBuffer {
+    let (nh, nkv, hd) = (shape.n_heads, shape.n_kv_heads, shape.head_dim);
+    let qd = shape.qd();
+
+    let prep = qkv_prepare(g, ids, shape, w, q_full, k, batch);
+
+    let scores = g.storage(batch as u64 * nh as u64 * paged.cap as u64);
+    let probs = g.storage(batch as u64 * nh as u64 * paged.cap as u64);
+    let ctx = g.storage((batch * qd) as u64);
+    g.submit(
+        &[],
+        &crate::block::gqa_decode_batched_step(
+            g,
+            decode_ids,
+            nh,
+            nkv,
+            hd,
+            batch,
+            paged.block_size,
+            paged.max_bt,
+            paged.cap,
+            &prep.q_normed,
+            &prep.k_normed,
+            v,
+            pool_k,
+            pool_v,
+            paged.blocks,
+            paged.offsets,
+            paged.block_tables,
+            paged.seq_lens,
+            &scores,
+            &probs,
+            &ctx,
+        ),
+    );
+
+    gate_ctx(g, ids, &ctx, &prep.q_gate, batch, qd).1
 }
 
 /// The mixer's projections-to-attention-inputs half, shared byte-for-byte by
