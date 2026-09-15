@@ -220,12 +220,71 @@ self-consistent.
   dependency - 7 unit tests, no real-checkpoint gate needed since it has no
   checkpoint dependency at all.
 
-- **M5**: `florence2::caps::ground` capability action (`scrfd::caps`'s
-  `detect` shape: `Outcome` JSON, no output blob), CLI (`brain florence2
-  {import,infer,ground}`), residency + cost-aware scheduler wiring.
-  `general.architecture` id: `"florence2"` (the HF config's own
-  `model_type` - no GGUF/llama.cpp conversion exists upstream to take an id
-  from, confirmed via an open unresolved llama.cpp issue).
+- **M5 - capability action done; CLI/residency/arch-registry wiring not
+  yet done**: `florence2::caps::ground` (`crates/florence2/src/caps.rs`),
+  modeled directly on `scrfd::caps`'s `detect` shape (`Outcome` JSON, no
+  output blob, a `Provider` + hot-instance-caching `Action` behind a
+  `Mutex`). `crates/florence2/src/import.rs::build_param_source` is the
+  real import path (NOT a rename table like `lfm2::import`'s - brain's own
+  parameter names here already ARE the checkpoint's real tensor names, see
+  that module's own doc for why; import applies only the few real host
+  transforms `vision::channel_attn`/`vision::project`'s docs already
+  required: the per-stage channel-attention qkv pre-scale and the two
+  synthesized `vision_projector.*` tensors).
+
+  Preprocessing matches the checkpoint's own `preprocessor_config.json`
+  (`CLIPImageProcessor`, direct 768x768 resize - `do_center_crop=false` -
+  bicubic, `image_mean`/`image_std`), via `imaging::Ctx` the same way
+  `scrfd::caps` uses it for its own letterbox.
+
+  The grounding prompt template (`"Locate {target} in the image."`) is
+  read directly from the reference's own `processing_florence2.py::
+  task_prompts_with_input['<OPEN_VOCABULARY_DETECTION>']`, not guessed -
+  confirmed the literal task-marker token (`<OPEN_VOCABULARY_DETECTION>`)
+  never reaches the tokenizer at all, it is purely a client-side
+  template-selection key inside `_construct_prompts`. This resolves the
+  original plan's "open decision point" (which of several grounding task
+  prompts to use) in favor of open-vocabulary detection specifically,
+  since it is the one shaped for "here is a short phrase, give me one
+  box" - the UI-grounding need this whole initiative is scoped around.
+
+  **Validated**: `crates/florence2/tests/ground_smoke.rs` runs the FULL
+  `ground` action against the real checkpoint end to end (image decode,
+  resize/normalize, vision tower, tokenizer encode, encoder,
+  `Florence2Lm::generate`'s multi-step loop - never exercised anywhere
+  else, since the parity tests only ever call `decode` for one fixed-length
+  teacher-forced prefix - tokenizer decode, `grounding::parse_boxes`) on a
+  synthetic image, confirming it runs to completion and produces a
+  well-formed `Outcome`. This is NOT a numerical-parity gate (no reference
+  `generate()` run exists to compare against - HF's own sampling/beam-search
+  machinery is out of scope to replicate byte-exact) and NOT a semantic
+  check (a synthetic gradient image has no real UI element to find) -
+  real-screenshot acceptance (a Betalo screenshot's "Get started / Add
+  card" button actually landing where the returned bbox says) is still
+  open, tracked below.
+
+  **Still open for M5**: CLI wiring (`ARCH_TO_MODEL` row in
+  `crates/cli/src/resolve.rs`, matching `scrfd`'s - no dedicated
+  `florence2_cli.rs` needed, since `ground` is florence2's only action and
+  the generic `capability::Registry` dispatch already covers a
+  single-action model with no extra CLI verbs, exactly like `scrfd` has
+  none), the model-store `ArchSpec` (`crates/florence2/src/spec.rs` -
+  classify a directory by `config.json`'s `model_type=="florence2"` or the
+  checkpoint's own distinctive tensor names, mirroring `scrfd::spec`/
+  `clip::spec`), `crates/arch/src/lib.rs`'s `ARCHS` row (`general.
+  architecture` id `"florence2"` - the HF config's own `model_type`, no
+  GGUF/llama.cpp conversion exists upstream to take an id from, confirmed
+  via an open unresolved llama.cpp issue - so the row omits `gguf`,
+  defaulting to `id` itself as the reserved spelling), and the residency
+  adapter (`crates/cli/src/resident_florence2.rs` + the two-file catalog
+  registration in `crates/catalog/src/lib.rs`/`crates/cli/src/catalog.rs`
+  - `resident_scrfd.rs` is the template, with `MemCost::estimate` needing
+  its own generous-bound reasoning since this crate's own decoder recomputes
+  its full prefix every generation step, not a fixed graph like scrfd's).
+  Each of these is cross-crate registry wiring rather than florence2-crate
+  logic, and none of them block `florence2::caps::Florence2Provider` from
+  being used directly (which is what `ground_smoke.rs` already does) - left
+  as the concrete, scoped remainder of M5 rather than silently dropped.
 - **M6**: LoRA + full fine-tune, single/batch overfit-to-zero gradcheck -
   lower priority than M1-M5 for the grounding-only use case, required by
   this repo's blanket per-model policy.
@@ -234,9 +293,16 @@ self-consistent.
 
 ## Open gaps to track (not blocking, recorded so they aren't lost)
 
-- GPU (wgpu) validation: implemented alongside CPU (same kernels/builders),
-  but this dev box has no GPU at all - real-weight GPU parity is an open
-  gap until validated on hardware that has one.
+- GPU (wgpu) validation: implemented alongside CPU (same kernels/builders).
+  All cosine-gated parity tests (M1-M3) run on the CPU-JIT backend
+  explicitly (`Gpu::new_cpu`); `ground_smoke.rs` (M5) uses the default
+  device selection and, on this environment, that resolved to a real GPU
+  (Intel Arc via Vulkan) and completed the full pipeline successfully - a
+  useful signal the GPU dispatch path is at least FUNCTIONAL, but not a
+  numerical-parity result (that test has no cosine gate, only "runs to
+  completion" + shape checks). Real-weight GPU parity (the same cosine
+  >=0.999 checks M1-M3 pass on CPU, re-run with `Gpu::new` instead of
+  `Gpu::new_cpu`) is still the open gap.
 - NPU: deferred unless it's a straightforward reuse of existing NPU
   plumbing (see `yolov8`/`zipdepth`'s Intel-NPU paths) - otherwise
   explicitly out of scope for now, not silently dropped.

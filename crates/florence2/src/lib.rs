@@ -12,7 +12,9 @@
 //! from-scratch kernel authoring - see each module's own doc for which
 //! existing piece it reuses.
 
+pub mod caps;
 pub mod grounding;
+pub mod import;
 pub mod text;
 pub mod tokenizer;
 pub mod vision;
