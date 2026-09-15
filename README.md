@@ -359,6 +359,7 @@ including those.
 | [`brain/scrfd`](docs/models/scrfd.md) | Vision | face detection (boxes, scores, 5-point landmarks) |
 | [`brain/arcface`](docs/models/arcface.md) | Vision | face identity embedding (512-d, cosine-ready) |
 | [`brain/clip`](docs/models/clip.md) | Vision | text/image embeddings |
+| [`brain/florence2`](docs/models/florence2.md) | Vision | phrase/UI-element grounding: text query + image -> bounding box |
 | [`Tongyi-MAI/Z-Image-Turbo`](docs/models/s3dit.md) | Image | text-to-image diffusion (S3-DiT) |
 | [`brain/flux2-klein`](docs/models/flux2.md) | Image | text-to-image + editing (MMDiT) |
 | [`brain/codeformer`](docs/models/codeformer.md) | Image | blind face restoration |
