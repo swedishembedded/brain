@@ -1024,20 +1024,39 @@ pub(crate) fn head_logits_on(
     head: &Weight,
     hidden_row: &[f32],
 ) -> Vec<f32> {
+    head_logits_rows_on(g, ops, cfg, final_norm_buf, head, hidden_row, 1)
+}
+
+/// [`head_logits_on`] over a `[rows, d_model]` block, returning
+/// `[rows, vocab]` - the batched-decode form, where the whole batch's final
+/// norm and head projection are one dispatch each instead of `rows` of them.
+///
+/// That matters more here than anywhere else in the decode tape: the head is
+/// the single largest weight this model has, so projecting `rows` separate
+/// rows through it reads it `rows` times, which would put back per sequence
+/// exactly the traffic batching the body just took out.
+pub(crate) fn head_logits_rows_on(
+    g: &Gpu,
+    ops: &model::ops::Ops,
+    cfg: &Qwen35Config,
+    final_norm_buf: &DeviceBuffer,
+    head: &Weight,
+    hidden: &[f32],
+    rows: u32,
+) -> Vec<f32> {
     let d = cfg.d_model as usize;
-    assert_eq!(hidden_row.len(), d, "head_logits_on: hidden_row must be one [d_model] row");
-    let x = g.storage_init("qwen35.head.row", hidden_row);
-    let normed = g.storage(d as u64);
-    // Through the decode tape's own RMSNorm seam: this is a ONE-ROW norm on the
-    // served path, the exact shape the per-element kernel is worst at.
-    g.submit(&[], &[crate::model::rms_step(g, &x, final_norm_buf, &normed, d as u32, 1)]);
+    assert!(rows > 0, "head_logits_rows_on: rows must be > 0");
+    assert_eq!(hidden.len(), rows as usize * d, "head_logits_rows_on: hidden must be exactly {rows} [d_model] rows");
+    let x = g.storage_init("qwen35.head.rows", hidden);
+    let normed = g.storage(rows as u64 * d as u64);
+    g.submit(&[], &[crate::model::rms_step(g, &x, final_norm_buf, &normed, d as u32, rows)]);
 
     let mut s = Vec::new();
-    let act = ops.act(&mut s, &normed, 0, 1, d as u32);
-    let logits_buf = g.storage(cfg.vocab as u64);
+    let act = ops.act(&mut s, &normed, 0, rows, d as u32);
+    let logits_buf = g.storage(rows as u64 * cfg.vocab as u64);
     ops.matmul(&mut s, head, &act, &logits_buf, 0);
     g.submit(&[], &s);
-    g.read(&logits_buf, cfg.vocab as usize)
+    g.read(&logits_buf, rows as usize * cfg.vocab as usize)
 }
 
 /// Real end-to-end generation: tokenize `prompt` (`tokenizer_path`, `data::

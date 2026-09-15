@@ -67,7 +67,7 @@ fn main() {
 
     let mg = MmapGguf::open(&path).unwrap_or_else(|e| panic!("open the checkpoint: {e}"));
     let cfg = resident_config(&mg, CAP).expect("resident_config");
-    let cost = layer_cost(&cfg, CAP, &tier);
+    let cost = layer_cost(&cfg, CAP, &tier, 1);
     let weight_bytes = cost.total();
     drop(mg);
 

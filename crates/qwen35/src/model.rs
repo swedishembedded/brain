@@ -2986,6 +2986,18 @@ impl Qwen35 {
         self.gpu.read(&hidden, self.cfg.d_model as usize)
     }
 
+    /// [`Self::decode_step_stage`] for a BATCH: one decode token for each of
+    /// `tokens.len()` independent sequences through THIS stage, staged to the
+    /// host as the whole `[bsz, d_model]` boundary block.
+    ///
+    /// One host round trip per stage per STEP, where the per-sequence form
+    /// pays one per stage per sequence per step - which is the same ratio, on
+    /// the pipeline seam, that [`Self::run_decode_batch`] buys inside a stage.
+    pub(crate) fn decode_batch_stage(&self, tokens: &[u32], caches: &BatchDecodeCaches, input_override: Option<&[f32]>) -> Vec<f32> {
+        let hidden = self.run_decode_batch(tokens, caches, input_override);
+        self.gpu.read(&hidden, tokens.len() * self.cfg.d_model as usize)
+    }
+
     /// Device-side head epilogue: `logits[vocab] = hidden[d_model] @
     /// head[vocab, d_model]^T` - the SAME `MATMUL` dispatch [`Self::
     /// run_forward`]'s head epilogue and [`Self::logits_all`] already issue,

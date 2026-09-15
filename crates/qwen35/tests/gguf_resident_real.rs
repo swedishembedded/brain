@@ -34,6 +34,7 @@ use model::shard::Shard;
 use qwen35::config::{LayerType, Qwen35Config};
 use qwen35::int8_gguf_resident::{endpoint_names, layer_cost, resident_config, shard_fetch_plan, shard_source, Qwen35GgufResident};
 use residency::multi::MultiDeviceResidentModel;
+use residency::model::Instance;
 use residency::{Device, ResidentModel};
 
 /// `prompt + max_new` capacity used by the tests here. Small on purpose: it
@@ -194,7 +195,7 @@ fn the_real_checkpoint_plans_across_the_real_cards() {
     }
     let mg = MmapGguf::open(&path).unwrap_or_else(|e| panic!("open {path}: {e}"));
     let cfg = resident_config(&mg, CAP).expect("resident_config");
-    let cost = layer_cost(&cfg, CAP, &TierPolicy::uniform(Dtype::I8));
+    let cost = layer_cost(&cfg, CAP, &TierPolicy::uniform(Dtype::I8), 1);
     println!("qwen35 gguf resident: cap={CAP}");
     println!("  total device bytes : {} ({:.2} GiB)", cost.total(), cost.total() as f64 / (1u64 << 30) as f64);
     println!("  embed              : {:.2} GiB", cost.embed as f64 / (1u64 << 30) as f64);
@@ -383,6 +384,118 @@ fn the_two_card_stack_continues_a_factual_prompt_correctly() {
         text.contains("Paris"),
         "the two-card int8 stack must continue \"The capital city of France is\" with Paris, got {text:?} \
          - see this test's own doc comment for what has already been ruled out"
+    );
+}
+
+/// **The batched-decode gate, on the real checkpoint.** Several DIFFERENT
+/// factual prompts, submitted as one `Instance::run_batch` call, must each get
+/// its own right answer - and the call must report a real aggregate decode
+/// rate above what the same prompts get one at a time.
+///
+/// Two independent things are being checked and they fail in different ways:
+///
+/// * **Correctness.** Every row must answer ITS OWN question. A batched decode
+///   step carries four sequences' rows through one dispatch set, sharing one
+///   KV pool (each row addressed by its own physical block) and one batched
+///   Gated-DeltaNet state slab (each row gathered in and scattered back). A
+///   row reading another row's slice of either would still produce fluent
+///   text - it would just be answering the wrong question, or a blend - which
+///   is exactly what four distinct, unambiguous factual questions catch and a
+///   single repeated prompt never could.
+/// * **Throughput.** The whole point of batching a decode step is that its
+///   cost is dominated by reading every weight in the model, and those reads
+///   are shared by the batch. The numbers are printed, and the aggregate rate
+///   is asserted only to BEAT the serial one - not to hit a target, which is a
+///   property of the card, not of this code.
+///
+/// The serial baseline is the same four prompts through the same instance, one
+/// `run` call each, so the comparison is on one load of one checkpoint on one
+/// set of cards.
+#[test]
+fn batched_decode_answers_each_prompt_and_beats_serial_throughput() {
+    let Some(path) = gguf_path() else { return };
+    let devices = real_devices();
+    if devices.len() < 2 {
+        brain_testutil::skip_unavailable(&format!("this gate wants a MULTI-card load; this box has {} usable GPU(s)", devices.len()));
+        return;
+    }
+    // Eight unambiguous questions with eight DIFFERENT answers, at
+    // deliberately different prompt lengths - equal lengths would make a
+    // stale-`seq_lens` or off-by-one causal bound invisible, since every row
+    // would then want the same bound anyway.
+    let asks: [(&str, &str); 8] = [
+        ("The capital city of France is", "Paris"),
+        ("The largest planet in our solar system is called", "Jupiter"),
+        ("Water freezes at a temperature of zero degrees", "Celsius"),
+        ("The chemical symbol for gold is", "Au"),
+        ("The tallest mountain above sea level on Earth is Mount", "Everest"),
+        ("The ocean that lies between Africa and Australia is the", "Indian"),
+        ("In the year 1969 the first human being to walk on the", "Moon"),
+        ("The programming language created by Guido van Rossum is called", "Python"),
+    ];
+    const NEW: usize = 8;
+
+    let r = Qwen35GgufResident::new(path, devices, CAP, TierPolicy::uniform(Dtype::I8)).with_max_batch(asks.len() as u32);
+    let key = r.instance_key("generate", &capability::Invocation::new());
+    let placed: Vec<Device> = r.estimate_multi(&key).devices().collect();
+    println!("  batched decode: max_batch={}, placed on {} card(s)", r.max_batch(), placed.len());
+    let mut inst = r.activate_multi(&key, &placed).expect("activate the real checkpoint across the real cards");
+
+    let inv_for = |prompt: &str| {
+        capability::Invocation::new()
+            .set("prompt", serde_json::json!(prompt))
+            .set("chat", serde_json::json!(false))
+            .set("max_new", serde_json::json!(NEW))
+            .set("temp", serde_json::json!(0.0))
+    };
+    // The answer WORD is what is being checked, not its casing: a
+    // mid-sentence continuation legitimately writes "moon" where a sentence
+    // start would write "Moon", and that is the model's business, not this
+    // gate's.
+    let answers = |text: &str, want: &str| text.to_lowercase().contains(&want.to_lowercase());
+    let decode_rate = |inst: &dyn Instance| -> (f64, f64) {
+        let m: std::collections::HashMap<String, serde_json::Value> = inst.metrics().into_iter().collect();
+        (m["decode_tokens"].as_f64().unwrap_or(0.0), m["decode_seconds"].as_f64().unwrap_or(0.0))
+    };
+
+    // --- serial baseline: one `run` per prompt, same instance -------------
+    let mut serial_tokens = 0.0;
+    let mut serial_seconds = 0.0;
+    for (prompt, want) in asks {
+        let out = inst.run("generate", &inv_for(prompt), &mut |_| {}).expect("serial generate");
+        let text = out.outputs["text"].as_str().unwrap_or_default().to_string();
+        println!("  serial  {prompt:?} -> {text:?}");
+        assert!(answers(&text, want), "serial: {prompt:?} must continue with {want:?}, got {text:?}");
+        let (t, s) = decode_rate(inst.as_ref());
+        serial_tokens += t;
+        serial_seconds += s;
+    }
+    let serial_rate = serial_tokens / serial_seconds;
+    println!("  serial  aggregate: {serial_tokens} decode tok in {serial_seconds:.2} s = {serial_rate:.2} tok/s");
+
+    // --- batched: all of them in ONE run_batch call -----------------------
+    let invs: Vec<capability::Invocation> = asks.iter().map(|&(p, _)| inv_for(p)).collect();
+    let outs = inst.run_batch("generate", &invs, &mut |_, _| {});
+    assert_eq!(outs.len(), asks.len(), "run_batch must return one result per request");
+    let (batched_tokens, batched_seconds) = decode_rate(inst.as_ref());
+    let batched_rate = batched_tokens / batched_seconds;
+    for (i, (prompt, want)) in asks.iter().enumerate() {
+        let out = outs[i].as_ref().unwrap_or_else(|e| panic!("batched request {i} ({prompt:?}) failed: {e}"));
+        let text = out.outputs["text"].as_str().unwrap_or_default().to_string();
+        println!("  batched {prompt:?} -> {text:?}");
+        assert!(
+            answers(&text, want),
+            "batched request {i}: {prompt:?} must continue with {want:?}, got {text:?} - a row answering the WRONG \
+             question means the batch mixed per-sequence state (KV pool window or Gated-DeltaNet slab)"
+        );
+    }
+    println!("  batched aggregate: {batched_tokens} decode tok in {batched_seconds:.2} s = {batched_rate:.2} tok/s");
+    println!("  speedup at batch {}: {:.2}x", asks.len(), batched_rate / serial_rate);
+    assert!(
+        batched_rate > serial_rate,
+        "a batch of {} must decode at a HIGHER aggregate rate than the same prompts served one at a time \
+         ({batched_rate:.2} vs {serial_rate:.2} tok/s) - if it does not, the batch is not sharing the weight reads",
+        asks.len()
     );
 }
 
@@ -592,7 +705,7 @@ fn the_real_checkpoints_cost_model_is_reported() {
     let Some(path) = gguf_path() else { return };
     let mg = MmapGguf::open(&path).unwrap_or_else(|e| panic!("open {path}: {e}"));
     let cfg = resident_config(&mg, CAP).expect("resident_config");
-    let cost = layer_cost(&cfg, CAP, &TierPolicy::uniform(Dtype::I8));
+    let cost = layer_cost(&cfg, CAP, &TierPolicy::uniform(Dtype::I8), 1);
     let gdn = cfg.layer_types().iter().position(|t| *t == LayerType::Linear).unwrap();
     let gqa = cfg.layer_types().iter().position(|t| *t == LayerType::Full).unwrap();
     println!("  per-layer GDN: {} bytes, GQA: {} bytes", cost.per_layer[gdn], cost.per_layer[gqa]);
