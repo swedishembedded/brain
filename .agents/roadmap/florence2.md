@@ -295,9 +295,65 @@ self-consistent.
   `crates/cli/tests/flops_coverage.rs`'s coverage gate was failing on a
   clean build before this session touched anything - fixed on the spot
   (own commit, unrelated to florence2 itself) rather than left broken.
-- **M6**: LoRA + full fine-tune, single/batch overfit-to-zero gradcheck -
-  lower priority than M1-M5 for the grounding-only use case, required by
-  this repo's blanket per-model policy.
+- **M6 - scoped, not yet implemented**: LoRA + full fine-tune, single/batch
+  overfit-to-zero gradcheck. Lower priority than M1-M5 for the
+  grounding-only use case (inference-only - `ground` does not need this),
+  required by this repo's blanket per-model policy. Deliberately NOT
+  attempted in the same push as M1-M5: a backward pass this codebase can
+  actually trust needs the same real-weight-parity discipline as the
+  forward passes above, and a rushed, unverified gradient implementation
+  would be worse than an honestly-scoped gap - `gradcheck/deepseekocr.rs`
+  exists specifically because kernel-level finite-difference checks catch
+  bugs a "looks plausible" backward pass does not.
+
+  **Real scoping research already done, so the next session starts from a
+  plan instead of a blank page**:
+  - **Precedent for the right shape**: `deepseek2ocr` (also a vision+text
+    composite in this repo) trains ONLY its decoder's LoRA adapters -
+    `crates/deepseek2ocr/src/train.rs`'s own doc confirms the SAM vision
+    tower is a frozen feature extractor with no backward/LoRA at all. The
+    same split is the right one here: DaViT stays frozen (it is a
+    pretrained visual feature extractor, not what grounding fine-tuning
+    would realistically target), LoRA adapts the BART text side only. This
+    is not a scope cut invented for convenience - it is the established
+    pattern the closest sibling model in this repo already uses.
+  - **The LoRA forward/backward pattern to copy**: `deepseek2::model::
+    DeepseekV2::lora_fwd`/`lora_bwd` (`crates/deepseek2/src/model.rs`) -
+    `lora_a_out = x @ A` (`matmul`), `lora_out = lora_a_out @ B` added to
+    the frozen projection's output; backward recomputes `lora_a_out`
+    (cheap, rank `r` is small), scales it, and `matmul_dw(d_out,
+    lora_a_out) -> dB`. `crates/gpu-core/src/cost.rs`'s `lora_delta`
+    formula (added this session, see the earlier commit) prices the
+    runtime-composed variant of the same idea.
+  - **Backward kernels confirmed to already exist for THIS crate's exact
+    (non-fused, separate Q/K/V buffer) attention shape** - `text::attn`'s
+    forward was built from `attn_scores_cross`/`attn_softmax{,_cross}`/
+    `attn_apply_cross`, and each has a real adjoint already in
+    `crates/kernels`: `attn_bwd_dscores_cross[_rows]`, `attn_bwd_dq_cross`,
+    `attn_bwd_dk_cross[_acc]`, `attn_bwd_dv_cross[_acc]` (`CrossBwdIds` in
+    `model::block` wraps these for the FUSED-qkv case `chunked_bidir_bwd`
+    needs; this crate would call the four kernels directly against its own
+    separate buffers, the same way `text::attn`'s forward calls
+    `cross_scores_step`/`attn_apply_cross` directly rather than going
+    through `chunked_bidir_fwd`'s fused wrapper).
+  - **Everything else needed already exists as a generic primitive**:
+    `layernorm_dx`/`layernorm_dgamma`/`layernorm_dbeta`, `matmul_dx`/
+    `matmul_dw`, `gelu_erf_bwd`, `ce_grad`/`ce_grad_stats` (cross-entropy
+    loss + gradient over the decoder's logits vs. teacher-forced targets -
+    the actual training objective), `crates/optim` for the optimizer step.
+  - **What is genuinely new work, not composition**: threading `d_x`
+    through every sublayer of `text::encoder`/`text::decoder` in reverse
+    (residual-add backward is trivial, but the buffer-aliasing discipline
+    `text::encoder`'s own module doc already had to learn the hard way for
+    the FORWARD pass applies equally to backward scratch buffers), the
+    embedding table's gradient (a scatter-ACCUMULATE over `shared.weight`'s
+    rows touched by both the vision-token gather... no, only the TEXT
+    tokens touch `shared.weight` at all - vision tokens are a projection
+    output, not a gather - so this is scoped to exactly the prompt +
+    decoder-input token positions), and the actual training-loop plumbing
+    (`crates/florence2/src/train.rs`, an optimizer step, and the
+    single-example / batch overfit-to-zero test harness itself, mirroring
+    `deepseek2ocr::train`'s shape).
 - **M7**: docs (`docs/models/florence2.md`, README entry, excluded from
   quickstart).
 
