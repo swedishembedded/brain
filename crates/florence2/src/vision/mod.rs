@@ -10,6 +10,7 @@
 pub mod block;
 pub mod channel_attn;
 pub mod config;
+pub mod davit;
 pub mod dwconv;
 pub mod mlp;
 pub mod patch_embed;
@@ -19,4 +20,5 @@ pub mod window_attn;
 pub use block::{ChannelBlock, ChannelBlockKernelIds, SpatialBlock, SpatialBlockKernelIds};
 pub use channel_attn::{ChannelAttn, ChannelAttnKernelIds};
 pub use config::{DavitConfig, DavitPatchSpec, DavitStageSpec};
+pub use davit::{Davit, DavitKernelIds};
 pub use patch_embed::{PatchEmbed, PatchEmbedKernelIds};
