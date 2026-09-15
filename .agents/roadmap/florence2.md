@@ -3,7 +3,9 @@
 **Status: M1 done. M2 done (patch embed, SpatialBlock, ChannelBlock, full
 DaViT tower, and the vision-token projection wrapper all verified against
 real weights end to end - see below). M3 done (BART encoder-decoder +
-greedy generation, verified against real weights). M4 done. M5/M6/M7 not
+greedy generation, verified against real weights). M4 done. M5 done
+(`ground` capability action + real import path + CLI/residency/model-store
+registry wiring, verified end to end including a real GPU run). M6/M7 not
 started.**
 
 ## Goal
@@ -220,8 +222,7 @@ self-consistent.
   dependency - 7 unit tests, no real-checkpoint gate needed since it has no
   checkpoint dependency at all.
 
-- **M5 - capability action done; CLI/residency/arch-registry wiring not
-  yet done**: `florence2::caps::ground` (`crates/florence2/src/caps.rs`),
+- **M5 (done)**: `florence2::caps::ground` (`crates/florence2/src/caps.rs`),
   modeled directly on `scrfd::caps`'s `detect` shape (`Outcome` JSON, no
   output blob, a `Provider` + hot-instance-caching `Action` behind a
   `Mutex`). `crates/florence2/src/import.rs::build_param_source` is the
@@ -263,28 +264,37 @@ self-consistent.
   card" button actually landing where the returned bbox says) is still
   open, tracked below.
 
-  **Still open for M5**: CLI wiring (`ARCH_TO_MODEL` row in
-  `crates/cli/src/resolve.rs`, matching `scrfd`'s - no dedicated
-  `florence2_cli.rs` needed, since `ground` is florence2's only action and
-  the generic `capability::Registry` dispatch already covers a
-  single-action model with no extra CLI verbs, exactly like `scrfd` has
-  none), the model-store `ArchSpec` (`crates/florence2/src/spec.rs` -
-  classify a directory by `config.json`'s `model_type=="florence2"` or the
-  checkpoint's own distinctive tensor names, mirroring `scrfd::spec`/
-  `clip::spec`), `crates/arch/src/lib.rs`'s `ARCHS` row (`general.
-  architecture` id `"florence2"` - the HF config's own `model_type`, no
-  GGUF/llama.cpp conversion exists upstream to take an id from, confirmed
-  via an open unresolved llama.cpp issue - so the row omits `gguf`,
-  defaulting to `id` itself as the reserved spelling), and the residency
-  adapter (`crates/cli/src/resident_florence2.rs` + the two-file catalog
-  registration in `crates/catalog/src/lib.rs`/`crates/cli/src/catalog.rs`
-  - `resident_scrfd.rs` is the template, with `MemCost::estimate` needing
-  its own generous-bound reasoning since this crate's own decoder recomputes
-  its full prefix every generation step, not a fixed graph like scrfd's).
-  Each of these is cross-crate registry wiring rather than florence2-crate
-  logic, and none of them block `florence2::caps::Florence2Provider` from
-  being used directly (which is what `ground_smoke.rs` already does) - left
-  as the concrete, scoped remainder of M5 rather than silently dropped.
+  **Cross-crate wiring (also done)**: `crates/florence2/src/spec.rs`
+  (the model-store `ArchSpec` - classifies a directory by its own
+  `config.json`'s `model_type=="florence2"`, never by path, mirroring
+  `scrfd::spec`/`clip::spec`); `crates/arch/src/lib.rs`'s `ARCHS` row
+  (`general.architecture` id `"florence2"` - the HF config's own
+  `model_type`, no GGUF/llama.cpp conversion exists upstream to take an id
+  from, confirmed via an open unresolved llama.cpp issue - so the row omits
+  `gguf`, defaulting to `id` itself as the reserved spelling); `resolve.rs`'s
+  `ARCH_TO_MODEL` row (no dedicated `florence2_cli.rs` needed, since
+  `ground` is florence2's only action and the generic `capability::Registry`
+  dispatch already covers that, exactly like `scrfd` has none - and `scrfd`
+  itself, despite having a `spec.rs`, is NOT in `RESOLVER_MIGRATED_ARCHS`
+  either, confirming that table is a separate, larger migration this crate
+  correctly stays out of for now); the residency adapter
+  (`crates/cli/src/resident_florence2.rs` + the two-file catalog
+  registration in `crates/catalog/src/lib.rs`/`crates/cli/src/catalog.rs` -
+  `resident_scrfd.rs` is the template, with `MemCost::estimate` needing its
+  own generous-bound reasoning since this crate's own decoder recomputes its
+  full prefix every generation step, not a fixed graph like scrfd's).
+  `brain do florence2 ground` (and the residency-served transports) is now
+  actually reachable, not just usable from Rust test code.
+
+  Verified: `brain-arch`'s 21 registry-invariant tests, `brain-catalog`'s 9
+  tests, and the full `brain-cli` test suite (360 passed) all pass with
+  florence2 wired in; the full workspace (`brain-cli`, which aggregates
+  everything) builds clean. A real, unrelated pre-existing gap was found and
+  fixed along the way: `wan`/`flux2` both dispatch the `lora_delta` kernel
+  but `gpu-core`'s cost-formula table never gained an entry for it, so
+  `crates/cli/tests/flops_coverage.rs`'s coverage gate was failing on a
+  clean build before this session touched anything - fixed on the spot
+  (own commit, unrelated to florence2 itself) rather than left broken.
 - **M6**: LoRA + full fine-tune, single/batch overfit-to-zero gradcheck -
   lower priority than M1-M5 for the grounding-only use case, required by
   this repo's blanket per-model policy.
