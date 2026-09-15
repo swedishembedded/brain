@@ -2648,6 +2648,11 @@ impl Qwen35 {
             // measured before/after at both scales.
             g.poll_wait();
             g.flush();
+            if std::env::var_os("QWEN35_DEBUG_LAYER_RMS").is_some() {
+                let last_row = g.read(&res, (n * d) as usize)[((n - 1) * d) as usize..].to_vec();
+                let rms = (last_row.iter().map(|v| v * v).sum::<f32>() / last_row.len() as f32).sqrt();
+                eprintln!("qwen35::run_prefill_chunk_stage: pos_start={pos_start} n={n} layer {l} ({ty:?}) last-row rms = {rms}");
+            }
         }
         if std::env::var("QWEN35_DEBUG_SCRATCH_HELD").is_ok() {
             let (n_slots, words) = g.scratch_held();
@@ -3686,6 +3691,333 @@ mod tests {
             let got = decode_stage(&stage1, (tok + 1) % cfg.vocab, pos, Some(&boundary));
             assert_eq!(got, want, "pos {pos}: two-shard decode diverged from the whole-shard model");
         }
+    }
+
+    /// A chunked-prefill round at the INT8 tier, wide enough to cross the
+    /// register-tiled `matmul_i8_dyn` GEMM's own 128-row tile boundary, must
+    /// match a token-by-token replay of the same prompt - the INT8 twin of
+    /// [`two_shard_chunked_prefill_matches_token_by_token_replay`], which
+    /// only ever ran at FP32 (`Qwen35::new_fp32_shard_src`) with chunks of 4
+    /// rows, far short of `matmul_i8_dyn`/`matmul_q4_dyn_reg`'s 128-row tile
+    /// - so a defect specific to the multi-tile dispatch path (real
+    /// production rounds are 256 rows, `int8_gguf_resident::
+    /// MAX_PREFILL_TOKENS`) had no gate at any tier that actually dispatches
+    /// that kernel family.
+    #[test]
+    fn chunked_prefill_at_int8_matches_token_by_token_past_one_gemm_tile() {
+        let cfg = Qwen35Config { block_size: 320, max_position_embeddings: 320, ..Qwen35Config::tiny_i8() };
+        let t = cfg.block_size;
+        let d = cfg.d_model as usize;
+        let init = crate::init::init_weights(&cfg, 7);
+
+        let whole = Qwen35::new_i8(cfg.clone(), 1, t, &init);
+        let whole_chunked = Qwen35::new_i8(cfg.clone(), 1, t, &init);
+        whole.reset_decode_cache();
+        whole_chunked.reset_decode_cache();
+
+        // 260 tokens: past the 128-row tile once (128), then a second full
+        // tile (256), then a ragged remainder (4) - all three tile shapes
+        // `matmul_i8_dyn`'s dispatch grid must cover in one round.
+        let prompt: Vec<u32> = (0..260).map(|i| (i * 5 + 3) % cfg.vocab).collect();
+
+        let mut want_last = Vec::new();
+        for (i, &tok) in prompt.iter().enumerate() {
+            want_last = decode_stage(&whole, tok, i as u32, None);
+        }
+
+        let got = prefill_stage(&whole_chunked, &prompt, 0, None);
+        assert_eq!(got.len(), prompt.len() * d, "a whole-model chunk must hand back its whole [n, d_model] block");
+        let got_last = got[(prompt.len() - 1) * d..].to_vec();
+
+        let maxabs = |a: &[f32], b: &[f32]| a.iter().zip(b).fold(0.0f32, |m, (x, y)| m.max((x - y).abs()));
+        let worst = maxabs(&got_last, &want_last);
+        assert!(worst < 1e-4, "chunked int8 prefill past one GEMM tile diverged from token-by-token replay: maxabs={worst}, want={want_last:?}, got={got_last:?}");
+    }
+
+    /// SEVERAL rounds of exactly [`crate::int8_gguf_resident::
+    /// MAX_PREFILL_TOKENS`] (256), the real production round size, then a
+    /// few token-by-token DECODE steps continuing from that state - the
+    /// exact shape `int8_gguf_resident::Qwen35GgufInstance::replay_prompt`
+    /// drives on a real long prompt (`gguf_resident_real.rs`'s
+    /// `prefill_throughput_at_a_real_long_context`/
+    /// `decode_throughput_at_a_real_long_context`, both of which produce
+    /// REPEATING GARBAGE on the real 27B checkpoint at ~1500-1700 real
+    /// tokens - several 256-token rounds - despite the single-round test
+    /// above passing clean). If a defect only shows up ACROSS a round
+    /// boundary (GDN state or GQA cache carried wrong from one round to the
+    /// next), one round can never see it; this is the first gate that
+    /// replays MULTIPLE real-sized rounds and then decodes from the result.
+    #[test]
+    fn chunked_prefill_at_int8_matches_token_by_token_across_several_max_size_rounds() {
+        let cfg = Qwen35Config { block_size: 896, max_position_embeddings: 896, ..Qwen35Config::tiny_i8() };
+        let t = cfg.block_size;
+        let d = cfg.d_model as usize;
+        let init = crate::init::init_weights(&cfg, 7);
+
+        let whole = Qwen35::new_i8(cfg.clone(), 1, t, &init);
+        let whole_chunked = Qwen35::new_i8(cfg.clone(), 1, t, &init);
+        whole.reset_decode_cache();
+        whole_chunked.reset_decode_cache();
+
+        // 3 rounds of the real MAX_PREFILL_TOKENS size (256, 256, 256), then
+        // a ragged one (68) - mirrors a real ~836-token prompt.
+        let prompt: Vec<u32> = (0..836).map(|i| (i * 5 + 3) % cfg.vocab).collect();
+        let tail: Vec<u32> = (0..6).map(|i| (i * 7 + 1) % cfg.vocab).collect();
+
+        let mut want_last = Vec::new();
+        for (i, &tok) in prompt.iter().enumerate() {
+            want_last = decode_stage(&whole, tok, i as u32, None);
+        }
+        let want_tail: Vec<Vec<f32>> = tail.iter().enumerate().map(|(i, &tok)| decode_stage(&whole, tok, (prompt.len() + i) as u32, None)).collect();
+
+        let mut pos = 0u32;
+        let mut got_last = Vec::new();
+        for round in prompt.chunks(256) {
+            let out = prefill_stage(&whole_chunked, round, pos, None);
+            got_last = out[(round.len() - 1) * d..].to_vec();
+            pos += round.len() as u32;
+        }
+        let got_tail: Vec<Vec<f32>> = tail.iter().enumerate().map(|(i, &tok)| decode_stage(&whole_chunked, tok, (prompt.len() + i) as u32, None)).collect();
+
+        let maxabs = |a: &[f32], b: &[f32]| a.iter().zip(b).fold(0.0f32, |m, (x, y)| m.max((x - y).abs()));
+        let mut worst = maxabs(&got_last, &want_last);
+        assert!(worst < 1e-4, "multi-round chunked int8 prefill diverged from token-by-token replay at the prompt's last token: maxabs={worst}");
+        for (i, (got, want)) in got_tail.iter().zip(&want_tail).enumerate() {
+            let err = maxabs(got, want);
+            worst = worst.max(err);
+            assert!(err < 1e-4, "decode step {i} after multi-round chunked prefill diverged: maxabs={err} (a round boundary left GDN/GQA state wrong)");
+        }
+        println!("multi-round chunked int8 prefill: worst maxabs = {worst:e}");
+    }
+
+    /// A ragged LAST round whose length is not a multiple of anything
+    /// `model::gdn::gdn_chunk_size` tries but 1 (a prime `n`) - the case a
+    /// round of 256 or 68 (both multiples of 4, this file's other fixtures)
+    /// never exercises. Real long prompts hit exactly this: 1731 tokens
+    /// (`prefill_throughput_at_a_real_long_context`) leaves a 195-token
+    /// last round, and 1555 tokens (`decode_throughput_at_a_real_long_context`)
+    /// leaves 19 - `gdn_chunk_size(195)` and `gdn_chunk_size(19)` both fall
+    /// through every candidate in `[64,32,16,8,4,2,1]` to plain 1, since
+    /// neither is even. Both of those real runs produce repeating garbage;
+    /// every OTHER gate in this file (including the one directly above)
+    /// happens to only ever use ragged remainders divisible by 4.
+    #[test]
+    fn chunked_prefill_at_int8_matches_token_by_token_with_a_prime_length_ragged_round() {
+        let cfg = Qwen35Config { block_size: 560, max_position_embeddings: 560, ..Qwen35Config::tiny_i8() };
+        let t = cfg.block_size;
+        let d = cfg.d_model as usize;
+        let init = crate::init::init_weights(&cfg, 7);
+
+        let whole = Qwen35::new_i8(cfg.clone(), 1, t, &init);
+        let whole_chunked = Qwen35::new_i8(cfg.clone(), 1, t, &init);
+        whole.reset_decode_cache();
+        whole_chunked.reset_decode_cache();
+
+        // 256 + 256 + 13 = 525: the last round (13) is prime, so
+        // `gdn_chunk_size(13)` collapses to 1.
+        let prompt: Vec<u32> = (0..525).map(|i| (i * 5 + 3) % cfg.vocab).collect();
+        let tail: Vec<u32> = (0..6).map(|i| (i * 7 + 1) % cfg.vocab).collect();
+
+        let mut want_last = Vec::new();
+        for (i, &tok) in prompt.iter().enumerate() {
+            want_last = decode_stage(&whole, tok, i as u32, None);
+        }
+        let want_tail: Vec<Vec<f32>> = tail.iter().enumerate().map(|(i, &tok)| decode_stage(&whole, tok, (prompt.len() + i) as u32, None)).collect();
+
+        let mut pos = 0u32;
+        let mut got_last = Vec::new();
+        for round in prompt.chunks(256) {
+            let out = prefill_stage(&whole_chunked, round, pos, None);
+            got_last = out[(round.len() - 1) * d..].to_vec();
+            pos += round.len() as u32;
+        }
+        let got_tail: Vec<Vec<f32>> = tail.iter().enumerate().map(|(i, &tok)| decode_stage(&whole_chunked, tok, (prompt.len() + i) as u32, None)).collect();
+
+        let maxabs = |a: &[f32], b: &[f32]| a.iter().zip(b).fold(0.0f32, |m, (x, y)| m.max((x - y).abs()));
+        let mut worst = maxabs(&got_last, &want_last);
+        assert!(worst < 1e-4, "chunked int8 prefill with a prime-length ragged round diverged at the prompt's last token: maxabs={worst}");
+        for (i, (got, want)) in got_tail.iter().zip(&want_tail).enumerate() {
+            let err = maxabs(got, want);
+            worst = worst.max(err);
+            assert!(err < 1e-4, "decode step {i} after a prime-length ragged round diverged: maxabs={err}");
+        }
+        println!("prime-ragged-round chunked int8 prefill: worst maxabs = {worst:e}");
+    }
+
+    /// The same multi-round chunked-prefill-vs-token-by-token comparison as
+    /// the two tests above, but at REAL `qwen38_27b` magnitude for every
+    /// dimension that could plausibly gate a kernel's correctness on its own
+    /// size (`d_model=5120`, GQA `head_dim=256`/`n_heads=24`/`n_kv_heads=4`,
+    /// GDN `linear_key_head_dim=128`/`linear_value_head_dim=128`/
+    /// `linear_num_key_heads=16`/`linear_num_value_heads=48`,
+    /// `intermediate_size=17408`) - only `vocab`/`n_layers` shrink, purely to
+    /// keep a RANDOM-weight run affordable (real weight VALUES are not the
+    /// suspect; `tiny_i8`-scale versions of every test above already passed
+    /// clean, so if this one diverges too the defect is tied to real
+    /// MAGNITUDE, not to the real trained checkpoint's own numbers).
+    #[test]
+    fn chunked_prefill_at_int8_matches_token_by_token_at_real_qwen38_27b_dims() {
+        let cfg = Qwen35Config { vocab: 320, n_layers: 4, block_size: 560, max_position_embeddings: 560, ..Qwen35Config::qwen38_27b() };
+        let t = cfg.block_size;
+        let d = cfg.d_model as usize;
+        let init = crate::init::init_weights(&cfg, 7);
+
+        let whole = Qwen35::new_i8(cfg.clone(), 1, t, &init);
+        let whole_chunked = Qwen35::new_i8(cfg.clone(), 1, t, &init);
+        whole.reset_decode_cache();
+        whole_chunked.reset_decode_cache();
+
+        // Same shape as the prime-ragged-round test: 256 + 256 + 13.
+        let prompt: Vec<u32> = (0..525).map(|i| (i * 5 + 3) % cfg.vocab).collect();
+        let tail: Vec<u32> = (0..6).map(|i| (i * 7 + 1) % cfg.vocab).collect();
+
+        let mut want_last = Vec::new();
+        for (i, &tok) in prompt.iter().enumerate() {
+            want_last = decode_stage(&whole, tok, i as u32, None);
+        }
+        let want_tail: Vec<Vec<f32>> = tail.iter().enumerate().map(|(i, &tok)| decode_stage(&whole, tok, (prompt.len() + i) as u32, None)).collect();
+
+        let mut pos = 0u32;
+        let mut got_last = Vec::new();
+        for round in prompt.chunks(256) {
+            let out = prefill_stage(&whole_chunked, round, pos, None);
+            got_last = out[(round.len() - 1) * d..].to_vec();
+            pos += round.len() as u32;
+        }
+        let got_tail: Vec<Vec<f32>> = tail.iter().enumerate().map(|(i, &tok)| decode_stage(&whole_chunked, tok, (prompt.len() + i) as u32, None)).collect();
+
+        let maxabs = |a: &[f32], b: &[f32]| a.iter().zip(b).fold(0.0f32, |m, (x, y)| m.max((x - y).abs()));
+        let mut worst = maxabs(&got_last, &want_last);
+        assert!(worst < 1e-3, "chunked int8 prefill at real qwen38_27b dims diverged at the prompt's last token: maxabs={worst}");
+        for (i, (got, want)) in got_tail.iter().zip(&want_tail).enumerate() {
+            let err = maxabs(got, want);
+            worst = worst.max(err);
+            assert!(err < 1e-3, "decode step {i} after real-dims chunked prefill diverged: maxabs={err}");
+        }
+        println!("real-dims chunked int8 prefill: worst maxabs = {worst:e}");
+    }
+
+    /// EVERY chunked-INT8 test above uses `init::init_weights`'s DEFAULT
+    /// decay, which this file's own `slow_decay` helper's doc says is
+    /// `~exp(-10)` per step - so close to total forgetting that the GDN
+    /// recurrent state is reset to ~0 every token regardless of how it is
+    /// replayed, and a bug that only shows up once state genuinely PERSISTS
+    /// across many tokens (the real checkpoint's own trained decay, which
+    /// must retain long-range memory to be useful at all) would be
+    /// completely invisible to it. This test is the same real-dims,
+    /// multi-round, INT8 chunked-vs-token-by-token comparison as
+    /// [`chunked_prefill_at_int8_matches_token_by_token_at_real_qwen38_27b_dims`],
+    /// with ONLY the decay retuned via `slow_decay` (`A_log = ln(0.05)`, the
+    /// same retuning the FP32 gate already applies) so the recurrent state
+    /// actually accumulates instead of resetting every step - the condition
+    /// `tests/gguf_resident_real.rs`'s real-checkpoint failure needs to
+    /// reproduce at all.
+    #[test]
+    fn chunked_prefill_at_int8_matches_token_by_token_with_persistent_gdn_state() {
+        let cfg = Qwen35Config { vocab: 320, n_layers: 4, block_size: 560, max_position_embeddings: 560, ..Qwen35Config::qwen38_27b() };
+        let t = cfg.block_size;
+        let d = cfg.d_model as usize;
+        let init = slow_decay(&cfg, crate::init::init_weights(&cfg, 7));
+
+        let whole = Qwen35::new_i8(cfg.clone(), 1, t, &init);
+        let whole_chunked = Qwen35::new_i8(cfg.clone(), 1, t, &init);
+        whole.reset_decode_cache();
+        whole_chunked.reset_decode_cache();
+
+        let prompt: Vec<u32> = (0..525).map(|i| (i * 5 + 3) % cfg.vocab).collect();
+        let tail: Vec<u32> = (0..6).map(|i| (i * 7 + 1) % cfg.vocab).collect();
+
+        let mut want_last = Vec::new();
+        for (i, &tok) in prompt.iter().enumerate() {
+            want_last = decode_stage(&whole, tok, i as u32, None);
+        }
+        let want_tail: Vec<Vec<f32>> = tail.iter().enumerate().map(|(i, &tok)| decode_stage(&whole, tok, (prompt.len() + i) as u32, None)).collect();
+
+        let mut pos = 0u32;
+        let mut got_last = Vec::new();
+        for round in prompt.chunks(256) {
+            let out = prefill_stage(&whole_chunked, round, pos, None);
+            got_last = out[(round.len() - 1) * d..].to_vec();
+            pos += round.len() as u32;
+        }
+        let got_tail: Vec<Vec<f32>> = tail.iter().enumerate().map(|(i, &tok)| decode_stage(&whole_chunked, tok, (prompt.len() + i) as u32, None)).collect();
+
+        let maxabs = |a: &[f32], b: &[f32]| a.iter().zip(b).fold(0.0f32, |m, (x, y)| m.max((x - y).abs()));
+        let rms = |a: &[f32]| (a.iter().map(|v| v * v).sum::<f32>() / a.len() as f32).sqrt();
+        let mut worst = maxabs(&got_last, &want_last);
+        println!("persistent-state chunked int8 prefill: last-token maxabs = {worst:e}, want_rms={:.4}, got_rms={:.4}", rms(&want_last), rms(&got_last));
+        assert!(worst < 1e-2, "chunked int8 prefill with persistent GDN state diverged at the prompt's last token: maxabs={worst}, want_rms={:.4}, got_rms={:.4}", rms(&want_last), rms(&got_last));
+        for (i, (got, want)) in got_tail.iter().zip(&want_tail).enumerate() {
+            let err = maxabs(got, want);
+            worst = worst.max(err);
+            println!("  decode step {i} after chunked prefill: maxabs = {err:e}");
+            assert!(err < 1e-2, "decode step {i} after persistent-state chunked prefill diverged: maxabs={err}");
+        }
+        println!("persistent-state chunked int8 prefill: worst maxabs = {worst:e}");
+    }
+
+    /// The combination none of the tests above try together: TWO SHARDS
+    /// (the real pipeline-parallel seam `int8_gguf_resident` drives, host
+    /// round-tripping the `[n, d_model]` boundary block between them) AND
+    /// several real-sized (256-row) chunked-prefill rounds, at the INT8
+    /// tier. Every single-shard INT8 chunked test above passed clean; every
+    /// two-shard chunked test that exists (`two_shard_chunked_prefill_
+    /// matches_token_by_token_replay`) only ever ran at FP32 with 4-row
+    /// chunks. This is the first gate combining both seams at once - the
+    /// exact shape a real long prompt through the two-card GGUF resident
+    /// exercises.
+    #[test]
+    fn two_shard_chunked_prefill_at_int8_matches_token_by_token_across_several_max_size_rounds() {
+        let cfg = Qwen35Config { block_size: 896, max_position_embeddings: 896, ..Qwen35Config::tiny_i8() };
+        let n_layers = cfg.n_layers as usize;
+        let cut = 2usize;
+        assert_eq!(cfg.layer_types()[cut - 1], LayerType::Linear, "cut must leave a GDN layer upstream");
+        assert_eq!(cfg.layer_types()[n_layers - 1], LayerType::Full, "the GQA layer must sit downstream of the cut");
+        let t = cfg.block_size;
+        let d = cfg.d_model as usize;
+        let init = crate::init::init_weights(&cfg, 7);
+
+        let whole = Qwen35::new_i8(cfg.clone(), 1, t, &init);
+        let stage0 = Qwen35::new_i8_shard(cfg.clone(), 1, t, &init, Shard { start: 0, end: cut, embed: true, head: false, gpu_index: Shard::ANY_GPU });
+        let stage1 =
+            Qwen35::new_i8_shard(cfg.clone(), 1, t, &init, Shard { start: cut, end: n_layers, embed: false, head: true, gpu_index: Shard::ANY_GPU });
+        whole.reset_decode_cache();
+        stage0.reset_decode_cache();
+        stage1.reset_decode_cache();
+
+        let prompt: Vec<u32> = (0..836).map(|i| (i * 5 + 3) % cfg.vocab).collect();
+        let tail: Vec<u32> = (0..6).map(|i| (i * 7 + 1) % cfg.vocab).collect();
+
+        let mut want_last = Vec::new();
+        for (i, &tok) in prompt.iter().enumerate() {
+            want_last = decode_stage(&whole, tok, i as u32, None);
+        }
+        let want_tail: Vec<Vec<f32>> = tail.iter().enumerate().map(|(i, &tok)| decode_stage(&whole, tok, (prompt.len() + i) as u32, None)).collect();
+
+        let step_both = |tok: u32, pos: u32| {
+            let boundary = decode_stage(&stage0, tok, pos, None);
+            decode_stage(&stage1, (tok + 1) % cfg.vocab, pos, Some(&boundary))
+        };
+
+        let mut pos = 0u32;
+        let mut got_last = Vec::new();
+        for round in prompt.chunks(256) {
+            let boundary = prefill_stage(&stage0, round, pos, None);
+            let out = prefill_stage(&stage1, round, pos, Some(&boundary));
+            got_last = out[(round.len() - 1) * d..].to_vec();
+            pos += round.len() as u32;
+        }
+        let got_tail: Vec<Vec<f32>> = tail.iter().enumerate().map(|(i, &tok)| step_both(tok, (prompt.len() + i) as u32)).collect();
+
+        let maxabs = |a: &[f32], b: &[f32]| a.iter().zip(b).fold(0.0f32, |m, (x, y)| m.max((x - y).abs()));
+        let mut worst = maxabs(&got_last, &want_last);
+        assert!(worst < 1e-4, "two-shard multi-round chunked int8 prefill diverged at the prompt's last token: maxabs={worst}");
+        for (i, (got, want)) in got_tail.iter().zip(&want_tail).enumerate() {
+            let err = maxabs(got, want);
+            worst = worst.max(err);
+            assert!(err < 1e-4, "decode step {i} after two-shard multi-round chunked prefill diverged: maxabs={err}");
+        }
+        println!("two-shard multi-round chunked int8 prefill: worst maxabs = {worst:e}");
     }
 
     /// The Q4 (W4A8) twin of the test above, same reasoning: a shard split

@@ -1552,6 +1552,57 @@ mod tests {
 
     const GB: u64 = 1 << 30;
 
+    /// Diagnostic (not gated - prints, does not assert): drives
+    /// [`Qwen35GgufInstance::stack_step`] (pure TOKEN-BY-TOKEN decode, never
+    /// [`Qwen35GgufInstance::stack_prefill_chunk`]/`replay_prompt`'s round
+    /// path) for ~900 real tokens on the real checkpoint, printing the
+    /// per-stage residual RMS the same way `debug_step` does.
+    ///
+    /// `tests/gguf_resident_real.rs`'s `where_does_the_real_checkpoint_
+    /// start_producing_garbage` found the residual RMS exploding
+    /// (single-digit -> tens -> hundreds) starting right around the 3rd
+    /// `MAX_PREFILL_TOKENS`-sized CHUNKED round (~pos 680) and never
+    /// recovering. This test asks the one question that result cannot
+    /// answer on its own: does the SAME real checkpoint also diverge at the
+    /// same real position when replayed one token at a time, with no
+    /// chunked round boundary ever crossed? If yes, the defect is long-
+    /// context GDN/GQA state drift independent of chunking; if the residual
+    /// stays healthy here, the defect is specific to the chunked-round-carry
+    /// path (`Qwen35::run_prefill_chunk_stage`'s GDN/GQA state hand-off)
+    /// interacting with the REAL checkpoint's own weight values (every
+    /// synthetic random-weight test at this crate's `model.rs` level already
+    /// passed clean at this same round count and real dims).
+    #[test]
+    fn token_by_token_replay_on_the_real_checkpoint_past_where_chunked_replay_diverges() {
+        let Ok(path) = std::env::var(GGUF_ENV) else {
+            brain_testutil::skip(&format!("{GGUF_ENV} unset (set it to a downloaded Qwen3.8-27B*.gguf to run this)"));
+            return;
+        };
+        const RESERVE: u64 = 2 * GB;
+        let devices: Vec<(Device, u64)> =
+            gpu_core::devices::gpus().iter().map(|d| (Device::Gpu(d.index), d.identity.vram_bytes.saturating_sub(RESERVE))).filter(|&(_, u)| u > 0).collect();
+        if devices.is_empty() {
+            brain_testutil::skip_unavailable("no GPU with queryable VRAM - this resident is GPU-only");
+            return;
+        }
+        let r = Qwen35GgufResident::new(path, devices, 2048, TierPolicy::uniform(Dtype::I8));
+        let key = r.instance_key("generate", &Invocation::new());
+        let placed: Vec<Device> = r.estimate_multi(&key).devices().collect();
+        let inst = r.activate_owned(&placed).expect("activate the real checkpoint");
+
+        let vocab = inst.cfg.vocab;
+        let n = 900u32;
+        for pos in 0..n {
+            let tok = (pos * 5 + 3) % vocab;
+            let logits = inst.stack_step(tok, pos).expect("stack_step");
+            if pos % 64 == 0 || pos == n - 1 {
+                let rms = (logits.iter().map(|v| v * v).sum::<f32>() / logits.len() as f32).sqrt();
+                let maxabs = logits.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+                println!("token-by-token pos {pos:4}: logits rms={rms:.4} maxabs={maxabs:.4}");
+            }
+        }
+    }
+
     /// The streaming loader must apply the SAME `ssm_a -> A_log` transform
     /// the offline converter does, and apply it to NOTHING else - including
     /// through the zero-copy `raw_words` path, which would otherwise hand the

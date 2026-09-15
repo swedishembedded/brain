@@ -107,6 +107,76 @@ fn fused_prefill_hd256_matches_the_triad_through_gqa_chunk_step() {
     assert!(worst < 1e-3, "gqa_chunk_step's fused branch disagrees with its own triad, maxabs={worst}");
 }
 
+/// Same fused-vs-triad comparison, but at the CONTEXT DEPTH a real long
+/// prompt reaches after several `MAX_PREFILL_TOKENS`-sized (256) rounds -
+/// ~1700 cached tokens, not ~150. The real 27B checkpoint produces repeating
+/// garbage (not a crash, not NaN) specifically once a chunked prefill runs
+/// several such rounds (`qwen35::tests::gguf_resident_real`'s
+/// `prefill_throughput_at_a_real_long_context`/
+/// `decode_throughput_at_a_real_long_context`), while every existing gate at
+/// this shape (including this file's own test above) only ever checks a
+/// small `cap`. If the fused kernel's online-softmax accumulation degrades
+/// at large `t_max` specifically, a small-`cap` gate structurally cannot see
+/// it - real dims (`n_heads=24, n_kv_heads=4`, `qwen38_27b`'s own GQA ratio)
+/// at a chunk this size, ending at the real round-boundary depth.
+#[test]
+fn fused_prefill_hd256_matches_the_triad_at_a_real_long_context_depth() {
+    let g = gpu_core::testgpu::dev(PIPES);
+    let (nh, nkv, hd) = (24u32, 4u32, 256u32); // qwen38_27b's own GQA shape
+    let kv_stride = nkv * hd;
+    let hq = nh * hd;
+
+    let start = 1536u32; // 6 prior MAX_PREFILL_TOKENS=256 rounds already cached
+    let n = 195u32; // the real 1731-token prompt's own ragged last round
+    let cap = start + n;
+
+    let mut rng = Lcg::new(1731);
+    let q: Vec<f32> = rng.vec_scaled((n * hq) as usize, 1.0);
+    let k_new: Vec<f32> = rng.vec_scaled((n * kv_stride) as usize, 1.0);
+    let v_new: Vec<f32> = rng.vec_scaled((n * kv_stride) as usize, 1.0);
+    let kcache_init: Vec<f32> = rng.vec_scaled((cap * kv_stride) as usize, 1.0);
+    let vcache_init: Vec<f32> = rng.vec_scaled((cap * kv_stride) as usize, 1.0);
+
+    let block_ids: Vec<u32> = vec![0; n as usize];
+    let seq_lens: Vec<u32> = (0..n).map(|i| start + i + 1).collect();
+
+    let ids = GqaChunkIds {
+        splice: idx(&g, "splice"),
+        scores_batched: idx(&g, "paged_decode_scores_batched"),
+        softmax_batched: idx(&g, "decode_softmax_batched"),
+        apply_batched: idx(&g, "paged_decode_apply_batched"),
+        fused_prefill_hd256: Some(idx(&g, "paged_flash_prefill_hd256")),
+    };
+
+    let run = |ids: &GqaChunkIds| -> Vec<f32> {
+        let qb = g.storage_init("q", &q);
+        let kb = g.storage_init("k_new", &k_new);
+        let vb = g.storage_init("v_new", &v_new);
+        let kcache = g.storage_init("kcache", &kcache_init);
+        let vcache = g.storage_init("vcache", &vcache_init);
+        let bt = g.storage(n as u64);
+        g.write(&bt, &block_ids);
+        let sl = g.storage(n as u64);
+        g.write(&sl, &seq_lens);
+        let scores = g.storage((n * nh * cap) as u64);
+        let probs = g.storage((n * nh * cap) as u64);
+        let ctx = g.storage((n * hq) as u64);
+
+        let steps = gqa_chunk_step(&g, ids, nh, nkv, hd, start, n, cap, &qb, &kb, &vb, &kcache, &vcache, &bt, &sl, &scores, &probs, &ctx);
+        g.submit(&[], &steps);
+        g.read(&ctx, (n * hq) as usize)
+    };
+
+    let ctx_fused = run(&ids);
+    let ctx_triad = run(&GqaChunkIds { fused_prefill_hd256: None, ..ids });
+
+    let worst = ctx_fused.iter().zip(&ctx_triad).fold(0f32, |m, (a, b)| m.max((a - b).abs()));
+    println!("gqa_chunk_step fused-hd256 vs triad at cap={cap}: worst maxabs = {worst:e}");
+    assert!(ctx_fused.iter().all(|v| v.is_finite()), "the fused kernel produced a non-finite output at cap={cap}");
+    assert!(worst > 0.0, "sanity: inputs are not all-zero, so a real match should not be a trivial 0==0");
+    assert!(worst < 1e-3, "gqa_chunk_step's fused branch disagrees with its own triad at a real long-context depth (cap={cap}), maxabs={worst}");
+}
+
 /// Sanity that the fused branch actually DISPATCHES the fused kernel rather
 /// than silently falling through to the triad for some unrelated reason
 /// (e.g. a capability gate this test's `testgpu` device fails) - counts

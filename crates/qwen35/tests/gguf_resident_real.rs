@@ -606,3 +606,52 @@ fn the_real_checkpoints_cost_model_is_reported() {
     assert_eq!(cost.per_layer[gdn], reference.layer_weight_bytes(LayerType::Linear, &TierPolicy::uniform(Dtype::I8)) + 4 * (48 * 128 * 128 + 10240 * 3));
     assert_eq!(cost.per_layer[gqa], reference.layer_weight_bytes(LayerType::Full, &TierPolicy::uniform(Dtype::I8)) + 2 * CAP as u64 * reference.kv_dim() as u64 * 4);
 }
+
+/// Diagnostic (not gated - prints, does not assert): sweeps the SAME
+/// "France" filler prompt at increasing repeat counts on ONE loaded
+/// instance, to find whether the real-checkpoint garbage seen at ~1500-1700
+/// tokens (`decode_throughput_at_a_real_long_context`,
+/// `prefill_throughput_at_a_real_long_context`) onsets at a length tied to
+/// `int8_gguf_resident::MAX_PREFILL_TOKENS` round boundaries (256, 512, 768,
+/// ...) or is simply a function of total context length regardless of
+/// round count - every prompt here below `MAX_PREFILL_TOKENS` still goes
+/// through `replay_prompt`'s SINGLE-round chunked path, so a break at a
+/// short, single-round length would rule out round-to-round state carry
+/// entirely and point at long-context GDN/GQA state drift instead.
+#[test]
+fn where_does_the_real_checkpoint_start_producing_garbage() {
+    let Some(path) = gguf_path() else { return };
+    let devices = real_devices();
+    if devices.is_empty() {
+        brain_testutil::skip_unavailable("this gate wants at least one usable GPU");
+        return;
+    }
+    let cap: u32 = 2048;
+    let r = Qwen35GgufResident::new(path, devices, cap, TierPolicy::uniform(Dtype::I8));
+    let key = r.instance_key("generate", &capability::Invocation::new());
+    let placed: Vec<Device> = r.estimate_multi(&key).devices().collect();
+    println!("placed on {} device(s): {placed:?}", placed.len());
+    let mut inst = r.activate_multi(&key, &placed).expect("activate the real checkpoint");
+
+    let para = "France is a country in Western Europe. Its territory stretches from the Rhine to the Atlantic \
+                Ocean, and its people speak French. The country is known for its cuisine, its literature and \
+                its long history. Many travellers visit each year to see its museums, its cathedrals and its \
+                countryside. The Seine flows through the north of the country and past its largest urban area. ";
+    for repeats in [1usize, 2, 4, 6, 9, 12, 16, 20, 23, 27] {
+        let mut prompt = String::new();
+        for _ in 0..repeats {
+            prompt.push_str(para);
+        }
+        prompt.push_str("The capital city of France is");
+        let inv = capability::Invocation::new()
+            .set("prompt", serde_json::json!(prompt))
+            .set("chat", serde_json::json!(false))
+            .set("max_new", serde_json::json!(8))
+            .set("temp", serde_json::json!(0.0));
+        let out = inst.run("generate", &inv, &mut |_| {}).expect("generate on the real checkpoint");
+        let prompt_tokens = out.outputs["prompt_tokens"].as_i64().unwrap_or(0);
+        let text = out.outputs["text"].as_str().unwrap_or_default().to_string();
+        let ok = text.contains("Paris");
+        println!("repeats={repeats:2} prompt_tokens={prompt_tokens:5} ok={ok:5} text={text:?}");
+    }
+}
