@@ -82,6 +82,17 @@ pub fn random_key() -> String {
     format!("sk-brain-{hi:016x}{lo:016x}")
 }
 
+/// `$BRAIN_API_KEY` if the operator set one (a fixed key, reused across
+/// every surface/dialect `brain serve` binds - set via a shell export, a
+/// `systemd`/container env var, or the CLI's own optional YAML config
+/// file), else a fresh [`random_key`] exactly as before this existed.
+/// Every dialect that binds gets the SAME key when this is set, unlike
+/// the default (each dialect independently random) - that is the whole
+/// point of naming a fixed one.
+pub fn resolved_key() -> String {
+    std::env::var("BRAIN_API_KEY").ok().filter(|s| !s.is_empty()).unwrap_or_else(random_key)
+}
+
 /// The `{provider: key}` map for a set of surfaces.
 pub fn keys_json(surfaces: &[Surface]) -> Value {
     let mut m = serde_json::Map::new();
@@ -110,5 +121,36 @@ pub fn write_keys(surfaces: &[Surface], path: &Path) -> std::io::Result<()> {
     #[cfg(not(unix))]
     {
         std::fs::write(path, body)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `BRAIN_API_KEY` set: every call returns that SAME fixed key, not a
+    /// fresh random one. `BRAIN_API_KEY` unset: falls back to `random_key`'s
+    /// own randomness (two calls differ).
+    #[test]
+    fn resolved_key_prefers_a_fixed_env_key_over_a_fresh_random_one() {
+        let _serial = brain_testutil::env_lock();
+        std::env::set_var("BRAIN_API_KEY", "sk-brain-fixed-for-test");
+        assert_eq!(resolved_key(), "sk-brain-fixed-for-test");
+        assert_eq!(resolved_key(), "sk-brain-fixed-for-test", "must be the same key every call, not regenerated");
+        std::env::remove_var("BRAIN_API_KEY");
+
+        assert_ne!(resolved_key(), resolved_key(), "with no fixed key, two calls must fall back to two fresh random ones");
+    }
+
+    /// An empty `BRAIN_API_KEY` (e.g. `BRAIN_API_KEY=` inherited from a
+    /// wrapper script) must not be treated as "the key is the empty
+    /// string" - access control is always on, so an empty key would be a
+    /// real hazard, not a harmless default.
+    #[test]
+    fn resolved_key_treats_an_empty_env_value_as_unset() {
+        let _serial = brain_testutil::env_lock();
+        std::env::set_var("BRAIN_API_KEY", "");
+        assert!(resolved_key().starts_with("sk-brain-"), "an empty BRAIN_API_KEY must fall back to a real random key");
+        std::env::remove_var("BRAIN_API_KEY");
     }
 }

@@ -95,8 +95,10 @@ HTTP INFERENCE APIS  (each behind its own key)
 
   Auth:  Authorization: Bearer <key>   (openai, openrouter)
          x-api-key: <key>              (anthropic)
-  A fresh key per surface per launch, printed on stdout as
+  A fresh key per DIALECT per launch by default, printed on stdout as
   `APIKEY <provider> <key>`; --api-keys-out writes the same keys as JSON, 0600.
+  $BRAIN_API_KEY pins a fixed key instead (e.g. via --config) - every dialect
+  then shares that SAME key rather than each getting its own random one.
 
   With no ADDR given, a surface binds 127.0.0.1 (unchanged default). There is
   no --listen / --host / --bind flag -- the address goes directly after the
@@ -838,7 +840,7 @@ fn run_apis(a: RunApis) {
             (a.openrouter, apiserve::Provider::OpenRouter),
         ] {
             if let Some(addrs) = addrs {
-                let key = apiserve::surface::random_key();
+                let key = apiserve::surface::resolved_key();
                 for addr in addrs {
                     surfaces.push(apiserve::Surface::new(provider, addr, key.clone()));
                 }

@@ -139,6 +139,7 @@ brain-npu.workspace = true
 # structs at the point of entry rather than permissive `Value` indexing.
 serde.workspace = true
 serde_json.workspace = true
+serde_norway.workspace = true
 brain-vulkan = { workspace = true, optional = true }
 brain-clip.workspace = true
 brain-t5encoder.workspace = true

@@ -36,3 +36,4 @@ anyhow.workspace = true
 [dev-dependencies]
 jsonschema.workspace = true
 brain-events.workspace = true
+brain-testutil.workspace = true

@@ -1,12 +1,34 @@
 # Configuration
 
-brain has no config file. Every choice - which models `brain serve` activates,
-where they run, and how they're tuned - is a `BRAIN_*` environment variable,
-set before you run `brain serve` or a `brain <model>` subcommand. This page is
-the complete reference, grouped by purpose.
+Every choice - which models `brain serve` activates, where they run, and how
+they're tuned - is a `BRAIN_*` environment variable. This page is the complete
+reference, grouped by purpose.
 
 Unset variables take documented defaults; a model whose weights variable is
 unset simply isn't served (no error, it's just absent from `brain caps`).
+
+## Config file (optional)
+
+`--config <FILE>` (or `$BRAIN_CONFIG`, global, valid on any subcommand) loads
+a flat YAML mapping of these SAME `BRAIN_*` variable names to values, before
+anything else runs. It is not a second configuration system - every variable
+below is still read the same way everywhere in this codebase - it is just
+another way to populate the environment, for a deployment that wants one
+reviewable file instead of a pile of exports.
+
+It fills gaps, never overrides: a variable already exported by the caller
+(shell, `systemd`'s `Environment=`, a container's `--env-file`) always wins
+over the same key named in the file.
+
+```yaml
+# config.yaml
+BRAIN_API_KEY: sk-brain-your-own-fixed-key
+BRAIN_QWEN35_CTX: 8192
+```
+
+```
+brain serve --config config.yaml --openai
+```
 
 ## Device selection
 
@@ -118,6 +140,7 @@ served, with no error.
 | Variable | Meaning | Default |
 | --- | --- | --- |
 | `BRAIN_MODELS_DIR` | model directory scanned at startup (also `--models-dir`) | `$XDG_DATA_HOME/brain/models` |
+| `BRAIN_API_KEY` | a fixed API key, shared by every OpenAI/Anthropic/OpenRouter surface `brain serve` binds, instead of a fresh random key per dialect per launch | unset (each dialect gets its own random `sk-brain-...` key) |
 | `BRAIN_AUTO_FETCH` | `1`/`true`/`on` enables on-demand fetching of missing model files (`--autofetch` publishes the same thing and wins over an exported `0`); a pulled model still resolves with the gate off | disabled |
 | `BRAIN_CONF` | stdio-loop YOLO confidence threshold (also `--conf`) | 0.25 |
 | `BRAIN_ADMIT_DEADLINE_MS` | how long a request waits for a free lane before it's shed with 429 | 10000 |

@@ -176,6 +176,18 @@ MEMORY CEILINGS (global - valid on any subcommand)
                             Else $BRAIN_LIMIT_VRAM_TOTAL / $BRAIN_LIMIT_RAM_TOTAL.
   Example: brain --limit-vram-total 8G qwen3 infer --weights model.safetensors
 
+CONFIG FILE (global - valid on any subcommand)
+  --config <FILE>          a flat YAML mapping of BRAIN_* variable names to
+                           values, loaded before anything else parses.
+                           Fills GAPS in the environment only:
+                           a variable already exported by the caller (shell,
+                           systemd Environment=, a container's --env-file)
+                           always wins over the same key in this file.
+                           Else $BRAIN_CONFIG.
+  Example config.yaml:
+    BRAIN_API_KEY: sk-brain-your-own-fixed-key
+    BRAIN_QWEN35_CTX: 8192
+
 MODEL STORE (global - valid on any subcommand)
   --brain-data-dir <DIR>   brain's data root; models live in <DIR>/models.
                            Default ~/.local/share/brain. Use it to put pulled
@@ -1115,6 +1127,87 @@ fn apply_data_dir(root: Option<String>) {
     brain_modelstore::publish_data_root(Some(root));
 }
 
+/// Extract the global `--config <FILE>` flag from anywhere in `argv`,
+/// falling back to `$BRAIN_CONFIG` when absent, and return `(path,
+/// remaining args)`. Pure - no process-global side effect - so it is
+/// testable like [`parse_data_dir`]; [`main`] is the sole caller of
+/// [`apply_config`] with this result.
+fn parse_config(argv: Vec<String>) -> (Option<String>, Vec<String>) {
+    let mut path = None;
+    let mut rest = Vec::with_capacity(argv.len());
+    let mut i = 0;
+    while i < argv.len() {
+        if argv[i] == "--config" {
+            let Some(value) = argv.get(i + 1) else {
+                eprintln!("brain: --config needs a file path");
+                std::process::exit(2);
+            };
+            path = Some(value.clone());
+            i += 2;
+        } else {
+            rest.push(argv[i].clone());
+            i += 1;
+        }
+    }
+    let path = path.or_else(|| std::env::var("BRAIN_CONFIG").ok().filter(|s| !s.is_empty()));
+    (path, rest)
+}
+
+/// Load `path` - a flat YAML mapping of `BRAIN_*` variable names to scalar
+/// values - and publish every entry into the process environment.
+///
+/// brain has no OTHER config file: every one of its ~100 `BRAIN_*`
+/// variables is read directly, all over this workspace, via
+/// `std::env::var*` - this function's only job is to get values INTO
+/// that environment before any of those reads happen, never to become a
+/// second source of truth those reads have to know about. That is also why
+/// it fills gaps rather than overriding: a variable the caller already
+/// exported (from a shell, a `systemd` `Environment=` line, a container's
+/// `--env-file`) always wins over the same key named in this file - the
+/// same flag-beats-inherited-env precedence `--brain-data-dir` already
+/// applies one level up, just one level further down since a config file
+/// is now the thing UNDER the environment rather than a flag above it.
+///
+/// Must run before every other `parse_*`/`apply_*` call in [`main`] that
+/// reads a `BRAIN_*` variable as its own default (`parse_verbosity` reads
+/// `BRAIN_VERBOSE` directly) - so this is `main`'s FIRST call, not merely an
+/// early one.
+///
+/// Hard-exits on a missing/unreadable/unparseable file, or a value that is
+/// not a flat string/number/bool: the operator just named this file, so
+/// silently ignoring a mistake in it would start a run configured
+/// differently than they believe, which is worse than refusing to start.
+fn apply_config(path: Option<String>) {
+    let Some(path) = path else { return };
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+        eprintln!("brain: --config {path}: {e}");
+        std::process::exit(2);
+    });
+    let map: std::collections::BTreeMap<String, serde_norway::Value> = serde_norway::from_str(&text).unwrap_or_else(|e| {
+        eprintln!("brain: --config {path}: {e}");
+        std::process::exit(2);
+    });
+    for (key, value) in map {
+        if std::env::var_os(&key).is_some() {
+            continue; // an inherited/exported value always outranks the file
+        }
+        let value = match value {
+            serde_norway::Value::String(s) => s,
+            serde_norway::Value::Bool(b) => b.to_string(),
+            serde_norway::Value::Number(n) => n.to_string(),
+            // An explicit `null` means "leave this unset", not "set to the
+            // empty string" - a caller who wants a real empty value writes
+            // `""` instead.
+            serde_norway::Value::Null => continue,
+            other => {
+                eprintln!("brain: --config {path}: {key}: expected a plain string, number or bool, got {other:?}");
+                std::process::exit(2);
+            }
+        };
+        std::env::set_var(key, value);
+    }
+}
+
 /// The full "about to terminate" sequence every one-shot CLI path that may
 /// have touched a real GPU device runs instead of a bare
 /// `std::process::exit`, then actually terminates with `code` - never
@@ -1145,6 +1238,12 @@ pub(crate) fn drain_before_exit(code: i32) -> ! {
 
 fn main() {
     let argv: Vec<String> = std::env::args().collect();
+    // First call, deliberately: every other parse_*/apply_* below (and
+    // every model/backend it touches) reads a BRAIN_* variable as its own
+    // default, so the config file has to be in the environment before any
+    // of them run - see apply_config's own doc.
+    let (config_path, argv) = parse_config(argv);
+    apply_config(config_path);
     let argv = install_tracing(argv);
     let (verbosity, argv) = parse_verbosity(argv);
     residency::log::set_verbosity(verbosity);
@@ -1247,7 +1346,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_autofetch, parse_autofetch, parse_data_dir, parse_limits, parse_verbosity, HELP};
+    use super::{apply_autofetch, apply_config, parse_autofetch, parse_config, parse_data_dir, parse_limits, parse_verbosity, HELP};
     use brain_testutil::env_lock;
 
     /// The opt-in fetch flag is stripped from anywhere in `argv`, consumes
@@ -1371,6 +1470,66 @@ mod tests {
         let (root, rest) = parse_data_dir(["brain".to_string(), "--brain-data-dir".to_string(), "/x".to_string(), "caps".to_string()].to_vec());
         assert_eq!(rest, ["brain", "caps"].map(String::from).to_vec(), "`brain help` documents --brain-data-dir, which parse_data_dir does not strip");
         assert_eq!(root.as_deref(), Some("/x"));
+    }
+
+    /// `--config` strips from anywhere and consumes its value, and falls
+    /// back to `$BRAIN_CONFIG` only when the flag itself is absent.
+    #[test]
+    fn parse_config_strips_the_flag_from_anywhere_and_falls_back_to_the_env_var() {
+        let argv = ["brain", "serve", "--config", "/etc/brain/config.yaml", "--openai"].map(String::from).to_vec();
+        let (path, rest) = parse_config(argv);
+        assert_eq!(path.as_deref(), Some("/etc/brain/config.yaml"));
+        assert_eq!(rest, ["brain", "serve", "--openai"].map(String::from).to_vec());
+
+        let _serial = brain_testutil::env_lock();
+        std::env::set_var("BRAIN_CONFIG", "/from/env.yaml");
+        let (path, rest) = parse_config(["brain", "caps"].map(String::from).to_vec());
+        assert_eq!(path.as_deref(), Some("/from/env.yaml"));
+        assert_eq!(rest, ["brain", "caps"].map(String::from).to_vec());
+        std::env::remove_var("BRAIN_CONFIG");
+
+        // Neither flag nor env var: no-op.
+        let (path, rest) = parse_config(["brain", "caps"].map(String::from).to_vec());
+        assert_eq!(path, None);
+        assert_eq!(rest, ["brain", "caps"].map(String::from).to_vec());
+    }
+
+    /// The file fills gaps in the environment but never overrides an
+    /// already-exported variable - the core precedence guarantee
+    /// [`apply_config`]'s own doc promises.
+    #[test]
+    fn apply_config_fills_gaps_but_never_overrides_an_inherited_value() {
+        let _serial = brain_testutil::env_lock();
+        std::env::remove_var("BRAIN_TEST_CONFIG_FILLED");
+        std::env::set_var("BRAIN_TEST_CONFIG_INHERITED", "from-shell");
+
+        let dir = std::env::temp_dir().join(format!("brain-config-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.yaml");
+        std::fs::write(&path, "BRAIN_TEST_CONFIG_FILLED: from-file\nBRAIN_TEST_CONFIG_INHERITED: from-file\nBRAIN_TEST_CONFIG_NUMBER: 16\nBRAIN_TEST_CONFIG_BOOL: true\n").unwrap();
+
+        apply_config(Some(path.to_string_lossy().into_owned()));
+
+        assert_eq!(std::env::var("BRAIN_TEST_CONFIG_FILLED").as_deref(), Ok("from-file"), "an unset variable must be filled from the file");
+        assert_eq!(std::env::var("BRAIN_TEST_CONFIG_INHERITED").as_deref(), Ok("from-shell"), "an inherited value must outrank the file");
+        assert_eq!(std::env::var("BRAIN_TEST_CONFIG_NUMBER").as_deref(), Ok("16"));
+        assert_eq!(std::env::var("BRAIN_TEST_CONFIG_BOOL").as_deref(), Ok("true"));
+
+        std::env::remove_var("BRAIN_TEST_CONFIG_FILLED");
+        std::env::remove_var("BRAIN_TEST_CONFIG_INHERITED");
+        std::env::remove_var("BRAIN_TEST_CONFIG_NUMBER");
+        std::env::remove_var("BRAIN_TEST_CONFIG_BOOL");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Same documented-and-stripped discipline every other global flag gets.
+    #[test]
+    fn the_config_flag_is_documented_and_stripped() {
+        assert!(HELP.contains("--config"), "--config is implemented but absent from `brain help`");
+        assert!(HELP.contains("BRAIN_CONFIG"), "BRAIN_CONFIG is implemented but absent from `brain help`");
+        let (path, rest) = parse_config(["brain".to_string(), "--config".to_string(), "/x.yaml".to_string(), "caps".to_string()].to_vec());
+        assert_eq!(rest, ["brain", "caps"].map(String::from).to_vec(), "`brain help` documents --config, which parse_config does not strip");
+        assert_eq!(path.as_deref(), Some("/x.yaml"));
     }
 
     /// `brain pull` must be reachable and documented -- an undocumented verb
