@@ -15,6 +15,7 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("conv_bias_reg", kernels::CONV_BIAS_REG),
     ("bias_add", kernels::BIAS_ADD),
     ("add_chan_bcast", kernels::ADD_CHAN_BCAST),
+    ("add_chan_inplace", kernels::ADD_CHAN_INPLACE),
     // --- transpose + norm + linear ---
     ("nchw_nlc", kernels::NCHW_NLC),
     ("nlc_nchw", kernels::NLC_NCHW),
@@ -30,4 +31,7 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("attn_scores_cross", kernels::ATTN_SCORES_CROSS),
     ("attn_softmax_cross", kernels::ATTN_SOFTMAX_CROSS),
     ("attn_apply_cross", kernels::ATTN_APPLY_CROSS),
+    // --- window partition/reverse row permutation ---
+    ("embed", kernels::EMBED),
+    ("row_scatter", kernels::ROW_SCATTER),
 ];

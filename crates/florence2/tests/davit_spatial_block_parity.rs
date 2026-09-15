@@ -1,0 +1,98 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+
+//! Stage 0's `SpatialBlock` (dwconv residual, window attention, dwconv
+//! residual, MLP) against the real checkpoint, isolated from the not-yet-
+//! implemented `ChannelBlock`: input is `conv0`'s golden (patch embed
+//! output, already parity-checked in `davit_patch_embed_parity.rs`),
+//! expected output is `stage0_spatial_block`'s golden - captured via a
+//! forward hook directly on `davit.blocks[0][0].spatial_block`, i.e.
+//! BEFORE the channel block in that pair runs.
+
+use std::collections::HashMap;
+
+use gpu_core::Gpu;
+use paramstore::{ParamStore, Role};
+
+use florence2::vision::{pipelines::PIPELINES, SpatialBlock, SpatialBlockKernelIds};
+
+const DAVIT_LN_EPS: f32 = 1e-5;
+
+fn cosine(a: &[f32], b: &[f32]) -> f64 {
+    let (mut dot, mut na, mut nb) = (0.0f64, 0.0f64, 0.0f64);
+    for (&x, &y) in a.iter().zip(b) {
+        dot += x as f64 * y as f64;
+        na += x as f64 * x as f64;
+        nb += y as f64 * y as f64;
+    }
+    if na == 0.0 || nb == 0.0 {
+        return 0.0;
+    }
+    dot / (na.sqrt() * nb.sqrt())
+}
+
+#[test]
+fn stage0_spatial_block_matches_real_checkpoint() {
+    let Some(ckpt_dir) = std::env::var("FLORENCE2_DIR").ok() else {
+        brain_testutil::skip("FLORENCE2_DIR unset");
+        return;
+    };
+    let golden_path = brain_testutil::testdata("florence2/davit/stages.safetensors");
+    if !std::path::Path::new(&golden_path).exists() {
+        brain_testutil::skip("florence2 davit golden fixture absent - regenerate with tools/goldens/florence2_dump_reference.py");
+        return;
+    }
+
+    let ckpt = checkpoint::safetensors::read(&format!("{ckpt_dir}/model.safetensors")).expect("read checkpoint");
+    let mut source: HashMap<String, (Vec<usize>, Vec<f32>)> = HashMap::new();
+    for t in ckpt {
+        source.insert(t.name, (t.shape, t.data));
+    }
+    let golden = checkpoint::safetensors::read(&golden_path).expect("read golden");
+    let gmap: HashMap<String, checkpoint::safetensors::StTensor> = golden.into_iter().map(|t| (t.name.clone(), t)).collect();
+
+    let prefix = "vision_tower.blocks.0.0.spatial_block";
+    let names = [
+        "conv1.fn.dw.weight",
+        "conv1.fn.dw.bias",
+        "conv2.fn.dw.weight",
+        "conv2.fn.dw.bias",
+        "window_attn.norm.weight",
+        "window_attn.norm.bias",
+        "window_attn.fn.qkv.weight",
+        "window_attn.fn.qkv.bias",
+        "window_attn.fn.proj.weight",
+        "window_attn.fn.proj.bias",
+        "ffn.norm.weight",
+        "ffn.norm.bias",
+        "ffn.fn.net.fc1.weight",
+        "ffn.fn.net.fc1.bias",
+        "ffn.fn.net.fc2.weight",
+        "ffn.fn.net.fc2.bias",
+    ];
+    let mut roles = Vec::new();
+    for n in names {
+        let full = format!("{prefix}.{n}");
+        let numel = source.get(&full).unwrap_or_else(|| panic!("missing checkpoint tensor {full}")).1.len();
+        roles.push((full, numel, Role::Frozen));
+    }
+
+    let gpu = Gpu::new_cpu(PIPELINES);
+    let ps = ParamStore::new_with_roles_src(&gpu, roles, &source);
+    let k = SpatialBlockKernelIds::resolve(PIPELINES);
+
+    // Stage 0: dim=128, heads=4, window_size=12, grid 192x192, mlp_ratio=4.
+    let block = SpatialBlock::new(&gpu, &k, prefix, 128, 4, 12, 192, 192, 4, DAVIT_LN_EPS, false);
+
+    let x_host = &gmap["conv0"].data;
+    let x_buf = gpu.storage(x_host.len() as u64);
+    gpu.write_f32(&x_buf, x_host);
+
+    let out_ref = block.forward(&gpu, &k, &ps, &x_buf);
+    gpu.poll_wait();
+    let out = gpu.read(out_ref, x_host.len());
+
+    let want = &gmap["stage0_spatial_block"].data;
+    let c = cosine(&out, want);
+    assert!(c >= 0.999, "cosine {c:.6} (want >= 0.999); got[0..4]={:?} want[0..4]={:?}", &out[..4], &want[..4]);
+}

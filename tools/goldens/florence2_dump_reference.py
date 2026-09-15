@@ -107,6 +107,20 @@ def dump_davit(model, pixel_values, out_dir, manifest):
     for i, conv in enumerate(davit.convs):
         hooks.append(conv.register_forward_hook(make_conv_hook(i)))
 
+    # Fine-grained taps on stage 0's single (spatial, channel) block pair -
+    # isolates SpatialBlock and ChannelBlock from each other and from later
+    # stages, so each can be implemented and parity-checked independently.
+    sub_outputs = {}
+
+    def make_sub_hook(name):
+        def hook(module, inp, out):
+            sub_outputs[name] = out[0].detach().clone()
+        return hook
+
+    pair0 = davit.blocks[0][0]
+    hooks.append(pair0.spatial_block.register_forward_hook(make_sub_hook("stage0_spatial_block")))
+    hooks.append(pair0.channel_block.register_forward_hook(make_sub_hook("stage0_channel_block")))
+
     with torch.no_grad():
         unpooled = davit.forward_features_unpool(pixel_values)
         projected = model._encode_image(pixel_values)
@@ -119,6 +133,8 @@ def dump_davit(model, pixel_values, out_dir, manifest):
         tensors[f"stage{i}"] = out
     for i, out in conv_outputs.items():
         tensors[f"conv{i}"] = out
+    for name, out in sub_outputs.items():
+        tensors[name] = out
     save(out_dir, "davit/stages.safetensors", tensors, manifest)
 
 
