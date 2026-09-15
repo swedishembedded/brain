@@ -327,10 +327,25 @@ pub fn multi_gpu_gguf_from_env(gpus: &[(u32, u64)], reserved: u64) -> Option<qwe
 /// checkpoint (`crate::resident_qwen35::Qwen35Resident::from_assembly`), not
 /// this one's. `None` (never a guessed path) when the resolver names no
 /// `.gguf` `weights`.
+///
+/// Goes through [`crate::resolver_cli::served_assembly`], not `try_resolve`
+/// directly: a store holding more than one real `qwen35`-architecture GGUF
+/// (a released checkpoint alongside an unrelated quantization someone else
+/// dropped in the same model dir) is a real, common shape, and `try_resolve`
+/// answers an ambiguity with "pass `--weights`" - a flag that does not exist
+/// on `brain serve`'s command line. `served_assembly` answers the same
+/// ambiguity by naming `BRAIN_QWEN35_GGUF`, the env var an operator running a
+/// daemon can actually set - bound to BOTH roles, since a GGUF's own
+/// `weights` file is also what satisfies its `tokenizer` role (see
+/// `qwen35::spec::Qwen35Spec::classify`'s self-tokenizer fallback): naming
+/// one file must not leave `tokenizer` tied between it and whatever OTHER
+/// `qwen35` GGUF happens to share the store.
 fn resolve_qwen35_gguf() -> Option<String> {
-    let assembly = crate::resolver_cli::try_resolve("qwen35", &qwen35::spec::Qwen35Spec, &Default::default())
-        .inspect_err(|e| eprintln!("brain: {} not served ({e})", qwen35::int8_gguf_resident::MODEL))
-        .ok()?;
+    let bindings = [
+        crate::resolver_cli::RoleEnv { role: "weights", var: "BRAIN_QWEN35_GGUF" },
+        crate::resolver_cli::RoleEnv { role: "tokenizer", var: "BRAIN_QWEN35_GGUF" },
+    ];
+    let assembly = crate::resolver_cli::served_assembly("qwen35", &qwen35::spec::Qwen35Spec, &bindings)?;
     assembly.roles.get("weights").map(|p| p.to_string_lossy().into_owned()).filter(|p| p.ends_with(".gguf"))
 }
 

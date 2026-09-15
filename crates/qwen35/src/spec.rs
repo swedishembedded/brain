@@ -44,11 +44,11 @@
 //! If your team needs the same discipline for its own model store, you can
 //! procure our services by emailing info@swedishembedded.com.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use brain_modelstore::inventory::{ArtifactKind, ArtifactRecord};
-use brain_modelstore::resolve::{classify_tokenizer_role, ArchSpec, AssembleOutcome, AssembledVariant, Confidence};
+use brain_modelstore::resolve::{classify_tokenizer_role, vendor_dir, ArchSpec, AssembleOutcome, AssembledVariant, Confidence};
 use capability::Assembly;
 use checkpoint::gguf::MmapGguf;
 
@@ -100,6 +100,30 @@ impl ArchSpec for Qwen35Spec {
         }
         let weights_candidates: Vec<&Path> = out.iter().filter(|(_, role, _)| role == "weights").map(|(idx, ..)| records[*idx].path.as_path()).collect();
         classify_tokenizer_role(records, inventory_root, "tokenizer", &weights_candidates, &mut out);
+
+        // A GGUF release carries its own `tokenizer.ggml.*` KVs (the same
+        // ones `int8_gguf_resident::activate_owned` already builds its real
+        // tokenizer from, via `MmapGguf::tokenizer` + `QwenBpe::from_gguf` -
+        // never from a resolved `tokenizer` role path) - unlike a bare
+        // `.safetensors` checkpoint, it never NEEDS a sibling
+        // `tokenizer.json` to satisfy this role. Only self-satisfy for a
+        // GGUF whose vendor directory has no external tokenizer.json
+        // already classified above, so a real sibling tokenizer.json (this
+        // arch's other real-world shape) stays the sole, unambiguous
+        // candidate rather than tying with the GGUF itself.
+        let tokenizer_vendors: BTreeSet<std::path::PathBuf> = out.iter().filter(|(_, role, _)| role == "tokenizer").filter_map(|(idx, ..)| vendor_dir(&records[*idx].path, inventory_root)).collect();
+        let gguf_weights: Vec<usize> = out.iter().filter(|(_, role, _)| role == "weights").map(|(idx, ..)| *idx).filter(|&idx| records[idx].kind == ArtifactKind::Gguf).collect();
+        for idx in gguf_weights {
+            let rec = &records[idx];
+            let Some(vendor) = vendor_dir(&rec.path, inventory_root) else { continue };
+            if tokenizer_vendors.contains(&vendor) {
+                continue;
+            }
+            let Ok(g) = MmapGguf::open(&rec.path.to_string_lossy()) else { continue };
+            if g.tokenizer().is_some() {
+                out.push((idx, "tokenizer".to_string(), Confidence::Declared));
+            }
+        }
         out
     }
 
@@ -157,6 +181,7 @@ mod tests {
             path.to_str().unwrap(),
             &[
                 ("general.architecture".to_string(), checkpoint::gguf::GgufValue::String(arch.to_string())),
+                ("tokenizer.ggml.model".to_string(), checkpoint::gguf::GgufValue::String("gpt2".to_string())),
                 ("tokenizer.ggml.tokens".to_string(), tokens),
             ],
             &[checkpoint::gguf_write::TensorOut { name: "w".to_string(), shape: vec![1], ty: checkpoint::gguf::GgmlType::F32.id(), data: vec![0u8; 4] }],
@@ -202,6 +227,37 @@ mod tests {
             Resolution::Resolved(assembly) => {
                 assert_eq!(assembly.roles["weights"], gguf_path);
                 assert_eq!(assembly.roles["tokenizer"], tok_path);
+            }
+            other => panic!("expected Resolved, got {other:?}"),
+        }
+    }
+
+    /// The other real-world release shape, and the one actually on disk for
+    /// `unsloth/Qwen3.8-27B-Q8_0.gguf` today: a bare GGUF with NO sibling
+    /// `tokenizer.json` at all. The file carries its own `tokenizer.ggml.*`
+    /// KVs - `int8_gguf_resident::activate_owned` already builds its
+    /// tokenizer straight from those (`MmapGguf::tokenizer` +
+    /// `QwenBpe::from_gguf`), never from a resolved `tokenizer` role path -
+    /// so requiring a separate on-disk artifact here was blocking `brain
+    /// serve` from registering this model at all on a real download that is
+    /// otherwise complete.
+    #[test]
+    fn resolves_cleanly_from_a_bare_gguf_with_no_sibling_tokenizer() {
+        let dir = tmp("bare-gguf-no-tokenizer");
+        let vendor = dir.join("unsloth");
+        let gguf_path = vendor.join("Qwen3.8-27B-Q8_0.gguf");
+        write_gguf(&gguf_path, GGUF_ARCHITECTURE, TOY_VOCAB);
+        // A second, unrelated vendor directory so root inference does not
+        // collapse onto the one vendor dir (mirrors the sibling-tokenizer
+        // fixture above).
+        let records = vec![complete(gguf_path.clone(), ArtifactKind::Gguf), complete(dir.join("other-vendor").join("unrelated.bin"), ArtifactKind::Opaque)];
+
+        let spec = Qwen35Spec;
+        let specs: Vec<&dyn ArchSpec> = vec![&spec];
+        match resolve("qwen35", &records, &specs, &BTreeMap::new()) {
+            Resolution::Resolved(assembly) => {
+                assert_eq!(assembly.roles["weights"], gguf_path);
+                assert_eq!(assembly.roles["tokenizer"], gguf_path, "the GGUF must satisfy its own tokenizer role, not need a sibling file");
             }
             other => panic!("expected Resolved, got {other:?}"),
         }
