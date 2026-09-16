@@ -195,3 +195,49 @@ fn lesioning_proprioception_changes_the_trajectory() {
     assert!(intact.iter().all(|v| v.is_finite()), "the intact run diverged");
     assert!(lesioned.iter().all(|v| v.is_finite()), "the lesioned run diverged");
 }
+
+#[test]
+fn severing_a_muscle_changes_what_the_body_does_and_an_intact_one_does_not() {
+    let Some(r) = rig() else { return };
+    let mut f = build(&r);
+    let cmd = vec![COMMAND; f.descending_count()];
+
+    let trajectory = |f: &mut Fly| -> Vec<f64> {
+        f.reset();
+        f.set_descending(&cmd).unwrap();
+        for _ in 0..60 {
+            f.step().unwrap();
+        }
+        f.qpos()
+    };
+
+    let intact = trajectory(&mut f);
+
+    // THE CONTROL, and it comes first. Setting every muscle to the strength it
+    // already has must change nothing at all - otherwise "the lesion changed
+    // the trajectory" is equally satisfied by a loop that is simply not
+    // reproducible, and the real assertion below would prove nothing.
+    let n = f.lesion_matching("_T1_left", 1.0).expect("the pattern matches");
+    assert!(n > 0, "the pattern matched no actuator");
+    let unchanged = trajectory(&mut f);
+    assert_eq!(intact, unchanged, "a no-op lesion changed the trajectory; the loop is not reproducible");
+
+    // Now sever them.
+    f.lesion_matching("_T1_left", 0.0).expect("the pattern matches");
+    let severed = trajectory(&mut f);
+    assert_ne!(intact, severed, "severing {n} muscles changed nothing; the lesion is not reaching the body");
+
+    // And it must be restorable, or a perturbation experiment could never
+    // measure the same animal twice.
+    f.lesion_matching("_T1_left", 1.0).unwrap();
+    assert_eq!(intact, trajectory(&mut f), "restoring the muscles did not restore the behaviour");
+}
+
+#[test]
+fn a_lesion_that_matches_nothing_is_an_error_rather_than_a_silent_no_op() {
+    let Some(r) = rig() else { return };
+    let mut f = build(&r);
+    let err = f.lesion_matching("no_such_actuator", 0.0).unwrap_err();
+    assert!(err.contains("no_such_actuator"), "the error must name the pattern: {err}");
+    assert!(f.set_muscle_strength(usize::MAX, 0.0).is_err(), "an out-of-range actuator must be refused");
+}

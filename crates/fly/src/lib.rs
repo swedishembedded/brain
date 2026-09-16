@@ -131,6 +131,8 @@ pub struct Fly {
     descending: Vec<u32>,
     /// Per-actuator muscle activation, carried across ticks.
     activation: Vec<f32>,
+    /// Per-actuator strength, 1.0 for an intact muscle. The body perturbation.
+    muscle: Vec<f32>,
     /// Which generalized coordinate each leg actuator moves. Established by
     /// measurement at construction, not by reading another mjModel field.
     actuator_qpos: Vec<usize>,
@@ -205,6 +207,7 @@ impl Fly {
             coupling,
             descending,
             activation: vec![0.0; actuator_names.len()],
+            muscle: vec![1.0; actuator_names.len()],
             actuator_qpos,
             actuator_names,
             proprioception: true,
@@ -213,6 +216,50 @@ impl Fly {
             drive: vec![0.0; n],
             control_tick: 0,
         })
+    }
+
+    /// Weaken or restore one muscle, `1.0` being intact and `0.0` severed.
+    ///
+    /// This is the BODY perturbation the control matrix asks for, and it is
+    /// deliberately peripheral: nothing about the nervous system changes, the
+    /// same spikes arrive at the same actuator, and less force comes out. That
+    /// is what a weakened or damaged muscle is, and it is the manipulation
+    /// insect locomotion work actually performs. Changing a coupling constant
+    /// or a motor-map polarity instead would perturb the CONTROLLER and then
+    /// call the recovery re-adaptation, which would be a different claim
+    /// wearing this one's name.
+    pub fn set_muscle_strength(&mut self, actuator: usize, strength: f32) -> Result<(), String> {
+        let n = self.muscle.len();
+        if actuator >= n {
+            return Err(format!("actuator {actuator} is out of range; this body has {n}"));
+        }
+        self.muscle[actuator] = strength;
+        Ok(())
+    }
+
+    /// Every muscle's current strength.
+    pub fn muscle_strengths(&self) -> &[f32] {
+        &self.muscle
+    }
+
+    /// Weaken every actuator whose name contains `pattern`, returning how many
+    /// were affected. Zero is an error rather than a silent no-op: a lesion
+    /// that hit nothing looks exactly like one the animal recovered from.
+    pub fn lesion_matching(&mut self, pattern: &str, strength: f32) -> Result<usize, String> {
+        let hit: Vec<usize> = self
+            .actuator_names
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| n.contains(pattern))
+            .map(|(i, _)| i)
+            .collect();
+        if hit.is_empty() {
+            return Err(format!("no actuator name contains {pattern:?}"));
+        }
+        for i in &hit {
+            self.muscle[*i] = strength;
+        }
+        Ok(hit.len())
     }
 
     /// Turn the proprioceptive channel on or off.
@@ -296,6 +343,12 @@ impl Fly {
     /// Not `DynamicalSystem::reset`, which also restores the connectome's
     /// original weights. An episode loop built on that unlearns between every
     /// episode and reports a perfectly reproducible failure to learn.
+    /// Put the body back where it started and silence the cord, leaving
+    /// anything learned - and any muscle lesion - in place.
+    ///
+    /// Muscle strength deliberately survives a reset. A body perturbation that
+    /// undid itself at every episode boundary could never be re-adapted to,
+    /// and the control that asks for re-adaptation would be measuring nothing.
     pub fn reset(&mut self) {
         self.net.reset_state();
         self.data.reset(&self.model);
@@ -418,7 +471,12 @@ impl Fly {
         }
 
         // --- act ---------------------------------------------------------
-        let ctrl: Vec<f64> = self.activation.iter().map(|a| a.clamp(-1.0, 1.0) as f64).collect();
+        let ctrl: Vec<f64> = self
+            .activation
+            .iter()
+            .zip(&self.muscle)
+            .map(|(a, m)| (a * m).clamp(-1.0, 1.0) as f64)
+            .collect();
         self.data.set(&self.model, StateSpec::CTRL, &ctrl)?;
 
         // --- integrate ---------------------------------------------------
