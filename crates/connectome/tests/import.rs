@@ -214,17 +214,25 @@ fn real_datasets_reproduce_their_published_statistics() {
     };
     let root = std::path::PathBuf::from(root);
 
-    // (dataset, neurons, edges, synapses, motor, descending, carries a size)
+    // (dataset, neurons, edges, synapses, motor, descending, neurons with a size)
     //
-    // The size flag is a FACT ABOUT THE EXPORT, asserted in both directions.
-    // MANC publishes a reconstructed volume per neuron; BANC publishes neither
-    // that nor a surface area. Asserting only the positive case would let a
-    // parser regression turn MANC into BANC unnoticed, and asserting nothing
-    // about BANC would let a future export quietly gain sizes that no run is
-    // using.
+    // The size count is a FACT ABOUT THE EXPORT, asserted exactly and in both
+    // directions. The Codex copy of BANC publishes neither a volume nor a
+    // surface area; MANC publishes a volume for every neuron; the Dataverse
+    // copy of BANC publishes one for 81% of them. Asserting only the positive
+    // case would let a parser regression turn MANC into BANC unnoticed, and
+    // asserting nothing about the empty one would let a future export quietly
+    // gain sizes that no run is using.
+    //
+    // `banc` and `banc-codex` are the SAME dataset by two routes, and the
+    // numbers differ because the releases do: `banc` is the Harvard Dataverse
+    // v888 snapshot converted by `tools/convert/banc_codex.py`, which needs no
+    // account, and it is denser than what Codex was serving.
     let expect = [
-        ("banc-codex", 158_262usize, 3_037_361usize, 23_556_214u64, 805usize, 1_316usize, false),
-        ("manc-codex", 23_665, 5_305_638, 30_934_610, 737, 1_328, true),
+        ("banc", 188_313usize, 13_620_321usize, 42_308_169u64, 805usize, 1_316usize, 152_612usize),
+        ("banc-codex", 158_262, 3_037_361, 23_556_214, 805, 1_316, 0),
+        ("manc", 23_665, 5_305_638, 30_934_610, 737, 1_328, 23_665),
+        ("manc-codex", 23_665, 5_305_638, 30_934_610, 737, 1_328, 23_665),
     ];
     for (name, neurons, edges, synapses, motor, descending, sized) in expect {
         let dir = root.join(name);
@@ -254,12 +262,8 @@ fn real_datasets_reproduce_their_published_statistics() {
         let mut sorted = e.clone();
         sorted.sort_by(f32::total_cmp);
         let (lo, mid, hi) = (sorted[0], sorted[sorted.len() / 2], sorted[sorted.len() - 1]);
-        if sized {
-            assert!(
-                known * 10 > neurons * 9,
-                "{name}: only {known} of {neurons} neurons have a recorded size; \
-                 the size column is present but not populated"
-            );
+        if sized > 0 {
+            assert_eq!(known, sized, "{name}: neurons with a recorded size");
             assert!(hi - lo > 1.0, "{name}: excitability spans only {:.3}; the normalisation does nothing", hi - lo);
             // The median neuron is left alone, which is what makes this a
             // redistribution rather than a global gain change nobody asked for.

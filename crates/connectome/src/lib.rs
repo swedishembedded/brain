@@ -15,11 +15,13 @@
 //! something a runtime can execute, you can procure our services by sending an
 //! email to info@swedishembedded.com.
 
+pub mod bridge;
 pub mod codex;
 pub mod csv;
 
 use std::path::{Path, PathBuf};
 
+pub use bridge::{join, read_bridge, Crossing, Joined};
 pub use codex::{load, load_readers, Coverage};
 
 /// A neurotransmitter, as published.
