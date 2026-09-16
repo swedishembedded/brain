@@ -163,6 +163,11 @@ fn main() {
                     Some(g) => g.score(),
                     None => e.airborne as f64 / e.ticks.max(1) as f64,
                 };
+                // `tipped` is reported and not scored: it is how a search that
+                // is cheating by rolling the animal over becomes visible.
+                if e.tipped > 1.0 {
+                    eprintln!("  (a candidate finished {:.2} rad from upright)", e.tipped);
+                }
                 (e.score(), e.net, quality)
             }
             // A parameter set the runtime refuses is not a crash, it is a

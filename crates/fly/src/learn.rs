@@ -44,6 +44,16 @@ pub struct Episode {
     pub gait: Option<crate::gait::Gait>,
     /// Ticks spent off the ground, under [`Objective::Fly`].
     pub airborne: u32,
+    /// How far from upright the body ended, in radians: the larger of its
+    /// roll and pitch.
+    ///
+    /// A DIAGNOSTIC and not part of any score, which is the point. Both
+    /// locomotion rewards here are built on net travel, and the classic way a
+    /// search cheats one is to tip the animal over and let it slide or roll -
+    /// which keeps the root height, keeps the legs oscillating, and covers
+    /// ground. A number that says "it finished on its side" is what turns that
+    /// from an undetectable success into an obvious one.
+    pub tipped: f64,
     /// Straight-line distance from where the episode started, in the model's
     /// own length units.
     ///
@@ -475,6 +485,18 @@ pub fn episode_with(
     }
 
     let end = fly.qpos();
+    // Roll and pitch out of the root quaternion, MuJoCo's (w, x, y, z) order.
+    // Yaw is deliberately not in it: an animal that has turned is not an
+    // animal that has fallen over.
+    let (qw, qx, qy, qz) = (
+        end.get(3).copied().unwrap_or(1.0),
+        end.get(4).copied().unwrap_or(0.0),
+        end.get(5).copied().unwrap_or(0.0),
+        end.get(6).copied().unwrap_or(0.0),
+    );
+    let roll = (2.0 * (qw * qx + qy * qz)).atan2(1.0 - 2.0 * (qx * qx + qy * qy));
+    let pitch = (2.0 * (qw * qy - qz * qx)).clamp(-1.0, 1.0).asin();
+    ep.tipped = roll.abs().max(pitch.abs());
     ep.distance = end.first().copied().unwrap_or(0.0) - start.first().copied().unwrap_or(0.0);
     let (dx, dy) = (
         end.first().copied().unwrap_or(0.0) - start.first().copied().unwrap_or(0.0),
