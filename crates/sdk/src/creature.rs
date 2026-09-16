@@ -63,6 +63,7 @@ pub struct CreatureBuilder {
     shuffle: Option<u64>,
     plasticity: bool,
     arena: Arena,
+    timestep: Option<f64>,
     food: Option<[f64; 3]>,
     device: Device,
 }
@@ -105,6 +106,25 @@ impl CreatureBuilder {
     /// the same default [`crate::ImagePipelineBuilder::device`] uses.
     pub fn device(mut self, device: Device) -> CreatureBuilder {
         self.device = device;
+        self
+    }
+
+    /// Integrate the body at `dt` seconds instead of the published 1e-4.
+    ///
+    /// The one dial that decides whether a walking fly can be watched at
+    /// natural speed, and it buys that by giving up contact accuracy. Physics
+    /// cost per simulated second is `1/dt` steps at a fixed cost each, so
+    /// MuJoCo's own measured 0.30x real time for this model at 1e-4 becomes
+    /// 0.62x at 2e-4 and 1.5x at 4e-4 - and the floor softens in step, because
+    /// its contact time constant has to stay at twice the timestep to stay
+    /// solvable. The control rate is unchanged: a control tick is 2 ms of body
+    /// time whatever the integrator does inside it.
+    ///
+    /// Leave it alone for anything being measured. It is here so that a person
+    /// watching the animal can choose to watch it move at its own speed, which
+    /// is a different purpose from measuring its gait.
+    pub fn timestep(mut self, dt: f64) -> CreatureBuilder {
+        self.timestep = Some(dt);
         self
     }
 
@@ -154,18 +174,31 @@ impl CreatureBuilder {
         // alive: MuJoCo reads the file at load and never again, but a caller
         // who wants to look at what was generated should find it still there.
         let scratch = tempfile::tempdir().map_err(|e| backend(format!("no scratch directory: {e}")))?;
-        let world = flybody::World { arena: self.arena, food: self.food, ..flybody::World::default() };
+        let world =
+            flybody::World { arena: self.arena, food: self.food, timestep: self.timestep, ..flybody::World::default() };
         let scene = flybody::world(&body, scratch.path(), world).map_err(backend)?;
         let model = mujoco::Model::from_xml(&mj, &scene).map_err(backend)?;
         let lif = fly::cord_lif();
         // Flight integrates ten times finer than walking and needs it: a
         // 218 Hz wingbeat resolved at the walking timestep integrates the
         // stroke adequately and the fluid forces on a reversing wing badly.
+        // A control tick is 2 ms of BODY time whatever the integrator does
+        // inside it, so the substep count is derived from the timestep rather
+        // than written next to it: the two disagreeing is a loop whose
+        // nervous system and body run at different speeds, which looks like a
+        // behaviour change rather than like a bug.
         let timing = match self.arena {
-            Arena::Ground => fly::Timing::default(),
+            Arena::Ground => match self.timestep {
+                None => fly::Timing::default(),
+                Some(dt) => fly::Timing {
+                    neural_per_control: 1,
+                    physics_per_control: fly::Timing::substeps(dt).map_err(backend)?,
+                    physics_dt: dt,
+                },
+            },
             Arena::Air => fly::Timing {
                 neural_per_control: 1,
-                physics_per_control: 40,
+                physics_per_control: fly::Timing::substeps(world.flight.timestep).map_err(backend)?,
                 physics_dt: world.flight.timestep,
             },
         };
@@ -279,6 +312,7 @@ impl Creature {
             shuffle: None,
             plasticity: false,
             arena: Arena::Ground,
+            timestep: None,
             food: None,
             device: Device::default(),
         }

@@ -51,6 +51,7 @@ struct Args {
     shuffled: bool,
     plastic: bool,
     throttle: Option<f32>,
+    timestep: Option<f64>,
     log: Option<String>,
 }
 
@@ -73,6 +74,12 @@ fn usage() -> ! {
                          so a run with nobody at the keyboard still flies
   --frames N             stop after N frames instead of running until closed
   --shot FILE            write the last frame as a PPM
+  --timestep SECONDS     integrate the body at this step instead of the
+                         published 1e-4. The one dial that decides whether the
+                         fly can be watched at natural speed: physics cost
+                         scales as 1/timestep, so 4e-4 is four times cheaper
+                         and the floor is four times softer for it. Measure
+                         gait at the published value, not at this one
   --log FILE             write one CSV row per CONTROL TICK: position,
                          velocity, attitude, wing stroke, spikes. A picture
                          shows where the fly ended up; this shows what it did
@@ -99,6 +106,7 @@ fn parse() -> Args {
         shuffled: false,
         plastic: false,
         throttle: None,
+        timestep: None,
         log: None,
     };
     let mut it = std::env::args().skip(1);
@@ -123,6 +131,7 @@ fn parse() -> Args {
             "--throttle" => a.throttle = Some(value().parse().unwrap_or_else(|_| usage())),
             "--shot" => a.shot = Some(value()),
             "--log" => a.log = Some(value()),
+            "--timestep" => a.timestep = Some(value().parse().unwrap_or_else(|_| usage())),
             "--shuffled-connectome" => a.shuffled = true,
             "--plastic" => a.plastic = true,
             "-h" | "--help" => usage(),
@@ -223,6 +232,9 @@ fn run() -> Result<(), Error> {
     }
     if args.shuffled {
         builder = builder.shuffled_connectome(0x5EED);
+    }
+    if let Some(dt) = args.timestep {
+        builder = builder.timestep(dt);
     }
     let mut fly = builder.build()?;
     println!(

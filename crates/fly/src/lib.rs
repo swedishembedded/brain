@@ -62,6 +62,37 @@ impl Default for Timing {
     }
 }
 
+/// A control tick is 2 ms of body time: 500 Hz, which is the rate flybody's
+/// own walking tasks control at.
+pub const CONTROL_PERIOD: f64 = 2e-3;
+
+impl Timing {
+    /// How many integrator steps of `dt` fill one control period.
+    ///
+    /// Derived rather than written down beside the timestep, because the two
+    /// disagreeing is not a crash: it is a body that runs faster or slower
+    /// than the nervous system driving it, and everything downstream - the
+    /// gait frequency, the real-time ratio, the reward per episode - reads as
+    /// a behaviour change instead of as a misconfiguration.
+    pub fn substeps(dt: f64) -> Result<u32, String> {
+        if !dt.is_finite() || dt <= 0.0 || dt > CONTROL_PERIOD {
+            return Err(format!(
+                "a timestep of {dt} s cannot fill a {CONTROL_PERIOD} s control period; it must be positive and no longer than one"
+            ));
+        }
+        let n = (CONTROL_PERIOD / dt).round();
+        // A step that does not divide the control period leaves the body
+        // ahead of or behind the cord by a fraction of a tick, every tick.
+        if (n * dt - CONTROL_PERIOD).abs() > 1e-12 {
+            return Err(format!(
+                "a timestep of {dt} s does not divide the {CONTROL_PERIOD} s control period ({n} steps would be {} s)",
+                n * dt
+            ));
+        }
+        Ok(n as u32)
+    }
+}
+
 // Why `neural_per_control` defaults to 1, measured rather than assumed:
 //
 //   neural step, no readback : 0.068 ms

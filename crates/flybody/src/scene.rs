@@ -79,14 +79,13 @@ fn replace_exactly(text: &mut String, from: &str, to: &str, want: usize, what: &
 /// assets being duplicated. Nothing under the source tree is written to: the
 /// published model may be read-only, and in the licence terms this workspace
 /// operates under it is not ours to modify in place.
-pub fn flight_model(fruitfly_xml: &Path, dir: &Path, cfg: Flight) -> Result<PathBuf, String> {
+fn model_text_with_absolute_assets(fruitfly_xml: &Path) -> Result<String, String> {
     let assets = fruitfly_xml
         .parent()
         .ok_or("the model path has no directory to resolve its meshes against")?
         .canonicalize()
         .map_err(|e| format!("{}: {e}", fruitfly_xml.display()))?;
     let mut text = std::fs::read_to_string(fruitfly_xml).map_err(|e| format!("{}: {e}", fruitfly_xml.display()))?;
-
     let abs = assets.display().to_string();
     replace_exactly(
         &mut text,
@@ -95,6 +94,42 @@ pub fn flight_model(fruitfly_xml: &Path, dir: &Path, cfg: Flight) -> Result<Path
         1,
         "the asset search paths",
     )?;
+    Ok(text)
+}
+
+/// The published model's own integrator timestep.
+pub const PUBLISHED_TIMESTEP: f64 = 1e-4;
+
+/// Write a copy of `fruitfly_xml` into `dir` that integrates at `timestep`.
+///
+/// The one thing that decides whether a walking fly can be watched at natural
+/// speed, and it is a FIDELITY dial, not a free one. The physics cost per
+/// simulated second is `1/timestep` steps at a fixed cost each, so it scales
+/// exactly. Measured with MuJoCo's own `testspeed` on this scene, one P-core,
+/// three runs each:
+///
+/// | timestep | real time |
+/// |---|---|
+/// | 1e-4 (published) | 0.30x |
+/// | 2e-4 | 0.62x |
+/// | 4e-4 | 1.5x |
+///
+/// What is traded for it is contact accuracy: the floor's `solref` time
+/// constant has to stay at or above twice the timestep or contacts go soft and
+/// then unstable, which is why [`world`] scales the floor with this rather
+/// than leaving it at the published 2e-4. A coarser step therefore means a
+/// SOFTER floor, and the legs sink further into it before it pushes back.
+/// Leave it at the published value for anything being measured.
+pub fn ground_model(fruitfly_xml: &Path, dir: &Path, timestep: f64) -> Result<PathBuf, String> {
+    let mut text = model_text_with_absolute_assets(fruitfly_xml)?;
+    replace_exactly(&mut text, "timestep=\"0.0001\"", &format!("timestep=\"{timestep}\""), 1, "the timestep")?;
+    let out = dir.join("fruitfly-ground.xml");
+    std::fs::write(&out, text).map_err(|e| format!("{}: {e}", out.display()))?;
+    Ok(out)
+}
+
+pub fn flight_model(fruitfly_xml: &Path, dir: &Path, cfg: Flight) -> Result<PathBuf, String> {
+    let mut text = model_text_with_absolute_assets(fruitfly_xml)?;
     replace_exactly(&mut text, "timestep=\"0.0001\"", &format!("timestep=\"{}\"", cfg.timestep), 1, "the timestep")?;
     replace_exactly(
         &mut text,
@@ -155,6 +190,11 @@ pub struct World {
     pub flight: Flight,
     /// How good the picture has to look, against how long a frame may take.
     pub look: Look,
+    /// The GROUND body's integrator timestep. `None` is the published 1e-4;
+    /// [`Arena::Air`] takes its own from [`Flight::timestep`] and ignores this.
+    /// See [`ground_model`] - this is the one dial that decides whether a
+    /// walking fly can be watched at natural speed, and what it costs.
+    pub timestep: Option<f64>,
     /// Where to put a food marker, in the model's own centimetres, or `None`
     /// for an empty arena.
     ///
@@ -166,7 +206,7 @@ pub struct World {
 
 impl Default for World {
     fn default() -> Self {
-        World { arena: Arena::Ground, flight: Flight::default(), look: Look::default(), food: None }
+        World { arena: Arena::Ground, flight: Flight::default(), look: Look::default(), timestep: None, food: None }
     }
 }
 
@@ -235,7 +275,12 @@ impl Look {
 /// standing on a floor at the wrong height either hovers or sinks into it, and
 /// neither looks like a bug until something is measured.
 const FLOOR_Z: f64 = -0.132;
-const FLOOR_SOLREF: &str = "0.0002 1";
+/// The contact time constant that goes with the published 1e-4 timestep, and
+/// the ratio it stands in: MuJoCo needs `solref[0] >= 2 * timestep` or contacts
+/// stop being solvable, and the published pair sits exactly at that ratio. So a
+/// scene that integrates coarser gets a proportionally softer floor rather than
+/// an unstable one - see [`ground_model`].
+const FLOOR_SOLREF_PER_TIMESTEP: f64 = 2.0;
 
 /// Write a complete scene - body, floor, sky, light, optional food - and return
 /// its path.
@@ -248,12 +293,17 @@ pub fn world(fruitfly_xml: &Path, dir: &Path, w: World) -> Result<PathBuf, Strin
     world_extent(w);
     let (body, name) = match w.arena {
         Arena::Air => (flight_model(fruitfly_xml, dir, w.flight)?, "brain-fly-air"),
-        Arena::Ground => (
-            fruitfly_xml
-                .canonicalize()
-                .map_err(|e| format!("{}: {e}", fruitfly_xml.display()))?,
-            "brain-fly-ground",
-        ),
+        Arena::Ground => match w.timestep {
+            // Unmodified when nothing is asked for, so a default walking run
+            // loads exactly the published model from where it lies.
+            None => (
+                fruitfly_xml
+                    .canonicalize()
+                    .map_err(|e| format!("{}: {e}", fruitfly_xml.display()))?,
+                "brain-fly-ground",
+            ),
+            Some(dt) => (ground_model(fruitfly_xml, dir, dt)?, "brain-fly-ground"),
+        },
     };
     let food = match w.food {
         Some([x, y, z]) => format!(
@@ -281,6 +331,11 @@ pub fn world(fruitfly_xml: &Path, dir: &Path, w: World) -> Result<PathBuf, Strin
     // override: MuJoCo merges every `<visual>` it parses and the last value
     // for an attribute wins.
     let Look { shadowsize, offsamples, floor_reflectance: reflectance } = w.look;
+    let timestep = match w.arena {
+        Arena::Air => w.flight.timestep,
+        Arena::Ground => w.timestep.unwrap_or(PUBLISHED_TIMESTEP),
+    };
+    let solref = format!("{} 1", FLOOR_SOLREF_PER_TIMESTEP * timestep);
     let scene = dir.join("scene.xml");
     let text = format!(
         r#"<mujoco model="{name}">
@@ -296,7 +351,7 @@ pub fn world(fruitfly_xml: &Path, dir: &Path, w: World) -> Result<PathBuf, Strin
   <statistic extent="{extent}" center="0 0 0"/>
   <worldbody>
     <light pos="0 0 3" dir="0 0 -1" diffuse=".8 .8 .8"/>
-    <geom name="floor" type="plane" size="20 20 .1" material="brain_grid" pos="0 0 {FLOOR_Z}" solref="{FLOOR_SOLREF}"/>
+    <geom name="floor" type="plane" size="20 20 .1" material="brain_grid" pos="0 0 {FLOOR_Z}" solref="{solref}"/>
 {food}  </worldbody>
 </mujoco>
 "#,
