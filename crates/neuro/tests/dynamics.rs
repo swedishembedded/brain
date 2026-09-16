@@ -41,7 +41,7 @@ fn membrane_matches_the_closed_form_for_a_constant_input() {
     // driven purely by the external port, which is the regime the closed form
     // describes. The threshold is placed out of reach so the trajectory is the
     // pure exponential rather than a reset sawtooth.
-    let p = LifParams { dt_over_tau: 0.2, v_rest: -0.3, v_reset: -0.6, v_th: 1.0e6, r: 2.0, refrac_ticks: 0, dt_over_tau_syn: 1.0, dt_over_tau_inh: 1.0 };
+    let p = LifParams { dt_over_tau: 0.2, v_rest: -0.3, v_reset: -0.6, v_th: 1.0e6, r: 2.0, refrac_ticks: 0, dt_over_tau_syn: 1.0, dt_over_tau_inh: 1.0, ..LifParams::default() };
     let csc = Csc::from_edges(1, &[]).unwrap();
     let gpu = gpu_core::testgpu::dev(&KERNELS);
     let mut net = SpikingNet::new(gpu, &csc, p).unwrap();
@@ -64,7 +64,7 @@ fn membrane_matches_the_closed_form_for_a_constant_input() {
 
 #[test]
 fn a_neuron_fires_at_threshold_and_then_stays_silent_while_refractory() {
-    let p = LifParams { dt_over_tau: 1.0, v_rest: 0.0, v_reset: 0.0, v_th: 0.5, r: 1.0, refrac_ticks: 3, dt_over_tau_syn: 1.0, dt_over_tau_inh: 1.0 };
+    let p = LifParams { dt_over_tau: 1.0, v_rest: 0.0, v_reset: 0.0, v_th: 0.5, r: 1.0, refrac_ticks: 3, dt_over_tau_syn: 1.0, dt_over_tau_inh: 1.0, ..LifParams::default() };
     let csc = Csc::from_edges(1, &[]).unwrap();
     let gpu = gpu_core::testgpu::dev(&KERNELS);
     let mut net = SpikingNet::new(gpu, &csc, p).unwrap();
@@ -100,7 +100,7 @@ fn the_gather_matches_a_host_sparse_matvec() {
     // the gather's loop bound deliberately broken. Hence the low threshold
     // here, and the assertion that neurons actually fired.
     let csc = random_csc(300, 19, 0xBEEF);
-    let p = LifParams { dt_over_tau: 1.0, v_rest: 0.0, v_reset: 0.0, v_th: 0.25, r: 1.0, refrac_ticks: 0, dt_over_tau_syn: 1.0, dt_over_tau_inh: 1.0 };
+    let p = LifParams { dt_over_tau: 1.0, v_rest: 0.0, v_reset: 0.0, v_th: 0.25, r: 1.0, refrac_ticks: 0, dt_over_tau_syn: 1.0, dt_over_tau_inh: 1.0, ..LifParams::default() };
     let n = csc.n as usize;
 
     let gpu = gpu_core::testgpu::dev(&KERNELS);
@@ -290,6 +290,7 @@ fn a_synaptic_time_constant_makes_a_spike_outlast_its_tick() {
         refrac_ticks: 0,
         dt_over_tau_syn: 1.0,
         dt_over_tau_inh: 1.0,
+        ..LifParams::default()
     };
 
     /// Neuron 1's synaptic current for the first `n` ticks after one spike.
@@ -350,6 +351,7 @@ fn excitation_and_inhibition_carry_their_own_time_constants() {
         // Excitation gone in one tick; inhibition keeps half each tick.
         dt_over_tau_syn: 1.0,
         dt_over_tau_inh: 0.5,
+        ..LifParams::default()
     };
 
     fn trace(weight: f32, p: LifParams) -> Vec<f32> {
@@ -382,4 +384,97 @@ fn excitation_and_inhibition_carry_their_own_time_constants() {
     // spikes, so nothing has crossed the synapse when tick 0 is read back.
     let first = *inh.iter().find(|c| c.abs() > 1e-6).expect("something should arrive");
     assert!(first < 0.0, "an inhibitory synapse should deliver negative current, got {first}");
+}
+
+/// Inter-spike intervals of one neuron under a constant drive.
+fn intervals(p: LifParams, drive: f32, ticks: u32) -> Vec<u32> {
+    let csc = Csc::from_edges(1, &[]).unwrap();
+    let gpu = gpu_core::testgpu::dev(&KERNELS);
+    let mut net = SpikingNet::new(gpu, &csc, p).unwrap();
+    net.drive(Port::Drive, &[drive]).unwrap();
+    let mut s = [0.0f32; 1];
+    let mut fired = Vec::new();
+    for tick in 0..ticks {
+        net.step();
+        net.read(Port::Spike, &mut s).unwrap();
+        if s[0] == 1.0 {
+            fired.push(tick);
+        }
+    }
+    fired.windows(2).map(|w| w[1] - w[0]).collect()
+}
+
+/// Spike-frequency adaptation: a cell under a constant current fires fast and
+/// then slows to a steady rate.
+///
+/// This is the ingredient a network oscillator needs and the LIF above does
+/// not have. A pair of populations inhibiting each other cannot alternate
+/// unless something makes the active one give way on a timescale slower than
+/// the synapse: with nothing but a membrane and a threshold, whichever side
+/// wins the first tick wins every tick, and what comes out is a cord that
+/// coordinates aperiodically - which is exactly what `fly`'s gait analysis
+/// measured before this existed.
+///
+/// The CONTROL is the same neuron with the increment at zero. Without it
+/// "the intervals grew" is also satisfied by a neuron that is simply running
+/// out of drive.
+#[test]
+fn adaptation_slows_a_neuron_down_and_its_absence_does_not() {
+    let base = LifParams {
+        dt_over_tau: 0.5,
+        v_th: 1.0,
+        r: 1.0,
+        refrac_ticks: 0,
+        adapt_decay: 0.9,
+        adapt_increment: 0.35,
+        ..LifParams::default()
+    };
+    let adapting = intervals(base, 3.0, 400);
+    let plain = intervals(LifParams { adapt_increment: 0.0, ..base }, 3.0, 400);
+
+    assert!(adapting.len() > 4 && plain.len() > 4, "both cells have to fire repeatedly: {adapting:?} / {plain:?}");
+    assert!(
+        plain.iter().all(|&i| i == plain[0]),
+        "without adaptation a constant current has to give a constant rate, got {plain:?}"
+    );
+    assert!(
+        adapting[0] < *adapting.last().unwrap(),
+        "adaptation has to lengthen the interval, got {adapting:?}"
+    );
+    // It SETTLES rather than running away: an adaptation current that never
+    // reached equilibrium would silence the cell instead of slowing it, and a
+    // silenced population cannot take its turn in an alternation.
+    let tail = &adapting[adapting.len() - 3..];
+    assert!(tail.iter().all(|&i| i == tail[0]), "the adapted rate has to settle, got {adapting:?}");
+    assert!(*tail.last().unwrap() > adapting[0], "the settled rate has to be slower than the onset rate");
+}
+
+/// The adaptation current is a geometric decay with a closed form, like the
+/// membrane it subtracts from - so its OFF state is exact rather than small.
+#[test]
+fn adaptation_off_is_bit_identical_to_a_cord_that_never_had_it() {
+    // Every default is the un-adapted model, so a network built from defaults
+    // has to reproduce what this runtime did before adaptation existed, to the
+    // bit. Anything less would silently restate every measurement in the fly
+    // ledger.
+    assert_eq!(LifParams::default().adapt_increment, 0.0);
+    let csc = random_csc(64, 6, 0xADA9);
+    let p = LifParams { dt_over_tau: 0.4, v_th: 0.3, refrac_ticks: 1, ..LifParams::default() };
+
+    let run = |p: LifParams| {
+        let gpu = gpu_core::testgpu::dev(&KERNELS);
+        let mut net = SpikingNet::new(gpu, &csc, p).unwrap();
+        net.drive(Port::Drive, &vec![0.8; 64]).unwrap();
+        let mut v = vec![0.0f32; 64];
+        let mut trace = Vec::new();
+        for _ in 0..40 {
+            net.step();
+            net.read(Port::Membrane, &mut v).unwrap();
+            trace.extend_from_slice(&v);
+        }
+        trace
+    };
+    // A decay of zero with no increment is the same no-op as any other decay:
+    // nothing ever enters the variable, so nothing ever leaves it.
+    assert_eq!(run(p), run(LifParams { adapt_decay: 0.99, ..p }), "an empty adaptation current is not inert");
 }

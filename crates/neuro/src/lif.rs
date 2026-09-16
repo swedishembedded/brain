@@ -43,6 +43,20 @@ pub struct LifParams {
     /// chose. This is what puts a network oscillator's period in the range an
     /// animal moves at.
     pub dt_over_tau_syn: f32,
+    /// Fraction of the SPIKE-FREQUENCY ADAPTATION current that survives a
+    /// tick, `exp(-dt / tau_w)`.
+    ///
+    /// The slow variable. A cell's own recent firing subtracts from its input,
+    /// so a constant drive produces a fast onset that settles to a lower rate.
+    /// This is the ingredient that lets a pair of mutually inhibiting
+    /// populations take turns: without a slow variable the side that wins the
+    /// first tick wins every tick, and the network can coordinate but never
+    /// oscillate. See `crates/kernels/wgsl/lif_step.wgsl`.
+    pub adapt_decay: f32,
+    /// How much adaptation current one spike adds. `0.0` - the default -
+    /// disables adaptation EXACTLY: nothing ever enters the variable, so
+    /// nothing leaves it and the membrane update is unchanged bit for bit.
+    pub adapt_increment: f32,
     /// The same for INHIBITORY input, which is deliberately a separate number.
     ///
     /// A reciprocal-inhibition oscillator's period is set by how long the
@@ -68,6 +82,10 @@ impl Default for LifParams {
             // taken before synapses had a time constant.
             dt_over_tau_syn: 1.0,
             dt_over_tau_inh: 1.0,
+            // Off, for the same reason: the default is the model this runtime
+            // had before it had a slow variable.
+            adapt_decay: 0.9,
+            adapt_increment: 0.0,
         }
     }
 }
@@ -81,6 +99,12 @@ impl LifParams {
             if !(a > 0.0 && a <= 1.0) {
                 return Err(format!("{name} must be in (0, 1], got {a}"));
             }
+        }
+        if !(0.0..1.0).contains(&self.adapt_decay) {
+            return Err(format!("adapt_decay must be in [0, 1), got {} - a current that never decays is not adaptation, it is a ramp to silence", self.adapt_decay));
+        }
+        if self.adapt_increment < 0.0 {
+            return Err(format!("adapt_increment must not be negative, got {} - a negative one is positive feedback", self.adapt_increment));
         }
         if self.v_th <= self.v_reset {
             return Err(format!("v_th ({}) must exceed v_reset ({})", self.v_th, self.v_reset));
@@ -171,6 +195,8 @@ pub struct SpikingNet {
     refrac: DeviceBuffer,
     spike: DeviceBuffer,
     isyn: DeviceBuffer,
+    /// Spike-frequency adaptation current, one per neuron.
+    adapt: DeviceBuffer,
     /// Excitatory and inhibitory current, interleaved `(e, i)` per neuron, so
     /// each can carry across ticks on its own time constant.
     syn: DeviceBuffer,
@@ -227,6 +253,7 @@ impl SpikingNet {
         let refrac = gpu.buffer("neuro.refrac", nb, live);
         let spike = gpu.buffer("neuro.spike", nb, live);
         let isyn = gpu.buffer("neuro.isyn", nb, live);
+        let adapt = gpu.buffer("neuro.adapt", nb, live);
         let syn = gpu.buffer("neuro.syn", bytes(2 * n as usize), live);
         let drive = gpu.buffer("neuro.drive", nb, live);
 
@@ -242,6 +269,7 @@ impl SpikingNet {
             refrac,
             spike,
             isyn,
+            adapt,
             syn,
             drive,
             w0: csc.w.clone(),
@@ -327,7 +355,7 @@ impl SpikingNet {
     /// The LIF kernel's `Params` block: two counts then five f32 bit patterns,
     /// in declaration order. A mismatched param list here is silently wrong
     /// rather than a crash, which is why the order is written once.
-    fn lif_params(&self) -> [u32; 7] {
+    fn lif_params(&self) -> [u32; 9] {
         [
             self.n,
             self.params.refrac_ticks,
@@ -336,6 +364,8 @@ impl SpikingNet {
             self.params.v_reset.to_bits(),
             self.params.v_th.to_bits(),
             self.params.r.to_bits(),
+            self.params.adapt_decay.to_bits(),
+            self.params.adapt_increment.to_bits(),
         ]
     }
 }
@@ -356,6 +386,7 @@ impl SpikingNet {
         self.gpu.write(&self.refrac, &vec![0u32; n]);
         self.gpu.write_f32(&self.spike, &vec![0.0; n]);
         self.gpu.write_f32(&self.isyn, &vec![0.0; n]);
+        self.gpu.write_f32(&self.adapt, &vec![0.0; n]);
         self.gpu.write_f32(&self.syn, &vec![0.0; 2 * n]);
         self.gpu.write_f32(&self.drive, &vec![0.0; n]);
         if let Some(pl) = &mut self.plast {
@@ -399,6 +430,7 @@ impl DynamicalSystem for SpikingNet {
         self.gpu.write(&self.refrac, &vec![0u32; n]);
         self.gpu.write_f32(&self.spike, &vec![0.0; n]);
         self.gpu.write_f32(&self.isyn, &vec![0.0; n]);
+        self.gpu.write_f32(&self.adapt, &vec![0.0; n]);
         self.gpu.write_f32(&self.syn, &vec![0.0; 2 * n]);
         self.gpu.write_f32(&self.drive, &vec![0.0; n]);
         self.gpu.write_f32(&self.w, &self.w0.clone());
@@ -426,7 +458,7 @@ impl DynamicalSystem for SpikingNet {
         );
         let lif = self.gpu.step(
             K_LIF,
-            &[&self.v, &self.refrac, &self.isyn, &self.drive, &self.spike],
+            &[&self.v, &self.refrac, &self.isyn, &self.drive, &self.spike, &self.adapt],
             &self.lif_params(),
             self.n,
         );
