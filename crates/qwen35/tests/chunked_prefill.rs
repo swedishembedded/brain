@@ -97,11 +97,19 @@ fn slow_decay(cfg: &Qwen35Config, mut w: HashMap<String, Vec<f32>>) -> HashMap<S
 
 /// Replay `prompt` through both paths at chunk size `chunk`, then continue
 /// both with the same `tail` tokens one at a time and compare.
-fn run(gpu: Gpu, chunk: u32) {
+///
+/// `pooled` selects which of `run_prefill_chunk_stage`'s two scratch regimes
+/// the chunked side runs in - see `Qwen35::set_chunk_arena_min_rows`. A
+/// `tiny()` round is far below the production threshold, so the default would
+/// only ever reach the unpooled one; both are production paths (the pooled one
+/// is what a real 256-row prefill round takes) and both have to hold this
+/// gate's claim.
+fn run(gpu: Gpu, chunk: u32, pooled: bool) {
     let cfg = Qwen35Config { n_layers: 8, ..Qwen35Config::tiny() };
     let d = cfg.d_model as usize;
     let init = slow_decay(&cfg, qwen35::init::init_weights(&cfg, 7));
     let m = Qwen35::new_on(gpu, cfg.clone(), 1, cfg.block_size, &init);
+    m.set_chunk_arena_min_rows(if pooled { 1 } else { u32::MAX });
 
     let prompt: Vec<u32> = (0..14).map(|i| (i * 5 + 3) % cfg.vocab).collect();
     let tail: Vec<u32> = (0..3).map(|i| (i * 7 + 1) % cfg.vocab).collect();
@@ -126,25 +134,44 @@ fn run(gpu: Gpu, chunk: u32) {
     assert_eq!(m.decode_pos(), (prompt.len() + tail.len()) as u32);
 
     let last_err = maxabs(&got_last, &want_last);
-    assert!(last_err < 1e-5, "chunk={chunk}: prompt's last hidden state maxabs={last_err}");
+    assert!(last_err < 1e-5, "chunk={chunk} pooled={pooled}: prompt's last hidden state maxabs={last_err}");
     let mut worst = last_err;
     for (i, (got, want)) in got_tail.iter().zip(&want_tail).enumerate() {
         let err = maxabs(got, want);
         worst = worst.max(err);
-        assert!(err < 1e-5, "chunk={chunk}: continuation token {i} hidden state maxabs={err} (chunked prefill left the decode state wrong)");
+        assert!(err < 1e-5, "chunk={chunk} pooled={pooled}: continuation token {i} hidden state maxabs={err} (chunked prefill left the decode state wrong)");
     }
-    println!("chunked_prefill(chunk={chunk}): worst maxabs over prompt-last + {} continuation steps = {worst:e}", tail.len());
+    println!("chunked_prefill(chunk={chunk}, pooled={pooled}): worst maxabs over prompt-last + {} continuation steps = {worst:e}", tail.len());
 }
 
 #[test]
 fn chunked_prefill_matches_token_by_token_replay_cpu() {
-    run(Gpu::new_cpu(pipelines()), 4);
+    run(Gpu::new_cpu(pipelines()), 4, false);
+    run(Gpu::new_cpu(pipelines()), 4, true);
 }
 
 #[test]
 fn chunked_prefill_matches_token_by_token_replay_default_backend() {
-    run(Gpu::new(pipelines()), 4);
-    run(Gpu::new(pipelines()), 8);
+    run(Gpu::new(pipelines()), 4, false);
+    run(Gpu::new(pipelines()), 8, false);
+}
+
+/// The same claim with the scratch ARENA open - the regime a production-sized
+/// (`>= CHUNK_ARENA_MIN_ROWS`) prefill round runs in, where every layer draws
+/// its temporaries from the previous layer's recycled buffers instead of fresh,
+/// zero-filled ones.
+///
+/// Separated from the unpooled test above because the two differ in exactly the
+/// way `gpu_core::scratch`'s own doc warns about: "a recycled buffer holds
+/// whatever the previous scope left in it", so a kernel that reads a slot it
+/// does not fully write agrees with a token-by-token replay on one path and not
+/// the other. Below the threshold no real round takes this path, but every
+/// 256-row prompt round does, and at `tiny()` dims this is the only way to
+/// reach it.
+#[test]
+fn pooled_chunked_prefill_matches_token_by_token_replay_default_backend() {
+    run(Gpu::new(pipelines()), 4, true);
+    run(Gpu::new(pipelines()), 8, true);
 }
 
 /// The single-round case: chunk >= prompt length, so the whole prompt is one
@@ -154,5 +181,6 @@ fn chunked_prefill_matches_token_by_token_replay_default_backend() {
 /// vice versa for a bug in the fresh-sequence seeding.
 #[test]
 fn whole_prompt_single_chunk_matches_token_by_token_replay() {
-    run(Gpu::new(pipelines()), 16);
+    run(Gpu::new(pipelines()), 16, false);
+    run(Gpu::new(pipelines()), 16, true);
 }

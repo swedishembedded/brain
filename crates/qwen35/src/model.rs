@@ -385,6 +385,46 @@ const HEAD_ARGMAX_CHUNKS: u32 = 256;
 // count of layers. See that function's own comments for the mechanism and
 // the ledger entry for the measured before/after.
 
+/// Rows at or above which a chunk round draws its per-layer temporaries from
+/// [`gpu_core::scratch::Arena`] - **and therefore pays that arena's drain**, a
+/// blocking `poll_wait` at every layer boundary.
+///
+/// The arena trades allocations for a fence. A round's per-layer temporaries
+/// are `[n, d_model]`, so what it saves scales with `n` while what it costs -
+/// one device fence per layer, which stops the host's recording of layer `l+1`
+/// from overlapping the card's execution of layer `l` - does not scale with `n`
+/// at all. That makes the trade a function of the row count and nothing else,
+/// which is why this is a threshold rather than a policy.
+///
+/// Below this, no scope is opened, so `Gpu::storage` allocates exactly as it
+/// did before any caller opted in - the arena's own documented behaviour
+/// outside a scope - which means no buffer is ever recycled and hence the drain
+/// the arena's contract asks for is not owed. The small-round path is then
+/// structurally the decode tape's: record a layer, `flush`, keep going. That is
+/// not a relaxed correctness argument, it is the absence of the condition the
+/// drain exists for. (An unpooled round still owes RECLAIM, which is a
+/// different obligation and is met on bytes - see the layer loop.)
+///
+/// **Measured**, real 27B across two P40s, layer-stack ms per round, pooled
+/// divided by unpooled - above 1 the pool is losing. The qwen35 ledger's M29
+/// records how these were taken, and
+/// `tests/gguf_resident_verify_cost_real::the_verify_round_cost_ladder`
+/// re-derives the whole row on demand:
+///
+/// | rows |   1  |   3  |   7  |   8  |  16  |  32  |  64  |  128 |  256 |
+/// |------|------|------|------|------|------|------|------|------|------|
+/// | pooled/unpooled | 1.68 | 1.66 | 1.44 | 1.36 | 1.10 | 1.10 | 1.04 | 0.96 | 0.92 |
+///
+/// The fence costs 1.4-1.7x at exactly the row counts a speculative verify
+/// round uses (`k + 1`, so 2-8), and the curve crosses over between 64 and 128.
+/// Anywhere in 16..=64 is within measurement noise of the same choice and no
+/// production caller runs a round in that range anyway - a verify round is
+/// `k + 1`, a prompt round is `MAX_PREFILL_TOKENS`, and only a ragged final
+/// prefill chunk lands between. 16 is the conservative end of that window: it
+/// keeps MORE rounds on the pool, and the pool is what bounds allocation churn
+/// (M6.10's actual purpose, whose stability claim is not re-measured here).
+const CHUNK_ARENA_MIN_ROWS: u32 = 16;
+
 /// This model's RMSNorm epsilon. Exactly what `rmsnorm.wgsl` hardcodes, but it
 /// has to be passed explicitly here - see [`rms_step`].
 const RMS_EPS: f32 = 1e-6;
@@ -873,6 +913,10 @@ pub struct Qwen35 {
     /// What the last chunk pass tapped, `(layer, [n, d_model])` in layer
     /// order. Drained by [`Self::take_hidden_taps`].
     tapped: RefCell<Vec<(usize, Vec<f32>)>>,
+
+    /// This instance's [`CHUNK_ARENA_MIN_ROWS`] - see
+    /// [`Self::set_chunk_arena_min_rows`].
+    chunk_arena_min_rows: Cell<u32>,
 }
 
 /// Which per-sequence GQA cache / GDN recurrent state one [`Qwen35::
@@ -1455,7 +1499,30 @@ impl Qwen35 {
             shard,
             taps: RefCell::new(Vec::new()),
             tapped: RefCell::new(Vec::new()),
+            chunk_arena_min_rows: Cell::new(CHUNK_ARENA_MIN_ROWS),
         }
+    }
+
+    /// **Move this instance's scratch-arena threshold**, the row count at or
+    /// above which [`Self::run_prefill_chunk_stage`] pools its per-layer
+    /// temporaries and pays the per-layer device drain that pooling requires.
+    /// Defaults to [`CHUNK_ARENA_MIN_ROWS`].
+    ///
+    /// Two behaviours exist behind one function, and both are production
+    /// paths, so both have to be reachable by a test. The equivalence gates
+    /// that own this function's correctness (`tests/chunked_prefill.rs`,
+    /// `two_shard_chunked_prefill_matches_token_by_token_replay`) run at
+    /// `tiny()` dims, whose whole `block_size` is far below any useful
+    /// threshold - so without this they would only ever exercise the unpooled
+    /// side, and the pooled side would be gated by nothing. Setting this to 1
+    /// is what lets them assert the same claim on both.
+    ///
+    /// It is not a knob for a serving caller to tune: the default is measured
+    /// (see [`CHUNK_ARENA_MIN_ROWS`]) and a caller that moves it is choosing
+    /// against a measurement, not for one.
+    pub fn set_chunk_arena_min_rows(&self, rows: u32) {
+        assert!(rows > 0, "qwen35::set_chunk_arena_min_rows: 0 would open a scope for an empty round; 1 is 'always pool'");
+        self.chunk_arena_min_rows.set(rows);
     }
 
     /// **Ask a chunk pass to hand back the residual leaving specific layers.**
@@ -2853,6 +2920,23 @@ impl Qwen35 {
         g.write(&block_ids, &vec![caches.gqa_base_row / caches.gqa_cap; n as usize]);
         g.write(&seq_lens, &(0..n).map(|i| pos_start + i + 1).collect::<Vec<u32>>());
 
+        let pooled = n >= self.chunk_arena_min_rows.get();
+        // What an UNPOOLED round owes instead of the arena's drain. Nothing is
+        // recycled there, so no dispatch can be overwritten while it still
+        // reads - but every layer's temporaries are still DROPPED as the next
+        // layer's are taken, and this backend refuses the next allocation once
+        // more than its own reclaim ceiling is sitting dropped-and-unreclaimed
+        // (`backend_wgpu::WgpuBackend::track`, which panics rather than
+        // letting it become a generic OOM hours into a run). Measured: a
+        // 128-row unpooled round crosses a P40's 4.29 GB ceiling partway
+        // through its 34 layers.
+        //
+        // So the unpooled path drains on BYTES, not on a layer count. A 1-8
+        // row verify round's whole scratch is a few hundred MB and never comes
+        // near this, so it pays nothing; a round large enough to matter drains
+        // a handful of times instead of once per layer. Half the ceiling, so
+        // one more layer's allocations after the check cannot cross it.
+        let reclaim_budget = g.reclaim_ceiling_bytes() / 2;
         let types = self.cfg.layer_types();
         #[allow(clippy::needless_range_loop)]
         for l in self.shard.start..self.shard.end {
@@ -2873,7 +2957,13 @@ impl Qwen35 {
             // for free - that slot gets a fresh allocation instead of
             // aliasing the value this loop is still reading, with no special
             // case needed here.
-            let _scope = g.scratch_scope();
+            //
+            // M29: only above `CHUNK_ARENA_MIN_ROWS`. Below it no scope is
+            // opened at all, `Gpu::storage` allocates as it does everywhere
+            // else, and the `poll_wait` this scope's reuse requires is not
+            // owed - see that constant's own doc for why the trade flips with
+            // the row count.
+            let _scope = pooled.then(|| g.scratch_scope());
 
             let xn1 = g.storage((n * d) as u64);
             g.submit(&[], &[rms_step(g, &res, self.w(&format!("blocks.{l}.ln1.weight")), &xn1, d, n)]);
@@ -2922,21 +3012,29 @@ impl Qwen35 {
             // has to run before `flush`, not after, or it drains nothing
             // this layer just recorded. On the FIRST layer of this call
             // there is nothing queued yet to drain (`poll_wait` on an idle
-            // queue returns immediately), so the ordering is unconditional
-            // rather than gated on a layer count. This IS a real cost at a
-            // small `n` (chunk row count) - not enough per-layer device work
-            // to hide a wait behind - which is why the production chunk size
-            // (`crate::int8_gguf_resident::MAX_PREFILL_TOKENS`, 256) is the
-            // one this scheme is measured against, not an arbitrarily small
-            // one. See M6.10's own kernel-performance ledger entry for the
-            // measured before/after at both scales.
-            g.poll_wait();
+            // queue returns immediately), so within the pooled regime the
+            // ordering is unconditional rather than gated on a layer count.
+            //
+            // The wait is a real cost, and how real depends entirely on `n`:
+            // a 256-row round has enough per-layer device work to hide it
+            // behind, a 1-row one has none and spends 60% of the round
+            // blocked. That is why it is now gated on `pooled` (M29) rather
+            // than paid by every round - it belongs to the POOL, not to the
+            // tape. See M6.10's kernel-performance ledger entry for the pool
+            // itself and the qwen35 ledger's M29 for the profile that priced
+            // its drain.
+            //
+            // The second disjunct is a different obligation with the same
+            // remedy - see `reclaim_budget` above.
+            if pooled || g.pending_reclaim_bytes() > reclaim_budget {
+                g.poll_wait();
+            }
             g.flush();
             // The tap ([`Self::set_hidden_taps`]). Here, not after the loop,
             // because `res` is rebound every iteration and only this point
-            // holds layer `l`'s own output; the `poll_wait`/`flush` pair just
-            // above is what makes the read correct, which the debug dump
-            // below has always relied on too.
+            // holds layer `l`'s own output. A tapped read is its own drain
+            // (`Gpu::read` flushes and blocks), so it is correct on both sides
+            // of the `pooled` branch above.
             if !self.taps.borrow().is_empty() && self.taps.borrow().contains(&l) {
                 self.tapped.borrow_mut().push((l, g.read(&res, (n * d) as usize)));
             }
@@ -2959,8 +3057,13 @@ impl Qwen35 {
         // permanently resident `~n_layers`-th of a round's scratch for
         // buffers a decode step never touches. Release it here, the same
         // point a `for` loop's locals would drop on their own if the arena
-        // did not deliberately outlive them.
-        g.scratch_release();
+        // did not deliberately outlive them. Skipped when no scope was opened
+        // (`n < CHUNK_ARENA_MIN_ROWS`): there is nothing this round put in the
+        // arena to give back, and a round that ran unpooled has no business
+        // reaching into the allocator state at all.
+        if pooled {
+            g.scratch_release();
+        }
 
         // Head epilogue (final norm): head stage only - `run_decode_step`'s own
         // `shard.head` branch, at `n` rows. A non-head stage hands back its raw
@@ -3895,6 +3998,20 @@ mod tests {
     /// orders of magnitude clear of the bound on both sides.
     #[test]
     fn two_shard_chunked_prefill_matches_token_by_token_replay() {
+        two_shard_chunked_prefill_replay(false);
+    }
+
+    /// [`two_shard_chunked_prefill_matches_token_by_token_replay`] with the
+    /// scratch arena OPEN - the regime a production-sized round takes. See
+    /// `tests/chunked_prefill.rs`'s `pooled_chunked_prefill_matches_token_by_
+    /// token_replay_default_backend` for why the two are separate tests and
+    /// not one.
+    #[test]
+    fn two_shard_pooled_chunked_prefill_matches_token_by_token_replay() {
+        two_shard_chunked_prefill_replay(true);
+    }
+
+    fn two_shard_chunked_prefill_replay(pooled: bool) {
         let cfg = Qwen35Config { n_layers: 8, ..Qwen35Config::tiny() };
         let n_layers = cfg.n_layers as usize;
         let cut = 5usize;
@@ -3919,6 +4036,9 @@ mod tests {
             &init,
             Shard { start: cut, end: n_layers, embed: false, head: true, gpu_index: Shard::ANY_GPU },
         );
+        for s in [&stage0, &stage1] {
+            s.set_chunk_arena_min_rows(if pooled { 1 } else { u32::MAX });
+        }
 
         // 14 prompt tokens at chunk 4 is 4+4+4+2 - several rounds with a
         // ragged last one, so every round after the first must continue from
@@ -3972,7 +4092,7 @@ mod tests {
             worst = worst.max(err);
             assert!(err < 1e-5, "continuation token {i} maxabs={err} (the chunked prefill left the two stages' decode state wrong)");
         }
-        println!("two_shard_chunked_prefill: worst maxabs over prompt-last + {} continuation steps = {worst:e}", tail.len());
+        println!("two_shard_chunked_prefill(pooled={pooled}): worst maxabs over prompt-last + {} continuation steps = {worst:e}", tail.len());
     }
 
     #[test]

@@ -7518,3 +7518,21 @@ the kernel-table regen gate does not apply. `cargo test --release --offline
 
 **Commit**: one - `qwen35: liveness-based scratch arena replaces prefill's
 fixed drain schedule (M6.10)`.
+
+**Follow-up (see `.agents/roadmap/qwen35.md` M29): the `n = 64` regression
+above was real, it was the dominant cost of the whole speculative-decoding
+path, and it is now bounded rather than accepted.** This entry reported a
+repeatable ~3.2x regression at a small chunk size and set it aside because
+the production prefill size is 256. What was not visible from here is that
+prefill is not the only caller: a speculative VERIFY round
+(`Qwen35GgufInstance::generate_speculative`) is structurally a prefill round
+at 1-8 rows, so it paid that regression on every round it ran. Profiled on
+the real 27B across two P40s, a 1-row round spent **60% of its wall clock
+blocked in the per-layer `poll_wait`** and 0.1% in the per-round setup the
+obvious hypothesis had blamed. The arena is unchanged and still open at
+production prefill sizes; what changed is that the drain it requires is now
+paid only where that pool is actually open (`model::CHUNK_ARENA_MIN_ROWS`,
+16 rows), because outside a scope nothing is recycled and nothing is owed.
+Unpooled rounds instead drain on BYTES against
+`Gpu::reclaim_ceiling_bytes()`, which is a different obligation this entry
+never had to consider and which a 128-row unpooled round does cross.
