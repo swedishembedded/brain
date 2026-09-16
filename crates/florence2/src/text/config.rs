@@ -56,4 +56,29 @@ impl BartConfig {
     pub fn head_dim(&self, heads: u32) -> u32 {
         self.d_model / heads
     }
+
+    /// A small synthetic shape for M6's gradcheck/overfit tests - never the
+    /// real checkpoint's dims (those are `florence2_base`'s job). Deliberately
+    /// distinct encoder/decoder ffn widths (17/19) and a `d_model`/`heads`
+    /// pair that gives a head_dim unlikely to collide with any other axis
+    /// (12/3 -> head_dim 4), the same "catch an axis-swap bug the real
+    /// checkpoint's coincidental dims would hide" reasoning
+    /// `deepseek2::config::DeepseekV2Config::tiny`'s own doc gives.
+    pub fn tiny() -> BartConfig {
+        BartConfig {
+            d_model: 12,
+            encoder_layers: 2,
+            decoder_layers: 2,
+            encoder_attention_heads: 3,
+            decoder_attention_heads: 3,
+            encoder_ffn_dim: 17,
+            decoder_ffn_dim: 19,
+            vocab_size: 23,
+            pad_token_id: 1,
+            bos_token_id: 0,
+            eos_token_id: 2,
+            decoder_start_token_id: 2,
+            layer_norm_eps: 1e-5,
+        }
+    }
 }

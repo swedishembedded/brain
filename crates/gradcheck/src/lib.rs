@@ -95,6 +95,15 @@ pub use deepseekocr2::check_deepseekocr2;
 pub mod timesfm3;
 pub use timesfm3::{check_timesfm3, check_timesfm3_lora, check_timesfm3_one_layer};
 
+/// Florence-2's BART text encoder-decoder (`crates/florence2`) - LoRA and
+/// full-fine-tune training. A direct [`CheckModel`] impl on the crate's own
+/// `Florence2Trainer` (no wrapper, no proxy objective - it already has a
+/// real mean cross-entropy `loss()`), not the blanket `model::Model` impl:
+/// its batch is a two-stream (encoder text-prompt-embeds, decoder ids)
+/// seq2seq shape `model::Batch` has no variant for.
+pub mod florence2;
+pub use florence2::{check_florence2, check_florence2_lora};
+
 /// A model the checker can drive: a fixed batch must already be set.
 pub trait CheckModel {
     fn param_names(&self) -> Vec<String>;

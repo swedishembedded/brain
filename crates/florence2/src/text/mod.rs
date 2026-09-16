@@ -9,8 +9,11 @@ pub mod config;
 pub mod decoder;
 pub mod encoder;
 pub mod lm;
+pub mod lora;
 
+pub use attn::{BartAttnBwdIds, BartAttnBwdScratch};
 pub use config::{BartConfig, POSITION_OFFSET};
-pub use decoder::{Decoder, DecoderKernelIds};
-pub use encoder::{Encoder, EncoderKernelIds};
+pub use decoder::{Decoder, DecoderBwdKernelIds, DecoderKernelIds};
+pub use encoder::{Encoder, EncoderBwdKernelIds, EncoderKernelIds};
 pub use lm::{Florence2Lm, Florence2LmKernelIds};
+pub use lora::{LoraCfg, LoraCtx, LoraKernelIds, LoraScratch};

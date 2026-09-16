@@ -1129,9 +1129,11 @@ dependencies = [
  "brain-kernels",
  "brain-model",
  "brain-modelstore",
+ "brain-optim",
  "brain-paramstore",
  "brain-testutil",
  "brain-vision",
+ "bytemuck",
  "serde_json",
 ]
 
@@ -1316,6 +1318,7 @@ dependencies = [
  "brain-cosyvoice",
  "brain-data",
  "brain-deepseekocr2",
+ "brain-florence2",
  "brain-flux2",
  "brain-glmdsa",
  "brain-gpt2",

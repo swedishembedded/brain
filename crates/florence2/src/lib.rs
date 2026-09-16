@@ -18,4 +18,5 @@ pub mod import;
 pub mod spec;
 pub mod text;
 pub mod tokenizer;
+pub mod train;
 pub mod vision;

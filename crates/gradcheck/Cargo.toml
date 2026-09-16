@@ -71,6 +71,9 @@ brain-sam1.workspace = true
 # `check_timesfm3` (+ `_one_layer`, `_lora`, the elementwise fold checks) -
 # TimesFM-3's sequence+variate mixing transformer training graph.
 brain-timesfm3.workspace = true
+# `check_florence2` (src/florence2.rs) - the Florence-2 BART text
+# encoder-decoder's LoRA/full-fine-tune training graph.
+brain-florence2.workspace = true
 
 [dev-dependencies]
 brain-testutil.workspace = true
