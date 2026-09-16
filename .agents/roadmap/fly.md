@@ -548,8 +548,82 @@ it against the scan+sort reference at `max|d| == 0`.
   and a negative result from a gain search is weaker evidence than one from a
   per-synapse search.
 
-  **Still open in M5:** the last control - body perturbation followed by
-  re-adaptation - and the reward redesign the ceiling's solution points at.
+  **The reward was redesigned, faithfully, and the answer got clearer rather
+  than better.** flybody's own walking task is DeepMimic imitation, and the
+  port initially got two things wrong that were read off its source and fixed:
+  the factors MULTIPLY (`flybody/tasks/base.py` returns `np.prod`), not sum,
+  and the task ends an episode once the centre of mass is more than 0.33 cm
+  from the reference. Both halves of DeepMimic are now here - early
+  termination AND reference-state initialisation from a random snippet and
+  frame - and the control matrix scores the episode RETURN, since surviving
+  longer is how a terminating episode earns more.
+
+  Over 120 episodes per condition with random starts:
+
+  | condition | mean return (of a perfect 6000) | first half to second |
+  |---|---|---|
+  | Learning | 49.3 | -14.6 |
+  | Frozen | 39.6 | -12.1 |
+  | ShuffledReward | 54.8 | -12.9 |
+  | ShuffledConnectome | 49.8 | -15.5 |
+
+  Learning beats Frozen 119/120 (p < 0.0001) and does NOT beat ShuffledReward
+  (57/120, p = 0.74) or ShuffledConnectome (7/26). Nothing improves within its
+  own run. **This is a negative result and it is reported as one:** the effect
+  of plasticity here is not reward-correlated.
+
+  One detail in it was the thread worth pulling. Learning and
+  ShuffledConnectome returned IDENTICAL scores in 94 of 120 episodes while
+  firing different numbers of spikes - which is what happens when a score is
+  determined by something other than the animal.
+
+  **So the reward was measured directly, and it pays a corpse.** With the start
+  fixed and the descending command swept from silence to saturation, plus a
+  PARALYSED control with every muscle severed:
+
+  | condition | return | spikes |
+  |---|---|---|
+  | drive 0.0 to 1.0 (below threshold) | 31.79 | 415 |
+  | drive 2.0 | 25.06 | 48,097 |
+  | drive 3.0 | 22.85 | 69,671 |
+  | drive 4.0 | 20.72 | 84,835 |
+  | **PARALYSED** | **31.36** | 48,592 |
+
+  A severed body scores **98.7%** of the best driven score, and driving the
+  animal harder makes the score monotonically WORSE. This is not a bug in the
+  reward - it is correct behaviour for an imitation reward applied to a body
+  that cannot track: the reference walks away whatever happens, so any motion
+  the creature makes is pure velocity error and the optimum within the
+  reachable set is to hold still.
+
+  **The ceiling instrument, re-run under imitation, agrees but is not flat.** A
+  direct search over the eleven cell-type gains reaches a return of 50.0
+  against 25.1 at unit gains and ~31 for a corpse - so there IS a reachable
+  margin above immobility, but the entire dynamic range between a corpse and
+  the best direct search is about 31 to 50 out of a perfect 4000. The local
+  rule's own mean (49.3) sits at roughly that ceiling, which says again that
+  the rule is not the binding constraint.
+
+  **What all of this points at, and the measurement that would settle it:**
+  every negative result so far shares an untested assumption - that this body,
+  driven through this actuation path, is capable of locomotion at all.
+  `examples/scripted_gait` tests exactly that with NO connectome involved: a
+  hand-written alternating-tripod gait writes the actuators directly and sweeps
+  frequency, swing and lift. If a scripted gait walks, the limit is in the cord
+  or the coupling; if it does not, no controller was ever going to make this
+  body walk and the actuation path is the thing to fix.
+
+  **The body perturbation control is now mechanised.**
+  `Fly::set_muscle_strength` scales one actuator's drive, and it is
+  deliberately PERIPHERAL - the same spikes reach the same actuator and less
+  force comes out, which is what a damaged muscle is. Perturbing a coupling
+  constant or a motor-map polarity instead would perturb the CONTROLLER and
+  then call the recovery re-adaptation, which is a different claim wearing this
+  one's name. `examples/readapt` runs the three phases, the third of which is
+  the control that makes the second mean anything: rewind to exactly the
+  weights training ended with, apply the same lesion, and run the same episodes
+  frozen - because a body that recovers on its own looks identical to a nervous
+  system that re-adapted.
 * **M6 - flight.** Wing MNs, power/steering split, wingbeat entrainment.
   **Gate:** 218 Hz entrainment; flight-imitation reward against the recorded
   saccade-evasion trajectories.
