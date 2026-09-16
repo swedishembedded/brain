@@ -34,9 +34,7 @@ pub struct LifParams {
     pub r: f32,
     /// Absolute refractory period, in ticks.
     pub refrac_ticks: u32,
-    /// `dt / tau_syn`, the synaptic decay rate. `1.0` is an instantaneous
-    /// synapse - all of last tick's current gone - and is what this crate did
-    /// before the parameter existed.
+    /// `dt / tau_syn` for EXCITATORY input. `1.0` is an instantaneous synapse.
     ///
     /// A spike is an impulse and a synapse is not. Without a synaptic time
     /// constant the summed input to a population is noise at the tick rate,
@@ -45,6 +43,14 @@ pub struct LifParams {
     /// chose. This is what puts a network oscillator's period in the range an
     /// animal moves at.
     pub dt_over_tau_syn: f32,
+    /// The same for INHIBITORY input, which is deliberately a separate number.
+    ///
+    /// A reciprocal-inhibition oscillator's period is set by how long the
+    /// inhibition takes to build and release relative to the excitation that
+    /// provoked it. Give both the same time constant and the loop has no phase
+    /// lag to turn into a rhythm. Fast cholinergic excitation against slower
+    /// GABAergic inhibition is also simply what a fly has.
+    pub dt_over_tau_inh: f32,
 }
 
 impl Default for LifParams {
@@ -61,6 +67,7 @@ impl Default for LifParams {
             // Instantaneous, so the default reproduces every measurement
             // taken before synapses had a time constant.
             dt_over_tau_syn: 1.0,
+            dt_over_tau_inh: 1.0,
         }
     }
 }
@@ -70,8 +77,10 @@ impl LifParams {
         if !(self.dt_over_tau > 0.0 && self.dt_over_tau <= 1.0) {
             return Err(format!("dt_over_tau must be in (0, 1], got {}", self.dt_over_tau));
         }
-        if !(self.dt_over_tau_syn > 0.0 && self.dt_over_tau_syn <= 1.0) {
-            return Err(format!("dt_over_tau_syn must be in (0, 1], got {}", self.dt_over_tau_syn));
+        for (name, a) in [("dt_over_tau_syn", self.dt_over_tau_syn), ("dt_over_tau_inh", self.dt_over_tau_inh)] {
+            if !(a > 0.0 && a <= 1.0) {
+                return Err(format!("{name} must be in (0, 1], got {a}"));
+            }
         }
         if self.v_th <= self.v_reset {
             return Err(format!("v_th ({}) must exceed v_reset ({})", self.v_th, self.v_reset));
@@ -162,6 +171,9 @@ pub struct SpikingNet {
     refrac: DeviceBuffer,
     spike: DeviceBuffer,
     isyn: DeviceBuffer,
+    /// Excitatory and inhibitory current, interleaved `(e, i)` per neuron, so
+    /// each can carry across ticks on its own time constant.
+    syn: DeviceBuffer,
     drive: DeviceBuffer,
 
     // The connectome's own weights, kept so `reset` can restore them after
@@ -215,6 +227,7 @@ impl SpikingNet {
         let refrac = gpu.buffer("neuro.refrac", nb, live);
         let spike = gpu.buffer("neuro.spike", nb, live);
         let isyn = gpu.buffer("neuro.isyn", nb, live);
+        let syn = gpu.buffer("neuro.syn", bytes(2 * n as usize), live);
         let drive = gpu.buffer("neuro.drive", nb, live);
 
         let mut net = SpikingNet {
@@ -229,6 +242,7 @@ impl SpikingNet {
             refrac,
             spike,
             isyn,
+            syn,
             drive,
             w0: csc.w.clone(),
             plast: None,
@@ -342,6 +356,7 @@ impl SpikingNet {
         self.gpu.write(&self.refrac, &vec![0u32; n]);
         self.gpu.write_f32(&self.spike, &vec![0.0; n]);
         self.gpu.write_f32(&self.isyn, &vec![0.0; n]);
+        self.gpu.write_f32(&self.syn, &vec![0.0; 2 * n]);
         self.gpu.write_f32(&self.drive, &vec![0.0; n]);
         if let Some(pl) = &mut self.plast {
             pl.delta = 0.0;
@@ -384,6 +399,7 @@ impl DynamicalSystem for SpikingNet {
         self.gpu.write(&self.refrac, &vec![0u32; n]);
         self.gpu.write_f32(&self.spike, &vec![0.0; n]);
         self.gpu.write_f32(&self.isyn, &vec![0.0; n]);
+        self.gpu.write_f32(&self.syn, &vec![0.0; 2 * n]);
         self.gpu.write_f32(&self.drive, &vec![0.0; n]);
         self.gpu.write_f32(&self.w, &self.w0.clone());
         if let Some(pl) = &mut self.plast {
@@ -400,8 +416,12 @@ impl DynamicalSystem for SpikingNet {
     fn step(&mut self) -> StepStats {
         let gather = self.gpu.step(
             K_GATHER,
-            &[&self.indptr, &self.pre, &self.w, &self.spike, &self.isyn],
-            &[self.n, (1.0 - self.params.dt_over_tau_syn).to_bits()],
+            &[&self.indptr, &self.pre, &self.w, &self.spike, &self.isyn, &self.syn],
+            &[
+                self.n,
+                (1.0 - self.params.dt_over_tau_syn).to_bits(),
+                (1.0 - self.params.dt_over_tau_inh).to_bits(),
+            ],
             self.n * 64,
         );
         let lif = self.gpu.step(

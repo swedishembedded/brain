@@ -17,9 +17,11 @@
 //   pre    : [nnz]  presynaptic neuron index of each edge
 //   w      : [nnz]  signed synaptic weight of each edge
 //   spike  : [n]    1.0 where the presynaptic neuron fired this tick, else 0.0
-//   isyn   : [n]    IN/OUT: synaptic current arriving at each neuron, carried
-//                   across ticks by `syn_decay`
-//   params : n, syn_decay
+//   isyn   : [n]    OUT: total synaptic current arriving at each neuron
+//   syn    : [2n]   IN/OUT: the excitatory and inhibitory currents separately,
+//                   interleaved as (e, i) per neuron, each carried across ticks
+//                   by its own decay
+//   params : n, decay_e, decay_i
 //
 // Dispatch: n * 64 invocations (one workgroup per postsynaptic neuron).
 //
@@ -53,20 +55,27 @@
 
 struct Params {
     n: u32,
-    // Fraction of last tick's synaptic current that survives into this one:
-    // `exp(-dt / tau_syn)`. ZERO reproduces an instantaneous synapse exactly,
-    // bit for bit, which is what every gate written before this parameter
-    // existed measured.
+    // Fraction of last tick's current that survives into this one,
+    // `exp(-dt / tau_syn)`, SEPARATELY for excitatory and inhibitory input.
     //
-    // It is not a refinement. A spike is an impulse and a synapse is not: the
-    // postsynaptic current from one vesicle release rises and decays over
-    // milliseconds. With no decay at all, a population's summed input is
-    // white-ish noise at the tick rate, and a recurrent loop through three
-    // neurons closes in three ticks - so the only oscillation such a network
-    // can sustain is at a frequency set by the integration step rather than by
-    // the biology. A synaptic time constant is what puts a network oscillator's
-    // period in the range an animal moves at.
-    syn_decay: f32,
+    // A spike is an impulse and a synapse is not: the postsynaptic current
+    // from one release rises and decays over milliseconds. With no decay at
+    // all a population's summed input is noise at the tick rate, and a
+    // recurrent loop through three neurons closes in three ticks, so the only
+    // oscillation such a network can hold has a period the integration step
+    // chose rather than one the biology did.
+    //
+    // The two are separate because that is what makes a reciprocal-inhibition
+    // oscillator oscillate. Such a circuit's period is set by how long the
+    // inhibition takes to build and release relative to the excitation that
+    // provokes it; give both the same time constant and the loop has no phase
+    // lag to turn into a rhythm. Fast cholinergic excitation against slower
+    // GABAergic inhibition is also simply what the animal has.
+    //
+    // Both at ZERO reproduces the instantaneous synapse this kernel had
+    // before, up to the order the two partials are summed in.
+    decay_e: f32,
+    decay_i: f32,
 };
 
 @group(0) @binding(0) var<uniform> p: Params;
@@ -75,8 +84,12 @@ struct Params {
 @group(0) @binding(3) var<storage, read>       w:      array<f32>;
 @group(0) @binding(4) var<storage, read>       spike:  array<f32>;
 @group(0) @binding(5) var<storage, read_write> isyn:   array<f32>;
+@group(0) @binding(6) var<storage, read_write> syn:    array<f32>;
 
-var<workgroup> partial: array<f32, 64>;
+// Two partials per thread, excitatory and inhibitory, laid out as two halves
+// of one array rather than two arrays: one workgroup allocation, one barrier,
+// and the fold below walks each half contiguously.
+var<workgroup> partial: array<f32, 128>;
 
 @compute @workgroup_size(64)
 fn main(@builtin(workgroup_id) wg: vec3<u32>,
@@ -90,18 +103,36 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
 
     let lo = indptr[post];
     let hi = indptr[post + 1u];
-    var acc = 0.0;
+    var acc_e = 0.0;
+    var acc_i = 0.0;
     for (var k = lo + t; k < hi; k = k + 64u) {
-        acc = acc + w[k] * spike[pre[k]];
+        let c = w[k] * spike[pre[k]];
+        // Split by the SIGN OF THE WEIGHT, which is the presynaptic neuron's
+        // transmitter. A zero contribution lands in the excitatory half and
+        // adds nothing, so the branch is on the weight rather than on the
+        // product and an unknown-transmitter edge does not get filed as
+        // inhibitory on the ticks its source is silent.
+        if (w[k] < 0.0) {
+            acc_i = acc_i + c;
+        } else {
+            acc_e = acc_e + c;
+        }
     }
-    partial[t] = acc;
+    partial[t] = acc_e;
+    partial[64u + t] = acc_i;
     workgroupBarrier();
 
-    var s = 0.0;
+    var s_e = 0.0;
+    var s_i = 0.0;
     for (var i = 0u; i < 64u; i = i + 1u) {
-        s = s + partial[i];
+        s_e = s_e + partial[i];
+        s_i = s_i + partial[64u + i];
     }
     if (t == 0u) {
-        isyn[post] = isyn[post] * p.syn_decay + s;
+        let e = syn[2u * post] * p.decay_e + s_e;
+        let inh = syn[2u * post + 1u] * p.decay_i + s_i;
+        syn[2u * post] = e;
+        syn[2u * post + 1u] = inh;
+        isyn[post] = e + inh;
     }
 }

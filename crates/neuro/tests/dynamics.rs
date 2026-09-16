@@ -41,7 +41,7 @@ fn membrane_matches_the_closed_form_for_a_constant_input() {
     // driven purely by the external port, which is the regime the closed form
     // describes. The threshold is placed out of reach so the trajectory is the
     // pure exponential rather than a reset sawtooth.
-    let p = LifParams { dt_over_tau: 0.2, v_rest: -0.3, v_reset: -0.6, v_th: 1.0e6, r: 2.0, refrac_ticks: 0, dt_over_tau_syn: 1.0 };
+    let p = LifParams { dt_over_tau: 0.2, v_rest: -0.3, v_reset: -0.6, v_th: 1.0e6, r: 2.0, refrac_ticks: 0, dt_over_tau_syn: 1.0, dt_over_tau_inh: 1.0 };
     let csc = Csc::from_edges(1, &[]).unwrap();
     let gpu = gpu_core::testgpu::dev(&KERNELS);
     let mut net = SpikingNet::new(gpu, &csc, p).unwrap();
@@ -64,7 +64,7 @@ fn membrane_matches_the_closed_form_for_a_constant_input() {
 
 #[test]
 fn a_neuron_fires_at_threshold_and_then_stays_silent_while_refractory() {
-    let p = LifParams { dt_over_tau: 1.0, v_rest: 0.0, v_reset: 0.0, v_th: 0.5, r: 1.0, refrac_ticks: 3, dt_over_tau_syn: 1.0 };
+    let p = LifParams { dt_over_tau: 1.0, v_rest: 0.0, v_reset: 0.0, v_th: 0.5, r: 1.0, refrac_ticks: 3, dt_over_tau_syn: 1.0, dt_over_tau_inh: 1.0 };
     let csc = Csc::from_edges(1, &[]).unwrap();
     let gpu = gpu_core::testgpu::dev(&KERNELS);
     let mut net = SpikingNet::new(gpu, &csc, p).unwrap();
@@ -100,7 +100,7 @@ fn the_gather_matches_a_host_sparse_matvec() {
     // the gather's loop bound deliberately broken. Hence the low threshold
     // here, and the assertion that neurons actually fired.
     let csc = random_csc(300, 19, 0xBEEF);
-    let p = LifParams { dt_over_tau: 1.0, v_rest: 0.0, v_reset: 0.0, v_th: 0.25, r: 1.0, refrac_ticks: 0, dt_over_tau_syn: 1.0 };
+    let p = LifParams { dt_over_tau: 1.0, v_rest: 0.0, v_reset: 0.0, v_th: 0.25, r: 1.0, refrac_ticks: 0, dt_over_tau_syn: 1.0, dt_over_tau_inh: 1.0 };
     let n = csc.n as usize;
 
     let gpu = gpu_core::testgpu::dev(&KERNELS);
@@ -289,6 +289,7 @@ fn a_synaptic_time_constant_makes_a_spike_outlast_its_tick() {
         r: 1.0,
         refrac_ticks: 0,
         dt_over_tau_syn: 1.0,
+        dt_over_tau_inh: 1.0,
     };
 
     /// Neuron 1's synaptic current for the first `n` ticks after one spike.
@@ -331,4 +332,54 @@ fn a_synaptic_time_constant_makes_a_spike_outlast_its_tick() {
         instant.iter().cloned().fold(f32::MIN, f32::max),
         "a synaptic time constant must not change how much current a spike delivers"
     );
+}
+
+#[test]
+fn excitation_and_inhibition_carry_their_own_time_constants() {
+    // Two networks that differ ONLY in the sign of their single synapse, run
+    // with a fast excitatory and a slow inhibitory time constant. If the split
+    // were not real, both would decay at whichever rate the kernel actually
+    // used and the two traces would be mirror images.
+    let base = LifParams {
+        dt_over_tau: 1.0,
+        v_rest: 0.0,
+        v_reset: 0.0,
+        v_th: 1.0e6,
+        r: 1.0,
+        refrac_ticks: 0,
+        // Excitation gone in one tick; inhibition keeps half each tick.
+        dt_over_tau_syn: 1.0,
+        dt_over_tau_inh: 0.5,
+    };
+
+    fn trace(weight: f32, p: LifParams) -> Vec<f32> {
+        let csc = Csc::from_edges(2, &[(0, 1, weight)]).unwrap();
+        let mut net = SpikingNet::new(gpu_core::testgpu::dev(&KERNELS), &csc, p).unwrap();
+        let mut isyn = vec![0.0f32; 2];
+        (0..6)
+            .map(|k| {
+                net.drive(Port::Drive, &[if k == 0 { 2.0e6 } else { 0.0 }, 0.0]).unwrap();
+                net.step();
+                net.read(Port::Current, &mut isyn).unwrap();
+                isyn[1]
+            })
+            .collect()
+    }
+
+    let exc = trace(1.0, base);
+    let inh = trace(-1.0, base);
+
+    // The excitatory one is instantaneous, which is the control: it fixes what
+    // "one tick and gone" looks like on this path.
+    assert_eq!(exc.iter().filter(|c| c.abs() > 1e-6).count(), 1, "excitation should last one tick: {exc:?}");
+    // The inhibitory one, over the SAME graph shape and the same spike,
+    // persists - so the two are not sharing a decay.
+    assert!(inh.iter().filter(|c| c.abs() > 1e-6).count() >= 4, "inhibition should persist: {inh:?}");
+    for pair in inh.windows(2).skip(1) {
+        assert!((pair[1] / pair[0] - 0.5).abs() < 1e-5, "inhibition should keep half each tick: {inh:?}");
+    }
+    // The first non-zero entry, not the first: the gather reads LAST tick's
+    // spikes, so nothing has crossed the synapse when tick 0 is read back.
+    let first = *inh.iter().find(|c| c.abs() > 1e-6).expect("something should arrive");
+    assert!(first < 0.0, "an inhibitory synapse should deliver negative current, got {first}");
 }

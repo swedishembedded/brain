@@ -56,9 +56,26 @@ fn main() {
     // instantaneous synapse this crate had before the parameter existed, which
     // is the control for whether it matters.
     let tau_syn_ms: f32 = std::env::var("TAU_SYN").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
-    let dt_over_tau_syn = if tau_syn_ms > 0.0 { (2.0 / tau_syn_ms).min(1.0) } else { 1.0 };
-    let lif = LifParams { dt_over_tau: 0.1, v_th: 1.0, r: 1.0, refrac_ticks: 1, dt_over_tau_syn, ..LifParams::default() };
-    println!("synaptic tau {:.1} ms", if tau_syn_ms > 0.0 { tau_syn_ms } else { 2.0 });
+    // $TAU_INH defaults to twice the excitatory constant, which is the
+    // asymmetry a reciprocal-inhibition oscillator needs and roughly what a
+    // fly has: fast cholinergic excitation against slower GABAergic
+    // inhibition.
+    let tau_inh_ms: f32 = std::env::var("TAU_INH").ok().and_then(|v| v.parse().ok()).unwrap_or(2.0 * tau_syn_ms);
+    let rate = |ms: f32| if ms > 0.0 { (2.0 / ms).min(1.0) } else { 1.0 };
+    let lif = LifParams {
+        dt_over_tau: 0.1,
+        v_th: 1.0,
+        r: 1.0,
+        refrac_ticks: 1,
+        dt_over_tau_syn: rate(tau_syn_ms),
+        dt_over_tau_inh: rate(tau_inh_ms),
+        ..LifParams::default()
+    };
+    println!(
+        "synaptic tau: excitatory {:.1} ms, inhibitory {:.1} ms",
+        if tau_syn_ms > 0.0 { tau_syn_ms } else { 2.0 },
+        if tau_inh_ms > 0.0 { tau_inh_ms } else { 2.0 }
+    );
     let n = c.neurons.len() as f64;
     let ticks: usize = std::env::var("TICKS").ok().and_then(|v| v.parse().ok()).unwrap_or(1000);
     let cell = std::env::var("CELL").unwrap_or_else(|_| "DNg100".to_string());
