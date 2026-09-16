@@ -340,6 +340,8 @@ pub const DWCONV3D: &str = include_str!("../wgsl/dwconv3d.wgsl");
 pub const DWCONV3D_DW: &str = include_str!("../wgsl/dwconv3d_dw.wgsl");
 /// `wgsl/dwconv3d_dx.wgsl`
 pub const DWCONV3D_DX: &str = include_str!("../wgsl/dwconv3d_dx.wgsl");
+/// `wgsl/dyn_group_conv1d.wgsl`
+pub const DYN_GROUP_CONV1D: &str = include_str!("../wgsl/dyn_group_conv1d.wgsl");
 /// `wgsl/edm_mix.wgsl`
 pub const EDM_MIX: &str = include_str!("../wgsl/edm_mix.wgsl");
 /// `wgsl/edm_wrap.wgsl`
@@ -1155,6 +1157,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("dwconv3d", DWCONV3D),
     ("dwconv3d_dw", DWCONV3D_DW),
     ("dwconv3d_dx", DWCONV3D_DX),
+    ("dyn_group_conv1d", DYN_GROUP_CONV1D),
     ("edm_mix", EDM_MIX),
     ("edm_wrap", EDM_WRAP),
     ("elu", ELU),
