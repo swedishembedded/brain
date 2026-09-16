@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 // @what  Per-synapse eligibility trace over a CSC column: e <- e*decay + x_pre*x_post
-// @how   64 invocations per postsynaptic neuron over its edge range, no barrier
+// @how   one thread per postsynaptic neuron over its edge range, no barrier
 // @opt   3
 // @cpu   yes
 // @gpu   yes
@@ -19,15 +19,18 @@
 //   x_post : [n]    postsynaptic activity trace
 //   params : n, decay
 //
-// Dispatch: n * 64 invocations (one workgroup per postsynaptic neuron).
+// Dispatch: n invocations (one thread per postsynaptic neuron).
 //
 // Each edge writes only its own slot, so unlike `syn_gather_csc` there is no
-// reduction and NO barrier at all. The 64-invocations-per-neuron shape is
-// kept anyway because it is the only way to know a given edge's POSTsynaptic
-// neuron: in CSC that fact lives in the column index, not in any per-edge
-// array. A one-invocation-per-edge kernel would have to binary-search
-// `indptr` for it, paying a log(n) search per edge to avoid a dispatch shape
-// that already costs nothing.
+// reduction and NO barrier at all. The per-NEURON shape is kept anyway,
+// rather than one invocation per edge, because the column index is the only
+// place CSC records an edge's POSTsynaptic neuron: a per-edge kernel would
+// have to binary-search `indptr` for it, paying a log(n) search per edge.
+//
+// One thread per neuron rather than 64, for the reason `syn_gather_csc`
+// documents at length and measures: 64 invocations per neuron over a column
+// averaging 58 edges spends most of a dispatch on invocations that load
+// `indptr` twice and then find their strided slice empty.
 //
 // Eligibility is what makes a delayed reward assignable to the synapses that
 // earned it: the trace accumulates coincident pre/post activity now, and a
@@ -52,18 +55,13 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
         @builtin(num_workgroups) nwg: vec3<u32>) {
     // Indexed off the FLAT invocation id rather than workgroup/local ids: the
     // CPU JIT compiles a barrier-free kernel per invocation and requires
-    // `global_invocation_id`, so a kernel with no barrier cannot address
-    // itself by workgroup the way `syn_gather_csc` (which has one) does.
-    // 64 consecutive invocations still cover one neuron's edges with stride
-    // 64, so the access pattern is unchanged; only the arithmetic is.
-    let j = gid.y * nwg.x * 64u + gid.x;
-    let post = j / 64u;
-    let t = j % 64u;
+    // `global_invocation_id`.
+    let post = gid.y * nwg.x * 64u + gid.x;
     if (post >= p.n) { return; }
     let lo = indptr[post];
     let hi = indptr[post + 1u];
     let xp = x_post[post];
-    for (var k = lo + t; k < hi; k = k + 64u) {
+    for (var k = lo; k < hi; k = k + 1u) {
         e[k] = e[k] * p.decay + x_pre[pre[k]] * xp;
     }
 }

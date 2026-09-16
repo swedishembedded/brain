@@ -389,7 +389,7 @@ load of it must already be bare-identifier-indexed.
 | [`na3d_apply`](../../crates/kernels/wgsl/na3d_apply.wgsl) | 3D neighborhood-attention (windowed, self-attention) probs*V apply | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | - | - | f32 |
 | [`na3d_scores`](../../crates/kernels/wgsl/na3d_scores.wgsl) | 3D neighborhood-attention (windowed, self-attention) QK scores | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | - | - | f32 |
 | [`nchw_nlc`](../../crates/kernels/wgsl/nchw_nlc.wgsl) | Layout permutation NCHW -> NLC [N, L=H*W, C] (gather) - spec | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
-| [`neuro_elig`](../../crates/kernels/wgsl/neuro_elig.wgsl) | Per-synapse eligibility trace over a CSC column: e <- e*decay + x_pre*x_post | 64 invocations per postsynaptic neuron over its edge range, no barrier | 3/5 | ✓ | ✓ | - | - | f32 |
+| [`neuro_elig`](../../crates/kernels/wgsl/neuro_elig.wgsl) | Per-synapse eligibility trace over a CSC column: e <- e*decay + x_pre*x_post | one thread per postsynaptic neuron over its edge range, no barrier | 3/5 | ✓ | ✓ | - | - | f32 |
 | [`neuro_learn`](../../crates/kernels/wgsl/neuro_learn.wgsl) | Three-factor weight update: w <- clamp(w + eta*e*delta, w_min, w_max) | one thread per synapse | 3/5 | ✓ | ✓ | - | - | f32 |
 | [`neuro_trace`](../../crates/kernels/wgsl/neuro_trace.wgsl) | Exponentially-decaying activity trace: x <- x*decay + spike | one thread per neuron | 3/5 | ✓ | ✓ | - | - | f32 |
 | [`nlc_bias_nchw`](../../crates/kernels/wgsl/nlc_bias_nchw.wgsl) | NLC -> NCHW with a per-channel bias - the epilogue of a conv lowered to a row-major GEMM | 64-thread workgroup tile, 1 barrier | 4/5 | ✓ | ✓ | - | - | f32 |
@@ -527,7 +527,7 @@ load of it must already be bare-identifier-indexed.
 | [`splice_bwd`](../../crates/kernels/wgsl/splice_bwd.wgsl) | Residual splice (backward) | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
 | [`sub`](../../crates/kernels/wgsl/sub.wgsl) | Elementwise subtract, with an independent flat offset into each input | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - | f32 |
 | [`swap_axes12_vec`](../../crates/kernels/wgsl/swap_axes12_vec.wgsl) | Swap axes 1 and 2 of a rank-4 [A0,A1,A2,D] tensor (a batched transpose of D-wide vectors) - model::timesfm3's sequence<->variate axis swap | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
-| [`syn_gather_csc`](../../crates/kernels/wgsl/syn_gather_csc.wgsl) | Sparse synaptic current: one WORKGROUP per postsynaptic neuron over its CSC column | 64-thread workgroup tile over a contiguous edge range, 1 barrier | 4/5 | ✓ | ✓ | - | - | f32 |
+| [`syn_gather_csc`](../../crates/kernels/wgsl/syn_gather_csc.wgsl) | Sparse synaptic current: one thread per postsynaptic neuron over its CSC column | scalar row walk, no work-group memory and no barrier | 2/5 | ✓ | ✓ | - | - | f32 |
 | [`tanh_act`](../../crates/kernels/wgsl/tanh_act.wgsl) | Tanh forward:  y = tanh(x) | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - | f32 |
 | [`tanh_act_bwd`](../../crates/kernels/wgsl/tanh_act_bwd.wgsl) | Tanh backward: dx = dy * (1 - tanh(x)^2) | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
 | [`tau_scale`](../../crates/kernels/wgsl/tau_scale.wgsl) | Moondream per-(head, token) attention-temperature scale, broadcast over head_dim | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |

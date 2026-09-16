@@ -309,7 +309,7 @@ impl SpikingNet {
             K_ELIG,
             &[&self.indptr, &self.pre, &pl.elig, &pl.x_pre, &pl.x_post],
             &[self.n, p.elig_decay.to_bits()],
-            self.n * 64,
+            self.n,
         ));
         if pl.on {
             // eta and delta travel premultiplied: a delta of 0 makes the
@@ -422,7 +422,7 @@ impl DynamicalSystem for SpikingNet {
                 (1.0 - self.params.dt_over_tau_syn).to_bits(),
                 (1.0 - self.params.dt_over_tau_inh).to_bits(),
             ],
-            self.n * 64,
+            self.n,
         );
         let lif = self.gpu.step(
             K_LIF,

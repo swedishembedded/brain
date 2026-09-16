@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-// @what  Sparse synaptic current: one WORKGROUP per postsynaptic neuron over its CSC column
-// @how   64-thread workgroup tile over a contiguous edge range, 1 barrier
-// @opt   4
+// @what  Sparse synaptic current: one thread per postsynaptic neuron over its CSC column
+// @how   scalar row walk, no work-group memory and no barrier
+// @opt   2
 // @cpu   yes
 // @gpu   yes
 // @npu   no
@@ -23,7 +23,7 @@
 //                   by its own decay
 //   params : n, decay_e, decay_i
 //
-// Dispatch: n * 64 invocations (one workgroup per postsynaptic neuron).
+// Dispatch: n invocations (one thread per postsynaptic neuron).
 //
 // GATHER, not scatter, and that is the whole design. The natural formulation
 // of spike propagation is "for each spiking neuron, add its weight to every
@@ -32,26 +32,51 @@
 // the CPU JIT nor the CUDA compiler lowers one), and an atomic kernel would
 // forfeit the CPU backend that cross-backend parity is gated on. So the graph
 // is stored transposed: each neuron reads its OWN incoming edges and writes
-// its own output, and no two workgroups ever touch the same address. Nothing
+// its own output, and no two invocations ever touch the same address. Nothing
 // needs to be locked because nothing is shared.
 //
-// The edge range is contiguous, so the 64 threads of a workgroup walk it with
-// stride 64 and every fetch of `pre`/`w` is fully used. One thread per neuron
-// would instead give thread t a range starting at an arbitrary offset, and a
-// warp's 32 loads would land in 32 unrelated places - the coalescing bug the
-// `*_rows` family exists to avoid, here by construction rather than by
-// retrofit.
+// ROW LENGTH is what picks the shape here, and it was measured rather than
+// assumed. The obvious alternative - a 64-thread work-group per neuron,
+// striding its edge range so a warp's loads coalesce - is what this kernel
+// used to be, and it is the right shape for a matrix whose rows are thousands
+// of elements long. A connectome's are not: the fly's nerve cord averages 226
+// incoming edges per neuron unpruned and 58 at the synapse floor
+// `fly::Wiring` actually runs, so the work-group's fixed per-neuron costs
+// (a work-group memory allocation, a barrier, and a 128-element fold of the
+// partials) dominated the handful of multiply-adds they existed to serve.
+// Those costs scale with NEURONS, not with edges, which is the diagnostic: on
+// the same cord the work-group shape cost 24.4 ms per tick over 1.37 M edges
+// and 69.0 ms over 5.31 M, so pruning 74% of the connectome bought almost
+// nothing. One neural tick of the MANC cord at the floor `fly::Wiring` runs
+// (23,665 neurons / 1.37 M edges), measured by
+// `crates/fly/examples/loop_profile.rs`:
+//
+//   shape                               Arc iGPU     22-thread CPU JIT
+//   work-group per neuron, fold in all   24.4 ms          28.6 ms
+//   work-group per neuron, fold in one   22.9 ms           5.7 ms
+//   one thread per neuron (this)          5.2 ms           1.2 ms
+//
+// The middle row is there because the fold - every thread redundantly summing
+// all 64 partials, the shape `rmsnorm_rows` uses - is the whole story on the
+// CPU JIT (which runs a work-group as two 64-iteration lane loops) and almost
+// none of it on the GPU. Fixing only that would have left the GPU where it
+// was.
+//
+// The loss is coalescing: 32 neighbouring threads now walk 32 unrelated edge
+// ranges instead of one contiguous one, which is exactly the pattern the
+// `*_rows` kernel family exists to avoid. It is paid for many times over here
+// because each thread's own walk is sequential, so a fetched cache line still
+// serves that thread's next 16 edges. Re-measure before carrying this shape
+// to a graph with long rows - the crossover is real, it is just far above any
+// in-degree a nervous system has.
 //
 // `spike[pre[k]]` is the one indirect read and it cannot be made contiguous:
 // it IS the connectome's irregularity. It is also why the spike vector is
 // f32 0.0/1.0 rather than a packed bitmask - a bitmask would save 32x on a
 // vector that is already the smallest buffer here (n floats against nnz
-// pairs, and nnz/n is ~226 on the fly's nerve cord), in exchange for bit
-// arithmetic on every edge. Measure before changing that.
-//
-// One top-level barrier: the CPU JIT splits a body at one barrier and no
-// more, so the 64 partials are folded redundantly by every thread (64 adds,
-// cheaper than a second barrier) exactly as `rmsnorm_rows` does.
+// pairs), in exchange for bit arithmetic on every edge. The whole vector is
+// 92 KB on this cord, which is cache-resident on both backends. Measure
+// before changing that.
 
 struct Params {
     n: u32,
@@ -86,53 +111,43 @@ struct Params {
 @group(0) @binding(5) var<storage, read_write> isyn:   array<f32>;
 @group(0) @binding(6) var<storage, read_write> syn:    array<f32>;
 
-// Two partials per thread, excitatory and inhibitory, laid out as two halves
-// of one array rather than two arrays: one workgroup allocation, one barrier,
-// and the fold below walks each half contiguously.
-var<workgroup> partial: array<f32, 128>;
-
 @compute @workgroup_size(64)
-fn main(@builtin(workgroup_id) wg: vec3<u32>,
-        @builtin(local_invocation_id) li: vec3<u32>,
+fn main(@builtin(global_invocation_id) gid: vec3<u32>,
         @builtin(num_workgroups) nwg: vec3<u32>) {
-    // 2D-grid safe linear workgroup index (identity for 1D dispatch): a
-    // connectome has more neurons than a 1D grid is guaranteed to carry.
-    let post = wg.y * nwg.x + wg.x;
-    let t = li.x;
+    // 2D-grid safe linear index (identity for a 1D dispatch): a connectome has
+    // more neurons than a 1D grid is guaranteed to carry.
+    let post = gid.y * nwg.x * 64u + gid.x;
     if (post >= p.n) { return; }
 
     let lo = indptr[post];
     let hi = indptr[post + 1u];
     var acc_e = 0.0;
     var acc_i = 0.0;
-    for (var k = lo + t; k < hi; k = k + 64u) {
+    for (var k = lo; k < hi; k = k + 1u) {
         let c = w[k] * spike[pre[k]];
         // Split by the SIGN OF THE WEIGHT, which is the presynaptic neuron's
-        // transmitter. A zero contribution lands in the excitatory half and
-        // adds nothing, so the branch is on the weight rather than on the
-        // product and an unknown-transmitter edge does not get filed as
-        // inhibitory on the ticks its source is silent.
-        if (w[k] < 0.0) {
-            acc_i = acc_i + c;
-        } else {
-            acc_e = acc_e + c;
-        }
+        // transmitter, so excitation and inhibition can carry their own time
+        // constants. Written as a clamp pair rather than as `if (w[k] < 0.0)`:
+        // `spike` is 0.0 or 1.0 and never negative, so `c` has the weight's
+        // sign whenever it is non-zero and is zero otherwise - which makes the
+        // two forms produce the same two sums, including the case the branch
+        // was written for (an edge whose source is silent contributes nothing
+        // to either half rather than being filed as inhibitory).
+        //
+        // The branch was worth removing and not by a little: its condition is
+        // a connectome's transmitter labels in edge order, which is as close
+        // to unpredictable as data gets, and at one mispredict per edge the
+        // CPU JIT spent more time recovering from it than reading the graph.
+        // Measured on the MANC cord at the synapse floor, per neural tick:
+        // 1.70 ms branched against 0.88 ms here on 22 CPU threads. On the Arc
+        // iGPU it made no measurable difference (8.9 ms either way) - a GPU
+        // predicates a two-sided branch instead of predicting it.
+        acc_e = acc_e + max(c, 0.0);
+        acc_i = acc_i + min(c, 0.0);
     }
-    partial[t] = acc_e;
-    partial[64u + t] = acc_i;
-    workgroupBarrier();
-
-    var s_e = 0.0;
-    var s_i = 0.0;
-    for (var i = 0u; i < 64u; i = i + 1u) {
-        s_e = s_e + partial[i];
-        s_i = s_i + partial[64u + i];
-    }
-    if (t == 0u) {
-        let e = syn[2u * post] * p.decay_e + s_e;
-        let inh = syn[2u * post + 1u] * p.decay_i + s_i;
-        syn[2u * post] = e;
-        syn[2u * post + 1u] = inh;
-        isyn[post] = e + inh;
-    }
+    let e = syn[2u * post] * p.decay_e + acc_e;
+    let inh = syn[2u * post + 1u] * p.decay_i + acc_i;
+    syn[2u * post] = e;
+    syn[2u * post + 1u] = inh;
+    isyn[post] = e + inh;
 }
