@@ -144,3 +144,65 @@ fn flight_is_opt_in_and_refuses_a_body_that_cannot_fly() {
     assert!(beating > 5.0 * settling, "flight enabled swept {beating:.3} rad against {settling:.3} ringing");
     eprintln!("stroke {beating:.2} rad peak to peak, against {settling:.3} ringing passively");
 }
+
+/// The flight objective has to be about staying UP, and the control is the
+/// same one this file already uses: the identical body with the stroke off.
+///
+/// A reward that a falling fly collects is the airborne version of the reward
+/// a corpse collected under imitation - and the failure mode is easy to reach,
+/// because a body thrown sideways covers ground the whole way down. That is
+/// why the score is travel MULTIPLIED by airtime rather than either alone.
+#[test]
+fn a_falling_fly_scores_nothing_and_a_beating_one_scores() {
+    use fly::learn::{episode, Condition, Lcg, Objective, RewardConfig};
+
+    let Some(mut rig) = rig() else { return };
+    rig.fly.enable_flight(Wingbeat { hz: 180.0, ..Wingbeat::default() }).expect("the body has wings");
+    let run = |rig: &mut Rig, power: f32, command: f32| {
+        rig.fly.hold_wing_command(Some(WingCommand { power, ..WingCommand::default() }));
+        let cfg = RewardConfig {
+            objective: Objective::flight(),
+            ticks: 600,
+            command,
+            ..RewardConfig::default()
+        };
+        episode(&mut rig.fly, cfg, Condition::Frozen, &mut Lcg::new(3)).expect("an episode runs")
+    };
+
+    // THE CONTROL: wings out and still. It sinks, lands, and the episode ends.
+    // With the descending command at zero, so the ONLY difference between the
+    // two runs is the stroke - see the assertion at the bottom for why that
+    // has to be said out loud.
+    let falling = run(&mut rig, 0.0, 0.0);
+    let flying = run(&mut rig, 1.0, 0.0);
+
+    assert!(falling.terminated, "with the stroke off the fly should have reached the ground");
+    assert!(
+        flying.airborne > falling.airborne * 2,
+        "beating wings bought {} airborne ticks against {} with them still",
+        flying.airborne,
+        falling.airborne
+    );
+    assert!(
+        flying.score() > falling.score(),
+        "a beating fly scored {:.5} against a falling one's {:.5}",
+        flying.score(),
+        falling.score()
+    );
+
+    // And the other direction, reported rather than asserted. Driving the cord
+    // CHANGES the flight - measured, 356 airborne ticks against 225 undriven
+    // with the same wings - so the cord's output reaches a flying body. Which
+    // way it changes it is not something this test is entitled to claim: a fly
+    // whose legs are flailing presents more area to the fluid model than one
+    // hanging limp, and over an altitude extra drag is indistinguishable from
+    // lift. What would tell them apart is attitude, which this binding does
+    // not read yet, and nothing in this cord has been given a reason to hold
+    // the body level.
+    let driven = run(&mut rig, 1.0, 1.0);
+    eprintln!(
+        "airborne ticks: {} beating, {} still, {} beating and driven",
+        flying.airborne, falling.airborne, driven.airborne
+    );
+    assert_ne!(driven.airborne, flying.airborne, "the descending command changed nothing about the flight");
+}

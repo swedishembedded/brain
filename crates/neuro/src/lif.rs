@@ -287,6 +287,21 @@ impl SpikingNet {
         self.params
     }
 
+    /// Change the membrane and synapse parameters of a running network.
+    ///
+    /// They are uniform across the population and are passed to the kernel
+    /// every tick, so this is a struct assignment rather than a rebuild -
+    /// which is what lets a search over dynamics cost one episode per
+    /// candidate instead of one graph upload per candidate. The DYNAMICAL
+    /// state is left alone: a caller changing the time constants mid-episode
+    /// gets exactly that, and one that wants a fresh start calls
+    /// [`SpikingNet::reset_state`].
+    pub fn set_params(&mut self, params: LifParams) -> Result<(), String> {
+        params.validate()?;
+        self.params = params;
+        Ok(())
+    }
+
     /// Allocate the traces and turn three-factor plasticity on.
     ///
     /// Separate from `new` because a forward-only run - a parity check, a

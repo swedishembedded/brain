@@ -25,6 +25,7 @@ pub mod gait;
 pub mod learn;
 pub mod reference;
 pub mod cns;
+pub mod search;
 pub mod sense;
 pub mod wing;
 
@@ -773,16 +774,48 @@ impl Fly {
     /// Muscle strength deliberately survives a reset. A body perturbation that
     /// undid itself at every episode boundary could never be re-adapted to,
     /// and the control that asks for re-adaptation would be measuring nothing.
+    /// Put the animal back where it started.
+    ///
+    /// EVERY piece of dynamical state, and the list is exhaustive on purpose.
+    /// This used to reset the network, the body, the muscle activation and the
+    /// descending command, and to leave the wingbeat's PHASE, the cord's wing
+    /// command and the per-joint opposition counts running - so two identical
+    /// episodes back to back were not identical. Measured before the fix, the
+    /// same 400-tick flight episode run four times: 53, 30, 36 and 30 ticks
+    /// airborne. An experiment comparing two parameter sets on numbers like
+    /// those is comparing its own leftovers, and the search built on top of it
+    /// would have been fitting them.
+    ///
+    /// What is NOT reset is CONFIGURATION: the weights, the wing hold, the
+    /// muscle strengths, the plasticity switch. A caller set those and a reset
+    /// that silently undid them would be the opposite bug - which this crate
+    /// has also had, when `reset` restored the connectome's original weights
+    /// and every episode in a learning run unlearned.
     pub fn reset(&mut self) {
         self.net.reset_state();
         self.data.reset(&self.model);
         for a in self.activation.iter_mut() {
             *a = 0.0;
         }
+        for o in self.opposed.iter_mut() {
+            *o = [0.0; 2];
+        }
         for c in self.command.iter_mut() {
             *c = 0.0;
         }
+        for d in self.drive.iter_mut() {
+            *d = 0.0;
+        }
+        for s in self.spike.iter_mut() {
+            *s = 0.0;
+        }
+        self.odour = [0.0; 2];
+        self.wing_cmd = WingCommand::default();
+        if let Some(beat) = self.wingbeat.as_mut() {
+            beat.phase = 0.0;
+        }
         self.last_proprio_spikes = 0;
+        self.last_antenna_spikes = (0, 0);
         self.control_tick = 0;
     }
 
@@ -810,6 +843,30 @@ impl Fly {
     /// [`neuro::SpikingNet::set_weights`].
     pub fn set_weights(&mut self, w: &[f32]) -> Result<(), String> {
         self.net.set_weights(w)
+    }
+
+    /// Change the cord's membrane and synapse parameters in place.
+    ///
+    /// A search over dynamics is a search over THESE - the synaptic time
+    /// constants and the adaptation current are what decide whether a network
+    /// of these cells can oscillate - and they are uniform across the
+    /// population, so changing them costs nothing. See
+    /// `neuro::SpikingNet::set_params`.
+    pub fn set_lif(&mut self, params: LifParams) -> Result<(), String> {
+        self.net.set_params(params)
+    }
+
+    pub fn lif(&self) -> LifParams {
+        self.net.params()
+    }
+
+    /// Change how body state becomes current and spikes become torque.
+    pub fn set_coupling(&mut self, coupling: Coupling) {
+        self.coupling = coupling;
+    }
+
+    pub fn coupling(&self) -> Coupling {
+        self.coupling
     }
 
     /// The largest absolute weight the connectome started with.

@@ -38,7 +38,7 @@ fn main() {
     println!("objective: {}", if imitate { "imitation (episode return)" } else { "displacement" });
     let evals: usize = std::env::var("EVALS").ok().and_then(|v| v.parse().ok()).unwrap_or(80);
 
-    let search = GainSearch::new(&c, 3e-2);
+    let search = GainSearch::new(&c, Wiring { shuffle_seed: None, ..Wiring::default() });
     println!("searching {} gains: {}", search.groups().len(), search.groups().join(", "));
 
     let model = Model::from_xml(&mj, &xml).unwrap();

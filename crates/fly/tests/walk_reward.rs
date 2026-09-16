@@ -137,3 +137,42 @@ fn a_walking_episode_too_short_to_score_is_an_error() {
     let e = episode(&mut fly, cfg, Condition::Frozen, &mut Lcg::new(1)).expect_err("too short to score");
     assert!(e.contains("would score zero"), "{e}");
 }
+
+/// Two identical episodes have to produce identical numbers.
+///
+/// The gate for a bug this crate had for real: `Fly::reset` restored the
+/// network, the body and the muscle activation and left the wingbeat's phase,
+/// the cord's wing command and the per-joint opposition counts running.
+/// Measured before the fix, the same 400-tick flight episode four times over:
+/// 53, 30, 36 and 30 ticks airborne. Every episodic experiment here - the
+/// control matrix, the ceiling instrument, the evolution strategy - compares
+/// one episode against another, so a reset that leaks is not noise, it is the
+/// comparison being made against leftovers.
+///
+/// The CONTROL is the other direction, and it matters just as much: a reset
+/// that also undid what a caller configured would be the bug this crate had in
+/// its other form, when `reset` restored the connectome's original weights and
+/// every episode of a learning run unlearned.
+#[test]
+fn two_identical_episodes_are_identical_and_a_reset_keeps_what_was_configured() {
+    let Some(mut fly) = rig() else { return };
+    let first = run(&mut fly, 1.0);
+    let second = run(&mut fly, 1.0);
+    assert_eq!(
+        (first.net, first.ticks, first.spikes),
+        (second.net, second.ticks, second.spikes),
+        "two identical episodes differed; reset is leaking state"
+    );
+
+    // Configuration survives: a lesioned body is still lesioned. Every
+    // actuator rather than one, because the cord drives some of them barely at
+    // all and a single lesion that happens to land on one of those is a
+    // control that passes without testing anything.
+    for a in 0..fly.actuator_count() {
+        fly.set_muscle_strength(a, 0.0).expect("an actuator exists");
+    }
+    let lesioned = run(&mut fly, 1.0);
+    assert_ne!(lesioned.net, first.net, "a lesion had no effect, so reset undid it");
+    let again = run(&mut fly, 1.0);
+    assert_eq!(lesioned.net, again.net, "the lesion did not persist across a second reset");
+}

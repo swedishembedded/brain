@@ -30,18 +30,22 @@ fn fixture() -> connectome::Connectome {
 #[test]
 fn unit_gains_reproduce_the_connectome_exactly() {
     let c = fixture();
-    let s = GainSearch::new(&c, 2.0);
+    // The wiring is the one a `Fly` would run, which is the point: the search
+    // must produce a weight vector that network ACCEPTS, and building it from
+    // the unpruned graph instead made `Fly::set_weights` reject it outright.
+    let wiring = fly::Wiring { weight_scale: 2.0, size_limit: None, min_synapses: 1, shuffle_seed: None };
+    let s = GainSearch::new(&c, wiring);
     // The search must start from the imported connectome and nothing else. A
     // parameterisation whose neutral point is not the real graph makes every
     // comparison against the local rule meaningless, because the two would not
     // start from the same animal.
-    assert_eq!(s.weights(&s.unit_gains()), c.signed_csc(2.0).w);
+    assert_eq!(s.weights(&s.unit_gains()), c.network(2.0, None, 1).w);
 }
 
 #[test]
 fn a_zero_gain_silences_exactly_one_cell_type() {
     let c = fixture();
-    let s = GainSearch::new(&c, 1.0);
+    let s = GainSearch::new(&c, fly::Wiring { weight_scale: 1.0, size_limit: None, min_synapses: 1, shuffle_seed: None });
     let groups = s.groups().to_vec();
     let desc = groups.iter().position(|g| g == "descending").expect("descending group");
     let intr = groups.iter().position(|g| g == "intrinsic_neuron").expect("intrinsic group");
@@ -82,7 +86,7 @@ fn a_zero_gain_silences_exactly_one_cell_type() {
 #[test]
 fn every_neuron_belongs_to_exactly_one_group() {
     let c = fixture();
-    let s = GainSearch::new(&c, 1.0);
+    let s = GainSearch::new(&c, fly::Wiring { weight_scale: 1.0, size_limit: None, min_synapses: 1, shuffle_seed: None });
     // A neuron missing from the partition would have its edges fall through to
     // the default gain and be invisible to the search: the optimiser would be
     // unable to reach part of the graph and would report a ceiling that is too

@@ -42,6 +42,8 @@ pub struct Episode {
     /// What the legs did, scored, under [`Objective::Walk`]. `None` under the
     /// other objectives, which do not collect a trace.
     pub gait: Option<crate::gait::Gait>,
+    /// Ticks spent off the ground, under [`Objective::Fly`].
+    pub airborne: u32,
     /// Straight-line distance from where the episode started, in the model's
     /// own length units.
     ///
@@ -62,9 +64,10 @@ impl Episode {
     /// the spot, and only a sustained periodic tripod that actually goes
     /// somewhere earns both. For the others it is the accumulated reward.
     pub fn score(&self) -> f64 {
-        match self.gait {
-            Some(g) => self.net * g.score(),
-            None => self.reward,
+        match (self.gait, self.airborne) {
+            (Some(g), _) => self.net * g.score(),
+            (None, a) if a > 0 => self.net * (a as f64 / self.ticks.max(1) as f64),
+            _ => self.reward,
         }
     }
 }
@@ -117,17 +120,45 @@ pub enum Objective {
     /// leg trace. Neither factor alone is a gait and the product cannot be
     /// earned by a corpse, by a lunge, or by running on the spot.
     ///
-    /// The PER-TICK reward stays dense - forward progress since the last tick
-    /// - because a three-factor plasticity rule needs a signal every tick and
-    /// a rhythm is a property of a window, not of a moment. The product is
-    /// what a SEARCH sees (`Episode::score`). That split is deliberate and is
-    /// the honest way to have both.
+    /// The PER-TICK reward stays dense (forward progress since the last tick)
+    /// because a three-factor plasticity rule needs a signal every tick and a
+    /// rhythm is a property of a window, not of a moment. The product is what
+    /// a SEARCH sees (`Episode::score`). That split is deliberate and is the
+    /// honest way to have both.
     Walk {
         /// End the episode once the body's height drops below this, in the
         /// model's own length units, measured from where it started. A fly
         /// that has fallen over is not walking, and the ticks it spends on the
         /// floor would otherwise dilute the rhythm it is being scored on.
         terminal_fall: f64,
+    },
+    /// FLY: stay up, and go somewhere while you are up.
+    ///
+    /// The airborne counterpart of `Walk`, and the same shape of reward for
+    /// the same reason: net horizontal travel multiplied by the fraction of
+    /// the episode spent off the ground. Travel alone is earned by a ballistic
+    /// arc - a fly thrown sideways covers ground the whole way down - and
+    /// airtime alone is earned by hovering, or by not having taken off from a
+    /// height in the first place. Only staying up AND covering ground earns
+    /// both.
+    ///
+    /// There is no rhythm term because a wingbeat is not the cord's to
+    /// produce: the power muscles are stretch-activated and drive a thorax
+    /// that resonates at a frequency the thorax chooses, so the wingbeat is
+    /// GENERATED and the nervous system modulates it. What the motor neurons
+    /// control - and what this objective can therefore reward - is power and
+    /// steering, not frequency.
+    Fly {
+        /// How far the animal may descend from where it started before the
+        /// episode ends, in the model's own length units: its altitude.
+        ///
+        /// An altitude rather than a floor height, because the flight scene
+        /// deliberately has NO ground in it - it exists to characterise the
+        /// airframe, and a fly that can bounce is measuring contact. So
+        /// "landed" is defined by how far it has fallen, and every tick before
+        /// that counts as airborne. A fly that holds its height is airborne
+        /// for the whole episode.
+        altitude: f64,
     },
 }
 
@@ -145,6 +176,22 @@ impl Objective {
         Objective::Walk { terminal_fall: 0.125 }
     }
 
+    /// Fly, with thresholds a quarter of a body length either side of the
+    /// start: far enough that a bounce is not a landing and a wobble is not a
+    /// take-off.
+    /// Fly, with ten centimetres of altitude to lose.
+    ///
+    /// Forty body lengths, and it is chosen so the measurement is about the
+    /// STEADY sink rate rather than the transient. A fly starts from rest and
+    /// its thorax has to spin up, so the first centimetre or two is dominated
+    /// by acceleration whatever the wings are doing: measured, over two
+    /// centimetres a beating fly outlasts a still one by 1.6x, and over ten by
+    /// 4.6x, against a steady-state sink rate that differs by 4.7x. A short
+    /// altitude does not measure flight, it measures falling.
+    pub fn flight() -> Objective {
+        Objective::Fly { altitude: 10.0 }
+    }
+
     pub fn imitate(start: Start) -> Objective {
         Objective::Imitate { start, reward: ImitationReward::default(), terminal_com_dist: 0.33 }
     }
@@ -157,7 +204,7 @@ impl Objective {
     /// caller that divides by it gets 0% instead of a made-up percentage.
     pub fn max_per_tick(&self) -> f64 {
         match self {
-            Objective::Displacement | Objective::Walk { .. } => f64::INFINITY,
+            Objective::Displacement | Objective::Walk { .. } | Objective::Fly { .. } => f64::INFINITY,
             Objective::Imitate { reward, .. } => reward.max(),
         }
     }
@@ -337,6 +384,7 @@ pub fn episode_with(
     let mut deltas: Vec<f32> = Vec::with_capacity(cfg.ticks as usize);
 
     let mut last_x = start.first().copied().unwrap_or(0.0);
+    let mut last_y = start.get(1).copied().unwrap_or(0.0);
     for tick in 0..cfg.ticks as usize {
         let t = fly.step()?;
         ep.spikes += t.total_spikes as u64;
@@ -361,6 +409,22 @@ pub fn episode_with(
                 let x = fly.qpos().first().copied().unwrap_or(0.0);
                 let r = x - last_x;
                 last_x = x;
+                r
+            }
+            Objective::Fly { altitude } => {
+                let q = fly.qpos();
+                let z = q.get(2).copied().unwrap_or(0.0);
+                if z < floor - altitude {
+                    ep.terminated = true;
+                    break;
+                }
+                ep.airborne += 1;
+                // Horizontal progress only: a fly that gains height is not
+                // travelling, and rewarding altitude would pay for a jump.
+                let (x, y) = (q.first().copied().unwrap_or(0.0), q.get(1).copied().unwrap_or(0.0));
+                let r = ((x - last_x).powi(2) + (y - last_y).powi(2)).sqrt();
+                last_x = x;
+                last_y = y;
                 r
             }
             Objective::Imitate { reward, terminal_com_dist, .. } => {
@@ -436,6 +500,12 @@ impl Lcg {
     pub fn new(seed: u64) -> Lcg {
         Lcg(seed | 1)
     }
+    /// The next raw draw. Public so a search can seed an episode with it and
+    /// have every candidate in a generation share that seed.
+    pub fn next_u64(&mut self) -> u64 {
+        self.next()
+    }
+
     fn next(&mut self) -> u64 {
         self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
         self.0
@@ -491,7 +561,19 @@ pub struct GainSearch {
 }
 
 impl GainSearch {
-    pub fn new(c: &connectome::Connectome, weight_scale: f32) -> GainSearch {
+    /// Build against the network a [`Fly`] with this `wiring` will actually
+    /// run.
+    ///
+    /// The wiring is an argument rather than a scale, and that is the fix for
+    /// a real defect: this used to build from `signed_csc`, the UNPRUNED
+    /// graph, while every `Fly` runs `network`, which drops every pair below
+    /// `Wiring::min_synapses` and renumbers what is left. On the fly's cord
+    /// that is 5,305,638 weights against 1,372,588, so `Fly::set_weights`
+    /// rejected the vector outright and `examples/ceiling` panicked on its
+    /// first evaluation from the day the synapse floor was introduced. Taking
+    /// the wiring makes the two agree by construction rather than by
+    /// coincidence.
+    pub fn new(c: &connectome::Connectome, wiring: crate::Wiring) -> GainSearch {
         let mut groups: Vec<String> = Vec::new();
         let mut of_neuron: Vec<u8> = Vec::with_capacity(c.neurons.len());
         for n in &c.neurons {
@@ -505,9 +587,9 @@ impl GainSearch {
             };
             of_neuron.push(idx as u8);
         }
-        let base = c.signed_csc(weight_scale).w;
-        let edge_group = c.csc.pre.iter().map(|&p| of_neuron[p as usize]).collect();
-        GainSearch { edge_group, groups, base }
+        let net = c.network(wiring.weight_scale, wiring.size_limit, wiring.min_synapses);
+        let edge_group = net.pre.iter().map(|&p| of_neuron[p as usize]).collect();
+        GainSearch { edge_group, groups, base: net.w }
     }
 
     pub fn groups(&self) -> &[String] {
