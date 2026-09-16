@@ -153,6 +153,8 @@ pub enum Arena {
 pub struct World {
     pub arena: Arena,
     pub flight: Flight,
+    /// How good the picture has to look, against how long a frame may take.
+    pub look: Look,
     /// Where to put a food marker, in the model's own centimetres, or `None`
     /// for an empty arena.
     ///
@@ -164,7 +166,67 @@ pub struct World {
 
 impl Default for World {
     fn default() -> Self {
-        World { arena: Arena::Ground, flight: Flight::default(), food: None }
+        World { arena: Arena::Ground, flight: Flight::default(), look: Look::default(), food: None }
+    }
+}
+
+/// What the scene costs to draw.
+///
+/// The published fruit-fly model asks for `shadowsize="8192"` and
+/// `offsamples="24"` - a 67-megatexel shadow map and 24x multisampling. Those
+/// are the right numbers for rendering a figure for a paper and the wrong ones
+/// for a window somebody is watching, and the difference is not marginal.
+/// MEASURED on an Intel Arc iGPU, one 960x720 frame of this scene, median of
+/// twenty, timing `mjr_render` with a `glFinish` after it so that the GPU time
+/// lands where it is spent rather than on the readback that waits for it:
+///
+/// | shadowsize / offsamples | GPU draw |
+/// |---|---|
+/// | 8192 / 24 (the model's own) | 316 ms |
+/// | 1024 / 4 | 33 ms |
+/// | 512 / 4 | 29 ms |
+/// | 256 / 4 | 29 ms |
+/// | **0 / 4 (default here)** | **4.6 ms** |
+/// | 0 / 8 | 6.0 ms |
+/// | 0 / 0 | 3.9 ms |
+///
+/// Read the middle rows before reaching for a smaller shadow map: below 1024
+/// the size stops mattering, because what a shadow costs on this model is not
+/// the map, it is drawing 272,550 triangles across 85 meshes a SECOND time
+/// from the light. That is a flat ~25 ms whatever the resolution, which is
+/// five times the entire rest of the frame - so shadows are off by default and
+/// antialiasing, which is nearly free, is on.
+///
+/// The floor's reflectance is in the same struct because it is the same kind
+/// of cost: a reflective floor makes MuJoCo draw the scene a second time,
+/// mirrored. Measured at 4x/no-shadow it was inside the noise, and it is off
+/// by default anyway because it buys a mirror nobody asked for.
+///
+/// `mjr_readPixels` costs a further 7 to 25 ms of its own for this 2 MB
+/// frame and is NOT included above. Without the `glFinish` the whole render
+/// appears inside the readback, which is how a GPU-bound frame gets
+/// misdiagnosed as a slow copy.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Look {
+    /// Shadow map edge, in texels. `0` turns shadows off entirely.
+    pub shadowsize: u32,
+    /// Multisample count for the offscreen buffer. `0` turns antialiasing off.
+    pub offsamples: u32,
+    /// How much of the scene the floor mirrors, `0.0` for a matte floor.
+    pub floor_reflectance: f64,
+}
+
+impl Default for Look {
+    fn default() -> Self {
+        Look { shadowsize: 0, offsamples: 4, floor_reflectance: 0.0 }
+    }
+}
+
+impl Look {
+    /// The published model's own visual settings: what to ask for when the
+    /// output is a still image rather than a window.
+    pub fn still() -> Look {
+        Look { shadowsize: 8192, offsamples: 24, floor_reflectance: 0.2 }
     }
 }
 
@@ -215,15 +277,22 @@ pub fn world(fruitfly_xml: &Path, dir: &Path, w: World) -> Result<PathBuf, Strin
     // any, and the height a flying one starts at. Too small and the animal
     // leaves the frame in the first second; too large and it is a speck.
     let extent = world_extent(w);
+    // The `<visual>` block goes AFTER the include, which is what makes it an
+    // override: MuJoCo merges every `<visual>` it parses and the last value
+    // for an attribute wins.
+    let Look { shadowsize, offsamples, floor_reflectance: reflectance } = w.look;
     let scene = dir.join("scene.xml");
     let text = format!(
         r#"<mujoco model="{name}">
   <asset>
     <texture name="brain_sky" type="skybox" builtin="gradient" rgb1=".4 .6 .8" rgb2=".05 .07 .12" width="200" height="200"/>
     <texture name="brain_grid" type="2d" builtin="checker" rgb1=".1 .2 .3" rgb2=".2 .3 .4" width="300" height="300" mark="edge" markrgb=".2 .3 .4"/>
-    <material name="brain_grid" texture="brain_grid" texrepeat="4 4" texuniform="true" reflectance=".2"/>
+    <material name="brain_grid" texture="brain_grid" texrepeat="4 4" texuniform="true" reflectance="{reflectance}"/>
   </asset>
   <include file="{}"/>
+  <visual>
+    <quality shadowsize="{shadowsize}" offsamples="{offsamples}"/>
+  </visual>
   <statistic extent="{extent}" center="0 0 0"/>
   <worldbody>
     <light pos="0 0 3" dir="0 0 -1" diffuse=".8 .8 .8"/>
