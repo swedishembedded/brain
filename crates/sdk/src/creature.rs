@@ -57,6 +57,7 @@ fn missing_argument(e: String) -> Error {
 /// weight scale are configuration, and configuration belongs in a builder.
 pub struct CreatureBuilder {
     connectome: Option<PathBuf>,
+    cns: fly::Cns,
     body: Option<PathBuf>,
     dataset: String,
     weight_scale: f32,
@@ -135,6 +136,23 @@ impl CreatureBuilder {
         self
     }
 
+    /// Give the animal a BRAIN.
+    ///
+    /// The default is the ventral nerve cord alone, which is what MANC is:
+    /// everything below the neck, with no eyes and nothing that decides where
+    /// to go. The descending command then has to come from the caller, which
+    /// is the caller standing in for the missing half of the animal.
+    ///
+    /// With this on, BANC's brain is joined to that cord at the 3,530
+    /// published crossing cells (`connectome::bridge`), and the descending
+    /// population is driven by the brain instead. It is eight times the
+    /// neurons and twice the edges, and it needs `banc/` beside `manc/` under
+    /// the connectome directory - see `tools/convert/banc_codex.py`.
+    pub fn brain(mut self, on: bool) -> CreatureBuilder {
+        self.cns = if on { fly::Cns::BrainAndCord } else { fly::Cns::Cord };
+        self
+    }
+
     /// Raw synapse count to membrane current. The connectome carries counts,
     /// not strengths, and nothing in the data fixes this conversion.
     pub fn weight_scale(mut self, scale: f32) -> CreatureBuilder {
@@ -166,8 +184,15 @@ impl CreatureBuilder {
         // Tolerant of how the export was unpacked - see `connectome::find`.
         // A caller should not have to know whether their download put the two
         // CSVs in `manc/`, in `manc-codex/`, or at the root.
-        let (neurons, edges) = connectome::find(&dir, &self.dataset).map_err(backend)?;
-        let c = connectome::load(&self.dataset, &neurons, &edges).map_err(backend)?;
+        let c = match self.cns {
+            // `dataset` still selects the cord, so a caller with a differently
+            // named export is not forced through the joined path to use it.
+            fly::Cns::Cord => {
+                let (neurons, edges) = connectome::find(&dir, &self.dataset).map_err(backend)?;
+                connectome::load(&self.dataset, &neurons, &edges).map_err(backend)?
+            }
+            fly::Cns::BrainAndCord => fly::cns::load(&dir, fly::Cns::BrainAndCord).map_err(backend)?,
+        };
 
         let mj = mujoco::MuJoCo::load().map_err(backend)?;
         // The generated scene lives in a scratch directory the creature keeps
@@ -306,6 +331,7 @@ impl Creature {
     pub fn fruit_fly() -> CreatureBuilder {
         CreatureBuilder {
             connectome: None,
+            cns: fly::Cns::Cord,
             body: None,
             dataset: "manc".to_string(),
             weight_scale: fly::Wiring::default().weight_scale,

@@ -23,7 +23,7 @@
 //!
 //! The first row is a scripted 12 Hz tripod put through the identical
 //! measurement, so nothing below it is read without a scale.
-use fly::gait::{analyse, Trace};
+use fly::gait::{analyse, scripted_tripod, Trace};
 use fly::{Coupling, Fly, Timing, Wiring};
 use mujoco::{Model, MuJoCo};
 
@@ -61,20 +61,6 @@ fn row(label: &str, t: &Trace, distance: Option<f64>) {
     }
 }
 
-/// A scripted 12 Hz alternating tripod through the identical measurement.
-fn scripted() -> Trace {
-    let mut t = Trace::new(CONTROL_DT);
-    for k in 0..500 {
-        let base = 2.0 * std::f64::consts::PI * 12.0 * k as f64 * CONTROL_DT;
-        let mut legs = [0.0f32; 6];
-        for (i, (_, _, tripod)) in flybody::LEGS.iter().enumerate() {
-            legs[i] = (base + if *tripod == 0 { 0.0 } else { std::f64::consts::PI }).sin() as f32;
-        }
-        t.push(legs);
-    }
-    t
-}
-
 fn main() {
     let mj = MuJoCo::load().unwrap();
     let (neurons, edges) = connectome::find(std::path::PathBuf::from(env("BRAIN_CONNECTOME_DIR")), "manc").unwrap();
@@ -84,7 +70,7 @@ fn main() {
     let cell = std::env::var("CELL").unwrap_or_else(|_| "DNg100".to_string());
 
     header();
-    row("SCRIPTED 12 Hz", &scripted(), None);
+    row("SCRIPTED 12 Hz", &scripted_tripod(12.0, CONTROL_DT, 500), None);
 
     for size_limit in [None, Some(10.0f32)] {
         let tag = if size_limit.is_some() { "sized" } else { "uniform" };

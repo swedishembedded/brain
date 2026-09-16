@@ -52,6 +52,7 @@ struct Args {
     plastic: bool,
     throttle: Option<f32>,
     timestep: Option<f64>,
+    brain: bool,
     log: Option<String>,
 }
 
@@ -61,6 +62,10 @@ fn usage() -> ! {
 
   --connectome DIR       where the MANC export is (a dir with neurons.csv.gz,
                          or a parent holding manc/ or manc-codex/)
+  --brain                give it a BRAIN: join BANC's brain to that cord at
+                         the published crossing cells, so the descending
+                         command comes from the animal instead of the
+                         keyboard. Needs banc/ beside manc/
   --body FILE            the fruit-fly MJCF - the BODY model, not a scene;
                          the floor, sky and food are generated around it
   --air                  fly instead of walk: wing aerodynamics, a finer
@@ -109,6 +114,7 @@ fn parse() -> Args {
         plastic: false,
         throttle: None,
         timestep: None,
+        brain: false,
         log: None,
     };
     let mut it = std::env::args().skip(1);
@@ -134,6 +140,7 @@ fn parse() -> Args {
             "--shot" => a.shot = Some(value()),
             "--log" => a.log = Some(value()),
             "--timestep" => a.timestep = Some(value().parse().unwrap_or_else(|_| usage())),
+            "--brain" => a.brain = true,
             "--shuffled-connectome" => a.shuffled = true,
             "--plastic" => a.plastic = true,
             "-h" | "--help" => usage(),
@@ -237,6 +244,9 @@ fn run() -> Result<(), Error> {
     }
     if let Some(dt) = args.timestep {
         builder = builder.timestep(dt);
+    }
+    if args.brain {
+        builder = builder.brain(true);
     }
     let mut fly = builder.build()?;
     println!(

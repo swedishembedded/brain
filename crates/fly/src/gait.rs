@@ -148,6 +148,25 @@ fn power_at(v: &[f64], hz: f64, dt: f64) -> f64 {
 /// Returns `None` for a trace too short to contain even one cycle of the
 /// slowest frequency considered - an answer of "no rhythm" from three samples
 /// would be indistinguishable from a real one.
+/// A perfect alternating tripod at `hz`, as a trace.
+///
+/// The SCALE every measured trace is read against, and it lives here rather
+/// than in whichever example needed it first: a gait score with nothing to
+/// compare it to is a number, and the two examples that had their own copy of
+/// this could have drifted apart without either being wrong.
+pub fn scripted_tripod(hz: f64, dt: f64, ticks: usize) -> Trace {
+    let mut t = Trace::new(dt);
+    for k in 0..ticks {
+        let base = 2.0 * std::f64::consts::PI * hz * k as f64 * dt;
+        let mut legs = [0.0f32; 6];
+        for (i, (_, _, tripod)) in flybody::LEGS.iter().enumerate() {
+            legs[i] = (base + if *tripod == 0 { 0.0 } else { std::f64::consts::PI }).sin() as f32;
+        }
+        t.push(legs);
+    }
+    t
+}
+
 pub fn analyse(t: &Trace) -> Option<Gait> {
     const LOW_HZ: f64 = 2.0;
     const HIGH_HZ: f64 = 40.0;

@@ -16,20 +16,26 @@ use neuro::{DynamicalSystem, Plastic, Port, SpikingNet};
 use std::time::Instant;
 
 fn main() {
-    let (neurons, edges) =
-        connectome::find(std::path::PathBuf::from(std::env::var("BRAIN_CONNECTOME_DIR").unwrap()), "manc").unwrap();
-    let c = connectome::load("manc", &neurons, &edges).unwrap();
+    // `CNS=brain` profiles the joined brain-and-cord network instead of the
+    // cord alone: it is eight times the neurons and three times the edges, and
+    // whether it fits a 2 ms control tick is the question that decides whether
+    // the animal can have a brain at all.
+    let which = match std::env::var("CNS").unwrap_or_default().as_str() {
+        "brain" | "banc" => fly::Cns::BrainAndCord,
+        _ => fly::Cns::Cord,
+    };
+    let c = fly::cns::load(std::env::var("BRAIN_CONNECTOME_DIR").unwrap(), which).unwrap();
     // The network the creature actually runs, not the raw graph: `Wiring`'s
     // synapse floor removes most of the edge list, and profiling the unpruned
     // graph measures a network nothing in this repo steps.
     let w = fly::Wiring::default();
     let csc = c.network(w.weight_scale, w.size_limit, w.min_synapses);
     println!(
-        "{} neurons, {} edges at min_synapses={} ({} unpruned)",
+        "{which:?}: {} neurons, {} edges at min_synapses={} ({} unpruned)",
         csc.n,
         csc.w.len(),
         w.min_synapses,
-        c.signed_csc(1e-3).w.len()
+        c.csc.nnz()
     );
     let gpu = gpu_core::testgpu::dev(&neuro::KERNELS);
     let lif = fly::cord_lif();

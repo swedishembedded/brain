@@ -24,6 +24,7 @@
 pub mod gait;
 pub mod learn;
 pub mod reference;
+pub mod cns;
 pub mod sense;
 pub mod wing;
 
@@ -36,6 +37,7 @@ use neuro::{DynamicalSystem, LifParams, Plastic, Port, SpikingNet};
 pub use gait::{analyse as analyse_gait, Gait, Trace};
 pub use wing::{WingCommand, Wingbeat};
 pub use reference::{ImitationReward, Reference};
+pub use cns::Cns;
 pub use sense::{Modality, Sensor};
 
 /// How the three clocks in this loop relate.
