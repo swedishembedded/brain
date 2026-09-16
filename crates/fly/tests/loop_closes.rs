@@ -120,20 +120,35 @@ fn closing_the_loop_costs_little_over_the_body_alone() {
     }
     let body_hz = ticks as f64 / t0.elapsed().as_secs_f64();
 
-    eprintln!("closed loop {hz:.0} Hz, body alone {body_hz:.0} Hz, {spikes} spikes");
+    let closed_ms = 1000.0 / hz;
+    let body_ms = 1000.0 / body_hz;
+    let overhead_ms = closed_ms - body_ms;
+    eprintln!(
+        "closed loop {hz:.0} Hz ({closed_ms:.2} ms/tick), body alone {body_hz:.0} Hz ({body_ms:.2} ms/tick), \
+         neural overhead {overhead_ms:.2} ms, {spikes} spikes"
+    );
     assert!(spikes > 0, "the cord was silent, so this measures an idle loop");
 
-    // THE claim this test can actually make. flybody runs at 2.69x slower
-    // than real time on this hardware, so a 500 Hz control rate - the rate its
-    // own walking tasks use - is not reachable here no matter what the
-    // nervous system costs, and asserting it would be asserting something
-    // about the machine. What IS brain's to answer is whether closing the loop
-    // is cheap against the body it closes around, and it is: one neural tick
-    // costs about one GPU round trip, against 20 physics steps.
+    // The claim is about the ABSOLUTE cost of the nervous system per control
+    // tick, not about a ratio. A ratio moves with the body: on the floorless
+    // model the body alone ran at 189 Hz and the same neural work was 2% of
+    // the tick, while with contact physics the body drops to ~131 Hz and the
+    // identical work is a larger share of a larger number. Neither tells you
+    // anything about brain. The overhead does, and it is one GPU round trip
+    // per neural tick (profiled at 0.81 ms) plus the drive write.
+    //
+    // 3 ms is a generous ceiling on that, chosen well above the profile rather
+    // than fitted to a run: it catches a regression that adds a second sync
+    // without failing on ordinary contention.
     assert!(
-        hz > 0.8 * body_hz,
-        "closing the loop cost more than a fifth of the body's own rate: {hz:.0} Hz against {body_hz:.0} Hz"
+        overhead_ms < 3.0,
+        "closing the loop added {overhead_ms:.2} ms per control tick; the profiled cost is about 1 ms"
     );
+
+    // flybody runs slower than real time on this hardware regardless, so the
+    // 500 Hz rate its own walking tasks use is a property of the machine
+    // rather than of this loop. Reported, never asserted.
+    eprintln!("  (500 Hz would need {:.2} ms/tick; the body alone needs {body_ms:.2} ms)", 2.0);
 }
 
 #[test]

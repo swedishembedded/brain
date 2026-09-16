@@ -385,8 +385,16 @@ it against the scan+sort reference at `max|d| == 0`.
   around, and it is: **185 Hz closed against 189 Hz for the body alone**, a 2%
   cost. The connectome is not the bottleneck; MuJoCo is.
 
-  **Two defects found here, both the same shape - a measurement that looked
-  healthy while the thing it measured was not happening:**
+  **`BRAIN_FLYBODY_XML` must name a SCENE, not the bare body.** flybody ships
+  `fruitfly.xml` with no worldbody geometry at all and `floor.xml` which
+  includes it and adds ground. Everything before this ran the bare body, so the
+  fly was in free fall: measured, the root reaches z = -70.6 still accelerating
+  at -145, against -0.005 at rest with ground. The loop's closure was real
+  either way, but a falling fly cannot walk. The M3 gate now asserts the root
+  SETTLES rather than merely staying finite, which free fall also does.
+
+  **Three defects found here, the first two the same shape - a measurement that
+  looked healthy while the thing it measured was not happening:**
 
   1. *The sensory channel was connected and silent.* Proprioceptors are
      afferents with almost no incoming synapses, so injected current is the

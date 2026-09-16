@@ -107,28 +107,35 @@ fn the_fly_loads_and_its_actuators_are_the_ones_the_motor_map_needs() {
 }
 
 #[test]
-fn the_fly_integrates_stably_under_gravity() {
+fn the_fly_settles_on_the_ground_rather_than_falling_forever() {
     let Some(mj) = lib() else { return };
     let Some(m) = fly(&mj) else { return };
     let mut d = Data::new(&m).unwrap();
     d.reset(&m);
 
-    // No control input, whatever the model's own worldbody provides. The claim
-    // is narrow and is the one the body milestone needs: the model integrates
-    // stably. A model that explodes here cannot be driven by anything.
+    // No control input. A fly on ground falls a short distance, contacts, and
+    // comes to rest; a fly in a vacuum accelerates forever.
     //
-    // 1000 steps is 0.1 s at flybody's own 1e-4 timestep, not a second. The
-    // fly is in free fall for all of it, so `max |qvel|` in the tens is
-    // expected and the assertion below is a divergence check, not a stillness
-    // one.
-    for _ in 0..1000 {
+    // This is the check that `BRAIN_FLYBODY_XML` points at a SCENE and not at
+    // the bare body. flybody ships `fruitfly.xml` with no worldbody geometry
+    // at all and `floor.xml` which includes it and adds a ground plane, and an
+    // earlier version of this test asserted only that the integration stayed
+    // finite - which free fall does. Measured: without ground the root reaches
+    // z = -70.6 still accelerating at -145; with ground it rests at -0.005.
+    for _ in 0..6000 {
         d.step(&m);
     }
     let qpos = d.get(&m, StateSpec::QPOS);
     let qvel = d.get(&m, StateSpec::QVEL);
-    assert!(qpos.iter().all(|v| v.is_finite()), "position diverged to a non-finite value");
-    assert!(qvel.iter().all(|v| v.is_finite()), "velocity diverged to a non-finite value");
-    let worst = qvel.iter().fold(0.0f64, |a, v| a.max(v.abs()));
-    eprintln!("after {:.3}s: max |qvel| = {worst:.3}", d.time(&m));
-    assert!(worst < 1e4, "the fly is being flung: max |qvel| = {worst}");
+    assert!(qpos.iter().all(|v| v.is_finite()), "position diverged");
+    assert!(qvel.iter().all(|v| v.is_finite()), "velocity diverged");
+
+    let root_speed = qvel[..3].iter().fold(0.0f64, |a, v| a.max(v.abs()));
+    eprintln!("after {:.3}s: root at z={:+.4}, |v|max={root_speed:.4}", d.time(&m), qpos[2]);
+    assert!(
+        root_speed < 0.5,
+        "the fly is still moving at {root_speed:.3} after 0.6s - it is in free fall, so \
+         BRAIN_FLYBODY_XML is pointing at the bare body rather than a scene with ground"
+    );
+    assert!(qpos[2].abs() < 1.0, "the fly came to rest at z={:+.3}, nowhere near the ground", qpos[2]);
 }
