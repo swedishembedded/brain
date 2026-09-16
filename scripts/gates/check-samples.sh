@@ -8,11 +8,12 @@
 # Enforces samples/README.md. The manifest checks are cheap reads; the two that
 # matter are measurements:
 #
-#   CLOSURE     - a sample's real `cargo tree` graph contains nothing from an
-#                 SDK surface it did not enable. This is the check that
-#                 literally enforces "pull in only its required dependencies",
-#                 and the surface -> crate mapping is DERIVED from the SDK's own
-#                 manifest, so it cannot drift from what the features do.
+#   CLOSURE     - a sample's real `cargo tree` graph contains nothing reachable
+#                 ONLY through an SDK surface it did not enable. This is the
+#                 check that literally enforces "pull in only its required
+#                 dependencies", and the surface -> crate mapping is DERIVED
+#                 from the SDK's own manifest, so it cannot drift from what the
+#                 features do.
 #   INCREMENTAL - editing a sample's own sources and rebuilding compiles
 #                 exactly one crate, and none of them a brain crate.
 #
@@ -130,21 +131,42 @@ for m in sys.argv[1:]:
     present = {ln.split()[0] for ln in tree.stdout.splitlines()
                if ln.strip().startswith("brain")}
 
-    # THE closure check: nothing from a surface this sample did not enable.
+    # THE closure check: nothing REACHABLE ONLY through a surface this sample
+    # did not enable.
     #
-    # Subtract what the ENABLED features legitimately bring in first. Surfaces
-    # share infrastructure tiers (`image` and a future `text` both select
-    # `resolve`), so a surface's raw crate set is not exclusively its own -
-    # without this subtraction, enabling `image` would be reported as leaking
+    # "Reachable only" is the whole subtlety, and getting it wrong produces
+    # false positives that are indistinguishable from real leaks. Two
+    # subtractions are needed, for two different reasons.
+    #
+    # First, surfaces share infrastructure tiers (`image` and a future `text`
+    # both select `resolve`), so a surface's raw crate set is not exclusively
+    # its own - without this, enabling `image` would be reported as leaking
     # `resolve`'s crates "from the text surface".
+    #
+    # Second, and this is what the `creature` surface exposed: a surface's
+    # `dep:` crates have dependencies of their own, and those can be crates
+    # another surface names directly. `brain-wm-display` depends on
+    # `brain-imaging`, which depends on `brain-vision`, which depends on
+    # `brain-model` - both of which the `image` surface names. Reading the
+    # manifest alone, those look like image-surface crates that leaked into a
+    # creature-only sample. They are nothing of the sort; they are the
+    # transitive closure of a dependency the sample legitimately asked for.
+    # So the enabled set is expanded through its REAL graph before subtracting.
     allowed = set()
     for f in named:
         allowed |= crates_of(f)
+    for crate in sorted(allowed):
+        t = subprocess.run(
+            ["cargo", "tree", "-p", crate, "--edges", "normal", "--prefix", "none"],
+            capture_output=True, text=True)
+        if t.returncode == 0:
+            allowed |= {ln.split()[0] for ln in t.stdout.splitlines()
+                        if ln.strip().startswith("brain")}
     for s in sorted(set(surfaces) - named):
         leaked = sorted((surface_crates[s] - allowed) & present)
         if leaked:
-            print(f"FAIL {pkg}: links {', '.join(leaked)} from the '{s}' surface, "
-                  f"which it did not enable")
+            print(f"FAIL {pkg}: links {', '.join(leaked)}, reachable only through the "
+                  f"'{s}' surface, which it did not enable")
             ok = False
 
     budget = man.get("package", {}).get("metadata", {}).get("brain", {}).get("max-brain-crates")

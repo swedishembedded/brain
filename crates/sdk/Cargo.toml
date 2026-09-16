@@ -28,11 +28,18 @@ path = "src/lib.rs"
 # baseline (`Cargo.toml`'s `brain = { default-features = false }`) is what
 # makes a consumer name its surfaces explicitly.
 default = ["full"]
-full = ["image"]
+full = ["image", "creature"]
 
 # --- surfaces: one per brain_arch::Domain the SDK has a public type for.
 #     A surface is the only thing a consumer names.
 image = ["resolve", "dep:brain-flux2", "dep:brain-s3dit", "dep:brain-imaging"]
+# `brain::Creature`, `brain::View` -- a connectome running a body, and a window
+# onto it. Selects `device` for the GPU the spiking network runs on. It does
+# NOT select `resolve`: a connectome is a published scientific dataset, not a
+# `<vendor>/<repo>` checkpoint, so it is loaded from a path rather than through
+# the model store. When that changes this feature gains `resolve`, not a
+# parallel resolver.
+creature = ["device", "dep:brain-fly", "dep:brain-connectome", "dep:brain-mujoco", "dep:brain-neuro", "dep:brain-wm-display"]
 
 # --- infrastructure: selected BY a surface, never named by a consumer.
 # `brain::Device`.
@@ -49,12 +56,17 @@ resolve = ["device", "dep:brain-loader", "dep:brain-model"]
 brain-capability.workspace = true
 brain-modelref.workspace = true
 brain-modelstore.workspace = true
+brain-connectome = { workspace = true, optional = true }
+brain-fly = { workspace = true, optional = true }
 brain-flux2 = { workspace = true, optional = true }
 brain-gpu-core = { workspace = true, optional = true }
 brain-imaging = { workspace = true, optional = true }
 brain-loader = { workspace = true, optional = true }
 brain-model = { workspace = true, optional = true }
+brain-mujoco = { workspace = true, optional = true }
+brain-neuro = { workspace = true, optional = true }
 brain-s3dit = { workspace = true, optional = true }
+brain-wm-display = { workspace = true, optional = true }
 
 [dev-dependencies]
 brain-checkpoint.workspace = true

@@ -59,6 +59,16 @@ pub enum Domain {
     ThreeD,
     Forecast,
     World,
+    /// A nervous system coupled to a body: a connectome stepped as a spiking
+    /// network, driving a physics simulation and reading it back.
+    ///
+    /// A separate domain because nothing about the others' shape fits. There
+    /// is no vocabulary and no scalar loss, the model's state SURVIVES a call
+    /// rather than being rebuilt from the request, and its parameters change
+    /// while it runs. A request-scoped `infer` verb has no meaning here, which
+    /// is exactly why it is named rather than filed under an existing domain
+    /// whose serving contract it would quietly violate.
+    Creature,
     /// brain's own architecture, no upstream reference. Real (gradient-checked,
     /// benchmarked) but excluded from `brain caps`, `brain --help` and the
     /// docs model list - see the [`Source::Toy`] naming rule above.
