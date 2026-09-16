@@ -22,6 +22,8 @@ pub type SDL_Texture = c_void;
 pub const SDL_INIT_VIDEO: u32 = 0x0000_0020;
 pub const SDL_WINDOWPOS_CENTERED: c_int = 0x2FFF_0000u32 as c_int;
 pub const SDL_WINDOW_SHOWN: u32 = 0x0000_0004;
+/// Set on a window whose framebuffer SDL decided to back with OpenGL.
+pub const SDL_WINDOW_OPENGL: u32 = 0x0000_0002;
 pub const SDL_RENDERER_SOFTWARE: u32 = 0x0000_0001;
 pub const SDL_RENDERER_ACCELERATED: u32 = 0x0000_0002;
 // SDL_PIXELFORMAT_RGB24: tightly packed interleaved R,G,B bytes.
@@ -31,6 +33,33 @@ pub const SDL_RENDERER_ACCELERATED: u32 = 0x0000_0002;
 // garbled the whole window; tests/sdl_roundtrip.rs now guards this).
 pub const SDL_PIXELFORMAT_RGB24: u32 = 0x1710_1803;
 pub const SDL_TEXTUREACCESS_STREAMING: c_int = 1;
+
+/// `SDL_RendererInfo`. The name and flags say which backend SDL ACTUALLY
+/// picked, which is not the same question as which one was asked for -
+/// `SDL_CreateRenderer` falls back on its own and reports success either way,
+/// so a message that echoes the requested flag is not a measurement.
+#[repr(C)]
+pub struct SDL_RendererInfo {
+    pub name: *const c_char,
+    pub flags: u32,
+    pub num_texture_formats: u32,
+    pub texture_formats: [u32; 16],
+    pub max_texture_width: c_int,
+    pub max_texture_height: c_int,
+}
+
+impl SDL_RendererInfo {
+    pub fn zeroed() -> SDL_RendererInfo {
+        SDL_RendererInfo {
+            name: std::ptr::null(),
+            flags: 0,
+            num_texture_formats: 0,
+            texture_formats: [0; 16],
+            max_texture_width: 0,
+            max_texture_height: 0,
+        }
+    }
+}
 
 // Event types.
 pub const SDL_QUIT: u32 = 0x100;
@@ -73,6 +102,7 @@ extern "C" {
     pub fn SDL_Init(flags: u32) -> c_int;
     pub fn SDL_Quit();
     pub fn SDL_GetError() -> *const c_char;
+    pub fn SDL_ClearError();
     pub fn SDL_SetHint(name: *const c_char, value: *const c_char) -> c_int;
     pub fn SDL_CreateWindow(
         title: *const c_char,
@@ -109,6 +139,8 @@ extern "C" {
         dst: *const c_void,
     ) -> c_int;
     pub fn SDL_RenderPresent(r: *mut SDL_Renderer);
+    pub fn SDL_GetRendererInfo(r: *mut SDL_Renderer, info: *mut SDL_RendererInfo) -> c_int;
+    pub fn SDL_GetWindowSize(w: *mut SDL_Window, cw: *mut c_int, ch: *mut c_int);
     pub fn SDL_GetCurrentVideoDriver() -> *const std::ffi::c_char;
     pub fn SDL_GetWindowFlags(w: *mut SDL_Window) -> u32;
     pub fn SDL_ShowWindow(w: *mut SDL_Window);

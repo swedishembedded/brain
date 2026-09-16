@@ -36,6 +36,9 @@ pub struct SdlWindow {
     /// because a failure that recurs every frame would otherwise bury the
     /// first one under thirty copies a second.
     reported: std::collections::BTreeSet<&'static str>,
+    /// Pending/completed single-frame capture of the blit path.
+    capture: Option<Vec<u8>>,
+    presented: u64,
 }
 
 impl SdlWindow {
@@ -48,9 +51,64 @@ impl SdlWindow {
                 return Err(sdl_error("SDL_Init"));
             }
             // Nearest-neighbor scaling for crisp low-res frames.
-            let hint = CString::new("SDL_RENDER_SCALE_QUALITY").unwrap();
-            let zero = CString::new("0").unwrap();
-            sys::SDL_SetHint(hint.as_ptr(), zero.as_ptr());
+            set_hint("SDL_RENDER_SCALE_QUALITY", "0");
+
+            // WHICH RENDERER depends on the video driver, and getting it wrong
+            // is invisible from inside the program.
+            //
+            // The software renderer is this crate's deliberate default:
+            // presentation stays on the CPU and the whole GPU compute budget
+            // belongs to the model. It does not work on Wayland, where SDL's
+            // software path needs a window framebuffer the compositor does not
+            // provide, and the result is a window that stays BLACK while every
+            // call involved returns success (libsdl-org/sdl2-compat issue 266,
+            // "Window framebuffer support not available"). So on Wayland, and
+            // only there, ask for an accelerated renderer: it costs the model a
+            // textured quad per frame, which is nothing next to not being able
+            // to see it.
+            //
+            // The driver has to be known BEFORE the window is created, because
+            // the framebuffer hint below is read at that moment.
+            let driver = sys::SDL_GetCurrentVideoDriver();
+            let driver = if driver.is_null() {
+                String::from("unknown")
+            } else {
+                std::ffi::CStr::from_ptr(driver).to_string_lossy().into_owned()
+            };
+            let wayland = driver == "wayland";
+            // `BRAIN_WM_RENDERER=software|accelerated` overrides the choice.
+            // Which backend can present depends on the display server, the
+            // driver and what else in the process has already touched the GPU,
+            // and none of that is knowable from in here - so the choice is
+            // reachable from outside without a rebuild.
+            let forced = std::env::var("BRAIN_WM_RENDERER").unwrap_or_default();
+            let want = match forced.as_str() {
+                "software" => sys::SDL_RENDERER_SOFTWARE,
+                "accelerated" => sys::SDL_RENDERER_ACCELERATED,
+                _ if wayland => sys::SDL_RENDERER_ACCELERATED,
+                _ => sys::SDL_RENDERER_SOFTWARE,
+            };
+
+            // A SOFTWARE renderer presents into the window's framebuffer - and
+            // SDL builds that framebuffer, by default, on top of an internal
+            // TEXTURE renderer, which on X11 means an OpenGL context SDL
+            // creates behind the window and never mentions.
+            //
+            // In a process that already holds its own GL context for offscreen
+            // rendering, that hidden context is a second claimant on the same
+            // thread, and the cost is every frame: SDL_RenderPresent returns
+            // - it returns void, so there is nothing to check - having drawn
+            // nothing, set no error, and sent NOT ONE request to the display
+            // server. The window is black and every call reports success.
+            //
+            // Asking for the plain shared-memory framebuffer instead is what a
+            // software renderer was always meant to present into. The
+            // difference is measurable from outside the process: one
+            // XShmPutImage per frame against none at all, and the window's
+            // SDL_WINDOW_OPENGL flag never being set behind our back.
+            if want == sys::SDL_RENDERER_SOFTWARE {
+                set_hint("SDL_FRAMEBUFFER_ACCELERATION", "0");
+            }
 
             let t = CString::new(title).unwrap();
             let win = sys::SDL_CreateWindow(
@@ -64,30 +122,6 @@ impl SdlWindow {
             if win.is_null() {
                 return Err(sdl_error("SDL_CreateWindow"));
             }
-            // WHICH RENDERER depends on the video driver, and getting it wrong
-            // is invisible from inside the program.
-            //
-            // The software renderer is this crate's deliberate default:
-            // presentation stays on the CPU and the whole iGPU compute budget
-            // belongs to the model. It does not work on Wayland. SDL's
-            // software path needs a window framebuffer, Wayland does not
-            // provide one, and the result is a window that stays BLACK while
-            // every call involved returns success - the renderer is created,
-            // the texture uploads, the copy succeeds, the present does nothing
-            // (libsdl-org/sdl2-compat issue 266, "Window framebuffer support
-            // not available").
-            //
-            // So on Wayland, and only there, ask for an accelerated renderer:
-            // it costs the model a textured quad per frame, which is nothing
-            // next to not being able to see it.
-            let driver = sys::SDL_GetCurrentVideoDriver();
-            let driver = if driver.is_null() {
-                String::from("unknown")
-            } else {
-                std::ffi::CStr::from_ptr(driver).to_string_lossy().into_owned()
-            };
-            let wayland = driver == "wayland";
-            let want = if wayland { sys::SDL_RENDERER_ACCELERATED } else { sys::SDL_RENDERER_SOFTWARE };
             let mut ren = sys::SDL_CreateRenderer(win, -1, want);
             if ren.is_null() {
                 // Whichever was asked for is unavailable; the other is better
@@ -118,11 +152,35 @@ impl SdlWindow {
             sys::SDL_ShowWindow(win);
             sys::SDL_RaiseWindow(win);
 
+            // Report what SDL ACTUALLY gave us, not what was asked for.
+            // `SDL_CreateRenderer` substitutes a backend of its own choosing
+            // and still returns success, so echoing the requested flag is an
+            // assertion dressed up as a measurement - and one of those already
+            // cost a debugging round trip here.
+            let mut info = sys::SDL_RendererInfo::zeroed();
+            let backend = if sys::SDL_GetRendererInfo(ren, &mut info) == 0 && !info.name.is_null() {
+                std::ffi::CStr::from_ptr(info.name).to_string_lossy().into_owned()
+            } else {
+                String::from("?")
+            };
+            let (mut ww, mut wh) = (0, 0);
+            sys::SDL_GetWindowSize(win, &mut ww, &mut wh);
             let flags = sys::SDL_GetWindowFlags(win);
+            // A software renderer over a GL-backed window framebuffer is the
+            // configuration that presents nothing, so say so where it can be
+            // read rather than leaving a black window to be interpreted.
+            if want == sys::SDL_RENDERER_SOFTWARE && flags & sys::SDL_WINDOW_OPENGL != 0 {
+                eprintln!(
+                    "wm-display: WARNING: the window framebuffer is OpenGL-backed despite the \
+                     software renderer. If this process also renders offscreen with OpenGL the \
+                     window will stay black. Set SDL_FRAMEBUFFER_ACCELERATION=0."
+                );
+            }
             eprintln!(
-                "wm-display: {driver} driver, {} renderer, {fw}x{fh} window{}",
-                if wayland { "accelerated (software does not present on Wayland)" } else { "software" },
-                if flags & sys::SDL_WINDOW_SHOWN == 0 { " (NOT SHOWN)" } else { "" }
+                "wm-display: {driver} driver, \"{backend}\" renderer (flags {:#x}), {fw}x{fh} frames in a {ww}x{wh} window{}{}",
+                info.flags,
+                if flags & sys::SDL_WINDOW_SHOWN == 0 { " HIDDEN" } else { "" },
+                if wayland { " [wayland: software does not present, asked for accelerated]" } else { "" }
             );
 
             Ok(SdlWindow {
@@ -134,35 +192,46 @@ impl SdlWindow {
                 pressed: KeySet::empty(),
                 last_title: String::new(),
                 reported: std::collections::BTreeSet::new(),
+                capture: None,
+                presented: 0,
             })
         }
     }
 
-    /// Read the renderer's output back as RGB24.
+    /// Ask for the next presented frame to be captured on its way through.
     ///
-    /// Recomposes the backbuffer from the last texture before reading it.
-    /// SDL's own documentation is explicit that on the main rendering target
-    /// this "should be called after rendering and BEFORE SDL_RenderPresent()",
-    /// and reading after a present returns whatever the driver left behind -
-    /// which looked exactly like a correct frame on one machine and was not
-    /// evidence of anything.
-    pub fn read_back(&mut self, w: u32, h: u32) -> Result<Vec<u8>, String> {
-        let mut buf = vec![0u8; (w * h * 3) as usize];
-        let rc = unsafe {
-            sys::SDL_RenderClear(self.ren);
-            sys::SDL_RenderCopy(self.ren, self.tex, std::ptr::null(), std::ptr::null());
-            sys::SDL_RenderReadPixels(
-                self.ren,
-                std::ptr::null(),
-                sys::SDL_PIXELFORMAT_RGB24,
-                buf.as_mut_ptr() as *mut _,
-                (w * 3) as i32,
-            )
-        };
-        if rc != 0 {
-            return Err(sdl_error("SDL_RenderReadPixels"));
+    /// The capture is taken after the texture has been copied into the
+    /// backbuffer and BEFORE the present, which is the only point SDL
+    /// documents `SDL_RenderReadPixels` as meaningful on the main target.
+    /// What it proves is that the blit path - texture upload, pixel-format
+    /// conversion, pitch, scaling - carried the frame intact.
+    ///
+    /// What it CANNOT prove is that anything reached the screen. There is no
+    /// call in SDL that reads a window back off the display server, so a
+    /// capture that matches the source frame is consistent with both a
+    /// correct window and a completely black one. Read it as clearing the
+    /// blit of suspicion, never as clearing the presentation.
+    pub fn capture_next_frame(&mut self) {
+        self.capture = Some(Vec::new());
+    }
+
+    /// The frame captured by [`SdlWindow::capture_next_frame`], if one has
+    /// been presented since.
+    pub fn captured(&self) -> Option<&[u8]> {
+        match &self.capture {
+            Some(buf) if !buf.is_empty() => Some(buf),
+            _ => None,
         }
-        Ok(buf)
+    }
+
+    /// How many frames have been handed to `SDL_RenderPresent`.
+    ///
+    /// A black window with a present count of one means the loop stalled
+    /// after the first frame; a black window with a rising count means the
+    /// frames are going somewhere that is not the screen. Those are different
+    /// faults and the count is the cheapest way to tell them apart.
+    pub fn presented(&self) -> u64 {
+        self.presented
     }
 
     /// Drain pending events into an [`Input`] snapshot.
@@ -206,6 +275,15 @@ impl SdlWindow {
         unsafe {
             sys::SDL_SetRelativeMouseMode(on as i32);
         }
+    }
+}
+
+/// Set an SDL hint by name.
+fn set_hint(name: &str, value: &str) {
+    let (n, v) = (CString::new(name).unwrap(), CString::new(value).unwrap());
+    // SAFETY: both pointers are NUL-terminated and live across the call.
+    unsafe {
+        sys::SDL_SetHint(n.as_ptr(), v.as_ptr());
     }
 }
 
@@ -289,7 +367,35 @@ impl FrameSink for SdlWindow {
             if sys::SDL_RenderCopy(self.ren, self.tex, std::ptr::null(), std::ptr::null()) != 0 {
                 self.blit_failed("SDL_RenderCopy");
             }
+            if matches!(&self.capture, Some(buf) if buf.is_empty()) {
+                let mut buf = vec![0u8; (w * h * 3) as usize];
+                let rc = sys::SDL_RenderReadPixels(
+                    self.ren,
+                    std::ptr::null(),
+                    sys::SDL_PIXELFORMAT_RGB24,
+                    buf.as_mut_ptr() as *mut _,
+                    (w * 3) as i32,
+                );
+                if rc != 0 {
+                    self.blit_failed("SDL_RenderReadPixels");
+                } else {
+                    self.capture = Some(buf);
+                }
+            }
+            // SDL_RenderPresent RETURNS VOID, which is why a present that
+            // does nothing is invisible - but it still sets the error string
+            // on the way out. Clearing it first makes whatever is there
+            // afterwards attributable to this call and nothing earlier.
+            sys::SDL_ClearError();
             sys::SDL_RenderPresent(self.ren);
+            self.presented += 1;
+            let e = sys::SDL_GetError();
+            if !e.is_null() {
+                let msg = std::ffi::CStr::from_ptr(e).to_string_lossy();
+                if !msg.is_empty() && self.reported.insert("present") {
+                    eprintln!("wm-display: SDL_RenderPresent: {msg}");
+                }
+            }
 
             let title = format!(
                 "brain wm — {} | {:.1}/{} fps | step {}{}{}",

@@ -28,7 +28,8 @@ fn sdl_texture_roundtrip_is_pixel_faithful() {
         rgb[i * 3 + 1] = (i * 13 % 256) as u8;
         rgb[i * 3 + 2] = (255 - i * 5 % 256) as u8;
     }
+    win.capture_next_frame();
     win.frame(&rgb, w, h, &Hud::default());
-    let back = win.read_back(w, h).expect("read back");
+    let back = win.captured().expect("the presented frame was captured");
     assert_eq!(back, rgb, "SDL texture path altered pixels (format/pitch bug)");
 }
