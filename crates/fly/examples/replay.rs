@@ -68,7 +68,18 @@ fn main() {
         f.enable_flight(fly::Wingbeat { hz: 180.0, ..fly::Wingbeat::default() }).unwrap();
     }
 
-    let objective = if air { Objective::flight() } else { Objective::walk() };
+    // `FOOD=x,y,z` replays a chemotaxis tuning: the animal is scored on how
+    // much nearer it ended, and never told where the food is.
+    let f_food: Option<[f64; 3]> = std::env::var("FOOD").ok().and_then(|v| {
+        let p: Vec<f64> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+        (p.len() == 3).then(|| [p[0], p[1], p[2]])
+    });
+    f.set_food(f_food);
+    let objective = match (f_food.is_some(), air) {
+        (true, _) => Objective::seek(),
+        (_, true) => Objective::flight(),
+        _ => Objective::walk(),
+    };
     let run = |f: &mut Fly, command: f32| {
         let cfg = RewardConfig { objective, ticks, command, ..RewardConfig::default() };
         episode(f, cfg, Condition::Frozen, &mut Lcg::new(1)).expect("an episode runs")
@@ -77,7 +88,8 @@ fn main() {
     let row = |label: &str, e: &fly::learn::Episode| {
         let quality = match e.gait {
             Some(g) => g.score(),
-            None => e.airborne as f64 / e.requested.max(e.ticks).max(1) as f64,
+            None if e.airborne > 0 => e.airborne as f64 / e.requested.max(e.ticks).max(1) as f64,
+            None => e.range.1,
         };
         println!(
             "{label:>12}  {:>9.5}  {:>9.4}  {:>8.3}  {:>8.2}  {:>7.2}  {:>9}  {}",
@@ -97,7 +109,7 @@ fn main() {
         "condition",
         "score",
         "net cm",
-        if air { "airborne" } else { "gait" },
+        if f_food.is_some() { "range" } else if air { "airborne" } else { "gait" },
         "BL/s",
         "tipped",
         "spikes"
@@ -126,7 +138,42 @@ fn main() {
     }
     let corpse = run(&mut f, command);
     row("paralysed", &corpse);
+    drop(f);
 
-    println!("\nthe tuned row has to beat both others, and `tipped` has to be small:");
-    println!("a walk that finishes more than a radian from upright is a slide.");
+    // THE STRUCTURAL CONTROL, and it is the one that says whether the
+    // CONNECTOME did any of this. The same tuning, the same body, the same
+    // command, on a degree-matched shuffle of the wiring: every neuron keeps
+    // its in-degree and the weight multiset is preserved exactly, applied
+    // after signing so the excitatory/inhibitory split is identical too. Only
+    // which cell contacts which is destroyed.
+    //
+    // This is a stronger control than searching the shuffle separately and
+    // comparing the two winners, which is what the earlier instrument here
+    // did: two best-of-N maxima are two draws from the tail of a noisy
+    // distribution, and their difference is mostly a statement about the
+    // noise. Holding the parameters fixed and changing only the graph asks
+    // the question directly.
+    let shuffled_wiring = Wiring { shuffle_seed: Some(0x5EED), ..wiring };
+    let model = Model::from_xml(&mj, &model_path).unwrap();
+    let mut sf = Fly::new(
+        gpu_core::testgpu::dev(&neuro::KERNELS),
+        &c,
+        model,
+        fly::cord_lif(),
+        shuffled_wiring,
+        timing,
+        Coupling::default(),
+    )
+    .unwrap();
+    if air {
+        sf.enable_flight(fly::Wingbeat { hz: 180.0, ..fly::Wingbeat::default() }).unwrap();
+    }
+    sf.set_food(f_food);
+    tuning.apply(&mut sf, &c, shuffled_wiring).expect("the tuning applies to the shuffle too");
+    let shuffled = run(&mut sf, command);
+    row("shuffled", &shuffled);
+
+    println!("\nthe tuned row has to beat every other, and `tipped` has to be small:");
+    println!("a walk that finishes more than a radian from upright is a slide, and a");
+    println!("tuning that does as well on the shuffle was not using the connectome.");
 }
