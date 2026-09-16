@@ -79,9 +79,9 @@ here (items already tracked there are not repeated - see that file's own
 |---|---|---|---|---|
 | 1 | 14/2 | `crates/sdk/src/creature.rs` | `Creature` has zero tests, inline or integration - the only public surface with none | fixed (M4) |
 | 2 | 14 | `crates/sdk/src/view.rs:11-14` | `View::frame`'s documented headless-capture behavior is untested | fixed (M4) |
-| 3 | 8 | `crates/sdk/src/pipeline.rs:321,331` | `generate`/`generate_with` hardcode `&CancelToken::default()` and a no-op progress closure; no public way to supply either | open (M5) |
-| 4 | 8 | `crates/sdk/src/pipeline.rs:300,481,504` | download and s3dit-build progress are likewise discarded | open (M5) |
-| 5 | 6 | `crates/sdk/src/error.rs:70-71` | `Error::Cancelled` is a dead public variant - unreachable with no public cancel entry point | open (M5) |
+| 3 | 8 | `crates/sdk/src/pipeline.rs:321,331` | `generate`/`generate_with` hardcode `&CancelToken::default()` and a no-op progress closure; no public way to supply either | fixed (M5) |
+| 4 | 8 | `crates/sdk/src/pipeline.rs:300,481,504` | download and s3dit-build progress are likewise discarded | open (M5b - split out, see below: three different progress shapes to plumb, not one) |
+| 5 | 6 | `crates/sdk/src/error.rs:70-71` | `Error::Cancelled` is a dead public variant - unreachable with no public cancel entry point | fixed (M5) |
 | 6 | 8 | crate-wide | no `.capabilities()`/manifest introspection anywhere in `crates/sdk` | open (M8) |
 | 7 | 9 | crate-wide | no training/finetune entry point at all in `crates/sdk` (the adjacent Dataset-layer gap is tracked in `sdk.md`; the missing training call itself was not) | open (Phase 2, per-pipeline) |
 | 8 | 9/4 | `crates/sdk/src/creature.rs:492-500` | `set_plasticity`/`reward` mutate learned synapse weights with no `save()`/`load()` counterpart - all learning dies with the process | open (backlog) |
@@ -206,7 +206,25 @@ then `crates/sdk` (M10c).
       when absent (build/drive/step/reset, and `View::open`/`show`/`frame`
       at the requested size) - honest about the gap per rule 14, same as
       `tests/image_pipeline.rs`'s own documented ceiling.
-- [ ] **M5** - progress/cancellation wired for real (findings 3, 4, 5).
+- [x] **M5** - generate-time progress/cancellation wired for real (findings
+      3, 5). Added `ImagePipeline::generate_with_progress(prompt, opts,
+      cancel, on_progress)` - the full-control call both `generate`/
+      `generate_with` now delegate to at their old defaults, so existing
+      callers see no change. `Error::Cancelled` is reachable through it now;
+      the string-to-`Error` mapping that makes it so was factored into
+      `backend_err_or_cancelled` and unit-tested directly, since neither
+      existing fixture reaches a live pipeline to exercise it end to end
+      (same documented ceiling as `tests/image_pipeline.rs`).
+- [ ] **M5b** - download progress (`ImagePipelineBuilder::load`'s
+      `execute_plan` call, finding 4) and s3dit build progress
+      (`HotPipeline::build_adapted`'s `impl FnMut(&str)`) are still
+      discarded. Split out because these are two MORE distinct progress
+      closure shapes (`FnMut(&str, u64, Option<u64>)` for downloads,
+      `FnMut(&str)` for the s3dit build) on top of generate's
+      `FnMut(u32, u32, &str)`, plumbed through a builder that is consumed by
+      value rather than a `&self` call - needs its own design pass for
+      where a boxed closure lives on `ImagePipelineBuilder`, not a
+      copy-paste of M5's pattern.
 - [ ] **M6** - split `Error::Backend`'s catch-all (findings 12, 13).
 - [ ] **M7** - `Creature` progressive disclosure + de-duplicate `watch.rs` (findings 15, 16).
 - [ ] **M8** - `.capabilities()` introspection (finding 6).

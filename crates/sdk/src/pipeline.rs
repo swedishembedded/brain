@@ -107,6 +107,20 @@ impl ImageGenerationOptions {
     }
 }
 
+/// Both backends' `generate` return `Result<_, String>` and signal a caller's
+/// cancel token firing with the literal string `"cancelled"` (there is no
+/// richer shared error type to carry it as anything else) -- this is the one
+/// place that string is turned into [`Error::Cancelled`] rather than an
+/// indistinguishable [`Error::Backend`], factored out so the mapping is
+/// testable with no real pipeline in hand.
+fn backend_err_or_cancelled(e: String) -> Error {
+    if e == "cancelled" {
+        Error::Cancelled
+    } else {
+        Error::Backend(e)
+    }
+}
+
 /// [`ImagePipeline::load_lora`]'s gate, factored out so it is testable with
 /// no real pipeline in hand: a literal filesystem path is accepted verbatim
 /// (mirroring today's real `flux2::AdapterSpec { path, scale: 1.0 }`);
@@ -297,22 +311,49 @@ impl ImagePipeline {
     }
 
     /// Generate one image from `prompt`, at every default
-    /// [`ImageGenerationOptions`] leaves unset.
+    /// [`ImageGenerationOptions`] leaves unset, with no progress reporting
+    /// and no way to cancel mid-generation. See
+    /// [`ImagePipeline::generate_with_progress`] for a caller that needs
+    /// either.
     pub fn generate(&self, prompt: &str) -> Result<Image> {
         self.generate_with(prompt, ImageGenerationOptions::default())
     }
 
-    /// The one place flux2's `(Vec<u8> RGB8, u32, u32)` and s3dit's float HWC
-    /// `Image { hwc, w, h }` both normalize into [`Image`] -- see this
-    /// module's doc and [`Image::from_hwc_unit`]'s doc.
+    /// [`ImagePipeline::generate`] plus [`ImageGenerationOptions`], still
+    /// with no progress reporting and no cancellation -- see
+    /// [`ImagePipeline::generate_with_progress`].
     pub fn generate_with(&self, prompt: &str, opts: ImageGenerationOptions) -> Result<Image> {
+        self.generate_with_progress(prompt, opts, &capability::CancelToken::default(), &mut |_step, _total, _msg| {})
+    }
+
+    /// The full-control entry point [`ImagePipeline::generate`]/
+    /// [`ImagePipeline::generate_with`] both delegate to at their defaults
+    /// (an unarmed [`capability::CancelToken`] and a discarded progress
+    /// closure): pass a token you control to cancel a multi-step denoise
+    /// loop from another thread (it is polled once per step, the same
+    /// cadence `capability::Action`'s own long-running actions use), and a
+    /// closure to observe `(step, total, message)` as it runs -- the CLI's
+    /// own progress line reads the identical three values. Neither backend's
+    /// underlying `generate` takes less than this; `generate`/`generate_with`
+    /// exist so the common call needs neither.
+    ///
+    /// This is the one place flux2's `(Vec<u8> RGB8, u32, u32)` and s3dit's
+    /// float HWC `Image { hwc, w, h }` both normalize into [`Image`] -- see
+    /// this module's doc and [`Image::from_hwc_unit`]'s doc.
+    pub fn generate_with_progress(
+        &self,
+        prompt: &str,
+        opts: ImageGenerationOptions,
+        cancel: &capability::CancelToken,
+        on_progress: &mut dyn FnMut(u32, u32, &str),
+    ) -> Result<Image> {
         match &self.backend {
             Backend::Flux2(b) => {
                 let o = opts.into_gen_opts();
                 let (rgb, w, h) = b
                     .pipe
-                    .generate(prompt, &[], &o, &capability::CancelToken::default(), |_step, _total, _msg| {})
-                    .map_err(|e| if e == "cancelled" { Error::Cancelled } else { Error::Backend(e) })?;
+                    .generate(prompt, &[], &o, cancel, on_progress)
+                    .map_err(backend_err_or_cancelled)?;
                 Image::from_rgb8(w, h, rgb)
             }
             Backend::S3dit(b) => {
@@ -321,8 +362,8 @@ impl ImagePipeline {
                 let seed = opts.seed.unwrap_or(S3DIT_DEFAULT_SEED);
                 let img = b
                     .pipe
-                    .generate(prompt, seed, steps, &capability::CancelToken::default(), |_step, _total, _msg| {})
-                    .map_err(|e| if e == "cancelled" { Error::Cancelled } else { Error::Backend(e) })?;
+                    .generate(prompt, seed, steps, cancel, on_progress)
+                    .map_err(backend_err_or_cancelled)?;
                 Image::from_hwc_unit(img.w as u32, img.h as u32, &img.hwc)
             }
         }
@@ -505,6 +546,22 @@ impl ImagePipelineBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The whole point of routing `generate_with_progress` through a
+    /// caller-supplied [`capability::CancelToken`]: the one string either
+    /// backend uses to signal it firing turns into [`Error::Cancelled`], not
+    /// an indistinguishable [`Error::Backend`].
+    #[test]
+    fn backend_err_or_cancelled_recognizes_the_cancellation_sentinel() {
+        assert!(matches!(backend_err_or_cancelled("cancelled".to_string()), Error::Cancelled));
+    }
+
+    /// Every other backend failure stays a named `Error::Backend`, verbatim.
+    #[test]
+    fn backend_err_or_cancelled_passes_every_other_message_through() {
+        let err = backend_err_or_cancelled("flux2: assemble: no dit chosen".to_string());
+        assert!(matches!(err, Error::Backend(ref m) if m == "flux2: assemble: no dit chosen"));
+    }
 
     /// TDD anchor for [`ImagePipeline::load_lora`]'s dispatch: a literal
     /// path that exists on disk is accepted, at the reference-default
