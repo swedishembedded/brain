@@ -100,8 +100,8 @@ here (items already tracked there are not repeated - see that file's own
 18. `ImagePipelineBuilder::load()` vs `CreatureBuilder::build()` - two terminal verbs for the same act in one crate.
 19. No `Creature::builder()` alongside `Creature::fruit_fly()` (arguably justified - the species names the assembly).
 20. Unprefixed setters (`drive`, `turn`, `reward`) beside `set_`-prefixed ones (`set_wing_power`, `set_plasticity`) on the same type.
-21. `creature.rs:283-285` - `drive()`'s doc documents a `turn` param it doesn't take; `turn()` next to it has no doc. (fixed in M2)
-22. `error.rs:82` - `Error::Backend` renders with no `brain: `-style prefix, unlike every other variant. (fixed in M2)
+21. ~~`creature.rs:283-285` - `drive()`'s doc documents a `turn` param it doesn't take; `turn()` next to it has no doc.~~ fixed in M2.
+22. ~~`error.rs:82` - `Error::Backend` renders with no `brain: `-style prefix.~~ **wontfix**: `error.rs`'s own module doc documents this as an intentional VERBATIM passthrough for in-process callers (the underlying flux2/s3dit message routinely already self-identifies, e.g. `"flux2: assemble: no dit chosen"`), and `backend_carries_the_original_message_verbatim` pins exactly that contract. A generic prefix would contradict the documented behavior and break the test for no real gain.
 23. `creature.rs:63` - `pub use flybody::Arena;` promoted into the compatibility surface with no doc comment justifying it, unlike `Device`/`DType`.
 24. `view.rs:86` - `View::open(creature, title, width, height)` is four positional args with no options type.
 
@@ -184,7 +184,7 @@ then `crates/sdk` (M10c).
 ## Milestone checklist
 
 - [x] **M1** - this document + the `sdk.md` stale-line fixes.
-- [ ] **M2** - `crates/sdk` cheap mechanical fixes (findings 21, 22).
+- [x] **M2** - `crates/sdk` cheap mechanical fixes (finding 21 fixed; finding 22 turned out to be intentional on inspection, marked wontfix).
 - [ ] **M3** - `Creature` gets a real device (findings 9, 10).
 - [ ] **M4** - `Creature`/`View` end-to-end test (findings 1, 2).
 - [ ] **M5** - progress/cancellation wired for real (findings 3, 4, 5).

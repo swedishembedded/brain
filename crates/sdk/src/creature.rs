@@ -278,16 +278,16 @@ impl Creature {
     }
 
     /// Set the standing descending command: how hard the brain is telling the
-    /// cord to go, and which way to lean.
-    ///
-    /// `turn` in `[-1, 1]` biases the two halves of the descending population
-    /// against each other, so a turn has to come out of the cord's own
-    /// circuitry rather than from anything steering the body directly.
+    /// cord to go.
     pub fn drive(&mut self, forward: f32) {
         self.drive = forward;
         self.apply_command();
     }
 
+    /// Bias the descending command to turn: `turn` in `[-1, 1]` weights the
+    /// two halves of the descending population against each other, so a turn
+    /// has to come out of the cord's own circuitry rather than from anything
+    /// steering the body directly.
     pub fn turn(&mut self, turn: f32) {
         self.turn = turn.clamp(-1.0, 1.0);
         self.apply_command();
