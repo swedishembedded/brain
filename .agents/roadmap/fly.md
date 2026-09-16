@@ -12,6 +12,26 @@ thing being gated at the end is a **behaviour**, not a tensor.
 
 ## Definition of done
 
+The whole animal: **BANC's brain joined to MANC's cord**, running as one
+spiking network, in a MuJoCo body, that **moves its legs, walks, flies and
+explores**.
+
+Brain AND cord, and the join is a wiring rather than a hand-off - see M9. As
+of that milestone the substrate exists and is measured: 178,860 neurons,
+15,902,235 synapses, 2,954 crossing cells merged from the two datasets'
+published correspondence, the optic lobe reaching the cord's motor neurons, and
+3,007 olfactory receptor neurons through which the animal can smell something
+in its world.
+
+What remains, per verb:
+
+| | state |
+|---|---|
+| **moves its legs** | done - 330 motor neurons on 44 actuators, the loop closes at 0.55x real time |
+| **walks** | the reward and the search exist and both work; the number is M12's |
+| **flies** | the airframe flies and the objective is gated; steering is untrained |
+| **explores** | the olfactory chain carries end to end and is lateralised; steering is untrained |
+
 `brain fly walk` fetches the MANC connectome, runs all 23,188 neurons and
 5.24M synapses as a spiking network on the GPU, drives the flybody fly in
 MuJoCo through its 369 leg motor neurons, and **learns to walk** - sustained
@@ -868,6 +888,150 @@ it against the scan+sort reference at `max|d| == 0`.
      `noslip_iterations` cannot be traded against accuracy from here. The
      model sets an elliptic cone and 3 noslip iterations, and dropping the
      latter measured ~20% on its own.
+
+* **M9 - a brain. LANDED.** The cord had no brain, so navigation, exploration
+  and everything a descending command is a command ABOUT were supplied by hand
+  - `Creature::seek_food` reads the food's true position out of the simulator
+  and pushes a turn into the descending population, which is the missing half
+  of the animal, written in Rust.
+
+  **BANC is reachable without the login wall.** Harvard Dataverse serves the
+  v888 snapshot under CC BY 4.0 with no account (doi:10.7910/DVN/7WTH1N) where
+  Codex serves the same data behind a Google sign-in and cannot be scripted. It
+  publishes Arrow; `tools/convert/banc_codex.py` converts it to the Codex CSV
+  schema this workspace already reads, so the engine's load path gains no Arrow
+  dependency - the same split `tools/` exists for everywhere else. Measured
+  through the production loader: **188,313 neurons, 13,620,321 edges,
+  42,308,169 synapses**, 805 motor, 1,316 descending, 1,849 ascending, 16,563
+  sensory, 152,612 carrying a reconstructed volume. Denser than the Codex
+  export the earlier rows in this file were measured on, and both are now in
+  the import gate.
+
+  **The join IDENTIFIES cells rather than wiring them.** A descending neuron is
+  ONE cell with its dendrites in the brain and its terminals in the cord, and
+  the two datasets reconstructed different halves of it. `connectome::bridge`
+  merges the two copies: the merged cell integrates what the brain gives it,
+  releases what the cord reads, and fires once. Modelling the join as a synapse
+  instead would insert a threshold and a tick of delay that no axon has, and
+  would double the cell in every census.
+
+  The identity is PUBLISHED, not inferred: BANC's own metadata carries a
+  `manc_match` column giving the MANC root id of the same cell, for 3,530
+  crossing neurons. BANC's own nerve cord is dropped, and that is what stops
+  the cord being counted twice - a descending cell's brain inputs survive, its
+  BANC-cord outputs fall away with their endpoints, and MANC supplies that half
+  of the same cell. An ascending cell is the mirror image.
+
+  `manc_match` is **many-to-one on 391 of MANC's cells**, up to eight claimants
+  each - a curator recording one exemplar for a type whose members the other
+  dataset did not resolve separately - and 297 of those groups have all their
+  members on ONE soma side, so they are not left/right pairs. Merging such a
+  group would fuse distinct brain neurons. So one member merges (the one whose
+  independent morphology match agrees, else the lowest id, so the result never
+  depends on CSV row order) and the rest are wired to the same cord cell at a
+  synapse count drawn from the real distribution - the p90 of 465,033 measured
+  descending connections, since the median is 2 and would not survive the
+  synapse floor. Setting that count to zero drops those pathways instead, which
+  is the control for whether they matter.
+
+  **Joined and measured: 178,860 neurons, 15,902,235 edges, 2,954 merged, 576
+  wired, and 78% of the cord's motor neurons reachable from the optic lobe** -
+  which is the assertion that the two halves are one nervous system rather than
+  two components in one file. At `Wiring`'s synapse floor it is 2,768,335 edges
+  and runs at **3.6 ms per control tick** on 22 CPU threads against the bare
+  cord's 0.8 ms. `--brain` on the sample, `CreatureBuilder::brain(true)` in the
+  SDK, and nothing downstream needed changing: the motor map, the
+  proprioceptors and the gait analysis all key on published annotations rather
+  than on indices, which is the property that made a brain addable at all.
+* **M10 - senses. THE NOSE CARRIES, END TO END.** An animal that cannot sense
+  anything outside itself cannot explore. BANC carries 3,007 olfactory receptor
+  neurons across 56 receptor types, 1,617 left and 1,390 right, on the antennae
+  and the maxillary palps; `Creature::smell_food` puts `exp(-r/2cm)` on them,
+  evaluated at each antenna - a diffusive plume with no wind, because the arena
+  has none and a wind direction nothing else in the simulation knows about
+  would be inventing physics to sense.
+
+  **Smell rather than sight, and the data is why.** BANC's photoreceptors are
+  1,846 cells of which 1,597 are on the RIGHT and 249 on the left, R7 and R8
+  only, with none of the R1-R6 that carry motion. Steering on an eye
+  reconstructed on one side measures the reconstruction. The optic lobe is
+  still in the network and still reaches the cord; what it has no principled
+  input yet is an image.
+
+  Measured on the joined network, 250 ticks per stimulus, spikes per tick:
+
+  | odour | antennae | brain | descending | motor |
+  |---|---|---|---|---|
+  | none | 0.00 | 0.0 | 0.00 | 0.00 |
+  | both | 747.80 | 6145.4 | 47.46 | 3.28 |
+  | left | 463.97 | 5732.7 | 44.57 | 3.23 |
+  | right | 406.25 | 5625.1 | 37.48 | 1.97 |
+
+  **The control row is the result.** With nothing to smell this nervous system
+  is SILENT - no baseline, nothing spontaneous - so every spike in the other
+  rows is the odour's, and the chain is real end to end: receptors fire, the
+  brain answers with six thousand spikes a tick, the descending population
+  carries it down, motor neurons reach the muscles. It is also LATERALISED: a
+  smell on the left moves the descending population differently from one on the
+  right, by up to twelve spikes a tick at the gains swept.
+
+  **What it is not is steering.** The leg bias that asymmetry produces flips
+  sign across the gain sweep, which is exactly what a connectome without fitted
+  synaptic strengths should be expected to do. The pathway is what M10
+  establishes. `--smell` on the sample runs it, against `--seek` which is the
+  hand-written control.
+
+  This crate has had a sensory channel that was connected and silent before -
+  current flowed into the proprioceptors every tick, none reached threshold,
+  lesioning changed nothing, and every other reading stayed healthy - so
+  `Fly::antenna_spikes` exists and `examples/smell_check` leads with the
+  no-odour row.
+* **M11 - a reward only a gait can earn. LANDED.** The imitation reward pays a
+  corpse, measured at 98.7%, and every search run under it was optimising
+  immobility. `Objective::Walk` scores net travel from where the episode began
+  MULTIPLIED by `gait::analyse`'s score over the whole leg trace: travel alone
+  is a lunge, rhythm alone is running on the spot, and the product is neither.
+  The per-tick reward stays dense so a three-factor rule still has a signal
+  every tick; the product is what a search sees.
+
+  The paralysed control is now a GATE rather than an experiment somebody
+  remembered to run - a severed body scores under 0.01 while still firing,
+  since the lesion is peripheral - alongside a dragged body and legs that
+  oscillate going nowhere, both zero. `Objective::Fly` is the airborne
+  counterpart: net horizontal travel times the fraction of the episode spent
+  airborne, over ten centimetres of altitude, gated against the same
+  stroke-off control the airframe was.
+
+  **Two defects fell out of building it, and the first invalidates
+  measurements above.** `Fly::reset` left the wingbeat's phase, the cord's wing
+  command, the per-joint opposition counts, the injected drive and the last
+  spike vector running: the same 400-tick flight episode, four times over, gave
+  53, 30, 36 and 30 ticks airborne. Every experiment here compares one episode
+  against another, so that was not noise around a true value - it was the
+  comparison being made against leftovers. It is gated now. It changed an
+  answer immediately: driving the cord was recorded as making a flying fly fall
+  faster, and reproducibly it stays airborne LONGER, 356 ticks against 225.
+  (Which is NOT evidence of control. Flailing legs present more area to the
+  fluid model, and over an altitude extra drag and real lift are
+  indistinguishable from airtime alone.)
+
+  And `GainSearch` built its weight vector from the UNPRUNED graph while every
+  `Fly` runs the pruned one, so `examples/ceiling` panicked on its first
+  evaluation from the day the synapse floor was introduced. It takes the
+  `Wiring` now.
+* **M12 - the search.** `fly::search::Es` is a mirrored-sampling
+  natural-gradient evolution strategy over the parameters a connectome does not
+  contain: the per-cell-type gains, the adaptation current, the two synaptic
+  time constants, the activation gain and the descending command. Mirrored
+  pairs to halve the estimator's variance, rank weighting because an episodic
+  score with a product in it is heavy-tailed, and common random numbers within
+  a generation so a comparison is between parameter vectors rather than between
+  dice rolls.
+
+  It replaces coordinate hill-climbing, which needs `2d` evaluations per step
+  and stalls on any ridge that is not axis-aligned. `examples/walk_search` runs
+  it, leads with the connectome as imported, and takes `SHUFFLE=1` for the
+  degree-matched structural control.
 
 M1-M4 are engineering. **M5 is the research milestone** and is where the
 schedule is honestly uncertain: the published precedents (flyvis for vision,

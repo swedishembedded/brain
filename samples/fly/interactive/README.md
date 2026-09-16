@@ -105,7 +105,25 @@ BRAIN_DEVICE=cpu make samples/fly/interactive/run ARGS="..."
 | `--shot FILE` | write the last frame as a PPM |
 | `--shuffled-connectome` | the structural control: same degrees, shuffled wiring |
 | `--plastic` | let synapses change while it runs |
+| `--brain` | join BANC's brain to the cord and run the whole animal |
+| `--smell` | put the food's odour on the antennae; implies `--brain` |
 | `--timestep X` | integrate the body at X seconds instead of the published 1e-4 |
+
+## Two ways to send it after the food
+
+`--seek` is the MISSING BRAIN, written by hand: it reads the food's true
+position out of the simulator and pushes a turn into the descending
+population. It works, and it is not the animal doing it.
+
+`--smell` is the animal. With `--brain` the creature has BANC's 3,007
+olfactory receptor neurons, and this puts a diffusive plume on them at each
+antenna; what happens next is whatever the published wiring does with it.
+Measured, the chain carries end to end and is lateralised - a smell on the
+left moves the descending population differently from one on the right - and
+nothing has trained it, so the animal does not yet steer towards the source.
+The status line shows both concentrations and the receptor spikes they
+produced, because a sensory channel that is connected and silent looks exactly
+like a working one from every other reading.
 
 ## What it does NOT show
 

@@ -53,6 +53,7 @@ struct Args {
     throttle: Option<f32>,
     timestep: Option<f64>,
     brain: bool,
+    smell: bool,
     log: Option<String>,
 }
 
@@ -71,7 +72,15 @@ fn usage() -> ! {
   --air                  fly instead of walk: wing aerodynamics, a finer
                          timestep, and a floor to take off from and land on
   --food X,Y,Z           put something in the world, in centimetres
-  --seek                 steer towards it, instead of going straight
+  --seek                 steer towards it, instead of going straight. This is
+                         the MISSING BRAIN, written by hand: it reads the
+                         food's true position out of the simulator and pushes
+                         a turn into the descending population
+  --smell                put the food's ODOUR on the antennae and let the
+                         nervous system do what it will with it. Implies
+                         --brain, because a nerve cord has no nose. Nothing
+                         has trained that pathway, so what the animal does
+                         with the smell is what the wiring does with it
   --cord-wings           fly on what the wing motor neurons produce, rather
                          than on a wingbeat the throttle drives
   --drive X              starting descending command (default 1.5)
@@ -115,6 +124,7 @@ fn parse() -> Args {
         throttle: None,
         timestep: None,
         brain: false,
+        smell: false,
         log: None,
     };
     let mut it = std::env::args().skip(1);
@@ -141,6 +151,10 @@ fn parse() -> Args {
             "--log" => a.log = Some(value()),
             "--timestep" => a.timestep = Some(value().parse().unwrap_or_else(|_| usage())),
             "--brain" => a.brain = true,
+            "--smell" => {
+                a.brain = true;
+                a.smell = true;
+            }
             "--shuffled-connectome" => a.shuffled = true,
             "--plastic" => a.plastic = true,
             "-h" | "--help" => usage(),
@@ -152,8 +166,12 @@ fn parse() -> Args {
     }
     // Seeking nothing is a flag that silently does nothing, which is worse
     // than an error because the fly still flies and still looks right.
-    if a.seek && a.food.is_none() {
-        eprintln!("--seek needs somewhere to go: pass --food X,Y,Z too");
+    if (a.seek || a.smell) && a.food.is_none() {
+        eprintln!("--seek and --smell need somewhere to go: pass --food X,Y,Z too");
+        std::process::exit(2);
+    }
+    if a.seek && a.smell {
+        eprintln!("--seek and --smell are two different animals: one is steered by hand, the other by its own brain");
         std::process::exit(2);
     }
     a
@@ -338,6 +356,10 @@ fn run() -> Result<(), Error> {
             fly.set_wing_power(Some(throttle));
         }
 
+        // Smell first, so the odour is on the antennae before the cord is
+        // stepped. What the animal does about it is its own business.
+        let smelled = if args.smell && !eaten { fly.smell_food() } else { None };
+
         let range = if args.seek && !eaten {
             let r = fly.seek_food(drive);
             if fly.reached_food() {
@@ -403,6 +425,14 @@ fn run() -> Result<(), Error> {
         }
         if let Some(r) = range {
             status += &format!(" | food {r:.2} cm");
+        }
+        if let Some((l, r)) = smelled {
+            // Both concentrations and the SPIKES they produced. A channel that
+            // is connected and silent looks exactly like a working one from
+            // every other reading, and this is the only place that shows the
+            // difference.
+            let (ls, rs) = fly.antenna_spikes();
+            status += &format!(" | smell {:.3}/{:.3} -> {ls}/{rs} ORN", l, r);
         }
         if eaten {
             status += " | FED";
