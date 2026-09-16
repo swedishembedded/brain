@@ -26,10 +26,15 @@ pub mod lif;
 pub mod seam;
 
 pub use csc::Csc;
-pub use lif::{LifParams, SpikingNet};
+pub use lif::{LifParams, PlasticityParams, SpikingNet};
 pub use seam::{DynamicalSystem, Plastic, Port, State, StepStats};
 
 /// The kernels this runtime dispatches, in the order [`lif`]'s `K_*` indices
 /// name them. A device built with this slice can run a [`SpikingNet`].
-pub const KERNELS: [(&str, &str); 2] =
-    [("syn_gather_csc", kernels::SYN_GATHER_CSC), ("lif_step", kernels::LIF_STEP)];
+pub const KERNELS: [(&str, &str); 5] = [
+    ("syn_gather_csc", kernels::SYN_GATHER_CSC),
+    ("lif_step", kernels::LIF_STEP),
+    ("neuro_trace", kernels::NEURO_TRACE),
+    ("neuro_elig", kernels::NEURO_ELIG),
+    ("neuro_learn", kernels::NEURO_LEARN),
+];

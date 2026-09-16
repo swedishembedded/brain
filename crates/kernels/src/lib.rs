@@ -708,6 +708,12 @@ pub const NA3D_APPLY: &str = include_str!("../wgsl/na3d_apply.wgsl");
 pub const NA3D_SCORES: &str = include_str!("../wgsl/na3d_scores.wgsl");
 /// `wgsl/nchw_nlc.wgsl`
 pub const NCHW_NLC: &str = include_str!("../wgsl/nchw_nlc.wgsl");
+/// `wgsl/neuro_elig.wgsl`
+pub const NEURO_ELIG: &str = include_str!("../wgsl/neuro_elig.wgsl");
+/// `wgsl/neuro_learn.wgsl`
+pub const NEURO_LEARN: &str = include_str!("../wgsl/neuro_learn.wgsl");
+/// `wgsl/neuro_trace.wgsl`
+pub const NEURO_TRACE: &str = include_str!("../wgsl/neuro_trace.wgsl");
 /// `wgsl/nlc_bias_nchw.wgsl`
 pub const NLC_BIAS_NCHW: &str = include_str!("../wgsl/nlc_bias_nchw.wgsl");
 /// `wgsl/nlc_nchw.wgsl`
@@ -1345,6 +1351,9 @@ pub const ALL: &[(&str, &str)] = &[
     ("na3d_apply", NA3D_APPLY),
     ("na3d_scores", NA3D_SCORES),
     ("nchw_nlc", NCHW_NLC),
+    ("neuro_elig", NEURO_ELIG),
+    ("neuro_learn", NEURO_LEARN),
+    ("neuro_trace", NEURO_TRACE),
     ("nlc_bias_nchw", NLC_BIAS_NCHW),
     ("nlc_nchw", NLC_NCHW),
     ("pack_qkv", PACK_QKV),

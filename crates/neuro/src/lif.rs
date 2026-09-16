@@ -6,12 +6,15 @@
 use gpu_core::{BufUsage, DeviceBuffer, Gpu};
 
 use crate::csc::Csc;
-use crate::seam::{DynamicalSystem, Port, State, StepStats};
+use crate::seam::{DynamicalSystem, Plastic, Port, State, StepStats};
 
 /// Kernel indices into [`crate::KERNELS`]. The order is this crate's own;
 /// `Gpu::step` takes the index the device was built with.
 const K_GATHER: usize = 0;
 const K_LIF: usize = 1;
+const K_TRACE: usize = 2;
+const K_ELIG: usize = 3;
+const K_LEARN: usize = 4;
 
 /// Membrane dynamics, in the discretised form the kernel actually integrates.
 ///
@@ -74,6 +77,50 @@ impl LifParams {
     }
 }
 
+/// Three-factor plasticity: eligibility accumulates locally, a neuromodulator
+/// decides whether any of it becomes learning.
+///
+/// Not a gradient. Nothing here differentiates a loss; the weight change at a
+/// synapse is a product of three quantities that synapse can actually see -
+/// its own recent pre/post coincidence, and a scalar broadcast to the whole
+/// population.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PlasticityParams {
+    /// Presynaptic activity-trace decay per tick, `exp(-dt/tau_pre)`.
+    pub pre_decay: f32,
+    /// Postsynaptic activity-trace decay per tick.
+    pub post_decay: f32,
+    /// Eligibility-trace decay per tick. Usually the slowest of the three:
+    /// it sets how long after acting a creature can still be credited for it.
+    pub elig_decay: f32,
+    /// Learning rate.
+    pub eta: f32,
+    /// Weight bounds. An unbounded reward-modulated rule is positively
+    /// unstable, so these are required rather than optional.
+    pub w_min: f32,
+    pub w_max: f32,
+}
+
+impl Default for PlasticityParams {
+    fn default() -> Self {
+        PlasticityParams { pre_decay: 0.9, post_decay: 0.9, elig_decay: 0.95, eta: 0.01, w_min: -1.0, w_max: 1.0 }
+    }
+}
+
+impl PlasticityParams {
+    pub fn validate(&self) -> Result<(), String> {
+        for (name, d) in [("pre_decay", self.pre_decay), ("post_decay", self.post_decay), ("elig_decay", self.elig_decay)] {
+            if !(0.0..1.0).contains(&d) {
+                return Err(format!("{name} must be in [0, 1), got {d} - a decay of 1 never forgets"));
+            }
+        }
+        if self.w_min >= self.w_max {
+            return Err(format!("w_min ({}) must be below w_max ({})", self.w_min, self.w_max));
+        }
+        Ok(())
+    }
+}
+
 /// A spiking network: a connectome plus the state that makes it run.
 pub struct SpikingNet {
     gpu: Gpu,
@@ -96,6 +143,23 @@ pub struct SpikingNet {
     // The connectome's own weights, kept so `reset` can restore them after
     // plasticity has moved them.
     w0: Vec<f32>,
+
+    // Plasticity. `None` until `enable_plasticity` allocates the traces: a
+    // forward-only run should not pay for an eligibility buffer the size of
+    // the edge list.
+    plast: Option<Plasticity>,
+}
+
+/// The buffers and settings plasticity needs, allocated only when it is on.
+struct Plasticity {
+    params: PlasticityParams,
+    on: bool,
+    /// This tick's neuromodulator. Consumed by `step` and cleared, so a
+    /// reward delivered once is applied once.
+    delta: f32,
+    x_pre: DeviceBuffer,
+    x_post: DeviceBuffer,
+    elig: DeviceBuffer,
 }
 
 impl SpikingNet {
@@ -143,6 +207,7 @@ impl SpikingNet {
             isyn,
             drive,
             w0: csc.w.clone(),
+            plast: None,
         };
         net.reset(0);
         Ok(net)
@@ -154,6 +219,71 @@ impl SpikingNet {
 
     pub fn params(&self) -> LifParams {
         self.params
+    }
+
+    /// Allocate the traces and turn three-factor plasticity on.
+    ///
+    /// Separate from `new` because a forward-only run - a parity check, a
+    /// replay, a frozen creature being evaluated - should not allocate an
+    /// eligibility buffer the size of the edge list, which is the largest
+    /// array in the system.
+    pub fn enable_plasticity(&mut self, params: PlasticityParams) -> Result<(), String> {
+        params.validate()?;
+        let live = BufUsage::STORAGE | BufUsage::COPY_DST | BufUsage::COPY_SRC;
+        let n = self.n as usize;
+        let nnz = self.w0.len();
+        let x_pre = self.gpu.buffer("neuro.x_pre", (n.max(1) * 4) as u64, live);
+        let x_post = self.gpu.buffer("neuro.x_post", (n.max(1) * 4) as u64, live);
+        let elig = self.gpu.buffer("neuro.elig", (nnz.max(1) * 4) as u64, live);
+        self.gpu.write_f32(&x_pre, &vec![0.0; n]);
+        self.gpu.write_f32(&x_post, &vec![0.0; n]);
+        self.gpu.write_f32(&elig, &vec![0.0; nnz]);
+        self.plast = Some(Plasticity { params, on: true, delta: 0.0, x_pre, x_post, elig });
+        Ok(())
+    }
+
+    /// The eligibility trace, one entry per edge. Empty when plasticity was
+    /// never enabled.
+    pub fn eligibility(&self) -> Vec<f32> {
+        match &self.plast {
+            Some(pl) => self.gpu.read(&pl.elig, self.w0.len()),
+            None => Vec::new(),
+        }
+    }
+
+    /// The synaptic weights as they stand now.
+    pub fn weights(&self) -> Vec<f32> {
+        self.gpu.read(&self.w, self.w0.len())
+    }
+
+    /// The learning half of a tick, appended to the forward steps.
+    ///
+    /// Order matters and is the reason this is not three separate submissions:
+    /// the traces must be updated with THIS tick's spikes before the
+    /// eligibility trace reads them, and the weight update must see the
+    /// eligibility the same tick produced.
+    fn learn_steps(&self, steps: &mut Vec<gpu_core::Step>) {
+        let Some(pl) = &self.plast else { return };
+        let p = pl.params;
+        steps.push(self.gpu.step(K_TRACE, &[&pl.x_pre, &self.spike], &[self.n, p.pre_decay.to_bits()], self.n));
+        steps.push(self.gpu.step(K_TRACE, &[&pl.x_post, &self.spike], &[self.n, p.post_decay.to_bits()], self.n));
+        steps.push(self.gpu.step(
+            K_ELIG,
+            &[&self.indptr, &self.pre, &pl.elig, &pl.x_pre, &pl.x_post],
+            &[self.n, p.elig_decay.to_bits()],
+            self.n * 64,
+        ));
+        if pl.on {
+            // eta and delta travel premultiplied: a delta of 0 makes the
+            // update a bit-identical no-op rather than a small change.
+            let eta_delta = p.eta * pl.delta;
+            steps.push(self.gpu.step(
+                K_LEARN,
+                &[&self.w, &pl.elig],
+                &[self.w0.len() as u32, eta_delta.to_bits(), p.w_min.to_bits(), p.w_max.to_bits()],
+                self.w0.len() as u32,
+            ));
+        }
     }
 
     /// The LIF kernel's `Params` block: two counts then five f32 bit patterns,
@@ -185,6 +315,14 @@ impl DynamicalSystem for SpikingNet {
         self.gpu.write_f32(&self.isyn, &vec![0.0; n]);
         self.gpu.write_f32(&self.drive, &vec![0.0; n]);
         self.gpu.write_f32(&self.w, &self.w0.clone());
+        if let Some(pl) = &mut self.plast {
+            // Traces are state, not configuration: a reset that left them
+            // running would leak one episode's activity into the next.
+            pl.delta = 0.0;
+            self.gpu.write_f32(&pl.x_pre, &vec![0.0; n]);
+            self.gpu.write_f32(&pl.x_post, &vec![0.0; n]);
+            self.gpu.write_f32(&pl.elig, &vec![0.0; self.w0.len()]);
+        }
         self.tick = 0;
     }
 
@@ -201,9 +339,17 @@ impl DynamicalSystem for SpikingNet {
             &self.lif_params(),
             self.n,
         );
-        // One submission, two steps: the gather reads last tick's spikes and
-        // the LIF overwrites them, so they must not be reordered.
-        self.gpu.submit(&[], &[gather, lif]);
+        // One submission, in order: the gather reads last tick's spikes, the
+        // LIF overwrites them, and the learning steps read what the LIF just
+        // wrote. None of these may be reordered.
+        let mut steps = vec![gather, lif];
+        self.learn_steps(&mut steps);
+        self.gpu.submit(&[], &steps);
+        if let Some(pl) = &mut self.plast {
+            // A reward delivered once is applied once. Leaving delta set
+            // would silently turn a single reinforcement into a standing one.
+            pl.delta = 0.0;
+        }
         self.tick += 1;
         StepStats { tick: self.tick }
     }
@@ -268,5 +414,23 @@ impl DynamicalSystem for SpikingNet {
         }
         self.tick = state.tick;
         Ok(())
+    }
+}
+
+impl Plastic for SpikingNet {
+    fn set_plasticity(&mut self, on: bool) {
+        if let Some(pl) = &mut self.plast {
+            pl.on = on;
+        }
+    }
+
+    fn plasticity(&self) -> bool {
+        self.plast.as_ref().is_some_and(|pl| pl.on)
+    }
+
+    fn modulate(&mut self, delta: f32) {
+        if let Some(pl) = &mut self.plast {
+            pl.delta = delta;
+        }
     }
 }

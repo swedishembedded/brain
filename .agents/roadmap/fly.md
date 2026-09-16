@@ -236,12 +236,19 @@ it against the scan+sort reference at `max|d| == 0`.
 
 ## Milestones
 
-* **M1 - sparse runtime.** PARTLY LANDED. `crates/neuro` has the CSC
-  connectome, the `syn_gather_csc` + `lif_step` kernels, the
-  `DynamicalSystem`/`Plastic` seams, and all four gates green on a real P40
-  against the 48-thread Cranelift JIT. **Still open in M1:** the eligibility
-  trace and neuromodulator kernels, and an implementation of `Plastic` for
-  `SpikingNet` - the trait exists, nothing implements it yet.
+* **M1 - sparse runtime. LANDED.** `crates/neuro` has the CSC connectome, five
+  kernels (`syn_gather_csc`, `lif_step`, `neuro_trace`, `neuro_elig`,
+  `neuro_learn`), the `DynamicalSystem`/`Plastic` seams with three-factor
+  plasticity implemented, and 12 gates green on a real P40 against the
+  48-thread Cranelift JIT.
+
+  Two of those gates are entries in the definition-of-done control matrix
+  rather than ordinary tests - "plasticity disabled does not learn" and "a
+  zero neuromodulator changes nothing" - and both assert BIT-EXACT no-ops.
+  That is only possible because `eta` and the modulator are premultiplied into
+  one scalar before they reach the kernel, so a zero factor is an exact
+  identity rather than a small number. Two controls the fly needs are
+  therefore already mechanised.
   **Gate:** analytic-LIF closed-form parity for constant input; CPU == GPU on a
   random connectome; bit-exact replay from a restored snapshot; and the gather
   against a host sparse mat-vec. `gradcheck` does not apply to a local rule -
