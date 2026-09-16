@@ -143,6 +143,27 @@ pub struct Neuron {
     pub nerve: String,
     pub soma_side: String,
     pub cell_type: String,
+    /// Membrane surface area in square nanometres, as reconstructed. `0.0`
+    /// where the export does not carry it.
+    ///
+    /// Not a curiosity. A leaky integrate-and-fire membrane obeys
+    /// `C dV/dt = -g_L (V - V_rest) + I`, and BOTH `C` and `g_L` scale with
+    /// membrane area - so the time constant `C/g_L` does not depend on size,
+    /// but the voltage a given synaptic current produces goes as `1/g_L`, and
+    /// therefore as one over the area. A large neuron is genuinely less
+    /// excitable per unit of input than a small one, and a model that gives
+    /// every cell the same threshold has quietly made the largest cells in the
+    /// cord hundreds of times more excitable than the smallest.
+    pub surface_area_nm2: f64,
+    /// Reconstructed volume in cubic nanometres. `0.0` where absent.
+    ///
+    /// Carried because it is what is actually POPULATED: the MANC Codex export
+    /// has a surface-area column and leaves it empty on every row, while the
+    /// volume column is filled. For a neurite the membrane area and the
+    /// enclosed volume differ by a factor of `2/r`, so at roughly constant
+    /// neurite radius the two are proportional and volume serves as the size
+    /// measure. See [`Connectome::size`].
+    pub volume_nm3: f64,
     pub nt: NtPrior,
 }
 
@@ -202,6 +223,72 @@ impl Connectome {
             let sign = self.neurons.get(pre).map_or(0.0, |n| n.nt.sign());
             *w *= sign * scale;
         }
+        csc
+    }
+
+    /// Per-neuron excitability, from reconstructed membrane area.
+    ///
+    /// A leaky integrate-and-fire membrane obeys `C dV/dt = -g_L(V - V_rest) + I`.
+    /// Both the capacitance and the leak conductance scale with membrane area,
+    /// so the time constant `C/g_L` is size-independent but the voltage a given
+    /// current produces goes as `1/g_L`, and therefore as one over the area.
+    /// Giving every cell the same threshold and the same input resistance
+    /// therefore makes the largest cells in the cord hundreds of times more
+    /// excitable than the smallest - which is not a small modelling liberty,
+    /// it is the difference between a network that oscillates and one that
+    /// saturates.
+    ///
+    /// Returned as a factor to MULTIPLY a neuron's input by, normalised so the
+    /// median neuron gets exactly `1.0`: the population keeps whatever overall
+    /// gain the caller chose, and only the spread changes. Clamped to
+    /// `[1/limit, limit]` because reconstruction leaves a long tail of
+    /// fragments and giant cells, and an unclamped factor turns one badly
+    /// reconstructed neuron into a silent one or a runaway one.
+    ///
+    /// A neuron with no recorded area gets the median, not zero: an unknown
+    /// size is an absence of evidence, and silencing the cell would be a
+    /// strong claim made by accident.
+    pub fn excitability(&self, limit: f32) -> Vec<f32> {
+        let sizes = self.sizes();
+        let mut known: Vec<f64> = sizes.iter().copied().filter(|a| *a > 0.0).collect();
+        if known.is_empty() {
+            return vec![1.0; self.neurons.len()];
+        }
+        known.sort_by(f64::total_cmp);
+        let median = known[known.len() / 2];
+        sizes
+            .iter()
+            .map(|s| if *s <= 0.0 { 1.0 } else { ((median / s) as f32).clamp(1.0 / limit, limit) })
+            .collect()
+    }
+
+    /// Every neuron's size, in whatever unit the export actually populated.
+    ///
+    /// Surface area is the quantity the conductance scales with and is
+    /// preferred where it exists. Where it does not - and in the MANC Codex
+    /// export it exists as a COLUMN and is empty on every row, which is the
+    /// failure mode a column-name lookup alone will not catch - volume stands
+    /// in for it. The two are proportional at constant neurite radius, and a
+    /// proportionality constant is absorbed by the median normalisation in
+    /// [`Self::excitability`], so the substitution costs nothing as long as it
+    /// is the same choice for every neuron. Mixed units across neurons would
+    /// be silently wrong, which is why this returns 0 rather than falling back
+    /// per row.
+    pub fn sizes(&self) -> Vec<f64> {
+        let area = self.neurons.iter().any(|n| n.surface_area_nm2 > 0.0);
+        self.neurons
+            .iter()
+            .map(|n| if area { n.surface_area_nm2 } else { n.volume_nm3 })
+            .collect()
+    }
+
+    /// [`Self::signed_csc`], with every neuron's inputs scaled by its own
+    /// [`Self::excitability`].
+    pub fn signed_csc_sized(&self, scale: f32, limit: f32) -> neuro::Csc {
+        let mut csc = self.signed_csc(scale);
+        // Cannot fail: `excitability` returns one factor per neuron by
+        // construction, and the graph has that many columns.
+        let _ = csc.scale_by_post(&self.excitability(limit));
         csc
     }
 

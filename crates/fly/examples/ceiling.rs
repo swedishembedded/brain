@@ -9,7 +9,7 @@
 //! about the same, the limit is the structure, the reward or the body, and no
 //! learning rule was going to fix it.
 use fly::learn::{episode_with, Condition, GainSearch, Lcg, Objective, RewardConfig, Start};
-use fly::{Coupling, Fly, Reference, Timing};
+use fly::{Coupling, Fly, Reference, Timing, Wiring};
 use mujoco::{Model, MuJoCo};
 use neuro::LifParams;
 
@@ -44,7 +44,7 @@ fn main() {
 
     let model = Model::from_xml(&mj, &xml).unwrap();
     let gpu = gpu_core::testgpu::dev(&neuro::KERNELS);
-    let mut f = Fly::new(gpu, &c, model, lif, 3e-2, None, Timing::default(), Coupling::default()).unwrap();
+    let mut f = Fly::new(gpu, &c, model, lif, Wiring { shuffle_seed: None, ..Wiring::default() }, Timing::default(), Coupling::default()).unwrap();
     let mut rng = Lcg::new(0xCE111);
 
     // Plasticity OFF throughout: this measures what the WEIGHTS can do, not

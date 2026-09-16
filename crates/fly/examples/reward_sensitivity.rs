@@ -16,7 +16,7 @@
 //! the paralysed score is its floor: a reward that pays a corpse most of what
 //! it pays a driven animal is measuring the recording.
 use fly::learn::{episode_with, Condition, Lcg, Objective, RewardConfig, Start};
-use fly::{Coupling, Fly, Reference, Timing};
+use fly::{Coupling, Fly, Reference, Timing, Wiring};
 use mujoco::{Model, MuJoCo};
 use neuro::LifParams;
 
@@ -35,7 +35,7 @@ fn main() {
     let reference = Reference::load(env("BRAIN_FLY_REFERENCE")).expect("the reference loads");
     let lif = LifParams { dt_over_tau: 0.2, v_th: 1.0, r: 1.0, refrac_ticks: 1, ..LifParams::default() };
     let gpu = gpu_core::testgpu::dev(&neuro::KERNELS);
-    let mut f = Fly::new(gpu, &c, model, lif, 3e-2, None, Timing::default(), Coupling::default()).unwrap();
+    let mut f = Fly::new(gpu, &c, model, lif, Wiring { shuffle_seed: None, ..Wiring::default() }, Timing::default(), Coupling::default()).unwrap();
 
     let max = 20.0 * 300.0;
     println!("snippet 0, 300-tick budget, a perfect return would be {max:.0}");

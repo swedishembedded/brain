@@ -71,6 +71,40 @@ impl Default for Timing {
 // Raising this is legitimate and costs ~0.8 ms per extra tick. It is not
 // something to raise without re-measuring.
 
+/// How the connectome becomes a network.
+///
+/// A struct rather than three more positional arguments, because two of these
+/// are controls and one is a modelling decision, and a call site that reads
+/// `..., 3e-2, None, Some(10.0), ...` tells a reader none of that.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Wiring {
+    /// Raw synapse count to membrane current. Nothing in the data fixes it.
+    pub weight_scale: f32,
+    /// `Some` runs the structural control on a degree-matched shuffle of the
+    /// connectome instead of the real one.
+    pub shuffle_seed: Option<u64>,
+    /// Scale each neuron's input by its own reconstructed membrane area,
+    /// clamped to this factor either way. See
+    /// [`connectome::Connectome::excitability`] - a uniform threshold makes the
+    /// largest cells in the cord hundreds of times more excitable than the
+    /// smallest, and that is the difference between a network that oscillates
+    /// and one that saturates.
+    ///
+    /// `None` keeps the uniform model, which is the CONTROL for whether the
+    /// normalisation is doing anything.
+    pub size_limit: Option<f32>,
+}
+
+impl Default for Wiring {
+    fn default() -> Self {
+        // 3e-2: swept, not reasoned about. See `tests/loop_closes.rs`.
+        // 10.0: the reconstruction leaves a long tail of fragments and giant
+        // cells, and an unclamped factor turns one badly reconstructed neuron
+        // into a silent one or a runaway one.
+        Wiring { weight_scale: 3e-2, shuffle_seed: None, size_limit: Some(10.0) }
+    }
+}
+
 /// How body state becomes current, and spikes become torque.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Coupling {
@@ -131,6 +165,13 @@ pub struct Fly {
 
     /// Indices of the descending neurons, the command input.
     descending: Vec<u32>,
+    /// Each descending neuron's published cell type, so a command can name one
+    /// rather than address the whole population.
+    descending_types: Vec<String>,
+    /// Per-neuron input scaling, `1.0` everywhere when size normalisation is
+    /// off. Applied to INJECTED current as well as to synaptic weights, or the
+    /// two input paths would end up on different scales.
+    excite: Vec<f32>,
     /// Per-actuator muscle activation, carried across ticks.
     activation: Vec<f32>,
     /// Per-actuator strength, 1.0 for an intact muscle. The body perturbation.
@@ -168,12 +209,7 @@ impl Fly {
         c: &Connectome,
         model: Model,
         lif: LifParams,
-        // `weight_scale`: raw synapse count to membrane current. See
-        // `Connectome::signed_csc`; nothing here fits it.
-        weight_scale: f32,
-        // `shuffle_seed`: `Some` runs the structural control on a
-        // degree-matched shuffle of this connectome instead of the real one.
-        shuffle_seed: Option<u64>,
+        wiring: Wiring,
         timing: Timing,
         coupling: Coupling,
     ) -> Result<Fly, String> {
@@ -196,8 +232,20 @@ impl Fly {
         // Signed and scaled: `Connectome::csc` carries raw synapse counts,
         // which are unsigned, and a network in which every synapse excites has
         // no inhibition and saturates on the first tick.
-        let mut graph = c.signed_csc(weight_scale);
-        if let Some(seed) = shuffle_seed {
+        // Excitability first, shuffle second. A shuffle reassigns SOURCES and
+        // leaves each neuron's own column intact, so the two commute - but
+        // stating the order matters, because a normalisation applied after a
+        // shuffle would be normalising by the shuffled graph's degrees rather
+        // than by the real cell's size.
+        let excite = match wiring.size_limit {
+            Some(limit) => c.excitability(limit),
+            None => vec![1.0; c.neurons.len()],
+        };
+        let mut graph = match wiring.size_limit {
+            Some(limit) => c.signed_csc_sized(wiring.weight_scale, limit),
+            None => c.signed_csc(wiring.weight_scale),
+        };
+        if let Some(seed) = wiring.shuffle_seed {
             // The structural control: same in-degrees, same weights, sources
             // randomly reassigned. Applied AFTER signing so the sign
             // distribution is identical too - shuffling first would also
@@ -207,6 +255,8 @@ impl Fly {
         let net = SpikingNet::new(gpu, &graph, lif)?;
         let n = c.neurons.len();
         let n_desc = descending.len();
+        let descending_types: Vec<String> =
+            descending.iter().map(|i| c.neurons[*i as usize].cell_type.clone()).collect();
         Ok(Fly {
             net,
             map,
@@ -216,6 +266,8 @@ impl Fly {
             timing,
             coupling,
             descending,
+            descending_types,
+            excite,
             activation: vec![0.0; actuator_names.len()],
             muscle: vec![1.0; actuator_names.len()],
             leg_coxa,
@@ -310,6 +362,49 @@ impl Fly {
         }
         self.command.copy_from_slice(values);
         Ok(())
+    }
+
+    /// Drive only the descending neurons whose published cell type is `name`,
+    /// silencing every other one.
+    ///
+    /// Addressing the whole descending population at once, which is the
+    /// obvious thing to do, is a category error: a fly has over a thousand
+    /// descending neurons and they command DIFFERENT behaviours, several of
+    /// which oppose each other. Driving them all together is not "go", it is
+    /// every command at once, and what reaches the muscles is whatever
+    /// survives the collision.
+    ///
+    /// Returns how many neurons were driven. Zero is an error rather than a
+    /// silent no-op, because a command that reached nobody looks exactly like
+    /// one the cord ignored.
+    pub fn drive_cell_type(&mut self, name: &str, current: f32) -> Result<usize, String> {
+        let mut hit = 0;
+        for (slot, ty) in self.descending_types.iter().enumerate() {
+            if ty == name {
+                self.command[slot] = current;
+                hit += 1;
+            } else {
+                self.command[slot] = 0.0;
+            }
+        }
+        if hit == 0 {
+            return Err(format!("no descending neuron has cell type {name:?}"));
+        }
+        Ok(hit)
+    }
+
+    /// Every distinct descending cell type, with how many neurons carry it.
+    pub fn descending_types(&self) -> Vec<(String, usize)> {
+        let mut v: Vec<String> = self.descending_types.clone();
+        v.sort();
+        let mut out: Vec<(String, usize)> = Vec::new();
+        for t in v {
+            match out.last_mut() {
+                Some((last, n)) if *last == t => *n += 1,
+                _ => out.push((t, 1)),
+            }
+        }
+        out
     }
 
     pub fn descending_count(&self) -> usize {
@@ -464,12 +559,12 @@ impl Fly {
             *v = 0.0;
         }
         for (slot, v) in self.descending.iter().zip(&self.command) {
-            self.drive[*slot as usize] = *v;
+            self.drive[*slot as usize] = *v * self.excite[*slot as usize];
         }
         if self.proprioception {
             for s in &self.sensors {
                 let current = self.sensor_current(s, &qpos, &qvel);
-                self.drive[s.neuron as usize] += current;
+                self.drive[s.neuron as usize] += current * self.excite[s.neuron as usize];
             }
         }
 

@@ -214,12 +214,19 @@ fn real_datasets_reproduce_their_published_statistics() {
     };
     let root = std::path::PathBuf::from(root);
 
-    // (dataset, neurons, edges, synapses, motor, descending)
+    // (dataset, neurons, edges, synapses, motor, descending, carries a size)
+    //
+    // The size flag is a FACT ABOUT THE EXPORT, asserted in both directions.
+    // MANC publishes a reconstructed volume per neuron; BANC publishes neither
+    // that nor a surface area. Asserting only the positive case would let a
+    // parser regression turn MANC into BANC unnoticed, and asserting nothing
+    // about BANC would let a future export quietly gain sizes that no run is
+    // using.
     let expect = [
-        ("banc-codex", 158_262usize, 3_037_361usize, 23_556_214u64, 805usize, 1_316usize),
-        ("manc-codex", 23_665, 5_305_638, 30_934_610, 737, 1_328),
+        ("banc-codex", 158_262usize, 3_037_361usize, 23_556_214u64, 805usize, 1_316usize, false),
+        ("manc-codex", 23_665, 5_305_638, 30_934_610, 737, 1_328, true),
     ];
-    for (name, neurons, edges, synapses, motor, descending) in expect {
+    for (name, neurons, edges, synapses, motor, descending, sized) in expect {
         let dir = root.join(name);
         if !dir.join("neurons.csv.gz").is_file() {
             brain_testutil::skip(&format!("{name}: not present under BRAIN_CONNECTOME_DIR"));
@@ -234,6 +241,37 @@ fn real_datasets_reproduce_their_published_statistics() {
         assert_eq!(c.population(|n| n.super_class == "motor").len(), motor, "{name}: motor neurons");
         assert_eq!(c.population(|n| n.super_class == "descending").len(), descending, "{name}: descending neurons");
         assert_eq!(c.coverage.neuron_rejects.len(), 0, "{name}: {:?}", c.coverage.neuron_rejects);
+
+        // Neuron SIZE, which the excitability normalisation depends on, and
+        // which has a failure mode a column-name lookup alone cannot catch:
+        // the MANC Codex export HAS a "Surface area (nm^2)" column and leaves
+        // it empty on every single row. The lookup succeeds, every value parses
+        // as absent, and the normalisation built on it becomes a silent no-op
+        // indistinguishable from one with nothing to correct.
+        let sizes = c.sizes();
+        let known = sizes.iter().filter(|s| **s > 0.0).count();
+        let e = c.excitability(10.0);
+        let mut sorted = e.clone();
+        sorted.sort_by(f32::total_cmp);
+        let (lo, mid, hi) = (sorted[0], sorted[sorted.len() / 2], sorted[sorted.len() - 1]);
+        if sized {
+            assert!(
+                known * 10 > neurons * 9,
+                "{name}: only {known} of {neurons} neurons have a recorded size; \
+                 the size column is present but not populated"
+            );
+            assert!(hi - lo > 1.0, "{name}: excitability spans only {:.3}; the normalisation does nothing", hi - lo);
+            // The median neuron is left alone, which is what makes this a
+            // redistribution rather than a global gain change nobody asked for.
+            assert!((mid - 1.0).abs() < 0.05, "{name}: the median neuron should be unchanged, got {mid}");
+        } else {
+            assert_eq!(known, 0, "{name}: this export gained a size column; a run could now be using it");
+            // The fallback has to be EXACTLY uniform, not merely close: a
+            // dataset with no sizes must behave identically with the
+            // normalisation on and off, or the control stops being a control.
+            assert!(e.iter().all(|x| *x == 1.0), "{name}: no sizes, so every factor must be exactly 1.0");
+        }
+        eprintln!("  excitability {lo:.3} to {hi:.3}, median {mid:.3} ({known} sized)");
 
         let (mean, median, p99, max) = c.in_degree_stats();
         eprintln!("{name}: {}", c.coverage.summary());

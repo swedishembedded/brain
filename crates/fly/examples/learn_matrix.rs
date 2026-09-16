@@ -7,7 +7,7 @@
 //! claim that holds whether or not the learner works.
 use fly::learn::{episode_with, Condition, Lcg, Objective, RewardConfig, Start};
 use fly::Reference;
-use fly::{Coupling, Fly, Timing};
+use fly::{Coupling, Fly, Timing, Wiring};
 use mujoco::{Model, MuJoCo};
 use neuro::{LifParams, PlasticityParams};
 use promote::stats::sign_test;
@@ -73,7 +73,7 @@ fn main() {
         // construction; every other condition runs the real connectome.
         let shuffle = (condition == Condition::ShuffledConnectome).then_some(0x5EEDu64);
         let mut f =
-            Fly::new(gpu, &c, model, lif, 3e-2, shuffle, Timing::default(), Coupling::default()).unwrap();
+            Fly::new(gpu, &c, model, lif, Wiring { shuffle_seed: shuffle, ..Wiring::default() }, Timing::default(), Coupling::default()).unwrap();
         // Clamp sized from the connectome's OWN weight range, not picked. The
         // weights are scaled synapse counts running to tens, so a fixed +/-0.2
         // squashes every one of them to the bound on the first update and

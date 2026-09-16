@@ -125,8 +125,7 @@ impl CreatureBuilder {
             &c,
             model,
             lif,
-            self.weight_scale,
-            self.shuffle,
+            fly::Wiring { weight_scale: self.weight_scale, shuffle_seed: self.shuffle, ..fly::Wiring::default() },
             fly::Timing::default(),
             fly::Coupling::default(),
         )

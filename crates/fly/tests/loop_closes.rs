@@ -7,7 +7,7 @@
 //! runs at rate but whose sensing changes nothing is an open loop wearing a
 //! closed loop's clothes, and it would pass every other test in this repo.
 
-use fly::{Coupling, Fly, Timing};
+use fly::{Coupling, Fly, Timing, Wiring};
 use mujoco::{Model, MuJoCo};
 use neuro::LifParams;
 
@@ -67,7 +67,7 @@ fn build(r: &Rig) -> Fly {
     // exactly 1.0 makes v approach threshold asymptotically and never reach
     // it. That is how an earlier version of this test measured a silent cord.
     let gpu = gpu_core::testgpu::dev(&neuro::KERNELS);
-    Fly::new(gpu, &r.c, model, lif, 3e-2, None, Timing::default(), Coupling::default()).expect("the loop composes")
+    Fly::new(gpu, &r.c, model, lif, Wiring::default(), Timing::default(), Coupling::default()).expect("the loop composes")
 }
 
 #[test]

@@ -30,6 +30,30 @@ impl Csc {
         self.pre.len()
     }
 
+    /// Multiply every edge by a factor belonging to its POSTSYNAPTIC neuron.
+    ///
+    /// The graph is stored by column, so a per-postsynaptic factor is a pure
+    /// row scaling and costs one pass. It is how per-neuron excitability is
+    /// expressed without a per-neuron threshold in the kernel: scaling every
+    /// input a neuron receives by `k` is exactly equivalent to dividing its
+    /// threshold by `k`, and it keeps `lif_step`'s uniform-parameter form.
+    ///
+    /// A caller applying this must scale any EXTERNAL current it injects into
+    /// that neuron by the same factor, or the two input paths end up on
+    /// different scales.
+    pub fn scale_by_post(&mut self, factor: &[f32]) -> Result<(), String> {
+        if factor.len() != self.n as usize {
+            return Err(format!("scale_by_post needs one factor per neuron: {} for {}", factor.len(), self.n));
+        }
+        for (post, f) in factor.iter().enumerate() {
+            let (a, b) = (self.indptr[post] as usize, self.indptr[post + 1] as usize);
+            for w in &mut self.w[a..b] {
+                *w *= f;
+            }
+        }
+        Ok(())
+    }
+
     /// Build from an edge list of `(pre, post, weight)`, counting-sorted into
     /// columns. Edge order within a column follows the input order, which is
     /// what makes the fp32 accumulation in `syn_gather_csc` reproducible:

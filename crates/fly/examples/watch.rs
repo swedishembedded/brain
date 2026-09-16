@@ -15,7 +15,7 @@
 //!
 //! Keys: W/S raise and lower the descending command, A/D bias it left and
 //! right, P lesions the proprioceptive channel, R resets, Esc quits.
-use fly::{Coupling, Fly, Timing};
+use fly::{Coupling, Fly, Timing, Wiring};
 use mujoco::{Model, MuJoCo, Renderer};
 use neuro::LifParams;
 use wm_display::keymap::{Key, KeySet, UxKey};
@@ -45,7 +45,7 @@ fn main() {
     let model = Model::from_xml(&mj, env("BRAIN_FLYBODY_XML")).expect("the body loads");
     let lif = LifParams { dt_over_tau: 0.2, v_th: 1.0, r: 1.0, refrac_ticks: 1, ..LifParams::default() };
     let gpu = gpu_core::testgpu::dev(&neuro::KERNELS);
-    let mut fly = Fly::new(gpu, &c, model, lif, 3e-2, None, Timing::default(), Coupling::default())
+    let mut fly = Fly::new(gpu, &c, model, lif, Wiring { shuffle_seed: None, ..Wiring::default() }, Timing::default(), Coupling::default())
         .expect("the connectome attaches to the body");
     println!("{} neurons, {}", c.neurons.len(), fly.motor_map().summary());
 
