@@ -463,6 +463,18 @@ it against the scan+sort reference at `max|d| == 0`.
   heavy-tailed. A shuffle preserving both degree sequences is an edge-swap walk
   and a much more expensive object.
 
+  **The activity confound is NOT resolved, and an earlier note here said it
+  was.** Normalising distance by spike count reproduces the sign tests exactly
+  (11/12, 11/12, 12/12), but that is arithmetic rather than corroboration:
+  Learning's mean distance is positive and every control's is negative, and
+  dividing both by a positive spike count cannot reorder them. The normalised
+  test is therefore guaranteed to agree and is not independent evidence. What
+  the normalised MEANS do show is still worth having - Learning moves +0.006 cm
+  per million spikes while the controls move -0.024 to -0.049, so per unit of
+  activity the controls go BACKWARDS and "Learning simply fires more" does not
+  explain the direction. Actually controlling for activity needs conditions
+  matched on firing rate, which this experiment does not yet do.
+
   **Retention is mechanised and gated.** After training moves ~934k weights,
   freezing holds them bit-identically and two frozen episodes are
   byte-identical in distance and spike count. Mutation-verified: leaving the

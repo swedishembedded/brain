@@ -98,11 +98,23 @@ fn main() {
         println!("  Learning vs {cond:?}: {}/{} episodes better, p = {:.4}", t.k, t.n, t.p_value);
     }
 
-    println!("\n--- the same, normalised by spike count (cm per million spikes) ---");
-    // Print the normalised means too. An identical sign-test result before and
-    // after normalising is the expected outcome when the distance gap dominates
-    // the activity gap, but it is also what a normalisation that silently did
-    // nothing would produce, so show the numbers rather than trusting the test.
+    println!("\n--- normalised by spike count (cm per million spikes) ---");
+    // READ THE MEANS, NOT THE SIGN TEST BELOW.
+    //
+    // The sign test on this metric is NOT independent evidence and must not be
+    // reported as a second, confirming result. Learning's mean distance is
+    // positive and every control's is negative, and dividing both by a
+    // positive spike count cannot change that ordering - so the normalised
+    // test is guaranteed to reproduce the raw one whatever the activity
+    // difference was. Identical k/n here is arithmetic, not corroboration.
+    //
+    // The MEANS do carry information, because they are not a ratio of the same
+    // comparison: measured, Learning moves +0.006 cm per million spikes while
+    // the controls move between -0.024 and -0.049. Per unit of activity the
+    // controls go BACKWARDS, so "Learning simply fires more" does not explain
+    // the direction. It does not fully control for activity either - that
+    // needs conditions matched on firing rate, which this experiment does not
+    // yet do.
     for (cond, d, ps) in &results {
         let md = d.iter().sum::<f64>() / d.len() as f64;
         let mp = ps.iter().sum::<f64>() / ps.len() as f64;
