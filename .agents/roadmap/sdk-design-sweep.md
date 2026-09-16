@@ -151,41 +151,55 @@ public functions (`flux2::caps::bind_variant`, `flux2::caps::check_license`,
 (`flux2_cli.rs` and the SDK) - `flux2::caps` and `resident_flux2.rs` never
 called it, so a `.gguf` DiT served over D-Bus/HTTP missed the
 fp32-to-packed-int8 correction the CLI and SDK both apply. **Fixed directly
-in M10a** (both now call it - `flux2::caps` at full fidelity, `resident_flux2.rs`
-at reduced fidelity per that milestone's own note). The underlying
-duplication - four sites independently re-deriving the same decision
-sequence - is not yet resolved; see M10-full below.
+in M10a**, then **fully unified in M10-full**: `flux2::build::{resolve,
+build_resolved}` (`crates/flux2/src/build.rs`) is now the ONE
+variant/license/config/precision decision every site composes, via a
+`VariantSource` enum (`Assembly`/`Sniff`/`Bound`) covering the three
+legitimate ways a caller already knows or has to determine the variant.
 
-**Recommended extraction** (M10-full): a new `flux2::pipeline::build_resolved`
-(or a small `flux2::build` module), living IN the `flux2` crate itself, taking
-a variant-source enum covering the three legitimate resolution policies
-(`FromAssembly(&Assembly)` / `SniffDit { requested }` / `Bound(&str)`) plus
-token ceilings/adapters/`max_batch` as parameters (these stay call-site-owned;
-pushing them down would re-create the SDK's fixed-1024² limitation
-everywhere), composing all four existing decision functions internally, and
-returning `(Pipeline, Flux2Config, Precision, bound_variant)`.
+- `flux2::caps::Flux2Action::run` (text2image/edit) calls `resolve` (not
+  `build_resolved`) with `VariantSource::Sniff` - it needs the resolved
+  variant/precision as its hot-pipeline cache KEY before deciding whether a
+  rebuild is even necessary, so the actual `Pipeline::build_sized` call
+  stays local to the cache-hit/miss branch.
+- `resident_flux2.rs::activate` calls `build_resolved` with
+  `VariantSource::Bound` inside its existing `on_device` scope - the
+  `.gguf` correction here is still reduced-fidelity (can coerce, never
+  reject an explicit fp32 misuse), because the `InstanceKey` string already
+  discarded whether the request was explicit before `activate` ever runs;
+  documented inline, not silently accepted.
+- `flux2_cli.rs`'s `generate` command calls `resolve` with
+  `VariantSource::Assembly` - it still computes its own tiling/reference-image
+  token ceilings before building, so the `Pipeline::build_sized` call stays
+  local there too.
+- `crates/sdk/src/pipeline.rs` calls `build_resolved` with
+  `VariantSource::Assembly` - and ALSO keeps one line of its own:
+  `check_license` is still called explicitly first, purely so the SDK can
+  still map that one failure to its typed `Error::LicenseRequired` (from
+  M6) - `build_resolved`'s own return type is a flat `Result<_, String>`
+  shared by every flux2 caller, so it cannot carry that distinction on its
+  own. Redundant but harmless (a pure, idempotent check); `build_resolved`
+  still re-derives and re-checks the SAME variant internally, so the
+  config/precision/build logic converges even though this one check is
+  still named twice.
 
-**Where NOT to put it, and why:**
-- Not `crates/loader` - architecture-agnostic by design; would gain a
-  `flux2` dependency.
-- Not re-exported from `crates/sdk` into `crates/cli` - `crates/cli` has no
-  dependency on `crates/sdk` today, and the SDK bundles daemon-hostile
-  behavior (process-global `apply_device`, network download,
-  flux2-then-s3dit auto-detection) a resident must never do. `crates/sdk`
-  should instead become a CONSUMER of `build_resolved`, the thinnest of the
-  four, same as everyone else.
-- Not a new residency helper - `resident_flux2.rs`'s `estimate`-before-build,
-  device-scoped construction (`on_device`), and incremental/cacheable build
-  (`build_adapted_with_cache`/`build_from_dit_cache`, no s3dit equivalent
-  exists) are genuinely residency-specific and stay exactly where they are;
-  only the ~8 duplicated decision lines above the build call move.
+**Deliberately NOT touched**, and why: `flux2::caps::train_action`
+(`lora_train`) and `flux2_cli.rs`'s own `lora_train` subcommand each run a
+structurally DIFFERENT sequence (`bind_variant`/`check_license`/
+`Flux2Config::from_name`, no `Pipeline::build_sized`, no precision decision
+at all - training uses `crate::finetune::run` instead) - forcing them
+through `build::resolve`, which requires a `Precision` argument that doesn't
+apply to training, would be an awkward fit for a sequence that was never
+part of the four inference-construction sites this item tracked. Also
+untouched: `ZImageProvider::load()`'s `Paths::from_env` (the last env-only
+construction path for s3dit) - out of scope, s3dit needed no extraction (see
+above).
 
-Safest landing order for the still-open `build_resolved` extraction:
-`flux2::caps`/`resident_flux2.rs` first (they have the least existing
-decision logic to reconcile, now that M10a already wired in the missing
-precision call by hand), then `flux2_cli.rs`, then `crates/sdk` - each swap
-verified against `cargo test -p brain-flux2`/the relevant `brain-cli` tests
-before moving to the next site, same discipline M10a used.
+Verified with `cargo test -p brain-flux2` (101 passed), the full
+`cargo test -p brain-cli` (360 + 3 + 5 + 7 + 3 + 2 + 2 + 4 + 4 + 12 + 13 + 1
+passed across every test binary, 0 failed), `cargo test -p brain --features
+full` (26 passed), `check/sdk-features`, and a full `cargo build --workspace`
+including the `samples/imagegen/*` samples that link `crates/sdk` directly.
 
 ## Milestone checklist
 
@@ -325,20 +339,21 @@ before moving to the next site, same discipline M10a used.
       `brain-cli` resident_flux2 tests (2 passed) show no regression.
       **`build_resolved` itself - the actual "one implementation" extraction
       unifying all four flux2 sites' variant/license/config/precision
-      decision into one function - is still open**, tracked as its own item
-      below; fixing the live bug first, safely, was worth doing before
+      decision into one function - landed separately as M10-full** (same
+      session); fixing the live bug first, safely, was worth doing before
       committing to that larger refactor's shape.
-- [ ] **M10-full** - the actual `flux2::pipeline::build_resolved` extraction
-      (a variant-source enum covering `FromAssembly`/`SniffDit`/`Bound`,
-      composing `bind_variant`/`check_license`/`Flux2Config::from_name`/
-      `effective_dit_precision` in ONE place) so all four flux2 sites
-      converge on one implementation instead of four independently
-      maintained copies of the same ~8 lines. M10a fixed the one bug that
-      duplication was hiding; this is the remaining "one implementation"
-      work - genuinely a separate, larger design commitment (four call
-      sites with different inputs on hand, per the sweep's own duplication
-      map above), not a small follow-up.
-- [ ] **Phase 2** - new pipelines, in the priority order above: Forecast, Text, Embedding, ASR, then the rest. Each gets its own sub-roadmap section here (or its own file, linked from here) when it starts, written against the full `sdk-design.md` checklist from day one - including an end-to-end test and its CLI migrated onto it in the SAME change, learning from M10 rather than repeating the `flux2_cli.rs` gap a second time.
+- [x] **M10-full** - `flux2::build::{resolve, build_resolved}`
+      (`crates/flux2/src/build.rs`, new module) unifies all four sites onto
+      one variant/license/config/precision decision via a `VariantSource`
+      enum (`Assembly`/`Sniff`/`Bound`). Full detail, including the one
+      honest compromise that remains (the SDK still calls `check_license`
+      once more itself, purely to keep its typed `Error::LicenseRequired`)
+      and what was deliberately left untouched (`lora_train`'s structurally
+      different sequence, s3dit's already-unified path), is in the
+      duplication section above. 4 new unit tests in `build.rs` plus full
+      regression runs across `brain-flux2`/`brain-cli`/`brain` (sdk) and a
+      whole-workspace build - see that section for exact counts.
+- [ ] **Phase 2** - new pipelines, in the priority order above: Forecast, Text, Embedding, ASR, then the rest. Each gets its own sub-roadmap section here (or its own file, linked from here) when it starts, written against the full `sdk-design.md` checklist from day one - including an end-to-end test and its CLI migrated onto it in the SAME change, learning from M10 rather than repeating the `flux2_cli.rs` gap a second time. Design each pipeline's progress/cancellation surface (rule 8) toward the `run.start()/subscribe()/cancel()/result()` shape `.agents/roadmap/orchestration-hsm.md` proposes, rather than reinventing M5's synchronous `generate_with_progress(cancel, on_progress)` a second time - M5's shape stays the right SIMPLE default, but a new pipeline's ADVANCED tier should point at where this is heading.
 
 Findings 8, 11, 14, 18-20, 23-24 are real but not yet milestoned - pick them
 up opportunistically when touching the same file for another reason, or spin

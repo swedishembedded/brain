@@ -296,15 +296,6 @@ impl ResidentModel for Flux2Resident {
         let mut it = key.config.splitn(6, ':');
         let variant = it.next().ok_or("flux2: bad instance key")?;
         let precision = flux2::Precision::from_name(it.next().ok_or("flux2: bad instance key")?)?;
-        // A `.gguf` DiT executes through FLUX.2's packed int8 path regardless
-        // of what was requested - `brain flux2 generate`/`brain::ImagePipeline`
-        // already apply this correction, this resident path did not. The
-        // `InstanceKey` string already collapsed "explicit fp32" and
-        // "defaulted to fp32" into the same value (`instance_key` below), so
-        // this can only coerce, never reject an explicit misuse the way the
-        // CLI/SDK paths do - but a served `.gguf` checkpoint must never be
-        // BUILT at the wrong precision either way, which is the actual bug.
-        let precision = flux2::pipeline::effective_dit_precision(&self.paths.dit, precision, false)?;
         let wh = it.next().ok_or("flux2: bad instance key")?;
         let nref: u32 = it.next().and_then(|s| s.parse().ok()).ok_or("flux2: bad instance key")?;
         let lora_scale: f32 = it.next().and_then(|s| s.parse().ok()).unwrap_or(1.0);
@@ -320,13 +311,22 @@ impl ResidentModel for Flux2Resident {
             .collect();
         let (w, h) = wh.split_once('x').ok_or("flux2: bad instance key")?;
         let (w, h): (u32, u32) = (w.parse().map_err(|_| "flux2: bad width")?, h.parse().map_err(|_| "flux2: bad height")?);
-        flux2::caps::check_license(&self.variant)?;
-        let cfg = flux2::Flux2Config::from_name(variant)?;
         let n_gen = (h / 16) * (w / 16);
-        // Place the pipeline on the assigned card (scoped registry selection;
-        // the TE card is flux2's own BRAIN_FLUX2_TE_DEVICE and left as configured).
-        let pipe = crate::resident_llm::on_device(device, || {
-            flux2::Pipeline::build_sized(&cfg, &self.paths, n_gen + nref, n_gen, &adapters, precision, max_batch())
+        // `flux2::build_resolved` runs the license/config/precision decision
+        // AND the build - `variant` here is already `self.variant` (bound at
+        // construction, never re-derived per request, see `instance_key`'s
+        // own doc), so `VariantSource::Bound` skips `bind_variant`'s sniff.
+        // This is also where the `.gguf` precision correction
+        // `brain flux2 generate`/`brain::ImagePipeline` already apply
+        // happens for this resident path - at REDUCED fidelity, since the
+        // `InstanceKey` string already collapsed "explicit fp32" and
+        // "defaulted to fp32" into one value before this ever runs, so it
+        // can only coerce (`precision_was_explicit: false`), never reject an
+        // explicit misuse the way the CLI/SDK paths do. Place the pipeline on
+        // the assigned card (scoped registry selection; the TE card is
+        // flux2's own BRAIN_FLUX2_TE_DEVICE and left as configured).
+        let (pipe, ..) = crate::resident_llm::on_device(device, || {
+            flux2::build_resolved(flux2::VariantSource::Bound(variant), &self.paths, n_gen + nref, n_gen, &adapters, precision, false, max_batch())
         })??;
         Ok(Box::new(Flux2Instance { pipe: Some(pipe), paths: clone_paths(&self.paths), variant: self.variant.clone() }))
     }

@@ -23,6 +23,7 @@
 //! instantiation of the same op sequence, gated against the host reference
 //! above; `finetune` selects between them explicitly.
 
+pub mod build;
 pub mod caps;
 pub mod config;
 pub mod devgrad;
@@ -40,6 +41,7 @@ pub mod refcond;
 pub mod spec;
 pub mod weights;
 
+pub use build::{build_resolved, resolve, VariantSource};
 pub use config::Flux2Config;
 pub use import::{dit_config_from_shapes, import_bfl, import_diffusers, sniff_dit_size, DitSize, Tensors};
 pub use mask::Mask;

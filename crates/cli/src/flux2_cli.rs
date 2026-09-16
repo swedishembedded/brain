@@ -601,14 +601,18 @@ fn generate(args: &[String]) -> Result<(), String> {
     // outcome prints and exits here - neither is recoverable within this
     // command, and resolve() never silently picks.
     let (paths, assembly) = resolve_flux2(dit.as_deref(), vae.as_deref(), text_encoder.as_deref(), tokenizer.as_deref(), variant_explicit.then_some(variant_name.as_str()))?;
-    variant_name = assembly.variant.clone().ok_or("flux2: resolved assembly has no variant")?;
-    flux2::caps::check_license(&variant_name)?; // 9B = FLUX Non-Commercial license
-    let variant = Flux2Config::from_name(&variant_name)?;
-    // Q8_0 GGUF is not an fp32 checkpoint with an optional output tier: the
-    // FLUX.2 constructor consumes it through its packed DP4A representation.
-    // Omitted `--precision` therefore follows the source; an explicit fp32
-    // request is rejected rather than silently changing it.
-    precision = flux2::pipeline::effective_dit_precision(&paths.dit, precision, precision_was_explicit)?;
+    // `flux2::resolve` (not `build_resolved`): this run still has to compute
+    // its own tiling/reference-image token ceilings before it can build (see
+    // `n_fwd`/`n_ref_fwd` below), so the actual `Pipeline::build_sized` call
+    // stays here rather than moving into the shared function. `check_license`
+    // (9B = FLUX Non-Commercial license) and the `.gguf`-vs-fp32 precision
+    // correction (Q8_0 GGUF is not an fp32 checkpoint with an optional output
+    // tier: the FLUX.2 constructor consumes it through its packed DP4A
+    // representation; an explicit `--precision fp32` is rejected rather than
+    // silently changed) both run inside it now, same as every other site.
+    let (variant, resolved_precision, resolved_variant_name) = flux2::resolve(flux2::VariantSource::Assembly(&assembly), &paths, precision, precision_was_explicit)?;
+    variant_name = resolved_variant_name;
+    precision = resolved_precision;
     // Resolve the sampler the variant actually runs, and say so. BFL ships
     // the distilled klein models as fixed-param checkpoints (4 steps,
     // guidance 1.0, no CFG): a caller's --steps is ignored there unless

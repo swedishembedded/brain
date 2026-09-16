@@ -535,14 +535,21 @@ impl ImagePipelineBuilder {
         match resolve_arch(&overrides)? {
             ResolvedArch::Flux2(assembly) => {
                 let paths = flux2::Paths::from_assembly(&assembly).map_err(Error::Backend)?;
+                // Checked here, ahead of `build_resolved`, ONLY so this can
+                // still map to the typed `Error::LicenseRequired` a caller
+                // may want to react to differently -- `build_resolved`
+                // itself returns a flat `Result<_, String>` shared by every
+                // flux2 call site, so it cannot carry that distinction on
+                // its own. Redundant but harmless when it passes (a pure
+                // check, no state beyond a once-only acceptance notice);
+                // `build_resolved` still re-derives and re-checks the SAME
+                // variant internally, converging config/precision/build with
+                // every other site rather than only the license check.
                 let variant_name = assembly.variant.clone().ok_or_else(|| Error::Backend(format!("flux2: resolved assembly {:?} has no variant", assembly.id)))?;
                 flux2::caps::check_license(&variant_name).map_err(Error::LicenseRequired)?;
-                let cfg = flux2::Flux2Config::from_name(&variant_name).map_err(Error::Backend)?;
-
-                let precision = flux2::pipeline::effective_dit_precision(&paths.dit, dtype, false).map_err(Error::Backend)?;
 
                 let n = default_forward_tokens();
-                let pipe = flux2::Pipeline::build_sized(&cfg, &paths, n, n, &[], precision, 1).map_err(Error::Backend)?;
+                let (pipe, cfg, precision, _variant) = flux2::build_resolved(flux2::VariantSource::Assembly(&assembly), &paths, n, n, &[], dtype, false, 1).map_err(Error::Backend)?;
 
                 Ok(ImagePipeline { backend: Backend::Flux2(Box::new(Flux2Backend { pipe, cfg, paths, precision, adapter: None })) })
             }

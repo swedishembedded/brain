@@ -19,7 +19,7 @@ use capability::{ActionSpec, BlobSpec, Manifest, Media, ParamSpec, ParamType};
 use serde_json::json;
 
 use crate::config::Flux2Config;
-use crate::pipeline::{effective_dit_precision, GenOpts, Paths, Pipeline};
+use crate::pipeline::{GenOpts, Paths, Pipeline};
 
 /// The model id used on the CLI (`brain do flux2-klein …`) and the event API.
 pub const MODEL: &str = "brain/flux2-klein";
@@ -413,17 +413,17 @@ impl Action for Flux2Action {
                 // size, not the request's claim - see `bind_variant`).
                 let mut p = gen_params_from(inv)?;
                 let paths = &self.paths;
-                let variant = bind_variant(&paths.dit, &p.variant)?;
-                check_license(&variant)?;
-                let cfg = Flux2Config::from_name(&variant)?;
-                // A `.gguf` DiT executes through FLUX.2's packed int8 path
-                // regardless of what was requested (`effective_dit_precision`'s
-                // own doc) - `brain flux2 generate` and `brain::ImagePipeline`
-                // already apply this; this served path did not, so a request
-                // that left `precision` at its "fp32" default against a served
-                // `.gguf` checkpoint built at the WRONG precision.
+                // `resolve` (not `build_resolved`): the variant/precision are
+                // the hot-cache KEY below, needed before deciding whether a
+                // rebuild is even necessary - see that function's own doc for
+                // why calling the full resolve-and-build here would defeat
+                // the cache. This is also where the precision correction a
+                // served `.gguf` DiT needs happens (`brain flux2 generate`/
+                // `brain::ImagePipeline` already apply it; this path once
+                // didn't, and built at the WRONG precision as a result).
                 let precision_was_explicit = inv.params.get("precision").is_some();
-                p.precision = effective_dit_precision(&paths.dit, p.precision, precision_was_explicit)?;
+                let (cfg, precision, variant) = crate::build::resolve(crate::build::VariantSource::Sniff(&p.variant), paths, p.precision, precision_was_explicit)?;
+                p.precision = precision;
                 let refs = refs_from(inv, self.name == "edit")?;
                 let n_gen = (p.opts.height / 16) * (p.opts.width / 16);
                 let n_ref = ref_tokens(&refs, &p.opts);
