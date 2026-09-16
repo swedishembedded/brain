@@ -39,6 +39,34 @@ pub struct Episode {
     pub terminated: bool,
     /// The snippet ran out with the body still tracking it. The good ending.
     pub reached_end: bool,
+    /// What the legs did, scored, under [`Objective::Walk`]. `None` under the
+    /// other objectives, which do not collect a trace.
+    pub gait: Option<crate::gait::Gait>,
+    /// Straight-line distance from where the episode started, in the model's
+    /// own length units.
+    ///
+    /// Distinct from `distance`, which is displacement along world x and can
+    /// be earned by a body that is being pushed. This cannot be earned by
+    /// jitter: a fly shaking in place travels no net distance however fast its
+    /// instantaneous speed reads, which is a confusion this crate has already
+    /// measured (the two differ by more than tenfold on a walking run).
+    pub net: f64,
+}
+
+impl Episode {
+    /// What the episode is WORTH on its objective.
+    ///
+    /// For [`Objective::Walk`] that is net travel multiplied by the gait
+    /// score, and the product is the whole design: travel alone is earned by a
+    /// single coordinated lunge, rhythm alone is earned by a fly running on
+    /// the spot, and only a sustained periodic tripod that actually goes
+    /// somewhere earns both. For the others it is the accumulated reward.
+    pub fn score(&self) -> f64 {
+        match self.gait {
+            Some(g) => self.net * g.score(),
+            None => self.reward,
+        }
+    }
 }
 
 /// What the creature is being asked to do.
@@ -73,6 +101,34 @@ pub enum Objective {
         /// lengths, which is [`RewardConfig::default`]'s value here too.
         terminal_com_dist: f64,
     },
+    /// WALK: go somewhere, on a sustained alternating tripod.
+    ///
+    /// The objective the other two are not. Displacement is earned by one
+    /// lunge - measured, a direct search under it suppressed the cord's own
+    /// circuitry and wired sensory input straight to the muscles, which is a
+    /// reflex and is what that reward asks for. Imitation is worse here and
+    /// the measurement is unambiguous: against a reference that walks away
+    /// whatever the body does, every motion is velocity error, and a
+    /// PARALYSED fly scored 98.7% of the best driven score while driving the
+    /// animal harder made the score monotonically worse.
+    ///
+    /// So this scores the two things a gait is, multiplied: net travel from
+    /// where the episode began, times `gait::analyse`'s score over the whole
+    /// leg trace. Neither factor alone is a gait and the product cannot be
+    /// earned by a corpse, by a lunge, or by running on the spot.
+    ///
+    /// The PER-TICK reward stays dense - forward progress since the last tick
+    /// - because a three-factor plasticity rule needs a signal every tick and
+    /// a rhythm is a property of a window, not of a moment. The product is
+    /// what a SEARCH sees (`Episode::score`). That split is deliberate and is
+    /// the honest way to have both.
+    Walk {
+        /// End the episode once the body's height drops below this, in the
+        /// model's own length units, measured from where it started. A fly
+        /// that has fallen over is not walking, and the ticks it spends on the
+        /// floor would otherwise dilute the rhythm it is being scored on.
+        terminal_fall: f64,
+    },
 }
 
 impl Objective {
@@ -80,6 +136,15 @@ impl Objective {
     ///
     /// A constructor rather than a literal, so the termination radius is not a
     /// number every call site has to know and half of them get wrong.
+    /// Walk, with a fall threshold that clears the standing pose.
+    ///
+    /// A fly stands about a tenth of a centimetre up and the floor is at
+    /// -0.132, so half a body length below the start is well past stumbling
+    /// and well short of tripping the threshold on a normal stride.
+    pub fn walk() -> Objective {
+        Objective::Walk { terminal_fall: 0.125 }
+    }
+
     pub fn imitate(start: Start) -> Objective {
         Objective::Imitate { start, reward: ImitationReward::default(), terminal_com_dist: 0.33 }
     }
@@ -92,7 +157,7 @@ impl Objective {
     /// caller that divides by it gets 0% instead of a made-up percentage.
     pub fn max_per_tick(&self) -> f64 {
         match self {
-            Objective::Displacement => f64::INFINITY,
+            Objective::Displacement | Objective::Walk { .. } => f64::INFINITY,
             Objective::Imitate { reward, .. } => reward.max(),
         }
     }
@@ -207,6 +272,20 @@ pub fn episode_with(
     reference: Option<&Reference>,
     rng: &mut Lcg,
 ) -> Result<Episode, String> {
+    // An episode too short to hold a rhythm scores zero on a gait objective
+    // however well the animal walks, and zero is indistinguishable from
+    // failure. Refused rather than returned.
+    if let Objective::Walk { .. } = cfg.objective {
+        let seconds = cfg.ticks as f64 * crate::CONTROL_PERIOD;
+        if seconds < crate::gait::MIN_SECONDS {
+            return Err(format!(
+                "a walking episode of {} ticks is {seconds:.2} s, and a gait cannot be scored below \
+                 {:.2} s - it would score zero whatever the animal did",
+                cfg.ticks,
+                crate::gait::MIN_SECONDS
+            ));
+        }
+    }
     fly.reset();
     let cmd = vec![cfg.command; fly.descending_count()];
     fly.set_descending(&cmd)?;
@@ -247,8 +326,12 @@ pub fn episode_with(
     }
 
     let start = fly.qpos();
+    let floor = start.get(2).copied().unwrap_or(0.0);
     let mut baseline = 0.0f64;
     let mut ep = Episode::default();
+    // One sample per control tick, which is the rate `gait::analyse` expects.
+    let mut trace = matches!(cfg.objective, Objective::Walk { .. })
+        .then(|| crate::gait::Trace::new(crate::CONTROL_PERIOD));
     // Pre-drawn so that ShuffledReward delivers the SAME distribution as
     // Learning, just uncorrelated with what the fly did.
     let mut deltas: Vec<f32> = Vec::with_capacity(cfg.ticks as usize);
@@ -261,6 +344,20 @@ pub fn episode_with(
 
         let reward = match cfg.objective {
             Objective::Displacement => {
+                let x = fly.qpos().first().copied().unwrap_or(0.0);
+                let r = x - last_x;
+                last_x = x;
+                r
+            }
+            Objective::Walk { terminal_fall } => {
+                // The legs, every tick, for the rhythm half of the score.
+                if let Some(t) = trace.as_mut() {
+                    t.push(fly.leg_swing());
+                }
+                if fly.qpos().get(2).copied().unwrap_or(0.0) < floor - terminal_fall {
+                    ep.terminated = true;
+                    break;
+                }
                 let x = fly.qpos().first().copied().unwrap_or(0.0);
                 let r = x - last_x;
                 last_x = x;
@@ -315,6 +412,15 @@ pub fn episode_with(
 
     let end = fly.qpos();
     ep.distance = end.first().copied().unwrap_or(0.0) - start.first().copied().unwrap_or(0.0);
+    let (dx, dy) = (
+        end.first().copied().unwrap_or(0.0) - start.first().copied().unwrap_or(0.0),
+        end.get(1).copied().unwrap_or(0.0) - start.get(1).copied().unwrap_or(0.0),
+    );
+    ep.net = (dx * dx + dy * dy).sqrt();
+    // A trace too short to hold a cycle is refused by `analyse` rather than
+    // guessed at, and a `None` gait scores zero - which is the right answer
+    // for an episode that fell over in the first tenth of a second.
+    ep.gait = trace.as_ref().and_then(crate::gait::analyse);
     Ok(ep)
 }
 

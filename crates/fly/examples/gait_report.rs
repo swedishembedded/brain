@@ -70,7 +70,7 @@ fn main() {
     let cell = std::env::var("CELL").unwrap_or_else(|_| "DNg100".to_string());
 
     header();
-    row("SCRIPTED 12 Hz", &scripted_tripod(12.0, CONTROL_DT, 500), None);
+    row("SCRIPTED 12 Hz", &scripted_tripod(12.0, CONTROL_DT, 1000), None);
 
     for size_limit in [None, Some(10.0f32)] {
         let tag = if size_limit.is_some() { "sized" } else { "uniform" };

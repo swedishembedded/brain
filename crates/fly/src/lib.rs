@@ -603,6 +603,12 @@ impl Fly {
     /// or a motor-map polarity instead would perturb the CONTROLLER and then
     /// call the recovery re-adaptation, which would be a different claim
     /// wearing this one's name.
+    /// How many actuators the body has, so a caller can lesion all of them
+    /// without knowing the model.
+    pub fn actuator_count(&self) -> usize {
+        self.muscle.len()
+    }
+
     pub fn set_muscle_strength(&mut self, actuator: usize, strength: f32) -> Result<(), String> {
         let n = self.muscle.len();
         if actuator >= n {

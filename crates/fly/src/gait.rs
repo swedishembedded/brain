@@ -167,25 +167,37 @@ pub fn scripted_tripod(hz: f64, dt: f64, ticks: usize) -> Trace {
     t
 }
 
-pub fn analyse(t: &Trace) -> Option<Gait> {
-    const LOW_HZ: f64 = 2.0;
-    const HIGH_HZ: f64 = 40.0;
-    /// Fraction of the trace discarded before analysis.
-    ///
-    /// A run starts from silence and the drive ramps in over the first
-    /// fraction of a second, which puts a large one-sided transient at the
-    /// very bottom of the spectrum. Subtracting the mean does not remove it -
-    /// a ramp is not a constant - so the dominant frequency pins to the lowest
-    /// band edge and reports a rhythm that is really the onset. Discarding the
-    /// ramp is what makes the answer about the steady state.
-    const SETTLE: f64 = 0.25;
+/// The shortest trace [`analyse`] will score, in seconds.
+///
+/// It discards the first quarter as onset transient and then needs two periods
+/// of the lowest frequency it looks for, so the whole trace has to be a third
+/// longer than that. Public because an EPISODE shorter than this scores zero
+/// on a gait objective no matter how well the animal walks, which is a silent
+/// failure worth refusing up front.
+pub const MIN_SECONDS: f64 = MIN_PERIODS / (LOW_HZ * (1.0 - SETTLE));
+/// Cycles of the slowest rhythm the analysis looks for that a trace has to
+/// contain, the lowest frequency it looks for, and the fraction of onset it
+/// throws away first. Named here because [`MIN_SECONDS`] is derived from them
+/// and `analyse` asserts they are the same numbers it uses.
+const MIN_PERIODS: f64 = 2.0;
+const LOW_HZ: f64 = 2.0;
+const SETTLE: f64 = 0.25;
 
+pub fn analyse(t: &Trace) -> Option<Gait> {
+    const HIGH_HZ: f64 = 40.0;
+    // `SETTLE` is the fraction of the trace discarded before analysis. A run
+    // starts from silence and the drive ramps in over the first fraction of a
+    // second, which puts a large one-sided transient at the very bottom of the
+    // spectrum. Subtracting the mean does not remove it - a ramp is not a
+    // constant - so the dominant frequency pins to the lowest band edge and
+    // reports a rhythm that is really the onset. Discarding the ramp is what
+    // makes the answer about the steady state.
     if t.is_empty() {
         return None;
     }
     let skip = (t.len() as f64 * SETTLE) as usize;
     let kept = t.len() - skip;
-    if (kept as f64 * t.dt) < 2.0 / LOW_HZ {
+    if (kept as f64 * t.dt) < MIN_PERIODS / LOW_HZ {
         return None;
     }
     // Each triangle of legs, averaged. `flybody::LEGS` fixes which is which.
