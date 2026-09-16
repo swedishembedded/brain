@@ -1164,6 +1164,7 @@ dependencies = [
  "brain-neuro",
  "brain-promote",
  "brain-testutil",
+ "brain-wm-display",
 ]
 
 [[package]]

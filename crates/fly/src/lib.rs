@@ -247,6 +247,16 @@ impl Fly {
     pub fn motor_map(&self) -> &MotorMap {
         &self.map
     }
+    /// The body, for a renderer.
+    ///
+    /// Handed out as a pair rather than separately because MuJoCo's rendering
+    /// calls take both and they must describe the same simulation; two
+    /// accessors would let a caller pair a model with another fly's data,
+    /// which reads out as a body frozen in its initial pose.
+    pub fn body(&self) -> (&Model, &Data) {
+        (&self.model, &self.data)
+    }
+
     pub fn actuator_names(&self) -> &[String] {
         &self.actuator_names
     }

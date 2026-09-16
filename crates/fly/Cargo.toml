@@ -21,3 +21,6 @@ brain-promote.workspace = true
 
 [dev-dependencies]
 brain-testutil.workspace = true
+# The `watch` example's window. A dev-dependency, so the library itself still
+# has no opinion about being looked at.
+brain-wm-display.workspace = true
