@@ -296,6 +296,15 @@ impl ResidentModel for Flux2Resident {
         let mut it = key.config.splitn(6, ':');
         let variant = it.next().ok_or("flux2: bad instance key")?;
         let precision = flux2::Precision::from_name(it.next().ok_or("flux2: bad instance key")?)?;
+        // A `.gguf` DiT executes through FLUX.2's packed int8 path regardless
+        // of what was requested - `brain flux2 generate`/`brain::ImagePipeline`
+        // already apply this correction, this resident path did not. The
+        // `InstanceKey` string already collapsed "explicit fp32" and
+        // "defaulted to fp32" into the same value (`instance_key` below), so
+        // this can only coerce, never reject an explicit misuse the way the
+        // CLI/SDK paths do - but a served `.gguf` checkpoint must never be
+        // BUILT at the wrong precision either way, which is the actual bug.
+        let precision = flux2::pipeline::effective_dit_precision(&self.paths.dit, precision, false)?;
         let wh = it.next().ok_or("flux2: bad instance key")?;
         let nref: u32 = it.next().and_then(|s| s.parse().ok()).ok_or("flux2: bad instance key")?;
         let lora_scale: f32 = it.next().and_then(|s| s.parse().ok()).unwrap_or(1.0);

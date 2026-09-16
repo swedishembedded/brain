@@ -19,7 +19,7 @@ use capability::{ActionSpec, BlobSpec, Manifest, Media, ParamSpec, ParamType};
 use serde_json::json;
 
 use crate::config::Flux2Config;
-use crate::pipeline::{GenOpts, Paths, Pipeline};
+use crate::pipeline::{effective_dit_precision, GenOpts, Paths, Pipeline};
 
 /// The model id used on the CLI (`brain do flux2-klein …`) and the event API.
 pub const MODEL: &str = "brain/flux2-klein";
@@ -411,11 +411,19 @@ impl Action for Flux2Action {
                 // request must not hide behind a licensing message. The gate
                 // itself needs `paths` (it checks the REAL weights' sniffed
                 // size, not the request's claim - see `bind_variant`).
-                let p = gen_params_from(inv)?;
+                let mut p = gen_params_from(inv)?;
                 let paths = &self.paths;
                 let variant = bind_variant(&paths.dit, &p.variant)?;
                 check_license(&variant)?;
                 let cfg = Flux2Config::from_name(&variant)?;
+                // A `.gguf` DiT executes through FLUX.2's packed int8 path
+                // regardless of what was requested (`effective_dit_precision`'s
+                // own doc) - `brain flux2 generate` and `brain::ImagePipeline`
+                // already apply this; this served path did not, so a request
+                // that left `precision` at its "fp32" default against a served
+                // `.gguf` checkpoint built at the WRONG precision.
+                let precision_was_explicit = inv.params.get("precision").is_some();
+                p.precision = effective_dit_precision(&paths.dit, p.precision, precision_was_explicit)?;
                 let refs = refs_from(inv, self.name == "edit")?;
                 let n_gen = (p.opts.height / 16) * (p.opts.width / 16);
                 let n_ref = ref_tokens(&refs, &p.opts);

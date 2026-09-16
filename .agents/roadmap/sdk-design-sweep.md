@@ -147,12 +147,16 @@ IMMEDIATELY BEFORE the build - picking the variant, checking the license,
 loading the config, and deciding the precision - is four separate, never-composed
 public functions (`flux2::caps::bind_variant`, `flux2::caps::check_license`,
 `flux2::Flux2Config::from_name`, `flux2::pipeline::effective_dit_precision`).
-`effective_dit_precision` is called at only TWO of the four sites (`flux2_cli.rs`
-and the SDK) - `flux2::caps` and `resident_flux2.rs` never call it, so a
-`.gguf` DiT served over D-Bus/HTTP misses the fp32-to-packed-int8 correction
-the CLI and SDK both apply. This is a real correctness bug, not just style.
+`effective_dit_precision` **was** called at only two of the four sites
+(`flux2_cli.rs` and the SDK) - `flux2::caps` and `resident_flux2.rs` never
+called it, so a `.gguf` DiT served over D-Bus/HTTP missed the
+fp32-to-packed-int8 correction the CLI and SDK both apply. **Fixed directly
+in M10a** (both now call it - `flux2::caps` at full fidelity, `resident_flux2.rs`
+at reduced fidelity per that milestone's own note). The underlying
+duplication - four sites independently re-deriving the same decision
+sequence - is not yet resolved; see M10-full below.
 
-**Recommended extraction** (M10a/b/c): a new `flux2::pipeline::build_resolved`
+**Recommended extraction** (M10-full): a new `flux2::pipeline::build_resolved`
 (or a small `flux2::build` module), living IN the `flux2` crate itself, taking
 a variant-source enum covering the three legitimate resolution policies
 (`FromAssembly(&Assembly)` / `SniffDit { requested }` / `Bound(&str)`) plus
@@ -176,10 +180,12 @@ returning `(Pipeline, Flux2Config, Precision, bound_variant)`.
   exists) are genuinely residency-specific and stay exactly where they are;
   only the ~8 duplicated decision lines above the build call move.
 
-Safest landing order: `flux2::caps`/`resident_flux2.rs` first (M10a - they
-have NO decision logic today, so wiring them up only adds correctness, it
-can't regress anything that already worked), then `flux2_cli.rs` (M10b),
-then `crates/sdk` (M10c).
+Safest landing order for the still-open `build_resolved` extraction:
+`flux2::caps`/`resident_flux2.rs` first (they have the least existing
+decision logic to reconcile, now that M10a already wired in the missing
+precision call by hand), then `flux2_cli.rs`, then `crates/sdk` - each swap
+verified against `cargo test -p brain-flux2`/the relevant `brain-cli` tests
+before moving to the next site, same discipline M10a used.
 
 ## Milestone checklist
 
@@ -291,9 +297,47 @@ then `crates/sdk` (M10c).
       leading with both surfaces' three-line examples before options,
       features, errors, and the resource-safety note; registered in
       `docs/readme.md`'s "Using brain" list next to `using/cli.md`.
-- [ ] **M10a** - `flux2::pipeline::build_resolved`, wired into `flux2::caps` + `resident_flux2.rs` (fixes the precision bug).
-- [ ] **M10b** - migrate `flux2_cli.rs` onto `build_resolved`.
-- [ ] **M10c** - migrate `crates/sdk`'s flux2 half onto `build_resolved`.
+- [x] **M10a** - the precision bug itself, fixed directly rather than via
+      the full `build_resolved` extraction (see below for why that's
+      still open). `flux2::caps::Flux2Action::run`'s served `text2image`/
+      `edit` branch now calls `effective_dit_precision(&paths.dit,
+      p.precision, precision_was_explicit)` before building - with FULL
+      fidelity, since `inv.params.get("precision").is_some()` recovers
+      whether the caller stated it explicitly, matching the CLI/SDK paths'
+      behavior exactly (an explicit fp32 request against a `.gguf` DiT is
+      still a named error, not silently coerced). `resident_flux2.rs`'s
+      `activate()` gets the same correction, but at REDUCED fidelity: the
+      `InstanceKey` string (`instance_key`) already collapsed "explicit
+      fp32" and "defaulted to fp32" into one value before `activate` ever
+      sees it, so it can only coerce (`f32_was_explicit: false`, always),
+      never reject an explicit misuse the way the other three paths do -
+      documented inline rather than silently accepted. The bug itself (a
+      served `.gguf` DiT building at the wrong precision) is fixed on both
+      remaining call sites either way, which is what mattered.
+      Not separately regression-tested beyond the existing suites passing:
+      `effective_dit_precision` itself already has full branch coverage in
+      `crates/flux2/tests/placement.rs`, and proving these two NEW call
+      sites build a real `Pipeline` at the corrected precision would need a
+      real `.gguf` DiT checkpoint to sniff and build against, which doesn't
+      exist in this workspace's fixtures (same class of gap as
+      `tests/image_pipeline.rs`'s own undocumented `generate()` success
+      path). `cargo test -p brain-flux2` (97 passed) and the relevant
+      `brain-cli` resident_flux2 tests (2 passed) show no regression.
+      **`build_resolved` itself - the actual "one implementation" extraction
+      unifying all four flux2 sites' variant/license/config/precision
+      decision into one function - is still open**, tracked as its own item
+      below; fixing the live bug first, safely, was worth doing before
+      committing to that larger refactor's shape.
+- [ ] **M10-full** - the actual `flux2::pipeline::build_resolved` extraction
+      (a variant-source enum covering `FromAssembly`/`SniffDit`/`Bound`,
+      composing `bind_variant`/`check_license`/`Flux2Config::from_name`/
+      `effective_dit_precision` in ONE place) so all four flux2 sites
+      converge on one implementation instead of four independently
+      maintained copies of the same ~8 lines. M10a fixed the one bug that
+      duplication was hiding; this is the remaining "one implementation"
+      work - genuinely a separate, larger design commitment (four call
+      sites with different inputs on hand, per the sweep's own duplication
+      map above), not a small follow-up.
 - [ ] **Phase 2** - new pipelines, in the priority order above: Forecast, Text, Embedding, ASR, then the rest. Each gets its own sub-roadmap section here (or its own file, linked from here) when it starts, written against the full `sdk-design.md` checklist from day one - including an end-to-end test and its CLI migrated onto it in the SAME change, learning from M10 rather than repeating the `flux2_cli.rs` gap a second time.
 
 Findings 8, 11, 14, 18-20, 23-24 are real but not yet milestoned - pick them
