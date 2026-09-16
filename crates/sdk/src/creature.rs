@@ -309,6 +309,16 @@ impl CreatureBuilder {
     }
 }
 
+/// How far the odour carries, in centimetres. A plume nobody can smell from
+/// across the arena makes the sense useless; one that saturates everywhere
+/// carries no gradient. Two centimetres is eight body lengths, which is the
+/// scale the arena is built at.
+const DECAY_CM: f64 = 2.0;
+/// Where the antennae sit relative to the root, in centimetres: a little ahead
+/// of it and to either side of the midline, on a body 0.25 cm long.
+const HEAD_AHEAD_CM: f64 = 0.10;
+const ANTENNA_HALF_BASE_CM: f64 = 0.012;
+
 /// A connectome driving a body.
 pub struct Creature {
     inner: fly::Fly,
@@ -447,6 +457,62 @@ impl Creature {
         // Slow down when nearly there, so arriving does not mean overshooting.
         self.drive(forward * (range as f32 / 1.0).clamp(0.25, 1.0));
         Some(range)
+    }
+
+    /// Let the animal SMELL the food, and report the two concentrations.
+    ///
+    /// The other half of `seek_food`, and the honest one. `seek_food` decides
+    /// where to go and pushes the answer into the descending population: it is
+    /// the missing brain, written by hand. This instead puts an odour on the
+    /// antennae and leaves the deciding to the nervous system - which is only
+    /// meaningful on a creature that HAS a brain
+    /// ([`CreatureBuilder::brain`]), since a nerve cord has no nose.
+    ///
+    /// The field is `exp(-r / DECAY_CM)` from the source, evaluated at each
+    /// antenna: a diffusive plume without wind, normalised to 1.0 at the food
+    /// itself. No wind, because flybody's arena has none and a plume model
+    /// with a wind direction nothing else in the simulation knows about would
+    /// be inventing physics to sense.
+    ///
+    /// The bilateral difference this produces is SMALL - the antennae are
+    /// about a tenth of a body length apart and the field is smooth - which is
+    /// a fact about fly chemotaxis rather than a shortcoming: a real fly turns
+    /// on a difference of a few percent and supplements it by casting, which
+    /// is a behaviour and not a sensor. Returns `(left, right)`, or `None`
+    /// when there is nothing to smell.
+    pub fn smell_food(&mut self) -> Option<(f32, f32)> {
+        let food = self.food?;
+        let (yaw, _) = self.attitude();
+        let [x, y, z] = self.position();
+        // Forward is +x at yaw 0 and left is +y, matching
+        // `bearing_to_food`'s own convention; the antennae sit ahead of the
+        // root and to either side of the midline. Derived from the root pose
+        // rather than from the antenna BODIES, which would need mjData's
+        // xpos: at this baseline the two differ by far less than the plume
+        // varies over one body length.
+        let (c, s) = (yaw.cos(), yaw.sin());
+        let at = |ahead: f64, left: f64| {
+            let (px, py) = (x + c * ahead - s * left, y + s * ahead + c * left);
+            let r = ((food[0] - px).powi(2) + (food[1] - py).powi(2) + (food[2] - z).powi(2)).sqrt();
+            (-r / DECAY_CM).exp() as f32
+        };
+        let pair = (at(HEAD_AHEAD_CM, ANTENNA_HALF_BASE_CM), at(HEAD_AHEAD_CM, -ANTENNA_HALF_BASE_CM));
+        self.inner.smell(pair.0, pair.1);
+        Some(pair)
+    }
+
+    /// How many olfactory receptor neurons fired on the last tick, by side.
+    ///
+    /// A sensory channel that is connected and silent looks exactly like one
+    /// that is working, from every other reading. This is how to tell.
+    pub fn antenna_spikes(&self) -> (u32, u32) {
+        self.inner.antenna_spikes()
+    }
+
+    /// How many receptor neurons the animal has, by side. `(0, 0)` without a
+    /// brain.
+    pub fn antenna_counts(&self) -> (usize, usize) {
+        self.inner.antenna_counts()
     }
 
     /// Whether the fly has reached the food, within one body length.

@@ -38,7 +38,7 @@ pub use gait::{analyse as analyse_gait, Gait, Trace};
 pub use wing::{WingCommand, Wingbeat};
 pub use reference::{ImitationReward, Reference};
 pub use cns::Cns;
-pub use sense::{Modality, Sensor};
+pub use sense::{Antennae, Modality, Sensor};
 
 /// How the three clocks in this loop relate.
 ///
@@ -197,6 +197,18 @@ impl Default for Wiring {
 pub struct Coupling {
     /// Current injected per radian of joint deflection.
     pub angle_gain: f32,
+    /// Current injected into each olfactory receptor neuron per unit of odour
+    /// concentration at its antenna.
+    ///
+    /// A receptor neuron has almost no incoming synapses - it is an afferent,
+    /// so injected current is the ONLY thing that can fire it, exactly as the
+    /// proprioceptors are. That is the failure this crate has already had
+    /// once: a sensory channel that was connected, carried current every tick,
+    /// never reached threshold, and changed nothing when it was lesioned while
+    /// every other reading stayed healthy. `Fly::antenna_spikes` exists so a
+    /// caller can assert the channel CARRIES something before asserting that
+    /// it matters.
+    pub odour_gain: f32,
     /// Current injected per radian/second, for the load proxy.
     pub load_gain: f32,
     /// Muscle activation decay per control tick. A spike is an impulse; a
@@ -218,6 +230,10 @@ impl Default for Coupling {
     fn default() -> Self {
         Coupling {
             angle_gain: 10.0,
+            // The same order as `angle_gain`, and for the same reason: a
+            // receptor's threshold is the cord's, and the concentrations a
+            // caller supplies are normalised to 1.0 at the source.
+            odour_gain: 10.0,
             load_gain: 0.05,
             activation_decay: 0.8,
             activation_gain: 0.05,
@@ -331,6 +347,15 @@ pub struct Fly {
     actuator_qpos: Vec<usize>,
     actuator_names: Vec<String>,
 
+    /// The olfactory receptor neurons, by side. Empty on a cord-only
+    /// nervous system: a nerve cord has no nose.
+    antennae: Antennae,
+    /// This tick's odour concentration at each antenna, `[left, right]`.
+    /// Persists until a caller changes it, the same way the descending
+    /// command does.
+    odour: [f32; 2],
+    /// Receptor neurons that fired on the last neural tick, `(left, right)`.
+    last_antenna_spikes: (u32, u32),
     proprioception: bool,
     last_proprio_spikes: u32,
     /// The standing descending command, one per descending neuron. Persists
@@ -449,6 +474,9 @@ impl Fly {
             leg_coxa,
             actuator_qpos,
             actuator_names,
+            antennae: Antennae::of(c),
+            odour: [0.0; 2],
+            last_antenna_spikes: (0, 0),
             proprioception: true,
             last_proprio_spikes: 0,
             command: vec![0.0; n_desc],
@@ -810,6 +838,39 @@ impl Fly {
         self.last_proprio_spikes
     }
 
+    /// Set the odour concentration at each antenna, `[left, right]`.
+    ///
+    /// A stimulus, not a command. See [`Antennae`]: the difference between the
+    /// two is a fraction of a percent at any useful distance and what to do
+    /// about it is the brain's problem, not this function's.
+    pub fn smell(&mut self, left: f32, right: f32) {
+        self.odour = [left, right];
+    }
+
+    /// The whole cord's spikes from the last neural tick, as the device last
+    /// reported them.
+    ///
+    /// Already in hand - `step` reads this vector back every tick to find the
+    /// motor neurons - so an experiment measuring some other population costs
+    /// a slice rather than a second readback.
+    pub fn spikes(&self) -> &[f32] {
+        &self.spike
+    }
+
+    /// How many receptor neurons there are, by side.
+    pub fn antenna_counts(&self) -> (usize, usize) {
+        (self.antennae.left.len(), self.antennae.right.len())
+    }
+
+    /// How many of them fired on the last neural tick, by side.
+    ///
+    /// The instrument that tells a connected-and-silent channel from a
+    /// working one, which is a distinction this crate has already paid for
+    /// once.
+    pub fn antenna_spikes(&self) -> (u32, u32) {
+        self.last_antenna_spikes
+    }
+
     /// Largest absolute muscle activation, same purpose.
     pub fn activation_range(&self) -> f32 {
         self.activation.iter().fold(0.0f32, |m, a| m.max(a.abs()))
@@ -834,6 +895,18 @@ impl Fly {
             for s in &self.sensors {
                 let current = self.sensor_current(s, &qpos, &qvel);
                 self.drive[s.neuron as usize] += current * self.excite[s.neuron as usize];
+            }
+        }
+        // Smell, if this animal has a nose. Rebuilt every tick like the rest
+        // of the sensory drive, so an odour that stops arriving stops being
+        // smelled rather than lingering as a standing current.
+        for (side, cells) in [(0usize, &self.antennae.left), (1, &self.antennae.right)] {
+            let current = self.odour[side] * self.coupling.odour_gain;
+            if current == 0.0 {
+                continue;
+            }
+            for &i in cells {
+                self.drive[i as usize] += current * self.excite[i as usize];
             }
         }
 
@@ -865,6 +938,8 @@ impl Fly {
             total_spikes += spike.iter().filter(|&&s| s > 0.5).count() as u32;
             self.last_proprio_spikes =
                 self.sensors.iter().filter(|s| spike[s.neuron as usize] > 0.5).count() as u32;
+            let fired = |cells: &[u32]| cells.iter().filter(|&&i| spike[i as usize] > 0.5).count() as u32;
+            self.last_antenna_spikes = (fired(&self.antennae.left), fired(&self.antennae.right));
             for d in &self.map.drives {
                 if spike[d.neuron as usize] > 0.5 {
                     self.activation[d.actuator] += self.coupling.activation_gain * d.polarity;

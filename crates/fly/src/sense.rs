@@ -94,3 +94,58 @@ pub fn proprioceptors(c: &Connectome) -> Vec<Sensor> {
 fn is_sensory(n: &Neuron) -> bool {
     matches!(n.super_class.as_str(), "sensory" | "sensory_ascending")
 }
+
+/// The fly's antennae, as two populations of olfactory receptor neurons.
+///
+/// ## Why smell and not sight
+///
+/// A fly finds food by smell, and this connectome supports it far better than
+/// it supports vision. BANC carries 3,007 olfactory receptor neurons across 56
+/// receptor types, split 1,617 left and 1,390 right - a bilateral pair, which
+/// is what a chemotactic animal steers on. Its photoreceptors are 1,846 cells
+/// of which 1,597 are on the RIGHT and 249 on the left, and they are R7 and R8
+/// only: the colour-sensitive inner pair, without the R1-R6 that carry motion.
+/// Steering on an eye that is reconstructed on one side is not a measurement of
+/// anything, so the exteroceptive channel here is the nose.
+///
+/// ## What a caller supplies, and what it does NOT
+///
+/// Two concentrations, one per antenna. That is a STIMULUS, not a command: the
+/// difference between them is a fraction of a percent at any useful distance,
+/// and what to do about it is the brain's problem. Nothing here turns the
+/// animal - `Fly::smell` injects current into the receptor neurons and the
+/// consequence, if any, has to come out of the wiring.
+#[derive(Clone, Debug, Default)]
+pub struct Antennae {
+    pub left: Vec<u32>,
+    pub right: Vec<u32>,
+}
+
+impl Antennae {
+    /// Select them out of a connectome, by the export's own annotation.
+    ///
+    /// Maxillary palp receptors come along with the antennal ones: they are
+    /// the fly's second olfactory organ, they are sided the same way, and
+    /// dropping them would be a modelling choice made by accident.
+    pub fn of(c: &Connectome) -> Antennae {
+        let mut a = Antennae::default();
+        for (i, n) in c.neurons.iter().enumerate() {
+            if n.class != "olfactory_receptor_neuron" {
+                continue;
+            }
+            match n.soma_side.as_str() {
+                "left" => a.left.push(i as u32),
+                "right" => a.right.push(i as u32),
+                // A receptor nobody could side cannot contribute to a
+                // bilateral comparison, and averaging it into both sides
+                // would dilute the very difference being measured.
+                _ => {}
+            }
+        }
+        a
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.left.is_empty() && self.right.is_empty()
+    }
+}
