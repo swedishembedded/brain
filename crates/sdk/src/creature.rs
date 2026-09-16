@@ -47,6 +47,12 @@ fn backend(e: String) -> Error {
     Error::Backend(e)
 }
 
+/// A required builder argument was never set -- see [`Error::MissingArgument`]'s
+/// own doc for why this is a distinct variant from [`backend`].
+fn missing_argument(e: String) -> Error {
+    Error::MissingArgument(e)
+}
+
 /// How a creature is assembled. Values, not features: a step count and a
 /// weight scale are configuration, and configuration belongs in a builder.
 pub struct CreatureBuilder {
@@ -135,8 +141,8 @@ impl CreatureBuilder {
     /// This is the expensive call: it reads the connectome from disk, uploads
     /// several million synapses to the device, and compiles the MJCF.
     pub fn build(self) -> Result<Creature, Error> {
-        let dir = self.connectome.ok_or_else(|| backend("no connectome directory set; call .connectome(dir)".into()))?;
-        let body = self.body.ok_or_else(|| backend("no body set; call .body(scene.xml)".into()))?;
+        let dir = self.connectome.ok_or_else(|| missing_argument("no connectome directory set; call .connectome(dir)".into()))?;
+        let body = self.body.ok_or_else(|| missing_argument("no body set; call .body(scene.xml)".into()))?;
         // Tolerant of how the export was unpacked - see `connectome::find`.
         // A caller should not have to know whether their download put the two
         // CSVs in `manc/`, in `manc-codex/`, or at the root.

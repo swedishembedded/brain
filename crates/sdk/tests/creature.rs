@@ -17,7 +17,7 @@
 
 #![cfg(feature = "creature")]
 
-use brain::Creature;
+use brain::{Creature, Error};
 
 #[test]
 fn build_without_a_connectome_names_the_missing_argument() {
@@ -29,6 +29,10 @@ fn build_without_a_connectome_names_the_missing_argument() {
     };
     let msg = err.to_string();
     assert!(msg.contains(".connectome"), "{msg}");
+    // Typed, not just a substring of the message: a caller-programming
+    // error (a required builder argument never set) is a distinct variant
+    // from a real backend failure.
+    assert!(matches!(err, Error::MissingArgument(_)), "{msg}");
 }
 
 #[test]
@@ -41,6 +45,7 @@ fn build_without_a_body_names_the_missing_argument_before_touching_disk() {
     };
     let msg = err.to_string();
     assert!(msg.contains(".body"), "{msg}");
+    assert!(matches!(err, Error::MissingArgument(_)), "{msg}");
 }
 
 /// A real connectome dir + a real flybody MJCF, or `None` - see this file's

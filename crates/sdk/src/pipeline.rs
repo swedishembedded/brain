@@ -520,7 +520,7 @@ impl ImagePipelineBuilder {
             ResolvedArch::Flux2(assembly) => {
                 let paths = flux2::Paths::from_assembly(&assembly).map_err(Error::Backend)?;
                 let variant_name = assembly.variant.clone().ok_or_else(|| Error::Backend(format!("flux2: resolved assembly {:?} has no variant", assembly.id)))?;
-                flux2::caps::check_license(&variant_name).map_err(Error::Backend)?;
+                flux2::caps::check_license(&variant_name).map_err(Error::LicenseRequired)?;
                 let cfg = flux2::Flux2Config::from_name(&variant_name).map_err(Error::Backend)?;
 
                 let precision = flux2::pipeline::effective_dit_precision(&paths.dit, dtype, false).map_err(Error::Backend)?;

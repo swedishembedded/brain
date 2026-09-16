@@ -88,8 +88,8 @@ here (items already tracked there are not repeated - see that file's own
 | 9 | 7 | `crates/sdk/src/creature.rs:157` | `Creature::build` acquires its GPU via `gpu_core::testgpu::dev` - TEST-SUPPORT infra, weak-reference lifetime, shipping on the production SDK path | fixed (M3) |
 | 10 | 7/13 | `crates/sdk/src/creature.rs` + `Cargo.toml` | `CreatureBuilder` has no `Device` knob at all, yet the `creature` feature's doc comment claims it "selects `device`" | fixed (M3) |
 | 11 | 5 | `crates/sdk/src/pipeline.rs:416-424,432-435` | `ImagePipelineBuilder::size` is silently IGNORED on a flux2-backed pipeline (the s3dit half of this asymmetry is tracked in `sdk.md`; the flux2 silent no-op was not) | open (backlog) |
-| 12 | 6 | `crates/sdk/src/error.rs:62-66` | `Error::Backend` is an untyped catch-all for ~8 semantically distinct failures (license refusal, no models dir, size mismatch, bad extension, missing builder arg, GPU/MuJoCo failure...) | open (M6) |
-| 13 | 6 | `crates/sdk/src/creature.rs:129-130` | a caller-programming error (missing required builder field) is typed as `Error::Backend`, indistinguishable from a real backend crash | open (M6) |
+| 12 | 6 | `crates/sdk/src/error.rs:62-66` | `Error::Backend` is an untyped catch-all for ~8 semantically distinct failures (license refusal, no models dir, size mismatch, bad extension, missing builder arg, GPU/MuJoCo failure...) | partially fixed (M6 - see below) |
+| 13 | 6 | `crates/sdk/src/creature.rs:129-130` | a caller-programming error (missing required builder field) is typed as `Error::Backend`, indistinguishable from a real backend crash | fixed (M6) |
 | 14 | 8/4 | `crates/sdk/src/creature.rs:276-278,414-416` | `wiring()`/`wing_wiring()` return a pre-rendered human summary string; no structured/programmatic accessor | open (backlog) |
 | 15 | 3 | `crates/sdk/src/creature.rs:257-268` | `Creature::fruit_fly()` has two mandatory runtime-checked fields and no simple zero-arg path - a builder tax, not optional configuration | open (M7, may end in "documented, won't fix" if no bundled default connectome exists) |
 | 16 | 13/10 | `crates/fly/examples/watch.rs:18-60` | hand-builds `Fly`/`SdlWindow`/`Renderer` independently of `Creature`/`View` - the same class of defect as the tracked CLI duplication, applied to an example | open (M7) |
@@ -225,7 +225,25 @@ then `crates/sdk` (M10c).
       value rather than a `&self` call - needs its own design pass for
       where a boxed closure lives on `ImagePipelineBuilder`, not a
       copy-paste of M5's pattern.
-- [ ] **M6** - split `Error::Backend`'s catch-all (findings 12, 13).
+- [x] **M6** - split `Error::Backend`'s catch-all, partially (findings 12,
+      13). Added the two clearly load-bearing variants - `LicenseRequired`
+      (a caller plausibly wants to react differently: surface the terms,
+      fall back to an ungated variant) and `MissingArgument` (a
+      caller-programming error, knowable before any backend/GPU/filesystem
+      call, distinct from a real backend crash) - and wired
+      `flux2::caps::check_license`/`CreatureBuilder::build`'s two required-field
+      checks onto them, each proven reachable by a real unit test (the
+      license one calls the real `flux2::caps::check_license`, gated on the
+      `image` feature since `flux2` is optional). Deliberately did NOT add
+      `UnsupportedFormat` (image.rs's bad-extension case) or a structured
+      size-mismatch variant: `imaging::save`'s error is an untyped `String`
+      with no way to distinguish "bad extension" from "I/O failure" short of
+      either duplicating its own extension-dispatch match (a second copy to
+      drift from) or substring-matching a message never designed as a
+      stable sentinel (unlike `"cancelled"`, which IS one, by this crate's
+      own convention). Left as `Error::Backend` until `imaging::save` itself
+      grows a typed error - not a gap in this milestone's judgment, a gap in
+      what's cleanly extractable today.
 - [ ] **M7** - `Creature` progressive disclosure + de-duplicate `watch.rs` (findings 15, 16).
 - [ ] **M8** - `.capabilities()` introspection (finding 6).
 - [ ] **M9** - user-facing SDK docs page (finding 17).

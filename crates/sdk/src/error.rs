@@ -59,6 +59,20 @@ pub enum Error {
     UnsupportedArchitecture(String),
     /// Fetching a model from the hub failed.
     Download(String),
+    /// The resolved checkpoint is gated behind a license the caller has not
+    /// accepted (e.g. FLUX.2's 9B weights, Non-Commercial). Named separately
+    /// from [`Error::Backend`] because a caller plausibly wants to react to
+    /// THIS failure differently -- surface the license terms, or fall back
+    /// to an ungated variant -- rather than just reporting a generic error.
+    LicenseRequired(String),
+    /// A required builder argument was never set (e.g.
+    /// [`crate::CreatureBuilder::connectome`]/`body`). Named separately from
+    /// [`Error::Backend`] because this is a caller-programming error,
+    /// knowable before any backend/GPU/filesystem call runs, not a real
+    /// backend failure -- the two are handled differently by any caller that
+    /// bothers to `match` on the difference (retry a backend failure,
+    /// don't retry a missing argument).
+    MissingArgument(String),
     /// Any other failure surfaced by the flux2/modelstore backends this
     /// facade sits on -- they return `Result<_, String>` throughout (see
     /// those crates' own module docs for why), and this variant carries that
@@ -79,6 +93,8 @@ impl std::fmt::Display for Error {
             Error::Missing(m) => write!(f, "{}", describe_missing(m)),
             Error::UnsupportedArchitecture(a) => write!(f, "unsupported architecture: {a}"),
             Error::Download(m) => write!(f, "download failed: {m}"),
+            Error::LicenseRequired(m) => write!(f, "license required: {m}"),
+            Error::MissingArgument(m) => write!(f, "{m}"),
             Error::Backend(m) => write!(f, "{m}"),
             Error::Io(e) => write!(f, "{e}"),
             Error::Cancelled => write!(f, "generation cancelled"),
@@ -155,5 +171,27 @@ mod tests {
     fn backend_carries_the_original_message_verbatim() {
         let err = Error::Backend("flux2: assemble: no dit chosen".to_string());
         assert_eq!(err.to_string(), "flux2: assemble: no dit chosen");
+    }
+
+    /// A real `flux2::caps::check_license` gate failure becomes
+    /// `Error::LicenseRequired`, not an indistinguishable `Error::Backend` --
+    /// a caller can `match` on this to prompt for license acceptance instead
+    /// of just reporting a generic failure.
+    #[cfg(feature = "image")]
+    #[test]
+    fn a_real_license_gate_failure_becomes_license_required() {
+        let _guard = brain_testutil::env_lock();
+        std::env::remove_var("BRAIN_FLUX2_ALLOW_NC");
+        let Err(msg) = flux2::caps::check_license("flux2-klein-9b") else {
+            panic!("the 9B variant must be gated with BRAIN_FLUX2_ALLOW_NC unset");
+        };
+        let err = Error::LicenseRequired(msg);
+        assert!(err.to_string().starts_with("license required: "), "{err}");
+    }
+
+    #[test]
+    fn missing_argument_renders_its_own_message_without_a_generic_prefix() {
+        let err = Error::MissingArgument("no connectome directory set; call .connectome(dir)".to_string());
+        assert_eq!(err.to_string(), "no connectome directory set; call .connectome(dir)");
     }
 }
