@@ -201,10 +201,17 @@ pub fn analyse(t: &Trace) -> Option<Gait> {
         hz += 0.25;
     }
 
+    // One frequency-resolution element either side of the peak. Sampled AT
+    // that spacing rather than on the search grid, because grid points closer
+    // together than 1/T are not independent and summing them would count the
+    // same power several times.
+    let df = 1.0 / (kept as f64 * t.dt);
+    let band: f64 = [-df, 0.0, df].iter().map(|d| power_at(&diff, (best.1 + d).max(0.1), t.dt)).sum();
+
     Some(Gait {
         step_hz: best.1,
         tripod: -correlation(&a, &b),
-        rhythmicity: if total > 1e-18 { (best.0 / total).clamp(0.0, 1.0) } else { 0.0 },
+        rhythmicity: if total > 1e-18 { (band / total).clamp(0.0, 1.0) } else { 0.0 },
         power: (rms(&a) + rms(&b)) / 2.0,
     })
 }
