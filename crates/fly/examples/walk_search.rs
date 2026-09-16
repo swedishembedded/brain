@@ -26,7 +26,7 @@
 //! nothing to be better than.
 use fly::learn::{episode, Condition, GainSearch, Lcg, Objective, RewardConfig};
 use fly::search::{Es, Knob};
-use fly::{Cns, Coupling, Fly, Timing, Wiring};
+use fly::{Cns, Coupling, Fly, Timing, Tuning, Wiring};
 use neuro::LifParams;
 use mujoco::{Model, MuJoCo};
 
@@ -118,6 +118,23 @@ fn main() {
         start.push(Coupling::default().odour_gain);
     }
     let start = start;
+
+    // `IN=path` starts the search from a tuning rather than from the imported
+    // connectome. A generation budget is a wall-clock decision, not a property
+    // of the problem, so a run that has to stop should be resumable - and a
+    // search restarted from unit gains throws away everything the last one
+    // paid for.
+    let start = match std::env::var("IN") {
+        Ok(path) => {
+            let t = Tuning::load(&path).unwrap_or_else(|e| {
+                eprintln!("{e}");
+                std::process::exit(2)
+            });
+            println!("continuing from {path}");
+            knobs.iter().zip(&start).map(|(k, d)| t.get(&k.name).unwrap_or(*d)).collect()
+        }
+        Err(_) => start,
+    };
 
     let ticks: u32 = num("TICKS", 1000);
     let pairs: usize = num("PAIRS", 6);
