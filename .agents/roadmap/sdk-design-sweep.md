@@ -82,7 +82,7 @@ here (items already tracked there are not repeated - see that file's own
 | 3 | 8 | `crates/sdk/src/pipeline.rs:321,331` | `generate`/`generate_with` hardcode `&CancelToken::default()` and a no-op progress closure; no public way to supply either | fixed (M5) |
 | 4 | 8 | `crates/sdk/src/pipeline.rs:300,481,504` | download and s3dit-build progress are likewise discarded | open (M5b - split out, see below: three different progress shapes to plumb, not one) |
 | 5 | 6 | `crates/sdk/src/error.rs:70-71` | `Error::Cancelled` is a dead public variant - unreachable with no public cancel entry point | fixed (M5) |
-| 6 | 8 | crate-wide | no `.capabilities()`/manifest introspection anywhere in `crates/sdk` | open (M8) |
+| 6 | 8 | crate-wide | no `.capabilities()`/manifest introspection anywhere in `crates/sdk` | fixed (M8) |
 | 7 | 9 | crate-wide | no training/finetune entry point at all in `crates/sdk` (the adjacent Dataset-layer gap is tracked in `sdk.md`; the missing training call itself was not) | open (Phase 2, per-pipeline) |
 | 8 | 9/4 | `crates/sdk/src/creature.rs:492-500` | `set_plasticity`/`reward` mutate learned synapse weights with no `save()`/`load()` counterpart - all learning dies with the process | open (backlog) |
 | 9 | 7 | `crates/sdk/src/creature.rs:157` | `Creature::build` acquires its GPU via `gpu_core::testgpu::dev` - TEST-SUPPORT infra, weak-reference lifetime, shipping on the production SDK path | fixed (M3) |
@@ -275,7 +275,18 @@ then `crates/sdk` (M10c).
         cycle like this, but it inverts the intended layering direction for
         no real gain, since the example's whole point is to exercise the
         lower-level API the SDK deliberately hides.
-- [ ] **M8** - `.capabilities()` introspection (finding 6).
+- [x] **M8** - `.capabilities()` introspection (finding 6). Turned out to
+      need no design decision at all: `flux2::caps::manifest()` and
+      `s3dit::caps::manifest()` are already free functions returning "the
+      full, static capability manifest - safe to build with no weights
+      loaded" (their own doc comment), the SAME one `brain caps`/D-Bus/HTTP
+      read for these architectures. `ImagePipeline::capabilities()` just
+      dispatches to whichever one matches the resolved backend - reflecting
+      the real manifest rather than growing a second, weaker description.
+      Not separately unit-tested: reaching a live `ImagePipeline` needs the
+      same real weights `generate()`'s own success path does (tracked
+      above), and the two manifest functions already have their own tests
+      in their home crates.
 - [x] **M9** - user-facing SDK docs page (finding 17): `docs/using/sdk.md`,
       leading with both surfaces' three-line examples before options,
       features, errors, and the resource-safety note; registered in

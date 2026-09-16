@@ -273,6 +273,22 @@ impl ImagePipeline {
         ImagePipelineBuilder { model_id: model_id.as_ref().to_string(), device: Device::default(), dtype: DType::F32, size: None }
     }
 
+    /// What this pipeline's backend can do, per action: the SAME static
+    /// `capability::Manifest` `brain caps`/D-Bus/HTTP read for this
+    /// architecture (`flux2::caps::manifest`/`s3dit::caps::manifest`) --
+    /// reflected, not re-described, so this can never drift into a second,
+    /// weaker capability description. Every param this manifest declares is
+    /// what the ARCHITECTURE supports; not every one necessarily has an
+    /// `ImageGenerationOptions` knob yet (see that type's own doc for the
+    /// ones that don't), so this is "what the model can do", not a promise
+    /// that this facade exposes every declared param today.
+    pub fn capabilities(&self) -> capability::Manifest {
+        match &self.backend {
+            Backend::Flux2(_) => flux2::caps::manifest(),
+            Backend::S3dit(_) => s3dit::caps::manifest(),
+        }
+    }
+
     /// Fold a LoRA adapter in, from THIS milestone's one supported source: a
     /// literal filesystem path to brain's own trained checkpoint, or a
     /// third-party ai-toolkit/ComfyUI/LyCORIS `.safetensors` (mirrors
