@@ -1,0 +1,18 @@
+[package]
+name = "brain-mujoco"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "A minimal hand-rolled binding to the MuJoCo physics library, dlopened at run time so the default build needs no MuJoCo installed. Loads a model, steps it, and reads or writes state through MuJoCo's own flat state API rather than by mirroring mjData."
+
+[lib]
+name = "mujoco"
+path = "src/lib.rs"
+
+[dependencies]
+# Same dlopen path `backend-cuda` uses for libcuda: no build-time dependency,
+# so a box with no MuJoCo still builds and tests this crate green.
+libloading.workspace = true
+
+[dev-dependencies]
+brain-testutil.workspace = true
