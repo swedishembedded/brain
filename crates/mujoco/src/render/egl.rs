@@ -82,6 +82,11 @@ struct Egl {
     make_current: unsafe extern "C" fn(Display, Surface, Surface, Context) -> u32,
     get_error: unsafe extern "C" fn() -> i32,
     gl_get_error: unsafe extern "C" fn() -> u32,
+    // GLX, resolved optionally. Present wherever libGL is a GLX
+    // implementation and absent on a pure-EGL stack; see `yield_glx`.
+    glx_current_context: Option<unsafe extern "C" fn() -> *mut c_void>,
+    glx_current_display: Option<unsafe extern "C" fn() -> *mut c_void>,
+    glx_make_current: Option<unsafe extern "C" fn(*mut c_void, u64, *mut c_void) -> i32>,
 }
 
 /// Load libEGL and libGL into the process's GLOBAL scope.
@@ -147,6 +152,21 @@ impl Egl {
                 let s: libloading::os::unix::Symbol<unsafe extern "C" fn() -> u32> =
                     unsafe { gl.get(b"glGetError\0") }.map_err(|e| format!("libGL.so.1: missing glGetError: {e}"))?;
                 *s
+            },
+            glx_current_context: {
+                let s: Option<libloading::os::unix::Symbol<unsafe extern "C" fn() -> *mut c_void>> =
+                    unsafe { gl.get(b"glXGetCurrentContext\0") }.ok();
+                s.map(|s| *s)
+            },
+            glx_current_display: {
+                let s: Option<libloading::os::unix::Symbol<unsafe extern "C" fn() -> *mut c_void>> =
+                    unsafe { gl.get(b"glXGetCurrentDisplay\0") }.ok();
+                s.map(|s| *s)
+            },
+            glx_make_current: {
+                let s: Option<libloading::os::unix::Symbol<unsafe extern "C" fn(*mut c_void, u64, *mut c_void) -> i32>> =
+                    unsafe { gl.get(b"glXMakeCurrent\0") }.ok();
+                s.map(|s| *s)
             },
             _egl: egl,
             _gl: gl,
@@ -224,7 +244,16 @@ impl EglContext {
             // needs some drawable to make a context current on this path, so
             // the smallest legal one is the right size for it.
             match EglContext::on(&egl, display, 16, 16) {
-                Ok((surface, context)) => return Ok(EglContext { egl, display, surface, context }),
+                Ok((surface, context)) => {
+                    let ctx = EglContext { egl, display, surface, context };
+                    // Creation has to make the context current to know it
+                    // works, and then must NOT leave it that way: a context
+                    // current on the thread is a context some other graphics
+                    // stack has to switch away from, and that transition is
+                    // what an X server refuses.
+                    ctx.release();
+                    return Ok(ctx);
+                }
                 Err(e) => tried.push(format!("{what}: {e}")),
             }
         }
@@ -234,14 +263,48 @@ impl EglContext {
         ))
     }
 
+    /// Let go of any GLX context this thread is holding.
+    ///
+    /// A thread can have one current context, not one per graphics API. A
+    /// window toolkit that brings up X11 leaves a GLX context current as a side
+    /// effect of initialising, and `eglMakeCurrent` then refuses with
+    /// `EGL_BAD_ACCESS` - EGL cannot bind over a binding it does not own, and
+    /// it will not evict one either. So the GLX side is asked to stand down
+    /// first, through its own API, which is the only thing that can release it.
+    ///
+    /// Every entry point here is optional: a machine with a pure-EGL libGL has
+    /// no GLX to stand down and nothing to do.
+    fn yield_glx(&self) {
+        let (Some(current), Some(display), Some(make_current)) =
+            (self.egl.glx_current_context, self.egl.glx_current_display, self.egl.glx_make_current)
+        else {
+            return;
+        };
+        // SAFETY: all three take no arguments or values obtained from the
+        // other two, and releasing a context is valid whether or not one is
+        // current. `None` is the null drawable and a null context is
+        // "unbind", which is exactly what is wanted.
+        unsafe {
+            if current().is_null() {
+                return;
+            }
+            let dpy = display();
+            if !dpy.is_null() {
+                make_current(dpy, 0, std::ptr::null_mut());
+            }
+        }
+    }
+
     /// Bind this context to the calling thread.
     pub fn make_current(&self) -> Result<(), String> {
+        self.yield_glx();
         // SAFETY: all three handles were produced by `create` and outlive the
         // process; EGL allows this exactly while the context is current on no
         // other thread, which the caller guarantees.
         if unsafe { (self.egl.make_current)(self.display, self.surface, self.surface, self.context) } == 0 {
             return Err(format!(
-                "eglMakeCurrent failed (EGL error {:#x}). Another thread may still hold the context.",
+                "eglMakeCurrent failed (EGL error {:#x}). Another thread may hold the context, or \
+                 another graphics API holds this one.",
                 unsafe { (self.egl.get_error)() }
             ));
         }

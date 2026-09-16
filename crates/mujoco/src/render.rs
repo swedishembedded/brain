@@ -219,6 +219,14 @@ impl Renderer {
             ));
         }
 
+        // Handed back immediately. A GL context left current on the thread is
+        // not inert: anything else that wants one - an SDL window bringing up
+        // X11, for instance - has to switch the thread away from it, and the
+        // EGL-to-GLX transition is refused by the X server with a BadAccess on
+        // X_GLXMakeCurrent. The context is therefore taken only around the
+        // calls that actually need it, which is `render` and the teardown.
+        egl.release();
+
         Ok(Renderer {
             mj: mj.clone(),
             egl,
@@ -256,6 +264,8 @@ impl Renderer {
     /// texture may not want to pay for it.
     pub fn render(&mut self, model: &Model, data: &Data) -> Result<&[u8], String> {
         let r = self.mj.lib().render.as_ref().ok_or("this MuJoCo build exposes no GL renderer")?;
+        // Held for the duration of the frame and no longer - see `new`.
+        self.egl.make_current()?;
         let viewport = Rect { left: 0, bottom: 0, width: self.width as c_int, height: self.height as c_int };
         // SAFETY: all four blobs were initialised by MuJoCo in `new` and are
         // only ever passed back to it; the pixel buffer is exactly w*h*3 bytes,
@@ -275,6 +285,7 @@ impl Renderer {
             (r.render)(viewport, self.scene.ptr(), self.context.ptr());
             (r.read_pixels)(self.rgb.as_mut_ptr(), std::ptr::null_mut(), viewport, self.context.ptr());
         }
+        self.egl.release();
         Ok(&self.rgb)
     }
 
@@ -313,9 +324,13 @@ impl Drop for Renderer {
         // and are freed while the context is still current - which is the only
         // state in which deleting GL objects does anything at all.
         if let Some(r) = self.mj.lib().render.as_ref() {
-            unsafe {
-                (r.free_scene)(self.scene.ptr());
-                (r.free_context)(self.context.ptr());
+            // Deleting GL objects with no context current does nothing at all,
+            // silently, so the context is taken back for the teardown.
+            if self.egl.make_current().is_ok() {
+                unsafe {
+                    (r.free_scene)(self.scene.ptr());
+                    (r.free_context)(self.context.ptr());
+                }
             }
         }
         // Only now may another thread take the context. `_exclusive` is

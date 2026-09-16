@@ -84,6 +84,16 @@ impl View {
     /// MuJoCo's renderer is built against one model and sizes its scene
     /// buffers from it.
     pub fn open(creature: &Creature, title: &str, width: u32, height: u32) -> Result<View, Error> {
+        // The RENDERER first, and the order is load-bearing in both
+        // directions. Building the GL context after SDL has brought up X11
+        // fails outright on a Mesa stack - EGL cannot get a screen once the
+        // display server owns one. Building it first and LEAVING IT CURRENT
+        // fails the other way, because SDL's X11 setup then has to switch the
+        // thread off a foreign context and the server refuses with a BadAccess
+        // on X_GLXMakeCurrent.
+        //
+        // So: build it first, and have it hand the context back the moment it
+        // is done. Nothing holds a current context except the frame itself.
         let (model, _) = creature.body_handles();
         let renderer = mujoco::Renderer::for_model(creature.mujoco(), model, width, height).map_err(Error::Backend)?;
         let win = wm_display::window::SdlWindow::new(title, width, height, 1).map_err(Error::Backend)?;
