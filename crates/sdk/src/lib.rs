@@ -37,6 +37,7 @@
 //! | `forecast` | [`ForecastPipeline`] -- time-series forecasting (kronos, timesfm3) |
 //! | `text` | [`TextGenerationPipeline`] -- text generation (qwen3, from a local checkpoint path) |
 //! | `vision` | [`EmbeddingPipeline`] -- text embedding (CLIP); named for the `brain_arch::Domain` it resolves under, not the capability, since there is no `Embedding` domain |
+//! | `audio` | [`TranscribePipeline`] -- speech-to-text (qwen3-asr, offline) |
 //! | `full` | every surface; this is `default` |
 //!
 //! `device` and `resolve` are infrastructure tiers that a surface selects for
@@ -69,6 +70,8 @@
 //! over its own model stack, you can procure our services by sending an
 //! email to info@swedishembedded.com.
 
+#[cfg(feature = "audio")]
+mod asr;
 #[cfg(feature = "creature")]
 mod creature;
 #[cfg(feature = "device")]
@@ -100,6 +103,8 @@ pub use gpu_core::devices::DeviceSpec as Device;
 #[cfg(feature = "resolve")]
 pub use model::dispatch::Precision as DType;
 
+#[cfg(feature = "audio")]
+pub use asr::{Transcript, TranscribePipeline, TranscribePipelineBuilder};
 #[cfg(feature = "creature")]
 pub use creature::{Arena, Beat, Creature, CreatureBuilder};
 #[cfg(feature = "vision")]

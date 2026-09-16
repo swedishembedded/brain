@@ -28,7 +28,7 @@ path = "src/lib.rs"
 # baseline (`Cargo.toml`'s `brain = { default-features = false }`) is what
 # makes a consumer name its surfaces explicitly.
 default = ["full"]
-full = ["image", "creature", "forecast", "text", "vision"]
+full = ["image", "creature", "forecast", "text", "vision", "audio"]
 
 # --- surfaces: one per brain_arch::Domain the SDK has a public type for.
 #     A surface is the only thing a consumer names.
@@ -63,6 +63,11 @@ text = ["device", "dep:brain-qwen3", "dep:brain-data", "dep:brain-checkpoint", "
 # pipeline (detection, segmentation, depth) joins this SAME feature rather
 # than getting its own, for the same reason.
 vision = ["resolve", "dep:brain-clip"]
+# `brain::TranscribePipeline`. Covers qwen3-asr (offline, fixed window) only;
+# nemotronasr (streaming, true batched forward across concurrent windows)
+# needs a genuinely different call shape and is a tracked future extension,
+# not folded in here.
+audio = ["resolve", "dep:brain-qwen3asr", "dep:brain-audio"]
 
 # --- infrastructure: selected BY a surface, never named by a consumer.
 # `brain::Device`.
@@ -79,6 +84,7 @@ resolve = ["device", "dep:brain-loader", "dep:brain-model"]
 brain-capability.workspace = true
 brain-modelref.workspace = true
 brain-modelstore.workspace = true
+brain-audio = { workspace = true, optional = true }
 brain-checkpoint = { workspace = true, optional = true }
 brain-clip = { workspace = true, optional = true }
 brain-connectome = { workspace = true, optional = true }
@@ -95,6 +101,7 @@ brain-model = { workspace = true, optional = true }
 brain-mujoco = { workspace = true, optional = true }
 brain-neuro = { workspace = true, optional = true }
 brain-qwen3 = { workspace = true, optional = true }
+brain-qwen3asr = { workspace = true, optional = true }
 brain-timesfm3 = { workspace = true, optional = true }
 brain-s3dit = { workspace = true, optional = true }
 brain-wm-display = { workspace = true, optional = true }

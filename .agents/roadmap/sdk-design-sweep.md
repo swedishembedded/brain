@@ -522,6 +522,60 @@ composed in first); ClipSpec's optional `"eva"` role (the EVA-CLIP image
 tower) is not exposed by this pipeline at all, since it is out of scope for
 TEXT embedding.
 
+### Phase 2.4 - `TranscribePipeline` (done, scoped to qwen3-asr) - and a real bug found while building it
+
+Covers **qwen3-asr only** (offline, fixed audio window), resolved through
+`loader::resolve_structured` against `qwen3asr::spec::Qwen3AsrSpec`'s one
+`"weights"` role. nemotronasr (the *streaming* ASR model, true batched
+forward across concurrent windows) needs a genuinely different call shape
+(feed chunks, get segments back incrementally) and is a tracked future
+extension, not folded in - same treatment ArcFace got in Phase 2.3.
+
+`qwen3asr::caps::QwenAsrProvider::load` + `.transcribe(wav)` was already the
+cleanest construction+call shape of any pipeline covered so far - a single
+directory for both weights and tokenizer, and `.transcribe` already returns
+`(String, Vec<u32>)` with no `Invocation`/`Outcome` ceremony needed. The one
+real design decision was surfacing `qwen3asr::caps::window_truncation`
+explicitly as `Transcript::truncated` - audio past the fixed decode window
+is DROPPED, and audit F18 (named in that function's own doc) is exactly the
+"a caller trusted a silently-partial transcript" bug class this field
+exists to prevent; silently truncating in this pipeline would have
+reintroduced the same bug class one layer up.
+
+**A real, independent bug was found and fixed while testing this pipeline,
+in `crates/qwen3asr` itself, not in `crates/sdk`**: `import::
+map_audio_encoder` PANICKED the whole process on an incomplete checkpoint
+(a missing tensor), reachable from both of `Qwen3Asr`'s public loaders
+(`from_hf`, `from_hf_windowed`) - exactly the "never panic on caller-reachable
+input" boundary this whole sweep exists to enforce, just one layer below the
+SDK this time. Fixed by collecting missing tensor names into a side vec
+instead of panicking inside the lookup closure, returning a named `Err`
+listing how many tensors are missing and the first one, once construction
+finishes - a minimal, surgical change (the closure's failure mode, not its
+dozens of call sites) rather than a rewrite. `Qwen3Asr::from_tensors` (the
+one function that was NOT already `Result`-shaped) gained one, its single
+caller (`from_hf`) already returned `Result` so the change was purely
+additive there. Two new regression tests pin this directly in
+`crates/qwen3asr` itself (an empty tensor map errors by name; a complete
+minimal one still builds) - not only proven indirectly through the SDK's own
+fixture, which is what surfaced it in the first place (a synthetic fixture
+with a config classifying correctly but no real tensors is exactly the
+"reachable incomplete checkpoint" case this bug needed to hit).
+
+Tested (SDK side) against a real local, synthetic, fully-offline fixture
+reproducing `qwen3asr::spec::Qwen3AsrSpec`'s own classification schema (a
+`config.json` declaring `architectures: ["Qwen3ASRForConditionalGeneration"]`
+plus a loose safetensors shard, matching the same `HfDir`-collapse
+requirement `forecast_pipeline.rs`'s kronos fixture already documents):
+resolution proven through to `QwenAsrProvider::load` being reached with the
+right directory, then - now correctly - a clean `Error::Backend`, never a
+panic.
+
+**Not done, tracked for later**: nemotronasr's streaming call shape (see
+above); CLI migration (there is no dedicated ASR CLI file at all to migrate,
+only `resident_asr.rs` - the same smaller, contained gap `EmbeddingPipeline`
+already noted for CLIP).
+
 Findings 8, 11, 14, 18-20, 23-24 are real but not yet milestoned - pick them
 up opportunistically when touching the same file for another reason, or spin
 them into their own milestone if they start blocking something.

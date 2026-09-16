@@ -120,6 +120,21 @@ forward rather than a loop. Behind the `vision` Cargo feature - CLIP's own
 registered architecture domain, since there is no dedicated embedding
 domain in this workspace.
 
+## Speech-to-text
+
+```rust
+let pipe = brain::TranscribePipeline::from_pretrained("Qwen/Qwen3-ASR-1.7B")?;
+let out = pipe.transcribe_wav(&std::fs::read("clip.wav")?)?;
+println!("{}", out.text);
+```
+
+`transcribe_wav` accepts any WAV file (channel count/sample rate handled
+automatically); `transcribe(samples)` takes already-16 kHz mono f32 PCM
+directly. `out.truncated` is `Some((available_secs, window_secs))` when the
+clip exceeded this pipeline's fixed decode window (`.builder(id).window_secs(60.0)`
+to widen it) - audio past the window is dropped, and this field says so
+rather than returning a silently partial transcript.
+
 ## Features
 
 Name the surfaces you use and you get their dependencies and nothing else:
@@ -131,6 +146,7 @@ Name the surfaces you use and you get their dependencies and nothing else:
 | `forecast` | `ForecastPipeline` - time-series forecasting |
 | `text` | `TextGenerationPipeline` - text generation, from a local checkpoint path |
 | `vision` | `EmbeddingPipeline` - CLIP text embedding (named for CLIP's registered domain, not the capability) |
+| `audio` | `TranscribePipeline` - speech-to-text (qwen3-asr, offline) |
 | `full` | every surface; this is the default |
 
 ## Errors

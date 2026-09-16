@@ -370,6 +370,7 @@ checksum = "dc0b364ead1874514c8c2855ab558056ebfeb775653e7ae45ff72f28f8f3166c"
 name = "brain"
 version = "1.1.0"
 dependencies = [
+ "brain-audio",
  "brain-capability",
  "brain-checkpoint",
  "brain-clip",
@@ -389,6 +390,7 @@ dependencies = [
  "brain-mujoco",
  "brain-neuro",
  "brain-qwen3",
+ "brain-qwen3asr",
  "brain-s3dit",
  "brain-testutil",
  "brain-timesfm3",
