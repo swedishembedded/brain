@@ -121,7 +121,17 @@ pub const PUBLISHED_TIMESTEP: f64 = 1e-4;
 /// SOFTER floor, and the legs sink further into it before it pushes back.
 /// Leave it at the published value for anything being measured.
 pub fn ground_model(fruitfly_xml: &Path, dir: &Path, timestep: f64) -> Result<PathBuf, String> {
-    let mut text = model_text_with_absolute_assets(fruitfly_xml)?;
+    // A SCENE fails here rather than three layers down, because the failure it
+    // otherwise produces names a compiler attribute and not the mistake. A
+    // caller who has been passing `floor.xml` - which works for every other
+    // purpose, since it is included verbatim - gets told what is different
+    // about this one.
+    let mut text = model_text_with_absolute_assets(fruitfly_xml).map_err(|e| {
+        format!(
+            "{e}\n  a non-default timestep REWRITES the body model, so this needs the fruit-fly MJCF \
+             itself rather than a scene that includes it"
+        )
+    })?;
     replace_exactly(&mut text, "timestep=\"0.0001\"", &format!("timestep=\"{timestep}\""), 1, "the timestep")?;
     let out = dir.join("fruitfly-ground.xml");
     std::fs::write(&out, text).map_err(|e| format!("{}: {e}", out.display()))?;

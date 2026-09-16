@@ -176,3 +176,44 @@ fn two_identical_episodes_are_identical_and_a_reset_keeps_what_was_configured() 
     let again = run(&mut fly, 1.0);
     assert_eq!(lesioned.net, again.net, "the lesion did not persist across a second reset");
 }
+
+/// A tuning has to reach the animal, and a tuning that names nothing has to be
+/// visible as such.
+///
+/// The silent failure this guards: a tuning whose gains name the bare cord's
+/// cell classes, applied to a creature built on the joined brain-and-cord
+/// network, matches nothing, changes almost nothing, and leaves the caller
+/// believing the animal is tuned. `Applied` reports the count so a caller can
+/// refuse it - the SDK does.
+#[test]
+fn a_tuning_reaches_the_animal_and_reports_what_it_did_not_recognise() {
+    let Some(mut fly) = rig() else { return };
+    let Some(root) = std::env::var_os("BRAIN_CONNECTOME_DIR").filter(|v| !v.is_empty()) else { return };
+    let (neurons, edges) = connectome::find(std::path::PathBuf::from(root), "manc").expect("MANC");
+    let c = connectome::load("manc", &neurons, &edges).expect("MANC loads");
+
+    let before = run(&mut fly, 1.0);
+
+    let mut t = fly::Tuning::default();
+    // Silence the descending population outright: whatever else changes, an
+    // animal whose command cannot reach its cord is a different animal.
+    t.set("gain:descending", 0.0);
+    t.set("activation_gain", 0.2);
+    t.set("not_a_parameter", 1.0);
+    let report = t.apply(&mut fly, &c, Wiring::default()).expect("a tuning applies");
+    assert_eq!(report.gains, 1, "the one gain it names should have matched");
+    assert_eq!(report.unknown, vec!["not_a_parameter".to_string()]);
+
+    let after = run(&mut fly, 1.0);
+    assert_ne!(before.net, after.net, "the tuning did not reach the animal");
+    assert_eq!(fly.coupling().activation_gain, 0.2, "a non-gain parameter did not apply");
+
+    // A tuning naming nothing this connectome has is not an error here - it is
+    // a report of zero, which is what lets the SDK refuse it with a message
+    // naming the file.
+    let mut foreign = fly::Tuning::default();
+    foreign.set("gain:optic_lobe_intrinsic", 2.0);
+    let report = foreign.apply(&mut fly, &c, Wiring::default()).expect("still applies");
+    assert_eq!(report.gains, 0, "a cord has no optic lobe");
+    assert_eq!(report.unknown, vec!["gain:optic_lobe_intrinsic".to_string()]);
+}
