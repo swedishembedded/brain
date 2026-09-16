@@ -223,6 +223,19 @@ pub struct Tick {
     pub motor_spikes: u32,
     /// Neurons that fired anywhere in the cord.
     pub total_spikes: u32,
+    /// Wall time inside the nervous system: the drive upload, the neural
+    /// ticks, and the spike readback each one waits for.
+    ///
+    /// Reported per tick rather than left to a profiling build because this
+    /// loop has a HARD deadline - 2 ms at 500 Hz - and which half is over it
+    /// is not guessable from the outside. The two are also fixed by different
+    /// things (the cord by the device the network is on, the body by MuJoCo's
+    /// own solver), so a single "slow" number sends the reader to the wrong
+    /// one as often as not. Two `Instant::now()` pairs per control tick is
+    /// about 40 ns against a 2 ms budget.
+    pub cord: std::time::Duration,
+    /// Wall time inside MuJoCo: `physics_per_control` steps of the body.
+    pub body: std::time::Duration,
 }
 
 /// A connectome, a body, and the wiring between them.
@@ -293,6 +306,10 @@ pub struct Fly {
     /// Per-neuron current for the next tick, rebuilt from `command` plus
     /// sensing every step so a lesioned channel leaves nothing behind.
     drive: Vec<f32>,
+    /// This tick's spikes, read back from the device. A field rather than a
+    /// local because `step` runs on a 2 ms deadline and this is one allocation
+    /// of a neuron-sized buffer per neural tick - 92 KB on the fly's cord.
+    spike: Vec<f32>,
     control_tick: u64,
 }
 
@@ -403,6 +420,7 @@ impl Fly {
             last_proprio_spikes: 0,
             command: vec![0.0; n_desc],
             drive: vec![0.0; n],
+            spike: vec![0.0; n],
             control_tick: 0,
         })
     }
@@ -766,6 +784,7 @@ impl Fly {
 
     /// One control tick: sense, think, act, integrate.
     pub fn step(&mut self) -> Result<Tick, String> {
+        let began = std::time::Instant::now();
         let qpos = self.data.get(&self.model, StateSpec::QPOS);
         let qvel = self.data.get(&self.model, StateSpec::QVEL);
 
@@ -787,7 +806,6 @@ impl Fly {
 
         // --- think -------------------------------------------------------
         self.net.drive(Port::Drive, &self.drive)?;
-        let mut spike = vec![0.0f32; self.drive.len()];
         let mut motor_spikes = 0u32;
         let mut total_spikes = 0u32;
         // Activation decays once per CONTROL tick, not once per neural tick:
@@ -809,7 +827,8 @@ impl Fly {
         }
         for _ in 0..self.timing.neural_per_control {
             self.net.step();
-            self.net.read(Port::Spike, &mut spike)?;
+            self.net.read(Port::Spike, &mut self.spike)?;
+            let spike = &self.spike;
             total_spikes += spike.iter().filter(|&&s| s > 0.5).count() as u32;
             self.last_proprio_spikes =
                 self.sensors.iter().filter(|s| spike[s.neuron as usize] > 0.5).count() as u32;
@@ -852,6 +871,8 @@ impl Fly {
             }
         }
 
+        let cord = began.elapsed();
+
         // --- act ---------------------------------------------------------
         let ctrl: Vec<f64> = self
             .activation
@@ -862,6 +883,7 @@ impl Fly {
         self.data.set(&self.model, StateSpec::CTRL, &ctrl)?;
 
         // --- integrate ---------------------------------------------------
+        let began = std::time::Instant::now();
         match self.wingbeat {
             // The stroke is written EVERY physics step. At 218 Hz a wingbeat
             // lasts 4.6 ms and a control tick is 2 ms, so writing it once per
@@ -894,8 +916,10 @@ impl Fly {
             }
         }
 
+        let body = began.elapsed();
+
         self.control_tick += 1;
-        Ok(Tick { control_tick: self.control_tick, motor_spikes, total_spikes })
+        Ok(Tick { control_tick: self.control_tick, motor_spikes, total_spikes, cord, body })
     }
 
     fn sensor_current(&self, s: &Sensor, qpos: &[f64], qvel: &[f64]) -> f32 {

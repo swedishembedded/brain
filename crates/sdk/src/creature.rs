@@ -480,7 +480,13 @@ impl Creature {
     /// Advance one control tick: 2 ms of body time.
     pub fn step(&mut self) -> Result<Beat, Error> {
         let t = self.inner.step().map_err(backend)?;
-        Ok(Beat { tick: t.control_tick, spikes: t.total_spikes, motor_spikes: t.motor_spikes })
+        Ok(Beat {
+            tick: t.control_tick,
+            spikes: t.total_spikes,
+            motor_spikes: t.motor_spikes,
+            cord: t.cord,
+            body: t.body,
+        })
     }
 
     /// Advance `ticks` control ticks, returning their totals.
@@ -491,6 +497,8 @@ impl Creature {
             out.tick = b.tick;
             out.spikes += b.spikes;
             out.motor_spikes += b.motor_spikes;
+            out.cord += b.cord;
+            out.body += b.body;
         }
         Ok(out)
     }
@@ -558,4 +566,11 @@ pub struct Beat {
     pub spikes: u32,
     /// Of those, motor neurons.
     pub motor_spikes: u32,
+    /// Wall time spent in the nervous system, summed over the ticks this beat
+    /// covers. See [`Creature::step_for`] - a loop that misses real time needs
+    /// to know WHICH half of the animal is over budget, and the two are fixed
+    /// by different things.
+    pub cord: std::time::Duration,
+    /// Wall time spent in the body's physics, over the same ticks.
+    pub body: std::time::Duration,
 }

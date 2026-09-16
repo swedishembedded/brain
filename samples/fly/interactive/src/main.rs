@@ -350,7 +350,8 @@ fn run() -> Result<(), Error> {
         } else {
             fly.step_for(ticks_per_frame)?
         };
-        let realtime = (ticks_per_frame as f64 / CONTROL_HZ) / began.elapsed().as_secs_f64().max(1e-9);
+        let simulated = began.elapsed();
+        let realtime = (ticks_per_frame as f64 / CONTROL_HZ) / simulated.as_secs_f64().max(1e-9);
 
         let [x, y, z] = fly.position();
         let vel = fly.velocity();
@@ -387,7 +388,9 @@ fn run() -> Result<(), Error> {
         // fixed frame in about a second, and an empty floor on screen reads as
         // the fly having failed rather than as the camera having been left.
         view.follow(&fly, 1.0);
+        let drawing = Instant::now();
         view.show(&fly, &status)?;
+        let drawn = drawing.elapsed();
 
         // Once, on the first frame: did the blit path carry the frame?
         //
@@ -426,11 +429,26 @@ fn run() -> Result<(), Error> {
         // window presented once and then stalled for a minute inside the
         // simulator looks exactly like a window that never presented, and the
         // two have nothing in common.
+        //
+        // Broken down, because "slow" is not an actionable report and the four
+        // parts have nothing to do with each other: the CORD is the spiking
+        // network and the device it is on, the BODY is MuJoCo's solver on one
+        // CPU thread, LOOP is this sample's own sensing and bookkeeping, and
+        // DRAW is the offscreen render plus the readback and blit that put it
+        // on the screen. Each one is fixed by something different, and the
+        // first question anyone asks about a 0.05x frame is which of them it
+        // was.
         if frames == 1 || frames == 10 || frames.is_multiple_of(150) {
+            let ms = |d: std::time::Duration| 1000.0 * d.as_secs_f64();
+            let loop_ms = ms(simulated) - ms(beat.cord) - ms(beat.body);
             eprintln!(
-                "frame {frames}: {} presented, {:.0} ms/frame, {realtime:.2}x realtime",
+                "frame {frames}: {} presented, {:.0} ms/frame, {realtime:.2}x realtime \
+                 | cord {:.1} + body {:.1} + loop {loop_ms:.1} + draw {:.1} ms over {ticks_per_frame} ticks",
                 view.presented(),
-                1000.0 * began.elapsed().as_secs_f64()
+                ms(simulated) + ms(drawn),
+                ms(beat.cord),
+                ms(beat.body),
+                ms(drawn),
             );
         }
         if args.frames != u64::MAX && frames.is_multiple_of(30) {

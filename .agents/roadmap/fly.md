@@ -439,10 +439,15 @@ it against the scan+sort reference at `max|d| == 0`.
      1e-3 the cord is 1.1% active with ZERO motor spikes - alive, and driving
      nothing.
 
-  Also measured, counter to the obvious guess: a neural step without a readback
-  only SUBMITS work (0.068 ms), while step-then-readback costs 0.807 ms. A
-  neural tick costs one GPU round trip, not kernel time, which is why
-  `neural_per_control` defaults to 1.
+  Also measured here, and **wrong - see M8**: that a neural step without a
+  readback only SUBMITS work (0.068 ms) while step-then-readback costs
+  0.807 ms, therefore a neural tick costs one GPU round trip rather than
+  kernel time. The first half is true and the conclusion does not follow. The
+  loop that produced 0.068 ms left 500 submissions queued behind it, so the
+  next loop measured paid for them, and the kernel time the round trip was
+  supposed to dwarf was in fact most of the 0.807 ms. `neural_per_control`
+  still defaults to 1, now for the ordinary reason that a neural tick is not
+  free.
 * **M5 - learning to walk. APPARATUS BUILT, NOT WALKING.** `crates/fly::learn`
   runs episodes under a control matrix (`Learning`, `Frozen`, `ShuffledReward`)
   with reward as forward displacement and a neuromodulator that is a reward
@@ -773,6 +778,72 @@ it against the scan+sort reference at `max|d| == 0`.
   against the recorded saccade-evasion trajectories.
 * **M7 - serving contract.** `fly::caps`, residency adapter, D-Bus, example,
   per `.agents/rules/serving-contract.md`.
+
+* **M8 - real time. THE CORD IS NO LONGER THE BOTTLENECK; THE BODY IS.**
+  Reported from a Meteor Lake laptop (Intel Arc iGPU + 22 CPU threads) where
+  the sample ran at **0.05x real time, 754 ms per frame**. Profiled rather
+  than guessed - `crates/fly/examples/loop_profile.rs` is the instrument, and
+  it had to be fixed first (see M4 above: it measured a backlog).
+
+  **Where the time went: the synaptic gather kernel, at 25.5 ms per neural
+  tick against a 2.00 ms budget.** Not the round trip, not MuJoCo, not the
+  window. `syn_gather_csc` ran one 64-thread WORK-GROUP per postsynaptic
+  neuron, striding the neuron's edge range so the loads coalesce, then folding
+  64 partials redundantly in every thread. Both halves of that are right for a
+  matrix with long rows and wrong for a connectome: the fly's cord averages 58
+  incoming edges per neuron at the synapse floor `Wiring` runs, so the fixed
+  per-neuron cost (a barrier, a work-group allocation, 128 work-group-memory
+  adds per thread) dwarfed the ~58 multiply-adds it existed to serve. The
+  diagnostic that named it: the cost did not fall when the connectome was
+  pruned - 24.4 ms over 1.37 M edges against 69.0 ms over 5.31 M, because the
+  term that dominates scales with NEURONS.
+
+  One neural tick of the cord at the floor (23,665 neurons / 1.37 M edges):
+
+  | | Arc iGPU (wgpu) | 22-thread CPU JIT |
+  |---|---|---|
+  | work-group per neuron, redundant fold | 25.5 ms | 27.5 ms |
+  | one thread per neuron | 8.9 ms | 1.70 ms |
+  | + the sign split as a clamp pair | 6.3 ms | **0.81 ms** |
+
+  **34x on the CPU backend, 4x on the iGPU**, and the CPU number is 2.48x real
+  time for the cord alone. The second row is the shape change; the third is
+  removing `if (w[k] < 0.0)`, whose condition is the transmitter labels in edge
+  order - unpredictable per edge, and the CPU spent as long recovering from it
+  as reading the graph. `spike` is never negative, so `max(c, 0)` / `min(c, 0)`
+  produces the same two sums. `neuro_elig` had the same 64-invocations-per-
+  neuron shape and got the same treatment.
+
+  **The cord belongs on the CPU on this machine, and that is a measurement,
+  not a preference.** `brain roofline` says 23 GB/s streaming for the iGPU
+  against 68 GB/s for the CPU, and this kernel is pure streaming: 11 MB of
+  edge list per tick, ~0 arithmetic intensity. The iGPU also charges ~3 ms per
+  spike readback that the CPU backend does not charge at all. So
+  `BRAIN_DEVICE=cpu` is the fast path here and the iGPU is better spent on the
+  window. (On a discrete card with 347 GB/s the GPU is the right place; this is
+  a property of integrated graphics, not of the backend.)
+
+  **What is left is the body.** M4 measured flybody at 2.69x slower than real
+  time on its own, and nothing in this milestone touched it. The sample now
+  reports the split every frame - `cord + body + loop + draw` - so the next
+  measurement is a run on the machine that reported 0.05x, not an estimate.
+  The levers, in the order they are worth trying:
+
+  1. **Overlap the cord with the body.** They are independent within a tick if
+     the motor path may lag one control tick (2 ms), which is a conduction
+     delay rather than a fudge. `crates/mujoco` steps on the calling thread
+     and the cord's readback blocks it; submitting the neural tick as an
+     effect and integrating the body while it runs is this workspace's own
+     event/effect model applied to the one loop that does not use it. It also
+     needs the gait gates re-run, because it changes the closed loop.
+  2. **MuJoCo's own threading.** `crates/mujoco/src/sys.rs` binds `mj_step`
+     and nothing else: no `mju_threadPoolCreate`/`mju_bindThreadPool`, so the
+     island solver runs single-threaded on a 22-thread box, and no `mjOption`
+     access, so solver iterations cannot be traded against accuracy.
+  3. **The draw path.** `View::show` renders offscreen, reads the frame back
+     with a synchronous `mjr_readPixels`, reallocates the RGB buffer, and hands
+     it to a SOFTWARE SDL renderer (the sample prints `"software" renderer` on
+     this machine). None of that is measured yet, which is why it is third.
 
 M1-M4 are engineering. **M5 is the research milestone** and is where the
 schedule is honestly uncertain: the published precedents (flyvis for vision,
