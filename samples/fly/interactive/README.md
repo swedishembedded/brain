@@ -50,6 +50,34 @@ SDL_VIDEODRIVER=dummy make samples/fly/interactive/run \
   ARGS="--connectome ... --body ... --frames 150 --shot fly.ppm"
 ```
 
+## If it runs in slow motion
+
+The title bar and the periodic frame line both report the ratio to real time,
+and the frame line breaks a frame into the four things that can be slow. The
+shape of it, with the numbers standing in for whatever your machine reports:
+
+```
+frame 150: 150 presented, 41 ms/frame, 0.81x realtime | cord 13.6 + body 22.1 + loop 0.9 + draw 4.3 ms over 17 ticks
+```
+
+* **cord** - the spiking network, and the device it is on. A control tick's
+  whole budget is 2.00 ms at 500 Hz, so `cord` divided by the tick count is
+  the number to compare against it.
+* **body** - MuJoCo integrating 20 physics steps, on one thread.
+* **loop** - this sample's own sensing and bookkeeping.
+* **draw** - the offscreen render, the pixel readback, and the blit.
+
+**If `cord` dominates, try `BRAIN_DEVICE=cpu`.** The gather over the edge list
+is pure streaming - about 11 MB per tick and almost no arithmetic - so it runs
+at whatever memory bandwidth the device has. `brain roofline` measures both:
+on a Meteor Lake laptop that is 23 GB/s for the integrated GPU against 68 GB/s
+for the CPU, and the CPU backend also has no readback to wait on, which makes
+it 8x faster there. On a discrete card the GPU wins by the same argument.
+
+```bash
+BRAIN_DEVICE=cpu make samples/fly/interactive/run ARGS="..."
+```
+
 ## Options
 
 | flag | meaning |
