@@ -823,11 +823,33 @@ it against the scan+sort reference at `max|d| == 0`.
   window. (On a discrete card with 347 GB/s the GPU is the right place; this is
   a property of integrated graphics, not of the backend.)
 
-  **What is left is the body.** M4 measured flybody at 2.69x slower than real
-  time on its own, and nothing in this milestone touched it. The sample now
-  reports the split every frame - `cord + body + loop + draw` - so the next
-  measurement is a run on the machine that reported 0.05x, not an estimate.
-  The levers, in the order they are worth trying:
+  **Then the window, which was the other half and was hiding behind the
+  readback.** With the cord fixed the frame was 613 ms of `draw`, and
+  `mjr_readPixels` appeared to be all of it. It was not: a `glFinish` after
+  `mjr_render` moved 590 of those milliseconds onto the GPU where they were
+  actually spent, and the readback is 7 to 25 ms. What the GPU was doing is
+  the published model's `<visual>` block, inherited silently through the
+  scene's `<include>`: `shadowsize="8192"` and `offsamples="24"`, figure
+  quality, in a window somebody is watching. Shadows cost a flat ~25 ms at any
+  map size below 1024 - the cost is re-drawing 272,550 triangles from the
+  light, not the map - so the generated scene now states its own
+  `flybody::Look`, shadows off and 4x antialiasing, and `Look::still()` hands
+  the model's numbers back for a picture. **316 ms to 4.6 ms of GPU draw.**
+
+  **What is left is the body, and it does not optimise away.** Physics cost
+  per simulated second is `1/timestep` integrator steps at a roughly fixed
+  cost each. MuJoCo's own profiler on this scene, one P-core: 437 us per step,
+  42% position (half of that collision), 35% constraint - and its own verdict,
+  0.30x real time, which is M4's 2.69x-slower measured again from the other
+  side. The engine threadpool (`--nenginethread`) made no measurable
+  difference; this model has too few islands. So the dial is the timestep, and
+  it is now reachable (`--timestep`, `CreatureBuilder::timestep`): 0.62x at
+  2e-4, 1.5x at 4e-4, against a floor that has to soften in step to stay
+  solvable. **Measured end to end on the machine that reported 0.05x: 0.55x
+  real time at 4e-4, steady over 150 frames, at cord 1.3 + body 2.4 ms per
+  control tick and 15 ms of draw per frame.**
+
+  Three things are known and not done:
 
   1. **Overlap the cord with the body.** They are independent within a tick if
      the motor path may lag one control tick (2 ms), which is a conduction
@@ -836,14 +858,16 @@ it against the scan+sort reference at `max|d| == 0`.
      effect and integrating the body while it runs is this workspace's own
      event/effect model applied to the one loop that does not use it. It also
      needs the gait gates re-run, because it changes the closed loop.
-  2. **MuJoCo's own threading.** `crates/mujoco/src/sys.rs` binds `mj_step`
-     and nothing else: no `mju_threadPoolCreate`/`mju_bindThreadPool`, so the
-     island solver runs single-threaded on a 22-thread box, and no `mjOption`
-     access, so solver iterations cannot be traded against accuracy.
-  3. **The draw path.** `View::show` renders offscreen, reads the frame back
-     with a synchronous `mjr_readPixels`, reallocates the RGB buffer, and hands
-     it to a SOFTWARE SDL renderer (the sample prints `"software" renderer` on
-     this machine). None of that is measured yet, which is why it is third.
+  2. **The readback and the blit**, now the largest part of `draw`: a
+     synchronous `mjr_readPixels` of 2 MB, a reallocated RGB buffer, and a
+     SOFTWARE SDL renderer (the sample prints `"software" renderer` on this
+     machine). A PBO readback one frame behind, or presenting the FBO
+     directly, removes the GPU-to-CPU-to-GPU round trip entirely.
+  3. **`mjOption` is not bound** - `crates/mujoco/src/sys.rs` binds `mj_step`
+     and nothing else - so solver iterations, the friction cone and
+     `noslip_iterations` cannot be traded against accuracy from here. The
+     model sets an elliptic cone and 3 noslip iterations, and dropping the
+     latter measured ~20% on its own.
 
 M1-M4 are engineering. **M5 is the research milestone** and is where the
 schedule is honestly uncertain: the published precedents (flyvis for vision,

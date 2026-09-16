@@ -50,6 +50,13 @@ SDL_VIDEODRIVER=dummy make samples/fly/interactive/run \
   ARGS="--connectome ... --body ... --frames 150 --shot fly.ppm"
 ```
 
+## Driving the camera
+
+Drag to orbit around the fly, right-drag (or middle-drag) to pan, wheel to
+zoom. The camera stays locked on the animal wherever it goes, so a pan is an
+offset from it rather than a place: look at the ground beside the fly and you
+keep looking beside the fly as it walks off.
+
 ## If it runs in slow motion
 
 The title bar and the periodic frame line both report the ratio to real time,
@@ -66,6 +73,15 @@ frame 150: 150 presented, 41 ms/frame, 0.81x realtime | cord 13.6 + body 22.1 + 
 * **body** - MuJoCo integrating 20 physics steps, on one thread.
 * **loop** - this sample's own sensing and bookkeeping.
 * **draw** - the offscreen render, the pixel readback, and the blit.
+
+**If `body` dominates, it is MuJoCo and `--timestep` is the only real dial.**
+The body costs `1/timestep` integrator steps per simulated second at a roughly
+fixed cost each, so it does not optimise away. MuJoCo's own `testspeed` on this
+scene, one P-core: 0.30x real time at the published 1e-4, 0.62x at 2e-4, 1.5x
+at 4e-4. It is a FIDELITY trade, not a free one - the floor's contact time
+constant scales with the step, so a coarser step means a softer floor and legs
+that sink further into it. Measure gait at the published value; use this to
+watch the animal move at its own speed.
 
 **If `cord` dominates, try `BRAIN_DEVICE=cpu`.** The gather over the edge list
 is pure streaming - about 11 MB per tick and almost no arithmetic - so it runs
@@ -89,6 +105,7 @@ BRAIN_DEVICE=cpu make samples/fly/interactive/run ARGS="..."
 | `--shot FILE` | write the last frame as a PPM |
 | `--shuffled-connectome` | the structural control: same degrees, shuffled wiring |
 | `--plastic` | let synapses change while it runs |
+| `--timestep X` | integrate the body at X seconds instead of the published 1e-4 |
 
 ## What it does NOT show
 
