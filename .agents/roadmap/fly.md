@@ -29,7 +29,7 @@ What remains, per verb:
 |---|---|
 | **moves its legs** | done - 330 motor neurons on 44 actuators, the loop closes at 0.55x real time |
 | **walks** | the reward and the search exist and both work; the number is M12's |
-| **flies** | the airframe flies and the objective is gated; steering is untrained |
+| **flies** | 8.9 BL/s and 3x the airtime of the imported wiring, upright, and 21x a degree-matched shuffle of it - but aloft for a quarter of an episode, not sustained |
 | **explores** | the olfactory chain carries end to end and is lateralised; steering is untrained |
 
 `brain fly walk` fetches the MANC connectome, runs all 23,188 neurons and
@@ -1030,8 +1030,45 @@ it against the scan+sort reference at `max|d| == 0`.
 
   It replaces coordinate hill-climbing, which needs `2d` evaluations per step
   and stalls on any ridge that is not axis-aligned. `examples/walk_search` runs
-  it, leads with the connectome as imported, and takes `SHUFFLE=1` for the
-  degree-matched structural control.
+  it on any of the four objectives (`ARENA=air` for flight, `FOOD=x,y,z` for
+  chemotaxis, `CNS=brain` for the joined network), writes its answer as a
+  `fly::Tuning`, and `IN=` continues from one.
+
+  **A search's own best score is the number least worth trusting** - it is the
+  maximum of a noisy sample, so it is biased upward by construction, and it is
+  reported by the code that was trying to make it large. `examples/replay`
+  re-measures a tuning cold against four rows, and the last two are what make
+  the first two mean anything.
+
+  **FLIGHT, 25 generations, replayed:**
+
+  | condition | score | net cm | airborne | BL/s | tipped | spikes |
+  |---|---|---|---|---|---|---|
+  | as imported | 0.033 | 0.38 | 0.088 | 0.75 | 0.64 | 83,458 |
+  | **tuned** | **1.113** | **4.44** | **0.251** | **8.87** | **0.22** | 589,077 |
+  | paralysed | 0.039 | 0.46 | 0.085 | 0.92 | 1.05 | 186,833 |
+  | shuffled | 0.052 | 0.51 | 0.102 | 1.02 | 1.07 | 585,437 |
+
+  Three times the airtime of the published wiring at unit gains, twelve times
+  the travel, thirty-three times the score, finishing upright at a fifth of a
+  radian. **It is not sustained flight**: a quarter of a two-second episode is
+  half a second aloft.
+
+  **The shuffled row is the result about the CONNECTOME.** Same tuning, same
+  body, same command, on a degree-matched shuffle - every in-degree preserved,
+  the weight multiset preserved exactly, shuffled after signing so the
+  excitatory/inhibitory split is identical, and only which cell contacts which
+  destroyed. Twenty-one times worse, and it finishes on its back.
+
+  The spike counts close it: **589,077 against 585,437**. The shuffle is not
+  quieter and not silent, it is exactly as active, and its activity does not
+  fly the animal. "The search found a way to make the cord fire" predicts
+  those two numbers to differ, and they do not.
+
+  This control is stronger than the one the M5 rows above used, which searched
+  the shuffle separately and compared the winners: two best-of-N maxima are two
+  draws from the tail of a noisy distribution. Holding the parameters fixed and
+  changing only the graph asks the question directly.
 
 M1-M4 are engineering. **M5 is the research milestone** and is where the
 schedule is honestly uncertain: the published precedents (flyvis for vision,
