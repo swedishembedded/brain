@@ -15,6 +15,7 @@ framework. This is its full documentation — what's on the website and what
 ## Using brain
 
 - [The `brain` command line](using/cli.md)
+- [The Rust SDK](using/sdk.md) - the embeddable `brain` crate: no CLI process, no server.
 - [Models and weights](using/models-and-weights.md) — model ids, auto-fetch, importing your own checkpoints.
 - [Configuration](using/configuration.md) — every `BRAIN_*` environment variable, in one place.
 - [Running a server](using/serving.md)

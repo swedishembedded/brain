@@ -93,7 +93,7 @@ here (items already tracked there are not repeated - see that file's own
 | 14 | 8/4 | `crates/sdk/src/creature.rs:276-278,414-416` | `wiring()`/`wing_wiring()` return a pre-rendered human summary string; no structured/programmatic accessor | open (backlog) |
 | 15 | 3 | `crates/sdk/src/creature.rs:257-268` | `Creature::fruit_fly()` has two mandatory runtime-checked fields and no simple zero-arg path | **wontfix (M7)** - see below |
 | 16 | 13/10 | `crates/fly/examples/watch.rs:18-60` | hand-builds `Fly`/`SdlWindow`/`Renderer` independently of `Creature`/`View` | **not a violation on reconsideration (M7)** - see below |
-| 17 | 13 | `docs/` | no user-facing SDK page exists for either surface (rustdoc itself is compliant) | open (M9) |
+| 17 | 13 | `docs/` | no user-facing SDK page exists for either surface (rustdoc itself is compliant) | fixed (M9) |
 
 ### Minor / stylistic (backlog, not milestoned individually - fold into whichever nearby milestone touches that file)
 
@@ -276,7 +276,10 @@ then `crates/sdk` (M10c).
         no real gain, since the example's whole point is to exercise the
         lower-level API the SDK deliberately hides.
 - [ ] **M8** - `.capabilities()` introspection (finding 6).
-- [ ] **M9** - user-facing SDK docs page (finding 17).
+- [x] **M9** - user-facing SDK docs page (finding 17): `docs/using/sdk.md`,
+      leading with both surfaces' three-line examples before options,
+      features, errors, and the resource-safety note; registered in
+      `docs/readme.md`'s "Using brain" list next to `using/cli.md`.
 - [ ] **M10a** - `flux2::pipeline::build_resolved`, wired into `flux2::caps` + `resident_flux2.rs` (fixes the precision bug).
 - [ ] **M10b** - migrate `flux2_cli.rs` onto `build_resolved`.
 - [ ] **M10c** - migrate `crates/sdk`'s flux2 half onto `build_resolved`.
