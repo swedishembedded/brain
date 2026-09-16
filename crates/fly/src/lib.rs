@@ -21,6 +21,7 @@
 //! system, you can procure our services by sending an email to
 //! info@swedishembedded.com.
 
+pub mod gait;
 pub mod learn;
 pub mod reference;
 pub mod sense;
@@ -31,6 +32,7 @@ use gpu_core::Gpu;
 use mujoco::{Data, Model, StateSpec};
 use neuro::{DynamicalSystem, LifParams, Plastic, Port, SpikingNet};
 
+pub use gait::{analyse as analyse_gait, Gait, Trace};
 pub use reference::{ImitationReward, Reference};
 pub use sense::{Modality, Sensor};
 
@@ -133,6 +135,9 @@ pub struct Fly {
     activation: Vec<f32>,
     /// Per-actuator strength, 1.0 for an intact muscle. The body perturbation.
     muscle: Vec<f32>,
+    /// The `coxa` actuator of each leg, in `flybody::LEGS` order: the
+    /// fore-aft swing, which is the signal a stepping rhythm shows up in.
+    leg_coxa: [Option<usize>; 6],
     /// Which generalized coordinate each leg actuator moves. Established by
     /// measurement at construction, not by reading another mjModel field.
     actuator_qpos: Vec<usize>,
@@ -182,6 +187,11 @@ impl Fly {
         let sensors = sense::proprioceptors(c);
         let descending = c.population(|n| n.super_class == "descending");
         let actuator_qpos = probe_actuator_joints(&model, &mut data);
+        let mut leg_coxa: [Option<usize>; 6] = [None; 6];
+        for (i, (seg, side, _)) in flybody::LEGS.iter().enumerate() {
+            let want = flybody::LegDof::Coxa.actuator(*seg, *side);
+            leg_coxa[i] = actuator_names.iter().position(|n| *n == want);
+        }
 
         // Signed and scaled: `Connectome::csc` carries raw synapse counts,
         // which are unsigned, and a network in which every synapse excites has
@@ -208,6 +218,7 @@ impl Fly {
             descending,
             activation: vec![0.0; actuator_names.len()],
             muscle: vec![1.0; actuator_names.len()],
+            leg_coxa,
             actuator_qpos,
             actuator_names,
             proprioception: true,
@@ -216,6 +227,22 @@ impl Fly {
             drive: vec![0.0; n],
             control_tick: 0,
         })
+    }
+
+    /// Each leg's fore-aft swing command, in `flybody::LEGS` order.
+    ///
+    /// The coxa's activation rather than a sum over the leg's actuators,
+    /// because a stepping rhythm is a matter of PHASE and a sum of magnitudes
+    /// discards it: a leg swinging forward and one swinging back would look
+    /// identical. This is the same signal a scripted tripod gait drives.
+    pub fn leg_swing(&self) -> [f32; 6] {
+        let mut out = [0.0f32; 6];
+        for (o, slot) in out.iter_mut().zip(self.leg_coxa) {
+            if let Some(i) = slot {
+                *o = self.activation[i] * self.muscle[i];
+            }
+        }
+        out
     }
 
     /// Weaken or restore one muscle, `1.0` being intact and `0.0` severed.

@@ -173,6 +173,40 @@ pub fn leg_muscle(name: &str) -> Option<MuscleAction> {
     Some(MuscleAction { dof, polarity })
 }
 
+/// Which leg an actuator belongs to, from its flybody name.
+///
+/// The inverse of [`LegDof::actuator`], and it is built by matching against
+/// that function's own output rather than by parsing the name - so a rename
+/// cannot make the two disagree.
+pub fn leg_of(actuator: &str) -> Option<(Segment, Side)> {
+    use LegDof::*;
+    for seg in [Segment::T1, Segment::T2, Segment::T3] {
+        for side in [Side::Left, Side::Right] {
+            for dof in [CoxaAbduct, CoxaTwist, Coxa, FemurTwist, Femur, Tibia, Tarsus, Tarsus2] {
+                if dof.actuator(seg, side) == actuator {
+                    return Some((seg, side));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// The six legs in a fixed order, with the alternating tripod each belongs to.
+///
+/// Tripod 0 is front-left, middle-right, hind-left; an insect's alternating
+/// tripod gait swings one triangle while the other bears weight. This ordering
+/// is the vocabulary every gait measurement in this workspace uses, so that
+/// "leg 3" means the same leg everywhere.
+pub const LEGS: [(Segment, Side, usize); 6] = [
+    (Segment::T1, Side::Left, 0),
+    (Segment::T2, Side::Right, 0),
+    (Segment::T3, Side::Left, 0),
+    (Segment::T1, Side::Right, 1),
+    (Segment::T2, Side::Left, 1),
+    (Segment::T3, Side::Right, 1),
+];
+
 /// One motor neuron's connection to one actuator.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Drive {
