@@ -25,7 +25,10 @@
 //! bound to real actuators with the provenance kept intact, you can procure
 //! our services by sending an email to info@swedishembedded.com.
 
+pub mod scene;
+
 use connectome::Connectome;
+pub use scene::{flight_model, flight_scene, Flight};
 
 /// Which thoracic segment a leg belongs to. The connectome writes these as
 /// `LegNpT1`/`T2`/`T3`; flybody writes them as `_T1_`/`_T2_`/`_T3_`.
@@ -206,6 +209,130 @@ pub const LEGS: [(Segment, Side, usize); 6] = [
     (Segment::T2, Side::Left, 1),
     (Segment::T3, Side::Right, 1),
 ];
+
+/// A wing degree of freedom in flybody. Three per wing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WingDof {
+    /// Stroke position: the fore-aft sweep that does the work.
+    Yaw,
+    /// Stroke-plane deviation.
+    Roll,
+    /// Feathering: the angle of attack, which flips at each stroke reversal.
+    Pitch,
+}
+
+impl WingDof {
+    fn stem(self) -> &'static str {
+        match self {
+            WingDof::Yaw => "wing_yaw",
+            WingDof::Roll => "wing_roll",
+            WingDof::Pitch => "wing_pitch",
+        }
+    }
+
+    /// The flybody actuator name, e.g. `wing_yaw_left`.
+    pub fn actuator(self, side: Side) -> String {
+        format!("{}_{}", self.stem(), side.suffix())
+    }
+}
+
+/// What a wing muscle does, which is NOT what a leg muscle does.
+///
+/// A leg muscle moves a joint and a motor neuron's firing maps onto that
+/// joint's position. A wing muscle does not, and treating it as though it did
+/// is the single easiest way to build a fly that cannot fly.
+///
+/// The power muscles - the dorsal longitudinal and dorsoventral groups - are
+/// ASYNCHRONOUS: they are stretch-activated and contract many times per motor
+/// spike, so their firing sets how much power goes into the thorax's resonant
+/// oscillation and has no fixed phase relationship to the wingbeat at all.
+/// Driving a wing joint from a DLM motor neuron's spike train would produce a
+/// wingbeat at the motor neuron's rate, which is one or two orders of magnitude
+/// too slow.
+///
+/// The steering muscles ARE phase-locked, one spike per beat or fewer, and
+/// they act on the wing hinge's sclerites to bias the stroke rather than to
+/// drive it. So they modulate amplitude and angle of attack, per wing.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum WingAction {
+    /// Power to the thoracic oscillator: sets wingbeat amplitude, not phase.
+    Power,
+    /// Biases this wing's stroke amplitude, by the given polarity.
+    Amplitude(f32),
+    /// Biases this wing's angle of attack, by the given polarity.
+    AngleOfAttack(f32),
+}
+
+/// The wing muscle vocabulary, from the connectome's own `Sub Class`.
+///
+/// Names arrive as published (`MN-WTct-DLM_c-f`, `MN-multi-i1`), so the muscle
+/// is the part after the last `-`. Which muscle does what is anatomy and is
+/// asserted with confidence; the SIGN of a steering muscle's effect is a
+/// stated convention in the same sense as [`MuscleAction::polarity`], to be
+/// pinned by measurement rather than assumed here. The one that is not a
+/// convention is the basalare/axillary split: b1, b2 and b3 increase stroke
+/// amplitude and the first and second axillary muscles reduce it, which is why
+/// they carry opposite polarity and not the same one.
+pub fn wing_muscle(name: &str) -> Option<WingAction> {
+    // `MN-<neuropil>-<muscle>`, split at the FIRST hyphen after the prefix
+    // rather than the last: the published power-muscle names carry a fibre
+    // RANGE that contains a hyphen of its own (`DLM_c-f`, `DVM_1a-c`), so
+    // taking the last field yields "f" and "c" and silently files the two
+    // largest muscles in the thorax as unknown.
+    let muscle = name.strip_prefix("MN-")?.split_once('-')?.1;
+    // The power groups are published with the fibre range in the name, so they
+    // are matched by prefix rather than exactly: `DLM_a,_b` and `DLM_c-f` are
+    // two rows of the same muscle.
+    if muscle.starts_with("DLM") || muscle.starts_with("DVM") {
+        return Some(WingAction::Power);
+    }
+    Some(match muscle {
+        // Basalares and the tergopleural group: stroke amplitude up.
+        "b1" | "b2" | "b3" | "tp" | "tp1" | "tp2" | "ps1" | "ps2" => WingAction::Amplitude(1.0),
+        // Third axillary and the anterior haltere group: also amplitude.
+        "iii1" | "iii3" | "hg1" | "hg2" => WingAction::Amplitude(1.0),
+        // First and second axillary: amplitude down.
+        "i1" | "i2" => WingAction::Amplitude(-1.0),
+        // Posterior haltere group: wing pitch, hence angle of attack.
+        "hg3" | "hg4" => WingAction::AngleOfAttack(1.0),
+        _ => return None,
+    })
+}
+
+/// One wing motor neuron's role.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WingDrive {
+    /// Index into the connectome's neuron list.
+    pub neuron: u32,
+    /// `None` for a power motor neuron, which acts on the whole thorax.
+    pub side: Option<Side>,
+    pub action: WingAction,
+}
+
+/// Every wing motor neuron in `c`, with what it does.
+///
+/// Power motor neurons are returned with `side: None` even though they have a
+/// soma side: the two dorsal longitudinal groups drive one shared resonant
+/// thorax, and attributing their output to one wing would invent a steering
+/// signal that the animal does not have.
+pub fn wing_map(c: &Connectome) -> Vec<WingDrive> {
+    let mut out = Vec::new();
+    for (i, n) in c.neurons.iter().enumerate() {
+        if n.super_class != "motor" || n.class != "wm" {
+            continue;
+        }
+        let Some(action) = wing_muscle(&n.sub_class) else { continue };
+        let side = match action {
+            WingAction::Power => None,
+            _ => Side::parse(&n.soma_side),
+        };
+        if !matches!(action, WingAction::Power) && side.is_none() {
+            continue;
+        }
+        out.push(WingDrive { neuron: i as u32, side, action });
+    }
+    out
+}
 
 /// One motor neuron's connection to one actuator.
 #[derive(Clone, Copy, Debug, PartialEq)]

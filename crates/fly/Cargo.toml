@@ -21,6 +21,9 @@ brain-promote.workspace = true
 
 [dev-dependencies]
 brain-testutil.workspace = true
+# The flight model is GENERATED from the published walking one; it is written
+# to a temp directory rather than next to a model that is not ours to modify.
+tempfile.workspace = true
 # The `watch` example's window. A dev-dependency, so the library itself still
 # has no opinion about being looked at.
 brain-wm-display.workspace = true

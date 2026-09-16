@@ -32,6 +32,13 @@ pub struct Trace {
 }
 
 impl Trace {
+    /// The sampling period, in seconds.
+    pub fn dt(&self) -> f64 {
+        self.dt
+    }
+}
+
+impl Trace {
     /// `dt` is the sampling period in seconds - the control period, if this is
     /// sampled once per control tick.
     pub fn new(dt: f64) -> Trace {
@@ -144,14 +151,29 @@ fn power_at(v: &[f64], hz: f64, dt: f64) -> f64 {
 pub fn analyse(t: &Trace) -> Option<Gait> {
     const LOW_HZ: f64 = 2.0;
     const HIGH_HZ: f64 = 40.0;
-    if t.is_empty() || t.duration() < 2.0 / LOW_HZ {
+    /// Fraction of the trace discarded before analysis.
+    ///
+    /// A run starts from silence and the drive ramps in over the first
+    /// fraction of a second, which puts a large one-sided transient at the
+    /// very bottom of the spectrum. Subtracting the mean does not remove it -
+    /// a ramp is not a constant - so the dominant frequency pins to the lowest
+    /// band edge and reports a rhythm that is really the onset. Discarding the
+    /// ramp is what makes the answer about the steady state.
+    const SETTLE: f64 = 0.25;
+
+    if t.is_empty() {
+        return None;
+    }
+    let skip = (t.len() as f64 * SETTLE) as usize;
+    let kept = t.len() - skip;
+    if (kept as f64 * t.dt) < 2.0 / LOW_HZ {
         return None;
     }
     // Each triangle of legs, averaged. `flybody::LEGS` fixes which is which.
-    let mut a = vec![0.0f64; t.len()];
-    let mut b = vec![0.0f64; t.len()];
+    let mut a = vec![0.0f64; kept];
+    let mut b = vec![0.0f64; kept];
     for (i, (_, _, tripod)) in flybody::LEGS.iter().enumerate() {
-        let signal = mean_removed(t.leg(i));
+        let signal = mean_removed(&t.leg(i)[skip..]);
         let into = if *tripod == 0 { &mut a } else { &mut b };
         for (acc, x) in into.iter_mut().zip(&signal) {
             *acc += x / 3.0;

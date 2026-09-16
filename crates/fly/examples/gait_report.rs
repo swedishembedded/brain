@@ -89,7 +89,7 @@ fn main() {
         refrac_ticks: 1,
         ..LifParams::default()
     };
-    let ticks: usize = std::env::var("TICKS").ok().and_then(|v| v.parse().ok()).unwrap_or(750);
+    let ticks: usize = std::env::var("TICKS").ok().and_then(|v| v.parse().ok()).unwrap_or(1000);
     let cell = std::env::var("CELL").unwrap_or_else(|_| "DNg100".to_string());
 
     header();

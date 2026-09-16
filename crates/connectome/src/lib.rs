@@ -226,6 +226,45 @@ impl Connectome {
         csc
     }
 
+    /// The graph as a network: signed, scaled, optionally size-normalised, and
+    /// optionally pruned of the weakest connections.
+    ///
+    /// `min_synapses` drops every pair connected by fewer than that many
+    /// synapses. This is not tidying. A reconstruction assigns a great many
+    /// one- and two-synapse pairs that are at the edge of what the imaging can
+    /// resolve, and they are numerous enough to dominate a neuron's input
+    /// count while carrying almost none of its drive - so including them
+    /// spends the network's whole dynamic range on connections nobody would
+    /// defend. Published connectome circuit models routinely impose a floor of
+    /// around five for exactly this reason. `0` or `1` keeps everything, which
+    /// is the control.
+    pub fn network(&self, scale: f32, size_limit: Option<f32>, min_synapses: u32) -> neuro::Csc {
+        let mut csc = if min_synapses > 1 {
+            let mut edges: Vec<(u32, u32, f32)> = Vec::new();
+            for post in 0..self.csc.n as usize {
+                let (a, b) = (self.csc.indptr[post] as usize, self.csc.indptr[post + 1] as usize);
+                for k in a..b {
+                    if self.csc.w[k] >= min_synapses as f32 {
+                        edges.push((self.csc.pre[k], post as u32, self.csc.w[k]));
+                    }
+                }
+            }
+            // Cannot fail: every index came out of a valid graph of the same
+            // size, so `from_edges` sees only in-range endpoints.
+            neuro::Csc::from_edges(self.csc.n, &edges).unwrap_or_else(|_| self.csc.clone())
+        } else {
+            self.csc.clone()
+        };
+        let signs: Vec<f32> = csc.pre.iter().map(|p| self.neurons.get(*p as usize).map_or(0.0, |n| n.nt.sign())).collect();
+        for (w, sign) in csc.w.iter_mut().zip(&signs) {
+            *w *= sign * scale;
+        }
+        if let Some(limit) = size_limit {
+            let _ = csc.scale_by_post(&self.excitability(limit));
+        }
+        csc
+    }
+
     /// Per-neuron excitability, from reconstructed membrane area.
     ///
     /// A leaky integrate-and-fire membrane obeys `C dV/dt = -g_L(V - V_rest) + I`.

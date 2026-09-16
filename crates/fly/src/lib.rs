@@ -25,6 +25,7 @@ pub mod gait;
 pub mod learn;
 pub mod reference;
 pub mod sense;
+pub mod wing;
 
 use connectome::Connectome;
 use flybody::MotorMap;
@@ -33,6 +34,7 @@ use mujoco::{Data, Model, StateSpec};
 use neuro::{DynamicalSystem, LifParams, Plastic, Port, SpikingNet};
 
 pub use gait::{analyse as analyse_gait, Gait, Trace};
+pub use wing::{WingCommand, Wingbeat};
 pub use reference::{ImitationReward, Reference};
 pub use sense::{Modality, Sensor};
 
@@ -47,11 +49,16 @@ pub struct Timing {
     /// Physics steps per control tick. flybody's own timestep is 1e-4 s, so
     /// 20 of them is the 2 ms (500 Hz) control period its walking tasks use.
     pub physics_per_control: u32,
+    /// The model's own physics timestep, in seconds. Only the wingbeat needs
+    /// it, and it needs it exactly: the stroke's phase advances in real time,
+    /// so a value that disagrees with the MJCF produces a wingbeat at the
+    /// wrong frequency while every other reading stays correct.
+    pub physics_dt: f64,
 }
 
 impl Default for Timing {
     fn default() -> Self {
-        Timing { neural_per_control: 1, physics_per_control: 20 }
+        Timing { neural_per_control: 1, physics_per_control: 20, physics_dt: 1e-4 }
     }
 }
 
@@ -93,6 +100,9 @@ pub struct Wiring {
     /// `None` keeps the uniform model, which is the CONTROL for whether the
     /// normalisation is doing anything.
     pub size_limit: Option<f32>,
+    /// Drop every pair connected by fewer than this many synapses. See
+    /// [`connectome::Connectome::network`]. `1` keeps everything.
+    pub min_synapses: u32,
 }
 
 impl Default for Wiring {
@@ -101,7 +111,7 @@ impl Default for Wiring {
         // 10.0: the reconstruction leaves a long tail of fragments and giant
         // cells, and an unclamped factor turns one badly reconstructed neuron
         // into a silent one or a runaway one.
-        Wiring { weight_scale: 3e-2, shuffle_seed: None, size_limit: Some(10.0) }
+        Wiring { weight_scale: 3e-2, shuffle_seed: None, size_limit: Some(10.0), min_synapses: 1 }
     }
 }
 
@@ -118,11 +128,29 @@ pub struct Coupling {
     pub activation_decay: f32,
     /// Activation added per polarity-weighted motor spike.
     pub activation_gain: f32,
+    /// Wingbeat power added per power-motor-neuron spike, before the same
+    /// decay the leg activation uses. The power muscles are asynchronous, so
+    /// this is a RATE-to-amplitude conversion and not a per-spike impulse on a
+    /// joint - see [`wing`].
+    pub wing_power_gain: f32,
+    /// Stroke-amplitude bias added per steering-motor-neuron spike.
+    pub wing_steer_gain: f32,
 }
 
 impl Default for Coupling {
     fn default() -> Self {
-        Coupling { angle_gain: 10.0, load_gain: 0.05, activation_decay: 0.8, activation_gain: 0.05 }
+        Coupling {
+            angle_gain: 10.0,
+            load_gain: 0.05,
+            activation_decay: 0.8,
+            activation_gain: 0.05,
+            // 24 power motor neurons firing at up to one spike per control
+            // tick reach full power in a few ticks at this gain, which is the
+            // right order for a thorax that spins up over a handful of
+            // wingbeats rather than instantly or over a second.
+            wing_power_gain: 0.05,
+            wing_steer_gain: 0.02,
+        }
     }
 }
 
@@ -176,6 +204,26 @@ pub struct Fly {
     activation: Vec<f32>,
     /// Per-actuator strength, 1.0 for an intact muscle. The body perturbation.
     muscle: Vec<f32>,
+    /// `Some` once flight is enabled: the wingbeat this body is flying on.
+    wingbeat: Option<Wingbeat>,
+    /// Wing motor neurons and what each one does.
+    wing_drives: Vec<flybody::WingDrive>,
+    /// `[wing][dof]` actuator indices, left then right, yaw/roll/pitch.
+    wing_actuators: [[Option<usize>; 3]; 2],
+    /// Where each of those six joints sits in `qpos`.
+    ///
+    /// Taken from the joint's NAME rather than from the actuator probe the
+    /// legs use. The probe drives one actuator and records which coordinate
+    /// moved most, and the three wing degrees of freedom are mechanically
+    /// coupled hard enough that driving the stroke moves the feathering more -
+    /// so the probe reports the wrong joint, and a stroke amplitude read that
+    /// way exceeds the stroke joint's own range without anything complaining.
+    wing_qpos: [[Option<usize>; 3]; 2],
+    /// The wingbeat command the cord is currently producing, low-passed the
+    /// same way leg activation is.
+    wing_cmd: WingCommand,
+    /// When set, the cord's wing output is IGNORED and this is flown instead.
+    wing_hold: Option<WingCommand>,
     /// The `coxa` actuator of each leg, in `flybody::LEGS` order: the
     /// fore-aft swing, which is the signal a stepping rhythm shows up in.
     leg_coxa: [Option<usize>; 6],
@@ -223,6 +271,15 @@ impl Fly {
         let sensors = sense::proprioceptors(c);
         let descending = c.population(|n| n.super_class == "descending");
         let actuator_qpos = probe_actuator_joints(&model, &mut data);
+        let mut wing_qpos: [[Option<usize>; 3]; 2] = [[None; 3]; 2];
+        for (w, side) in [flybody::Side::Left, flybody::Side::Right].into_iter().enumerate() {
+            for (d, dof) in [flybody::WingDof::Yaw, flybody::WingDof::Roll, flybody::WingDof::Pitch]
+                .into_iter()
+                .enumerate()
+            {
+                wing_qpos[w][d] = model.joint_qpos(&dof.actuator(side));
+            }
+        }
         let mut leg_coxa: [Option<usize>; 6] = [None; 6];
         for (i, (seg, side, _)) in flybody::LEGS.iter().enumerate() {
             let want = flybody::LegDof::Coxa.actuator(*seg, *side);
@@ -241,10 +298,7 @@ impl Fly {
             Some(limit) => c.excitability(limit),
             None => vec![1.0; c.neurons.len()],
         };
-        let mut graph = match wiring.size_limit {
-            Some(limit) => c.signed_csc_sized(wiring.weight_scale, limit),
-            None => c.signed_csc(wiring.weight_scale),
-        };
+        let mut graph = c.network(wiring.weight_scale, wiring.size_limit, wiring.min_synapses);
         if let Some(seed) = wiring.shuffle_seed {
             // The structural control: same in-degrees, same weights, sources
             // randomly reassigned. Applied AFTER signing so the sign
@@ -270,6 +324,24 @@ impl Fly {
             excite,
             activation: vec![0.0; actuator_names.len()],
             muscle: vec![1.0; actuator_names.len()],
+            wingbeat: None,
+            wing_drives: flybody::wing_map(c),
+            wing_actuators: {
+                let mut a = [[None; 3]; 2];
+                for (w, side) in [flybody::Side::Left, flybody::Side::Right].into_iter().enumerate() {
+                    for (d, dof) in [flybody::WingDof::Yaw, flybody::WingDof::Roll, flybody::WingDof::Pitch]
+                        .into_iter()
+                        .enumerate()
+                    {
+                        let want = dof.actuator(side);
+                        a[w][d] = actuator_names.iter().position(|n| *n == want);
+                    }
+                }
+                a
+            },
+            wing_qpos,
+            wing_cmd: WingCommand::default(),
+            wing_hold: None,
             leg_coxa,
             actuator_qpos,
             actuator_names,
@@ -279,6 +351,79 @@ impl Fly {
             drive: vec![0.0; n],
             control_tick: 0,
         })
+    }
+
+    /// Start the wingbeat.
+    ///
+    /// Flight is opt-in because it changes what a control tick costs: the
+    /// stroke has to be written inside the physics loop, so every physics step
+    /// now carries a control write. A walking run should not pay for that.
+    ///
+    /// Fails when the body has no wing actuators or the connectome has no wing
+    /// motor neurons, rather than flying a body nothing is attached to.
+    pub fn enable_flight(&mut self, beat: Wingbeat) -> Result<(), String> {
+        if self.wing_actuators.iter().flatten().any(|a| a.is_none()) {
+            return Err("this body does not expose all six wing actuators".to_string());
+        }
+        if self.wing_drives.is_empty() {
+            return Err("this connectome has no wing motor neurons to fly with".to_string());
+        }
+        self.wingbeat = Some(beat);
+        Ok(())
+    }
+
+    pub fn wingbeat(&self) -> Option<Wingbeat> {
+        self.wingbeat
+    }
+
+    /// Set the wingbeat frequency without disturbing its phase.
+    pub fn set_wingbeat_hz(&mut self, hz: f64) {
+        if let Some(b) = &mut self.wingbeat {
+            b.hz = hz;
+        }
+    }
+
+    /// Fly an imposed wing command, ignoring what the cord produces.
+    ///
+    /// This is a calibration control, not a shortcut: it is how the AIRFRAME
+    /// is characterised - what stroke amplitude a given drive reaches, at what
+    /// frequency it resonates, whether it lifts at all - separately from
+    /// whether a connectome can command it. Measuring the two together makes
+    /// a fly that does not take off uninterpretable.
+    pub fn hold_wing_command(&mut self, cmd: Option<WingCommand>) {
+        self.wing_hold = cmd;
+    }
+
+    /// Each wing's `[yaw, roll, pitch]` joint angle, left then right.
+    pub fn wing_angles(&self) -> [[f64; 3]; 2] {
+        let qpos = self.qpos();
+        let mut out = [[0.0; 3]; 2];
+        for (wing, slots) in out.iter_mut().zip(self.wing_qpos) {
+            for (angle, slot) in wing.iter_mut().zip(slots) {
+                if let Some(i) = slot {
+                    *angle = qpos.get(i).copied().unwrap_or(0.0);
+                }
+            }
+        }
+        out
+    }
+
+    /// What the cord is currently telling the wings to do.
+    pub fn wing_command(&self) -> WingCommand {
+        self.wing_cmd
+    }
+
+    /// How many wing motor neurons attached, by role.
+    pub fn wing_summary(&self) -> String {
+        let (mut power, mut amp, mut aoa) = (0, 0, 0);
+        for d in &self.wing_drives {
+            match d.action {
+                flybody::WingAction::Power => power += 1,
+                flybody::WingAction::Amplitude(_) => amp += 1,
+                flybody::WingAction::AngleOfAttack(_) => aoa += 1,
+            }
+        }
+        format!("{power} power, {amp} amplitude, {aoa} angle-of-attack wing motor neurons")
     }
 
     /// Each leg's fore-aft swing command, in `flybody::LEGS` order.
@@ -578,6 +723,15 @@ impl Fly {
         for a in self.activation.iter_mut() {
             *a *= self.coupling.activation_decay;
         }
+        if self.wingbeat.is_some() && self.wing_hold.is_none() {
+            // The same leak as the muscles, for the same reason: a spike is an
+            // impulse and a thorax is not. Power decays toward zero when the
+            // power motor neurons stop, which is what makes a fly stop flying.
+            self.wing_cmd.power *= self.coupling.activation_decay;
+            for v in self.wing_cmd.amplitude.iter_mut().chain(self.wing_cmd.aoa.iter_mut()) {
+                *v *= self.coupling.activation_decay;
+            }
+        }
         for _ in 0..self.timing.neural_per_control {
             self.net.step();
             self.net.read(Port::Spike, &mut spike)?;
@@ -588,6 +742,36 @@ impl Fly {
                 if spike[d.neuron as usize] > 0.5 {
                     self.activation[d.actuator] += self.coupling.activation_gain * d.polarity;
                     motor_spikes += 1;
+                }
+            }
+            if self.wingbeat.is_some() && self.wing_hold.is_none() {
+                for d in &self.wing_drives {
+                    if spike[d.neuron as usize] <= 0.5 {
+                        continue;
+                    }
+                    motor_spikes += 1;
+                    let w = match d.side {
+                        Some(flybody::Side::Left) => 0,
+                        Some(flybody::Side::Right) => 1,
+                        None => usize::MAX,
+                    };
+                    match d.action {
+                        // A power motor neuron works the whole thorax, so it
+                        // has no side even though its soma does.
+                        flybody::WingAction::Power => {
+                            self.wing_cmd.power += self.coupling.wing_power_gain;
+                        }
+                        flybody::WingAction::Amplitude(p) => {
+                            self.wing_cmd.amplitude[w] += self.coupling.wing_steer_gain * p;
+                        }
+                        flybody::WingAction::AngleOfAttack(p) => {
+                            self.wing_cmd.aoa[w] += self.coupling.wing_steer_gain * p;
+                        }
+                    }
+                }
+                self.wing_cmd.power = self.wing_cmd.power.clamp(0.0, 1.0);
+                for v in self.wing_cmd.amplitude.iter_mut().chain(self.wing_cmd.aoa.iter_mut()) {
+                    *v = v.clamp(-1.0, 1.0);
                 }
             }
         }
@@ -602,8 +786,36 @@ impl Fly {
         self.data.set(&self.model, StateSpec::CTRL, &ctrl)?;
 
         // --- integrate ---------------------------------------------------
-        for _ in 0..self.timing.physics_per_control {
-            self.data.step(&self.model);
+        match self.wingbeat {
+            // The stroke is written EVERY physics step. At 218 Hz a wingbeat
+            // lasts 4.6 ms and a control tick is 2 ms, so writing it once per
+            // control tick would sample the stroke barely twice and alias it
+            // into a slow wobble - the wings would move, the fly would not fly,
+            // and every other reading would look healthy.
+            Some(mut beat) => {
+                let dt = self.timing.physics_dt;
+                let mut ctrl = ctrl;
+                for _ in 0..self.timing.physics_per_control {
+                    beat.advance(dt);
+                    let cmd = self.wing_hold.unwrap_or(self.wing_cmd);
+                    for w in 0..2 {
+                        let t = beat.torques(w, &cmd);
+                        for (d, value) in t.iter().enumerate() {
+                            if let Some(i) = self.wing_actuators[w][d] {
+                                ctrl[i] = value * self.muscle[i] as f64;
+                            }
+                        }
+                    }
+                    self.data.set(&self.model, StateSpec::CTRL, &ctrl)?;
+                    self.data.step(&self.model);
+                }
+                self.wingbeat = Some(beat);
+            }
+            None => {
+                for _ in 0..self.timing.physics_per_control {
+                    self.data.step(&self.model);
+                }
+            }
         }
 
         self.control_tick += 1;

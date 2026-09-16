@@ -34,52 +34,65 @@ fn main() {
     let c = connectome::load("manc", &dir.join("neurons.csv.gz"), &dir.join("connections_princeton.csv.gz")).unwrap();
     let model = Model::from_xml(&mj, env("BRAIN_FLYBODY_XML")).unwrap();
     let lif = LifParams { dt_over_tau: 0.1, v_th: 1.0, r: 1.0, refrac_ticks: 1, ..LifParams::default() };
-    let gpu = gpu_core::testgpu::dev(&neuro::KERNELS);
-    let wiring = Wiring::default();
-    let mut f = Fly::new(gpu, &c, model, lif, wiring, Timing::default(), Coupling::default()).unwrap();
-
     let n = c.neurons.len() as f64;
-    let ticks: usize = std::env::var("TICKS").ok().and_then(|v| v.parse().ok()).unwrap_or(600);
+    let ticks: usize = std::env::var("TICKS").ok().and_then(|v| v.parse().ok()).unwrap_or(1000);
     let cell = std::env::var("CELL").unwrap_or_else(|_| "DNg100".to_string());
-    let limit = wiring.size_limit.unwrap_or(1.0);
+    let scales: Vec<f32> = std::env::var("SCALES")
+        .ok()
+        .map(|v| v.split(',').filter_map(|x| x.trim().parse().ok()).collect())
+        .unwrap_or_else(|| vec![0.3, 0.6, 1.0, 2.0]);
 
-    println!("{} neurons, {} ticks per run, drive to {cell}", c.neurons.len(), ticks);
+    println!("{} neurons, {ticks} ticks per run, drive to {cell}", c.neurons.len());
     println!(
-        "{:>10}  {:>9}  {:>7}  {:>8}  {:>8}  {:>7}  {:>9}  {:>7}",
-        "scale", "active %", "motor/t", "step Hz", "tripod", "rhythm", "power", "score"
+        "{:>6}  {:>5}  {:>8}  {:>9}  {:>7}  {:>8}  {:>8}  {:>7}  {:>9}  {:>7}",
+        "minsyn", "tau", "scale", "active %", "motor/t", "step Hz", "tripod", "rhythm", "power", "score"
     );
 
-    for scale in [3e-2f32, 1e-1, 3e-1, 1.0, 3.0, 10.0] {
-        // Re-weighting rather than rebuilding: the graph's shape never
-        // changes, so uploading new weights is the whole difference between
-        // one run and the next and a rebuild would cost a connectome load each
-        // time.
-        f.set_weights(&c.signed_csc_sized(scale, limit).w).unwrap();
-        f.reset();
-        if let Err(e) = f.drive_cell_type(&cell, 250.0) {
-            eprintln!("{e}");
-            return;
-        }
-        let mut t = Trace::new(CONTROL_DT);
-        let (mut spikes, mut motor) = (0u64, 0u64);
-        for _ in 0..ticks {
-            let beat = f.step().unwrap();
-            spikes += beat.total_spikes as u64;
-            motor += beat.motor_spikes as u64;
-            t.push(f.leg_swing());
-        }
-        let active = 100.0 * spikes as f64 / (ticks as f64 * n);
-        match analyse(&t) {
-            Some(g) => println!(
-                "{scale:>10.3}  {active:>9.3}  {:>7.1}  {:>8.2}  {:>8.3}  {:>7.3}  {:>9.4}  {:>7.3}",
-                motor as f64 / ticks as f64,
-                g.step_hz,
-                g.tripod,
-                g.rhythmicity,
-                g.power,
-                g.score()
-            ),
-            None => println!("{scale:>10.3}  {active:>9.3}  trace too short"),
+    // `min_synapses` changes the graph's SHAPE and `dt_over_tau` is fixed when
+    // the network is built, so each pair needs its own network; only the
+    // weight scale can be swept by re-uploading weights.
+    let mut model = Some(model);
+    for min_syn in [1u32, 5] {
+        for dt_over_tau in [0.1f32, 0.2, 0.4] {
+            let lif = LifParams { dt_over_tau, ..lif };
+            let wiring = Wiring { min_synapses: min_syn, ..Wiring::default() };
+            let m = match model.take() {
+                Some(m) => m,
+                None => Model::from_xml(&mj, env("BRAIN_FLYBODY_XML")).unwrap(),
+            };
+            let gpu = gpu_core::testgpu::dev(&neuro::KERNELS);
+            let mut f = Fly::new(gpu, &c, m, lif, wiring, Timing::default(), Coupling::default()).unwrap();
+
+            for &scale in &scales {
+                f.set_weights(&c.network(scale, wiring.size_limit, min_syn).w).unwrap();
+                f.reset();
+                if let Err(e) = f.drive_cell_type(&cell, 250.0) {
+                    eprintln!("{e}");
+                    return;
+                }
+                let mut t = Trace::new(CONTROL_DT);
+                let (mut spikes, mut motor) = (0u64, 0u64);
+                for _ in 0..ticks {
+                    let beat = f.step().unwrap();
+                    spikes += beat.total_spikes as u64;
+                    motor += beat.motor_spikes as u64;
+                    t.push(f.leg_swing());
+                }
+                let active = 100.0 * spikes as f64 / (ticks as f64 * n);
+                let tau = 2.0 / dt_over_tau;
+                match analyse(&t) {
+                    Some(g) => println!(
+                        "{min_syn:>6}  {tau:>5.0}  {scale:>8.3}  {active:>9.3}  {:>7.1}  {:>8.2}  {:>8.3}  {:>7.3}  {:>9.4}  {:>7.3}",
+                        motor as f64 / ticks as f64,
+                        g.step_hz,
+                        g.tripod,
+                        g.rhythmicity,
+                        g.power,
+                        g.score()
+                    ),
+                    None => println!("{min_syn:>6}  {tau:>5.0}  {scale:>8.3}  {active:>9.3}  trace too short"),
+                }
+            }
         }
     }
 

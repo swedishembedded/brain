@@ -174,6 +174,35 @@ impl Model {
         Some(unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned())
     }
 
+    /// Where a named joint's first coordinate sits in `qpos`.
+    ///
+    /// MuJoCo stores this in `mjModel.jnt_qposadr`, which this binding will not
+    /// read: it is deep in a struct whose layout depends on compile-time
+    /// maxima, and a wrong offset there returns a plausible index rather than
+    /// failing. It can be DERIVED instead, for the one model shape where the
+    /// derivation is unambiguous.
+    ///
+    /// A free joint occupies seven coordinates and six velocities; every other
+    /// joint type occupies the same number of each. So `nq - nv` counts the
+    /// free joints, and when it is exactly one - a single floating body with
+    /// everything else hinged or sliding off it, which is what a legged or
+    /// winged animal model is - joint 0 is that free joint and joint `k` for
+    /// `k >= 1` sits at `7 + k - 1`.
+    ///
+    /// Returns `None` when the model is not that shape, rather than a number
+    /// that would be right for a different model.
+    pub fn joint_qpos(&self, name: &str) -> Option<usize> {
+        if self.nq.checked_sub(self.nv) != Some(1) {
+            return None;
+        }
+        let id = self.id_of(ObjType::Joint, name)?;
+        if id == 0 {
+            return Some(0);
+        }
+        let at = 6 + id;
+        (at < self.nq).then_some(at)
+    }
+
     /// Every actuator name, in index order. `None` where an actuator is
     /// unnamed, which MJCF permits.
     /// The raw `mjModel*`, for the sibling modules that hand it back to MuJoCo.

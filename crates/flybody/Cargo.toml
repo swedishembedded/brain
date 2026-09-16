@@ -18,3 +18,6 @@ brain-connectome.workspace = true
 # that does need it is the one that measures how the model responds.
 brain-mujoco.workspace = true
 brain-testutil.workspace = true
+# The flight model is generated into a scratch directory rather than next to a
+# published model that is not ours to modify.
+tempfile.workspace = true
