@@ -28,7 +28,7 @@ path = "src/lib.rs"
 # baseline (`Cargo.toml`'s `brain = { default-features = false }`) is what
 # makes a consumer name its surfaces explicitly.
 default = ["full"]
-full = ["image", "creature", "forecast", "text"]
+full = ["image", "creature", "forecast", "text", "vision"]
 
 # --- surfaces: one per brain_arch::Domain the SDK has a public type for.
 #     A surface is the only thing a consumer names.
@@ -54,6 +54,15 @@ creature = ["device", "dep:brain-fly", "dep:brain-connectome", "dep:brain-flybod
 # loader/model-store dependency belongs here until an `ArchSpec` exists to
 # use it.
 text = ["device", "dep:brain-qwen3", "dep:brain-data", "dep:brain-checkpoint", "dep:serde_json"]
+# `brain::EmbeddingPipeline` (CLIP text embedding today). Named `vision`, not
+# `embedding` - `brain_arch::Domain` has no `Embedding` variant (CLIP's own
+# `arch!` row is registered `Vision`, since the same released checkpoint also
+# holds an image tower), and this workspace's rule is that a surface name is
+# a `Domain` variant, full stop - inventing a second word for the same
+# modality is exactly what that rule exists to prevent. A future vision
+# pipeline (detection, segmentation, depth) joins this SAME feature rather
+# than getting its own, for the same reason.
+vision = ["resolve", "dep:brain-clip"]
 
 # --- infrastructure: selected BY a surface, never named by a consumer.
 # `brain::Device`.
@@ -71,6 +80,7 @@ brain-capability.workspace = true
 brain-modelref.workspace = true
 brain-modelstore.workspace = true
 brain-checkpoint = { workspace = true, optional = true }
+brain-clip = { workspace = true, optional = true }
 brain-connectome = { workspace = true, optional = true }
 brain-data = { workspace = true, optional = true }
 brain-fly = { workspace = true, optional = true }

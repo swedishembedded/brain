@@ -106,6 +106,20 @@ layers on the common knobs; the result's `prompt_tokens`/`completion_tokens`/
 `finish_reason` mirror what the served `/v1/chat/completions` endpoint
 reports, since both run through the same chat-templating and sampling code.
 
+## Text embedding
+
+```rust
+let pipe = brain::EmbeddingPipeline::from_pretrained("stabilityai/stable-diffusion-xl-base-1.0")?;
+let v = pipe.embed("a whale submarine")?;
+println!("{} dims", v.len());
+```
+
+Covers CLIP's text towers (CLIP-L by default; `.builder(id).tower("openclip_bigg")`
+for the larger one). `pipe.embed_batch(&["a", "b", "c"])` runs one batched
+forward rather than a loop. Behind the `vision` Cargo feature - CLIP's own
+registered architecture domain, since there is no dedicated embedding
+domain in this workspace.
+
 ## Features
 
 Name the surfaces you use and you get their dependencies and nothing else:
@@ -116,6 +130,7 @@ Name the surfaces you use and you get their dependencies and nothing else:
 | `creature` | `Creature`, `View` - a connectome running a body, and a window onto it |
 | `forecast` | `ForecastPipeline` - time-series forecasting |
 | `text` | `TextGenerationPipeline` - text generation, from a local checkpoint path |
+| `vision` | `EmbeddingPipeline` - CLIP text embedding (named for CLIP's registered domain, not the capability) |
 | `full` | every surface; this is the default |
 
 ## Errors

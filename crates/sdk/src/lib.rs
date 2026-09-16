@@ -36,6 +36,7 @@
 //! | `creature` | [`Creature`], [`View`] -- a connectome running a body, and a window onto it |
 //! | `forecast` | [`ForecastPipeline`] -- time-series forecasting (kronos, timesfm3) |
 //! | `text` | [`TextGenerationPipeline`] -- text generation (qwen3, from a local checkpoint path) |
+//! | `vision` | [`EmbeddingPipeline`] -- text embedding (CLIP); named for the `brain_arch::Domain` it resolves under, not the capability, since there is no `Embedding` domain |
 //! | `full` | every surface; this is `default` |
 //!
 //! `device` and `resolve` are infrastructure tiers that a surface selects for
@@ -73,6 +74,8 @@ mod creature;
 #[cfg(feature = "device")]
 mod device;
 mod error;
+#[cfg(feature = "vision")]
+mod embedding;
 #[cfg(feature = "forecast")]
 mod forecast;
 #[cfg(feature = "image")]
@@ -99,6 +102,8 @@ pub use model::dispatch::Precision as DType;
 
 #[cfg(feature = "creature")]
 pub use creature::{Arena, Beat, Creature, CreatureBuilder};
+#[cfg(feature = "vision")]
+pub use embedding::{Embedding, EmbeddingPipeline, EmbeddingPipelineBuilder};
 #[cfg(feature = "forecast")]
 pub use forecast::{ForecastPipeline, ForecastPipelineBuilder};
 /// The forecasting domain types [`ForecastPipeline::forecast_with`] needs

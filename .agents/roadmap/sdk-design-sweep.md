@@ -470,6 +470,58 @@ asks for long-term - this milestone proves the shape on the single
 most-complete backend first, deliberately not the full consolidation in one
 change.
 
+### Phase 2.3 - `EmbeddingPipeline` (done, scoped to CLIP text embedding)
+
+Covers **CLIP's text towers only** (CLIP-L default, OpenCLIP-bigG via
+`.builder(id).tower("openclip_bigg")`), resolved through the SAME
+`loader::resolve_structured` call `ImagePipeline`/`ForecastPipeline` use,
+against CLIP's real `ClipSpec` (`crates/clip/src/spec.rs`, the `"towers"`
+role - a released SDXL-layout directory several image-generation
+checkpoints already carry, since SDXL conditions on the same two towers).
+
+**Named `vision`, not `embedding`, and this is a hard constraint, not a
+style choice**: `scripts/gates/check-sdk-features.sh` requires every surface
+name to be a `brain_arch::Domain` variant, and there is no `Embedding`
+variant - CLIP's own `arch!` row is registered `Vision` (the same released
+checkpoint also carries an image tower). The public TYPE is still named for
+what it does (`EmbeddingPipeline`, not `VisionPipeline`) - only the Cargo
+feature flag is named for the domain, same as how the `image` feature's
+name and its types' names already happen to coincide by chance rather than
+by rule. A future vision pipeline (detection, segmentation, depth) joins
+this SAME `vision` feature rather than inventing another one.
+
+**Deliberately excluded, not silently missing**: ArcFace (face embedding)
+takes an image plus a detected-and-aligned face, not a string - a genuinely
+different call shape (`embed_image`, composed with SCRFD detection), tracked
+as a separate future extension rather than forced into `EmbeddingPipeline`
+by pretending the inputs are the same. T5-XXL/umT5-XXL are conditioning
+encoders another model's pipeline (FLUX.1) consumes internally, not a
+caller-facing embedding endpoint of their own.
+
+The domain object (`Embedding`) is a thin, deliberate wrapper over
+`Vec<f32>` - unlike `Forecast`'s rich, pre-existing structure, an embedding
+vector genuinely has nothing more to say than its own values and dimension,
+so the wrapper exists only to keep raw tensors off the public return type
+(rule 12) rather than to carry real domain richness the way `Forecast` does.
+
+Tested against a real local, synthetic, fully-offline fixture reproducing
+`crates/clip/src/spec.rs`'s own (private) SDXL-tower-root classification
+schema (an `model_index.json` naming `StableDiffusionXLPipeline` plus four
+component directories - empty, since only their EXISTENCE decides
+classification): resolution proven all the way to `clip::caps::Session::load`
+being reached with the right directory, then a clean `Error::Backend` on the
+fixture's empty tokenizer directories - `data::clip_bpe::ClipBpe` has no
+synthetic/in-memory constructor either, the same class of gap
+`TextGenerationPipeline`'s own tests document for `QwenBpe`.
+
+**Not done, tracked for later**: CLI migration (there is no dedicated
+`clip`/embedding CLI file to migrate at all - only `resident_clip.rs` - so
+this is a smaller, more contained version of the same gap the earlier
+pipelines have); ArcFace's `embed_image` extension (needs SCRFD detection
+composed in first); ClipSpec's optional `"eva"` role (the EVA-CLIP image
+tower) is not exposed by this pipeline at all, since it is out of scope for
+TEXT embedding.
+
 Findings 8, 11, 14, 18-20, 23-24 are real but not yet milestoned - pick them
 up opportunistically when touching the same file for another reason, or spin
 them into their own milestone if they start blocking something.
