@@ -416,9 +416,42 @@ it against the scan+sort reference at `max|d| == 0`.
   only SUBMITS work (0.068 ms), while step-then-readback costs 0.807 ms. A
   neural tick costs one GPU round trip, not kernel time, which is why
   `neural_per_control` defaults to 1.
-* **M5 - learning to walk.** Three-factor plasticity over 5.24M edges with sign
-  as a fitted parameter; the surrogate-gradient ceiling alongside as the
-  instrument. **Gate:** the definition-of-done table, via `promote`'s sign test.
+* **M5 - learning to walk. APPARATUS BUILT, NOT WALKING.** `crates/fly::learn`
+  runs episodes under a control matrix (`Learning`, `Frozen`, `ShuffledReward`)
+  with reward as forward displacement and a neuromodulator that is a reward
+  PREDICTION ERROR against an EMA baseline, scored by `promote`'s paired sign
+  test.
+
+  **What is established:** reward-correlated plasticity changes behaviour
+  differently from reward-SHUFFLED plasticity - same modulator distribution,
+  destroyed correlation - at p = 0.0107 over 10 episodes against both controls,
+  with `Frozen` byte-identical across every episode. That rules out "any
+  plasticity produces drift", which is the thing this control matrix exists to
+  rule out.
+
+  **What is NOT established, and the numbers say so plainly.** flybody's
+  `gravity="0 0 -981"` fixes the units as CENTIMETRES, so the best episode's
+  +0.008 is 0.08 mm, about 1/30th of a body length in 0.6 s. A walking fly
+  covers one to three body lengths per SECOND. This is drift, roughly 100x
+  short of locomotion, and the experiment now prints body lengths so a raw
+  figure cannot be read as success. There is also an uncontrolled confound:
+  `Learning` ends the run firing 4.5x more than it started while
+  `ShuffledReward` ends at a quarter, so the conditions differ in excitability
+  and not only in behaviour, and a distance comparison between them is not
+  clean. Controlling for activity is the next thing this needs.
+
+  **Two apparatus bugs it found by being run:** `Fly::reset` called
+  `DynamicalSystem::reset`, which restores the connectome's ORIGINAL weights -
+  so every episode unlearned and all ten were byte-identical, a perfectly
+  reproducible failure to learn. And the plasticity clamp was a hardcoded
+  +/-0.2 against weights that run to +/-32, squashing the whole connectome to
+  the bound on the first update. `SpikingNet::reset_state` and
+  `Fly::initial_weight_scale` exist because of those.
+
+  **Still open in M5:** the surrogate-gradient ceiling, which is what makes a
+  negative result interpretable rather than ambiguous, and the remaining
+  controls (shuffled connectome at matched degree, frozen-after-training
+  retention, body perturbation and re-adaptation).
 * **M6 - flight.** Wing MNs, power/steering split, wingbeat entrainment.
   **Gate:** 218 Hz entrainment; flight-imitation reward against the recorded
   saccade-evasion trajectories.

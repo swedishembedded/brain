@@ -1162,6 +1162,7 @@ dependencies = [
  "brain-gpu-core",
  "brain-mujoco",
  "brain-neuro",
+ "brain-promote",
  "brain-testutil",
 ]
 

@@ -21,13 +21,14 @@
 //! system, you can procure our services by sending an email to
 //! info@swedishembedded.com.
 
+pub mod learn;
 pub mod sense;
 
 use connectome::Connectome;
 use flybody::MotorMap;
 use gpu_core::Gpu;
 use mujoco::{Data, Model, StateSpec};
-use neuro::{DynamicalSystem, LifParams, Port, SpikingNet};
+use neuro::{DynamicalSystem, LifParams, Plastic, Port, SpikingNet};
 
 pub use sense::{Modality, Sensor};
 
@@ -237,6 +238,54 @@ impl Fly {
     /// Generalized coordinates of the body.
     pub fn qpos(&self) -> Vec<f64> {
         self.data.get(&self.model, StateSpec::QPOS)
+    }
+
+    /// Start a new episode: clear the dynamical state and put the body back,
+    /// KEEPING whatever the weights have learned.
+    ///
+    /// Not `DynamicalSystem::reset`, which also restores the connectome's
+    /// original weights. An episode loop built on that unlearns between every
+    /// episode and reports a perfectly reproducible failure to learn.
+    pub fn reset(&mut self) {
+        self.net.reset_state();
+        self.data.reset(&self.model);
+        for a in self.activation.iter_mut() {
+            *a = 0.0;
+        }
+        for c in self.command.iter_mut() {
+            *c = 0.0;
+        }
+        self.last_proprio_spikes = 0;
+        self.control_tick = 0;
+    }
+
+    /// Turn weight updates on or off. See `neuro::Plastic`.
+    pub fn set_plasticity(&mut self, on: bool) {
+        self.net.set_plasticity(on);
+    }
+
+    /// Deliver this tick's neuromodulator.
+    pub fn modulate(&mut self, delta: f32) {
+        self.net.modulate(delta);
+    }
+
+    /// Enable three-factor plasticity on the cord.
+    pub fn enable_plasticity(&mut self, p: neuro::PlasticityParams) -> Result<(), String> {
+        self.net.enable_plasticity(p)
+    }
+
+    /// The cord's current synaptic weights.
+    pub fn weights(&self) -> Vec<f32> {
+        self.net.weights()
+    }
+
+    /// The largest absolute weight the connectome started with.
+    ///
+    /// The number a plasticity clamp has to be sized against. Weights here are
+    /// scaled synapse counts, so they run to tens; a clamp picked without
+    /// looking at them squashes the entire connectome on the first update.
+    pub fn initial_weight_scale(&self) -> f32 {
+        self.net.initial_weights().iter().fold(0.0f32, |m, w| m.max(w.abs()))
     }
 
     /// Range of the sensory current injected on the last tick, for tracing a

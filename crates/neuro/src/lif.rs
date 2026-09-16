@@ -302,6 +302,38 @@ impl SpikingNet {
     }
 }
 
+impl SpikingNet {
+    /// Clear the dynamical state and start again, KEEPING whatever the weights
+    /// have become.
+    ///
+    /// Distinct from [`DynamicalSystem::reset`], which also restores the
+    /// connectome's original weights. Both are needed and confusing them is
+    /// expensive: an episode loop that calls the full reset unlearns between
+    /// every episode, so every episode is byte-identical and the experiment
+    /// reports a perfectly reproducible failure to learn. That is exactly what
+    /// happened here before this existed.
+    pub fn reset_state(&mut self) {
+        let n = self.n as usize;
+        self.gpu.write_f32(&self.v, &vec![self.params.v_rest; n]);
+        self.gpu.write(&self.refrac, &vec![0u32; n]);
+        self.gpu.write_f32(&self.spike, &vec![0.0; n]);
+        self.gpu.write_f32(&self.isyn, &vec![0.0; n]);
+        self.gpu.write_f32(&self.drive, &vec![0.0; n]);
+        if let Some(pl) = &mut self.plast {
+            pl.delta = 0.0;
+            self.gpu.write_f32(&pl.x_pre, &vec![0.0; n]);
+            self.gpu.write_f32(&pl.x_post, &vec![0.0; n]);
+            self.gpu.write_f32(&pl.elig, &vec![0.0; self.w0.len()]);
+        }
+        self.tick = 0;
+    }
+
+    /// The connectome's weights as they were loaded, before any plasticity.
+    pub fn initial_weights(&self) -> &[f32] {
+        &self.w0
+    }
+}
+
 impl DynamicalSystem for SpikingNet {
     fn reset(&mut self, _seed: u64) {
         // Deterministic and seed-independent today: every neuron starts at
