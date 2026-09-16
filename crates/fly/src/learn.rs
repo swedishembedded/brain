@@ -152,10 +152,92 @@ impl Lcg {
         self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
         self.0
     }
+    /// A standard normal, by Box-Muller. The search needs a symmetric
+    /// perturbation; a uniform one biases every step toward the corners of the
+    /// box it samples.
+    pub fn normal(&mut self) -> f32 {
+        let u1 = ((self.next() >> 11) as f64 / (1u64 << 53) as f64).max(1e-12);
+        let u2 = (self.next() >> 11) as f64 / (1u64 << 53) as f64;
+        ((-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()) as f32
+    }
+
     fn index(&mut self, n: usize) -> usize {
         if n == 0 {
             return 0;
         }
         (self.next() >> 33) as usize % n
+    }
+}
+
+/// A search over per-cell-type gains, with the wiring held fixed.
+///
+/// This is the CEILING INSTRUMENT, and it exists to answer a question the
+/// control matrix cannot: when the local learning rule fails to produce
+/// walking, is the rule weak, or can this structure not do this task with this
+/// reward and this body? Without an answer, a negative result is ambiguous and
+/// therefore not much of a result.
+///
+/// It is not a surrogate-gradient method, and the substitution is deliberate.
+/// A gradient path would have to differentiate through MuJoCo, which this
+/// binding does not expose and which would mean either a differentiable body
+/// or a policy-gradient estimator - both larger projects than the question
+/// needs. What the question needs is an upper bound on what these parameters
+/// can achieve under a stronger optimiser than a local rule, and a direct
+/// search gives that.
+///
+/// The parameters are per-presynaptic-SUPER-CLASS gains rather than per-synapse
+/// weights, which is what makes the search tractable: eleven numbers against
+/// 5.3 million, at roughly three seconds per evaluation. It is also the
+/// standard shape for a connectome-constrained model - structure fixed,
+/// a small number of biologically meaningful gains free - rather than a
+/// convenience. The cost is real and worth naming: a gain search cannot
+/// express anything the cell-type partition cannot, so it is a LOWER bound on
+/// what the full weight space could do, and a negative result from it is
+/// weaker evidence than a negative result from a per-synapse optimiser.
+pub struct GainSearch {
+    /// Which gain group each edge belongs to, by its presynaptic neuron.
+    edge_group: Vec<u8>,
+    groups: Vec<String>,
+    /// Signed, scaled weights at unit gain.
+    base: Vec<f32>,
+}
+
+impl GainSearch {
+    pub fn new(c: &connectome::Connectome, weight_scale: f32) -> GainSearch {
+        let mut groups: Vec<String> = Vec::new();
+        let mut of_neuron: Vec<u8> = Vec::with_capacity(c.neurons.len());
+        for n in &c.neurons {
+            let key = if n.super_class.is_empty() { "<none>" } else { n.super_class.as_str() };
+            let idx = match groups.iter().position(|g| g == key) {
+                Some(i) => i,
+                None => {
+                    groups.push(key.to_string());
+                    groups.len() - 1
+                }
+            };
+            of_neuron.push(idx as u8);
+        }
+        let base = c.signed_csc(weight_scale).w;
+        let edge_group = c.csc.pre.iter().map(|&p| of_neuron[p as usize]).collect();
+        GainSearch { edge_group, groups, base }
+    }
+
+    pub fn groups(&self) -> &[String] {
+        &self.groups
+    }
+
+    /// The weight vector for a given gain setting.
+    pub fn weights(&self, gains: &[f32]) -> Vec<f32> {
+        self.base
+            .iter()
+            .zip(&self.edge_group)
+            .map(|(w, &g)| w * gains.get(g as usize).copied().unwrap_or(1.0))
+            .collect()
+    }
+
+    /// A neutral starting point: every gain at 1, which reproduces the
+    /// connectome exactly as imported.
+    pub fn unit_gains(&self) -> Vec<f32> {
+        vec![1.0; self.groups.len()]
     }
 }

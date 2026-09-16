@@ -293,6 +293,12 @@ impl Fly {
         self.net.weights()
     }
 
+    /// Overwrite the cord's synaptic weights. See
+    /// [`neuro::SpikingNet::set_weights`].
+    pub fn set_weights(&mut self, w: &[f32]) -> Result<(), String> {
+        self.net.set_weights(w)
+    }
+
     /// The largest absolute weight the connectome started with.
     ///
     /// The number a plasticity clamp has to be sized against. Weights here are

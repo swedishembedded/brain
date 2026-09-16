@@ -482,11 +482,47 @@ it against the scan+sort reference at `max|d| == 0`.
   the gate fails. Retention is a property of the MECHANISM and is therefore
   testable independently of whether what was learned is any good.
 
-  **Still open in M5:** the surrogate-gradient ceiling, which is what makes a
-  negative result interpretable rather than ambiguous, and the last control -
-  body perturbation followed by re-adaptation. The effect size is still the
-  headline caveat: the best episode is 0.063 body lengths in 0.6 s, so about
-  0.1 body lengths per second against a real fly's one to three.
+  **The ceiling is measured, and it says the learning rule is not the binding
+  constraint.** `GainSearch` hill-climbs eleven per-presynaptic-cell-type gains
+  with the wiring fixed - the standard connectome-constrained shape, and a
+  stand-in for a surrogate-gradient method because differentiating through
+  MuJoCo would need either a differentiable body or a policy-gradient
+  estimator, both larger than the question. Converged after 66 evaluations:
+
+  | | speed |
+  |---|---|
+  | connectome as imported (unit gains) | -0.013 BL/s |
+  | local three-factor rule, best episode | 0.105 BL/s |
+  | **gain search ceiling** | **0.201 BL/s** |
+  | a real walking fly | 1 to 3 BL/s |
+
+  So the local rule reaches about HALF of what a direct search over the same
+  structure can find, and that ceiling is itself five to fifteen times short of
+  walking. Improving the plasticity cannot get to locomotion from here: the
+  binding constraint is the reward, the sensorimotor coupling or the
+  parameterisation, not the rule. That is the whole reason this instrument
+  exists - without it, "the local rule is weak" and "this setup cannot walk"
+  are indistinguishable, and the M5 negative result would have been
+  uninterpretable.
+
+  **The shape of the solution it found is the more useful finding.** The search
+  drives `motor` to 0.064, `intrinsic_neuron` to 0.130 and `sensory_ascending`
+  to 0.000 while amplifying `ascending` to 3.57 and `sensory` to 2.29: it
+  SUPPRESSES the cord's own recurrent circuitry and amplifies the sensory drive
+  through to the muscles. That is a reflex, not a central pattern generator -
+  and it is what a reward of net forward displacement over a short episode
+  actually asks for, since a single coordinated lunge scores as well as a gait.
+  The next experiment this points at is a reward that only a sustained periodic
+  gait can earn.
+
+  **The instrument's own limitation, stated:** eleven gains cannot express
+  anything the cell-type partition cannot, so this is a LOWER bound on what the
+  full 5.3M-weight space could reach. A per-synapse optimiser might do better,
+  and a negative result from a gain search is weaker evidence than one from a
+  per-synapse search.
+
+  **Still open in M5:** the last control - body perturbation followed by
+  re-adaptation - and the reward redesign the ceiling's solution points at.
 * **M6 - flight.** Wing MNs, power/steering split, wingbeat entrainment.
   **Gate:** 218 Hz entrainment; flight-imitation reward against the recorded
   saccade-evasion trajectories.

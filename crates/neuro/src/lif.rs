@@ -328,6 +328,21 @@ impl SpikingNet {
         self.tick = 0;
     }
 
+    /// Overwrite the synaptic weights.
+    ///
+    /// For a search over the weight space that is not plasticity: an
+    /// optimiser choosing weights from outside, to answer what the structure
+    /// could do under a stronger method than a local rule. Does NOT change
+    /// what `reset` restores, so the connectome's own weights remain the
+    /// baseline a run can always return to.
+    pub fn set_weights(&mut self, w: &[f32]) -> Result<(), String> {
+        if w.len() != self.w0.len() {
+            return Err(format!("this connectome has {} edges, got {} weights", self.w0.len(), w.len()));
+        }
+        self.gpu.write_f32(&self.w, w);
+        Ok(())
+    }
+
     /// The connectome's weights as they were loaded, before any plasticity.
     pub fn initial_weights(&self) -> &[f32] {
         &self.w0
