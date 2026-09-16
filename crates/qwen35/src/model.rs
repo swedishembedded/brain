@@ -864,6 +864,15 @@ pub struct Qwen35 {
     /// Which layers/endpoints this instance owns - `Shard::whole` for every
     /// constructor except [`Self::new_shard`].
     pub shard: Shard,
+
+    // ---- hidden-state tap (see `Self::set_hidden_taps`) --------------------
+    /// ABSOLUTE decoder-layer indices whose post-MLP residual a chunk pass
+    /// should copy back to the host. Empty (the default) makes the tap a
+    /// compiled-in `is_empty()` check per layer and nothing else.
+    taps: RefCell<Vec<usize>>,
+    /// What the last chunk pass tapped, `(layer, [n, d_model])` in layer
+    /// order. Drained by [`Self::take_hidden_taps`].
+    tapped: RefCell<Vec<(usize, Vec<f32>)>>,
 }
 
 /// Which per-sequence GQA cache / GDN recurrent state one [`Qwen35::
@@ -1444,7 +1453,39 @@ impl Qwen35 {
             dres_boundary_in,
             dres_boundary_out,
             shard,
+            taps: RefCell::new(Vec::new()),
+            tapped: RefCell::new(Vec::new()),
         }
+    }
+
+    /// **Ask a chunk pass to hand back the residual leaving specific layers.**
+    ///
+    /// `layers` are ABSOLUTE decoder-layer indices; ones outside this stage's
+    /// own `shard` range are simply never reached, so a caller driving a
+    /// pipeline hands the same list to every stage and each answers for its
+    /// own range. The tapped value is the post-MLP residual - the standard
+    /// "hidden state after decoder layer `l`", and exactly what HF's
+    /// `output_hidden_states=True` returns at tuple index `l + 1`.
+    ///
+    /// This exists for cross-model consumers of the target's INTERNALS, of
+    /// which the DFlash2 drafter (`crate::dflash2`) is the first: it
+    /// cross-attends to the concatenated residuals of five specific layers,
+    /// which no amount of reading this model's OUTPUT can reconstruct. It is
+    /// deliberately not an env-var dump like `QWEN35_DEBUG_LAYER_RMS` beside
+    /// it - a drafter needs the values in-process, every round, not printed.
+    ///
+    /// Costs one `[n, d_model]` readback per tapped layer per chunk when the
+    /// list is non-empty, and one `Vec::is_empty` per layer when it is not.
+    pub fn set_hidden_taps(&self, layers: &[usize]) {
+        *self.taps.borrow_mut() = layers.to_vec();
+        self.tapped.borrow_mut().clear();
+    }
+
+    /// Take what the last chunk pass tapped, `(absolute layer, `[n, d_model]`)`
+    /// in the order the layers ran. Draining rather than borrowing, so a
+    /// caller cannot accidentally read a previous round's rows.
+    pub fn take_hidden_taps(&self) -> Vec<(usize, Vec<f32>)> {
+        std::mem::take(&mut *self.tapped.borrow_mut())
     }
 
     fn w(&self, name: &str) -> &DeviceBuffer {
@@ -2883,6 +2924,14 @@ impl Qwen35 {
             // measured before/after at both scales.
             g.poll_wait();
             g.flush();
+            // The tap ([`Self::set_hidden_taps`]). Here, not after the loop,
+            // because `res` is rebound every iteration and only this point
+            // holds layer `l`'s own output; the `poll_wait`/`flush` pair just
+            // above is what makes the read correct, which the debug dump
+            // below has always relied on too.
+            if !self.taps.borrow().is_empty() && self.taps.borrow().contains(&l) {
+                self.tapped.borrow_mut().push((l, g.read(&res, (n * d) as usize)));
+            }
             if std::env::var_os("QWEN35_DEBUG_LAYER_RMS").is_some() {
                 let last_row = g.read(&res, (n * d) as usize)[((n - 1) * d) as usize..].to_vec();
                 let rms = (last_row.iter().map(|v| v * v).sum::<f32>() / last_row.len() as f32).sqrt();
@@ -3962,11 +4011,11 @@ mod tests {
     /// match a token-by-token replay of the same prompt - the INT8 twin of
     /// [`two_shard_chunked_prefill_matches_token_by_token_replay`], which
     /// only ever ran at FP32 (`Qwen35::new_fp32_shard_src`) with chunks of 4
-    /// rows, far short of `matmul_i8_dyn`/`matmul_q4_dyn_reg`'s 128-row tile
-    ///   - so a defect specific to the multi-tile dispatch path (real
-    ///   production rounds are 256 rows, `int8_gguf_resident::
-    ///   MAX_PREFILL_TOKENS`) had no gate at any tier that actually
-    ///   dispatches that kernel family.
+    /// rows, far short of `matmul_i8_dyn`/`matmul_q4_dyn_reg`'s 128-row tile,
+    /// so a defect specific to the multi-tile dispatch path (real
+    /// production rounds are 256 rows, `int8_gguf_resident::
+    /// MAX_PREFILL_TOKENS`) had no gate at any tier that actually
+    /// dispatches that kernel family.
     #[test]
     fn chunked_prefill_at_int8_matches_token_by_token_past_one_gemm_tile() {
         let cfg = Qwen35Config { block_size: 320, max_position_embeddings: 320, ..Qwen35Config::tiny_i8() };

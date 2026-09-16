@@ -132,7 +132,7 @@
 //!   is `crate::serve::Scheduler`'s job.
 //! * **Text only.** `crate::vl`'s vision front-end is not spliced in here.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
@@ -830,6 +830,39 @@ pub struct BatchRequest {
     pub seed: u64,
 }
 
+/// **The target's own internals, kept for a cross-attending drafter.**
+///
+/// A DFlash2-style draft model does not read the target's OUTPUT; it reads
+/// the residual leaving a handful of the target's layers and cross-attends to
+/// it. That is a number no caller can reconstruct from logits, so the stack
+/// has to hand it out, and the cheapest place to keep it is one host-side
+/// slab indexed by ABSOLUTE token position - the same index the KV cache uses,
+/// so a speculative round that rewinds and re-commits its accepted prefix
+/// overwrites exactly the rows it invalidated, with no bookkeeping.
+///
+/// Off unless [`Qwen35GgufInstance::enable_hidden_taps`] has run; the slab is
+/// `cap * layers.len() * d_model` f32 (104 MB at five layers and a 1024-token
+/// cap), which is why it is allocated then and not at construction.
+struct HiddenTaps {
+    /// ABSOLUTE decoder-layer indices, in the order a consumer wants them
+    /// CONCATENATED - the draft model's `fc` consumes one wide row, and which
+    /// 5120-wide band means which layer is fixed by the checkpoint.
+    layers: Vec<usize>,
+    /// `[cap, layers.len() * d_model]`, by absolute position.
+    rows: RefCell<Vec<f32>>,
+    /// How far the current sequence has been written. Read past this and the
+    /// rows are a previous generation's, which is a wrong answer rather than
+    /// a missing one - so it is checked, not trusted.
+    filled: Cell<u32>,
+    /// Bumped by every [`Qwen35GgufInstance::reset`]. A consumer that CACHES
+    /// anything derived from these rows - which a drafter must, or it would
+    /// re-project the whole context every round - cannot detect a new
+    /// sequence from the context length alone: a second generation with a
+    /// longer prompt looks exactly like the first one continuing. This is the
+    /// number that distinguishes them.
+    generation: Cell<u64>,
+}
+
 /// A built, multi-card, GGUF-resident Qwen3.8-27B.
 pub struct Qwen35GgufInstance {
     cfg: Qwen35Config,
@@ -867,6 +900,9 @@ pub struct Qwen35GgufInstance {
     /// ambiguous between a model that chose to stop and a loop that gave up,
     /// and those need different investigations.
     stop: Cell<&'static str>,
+    /// The per-layer residual tap a cross-attending drafter needs - `None`
+    /// (and free) until [`Self::enable_hidden_taps`] turns it on.
+    taps: RefCell<Option<HiddenTaps>>,
 }
 
 /// One `generate` call's measured cost, reported by [`Instance::metrics`].
@@ -977,9 +1013,11 @@ impl Qwen35GgufInstance {
         let mut carry = self.embed_rows(tokens)?;
         let debug = std::env::var_os("BRAIN_QWEN35_GGUF_DEBUG").is_some();
         let mut per_stage_rms = Vec::new();
+        let mut taps: Vec<(usize, Vec<f32>)> = Vec::new();
         for s in &self.shards {
             let caches = s.caches.view(slot);
             carry = s.qwen35.prefill_chunk_stage(tokens, pos_start, &caches, Some(&carry));
+            taps.extend(s.qwen35.take_hidden_taps());
             if debug {
                 // The round's LAST row, so the dump is directly comparable to
                 // the per-token one `stack_step` prints.
@@ -987,7 +1025,152 @@ impl Qwen35GgufInstance {
                 per_stage_rms.push((last.iter().map(|v| v * v).sum::<f32>() / last.len() as f32).sqrt());
             }
         }
+        self.record_taps(pos_start, n, &taps)?;
         Ok((carry, per_stage_rms))
+    }
+
+    /// **Turn the per-layer residual tap on**, for the ABSOLUTE decoder-layer
+    /// indices `layers`, in the order a consumer wants them concatenated.
+    ///
+    /// Allocates the whole `cap * layers.len() * d_model` slab up front - a
+    /// tap that grew as it filled would reallocate inside a decode round, and
+    /// this path's whole design is that a round allocates nothing.
+    ///
+    /// Only the CHUNK tape fills it ([`Self::stack_chunk_carry`], which is
+    /// every prefill round and every speculative verify). The one-token decode
+    /// tape does not, deliberately: a drafter that needs the target's hidden
+    /// states runs inside [`Self::generate_speculative`], which never takes
+    /// that tape, and tapping it too would put a readback on the hot path of
+    /// plain generation for a consumer that has none.
+    pub fn enable_hidden_taps(&self, layers: &[usize]) {
+        for &l in layers {
+            assert!(l < self.cfg.n_layers as usize, "{MODEL}: hidden tap asked for layer {l} of a {}-layer model", self.cfg.n_layers);
+        }
+        for s in &self.shards {
+            s.qwen35.set_hidden_taps(layers);
+        }
+        let width = layers.len() * self.cfg.d_model as usize;
+        *self.taps.borrow_mut() = Some(HiddenTaps {
+            layers: layers.to_vec(),
+            rows: RefCell::new(vec![0.0; self.cap as usize * width]),
+            filled: Cell::new(0),
+            generation: Cell::new(0),
+        });
+    }
+
+    /// One card this instance is resident on, for a SECOND model that wants to
+    /// live beside it. `Gpu::new_like` off this handle keeps the same adapter,
+    /// queue and memory accounting while registering a different kernel set -
+    /// which is what a co-resident drafter (`crate::dflash2`) needs, since its
+    /// architecture dispatches kernels this one never compiled.
+    pub fn stage_gpu(&self, stage: usize) -> &Gpu {
+        &self.shards[stage].qwen35.gpu
+    }
+
+    /// How many cards the plan placed this instance on.
+    pub fn stages(&self) -> usize {
+        self.shards.len()
+    }
+
+    /// The TARGET's own embedding rows for `tokens`, `[tokens.len(), d_model]`.
+    ///
+    /// A DFlash2-style drafter ships no embedding table - it embeds
+    /// `[anchor, MASK, ...]` with the target's, by design - so the table has to
+    /// be reachable. It is not a device buffer here and never was (see
+    /// [`EmbedTable`]); this reads the rows straight out of the mapping, which
+    /// is what every prefill round already does.
+    pub fn embed_rows_of(&self, tokens: &[u32]) -> Result<Vec<f32>, String> {
+        self.embed_rows(tokens)
+    }
+
+    /// **Project `rows` PRE-final-norm hidden states to `[rows, vocab]`
+    /// logits with this instance's own resident INT8 `lm_head`**, applying
+    /// `norm` as the final RMSNorm weight instead of the target's.
+    ///
+    /// The substitution is the point. A draft model that reuses the target's
+    /// head has its OWN final norm in front of it, and the composition
+    /// "draft's norm, then target's head" is exactly one
+    /// `head_logits_rows_on` call with a different weight vector - so a
+    /// co-resident drafter needs no second copy of a 1.42 GB head, which at
+    /// this shape is the difference between fitting on two cards and not.
+    ///
+    /// `hidden` is `[rows, d_model]` and must come from a model whose hidden
+    /// width matches this one's; nothing else about it is assumed.
+    pub fn logits_with_norm(&self, hidden: &[f32], rows: u32, norm: &[f32]) -> Result<Vec<f32>, String> {
+        let d = self.cfg.d_model as usize;
+        if norm.len() != d {
+            return Err(format!("{MODEL}: logits_with_norm got a {}-wide final norm for a {d}-wide model", norm.len()));
+        }
+        if hidden.len() != rows as usize * d {
+            return Err(format!("{MODEL}: logits_with_norm got {} floats for {rows} rows of {d}", hidden.len()));
+        }
+        let last = self.shards.last().expect("a plan always has at least one stage");
+        let nb = last.qwen35.gpu.storage_init("qwen35.head.foreign_norm", norm);
+        Ok(crate::stream::head_logits_rows_on(&last.qwen35.gpu, &self.head.ops, &self.cfg, &nb, &self.head.w, hidden, rows))
+    }
+
+    /// Which SEQUENCE the tapped rows belong to - see [`HiddenTaps::generation`].
+    ///
+    /// A consumer caching anything derived from [`Self::target_hidden`] must
+    /// compare this every round and throw its cache away when it changes.
+    /// Nothing about the context length can tell it: a new generation with a
+    /// longer prompt is indistinguishable from the previous one continuing,
+    /// and the failure mode is a drafter conditioned on another request's
+    /// context, which produces fluent proposals that are simply never
+    /// accepted.
+    pub fn hidden_tap_generation(&self) -> u64 {
+        self.taps.borrow().as_ref().map(|t| t.generation.get()).unwrap_or(0)
+    }
+
+    /// How wide one tapped row is - `layers.len() * d_model`, the width a
+    /// consumer's own projection must expect.
+    pub fn hidden_tap_width(&self) -> usize {
+        self.taps.borrow().as_ref().map(|t| t.layers.len() * self.cfg.d_model as usize).unwrap_or(0)
+    }
+
+    /// The tapped rows for absolute positions `from .. from+n`, concatenated
+    /// in [`Self::enable_hidden_taps`]' layer order - `[n, hidden_tap_width()]`.
+    ///
+    /// Errors rather than returning stale rows when asked past what the
+    /// current sequence has actually computed: at this scale a plausible-
+    /// looking wrong hidden state produces plausible-looking wrong drafts,
+    /// which is a silent acceptance-rate loss and not a visible failure.
+    pub fn target_hidden(&self, from: u32, n: u32) -> Result<Vec<f32>, String> {
+        let taps = self.taps.borrow();
+        let taps = taps.as_ref().ok_or_else(|| format!("{MODEL}: target_hidden before enable_hidden_taps"))?;
+        if from + n > taps.filled.get() {
+            return Err(format!("{MODEL}: target_hidden asked for positions {from}..{} but only {} have been computed", from + n, taps.filled.get()));
+        }
+        let w = taps.layers.len() * self.cfg.d_model as usize;
+        let out = taps.rows.borrow()[from as usize * w..(from + n) as usize * w].to_vec();
+        Ok(out)
+    }
+
+    /// File one chunk's taps into the position-indexed slab. `collected` is
+    /// `(absolute layer, [n, d_model])` from every stage, in whatever order
+    /// the pipeline produced them; the slab wants them in the CONCATENATION
+    /// order the consumer asked for, which is a different thing and is why
+    /// this looks each layer up rather than appending.
+    fn record_taps(&self, pos_start: u32, n: usize, collected: &[(usize, Vec<f32>)]) -> Result<(), String> {
+        let taps = self.taps.borrow();
+        let Some(taps) = taps.as_ref() else { return Ok(()) };
+        let d = self.cfg.d_model as usize;
+        let w = taps.layers.len() * d;
+        let mut rows = taps.rows.borrow_mut();
+        for (band, &l) in taps.layers.iter().enumerate() {
+            let src = collected
+                .iter()
+                .find(|(li, _)| *li == l)
+                .map(|(_, v)| v)
+                .ok_or_else(|| format!("{MODEL}: hidden tap for layer {l} was requested but no stage produced it"))?;
+            assert_eq!(src.len(), n * d, "{MODEL}: hidden tap for layer {l} is {} floats, expected {}", src.len(), n * d);
+            for i in 0..n {
+                let dst = (pos_start as usize + i) * w + band * d;
+                rows[dst..dst + d].copy_from_slice(&src[i * d..(i + 1) * d]);
+            }
+        }
+        taps.filled.set(taps.filled.get().max(pos_start + n as u32));
+        Ok(())
     }
 
     /// **The speculative verify pass**: `tokens` at consecutive positions from
@@ -1087,6 +1270,13 @@ impl Qwen35GgufInstance {
     fn reset(&self) {
         for s in &self.shards {
             s.caches.reset(&s.qwen35.gpu);
+        }
+        // The tap slab is position-indexed exactly like the KV cache, so a new
+        // sequence invalidates it the same way - by rewinding the watermark,
+        // not by zeroing 104 MB nothing will read before it is overwritten.
+        if let Some(t) = self.taps.borrow().as_ref() {
+            t.filled.set(0);
+            t.generation.set(t.generation.get() + 1);
         }
     }
 
@@ -2144,7 +2334,7 @@ impl Qwen35GgufResident {
         };
         let embed = EmbedTable { name: embed_name, d };
 
-        Ok(Qwen35GgufInstance { cfg, shards, mg, embed, head, tok, eos, cap: self.cap, max_batch: self.max_batch, last: Cell::default(), stop: Cell::new("length") })
+        Ok(Qwen35GgufInstance { cfg, shards, mg, embed, head, tok, eos, cap: self.cap, max_batch: self.max_batch, last: Cell::default(), stop: Cell::new("length"), taps: RefCell::new(None) })
     }
 }
 
