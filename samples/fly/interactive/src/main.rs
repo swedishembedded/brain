@@ -141,17 +141,44 @@ fn parse() -> Args {
     a
 }
 
-/// How many distinct colours are in an RGB8 buffer. Sixteen or fewer is a
-/// buffer nothing was drawn into.
-fn distinct_colours(rgb: &[u8]) -> usize {
+/// What an RGB8 buffer actually looks like: distinct colours, mean brightness,
+/// and how much of it is not nearly black.
+///
+/// A colour count alone was not enough and said so on the first machine it was
+/// used on. Counting stops once the answer is "many", so a frame that is
+/// almost entirely black with a faint sky gradient scores exactly the same as
+/// a lit scene - and telling those two apart is the whole question when
+/// somebody reports a black window.
+fn describe(rgb: &[u8]) -> String {
     let mut seen = std::collections::HashSet::new();
+    let (mut sum, mut lit) = (0u64, 0usize);
+    let n = rgb.len() / 3;
     for p in rgb.chunks_exact(3) {
-        seen.insert([p[0], p[1], p[2]]);
-        if seen.len() > 64 {
-            break;
+        if seen.len() <= 64 {
+            seen.insert([p[0], p[1], p[2]]);
+        }
+        let l = p[0] as u64 + p[1] as u64 + p[2] as u64;
+        sum += l;
+        if l > 90 {
+            lit += 1;
         }
     }
-    seen.len()
+    format!(
+        "{}{} colours, mean brightness {:.0}/255, {:.1}% of pixels lit",
+        if seen.len() > 64 { ">" } else { "" },
+        seen.len().min(64),
+        sum as f64 / (3.0 * n.max(1) as f64),
+        100.0 * lit as f64 / n.max(1) as f64
+    )
+}
+
+/// An RGB8 buffer as a PPM.
+fn write_ppm(path: &str, rgb: &[u8], w: u32, h: u32) -> Result<(), Error> {
+    use std::io::Write;
+    let mut f = std::fs::File::create(path)?;
+    write!(f, "P6\n{w} {h}\n255\n")?;
+    f.write_all(rgb)?;
+    Ok(())
 }
 
 /// One trajectory sample.
@@ -366,23 +393,32 @@ fn run() -> Result<(), Error> {
         // two different faults with nothing in common, and telling them apart
         // from a photograph of a screen is impossible.
         if frames == 1 {
-            let rendered = distinct_colours(view.frame());
+            // stderr, with everything else diagnostic: these lines exist to be
+            // read off someone else's terminal when their screen is black, and
+            // stdout is where the trajectory goes.
+            eprintln!("blit check: renderer  -> {}", describe(view.frame()));
             match view.window_frame() {
-                // stderr, with everything else diagnostic: this line exists to
-                // be read off someone else's terminal when their screen is
-                // black, and stdout is where the trajectory goes.
-                Ok(shown) => eprintln!(
-                    "blit check: renderer produced {rendered} distinct colours, the window holds {}{}",
-                    distinct_colours(&shown),
-                    if distinct_colours(&shown) < 16 && rendered >= 16 {
-                        "  <- THE BLIT IS THE PROBLEM, not the renderer"
-                    } else {
-                        ""
+                Ok(shown) => {
+                    eprintln!("blit check: window    -> {}", describe(&shown));
+                    if view.frame() != shown.as_slice() {
+                        eprintln!(
+                            "blit check: THE WINDOW DOES NOT HOLD WHAT WAS RENDERED - the blit is at fault"
+                        );
                     }
-                ),
-                Err(e) => eprintln!(
-                    "blit check: renderer produced {rendered} distinct colours; reading the window back failed: {e}"
-                ),
+                }
+                Err(e) => eprintln!("blit check: reading the window back failed: {e}"),
+            }
+            if let Some(path) = &args.shot {
+                // Both sides, side by side on disk. A black screen with a
+                // correct render and a correct window surface is a
+                // presentation problem, and the only way to see that from here
+                // is to have both files.
+                let window = view.window_frame().ok();
+                write_ppm(&format!("{path}.render.ppm"), view.frame(), view.width(), view.height())?;
+                if let Some(w) = window {
+                    write_ppm(&format!("{path}.window.ppm"), &w, view.width(), view.height())?;
+                }
+                eprintln!("blit check: wrote {path}.render.ppm and {path}.window.ppm");
             }
         }
         if args.frames != u64::MAX && frames.is_multiple_of(30) {
@@ -391,10 +427,7 @@ fn run() -> Result<(), Error> {
     }
 
     if let Some(path) = &args.shot {
-        use std::io::Write;
-        let mut f = std::fs::File::create(path)?;
-        write!(f, "P6\n{} {}\n255\n", view.width(), view.height())?;
-        f.write_all(view.frame())?;
+        write_ppm(path, view.frame(), view.width(), view.height())?;
         println!("{path}: {}x{} after {frames} frames", view.width(), view.height());
     }
     Ok(())

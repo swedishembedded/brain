@@ -64,7 +64,39 @@ impl SdlWindow {
             if win.is_null() {
                 return Err(sdl_error("SDL_CreateWindow"));
             }
-            let ren = sys::SDL_CreateRenderer(win, -1, sys::SDL_RENDERER_SOFTWARE);
+            // WHICH RENDERER depends on the video driver, and getting it wrong
+            // is invisible from inside the program.
+            //
+            // The software renderer is this crate's deliberate default:
+            // presentation stays on the CPU and the whole iGPU compute budget
+            // belongs to the model. It does not work on Wayland. SDL's
+            // software path needs a window framebuffer, Wayland does not
+            // provide one, and the result is a window that stays BLACK while
+            // every call involved returns success - the renderer is created,
+            // the texture uploads, the copy succeeds, the present does nothing
+            // (libsdl-org/sdl2-compat issue 266, "Window framebuffer support
+            // not available").
+            //
+            // So on Wayland, and only there, ask for an accelerated renderer:
+            // it costs the model a textured quad per frame, which is nothing
+            // next to not being able to see it.
+            let driver = sys::SDL_GetCurrentVideoDriver();
+            let driver = if driver.is_null() {
+                String::from("unknown")
+            } else {
+                std::ffi::CStr::from_ptr(driver).to_string_lossy().into_owned()
+            };
+            let wayland = driver == "wayland";
+            let want = if wayland { sys::SDL_RENDERER_ACCELERATED } else { sys::SDL_RENDERER_SOFTWARE };
+            let mut ren = sys::SDL_CreateRenderer(win, -1, want);
+            if ren.is_null() {
+                // Whichever was asked for is unavailable; the other is better
+                // than no window, and the reason it was wanted is recorded
+                // above rather than lost.
+                eprintln!("wm-display: {}", sdl_error("SDL_CreateRenderer"));
+                let fallback = if wayland { sys::SDL_RENDERER_SOFTWARE } else { sys::SDL_RENDERER_ACCELERATED };
+                ren = sys::SDL_CreateRenderer(win, -1, fallback);
+            }
             if ren.is_null() {
                 return Err(sdl_error("SDL_CreateRenderer"));
             }
@@ -78,6 +110,21 @@ impl SdlWindow {
             if tex.is_null() {
                 return Err(sdl_error("SDL_CreateTexture"));
             }
+            // Shown and raised explicitly. SDL_WINDOW_SHOWN asks for a mapped
+            // window and is not the same as the compositor having actually
+            // mapped it; on a display server that defers the map until
+            // something asks, presenting into an unmapped window is a black
+            // rectangle and no error anywhere.
+            sys::SDL_ShowWindow(win);
+            sys::SDL_RaiseWindow(win);
+
+            let flags = sys::SDL_GetWindowFlags(win);
+            eprintln!(
+                "wm-display: {driver} driver, {} renderer, {fw}x{fh} window{}",
+                if wayland { "accelerated (software does not present on Wayland)" } else { "software" },
+                if flags & sys::SDL_WINDOW_SHOWN == 0 { " (NOT SHOWN)" } else { "" }
+            );
+
             Ok(SdlWindow {
                 win,
                 ren,
@@ -91,11 +138,19 @@ impl SdlWindow {
         }
     }
 
-    /// Read back the renderer's current output as RGB24 (post-present).
-    /// For self-tests: proves the texture format/pitch path is faithful.
+    /// Read the renderer's output back as RGB24.
+    ///
+    /// Recomposes the backbuffer from the last texture before reading it.
+    /// SDL's own documentation is explicit that on the main rendering target
+    /// this "should be called after rendering and BEFORE SDL_RenderPresent()",
+    /// and reading after a present returns whatever the driver left behind -
+    /// which looked exactly like a correct frame on one machine and was not
+    /// evidence of anything.
     pub fn read_back(&mut self, w: u32, h: u32) -> Result<Vec<u8>, String> {
         let mut buf = vec![0u8; (w * h * 3) as usize];
         let rc = unsafe {
+            sys::SDL_RenderClear(self.ren);
+            sys::SDL_RenderCopy(self.ren, self.tex, std::ptr::null(), std::ptr::null());
             sys::SDL_RenderReadPixels(
                 self.ren,
                 std::ptr::null(),

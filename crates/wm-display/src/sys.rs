@@ -23,6 +23,7 @@ pub const SDL_INIT_VIDEO: u32 = 0x0000_0020;
 pub const SDL_WINDOWPOS_CENTERED: c_int = 0x2FFF_0000u32 as c_int;
 pub const SDL_WINDOW_SHOWN: u32 = 0x0000_0004;
 pub const SDL_RENDERER_SOFTWARE: u32 = 0x0000_0001;
+pub const SDL_RENDERER_ACCELERATED: u32 = 0x0000_0002;
 // SDL_PIXELFORMAT_RGB24: tightly packed interleaved R,G,B bytes.
 // SDL_DEFINE_PIXELFORMAT(ARRAYU8=7, ARRAYORDER_RGB=1, layout 0, 24 bits,
 // 3 bytes) = 0x17101803 — printed from SDL2/SDL_pixels.h by a C program,
@@ -108,6 +109,10 @@ extern "C" {
         dst: *const c_void,
     ) -> c_int;
     pub fn SDL_RenderPresent(r: *mut SDL_Renderer);
+    pub fn SDL_GetCurrentVideoDriver() -> *const std::ffi::c_char;
+    pub fn SDL_GetWindowFlags(w: *mut SDL_Window) -> u32;
+    pub fn SDL_ShowWindow(w: *mut SDL_Window);
+    pub fn SDL_RaiseWindow(w: *mut SDL_Window);
     pub fn SDL_PollEvent(ev: *mut SDL_Event) -> c_int;
     pub fn SDL_SetRelativeMouseMode(enabled: c_int) -> c_int;
     pub fn SDL_RenderReadPixels(
