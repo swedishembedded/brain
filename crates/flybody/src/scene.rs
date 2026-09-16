@@ -131,9 +131,131 @@ pub fn flight_model(fruitfly_xml: &Path, dir: &Path, cfg: Flight) -> Result<Path
     Ok(out)
 }
 
-/// The same, wrapped in a scene with a sky and no ground, which is what a
-/// hovering fly wants: a floor at the model's own origin is a surface the wings
-/// strike on the first downstroke.
+/// What kind of world the fly is put in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Arena {
+    /// A ground plane at the model's own standing height, with the walking
+    /// model's parameters. What a walking fly needs.
+    Ground,
+    /// The flight model - ellipsoid wing aerodynamics, stiffer actuators, a
+    /// shorter timestep - over the same ground, so the fly can take off from
+    /// it and land back on it.
+    ///
+    /// The floor is kept rather than removed. A hovering fly does not need
+    /// one, but a fly that can only hover is not doing anything you would
+    /// watch; taking off and landing are the interesting parts and both need a
+    /// surface.
+    Air,
+}
+
+/// A world: a fly, a floor, a sky, and optionally something to fly towards.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct World {
+    pub arena: Arena,
+    pub flight: Flight,
+    /// Where to put a food marker, in the model's own centimetres, or `None`
+    /// for an empty arena.
+    ///
+    /// It does not collide with anything. A fly that has to physically push
+    /// into its target to reach it would be measuring contact resolution
+    /// rather than navigation.
+    pub food: Option<[f64; 3]>,
+}
+
+impl Default for World {
+    fn default() -> Self {
+        World { arena: Arena::Ground, flight: Flight::default(), food: None }
+    }
+}
+
+/// The floor's height in the published walking scene, and the contact softness
+/// that goes with it. Both are the distributed model's own numbers: a fly
+/// standing on a floor at the wrong height either hovers or sinks into it, and
+/// neither looks like a bug until something is measured.
+const FLOOR_Z: f64 = -0.132;
+const FLOOR_SOLREF: &str = "0.0002 1";
+
+/// Write a complete scene - body, floor, sky, light, optional food - and return
+/// its path.
+///
+/// The body is copied and rewritten into `dir` for [`Arena::Air`] and included
+/// from where it lies for [`Arena::Ground`], so a walking run loads exactly the
+/// published model and a flying one loads the published model plus the four
+/// changes flight needs and nothing else.
+pub fn world(fruitfly_xml: &Path, dir: &Path, w: World) -> Result<PathBuf, String> {
+    world_extent(w);
+    let (body, name) = match w.arena {
+        Arena::Air => (flight_model(fruitfly_xml, dir, w.flight)?, "brain-fly-air"),
+        Arena::Ground => (
+            fruitfly_xml
+                .canonicalize()
+                .map_err(|e| format!("{}: {e}", fruitfly_xml.display()))?,
+            "brain-fly-ground",
+        ),
+    };
+    let food = match w.food {
+        Some([x, y, z]) => format!(
+            // No collision, and lit from inside so it reads as a marker rather
+            // than as an object the fly is expected to bump into.
+            r#"    <body name="food" pos="{x} {y} {z}">
+      <geom name="food" type="sphere" size="0.05" rgba="1 0.85 0.1 1" contype="0" conaffinity="0" mass="0"/>
+      <light pos="0 0 0.2" diffuse=".3 .25 .05" specular="0 0 0"/>
+    </body>
+"#
+        ),
+        None => String::new(),
+    };
+    // What the free camera frames. MuJoCo derives the default camera's
+    // distance from the model's own extent, and the extent is derived from
+    // everything in the world - so a twenty-centimetre floor around a
+    // quarter-centimetre animal produces a correct picture of an empty plain
+    // with a speck in it. Stating the extent explicitly points the camera at
+    // the fly instead, and the floor stays large enough to walk on.
+    // Big enough to hold whatever the fly will be doing: the food if there is
+    // any, and the height a flying one starts at. Too small and the animal
+    // leaves the frame in the first second; too large and it is a speck.
+    let extent = world_extent(w);
+    let scene = dir.join("scene.xml");
+    let text = format!(
+        r#"<mujoco model="{name}">
+  <asset>
+    <texture name="brain_sky" type="skybox" builtin="gradient" rgb1=".4 .6 .8" rgb2=".05 .07 .12" width="200" height="200"/>
+    <texture name="brain_grid" type="2d" builtin="checker" rgb1=".1 .2 .3" rgb2=".2 .3 .4" width="300" height="300" mark="edge" markrgb=".2 .3 .4"/>
+    <material name="brain_grid" texture="brain_grid" texrepeat="4 4" texuniform="true" reflectance=".2"/>
+  </asset>
+  <include file="{}"/>
+  <statistic extent="{extent}" center="0 0 0"/>
+  <worldbody>
+    <light pos="0 0 3" dir="0 0 -1" diffuse=".8 .8 .8"/>
+    <geom name="floor" type="plane" size="20 20 .1" material="brain_grid" pos="0 0 {FLOOR_Z}" solref="{FLOOR_SOLREF}"/>
+{food}  </worldbody>
+</mujoco>
+"#,
+        body.display()
+    );
+    std::fs::write(&scene, text).map_err(|e| format!("{}: {e}", scene.display()))?;
+    Ok(scene)
+}
+
+/// What [`world`] writes as the scene's `<statistic extent>`.
+///
+/// Public because a camera that follows the animal needs it: MuJoCo scales
+/// every camera gesture by the model's extent, so a pan of a given size means
+/// a different distance in a different world.
+pub fn world_extent(w: World) -> f64 {
+    let reach = w.food.map_or(0.0, |f| (f[0] * f[0] + f[1] * f[1] + f[2] * f[2]).sqrt());
+    // Framed on the ANIMAL, not on the volume it will cross. The camera
+    // follows it, so a frame wide enough to contain the whole flight would
+    // only make the fly a speck for the entire run; two centimetres is eight
+    // body lengths, which shows the animal and enough floor to judge its
+    // height above.
+    match w.arena {
+        Arena::Ground => reach.max(1.0) * 1.2,
+        Arena::Air => 2.0,
+    }
+}
+
+/// A flight scene with no ground, for characterising the airframe alone.
 pub fn flight_scene(fruitfly_xml: &Path, dir: &Path, cfg: Flight) -> Result<PathBuf, String> {
     let body = flight_model(fruitfly_xml, dir, cfg)?;
     let scene = dir.join("flight-scene.xml");

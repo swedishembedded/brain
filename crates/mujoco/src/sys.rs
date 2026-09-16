@@ -64,6 +64,7 @@ type MakeContext = unsafe extern "C" fn(*mut c_void, *mut c_void, c_int);
 type SetBuffer = unsafe extern "C" fn(c_int, *mut c_void);
 type ResizeOffscreen = unsafe extern "C" fn(c_int, c_int, *mut c_void);
 type MaxViewport = unsafe extern "C" fn(*mut c_void) -> Rect;
+type MoveCamera = unsafe extern "C" fn(*mut c_void, c_int, f64, f64, *mut c_void);
 type RenderFn = unsafe extern "C" fn(Rect, *mut c_void, *mut c_void);
 type ReadPixels = unsafe extern "C" fn(*mut u8, *mut f32, Rect, *mut c_void);
 
@@ -85,6 +86,7 @@ pub struct Render {
     pub set_buffer: SetBuffer,
     pub resize_offscreen: ResizeOffscreen,
     pub max_viewport: MaxViewport,
+    pub move_camera: MoveCamera,
     pub render: RenderFn,
     pub read_pixels: ReadPixels,
 }
@@ -181,6 +183,7 @@ impl Lib {
                 set_buffer: rsym!(b"mjr_setBuffer\0", SetBuffer),
                 resize_offscreen: rsym!(b"mjr_resizeOffscreen\0", ResizeOffscreen),
                 max_viewport: rsym!(b"mjr_maxViewport\0", MaxViewport),
+                move_camera: rsym!(b"mjv_moveCamera\0", MoveCamera),
                 render: rsym!(b"mjr_render\0", RenderFn),
                 read_pixels: rsym!(b"mjr_readPixels\0", ReadPixels),
             })

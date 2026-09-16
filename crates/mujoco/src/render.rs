@@ -35,6 +35,22 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::sys::Rect;
+
+/// A camera gesture, as `mjtMouse` names them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(i32)]
+pub enum Camera {
+    /// Orbit up and down.
+    OrbitV = 1,
+    /// Orbit left and right.
+    OrbitH = 2,
+    /// Slide in the vertical plane.
+    PanV = 3,
+    /// Slide in the horizontal plane.
+    PanH = 4,
+    /// Towards or away from what it is looking at.
+    Zoom = 5,
+}
 use crate::{Data, Model, MuJoCo};
 
 mod egl;
@@ -120,10 +136,17 @@ pub struct Renderer {
     camera: Blob,
     option: Blob,
     context: Blob,
+    /// The model the scene was built against. Held so camera gestures can be
+    /// applied without the caller having to pass it back every time.
+    model_ptr: *mut c_void,
     width: u32,
     height: u32,
     rgb: Vec<u8>,
 }
+
+// The model pointer is borrowed, not owned, and is only ever handed back to
+// MuJoCo; the renderer is already single-threaded by construction.
+unsafe impl Send for Renderer {}
 
 impl Renderer {
     /// Build an offscreen renderer at `width` x `height`.
@@ -204,6 +227,7 @@ impl Renderer {
             camera,
             option,
             context,
+            model_ptr: model.ptr(),
             width,
             height,
             rgb: vec![0u8; (width as usize) * (height as usize) * 3],
@@ -252,6 +276,22 @@ impl Renderer {
             (r.read_pixels)(self.rgb.as_mut_ptr(), std::ptr::null_mut(), viewport, self.context.ptr());
         }
         Ok(&self.rgb)
+    }
+
+    /// Move the camera the way a mouse drag would.
+    ///
+    /// The one operation on `mjvCamera` this binding permits, and it is
+    /// permitted because it reads no field: MuJoCo owns the struct, applies
+    /// the gesture, and hands nothing back. Pointing the camera by writing
+    /// `lookat` or `distance` directly would mean knowing where in the struct
+    /// they are, which is the thing this module exists not to know.
+    ///
+    /// `reldx`/`reldy` are fractions of the window, as a mouse drag would be.
+    pub fn move_camera(&mut self, action: Camera, reldx: f64, reldy: f64) {
+        let Some(r) = self.mj.lib().render.as_ref() else { return };
+        // SAFETY: both pointers were initialised by MuJoCo in `new` and are
+        // only ever passed back to it.
+        unsafe { (r.move_camera)(self.model_ptr, action as c_int, reldx, reldy, self.camera.ptr()) }
     }
 
     /// The last rendered frame with rows in top-down order, which is what a

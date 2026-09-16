@@ -114,13 +114,11 @@ fn manc_motor_neurons_attach_to_the_fly() {
         brain_testutil::skip("BRAIN_CONNECTOME_DIR unset");
         return;
     };
-    let dir = std::path::PathBuf::from(root).join("manc-codex");
-    if !dir.join("neurons.csv.gz").is_file() {
-        brain_testutil::skip("manc-codex not present");
+    let Ok((neurons, edges)) = connectome::find(std::path::PathBuf::from(root), "manc") else {
+        brain_testutil::skip("no MANC export under BRAIN_CONNECTOME_DIR");
         return;
-    }
-    let c = connectome::load("manc", &dir.join("neurons.csv.gz"), &dir.join("connections_princeton.csv.gz"))
-        .expect("MANC loads");
+    };
+    let c = connectome::load("manc", &neurons, &edges).expect("MANC loads");
 
     let actuators = leg_actuators();
     let m = build(&c, &actuators);

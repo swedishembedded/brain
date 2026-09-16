@@ -28,7 +28,7 @@
 pub mod scene;
 
 use connectome::Connectome;
-pub use scene::{flight_model, flight_scene, Flight};
+pub use scene::{flight_model, flight_scene, world, world_extent, Arena, Flight, World};
 
 /// Which thoracic segment a leg belongs to. The connectome writes these as
 /// `LegNpT1`/`T2`/`T3`; flybody writes them as `_T1_`/`_T2_`/`_T3_`.
