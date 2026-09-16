@@ -60,8 +60,8 @@ pub enum Objective {
     /// engineering the alternative does. The reward is dense - every tick has
     /// a target - where displacement is nearly flat until something moves.
     Imitate {
-        /// Which recorded snippet to follow.
-        snippet: usize,
+        /// Where on the recorded data an episode begins.
+        start: Start,
         reward: ImitationReward,
         /// End the episode once the body's centre of mass is this far from
         /// the reference's, in the model's own length units.
@@ -80,8 +80,8 @@ impl Objective {
     ///
     /// A constructor rather than a literal, so the termination radius is not a
     /// number every call site has to know and half of them get wrong.
-    pub fn imitate(snippet: usize) -> Objective {
-        Objective::Imitate { snippet, reward: ImitationReward::default(), terminal_com_dist: 0.33 }
+    pub fn imitate(start: Start) -> Objective {
+        Objective::Imitate { start, reward: ImitationReward::default(), terminal_com_dist: 0.33 }
     }
 
     /// The largest reward one tick can earn, for reporting a score as a
@@ -96,6 +96,25 @@ impl Objective {
             Objective::Imitate { reward, .. } => reward.max(),
         }
     }
+}
+
+/// Where an imitation episode begins on the reference data.
+///
+/// DeepMimic's two contributions are early termination and REFERENCE STATE
+/// INITIALISATION, and they work together: termination keeps a product reward
+/// out of the region where it is flat, and random initialisation is what stops
+/// that from confining every episode to the first fraction of a second of the
+/// recording. Starting always at frame 0 means a creature only ever sees the
+/// part of the gait it can already reach, and the rest of the trajectory is
+/// never experienced at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Start {
+    /// Frame 0 of one named snippet. Deterministic, which is what a
+    /// reproducible control needs.
+    Fixed(usize),
+    /// A uniformly random snippet and a uniformly random frame within it,
+    /// leaving at least `min_frames` of trajectory ahead.
+    Random { min_frames: usize },
 }
 
 /// How reward becomes a neuromodulator.
@@ -194,12 +213,34 @@ pub fn episode_with(
     fly.set_plasticity(condition.plastic());
 
     // Reference-state initialisation: an imitation episode starts ON the
-    // trajectory it is asked to follow.
-    if let Objective::Imitate { snippet, .. } = cfg.objective {
+    // trajectory it is asked to follow, at a point chosen by `Start`.
+    let mut origin = (0usize, 0usize);
+    if let Objective::Imitate { start, .. } = cfg.objective {
         let r = reference.ok_or("Objective::Imitate needs a reference trajectory")?;
         let (nq, nv) = fly.dims();
         r.check_matches(nq, nv)?;
-        let (q, v) = r.frame(snippet, 0).ok_or_else(|| format!("snippet {snippet} is empty"))?;
+        origin = match start {
+            Start::Fixed(snippet) => (snippet, 0),
+            Start::Random { min_frames } => {
+                // Rejection would be simpler but can loop; instead pick among
+                // the snippets that are long enough, and fail loudly if none
+                // is, rather than silently falling back to frame 0 of snippet
+                // 0 and running an experiment nobody asked for.
+                let usable: Vec<usize> = (0..r.snippets()).filter(|&i| r.len(i) > min_frames).collect();
+                if usable.is_empty() {
+                    return Err(format!(
+                        "no snippet has more than {min_frames} frames, so a random start leaving that \
+                         much trajectory ahead is impossible"
+                    ));
+                }
+                let snippet = usable[rng.index(usable.len())];
+                (snippet, rng.index(r.len(snippet) - min_frames))
+            }
+        };
+        let (snippet, offset) = origin;
+        let (q, v) = r
+            .frame(snippet, offset)
+            .ok_or_else(|| format!("snippet {snippet} has no frame {offset}"))?;
         let q: Vec<f64> = q.iter().map(|x| *x as f64).collect();
         let v: Vec<f64> = v.iter().map(|x| *x as f64).collect();
         fly.set_pose(&q, &v)?;
@@ -225,12 +266,13 @@ pub fn episode_with(
                 last_x = x;
                 r
             }
-            Objective::Imitate { snippet, reward, terminal_com_dist } => {
+            Objective::Imitate { reward, terminal_com_dist, .. } => {
                 // One reference frame per control tick - the dataset is
-                // sampled at exactly the control period, so `tick` indexes it
-                // directly.
+                // sampled at exactly the control period, so `tick` counts off
+                // frames from wherever this episode started.
                 let r = reference.expect("checked above");
-                match r.frame(snippet, tick) {
+                let (snippet, offset) = origin;
+                match r.frame(snippet, offset + tick) {
                     Some((rq, rv)) => {
                         let qpos = fly.qpos();
                         // Terminate BEFORE scoring, so a tick that has already

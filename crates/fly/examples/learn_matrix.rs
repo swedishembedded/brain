@@ -5,7 +5,7 @@
 //! This is the experiment, not a test: it takes minutes and its answer is
 //! empirical. The test that gates it asserts the CONTROLS behave, which is a
 //! claim that holds whether or not the learner works.
-use fly::learn::{episode_with, Condition, Lcg, Objective, RewardConfig};
+use fly::learn::{episode_with, Condition, Lcg, Objective, RewardConfig, Start};
 use fly::Reference;
 use fly::{Coupling, Fly, Timing};
 use mujoco::{Model, MuJoCo};
@@ -36,7 +36,14 @@ fn main() {
     let imitate = reference.is_some() && std::env::var("OBJECTIVE").as_deref() != Ok("displacement");
     let cfg = RewardConfig {
         objective: if imitate {
-            Objective::imitate(0)
+            Objective::imitate(if std::env::var("START").as_deref() == Ok("fixed") {
+                Start::Fixed(0)
+            } else {
+                // Random by default: DeepMimic's other half. Fixed starts
+                // confine every episode to the first fraction of a second of
+                // one recording, and the rest of the gait is never seen.
+                Start::Random { min_frames: 300 }
+            })
         } else {
             Objective::Displacement
         },
