@@ -353,7 +353,64 @@ including the `samples/imagegen/*` samples that link `crates/sdk` directly.
       duplication section above. 4 new unit tests in `build.rs` plus full
       regression runs across `brain-flux2`/`brain-cli`/`brain` (sdk) and a
       whole-workspace build - see that section for exact counts.
-- [ ] **Phase 2** - new pipelines, in the priority order above: Forecast, Text, Embedding, ASR, then the rest. Each gets its own sub-roadmap section here (or its own file, linked from here) when it starts, written against the full `sdk-design.md` checklist from day one - including an end-to-end test and its CLI migrated onto it in the SAME change, learning from M10 rather than repeating the `flux2_cli.rs` gap a second time. Design each pipeline's progress/cancellation surface (rule 8) toward the `run.start()/subscribe()/cancel()/result()` shape `.agents/roadmap/orchestration-hsm.md` proposes, rather than reinventing M5's synchronous `generate_with_progress(cancel, on_progress)` a second time - M5's shape stays the right SIMPLE default, but a new pipeline's ADVANCED tier should point at where this is heading.
+- [ ] **Phase 2** - new pipelines, in the priority order above: Forecast, Text, Embedding, ASR, then the rest. Each gets its own sub-roadmap section here (or its own file, linked from here) when it starts, written against the full `sdk-design.md` checklist from day one - including an end-to-end test, learning from M10 rather than repeating the `flux2_cli.rs` duplication gap a second time. Design each pipeline's progress/cancellation surface (rule 8) toward the `run.start()/subscribe()/cancel()/result()` shape `.agents/roadmap/orchestration-hsm.md` proposes, rather than reinventing M5's synchronous `generate_with_progress(cancel, on_progress)` a second time - M5's shape stays the right SIMPLE default, but a new pipeline's ADVANCED tier should point at where this is heading.
+
+### Phase 2.1 - `ForecastPipeline` (done)
+
+Covers **kronos and timesfm3** - the two forecasting architectures with a
+real model-store `ArchSpec` today (`kronos::spec::KronosSpec`,
+`timesfm3::spec::Timesfm3Spec`), resolved through the SAME `loader::
+resolve_structured` call `ImagePipeline` uses. **chronos2 and fincast are a
+real, tracked gap, not silently unsupported**: neither has a `default_ref`
+or any resolver `ArchSpec` registered anywhere in `brain_arch::ARCHS` -
+both load from a plain `BRAIN_CHRONOS2`/`BRAIN_FINCAST` env var today
+(`resident_forecast.rs`), so there is nothing for a store-based resolver to
+resolve them against; wiring them up is upstream work in those two model
+crates, not something to fake at the SDK layer.
+
+Simpler than `ImagePipeline` in one real way: all four forecasting
+architectures (including the two not wired in here) already share ONE
+object-safe trait, `forecast::ForecastModel` - so `ForecastPipeline` holds a
+plain `Box<dyn ForecastModel>` with no per-architecture match arm anywhere
+past construction, unlike `ImagePipeline`'s `Backend` enum. The domain
+object (`forecast::Forecast`/`Panel`/`Variate`/`Capabilities`/...) already
+existed, well-designed to rule 4's own standard (an explicit `derived: bool`
++ `method` on every value brain computed rather than the model emitting,
+never fabricating a representation that isn't mathematically sound) -
+re-exported directly rather than wrapped a second time (rule 58).
+
+`Error::Forecast` is a NEW enum variant, carrying `code`/`message`/
+`retryable` - but as a locally-defined `ForecastFailure` struct, not
+`forecast::ForecastError` itself, specifically so `Error`'s own shape does
+not depend on the `forecast` feature (`Error` is documented as one shape in
+every configuration; a feature-gated variant would break that). The wire-only
+structured `detail` JSON blob is deliberately not carried across - `message`
+already states any numbers it would repeat.
+
+`crate::device::apply` (the `resolve`-tier device+placer setup) was factored
+out of `pipeline.rs`'s own private `apply_device` into `device.rs` proper
+(alongside the `device`-tier-only `resolve` from M3), since `forecast` now
+needs the exact same "resolve → apply → install the model-shard placer"
+sequence `image` does - the alternative was a second private copy in
+`forecast.rs`, which is exactly the class of duplication this whole
+sweep exists to prevent.
+
+Tested against real local, synthetic, fully-offline fixtures reproducing
+`crates/kronos/src/spec.rs`'s and `crates/timesfm3/src/spec.rs`'s own
+(private) classification schemas, mirroring `tests/image_pipeline.rs`'s
+established pattern exactly: resolution + dispatch proven all the way to
+each architecture's real, unavoidable ceiling (`Forecaster::load` needs
+every weight tensor its config implies; neither model has a tiny injectable
+config), then a clean typed `Error::Backend`, never a panic.
+
+**Not done, tracked for later**: CLI migration (`forecast_cli.rs`'s
+`predict`/`compare` commands are NOT rebuilt onto `ForecastPipeline` in this
+change - they also own CSV parsing, baseline comparison, chart rendering and
+several sampling-parameter env-var overrides well beyond this pipeline's
+scope, and `--timesfm3 <path>` there is a raw path argument that never goes
+through the resolver at all). This is the SAME kind of gap `ImagePipeline`
+itself still has against `flux2_cli.rs` - tracked, not silently accepted,
+and not repeated by pretending it's smaller than it is.
 
 Findings 8, 11, 14, 18-20, 23-24 are real but not yet milestoned - pick them
 up opportunistically when touching the same file for another reason, or spin

@@ -34,6 +34,7 @@
 //! |---|---|
 //! | `image` | [`ImagePipeline`], [`Image`] -- text-to-image and image editing |
 //! | `creature` | [`Creature`], [`View`] -- a connectome running a body, and a window onto it |
+//! | `forecast` | [`ForecastPipeline`] -- time-series forecasting (kronos, timesfm3) |
 //! | `full` | every surface; this is `default` |
 //!
 //! `device` and `resolve` are infrastructure tiers that a surface selects for
@@ -71,6 +72,8 @@ mod creature;
 #[cfg(feature = "device")]
 mod device;
 mod error;
+#[cfg(feature = "forecast")]
+mod forecast;
 #[cfg(feature = "image")]
 mod image;
 #[cfg(feature = "image")]
@@ -78,7 +81,7 @@ mod pipeline;
 #[cfg(feature = "creature")]
 mod view;
 
-pub use error::Error;
+pub use error::{Error, ForecastFailure};
 
 /// A device/backend selection. Re-exported, not reinvented: the SAME type
 /// `--device` parses into (`gpu_core::devices::DeviceSpec`). An empty
@@ -93,6 +96,15 @@ pub use model::dispatch::Precision as DType;
 
 #[cfg(feature = "creature")]
 pub use creature::{Arena, Beat, Creature, CreatureBuilder};
+#[cfg(feature = "forecast")]
+pub use forecast::{ForecastPipeline, ForecastPipelineBuilder};
+/// The forecasting domain types [`ForecastPipeline::forecast_with`] needs
+/// for anything past the simple `.forecast(series, horizon)` call --
+/// re-exported from `brain-forecast`, not reinvented (that crate IS the
+/// model-agnostic seam; wrapping it again here would be a second,
+/// competing representation of the same domain).
+#[cfg(feature = "forecast")]
+pub use ::forecast::{Block, Capabilities, Forecast, ForecastSpec, Item, Panel, Representation, TargetForecast, Variate};
 #[cfg(feature = "image")]
 pub use image::Image;
 #[cfg(feature = "image")]

@@ -67,6 +67,21 @@ println!("{:?} after one second", fly.position());
 see `samples/fly/interactive` in the repository for a complete, runnable
 example with keyboard control.
 
+## Time-series forecasting
+
+```rust
+let pipe = brain::ForecastPipeline::from_pretrained("NeoQuasar/Kronos-base")?;
+let series: Vec<f32> = vec![100.0, 101.2, 99.8, 102.5];
+let forecast = pipe.forecast(&series, 24)?;
+println!("{} steps ahead, {} target(s)", forecast.horizon, forecast.targets.len());
+```
+
+Covers kronos and timesfm3 today; `pipe.capabilities()` reports what the
+resolved model actually supports (context/horizon limits, native
+representation, covariate handling), and `pipe.forecast_with(&panel, &spec)`
+is the full-control entry point for a multi-item, multi-variate `Panel` or
+for requesting samples/a distribution instead of quantiles.
+
 ## Features
 
 Name the surfaces you use and you get their dependencies and nothing else:
@@ -75,6 +90,7 @@ Name the surfaces you use and you get their dependencies and nothing else:
 | --- | --- |
 | `image` | `ImagePipeline`, `Image` - text-to-image and image editing |
 | `creature` | `Creature`, `View` - a connectome running a body, and a window onto it |
+| `forecast` | `ForecastPipeline` - time-series forecasting |
 | `full` | every surface; this is the default |
 
 ## Errors

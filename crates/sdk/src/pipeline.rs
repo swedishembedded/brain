@@ -184,17 +184,6 @@ fn check_s3dit_size(built: (u32, u32), requested: (Option<u32>, Option<u32>)) ->
     Ok(())
 }
 
-/// [`crate::device::resolve`] plus the one thing only a `resolve`-surface
-/// needs on top: installing [`loader::install_default_placer`] so automatic
-/// GPU/CPU model-shard placement narrows to exactly what was asked for.
-fn apply_device(device: &Device) -> Result<()> {
-    let set = crate::device::resolve(device)?;
-    let gpus: Option<std::collections::HashSet<u32>> = Some(set.gpus.iter().copied().collect());
-    let cpu_allowed = set.cpu_enabled();
-    loader::install_default_placer(gpus, cpu_allowed);
-    Ok(())
-}
-
 /// The backend-specific state one resolved architecture built --
 /// [`ImagePipeline`] itself carries only a [`Backend`], and every public
 /// method matches on it once, at the top; nothing downstream of that match
@@ -486,7 +475,7 @@ impl ImagePipelineBuilder {
 
     /// Resolve `model_id` and build a real [`ImagePipeline`].
     ///
-    /// 1. [`Device`] is applied to this process (see [`apply_device`]).
+    /// 1. [`Device`] is applied to this process (see [`crate::device::apply`]).
     /// 2. `model_id` is parsed and, under `DownloadPolicy::IfMissing` (the
     ///    one policy this milestone's builder offers -- see
     ///    [`loader::DownloadPolicy`]'s own doc for the other two), fetched
@@ -516,7 +505,7 @@ impl ImagePipelineBuilder {
     pub fn load(self) -> Result<ImagePipeline> {
         let ImagePipelineBuilder { model_id, device, dtype, size } = self;
 
-        apply_device(&device)?;
+        crate::device::apply(&device)?;
 
         let reference = brain_modelref::ModelRef::parse(&model_id).map_err(|e| Error::ModelNotFound(format!("{model_id}: {e}")))?;
 

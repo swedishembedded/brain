@@ -36,6 +36,27 @@
 
 use brain_modelstore::resolve::{describe_ambiguity, describe_missing, Ambiguity, Missing};
 
+/// [`Error::Forecast`]'s payload - see that variant's own doc for why this
+/// is a local redefinition of `forecast::ForecastError`'s shape rather than
+/// that type itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForecastFailure {
+    /// Stable machine-readable slug (`"context_too_long"`, `"missing_variate"`,
+    /// `"unsupported_capability"`, `"bad_request"`, `"internal"`, ...).
+    pub code: String,
+    /// Human-readable detail - already states any numbers a `detail` JSON
+    /// blob on the wire-facing type would otherwise repeat.
+    pub message: String,
+    /// Whether retrying the identical request could plausibly succeed.
+    pub retryable: bool,
+}
+
+impl std::fmt::Display for ForecastFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.code, self.message)
+    }
+}
+
 /// Everything a `brain` SDK call can fail with.
 #[derive(Debug)]
 pub enum Error {
@@ -73,6 +94,21 @@ pub enum Error {
     /// bothers to `match` on the difference (retry a backend failure,
     /// don't retry a missing argument).
     MissingArgument(String),
+    /// A forecasting request failed a capability check or a model's own
+    /// validation (context too long, a missing required variate, an
+    /// unsupported representation) - [`ForecastFailure`]'s `code`/`message`/
+    /// `retryable`, carried structurally rather than flattened into
+    /// [`Error::Backend`]'s bare string, for the same reason
+    /// [`Error::Ambiguous`] is. Redefined here rather than wrapping
+    /// `forecast::ForecastError` directly so `Error`'s own shape does not
+    /// depend on the `forecast` feature (this enum is one shape in every
+    /// configuration - see this module's doc); the conversion lives in
+    /// `crate::forecast`, gated the same way. The wire-only structured
+    /// `detail` JSON blob is NOT carried across this boundary - `code`,
+    /// `message` and `retryable` are what an in-process Rust caller acts on,
+    /// and `message` already states the numbers `detail` would repeat
+    /// (e.g. `"context 900 exceeds max_context 512"`).
+    Forecast(ForecastFailure),
     /// Any other failure surfaced by the flux2/modelstore backends this
     /// facade sits on -- they return `Result<_, String>` throughout (see
     /// those crates' own module docs for why), and this variant carries that
@@ -95,6 +131,7 @@ impl std::fmt::Display for Error {
             Error::Download(m) => write!(f, "download failed: {m}"),
             Error::LicenseRequired(m) => write!(f, "license required: {m}"),
             Error::MissingArgument(m) => write!(f, "{m}"),
+            Error::Forecast(e) => write!(f, "{e}"),
             Error::Backend(m) => write!(f, "{m}"),
             Error::Io(e) => write!(f, "{e}"),
             Error::Cancelled => write!(f, "generation cancelled"),
@@ -131,6 +168,17 @@ impl From<Box<brain_modelstore::PlanError>> for Error {
             PlanError::AmbiguousRecipe(r, ids) => Error::Backend(format!("{r}: ambiguous recipe match -- {}", ids.join(", "))),
             PlanError::Hub(e) => Error::Download(e.to_string()),
         }
+    }
+}
+
+/// The one place `forecast::ForecastError` becomes [`Error::Forecast`] - see
+/// that variant's own doc for why the payload is a local redefinition
+/// rather than the wire-facing type itself (`Error`'s shape must not depend
+/// on the `forecast` feature).
+#[cfg(feature = "forecast")]
+impl From<::forecast::ForecastError> for Error {
+    fn from(e: ::forecast::ForecastError) -> Self {
+        Error::Forecast(ForecastFailure { code: e.code, message: e.message, retryable: e.retryable })
     }
 }
 
@@ -193,5 +241,20 @@ mod tests {
     fn missing_argument_renders_its_own_message_without_a_generic_prefix() {
         let err = Error::MissingArgument("no connectome directory set; call .connectome(dir)".to_string());
         assert_eq!(err.to_string(), "no connectome directory set; call .connectome(dir)");
+    }
+
+    /// A real `forecast::ForecastError` (not a hand-built stand-in) survives
+    /// the trip through `Error::Forecast` with its code/message/retryable
+    /// intact - `code`/`retryable` are exactly what a caller needs to react
+    /// differently than to a generic `Error::Backend`.
+    #[cfg(feature = "forecast")]
+    #[test]
+    fn a_real_forecast_error_becomes_error_forecast_with_its_fields_intact() {
+        let fe = ::forecast::ForecastError::context_too_long(512, 900);
+        let err: Error = fe.into();
+        let Error::Forecast(f) = &err else { panic!("expected Error::Forecast, got {err:?}") };
+        assert_eq!(f.code, "context_too_long");
+        assert!(!f.retryable);
+        assert_eq!(err.to_string(), "context_too_long: context 900 exceeds max_context 512");
     }
 }
