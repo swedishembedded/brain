@@ -143,6 +143,10 @@ pub struct Neuron {
     pub nerve: String,
     pub soma_side: String,
     pub cell_type: String,
+    /// The neuropil this neuron has most of its connectivity in, e.g.
+    /// `LEGNP_T1` for the front-leg neuropil. This is the handle a
+    /// per-neuropil subnetwork is selected by.
+    pub region: String,
     /// Membrane surface area in square nanometres, as reconstructed. `0.0`
     /// where the export does not carry it.
     ///
@@ -224,6 +228,67 @@ impl Connectome {
             *w *= sign * scale;
         }
         csc
+    }
+
+    /// A connectome restricted to the neurons `keep` selects, with the edges
+    /// between them.
+    ///
+    /// Published circuit models of this nerve cord work on a SUBNETWORK - one
+    /// leg neuropil and the neurons that reach it - rather than on the whole
+    /// cord, and that is not only a compute saving. A large recurrent network
+    /// carries many feedback loops of many different lengths at once, and a
+    /// network oscillator's period is set by its loop delay; running them all
+    /// together smears the rhythm across every period the graph contains.
+    ///
+    /// Edges are kept only where BOTH endpoints survive. An edge from a
+    /// dropped neuron is not evidence of anything about the remaining ones, and
+    /// carrying its weight in as a constant would be inventing a tonic drive
+    /// the data does not describe.
+    ///
+    /// The coverage report on the result describes the SUBSET, and says so: it
+    /// is derived from a balanced import rather than measured against an input
+    /// file, so its row counts equal its kept counts by construction and a
+    /// balance check on it proves nothing new.
+    pub fn subgraph(&self, keep: impl Fn(&Neuron) -> bool) -> Connectome {
+        let mut remap = vec![u32::MAX; self.neurons.len()];
+        let mut neurons = Vec::new();
+        for (i, n) in self.neurons.iter().enumerate() {
+            if keep(n) {
+                remap[i] = neurons.len() as u32;
+                neurons.push(n.clone());
+            }
+        }
+        let mut edges: Vec<(u32, u32, f32)> = Vec::new();
+        let mut synapses = 0u64;
+        for post in 0..self.csc.n as usize {
+            let to = remap[post];
+            if to == u32::MAX {
+                continue;
+            }
+            let (a, b) = (self.csc.indptr[post] as usize, self.csc.indptr[post + 1] as usize);
+            for k in a..b {
+                let from = remap[self.csc.pre[k] as usize];
+                if from != u32::MAX {
+                    edges.push((from, to, self.csc.w[k]));
+                    synapses += self.csc.w[k] as u64;
+                }
+            }
+        }
+        let n = neurons.len() as u32;
+        // Cannot fail: every endpoint was produced by `remap` and is therefore
+        // below `n` by construction.
+        let csc = neuro::Csc::from_edges(n, &edges).expect("remapped endpoints are in range");
+        let coverage = crate::codex::Coverage {
+            neuron_rows: neurons.len(),
+            neurons_kept: neurons.len(),
+            neuron_rejects: Default::default(),
+            edge_rows: edges.len(),
+            edge_rows_kept: edges.len(),
+            edge_rejects: Default::default(),
+            edges: edges.len(),
+            synapses,
+        };
+        Connectome { dataset: format!("{} (subgraph)", self.dataset), neurons, csc, coverage }
     }
 
     /// The graph as a network: signed, scaled, optionally size-normalised, and

@@ -123,6 +123,7 @@ fn read_neurons(r: impl Read, cov: &mut Coverage) -> Result<(BTreeMap<u64, u32>,
     let c_nerve = header.find("Nerve");
     let c_side = header.find("Soma side");
     let c_type = header.find("Primary Cell Type");
+    let c_region = header.find("Top in/out region");
     let c_pred = header.find("Predicted NT type");
     let c_conf = header.find("Predicted NT confidence");
     let c_ver = header.find("Verified NT type");
@@ -169,6 +170,7 @@ fn read_neurons(r: impl Read, cov: &mut Coverage) -> Result<(BTreeMap<u64, u32>,
             nerve: get(c_nerve),
             soma_side: get(c_side),
             cell_type: get(c_type),
+            region: get(c_region),
             // Missing or unparseable becomes 0.0, which `Connectome::size_scale`
             // reads as "unknown" and replaces with the population median rather
             // than with an infinitely excitable neuron.

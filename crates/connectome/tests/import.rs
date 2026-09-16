@@ -279,3 +279,50 @@ fn real_datasets_reproduce_their_published_statistics() {
         eprintln!("  CSR {:.1} MB", c.csc.nnz() as f64 * 8.0 / 1e6);
     }
 }
+
+/// A subnetwork is what published circuit models of this cord actually run on,
+/// so the selection has to be exact rather than approximately right.
+#[test]
+fn a_subgraph_keeps_only_the_edges_between_the_neurons_it_kept() {
+    let Some(root) = std::env::var_os("BRAIN_CONNECTOME_DIR").filter(|v| !v.is_empty()) else {
+        brain_testutil::skip("BRAIN_CONNECTOME_DIR unset");
+        return;
+    };
+    let dir = std::path::PathBuf::from(root).join("manc-codex");
+    if !dir.join("neurons.csv.gz").is_file() {
+        brain_testutil::skip("manc-codex not present");
+        return;
+    }
+    let c = load("manc", &dir.join("neurons.csv.gz"), &dir.join("connections_princeton.csv.gz")).unwrap();
+
+    // The front-leg neuropil plus every descending neuron, which is the scope
+    // the published front-leg circuit model works at.
+    let sub = c.subgraph(|n| n.region.starts_with("LEGNP_T1") || n.super_class == "descending");
+    assert!(sub.neurons.len() > 5_000, "LEGNP_T1 plus the descending population should be thousands of neurons, got {}", sub.neurons.len());
+    assert!(sub.neurons.len() < c.neurons.len() / 2, "the subgraph should be a small fraction of the cord, got {}", sub.neurons.len());
+
+    // Every kept neuron satisfies the predicate, and the annotations travelled
+    // with it rather than being reset.
+    for n in &sub.neurons {
+        assert!(n.region.starts_with("LEGNP_T1") || n.super_class == "descending", "{:?} does not satisfy the predicate", n.root_id);
+    }
+
+    // THE CONTROL that makes the edge claim mean something: selecting
+    // EVERYTHING must reproduce the original graph exactly, so an edge is
+    // never dropped for a reason other than an endpoint being dropped.
+    let all = c.subgraph(|_| true);
+    assert_eq!(all.neurons.len(), c.neurons.len());
+    assert_eq!(all.coverage.edges, c.coverage.edges, "selecting everything lost edges");
+    assert_eq!(all.coverage.synapses, c.coverage.synapses, "selecting everything lost synapses");
+
+    // And the restricted graph is genuinely smaller on both counts, or the
+    // subgraph is keeping edges to neurons that are no longer there.
+    assert!(sub.coverage.edges < c.coverage.edges);
+    assert!(sub.csc.n as usize == sub.neurons.len(), "the graph and the annotation list disagree on size");
+    eprintln!(
+        "LEGNP_T1 + descending: {} neurons, {} edges, {} synapses",
+        sub.neurons.len(),
+        sub.coverage.edges,
+        sub.coverage.synapses
+    );
+}

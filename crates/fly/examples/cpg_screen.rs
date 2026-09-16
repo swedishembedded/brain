@@ -31,7 +31,26 @@ fn env(name: &str) -> String {
 fn main() {
     let mj = MuJoCo::load().unwrap();
     let dir = std::path::PathBuf::from(env("BRAIN_CONNECTOME_DIR")).join("manc-codex");
-    let c = connectome::load("manc", &dir.join("neurons.csv.gz"), &dir.join("connections_princeton.csv.gz")).unwrap();
+    let whole = connectome::load("manc", &dir.join("neurons.csv.gz"), &dir.join("connections_princeton.csv.gz")).unwrap();
+    // $REGION restricts the network to one neuropil plus the descending
+    // neurons that reach it, which is the scope published circuit models of
+    // this cord work at. A large recurrent graph carries feedback loops of
+    // many lengths at once and a network oscillator's period is its loop
+    // delay, so running the whole cord smears the rhythm across every period
+    // the graph contains.
+    let region = std::env::var("REGION").unwrap_or_default();
+    let c = if region.is_empty() {
+        whole
+    } else {
+        let sub = whole.subgraph(|n| n.region.starts_with(&region) || n.super_class == "descending");
+        println!(
+            "restricted to {region}: {} neurons, {} edges, {} synapses",
+            sub.neurons.len(),
+            sub.coverage.edges,
+            sub.coverage.synapses
+        );
+        sub
+    };
     let model = Model::from_xml(&mj, env("BRAIN_FLYBODY_XML")).unwrap();
     let lif = LifParams { dt_over_tau: 0.1, v_th: 1.0, r: 1.0, refrac_ticks: 1, ..LifParams::default() };
     let n = c.neurons.len() as f64;
