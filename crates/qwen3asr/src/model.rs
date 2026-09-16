@@ -39,9 +39,9 @@ impl Qwen3Asr {
         seq_budget: u32,
         audio_row0: u32,
         n_audio: u32,
-    ) -> Qwen3Asr {
+    ) -> Result<Qwen3Asr, String> {
         let src: HashMap<String, Vec<f32>> = tensors.into_iter().map(|t| (t.name, t.data)).collect();
-        let aweights = crate::import::map_audio_encoder(&src, &cfg.audio);
+        let aweights = crate::import::map_audio_encoder(&src, &cfg.audio)?;
         let dweights = crate::import::map_decoder_weights(&src);
         drop(src); // release the ~7 GB source map before uploading the decoder
         // Inference-only decoder (weights only, no grad/moment state) so the 1.7B
@@ -49,13 +49,13 @@ impl Qwen3Asr {
         let shard = qwen3::Shard::whole(cfg.text.n_layers as usize);
         let mut decoder = Qwen::new_shard(cfg.text.clone(), 1, seq_budget, &dweights, false, shard);
         decoder.enable_mm_splice(audio_row0, n_audio);
-        Qwen3Asr { agpu: Gpu::new_cpu(audio_pipelines()), cfg, aweights, decoder, audio_row0, n_audio }
+        Ok(Qwen3Asr { agpu: Gpu::new_cpu(audio_pipelines()), cfg, aweights, decoder, audio_row0, n_audio })
     }
 
     /// Load a Hugging Face Qwen3-ASR checkpoint directory (bf16 → f32).
     pub fn from_hf(dir: &str, cfg: QwenAsrConfig, seq_budget: u32, audio_row0: u32, n_audio: u32) -> Result<Qwen3Asr, String> {
         let tensors = checkpoint::safetensors::read_model_dir(Path::new(dir))?;
-        Ok(Self::from_tensors(tensors, cfg, seq_budget, audio_row0, n_audio))
+        Self::from_tensors(tensors, cfg, seq_budget, audio_row0, n_audio)
     }
 
     /// The number of audio placeholder tokens this model is assembled for.
@@ -73,7 +73,7 @@ impl Qwen3Asr {
     pub fn from_hf_windowed(dir: &str, cfg: QwenAsrConfig, window_samples: usize, audio_row0: u32, max_new: u32) -> Result<(Qwen3Asr, u32), String> {
         let tensors = checkpoint::safetensors::read_model_dir(Path::new(dir))?;
         let src: HashMap<String, Vec<f32>> = tensors.into_iter().map(|t| (t.name, t.data)).collect();
-        let aweights = crate::import::map_audio_encoder(&src, &cfg.audio);
+        let aweights = crate::import::map_audio_encoder(&src, &cfg.audio)?;
         let agpu = Gpu::new_cpu(audio_pipelines());
         // Probe: encode a full window of silence to get the actual audio-token count.
         let silence = vec![0.0f32; window_samples];

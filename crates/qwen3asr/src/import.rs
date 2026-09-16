@@ -30,12 +30,26 @@ pub fn load_audio_encoder(dir: &Path, cfg: &AudioEncoderConfig) -> Result<HashMa
     for t in tensors {
         src.insert(t.name, t.data);
     }
-    Ok(map_audio_encoder(&src, cfg))
+    map_audio_encoder(&src, cfg)
 }
 
-/// Pure name/shape remap (testable without a checkpoint on disk).
-pub fn map_audio_encoder(src: &HashMap<String, Vec<f32>>, cfg: &AudioEncoderConfig) -> HashMap<String, Vec<f32>> {
-    let get = |name: &str| -> Vec<f32> { src.get(name).unwrap_or_else(|| panic!("Qwen3-ASR tensor missing: {name}")).clone() };
+/// Pure name/shape remap (testable without a checkpoint on disk). An
+/// incomplete `src` (a truncated or malformed checkpoint - real, reachable
+/// input, not a programming bug) is a named `Err` naming every missing
+/// tensor, never a panic: this function is reached from `Qwen3Asr::
+/// from_hf_windowed`/`from_hf`, both public loaders an embedder's own bad
+/// path can drive.
+pub fn map_audio_encoder(src: &HashMap<String, Vec<f32>>, cfg: &AudioEncoderConfig) -> Result<HashMap<String, Vec<f32>>, String> {
+    let mut missing: Vec<String> = Vec::new();
+    let mut get = |name: &str| -> Vec<f32> {
+        match src.get(name) {
+            Some(v) => v.clone(),
+            None => {
+                missing.push(name.to_string());
+                Vec::new()
+            }
+        }
+    };
     let mut w = HashMap::new();
 
     // conv stem + conv_out
@@ -47,7 +61,7 @@ pub fn map_audio_encoder(src: &HashMap<String, Vec<f32>>, cfg: &AudioEncoderConf
 
     // transformer blocks (fuse q/k/v)
     for b in 0..cfg.n_layers {
-        let a = |leaf: &str| get(&format!("thinker.audio_tower.layers.{b}.{leaf}"));
+        let mut a = |leaf: &str| get(&format!("thinker.audio_tower.layers.{b}.{leaf}"));
         let mut qkv_w = a("self_attn.q_proj.weight");
         qkv_w.extend(a("self_attn.k_proj.weight"));
         qkv_w.extend(a("self_attn.v_proj.weight"));
@@ -75,7 +89,10 @@ pub fn map_audio_encoder(src: &HashMap<String, Vec<f32>>, cfg: &AudioEncoderConf
         w.insert(format!("multi_modal_projector.linear_{i}.weight"), get(&format!("thinker.audio_tower.proj{i}.weight")));
         w.insert(format!("multi_modal_projector.linear_{i}.bias"), get(&format!("thinker.audio_tower.proj{i}.bias")));
     }
-    w
+    if !missing.is_empty() {
+        return Err(format!("Qwen3-ASR checkpoint is missing {} audio-tower tensor(s), starting with '{}'", missing.len(), missing[0]));
+    }
+    Ok(w)
 }
 
 /// Map an HF Qwen3-ASR decoder tensor name (`thinker.model.*`) to a brain
@@ -118,4 +135,51 @@ pub fn map_decoder_weights(src: &HashMap<String, Vec<f32>>) -> HashMap<String, V
         }
     }
     w
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::AudioEncoderConfig;
+
+    /// The bug this test pins: an incomplete checkpoint (a real, reachable
+    /// input - a truncated download, a wrong directory) used to panic the
+    /// whole process from deep inside a "pure" remap function reached by
+    /// `Qwen3Asr::from_hf`/`from_hf_windowed`, both public loaders. It must
+    /// instead be a named `Err`, and the error must say WHICH tensor is
+    /// missing rather than a bare "something failed".
+    #[test]
+    fn an_incomplete_checkpoint_is_a_named_error_not_a_panic() {
+        let cfg = AudioEncoderConfig { n_layers: 0, ..AudioEncoderConfig::qwen3_asr() };
+        let src: HashMap<String, Vec<f32>> = HashMap::new();
+        let Err(msg) = map_audio_encoder(&src, &cfg) else { panic!("an empty tensor map must fail") };
+        assert!(msg.contains("thinker.audio_tower.conv2d1.weight"), "{msg}");
+    }
+
+    /// A COMPLETE (if minimal) tensor set - `n_layers: 0` so only the conv
+    /// stem, final norm and projector need real entries - builds cleanly.
+    #[test]
+    fn a_complete_checkpoint_still_builds() {
+        let cfg = AudioEncoderConfig { n_layers: 0, ..AudioEncoderConfig::qwen3_asr() };
+        let mut src: HashMap<String, Vec<f32>> = HashMap::new();
+        for name in [
+            "thinker.audio_tower.conv2d1.weight",
+            "thinker.audio_tower.conv2d1.bias",
+            "thinker.audio_tower.conv2d2.weight",
+            "thinker.audio_tower.conv2d2.bias",
+            "thinker.audio_tower.conv2d3.weight",
+            "thinker.audio_tower.conv2d3.bias",
+            "thinker.audio_tower.conv_out.weight",
+            "thinker.audio_tower.ln_post.weight",
+            "thinker.audio_tower.ln_post.bias",
+            "thinker.audio_tower.proj1.weight",
+            "thinker.audio_tower.proj1.bias",
+            "thinker.audio_tower.proj2.weight",
+            "thinker.audio_tower.proj2.bias",
+        ] {
+            src.insert(name.to_string(), vec![0.0]);
+        }
+        let w = map_audio_encoder(&src, &cfg).expect("a complete tensor set must build");
+        assert!(w.contains_key("conv_out.weight"));
+    }
 }
