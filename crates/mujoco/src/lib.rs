@@ -38,12 +38,21 @@ use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::path::Path;
 use std::sync::Arc;
 
+mod render;
 mod sys;
-pub use sys::{ObjType, StateSpec};
+pub use render::{EglContext, Renderer};
+pub use sys::{ObjType, Rect, StateSpec};
 
 /// The loaded MuJoCo shared library and the entry points this crate uses.
 pub struct MuJoCo {
     inner: sys::Lib,
+}
+
+impl MuJoCo {
+    /// The resolved entry points, for the sibling modules that call them.
+    pub(crate) fn lib(&self) -> &sys::Lib {
+        &self.inner
+    }
 }
 
 impl MuJoCo {
@@ -167,6 +176,11 @@ impl Model {
 
     /// Every actuator name, in index order. `None` where an actuator is
     /// unnamed, which MJCF permits.
+    /// The raw `mjModel*`, for the sibling modules that hand it back to MuJoCo.
+    pub(crate) fn ptr(&self) -> *mut c_void {
+        self.ptr
+    }
+
     pub fn actuator_names(&self) -> Vec<Option<String>> {
         (0..self.nu).map(|i| self.name_of(ObjType::Actuator, i)).collect()
     }
@@ -193,6 +207,11 @@ impl Data {
             return Err("mj_makeData returned null (out of memory?)".to_string());
         }
         Ok(Data { mj: model.mj.clone(), ptr })
+    }
+
+    /// The raw `mjData*`, for the sibling modules that hand it back to MuJoCo.
+    pub(crate) fn ptr(&self) -> *mut c_void {
+        self.ptr
     }
 
     /// Advance the simulation by one `timestep`.

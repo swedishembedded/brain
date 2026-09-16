@@ -16,3 +16,4 @@ libloading.workspace = true
 
 [dev-dependencies]
 brain-testutil.workspace = true
+tempfile.workspace = true

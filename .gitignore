@@ -80,3 +80,6 @@ scripts/gates/*-perf-baselines.json
 *.safetensors
 *.gguf
 *.ckpt
+
+# MuJoCo writes this next to the working directory whenever it warns.
+MUJOCO_LOG.TXT
