@@ -1,15 +1,15 @@
 # florence2
 
-**Status: M1-M5 and M7 done. M1: tokenizer. M2: DaViT vision tower
+**Status: M1-M7 all done.** M1: tokenizer. M2: DaViT vision tower
 (patch embed, SpatialBlock, ChannelBlock, full tower, vision-token
 projection - all verified against real weights end to end). M3: BART
 encoder-decoder + greedy generation, verified against real weights. M4:
 location-token -> bbox parser. M5: `ground` capability action + real import
 path + CLI/residency/model-store registry wiring, verified end to end
 including a real GPU run - `brain do florence2 ground` is a real, reachable
-command. M7: model docs + README entry. M6 (LoRA training) is scoped with
-concrete research recorded below but not yet implemented - the only
-milestone remaining, and inference-irrelevant for `ground`.**
+command. M6: LoRA + full fine-tune training for the BART text side,
+gradient-checked and overfit-verified (see below). M7: model docs + README
+entry.
 
 ## Goal
 
@@ -298,65 +298,86 @@ self-consistent.
   `crates/cli/tests/flops_coverage.rs`'s coverage gate was failing on a
   clean build before this session touched anything - fixed on the spot
   (own commit, unrelated to florence2 itself) rather than left broken.
-- **M6 - scoped, not yet implemented**: LoRA + full fine-tune, single/batch
-  overfit-to-zero gradcheck. Lower priority than M1-M5 for the
-  grounding-only use case (inference-only - `ground` does not need this),
-  required by this repo's blanket per-model policy. Deliberately NOT
-  attempted in the same push as M1-M5: a backward pass this codebase can
-  actually trust needs the same real-weight-parity discipline as the
-  forward passes above, and a rushed, unverified gradient implementation
-  would be worse than an honestly-scoped gap - `gradcheck/deepseekocr.rs`
-  exists specifically because kernel-level finite-difference checks catch
-  bugs a "looks plausible" backward pass does not.
+- **M6 (done)**: LoRA + full fine-tune training for the BART text side,
+  `crates/florence2/src/train.rs` (`Florence2Trainer`) +
+  `crates/florence2/src/text/lora.rs`. DaViT stays entirely frozen and out
+  of scope - matching `deepseek2ocr`'s own precedent of training only its
+  decoder's LoRA adapters over a frozen vision tower - so this trainer
+  never builds a vision tower at all; its encoder input is the text-prompt
+  embeddings only (`t_vision = 0`). That is a deliberate simplification,
+  not a coverage gap: the vision-token splice in `text::lm::Florence2Lm::
+  encode` carries no trainable parameters, so skipping it loses no
+  backward-pass coverage - every trainable tensor in the real `ground`
+  inference path (the full BART encoder-decoder, tied embeddings, every
+  LoRA-targetable attention/FFN projection) is exercised.
 
-  **Real scoping research already done, so the next session starts from a
-  plan instead of a blank page**:
-  - **Precedent for the right shape**: `deepseek2ocr` (also a vision+text
-    composite in this repo) trains ONLY its decoder's LoRA adapters -
-    `crates/deepseek2ocr/src/train.rs`'s own doc confirms the SAM vision
-    tower is a frozen feature extractor with no backward/LoRA at all. The
-    same split is the right one here: DaViT stays frozen (it is a
-    pretrained visual feature extractor, not what grounding fine-tuning
-    would realistically target), LoRA adapts the BART text side only. This
-    is not a scope cut invented for convenience - it is the established
-    pattern the closest sibling model in this repo already uses.
-  - **The LoRA forward/backward pattern to copy**: `deepseek2::model::
-    DeepseekV2::lora_fwd`/`lora_bwd` (`crates/deepseek2/src/model.rs`) -
-    `lora_a_out = x @ A` (`matmul`), `lora_out = lora_a_out @ B` added to
-    the frozen projection's output; backward recomputes `lora_a_out`
-    (cheap, rank `r` is small), scales it, and `matmul_dw(d_out,
-    lora_a_out) -> dB`. `crates/gpu-core/src/cost.rs`'s `lora_delta`
-    formula (added this session, see the earlier commit) prices the
-    runtime-composed variant of the same idea.
-  - **Backward kernels confirmed to already exist for THIS crate's exact
-    (non-fused, separate Q/K/V buffer) attention shape** - `text::attn`'s
-    forward was built from `attn_scores_cross`/`attn_softmax{,_cross}`/
-    `attn_apply_cross`, and each has a real adjoint already in
-    `crates/kernels`: `attn_bwd_dscores_cross[_rows]`, `attn_bwd_dq_cross`,
-    `attn_bwd_dk_cross[_acc]`, `attn_bwd_dv_cross[_acc]` (`CrossBwdIds` in
-    `model::block` wraps these for the FUSED-qkv case `chunked_bidir_bwd`
-    needs; this crate would call the four kernels directly against its own
-    separate buffers, the same way `text::attn`'s forward calls
-    `cross_scores_step`/`attn_apply_cross` directly rather than going
-    through `chunked_bidir_fwd`'s fused wrapper).
-  - **Everything else needed already exists as a generic primitive**:
-    `layernorm_dx`/`layernorm_dgamma`/`layernorm_dbeta`, `matmul_dx`/
-    `matmul_dw`, `gelu_erf_bwd`, `ce_grad`/`ce_grad_stats` (cross-entropy
-    loss + gradient over the decoder's logits vs. teacher-forced targets -
-    the actual training objective), `crates/optim` for the optimizer step.
-  - **What is genuinely new work, not composition**: threading `d_x`
-    through every sublayer of `text::encoder`/`text::decoder` in reverse
-    (residual-add backward is trivial, but the buffer-aliasing discipline
-    `text::encoder`'s own module doc already had to learn the hard way for
-    the FORWARD pass applies equally to backward scratch buffers), the
-    embedding table's gradient (a scatter-ACCUMULATE over `shared.weight`'s
-    rows touched by both the vision-token gather... no, only the TEXT
-    tokens touch `shared.weight` at all - vision tokens are a projection
-    output, not a gather - so this is scoped to exactly the prompt +
-    decoder-input token positions), and the actual training-loop plumbing
-    (`crates/florence2/src/train.rs`, an optimizer step, and the
-    single-example / batch overfit-to-zero test harness itself, mirroring
-    `deepseek2ocr::train`'s shape).
+  Built additively to M3's inference path: `BartAttn`/`Encoder`/`Decoder`
+  gained `forward_train`/`backward` methods (LoRA-delta-fused forward, and
+  a full reverse pass through self-attention, cross-attention, FFN,
+  LayerNorms, and the embedding/position-table stage), while `forward`
+  and every struct field M3's real-checkpoint parity tests already gate
+  are untouched. LoRA targets the four attention projections
+  (`q_proj`/`k_proj`/`v_proj`/`out_proj`) and the two FFN linears
+  (`fc1`/`fc2`) on every encoder AND decoder layer (including the
+  decoder's `encoder_attn`), using the same seven-step forward/backward
+  derivation as `deepseek2::model::DeepseekV2::lora_fwd`/`lora_bwd`.
+  `Florence2Trainer` owns a real mean cross-entropy `loss()`/`backward()`
+  pair (the actual training objective, not a proxy `<r,y>` linear trick),
+  wired to `optim::Optim` for the AdamW step.
+
+  **Two real bugs the gradcheck/overfit discipline caught, both fixed
+  before landing**:
+  - `emb_bwd`'s thread count was dispatched as `n_rows * d_model` at all
+    four call sites (encoder/decoder position-table backward, and
+    `shared.weight`'s two token-embedding contributions in
+    `Florence2Trainer::backward`) - but `emb_bwd.wgsl` loops every VOCAB
+    row per thread (`total = vocab * d_model`), so any row at or past
+    index `n_rows` silently never got touched at all. At this crate's tiny
+    gradcheck fixture (`n_rows` in the single digits, `vocab` a few dozen)
+    this under-dispatch zeroed most rows' gradient while still looking
+    numerically plausible for the handful of low-index rows that
+    accidentally fell inside the (wrong) dispatched range - at the real
+    checkpoint's 51289-token vocabulary this would have silently trained
+    on an almost entirely dead embedding gradient. Found by bisecting a
+    seed-11 gradcheck failure on `shared.weight` down through a sequence
+    of shrinking synthetic configs (multi-position vs single-position,
+    encoder-only vs decoder-only) to a targeted per-row finite-difference
+    sweep that showed the exact mismatched row set matching the
+    (wrongly) dispatched thread range precisely.
+  - `init_weights`' RNG draw order walked ALL parameter names (base +
+    LoRA) in one alphabetically-sorted pass - a LoRA config's extra
+    `.lora_a`/`.lora_b` names, interleaved among the base names they
+    follow alphabetically, shifted every LATER base tensor's draw versus
+    the same seed with no LoRA names present. This broke the "a fresh
+    (`B=0`) LoRA adapter is a bit-for-bit no-op" invariant (the base
+    weights genuinely differed between the two configs at the same seed).
+    Fixed by drawing base tensors in one full pass first, LoRA tensors
+    after - base weights are now bit-identical for a given seed regardless
+    of whether the config also carries LoRA names.
+
+  **Verified**: `crates/gradcheck/src/florence2.rs`'s `check_florence2`/
+  `check_florence2_lora` (a bespoke `CheckModel` impl on a local `Harness`
+  newtype - florence2's two-stream encoder-decoder batch has no
+  `model::Batch` variant, and Rust's coherence rules reject implementing
+  a foreign trait directly on `Florence2Trainer` against this crate's own
+  blanket `model::Model` impl), both passing at the workspace-standard
+  `(4e-3, 8e-2)` tolerance with zero dead gradients, over every trainable
+  tensor in both configurations. `crates/florence2/tests/train_overfit.rs`:
+  full fine-tune drives a single random-init example's loss to ~1e-5 and a
+  two-example batch to ~5e-5; LoRA against a real (full-fine-tuned) base
+  makes large real progress on a second, different example (16.2 -> 0.0005);
+  a fresh (`B=0`) adapter is bit-identical to the unadapted forward.
+
+  **Honest gaps, not silently dropped**: training is only exercised on
+  the CPU-JIT backend (same backend M1-M3's own real-checkpoint parity
+  gates use) - GPU-backend backward parity is not separately re-verified,
+  the same open gap M5's own section already tracks for the forward pass.
+  Training was validated on `BartConfig::tiny()`'s synthetic shape only,
+  never against the real 51289-vocab/768-d_model checkpoint (this repo's
+  own policy defers real-checkpoint validation to "upon request" for
+  genuinely large checkpoints; unlike M1-M3's 463 MiB weights, a full
+  training run at the real model's scale is a meaningfully larger ask
+  than a forward-only parity check and was not attempted here).
 - **M7**: docs (`docs/models/florence2.md`, README entry, excluded from
   quickstart).
 
