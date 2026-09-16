@@ -22,6 +22,7 @@
 //! info@swedishembedded.com.
 
 pub mod learn;
+pub mod reference;
 pub mod sense;
 
 use connectome::Connectome;
@@ -30,6 +31,7 @@ use gpu_core::Gpu;
 use mujoco::{Data, Model, StateSpec};
 use neuro::{DynamicalSystem, LifParams, Plastic, Port, SpikingNet};
 
+pub use reference::{ImitationReward, Reference};
 pub use sense::{Modality, Sensor};
 
 /// How the three clocks in this loop relate.
@@ -252,6 +254,30 @@ impl Fly {
     /// Generalized coordinates of the body.
     pub fn qpos(&self) -> Vec<f64> {
         self.data.get(&self.model, StateSpec::QPOS)
+    }
+
+    /// Place the body at a given pose and velocity.
+    ///
+    /// Reference-state initialisation, which is standard for imitation: a
+    /// creature that always starts from rest has to learn to reach the
+    /// reference's starting posture before it can track anything, and that
+    /// detour is not what is being measured. Starting on the trajectory means
+    /// the reward is about following it.
+    pub fn set_pose(&mut self, qpos: &[f64], qvel: &[f64]) -> Result<(), String> {
+        self.data.set(&self.model, StateSpec::QPOS, qpos)?;
+        self.data.set(&self.model, StateSpec::QVEL, qvel)?;
+        self.data.forward(&self.model);
+        Ok(())
+    }
+
+    /// Generalized velocities of the body.
+    pub fn qvel(&self) -> Vec<f64> {
+        self.data.get(&self.model, StateSpec::QVEL)
+    }
+
+    /// `(nq, nv)` of the body, for checking a reference describes it.
+    pub fn dims(&self) -> (usize, usize) {
+        (self.model.nq(), self.model.nv())
     }
 
     /// Start a new episode: clear the dynamical state and put the body back,

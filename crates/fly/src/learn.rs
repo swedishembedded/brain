@@ -11,6 +11,7 @@
 //! condition runs the same episodes through the same code, and only the one
 //! thing under test differs.
 
+use crate::reference::{ImitationReward, Reference};
 use crate::Fly;
 
 /// What one episode produced.
@@ -27,9 +28,36 @@ pub struct Episode {
     pub proprio_spikes: u64,
 }
 
+/// What the creature is being asked to do.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Objective {
+    /// Net forward displacement of the body.
+    ///
+    /// Kept because the ceiling was measured under it, and because it is the
+    /// honest demonstration of why it is the wrong objective: a single
+    /// coordinated lunge scores as well as a gait, and a direct search under
+    /// this reward suppressed the cord's recurrent circuitry and drove sensory
+    /// input straight to the muscles. That is a reflex, and it is what this
+    /// reward asks for.
+    Displacement,
+    /// Track a recorded fly walking, DeepMimic style.
+    ///
+    /// What flybody's own walking task uses, and what the imitation-learning
+    /// literature settled on precisely because it does not need the reward
+    /// engineering the alternative does. The reward is dense - every tick has
+    /// a target - where displacement is nearly flat until something moves.
+    Imitate {
+        /// Which recorded snippet to follow.
+        snippet: usize,
+        reward: ImitationReward,
+    },
+}
+
 /// How reward becomes a neuromodulator.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RewardConfig {
+    /// What to reward.
+    pub objective: Objective,
     /// Ticks per episode.
     pub ticks: u32,
     /// Descending command held for the episode.
@@ -47,7 +75,13 @@ pub struct RewardConfig {
 
 impl Default for RewardConfig {
     fn default() -> Self {
-        RewardConfig { ticks: 300, command: 2.0, baseline_rate: 0.01, modulator_gain: 50.0 }
+        RewardConfig {
+            objective: Objective::Displacement,
+            ticks: 300,
+            command: 2.0,
+            baseline_rate: 0.01,
+            modulator_gain: 50.0,
+        }
     }
 }
 
@@ -94,10 +128,37 @@ impl Condition {
 /// The fly is reset first, so episodes are independent and an improvement
 /// cannot come from a body that happens to have fallen into a better pose.
 pub fn episode(fly: &mut Fly, cfg: RewardConfig, condition: Condition, rng: &mut Lcg) -> Result<Episode, String> {
+    episode_with(fly, cfg, condition, None, rng)
+}
+
+/// The same, with a reference trajectory available for [`Objective::Imitate`].
+///
+/// Separate entry point rather than an `Option` on `RewardConfig` because a
+/// reference is data with a lifetime, and threading it through a `Copy` config
+/// would make the config borrow.
+pub fn episode_with(
+    fly: &mut Fly,
+    cfg: RewardConfig,
+    condition: Condition,
+    reference: Option<&Reference>,
+    rng: &mut Lcg,
+) -> Result<Episode, String> {
     fly.reset();
     let cmd = vec![cfg.command; fly.descending_count()];
     fly.set_descending(&cmd)?;
     fly.set_plasticity(condition.plastic());
+
+    // Reference-state initialisation: an imitation episode starts ON the
+    // trajectory it is asked to follow.
+    if let Objective::Imitate { snippet, .. } = cfg.objective {
+        let r = reference.ok_or("Objective::Imitate needs a reference trajectory")?;
+        let (nq, nv) = fly.dims();
+        r.check_matches(nq, nv)?;
+        let (q, v) = r.frame(snippet, 0).ok_or_else(|| format!("snippet {snippet} is empty"))?;
+        let q: Vec<f64> = q.iter().map(|x| *x as f64).collect();
+        let v: Vec<f64> = v.iter().map(|x| *x as f64).collect();
+        fly.set_pose(&q, &v)?;
+    }
 
     let start = fly.qpos();
     let mut baseline = 0.0f64;
@@ -107,14 +168,33 @@ pub fn episode(fly: &mut Fly, cfg: RewardConfig, condition: Condition, rng: &mut
     let mut deltas: Vec<f32> = Vec::with_capacity(cfg.ticks as usize);
 
     let mut last_x = start.first().copied().unwrap_or(0.0);
-    for _ in 0..cfg.ticks {
+    for tick in 0..cfg.ticks as usize {
         let t = fly.step()?;
         ep.spikes += t.total_spikes as u64;
         ep.proprio_spikes += fly.proprioceptor_spikes() as u64;
 
-        let x = fly.qpos().first().copied().unwrap_or(0.0);
-        let reward = x - last_x;
-        last_x = x;
+        let reward = match cfg.objective {
+            Objective::Displacement => {
+                let x = fly.qpos().first().copied().unwrap_or(0.0);
+                let r = x - last_x;
+                last_x = x;
+                r
+            }
+            Objective::Imitate { snippet, reward } => {
+                // One reference frame per control tick - the dataset is
+                // sampled at exactly the control period, so `tick` indexes it
+                // directly. Past the end of a snippet the reward is zero
+                // rather than clamped to the last frame, which would pay a
+                // creature for standing still at the end.
+                let r = reference.expect("checked above");
+                match r.frame(snippet, tick) {
+                    Some((rq, rv)) => {
+                        reward.total_over(&fly.qpos(), &fly.qvel(), rq, rv, r.moving_dofs())
+                    }
+                    None => 0.0,
+                }
+            }
+        };
         baseline += cfg.baseline_rate * (reward - baseline);
         let delta = ((reward - baseline) * cfg.modulator_gain as f64) as f32;
         deltas.push(delta);
