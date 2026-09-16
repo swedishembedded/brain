@@ -344,6 +344,8 @@ fn run() -> Result<(), Error> {
                 total.tick = b.tick;
                 total.spikes += b.spikes;
                 total.motor_spikes += b.motor_spikes;
+                total.cord += b.cord;
+                total.body += b.body;
                 write_row(f, &fly, &b, throttle)?;
             }
             total
