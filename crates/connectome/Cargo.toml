@@ -1,0 +1,20 @@
+[package]
+name = "brain-connectome"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Connectome import: the Codex CSV export (BANC, MANC and every other FlyWire dataset share one schema) read into a neuro::Csc, with per-neuron neurotransmitter priors, named populations, and a coverage report that accounts for every row."
+
+[lib]
+name = "connectome"
+path = "src/lib.rs"
+
+[dependencies]
+brain-neuro.workspace = true
+# Already in this workspace's dependency graph transitively, so declaring it
+# directly costs no compile time. The alternative is asking every caller to
+# gunzip a 30 MB file by hand before loading it.
+flate2 = "1"
+
+[dev-dependencies]
+brain-testutil.workspace = true

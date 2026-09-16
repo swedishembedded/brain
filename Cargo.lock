@@ -839,6 +839,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-connectome"
+version = "1.1.0"
+dependencies = [
+ "brain-neuro",
+ "brain-testutil",
+ "flate2",
+]
+
+[[package]]
 name = "brain-controlnet"
 version = "1.1.0"
 dependencies = [

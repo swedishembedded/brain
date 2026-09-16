@@ -109,7 +109,7 @@ it is not scriptable, and the resources tree records the manual steps.
 |---|---|
 | neurons / edges / synapses | 158,262 / 3,037,361 / 23,556,214 |
 | full CSR footprint | **24.3 MB** - the entire animal, smaller than MANC alone |
-| in-degree | mean 20.4, median 9, p99 182, max 2624 |
+| in-degree | mean 19.2, median 8, p99 178, max 2624 (over ALL neurons, isolated ones included) |
 | NT predicted | 94.5%, mean confidence 0.759, 48.7% above 0.8 |
 | NT **verified** | **65,369 neurons (41%)** |
 | motor neurons | 805: 391 leg, 62 wing, 172 abdomen, 49 neck, 25 haltere |
@@ -125,6 +125,22 @@ lobe, central brain, cord and motor neurons are all resident at once, and the
 per-edge plasticity state alongside it is another 24 MB. And **the importer
 needs no Arrow**: Codex exports plain gzipped CSV with one schema shared across
 every dataset, so the feather path M2 was going to need does not exist.
+
+**BANC's nerve cord is NOT as densely reconstructed as MANC's, and that
+decides which dataset the walking work sits on.** Measured, restricting to
+BANC's own VNC-side neurons so the optic lobe cannot skew it: in-degree mean
+40.0 / median 26 over VNC-internal edges, 51.9 / 32 counting every incoming
+edge, and 110.1 / 80 onto motor neurons specifically. MANC is 224.2 / 173
+overall. So BANC's cord is roughly four to five times sparser even on its own
+territory, and the gap is not an artefact of the optic lobe.
+
+The consequence, stated plainly so it is not rediscovered: **M3 to M6 sit on
+MANC**, which has both the denser cord and the per-neuron muscle targets the
+motor map needs. BANC is the substrate for brain-level work and for the
+descending interface, and is worth revisiting as it is proofread further. The
+seam this dataset was supposed to remove is therefore still there - the
+measurement says the unified volume is not yet a replacement for the specialist
+one, which is a better thing to know now than at M4.
 
 The Codex and Janelia renderings of MANC cross-validate: 5,305,638 edges /
 30,934,610 synapses / 23,665 neurons against 5,243,574 / 30,698,527 / 23,188,
@@ -296,7 +312,18 @@ it against the scan+sort reference at `max|d| == 0`.
   real fraction of neurons fired before comparing, and catches both that
   mutation and a truncated partial fold. Mutation-verify a new gate: one that
   has never been seen to fail has not been tested.
-* **M2 - connectome import.** `crates/connectome`: the Codex CSV schema ->
+* **M2 - connectome import. LANDED.** `crates/connectome` reads the Codex CSV
+  schema (hand-rolled RFC 4180, because a quoted annotation field would
+  otherwise shift every later column and a neuron would get a transmitter from
+  its cell-type cell), aggregates per-neuropil rows into neuron-pair edges,
+  carries the NT prior with its confidence and the verified type where there is
+  one, selects populations by annotation predicate, and returns a coverage
+  report that balances or refuses to return at all. Real-data gate green on
+  both datasets with ZERO rejected rows, reproducing every published figure
+  from an implementation independent of the one that first measured them.
+  Original scope follows.
+
+  the Codex CSV schema ->
   CSR/CSC, NT prior carrying its own confidence (and the verified type where
   BANC has one), named populations from `Super Class`/`Class`/`Nerve`, and
   `brain pull` integration. ONE reader serves BANC and MANC because Codex
@@ -378,11 +405,8 @@ from a connectome, then learning.
   request-scoped. A creature's accumulated learning lives in device state, so
   eviction destroys it and `run_batch` is meaningless. Needs a deliberate
   answer in M7, not a bolt-on.
-* **Is BANC's nerve cord as complete as MANC's?** BANC's in-degree is mean
-  20.4 / median 9 against MANC's 224.5 / 173. Part of that is BANC's 3-synapse
-  floor and part is its 72,582 sparsely-connected optic-lobe neurons, but
-  whether its VNC is as densely reconstructed is not established. Both now
-  import through one schema, so measure it in M2 rather than assuming.
+* **Model naming and stateful residency** remain the two open questions; the
+  BANC density question below is now closed by measurement.
 
 ## Sources
 
