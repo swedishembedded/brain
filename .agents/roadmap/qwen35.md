@@ -2578,6 +2578,16 @@ configuration where a real, well-ported drafter LOST to plain decoding, and the
 reason was the target's tape, not the drafter. It is now a 1.10x win, and every
 `k` is a win on both workloads.
 
+**M28's own prediction, scored.** That entry wrote: "a verify round that cost
+one decode step instead of ~2.4 would put DFlash2's measured acceptance at
+roughly 1.8-2.3x rather than 1.08-1.44x." The measured answer is **1.50-1.63x**
+- a real win, and below the predicted range. The prediction's premise was the
+part that was wrong: a verify round does not cost one decode step even with the
+per-round overhead gone, because its ROWS are real work. Recorded here rather
+than quietly superseded, because this ledger's standing rule is that the
+confident hypothesis loses to the profile, and that applies to its own
+forecasts too.
+
 The floor is the headline: using the verify path at all now costs 8-17%
 instead of 45%, so break-even for a drafter drops from ~5 accepted tokens per
 round to roughly 1, and the model-free n-gram drafter stops being a LOSS on
