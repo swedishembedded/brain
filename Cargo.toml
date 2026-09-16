@@ -1,12 +1,22 @@
 [workspace]
 resolver = "2"
-members = ["crates/*"]
+# `crates/*` are the engine. `samples/*/*` are standalone demo APPLICATIONS -
+# Zephyr-style: each one is its own binary crate that links the public `brain`
+# SDK facade the way a downstream user would, and none of them is part of the
+# engine build. They are workspace members (never a separate workspace) for one
+# reason: workspace membership is what guarantees they share `./target` and one
+# lockfile, so building a sample after `make build/release` compiles the sample
+# and nothing else. See samples/README.md for the rules that keep that true.
+members = ["crates/*", "samples/*/*"]
 # The Vulkan cooperative-matrix path pulls in ash + naga and is an *optional*
 # acceleration backend. Keep the default `cargo build` pure-wgpu (the core
 # invariant) by excluding it from the default set; build it explicitly with
 # `cargo build -p brain-vulkan` or via the cli's `vulkan-coopmat` feature.
 #
-# `crates/vulkan` is the ONLY deliberate exclusion. This list is
+# `crates/vulkan` is the ONLY deliberate exclusion under `crates/`; every
+# `samples/*/*` member is excluded as a class (a sample is an application,
+# not engine code - `make build` and `make test` must never build one).
+# This list is
 # hand-maintained, and a crate silently missing from it is built as a
 # DEPENDENCY but its own tests never run under a bare `cargo test` - which is
 # how omni's actively-developed int8 dual-GPU work went untested by default
@@ -220,7 +230,13 @@ brain-catalog = { path = "crates/catalog" }
 brain-loader = { path = "crates/loader" }
 # `brain` (crates/sdk), not `brain-sdk`: the public SDK facade package is
 # named literally `brain` on purpose -- see crates/sdk/Cargo.toml.
-brain = { path = "crates/sdk" }
+# The inherited baseline is NOTHING: a consumer must NAME the surfaces it uses
+# (`brain = { workspace = true, features = ["image"] }`). A consumer that
+# names none gets an SDK with no public types and fails to COMPILE, rather
+# than silently linking every model crate. `cargo build -p brain` still uses
+# the package's own `default = ["full"]`, so `make build`/`make test` cover
+# every surface.
+brain = { path = "crates/sdk", default-features = false }
 brain-captioner = { path = "crates/captioner" }
 brain-memauth = { path = "crates/memauth" }
 brain-weightset = { path = "crates/weightset" }

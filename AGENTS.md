@@ -1003,6 +1003,8 @@ front-end to depend on.
 | Image handling of ANY kind (resize/pad/crop/letterbox/masks/tiling/codecs) | `crates/imaging` - check here BEFORE writing a pixel loop; five copies of `chw_to_hwc` is what created it |
 | Identity conditioning (ArcFace -> ID tokens -> diffusion attention) | `crates/pulid` (FLUX.1, wired), `crates/instantid` (SDXL, shapes only); `pulid::idcond` documents the raw-vs-normalised asymmetry that silently breaks it |
 | Clippy gate (exit code + a warning ratchet) | `make clippy`, `scripts/gates/clippy-gate.sh` - clippy ABORTS on a denied lint and then reports nothing, so always check the exit code |
+| **Standalone sample APPLICATIONS** (`make samples/<path>/{build,run}`) - Zephyr-style demos that link the public `brain` SDK the way a product would, as opposed to `examples/`'s off-process client scripts | `samples/README.md` (the contract: SDK-only dependency, each sample NAMES the SDK surfaces it uses, why they are workspace members but never `default-members`, and why a sample is built with `-p <sample>` alone), `scripts/gates/check-samples.sh` (`make check/samples`, which MEASURES that a sample's dependency closure contains nothing from a surface it did not enable) |
+| **The SDK's feature vocabulary** (what a consumer may name, and what it costs) | `crates/sdk/Cargo.toml`'s `[features]` - surfaces are `brain_arch::Domain` names, `device`/`resolve` are tiers a surface selects; `scripts/gates/check-sdk-features.sh` (`make check/sdk-features`) pins the vocabulary, compiles every surface alone, and keeps `crates/catalog` un-featurized. Per-family importers live behind `brain-loader`'s `import-*` features (`brain-cli` takes `import-all`); that split is what takes the SDK's closure from 69 brain crates to 38 |
 | CLI subcommands | `crates/cli/src/{main,args,*_cli}.rs` |
 | **Fetch a model's weights** (`brain pull <id\|url>`), and where models live on disk | `crates/cli/src/pull_cli.rs` (the verb + both progress modes), `brain_modelstore::refurl` (what a user may type), `brain_modelstore::default_root` (the ONE answer to "where do models live"; `--brain-data-dir` publishes into it), `crate::supply::execute_plan` (the shared plan/execute/finish core auto-fetch uses too); `docs/using/cli.md` |
 | **Progress while weights move** (auto-fetch downloads; per-file load lines during a model command) | `crate::supply::execute_plan_reported` (auto-fetch renders through pull's `Reporter`, on stderr), `crates/checkpoint/src/load_progress.rs` (byte-level events from the mmap readers), `crates/cli/src/load_line.rs` (the `<arch> load <file> N%` line `dispatch_arch` installs); `docs/using/cli.md#progress` |
@@ -1051,6 +1053,9 @@ make forecast/compare | forecast/serve
 make export/yolo-onnx | quantize/yolo | sim/yolo-int8 | run/yolo-npu | bench/yolo-npu
 make federated-demo                  # MoE train -> split -> verify -> merge
 make web/dev                         # WebGPU browser demo (crates/web)
+make samples/list                    # the standalone sample applications
+make samples/<path>/build            # build one; reuses brain's warm ./target
+make samples/<path>/run ARGS="..."   # run one, rebuilding if stale
 make bench                           # architecture-evaluation suite (see below)
 ```
 

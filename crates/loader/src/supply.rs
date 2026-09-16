@@ -205,6 +205,32 @@ pub fn execute_plan_opt(store: &Store, hub: &dyn Hub, plan: &brain_modelstore::P
     Ok(store.local(reference))
 }
 
+/// What a build without a given family's importer returns.
+///
+/// It names the family AND the cargo feature that would supply it, because a
+/// bare "unsupported family" here is indistinguishable from a genuinely
+/// unknown architecture -- and those two need opposite fixes. A narrow build
+/// (the `brain` SDK, a service, a sample) is a supported configuration, so its
+/// failure mode has to be actionable rather than mysterious.
+///
+/// Compiled only when at least one importer is absent -- with `import-all` on
+/// there is no arm that can call it, and an always-present helper would be an
+/// unused-function warning in the configuration `brain-cli` actually ships.
+#[cfg(not(all(
+    feature = "import-qwen3",
+    feature = "import-glmdsa",
+    feature = "import-lfm2",
+    feature = "import-qwen3omnimoe",
+    feature = "import-qwen3tts",
+    feature = "import-yolov8"
+)))]
+fn no_importer(vendor: &str, repo: &str, family: &str, feature: &str) -> String {
+    format!(
+        "{vendor}/{repo}: convert: this build of brain-loader has no {family} importer \
+         (enable brain-loader/{feature}, or the `brain` SDK surface that selects it)"
+    )
+}
+
 /// Dispatch a `Step::Convert { vendor, repo, recipe }` to the matching
 /// family's finish logic. `recipe` is the `ArtifactRecipe::id` `modelstore::
 /// plan` already picked (`brain_modelstore::recipe`) -- routing on it directly
@@ -302,6 +328,13 @@ fn convert_files(store: &Store, vendor: &str, repo: &str, family: &str, roles_ta
 /// the remapped tensors as `model.brain.safetensors` -- the same single-file
 /// convention every transformers-family model already uses, so no store or
 /// `resident_for` changes were needed for this family.
+#[cfg(not(feature = "import-yolov8"))]
+fn convert_yolo(store: &Store, vendor: &str, repo: &str) -> Result<(), String> {
+    let _ = store;
+    Err(no_importer(vendor, repo, "yolov8", "import-yolov8"))
+}
+
+#[cfg(feature = "import-yolov8")]
 fn convert_yolo(store: &Store, vendor: &str, repo: &str) -> Result<(), String> {
     let dir = store.repo_dir(&ModelRef::new(vendor, repo, None));
     let pt = std::fs::read_dir(&dir)
@@ -474,10 +507,31 @@ fn convert_transformers(store: &Store, vendor: &str, repo: &str) -> Result<(), S
     let out = out_path.to_str().ok_or_else(|| format!("{vendor}/{repo}: non-UTF8 store path"))?;
     let id = format!("{vendor}/{repo}");
 
+    // Every consumer of these three is behind an `import-*` feature. In a build
+    // with none of them on, the match below is nothing but diagnostic arms and
+    // the bindings are genuinely unused -- said here rather than by prefixing
+    // them with `_`, which would also silence a real unused binding later.
+    #[cfg(not(any(
+        feature = "import-qwen3",
+        feature = "import-glmdsa",
+        feature = "import-lfm2",
+        feature = "import-qwen3omnimoe"
+    )))]
+    let _ = (hf_dir, out, &id);
+
     let result = match family {
+        #[cfg(feature = "import-qwen3")]
         "qwen3" => qwen3::import::import_as(hf_dir, out, None, Some(&id)),
+        #[cfg(not(feature = "import-qwen3"))]
+        "qwen3" => Err(no_importer(vendor, repo, "qwen3", "import-qwen3")),
+        #[cfg(feature = "import-glmdsa")]
         "glmdsa" => glmdsa::import::import_as(hf_dir, out, Some(&id)),
+        #[cfg(not(feature = "import-glmdsa"))]
+        "glmdsa" => Err(no_importer(vendor, repo, "glmdsa", "import-glmdsa")),
+        #[cfg(feature = "import-lfm2")]
         "lfm2" => lfm2::import::import_as(hf_dir, out, Some(&id)),
+        #[cfg(not(feature = "import-lfm2"))]
+        "lfm2" => Err(no_importer(vendor, repo, "lfm2", "import-lfm2")),
         // gpt2 is nanogpt-style, trained from scratch -- brain has never had
         // an HF importer for it (unlike glmdsa/qwen3/lfm2, all
         // production-tested). Writing one is real new-crate work, not "wire
@@ -492,7 +546,10 @@ fn convert_transformers(store: &Store, vendor: &str, repo: &str) -> Result<(), S
         // by qwen3tts::mtp::MtpModel/mimi::Codec for the Talker/Code2Wav pieces
         // (two open naming gaps); Thinker-only generation is unaffected by
         // either gap.
+        #[cfg(feature = "import-qwen3omnimoe")]
         "qwen3omnimoe" => qwen3omnimoe::import::import_as(hf_dir, out, Some(&id)),
+        #[cfg(not(feature = "import-qwen3omnimoe"))]
+        "qwen3omnimoe" => Err(no_importer(vendor, repo, "qwen3omnimoe", "import-qwen3omnimoe")),
         other => Err(format!("architecture {other:?} matched but has no dispatch arm (bug: family_of_architecture and this match have drifted)")),
     };
     result.map_err(|e| format!("{vendor}/{repo}: convert: {e}"))?;
@@ -520,6 +577,13 @@ fn convert_transformers(store: &Store, vendor: &str, repo: &str) -> Result<(), S
 /// checkpoint dir doubles as `ckpt`, still needed for tokenizer/config at
 /// serve time): `ckpt` -> the repo dir itself, `weights_dir` -> the new
 /// `brain_tts/` subdirectory holding the four converted files.
+#[cfg(not(feature = "import-qwen3tts"))]
+fn convert_qwen3tts(store: &Store, vendor: &str, repo: &str) -> Result<(), String> {
+    let _ = store;
+    Err(no_importer(vendor, repo, "qwen3tts", "import-qwen3tts"))
+}
+
+#[cfg(feature = "import-qwen3tts")]
 fn convert_qwen3tts(store: &Store, vendor: &str, repo: &str) -> Result<(), String> {
     let dir = store.repo_dir(&ModelRef::new(vendor, repo, None));
     let ckpt = dir.to_str().ok_or_else(|| format!("{vendor}/{repo}: non-UTF8 store path"))?;

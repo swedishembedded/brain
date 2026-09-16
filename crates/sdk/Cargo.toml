@@ -15,16 +15,46 @@ description = "The public brain SDK: a small, stable, embeddable facade (ImagePi
 name = "brain"
 path = "src/lib.rs"
 
+[features]
+# The SDK is this workspace's feature vocabulary: a consumer names the
+# SURFACES it uses and gets their dependencies and nothing else. Features
+# SELECT code; they never carry a value and never change behaviour (see
+# samples/README.md). Value-like configuration is a builder argument.
+#
+# `default = ["full"]` so `cargo add brain` just works, and so `cargo test -p
+# brain` keeps running every surface's tests -- a `default = []` here would
+# silently stop testing `pipeline.rs`, which is the audit-F37 failure mode the
+# workspace's own `default-members` comment was written about. The WORKSPACE
+# baseline (`Cargo.toml`'s `brain = { default-features = false }`) is what
+# makes a consumer name its surfaces explicitly.
+default = ["full"]
+full = ["image"]
+
+# --- surfaces: one per brain_arch::Domain the SDK has a public type for.
+#     A surface is the only thing a consumer names.
+image = ["resolve", "dep:brain-flux2", "dep:brain-s3dit", "dep:brain-imaging"]
+
+# --- infrastructure: selected BY a surface, never named by a consumer.
+# `brain::Device`.
+device = ["dep:brain-gpu-core"]
+# Model-store resolution + `brain::DType`.
+resolve = ["device", "dep:brain-loader", "dep:brain-model"]
+
 [dependencies]
+# Unconditional: `Error` is one shape in every configuration. It carries the
+# resolver's own structured `Ambiguity`/`Missing` and converts `PlanError`, so
+# capability/modelref/modelstore are core, not a surface. An error enum that
+# changed shape with a feature would be exactly the behaviour-by-feature this
+# design forbids.
 brain-capability.workspace = true
-brain-flux2.workspace = true
-brain-gpu-core.workspace = true
-brain-imaging.workspace = true
-brain-loader.workspace = true
-brain-model.workspace = true
 brain-modelref.workspace = true
 brain-modelstore.workspace = true
-brain-s3dit.workspace = true
+brain-flux2 = { workspace = true, optional = true }
+brain-gpu-core = { workspace = true, optional = true }
+brain-imaging = { workspace = true, optional = true }
+brain-loader = { workspace = true, optional = true }
+brain-model = { workspace = true, optional = true }
+brain-s3dit = { workspace = true, optional = true }
 
 [dev-dependencies]
 brain-checkpoint.workspace = true

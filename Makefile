@@ -77,7 +77,7 @@ YOLO_IOU   ?= 0.45
 
 SHAKE_URL := https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt
 
-.PHONY: check/workspace help build/debug build/release deb deb/debug deb/release test/doc test/slow test/full test/times test/capability-report wm/play wm-fixtures test test/rl gradcheck kernels-regen kernels-table kernels-table/check cuda-table cuda-table/check parity requirements environment environment/openvino npu-diagnose bench bench/char bench/eval bench/scale bench/advise bench/compare perf perf/compare perf/smoke clean federated-demo depth/demo depth/smoke depth/camera train/zipdepth mirror/import mirror/infer mirror/demo splat/view \
+.PHONY: check/workspace help build/debug build/release samples/list check/samples check/sdk-features deb deb/debug deb/release test/doc test/slow test/full test/times test/capability-report wm/play wm-fixtures test test/rl gradcheck kernels-regen kernels-table kernels-table/check cuda-table cuda-table/check parity requirements environment environment/openvino npu-diagnose bench bench/char bench/eval bench/scale bench/advise bench/compare perf perf/compare perf/smoke clean federated-demo depth/demo depth/smoke depth/camera train/zipdepth mirror/import mirror/infer mirror/demo splat/view \
         data/calculator data/reverser data/wordcalc data/timeseries \
         data/shakespeare_char data/gpt data/detect data/tts \
         train/yolo eval/yolo detect/yolo train/qwen/lora \
@@ -96,6 +96,9 @@ help:
 	@echo "  make requirements            pip-install the Python tooling (OpenVINO/NPU, torch, ...)"
 	@echo "  make environment             requirements + detect/verify a real Intel NPU (no-op if absent)"
 	@echo "  make environment/openvino    OpenVINO/NPU setup only, skips torch/CUDA (fast iteration)"
+	@echo "  make samples/list            list the standalone sample applications"
+	@echo "  make samples/<path>/build    build one sample (shares brain's ./target cache)"
+	@echo "  make samples/<path>/run      run one sample, rebuilding if stale (ARGS=...)"
 	@echo "  make test                    FAST lane: unit+integration, no doc-tests"
 	@echo "  make test/doc                doc-tests (slow: one link per crate)"
 	@echo "  make test/slow               #[ignore]d long-running tests"
@@ -186,6 +189,63 @@ build/debug:
 
 build/release:
 	cargo build --release
+
+# ---- samples ---------------------------------------------------------------
+# A sample is a standalone APPLICATION built on the public `brain` SDK, living
+# in samples/<category>/<name>/ - Zephyr's samples/ idea. Each one NAMES the SDK
+# surfaces it uses and links those and nothing else. Samples are workspace
+# members (so they share ./target, one lockfile and one registry) but never
+# `default-members`, so `make build` and `make test` never build one. The full
+# contract is samples/README.md.
+#
+#   make samples/list
+#   make samples/imagegen/generate/build
+#   make samples/imagegen/generate/run ARGS="--prompt 'a whale submarine'"
+#
+# `run` rebuilds a stale sample by itself: that is `cargo run`'s own
+# dependency check, not something re-implemented here.
+SAMPLE_PROFILE ?= release
+SAMPLE_CARGO_FLAGS = $(if $(filter release,$(SAMPLE_PROFILE)),--release,)
+ARGS ?=
+
+# samples/<a>/<b> -> package `sample-<a>-<b>`. check/samples enforces it.
+sample_pkg = sample-$(subst /,-,$(1))
+
+# A sample is built with `-p <sample>` and nothing else. It CANNOT be built
+# alongside the engine's package selection: `crates/sdk` is a default member,
+# so a selection containing both it and a sample unions the sample's declared
+# features with the SDK's own defaults, and the sample's `features = ["image"]`
+# becomes a silent no-op that links every model crate anyway. Cargo has no
+# per-package feature flag and features cannot be subtracted, so a narrow
+# selection is the only mechanism that actually honours the declaration.
+
+samples/list:
+	@echo "samples (make samples/<path>/{build,run}):"
+	@find samples -mindepth 3 -maxdepth 3 -name Cargo.toml -printf '%h\n' 2>/dev/null \
+		| sed 's|^samples/||' | sort | while read -r s; do \
+			printf '  %-34s %s\n' "$$s" "$$(sed -n 's/^description = "\(.*\)"/\1/p' "samples/$$s/Cargo.toml" | head -1)"; \
+		done
+
+samples/%/build:
+	@test -f "samples/$*/Cargo.toml" || { echo "no such sample: samples/$* (try: make samples/list)"; exit 2; }
+	cargo build $(SAMPLE_CARGO_FLAGS) -p $(call sample_pkg,$*)
+
+samples/%/run:
+	@test -f "samples/$*/Cargo.toml" || { echo "no such sample: samples/$* (try: make samples/list)"; exit 2; }
+	cargo run $(SAMPLE_CARGO_FLAGS) -p $(call sample_pkg,$*) -- $(ARGS)
+
+# Enforces samples/README.md: SDK-only brain dependency, declared surfaces, a
+# path-derived package name, SPDX headers - and the two measured properties,
+# that a sample's dependency CLOSURE contains nothing from a surface it did not
+# enable, and that rebuilding it after an edit compiles exactly one crate.
+check/samples:
+	bash scripts/gates/check-samples.sh
+
+# The SDK is the workspace's feature vocabulary; this keeps that vocabulary
+# honest (surface names, `default` == `full`, no value-shaped feature names,
+# and every surface compiling on its own).
+check/sdk-features:
+	bash scripts/gates/check-sdk-features.sh
 
 # Build self-contained Debian packages for package-only integrations.
 deb: deb/release
@@ -502,7 +562,7 @@ hooks/install:
 # controlnet's duplicate `scale_chan` registration - see `.agents/rules/
 # lessons.md`). Needs no external fixtures, so unlike `parity/strict` it
 # carries no narrowing knob and no "green because skipped" risk.
-test/full: test test/doc test/slow test/e2e check/scripts check/spdx check/paths check/files kernels-table/check cuda-table/check parity parity/strict
+test/full: test test/doc test/slow test/e2e check/scripts check/spdx check/paths check/files check/samples check/sdk-features kernels-table/check cuda-table/check parity parity/strict
 
 # Rank every test binary by wall time; --budget fails if any exceeds it. This is
 # what keeps the fast lane fast.

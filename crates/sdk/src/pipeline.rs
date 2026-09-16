@@ -23,14 +23,10 @@ use std::collections::BTreeMap;
 
 use crate::{Error, Image, Result};
 
-/// A device/backend selection. Re-exported, not reinvented: the SAME type
-/// `--device` parses into (`gpu_core::devices::DeviceSpec`). An empty
-/// [`Device::default`] is the existing "auto" concept -- schedule on
-/// whatever hardware the machine actually has.
-pub use gpu_core::devices::DeviceSpec as Device;
-/// A DiT numeric tier. Re-exported, not reinvented: the SAME type flux2's
-/// own `Pipeline::build_sized` takes (`model::dispatch::Precision`).
-pub use model::dispatch::Precision as DType;
+// `Device` and `DType` live in lib.rs: they belong to the `device` and
+// `resolve` tiers, which every surface selects, so a second surface finds them
+// already in place rather than having to move them out of this module.
+use crate::{DType, Device};
 
 /// Generation knobs layered over flux2's own [`flux2::GenOpts`] defaults on
 /// a flux2-backed pipeline -- every field left unset here keeps whatever

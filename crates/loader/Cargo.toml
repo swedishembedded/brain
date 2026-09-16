@@ -9,6 +9,28 @@ description = "The library half of what used to live only inside the `brain` CLI
 name = "loader"
 path = "src/lib.rs"
 
+[features]
+# Selection only, never behaviour: enabling an importer adds a `convert`
+# dispatch arm and its model crate, and changes nothing else.
+default = []
+# What `brain-cli` enables, so the CLI's fetch/convert surface is unchanged.
+import-all = [
+    "import-qwen3",
+    "import-glmdsa",
+    "import-lfm2",
+    "import-qwen3omnimoe",
+    "import-qwen3tts",
+    "import-yolov8",
+]
+import-qwen3 = ["dep:brain-qwen3"]
+import-glmdsa = ["dep:brain-glmdsa"]
+import-lfm2 = ["dep:brain-lfm2"]
+import-qwen3omnimoe = ["dep:brain-qwen3omnimoe"]
+# One family, three importers: the Talker/MTP pair, the Mimi-style codec and
+# the ECAPA speaker encoder are all needed to finish a qwen3tts fetch.
+import-qwen3tts = ["dep:brain-qwen3tts", "dep:brain-mimi", "dep:brain-ecapatdnn"]
+import-yolov8 = ["dep:brain-yolov8"]
+
 [dependencies]
 brain-arch.workspace = true
 brain-capability.workspace = true
@@ -21,14 +43,21 @@ brain-gpu-core.workspace = true
 # The `convert` dispatch's finish-step importers -- one per family it can
 # fetch and convert on an embedder's behalf, mirroring `brain-cli`'s own
 # dependency on each (this is a pure move of that dispatch, not new scope).
-brain-qwen3.workspace = true
-brain-glmdsa.workspace = true
-brain-lfm2.workspace = true
-brain-qwen3omnimoe.workspace = true
-brain-qwen3tts.workspace = true
-brain-mimi.workspace = true
-brain-ecapatdnn.workspace = true
-brain-yolov8.workspace = true
+#
+# OPTIONAL, one feature each: these eight are why this crate's dependency
+# closure is 65 brain crates while the rest of it is 18. An embedder that only
+# resolves and loads (the `brain` SDK, a service, a second binary) needs none
+# of them; `brain-cli` turns them all on with `import-all` so its `brain pull`
+# behaviour is byte-identical. A family whose importer is absent fails with an
+# error naming the feature to enable, never a silent "unsupported family".
+brain-qwen3 = { workspace = true, optional = true }
+brain-glmdsa = { workspace = true, optional = true }
+brain-lfm2 = { workspace = true, optional = true }
+brain-qwen3omnimoe = { workspace = true, optional = true }
+brain-qwen3tts = { workspace = true, optional = true }
+brain-mimi = { workspace = true, optional = true }
+brain-ecapatdnn = { workspace = true, optional = true }
+brain-yolov8 = { workspace = true, optional = true }
 serde_json.workspace = true
 
 [dev-dependencies]

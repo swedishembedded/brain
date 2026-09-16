@@ -162,7 +162,12 @@ find crates -name 'lib.rs' -o -name 'main.rs' | xargs touch
 
 out="$(mktemp)"
 trap 'rm -f "$out"' EXIT
-cargo clippy --workspace --all-targets --message-format=short >"$out" 2>&1
+# Engine packages only, never `--workspace`: that would select samples/*/* and
+# union every sample's declared SDK features into a configuration nothing
+# else uses. Samples are linted by scripts/gates/check-samples.sh, one
+# `cargo clippy -p <sample>` each, in their own declared configuration.
+cargo clippy --all-targets $(bash "$(dirname "$0")/../build/engine-pkgs.sh") \
+    --message-format=short >"$out" 2>&1
 rc=$?
 
 if [ "$rc" -ne 0 ]; then

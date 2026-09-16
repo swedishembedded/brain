@@ -21,6 +21,25 @@
 //! one deliberate exception to its `brain-<short>` package-naming
 //! convention.
 //!
+//! ## Features
+//!
+//! This crate is the workspace's feature vocabulary. Name the **surfaces** you
+//! use and you get their dependencies and nothing else:
+//!
+//! ```toml
+//! brain = { version = "1", features = ["image"] }
+//! ```
+//!
+//! | feature | what it adds |
+//! |---|---|
+//! | `image` | [`ImagePipeline`], [`Image`] -- text-to-image and image editing |
+//! | `full` | every surface; this is `default` |
+//!
+//! `device` and `resolve` are infrastructure tiers that a surface selects for
+//! you ([`Device`], [`DType`]); name a surface, not a tier. Features select
+//! code and never carry values -- per-instance configuration is a builder
+//! argument ([`ImagePipelineBuilder`]), never a feature name.
+//!
 //! ## Resource safety
 //!
 //! This crate is an in-process library, not a server: unlike
@@ -47,12 +66,28 @@
 //! email to info@swedishembedded.com.
 
 mod error;
+#[cfg(feature = "image")]
 mod image;
+#[cfg(feature = "image")]
 mod pipeline;
 
 pub use error::Error;
+
+/// A device/backend selection. Re-exported, not reinvented: the SAME type
+/// `--device` parses into (`gpu_core::devices::DeviceSpec`). An empty
+/// [`Device::default`] is the existing "auto" concept -- schedule on
+/// whatever hardware the machine actually has.
+#[cfg(feature = "device")]
+pub use gpu_core::devices::DeviceSpec as Device;
+/// A numeric tier. Re-exported, not reinvented: the SAME type flux2's own
+/// `Pipeline::build_sized` takes (`model::dispatch::Precision`).
+#[cfg(feature = "resolve")]
+pub use model::dispatch::Precision as DType;
+
+#[cfg(feature = "image")]
 pub use image::Image;
-pub use pipeline::{Device, DType, ImageGenerationOptions, ImagePipeline, ImagePipelineBuilder};
+#[cfg(feature = "image")]
+pub use pipeline::{ImageGenerationOptions, ImagePipeline, ImagePipelineBuilder};
 
 /// This crate's one `Result` alias -- every fallible public entry point
 /// returns it.

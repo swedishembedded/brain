@@ -2,12 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 #
-# Every directory under crates/ must be a crate whose manifest PARSES.
+# Every directory under crates/ - and every samples/<category>/<name>/ - must
+# be a crate whose manifest PARSES.
 #
-# The workspace takes its members from the glob `members = ["crates/*"]`, so
-# one bad manifest there does not fail one crate - it makes the whole
-# workspace unresolvable, at manifest-parse time, before any build script,
-# test or gate can run.
+# The workspace takes its members from the globs `members = ["crates/*",
+# "samples/*/*"]`, so one bad manifest under EITHER does not fail one crate -
+# it makes the whole workspace unresolvable, at manifest-parse time, before
+# any build script, test or gate can run. A half-finished sample directory is
+# therefore exactly as fatal as a half-finished crate.
 #
 # Two failure modes, and they are not equally well reported:
 #
@@ -33,19 +35,19 @@ cd "$(dirname "$0")/../.." || exit 2
 
 fail=0
 
-for d in crates/*/; do
+for d in crates/*/ samples/*/*/; do
     [ -d "$d" ] || continue
     if [ ! -f "${d}Cargo.toml" ]; then
         echo "check-workspace-members: FAIL - ${d} has no Cargo.toml"
-        echo "    The workspace globs crates/*, so this makes EVERY crate unresolvable."
-        echo "    Finish the crate, remove the directory, or move it out of crates/."
+        echo "    The workspace globs crates/* and samples/*/*, so this makes EVERY"
+        echo "    member unresolvable. Finish it, remove the directory, or move it out."
         fail=1
     fi
 done
 
 # Conflict markers first: a more specific and far more likely diagnosis than
 # "invalid TOML", and worth saying by name.
-if markers=$(grep -rln --include=Cargo.toml -E '^(<<<<<<< |=======$|>>>>>>> )' crates/ Cargo.toml 2>/dev/null); then
+if markers=$(grep -rln --include=Cargo.toml -E '^(<<<<<<< |=======$|>>>>>>> )' crates/ samples/ Cargo.toml 2>/dev/null); then
     if [ -n "$markers" ]; then
         echo "check-workspace-members: FAIL - unresolved conflict markers in a manifest:"
         while IFS= read -r f; do
@@ -61,7 +63,7 @@ fi
 # Then anything else that simply is not valid TOML.
 bad=$(python3 - <<'PY'
 import glob, tomllib
-for f in sorted(glob.glob("crates/*/Cargo.toml")) + ["Cargo.toml"]:
+for f in sorted(glob.glob("crates/*/Cargo.toml") + glob.glob("samples/*/*/Cargo.toml")) + ["Cargo.toml"]:
     try:
         with open(f, "rb") as fh:
             tomllib.load(fh)
@@ -78,5 +80,5 @@ if [ -n "$bad" ]; then
 fi
 
 [ "$fail" -ne 0 ] && exit 1
-echo "check-workspace-members: exit 0, $(ls -d crates/*/ | wc -l | tr -d ' ') crates, all manifests parse"
+echo "check-workspace-members: exit 0, $(ls -d crates/*/ | wc -l | tr -d ' ') crates + $(find samples -mindepth 3 -maxdepth 3 -name Cargo.toml 2>/dev/null | wc -l | tr -d ' ') samples, all manifests parse"
 exit 0

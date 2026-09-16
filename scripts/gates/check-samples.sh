@@ -1,0 +1,202 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+#
+# Gate for samples/ - the standalone applications built on the public `brain`
+# SDK. Invoked by `make check/samples`.
+#
+# Enforces samples/README.md. The manifest checks are cheap reads; the two that
+# matter are measurements:
+#
+#   CLOSURE     - a sample's real `cargo tree` graph contains nothing from an
+#                 SDK surface it did not enable. This is the check that
+#                 literally enforces "pull in only its required dependencies",
+#                 and the surface -> crate mapping is DERIVED from the SDK's own
+#                 manifest, so it cannot drift from what the features do.
+#   INCREMENTAL - editing a sample's own sources and rebuilding compiles
+#                 exactly one crate, and none of them a brain crate.
+#
+# A declared `[package.metadata.brain] max-brain-crates` budget per sample turns
+# closure growth into a decision someone makes in a commit rather than a drift
+# nobody notices.
+set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")/../.."
+
+# Pin CARGO_HOME exactly as the Makefile does. Cargo records the ABSOLUTE
+# source path of every registry crate in its fingerprints, so building under a
+# different CARGO_HOME shares no artifacts with what `make` produced and the
+# measurements below would report a cold third-party graph that has nothing to
+# do with samples.
+export CARGO_HOME="${CARGO_HOME_OVERRIDE:-$HOME/.cargo}"
+
+fail=0
+note() { printf '  %s\n' "$*"; }
+bad()  { printf 'FAIL %s\n' "$*"; fail=1; }
+
+mapfile -t manifests < <(find samples -mindepth 3 -maxdepth 3 -name Cargo.toml | sort)
+if [ "${#manifests[@]}" -eq 0 ]; then
+	echo "check/samples: no samples yet - nothing to check"
+	exit 0
+fi
+echo "check/samples: ${#manifests[@]} sample(s)"
+
+# ---------------------------------------------------------------- manifests
+for m in "${manifests[@]}"; do
+	dir="$(dirname "$m")"
+	rel="${dir#samples/}"
+	want="sample-${rel//\//-}"
+	got="$(sed -n 's/^name = "\(.*\)"/\1/p' "$m" | head -1)"
+
+	# The Makefile's samples/%/{build,run} rules resolve the package this way.
+	[ "$got" = "$want" ] || bad "$m: package is '$got', path implies '$want'"
+
+	# Rule 1: the only brain dependency is the SDK facade.
+	while read -r dep; do
+		case "$dep" in
+			brain) : ;;
+			brain-*) bad "$dep: $dir reaches past the SDK into an engine crate (samples/README.md rule 1)" ;;
+		esac
+	done < <(sed -n '/^\[dependencies\]/,/^\[/p' "$m" \
+		| sed -n 's/^\([A-Za-z0-9_-]*\)[ .=].*/\1/p' | grep '^brain' || true)
+
+	[ -f "$dir/README.md" ] || bad "$dir: no README.md"
+	while read -r src; do
+		head -3 "$src" | grep -q 'SPDX-License-Identifier' || bad "$src: no SPDX header"
+	done < <(find "$dir/src" -name '*.rs' 2>/dev/null || true)
+done
+
+# ------------------------------------------------- surfaces, closure, budget
+# One python pass: read the SDK's feature table, then check every sample's
+# declaration and real dependency graph against it.
+python3 - "${manifests[@]}" <<'PY' || fail=1
+import subprocess, sys, tomllib
+
+sdk = tomllib.load(open("crates/sdk/Cargo.toml", "rb"))
+feats = sdk.get("features", {})
+
+# Infrastructure tiers are selected BY a surface and must never be named by a
+# sample; `full` is the "everything" alias and is equally not a surface.
+TIERS = {"device", "resolve", "full", "default"}
+surfaces = {f: v for f, v in feats.items() if f not in TIERS}
+
+def crates_of(feature, seen=None):
+    """Every `dep:` crate a feature pulls in, transitively through the table."""
+    seen = seen if seen is not None else set()
+    out = set()
+    for entry in feats.get(feature, []):
+        if entry.startswith("dep:"):
+            out.add(entry[4:])
+        elif "/" in entry:
+            out.add(entry.split("/", 1)[0])
+        elif entry not in seen:
+            seen.add(entry)
+            out |= crates_of(entry, seen)
+    return out
+
+surface_crates = {s: crates_of(s) for s in surfaces}
+ok = True
+
+for m in sys.argv[1:]:
+    d = m.rsplit("/", 1)[0]
+    pkg = "sample-" + d[len("samples/"):].replace("/", "-")
+    man = tomllib.load(open(m, "rb"))
+    dep = man.get("dependencies", {}).get("brain")
+
+    if not isinstance(dep, dict) or not dep.get("features"):
+        print(f"FAIL {m}: must NAME the SDK surfaces it uses, e.g. "
+              f'brain = {{ workspace = true, features = ["image"] }} '
+              f"(samples/README.md rule 2)")
+        ok = False
+        continue
+
+    named = set(dep["features"])
+    for f in sorted(named):
+        if f in TIERS:
+            print(f"FAIL {m}: names '{f}', an infrastructure tier rather than a "
+                  f"surface. Name a surface; a surface selects its own tiers.")
+            ok = False
+        elif f not in surfaces:
+            print(f"FAIL {m}: names '{f}', which is not an SDK surface. "
+                  f"Known surfaces: {', '.join(sorted(surfaces))}")
+            ok = False
+
+    tree = subprocess.run(
+        ["cargo", "tree", "-p", pkg, "--edges", "normal", "--prefix", "none"],
+        capture_output=True, text=True)
+    if tree.returncode != 0:
+        print(f"FAIL {pkg}: cargo tree failed:\n{tree.stderr.strip()[:400]}")
+        ok = False
+        continue
+    present = {ln.split()[0] for ln in tree.stdout.splitlines()
+               if ln.strip().startswith("brain")}
+
+    # THE closure check: nothing from a surface this sample did not enable.
+    #
+    # Subtract what the ENABLED features legitimately bring in first. Surfaces
+    # share infrastructure tiers (`image` and a future `text` both select
+    # `resolve`), so a surface's raw crate set is not exclusively its own -
+    # without this subtraction, enabling `image` would be reported as leaking
+    # `resolve`'s crates "from the text surface".
+    allowed = set()
+    for f in named:
+        allowed |= crates_of(f)
+    for s in sorted(set(surfaces) - named):
+        leaked = sorted((surface_crates[s] - allowed) & present)
+        if leaked:
+            print(f"FAIL {pkg}: links {', '.join(leaked)} from the '{s}' surface, "
+                  f"which it did not enable")
+            ok = False
+
+    budget = man.get("package", {}).get("metadata", {}).get("brain", {}).get("max-brain-crates")
+    if budget is None:
+        print(f"FAIL {m}: no [package.metadata.brain] max-brain-crates budget "
+              f"(samples/README.md rule 8)")
+        ok = False
+    elif len(present) > budget:
+        print(f"FAIL {pkg}: links {len(present)} brain crates, budget is {budget}. "
+              f"Raise the budget in the same commit as the dependency, or drop it.")
+        ok = False
+    else:
+        print(f"  {pkg}: {len(present)} brain crates "
+              f"(budget {budget}, surfaces: {', '.join(sorted(named))})")
+
+sys.exit(0 if ok else 1)
+PY
+
+# --------------------------------------------------------------- incremental
+if [ "${BRAIN_SAMPLES_CHECK_BUILD:-1}" = "0" ]; then
+	note "build measurement skipped (BRAIN_SAMPLES_CHECK_BUILD=0)"
+elif ! command -v cargo >/dev/null 2>&1; then
+	note "build measurement skipped (no cargo)"
+else
+	for m in "${manifests[@]}"; do
+		rel="$(dirname "$m")"; rel="${rel#samples/}"
+		pkg="sample-${rel//\//-}"
+		note "building $pkg"
+		# Narrow selection on purpose: a selection that also contained the
+		# engine's default members would union this sample's declared features
+		# with the SDK's own defaults and silently ignore the declaration.
+		cargo build --release -p "$pkg" >/dev/null 2>&1 || bad "$pkg: does not build"
+		cargo clippy --release -p "$pkg" --all-targets --message-format=short \
+			>/dev/null 2>&1 || bad "$pkg: clippy failed"
+	done
+
+	# Touch the last sample's own sources so it MUST relink - proving the
+	# measurement is live rather than observing an already-current tree.
+	last="$(dirname "${manifests[-1]}")"
+	rel="${last#samples/}"; pkg="sample-${rel//\//-}"
+	find "$last/src" -name '*.rs' -exec touch {} +
+	out="$(cargo build --release -p "$pkg" --message-format short 2>&1 || true)"
+	brain_units="$(printf '%s\n' "$out" | grep -c '^ *Compiling brain' || true)"
+	all_units="$(printf '%s\n' "$out" | grep -c '^ *Compiling' || true)"
+	if [ "$brain_units" -ne 0 ]; then
+		bad "rebuilding $pkg recompiled $brain_units brain crate(s) - it is not being built with its own narrow selection"
+	elif [ "$all_units" -ne 1 ]; then
+		bad "rebuilding $pkg compiled $all_units crates, expected exactly 1 (its own)"
+	else
+		note "rebuild of $pkg compiled 1 crate, 0 of them brain crates"
+	fi
+fi
+
+[ "$fail" -eq 0 ] && echo "check/samples: OK" || echo "check/samples: FAILED"
+exit "$fail"
