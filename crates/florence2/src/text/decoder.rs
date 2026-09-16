@@ -502,7 +502,7 @@ impl Decoder {
         let pos_w_n = "language_model.model.decoder.embed_positions.weight";
         if trainable(ps, pos_w_n) {
             let pos_vocab = ps.numel(pos_w_n) as u32 / d;
-            gpu.submit(&[], &[gpu.step(bwd.emb_bwd, &[&self.pos_idx, &train.d_pos_embedded, ps.g(pos_w_n)], &[t, d, pos_vocab], t * d)]);
+            gpu.submit(&[], &[gpu.step(bwd.emb_bwd, &[&self.pos_idx, &train.d_pos_embedded, ps.g(pos_w_n)], &[t, d, pos_vocab], pos_vocab * d)]);
         }
 
         (&train.d_pos_embedded, &train.d_enc_out)

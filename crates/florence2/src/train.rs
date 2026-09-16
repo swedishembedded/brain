@@ -167,11 +167,21 @@ pub fn param_list(cfg: &BartConfig, t_prompt: u32, max_t: u32, lora: Option<Lora
 /// Deterministic fresh init: LayerNorm gains at identity (`1.0`)/biases at
 /// `0.0`, `.lora_b` at `0.0` (a fresh adapter is an exact no-op - the same
 /// convention every LoRA-adopting model in this repo holds to), everything
-/// else `Normal(0, std)` via [`data::rng::Lcg`].
+/// else `Normal(0, std)` via [`data::rng::Lcg`]. Base tensors are drawn
+/// FIRST (sorted among themselves), `.lora_a`/`.lora_b` tensors after
+/// (sorted among themselves) - not one alphabetical pass over the combined
+/// list - so a LoRA config's extra names never shift which RNG draw a base
+/// tensor gets: the same seed gives every base tensor the identical value
+/// whether or not `names` also carries LoRA adapters, which is what lets a
+/// fresh (`B=0`) adapter be verified as an exact forward no-op.
 pub fn init_weights(names: &[(String, usize)], std: f32, seed: u64) -> HashMap<String, Vec<f32>> {
     let mut rng = data::rng::Lcg::new(seed);
-    let mut sorted: Vec<&(String, usize)> = names.iter().collect();
+    let is_lora = |n: &str| n.ends_with(".lora_a") || n.ends_with(".lora_b");
+    let mut sorted: Vec<&(String, usize)> = names.iter().filter(|(n, _)| !is_lora(n)).collect();
     sorted.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut lora_sorted: Vec<&(String, usize)> = names.iter().filter(|(n, _)| is_lora(n)).collect();
+    lora_sorted.sort_by(|a, b| a.0.cmp(&b.0));
+    sorted.extend(lora_sorted);
     let mut out = HashMap::new();
     for (name, numel) in sorted {
         let data: Vec<f32> = if name.ends_with("layer_norm.weight") || name.ends_with("layernorm_embedding.weight") {
@@ -349,13 +359,13 @@ impl Florence2Trainer {
         let (d_dec_embedded, d_enc_out) = self.decoder.backward(&self.gpu, &self.dec_k, &self.dec_bwd_k, &self.ps, enc_out, &self.d_hidden, t, self.lora_ids.as_ref());
         if trainable(&self.ps, shared_n) {
             let vocab = v;
-            self.gpu.submit(&[], &[self.gpu.step(self.k("emb_bwd"), &[&self.decoder_idx, d_dec_embedded, self.ps.g(shared_n)], &[self.max_t, d, vocab], self.max_t * d)]);
+            self.gpu.submit(&[], &[self.gpu.step(self.k("emb_bwd"), &[&self.decoder_idx, d_dec_embedded, self.ps.g(shared_n)], &[self.max_t, d, vocab], vocab * d)]);
         }
 
         let d_inputs_embeds = self.encoder.backward(&self.gpu, &self.enc_k, &self.enc_bwd_k, &self.ps, d_enc_out, self.lora_ids.as_ref());
         if trainable(&self.ps, shared_n) {
             let vocab = v;
-            self.gpu.submit(&[], &[self.gpu.step(self.k("emb_bwd"), &[&self.prompt_idx, d_inputs_embeds, self.ps.g(shared_n)], &[self.t_prompt, d, vocab], self.t_prompt * d)]);
+            self.gpu.submit(&[], &[self.gpu.step(self.k("emb_bwd"), &[&self.prompt_idx, d_inputs_embeds, self.ps.g(shared_n)], &[self.t_prompt, d, vocab], vocab * d)]);
         }
     }
 
