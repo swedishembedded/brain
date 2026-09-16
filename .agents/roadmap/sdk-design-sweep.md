@@ -1,0 +1,202 @@
+# sdk-design sweep - roadmap
+
+The tracking document for bringing the whole workspace into line with
+`.agents/rules/sdk-design.md`, across as many sessions as it takes. Read this
+file FIRST before touching anything SDK-surface-shaped; it is meant to be
+picked up cold by a session that has never seen this campaign before. Check
+items off as they land, and add what you learn - this file decays fast if
+only read, never written.
+
+Seeded from three background audits run at kickoff (2026-09-16): a domain
+inventory of every served model, a rule-by-rule self-audit of `crates/sdk`,
+and an architecture map of the flux2/s3dit pipeline-construction duplication.
+None of the three read every model crate's source; they used `crates/catalog`,
+`crates/arch`, and targeted greps, on purpose, to keep the audit itself cheap.
+
+## Domain inventory - what has an SDK pipeline, and what's next
+
+`crates/arch::ARCHS` carries an explicit `Domain` enum (`crates/arch/src/
+lib.rs:47-76`). 59 rows across it; `crates/catalog::models()` registers 36 of
+them for serving. Today `crates/sdk` covers exactly two surfaces: `ImagePipeline`
+(the `Image` domain's generation half) and `Creature` (not an `ARCHS` row at
+all - the fly/flybody/connectome stack is unregistered).
+
+| Domain bucket | Archs | Served | SDK pipeline | CLI shape | LoRA/finetune |
+|---|---|---|---|---|---|
+| Text decoders | 8 | 6 | none | fragmented: 6 model-specific `*_cli.rs` + `resident_llm.rs` | yes (qwen3) |
+| Multimodal/VLM/OCR | 9 | 8 | none | `omni_cli.rs`, `document_study_cli.rs` + 5 `resident_*.rs` | yes (qwen3vl) |
+| Image generation | 6 | 6 | **YES - `ImagePipeline`** (flux2+s3dit only) | `flux2_cli.rs` + `s3dit::caps::ZAction` | yes (flux2, s3dit) |
+| Restoration/upscaling/VAE | 5 | 5 | none | no dedicated CLI; `resident_restore/upscale/supir.rs` | no |
+| Video generation | 2 | 2 | none | `wan_cli.rs`, `ltxv_cli.rs` | yes (wan) |
+| ASR | 2 | 2 | none | **no CLI at all** - `resident_asr.rs` only | no |
+| TTS/music/speech codec | 7 | 3 | none | `tts_cli.rs` + `tts_serve.rs` | no |
+| Vision/detection/segmentation | 4 | 4 | none | `yolo_cli.rs`, `sam2_cli.rs`, `depth_cli.rs`, `label_cli.rs` | no |
+| Embedding towers | 3 | 3 | none | **no CLI at all** - `resident_clip/arcface/t5encoder.rs` | no |
+| Forecasting | 4 | 0 (CLI-local) | none | **one unified entry**: `forecast_cli.rs` + generic `resident_forecast.rs` | yes (`brain forecast finetune`) |
+| 3D/scene | 2 | 0 (CLI-local) | none | `splat_cli.rs`, `mirror_cli.rs` | no |
+| World models | 2 | 0 | none | `wm_cli.rs` | no |
+| Toy (excluded from `brain caps`) | 4 | 0 | n/a | `pid_cli.rs` | n/a |
+| Creature (unregistered) | 0 | 0 | **YES - `Creature`** | none (see rule-2 exception in sdk-design.md) | n/a |
+
+`imgpipe` (in `catalog::models()` but not an arch - it *composes* capabilities
+via `stage_registry()`) is a natural future `AutoPipeline` consumer, not its
+own bucket.
+
+**Priority order for the next new pipeline** (reasoning kept short; expand
+when a milestone actually starts one):
+
+1. **`ForecastPipeline`** - only bucket with ONE unified CLI entry already
+   (`forecast_cli.rs`) and one generic resident dispatch; stateless call
+   shape; smallest domain object (`Forecast`); already has a `finetune` verb.
+   Lowest-risk proof of the *second* `from_pretrained` shape.
+2. **`TextGenerationPipeline`** - highest raw unlock (8 decoders + ~9
+   multimodal decoders behind them), but the CLI side is fragmented across
+   six model-specific files - a consolidation project, not a wrapping one.
+   Must not regress into `Qwen3Pipeline`/`GlmPipeline` per-model types
+   (rule 2 forbids this explicitly).
+3. **`EmbeddingPipeline`** (clip/arcface/t5encoder/ecapatdnn/campplus) -
+   conceptually the simplest call shape, but no CLI entry point to lift from
+   at all - written fresh.
+4. **ASR `TranscribePipeline`** - same "no CLI to lift from" gap as
+   embedding, plus Nemotron's streaming path needs the progress/cancel
+   design (rule 8) done properly, not stubbed.
+5. Vision/detection, restoration/upscaling (natural `ImagePipeline` siblings
+   returning the same `Image` domain type), TTS/music, video generation, then
+   3D/world models last - `SplatPipeline` is closer to `Creature` (stateful,
+   steppable) than to `ImagePipeline`, and world models have no settled
+   domain object yet.
+
+## `crates/sdk` self-audit findings
+
+Rule-by-rule audit against `.agents/rules/sdk-design.md`, cross-checked
+against `.agents/roadmap/sdk.md` so only genuinely NEW findings are listed
+here (items already tracked there are not repeated - see that file's own
+"Not yet done" section for those).
+
+### Real violations / gaps
+
+| # | Rule | Where | Finding | Status |
+|---|---|---|---|---|
+| 1 | 14/2 | `crates/sdk/src/creature.rs` | `Creature` has zero tests, inline or integration - the only public surface with none | open (M4) |
+| 2 | 14 | `crates/sdk/src/view.rs:11-14` | `View::frame`'s documented headless-capture behavior is untested | open (M4) |
+| 3 | 8 | `crates/sdk/src/pipeline.rs:321,331` | `generate`/`generate_with` hardcode `&CancelToken::default()` and a no-op progress closure; no public way to supply either | open (M5) |
+| 4 | 8 | `crates/sdk/src/pipeline.rs:300,481,504` | download and s3dit-build progress are likewise discarded | open (M5) |
+| 5 | 6 | `crates/sdk/src/error.rs:70-71` | `Error::Cancelled` is a dead public variant - unreachable with no public cancel entry point | open (M5) |
+| 6 | 8 | crate-wide | no `.capabilities()`/manifest introspection anywhere in `crates/sdk` | open (M8) |
+| 7 | 9 | crate-wide | no training/finetune entry point at all in `crates/sdk` (the adjacent Dataset-layer gap is tracked in `sdk.md`; the missing training call itself was not) | open (Phase 2, per-pipeline) |
+| 8 | 9/4 | `crates/sdk/src/creature.rs:492-500` | `set_plasticity`/`reward` mutate learned synapse weights with no `save()`/`load()` counterpart - all learning dies with the process | open (backlog) |
+| 9 | 7 | `crates/sdk/src/creature.rs:157` | `Creature::build` acquires its GPU via `gpu_core::testgpu::dev` - TEST-SUPPORT infra, weak-reference lifetime, shipping on the production SDK path | open (M3) |
+| 10 | 7/13 | `crates/sdk/src/creature.rs` + `Cargo.toml` | `CreatureBuilder` has no `Device` knob at all, yet the `creature` feature's doc comment claims it "selects `device`" | open (M3) |
+| 11 | 5 | `crates/sdk/src/pipeline.rs:416-424,432-435` | `ImagePipelineBuilder::size` is silently IGNORED on a flux2-backed pipeline (the s3dit half of this asymmetry is tracked in `sdk.md`; the flux2 silent no-op was not) | open (backlog) |
+| 12 | 6 | `crates/sdk/src/error.rs:62-66` | `Error::Backend` is an untyped catch-all for ~8 semantically distinct failures (license refusal, no models dir, size mismatch, bad extension, missing builder arg, GPU/MuJoCo failure...) | open (M6) |
+| 13 | 6 | `crates/sdk/src/creature.rs:129-130` | a caller-programming error (missing required builder field) is typed as `Error::Backend`, indistinguishable from a real backend crash | open (M6) |
+| 14 | 8/4 | `crates/sdk/src/creature.rs:276-278,414-416` | `wiring()`/`wing_wiring()` return a pre-rendered human summary string; no structured/programmatic accessor | open (backlog) |
+| 15 | 3 | `crates/sdk/src/creature.rs:257-268` | `Creature::fruit_fly()` has two mandatory runtime-checked fields and no simple zero-arg path - a builder tax, not optional configuration | open (M7, may end in "documented, won't fix" if no bundled default connectome exists) |
+| 16 | 13/10 | `crates/fly/examples/watch.rs:18-60` | hand-builds `Fly`/`SdlWindow`/`Renderer` independently of `Creature`/`View` - the same class of defect as the tracked CLI duplication, applied to an example | open (M7) |
+| 17 | 13 | `docs/` | no user-facing SDK page exists for either surface (rustdoc itself is compliant) | open (M9) |
+
+### Minor / stylistic (backlog, not milestoned individually - fold into whichever nearby milestone touches that file)
+
+18. `ImagePipelineBuilder::load()` vs `CreatureBuilder::build()` - two terminal verbs for the same act in one crate.
+19. No `Creature::builder()` alongside `Creature::fruit_fly()` (arguably justified - the species names the assembly).
+20. Unprefixed setters (`drive`, `turn`, `reward`) beside `set_`-prefixed ones (`set_wing_power`, `set_plasticity`) on the same type.
+21. `creature.rs:283-285` - `drive()`'s doc documents a `turn` param it doesn't take; `turn()` next to it has no doc. (fixed in M2)
+22. `error.rs:82` - `Error::Backend` renders with no `brain: `-style prefix, unlike every other variant. (fixed in M2)
+23. `creature.rs:63` - `pub use flybody::Arena;` promoted into the compatibility surface with no doc comment justifying it, unlike `Device`/`DType`.
+24. `view.rs:86` - `View::open(creature, title, width, height)` is four positional args with no options type.
+
+### Checked and clean (recorded so nobody re-audits these)
+
+- Rule 2: one `ImagePipeline` type dispatching internally, no `Flux2Pipeline`/`S3ditPipeline` pair; `from_pretrained` has no second init stage; local paths and hub ids share one call.
+- Rule 4: `Image` is the one normalized domain type both backends produce; raw access (`pixels()`) exists without being the only output.
+- Rule 7: `Device`/`DType` are re-exports, not parallel types, with the reasoning recorded inline in `lib.rs`.
+- Rule 6: `Error::Ambiguous`/`Missing` carry the resolver's structured answer boxed, proven by a test that the structure survives.
+- Rule 3 level 2: `ImageGenerationOptions` setters override only their own field, verified by test.
+- Rule 13 (feature vocabulary): `crates/sdk/Cargo.toml`'s `image`/`creature`/`device`/`resolve`/`full` features are fully compliant and mechanically gated by `scripts/gates/check-sdk-features.sh`. One accepted consequence, not a violation: `View` (SDL+MuJoCo) is bundled into the `creature` surface, so a headless embedder still links the display closure - splitting it needs a new `Domain` variant, which the gate would demand.
+
+## The flux2 pipeline-construction duplication
+
+Six independent places build a `flux2::Pipeline`, not four:
+
+| # | Site | Role |
+|---|---|---|
+| 1 | `crates/sdk/src/pipeline.rs:495` (+ `:296` on `load_lora` rebuild) | SDK facade |
+| 2 | `crates/cli/src/flux2_cli.rs:696` | one-shot CLI |
+| 3 | `crates/flux2/src/caps.rs:432` | `Flux2Action` served path (D-Bus/HTTP) |
+| 4 | `crates/cli/src/resident_flux2.rs:320` | flux2 residency adapter |
+
+(The s3dit-backed sites - `crates/sdk/src/pipeline.rs:504`, `flux2_cli.rs`'s
+sibling is N/A, `crates/s3dit/src/caps.rs:195`, `crates/cli/src/resident.rs`
+- are NOT a duplication problem: `s3dit::pipeline::HotPipeline::build_adapted`
+already IS the one shared "resolve config + pick precision + build" call;
+every site above it just extracts different params. Only
+`ZImageProvider::load()`'s `Paths::from_env` at `crates/cli/src/run_cli.rs:496`
+is worth a note - the last env-only construction path while
+`crates/catalog/src/lib.rs:262` already resolves from a real `Assembly` - not
+a code change on its own.)
+
+**Resolution itself is not duplicated** - all four flux2 sites bottom out in
+one core, `loader::resolver::resolve_structured` (`crates/loader/src/
+lib.rs:45`), through three deliberately different error-policy wrappers
+(typed `Error` for the SDK, `process::exit` for the CLI, an `Option` +
+per-role env override for the served/resident paths). That layering is
+intentional; it is not the target.
+
+**The real duplication, and a real bug it's hiding**: what happens
+IMMEDIATELY BEFORE the build - picking the variant, checking the license,
+loading the config, and deciding the precision - is four separate, never-composed
+public functions (`flux2::caps::bind_variant`, `flux2::caps::check_license`,
+`flux2::Flux2Config::from_name`, `flux2::pipeline::effective_dit_precision`).
+`effective_dit_precision` is called at only TWO of the four sites (`flux2_cli.rs`
+and the SDK) - `flux2::caps` and `resident_flux2.rs` never call it, so a
+`.gguf` DiT served over D-Bus/HTTP misses the fp32-to-packed-int8 correction
+the CLI and SDK both apply. This is a real correctness bug, not just style.
+
+**Recommended extraction** (M10a/b/c): a new `flux2::pipeline::build_resolved`
+(or a small `flux2::build` module), living IN the `flux2` crate itself, taking
+a variant-source enum covering the three legitimate resolution policies
+(`FromAssembly(&Assembly)` / `SniffDit { requested }` / `Bound(&str)`) plus
+token ceilings/adapters/`max_batch` as parameters (these stay call-site-owned;
+pushing them down would re-create the SDK's fixed-1024² limitation
+everywhere), composing all four existing decision functions internally, and
+returning `(Pipeline, Flux2Config, Precision, bound_variant)`.
+
+**Where NOT to put it, and why:**
+- Not `crates/loader` - architecture-agnostic by design; would gain a
+  `flux2` dependency.
+- Not re-exported from `crates/sdk` into `crates/cli` - `crates/cli` has no
+  dependency on `crates/sdk` today, and the SDK bundles daemon-hostile
+  behavior (process-global `apply_device`, network download,
+  flux2-then-s3dit auto-detection) a resident must never do. `crates/sdk`
+  should instead become a CONSUMER of `build_resolved`, the thinnest of the
+  four, same as everyone else.
+- Not a new residency helper - `resident_flux2.rs`'s `estimate`-before-build,
+  device-scoped construction (`on_device`), and incremental/cacheable build
+  (`build_adapted_with_cache`/`build_from_dit_cache`, no s3dit equivalent
+  exists) are genuinely residency-specific and stay exactly where they are;
+  only the ~8 duplicated decision lines above the build call move.
+
+Safest landing order: `flux2::caps`/`resident_flux2.rs` first (M10a - they
+have NO decision logic today, so wiring them up only adds correctness, it
+can't regress anything that already worked), then `flux2_cli.rs` (M10b),
+then `crates/sdk` (M10c).
+
+## Milestone checklist
+
+- [x] **M1** - this document + the `sdk.md` stale-line fixes.
+- [ ] **M2** - `crates/sdk` cheap mechanical fixes (findings 21, 22).
+- [ ] **M3** - `Creature` gets a real device (findings 9, 10).
+- [ ] **M4** - `Creature`/`View` end-to-end test (findings 1, 2).
+- [ ] **M5** - progress/cancellation wired for real (findings 3, 4, 5).
+- [ ] **M6** - split `Error::Backend`'s catch-all (findings 12, 13).
+- [ ] **M7** - `Creature` progressive disclosure + de-duplicate `watch.rs` (findings 15, 16).
+- [ ] **M8** - `.capabilities()` introspection (finding 6).
+- [ ] **M9** - user-facing SDK docs page (finding 17).
+- [ ] **M10a** - `flux2::pipeline::build_resolved`, wired into `flux2::caps` + `resident_flux2.rs` (fixes the precision bug).
+- [ ] **M10b** - migrate `flux2_cli.rs` onto `build_resolved`.
+- [ ] **M10c** - migrate `crates/sdk`'s flux2 half onto `build_resolved`.
+- [ ] **Phase 2** - new pipelines, in the priority order above: Forecast, Text, Embedding, ASR, then the rest. Each gets its own sub-roadmap section here (or its own file, linked from here) when it starts, written against the full `sdk-design.md` checklist from day one - including an end-to-end test and its CLI migrated onto it in the SAME change, learning from M10 rather than repeating the `flux2_cli.rs` gap a second time.
+
+Findings 8, 11, 14, 18-20, 23-24 are real but not yet milestoned - pick them
+up opportunistically when touching the same file for another reason, or spin
+them into their own milestone if they start blocking something.

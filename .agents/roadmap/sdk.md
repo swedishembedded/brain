@@ -56,8 +56,10 @@ for why.
       only a literal filesystem path works today (`adapter_source_path`'s
       gate).
 - [ ] TextPipeline/EmbeddingPipeline: not built. `brain`'s public surface
-      covers image generation only; there is no text-generation or embedding
-      counterpart to `ImagePipeline` anywhere in `crates/sdk`.
+      covers image generation (`ImagePipeline`) and one embodied simulation
+      (`Creature`); there is no text-generation or embedding counterpart to
+      `ImagePipeline` anywhere in `crates/sdk`. Full domain-by-domain backlog
+      and priority order: `.agents/roadmap/sdk-design-sweep.md`.
 - [ ] The semantic Dataset layer: no file-backed dataset loader exists for
       any training objective this SDK could eventually expose. DPO is the
       concrete example: `crates/rl/src/objective/dpo.rs`'s
@@ -77,14 +79,19 @@ for why.
       inline, independently of `crates/sdk` -- the CLI does not call
       `brain::ImagePipeline` at all, so the resolve/build logic genuinely
       exists in two places (the SDK's copy and the CLI's own), not one
-      shared one.
-- [ ] Per-domain Cargo features: `crates/sdk/Cargo.toml` pulls in
-      `brain-flux2`, `brain-s3dit`, `brain-imaging`, `brain-model`,
-      `brain-capability`, `brain-loader`, `brain-modelref`,
-      `brain-modelstore`, `brain-gpu-core` unconditionally -- an embedder
-      who only ever wants one backend (or, once it exists, only ever wants
-      `TextPipeline`) still links every backend's full dependency closure.
-      Deliberately deferred, not an oversight.
+      shared one. There are actually SIX independent build sites on the
+      flux2 side alone (`flux2::caps` and `resident_flux2.rs` are two more,
+      and neither calls `effective_dit_precision` -- a real bug, not just
+      duplication: a served `.gguf` DiT misses the fp32-to-packed-int8
+      correction the CLI and SDK both apply). Full site-by-site map and the
+      planned extraction: `.agents/roadmap/sdk-design-sweep.md`.
+- [x] Per-domain Cargo features: done. `crates/sdk/Cargo.toml` now gates
+      `brain-flux2`/`brain-s3dit`/`brain-imaging`/`brain-model`/
+      `brain-capability`/`brain-loader`/`brain-modelref`/`brain-modelstore`/
+      `brain-gpu-core` behind `optional = true`, selected per surface
+      (`image`, `creature`); an embedder who only wants one backend no
+      longer links the other's dependency closure. Enforced by
+      `scripts/gates/check-sdk-features.sh` (`make check/sdk-features`).
 - [ ] s3dit's build-time size/cap_len/hifi coupling: `s3dit::pipeline::
       HotPipeline::build_adapted` records its DiT/VAE graphs for exactly one
       `(width, height, cap_len, hifi)` shape at construction
