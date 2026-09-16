@@ -1639,6 +1639,7 @@ name = "brain-mujoco"
 version = "1.1.0"
 dependencies = [
  "brain-testutil",
+ "brain-wm-display",
  "libloading",
  "tempfile",
 ]

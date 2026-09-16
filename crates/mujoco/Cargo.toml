@@ -15,5 +15,9 @@ path = "src/lib.rs"
 libloading.workspace = true
 
 [dev-dependencies]
+# `window_with_gl` example: the minimal reproducer for a headless GL context
+# and an SDL window in one process. Dev-only, so nothing that links this
+# crate gains a display dependency.
+brain-wm-display.workspace = true
 brain-testutil.workspace = true
 tempfile.workspace = true
