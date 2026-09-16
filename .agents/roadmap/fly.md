@@ -100,6 +100,38 @@ Flight sets the real rate: 5 kHz control, 20 kHz physics, 218 Hz wingbeat - at a
 flight needs the weight>=2 sparsification, a second card, or the event-driven
 path. Walking has an 8x margin; flight does not.
 
+**BANC v888 - the whole CNS in one volume. Now on disk.** Brain *and* nerve
+cord in a single reconstruction, so the seam between descending command and
+executing cord is gone. Fetched by hand through an authenticated Codex session;
+it is not scriptable, and the resources tree records the manual steps.
+
+| | |
+|---|---|
+| neurons / edges / synapses | 158,262 / 3,037,361 / 23,556,214 |
+| full CSR footprint | **24.3 MB** - the entire animal, smaller than MANC alone |
+| in-degree | mean 20.4, median 9, p99 182, max 2624 |
+| NT predicted | 94.5%, mean confidence 0.759, 48.7% above 0.8 |
+| NT **verified** | **65,369 neurons (41%)** |
+| motor neurons | 805: 391 leg, 62 wing, 172 abdomen, 49 neck, 25 haltere |
+| descending / ascending / sensory | 1,316 / 1,849 / 16,557 |
+| annotation coverage | 153,962 / 153,962 edge endpoints |
+
+Three consequences. **Sign gets much better on BANC**: 41% of neurons carry a
+VERIFIED neurotransmitter, which is ground truth rather than the
+confidence-weighted prior the prediction gives - the fitted-sign design still
+holds, but for two fifths of the animal it is fitted from a fixed point rather
+than from a guess. **Residency stops being a question**: 24.3 MB means optic
+lobe, central brain, cord and motor neurons are all resident at once, and the
+per-edge plasticity state alongside it is another 24 MB. And **the importer
+needs no Arrow**: Codex exports plain gzipped CSV with one schema shared across
+every dataset, so the feather path M2 was going to need does not exist.
+
+The Codex and Janelia renderings of MANC cross-validate: 5,305,638 edges /
+30,934,610 synapses / 23,665 neurons against 5,243,574 / 30,698,527 / 23,188,
+with identical motor-neuron subclass counts. The small excess is a later patch
+revision. Codex carries NT confidence inline; Janelia carries the per-neuron
+muscle targets Codex omits, so M3's muscle map still reads the Janelia export.
+
 ### Sign is a learned parameter, not a given
 
 Neurotransmitter is predicted for 98.9% of neurons, but mean confidence is
@@ -264,11 +296,17 @@ it against the scan+sort reference at `max|d| == 0`.
   real fraction of neurons fired before comparing, and catches both that
   mutation and a truncated partial fold. Mutation-verify a new gate: one that
   has never been seen to fail has not been tested.
-* **M2 - connectome import.** `crates/connectome`: MANC CSV + feather -> CSR/CSC,
-  NT prior with confidence, named populations, `brain pull` integration.
-  **Gate:** two-way coverage over all 23,188 neurons and 5,243,574 edges -
-  every row accounted for or explicitly rejected with a reason; degree
-  statistics reproduce the table above.
+* **M2 - connectome import.** `crates/connectome`: the Codex CSV schema ->
+  CSR/CSC, NT prior carrying its own confidence (and the verified type where
+  BANC has one), named populations from `Super Class`/`Class`/`Nerve`, and
+  `brain pull` integration. ONE reader serves BANC and MANC because Codex
+  exports one schema; the Janelia MANC export is a second, smaller reader kept
+  for the muscle targets Codex omits.
+  **Gate:** two-way coverage over every neuron and every edge of whichever
+  dataset is loaded - each row accounted for or explicitly rejected with a
+  typed reason; the degree and class statistics in this file reproduced by the
+  importer's own test, for BOTH datasets, which is also what settles the
+  density question above.
 * **M3 - body.** MuJoCo behind the feature gate; flybody model loaded; the
   MN -> muscle -> actuator map. **Gate:** the fly stands under gravity; passive
   replay of reference kinematics reproduces recorded joint angles. Also
@@ -340,8 +378,11 @@ from a connectome, then learning.
   request-scoped. A creature's accumulated learning lives in device state, so
   eviction destroys it and `run_batch` is meaningless. Needs a deliberate
   answer in M7, not a bolt-on.
-* **BANC** requires a signed-in session at `codex.flywire.ai`; a human has to
-  accept the terms once. MANC v1.0 covers M1-M6 without it.
+* **Is BANC's nerve cord as complete as MANC's?** BANC's in-degree is mean
+  20.4 / median 9 against MANC's 224.5 / 173. Part of that is BANC's 3-synapse
+  floor and part is its 72,582 sparsely-connected optic-lobe neurons, but
+  whether its VNC is as densely reconstructed is not established. Both now
+  import through one schema, so measure it in M2 rather than assuming.
 
 ## Sources
 
