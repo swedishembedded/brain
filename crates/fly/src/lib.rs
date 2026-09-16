@@ -202,6 +202,15 @@ pub struct Fly {
     excite: Vec<f32>,
     /// Per-actuator muscle activation, carried across ticks.
     activation: Vec<f32>,
+    /// Motor spikes on each actuator THIS tick, split by polarity:
+    /// `[agonist, antagonist]`.
+    ///
+    /// Kept separately from `activation` because the net signal cannot tell
+    /// two silent muscles from two loud ones pulling against each other, and
+    /// those are different failures. A cord that produces a clean rhythm on
+    /// both sides of a joint at the same phase drives that joint nowhere, and
+    /// every summary that looks at the net output reports it as no rhythm.
+    opposed: Vec<[f32; 2]>,
     /// Per-actuator strength, 1.0 for an intact muscle. The body perturbation.
     muscle: Vec<f32>,
     /// `Some` once flight is enabled: the wingbeat this body is flying on.
@@ -323,6 +332,7 @@ impl Fly {
             descending_types,
             excite,
             activation: vec![0.0; actuator_names.len()],
+            opposed: vec![[0.0; 2]; actuator_names.len()],
             muscle: vec![1.0; actuator_names.len()],
             wingbeat: None,
             wing_drives: flybody::wing_map(c),
@@ -437,6 +447,24 @@ impl Fly {
         for (o, slot) in out.iter_mut().zip(self.leg_coxa) {
             if let Some(i) = slot {
                 *o = self.activation[i] * self.muscle[i];
+            }
+        }
+        out
+    }
+
+    /// Each leg's coxa drive this tick as `[agonist, antagonist]` spike
+    /// counts, in `flybody::LEGS` order.
+    ///
+    /// The diagnostic [`Self::leg_swing`] cannot give: a joint whose two
+    /// muscles both fire rhythmically IN PHASE produces no movement, and the
+    /// net activation that drives the body reports that as no rhythm at all.
+    /// Looking at one side alone says whether the rhythm is absent or merely
+    /// cancelled, and those need different fixes.
+    pub fn leg_opposed(&self) -> [[f32; 2]; 6] {
+        let mut out = [[0.0f32; 2]; 6];
+        for (o, slot) in out.iter_mut().zip(self.leg_coxa) {
+            if let Some(i) = slot {
+                *o = self.opposed[i];
             }
         }
         out
@@ -723,6 +751,9 @@ impl Fly {
         for a in self.activation.iter_mut() {
             *a *= self.coupling.activation_decay;
         }
+        for o in self.opposed.iter_mut() {
+            *o = [0.0; 2];
+        }
         if self.wingbeat.is_some() && self.wing_hold.is_none() {
             // The same leak as the muscles, for the same reason: a spike is an
             // impulse and a thorax is not. Power decays toward zero when the
@@ -741,6 +772,7 @@ impl Fly {
             for d in &self.map.drives {
                 if spike[d.neuron as usize] > 0.5 {
                     self.activation[d.actuator] += self.coupling.activation_gain * d.polarity;
+                    self.opposed[d.actuator][usize::from(d.polarity < 0.0)] += 1.0;
                     motor_spikes += 1;
                 }
             }

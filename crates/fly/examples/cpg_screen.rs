@@ -66,6 +66,7 @@ fn main() {
         "{:>6}  {:>5}  {:>8}  {:>9}  {:>7}  {:>8}  {:>8}  {:>7}  {:>9}  {:>7}",
         "minsyn", "tau", "scale", "active %", "motor/t", "step Hz", "tripod", "rhythm", "power", "score"
     );
+    println!("    (the 'ag' columns repeat the last three for ONE side of each joint)");
 
     // `min_synapses` changes the graph's SHAPE and `dt_over_tau` is fixed when
     // the network is built, so each pair needs its own network; only the
@@ -90,24 +91,34 @@ fn main() {
                     return;
                 }
                 let mut t = Trace::new(CONTROL_DT);
+                // The same trace taken from ONE side of each joint. A cord
+                // whose flexors and extensors both oscillate in phase moves
+                // nothing, and the net signal reports that as no rhythm; this
+                // says which of the two it is.
+                let mut agonist = Trace::new(CONTROL_DT);
                 let (mut spikes, mut motor) = (0u64, 0u64);
                 for _ in 0..ticks {
                     let beat = f.step().unwrap();
                     spikes += beat.total_spikes as u64;
                     motor += beat.motor_spikes as u64;
                     t.push(f.leg_swing());
+                    agonist.push(f.leg_opposed().map(|o| o[0]));
                 }
                 let active = 100.0 * spikes as f64 / (ticks as f64 * n);
                 let tau = 2.0 / dt_over_tau;
+                let ag = analyse(&agonist);
                 match analyse(&t) {
                     Some(g) => println!(
-                        "{min_syn:>6}  {tau:>5.0}  {scale:>8.3}  {active:>9.3}  {:>7.1}  {:>8.2}  {:>8.3}  {:>7.3}  {:>9.4}  {:>7.3}",
+                        "{min_syn:>6}  {tau:>5.0}  {scale:>8.3}  {active:>9.3}  {:>7.1}  {:>8.2}  {:>8.3}  {:>7.3}  {:>9.4}  {:>7.3}  ag {:>6.2} Hz {:>6.3} tri {:>6.3} rhy",
                         motor as f64 / ticks as f64,
                         g.step_hz,
                         g.tripod,
                         g.rhythmicity,
                         g.power,
-                        g.score()
+                        g.score(),
+                        ag.map(|a| a.step_hz).unwrap_or(0.0),
+                        ag.map(|a| a.tripod).unwrap_or(0.0),
+                        ag.map(|a| a.rhythmicity).unwrap_or(0.0)
                     ),
                     None => println!("{min_syn:>6}  {tau:>5.0}  {scale:>8.3}  {active:>9.3}  trace too short"),
                 }
