@@ -89,6 +89,38 @@ impl Csc {
         Ok(())
     }
 
+    /// The same graph with every edge's SOURCE randomly reassigned, keeping
+    /// each neuron's in-degree and the multiset of weights exactly.
+    ///
+    /// The structural control. If a creature learns as well on this as on the
+    /// real connectome, then nothing about the published wiring mattered and
+    /// the result is about the learning rule, the body, or the reward - which
+    /// is a finding, but not the one anybody wants to claim.
+    ///
+    /// Only `pre` is permuted, so `indptr` is untouched and in-degree is
+    /// preserved neuron for neuron. Out-degree is NOT preserved: it becomes
+    /// binomial where the real graph is heavy-tailed. That asymmetry is
+    /// unavoidable - a shuffle preserving both degree sequences is a different
+    /// and much more expensive object (an edge-swap walk) - and it is the
+    /// honest limitation of this control rather than a detail to omit. What it
+    /// does destroy is every correlation between who a neuron listens to and
+    /// what it is, which is the thing being tested.
+    pub fn shuffled_sources(&self, seed: u64) -> Csc {
+        let mut out = self.clone();
+        // Fisher-Yates over the `pre` array, with this workspace's
+        // deterministic test PRNG shape so a shuffled run is reproducible.
+        let mut state = seed | 1;
+        let mut next = || {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (state >> 33) as usize
+        };
+        for i in (1..out.pre.len()).rev() {
+            let j = next() % (i + 1);
+            out.pre.swap(i, j);
+        }
+        out
+    }
+
     /// In-degree of every neuron, straight out of `indptr`. The degree
     /// distribution is what a connectome import gates itself on, and it costs
     /// nothing to read here rather than recomputing it from an edge list.

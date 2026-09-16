@@ -448,10 +448,33 @@ it against the scan+sort reference at `max|d| == 0`.
   the bound on the first update. `SpikingNet::reset_state` and
   `Fly::initial_weight_scale` exist because of those.
 
+  **Structural control added, and it is the most decisive of the four.**
+  `Csc::shuffled_sources` reassigns every edge's source while preserving each
+  neuron's in-degree and the weight multiset exactly, applied AFTER signing so
+  the excitatory/inhibitory split is identical too. Over 12 episodes:
+  Learning beats Frozen 11/12 (p = 0.0032), ShuffledReward 11/12 (p = 0.0032)
+  and **ShuffledConnectome 12/12 (p = 0.0002)** - shuffling the wiring is worse
+  than every other control, so the published structure is doing work. Learning
+  is also the only condition that improves within its own run (+0.027 body
+  lengths first half to second half); all three controls flatten or degrade.
+
+  The control's honest limitation, recorded rather than omitted: in-degree is
+  preserved exactly but out-degree becomes binomial where the real graph is
+  heavy-tailed. A shuffle preserving both degree sequences is an edge-swap walk
+  and a much more expensive object.
+
+  **Retention is mechanised and gated.** After training moves ~934k weights,
+  freezing holds them bit-identically and two frozen episodes are
+  byte-identical in distance and spike count. Mutation-verified: leaving the
+  membrane potential out of `reset_state` makes the two episodes diverge and
+  the gate fails. Retention is a property of the MECHANISM and is therefore
+  testable independently of whether what was learned is any good.
+
   **Still open in M5:** the surrogate-gradient ceiling, which is what makes a
-  negative result interpretable rather than ambiguous, and the remaining
-  controls (shuffled connectome at matched degree, frozen-after-training
-  retention, body perturbation and re-adaptation).
+  negative result interpretable rather than ambiguous, and the last control -
+  body perturbation followed by re-adaptation. The effect size is still the
+  headline caveat: the best episode is 0.063 body lengths in 0.6 s, so about
+  0.1 body lengths per second against a real fly's one to three.
 * **M6 - flight.** Wing MNs, power/steering split, wingbeat entrainment.
   **Gate:** 218 Hz entrainment; flight-imitation reward against the recorded
   saccade-evasion trajectories.

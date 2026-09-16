@@ -29,11 +29,20 @@ fn main() {
     let cfg = RewardConfig::default();
     let episodes: usize = std::env::var("EPISODES").ok().and_then(|v| v.parse().ok()).unwrap_or(12);
 
-    let mut results: Vec<(Condition, Vec<f64>)> = Vec::new();
-    for condition in [Condition::Learning, Condition::Frozen, Condition::ShuffledReward] {
+    let mut results: Vec<(Condition, Vec<f64>, Vec<f64>)> = Vec::new();
+    for condition in [
+        Condition::Learning,
+        Condition::Frozen,
+        Condition::ShuffledReward,
+        Condition::ShuffledConnectome,
+    ] {
         let model = Model::from_xml(&mj, &xml).unwrap();
         let gpu = gpu_core::testgpu::dev(&neuro::KERNELS);
-        let mut f = Fly::new(gpu, &c, model, lif, 3e-2, Timing::default(), Coupling::default()).unwrap();
+        // The structural control differs in its WIRING, which is fixed at
+        // construction; every other condition runs the real connectome.
+        let shuffle = (condition == Condition::ShuffledConnectome).then_some(0x5EEDu64);
+        let mut f =
+            Fly::new(gpu, &c, model, lif, 3e-2, shuffle, Timing::default(), Coupling::default()).unwrap();
         // Clamp sized from the connectome's OWN weight range, not picked. The
         // weights are scaled synapse counts running to tens, so a fixed +/-0.2
         // squashes every one of them to the bound on the first update and
@@ -44,10 +53,17 @@ fn main() {
         println!("{condition:?}: weight clamp +/-{bound:.3}");
         let mut rng = Lcg::new(0xF1A);
         let mut dist = Vec::new();
+        // Distance per million spikes. The conditions do NOT end up equally
+        // active - Learning finishes firing several times more than it
+        // started - so a distance comparison alone cannot separate "moved
+        // further because it coordinated" from "moved further because it
+        // flailed more". This is the normalised view; both are reported.
+        let mut per_spike = Vec::new();
         let w0 = f.weights();
         for i in 0..episodes {
             let e = episode(&mut f, cfg, condition, &mut rng).unwrap();
             dist.push(e.distance);
+            per_spike.push(e.distance / (e.spikes.max(1) as f64 / 1e6));
             if i == 0 || i == episodes - 1 {
                 println!(
                     "  {condition:?} ep{i:3}: distance {:+.5} cm = {:+.3} body lengths  spikes {}  proprio {}",
@@ -59,11 +75,11 @@ fn main() {
         let moved = w0.iter().zip(&w1).filter(|(a, b)| a.to_bits() != b.to_bits()).count();
         let drift = w0.iter().zip(&w1).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
         println!("{condition:?}: {} of {} weights moved, max drift {drift:.6}", moved, w0.len());
-        results.push((condition, dist));
+        results.push((condition, dist, per_spike));
     }
 
     println!("\n--- did anything improve within its own run? (first half vs second half) ---");
-    for (cond, d) in &results {
+    for (cond, d, _) in &results {
         let h = d.len() / 2;
         let (a, b) = (&d[..h], &d[h..]);
         let ma = a.iter().sum::<f64>() / a.len() as f64;
@@ -77,8 +93,26 @@ fn main() {
 
     println!("\n--- paired sign test, Learning against each control ---");
     let learning = &results[0].1;
-    for (cond, d) in &results[1..] {
+    for (cond, d, _) in &results[1..] {
         let t = sign_test(learning, d);
+        println!("  Learning vs {cond:?}: {}/{} episodes better, p = {:.4}", t.k, t.n, t.p_value);
+    }
+
+    println!("\n--- the same, normalised by spike count (cm per million spikes) ---");
+    // Print the normalised means too. An identical sign-test result before and
+    // after normalising is the expected outcome when the distance gap dominates
+    // the activity gap, but it is also what a normalisation that silently did
+    // nothing would produce, so show the numbers rather than trusting the test.
+    for (cond, d, ps) in &results {
+        let md = d.iter().sum::<f64>() / d.len() as f64;
+        let mp = ps.iter().sum::<f64>() / ps.len() as f64;
+        let sp: f64 = d.len() as f64;
+        let _ = sp;
+        println!("    {cond:?}: raw mean {md:+.5} cm, per-Mspike mean {mp:+.5} cm");
+    }
+    let learning_ps = &results[0].2;
+    for (cond, _, ps) in &results[1..] {
+        let t = sign_test(learning_ps, ps);
         println!("  Learning vs {cond:?}: {}/{} episodes better, p = {:.4}", t.k, t.n, t.p_value);
     }
 

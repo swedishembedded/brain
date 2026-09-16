@@ -231,6 +231,36 @@ fn a_restored_snapshot_replays_bit_for_bit() {
 }
 
 #[test]
+fn a_shuffled_graph_keeps_its_in_degrees_and_weights_but_loses_its_structure() {
+    let csc = random_csc(400, 20, 0xD1CE);
+    let shuffled = csc.shuffled_sources(0x5EED);
+
+    // The properties the structural control depends on: same shape, same
+    // in-degree per neuron, same multiset of weights. A "shuffle" that changed
+    // any of these would be testing something other than structure.
+    assert_eq!(shuffled.n, csc.n);
+    assert_eq!(shuffled.nnz(), csc.nnz());
+    assert_eq!(shuffled.indptr, csc.indptr, "in-degree must be preserved exactly");
+    assert_eq!(shuffled.w, csc.w, "weights stay with their postsynaptic slot");
+    assert_eq!(shuffled.in_degrees(), csc.in_degrees());
+    shuffled.validate().expect("a shuffled graph is still a valid graph");
+
+    // And it must actually be shuffled. A no-op shuffle would pass every
+    // assertion above and silently make the control identical to the test.
+    let moved = csc.pre.iter().zip(&shuffled.pre).filter(|(a, b)| a != b).count();
+    assert!(
+        moved > csc.nnz() / 2,
+        "only {moved} of {} sources moved; this is not a shuffle",
+        csc.nnz()
+    );
+
+    // Deterministic: the same seed reproduces the same graph, or a shuffled
+    // condition could not be replayed.
+    assert_eq!(csc.shuffled_sources(0x5EED).pre, shuffled.pre);
+    assert_ne!(csc.shuffled_sources(0x1234).pre, shuffled.pre, "different seeds must differ");
+}
+
+#[test]
 fn a_malformed_connectome_is_refused_rather_than_silently_misread() {
     // A short indptr does not fail a kernel: it reads another neuron's edge
     // range and produces a plausible number. This is the only layer that can

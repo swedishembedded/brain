@@ -150,7 +150,10 @@ impl Fly {
     ///
     /// `weight_scale` converts raw synapse counts to membrane current; see
     /// [`connectome::Connectome::signed_csc`] for why it is the caller's dial
-    /// and not something this crate can pick.
+    /// and not something this crate can pick. `shuffle_seed` replaces the real
+    /// wiring with a degree-matched shuffle of it, which is the structural
+    /// control: if a creature does as well on that, the connectome was not
+    /// what mattered.
     pub fn new(
         gpu: Gpu,
         c: &Connectome,
@@ -159,6 +162,9 @@ impl Fly {
         // `weight_scale`: raw synapse count to membrane current. See
         // `Connectome::signed_csc`; nothing here fits it.
         weight_scale: f32,
+        // `shuffle_seed`: `Some` runs the structural control on a
+        // degree-matched shuffle of this connectome instead of the real one.
+        shuffle_seed: Option<u64>,
         timing: Timing,
         coupling: Coupling,
     ) -> Result<Fly, String> {
@@ -176,7 +182,15 @@ impl Fly {
         // Signed and scaled: `Connectome::csc` carries raw synapse counts,
         // which are unsigned, and a network in which every synapse excites has
         // no inhibition and saturates on the first tick.
-        let net = SpikingNet::new(gpu, &c.signed_csc(weight_scale), lif)?;
+        let mut graph = c.signed_csc(weight_scale);
+        if let Some(seed) = shuffle_seed {
+            // The structural control: same in-degrees, same weights, sources
+            // randomly reassigned. Applied AFTER signing so the sign
+            // distribution is identical too - shuffling first would also
+            // shuffle which neurons are inhibitory and confound two variables.
+            graph = graph.shuffled_sources(seed);
+        }
+        let net = SpikingNet::new(gpu, &graph, lif)?;
         let n = c.neurons.len();
         let n_desc = descending.len();
         Ok(Fly {

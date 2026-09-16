@@ -66,6 +66,27 @@ pub enum Condition {
     /// only the correlation with behaviour is destroyed. This is the control
     /// that separates learning from potentiation.
     ShuffledReward,
+    /// Plasticity on and reward delivered correctly, but the WIRING is a
+    /// degree-matched shuffle of the connectome. The structural control: if
+    /// this does as well, the published wiring was not what mattered.
+    ///
+    /// Selected when the fly is built, not here - the graph is fixed at
+    /// construction - so this variant exists to label the condition rather
+    /// than to change what `episode` does.
+    ShuffledConnectome,
+}
+
+impl Condition {
+    /// Whether weights may move under this condition.
+    pub fn plastic(self) -> bool {
+        self != Condition::Frozen
+    }
+
+    /// Whether the modulator this condition delivers is the one that was
+    /// earned.
+    pub fn reward_is_honest(self) -> bool {
+        matches!(self, Condition::Learning | Condition::ShuffledConnectome)
+    }
 }
 
 /// Run one episode and return what it produced.
@@ -76,7 +97,7 @@ pub fn episode(fly: &mut Fly, cfg: RewardConfig, condition: Condition, rng: &mut
     fly.reset();
     let cmd = vec![cfg.command; fly.descending_count()];
     fly.set_descending(&cmd)?;
-    fly.set_plasticity(condition != Condition::Frozen);
+    fly.set_plasticity(condition.plastic());
 
     let start = fly.qpos();
     let mut baseline = 0.0f64;
@@ -99,7 +120,7 @@ pub fn episode(fly: &mut Fly, cfg: RewardConfig, condition: Condition, rng: &mut
         deltas.push(delta);
 
         match condition {
-            Condition::Learning => fly.modulate(delta),
+            Condition::Learning | Condition::ShuffledConnectome => fly.modulate(delta),
             // Deliver a modulator drawn from what this episode has already
             // produced, at a time unrelated to what just happened.
             Condition::ShuffledReward => {
