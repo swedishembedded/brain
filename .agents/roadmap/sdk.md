@@ -1,5 +1,13 @@
 # sdk - roadmap
 
+The rules this crate (and every future pipeline/CLI/Python surface) is held to
+are `.agents/rules/sdk-design.md`. Several "not yet done" items below are that
+document's own review checklist failing today, tracked here rather than
+re-stated there: no `TextPipeline`/`EmbeddingPipeline`/`AutoPipeline` (rule 2),
+the CLI building its own `flux2::Pipeline`/`HotPipeline` instead of calling
+`ImagePipeline` (rule 10), and `brain-py` driving a subprocess instead of a
+direct binding (rule 10).
+
 crates/sdk (package `brain`, the deliberate sole exception to this workspace's
 `brain-<short>` naming convention) is brain's public embeddable SDK facade:
 `ImagePipeline` resolves a local model store through `crates/loader`'s

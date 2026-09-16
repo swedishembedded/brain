@@ -6,6 +6,12 @@ This is the checklist every new model must satisfy *in the same change that adds
 and the rule is mirrored as an invariant in `AGENTS.md` (Conventions & invariants →
 "Every new model ships the full serving contract"). Keep the two in sync.
 
+This is the CLI/D-Bus/scheduler half of "done." The embeddable-library half -
+whether a caller can reach the capability through `crates/sdk` with no CLI process
+in the loop, at the progressive-disclosure bar a public API is held to - is
+`.agents/rules/sdk-design.md`. A model needs both; satisfying one is not a
+substitute for the other.
+
 The point is uniformity: one capability interface, one scheduler, one transport. A
 model that bolts on its own subcommand, its own thread pool, or its own socket is a
 maintenance island and a benchmark blind spot (`brain perf` measures anything behind

@@ -1006,6 +1006,7 @@ front-end to depend on.
 | Clippy gate (exit code + a warning ratchet) | `make clippy`, `scripts/gates/clippy-gate.sh` - clippy ABORTS on a denied lint and then reports nothing, so always check the exit code |
 | **Standalone sample APPLICATIONS** (`make samples/<path>/{build,run}`) - Zephyr-style demos that link the public `brain` SDK the way a product would, as opposed to `examples/`'s off-process client scripts | `samples/README.md` (the contract: SDK-only dependency, each sample NAMES the SDK surfaces it uses, why they are workspace members but never `default-members`, and why a sample is built with `-p <sample>` alone), `scripts/gates/check-samples.sh` (`make check/samples`, which MEASURES that a sample's dependency closure contains nothing from a surface it did not enable) |
 | **The SDK's feature vocabulary** (what a consumer may name, and what it costs) | `crates/sdk/Cargo.toml`'s `[features]` - surfaces are `brain_arch::Domain` names, `device`/`resolve` are tiers a surface selects; `scripts/gates/check-sdk-features.sh` (`make check/sdk-features`) pins the vocabulary, compiles every surface alone, and keeps `crates/catalog` un-featurized. Per-family importers live behind `brain-loader`'s `import-*` features (`brain-cli` takes `import-all`); that split is what takes the SDK's closure from 69 brain crates to 38 |
+| **Public API / SDK design** (progressive disclosure, `from_pretrained`, one pipeline type per task, domain objects, CLI-must-call-the-SDK) | **`.agents/rules/sdk-design.md`** - read BEFORE adding or changing a public type in `crates/sdk`, a CLI subcommand, or `brain-py`; pairs with `.agents/rules/serving-contract.md` (that one is the D-Bus/scheduler half, this one the library half). `crates/sdk`, `.agents/roadmap/sdk.md` |
 | CLI subcommands | `crates/cli/src/{main,args,*_cli}.rs` |
 | **Fetch a model's weights** (`brain pull <id\|url>`), and where models live on disk | `crates/cli/src/pull_cli.rs` (the verb + both progress modes), `brain_modelstore::refurl` (what a user may type), `brain_modelstore::default_root` (the ONE answer to "where do models live"; `--brain-data-dir` publishes into it), `crate::supply::execute_plan` (the shared plan/execute/finish core auto-fetch uses too); `docs/using/cli.md` |
 | **Progress while weights move** (auto-fetch downloads; per-file load lines during a model command) | `crate::supply::execute_plan_reported` (auto-fetch renders through pull's `Reporter`, on stderr), `crates/checkpoint/src/load_progress.rs` (byte-level events from the mmap readers), `crates/cli/src/load_line.rs` (the `<arch> load <file> N%` line `dispatch_arch` installs); `docs/using/cli.md#progress` |
@@ -1786,6 +1787,17 @@ a metric that isn't there was simply forgotten.
      this bullet in sync.
   A model that trains and passes parity but cannot be discovered, scheduled, batched,
   and driven over D-Bus is **incomplete**.
+- **A capability is not done until it is also usable as a library, at the SDK's own
+  bar - the embeddable-library half of "done."** The full ruleset is
+  `.agents/rules/sdk-design.md` (progressive disclosure, `from_pretrained`, domain
+  objects, one implementation shared by CLI/D-Bus/Python/SDK); keep it and this
+  bullet in sync, the same way the serving-contract bullet above is. In short: one
+  obvious high-level pipeline type per task, ready to use the moment
+  `from_pretrained` returns, returning a domain object with an obvious way to save
+  it - and the CLI/D-Bus/Python surfaces call that SAME code rather than
+  re-deriving it (a real, tracked violation of this exists today: `crates/cli/src/
+  flux2_cli.rs` builds its own `flux2::Pipeline` instead of going through
+  `crates/sdk::ImagePipeline` - see `.agents/roadmap/sdk.md`).
 
   **Imaging/conditioning workstream status, so nobody has to infer it:** the
   contract is met for **`sam2`, `scrfd`, `arcface`, `vqgan`, `codeformer`,
