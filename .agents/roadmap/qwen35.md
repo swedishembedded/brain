@@ -2248,6 +2248,165 @@ same file proves the scaling actually does something: a `factor = 3.0`,
 past position 6, and a full decode run under real scaling never panics or
 produces a non-finite hidden state.
 
+### M28 (DONE): the DFlash2 block-diffusion drafter, ported and measured - the first drafter on this stack that is a net win on free-form text
+
+Speculative decoding landed with two synthetic drafters: an oracle fed the
+answer (a ceiling, not a drafter) and a model-free n-gram suffix matcher (a
+real drafter, and a measured 0.67x LOSS on free-form prose). Whether a real
+draft MODEL was worth porting was an open empirical question. This milestone
+answers it with a real port of
+[`incoai/Qwen3.8-27B-DFlash2`](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2)
+(`crates/qwen35/src/dflash2.rs`, 1.9B, Q8_0) wired through the existing
+`Qwen35GgufInstance::generate_speculative` with its contract untouched.
+
+**Measured, 2x Tesla P40, both checkpoints Q8_0 served INT8, greedy, one load
+per test** (`crates/qwen35/tests/dflash2_real.rs`):
+
+| drafter | free-form tok/s | vs plain | acc/round | repetition tok/s | vs plain | acc/round |
+|---|---:|---:|---:|---:|---:|---:|
+| plain decode | 6.60 | 1.00x | - | 5.73 | 1.00x | - |
+| chunk tape, no spec | 3.65 | 0.55x | - | 3.16 | 0.55x | - |
+| n-gram, k=7 | 4.45 | 0.67x | 0.57 | 9.04 | 1.58x | 5.12 |
+| **DFlash2, k=3** | **7.10** | **1.08x** | 2.30 | 7.44 | 1.30x | 3.00 |
+| DFlash2, k=5 | 6.73 | 1.02x | 3.12 | 7.37 | 1.29x | 4.44 |
+| DFlash2, k=7 | 5.70 | 0.86x | 3.12 | **8.22** | **1.44x** | 6.00 |
+
+DFlash2 out-drafts the model-free baseline by 4x on free-form text (2.30
+accepted per round against 0.57) and still beats it on n-gram's own best
+workload (6.00 against 5.12) - but only converts that into 1.08x / 1.44x of
+wall clock, for a reason that is a property of THIS stack and not of the
+drafter. A draft round costs 48 ms (44 ms device, 4 ms selector) against a
+152 ms target decode step, so the drafter itself is ~30% overhead at worst;
+what actually caps the win is the `chunk tape, no spec` row. Every
+speculative round verifies through the chunk tape, and a chunk forward here
+costs **~2.4 plain decode steps almost regardless of its row count** - the
+per-call overhead (a host-staged residual per pipeline stage, a
+`poll_wait`/`flush` per layer) dominates, so an 8-row verify is not 8 rows
+for the price of one. The break-even M27-era analysis quoted, 2.0 accepted
+per round, is the figure for a round costing ONE target forward; the measured
+cost is ~2.4 forwards for an all-accepted round and ~4.8 for a rejecting one,
+putting the real break-even near 5 accepted per round at `k = 7`. That is also
+why the tests SWEEP `k` rather than fixing it at 7: `k = 3` rejects less often
+and wins on free-form, `k = 7` accepts nearly everything and wins on
+repetition.
+
+**Architecture: verified, not assumed.** Every claim carried into this work
+was re-derived from the checkpoint, and two were wrong or incomplete:
+
+* **RoPE is FULL, not partial** - the open question from the prior
+  investigation. The target rotates `rope.dimension_count = 64` of its 256
+  head channels, so "partial" is the natural assumption to carry over; the
+  draft's own `config.json` says `rope_type: "default"` with no partial
+  factor, and its GGUF says `rope.dimension_sections = [64, 0, 0, 0]`, which
+  sums to `head_dim / 2` - the mrope spelling of a FULL rotation with every
+  section on the text axis. It uses `kernels::ROPE2D`, which the target does
+  not register at all.
+* **`dflash.target_layers = [6, 20, 34, 48, 62]` is NOT the layer list** - it
+  is that list plus one, because the reference indexes the HF `hidden_states`
+  TUPLE, whose entry 0 is the embedding output. The layers to tap are
+  `[5, 19, 33, 47, 61]`, which the published `config.json`'s
+  `target_layer_ids` confirms.
+* Confirmed as claimed: 5 blocks, non-causal sliding-window(2048) GQA 32/8 x
+  128, `fc` `[5120, 25600]` consuming five concatenated 5120-wide target
+  residuals with `enc.output_norm` applied AFTER `fc`, the rank-256 top-16
+  three-way-Hadamard selector with a greedy (not Viterbi) left-to-right walk,
+  `mask_token_id = 248070`, and no embedding or head of its own.
+* Newly pinned: the norms are PLAIN `x * w`, not the target GGUF's
+  pre-folded `(1 + w)`; `*_conv_base` is `[2, taps, 5120]` with index 0 the
+  convolution entering the sublayer and index 1 the one leaving it, tap 0 the
+  current token (initialized to ~1.0) and tap 1 the previous (~0.0); the
+  dynamic taps are the SECOND half of the same `[5120 -> 1280]` projection
+  whose first half feeds the entering convolution.
+
+**How that was established** (four independent steps, each ruling out a
+different class of error):
+
+1. Every one of the GGUF's tensors compared ELEMENTWISE against the original
+   bf16 safetensors release - 21 leaves including all six selector/`fc`/norm
+   endpoints, correlation > 0.9999 with no transposition or reordering
+   anywhere. This is what pins the layout questions the checkpoint's own
+   statistics could only suggest.
+2. A dependency-light host reference, `tools/goldens/dflash2_reference_forward.py`,
+   re-implementing the published `dflash/model.py` over the same bytes.
+3. That reference, run with `--safetensors` on the ORIGINAL bf16 weights,
+   reproduces the AUTHORS' OWN `DFlash2DraftModel` under `transformers`
+   exactly - same 7 proposed ids, hidden states agreeing to 7 significant
+   figures. This is what rules out a self-consistent misreading.
+4. The device port at the fp32 weight tier reproduces the host reference over
+   the Q8_0 file exactly: same 7 proposed ids, and a pre-final-norm hidden
+   state agreeing to 6 significant figures (RMS 1089.6268 against
+   1089.6241). Gated by `one_draft_block_matches_the_host_reference`.
+
+Step 4 is deliberately run at fp32 and not at the INT8 serving tier, because
+**the INT8 tier moves the answer and the amount is worth recording.** The
+hidden states barely move (1.37% on RMS) - but the selector is a GREEDY
+left-to-right walk, so one flipped near-tie changes the predecessor every
+later position is scored against. On the gated prompt the reference's own
+margin between the top two candidates at position 1 is 0.0086 on scores of
+order 23, i.e. a coin flip, and the two tiers take opposite sides of it and
+then agree on nothing after position 0: `" Paris, and the capital of Paris"`
+against `" Paris.\n</think>\n\n** of"`. (The irony worth recording: on this
+prompt the INT8 tier lands on the ORIGINAL bf16 checkpoint's path and the
+fp32 device tier lands on the Q8_0 file's - the tie is that close.) No
+acceptance-rate cost was isolated for this at the scale measured; it is a
+real mechanism for one, and the place to look first if acceptance ever
+disappoints.
+
+**What was built.** `crates/qwen35/src/dflash2.rs` (config from `dflash.*`
+metadata cross-checked against tensor shapes, INT8/fp32 weight tiers, the
+context K/V projection, the denoising block forward, the selector, and the
+`FnMut(&[u32], u32) -> Vec<u32>` drafter); one new kernel,
+`kernels::DYN_GROUP_CONV1D`, because nothing in the tree had a
+data-dependent conv weight (`causal_conv1d_step.wgsl` indexes its weight by
+channel alone) and broadcasting one per token would have cost more than the
+convolution; and two seams on the target: `Qwen35::set_hidden_taps` /
+`take_hidden_taps` (the post-MLP residual of named layers, copied out of the
+chunk tape's per-layer loop at the point the existing `QWEN35_DEBUG_LAYER_RMS`
+dump already proves is safe to read) and
+`Qwen35GgufInstance::{enable_hidden_taps, target_hidden, embed_rows_of,
+logits_with_norm, stage_gpu}`.
+
+Two reuse decisions worth recording because they are what kept this small:
+
+* **The non-causal attention needed no new kernel.** The paged-attention
+  triad `model::block::gqa_chunk_step` dispatches takes `seq_lens` as a
+  per-query-row live-key COUNT, and its causality is entirely that count's
+  value. Passing a UNIFORM `pos + n` instead of the documented `start + i + 1`
+  makes every block row see every other - exactly `dflash.attention.causal =
+  false`. The triad is dispatched directly rather than through
+  `gqa_chunk_step`, whose doc states the causal contract, so the deviation is
+  visible at the call site.
+* **No second `lm_head`.** The draft has none of its own and the target's is
+  1.42 GB of INT8 on the last card; `logits_with_norm` projects a foreign
+  model's hidden states through it with the DRAFT's `output_norm` substituted
+  for the target's final norm - which is exactly the composition
+  `DFlashDraftModel.forward` + `compute_logits` performs, so it is not a
+  trick, it is the architecture.
+
+**PARTIAL / not done:**
+
+* **Sliding window is asserted, not applied.** The draft's window is 2048 and
+  the triad above counts live keys from key 0, so a context past 2048 would
+  need a per-row lower bound the kernel has no parameter for.
+  `Dflash2::attend` asserts rather than silently attending outside the
+  window. Fixing it needs either a windowed variant of the paged triad or a
+  rebased K/V view; neither was needed at the 1024-token capacity measured.
+* **The drafter is single-sequence.** `generate_speculative` is too, so this
+  matches, but `generate_batch` has no speculative form and this drafter has
+  no batched one.
+* **Sampled (temperature > 0) speculation is still unavailable**, unchanged
+  from M27's position: the lossless correction needs the drafter's own
+  per-token distribution and the closure contract returns ids. DFlash2's
+  reference supplies exactly that distribution (`propose` returns
+  `(tokens, indices, probs)`), so this is now a closure-contract limitation
+  rather than a missing capability - widening it is the obvious next step.
+* **The chunk-tape floor is the binding constraint and was not touched.** At
+  0.55x it is where the remaining 2x lives: a verify round that cost one
+  decode step instead of ~2.4 would put DFlash2's measured acceptance at
+  roughly 1.8-2.3x rather than 1.08-1.44x. That is the same floor
+  `generate_speculative`'s own doc records and defers, and it is a property of
+  the target's chunk tape, not of anything in this milestone.
+
 ## Not yet done
 
 

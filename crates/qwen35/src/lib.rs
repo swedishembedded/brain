@@ -16,6 +16,7 @@
 
 pub mod caps;
 pub mod config;
+pub mod dflash2;
 pub mod finetune;
 pub mod gguf_import;
 pub mod import;

@@ -950,6 +950,8 @@ front-end to depend on.
 | Qwen3.5-35B-A3B serving (`caps.rs`, resident, D-Bus/HTTP) | `crates/qwen35moe/src/{caps,serve}.rs`, `crates/cli/src/{qwen35moe_cli,resident_qwen35moe}.rs`, `examples/llm/` |
 | Qwen3.8-27B dense model / import / LoRA / finetune / sharding / MTP / vision splice | `crates/qwen35/src/{model,import,finetune,shard,vl}.rs`, `model::gdn` (shared Gated DeltaNet kernels), `.agents/roadmap/qwen35.md` |
 | Qwen3.8-27B serving (`caps.rs`, resident, D-Bus/HTTP) | `crates/qwen35/src/{caps,serve}.rs`, `crates/cli/src/{qwen35_cli,resident_qwen35}.rs` |
+| Qwen3.8-27B **speculative decoding** - the verify/accept-reject loop and its recurrent-state rollback | `crates/qwen35/src/int8_gguf_resident.rs` (`generate_speculative`), `crates/qwen35/src/model.rs` (`gdn_snapshot_xfer`), `crates/qwen35/tests/{spec_decode,gguf_resident_spec_real}.rs` |
+| Qwen3.8-27B **DFlash2 draft model** - block-diffusion drafter (non-causal GQA, per-token dynamic conv, rank-256 candidate selector), reusing the target's embedding, head and per-layer hidden taps | `crates/qwen35/src/dflash2.rs`, `kernels::DYN_GROUP_CONV1D`, host reference `tools/goldens/dflash2_reference_forward.py`, `crates/qwen35/tests/dflash2_real.rs`, `.agents/roadmap/qwen35.md` M28 |
 | Model residency / job scheduling | `crates/residency/src/{manager,scheduler,executor,budget,lru,place}.rs` |
 | Capability manifests + generic dispatch (`brain caps` / `brain <arch> <verb>`) | `crates/capability/src/lib.rs`, `crates/cli/src/caps_cli.rs` |
 | Deterministic weight-free mock `Provider` (synthetic image/mask/video/audio/text/bytes, for a `capability::Provider` consumer that must not load real weights) | `crates/capability-mock/src/lib.rs` |
