@@ -1067,6 +1067,17 @@ impl Qwen35GgufInstance {
         &self.shards[stage].qwen35.gpu
     }
 
+    /// Move every stage's scratch-arena threshold - see
+    /// [`Qwen35::set_chunk_arena_min_rows`]. What the cost ladder in
+    /// `tests/gguf_resident_verify_cost_real.rs` sweeps to measure the two
+    /// regimes against each other on the real checkpoint instead of quoting one
+    /// of them from a rebuild.
+    pub fn set_chunk_arena_min_rows(&self, rows: u32) {
+        for s in &self.shards {
+            s.qwen35.set_chunk_arena_min_rows(rows);
+        }
+    }
+
     /// How many cards the plan placed this instance on.
     pub fn stages(&self) -> usize {
         self.shards.len()
@@ -1437,19 +1448,27 @@ impl Qwen35GgufInstance {
     /// and helping ourselves to the target's distribution instead would change
     /// the sampled distribution while looking like it worked.
     ///
-    /// **Known floor, measured.** Every round verifies through the chunk
-    /// path, including a round whose drafter proposed nothing. A one-row
-    /// verify chunk is slower than the one-row decode step it stands in for -
-    /// 3.7 tok/s against 6.6 on the real checkpoint and cards - so a drafter
-    /// that never fires makes this ~0.6x plain decode rather than 1.0x. It is
-    /// left uniform on purpose: routing the `kk == 0` round to
-    /// [`Self::stack_step`] would fix the floor and would also put different
-    /// rounds of one generation on different tapes, which forfeits the one
-    /// exact real-checkpoint equivalence gate this path has
-    /// (`tests/gguf_resident_spec_real.rs`, which holds the tape fixed and
-    /// varies only the speculation). For the drafter this exists to serve -
-    /// one that proposes a full block every round - the two are the same code
-    /// path anyway. Revisit it behind that measurement, not before.
+    /// **The per-round floor, and what it is now.** Every round verifies
+    /// through the chunk path, including a round whose drafter proposed
+    /// nothing, and that is deliberate: routing the `kk == 0` round to
+    /// [`Self::stack_step`] would put different rounds of one generation on
+    /// different tapes and forfeit the one exact real-checkpoint equivalence
+    /// gate this path has (`tests/gguf_resident_spec_real.rs`, which holds the
+    /// tape fixed and varies only the speculation).
+    ///
+    /// That uniformity used to cost ~1.8x: a one-row verify chunk ran at 3.7
+    /// tok/s against the one-row decode step's 6.6, so a drafter that never
+    /// fired made this ~0.55x plain decode rather than ~1.0x, and no drafter
+    /// however good could reach past the ceiling that implied. The cause was
+    /// NOT the round's setup (a re-uploaded M-RoPE table and index buffers, a
+    /// measured 0.1% of the round) but a blocking `poll_wait` at every layer
+    /// boundary, which a 256-row prefill round hides behind its own device
+    /// work and a 1-row verify round cannot. It is now paid only where the
+    /// scratch pool that requires it is open (`model::CHUNK_ARENA_MIN_ROWS`),
+    /// which no verify round reaches. The qwen35 ledger's M29 records the
+    /// profile and the measured before/after;
+    /// `tests/gguf_resident_verify_cost_real.rs` is the gate that keeps it from
+    /// coming back.
     pub fn generate_speculative(
         &self,
         prompt: &[u32],
@@ -1814,6 +1833,168 @@ impl Qwen35GgufInstance {
         let mut rows: Vec<(String, f64, u64)> = merged.into_iter().map(|(n, (ms, c))| (n, ms, c)).collect();
         rows.sort_by(|a, b| b.1.total_cmp(&a.1));
         DecodeProfile { steps, wall_s, timed_wall_s, rows }
+    }
+
+    /// **The CHUNK tape at a chosen row count**, profiled the same way
+    /// [`Self::profile_decode`] profiles the decode tape - and the measurement
+    /// a speculative decoder's per-round floor is read off.
+    ///
+    /// A verify round is structurally a prefill round
+    /// ([`Self::stack_chunk_carry`]), so the cost this reports at `rows = 1..8`
+    /// IS the cost `generate_speculative` pays per round before any draft
+    /// token is accepted, and the cost at `rows = 256` is the one chunked
+    /// prefill was tuned for. Reporting both from one entry point is the point:
+    /// a fixed per-round cost is only visible as the RATIO between them.
+    ///
+    /// The two halves are timed apart because they scale differently and a
+    /// merged figure hides which one moved:
+    /// * `carry_s` - the layer stack over every stage
+    ///   ([`Self::stack_chunk_carry`]), where a per-round fixed cost lives;
+    /// * `head_s` - the `[rows, vocab]` INT8 head projection, which is real
+    ///   work proportional to `rows` and is not a fixed cost at all.
+    ///
+    /// `prompt` establishes a realistic recurrent state and KV depth first, so
+    /// the profiled rounds are steady-state rather than cold. Panics rather
+    /// than truncating if the prompt plus the profiled rounds run past
+    /// capacity.
+    pub fn profile_chunk_round(&self, prompt: &[u32], rows: u32, rounds: u32) -> ChunkRoundProfile {
+        assert!(rows > 0 && rounds > 0, "profile_chunk_round: rows and rounds must be > 0");
+        assert!(!prompt.is_empty(), "profile_chunk_round: needs a non-empty prompt to establish decode state");
+        let need = prompt.len() as u64 + 2 * rows as u64 * rounds as u64;
+        assert!(need <= self.cap as u64, "profile_chunk_round: prompt ({}) + 2*{rounds} rounds of {rows} = {need} exceeds capacity {}", prompt.len(), self.cap);
+
+        self.reset();
+        let (_, mut pos) = self.replay_prompt(prompt, 0).expect("profile_chunk_round warm-up");
+        let last = prompt[prompt.len() - 1];
+        let block: Vec<u32> = vec![last; rows as usize];
+        self.poll_wait();
+
+        let d = self.cfg.d_model as usize;
+        let head = self.shards.last().expect("a plan always has at least one stage");
+        let (mut carry_s, mut head_s) = (0.0f64, 0.0f64);
+        let t0 = std::time::Instant::now();
+        for _ in 0..rounds {
+            let tc = std::time::Instant::now();
+            let (hidden, _) = self.stack_chunk_carry(&block, pos, 0).expect("profile_chunk_round carry");
+            carry_s += tc.elapsed().as_secs_f64();
+            let th = std::time::Instant::now();
+            let flat = crate::stream::head_logits_rows_on(&head.qwen35.gpu, &self.head.ops, &self.cfg, &self.head.norm, &self.head.w, &hidden, rows);
+            head_s += th.elapsed().as_secs_f64();
+            std::hint::black_box(flat.len() + hidden.len() / d);
+            pos += rows;
+        }
+        self.poll_wait();
+        let wall_s = t0.elapsed().as_secs_f64();
+
+        // The kernel table, from a second set of rounds with timestamps armed -
+        // same split of concerns `profile_decode` documents: this RANKS the
+        // kernels, the wall clock above is the cost.
+        let timed = self.shards.iter().all(|s| s.qwen35.gpu.set_kernel_timing(true));
+        for s in &self.shards {
+            s.qwen35.gpu.reset_kernel_times();
+        }
+        for _ in 0..rounds {
+            self.stack_chunk_carry(&block, pos, 0).expect("profile_chunk_round timed region");
+            pos += rows;
+        }
+        self.poll_wait();
+        let mut merged: std::collections::BTreeMap<String, (f64, u64)> = Default::default();
+        if timed {
+            for s in &self.shards {
+                for (name, ms, calls) in s.qwen35.gpu.kernel_times().unwrap_or_default() {
+                    let e = merged.entry(name).or_insert((0.0, 0));
+                    e.0 += ms;
+                    e.1 += calls;
+                }
+            }
+        }
+        for s in &self.shards {
+            s.qwen35.gpu.set_kernel_timing(false);
+        }
+        let mut table: Vec<(String, f64, u64)> = merged.into_iter().map(|(n, (ms, c))| (n, ms, c)).collect();
+        table.sort_by(|a, b| b.1.total_cmp(&a.1));
+        ChunkRoundProfile { rows, rounds, wall_s, carry_s, head_s, table }
+    }
+}
+
+impl Qwen35GgufInstance {
+    /// **What the GDN state snapshot costs**, in ms per round - the second
+    /// structural cost `generate_speculative` pays on every round that proposes
+    /// anything, and one that is easy to over-estimate by reading its BYTE
+    /// count (a `[state + conv history]` copy per recurrent layer, hundreds of
+    /// MB across both cards) rather than measuring it.
+    ///
+    /// It has to be measured with an explicit drain, not by timing the call:
+    /// `Qwen35::gdn_snapshot_xfer` only RECORDS its `region_copy` dispatches
+    /// (this backend's `submit` appends to a pending list), so a wall clock
+    /// around it reads near zero and says nothing about the device time it
+    /// adds to the round it is part of. `reps` snapshots are recorded and
+    /// drained together, so the figure is the device cost amortized the way a
+    /// real round's is - never a per-call fence latency.
+    pub fn profile_gdn_snapshot(&self, reps: u32) -> f64 {
+        assert!(reps > 0, "profile_gdn_snapshot: reps must be > 0");
+        let snaps: Vec<_> = self.shards.iter().map(|s| s.qwen35.new_gdn_snapshot()).collect();
+        // Warm-up: the first copy of each shape compiles its pipeline.
+        for (s, snap) in self.shards.iter().zip(&snaps) {
+            s.qwen35.gdn_snapshot_xfer(&s.caches.view(0), snap, true);
+        }
+        self.poll_wait();
+
+        let t = std::time::Instant::now();
+        for _ in 0..reps {
+            for (s, snap) in self.shards.iter().zip(&snaps) {
+                s.qwen35.gdn_snapshot_xfer(&s.caches.view(0), snap, true);
+            }
+        }
+        self.poll_wait();
+        t.elapsed().as_secs_f64() * 1e3 / reps as f64
+    }
+}
+
+/// What [`Qwen35GgufInstance::profile_chunk_round`] measured.
+#[derive(Clone, Debug)]
+pub struct ChunkRoundProfile {
+    /// Rows in each profiled round.
+    pub rows: u32,
+    /// Rounds in each measured region.
+    pub rounds: u32,
+    /// Wall seconds for `rounds` whole rounds (layer stack + head).
+    pub wall_s: f64,
+    /// Of `wall_s`, the layer stack's share - where a per-round fixed cost lives.
+    pub carry_s: f64,
+    /// Of `wall_s`, the `[rows, vocab]` head projection's share.
+    pub head_s: f64,
+    /// `(kernel, device ms, calls)` over every stage for the LAYER half,
+    /// descending by time. Empty when the backend cannot time kernels.
+    pub table: Vec<(String, f64, u64)>,
+}
+
+impl ChunkRoundProfile {
+    /// Milliseconds per whole round.
+    pub fn round_ms(&self) -> f64 {
+        self.wall_s * 1e3 / self.rounds as f64
+    }
+
+    /// Milliseconds per round spent in the layer stack.
+    pub fn carry_ms(&self) -> f64 {
+        self.carry_s * 1e3 / self.rounds as f64
+    }
+
+    /// Milliseconds per round spent in the head projection.
+    pub fn head_ms(&self) -> f64 {
+        self.head_s * 1e3 / self.rounds as f64
+    }
+
+    /// Milliseconds of layer-stack cost per ROW - the number that exposes a
+    /// fixed per-round cost, because real work is flat in it and a fixed cost
+    /// is not.
+    pub fn carry_ms_per_row(&self) -> f64 {
+        self.carry_ms() / self.rows as f64
+    }
+
+    /// Summed device time across the layer-half table, in ms.
+    pub fn device_ms(&self) -> f64 {
+        self.table.iter().map(|(_, ms, _)| ms).sum()
     }
 }
 

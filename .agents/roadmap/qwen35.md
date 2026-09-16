@@ -2407,6 +2407,227 @@ Two reuse decisions worth recording because they are what kept this small:
   `generate_speculative`'s own doc records and defers, and it is a property of
   the target's chunk tape, not of anything in this milestone.
 
+### M29 (DONE): the chunk-tape per-round floor, profiled and removed - a verify round stops paying a 256-token prefill's drain schedule
+
+M28 closed with the honest statement that the binding constraint on
+speculative decoding was not the drafter but the tape it verifies on: a chunk
+forward cost "~2.4 plain decode steps almost regardless of its row count", so
+even a PERFECT drafter topped out at 2.6x and DFlash2 at `k = 7` on free-form
+text was a measured LOSS (0.86x). This milestone profiles that cost, finds it,
+removes it, and re-measures the whole ladder.
+
+**The control that isolates it.** A verify round with ZERO drafted tokens is
+the speculative loop with the speculation taken out: one row in, one token
+committed, no proposals, no rejections, no rollback. It ran at **3.7 tok/s
+against plain single-token decode's 6.6 on the same checkpoint and cards** -
+a 1.8x penalty for using the verify path at all, before any drafting. Nothing
+a drafter does can recover it.
+
+**Profile first, and the obvious hypothesis was wrong.**
+`Qwen35::run_prefill_chunk_stage` is shared by prefill and verify, and it
+rebuilds a host-computed M-RoPE table and re-uploads four index buffers every
+round. That looked like the fixed cost. It is not. Phase-timed on the real 27B
+across two P40s, one 1-row round on the 34-layer stage:
+
+| phase | ms | share |
+|---|---:|---:|
+| per-round setup (M-RoPE recompute + 4 host→device writes) | 0.15 | **0.1%** |
+| host recording of all dispatches | 50.4 | 39% |
+| **blocking `poll_wait`, once per layer** | **82.0** | **61%** |
+| `flush` | 0.02 | 0.0% |
+
+against the DECODE tape's own per-layer discipline at one row, which drains
+nothing and flushes only (26 ms recording + 20 ms submit = 46 ms for the same
+34 layers). The cost is the fence, and specifically the OVERLAP it destroys:
+`run_decode_batch` records layer `l+1` on the host while the card runs layer
+`l`; `run_prefill_chunk_stage` blocked at every layer boundary, so the two
+costs added instead of overlapping.
+
+That fence is not arbitrary. It is the drain `gpu_core::scratch::Arena`'s
+contract requires, wired in by kernel-performance M6.10 - whose own entry
+already measured and reported a ~3.2x regression at a small chunk size and set
+it aside because production prefill is 256 rows. What that entry could not see
+is that prefill is not the only caller of the function.
+
+**The fix**: pay the drain where the pool it serves is open, and nowhere else
+(`model::CHUNK_ARENA_MIN_ROWS`, 16 rows). Below the threshold no arena scope is
+opened, so `Gpu::storage` allocates exactly as it does everywhere else, nothing
+is ever recycled, and the drain is not owed - this is the absence of the
+condition the drain exists for, not a relaxed argument about it. The
+small-round path becomes structurally the decode tape's: record a layer,
+`flush`, keep going.
+
+**Measured, layer-stack ms per round, pooled against unpooled**, one load, both
+regimes back to back at every row count (real 27B, 2x P40,
+`tests/gguf_resident_verify_cost_real::the_verify_round_cost_ladder`, which
+re-derives this whole table on demand):
+
+| rows | 1 | 3 | 7 | 8 | 16 | 32 | 64 | 128 | 256 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| pooled (drains per layer) | 249.1 | 315.7 | 457.8 | 373.3 | 949.0 | 1042.7 | 1193.1 | 1443.8 | 2582.1 |
+| unpooled (flush only) | 148.3 | 189.6 | 318.4 | 274.8 | 863.6 | 950.7 | 1149.0 | 1497.5 | 2806.5 |
+| pooled/unpooled | **1.68** | **1.66** | **1.44** | **1.36** | 1.10 | 1.10 | 1.04 | 0.96 | 0.92 |
+
+A clean monotone crossover: the fence costs 1.4-1.7x at exactly the row counts
+a verify round uses (`k + 1`, so 2-8), and EARNS 1.09x by 256, which is what
+M6.10 measured it for. The threshold is placed at 16 rather than at the
+measured crossover (between 64 and 128) because anywhere in 16..=64 is inside
+the noise on a range no production caller runs - a verify round is `k + 1`, a
+prompt round is `MAX_PREFILL_TOKENS`, and only a ragged final prefill chunk
+lands between - and 16 is the end of that window that keeps MORE rounds on the
+pool, the pool being what bounds allocation churn.
+
+Re-measured through the SHIPPED threshold (16) rather than the sweep, on a
+separate run, against the same instance's own decode rate:
+
+| | before | after |
+|---|---:|---:|
+| 1-row round, layer + head, vs one decode step | 1.93x | **1.13x** |
+| 1-row round's layer cost vs one row of a 256-row round | 24.7x | **15.1x** |
+| 256-row prefill round, layer stack | 2542.9 ms | 2539.3 ms |
+
+The last row is the one that says the fix is CONFINED: production prefill is
+unchanged inside 0.15%, because at 256 rows the round is still pooled and still
+drains every layer. Nothing above the threshold moved, which is the point of
+making this a threshold instead of deleting the drain.
+
+**A second obligation, found by breaking it.** An unpooled round owes no drain
+for ALIASING, but it still drops each layer's temporaries as it takes the
+next's, and `backend_wgpu::WgpuBackend::track` refuses the next allocation once
+more than the device's own ceiling is dropped-but-unreclaimed. A 128-row
+unpooled round crosses a P40's 4.29 GB ceiling partway through its 34 layers -
+found by running it (the ladder above panicked at that row before this existed,
+and completes at 1497.5 ms with it), not by reasoning about it. So the unpooled
+path drains on BYTES (`Gpu::pending_reclaim_bytes` against a new `Gpu::reclaim_ceiling_bytes`,
+which resolves the same override the backend's own check does), which costs a
+1-8 row round nothing and merely bounds a round that would otherwise have been
+fatal. Gated by `tests/chunk_round_reclaim.rs`, which crosses the real ceiling
+at kilobyte scale in a child process under `BRAIN_GPU_RECLAIM_CEILING` -
+mutation-verified: deleting the byte check makes that child die with "dropped
+without an intervening poll_wait()".
+
+**The other suspected cost, measured rather than assumed.** Every round that
+proposes anything snapshots the GDN recurrent state before verifying, because
+whether a restore is needed is only known afterwards - a `region_copy` per
+recurrent layer across both cards. Read by its byte count this looks
+significant. Measured (`Qwen35GgufInstance::profile_gdn_snapshot`, which drains
+explicitly, because the transfer only RECORDS its dispatches and a wall clock
+around the call reads ~0 and would have "proved" it free): **3.29 ms per
+round**, against a ~155 ms round - 2%. It was correctly not the place to spend
+effort, and now that is a measurement rather than a hunch.
+
+**Correctness, and what had to grow to keep it.** The fix creates a second
+scratch regime, and the equivalence gates that own this function
+(`tests/chunked_prefill.rs`, `model::tests::two_shard_chunked_prefill_matches_
+token_by_token_replay`) all run at `tiny()` dims, far below any useful
+threshold - so left alone they would have gated only the unpooled side and the
+pooled side (every real 256-row prefill round) would have been gated by
+nothing. `Qwen35::set_chunk_arena_min_rows` exists for that and is documented
+as existing for that: both files now assert the same claim in both regimes,
+separately, because `gpu_core::scratch`'s own doc warns that a recycled buffer
+holds whatever the previous scope left in it and a kernel that reads a slot it
+does not fully write agrees on one path and not the other. All green, plus the
+new reclaim-ceiling gate.
+
+**A real bug found on the way, unrelated to performance.**
+`Qwen35Config::yarn_scaling`'s doc claimed to be "the one place both of this
+model's `mrope_tables` call sites (prefill and single-step decode) derive
+this, so they cannot drift from each other". There are THREE call sites:
+M27 wired YaRN into `run_forward` and `run_decode_batch` and missed
+`run_prefill_chunk_stage`, the tape every chunked prompt replay and every
+verify round runs on. A YaRN-configured checkpoint therefore wrote its
+chunk-prefilled K/V at one rotation and read it back with queries at another -
+silent long-context degradation, no panic, no NaN, and invisible to every
+existing gate (it needs YaRN on AND a round boundary AND a position past
+`original_max_position_embeddings`). Fixed, and gated by a new
+`yarn_scaled_chunked_prefill_matches_token_by_token_replay`, verified RED
+first at maxabs 5.86e-4 against a 1e-5 bound. It does not affect the GGUF path
+today (`gguf_import.rs` sets `rope_scaling: None` unconditionally, M27's own
+recorded gap), which is exactly why it survived.
+
+**End to end, the whole ladder re-run on the real checkpoints.** Same tests,
+same prompts, same drafters, one load each; only the drain changed
+(`tests/gguf_resident_spec_real.rs`, free-form prompt, greedy, plain decode
+6.70 tok/s):
+
+| drafter | before | after | vs plain | accepted/round |
+|---|---:|---:|---:|---:|
+| none - the chunk-tape floor | 3.7 | **6.18** | 0.55x -> **0.92x** | - |
+| n-gram, k=7 | 4.4 | **6.79** | 0.67x -> **1.01x** | 0.57 |
+| oracle, k=3 | 12.2 | **18.10** | 1.9x -> **2.70x** | 3.00 |
+| oracle, k=7 | 17.0 | **21.73** | 2.6x -> **3.24x** | 7.00 |
+
+and on the repetition workload (90-token prompt, plain decode 5.71 tok/s):
+
+| drafter | before | after | vs plain | accepted/round |
+|---|---:|---:|---:|---:|
+| none - the chunk-tape floor | 3.2 | **4.75** | 0.55x -> **0.83x** | - |
+| n-gram, k=7 | 9.0 | **10.36** | 1.58x -> **1.81x** | 5.12 |
+
+and the REAL drafter, M28's DFlash2, with not one line of it changed
+(`tests/dflash2_real.rs`, tok/s):
+
+| | free-form: was | now | vs plain | repetition: was | now | vs plain |
+|---|---:|---:|---:|---:|---:|---:|
+| DFlash2, k=3 | 7.10 | **10.13** | 1.08x -> **1.50x** | 7.44 | **8.94** | 1.30x -> 1.57x |
+| DFlash2, k=5 | 6.73 | **9.12** | 1.02x -> **1.35x** | 7.37 | **8.60** | 1.29x -> 1.51x |
+| DFlash2, k=7 | 5.70 | **7.47** | **0.86x -> 1.10x** | 8.22 | **9.26** | 1.44x -> 1.63x |
+
+The `k = 7` free-form row answers M28's open question directly: it was the one
+configuration where a real, well-ported drafter LOST to plain decoding, and the
+reason was the target's tape, not the drafter. It is now a 1.10x win, and every
+`k` is a win on both workloads.
+
+The floor is the headline: using the verify path at all now costs 8-17%
+instead of 45%, so break-even for a drafter drops from ~5 accepted tokens per
+round to roughly 1, and the model-free n-gram drafter stops being a LOSS on
+free-form text (0.67x -> 1.01x) without a single change to the drafter. The
+floor is workload-dependent in a way it was not before - 0.92x behind a
+6-token prompt, 0.83x behind a 90-token one - because what remains of it is the
+chunk tape's own attention and GDN kernels doing more work per row at depth,
+which is a cost that scales rather than a fixed one.
+
+**Is 30 tok/s reachable? No, and here is the number that is.** The question
+this work started from was why speculation gave 1.0-2.5x when ~4.5x (30 tok/s)
+was hoped for. After this milestone a PERFECT drafter measures **21.7 tok/s,
+3.24x** - so 30 is not reachable at `k = 7` on this hardware, and the gap is no
+longer a fixed per-round overhead to be engineered away. It is the shape of the
+technique on this stack: an 8-row verify round still streams every weight in
+the 27B model exactly once, the same as one decode step, and it measures 291 ms
+against a decode step's 137 - **2.1 steps for 8 tokens**, because 8 rows of
+GEMM, an 8-row head projection (16.6 ms) and the GDN snapshot (3.3 ms) are real
+work, not overhead. 8 tokens for 2.1 steps is a 3.8x arithmetic ceiling and
+3.24x measured end to end, the difference being prompt prefill, the drafter
+call and detokenization inside the timed region. Reaching 30 needs one of
+three things, none of them this: a WIDER accepted block (blocked by
+`gdn_chunk_size`'s cost curve above - `k = 15` is measurably worse per row than
+`k = 7`), a cheaper head at 8 rows, or a faster decode step, which raises plain
+and speculative throughput together. Real drafters land below the 3.24x
+ceiling in proportion to their acceptance rate.
+
+**What the ladder says is next, and it is not this.** Read the unpooled
+`ms/row` column: 148.3 at 1 row, 63.2 at 3, 45.5 at 7, **34.4 at 8**, then back
+UP to 54.0 at 16. That non-monotonicity is `model::gdn::gdn_chunk_size`, which
+picks the largest of `[64, 32, 16, 8, 4, 2, 1]` dividing the round length - so a
+7-row round runs the GDN recurrence at chunk 1 (no intra-chunk parallelism at
+all) while an 8-row round runs it at chunk 8, and a 16-row round pays a chunk-16
+UT transform that costs more per row than chunk 8 does. Two consequences worth
+recording rather than acting on here: `k = 7` (8 rows) is a genuine sweet spot
+on this stack and not a coincidence, and a `k` chosen to make `k+1` a power of
+two is worth more than a larger `k` that is not. The selector is shared
+`crates/model` code used by qwen35moe too, so retuning it is its own change with
+its own gates.
+
+**Not claimed**: that the chunk tape is now as cheap as the decode tape at one
+row (it is 1.13x, and the residual is the chunked GDN form doing real extra
+work at `n = 1` that `gdn_recurrent_step` does not - a separate change, and one
+that would break the single-tape property the losslessness gate depends on);
+that the threshold of 16 is optimal on other hardware (it is read off the
+ladder above, on these cards, and the ladder is a test anyone can re-run); that
+the arena's allocation-churn benefit above the threshold was independently
+re-measured here (M6.10's claim is taken as given, and the threshold is placed
+so that nothing above it changes).
+
 ## Not yet done
 
 
@@ -2502,6 +2723,15 @@ deliberately does not implement multi-sequence GPU batching (M25's own
 scope note), so "max batched tok/s" for qwen35 today equals its
 single-sequence number; concurrent qwen35 sequences interleave, they do not
 share a dispatch.
+
+What raises a SINGLE qwen35 sequence instead is speculation (M29). On the
+two-card INT8 27B, against the same instance's own 6.70 tok/s plain decode:
+
+| Drafter | Throughput |
+|---|---|
+| none - the verify path's own floor | 6.18 tok/s (0.92x) |
+| n-gram, k=7, repetition workload | 10.36 tok/s (1.81x) |
+| oracle, k=7 - the ceiling any drafter is bounded by | 21.73 tok/s (3.24x) |
 
 ## Recorded gaps (this development machine has no discrete GPU and 18 GiB usable RAM)
 

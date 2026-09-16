@@ -66,20 +66,36 @@
 //! * the plain path, same instance, as the baseline.
 //!
 //! Measured on two Tesla P40s, Q8_0 weights served INT8, greedy, one load
-//! per test (plain decode 5.8-6.8 tok/s across these prompts):
+//! per test (plain decode 5.7-6.7 tok/s across these prompts). The `before`
+//! column is the same ladder when a verify round still paid a 256-token
+//! prefill round's per-layer device drain, which the qwen35 ledger's M29
+//! removed; nothing about the drafters or the accept/reject logic differs
+//! between the two columns:
 //!
-//! | drafter                          | tok/s | vs plain | accepted/round |
-//! |----------------------------------|-------|----------|----------------|
-//! | none (chunk tape floor)          |  3.7  |    0.6x  |  -             |
-//! | n-gram, free-form prompt         |  4.4  |    0.7x  |  0.57          |
-//! | n-gram, repetition workload      |  9.1  |    1.6x  |  5.12          |
-//! | oracle, k=3                      | 12.2  |    1.9x  |  3.00          |
-//! | oracle, k=7                      | 17.0  |    2.6x  |  7.00          |
+//! | drafter                          | before | after | vs plain | accepted/round |
+//! |----------------------------------|-------:|------:|---------:|---------------:|
+//! | none (chunk tape floor)          |   3.7  |  6.18 |    0.92x |  -             |
+//! | n-gram, free-form prompt         |   4.4  |  6.79 |    1.01x |  0.57          |
+//! | oracle, k=3                      |  12.2  | 18.10 |    2.70x |  3.00          |
+//! | oracle, k=7                      |  17.0  | 21.73 |    3.24x |  7.00          |
+//! | none, repetition workload        |   3.2  |  4.75 |    0.83x |  -             |
+//! | n-gram, repetition workload      |   9.1  | 10.36 |    1.81x |  5.12          |
+//!
+//! The floor is workload-dependent and the two `none` rows say why: it is
+//! 0.92x behind a 6-token prompt and 0.83x behind a 90-token one, because what
+//! remains of the gap is the chunk tape's own attention and GDN kernels doing
+//! more work per row than the decode tape's at the same context depth - not a
+//! fixed per-round cost, which is what this used to be.
 //!
 //! Read that table as the answer to "is a draft MODEL worth porting": the
-//! ceiling at a full block is 2.6x, a drafter good enough to average ~5
-//! accepted tokens per round reaches ~1.6x, and one that averages under 2
-//! loses to plain decoding outright.
+//! ceiling at a full block is 3.2x, and a drafter now has to average only ~1
+//! accepted token per round to break even rather than ~5, because the floor
+//! it starts from is 0.92x instead of 0.55x. The remaining gap between the
+//! oracle's 3.2x and the 8x a `k = 7` round would buy on a machine with no
+//! per-round cost at all is the verify round's own shape, not the drafter's:
+//! an 8-row round still reads every weight in the model once, the same as one
+//! decode step, so 8 tokens for ~2.5 steps' wall clock is the realistic shape
+//! of the win.
 //!
 //! Everything self-skips loudly without the real `Qwen3.8-27B*.gguf` named by
 //! `BRAIN_QWEN35_GGUF`, exactly as `tests/gguf_resident_real.rs` does. Run:

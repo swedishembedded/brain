@@ -23,35 +23,42 @@
 //! file's table. Two Tesla P40s, Q8_0 target served INT8, Q8_0 draft served
 //! INT8, greedy, one load per test:
 //!
-//! | drafter                | free-form: tok/s | vs plain | acc/round | repetition: tok/s | vs plain | acc/round |
-//! |------------------------|---------:|------:|-----:|---------:|------:|-----:|
-//! | plain decode           | 6.60 | 1.00x |  -   | 5.73 | 1.00x |  -   |
-//! | chunk tape, no spec    | 3.65 | 0.55x |  -   | 3.16 | 0.55x |  -   |
-//! | n-gram, k=7            | 4.45 | 0.67x | 0.57 | 9.04 | 1.58x | 5.12 |
-//! | **DFlash2, k=3**       | **7.10** | **1.08x** | 2.30 | 7.44 | 1.30x | 3.00 |
-//! | DFlash2, k=5           | 6.73 | 1.02x | 3.12 | 7.37 | 1.29x | 4.44 |
-//! | DFlash2, k=7           | 5.70 | 0.86x | 3.12 | **8.22** | **1.44x** | 6.00 |
+//! The `was` columns are the same ladder before the qwen35 ledger's M29
+//! removed a per-round cost from the verify tape; nothing about this drafter
+//! differs between them.
 //!
-//! The first column is the result that matters: **DFlash2 is the first
+//! | drafter             | free-form: was | now | vs plain | acc/round | repetition: was | now | vs plain | acc/round |
+//! |---------------------|------:|------:|------:|-----:|------:|------:|------:|-----:|
+//! | plain decode        |  6.60 |  6.76 | 1.00x |  -   |  5.73 |  5.68 | 1.00x |  -   |
+//! | chunk tape, no spec |  3.65 |  6.14 | 0.91x |  -   |  3.16 |  4.76 | 0.84x |  -   |
+//! | n-gram, k=7         |  4.45 |  6.72 | 1.00x | 0.57 |  9.04 | 10.35 | 1.82x | 5.12 |
+//! | **DFlash2, k=3**    |  7.10 | **10.13** | **1.50x** | 2.30 |  7.44 |  8.94 | 1.57x | 3.00 |
+//! | DFlash2, k=5        |  6.73 |  9.12 | 1.35x | 3.12 |  7.37 |  8.60 | 1.51x | 4.44 |
+//! | DFlash2, k=7        |  5.70 |  7.47 | 1.10x | 3.12 |  8.22 | **9.26** | **1.63x** | 6.00 |
+//!
+//! The free-form column is the result that matters: **DFlash2 is the first
 //! drafter on this stack that is a net WIN on free-form text**, where the
-//! model-free one is a 0.67x loss. It out-drafts n-gram by 4x there (2.30
-//! against 0.57 accepted per round) and still beats it on n-gram's own best
-//! workload (6.00 against 5.12) - though not on wall clock there, because
-//! n-gram costs nothing to run and this costs a 1.9B forward.
+//! model-free one is exactly break-even. It out-drafts n-gram by 4x there
+//! (2.30 against 0.57 accepted per round) and still beats it on n-gram's own
+//! best workload (6.00 against 5.12) - though not on wall clock there, because
+//! n-gram costs nothing to run and this costs a 1.9B forward. Every `k` is now
+//! a win on both workloads; `k = 7` on free-form used to be a 0.86x LOSS, for
+//! a reason that was in the target's tape and not in the drafter.
 //!
-//! **Why the wall-clock win is so much smaller than the acceptance rate
-//! suggests, and why `k` is swept rather than fixed at 7.** The
-//! `chunk tape, no spec` row is the whole answer: every speculative round
-//! verifies through the chunk tape, and on this stack a chunk forward costs
-//! ~2.4 plain decode steps almost regardless of how many rows it carries
-//! (fixed per-call overhead - host-staged residual per pipeline stage, a
-//! `poll_wait`/`flush` per layer - dominates). So the break-even quoted by
-//! `tests/gguf_resident_spec_real.rs`, 2.0 accepted per round, is the figure
-//! for a round that costs ONE target forward; the measured cost of a round is
-//! ~2.4 forwards when it accepts everything and ~4.8 when it does not, which
-//! puts the real break-even near 5 accepted per round at `k = 7`. That is
-//! also why `k = 3` wins on free-form and `k = 7` on repetition: a smaller
-//! window rejects less often, and a rejecting round is what doubles the bill.
+//! **Why `k` is swept rather than fixed at 7.** A wider window proposes more
+//! per round but widens both the verify chunk and the re-commit a rejecting
+//! round pays, so the best `k` is a property of the workload's acceptance rate
+//! and not a constant: `k = 3` wins on free-form text, `k = 7` on repetition.
+//!
+//! The table above carries two columns because the per-round cost these
+//! numbers are measured against CHANGED under them. When this port was first
+//! measured, every speculative round paid a 256-token prefill round's
+//! per-layer device drain (the qwen35 ledger's M29 profiles and removes it), so
+//! a chunk forward cost ~2.4 plain decode steps almost regardless of its row
+//! count, the `chunk tape, no spec` floor was 0.55x, and the real break-even
+//! sat near 5 accepted tokens per round - which is why `k = 7` on free-form
+//! text was a measured LOSS. The floor is now 0.91x and break-even is near 1,
+//! so the same drafter, unchanged, is a win at every `k` swept here.
 //!
 //! Both checkpoints are needed and everything self-skips loudly without them:
 //!
