@@ -136,6 +136,71 @@ fn a_missing_required_column_is_an_error_naming_the_header() {
     assert!(err.contains("Wrong"), "and show the header it actually got: {err}");
 }
 
+#[test]
+fn signing_the_graph_applies_the_transmitter_and_the_scale() {
+    // This test exists because a mutation survived without it. `signed_csc`
+    // was written to fix a real defect - the sign prior was computed at import
+    // and never applied, so every synapse excited - and the fix itself had no
+    // gate, which meant deleting the sign multiplication again would have been
+    // silent. A fix without a test is a defect waiting to come back.
+    let c = fixture();
+    let signed = c.signed_csc(2.0);
+    assert_eq!(signed.nnz(), c.csc.nnz(), "signing must not change the graph's shape");
+    assert_eq!(signed.indptr, c.csc.indptr, "nor its structure");
+    assert_eq!(signed.pre, c.csc.pre);
+
+    // Neuron 1 is cholinergic (excitatory), 2 is GABAergic (inhibitory),
+    // 3 is verified cholinergic, 4 has no transmitter at all.
+    let edge = |pre: u64, post: u64| -> f32 {
+        let (p, q) = (c.index_of(pre).unwrap(), c.index_of(post).unwrap());
+        let (lo, hi) = (signed.indptr[q as usize] as usize, signed.indptr[q as usize + 1] as usize);
+        (lo..hi).find(|&k| signed.pre[k] == p).map(|k| signed.w[k]).expect("edge exists")
+    };
+    // 1 -> 3 aggregated to 12 synapses; cholinergic, so +12 * scale 2.0.
+    assert_eq!(edge(1, 3), 24.0, "an excitatory presynaptic neuron must give a positive weight");
+    // 2 -> 3 is 4 synapses from a GABAergic neuron: -4 * 2.0.
+    assert_eq!(edge(2, 3), -8.0, "an inhibitory presynaptic neuron must give a negative weight");
+
+    // And the unsigned graph must be unchanged: signing returns a new graph
+    // rather than mutating the one the importer produced.
+    assert!(c.csc.w.iter().all(|&w| w > 0.0), "raw synapse counts must stay positive");
+}
+
+#[test]
+fn an_unknown_transmitter_contributes_zero_rather_than_a_guess() {
+    // Neuron 4 has no predicted and no verified transmitter. An edge from it
+    // must be silenced, not guessed: absence of evidence is not a coin flip,
+    // and a guessed sign is indistinguishable downstream from a measured one.
+    let neurons = "\
+Root ID,Flow,Super Class,Class,Sub Class,Nerve,Soma side,Primary Cell Type,Predicted NT type,Predicted NT confidence,Verified NT type
+1,intrinsic,x,,,,left,A,ACH,0.9,
+2,intrinsic,x,,,,left,B,,,
+";
+    let edges = "pre_root_id,post_root_id,neuropil,syn_count,nt_type\n1,2,X,5,\n2,1,X,7,\n";
+    let c = load_readers("t", neurons.as_bytes(), edges.as_bytes()).unwrap();
+    let signed = c.signed_csc(1.0);
+
+    let w_from_known: Vec<f32> = signed
+        .w
+        .iter()
+        .enumerate()
+        .filter(|(k, _)| signed.pre[*k] == c.index_of(1).unwrap())
+        .map(|(_, w)| *w)
+        .collect();
+    let w_from_unknown: Vec<f32> = signed
+        .w
+        .iter()
+        .enumerate()
+        .filter(|(k, _)| signed.pre[*k] == c.index_of(2).unwrap())
+        .map(|(_, w)| *w)
+        .collect();
+    assert_eq!(w_from_known, vec![5.0], "the cholinergic neuron's edge survives");
+    assert_eq!(w_from_unknown, vec![0.0], "the unknown neuron's edge is silenced, not guessed");
+
+    let (exc, inh, zero) = c.sign_census();
+    assert_eq!((exc, inh, zero), (1, 0, 1));
+}
+
 /// Reproduce the published statistics on the real datasets.
 ///
 /// Skips when `$BRAIN_CONNECTOME_DIR` is unset or the files are absent: the

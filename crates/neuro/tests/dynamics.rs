@@ -159,6 +159,19 @@ fn cpu_and_gpu_agree_on_an_irregular_connectome() {
     let (gpu_counts, gpu_v) = run(gpu_core::testgpu::dev(&KERNELS));
     let (cpu_counts, cpu_v) = run(gpu_core::Gpu::new_cpu(&KERNELS));
 
+    // AGREEMENT IS VACUOUS WITHOUT ACTIVITY. Two backends that both produce
+    // an all-zero spike train agree perfectly and prove nothing about the
+    // spiking path, so assert the network actually fired before comparing.
+    // This test passed that way until this assertion was added.
+    let fired: f32 = gpu_counts.iter().sum();
+    assert!(fired > 0.0, "neither backend fired at all, so the agreement below is between two empty trains");
+    assert!(
+        gpu_counts.iter().filter(|&&c| c > 0.0).count() > gpu_counts.len() / 4,
+        "only {} of {} ticks had any spike; the comparison is nearly empty",
+        gpu_counts.iter().filter(|&&c| c > 0.0).count(),
+        gpu_counts.len()
+    );
+
     // Spike counts are discrete: a backend that disagreed about even one
     // threshold crossing would show up here as an integer difference, not a
     // rounding one.
@@ -200,6 +213,16 @@ fn a_restored_snapshot_replays_bit_for_bit() {
     }
 
     assert_eq!(saved.tick, 20, "snapshot should carry the tick it was taken at");
+
+    // Same vacuity trap as the cross-backend test: two all-zero spike trains
+    // replay each other perfectly. Assert the run had content first.
+    let total: f32 = first.iter().flat_map(|v| v.iter()).sum();
+    assert!(total > 0.0, "nothing fired in the replayed window, so equality below is between empty trains");
+    assert!(
+        first.iter().filter(|v| v.iter().any(|&s| s > 0.5)).count() > first.len() / 4,
+        "too few ticks had any spike for the replay comparison to mean anything"
+    );
+
     // Bit-for-bit, not approximately: the gather sums each neuron's edges in a
     // fixed order, so a replay from identical state is identical arithmetic.
     for (i, (a, b)) in first.iter().zip(&second).enumerate() {
