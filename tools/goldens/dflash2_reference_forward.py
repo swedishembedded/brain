@@ -38,11 +38,13 @@ Usage:
     tools/goldens/dflash2_reference_forward.py \\
         --gguf ~/models/incoai/Qwen3.8-27B-DFlash2-GGUF/Q8_0.gguf \\
         --target-gguf ~/models/unsloth/Qwen3.8-27B-Q8_0.gguf \\
-        --hidden /tmp/target_hidden.f32 --anchor 8993 --start 7 --digest
+        --hidden $BRAIN_DFLASH2_DUMP/target_hidden.f32 \\
+        --anchor 8993 --start 7 --digest
 
-`--hidden` is `[ctx_len, 5 * 5120]` little-endian f32: for each context token,
-the target's residual leaving layers `target_layer_ids`, concatenated in that
-order. `--start` is the absolute position of the anchor token (the context
+`--hidden` is the dump `crates/qwen35/tests/dflash2_real.rs` writes when
+`BRAIN_DFLASH2_DUMP` names a directory: `[ctx_len, 5 * 5120]` little-endian
+f32, and for each context token the target's residual leaving layers
+`target_layer_ids`, concatenated in that order. `--start` is the absolute position of the anchor token (the context
 tokens occupy `start - ctx_len .. start - 1`).
 
 Swedish Embedded AB implements independent, dependency-light reference
