@@ -669,14 +669,44 @@ it against the scan+sort reference at `max|d| == 0`.
   pinned to the lowest band edge. The same run that now reads +0.228 previously
   read -0.218.
 
-  **Still open:** the rhythm is at 3 Hz where a walking fly steps at 10 to 15,
-  and the tripod term is positive but weak. The next lever is the one the
-  published models use and this does not: restricting the network to a single
-  leg neuropil, because a large recurrent graph carries feedback loops of many
-  lengths at once and a network oscillator's period is its loop delay.
-  `Connectome::subgraph` exists for it; LEGNP_T1 plus the descending population
-  is 5,752 neurons and 4.8M synapses, against a published front-leg model's
-  4,604 and 3.8M.
+  **Restricting to one leg neuropil raises the frequency,** which is what the
+  loop-delay argument predicts. `Connectome::subgraph` selects by the export's
+  own `Top in/out region`; LEGNP_T1 plus the descending population is 5,752
+  neurons and 4.8M synapses against a published front-leg model's 4,604 and
+  3.8M. Step frequency goes from about 3 Hz on the whole cord to 9.75 Hz on
+  T1.
+
+  **And synapses had no time constant, which is the largest remaining thing
+  that was wrong.** The gather wrote each tick's current straight over the last,
+  so a spike's effect lasted exactly one tick. A recurrent loop through three
+  neurons then closes in three ticks, and the only oscillation such a network
+  can hold has a period the integration step chose. `LifParams` now carries
+  `dt_over_tau_syn` and `dt_over_tau_inh` - SEPARATELY, because a
+  reciprocal-inhibition oscillator's period is set by how long the inhibition
+  takes to build and release relative to the excitation that provoked it, and
+  equal time constants leave the loop no phase lag to turn into a rhythm. The
+  default is the instantaneous synapse, so every earlier gate measures what it
+  measured before and the same default is the control.
+
+  **With a 5 ms excitatory constant on the T1 network, the cord produces an
+  alternating tripod.** Measured on one side of each joint, the two leg
+  triangles reach a phase correlation of **0.94** at 3 Hz and **0.83** at 7.5
+  Hz, with the net motor output retaining +0.50 and +0.20 of it. That is the
+  coordination an insect gait is made of, out of the published wiring, with no
+  training of any kind.
+
+  Two instrument corrections were needed to see it. `Fly::leg_opposed` reports
+  each joint's agonist and antagonist drive separately, because a cord
+  producing a clean rhythm on BOTH sides of a joint in phase moves that joint
+  nowhere and reads as no rhythm at all. And rhythmicity was scored on a single
+  frequency bin, which penalises a real oscillation for being biological: a
+  window of T seconds cannot resolve frequencies closer than 1/T, so it is now
+  scored over one resolution element and a measured 0.006 against a noise floor
+  of 0.007 is no longer how a genuine rhythm reads.
+
+  **Still open:** the coordination is there and the PERIODICITY is not - the
+  legs alternate, aperiodically. That is what the inhibitory time constant was
+  added to address and what is being swept now.
 * **M6 - flight. THE WINGS WORK.** The published body could not have flown, and
   not for want of tuning: its wing surfaces carry MuJoCo's DEFAULT fluid model,
   which approximates a body by its inertia box and makes almost no lift from a
