@@ -85,8 +85,8 @@ here (items already tracked there are not repeated - see that file's own
 | 6 | 8 | crate-wide | no `.capabilities()`/manifest introspection anywhere in `crates/sdk` | open (M8) |
 | 7 | 9 | crate-wide | no training/finetune entry point at all in `crates/sdk` (the adjacent Dataset-layer gap is tracked in `sdk.md`; the missing training call itself was not) | open (Phase 2, per-pipeline) |
 | 8 | 9/4 | `crates/sdk/src/creature.rs:492-500` | `set_plasticity`/`reward` mutate learned synapse weights with no `save()`/`load()` counterpart - all learning dies with the process | open (backlog) |
-| 9 | 7 | `crates/sdk/src/creature.rs:157` | `Creature::build` acquires its GPU via `gpu_core::testgpu::dev` - TEST-SUPPORT infra, weak-reference lifetime, shipping on the production SDK path | open (M3) |
-| 10 | 7/13 | `crates/sdk/src/creature.rs` + `Cargo.toml` | `CreatureBuilder` has no `Device` knob at all, yet the `creature` feature's doc comment claims it "selects `device`" | open (M3) |
+| 9 | 7 | `crates/sdk/src/creature.rs:157` | `Creature::build` acquires its GPU via `gpu_core::testgpu::dev` - TEST-SUPPORT infra, weak-reference lifetime, shipping on the production SDK path | fixed (M3) |
+| 10 | 7/13 | `crates/sdk/src/creature.rs` + `Cargo.toml` | `CreatureBuilder` has no `Device` knob at all, yet the `creature` feature's doc comment claims it "selects `device`" | fixed (M3) |
 | 11 | 5 | `crates/sdk/src/pipeline.rs:416-424,432-435` | `ImagePipelineBuilder::size` is silently IGNORED on a flux2-backed pipeline (the s3dit half of this asymmetry is tracked in `sdk.md`; the flux2 silent no-op was not) | open (backlog) |
 | 12 | 6 | `crates/sdk/src/error.rs:62-66` | `Error::Backend` is an untyped catch-all for ~8 semantically distinct failures (license refusal, no models dir, size mismatch, bad extension, missing builder arg, GPU/MuJoCo failure...) | open (M6) |
 | 13 | 6 | `crates/sdk/src/creature.rs:129-130` | a caller-programming error (missing required builder field) is typed as `Error::Backend`, indistinguishable from a real backend crash | open (M6) |
@@ -185,7 +185,15 @@ then `crates/sdk` (M10c).
 
 - [x] **M1** - this document + the `sdk.md` stale-line fixes.
 - [x] **M2** - `crates/sdk` cheap mechanical fixes (finding 21 fixed; finding 22 turned out to be intentional on inspection, marked wontfix).
-- [ ] **M3** - `Creature` gets a real device (findings 9, 10).
+- [x] **M3** - `Creature` gets a real device (findings 9, 10). Factored the
+      probe/resolve/apply/publish core out of `pipeline.rs::apply_device`
+      into a shared `crate::device::resolve` (gated on the `device` feature
+      alone, since `creature` selects `device` but not `resolve` and has no
+      loader dependency); `pipeline.rs`'s own `apply_device` now layers only
+      the `resolve`-specific placer install on top. `CreatureBuilder::device`
+      mirrors `ImagePipelineBuilder::device`; `Creature::build` now calls
+      `gpu_core::Gpu::new(&neuro::KERNELS)` - the same production
+      constructor every `resident_*.rs` uses - instead of the test pool.
 - [ ] **M4** - `Creature`/`View` end-to-end test (findings 1, 2).
 - [ ] **M5** - progress/cancellation wired for real (findings 3, 4, 5).
 - [ ] **M6** - split `Error::Backend`'s catch-all (findings 12, 13).

@@ -68,6 +68,8 @@
 
 #[cfg(feature = "creature")]
 mod creature;
+#[cfg(feature = "device")]
+mod device;
 mod error;
 #[cfg(feature = "image")]
 mod image;

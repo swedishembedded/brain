@@ -41,7 +41,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::Error;
+use crate::{Device, Error};
 
 fn backend(e: String) -> Error {
     Error::Backend(e)
@@ -58,6 +58,7 @@ pub struct CreatureBuilder {
     plasticity: bool,
     arena: Arena,
     food: Option<[f64; 3]>,
+    device: Device,
 }
 
 pub use flybody::Arena;
@@ -90,6 +91,14 @@ impl CreatureBuilder {
     /// Ground to walk on, or air to fly through. See [`Arena`].
     pub fn arena(mut self, arena: Arena) -> CreatureBuilder {
         self.arena = arena;
+        self
+    }
+
+    /// Which GPU/backend the spiking network runs on. Defaults to
+    /// [`Device::default`] ("auto" -- whatever hardware the machine has),
+    /// the same default [`crate::ImagePipelineBuilder::device`] uses.
+    pub fn device(mut self, device: Device) -> CreatureBuilder {
+        self.device = device;
         self
     }
 
@@ -154,7 +163,8 @@ impl CreatureBuilder {
                 physics_dt: world.flight.timestep,
             },
         };
-        let gpu = gpu_core::testgpu::dev(&neuro::KERNELS);
+        crate::device::resolve(&self.device)?;
+        let gpu = gpu_core::Gpu::new(&neuro::KERNELS);
         let mut inner = fly::Fly::new(
             gpu,
             &c,
@@ -264,6 +274,7 @@ impl Creature {
             plasticity: false,
             arena: Arena::Ground,
             food: None,
+            device: Device::default(),
         }
     }
 

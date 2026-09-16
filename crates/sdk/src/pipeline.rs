@@ -170,20 +170,13 @@ fn check_s3dit_size(built: (u32, u32), requested: (Option<u32>, Option<u32>)) ->
     Ok(())
 }
 
-/// Apply a device/backend selection to this process, the same way
-/// `crates/cli/src/main.rs` applies `--device` before any model builds:
-/// resolve it against the real hardware inventory, publish it as the
-/// process's ambient [`gpu_core::ComputeSet`], and install
-/// [`loader::install_default_placer`] so automatic GPU/CPU placement narrows
-/// to exactly what was asked for. An embedder has no CLI startup path to do
-/// this for it, so [`ImagePipelineBuilder::load`] does it here instead.
+/// [`crate::device::resolve`] plus the one thing only a `resolve`-surface
+/// needs on top: installing [`loader::install_default_placer`] so automatic
+/// GPU/CPU model-shard placement narrows to exactly what was asked for.
 fn apply_device(device: &Device) -> Result<()> {
-    let probe = gpu_core::Inventory::probe();
-    let set = device.resolve(&probe).map_err(Error::Backend)?;
-    set.apply().map_err(Error::Backend)?;
+    let set = crate::device::resolve(device)?;
     let gpus: Option<std::collections::HashSet<u32>> = Some(set.gpus.iter().copied().collect());
     let cpu_allowed = set.cpu_enabled();
-    gpu_core::publish_compute_set(set);
     loader::install_default_placer(gpus, cpu_allowed);
     Ok(())
 }
