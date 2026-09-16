@@ -688,12 +688,31 @@ it against the scan+sort reference at `max|d| == 0`.
   default is the instantaneous synapse, so every earlier gate measures what it
   measured before and the same default is the control.
 
-  **With a 5 ms excitatory constant on the T1 network, the cord produces an
-  alternating tripod.** Measured on one side of each joint, the two leg
-  triangles reach a phase correlation of **0.94** at 3 Hz and **0.83** at 7.5
-  Hz, with the net motor output retaining +0.50 and +0.20 of it. That is the
-  coordination an insect gait is made of, out of the published wiring, with no
-  training of any kind.
+  **With a synaptic time constant, the T1 network produces alternating tripod
+  coordination - as a TRANSIENT.** Driven from rest at a 5 ms excitatory
+  constant, the two leg triangles reach a phase correlation of 0.94 measured on
+  one side of each joint. Replicated at three trace lengths, it decays:
+
+  | window analysed | agonist tripod | net tripod |
+  |---|---|---|
+  | 1.5 s | 0.941 | +0.495 |
+  | 2.5 s | 0.777 | -0.069 |
+  | 3.0 s | 0.593 | -0.116 |
+
+  So the alternation is real and it is not sustained: the cord falls into it on
+  being driven and drifts out of it, and it never becomes periodic
+  (rhythmicity 0.001 to 0.003 throughout). Reporting the 0.94 without the decay
+  would be reporting one cell of a sweep as a gait, which is the failure mode
+  the rest of this file exists to avoid.
+
+  That corner also sits at 14.6% of the cord active, which is the over-driven
+  regime rather than the few-percent one a nerve cord should occupy.
+
+  **What reproduces at the operating point adopted below,** across neighbouring
+  cells of two independent sweeps at 1500 ticks: cord activity 1.4 to 6.2%,
+  2.4 to 10.6 motor spikes per tick, net tripod +0.18 to +0.26, rhythmicity
+  0.33 to 0.35, stepping frequency 2.5 to 6.75 Hz. Positive, repeatable, and
+  well short of a fly's 10 to 15 Hz.
 
   Two instrument corrections were needed to see it. `Fly::leg_opposed` reports
   each joint's agonist and antagonist drive separately, because a cord
