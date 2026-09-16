@@ -236,11 +236,27 @@ it against the scan+sort reference at `max|d| == 0`.
 
 ## Milestones
 
-* **M1 - sparse runtime.** `crates/neuro`: CSC gather, LIF, traces, the
-  `DynamicalSystem`/`Plastic` seams. **Gate:** analytic-LIF closed-form parity
-  for constant input; CPU == GPU on a random connectome; bit-exact replay from
-  a restored snapshot. `gradcheck` does not apply to a local rule - that is a
-  deliberate, recorded exception, and the substitutes are these three.
+* **M1 - sparse runtime.** PARTLY LANDED. `crates/neuro` has the CSC
+  connectome, the `syn_gather_csc` + `lif_step` kernels, the
+  `DynamicalSystem`/`Plastic` seams, and all four gates green on a real P40
+  against the 48-thread Cranelift JIT. **Still open in M1:** the eligibility
+  trace and neuromodulator kernels, and an implementation of `Plastic` for
+  `SpikingNet` - the trait exists, nothing implements it yet.
+  **Gate:** analytic-LIF closed-form parity for constant input; CPU == GPU on a
+  random connectome; bit-exact replay from a restored snapshot; and the gather
+  against a host sparse mat-vec. `gradcheck` does not apply to a local rule -
+  that is a deliberate, recorded exception, and the substitutes are these four.
+
+  The fourth gate was not in the original plan and is the one that mattered.
+  The cross-backend check cannot catch a gather that is wrong the SAME way on
+  both backends, and the analytic check runs on an empty connectome where the
+  gather contributes nothing, so the gather started with no gate at all. The
+  first version of its host oracle was itself vacuous - an unreachable
+  threshold meant nothing ever spiked, so it compared zero against zero - and
+  it passed with the gather's loop bound deliberately broken. It now asserts a
+  real fraction of neurons fired before comparing, and catches both that
+  mutation and a truncated partial fold. Mutation-verify a new gate: one that
+  has never been seen to fail has not been tested.
 * **M2 - connectome import.** `crates/connectome`: MANC CSV + feather -> CSR/CSC,
   NT prior with confidence, named populations, `brain pull` integration.
   **Gate:** two-way coverage over all 23,188 neurons and 5,243,574 edges -

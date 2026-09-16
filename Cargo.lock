@@ -1588,6 +1588,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-neuro"
+version = "1.1.0"
+dependencies = [
+ "brain-data",
+ "brain-gpu-core",
+ "brain-kernels",
+]
+
+[[package]]
 name = "brain-npu"
 version = "1.1.0"
 dependencies = [

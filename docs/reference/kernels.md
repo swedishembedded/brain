@@ -315,6 +315,7 @@ load of it must already be bare-identifier-indexed.
 | [`layernorm_rows`](../../crates/kernels/wgsl/layernorm_rows.wgsl) | LayerNorm forward, one WORKGROUP per row - the coalesced variant | 64-thread workgroup tile, 1 barrier | 4/5 | ✓ | ✓ | ✓ | - | f32 |
 | [`leaky_relu`](../../crates/kernels/wgsl/leaky_relu.wgsl) | Leaky ReLU forward:  y = x        if x >= 0 y = slope*x  otherwise | one thread per output element | 3/5 | native | ✓ | ✓ | - | f32 |
 | [`leaky_relu_bwd`](../../crates/kernels/wgsl/leaky_relu_bwd.wgsl) | Leaky ReLU backward - gradient w.r.t | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - | f32 |
+| [`lif_step`](../../crates/kernels/wgsl/lif_step.wgsl) | Leaky integrate-and-fire membrane update, threshold, reset and refractory countdown | one thread per neuron | 3/5 | ✓ | ✓ | - | - | f32 |
 | [`ln_head`](../../crates/kernels/wgsl/ln_head.wgsl) | Strided per-head LayerNorm (QK-norm) | one thread per output element, 3 nested serial reductions | 1/5 | ✓ | ✓ | - | - | f32 |
 | [`ln_head_dgb`](../../crates/kernels/wgsl/ln_head_dgb.wgsl) | Strided per-head LayerNorm backward (parameter grads) | one thread per output element, 4 nested serial reductions | 1/5 | ✓ | ✓ | - | - | f32 |
 | [`ln_head_dx`](../../crates/kernels/wgsl/ln_head_dx.wgsl) | Strided per-head LayerNorm backward (input grad), the ln_head companion | one thread per output element, 4 nested serial reductions | 1/5 | ✓ | ✓ | - | - | f32 |
@@ -523,6 +524,7 @@ load of it must already be bare-identifier-indexed.
 | [`splice_bwd`](../../crates/kernels/wgsl/splice_bwd.wgsl) | Residual splice (backward) | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
 | [`sub`](../../crates/kernels/wgsl/sub.wgsl) | Elementwise subtract, with an independent flat offset into each input | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - | f32 |
 | [`swap_axes12_vec`](../../crates/kernels/wgsl/swap_axes12_vec.wgsl) | Swap axes 1 and 2 of a rank-4 [A0,A1,A2,D] tensor (a batched transpose of D-wide vectors) - model::timesfm3's sequence<->variate axis swap | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
+| [`syn_gather_csc`](../../crates/kernels/wgsl/syn_gather_csc.wgsl) | Sparse synaptic current: one WORKGROUP per postsynaptic neuron over its CSC column | 64-thread workgroup tile over a contiguous edge range, 1 barrier | 4/5 | ✓ | ✓ | - | - | f32 |
 | [`tanh_act`](../../crates/kernels/wgsl/tanh_act.wgsl) | Tanh forward:  y = tanh(x) | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - | f32 |
 | [`tanh_act_bwd`](../../crates/kernels/wgsl/tanh_act_bwd.wgsl) | Tanh backward: dx = dy * (1 - tanh(x)^2) | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
 | [`tau_scale`](../../crates/kernels/wgsl/tau_scale.wgsl) | Moondream per-(head, token) attention-temperature scale, broadcast over head_dim | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |

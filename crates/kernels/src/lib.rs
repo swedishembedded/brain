@@ -560,6 +560,8 @@ pub const LAYERNORM_ROWS: &str = include_str!("../wgsl/layernorm_rows.wgsl");
 pub const LEAKY_RELU: &str = include_str!("../wgsl/leaky_relu.wgsl");
 /// `wgsl/leaky_relu_bwd.wgsl`
 pub const LEAKY_RELU_BWD: &str = include_str!("../wgsl/leaky_relu_bwd.wgsl");
+/// `wgsl/lif_step.wgsl`
+pub const LIF_STEP: &str = include_str!("../wgsl/lif_step.wgsl");
 /// `wgsl/ln_head.wgsl`
 pub const LN_HEAD: &str = include_str!("../wgsl/ln_head.wgsl");
 /// `wgsl/ln_head_dgb.wgsl`
@@ -976,6 +978,8 @@ pub const SPLICE_BWD: &str = include_str!("../wgsl/splice_bwd.wgsl");
 pub const SUB: &str = include_str!("../wgsl/sub.wgsl");
 /// `wgsl/swap_axes12_vec.wgsl`
 pub const SWAP_AXES12_VEC: &str = include_str!("../wgsl/swap_axes12_vec.wgsl");
+/// `wgsl/syn_gather_csc.wgsl`
+pub const SYN_GATHER_CSC: &str = include_str!("../wgsl/syn_gather_csc.wgsl");
 /// `wgsl/tanh_act.wgsl`
 pub const TANH_ACT: &str = include_str!("../wgsl/tanh_act.wgsl");
 /// `wgsl/tanh_act_bwd.wgsl`
@@ -1267,6 +1271,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("layernorm_rows", LAYERNORM_ROWS),
     ("leaky_relu", LEAKY_RELU),
     ("leaky_relu_bwd", LEAKY_RELU_BWD),
+    ("lif_step", LIF_STEP),
     ("ln_head", LN_HEAD),
     ("ln_head_dgb", LN_HEAD_DGB),
     ("ln_head_dx", LN_HEAD_DX),
@@ -1475,6 +1480,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("splice_bwd", SPLICE_BWD),
     ("sub", SUB),
     ("swap_axes12_vec", SWAP_AXES12_VEC),
+    ("syn_gather_csc", SYN_GATHER_CSC),
     ("tanh_act", TANH_ACT),
     ("tanh_act_bwd", TANH_ACT_BWD),
     ("tau_scale", TAU_SCALE),

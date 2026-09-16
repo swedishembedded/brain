@@ -1,0 +1,18 @@
+[package]
+name = "brain-neuro"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sparse stateful neural runtime: a CSC connectome, leaky integrate-and-fire dynamics on the GPU or CPU, and the DynamicalSystem/Plastic seams a digital creature is built on. Knows nothing about any particular animal."
+
+[lib]
+name = "neuro"
+path = "src/lib.rs"
+
+[dependencies]
+brain-gpu-core.workspace = true
+brain-kernels.workspace = true
+
+[dev-dependencies]
+# `data::rng::Lcg` -- the one deterministic test PRNG (tests only).
+brain-data.workspace = true
