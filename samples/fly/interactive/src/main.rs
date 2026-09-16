@@ -54,6 +54,7 @@ struct Args {
     timestep: Option<f64>,
     brain: bool,
     smell: bool,
+    tuning: Option<String>,
     log: Option<String>,
 }
 
@@ -83,7 +84,13 @@ fn usage() -> ! {
                          with the smell is what the wiring does with it
   --cord-wings           fly on what the wing motor neurons produce, rather
                          than on a wingbeat the throttle drives
-  --drive X              starting descending command (default 1.5)
+  --drive X              starting descending command (default 1.5). A
+                         --tuning that carries its own command overrides this
+  --tuning FILE          apply parameters found by a search: the synaptic
+                         gains, the membrane and synapse time constants, and
+                         the coupling. A connectome does not contain any of
+                         them, and they are what decide whether the animal
+                         does anything. See crates/fly/examples/walk_search.rs
   --throttle X           hold the wings at X (0 to 1) instead of on the key,
                          so a run with nobody at the keyboard still flies
   --frames N             stop after N frames instead of running until closed
@@ -125,6 +132,7 @@ fn parse() -> Args {
         timestep: None,
         brain: false,
         smell: false,
+        tuning: None,
         log: None,
     };
     let mut it = std::env::args().skip(1);
@@ -151,6 +159,7 @@ fn parse() -> Args {
             "--log" => a.log = Some(value()),
             "--timestep" => a.timestep = Some(value().parse().unwrap_or_else(|_| usage())),
             "--brain" => a.brain = true,
+            "--tuning" => a.tuning = Some(value()),
             "--smell" => {
                 a.brain = true;
                 a.smell = true;
@@ -266,6 +275,9 @@ fn run() -> Result<(), Error> {
     if args.brain {
         builder = builder.brain(true);
     }
+    if let Some(path) = &args.tuning {
+        builder = builder.tuning(path);
+    }
     let mut fly = builder.build()?;
     println!(
         "{} neurons, {} - loaded in {:.1} s{}",
@@ -298,7 +310,10 @@ fn run() -> Result<(), Error> {
     // rather than an incorrect fly at speed, and the title bar reports the
     // ratio rather than hiding it.
     let ticks_per_frame = (CONTROL_HZ / TARGET_FPS as f64).round() as u32;
-    let mut drive = args.drive;
+    // A tuning that carries a command has already set it, and overriding it
+    // from the flag's default would replay the tuning at a drive it was not
+    // found at.
+    let mut drive = if args.tuning.is_some() { fly.command() } else { args.drive };
     let mut throttle = args.throttle.unwrap_or(0.0);
     let mut eaten = false;
     fly.drive(drive);

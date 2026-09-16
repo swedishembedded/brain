@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
-//! Search the parameters the connectome does not contain, for a WALK.
+//! Search the parameters the connectome does not contain, for a WALK or a
+//! FLIGHT.
 //!
 //! The ceiling instrument, re-aimed. `examples/ceiling` hill-climbs the
 //! per-cell-type gains one coordinate at a time under a reward a corpse can
@@ -87,12 +88,50 @@ fn main() {
         ])
         .collect();
 
+    // `ARENA=air` searches for flight instead: the generated flight model,
+    // the wings handed to the cord's own motor neurons rather than to a
+    // throttle, and `Objective::Fly`. The wing gains join the knobs, because
+    // what a wing motor neuron's spike is WORTH is exactly the kind of thing
+    // no connectome contains.
+    let air = std::env::var("ARENA").unwrap_or_default() == "air";
+    if air {
+        knobs.push(Knob::new("wing_power_gain", 0.001, 0.3));
+        knobs.push(Knob::new("wing_steer_gain", 0.001, 0.2));
+    }
+    let start: Vec<f32> = if air {
+        start
+            .into_iter()
+            .chain([Coupling::default().wing_power_gain, Coupling::default().wing_steer_gain])
+            .collect()
+    } else {
+        start
+    };
+
     let ticks: u32 = num("TICKS", 1000);
     let pairs: usize = num("PAIRS", 6);
     let generations: u32 = num("GENERATIONS", 20);
-    let model = Model::from_xml(&mj, env("BRAIN_FLYBODY_XML")).unwrap();
+    // Held for the whole run: the generated flight model lives in it.
+    let scratch = tempfile::tempdir().unwrap();
+    let flight = flybody::Flight::default();
+    let (path, timing) = if air {
+        let base = env("BRAIN_FLYBODY_FRUITFLY_XML");
+        let scene = flybody::flight_scene(std::path::Path::new(&base), scratch.path(), flight).unwrap();
+        let steps = fly::Timing::substeps(flight.timestep).unwrap();
+        (scene, Timing { neural_per_control: 1, physics_per_control: steps, physics_dt: flight.timestep })
+    } else {
+        (std::path::PathBuf::from(env("BRAIN_FLYBODY_XML")), Timing::default())
+    };
+    let model = Model::from_xml(&mj, &path).unwrap();
     let gpu = gpu_core::testgpu::dev(&neuro::KERNELS);
-    let mut f = Fly::new(gpu, &c, model, lif, wiring, Timing::default(), Coupling::default()).unwrap();
+    let mut f = Fly::new(gpu, &c, model, lif, wiring, timing, Coupling::default()).unwrap();
+    if air {
+        // 180 Hz rather than the animal's 218: this airframe's hinge resonates
+        // lower than a real thorax, measured by sweep rather than assumed. The
+        // wings are NOT held - the cord's own wing motor neurons drive them,
+        // which is the thing being searched.
+        f.enable_flight(fly::Wingbeat { hz: 180.0, ..fly::Wingbeat::default() }).unwrap();
+        println!("{}", f.wing_summary());
+    }
 
     // Plasticity OFF throughout. This measures what the PARAMETERS can do,
     // not what a rule can find, and mixing the two makes the answer
@@ -108,10 +147,24 @@ fn main() {
             ..lif
         })
         .unwrap();
-        f.set_coupling(Coupling { activation_gain: d[4], ..Coupling::default() });
-        let cfg = RewardConfig { objective: Objective::walk(), ticks, command: d[5], ..RewardConfig::default() };
+        let mut coupling = Coupling { activation_gain: d[4], ..Coupling::default() };
+        if air {
+            coupling.wing_power_gain = d[6];
+            coupling.wing_steer_gain = d[7];
+        }
+        f.set_coupling(coupling);
+        let objective = if air { Objective::flight() } else { Objective::walk() };
+        let cfg = RewardConfig { objective, ticks, command: d[5], ..RewardConfig::default() };
         match episode(f, cfg, Condition::Frozen, &mut Lcg::new(seed)) {
-            Ok(e) => (e.score(), e.net, e.gait.map(|g| g.score()).unwrap_or(0.0)),
+            Ok(e) => {
+                // The quality half of the score: a gait on the ground, the
+                // fraction of the episode spent airborne in the air.
+                let quality = match e.gait {
+                    Some(g) => g.score(),
+                    None => e.airborne as f64 / e.ticks.max(1) as f64,
+                };
+                (e.score(), e.net, quality)
+            }
             // A parameter set the runtime refuses is not a crash, it is a
             // candidate worth nothing - but it must not be worth MORE than a
             // real one, so it scores below anything an episode can produce.
@@ -123,7 +176,7 @@ fn main() {
     // published dynamics. Every row below is read against this one.
     let (base, base_net, base_gait) = evaluate(&mut f, &start, 1);
     println!("\nconnectome as imported: score {base:.5} (net {base_net:.4} cm, gait {base_gait:.3})");
-    println!("\n{:>4}  {:>12}  {:>12}  {:>10}  {:>8}", "gen", "best", "mean", "net cm", "gait");
+    println!("\n{:>4}  {:>12}  {:>12}  {:>10}  {:>8}", "gen", "best", "mean", "net cm", if air { "airborne" } else { "gait" });
 
     let mut es = Es::new(knobs, &start, num("SIGMA", 0.6), num("RATE", 0.5), num("SEED", 0xF1E5u64)).unwrap();
     let (mut best_ever, mut best_params) = (base, start.clone());
@@ -142,5 +195,18 @@ fn main() {
     println!("{:.2} body lengths per second", net / 0.25 / (ticks as f64 * fly::CONTROL_PERIOD));
     for (k, v) in es.knobs().iter().zip(&best_params) {
         println!("  {:<28} {v:.4}", k.name);
+    }
+
+    // Written out, because a result nobody can replay is a number in a log.
+    // `OUT=path` and the sample's `--tuning` are the two ends of the same
+    // wire: a person can watch what this found.
+    if let Ok(path) = std::env::var("OUT") {
+        let t = fly::tuning::from_knobs(es.knobs(), &best_params);
+        match t.save(&path) {
+            Ok(()) => println!("\nwrote {path}; watch it with `sample-fly-interactive --tuning {path}`"),
+            Err(e) => eprintln!("could not write {path}: {e}"),
+        }
+    } else {
+        println!("\nset OUT=path to write these where the sample's --tuning can read them");
     }
 }

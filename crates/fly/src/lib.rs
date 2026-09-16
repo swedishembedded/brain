@@ -27,6 +27,7 @@ pub mod reference;
 pub mod cns;
 pub mod search;
 pub mod sense;
+pub mod tuning;
 pub mod wing;
 
 use connectome::Connectome;
@@ -39,6 +40,7 @@ pub use gait::{analyse as analyse_gait, Gait, Trace};
 pub use wing::{WingCommand, Wingbeat};
 pub use reference::{ImitationReward, Reference};
 pub use cns::Cns;
+pub use tuning::Tuning;
 pub use sense::{Antennae, Modality, Sensor};
 
 /// How the three clocks in this loop relate.

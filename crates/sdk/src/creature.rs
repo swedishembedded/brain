@@ -58,6 +58,7 @@ fn missing_argument(e: String) -> Error {
 pub struct CreatureBuilder {
     connectome: Option<PathBuf>,
     cns: fly::Cns,
+    tuning: Option<PathBuf>,
     body: Option<PathBuf>,
     dataset: String,
     weight_scale: f32,
@@ -153,6 +154,20 @@ impl CreatureBuilder {
         self
     }
 
+    /// Apply a tuning: the parameters a connectome does not contain, as found
+    /// by a search and written to a file.
+    ///
+    /// A connectome says which cell contacts which and how many times. It does
+    /// not say what a synapse is worth or what a membrane's time constants
+    /// are, and those are what decide whether the animal does anything. This
+    /// is how the answer to that gets from a search back into a creature
+    /// somebody is watching - see `fly::Tuning` and
+    /// `crates/fly/examples/walk_search.rs`.
+    pub fn tuning(mut self, path: impl AsRef<Path>) -> CreatureBuilder {
+        self.tuning = Some(path.as_ref().to_path_buf());
+        self
+    }
+
     /// Raw synapse count to membrane current. The connectome carries counts,
     /// not strengths, and nothing in the data fixes this conversion.
     pub fn weight_scale(mut self, scale: f32) -> CreatureBuilder {
@@ -239,6 +254,23 @@ impl CreatureBuilder {
             fly::Coupling::default(),
         )
         .map_err(backend)?;
+        // Before plasticity, so a tuned creature that is then allowed to learn
+        // starts from the tuning rather than from the imported connectome.
+        let mut tuned = None;
+        if let Some(path) = &self.tuning {
+            let t = fly::Tuning::load(path).map_err(backend)?;
+            let report = t
+                .apply(&mut inner, &c, fly::Wiring { weight_scale: self.weight_scale, shuffle_seed: self.shuffle, ..fly::Wiring::default() })
+                .map_err(backend)?;
+            if report.gains == 0 {
+                return Err(backend(format!(
+                    "{}: not one of its gains names a cell class this connectome has, so applying it                      would change almost nothing while looking like it worked",
+                    path.display()
+                )));
+            }
+            tuned = Some((t, report));
+        }
+
         if self.plasticity {
             // Clamp sized from the connectome's own weight range rather than
             // picked: the weights are scaled synapse counts running to tens,
@@ -305,6 +337,21 @@ impl CreatureBuilder {
             _scratch: scratch,
         };
         creature.reset();
+        // A tuning's descending command travels WITH it: a gain set found at
+        // one drive and replayed at another is not the thing that was
+        // measured. Applied after `reset`, which zeroes the command.
+        if let Some((t, report)) = tuned {
+            if let Some(cmd) = t.command() {
+                creature.drive(cmd);
+            }
+            if !report.unknown.is_empty() {
+                eprintln!(
+                    "tuning: {} parameter(s) this runtime does not know were ignored: {}",
+                    report.unknown.len(),
+                    report.unknown.join(", ")
+                );
+            }
+        }
         Ok(creature)
     }
 }
@@ -342,6 +389,7 @@ impl Creature {
         CreatureBuilder {
             connectome: None,
             cns: fly::Cns::Cord,
+            tuning: None,
             body: None,
             dataset: "manc".to_string(),
             weight_scale: fly::Wiring::default().weight_scale,
@@ -369,6 +417,12 @@ impl Creature {
     pub fn drive(&mut self, forward: f32) {
         self.drive = forward;
         self.apply_command();
+    }
+
+    /// The standing descending command, as last set. A tuning that carries
+    /// one has already applied it.
+    pub fn command(&self) -> f32 {
+        self.drive
     }
 
     /// Bias the descending command to turn: `turn` in `[-1, 1]` weights the
