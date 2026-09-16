@@ -274,9 +274,17 @@ impl Qwen35Config {
     /// pass straight into `qwen3vl::mrope::mrope_tables_scaled`'s `scaling`
     /// parameter - `None` if `self.rope_scaling` is unset, which is the SAME
     /// `None` `mrope_tables_scaled` already treats as "plain unscaled RoPE,
-    /// bit-for-bit". The one place both of this model's `mrope_tables` call
-    /// sites (prefill and single-step decode) derive this, so they cannot
-    /// drift from each other.
+    /// bit-for-bit". The one place ALL THREE of this model's `mrope_tables`
+    /// call sites derive this - whole-sequence prefill
+    /// (`Qwen35::run_forward`), single-step decode
+    /// (`Qwen35::run_decode_batch`) and the CHUNK round
+    /// (`Qwen35::run_prefill_chunk_stage`) - so they cannot drift from each
+    /// other. The third one was the one that did: it stayed on plain
+    /// `mrope_tables` when M27 wired the other two, which put a chunked
+    /// prompt replay's keys on a different rotation from the queries the
+    /// following decode steps read them with. Gated by
+    /// `tests/yarn_rope_scaling.rs`'s
+    /// `yarn_scaled_chunked_prefill_matches_token_by_token_replay`.
     pub fn yarn_scaling(&self) -> Option<(Vec<f32>, f32)> {
         self.rope_scaling.as_ref().map(|y| model::yarn::scaled_inv_freq(self.rotary_dim(), self.rope_theta, y))
     }

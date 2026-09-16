@@ -2828,7 +2828,15 @@ impl Qwen35 {
         // own M-RoPE table (absolute positions), its causal `seq_lens`, and
         // the single-block table a flat per-sequence KV cache degenerates to.
         let positions: Vec<[u32; 3]> = (0..n).map(|i| [pos_start + i, pos_start + i, pos_start + i]).collect();
-        let (cos, sin) = qwen3vl::mrope::mrope_tables(&positions, c.mrope_section, c.rotary_dim(), c.rope_theta);
+        // `mrope_tables_scaled`, not plain `mrope_tables`: this is the THIRD
+        // M-RoPE call site (`run_forward` and `run_decode_batch` are the other
+        // two), and a round that rotates its keys unscaled while the decode
+        // step that later reads them rotates its queries with YaRN applied
+        // writes a cache the rest of the sequence silently misreads. See
+        // `tests/yarn_rope_scaling.rs`'s chunked-replay gate.
+        let yarn = c.yarn_scaling();
+        let (cos, sin) =
+            qwen3vl::mrope::mrope_tables_scaled(&positions, c.mrope_section, c.rotary_dim(), c.rope_theta, yarn.as_ref().map(|(f, a)| (f.as_slice(), *a)));
         let cos = g.storage_init("qwen35.prefill_chunk.cos", &cos);
         let sin = g.storage_init("qwen35.prefill_chunk.sin", &sin);
         let block_ids = g.storage(n as u64);

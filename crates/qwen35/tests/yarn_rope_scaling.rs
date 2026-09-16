@@ -85,6 +85,59 @@ fn yarn_scaled_decode_diverges_from_unscaled_beyond_original_context() {
     assert!(diverged_beyond_boundary, "YaRN-scaled decode must diverge from the unscaled baseline once past original_max_position_embeddings=6");
 }
 
+/// **The third M-RoPE call site.** `Qwen35Config::yarn_scaling`'s own doc
+/// claims to be "the one place both of this model's `mrope_tables` call sites
+/// (prefill and single-step decode) derive this, so they cannot drift from
+/// each other" - but CHUNKED prefill (`Qwen35::prefill_chunked`, the tape every
+/// real prompt replay and every speculative verify round runs on) is a third
+/// site, and a per-round table that is not scaled while the decode step's IS
+/// writes K/V into the cache at a different rotation than the queries that
+/// later read it.
+///
+/// That failure is invisible to every other gate here: it needs YaRN turned
+/// on AND a round boundary AND a position past
+/// `original_max_position_embeddings`, and it shows up as degraded
+/// long-context quality rather than as a panic or a NaN.
+///
+/// So this asserts the contract `tests/chunked_prefill.rs` asserts for the
+/// unscaled config - a chunked replay leaves the decode state exactly where a
+/// token-by-token replay would - with `rope_scaling` ON and a prompt that
+/// crosses the boundary.
+#[test]
+fn yarn_scaled_chunked_prefill_matches_token_by_token_replay() {
+    let cfg = yarn_cfg();
+    let t = cfg.block_size;
+    let init = qwen35::init::init_weights(&cfg, 11);
+
+    // 14 tokens at chunk 4 is 4+4+4+2 - several rounds with a ragged last one,
+    // every one of them past `original_max_position_embeddings = 6` after the
+    // second, plus a 3-token single-step continuation off the chunked state.
+    let prompt: Vec<u32> = (0..14).map(|i| (i * 5 + 3) % cfg.vocab).collect();
+    let tail: Vec<u32> = (0..3).map(|i| (i * 7 + 1) % cfg.vocab).collect();
+    assert!(prompt.len() as u32 + tail.len() as u32 <= t, "the whole run must fit one instance's decode capacity");
+
+    let m_step = Qwen35::new_on(Gpu::new_cpu(pipelines()), cfg.clone(), 1, t, &init);
+    m_step.reset_decode_cache();
+    let mut want_last = Vec::new();
+    for &tok in &prompt {
+        want_last = m_step.step(tok);
+    }
+    let want_tail: Vec<Vec<f32>> = tail.iter().map(|&tok| m_step.step(tok)).collect();
+
+    let m_chunk = Qwen35::new_on(Gpu::new_cpu(pipelines()), cfg.clone(), 1, t, &init);
+    m_chunk.reset_decode_cache();
+    let got_last = m_chunk.prefill_chunked(&prompt, 4);
+    let got_tail: Vec<Vec<f32>> = tail.iter().map(|&tok| m_chunk.step(tok)).collect();
+
+    let maxabs = |a: &[f32], b: &[f32]| a.iter().zip(b).fold(0.0f32, |m, (x, y)| m.max((x - y).abs()));
+    let worst = maxabs(&got_last, &want_last);
+    assert!(worst < 1e-5, "YaRN-scaled chunked prefill: prompt's last hidden state maxabs={worst} (the round's M-RoPE table is not YaRN-scaled)");
+    for (i, (got, want)) in got_tail.iter().zip(&want_tail).enumerate() {
+        let err = maxabs(got, want);
+        assert!(err < 1e-5, "YaRN-scaled continuation token {i} maxabs={err} (the chunked prefill left the decode state on a different rotation)");
+    }
+}
+
 /// Regression proof at the whole-model level: a config that carries
 /// `rope_scaling: Some(YarnConfig::new(1.0, ..))` - i.e. the YaRN code path
 /// IS exercised (it is not simply `None`) but requests no real extension
