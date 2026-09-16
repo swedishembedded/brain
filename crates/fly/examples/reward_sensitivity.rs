@@ -18,7 +18,6 @@
 use fly::learn::{episode_with, Condition, Lcg, Objective, RewardConfig, Start};
 use fly::{Coupling, Fly, Reference, Timing, Wiring};
 use mujoco::{Model, MuJoCo};
-use neuro::LifParams;
 
 fn env(name: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| {
@@ -33,7 +32,7 @@ fn main() {
     let c = connectome::load("manc", &dir.join("neurons.csv.gz"), &dir.join("connections_princeton.csv.gz")).unwrap();
     let model = Model::from_xml(&mj, env("BRAIN_FLYBODY_XML")).unwrap();
     let reference = Reference::load(env("BRAIN_FLY_REFERENCE")).expect("the reference loads");
-    let lif = LifParams { dt_over_tau: 0.2, v_th: 1.0, r: 1.0, refrac_ticks: 1, ..LifParams::default() };
+    let lif = fly::cord_lif();
     let gpu = gpu_core::testgpu::dev(&neuro::KERNELS);
     let mut f = Fly::new(gpu, &c, model, lif, Wiring { shuffle_seed: None, ..Wiring::default() }, Timing::default(), Coupling::default()).unwrap();
 

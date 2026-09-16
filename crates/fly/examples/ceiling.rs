@@ -11,7 +11,6 @@
 use fly::learn::{episode_with, Condition, GainSearch, Lcg, Objective, RewardConfig, Start};
 use fly::{Coupling, Fly, Reference, Timing, Wiring};
 use mujoco::{Model, MuJoCo};
-use neuro::LifParams;
 
 const BODY_LENGTH_CM: f64 = 0.25;
 
@@ -20,7 +19,7 @@ fn main() {
     let dir = std::path::PathBuf::from(std::env::var("BRAIN_CONNECTOME_DIR").unwrap()).join("manc-codex");
     let c = connectome::load("manc", &dir.join("neurons.csv.gz"), &dir.join("connections_princeton.csv.gz")).unwrap();
     let xml = std::env::var("BRAIN_FLYBODY_XML").unwrap();
-    let lif = LifParams { dt_over_tau: 0.2, v_th: 1.0, r: 1.0, refrac_ticks: 1, ..LifParams::default() };
+    let lif = fly::cord_lif();
     // A FIXED start, deliberately, when imitating. The search compares one
     // evaluation against another, so the objective has to be the same function
     // each time; a random start would make every evaluation a different

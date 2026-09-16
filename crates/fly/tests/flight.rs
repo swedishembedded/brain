@@ -19,7 +19,6 @@
 use fly::wing::{WingCommand, Wingbeat};
 use fly::{Coupling, Fly, Timing, Wiring};
 use mujoco::{Model, MuJoCo};
-use neuro::LifParams;
 
 struct Rig {
     fly: Fly,
@@ -53,7 +52,7 @@ fn rig() -> Option<Rig> {
     let c = connectome::load("manc", &cdir.join("neurons.csv.gz"), &cdir.join("connections_princeton.csv.gz"))
         .expect("MANC loads");
     let model = Model::from_xml(&mj, &scene).expect("the flight model compiles");
-    let lif = LifParams { dt_over_tau: 0.1, v_th: 1.0, r: 1.0, refrac_ticks: 1, ..LifParams::default() };
+    let lif = fly::cord_lif();
     let gpu = gpu_core::testgpu::dev(&neuro::KERNELS);
     let steps = 40;
     let timing = Timing { neural_per_control: 1, physics_per_control: steps, physics_dt: cfg.timestep };

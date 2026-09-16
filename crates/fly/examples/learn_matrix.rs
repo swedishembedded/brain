@@ -9,7 +9,7 @@ use fly::learn::{episode_with, Condition, Lcg, Objective, RewardConfig, Start};
 use fly::Reference;
 use fly::{Coupling, Fly, Timing, Wiring};
 use mujoco::{Model, MuJoCo};
-use neuro::{LifParams, PlasticityParams};
+use neuro::PlasticityParams;
 use promote::stats::sign_test;
 
 /// Body length of *Drosophila melanogaster*, in the model's own units.
@@ -26,7 +26,7 @@ fn main() {
     let dir = std::path::PathBuf::from(std::env::var("BRAIN_CONNECTOME_DIR").unwrap()).join("manc-codex");
     let c = connectome::load("manc", &dir.join("neurons.csv.gz"), &dir.join("connections_princeton.csv.gz")).unwrap();
     let xml = std::env::var("BRAIN_FLYBODY_XML").unwrap();
-    let lif = LifParams { dt_over_tau: 0.2, v_th: 1.0, r: 1.0, refrac_ticks: 1, ..LifParams::default() };
+    let lif = fly::cord_lif();
     // Which objective. Displacement is kept because the ceiling was measured
     // under it and because it is the honest demonstration of why it is wrong;
     // imitation is what flybody's own walking task uses.

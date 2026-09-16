@@ -26,7 +26,6 @@
 use fly::gait::{analyse, Trace};
 use fly::{Coupling, Fly, Timing, Wiring};
 use mujoco::{Model, MuJoCo};
-use neuro::LifParams;
 
 const CONTROL_DT: f64 = 0.002;
 
@@ -80,15 +79,7 @@ fn main() {
     let mj = MuJoCo::load().unwrap();
     let dir = std::path::PathBuf::from(env("BRAIN_CONNECTOME_DIR")).join("manc-codex");
     let c = connectome::load("manc", &dir.join("neurons.csv.gz"), &dir.join("connections_princeton.csv.gz")).unwrap();
-    let lif = LifParams {
-        // 20 ms membrane time constant at a 2 ms tick. The fly literature's
-        // own connectome simulations use 20 ms; this crate started at 10.
-        dt_over_tau: 0.1,
-        v_th: 1.0,
-        r: 1.0,
-        refrac_ticks: 1,
-        ..LifParams::default()
-    };
+    let lif = fly::cord_lif();
     let ticks: usize = std::env::var("TICKS").ok().and_then(|v| v.parse().ok()).unwrap_or(1000);
     let cell = std::env::var("CELL").unwrap_or_else(|_| "DNg100".to_string());
 

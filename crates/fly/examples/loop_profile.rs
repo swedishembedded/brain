@@ -6,7 +6,7 @@
 //! stepping the network without reading it back only SUBMITS work, so the cost
 //! of a neural tick is one GPU round trip rather than the kernel time, and the
 //! body - not the connectome - is what caps this loop.
-use neuro::{DynamicalSystem, LifParams, Port, SpikingNet};
+use neuro::{DynamicalSystem, Port, SpikingNet};
 use std::time::Instant;
 
 fn main() {
@@ -14,7 +14,7 @@ fn main() {
     let c = connectome::load("manc", &dir.join("neurons.csv.gz"), &dir.join("connections_princeton.csv.gz")).unwrap();
     let csc = c.signed_csc(1e-3);
     let gpu = gpu_core::testgpu::dev(&neuro::KERNELS);
-    let lif = LifParams { dt_over_tau: 0.2, v_th: 1.0, r: 1.0, refrac_ticks: 1, ..LifParams::default() };
+    let lif = fly::cord_lif();
     let mut net = SpikingNet::new(gpu, &csc, lif).unwrap();
     let n = c.neurons.len();
     let mut spike = vec![0.0f32; n];

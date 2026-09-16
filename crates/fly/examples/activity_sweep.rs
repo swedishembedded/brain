@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 //! Pick the weight scale by measurement: which values leave the cord silent,
 //! which make it seize, and which sit in between.
-use neuro::{DynamicalSystem, LifParams, Port, SpikingNet};
+use neuro::{DynamicalSystem, Port, SpikingNet};
 fn main() {
     let dir = std::path::PathBuf::from(std::env::var("BRAIN_CONNECTOME_DIR").unwrap()).join("manc-codex");
     let c = connectome::load("manc", &dir.join("neurons.csv.gz"), &dir.join("connections_princeton.csv.gz")).unwrap();
@@ -14,7 +14,7 @@ fn main() {
         for &cmd in &[2.0f32, 5.0] {
             let csc = c.signed_csc(scale);
             let gpu = gpu_core::testgpu::dev(&neuro::KERNELS);
-            let lif = LifParams { dt_over_tau: 0.2, v_th: 1.0, r: 1.0, refrac_ticks: 1, ..LifParams::default() };
+            let lif = fly::cord_lif();
             let mut net = SpikingNet::new(gpu, &csc, lif).unwrap();
             let mut drive = vec![0.0f32; n];
             for &d in &desc { drive[d as usize] = cmd; }

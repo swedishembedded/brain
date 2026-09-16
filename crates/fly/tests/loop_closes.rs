@@ -9,7 +9,6 @@
 
 use fly::{Coupling, Fly, Timing, Wiring};
 use mujoco::{Model, MuJoCo};
-use neuro::LifParams;
 
 /// Descending command strength. Above threshold, see `build`.
 const COMMAND: f32 = 2.0;
@@ -62,7 +61,7 @@ fn build(r: &Rig) -> Fly {
     //
     // Sign comes from the connectome (52.1% excitatory, 47.7% inhibitory) and
     // applying it is not optional - an all-excitatory network has no brake.
-    let lif = LifParams { dt_over_tau: 0.2, v_th: 1.0, r: 1.0, refrac_ticks: 1, ..LifParams::default() };
+    let lif = fly::cord_lif();
     // Command must EXCEED threshold: with r = 1 and v_th = 1, a command of
     // exactly 1.0 makes v approach threshold asymptotically and never reach
     // it. That is how an earlier version of this test measured a silent cord.

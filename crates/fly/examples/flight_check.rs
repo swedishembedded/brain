@@ -16,7 +16,6 @@
 use fly::wing::{WingCommand, Wingbeat};
 use fly::{Coupling, Fly, Timing, Wiring};
 use mujoco::{Model, MuJoCo};
-use neuro::LifParams;
 
 fn env(name: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| {
@@ -36,7 +35,7 @@ fn main() {
     let cdir = std::path::PathBuf::from(env("BRAIN_CONNECTOME_DIR")).join("manc-codex");
     let c = connectome::load("manc", &cdir.join("neurons.csv.gz"), &cdir.join("connections_princeton.csv.gz")).unwrap();
     let model = Model::from_xml(&mj, &scene).expect("the flight model compiles");
-    let lif = LifParams { dt_over_tau: 0.1, v_th: 1.0, r: 1.0, refrac_ticks: 1, ..LifParams::default() };
+    let lif = fly::cord_lif();
     let gpu = gpu_core::testgpu::dev(&neuro::KERNELS);
 
     // The physics timestep must match the model, or the stroke advances at the

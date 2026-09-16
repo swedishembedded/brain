@@ -78,6 +78,41 @@ impl Default for Timing {
 // Raising this is legitimate and costs ~0.8 ms per extra tick. It is not
 // something to raise without re-measuring.
 
+/// The membrane and synapse parameters a nerve cord is run at here.
+///
+/// A function rather than a constant because it is a MEASURED operating point,
+/// not a convention, and the measurement should live next to the number. On the
+/// front-leg neuropil driven through one descending cell type, sweeping the
+/// synaptic time constants over a decade each:
+///
+/// | inhibitory tau | rhythmicity | cord active | motor spikes/tick |
+/// |---|---|---|---|
+/// | 5 ms | 0.04 to 0.30 | 13 to 15% | 13 to 18 |
+/// | **20 ms** | **0.14 to 0.46** | **3 to 6%** | **7 to 19** |
+/// | 40 ms | 0.11 to 0.40 | 2 to 5% | 1 to 6 |
+///
+/// Twenty milliseconds is a peak rather than an end of a range. Below it the
+/// cord fires at a seizure's rate and the rhythm is buried; above it the rhythm
+/// survives but the inhibition swallows the motor output, and a cord that
+/// oscillates beautifully while sending nothing to the muscles is not a
+/// controller. It is also the asymmetry a reciprocal-inhibition oscillator
+/// needs and roughly what the animal has: fast cholinergic excitation against
+/// slower GABAergic inhibition.
+///
+/// The membrane constant is 10 ms and the refractory period one control tick.
+pub fn cord_lif() -> LifParams {
+    let dt_ms = 2.0;
+    LifParams {
+        dt_over_tau: dt_ms / 10.0,
+        v_th: 1.0,
+        r: 1.0,
+        refrac_ticks: 1,
+        dt_over_tau_syn: dt_ms / 5.0,
+        dt_over_tau_inh: dt_ms / 20.0,
+        ..LifParams::default()
+    }
+}
+
 /// How the connectome becomes a network.
 ///
 /// A struct rather than three more positional arguments, because two of these
@@ -107,11 +142,20 @@ pub struct Wiring {
 
 impl Default for Wiring {
     fn default() -> Self {
-        // 3e-2: swept, not reasoned about. See `tests/loop_closes.rs`.
-        // 10.0: the reconstruction leaves a long tail of fragments and giant
-        // cells, and an unclamped factor turns one badly reconstructed neuron
-        // into a silent one or a runaway one.
-        Wiring { weight_scale: 3e-2, shuffle_seed: None, size_limit: Some(10.0), min_synapses: 1 }
+        // 0.6: swept against the gait criterion with the command delivered to
+        // ONE descending cell type. This crate's earlier default of 0.03 was
+        // swept too, but under a simultaneous barrage of all 1,328 descending
+        // neurons - and under a single-cell-type command it leaves the cord at
+        // 0.007% active, which is to say the command dies before it arrives.
+        //
+        // 5: a reconstruction assigns a great many one- and two-synapse pairs
+        // at the edge of what the imaging resolves, numerous enough to dominate
+        // a neuron's input count while carrying almost none of its drive.
+        //
+        // 10.0: the reconstruction also leaves a long tail of fragments and
+        // giant cells, and an unclamped size factor turns one badly
+        // reconstructed neuron into a silent one or a runaway one.
+        Wiring { weight_scale: 0.6, shuffle_seed: None, size_limit: Some(10.0), min_synapses: 5 }
     }
 }
 
