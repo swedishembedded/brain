@@ -375,6 +375,7 @@ dependencies = [
  "brain-connectome",
  "brain-flux2",
  "brain-fly",
+ "brain-flybody",
  "brain-gpu-core",
  "brain-imaging",
  "brain-loader",
@@ -387,6 +388,7 @@ dependencies = [
  "brain-testutil",
  "brain-wm-display",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

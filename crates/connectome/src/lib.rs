@@ -18,6 +18,8 @@
 pub mod codex;
 pub mod csv;
 
+use std::path::{Path, PathBuf};
+
 pub use codex::{load, load_readers, Coverage};
 
 /// A neurotransmitter, as published.
@@ -169,6 +171,37 @@ pub struct Neuron {
     /// measure. See [`Connectome::size`].
     pub volume_nm3: f64,
     pub nt: NtPrior,
+}
+
+/// Find a dataset's two files under `root`, wherever it was unpacked.
+///
+/// A Codex export arrives as a directory of two gzipped CSVs, and what that
+/// directory is CALLED depends on how it was downloaded: the bare dataset
+/// name, the name with the portal's `-codex` suffix, or the files sitting at
+/// the root with no directory at all. None of those is more correct than the
+/// others and a caller should not have to know which one they have - the
+/// failure otherwise is a path error naming one spelling, from which it is not
+/// obvious that two others would have worked.
+///
+/// Returns `(neurons, connections)`. The error names every layout that was
+/// tried, because "no such file" without the list is the least actionable
+/// message a data dependency can produce.
+pub fn find(root: impl AsRef<Path>, dataset: &str) -> Result<(PathBuf, PathBuf), String> {
+    let root = root.as_ref();
+    let mut tried = Vec::new();
+    for dir in [root.to_path_buf(), root.join(dataset), root.join(format!("{dataset}-codex"))] {
+        let neurons = dir.join("neurons.csv.gz");
+        let edges = dir.join("connections_princeton.csv.gz");
+        if neurons.is_file() && edges.is_file() {
+            return Ok((neurons, edges));
+        }
+        tried.push(dir.display().to_string());
+    }
+    Err(format!(
+        "no {dataset} export found. Looked for neurons.csv.gz and \
+         connections_princeton.csv.gz in: {}",
+        tried.join(", ")
+    ))
 }
 
 /// A loaded connectome: the graph, the annotations, and the proof that every
