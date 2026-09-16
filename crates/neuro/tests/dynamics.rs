@@ -41,7 +41,7 @@ fn membrane_matches_the_closed_form_for_a_constant_input() {
     // driven purely by the external port, which is the regime the closed form
     // describes. The threshold is placed out of reach so the trajectory is the
     // pure exponential rather than a reset sawtooth.
-    let p = LifParams { dt_over_tau: 0.2, v_rest: -0.3, v_reset: -0.6, v_th: 1.0e6, r: 2.0, refrac_ticks: 0 };
+    let p = LifParams { dt_over_tau: 0.2, v_rest: -0.3, v_reset: -0.6, v_th: 1.0e6, r: 2.0, refrac_ticks: 0, dt_over_tau_syn: 1.0 };
     let csc = Csc::from_edges(1, &[]).unwrap();
     let gpu = gpu_core::testgpu::dev(&KERNELS);
     let mut net = SpikingNet::new(gpu, &csc, p).unwrap();
@@ -64,7 +64,7 @@ fn membrane_matches_the_closed_form_for_a_constant_input() {
 
 #[test]
 fn a_neuron_fires_at_threshold_and_then_stays_silent_while_refractory() {
-    let p = LifParams { dt_over_tau: 1.0, v_rest: 0.0, v_reset: 0.0, v_th: 0.5, r: 1.0, refrac_ticks: 3 };
+    let p = LifParams { dt_over_tau: 1.0, v_rest: 0.0, v_reset: 0.0, v_th: 0.5, r: 1.0, refrac_ticks: 3, dt_over_tau_syn: 1.0 };
     let csc = Csc::from_edges(1, &[]).unwrap();
     let gpu = gpu_core::testgpu::dev(&KERNELS);
     let mut net = SpikingNet::new(gpu, &csc, p).unwrap();
@@ -100,7 +100,7 @@ fn the_gather_matches_a_host_sparse_matvec() {
     // the gather's loop bound deliberately broken. Hence the low threshold
     // here, and the assertion that neurons actually fired.
     let csc = random_csc(300, 19, 0xBEEF);
-    let p = LifParams { dt_over_tau: 1.0, v_rest: 0.0, v_reset: 0.0, v_th: 0.25, r: 1.0, refrac_ticks: 0 };
+    let p = LifParams { dt_over_tau: 1.0, v_rest: 0.0, v_reset: 0.0, v_th: 0.25, r: 1.0, refrac_ticks: 0, dt_over_tau_syn: 1.0 };
     let n = csc.n as usize;
 
     let gpu = gpu_core::testgpu::dev(&KERNELS);
@@ -272,4 +272,63 @@ fn a_malformed_connectome_is_refused_rather_than_silently_misread() {
     assert!(out_of_range.validate().is_err(), "an out-of-range presynaptic index must be refused");
 
     assert!(Csc::from_edges(2, &[(0, 5, 1.0)]).is_err(), "an edge past the neuron count must be refused");
+}
+
+#[test]
+fn a_synaptic_time_constant_makes_a_spike_outlast_its_tick() {
+    // Two neurons, one edge: 0 -> 1. Neuron 0 is driven over threshold for a
+    // single tick and then released, so exactly one spike crosses the synapse.
+    let csc = Csc::from_edges(2, &[(0, 1, 1.0)]).unwrap();
+    let base = LifParams {
+        dt_over_tau: 1.0,
+        v_rest: 0.0,
+        v_reset: 0.0,
+        // Out of reach, so neuron 1 integrates the current without ever firing
+        // and resetting the thing being measured.
+        v_th: 1.0e6,
+        r: 1.0,
+        refrac_ticks: 0,
+        dt_over_tau_syn: 1.0,
+    };
+
+    /// Neuron 1's synaptic current for the first `n` ticks after one spike.
+    fn current_after_one_spike(csc: &Csc, p: LifParams, n: usize) -> Vec<f32> {
+        let mut net = SpikingNet::new(gpu_core::testgpu::dev(&KERNELS), csc, p).unwrap();
+        let mut out = Vec::new();
+        let mut isyn = vec![0.0f32; 2];
+        for k in 0..n {
+            // Neuron 0 fires on the first tick only. Its threshold is the
+            // unreachable one too, so it is driven ABOVE it deliberately.
+            net.drive(Port::Drive, &[if k == 0 { 2.0e6 } else { 0.0 }, 0.0]).unwrap();
+            net.step();
+            net.read(Port::Current, &mut isyn).unwrap();
+            out.push(isyn[1]);
+        }
+        out
+    }
+
+    // THE CONTROL: an instantaneous synapse. The current appears for exactly
+    // one tick and is gone. Without this, "the decayed one lasted longer" is
+    // equally satisfied by a network where nothing ever arrives at all.
+    let instant = current_after_one_spike(&csc, base, 6);
+    let arrived = instant.iter().filter(|c| **c > 0.0).count();
+    assert_eq!(arrived, 1, "an instantaneous synapse should carry current for one tick: {instant:?}");
+
+    // Half of it survives each tick, so the current decays geometrically
+    // instead of vanishing.
+    let slow = current_after_one_spike(&csc, LifParams { dt_over_tau_syn: 0.5, ..base }, 6);
+    let carried = slow.iter().filter(|c| **c > 1e-6).count();
+    assert!(carried >= 4, "a decaying synapse should carry current for several ticks: {slow:?}");
+    for pair in slow.windows(2).skip(1) {
+        assert!(pair[1] < pair[0], "the current should decay monotonically: {slow:?}");
+        assert!((pair[1] / pair[0] - 0.5).abs() < 1e-5, "each tick should keep half: {slow:?}");
+    }
+
+    // And the peak is the same either way: the time constant spreads the
+    // charge, it does not add any.
+    assert_eq!(
+        slow.iter().cloned().fold(f32::MIN, f32::max),
+        instant.iter().cloned().fold(f32::MIN, f32::max),
+        "a synaptic time constant must not change how much current a spike delivers"
+    );
 }

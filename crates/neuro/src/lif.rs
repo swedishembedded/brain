@@ -34,13 +34,34 @@ pub struct LifParams {
     pub r: f32,
     /// Absolute refractory period, in ticks.
     pub refrac_ticks: u32,
+    /// `dt / tau_syn`, the synaptic decay rate. `1.0` is an instantaneous
+    /// synapse - all of last tick's current gone - and is what this crate did
+    /// before the parameter existed.
+    ///
+    /// A spike is an impulse and a synapse is not. Without a synaptic time
+    /// constant the summed input to a population is noise at the tick rate,
+    /// and a recurrent loop through three neurons closes in three ticks, so
+    /// the only rhythm such a network can hold is one the integration step
+    /// chose. This is what puts a network oscillator's period in the range an
+    /// animal moves at.
+    pub dt_over_tau_syn: f32,
 }
 
 impl Default for LifParams {
     /// Dimensionless defaults in the usual millivolt-shaped range, chosen so
     /// a unit-current input is comfortably suprathreshold.
     fn default() -> Self {
-        LifParams { dt_over_tau: 0.1, v_rest: 0.0, v_reset: 0.0, v_th: 1.0, r: 1.0, refrac_ticks: 0 }
+        LifParams {
+            dt_over_tau: 0.1,
+            v_rest: 0.0,
+            v_reset: 0.0,
+            v_th: 1.0,
+            r: 1.0,
+            refrac_ticks: 0,
+            // Instantaneous, so the default reproduces every measurement
+            // taken before synapses had a time constant.
+            dt_over_tau_syn: 1.0,
+        }
     }
 }
 
@@ -48,6 +69,9 @@ impl LifParams {
     pub fn validate(&self) -> Result<(), String> {
         if !(self.dt_over_tau > 0.0 && self.dt_over_tau <= 1.0) {
             return Err(format!("dt_over_tau must be in (0, 1], got {}", self.dt_over_tau));
+        }
+        if !(self.dt_over_tau_syn > 0.0 && self.dt_over_tau_syn <= 1.0) {
+            return Err(format!("dt_over_tau_syn must be in (0, 1], got {}", self.dt_over_tau_syn));
         }
         if self.v_th <= self.v_reset {
             return Err(format!("v_th ({}) must exceed v_reset ({})", self.v_th, self.v_reset));
@@ -377,7 +401,7 @@ impl DynamicalSystem for SpikingNet {
         let gather = self.gpu.step(
             K_GATHER,
             &[&self.indptr, &self.pre, &self.w, &self.spike, &self.isyn],
-            &[self.n],
+            &[self.n, (1.0 - self.params.dt_over_tau_syn).to_bits()],
             self.n * 64,
         );
         let lif = self.gpu.step(

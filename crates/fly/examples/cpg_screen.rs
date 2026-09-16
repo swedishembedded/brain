@@ -52,7 +52,13 @@ fn main() {
         sub
     };
     let model = Model::from_xml(&mj, env("BRAIN_FLYBODY_XML")).unwrap();
-    let lif = LifParams { dt_over_tau: 0.1, v_th: 1.0, r: 1.0, refrac_ticks: 1, ..LifParams::default() };
+    // $TAU_SYN is the synaptic time constant in milliseconds; 0 keeps the
+    // instantaneous synapse this crate had before the parameter existed, which
+    // is the control for whether it matters.
+    let tau_syn_ms: f32 = std::env::var("TAU_SYN").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
+    let dt_over_tau_syn = if tau_syn_ms > 0.0 { (2.0 / tau_syn_ms).min(1.0) } else { 1.0 };
+    let lif = LifParams { dt_over_tau: 0.1, v_th: 1.0, r: 1.0, refrac_ticks: 1, dt_over_tau_syn, ..LifParams::default() };
+    println!("synaptic tau {:.1} ms", if tau_syn_ms > 0.0 { tau_syn_ms } else { 2.0 });
     let n = c.neurons.len() as f64;
     let ticks: usize = std::env::var("TICKS").ok().and_then(|v| v.parse().ok()).unwrap_or(1000);
     let cell = std::env::var("CELL").unwrap_or_else(|_| "DNg100".to_string());

@@ -17,8 +17,9 @@
 //   pre    : [nnz]  presynaptic neuron index of each edge
 //   w      : [nnz]  signed synaptic weight of each edge
 //   spike  : [n]    1.0 where the presynaptic neuron fired this tick, else 0.0
-//   isyn   : [n]    OUT: total synaptic current arriving at each neuron
-//   params : n
+//   isyn   : [n]    IN/OUT: synaptic current arriving at each neuron, carried
+//                   across ticks by `syn_decay`
+//   params : n, syn_decay
 //
 // Dispatch: n * 64 invocations (one workgroup per postsynaptic neuron).
 //
@@ -52,6 +53,20 @@
 
 struct Params {
     n: u32,
+    // Fraction of last tick's synaptic current that survives into this one:
+    // `exp(-dt / tau_syn)`. ZERO reproduces an instantaneous synapse exactly,
+    // bit for bit, which is what every gate written before this parameter
+    // existed measured.
+    //
+    // It is not a refinement. A spike is an impulse and a synapse is not: the
+    // postsynaptic current from one vesicle release rises and decays over
+    // milliseconds. With no decay at all, a population's summed input is
+    // white-ish noise at the tick rate, and a recurrent loop through three
+    // neurons closes in three ticks - so the only oscillation such a network
+    // can sustain is at a frequency set by the integration step rather than by
+    // the biology. A synaptic time constant is what puts a network oscillator's
+    // period in the range an animal moves at.
+    syn_decay: f32,
 };
 
 @group(0) @binding(0) var<uniform> p: Params;
@@ -87,6 +102,6 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
         s = s + partial[i];
     }
     if (t == 0u) {
-        isyn[post] = s;
+        isyn[post] = isyn[post] * p.syn_decay + s;
     }
 }
