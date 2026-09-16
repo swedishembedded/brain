@@ -128,8 +128,16 @@ pub struct Neuron {
     pub flow: String,
     /// `motor`, `descending`, `sensory`, `optic_lobe_intrinsic`, ...
     pub super_class: String,
-    /// `leg_motor_neuron`, `wing_motor_neuron`, ...
+    /// `leg_motor_neuron`, `wing_motor_neuron`, ... In MANC this is the short
+    /// form (`fl`, `ml`, `hl`, `wm`).
     pub class: String,
+    /// The finer annotation, and the one that carries the MUSCLE a motor
+    /// neuron innervates: `MN-LegNpT2-Ti_flexor` names both the thoracic
+    /// segment and the muscle. Worth knowing that this exists, because the
+    /// obvious alternative is Janelia's per-neuron feather, and going that way
+    /// would have put an Arrow dependency in the import path for a field the
+    /// CSV already carries.
+    pub sub_class: String,
     /// The nerve a motor or sensory neuron runs in, e.g.
     /// `left_prothoracic_leg_nerve`. This is the handle a body attaches to.
     pub nerve: String,

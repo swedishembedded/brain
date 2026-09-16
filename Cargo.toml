@@ -44,6 +44,7 @@ default-members = [
     "crates/data",
     "crates/audio",
     "crates/model",
+    "crates/flybody",
     "crates/mujoco",
     "crates/connectome",
     "crates/neuro",
@@ -189,6 +190,7 @@ brain-data = { path = "crates/data" }
 brain-audio = { path = "crates/audio" }
 brain-model = { path = "crates/model" }
 brain-connectome = { path = "crates/connectome" }
+brain-flybody = { path = "crates/flybody" }
 brain-mujoco = { path = "crates/mujoco" }
 brain-neuro = { path = "crates/neuro" }
 brain-toymoe = { path = "crates/toymoe" }

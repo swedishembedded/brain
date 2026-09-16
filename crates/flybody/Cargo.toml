@@ -1,0 +1,16 @@
+[package]
+name = "brain-flybody"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The fly's body seam: which MuJoCo actuator each motor neuron drives, built from the connectome's own muscle annotations rather than a hand-written neuron list."
+
+[lib]
+name = "flybody"
+path = "src/lib.rs"
+
+[dependencies]
+brain-connectome.workspace = true
+
+[dev-dependencies]
+brain-testutil.workspace = true

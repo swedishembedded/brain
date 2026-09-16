@@ -119,6 +119,7 @@ fn read_neurons(r: impl Read, cov: &mut Coverage) -> Result<(BTreeMap<u64, u32>,
     let c_flow = header.find("Flow");
     let c_super = header.find("Super Class");
     let c_class = header.find("Class");
+    let c_sub = header.find("Sub Class");
     let c_nerve = header.find("Nerve");
     let c_side = header.find("Soma side");
     let c_type = header.find("Primary Cell Type");
@@ -162,6 +163,7 @@ fn read_neurons(r: impl Read, cov: &mut Coverage) -> Result<(BTreeMap<u64, u32>,
             flow: get(c_flow),
             super_class: get(c_super),
             class: get(c_class),
+            sub_class: get(c_sub),
             nerve: get(c_nerve),
             soma_side: get(c_side),
             cell_type: get(c_type),

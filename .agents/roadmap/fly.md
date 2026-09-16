@@ -334,10 +334,31 @@ it against the scan+sort reference at `max|d| == 0`.
   typed reason; the degree and class statistics in this file reproduced by the
   importer's own test, for BOTH datasets, which is also what settles the
   density question above.
-* **M3 - body.** MuJoCo behind the feature gate; flybody model loaded; the
-  MN -> muscle -> actuator map. **Gate:** the fly stands under gravity; passive
-  replay of reference kinematics reproduces recorded joint angles. Also
-  resolves the `mujoco-rs` link-time question above.
+* **M3 - body. LANDED except the kinematic replay.** `crates/mujoco` binds
+  MuJoCo through its flat state API and validates its own mjModel layout
+  against `mj_stateSize` rather than pinning a version - so no feature gate was
+  needed after all, `dlopen` keeps it out of the build entirely and absence is
+  a runtime skip. `crates/flybody` maps MANC's motor neurons onto flybody's
+  actuators from the connectome's own `Sub Class` (`MN-LegNpT2-Ti_flexor`
+  carries segment and muscle), so no Arrow dependency and no hand-written
+  neuron list. The real fly loads at nq=109 / nv=108 / nu=78 and integrates
+  stably; 330 of 396 leg motor neurons attach, the other 66 reported by name.
+
+  **Three findings the walking milestone must handle, each pinned by test and
+  each with a different cause:** (a) MANC annotates `Ta_depressor`,
+  `Ta_levator` and the coxa promotor on the FRONT legs only, so `tarsus_T2/T3`
+  have no motor neuron and `coxa_T2/T3` have a retractor with nothing to
+  oppose it - an annotation gap; (b) `tarsus2` is one-way on every leg and that
+  is CORRECT, since the long tendon muscle flexes the tarsus and an insect leg
+  has no tarsal extensor, so inventing an antagonist would be wrong;
+  (c) `femur_twist` has only the femur reductor, and whether that rotation has
+  an antagonist or is merely unannotated is not something the map can settle.
+
+  **Still open in M3:** the polarity convention is stated, not verified. Which
+  DoF a muscle acts on is anatomy and is solid; whether a flexor is positive or
+  negative against flybody's own joint axes needs the recorded kinematics
+  replayed through the model. That replay is what closes this milestone, and
+  the 16,252-snippet walking dataset is already on disk for it.
 * **M4 - closed loop, no learning.** descending drive -> MNs -> torques ->
   proprioception -> back into the graph. **Gate:** the loop sustains 500 Hz
   in real time, *measured*; a lesioned proprioceptive channel changes the
