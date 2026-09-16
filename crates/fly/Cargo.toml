@@ -1,0 +1,20 @@
+[package]
+name = "brain-fly"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The composed animal: a connectome running as a spiking network, driving a MuJoCo body through its motor neurons, and reading that body back through its proprioceptors."
+
+[lib]
+name = "fly"
+path = "src/lib.rs"
+
+[dependencies]
+brain-connectome.workspace = true
+brain-flybody.workspace = true
+brain-gpu-core.workspace = true
+brain-mujoco.workspace = true
+brain-neuro.workspace = true
+
+[dev-dependencies]
+brain-testutil.workspace = true

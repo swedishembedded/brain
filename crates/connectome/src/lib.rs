@@ -176,6 +176,50 @@ impl Connectome {
         self.neurons.iter().enumerate().filter(|(_, n)| pred(n)).map(|(i, _)| i as u32).collect()
     }
 
+    /// The graph with each edge SIGNED by its presynaptic neuron's
+    /// transmitter and scaled.
+    ///
+    /// [`Self::csc`] carries raw synapse counts, which are unsigned: a count
+    /// cannot be negative. Sign belongs to the presynaptic neuron, not the
+    /// edge, so it is applied here rather than at import - and applying it is
+    /// not optional, because a network in which every synapse excites has no
+    /// inhibition at all and saturates immediately.
+    ///
+    /// `scale` converts counts to membrane current. It matters more than it
+    /// looks: in-degree averages in the hundreds and synapse counts run to
+    /// tens, so an unscaled network drives every neuron thousands of
+    /// millivolts past threshold. Nothing here fits it; it is the caller's
+    /// dial.
+    ///
+    /// A neuron whose transmitter is unknown contributes ZERO rather than a
+    /// guessed sign. That is deliberate: an unknown sign is not a coin flip,
+    /// it is an absence of evidence, and 0.0 is what
+    /// [`NtPrior::sign`] already returns for it.
+    pub fn signed_csc(&self, scale: f32) -> neuro::Csc {
+        let mut csc = self.csc.clone();
+        for (k, w) in csc.w.iter_mut().enumerate() {
+            let pre = self.csc.pre[k] as usize;
+            let sign = self.neurons.get(pre).map_or(0.0, |n| n.nt.sign());
+            *w *= sign * scale;
+        }
+        csc
+    }
+
+    /// How many edges [`Self::signed_csc`] would silence, and how many it
+    /// would make inhibitory. Reported rather than inferred, because "the
+    /// network went quiet" has too many possible causes to guess between.
+    pub fn sign_census(&self) -> (usize, usize, usize) {
+        let (mut exc, mut inh, mut zero) = (0, 0, 0);
+        for &p in &self.csc.pre {
+            match self.neurons.get(p as usize).map_or(0.0, |n| n.nt.sign()) {
+                s if s > 0.0 => exc += 1,
+                s if s < 0.0 => inh += 1,
+                _ => zero += 1,
+            }
+        }
+        (exc, inh, zero)
+    }
+
     /// `(mean, median, p99, max)` of the in-degree, the statistic a published
     /// connectome is most cheaply compared against.
     pub fn in_degree_stats(&self) -> (f64, u32, u32, u32) {

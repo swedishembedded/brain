@@ -371,10 +371,43 @@ it against the scan+sort reference at `max|d| == 0`.
   metric will detect. Kinematic replay against the 16,252-snippet walking
   dataset would pin it outright and is worth doing, but it is no longer a
   blocker for M4.
-* **M4 - closed loop, no learning.** descending drive -> MNs -> torques ->
-  proprioception -> back into the graph. **Gate:** the loop sustains 500 Hz
-  in real time, *measured*; a lesioned proprioceptive channel changes the
-  trajectory (i.e. the feedback is actually load-bearing, not decorative).
+* **M4 - closed loop, no learning. LANDED.** `crates/fly` composes the cord,
+  the body and the wiring between them: 1,328 descending neurons as the command
+  channel, 330 motor neurons driving 44 actuators, 304 leg proprioceptors
+  reading joint state back. Lesioning the sensory channel changes all 109
+  generalized coordinates, so the loop is closed rather than decorative.
+
+  **The 500 Hz gate could not be met and should not have been written as one.**
+  flybody runs at **2.69x slower than real time** on this hardware, so its own
+  walking control rate is unreachable here whatever the nervous system costs;
+  asserting it would assert something about the machine. What is brain's to
+  answer is whether closing the loop is cheap against the body it closes
+  around, and it is: **185 Hz closed against 189 Hz for the body alone**, a 2%
+  cost. The connectome is not the bottleneck; MuJoCo is.
+
+  **Two defects found here, both the same shape - a measurement that looked
+  healthy while the thing it measured was not happening:**
+
+  1. *The sensory channel was connected and silent.* Proprioceptors are
+     afferents with almost no incoming synapses, so injected current is the
+     only thing that can fire them. At the first sensory gain the peak current
+     was 0.45 against a threshold of 1.0: current flowed every tick, no
+     proprioceptor ever spiked, and lesioning changed nothing - while the cord
+     fired, the body moved, and every other check passed. Swept it; the
+     transition sits exactly at threshold. `proprioceptor_spikes()` now exists
+     so a test can assert the channel CARRIES something before asserting that
+     removing it matters.
+  2. *The sign prior was computed and never applied.* `Connectome::csc` holds
+     raw synapse counts, which are unsigned. `signed_csc` applies the
+     transmitter sign (52.1% excitatory, 47.7% inhibitory, 0.2% unknown
+     contributing zero rather than a guess) and a scale, swept the same way: at
+     1e-3 the cord is 1.1% active with ZERO motor spikes - alive, and driving
+     nothing.
+
+  Also measured, counter to the obvious guess: a neural step without a readback
+  only SUBMITS work (0.068 ms), while step-then-readback costs 0.807 ms. A
+  neural tick costs one GPU round trip, not kernel time, which is why
+  `neural_per_control` defaults to 1.
 * **M5 - learning to walk.** Three-factor plasticity over 5.24M edges with sign
   as a fitted parameter; the surrogate-gradient ceiling alongside as the
   instrument. **Gate:** the definition-of-done table, via `promote`'s sign test.

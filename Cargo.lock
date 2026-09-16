@@ -1154,6 +1154,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-fly"
+version = "1.1.0"
+dependencies = [
+ "brain-connectome",
+ "brain-flybody",
+ "brain-gpu-core",
+ "brain-mujoco",
+ "brain-neuro",
+ "brain-testutil",
+]
+
+[[package]]
 name = "brain-flybody"
 version = "1.1.0"
 dependencies = [
