@@ -77,8 +77,8 @@ here (items already tracked there are not repeated - see that file's own
 
 | # | Rule | Where | Finding | Status |
 |---|---|---|---|---|
-| 1 | 14/2 | `crates/sdk/src/creature.rs` | `Creature` has zero tests, inline or integration - the only public surface with none | open (M4) |
-| 2 | 14 | `crates/sdk/src/view.rs:11-14` | `View::frame`'s documented headless-capture behavior is untested | open (M4) |
+| 1 | 14/2 | `crates/sdk/src/creature.rs` | `Creature` has zero tests, inline or integration - the only public surface with none | fixed (M4) |
+| 2 | 14 | `crates/sdk/src/view.rs:11-14` | `View::frame`'s documented headless-capture behavior is untested | fixed (M4) |
 | 3 | 8 | `crates/sdk/src/pipeline.rs:321,331` | `generate`/`generate_with` hardcode `&CancelToken::default()` and a no-op progress closure; no public way to supply either | open (M5) |
 | 4 | 8 | `crates/sdk/src/pipeline.rs:300,481,504` | download and s3dit-build progress are likewise discarded | open (M5) |
 | 5 | 6 | `crates/sdk/src/error.rs:70-71` | `Error::Cancelled` is a dead public variant - unreachable with no public cancel entry point | open (M5) |
@@ -194,7 +194,18 @@ then `crates/sdk` (M10c).
       mirrors `ImagePipelineBuilder::device`; `Creature::build` now calls
       `gpu_core::Gpu::new(&neuro::KERNELS)` - the same production
       constructor every `resident_*.rs` uses - instead of the test pool.
-- [ ] **M4** - `Creature`/`View` end-to-end test (findings 1, 2).
+- [x] **M4** - `Creature`/`View` end-to-end test (findings 1, 2).
+      `crates/fly`'s own suite has no synthetic connectome/body fixture
+      either - every one of its tests gates on real `BRAIN_CONNECTOME_DIR`/
+      `BRAIN_FLYBODY_XML` data with a clean skip (`crates/fly/tests/
+      loop_closes.rs`'s `rig()`), so `crates/sdk/tests/creature.rs` follows
+      the same convention rather than inventing a fixture this workspace has
+      never needed before. Two tests need no real data at all (the missing
+      `.connectome()`/`.body()` argument errors, always-green); two need the
+      real env vars and skip cleanly via `brain_testutil::skip_unavailable`
+      when absent (build/drive/step/reset, and `View::open`/`show`/`frame`
+      at the requested size) - honest about the gap per rule 14, same as
+      `tests/image_pipeline.rs`'s own documented ceiling.
 - [ ] **M5** - progress/cancellation wired for real (findings 3, 4, 5).
 - [ ] **M6** - split `Error::Backend`'s catch-all (findings 12, 13).
 - [ ] **M7** - `Creature` progressive disclosure + de-duplicate `watch.rs` (findings 15, 16).
