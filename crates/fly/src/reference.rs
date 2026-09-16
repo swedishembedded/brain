@@ -262,7 +262,7 @@ impl ImitationReward {
         )
     }
 
-    /// [`Self::factors_over`], summed.
+    /// [`Self::factors_over`], multiplied. See [`Self::total`].
     pub fn total_over(
         &self,
         qpos: &[f64],
@@ -272,15 +272,42 @@ impl ImitationReward {
         dofs: &[u32],
     ) -> f64 {
         let (a, b) = self.factors_over(qpos, qvel, ref_qpos, ref_qvel, dofs);
-        a + b
+        a * b
     }
 
-    /// The factors summed. flybody's agent consumes them separately, so they
-    /// are exposed separately too and this is only the scalar a local learning
-    /// rule needs.
+    /// The factors MULTIPLIED, which is the scalar reward.
+    ///
+    /// A product, not a sum, and the difference is the whole character of the
+    /// objective: `flybody/tasks/base.py` returns `np.prod(...)` over the
+    /// factors its walking task produces. Under a sum, a creature that gets
+    /// its joint velocities roughly right collects most of what the velocity
+    /// term can pay while its centre of mass drifts anywhere it likes. Under a
+    /// product, a dead factor kills the reward outright, so there is no
+    /// partial credit for matching one feature while abandoning another.
+    ///
+    /// The cost of a product is that it is zero over most of the space, which
+    /// is exactly why the imitation literature pairs it with early termination
+    /// and reference-state initialisation - see [`Self::com_distance`], which
+    /// is what an episode terminates on.
     pub fn total(&self, qpos: &[f64], qvel: &[f64], ref_qpos: &[f32], ref_qvel: &[f32]) -> f64 {
         let (a, b) = self.factors(qpos, qvel, ref_qpos, ref_qvel);
-        a + b
+        a * b
+    }
+
+    /// Distance between the body's centre of mass and the reference's, in the
+    /// model's own length units.
+    ///
+    /// The termination criterion. flybody ends a walking episode once this
+    /// exceeds 0.33 cm, which is about 1.3 body lengths, and that is what
+    /// keeps a product reward from spending an entire episode at zero.
+    pub fn com_distance(qpos: &[f64], ref_qpos: &[f32]) -> f64 {
+        (0..3)
+            .map(|i| {
+                let d = qpos.get(i).copied().unwrap_or(0.0) - ref_qpos.get(i).copied().unwrap_or(0.0) as f64;
+                d * d
+            })
+            .sum::<f64>()
+            .sqrt()
     }
 
     /// The largest value [`Self::total`] can return: a perfect match.
@@ -288,6 +315,6 @@ impl ImitationReward {
     /// Worth having explicitly, because a reward whose scale is unknown makes
     /// "it improved by 0.3" uninterpretable.
     pub fn max(&self) -> f64 {
-        self.com_weight + self.qvel_weight
+        self.com_weight * self.qvel_weight
     }
 }

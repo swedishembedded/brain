@@ -76,7 +76,7 @@ fn a_perfect_match_scores_the_maximum_and_error_reduces_it_monotonically() {
 
     let perfect = rw.total(&qpos, &qvel, &rq, &rv);
     assert!((perfect - rw.max()).abs() < 1e-12, "an exact match must score max(), got {perfect}");
-    assert!((rw.max() - 21.0).abs() < 1e-12, "flybody weights are 20 for com and 1 for qvel");
+    assert!((rw.max() - 20.0).abs() < 1e-12, "the factors multiply, and flybody weights them 20 and 1");
 
     // Growing position error must reduce the reward, strictly and at every
     // step. A reward that plateaus gives a learning rule nothing to climb.
@@ -164,4 +164,40 @@ fn the_published_reference_matches_this_body() {
     eprintln!("  reference tracks {} of {} velocity DoF", moving.len(), r.nv());
     assert_eq!(moving.len(), 48, "expected 6 root DoF plus 7 on each of 6 legs");
     assert!(moving.iter().take(6).copied().eq(0..6), "the root's own motion must be tracked");
+}
+
+#[test]
+fn a_dead_factor_zeroes_the_reward_rather_than_leaving_partial_credit() {
+    let rw = ImitationReward::default();
+    let rq = vec![0.0f32; 3];
+    let rv = vec![0.0f32; 6];
+    let v = vec![0.0; 6];
+
+    // Velocities matched exactly, centre of mass a long way off: the com
+    // factor's Gaussian has a standard deviation of 0.078 cm, so a whole
+    // centimetre is far outside it.
+    let (com, qvel) = rw.factors(&[1.0, 0.0, 0.0], &v, &rq, &rv);
+
+    // THE CONTROL. Without it this test also passes when BOTH factors are
+    // dead, which would prove nothing about how they combine.
+    assert!(qvel > 0.99 * rw.qvel_weight, "the velocity factor should be near its maximum, got {qvel}");
+    assert!(com < 1e-6 * rw.com_weight, "the com factor should be dead, got {com}");
+
+    // The factors MULTIPLY. Summed, this state would score the whole velocity
+    // weight for a body that had abandoned the trajectory entirely - partial
+    // credit for tracking one feature while ignoring another, which is not the
+    // objective flybody defines.
+    let total = rw.total(&[1.0, 0.0, 0.0], &v, &rq, &rv);
+    assert!(
+        total < 1e-6,
+        "a dead factor must kill the reward, but it scored {total}; the factors are being summed, not multiplied"
+    );
+}
+
+#[test]
+fn the_termination_distance_is_a_distance_and_not_a_squared_one() {
+    // A 3-4-5 triangle: if this returned the sum of squares it would be 25,
+    // and every episode would run to its budget because the threshold is 0.33.
+    let d = ImitationReward::com_distance(&[3.0, 4.0, 0.0], &[0.0, 0.0, 0.0]);
+    assert!((d - 5.0).abs() < 1e-12, "expected a Euclidean distance of 5, got {d}");
 }

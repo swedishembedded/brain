@@ -6,7 +6,7 @@
 //! empirical. The test that gates it asserts the CONTROLS behave, which is a
 //! claim that holds whether or not the learner works.
 use fly::learn::{episode_with, Condition, Lcg, Objective, RewardConfig};
-use fly::{ImitationReward, Reference};
+use fly::Reference;
 use fly::{Coupling, Fly, Timing};
 use mujoco::{Model, MuJoCo};
 use neuro::{LifParams, PlasticityParams};
@@ -36,7 +36,7 @@ fn main() {
     let imitate = reference.is_some() && std::env::var("OBJECTIVE").as_deref() != Ok("displacement");
     let cfg = RewardConfig {
         objective: if imitate {
-            Objective::Imitate { snippet: 0, reward: ImitationReward::default() }
+            Objective::imitate(0)
         } else {
             Objective::Displacement
         },
@@ -44,6 +44,9 @@ fn main() {
     };
     if let Some(r) = &reference {
         println!("objective: {}", if imitate { "imitation" } else { "displacement" });
+        if imitate {
+            println!("  reward is a PRODUCT of factors, max {:.0} per tick, episode ends on losing the reference", cfg.objective.max_per_tick());
+        }
         println!("  reference: {:?}, tracking {} of {} DoF", r, r.moving_dofs().len(), r.nv());
     } else {
         println!("objective: displacement (set BRAIN_FLY_REFERENCE for imitation)");
@@ -87,18 +90,39 @@ fn main() {
             // is a side observation and reward is the thing being optimised;
             // ranking conditions by distance while rewarding imitation would
             // be scoring a different experiment than the one being run.
-            let score = if imitate { e.reward / e.ticks.max(1) as f64 } else { e.distance };
+            //
+            // The episode RETURN, not the per-tick average. An imitation
+            // episode ends when the body loses the reference, so a creature
+            // that tracks for twice as long earns twice as much - and a
+            // per-tick average would hide exactly that, scoring one good tick
+            // followed by immediate failure as highly as sustained tracking.
+            let score = if imitate { e.reward } else { e.distance };
             dist.push(score);
             per_spike.push(score / (e.spikes.max(1) as f64 / 1e6));
             if i == 0 || i == episodes - 1 {
-                println!(
-                    "  {condition:?} ep{i:3}: reward/tick {:.4} of {:.1}  distance {:+.5} cm = {:+.3} BL  spikes {}",
-                    e.reward / e.ticks.max(1) as f64,
-                    if imitate { ImitationReward::default().max() } else { 0.0 },
-                    e.distance,
-                    e.distance / BODY_LENGTH_CM,
-                    e.spikes
-                );
+                if imitate {
+                    println!(
+                        "  {condition:?} ep{i:3}: return {:.3} over {} ticks ({}), distance {:+.3} BL, spikes {}",
+                        e.reward,
+                        e.ticks,
+                        if e.reached_end {
+                            "tracked to the end"
+                        } else if e.terminated {
+                            "lost the reference"
+                        } else {
+                            "ran out of budget"
+                        },
+                        e.distance / BODY_LENGTH_CM,
+                        e.spikes
+                    );
+                } else {
+                    println!(
+                        "  {condition:?} ep{i:3}: distance {:+.5} cm = {:+.3} BL, spikes {}",
+                        e.distance,
+                        e.distance / BODY_LENGTH_CM,
+                        e.spikes
+                    );
+                }
             }
         }
         let w1 = f.weights();
@@ -114,8 +138,10 @@ fn main() {
     // unit with the number is not decoration - a bare "+0.84" printed with the
     // wrong label is exactly how a null result gets read as a win.
     let (unit, in_units): (&str, Box<dyn Fn(f64) -> String>) = if imitate {
-        let max = cfg.objective.max_per_tick();
-        ("reward/tick", Box::new(move |v: f64| format!("{:.1}% of max {max:.1}", 100.0 * v / max)))
+        // The ceiling is a perfect tick held for the whole budget. Reporting
+        // against it is what stops a return of 0.8 from reading as progress.
+        let max = cfg.objective.max_per_tick() * cfg.ticks as f64;
+        ("return", Box::new(move |v: f64| format!("{:.2}% of a perfect {max:.0}", 100.0 * v / max)))
     } else {
         ("cm", Box::new(|v: f64| format!("{:+.3} body lengths", v / BODY_LENGTH_CM)))
     };

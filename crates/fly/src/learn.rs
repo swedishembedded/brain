@@ -30,8 +30,15 @@ pub struct Episode {
     /// [`Objective::Imitate`] this is what a creature is actually being
     /// scored on; distance is then only a side observation.
     pub reward: f64,
-    /// Ticks the episode actually ran.
+    /// Ticks the episode actually ran. Under [`Objective::Imitate`] this is
+    /// itself a score: an episode ends when the body loses the reference, so
+    /// a longer one tracked for longer.
     pub ticks: u32,
+    /// The body drifted further from the reference than
+    /// [`Objective::Imitate`]'s `terminal_com_dist` allowed.
+    pub terminated: bool,
+    /// The snippet ran out with the body still tracking it. The good ending.
+    pub reached_end: bool,
 }
 
 /// What the creature is being asked to do.
@@ -56,10 +63,27 @@ pub enum Objective {
         /// Which recorded snippet to follow.
         snippet: usize,
         reward: ImitationReward,
+        /// End the episode once the body's centre of mass is this far from
+        /// the reference's, in the model's own length units.
+        ///
+        /// Not optional garnish. The reward is a PRODUCT of Gaussian factors,
+        /// so it is zero almost everywhere, and without termination an episode
+        /// spends nearly all of its ticks collecting nothing and learning from
+        /// nothing. flybody's walking task uses 0.33 cm, about 1.3 body
+        /// lengths, which is [`RewardConfig::default`]'s value here too.
+        terminal_com_dist: f64,
     },
 }
 
 impl Objective {
+    /// Track a recorded snippet with flybody's own walking-task settings.
+    ///
+    /// A constructor rather than a literal, so the termination radius is not a
+    /// number every call site has to know and half of them get wrong.
+    pub fn imitate(snippet: usize) -> Objective {
+        Objective::Imitate { snippet, reward: ImitationReward::default(), terminal_com_dist: 0.33 }
+    }
+
     /// The largest reward one tick can earn, for reporting a score as a
     /// fraction of what is achievable.
     ///
@@ -201,18 +225,31 @@ pub fn episode_with(
                 last_x = x;
                 r
             }
-            Objective::Imitate { snippet, reward } => {
+            Objective::Imitate { snippet, reward, terminal_com_dist } => {
                 // One reference frame per control tick - the dataset is
                 // sampled at exactly the control period, so `tick` indexes it
-                // directly. Past the end of a snippet the reward is zero
-                // rather than clamped to the last frame, which would pay a
-                // creature for standing still at the end.
+                // directly.
                 let r = reference.expect("checked above");
                 match r.frame(snippet, tick) {
                     Some((rq, rv)) => {
-                        reward.total_over(&fly.qpos(), &fly.qvel(), rq, rv, r.moving_dofs())
+                        let qpos = fly.qpos();
+                        // Terminate BEFORE scoring, so a tick that has already
+                        // lost the reference does not pay for itself. An
+                        // episode's return is then the thing being maximised
+                        // and surviving longer is how it grows, which is what
+                        // makes a product reward learnable at all.
+                        if ImitationReward::com_distance(&qpos, rq) > terminal_com_dist {
+                            ep.terminated = true;
+                            break;
+                        }
+                        reward.total_over(&qpos, &fly.qvel(), rq, rv, r.moving_dofs())
                     }
-                    None => 0.0,
+                    // The snippet ran out: the creature tracked it to the end,
+                    // which is the good ending, not a reason to keep paying.
+                    None => {
+                        ep.reached_end = true;
+                        break;
+                    }
                 }
             }
         };

@@ -153,7 +153,7 @@ fn main() {
         // The HUD lives in the window title, which a bounded run has nobody to
         // read. Echo it periodically so a headless run still reports what it
         // did rather than only that it finished.
-        if limit != u64::MAX && frames % 30 == 0 {
+        if limit != u64::MAX && frames.is_multiple_of(30) {
             println!("frame {frames}: {}", hud.model);
         }
 
