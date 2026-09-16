@@ -5,7 +5,8 @@
 //! This is the experiment, not a test: it takes minutes and its answer is
 //! empirical. The test that gates it asserts the CONTROLS behave, which is a
 //! claim that holds whether or not the learner works.
-use fly::learn::{episode, Condition, Lcg, RewardConfig};
+use fly::learn::{episode_with, Condition, Lcg, Objective, RewardConfig};
+use fly::{ImitationReward, Reference};
 use fly::{Coupling, Fly, Timing};
 use mujoco::{Model, MuJoCo};
 use neuro::{LifParams, PlasticityParams};
@@ -26,7 +27,27 @@ fn main() {
     let c = connectome::load("manc", &dir.join("neurons.csv.gz"), &dir.join("connections_princeton.csv.gz")).unwrap();
     let xml = std::env::var("BRAIN_FLYBODY_XML").unwrap();
     let lif = LifParams { dt_over_tau: 0.2, v_th: 1.0, r: 1.0, refrac_ticks: 1, ..LifParams::default() };
-    let cfg = RewardConfig::default();
+    // Which objective. Displacement is kept because the ceiling was measured
+    // under it and because it is the honest demonstration of why it is wrong;
+    // imitation is what flybody's own walking task uses.
+    let reference = std::env::var_os("BRAIN_FLY_REFERENCE")
+        .filter(|v| !v.is_empty())
+        .map(|p| Reference::load(std::path::PathBuf::from(p)).expect("the reference loads"));
+    let imitate = reference.is_some() && std::env::var("OBJECTIVE").as_deref() != Ok("displacement");
+    let cfg = RewardConfig {
+        objective: if imitate {
+            Objective::Imitate { snippet: 0, reward: ImitationReward::default() }
+        } else {
+            Objective::Displacement
+        },
+        ..RewardConfig::default()
+    };
+    if let Some(r) = &reference {
+        println!("objective: {}", if imitate { "imitation" } else { "displacement" });
+        println!("  reference: {:?}, tracking {} of {} DoF", r, r.moving_dofs().len(), r.nv());
+    } else {
+        println!("objective: displacement (set BRAIN_FLY_REFERENCE for imitation)");
+    }
     let episodes: usize = std::env::var("EPISODES").ok().and_then(|v| v.parse().ok()).unwrap_or(12);
 
     let mut results: Vec<(Condition, Vec<f64>, Vec<f64>)> = Vec::new();
@@ -61,13 +82,22 @@ fn main() {
         let mut per_spike = Vec::new();
         let w0 = f.weights();
         for i in 0..episodes {
-            let e = episode(&mut f, cfg, condition, &mut rng).unwrap();
-            dist.push(e.distance);
-            per_spike.push(e.distance / (e.spikes.max(1) as f64 / 1e6));
+            let e = episode_with(&mut f, cfg, condition, reference.as_ref(), &mut rng).unwrap();
+            // Score on the objective actually set. Under imitation, distance
+            // is a side observation and reward is the thing being optimised;
+            // ranking conditions by distance while rewarding imitation would
+            // be scoring a different experiment than the one being run.
+            let score = if imitate { e.reward / e.ticks.max(1) as f64 } else { e.distance };
+            dist.push(score);
+            per_spike.push(score / (e.spikes.max(1) as f64 / 1e6));
             if i == 0 || i == episodes - 1 {
                 println!(
-                    "  {condition:?} ep{i:3}: distance {:+.5} cm = {:+.3} body lengths  spikes {}  proprio {}",
-                    e.distance, e.distance / BODY_LENGTH_CM, e.spikes, e.proprio_spikes
+                    "  {condition:?} ep{i:3}: reward/tick {:.4} of {:.1}  distance {:+.5} cm = {:+.3} BL  spikes {}",
+                    e.reward / e.ticks.max(1) as f64,
+                    if imitate { ImitationReward::default().max() } else { 0.0 },
+                    e.distance,
+                    e.distance / BODY_LENGTH_CM,
+                    e.spikes
                 );
             }
         }
@@ -78,17 +108,25 @@ fn main() {
         results.push((condition, dist, per_spike));
     }
 
+    // How a score is read back to a human. Displacement is a distance in
+    // centimetres, so body lengths are the meaningful unit; imitation is a
+    // per-tick reward whose meaningful unit is its own maximum. Carrying the
+    // unit with the number is not decoration - a bare "+0.84" printed with the
+    // wrong label is exactly how a null result gets read as a win.
+    let (unit, in_units): (&str, Box<dyn Fn(f64) -> String>) = if imitate {
+        let max = cfg.objective.max_per_tick();
+        ("reward/tick", Box::new(move |v: f64| format!("{:.1}% of max {max:.1}", 100.0 * v / max)))
+    } else {
+        ("cm", Box::new(|v: f64| format!("{:+.3} body lengths", v / BODY_LENGTH_CM)))
+    };
+
     println!("\n--- did anything improve within its own run? (first half vs second half) ---");
     for (cond, d, _) in &results {
         let h = d.len() / 2;
         let (a, b) = (&d[..h], &d[h..]);
         let ma = a.iter().sum::<f64>() / a.len() as f64;
         let mb = b.iter().sum::<f64>() / b.len() as f64;
-        println!(
-            "  {cond:?}: first half {ma:+.5}, second half {mb:+.5}, change {:+.5} ({:+.3} body lengths)",
-            mb - ma,
-            (mb - ma) / BODY_LENGTH_CM
-        );
+        println!("  {cond:?}: first half {ma:+.5}, second half {mb:+.5}, change {:+.5} {unit}", mb - ma);
     }
 
     println!("\n--- paired sign test, Learning against each control ---");
@@ -98,29 +136,28 @@ fn main() {
         println!("  Learning vs {cond:?}: {}/{} episodes better, p = {:.4}", t.k, t.n, t.p_value);
     }
 
-    println!("\n--- normalised by spike count (cm per million spikes) ---");
-    // READ THE MEANS, NOT THE SIGN TEST BELOW.
+    println!("\n--- normalised by spike count ({unit} per million spikes) ---");
+    // Whether the sign test on this metric is independent evidence DEPENDS ON
+    // THE OBJECTIVE, and getting that wrong once already produced a reported
+    // "corroboration" that was arithmetic.
     //
-    // The sign test on this metric is NOT independent evidence and must not be
-    // reported as a second, confirming result. Learning's mean distance is
-    // positive and every control's is negative, and dividing both by a
-    // positive spike count cannot change that ordering - so the normalised
-    // test is guaranteed to reproduce the raw one whatever the activity
-    // difference was. Identical k/n here is arithmetic, not corroboration.
+    // Under displacement, Learning's mean is positive and every control's is
+    // negative. Dividing both by a positive spike count cannot reorder a
+    // positive against a negative, so the normalised test is GUARANTEED to
+    // reproduce the raw one and identical k/n is not a second result.
     //
-    // The MEANS do carry information, because they are not a ratio of the same
-    // comparison: measured, Learning moves +0.006 cm per million spikes while
-    // the controls move between -0.024 and -0.049. Per unit of activity the
-    // controls go BACKWARDS, so "Learning simply fires more" does not explain
-    // the direction. It does not fully control for activity either - that
-    // needs conditions matched on firing rate, which this experiment does not
-    // yet do.
+    // Under imitation every score is positive, so division by differing spike
+    // counts genuinely can reorder a pair, and the test carries information.
+    //
+    // The MEANS carry information under either objective, because a ratio of
+    // score to activity is not a restatement of the score. They do not control
+    // for activity - that needs conditions matched on firing rate, which this
+    // experiment does not do - but they do answer "is Learning simply firing
+    // more?".
     for (cond, d, ps) in &results {
         let md = d.iter().sum::<f64>() / d.len() as f64;
         let mp = ps.iter().sum::<f64>() / ps.len() as f64;
-        let sp: f64 = d.len() as f64;
-        let _ = sp;
-        println!("    {cond:?}: raw mean {md:+.5} cm, per-Mspike mean {mp:+.5} cm");
+        println!("    {cond:?}: raw mean {md:+.5} {unit} ({}), per-Mspike mean {mp:+.5}", in_units(md));
     }
     let learning_ps = &results[0].2;
     for (cond, _, ps) in &results[1..] {
@@ -130,8 +167,18 @@ fn main() {
 
     let best = results[0].1.iter().cloned().fold(f64::MIN, f64::max);
     println!();
-    println!("Best single episode: {best:+.5} cm = {:+.3} body lengths in {:.2} s simulated.", best / BODY_LENGTH_CM, cfg.ticks as f64 * 0.002);
-    println!("A walking fly covers one to three body lengths per SECOND. Read the");
-    println!("sign tests as 'reward-correlated plasticity differs from reward-shuffled',");
-    println!("which is what they test, and NOT as locomotion.");
+    println!(
+        "Best single episode: {best:+.5} {unit} = {} over {:.2} s simulated.",
+        in_units(best),
+        cfg.ticks as f64 * 0.002
+    );
+    if imitate {
+        println!("The maximum is reached only by tracking the recorded gait exactly. Read the");
+        println!("sign tests as 'reward-correlated plasticity differs from its controls',");
+        println!("which is what they test, and NOT as locomotion.");
+    } else {
+        println!("A walking fly covers one to three body lengths per SECOND. Read the");
+        println!("sign tests as 'reward-correlated plasticity differs from reward-shuffled',");
+        println!("which is what they test, and NOT as locomotion.");
+    }
 }

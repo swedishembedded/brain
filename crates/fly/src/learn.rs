@@ -26,6 +26,12 @@ pub struct Episode {
     pub spikes: u64,
     /// Proprioceptor spikes, same purpose for the sensory channel.
     pub proprio_spikes: u64,
+    /// Total reward earned, on whatever objective was set. For
+    /// [`Objective::Imitate`] this is what a creature is actually being
+    /// scored on; distance is then only a side observation.
+    pub reward: f64,
+    /// Ticks the episode actually ran.
+    pub ticks: u32,
 }
 
 /// What the creature is being asked to do.
@@ -51,6 +57,21 @@ pub enum Objective {
         snippet: usize,
         reward: ImitationReward,
     },
+}
+
+impl Objective {
+    /// The largest reward one tick can earn, for reporting a score as a
+    /// fraction of what is achievable.
+    ///
+    /// Displacement has no such bound - a body can always be flung further -
+    /// so it reports `f64::INFINITY` rather than an invented ceiling, and a
+    /// caller that divides by it gets 0% instead of a made-up percentage.
+    pub fn max_per_tick(&self) -> f64 {
+        match self {
+            Objective::Displacement => f64::INFINITY,
+            Objective::Imitate { reward, .. } => reward.max(),
+        }
+    }
 }
 
 /// How reward becomes a neuromodulator.
@@ -195,6 +216,8 @@ pub fn episode_with(
                 }
             }
         };
+        ep.reward += reward;
+        ep.ticks += 1;
         baseline += cfg.baseline_rate * (reward - baseline);
         let delta = ((reward - baseline) * cfg.modulator_gain as f64) as f32;
         deltas.push(delta);
