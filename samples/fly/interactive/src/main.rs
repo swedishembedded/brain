@@ -281,6 +281,7 @@ fn run() -> Result<(), Error> {
 
     let mut frames = 0u64;
     let start = fly.position();
+    view.capture_next_frame();
     while frames < args.frames {
         frames += 1;
         let steering = view.steering();
@@ -388,38 +389,49 @@ fn run() -> Result<(), Error> {
         view.follow(&fly, 1.0);
         view.show(&fly, &status)?;
 
-        // Once, on the first frame: check that what the window is holding is
-        // what the renderer produced. A black window and a correct render are
-        // two different faults with nothing in common, and telling them apart
-        // from a photograph of a screen is impossible.
+        // Once, on the first frame: did the blit path carry the frame?
+        //
+        // This is deliberately NOT called a window check. Nothing inside the
+        // process can read the window back off the display server, so a pass
+        // here means the texture upload and copy are sound and says nothing
+        // whatever about whether the screen is lit. When the screen is black
+        // and this passes, the next thing to run is
+        // `cargo run -p brain-wm-display --example window_smoke`, which puts
+        // an unmistakable pattern up with no simulator behind it.
         if frames == 1 {
             // stderr, with everything else diagnostic: these lines exist to be
             // read off someone else's terminal when their screen is black, and
             // stdout is where the trajectory goes.
-            eprintln!("blit check: renderer  -> {}", describe(view.frame()));
-            match view.window_frame() {
-                Ok(shown) => {
-                    eprintln!("blit check: window    -> {}", describe(&shown));
-                    if view.frame() != shown.as_slice() {
-                        eprintln!(
-                            "blit check: THE WINDOW DOES NOT HOLD WHAT WAS RENDERED - the blit is at fault"
-                        );
-                    }
+            eprintln!("render   -> {}", describe(view.frame()));
+            match view.captured() {
+                Some(blit) if blit == view.frame() => {
+                    eprintln!("blit     -> carried the frame intact (says NOTHING about the screen)")
                 }
-                Err(e) => eprintln!("blit check: reading the window back failed: {e}"),
+                Some(blit) => {
+                    eprintln!("blit     -> {}", describe(blit));
+                    eprintln!("blit     -> THE BLIT PATH CORRUPTED THE FRAME");
+                }
+                None => eprintln!("blit     -> could not be read back"),
             }
             if let Some(path) = &args.shot {
-                // Both sides, side by side on disk. A black screen with a
-                // correct render and a correct window surface is a
-                // presentation problem, and the only way to see that from here
-                // is to have both files.
-                let window = view.window_frame().ok();
+                let blit = view.captured().map(|b| b.to_vec());
                 write_ppm(&format!("{path}.render.ppm"), view.frame(), view.width(), view.height())?;
-                if let Some(w) = window {
-                    write_ppm(&format!("{path}.window.ppm"), &w, view.width(), view.height())?;
+                if let Some(b) = blit {
+                    write_ppm(&format!("{path}.blit.ppm"), &b, view.width(), view.height())?;
                 }
-                eprintln!("blit check: wrote {path}.render.ppm and {path}.window.ppm");
+                eprintln!("wrote {path}.render.ppm and {path}.blit.ppm");
             }
+        }
+        // How long a frame takes decides what a black window even means. A
+        // window presented once and then stalled for a minute inside the
+        // simulator looks exactly like a window that never presented, and the
+        // two have nothing in common.
+        if frames == 1 || frames == 10 || frames.is_multiple_of(150) {
+            eprintln!(
+                "frame {frames}: {} presented, {:.0} ms/frame, {realtime:.2}x realtime",
+                view.presented(),
+                1000.0 * began.elapsed().as_secs_f64()
+            );
         }
         if args.frames != u64::MAX && frames.is_multiple_of(30) {
             println!("frame {frames} tick {}: {status}", beat.tick);

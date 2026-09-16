@@ -175,16 +175,32 @@ impl View {
         &self.rgb
     }
 
-    /// Read the pixels back off the window surface.
+    /// Capture the next presented frame as it goes through the blit path.
     ///
-    /// The difference between this and [`View::frame`] is the entire blit
-    /// path - texture upload, format conversion, pitch, present. A black
-    /// window with a correct [`View::frame`] means the renderer is fine and
-    /// the blit is not, and those have nothing to do with each other; without
-    /// a way to ask the window what it is holding, the two are
-    /// indistinguishable from the outside.
-    pub fn window_frame(&mut self) -> Result<Vec<u8>, Error> {
-        self.win.read_back(self.width, self.height).map_err(Error::Backend)
+    /// The difference between this and [`View::frame`] is texture upload,
+    /// pixel-format conversion, pitch and scaling - so a mismatch localises
+    /// the fault to the blit and a match clears it.
+    ///
+    /// It does NOT say the window is showing anything. SDL has no call that
+    /// reads a window back off the display server, so presentation is simply
+    /// not observable from inside the process, and an instrument here that
+    /// claimed otherwise sent a black-window report down the wrong path once
+    /// already. `cargo run -p brain-wm-display --example window_smoke` is the
+    /// test that answers the presentation question, by putting an
+    /// unmistakable pattern on the screen with nothing else running.
+    pub fn capture_next_frame(&mut self) {
+        self.win.capture_next_frame();
+    }
+
+    /// The frame captured by [`View::capture_next_frame`], once one has been
+    /// presented.
+    pub fn captured(&self) -> Option<&[u8]> {
+        self.win.captured()
+    }
+
+    /// How many frames have been presented.
+    pub fn presented(&self) -> u64 {
+        self.win.presented()
     }
 
     pub fn width(&self) -> u32 {
