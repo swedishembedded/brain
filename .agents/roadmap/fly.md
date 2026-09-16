@@ -371,6 +371,33 @@ it against the scan+sort reference at `max|d| == 0`.
   metric will detect. Kinematic replay against the 16,252-snippet walking
   dataset would pin it outright and is worth doing, but it is no longer a
   blocker for M4.
+
+  **The window is done, and the fly can be looked at.** `crates/mujoco` now
+  binds `mjv_*`/`mjr_*` and renders offscreen through an EGL device context,
+  so there is no display-server requirement and it works over SSH and in CI.
+  The four visual structs are opaque OVER-ALLOCATED blobs with a canary tail
+  verified after MuJoCo initialises them: their layouts depend on compile-time
+  maxima, mirroring them would reintroduce the wrong-offset failure this
+  binding avoids for `mjData`, and none of their fields need to be touched.
+  The offscreen buffer is resized with `mjr_resizeOffscreen` and the result
+  confirmed with `mjr_maxViewport`, because MuJoCo sizes it from the model's
+  own `<visual><global offwidth/offheight>` (640x480 by default) and a larger
+  viewport would otherwise read undefined pixels for every row past it.
+
+  Two things measured while gating it, both recorded because they are
+  surprising: a repeat render of an UNCHANGED state is not bit-identical
+  across a thread change - it differs by one byte in 230,400 by one level, so
+  the determinism control is bounded rather than exact - and MuJoCo reports
+  `GL_INVALID_OPERATION` during `mjr_makeContext` even after the GL error
+  queue is drained first, which establishes that the error is raised inside
+  its own context creation rather than inherited.
+
+  There is one GL context per process and at most one live `Renderer`, refused
+  with a message rather than raced. `crates/fly`'s `watch` example runs the
+  closed loop with the renderer hung off the body; measured over 150 frames
+  (3 s simulated) at a standing descending command, the loop runs at 0.23x
+  real time WITH rendering, the body stays on the ground, and 12% of the image
+  changes between the third frame and the hundred-and-fiftieth.
 * **M4 - closed loop, no learning. LANDED.** `crates/fly` composes the cord,
   the body and the wiring between them: 1,328 descending neurons as the command
   channel, 330 motor neurons driving 44 actuators, 304 leg proprioceptors
@@ -543,6 +570,26 @@ The user-facing deliverable is a **sample**, not a CLI verb:
 `brain` SDK and lets a person poke a fly. It follows `samples/README.md`'s
 contract like every other sample, which means the SDK has to grow a creature
 surface; that is the point, not a side effect.
+
+**LANDED.** The SDK gained `brain::Creature` and `brain::View` behind a
+`creature` surface, and `brain_arch::Domain` gained a `Creature` variant to
+name it - the SDK's feature vocabulary is gated against that enum, so a
+surface that is not a domain is refused, which is what stopped this from
+quietly becoming a second vocabulary. Measured: the `creature` surface's
+closure is 35 brain crates against 45 for the full SDK, and the sample links
+nothing from the image surface.
+
+The three controls are on the PUBLIC surface, not in an experiment binary:
+`set_plasticity`, `set_proprioception` and `shuffled_connectome`. A creature
+that behaves the same with its sensing lesioned was not using it, and anyone
+embedding this should be able to find that out without reaching past the SDK.
+
+The sample runs bounded and headless (`--frames N --shot out.ppm` under
+`SDL_VIDEODRIVER=dummy`), which is what makes the whole path - connectome,
+body, renderer, window blit - checkable on a machine with no display. Measured
+end to end at 960x720: 23,665 neurons loaded in 8.8 s, 330 motor neurons on 44
+actuators, ~7,000 spikes and ~90 motor spikes per rendered frame, 0.23x real
+time.
 
 Verified while scoping it:
 
