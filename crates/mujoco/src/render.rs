@@ -35,22 +35,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::sys::Rect;
-
-/// A camera gesture, as `mjtMouse` names them.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(i32)]
-pub enum Camera {
-    /// Orbit up and down.
-    OrbitV = 1,
-    /// Orbit left and right.
-    OrbitH = 2,
-    /// Slide in the vertical plane.
-    PanV = 3,
-    /// Slide in the horizontal plane.
-    PanH = 4,
-    /// Towards or away from what it is looking at.
-    Zoom = 5,
-}
 use crate::{Data, Model, MuJoCo};
 
 mod egl;
@@ -88,6 +72,46 @@ impl Blob {
     fn intact(&self) -> bool {
         self.bytes[BLOB - CANARY_LEN..].iter().all(|&b| b == CANARY)
     }
+}
+
+/// Where `mjvCamera`'s fields sit, in bytes from the start of the struct.
+///
+/// This is the ONE MuJoCo struct this binding reads and writes by offset
+/// rather than passing back untouched, and it earns the exception: an
+/// interactive camera has to be pointed at a moving animal every frame, and
+/// the only alternative the C API offers - `mjv_moveCamera` gestures - is a
+/// relative nudge whose effect depends on state this binding would then have
+/// to shadow and keep in sync. It was shadowed that way, with two fitted
+/// constants converting a pan into a distance, and it drifted the moment
+/// anything else moved the camera.
+///
+/// The layout is from `mujoco/mjvisualize.h` at the pinned version, with
+/// `mjtNum` as `double`: three `int`s, four bytes of padding to align the
+/// doubles, then `lookat[3]`, `distance`, `azimuth`, `elevation`.
+/// [`Renderer::check_camera_layout`] verifies it against a freshly initialised
+/// camera rather than trusting this comment.
+mod cam {
+    pub const TYPE: usize = 0;
+    pub const FIXEDCAMID: usize = 4;
+    pub const TRACKBODYID: usize = 8;
+    pub const LOOKAT: usize = 16;
+    pub const DISTANCE: usize = 40;
+    pub const AZIMUTH: usize = 48;
+    pub const ELEVATION: usize = 56;
+    /// `mjCAMERA_FREE`.
+    pub const FREE: i32 = 0;
+}
+
+/// The abstract camera's pose: where it looks, from how far, and from where.
+///
+/// Angles in degrees, distances in the model's own length units, exactly as
+/// `mjvCamera` stores them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CameraPose {
+    pub lookat: [f64; 3],
+    pub distance: f64,
+    pub azimuth: f64,
+    pub elevation: f64,
 }
 
 /// Whether a [`Renderer`] is live anywhere in this process.
@@ -136,9 +160,6 @@ pub struct Renderer {
     camera: Blob,
     option: Blob,
     context: Blob,
-    /// The model the scene was built against. Held so camera gestures can be
-    /// applied without the caller having to pass it back every time.
-    model_ptr: *mut c_void,
     width: u32,
     height: u32,
     rgb: Vec<u8>,
@@ -147,8 +168,8 @@ pub struct Renderer {
     gl_errors_reported: usize,
 }
 
-// The model pointer is borrowed, not owned, and is only ever handed back to
-// MuJoCo; the renderer is already single-threaded by construction.
+// Every pointer this holds is borrowed from MuJoCo and only ever handed back
+// to it; the renderer is already single-threaded by construction.
 unsafe impl Send for Renderer {}
 
 impl Renderer {
@@ -209,6 +230,8 @@ impl Renderer {
             }
         }
 
+        Renderer::check_camera_layout(&camera, mj.version())?;
+
         // Ask MuJoCo how big the active buffer actually is, rather than
         // trusting that the resize above succeeded. This is the same shape of
         // check as Model::validate_layout: the library's own answer, compared
@@ -238,7 +261,6 @@ impl Renderer {
             camera,
             option,
             context,
-            model_ptr: model.ptr(),
             gl_errors_reported: 0,
             width,
             height,
@@ -301,20 +323,65 @@ impl Renderer {
         Ok(&self.rgb)
     }
 
-    /// Move the camera the way a mouse drag would.
+    /// Confirm this binding's `mjvCamera` offsets against a camera MuJoCo has
+    /// just initialised.
     ///
-    /// The one operation on `mjvCamera` this binding permits, and it is
-    /// permitted because it reads no field: MuJoCo owns the struct, applies
-    /// the gesture, and hands nothing back. Pointing the camera by writing
-    /// `lookat` or `distance` directly would mean knowing where in the struct
-    /// they are, which is the thing this module exists not to know.
+    /// `mjv_defaultFreeCamera` leaves a signature that is very unlikely to
+    /// appear at the wrong offsets: the type is `mjCAMERA_FREE` (0) and BOTH
+    /// id fields are -1, which is three specific words in a row, and the
+    /// distance it frames the model at is a positive finite double. A build
+    /// whose struct moved fails here, loudly, instead of pointing the camera
+    /// with whatever happened to be at byte 40.
+    fn check_camera_layout(camera: &Blob, version: i32) -> Result<(), String> {
+        let i = |at: usize| i32::from_ne_bytes(camera.bytes[at..at + 4].try_into().unwrap_or([0; 4]));
+        let f = |at: usize| f64::from_ne_bytes(camera.bytes[at..at + 8].try_into().unwrap_or([0; 8]));
+        let (ty, fixed, track, dist) = (i(cam::TYPE), i(cam::FIXEDCAMID), i(cam::TRACKBODYID), f(cam::DISTANCE));
+        if ty != cam::FREE || fixed != -1 || track != -1 || !dist.is_finite() || dist <= 0.0 {
+            return Err(format!(
+                "MuJoCo {version}'s mjvCamera is not laid out the way this binding reads it: a freshly \
+                 initialised free camera should read (type 0, fixedcamid -1, trackbodyid -1, distance > 0) \
+                 and reads ({ty}, {fixed}, {track}, {dist})"
+            ));
+        }
+        Ok(())
+    }
+
+    /// Where the camera is looking, from how far, and from what angle.
     ///
-    /// `reldx`/`reldy` are fractions of the window, as a mouse drag would be.
-    pub fn move_camera(&mut self, action: Camera, reldx: f64, reldy: f64) {
-        let Some(r) = self.mj.lib().render.as_ref() else { return };
-        // SAFETY: both pointers were initialised by MuJoCo in `new` and are
-        // only ever passed back to it.
-        unsafe { (r.move_camera)(self.model_ptr, action as c_int, reldx, reldy, self.camera.ptr()) }
+    /// Read out of `mjvCamera` by offset. That is the exception this binding
+    /// otherwise refuses to make, and [`Self::check_camera_layout`] is the
+    /// price of making it: pointing a camera at a moving animal is an ABSOLUTE
+    /// request, and `mjv_moveCamera`'s relative nudges can only serve one
+    /// through a shadow copy of the state they are nudging - which this code
+    /// had, with two fitted constants in it, and which drifted.
+    pub fn camera(&self) -> CameraPose {
+        let f = |at: usize| f64::from_ne_bytes(self.camera.bytes[at..at + 8].try_into().unwrap_or([0; 8]));
+        CameraPose {
+            lookat: [f(cam::LOOKAT), f(cam::LOOKAT + 8), f(cam::LOOKAT + 16)],
+            distance: f(cam::DISTANCE),
+            azimuth: f(cam::AZIMUTH),
+            elevation: f(cam::ELEVATION),
+        }
+    }
+
+    /// Point the camera. See [`CameraPose`].
+    ///
+    /// A non-finite field is refused rather than written: it does not crash
+    /// MuJoCo, it renders an EMPTY frame, and an empty frame is
+    /// indistinguishable from a window that never presented.
+    pub fn set_camera(&mut self, pose: CameraPose) -> Result<(), String> {
+        let all = [pose.lookat[0], pose.lookat[1], pose.lookat[2], pose.distance, pose.azimuth, pose.elevation];
+        if all.iter().any(|v| !v.is_finite()) {
+            return Err(format!("a camera pose has to be finite, got {pose:?}"));
+        }
+        let mut put = |at: usize, v: f64| self.camera.bytes[at..at + 8].copy_from_slice(&v.to_ne_bytes());
+        put(cam::LOOKAT, pose.lookat[0]);
+        put(cam::LOOKAT + 8, pose.lookat[1]);
+        put(cam::LOOKAT + 16, pose.lookat[2]);
+        put(cam::DISTANCE, pose.distance.max(f64::MIN_POSITIVE));
+        put(cam::AZIMUTH, pose.azimuth);
+        put(cam::ELEVATION, pose.elevation);
+        Ok(())
     }
 
     /// The last rendered frame with rows in top-down order, which is what a

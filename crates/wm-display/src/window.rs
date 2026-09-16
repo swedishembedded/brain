@@ -10,8 +10,21 @@ use crate::sink::{FrameSink, Hud};
 use crate::sys;
 use std::ffi::CString;
 
+/// Which mouse buttons are down.
+///
+/// Latched across pumps the same way [`KeySet`] is, because a drag is a state
+/// that spans frames while the events that start and end it are instants: a
+/// consumer that only saw the events would have to keep this itself, and every
+/// consumer would keep it slightly differently.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Buttons {
+    pub left: bool,
+    pub middle: bool,
+    pub right: bool,
+}
+
 /// Input state snapshot from one pump: latest pressed-set + UX commands +
-/// relative mouse motion accumulated over the drained events.
+/// mouse motion, buttons and wheel accumulated over the drained events.
 #[derive(Clone, Debug, Default)]
 pub struct Input {
     pub pressed: KeySet,
@@ -19,6 +32,10 @@ pub struct Input {
     pub quit: bool,
     pub mouse_dx: i32,
     pub mouse_dy: i32,
+    /// Buttons held at the end of this pump.
+    pub buttons: Buttons,
+    /// Wheel clicks since the last pump, positive away from the user.
+    pub wheel: i32,
 }
 
 pub struct SdlWindow {
@@ -28,6 +45,7 @@ pub struct SdlWindow {
     fw: u32,
     fh: u32,
     pressed: KeySet,
+    buttons: Buttons,
     last_title: String,
     /// Blit failures already reported. SDL's presentation calls all return a
     /// code and all of them were being discarded, which turns a broken blit
@@ -190,6 +208,7 @@ impl SdlWindow {
                 fw,
                 fh,
                 pressed: KeySet::empty(),
+                buttons: Buttons::default(),
                 last_title: String::new(),
                 reported: std::collections::BTreeSet::new(),
                 capture: None,
@@ -236,7 +255,7 @@ impl SdlWindow {
 
     /// Drain pending events into an [`Input`] snapshot.
     pub fn pump(&mut self) -> Input {
-        let mut input = Input { pressed: self.pressed, ..Default::default() };
+        let mut input = Input { pressed: self.pressed, buttons: self.buttons, ..Default::default() };
         unsafe {
             let mut ev = sys::SDL_Event::zeroed();
             while sys::SDL_PollEvent(&mut ev) != 0 {
@@ -258,6 +277,16 @@ impl SdlWindow {
                         input.mouse_dx += ev.motion_xrel();
                         input.mouse_dy += ev.motion_yrel();
                     }
+                    sys::SDL_MOUSEBUTTONDOWN | sys::SDL_MOUSEBUTTONUP => {
+                        let down = ev.kind() == sys::SDL_MOUSEBUTTONDOWN;
+                        match ev.button() {
+                            sys::SDL_BUTTON_LEFT => input.buttons.left = down,
+                            sys::SDL_BUTTON_MIDDLE => input.buttons.middle = down,
+                            sys::SDL_BUTTON_RIGHT => input.buttons.right = down,
+                            _ => {}
+                        }
+                    }
+                    sys::SDL_MOUSEWHEEL => input.wheel += ev.wheel_y(),
                     _ => {}
                 }
             }
@@ -266,6 +295,7 @@ impl SdlWindow {
             input.quit = true;
         }
         self.pressed = input.pressed;
+        self.buttons = input.buttons;
         input
     }
 

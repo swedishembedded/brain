@@ -86,8 +86,10 @@ fn usage() -> ! {
   --shuffled-connectome  the structural control: same degrees, shuffled wiring
   --plastic              let synapses change while it runs
 
-Keys: W/S descending command, A/D turn, SPACE wing throttle (in the air),
-      C (held) lesions proprioception, RETURN resets, ESC quits."
+Keys:  W/S descending command, A/D turn, SPACE wing throttle (in the air),
+       C (held) lesions proprioception, RETURN resets, ESC quits.
+Mouse: drag to orbit around the fly, right-drag to pan, wheel to zoom.
+       The camera stays on the animal wherever it goes."
     );
     std::process::exit(2)
 }

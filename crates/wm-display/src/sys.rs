@@ -66,6 +66,14 @@ pub const SDL_QUIT: u32 = 0x100;
 pub const SDL_KEYDOWN: u32 = 0x300;
 pub const SDL_KEYUP: u32 = 0x301;
 pub const SDL_MOUSEMOTION: u32 = 0x400;
+pub const SDL_MOUSEBUTTONDOWN: u32 = 0x401;
+pub const SDL_MOUSEBUTTONUP: u32 = 0x402;
+pub const SDL_MOUSEWHEEL: u32 = 0x403;
+
+/// SDL's mouse button numbers, as `SDL_MouseButtonEvent.button` reports them.
+pub const SDL_BUTTON_LEFT: u8 = 1;
+pub const SDL_BUTTON_MIDDLE: u8 = 2;
+pub const SDL_BUTTON_RIGHT: u8 = 3;
 
 /// 64-byte buffer covering SDL2's 56-byte SDL_Event union.
 #[repr(C, align(8))]
@@ -95,6 +103,16 @@ impl SDL_Event {
     /// SDL_MouseMotionEvent.yrel (i32 at byte offset 32).
     pub fn motion_yrel(&self) -> i32 {
         i32::from_ne_bytes([self.0[32], self.0[33], self.0[34], self.0[35]])
+    }
+    /// SDL_MouseButtonEvent.button (u8 at byte offset 16: type 0, timestamp 4,
+    /// windowID 8, which 12, button 16, state 17, clicks 18, padding 19).
+    pub fn button(&self) -> u8 {
+        self.0[16]
+    }
+    /// SDL_MouseWheelEvent.y (i32 at byte offset 20: type 0, timestamp 4,
+    /// windowID 8, which 12, x 16, y 20). Positive is away from the user.
+    pub fn wheel_y(&self) -> i32 {
+        i32::from_ne_bytes([self.0[20], self.0[21], self.0[22], self.0[23]])
     }
 }
 

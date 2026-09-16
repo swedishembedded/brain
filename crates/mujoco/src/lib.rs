@@ -40,7 +40,7 @@ use std::sync::Arc;
 
 mod render;
 mod sys;
-pub use render::{Camera, EglContext, Renderer};
+pub use render::{CameraPose, EglContext, Renderer};
 pub use sys::{ObjType, Rect, StateSpec};
 
 /// The loaded MuJoCo shared library and the entry points this crate uses.
