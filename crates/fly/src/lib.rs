@@ -357,6 +357,11 @@ pub struct Fly {
     /// Persists until a caller changes it, the same way the descending
     /// command does.
     odour: [f32; 2],
+    /// Where the food is, if the world has any. When set, the odour is
+    /// recomputed from the body's own pose every tick rather than being
+    /// supplied from outside - which is what lets an EPISODE smell, without
+    /// the loop that runs it having to know what a plume is.
+    food: Option<[f64; 3]>,
     /// Receptor neurons that fired on the last neural tick, `(left, right)`.
     last_antenna_spikes: (u32, u32),
     proprioception: bool,
@@ -479,6 +484,7 @@ impl Fly {
             actuator_names,
             antennae: Antennae::of(c),
             odour: [0.0; 2],
+            food: None,
             last_antenna_spikes: (0, 0),
             proprioception: true,
             last_proprio_spikes: 0,
@@ -909,7 +915,28 @@ impl Fly {
     /// two is a fraction of a percent at any useful distance and what to do
     /// about it is the brain's problem, not this function's.
     pub fn smell(&mut self, left: f32, right: f32) {
+        self.food = None;
         self.odour = [left, right];
+    }
+
+    /// Put something in the world to smell, and let the animal's own pose
+    /// decide what reaches each antenna.
+    ///
+    /// `None` removes it, which is the CONTROL: the same animal in the same
+    /// world with nothing to smell. Without that control, "it approached the
+    /// food" is equally satisfied by an animal that walks in one direction.
+    pub fn set_food(&mut self, at: Option<[f64; 3]>) {
+        self.food = at;
+        self.odour = [0.0; 2];
+    }
+
+    pub fn food(&self) -> Option<[f64; 3]> {
+        self.food
+    }
+
+    /// How far the food is, or `None` if there is none.
+    pub fn food_range(&self) -> Option<f64> {
+        self.food.map(|f| sense::yaw_and_range(&self.qpos(), f).1)
     }
 
     /// The whole cord's spikes from the last neural tick, as the device last
@@ -965,6 +992,12 @@ impl Fly {
         // Smell, if this animal has a nose. Rebuilt every tick like the rest
         // of the sensory drive, so an odour that stops arriving stops being
         // smelled rather than lingering as a standing current.
+        if let Some(food) = self.food {
+            let (yaw, _) = sense::yaw_and_range(&qpos, food);
+            let p = [qpos.first().copied().unwrap_or(0.0), qpos.get(1).copied().unwrap_or(0.0), qpos.get(2).copied().unwrap_or(0.0)];
+            let (l, r) = sense::plume(food, p, yaw);
+            self.odour = [l, r];
+        }
         for (side, cells) in [(0usize, &self.antennae.left), (1, &self.antennae.right)] {
             let current = self.odour[side] * self.coupling.odour_gain;
             if current == 0.0 {

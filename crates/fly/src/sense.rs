@@ -149,3 +149,64 @@ impl Antennae {
         self.left.is_empty() && self.right.is_empty()
     }
 }
+
+
+/// How far the odour carries, in centimetres.
+///
+/// A plume nobody can smell from across the arena makes the sense useless; one
+/// that saturates everywhere carries no gradient. Two centimetres is eight
+/// body lengths, which is the scale the arena is built at.
+pub const PLUME_DECAY_CM: f64 = 2.0;
+/// Where the antennae sit relative to the root, in centimetres: a little ahead
+/// of it and to either side of the midline, on a body 0.25 cm long.
+///
+/// Derived from the root pose rather than from the antenna BODIES, which would
+/// need mjData's `xpos`. At this baseline the two differ by far less than the
+/// plume varies over one body length.
+pub const HEAD_AHEAD_CM: f64 = 0.10;
+pub const ANTENNA_HALF_BASE_CM: f64 = 0.012;
+
+/// Odour concentration at each antenna, `(left, right)`.
+///
+/// `exp(-r / PLUME_DECAY_CM)` from the source, normalised to 1.0 at the food
+/// itself: a diffusive plume with no wind, because the arena has none and a
+/// plume model with a wind direction nothing else in the simulation knows
+/// about would be inventing physics to sense.
+///
+/// The bilateral difference this produces is SMALL - the antennae are about a
+/// tenth of a body length apart and the field is smooth - which is a fact
+/// about fly chemotaxis rather than a shortcoming: a real fly turns on a
+/// difference of a few percent and supplements it by casting, which is a
+/// behaviour and not a sensor.
+pub fn plume(food: [f64; 3], position: [f64; 3], yaw: f64) -> (f32, f32) {
+    // Forward is +x at yaw 0 and left is +y, the same convention the bearing
+    // to the food is computed in.
+    let (c, s) = (yaw.cos(), yaw.sin());
+    let at = |left: f64| {
+        let (px, py) = (
+            position[0] + c * HEAD_AHEAD_CM - s * left,
+            position[1] + s * HEAD_AHEAD_CM + c * left,
+        );
+        let r = ((food[0] - px).powi(2) + (food[1] - py).powi(2) + (food[2] - position[2]).powi(2)).sqrt();
+        (-r / PLUME_DECAY_CM).exp() as f32
+    };
+    (at(ANTENNA_HALF_BASE_CM), at(-ANTENNA_HALF_BASE_CM))
+}
+
+/// Yaw and the distance to a point, from a root pose in MuJoCo's `qpos` order.
+pub fn yaw_and_range(qpos: &[f64], to: [f64; 3]) -> (f64, f64) {
+    let (w, x, y, z) = (
+        qpos.get(3).copied().unwrap_or(1.0),
+        qpos.get(4).copied().unwrap_or(0.0),
+        qpos.get(5).copied().unwrap_or(0.0),
+        qpos.get(6).copied().unwrap_or(0.0),
+    );
+    let yaw = (2.0 * (w * z + x * y)).atan2(1.0 - 2.0 * (y * y + z * z));
+    let (px, py, pz) = (
+        qpos.first().copied().unwrap_or(0.0),
+        qpos.get(1).copied().unwrap_or(0.0),
+        qpos.get(2).copied().unwrap_or(0.0),
+    );
+    let range = ((to[0] - px).powi(2) + (to[1] - py).powi(2) + (to[2] - pz).powi(2)).sqrt();
+    (yaw, range)
+}

@@ -94,18 +94,30 @@ fn main() {
     // what a wing motor neuron's spike is WORTH is exactly the kind of thing
     // no connectome contains.
     let air = std::env::var("ARENA").unwrap_or_default() == "air";
+    // `FOOD=x,y,z` searches for CHEMOTAXIS instead: something in the world
+    // that the animal can only smell, and a score that is how much nearer it
+    // ended. Only meaningful with `CNS=brain`, because a nerve cord has no
+    // nose - and the odour gain joins the knobs, since what a receptor
+    // neuron's current is worth is not in any file either.
+    let food: Option<[f64; 3]> = std::env::var("FOOD").ok().and_then(|v| {
+        let p: Vec<f64> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+        (p.len() == 3).then(|| [p[0], p[1], p[2]])
+    });
+    if food.is_some() {
+        knobs.push(Knob::new("odour_gain", 0.1, 100.0));
+    }
     if air {
         knobs.push(Knob::new("wing_power_gain", 0.001, 0.3));
         knobs.push(Knob::new("wing_steer_gain", 0.001, 0.2));
     }
-    let start: Vec<f32> = if air {
-        start
-            .into_iter()
-            .chain([Coupling::default().wing_power_gain, Coupling::default().wing_steer_gain])
-            .collect()
-    } else {
-        start
-    };
+    let mut start = start;
+    if air {
+        start.extend([Coupling::default().wing_power_gain, Coupling::default().wing_steer_gain]);
+    }
+    if food.is_some() {
+        start.push(Coupling::default().odour_gain);
+    }
+    let start = start;
 
     let ticks: u32 = num("TICKS", 1000);
     let pairs: usize = num("PAIRS", 6);
@@ -124,6 +136,15 @@ fn main() {
     let model = Model::from_xml(&mj, &path).unwrap();
     let gpu = gpu_core::testgpu::dev(&neuro::KERNELS);
     let mut f = Fly::new(gpu, &c, model, lif, wiring, timing, Coupling::default()).unwrap();
+    f.set_food(food);
+    if let Some(at) = food {
+        let (l, r) = f.antenna_counts();
+        println!("{l} + {r} olfactory receptor neurons; food at {at:?}");
+        if l + r == 0 {
+            println!("this nervous system has no nose - run it with CNS=brain");
+            std::process::exit(2);
+        }
+    }
     if air {
         // 180 Hz rather than the animal's 218: this airframe's hinge resonates
         // lower than a real thorax, measured by sweep rather than assumed. The
@@ -147,13 +168,25 @@ fn main() {
             ..lif
         })
         .unwrap();
+        // The extra knobs sit after the six shared ones, in the order they were
+        // pushed: the two wing gains when there is air, then the odour gain
+        // when there is something to smell.
         let mut coupling = Coupling { activation_gain: d[4], ..Coupling::default() };
+        let mut extra = 6;
         if air {
-            coupling.wing_power_gain = d[6];
-            coupling.wing_steer_gain = d[7];
+            coupling.wing_power_gain = d[extra];
+            coupling.wing_steer_gain = d[extra + 1];
+            extra += 2;
+        }
+        if food.is_some() {
+            coupling.odour_gain = d[extra];
         }
         f.set_coupling(coupling);
-        let objective = if air { Objective::flight() } else { Objective::walk() };
+        let objective = match (food.is_some(), air) {
+            (true, _) => Objective::seek(),
+            (_, true) => Objective::flight(),
+            _ => Objective::walk(),
+        };
         let cfg = RewardConfig { objective, ticks, command: d[5], ..RewardConfig::default() };
         match episode(f, cfg, Condition::Frozen, &mut Lcg::new(seed)) {
             Ok(e) => {
@@ -161,7 +194,9 @@ fn main() {
                 // fraction of the episode spent airborne in the air.
                 let quality = match e.gait {
                     Some(g) => g.score(),
-                    None => e.airborne as f64 / e.ticks.max(1) as f64,
+                    None if e.airborne > 0 => e.airborne as f64 / e.requested.max(e.ticks).max(1) as f64,
+                    // For a seek, the quality term IS the range it ended at.
+                    None => e.range.1,
                 };
                 // `tipped` is reported and not scored: it is how a search that
                 // is cheating by rolling the animal over becomes visible.
@@ -181,7 +216,7 @@ fn main() {
     // published dynamics. Every row below is read against this one.
     let (base, base_net, base_gait) = evaluate(&mut f, &start, 1);
     println!("\nconnectome as imported: score {base:.5} (net {base_net:.4} cm, gait {base_gait:.3})");
-    println!("\n{:>4}  {:>12}  {:>12}  {:>10}  {:>8}", "gen", "best", "mean", "net cm", if air { "airborne" } else { "gait" });
+    println!("\n{:>4}  {:>12}  {:>12}  {:>10}  {:>8}", "gen", "best", "mean", "net cm", if food.is_some() { "range" } else if air { "airborne" } else { "gait" });
 
     let mut es = Es::new(knobs, &start, num("SIGMA", 0.6), num("RATE", 0.5), num("SEED", 0xF1E5u64)).unwrap();
     let (mut best_ever, mut best_params) = (base, start.clone());

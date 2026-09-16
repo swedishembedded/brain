@@ -34,6 +34,17 @@ pub struct Episode {
     /// itself a score: an episode ends when the body loses the reference, so
     /// a longer one tracked for longer.
     pub ticks: u32,
+    /// Ticks the episode was ASKED for.
+    ///
+    /// Not the same number, and the difference is the whole of
+    /// [`Objective::Fly`]'s quality term. Scoring airtime as `airborne /
+    /// ticks` is degenerate - an episode that ends the moment the animal
+    /// lands has `airborne == ticks` and scores a perfect 1.0 however briefly
+    /// it stayed up - which collapses the product into bare travel and hands
+    /// the search the ballistic arc the product exists to refuse. Measured
+    /// with that bug in place: a tuned fly reported 8.11 body lengths per
+    /// second of "flight" while falling out of the sky.
+    pub requested: u32,
     /// The body drifted further from the reference than
     /// [`Objective::Imitate`]'s `terminal_com_dist` allowed.
     pub terminated: bool,
@@ -44,6 +55,11 @@ pub struct Episode {
     pub gait: Option<crate::gait::Gait>,
     /// Ticks spent off the ground, under [`Objective::Fly`].
     pub airborne: u32,
+    /// Range to the food at the start and at the end, under
+    /// [`Objective::Seek`]. Equal when there is nothing to seek.
+    pub range: (f64, f64),
+    /// The animal reached the food.
+    pub reached: bool,
     /// How far from upright the body ended, in radians: the larger of its
     /// roll and pitch.
     ///
@@ -74,9 +90,13 @@ impl Episode {
     /// the spot, and only a sustained periodic tripod that actually goes
     /// somewhere earns both. For the others it is the accumulated reward.
     pub fn score(&self) -> f64 {
-        match (self.gait, self.airborne) {
-            (Some(g), _) => self.net * g.score(),
-            (None, a) if a > 0 => self.net * (a as f64 / self.ticks.max(1) as f64),
+        match (self.gait, self.airborne, self.range) {
+            (Some(g), _, _) => self.net * g.score(),
+            (None, a, _) if a > 0 => self.net * (a as f64 / self.requested.max(self.ticks).max(1) as f64),
+            // How much nearer it ended than it started. Negative for an animal
+            // that went the wrong way, which is what a search needs in order to
+            // tell wrong from merely motionless.
+            (_, _, (from, to)) if from != to => from - to,
             _ => self.reward,
         }
     }
@@ -170,6 +190,28 @@ pub enum Objective {
         /// for the whole episode.
         altitude: f64,
     },
+    /// EXPLORE: get closer to something you can only smell.
+    ///
+    /// The other three objectives are about the body. This one is about the
+    /// BRAIN, and it only means anything on a nervous system that has one: a
+    /// nerve cord has no nose, and the food's position is never given to the
+    /// animal, only its odour at each antenna.
+    ///
+    /// Scored as the reduction in range over the episode, which is the whole
+    /// claim: the animal ended up nearer the source than it started. The
+    /// CONTROL that makes it a claim is running the identical episode with the
+    /// food removed - same body, same cord, same command, nothing to smell -
+    /// because "it moved towards the food" is otherwise equally satisfied by
+    /// an animal that walks in one direction and got lucky about which.
+    ///
+    /// Reaching it ends the episode: within one body length is arrival, and
+    /// paying an animal to keep walking through its dinner would reward
+    /// overshooting.
+    Seek {
+        /// Range at which the food counts as reached, in the model's own
+        /// length units.
+        reached: f64,
+    },
 }
 
 impl Objective {
@@ -202,6 +244,12 @@ impl Objective {
         Objective::Fly { altitude: 10.0 }
     }
 
+    /// Seek, with arrival at one body length. Anything tighter is asking the
+    /// contact solver for a precision it does not have.
+    pub fn seek() -> Objective {
+        Objective::Seek { reached: 0.25 }
+    }
+
     pub fn imitate(start: Start) -> Objective {
         Objective::Imitate { start, reward: ImitationReward::default(), terminal_com_dist: 0.33 }
     }
@@ -214,7 +262,9 @@ impl Objective {
     /// caller that divides by it gets 0% instead of a made-up percentage.
     pub fn max_per_tick(&self) -> f64 {
         match self {
-            Objective::Displacement | Objective::Walk { .. } | Objective::Fly { .. } => f64::INFINITY,
+            Objective::Displacement | Objective::Walk { .. } | Objective::Fly { .. } | Objective::Seek { .. } => {
+                f64::INFINITY
+            }
             Objective::Imitate { reward, .. } => reward.max(),
         }
     }
@@ -395,6 +445,9 @@ pub fn episode_with(
 
     let mut last_x = start.first().copied().unwrap_or(0.0);
     let mut last_y = start.get(1).copied().unwrap_or(0.0);
+    let mut last_range = fly.food_range().unwrap_or(0.0);
+    ep.range = (last_range, last_range);
+    ep.requested = cfg.ticks;
     for tick in 0..cfg.ticks as usize {
         let t = fly.step()?;
         ep.spikes += t.total_spikes as u64;
@@ -435,6 +488,19 @@ pub fn episode_with(
                 let r = ((x - last_x).powi(2) + (y - last_y).powi(2)).sqrt();
                 last_x = x;
                 last_y = y;
+                r
+            }
+            Objective::Seek { reached } => {
+                let range = fly.food_range().unwrap_or(0.0);
+                ep.range.1 = range;
+                if range < reached {
+                    ep.reached = true;
+                    break;
+                }
+                // Dense, so a local rule has something every tick: how much
+                // closer this tick got it.
+                let r = last_range - range;
+                last_range = range;
                 r
             }
             Objective::Imitate { reward, terminal_com_dist, .. } => {

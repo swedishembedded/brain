@@ -77,7 +77,7 @@ fn main() {
     let row = |label: &str, e: &fly::learn::Episode| {
         let quality = match e.gait {
             Some(g) => g.score(),
-            None => e.airborne as f64 / e.ticks.max(1) as f64,
+            None => e.airborne as f64 / e.requested.max(e.ticks).max(1) as f64,
         };
         println!(
             "{label:>12}  {:>9.5}  {:>9.4}  {:>8.3}  {:>8.2}  {:>7.2}  {:>9}  {}",

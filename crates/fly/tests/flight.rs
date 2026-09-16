@@ -190,6 +190,18 @@ fn a_falling_fly_scores_nothing_and_a_beating_one_scores() {
         falling.score()
     );
 
+    // The airtime term has to be a FRACTION OF THE EPISODE and not of the
+    // ticks that ran, or it is 1.0 for everything: an episode that ends the
+    // moment the animal lands has `airborne == ticks` by construction. With
+    // that bug in place the product collapsed to bare travel and a search
+    // found a fly that covered eight body lengths a second on the way down.
+    assert!(
+        (falling.airborne as f64 / falling.requested as f64) < 0.5,
+        "a fly that fell out of the sky was airborne for {} of {} requested ticks",
+        falling.airborne,
+        falling.requested
+    );
+
     // And the other direction, reported rather than asserted. Driving the cord
     // CHANGES the flight - measured, 356 airborne ticks against 225 undriven
     // with the same wings - so the cord's output reaches a flying body. Which
