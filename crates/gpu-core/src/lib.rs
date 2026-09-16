@@ -1108,6 +1108,21 @@ mod native_facade {
         pub fn pending_reclaim_bytes(&self) -> u64 {
             self.inner.pending_reclaim_bytes()
         }
+        /// How many dropped-but-unreclaimed bytes this device tolerates before
+        /// it refuses the next allocation - the ceiling
+        /// [`Self::pending_reclaim_bytes`] is measured against.
+        ///
+        /// Exposed so a loop that allocates per iteration can drain on BYTES
+        /// rather than on an iteration count it would have to tune per shape:
+        /// the same loop is free at a small working set and fatal at a large
+        /// one, and only this number says where the line is on THIS device.
+        /// Resolved through `backend_api::hardware::reclaim_ceiling`, so it
+        /// honours `BRAIN_GPU_RECLAIM_CEILING` exactly as the check itself
+        /// does - a caller budgeting against it cannot disagree with the
+        /// backend about where the ceiling is.
+        pub fn reclaim_ceiling_bytes(&self) -> u64 {
+            backend_api::hardware::reclaim_ceiling(self.max_buffer_bytes())
+        }
         /// [`Self::poll_wait`], bounded: `false` on timeout instead of blocking
         /// forever. See `backend_api::Backend::poll_wait_timeout`'s doc for the
         /// full contract, including which backends actually bound anything
