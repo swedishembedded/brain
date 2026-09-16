@@ -112,14 +112,25 @@ pub struct MuscleAction {
     pub dof: LegDof,
     /// Agonist/antagonist polarity, `+1.0` or `-1.0`.
     ///
-    /// **This is a convention, not a measurement.** The assignment of a muscle
-    /// to a DoF is anatomy and is solid; whether a flexor's contraction
-    /// corresponds to a positive or negative displacement of flybody's joint
-    /// depends on that model's own axis conventions, which nothing here
-    /// checks. What IS guaranteed is relative: a flexor and its extensor land
-    /// on the same DoF with opposite polarity, so an antagonist pair is always
-    /// a pair. Pinning the absolute sign needs recorded kinematics replayed
-    /// through the model.
+    /// Two things about this sign are settled and one is not, and the
+    /// difference matters more than it looks.
+    ///
+    /// **Settled, by construction:** a flexor and its extensor land on the
+    /// same DoF with opposite polarity, so an antagonist pair is always a pair.
+    ///
+    /// **Settled, by measurement** (`tests/actuator_convention.rs`): flybody
+    /// mirrors its own joint axes, so positive control moves the left and
+    /// right legs the same anatomical way, to better than 0.01% on 21 of 24
+    /// DoF pairs. One polarity per muscle is therefore correct and NO per-side
+    /// flip is needed. Had it been otherwise, a uniform convention would have
+    /// driven the left legs forward and the right legs backward, and the fly
+    /// would have turned in circles while every unit test passed.
+    ///
+    /// **Not settled:** the absolute sense - whether a flexor's contraction is
+    /// a positive or negative joint displacement in flybody's frame. Getting
+    /// that backwards flips every leg identically, which a learning system can
+    /// absorb and a gait metric will detect. It is a benign ambiguity because
+    /// the dangerous one, the per-side kind, is ruled out above.
     pub polarity: f32,
 }
 

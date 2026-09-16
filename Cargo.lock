@@ -1158,6 +1158,7 @@ name = "brain-flybody"
 version = "1.1.0"
 dependencies = [
  "brain-connectome",
+ "brain-mujoco",
  "brain-testutil",
 ]
 

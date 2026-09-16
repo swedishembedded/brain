@@ -13,4 +13,8 @@ path = "src/lib.rs"
 brain-connectome.workspace = true
 
 [dev-dependencies]
+# Only the tests need a physics engine: the map itself is built against a list
+# of actuator NAMES, so it stays testable with no MuJoCo present. The one gate
+# that does need it is the one that measures how the model responds.
+brain-mujoco.workspace = true
 brain-testutil.workspace = true

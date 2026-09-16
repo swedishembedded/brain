@@ -354,11 +354,23 @@ it against the scan+sort reference at `max|d| == 0`.
   (c) `femur_twist` has only the femur reductor, and whether that rotation has
   an antagonist or is merely unannotated is not something the map can settle.
 
-  **Still open in M3:** the polarity convention is stated, not verified. Which
-  DoF a muscle acts on is anatomy and is solid; whether a flexor is positive or
-  negative against flybody's own joint axes needs the recorded kinematics
-  replayed through the model. That replay is what closes this milestone, and
-  the 16,252-snippet walking dataset is already on disk for it.
+  **The polarity question is now split into its dangerous and benign halves,
+  and the dangerous one is closed by measurement.** Driving each leg actuator
+  alone and reading which generalized coordinate moves shows flybody mirrors
+  its own joint axes: positive control moves left and right the same
+  anatomical way, agreeing to better than 0.01% on 21 of 24 DoF pairs, worst
+  case 0.22% on T3 coxa abduction (the model comes from a real scan, not a
+  mirrored idealisation). So one polarity per muscle is correct and no
+  per-side flip is needed - had it been otherwise, a uniform convention would
+  have driven the left legs forward and the right backward and the fly would
+  have circled while every unit test passed.
+
+  What remains is only the ABSOLUTE sense: whether a flexor's contraction is a
+  positive or negative displacement in flybody's frame. Getting that backwards
+  flips every leg identically, which a learning system can absorb and a gait
+  metric will detect. Kinematic replay against the 16,252-snippet walking
+  dataset would pin it outright and is worth doing, but it is no longer a
+  blocker for M4.
 * **M4 - closed loop, no learning.** descending drive -> MNs -> torques ->
   proprioception -> back into the graph. **Gate:** the loop sustains 500 Hz
   in real time, *measured*; a lesioned proprioceptive channel changes the
