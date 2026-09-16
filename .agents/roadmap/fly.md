@@ -624,9 +624,104 @@ it against the scan+sort reference at `max|d| == 0`.
   weights training ended with, apply the same lesion, and run the same episodes
   frozen - because a body that recovers on its own looks identical to a nervous
   system that re-adapted.
-* **M6 - flight.** Wing MNs, power/steering split, wingbeat entrainment.
-  **Gate:** 218 Hz entrainment; flight-imitation reward against the recorded
-  saccade-evasion trajectories.
+  **Then the walking body was tested WITHOUT a nervous system, and it walks.**
+  A hand-written alternating tripod written straight to the actuators - fore-aft
+  swing on the coxa, levation on the femur a quarter cycle ahead - reaches
+  **+2.67 body lengths per second** at 12 Hz and finishes upright. A real fruit
+  fly walks at one to three. The body, the actuators and the ground contact are
+  not the limit, and every earlier negative result shared the untested
+  assumption that they might be. What the cord is failing to produce is the
+  RHYTHM.
+
+  **So rhythm became the thing measured.** `fly::gait` scores a trace on
+  stepping frequency, tripod antiphase, and how much of the power sits in that
+  oscillation - connectome-independent, no reference recording, and validated
+  on synthetic traces where the answer is known exactly. A perfect tripod
+  scores above 0.9; the same frequency with all six legs in phase scores below
+  0.02, which is what separates the phase measurement from the spectral one.
+
+  **Three modelling corrections then came out of the literature on
+  connectome-derived circuits, and the third was decisive.**
+
+  *Neurons have sizes.* A leaky membrane obeys `C dV/dt = -g_L(V - V_rest) + I`
+  and both terms scale with area, so input resistance goes as one over the
+  area. A uniform threshold made the largest cells hundreds of times more
+  excitable than the smallest. The correction was nearly a silent no-op: the
+  MANC export HAS a `Surface area (nm^2)` column and leaves it EMPTY on all
+  23,665 rows, so the lookup succeeds and every value parses as absent. Volume
+  is what is populated, and the import gate now asserts the state of this per
+  dataset in both directions.
+
+  *A command goes to one cell type, not to the whole population.* A fly has
+  1,328 descending neurons commanding different and sometimes opposing
+  behaviours. Driving them together is not "go", it is every command at once.
+
+  *And at the weight scale this crate had used since the loop was built, a
+  single-cell-type command DIES before it arrives* - 0.007% of the cord active.
+  Every earlier result about learning was measured on a network carrying no
+  signal. Rhythm lives between 0.3 and 1.0, at a few percent active, and
+  collapses into a fused burst above that. At 1.0 the whole cord reaches
+  rhythmicity 0.432 with a POSITIVE tripod term of +0.228, at 3 Hz.
+
+  *And one measurement artifact was reading as a result:* `gait::analyse`
+  discarded nothing, so a run's onset sat at the bottom of the spectrum -
+  subtracting the mean does not remove a ramp - and the dominant frequency
+  pinned to the lowest band edge. The same run that now reads +0.228 previously
+  read -0.218.
+
+  **Still open:** the rhythm is at 3 Hz where a walking fly steps at 10 to 15,
+  and the tripod term is positive but weak. The next lever is the one the
+  published models use and this does not: restricting the network to a single
+  leg neuropil, because a large recurrent graph carries feedback loops of many
+  lengths at once and a network oscillator's period is its loop delay.
+  `Connectome::subgraph` exists for it; LEGNP_T1 plus the descending population
+  is 5,752 neurons and 4.8M synapses, against a published front-leg model's
+  4,604 and 3.8M.
+* **M6 - flight. THE WINGS WORK.** The published body could not have flown, and
+  not for want of tuning: its wing surfaces carry MuJoCo's DEFAULT fluid model,
+  which approximates a body by its inertia box and makes almost no lift from a
+  thin flapping plate. A wingbeat driven into it moves the wings correctly and
+  produces nothing. `flybody::flight_model` generates the flight variant - the
+  ellipsoid fluid model with a fly wing's coefficients, a far higher actuator
+  gain, more hinge damping, a shorter timestep - as a textual rewrite where
+  every substitution is COUNTED, so an upstream reformat is an error naming the
+  pattern rather than a fly that flaps and does not fly.
+
+  The wingbeat is GENERATED and the nervous system modulates it, because that
+  is the anatomy. Power muscles are stretch-activated and drive a resonant
+  thorax at a frequency the thorax sets: a fly beats near 218 Hz while those
+  motor neurons fire at tens of hertz, so wiring a wing joint to their spike
+  train would produce a wingbeat two orders of magnitude too slow. MANC's own
+  annotations carry the split - **24 power motor neurons** across the dorsal
+  longitudinal and dorsoventral groups, **28 amplitude** and **4
+  angle-of-attack** steering neurons.
+
+  Two implementation facts that are not details. The stroke is written every
+  PHYSICS step: at 218 Hz a beat lasts 4.6 ms against a 2 ms control period, so
+  writing it per control tick samples it twice and aliases it into a wobble.
+  And feathering is `tanh(k cos phi)` rather than a sinusoid, because a real
+  wing holds a nearly constant angle of attack through each half-stroke and
+  flips it fast at the reversal - which is that shape with one parameter and no
+  lookup table.
+
+  **Measured:** stroke 2.4 rad peak, and the descent falls from **100.6 cm/s
+  with the stroke off to 21.4 cm/s beating at 180 Hz**, a 79% reduction in sink
+  rate. 180 rather than the animal's 218 because this airframe's hinge
+  resonates lower than a real thorax, measured by sweep rather than assumed.
+
+  Two things the gate got wrong first and now records. A fly with its wings out
+  and STILL does not fall at g - those wings are large aerodynamic surfaces
+  whether or not they beat, and passive drag alone halves the descent - so
+  comparing against textbook free fall credits the wingbeat with lift the wings
+  produce by existing. And the wings are not motionless with flight disabled:
+  the sprung hinge rings at about half a radian, asserted as the baseline the
+  stroke must clear rather than hidden behind a threshold this model does not
+  meet.
+
+  **Gate:** sink rate at least halved against the same body with the stroke
+  off, which holds. **Still open:** the remaining sink, steering through the
+  amplitude and angle-of-attack motor neurons, and a flight-imitation reward
+  against the recorded saccade-evasion trajectories.
 * **M7 - serving contract.** `fly::caps`, residency adapter, D-Bus, example,
   per `.agents/rules/serving-contract.md`.
 

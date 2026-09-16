@@ -1170,6 +1170,7 @@ dependencies = [
  "brain-promote",
  "brain-testutil",
  "brain-wm-display",
+ "tempfile",
 ]
 
 [[package]]
@@ -1179,6 +1180,7 @@ dependencies = [
  "brain-connectome",
  "brain-mujoco",
  "brain-testutil",
+ "tempfile",
 ]
 
 [[package]]
