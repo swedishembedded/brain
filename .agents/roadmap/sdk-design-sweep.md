@@ -412,6 +412,64 @@ through the resolver at all). This is the SAME kind of gap `ImagePipeline`
 itself still has against `flux2_cli.rs` - tracked, not silently accepted,
 and not repeated by pretending it's smaller than it is.
 
+### Phase 2.2 - `TextGenerationPipeline` (done, scoped to qwen3 + a local path)
+
+Covers **qwen3 only, loaded from a literal local checkpoint path, not a
+`<vendor>/<repo>` hub id** - `crates/qwen3` has no model-store `ArchSpec` at
+all (unlike `crates/qwen35/src/spec.rs`, which does, in the exact
+`["weights", "tokenizer"]`-role shape a future `qwen3::spec::Qwen3Spec`
+should copy). Writing that `ArchSpec` is upstream work in the qwen3 crate,
+tracked here rather than attempted inline - the same treatment
+chronos2/fincast got in Phase 2.1, applied to the highest-value remaining
+architecture instead of the easiest one.
+
+The construction sequence (checkpoint-open, config-parse, tokenizer
+precedence, device-aware placement) is real and mirrors `qwen_cli.rs`'s own
+`infer` command and `qwen3::caps::GenerateAction` byte-for-byte (same
+`checkpoint::weightio::WeightReader::open` pre-check before the panicking
+`Qwen::load_inference`, same `qwen3::footprint::place_and_build` VRAM-budget
+wrapper, same tokenizer-precedence rule: an explicit path wins, else a
+`.gguf`'s own embedded tokenizer, else a named error). The GENERATION call
+is not a third implementation of chat templating/sampling/stop-strings: it
+runs `qwen3::chat::parse_request` + `qwen3::chat::SeqState` +
+`qwen3::sample::generate_kv_stream` - the exact sequence
+`caps::GenerateAction::run` (the served `/v1/chat/completions` path) runs -
+built from a plain in-process `capability::Invocation`, with no
+capability-dispatch server, no scheduler and no paged KV cache anywhere in
+the loop. This is what "CLI/SDK/server converge on one implementation"
+(rule 10) looks like from day one, rather than something to migrate onto
+later the way M10 had to for flux2.
+
+The context budget (prompt + completion, in tokens) is fixed at BUILD time
+(`TextGenerationPipelineBuilder::capacity`, default 4096) rather than
+resized per call - the same `s3dit` build-time-size asymmetry
+`ImagePipelineBuilder::size` already documents, for the same underlying
+reason: `Qwen`'s KV cache is sized once, at construction.
+`TextGenerationPipeline::generate_with` validates a request against it and
+names the fix in the error rather than silently truncating or rebuilding.
+
+Tested against a real (if minimal) local safetensors fixture: an empty `{}`
+config header, which `QwenConfig::from_json`'s own defaults happen to
+resolve to EXACTLY `QwenConfig::tiny()` - genuinely cheaper than
+`ImagePipeline`'s or `ForecastPipeline`'s fixtures, which both need real
+classifiable tensor shapes. What stays out of reach: `data::qwen_tokenizer::
+QwenBpe` has no synthetic/in-memory constructor, only `from_file`/
+`from_dir`/`from_gguf`/`from_json_bytes` reading a real HF `tokenizer.json`
+schema, so these tests prove construction through checkpoint-open and
+config-parse, then a clean `Error::MissingArgument` at the tokenizer step -
+never reaching the heavier `Qwen::load_inference` call, and never a panic.
+
+**Not done, tracked for later**: kronos/timesfm3-style model-store
+resolution (needs `qwen3::spec::Qwen3Spec` first, see above); CLI migration
+(the SIX qwen-family CLI files - `qwen_cli.rs`/`qwen35_cli.rs`/
+`qwen35moe_cli.rs`/`glm_cli.rs`/`gpt_cli.rs`/`lfm_cli.rs` - are untouched,
+same class of gap as `flux2_cli.rs`/`forecast_cli.rs`); a `TextGenerationPipeline`
+type that ALSO dispatches across the other decoder families the way
+`ImagePipeline` dispatches across flux2/s3dit, which is what rule 2 actually
+asks for long-term - this milestone proves the shape on the single
+most-complete backend first, deliberately not the full consolidation in one
+change.
+
 Findings 8, 11, 14, 18-20, 23-24 are real but not yet milestoned - pick them
 up opportunistically when touching the same file for another reason, or spin
 them into their own milestone if they start blocking something.

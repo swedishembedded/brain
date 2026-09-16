@@ -82,6 +82,30 @@ representation, covariate handling), and `pipe.forecast_with(&panel, &spec)`
 is the full-control entry point for a multi-item, multi-variate `Panel` or
 for requesting samples/a distribution instead of quantiles.
 
+## Text generation
+
+```rust
+let pipe = brain::TextGenerationPipeline::from_pretrained("/models/qwen3-4b-q8_0.gguf")?;
+let out = pipe.generate("Explain DMA in one sentence.")?;
+println!("{}", out.text);
+```
+
+Loads from a local checkpoint path rather than a hub id today (qwen3 has no
+model-store resolver registered yet). A `.gguf` checkpoint carries its own
+tokenizer; a brain-format `.safetensors` checkpoint needs one named
+explicitly:
+
+```rust
+let pipe = brain::TextGenerationPipeline::builder("/models/qwen3-4b.safetensors")
+    .tokenizer("/models/qwen3-4b/tokenizer.json")
+    .load()?;
+```
+
+`pipe.generate_with(prompt, brain::TextGenerationOptions::new().max_new_tokens(256).temperature(0.7))`
+layers on the common knobs; the result's `prompt_tokens`/`completion_tokens`/
+`finish_reason` mirror what the served `/v1/chat/completions` endpoint
+reports, since both run through the same chat-templating and sampling code.
+
 ## Features
 
 Name the surfaces you use and you get their dependencies and nothing else:
@@ -91,6 +115,7 @@ Name the surfaces you use and you get their dependencies and nothing else:
 | `image` | `ImagePipeline`, `Image` - text-to-image and image editing |
 | `creature` | `Creature`, `View` - a connectome running a body, and a window onto it |
 | `forecast` | `ForecastPipeline` - time-series forecasting |
+| `text` | `TextGenerationPipeline` - text generation, from a local checkpoint path |
 | `full` | every surface; this is the default |
 
 ## Errors

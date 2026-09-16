@@ -28,7 +28,7 @@ path = "src/lib.rs"
 # baseline (`Cargo.toml`'s `brain = { default-features = false }`) is what
 # makes a consumer name its surfaces explicitly.
 default = ["full"]
-full = ["image", "creature", "forecast"]
+full = ["image", "creature", "forecast", "text"]
 
 # --- surfaces: one per brain_arch::Domain the SDK has a public type for.
 #     A surface is the only thing a consumer names.
@@ -46,6 +46,14 @@ forecast = ["resolve", "dep:brain-forecast", "dep:brain-kronos", "dep:brain-time
 # the model store. When that changes this feature gains `resolve`, not a
 # parallel resolver.
 creature = ["device", "dep:brain-fly", "dep:brain-connectome", "dep:brain-flybody", "dep:brain-mujoco", "dep:brain-neuro", "dep:brain-wm-display", "dep:tempfile"]
+# `brain::TextGenerationPipeline`. Covers qwen3 only, and from a literal local
+# checkpoint path, not a `<vendor>/<repo>` hub id: `crates/qwen3` has no
+# model-store `ArchSpec` at all yet (unlike kronos/timesfm3 above), so there
+# is nothing for a resolver to resolve a hub id against - the same reason
+# `creature` selects no resolver. Selects `device` only, not `resolve` - no
+# loader/model-store dependency belongs here until an `ArchSpec` exists to
+# use it.
+text = ["device", "dep:brain-qwen3", "dep:brain-data", "dep:brain-checkpoint", "dep:serde_json"]
 
 # --- infrastructure: selected BY a surface, never named by a consumer.
 # `brain::Device`.
@@ -62,7 +70,9 @@ resolve = ["device", "dep:brain-loader", "dep:brain-model"]
 brain-capability.workspace = true
 brain-modelref.workspace = true
 brain-modelstore.workspace = true
+brain-checkpoint = { workspace = true, optional = true }
 brain-connectome = { workspace = true, optional = true }
+brain-data = { workspace = true, optional = true }
 brain-fly = { workspace = true, optional = true }
 brain-flybody = { workspace = true, optional = true }
 brain-flux2 = { workspace = true, optional = true }
@@ -74,9 +84,11 @@ brain-loader = { workspace = true, optional = true }
 brain-model = { workspace = true, optional = true }
 brain-mujoco = { workspace = true, optional = true }
 brain-neuro = { workspace = true, optional = true }
+brain-qwen3 = { workspace = true, optional = true }
 brain-timesfm3 = { workspace = true, optional = true }
 brain-s3dit = { workspace = true, optional = true }
 brain-wm-display = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
 tempfile = { workspace = true, optional = true }
 
 [dev-dependencies]
