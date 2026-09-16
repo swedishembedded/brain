@@ -30,8 +30,8 @@ fn env(name: &str) -> String {
 
 fn main() {
     let mj = MuJoCo::load().unwrap();
-    let dir = std::path::PathBuf::from(env("BRAIN_CONNECTOME_DIR")).join("manc-codex");
-    let whole = connectome::load("manc", &dir.join("neurons.csv.gz"), &dir.join("connections_princeton.csv.gz")).unwrap();
+    let root = std::path::PathBuf::from(env("BRAIN_CONNECTOME_DIR"));
+    let whole = { let (n, e) = connectome::find(&root, "manc").unwrap(); connectome::load("manc", &n, &e).unwrap() };
     // $REGION restricts the network to one neuropil plus the descending
     // neurons that reach it, which is the scope published circuit models of
     // this cord work at. A large recurrent graph carries feedback loops of

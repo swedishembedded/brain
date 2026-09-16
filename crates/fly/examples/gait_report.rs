@@ -77,8 +77,8 @@ fn scripted() -> Trace {
 
 fn main() {
     let mj = MuJoCo::load().unwrap();
-    let dir = std::path::PathBuf::from(env("BRAIN_CONNECTOME_DIR")).join("manc-codex");
-    let c = connectome::load("manc", &dir.join("neurons.csv.gz"), &dir.join("connections_princeton.csv.gz")).unwrap();
+    let (neurons, edges) = connectome::find(std::path::PathBuf::from(env("BRAIN_CONNECTOME_DIR")), "manc").unwrap();
+    let c = connectome::load("manc", &neurons, &edges).unwrap();
     let lif = fly::cord_lif();
     let ticks: usize = std::env::var("TICKS").ok().and_then(|v| v.parse().ok()).unwrap_or(1000);
     let cell = std::env::var("CELL").unwrap_or_else(|_| "DNg100".to_string());

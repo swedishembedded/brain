@@ -4,8 +4,8 @@
 //! which make it seize, and which sit in between.
 use neuro::{DynamicalSystem, Port, SpikingNet};
 fn main() {
-    let dir = std::path::PathBuf::from(std::env::var("BRAIN_CONNECTOME_DIR").unwrap()).join("manc-codex");
-    let c = connectome::load("manc", &dir.join("neurons.csv.gz"), &dir.join("connections_princeton.csv.gz")).unwrap();
+    let (neurons, edges) = connectome::find(std::path::PathBuf::from(std::env::var("BRAIN_CONNECTOME_DIR").unwrap()), "manc").unwrap();
+    let c = connectome::load("manc", &neurons, &edges).unwrap();
     let n = c.neurons.len();
     let desc = c.population(|x| x.super_class == "descending");
     let motor = c.population(|x| x.super_class == "motor");

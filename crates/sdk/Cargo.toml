@@ -39,7 +39,7 @@ image = ["resolve", "dep:brain-flux2", "dep:brain-s3dit", "dep:brain-imaging"]
 # `<vendor>/<repo>` checkpoint, so it is loaded from a path rather than through
 # the model store. When that changes this feature gains `resolve`, not a
 # parallel resolver.
-creature = ["device", "dep:brain-fly", "dep:brain-connectome", "dep:brain-mujoco", "dep:brain-neuro", "dep:brain-wm-display"]
+creature = ["device", "dep:brain-fly", "dep:brain-connectome", "dep:brain-flybody", "dep:brain-mujoco", "dep:brain-neuro", "dep:brain-wm-display", "dep:tempfile"]
 
 # --- infrastructure: selected BY a surface, never named by a consumer.
 # `brain::Device`.
@@ -58,6 +58,7 @@ brain-modelref.workspace = true
 brain-modelstore.workspace = true
 brain-connectome = { workspace = true, optional = true }
 brain-fly = { workspace = true, optional = true }
+brain-flybody = { workspace = true, optional = true }
 brain-flux2 = { workspace = true, optional = true }
 brain-gpu-core = { workspace = true, optional = true }
 brain-imaging = { workspace = true, optional = true }
@@ -67,6 +68,7 @@ brain-mujoco = { workspace = true, optional = true }
 brain-neuro = { workspace = true, optional = true }
 brain-s3dit = { workspace = true, optional = true }
 brain-wm-display = { workspace = true, optional = true }
+tempfile = { workspace = true, optional = true }
 
 [dev-dependencies]
 brain-checkpoint.workspace = true

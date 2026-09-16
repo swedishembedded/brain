@@ -23,8 +23,8 @@ const BODY_LENGTH_CM: f64 = 0.25;
 
 fn main() {
     let mj = MuJoCo::load().unwrap();
-    let dir = std::path::PathBuf::from(std::env::var("BRAIN_CONNECTOME_DIR").unwrap()).join("manc-codex");
-    let c = connectome::load("manc", &dir.join("neurons.csv.gz"), &dir.join("connections_princeton.csv.gz")).unwrap();
+    let (neurons, edges) = connectome::find(std::path::PathBuf::from(std::env::var("BRAIN_CONNECTOME_DIR").unwrap()), "manc").unwrap();
+    let c = connectome::load("manc", &neurons, &edges).unwrap();
     let xml = std::env::var("BRAIN_FLYBODY_XML").unwrap();
     let lif = fly::cord_lif();
     // Which objective. Displacement is kept because the ceiling was measured

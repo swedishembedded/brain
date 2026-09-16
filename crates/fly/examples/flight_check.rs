@@ -28,12 +28,16 @@ fn main() {
     let mj = MuJoCo::load().unwrap();
     let base = std::path::PathBuf::from(env("BRAIN_FLYBODY_FRUITFLY_XML"));
     let dir = tempfile::tempdir().expect("a temp dir");
-    let cfg = flybody::Flight::default();
+    // The published flight tasks use a wing gain of 18. Whether that is a
+    // ceiling or just the value they happened to train at is a question this
+    // sweep can answer rather than assume.
+    let gain: f64 = std::env::var("WING_GAIN").ok().and_then(|v| v.parse().ok()).unwrap_or(18.0);
+    let cfg = flybody::Flight { wing_gain: gain, ..flybody::Flight::default() };
     let scene = flybody::flight_scene(&base, dir.path(), cfg).expect("the flight scene builds");
     println!("flight model: timestep {:.0e} s, wing gain {}, fluid {:?}", cfg.timestep, cfg.wing_gain, cfg.fluidcoef);
 
-    let cdir = std::path::PathBuf::from(env("BRAIN_CONNECTOME_DIR")).join("manc-codex");
-    let c = connectome::load("manc", &cdir.join("neurons.csv.gz"), &cdir.join("connections_princeton.csv.gz")).unwrap();
+    let (neurons, edges) = connectome::find(std::path::PathBuf::from(env("BRAIN_CONNECTOME_DIR")), "manc").unwrap();
+    let c = connectome::load("manc", &neurons, &edges).unwrap();
     let model = Model::from_xml(&mj, &scene).expect("the flight model compiles");
     let lif = fly::cord_lif();
     let gpu = gpu_core::testgpu::dev(&neuro::KERNELS);

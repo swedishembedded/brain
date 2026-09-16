@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// The whole file is about the `image` surface, so it compiles only with it.
+// Without this, `cargo test -p brain --no-default-features --features
+// <anything else>` fails to build a test that was never meant to run - which
+// looks like the other surface being broken.
+#![cfg(feature = "image")]
+
 //! End-to-end coverage of `ImagePipeline::from_pretrained`'s resolution +
 //! backend-dispatch path against a local, synthetic, fully offline
 //! models-directory fixture -- mirroring `crates/flux2/tests/

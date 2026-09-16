@@ -56,21 +56,47 @@ pub struct CreatureBuilder {
     weight_scale: f32,
     shuffle: Option<u64>,
     plasticity: bool,
+    arena: Arena,
+    food: Option<[f64; 3]>,
 }
 
+pub use flybody::Arena;
+
 impl CreatureBuilder {
-    /// Directory holding the connectome export - for the fruit fly, the one
-    /// containing `manc-codex/`.
+    /// Where the connectome export is.
+    ///
+    /// Either the directory holding `neurons.csv.gz` and
+    /// `connections_princeton.csv.gz` directly, or a parent containing a
+    /// `manc/` or `manc-codex/` beside them. All three layouts are what a
+    /// download of this data actually produces.
     pub fn connectome(mut self, dir: impl AsRef<Path>) -> CreatureBuilder {
         self.connectome = Some(dir.as_ref().to_path_buf());
         self
     }
 
-    /// The MJCF scene. Use the one WITH a ground plane: a body file with no
-    /// floor simulates a fly falling forever, and every other measurement
-    /// still looks healthy while it does.
+    /// The fruit-fly MJCF - the BODY model, not a scene.
+    ///
+    /// The scene is generated: floor, sky, light, and whatever else the arena
+    /// calls for. That is not convenience. A body file with no floor simulates
+    /// a fly falling forever while every other reading looks healthy, and the
+    /// flight arena needs four changes to the published model before a
+    /// wingbeat produces any lift at all. Neither is something a caller should
+    /// have to know to get right.
     pub fn body(mut self, xml: impl AsRef<Path>) -> CreatureBuilder {
         self.body = Some(xml.as_ref().to_path_buf());
+        self
+    }
+
+    /// Ground to walk on, or air to fly through. See [`Arena`].
+    pub fn arena(mut self, arena: Arena) -> CreatureBuilder {
+        self.arena = arena;
+        self
+    }
+
+    /// Put something in the world to go towards, in the model's own
+    /// centimetres. The fly's body is about 0.25 cm long.
+    pub fn food(mut self, at: [f64; 3]) -> CreatureBuilder {
+        self.food = Some(at);
         self
     }
 
@@ -102,22 +128,31 @@ impl CreatureBuilder {
     pub fn build(self) -> Result<Creature, Error> {
         let dir = self.connectome.ok_or_else(|| backend("no connectome directory set; call .connectome(dir)".into()))?;
         let body = self.body.ok_or_else(|| backend("no body set; call .body(scene.xml)".into()))?;
-        let export = dir.join(format!("{}-codex", self.dataset));
-        let c = connectome::load(
-            &self.dataset,
-            &export.join("neurons.csv.gz"),
-            &export.join("connections_princeton.csv.gz"),
-        )
-        .map_err(backend)?;
+        // Tolerant of how the export was unpacked - see `connectome::find`.
+        // A caller should not have to know whether their download put the two
+        // CSVs in `manc/`, in `manc-codex/`, or at the root.
+        let (neurons, edges) = connectome::find(&dir, &self.dataset).map_err(backend)?;
+        let c = connectome::load(&self.dataset, &neurons, &edges).map_err(backend)?;
 
         let mj = mujoco::MuJoCo::load().map_err(backend)?;
-        let model = mujoco::Model::from_xml(&mj, &body).map_err(backend)?;
-        let lif = neuro::LifParams {
-            dt_over_tau: 0.2,
-            v_th: 1.0,
-            r: 1.0,
-            refrac_ticks: 1,
-            ..neuro::LifParams::default()
+        // The generated scene lives in a scratch directory the creature keeps
+        // alive: MuJoCo reads the file at load and never again, but a caller
+        // who wants to look at what was generated should find it still there.
+        let scratch = tempfile::tempdir().map_err(|e| backend(format!("no scratch directory: {e}")))?;
+        let world = flybody::World { arena: self.arena, food: self.food, ..flybody::World::default() };
+        let scene = flybody::world(&body, scratch.path(), world).map_err(backend)?;
+        let model = mujoco::Model::from_xml(&mj, &scene).map_err(backend)?;
+        let lif = fly::cord_lif();
+        // Flight integrates ten times finer than walking and needs it: a
+        // 218 Hz wingbeat resolved at the walking timestep integrates the
+        // stroke adequately and the fluid forces on a reversing wing badly.
+        let timing = match self.arena {
+            Arena::Ground => fly::Timing::default(),
+            Arena::Air => fly::Timing {
+                neural_per_control: 1,
+                physics_per_control: 40,
+                physics_dt: world.flight.timestep,
+            },
         };
         let gpu = gpu_core::testgpu::dev(&neuro::KERNELS);
         let mut inner = fly::Fly::new(
@@ -126,7 +161,7 @@ impl CreatureBuilder {
             model,
             lif,
             fly::Wiring { weight_scale: self.weight_scale, shuffle_seed: self.shuffle, ..fly::Wiring::default() },
-            fly::Timing::default(),
+            timing,
             fly::Coupling::default(),
         )
         .map_err(backend)?;
@@ -140,8 +175,63 @@ impl CreatureBuilder {
                 .enable_plasticity(neuro::PlasticityParams { eta: 0.02, w_min: -bound, w_max: bound, ..Default::default() })
                 .map_err(backend)?;
         }
+        if self.arena == Arena::Air {
+            // 180 Hz rather than the animal's 218: this airframe's wing hinge
+            // resonates lower than a real thorax does, measured by sweeping
+            // the drive frequency rather than assumed from the biology.
+            //
+            // Feathering at 0.4 rather than the default 0.6, and the actuator
+            // gain left at the published 18. Both are measurements: sweeping
+            // the gain to 30 and 45 makes the stroke bigger and the flight
+            // WORSE - 90.8% of body weight supported at 18, 73.2% at 30, 59.4%
+            // at 45 - because the wing over-rotates past a useful angle of
+            // attack and stalls. The published value is well chosen and a
+            // bigger number is not a better one.
+            inner
+                .enable_flight(fly::Wingbeat { hz: 180.0, feather: 0.4, ..fly::Wingbeat::default() })
+                .map_err(backend)?;
+            // Retract the legs, which is what a flying fly does and what the
+            // published flight tasks do to this model. Leaving them driven
+            // means six limbs being flailed by a cord that has no idea it is
+            // airborne: they add drag, they catch the floor on the way past,
+            // and the difference reads as the wings underperforming.
+            let legs: Vec<usize> = inner
+                .actuator_names()
+                .iter()
+                .enumerate()
+                .filter(|(_, n)| !n.starts_with("wing_"))
+                .map(|(i, _)| i)
+                .collect();
+            for i in legs {
+                // Cannot fail: the index came from this body's own list.
+                let _ = inner.set_muscle_strength(i, 0.0);
+            }
+        }
         let neurons = c.neurons.len();
-        Ok(Creature { inner, mj, neurons, drive: 0.0, turn: 0.0 })
+        // An air arena starts the fly ALOFT. Left on the floor with its wings
+        // beating, what gets measured is a fly skimming a surface, which looks
+        // like flight in the numbers and is not.
+        let mut creature = Creature {
+            inner,
+            mj,
+            neurons,
+            drive: 0.0,
+            turn: 0.0,
+            food: self.food,
+            extent: flybody::world_extent(world),
+            // Twenty centimetres, which is eighty body lengths and an
+            // ordinary height for a fly. It has to be this high because the
+            // wings carry about 90% of the body's weight and not 100%: the fly
+            // sinks at roughly 14 cm/s, so altitude is flight TIME. A
+            // centimetre sounds like plenty and buys 45 milliseconds.
+            start_height: match self.arena {
+                Arena::Air => 20.0,
+                Arena::Ground => 0.0,
+            },
+            _scratch: scratch,
+        };
+        creature.reset();
+        Ok(creature)
     }
 }
 
@@ -152,6 +242,13 @@ pub struct Creature {
     neurons: usize,
     drive: f32,
     turn: f32,
+    food: Option<[f64; 3]>,
+    /// How far above its resting pose the body starts, in centimetres.
+    start_height: f64,
+    /// The scene's `<statistic extent>`, for anything pointing a camera.
+    extent: f64,
+    // Holds the generated scene on disk for as long as the creature lives.
+    _scratch: tempfile::TempDir,
 }
 
 impl Creature {
@@ -162,9 +259,11 @@ impl Creature {
             connectome: None,
             body: None,
             dataset: "manc".to_string(),
-            weight_scale: 3e-2,
+            weight_scale: fly::Wiring::default().weight_scale,
             shuffle: None,
             plasticity: false,
+            arena: Arena::Ground,
+            food: None,
         }
     }
 
@@ -201,6 +300,164 @@ impl Creature {
             .collect();
         // Cannot fail: the length is taken from the creature itself.
         let _ = self.inner.set_descending(&command);
+    }
+
+    /// The scene's declared extent, which is what MuJoCo scales every camera
+    /// gesture by.
+    pub fn scene_extent(&self) -> f64 {
+        self.extent
+    }
+
+    /// Where the food is, if this world has any.
+    pub fn food(&self) -> Option<[f64; 3]> {
+        self.food
+    }
+
+    /// Distance and bearing to the food, in the FLY's own frame: `(range in
+    /// centimetres, bearing in radians, positive to the left)`.
+    ///
+    /// Computed from the body's position and orientation alone, both of which
+    /// are in the state vector - no MuJoCo struct is read and no site is
+    /// queried, because the food does not move and its position is something
+    /// this creature was told rather than something it has to look up.
+    pub fn bearing_to_food(&self) -> Option<(f64, f64)> {
+        let food = self.food?;
+        let q = self.inner.qpos();
+        let (px, py) = (q.first().copied().unwrap_or(0.0), q.get(1).copied().unwrap_or(0.0));
+        let (dx, dy) = (food[0] - px, food[1] - py);
+        let range = (dx * dx + dy * dy + (food[2] - q.get(2).copied().unwrap_or(0.0)).powi(2)).sqrt();
+        // Yaw from the root quaternion, MuJoCo's (w, x, y, z) order. Only the
+        // heading matters for a bearing, so this is the standard yaw
+        // extraction rather than a full rotation.
+        let (w, x, y, z) = (
+            q.get(3).copied().unwrap_or(1.0),
+            q.get(4).copied().unwrap_or(0.0),
+            q.get(5).copied().unwrap_or(0.0),
+            q.get(6).copied().unwrap_or(0.0),
+        );
+        let yaw = (2.0 * (w * z + x * y)).atan2(1.0 - 2.0 * (y * y + z * z));
+        // Wrapped to (-pi, pi], so a target just behind the left shoulder is a
+        // small left turn rather than an almost full circle to the right.
+        let mut bearing = dy.atan2(dx) - yaw;
+        while bearing > std::f64::consts::PI {
+            bearing -= 2.0 * std::f64::consts::PI;
+        }
+        while bearing <= -std::f64::consts::PI {
+            bearing += 2.0 * std::f64::consts::PI;
+        }
+        Some((range, bearing))
+    }
+
+    /// Steer towards the food, returning the range left.
+    ///
+    /// The bearing is computed here and delivered through the DESCENDING
+    /// command, which is where it belongs anatomically rather than as a
+    /// convenience. This connectome is the ventral nerve cord; a fly's
+    /// navigation happens in its brain, and the only thing the brain sends
+    /// down is a descending command. So a controller that works out which way
+    /// to go and pushes it into the descending population is standing in for
+    /// the missing half of the animal, in exactly the place the missing half
+    /// would have connected.
+    ///
+    /// `None` when there is nothing to seek.
+    pub fn seek_food(&mut self, forward: f32) -> Option<f64> {
+        let (range, bearing) = self.bearing_to_food()?;
+        // Saturating rather than proportional: a fly does not turn twice as
+        // hard for a target twice as far off to the side, and a linear law
+        // makes the approach oscillate as the bearing crosses zero.
+        let turn = (bearing / std::f64::consts::FRAC_PI_4).clamp(-1.0, 1.0) as f32;
+        self.turn(turn);
+        // Slow down when nearly there, so arriving does not mean overshooting.
+        self.drive(forward * (range as f32 / 1.0).clamp(0.25, 1.0));
+        Some(range)
+    }
+
+    /// Whether the fly has reached the food, within one body length.
+    pub fn reached_food(&self) -> bool {
+        // 0.25 cm is a fruit fly's body length; anything tighter is asking the
+        // physics for a precision the contact solver does not have.
+        self.bearing_to_food().is_some_and(|(range, _)| range < 0.25)
+    }
+
+    /// Whether this creature has wings running at all.
+    pub fn flying(&self) -> bool {
+        self.inner.wingbeat().is_some()
+    }
+
+    /// Drive the wings directly, `0.0` for stopped and `1.0` for full power.
+    ///
+    /// Overrides what the wing motor neurons are producing. That is an honest
+    /// override rather than a hidden one: the cord's wing output is measured
+    /// and reported by [`Creature::wing_command`], and until something trains
+    /// it there is nothing to fly on. Pass `None` to hand the wings back.
+    pub fn set_wing_power(&mut self, power: Option<f32>) {
+        self.inner.hold_wing_command(power.map(|p| fly::WingCommand {
+            power: p.clamp(0.0, 1.0),
+            ..fly::WingCommand::default()
+        }));
+    }
+
+    /// What the cord is currently telling the wings to do, whatever is
+    /// actually being flown.
+    pub fn wing_command(&self) -> (f32, [f32; 2]) {
+        let c = self.inner.wing_command();
+        (c.power, c.amplitude)
+    }
+
+    /// Each wing's `[yaw, roll, pitch]` joint angle, left then right - the
+    /// stroke as it actually came out of the physics.
+    pub fn wing_angles(&self) -> [[f64; 3]; 2] {
+        self.inner.wing_angles()
+    }
+
+    /// How many motor neurons attached to the wings, by role.
+    pub fn wing_wiring(&self) -> String {
+        self.inner.wing_summary()
+    }
+
+    /// Heading and body pitch, in radians. Pitch is positive nose-up.
+    ///
+    /// A fly's attitude is most of what its trajectory means: the same forward
+    /// speed at two different body pitches is two different behaviours, and
+    /// neither is visible in a position log alone.
+    pub fn attitude(&self) -> (f64, f64) {
+        let q = self.inner.qpos();
+        let (w, x, y, z) = (
+            q.get(3).copied().unwrap_or(1.0),
+            q.get(4).copied().unwrap_or(0.0),
+            q.get(5).copied().unwrap_or(0.0),
+            q.get(6).copied().unwrap_or(0.0),
+        );
+        let yaw = (2.0 * (w * z + x * y)).atan2(1.0 - 2.0 * (y * y + z * z));
+        // Clamped before the arcsine: a unit quaternion's sine term is in
+        // range by construction and a denormalised one is not, and NaN in a
+        // trajectory log is worse than a saturated angle.
+        let pitch = (2.0 * (w * y - z * x)).clamp(-1.0, 1.0).asin();
+        (yaw, pitch)
+    }
+
+    /// How fast the body is moving, in centimetres per second.
+    pub fn velocity(&self) -> [f64; 3] {
+        let v = self.inner.qvel();
+        [
+            v.first().copied().unwrap_or(0.0),
+            v.get(1).copied().unwrap_or(0.0),
+            v.get(2).copied().unwrap_or(0.0),
+        ]
+    }
+
+    /// Whether the body is resting on the ground rather than in the air.
+    ///
+    /// Height above the floor rather than a contact query: a contact set says
+    /// what is TOUCHING, and a fly with one tarsus brushing the ground on its
+    /// way past is not landed.
+    ///
+    /// The threshold has to clear the standing pose rather than the floor. A
+    /// fly stands with its body about a tenth of a centimetre up, and a flying
+    /// one with its legs retracted lies LOWER than that when it comes down -
+    /// so a threshold set at the floor plane calls a landed fly airborne.
+    pub fn grounded(&self) -> bool {
+        self.position()[2] < -0.05 && self.velocity()[2].abs() < 5.0
     }
 
     /// Advance one control tick: 2 ms of body time.
@@ -254,6 +511,15 @@ impl Creature {
     /// Put the body back where it started, leaving anything learned in place.
     pub fn reset(&mut self) {
         self.inner.reset();
+        if self.start_height > 0.0 {
+            let mut qpos = self.inner.qpos();
+            if let Some(z) = qpos.get_mut(2) {
+                *z += self.start_height;
+            }
+            let qvel = vec![0.0; self.inner.dims().1];
+            // Cannot fail: both vectors came from this body's own dimensions.
+            let _ = self.inner.set_pose(&qpos, &qvel);
+        }
         self.apply_command();
     }
 

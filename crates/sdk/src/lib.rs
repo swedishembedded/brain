@@ -90,7 +90,7 @@ pub use gpu_core::devices::DeviceSpec as Device;
 pub use model::dispatch::Precision as DType;
 
 #[cfg(feature = "creature")]
-pub use creature::{Beat, Creature, CreatureBuilder};
+pub use creature::{Arena, Beat, Creature, CreatureBuilder};
 #[cfg(feature = "image")]
 pub use image::Image;
 #[cfg(feature = "image")]

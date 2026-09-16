@@ -41,16 +41,14 @@ fn rig() -> Option<Rig> {
         brain_testutil::skip("BRAIN_CONNECTOME_DIR unset");
         return None;
     };
-    let cdir = std::path::PathBuf::from(root).join("manc-codex");
-    if !cdir.join("neurons.csv.gz").is_file() {
-        brain_testutil::skip("manc-codex not present");
+    let Ok((neurons, edges)) = connectome::find(std::path::PathBuf::from(root), "manc") else {
+        brain_testutil::skip("no MANC export under BRAIN_CONNECTOME_DIR");
         return None;
-    }
+    };
     let dir = tempfile::tempdir().unwrap();
     let cfg = flybody::Flight::default();
     let scene = flybody::flight_scene(std::path::Path::new(&base), dir.path(), cfg).expect("the flight scene builds");
-    let c = connectome::load("manc", &cdir.join("neurons.csv.gz"), &cdir.join("connections_princeton.csv.gz"))
-        .expect("MANC loads");
+    let c = connectome::load("manc", &neurons, &edges).expect("MANC loads");
     let model = Model::from_xml(&mj, &scene).expect("the flight model compiles");
     let lif = fly::cord_lif();
     let gpu = gpu_core::testgpu::dev(&neuro::KERNELS);

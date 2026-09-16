@@ -28,8 +28,8 @@ fn env(name: &str) -> String {
 
 fn main() {
     let mj = MuJoCo::load().unwrap();
-    let dir = std::path::PathBuf::from(env("BRAIN_CONNECTOME_DIR")).join("manc-codex");
-    let c = connectome::load("manc", &dir.join("neurons.csv.gz"), &dir.join("connections_princeton.csv.gz")).unwrap();
+    let (neurons, edges) = connectome::find(std::path::PathBuf::from(env("BRAIN_CONNECTOME_DIR")), "manc").unwrap();
+    let c = connectome::load("manc", &neurons, &edges).unwrap();
     let model = Model::from_xml(&mj, env("BRAIN_FLYBODY_XML")).unwrap();
     let reference = Reference::load(env("BRAIN_FLY_REFERENCE")).expect("the reference loads");
     let lif = fly::cord_lif();

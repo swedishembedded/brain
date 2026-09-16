@@ -10,8 +10,8 @@ use neuro::{DynamicalSystem, Port, SpikingNet};
 use std::time::Instant;
 
 fn main() {
-    let dir = std::path::PathBuf::from(std::env::var("BRAIN_CONNECTOME_DIR").unwrap()).join("manc-codex");
-    let c = connectome::load("manc", &dir.join("neurons.csv.gz"), &dir.join("connections_princeton.csv.gz")).unwrap();
+    let (neurons, edges) = connectome::find(std::path::PathBuf::from(std::env::var("BRAIN_CONNECTOME_DIR").unwrap()), "manc").unwrap();
+    let c = connectome::load("manc", &neurons, &edges).unwrap();
     let csc = c.signed_csc(1e-3);
     let gpu = gpu_core::testgpu::dev(&neuro::KERNELS);
     let lif = fly::cord_lif();

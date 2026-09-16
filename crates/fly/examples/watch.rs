@@ -30,7 +30,7 @@ const TARGET_FPS: u32 = 30;
 fn env(name: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| {
         eprintln!("${name} is not set. This example needs a connectome and a body:");
-        eprintln!("  BRAIN_CONNECTOME_DIR   directory holding manc-codex/");
+        eprintln!("  BRAIN_CONNECTOME_DIR   where the MANC export is");
         eprintln!("  BRAIN_FLYBODY_XML      the flybody scene, the one WITH a floor");
         std::process::exit(2)
     })
@@ -38,9 +38,9 @@ fn env(name: &str) -> String {
 
 fn main() {
     let mj = MuJoCo::load().expect("MuJoCo loads");
-    let dir = std::path::PathBuf::from(env("BRAIN_CONNECTOME_DIR")).join("manc-codex");
-    let c = connectome::load("manc", &dir.join("neurons.csv.gz"), &dir.join("connections_princeton.csv.gz"))
-        .expect("the connectome loads");
+    let root = std::path::PathBuf::from(env("BRAIN_CONNECTOME_DIR"));
+    let (neurons, edges) = connectome::find(&root, "manc").expect("a MANC export");
+    let c = connectome::load("manc", &neurons, &edges).expect("the connectome loads");
     let model = Model::from_xml(&mj, env("BRAIN_FLYBODY_XML")).expect("the body loads");
     let lif = fly::cord_lif();
     let gpu = gpu_core::testgpu::dev(&neuro::KERNELS);
