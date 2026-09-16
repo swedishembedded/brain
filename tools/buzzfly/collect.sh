@@ -74,23 +74,71 @@ note "MuJoCo stays where it is ($mj)"
 # one licence line of its own, and a heredoc holding a second one reads as a
 # duplicate to anything scanning the file.
 tag="SPDX-License-Identifier"
-cat > "$dest/env.sh" <<ENV
-# $tag: Apache-2.0
+
+# env.sh is written to be PORTABLE, because this directory gets copied between
+# machines and a file full of one machine's absolute paths is a file that works
+# exactly once. It finds itself, and it searches for MuJoCo rather than
+# recording where MuJoCo happened to be the day it was generated.
+cat > "$dest/env.sh" <<'ENV'
+# TAG_PLACEHOLDER: Apache-2.0
 # Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 #
 # Source this, then run the fly:
 #
-#   . ~/Downloads/buzzfly/env.sh
+#   . /path/to/buzzfly/env.sh
 #   make samples/fly/interactive/run
 #
-# Written by tools/buzzfly/collect.sh; edit that rather than this.
-export BUZZFLY_DIR="$dest"
-export BRAIN_MUJOCO_DIR="$mj"
-export BRAIN_CONNECTOME_DIR="\$BUZZFLY_DIR/connectome"
-export BRAIN_FLYBODY_XML="\$BUZZFLY_DIR/body/floor.xml"
-export BRAIN_FLYBODY_FRUITFLY_XML="\$BUZZFLY_DIR/body/fruitfly.xml"
-export BRAIN_FLY_REFERENCE="\$BUZZFLY_DIR/reference/$(basename "$ref")"
+# Written by brain's tools/buzzfly/collect.sh; edit that rather than this.
+
+# Where this file is, whatever anyone renamed or moved the directory to. The
+# data lives beside it, so nothing here needs to know an absolute path.
+if [ -n "${BASH_SOURCE:-}" ]; then
+	_buzzfly_self="${BASH_SOURCE[0]}"
+elif [ -n "${ZSH_VERSION:-}" ]; then
+	_buzzfly_self="${(%):-%x}"
+else
+	# Sourced by a shell that does not say which file it is reading. The
+	# caller's $0 is the best guess and is usually wrong, so say so rather
+	# than silently resolving to their shell's directory.
+	_buzzfly_self="$0"
+fi
+BUZZFLY_DIR="$(cd "$(dirname "$_buzzfly_self")" && pwd)"
+unset _buzzfly_self
+if [ ! -d "$BUZZFLY_DIR/connectome" ]; then
+	echo "buzzfly: $BUZZFLY_DIR does not look like a buzzfly directory." >&2
+	echo "buzzfly: source this file by its own path, e.g. '. /path/to/buzzfly/env.sh'." >&2
+fi
+export BUZZFLY_DIR
+
+export BRAIN_CONNECTOME_DIR="$BUZZFLY_DIR/connectome"
+export BRAIN_FLYBODY_XML="$BUZZFLY_DIR/body/floor.xml"
+export BRAIN_FLYBODY_FRUITFLY_XML="$BUZZFLY_DIR/body/fruitfly.xml"
+export BRAIN_FLY_REFERENCE="$BUZZFLY_DIR/reference/REFERENCE_PLACEHOLDER"
+
+# MuJoCo is SEARCHED FOR rather than recorded. It is installed per machine,
+# outside this directory, and a path captured when this file was generated is
+# the one thing here guaranteed to be wrong somewhere else. An existing
+# setting always wins, so a machine with MuJoCo somewhere unusual is not
+# overridden.
+if [ -z "${BRAIN_MUJOCO_DIR:-}" ]; then
+	for _buzzfly_mj in \
+		"${MUJOCO_DIR:-}" "${MUJOCO_PATH:-}" \
+		"$HOME"/.mujoco/mujoco-* /opt/mujoco-* /usr/local/mujoco-*; do
+		if [ -n "$_buzzfly_mj" ] && [ -f "$_buzzfly_mj/lib/libmujoco.so" ]; then
+			export BRAIN_MUJOCO_DIR="$_buzzfly_mj"
+			break
+		fi
+	done
+	unset _buzzfly_mj
+fi
+if [ -z "${BRAIN_MUJOCO_DIR:-}" ]; then
+	echo "buzzfly: no MuJoCo found. Install it and set \$BRAIN_MUJOCO_DIR to the" >&2
+	echo "buzzfly: directory holding lib/libmujoco.so, e.g. ~/.mujoco/mujoco-3.12.0." >&2
+fi
 ENV
+# The licence tag and the reference filename are substituted in afterwards: the
+# heredoc above is quoted so that everything else in it survives verbatim.
+sed -i "s|TAG_PLACEHOLDER|$tag|; s|REFERENCE_PLACEHOLDER|$(basename "$ref")|" "$dest/env.sh"
 
 {
 	echo "# buzzfly"
