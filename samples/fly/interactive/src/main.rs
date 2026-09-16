@@ -141,6 +141,19 @@ fn parse() -> Args {
     a
 }
 
+/// How many distinct colours are in an RGB8 buffer. Sixteen or fewer is a
+/// buffer nothing was drawn into.
+fn distinct_colours(rgb: &[u8]) -> usize {
+    let mut seen = std::collections::HashSet::new();
+    for p in rgb.chunks_exact(3) {
+        seen.insert([p[0], p[1], p[2]]);
+        if seen.len() > 64 {
+            break;
+        }
+    }
+    seen.len()
+}
+
 /// One trajectory sample.
 fn write_row(f: &mut std::fs::File, fly: &Creature, beat: &brain::Beat, throttle: f32) -> Result<(), Error> {
     use std::io::Write;
@@ -347,6 +360,31 @@ fn run() -> Result<(), Error> {
         // the fly having failed rather than as the camera having been left.
         view.follow(&fly, 1.0);
         view.show(&fly, &status)?;
+
+        // Once, on the first frame: check that what the window is holding is
+        // what the renderer produced. A black window and a correct render are
+        // two different faults with nothing in common, and telling them apart
+        // from a photograph of a screen is impossible.
+        if frames == 1 {
+            let rendered = distinct_colours(view.frame());
+            match view.window_frame() {
+                // stderr, with everything else diagnostic: this line exists to
+                // be read off someone else's terminal when their screen is
+                // black, and stdout is where the trajectory goes.
+                Ok(shown) => eprintln!(
+                    "blit check: renderer produced {rendered} distinct colours, the window holds {}{}",
+                    distinct_colours(&shown),
+                    if distinct_colours(&shown) < 16 && rendered >= 16 {
+                        "  <- THE BLIT IS THE PROBLEM, not the renderer"
+                    } else {
+                        ""
+                    }
+                ),
+                Err(e) => eprintln!(
+                    "blit check: renderer produced {rendered} distinct colours; reading the window back failed: {e}"
+                ),
+            }
+        }
         if args.frames != u64::MAX && frames.is_multiple_of(30) {
             println!("frame {frames} tick {}: {status}", beat.tick);
         }

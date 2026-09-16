@@ -58,6 +58,13 @@ const EGL_WIDTH: i32 = 0x3057;
 const EGL_HEIGHT: i32 = 0x3056;
 const EGL_OPENGL_API: u32 = 0x30A2;
 const EGL_PLATFORM_DEVICE_EXT: u32 = 0x313F;
+const EGL_CONTEXT_MAJOR_VERSION: i32 = 0x3098;
+const EGL_CONTEXT_MINOR_VERSION: i32 = 0x30FB;
+const EGL_CONTEXT_OPENGL_PROFILE_MASK: i32 = 0x30FD;
+const EGL_CONTEXT_OPENGL_COMPATIBILITY_PROFILE_BIT: i32 = 0x0002;
+/// `GL_VERSION`, for `glGetString`.
+const GL_VERSION: u32 = 0x1F02;
+const GL_RENDERER: u32 = 0x1F01;
 
 type Display = *mut c_void;
 type Config = *mut c_void;
@@ -82,11 +89,30 @@ struct Egl {
     make_current: unsafe extern "C" fn(Display, Surface, Surface, Context) -> u32,
     get_error: unsafe extern "C" fn() -> i32,
     gl_get_error: unsafe extern "C" fn() -> u32,
+    gl_get_string: unsafe extern "C" fn(u32) -> *const u8,
     // GLX, resolved optionally. Present wherever libGL is a GLX
     // implementation and absent on a pure-EGL stack; see `yield_glx`.
     glx_current_context: Option<unsafe extern "C" fn() -> *mut c_void>,
     glx_current_display: Option<unsafe extern "C" fn() -> *mut c_void>,
     glx_make_current: Option<unsafe extern "C" fn(*mut c_void, u64, *mut c_void) -> i32>,
+}
+
+/// One of OpenGL's descriptive strings, or empty if it has none.
+fn gl_string(egl: &Egl, name: u32) -> String {
+    // SAFETY: a context is current on this thread, and glGetString returns
+    // either null or a NUL-terminated string owned by the driver.
+    unsafe {
+        let p = (egl.gl_get_string)(name);
+        if p.is_null() {
+            return String::new();
+        }
+        std::ffi::CStr::from_ptr(p as *const std::ffi::c_char).to_string_lossy().into_owned()
+    }
+}
+
+/// The leading major number of a `GL_VERSION` string such as `"4.6 (Compatibility Profile) ..."`.
+fn major_version(v: &str) -> u32 {
+    v.split(['.', ' ']).next().and_then(|n| n.parse().ok()).unwrap_or(0)
 }
 
 /// Load libEGL and libGL into the process's GLOBAL scope.
@@ -151,6 +177,11 @@ impl Egl {
             gl_get_error: {
                 let s: libloading::os::unix::Symbol<unsafe extern "C" fn() -> u32> =
                     unsafe { gl.get(b"glGetError\0") }.map_err(|e| format!("libGL.so.1: missing glGetError: {e}"))?;
+                *s
+            },
+            gl_get_string: {
+                let s: libloading::os::unix::Symbol<unsafe extern "C" fn(u32) -> *const u8> =
+                    unsafe { gl.get(b"glGetString\0") }.map_err(|e| format!("libGL.so.1: missing glGetString: {e}"))?;
                 *s
             },
             glx_current_context: {
@@ -246,6 +277,7 @@ impl EglContext {
             match EglContext::on(&egl, display, 16, 16) {
                 Ok((surface, context)) => {
                     let ctx = EglContext { egl, display, surface, context };
+                    ctx.describe();
                     // Creation has to make the context current to know it
                     // works, and then must NOT leave it that way: a context
                     // current on the thread is a context some other graphics
@@ -261,6 +293,20 @@ impl EglContext {
             "no usable EGL display for offscreen rendering. Tried: {}",
             if tried.is_empty() { "none, EGL reported no displays at all".to_string() } else { tried.join("; ") }
         ))
+    }
+
+    /// What this context actually is, on stderr.
+    ///
+    /// One line, once, at construction. The driver, the OpenGL version and
+    /// which of several devices answered are exactly the three facts a
+    /// rendering problem on someone else's machine turns on, and none of them
+    /// is recoverable afterwards from a screenshot.
+    fn describe(&self) {
+        eprintln!(
+            "render: OpenGL {} on {}",
+            gl_string(&self.egl, GL_VERSION),
+            gl_string(&self.egl, GL_RENDERER)
+        );
     }
 
     /// Let go of any GLX context this thread is holding.
@@ -357,7 +403,37 @@ impl EglContext {
                 (egl.terminate)(display);
                 return Err(fail("eglCreatePbufferSurface"));
             }
-            let context = (egl.create_context)(display, config, std::ptr::null_mut(), std::ptr::null());
+            // ASK FOR A VERSION. An attribute-less context is whatever the
+            // driver feels like giving, and the drivers disagree: NVIDIA hands
+            // back a full compatibility profile, Mesa hands back OpenGL 1.4.
+            // MuJoCo's offscreen rendering needs framebuffer objects, which
+            // arrived in 3.0, so on the second kind of driver every frame comes
+            // back black with nothing reported as having failed.
+            //
+            // COMPATIBILITY rather than core, because MuJoCo's renderer still
+            // uses fixed-function state that a core profile removed.
+            //
+            // Tried newest first, falling back - an old driver that cannot give
+            // 3.3 may still give something usable, and the version check after
+            // this is what decides whether it is.
+            let mut context = std::ptr::null_mut();
+            for (major, minor) in [(3, 3), (3, 0), (2, 1)] {
+                let attrs = [
+                    EGL_CONTEXT_MAJOR_VERSION, major,
+                    EGL_CONTEXT_MINOR_VERSION, minor,
+                    EGL_CONTEXT_OPENGL_PROFILE_MASK, EGL_CONTEXT_OPENGL_COMPATIBILITY_PROFILE_BIT,
+                    EGL_NONE,
+                ];
+                context = (egl.create_context)(display, config, std::ptr::null_mut(), attrs.as_ptr());
+                if !context.is_null() {
+                    break;
+                }
+            }
+            if context.is_null() {
+                // Last resort: whatever the driver defaults to. Better than
+                // nothing, and the version check below still gates it.
+                context = (egl.create_context)(display, config, std::ptr::null_mut(), std::ptr::null());
+            }
             if context.is_null() {
                 (egl.destroy_surface)(display, surface);
                 (egl.terminate)(display);
@@ -368,6 +444,23 @@ impl EglContext {
                 (egl.destroy_surface)(display, surface);
                 (egl.terminate)(display);
                 return Err(fail("eglMakeCurrent"));
+            }
+
+            // What did we actually get? A context below 3.0 has no framebuffer
+            // objects and will render every frame into nothing, silently, and
+            // a black window is a terrible way to learn that. Refuse it here
+            // with the version in the message.
+            let version = gl_string(egl, GL_VERSION);
+            if major_version(&version) < 3 {
+                let renderer = gl_string(egl, GL_RENDERER);
+                (egl.make_current)(display, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut());
+                (egl.destroy_context)(display, context);
+                (egl.destroy_surface)(display, surface);
+                (egl.terminate)(display);
+                return Err(format!(
+                    "this driver gave OpenGL {version:?} on {renderer:?}, and offscreen rendering \
+                     needs 3.0 or later for framebuffer objects. Every frame would come back blank."
+                ));
             }
             Ok((surface, context))
         }

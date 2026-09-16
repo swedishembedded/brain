@@ -142,6 +142,9 @@ pub struct Renderer {
     width: u32,
     height: u32,
     rgb: Vec<u8>,
+    /// GL errors seen while drawing, so the complaint is made once rather than
+    /// thirty times a second.
+    gl_errors_reported: usize,
 }
 
 // The model pointer is borrowed, not owned, and is only ever handed back to
@@ -236,6 +239,7 @@ impl Renderer {
             option,
             context,
             model_ptr: model.ptr(),
+            gl_errors_reported: 0,
             width,
             height,
             rgb: vec![0u8; (width as usize) * (height as usize) * 3],
@@ -285,6 +289,14 @@ impl Renderer {
             (r.render)(viewport, self.scene.ptr(), self.context.ptr());
             (r.read_pixels)(self.rgb.as_mut_ptr(), std::ptr::null_mut(), viewport, self.context.ptr());
         }
+        // Whatever the frame raised, said once. A GL error during rendering
+        // is how a blank or corrupt frame announces itself, and discarding it
+        // leaves a black window as the only symptom.
+        let errors = self.egl.drain_gl_errors();
+        if errors > 0 && self.gl_errors_reported == 0 {
+            eprintln!("render: OpenGL reported {errors} error(s) while drawing a frame; the image may be wrong");
+        }
+        self.gl_errors_reported += errors;
         self.egl.release();
         Ok(&self.rgb)
     }

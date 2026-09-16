@@ -29,6 +29,13 @@ pub struct SdlWindow {
     fh: u32,
     pressed: KeySet,
     last_title: String,
+    /// Blit failures already reported. SDL's presentation calls all return a
+    /// code and all of them were being discarded, which turns a broken blit
+    /// into a black window and nothing else - the single hardest kind of fault
+    /// to diagnose from the outside. They are reported now, and latched,
+    /// because a failure that recurs every frame would otherwise bury the
+    /// first one under thirty copies a second.
+    reported: std::collections::BTreeSet<&'static str>,
 }
 
 impl SdlWindow {
@@ -79,6 +86,7 @@ impl SdlWindow {
                 fh,
                 pressed: KeySet::empty(),
                 last_title: String::new(),
+                reported: std::collections::BTreeSet::new(),
             })
         }
     }
@@ -191,19 +199,41 @@ fn keycode_to_key(sym: i32) -> Mapped {
     }
 }
 
+impl SdlWindow {
+    /// Complain, once, about an SDL call that failed.
+    fn blit_failed(&mut self, what: &'static str) {
+        if self.reported.insert(what) {
+            eprintln!("wm-display: {}", sdl_error(what));
+        }
+    }
+}
+
 impl FrameSink for SdlWindow {
     fn frame(&mut self, rgb: &[u8], w: u32, h: u32, hud: &Hud) {
-        debug_assert_eq!((w, h), (self.fw, self.fh));
-        debug_assert_eq!(rgb.len(), (w * h * 3) as usize);
+        // Checked rather than asserted: a debug assertion is compiled out of
+        // the release build that people actually run, and a frame of the wrong
+        // size is a buffer overrun inside SDL rather than a wrong picture.
+        if (w, h) != (self.fw, self.fh) || rgb.len() != (w * h * 3) as usize {
+            if self.reported.insert("size") {
+                eprintln!(
+                    "wm-display: refusing a {w}x{h} frame of {} bytes for a {}x{} window",
+                    rgb.len(),
+                    self.fw,
+                    self.fh
+                );
+            }
+            return;
+        }
         unsafe {
-            sys::SDL_UpdateTexture(
-                self.tex,
-                std::ptr::null(),
-                rgb.as_ptr() as *const _,
-                (w * 3) as i32,
-            );
-            sys::SDL_RenderClear(self.ren);
-            sys::SDL_RenderCopy(self.ren, self.tex, std::ptr::null(), std::ptr::null());
+            if sys::SDL_UpdateTexture(self.tex, std::ptr::null(), rgb.as_ptr() as *const _, (w * 3) as i32) != 0 {
+                self.blit_failed("SDL_UpdateTexture");
+            }
+            if sys::SDL_RenderClear(self.ren) != 0 {
+                self.blit_failed("SDL_RenderClear");
+            }
+            if sys::SDL_RenderCopy(self.ren, self.tex, std::ptr::null(), std::ptr::null()) != 0 {
+                self.blit_failed("SDL_RenderCopy");
+            }
             sys::SDL_RenderPresent(self.ren);
 
             let title = format!(

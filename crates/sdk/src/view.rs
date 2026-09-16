@@ -168,8 +168,23 @@ impl View {
     }
 
     /// The last frame [`View::show`] put on the screen, RGB8, top row first.
+    ///
+    /// This is what was HANDED to the window. See [`View::window_frame`] for
+    /// what the window actually has, which is not the same question.
     pub fn frame(&self) -> &[u8] {
         &self.rgb
+    }
+
+    /// Read the pixels back off the window surface.
+    ///
+    /// The difference between this and [`View::frame`] is the entire blit
+    /// path - texture upload, format conversion, pitch, present. A black
+    /// window with a correct [`View::frame`] means the renderer is fine and
+    /// the blit is not, and those have nothing to do with each other; without
+    /// a way to ask the window what it is holding, the two are
+    /// indistinguishable from the outside.
+    pub fn window_frame(&mut self) -> Result<Vec<u8>, Error> {
+        self.win.read_back(self.width, self.height).map_err(Error::Backend)
     }
 
     pub fn width(&self) -> u32 {
