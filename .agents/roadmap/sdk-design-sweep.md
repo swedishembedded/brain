@@ -91,8 +91,8 @@ here (items already tracked there are not repeated - see that file's own
 | 12 | 6 | `crates/sdk/src/error.rs:62-66` | `Error::Backend` is an untyped catch-all for ~8 semantically distinct failures (license refusal, no models dir, size mismatch, bad extension, missing builder arg, GPU/MuJoCo failure...) | partially fixed (M6 - see below) |
 | 13 | 6 | `crates/sdk/src/creature.rs:129-130` | a caller-programming error (missing required builder field) is typed as `Error::Backend`, indistinguishable from a real backend crash | fixed (M6) |
 | 14 | 8/4 | `crates/sdk/src/creature.rs:276-278,414-416` | `wiring()`/`wing_wiring()` return a pre-rendered human summary string; no structured/programmatic accessor | open (backlog) |
-| 15 | 3 | `crates/sdk/src/creature.rs:257-268` | `Creature::fruit_fly()` has two mandatory runtime-checked fields and no simple zero-arg path - a builder tax, not optional configuration | open (M7, may end in "documented, won't fix" if no bundled default connectome exists) |
-| 16 | 13/10 | `crates/fly/examples/watch.rs:18-60` | hand-builds `Fly`/`SdlWindow`/`Renderer` independently of `Creature`/`View` - the same class of defect as the tracked CLI duplication, applied to an example | open (M7) |
+| 15 | 3 | `crates/sdk/src/creature.rs:257-268` | `Creature::fruit_fly()` has two mandatory runtime-checked fields and no simple zero-arg path | **wontfix (M7)** - see below |
+| 16 | 13/10 | `crates/fly/examples/watch.rs:18-60` | hand-builds `Fly`/`SdlWindow`/`Renderer` independently of `Creature`/`View` | **not a violation on reconsideration (M7)** - see below |
 | 17 | 13 | `docs/` | no user-facing SDK page exists for either surface (rustdoc itself is compliant) | open (M9) |
 
 ### Minor / stylistic (backlog, not milestoned individually - fold into whichever nearby milestone touches that file)
@@ -244,7 +244,37 @@ then `crates/sdk` (M10c).
       own convention). Left as `Error::Backend` until `imaging::save` itself
       grows a typed error - not a gap in this milestone's judgment, a gap in
       what's cleanly extractable today.
-- [ ] **M7** - `Creature` progressive disclosure + de-duplicate `watch.rs` (findings 15, 16).
+- [x] **M7** - `Creature` progressive disclosure + `watch.rs` (findings 15,
+      16), both resolved without a code change:
+      - **Finding 15 (wontfix)**: `resources/README.md` is explicit that
+        nothing under `resources/` is vendored into the repo - the MANC
+        connectome and the flybody body model are fetched at use time
+        specifically so the license gate (attribution requirements, and one
+        component whose Codex redistribution terms are unestablished) stays
+        honest. A zero-arg `Creature::fruit_fly().build()` default pointing
+        at `resources/connectome` would only work when run from this exact
+        repo checkout with that script already run - actively misleading
+        for an embedded library, not a convenience. There is no real default
+        to offer; forcing `.connectome()`/`.body()` explicitly is the
+        correct behavior for a dataset that cannot be bundled, not a
+        builder-tax bug.
+      - **Finding 16 (reconsidered, not a violation)**: unlike
+        `flux2_cli.rs` (a PRODUCTION path serving real users, duplicating
+        the SAME end-user capability `ImagePipeline` already implements -
+        two implementations of one thing, which is where the real
+        `effective_dit_precision` bug hid), `crates/fly/examples/watch.rs`
+        is a crate-internal developer example exercising `brain-fly`'s own
+        raw `Wiring`/`Timing`/descending-command API for debugging the
+        connectome/body coupling itself - not a second implementation of an
+        end-user capability. `samples/fly/interactive` already IS the
+        SDK-facing "watch a fly in a window" experience for embedders, so
+        there is no end-user-facing gap. Rewriting `watch.rs` onto
+        `brain::Creature`/`View` would need `crates/fly` (layer 4) to take a
+        dev-dependency on `crates/sdk` (layer 6, which already depends on
+        `brain-fly`) purely for one example - Cargo permits a dev-dependency
+        cycle like this, but it inverts the intended layering direction for
+        no real gain, since the example's whole point is to exercise the
+        lower-level API the SDK deliberately hides.
 - [ ] **M8** - `.capabilities()` introspection (finding 6).
 - [ ] **M9** - user-facing SDK docs page (finding 17).
 - [ ] **M10a** - `flux2::pipeline::build_resolved`, wired into `flux2::caps` + `resident_flux2.rs` (fixes the precision bug).
