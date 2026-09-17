@@ -33,71 +33,48 @@ setup_file() {
   "$PY" -c "import jeepney" >/dev/null 2>&1 || skip "python jeepney not installed (pip install -e brain-py)"
   export PYTHONPATH="$REPO/brain-py"
 
-  CONF_DIR="$(mktemp -d)"
+  # shellcheck source=../../tools/dbus-session.sh
+  . "$REPO/tools/dbus-session.sh"
+
+  CONF_DIR="$(dbus_session_work_dir)"
   export CONF_DIR
   OUT="$CONF_DIR/out"
   mkdir -p "$OUT"
   export OUT
 
-  DBUS_SESSION_BUS_ADDRESS="$(dbus-daemon --session --fork --print-address --print-pid=3 3>"$CONF_DIR/dbus.pid" 2>/dev/null)"
-  export DBUS_SESSION_BUS_ADDRESS
-  DBUS_PID="$(cat "$CONF_DIR/dbus.pid")"
+  dbus_session_start_bus || skip "could not start a private dbus-daemon"
+  DBUS_PID="$DBUS_SESSION_PID"
   export DBUS_PID
-  [ -n "$DBUS_SESSION_BUS_ADDRESS" ] && kill -0 "$DBUS_PID" 2>/dev/null || skip "could not start a private dbus-daemon"
 
   ANTHROPIC_PORT="${ANTHROPIC_PORT:-8991}"
   export ANTHROPIC_PORT
   OPENAI_PORT="${OPENAI_PORT:-8992}"
   export OPENAI_PORT
-  KEYS="$CONF_DIR/keys.json"
-  export KEYS
-  READY="$CONF_DIR/ready"
-  export READY
+
   # BRAIN_MOCK_DELAY_MS is a SERVER-side knob (crates/cli/src/resident_mock.rs
   # reads it once per request from ITS OWN environment) — it must be set on this
   # launch, not on a client invocation later, or the cancellation test below
   # races every step to completion before Cancel can land. 300ms split across
   # text2image's 4 steps is unnoticeable for every other test here.
-  BRAIN_MOCK=1 BRAIN_MOCK_DELAY_MS=300 BRAIN_DEVICE=cpu "$BRAIN" serve \
-    --dbus --anthropic "$ANTHROPIC_PORT" --openai "$OPENAI_PORT" \
-    --api-keys-out "$KEYS" --ready-file "$READY" \
-    >"$CONF_DIR/server.log" 2>&1 &
-  SERVER_PID=$!
+  BRAIN_MOCK=1 BRAIN_MOCK_DELAY_MS=300 BRAIN_DEVICE=cpu \
+    dbus_session_start_serve "$BRAIN" "--dbus --anthropic $ANTHROPIC_PORT --openai $OPENAI_PORT"
+  SERVER_PID="$DBUS_SESSION_SERVER_PID"
   export SERVER_PID
-  echo "$SERVER_PID" > "$CONF_DIR/pid"
 
-  # Wait on the ready file rather than polling D-Bus directly: run_cli.rs's
-  # "ORDER IS THE CONTRACT" guarantee means the ready file is touched only
-  # once every requested surface (D-Bus included) is bound AND strictly after
-  # --api-keys-out is written, so a single wait covers all three -- no retry
-  # loop needed for the key read below.
-  local ready=0
-  for _ in $(seq 1 60); do
-    [ -e "$READY" ] && { ready=1; break; }
-    kill -0 "$SERVER_PID" 2>/dev/null || break
-    sleep 0.3
-  done
-  if [ "$ready" != 1 ]; then
+  dbus_session_wait_ready 20 || {
     echo "--- brain serve log ---" >&3
-    cat "$CONF_DIR/server.log" >&3 || true
+    cat "$DBUS_SESSION_LOG_FILE" >&3 2>/dev/null || true
     skip "brain serve did not become ready"
-  fi
+  }
 
-  OPENAI_KEY="$(jq -r .openai "$KEYS" 2>/dev/null)"
+  OPENAI_KEY="${BRAIN_OPENAI_KEY:-}"
   export OPENAI_KEY
-  ANTHROPIC_KEY="$(jq -r .anthropic "$KEYS" 2>/dev/null)"
+  ANTHROPIC_KEY="${BRAIN_ANTHROPIC_KEY:-}"
   export ANTHROPIC_KEY
 }
 
 teardown_file() {
-  # Kill ONLY the recorded PIDs — never pkill.
-  if [ -n "${SERVER_PID:-}" ]; then
-    kill -9 "$SERVER_PID" 2>/dev/null || true
-  fi
-  if [ -n "${DBUS_PID:-}" ]; then
-    kill -9 "$DBUS_PID" 2>/dev/null || true
-  fi
-  [ -n "${CONF_DIR:-}" ] && rm -rf "$CONF_DIR"
+  dbus_session_stop
 }
 
 # Run a Python example; exit 77 becomes a bats skip (with the printed reason),
