@@ -82,6 +82,31 @@ pub fn default_ready_path() -> PathBuf {
 /// An exclusive claim on "the brain server on this machine", held for as long
 /// as the file stays open. Dropping it (or the process dying, however
 /// abruptly) releases the lock.
+///
+/// # Why the lock is cross-process, and why it is `flock`
+///
+/// "Only one brain server per user" is a statement about processes that do
+/// not know about each other, so nothing inside one process can enforce it.
+/// The alternatives were considered and rejected:
+///
+/// * A pidfile alone (write, then `kill(pid, 0)` to test) races two
+///   simultaneous starts: both read "nothing here" and both start.
+/// * POSIX record locks (`fcntl(F_SETLK)`) are owned by the process, so they
+///   are NOT inherited across `fork` - attractive here, until you hit their
+///   defining flaw: closing ANY descriptor to that file in the process drops
+///   the lock. Anything that read the pidfile back would silently surrender
+///   the single-instance guarantee and let a second server start. A rare,
+///   self-correcting refusal beats a silent double start.
+/// * OFD locks (`F_OFD_SETLK`) are owned by the open file description exactly
+///   as `flock` is, so they trade nothing for the extra portability cost.
+///
+/// The claim is taken by the process that actually serves, AFTER
+/// [`detach_process`] has done its forking, so nothing here depends on a
+/// child inheriting it. One residual consequence remains: because the lock
+/// belongs to the open file description, a child forked while it is held
+/// carries a copy until it execs (the fd is `CLOEXEC`). A caller reclaiming
+/// immediately after stopping a server can therefore see one spurious
+/// refusal, and should retry rather than read it as "still running".
 pub struct PidGuard {
     file: File,
 }
@@ -418,7 +443,23 @@ mod tests {
         }
         drop(first);
         // Released with the fd: the next start reclaims it with no cleanup.
-        assert!(matches!(claim(&path).unwrap(), Claim::Ours(_)));
+        //
+        // Bounded rather than immediate, because the lock belongs to the open
+        // file description (see `PidGuard`): any other test forking a
+        // subprocess in this same binary hands it a copy of this fd, which
+        // holds the lock until that child execs. Retrying asserts the property
+        // that matters - the claim becomes reclaimable - without asserting the
+        // absence of concurrent forks, which no test here can guarantee.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match claim(&path).unwrap() {
+                Claim::Ours(_) => break,
+                Claim::HeldBy(_) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10))
+                }
+                Claim::HeldBy(pid) => panic!("the claim was never released (held by {pid:?})"),
+            }
+        }
     }
 
     /// A crashed server leaves a pidfile behind. It must not block the next
