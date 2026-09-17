@@ -106,9 +106,10 @@ decode), batch what you can and say why in a comment.
   cache, batching, cancellation and streaming then come from `model::serve`
   for free, rather than each decoder growing its own copy of this machinery.
 
-### 4. D-Bus surface — reachable over the bus, with a runnable example
+### 4. D-Bus surface - reachable over the bus, with a runnable sample
 The actions MUST be callable over `crates/dbus` (`com.swedishembedded.Brain1`) and
-demonstrated by an example under `examples/<domain>/` with a README.
+demonstrated by a sample under `samples/python/<pipeline>/` or
+`samples/shell/<pipeline>/` with a README.
 - **Fit first.** If the model's shape matches the existing surface, use it as-is:
   - `Run` — one-shot request → result + output fds (memfd/dmabuf).
   - `Subscribe` — a job that streams progress/blob/done frames out over a SEQPACKET.
@@ -123,18 +124,18 @@ demonstrated by an example under `examples/<domain>/` with a README.
   - fd blob transport (`crates/dbus/src/fd.rs`) for bulk data in/out.
 - **Extend or refactor if it doesn't fit.** If a new modality can't be expressed with
   the existing methods/frames, add a method or generalize a frame type in
-  `crates/dbus` — and update every client/example the change touches
-  (`brain-py/brain_py/dbus.py`, `examples/`). Do **not** add a side channel (a private
-  socket, a temp file dance) to avoid touching the surface. The surface is meant to
-  grow deliberately; a side channel is how it rots.
+  `crates/dbus` - and update every client/sample the change touches
+  (`brain-py/brain_py/dbus.py`, `samples/python/`, `samples/shell/`). Do **not** add
+  a side channel (a private socket, a temp file dance) to avoid touching the
+  surface. The surface is meant to grow deliberately; a side channel is how it rots.
 - Reference: `crates/dbus/src/{service,stream,fd}.rs`; clients:
-  `brain-py/brain_py/dbus.py`; examples: `examples/dbus`, `examples/asr`.
+  `brain-py/brain_py/dbus.py`; samples: `samples/python/dbus/`, `samples/python/asr/`.
 
 ### 5. Verify it end to end
 - Cross-backend parity if imported (`make parity`), gradient-check if trained
   (`make gradcheck`).
 - A capability/manifest unit test (cheap; no weights) asserting the action schema.
-- The example must run against `brain serve --dbus` (WAV-file mode for a no-hardware
+- The sample must run against `brain serve --dbus` (WAV-file mode for a no-hardware
   smoke test where the input is live audio/video).
 
 ## Quick self-audit
@@ -142,6 +143,6 @@ demonstrated by an example under `examples/<domain>/` with a README.
 > Can a fresh process, given only the weights path in an env var, do
 > `brain serve --dbus` and have this model show up in `Manifests`, run its action over
 > `Run`/`Subscribe`/`StreamTranscribe`, batch when two requests arrive at once, and be
-> driven by an `examples/` script — with no model-specific code in the transport?
+> driven by a `samples/python/` or `samples/shell/` script - with no model-specific code in the transport?
 
 If yes, the contract is met. If any answer is "no", the model is not done.

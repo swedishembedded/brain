@@ -130,7 +130,7 @@ fast and scalable kernel - not a naive one.
     See `.agents/roadmap/scrfd.md`. **Serving contract met**, as TWO models:
     `scrfd::caps` (`detect`, `BRAIN_SCRFD_DIR`) and `arcface::caps` (`embed`,
     `BRAIN_ARCFACE_DIR`), with `crates/cli/src/resident_{scrfd,arcface}.rs`,
-    D-Bus `Run` and `examples/vision/`. The detector is self-sufficient; the
+    D-Bus `Run` and `samples/python/vision/face-id/`. The detector is self-sufficient; the
     embedder depends on it (its default `align=true` detects first), so with
     both resident SCRFD is loaded twice - accepted, it is 17 MB. *(`run_batch`
     is the serial default and says why: both released graphs are built for
@@ -159,7 +159,7 @@ fast and scalable kernel - not a naive one.
     `vision::blocks`; adds no kernel (the memory attention reuses
     `rope_interleave_table`). **Serving contract met**: `sam2::caps`
     (`segment`), `crates/cli/src/resident_sam2.rs` (`BRAIN_SAM2_WEIGHTS`),
-    D-Bus `Run`, `examples/vision/`; `run_batch` groups a batch **by image**, so
+    D-Bus `Run`, `samples/python/vision/segment-image/`; `run_batch` groups a batch **by image**, so
     N prompts on one frame cost ONE Hiera trunk pass and N decoder passes.
     *(Forward only: backward/gradcheck are deferred, and the video path tracks
     ONE object per run, forward only - see the Limits section of
@@ -246,7 +246,7 @@ fast and scalable kernel - not a naive one.
     Klein's `empirical_mu`, different constants - a 16-channel VAE decode via
     its scalar affine, not FLUX.2's BatchNorm packing). **Serving contract
     met**: `flux1::caps` (`text2image`), `resident_flux1::Flux1Resident`
-    (`BRAIN_FLUX1_DIR`), D-Bus `Run`, `examples/imagegen/flux1_generate.py`.
+    (`BRAIN_FLUX1_DIR`), D-Bus `Run`, `samples/python/imagegen/flux1/flux1_generate.py`.
     *(Text-to-image only - no Kontext editing, img2img or LoRA yet; no batch >
     1; backward/gradcheck deferred. Unlike this cluster's other served
     models, the PIPELINE glue has no end-to-end fixture in this workspace to
@@ -267,7 +267,7 @@ fast and scalable kernel - not a naive one.
     `gradcheck::check_t5{,_one_block,_tiled}`. **Serving contract met**:
     `t5encoder::caps` (`encode`, `variant` picks flux_xxl/wan_umt5, tokenized
     via `data::unigram`), `resident_t5encoder::T5encoderResident`
-    (`BRAIN_T5ENCODER_DIR`), D-Bus `Run`, `examples/embedding/t5_embed.py`.
+    (`BRAIN_T5ENCODER_DIR`), D-Bus `Run`, `samples/python/embedding/t5-embed/t5_embed.py`.
     *(**T=512 - the length FLUX.1 actually uses - is untested** at the model
     level, and the served path has no fixture to verify end to end in this
     workspace's checked-in test data - see `.agents/roadmap/t5encoder.md`.)*
@@ -282,7 +282,7 @@ fast and scalable kernel - not a naive one.
     code-index disagreements. See `.agents/roadmap/vqgan.md`. **Serving
     contract met**: `vqgan::caps` (`encode`/`decode` - the codes travel as a
     `Media::Bytes` blob), `resident_restore::VqganResident`
-    (`BRAIN_VQGAN_WEIGHTS`), D-Bus `Run`, `examples/restore/`. **Training /
+    (`BRAIN_VQGAN_WEIGHTS`), D-Bus `Run`, `samples/python/restore/vq-roundtrip/`. **Training /
     backward done** (`crates/vqgan/src/train.rs`, gated by
     `gradcheck::check_vqgan`). *(`run_batch` is the serial default and says
     why.)*
@@ -323,7 +323,7 @@ fast and scalable kernel - not a naive one.
     code-index disagreements at every `w`. See `.agents/roadmap/codeformer.md`.
     **Serving contract met**: `codeformer::caps` (`restore_face`, `w` as a plain
     float param), `resident_restore::RestoreResident` (`BRAIN_CODEFORMER_WEIGHTS`),
-    D-Bus `Run`, `examples/restore/`. *(Forward only: `adain=True` - the
+    D-Bus `Run`, `samples/python/restore/restore-face/`. *(Forward only: `adain=True` - the
     reference CLI's path - face detection/alignment, batch > 1, sizes ≠ 512² and
     backward/gradcheck are all deferred and listed in that ledger.)*
 
@@ -342,7 +342,7 @@ fast and scalable kernel - not a naive one.
     gated at **exact id equality** vs HF `CLIPTokenizer` on both SDXL tokenizers.
     **Serving contract met**: `clip::caps` (`embed_text` batched per-tower,
     `embed_image`), `resident_clip::ClipResident` (`BRAIN_CLIP_DIR`), D-Bus
-    `Run`, `examples/embedding/clip_embed.py`. **Backward is gated**
+    `Run`, `samples/python/embedding/clip-embed/clip_embed.py`. **Backward is gated**
     (`gradcheck::check_clip`, wired in
     `crates/gradcheck/tests/imaging_models.rs`; `check_clip_bigg` and
     `check_clip_tiled` cover the bigG tower and the tiled path).
@@ -373,7 +373,7 @@ fast and scalable kernel - not a naive one.
     discrete Euler step, CFG, VAE decode - "SDXL works" end to end).
     **Serving contract met**: `sdxlunet::caps` (`text2image`),
     `resident_sdxl::SdxlResident` (`BRAIN_SDXL_DIR`), D-Bus `Run`,
-    `examples/imagegen/sdxl_generate.py`. **Backward + gradcheck done**
+    `samples/python/imagegen/sdxl/sdxl_generate.py`. **Backward + gradcheck done**
     (`crates/sdxlunet/src/train.rs`, gated by `gradcheck::check_unet` and
     `check_unet_conditioning_elementwise`) - which required teaching the shared
     `vae::blocks` tape to RECORD the transformer half rather than
@@ -401,7 +401,7 @@ fast and scalable kernel - not a naive one.
     `ControlNet::run` per step, reusing the same two CLIP towers/scheduler/VAE
     calls `sdxlunet::caps`'s does), `resident_controlnet::ControlnetResident`
     (`BRAIN_SDXL_DIR` + `BRAIN_CONTROLNET_DIR`), D-Bus `Run`,
-    `examples/imagegen/controlnet_generate.py`. *(No backward, no
+    `samples/python/imagegen/controlnet/controlnet_generate.py`. *(No backward, no
     `check_controlnet`, no INT8, no batch > 1 - every request is its own
     multi-step sample, same as plain SDXL. "InstantID works" is still NOT
     claimed - InstantID is a separate crate, `crates/instantid`, whose forward
@@ -427,7 +427,7 @@ fast and scalable kernel - not a naive one.
     EVA-CLIP → `IdFormer` → `PulidAdapter` → `flux1::pipeline::Flux1::
     generate_injected`), `resident_pulid::PulidResident` (`BRAIN_FLUX1_DIR` +
     `BRAIN_PULID_DIR` + `BRAIN_ARCFACE_DIR` + `BRAIN_CLIP_DIR`), D-Bus `Run`,
-    `examples/imagegen/pulid_generate.py`. *(Forward only: no backward, no
+    `samples/python/imagegen/pulid/pulid_generate.py`. *(Forward only: no backward, no
     `check_pulid`, no batch > 1. Only `dev` is validated against a PuLID
     reference. One real, documented gap: the served path resizes the face
     crop straight to EVA-CLIP-L/336 rather than reproducing the reference's
@@ -449,7 +449,7 @@ fast and scalable kernel - not a naive one.
     (rel_l2 3.755e-6) against BOTH the official repo and diffusers, on Vulkan and
     the CPU JIT. **Serving contract met**: `wan::caps` (one `t2v` action),
     `resident_wan::WanResident`, D-Bus `Subscribe` + `Cancel`,
-    `examples/videogen/`. **Training done, host only**: `grad.rs`/`modelgrad.rs`/
+    `samples/python/videogen/wan/`. **Training done, host only**: `grad.rs`/`modelgrad.rs`/
     `lora.rs`/`finetune.rs`, gated by `gradcheck::check_wan`
     (block FD 1.8e-9, model FD 1.7e-8, LoRA a bit-exact no-op at init).
     `brain wan t2v` is one command to a playable mp4 (fetching is opt-in:
@@ -493,7 +493,7 @@ fast and scalable kernel - not a naive one.
     `brain qwen3tts {import,clone,synth,design,serve,sim,finetune}`.
 13b. **ASR / speech-to-text** - two imported, parity-gated models served through the
     full stack (capability + residency + batched `run_batch` + D-Bus
-    `StreamTranscribe` + `examples/asr/`):
+    `StreamTranscribe` + `samples/python/asr/`):
     * **Nemotron 3.5 ASR Streaming 0.6B** (`crates/nemotronasr`) - FastConformer
       encoder (depthwise-sep causal subsampling, macaron FFs, Transformer-XL
       rel-pos attention, GLU conv module) + RNN-T transducer; the *streaming* model,
@@ -507,7 +507,7 @@ fast and scalable kernel - not a naive one.
     (sigmoid-gated MoE) + 5-layer MTP code predictor → Code2Wav vocoder,
     composed end to end: text/speech/image/video in, text + real synthesized
     speech out, served over D-Bus/OpenAI/Anthropic (`brain caps`/`brain qwen3omnimoe ...`,
-    `examples/omni/omni.py`). int8-native checkpoint import exists and has
+    `samples/python/qwen3omnimoe/omni/omni.py`). int8-native checkpoint import exists and has
     been run for real (70GB→36GB, 54,764 tensors, exact two-way name
     coverage). A layer-sharded int8 dual-GPU Thinker (`crates/qwen3omnimoe/src/
     int8_resident.rs`, `int8_thinker_resident.rs`) is built and validated on
@@ -538,7 +538,7 @@ fast and scalable kernel - not a naive one.
     parallel-block sparse-MoE decoder, gradient-checked and import-covered.
     **Serving contract met**: `moondream3::caps` (one streaming `caption`
     action), `crates/cli/src/resident_moondream3.rs`, a `catalog.rs` entry,
-    D-Bus `Subscribe`, `examples/vision/moondream3_caption.py`.
+    D-Bus `Subscribe`, `samples/python/vision/moondream3-caption/moondream3_caption.py`.
     **int8 is the default and is what makes it loadable at all**: the fp32
     build is 32.8 GiB of weights plus 10.3 GiB of per-block activation scratch
     (~43 GiB); `Precision::Int8` quantizes the 1280 expert tensors
@@ -612,7 +612,7 @@ fast and scalable kernel - not a naive one.
     `prompt_tokens`/`completion_tokens`/`finish_reason`),
     `crates/cli/src/resident_deepseekocr.rs` (`BRAIN_DEEPSEEK_OCR_DIR`), one
     `catalog.rs` entry wiring `brain caps`/`brain deepseek2ocr ...`/D-Bus/OpenAI/Anthropic at
-    once, `examples/vision/deepseek-ocr/`. The production checkpoint loader is
+    once, `samples/python/vision/deepseek-ocr/`. The production checkpoint loader is
     `deepseek2ocr::import` - this crate's four real-weight test binaries are
     thin wrappers over it, so a served run and its own parity test cannot
     disagree about which tensors they loaded.
@@ -702,8 +702,8 @@ fast and scalable kernel - not a naive one.
     LoRA-capable. **Serving contract met for CosyVoice 2**: `cosyvoice::caps`
     (one `synth` action, streaming), `crates/cli/src/resident_cosyvoice.rs`
     (load-per-call, following `resident_minimaxmusic3.rs`), `brain
-    caps`/`brain cosyvoice synth`/D-Bus/HTTP, `examples/tts/
-    cosyvoice_synth.py`. **Both generations run**: `pipeline::Variant` selects
+    caps`/`brain cosyvoice synth`/D-Bus/HTTP,
+    `samples/python/tts/cosyvoice-synth/cosyvoice_synth.py`. **Both generations run**: `pipeline::Variant` selects
     the LM config, the flow decoder (UNet CFM vs the 22-layer adaLN-zero DiT)
     and the vocoder (non-causal vs causal HiFT), and everything the two share -
     CAM++, S3Tokenizer, the prompt mel, the truncation rule, the token budget -
@@ -730,7 +730,7 @@ fast and scalable kernel - not a naive one.
     LoRA and sharding on the DiT; a discriminator and training loops exist
     per component. **Serving contract met**: `minimaxmusic3::caps`
     (`generate`), `resident_minimaxmusic3::MinimaxMusic3Resident`, a
-    `catalog.rs` entry, D-Bus, `examples/musicgen/`.
+    `catalog.rs` entry, D-Bus, `samples/python/musicgen/generate-song/`.
     *(Load-per-call, like `cosyvoice`. The real short end-to-end WAV gate is
     written but blocked on this box; joint generator+discriminator training
     and a multi-resolution discriminator are open. See
@@ -824,7 +824,7 @@ The recent workstream (P7.x) is concurrent LLM serving. Key pieces:
 | Residency | `crates/residency` | tiers model weights GPU/RAM/disk by a size/reload-cost-aware policy within a memory budget; schedules jobs (batch-by-model, queue-age-aware, parallel lanes); `crates/residency/src/admission.rs` is the shared edge-concurrency-ceiling/admit-deadline policy both HTTP and D-Bus read from |
 | Capability interface | `crates/capability` | models advertise a `Manifest` of typed `ActionSpec`s; CLI (`brain caps` / `brain <arch> <verb>`) and the event API dispatch generically - adding a capability = implementing `Action`, no new subcommand or event variant |
 | Transports | `crates/server` | one JSONL protocol over **stdio, TCP, and Unix socket**; thread-per-connection, bounded, panic-isolated |
-| D-Bus surface | `crates/dbus` | exposes the same `residency::Executor`-backed resident models HTTP serves (`Run`/`Subscribe`, streaming `Progress::delta`/`Progress::event`, the same admission deadline + concurrency ceiling as HTTP) over `com.swedishembedded.Brain1`, passing images/streams via fd (memfd/mmap + dmabuf). Example client: `examples/dbus`. Also serves the stats snapshot (`StatsSnapshot` method + `StatsStream` signal) and `ResidentModels` - just the `StatsSnapshot.models` rows with `resident == true`, so a client doesn't have to pull and parse the whole tree to answer "what's warm" |
+| D-Bus surface | `crates/dbus` | exposes the same `residency::Executor`-backed resident models HTTP serves (`Run`/`Subscribe`, streaming `Progress::delta`/`Progress::event`, the same admission deadline + concurrency ceiling as HTTP) over `com.swedishembedded.Brain1`, passing images/streams via fd (memfd/mmap + dmabuf). Example client: `samples/python/dbus/brain-dbus/`. Also serves the stats snapshot (`StatsSnapshot` method + `StatsStream` signal) and `ResidentModels` - just the `StatsSnapshot.models` rows with `resident == true`, so a client doesn't have to pull and parse the whole tree to answer "what's warm" |
 | Stats subsystem | `crates/stats` (`brain-stats`) | self-describing, hierarchical JSON `StatsSnapshot` (accelerators/models/executor/requests/connections + open `extra`), assembled from `StatsSource` contributors; `braintop` renders it |
 | Event HFSM | `crates/runtime`, `crates/events`, `crates/hfsm` | `camera_frame`→`object_detected`, `user_text`→`brain_text_chunk`, `user_synth_request`→streamed `audio_chunk`. The TTS seam's real implementation (`runtime::tts::Qwen3TtsSynthModel`, over `qwen3tts::pipeline`) is behind the **non-default** `brain-runtime/qwen3tts` feature (cli: `qwen3tts-synth`), because `brain-qwen3tts` pulls the whole codec+speaker+talker+MTP graph and this crate's default tree is deliberately small |
 | Python client | `brain-py/` | drives the `brain` binary as an event-driven subprocess (not in the build/test path) |
@@ -982,7 +982,7 @@ front-end to depend on.
 | Qwen model / import / LoRA / INT8 / sharding | `crates/qwen3/src/{model,import,finetune,q8,shard,sample}.rs` |
 | **Qwen concurrent serving (paged KV, continuous batching, spec decode)** | `crates/qwen3/src/serve.rs`, `crates/model/src/paged.rs`, `crates/cli/src/qwen_cli.rs` |
 | Qwen3.5-35B-A3B model / import / LoRA / INT8 / sharding / vision splice | `crates/qwen35moe/src/{model,import,lora,q8,shard,vl}.rs`, `model::gdn` (shared Gated DeltaNet kernels), `.agents/roadmap/qwen35moe.md` |
-| Qwen3.5-35B-A3B serving (`caps.rs`, resident, D-Bus/HTTP) | `crates/qwen35moe/src/{caps,serve}.rs`, `crates/cli/src/{qwen35moe_cli,resident_qwen35moe}.rs`, `examples/llm/` |
+| Qwen3.5-35B-A3B serving (`caps.rs`, resident, D-Bus/HTTP) | `crates/qwen35moe/src/{caps,serve}.rs`, `crates/cli/src/{qwen35moe_cli,resident_qwen35moe}.rs`, `samples/python/llm/qwen35moe/` |
 | Qwen3.8-27B dense model / import / LoRA / finetune / sharding / MTP / vision splice | `crates/qwen35/src/{model,import,finetune,shard,vl}.rs`, `model::gdn` (shared Gated DeltaNet kernels), `.agents/roadmap/qwen35.md` |
 | Qwen3.8-27B serving (`caps.rs`, resident, D-Bus/HTTP) | `crates/qwen35/src/{caps,serve}.rs`, `crates/cli/src/{qwen35_cli,resident_qwen35}.rs` |
 | Qwen3.8-27B **speculative decoding** - the verify/accept-reject loop and its recurrent-state rollback | `crates/qwen35/src/int8_gguf_resident.rs` (`generate_speculative`), `crates/qwen35/src/model.rs` (`gdn_snapshot_xfer`), `crates/qwen35/tests/{spec_decode,gguf_resident_spec_real}.rs` |
@@ -994,7 +994,7 @@ front-end to depend on.
 | Served-model catalog (manifest + weight-free provider ctor per model, ~70 crates, in ONE list, no CLI dependency) | `crates/catalog/src/lib.rs`; the CLI-local residency-adapter extension over it lives in `crates/cli/src/catalog.rs` |
 | **Captioning/labeling a dataset with any VLM** (the seam, not one model) | `crates/captioner/src/{lib,label}.rs` - `Captioner`/`Clip`/`Capabilities`; implementors in `crates/qwen3vl/src/captioner.rs` and `crates/fastvlm/src/captioner.rs`; verb in `crates/cli/src/label_cli.rs`; `docs/training/labeling.md` |
 | JSONL transports (stdio / TCP / unix) | `crates/server/src/{transport,controller_session}.rs` |
-| D-Bus control surface | `crates/dbus`, `examples/dbus` |
+| D-Bus control surface | `crates/dbus`, `samples/python/dbus/brain-dbus/` |
 | **Stats snapshot / braintop contract** (add a metric, data-driven sections) | `crates/stats/src/{snapshot,source,build}.rs`; D-Bus `StatsSnapshot`/`StatsStream` in `crates/dbus/src/service.rs`; `Executor::residency` in `crates/residency/src/{executor,manager}.rs` |
 | Event/HFSM controller (`brain serve --stdio`) | `crates/runtime/src/{lib,pump}.rs`, `crates/cli/src/run_cli.rs`, `crates/events/src/lib.rs` |
 | GLM-5.2 (MLA + MoE + DSA indexer + MTP) | `docs/models/glmdsa.md`, `docs/models/glmdsa/npu.md`; `crates/glmdsa`, `crates/cli/src/glm_cli.rs` |
@@ -1028,18 +1028,18 @@ front-end to depend on.
 | Synthetic detection dataset (RGB shapes + GT boxes) | `crates/data/src/gen_detect.rs` |
 | Datasets & tokenizers | `crates/data/src/{prepare,gen_*,tokenizer,bpe,clip_bpe,qwen_tokenizer,loader,binio,rng}.rs` |
 | TTS: guide / acceleration | `docs/models/qwen3tts/{readme,acceleration}.md`; `crates/{qwen3tts,mimi,ecapatdnn,audio}`, `crates/cli/src/{tts_cli,tts_serve}.rs` |
-| **ASR (speech-to-text)**: status / serving / perf | `.agents/roadmap/asr.md`; `crates/{nemotronasr,qwen3asr}`, shared `audio::asr_caps`, `crates/cli/src/resident_asr.rs`, D-Bus `StreamTranscribe` (`crates/dbus`), `examples/asr/` |
+| **ASR (speech-to-text)**: status / serving / perf | `.agents/roadmap/asr.md`; `crates/{nemotronasr,qwen3asr}`, shared `audio::asr_caps`, `crates/cli/src/resident_asr.rs`, D-Bus `StreamTranscribe` (`crates/dbus`), `samples/python/asr/` |
 | Forecasting models + backtester | `docs/models/{chronos2,kronos,fincast,timesfm3}.md`; `crates/{forecast,fcbench,chronos2,kronos,fincast,timesfm3}`, `crates/cli/src/forecast_cli.rs` |
 | World models (playable) | `docs/models/world-models/{status,playbooks,fixtures}.md` + `specs/`; `crates/{wm-core,wm-display,diamond,genieredux}`, `crates/cli/src/wm_cli.rs` |
 | Z-Image / diffusion stack | `docs/models/s3dit/{readme,status}.md`; `crates/{s3dit,dit,diffusion,vae}` |
 | FLUX.2 Klein: guide / ledger | `docs/models/flux2/{readme,status}.md`; `crates/flux2`, `crates/cli/src/flux2_cli.rs`; goldens via `tools/goldens/flux2_dump_reference.py` |
-| **Video generation (Wan)**: guide / roadmap + perf baseline | `docs/models/wan.md`, `.agents/roadmap/wan.md`; `crates/wan`, `crates/cli/src/{wan_cli,resident_wan}.rs`, `crates/wan/src/bin/wan_bench.rs`, `examples/videogen/`; goldens via `tools/goldens/wan_{dit,vae,t5,schedule}_dump_reference.py` |
+| **Video generation (Wan)**: guide / roadmap + perf baseline | `docs/models/wan.md`, `.agents/roadmap/wan.md`; `crates/wan`, `crates/cli/src/{wan_cli,resident_wan}.rs`, `crates/wan/src/bin/wan_bench.rs`, `samples/python/videogen/wan/`; goldens via `tools/goldens/wan_{dit,vae,t5,schedule}_dump_reference.py` |
 | Finetuning guides | `docs/guides/finetune/{plan,datasets}.md` |
 | **"change only X" end to end** (segment -> refine -> restore -> composite) | `crates/imgpipe` - the bit-exactness contract and why it holds is in its module docs |
 | Image handling of ANY kind (resize/pad/crop/letterbox/masks/tiling/codecs) | `crates/imaging` - check here BEFORE writing a pixel loop; five copies of `chw_to_hwc` is what created it |
 | Identity conditioning (ArcFace -> ID tokens -> diffusion attention) | `crates/pulid` (FLUX.1, wired), `crates/instantid` (SDXL, shapes only); `pulid::idcond` documents the raw-vs-normalised asymmetry that silently breaks it |
 | Clippy gate (exit code + a warning ratchet) | `make clippy`, `scripts/gates/clippy-gate.sh` - clippy ABORTS on a denied lint and then reports nothing, so always check the exit code |
-| **Standalone sample APPLICATIONS** (`make samples/<path>/{build,run}`) - Zephyr-style demos that link the public `brain` SDK the way a product would, as opposed to `examples/`'s off-process client scripts | `samples/README.md` (the contract: SDK-only dependency, each sample NAMES the SDK surfaces it uses, why they are workspace members but never `default-members`, and why a sample is built with `-p <sample>` alone), `scripts/gates/check-samples.sh` (`make check/samples`, which MEASURES that a sample's dependency closure contains nothing from a surface it did not enable) |
+| **Standalone samples** - Rust applications (`make samples/<path>/{build,run}`, link the public `brain` SDK the way a product would) plus Python/shell client scripts (`samples/python/<pipeline>/`, `samples/shell/<pipeline>/`, driven off-process over D-Bus/HTTP/the CLI) | `samples/README.md` (the contract for all three kinds: SDK-only dependency for a Rust sample, each Rust sample NAMES the SDK surfaces it uses, why Rust samples are workspace members but never `default-members`, why a Rust sample is built with `-p <sample>` alone, and the directory/README/fetch-data.sh shape every sample follows), `scripts/gates/check-samples.sh` (`make check/samples`, which MEASURES a Rust sample's dependency closure and checks the shell/Python trees structurally) |
 | **The SDK's feature vocabulary** (what a consumer may name, and what it costs) | `crates/sdk/Cargo.toml`'s `[features]` - surfaces are `brain_arch::Domain` names, `device`/`resolve` are tiers a surface selects; `scripts/gates/check-sdk-features.sh` (`make check/sdk-features`) pins the vocabulary, compiles every surface alone, and keeps `crates/catalog` un-featurized. Per-family importers live behind `brain-loader`'s `import-*` features (`brain-cli` takes `import-all`); that split is what takes the SDK's closure from 69 brain crates to 38 |
 | **Public API / SDK design** (progressive disclosure, `from_pretrained`, one pipeline type per task, domain objects, CLI-must-call-the-SDK) | **`.agents/rules/sdk-design.md`** - read BEFORE adding or changing a public type in `crates/sdk`, a CLI subcommand, or `brain-py`; pairs with `.agents/rules/serving-contract.md` (that one is the D-Bus/scheduler half, this one the library half). `crates/sdk`, `.agents/roadmap/sdk.md` |
 | CLI subcommands | `crates/cli/src/{main,args,*_cli}.rs` |
@@ -1811,13 +1811,14 @@ a metric that isn't there was simply forgotten.
      forward wherever the architecture allows (see `resident_asr`/`resident.rs`
      yolov8) - never leave concurrent same-model work on the default serial loop
      without saying why;
-  4. **D-Bus wiring + a runnable example.** The model's actions MUST be reachable
-     over `crates/dbus` (`com.swedishembedded.Brain1`) and demonstrated by an
-     example under `examples/<domain>/` with a README. If the model's shape fits the
-     existing D-Bus surface (`Run`/`Subscribe`/`StreamTranscribe`/fd blobs), use it;
+  4. **D-Bus wiring + a runnable sample.** The model's actions MUST be reachable
+     over `crates/dbus` (`com.swedishembedded.Brain1`) and demonstrated by a sample
+     under `samples/python/<pipeline>/` or `samples/shell/<pipeline>/` with a
+     README. If the model's shape fits the existing D-Bus surface
+     (`Run`/`Subscribe`/`StreamTranscribe`/fd blobs), use it;
      if it does not, **extend or refactor the surface** (add a method, generalize a
      frame type) rather than bolting on a side channel - and update every existing
-     client/example that the change touches. The full checklist lives in
+     client/sample that the change touches. The full checklist lives in
      `.agents/rules/serving-contract.md` (linked from the Serving stack section); keep it and
      this bullet in sync.
   A model that trains and passes parity but cannot be discovered, scheduled, batched,
@@ -1844,8 +1845,8 @@ a metric that isn't there was simply forgotten.
   the rest - including `sdxlunet`, `controlnet`, `flux1` and `pulid`, each a
   full multi-step sample per call with no batch axis to fill - are the
   serial default and each says why in-file. All eleven now have a runnable
-  `examples/` entry, under
-  `examples/{vision,restore,embedding,imagegen}/`. `controlnet`'s `caps` is
+  sample, under
+  `samples/python/{vision,restore,embedding,imagegen}/`. `controlnet`'s `caps` is
   its own sampler loop (`sdxlunet::pipeline::Sdxl` has no seam for a per-step
   residual), built on `Unet::new_controlled` + `Unet::run_with_control`
   rather than composed on top of `pipeline::Sdxl` - see
@@ -1971,10 +1972,15 @@ a metric that isn't there was simply forgotten.
   check via `make check/scripts` (below), and the `/data/…` ban is enforced
   repo-wide - any tracked file, both modes of the gate - by
   `scripts/gates/check-no-machine-paths.sh`.
-- **`scripts/` vs `tools/`.** `scripts/` is repo automation - invoked by a
-  Makefile target or a bats test, nothing else. `tools/` is developer utilities a
-  human runs by hand (golden dumpers, converters, benchmarks) - it needs
-  `requirements.txt`, `crates/**` never does. **`make check/scripts`**
+- **`scripts/` vs `tools/` vs `samples/`.** `scripts/` is repo automation - invoked
+  by a Makefile target or a bats test, nothing else. `tools/` is developer
+  utilities a human runs by hand (golden dumpers, converters, benchmarks) - it
+  needs `requirements.txt`, `crates/**` never does. A script a human runs by hand
+  to DEMONSTRATE a capability (not develop one) belongs in `samples/python/` or
+  `samples/shell/` instead, with a README - a sample may still wrap a `tools/`
+  utility for its own on-demand data generation (`fetch-data.sh`), the way
+  `samples/shell/forecast/cooling-loop/` wraps `tools/forecast/make_cooling_loop.py`.
+  **`make check/scripts`**
   (`scripts/gates/check-scripts.sh`, folded into `test/full`) is what keeps both from
   rotting the way they did before it existed: every `.sh` parses and every `.py`
   compiles; every tracked file is named **somewhere else** in the repo (a
