@@ -28,8 +28,8 @@ What remains, per verb:
 | | state |
 |---|---|
 | **moves its legs** | done - 330 motor neurons on 44 actuators, the loop closes at 0.55x real time |
-| **walks** | the reward and the search exist and both work; the number is M12's |
-| **flies** | 8.9 BL/s and 3x the airtime of the imported wiring, upright, and 21x a degree-matched shuffle of it - but aloft for a quarter of an episode, not sustained |
+| **walks** | the first search under it found a slide: 20x the imported connectome while finishing 2.39 radians from upright. Uprightness is in the objective now and the search is re-running |
+| **flies** | two thirds of an episode airborne at 48 BL/s, upright - but a degree-matched shuffle reaches 77% of that, so the objective does not need the wiring. Steering is the task that would |
 | **explores** | the olfactory chain carries end to end and is lateralised; steering is untrained |
 
 `brain fly walk` fetches the MANC connectome, runs all 23,188 neurons and
@@ -1069,6 +1069,37 @@ it against the scan+sort reference at `max|d| == 0`.
   the shuffle separately and compared the winners: two best-of-N maxima are two
   draws from the tail of a noisy distribution. Holding the parameters fixed and
   changing only the graph asks the question directly.
+
+  **AND THEN MORE SEARCH TOOK THE STRUCTURE BACK OUT.** Continuing that run
+  for 60 further generations at a wider exploration radius produced a far
+  better flier and a far worse RESULT:
+
+  | condition | score | net cm | airborne | BL/s | tipped | spikes |
+  |---|---|---|---|---|---|---|
+  | as imported | 0.033 | 0.38 | 0.088 | 0.75 | 0.64 | 83,458 |
+  | **tuned** | **15.96** | **24.0** | **0.665** | **48.0** | 0.35 | 4,018,802 |
+  | paralysed | 0.039 | 0.46 | 0.085 | 0.92 | 1.05 | 407,005 |
+  | shuffled | 12.35 | 18.8 | 0.658 | 37.5 | 0.03 | 5,802,458 |
+
+  Two thirds of the episode airborne against a tenth, 48 body lengths a second
+  against 0.75 - and **the shuffle now reaches 77% of it**, where the earlier
+  and weaker tuning left it at 5%. The shuffled cord even fires MORE
+  (5.8 M spikes against 4.0 M).
+
+  The reading is not that the first result was wrong; both were measured the
+  same way. It is that **optimisation pressure moved the solution off the
+  connectome**. The easiest way to fly this airframe is to drive the power
+  motor neurons hard, and any sufficiently active cord can do that - the
+  wingbeat is GENERATED and the nervous system only modulates it, so a task
+  scored on staying up and covering ground does not require the wiring to be
+  the fly's own.
+
+  That is a result about the OBJECTIVE rather than about the animal, and it
+  says what the next one has to be: **steering**. A task that pays for going
+  somewhere CHOSEN needs the amplitude and angle-of-attack motor neurons to act
+  differentially, which is a thing a shuffled cord has no reason to produce.
+  M6 already listed steering as open; this is the measurement that says it is
+  not optional.
 
 M1-M4 are engineering. **M5 is the research milestone** and is where the
 schedule is honestly uncertain: the published precedents (flyvis for vision,
