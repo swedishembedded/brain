@@ -95,7 +95,12 @@ fn travel_without_a_rhythm_scores_nothing_and_so_does_rhythm_without_travel() {
 
     // And the product: a perfect gait that travels nowhere is worth nothing,
     // however good the rhythm.
-    let ep = |net: f64, gait: Option<Gait>| fly::learn::Episode { net, gait, ..Default::default() };
+    let ep = |net: f64, gait: Option<Gait>| fly::learn::Episode {
+        net,
+        gait,
+        objective: Some(Objective::walk()),
+        ..Default::default()
+    };
     assert_eq!(ep(0.0, Some(walking)).score(), 0.0, "running on the spot is not walking");
     assert!(ep(1.0, None).score().abs() < 1e-12, "travel with no analysable gait is not walking");
     assert!(ep(1.0, Some(walking)).score() > 0.5, "a tripod that travels should score");
@@ -114,7 +119,7 @@ fn dropping_below_the_fall_threshold_ends_the_episode() {
     let Some(mut fly) = rig() else { return };
     let run = |fly: &mut Fly, terminal_fall| {
         let cfg = RewardConfig {
-            objective: Objective::Walk { terminal_fall },
+            objective: Objective::Walk { terminal_fall, terminal_tip: 1.0 },
             ticks: 1000,
             command: 1.0,
             ..RewardConfig::default()
@@ -216,4 +221,54 @@ fn a_tuning_reaches_the_animal_and_reports_what_it_did_not_recognise() {
     let report = foreign.apply(&mut fly, &c, Wiring::default()).expect("still applies");
     assert_eq!(report.gains, 0, "a cord has no optic lobe");
     assert_eq!(report.unknown, vec!["gain:optic_lobe_intrinsic".to_string()]);
+}
+
+/// Falling over has to end a walk, and a height threshold does not catch it.
+///
+/// The measurement this exists for: under height-only termination a search
+/// found a tuning scoring 0.089 - twenty times the imported connectome - that
+/// finished 2.39 radians from upright. A fly on its back keeps its root
+/// height, keeps its legs oscillating and covers ground, so every term in the
+/// score was satisfied by a body that was not walking at all. The shuffled
+/// control scored 0.044 and tipped 2.43, which is two animals falling over at
+/// similar rates rather than a structural result.
+#[test]
+fn a_walk_that_ends_on_its_back_scores_nothing() {
+    // The reward's own arithmetic, with no fly needed: an episode that ended
+    // because the animal tipped over has too short a trace to hold a rhythm,
+    // and a gait it cannot score is worth zero however far the body travelled.
+    let ep = |net: f64, gait: Option<Gait>| fly::learn::Episode {
+        net,
+        gait,
+        objective: Some(Objective::walk()),
+        ..Default::default()
+    };
+    assert_eq!(ep(5.0, None).score(), 0.0, "a long slide with no scorable gait is not a walk");
+
+    // And the threshold is in the objective rather than only in the report.
+    match Objective::walk() {
+        Objective::Walk { terminal_tip, .. } => {
+            assert!(terminal_tip > 0.0 && terminal_tip < std::f64::consts::FRAC_PI_2);
+        }
+        other => panic!("walk() should be a Walk objective, got {other:?}"),
+    }
+
+    let Some(mut fly) = rig() else { return };
+    // A tip threshold a walking fly is already past ends the episode at once;
+    // the ordinary one does not. The pair is what makes it a test of the
+    // THRESHOLD rather than of an episode that always terminates.
+    let run = |fly: &mut Fly, terminal_tip| {
+        let cfg = RewardConfig {
+            objective: Objective::Walk { terminal_fall: 0.125, terminal_tip },
+            ticks: 1000,
+            command: 1.0,
+            ..RewardConfig::default()
+        };
+        episode(fly, cfg, Condition::Frozen, &mut Lcg::new(1)).expect("an episode runs")
+    };
+    let strict = run(&mut fly, 0.001);
+    let normal = run(&mut fly, 1.0);
+    assert!(strict.terminated && strict.ticks < 1000, "a threshold under the standing attitude did not terminate");
+    assert_eq!(strict.score(), 0.0, "an episode that ended immediately still scored {}", strict.score());
+    assert!(!normal.terminated, "a standing fly tripped a one-radian attitude threshold");
 }

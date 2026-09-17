@@ -86,6 +86,27 @@ fn the_loop_composes_and_every_channel_is_populated() {
     assert_eq!(f.motor_map().mapped(), 330, "the motor channel");
 }
 
+/// Time one repeat of `f`, taking the FASTEST of several.
+///
+/// The minimum rather than the mean, and that is not cherry-picking: every
+/// source of error in a wall-clock measurement on a shared machine is
+/// one-sided. Contention, migration between a performance core and an
+/// efficiency one, and a scheduler slice lost to another process can only
+/// make a run slower, never faster. The fastest repeat is therefore the
+/// closest estimate of what the work actually costs, and it is the only
+/// summary that does not drift with whatever else the box is doing - which
+/// matters here because this test is habitually run while a parameter search
+/// is using every core.
+fn fastest(repeats: usize, mut f: impl FnMut()) -> f64 {
+    let mut best = f64::MAX;
+    for _ in 0..repeats {
+        let t0 = std::time::Instant::now();
+        f();
+        best = best.min(t0.elapsed().as_secs_f64());
+    }
+    best
+}
+
 #[test]
 fn closing_the_loop_costs_little_over_the_body_alone() {
     let Some(r) = rig() else { return };
@@ -98,12 +119,13 @@ fn closing_the_loop_costs_little_over_the_body_alone() {
         f.step().unwrap();
     }
     let ticks = 200;
-    let t0 = std::time::Instant::now();
     let mut spikes = 0u64;
-    for _ in 0..ticks {
-        spikes += f.step().unwrap().total_spikes as u64;
-    }
-    let hz = ticks as f64 / t0.elapsed().as_secs_f64();
+    let closed = fastest(3, || {
+        spikes = 0;
+        for _ in 0..ticks {
+            spikes += f.step().unwrap().total_spikes as u64;
+        }
+    });
 
     // The same number of physics steps, with no nervous system at all.
     let model = Model::from_xml(&r.mj, &r.xml).unwrap();
@@ -111,11 +133,11 @@ fn closing_the_loop_costs_little_over_the_body_alone() {
     for _ in 0..200 {
         d.step(&model);
     }
-    let t0 = std::time::Instant::now();
-    for _ in 0..(ticks * 20) {
-        d.step(&model);
-    }
-    let body_hz = ticks as f64 / t0.elapsed().as_secs_f64();
+    let body = fastest(3, || {
+        for _ in 0..(ticks * 20) {
+            d.step(&model);
+        }
+    });
 
     // What the CORD costs on its own, in this process, on this device: the
     // same network, the same number of ticks, with no body attached.
@@ -128,9 +150,10 @@ fn closing_the_loop_costs_little_over_the_body_alone() {
     // about the hardware, and this test had one: three milliseconds, chosen
     // against a profile of 0.81 ms that was itself measuring a submission
     // backlog rather than a tick.
+    let w = Wiring::default();
     let mut bare = neuro::SpikingNet::new(
         gpu_core::testgpu::dev(&neuro::KERNELS),
-        &r.c.network(Wiring::default().weight_scale, Wiring::default().size_limit, Wiring::default().min_synapses),
+        &r.c.network(w.weight_scale, w.size_limit, w.min_synapses),
         fly::cord_lif(),
     )
     .expect("the cord builds");
@@ -140,19 +163,19 @@ fn closing_the_loop_costs_little_over_the_body_alone() {
         bare.step();
         bare.read(neuro::Port::Spike, &mut spike).unwrap();
     }
-    let t0 = std::time::Instant::now();
-    for _ in 0..ticks {
-        bare.step();
-        bare.read(neuro::Port::Spike, &mut spike).unwrap();
-    }
-    let cord_ms = 1000.0 * t0.elapsed().as_secs_f64() / ticks as f64;
+    let cord = fastest(3, || {
+        for _ in 0..ticks {
+            bare.step();
+            bare.read(neuro::Port::Spike, &mut spike).unwrap();
+        }
+    });
 
-    let closed_ms = 1000.0 / hz;
-    let body_ms = 1000.0 / body_hz;
+    let per = |seconds: f64| 1000.0 * seconds / ticks as f64;
+    let (closed_ms, body_ms, cord_ms) = (per(closed), per(body), per(cord));
     let overhead_ms = closed_ms - body_ms;
     eprintln!(
-        "closed loop {hz:.0} Hz ({closed_ms:.2} ms/tick), body alone {body_ms:.2} ms, cord alone \
-         {cord_ms:.2} ms, neural overhead {overhead_ms:.2} ms, {spikes} spikes"
+        "closed loop {closed_ms:.2} ms/tick, body alone {body_ms:.2} ms, cord alone {cord_ms:.2} ms, \
+         neural overhead {overhead_ms:.2} ms, {spikes} spikes"
     );
     assert!(spikes > 0, "the cord was silent, so this measures an idle loop");
 
@@ -162,6 +185,11 @@ fn closing_the_loop_costs_little_over_the_body_alone() {
     // regression here would actually be - a second synchronisation per tick,
     // an allocation in the step, a readback nobody needed - each of which
     // shows up as overhead the cord alone does not account for.
+    //
+    // It caught one: the proprioceptors were rebuilding an actuator name with
+    // `format!` and linear-searching for it on every sensor on every tick,
+    // 150,000 string allocations a second, and the loop cost five
+    // milliseconds a tick more than the body and the cord together.
     //
     // The margin is a millisecond plus half the cord's own cost, because the
     // two measurements are taken under different cache pressure and the

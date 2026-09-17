@@ -34,6 +34,13 @@ pub struct Episode {
     /// itself a score: an episode ends when the body loses the reference, so
     /// a longer one tracked for longer.
     pub ticks: u32,
+    /// What this episode was scored ON.
+    ///
+    /// Recorded rather than inferred from which fields happen to be set. The
+    /// inference version read "a gait is present" as "this was a walk", so a
+    /// walk whose gait could not be analysed silently became a different
+    /// objective with a different score.
+    pub objective: Option<Objective>,
     /// Ticks the episode was ASKED for.
     ///
     /// Not the same number, and the difference is the whole of
@@ -90,13 +97,21 @@ impl Episode {
     /// the spot, and only a sustained periodic tripod that actually goes
     /// somewhere earns both. For the others it is the accumulated reward.
     pub fn score(&self) -> f64 {
-        match (self.gait, self.airborne, self.range) {
-            (Some(g), _, _) => self.net * g.score(),
-            (None, a, _) if a > 0 => self.net * (a as f64 / self.requested.max(self.ticks).max(1) as f64),
+        match self.objective {
+            // Travel times rhythm, and NO GAIT IS NO SCORE. An episode that
+            // ended early - the animal fell, or tipped over - has too short a
+            // trace to hold a rhythm, and falling back to the accumulated
+            // per-tick reward would hand it exactly the travel-without-a-gait
+            // the product exists to refuse. Measured with that fallback in
+            // place: an episode terminated on its first tick still scored.
+            Some(Objective::Walk { .. }) => self.gait.map_or(0.0, |g| self.net * g.score()),
+            Some(Objective::Fly { .. }) => {
+                self.net * (self.airborne as f64 / self.requested.max(self.ticks).max(1) as f64)
+            }
             // How much nearer it ended than it started. Negative for an animal
             // that went the wrong way, which is what a search needs in order to
             // tell wrong from merely motionless.
-            (_, _, (from, to)) if from != to => from - to,
+            Some(Objective::Seek { .. }) => self.range.0 - self.range.1,
             _ => self.reward,
         }
     }
@@ -161,6 +176,21 @@ pub enum Objective {
         /// that has fallen over is not walking, and the ticks it spends on the
         /// floor would otherwise dilute the rhythm it is being scored on.
         terminal_fall: f64,
+        /// End the episode once the body is this far from upright, in radians.
+        ///
+        /// A height threshold alone does NOT catch falling over, and the
+        /// measurement that says so is the reason this field exists: a search
+        /// under height-only termination found a tuning that scored 0.089 -
+        /// twenty times the imported connectome - and finished 2.39 radians
+        /// from upright, which is 137 degrees. The animal was toppling and
+        /// sliding. A fly on its back keeps its root height, keeps its legs
+        /// oscillating, and covers ground, so every term in the score is
+        /// satisfied by a body that is not walking at all.
+        ///
+        /// The shuffled control gave the game away at the same time: it scored
+        /// 0.044 against the real wiring's 0.089 and tipped 2.43. Two animals
+        /// falling over at similar rates is not a structural result.
+        terminal_tip: f64,
     },
     /// FLY: stay up, and go somewhere while you are up.
     ///
@@ -224,8 +254,16 @@ impl Objective {
     /// A fly stands about a tenth of a centimetre up and the floor is at
     /// -0.132, so half a body length below the start is well past stumbling
     /// and well short of tripping the threshold on a normal stride.
+    /// Walk, with a fall threshold that clears the standing pose and an
+    /// attitude threshold at one radian.
+    ///
+    /// A fly stands about a tenth of a centimetre up and the floor is at
+    /// -0.132, so half a body length below the start is well past stumbling
+    /// and well short of tripping on a normal stride. One radian is 57
+    /// degrees, which a walking fly never reaches and a falling one passes
+    /// through on its way over.
     pub fn walk() -> Objective {
-        Objective::Walk { terminal_fall: 0.125 }
+        Objective::Walk { terminal_fall: 0.125, terminal_tip: 1.0 }
     }
 
     /// Fly, with thresholds a quarter of a body length either side of the
@@ -448,6 +486,7 @@ pub fn episode_with(
     let mut last_range = fly.food_range().unwrap_or(0.0);
     ep.range = (last_range, last_range);
     ep.requested = cfg.ticks;
+    ep.objective = Some(cfg.objective);
     for tick in 0..cfg.ticks as usize {
         let t = fly.step()?;
         ep.spikes += t.total_spikes as u64;
@@ -460,12 +499,13 @@ pub fn episode_with(
                 last_x = x;
                 r
             }
-            Objective::Walk { terminal_fall } => {
+            Objective::Walk { terminal_fall, terminal_tip } => {
                 // The legs, every tick, for the rhythm half of the score.
                 if let Some(t) = trace.as_mut() {
                     t.push(fly.leg_swing());
                 }
-                if fly.qpos().get(2).copied().unwrap_or(0.0) < floor - terminal_fall {
+                let q = fly.qpos();
+                if q.get(2).copied().unwrap_or(0.0) < floor - terminal_fall || tipped_by(&q) > terminal_tip {
                     ep.terminated = true;
                     break;
                 }
@@ -551,18 +591,7 @@ pub fn episode_with(
     }
 
     let end = fly.qpos();
-    // Roll and pitch out of the root quaternion, MuJoCo's (w, x, y, z) order.
-    // Yaw is deliberately not in it: an animal that has turned is not an
-    // animal that has fallen over.
-    let (qw, qx, qy, qz) = (
-        end.get(3).copied().unwrap_or(1.0),
-        end.get(4).copied().unwrap_or(0.0),
-        end.get(5).copied().unwrap_or(0.0),
-        end.get(6).copied().unwrap_or(0.0),
-    );
-    let roll = (2.0 * (qw * qx + qy * qz)).atan2(1.0 - 2.0 * (qx * qx + qy * qy));
-    let pitch = (2.0 * (qw * qy - qz * qx)).clamp(-1.0, 1.0).asin();
-    ep.tipped = roll.abs().max(pitch.abs());
+    ep.tipped = tipped_by(&end);
     ep.distance = end.first().copied().unwrap_or(0.0) - start.first().copied().unwrap_or(0.0);
     let (dx, dy) = (
         end.first().copied().unwrap_or(0.0) - start.first().copied().unwrap_or(0.0),
@@ -574,6 +603,24 @@ pub fn episode_with(
     // for an episode that fell over in the first tenth of a second.
     ep.gait = trace.as_ref().and_then(crate::gait::analyse);
     Ok(ep)
+}
+
+/// How far from upright a root pose is, in radians: the larger of its roll and
+/// its pitch, from MuJoCo's `(w, x, y, z)` quaternion order.
+///
+/// Yaw is deliberately excluded: an animal that has TURNED is not an animal
+/// that has fallen over, and folding yaw in here would terminate every episode
+/// in which the creature changed direction.
+pub fn tipped_by(qpos: &[f64]) -> f64 {
+    let (w, x, y, z) = (
+        qpos.get(3).copied().unwrap_or(1.0),
+        qpos.get(4).copied().unwrap_or(0.0),
+        qpos.get(5).copied().unwrap_or(0.0),
+        qpos.get(6).copied().unwrap_or(0.0),
+    );
+    let roll = (2.0 * (w * x + y * z)).atan2(1.0 - 2.0 * (x * x + y * y));
+    let pitch = (2.0 * (w * y - z * x)).clamp(-1.0, 1.0).asin();
+    roll.abs().max(pitch.abs())
 }
 
 /// A small deterministic PRNG for the shuffled-reward control.
