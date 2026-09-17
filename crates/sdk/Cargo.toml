@@ -32,7 +32,12 @@ full = ["image", "creature", "forecast", "text", "vision", "audio", "decision"]
 
 # --- surfaces: one per brain_arch::Domain the SDK has a public type for.
 #     A surface is the only thing a consumer names.
-image = ["resolve", "dep:brain-flux2", "dep:brain-s3dit", "dep:brain-imaging"]
+# `brain::ImagePipeline` (flux2/s3dit text-to-image) and `brain::
+# UpscalePipeline` (RRDBNet super-resolution) - two public types under one
+# feature, since both architectures are registered `Domain::Image` and both
+# return `brain::Image`. Generation and upscaling are different capabilities
+# ("one pipeline type per capability"), not two backends of one pipeline.
+image = ["resolve", "dep:brain-flux2", "dep:brain-s3dit", "dep:brain-imaging", "dep:brain-rrdbnet"]
 # `brain::ForecastPipeline`. Covers kronos and timesfm3 - the two forecasting
 # architectures with a real model-store `ArchSpec` today
 # (`kronos::spec::KronosSpec`, `timesfm3::spec::Timesfm3Spec`); chronos2 and
@@ -108,6 +113,7 @@ brain-mujoco = { workspace = true, optional = true }
 brain-neuro = { workspace = true, optional = true }
 brain-qwen3 = { workspace = true, optional = true }
 brain-qwen3asr = { workspace = true, optional = true }
+brain-rrdbnet = { workspace = true, optional = true }
 brain-timesfm3 = { workspace = true, optional = true }
 brain-s3dit = { workspace = true, optional = true }
 brain-wm-display = { workspace = true, optional = true }

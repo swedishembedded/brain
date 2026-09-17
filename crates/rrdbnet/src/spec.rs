@@ -58,7 +58,14 @@ impl ArchSpec for RrdbnetSpec {
     fn classify(&self, records: &[ArtifactRecord], _inventory_root: &Path) -> Vec<(usize, String, Confidence)> {
         let mut out = Vec::new();
         for (idx, rec) in records.iter().enumerate() {
-            if !rec.usable() || rec.kind != ArtifactKind::Opaque {
+            // A real `.pt`/`.pth` archive the scanner could actually read the
+            // pickle/zip container of classifies `Torch`, not `Opaque` --
+            // `Opaque` here NEVER matches a real checkpoint scanned by
+            // `brain_modelstore::inventory::scan` (only this spec's own
+            // hand-built unit-test records used to), so this was a silent,
+            // total dead end for real resolution (`cosyvoice`/`wan`'s own
+            // specs already check `Torch` correctly, for the same file kind).
+            if !rec.usable() || rec.kind != ArtifactKind::Torch {
                 continue;
             }
             if !matches!(rec.path.extension().and_then(|e| e.to_str()), Some("pt" | "pth")) {
@@ -130,7 +137,7 @@ mod tests {
         let path = dir.join("schwgHao").join("RealESRGAN_x4plus.pth");
         write_rrdb_pt(&path, 8, 4, 2, 2);
 
-        let records = vec![complete(path, ArtifactKind::Opaque)];
+        let records = vec![complete(path, ArtifactKind::Torch)];
         let out = RrdbnetSpec.classify(&records, dir.as_path());
         assert_eq!(out, vec![(0, "weights".to_string(), Confidence::Derived)], "{out:?}");
     }
@@ -145,7 +152,7 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, b"not a real torch.save archive").unwrap();
 
-        let records = vec![complete(path, ArtifactKind::Opaque)];
+        let records = vec![complete(path, ArtifactKind::Torch)];
         let out = RrdbnetSpec.classify(&records, dir.as_path());
         assert_eq!(out, Vec::new(), "{out:?}");
     }
@@ -156,7 +163,7 @@ mod tests {
         let path = dir.join("schwgHao").join("RealESRGAN_x4plus.pth");
         write_rrdb_pt(&path, 8, 4, 2, 2);
 
-        let records = vec![complete(path.clone(), ArtifactKind::Opaque)];
+        let records = vec![complete(path.clone(), ArtifactKind::Torch)];
         let spec = RrdbnetSpec;
         let specs: Vec<&dyn ArchSpec> = vec![&spec];
         let out = resolve("rrdbnet", &records, &specs, &BTreeMap::new());
@@ -177,10 +184,32 @@ mod tests {
         let b = dir.join("some-mirror").join("RealESRGAN_x4plus-copy.pth");
         write_rrdb_pt(&b, 8, 4, 2, 2);
 
-        let records = vec![complete(a, ArtifactKind::Opaque), complete(b, ArtifactKind::Opaque)];
+        let records = vec![complete(a, ArtifactKind::Torch), complete(b, ArtifactKind::Torch)];
         let spec = RrdbnetSpec;
         let specs: Vec<&dyn ArchSpec> = vec![&spec];
         let out = resolve("rrdbnet", &records, &specs, &BTreeMap::new());
         assert!(matches!(out, Resolution::Ambiguous(_)), "{out:?}");
+    }
+
+    /// Regression pin for the bug every other test in this file could not
+    /// have caught: they all hand-build an `ArtifactRecord` with an
+    /// explicitly chosen `kind`, so a `classify` that checked the WRONG
+    /// `ArtifactKind` still passed every one of them. This test goes through
+    /// the REAL scanner (`brain_modelstore::inventory::scan`) instead, the
+    /// same one `loader::resolve_structured` uses in production - a real
+    /// `.pth` file must classify as `weights` end to end, with no
+    /// hand-picked `ArtifactKind` anywhere in this test.
+    #[test]
+    fn classify_recognizes_a_real_pth_file_scanned_by_the_real_inventory_scanner() {
+        let dir = tmp("real-scanner");
+        let path = dir.join("schwgHao").join("RealESRGAN_x4plus.pth");
+        write_rrdb_pt(&path, 8, 4, 2, 2);
+
+        let records = brain_modelstore::inventory::scan(&dir);
+        assert_eq!(records.len(), 1, "{records:?}");
+        assert_eq!(records[0].kind, ArtifactKind::Torch, "a real .pth scans as Torch, not Opaque - this is exactly what classify() must check");
+
+        let out = RrdbnetSpec.classify(&records, dir.as_path());
+        assert_eq!(out, vec![(0, "weights".to_string(), Confidence::Derived)], "{out:?}");
     }
 }

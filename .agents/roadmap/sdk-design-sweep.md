@@ -26,7 +26,7 @@ all - the fly/flybody/connectome stack is unregistered).
 | Text decoders | 8 | 6 | none | fragmented: 6 model-specific `*_cli.rs` + `resident_llm.rs` | yes (qwen3) |
 | Multimodal/VLM/OCR | 9 | 8 | none | `omni_cli.rs`, `document_study_cli.rs` + 5 `resident_*.rs` | yes (qwen3vl) |
 | Image generation | 6 | 6 | **YES - `ImagePipeline`** (flux2+s3dit only) | `flux2_cli.rs` + `s3dit::caps::ZAction` | yes (flux2, s3dit) |
-| Restoration/upscaling/VAE | 5 | 5 | none | no dedicated CLI; `resident_restore/upscale/supir.rs` | no |
+| Restoration/upscaling/VAE | 5 | 5 | **PARTIAL - `UpscalePipeline`** (RRDBNet only; CodeFormer/SUPIR/VQGAN deferred, see Phase 2.5) | no dedicated CLI; `resident_restore/upscale/supir.rs` | no |
 | Video generation | 2 | 2 | none | `wan_cli.rs`, `ltxv_cli.rs` | yes (wan) |
 | ASR | 2 | 2 | none | **no CLI at all** - `resident_asr.rs` only | no |
 | TTS/music/speech codec | 7 | 3 | none | `tts_cli.rs` + `tts_serve.rs` | no |
@@ -60,11 +60,14 @@ when a milestone actually starts one):
 4. **ASR `TranscribePipeline`** - same "no CLI to lift from" gap as
    embedding, plus Nemotron's streaming path needs the progress/cancel
    design (rule 8) done properly, not stubbed.
-5. Vision/detection, restoration/upscaling (natural `ImagePipeline` siblings
+5. Restoration/upscaling, vision/detection (natural `ImagePipeline` siblings
    returning the same `Image` domain type), TTS/music, video generation, then
    3D/world models last - `SplatPipeline` is closer to `Creature` (stateful,
    steppable) than to `ImagePipeline`, and world models have no settled
-   domain object yet.
+   domain object yet. **Started**: `UpscalePipeline` (RRDBNet), Phase 2.5.
+   Restoration (CodeFormer, needs a new `spec.rs` first) and vision/detection
+   (YOLOv8 boxes / SAM2 masks - a different domain object than `Image`, not a
+   sibling of this pipeline) are the next candidates within this bucket.
 
 ## `crates/sdk` self-audit findings
 
@@ -354,6 +357,13 @@ including the `samples/imagegen/*` samples that link `crates/sdk` directly.
       regression runs across `brain-flux2`/`brain-cli`/`brain` (sdk) and a
       whole-workspace build - see that section for exact counts.
 - [ ] **Phase 2** - new pipelines, in the priority order above: Forecast, Text, Embedding, ASR, then the rest. Each gets its own sub-roadmap section here (or its own file, linked from here) when it starts, written against the full `sdk-design.md` checklist from day one - including an end-to-end test, learning from M10 rather than repeating the `flux2_cli.rs` duplication gap a second time. Design each pipeline's progress/cancellation surface (rule 8) toward the `run.start()/subscribe()/cancel()/result()` shape `.agents/roadmap/orchestration-hsm.md` proposes, rather than reinventing M5's synchronous `generate_with_progress(cancel, on_progress)` a second time - M5's shape stays the right SIMPLE default, but a new pipeline's ADVANCED tier should point at where this is heading.
+  - [x] **Phase 2.1** - `ForecastPipeline` (kronos, timesfm3).
+  - [x] **Phase 2.2** - `TextGenerationPipeline` (qwen3 only).
+  - [x] **Phase 2.3** - `EmbeddingPipeline` (CLIP text towers only).
+  - [x] **Phase 2.4** - `TranscribePipeline` (qwen3-asr only).
+  - [x] **Phase 2.5** - `UpscalePipeline` (RRDBNet only) - see its own section above for the real `RrdbnetSpec` bug this one found and fixed, and the new `Image::open`/`Image::from_rgb8` public API it needed.
+  - [ ] Next within the restoration/upscaling bucket: `CodeFormerSpec` (a real prerequisite, see Phase 2.5's "Not done" list), then a restoration pipeline once it exists. SUPIR and VQGAN stay deferred with the reasons already on record.
+  - [ ] Still entirely uncovered domain buckets: vision/detection (YOLOv8/SAM2 - a different domain object than `Image`), TTS/music, video generation, 3D/world models. See the domain inventory table.
 
 ### Phase 2.1 - `ForecastPipeline` (done)
 
@@ -575,6 +585,107 @@ panic.
 above); CLI migration (there is no dedicated ASR CLI file at all to migrate,
 only `resident_asr.rs` - the same smaller, contained gap `EmbeddingPipeline`
 already noted for CLIP).
+
+### Phase 2.5 - `UpscalePipeline` (done, scoped to RRDBNet) - a real bug found while building it, and a new public `Image::open`/`Image::from_rgb8`
+
+Covers **RRDBNet (Real-ESRGAN's generator) only**, resolved through
+`loader::resolve_structured` against `rrdbnet::spec::RrdbnetSpec`'s one
+`"weights"` role - the first pipeline in this family scoped to the
+"restoration/upscaling" domain bucket, and a deliberate SEPARATE public type
+from `ImagePipeline` rather than a third backend inside it: generation and
+upscaling are different capabilities (rule 2), even though RRDBNet's
+`brain_arch` row is registered the same `Domain::Image` flux2/s3dit are, so
+`UpscalePipeline` lives under the SAME `image` Cargo feature as
+`ImagePipeline` rather than getting its own (mirroring how `EmbeddingPipeline`
+joined the `vision` feature in Phase 2.3 rather than inventing a new one).
+
+**A real, independent bug was found and fixed while testing this pipeline, in
+`crates/rrdbnet` itself, not in `crates/sdk`** - the third time in a row this
+campaign's own fixture discipline has done this (qwen3asr's import panic in
+Phase 2.4; before that, the flux2 precision bug M10 fixed). `rrdbnet::spec::
+RrdbnetSpec::classify` checked `rec.kind != ArtifactKind::Opaque`, but
+`brain_modelstore::inventory::scan` classifies a real `.pt`/`.pth` archive as
+`ArtifactKind::Torch` (confirmed correct in `cosyvoice`/`wan`'s own specs,
+which both check `Torch` for the same file kind) - so `RrdbnetSpec` had NEVER
+successfully classified a real, scanner-produced checkpoint; every one of its
+own pre-existing unit tests passed anyway because they all hand-build an
+`ArtifactRecord` with an explicitly chosen `kind: ArtifactKind::Opaque`,
+never going through the real scanner. This means `brain rrdbnet upscale`/
+`brain do rrdbnet upscale` (the resolver-migrated CLI path) could never
+actually resolve a real installed RealESRGAN checkpoint either - not a
+theoretical gap, a live one. Fixed by changing the one `!=` comparison to
+check `Torch`, updating that spec's own tests to match reality, and adding a
+new regression test that classifies a fixture through the REAL
+`brain_modelstore::inventory::scan` rather than a hand-built record, so this
+exact "the check quietly diverged from the real scanner's own output" class
+of bug cannot recur silently a second time (`crates/rrdbnet/src/spec.rs`'s
+`classify_recognizes_a_real_pth_file_scanned_by_the_real_inventory_scanner`).
+
+**`crates/sdk::Image` gained two new public methods this milestone forced
+into existence**: before `UpscalePipeline`, every `Image` was a pipeline
+OUTPUT (`ImagePipeline::generate` produces one; nothing ever took one as
+input), so `Image::from_rgb8`/`from_hwc_unit` were `pub(crate)` and there was
+no way at all - not even privately - to read one back off disk. A pipeline
+whose task takes an `Image` as INPUT needs both: `Image::open(path)` (new,
+public, delegates to the already-existing `imaging::load`) for a caller
+reading a file, and `Image::from_rgb8` promoted from `pub(crate)` to `pub`
+for a caller who already has decoded pixels in memory. `Image::to_hwc_unit`
+(new, `pub(crate)`) is the float-HWC counterpart `UpscalePipeline::upscale`
+itself needs to hand pixels to `rrdbnet::caps::Upscaler`. All four are
+covered by round-trip unit tests in `crates/sdk/src/image.rs`.
+
+**This is the pipeline family's FIRST real end-to-end
+`from_pretrained -> task call -> inspect the domain result -> save` test that
+does not have to stop at a clean construction error** (`.agents/rules/
+sdk-design.md` rule 14's aspiration, unmet by every prior pipeline in this
+crate - see `tests/image_pipeline.rs`'s own doc for why flux2/s3dit cannot).
+RRDBNet's shape is DERIVED from the checkpoint rather than hardcoded to one
+multi-billion-parameter release, and `RrdbConfig::param_list()` already names
+every tensor a given config's forward pass reads with an exact-match
+contract (`crates/rrdbnet/src/import.rs::validate`) - so a fixture at TINY
+dimensions (`num_feat=8`, `num_grow_ch=4`, 2 blocks, `x2`), built from that
+same `param_list()` rather than a hand-picked subset, is a genuinely
+complete, genuinely buildable checkpoint. All zeros, so the output is not a
+meaningful image, but every kernel dispatch, buffer size and layout
+permutation on the real path runs for real, including the tiled code path
+(`UpscaleOptions::tile`, a second real forward pass through different code
+over the same checkpoint) - `crates/sdk/tests/upscale_pipeline.rs`.
+
+**Not done, tracked for later, all within this same domain bucket**:
+
+- **CodeFormer** (face restoration, `restore_face` action) - clean
+  `image(+w fidelity dial) -> image` shape at a FIXED 512² geometry, but has
+  NO `spec.rs`/`ArchSpec` at all today (confirmed: its `Cargo.toml` does not
+  even depend on `brain-modelstore`), so there is nothing for
+  `loader::resolve_structured` to resolve against - real upstream work,
+  the same class of prerequisite Phase 2.2 named for `qwen3::spec::
+  Qwen3Spec`. `RrdbnetSpec` is the template (derive real tensor shapes,
+  `Confidence::Derived`), but CodeFormer's config (`CodeFormerConfig::
+  codeformer()`) is a single hardcoded variant with no `from_tensors` - a
+  future spec would classify by tensor NAME presence, not shape-derive a
+  variant the way RRDBNet's does.
+- **SUPIR** (heavier restoration) - deferred for three independent reasons:
+  no `spec.rs`, and by its own `brain_arch` row's comment, deliberately no
+  `default_ref`/`weights_env` at all (the SUPIR license is non-commercial
+  only); its call shape is genuinely heavier than "image in, image out"
+  (model-determined output size, an optional text-caption input that can
+  cross-dispatch to a SECOND model over an injected `capability::Registry`,
+  a 9-parameter 50-step cancellable/streaming sampler); and its backbone (a
+  frozen ~14GB SDXL checkpoint) puts real construction in the exact same
+  "fixture infeasible, prove resolve->dispatch->clean-error" bucket
+  `ImagePipeline`'s flux2/s3dit backends are already in - covering it would
+  regress this pipeline family's first genuine end-to-end success back to
+  that weaker bar immediately.
+- **VQGAN** - deferred because its real call shape (`encode`/`decode`, a
+  discrete-code `Media::Bytes` intermediate travelling BETWEEN two separate
+  actions, deliberately no single "reconstruct" action per that crate's own
+  module doc) does not fit a unified `restore(image) -> Image` signature at
+  all - the same "shape mismatch within one domain bucket" reasoning Phase
+  2.3 already used to defer ArcFace's `embed_image`. Also has no `spec.rs`.
+- CLI migration: `brain rrdbnet upscale`/`brain do rrdbnet upscale` still
+  builds its own `Session` inline (`resident_upscale.rs`) rather than
+  calling `UpscalePipeline` - same class of gap every other pipeline in this
+  crate still has.
 
 Findings 8, 11, 14, 18-20, 23-24 are real but not yet milestoned - pick them
 up opportunistically when touching the same file for another reason, or spin

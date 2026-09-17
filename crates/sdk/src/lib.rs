@@ -32,7 +32,7 @@
 //!
 //! | feature | what it adds |
 //! |---|---|
-//! | `image` | [`ImagePipeline`], [`Image`] -- text-to-image and image editing |
+//! | `image` | [`ImagePipeline`], [`Image`] -- text-to-image and image editing; [`UpscalePipeline`] -- super-resolution |
 //! | `creature` | [`Creature`], [`View`] -- a connectome running a body, and a window onto it |
 //! | `forecast` | [`ForecastPipeline`] -- time-series forecasting (kronos, timesfm3) |
 //! | `text` | [`TextGenerationPipeline`] -- text generation (qwen3, from a local checkpoint path) |
@@ -108,6 +108,8 @@ pub use flow::{EvalReport, Flow, Stages, TrainReport};
 
 #[cfg(feature = "text")]
 mod text;
+#[cfg(feature = "image")]
+mod upscale;
 #[cfg(feature = "creature")]
 mod view;
 
@@ -145,6 +147,8 @@ pub use image::Image;
 pub use pipeline::{ImageGenerationOptions, ImagePipeline, ImagePipelineBuilder};
 #[cfg(feature = "text")]
 pub use text::{GeneratedText, TextGenerationOptions, TextGenerationPipeline, TextGenerationPipelineBuilder};
+#[cfg(feature = "image")]
+pub use upscale::{UpscaleOptions, UpscalePipeline, UpscalePipelineBuilder};
 #[cfg(feature = "creature")]
 pub use view::{Steering, View};
 

@@ -3,10 +3,11 @@
 The rules this crate (and every future pipeline/CLI/Python surface) is held to
 are `.agents/rules/sdk-design.md`. Several "not yet done" items below are that
 document's own review checklist failing today, tracked here rather than
-re-stated there: no `TextPipeline`/`EmbeddingPipeline`/`AutoPipeline` (rule 2),
-the CLI building its own `flux2::Pipeline`/`HotPipeline` instead of calling
-`ImagePipeline` (rule 10), and `brain-py` driving a subprocess instead of a
-direct binding (rule 10).
+re-stated there: no `AutoPipeline` and no multi-architecture dispatch on most
+of the pipelines that DO exist (rule 2 - see `.agents/roadmap/
+sdk-design-sweep.md` for the per-pipeline scope), the CLI building its own
+`flux2::Pipeline`/`HotPipeline` instead of calling `ImagePipeline` (rule 10),
+and `brain-py` driving a subprocess instead of a direct binding (rule 10).
 
 crates/sdk (package `brain`, the deliberate sole exception to this workspace's
 `brain-<short>` naming convention) is brain's public embeddable SDK facade:
@@ -55,11 +56,15 @@ for why.
       `ImagePipeline::load_lora` to resolve a store reference against --
       only a literal filesystem path works today (`adapter_source_path`'s
       gate).
-- [ ] TextPipeline/EmbeddingPipeline: not built. `brain`'s public surface
-      covers image generation (`ImagePipeline`) and one embodied simulation
-      (`Creature`); there is no text-generation or embedding counterpart to
-      `ImagePipeline` anywhere in `crates/sdk`. Full domain-by-domain backlog
-      and priority order: `.agents/roadmap/sdk-design-sweep.md`.
+- [x] TextGenerationPipeline/EmbeddingPipeline/TranscribePipeline/
+      ForecastPipeline/UpscalePipeline: built (Phase 2.1-2.5 - see
+      `.agents/roadmap/sdk-design-sweep.md`, the live tracker for this line
+      of work; this bullet was stale until fixed in the UpscalePipeline
+      milestone that also added the fifth). Scoped to one architecture (or
+      two, for Image/Forecast) each, not the full multi-architecture
+      dispatch rule 2 asks for long-term - see that document's own
+      "Not done, tracked for later" note per pipeline, and the domain
+      inventory table for what has NO pipeline yet.
 - [ ] The semantic Dataset layer: no file-backed dataset loader exists for
       any training objective this SDK could eventually expose. DPO is the
       concrete example: `crates/rl/src/objective/dpo.rs`'s
