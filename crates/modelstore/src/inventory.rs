@@ -349,9 +349,24 @@ const MAX_COMPONENT_DEPTH: u32 = 3;
 /// otherwise walks its files and recurses into subdirectories up to
 /// [`MAX_COMPONENT_DEPTH`].
 fn walk_repo_dir(dir: &Path, scan_root: &Path, cache: &BTreeMap<PathBuf, CacheEntry>, probed: &mut dyn FnMut(&Path), out: &mut Vec<ArtifactRecord>, depth: u32) {
-    if let Some(mut records) = compound_records(dir, scan_root, cache, probed) {
+    // A `brain.manifest.json` describes this directory's brain-native ROLES.
+    // It does not stop the directory from ALSO being an ordinary HF
+    // checkpoint: `brain pull` writes that manifest beside the very
+    // `config.json` + `model.safetensors` pair every architecture's
+    // `classify` recognises, and those all gate on `ArtifactKind::HfDir`
+    // before reading the declared architecture. Emitting only the compound
+    // records therefore made a freshly pulled checkpoint invisible to its
+    // own architecture -- `brain nemotronasr transcribe` and `brain fastvlm
+    // caption` both failed with "no artifact classifies as weights" on a
+    // checkpoint that had just been fetched successfully.
+    //
+    // The two descriptions are independent and both are emitted. What the
+    // manifest still suppresses is the generic per-file walk below, which it
+    // fully replaces.
+    let compound = compound_records(dir, scan_root, cache, probed);
+    let is_compound = compound.is_some();
+    if let Some(mut records) = compound {
         out.append(&mut records);
-        return;
     }
     if let Some(record) = hfdir_record(dir, scan_root, cache, probed) {
         out.push(record);
@@ -383,6 +398,9 @@ fn walk_repo_dir(dir: &Path, scan_root: &Path, cache: &BTreeMap<PathBuf, CacheEn
                 push_file_record(&path, scan_root, ArtifactKind::TokenizerJson, cache, probed, out);
             }
         }
+        return;
+    }
+    if is_compound {
         return;
     }
     if depth > MAX_COMPONENT_DEPTH {
@@ -878,9 +896,12 @@ mod tests {
         let root = scratch_root("compound-manifest");
         let dir = root.join("Qwen").join("Qwen3-TTS-12Hz-0.6B-Base");
         std::fs::create_dir_all(dir.join("brain_tts")).unwrap();
-        // "ckpt" role's own dir also looks HF-checkpoint-shaped (real
-        // qwen3tts checkpoints do) - the manifest must still win over
-        // `hfdir_record`'s collapse, not merely coexist with it.
+        // A bare `config.json` with NO top-level shard set beside it: this
+        // is not an HF checkpoint by `hfdir_record`'s definition (which
+        // requires an index or a `model*.safetensors`), so no `HfDir` record
+        // exists for it to begin with. A directory that IS shaped that way
+        // gets both descriptions -- see
+        // `a_pulled_hf_checkpoint_is_both_compound_and_hfdir`.
         std::fs::write(dir.join("config.json"), b"{}").unwrap();
         tiny_safetensors(&dir.join("brain_tts").join("talker.safetensors"));
         let manifest = crate::CompoundManifest {
@@ -896,9 +917,47 @@ mod tests {
         assert!(compound.iter().any(|r| r.path == dir), "no record for the ckpt role's directory: {found:?}");
         assert!(compound.iter().any(|r| r.path == dir.join("brain_tts")), "no record for the weights_dir role's directory: {found:?}");
         assert!(compound.iter().all(|r| r.usable()), "{found:?}");
-        // The manifest fully describes this directory - it must not ALSO
-        // collapse to a separate HfDir record for the same path.
+        // Nothing here is HF-checkpoint-shaped, so the walk yields the
+        // manifest's roles and nothing else.
         assert!(found.iter().all(|r| r.kind != ArtifactKind::HfDir), "{found:?}");
+    }
+
+    /// The shape `brain pull` leaves behind for an ordinary single-file HF
+    /// checkpoint (nvidia/nemotron-3.5-asr-streaming-0.6b, apple/FastVLM-0.5B,
+    /// and every other arch whose recipe declares `roles: {"weights": "."}`):
+    /// a `brain.manifest.json` sitting in a directory that is ALSO a complete
+    /// HF checkpoint of its own, `config.json` and `model.safetensors` both
+    /// at top level.
+    ///
+    /// The manifest must not hide that. Every arch spec's `classify` gates on
+    /// `ArtifactKind::HfDir` before reading `config.json` to check the
+    /// declared architecture, so a directory that only ever produced
+    /// `Compound` records was invisible to its own architecture: `brain
+    /// nemotronasr transcribe` and `brain fastvlm caption` both failed with
+    /// "no artifact classifies as weights for arch ...", on a checkpoint
+    /// `brain pull` had just fetched successfully.
+    #[test]
+    fn a_pulled_hf_checkpoint_is_both_compound_and_hfdir() {
+        let root = scratch_root("compound-and-hfdir");
+        let dir = root.join("nvidia").join("nemotron-3.5-asr-streaming-0.6b");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.json"), br#"{"architectures":["Nemotron3_5AsrForRNNT"]}"#).unwrap();
+        tiny_safetensors(&dir.join("model.safetensors"));
+        let manifest = crate::CompoundManifest {
+            id: "nvidia/nemotron-3.5-asr-streaming-0.6b".to_string(),
+            family: "nemotronasr".to_string(),
+            roles: BTreeMap::from([("weights".to_string(), ".".to_string())]),
+        };
+        std::fs::write(dir.join(crate::MANIFEST_FILE), serde_json::to_vec(&manifest).unwrap()).unwrap();
+
+        let found = scan(&root);
+        assert!(
+            found.iter().any(|r| r.kind == ArtifactKind::Compound && r.path == dir),
+            "the manifest's own role record must survive: {found:?}"
+        );
+        let hfdir: Vec<&ArtifactRecord> = found.iter().filter(|r| r.kind == ArtifactKind::HfDir && r.path == dir).collect();
+        assert_eq!(hfdir.len(), 1, "a pulled HF checkpoint must still be classifiable by its arch: {found:?}");
+        assert!(hfdir[0].usable(), "{found:?}");
     }
 
     #[test]
