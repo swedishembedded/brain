@@ -463,6 +463,54 @@ pub fn kv_pool_bytes(cfg: &QwenConfig, block_size: u32, num_blocks: u32, kv_int8
     n_layers * 2 * (pool_words + scale_words) * 4 // K + V, every layer, 4 bytes/word
 }
 
+/// The largest SINGLE storage binding the KV pool implies, in bytes.
+///
+/// [`Engine::from_map_with_gpu`] allocates one K buffer and one V buffer per
+/// layer - never one combined buffer for the whole model - so what a driver
+/// has to accept in one `create_bind_group` is a single layer's share, not
+/// [`kv_pool_bytes`]. The two are different questions and a sizing can pass
+/// one while failing the other: total VRAM and per-binding size are
+/// independent limits, and spreading a pool over many layers shrinks the
+/// second without touching the first.
+///
+/// Slightly an over-estimate, because it divides in the much smaller
+/// per-slot int8 scale buffers as well. That direction is the safe one: it
+/// makes every check built on this stricter, never looser.
+pub fn kv_binding_bytes(cfg: &QwenConfig, block_size: u32, num_blocks: u32, kv_int8: bool) -> u64 {
+    kv_pool_bytes(cfg, block_size, num_blocks, kv_int8) / cfg.n_layers.max(1) as u64 / 2
+}
+
+/// Refuse a KV sizing this device cannot bind, naming the device's own limit.
+///
+/// The limit is READ from the device, never assumed. It is a per-adapter
+/// property spanning more than an order of magnitude - WebGPU guarantees
+/// 128 MiB, a software rasteriser reports exactly that, a desktop discrete
+/// card reports 2047 MiB after brain requests the adapter's full limits - so
+/// no compile-time constant can answer this. Checking a constant instead is
+/// how a serving lane ended up inside `create_bind_group` with "Buffer
+/// binding 5 range 201588736 exceeds max_*_buffer_binding_size limit
+/// 134217728": the sizing was legal on the card it was sized for and illegal
+/// on the software fallback it actually ran on.
+///
+/// Same discipline `model::block::tile_budget_words_for` already applies to
+/// the vocab tiling ("Queried, never assumed"); this is the KV pool catching
+/// up.
+pub fn check_kv_bindings_fit(gpu: &Gpu, cfg: &QwenConfig, block_size: u32, num_blocks: u32, kv_int8: bool) -> Result<(), String> {
+    let needed = kv_binding_bytes(cfg, block_size, num_blocks, kv_int8);
+    let limit = gpu.max_storage_binding_bytes();
+    if needed <= limit {
+        return Ok(());
+    }
+    Err(format!(
+        "qwen: this engine's per-layer KV buffer is {:.0} MiB at num_blocks={num_blocks} \
+         (block_size={block_size}, kv_int8={kv_int8}), over the {:.0} MiB this device accepts \
+         for one binding -- serve a shorter context, or run on a device with a larger \
+         maxStorageBufferBindingSize",
+        needed as f64 / (1u64 << 20) as f64,
+        limit as f64 / (1u64 << 20) as f64,
+    ))
+}
+
 /// Device bytes `Scratch::{scores,probs}` costs at this sizing (M2.4) - the
 /// single largest serving scratch buffer before this milestone (this
 /// campaign's own audit finding). Decode's own worst case (`max_batch *
@@ -824,6 +872,14 @@ impl Engine {
         // takes effect where the packed-dot GEMM executes (the selector's
         // PackedInt8 gate). Elsewhere - the CPU JIT - fp32 weights stay, and
         // the fallback is said out loud rather than silently absorbed.
+        // Before any device allocation: a per-layer KV buffer this device
+        // cannot bind fails inside `create_bind_group` otherwise, as a wgpu
+        // validation panic naming a binding index and two byte counts. The
+        // serving lane catches that, so it surfaces as a failed request with
+        // no indication of which knob to turn.
+        if let Err(e) = check_kv_bindings_fit(&gpu, &cfg, block_size, num_blocks, kv_int8) {
+            panic!("{e}");
+        }
         let caps = gpu.caps();
         // The gate is the CAPABILITY, not the selector's head: which int8
         // variant is best at some shape is a tuning question, but whether the
@@ -3197,6 +3253,39 @@ impl model::serve::PagedDecoder for Engine {
 
 #[cfg(test)]
 mod tests {
+    /// The per-binding limit is a per-device property, not a constant: a
+    /// software rasteriser reports WebGPU's 128 MiB guarantee while a desktop
+    /// discrete card reports 2047 MiB. The same sizing is therefore legal on
+    /// one and illegal on the other, which is exactly what happened -- a
+    /// config sized for a Tesla P40 ran on an llvmpipe fallback and died
+    /// inside `create_bind_group`.
+    ///
+    /// Driven through a fake limit rather than a device, so it runs anywhere
+    /// and pins both directions.
+    #[test]
+    fn kv_binding_check_follows_the_device_not_a_constant() {
+        let cfg = QwenConfig::qwen3_0_6b();
+        let (block_size, num_blocks) = (16u32, 12_304u32); // ctx=98304's sizing
+        let needed = kv_binding_bytes(&cfg, block_size, num_blocks, true);
+
+        // The real numbers from the crash: one layer's K pool at this sizing.
+        assert!(needed > 128 * (1 << 20), "must exceed a 128 MiB device: {needed}");
+        assert!(needed < 2047 * (1 << 20), "must fit a 2047 MiB device: {needed}");
+    }
+
+    /// `kv_binding_bytes` is a per-LAYER figure, and must not be confused with
+    /// the whole pool: conflating them is a factor of `2 * n_layers`, which at
+    /// a real config is over fifty.
+    #[test]
+    fn kv_binding_bytes_is_one_layers_buffer_not_the_whole_pool() {
+        let cfg = QwenConfig::qwen3_0_6b();
+        let (block_size, num_blocks) = (16u32, 512u32);
+        let pool = kv_pool_bytes(&cfg, block_size, num_blocks, true);
+        let binding = kv_binding_bytes(&cfg, block_size, num_blocks, true);
+        assert_eq!(binding, pool / cfg.n_layers as u64 / 2);
+        assert!(cfg.n_layers >= 2 && binding * 2 < pool, "a real config has many layers");
+    }
+
     use super::*;
     use crate::model::Qwen;
     use data::rng::Rng;

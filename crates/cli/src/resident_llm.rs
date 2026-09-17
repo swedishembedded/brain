@@ -456,12 +456,9 @@ struct PoolProfile {
     scratch_bytes: u64,
     /// The largest single storage binding this sizing implies.
     ///
-    /// `Engine::from_map_with_gpu` allocates one K and one V buffer PER LAYER
-    /// (never one combined buffer), so the worst KV binding is
-    /// `kv_bytes / n_layers / 2` - slightly an over-estimate, since it also
-    /// divides in the much smaller per-slot int8 scale buffers, which only
-    /// makes every check stricter. `scores`/`probs` are each exactly half of
-    /// the scratch total.
+    /// The KV term is `qwen3::serve::kv_binding_bytes` (that crate owns the
+    /// pool layout and its own doc explains the per-layer split);
+    /// `scores`/`probs` are each exactly half of the scratch total.
     largest_binding: u64,
 }
 
@@ -469,7 +466,11 @@ impl PoolProfile {
     fn new(cfg: &qwen3::config::QwenConfig, block_size: u32, num_blocks: u32, max_batch: u32, max_prefill: u32, cap: u32, kv_int8: bool, fused_prefill_available: bool) -> PoolProfile {
         let kv_bytes = qwen3::serve::kv_pool_bytes(cfg, block_size, num_blocks, kv_int8);
         let scratch_bytes = qwen3::serve::paged_attn_scratch_bytes(cfg, max_batch, max_prefill, cap, fused_prefill_available);
-        let per_layer_kv = kv_bytes / cfg.n_layers.max(1) as u64 / 2;
+        // The per-layer KV figure comes from `qwen3::serve`, which owns the
+        // pool layout -- the same function the engine itself checks against
+        // the real device limit, so this pre-flight and that authoritative
+        // check cannot disagree about the size of the buffer in question.
+        let per_layer_kv = qwen3::serve::kv_binding_bytes(cfg, block_size, num_blocks, kv_int8);
         PoolProfile { kv_bytes, scratch_bytes, largest_binding: per_layer_kv.max(scratch_bytes / 2) }
     }
 
