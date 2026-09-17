@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-// @what  Three-factor weight update: w <- clamp(w + eta*e*delta, w_min, w_max)
+// @what  Three-factor weight update at sited synapses: w <- clamp(w + eta*m[site]*e, lo, hi)
 // @how   one thread per synapse
 // @opt   3
 // @cpu   yes
@@ -15,16 +15,25 @@
 //
 //   w      : [nnz]  synaptic weights, updated in place
 //   e      : [nnz]  eligibility trace
-//   params : nnz, eta*delta (premultiplied), w_min, w_max
+//   site   : [nnz]  compartment modulating each synapse; 0 = does not learn
+//   m      : [c]    modulator level per compartment (`neuro_modulate`)
+//   params : nnz, eta, w_min, w_max
 //
 // Dispatch: nnz invocations.
 //
-// `eta` and the neuromodulator `delta` arrive premultiplied as one scalar
-// because that is how they are used: two uniforms that are only ever
-// multiplied together invite a call site that sets one and forgets the other.
-// A `delta` of zero therefore leaves every weight BIT-IDENTICAL rather than
-// merely close, which is what lets "reward shuffled" and "plasticity off" be
-// tested as exact no-ops instead of as small differences.
+// Every synapse being eligible is a modelling choice, and in an animal it is
+// the wrong one. A connectome is 16 million edges; the population where
+// *Drosophila* associative learning is actually known to happen is about
+// 18,000 of them. A rule that updates all of them is not a stronger version of
+// that, it is a different claim, and it is the claim that makes a search
+// stop needing the connectome. `site` is what restricts it, and compartment 0
+// is reserved so that "not plastic" is an early return rather than a small
+// update.
+//
+// A zero modulator leaves weights BIT-IDENTICAL rather than merely close,
+// because `w + eta*0*e` is exactly `w`. That is what lets "plasticity off",
+// "reward shuffled" and "unpaired control" be tested as exact no-ops instead
+// of as differences small enough to argue about.
 //
 // The clamp is not decoration. An unbounded reward-modulated rule is
 // positively unstable: a synapse that helps earn reward is strengthened,
@@ -40,19 +49,23 @@
 
 struct Params {
     nnz: u32,
-    eta_delta: f32,
+    eta: f32,
     w_min: f32,
     w_max: f32,
 };
 
 @group(0) @binding(0) var<uniform> p: Params;
-@group(0) @binding(1) var<storage, read_write> w: array<f32>;
-@group(0) @binding(2) var<storage, read>       e: array<f32>;
+@group(0) @binding(1) var<storage, read_write> w:    array<f32>;
+@group(0) @binding(2) var<storage, read>       e:    array<f32>;
+@group(0) @binding(3) var<storage, read>       site: array<u32>;
+@group(0) @binding(4) var<storage, read>       m:    array<f32>;
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>,
         @builtin(num_workgroups) nwg: vec3<u32>) {
     let k = gid.y * nwg.x * 64u + gid.x;
     if (k >= p.nnz) { return; }
-    w[k] = clamp(w[k] + p.eta_delta * e[k], p.w_min, p.w_max);
+    let c = site[k];
+    if (c == 0u) { return; }
+    w[k] = clamp(w[k] + p.eta * m[c] * e[k], p.w_min, p.w_max);
 }

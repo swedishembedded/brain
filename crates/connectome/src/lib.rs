@@ -18,11 +18,13 @@
 pub mod bridge;
 pub mod codex;
 pub mod csv;
+pub mod mushroom_body;
 
 use std::path::{Path, PathBuf};
 
 pub use bridge::{join, read_bridge, Crossing, Joined};
 pub use codex::{load, load_readers, Coverage};
+pub use mushroom_body::{Compartment, MushroomBody};
 
 /// A neurotransmitter, as published.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -339,12 +341,39 @@ impl Connectome {
     /// around five for exactly this reason. `0` or `1` keeps everything, which
     /// is the control.
     pub fn network(&self, scale: f32, size_limit: Option<f32>, min_synapses: u32) -> neuro::Csc {
+        self.network_keeping(scale, size_limit, min_synapses, &std::collections::HashSet::new())
+    }
+
+    /// The same, with `keep` exempt from the synapse floor.
+    ///
+    /// The floor exists because reconstruction assigns a great many one- and
+    /// two-synapse pairs at the resolution limit, numerous enough to dominate
+    /// a neuron's input count while carrying almost none of its drive. That
+    /// argument is sound for ordinary neuropil and it is FALSE for a pathway
+    /// that is sparse by design. In BANC, 9,483 of the 17,789 Kenyon-cell
+    /// synapses onto mushroom-body output neurons are single-synapse pairs,
+    /// and a floor of 5 deletes 79% of that pathway's synapse mass while
+    /// keeping 52% of everything else arriving at the same cells. Those
+    /// synapses are not noise: a Kenyon cell is MEANT to contribute almost
+    /// nothing on its own, the odour is carried by which two thousand of them
+    /// fire together, and applying a per-pair threshold to a population code
+    /// removes the code and leaves the cells.
+    ///
+    /// So the exemption is a statement about one pathway, made by whoever
+    /// knows which pathway it is, rather than a weaker floor everywhere.
+    pub fn network_keeping(
+        &self,
+        scale: f32,
+        size_limit: Option<f32>,
+        min_synapses: u32,
+        keep: &std::collections::HashSet<(u32, u32)>,
+    ) -> neuro::Csc {
         let mut csc = if min_synapses > 1 {
             let mut edges: Vec<(u32, u32, f32)> = Vec::new();
             for post in 0..self.csc.n as usize {
                 let (a, b) = (self.csc.indptr[post] as usize, self.csc.indptr[post + 1] as usize);
                 for k in a..b {
-                    if self.csc.w[k] >= min_synapses as f32 {
+                    if self.csc.w[k] >= min_synapses as f32 || keep.contains(&(self.csc.pre[k], post as u32)) {
                         edges.push((self.csc.pre[k], post as u32, self.csc.w[k]));
                     }
                 }

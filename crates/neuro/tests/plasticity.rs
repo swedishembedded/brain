@@ -10,7 +10,7 @@
 //! learning rate and the neuromodulator are premultiplied into one scalar, so
 //! a zero factor is an exact no-op instead of a small number.
 
-use neuro::{Csc, DynamicalSystem, LifParams, Plastic, PlasticityParams, Port, SpikingNet, KERNELS};
+use neuro::{Csc, DynamicalSystem, LifParams, Plastic, PlasticityParams, Port, Sites, SpikingNet, KERNELS};
 
 fn random_csc(n: u32, avg_degree: usize, seed: u64) -> Csc {
     let mut rng = data::rng::Lcg::new(seed);
@@ -214,4 +214,89 @@ fn cpu_and_gpu_agree_on_the_learning_path() {
     assert!(dw < 1e-4, "backends disagree on learned weights by {dw:e}");
     assert!(de < 1e-4, "backends disagree on eligibility by {de:e}");
     assert!(gw.iter().zip(&cw).any(|(a, b)| a != b || *a != 0.0), "both backends learned nothing");
+}
+
+// ---------------------------------------------------------------------------
+// Sited plasticity: which synapses may learn, and what tells them to.
+//
+// The rule above is a global one: every synapse in the animal is eligible and
+// one broadcast scalar decides whether all of them learn. That is a useful
+// instrument and it is not what a fly does. In a fly the best understood
+// learning happens at one identified population of synapses, and the third
+// factor is not an experimenter's scalar but the firing of identified
+// dopaminergic neurons into one compartment. These gate that distinction.
+// ---------------------------------------------------------------------------
+
+/// Reserved compartment 0 means "this synapse does not learn", so the mask is
+/// exact rather than a small update: a connectome is 15.9M edges and 0.1% of
+/// them are plastic, so "the rest barely moved" is not good enough to
+/// distinguish a sited rule from a global one that happens to be weak.
+#[test]
+fn only_the_sited_synapses_learn_and_every_other_weight_is_bit_identical() {
+    let (csc, mut net, drive) = active_net(192, 0x81);
+    let before = net.weights();
+
+    // Make the edges onto the first 10 neurons plastic, and nothing else.
+    let plastic: Vec<u32> = (0..csc.indptr[10]).collect();
+    assert!(plastic.len() > 20, "the fixture must have edges to make plastic");
+    let mut sites = Sites::new(csc.nnz());
+    let c = sites.compartment(&[], 1.0);
+    sites.assign(&plastic, c).unwrap();
+
+    net.enable_plasticity_at(PlasticityParams { eta: 0.5, ..Default::default() }, sites).unwrap();
+    net.drive(Port::Drive, &drive).unwrap();
+    for _ in 0..30 {
+        net.modulate(1.0);
+        net.step();
+    }
+
+    let after = net.weights();
+    let moved = plastic.iter().filter(|&&k| after[k as usize] != before[k as usize]).count();
+    assert!(moved > 10, "the sited synapses did not learn ({moved} of {} moved)", plastic.len());
+    for k in plastic.len()..after.len() {
+        assert_eq!(after[k], before[k], "edge {k} is outside every site and must be bit-identical");
+    }
+}
+
+/// The third factor arrives from named cells, and it stays in its compartment.
+///
+/// This is the property that makes "sugar" and "shock" different signals
+/// rather than the same number with a different sign: two compartments of the
+/// same network, each driven by its own neuron, one of which is silent.
+#[test]
+fn a_compartment_is_modulated_by_its_own_neurons_and_not_by_anothers() {
+    let (csc, mut net, _drive) = active_net(192, 0x82);
+    let before = net.weights();
+
+    // Two disjoint sets of synapses, each answering to one source neuron.
+    let a: Vec<u32> = (csc.indptr[20]..csc.indptr[30]).collect();
+    let b: Vec<u32> = (csc.indptr[30]..csc.indptr[40]).collect();
+    let mut sites = Sites::new(csc.nnz());
+    let ca = sites.compartment(&[0], 1.0);
+    let cb = sites.compartment(&[1], 1.0);
+    sites.assign(&a, ca).unwrap();
+    sites.assign(&b, cb).unwrap();
+
+    net.enable_plasticity_at(PlasticityParams { eta: 0.5, ..Default::default() }, sites).unwrap();
+
+    // Neuron 0 is driven hard and fires; neuron 1 is left alone and does not.
+    let mut drive = vec![0.4f32; csc.n as usize];
+    drive[0] = 40.0;
+    drive[1] = 0.0;
+    net.drive(Port::Drive, &drive).unwrap();
+    for _ in 0..30 {
+        net.step();
+    }
+
+    let m = net.modulator();
+    assert_eq!(m.len(), 3, "an inert compartment plus the two configured");
+    assert_eq!(m[0], 0.0, "compartment 0 is reserved and must never carry a modulator");
+    assert!(m[ca as usize] > 0.0, "the driven neuron's compartment saw no dopamine ({})", m[ca as usize]);
+    assert_eq!(m[cb as usize], 0.0, "the silent neuron's compartment was modulated anyway");
+
+    let after = net.weights();
+    assert!(a.iter().any(|&k| after[k as usize] != before[k as usize]), "the modulated compartment did not learn");
+    for &k in &b {
+        assert_eq!(after[k as usize], before[k as usize], "edge {k} is in an unmodulated compartment and must not move");
+    }
 }

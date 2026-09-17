@@ -712,6 +712,8 @@ pub const NCHW_NLC: &str = include_str!("../wgsl/nchw_nlc.wgsl");
 pub const NEURO_ELIG: &str = include_str!("../wgsl/neuro_elig.wgsl");
 /// `wgsl/neuro_learn.wgsl`
 pub const NEURO_LEARN: &str = include_str!("../wgsl/neuro_learn.wgsl");
+/// `wgsl/neuro_modulate.wgsl`
+pub const NEURO_MODULATE: &str = include_str!("../wgsl/neuro_modulate.wgsl");
 /// `wgsl/neuro_trace.wgsl`
 pub const NEURO_TRACE: &str = include_str!("../wgsl/neuro_trace.wgsl");
 /// `wgsl/nlc_bias_nchw.wgsl`
@@ -1353,6 +1355,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("nchw_nlc", NCHW_NLC),
     ("neuro_elig", NEURO_ELIG),
     ("neuro_learn", NEURO_LEARN),
+    ("neuro_modulate", NEURO_MODULATE),
     ("neuro_trace", NEURO_TRACE),
     ("nlc_bias_nchw", NLC_BIAS_NCHW),
     ("nlc_nchw", NLC_NCHW),

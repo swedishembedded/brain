@@ -14,7 +14,8 @@ const K_GATHER: usize = 0;
 const K_LIF: usize = 1;
 const K_TRACE: usize = 2;
 const K_ELIG: usize = 3;
-const K_LEARN: usize = 4;
+const K_MODULATE: usize = 4;
+const K_LEARN: usize = 5;
 
 /// Membrane dynamics, in the discretised form the kernel actually integrates.
 ///
@@ -216,12 +217,26 @@ pub struct SpikingNet {
 struct Plasticity {
     params: PlasticityParams,
     on: bool,
-    /// This tick's neuromodulator. Consumed by `step` and cleared, so a
-    /// reward delivered once is applied once.
+    /// This tick's neuromodulator for the host-driven compartments. Consumed
+    /// by `step` and cleared, so a reward delivered once is applied once.
     delta: f32,
+    /// Whether `delta` has been written since it was last consumed. Without
+    /// it, clearing on every tick would mean rewriting the whole modulator
+    /// buffer 500 times a second to write zeros over zeros.
+    delta_pending: bool,
     x_pre: DeviceBuffer,
     x_post: DeviceBuffer,
     elig: DeviceBuffer,
+    /// Where learning is allowed and what modulates it.
+    sites: crate::Sites,
+    /// Compartment of each edge, on the device.
+    site_of_edge: DeviceBuffer,
+    /// The compartments' source lists, CSC-style.
+    site_indptr: DeviceBuffer,
+    site_source: DeviceBuffer,
+    site_gain: DeviceBuffer,
+    /// Modulator level, one per compartment.
+    modulator: DeviceBuffer,
 }
 
 impl SpikingNet {
@@ -309,7 +324,20 @@ impl SpikingNet {
     /// eligibility buffer the size of the edge list, which is the largest
     /// array in the system.
     pub fn enable_plasticity(&mut self, params: PlasticityParams) -> Result<(), String> {
+        self.enable_plasticity_at(params, crate::Sites::everywhere(self.w0.len()))
+    }
+
+    /// Turn plasticity on only where `sites` allows it.
+    ///
+    /// The difference from [`Self::enable_plasticity`] is the whole point of
+    /// the exercise rather than an optimisation. A rule free to change every
+    /// synapse can solve a task by walking away from the measured wiring, so
+    /// a result obtained that way says nothing about the connectome. A rule
+    /// confined to one identified population, driven by identified cells,
+    /// cannot: whatever it achieves, it achieved through the graph.
+    pub fn enable_plasticity_at(&mut self, params: PlasticityParams, sites: crate::Sites) -> Result<(), String> {
         params.validate()?;
+        sites.validate(self.w0.len(), self.n)?;
         let live = BufUsage::STORAGE | BufUsage::COPY_DST | BufUsage::COPY_SRC;
         let n = self.n as usize;
         let nnz = self.w0.len();
@@ -319,8 +347,53 @@ impl SpikingNet {
         self.gpu.write_f32(&x_pre, &vec![0.0; n]);
         self.gpu.write_f32(&x_post, &vec![0.0; n]);
         self.gpu.write_f32(&elig, &vec![0.0; nnz]);
-        self.plast = Some(Plasticity { params, on: true, delta: 0.0, x_pre, x_post, elig });
+
+        let (of_edge, indptr, source, gain) = sites.parts();
+        let nc = gain.len();
+        let site_of_edge = self.gpu.buffer("neuro.site", (of_edge.len().max(1) * 4) as u64, live);
+        let site_indptr = self.gpu.buffer("neuro.site_indptr", (indptr.len().max(1) * 4) as u64, live);
+        let site_source = self.gpu.buffer("neuro.site_source", (source.len().max(1) * 4) as u64, live);
+        let site_gain = self.gpu.buffer("neuro.site_gain", (nc.max(1) * 4) as u64, live);
+        let modulator = self.gpu.buffer("neuro.modulator", (nc.max(1) * 4) as u64, live);
+        self.gpu.write(&site_of_edge, of_edge);
+        self.gpu.write(&site_indptr, indptr);
+        self.gpu.write(&site_source, if source.is_empty() { &[0u32][..] } else { source });
+        self.gpu.write_f32(&site_gain, gain);
+        self.gpu.write_f32(&modulator, &vec![0.0; nc]);
+
+        self.plast = Some(Plasticity {
+            params,
+            on: true,
+            delta: 0.0,
+            delta_pending: false,
+            x_pre,
+            x_post,
+            elig,
+            sites,
+            site_of_edge,
+            site_indptr,
+            site_source,
+            site_gain,
+            modulator,
+        });
         Ok(())
+    }
+
+    /// The modulator level of every compartment, index 0 first.
+    ///
+    /// The instrument that says a reinforcer actually reached the synapses it
+    /// was meant to reach, which is otherwise only visible as a weight change
+    /// that could have come from anywhere.
+    pub fn modulator(&self) -> Vec<f32> {
+        match &self.plast {
+            Some(pl) => self.gpu.read(&pl.modulator, pl.sites.len()),
+            None => Vec::new(),
+        }
+    }
+
+    /// Where this network is allowed to learn.
+    pub fn sites(&self) -> Option<&crate::Sites> {
+        self.plast.as_ref().map(|pl| &pl.sites)
     }
 
     /// The eligibility trace, one entry per edge. Empty when plasticity was
@@ -335,6 +408,28 @@ impl SpikingNet {
     /// The synaptic weights as they stand now.
     pub fn weights(&self) -> Vec<f32> {
         self.gpu.read(&self.w, self.w0.len())
+    }
+
+    /// Put the host's `modulate` value into every compartment it owns.
+    ///
+    /// "Owns" means a compartment with no modulatory neurons of its own: an
+    /// experimenter's reinforcer, as against dopamine the network produced.
+    /// Both kinds live in one buffer and the learning kernel cannot tell them
+    /// apart, which is deliberate - it is the same rule either way, and the
+    /// difference is only in who decided.
+    fn publish_delta(&mut self) {
+        let Some(pl) = &mut self.plast else { return };
+        if !pl.delta_pending {
+            return;
+        }
+        pl.delta_pending = false;
+        let mut level = self.gpu.read(&pl.modulator, pl.sites.len());
+        for (c, slot) in level.iter_mut().enumerate() {
+            if pl.sites.host_driven(c as u32) {
+                *slot = pl.delta;
+            }
+        }
+        self.gpu.write_f32(&pl.modulator, &level);
     }
 
     /// The learning half of a tick, appended to the forward steps.
@@ -354,14 +449,24 @@ impl SpikingNet {
             &[self.n, p.elig_decay.to_bits()],
             self.n,
         ));
+        // The third factor, computed from the network's own dopaminergic
+        // cells. Runs whether or not `on`, so that turning learning off
+        // freezes the weights without also blinding the instrument that says
+        // what the reinforcement was doing.
+        steps.push(self.gpu.step(
+            K_MODULATE,
+            &[&pl.modulator, &pl.site_indptr, &pl.site_source, &pl.site_gain, &self.spike],
+            &[pl.sites.len() as u32, pl.sites.decay.to_bits()],
+            pl.sites.len() as u32,
+        ));
         if pl.on {
-            // eta and delta travel premultiplied: a delta of 0 makes the
-            // update a bit-identical no-op rather than a small change.
-            let eta_delta = p.eta * pl.delta;
+            // A modulator of 0 makes the update bit-identical rather than
+            // small, and an edge in the inert compartment is not written at
+            // all.
             steps.push(self.gpu.step(
                 K_LEARN,
-                &[&self.w, &pl.elig],
-                &[self.w0.len() as u32, eta_delta.to_bits(), p.w_min.to_bits(), p.w_max.to_bits()],
+                &[&self.w, &pl.elig, &pl.site_of_edge, &pl.modulator],
+                &[self.w0.len() as u32, p.eta.to_bits(), p.w_min.to_bits(), p.w_max.to_bits()],
                 self.w0.len() as u32,
             ));
         }
@@ -406,9 +511,11 @@ impl SpikingNet {
         self.gpu.write_f32(&self.drive, &vec![0.0; n]);
         if let Some(pl) = &mut self.plast {
             pl.delta = 0.0;
+            pl.delta_pending = false;
             self.gpu.write_f32(&pl.x_pre, &vec![0.0; n]);
             self.gpu.write_f32(&pl.x_post, &vec![0.0; n]);
             self.gpu.write_f32(&pl.elig, &vec![0.0; self.w0.len()]);
+            self.gpu.write_f32(&pl.modulator, &vec![0.0; pl.sites.len()]);
         }
         self.tick = 0;
     }
@@ -453,9 +560,11 @@ impl DynamicalSystem for SpikingNet {
             // Traces are state, not configuration: a reset that left them
             // running would leak one episode's activity into the next.
             pl.delta = 0.0;
+            pl.delta_pending = false;
             self.gpu.write_f32(&pl.x_pre, &vec![0.0; n]);
             self.gpu.write_f32(&pl.x_post, &vec![0.0; n]);
             self.gpu.write_f32(&pl.elig, &vec![0.0; self.w0.len()]);
+            self.gpu.write_f32(&pl.modulator, &vec![0.0; pl.sites.len()]);
         }
         self.tick = 0;
     }
@@ -481,6 +590,7 @@ impl DynamicalSystem for SpikingNet {
         // LIF overwrites them, and the learning steps read what the LIF just
         // wrote. None of these may be reordered.
         let mut steps = vec![gather, lif];
+        self.publish_delta();
         self.learn_steps(&mut steps);
         self.gpu.submit(&[], &steps);
         if let Some(pl) = &mut self.plast {
@@ -569,6 +679,7 @@ impl Plastic for SpikingNet {
     fn modulate(&mut self, delta: f32) {
         if let Some(pl) = &mut self.plast {
             pl.delta = delta;
+            pl.delta_pending = true;
         }
     }
 }
