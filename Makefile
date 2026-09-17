@@ -86,7 +86,7 @@ SHAKE_URL := https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tin
         clippy check/scripts check/spdx check/paths check/files hooks/install qwen/serving-perf-gate \
         test/e2e test/e2e/claude-code test/e2e/api-conformance test/e2e/shutdown test/e2e/examples test/e2e/scheduler test/e2e/ready \
         perf/lfm perf/flux2 perf/wan flux2/generate flux2/edit wan/t2v wan/parity parity/strict s3dit/int8-e2e \
-        release/patch release/minor release/major changelog release/notes dist/fly \
+        release/patch release/minor release/major changelog release/notes \
         release/github release/publish test/e2e/deb
 
 help:
@@ -127,9 +127,7 @@ help:
 	@echo "  make forecast/perf-gate      forecasting perf regression gate (vs baselines)"
 	@echo "  make wm/perf-gate            world-model perf regression gate (vs baselines)"
 	@echo "  make qwen/serving-perf-gate  qwen serving perf regression gate (vs baselines)"
-	@echo "  make experiment/fly/<name> ENV=... ARGS=...  run a fly experiment (builds first)"
-	@echo "  make experiment/fly/replay ARGS=tuning.txt   re-measure a tuning against its controls"
-	@echo "  make dist/fly                run the fly with no cargo on the target machine"
+	@echo "  make experiment/fly/<name>/{build,run}  build, then run, a fly experiment"
 	@echo "  make kernels-table           regenerate docs/reference/kernels.md from the .wgsl sources"
 	@echo "  make kernels-table/check     fail if that catalogue has drifted (part of test/full)"
 	@echo "  make cuda-table              regenerate docs/reference/kernels-cuda.md from crates/kernels-cuda"
@@ -205,8 +203,17 @@ build/release:
 #   make samples/imagegen/generate/build
 #   make samples/imagegen/generate/run ARGS="--prompt 'a whale submarine'"
 #
-# `run` rebuilds a stale sample by itself: that is `cargo run`'s own
-# dependency check, not something re-implemented here.
+# `build` and `run` are separate on purpose, and `run` does NOT invoke cargo.
+# A sample is an ordinary binary once it is built: copying
+# `target/release/sample-<a>-<b>` to a machine with no Rust toolchain and
+# running it there is the whole distribution story, and a `run` target that
+# shelled out to `cargo run` quietly made the toolchain a runtime dependency
+# of every demonstration.
+#
+# The cost of the split is that `run` cannot notice a stale binary, and a
+# stale binary has already cost this repo an hour of CPU and a result that no
+# replay could reproduce. So `run` prints what it is about to execute and when
+# that file was built, which is the fact that would have made it obvious.
 SAMPLE_PROFILE ?= release
 SAMPLE_CARGO_FLAGS = $(if $(filter release,$(SAMPLE_PROFILE)),--release,)
 ARGS ?=
@@ -235,7 +242,10 @@ samples/%/build:
 
 samples/%/run:
 	@test -f "samples/$*/Cargo.toml" || { echo "no such sample: samples/$* (try: make samples/list)"; exit 2; }
-	cargo run $(SAMPLE_CARGO_FLAGS) -p $(call sample_pkg,$*) -- $(ARGS)
+	@bin="target/$(SAMPLE_PROFILE)/$(call sample_pkg,$*)"; \
+	test -x "$$bin" || { echo "not built: $$bin"; echo "run: make samples/$*/build"; exit 2; }; \
+	echo "$$bin (built $$(date -r "$$bin" '+%Y-%m-%d %H:%M:%S'))"; \
+	exec env $(ENV) "$$bin" $(ARGS)
 
 # Enforces samples/README.md: SDK-only brain dependency, declared surfaces, a
 # path-derived package name, SPDX headers - and the two measured properties,
@@ -741,41 +751,45 @@ test/rl:
 kernels-regen:
 	scripts/build/kernels-regen.sh
 
-# The fly's experiments, BUILT BEFORE THEY RUN.
+# The fly's experiments: built by one target, run by another.
 #
-# `cargo build -p brain-fly` does not build examples, so a change to the
-# objective can be committed, believed, and then not be in the binary a search
-# actually executes. That happened: a walk search ran for forty generations
-# against an objective without its attitude termination, found the slide that
-# termination exists to refuse, and reported a score that no replay could
-# reproduce. An hour of CPU, and the only symptom was a number that did not
-# survive being re-measured.
+# Split the same way samples are, and for the same reason - an experiment is
+# an ordinary binary once built, and a `run` that shelled out to cargo would
+# make the toolchain a runtime dependency of every measurement.
 #
-#   make experiment/fly/search ENV="ARENA=air OUT=/tmp/t.txt"
-#   make experiment/fly/replay ENV="ARENA=air" ARGS=/tmp/t.txt
+# The hazard the split reintroduces is worth naming, because it has already
+# been paid for. `cargo build -p brain-fly` does not build examples, so a
+# change to the objective can be committed, believed, and simply not be in the
+# binary a search executes. That happened: a walk search ran for forty
+# generations against an objective without its attitude termination, found the
+# slide that termination exists to refuse, and reported a score that no replay
+# could reproduce. An hour of CPU, and the only symptom was a number that did
+# not survive re-measurement. `run` therefore prints the binary it is about to
+# execute and when that file was built, which is exactly the fact that would
+# have made it obvious at the time.
+#
+#   make experiment/fly/search/build
+#   make experiment/fly/search/run ENV="ARENA=air OUT=/tmp/t.txt"
+#   make experiment/fly/replay/run ENV="ARENA=air" ARGS=/tmp/t.txt
 #
 # Under `experiment/` rather than at the top level, and NOT under `samples/`:
 # a sample is a demonstration someone runs to see the thing work, and these
 # are measurements that print numbers and controls. `samples/fly/interactive`
-# is the demonstration; `experiment/fly/cpg` is the experiment behind it.
+# is the demonstration; `experiment/fly/cpg/run` is the experiment behind it.
 #
 # ENV carries the run's own `NAME=value` settings, ARGS its positional
 # arguments. Everything the examples read from the wider environment
 # (BRAIN_CONNECTOME_DIR, BRAIN_FLYBODY_XML, ...) is expected to be set already,
 # as `tools/buzzfly/collect.sh`'s env.sh sets it.
 fly_example = $(if $(filter search,$*),walk_search,$*)
-experiment/fly/%:
-	@cargo build --release --offline -p brain-fly --example $(fly_example)
-	@env $(ENV) ./target/release/examples/$(fly_example) $(ARGS)
+experiment/fly/%/build:
+	cargo build --release --offline -p brain-fly --example $(fly_example)
 
-# Package the fly to run where there is no Rust toolchain.
-#
-# A tarball rather than a .deb, because the machine this goes to is not one
-# where anybody is getting root to install a package. `--with-data` folds in
-# the connectome for an air-gapped target; without it the package is a few
-# tens of megabytes and expects $BUZZFLY_DIR on the other side.
-dist/fly:
-	bash scripts/build/build-fly-dist.sh $(ARGS)
+experiment/fly/%/run:
+	@bin="target/release/examples/$(fly_example)"; \
+	test -x "$$bin" || { echo "not built: $$bin"; echo "run: make experiment/fly/$*/build"; exit 2; }; \
+	echo "$$bin (built $$(date -r "$$bin" '+%Y-%m-%d %H:%M:%S'))"; \
+	exec env $(ENV) "$$bin" $(ARGS)
 
 # Regenerate docs/reference/kernels.md's catalogue from crates/kernels/wgsl/.
 # Every column is derived from the sources, so the table cannot be edited by
