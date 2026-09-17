@@ -36,7 +36,7 @@
 //! | `creature` | [`Creature`], [`View`] -- a connectome running a body, and a window onto it |
 //! | `forecast` | [`ForecastPipeline`] -- time-series forecasting (kronos, timesfm3) |
 //! | `text` | [`TextGenerationPipeline`] -- text generation (qwen3, from a local checkpoint path) |
-//! | `vision` | [`EmbeddingPipeline`] -- text embedding (CLIP); named for the `brain_arch::Domain` it resolves under, not the capability, since there is no `Embedding` domain |
+//! | `vision` | [`EmbeddingPipeline`] -- text embedding (CLIP); [`DetectionPipeline`] -- object detection (YOLOv8); named for the `brain_arch::Domain` they resolve under, not the capability, since there is no `Embedding`/`Detection` domain |
 //! | `audio` | [`TranscribePipeline`] -- speech-to-text (qwen3-asr, offline) |
 //! | `full` | every surface; this is `default` |
 //!
@@ -74,6 +74,8 @@
 mod asr;
 #[cfg(feature = "creature")]
 mod creature;
+#[cfg(feature = "vision")]
+mod detect;
 #[cfg(feature = "device")]
 mod device;
 mod error;
@@ -132,6 +134,8 @@ pub use model::dispatch::Precision as DType;
 pub use asr::{Transcript, TranscribePipeline, TranscribePipelineBuilder};
 #[cfg(feature = "creature")]
 pub use creature::{Arena, Beat, Creature, CreatureBuilder};
+#[cfg(feature = "vision")]
+pub use detect::{DetectOptions, Detection, DetectionPipeline, DetectionPipelineBuilder};
 #[cfg(feature = "vision")]
 pub use embedding::{Embedding, EmbeddingPipeline, EmbeddingPipelineBuilder};
 #[cfg(feature = "forecast")]

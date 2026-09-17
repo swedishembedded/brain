@@ -30,7 +30,7 @@ all - the fly/flybody/connectome stack is unregistered).
 | Video generation | 2 | 2 | none | `wan_cli.rs`, `ltxv_cli.rs` | yes (wan) |
 | ASR | 2 | 2 | none | **no CLI at all** - `resident_asr.rs` only | no |
 | TTS/music/speech codec | 7 | 3 | none | `tts_cli.rs` + `tts_serve.rs` | no |
-| Vision/detection/segmentation | 4 | 4 | none | `yolo_cli.rs`, `sam2_cli.rs`, `depth_cli.rs`, `label_cli.rs` | no |
+| Vision/detection/segmentation | 4 | 4 | **PARTIAL - `DetectionPipeline`** (YOLOv8; SAM2 segmentation/depth/label deferred, see Phase 3.1) | `yolo_cli.rs`, `sam2_cli.rs`, `depth_cli.rs`, `label_cli.rs` | no |
 | Embedding towers | 3 | 3 | none | **no CLI at all** - `resident_clip/arcface/t5encoder.rs` | no |
 | Forecasting | 4 | 0 (CLI-local) | none | **one unified entry**: `forecast_cli.rs` + generic `resident_forecast.rs` | yes (`brain forecast finetune`) |
 | 3D/scene | 2 | 0 (CLI-local) | none | `splat_cli.rs`, `mirror_cli.rs` | no |
@@ -366,7 +366,8 @@ including the `samples/imagegen/*` samples that link `crates/sdk` directly.
   - [x] **Phase 2.5** - `UpscalePipeline` (RRDBNet only) - see its own section above for the real `RrdbnetSpec` bug this one found and fixed, and the new `Image::open`/`Image::from_rgb8` public API it needed.
   - [x] **Phase 2.6** - `codeformer::spec::CodeFormerSpec`, the prerequisite Phase 2.5 named - see its own section below.
   - [x] **Phase 2.7** - `RestorePipeline` (CodeFormer) - see its own section below for two real forward-pass infrastructure bugs this one found AND FIXED (a duplicate kernel registration that broke the CPU JIT backend; a `backend-wgpu` buffer-reclaim ceiling from two unpolled `Builder` scopes) - this pipeline's test reaches a genuine, complete `.restore()` forward pass at CodeFormer's real fixed geometry, the strongest end-to-end proof of any pipeline in this crate so far. SUPIR and VQGAN stay deferred with the reasons already on record.
-  - [ ] Still entirely uncovered domain buckets: vision/detection (YOLOv8/SAM2 - a different domain object than `Image`), TTS/music, video generation, 3D/world models. See the domain inventory table.
+  - [x] **Phase 3.1** - `DetectionPipeline` (YOLOv8 only) - the vision/detection domain bucket's first pipeline, and its first NEW domain object (`Detection`, not `Image`). See its own section below.
+  - [ ] Still open within vision/detection: `SegmentPipeline` (SAM2 - already has a real `spec.rs`, unlike YOLOv8 before this milestone; masks are a different domain object again, not boxes). Still entirely uncovered domain buckets: TTS/music, video generation, 3D/world models. See the domain inventory table.
 
 ### Phase 2.1 - `ForecastPipeline` (done)
 
@@ -888,6 +889,81 @@ refactor or the `model.rs` kernel/reclaim changes), `cargo build -p brain
 pipelines' suites green, including this one's 4 tests - one of them now a
 genuine, complete `.restore()` forward pass rather than a construction-only
 stand-in).
+### Phase 3.1 - `DetectionPipeline` (done, scoped to YOLOv8) - the vision/detection bucket's first pipeline, and its first non-`Image` domain object
+
+Covers **YOLOv8 only**, resolved through the SAME `loader::resolve_structured`
+call every earlier pipeline uses, against a NEW `yolov8::spec::YoloSpec` -
+YOLOv8 had no model-store `ArchSpec` at all before this milestone (its
+weights were a REQUIRED `--weights`/`BRAIN_YOLOV8` CLI param, never resolved
+through the store), the exact prerequisite gap `codeformer::spec::
+CodeFormerSpec` closed for the restoration bucket in Phase 2.6.
+
+**Classification, and why it needed care despite the config being
+DERIVED (unlike CodeFormer's fixed preset)**: `crates/yolov8`'s checkpoint
+format is brain-native, not an upstream `.pt`/`.pth` - a plain
+`.safetensors` file carrying its own config under the `brain.config`
+metadata key. `YoloConfig::from_json` reads that config, but - unlike
+`RrdbConfig::from_tensors`, which returns `Err` naming what's wrong -
+`from_json` NEVER FAILS: every field defaults to `yolov8n`'s own value when
+absent, so parse success alone would happily "classify" an EMPTY `{}` or a
+different model's unrelated config as YOLOv8. The real signal
+(`yolov8::spec::yolo_config_for`) derives a candidate config and then
+verifies it against the file's REAL tensor names/shapes via
+`YoloConfig::full_param_list()` (already existed, written to reproduce
+`Yolo::new`'s own registration exactly, for parity-testing without a GPU -
+reused here as-is, not re-derived) - `Confidence::Derived`, matching
+`RrdbnetSpec`'s reasoning for a self-describing-but-unverified header.
+`classify_rejects_a_safetensors_file_with_an_unrelated_config_and_no_real_tensors`
+pins the headline case this care was for.
+
+**`Detection`, the vision/detection bucket's first domain object that is
+NOT `Image`**: `yolov8::Detection` is a bare `[f32; 6]`
+(`[x1,y1,x2,y2,conf,class]`) at the crate-internal level - functional, but
+exactly the kind of raw-tuple return rule 4 asks a public pipeline not to
+expose. `crate::detect::Detection` wraps it as a named struct
+(`x1`/`y1`/`x2`/`y2`/`confidence`/`class`); this is genuinely a NEW pipeline
+shape in this crate, not a fourth backend of `ImagePipeline`/
+`UpscalePipeline`/`RestorePipeline` - `image(+opts) -> boxes` does not fit
+`image(+opts) -> Image`, confirming the domain inventory table's own note
+that vision/detection needs a different domain object. `DetectionPipeline`
+still joins the `vision` feature `EmbeddingPipeline` already occupies (both
+resolve under `brain_arch::Domain::Vision`, this workspace's rule that a
+surface name is a `Domain` variant, not a second word for the same
+modality) - a THIRD public type sharing one feature, the same way `image`
+already holds three.
+
+**A genuinely fast, genuinely complete end-to-end test, unlike
+`RestorePipeline`'s**: `YoloConfig::tiny(nc)` is a real, intentionally small
+preset (unlike CodeFormer's one fixed size), so
+`crates/sdk/tests/detection_pipeline.rs` reaches a real `.detect()` forward
+pass - resolve, classify, import, build, DFL-decode, NMS - in ~3 seconds for
+all 4 tests combined, the same "shrinkable config" advantage `UpscalePipeline`
+(Phase 2.5) had over `RestorePipeline` (Phase 2.7). All-zero weights make
+every anchor's class score `sigmoid(0) = 0.5`, so `detect()` returns
+plenty of (meaningless but real) candidate boxes rather than none -
+`detect_with_a_confidence_above_any_real_score_returns_nothing` uses a
+confidence threshold above any possible sigmoid output to prove the option
+is genuinely threaded through and the whole path can also return empty
+cleanly.
+
+**Not done, tracked for later**: CLI migration (`brain do yolov8 detect`/
+`crates/cli`'s yolo path still takes a raw `--weights`/`BRAIN_YOLOV8`
+path, not the resolver - the same class of gap every other pipeline in this
+crate still has, now also true for the newly-added `YoloSpec` itself);
+`SegmentPipeline` (SAM2 - already has a real `spec.rs`, so it is a smaller
+lift than YOLOv8 was, but masks are a different domain object again, not
+boxes, so it is not a trivial copy of this pipeline either); `Yolo::load`
+itself is not `Result`-shaped (a malformed checkpoint that somehow still
+classifies would panic inside `ParamStore::new`, not return a typed
+`Error::Backend`) - not touched here, matching every other pipeline's
+`Result`-shaped SDK wrapper over a pre-existing, non-`Result` model
+constructor.
+
+Verified with `cargo test -p brain-yolov8 --lib` (46 passed, 6 new, no
+regressions), `cargo build -p brain --features vision` (clean), `cargo test
+-p brain --features vision` (all pipelines' suites green, including this
+one's 4 tests), and a full `cargo build --workspace --exclude brain-vulkan`.
+
 Findings 8, 11, 14, 18-20, 23-24 are real but not yet milestoned - pick them
 up opportunistically when touching the same file for another reason, or spin
 them into their own milestone if they start blocking something.

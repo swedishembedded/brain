@@ -25,6 +25,7 @@ pub mod loss;
 pub mod model;
 pub mod net;
 pub mod nms;
+pub mod spec;
 
 pub use boxmath::Letterbox;
 pub use config::YoloConfig;

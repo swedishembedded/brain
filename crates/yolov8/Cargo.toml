@@ -23,6 +23,9 @@ brain-paramstore.workspace = true
 brain-optim.workspace = true
 brain-checkpoint.workspace = true
 brain-kernels.workspace = true
+# `spec.rs` - the model-store `ArchSpec` classifying a real brain-format
+# `.safetensors` checkpoint.
+brain-modelstore.workspace = true
 brain-data.workspace = true
 serde_json.workspace = true
 bytemuck.workspace = true
