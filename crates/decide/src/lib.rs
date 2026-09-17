@@ -25,6 +25,7 @@ pub mod config;
 pub mod import;
 pub mod init;
 pub mod model;
+pub mod pack;
 
 pub use config::EncoderConfig;
 pub use model::Encoder;
