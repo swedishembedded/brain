@@ -86,7 +86,7 @@ SHAKE_URL := https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tin
         clippy check/scripts check/spdx check/paths check/files hooks/install qwen/serving-perf-gate \
         test/e2e test/e2e/claude-code test/e2e/api-conformance test/e2e/shutdown test/e2e/examples test/e2e/scheduler test/e2e/ready \
         perf/lfm perf/flux2 perf/wan flux2/generate flux2/edit wan/t2v wan/parity parity/strict s3dit/int8-e2e \
-        release/patch release/minor release/major changelog release/notes \
+        release/patch release/minor release/major changelog release/notes dist/fly \
         release/github release/publish test/e2e/deb
 
 help:
@@ -127,8 +127,9 @@ help:
 	@echo "  make forecast/perf-gate      forecasting perf regression gate (vs baselines)"
 	@echo "  make wm/perf-gate            world-model perf regression gate (vs baselines)"
 	@echo "  make qwen/serving-perf-gate  qwen serving perf regression gate (vs baselines)"
-	@echo "  make fly/search ENV=... ARGS=...   search the fly's parameters (builds first)"
-	@echo "  make fly/replay ARGS=tuning.txt     re-measure a tuning against its controls"
+	@echo "  make experiment/fly/<name> ENV=... ARGS=...  run a fly experiment (builds first)"
+	@echo "  make experiment/fly/replay ARGS=tuning.txt   re-measure a tuning against its controls"
+	@echo "  make dist/fly                run the fly with no cargo on the target machine"
 	@echo "  make kernels-table           regenerate docs/reference/kernels.md from the .wgsl sources"
 	@echo "  make kernels-table/check     fail if that catalogue has drifted (part of test/full)"
 	@echo "  make cuda-table              regenerate docs/reference/kernels-cuda.md from crates/kernels-cuda"
@@ -750,17 +751,31 @@ kernels-regen:
 # reproduce. An hour of CPU, and the only symptom was a number that did not
 # survive being re-measured.
 #
-#   make fly/search ENV="ARENA=air OUT=/tmp/t.txt"
-#   make fly/replay ENV="ARENA=air" ARGS=/tmp/t.txt
+#   make experiment/fly/search ENV="ARENA=air OUT=/tmp/t.txt"
+#   make experiment/fly/replay ENV="ARENA=air" ARGS=/tmp/t.txt
+#
+# Under `experiment/` rather than at the top level, and NOT under `samples/`:
+# a sample is a demonstration someone runs to see the thing work, and these
+# are measurements that print numbers and controls. `samples/fly/interactive`
+# is the demonstration; `experiment/fly/cpg` is the experiment behind it.
 #
 # ENV carries the run's own `NAME=value` settings, ARGS its positional
 # arguments. Everything the examples read from the wider environment
 # (BRAIN_CONNECTOME_DIR, BRAIN_FLYBODY_XML, ...) is expected to be set already,
 # as `tools/buzzfly/collect.sh`'s env.sh sets it.
 fly_example = $(if $(filter search,$*),walk_search,$*)
-fly/%:
+experiment/fly/%:
 	@cargo build --release --offline -p brain-fly --example $(fly_example)
 	@env $(ENV) ./target/release/examples/$(fly_example) $(ARGS)
+
+# Package the fly to run where there is no Rust toolchain.
+#
+# A tarball rather than a .deb, because the machine this goes to is not one
+# where anybody is getting root to install a package. `--with-data` folds in
+# the connectome for an air-gapped target; without it the package is a few
+# tens of megabytes and expects $BUZZFLY_DIR on the other side.
+dist/fly:
+	bash scripts/build/build-fly-dist.sh $(ARGS)
 
 # Regenerate docs/reference/kernels.md's catalogue from crates/kernels/wgsl/.
 # Every column is derived from the sources, so the table cannot be edited by
