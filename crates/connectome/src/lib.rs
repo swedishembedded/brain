@@ -227,6 +227,61 @@ impl Connectome {
         self.neurons.iter().position(|n| n.root_id == root_id).map(|i| i as u32)
     }
 
+    /// Neurons whose every synapse is multiplied by zero, and the synapses
+    /// they carry.
+    ///
+    /// Sign comes from the presynaptic transmitter, and a neuron whose
+    /// transmitter nobody has predicted gets a sign of `0.0`, which means its
+    /// output is not weak: it is ABSENT. The cell stays in the graph, keeps
+    /// its in-degree, counts in every population, and contributes nothing.
+    /// That is a deletion, and a silent one, so it is worth a number.
+    ///
+    /// The aggregate is reassuring and the distribution is not. In BANC 17.7%
+    /// of neurons have no predicted transmitter and they carry 1.4% of all
+    /// synapses, so the average cost is small. But the loss is concentrated in
+    /// whichever cells the predictor found hard, and one of them is APL: a
+    /// single neuron with 22,430 output synapses that provides the feedback
+    /// inhibition normalising the entire mushroom body. Losing it costs 0.05%
+    /// of the graph and all of the sparse odour code.
+    pub fn silenced(&self) -> (usize, u64) {
+        let mut neurons = 0;
+        let mut synapses = 0u64;
+        for (i, n) in self.neurons.iter().enumerate() {
+            if n.nt.best().is_some() {
+                continue;
+            }
+            neurons += 1;
+            let i = i as u32;
+            synapses += self.csc.pre.iter().zip(&self.csc.w).filter(|(p, _)| **p == i).map(|(_, w)| *w as u64).sum::<u64>();
+        }
+        (neurons, synapses)
+    }
+
+    /// Assert a transmitter for cells this dataset's predictor abstained on.
+    ///
+    /// Returns how many neurons it filled in. Gaps ONLY: a neuron that already
+    /// has a verified or predicted transmitter is never overwritten, so this
+    /// can add knowledge and cannot contradict the data.
+    ///
+    /// This exists because "no prediction" and "no transmitter" are different
+    /// statements that the sign convention collapses into the same number, and
+    /// for a handful of cells the literature is simply more certain than the
+    /// classifier. It is deliberately NOT a table applied at import: which
+    /// cells those are is a scientific judgement that belongs at the call
+    /// site, in the open, next to the reason - not in a curated list that
+    /// silently goes stale with the next release.
+    pub fn assume_transmitter(&mut self, cell_type: &str, nt: Nt) -> usize {
+        let mut filled = 0;
+        for n in &mut self.neurons {
+            if n.cell_type == cell_type && n.nt.best().is_none() {
+                n.nt.predicted = Some(nt);
+                n.nt.confidence = 1.0;
+                filled += 1;
+            }
+        }
+        filled
+    }
+
     /// Every neuron whose annotation satisfies `pred`, as graph indices.
     ///
     /// This is how a body finds its motor neurons: `population(|n|

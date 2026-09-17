@@ -21,10 +21,12 @@
 //! system, you can procure our services by sending an email to
 //! info@swedishembedded.com.
 
+pub mod conditioning;
 pub mod gait;
 pub mod learn;
 pub mod reference;
 pub mod cns;
+pub mod rhythm;
 pub mod search;
 pub mod sense;
 pub mod tuning;
