@@ -24,7 +24,7 @@
 //! by sending an email to info@swedishembedded.com.
 
 use std::collections::{BTreeMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use brain_modelref::ModelRef;
 use brain_modelstore::{Format, LocalModel, Store};
@@ -618,13 +618,27 @@ fn run_info(args: &[String]) -> i32 {
 /// base repo. Shared with `run_list`'s interactive `on_enter` (see that
 /// function's own doc) so the printed command and the browser's detail view
 /// can never show different information for the same model.
+/// The `(label, path)` pairs `brain models info` should open for `local`.
+///
+/// A compound model's `weights` field is its `brain.manifest.json` -- a
+/// sentinel, not a checkpoint, because there is no single weights file to
+/// name (`Store::local_compound`); the real files are its roles. Opening it
+/// blindly made this command fail with "safetensors: truncated header" on
+/// every pulled compound model. The label is the role name, empty for a
+/// single-file model so its header reads exactly as it always did.
+fn info_targets(local: &LocalModel) -> Vec<(String, PathBuf)> {
+    match (&local.format, &local.roles) {
+        (Format::Compound, Some(roles)) if !roles.is_empty() => roles.iter().map(|(role, path)| (role.clone(), path.clone())).collect(),
+        _ => vec![(String::new(), local.weights.clone())],
+    }
+}
+
 fn build_info_nodes(store: &Store, reference: &str) -> Result<Vec<Node>, String> {
     let model_ref = brain_modelstore::refurl::parse_model_arg(reference).map_err(|e| e.to_string())?;
     let Some(local) = store.local(&model_ref) else {
         return Err(format!("{model_ref} is not pulled; run `brain pull {model_ref}` first"));
     };
-    let path = local.weights.to_str().ok_or_else(|| "non-UTF-8 weights path".to_string())?;
-    let reader = checkpoint::weightio::WeightReader::open(path).map_err(|e| format!("{path}: {e}"))?;
+    let targets = info_targets(&local);
 
     // Any adapter already pulled for this SAME base repo is overlaid onto the
     // tree it targets, colored distinctly - `Store::scan` finds it the same
@@ -641,24 +655,64 @@ fn build_info_nodes(store: &Store, reference: &str) -> Result<Vec<Node>, String>
         .collect();
 
     let card = local.card.clone().unwrap_or_else(|| ModelCard::new(model_ref.to_string(), "?"));
-    let param_count = card.param_count.unwrap_or_else(|| reader.names().filter_map(|n| reader.shape(n)).map(|s| s.iter().product::<u64>()).sum());
-    let total_bytes = reader.names().filter_map(|n| reader.nbytes(n)).sum::<u64>();
-    let mut header = format!(
-        "{}   {:?}   {} tensors   {:.2}B params   {}",
-        model_ref,
-        local.format,
-        reader.names().count(),
-        param_count as f64 / 1e9,
-        human_bytes(total_bytes)
-    );
-    if !adapters.is_empty() {
-        let names: Vec<String> = adapters.iter().map(|(r, _)| r.adapter().map(|a| a.to_string()).unwrap_or_default()).collect();
-        header.push_str(&format!("   adapters: {}", names.join(", ")));
+    let mut nodes = Vec::new();
+    let mut opened_any = false;
+    let mut failures = Vec::new();
+
+    for (label, path) in &targets {
+        // `open_hf_dir` covers both shapes a role can take: a directory
+        // holding a (possibly sharded) HF checkpoint, or a single file, which
+        // it forwards to `open`.
+        let reader = match checkpoint::weightio::WeightReader::open_hf_dir(path) {
+            Ok(r) => r,
+            Err(e) => {
+                // A role that is not a readable checkpoint (a tokenizer
+                // directory, say) is reported in place rather than failing
+                // the whole command -- the other roles are still worth
+                // printing.
+                failures.push(format!("{}: {e}", path.display()));
+                nodes.push(Node::leaf(format!("{}   (not a readable checkpoint: {e})", role_prefix(label, &model_ref))));
+                continue;
+            }
+        };
+        opened_any = true;
+        let param_count = if targets.len() == 1 {
+            card.param_count.unwrap_or_else(|| reader.names().filter_map(|n| reader.shape(n)).map(|s| s.iter().product::<u64>()).sum())
+        } else {
+            reader.names().filter_map(|n| reader.shape(n)).map(|s| s.iter().product::<u64>()).sum()
+        };
+        let total_bytes = reader.names().filter_map(|n| reader.nbytes(n)).sum::<u64>();
+        let mut header = format!(
+            "{}   {:?}   {} tensors   {:.2}B params   {}",
+            role_prefix(label, &model_ref),
+            local.format,
+            reader.names().count(),
+            param_count as f64 / 1e9,
+            human_bytes(total_bytes)
+        );
+        if !adapters.is_empty() {
+            let names: Vec<String> = adapters.iter().map(|(r, _)| r.adapter().map(|a| a.to_string()).unwrap_or_default()).collect();
+            header.push_str(&format!("   adapters: {}", names.join(", ")));
+        }
+        nodes.push(Node::leaf(header));
+        nodes.extend(build_tensor_tree(&reader, &adapters));
     }
 
-    let mut nodes = vec![Node::leaf(header)];
-    nodes.extend(build_tensor_tree(&reader, &adapters));
+    if !opened_any {
+        return Err(format!("{model_ref}: no role holds a readable checkpoint ({})", failures.join("; ")));
+    }
     Ok(nodes)
+}
+
+/// A target's header prefix: the model reference alone for a single-file
+/// model (unchanged output), or `<reference> [<role>]` when a compound model
+/// contributes several.
+fn role_prefix(label: &str, model_ref: &ModelRef) -> String {
+    if label.is_empty() {
+        model_ref.to_string()
+    } else {
+        format!("{model_ref} [{label}]")
+    }
 }
 
 /// Group tensor names by `.`-separated segment into a tree, each leaf a real
@@ -790,7 +844,6 @@ fn run_measure(arch_id: &str, ref_str: &str, config: &serde_json::Value, reps: u
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     fn compound_local(id: &str, family: &str) -> LocalModel {
         let reference = brain_modelref::ModelRef::parse(id).unwrap();
@@ -805,6 +858,45 @@ mod tests {
             adapter: None,
             roles: Some(BTreeMap::new()),
         }
+    }
+
+    /// A compound model's `weights` field is its `brain.manifest.json`, a
+    /// sentinel rather than a checkpoint (`Store::local_compound` sets it
+    /// that way because there is no single weights file; the real ones are
+    /// its roles). `brain models info` opened it blindly and failed with
+    /// "safetensors: truncated header" on EVERY pulled compound model --
+    /// nemotronasr, fastvlm, Z-Image, sam2, qwen3tts and the rest.
+    #[test]
+    fn info_targets_opens_a_compound_models_roles_not_its_manifest() {
+        let mut local = compound_local("nvidia/nemotron-3.5-asr-streaming-0.6b", "nemotronasr");
+        let dir = PathBuf::from("/models/nvidia/nemotron-3.5-asr-streaming-0.6b");
+        local.roles = Some(BTreeMap::from([("weights".to_string(), dir.clone())]));
+
+        let targets = info_targets(&local);
+        assert_eq!(targets, vec![("weights".to_string(), dir)]);
+        assert!(
+            !targets.iter().any(|(_, p)| p.ends_with("brain.manifest.json")),
+            "the manifest is a sentinel, never a checkpoint to open"
+        );
+    }
+
+    /// A single-file model is untouched: one unlabelled target, its own
+    /// weights path.
+    #[test]
+    fn info_targets_leaves_a_single_file_model_alone() {
+        let reference = brain_modelref::ModelRef::parse("Qwen/Qwen3-0.6B").unwrap();
+        let weights = PathBuf::from("/models/Qwen/Qwen3-0.6B/model.brain.safetensors");
+        let local = LocalModel {
+            reference,
+            dir: PathBuf::from("/models/Qwen/Qwen3-0.6B"),
+            weights: weights.clone(),
+            tokenizer: None,
+            card: None,
+            format: Format::Safetensors,
+            adapter: None,
+            roles: None,
+        };
+        assert_eq!(info_targets(&local), vec![(String::new(), weights)]);
     }
 
     #[test]
