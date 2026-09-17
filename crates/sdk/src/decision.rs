@@ -6,7 +6,11 @@
 //!
 //! ```no_run
 //! use brain::{Choice, DecisionPipeline};
-//! let mut pipe = DecisionPipeline::from_pretrained("/path/to/all-MiniLM-L6-v2")?;
+//! // `from_pretrained` STARTS A CHAIN, so it hands back a `Flow`; `finish`
+//! // is the one place a chain's error surfaces. `builder(..).load()` is the
+//! // same construction without the chain, for a caller that only wants to
+//! // ask questions.
+//! let mut pipe = DecisionPipeline::builder("/path/to/all-MiniLM-L6-v2").load()?;
 //! let answer = pipe.choose(
 //!     "I am still waiting on my card",
 //!     "which banking intent does this message express",
@@ -388,35 +392,50 @@ impl DecisionPipelineBuilder {
     /// Build a model ready to answer. Trainable, so the same object a caller
     /// loads is the one it can fine-tune.
     pub fn load(self) -> Result<DecisionPipeline> {
-        let dir = Path::new(&self.dir);
-        let cfg_json = std::fs::read_to_string(dir.join("config.json"))
-            .map_err(|e| Error::Backend(format!("read {}/config.json: {e}", self.dir)))?;
-        let cfg = decide::import::config_from_hf(&cfg_json).map_err(Error::Backend)?;
-        let weights = dir.join("model.safetensors");
-        let tensors = checkpoint::safetensors::read(
-            weights.to_str().ok_or_else(|| Error::Backend("non-UTF-8 weights path".into()))?,
-        )
-        .map_err(|e| Error::Backend(format!("read {}: {e}", weights.display())))?;
-        let enc_init = decide::import::brain_init_from_hf(tensors, &cfg).map_err(Error::Backend)?;
-
-        let tok_path = dir.join("tokenizer.json");
-        let tok = data::wordpiece::WordPiece::from_file(
-            tok_path.to_str().ok_or_else(|| Error::Backend("non-UTF-8 tokenizer path".into()))?,
-        )
-        .map_err(Error::Backend)?;
-
-        let head_init = match &self.head {
-            Some(p) => {
-                let t = checkpoint::safetensors::read(p)
-                    .map_err(|e| Error::Backend(format!("read {p}: {e}")))?;
-                t.into_iter().map(|x| (x.name, x.data)).collect()
-            }
-            None => decide::init::init_head(&cfg, self.seed),
-        };
-
-        crate::device::resolve(&self.device)?;
-        let gpu = gpu_core::Gpu::new(decide::kern::PIPELINES);
-        let model = Decide::new_on(gpu, cfg, tok, self.limits, &enc_init, &head_init, true);
+        let model = load_decide(&self.dir, self.head.as_deref(), &self.device, self.limits, self.seed)?;
         Ok(DecisionPipeline { model, last_options: Vec::new(), last_instructions: String::new(), last_eval: Vec::new() })
     }
+}
+
+/// Build a trainable [`Decide`] from an encoder checkpoint directory.
+///
+/// Shared by every pipeline over this architecture, because the loading is
+/// the part they genuinely have in common - the checkpoint, the tokenizer and
+/// the device are the same three things whatever question the head is later
+/// asked. What differs is only what gets trained on top.
+pub(crate) fn load_decide(
+    dir: &str,
+    head: Option<&str>,
+    device: &Device,
+    limits: Limits,
+    seed: u64,
+) -> Result<Decide> {
+    let path = Path::new(dir);
+    let cfg_json = std::fs::read_to_string(path.join("config.json"))
+        .map_err(|e| Error::Backend(format!("read {dir}/config.json: {e}")))?;
+    let cfg = decide::import::config_from_hf(&cfg_json).map_err(Error::Backend)?;
+    let weights = path.join("model.safetensors");
+    let tensors = checkpoint::safetensors::read(
+        weights.to_str().ok_or_else(|| Error::Backend("non-UTF-8 weights path".into()))?,
+    )
+    .map_err(|e| Error::Backend(format!("read {}: {e}", weights.display())))?;
+    let enc_init = decide::import::brain_init_from_hf(tensors, &cfg).map_err(Error::Backend)?;
+
+    let tok_path = path.join("tokenizer.json");
+    let tok = data::wordpiece::WordPiece::from_file(
+        tok_path.to_str().ok_or_else(|| Error::Backend("non-UTF-8 tokenizer path".into()))?,
+    )
+    .map_err(Error::Backend)?;
+
+    let head_init = match head {
+        Some(p) => {
+            let t = checkpoint::safetensors::read(p).map_err(|e| Error::Backend(format!("read {p}: {e}")))?;
+            t.into_iter().map(|x| (x.name, x.data)).collect()
+        }
+        None => decide::init::init_head(&cfg, seed),
+    };
+
+    crate::device::resolve(device)?;
+    let gpu = gpu_core::Gpu::new(decide::kern::PIPELINES);
+    Ok(Decide::new_on(gpu, cfg, tok, limits, &enc_init, &head_init, true))
 }

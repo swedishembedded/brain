@@ -92,6 +92,13 @@ mod pipeline;
 pub mod decision;
 #[cfg(feature = "decision")]
 pub use decision::{Choice, DecisionPipeline, DecisionPipelineBuilder, TrainSpec};
+#[cfg(feature = "decision")]
+pub mod conversion;
+#[cfg(feature = "decision")]
+pub use conversion::{
+    sales_conversations, ConversionPipeline, ConversionPipelineBuilder, ConversionSpec,
+    RoutingDecision, SalesConversation, SalesMessage, Verdict,
+};
 
 /// The stage chain every pipeline shares: `train`, `evaluate`, `save`, `ask`,
 /// `tui`, `report`, `finish`. Written once, adapted per architecture through

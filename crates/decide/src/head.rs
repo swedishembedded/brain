@@ -224,6 +224,19 @@ impl Head {
         self.gpu.poll_wait();
     }
 
+    /// The head's post-LayerNorm output for one option - the representation
+    /// the score is a linear readout of, and so the one a confidence signal
+    /// should ask about.
+    ///
+    /// `slot` indexes the options in pack order. Reads back `[H]` floats, so
+    /// this belongs on an inspection path and not in a training loop.
+    pub fn decision_repr(&self, slot: usize) -> Vec<f32> {
+        assert!(slot < self.n_slots as usize, "slot {slot} of {} options", self.n_slots);
+        let h = self.cfg.d_model as usize;
+        let all = self.gpu.read(&self.out, self.n_slots as usize * h);
+        all[slot * h..(slot + 1) * h].to_vec()
+    }
+
     /// L2 norm of each forward stage, for localizing a dead path.
     ///
     /// A stage that reads zero when the one before it does not is where the

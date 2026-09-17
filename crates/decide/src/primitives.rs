@@ -60,6 +60,19 @@ pub enum Answer {
     Noul { noul: f32 },
 }
 
+/// The logistic, which is what turns a `Noul`'s single score into a
+/// probability.
+pub fn sigmoid(z: f32) -> f32 {
+    if z >= 0.0 {
+        let e = (-z as f64).exp();
+        (1.0 / (1.0 + e)) as f32
+    } else {
+        // Written both ways round so neither tail overflows.
+        let e = (z as f64).exp();
+        (e / (1.0 + e)) as f32
+    }
+}
+
 /// How concentrated a distribution is, on `[0, 1]`.
 ///
 /// `1 - H/ln(k)`: exactly 1 on a one-hot, exactly 0 on a uniform, and - the
@@ -95,7 +108,8 @@ impl Question {
         match self {
             Question::Choice { options, .. } => options.len(),
             Question::Score { levels, .. } => levels.len(),
-            Question::Noul { .. } => 2,
+            // ONE slot, not two - see `slots`.
+            Question::Noul { .. } => 1,
         }
     }
 
@@ -132,6 +146,35 @@ impl Question {
     /// what lets one state encoding serve every question in a request, and it
     /// is the reason question independence is structural here rather than a
     /// promise.
+    ///
+    /// **A `Noul` emits ONE slot, and this is load-bearing.** The obvious
+    /// design is two - "yes" and "no" - scored against each other by softmax,
+    /// and it does not work. The head uses a slot's representation as its
+    /// attention QUERY, and two slots that differ by a word or two are nearly
+    /// parallel: measured on the released checkpoint, the cosine between a
+    /// yes-slot and its no-slot is **0.989**. Two nearly-parallel queries
+    /// attend to the state almost identically, so both scores carry the same
+    /// state information and a softmax - which sees only their DIFFERENCE -
+    /// subtracts it right back out.
+    ///
+    /// The numbers, on three deliberately extreme conversations:
+    ///
+    /// ```text
+    ///                     yes      no    yes-no
+    /// obvious close    0.5740  0.6161   -0.0421
+    /// obvious loss     0.6482  0.6969   -0.0487
+    /// undecided        0.3587  0.4008   -0.0421
+    ///                  \_____________/  \______/
+    ///                  spread 0.2895    spread 0.0066
+    /// ```
+    ///
+    /// The state signal is plainly there in the absolute scores and gone from
+    /// their difference. So a `Noul` scores ONE slot and reads a logistic off
+    /// it, which keeps the absolute score; the `no` text is carried for the
+    /// answer's legend and never encoded.
+    ///
+    /// A `Choice` is not affected because its options are genuinely different
+    /// text, which is what gives a softmax something to work with.
     pub fn slots(&self) -> Vec<String> {
         let join = |instructions: &str, tail: &str| format!("{instructions} [SEP] {tail}");
         match self {
@@ -145,10 +188,12 @@ impl Question {
             Question::Score { instructions, levels } => {
                 levels.iter().map(|l| join(instructions, l)).collect()
             }
-            Question::Noul { instructions, yes, no } => vec![
-                join(instructions, yes.as_deref().unwrap_or("yes")),
-                join(instructions, no.as_deref().unwrap_or("no")),
-            ],
+            // ONE slot: the proposition itself. `no` never becomes a slot -
+            // see this method's own note on why two of them cannot work.
+            Question::Noul { instructions, yes, .. } => match yes {
+                Some(y) => vec![join(instructions, y)],
+                None => vec![instructions.clone()],
+            },
         }
     }
 
@@ -176,7 +221,10 @@ impl Question {
                     probabilities: p,
                 }
             }
-            Question::Noul { .. } => Answer::Noul { noul: p[0] },
+            // A logistic on the single score, NOT a softmax over two. The
+            // softmax sees only the DIFFERENCE between its inputs, and for a
+            // yes/no pair that difference is where the answer is not.
+            Question::Noul { .. } => Answer::Noul { noul: sigmoid(scores[0]) },
         }
     }
 }
@@ -267,10 +315,44 @@ mod tests {
     }
 
     #[test]
-    fn a_noul_is_two_options_and_reports_the_yes_probability() {
+    fn a_noul_scores_one_slot_and_reports_a_logistic_of_it() {
         let q = Question::Noul { instructions: "is it urgent".into(), yes: None, no: None };
-        assert_eq!(q.arity(), 2);
-        let Answer::Noul { noul } = q.answer(&[1.0, 0.0]) else { panic!("wrong variant") };
-        assert!(noul > 0.7, "yes probability {noul}");
+        assert_eq!(q.arity(), 1, "a noul scores one slot");
+        assert_eq!(q.slots(), vec!["is it urgent".to_string()]);
+        // A logistic, so the ABSOLUTE score is what moves the answer - which
+        // is the whole reason this is not a two-slot softmax.
+        let p = |z: f32| match q.answer(&[z]) {
+            Answer::Noul { noul } => noul,
+            other => panic!("a noul answered {other:?}"),
+        };
+        assert!((p(0.0) - 0.5).abs() < 1e-6, "a zero score is 0.5, got {}", p(0.0));
+        assert!(p(2.0) > 0.85, "a positive score should lean yes, got {}", p(2.0));
+        assert!(p(-2.0) < 0.15, "a negative score should lean no, got {}", p(-2.0));
+        assert!(p(2.0) > p(0.5) && p(0.5) > p(-0.5), "not monotone in the score");
+    }
+
+    /// A supplied positive label enters the slot; the negative one never does.
+    #[test]
+    fn a_nouls_negative_label_is_legend_only() {
+        let q = Question::Noul {
+            instructions: "does this convert".into(),
+            yes: Some("the deal closes".into()),
+            no: Some("the deal is lost".into()),
+        };
+        let slots = q.slots();
+        assert_eq!(slots.len(), 1);
+        assert!(slots[0].contains("the deal closes"));
+        assert!(!slots[0].contains("lost"), "the negative label was encoded: {:?}", slots[0]);
+    }
+
+    /// The logistic must not overflow at either tail - a saturated score is a
+    /// normal thing for a trained model to produce.
+    #[test]
+    fn the_logistic_survives_both_tails() {
+        for z in [-120.0f32, -40.0, 0.0, 40.0, 120.0] {
+            let p = sigmoid(z);
+            assert!(p.is_finite() && (0.0..=1.0).contains(&p), "sigmoid({z}) = {p}");
+        }
+        assert!(sigmoid(-120.0) < 1e-6 && sigmoid(120.0) > 1.0 - 1e-6);
     }
 }

@@ -124,7 +124,13 @@ impl<P> Flow<P> {
     }
 
     /// Run `f` only while the chain is live, recording `note` either way.
-    fn stage(mut self, note: &str, f: impl FnOnce(&mut P) -> Result<Option<String>>) -> Flow<P> {
+    ///
+    /// `pub(crate)` so an architecture may add a stage of its OWN through the
+    /// same seam - `Flow<ConversionPipeline>::replay` is one. Going through
+    /// here rather than reaching into the fields is what keeps every stage,
+    /// generic or not, obeying the one rule that matters: a failed chain is
+    /// never restarted and its first cause is never overwritten.
+    pub(crate) fn stage(mut self, note: &str, f: impl FnOnce(&mut P) -> Result<Option<String>>) -> Flow<P> {
         match &mut self.inner {
             Err(_) => {
                 // Deliberately NOT overwritten: the first failure is the one

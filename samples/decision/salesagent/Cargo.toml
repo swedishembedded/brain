@@ -1,0 +1,21 @@
+[package]
+# Package names under samples/ are derived from the path:
+# `samples/decision/salesagent` -> `sample-decision-salesagent`. The Makefile's
+# `samples/%/{build,run}` rules depend on that mapping; `make check/samples`
+# enforces it.
+name = "sample-decision-salesagent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sample application: turn-by-turn sales-conversion probability with confidence-aware routing, trained by policy gradient on real conversation data, through the public brain SDK."
+publish = false
+
+[dependencies]
+# The ONLY brain dependency a sample may have is the SDK facade, and it must
+# NAME the surfaces it uses - see samples/README.md rules 1 and 2. This one
+# uses `decision` and nothing else.
+brain = { workspace = true, features = ["decision"] }
+
+[package.metadata.brain]
+# `make check/samples` fails if the real `cargo tree` closure exceeds this.
+max-brain-crates = 30

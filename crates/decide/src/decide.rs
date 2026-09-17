@@ -87,6 +87,17 @@ pub struct Request {
     pub state_rows: u32,
 }
 
+/// What [`Decide::repr_snapshot`] hands the confidence signals.
+pub struct ReprSnapshot {
+    /// One flattened hidden slab per encoder layer, state rows only - the
+    /// `{h_l}` of the convergence signal.
+    pub layers: Vec<Vec<f32>>,
+    /// The encoder's mean-pooled sentence embedding of the state.
+    pub reference: Vec<f32>,
+    /// The head's post-LayerNorm output for the option that was chosen.
+    pub decision: Vec<f32>,
+}
+
 /// One training example: a state, a question, and which of its options is
 /// correct.
 pub struct Example<'a> {
@@ -252,8 +263,32 @@ impl Decide {
 
     /// One optimizer step on one example. Returns the loss.
     pub fn train_step(&mut self, ex: &Example, loss: &LossConfig, enc_lr: f32, head_lr: f32) -> Result<f32, String> {
-        let scores = self.score(ex.state, std::slice::from_ref(ex.question))?;
-        let (l, d_score) = decision_loss(&scores[0], ex.gold, loss);
+        self.train_step_with(ex.state, ex.question, enc_lr, head_lr, |scores| {
+            decision_loss(scores, ex.gold, loss)
+        })
+    }
+
+    /// One optimizer step under a CALLER-SUPPLIED objective.
+    ///
+    /// `objective` receives this call's raw option scores and returns
+    /// `(loss, dL/d(score))`. Everything downstream of that - the head's
+    /// reverse pass, the encoder's, and both optimizers - is identical
+    /// whatever the objective is, which is what lets a policy gradient
+    /// ([`crate::policy`]) reuse the whole datapath instead of forking it.
+    ///
+    /// The objective is host code and sees host floats, so it may do anything:
+    /// sample an action, look up a return, clip a ratio.
+    pub fn train_step_with(
+        &mut self,
+        state: &str,
+        question: &Question,
+        enc_lr: f32,
+        head_lr: f32,
+        objective: impl FnOnce(&[f32]) -> (f32, Vec<f32>),
+    ) -> Result<f32, String> {
+        let scores = self.score(state, std::slice::from_ref(question))?;
+        let (l, d_score) = objective(&scores[0]);
+        assert_eq!(d_score.len(), scores[0].len(), "one score gradient per option");
 
         self.enc.zero_grads();
         self.head.zero_grads();
@@ -269,6 +304,31 @@ impl Decide {
 
         self.adamw(enc_lr, head_lr);
         Ok(l)
+    }
+
+    /// The representations the confidence signals of [`crate::routing`] are
+    /// computed from, for the call just made.
+    ///
+    /// Reads every layer's hidden slab back off the device, so this is an
+    /// inspection path: call it when routing a decision, never inside a
+    /// training loop.
+    pub fn repr_snapshot(&self, state_rows: usize, chosen_slot: usize) -> ReprSnapshot {
+        let h = self.cfg.d_model as usize;
+        let keep = state_rows * h;
+        let layers: Vec<Vec<f32>> = (0..self.cfg.n_layers as usize)
+            .map(|l| {
+                let mut v = self.enc.layer_out(l);
+                // State rows only. The option slots are packed into the same
+                // buffer, and their spread says nothing about whether the
+                // stack settled on THIS conversation.
+                v.truncate(keep);
+                v
+            })
+            .collect();
+        // The first span is the state's first window - the sentence embedding
+        // the projection in equation (1) is compared against.
+        let reference = self.enc.pooled_mean()[..h].to_vec();
+        ReprSnapshot { layers, reference, decision: self.head.decision_repr(chosen_slot) }
     }
 
     /// Advance both halves by one AdamW update.
