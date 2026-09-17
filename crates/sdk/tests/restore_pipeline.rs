@@ -7,7 +7,7 @@
 //! local, synthetic, fully offline models-directory fixture -- mirroring
 //! `tests/upscale_pipeline.rs`'s fixture pattern.
 //!
-//! ## Why this stops at construction, and two real gaps found reaching that far
+//! ## The pipeline family's first real, full-size forward pass -- and two real, independent, pre-existing bugs found and fixed reaching it
 //!
 //! Unlike `RrdbConfig` (`tests/upscale_pipeline.rs`'s own doc), CodeFormer's
 //! shape is NOT derived from the checkpoint - `codeformer::CodeFormerConfig`
@@ -16,44 +16,61 @@
 //! `CodeFormerConfig::tensor_manifest()` still names every tensor the
 //! forward graph reads with an exact-match contract
 //! (`crates/codeformer/src/import.rs::import`), so an all-zero checkpoint AT
-//! THE REAL RELEASED SIZE is a genuinely complete, genuinely importable one -
-//! `from_pretrained` resolves, classifies and imports all 515 real tensors
-//! and builds the whole real 512x512 graph (VQGAN encoder/generator, the
-//! 9-layer code-prediction Transformer, the controllable feature
-//! transformation), further than `tests/image_pipeline.rs`'s flux2/s3dit
-//! backends reach at all (their weights are too large to fixture even at
-//! construction).
+//! THE REAL RELEASED SIZE is a genuinely complete, genuinely buildable one -
+//! all zeros, so the restored face is not a meaningful image, but every
+//! kernel dispatch on the real path (VQGAN encoder, 9-layer code-prediction
+//! Transformer, codebook gather, generator with the controllable feature
+//! transformation) runs for real, at the model's real fixed 512x512
+//! geometry, on a real `Gpu` - there is no smaller real config to fall back
+//! to, and unlike every other pipeline in this crate, this one does not need
+//! one: `.restore()` itself completes.
 //!
-//! `.restore()` itself - the actual forward dispatch - is NOT called here,
-//! because it does not complete on either backend available in this
-//! environment, for two independent, real, pre-existing reasons this
-//! fixture surfaced (neither is new code from this milestone; both are in
-//! shared forward-pass/backend infrastructure this crate does not own):
+//! Getting there surfaced two real, independent, pre-existing bugs in shared
+//! forward-pass/backend infrastructure this crate does not own - neither
+//! reachable before, because `crates/codeformer/tests/parity.rs`'s own
+//! real-forward-pass tests all gate on `BRAIN_CODEFORMER_WEIGHTS` (a
+//! license-gated real checkpoint, silently skipped absent one) - both found
+//! and fixed in the same milestone that added this test:
 //!
-//! * **wgpu**: `backend-wgpu` aborts with "2.37 GiB of device buffers were
-//!   dropped without an intervening `poll_wait()`", over this device's 2 GiB
-//!   ceiling - the exact failure mode `gpu_core::transient`'s own module doc
-//!   describes ("a real 12B text encoder and a real 22B DiT both reached
-//!   multiple gigabytes of abandoned-but-live device memory this way"),
-//!   here from CodeFormer's ~59-block encoder+transformer+generator walk
-//!   never calling `gpu_core::reclaiming`/`Transient` anywhere in its own or
-//!   `vqgan::model::run_blocks`'s forward path.
-//! * **CPU (`wgsl-cpu`)**: `matmul_reg3` "was not JIT-compiled (unsupported
-//!   work-group structure)" - a kernel-coverage gap in the CPU JIT backend
-//!   the code-prediction Transformer's attention/FFN matmuls hit.
+//! * **A duplicate kernel registration** (`crates/codeformer/src/model.rs`):
+//!   `matmul_reg3` is already present in `vae::blocks::KERNELS` (exported as
+//!   `vae::blocks::MATMUL_REG3_SLOT` for exactly this reason - a caller
+//!   layering its own kernels on top must reuse it, not register a second
+//!   copy, the same lesson `crates/sdxlunet`'s own history records), but
+//!   this crate's `kernel_set()` registered a SECOND `("matmul_reg3", ...)`
+//!   at a new slot anyway. Harmless on `backend-wgpu` (both indices compile
+//!   to a valid pipeline), but `wgsl-cpu`'s JIT cannot compile `matmul_reg3`
+//!   AT ALL (a work-group/shared-memory kernel, CPU-native-only by design) -
+//!   `backend_cpu`'s AVX2 fast path intercepts it by matching ONE cached
+//!   index, so dispatching through the uncaught duplicate fell through to
+//!   the JIT and panicked. Fixed by resolving `K_MATMUL_REG3` to the
+//!   existing `vae::blocks::MATMUL_REG3_SLOT` instead of appending a new
+//!   one (`model::tests::matmul_reg3_reuses_the_shared_slot_not_a_second_registration`
+//!   pins it).
+//! * **Two unreclaimed device-memory scopes** (`crates/codeformer/src/
+//!   model.rs::CodeFormer::build`): the encoder+transformer half and the
+//!   generator+CFT half each build their own `vae::blocks::Builder`, whose
+//!   activation pool (`Builder::free`) reuses same-length buffers WITHIN one
+//!   builder's own recording but leaves anything that never recurs sitting
+//!   in the pool until that `Builder` itself drops at the end of its block -
+//!   with no poll in between, and nothing else allocates again until
+//!   `.restore()`'s own first post-construction buffer (a readback staging
+//!   buffer), which is where `backend-wgpu`'s "too much unreclaimed memory"
+//!   ceiling actually tripped - exactly the failure mode `gpu_core::
+//!   transient`'s own module doc describes, one `Builder` scope at a time
+//!   rather than one loop iteration at a time. Fixed by wrapping each of the
+//!   two builder scopes in `gpu_core::reclaiming`, which polls once each
+//!   scope's drops are done - the buffers a later scope still needs
+//!   (`enc_feat`'s four pinned encoder taps) are returned OUT of the first
+//!   closure, so they survive its poll, exactly as that helper's own doc
+//!   describes.
 //!
-//! Both are plausibly never exercised anywhere else in this workspace
-//! either: `crates/codeformer/tests/parity.rs`'s own real-forward-pass tests
-//! all gate on `BRAIN_CODEFORMER_WEIGHTS` (a license-gated real checkpoint),
-//! silently skipped in any environment that has not fetched one - this
-//! all-zero-but-complete synthetic fixture is the first thing in this
-//! workspace to force CodeFormer's real graph to actually dispatch with no
-//! real weights required. Tracked in the SDK design-sweep roadmap as two
-//! real, named, NOT-fixed gaps - fixing either safely needs a device this
-//! environment does not have (more VRAM, or a working CPU JIT path to
-//! cross-check a memory-management change against),
-//! not a fix attempted blind against the one small, already-panicking
-//! device available here.
+//! Verified two ways beyond this file's own tests: `cargo test -p
+//! brain-codeformer --lib` (no regressions - taps/gradcheck/parity-fixture
+//! coverage all still pass), and this test itself passing on BOTH the wgpu
+//! backend (the default here) and, during investigation, `Device::parse
+//! ("cpu")` - a genuine forward pass and NOT a placeholder success, since
+//! there is only one real fixed geometry for this model to have run.
 
 use std::path::{Path, PathBuf};
 
@@ -149,24 +166,33 @@ fn rgb8_gradient(w: u32, h: u32) -> brain::Image {
 }
 
 /// The full facade path against a real, COMPLETE local fixture, with no
-/// network access at any point: reference parses, `Store::local` resolves
-/// it, `loader::resolve_structured` finds exactly one candidate for
-/// `"weights"`, and `codeformer::caps::load` imports all 515 real tensors
-/// and builds the whole real 512x512 graph on a real `Gpu`. This module's
-/// own doc explains why `.restore()` itself is not called here - two real,
-/// separately-tracked gaps in shared forward-pass/backend infrastructure,
-/// neither of which is new code from this milestone.
+/// network access at any point, all the way to a real `.restore()?.save()`:
+/// reference parses, `Store::local` resolves it, `loader::resolve_structured`
+/// finds exactly one candidate for `"weights"`, `codeformer::caps::load`
+/// imports all 515 real tensors and builds the whole real 512x512 graph on a
+/// real `Gpu`, and `.restore()` runs a genuine forward pass through the
+/// entire graph - any input size in, a real 512x512 PNG out. This module's
+/// own doc explains the two real bugs fixing this took.
 #[test]
-fn from_pretrained_builds_a_real_complete_fixture() {
+fn from_pretrained_restores_a_real_complete_fixture_end_to_end() {
     let root = scratch_root("restore");
     write_complete_codeformer_checkpoint(&root.join("sczhou").join("codeformer.pth"));
     mark_locally_present(&root, "local", "codeformer-sdk-test");
 
-    let pipe = with_models_dir(&root, || brain::RestorePipeline::from_pretrained("local/codeformer-sdk-test"))
-        .expect("a complete, real checkpoint must import and build");
+    let pipe = with_models_dir(&root, || brain::RestorePipeline::from_pretrained("local/codeformer-sdk-test")).expect("a complete, real checkpoint must build");
 
-    let cfg = format!("{pipe:?}");
-    assert!(cfg.contains("RestorePipeline"), "{cfg}");
+    let input = rgb8_gradient(8, 8);
+    let out = pipe.restore(&input).expect("a real forward pass over a complete checkpoint must succeed");
+
+    assert_eq!(out.width(), 512, "the graph's fixed square side");
+    assert_eq!(out.height(), 512);
+    assert_eq!(out.pixels().len(), 512 * 512 * 3);
+
+    let png = std::env::temp_dir().join(format!("brain-sdk-restore-e2e-{}.png", std::process::id()));
+    out.save(&png).expect("Image::save must write a real PNG");
+    let bytes = std::fs::read(&png).unwrap();
+    assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n", "must be a real PNG signature");
+    std::fs::remove_file(&png).ok();
 }
 
 /// `RestoreOptions::fidelity` out of `[0, 1]` is a clean, named error over

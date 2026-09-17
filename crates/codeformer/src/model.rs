@@ -79,23 +79,38 @@ const K_LAYERNORM: usize = N_VQGAN;
 // `layernorm_rows` is N_VQGAN + 1 — registered so `block::LayerNormIds::resolve_fwd`
 // can pick it up BY NAME on a device with workgroup reductions; never indexed.
 const K_MATMUL: usize = N_VQGAN + 2;
-const K_MATMUL_REG3: usize = N_VQGAN + 3;
-const K_BIAS_ADD: usize = N_VQGAN + 4;
-const K_GELU_ERF: usize = N_VQGAN + 5;
-const K_ARGMAX_ROW: usize = N_VQGAN + 6;
-const K_MUL: usize = N_VQGAN + 7;
-const K_LEAKY_RELU: usize = N_VQGAN + 8;
-const K_SCALE_ADD: usize = N_VQGAN + 9;
-const K_REGION_COPY: usize = N_VQGAN + 10;
+/// NOT a new appended slot: `vae::blocks::MATMUL_REG3_SLOT` (already present
+/// in `0..N_VQGAN`, copied verbatim below) is the SAME `matmul_reg3` kernel
+/// this Transformer's own `pick_gemm` call needs - reusing it, rather than
+/// registering a second `("matmul_reg3", ...)` entry at a new index, is
+/// exactly what that constant's own doc warns a caller layering on
+/// `vae::blocks::KERNELS` to do (`crates/sdxlunet` carried a duplicate
+/// tiled-GEMM kernel once; this crate did too, until this fix). A duplicate
+/// registration is harmless on the wgpu backend (both indices compile to a
+/// valid pipeline), but `wgsl-cpu`'s JIT cannot compile `matmul_reg3` at all
+/// (workgroup+shared-memory structure) - the CPU backend's AVX2 fast path
+/// only intercepts the ONE index it cached at construction
+/// (`backend_cpu::FastIdx::matmul_reg3`), so dispatching through the second,
+/// uncaught index fell through to the JIT and panicked.
+const K_MATMUL_REG3: usize = vae::blocks::MATMUL_REG3_SLOT;
+const K_BIAS_ADD: usize = N_VQGAN + 3;
+const K_GELU_ERF: usize = N_VQGAN + 4;
+const K_ARGMAX_ROW: usize = N_VQGAN + 5;
+const K_MUL: usize = N_VQGAN + 6;
+const K_LEAKY_RELU: usize = N_VQGAN + 7;
+const K_SCALE_ADD: usize = N_VQGAN + 8;
+const K_REGION_COPY: usize = N_VQGAN + 9;
 
 /// This model's kernel set: [`vqgan::KERNELS`] verbatim (never restated — a
-/// restated list that drifts by one entry is silently wrong, not a crash) plus
-/// the eleven the Transformer and the CFT need (`concat2` now comes from the
-/// shared block set, through `vae::blocks::Builder::concat`).
-pub const KERNELS: [(&str, &str); N_VQGAN + 11] = kernel_set();
+/// restated list that drifts by one entry is silently wrong, not a crash)
+/// plus the ten the Transformer and the CFT need beyond it (`concat2` comes
+/// from the shared block set, through `vae::blocks::Builder::concat`;
+/// `matmul_reg3` is `vae::blocks::MATMUL_REG3_SLOT`, already in the copied
+/// prefix - not an eleventh appended entry).
+pub const KERNELS: [(&str, &str); N_VQGAN + 10] = kernel_set();
 
-const fn kernel_set() -> [(&'static str, &'static str); N_VQGAN + 11] {
-    let mut k = [("", ""); N_VQGAN + 11];
+const fn kernel_set() -> [(&'static str, &'static str); N_VQGAN + 10] {
+    let mut k = [("", ""); N_VQGAN + 10];
     let mut i = 0;
     while i < N_VQGAN {
         k[i] = vqgan::KERNELS[i];
@@ -104,7 +119,6 @@ const fn kernel_set() -> [(&'static str, &'static str); N_VQGAN + 11] {
     k[K_LAYERNORM] = ("layernorm", kernels::LAYERNORM);
     k[N_VQGAN + 1] = ("layernorm_rows", kernels::LAYERNORM_ROWS);
     k[K_MATMUL] = ("matmul", kernels::MATMUL);
-    k[K_MATMUL_REG3] = ("matmul_reg3", kernels::MATMUL_REG3);
     k[K_BIAS_ADD] = ("bias_add", kernels::BIAS_ADD);
     k[K_GELU_ERF] = ("gelu_erf", kernels::GELU_ERF);
     k[K_ARGMAX_ROW] = ("argmax_row", kernels::ARGMAX_ROW);
@@ -236,7 +250,19 @@ impl CodeFormer {
         let w_buf = gpu.storage(1);
 
         // ---- submit A: encoder segments + transformer + argmax --------------
-        let (encode_steps, logits, idx_f32, enc_feat, mut all_taps) = {
+        // Wrapped in `gpu_core::reclaiming`: `Builder`'s own activation pool
+        // (`Builder::free`) reuses a freed buffer of the SAME length within
+        // this one builder's recording, but a length that never recurs sits
+        // in the pool until `b` itself drops at the end of this block - which
+        // happens with no poll in between submit A and submit B below, so an
+        // unreclaimed ~2 GiB of dropped-but-pending buffers had already
+        // accumulated by the time `.restore()`'s own first post-construction
+        // allocation (a readback staging buffer) tripped `backend_wgpu`'s
+        // ceiling check - construction itself never allocates again after
+        // both builders finish, so nothing catches it until then. Exactly the
+        // `gpu_core::reclaiming` module doc's own failure mode, one builder
+        // scope at a time rather than one loop iteration at a time.
+        let (encode_steps, logits, idx_f32, enc_feat, mut all_taps) = gpu_core::reclaiming(&gpu, || {
             let mut b = Builder::new(
                 &gpu,
                 tensors,
@@ -290,10 +316,13 @@ impl CodeFormer {
             b.free((nt * emb) as u64, rows);
             let (steps, tp) = b.finish();
             (steps, logits, idx_f32, enc_feat, tp)
-        };
+        });
 
         // ---- submit B: codebook gather + generator with the CFT --------------
-        let (decode_steps, out, dec_taps) = {
+        // Reclaiming again for the same reason submit A above is: a second,
+        // independent `Builder` with its own pool, dropped at this block's
+        // end.
+        let (decode_steps, out, dec_taps) = gpu_core::reclaiming(&gpu, || {
             let mut b = Builder::new(
                 &gpu,
                 tensors,
@@ -345,7 +374,7 @@ impl CodeFormer {
             assert_eq!((oh, ow), (img, img), "restore: generator produced {oh}x{ow}");
             let (steps, tp) = b.finish();
             (steps, out, tp)
-        };
+        });
         all_taps.extend(dec_taps);
 
         CodeFormer {
@@ -786,6 +815,21 @@ mod tests {
     fn shared_slots_are_copied_verbatim() {
         assert_eq!(super::KERNELS[..super::N_VQGAN], vqgan::KERNELS[..]);
         assert_eq!(super::KERNELS[..vae::blocks::NEXT_SLOT], vae::blocks::KERNELS[..]);
+    }
+
+    /// `matmul_reg3` must resolve to `vae::blocks`' own slot, never a second
+    /// appended registration - `wgsl-cpu` cannot JIT-compile this kernel at
+    /// all (it is a work-group/shared-memory kernel, CPU-native-only by
+    /// design), so `backend_cpu`'s AVX2 fast path intercepts it by matching a
+    /// SINGLE cached index; a second `("matmul_reg3", ...)` entry at a new
+    /// slot would dispatch through the uncaught index and panic on CPU,
+    /// while compiling silently fine on the wgpu backend (this is exactly
+    /// how the bug hid until a real CPU dispatch hit it).
+    #[test]
+    fn matmul_reg3_reuses_the_shared_slot_not_a_second_registration() {
+        assert!(super::K_MATMUL_REG3 < vae::blocks::NEXT_SLOT, "K_MATMUL_REG3 = {} must be inside the shared vae::blocks prefix (< {})", super::K_MATMUL_REG3, vae::blocks::NEXT_SLOT);
+        assert_eq!(super::K_MATMUL_REG3, vae::blocks::MATMUL_REG3_SLOT);
+        assert_eq!(super::KERNELS.iter().filter(|(n, _)| *n == "matmul_reg3").count(), 1, "matmul_reg3 must appear exactly once in KERNELS");
     }
 
     /// Every appended slot must hold the kernel its constant names — an

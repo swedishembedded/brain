@@ -65,8 +65,9 @@ when a milestone actually starts one):
    3D/world models last - `SplatPipeline` is closer to `Creature` (stateful,
    steppable) than to `ImagePipeline`, and world models have no settled
    domain object yet. **Done**: `UpscalePipeline` (RRDBNet, Phase 2.5) and
-   `RestorePipeline` (CodeFormer, Phase 2.6/2.7 - construction only, two
-   real forward-pass gaps found and tracked, not fixed). Vision/detection
+   `RestorePipeline` (CodeFormer, Phase 2.6/2.7 - a genuine full `.restore()`
+   forward pass at the model's real fixed geometry, and two real
+   forward-pass infrastructure bugs found AND fixed reaching it). Vision/detection
    (YOLOv8 boxes / SAM2 masks - a different domain object than `Image`, not
    a sibling of either) is the next candidate within this bucket.
 
@@ -364,7 +365,7 @@ including the `samples/imagegen/*` samples that link `crates/sdk` directly.
   - [x] **Phase 2.4** - `TranscribePipeline` (qwen3-asr only).
   - [x] **Phase 2.5** - `UpscalePipeline` (RRDBNet only) - see its own section above for the real `RrdbnetSpec` bug this one found and fixed, and the new `Image::open`/`Image::from_rgb8` public API it needed.
   - [x] **Phase 2.6** - `codeformer::spec::CodeFormerSpec`, the prerequisite Phase 2.5 named - see its own section below.
-  - [x] **Phase 2.7** - `RestorePipeline` (CodeFormer) - see its own section below for two real, NOT-fixed forward-pass infrastructure gaps this one found (a `backend-wgpu` buffer-reclaim ceiling, a `wgsl-cpu` JIT coverage gap), which cap this pipeline's own test at construction, not a real `.restore()` call. SUPIR and VQGAN stay deferred with the reasons already on record.
+  - [x] **Phase 2.7** - `RestorePipeline` (CodeFormer) - see its own section below for two real forward-pass infrastructure bugs this one found AND FIXED (a duplicate kernel registration that broke the CPU JIT backend; a `backend-wgpu` buffer-reclaim ceiling from two unpolled `Builder` scopes) - this pipeline's test reaches a genuine, complete `.restore()` forward pass at CodeFormer's real fixed geometry, the strongest end-to-end proof of any pipeline in this crate so far. SUPIR and VQGAN stay deferred with the reasons already on record.
   - [ ] Still entirely uncovered domain buckets: vision/detection (YOLOv8/SAM2 - a different domain object than `Image`), TTS/music, video generation, 3D/world models. See the domain inventory table.
 
 ### Phase 2.1 - `ForecastPipeline` (done)
@@ -770,7 +771,7 @@ Verified with `cargo test -p brain-codeformer --lib` (26 passed, 6 new),
 the_catalog`), `cargo test -p brain-cli` (full suite), and a full
 `cargo build -p brain-arch -p brain-codeformer -p brain-catalog -p brain-cli`.
 
-### Phase 2.7 - `RestorePipeline` (CodeFormer) - construction succeeds; two real, unfixed forward-pass gaps found reaching that far
+### Phase 2.7 - `RestorePipeline` (CodeFormer) - the pipeline family's first REAL end-to-end forward pass, and two real bugs found AND fixed reaching it
 
 Covers **CodeFormer only**, resolved through `loader::resolve_structured`
 against the just-added `codeformer::spec::CodeFormerSpec`'s one `"weights"`
@@ -793,75 +794,100 @@ rather than duplicating its body. `Session::config()` (new) gives the SDK's
 `Debug` impl the same `dim_embd`/`n_layers`/`img_size` accessor `rrdbnet::
 caps::Session::config` already has.
 
-**Two real, independent, NOT-fixed gaps this pipeline's own fixture
-discipline found, in shared forward-pass/backend infrastructure this crate
-does not own** - the fourth and fifth time in a row this campaign's fixture
-discipline has found a real bug by being the first thing to actually
-dispatch a code path (qwen3asr's import panic in Phase 2.4; the flux2
-precision bug M10; `RrdbnetSpec`'s wrong `ArtifactKind` in Phase 2.5) -
-except this time NEITHER is fixed in this milestone, because neither has a
-device available in this environment to safely verify a fix against:
+**Two real, independent, pre-existing bugs this pipeline's own fixture
+discipline found IN shared forward-pass/backend infrastructure this crate
+does not own - and both got fixed in this same milestone**, the fourth and
+fifth time in a row this campaign's fixture discipline has found a real bug
+by being the first thing to actually dispatch a code path (qwen3asr's
+import panic in Phase 2.4; the flux2 precision bug M10; `RrdbnetSpec`'s
+wrong `ArtifactKind` in Phase 2.5):
 
-- **`backend-wgpu`**: calling the real `.restore()` on a complete fixture
-  aborts with "2.37 GiB of device buffers were dropped without an
-  intervening `poll_wait()`", over this dev machine's small integrated
-  GPU's 2 GiB single-buffer ceiling - exactly the failure mode `gpu_core::
-  transient`'s own module doc names and provides the fix pattern for
-  (`Transient`/`reclaiming`), but CodeFormer's ~59-block encoder +
-  9-layer transformer + generator walk (`crates/codeformer/src/model.rs`,
-  `vqgan::model::run_blocks`) calls neither anywhere on its forward path.
-  A correct fix needs to reclaim periodically WITHIN that walk (wrapping
-  the whole `.restore()` call once, at the outside, reclaims too late - the
-  accumulation trips the ceiling before the call can return) - real surgery
-  in code this milestone did not otherwise touch, on a device too small to
-  safely confirm the fix doesn't also break a "the pinned encoder taps must
-  survive to the generator" invariant that same walk depends on.
-- **`wgsl-cpu`**: the same call on the CPU JIT backend instead fails
-  differently - "`matmul_reg3` was not JIT-compiled (unsupported work-group
-  structure)" - a kernel-coverage gap the code-prediction Transformer's
-  attention/FFN matmuls hit that has nothing to do with the wgpu finding
-  above.
+- **A duplicate kernel registration** (`crates/codeformer/src/model.rs`):
+  `matmul_reg3` already lives in `vae::blocks::KERNELS`, exported as
+  `vae::blocks::MATMUL_REG3_SLOT` specifically so a caller layering its own
+  kernels on top reuses it rather than registering a second copy - the
+  exact lesson that constant's own doc records from `crates/sdxlunet`'s
+  history. `codeformer::model::kernel_set()` registered a SECOND
+  `("matmul_reg3", ...)` at a new slot anyway. Harmless on `backend-wgpu`
+  (both indices compile to a valid pipeline, so nothing looked wrong there),
+  but `wgsl-cpu`'s JIT cannot compile `matmul_reg3` AT ALL - it is a
+  work-group/shared-memory kernel, CPU-native-only by design -
+  `backend_cpu`'s AVX2 fast path intercepts it by matching ONE cached
+  index (`FastIdx::matmul_reg3`, resolved once at `CpuBackend::new`), so
+  CodeFormer's own dispatch through the SECOND, uncaught index fell
+  through to the JIT and panicked ("matmul_reg3 was not JIT-compiled").
+  **Fixed** by resolving `K_MATMUL_REG3` to `vae::blocks::MATMUL_REG3_SLOT`
+  directly instead of appending a new entry (shrinking `KERNELS` by one
+  slot) - a regression test
+  (`model::tests::matmul_reg3_reuses_the_shared_slot_not_a_second_registration`)
+  pins both that the slot sits inside the shared prefix and that the name
+  appears exactly once.
+- **Two unreclaimed device-memory scopes** (`crates/codeformer/src/
+  model.rs::CodeFormer::build`): the encoder+transformer half and the
+  generator+CFT half each build their own `vae::blocks::Builder`, whose
+  activation pool (`Builder::free`) reuses a same-length buffer WITHIN one
+  builder's own recording, but a length that never recurs sits pooled
+  until that `Builder` itself drops at the end of its block - with no poll
+  anywhere in between, and CONSTRUCTION never allocates again after both
+  builders finish, so nothing catches the accumulation until `.restore()`'s
+  own first post-construction buffer (a readback staging buffer) is what
+  actually tripped `backend-wgpu`'s "2.37 GiB of device buffers were
+  dropped without an intervening `poll_wait()`" ceiling - the exact failure
+  mode `gpu_core::transient`'s own module doc describes, one `Builder`
+  scope at a time rather than one loop iteration at a time. **Fixed** by
+  wrapping each of the two builder scopes in `gpu_core::reclaiming` - the
+  four pinned encoder taps (`enc_feat`) the generator half still needs are
+  returned OUT of the first closure, so they survive that closure's own
+  poll, exactly as `reclaiming`'s own doc describes for a value the next
+  iteration still needs.
 
-Both are plausibly unexercised anywhere else in this workspace:
-`crates/codeformer/tests/parity.rs`'s own real-forward-pass tests all gate
-on `BRAIN_CODEFORMER_WEIGHTS` (a license-gated real checkpoint), silently
-skipped in any environment - this one included - that has not fetched one.
-This milestone's all-zero-but-COMPLETE synthetic fixture (built from
-`CodeFormerConfig::tensor_manifest()`, the same discipline
-`write_complete_rrdb_checkpoint` used in Phase 2.5, just at CodeFormer's one
-real fixed size rather than a shrinkable one) is the first thing in this
-workspace to force CodeFormer's real graph to actually dispatch with no
-real weights required anywhere - and it does dispatch, far enough to prove
-both gaps are real, before either backend can finish.
+Both are plausibly unexercised anywhere else in this workspace before this
+milestone: `crates/codeformer/tests/parity.rs`'s own real-forward-pass
+tests all gate on `BRAIN_CODEFORMER_WEIGHTS` (a license-gated real
+checkpoint), silently skipped in any environment - this one included - that
+has not fetched one. This milestone's all-zero-but-COMPLETE synthetic
+fixture (built from `CodeFormerConfig::tensor_manifest()`, the same
+discipline `write_complete_rrdb_checkpoint` used in Phase 2.5, just at
+CodeFormer's one real fixed size rather than a shrinkable one) is the first
+thing in this workspace to force CodeFormer's real graph to actually
+dispatch with no real weights required anywhere - and once both bugs above
+were fixed, IT COMPLETES, on both backends available in this environment
+(wgpu in ~78s, the CPU JIT in ~260s - confirmed independently during
+investigation, then left as the wgpu default in the committed test since it
+is both faster and this crate's ordinary default device).
 
-**Test ceiling, honestly scoped rather than pretended away**:
-`crates/sdk/tests/restore_pipeline.rs` proves `from_pretrained` resolves,
-classifies, imports all 515 real tensors and builds the whole real-size
-graph - reaching further than `tests/image_pipeline.rs`'s flux2/s3dit
-backends do at all (their weights are too large to fixture even at
-construction) - but does not call `.restore()`, for the two reasons above.
-This is the SAME "prove resolve -> dispatch -> construction succeeds, stay
-honest about what's past reach" ceiling `ImagePipeline`'s own flux2/s3dit
-tests document, not a new kind of gap. `RestoreOptions::fidelity`
-out-of-range is still tested end to end (validated before any GPU work, so
-it never meets either gap). Construction alone takes ~70-85s against the
-real 515-tensor/512x512-graph fixture on this dev machine - slower than
-every prior pipeline's fixture in this crate, because CodeFormer has no
-"tiny" config to shrink to the way RRDBNet's does (Phase 2.5's own doc);
-accepted as the real cost of proving genuine, complete-checkpoint
-construction rather than a lighter, less honest fixture.
+**This is the pipeline family's FIRST real end-to-end
+`from_pretrained -> task call -> inspect the domain result -> save` test at
+the model's actual, real, full release geometry** - stronger than Phase
+2.5's own `UpscalePipeline` achievement, which needed RRDBNet's shrinkable
+config to reach a genuine forward pass at all: CodeFormer has no such
+lever, so this proves the real 512x512 graph, not a toy-sized stand-in.
+`crates/sdk/tests/restore_pipeline.rs`'s
+`from_pretrained_restores_a_real_complete_fixture_end_to_end` covers
+resolve -> classify -> import all 515 real tensors -> build the whole real
+graph -> a genuine forward pass -> a real PNG on disk, all with no network
+access and no real weights anywhere. `RestoreOptions::fidelity`
+out-of-range is tested too (validated before any GPU work, so it stays
+fast). Construction+restore together take ~70-90s against the real
+515-tensor/512x512-graph fixture on this dev machine's small integrated
+GPU - slower than every prior pipeline's fixture in this crate, because
+CodeFormer has no "tiny" config to shrink to the way RRDBNet's does (Phase
+2.5's own doc); accepted as the real cost of proving genuine,
+complete-checkpoint, complete-forward-pass coverage rather than a lighter,
+less honest fixture, or a construction-only one.
 
-**Not done, tracked for later**: fixing either of the two gaps above (needs
-a device this environment does not have); CLI migration
-(`resident_restore.rs` still builds its own `Session` inline, same as
-Phase 2.6 already tracked); once fixed, revisiting whether `.restore()`
-itself can join the test.
+**Not done, tracked for later**: CLI migration (`resident_restore.rs` still
+builds its own `Session` inline, same as Phase 2.6 already tracked). The
+two forward-pass bugs above are NOT tracked as open - both are fixed, with
+regression coverage.
 
-Verified with `cargo test -p brain-codeformer --lib` (26 passed, no
-regressions from the `caps.rs` refactor), `cargo build -p brain --features
-image` (clean), `cargo test -p brain --features image` (all pipelines'
-suites green, including this one's 4 tests).
-
+Verified with `cargo test -p brain-codeformer --lib` (27 passed, including
+the new `matmul_reg3` regression test, no regressions from the `caps.rs`
+refactor or the `model.rs` kernel/reclaim changes), `cargo build -p brain
+--features image` (clean), `cargo test -p brain --features image` (all
+pipelines' suites green, including this one's 4 tests - one of them now a
+genuine, complete `.restore()` forward pass rather than a construction-only
+stand-in).
 Findings 8, 11, 14, 18-20, 23-24 are real but not yet milestoned - pick them
 up opportunistically when touching the same file for another reason, or spin
 them into their own milestone if they start blocking something.
