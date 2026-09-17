@@ -86,7 +86,28 @@ pub struct Episode {
     /// instantaneous speed reads, which is a confusion this crate has already
     /// measured (the two differ by more than tenfold on a walking run).
     pub net: f64,
+    /// The episode's SLOWEST stretch, scaled to the whole episode so it is
+    /// directly comparable with [`Self::net`].
+    ///
+    /// Equal to `net` for an animal that travels at a steady rate, and near
+    /// zero for one that moves once and stops. That distinction is not a
+    /// refinement: an objective built on net displacement over a short episode
+    /// is completely satisfied by a single lunge, and a search will find the
+    /// lunge, because it is far easier than walking. One did. It scored 0.46
+    /// body lengths per second over the two seconds it was tuned on and 0.02
+    /// over the next ten, which is worse than the connectome untouched, and it
+    /// passed the imported, paralysed and shuffled controls on the way -
+    /// because all three ran for the same two seconds and were blind to the
+    /// same thing.
+    pub sustained: f64,
 }
+
+/// How many stretches an episode is divided into to measure [`Episode::sustained`].
+///
+/// Four, so each stretch of a 1000-tick episode is half a second: long enough
+/// that a stepping cycle fits inside one and short enough that stopping for a
+/// quarter of the episode is visible.
+pub const WINDOWS: usize = 4;
 
 impl Episode {
     /// What the episode is WORTH on its objective.
@@ -104,7 +125,16 @@ impl Episode {
             // per-tick reward would hand it exactly the travel-without-a-gait
             // the product exists to refuse. Measured with that fallback in
             // place: an episode terminated on its first tick still scored.
-            Some(Objective::Walk { .. }) => self.gait.map_or(0.0, |g| self.net * g.score()),
+            // Travel times rhythm, where "travel" is the SMALLER of the net
+            // displacement and the slowest stretch. Both are needed and each
+            // refuses something the other allows: net alone is earned by a
+            // lunge followed by twelve seconds of nothing, and the slowest
+            // stretch alone is earned by walking in a circle back to where it
+            // started. Taking the minimum asks for an animal that keeps going
+            // AND ends up somewhere.
+            Some(Objective::Walk { .. }) => {
+                self.gait.map_or(0.0, |g| self.net.min(self.sustained) * g.score())
+            }
             Some(Objective::Fly { .. }) => {
                 self.net * (self.airborne as f64 / self.requested.max(self.ticks).max(1) as f64)
             }
@@ -487,8 +517,23 @@ pub fn episode_with(
     ep.range = (last_range, last_range);
     ep.requested = cfg.ticks;
     ep.objective = Some(cfg.objective);
+    // Sampled at window boundaries so a transient cannot hide inside the
+    // episode's total.
+    let window = (cfg.ticks as usize).div_ceil(WINDOWS).max(1);
+    let mut window_start = start.clone();
+    let mut slowest = f64::INFINITY;
+    let planar = |a: &[f64], b: &[f64]| -> f64 {
+        let dx = a.first().copied().unwrap_or(0.0) - b.first().copied().unwrap_or(0.0);
+        let dy = a.get(1).copied().unwrap_or(0.0) - b.get(1).copied().unwrap_or(0.0);
+        (dx * dx + dy * dy).sqrt()
+    };
     for tick in 0..cfg.ticks as usize {
         let t = fly.step()?;
+        if (tick + 1) % window == 0 {
+            let here = fly.qpos();
+            slowest = slowest.min(planar(&here, &window_start));
+            window_start = here;
+        }
         ep.spikes += t.total_spikes as u64;
         ep.proprio_spikes += fly.proprioceptor_spikes() as u64;
 
@@ -598,6 +643,10 @@ pub fn episode_with(
         end.get(1).copied().unwrap_or(0.0) - start.get(1).copied().unwrap_or(0.0),
     );
     ep.net = (dx * dx + dy * dy).sqrt();
+    // Scaled by the number of windows so a steady walk gives `sustained ==
+    // net` and the two are read on one scale. An episode that ended early has
+    // no complete window and no claim to have sustained anything.
+    ep.sustained = if slowest.is_finite() { slowest * WINDOWS as f64 } else { 0.0 };
     // A trace too short to hold a cycle is refused by `analyse` rather than
     // guessed at, and a `None` gait scores zero - which is the right answer
     // for an episode that fell over in the first tenth of a second.

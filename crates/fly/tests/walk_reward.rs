@@ -95,8 +95,13 @@ fn travel_without_a_rhythm_scores_nothing_and_so_does_rhythm_without_travel() {
 
     // And the product: a perfect gait that travels nowhere is worth nothing,
     // however good the rhythm.
+    // `sustained` matches `net` here: these fixtures are about the
+    // travel-times-rhythm product, and an animal that travels steadily has a
+    // slowest stretch equal to its whole distance. The case where the two
+    // differ is a transient, and it has its own test below.
     let ep = |net: f64, gait: Option<Gait>| fly::learn::Episode {
         net,
+        sustained: net,
         gait,
         objective: Some(Objective::walk()),
         ..Default::default()
@@ -237,8 +242,13 @@ fn a_walk_that_ends_on_its_back_scores_nothing() {
     // The reward's own arithmetic, with no fly needed: an episode that ended
     // because the animal tipped over has too short a trace to hold a rhythm,
     // and a gait it cannot score is worth zero however far the body travelled.
+    // `sustained` matches `net` here: these fixtures are about the
+    // travel-times-rhythm product, and an animal that travels steadily has a
+    // slowest stretch equal to its whole distance. The case where the two
+    // differ is a transient, and it has its own test below.
     let ep = |net: f64, gait: Option<Gait>| fly::learn::Episode {
         net,
+        sustained: net,
         gait,
         objective: Some(Objective::walk()),
         ..Default::default()
@@ -330,4 +340,45 @@ fn the_same_parameters_score_the_same_before_and_after_other_episodes() {
         "the same parameters gave a different episode after other episodes had run; \
          every comparison a search makes is between numbers measured this way"
     );
+}
+
+/// A lunge must not outscore a walk.
+///
+/// The failure this exists to prevent, stated as arithmetic rather than as a
+/// simulation. An objective built on net displacement over a short episode is
+/// fully satisfied by one coordinated shove: the animal travels, finishes
+/// upright, and stops. A forty-generation search found exactly that, scored
+/// 0.46 body lengths per second over its two-second episode and 0.02 over the
+/// next ten - worse than the connectome untouched - and passed the imported,
+/// paralysed and shuffled controls on the way, because all three ran for the
+/// same two seconds.
+#[test]
+fn a_transient_cannot_outscore_a_steady_walk_of_the_same_distance() {
+    use fly::gait::Gait;
+    use fly::learn::{Episode, Objective};
+
+    let gait = Gait { step_hz: 10.0, tripod: 0.8, rhythmicity: 0.8, power: 0.5 };
+    let walk = Episode {
+        objective: Some(Objective::walk()),
+        gait: Some(gait),
+        net: 1.0,
+        // A steady walk covers the same ground in every stretch, so its
+        // slowest stretch scaled up is the whole distance.
+        sustained: 1.0,
+        ..Episode::default()
+    };
+    // The same distance, all of it in one stretch out of four.
+    let lunge = Episode { sustained: 0.0, ..walk.clone() };
+    assert!(walk.score() > 0.0, "a steady walk scores");
+    assert_eq!(lunge.score(), 0.0, "a lunge that then stops scores nothing");
+    assert!(walk.score() > lunge.score());
+
+    // And the reverse failure: going nowhere while never stopping, which is
+    // what walking in a circle looks like to a per-stretch measure.
+    let circle = Episode { net: 0.0, sustained: 1.0, ..walk.clone() };
+    assert_eq!(circle.score(), 0.0, "a circle ends where it started and scores nothing");
+
+    // Partial credit is monotone in between, so a search still has a gradient.
+    let halting = Episode { sustained: 0.5, ..walk.clone() };
+    assert!(halting.score() > lunge.score() && halting.score() < walk.score());
 }
