@@ -162,7 +162,11 @@ SERVING OPTIONS
                          pid and no address.
 
 QWEN3 SERVING TUNABLES  (which checkpoint to serve stays BRAIN_QWEN_WEIGHTS/
-                         BRAIN_QWEN_TOKENIZER; everything about HOW is a flag)
+                         BRAIN_QWEN_TOKENIZER; everything about HOW is a flag.
+                         BRAIN_QWEN_WEIGHTS takes either the checkpoint file or
+                         the repo directory holding it; with a directory, a
+                         tokenizer.json beside it is picked up and
+                         BRAIN_QWEN_TOKENIZER is not needed)
   --qwen-ctx N           built context length. Default: auto-sized to the
                          target device's real free VRAM (minus --reserve-gb),
                          capped at the checkpoint's own trained

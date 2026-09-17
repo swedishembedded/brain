@@ -653,14 +653,18 @@ fn finetune(args: &[String]) {
 }
 
 /// Resolve `--weights` to `(weights_file, its_directory, canonical_base_id)`
-/// -- either a `vendor/repo[-QUANT]` model-store reference, or a direct
-/// filesystem path to a `.safetensors` file (its sibling directory then
-/// supplies `tokenizer.json`/`tokenizer_config.json`). Filesystem existence
-/// is checked FIRST: a relative path like `out/qwen.safetensors` also parses
-/// as a syntactically valid (if unlikely) `ModelRef`, so "is this a real
-/// file" must win before "is this a ref" is even considered.
+/// -- a `vendor/repo[-QUANT]` model-store reference, a direct filesystem path
+/// to a `.safetensors` file (its sibling directory then supplies
+/// `tokenizer.json`/`tokenizer_config.json`), or the repo DIRECTORY holding
+/// one. Filesystem existence is checked FIRST: a relative path like
+/// `out/qwen.safetensors` also parses as a syntactically valid (if unlikely)
+/// `ModelRef`, so "is this a real file" must win before "is this a ref" is
+/// even considered.
 pub(crate) fn resolve_base(base: &str, store_root: Option<&Path>) -> Result<(PathBuf, PathBuf, String), String> {
     let path = Path::new(base);
+    if path.is_dir() {
+        return resolve_repo_dir(path);
+    }
     if path.is_file() {
         let dir = path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
         // Synthesize under the "local" reserved vendor (`brain_modelref::is_reserved`)
@@ -675,6 +679,30 @@ pub(crate) fn resolve_base(base: &str, store_root: Option<&Path>) -> Result<(Pat
     let root = store_root.ok_or_else(|| "no models directory resolved (set --models-dir, BRAIN_MODELS_DIR, or HOME)".to_string())?;
     let store = brain_modelstore::Store::new(root);
     let local = store.local(&r).ok_or_else(|| format!("{base}: not found in the model store at {}", root.display()))?;
+    Ok((local.weights, local.dir, r.to_string()))
+}
+
+/// A repo directory -> the same `(weights, dir, id)` a `vendor/repo` ref
+/// resolves to.
+///
+/// A directory in the store IS `<root>/<vendor>/<repo>`, so splitting those
+/// three parts back out and going through [`brain_modelstore::Store`] reuses
+/// the compound/quant/manifest resolution instead of guessing at a filename.
+/// Every other weights variable names a directory; without this, the one that
+/// does not accepted a directory happily and failed with "Is a directory" at
+/// the first request, long after the operator could connect it to what they
+/// typed.
+fn resolve_repo_dir(dir: &Path) -> Result<(PathBuf, PathBuf, String), String> {
+    let unservable =
+        || format!("{}: a directory with no servable checkpoint in it", dir.display());
+
+    let repo = dir.file_name().and_then(|s| s.to_str()).ok_or_else(unservable)?;
+    let parent = dir.parent().ok_or_else(unservable)?;
+    let vendor = parent.file_name().and_then(|s| s.to_str()).ok_or_else(unservable)?;
+    let root = parent.parent().ok_or_else(unservable)?;
+
+    let r = brain_modelref::ModelRef::parse(&format!("{vendor}/{repo}")).map_err(|_| unservable())?;
+    let local = brain_modelstore::Store::new(root).local(&r).ok_or_else(unservable)?;
     Ok((local.weights, local.dir, r.to_string()))
 }
 
@@ -1528,6 +1556,37 @@ mod lora_finetune_cli_tests {
         assert_eq!(path, repo_dir.join("model.brain.safetensors"));
         assert_eq!(base_dir, repo_dir);
         assert_eq!(id, "Qwen/Qwen3-0.6B");
+    }
+
+    #[test]
+    fn resolve_base_resolves_a_repo_directory_to_the_checkpoint_inside_it() {
+        let dir = tmp("repo-dir");
+        let repo_dir = dir.join("Qwen").join("Qwen3-0.6B");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        let card = checkpoint::st::ModelCard::new("Qwen/Qwen3-0.6B", "qwen");
+        checkpoint::st::save_safetensors(
+            repo_dir.join("model.brain.safetensors").to_str().unwrap(),
+            &[("weight".to_string(), vec![2], vec![1.0, 2.0])],
+            &serde_json::json!({"vocab_size": 23}),
+            Some(&card),
+        )
+        .unwrap();
+        std::fs::write(repo_dir.join("tokenizer.json"), b"{}").unwrap();
+
+        // The directory is what `ls` and every other weights variable hand you.
+        let (path, base_dir, id) = resolve_base(repo_dir.to_str().unwrap(), None).unwrap();
+        assert_eq!(path, repo_dir.join("model.brain.safetensors"));
+        assert_eq!(base_dir, repo_dir);
+        assert_eq!(id, "Qwen/Qwen3-0.6B");
+    }
+
+    #[test]
+    fn resolve_base_reports_a_directory_with_no_checkpoint_by_name() {
+        let dir = tmp("empty-repo-dir");
+        let repo_dir = dir.join("Qwen").join("Nothing-Here");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        let err = resolve_base(repo_dir.to_str().unwrap(), None).unwrap_err();
+        assert!(err.contains("no servable checkpoint"), "{err}");
     }
 
     #[test]

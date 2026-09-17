@@ -559,8 +559,28 @@ impl QwenResident {
     /// SELECTION stays the two env vars named below (see
     /// [`QwenServeConfig`]'s own doc for why that split).
     pub fn from_env(cfg: QwenServeConfig) -> Option<QwenResident> {
-        let path = std::env::var("BRAIN_QWEN_WEIGHTS").ok().filter(|p| !p.is_empty())?;
-        let tokenizer = std::env::var("BRAIN_QWEN_TOKENIZER").ok().unwrap_or_default();
+        let spec = std::env::var("BRAIN_QWEN_WEIGHTS").ok().filter(|p| !p.is_empty())?;
+
+        // A directory is what every other weights variable takes, so accept one
+        // here too: `resolve_base` turns a repo directory into the checkpoint
+        // inside it, and leaves a plain file path alone. Unresolvable is not
+        // fatal - the path travels on verbatim so `activate` reports it against
+        // the real open, which is where every other bad path is reported.
+        let (path, dir) = match crate::qwen_cli::resolve_base(&spec, None) {
+            Ok((weights, dir, _)) => (weights.to_string_lossy().into_owned(), Some(dir)),
+            Err(_) => (spec, None),
+        };
+
+        // A tokenizer beside the checkpoint needs no second variable.
+        let tokenizer = match std::env::var("BRAIN_QWEN_TOKENIZER").ok().filter(|t| !t.is_empty()) {
+            Some(t) => t,
+            None => dir
+                .map(|d| d.join("tokenizer.json"))
+                .filter(|t| t.is_file())
+                .map(|t| t.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        };
+
         // See GptResident::from_env's comment: env-loaded, no upstream provenance.
         Some(Self::from_card_configured(&path, &ModelCard::new("brain/qwen3", "qwen"), Some(&tokenizer), None, cfg))
     }
