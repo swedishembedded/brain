@@ -27,7 +27,66 @@ use data::tokenizer::Tokenizer;
 use qwen3::config::QwenConfig;
 use qwen3::model::Qwen;
 
+/// Verbs this module implements ITSELF, in the form
+/// [`crate::args::canon_verb`] normalizes them to. Anything else that names
+/// a real action on `qwen3::caps`'s manifest is forwarded to the generic
+/// capability dispatcher instead - see [`run_qwen`].
+const DEDICATED_VERBS: &[&str] = &[
+    "import",
+    "infer",
+    "serve",
+    "export",
+    "precompile",
+    "train",
+    "finetune",
+    "toolcall",
+    "eval",
+    "calib",
+    "lora_gate",
+];
+
+/// Whether `verb` should be served by this module or handed to the generic
+/// capability dispatcher (`brain do <model> <action>`).
+///
+/// `canon_verb` folds `generate`/`gen`/`sample` into `infer`, which is right
+/// for the legacy spellings but WRONG for `generate`: that is the literal
+/// name of an action on `qwen3::caps`'s manifest, with its own parameter
+/// schema (`--precision`, `--messages`, `--tools`, `--enable_thinking`, ...).
+/// Folding it into this module's `infer` meant `brain qwen3 generate
+/// --precision int8` silently ran a different implementation and printed
+/// "ignoring unknown flag" for every caps-only parameter - the CLI
+/// contradicting the manifest `brain caps qwen3` prints, exactly the defect
+/// `tts_cli::run_tts`'s own fallback was added to fix.
+///
+/// So the RAW verb decides first: a caps action name goes to caps, and only
+/// what is left is canonicalized for this module's own match.
+#[must_use]
+pub fn is_caps_action(verb: &str) -> bool {
+    qwen3::caps::manifest()
+        .actions
+        .iter()
+        .any(|a| a.name == verb)
+}
+
 pub fn run_qwen(args: &[String]) {
+    // A verb naming a real caps action is dispatched generically, BEFORE
+    // `canon_verb` can fold it into a same-named dedicated verb. `infer`
+    // stays this module's own (it is not a caps action name), so every
+    // existing invocation is unchanged.
+    if let Some(verb) = args.first() {
+        if !verb.starts_with('-')
+            && is_caps_action(verb)
+            && !DEDICATED_VERBS.contains(&verb.as_str())
+        {
+            let mut do_args = vec![qwen3::caps::MODEL.to_string()];
+            do_args.extend_from_slice(args);
+            let code = crate::caps_cli::run_do(&do_args);
+            // See `crate::drain_before_exit`'s doc for the measured segfault
+            // this avoids on a real device build's abrupt-exit teardown.
+            crate::drain_before_exit(code);
+        }
+    }
+
     // Canonical verbs shared with `gpt`/`glm` (`gen`->`infer`, `fine-tune`->`finetune`).
     match args.first().map(|s| crate::args::canon_verb(s)) {
         Some("import") => import(&args[1..]),
@@ -42,8 +101,66 @@ pub fn run_qwen(args: &[String]) {
         Some("calib") => calib(&args[1..]),
         Some("lora_gate") => lora_gate(&args[1..]),
         other => {
-            eprintln!("usage: brain qwen3 <import|infer|export|precompile|train|finetune|toolcall|eval|calib|lora_gate> ...  (got {other:?})")
+            eprintln!("usage: brain qwen3 <import|infer|export|precompile|train|finetune|toolcall|eval|calib|lora_gate> ...  (got {other:?})");
+            eprintln!("       plus every action on the generic manifest (`brain caps qwen3`), e.g. `generate`.");
         }
+    }
+}
+
+#[cfg(test)]
+mod routing_tests {
+    use super::*;
+
+    /// The reported defect: `brain qwen3 generate --precision int8` ran this
+    /// module's `infer` and ignored `--precision`, because `canon_verb` folds
+    /// `generate` into `infer`. `generate` IS a caps action, so it must route
+    /// generically.
+    #[test]
+    fn generate_is_a_caps_action_and_is_not_a_dedicated_verb() {
+        assert!(
+            is_caps_action("generate"),
+            "qwen3::caps advertises `generate`"
+        );
+        assert!(
+            !DEDICATED_VERBS.contains(&"generate"),
+            "`generate` must not be claimed by this module, or it shadows the manifest"
+        );
+    }
+
+    /// `infer` is this module's own and is NOT on the manifest - so the
+    /// pre-existing `brain qwen3 infer` invocation keeps its old behaviour.
+    #[test]
+    fn infer_stays_dedicated_and_is_not_a_caps_action() {
+        assert!(DEDICATED_VERBS.contains(&"infer"));
+        assert!(
+            !is_caps_action("infer"),
+            "if caps ever adds `infer`, this routing needs revisiting"
+        );
+    }
+
+    /// Pins WHICH dedicated verbs also name a caps action, so a new shadow
+    /// cannot appear unnoticed - a caps action silently losing to a
+    /// same-named dedicated verb is the defect class this module's routing
+    /// exists to prevent.
+    ///
+    /// `lora_gate` is the one genuine, PRE-EXISTING duplicate: it is both a
+    /// verb here and an action on `qwen3::caps`'s manifest. Its routing is
+    /// deliberately left alone - it has worked as a dedicated verb for as
+    /// long as it has existed, and changing which implementation answers it
+    /// is a behavioural change that belongs in its own commit with its own
+    /// justification, not smuggled in behind a fix for `generate`.
+    #[test]
+    fn the_only_dedicated_verb_shadowing_a_caps_action_is_the_known_one() {
+        let shadowed: Vec<&str> = DEDICATED_VERBS
+            .iter()
+            .copied()
+            .filter(|v| is_caps_action(v))
+            .collect();
+        assert_eq!(
+            shadowed,
+            ["lora_gate"],
+            "a NEW dedicated verb now shadows a caps action; decide which implementation owns it"
+        );
     }
 }
 
