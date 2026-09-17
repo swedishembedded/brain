@@ -48,6 +48,7 @@ samples/python/restore/supir-restore/README.md
 samples/python/restore/vq-roundtrip/README.md
 samples/python/tts/cosyvoice-synth/README.md
 samples/python/tts/qwen3tts-speak/README.md
+samples/python/tts/voice-server/README.md
 samples/python/videogen/wan/README.md
 samples/python/vision/deepseek-ocr/README.md
 samples/python/vision/face-id/README.md

@@ -30,8 +30,8 @@ onnxruntime             # tools/goldens/arcface_dump_reference.py, tools/npu-adj
 opencv-python           # tools/goldens/arcface_dump_reference.py, tools/yolo_export/export_yolov8.py (cv2)
 scikit-image            # tools/goldens/arcface_dump_reference.py (5-point alignment; skimage.transform)
 pyyaml                  # tools/goldens/sam2_dump_reference.py, scripts/api/api_sync.py
-soundfile                # scripts/tts/brain_tts_client.py, tools/goldens/asr_dump_reference.py
-sounddevice              # scripts/tts/brain_tts_client.py, tools/goldens/asr_dump_reference.py (live audio)
+soundfile                # samples/python/tts/voice-server/brain_tts_client.py, tools/goldens/asr_dump_reference.py
+sounddevice              # samples/python/tts/voice-server/brain_tts_client.py, tools/goldens/asr_dump_reference.py (live audio)
 jsonschema               # scripts/api/validate_spec.py (degrades to jq shape checks if absent)
 chronos-forecasting      # tools/goldens/chronos2_dump_*_reference.py (`from chronos.chronos2 import ...`)
 st_moe_pytorch           # tools/goldens/fincast_dump_reference.py

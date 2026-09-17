@@ -55,3 +55,6 @@ samples/python/vision/worldmirror2-reconstruct/worldmirror2_reconstruct.py	skip	
 samples/shell/forecast/cooling-loop/cooling_loop.py	skip	needs BRAIN_TIMESFM3 weights (timesfm-non-commercial license, never redistributed); the mock model has no forecast covariate wire yet
 samples/shell/forecast/cooling-loop/cooling_loop.sh	skip	direct Rust cargo-example path (no D-Bus); needs a real TimesFM-3 checkpoint
 samples/shell/restore/upscale/upscale.sh	skip	direct-CLI (no D-Bus); needs BRAIN_ESRGAN_WEIGHTS (RealESRGAN_x4plus.pth)
+samples/python/tts/voice-server/brain_tts_client.py	skip	internal helper (socket client) shared by voice-clone.py and voice-design.py, not an independent entry point; not run standalone here
+samples/python/tts/voice-server/voice-clone.py	skip	needs a running `brain qwen3tts serve` with BRAIN_QWEN3TTS_REF/_REF_TEXT set; not a D-Bus client, out of this harness's scope
+samples/python/tts/voice-server/voice-design.py	skip	needs a running `brain qwen3tts serve`; not a D-Bus client, out of this harness's scope

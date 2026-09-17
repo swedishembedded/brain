@@ -114,9 +114,9 @@ an empty terminal `audio_chunk`.
 There is also a dedicated low-latency server, `brain qwen3tts serve`, which keeps
 compiled NPU graphs resident and streams synthesized audio back over a
 line-delimited JSON protocol on a Unix socket - see `brain qwen3tts serve --help`
-for its engine/socket flags. `scripts/tts/voice-clone.py` and
-`scripts/tts/voice-design.py` are example clients that speak to it and play
-the result.
+for its engine/socket flags. `samples/python/tts/voice-server/voice-clone.py` and
+`samples/python/tts/voice-server/voice-design.py` are example clients that speak
+to it and play the result.
 
 LoRA fine-tuning (single-speaker) of the Talker on a `text -> codes` dataset:
 
