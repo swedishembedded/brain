@@ -129,3 +129,94 @@ fn the_circuit_is_silent_until_it_is_driven() {
     assert_eq!(quiet.rate, 0.0, "the circuit fires with no input at all");
     assert!(!quiet.is_rhythmic(0.3));
 }
+
+/// The same claim for the whole cord, which is the harder one.
+///
+/// The isolated circuit test above shows the oscillator exists in the
+/// anatomy. It does not show that anything downstream can hear it: twenty
+/// cells driving a rhythm inside 23,665 of them is a different question, and
+/// at the uniform physiology the answer was nearly no. This gates what
+/// survives - that SOME tonic drive of DNg100 makes the leg motor pool
+/// oscillate in the walking band, and that at that same drive a degree-matched
+/// shuffle does not.
+///
+/// The shuffle is checked across the whole sweep rather than at the matched
+/// drive alone. A shuffled cord that oscillated in band at some OTHER current
+/// would mean the frequency is a property of the cord's bulk dynamics that the
+/// real wiring merely happens to reach first, which is a much weaker claim
+/// than the one being made.
+#[test]
+fn the_whole_cord_oscillates_in_the_walking_band_under_its_own_command_neuron() {
+    let Some(c) = cord() else {
+        eprintln!("skipping: set BRAIN_CONNECTOME_DIR to a directory holding manc/");
+        return;
+    };
+    let w = fly::Wiring::default();
+    let command = c.population(|n| n.cell_type == "DNg100");
+    let legs = c.population(|n| n.super_class == "motor" && matches!(n.class.as_str(), "fl" | "ml" | "hl"));
+    assert!(!command.is_empty() && !legs.is_empty(), "MANC must have DNg100 and leg motor neurons");
+    // A size-matched descending population that is not the one being claimed.
+    let others: Vec<u32> = c
+        .population(|n| n.super_class == "descending" && n.cell_type != "DNg100")
+        .into_iter()
+        .take(command.len())
+        .collect();
+
+    let base = c.network(w.weight_scale, w.size_limit, w.min_synapses);
+    let shuffled_graph = base.shuffled_sources(0x5EED);
+    let mut real = SpikingNet::new(gpu_core::testgpu::dev(&neuro::KERNELS), &base, fly::cord_lif()).unwrap();
+    let mut shuf = SpikingNet::new(gpu_core::testgpu::dev(&neuro::KERNELS), &shuffled_graph, fly::cord_lif()).unwrap();
+
+    let n = real.port_len(Port::Spike);
+    let go = |net: &mut SpikingNet, driven: &[u32], current: f32| -> Rhythm {
+        let mut drive = vec![0.0f32; n];
+        for &d in driven {
+            drive[d as usize] = current;
+        }
+        net.reset(0);
+        net.drive(Port::Drive, &drive).unwrap();
+        let mut spike = vec![0.0f32; n];
+        let mut series = Vec::new();
+        for t in 0..1750 {
+            net.step();
+            net.read(Port::Spike, &mut spike).unwrap();
+            if t >= 250 {
+                series.push(legs.iter().map(|&i| spike[i as usize] as f64).sum());
+            }
+        }
+        analyse(&series, DT, (5.0, 20.0))
+    };
+    let currents = [1.0f32, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0];
+    let mut found: Option<(f32, Rhythm)> = None;
+    for &i in &currents {
+        let r = go(&mut real, &command, i);
+        eprintln!("DNg100 at {i:>4}: {:>7.2} Hz  strength {:.3}  in_band {}", r.hz, r.strength, r.in_band);
+        if r.is_rhythmic(0.3) && found.as_ref().is_none_or(|(_, b)| r.strength > b.strength) {
+            found = Some((i, r));
+        }
+    }
+    let Some((current, best)) = found else {
+        panic!("no tonic DNg100 drive made the leg motor pool oscillate in the walking band");
+    };
+    eprintln!("\nthe cord oscillates at {:.2} Hz under a constant DNg100 drive of {current}", best.hz);
+
+    for &i in &currents {
+        let r = go(&mut shuf, &command, i);
+        assert!(
+            !r.is_rhythmic(0.3),
+            "a degree-matched shuffle oscillated in band at drive {i} ({:.2} Hz, strength {:.3}), so the rhythm is not a property of this wiring",
+            r.hz,
+            r.strength
+        );
+    }
+    if !others.is_empty() {
+        let r = go(&mut real, &others, current);
+        eprintln!("other descending: {:>7.2} Hz  strength {:.3}", r.hz, r.strength);
+        assert!(
+            r.strength < best.strength,
+            "a size-matched descending population that is not DNg100 drove the pool as rhythmically ({:.3} against {:.3})",
+            r.strength,
+            best.strength
+        );
+    }
+}

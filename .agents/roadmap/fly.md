@@ -28,9 +28,9 @@ What remains, per verb:
 | | state |
 |---|---|
 | **moves its legs** | done - 330 motor neurons on 44 actuators, the loop closes at 0.55x real time |
-| **walks** | the first search under it found a slide: 20x the imported connectome while finishing 2.39 radians from upright. Uprightness is in the objective now and the search is re-running |
+| **walks** | the RHYTHM is in the anatomy and is measured: tonic DNg100 drive makes the leg motor pool oscillate at 16.7 Hz, where a degree-matched shuffle rings at 125 Hz at every drive and a size-matched descending population is 6x weaker. Isolated, the published three-neuron circuit runs at 13.5 Hz and dies when its inhibitory cell is deleted. Turning that rhythm into locomotion in the body is not done |
 | **flies** | two thirds of an episode airborne at 48 BL/s, upright - but a degree-matched shuffle reaches 77% of that, so the objective does not need the wiring. Steering is the task that would |
-| **explores** | the olfactory chain carries end to end and is lateralised; steering is untrained |
+| **explores** | the olfactory chain carries end to end and is lateralised; steering is untrained. The mushroom body is now wired for learning rather than searched: plasticity is confined to the Kenyon-cell output synapses and gated by identified dopaminergic cells per compartment |
 
 `brain fly walk` fetches the MANC connectome, runs all 23,188 neurons and
 5.24M synapses as a spiking network on the GPU, drives the flybody fly in
@@ -51,6 +51,38 @@ entrained at 218 Hz.
 
 The gate is `crates/promote`'s one-sided paired sign test over matched episode
 pairs, not a screenshot and not a mean.
+
+## Three kinds of learning, kept apart
+
+Conflating these is what produced the flight result whose shuffle reached 77%.
+A connectome fixes who contacts whom; it contains no time constants, no
+excitabilities and no synaptic conductances, and supplying those is a
+different problem from acquiring a skill, which is a different problem again
+from learning something during a life.
+
+| | question | method | state |
+|---|---|---|---|
+| **calibration** | what physiology makes this anatomy work? | fitted, shared per connection type | `physiology.rs`, 815 parameters on MANC |
+| **skill** | how does this body walk and fly? | search against a behaviour, in physics | the searches in `learn.rs` |
+| **lifetime** | what is good, and where is it? | dopamine-gated plasticity at real synapses | `neuro::Sites` + `connectome::mushroom_body` |
+
+The rule is that a lower row may not be used to do a higher row's job. Asking
+a behavioural score to supply the physiology is what lets an optimiser buy the
+behaviour by leaving the measured wiring behind, because nothing in that
+objective forbids it. Calibration is therefore fitted against PHYSIOLOGICAL
+targets - an in-band rhythm, a plausible firing rate, silence without a
+command - and the shuffle control is evaluated at the same parameters every
+generation.
+
+Parameter sharing is what keeps calibration honest, and the granularity was
+chosen by measuring MANC rather than by copying a number:
+
+| grouping | groups | connection types | edges in named groups |
+|---|---|---|---|
+| super class | 11 | - | too coarse to distinguish a motor from an interneuron target |
+| **class** | **36** | **707** | **95%** |
+| hemilineage | 44 | 1,640 | 56% |
+| cell type | 4,075 | 345,573 | a free parameter per synapse in all but name |
 
 ## Decisions taken
 

@@ -38,7 +38,7 @@ fn num<T: std::str::FromStr>(name: &str, default: T) -> T {
 
 /// A walking fly steps at something like 5 to 20 hertz. Asking inside a band
 /// is what separates a measurement from a search for any structure at all.
-const BAND: (f64, f64) = (3.0, 30.0);
+const BAND: (f64, f64) = (5.0, 20.0);
 
 fn main() {
     let which = match std::env::var("CNS").unwrap_or_else(|_| "cord".into()).as_str() {
@@ -117,7 +117,21 @@ fn main() {
             r.deviation,
             r.hz,
             r.strength,
-            if r.is_rhythmic(0.3) { "in band" } else if r.hz > 0.0 { "out of band" } else { "silent" }
+            // Three outcomes, not two. "Weak" and "out of band" are
+            // different failures: a control that oscillates at the right
+            // frequency but feebly has the mechanism and not the drive, while
+            // one ringing at its refractory period does not have the
+            // mechanism at all. Collapsing them hid that a size-matched
+            // descending population does reach the band, just barely.
+            if r.rate == 0.0 {
+                "silent"
+            } else if !r.in_band {
+                "out of band"
+            } else if r.strength >= 0.3 {
+                "IN BAND"
+            } else {
+                "in band, weak"
+            }
         );
     };
 
@@ -144,7 +158,18 @@ fn main() {
     }
 
     // Where the rhythm should be coming from, if it is coming from anywhere.
-    let strongest = sweep.iter().skip(1).max_by(|a, b| a.1.strength.total_cmp(&b.1.strength)).map(|x| x.0).unwrap_or(8.0);
+    // The drive to run the controls at is the one with the best IN-BAND
+    // rhythm, not the highest strength. Strength alone picks whichever drive
+    // rings hardest at the refractory period, which is how the first version
+    // of this ran every control at a current where the real cord was not
+    // oscillating in band either - and then reported that the controls looked
+    // similar, which they did, because none of them were doing the thing.
+    let strongest = sweep
+        .iter()
+        .filter(|(i, r)| *i > 0.0 && r.is_rhythmic(0.0))
+        .max_by(|a, b| a.1.strength.total_cmp(&b.1.strength))
+        .map(|x| x.0)
+        .unwrap_or(8.0);
     println!("\nthe pruned oscillator at {command_type} = {strongest:.0}:");
     let series = run(&mut net, &command, strongest, &watch);
     for (i, (name, cells)) in cpg.iter().enumerate() {
@@ -166,8 +191,13 @@ fn main() {
         row("other descending", &analyse(&series[0], dt, BAND));
     }
     let mut shuffled = build(Some(0x5EED));
-    let series = run(&mut shuffled, &command, strongest, &watch);
-    row("shuffled cord", &analyse(&series[0], dt, BAND));
+    for &i in &currents {
+        if i == 0.0 {
+            continue;
+        }
+        let series = run(&mut shuffled, &command, i, &watch);
+        row(&format!("shuffled cord at {i}"), &analyse(&series[0], dt, BAND));
+    }
 
     // THE CIRCUIT ALONE.
     //
@@ -205,7 +235,7 @@ fn main() {
     }
     let best_iso = iso_sweep
         .iter()
-        .filter(|(i, _)| *i > 0.0)
+        .filter(|(i, r)| *i > 0.0 && r.is_rhythmic(0.0))
         .max_by(|a, b| a.1.strength.total_cmp(&b.1.strength))
         .map(|x| x.0)
         .unwrap_or(4.0);
