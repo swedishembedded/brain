@@ -77,12 +77,17 @@ fn main() {
     let settle: usize = num("SETTLE", 250);
     let dt = 0.002;
 
+    // How far below rest inhibition may push a membrane, in threshold-gaps.
+    // A fly rests 7 mV below threshold and its chloride reversal sits about
+    // 20 mV below rest, so the physiological value is near -3. Swept because
+    // the oscillation this example reports turned out to DEPEND on it.
+    let lif = || fly::LifParams { v_min: num("V_MIN", -3.0f32), ..fly::cord_lif() };
     let build = |seed: Option<u64>| {
         let mut graph = c.network(wiring.weight_scale, wiring.size_limit, wiring.min_synapses);
         if let Some(s) = seed {
             graph = graph.shuffled_sources(s);
         }
-        SpikingNet::new(gpu_core::testgpu::dev(&neuro::KERNELS), &graph, fly::cord_lif()).expect("the cord runs")
+        SpikingNet::new(gpu_core::testgpu::dev(&neuro::KERNELS), &graph, lif()).expect("the cord runs")
     };
 
     // One run: constant current into `driven`, and the per-tick population
@@ -222,7 +227,7 @@ fn main() {
         sub.neurons.len(),
         graph.nnz()
     );
-    let mut iso = SpikingNet::new(gpu_core::testgpu::dev(&neuro::KERNELS), &graph, fly::cord_lif()).expect("it runs");
+    let mut iso = SpikingNet::new(gpu_core::testgpu::dev(&neuro::KERNELS), &graph, lif()).expect("it runs");
     let s_watch: Vec<&[u32]> = s_cpg.iter().map(|(_, v)| v.as_slice()).collect();
     let mut iso_sweep: Vec<(f32, Rhythm)> = Vec::new();
     for &i in &currents {
@@ -259,7 +264,7 @@ fn main() {
     println!("\ncontrols on the circuit alone, at {command_type} = {best_iso:.0}:");
     let shuffled_graph = graph.shuffled_sources(0x5EED);
     let mut iso_shuf =
-        SpikingNet::new(gpu_core::testgpu::dev(&neuro::KERNELS), &shuffled_graph, fly::cord_lif()).expect("it runs");
+        SpikingNet::new(gpu_core::testgpu::dev(&neuro::KERNELS), &shuffled_graph, lif()).expect("it runs");
     let series = run(&mut iso_shuf, &s_command, best_iso, &s_watch);
     row("shuffled circuit", &analyse(&series[1], dt, BAND));
 
@@ -267,7 +272,7 @@ fn main() {
     let ni_command = no_inhibition.population(|n| n.cell_type == command_type);
     let ni_e2 = no_inhibition.population(|n| n.cell_type == "INXXX466");
     let ni_graph = no_inhibition.network(wiring.weight_scale, wiring.size_limit, wiring.min_synapses);
-    let mut ni = SpikingNet::new(gpu_core::testgpu::dev(&neuro::KERNELS), &ni_graph, fly::cord_lif()).expect("it runs");
+    let mut ni = SpikingNet::new(gpu_core::testgpu::dev(&neuro::KERNELS), &ni_graph, lif()).expect("it runs");
     let series = run(&mut ni, &ni_command, best_iso, &[ni_e2.as_slice()]);
     row("without IN16B036", &analyse(&series[0], dt, BAND));
 

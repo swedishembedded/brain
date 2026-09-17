@@ -44,6 +44,16 @@ fn cord() -> Option<connectome::Connectome> {
 
 /// Drive `command` with a constant current and analyse `watch`.
 fn oscillation(c: &connectome::Connectome, drop: Option<&str>, shuffle: Option<u64>, current: f32) -> Rhythm {
+    oscillation_at(c, drop, shuffle, current, fly::cord_lif().v_min)
+}
+
+fn oscillation_at(
+    c: &connectome::Connectome,
+    drop: Option<&str>,
+    shuffle: Option<u64>,
+    current: f32,
+    v_min: f32,
+) -> Rhythm {
     let sub = c.subgraph(|n| CIRCUIT.contains(&n.cell_type.as_str()) && Some(n.cell_type.as_str()) != drop);
     let command = sub.population(|n| n.cell_type == "DNg100");
     let watch = sub.population(|n| n.cell_type == "INXXX466");
@@ -52,8 +62,8 @@ fn oscillation(c: &connectome::Connectome, drop: Option<&str>, shuffle: Option<u
     if let Some(s) = shuffle {
         graph = graph.shuffled_sources(s);
     }
-    let mut net =
-        SpikingNet::new(gpu_core::testgpu::dev(&neuro::KERNELS), &graph, fly::cord_lif()).expect("the circuit runs");
+    let lif = fly::LifParams { v_min, ..fly::cord_lif() };
+    let mut net = SpikingNet::new(gpu_core::testgpu::dev(&neuro::KERNELS), &graph, lif).expect("the circuit runs");
     let n = net.port_len(Port::Spike);
     let mut drive = vec![0.0f32; n];
     for &d in &command {
@@ -73,8 +83,34 @@ fn oscillation(c: &connectome::Connectome, drop: Option<&str>, shuffle: Option<u
     analyse(&series, DT, BAND)
 }
 
+/// RETRACTED, and kept as the measurement that retracts it.
+///
+/// This file previously asserted that the connectome's own three-neuron
+/// circuit oscillates at 13.5 Hz under tonic drive, with a degree-matched
+/// shuffle and a deleted-inhibition control both failing. Those numbers were
+/// real. The conclusion was not, because the model they came from let a
+/// membrane be driven arbitrarily far below rest.
+///
+/// A real neuron cannot. Inhibition opens channels whose reversal potential
+/// sits about 20 mV below a rest that is itself 7 mV below threshold, so the
+/// membrane approaches roughly three threshold-gaps down and stops. Sweeping
+/// that floor:
+///
+///   v_min     -3      physiological      never oscillates in band
+///   v_min     -6                         in band, strength 0.09
+///   v_min    -12                         in band, strength 0.37
+///   unbounded                            in band, strength 0.94
+///
+/// The oscillation needs about twelve threshold-gaps of hyperpolarisation,
+/// which for this animal is 84 mV below rest. Nothing in a fly reaches that.
+/// The rhythm was rebound from a hyperpolarisation no neuron can experience.
+///
+/// The published result it was supposed to reproduce used a RATE model with a
+/// rectified tanh, bounded below at zero by construction, where this failure
+/// mode cannot occur. A spiking port of it is not a reproduction of it, and
+/// this is what that difference cost.
 #[test]
-fn the_isolated_circuit_oscillates_in_the_walking_band_and_needs_its_inhibition() {
+fn the_oscillation_needs_hyperpolarisation_deeper_than_a_neuron_can_reach() {
     let Some(c) = cord() else {
         eprintln!("skipping: set BRAIN_CONNECTOME_DIR to a directory holding manc/");
         return;
@@ -82,39 +118,29 @@ fn the_isolated_circuit_oscillates_in_the_walking_band_and_needs_its_inhibition(
     for t in CIRCUIT {
         assert!(!c.population(|n| n.cell_type == t).is_empty(), "MANC has no {t}");
     }
-
-    // The drive is swept rather than chosen, because picking one current and
-    // reporting what happened there is how a search result gets written up as
-    // a prediction. The claim is that SOME tonic drive makes this circuit
-    // oscillate in the walking band; the sweep is what makes that a statement
-    // about the circuit rather than about a number somebody tuned.
     let currents = [1.0f32, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0];
-    let intact: Vec<(f32, Rhythm)> = currents.iter().map(|&i| (i, oscillation(&c, None, None, i))).collect();
-    for (i, r) in &intact {
-        eprintln!("intact at {i:>4}: {:>7.2} Hz  strength {:.3}  {}", r.hz, r.strength, if r.is_rhythmic(0.3) { "in band" } else { "out" });
-    }
-    let Some(&(current, ref best)) = intact.iter().filter(|(_, r)| r.is_rhythmic(0.3)).max_by(|a, b| a.1.strength.total_cmp(&b.1.strength)) else {
-        panic!("no tonic drive made the circuit oscillate in {BAND:?} Hz");
+    let best = |v_min: f32| -> f64 {
+        currents
+            .iter()
+            .map(|&i| oscillation_at(&c, None, None, i, v_min))
+            .filter(|r| r.is_rhythmic(0.0))
+            .map(|r| r.strength)
+            .fold(0.0f64, f64::max)
     };
-    eprintln!("\nthe circuit oscillates at {:.2} Hz under a constant drive of {current}", best.hz);
 
-    // And at that same drive, neither control does.
-    let shuffled = oscillation(&c, None, Some(0x5EED), current);
-    let no_inhibition = oscillation(&c, Some("IN16B036"), None, current);
-    eprintln!("shuffled:   {:>7.2} Hz  strength {:.3}", shuffled.hz, shuffled.strength);
-    eprintln!("no IN16B036:{:>7.2} Hz  strength {:.3}", no_inhibition.hz, no_inhibition.strength);
+    let physiological = best(fly::cord_lif().v_min);
+    let unbounded = best(-1.0e9);
+    eprintln!("best in-band strength: physiological floor {physiological:.3}, unbounded {unbounded:.3}");
 
     assert!(
-        !shuffled.is_rhythmic(0.3),
-        "a degree-matched shuffle of the same cells oscillated too ({:.2} Hz, strength {:.3}), so the wiring was not what produced the rhythm",
-        shuffled.hz,
-        shuffled.strength
+        physiological < 0.25,
+        "the circuit oscillates at a physiological inhibitory reversal ({physiological:.3}); if this \
+         starts passing the model changed and the retraction above should be revisited"
     );
     assert!(
-        !no_inhibition.is_rhythmic(0.3),
-        "the rhythm survived deleting the inhibitory neuron ({:.2} Hz, strength {:.3}), so rebound from inhibition was not the mechanism",
-        no_inhibition.hz,
-        no_inhibition.strength
+        unbounded > physiological + 0.2,
+        "removing the floor no longer produces the oscillation ({unbounded:.3} against {physiological:.3}), \
+         so the artefact this test records is gone and the test has stopped measuring anything"
     );
 }
 
@@ -130,93 +156,18 @@ fn the_circuit_is_silent_until_it_is_driven() {
     assert!(!quiet.is_rhythmic(0.3));
 }
 
-/// The same claim for the whole cord, which is the harder one.
+/// The whole-cord version of the same retraction, recorded rather than
+/// re-asserted.
 ///
-/// The isolated circuit test above shows the oscillator exists in the
-/// anatomy. It does not show that anything downstream can hear it: twenty
-/// cells driving a rhythm inside 23,665 of them is a different question, and
-/// at the uniform physiology the answer was nearly no. This gates what
-/// survives - that SOME tonic drive of DNg100 makes the leg motor pool
-/// oscillate in the walking band, and that at that same drive a degree-matched
-/// shuffle does not.
+/// This file also claimed that tonic DNg100 drive makes the leg motor pool
+/// oscillate at 16.67 Hz where a degree-matched shuffle rings at 125 Hz at
+/// every drive, and that a size-matched descending population is six times
+/// weaker. Under a physiological inhibitory reversal the best in-band strength
+/// DNg100 reaches is 0.201, and the size-matched control reaches 0.778 - the
+/// specificity is not merely weaker, it is reversed.
 ///
-/// The shuffle is checked across the whole sweep rather than at the matched
-/// drive alone. A shuffled cord that oscillated in band at some OTHER current
-/// would mean the frequency is a property of the cord's bulk dynamics that the
-/// real wiring merely happens to reach first, which is a much weaker claim
-/// than the one being made.
-#[test]
-fn the_whole_cord_oscillates_in_the_walking_band_under_its_own_command_neuron() {
-    let Some(c) = cord() else {
-        eprintln!("skipping: set BRAIN_CONNECTOME_DIR to a directory holding manc/");
-        return;
-    };
-    let w = fly::Wiring::default();
-    let command = c.population(|n| n.cell_type == "DNg100");
-    let legs = c.population(|n| n.super_class == "motor" && matches!(n.class.as_str(), "fl" | "ml" | "hl"));
-    assert!(!command.is_empty() && !legs.is_empty(), "MANC must have DNg100 and leg motor neurons");
-    // A size-matched descending population that is not the one being claimed.
-    let others: Vec<u32> = c
-        .population(|n| n.super_class == "descending" && n.cell_type != "DNg100")
-        .into_iter()
-        .take(command.len())
-        .collect();
-
-    let base = c.network(w.weight_scale, w.size_limit, w.min_synapses);
-    let shuffled_graph = base.shuffled_sources(0x5EED);
-    let mut real = SpikingNet::new(gpu_core::testgpu::dev(&neuro::KERNELS), &base, fly::cord_lif()).unwrap();
-    let mut shuf = SpikingNet::new(gpu_core::testgpu::dev(&neuro::KERNELS), &shuffled_graph, fly::cord_lif()).unwrap();
-
-    let n = real.port_len(Port::Spike);
-    let go = |net: &mut SpikingNet, driven: &[u32], current: f32| -> Rhythm {
-        let mut drive = vec![0.0f32; n];
-        for &d in driven {
-            drive[d as usize] = current;
-        }
-        net.reset(0);
-        net.drive(Port::Drive, &drive).unwrap();
-        let mut spike = vec![0.0f32; n];
-        let mut series = Vec::new();
-        for t in 0..1750 {
-            net.step();
-            net.read(Port::Spike, &mut spike).unwrap();
-            if t >= 250 {
-                series.push(legs.iter().map(|&i| spike[i as usize] as f64).sum());
-            }
-        }
-        analyse(&series, DT, (5.0, 20.0))
-    };
-    let currents = [1.0f32, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0];
-    let mut found: Option<(f32, Rhythm)> = None;
-    for &i in &currents {
-        let r = go(&mut real, &command, i);
-        eprintln!("DNg100 at {i:>4}: {:>7.2} Hz  strength {:.3}  in_band {}", r.hz, r.strength, r.in_band);
-        if r.is_rhythmic(0.3) && found.as_ref().is_none_or(|(_, b)| r.strength > b.strength) {
-            found = Some((i, r));
-        }
-    }
-    let Some((current, best)) = found else {
-        panic!("no tonic DNg100 drive made the leg motor pool oscillate in the walking band");
-    };
-    eprintln!("\nthe cord oscillates at {:.2} Hz under a constant DNg100 drive of {current}", best.hz);
-
-    for &i in &currents {
-        let r = go(&mut shuf, &command, i);
-        assert!(
-            !r.is_rhythmic(0.3),
-            "a degree-matched shuffle oscillated in band at drive {i} ({:.2} Hz, strength {:.3}), so the rhythm is not a property of this wiring",
-            r.hz,
-            r.strength
-        );
-    }
-    if !others.is_empty() {
-        let r = go(&mut real, &others, current);
-        eprintln!("other descending: {:>7.2} Hz  strength {:.3}", r.hz, r.strength);
-        assert!(
-            r.strength < best.strength,
-            "a size-matched descending population that is not DNg100 drove the pool as rhythmically ({:.3} against {:.3})",
-            r.strength,
-            best.strength
-        );
-    }
-}
+/// There is no whole-cord test here any more because there is nothing left to
+/// gate: the claim it was written to defend does not survive the correction,
+/// and a test that asserts the corrected negative would spend forty-five
+/// seconds a run to say what the isolated-circuit test above already says
+/// faster and more precisely.

@@ -190,30 +190,24 @@ fn main() {
         // the circuit. This is what the published screen does and it is the
         // step whose absence made a drive sweep here work at one value out of
         // eight.
+        // Find the lowest current that recruits anything at all, then report
+        // just above it. Bisecting to a recruitment TARGET reports nothing
+        // useful when recruitment jumps discontinuously from zero to the whole
+        // cord, which is what a network with no graded regime does: the probe
+        // closest to the target is the one on the zero side, and the row then
+        // reads "recruits nothing" for a scale that recruits everything one
+        // step higher. The transition itself is the measurement.
         let (mut lo, mut hi) = (1e-3f32, 1e4f32);
-        let mut driven = run(&command, drive_current);
-        let mut current = drive_current;
-        // Keep the probe that came CLOSEST to the target, not the last one.
-        // Where recruitment jumps discontinuously - which is what a cord
-        // driven by two cells does - the final bisection step lands on
-        // whichever side it happened to, and reporting that says a scale
-        // recruits nothing when the probe before it recruited five hundred.
-        let mut best = usize::MAX;
-        for _ in 0..14 {
+        for _ in 0..16 {
             let probe = (lo * hi).sqrt();
-            let r = run(&command, probe);
-            let miss = r.recruited.abs_diff(TARGET_RECRUITED);
-            if miss < best {
-                best = miss;
-                driven = r.clone();
-                current = probe;
-            }
-            if r.recruited < TARGET_RECRUITED {
+            if run(&command, probe).recruited < 5 {
                 lo = probe;
             } else {
                 hi = probe;
             }
         }
+        let current = hi;
+        let driven = run(&command, current);
         let (rate, active) = (driven.mean, driven.active);
         let kc = (!mb.kc.is_empty() && !orns.is_empty()).then(|| {
             let mut drive = vec![0.0f32; n];

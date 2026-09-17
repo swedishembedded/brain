@@ -84,7 +84,11 @@ fn main() {
         gpu_core::testgpu::dev(&neuro::KERNELS),
         &c,
         model,
-        fly::cord_lif(),
+        // `TAU_INH` in milliseconds. The default here gives inhibition four
+        // times the excitatory time constant, so a balanced synapse count
+        // integrates to four times the inhibition; the published whole-brain
+        // model of this animal uses one 5 ms constant for both.
+        fly::LifParams { dt_over_tau_inh: 2.0 / num("TAU_INH", 20.0f32), ..fly::cord_lif() },
         Wiring { weight_scale: num("SCALE", 0.6f32), ..Wiring::default() },
         Timing::default(),
         Coupling { adhesion_gain: num("ADHESION", 0.4), ..Coupling::default() },
@@ -98,6 +102,14 @@ fn main() {
 
     let names: Vec<String> = groups.keys().cloned().collect();
     let mut trace: Vec<Vec<f64>> = vec![Vec::with_capacity(ticks); names.len()];
+    // Membrane potential, because a cell with the most input in the leg firing
+    // at 0.7 Hz while one with the least fires at 99 Hz is not an excitability
+    // story. There is no lower bound on `v` in this model: a real neuron
+    // cannot be driven below its inhibitory reversal potential, and one here
+    // can, so a heavily innervated cell in a balanced network can be pushed
+    // arbitrarily far down and never come back.
+    let mut volts = vec![0.0f64; names.len()];
+    let mut vbuf = vec![0.0f32; c.neurons.len()];
     for t in 0..settle + ticks {
         f.step().expect("a tick runs");
         if t < settle {
@@ -107,19 +119,26 @@ fn main() {
         for (row, name) in trace.iter_mut().zip(&names) {
             row.push(groups[name].iter().filter(|&&i| spike[i as usize] > 0.5).count() as f64);
         }
+        f.membrane(&mut vbuf).expect("the readback fits");
+        for (v, name) in volts.iter_mut().zip(&names) {
+            let g = &groups[name];
+            *v += g.iter().map(|&i| vbuf[i as usize] as f64).sum::<f64>() / g.len() as f64;
+        }
     }
 
     let seconds = ticks as f64 * fly::CONTROL_PERIOD;
     println!("{seg:?} {side:?} leg, command {command} to {dn}, {ticks} ticks ({seconds:.0} s)\n");
-    println!("{:>34}  {:>5}  {:>9}  {:>9}  {:>8}", "muscle", "cells", "Hz/cell", "rhythm", "at Hz");
+    println!("{:>34}  {:>5}  {:>9}  {:>9}  {:>8}  {:>9}", "muscle", "cells", "Hz/cell", "rhythm", "at Hz", "mean v");
     for (name, row) in names.iter().zip(&trace) {
         let cells = groups[name].len();
         let r = analyse(row, fly::CONTROL_PERIOD, BAND);
         let per_cell = row.iter().sum::<f64>() / cells as f64 / seconds;
+        let i = names.iter().position(|n| n == name).unwrap();
         println!(
-            "{name:>34}  {cells:>5}  {per_cell:>9.1}  {:>9.3}  {:>8.2}{}",
+            "{name:>34}  {cells:>5}  {per_cell:>9.1}  {:>9.3}  {:>8.2}  {:>9.2}{}",
             r.strength,
             r.hz,
+            volts[i] / ticks as f64,
             if r.is_rhythmic(0.25) { "  IN BAND" } else { "" }
         );
     }

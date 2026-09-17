@@ -72,14 +72,29 @@ fn main() {
             &c,
             model,
             fly::cord_lif(),
-            Wiring::default(),
+            Wiring {
+                weight_scale: num("SCALE", 0.06f32),
+                // `SIZE=0` turns off the per-neuron size normalisation. It is
+                // physiologically motivated - a bigger cell has lower input
+                // resistance - but it divides motor neuron input to 36% while
+                // multiplying sensory input by 5.3, and no single synaptic
+                // scale can then satisfy both.
+                size_limit: (num("SIZE", 1u8) != 0).then_some(10.0),
+                ..Wiring::default()
+            },
             Timing::default(),
             coupling,
         )
         .unwrap();
         f.set_proprioception(proprio);
         f.reset();
-        if f.drive_cell_type(&dn, cmd).unwrap_or(0) == 0 {
+        if dn == "all" {
+            // The whole descending population at once. Not the published
+            // experiment, but the comparison that says whether one command
+            // cell failing to recruit the cord is about that cell or about
+            // the model having no background tone at all.
+            f.set_descending(&vec![cmd; f.descending_count()]).expect("the command fits");
+        } else if f.drive_cell_type(&dn, cmd).unwrap_or(0) == 0 {
             eprintln!("no descending neuron of type {dn}");
             std::process::exit(2);
         }

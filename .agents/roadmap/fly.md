@@ -28,7 +28,7 @@ What remains, per verb:
 | | state |
 |---|---|
 | **moves its legs** | done - 330 motor neurons on 44 actuators, the loop closes at 0.55x real time |
-| **walks** | NOT DONE, and the earlier claim here was wrong. The tuning scores 0.46 BL/s over the 2 s episode it was trained on and 0.02 BL/s over 6 or 12 s, which is worse than the connectome as imported. It is a two-second lunge, and all four controls ran at the training length so none could see it. The RHYTHM is a separate and standing result: tonic DNg100 drive makes the leg motor pool oscillate at 16.7 Hz where a shuffle rings at 125 Hz at every drive |
+| **walks** | NOT DONE, and both earlier claims here are retracted. The tuning was a two-second lunge (0.46 BL/s over its training episode, 0.02 over ten seconds, worse than the connectome untouched). The DNg100 rhythm was an artefact: the model let a membrane be driven arbitrarily below rest, and the oscillation needs about twelve threshold-gaps of hyperpolarisation where a fly has three. At a physiological inhibitory reversal it does not oscillate in band at all |
 | **flies** | two thirds of an episode airborne at 48 BL/s, upright - but a degree-matched shuffle reaches 77% of that, so the objective does not need the wiring. Steering is the task that would |
 | **explores** | the olfactory chain carries end to end and is lateralised; steering is untrained. The mushroom body is now wired for learning rather than searched: plasticity is confined to the Kenyon-cell output synapses and gated by identified dopaminergic cells per compartment |
 

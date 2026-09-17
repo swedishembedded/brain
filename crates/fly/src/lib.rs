@@ -37,7 +37,8 @@ use connectome::Connectome;
 use flybody::MotorMap;
 use gpu_core::Gpu;
 use mujoco::{Data, Model, StateSpec};
-use neuro::{DynamicalSystem, LifParams, Plastic, Port, SpikingNet};
+use neuro::{DynamicalSystem, Plastic, Port, SpikingNet};
+pub use neuro::LifParams;
 
 pub use gait::{analyse as analyse_gait, Gait, Trace};
 pub use wing::{WingCommand, Wingbeat};
@@ -195,19 +196,24 @@ pub struct Wiring {
 
 impl Default for Wiring {
     fn default() -> Self {
-        // 0.6: swept against the gait criterion with the command delivered to
-        // ONE descending cell type. This crate's earlier default of 0.03 was
-        // swept too, but under a simultaneous barrage of all 1,328 descending
-        // neurons - and under a single-cell-type command it leaves the cord at
-        // 0.007% active, which is to say the command dies before it arrives.
+        // 0.6, and the justification for it is WITHDRAWN rather than
+        // replaced. It was swept against the gait criterion, which is a
+        // parameter fitted to the objective it is then used to evaluate.
         //
-        // 5: a reconstruction assigns a great many one- and two-synapse pairs
-        // at the edge of what the imaging resolves, numerous enough to dominate
-        // a neuron's input count while carrying almost none of its drive.
+        // A calibration against firing statistics said 0.04 to 0.08, agreeing
+        // with the published whole-brain model by dimension. That calibration
+        // was run before `LifParams::v_min` existed, and the missing floor is
+        // exactly what made heavily innervated cells look quiet: they were at
+        // -274 against a threshold of +1, not weakly driven. Every number in
+        // that sweep is a measurement of a different model, so the scale it
+        // chose cannot be carried over.
         //
-        // 10.0: the reconstruction also leaves a long tail of fragments and
-        // giant cells, and an unclamped size factor turns one badly
-        // reconstructed neuron into a silent one or a runaway one.
+        // What is actually known, now that the floor exists: no single scale
+        // puts this cord in a graded regime. Below the transition it recruits
+        // nothing, above it the whole cord, and the leg's muscles sit either
+        // pinned at the refractory ceiling or pinned at the inhibitory
+        // reversal. That is an argument for per-connection-type gains
+        // (`physiology::Physiology`), not for a better global number.
         Wiring { weight_scale: 0.6, shuffle_seed: None, size_limit: Some(10.0), min_synapses: 5 }
     }
 }
@@ -1103,6 +1109,16 @@ impl Fly {
     /// Already in hand - `step` reads this vector back every tick to find the
     /// motor neurons - so an experiment measuring some other population costs
     /// a slice rather than a second readback.
+    /// Membrane potential of every neuron, for tracing a cord that is not
+    /// firing when it should be.
+    ///
+    /// Spikes alone cannot tell a cell that is merely below threshold from one
+    /// that has been driven so far below it that nothing will bring it back,
+    /// and those are different failures.
+    pub fn membrane(&self, out: &mut [f32]) -> Result<(), String> {
+        self.net.read(Port::Membrane, out)
+    }
+
     pub fn spikes(&self) -> &[f32] {
         &self.spike
     }

@@ -263,7 +263,13 @@ fn gesture(
         }
     } else if input.buttons.left {
         cam.azimuth -= dx * ORBIT_DEG_PER_PIXEL;
-        cam.elevation = (cam.elevation + dy * ORBIT_DEG_PER_PIXEL).clamp(-MAX_ELEVATION, MAX_ELEVATION);
+        // MINUS, like the azimuth beside it. Grab-and-drag means what is under
+        // the cursor follows the cursor, so dragging DOWN has to swing the
+        // camera up over the subject and show it from above. The horizontal
+        // axis had this right and the vertical one did not, which is the worst
+        // case for a control: it feels wrong without being obviously broken,
+        // because either sign produces smooth motion.
+        cam.elevation = (cam.elevation - dy * ORBIT_DEG_PER_PIXEL).clamp(-MAX_ELEVATION, MAX_ELEVATION);
     }
     (cam, offset)
 }
@@ -304,8 +310,19 @@ mod tests {
         let left = Buttons { left: true, ..Default::default() };
         let (down, _) = gesture(POSE, [0.0; 3], &drag(left, 0, 100_000));
         let (up, _) = gesture(POSE, [0.0; 3], &drag(left, 0, -100_000));
-        assert_eq!(down.elevation, MAX_ELEVATION);
-        assert_eq!(up.elevation, -MAX_ELEVATION);
+        assert_eq!(down.elevation, -MAX_ELEVATION);
+        assert_eq!(up.elevation, MAX_ELEVATION);
+    }
+
+    /// Both orbit axes drag the same way, which is the property that was
+    /// wrong: horizontal followed the cursor and vertical opposed it.
+    #[test]
+    fn the_orbit_follows_the_cursor_on_both_axes() {
+        let left = Buttons { left: true, ..Default::default() };
+        let (right, _) = gesture(POSE, [0.0; 3], &drag(left, 60, 0));
+        let (down, _) = gesture(POSE, [0.0; 3], &drag(left, 0, 60));
+        assert!(right.azimuth < POSE.azimuth, "dragging right must orbit one way");
+        assert!(down.elevation < POSE.elevation, "dragging down must swing the camera the matching way");
     }
 
     /// The measured convention, restated as an assertion on the sign that

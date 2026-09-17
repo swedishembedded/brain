@@ -67,6 +67,20 @@ struct Params {
     v_rest: f32,
     v_reset: f32,
     v_th: f32,
+    /// Inhibitory reversal potential: the floor a membrane cannot be pushed
+    /// below.
+    ///
+    /// Not a numerical guard. Inhibition in a real neuron opens channels whose
+    /// reversal potential is a little below rest, so however much of it
+    /// arrives the membrane approaches that value and stops; it cannot be
+    /// driven arbitrarily negative. Without the floor, a cell in a balanced
+    /// network with a large in-degree is pushed hundreds of threshold-gaps
+    /// below rest and never fires again - measured on this fly's own cord,
+    /// where the leg muscle with the MOST input sat at -274 against a
+    /// threshold of +1 while the one with the least fired at 119 Hz. The
+    /// silence looked like weak excitation and was unrecoverable
+    /// hyperpolarisation.
+    v_min: f32,
     r: f32,
     /// Fraction of the adaptation current that survives a tick,
     /// `exp(-dt / tau_w)`.
@@ -122,7 +136,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
 
     let a = p.a * tau_scale[i];
     let r = p.r * gain_scale[i];
-    let vi = v[i] + a * (p.v_rest - v[i] + r * (isyn[i] + drive[i] - w));
+    let vi = max(v[i] + a * (p.v_rest - v[i] + r * (isyn[i] + drive[i] - w)), p.v_min);
     if (vi >= p.v_th) {
         v[i] = p.v_reset;
         refrac[i] = p.refrac_ticks;

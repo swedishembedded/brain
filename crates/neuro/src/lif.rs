@@ -31,6 +31,18 @@ pub struct LifParams {
     pub v_rest: f32,
     pub v_reset: f32,
     pub v_th: f32,
+    /// Inhibitory reversal potential: the floor the membrane cannot go below.
+    ///
+    /// Inhibition opens channels whose reversal potential sits a little below
+    /// rest, so a neuron approaches it and stops rather than being driven
+    /// arbitrarily negative. A model without the floor silences its
+    /// best-connected cells permanently: in a balanced network the integrated
+    /// inhibition scales with in-degree, and nothing brings the membrane back.
+    ///
+    /// Defaults to three threshold-gaps below rest, which is where a fly's
+    /// chloride reversal sits relative to its spike threshold (about -20 mV
+    /// below a rest that is 7 mV below threshold).
+    pub v_min: f32,
     /// Input resistance: the scale from current to membrane volts.
     pub r: f32,
     /// Absolute refractory period, in ticks.
@@ -77,6 +89,7 @@ impl Default for LifParams {
             v_rest: 0.0,
             v_reset: 0.0,
             v_th: 1.0,
+            v_min: -3.0,
             r: 1.0,
             refrac_ticks: 0,
             // Instantaneous, so the default reproduces every measurement
@@ -486,7 +499,7 @@ impl SpikingNet {
     /// The LIF kernel's `Params` block: two counts then five f32 bit patterns,
     /// in declaration order. A mismatched param list here is silently wrong
     /// rather than a crash, which is why the order is written once.
-    fn lif_params(&self) -> [u32; 9] {
+    fn lif_params(&self) -> [u32; 10] {
         [
             self.n,
             self.params.refrac_ticks,
@@ -494,6 +507,7 @@ impl SpikingNet {
             self.params.v_rest.to_bits(),
             self.params.v_reset.to_bits(),
             self.params.v_th.to_bits(),
+            self.params.v_min.to_bits(),
             self.params.r.to_bits(),
             self.params.adapt_decay.to_bits(),
             self.params.adapt_increment.to_bits(),
