@@ -19,6 +19,7 @@ brain-qwen35moe.workspace = true
 # mixers, no MoE).
 brain-qwen35.workspace = true
 brain-lfm2.workspace = true
+brain-decide.workspace = true
 brain-glmdsa.workspace = true
 brain-toymoe.workspace = true
 brain-toypid.workspace = true

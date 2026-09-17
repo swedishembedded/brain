@@ -1342,6 +1342,7 @@ dependencies = [
  "brain-controlnet",
  "brain-cosyvoice",
  "brain-data",
+ "brain-decide",
  "brain-deepseekocr2",
  "brain-florence2",
  "brain-flux2",

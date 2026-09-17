@@ -50,14 +50,22 @@ impl EncoderConfig {
     }
 
     /// A small synthetic shape for gradient checks. Deliberately NOT a scaled
-    /// copy of the real one: `d_model`/`n_heads` give `head_dim = 4`, and
-    /// `d_ff` is not a multiple of `d_model`, so an axis swap that the real
+    /// copy of the real one: `d_ff` is not a multiple of `d_model` and
+    /// `head_dim` (16) collides with no other axis, so an axis swap the real
     /// config's tidy ratios would hide shows up as a shape error.
+    ///
+    /// `d_model` is 64 rather than smaller because the span attention binds a
+    /// view at each span's first row and a bound offset must be 256-byte
+    /// aligned. 64 is the narrowest width that makes both row strides
+    /// (`3H` and `H` floats) multiples of 256 bytes, so every span start is
+    /// legal - which is what lets the check use spans of DIFFERENT lengths,
+    /// the thing a uniform-batch check would not exercise. Every real
+    /// checkpoint of this family is already a multiple of 64.
     pub fn tiny() -> EncoderConfig {
         EncoderConfig {
             vocab: 23,
             max_positions: 12,
-            d_model: 16,
+            d_model: 64,
             n_layers: 2,
             n_heads: 4,
             d_ff: 19,

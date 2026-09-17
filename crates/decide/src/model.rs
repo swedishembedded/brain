@@ -53,6 +53,20 @@ const K_LAYERNORM_DX: usize = 8;
 const K_SCORES_CROSS: usize = 9;
 const K_SOFTMAX_CROSS: usize = 10;
 const K_APPLY_CROSS: usize = 11;
+// 12-14 are the cooperative LayerNorm trio, resolved by NAME (see PIPELINES).
+const K_MATMUL_DX: usize = 15;
+const K_MATMUL_DW: usize = 16;
+const K_MATMUL_DX_REG: usize = 17;
+const K_MATMUL_DW_REG: usize = 18;
+const K_BIAS_GRAD: usize = 19;
+const K_GELU_ERF_BWD: usize = 20;
+const K_LN_DGAMMA: usize = 21;
+const K_LN_DBETA: usize = 22;
+const K_EMB_BWD: usize = 23;
+const K_DSCORES_CROSS: usize = 24;
+const K_DQ_CROSS: usize = 25;
+const K_DK_CROSS_ACC: usize = 26;
+const K_DV_CROSS_ACC: usize = 27;
 
 /// Every kernel this model dispatches. `layernorm_rows` has no index of its own
 /// because `block::LayerNormIds::resolve` picks it BY NAME when the device
@@ -74,12 +88,42 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("layernorm_rows", kernels::LAYERNORM_ROWS),
     ("ln_stats_rows", kernels::LN_STATS_ROWS),
     ("layernorm_dx_rows", kernels::LAYERNORM_DX_ROWS),
+    // ---- reverse pass ----
+    ("matmul_dx", kernels::MATMUL_DX),
+    ("matmul_dw", kernels::MATMUL_DW),
+    ("matmul_dx_reg", kernels::MATMUL_DX_REG),
+    ("matmul_dw_reg", kernels::MATMUL_DW_REG),
+    ("bias_grad", kernels::BIAS_GRAD),
+    ("gelu_erf_bwd", kernels::GELU_ERF_BWD),
+    ("layernorm_dgamma", kernels::LAYERNORM_DGAMMA),
+    ("layernorm_dbeta", kernels::LAYERNORM_DBETA),
+    ("emb_bwd", kernels::EMB_BWD),
+    ("attn_bwd_dscores_cross", kernels::ATTN_BWD_DSCORES_CROSS),
+    ("attn_bwd_dq_cross", kernels::ATTN_BWD_DQ_CROSS),
+    ("attn_bwd_dk_cross_acc", kernels::ATTN_BWD_DK_CROSS_ACC),
+    ("attn_bwd_dv_cross_acc", kernels::ATTN_BWD_DV_CROSS_ACC),
 ];
 
 /// Attention-slab budget for the chunked path: the `[heads, chunk, len]` score
 /// and probability slabs are sized against it, so `chunk` falls as the longest
 /// span grows and the allocation stays bounded whatever a caller asks for.
 const SLAB_BUDGET: u64 = 256 << 20;
+
+/// WebGPU's `min_storage_buffer_offset_alignment`. The span attention binds a
+/// VIEW of the fused qkv and of the context buffer starting at a span's first
+/// row, and a bound offset must be a multiple of this. It is a hardware
+/// binding rule, not a tunable: the driver rejects the bind group outright.
+const BIND_ALIGN: u64 = 256;
+
+/// Greatest common divisor, for reporting the span-start granularity a given
+/// width imposes.
+fn gcd(a: u64, b: u64) -> u64 {
+    if b == 0 {
+        a
+    } else {
+        gcd(b, a % b)
+    }
+}
 
 struct LayerBufs {
     /// Fused `[rows, 3H]` - q at 0, k at H, v at 2H.
@@ -94,6 +138,42 @@ struct LayerBufs {
     mlp_out: DeviceBuffer,
     /// `res + mlp_out`, before LN2.
     ffn_pre: DeviceBuffer,
+}
+
+/// Reverse-pass buffers and the recorded backward step list. Allocated only by
+/// [`Encoder::new_train_on`]; an inference build carries `None` and runs the
+/// byte-for-byte graph the parity ladder gates.
+///
+/// Every entry is a GRADIENT. The activations the backward reads are the
+/// forward's own buffers - nothing is recomputed on the host and nothing is
+/// aliased. The per-layer scratch is shared across layers because the reverse
+/// walk holds one layer's intermediates live at a time; only `dx` is per layer.
+struct Bwd {
+    /// `dx[i]` is the grad of `x[i]`, so `dx[n_layers]` is the objective's own
+    /// seed: the final hidden states ARE `x[n_layers]`, and writing the seed
+    /// straight in saves a copy.
+    dx: Vec<DeviceBuffer>,
+    d_ffn_pre: DeviceBuffer,
+    d_res: DeviceBuffer,
+    d_res_pre: DeviceBuffer,
+    /// Grad arriving from one branch, before it re-joins the residual.
+    d_tmp: DeviceBuffer,
+    /// Grad of the POST-activation FFN hidden.
+    d_h_act: DeviceBuffer,
+    /// Grad of the PRE-activation FFN hidden - what the activation backward
+    /// differentiates, which is why `h` is kept and not just `h_act`.
+    d_h: DeviceBuffer,
+    d_ctx: DeviceBuffer,
+    d_qkv: DeviceBuffer,
+    d_scores: DeviceBuffer,
+    /// Grad of the summed embedding, before its LayerNorm. All three tables
+    /// read this same buffer: addition fans out, so their adjoints are equal.
+    d_sum: DeviceBuffer,
+    /// Per-row LayerNorm mean / inverse-std, recomputed per use (they are
+    /// `[rows]`, cheaper to recompute than to cache).
+    mean: DeviceBuffer,
+    inv: DeviceBuffer,
+    steps: Vec<Step>,
 }
 
 pub struct Encoder {
@@ -119,6 +199,7 @@ pub struct Encoder {
     scores: DeviceBuffer,
     probs: DeviceBuffer,
     steps: Vec<Step>,
+    bwd: Option<Bwd>,
 }
 
 impl Encoder {
@@ -132,16 +213,45 @@ impl Encoder {
         max_span: u32,
         init: &HashMap<String, Vec<f32>>,
     ) -> Encoder {
+        Encoder::build(gpu, cfg, cap_rows, max_span, init, false)
+    }
+
+    /// A **trainable** encoder on an existing device: every parameter
+    /// `Role::Trainable` (gradient + AdamW moments) plus the reverse step list.
+    ///
+    /// The forward is the SAME `build_steps` an inference build records - the
+    /// graph is already SSA, so there is no cached-vs-uncached split to get
+    /// wrong and no way for the training path's existence to move a parity
+    /// number.
+    pub fn new_train_on(
+        gpu: Gpu,
+        cfg: EncoderConfig,
+        cap_rows: u32,
+        max_span: u32,
+        init: &HashMap<String, Vec<f32>>,
+    ) -> Encoder {
+        Encoder::build(gpu, cfg, cap_rows, max_span, init, true)
+    }
+
+    fn build(
+        gpu: Gpu,
+        cfg: EncoderConfig,
+        cap_rows: u32,
+        max_span: u32,
+        init: &HashMap<String, Vec<f32>>,
+        train: bool,
+    ) -> Encoder {
         assert!(
             max_span <= cfg.max_positions,
             "span {max_span} > max_positions {} - a window may not outrun the learned position table",
             cfg.max_positions
         );
         assert!(max_span <= cap_rows, "max_span {max_span} > cap_rows {cap_rows}");
+        let role = if train { Role::Trainable } else { Role::Frozen };
         let roles: Vec<(String, usize, Role)> = cfg
             .tensor_manifest()
             .into_iter()
-            .map(|(n, s)| (n, s.iter().product::<usize>(), Role::Frozen))
+            .map(|(n, s)| (n, s.iter().product::<usize>(), role))
             .collect();
         let ps = ParamStore::new_with_roles(&gpu, roles, init);
 
@@ -169,6 +279,7 @@ impl Encoder {
                 ffn_pre: gpu.storage(n * h),
             })
             .collect();
+        let cfg_layers = cfg.n_layers;
         let mut e = Encoder {
             cap_rows,
             rows: 0,
@@ -187,6 +298,7 @@ impl Encoder {
             scores: gpu.storage(slab),
             probs: gpu.storage(slab),
             steps: Vec::new(),
+            bwd: None,
             gpu,
             cfg,
             ps,
@@ -194,6 +306,32 @@ impl Encoder {
         e.rows = cap_rows;
         e.spans = vec![(0, cap_rows.min(max_span))];
         e.steps = e.build_steps();
+        if train {
+            let st = |w: u64| e.gpu.storage(w);
+            e.bwd = Some(Bwd {
+                // COPY_DST because the objective's seed is uploaded into
+                // `dx[n_layers]` directly rather than copied in on device.
+                dx: (0..=cfg_layers)
+                    .map(|_| {
+                        e.gpu.buffer("dx", n * h * 4, gpu_core::BufUsage::STORAGE | gpu_core::BufUsage::COPY_DST)
+                    })
+                    .collect(),
+                d_ffn_pre: st(n * h),
+                d_res: st(n * h),
+                d_res_pre: st(n * h),
+                d_tmp: st(n * h),
+                d_h_act: st(n * ff),
+                d_h: st(n * ff),
+                d_ctx: st(n * h),
+                d_qkv: st(n * 3 * h),
+                d_scores: st(slab),
+                d_sum: st(n * h),
+                mean: st(n),
+                inv: st(n),
+                steps: Vec::new(),
+            });
+            e.rebuild_bwd();
+        }
         e
     }
 
@@ -216,12 +354,31 @@ impl Encoder {
         let covered: u32 = spans.iter().map(|&(_, l)| l).sum();
         assert_eq!(covered as usize, ids.len(), "spans cover {covered} rows but {} were supplied", ids.len());
         let mut pos = vec![0u32; ids.len()];
+        let h = self.cfg.d_model as u64;
         for &(row0, len) in spans {
             assert!(
                 len <= self.cfg.max_positions,
                 "span of {len} rows > max_positions {}",
                 self.cfg.max_positions
             );
+            // The attention binds each span as a view starting at `row0`, in
+            // the fused qkv (row = 3H floats) and in the context (row = H
+            // floats). Both offsets must land on a 256-byte boundary.
+            //
+            // Every real checkpoint of this family has `d_model` a multiple of
+            // 64, which makes both row strides multiples of 256 and every
+            // `row0` legal. A width that does not gets a named failure here
+            // rather than a driver-level bind-group rejection several layers
+            // deeper, where the offset is all the message contains.
+            for (bytes, what) in [(3 * h * 4, "qkv"), (h * 4, "context")] {
+                let off = row0 as u64 * bytes;
+                assert_eq!(
+                    off % BIND_ALIGN,
+                    0,
+                    "span starting at row {row0} binds the {what} buffer at byte {off}, which is not a                      multiple of {BIND_ALIGN}; with d_model {h} a span may only start on a row that is                      a multiple of {}",
+                    (BIND_ALIGN / gcd(BIND_ALIGN, bytes)).max(1)
+                );
+            }
             for i in 0..len {
                 pos[(row0 + i) as usize] = i;
             }
@@ -234,6 +391,7 @@ impl Encoder {
         if changed {
             self.spans = spans.to_vec();
             self.steps = self.build_steps();
+            self.rebuild_bwd();
         }
     }
 
@@ -342,6 +500,192 @@ impl Encoder {
                 c.eps,
             ));
         }
+        s
+    }
+
+    /// Re-record the reverse pass. Called whenever the spans change, for the
+    /// same reason the forward is: `chunked_bidir_bwd` bakes them in.
+    fn rebuild_bwd(&mut self) {
+        if self.bwd.is_none() {
+            return;
+        }
+        // Built BEFORE the mutable borrow: `build_bwd_steps` reads the
+        // forward's own buffers through `&self`.
+        let steps = self.build_bwd_steps();
+        if let Some(bw) = &mut self.bwd {
+            bw.steps = steps;
+        }
+    }
+
+    /// Whether this encoder was built trainable.
+    pub fn is_trainable(&self) -> bool {
+        self.bwd.is_some()
+    }
+
+    /// Zero every parameter gradient. Call once per step BEFORE
+    /// [`Encoder::backward`], which accumulates into them.
+    pub fn zero_grads(&self) {
+        self.ps.zero_grads(&self.gpu);
+    }
+
+    /// Seed the reverse pass with the objective's gradient on the final hidden
+    /// states, `[rows, H]` row-major, and run it.
+    pub fn backward(&self, d_hidden: &[f32]) {
+        let bw = self.bwd.as_ref().expect("backward on an inference build");
+        let want = (self.rows * self.cfg.d_model) as usize;
+        assert_eq!(d_hidden.len(), want, "d_hidden must be [rows, H] = {want}");
+        self.gpu.write_f32(&bw.dx[self.cfg.n_layers as usize], d_hidden);
+        self.gpu.submit(&[], &bw.steps);
+    }
+
+    /// Read one parameter's current value.
+    pub fn read_weight(&self, name: &str) -> Vec<f32> {
+        self.gpu.read(self.w(name), self.numel(name))
+    }
+
+    /// Overwrite one parameter - the finite-difference checker's perturbation.
+    pub fn set_weight(&self, name: &str, data: &[f32]) {
+        assert_eq!(data.len(), self.numel(name), "{name}");
+        self.gpu.write_f32(self.w(name), data);
+    }
+
+    fn numel(&self, name: &str) -> usize {
+        self.cfg
+            .tensor_manifest()
+            .into_iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, s)| s.iter().product::<usize>())
+            .unwrap_or_else(|| panic!("no parameter {name:?}"))
+    }
+
+    /// Read one parameter's accumulated gradient.
+    pub fn read_grad(&self, name: &str) -> Vec<f32> {
+        self.gpu.read(self.ps.g(name), self.numel(name))
+    }
+
+    /// The exact adjoint of [`Encoder::build_steps`], walked bottom up.
+    ///
+    /// Post-LayerNorm is what makes this differ structurally from a pre-LN
+    /// tower: each block normalizes AFTER its residual add, so the LayerNorm
+    /// adjoint sits between the block output and the residual fork rather than
+    /// inside the branch. Getting that order wrong still produces finite,
+    /// plausible gradients - which is why it is finite-difference checked on
+    /// both backends rather than reasoned about.
+    fn build_bwd_steps(&self) -> Vec<Step> {
+        let g = &self.gpu;
+        let c = &self.cfg;
+        let bw = self.bwd.as_ref().expect("build_bwd_steps in training mode only");
+        let n = self.rows;
+        let h = c.d_model;
+        let ff = c.d_ff;
+        let hd = c.head_dim();
+        let ln = block::LayerNormIds::resolve(g, K_LAYERNORM, K_LN_STATS, K_LAYERNORM_DX);
+        let cross = block::CrossIds { scores: K_SCORES_CROSS, softmax: K_SOFTMAX_CROSS, apply: K_APPLY_CROSS };
+        let cross_bwd = block::CrossBwdIds {
+            dscores: K_DSCORES_CROSS,
+            dq: K_DQ_CROSS,
+            dk_acc: K_DK_CROSS_ACC,
+            dv_acc: K_DV_CROSS_ACC,
+        };
+        let gr = |name: &str| self.ps.g(name);
+        let dw_gemm = |m: u32, k: u32| block::pick_gemm(m as usize, k as usize, K_MATMUL_DW, K_MATMUL_DW_REG, false);
+        let dx_gemm = |m: u32, k: u32| block::pick_gemm(m as usize, k as usize, K_MATMUL_DX, K_MATMUL_DX_REG, false);
+        let mut s: Vec<Step> = Vec::new();
+
+        for l in (0..c.n_layers as usize).rev() {
+            let lb = &self.layers[l];
+            let p = format!("blocks.{l}");
+            let d_out = &bw.dx[l + 1];
+
+            // ---- LN2, then the FFN branch ----
+            // `layernorm_dgamma` Params: [d_model, n_rows]; bufs [dy, x, mean, inv, dgamma].
+            // `layernorm_dbeta`  Params: [d_model, n_rows]; bufs [dy, dbeta].
+            s.push(block::ln_stats_fwd(g, &ln, &lb.ffn_pre, &bw.mean, &bw.inv, h, n, c.eps));
+            s.push(g.step(K_LN_DGAMMA, &[d_out, &lb.ffn_pre, &bw.mean, &bw.inv, gr(&format!("{p}.ln2.weight"))], &[h, n], h));
+            s.push(g.step(K_LN_DBETA, &[d_out, gr(&format!("{p}.ln2.bias"))], &[h, n], h));
+            s.push(block::layernorm_dx_bwd(g, &ln, &lb.ffn_pre, self.w(&format!("{p}.ln2.weight")), d_out, &bw.d_ffn_pre, h, n, c.eps));
+
+            // `ffn_pre = res + mlp_out`, so the MLP branch's incoming grad IS
+            // `d_ffn_pre` and `res` also receives it directly.
+            // `bias_grad`  Params: [m, n]; bufs [dy, dbias] - one thread per feature.
+            // `matmul_dw`  Params: [m, k, n]; bufs [dy, x, dw] - ACCUMULATES.
+            // `matmul_dx`  Params: [m, k, n, accumulate]; bufs [dy, w, dx].
+            s.push(g.step(K_BIAS_GRAD, &[&bw.d_ffn_pre, gr(&format!("{p}.fc2.bias"))], &[n, h], h));
+            let (dw, dwt) = dw_gemm(h, ff);
+            s.push(g.step(dw, &[&bw.d_ffn_pre, &lb.h_act, gr(&format!("{p}.fc2.weight"))], &[n, ff, h], dwt));
+            let (dx, dxt) = dx_gemm(n, ff);
+            s.push(g.step(dx, &[&bw.d_ffn_pre, self.w(&format!("{p}.fc2.weight")), &bw.d_h_act], &[n, ff, h, 0], dxt));
+            // The activation backward reads the PRE-activation hidden, never
+            // the activated one.
+            s.push(g.step(K_GELU_ERF_BWD, &[&lb.h, &bw.d_h_act, &bw.d_h], &[n * ff], n * ff));
+            s.push(g.step(K_BIAS_GRAD, &[&bw.d_h, gr(&format!("{p}.fc1.bias"))], &[n, ff], ff));
+            let (dw, dwt) = dw_gemm(ff, h);
+            s.push(g.step(dw, &[&bw.d_h, &lb.res, gr(&format!("{p}.fc1.weight"))], &[n, h, ff], dwt));
+            let (dx, dxt) = dx_gemm(n, h);
+            s.push(g.step(dx, &[&bw.d_h, self.w(&format!("{p}.fc1.weight")), &bw.d_tmp], &[n, h, ff, 0], dxt));
+            s.push(g.step(K_ADD2, &[&bw.d_ffn_pre, &bw.d_tmp, &bw.d_res], &[n * h], n * h));
+
+            // ---- LN1, then the attention branch ----
+            s.push(block::ln_stats_fwd(g, &ln, &lb.res_pre, &bw.mean, &bw.inv, h, n, c.eps));
+            s.push(g.step(K_LN_DGAMMA, &[&bw.d_res, &lb.res_pre, &bw.mean, &bw.inv, gr(&format!("{p}.ln1.weight"))], &[h, n], h));
+            s.push(g.step(K_LN_DBETA, &[&bw.d_res, gr(&format!("{p}.ln1.bias"))], &[h, n], h));
+            s.push(block::layernorm_dx_bwd(g, &ln, &lb.res_pre, self.w(&format!("{p}.ln1.weight")), &bw.d_res, &bw.d_res_pre, h, n, c.eps));
+
+            s.push(g.step(K_BIAS_GRAD, &[&bw.d_res_pre, gr(&format!("{p}.proj.bias"))], &[n, h], h));
+            let (dw, dwt) = dw_gemm(h, h);
+            s.push(g.step(dw, &[&bw.d_res_pre, &lb.ctx, gr(&format!("{p}.proj.weight"))], &[n, h, h], dwt));
+            let (dx, dxt) = dx_gemm(n, h);
+            s.push(g.step(dx, &[&bw.d_res_pre, self.w(&format!("{p}.proj.weight")), &bw.d_ctx], &[n, h, h, 0], dxt));
+
+            // Per-span attention backward, recomputing each chunk's scores and
+            // probabilities from the cached qkv. `d_qkv` needs no clear: the
+            // first chunk of every span ASSIGNS its region and later chunks
+            // accumulate onto it.
+            block::chunked_bidir_bwd(
+                g,
+                &cross,
+                None,
+                &cross_bwd,
+                c.n_heads,
+                hd,
+                h,
+                &lb.qkv,
+                3 * h,
+                0,
+                h,
+                2 * h,
+                &bw.d_ctx,
+                &bw.d_qkv,
+                &self.scores,
+                &self.probs,
+                &bw.d_scores,
+                &self.spans,
+                self.chunk,
+                None,
+                &mut s,
+            );
+
+            s.push(g.step(K_BIAS_GRAD, &[&bw.d_qkv, gr(&format!("{p}.qkv.bias"))], &[n, 3 * h], 3 * h));
+            let (dw, dwt) = dw_gemm(3 * h, h);
+            s.push(g.step(dw, &[&bw.d_qkv, &self.x[l], gr(&format!("{p}.qkv.weight"))], &[n, h, 3 * h], dwt));
+            let (dx, dxt) = dx_gemm(n, h);
+            s.push(g.step(dx, &[&bw.d_qkv, self.w(&format!("{p}.qkv.weight")), &bw.d_tmp], &[n, h, 3 * h, 0], dxt));
+            // `res_pre = x + attn_out`: the block input receives the residual
+            // pass-through AND the attention branch.
+            s.push(g.step(K_ADD2, &[&bw.d_res_pre, &bw.d_tmp, &bw.dx[l]], &[n * h], n * h));
+        }
+
+        // ---- embeddings ----
+        s.push(block::ln_stats_fwd(g, &ln, &self.sum2, &bw.mean, &bw.inv, h, n, c.eps));
+        s.push(g.step(K_LN_DGAMMA, &[&bw.dx[0], &self.sum2, &bw.mean, &bw.inv, gr("emb_ln.weight")], &[h, n], h));
+        s.push(g.step(K_LN_DBETA, &[&bw.dx[0], gr("emb_ln.bias")], &[h, n], h));
+        s.push(block::layernorm_dx_bwd(g, &ln, &self.sum2, self.w("emb_ln.weight"), &bw.dx[0], &bw.d_sum, h, n, c.eps));
+        // Three gathers summed: addition fans the gradient out unchanged, so
+        // every table scatters the SAME `d_sum` through its own index buffer.
+        // `emb_bwd` Params: [n_rows, width, rows_in_table]; bufs [index(u32), d_x, grad_table].
+        s.push(g.step(K_EMB_BWD, &[&self.ids, &bw.d_sum, gr("tok.weight")], &[n, h, c.vocab], c.vocab * h));
+        s.push(g.step(K_EMB_BWD, &[&self.pos_ids, &bw.d_sum, gr("pos.weight")], &[n, h, c.max_positions], c.max_positions * h));
+        s.push(g.step(K_EMB_BWD, &[&self.type_ids, &bw.d_sum, gr("type.weight")], &[n, h, c.type_vocab], c.type_vocab * h));
         s
     }
 

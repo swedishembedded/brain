@@ -23,6 +23,7 @@
 
 pub mod config;
 pub mod import;
+pub mod init;
 pub mod model;
 
 pub use config::EncoderConfig;

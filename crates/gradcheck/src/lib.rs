@@ -101,6 +101,11 @@ pub use timesfm3::{check_timesfm3, check_timesfm3_lora, check_timesfm3_one_layer
 /// real mean cross-entropy `loss()`), not the blanket `model::Model` impl:
 /// its batch is a two-stream (encoder text-prompt-embeds, decoder ids)
 /// seq2seq shape `model::Batch` has no variant for.
+/// `decide`'s encoder: no vocabulary and no scalar loss of its own, so the
+/// checker drives it through a small fixed-readout objective.
+pub mod decide;
+pub use decide::check_decide;
+
 pub mod florence2;
 pub use florence2::{check_florence2, check_florence2_lora};
 
