@@ -52,6 +52,8 @@ fn num<T: std::str::FromStr>(name: &str, default: T) -> T {
 const RATE_BAND: (f64, f64) = (2.0, 60.0);
 /// Fraction of Kenyon cells an odour should recruit.
 const KC_SPARSENESS: (f64, f64) = (0.01, 0.15);
+/// Neurons the stimulus is bisected to recruit.
+const TARGET_RECRUITED: usize = 500;
 
 struct Measured {
     scale: f32,
@@ -59,6 +61,32 @@ struct Measured {
     rate: f64,
     active: f64,
     kc: Option<f64>,
+    /// Fraction of neurons that never fired, and the fraction pinned at their
+    /// refractory ceiling.
+    ///
+    /// The mean rate is not enough and believing it cost a day. A cord whose
+    /// mean sits at a healthy 15 Hz can be half silent and half saturated, and
+    /// that is not a quiet network or a loud one - it is a network in the
+    /// wrong regime entirely, where the flexors of a leg fire at 99 Hz while
+    /// its extensors fire at zero and the leg simply curls up. Measured on the
+    /// fly's own T1 leg, the worst antagonist pair was 35 to 1.
+    silent: f64,
+    saturated: f64,
+    /// How many neurons fired at all. The published descending-neuron screen
+    /// adjusts its stimulus to keep this between 5 and 1,500, because outside
+    /// that band the measurement is about the stimulus and not the circuit.
+    recruited: usize,
+    /// The current that landed there.
+    current: f32,
+}
+
+#[derive(Clone)]
+struct Rates {
+    mean: f64,
+    recruited: usize,
+    active: f64,
+    silent: f64,
+    saturated: f64,
 }
 
 fn main() {
@@ -76,7 +104,24 @@ fn main() {
     let drive_current: f32 = num("DRIVE", 4.0);
 
     // What gets driven, and what is watched for a sparse code.
-    let command = c.population(|x| x.super_class == "descending");
+    // `DN=<type>` drives one descending cell type, as the published screen
+    // does, instead of the whole descending population. The difference is
+    // large and it is the point: two DNg100 cells recruiting a 23,665-neuron
+    // cord is a completely different demand on synaptic strength from 1,328
+    // cells doing it together, and a scale that is right for one can leave the
+    // other silent.
+    let command = match std::env::var("DN").ok().filter(|v| !v.is_empty() && v != "all") {
+        Some(t) => {
+            let p = c.population(|x| x.super_class == "descending" && x.cell_type == t);
+            if p.is_empty() {
+                eprintln!("no descending neuron of type {t}");
+                std::process::exit(2);
+            }
+            println!("driving {} {t} cells", p.len());
+            p
+        }
+        None => c.population(|x| x.super_class == "descending"),
+    };
     let mb = connectome::MushroomBody::find(&c, connectome::mushroom_body::Policy::default());
     let orns: Vec<u32> = {
         let want: std::collections::HashSet<String> =
@@ -103,15 +148,14 @@ fn main() {
             SpikingNet::new(gpu_core::testgpu::dev(&neuro::KERNELS), &graph, fly::cord_lif()).expect("it runs");
         let mut spike = vec![0.0f32; n];
 
-        let mut run = |driven: &[u32], current: f32| -> (f64, f64) {
+        let mut run = |driven: &[u32], current: f32| -> Rates {
             let mut drive = vec![0.0f32; n];
             for &d in driven {
                 drive[d as usize] = current;
             }
             net.reset(0);
             net.drive(Port::Drive, &drive).expect("fits");
-            let mut total = 0u64;
-            let mut fired = vec![false; n];
+            let mut per_neuron = vec![0u32; n];
             for t in 0..settle + ticks {
                 net.step();
                 net.read(Port::Spike, &mut spike).expect("fits");
@@ -120,18 +164,57 @@ fn main() {
                 }
                 for (i, s) in spike.iter().enumerate() {
                     if *s > 0.5 {
-                        total += 1;
-                        fired[i] = true;
+                        per_neuron[i] += 1;
                     }
                 }
             }
-            // Spikes per neuron per second, and the fraction that fired at all.
             let seconds = ticks as f64 * fly::CONTROL_PERIOD;
-            (total as f64 / n as f64 / seconds, fired.iter().filter(|f| **f).count() as f64 / n as f64)
+            let total: u64 = per_neuron.iter().map(|x| *x as u64).sum();
+            // The refractory ceiling: one spike every other tick is the fastest
+            // this discretisation allows, so anything near it is pinned.
+            let ceiling = 0.4 * ticks as f64;
+            Rates {
+                mean: total as f64 / n as f64 / seconds,
+                active: per_neuron.iter().filter(|c| **c > 0).count() as f64 / n as f64,
+                recruited: per_neuron.iter().filter(|c| **c > 0).count(),
+                silent: per_neuron.iter().filter(|c| **c == 0).count() as f64 / n as f64,
+                saturated: per_neuron.iter().filter(|c| (**c as f64) >= ceiling).count() as f64 / n as f64,
+            }
         };
 
-        let (idle, _) = run(&[], 0.0);
-        let (rate, active) = run(&command, drive_current);
+        let idle = run(&[], 0.0).mean;
+        // Bisect the stimulus to land inside the recruitment band rather than
+        // reporting whatever one fixed current happened to do. A current that
+        // pins every cell it touches and a current that recruits nothing are
+        // both measurements of the stimulus, and neither says anything about
+        // the circuit. This is what the published screen does and it is the
+        // step whose absence made a drive sweep here work at one value out of
+        // eight.
+        let (mut lo, mut hi) = (1e-3f32, 1e4f32);
+        let mut driven = run(&command, drive_current);
+        let mut current = drive_current;
+        // Keep the probe that came CLOSEST to the target, not the last one.
+        // Where recruitment jumps discontinuously - which is what a cord
+        // driven by two cells does - the final bisection step lands on
+        // whichever side it happened to, and reporting that says a scale
+        // recruits nothing when the probe before it recruited five hundred.
+        let mut best = usize::MAX;
+        for _ in 0..14 {
+            let probe = (lo * hi).sqrt();
+            let r = run(&command, probe);
+            let miss = r.recruited.abs_diff(TARGET_RECRUITED);
+            if miss < best {
+                best = miss;
+                driven = r.clone();
+                current = probe;
+            }
+            if r.recruited < TARGET_RECRUITED {
+                lo = probe;
+            } else {
+                hi = probe;
+            }
+        }
+        let (rate, active) = (driven.mean, driven.active);
         let kc = (!mb.kc.is_empty() && !orns.is_empty()).then(|| {
             let mut drive = vec![0.0f32; n];
             for &i in &orns {
@@ -152,12 +235,22 @@ fn main() {
             }
             fired.iter().filter(|f| **f).count() as f64 / mb.kc.len() as f64
         });
-        Measured { scale, idle, rate, active, kc }
+        Measured {
+            scale,
+            idle,
+            rate,
+            active,
+            kc,
+            silent: driven.silent,
+            saturated: driven.saturated,
+            recruited: driven.recruited,
+            current,
+        }
     };
 
     println!(
-        "\n{:>8}  {:>10}  {:>10}  {:>9}  {:>9}  {}",
-        "scale", "idle Hz", "driven Hz", "% active", "KC active", "verdict"
+        "\n{:>8}  {:>9}  {:>9}  {:>8}  {:>9}  {:>9}  {}",
+        "scale", "idle Hz", "mean Hz", "recruited", "% pinned", "KC active", "verdict"
     );
     let mut ok: Vec<Measured> = Vec::new();
     for s in scales {
@@ -172,6 +265,19 @@ fn main() {
         if m.rate > RATE_BAND.1 {
             why.push("saturated");
         }
+        // A network in two populations is in the wrong regime whatever its
+        // mean says.
+        if m.saturated > 0.02 {
+            why.push("cells pinned at the refractory ceiling");
+        }
+        // The published descending-neuron screen adjusts its stimulus to keep
+        // recruitment between 5 and 1,500 neurons, because outside that band
+        // the answer is about the stimulus rather than about the circuit.
+        if m.recruited < 5 {
+            why.push("recruits nothing");
+        } else if m.recruited > 1500 && m.saturated > 0.02 {
+            why.push("recruits the whole cord");
+        }
         if let Some(k) = m.kc {
             if k > KC_SPARSENESS.1 {
                 why.push("no sparse odour code");
@@ -180,14 +286,16 @@ fn main() {
             }
         }
         println!(
-            "{:>8.3}  {:>10.2}  {:>10.2}  {:>8.1}%  {:>8}  {}",
+            "{:>8.3}  {:>9.2}  {:>9.2}  {:>9}  {:>8.2}%  {:>9}  {}",
             m.scale,
             m.idle,
             m.rate,
-            100.0 * m.active,
+            m.recruited,
+            100.0 * m.saturated,
             m.kc.map(|k| format!("{:.1}%", 100.0 * k)).unwrap_or_else(|| "-".into()),
             if why.is_empty() { "OK".to_string() } else { why.join(", ") }
         );
+        let _ = (m.active, m.silent, m.idle);
         if why.is_empty() {
             ok.push(m);
         }

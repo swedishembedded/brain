@@ -59,7 +59,7 @@ pub enum Side {
 }
 
 impl Side {
-    fn parse(s: &str) -> Option<Side> {
+    pub fn parse(s: &str) -> Option<Side> {
         match s.trim().to_ascii_lowercase().as_str() {
             "left" | "lhs" => Some(Side::Left),
             "right" | "rhs" => Some(Side::Right),
@@ -423,7 +423,8 @@ impl MotorMap {
 }
 
 /// Parse a connectome `Sub Class` of the form `MN-LegNpT2-Ti_flexor`.
-fn parse_sub_class(sub: &str) -> Option<(Segment, String)> {
+/// `MN-LegNpT<n>-<muscle>` split into its segment and muscle name.
+pub fn parse_sub_class(sub: &str) -> Option<(Segment, String)> {
     let rest = sub.strip_prefix("MN-")?;
     let (np, muscle) = rest.split_once('-')?;
     let seg = match np {
