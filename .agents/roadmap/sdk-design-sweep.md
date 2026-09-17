@@ -29,7 +29,7 @@ all - the fly/flybody/connectome stack is unregistered).
 | Restoration/upscaling/VAE | 5 | 5 | **PARTIAL - `UpscalePipeline`** (RRDBNet) + **`RestorePipeline`** (CodeFormer; SUPIR/VQGAN deferred, see Phase 2.5/2.7) | no dedicated CLI; `resident_restore/upscale/supir.rs` | no |
 | Video generation | 2 | 2 | none | `wan_cli.rs`, `ltxv_cli.rs` | yes (wan) |
 | ASR | 2 | 2 | none | **no CLI at all** - `resident_asr.rs` only | no |
-| TTS/music/speech codec | 7 | 3 | none | `tts_cli.rs` + `tts_serve.rs` | no |
+| TTS/music/speech codec | 7 | 3 | **PARTIAL - `TtsPipeline`** (Qwen3-TTS: speak/clone_voice/design; cosyvoice/minimaxmusic3 deferred, see Phase 4.1) | `tts_cli.rs` + `tts_serve.rs` | no |
 | Vision/detection/segmentation | 4 | 4 | **PARTIAL - `DetectionPipeline`** (YOLOv8) + **`SegmentPipeline`** (SAM2) + **`DepthPipeline`** (ZipDepth; label is a VLM captioning workflow, not a single-arch capability, out of scope here - see Phase 3.1/3.2/3.3) | `yolo_cli.rs`, `sam2_cli.rs`, `depth_cli.rs`, `label_cli.rs` | no |
 | Embedding towers | 3 | 3 | none | **no CLI at all** - `resident_clip/arcface/t5encoder.rs` | no |
 | Forecasting | 4 | 0 (CLI-local) | none | **one unified entry**: `forecast_cli.rs` + generic `resident_forecast.rs` | yes (`brain forecast finetune`) |
@@ -1187,3 +1187,105 @@ music, video generation, 3D/world models - see the priority order note
 above, last in line since `SplatPipeline`-shaped types are closer to
 `Creature` (stateful, steppable) than to any `image(+opts) -> T` pipeline
 built so far, and world models have no settled domain object yet.
+
+### Phase 4.1 - `TtsPipeline` (Qwen3-TTS) - the TTS/music bucket's first pipeline, ONE type over three voice-selection call shapes
+
+Covers **Qwen3-TTS only**, over the already-existing `qwen3tts::spec::
+Qwen3TtsSpec` (a real `ArchSpec` since before this session, unlike YOLOv8/
+ZipDepth's from-scratch specs) - picked over the other two served
+architectures in this bucket (cosyvoice, minimaxmusic3) because it is the
+only one with a genuinely shrinkable full-graph forward pass (`TalkerConfig::
+tiny()`/`MtpConfig::tiny()` exist; cosyvoice's flow/diffusion stage and
+minimaxmusic3's 5-component chain have no shrink lever at all - a future
+milestone there pays a `RestorePipeline`/`SegmentPipeline`-class fixed cost,
+not a design blocker, just a heavier one).
+
+**ONE pipeline type, not three, and not a fork of `ImagePipeline`'s own
+"one type, several backends" shape either**: `speak`/`clone_voice`/`design`
+are three voice-selection call shapes over the SAME capability
+(`qwen3tts::caps::manifest`'s own doc already frames `synth`/`clone`/
+`design` as "each a thin wrapper over the same pipeline"), not three
+different capabilities the way restoration and upscaling are - rule 2
+("one pipeline type per capability") says keep them on one `TtsPipeline`
+type, which is what this does.
+
+**No new typed-core split needed - the crate already had one**: every
+action in `qwen3tts::caps.rs` was ALREADY a thin wrapper over
+`qwen3tts::pipeline::{synth,clone,design}`, and `qwen3tts::pipeline::
+TtsPaths::from_assembly` already existed, built for exactly this seam. This
+is the first phase in the campaign where the target crate needed zero
+production-code changes at all - `crates/sdk/src/tts.rs` calls the same
+functions `crates/cli/src/tts_cli.rs` and `qwen3tts::caps::{Synth,Clone,
+Design}Action::run` already call.
+
+**Unlike every other pipeline in this crate, `TtsPipelineBuilder::load`
+builds no resident GPU state at all**: Qwen3-TTS's own design is stateless
+per call (`qwen3tts::caps`'s own module doc - "the weights load per call...
+there is nothing resident to cache"), so `TtsPipeline` is just a resolved,
+existence-checked `TtsPaths` handle; every `.speak()`/`.clone_voice()`/
+`.design()` call pays the same load cost the CLI/D-Bus path already pays.
+The builder still checks `talker`/`mtp`/`codec` exist at `load()` time
+(mirroring `qwen3tts::caps::common_run`'s own existence check), so a broken
+checkpoint fails at construction rather than on the first call.
+
+**`Audio`, the audio bucket's first domain object**: interleaved-nothing
+(mono) `f32` PCM samples plus the sample rate they were generated at
+(`SAMPLE_RATE = 24_000`, the same constant every existing caller
+hardcodes - `qwen3tts::pipeline::{synth,clone,design}` return raw `Vec<f32>`
+with no rate attached at all, so there was nothing to derive it from without
+a deeper change to that crate, out of scope here). `.save(path)` writes a
+WAV via `audio::wav::write`, the same codec every CLI/D-Bus caller in this
+workspace already writes.
+
+**A real ceiling this milestone's own test discipline confirmed applies
+here too**: `qwen3tts::pipeline::synth`/`clone`/`design` all need a REAL
+tokenizer (`data::qwen_tokenizer::QwenBpe`, via `prompt::load_tokenizer`) -
+the same "cannot synthesize a meaningful BPE vocab from scratch" ceiling
+`TranscribePipeline`'s/`TextGenerationPipeline`'s/`EmbeddingPipeline`'s own
+tests already document and stop short of. `crates/sdk/tests/tts_pipeline.rs`
+reuses `qwen3tts::spec::tests`' own `write_qwen3tts_checkpoint` fixture
+shape (a converted-checkpoint directory with real `brain.manifest.json`
+compound-manifest roles, fake tensor content) to prove resolution reaches
+`TtsPipelineBuilder::load`'s own existence check and `.speak()` reaches
+`qwen3tts::pipeline::synth` itself, which then fails CLEANLY
+(`Error::Backend`, never a panic) on the fake tokenizer/checkpoint content -
+the same "resolution proven, full forward pass not" scope those three
+pipelines' own tests already accepted.
+
+**A real fixture-building gap found and fixed while writing the "missing
+role" test**: naively reusing every OTHER spec's `mark_locally_present`
+helper (a single-role `{"weights": "weights.stub"}` manifest) initially hit
+`Error::Download` instead of `Error::Missing`, because `Store::local_compound`
+(`crates/modelstore/src/lib.rs:312`) checks that EVERY role path a manifest
+DECLARES actually exists on disk before considering a repo "locally
+present" - so a manifest naming a role `Qwen3TtsSpec` does not even look
+for (`"weights"`, not `"weights_dir"`/`"ckpt"`) still needs that role's own
+file to exist for `store.local()` to succeed at all, or the builder
+attempts a network fetch instead of ever reaching the resolver. Fixed by
+writing `weights.stub` (satisfying `local_compound`'s existence check) under
+a manifest whose `family` is `"qwen3tts"` (so `classify_compound_manifest`
+does not skip it) but whose ONE role is named `"weights"` (so neither of
+`Qwen3TtsSpec`'s two real roles, `weights_dir`/`ckpt`, ever classifies) -
+the same trick `RESOLVER_MIGRATED_ARCHS`' single-role specs already use,
+adapted to a two-role compound manifest for the first time.
+
+**Not done, tracked for later**: `cosyvoice`/`minimaxmusic3` (this bucket's
+other two served architectures) have no SDK pipeline yet - `cosyvoice`
+would need a genuinely different call shape anyway (its one `synth` action
+always requires `ref_audio`+`ref_text`, no speaker-free mode, closer to
+`clone_voice` alone than to `speak`). `mimi`/`ecapatdnn` (consumed as plain
+files inside `qwen3tts`'s own `weights_dir`, not independently resolvable)
+and `campplus`/`s3tokenizer` (have `spec.rs` but no `caps.rs`, cosyvoice-
+internal only) remain real "no independently-servable `ArchSpec`" gaps, not
+new ones this milestone introduced. No CLI migration gap here either -
+`tts_cli.rs` was never on the resolver-migrated list to begin with (its own
+`--weights-dir`/`--ckpt` flags predate `RESOLVER_MIGRATED_ARCHS`), so there
+is nothing this phase silently left worse than it found.
+
+Verified with `cargo build -p brain --features audio` (clean), `bash
+scripts/gates/check-sdk-features.sh` (OK, `audio` compiles standalone -
+confirmed clean on the FIRST attempt this time, unlike `vision`/`image` in
+Phase 3.3), `cargo test -p brain --features audio --test tts_pipeline`
+(3 passed), `cargo test -p brain --features audio --tests` (full audio
+surface suite, no regressions), `bash scripts/gates/check-no-doc-citations.sh`
+(clean), and a full `cargo build --workspace --exclude brain-vulkan`.

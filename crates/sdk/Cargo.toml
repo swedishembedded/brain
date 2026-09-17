@@ -78,11 +78,15 @@ vision = ["resolve", "imagetype", "dep:brain-clip", "dep:brain-yolov8", "dep:bra
 # resolver to resolve a hub id against - and a decision model is two artifacts
 # (an imported encoder, a trained head) where a hub id names only the first.
 decision = ["device", "dep:brain-decide", "dep:brain-data", "dep:brain-checkpoint"]
-# `brain::TranscribePipeline`. Covers qwen3-asr (offline, fixed window) only;
-# nemotronasr (streaming, true batched forward across concurrent windows)
-# needs a genuinely different call shape and is a tracked future extension,
-# not folded in here.
-audio = ["resolve", "dep:brain-qwen3asr", "dep:brain-audio"]
+# `brain::TranscribePipeline` (qwen3-asr, offline, fixed window; nemotronasr's
+# streaming path needs a genuinely different call shape, a tracked future
+# extension, not folded in here) and `brain::TtsPipeline` (Qwen3-TTS
+# speak/clone_voice/design - one capability, three voice-selection call
+# shapes, not three pipeline types). `dep:brain-data` is qwen3tts's own
+# `data::rng::random_seed` for an unset seed, the same "explicit unset stays
+# unset, resolved from the checkpoint" contract `qwen3tts::caps::
+# gen_opts_from` already established for the wire path.
+audio = ["resolve", "dep:brain-qwen3asr", "dep:brain-audio", "dep:brain-qwen3tts", "dep:brain-data"]
 
 # --- infrastructure: selected BY a surface, never named by a consumer.
 # `brain::Device`.
@@ -132,6 +136,7 @@ brain-mujoco = { workspace = true, optional = true }
 brain-neuro = { workspace = true, optional = true }
 brain-qwen3 = { workspace = true, optional = true }
 brain-qwen3asr = { workspace = true, optional = true }
+brain-qwen3tts = { workspace = true, optional = true }
 brain-rrdbnet = { workspace = true, optional = true }
 brain-sam2 = { workspace = true, optional = true }
 brain-timesfm3 = { workspace = true, optional = true }

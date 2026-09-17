@@ -37,7 +37,7 @@
 //! | `forecast` | [`ForecastPipeline`] -- time-series forecasting (kronos, timesfm3) |
 //! | `text` | [`TextGenerationPipeline`] -- text generation (qwen3, from a local checkpoint path) |
 //! | `vision` | [`EmbeddingPipeline`] -- text embedding (CLIP); [`DetectionPipeline`] -- object detection (YOLOv8); [`SegmentPipeline`] -- promptable segmentation (SAM 2.1); [`DepthPipeline`] -- monocular depth (ZipDepth); named for the `brain_arch::Domain` they resolve under, not the capability, since there is no `Embedding`/`Detection`/`Segmentation`/`Depth` domain |
-//! | `audio` | [`TranscribePipeline`] -- speech-to-text (qwen3-asr, offline) |
+//! | `audio` | [`TranscribePipeline`] -- speech-to-text (qwen3-asr, offline); [`TtsPipeline`] -- text-to-speech (Qwen3-TTS: speak/clone_voice/design) |
 //! | `full` | every surface; this is `default` |
 //!
 //! `device` and `resolve` are infrastructure tiers that a surface selects for
@@ -116,6 +116,8 @@ mod restore;
 mod segment;
 #[cfg(feature = "text")]
 mod text;
+#[cfg(feature = "audio")]
+mod tts;
 #[cfg(feature = "image")]
 mod upscale;
 #[cfg(feature = "creature")]
@@ -163,6 +165,8 @@ pub use restore::{RestoreOptions, RestorePipeline, RestorePipelineBuilder};
 pub use segment::{Mask, Prompt, SegmentOptions, SegmentPipeline, SegmentPipelineBuilder};
 #[cfg(feature = "text")]
 pub use text::{GeneratedText, TextGenerationOptions, TextGenerationPipeline, TextGenerationPipelineBuilder};
+#[cfg(feature = "audio")]
+pub use tts::{Audio, TtsOptions, TtsPipeline, TtsPipelineBuilder};
 #[cfg(feature = "image")]
 pub use upscale::{UpscaleOptions, UpscalePipeline, UpscalePipelineBuilder};
 #[cfg(feature = "creature")]

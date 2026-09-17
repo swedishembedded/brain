@@ -393,6 +393,7 @@ dependencies = [
  "brain-neuro",
  "brain-qwen3",
  "brain-qwen3asr",
+ "brain-qwen3tts",
  "brain-rrdbnet",
  "brain-s3dit",
  "brain-sam2",
