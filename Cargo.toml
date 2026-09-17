@@ -356,6 +356,11 @@ minijinja-contrib = { version = "2", features = ["pycompat"] }
 # braintop TUI's unicode-truncate, so promoting it to a direct dependency adds
 # no new crate to the build.
 unicode-segmentation = "1"
+# Unicode general categories, for `data::wordpiece`: BERT's normalizer deletes
+# every "Other" category (Cc/Cf/Co/Cs/Cn) and its pre-tokenizer isolates every
+# P* category, neither of which std exposes (`char::is_control` is Cc only).
+# Already in the lock via jsonschema, so this adds no new build.
+unicode-general-category = "1"
 # Safetensors read/write (HF's official pure-Rust container) + half for
 # f16/bf16<->f32. Both are wasm-compatible.
 safetensors = "0.8"

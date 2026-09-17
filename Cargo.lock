@@ -919,6 +919,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_norway",
+ "unicode-general-category",
  "unicode-segmentation",
 ]
 

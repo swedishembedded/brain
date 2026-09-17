@@ -7,11 +7,19 @@
 #
 # Design goals:
 #   * Idempotent - only ever fetches files that are NOT already present.
-#   * Offline-first - reads a local mirror directory (fast, no network). There is
-#     currently no URL-download fallback; a missing mirror is reported and
+#   * Offline-first - reads a local mirror directory (fast, no network). Most
+#     groups have no URL fallback at all: a missing mirror is reported and
 #     skipped (see the `missing` counter at the end of a run). `brain fetch`
 #     (`crates/cli/src/fetch.rs`) is the network-download path for actual model
 #     weights - this script is test-fixture plumbing, not a general fetcher.
+#
+#     The ONE exception is `_fetch_url`, used for fixtures that have a stable
+#     public URL, are small (hundreds of kB), and have no mirror anywhere
+#     because they are not checkpoints and not per-box regenerated goldens:
+#     a published dataset and a tokenizer file. It is still offline-first -
+#     a download that fails for ANY reason (no network, no curl, a 404) is
+#     reported as a missing group exactly like an absent mirror and never
+#     fails the run - and `BRAIN_TESTDATA_NO_NETWORK=1` skips it outright.
 #   * Zero extra disk on the same filesystem - mirror files are HARD-LINKED into
 #     `testdata/` when possible (instant, shares blocks), else copied.
 #   * Never bakes an absolute path into the source tree: tests resolve their
@@ -34,6 +42,8 @@
 #   testdata/asr/audio/…               test waveforms
 #   testdata/face/antelopev2/…         the two released insightface ONNX graphs
 #   testdata/tts/ckpt/…                the Qwen3-TTS base + speech-tokenizer ckpt
+#   testdata/decide/tokenizer/…        all-MiniLM-L6-v2's tokenizer.json (URL)
+#   testdata/decide/banking77/…        the Banking77 intent dataset (URL)
 #
 # The checkpoints the model crates import are NOT produced here: they are
 # reported present-or-absent in the model store (`<models-dir>/<vendor>/<repo>`,
@@ -205,6 +215,38 @@ tts_tree() { _link_from "$TTS_MIRROR" "$1" "$2"; }
 # `model_dir` and so cannot read it from the store directly.
 ckpt_tree() { _link_from "$MODEL_MIRROR" "$1" "$2" "${3:-}"; }
 
+# _fetch_url <url> <dest-relative-path> - download ONE small file into $DEST.
+#
+# The narrow network exception documented in the header. Idempotent (an existing
+# file is never re-fetched), atomic (downloads to `.part`, renames on success),
+# and non-fatal: any failure is counted as a missing group and the run carries
+# on, so a box with no network behaves exactly as it does for an absent mirror.
+_fetch_url() {
+  local url="$1" rel="$2" out="$DEST/$2"
+  if [ -e "$out" ]; then
+    skipped=$((skipped + 1))
+    ORIGIN=""
+    return 0
+  fi
+  if [ -n "${BRAIN_TESTDATA_NO_NETWORK:-}" ] || ! command -v curl >/dev/null 2>&1; then
+    echo "  · $rel: no download (BRAIN_TESTDATA_NO_NETWORK set, or curl absent) - skipping"
+    _origin
+    missing=$((missing + 1))
+    return 0
+  fi
+  mkdir -p "$(dirname "$out")"
+  if curl -fsSL --retry 3 --max-time "${BRAIN_TESTDATA_FETCH_TIMEOUT:-120}" -o "$out.part" "$url"; then
+    mv "$out.part" "$out"
+    added=$((added + 1))
+    ORIGIN=""
+  else
+    rm -f "$out.part"
+    echo "  · $rel: download failed - skipping"
+    _origin
+    missing=$((missing + 1))
+  fi
+}
+
 echo "brain: populating testdata at $DEST, models at $MODELS_DIR"
 echo "       checkpoint mirror: ${MODEL_MIRROR:-<unset: export BRAIN_MODEL_MIRROR or BRAIN_MODELS_DIR>}"
 echo "       fixture mirrors: asr=${ASR_MIRROR:-<unset BRAIN_ASR_MIRROR>} vl=${VL_MIRROR:-<unset BRAIN_VL_MIRROR>} tts=${TTS_MIRROR:-<unset BRAIN_TTS_MIRROR>} golden=${GOLDEN_MIRROR:-<unset BRAIN_GOLDEN_MIRROR>}"
@@ -347,5 +389,31 @@ elif [ ! -e "$DEST/tts/voice-clone-example-voice.wav" ]; then
   _origin
   missing=$((missing + 1))
 fi
+
+# --- Decision model: tokenizer + Banking77 -----------------------------------
+# Both are URL-fetched (see `_fetch_url`): neither is a checkpoint, so neither
+# belongs in the model store, and neither is a per-box golden, so no mirror
+# variable would ever be set for them.
+#
+# The tokenizer is all-MiniLM-L6-v2's `tokenizer.json` alone - ~470 kB, read by
+# `crates/data/tests/wordpiece_parity.rs`. The model's WEIGHTS are not here:
+# they are a checkpoint and come from the store via
+# `brain pull sentence-transformers/all-MiniLM-L6-v2`.
+#
+# Banking77 (Casanueva et al. 2020, CC-BY-4.0) is the decision model's first
+# training/evaluation set: 10,003 train + 3,080 test utterances over 77 banking
+# intents. Taken from the authors' own repository rather than the HF mirror,
+# whose loader is a dataset script that the datasets server no longer runs.
+MINILM_URL="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main"
+ORIGIN="$MINILM_URL/tokenizer.json"
+_fetch_url "$MINILM_URL/tokenizer.json" "decide/tokenizer/tokenizer.json"
+ORIGIN="$MINILM_URL/tokenizer_config.json"
+_fetch_url "$MINILM_URL/tokenizer_config.json" "decide/tokenizer/tokenizer_config.json"
+
+B77_URL="https://raw.githubusercontent.com/PolyAI-LDN/task-specific-datasets/master/banking_data"
+for f in train.csv test.csv categories.json; do
+  ORIGIN="$B77_URL/$f (PolyAI, CC-BY-4.0 - cite Casanueva et al. 2020)"
+  _fetch_url "$B77_URL/$f" "decide/banking77/$f"
+done
 
 echo "brain: testdata ready - $added new, $skipped already present, $missing groups unavailable"

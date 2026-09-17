@@ -33,6 +33,10 @@ brain-events.workspace = true
 # that boundary wrong changes real token ids. Already in the workspace lock
 # (via the braintop TUI's unicode-truncate), so this adds no new build.
 unicode-segmentation.workspace = true
+# BERT's normalizer/pre-tokenizer are defined in terms of Unicode general
+# categories (delete every Other category, isolate every Punctuation one)
+# and std has no accessor for them - `char::is_control` covers Cc alone.
+unicode-general-category.workspace = true
 # Synthetic object-detection scene rendering (gen_detect) draws shapes into
 # in-memory RGB buffers; the captioned-image dataset loader (imageset, hoisted
 # from zimage) additionally decodes JPEG/PNG/PPM training images — so exactly

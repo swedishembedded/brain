@@ -575,7 +575,7 @@ hooks/install:
 # controlnet's duplicate `scale_chan` registration - see `.agents/rules/
 # lessons.md`). Needs no external fixtures, so unlike `parity/strict` it
 # carries no narrowing knob and no "green because skipped" risk.
-test/full: test test/doc test/slow test/e2e check/scripts check/spdx check/paths check/files check/samples check/sdk-features kernels-table/check cuda-table/check parity parity/strict
+test/full: test test/doc test/slow test/e2e check/scripts check/spdx check/paths check/files check/samples check/sdk-features kernels-table/check cuda-table/check wordpiece-table/check parity parity/strict
 
 # Rank every test binary by wall time; --budget fails if any exceeds it. This is
 # what keeps the fast lane fast.
@@ -805,6 +805,12 @@ kernels-table:
 
 kernels-table/check:
 	scripts/build/gen-kernel-table.py --check
+
+# Verify the checked-in Unicode table `data::wordpiece` reads is what the
+# current UCD produces. A stale table is a tokenizer that is wrong only on
+# accented/CJK input, which no accuracy metric would obviously show.
+wordpiece-table/check:
+	python3 scripts/build/gen-wordpiece-unicode.py --verify
 
 # Regenerate the NATIVE CUDA catalogue from crates/kernels-cuda's own registry.
 # A sibling of the WGSL pair above, not a mode of it: that generator derives
