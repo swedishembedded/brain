@@ -477,6 +477,17 @@ impl Encoder {
         self.gpu.submit(&[], &bw.steps);
     }
 
+    /// Apply one AdamW update to this half's parameters, on this half's own
+    /// handle.
+    ///
+    /// Which handle is not a detail: a submit on one handle is not ordered
+    /// against a submit on another, so stepping these weights from the other
+    /// half's handle would race this half's next forward and it would read
+    /// weights from before the update.
+    pub fn adamw_step(&self, opt: &optim::Optim, t: u32, lr: f32, wd: f32, clip: Option<f32>) {
+        opt.step(&self.gpu, &self.ps, t, lr, wd, 0.9, 0.999, 1e-8, clip, 1.0);
+    }
+
     /// Block until this device has finished what it was given.
     pub fn poll_wait(&self) {
         self.gpu.poll_wait();

@@ -28,7 +28,7 @@ path = "src/lib.rs"
 # baseline (`Cargo.toml`'s `brain = { default-features = false }`) is what
 # makes a consumer name its surfaces explicitly.
 default = ["full"]
-full = ["image", "creature", "forecast", "text", "vision", "audio"]
+full = ["image", "creature", "forecast", "text", "vision", "audio", "decision"]
 
 # --- surfaces: one per brain_arch::Domain the SDK has a public type for.
 #     A surface is the only thing a consumer names.
@@ -63,6 +63,11 @@ text = ["device", "dep:brain-qwen3", "dep:brain-data", "dep:brain-checkpoint", "
 # pipeline (detection, segmentation, depth) joins this SAME feature rather
 # than getting its own, for the same reason.
 vision = ["resolve", "dep:brain-clip"]
+# `brain::DecisionPipeline`. Selects `device` only, not `resolve`: like `text`,
+# this architecture has no model-store `ArchSpec`, so there is nothing for a
+# resolver to resolve a hub id against - and a decision model is two artifacts
+# (an imported encoder, a trained head) where a hub id names only the first.
+decision = ["device", "dep:brain-decide", "dep:brain-data", "dep:brain-checkpoint"]
 # `brain::TranscribePipeline`. Covers qwen3-asr (offline, fixed window) only;
 # nemotronasr (streaming, true batched forward across concurrent windows)
 # needs a genuinely different call shape and is a tracked future extension,
@@ -89,6 +94,7 @@ brain-checkpoint = { workspace = true, optional = true }
 brain-clip = { workspace = true, optional = true }
 brain-connectome = { workspace = true, optional = true }
 brain-data = { workspace = true, optional = true }
+brain-decide = { workspace = true, optional = true }
 brain-fly = { workspace = true, optional = true }
 brain-flybody = { workspace = true, optional = true }
 brain-flux2 = { workspace = true, optional = true }

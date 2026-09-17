@@ -69,6 +69,15 @@ pub enum Domain {
     /// is exactly why it is named rather than filed under an existing domain
     /// whose serving contract it would quietly violate.
     Creature,
+    /// Returns a probability distribution over answers the CALLER supplies at
+    /// request time, rather than text.
+    ///
+    /// A separate domain because nothing about the text domain's shape fits.
+    /// There is no vocabulary and no fixed output space: the set of things the
+    /// model may answer is part of the REQUEST, so a generic `infer` verb has
+    /// no meaning without one, and the serving contract has to carry the
+    /// allowed answers rather than only a prompt.
+    Decision,
     /// brain's own architecture, no upstream reference. Real (gradient-checked,
     /// benchmarked) but excluded from `brain caps`, `brain --help` and the
     /// docs model list - see the [`Source::Toy`] naming rule above.
@@ -244,6 +253,15 @@ use Source::*;
 /// `crates/arcface`. Each rename updates its row in the same commit that moves
 /// the crate.
 pub const ARCHS: &[Arch] = &[
+    // -- Decision -------------------------------------------------------
+    arch!(
+        "decide",
+        "Calibrated decisions over runtime-supplied options",
+        Decision,
+        Brain,
+        "brain-decide",
+        default_ref: Some("sentence-transformers/all-MiniLM-L6-v2")
+    ),
     // -- Text decoders --------------------------------------------------
     arch!("gpt2", "GPT-2 (nanoGPT parity baseline)", Text, LlamaCpp, "brain-gpt2", hf: &["GPT2LMHeadModel"]),
     // "qwen3" is the real config.json `model_type` fallback value (used when

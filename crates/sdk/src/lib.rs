@@ -85,6 +85,20 @@ mod forecast;
 mod image;
 #[cfg(feature = "image")]
 mod pipeline;
+/// `brain::DecisionPipeline` - calibrated probabilities over options supplied
+/// per request. Its own surface because its output space lives in the CALL,
+/// which no generative pipeline's shape can express.
+#[cfg(feature = "decision")]
+pub mod decision;
+#[cfg(feature = "decision")]
+pub use decision::{Choice, DecisionPipeline, DecisionPipelineBuilder, TrainSpec};
+
+/// The stage chain every pipeline shares: `train`, `evaluate`, `save`, `ask`,
+/// `tui`, `report`, `finish`. Written once, adapted per architecture through
+/// [`flow::Stages`].
+pub mod flow;
+pub use flow::{EvalReport, Flow, Stages, TrainReport};
+
 #[cfg(feature = "text")]
 mod text;
 #[cfg(feature = "creature")]

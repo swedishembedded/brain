@@ -218,7 +218,7 @@ impl Decide {
         self.head.zero_grads();
         // The head writes its hidden-state gradient straight into the
         // encoder's seed buffer, so the two halves need no copy between them.
-        self.head.backward(&d_score);
+        self.head.backward(self.enc.seed_buf(), &d_score);
         // The head and the encoder hold DIFFERENT handles to one device, and a
         // submit on one is not ordered against a submit on the other. The
         // encoder's reverse pass reads the seed buffer the head's reverse pass
@@ -231,13 +231,31 @@ impl Decide {
         // Two rates, because the encoder arrives pretrained and the head does
         // not: one rate would either move the head too slowly to learn or move
         // the encoder fast enough to forget what it was imported for.
+        // EACH HALF STEPS ITS OWN PARAMETERS ON ITS OWN HANDLE. Stepping the
+        // head's weights through the encoder's handle raced the head's next
+        // forward, which then read pre-update weights - the model evaluated as
+        // a near-uniform distribution while the SAME weights, reloaded into a
+        // fresh process, answered correctly. Same root cause as the forward's
+        // own wait.
         if let Some(o) = &self.enc_opt {
-            o.step(&self.enc.gpu, &self.enc.ps, t, enc_lr, 0.01, 0.9, 0.999, 1e-8, Some(1.0), 1.0);
+            self.enc.adamw_step(o, t, enc_lr, 0.01, Some(1.0));
         }
         if let Some(o) = &self.head_opt {
-            o.step(&self.enc.gpu, &self.head.ps, t, head_lr, 0.01, 0.9, 0.999, 1e-8, Some(1.0), 1.0);
+            self.head.adamw_step(o, t, head_lr, 0.01, Some(1.0));
         }
         Ok(l)
+    }
+
+    /// Write the head's weights to a brain `.safetensors`.
+    ///
+    /// Only the head: the encoder is imported from a published checkpoint and
+    /// re-importing it is free, so a run's artifact is the part that did not
+    /// exist before it.
+    pub fn save_head(&self, path: &str) -> Result<(), String> {
+        let tensors: Vec<(String, Vec<u64>, Vec<f32>)> =
+            self.head.weights().into_iter().map(|(n, v)| (n, vec![v.len() as u64], v)).collect();
+        checkpoint::save(path, self.cfg.to_json(), &tensors);
+        Ok(())
     }
 
     /// Steps taken so far - the AdamW time index, which a resumed run must

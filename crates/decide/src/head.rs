@@ -201,6 +201,24 @@ impl Head {
         self.gpu.read(&self.score, self.n_slots as usize)
     }
 
+    /// Every head parameter as `(name, values)`, for checkpointing.
+    pub fn weights(&self) -> Vec<(String, Vec<f32>)> {
+        tensor_manifest(&self.cfg)
+            .into_iter()
+            .map(|(name, shape)| {
+                let n: usize = shape.iter().product();
+                let v = self.gpu.read(self.w(&name), n);
+                (name, v)
+            })
+            .collect()
+    }
+
+    /// Apply one AdamW update to the head's parameters, on the HEAD's handle -
+    /// see the encoder's own note on why the handle matters.
+    pub fn adamw_step(&self, opt: &optim::Optim, t: u32, lr: f32, wd: f32, clip: Option<f32>) {
+        opt.step(&self.gpu, &self.ps, t, lr, wd, 0.9, 0.999, 1e-8, clip, 1.0);
+    }
+
     /// Block until this device has finished what it was given.
     pub fn poll_wait(&self) {
         self.gpu.poll_wait();
@@ -295,11 +313,22 @@ impl Head {
 
     /// Seed with `dL/d(score)` (one per option, host-computed by the loss) and
     /// run the reverse pass, which writes the encoder's seed buffer in place.
-    pub fn backward(&self, d_score: &[f32]) {
+    pub fn backward(&self, d_hidden_out: &DeviceBuffer, d_score: &[f32]) {
         let b = self.bwd.as_ref().expect("backward on an inference head");
         assert_eq!(d_score.len(), self.n_slots as usize, "one score gradient per option");
         self.gpu.write_f32(&b.d_score, d_score);
-        self.gpu.submit(&[], &b.steps);
+        // CLEARED FIRST, and it must be. This pass writes only two parts of
+        // the encoder's seed buffer: the key/value path ASSIGNS the state rows
+        // `[0, state_rows)`, and the `[CLS]` scatter ACCUMULATES onto one row
+        // per option. Every other slot row is written by neither, so without
+        // this clear it would still hold the previous step's gradient - and
+        // the encoder's reverse pass reads the WHOLE buffer. The result is a
+        // real gradient plus stale noise, which trains, and degrades the
+        // encoder as it goes.
+        //
+        // The clear rides on this submit rather than a separate one so it is
+        // ordered against these steps on this handle, not racing them.
+        self.gpu.submit(&[d_hidden_out], &b.steps);
     }
 
     fn build_bwd_steps(&self, hidden: &DeviceBuffer, d_hidden_out: &DeviceBuffer) -> Vec<Step> {
