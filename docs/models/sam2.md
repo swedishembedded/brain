@@ -49,10 +49,10 @@ Over D-Bus, the same action takes the same params:
 ```bash
 BRAIN_SAM2_WEIGHTS=<ckpt>/sam2.1_hiera_tiny.pt \
   dbus-run-session -- bash -c 'brain serve --dbus & sleep 3
-    python3 examples/vision/segment_image.py --image photo.ppm --point 614,430 --concurrent 4'
+    python3 samples/python/vision/segment-image/segment_image.py --image photo.ppm --point 614,430 --concurrent 4'
 ```
 
-Reference client: `examples/vision/segment_image.py` - prompts are given in
+Reference client: `samples/python/vision/segment-image/segment_image.py` - prompts are given in
 source-image pixels; `--point x,y` is repeatable, `--box x1,y1,x2,y2` sets a
 box prompt, `--concurrent N` submits N prompts at once to exercise the
 image-batched path.

@@ -1,38 +1,63 @@
 <!-- SPDX-License-Identifier: CC-BY-4.0 -->
 <!-- Copyright (c) 2026 Martin Schröder <info@swedishembedded.com> -->
 
-# samples - standalone applications built on the brain SDK
+# samples - standalone applications and client scripts built on brain
 
-A **sample** is a complete, standalone application that links the public
-`brain` SDK the way a downstream product would, declares exactly which parts of
-brain it needs, and is built and run on its own:
+A **sample** is a complete, standalone demonstration of one brain capability,
+built and run on its own - never part of the engine build. This is the Zephyr
+`samples/` idea: the engine is one thing, and the applications that demonstrate
+what you can build with it are another. A sample is not a test and not a
+fixture.
 
-```bash
-make samples/imagegen/generate/build
-make samples/imagegen/generate/run ARGS="--prompt 'a whale submarine'"
-make samples/list
-```
+There are three kinds, one per way of reaching brain:
 
-This is the Zephyr `samples/` idea: the engine is one thing, and the
-applications that demonstrate what you can build with it are another. A sample
-is not a test, not a fixture, and not part of the engine build.
+| | `samples/<category>/<name>/` | `samples/python/<pipeline>/<name>/` | `samples/shell/<pipeline>/<name>/` |
+|---|---|---|---|
+| what it is | a **Rust application** | a **Python** client script | a **shell** client/CLI script |
+| how it reaches brain | by linking the `brain` SDK crate | over D-Bus / HTTP (`brain_py`) | over D-Bus (via `tools/dbus-session.sh`) or the `brain` CLI directly |
+| what it proves | the SDK is a real, usable library | the served surface works off-process | the CLI/served surface works off-process, no Python needed |
+| built by | `make samples/<path>/build` | nothing - run against a running brain | nothing - run against a running brain |
 
-## samples/ vs examples/
+A capability is only fully demonstrated when the ways that apply to it work:
+every served model gets at least a Python or shell client; a capability the
+SDK exposes as a library gets a Rust sample too when linking it standalone is
+a meaningfully different story from driving it over the bus.
 
-| | `examples/` | `samples/` |
-|---|---|---|
-| what it is | a **client** script (Python/shell) | a **Rust application** |
-| how it reaches brain | over D-Bus / HTTP / the `brain` CLI | by linking the `brain` SDK crate |
-| what it proves | the served surface works off-process | the SDK is a real, usable library |
-| built by | nothing - run against a running brain | `make samples/<path>/build` |
+## Every sample is a directory
 
-Both stay. They demonstrate the two genuinely different ways to consume brain,
-and a capability is only fully demonstrated when both work.
+Regardless of kind, a sample is `samples/.../<name>/`, always containing:
 
-## Rules
+- **An entry point** - `src/main.rs` for a Rust sample, or one or more
+  `.py`/`.sh` scripts for a Python/shell sample. A sample that legitimately
+  needs several entry points around one workflow (train step + generate step,
+  or several actions on one served model) keeps them together in one
+  directory with one README, rather than splitting one story across several
+  samples.
+- **`README.md`** - what it demonstrates, what it needs, how to run it, and
+  what it needs to build (for a Rust sample). This compiles into the docs
+  manual (`make docs`) - see `scripts/build/gen-samples-manifest.py`.
+- Optionally, **`fetch-data.sh`** - a script that pulls or generates the
+  sample's own input data on demand. No sample commits a fixture; if it needs
+  a CSV, an image, or a checkpoint conversion, it fetches or generates it
+  itself, usually by wrapping a `tools/` utility.
+- A shell/Python sample may keep its own private helper scripts beside its
+  entry point (e.g. a Python script a shell sample shells out to) - those are
+  implementation details of that one sample, not independent samples in their
+  own right, and are not expected to run standalone.
+
+Python samples reach brain via `brain_py` (`pip install -e brain-py`) and
+`tools/dbus-session.sh` for the launch-and-wait boilerplate (a private session
+bus, `brain serve` with a real readiness wait, teardown on exit) - see that
+script for its usage. Shell samples either do the same, or shell out to the
+`brain` CLI directly when no bus is needed.
+
+## Rules for Rust samples
 
 These are not style preferences. Each exists to keep a sample's dependency
-closure honest or the engine build unaffected.
+closure honest or the engine build unaffected. (Shell/Python samples have no
+Cargo closure to police; their contract is the directory shape above, plus
+`make check/samples`' structural checks - README present, entry script
+executable and SPDX-headed, no stray committed fixtures.)
 
 1. **A sample depends on `brain` (the SDK crate), not on `brain-<short>` engine
    crates.** The SDK is where the *feature vocabulary* lives - it is this
@@ -128,7 +153,7 @@ compiles exactly 1 crate, 0 of them brain crates**, and that is what
 If you ever see a sample build recompiling `brain-*` crates, it is being built
 with a selection other than its own.
 
-## Adding a sample
+## Adding a Rust sample
 
     samples/<category>/<name>/
         Cargo.toml       package `sample-<category>-<name>`, the surfaces it
@@ -138,3 +163,19 @@ with a selection other than its own.
 
 Nothing else to register: the workspace picks it up through the `samples/*/*`
 glob, and `make samples/<category>/<name>/{build,run}` works immediately.
+
+## Adding a Python or shell sample
+
+    samples/python/<pipeline>/<name>/       or samples/shell/<pipeline>/<name>/
+        README.md        what it demonstrates, what it needs, how to run it
+        <name>.py (.sh)  SPDX header, Copyright (c) 2026 Martin Schröder,
+                         executable (chmod +x)
+        fetch-data.sh    optional: pulls/generates this sample's own input
+
+`<pipeline>` is the existing taxonomy (`api asr dbus embedding forecast
+imagegen imaging llm musicgen qwen3omnimoe restore tts videogen vision`) -
+reuse an existing one or add a new one only when the sample genuinely opens a
+new pipeline. These trees are **excluded from the Cargo workspace**
+(root `Cargo.toml`'s `exclude`) - they hold no `Cargo.toml` and are never
+built. `make check/samples` still validates their directory shape; `make
+samples/list` lists them alongside the Rust samples.

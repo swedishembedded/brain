@@ -5,7 +5,7 @@
 # Git pre-commit hook: blocks a commit that (1) touches a source file missing
 # the SPDX-License-Identifier/copyright header (scripts/spdx/check.py has the
 # actual rules), or (2) adds a docs/ or .agents/ file-path citation in
-# crates/, scripts/, tools/, or examples/ (scripts/gates/check-no-doc-citations.sh
+# crates/, scripts/, tools/, or samples/ (scripts/gates/check-no-doc-citations.sh
 # has the rationale). Installed via `make hooks/install`; this is the
 # no-extra-dependency path — see .pre-commit-config.yaml for the same checks
 # via the `pre-commit` framework, for anyone already using it.

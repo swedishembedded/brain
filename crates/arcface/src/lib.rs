@@ -40,7 +40,7 @@
 //!
 //! The serving contract is met by [`caps`] (the `embed`
 //! `capability::Provider`), the CLI's residency adapter (`BRAIN_ARCFACE_DIR`)
-//! and `examples/vision/`.
+//! and `samples/python/vision/`.
 //!
 //! # Two normalisations, one letter apart
 //!

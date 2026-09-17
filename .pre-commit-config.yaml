@@ -15,7 +15,7 @@ repos:
       - id: no-doc-citations-in-code
         name: "No docs/ or .agents/ file-path citations in code"
         description: >-
-          crates/, scripts/, tools/, and examples/ must never cite a docs/ or
+          crates/, scripts/, tools/, and samples/ must never cite a docs/ or
           .agents/ file path (a comment, a doc-string, a user-facing error
           message) — those trees move and get rewritten, and a citation to
           them is a cross-reference nothing keeps in sync. State the fact or
@@ -99,7 +99,7 @@ repos:
           survived (should only happen for a commit that bypassed the
           commit-msg hook), OR if the full working tree being pushed still
           cites a docs/ or .agents/ file path anywhere in crates/, scripts/,
-          tools/, or examples/ (a full-tree, not diff-scoped, re-run of
+          tools/, or samples/ (a full-tree, not diff-scoped, re-run of
           no-doc-citations-in-code -- the deterministic backstop for
           whatever got the diff-scoped commit-time check bypassed). See
           scripts/hooks/pre-push.

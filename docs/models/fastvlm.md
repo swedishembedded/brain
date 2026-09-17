@@ -47,7 +47,7 @@ with BrainDBus() as brain:
     )
 ```
 
-See [`examples/dbus/brain_dbus.py`](../../examples/dbus/brain_dbus.py) for the
+See [`samples/python/dbus/brain-dbus/brain_dbus.py`](../../samples/python/dbus/brain-dbus/brain_dbus.py) for the
 connection setup this snippet builds on.
 
 ## Options

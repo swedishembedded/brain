@@ -74,7 +74,7 @@ brain minimaxmusic3 generate \
     --out audio=song.wav
 ```
 
-Or over D-Bus: see `examples/musicgen/generate_song.py` and its own
+Or over D-Bus: see `samples/python/musicgen/generate-song/generate_song.py` and its own
 README for the full `dbus-run-session` invocation.
 
 `BRAIN_DEVICE=cpu` matters on a machine whose GPU cannot hold the Global

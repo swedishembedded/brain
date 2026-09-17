@@ -5,7 +5,7 @@
 """Git pre-push hook: FAILS the push if (1) any commit about to be pushed
 still has a Co-Authored-By:/Claude-Session: trailer line, (2) the tree being
 pushed cites a docs/ or .agents/ file path from crates/, scripts/, tools/, or
-examples/ (scripts/gates/check-no-doc-citations.sh), or (3) HEAD's history
+samples/ (scripts/gates/check-no-doc-citations.sh), or (3) HEAD's history
 contains a merge commit (scripts/gates/check-linear-history.sh) -- merging
 instead of rebasing is exactly the kind of local mistake this backstop exists
 to catch before it becomes shared history.

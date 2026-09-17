@@ -27,8 +27,9 @@
 //!   exercise beyond `crates/dbus/tests/roundtrip.rs`'s synthetic `slow` action).
 //! * **`forecast`**: a deterministic last-value-plus-drift extrapolation, returned
 //!   in the same `[levels, horizon]` quantile-major f32-LE wire shape chronos2
-//!   uses — pinning the forecast contract `examples/forecast/README.md` documents,
-//!   not a stand-in.
+//!   uses - pinning the forecast contract
+//!   `samples/python/forecast/forecast-client/README.md` documents, not a
+//!   stand-in.
 //!
 //! `estimate()` reports a small non-zero VRAM footprint so real placement runs (and,
 //! on a GPU-less box, falls back to the CPU/RAM pool); `activate()` is instant.
@@ -369,7 +370,8 @@ const EMBED_DIM: usize = 8;
 /// normalized and squashed with `sin` to a bounded, reproducible vector.
 /// `outputs.mean` and `outputs.tokens` are exactly what the HTTP embeddings handler
 /// reads; the `embeddings` blob (f32-LE, `meta.shape=[1,DIM]`) is the same vector for
-/// a caller on the fd-in/fd-out path (see `examples/embedding/embed_document.py`).
+/// a caller on the fd-in/fd-out path (see
+/// `samples/python/embedding/embed-document/embed_document.py`).
 ///
 /// `text` comes from the input blob if present, else the `text` param — neither is
 /// required at the spec level (see [`MockResident::embed_spec`]) so this is the one
@@ -411,9 +413,10 @@ const FORECAST_LEVELS: [f32; 3] = [0.1, 0.5, 0.9];
 /// horizon (so `--horizon 64` visibly produces a wider band than `--horizon 4`,
 /// exercising a client's per-quantile unpacking rather than returning three
 /// identical rows). Wire shape and field names match chronos2
-/// (`crates/chronos2`) — `[levels, horizon]` quantile-major f32-LE, `meta.kind =
-/// "quantiles"` — so this pins the contract `examples/forecast/README.md`
-/// documents instead of drifting from it silently.
+/// (`crates/chronos2`) - `[levels, horizon]` quantile-major f32-LE, `meta.kind =
+/// "quantiles"` - so this pins the contract
+/// `samples/python/forecast/forecast-client/README.md` documents instead of
+/// drifting from it silently.
 fn forecast(inv: &Invocation) -> ActionResult {
     let blob = inv.get_blob("context").ok_or("mock: forecast needs a `context` input blob")?;
     if blob.bytes.is_empty() || !blob.bytes.len().is_multiple_of(4) {
@@ -649,8 +652,9 @@ mod tests {
         let mean = out.outputs["mean"].as_array().unwrap();
         assert_eq!(mean.len(), EMBED_DIM);
         assert!(out.outputs["tokens"].as_i64().unwrap() > 0);
-        // The blob path must return the SAME vector as f32-LE, meta.shape=[1,DIM] —
-        // this is the fd-in/fd-out contract `examples/embedding/embed_document.py`
+        // The blob path must return the SAME vector as f32-LE, meta.shape=[1,DIM] -
+        // this is the fd-in/fd-out contract
+        // `samples/python/embedding/embed-document/embed_document.py`
         // depends on, and previously had zero coverage.
         let blob = &out.blobs["embeddings"];
         assert_eq!(blob.meta, json!({ "shape": [1, EMBED_DIM] }));

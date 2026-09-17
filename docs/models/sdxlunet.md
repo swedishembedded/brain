@@ -11,7 +11,7 @@ covered) and forward-parity-gated (165 comparisons, worst cosine
 
 It is **served**: a capability manifest (`text2image`), a residency adapter
 (`BRAIN_SDXL_DIR`), D-Bus `Run`, and a runnable example under
-`examples/imagegen/`, on top of a complete sampler loop (dual CLIP
+`samples/python/imagegen/`, on top of a complete sampler loop (dual CLIP
 conditioning, a discrete Euler step, CFG, VAE decode). It is also
 **trainable**: the backward is gated by finite differences over the whole
 graph, including a per-entry check on the timestep-embedding chain that all

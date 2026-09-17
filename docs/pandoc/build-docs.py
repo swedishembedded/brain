@@ -36,7 +36,11 @@ toc-title: "Contents"
 """
 
 def manifest():
-    """Yields ('part', title) for a `== Title` line, ('doc', rel_path) otherwise."""
+    """Yields ('part', title) for a `== Title` line, ('doc', rel_path) otherwise.
+
+    A doc path is repo-root-relative (e.g. `docs/using/cli.md` or
+    `samples/python/dbus/brain-dbus/README.md`), not docs/-relative - so the
+    manual can pull in a sample's own README alongside the docs/ pages."""
     for line in open(os.path.join(DOCS, "manifest.txt")):
         line = line.strip()
         if not line or line.startswith("#"):
@@ -52,13 +56,13 @@ LINK = re.compile(r"(?<!\!)\[([^\]]+)\]\(([^)]+?\.md(?:#[^)]*)?)\)")
 IMG = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")
 
 def transform(rel_path, text):
-    doc_dir = posixpath.dirname(rel_path)  # e.g. models/yolo
+    doc_dir = posixpath.dirname(rel_path)  # e.g. docs/models/yolo or samples/python/dbus/brain-dbus
     def img_repl(m):
         alt, src = m.group(1), m.group(2)
         if src.startswith(("http://", "https://", "/")):
             return m.group(0)
         # repo-root-relative so pandoc (run from ROOT) resolves it
-        new = posixpath.normpath(posixpath.join("docs", doc_dir, src))
+        new = posixpath.normpath(posixpath.join(doc_dir, src))
         return f"![{alt}]({new})"
     text = IMG.sub(img_repl, text)
     text = LINK.sub(lambda m: m.group(1), text)  # flatten cross-doc links to text
@@ -72,10 +76,9 @@ def build_markdown():
             parts.append(f"`\\part{{{latex_part}}}`{{=latex}}\n\n")
             continue
         rel = val
-        p = os.path.join(DOCS, rel)
+        p = os.path.join(ROOT, rel)
         if not os.path.isfile(p):
-            print(f"WARN missing: {rel}", file=sys.stderr)
-            continue
+            sys.exit(f"docs/manifest.txt: missing file: {rel}")
         parts.append(transform(rel, open(p).read()).rstrip() + "\n\n")
     md = os.path.join(OUT, "brain-docs.md")
     open(md, "w").write("".join(parts))

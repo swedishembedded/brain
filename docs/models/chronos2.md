@@ -53,7 +53,7 @@ metadata).
 BRAIN_CHRONOS2=/path/to/chronos2.safetensors dbus-run-session -- bash -c '
   brain serve --dbus &
   sleep 2
-  python3 examples/forecast/forecast_client.py --model brain/chronos2 --horizon 64
+  python3 samples/python/forecast/forecast-client/forecast_client.py --model brain/chronos2 --horizon 64
 '
 ```
 

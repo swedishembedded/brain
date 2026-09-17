@@ -128,7 +128,7 @@ impl Action for Gradient {
 /// `yolov8 detect --identity-ref` runs ArcFace over each person box and can say
 /// `einstein` where the head could only say `0`. When it is absent the numeric
 /// class is rendered exactly as before, so every caller predating this field
-/// (`scripts/demo/quickstart.sh`, `examples/`) is unaffected.
+/// (`scripts/demo/quickstart.sh`, `samples/`) is unaffected.
 struct Box_ {
     bbox: [f32; 4],
     conf: f32,

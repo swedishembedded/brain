@@ -6,14 +6,15 @@
 # scheduler (batching/eviction, live Stats counters) plus the generate -> detect ->
 # annotate demo actually producing images over D-Bus.
 #
-# The generate/detect half IS `examples/dbus/detect_pipeline.py` — this file drives
+# The generate/detect half IS
+# `samples/python/dbus/detect-pipeline/detect_pipeline.py` - this file drives
 # it directly rather than maintaining a second, drifting copy. The scheduler math
 # (batching/eviction) is `scheduler_asserts.py`, next to this file.
 #
 # Needs BRAIN_E2E=1, a GPU, and real z-image AND yolo weights (detect_pipeline.py
-# hard-requires both — it has no "skip detection" mode, unlike the hand-written
+# hard-requires both - it has no "skip detection" mode, unlike the hand-written
 # driver this file used to run instead), so this is NOT part of the fast harness:
-# `tests/e2e/examples.bats` runs the SAME examples against the weight-free mock
+# `tests/e2e/samples.bats` runs the SAME samples against the weight-free mock
 # model instead, on every `make test/e2e`. Run:
 #
 #   BRAIN_E2E=1 \
@@ -40,7 +41,7 @@ setup_file() {
   export BIN
 }
 
-@test "scheduler e2e: generate + detect (examples/dbus/detect_pipeline.py) + batching + eviction" {
+@test "scheduler e2e: generate + detect (samples/python/dbus/detect-pipeline/detect_pipeline.py) + batching + eviction" {
   # CPU encoder (unset ENCODER_GPU) so each z-image instance is DiT-on-one-GPU +
   # encoder-in-RAM — several sizes then fit across the GPUs and the extra one is
   # evicted, with no single-card overcommit. --reserve-gb keeps headroom for
@@ -50,7 +51,7 @@ setup_file() {
       '$BIN' serve --dbus --reserve-gb 4 2>/tmp/brain_e2e_srv.log &
       SRV=\$!
       for i in \$(seq 1 60); do busctl --user list 2>/dev/null | grep -q com.swedishembedded.Brain1 && break; sleep 0.3; done
-      python3 -u '$REPO/examples/dbus/detect_pipeline.py' \
+      python3 -u '$REPO/samples/python/dbus/detect-pipeline/detect_pipeline.py' \
         && python3 -u '$REPO/tests/e2e/scheduler_asserts.py' --model z-image --size \"\$SIZE\" --steps \"\$STEPS\" --batch-n \"\$BATCH_N\"
       RC=\$?
       kill \$SRV 2>/dev/null

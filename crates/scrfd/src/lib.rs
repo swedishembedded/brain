@@ -25,7 +25,7 @@
 //!
 //! The serving contract is met by [`caps`] (the `detect`
 //! `capability::Provider`), the CLI's residency adapter (`BRAIN_SCRFD_DIR`) and
-//! `examples/vision/`.
+//! `samples/python/vision/`.
 //!
 //! # Two normalisations, one letter apart
 //!

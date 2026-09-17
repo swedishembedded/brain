@@ -96,8 +96,8 @@ video input uses) and a `views` param (the camera array as JSON, the shape
 per-iteration MSE as progress; cancellable mid-run like any other long-running
 served action. `view` is deliberately not served - it is an interactive
 WASD/mouse loop with no request/response shape. See
-[`examples/vision/splat_render.py`](../../examples/vision/splat_render.py) and
-[`splat_fit.py`](../../examples/vision/splat_fit.py).
+[`samples/python/vision/splat/splat_render.py`](../../samples/python/vision/splat/splat_render.py) and
+[`splat_fit.py`](../../samples/python/vision/splat/splat_fit.py).
 
 ## Hardware and limits
 

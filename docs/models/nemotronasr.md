@@ -52,15 +52,15 @@ BRAIN_NEMOTRONASR=/path/to/nemotron/hf brain serve --dbus
 Additionally exposes `transcribe_stream` for a live session: send successive
 windows of a mic feed under the same `stream` session id, and a final
 `eos`-only call to flush and close it. See
-[`examples/asr/README.md`](../../examples/asr/README.md) and the reference
-client [`examples/asr/transcribe_mic.py`](../../examples/asr/transcribe_mic.py)
+[`samples/python/asr/transcribe-mic/README.md`](../../samples/python/asr/transcribe-mic/README.md) and the reference
+client [`samples/python/asr/transcribe-mic/transcribe_mic.py`](../../samples/python/asr/transcribe-mic/transcribe_mic.py)
 (`--model brain/nemotronasr`, `--wav FILE` or live mic capture) for the full
 protocol.
 
 ```bash
 BRAIN_NEMOTRONASR=/path/to/nemotron/hf dbus-run-session -- bash -c '
   brain serve --dbus & sleep 2
-  python3 examples/asr/transcribe_mic.py --model brain/nemotronasr --wav clip.wav'
+  python3 samples/python/asr/transcribe-mic/transcribe_mic.py --model brain/nemotronasr --wav clip.wav'
 ```
 
 ## Options

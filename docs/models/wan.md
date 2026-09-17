@@ -132,7 +132,7 @@ surfaces dispatch:
 
 ```bash
 brain caps brain/wan                     # discovery, no weights needed
-brain serve --dbus                       # then drive it from examples/videogen/
+brain serve --dbus                       # then drive it from samples/python/videogen/wan/
 ```
 
 Only `prompt` is required; every other parameter defaults from the action's own
@@ -142,7 +142,7 @@ Over D-Bus, `t2v` is a streaming subscription: progress arrives per denoise step
 and the clip comes back as a file descriptor. It is **cancellable** - a cancel
 flips the job's token and the denoise loop aborts at its next step boundary,
 which matters for a model whose default run occupies a card for a long time.
-`examples/videogen/` is the runnable client for both.
+`samples/python/videogen/wan/` is the runnable client for both.
 
 The action is not reachable as a CLI verb of its own: `wan` has a dedicated CLI
 module and the resolver gives those precedence over generic capability

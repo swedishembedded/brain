@@ -3,7 +3,10 @@
 # Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 #
 # Every directory under crates/ - and every samples/<category>/<name>/ - must
-# be a crate whose manifest PARSES.
+# be a crate whose manifest PARSES. samples/shell/ and samples/python/ are
+# EXCLUDED (root Cargo.toml's `exclude`): they hold shell/Python client
+# samples, never a Cargo.toml, and are skipped here for the same reason
+# cargo itself skips them.
 #
 # The workspace takes its members from the globs `members = ["crates/*",
 # "samples/*/*"]`, so one bad manifest under EITHER does not fail one crate -
@@ -37,6 +40,7 @@ fail=0
 
 for d in crates/*/ samples/*/*/; do
     [ -d "$d" ] || continue
+    case "$d" in samples/shell/*|samples/python/*) continue ;; esac
     if [ ! -f "${d}Cargo.toml" ]; then
         echo "check-workspace-members: FAIL - ${d} has no Cargo.toml"
         echo "    The workspace globs crates/* and samples/*/*, so this makes EVERY"

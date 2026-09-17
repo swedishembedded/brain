@@ -89,8 +89,9 @@ these, not a per-model format:
 ## Client examples
 
 A reusable Python client lives in the `brain-py` package (`brain_py.dbus.BrainDBus`),
-and [`examples/dbus/`](../../examples/dbus/) has a runnable example
-(`brain_dbus.py`) showing discovery, a one-shot image action read back over a file
-descriptor, and a streaming request — plus a `busctl`-based smoke test
-(`busctl_smoke.sh`) that needs no Python at all. See that directory's README for the
-exact commands.
+and [`samples/python/dbus/brain-dbus/`](../../samples/python/dbus/brain-dbus/README.md)
+has a runnable example (`brain_dbus.py`) showing discovery, a one-shot image action
+read back over a file descriptor, and a streaming request - plus
+[`samples/shell/dbus/busctl-smoke/`](../../samples/shell/dbus/busctl-smoke/README.md),
+a `busctl`-based smoke test (`busctl_smoke.sh`) that needs no Python at all. See
+those directories' READMEs for the exact commands.

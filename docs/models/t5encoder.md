@@ -25,7 +25,7 @@ It is **served**: a capability manifest (one `encode` action, model id
 `brain/t5encoder`), a residency adapter (`BRAIN_T5ENCODER_DIR`, holding
 either or both variants' released layout), genuine batched `run_batch`
 (grouped by `(variant, max_len)`, one forward per group), D-Bus `Run`, and a
-runnable example (`examples/embedding/t5_embed.py`).
+runnable example (`samples/python/embedding/t5-embed/t5_embed.py`).
 
 Two things are worth knowing before trusting a change here. The per-block
 relative bias is a **silent** difference - a port that shares block 0's table

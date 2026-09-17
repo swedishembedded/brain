@@ -59,7 +59,7 @@ in the request metadata), parameters `horizon` (forecast length) and `freq`
 BRAIN_FINCAST=/path/to/fincast.safetensors dbus-run-session -- bash -c '
   brain serve --dbus &
   sleep 2
-  python3 examples/forecast/forecast_client.py --model brain/fincast --freq 0
+  python3 samples/python/forecast/forecast-client/forecast_client.py --model brain/fincast --freq 0
 '
 ```
 

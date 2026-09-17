@@ -42,7 +42,7 @@ detection and region captioning are unavailable - `caption` is the only action.
 | model id | `brain/moondream3` |
 | weights | resolved automatically from the models directory (`moondream3::spec::Moondream3Spec`); `--weights`/`weights` names one outright |
 | action | `caption` (streaming) |
-| example | `examples/vision/moondream3_caption.py` |
+| example | `samples/python/vision/moondream3-caption/moondream3_caption.py` |
 | placement | GPU when one is budgeted, else the CPU pool |
 
 Package: `brain-moondream3`.

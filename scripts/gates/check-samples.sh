@@ -66,6 +66,31 @@ for m in "${manifests[@]}"; do
 	done < <(find "$dir/src" -name '*.rs' 2>/dev/null || true)
 done
 
+# --------------------------------------------------- shell/python samples
+# These trees carry no Cargo closure to police (root Cargo.toml excludes
+# them); the contract is structural: a README, an SPDX-headed entry point
+# (run via `bash script.sh` / `python3 script.py`, so the executable bit
+# itself is not required - and is inconsistent in this tree already), and no
+# committed fixture.
+mapfile -t script_dirs < <(find samples/shell samples/python -mindepth 2 -maxdepth 2 -type d 2>/dev/null | sort)
+if [ "${#script_dirs[@]}" -gt 0 ]; then
+	echo "check/samples: ${#script_dirs[@]} shell/python sample(s)"
+	fixture_re='\.(csv|ply|wav|mp3|mp4|png|jpe?g|ppm|pt|pth|safetensors|weights|gguf|bin|npy|npz)$'
+	for d in "${script_dirs[@]}"; do
+		[ -f "$d/README.md" ] || bad "$d: no README.md"
+
+		mapfile -t entries < <(find "$d" -maxdepth 1 \( -name '*.py' -o -name '*.sh' \) 2>/dev/null | sort)
+		[ "${#entries[@]}" -gt 0 ] || bad "$d: no .py or .sh entry point"
+		for e in "${entries[@]}"; do
+			head -3 "$e" | grep -q 'SPDX-License-Identifier' || bad "$e: no SPDX header"
+		done
+
+		while read -r f; do
+			bad "$f: looks like a committed fixture - samples fetch/generate their own input (see samples/README.md), never commit one"
+		done < <(find "$d" -maxdepth 1 -type f -regextype posix-extended -regex ".*$fixture_re" 2>/dev/null)
+	done
+fi
+
 # ------------------------------------------------- surfaces, closure, budget
 # One python pass: read the SDK's feature table, then check every sample's
 # declaration and real dependency graph against it.

@@ -5,9 +5,9 @@
 """Scheduler batching + eviction assertions over brain's D-Bus surface.
 
 Isolated from the generate -> detect -> annotate demo (that demo IS
-``examples/dbus/detect_pipeline.py`` — ``scheduler.bats`` runs it directly rather
-than maintaining a second, drifting copy). This file is only the scheduler
-validation this repo needs automated coverage of:
+``samples/python/dbus/detect-pipeline/detect_pipeline.py`` - ``scheduler.bats``
+runs it directly rather than maintaining a second, drifting copy). This file
+is only the scheduler validation this repo needs automated coverage of:
 
 1. **batch**  — several same-shape requests fired concurrently must coalesce into
    one scheduler group (``Stats.max_batch >= 2``);

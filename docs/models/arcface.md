@@ -47,7 +47,7 @@ brain arcface embed --align false \
 
 The same action is reachable over D-Bus via the generic
 `Run(model, action, params, in_fds, in_meta, transport)` call. Reference
-client: `examples/vision/face_id.py` (see `examples/vision/README.md`).
+client: `samples/python/vision/face-id/face_id.py` (see that sample's README.md).
 
 ## Options
 

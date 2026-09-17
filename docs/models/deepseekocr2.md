@@ -91,7 +91,9 @@ gradient-checked, the decode loop's causal self-consistency proven against
 the real checkpoint). Try it on an actual scanned document to judge decode
 quality for yourself.
 
-Reference client: [`examples/vision/deepseek-ocr-2/`](../../examples/vision/deepseek-ocr-2/README.md).
+Reference client: [`samples/python/vision/deepseek-ocr/`](../../samples/python/vision/deepseek-ocr/README.md)
+(the same script serves both DeepSeek-OCR and DeepSeek-OCR-2 - see that README's
+"v2" section).
 
 ## Options
 

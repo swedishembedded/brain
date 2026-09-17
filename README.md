@@ -272,7 +272,7 @@ last 6 rows of each window are held back from the model and used as the answer
 key, at 16 disjoint origins:
 
 ```bash
-$ brain forecast predict --csv examples/forecast/synthetic_hourly.csv \
+$ brain forecast predict --csv crates/kronos/tests/data/synthetic_hourly.csv \
     --horizon 6 --samples 16 --origins 16 --gnuplot kronos-forecast.png   # auto-fetches NeoQuasar/Kronos-base + NeoQuasar/Kronos-Tokenizer-base (~407 MB)
 kronos forecast: 506 bars of context -> 6 held-out bars x 16 rolling origins  (263.7s, 16 samples)
   close, vs held-out truth       mean MAE       CRPS    pinball

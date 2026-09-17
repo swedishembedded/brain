@@ -45,7 +45,7 @@ the data. Bar ranges therefore inherit the volatility clustering too.
 Only numpy is needed (already in requirements.txt).
 
 Usage:
-  tools/forecast/make_synthetic_ohlcv.py --out examples/forecast/synthetic_hourly.csv
+  tools/forecast/make_synthetic_ohlcv.py --out crates/kronos/tests/data/synthetic_hourly.csv
     [--bars 720] [--seed 18] [--horizon 6] [--start 2026-01-05T00:00:00]
 """
 import argparse

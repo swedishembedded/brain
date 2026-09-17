@@ -32,7 +32,7 @@ pump_power, shift_on`.
               Role::KnownFuture covariate (the schedule is planned in advance).
 
 Usage:
-  python3 tools/forecast/make_cooling_loop.py --out examples/forecast/cooling_loop.csv \
+  python3 tools/forecast/make_cooling_loop.py --out cooling_loop.csv \
     --hours 720 --seed 7
 """
 import argparse

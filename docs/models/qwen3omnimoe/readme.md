@@ -150,7 +150,7 @@ with BrainDBus() as brain:
     # out.text: the response text
 ```
 
-[`examples/omni/omni.py`](../../../examples/omni/omni.py) exercises text,
+[`samples/python/qwen3omnimoe/omni/omni.py`](../../../samples/python/qwen3omnimoe/omni/omni.py) exercises text,
 speech, image and video input over both the D-Bus and HTTP transports.
 
 ## Options

@@ -77,9 +77,9 @@ BRAIN_SUPIR_DIR=/path/to/SUPIR-v0Q_fp32.safetensors \
 ```
 
 Over D-Bus - see
-[`examples/restore/supir_restore.py`](../../examples/restore/supir_restore.py)
+[`samples/python/restore/supir-restore/supir_restore.py`](../../samples/python/restore/supir-restore/supir_restore.py)
 and that directory's own README for the full worked example, mirroring
-[`examples/restore/restore_face.py`](../../examples/restore/restore_face.py)'s
+[`samples/python/restore/restore-face/restore_face.py`](../../samples/python/restore/restore-face/restore_face.py)'s
 shape.
 
 ## Options

@@ -14,7 +14,7 @@ It is **served**: a capability manifest (`text2image`, model id
 `brain/flux1-pulid`), a residency adapter (`BRAIN_FLUX1_DIR` for the FLUX.1
 backbone, `BRAIN_PULID_DIR` for the PuLID checkpoint, `BRAIN_ARCFACE_DIR` and
 `BRAIN_CLIP_DIR` for the identity towers), D-Bus `Run`, and a runnable
-example (`examples/imagegen/pulid_generate.py`) - a prompt plus a face photo
+example (`samples/python/imagegen/pulid/pulid_generate.py`) - a prompt plus a face photo
 in, an identity-conditioned image out. The image -> `id_cond` path is wired
 at this serving layer (an ArcFace embedding plus EVA-CLIP taps composed by
 `crate::idcond::compose`), a documented approximation of the reference

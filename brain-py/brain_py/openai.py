@@ -28,8 +28,9 @@ from .base import BrainBase, BrainError, OnProgress, Outcome
 def _normalize_base_url(url: str) -> str:
     """Accept a bare host:port OR an explicit `.../v1` and always return the
     latter -- so `--openai localhost:8788` and `--openai
-    http://localhost:8788/v1` both work, per `examples/omni.py`'s own
-    "URLs missing a scheme or /v1 are normalized" contract."""
+    http://localhost:8788/v1` both work, per
+    `samples/python/qwen3omnimoe/omni/omni.py`'s own "URLs missing a scheme
+    or /v1 are normalized" contract."""
     if "://" not in url:
         url = f"http://{url}"
     url = url.rstrip("/")

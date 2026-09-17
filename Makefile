@@ -77,14 +77,14 @@ YOLO_IOU   ?= 0.45
 
 SHAKE_URL := https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt
 
-.PHONY: check/workspace help build/debug build/release samples/list check/samples check/sdk-features deb deb/debug deb/release test/doc test/slow test/full test/times test/capability-report wm/play wm-fixtures test test/rl gradcheck kernels-regen kernels-table kernels-table/check cuda-table cuda-table/check parity requirements environment environment/openvino npu-diagnose bench bench/char bench/eval bench/scale bench/advise bench/compare perf perf/compare perf/smoke clean federated-demo depth/demo depth/smoke depth/camera train/zipdepth mirror/import mirror/infer mirror/demo splat/view \
+.PHONY: check/workspace help build/debug build/release samples/list check/samples check/sdk-features deb deb/debug deb/release test/doc test/slow test/full test/times test/capability-report wm/play wm-fixtures test test/rl gradcheck kernels-regen kernels-table kernels-table/check samples-manifest samples-manifest/check cuda-table cuda-table/check parity requirements environment environment/openvino npu-diagnose bench bench/char bench/eval bench/scale bench/advise bench/compare perf perf/compare perf/smoke clean federated-demo depth/demo depth/smoke depth/camera train/zipdepth mirror/import mirror/infer mirror/demo splat/view \
         data/calculator data/reverser data/wordcalc data/timeseries \
         data/shakespeare_char data/gpt data/detect data/tts \
         train/yolo eval/yolo detect/yolo train/qwen/lora \
         export/yolo-onnx quantize/yolo sim/yolo-int8 run/yolo-npu bench/yolo-npu \
         web/dev web/build forecast/compare forecast/serve forecast/parity forecast/perf-gate wm/perf-gate fetch/testdata \
         clippy check/scripts check/spdx check/paths check/files hooks/install qwen/serving-perf-gate \
-        test/e2e test/e2e/claude-code test/e2e/api-conformance test/e2e/shutdown test/e2e/examples test/e2e/scheduler test/e2e/ready \
+        test/e2e test/e2e/claude-code test/e2e/api-conformance test/e2e/shutdown test/e2e/samples test/e2e/scheduler test/e2e/ready \
         perf/lfm perf/flux2 perf/wan flux2/generate flux2/edit wan/t2v wan/parity parity/strict s3dit/int8-e2e \
         release/patch release/minor release/major changelog release/notes \
         release/github release/publish test/e2e/deb
@@ -108,7 +108,7 @@ help:
 	@echo "  make test/capability-report  render the hardware-capability skip ledger"
 	@echo "                               (brain_testutil::skip_unvalidated_capability)"
 	@echo "  make test/e2e                every fast end-to-end bats suite (api-conformance|"
-	@echo "                               shutdown|examples|ready; test/e2e/<name> runs one;"
+	@echo "                               shutdown|samples|ready; test/e2e/<name> runs one;"
 	@echo "                               claude-code + scheduler are heavier, opt-in)"
 	@echo "  make clippy                  the clippy ratchet gate (exit 0 + no new warnings)"
 	@echo "  make check/scripts           scripts/tools self-validation + env-var doc gate"
@@ -175,7 +175,7 @@ help:
 	@echo "  make deb                     build a self-contained Debian package"
 
 # The DEV profile on purpose, and NOT `cargo check`. The four fast e2e bats
-# suites `test/e2e` aggregates - api-conformance, shutdown, examples, ready -
+# suites `test/e2e` aggregates - api-conformance, shutdown, samples, ready -
 # each name this target as their prerequisite and drive `$(BRAIN_BIN)`, which
 # defaults to ./target/debug/brain; `deb/debug` packages that same file. Those
 # need a LINKED binary, which `cargo check` never produces, and each suite
@@ -230,11 +230,14 @@ sample_pkg = sample-$(subst /,-,$(1))
 # selection is the only mechanism that actually honours the declaration.
 
 samples/list:
-	@echo "samples (make samples/<path>/{build,run}):"
+	@echo "Rust samples (make samples/<path>/{build,run}):"
 	@find samples -mindepth 3 -maxdepth 3 -name Cargo.toml -printf '%h\n' 2>/dev/null \
 		| sed 's|^samples/||' | sort | while read -r s; do \
 			printf '  %-34s %s\n' "$$s" "$$(sed -n 's/^description = "\(.*\)"/\1/p' "samples/$$s/Cargo.toml" | head -1)"; \
 		done
+	@echo "Shell/Python samples (run directly - see each README.md):"
+	@find samples/shell samples/python -mindepth 3 -maxdepth 3 -name README.md 2>/dev/null \
+		| sed -E 's|/README\.md$$||' | sort | while read -r s; do printf '  %s\n' "$$s"; done
 
 samples/%/build:
 	@test -f "samples/$*/Cargo.toml" || { echo "no such sample: samples/$* (try: make samples/list)"; exit 2; }
@@ -467,7 +470,7 @@ test/slow:
 # documented in docs/using/configuration.md, a docs/models/<model>.md page, or
 # .agents/rules/testing.md (env-only config MUST have a reference).
 # check-no-doc-citations.sh additionally requires that crates/, scripts/,
-# tools/, and examples/ never cite a docs/ or .agents/ file path - see that
+# tools/, and samples/ never cite a docs/ or .agents/ file path - see that
 # script for why (also wired as a pre-commit hook, so this is a slow-path
 # backstop for anything pre-commit was bypassed for).
 # check-no-perf-numbers.sh additionally denies a bare number next to a
@@ -530,7 +533,7 @@ check/spdx:
 # Install the local git hooks into .git/hooks - a one-time-per-clone step,
 # not run automatically, since it writes outside version control:
 #   pre-commit  - the check/spdx gate above, plus check-no-doc-citations.sh
-#                 (crates/scripts/tools/examples must never cite a docs/ or
+#                 (crates/scripts/tools/samples must never cite a docs/ or
 #                 .agents/ file path)
 #   commit-msg  - silently strips Co-Authored-By:/Claude-Session: trailer
 #                 lines from every new commit message (never fails)
@@ -575,7 +578,7 @@ hooks/install:
 # controlnet's duplicate `scale_chan` registration - see `.agents/rules/
 # lessons.md`). Needs no external fixtures, so unlike `parity/strict` it
 # carries no narrowing knob and no "green because skipped" risk.
-test/full: test test/doc test/slow test/e2e check/scripts check/spdx check/paths check/files check/samples check/sdk-features kernels-table/check cuda-table/check wordpiece-table/check parity parity/strict
+test/full: test test/doc test/slow test/e2e check/scripts check/spdx check/paths check/files check/samples check/sdk-features kernels-table/check samples-manifest/check cuda-table/check wordpiece-table/check parity parity/strict
 
 # Rank every test binary by wall time; --budget fails if any exceeds it. This is
 # what keeps the fast lane fast.
@@ -614,22 +617,24 @@ test/e2e/api-conformance: build/debug
 test/e2e/shutdown: build/debug
 	BRAIN_BIN=$(BRAIN_BIN) bats tests/e2e/shutdown.bats
 
-# End-to-end: every example under examples/ is actually exercised - the harness
-# that did not exist when they all silently rotted after the P19 brain-py rewrite.
-# ONE shared BRAIN_MOCK=1 server (D-Bus + Anthropic HTTP); each example that CAN
-# run against the weight-free mock does so for real, the rest skip honestly with
-# a printed reason. A completeness check fails the suite if a tracked example is
-# missing from tests/e2e/examples/manifest.tsv (or vice versa), so a new, unwired
-# example cannot silently rot the way these did. Needs a debug/release binary,
+# End-to-end: every sample script under samples/{shell,python}/ is actually
+# exercised - the harness that did not exist when they all silently rotted
+# after the P19 brain-py rewrite. ONE shared BRAIN_MOCK=1 server (D-Bus +
+# Anthropic HTTP); each sample that CAN run against the weight-free mock does
+# so for real, the rest skip honestly with a printed reason. A completeness
+# check (tests/e2e/samples_manifest.bats, not gated behind this harness's own
+# skip conditions) fails the suite if a tracked sample script is missing from
+# tests/e2e/samples/manifest.tsv (or vice versa), so a new, unwired sample
+# cannot silently rot the way these did. Needs a debug/release binary,
 # dbus-daemon, curl, and `pip install -e brain-py` (jeepney) on EXAMPLES_PY
 # (default python3).
-#   make test/e2e/examples   (or: EXAMPLES_PY=/path/to/python3 bats tests/e2e/examples.bats)
-test/e2e/examples: build/debug
-	BRAIN_BIN=$(BRAIN_BIN) bats tests/e2e/examples.bats
+#   make test/e2e/samples   (or: EXAMPLES_PY=/path/to/python3 bats tests/e2e/samples.bats tests/e2e/samples_manifest.bats)
+test/e2e/samples: build/debug
+	BRAIN_BIN=$(BRAIN_BIN) bats tests/e2e/samples.bats tests/e2e/samples_manifest.bats
 
 # Heavy, opt-in: brain's residency scheduler (batching/eviction) + the generate ->
 # detect -> annotate demo against REAL model weights and a GPU. NOT part of
-# test/e2e (that's test/e2e/examples' job, against the mock) - see
+# test/e2e (that's test/e2e/samples' job, against the mock) - see
 # tests/e2e/scheduler.bats for the required env vars.
 test/e2e/scheduler:
 	BRAIN_BIN=$(BRAIN_BIN) bats tests/e2e/scheduler.bats
@@ -661,7 +666,7 @@ test/e2e/deb: deb/release deb/debug
 	bats tests/e2e/deb.bats
 
 # Every fast (no real weights, no GPU) end-to-end bats suite, in one target.
-test/e2e: test/e2e/api-conformance test/e2e/shutdown test/e2e/examples test/e2e/ready
+test/e2e: test/e2e/api-conformance test/e2e/shutdown test/e2e/samples test/e2e/ready
 
 # Install the Python tooling (OpenVINO/NPU runtime, torch + transformers for the
 # benchmark reference rows, etc.) into the current environment. The Rust engine
@@ -811,6 +816,16 @@ kernels-table/check:
 # accented/CJK input, which no accuracy metric would obviously show.
 wordpiece-table/check:
 	python3 scripts/build/gen-wordpiece-unicode.py --verify
+
+# Regenerate docs/manifest.txt's Samples part from the READMEs that actually
+# exist under samples/, so a new sample cannot ship without reaching the
+# compiled manual (build-docs.py treats a manifest entry with no file as
+# fatal) and a deleted sample cannot leave a dangling one.
+samples-manifest:
+	scripts/build/gen-samples-manifest.py
+
+samples-manifest/check:
+	scripts/build/gen-samples-manifest.py --check
 
 # Regenerate the NATIVE CUDA catalogue from crates/kernels-cuda's own registry.
 # A sibling of the WGSL pair above, not a mode of it: that generator derives

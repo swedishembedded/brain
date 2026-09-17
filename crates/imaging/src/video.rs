@@ -18,7 +18,7 @@
 //! One frame per file reuses the existing, already-tested decoder instead.
 //!
 //! [`ffmpeg_available`] lets a caller skip cleanly when the binary is absent
-//! (the pattern `examples/omni/omni.py`'s PyAV path already documents for
+//! (the pattern `samples/python/qwen3omnimoe/omni/omni.py`'s PyAV path already documents for
 //! its own optional dependency) rather than making `ffmpeg` a hard
 //! requirement of every brain build.
 //!

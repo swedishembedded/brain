@@ -17,7 +17,7 @@
 //! The graph is built for `cfg.img_size()` (512²) and every buffer in it is
 //! sized from that, so the action resizes the input to 512² on the device and
 //! returns the restored 512² face. Pasting it back into a full photo is the
-//! caller's job (`examples/restore/`), exactly as in the reference CLI where
+//! caller's job (`samples/python/restore/`), exactly as in the reference CLI where
 //! `cropped_faces/` and `restored_faces/` are 512² and the paste-back is a
 //! separate step.
 //!

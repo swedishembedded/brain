@@ -13,7 +13,7 @@ full-depth int8 out cosine 0.9985/0.9991).
 It is **served**: a capability manifest (`text2image`, model id
 `brain/flux1`), a residency adapter (`BRAIN_FLUX1_DIR`, a released diffusers
 FLUX.1 checkpoint root), D-Bus `Run`, and a runnable example
-(`examples/imagegen/flux1_generate.py`), on top of a complete sampler loop
+(`samples/python/imagegen/flux1/flux1_generate.py`), on top of a complete sampler loop
 (T5-XXL + CLIP-L conditioning, FLUX.1's own linear-shift schedule, VAE
 decode). The glue this loop adds on top of the parity-gated DiT/T5/CLIP/VAE
 pieces - patchify layout, position ids, the schedule, the affine latent

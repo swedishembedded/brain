@@ -38,7 +38,7 @@ use forecast::ForecastModel;
 
 /// The committed example series, resolved repo-relative (an in-repo artifact,
 /// never an absolute machine path).
-const CSV: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples/forecast/synthetic_hourly.csv");
+const CSV: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/synthetic_hourly.csv");
 
 /// The scored configuration. Eight disjoint held-out windows rather than four:
 /// coverage is strongly correlated WITHIN a window (a forecast either brackets

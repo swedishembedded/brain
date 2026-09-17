@@ -84,7 +84,7 @@ Returns `scene` (the reconstructed Gaussian scene, Inria-layout binary PLY)
 and `cameras` (the per-frame cameras WorldMirror-2 predicted, the same JSON
 shape `cameras.json` uses); `maps` additionally returns a per-frame depth-map
 video when requested. See
-[`examples/vision/worldmirror2_reconstruct.py`](../../examples/vision/worldmirror2_reconstruct.py).
+[`samples/python/vision/worldmirror2-reconstruct/worldmirror2_reconstruct.py`](../../samples/python/vision/worldmirror2-reconstruct/worldmirror2_reconstruct.py).
 
 One resident instance serves every request shape: the model is
 shape-adaptive internally (it rebuilds its own per-shape buffers on demand,

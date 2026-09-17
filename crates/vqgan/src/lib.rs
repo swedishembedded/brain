@@ -28,7 +28,7 @@
 //!
 //! The serving contract is met by [`caps`] (the `encode`/`decode`
 //! `capability::Provider`), `crates/cli/src/resident_restore.rs` (the residency
-//! adapter, `BRAIN_VQGAN_WEIGHTS`) and `examples/restore/`.
+//! adapter, `BRAIN_VQGAN_WEIGHTS`) and `samples/python/restore/`.
 
 pub mod caps;
 pub mod config;

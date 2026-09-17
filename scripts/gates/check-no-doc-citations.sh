@@ -6,7 +6,7 @@
 #
 # docs/ is user-facing product documentation and .agents/ is contributor
 # rules/roadmaps — both move and get rewritten over time. A comment or string
-# in crates/, scripts/, tools/, or examples/ that names one of their paths
+# in crates/, scripts/, tools/, or samples/ that names one of their paths
 # (`docs/foo.md`, `.agents/rules/bar.md`, a `#N` lesson number, a `§` section)
 # is a cross-reference nothing enforces: it silently goes stale the next time
 # that doc is edited, renamed, or deleted, and the fix cost lands on whoever
@@ -47,13 +47,13 @@ if [ "$#" -gt 0 ]; then
   for f in "$@"; do
     case "$f" in
       scripts/gates/*|scripts/hooks/*) continue ;;
-      crates/*|scripts/*|tools/*|examples/*|brain-py/*) files+=("$f") ;;
+      crates/*|scripts/*|tools/*|samples/*|brain-py/*) files+=("$f") ;;
     esac
   done
   [ "${#files[@]}" -eq 0 ] && exit 0
   hits=$(grep -nE "$PATTERN" "${files[@]}" 2>/dev/null)
 else
-  hits=$(grep -rnE "$PATTERN" crates scripts tools examples brain-py 2>/dev/null | grep -vE "^$EXEMPT_RE")
+  hits=$(grep -rnE "$PATTERN" crates scripts tools samples brain-py 2>/dev/null | grep -vE "^$EXEMPT_RE")
 fi
 
 if [ -n "$hits" ]; then

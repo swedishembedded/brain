@@ -91,10 +91,10 @@ metadata). It is gated on the corresponding model's weight variable(s)
 being set. A shared reference client covers all four:
 
 ```bash
-python3 examples/forecast/forecast_client.py --model brain/chronos2|brain/fincast|brain/kronos|brain/timesfm3
+python3 samples/python/forecast/forecast-client/forecast_client.py --model brain/chronos2|brain/fincast|brain/kronos|brain/timesfm3
 ```
 
-See [`examples/forecast/README.md`](../../examples/forecast/README.md) for
+See [`samples/python/forecast/forecast-client/README.md`](../../samples/python/forecast/forecast-client/README.md) for
 full runnable invocations per model.
 
 ## Options

@@ -52,7 +52,7 @@ other - a target plus measured (past-only) and scheduled/forecast
 
 ```bash
 # one-command forecast + score + chart against an OHLCV CSV's close column
-brain forecast predict --csv examples/forecast/synthetic_hourly.csv \
+brain forecast predict --csv crates/kronos/tests/data/synthetic_hourly.csv \
   --timesfm3 timesfm3.safetensors --horizon 32 --gnuplot chart.png
 
 # backtest against statistical baselines
@@ -71,7 +71,7 @@ build a `forecast::Panel` with `Role::Target` (one or more target series),
 `crates/timesfm3/examples/cooling_loop.rs` for a complete worked example (an
 industrial cooling loop: a fouling heat exchanger under an unmeasured,
 schedule-driven load, forecast against a physics observer and a seasonal-naive
-baseline) and `examples/forecast/cooling_loop.sh`/`.py` for the shell/served
+baseline) and `samples/shell/forecast/cooling-loop/cooling_loop.sh`/`.py` for the shell/served
 variants.
 
 D-Bus action `forecast`: input `context`, raw f32 with its shape in the
@@ -89,7 +89,7 @@ meta array, for more than one.
 BRAIN_TIMESFM3=/path/to/timesfm3.safetensors dbus-run-session -- bash -c '
   brain serve --dbus &
   sleep 2
-  python3 examples/forecast/forecast_client.py --model brain/timesfm3
+  python3 samples/python/forecast/forecast-client/forecast_client.py --model brain/timesfm3
 '
 ```
 

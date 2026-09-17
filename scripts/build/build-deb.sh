@@ -37,11 +37,17 @@ rm -rf "${STAGING}"
 install -d "${STAGING}/DEBIAN" "${STAGING}/usr/bin" "${STAGING}/usr/share/brain" \
     "${STAGING}/usr/share/doc/brain" "${STAGING}/usr/share/dbus-1/system.d"
 install -m 0755 "${BINARY}" "${STAGING}/usr/bin/brain"
-cp -a "${ROOT}/examples/." "${STAGING}/usr/share/brain/examples/"
-# examples/ is a live working tree, not a release artifact - drop whatever
+# Only the shell/python samples are runtime client scripts against an
+# installed `brain`; the Rust SDK samples under samples/<category>/<name>
+# need `cargo build` and are not a release artifact.
+install -d "${STAGING}/usr/share/brain/samples"
+cp -a "${ROOT}/samples/shell" "${STAGING}/usr/share/brain/samples/shell"
+cp -a "${ROOT}/samples/python" "${STAGING}/usr/share/brain/samples/python"
+install -m 0755 "${ROOT}/tools/dbus-session.sh" "${STAGING}/usr/share/brain/samples/dbus-session.sh"
+# samples/ is a live working tree, not a release artifact - drop whatever
 # gitignored Python bytecode cache happens to exist there at build time so
 # the package payload isn't machine/interpreter-version dependent.
-find "${STAGING}/usr/share/brain/examples" -name '__pycache__' -type d -prune -exec rm -rf {} +
+find "${STAGING}/usr/share/brain/samples" -name '__pycache__' -type d -prune -exec rm -rf {} +
 # Vetted system-bus policy for `brain serve --dbus-system`: without a shipped
 # default, operators hand-write the path-of-least-resistance allow-everyone
 # policy, which grants every local user model execution + auto-fetch. This one
@@ -86,9 +92,9 @@ Description: Swedish Embedded model training and inference runtime
  Brain is the native CLI and API server for Swedish Embedded's model runtime:
  training, evaluation and serving for the architectures listed by \`brain caps\`.
  .
- Bundled example scripts are installed under /usr/share/brain/examples/; the
- D-Bus system-bus policy for \`brain serve --dbus-system\` is installed under
- /usr/share/dbus-1/system.d/.
+ Bundled sample client scripts are installed under /usr/share/brain/samples/;
+ the D-Bus system-bus policy for \`brain serve --dbus-system\` is installed
+ under /usr/share/dbus-1/system.d/.
 EOF
 cat >"${STAGING}/usr/share/doc/brain/copyright" <<'EOF'
 Copyright: 2026 Swedish Embedded
@@ -102,7 +108,10 @@ Run `brain --help` for the full CLI reference and `brain caps` to list the
 architectures this build can train/eval/serve.
 
 Bundled data installed under /usr/share/brain/:
-  examples/  runnable example scripts (see each subdirectory's own docs)
+  samples/shell/, samples/python/   runnable sample client scripts (each
+                                     directory has its own README.md); run
+                                     them via samples/dbus-session.sh
+                                     (installed alongside)
 
 The D-Bus system-bus policy for `brain serve --dbus-system`
 (com.swedishembedded.Brain1) is installed under

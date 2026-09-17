@@ -22,7 +22,7 @@ brain serve --dbus --openai[:PORT] --anthropic[:PORT] --openrouter[:PORT] \
   fallback - no route enumeration).
 - D-Bus and the HTTP surfaces share one scheduler; D-Bus runs on its own thread.
 
-Example: [`examples/api/claude-with-brain.sh`](../../examples/api/claude-with-brain.sh)
+Example: [`samples/shell/api/claude-with-brain/claude-with-brain.sh`](../../samples/shell/api/claude-with-brain/claude-with-brain.sh)
 launches a local qwen3 Anthropic surface and points Claude Code at it.
 
 ## Endpoints (the implemented subset)

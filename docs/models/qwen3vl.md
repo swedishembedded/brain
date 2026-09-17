@@ -17,7 +17,7 @@ single image. For dedicated single-purpose captioning instead, see
 | LoRA fine-tune         | [x] |
 | CLI                    | [x] |
 | HTTP API               | [x] (OpenAI + Anthropic chat, auto-exposed - `generate`'s shape matches `apiserve::catalog::api_caps`'s chat classification) |
-| D-Bus                  | [x] (`Run`/`Subscribe`, `examples/vision/qwen3vl_caption.py`) |
+| D-Bus                  | [x] (`Run`/`Subscribe`, `samples/python/vision/qwen3vl-caption/qwen3vl_caption.py`) |
 | Batched/streaming serving | [x] (streams tokens; does not batch concurrent requests - see "Hardware and limits" below) |
 
 ## Getting the weights
@@ -82,7 +82,7 @@ env-configured - it does not yet read the model-store resolver `generate`/
 `lora_train` use) that
 builds the checkpoint ONCE (device-placed, GPU or CPU) and reuses it across
 requests, reachable over D-Bus (`Run`/`Subscribe` -
-`examples/vision/qwen3vl_caption.py`) and, because `generate` matches the
+`samples/python/vision/qwen3vl-caption/qwen3vl_caption.py`) and, because `generate` matches the
 chat-capable shape `apiserve::catalog::api_caps` looks for, automatically on
 the OpenAI/Anthropic `/v1/chat/completions` and `/v1/messages` surfaces too -
 no per-model HTTP or D-Bus code was added for this. `max_pixels` and

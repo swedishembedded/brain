@@ -53,7 +53,7 @@ action.
 
 ```bash
 # one command, CSV in, scored forecast (and a chart) out
-brain forecast predict --csv examples/forecast/synthetic_hourly.csv --horizon 6 --samples 16 --origins 16 --gnuplot chart.png
+brain forecast predict --csv crates/kronos/tests/data/synthetic_hourly.csv --horizon 6 --samples 16 --origins 16 --gnuplot chart.png
 
 # backtest against statistical baselines before trusting it
 brain forecast compare --kronos-tokenizer <tok-dir> --kronos-decoder <dec-dir> --windows 24 --seed 1337
@@ -73,7 +73,7 @@ BRAIN_KRONOS_TOKENIZER=<tok-dir> BRAIN_KRONOS_DECODER=<dec-dir> \
   dbus-run-session -- bash -c '
     brain serve --dbus &
     sleep 2
-    python3 examples/forecast/forecast_client.py --model brain/kronos --horizon 32
+    python3 samples/python/forecast/forecast-client/forecast_client.py --model brain/kronos --horizon 32
   '
 ```
 

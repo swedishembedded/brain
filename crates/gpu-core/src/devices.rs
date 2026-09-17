@@ -529,7 +529,7 @@ pub fn forget_auto_placement() {
 /// How many times [`build_with_retry`] re-plans and rebuilds before giving up,
 /// and how long it waits between attempts. Three attempts over ~6 s: long
 /// enough for a neighbouring one-shot job to finish and release a card (the
-/// case this exists for - `examples/imagegen/identity_yolo_pipeline.sh` starts
+/// case this exists for - `samples/shell/imagegen/identity-yolo-pipeline/identity_yolo_pipeline.sh` starts
 /// ~75 short-lived `brain` processes in one run, so two of them overlapping on
 /// one card is routine, not rare), short enough that a genuinely full machine
 /// still reaches its own fallback promptly.

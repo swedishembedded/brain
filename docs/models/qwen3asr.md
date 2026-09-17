@@ -47,9 +47,9 @@ BRAIN_QWEN3ASR=/path/to/qwen3-asr/hf brain serve --dbus
 ```
 
 Reference client:
-[`examples/asr/transcribe_mic.py`](../../examples/asr/transcribe_mic.py)
+[`samples/python/asr/transcribe-mic/transcribe_mic.py`](../../samples/python/asr/transcribe-mic/transcribe_mic.py)
 (`--model brain/qwen3asr`, `--wav FILE`) - see
-[`examples/asr/README.md`](../../examples/asr/README.md) for the full
+[`samples/python/asr/transcribe-mic/README.md`](../../samples/python/asr/transcribe-mic/README.md) for the full
 protocol.
 
 ## Options

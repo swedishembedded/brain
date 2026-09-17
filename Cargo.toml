@@ -8,6 +8,12 @@ resolver = "2"
 # lockfile, so building a sample after `make build/release` compiles the sample
 # and nothing else. See samples/README.md for the rules that keep that true.
 members = ["crates/*", "samples/*/*"]
+# samples/shell/<pipeline>/<name> and samples/python/<pipeline>/<name> are
+# shell/Python client scripts, not Cargo packages - but samples/*/* above
+# still glob-matches their <pipeline> directories (e.g. samples/shell/api),
+# and a glob match with no Cargo.toml is a hard workspace-load error. Exclude
+# both trees as a class, the same way crates/vulkan is excluded below.
+exclude = ["samples/shell", "samples/python"]
 # The Vulkan cooperative-matrix path pulls in ash + naga and is an *optional*
 # acceleration backend. Keep the default `cargo build` pure-wgpu (the core
 # invariant) by excluding it from the default set; build it explicitly with

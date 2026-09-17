@@ -134,10 +134,10 @@ an image attached and streams the decoded text back token by token, with real
 
 ```bash
 dbus-run-session -- bash -c 'brain serve --dbus & sleep 5
-  python3 examples/vision/deepseek-ocr/ocr_document.py --image page.ppm --max-new 8'
+  python3 samples/python/vision/deepseek-ocr/ocr_document.py --image page.ppm --max-new 8'
 ```
 
-Reference client: [`examples/vision/deepseek-ocr/`](../../examples/vision/deepseek-ocr/README.md).
+Reference client: [`samples/python/vision/deepseek-ocr/`](../../samples/python/vision/deepseek-ocr/README.md).
 
 ## Options
 
