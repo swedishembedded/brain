@@ -19,6 +19,7 @@ pub mod bridge;
 pub mod codex;
 pub mod csv;
 pub mod mushroom_body;
+pub mod retinotopy;
 
 use std::path::{Path, PathBuf};
 
