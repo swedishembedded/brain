@@ -28,7 +28,7 @@ What remains, per verb:
 | | state |
 |---|---|
 | **moves its legs** | done - 330 motor neurons on 44 actuators, the loop closes at 0.55x real time |
-| **walks** | the RHYTHM is in the anatomy and is measured: tonic DNg100 drive makes the leg motor pool oscillate at 16.7 Hz, where a degree-matched shuffle rings at 125 Hz at every drive and a size-matched descending population is 6x weaker. Isolated, the published three-neuron circuit runs at 13.5 Hz and dies when its inhibitory cell is deleted. Turning that rhythm into locomotion in the body is not done |
+| **walks** | upright, using the connectome, and slow. 0.46 BL/s at 0.16 rad from upright, 12x the imported connectome, and every control fails: paralysed 0.00000, degree-matched shuffle 0.00309 against 0.05301. Separately, the RHYTHM is in the anatomy: tonic DNg100 drive makes the leg motor pool oscillate at 16.7 Hz where a shuffle rings at 125 Hz at every drive |
 | **flies** | two thirds of an episode airborne at 48 BL/s, upright - but a degree-matched shuffle reaches 77% of that, so the objective does not need the wiring. Steering is the task that would |
 | **explores** | the olfactory chain carries end to end and is lateralised; steering is untrained. The mushroom body is now wired for learning rather than searched: plasticity is confined to the Kenyon-cell output synapses and gated by identified dopaminergic cells per compartment |
 
