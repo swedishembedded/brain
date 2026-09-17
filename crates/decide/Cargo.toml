@@ -1,0 +1,26 @@
+[package]
+name = "brain-decide"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Decision model: a bidirectional state encoder plus a candidate-to-state cross-attention head returning calibrated probabilities over runtime-supplied options."
+
+[lib]
+name = "decide"
+path = "src/lib.rs"
+
+[dependencies]
+brain-checkpoint.workspace = true
+brain-gpu-core.workspace = true
+brain-kernels.workspace = true
+brain-model.workspace = true
+brain-paramstore.workspace = true
+brain-optim.workspace = true
+brain-data.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+# `testutil::skip` / `golden::Source` - an absent fixture skips by name (fatal
+# under BRAIN_REQUIRE_FIXTURES=1), and a golden dumped from the wrong tier is
+# refused rather than compared.
+brain-testutil.workspace = true

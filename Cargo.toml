@@ -42,6 +42,7 @@ default-members = [
     "crates/atif",
     "crates/rl",
     "crates/data",
+    "crates/decide",
     "crates/audio",
     "crates/model",
     "crates/fly",
@@ -188,6 +189,7 @@ brain-promote = { path = "crates/promote" }
 brain-atif = { path = "crates/atif" }
 brain-rl = { path = "crates/rl" }
 brain-data = { path = "crates/data" }
+brain-decide = { path = "crates/decide" }
 brain-audio = { path = "crates/audio" }
 brain-model = { path = "crates/model" }
 brain-connectome = { path = "crates/connectome" }

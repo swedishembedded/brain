@@ -1,0 +1,92 @@
+{
+  "modules": "transformers.BertModel (real checkpoint, live run, eager attention)",
+  "torch": "2.14.0+cu130",
+  "source": {
+    "identity": {
+      "hidden_size": 384,
+      "num_hidden_layers": 6,
+      "num_attention_heads": 12,
+      "intermediate_size": 1536,
+      "vocab_size": 30522,
+      "max_position_embeddings": 512,
+      "type_vocab_size": 2
+    },
+    "checkpoint": "sentence-transformers/all-MiniLM-L6-v2",
+    "files": {
+      "model.safetensors": "sha256:53aa51172d142c89d9012cce15ae4d6cc0ca6895895114379cacb4fab128d9db"
+    }
+  },
+  "files": {
+    "minilm.safetensors": {
+      "sha256": "5dfcddd5c4e017ed892bdb3693fa4c1c0c73cc5bd0965bdf0b30c76a97b74fa2",
+      "tensors": {
+        "emb": [
+          2,
+          16,
+          384
+        ],
+        "layer.0": [
+          2,
+          16,
+          384
+        ],
+        "layer.1": [
+          2,
+          16,
+          384
+        ],
+        "layer.2": [
+          2,
+          16,
+          384
+        ],
+        "layer.3": [
+          2,
+          16,
+          384
+        ],
+        "layer.4": [
+          2,
+          16,
+          384
+        ],
+        "layer.5": [
+          2,
+          16,
+          384
+        ],
+        "l0.attn_ctx": [
+          2,
+          16,
+          384
+        ],
+        "l0.attn_out": [
+          2,
+          16,
+          384
+        ],
+        "l0.ffn_act": [
+          2,
+          16,
+          1536
+        ],
+        "pooled_mean": [
+          2,
+          384
+        ],
+        "input_ids": [
+          2,
+          16
+        ],
+        "attention_mask": [
+          2,
+          16
+        ],
+        "token_type_ids": [
+          2,
+          16
+        ]
+      }
+    }
+  }
+}

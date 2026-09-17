@@ -941,6 +941,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-decide"
+version = "1.1.0"
+dependencies = [
+ "brain-checkpoint",
+ "brain-data",
+ "brain-gpu-core",
+ "brain-kernels",
+ "brain-model",
+ "brain-optim",
+ "brain-paramstore",
+ "brain-testutil",
+ "serde_json",
+]
+
+[[package]]
 name = "brain-deepseek2"
 version = "1.1.0"
 dependencies = [
