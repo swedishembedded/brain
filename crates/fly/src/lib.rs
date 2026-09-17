@@ -26,6 +26,7 @@ pub mod gait;
 pub mod learn;
 pub mod reference;
 pub mod cns;
+pub mod physiology;
 pub mod rhythm;
 pub mod search;
 pub mod sense;

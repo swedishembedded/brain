@@ -478,3 +478,74 @@ fn adaptation_off_is_bit_identical_to_a_cord_that_never_had_it() {
     // nothing ever enters the variable, so nothing ever leaves it.
     assert_eq!(run(p), run(LifParams { adapt_decay: 0.99, ..p }), "an empty adaptation current is not inert");
 }
+
+/// Per-neuron physiology, and the control that says adding it changed nothing
+/// until it was asked to.
+///
+/// A connectome fixes who contacts whom and says nothing about time constants
+/// or excitability, so those have to be supplied - and a model where every
+/// cell shares one membrane is a CHOICE, not a neutral starting point. These
+/// gate the two halves of that: the uniform model must survive exactly, and
+/// a cell given its own time constant must actually get one.
+#[test]
+fn unit_cell_scales_are_bit_identical_to_a_network_that_never_had_them() {
+    let csc = random_csc(96, 6, 0x71);
+    let p = LifParams { dt_over_tau: 0.4, v_th: 0.5, ..LifParams::default() };
+    let drive: Vec<f32> = (0..96).map(|i| 0.2 + (i % 7) as f32 * 0.05).collect();
+
+    let run = |scales: Option<(Vec<f32>, Vec<f32>)>| {
+        let mut net = SpikingNet::new(gpu_core::testgpu::dev(&KERNELS), &csc, p).unwrap();
+        if let Some((t, g)) = scales {
+            net.set_cell_scales(&t, &g).unwrap();
+        }
+        net.drive(Port::Drive, &drive).unwrap();
+        let mut v = vec![0.0f32; 96];
+        let mut trace = Vec::new();
+        for _ in 0..40 {
+            net.step();
+            net.read(Port::Membrane, &mut v).unwrap();
+            trace.extend_from_slice(&v);
+        }
+        trace
+    };
+
+    let plain = run(None);
+    let unit = run(Some((vec![1.0; 96], vec![1.0; 96])));
+    assert_eq!(plain, unit, "unit scales must be an exact no-op, not an approximation");
+}
+
+#[test]
+fn a_cell_given_its_own_time_constant_integrates_at_its_own_rate() {
+    let csc = random_csc(64, 4, 0x72);
+    // No threshold crossing: this is about the membrane, not about spikes.
+    let p = LifParams { dt_over_tau: 0.2, v_th: 1e6, r: 1.0, v_rest: 0.0, ..LifParams::default() };
+    let mut net = SpikingNet::new(gpu_core::testgpu::dev(&KERNELS), &csc, p).unwrap();
+    let mut tau = vec![1.0f32; 64];
+    tau[7] = 2.0; // twice as fast
+    tau[9] = 0.5; // twice as slow
+    let mut gain = vec![1.0f32; 64];
+    gain[11] = 3.0; // three times as excitable
+    net.set_cell_scales(&tau, &gain).unwrap();
+    net.drive(Port::Drive, &vec![1.0; 64]).unwrap();
+    for _ in 0..12 {
+        net.step();
+    }
+    let mut v = vec![0.0f32; 64];
+    net.read(Port::Membrane, &mut v).unwrap();
+
+    // The closed form for a constant input, per neuron.
+    let want = |a: f32, r: f32| {
+        let v_inf = r;
+        v_inf * (1.0 - (1.0f32 - a).powi(12))
+    };
+    for (i, (a, r)) in [(7usize, (0.4f32, 1.0f32)), (9, (0.1, 1.0)), (11, (0.2, 3.0)), (0, (0.2, 1.0))] {
+        let e = (v[i] - want(a, r)).abs();
+        assert!(e < 1e-4, "neuron {i}: {} against the closed form {}, off by {e:e}", v[i], want(a, r));
+    }
+    assert!(v[7] > v[0], "a faster membrane is nearer its steady state after the same time");
+    assert!(v[9] < v[0], "a slower membrane is further from it");
+    assert!(v[11] > 2.0 * v[0], "a more excitable cell reaches a higher steady state");
+
+    assert!(net.set_cell_scales(&vec![1.0; 64], &vec![0.0; 64]).is_err(), "a gain of zero is a deleted cell");
+    assert!(net.set_cell_scales(&vec![1.0; 63], &vec![1.0; 64]).is_err(), "the wrong width is refused");
+}

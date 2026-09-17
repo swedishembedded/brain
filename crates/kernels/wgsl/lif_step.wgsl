@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-// @what  Leaky integrate-and-fire membrane update, threshold, reset and refractory countdown
+// @what  Leaky integrate-and-fire membrane update, with per-neuron physiology, threshold, reset and refractory countdown
 // @how   one thread per neuron
 // @opt   3
 // @cpu   yes
@@ -82,6 +82,21 @@ struct Params {
 @group(0) @binding(4) var<storage, read>       drive:  array<f32>;
 @group(0) @binding(5) var<storage, read_write> spike:  array<f32>;
 @group(0) @binding(6) var<storage, read_write> adapt:  array<f32>;
+// Per-neuron MULTIPLIERS on the two parameters that are uniform above, so a
+// population can differ in the way real cells differ without a kernel per
+// cell type. Both are 1.0 by default, and `p.a * 1.0` is exactly `p.a`, so a
+// network that does not use them is bit-identical to one compiled before they
+// existed - which is what lets "the physiology is uniform" stand as a control
+// rather than as an approximation.
+//
+// `tau_scale` multiplies `dt/tau`, so it is the RECIPROCAL of a time-constant
+// multiplier: 2.0 means a membrane twice as fast. `gain_scale` multiplies the
+// input resistance, which is how excitable the cell is per unit of synaptic
+// current. These two and a tonic bias (which needs no kernel support, since
+// the drive port already carries per-neuron current) are the physiological
+// parameters a connectome does not contain and a fitted model has to supply.
+@group(0) @binding(7) var<storage, read>       tau_scale:  array<f32>;
+@group(0) @binding(8) var<storage, read>       gain_scale: array<f32>;
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>,
@@ -105,7 +120,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
         return;
     }
 
-    let vi = v[i] + p.a * (p.v_rest - v[i] + p.r * (isyn[i] + drive[i] - w));
+    let a = p.a * tau_scale[i];
+    let r = p.r * gain_scale[i];
+    let vi = v[i] + a * (p.v_rest - v[i] + r * (isyn[i] + drive[i] - w));
     if (vi >= p.v_th) {
         v[i] = p.v_reset;
         refrac[i] = p.refrac_ticks;

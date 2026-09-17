@@ -198,6 +198,11 @@ pub struct SpikingNet {
     isyn: DeviceBuffer,
     /// Spike-frequency adaptation current, one per neuron.
     adapt: DeviceBuffer,
+    /// Per-neuron multipliers on `dt/tau` and on the input resistance. Both
+    /// are 1.0 unless [`SpikingNet::set_cell_scales`] says otherwise, and at
+    /// 1.0 the arithmetic is exactly the uniform model's.
+    tau_scale: DeviceBuffer,
+    gain_scale: DeviceBuffer,
     /// Excitatory and inhibitory current, interleaved `(e, i)` per neuron, so
     /// each can carry across ticks on its own time constant.
     syn: DeviceBuffer,
@@ -271,6 +276,10 @@ impl SpikingNet {
         let adapt = gpu.buffer("neuro.adapt", nb, live);
         let syn = gpu.buffer("neuro.syn", bytes(2 * n as usize), live);
         let drive = gpu.buffer("neuro.drive", nb, live);
+        let tau_scale = gpu.buffer("neuro.tau_scale", nb, live);
+        let gain_scale = gpu.buffer("neuro.gain_scale", nb, live);
+        gpu.write_f32(&tau_scale, &vec![1.0; n as usize]);
+        gpu.write_f32(&gain_scale, &vec![1.0; n as usize]);
 
         let mut net = SpikingNet {
             gpu,
@@ -285,6 +294,8 @@ impl SpikingNet {
             spike,
             isyn,
             adapt,
+            tau_scale,
+            gain_scale,
             syn,
             drive,
             w0: csc.w.clone(),
@@ -535,6 +546,34 @@ impl SpikingNet {
         Ok(())
     }
 
+    /// Give each neuron its own time constant and excitability.
+    ///
+    /// Both are MULTIPLIERS on the uniform [`LifParams`] values, so `1.0`
+    /// everywhere is exactly the uniform model and is the control this is
+    /// measured against. `tau_scale` multiplies `dt/tau`: a value of 2.0 is a
+    /// membrane twice as fast, not twice as slow.
+    ///
+    /// This exists because a connectome does not contain physiology, and the
+    /// physiology is what decides whether a circuit oscillates or rings. The
+    /// parameters are not per neuron in practice - they are shared across
+    /// cells of the same published class, which is what keeps the count in the
+    /// hundreds instead of the hundreds of thousands and keeps the anatomy
+    /// rather than the optimiser in charge of what the network is.
+    pub fn set_cell_scales(&mut self, tau_scale: &[f32], gain_scale: &[f32]) -> Result<(), String> {
+        let n = self.n as usize;
+        for (name, v) in [("tau_scale", tau_scale), ("gain_scale", gain_scale)] {
+            if v.len() != n {
+                return Err(format!("{name} expects {n} values, got {}", v.len()));
+            }
+            if let Some(bad) = v.iter().find(|x| !x.is_finite() || **x <= 0.0) {
+                return Err(format!("{name} must be positive and finite, got {bad}"));
+            }
+        }
+        self.gpu.write_f32(&self.tau_scale, tau_scale);
+        self.gpu.write_f32(&self.gain_scale, gain_scale);
+        Ok(())
+    }
+
     /// The connectome's weights as they were loaded, before any plasticity.
     pub fn initial_weights(&self) -> &[f32] {
         &self.w0
@@ -582,7 +621,16 @@ impl DynamicalSystem for SpikingNet {
         );
         let lif = self.gpu.step(
             K_LIF,
-            &[&self.v, &self.refrac, &self.isyn, &self.drive, &self.spike, &self.adapt],
+            &[
+                &self.v,
+                &self.refrac,
+                &self.isyn,
+                &self.drive,
+                &self.spike,
+                &self.adapt,
+                &self.tau_scale,
+                &self.gain_scale,
+            ],
             &self.lif_params(),
             self.n,
         );
