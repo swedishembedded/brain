@@ -122,6 +122,9 @@ PROCESS LIFECYCLE
   -d, --detach           run in the background and return once every requested
                          surface is listening (not merely once the process has
                          started). Prints the pid; output goes to the log below.
+                         A requested surface that cannot bind ends the process
+                         rather than serving the rest, since readiness is the
+                         AND of all of them and would otherwise never arrive.
   --reload               stop whatever server is already running, then take its
                          place. Imperative: nothing watches anything, so a
                          restart only ever happens when asked for.
@@ -760,14 +763,7 @@ struct RunApis {
 /// A `brain_dbus::serve` failure is almost always "no bus at this address" (no
 /// desktop session, no `dbus-run-session`, no system bus policy for this user) -
 /// give a message that says what to try instead of the raw connect errno.
-/// `http_up` reports whether an HTTP API surface is still serving, so the
-/// operator knows this failure did not take the whole process down.
-fn dbus_connect_hint(err: &dyn std::fmt::Display, system_bus: bool, http_up: bool) -> String {
-    let status = if http_up {
-        "HTTP API surface(s) remain up."
-    } else {
-        "no other surface was requested; exiting."
-    };
+fn dbus_connect_hint(err: &dyn std::fmt::Display, system_bus: bool) -> String {
     let advice = if system_bus {
         "Check the system bus is running and this user has a policy file for \
          the requested bus name, or drop --dbus-system for the per-user session bus."
@@ -776,7 +772,10 @@ fn dbus_connect_hint(err: &dyn std::fmt::Display, system_bus: bool, http_up: boo
          --dbus-system if a system bus policy is installed for this service."
     };
     let kind = if system_bus { "system" } else { "session" };
-    format!("brain serve --dbus: could not connect to the D-Bus {kind} bus ({err}). {advice} {status}")
+    // What this means for the process is NOT said here: it depends on whether
+    // the surface had already bound, which only the caller knows. Each call
+    // site prints its own consequence, so the two can never contradict.
+    format!("brain serve --dbus: could not connect to the D-Bus {kind} bus ({err}). {advice}")
 }
 
 /// How long [`run_apis`] waits for a backgrounded D-Bus surface to finish its own
@@ -867,20 +866,34 @@ fn run_apis(a: RunApis) {
             let sd = shutdown.clone();
             let dbus_system = a.dbus_system;
             let ready = a.ready.clone();
-            let ready_for_diag = a.ready.clone();
+            let ready_state = a.ready.clone();
             Some(std::thread::spawn(move || {
                 let serve_opts = brain_dbus::ServeOpts::new().with_shutdown(sd).with_supplier(sup).with_ready(ready);
-                if let Err(err) = brain_dbus::serve(e, opts, serve_opts) {
-                    eprintln!("{}", dbus_connect_hint(&err, dbus_system, true));
-                    if let Some(p) = ready_for_diag.path() {
-                        eprintln!("brain serve: --ready-file {} will NEVER be created -- the D-Bus surface was requested but did not start", p.display());
-                    }
+                let Err(err) = brain_dbus::serve(e, opts, serve_opts) else { return };
+                eprintln!("{}", dbus_connect_hint(&err, dbus_system));
+                // Before ready, this is a FAILED start and has to end the
+                // process. Readiness is the AND of every requested surface
+                // (see `brain_shutdown::ready::Gate`), so a process missing one
+                // can never signal ready; staying up to serve the rest leaves
+                // anything waiting on it -- `serve -d`, a test harness, a unit
+                // file -- to sit out its whole timeout against a server that
+                // will never arrive. Exiting makes the failure the answer.
+                //
+                // After ready it is a surface LOST by a server that is
+                // otherwise working, and taking the rest down with it would be
+                // the more destructive of the two mistakes.
+                if ready_state.is_ready() {
+                    eprintln!("brain serve: the D-Bus surface stopped; the remaining surfaces keep serving");
+                    return;
                 }
+                eprintln!("brain serve: the D-Bus surface was requested but did not start -- exiting");
+                std::process::exit(1);
             }))
         } else {
             let serve_opts = brain_dbus::ServeOpts::new().with_shutdown(shutdown).with_supplier(sup).with_ready(a.ready.clone());
             if let Err(err) = brain_dbus::serve(e, opts, serve_opts) {
-                eprintln!("{}", dbus_connect_hint(&err, a.dbus_system, false));
+                eprintln!("{}", dbus_connect_hint(&err, a.dbus_system));
+                eprintln!("brain serve: the D-Bus surface was the only one requested -- exiting");
                 std::process::exit(1);
             }
             return;

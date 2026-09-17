@@ -11,11 +11,17 @@
 //! port 8787 or about `com.swedishembedded.Brain1`. [`Gate`] is that AND: a
 //! counting latch that creates one marker file on the LAST bind and never before.
 //!
-//! The failure mode is deliberately one-sided. A surface that fails to bind
+//! The gate itself is deliberately one-sided. A surface that fails to bind
 //! simply never calls [`Gate::bound`], so the count never reaches `expected` and
-//! the marker never appears — "not ready" needs no error path and cannot be
-//! reported by accident. A waiter must still bound its wait and check the process
-//! is alive: "never appears" converts a wrong answer into a hang, not a signal.
+//! the marker never appears - "not ready" needs no error path here and cannot be
+//! reported by accident.
+//!
+//! What keeps that from becoming a hang is not this type but the contract around
+//! it: a surface that permanently fails to bind ENDS the process (see the D-Bus
+//! thread in `run_cli::run_apis`), precisely because a process missing one of
+//! its surfaces can never satisfy the AND above, and a waiter has nothing else
+//! to go on. So a waiter still bounds its wait and still checks the process is
+//! alive - but the answer it gets is an exit, not silence.
 //!
 //! The marker is intentionally empty and holds no secret: not a key (that is
 //! `--api-keys-out`'s job), not a pid, not an address. If it had content, a
