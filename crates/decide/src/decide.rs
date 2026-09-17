@@ -57,6 +57,15 @@ impl Default for Limits {
     }
 }
 
+/// Recorded dispatches kept per handle.
+///
+/// The encoder's tape is a few hundred dispatches per distinct packed layout,
+/// and training walks many layouts (every message is a different length), so
+/// this is sized to hold a working set of them rather than one. Entries cost
+/// only their own bookkeeping here: every buffer they pin is a model buffer
+/// that outlives the cache anyway.
+const STEP_CACHE_ENTRIES: usize = 65536;
+
 pub struct Decide {
     pub enc: Encoder,
     pub head: Head,
@@ -66,6 +75,16 @@ pub struct Decide {
     enc_opt: Option<optim::Optim>,
     head_opt: Option<optim::Optim>,
     step: u32,
+}
+
+/// A request laid out for the device: the packed token stream, where each
+/// option's `[CLS]` row sits, how many options each question has, and where
+/// the state's rows end.
+pub struct Request {
+    pub packed: crate::pack::Packed,
+    pub cls_rows: Vec<u32>,
+    pub arity: Vec<usize>,
+    pub state_rows: u32,
 }
 
 /// One training example: a state, a question, and which of its options is
@@ -89,20 +108,27 @@ impl Decide {
         train: bool,
     ) -> Decide {
         let ids = kern::Ids::resolve(&gpu);
-        // Every buffer this model dispatches against is allocated once at
-        // build time and lives as long as the model, which is exactly the
-        // shape the step cache is safe on: it keeps an entry's buffers alive,
-        // so arming it on a handle that allocated per call would pin every
-        // temporary ever used. Requests repeat shapes constantly (the same
-        // option set, similar state lengths), and without this the step list
-        // is rebuilt from scratch on every single call.
-        gpu.enable_step_cache(8192);
         let enc = if train {
             Encoder::new_train_on(gpu.share(), cfg.clone(), limits.cap_rows, limits.max_span, enc_init)
         } else {
             Encoder::new_on(gpu.share(), cfg.clone(), limits.cap_rows, limits.max_span, enc_init)
         };
         let head = Head::new_on(gpu, cfg.clone(), limits.cap_rows, limits.cap_slots, head_init, train);
+        // Every buffer this model dispatches against is allocated once at build
+        // time and lives as long as the model, which is exactly the shape the
+        // step cache is safe on: an entry keeps its buffers alive, so arming it
+        // on a handle that allocates per call would pin every temporary it ever
+        // used. Requests repeat shapes constantly - the same option set, the
+        // same state length - and without this the whole tape is re-recorded
+        // from scratch on every call, which for a packed encoder is several
+        // hundred bind groups.
+        //
+        // ARMED PER HANDLE, AFTER BOTH HALVES EXIST. `Gpu::share` hands back an
+        // independent handle with its own memo, so arming the handle that is
+        // about to be moved into one half leaves the OTHER half uncached - and
+        // the encoder is the half with 96% of the dispatches.
+        enc.gpu().enable_step_cache(STEP_CACHE_ENTRIES);
+        head.gpu().enable_step_cache(STEP_CACHE_ENTRIES);
         Decide {
             enc,
             head,
@@ -120,6 +146,24 @@ impl Decide {
     /// Returns the raw scores grouped per question, in the order the questions
     /// were supplied.
     pub fn score(&mut self, state: &str, questions: &[Question]) -> Result<Vec<Vec<f32>>, String> {
+        let req = self.pack_request(state, questions)?;
+        let flat = self.run_packed(&req);
+        let mut out = Vec::with_capacity(req.arity.len());
+        let mut at = 0usize;
+        for &n in &req.arity {
+            out.push(flat[at..at + n].to_vec());
+            at += n;
+        }
+        Ok(out)
+    }
+
+    /// Tokenize and pack one request without touching the device.
+    ///
+    /// Separate from [`Decide::run_packed`] because the two halves have
+    /// different costs and different failure modes: everything that can be
+    /// rejected is rejected here, on the host, before a single dispatch is
+    /// recorded.
+    pub fn pack_request(&self, state: &str, questions: &[Question]) -> Result<Request, String> {
         for q in questions {
             q.validate()?;
         }
@@ -176,7 +220,12 @@ impl Decide {
             .map(|i| i as u32)
             .unwrap_or(packed.ids.len() as u32);
 
-        self.enc.set_batch(&packed.ids, &packed.types, &packed.spans);
+        Ok(Request { packed, cls_rows, arity, state_rows })
+    }
+
+    /// Encode a packed request and score every option, flat and in pack order.
+    pub fn run_packed(&mut self, req: &Request) -> Vec<f32> {
+        self.enc.set_batch(&req.packed.ids, &req.packed.types, &req.packed.spans);
         self.enc.forward();
         // MUST NOT BE REMOVED. The head holds a different `Gpu` handle to the
         // same device, and a submit on one handle is not ordered against a
@@ -188,19 +237,11 @@ impl Decide {
         // Disjoint field borrows: the head is taken mutably while the
         // encoder's buffers are read.
         if self.enc.is_trainable() {
-            self.head.set_call(self.enc.hidden_buf(), Some(self.enc.seed_buf()), state_rows, &cls_rows);
+            self.head.set_call(self.enc.hidden_buf(), Some(self.enc.seed_buf()), req.state_rows, &req.cls_rows);
         } else {
-            self.head.set_call(self.enc.hidden_buf(), None, state_rows, &cls_rows);
+            self.head.set_call(self.enc.hidden_buf(), None, req.state_rows, &req.cls_rows);
         }
-        let flat = self.head.forward();
-
-        let mut out = Vec::with_capacity(questions.len());
-        let mut at = 0usize;
-        for n in arity {
-            out.push(flat[at..at + n].to_vec());
-            at += n;
-        }
-        Ok(out)
+        self.head.forward()
     }
 
     /// Answer every question about one state.
@@ -226,24 +267,30 @@ impl Decide {
         self.head.poll_wait();
         self.enc.backward_seeded();
 
+        self.adamw(enc_lr, head_lr);
+        Ok(l)
+    }
+
+    /// Advance both halves by one AdamW update.
+    ///
+    /// Two rates, because the encoder arrives pretrained and the head does
+    /// not: one rate would either move the head too slowly to learn or move
+    /// the encoder fast enough to forget what it was imported for.
+    ///
+    /// EACH HALF STEPS ITS OWN PARAMETERS ON ITS OWN HANDLE. Stepping the
+    /// head's weights through the encoder's handle raced the head's next
+    /// forward, which then read pre-update weights - the model evaluated as a
+    /// near-uniform distribution while the SAME weights, reloaded into a fresh
+    /// process, answered correctly. Same root cause as the forward's own wait.
+    pub fn adamw(&mut self, enc_lr: f32, head_lr: f32) {
         self.step += 1;
         let t = self.step;
-        // Two rates, because the encoder arrives pretrained and the head does
-        // not: one rate would either move the head too slowly to learn or move
-        // the encoder fast enough to forget what it was imported for.
-        // EACH HALF STEPS ITS OWN PARAMETERS ON ITS OWN HANDLE. Stepping the
-        // head's weights through the encoder's handle raced the head's next
-        // forward, which then read pre-update weights - the model evaluated as
-        // a near-uniform distribution while the SAME weights, reloaded into a
-        // fresh process, answered correctly. Same root cause as the forward's
-        // own wait.
         if let Some(o) = &self.enc_opt {
             self.enc.adamw_step(o, t, enc_lr, 0.01, Some(1.0));
         }
         if let Some(o) = &self.head_opt {
             self.head.adamw_step(o, t, head_lr, 0.01, Some(1.0));
         }
-        Ok(l)
     }
 
     /// Write the head's weights to a brain `.safetensors`.

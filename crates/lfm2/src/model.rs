@@ -1228,7 +1228,7 @@ impl Lfm {
                         Some(chunk) => {
                             let spans: Vec<(u32, u32)> = (0..self.b).map(|i| (i * self.t, self.t)).collect();
                             let fwd_ids = CrossIds { scores: SCORES_CROSS, softmax: SOFTMAX_CROSS, apply: APPLY_CROSS };
-                            let bwd_ids = block::CrossBwdIds { dscores: DSCORES_CROSS, dq: DQ_CROSS, dk_acc: DK_CROSS_ACC, dv_acc: DV_CROSS_ACC };
+                            let bwd_ids = block::CrossBwdIds::resolve(&self.gpu, DSCORES_CROSS, DQ_CROSS, DK_CROSS_ACC, DV_CROSS_ACC);
                             block::chunked_bidir_bwd(
                                 &self.gpu, &fwd_ids, None, &bwd_ids, c.n_heads, hd, hq, &ab.qkv, 3 * d, 0, d, 2 * d,
                                 &bw.d_ctx, &bw.d_qkv, &self.slab_scores, &self.slab_probs, &self.slab_dscores,

@@ -586,6 +586,13 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             let (rows, d, v) = (p(0)?, p(1)?, p(2)?);
             f(d * (rows + v), 4 * (2 * v * d + rows * d + rows))
         }
+        // params [n_rows, d_model, n_uniq]: the same scatter restricted to the
+        // rows actually looked up, so `n_uniq` stands where `vocab` does
+        // above, plus the `uniq` list itself.
+        "emb_bwd_uniq" => {
+            let (rows, d, u) = (p(0)?, p(1)?, p(2)?);
+            f(d * (rows + u), 4 * (2 * u * d + rows * d + rows + u))
+        }
         // params [n_idx, d, n_rows_out].
         "row_scatter" => {
             let (ni, d) = (p(0)?, p(1)?);

@@ -125,6 +125,12 @@ pub struct Encoder {
     ids: DeviceBuffer,
     pos_ids: DeviceBuffer,
     type_ids: DeviceBuffer,
+    /// The DISTINCT ids of the three index streams above, and how many each
+    /// holds. The embedding scatter only has to visit the table rows a call
+    /// actually looked up, and a call looks up at most `rows` of a 30522-row
+    /// vocabulary - see `block::emb_bwd_step`.
+    uniq: [DeviceBuffer; 3],
+    uniq_n: [u32; 3],
     e_tok: DeviceBuffer,
     e_pos: DeviceBuffer,
     e_type: DeviceBuffer,
@@ -227,6 +233,8 @@ impl Encoder {
             ids: idbuf("ids"),
             pos_ids: idbuf("pos_ids"),
             type_ids: idbuf("type_ids"),
+            uniq: [idbuf("uniq_tok"), idbuf("uniq_pos"), idbuf("uniq_type")],
+            uniq_n: [0; 3],
             e_tok: gpu.storage(n * h),
             e_pos: gpu.storage(n * h),
             e_type: gpu.storage(n * h),
@@ -325,8 +333,21 @@ impl Encoder {
         self.gpu.write(&self.ids, ids);
         self.gpu.write(&self.pos_ids, &pos);
         self.gpu.write(&self.type_ids, type_ids);
-        let changed = self.rows != ids.len() as u32 || self.spans != spans;
+        // Built from the SAME slices that were just uploaded, never from the
+        // capacity-sized buffers: a `uniq` list that misses an id silently
+        // drops that table row's gradient.
+        let mut uniq_n = [0u32; 3];
+        for (i, src) in [ids, &pos, type_ids].into_iter().enumerate() {
+            let u = block::uniq_u32(src);
+            self.gpu.write(&self.uniq[i], &u);
+            uniq_n[i] = u.len() as u32;
+        }
+        // The distinct count is both a kernel parameter and a thread count, so
+        // a call that repacks the same span layout with different tokens still
+        // needs its reverse pass re-recorded.
+        let changed = self.rows != ids.len() as u32 || self.spans != spans || self.uniq_n != uniq_n;
         self.rows = ids.len() as u32;
+        self.uniq_n = uniq_n;
         if changed {
             self.spans = spans.to_vec();
             self.steps = self.build_steps();
@@ -505,6 +526,22 @@ impl Encoder {
         &self.bwd.as_ref().expect("seed_buf on an inference build").dx[self.cfg.n_layers as usize]
     }
 
+    /// This half's device handle - what a profiler times its steps on.
+    pub fn gpu(&self) -> &Gpu {
+        &self.gpu
+    }
+
+    /// The recorded forward dispatches, for a profiler. Borrowed rather than
+    /// run, so the caller decides how to time them.
+    pub fn fwd_steps(&self) -> &[Step] {
+        &self.steps
+    }
+
+    /// The recorded reverse dispatches, empty on an inference build.
+    pub fn bwd_steps(&self) -> &[Step] {
+        self.bwd.as_ref().map(|b| b.steps.as_slice()).unwrap_or(&[])
+    }
+
     /// Run the reverse pass against whatever already sits in [`Encoder::seed_buf`].
     pub fn backward_seeded(&self) {
         let bw = self.bwd.as_ref().expect("backward on an inference build");
@@ -554,12 +591,13 @@ impl Encoder {
         let hd = c.head_dim();
         let ln = block::LayerNormIds::resolve(g, self.k.layernorm, self.k.ln_stats, self.k.layernorm_dx);
         let cross = block::CrossIds { scores: self.k.scores_cross, softmax: self.k.softmax_cross, apply: self.k.apply_cross };
-        let cross_bwd = block::CrossBwdIds {
-            dscores: self.k.dscores_cross,
-            dq: self.k.dq_cross,
-            dk_acc: self.k.dk_cross_acc,
-            dv_acc: self.k.dv_cross_acc,
-        };
+        let cross_bwd = block::CrossBwdIds::resolve(
+            g,
+            self.k.dscores_cross,
+            self.k.dq_cross,
+            self.k.dk_cross_acc,
+            self.k.dv_cross_acc,
+        );
         let gr = |name: &str| self.ps.g(name);
         let dw_gemm = |m: u32, k: u32| block::pick_gemm(m as usize, k as usize, self.k.matmul_dw, self.k.matmul_dw_reg, false);
         let dx_gemm = |m: u32, k: u32| block::pick_gemm(m as usize, k as usize, self.k.matmul_dx, self.k.matmul_dx_reg, false);
@@ -655,10 +693,27 @@ impl Encoder {
         s.push(block::layernorm_dx_bwd(g, &ln, &self.sum2, self.w("emb_ln.weight"), &bw.dx[0], &bw.d_sum, h, n, c.eps));
         // Three gathers summed: addition fans the gradient out unchanged, so
         // every table scatters the SAME `d_sum` through its own index buffer.
-        // `emb_bwd` Params: [n_rows, width, rows_in_table]; bufs [index(u32), d_x, grad_table].
-        s.push(g.step(self.k.emb_bwd, &[&self.ids, &bw.d_sum, gr("tok.weight")], &[n, h, c.vocab], c.vocab * h));
-        s.push(g.step(self.k.emb_bwd, &[&self.pos_ids, &bw.d_sum, gr("pos.weight")], &[n, h, c.max_positions], c.max_positions * h));
-        s.push(g.step(self.k.emb_bwd, &[&self.type_ids, &bw.d_sum, gr("type.weight")], &[n, h, c.type_vocab], c.type_vocab * h));
+        let eb = block::EmbBwdIds::resolve(g, self.k.emb_bwd);
+        for (i, (index, table, table_rows)) in [
+            (&self.ids, "tok.weight", c.vocab),
+            (&self.pos_ids, "pos.weight", c.max_positions),
+            (&self.type_ids, "type.weight", c.type_vocab),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            s.push(block::emb_bwd_step(
+                g,
+                &eb,
+                index,
+                Some((&self.uniq[i], self.uniq_n[i])),
+                &bw.d_sum,
+                gr(table),
+                n,
+                h,
+                table_rows,
+            ));
+        }
         s
     }
 

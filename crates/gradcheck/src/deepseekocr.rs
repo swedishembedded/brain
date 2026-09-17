@@ -107,7 +107,7 @@ const PIPES: &[(&str, &str)] = &[
 ];
 
 const FWD: CrossIds = CrossIds { scores: 0, softmax: 1, apply: 2 };
-const BWD: CrossBwdIds = CrossBwdIds { dscores: 3, dq: 4, dk_acc: 5, dv_acc: 6 };
+const BWD: CrossBwdIds = CrossBwdIds { dscores: 3, dscores_rows: None, dq: 4, dk_acc: 5, dv_acc: 6 };
 const REL: RelPosIds = RelPosIds { qr: 7, add: 8, drh: 9, drw: 10, dq: 11, dr: 12 };
 const TBL: RelPosTableIds = RelPosTableIds { embed: 13, scale_row: 14, add2: 15, nlc_nchw: 16, emb_bwd: 17 };
 

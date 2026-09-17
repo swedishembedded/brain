@@ -69,18 +69,32 @@ thing this model is for.
 600 steps, 8 intents, one Tesla P40, fine-tuning the encoder and a fresh head:
 
 ```
-train:    600 steps, final loss 0.148, 712s (1187 ms/step)
-evaluate: accuracy 0.962 over 160 items, chance 0.125, mean confidence 0.973
+train:    600 steps, final loss 0.102, 14.2s (24 ms/step)
+evaluate: accuracy 0.938 over 160 items, chance 0.125, mean confidence 0.959
 ask:      "my card has not arrived yet, it has been three weeks"
           -> card arrival  (confidence 1.00)
 ```
 
-**1187 ms/step is the honest number and it is slow** - roughly two orders of
-magnitude off what the arithmetic implies for a 22M-parameter encoder. The
-model rebuilds its dispatch list on every call, because the packed span layout
-changes with every message length, and it trains one example at a time. Batching
-and caching that layout are the next work; nothing about the architecture
-requires this rate.
+That step used to take **1187 ms**, and what it was spending it on is worth
+recording, because none of it was the model:
+
+| | ms/step | why |
+|---|---|---|
+| gradient-norm clipping | 1163 | one thread, serially, over a 11.7M-float embedding table |
+| dispatch re-recording | ~10 | the packed layout moves with every message, so the tape was rebuilt each step |
+| embedding scatter | 5.7 | an invocation per (vocab row, channel) when at most ~130 rows were looked up |
+| cross-attention `d_scores` | 4.2 | one thread per query row, walking its whole key axis twice |
+
+Every one of those was a kernel or a seam that already existed and was simply
+not selected: the cooperative grad-norm pair, `emb_bwd_uniq`,
+`attn_bwd_dscores_cross_rows`, and `Gpu::enable_step_cache`. `decide_bench`
+prints the table this came from -
+`cargo run --release -p brain-decide --bin decide_bench -- 8 12 8`.
+
+What remains is genuine arithmetic at an awkward width: the reverse pass'
+GEMMs run at ~8% of this card's roof because a training step is ONE example,
+134 packed rows. Batching examples is the next real win, and it is an
+architectural change rather than a kernel one.
 
 ## Cost
 

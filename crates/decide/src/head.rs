@@ -248,6 +248,21 @@ impl Head {
         ]
     }
 
+    /// This half's device handle - what a profiler times its steps on.
+    pub fn gpu(&self) -> &Gpu {
+        &self.gpu
+    }
+
+    /// The recorded forward dispatches, for a profiler.
+    pub fn fwd_steps(&self) -> &[Step] {
+        &self.steps
+    }
+
+    /// The recorded reverse dispatches, empty on an inference build.
+    pub fn bwd_steps(&self) -> &[Step] {
+        self.bwd.as_ref().map(|b| b.steps.as_slice()).unwrap_or(&[])
+    }
+
     fn build_steps(&self, hidden: &DeviceBuffer) -> Vec<Step> {
         let g = &self.gpu;
         let (h, hd) = (self.cfg.d_model, self.cfg.head_dim());
@@ -367,7 +382,15 @@ impl Head {
         p_qk_acc[..9].copy_from_slice(&p_qk);
         let mut p_v_acc = [0u32; 9];
         p_v_acc[..8].copy_from_slice(&p_v);
-        st.push(g.step(self.k.dscores_cross, &[&b.d_sum, &self.kv, &self.probs, &b.d_scores_attn], &p_v, heads * s));
+        let cross_bwd = block::CrossBwdIds::resolve(
+            g,
+            self.k.dscores_cross,
+            self.k.dq_cross,
+            self.k.dk_cross_acc,
+            self.k.dv_cross_acc,
+        );
+        let (dsc_k, dsc_t) = block::dscores_variant(g, &cross_bwd, heads * s, r);
+        st.push(g.step(dsc_k, &[&b.d_sum, &self.kv, &self.probs, &b.d_scores_attn], &p_v, dsc_t));
         st.push(g.step(self.k.dq_cross, &[&b.d_scores_attn, &self.kv, &b.d_q], &p_qk, heads * s * hd));
         st.push(g.step(self.k.dk_cross_acc, &[&b.d_scores_attn, &self.q, &b.d_kv], &p_qk_acc, heads * r * hd));
         st.push(g.step(self.k.dv_cross_acc, &[&self.probs, &b.d_sum, &b.d_kv], &p_v_acc, heads * r * hd));

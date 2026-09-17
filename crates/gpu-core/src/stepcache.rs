@@ -59,6 +59,12 @@ struct Key {
     threads: u32,
     bufs: Box<[usize]>,
     params: Box<[u32]>,
+    /// The `(offset, size)` view of each buffer, for a `step_sliced` record;
+    /// empty for a whole-buffer `step`. Part of the key because two calls that
+    /// agree on everything else and differ only in where they bind are
+    /// different dispatches - and because an empty slice can never collide
+    /// with a non-empty one, the two families share this map safely.
+    offs: Box<[(u64, u64)]>,
 }
 
 struct Entry {
@@ -86,18 +92,26 @@ impl StepCache {
         StepCache { cap: cap.max(1), map: HashMap::new(), hits: 0, misses: 0 }
     }
 
-    fn key(kind: usize, bufs: &[&DeviceBuffer], params: &[u32], threads: u32) -> Key {
+    fn key(kind: usize, bufs: &[&DeviceBuffer], offsets: &[(u64, u64)], params: &[u32], threads: u32) -> Key {
         Key {
             kind,
             threads,
             bufs: bufs.iter().map(|b| b.alloc_id() as usize).collect(),
             params: params.into(),
+            offs: offsets.into(),
         }
     }
 
     /// The dispatch recorded for this exact call before, if there was one.
-    pub(crate) fn get(&mut self, kind: usize, bufs: &[&DeviceBuffer], params: &[u32], threads: u32) -> Option<Step> {
-        match self.map.get_mut(&Self::key(kind, bufs, params, threads)) {
+    pub(crate) fn get(
+        &mut self,
+        kind: usize,
+        bufs: &[&DeviceBuffer],
+        offsets: &[(u64, u64)],
+        params: &[u32],
+        threads: u32,
+    ) -> Option<Step> {
+        match self.map.get_mut(&Self::key(kind, bufs, offsets, params, threads)) {
             Some(e) => {
                 e.reused = true;
                 self.hits += 1;
@@ -124,7 +138,16 @@ impl StepCache {
     ///
     /// Either way a key and the strong handles pinning its buffers die
     /// together, which is what keeps the `alloc_id` key sound.
-    pub(crate) fn put(&mut self, kind: usize, bufs: &[&DeviceBuffer], params: &[u32], threads: u32, step: &Step) {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn put(
+        &mut self,
+        kind: usize,
+        bufs: &[&DeviceBuffer],
+        offsets: &[(u64, u64)],
+        params: &[u32],
+        threads: u32,
+        step: &Step,
+    ) {
         if self.map.len() >= self.cap {
             self.map.retain(|_, e| e.reused);
             if self.map.len() >= self.cap {
@@ -132,7 +155,7 @@ impl StepCache {
             }
         }
         self.map.insert(
-            Self::key(kind, bufs, params, threads),
+            Self::key(kind, bufs, offsets, params, threads),
             Entry { step: step.clone(), reused: false, _pinned: bufs.iter().map(|b| (*b).clone()).collect() },
         );
     }

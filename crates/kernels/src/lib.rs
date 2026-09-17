@@ -352,6 +352,8 @@ pub const ELU: &str = include_str!("../wgsl/elu.wgsl");
 pub const ELU_BWD: &str = include_str!("../wgsl/elu_bwd.wgsl");
 /// `wgsl/emb_bwd.wgsl`
 pub const EMB_BWD: &str = include_str!("../wgsl/emb_bwd.wgsl");
+/// `wgsl/emb_bwd_uniq.wgsl`
+pub const EMB_BWD_UNIQ: &str = include_str!("../wgsl/emb_bwd_uniq.wgsl");
 /// `wgsl/embed.wgsl`
 pub const EMBED: &str = include_str!("../wgsl/embed.wgsl");
 /// `wgsl/embed_tile.wgsl`
@@ -1175,6 +1177,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("elu", ELU),
     ("elu_bwd", ELU_BWD),
     ("emb_bwd", EMB_BWD),
+    ("emb_bwd_uniq", EMB_BWD_UNIQ),
     ("embed", EMBED),
     ("embed_tile", EMBED_TILE),
     ("exp", EXP),

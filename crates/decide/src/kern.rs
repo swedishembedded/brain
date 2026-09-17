@@ -20,6 +20,11 @@ use gpu_core::Gpu;
 pub const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
     ("emb_bwd", kernels::EMB_BWD),
+    // The compact twin of the scatter above, resolved by name through
+    // `block::EmbBwdIds`. A call looks up at most a few hundred of this
+    // model's 30522 vocabulary rows, and the reference kernel spends an
+    // invocation per (table row, channel) regardless.
+    ("emb_bwd_uniq", kernels::EMB_BWD_UNIQ),
     ("matmul", kernels::MATMUL),
     ("matmul_reg3", kernels::MATMUL_REG3),
     ("matmul_dx", kernels::MATMUL_DX),
@@ -46,6 +51,12 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("attn_softmax_cross", kernels::ATTN_SOFTMAX_CROSS),
     ("attn_apply_cross", kernels::ATTN_APPLY_CROSS),
     ("attn_bwd_dscores_cross", kernels::ATTN_BWD_DSCORES_CROSS),
+    // The workgroup-per-query-row twin of the line above. Never indexed
+    // directly: `block::CrossBwdIds::resolve` finds it by name. The reference
+    // kernel gives ONE thread a span's whole `(key, head_dim)` double loop and
+    // then walks it twice, which is why it cost more than every GEMM in the
+    // reverse pass put together at this model's shapes.
+    ("attn_bwd_dscores_cross_rows", kernels::ATTN_BWD_DSCORES_CROSS_ROWS),
     ("attn_bwd_dq_cross", kernels::ATTN_BWD_DQ_CROSS),
     ("attn_bwd_dk_cross_acc", kernels::ATTN_BWD_DK_CROSS_ACC),
     ("attn_bwd_dv_cross_acc", kernels::ATTN_BWD_DV_CROSS_ACC),
@@ -55,6 +66,17 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("grad_scale", kernels::GRAD_SCALE),
     ("clip_coef", kernels::CLIP_COEF),
     ("grad_scale_buf", kernels::GRAD_SCALE_BUF),
+    // The COOPERATIVE grad-norm pair. Never indexed directly either:
+    // `optim::Optim` resolves these by name and uses them in place of the two
+    // above wherever the device can run a workgroup barrier.
+    //
+    // Registering them is the entire opt-in, and it is not optional in
+    // practice. `gradnorm_sq` reduces a whole tensor from ONE thread, and this
+    // model's largest tensor is the `vocab x d_model` token embedding - 11.7M
+    // floats. That single thread was 97% of a training step. See
+    // `tests/optimizer_kernels.rs`.
+    ("gradnorm_part", kernels::GRADNORM_PART),
+    ("clip_coef_wg", kernels::CLIP_COEF_WG),
 ];
 
 macro_rules! ids {

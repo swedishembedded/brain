@@ -25,6 +25,15 @@
 //! 4. **The cap is a cap**, and an entry never outlives the buffers its key
 //!    names (which is what makes an `alloc_id` key sound at all).
 //!
+//! 5. **A SLICED dispatch obeys all four, with its bind OFFSETS in the key.**
+//!    `Gpu::step_sliced` is memoized on the same terms, and it is the path
+//!    that matters most: a packed-span attention records one sliced dispatch
+//!    per span per layer, several hundred bind groups per rebuild, and they
+//!    are precisely the ones a `step`-only memo could never return. Two
+//!    sliced calls agreeing on everything but where they bind are DIFFERENT
+//!    dispatches, so the offsets are part of the key - a cache that dropped
+//!    them would compute the right arithmetic over the wrong rows.
+//!
 //! Both backends: the default device and the CPU Cranelift JIT.
 //!
 //! Each case owns its own pipeline-list constant. `gpu_core::testgpu::dev`
@@ -45,6 +54,8 @@ use gpu_core::Gpu;
 /// separately is meant to avoid.
 const REPLAY_PIPES: &[(&str, &str)] = &[("add2", kernels::ADD2), ("axpy", kernels::AXPY)];
 const MISS_PIPES: &[(&str, &str)] = &[("add2", kernels::ADD2), ("axpy", kernels::AXPY), ("scale_add", kernels::SCALE_ADD)];
+const SLICED_PIPES: &[(&str, &str)] =
+    &[("add2", kernels::ADD2), ("axpy", kernels::AXPY), ("scale_add", kernels::SCALE_ADD), ("gelu_erf", kernels::GELU_ERF)];
 
 const ADD2: usize = 0;
 const N: usize = 64;
@@ -202,4 +213,62 @@ fn the_cap_holds_and_clearing_releases_the_pinned_buffers() {
     g.submit(&[], &[s]);
     assert_eq!(g.read(&out, N)[0], 3.0, "a disarmed handle still dispatches");
     assert!(g.step_cache_stats().is_none(), "a disarmed handle records nothing");
+}
+
+/// (5): a sliced dispatch replays, and two sliced calls that differ ONLY in
+/// their bind offsets stay apart.
+///
+/// The offsets carry the whole difference here - same kernel, same buffers,
+/// same params, same threads - so a key that omitted them would return the
+/// first window's dispatch for the second window and silently add the wrong
+/// rows. That is the defect this case exists for; the replay half is the
+/// cheaper half.
+#[test]
+fn a_sliced_dispatch_replays_and_its_offsets_are_part_of_the_key() {
+    // `step_sliced` offsets are `(start, len)` in ELEMENTS, `len == 0` meaning
+    // "to the end of the buffer". The second window starts at element 64, which
+    // is 256 bytes in - the `min_storage_buffer_offset_alignment` every binding
+    // has to clear, and the reason the halves are this size.
+    const HALF: usize = 64;
+    const WHOLE: usize = 2 * HALF;
+    let ramp2 = |base: f32| -> Vec<f32> { (0..WHOLE).map(|i| base + i as f32 * 0.25).collect() };
+
+    for (label, dev) in devices(SLICED_PIPES) {
+        let g = dev();
+        g.clear_step_cache();
+        g.enable_step_cache(64);
+
+        let a = g.storage_init("a", &ramp2(1.0));
+        let b = g.storage_init("b", &ramp2(2.0));
+        let out = g.storage(WHOLE as u64);
+        let lo = [(0u64, HALF as u64), (0u64, HALF as u64), (0u64, HALF as u64)];
+        let hi = [(HALF as u64, 0u64), (HALF as u64, 0u64), (HALF as u64, 0u64)];
+        let bufs = [&a, &b, &out];
+        let p = [HALF as u32];
+
+        let sliced = |offs: &[(u64, u64)]| g.step_sliced(ADD2, &bufs, offs, &p, HALF as u32);
+        g.submit(&[], &[sliced(&lo), sliced(&hi)]);
+        let want = g.read(&out, WHOLE);
+        let (_, misses, _) = g.step_cache_stats().expect("armed");
+        assert_eq!(misses, 2, "[{label}] the two windows must not share an entry - the offsets differ");
+
+        // Replay both, after rewriting an input: contents are outside the key.
+        let a1 = ramp2(-7.0);
+        g.write_f32(&a, &a1);
+        g.submit(&[], &[sliced(&lo), sliced(&hi)]);
+        let got = g.read(&out, WHOLE);
+        let (hits, misses, live) = g.step_cache_stats().expect("armed");
+        assert_eq!((hits, misses, live), (2, 2, 2), "[{label}] the second round must be two hits");
+
+        // Every element recomputed from the NEW `a`, both halves alive: a cache
+        // that had merged the two entries would leave one half stale, and one
+        // that dropped the offsets would write the low half twice.
+        let bb = g.read(&b, WHOLE);
+        for i in 0..WHOLE {
+            let expect = a1[i] + bb[i];
+            assert_eq!(got[i].to_bits(), expect.to_bits(), "[{label}] out[{i}] after replay");
+        }
+        assert_ne!(want, got, "[{label}] the rewrite must change the answer, or the case proves nothing");
+        g.clear_step_cache();
+    }
 }

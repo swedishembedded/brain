@@ -1604,9 +1604,118 @@ pub fn gemm_bidir_fwd(
 #[derive(Clone, Copy)]
 pub struct CrossBwdIds {
     pub dscores: usize,
+    /// `attn_bwd_dscores_cross_rows`, the workgroup-per-query-row twin, when
+    /// the model registered it. `None` keeps the reference kernel - see
+    /// [`CrossBwdIds::resolve`].
+    pub dscores_rows: Option<usize>,
     pub dq: usize,
     pub dk_acc: usize,
     pub dv_acc: usize,
+}
+
+impl CrossBwdIds {
+    /// Reference indices supplied by the model; the `_rows` twin resolved
+    /// **by name** from this handle's pipeline list, exactly as
+    /// [`LayerNormIds::resolve`] does it.
+    ///
+    /// Worth the seam because the reference kernel is the worst-shaped one in
+    /// the cross-attention backward: it gives one THREAD the whole
+    /// `(j, head_dim)` double loop, and then walks it TWICE - once to form the
+    /// softmax jacobian's `dot`, once to use it. A packed encoder dispatches
+    /// it once per span per layer at a few hundred threads, which leaves a
+    /// large GPU almost entirely idle.
+    pub fn resolve(g: &Gpu, dscores: usize, dq: usize, dk_acc: usize, dv_acc: usize) -> CrossBwdIds {
+        CrossBwdIds { dscores, dscores_rows: g.kernel_index("attn_bwd_dscores_cross_rows"), dq, dk_acc, dv_acc }
+    }
+}
+
+/// The embedding-table scatter's kernels: the reference, plus the compact
+/// twin when the model registered it.
+#[derive(Clone, Copy, Debug)]
+pub struct EmbBwdIds {
+    pub emb_bwd: usize,
+    /// `emb_bwd_uniq`, resolved by name. `None` keeps the reference kernel.
+    pub emb_bwd_uniq: Option<usize>,
+}
+
+impl EmbBwdIds {
+    pub fn resolve(g: &Gpu, emb_bwd: usize) -> EmbBwdIds {
+        EmbBwdIds { emb_bwd, emb_bwd_uniq: g.kernel_index("emb_bwd_uniq") }
+    }
+}
+
+/// The distinct values of `ids`, ascending - the `uniq` list
+/// [`emb_bwd_step`] wants.
+///
+/// Ascending rather than first-seen so the scatter's writes climb the table
+/// in address order; the ORDER of the list does not affect the result, since
+/// each entry owns a disjoint set of output elements.
+pub fn uniq_u32(ids: &[u32]) -> Vec<u32> {
+    let mut v = ids.to_vec();
+    v.sort_unstable();
+    v.dedup();
+    v
+}
+
+/// One embedding-table scatter: `grad_table[index[n], :] += d_x[n, :]`.
+///
+/// `uniq` is `(buffer, count)` holding [`uniq_u32`] of the SAME ids that are
+/// in `index`. Supplying it lets this dispatch the compact kernel, whose cost
+/// is `n_uniq * width * n_rows` instead of `table_rows * width * n_rows` -
+/// which on a vocabulary-sized table is the difference between the scatter
+/// being the largest kernel in a reverse pass and it being invisible. Pass
+/// `None` and the reference kernel runs, unchanged.
+///
+/// The compact kernel is chosen only when it has strictly less work to do, so
+/// a caller that hands over a `uniq` list as long as the table itself is not
+/// penalised for it.
+///
+/// **A `uniq` list missing an id silently drops that row's gradient**, so
+/// build it with [`uniq_u32`] and from the same slice that was uploaded to
+/// `index` - not from a longer buffer whose tail is stale.
+#[allow(clippy::too_many_arguments)]
+pub fn emb_bwd_step(
+    g: &Gpu,
+    k: &EmbBwdIds,
+    index: &DeviceBuffer,
+    uniq: Option<(&DeviceBuffer, u32)>,
+    d_x: &DeviceBuffer,
+    grad_table: &DeviceBuffer,
+    n_rows: u32,
+    width: u32,
+    table_rows: u32,
+) -> Step {
+    match (k.emb_bwd_uniq, uniq) {
+        (Some(kern), Some((buf, n_uniq))) if n_uniq < table_rows => {
+            g.step(kern, &[index, buf, d_x, grad_table], &[n_rows, width, n_uniq], n_uniq * width)
+        }
+        _ => g.step(k.emb_bwd, &[index, d_x, grad_table], &[n_rows, width, table_rows], table_rows * width),
+    }
+}
+
+/// Which cross-attention `d_scores` kernel to dispatch, and the resulting
+/// thread count: the cooperative twin where the model registered it and the
+/// device can run a workgroup reduction, else the reference.
+///
+/// Same shape and same policy source as [`ln_variant`] and
+/// [`softmax_variant`]. NOT a `gpu_core::upgrade` row, and deliberately: the
+/// twin splits the row's `dot` over 64 lanes, so it REASSOCIATES an fp32 sum
+/// and its last bits differ. That is a visible seam's job, not an invisible
+/// one's (`gpu_core::upgrade`'s own bar #2).
+///
+/// `rows` is `bsz * n_heads * t_dec`, the reference kernel's own thread count.
+pub fn dscores_variant(g: &Gpu, k: &CrossBwdIds, rows: u32, cols: u32) -> (usize, u32) {
+    use gpu_core::select::{Dtype, KernelSelector, KernelVariant, Op, OpShape};
+    let shape = OpShape { m: rows, n: cols, k: 0, dtype: Dtype::F32 };
+    match k.dscores_rows {
+        Some(i)
+            if gpu_core::select::DefaultSelector.select(Op::AttnBwdDScores, shape, &g.caps())
+                == KernelVariant::WorkgroupPerOutput =>
+        {
+            (i, rows * 64)
+        }
+        _ => (k.dscores, rows),
+    }
 }
 
 /// Backward of [`chunked_bidir_fwd`] with per-chunk score/softmax recompute -
@@ -1671,12 +1780,13 @@ pub fn chunked_bidir_bwd(
             }
             steps.push(g.step(fwd.softmax, &[scores, probs], &[1, heads, qn, len], heads * qn));
             // Softmax jacobian → d_scores (chunk-local).
+            let (dsc_k, dsc_t) = dscores_variant(g, bwd, heads * qn, len);
             steps.push(g.step_sliced(
-                bwd.dscores,
+                dsc_k,
                 &[d_ctx, qkv, probs, d_scores],
                 &[(dc_off, 0), (kv_row_off, 0), (0, 0), (0, 0)],
                 &p_v,
-                heads * qn,
+                dsc_t,
             ));
             // d_q: chunk rows only (disjoint - plain assign into the q region).
             steps.push(g.step_sliced(

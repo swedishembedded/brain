@@ -1198,7 +1198,7 @@ mod native_facade {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .as_mut()
-                    .and_then(|c| c.get(kind, bufs, params, threads));
+                    .and_then(|c| c.get(kind, bufs, &[], params, threads));
                 if let Some(s) = hit {
                     return s;
                 }
@@ -1210,7 +1210,7 @@ mod native_facade {
                 .with_meta(StepMeta { kernel: kind, params: Some(params.to_vec()), threads });
             if armed {
                 if let Some(c) = self.memo.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
-                    c.put(kind, bufs, params, threads, &step);
+                    c.put(kind, bufs, &[], params, threads, &step);
                 }
             }
             step
@@ -1219,8 +1219,9 @@ mod native_facade {
         /// **Replay recorded dispatches instead of rebuilding them.**
         ///
         /// Arms [`crate::stepcache`] on this handle with room for
-        /// `max_entries` distinct `(kernel, buffers, params, threads)` calls.
-        /// From here on a repeated [`Self::step`] returns the `Step` it
+        /// `max_entries` distinct `(kernel, buffers, bind offsets, params,
+        /// threads)` calls. From here on a repeated [`Self::step`] or
+        /// [`Self::step_sliced`] returns the `Step` it
         /// returned the first time rather than asking the backend to build
         /// another - on wgpu that is a fresh uniform buffer plus a fresh bind
         /// group per dispatch, tens of microseconds of driver work each, and
@@ -1273,10 +1274,37 @@ mod native_facade {
         pub fn step_sliced(&self, kind: usize, bufs: &[&DeviceBuffer], offsets: &[(u64, u64)], params: &[u32], threads: u32) -> Step {
             // NB: sliced views of ONE buffer at disjoint offsets are legal and common
             // here, so no alias check - wgpu validates the concrete ranges.
+            //
+            // Memoized on the same terms as `step` (see `enable_step_cache`),
+            // with the bind OFFSETS in the key: a sliced dispatch is a pure
+            // function of exactly these five inputs too. This is the path that
+            // matters most for a model whose tape is re-recorded per call,
+            // because a packed-span attention builds one sliced dispatch per
+            // span per layer - several hundred bind groups per rebuild, and
+            // the only ones `step`'s memo could never return.
+            let armed = self.memo_enabled.load(Ordering::Relaxed);
+            if armed {
+                let hit = self
+                    .memo
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .as_mut()
+                    .and_then(|c| c.get(kind, bufs, offsets, params, threads));
+                if let Some(s) = hit {
+                    return s;
+                }
+            }
             let (k, t) = crate::upgrade::apply(&self.upgrades, kind, Some(params), threads);
-            self.inner
+            let step = self
+                .inner
                 .step_sliced(k, bufs, offsets, params, t)
-                .with_meta(StepMeta { kernel: kind, params: Some(params.to_vec()), threads })
+                .with_meta(StepMeta { kernel: kind, params: Some(params.to_vec()), threads });
+            if armed {
+                if let Some(c) = self.memo.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+                    c.put(kind, bufs, offsets, params, threads, &step);
+                }
+            }
+            step
         }
         pub fn step_buf(&self, kind: usize, ubuf: &DeviceBuffer, bufs: &[&DeviceBuffer], threads: u32) -> Step {
             // The uniform lives in a caller-owned buffer: shape params unknown

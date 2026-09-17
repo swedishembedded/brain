@@ -195,12 +195,13 @@ impl Ids {
             perm: VitPermuteIds { embed: k("embed"), row_scatter: k("row_scatter") },
             cross: CrossIds { scores: k("attn_scores_cross"), softmax: k("attn_softmax_cross"), apply: k("attn_apply_cross") },
             key_minor: (k("kv_k_headt"), k("attn_scores_cross_kt")),
-            cross_bwd: CrossBwdIds {
-                dscores: k("attn_bwd_dscores_cross"),
-                dq: k("attn_bwd_dq_cross"),
-                dk_acc: k("attn_bwd_dk_cross_acc"),
-                dv_acc: k("attn_bwd_dv_cross_acc"),
-            },
+            cross_bwd: CrossBwdIds::resolve(
+                g,
+                k("attn_bwd_dscores_cross"),
+                k("attn_bwd_dq_cross"),
+                k("attn_bwd_dk_cross_acc"),
+                k("attn_bwd_dv_cross_acc"),
+            ),
             rel: RelPosIds {
                 qr: k("attn_relpos_qr"),
                 add: k("attn_relpos_add"),
