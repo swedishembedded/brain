@@ -41,7 +41,11 @@ fn membrane_matches_the_closed_form_for_a_constant_input() {
     // driven purely by the external port, which is the regime the closed form
     // describes. The threshold is placed out of reach so the trajectory is the
     // pure exponential rather than a reset sawtooth.
-    let p = LifParams { dt_over_tau: 0.2, v_rest: -0.3, v_reset: -0.6, v_th: 1.0e6, r: 2.0, refrac_ticks: 0, dt_over_tau_syn: 1.0, dt_over_tau_inh: 1.0, ..LifParams::default() };
+    // `e_inh` tracks `v_rest`: a synaptic reversal potential is defined
+    // relative to rest, and the default's literal 0.0 is only correct for the
+    // default's rest of 0.0. Leaving it is refused rather than silently
+    // making inhibition depolarising.
+    let p = LifParams { dt_over_tau: 0.2, v_rest: -0.3, e_inh: -0.3, v_reset: -0.6, v_th: 1.0e6, r: 2.0, refrac_ticks: 0, dt_over_tau_syn: 1.0, dt_over_tau_inh: 1.0, ..LifParams::default() };
     let csc = Csc::from_edges(1, &[]).unwrap();
     let gpu = gpu_core::testgpu::dev(&KERNELS);
     let mut net = SpikingNet::new(gpu, &csc, p).unwrap();
@@ -444,9 +448,21 @@ fn adaptation_slows_a_neuron_down_and_its_absence_does_not() {
     // It SETTLES rather than running away: an adaptation current that never
     // reached equilibrium would silence the cell instead of slowing it, and a
     // silenced population cannot take its turn in an alternation.
-    let tail = &adapting[adapting.len() - 3..];
-    assert!(tail.iter().all(|&i| i == tail[0]), "the adapted rate has to settle, got {adapting:?}");
-    assert!(*tail.last().unwrap() > adapting[0], "the settled rate has to be slower than the onset rate");
+    //
+    // Settled means BOUNDED, not constant. An interval is a whole number of
+    // ticks, so any adapted rate that does not happen to land on one has to
+    // alternate between the two it falls between - 2,2,2,3 is a settled 2.25
+    // and asserting strict equality only passed because the previous
+    // integrator happened to land on an integer.
+    let tail = &adapting[adapting.len() - 8..];
+    let (lo, hi) = (*tail.iter().min().unwrap(), *tail.iter().max().unwrap());
+    assert!(hi - lo <= 1, "the adapted rate has to settle within the tick it is quantised to, got {adapting:?}");
+    let earlier = &adapting[adapting.len() - 16..adapting.len() - 8];
+    assert!(
+        hi <= *earlier.iter().max().unwrap(),
+        "the interval is still growing, so adaptation has not reached equilibrium: {adapting:?}"
+    );
+    assert!(lo > adapting[0], "the settled rate has to be slower than the onset rate");
 }
 
 /// The adaptation current is a geometric decay with a closed form, like the
@@ -534,9 +550,10 @@ fn a_cell_given_its_own_time_constant_integrates_at_its_own_rate() {
     net.read(Port::Membrane, &mut v).unwrap();
 
     // The closed form for a constant input, per neuron.
+    // The exact solution, matching the kernel's exponential step.
     let want = |a: f32, r: f32| {
         let v_inf = r;
-        v_inf * (1.0 - (1.0f32 - a).powi(12))
+        v_inf * (1.0 - (-a * 12.0).exp())
     };
     for (i, (a, r)) in [(7usize, (0.4f32, 1.0f32)), (9, (0.1, 1.0)), (11, (0.2, 3.0)), (0, (0.2, 1.0))] {
         let e = (v[i] - want(a, r)).abs();
@@ -548,4 +565,107 @@ fn a_cell_given_its_own_time_constant_integrates_at_its_own_rate() {
 
     assert!(net.set_cell_scales(&vec![1.0; 64], &vec![0.0; 64]).is_err(), "a gain of zero is a deleted cell");
     assert!(net.set_cell_scales(&vec![1.0; 63], &vec![1.0; 64]).is_err(), "the wrong width is refused");
+}
+
+/// Inhibition cannot push a cell below its reversal potential, however much of
+/// it arrives.
+///
+/// The failure this replaces cost a headline result. With current-based
+/// synapses an inhibitory input subtracts a fixed amount regardless of where
+/// the membrane already is, so in a balanced network the integrated inhibition
+/// scales with in-degree and the best-connected cells are driven far below
+/// anything they can recover from. Measured on the fly's cord: the leg muscle
+/// with the most input sat 274 threshold-gaps below rest, permanently silent,
+/// and the oscillation the model did produce turned out to be rebound from a
+/// hyperpolarisation no neuron can reach.
+///
+/// A conductance passes `g * (E_rev - v)`, which is zero at `E_rev` and
+/// changes sign beyond it. The floor is therefore in the arithmetic rather
+/// than in a clamp.
+#[test]
+fn inhibition_cannot_drive_a_cell_below_its_reversal_potential() {
+    // One inhibitory synapse onto a cell, hammered every tick.
+    let csc = Csc::from_edges(2, &[(0, 1, -50.0)]).expect("well-formed");
+    let p = LifParams {
+        dt_over_tau: 0.5,
+        v_rest: 0.0,
+        e_inh: 0.0,
+        v_th: 0.25,
+        v_min: -1.0e9,
+        r: 1.0,
+        refrac_ticks: 0,
+        dt_over_tau_syn: 1.0,
+        dt_over_tau_inh: 1.0,
+        ..LifParams::default()
+    };
+    let mut net = SpikingNet::new(gpu_core::testgpu::dev(&KERNELS), &csc, p).unwrap();
+    // Neuron 0 fires constantly; neuron 1 receives 50 units of inhibition a
+    // tick and is also held up by a standing excitatory current.
+    net.drive(Port::Drive, &[10.0, 2.0]).unwrap();
+    let mut v = [0.0f32; 2];
+    let mut lowest = f32::MAX;
+    for _ in 0..200 {
+        net.step();
+        net.read(Port::Membrane, &mut v).unwrap();
+        lowest = lowest.min(v[1]);
+    }
+    assert!(
+        lowest >= p.e_inh - 1e-6,
+        "inhibition drove the cell to {lowest}, below its reversal potential of {}",
+        p.e_inh
+    );
+    // And `v_min` is not what stopped it: the floor is a billion below.
+    assert!(lowest > -1.0, "the clamp was doing the work, not the reversal potential");
+}
+
+/// Inhibition divides rather than subtracts.
+///
+/// The property current-based synapses cannot express at all, and the one a
+/// mushroom body runs on: raising the inhibitory conductance raises the cell's
+/// total conductance, which shrinks its response to everything else. That is
+/// gain control, and it is why a real Kenyon-cell population answers a strong
+/// odour with the same few percent of its cells as a weak one.
+#[test]
+fn inhibition_scales_the_response_to_excitation_rather_than_offsetting_it() {
+    // The threshold has to stay REACHABLE, because the inhibiting cell has to
+    // fire for any inhibition to exist at all. So the observed cell is held
+    // below it by a small drive rather than by an unreachable threshold, which
+    // is the version of this test that measured nothing: neuron 0 never spiked
+    // and both conditions were the uninhibited one.
+    let response = |inhibition: f32, drive: f32| -> f32 {
+        let csc = Csc::from_edges(2, &[(0, 1, -inhibition)]).expect("well-formed");
+        let p = LifParams {
+            dt_over_tau: 0.5,
+            v_th: 0.25,
+            r: 1.0,
+            refrac_ticks: 0,
+            dt_over_tau_syn: 1.0,
+            dt_over_tau_inh: 1.0,
+            ..LifParams::default()
+        };
+        let mut net = SpikingNet::new(gpu_core::testgpu::dev(&KERNELS), &csc, p).unwrap();
+        net.drive(Port::Drive, &[10.0, drive]).unwrap();
+        let mut v = [0.0f32; 2];
+        for _ in 0..80 {
+            net.step();
+        }
+        net.read(Port::Membrane, &mut v).unwrap();
+        v[1]
+    };
+
+    // Doubling the drive with no inhibition doubles the response.
+    let (a1, a2) = (response(0.0, 0.05), response(0.0, 0.10));
+    assert!((a2 / a1 - 2.0).abs() < 0.05, "without inhibition the cell should be linear: {a1} then {a2}");
+
+    // With inhibition present the response to BOTH drives shrinks by the same
+    // FACTOR. A subtractive inhibition would shift them by the same amount
+    // instead, leaving the difference unchanged.
+    let (b1, b2) = (response(3.0, 0.05), response(3.0, 0.10));
+    let gain_without = a2 - a1;
+    let gain_with = b2 - b1;
+    assert!(
+        gain_with < 0.6 * gain_without,
+        "inhibition did not reduce the GAIN ({gain_with} against {gain_without}), so it is subtracting rather than dividing"
+    );
+    assert!((b2 / b1 - a2 / a1).abs() < 0.1, "the response should scale, so the ratio should survive: {b2}/{b1}");
 }

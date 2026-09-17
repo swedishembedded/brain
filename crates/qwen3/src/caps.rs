@@ -333,18 +333,39 @@ impl Action for GenerateAction {
             // Refuse an over-budget checkpoint legibly BEFORE dispatching a
             // device allocation, instead of letting `Qwen::load_inference*`
             // OOM the driver - see `crate::footprint`'s own doc.
-            let reader = checkpoint::weightio::WeightReader::open(&weights).map_err(|e| format!("qwen generate: cannot open {weights}: {e}"))?;
-            let cfg = crate::config::QwenConfig::from_json(&reader.config());
-            let shard = crate::model::Shard::whole(cfg.n_layers as usize);
-            drop(reader);
             let dt = if precision == "int8" { gpu_core::select::Dtype::I8 } else { gpu_core::select::Dtype::F32 };
-            let model = crate::footprint::place_and_build(&cfg, &shard, dt, 1, cap, false, false, "qwen3", || {
-                if precision == "int8" {
-                    Qwen::load_inference_i8(&weights, 1, cap)
-                } else {
-                    Qwen::load_inference(&weights, 1, cap)
-                }
-            })?;
+            // A GGUF is served STRAIGHT off its own mapping, under brain's
+            // parameter names, with no ahead-of-time conversion: see
+            // `crate::gguf_import::open_source`. `brain import` would first
+            // write an fp32 checkpoint ~4x the GGUF's size (15 GiB from a
+            // 4 GiB Q8_0 Qwen3-4B) purely to rename tensors, and the fp32
+            // build then does not fit an integrated GPU at all. The
+            // quantized bytes on disk are already what a reduced-precision
+            // build wants.
+            let is_gguf = std::path::Path::new(&weights)
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("gguf"));
+            let model = if is_gguf {
+                let (cfg, src) = crate::gguf_import::open_source(&weights)?;
+                let shard = crate::model::Shard::whole(cfg.n_layers as usize);
+                let build_cfg = cfg.clone();
+                let build_shard = shard.clone();
+                crate::footprint::place_and_build(&cfg, &shard, dt, 1, cap, false, false, "qwen3", move || {
+                    Qwen::new_shard_dt(build_cfg, 1, cap, &src, build_shard, dt)
+                })?
+            } else {
+                let reader = checkpoint::weightio::WeightReader::open(&weights).map_err(|e| format!("qwen generate: cannot open {weights}: {e}"))?;
+                let cfg = crate::config::QwenConfig::from_json(&reader.config());
+                let shard = crate::model::Shard::whole(cfg.n_layers as usize);
+                drop(reader);
+                crate::footprint::place_and_build(&cfg, &shard, dt, 1, cap, false, false, "qwen3", || {
+                    if precision == "int8" {
+                        Qwen::load_inference_i8(&weights, 1, cap)
+                    } else {
+                        Qwen::load_inference(&weights, 1, cap)
+                    }
+                })?
+            };
             let head = model.read_weight(model.cfg.head_weight());
             *guard = Some(Hot { precision: precision.clone(), weights: weights.clone(), cap, model, head });
         }

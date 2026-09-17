@@ -64,7 +64,10 @@
 //! are. The conversion is a rename plus a dequant, exactly as the HF route is
 //! a rename plus a bf16→f32 widen.
 
+use std::collections::HashMap;
+
 use checkpoint::gguf::MmapGguf;
+use checkpoint::gguf_src::GgufSource;
 use checkpoint::st::ModelCard;
 use gguf::import::{self, ImportStats, Leaf, Mapped};
 use gguf::leaf::Role;
@@ -144,6 +147,59 @@ fn classify(name: &str, tie: bool) -> Result<Mapped, String> {
         _ if name == "rope_freqs.weight" => Ok(Mapped::Dropped(DROP_ROPE_FREQS)),
         _ => Err(format!("unrecognized tensor {name:?} - the qwen3 name map has no entry for it")),
     }
+}
+
+/// Open a GGUF and present it under **brain's own** qwen3 parameter names,
+/// ready to build from directly - no ahead-of-time conversion, no fp32
+/// intermediate on disk, no whole-model host copy.
+///
+/// # Why this is the route that matters
+///
+/// [`import_gguf`] exists to WRITE a brain-format checkpoint, and that is a
+/// genuinely different job: it produces an fp32 `.safetensors` roughly 4x
+/// the GGUF's size (a 4 GiB Q8_0 Qwen3-4B becomes ~15 GiB) purely so the
+/// tensors are stored under brain's names. Paying that - in disk, in
+/// conversion time, and then in device memory when the fp32 build does not
+/// fit an integrated GPU - to serve a model that was already quantized is
+/// backwards.
+///
+/// The quantized bytes are already exactly what a reduced-precision build
+/// wants. So this hands the mapping to [`checkpoint::gguf_src::GgufSource`]
+/// (the one shared GGUF-under-a-model's-own-names source, as `wan`, `ltxv`
+/// and `gemma4` already use) and lets the builder stream straight off the
+/// mapping, one leaf at a time.
+///
+/// # Errors
+///
+/// A human-readable message if the file cannot be mapped or its KV metadata
+/// does not describe a qwen3.
+pub fn open_source(path: &str) -> Result<(QwenConfig, GgufSource), String> {
+    let mg = MmapGguf::open(path).map_err(|e| format!("cannot open gguf {path:?}: {e}"))?;
+    let cfg = config_from_gguf(&mg)?;
+    let tie = cfg.tie_embeddings;
+
+    let mut plan: HashMap<String, String> = HashMap::new();
+    let mut embed_source: Option<String> = None;
+    for g in mg.names() {
+        if matches!(import::split_name(g, u32::MAX), Leaf::TokenEmbd) {
+            embed_source = Some(g.clone());
+        }
+        if let Some(brain) = gguf_to_brain(g, tie) {
+            plan.insert(brain, g.clone());
+        }
+    }
+    // A tied checkpoint carries no `output.weight`: the head IS the embedding
+    // table, and `gguf_to_brain` deliberately returns `None` for the head so
+    // an importer drops it rather than inventing one. A SOURCE has the
+    // opposite obligation - the model still asks for `lm_head.weight`, and it
+    // must resolve, or the head builds uninitialised.
+    if tie {
+        if let Some(embed) = embed_source {
+            plan.insert("lm_head.weight".to_string(), embed);
+        }
+    }
+
+    Ok((cfg, GgufSource::renaming(mg, plan)))
 }
 
 /// Derive a [`QwenConfig`] from a GGUF's KV metadata.
@@ -376,6 +432,51 @@ pub mod testing {
 
 #[cfg(test)]
 mod tests {
+
+    /// The point of `open_source`: a quantized GGUF is readable under brain's
+    /// own parameter names with NO ahead-of-time conversion. Before this
+    /// existed, serving a GGUF meant `brain import` first, which wrote an
+    /// fp32 checkpoint roughly 4x the GGUF's size (15 GiB from a 4 GiB Q8_0
+    /// Qwen3-4B) purely to rename tensors.
+    #[test]
+    fn every_brain_parameter_reads_straight_out_of_an_untied_gguf() {
+        use checkpoint::TensorSource;
+        let dir = scratch("open-source-untied");
+        let path = dir.join("m.gguf");
+        let path = path.to_str().unwrap();
+        testing::write_synthetic_gguf(path, false);
+
+        let (cfg, src) = open_source(path).expect("a synthetic gguf opens");
+        let missing: Vec<String> = cfg
+            .param_list()
+            .into_iter()
+            .map(|(n, _)| n)
+            .filter(|n| !src.with_tensor(n, &mut |_| {}))
+            .collect();
+        assert!(missing.is_empty(), "unreadable brain parameters: {missing:?}");
+    }
+
+    /// A tied checkpoint carries no `output.weight` at all - the head IS the
+    /// embedding table. The plan has to say so, or the head silently has no
+    /// source and the model builds with an uninitialised `lm_head`.
+    #[test]
+    fn a_tied_gguf_sources_the_head_from_the_embedding_table() {
+        use checkpoint::TensorSource;
+        let dir = scratch("open-source-tied");
+        let path = dir.join("tied.gguf");
+        let path = path.to_str().unwrap();
+        testing::write_synthetic_gguf(path, true);
+
+        let (cfg, src) = open_source(path).expect("a synthetic tied gguf opens");
+        assert!(cfg.tie_embeddings, "fixture is the tied one");
+        let missing: Vec<String> = cfg
+            .param_list()
+            .into_iter()
+            .map(|(n, _)| n)
+            .filter(|n| !src.with_tensor(n, &mut |_| {}))
+            .collect();
+        assert!(missing.is_empty(), "unreadable brain parameters: {missing:?}");
+    }
     use super::testing::{write_synthetic_gguf, write_synthetic_hf_dir};
     use super::*;
     use std::collections::HashMap;

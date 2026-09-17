@@ -43,6 +43,22 @@ pub struct LifParams {
     /// chloride reversal sits relative to its spike threshold (about -20 mV
     /// below a rest that is 7 mV below threshold).
     pub v_min: f32,
+    /// Excitatory and inhibitory reversal potentials.
+    ///
+    /// A synapse passes `g * (E_rev - v)`, so inhibition whose reversal sits
+    /// at the resting potential cannot push a cell below rest and acts by
+    /// DIVIDING the cell's gain rather than subtracting from its input. Both
+    /// are load-bearing: the first is what stops a well-connected cell in a
+    /// balanced network being silenced permanently, and the second is the gain
+    /// control a mushroom body needs.
+    ///
+    /// Defaults follow the published whole-brain model of this animal, which
+    /// rests at -70 mV, fires at -45 and reverses excitation at 0 and
+    /// inhibition at -70. In this runtime's units - rest 0, threshold 1 - that
+    /// is 2.8 threshold-gaps above rest for excitation and exactly rest for
+    /// inhibition.
+    pub e_exc: f32,
+    pub e_inh: f32,
     /// Input resistance: the scale from current to membrane volts.
     pub r: f32,
     /// Absolute refractory period, in ticks.
@@ -90,6 +106,8 @@ impl Default for LifParams {
             v_reset: 0.0,
             v_th: 1.0,
             v_min: -3.0,
+            e_exc: 2.8,
+            e_inh: 0.0,
             r: 1.0,
             refrac_ticks: 0,
             // Instantaneous, so the default reproduces every measurement
@@ -114,6 +132,19 @@ impl LifParams {
                 return Err(format!("{name} must be in (0, 1], got {a}"));
             }
         }
+        // The two ways a reversal potential can be set to something that makes
+        // its synapse do the opposite of what it is for.
+        if self.e_inh > self.v_rest {
+            return Err(format!(
+                "the inhibitory reversal ({}) is above the resting potential ({}), which makes inhibition depolarising",
+                self.e_inh, self.v_rest
+            ));
+        }
+        // No check that the excitatory reversal sits above threshold. It
+        // usually should, but putting the threshold out of reach is how every
+        // membrane test here observes a trajectory instead of a sawtooth, and
+        // those drive through the injected-current port, which a reversal
+        // potential does not touch.
         if !(0.0..1.0).contains(&self.adapt_decay) {
             return Err(format!("adapt_decay must be in [0, 1), got {} - a current that never decays is not adaptation, it is a ramp to silence", self.adapt_decay));
         }
@@ -134,7 +165,7 @@ impl LifParams {
     /// approximation:
     ///
     /// ```text
-    /// v_k = v_inf + (v0 - v_inf)(1 - a)^k,   v_inf = v_rest + r*I
+    /// v_k = v_inf + (v0 - v_inf) exp(-a k),   v_inf = v_rest + r*I
     /// ```
     ///
     /// This is the runtime's correctness oracle. `gradcheck` cannot gate a
@@ -143,8 +174,12 @@ impl LifParams {
     /// dynamics -- and it exists only because the discretisation was chosen to
     /// have one.
     pub fn analytic_v(&self, v0: f32, current: f32, ticks: u32) -> f32 {
+        // The EXACT solution, matching the kernel's exponential step. With no
+        // synaptic conductance the membrane equation is linear with unit leak,
+        // so this is what the integrator computes rather than an approximation
+        // of it.
         let v_inf = self.v_rest + self.r * current;
-        v_inf + (v0 - v_inf) * (1.0 - self.dt_over_tau).powi(ticks as i32)
+        v_inf + (v0 - v_inf) * (-self.dt_over_tau * ticks as f32).exp()
     }
 }
 
@@ -499,14 +534,19 @@ impl SpikingNet {
     /// The LIF kernel's `Params` block: two counts then five f32 bit patterns,
     /// in declaration order. A mismatched param list here is silently wrong
     /// rather than a crash, which is why the order is written once.
-    fn lif_params(&self) -> [u32; 10] {
+    fn lif_params(&self) -> [u32; 12] {
         [
             self.n,
             self.params.refrac_ticks,
             self.params.dt_over_tau.to_bits(),
             self.params.v_rest.to_bits(),
             self.params.v_reset.to_bits(),
+            // Order matters and is checked nowhere else: a mismatched param
+            // list here is silently wrong rather than a crash, which is why
+            // this reads as one block against the WGSL struct beside it.
             self.params.v_th.to_bits(),
+            self.params.e_exc.to_bits(),
+            self.params.e_inh.to_bits(),
             self.params.v_min.to_bits(),
             self.params.r.to_bits(),
             self.params.adapt_decay.to_bits(),
@@ -638,7 +678,7 @@ impl DynamicalSystem for SpikingNet {
             &[
                 &self.v,
                 &self.refrac,
-                &self.isyn,
+                &self.syn,
                 &self.drive,
                 &self.spike,
                 &self.adapt,

@@ -67,6 +67,30 @@ struct Params {
     v_rest: f32,
     v_reset: f32,
     v_th: f32,
+    /// Excitatory and inhibitory REVERSAL potentials.
+    ///
+    /// A synapse is a conductance, not a current source. It opens a channel
+    /// whose ions have an equilibrium potential, and the current it passes is
+    /// `g * (E_rev - v)`: proportional to how far the membrane is from that
+    /// equilibrium, and zero when it arrives. Two consequences, and this model
+    /// had neither.
+    ///
+    /// Inhibition cannot hyperpolarise past its reversal potential. In a fly
+    /// GABA-A reverses at about the resting potential, so inhibition at rest
+    /// passes NO current at all and can only oppose depolarisation. With
+    /// current-based synapses it instead subtracts a fixed amount however
+    /// negative the cell already is, and in a balanced network the integrated
+    /// inhibition scales with in-degree: measured on this fly's cord, the leg
+    /// muscle with the most input sat 274 threshold-gaps below rest and could
+    /// never fire again.
+    ///
+    /// And inhibition becomes DIVISIVE rather than subtractive: raising `g_i`
+    /// raises the total conductance, which shrinks the cell's response to
+    /// everything else. That is the gain control a mushroom body uses to keep
+    /// its odour code sparse, and it is not expressible with current-based
+    /// synapses at all.
+    e_exc: f32,
+    e_inh: f32,
     /// Inhibitory reversal potential: the floor a membrane cannot be pushed
     /// below.
     ///
@@ -92,7 +116,11 @@ struct Params {
 @group(0) @binding(0) var<uniform> p: Params;
 @group(0) @binding(1) var<storage, read_write> v:      array<f32>;
 @group(0) @binding(2) var<storage, read_write> refrac: array<u32>;
-@group(0) @binding(3) var<storage, read>       isyn:   array<f32>;
+// Excitatory and inhibitory conductance, interleaved `(e, i)` per neuron, as
+// `syn_gather_csc` accumulates them. The inhibitory half arrives NEGATIVE
+// because the gather splits on the sign of the weight; a conductance is a
+// magnitude, so it is negated here.
+@group(0) @binding(3) var<storage, read>       syn:    array<f32>;
 @group(0) @binding(4) var<storage, read>       drive:  array<f32>;
 @group(0) @binding(5) var<storage, read_write> spike:  array<f32>;
 @group(0) @binding(6) var<storage, read_write> adapt:  array<f32>;
@@ -136,7 +164,24 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
 
     let a = p.a * tau_scale[i];
     let r = p.r * gain_scale[i];
-    let vi = max(v[i] + a * (p.v_rest - v[i] + r * (isyn[i] + drive[i] - w)), p.v_min);
+    let g_e = max(syn[2u * i], 0.0) * r;
+    let g_i = max(-syn[2u * i + 1u], 0.0) * r;
+
+    // Exponential Euler on the conductance-based membrane, which is the only
+    // integrator that stays stable here. Collecting
+    //
+    //   tau dv/dt = (v_rest - v) + g_e (e_exc - v) + g_i (e_inh - v) + I
+    //
+    // into `tau dv/dt = A - B v` gives a leak that GROWS with the total
+    // conductance, so a forward step of fixed size diverges exactly when the
+    // input is strongest. Solving the linear equation over the tick instead is
+    // unconditionally stable and is the exact answer for constant input, which
+    // is also what keeps `LifParams::analytic_v` an oracle rather than an
+    // approximation.
+    let bb = 1.0 + g_e + g_i;
+    let aa = p.v_rest + g_e * p.e_exc + g_i * p.e_inh + r * (drive[i] - w);
+    let v_inf = aa / bb;
+    let vi = max(v_inf + (v[i] - v_inf) * exp(-a * bb), p.v_min);
     if (vi >= p.v_th) {
         v[i] = p.v_reset;
         refrac[i] = p.refrac_ticks;

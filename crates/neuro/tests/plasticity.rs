@@ -265,7 +265,30 @@ fn only_the_sited_synapses_learn_and_every_other_weight_is_bit_identical() {
 /// same network, each driven by its own neuron, one of which is silent.
 #[test]
 fn a_compartment_is_modulated_by_its_own_neurons_and_not_by_anothers() {
-    let (csc, mut net, _drive) = active_net(192, 0x82);
+    // An ISOLATED neuron is the silent source. Picking an arbitrary one and
+    // leaving it undriven is not enough in a recurrent network: the previous
+    // version of this test assumed neuron 1 would stay quiet, which was true
+    // only while excitation was too weak to recruit it, and became false the
+    // moment synapses became conductances. A neuron with no inputs at all
+    // cannot fire, whatever the rest of the network does.
+    let n = 192u32;
+    let base = random_csc(n, 14, 0x82);
+    let mut edges: Vec<(u32, u32, f32)> = Vec::new();
+    for post in 0..n as usize {
+        for k in base.indptr[post]..base.indptr[post + 1] {
+            edges.push((base.pre[k as usize], post as u32, base.w[k as usize]));
+        }
+    }
+    // Neuron `n` is appended with no edges in either direction.
+    let csc = Csc::from_edges(n + 1, &edges).expect("well-formed");
+    let silent = n;
+    assert_eq!(
+        csc.indptr[silent as usize], csc.indptr[silent as usize + 1],
+        "the fixture's silent neuron has incoming edges"
+    );
+    assert!(!csc.pre.contains(&silent), "the fixture's silent neuron has outgoing edges");
+    let p = LifParams { dt_over_tau: 0.5, v_th: 0.3, refrac_ticks: 1, ..LifParams::default() };
+    let mut net = SpikingNet::new(gpu_core::testgpu::dev(&KERNELS), &csc, p).unwrap();
     let before = net.weights();
 
     // Two disjoint sets of synapses, each answering to one source neuron.
@@ -273,30 +296,106 @@ fn a_compartment_is_modulated_by_its_own_neurons_and_not_by_anothers() {
     let b: Vec<u32> = (csc.indptr[30]..csc.indptr[40]).collect();
     let mut sites = Sites::new(csc.nnz());
     let ca = sites.compartment(&[0], 1.0);
-    let cb = sites.compartment(&[1], 1.0);
+    let cb = sites.compartment(&[silent], 1.0);
     sites.assign(&a, ca).unwrap();
     sites.assign(&b, cb).unwrap();
 
     net.enable_plasticity_at(PlasticityParams { eta: 0.5, ..Default::default() }, sites).unwrap();
 
-    // Neuron 0 is driven hard and fires; neuron 1 is left alone and does not.
-    let mut drive = vec![0.4f32; csc.n as usize];
+    // ONLY neuron 0 is driven. A background current on every neuron - which is
+    // what this fixture used to have - reaches the isolated one too, and then
+    // its compartment is modulated because it genuinely fired.
+    let mut drive = vec![0.0f32; csc.n as usize];
     drive[0] = 40.0;
-    drive[1] = 0.0;
     net.drive(Port::Drive, &drive).unwrap();
     for _ in 0..30 {
         net.step();
     }
 
+    let mut spike = vec![0.0f32; csc.n as usize];
+    net.read(Port::Spike, &mut spike).unwrap();
     let m = net.modulator();
     assert_eq!(m.len(), 3, "an inert compartment plus the two configured");
     assert_eq!(m[0], 0.0, "compartment 0 is reserved and must never carry a modulator");
     assert!(m[ca as usize] > 0.0, "the driven neuron's compartment saw no dopamine ({})", m[ca as usize]);
-    assert_eq!(m[cb as usize], 0.0, "the silent neuron's compartment was modulated anyway");
+    assert_eq!(m[cb as usize], 0.0, "the isolated neuron's compartment was modulated anyway");
+    assert_eq!(spike[silent as usize], 0.0, "the isolated neuron fired, so the fixture is not what it claims");
 
     let after = net.weights();
     assert!(a.iter().any(|&k| after[k as usize] != before[k as usize]), "the modulated compartment did not learn");
     for &k in &b {
         assert_eq!(after[k as usize], before[k as usize], "edge {k} is in an unmodulated compartment and must not move");
+    }
+}
+
+/// The modulator path, on a fixture small enough to check by hand.
+#[test]
+fn a_compartments_modulator_comes_only_from_its_own_sources() {
+    // Four neurons and one irrelevant edge, so there is a weight array for the
+    // site map to have the same length as. Neuron 0 is driven over threshold;
+    // neuron 3 receives nothing and cannot fire.
+    let csc = Csc::from_edges(4, &[(1, 2, 0.1)]).expect("well-formed");
+    let p = LifParams { dt_over_tau: 0.9, v_th: 0.5, refrac_ticks: 0, ..LifParams::default() };
+    let mut net = SpikingNet::new(gpu_core::testgpu::dev(&KERNELS), &csc, p).unwrap();
+
+    let mut sites = Sites::new(csc.nnz());
+    let firing = sites.compartment(&[0], 1.0);
+    let quiet = sites.compartment(&[3], 1.0);
+    net.enable_plasticity_at(PlasticityParams::default(), sites).unwrap();
+    net.drive(Port::Drive, &[5.0, 0.0, 0.0, 0.0]).unwrap();
+
+    let mut spike = vec![0.0f32; 4];
+    for _ in 0..10 {
+        net.step();
+    }
+    net.read(Port::Spike, &mut spike).unwrap();
+    assert_eq!(spike[0], 1.0, "neuron 0 has to fire for this to measure anything");
+    assert_eq!(spike[3], 0.0, "neuron 3 has no input and must be silent");
+
+    let m = net.modulator();
+    assert!(m[firing as usize] > 0.0, "the firing compartment saw nothing: {m:?}");
+    assert_eq!(m[quiet as usize], 0.0, "a compartment whose only source never fired was modulated: {m:?}");
+    assert_eq!(m[0], 0.0, "compartment 0 is reserved");
+}
+
+/// A neuron with no inputs and no drive must never fire, at any population
+/// size.
+///
+/// Found by a compartment whose only source was an isolated neuron reporting
+/// dopamine. The isolated neuron was spiking. It has no edges and no injected
+/// current, so nothing in the model can raise its membrane - unless the buffers
+/// it lives in are not the size the kernels think they are. Sizes that are not
+/// a multiple of the device's alignment are where that shows up, which is why
+/// this sweeps awkward widths rather than testing one.
+#[test]
+fn an_isolated_neuron_never_fires_whatever_the_population_size() {
+    for n in [4u32, 63, 64, 65, 129, 192, 193, 194, 257] {
+        // Every neuron but the last is wired into a ring that fires hard; the
+        // last has no edge in either direction.
+        let mut edges: Vec<(u32, u32, f32)> = Vec::new();
+        for i in 0..n - 1 {
+            edges.push((i, (i + 1) % (n - 1), 2.0));
+        }
+        let csc = Csc::from_edges(n, &edges).expect("well-formed");
+        let p = LifParams { dt_over_tau: 0.5, v_th: 0.3, refrac_ticks: 1, ..LifParams::default() };
+        let mut net = SpikingNet::new(gpu_core::testgpu::dev(&KERNELS), &csc, p).unwrap();
+        let mut drive = vec![0.0f32; n as usize];
+        drive[0] = 40.0;
+        net.drive(Port::Drive, &drive).unwrap();
+
+        let isolated = (n - 1) as usize;
+        let mut spike = vec![0.0f32; n as usize];
+        let mut v = vec![0.0f32; n as usize];
+        for t in 0..30 {
+            net.step();
+            net.read(Port::Spike, &mut spike).unwrap();
+            net.read(Port::Membrane, &mut v).unwrap();
+            assert_eq!(
+                spike[isolated], 0.0,
+                "n={n}, tick {t}: the isolated neuron fired, membrane {}",
+                v[isolated]
+            );
+            assert_eq!(v[isolated], 0.0, "n={n}, tick {t}: the isolated neuron's membrane moved to {}", v[isolated]);
+        }
     }
 }
