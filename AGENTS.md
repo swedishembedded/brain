@@ -771,6 +771,41 @@ fast and scalable kernel - not a naive one.
     (`diamond` is the one served world-model architecture today; SDL window
     via `crates/wm-display`).
 
+### A digital animal (not a checkpoint port)
+
+19. **The fruit fly** (`crates/fly` over `crates/connectome`, `crates/neuro`,
+    `crates/flybody`, `crates/mujoco`) - the one entry here that is NOT a
+    trained checkpoint reproduced forward. A connectome is a wiring diagram,
+    and the parameters that make it FUNCTION exist in no file, so what is gated
+    at the end is a BEHAVIOUR rather than a tensor.
+
+    **Two connectomes joined into one nervous system.** BANC's brain (188,313
+    neurons, Harvard Dataverse, CC BY 4.0, no account) merged with MANC's
+    ventral nerve cord at the 3,530 cells BANC's own `manc_match` column says
+    are the same cell in both - `connectome::bridge` IDENTIFIES the two
+    reconstructed halves rather than wiring one to the other, and drops BANC's
+    own cord so nothing is counted twice. Joined: **178,860 neurons,
+    15,902,235 synapses**, 78% of the cord's motor neurons reachable from the
+    optic lobe. MANC alone is `Cns::Cord` and is what the leg work sits on;
+    BANC's cord is four to five times more sparsely reconstructed.
+
+    **Runs as a spiking network** (`crates/neuro`: CSC connectome, leaky
+    integrate-and-fire with per-polarity synaptic time constants and a
+    spike-frequency adaptation current, three-factor plasticity) driving
+    flybody in MuJoCo through the motor neurons the connectome itself names,
+    and reading the body back through its proprioceptors, its 3,007 olfactory
+    receptor neurons and its antennal mechanosensors.
+
+    **gradcheck does not apply** - the learning rule is local, not
+    differentiated - so the substitute is an independently derived closed form
+    for the membrane, plus cross-backend agreement and bit-for-bit snapshot
+    replay. Behaviour is gated by objectives with their controls built in
+    (`fly::learn::Objective::{Walk,Fly,Seek}`): a corpse, a degree-matched
+    shuffle of the wiring, and a no-stimulus row. `fly::search::Es` finds the
+    parameters, `fly::Tuning` carries them out, `examples/replay` re-measures
+    them cold. See `.agents/roadmap/fly.md` for what each verb currently
+    stands at, and `samples/fly/interactive` for the window.
+
 > `crates/timeseries` is a **placeholder** - declared in the workspace,
 > implemented in a later phase.
 
