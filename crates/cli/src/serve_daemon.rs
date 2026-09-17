@@ -176,6 +176,105 @@ pub fn stop(path: &Path, timeout: Duration) -> io::Result<Option<i32>> {
     Ok(Some(pid))
 }
 
+
+/// Handle `brain serve`'s lifecycle flags **before anything probes a device**,
+/// returning the argv the rest of `main` should use.
+///
+/// Placement is the whole point. `main` resolves `--device`/`--backend` by
+/// enumerating adapters, and that enumeration builds a Vulkan instance cached
+/// in a process-wide `OnceLock`. Vulkan is explicitly not fork-safe: the cached
+/// registry is plain memory and survives a fork intact, but the instance behind
+/// it does not. Detaching after that point produced a daemon that still
+/// believed it had two Tesla P40s, failed the next enumeration with "wgpu
+/// enumerated 0 adapters", and silently fell back to a software rasteriser --
+/// a server that ran every model on the CPU while reporting success.
+///
+/// So the fork happens first, before any of it. `--status` and `--stop` are
+/// handled here too: neither forks, but neither has any reason to pay for an
+/// adapter probe.
+///
+/// A detached run always gets a `--ready-file`, appended here when the caller
+/// did not name one, because that file is what the parent waits on.
+pub fn lifecycle(mut argv: Vec<String>) -> Vec<String> {
+    if argv.get(1).map(String::as_str) != Some("serve") {
+        return argv;
+    }
+    let has = |flag: &str| argv.iter().any(|a| a == flag);
+    let (detach, reload, stop_flag, status) =
+        (has("-d") || has("--detach"), has("--reload"), has("--stop"), has("--status"));
+    if !(detach || reload || stop_flag || status) {
+        return argv;
+    }
+
+    let pid_file = pid_path();
+    if status {
+        match running(&pid_file) {
+            Some(pid) => println!("brain serve: running, pid {pid} (log {})", log_path().display()),
+            None => println!("brain serve: not running"),
+        }
+        std::process::exit(0);
+    }
+    if stop_flag {
+        match stop(&pid_file, STOP_TIMEOUT) {
+            Ok(Some(pid)) => println!("brain serve: stopped pid {pid}"),
+            Ok(None) => println!("brain serve: not running"),
+            Err(e) => {
+                eprintln!("brain serve: --stop: {e}");
+                std::process::exit(1);
+            }
+        }
+        std::process::exit(0);
+    }
+    if reload {
+        match stop(&pid_file, STOP_TIMEOUT) {
+            Ok(Some(pid)) => eprintln!("brain serve: --reload: replaced pid {pid}"),
+            Ok(None) => {}
+            Err(e) => {
+                eprintln!("brain serve: --reload: {e}");
+                std::process::exit(1);
+            }
+        }
+    } else if let Some(pid) = running(&pid_file) {
+        // Advisory only; the authoritative claim is the lock taken below. It
+        // turns the common case into one clear sentence rather than a server
+        // that starts and then loses the race for the bus name.
+        eprintln!("brain serve: already running (pid {pid}); use --reload to replace it, or --stop");
+        std::process::exit(1);
+    }
+
+    if detach {
+        let ready = match argv.iter().position(|a| a == "--ready-file") {
+            Some(i) => argv.get(i + 1).map(PathBuf::from).unwrap_or_else(default_ready_path),
+            None => {
+                let p = default_ready_path();
+                argv.push("--ready-file".to_string());
+                argv.push(p.to_string_lossy().into_owned());
+                p
+            }
+        };
+        let log = log_path();
+        if let Err(e) = detach_process(&ready, &pid_file, &log, READY_TIMEOUT) {
+            eprintln!("brain serve: -d: {e}");
+            std::process::exit(1);
+        }
+        // Only the daemon reaches here.
+    }
+
+    // Taken by whichever process actually serves, and held for its whole life.
+    match claim(&pid_file) {
+        Ok(Claim::Ours(guard)) => guard.hold_forever(),
+        Ok(Claim::HeldBy(pid)) => {
+            eprintln!("brain serve: another server holds {} (pid {pid:?})", pid_file.display());
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("brain serve: {}: {e}", pid_file.display());
+            std::process::exit(1);
+        }
+    }
+    argv
+}
+
 /// Detach into the background, returning **only in the daemon**.
 ///
 /// The caller continues exactly as it would have in the foreground; the
@@ -184,7 +283,7 @@ pub fn stop(path: &Path, timeout: Duration) -> io::Result<Option<i32>> {
 ///
 /// `ready` must be the same path handed to `--ready-file`, since that is the
 /// signal being waited on.
-pub fn detach(ready: &Path, pid_file: &Path, log: &Path, timeout: Duration) -> io::Result<()> {
+pub fn detach_process(ready: &Path, pid_file: &Path, log: &Path, timeout: Duration) -> io::Result<()> {
     if let Some(parent) = log.parent() {
         std::fs::create_dir_all(parent)?;
     }

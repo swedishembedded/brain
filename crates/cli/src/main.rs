@@ -1270,6 +1270,11 @@ fn main() {
         return;
     }
 
+    // Before `select_backend` and every other probe: detaching after a Vulkan
+    // instance exists produces a daemon that inherits the cached device
+    // registry but not the instance behind it, and silently runs every model
+    // on a software rasteriser. See `serve_daemon::lifecycle`.
+    let argv = serve_daemon::lifecycle(argv);
     let argv = select_backend(argv);
     // After `--device` is resolved (so the candidate set is exactly what the
     // user made schedulable) and before any model is built. This is what

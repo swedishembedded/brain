@@ -446,70 +446,12 @@ pub fn run_serve(args: &[String]) {
         }
         i += 1;
     }
-    // ── Lifecycle: --status / --stop / --reload / -d ─────────────────────────
-    let pid_path = crate::serve_daemon::pid_path();
-    if do_status {
-        match crate::serve_daemon::running(&pid_path) {
-            Some(pid) => println!("brain serve: running, pid {pid} (log {})", crate::serve_daemon::log_path().display()),
-            None => println!("brain serve: not running"),
-        }
-        return;
-    }
-    if do_stop {
-        match crate::serve_daemon::stop(&pid_path, crate::serve_daemon::STOP_TIMEOUT) {
-            Ok(Some(pid)) => println!("brain serve: stopped pid {pid}"),
-            Ok(None) => println!("brain serve: not running"),
-            Err(e) => {
-                eprintln!("brain serve: --stop: {e}");
-                std::process::exit(1);
-            }
-        }
-        return;
-    }
-    if reload {
-        match crate::serve_daemon::stop(&pid_path, crate::serve_daemon::STOP_TIMEOUT) {
-            Ok(Some(pid)) => eprintln!("brain serve: --reload: replaced pid {pid}"),
-            Ok(None) => {}
-            Err(e) => {
-                eprintln!("brain serve: --reload: {e}");
-                std::process::exit(1);
-            }
-        }
-    } else if let Some(pid) = crate::serve_daemon::running(&pid_path) {
-        // Advisory: the authoritative claim is the flock the server itself
-        // takes below. Checking here turns the common case into one clear
-        // message instead of a server that starts and immediately loses the
-        // race for the bus name.
-        eprintln!("brain serve: already running (pid {pid}); use --reload to replace it, or --stop");
-        std::process::exit(1);
-    }
-    if detach {
-        // `-d` has to wait on something, and `--ready-file` is already exactly
-        // that signal, so a detached run always has one even when the caller
-        // did not ask for it.
-        let ready_path = ready_file.clone().map(std::path::PathBuf::from).unwrap_or_else(crate::serve_daemon::default_ready_path);
-        ready_file = Some(ready_path.to_string_lossy().into_owned());
-        let log = crate::serve_daemon::log_path();
-        if let Err(e) = crate::serve_daemon::detach(&ready_path, &pid_path, &log, crate::serve_daemon::READY_TIMEOUT) {
-            eprintln!("brain serve: -d: {e}");
-            std::process::exit(1);
-        }
-        // Only the daemon reaches here.
-    }
-    // The single-instance claim, taken by whichever process actually serves.
-    // Held for the rest of this process's life; the kernel releases it when
-    // the process dies, however abruptly.
-    match crate::serve_daemon::claim(&pid_path) {
-        Ok(crate::serve_daemon::Claim::Ours(guard)) => guard.hold_forever(),
-        Ok(crate::serve_daemon::Claim::HeldBy(pid)) => {
-            eprintln!("brain serve: another server holds {} (pid {:?})", pid_path.display(), pid);
-            std::process::exit(1);
-        }
-        Err(e) => {
-            eprintln!("brain serve: {}: {e}", pid_path.display());
-            std::process::exit(1);
-        }
-    }
+    // Lifecycle flags (-d / --reload / --stop / --status) are handled in
+    // `main`, before anything probes a device -- see `serve_daemon::lifecycle`
+    // for why that ordering is load-bearing. They are still accepted by the
+    // parser above so an unknown-flag error is never raised for them; by the
+    // time this runs, their work is done.
+    let _ = (detach, reload, do_stop, do_status);
 
     if !args.iter().any(|a| a == "--seed") {
         cfg.seed = data::rng::random_seed();
