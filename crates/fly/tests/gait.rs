@@ -102,3 +102,77 @@ fn the_frequency_band_is_a_slope_and_not_a_cliff() {
     assert!(far < near, "2 Hz scored {far}, 3.5 Hz scored {near}; the approach is not monotone");
     assert!(near < inside, "3.5 Hz scored {near}, 8 Hz scored {inside}");
 }
+
+/// The analyser has to recognise a real fly walking.
+///
+/// Every gait number in this crate comes from `gait::analyse`, and until this
+/// existed nothing had checked that it scores an actual walk highly. That is
+/// the wrong way round, and it left two things unknown that this settles.
+///
+/// The CEILING. A real fly scores about 0.46, not 1.0, because the score is a
+/// product of three terms none of which is ever perfect on a real animal. Every
+/// simulated score in this repository should be read against 0.46 - which
+/// makes an earlier result of 0.229 half of a real walk rather than a fifth of
+/// one, and the current 0.017 about four percent.
+///
+/// And the SIGN. `tripod` comes out +0.65 on real walking, so the analyser's
+/// two leg triangles are the right way round. Had it been negative, every gait
+/// score ever reported here would have been upside down and the searches would
+/// have been optimising for all six legs moving together.
+///
+/// Skips when the reference is not on the machine.
+#[test]
+fn the_analyser_recognises_a_real_fly_walking() {
+    let (Ok(path), Ok(body)) = (std::env::var("BRAIN_FLY_REFERENCE"), std::env::var("BRAIN_FLYBODY_XML")) else {
+        eprintln!("skipping: set BRAIN_FLY_REFERENCE and BRAIN_FLYBODY_XML");
+        return;
+    };
+    let Ok(reference) = fly::reference::Reference::load(&path) else {
+        eprintln!("skipping: {path} did not load");
+        return;
+    };
+    let Ok(mj) = mujoco::MuJoCo::load() else {
+        eprintln!("skipping: no MuJoCo");
+        return;
+    };
+    let model = mujoco::Model::from_xml(&mj, std::path::Path::new(&body)).expect("the body loads");
+
+    // The same six coordinates the simulated fly's gait is read from.
+    let mut coxa = [usize::MAX; 6];
+    for (i, (seg, side, _)) in flybody::LEGS.iter().enumerate() {
+        coxa[i] = model
+            .joint_qpos(&flybody::LegDof::Coxa.actuator(*seg, *side))
+            .unwrap_or_else(|| panic!("the body has no coxa joint for leg {i}"));
+    }
+
+    let mut scored: Vec<fly::Gait> = Vec::new();
+    for s in 0..reference.snippets() {
+        let n = reference.len(s);
+        if n < 700 {
+            continue;
+        }
+        let mut trace = fly::Trace::new(reference.timestep());
+        for i in 0..n {
+            let Some((qpos, _)) = reference.frame(s, i) else { continue };
+            let mut per_leg = [0.0f32; 6];
+            for (slot, &q) in per_leg.iter_mut().zip(&coxa) {
+                *slot = qpos.get(q).copied().unwrap_or(0.0);
+            }
+            trace.push(per_leg);
+        }
+        if let Some(g) = fly::analyse_gait(&trace) {
+            scored.push(g);
+        }
+    }
+    assert!(!scored.is_empty(), "no reference snippet was long enough to analyse");
+
+    let n = scored.len() as f64;
+    let mean = |f: fn(&fly::Gait) -> f64| scored.iter().map(f).sum::<f64>() / n;
+    let (hz, tripod, score) = (mean(|g| g.step_hz), mean(|g| g.tripod), mean(|g| g.score()));
+    eprintln!("real fly walking: {hz:.2} Hz, tripod {tripod:.3}, score {score:.3} over {n} snippets");
+
+    assert!(tripod > 0.3, "a real tripod gait must score POSITIVE tripod, got {tripod:.3} - the triangles are swapped");
+    assert!((4.0..=25.0).contains(&hz), "a real fly steps at about 7 Hz, and the analyser read {hz:.2}");
+    assert!(score > 0.3, "the analyser scored a real walk at {score:.3}, so it does not recognise walking");
+    assert!(score < 0.95, "a real walk scoring {score:.3} would mean the score has no headroom left to be wrong in");
+}

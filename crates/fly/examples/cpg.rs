@@ -89,7 +89,12 @@ fn main() {
     // Spike-frequency adaptation: a slow current that builds while a cell
     // fires and decays when it stops. It is the classic burst terminator, and
     // a population that cannot stop firing cannot alternate with another.
+    // `TAU_M` is the membrane time constant in milliseconds. It sets how fast
+    // a recurrent loop can go round, so it sets the rhythm's frequency: a real
+    // fly steps at about 7 Hz (measured on flybody's own walking reference by
+    // `reference_gait`), and this cord runs at 18 to 20.
     let lif = || fly::LifParams {
+        dt_over_tau: 2.0 / num("TAU_M", 10.0f32),
         v_min: num("V_MIN", -3.0f32),
         adapt_increment: num("ADAPT", 0.0f32),
         adapt_decay: num("ADAPT_DECAY", 0.98f32),
