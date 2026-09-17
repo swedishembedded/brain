@@ -12,6 +12,8 @@
 //! Everything here is device-free, so the layout can be verified — and weights
 //! initialised — with no GPU.
 
+use std::collections::HashMap;
+
 /// Which extra global-context modules the encoder gets.
 ///
 /// Verified against the reference: `EfficientGlobalAttention` is gated on
@@ -278,6 +280,74 @@ impl ZipConfig {
     pub fn numel(&self) -> usize {
         self.param_list().iter().map(|(_, s)| s.iter().product::<usize>()).sum()
     }
+
+    /// Derive from `name -> shape`, the same "read it back from real tensors"
+    /// discipline `rrdbnet::config::RrdbConfig::from_tensors` established:
+    /// every field here is recoverable from a handful of tensor shapes plus
+    /// counting how many per-stage blocks a checkpoint actually carries, so
+    /// there is no reason to guess a fixed preset (`base`/`small`/`large`/
+    /// `giant`) and hope it matches - [`crate::import::cfg_for_checkpoint`]
+    /// used to do exactly that (always `ZipConfig::base()`, only toggling
+    /// [`ZipConfig::upsample_unfold`]), which silently mis-derived any
+    /// checkpoint whose encoder width did not happen to be the `base` preset.
+    ///
+    /// `heads`/`input` are not shape-derived: `heads` only matters for
+    /// `GlobalMode::Full`, which no released checkpoint uses and this crate
+    /// does not implement, and `input` is an inference-time knob, not a
+    /// stored weight. Both default to `base`'s values.
+    pub fn from_tensors(shapes: &HashMap<String, Vec<usize>>) -> Result<ZipConfig, String> {
+        let dim = |name: &str| -> Result<u32, String> {
+            shapes.get(name).map(|s| s[0] as u32).ok_or_else(|| format!("zipdepth: no `{name}` in checkpoint"))
+        };
+        let dims = [
+            dim("encoder.stem_quarter.conv.weight")?,
+            dim("encoder.down2.branch_3x3.0.weight")?,
+            dim("encoder.down3.branch_3x3.0.weight")?,
+            dim("encoder.down4.branch_3x3.0.weight")?,
+        ];
+
+        // Count qarep blocks per stage: `encoder.stage<N>.<i>.branch_3x3.0.weight`
+        // for increasing `i`. This naturally stops at the first non-qarep
+        // module a stage appends (MinimalMultiScale's `.branch1`/`.branch2`,
+        // StripPoolingAttention's `.gate_conv`), since those use different key
+        // substrings and never match `branch_3x3`.
+        let count_blocks = |stage: u32| -> u32 {
+            let mut n = 0u32;
+            while shapes.contains_key(&format!("encoder.stage{stage}.{n}.branch_3x3.0.weight")) {
+                n += 1;
+            }
+            n
+        };
+        let depths = [count_blocks(1), count_blocks(2), count_blocks(3), count_blocks(4)];
+        if depths.iter().any(|&d| d == 0) {
+            return Err("zipdepth: no `encoder.stage<N>.0.branch_3x3.0.weight` for some stage - not a ZipDepth checkpoint".to_string());
+        }
+
+        // GlobalMode::Full (EfficientGlobalAttention) is not implemented and no
+        // released checkpoint uses it, so the only two possibilities a real
+        // file can carry are None and Balanced (StripPoolingAttention's
+        // `gate_conv` / GlobalContextBlock's `context_weight`).
+        let global_mode =
+            if shapes.keys().any(|k| k.contains("gate_conv") || k.contains("context_weight")) { GlobalMode::Balanced } else { GlobalMode::None };
+
+        let ch4 = dim("decoder.proj4.conv.weight")?;
+        if !ch4.is_multiple_of(3) {
+            return Err(format!("zipdepth: decoder.proj4 has {ch4} output channels, not a multiple of 3 (dec_ch*3)"));
+        }
+        let dec_ch = ch4 / 3;
+
+        let half_dec_ch = shapes
+            .get("decoder.head_half.weight")
+            .map(|s| s[1] as u32)
+            .ok_or("zipdepth: no `decoder.head_half.weight` in checkpoint")?;
+
+        let upsample_unfold = shapes.keys().any(|k| k.starts_with("decoder.convex_up.mask_pred"));
+        if !upsample_unfold && !shapes.keys().any(|k| k.starts_with("decoder.convex_up.where_conv")) {
+            return Err("zipdepth: neither `decoder.convex_up.mask_pred.*` nor `decoder.convex_up.where_conv.*` present".to_string());
+        }
+
+        Ok(ZipConfig { dims, depths, heads: ZipConfig::base().heads, dec_ch, half_dec_ch, global_mode, upsample_unfold, input: ZipConfig::base().input })
+    }
 }
 
 #[cfg(test)]
@@ -327,5 +397,65 @@ mod tests {
         // 278 vs 283 keys; minus their 43/44 counters -> 235 vs 239 floats.
         assert_eq!(b.len(), 283 - 44, "npu param count != the checkpoint's float tensors");
         assert_eq!(npu.numel(), 6_801_324 - 44, "npu element count != the checkpoint's");
+    }
+
+    fn shapes_of(cfg: &ZipConfig) -> HashMap<String, Vec<usize>> {
+        cfg.param_list().into_iter().collect()
+    }
+
+    /// `param_list` and `from_tensors` are inverses for the released `base`
+    /// shape, the same round-trip pin `rrdbnet::config::RrdbConfig` has.
+    #[test]
+    fn derive_round_trips_the_base_layout() {
+        let want = ZipConfig::base();
+        let got = ZipConfig::from_tensors(&shapes_of(&want)).unwrap();
+        assert_eq!(got.dims, want.dims);
+        assert_eq!(got.depths, want.depths);
+        assert_eq!(got.dec_ch, want.dec_ch);
+        assert_eq!(got.half_dec_ch, want.half_dec_ch);
+        assert_eq!(got.global_mode, want.global_mode);
+        assert_eq!(got.upsample_unfold, want.upsample_unfold);
+    }
+
+    /// The NPU (blend upsampler) variant must derive too, distinguished only
+    /// by `where_conv` vs `mask_pred` - [`crate::import::cfg_for_checkpoint`]
+    /// already relied on exactly this key, `from_tensors` must too.
+    #[test]
+    fn derive_recognizes_the_npu_upsampler_variant() {
+        let npu = ZipConfig { upsample_unfold: false, ..ZipConfig::base() };
+        let got = ZipConfig::from_tensors(&shapes_of(&npu)).unwrap();
+        assert!(!got.upsample_unfold);
+    }
+
+    /// A non-`base` size (here `small`) must derive its OWN dims/depths/dec_ch,
+    /// not silently fall back to `base` - the exact bug `cfg_for_checkpoint`
+    /// had before it was rewritten to call `from_tensors`.
+    #[test]
+    fn derive_recognizes_a_non_base_preset() {
+        let small = ZipConfig::small();
+        let got = ZipConfig::from_tensors(&shapes_of(&small)).unwrap();
+        assert_eq!(got.dims, small.dims);
+        assert_eq!(got.depths, small.depths);
+        assert_eq!(got.dec_ch, small.dec_ch);
+        assert_eq!(got.half_dec_ch, small.half_dec_ch);
+    }
+
+    /// A checkpoint missing a stage entirely (here stage3) is rejected by
+    /// name, not derived as a plausible-looking but wrong config.
+    #[test]
+    fn derive_rejects_a_checkpoint_missing_a_stage() {
+        let mut s = shapes_of(&ZipConfig::base());
+        s.retain(|k, _| !k.starts_with("encoder.stage3."));
+        let err = ZipConfig::from_tensors(&s).unwrap_err();
+        assert!(err.contains("stage"), "{err}");
+    }
+
+    /// An empty or foreign checkpoint is rejected by name at the first
+    /// missing tensor, not a panic or a garbage config.
+    #[test]
+    fn derive_rejects_an_empty_checkpoint() {
+        let empty: HashMap<String, Vec<usize>> = HashMap::new();
+        let err = ZipConfig::from_tensors(&empty).unwrap_err();
+        assert!(err.contains("stem_quarter"), "{err}");
     }
 }

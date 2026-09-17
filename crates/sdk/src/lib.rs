@@ -36,7 +36,7 @@
 //! | `creature` | [`Creature`], [`View`] -- a connectome running a body, and a window onto it |
 //! | `forecast` | [`ForecastPipeline`] -- time-series forecasting (kronos, timesfm3) |
 //! | `text` | [`TextGenerationPipeline`] -- text generation (qwen3, from a local checkpoint path) |
-//! | `vision` | [`EmbeddingPipeline`] -- text embedding (CLIP); [`DetectionPipeline`] -- object detection (YOLOv8); [`SegmentPipeline`] -- promptable segmentation (SAM 2.1); named for the `brain_arch::Domain` they resolve under, not the capability, since there is no `Embedding`/`Detection`/`Segmentation` domain |
+//! | `vision` | [`EmbeddingPipeline`] -- text embedding (CLIP); [`DetectionPipeline`] -- object detection (YOLOv8); [`SegmentPipeline`] -- promptable segmentation (SAM 2.1); [`DepthPipeline`] -- monocular depth (ZipDepth); named for the `brain_arch::Domain` they resolve under, not the capability, since there is no `Embedding`/`Detection`/`Segmentation`/`Depth` domain |
 //! | `audio` | [`TranscribePipeline`] -- speech-to-text (qwen3-asr, offline) |
 //! | `full` | every surface; this is `default` |
 //!
@@ -75,6 +75,8 @@ mod asr;
 #[cfg(feature = "creature")]
 mod creature;
 #[cfg(feature = "vision")]
+mod depth;
+#[cfg(feature = "vision")]
 mod detect;
 #[cfg(feature = "device")]
 mod device;
@@ -83,7 +85,7 @@ mod error;
 mod embedding;
 #[cfg(feature = "forecast")]
 mod forecast;
-#[cfg(feature = "image")]
+#[cfg(feature = "imagetype")]
 mod image;
 #[cfg(feature = "image")]
 mod pipeline;
@@ -137,6 +139,8 @@ pub use asr::{Transcript, TranscribePipeline, TranscribePipelineBuilder};
 #[cfg(feature = "creature")]
 pub use creature::{Arena, Beat, Creature, CreatureBuilder};
 #[cfg(feature = "vision")]
+pub use depth::{DepthMap, DepthOptions, DepthPipeline, DepthPipelineBuilder};
+#[cfg(feature = "vision")]
 pub use detect::{DetectOptions, Detection, DetectionPipeline, DetectionPipelineBuilder};
 #[cfg(feature = "vision")]
 pub use embedding::{Embedding, EmbeddingPipeline, EmbeddingPipelineBuilder};
@@ -149,7 +153,7 @@ pub use forecast::{ForecastPipeline, ForecastPipelineBuilder};
 /// competing representation of the same domain).
 #[cfg(feature = "forecast")]
 pub use ::forecast::{Block, Capabilities, Forecast, ForecastSpec, Item, Panel, Representation, TargetForecast, Variate};
-#[cfg(feature = "image")]
+#[cfg(feature = "imagetype")]
 pub use image::Image;
 #[cfg(feature = "image")]
 pub use pipeline::{ImageGenerationOptions, ImagePipeline, ImagePipelineBuilder};

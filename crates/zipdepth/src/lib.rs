@@ -19,6 +19,7 @@ pub mod import;
 pub mod predict;
 pub mod quant;
 pub mod effects;
+pub mod spec;
 pub mod stereo;
 pub mod train;
 pub mod viz;

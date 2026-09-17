@@ -30,6 +30,88 @@ use crate::{Predictor, ZipConfig};
 /// The model id used on the CLI (`brain do depth …`) and the event API.
 pub const MODEL: &str = "brain/zipdepth";
 
+/// One `infer` call's result: the min-max-normalized `[0,1]` inverse-depth
+/// map on the frame's own grid, plus the raw bounds it was normalized from
+/// (so the relative map stays recoverable) - [`Session::predict`]'s and
+/// [`InferAction::run`]'s shared typed output, the same "CLI/D-Bus and SDK
+/// call the same code" split `codeformer::caps::RestoreOutput`/`sam2::caps::
+/// SegmentOutput` already established.
+pub struct DepthOutput {
+    pub values: Vec<f32>,
+    pub width: u32,
+    pub height: u32,
+    pub min: f32,
+    pub max: f32,
+}
+
+/// The shared core: build a transient `ParamStore`/[`Predictor`] from
+/// `gpu`+`cfg`+`init`, run one forward pass, then min-max normalize - exactly
+/// what [`InferAction::run`] did inline before this was factored out, called
+/// from there (via `Hot`'s residency) and from [`Session::predict`] (via its
+/// own owned state) alike.
+fn predict_normalized(gpu: &Gpu, cfg: &ZipConfig, init: &HashMap<String, Vec<f32>>, hwc: &[f32], w: u32, h: u32) -> DepthOutput {
+    let params: Vec<(String, usize)> = cfg.param_list().into_iter().map(|(name, s)| (name, s.iter().product())).collect();
+    let ps = paramstore::ParamStore::new(gpu, params, init);
+    let predictor = Predictor::new(gpu, cfg.clone(), ps);
+    let depth = predictor.predict(hwc, w, h);
+
+    let (mut mn, mut mx) = (f32::INFINITY, f32::NEG_INFINITY);
+    for &v in &depth {
+        mn = mn.min(v);
+        mx = mx.max(v);
+    }
+    let range = (mx - mn).max(1e-6);
+    let values: Vec<f32> = depth.iter().map(|&v| ((v - mn) / range).clamp(0.0, 1.0)).collect();
+    DepthOutput { values, width: w, height: h, min: mn, max: mx }
+}
+
+/// A bound ZipDepth session: one resolved checkpoint, imported once, ready to
+/// [`Session::predict`] on any number of frames - the shape `crates/sdk`'s
+/// `DepthPipeline` needs (a builder resolves the checkpoint once via
+/// `zipdepth::spec::ZipdepthSpec`, `load()` imports it, then every call is
+/// just a forward pass), distinct from [`DepthProvider`]'s own `Hot`
+/// residency (keyed by weights path, shared across many different
+/// checkpoints over one long-lived D-Bus/CLI process).
+pub struct Session {
+    gpu: Gpu,
+    init: HashMap<String, Vec<f32>>,
+    cfg: ZipConfig,
+}
+
+impl Session {
+    /// The checkpoint's own native model input (shorter side, already a
+    /// multiple of 32) - the same value `input: 0` on the `infer` action
+    /// resolves to.
+    pub fn native_input(&self) -> u32 {
+        self.cfg.input
+    }
+
+    /// Predict depth for an interleaved-RGB HWC frame in `[0,1]`, returning a
+    /// `[h*w]` min-max-normalized inverse-depth map on the frame's own grid.
+    /// `input`, when `Some` and non-zero, overrides the checkpoint's native
+    /// model input side - the same knob the `infer` action's `input` param
+    /// exposes (fully convolutional: any multiple-of-32 side is valid).
+    pub fn predict(&self, hwc: &[f32], w: u32, h: u32, input: Option<u32>) -> DepthOutput {
+        let mut cfg = self.cfg.clone();
+        if let Some(n) = input {
+            if n > 0 {
+                cfg.input = n;
+            }
+        }
+        predict_normalized(&self.gpu, &cfg, &self.init, hwc, w, h)
+    }
+}
+
+/// Resolve `weights`' variant and import it into a fresh [`Session`] - the
+/// same [`crate::import::cfg_for_checkpoint`] + [`crate::import::load`] pair
+/// [`InferAction::run`]'s own `Hot` construction runs, on its own [`Gpu`].
+pub fn load(weights: &str) -> Result<Session, String> {
+    let cfg = crate::import::cfg_for_checkpoint(weights)?;
+    let gpu = Gpu::new(crate::net::PIPELINES);
+    let init = crate::import::load(weights, &cfg)?;
+    Ok(Session { gpu, init, cfg })
+}
+
 /// The full, static capability manifest — safe to build with no weights loaded.
 pub fn manifest() -> Manifest {
     let infer = ActionSpec::new("infer", "dense relative inverse depth from a single image (ZipDepth)")
@@ -106,26 +188,15 @@ impl Action for InferAction {
 
         // Transient device state from the resident host weights, then the same
         // reference pipeline `brain depth --image` runs.
-        let params: Vec<(String, usize)> = cfg.param_list().into_iter().map(|(name, s)| (name, s.iter().product())).collect();
-        let ps = paramstore::ParamStore::new(&hot.gpu, params, &hot.init);
-        let predictor = Predictor::new(&hot.gpu, cfg, ps);
-        let depth = predictor.predict(&hwc, w, h);
+        let out = predict_normalized(&hot.gpu, &cfg, &hot.init, &hwc, w, h);
 
-        // Min-max normalize to [0,1] for the blob; report the raw bounds so the
-        // relative map stays recoverable.
-        let (mut mn, mut mx) = (f32::INFINITY, f32::NEG_INFINITY);
-        for &v in &depth {
-            mn = mn.min(v);
-            mx = mx.max(v);
-        }
-        let range = (mx - mn).max(1e-6);
-        let bytes: Vec<u8> = depth.iter().flat_map(|&v| ((v - mn) / range).clamp(0.0, 1.0).to_le_bytes()).collect();
+        let bytes: Vec<u8> = out.values.iter().flat_map(|v| v.to_le_bytes()).collect();
         Ok(Outcome::new()
-            .set("width", json!(w))
-            .set("height", json!(h))
-            .set("min", json!(mn))
-            .set("max", json!(mx))
-            .blob("depth", Blob::new(Media::Image, bytes).with_meta(json!({"w": w, "h": h, "c": 1, "min": mn, "max": mx}))))
+            .set("width", json!(out.width))
+            .set("height", json!(out.height))
+            .set("min", json!(out.min))
+            .set("max", json!(out.max))
+            .blob("depth", Blob::new(Media::Image, bytes).with_meta(json!({"w": out.width, "h": out.height, "c": 1, "min": out.min, "max": out.max}))))
     }
 }
 

@@ -30,7 +30,7 @@ all - the fly/flybody/connectome stack is unregistered).
 | Video generation | 2 | 2 | none | `wan_cli.rs`, `ltxv_cli.rs` | yes (wan) |
 | ASR | 2 | 2 | none | **no CLI at all** - `resident_asr.rs` only | no |
 | TTS/music/speech codec | 7 | 3 | none | `tts_cli.rs` + `tts_serve.rs` | no |
-| Vision/detection/segmentation | 4 | 4 | **PARTIAL - `DetectionPipeline`** (YOLOv8) + **`SegmentPipeline`** (SAM2; depth/label deferred, see Phase 3.1/3.2) | `yolo_cli.rs`, `sam2_cli.rs`, `depth_cli.rs`, `label_cli.rs` | no |
+| Vision/detection/segmentation | 4 | 4 | **PARTIAL - `DetectionPipeline`** (YOLOv8) + **`SegmentPipeline`** (SAM2) + **`DepthPipeline`** (ZipDepth; label is a VLM captioning workflow, not a single-arch capability, out of scope here - see Phase 3.1/3.2/3.3) | `yolo_cli.rs`, `sam2_cli.rs`, `depth_cli.rs`, `label_cli.rs` | no |
 | Embedding towers | 3 | 3 | none | **no CLI at all** - `resident_clip/arcface/t5encoder.rs` | no |
 | Forecasting | 4 | 0 (CLI-local) | none | **one unified entry**: `forecast_cli.rs` + generic `resident_forecast.rs` | yes (`brain forecast finetune`) |
 | 3D/scene | 2 | 0 (CLI-local) | none | `splat_cli.rs`, `mirror_cli.rs` | no |
@@ -1061,3 +1061,129 @@ brain-vulkan`.
 Findings 8, 11, 14, 18-20, 23-24 are real but not yet milestoned - pick them
 up opportunistically when touching the same file for another reason, or spin
 them into their own milestone if they start blocking something.
+
+### Phase 3.3 - `DepthPipeline` (ZipDepth) - completes the vision/detection bucket, a real `cfg_for_checkpoint` shape bug fixed, and a real `vision`/`image` feature-split bug found by finally exercising the compile gate this milestone was built to pass
+
+Covers **ZipDepth monocular depth only**, over a NEW `zipdepth::spec::
+ZipdepthSpec` (no `ArchSpec` existed for this arch before this milestone,
+same starting point as YOLOv8/Phase 3.1, unlike SAM2/Phase 3.2's
+already-existing spec).
+
+**A real, derived-not-guessed config reader, added alongside the spec and
+reused by it**: `zipdepth::config::ZipConfig::from_tensors` reads a
+checkpoint's own tensor shapes (encoder width from `stem_quarter`'s output
+channels, per-stage depth by counting `stage<N>.<i>.branch_3x3.0.weight`
+keys, decoder width from `proj4`'s output channels, which upsampler from
+`mask_pred` vs `where_conv`) the same `rrdbnet::config::RrdbConfig::
+from_tensors` discipline this crate had not yet adopted. **A real bug this
+replaced**: `zipdepth::import::cfg_for_checkpoint` used to ALWAYS return
+`ZipConfig::base()`, toggling only `upsample_unfold` - so any checkpoint
+whose encoder width was not exactly the `base` preset (a `small`/`large`/
+`giant`-trained model, or any future release) would silently derive the
+WRONG shape and fail downstream as a confusing tensor-shape mismatch rather
+than a clean "wrong variant" error, or - worse, if shapes coincidentally
+matched a smaller subset - load with silently wrong weights. Not a
+theoretical gap: this is exactly the case `ZipdepthSpec::classify` needed
+to get right to classify anything other than the one released preset at
+all. `cfg_for_checkpoint` now calls `from_tensors` directly; every existing
+caller (`depth_cli.rs`, `resident_depth.rs`) already wraps it in
+`.unwrap_or_else(|_| ZipConfig::base())`, so this is a strict improvement
+with no call-site changes needed.
+
+**`ArtifactKind::Torch` checked correctly from the start** - `ZipdepthSpec`
+is the third spec written after `RrdbnetSpec` (Phase 2.5) and `Sam2Spec`
+(fixed this session, Phase 3.2) both hit the `Opaque`-vs-`Torch` mistake;
+written correctly here first try, and pinned with the same
+`classify_recognizes_a_real_pt_file_scanned_by_the_real_inventory_scanner`
+regression test the other two needed added after the fact.
+
+**`zipdepth::caps::Session`/`load`, a NEW typed core alongside the existing
+`DepthProvider`/`Hot`, not a replacement of it**: `DepthProvider`'s `Hot`
+residency is keyed by weights PATH and re-uploads a transient `ParamStore`
+per call (so one long-lived D-Bus/CLI process can serve many different
+checkpoints); `Session` is a bound, single-checkpoint handle a builder
+resolves once (the shape `DepthPipeline` needs). Both call the SAME shared
+core, `predict_normalized(gpu, cfg, init, hwc, w, h) -> DepthOutput`
+(build `ParamStore`+`Predictor`, forward, min-max normalize) - factored out
+of `InferAction::run`'s own inline body rather than duplicated, the
+"CLI/D-Bus and SDK call the same code" rule (10) applied to a provider whose
+residency shape does not fit the `Session`-owns-a-built-model pattern
+`codeformer`/`sam2`/`rrdbnet` use.
+
+**`DepthMap`, the vision/detection bucket's third non-`Image` domain
+object**: a per-pixel min-max-normalized-to-`[0,1]` inverse-depth grid at
+source-image resolution, plus the raw `min`/`max` bounds the map was scaled
+from (so the relative distances stay recoverable) - the same "per-pixel
+float grid plus metadata" shape `Mask` established, not a fourth `Image`
+backend. `DepthOptions::input(side)` is the one knob, mirroring the
+`infer` action's own `input` param.
+
+**A real, independent gap this milestone's OWN verification step found and
+fixed, in `crates/sdk/Cargo.toml` itself**: `cargo build -p brain --features
+vision` (the exact command every prior phase's own verification section
+used) never actually tests `vision` standalone, because `default = ["full"]`
+silently backfills `image` underneath it - only `--no-default-features
+--features vision`, the command `scripts/gates/check-sdk-features.sh`'s own
+per-surface compile sweep runs, exercises a surface alone. Running that
+command surfaced that `vision` (and this milestone's own `depth.rs`) could
+not compile standalone at all: `detect.rs`/`segment.rs` (Phase 3.1/3.2) both
+use `crate::Image`, gated behind the `image` feature, which `vision` never
+selected - a real, live gap in two already-shipped pipelines, not something
+this milestone introduced. Fixed by splitting `Image` out into its own
+infrastructure feature, `imagetype` (alongside `device`/`resolve`, selected
+BY a surface, never named by a consumer directly) - `image.rs` itself only
+ever depended on `brain-imaging`, never on flux2/s3dit/rrdbnet/codeformer,
+so this was a clean split, not a new dependency edge. Both `image` and
+`vision` now select `imagetype`; `check-sdk-features.sh`'s own `TIERS`
+exclusion set (the list that keeps `device`/`resolve` out of the
+per-surface sweep and the Domain-vocabulary check) grew `imagetype` to
+match. Full gate run clean after the fix (`bash scripts/gates/
+check-sdk-features.sh` - `check/sdk-features: OK`, every surface including
+`vision` and `image` compiling standalone).
+
+**A genuine end-to-end test, FAST like `DetectionPipeline`'s and unlike
+`RestorePipeline`'s/`SegmentPipeline`'s**: because `ZipConfig::from_tensors`
+derives the whole net shape rather than requiring one fixed released preset,
+`crates/sdk/tests/depth_pipeline.rs` builds a genuinely tiny (`dims: [8, 16,
+32, 64]`, `depths: [1,1,1,1]`) complete checkpoint via `cfg.param_list()` and
+reaches a real `.predict()` forward pass - encoder stages 1-4 (including
+StripPoolingAttention/GlobalContextBlock, since the fixture inherits
+`GlobalMode::Balanced` from `ZipConfig::base()`), SPPF, cross-scale fusion,
+decoder, FastConvexUpsample - in ~1s. The model's input SIDE is a runtime
+knob, not a stored weight, so it does not shrink with the tiny encoder
+widths alone; `DepthOptions::input(32)` overrides it down to the smallest
+valid (x32) size to keep the test fast, the one thing this fixture needed
+that `DetectionPipeline`'s tiny-preset fixture did not.
+
+**Not done, tracked for later**: catalog's `zipdepth` registration
+(`crates/catalog/src/lib.rs`) stays `always!(zipdepth::caps::DepthProvider::
+new())`, matching `yolov8::caps::YoloProvider`'s own `always!()` - both
+providers take `weights` as a PER-CALL action param (not bound at
+construction the way `codeformer`/`sam2`/`rrdbnet`'s providers are), so the
+`assembly.role_path("weights")`-closure resolver-migration shape Phase 2.6
+used does not fit either without a provider redesign; `brain zipdepth
+--image`'s own CLI (`depth_cli.rs`) is a windowed SDL/V4L2 demo with many
+specialized flags (camera, view modes, colormaps) and stays entirely
+CLI-local, the same "genuinely different call shape" reasoning every prior
+phase's CLI-migration gap note uses - not a new gap, an existing one this
+milestone did not need to touch. `label_cli.rs` (VLM captioning workflow) is
+excluded from this domain bucket entirely, not deferred: it is a workflow
+over `captioner::Captioner`, not a single architecture's capability, the
+same reason `forecast`'s finetune verb is not itself a "forecasting arch."
+
+Verified with `cargo test -p brain-zipdepth --lib` (39 passed, no
+regressions from the `config.rs`/`import.rs`/`caps.rs` changes),
+`bash scripts/gates/check-sdk-features.sh` (`OK`, every surface compiling
+standalone), `cargo test -p brain --features vision --test depth_pipeline`
+(3 passed, ~1.3s total), `cargo test -p brain --features vision --tests`
+(the full vision surface's test suites together, no regressions), and a full
+`cargo build --workspace --exclude brain-vulkan`.
+
+This closes out the vision/detection/segmentation domain bucket's
+architecture coverage (detection, segmentation, depth all have SDK
+pipelines; only `label` remains, correctly excluded as a workflow rather
+than an architecture). Remaining fully uncovered SDK domain buckets: TTS/
+music, video generation, 3D/world models - see the priority order note
+above, last in line since `SplatPipeline`-shaped types are closer to
+`Creature` (stateful, steppable) than to any `image(+opts) -> T` pipeline
+built so far, and world models have no settled domain object yet.

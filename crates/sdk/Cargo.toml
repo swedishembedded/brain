@@ -39,7 +39,7 @@ full = ["image", "creature", "forecast", "text", "vision", "audio", "decision"]
 # return `brain::Image`. Generation, upscaling and restoration are different
 # capabilities ("one pipeline type per capability"), not backends of one
 # pipeline.
-image = ["resolve", "dep:brain-flux2", "dep:brain-s3dit", "dep:brain-imaging", "dep:brain-rrdbnet", "dep:brain-codeformer"]
+image = ["resolve", "imagetype", "dep:brain-flux2", "dep:brain-s3dit", "dep:brain-rrdbnet", "dep:brain-codeformer"]
 # `brain::ForecastPipeline`. Covers kronos and timesfm3 - the two forecasting
 # architectures with a real model-store `ArchSpec` today
 # (`kronos::spec::KronosSpec`, `timesfm3::spec::Timesfm3Spec`); chronos2 and
@@ -70,9 +70,9 @@ text = ["device", "dep:brain-qwen3", "dep:brain-data", "dep:brain-checkpoint", "
 # an image tower; YOLOv8's and SAM2's are `Vision` too), and this
 # workspace's rule is that a surface name is a `Domain` variant, full stop -
 # inventing a second word for the same modality is exactly what that rule
-# exists to prevent. A future vision pipeline (depth) joins this SAME
-# feature rather than getting its own, for the same reason.
-vision = ["resolve", "dep:brain-clip", "dep:brain-yolov8", "dep:brain-sam2"]
+# exists to prevent. `brain::DepthPipeline` (ZipDepth monocular depth) joins
+# this SAME feature for the same reason, rather than getting its own.
+vision = ["resolve", "imagetype", "dep:brain-clip", "dep:brain-yolov8", "dep:brain-sam2", "dep:brain-zipdepth"]
 # `brain::DecisionPipeline`. Selects `device` only, not `resolve`: like `text`,
 # this architecture has no model-store `ArchSpec`, so there is nothing for a
 # resolver to resolve a hub id against - and a decision model is two artifacts
@@ -89,6 +89,19 @@ audio = ["resolve", "dep:brain-qwen3asr", "dep:brain-audio"]
 device = ["dep:brain-gpu-core"]
 # Model-store resolution + `brain::DType`.
 resolve = ["device", "dep:brain-loader", "dep:brain-model"]
+# `brain::Image`, the pixel-in/pixel-out domain type. Split out from `image`
+# (which also carries flux2/s3dit/rrdbnet/codeformer, the actual generation
+# backends) because `vision`'s detection/segmentation/depth pipelines all
+# take or return an `Image` too but must not drag in a text-to-image engine
+# to do it -- `image.rs` itself depends on nothing but `brain-imaging`, so
+# this is genuinely cheap to select twice. A real gap this milestone found
+# and fixed: `vision` alone (`--no-default-features --features vision`) has
+# never actually compiled standalone since `DetectionPipeline`/
+# `SegmentPipeline` were added (Phase 3.1/3.2) -- `check-sdk-features.sh`'s
+# own per-surface compile sweep would have caught it, but every verification
+# pass since used `--features vision` WITHOUT `--no-default-features`, which
+# `default = ["full"]` silently backfills with `image` anyway.
+imagetype = ["dep:brain-imaging"]
 
 [dependencies]
 # Unconditional: `Error` is one shape in every configuration. It carries the
@@ -125,6 +138,7 @@ brain-timesfm3 = { workspace = true, optional = true }
 brain-s3dit = { workspace = true, optional = true }
 brain-wm-display = { workspace = true, optional = true }
 brain-yolov8 = { workspace = true, optional = true }
+brain-zipdepth = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 tempfile = { workspace = true, optional = true }
 

@@ -40,7 +40,7 @@ if not feats:
     bad("crates/sdk/Cargo.toml has no [features] table")
     sys.exit(1)
 
-TIERS = {"device", "resolve", "full", "default"}
+TIERS = {"device", "resolve", "imagetype", "full", "default"}
 surfaces = sorted(set(feats) - TIERS)
 
 # 1. surface names are brain_arch::Domain variants, kebab-cased.
@@ -98,7 +98,7 @@ else
 	mapfile -t surfaces < <(python3 -c "
 import tomllib
 f = tomllib.load(open('crates/sdk/Cargo.toml','rb'))['features']
-print('\n'.join(sorted(set(f) - {'device','resolve','full','default'})))
+print('\n'.join(sorted(set(f) - {'device','resolve','imagetype','full','default'})))
 ")
 	printf '  compiling bare core ... '
 	if cargo check -p brain --no-default-features --message-format short >/dev/null 2>&1; then

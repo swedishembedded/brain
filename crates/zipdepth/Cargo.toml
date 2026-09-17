@@ -21,6 +21,7 @@ brain-optim.workspace = true
 brain-data.workspace = true
 brain-checkpoint.workspace = true
 brain-kernels.workspace = true
+brain-modelstore.workspace = true
 serde_json.workspace = true
 bytemuck.workspace = true
 # Host-side pre/post-processing (resize + layout pack) runs per camera frame;

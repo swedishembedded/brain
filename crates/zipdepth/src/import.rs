@@ -110,12 +110,14 @@ pub fn tensor_names(path: &str) -> Result<Vec<String>, String> {
     Ok(tensors.into_iter().map(|t| t.name).filter(|n| !is_counter(n)).collect())
 }
 
-/// Pick the [`ZipConfig`] by inspecting the checkpoint's own tensor names, so a
-/// caller never has to match a `--variant` flag to the file: `where_conv.*` →
-/// blend (NPU) upsampler, otherwise the unfold (base) variant. A wrong variant
-/// was the classic footgun ("11 tensors the model does not declare").
+/// Pick the [`ZipConfig`] by inspecting the checkpoint's own tensor SHAPES
+/// ([`ZipConfig::from_tensors`]), so a caller never has to match a `--variant`
+/// flag to the file, and a non-`base` encoder width derives its own dims
+/// rather than silently mis-deriving as `base`. Header-only
+/// ([`checkpoint::torchpt::read_shapes`] never decodes a tensor's storage
+/// bytes), so this is cheap enough to call before committing to a full
+/// [`load`].
 pub fn cfg_for_checkpoint(path: &str) -> Result<ZipConfig, String> {
-    let names = tensor_names(path)?;
-    let blend = names.iter().any(|n| n.contains("where_conv"));
-    Ok(ZipConfig { upsample_unfold: !blend, ..ZipConfig::base() })
+    let shapes: HashMap<String, Vec<usize>> = checkpoint::torchpt::read_shapes(path)?.into_iter().collect();
+    ZipConfig::from_tensors(&shapes)
 }

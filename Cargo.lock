@@ -400,6 +400,7 @@ dependencies = [
  "brain-timesfm3",
  "brain-wm-display",
  "brain-yolov8",
+ "brain-zipdepth",
  "serde_json",
  "tempfile",
 ]
@@ -2531,6 +2532,7 @@ dependencies = [
  "brain-imaging",
  "brain-kernels",
  "brain-model",
+ "brain-modelstore",
  "brain-optim",
  "brain-paramstore",
  "brain-testutil",
