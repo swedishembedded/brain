@@ -976,6 +976,12 @@ pub struct WgpuBackend {
     /// which is a GPU pipeline barrier that serialises an integrated GPU.
     /// `Mutex` keeps `WgpuBackend: Sync`; it is only ever locked single-threaded.
     pending: std::sync::Mutex<Vec<WgpuStep>>,
+    /// Accumulated `gx * gy` of everything in `pending`, checked against
+    /// `backend_api::hardware::max_unsynced_workgroups` on every `submit` to
+    /// force a host-synchronised flush before one command buffer grows past
+    /// what the driver can preempt. Reset by `flush_inner`, the one place
+    /// `pending` is emptied.
+    pending_workgroups: std::sync::atomic::AtomicU64,
     /// Whether `BRAIN_PROFILE` prints the op-count summary at drop. The
     /// counters themselves are ALWAYS maintained (relaxed atomics, negligible
     /// next to a dispatch) so `Backend::stats` is queryable on every run.
@@ -1850,6 +1856,7 @@ impl WgpuBackend {
         WgpuBackend {
             shared,
             pending: std::sync::Mutex::new(Vec::new()),
+            pending_workgroups: AtomicU64::new(0),
             profile,
             stats_uniform: AtomicU64::new(0),
             stats_bg: AtomicU64::new(0),
@@ -1946,6 +1953,9 @@ impl WgpuBackend {
     fn flush_inner(&self) {
         use std::sync::atomic::Ordering::AcqRel;
         let steps: Vec<WgpuStep> = std::mem::take(&mut *self.pending.lock().unwrap_or_else(|e| e.into_inner()));
+        // `pending` is now empty - keep the accumulated-size counter in sync
+        // with it, or the valve in `submit` would fire on every later submit.
+        self.pending_workgroups.store(0, std::sync::atomic::Ordering::Relaxed);
         // Every path below ends in a `queue.submit`, which carries wgpu's
         // pending-writes encoder along with the dispatches, so any outstanding
         // host write is submitted by it. Claim the flag up front either way.
@@ -2540,6 +2550,41 @@ impl WgpuBackend {
         self.pending.lock().unwrap_or_else(|e| e.into_inner()).extend(steps.iter().cloned());
         self.stats_dispatch
             .fetch_add(steps.len() as u64, std::sync::atomic::Ordering::Relaxed);
+
+        // The same safety valve `backend_vulkan::VulkanBackend::submit` has
+        // carried since M6.9, for the identical architectural reason:
+        // accumulating is right, accumulating WITHOUT a bound is not. A
+        // caller that never calls `read`/`poll_wait`/`flush` between submits
+        // grows one unbounded command buffer, and a prefill is exactly that
+        // caller - it feeds a whole prompt through with a single readback at
+        // the end, so the batch grows with the PROMPT until the driver can no
+        // longer preempt it in time and resets the engine, invalidating every
+        // resource on it.
+        //
+        // Bounded by accumulated dispatch SIZE, not count: dispatch cost
+        // varies by orders of magnitude, so a count is not a proxy for
+        // duration (one naive `matmul` dispatch measured ~3.3 real seconds at
+        // a real `d_model`), and a count low enough to catch that would break
+        // the opposite contract that hundreds of tiny dispatches still cost
+        // one flush. See `backend_api::hardware::max_unsynced_workgroups` for
+        // the full derivation and the measured numbers.
+        //
+        // `flush` then `poll_wait`: flush alone only submits, so without the
+        // wait a caller could still queue submissions faster than the device
+        // retires them. Mirrors the Vulkan valve's own `flush(); drain();`.
+        //
+        // The `pending` guard is dropped before both: `write` takes `io` and
+        // THEN `pending`, so taking them in the other order here would be a
+        // lock-order inversion between two paths a caller can hit
+        // concurrently.
+        let added: u64 = steps.iter().map(|s| u64::from(s.2) * u64::from(s.3)).sum();
+        let before = self
+            .pending_workgroups
+            .fetch_add(added, std::sync::atomic::Ordering::Relaxed);
+        if before + added >= backend_api::hardware::max_unsynced_workgroups() {
+            self.flush();
+            self.poll_wait();
+        }
     }
 
     pub fn write(&self, buf: &wgpu::Buffer, data: &[u32]) {

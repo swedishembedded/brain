@@ -365,7 +365,16 @@ const MAX_TIMED_DISPATCHES: usize = 8192;
 /// accumulate past a hang-detection window). `BRAIN_VK_SERIAL=1` remains the
 /// maximally conservative escape hatch (a host wait after EVERY dispatch) for
 /// a shape this heuristic does not cover.
-const MAX_UNSYNCED_WORKGROUPS: u64 = 4_096;
+/// Hoisted to [`backend_api::hardware::max_unsynced_workgroups`] so this
+/// crate and `backend-wgpu` share ONE definition: the identical bug was
+/// found independently in the wgpu backend (an unbounded qwen3 prefill
+/// resetting the same iGPU), and two separately-tuned ceilings for one
+/// hardware property is how they drift apart. The derivation above is the
+/// authoritative one and is reproduced at the shared definition; this stays
+/// as the name this crate's own code and doc comments already refer to.
+fn max_unsynced_workgroups() -> u64 {
+    backend_api::hardware::max_unsynced_workgroups()
+}
 
 /// A sanity ceiling on a single dispatch's device time, used by
 /// [`VulkanBackend::record_timing`] to detect a corrupted or query-mechanism-
@@ -465,7 +474,7 @@ pub struct VulkanBackend {
     /// Accumulated dispatches, flushed as one command submission.
     pending: Mutex<Vec<VkStep>>,
     /// Running `sum(gx*gy)` of everything currently in `pending` - compared
-    /// against [`MAX_UNSYNCED_WORKGROUPS`] on every `submit` to force a flush
+    /// against [`max_unsynced_workgroups`] on every `submit` to force a flush
     /// before an unbounded, un-synchronised accumulation of dispatches (M6.9).
     /// Reset to 0 wherever `pending` is drained (`flush`).
     pending_workgroups: AtomicU64,
@@ -1364,7 +1373,7 @@ impl VulkanBackend {
         // a flush that races between their creation and their own submit.
         self.inflight_uniforms.lock().unwrap_or_else(|e| e.into_inner()).append(&mut self.uniforms.lock().unwrap_or_else(|e| e.into_inner()));
 
-        // M6.9 safety valve (see `MAX_UNSYNCED_WORKGROUPS`'s doc): a caller
+        // M6.9 safety valve (see `max_unsynced_workgroups`'s doc): a caller
         // that never calls `read`/`poll_wait`/`Backend::flush` between
         // `submit`s can otherwise grow `pending` into one unbounded command
         // buffer. Force a real host-synchronised flush once accumulated
@@ -1373,7 +1382,7 @@ impl VulkanBackend {
         // driver's own hang-detection reset regardless of how the caller
         // batches its own `submit`/`flush` calls.
         let added: u64 = steps.iter().map(|s| s.gx as u64 * s.gy as u64).sum();
-        if self.pending_workgroups.fetch_add(added, Ordering::Relaxed) + added >= MAX_UNSYNCED_WORKGROUPS {
+        if self.pending_workgroups.fetch_add(added, Ordering::Relaxed) + added >= max_unsynced_workgroups() {
             self.flush();
             self.drain();
         }

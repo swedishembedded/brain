@@ -139,6 +139,102 @@ fn parse_reclaim_ceiling(raw: Option<&str>) -> Option<u64> {
     raw.and_then(|v| v.trim().parse::<u64>().ok()).filter(|v| *v > 0)
 }
 
+/// How much un-synchronised GPU work (in WORKGROUPS, summed `gx * gy`) a
+/// backend lets accumulate into one command buffer before it forces a real
+/// host-synchronised flush - 4096 unless `BRAIN_GPU_MAX_UNSYNCED_WORKGROUPS`
+/// names a count.
+///
+/// # Why a bound has to exist at all
+///
+/// A backend that batches (both `backend_vulkan::VulkanBackend::submit` and
+/// `backend_wgpu::WgpuBackend::submit` append to a pending list rather than
+/// submitting) is right to do so, and matches the documented WebGPU
+/// guidance: encode work that shares buffers into one command buffer and let
+/// the implicit intra-submission hazard tracking order it, instead of
+/// reading back between steps. An inference path discards every intermediate
+/// hidden, so a submit+fence+map round trip per step is pure waste.
+///
+/// But "batch until the caller reads back" is not a bound. A caller that
+/// never calls `read`/`poll_wait`/`flush` between submits grows one
+/// unbounded command buffer - and a prefill is exactly that caller: it feeds
+/// a whole prompt through with a single readback at the end, so the batch
+/// grows with the PROMPT.
+///
+/// # What actually kills the device
+///
+/// Not a fixed "hangcheck" constant - i915 replaced hangcheck with a
+/// heartbeat. The driver injects a no-op request every
+/// `heartbeat_interval_ms`; if that does not complete it re-submits it at
+/// `I915_PRIORITY_BARRIER` to force preemption of whatever is running, and
+/// only if preemption is not honoured within `preempt_timeout_ms` does it
+/// call `reset_engine()`. The fatal property is therefore work the driver
+/// cannot preempt in time, not merely a lot of it. On the Meteor Lake Arc
+/// iGPU this was reproduced on: `heartbeat_interval_ms = 2500` on every
+/// engine, `preempt_timeout_ms = 7500` on `rcs0`/`ccs0`.
+///
+/// A reset invalidates every resource on the device at once, so it surfaces
+/// as a validation error naming whichever buffer is touched next, which
+/// describes nothing about the real cause.
+///
+/// # Why SIZE and not COUNT
+///
+/// Because a dispatch's cost varies by orders of magnitude, so a count is
+/// not a proxy for duration at all. `backend-vulkan` measured ONE
+/// `matmul.wgsl` dispatch (`@opt 2`, a deliberately naive
+/// one-thread-per-output-element GEMM) at ~3.3 real seconds at Qwen3.5's
+/// actual `d_model = 5120` q_proj shape - a single dispatch that alone
+/// approaches the preemption budget. A count-based ceiling cannot see that,
+/// and a count low enough to catch it would break the opposite contract:
+/// `backend_vulkan`'s own `frame_loop_submits_are_bounded_per_frame`
+/// requires 32 small dispatches (`gx * gy == 1` each) to cost exactly one
+/// flush. Small kernels do not individually run long enough for their count
+/// to matter; only a size outlier does.
+///
+/// # Why 4096
+///
+/// Calibrated empirically in `backend-vulkan` (M6.9) with a deliberately
+/// wide margin: an initial `65536` only reduced that crash's rate rather
+/// than eliminating it, because this box is measured to be thermally and
+/// contention noisy (roughly a 10x integrated-GPU clock swing idle-to-ramped,
+/// and ~3x again from a co-resident CPU load), so a ceiling calibrated
+/// against one clean session is not safe against a noisier one. 4096 sits
+/// UNDER even attention's own largest single dispatch (`gqa_scores`/
+/// `gqa_apply` at `nh*t*t/64 = 6144` workgroups at that shape), so in
+/// practice every dispatch at or above roughly attention size becomes its
+/// own synchronised unit, while staying far above what "hundreds of small
+/// dispatches, one flush" will ever accumulate.
+///
+/// This is a heuristic proxy for elapsed device time, not a measurement of
+/// it - neither backend profiles ahead of a dispatch. It bounds the known
+/// failures with a wide margin; it is not a guarantee against every
+/// theoretically possible one. The serial escape hatches
+/// (`BRAIN_VK_SERIAL=1`, `BRAIN_WGPU_SERIAL=1`) remain the maximally
+/// conservative option for a shape this heuristic does not cover.
+///
+/// Resolved ONCE per process (read on every submit), same reason and same
+/// shape as [`reclaim_ceiling`].
+pub fn max_unsynced_workgroups() -> u64 {
+    /// See this function's own doc for how this is derived.
+    const DEFAULT: u64 = 4_096;
+    static OVERRIDE: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    OVERRIDE
+        .get_or_init(|| {
+            parse_max_unsynced_workgroups(std::env::var("BRAIN_GPU_MAX_UNSYNCED_WORKGROUPS").ok().as_deref())
+        })
+        .unwrap_or(DEFAULT)
+}
+
+/// [`max_unsynced_workgroups`]'s parsing rule as a pure function - same
+/// reason [`parse_reclaim_ceiling`] is factored out.
+///
+/// Anything that is not a strictly positive integer falls back to the
+/// default rather than being clamped, so a bad value cannot turn batching
+/// off entirely (`0` would synchronise after every single dispatch, which is
+/// the orders-of-magnitude-slower serialized path).
+fn parse_max_unsynced_workgroups(raw: Option<&str>) -> Option<u64> {
+    raw.and_then(|v| v.trim().parse::<u64>().ok()).filter(|v| *v > 0)
+}
+
 // ---- mutual exclusion over the physical device ------------------------------
 
 /// The GPU class: every logical device opened on a graphics card, whether
@@ -464,6 +560,36 @@ mod tests {
         }
         assert_eq!(parse_reclaim_ceiling(Some("4194304")), Some(4 << 20));
         assert_eq!(parse_reclaim_ceiling(Some(" 4194304 ")), Some(4 << 20));
+    }
+
+    /// A malformed ceiling must fall back to the default, and must never
+    /// resolve to `0`: a ceiling of zero synchronises after every dispatch,
+    /// which is the serialized path and orders of magnitude slower than the
+    /// batching this whole mechanism exists to keep.
+    #[test]
+    fn a_bad_unsynced_ceiling_falls_back_to_the_default() {
+        for bad in [None, Some(""), Some("0"), Some("-1"), Some("abc"), Some("1.5")] {
+            assert_eq!(parse_max_unsynced_workgroups(bad), None, "{bad:?} must not override the default");
+        }
+        assert_eq!(parse_max_unsynced_workgroups(Some("512")), Some(512));
+        assert_eq!(parse_max_unsynced_workgroups(Some(" 512 ")), Some(512));
+    }
+
+    /// The resolved default must stay under a single attention-sized
+    /// dispatch. That is the property that makes a large dispatch its own
+    /// synchronised unit instead of something that piles up behind others -
+    /// `gqa_scores`/`gqa_apply` measured 6144 workgroups at the shape this
+    /// was calibrated against, and one naive `matmul` dispatch at a real
+    /// `d_model` measured ~3.3 seconds on its own.
+    #[test]
+    fn the_default_unsynced_ceiling_stays_under_one_attention_dispatch() {
+        let ceiling = max_unsynced_workgroups();
+        assert!(ceiling > 0, "a zero ceiling synchronises after every dispatch");
+        assert!(
+            ceiling <= 6_144,
+            "ceiling {ceiling} is at or above attention's own single largest dispatch, so such \
+             a dispatch would no longer be its own synchronised unit"
+        );
     }
 
     /// The kernel-list shim must survive the round trip into a worker thread
