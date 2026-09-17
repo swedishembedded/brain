@@ -36,6 +36,10 @@ const TARGET_FPS: u32 = 30;
 const W: u32 = 960;
 const H: u32 = 720;
 /// A fruit fly is about 2.5 mm long, and the model works in centimetres.
+/// Current injected into the appetitive dopaminergic cells while the fly is on
+/// the food. Enough to make them fire; the rest is the animal's business.
+const DOPAMINE_CURRENT: f32 = 8.0;
+
 const BODY_LENGTH: f64 = 0.25;
 
 struct Args {
@@ -50,6 +54,7 @@ struct Args {
     shot: Option<String>,
     shuffled: bool,
     plastic: bool,
+    learn: bool,
     throttle: Option<f32>,
     timestep: Option<f64>,
     brain: bool,
@@ -105,7 +110,19 @@ fn usage() -> ! {
                          velocity, attitude, wing stroke, spikes. A picture
                          shows where the fly ended up; this shows what it did
   --shuffled-connectome  the structural control: same degrees, shuffled wiring
-  --plastic              let synapses change while it runs
+  --plastic              let synapses change while it runs, under the GLOBAL
+                         rule: every synapse eligible, one broadcast scalar.
+                         Nothing here delivers that scalar, so on its own this
+                         changes no weight at all - it is the instrument, and
+                         it is here to be driven from code
+  --learn                let the fly learn its OWN way instead: plasticity
+                         confined to the Kenyon-cell output synapses of the
+                         mushroom body, with the third factor coming from
+                         identified dopaminergic cells that reaching the food
+                         actually stimulates. Needs --brain, since a nerve cord
+                         has no mushroom body. Watch `MB` in the status line:
+                         a real mushroom body answers an odour with a few
+                         percent of its Kenyon cells
 
 Keys:  W/S descending command, A/D turn, SPACE wing throttle (in the air),
        C (held) lesions proprioception, RETURN resets, ESC quits.
@@ -128,6 +145,7 @@ fn parse() -> Args {
         shot: None,
         shuffled: false,
         plastic: false,
+        learn: false,
         throttle: None,
         timestep: None,
         brain: false,
@@ -166,6 +184,7 @@ fn parse() -> Args {
             }
             "--shuffled-connectome" => a.shuffled = true,
             "--plastic" => a.plastic = true,
+            "--learn" => a.learn = true,
             "-h" | "--help" => usage(),
             _ => usage(),
         }
@@ -177,6 +196,17 @@ fn parse() -> Args {
     // than an error because the fly still flies and still looks right.
     if (a.seek || a.smell) && a.food.is_none() {
         eprintln!("--seek and --smell need somewhere to go: pass --food X,Y,Z too");
+        std::process::exit(2);
+    }
+    if a.learn && !a.brain {
+        eprintln!("--learn needs --brain: a nerve cord has no mushroom body, so there is nowhere");
+        eprintln!("for an association to be stored. Without the brain this would run a full");
+        eprintln!("protocol, change nothing, and report that the animal did not learn.");
+        std::process::exit(2);
+    }
+    if a.learn && a.food.is_none() {
+        eprintln!("--learn needs --food X,Y,Z: the reinforcer is reaching the food, and with");
+        eprintln!("nothing to reach the dopaminergic cells are never stimulated.");
         std::process::exit(2);
     }
     if a.seek && a.smell {
@@ -262,7 +292,7 @@ fn run() -> Result<(), Error> {
 
     let loading = Instant::now();
     let mut builder =
-        Creature::fruit_fly().connectome(&args.connectome).body(&args.body).arena(args.arena).plasticity(args.plastic);
+        Creature::fruit_fly().connectome(&args.connectome).body(&args.body).arena(args.arena).plasticity(args.plastic).learning(args.learn);
     if let Some(at) = args.food {
         builder = builder.food(at);
     }
@@ -451,6 +481,19 @@ fn run() -> Result<(), Error> {
         }
         if eaten {
             status += " | FED";
+        }
+        if args.learn {
+            // The reinforcer is a place, not a keystroke: standing on the food
+            // stimulates the appetitive dopaminergic population, and whether
+            // any synapse changes follows from whether those cells fire and
+            // what was active when they did.
+            fly.taste(if eaten { DOPAMINE_CURRENT } else { 0.0 });
+            let (kc, mbon, total) = fly.mushroom_body_activity();
+            status += &format!(
+                " | MB {:.1}% KC ({kc}/{total}), {mbon} MBON{}",
+                100.0 * kc as f64 / total.max(1) as f64,
+                if eaten { ", DOPAMINE" } else { "" }
+            );
         }
         if !fly.proprioception() {
             status += " | NO PROPRIOCEPTION";

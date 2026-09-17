@@ -64,6 +64,8 @@ pub struct CreatureBuilder {
     weight_scale: f32,
     shuffle: Option<u64>,
     plasticity: bool,
+    /// The mushroom body rule, as against the global one.
+    learning: bool,
     arena: Arena,
     timestep: Option<f64>,
     food: Option<[f64; 3]>,
@@ -189,6 +191,25 @@ impl CreatureBuilder {
         self
     }
 
+    /// Whether to turn on the fly's OWN learning rule.
+    ///
+    /// Distinct from [`Self::plasticity`], and the distinction is the point.
+    /// That one makes every synapse in the animal eligible, with a third
+    /// factor supplied by whoever calls [`Creature::reward`]: a broadcast
+    /// scalar decided outside the animal, which is a useful instrument and is
+    /// not a nervous system. This one confines plasticity to the Kenyon-cell
+    /// output synapses of the mushroom body - 0.05% of the graph, the
+    /// population where *Drosophila* associative learning is actually known to
+    /// happen - and takes the third factor from identified dopaminergic cells
+    /// firing inside the network, which is what [`Creature::taste`] recruits.
+    ///
+    /// Requires the brain: a nerve cord has no mushroom body, and building
+    /// this on one fails rather than quietly doing nothing.
+    pub fn learning(mut self, on: bool) -> CreatureBuilder {
+        self.learning = on;
+        self
+    }
+
     /// Load the connectome and the body and wire them together.
     ///
     /// This is the expensive call: it reads the connectome from disk, uploads
@@ -271,15 +292,18 @@ impl CreatureBuilder {
             tuned = Some((t, report));
         }
 
-        if self.plasticity {
+        if self.plasticity || self.learning {
             // Clamp sized from the connectome's own weight range rather than
             // picked: the weights are scaled synapse counts running to tens,
             // so a fixed small bound squashes every one of them on the first
             // update and destroys the graph.
             let bound = 1.5 * inner.initial_weight_scale();
-            inner
-                .enable_plasticity(neuro::PlasticityParams { eta: 0.02, w_min: -bound, w_max: bound, ..Default::default() })
-                .map_err(backend)?;
+            let p = neuro::PlasticityParams { eta: 0.02, w_min: -bound, w_max: bound, ..Default::default() };
+            if self.learning {
+                inner.enable_learning(p).map_err(backend)?;
+            } else {
+                inner.enable_plasticity(p).map_err(backend)?;
+            }
         }
         if self.arena == Arena::Air {
             // 180 Hz rather than the animal's 218: this airframe's wing hinge
@@ -385,6 +409,7 @@ impl Creature {
             weight_scale: fly::Wiring::default().weight_scale,
             shuffle: None,
             plasticity: false,
+            learning: false,
             arena: Arena::Ground,
             timestep: None,
             food: None,
@@ -675,8 +700,35 @@ impl Creature {
 
     /// Deliver a neuromodulator pulse: the third factor. Positive potentiates
     /// what was recently eligible, negative depresses it.
+    ///
+    /// The instrument, for the global rule. Under
+    /// [`CreatureBuilder::learning`] this reaches the experimenter-driven
+    /// compartments and NOT the mushroom body's, whose dopamine comes from its
+    /// own cells; use [`Self::taste`] there.
     pub fn reward(&mut self, delta: f32) {
         self.inner.modulate(delta);
+    }
+
+    /// Deliver an appetitive reinforcer as current into the dopaminergic cells
+    /// that carry it, the way the optogenetic experiments do.
+    ///
+    /// Whether anything is learned then depends on whether those cells fire
+    /// and on what was active when they did, rather than on a number handed to
+    /// the rule. Persists until changed, because standing on sugar is a state
+    /// rather than an event.
+    pub fn taste(&mut self, current: f32) {
+        self.inner.taste(current);
+    }
+
+    /// Kenyon cells that fired on the last tick, output neurons that fired,
+    /// and how many Kenyon cells there are.
+    ///
+    /// The first over the third is the number that says whether there is an
+    /// odour code: a real mushroom body answers an odour with a few percent of
+    /// its Kenyon cells, and a population where most of them fire has a large
+    /// spike count and no code at all.
+    pub fn mushroom_body_activity(&self) -> (u32, u32, usize) {
+        self.inner.mushroom_body_activity()
     }
 
     /// Turn the proprioceptive channel on or off. A control, not a setting.

@@ -152,6 +152,20 @@ pub fn cord_lif() -> LifParams {
     }
 }
 
+/// Direction of the mushroom body's learning rule.
+///
+/// Negative because dopamine paired with Kenyon-cell activity DEPRESSES that
+/// cell's output synapse. The behaviour follows from the imbalance this
+/// creates between output neurons that drive approach and those that drive
+/// avoidance, not from strengthening a path to anything.
+pub const LEARNING_GAIN: f32 = -1.0;
+/// How long a compartment's dopamine outlasts the spikes that made it.
+///
+/// On the same scale as the eligibility trace it multiplies: a modulator that
+/// cleared faster than the trace could only ever reinforce what happened in
+/// the same few ticks, which is not what a delayed reward needs.
+pub const LEARNING_MODULATOR_DECAY: f32 = 0.98;
+
 /// How the connectome becomes a network.
 ///
 /// A struct rather than three more positional arguments, because two of these
@@ -367,6 +381,23 @@ pub struct Fly {
     food: Option<[f64; 3]>,
     /// Receptor neurons that fired on the last neural tick, `(left, right)`.
     last_antenna_spikes: (u32, u32),
+
+    /// The mushroom body, empty on a nervous system that has no brain.
+    mb: connectome::MushroomBody,
+    /// Plastic sites at the Kenyon-cell output synapses, built alongside the
+    /// graph because that is the only place the graph exists, and consumed by
+    /// [`Fly::enable_learning`].
+    learning_sites: Option<neuro::Sites>,
+    /// The dopaminergic cells an appetitive reinforcer recruits: PAM, the
+    /// population sugar drives.
+    appetitive: Vec<u32>,
+    /// Current injected into them. Persists until a caller changes it, the
+    /// same way the odour and the descending command do, because "the fly is
+    /// standing on food" is a state and not an event.
+    reinforcement: f32,
+    /// Kenyon cells and output neurons that fired on the last neural tick.
+    /// The instrument that says whether the odour code is sparse.
+    last_mb_spikes: (u32, u32),
     proprioception: bool,
     last_proprio_spikes: u32,
     /// The standing descending command, one per descending neuron. Persists
@@ -442,7 +473,16 @@ impl Fly {
             Some(limit) => c.excitability(limit),
             None => vec![1.0; c.neurons.len()],
         };
-        let mut graph = c.network(wiring.weight_scale, wiring.size_limit, wiring.min_synapses);
+        // The mushroom body, and the synapse-floor exemption it needs. A
+        // Kenyon cell makes one or two synapses onto an output neuron and is
+        // meant to: the odour is in which cells fire together, so a per-pair
+        // floor removes the population code rather than reconstruction noise.
+        // On a cord-only nervous system this is empty and `network_keeping`
+        // with an empty exemption is `network`, bit for bit.
+        let mb = connectome::MushroomBody::find(c, connectome::mushroom_body::Policy::default());
+        let exempt = mb.plastic_pairs(c);
+        let mut graph =
+            c.network_keeping(wiring.weight_scale, wiring.size_limit, wiring.min_synapses, &exempt);
         if let Some(seed) = wiring.shuffle_seed {
             // The structural control: same in-degrees, same weights, sources
             // randomly reassigned. Applied AFTER signing so the sign
@@ -450,6 +490,24 @@ impl Fly {
             // shuffle which neurons are inhibitory and confound two variables.
             graph = graph.shuffled_sources(seed);
         }
+        // Dopamine leaves the fast pathway, and this has to happen on the
+        // final graph. A connectome's transmitter prediction is signed by a
+        // convention that gives dopamine +1, so without it every reinforcement
+        // would also be a barrage of excitatory current into the very neuron
+        // it is teaching - and a changed response after training could be
+        // nothing but that current still arriving.
+        for &k in &mb.modulatory_edges(&graph) {
+            graph.w[k as usize] = 0.0;
+        }
+        // Negative: dopamine paired with Kenyon-cell activity DEPRESSES that
+        // cell's output synapse. A fly does not learn that sugar is good by
+        // strengthening the path to approach, it learns by weakening the path
+        // to the output neuron that drives avoidance.
+        let learning_sites =
+            (!mb.is_empty()).then(|| mb.sites(&graph, LEARNING_GAIN, LEARNING_MODULATOR_DECAY));
+        let appetitive: Vec<u32> =
+            mb.dan.iter().copied().filter(|&d| c.neurons[d as usize].cell_type.starts_with("PAM")).collect();
+
         let net = SpikingNet::new(gpu, &graph, lif)?;
         let n = c.neurons.len();
         let n_desc = descending.len();
@@ -494,6 +552,11 @@ impl Fly {
             odour: [0.0; 2],
             food: None,
             last_antenna_spikes: (0, 0),
+            mb,
+            learning_sites,
+            appetitive,
+            reinforcement: 0.0,
+            last_mb_spikes: (0, 0),
             proprioception: true,
             last_proprio_spikes: 0,
             command: vec![0.0; n_desc],
@@ -832,6 +895,8 @@ impl Fly {
         }
         self.last_proprio_spikes = 0;
         self.last_antenna_spikes = (0, 0);
+        self.last_mb_spikes = (0, 0);
+        self.reinforcement = 0.0;
         self.control_tick = 0;
     }
 
@@ -846,6 +911,67 @@ impl Fly {
     }
 
     /// Enable three-factor plasticity on the cord.
+    /// Turn on the fly's OWN learning rule: plasticity confined to the
+    /// Kenyon-cell output synapses, gated per compartment by the dopaminergic
+    /// cells that innervate it.
+    ///
+    /// Different from [`Fly::enable_plasticity`] in the way that matters. That
+    /// one makes every synapse in the animal eligible and takes its third
+    /// factor from whoever calls [`Fly::reward`] - a useful instrument, and a
+    /// rule that can solve a task by leaving the measured wiring behind,
+    /// because nothing in it says it may not. This one can change 0.05% of the
+    /// graph, at the population where *Drosophila* associative learning is
+    /// actually known to happen, and only when identified cells fire.
+    ///
+    /// Fails on a nervous system with no mushroom body rather than quietly
+    /// doing nothing, because "the animal did not learn" and "there was
+    /// nowhere for it to store anything" are different results that otherwise
+    /// look identical. A nerve cord has no mushroom body; this needs the
+    /// brain.
+    pub fn enable_learning(&mut self, p: neuro::PlasticityParams) -> Result<(), String> {
+        let sites = self.learning_sites.take().ok_or_else(|| {
+            format!(
+                "this nervous system has no mushroom body ({}), so there is nowhere for an \
+                 association to be stored - load the brain as well as the cord",
+                self.mb.summary()
+            )
+        })?;
+        if sites.plastic_edges() == 0 {
+            return Err("no Kenyon-cell output synapse survived into the network".to_string());
+        }
+        self.net.enable_plasticity_at(p, sites)
+    }
+
+    /// Deliver an appetitive reinforcer, as current into the dopaminergic
+    /// cells that carry it.
+    ///
+    /// Not a reward signal handed to the learning rule. The experiments this
+    /// imitates stimulate PAM neurons directly and let the consequences follow,
+    /// and so does this: whether anything is learned depends on whether those
+    /// cells fire and on what was active when they did. Persists until
+    /// changed, because standing on sugar is a state.
+    pub fn taste(&mut self, current: f32) {
+        self.reinforcement = current;
+    }
+
+    /// The mushroom body this animal has, if any.
+    pub fn mushroom_body(&self) -> &connectome::MushroomBody {
+        &self.mb
+    }
+
+    /// Kenyon cells and output neurons that fired on the last neural tick,
+    /// and how many Kenyon cells there are.
+    ///
+    /// The first number divided by the third is the measurement that says
+    /// whether there is an odour code at all. A real mushroom body answers an
+    /// odour with a few percent of its Kenyon cells; a population where most
+    /// of them fire has a large spike count and no code, because every odour
+    /// looks the same and nothing downstream can learn a distinction the
+    /// representation does not make.
+    pub fn mushroom_body_activity(&self) -> (u32, u32, usize) {
+        (self.last_mb_spikes.0, self.last_mb_spikes.1, self.mb.kc.len())
+    }
+
     pub fn enable_plasticity(&mut self, p: neuro::PlasticityParams) -> Result<(), String> {
         self.net.enable_plasticity(p)
     }
@@ -1017,6 +1143,18 @@ impl Fly {
             }
         }
 
+        // The reinforcer, delivered the way the experiments deliver it: as
+        // current into identified dopaminergic neurons, not as a number handed
+        // to the learning rule. Whether any synapse changes is then decided by
+        // whether those cells actually fire and what was active when they did,
+        // which is the entire point of putting the third factor inside the
+        // animal.
+        if self.reinforcement != 0.0 {
+            for &i in &self.appetitive {
+                self.drive[i as usize] += self.reinforcement * self.excite[i as usize];
+            }
+        }
+
         // --- think -------------------------------------------------------
         self.net.drive(Port::Drive, &self.drive)?;
         let mut motor_spikes = 0u32;
@@ -1047,6 +1185,9 @@ impl Fly {
                 self.sensors.iter().filter(|s| spike[s.neuron as usize] > 0.5).count() as u32;
             let fired = |cells: &[u32]| cells.iter().filter(|&&i| spike[i as usize] > 0.5).count() as u32;
             self.last_antenna_spikes = (fired(&self.antennae.left), fired(&self.antennae.right));
+            if !self.mb.is_empty() {
+                self.last_mb_spikes = (fired(&self.mb.kc), fired(&self.mb.mbon));
+            }
             for d in &self.map.drives {
                 if spike[d.neuron as usize] > 0.5 {
                     self.activation[d.actuator] += self.coupling.activation_gain * d.polarity;
