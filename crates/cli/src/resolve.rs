@@ -352,6 +352,7 @@ const RESOLVER_MIGRATED_ARCHS: &[&str] = &[
     "rrdbnet",
     "timesfm3",
     "s3dit",
+    "codeformer",
 ];
 
 fn dispatch_arch(arch: &str, rest: Vec<String>) {

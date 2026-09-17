@@ -549,6 +549,13 @@ pub const ARCHS: &[Arch] = &[
     arch!("instantid", "InstantID (SDXL + IP-Adapter-FaceID)", Image, Brain, "brain-instantid"),
     arch!("autoencoderkl", "diffusers AutoencoderKL (Z-Image/FLUX.2/SDXL VAE)", Image, Brain, "brain-vae"),
     arch!("vqgan", "VQGAN / CodeFormer VQ autoencoder", Image, Brain, "brain-vqgan"),
+    // No `weights_env`: codeformer resolves its single `weights` role
+    // through `brain_modelstore::resolve` (`crates/codeformer/src/spec.rs`),
+    // not `BRAIN_CODEFORMER_WEIGHTS` - the same migration `rrdbnet` (below)
+    // already went through. `crates/cli/src/resident_restore.rs`'s served
+    // path still reads that env var directly - a tracked, not silent, gap
+    // (`brain rrdbnet upscale`'s own residency adapter has the identical
+    // one).
     arch!("codeformer", "CodeFormer blind face restoration", Image, Brain, "brain-codeformer"),
     // SUPIR: a frozen SDXL 1.0 base UNet + a 1.24B ControlNet-shaped trunk
     // (`GLVControl`, over the same `sdxlunet::model::Rec` `controlnet` reuses)

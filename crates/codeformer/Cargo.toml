@@ -20,6 +20,8 @@ brain-vision.workspace = true
 brain-imaging.workspace = true
 # `caps.rs` — the serving contract's capability surface.
 brain-capability.workspace = true
+# `spec.rs` - the model-store `ArchSpec` classifying a real `codeformer.pth`.
+brain-modelstore.workspace = true
 # `train.rs` — trainable params + grads, and the workspace's test PRNG.
 brain-paramstore.workspace = true
 brain-data.workspace = true

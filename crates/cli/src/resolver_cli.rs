@@ -277,6 +277,7 @@ fn with_arch_spec<R>(arch: &str, f: impl FnOnce(&dyn ArchSpec) -> R) -> Option<R
         "nemotronasr" => Some(f(&nemotronasr::spec::NemotronAsrSpec)),
         "sam2" => Some(f(&sam2::spec::Sam2Spec)),
         "rrdbnet" => Some(f(&rrdbnet::spec::RrdbnetSpec)),
+        "codeformer" => Some(f(&codeformer::spec::CodeFormerSpec)),
         "timesfm3" => Some(f(&timesfm3::spec::Timesfm3Spec)),
         "s3dit" => Some(f(&s3dit::spec::S3ditSpec)),
         _ => None,

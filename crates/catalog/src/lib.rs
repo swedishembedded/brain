@@ -437,10 +437,22 @@ pub fn models() -> Vec<ModelEntry> {
         },
         ModelEntry {
             manifest: codeformer::caps::manifest,
-            provider: from_env!(
-                codeformer::caps::RestoreProvider::from_env,
-                "set BRAIN_CODEFORMER_WEIGHTS to an existing codeformer.pth (or its directory)"
-            ),
+            provider: |assembly: &Assembly| {
+                let weights = assembly.role_path("weights")?;
+                // Checked before construction, same discipline `rrdbnet`'s
+                // own entry below uses - a caller handing this fn a raw
+                // `Assembly` directly (a unit test, say) must not get a
+                // confusing failure only surfaced on the first real call.
+                if !std::path::Path::new(&weights).exists() {
+                    return Err(format!("codeformer: {weights} does not exist"));
+                }
+                // `RestoreProvider::new` builds no GPU and imports no
+                // checkpoint yet - both happen lazily on the first
+                // `restore_face` call (`caps.rs`'s own doc) - so this is
+                // free, unlike `rrdbnet`'s entry below which must build
+                // eagerly to classify the checkpoint's derived variant.
+                Ok(Arc::new(codeformer::caps::RestoreProvider::new(weights)) as Arc<dyn Provider>)
+            },
             resident: None,
         },
         ModelEntry {
@@ -661,20 +673,18 @@ fn stage_registry() -> capability::Registry {
     let mut inner = capability::Registry::new();
     for e in models() {
         let id = (e.manifest)().model;
-        // Only the models a stage can actually name today. `sam2`/`rrdbnet`
-        // are resolver-migrated - their own provider reads a real Assembly's
-        // `weights` role (see this file's `models()`), so a real one - when
-        // an explicit models directory is opted into, see
+        // Only the models a stage can actually name today. `sam2`/`rrdbnet`/
+        // `codeformer` are resolver-migrated - their own provider reads a
+        // real Assembly's `weights` role (see this file's `models()`), so a
+        // real one - when an explicit models directory is opted into, see
         // `resolved_stage_assembly`'s own doc - stands in for the env var
-        // each used to read. `codeformer` has not migrated yet, so an empty
-        // placeholder stands in for it exactly as before (its own provider
-        // still reads `BRAIN_CODEFORMER_WEIGHTS` directly).
+        // each used to read.
         let assembly = if id == imgpipe::SEGMENT_MODEL {
             resolved_stage_assembly("sam2", &sam2::spec::Sam2Spec)
         } else if id == imgpipe::UPSCALE_MODEL {
             resolved_stage_assembly("rrdbnet", &rrdbnet::spec::RrdbnetSpec)
         } else if id == imgpipe::RESTORE_MODEL {
-            Some(empty_assembly())
+            resolved_stage_assembly("codeformer", &codeformer::spec::CodeFormerSpec)
         } else {
             continue;
         };

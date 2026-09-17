@@ -362,7 +362,8 @@ including the `samples/imagegen/*` samples that link `crates/sdk` directly.
   - [x] **Phase 2.3** - `EmbeddingPipeline` (CLIP text towers only).
   - [x] **Phase 2.4** - `TranscribePipeline` (qwen3-asr only).
   - [x] **Phase 2.5** - `UpscalePipeline` (RRDBNet only) - see its own section above for the real `RrdbnetSpec` bug this one found and fixed, and the new `Image::open`/`Image::from_rgb8` public API it needed.
-  - [ ] Next within the restoration/upscaling bucket: `CodeFormerSpec` (a real prerequisite, see Phase 2.5's "Not done" list), then a restoration pipeline once it exists. SUPIR and VQGAN stay deferred with the reasons already on record.
+  - [x] **Phase 2.6** - `codeformer::spec::CodeFormerSpec`, the prerequisite Phase 2.5 named - see its own section below. No SDK `RestorePipeline` type yet; that is still the next step within this bucket.
+  - [ ] Next within the restoration/upscaling bucket: a `RestorePipeline` SDK type built on `CodeFormerSpec`. SUPIR and VQGAN stay deferred with the reasons already on record.
   - [ ] Still entirely uncovered domain buckets: vision/detection (YOLOv8/SAM2 - a different domain object than `Image`), TTS/music, video generation, 3D/world models. See the domain inventory table.
 
 ### Phase 2.1 - `ForecastPipeline` (done)
@@ -686,6 +687,88 @@ over the same checkpoint) - `crates/sdk/tests/upscale_pipeline.rs`.
   builds its own `Session` inline (`resident_upscale.rs`) rather than
   calling `UpscalePipeline` - same class of gap every other pipeline in this
   crate still has.
+
+### Phase 2.6 - `codeformer::spec::CodeFormerSpec` (done) - the Phase 2.5 prerequisite, now migrated onto the resolver everywhere it fits
+
+Writes exactly the prerequisite Phase 2.5's "Not done" list named: a real
+`ArchSpec` for CodeFormer's single `"weights"` role, `crates/codeformer/src/
+spec.rs`. No SDK `RestorePipeline` type yet - that is still open, tracked
+above - but everything ELSE this spec unlocks was migrated in the same
+change, not left half-wired:
+
+- `crates/catalog/src/lib.rs`'s `ModelEntry` for `codeformer` now resolves
+  `weights` through the model store instead of `from_env!("BRAIN_CODEFORMER_
+  WEIGHTS", ...)` - mirroring `rrdbnet`'s own entry, but simpler:
+  `codeformer::caps::RestoreProvider::new` builds no GPU and imports no
+  checkpoint at construction (both happen lazily on the first `restore_face`
+  call, per `caps.rs`'s own doc), so the provider closure is just a resolved
+  path plus an existence check, no eager `Gpu::new`/`caps::load` the way
+  `rrdbnet`'s entry needs.
+- `stage_registry()`'s `imgpipe::RESTORE_MODEL` branch, which stood in an
+  `empty_assembly()` placeholder specifically because "codeformer has not
+  migrated yet" (that comment, now deleted), now calls
+  `resolved_stage_assembly("codeformer", &codeformer::spec::CodeFormerSpec)`
+  - the same real-assembly path `SEGMENT_MODEL`/`UPSCALE_MODEL` already use,
+  so `imgpipe`'s `restore` stage picks up a real, explicitly-opted-into
+  models directory instead of never resolving anything.
+- `crates/cli/src/resolve.rs`'s `RESOLVER_MIGRATED_ARCHS` and `crates/cli/
+  src/resolver_cli.rs`'s `with_arch_spec` both gained a `"codeformer"` row,
+  the same two-line wiring `rrdbnet` needed - `brain codeformer <verb>` now
+  resolves its own `--weights` override flag through the store rather than
+  requiring `BRAIN_CODEFORMER_WEIGHTS` to already be set.
+- `crates/arch/src/lib.rs`'s `codeformer` row gained the same explanatory
+  comment `rrdbnet`'s already carries: `weights_env` was already empty (the
+  macro default - codeformer never had a declared env-var role to begin
+  with), so this is documentation, not a behavior change.
+
+**Classification method, and why it differs from `RrdbnetSpec`**:
+`CodeFormerConfig` is ONE fixed preset (`CodeFormerConfig::codeformer()`,
+`inference_codeformer.py`'s own hardcoded constructor call), not a family of
+variants differing in width/depth/scale the way RRDBNet's `x4plus`/
+`x4plus_anime_6B`/`x2plus` do - so there is no `from_tensors` to derive a
+config FROM, and the roadmap's own note above ("a future spec would classify
+by tensor NAME presence, not shape-derive a variant") called this correctly
+in advance. `classify` instead checks five tensors ONLY the `CodeFormer`
+class itself declares (never the `VQAutoEncoder` it subclasses) against the
+exact shape the fixed preset implies: `position_emb`, `feat_emb.weight`,
+`idx_pred_layer.1.weight`, one full transformer layer's fused attention
+projection, and one controllable-feature-transformation tap's scale tower.
+`crate::import::load` is what fully validates all 515 tensors at real load
+time; classification only needs enough to be confident, the same division of
+labor `RrdbnetSpec`/`CosyVoiceSpec` already draw. `Confidence::Derived`, not
+`Declared` - a raw `torch.save` state dict has no header/config field that
+names an architecture, matching `RrdbnetSpec`'s own reasoning for the same
+file kind (`CosyVoiceSpec` chose `Declared` for an analogous tensor-name
+check; `RrdbnetSpec`'s reasoning was the more recent and more literally
+correct reading of the `Confidence` enum's own doc, so this spec follows
+that one).
+
+**The real headline case a fixture must get right, and does**: CodeFormer's
+515 checkpoint tensors are a strict superset of the `VQAutoEncoder` it
+subclasses' 329 (`crates/vqgan`'s own released `vqgan_code1024.pth`), so a
+bare VQGAN checkpoint - real tensor names, just none of the five
+CodeFormer-only ones - must never be mistaken for `codeformer.pth`.
+`classify_rejects_a_bare_vqgan_checkpoint` pins exactly this. Also tested,
+mirroring `RrdbnetSpec`'s own discipline: an unreadable `.pth` classifies as
+nothing; resolution end-to-end with `variant: None` (no variant dimension
+exists here, unlike RRDBNet's `x{scale}-{blocks}b`); two equally-real
+candidates report `Ambiguous`, never a silent pick; and a regression pin
+through the REAL scanner (`brain_modelstore::inventory::scan`), not a
+hand-built `ArtifactRecord` with an explicitly chosen `kind` - the exact
+class of bug `RrdbnetSpec`'s own equivalent test caught after the fact, only
+this time written correctly from day one rather than needing a fix.
+
+**Not done, tracked for later**: the `RestorePipeline` SDK type itself (this
+was scoped as the prerequisite, not the pipeline - see the milestone
+checklist); `crates/cli/src/resident_restore.rs`'s served/D-Bus path still
+reads `BRAIN_CODEFORMER_WEIGHTS` directly rather than the resolver, the same
+tracked (not silent) gap `resident_upscale.rs` already has for `rrdbnet`.
+
+Verified with `cargo test -p brain-codeformer --lib` (26 passed, 6 new),
+`cargo test -p brain-catalog --lib` (9 passed, including
+`every_listed_model_is_constructible_by_name` and `imgpipe_stage_ids_match_
+the_catalog`), `cargo test -p brain-cli` (full suite), and a full
+`cargo build -p brain-arch -p brain-codeformer -p brain-catalog -p brain-cli`.
 
 Findings 8, 11, 14, 18-20, 23-24 are real but not yet milestoned - pick them
 up opportunistically when touching the same file for another reason, or spin
