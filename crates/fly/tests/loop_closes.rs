@@ -117,29 +117,60 @@ fn closing_the_loop_costs_little_over_the_body_alone() {
     }
     let body_hz = ticks as f64 / t0.elapsed().as_secs_f64();
 
+    // What the CORD costs on its own, in this process, on this device: the
+    // same network, the same number of ticks, with no body attached.
+    //
+    // Measured rather than assumed, because it is a property of the machine
+    // and spans an order of magnitude across the ones this runs on - 0.6 ms
+    // per tick on 22 CPU threads against 6 ms on an integrated GPU, whose
+    // memory bandwidth is a seventh of the CPU's for a kernel that is pure
+    // streaming. A fixed millisecond ceiling here is therefore a statement
+    // about the hardware, and this test had one: three milliseconds, chosen
+    // against a profile of 0.81 ms that was itself measuring a submission
+    // backlog rather than a tick.
+    let mut bare = neuro::SpikingNet::new(
+        gpu_core::testgpu::dev(&neuro::KERNELS),
+        &r.c.network(Wiring::default().weight_scale, Wiring::default().size_limit, Wiring::default().min_synapses),
+        fly::cord_lif(),
+    )
+    .expect("the cord builds");
+    let mut spike = vec![0.0f32; r.c.neurons.len()];
+    use neuro::DynamicalSystem;
+    for _ in 0..20 {
+        bare.step();
+        bare.read(neuro::Port::Spike, &mut spike).unwrap();
+    }
+    let t0 = std::time::Instant::now();
+    for _ in 0..ticks {
+        bare.step();
+        bare.read(neuro::Port::Spike, &mut spike).unwrap();
+    }
+    let cord_ms = 1000.0 * t0.elapsed().as_secs_f64() / ticks as f64;
+
     let closed_ms = 1000.0 / hz;
     let body_ms = 1000.0 / body_hz;
     let overhead_ms = closed_ms - body_ms;
     eprintln!(
-        "closed loop {hz:.0} Hz ({closed_ms:.2} ms/tick), body alone {body_hz:.0} Hz ({body_ms:.2} ms/tick), \
-         neural overhead {overhead_ms:.2} ms, {spikes} spikes"
+        "closed loop {hz:.0} Hz ({closed_ms:.2} ms/tick), body alone {body_ms:.2} ms, cord alone \
+         {cord_ms:.2} ms, neural overhead {overhead_ms:.2} ms, {spikes} spikes"
     );
     assert!(spikes > 0, "the cord was silent, so this measures an idle loop");
 
-    // The claim is about the ABSOLUTE cost of the nervous system per control
-    // tick, not about a ratio. A ratio moves with the body: on the floorless
-    // model the body alone ran at 189 Hz and the same neural work was 2% of
-    // the tick, while with contact physics the body drops to ~131 Hz and the
-    // identical work is a larger share of a larger number. Neither tells you
-    // anything about brain. The overhead does, and it is one GPU round trip
-    // per neural tick (profiled at 0.81 ms) plus the drive write.
+    // THE CLAIM, and it is device-independent because both sides of it are
+    // measured on the device in front of it: closing the loop costs the body
+    // plus the cord and NOTHING ELSE. What that rules out is what a
+    // regression here would actually be - a second synchronisation per tick,
+    // an allocation in the step, a readback nobody needed - each of which
+    // shows up as overhead the cord alone does not account for.
     //
-    // 3 ms is a generous ceiling on that, chosen well above the profile rather
-    // than fitted to a run: it catches a regression that adds a second sync
-    // without failing on ordinary contention.
+    // The margin is a millisecond plus half the cord's own cost, because the
+    // two measurements are taken under different cache pressure and the
+    // closed loop interleaves the body between the submit and the readback.
+    let budget = cord_ms * 1.5 + 1.0;
     assert!(
-        overhead_ms < 3.0,
-        "closing the loop added {overhead_ms:.2} ms per control tick; the profiled cost is about 1 ms"
+        overhead_ms < budget,
+        "closing the loop added {overhead_ms:.2} ms per control tick against a cord that costs \
+         {cord_ms:.2} ms on its own; the loop is paying for something besides the nervous system"
     );
 
     // flybody runs slower than real time on this hardware regardless, so the

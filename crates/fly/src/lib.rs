@@ -345,10 +345,10 @@ pub struct Fly {
     /// The `coxa` actuator of each leg, in `flybody::LEGS` order: the
     /// fore-aft swing, which is the signal a stepping rhythm shows up in.
     leg_coxa: [Option<usize>; 6],
-    /// Which generalized coordinate each leg actuator moves. Established by
-    /// measurement at construction, not by reading another mjModel field.
-    actuator_qpos: Vec<usize>,
     actuator_names: Vec<String>,
+    /// Which generalized coordinates each sensor reads, resolved once against
+    /// the body rather than looked up by name every tick.
+    sensor_target: Vec<SensorTarget>,
 
     /// The olfactory receptor neurons, by side. Empty on a cord-only
     /// nervous system: a nerve cord has no nose.
@@ -406,7 +406,12 @@ impl Fly {
         }
         let sensors = sense::proprioceptors(c);
         let descending = c.population(|n| n.super_class == "descending");
+        // Which generalized coordinate each leg actuator moves, established by
+        // measurement rather than by reading another mjModel field. Consumed
+        // here and not kept: the only thing that ever wanted it was the
+        // sensors, and they now carry their own answer.
         let actuator_qpos = probe_actuator_joints(&model, &mut data);
+        let sensor_target = resolve_sensors(&sensors, &actuator_names, &actuator_qpos);
         let mut wing_qpos: [[Option<usize>; 3]; 2] = [[None; 3]; 2];
         for (w, side) in [flybody::Side::Left, flybody::Side::Right].into_iter().enumerate() {
             for (d, dof) in [flybody::WingDof::Yaw, flybody::WingDof::Roll, flybody::WingDof::Pitch]
@@ -480,7 +485,7 @@ impl Fly {
             wing_cmd: WingCommand::default(),
             wing_hold: None,
             leg_coxa,
-            actuator_qpos,
+            sensor_target,
             actuator_names,
             antennae: Antennae::of(c),
             odour: [0.0; 2],
@@ -984,9 +989,10 @@ impl Fly {
             self.drive[*slot as usize] = *v * self.excite[*slot as usize];
         }
         if self.proprioception {
-            for s in &self.sensors {
-                let current = self.sensor_current(s, &qpos, &qvel);
-                self.drive[s.neuron as usize] += current * self.excite[s.neuron as usize];
+            for i in 0..self.sensors.len() {
+                let current = self.sensor_current(i, &qpos, &qvel);
+                let n = self.sensors[i].neuron as usize;
+                self.drive[n] += current * self.excite[n];
             }
         }
         // Smell, if this animal has a nose. Rebuilt every tick like the rest
@@ -1128,42 +1134,64 @@ impl Fly {
         Ok(Tick { control_tick: self.control_tick, motor_spikes, total_spikes, cord, body })
     }
 
-    fn sensor_current(&self, s: &Sensor, qpos: &[f64], qvel: &[f64]) -> f32 {
-        match s.modality {
-            Modality::Angle(dof) => {
-                let want = dof.actuator(s.segment, s.side);
-                match self.actuator_names.iter().position(|n| *n == want) {
-                    Some(i) => {
-                        let q = self.actuator_qpos[i];
-                        qpos.get(q).copied().unwrap_or(0.0) as f32 * self.coupling.angle_gain
-                    }
-                    None => 0.0,
-                }
+    /// This sensor's reading, from the generalized coordinates it was RESOLVED
+    /// to at construction.
+    ///
+    /// The resolution happens once because it used to happen here, every
+    /// sensor, every control tick: an angle sensor formatted its actuator's
+    /// name with `format!` and then linear-searched 44 strings for it, and a
+    /// load sensor formatted a suffix, scanned the same 44 with `ends_with`
+    /// and collected the matches into a fresh `Vec`. Three hundred and four
+    /// sensors at 500 Hz is 150,000 string allocations a second to answer a
+    /// question whose answer cannot change: which joint a fixed sensor watches
+    /// is a property of the body, fixed when the body is loaded.
+    fn sensor_current(&self, i: usize, qpos: &[f64], qvel: &[f64]) -> f32 {
+        match &self.sensor_target[i] {
+            SensorTarget::Angle(Some(q)) => {
+                qpos.get(*q).copied().unwrap_or(0.0) as f32 * self.coupling.angle_gain
             }
-            Modality::LoadProxy => {
+            SensorTarget::Angle(None) => 0.0,
+            SensorTarget::Load(qs) if !qs.is_empty() => {
                 // Mean joint speed of this leg. See `Modality::LoadProxy` for
                 // why this is a proxy and not the quantity itself.
-                let suffix = format!("_{}_{}", seg_str(s.segment), side_str(s.side));
-                let leg: Vec<usize> = self
-                    .actuator_names
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, n)| n.ends_with(&suffix))
-                    .map(|(i, _)| i)
-                    .collect();
-                if leg.is_empty() {
-                    return 0.0;
-                }
-                let sum: f64 = leg
-                    .iter()
-                    .filter_map(|&i| self.actuator_qpos.get(i))
-                    .filter_map(|&q| qvel.get(q))
-                    .map(|v| v.abs())
-                    .sum();
-                (sum / leg.len() as f64) as f32 * self.coupling.load_gain
+                let sum: f64 = qs.iter().filter_map(|&q| qvel.get(q)).map(|v| v.abs()).sum();
+                (sum / qs.len() as f64) as f32 * self.coupling.load_gain
             }
+            SensorTarget::Load(_) => 0.0,
         }
     }
+}
+
+/// Which generalized coordinates a sensor reads, resolved once.
+enum SensorTarget {
+    /// One joint's angle, or `None` where this body has no such actuator.
+    Angle(Option<usize>),
+    /// Every joint of one leg, for the load proxy.
+    Load(Vec<usize>),
+}
+
+/// Resolve every sensor against a body's actuator list, once.
+fn resolve_sensors(sensors: &[Sensor], names: &[String], qpos_of: &[usize]) -> Vec<SensorTarget> {
+    sensors
+        .iter()
+        .map(|s| match s.modality {
+            Modality::Angle(dof) => {
+                let want = dof.actuator(s.segment, s.side);
+                SensorTarget::Angle(names.iter().position(|n| *n == want).and_then(|i| qpos_of.get(i).copied()))
+            }
+            Modality::LoadProxy => {
+                let suffix = format!("_{}_{}", seg_str(s.segment), side_str(s.side));
+                SensorTarget::Load(
+                    names
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, n)| n.ends_with(&suffix))
+                        .filter_map(|(i, _)| qpos_of.get(i).copied())
+                        .collect(),
+                )
+            }
+        })
+        .collect()
 }
 
 fn seg_str(s: flybody::Segment) -> &'static str {
