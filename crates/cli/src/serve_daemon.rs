@@ -208,11 +208,21 @@ pub fn lifecycle(mut argv: Vec<String>) -> Vec<String> {
 
     let pid_file = pid_path();
     if status {
+        // The answer goes in the exit code as well as on stdout: `--status` is
+        // a query, and a caller asking "is one running?" should not have to
+        // grep prose for it. 3 for "not running" is the `systemctl is-active`
+        // convention, and stays clear of 1 (a real failure) and 2 (a usage
+        // error), which this command can also produce.
         match running(&pid_file) {
-            Some(pid) => println!("brain serve: running, pid {pid} (log {})", log_path().display()),
-            None => println!("brain serve: not running"),
+            Some(pid) => {
+                println!("brain serve: running, pid {pid} (log {})", log_path().display());
+                std::process::exit(0);
+            }
+            None => {
+                println!("brain serve: not running");
+                std::process::exit(3);
+            }
         }
-        std::process::exit(0);
     }
     if stop_flag {
         match stop(&pid_file, STOP_TIMEOUT) {

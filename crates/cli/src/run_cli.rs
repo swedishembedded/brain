@@ -126,7 +126,9 @@ PROCESS LIFECYCLE
                          place. Imperative: nothing watches anything, so a
                          restart only ever happens when asked for.
   --stop                 stop the running server.
-  --status               report whether one is running, and its pid.
+  --status               report whether one is running, and its pid. Exits 0
+                         when one is, 3 when none is - so a script can branch
+                         on it without parsing the message.
 
   At most one server runs per user at a time, enforced by an exclusive lock on
   the pidfile rather than by matching process names, so a crash leaves nothing

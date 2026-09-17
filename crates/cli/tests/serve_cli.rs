@@ -116,3 +116,31 @@ fn stdio_flag_is_recognized_and_still_reaches_help() {
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
     assert!(String::from_utf8_lossy(&out.stdout).contains("--openai"));
 }
+
+/// `--status` is a query, so its answer has to be in the exit code: a script
+/// that asks "is a server running?" should not have to grep English prose.
+/// This is the `systemctl is-active` convention (3 = inactive), which is why
+/// the script driving a server can write `if brain serve --status; then`.
+#[test]
+fn status_exits_nonzero_when_no_server_is_running() {
+    let state = std::env::temp_dir().join(format!("brain-status-test-{}", std::process::id()));
+    std::fs::create_dir_all(&state).unwrap();
+
+    let out = Command::new(bin())
+        .args(["serve", "--status"])
+        .stdin(Stdio::null())
+        .env("BRAIN_DEVICE", "cpu")
+        .env("XDG_RUNTIME_DIR", &state)
+        .output()
+        .expect("run brain serve --status");
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("not running"), "stdout: {stdout}");
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "--status must report absence through the exit code; stdout: {stdout}"
+    );
+
+    std::fs::remove_dir_all(&state).ok();
+}
