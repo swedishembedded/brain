@@ -86,6 +86,20 @@ pub struct LifParams {
     /// disables adaptation EXACTLY: nothing ever enters the variable, so
     /// nothing leaves it and the membrane update is unchanged bit for bit.
     pub adapt_increment: f32,
+    /// Short-term synaptic depression: the fraction of a neuron's vesicle pool
+    /// surviving one of its own spikes, and `dt/tau` for the refill.
+    ///
+    /// Adaptation slows a cell down; depression weakens what it SENDS, which
+    /// is the one that scales with how much the receiver is already getting
+    /// and so is the one that keeps a recurrent network off its ceiling. In
+    /// the published whole-brain model of this animal it is also a structural
+    /// control: depression stabilises the real connectome while a
+    /// degree-matched shuffle still seizes.
+    ///
+    /// `std_release = 1.0` never depletes and is exactly inert, which is the
+    /// default and the control.
+    pub std_release: f32,
+    pub std_recover: f32,
     /// The same for INHIBITORY input, which is deliberately a separate number.
     ///
     /// A reciprocal-inhibition oscillator's period is set by how long the
@@ -118,6 +132,10 @@ impl Default for LifParams {
             // had before it had a slow variable.
             adapt_decay: 0.9,
             adapt_increment: 0.0,
+            std_release: 1.0,
+            // dt/tau for a 150 ms refill at a 2 ms tick, which is inside the
+            // range the published model found stabilising.
+            std_recover: 2.0 / 150.0,
         }
     }
 }
@@ -134,6 +152,12 @@ impl LifParams {
         }
         // The two ways a reversal potential can be set to something that makes
         // its synapse do the opposite of what it is for.
+        if !(self.std_release > 0.0 && self.std_release <= 1.0) {
+            return Err(format!("std_release must be in (0, 1], got {}", self.std_release));
+        }
+        if !(self.std_recover > 0.0 && self.std_recover <= 1.0) {
+            return Err(format!("std_recover must be in (0, 1], got {}", self.std_recover));
+        }
         if self.e_inh > self.v_rest {
             return Err(format!(
                 "the inhibitory reversal ({}) is above the resting potential ({}), which makes inhibition depolarising",
@@ -251,6 +275,8 @@ pub struct SpikingNet {
     /// 1.0 the arithmetic is exactly the uniform model's.
     tau_scale: DeviceBuffer,
     gain_scale: DeviceBuffer,
+    /// Presynaptic vesicle pool, one per neuron. 1.0 is fully recovered.
+    depress: DeviceBuffer,
     /// Excitatory and inhibitory current, interleaved `(e, i)` per neuron, so
     /// each can carry across ticks on its own time constant.
     syn: DeviceBuffer,
@@ -326,8 +352,10 @@ impl SpikingNet {
         let drive = gpu.buffer("neuro.drive", nb, live);
         let tau_scale = gpu.buffer("neuro.tau_scale", nb, live);
         let gain_scale = gpu.buffer("neuro.gain_scale", nb, live);
+        let depress = gpu.buffer("neuro.depress", nb, live);
         gpu.write_f32(&tau_scale, &vec![1.0; n as usize]);
         gpu.write_f32(&gain_scale, &vec![1.0; n as usize]);
+        gpu.write_f32(&depress, &vec![1.0; n as usize]);
 
         let mut net = SpikingNet {
             gpu,
@@ -344,6 +372,7 @@ impl SpikingNet {
             adapt,
             tau_scale,
             gain_scale,
+            depress,
             syn,
             drive,
             w0: csc.w.clone(),
@@ -534,7 +563,7 @@ impl SpikingNet {
     /// The LIF kernel's `Params` block: two counts then five f32 bit patterns,
     /// in declaration order. A mismatched param list here is silently wrong
     /// rather than a crash, which is why the order is written once.
-    fn lif_params(&self) -> [u32; 12] {
+    fn lif_params(&self) -> [u32; 14] {
         [
             self.n,
             self.params.refrac_ticks,
@@ -551,6 +580,8 @@ impl SpikingNet {
             self.params.r.to_bits(),
             self.params.adapt_decay.to_bits(),
             self.params.adapt_increment.to_bits(),
+            self.params.std_release.to_bits(),
+            self.params.std_recover.to_bits(),
         ]
     }
 }
@@ -572,6 +603,7 @@ impl SpikingNet {
         self.gpu.write_f32(&self.spike, &vec![0.0; n]);
         self.gpu.write_f32(&self.isyn, &vec![0.0; n]);
         self.gpu.write_f32(&self.adapt, &vec![0.0; n]);
+        self.gpu.write_f32(&self.depress, &vec![1.0; n]);
         self.gpu.write_f32(&self.syn, &vec![0.0; 2 * n]);
         self.gpu.write_f32(&self.drive, &vec![0.0; n]);
         if let Some(pl) = &mut self.plast {
@@ -646,6 +678,7 @@ impl DynamicalSystem for SpikingNet {
         self.gpu.write_f32(&self.spike, &vec![0.0; n]);
         self.gpu.write_f32(&self.isyn, &vec![0.0; n]);
         self.gpu.write_f32(&self.adapt, &vec![0.0; n]);
+        self.gpu.write_f32(&self.depress, &vec![1.0; n]);
         self.gpu.write_f32(&self.syn, &vec![0.0; 2 * n]);
         self.gpu.write_f32(&self.drive, &vec![0.0; n]);
         self.gpu.write_f32(&self.w, &self.w0.clone());
@@ -665,7 +698,7 @@ impl DynamicalSystem for SpikingNet {
     fn step(&mut self) -> StepStats {
         let gather = self.gpu.step(
             K_GATHER,
-            &[&self.indptr, &self.pre, &self.w, &self.spike, &self.isyn, &self.syn],
+            &[&self.indptr, &self.pre, &self.w, &self.spike, &self.isyn, &self.syn, &self.depress],
             &[
                 self.n,
                 (1.0 - self.params.dt_over_tau_syn).to_bits(),
@@ -684,6 +717,7 @@ impl DynamicalSystem for SpikingNet {
                 &self.adapt,
                 &self.tau_scale,
                 &self.gain_scale,
+                &self.depress,
             ],
             &self.lif_params(),
             self.n,

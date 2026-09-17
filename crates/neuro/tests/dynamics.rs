@@ -669,3 +669,69 @@ fn inhibition_scales_the_response_to_excitation_rather_than_offsetting_it() {
     );
     assert!((b2 / b1 - a2 / a1).abs() < 0.1, "the response should scale, so the ratio should survive: {b2}/{b1}");
 }
+
+/// Short-term depression weakens what a fast-firing cell SENDS, and its off
+/// state is exact.
+#[test]
+fn depression_weakens_a_busy_synapse_and_its_absence_is_bit_identical() {
+    // Two neurons: 0 drives 1 through one strong excitatory synapse.
+    let csc = Csc::from_edges(2, &[(0, 1, 6.0)]).expect("well-formed");
+    let run = |release: f32| -> (Vec<f32>, u32) {
+        let p = LifParams {
+            dt_over_tau: 0.5,
+            v_th: 0.4,
+            refrac_ticks: 0,
+            dt_over_tau_syn: 0.5,
+            dt_over_tau_inh: 0.5,
+            std_release: release,
+            std_recover: 2.0 / 150.0,
+            ..LifParams::default()
+        };
+        let mut net = SpikingNet::new(gpu_core::testgpu::dev(&KERNELS), &csc, p).unwrap();
+        net.drive(Port::Drive, &[8.0, 0.0]).unwrap();
+        let mut spike = vec![0.0f32; 2];
+        let mut current = vec![0.0f32; 2];
+        let mut trace = Vec::new();
+        let mut fired = 0;
+        for _ in 0..120 {
+            net.step();
+            net.read(Port::Spike, &mut spike).unwrap();
+            net.read(Port::Current, &mut current).unwrap();
+            trace.push(current[1]);
+            fired += (spike[1] > 0.5) as u32;
+        }
+        (trace, fired)
+    };
+
+    // Off: the pool never depletes, so this must be the model that never had
+    // depression at all, bit for bit.
+    let (plain, plain_spikes) = run(1.0);
+    let p_off = LifParams {
+        dt_over_tau: 0.5,
+        v_th: 0.4,
+        refrac_ticks: 0,
+        dt_over_tau_syn: 0.5,
+        dt_over_tau_inh: 0.5,
+        ..LifParams::default()
+    };
+    assert_eq!(p_off.std_release, 1.0, "the default has to be the inert one");
+
+    // On: the same drive delivers steadily less current as the pool empties.
+    let (depressed, depressed_spikes) = run(0.7);
+    let early: f32 = depressed[5..15].iter().sum();
+    let late: f32 = depressed[100..110].iter().sum();
+    assert!(
+        late < 0.75 * early,
+        "the synapse did not weaken with use: {early} early against {late} late"
+    );
+    let plain_early: f32 = plain[5..15].iter().sum();
+    let plain_late: f32 = plain[100..110].iter().sum();
+    assert!(
+        (plain_late - plain_early).abs() < 0.1 * plain_early.abs().max(1e-6),
+        "without depression the synapse must not fade: {plain_early} then {plain_late}"
+    );
+    assert!(
+        depressed_spikes < plain_spikes,
+        "depression has to cost the receiver spikes: {depressed_spikes} against {plain_spikes}"
+    );
+}

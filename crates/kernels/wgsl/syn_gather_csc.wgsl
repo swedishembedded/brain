@@ -110,6 +110,9 @@ struct Params {
 @group(0) @binding(4) var<storage, read>       spike:  array<f32>;
 @group(0) @binding(5) var<storage, read_write> isyn:   array<f32>;
 @group(0) @binding(6) var<storage, read_write> syn:    array<f32>;
+/// Presynaptic vesicle pool, one per neuron, maintained by `lif_step`. A
+/// spike from a neuron that has been firing hard delivers less.
+@group(0) @binding(7) var<storage, read>       depress: array<f32>;
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>,
@@ -124,7 +127,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     var acc_e = 0.0;
     var acc_i = 0.0;
     for (var k = lo; k < hi; k = k + 1u) {
-        let c = w[k] * spike[pre[k]];
+        let src = pre[k];
+        let c = w[k] * spike[src] * depress[src];
         // Split by the SIGN OF THE WEIGHT, which is the presynaptic neuron's
         // transmitter, so excitation and inhibition can carry their own time
         // constants. Written as a clamp pair rather than as `if (w[k] < 0.0)`:

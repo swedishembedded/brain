@@ -111,6 +111,26 @@ struct Params {
     adapt_decay: f32,
     /// How much of it one spike adds.
     adapt_increment: f32,
+    /// Short-term synaptic depression, on the presynaptic side.
+    ///
+    /// A synapse has a finite pool of ready vesicles. Firing spends it and it
+    /// refills over hundreds of milliseconds, so a cell that fires fast
+    /// delivers progressively LESS per spike. That is the mechanism which
+    /// keeps a recurrent network off its ceiling: adaptation slows the sender,
+    /// depression weakens what the sender sends, and only the second scales
+    /// with how much the receiver is already getting.
+    ///
+    /// It is also a structural control for free. In the published whole-brain
+    /// model of this animal, depression stabilises the reconstructed
+    /// connectome while a degree-matched shuffle of it still seizes, so a
+    /// network that needs depression to behave and a network that cannot be
+    /// saved by it are telling you something about the wiring.
+    ///
+    /// `std_release` is the fraction of the pool surviving one spike and
+    /// `std_recover` is `dt/tau_D` for the refill. A release of 1.0 never
+    /// depletes and is exactly inert.
+    std_release: f32,
+    std_recover: f32,
 };
 
 @group(0) @binding(0) var<uniform> p: Params;
@@ -139,6 +159,9 @@ struct Params {
 // parameters a connectome does not contain and a fitted model has to supply.
 @group(0) @binding(7) var<storage, read>       tau_scale:  array<f32>;
 @group(0) @binding(8) var<storage, read>       gain_scale: array<f32>;
+/// Fraction of each neuron's vesicle pool still available, one per PREsynaptic
+/// neuron. Read by `syn_gather_csc` when it weighs that neuron's spikes.
+@group(0) @binding(9) var<storage, read_write> depress:    array<f32>;
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>,
@@ -153,12 +176,18 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     // refractory period twice over.
     let w = adapt[i] * p.adapt_decay;
 
+    // Depression recovers every tick and is spent by spiking below. Recovery
+    // first, so a spike's cost lands on the refilled pool rather than on the
+    // one this tick started with.
+    let pool = depress[i] + (1.0 - depress[i]) * p.std_recover;
+
     let left = refrac[i];
     if (left > 0u) {
         v[i] = p.v_reset;
         refrac[i] = left - 1u;
         spike[i] = 0.0;
         adapt[i] = w;
+        depress[i] = pool;
         return;
     }
 
@@ -187,9 +216,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
         refrac[i] = p.refrac_ticks;
         spike[i] = 1.0;
         adapt[i] = w + p.adapt_increment;
+        depress[i] = pool * p.std_release;
     } else {
         v[i] = vi;
         spike[i] = 0.0;
         adapt[i] = w;
+        depress[i] = pool;
     }
 }

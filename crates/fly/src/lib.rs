@@ -149,6 +149,14 @@ pub fn cord_lif() -> LifParams {
         refrac_ticks: 1,
         dt_over_tau_syn: dt_ms / 5.0,
         dt_over_tau_inh: dt_ms / 20.0,
+        // Short-term depression on, because a cord without it sits with a
+        // twentieth of its cells pinned at the refractory ceiling however the
+        // synaptic scale is set. 0.85 per spike against a 150 ms refill: a
+        // cell firing at 50 Hz settles to about two thirds of its rested
+        // strength, which is the range the published whole-brain model of this
+        // animal found stabilising.
+        std_release: 0.85,
+        std_recover: dt_ms / 150.0,
         ..LifParams::default()
     }
 }
@@ -196,25 +204,20 @@ pub struct Wiring {
 
 impl Default for Wiring {
     fn default() -> Self {
-        // 0.6, and the justification for it is WITHDRAWN rather than
-        // replaced. It was swept against the gait criterion, which is a
-        // parameter fitted to the objective it is then used to evaluate.
+        // 0.3, chosen by firing statistics now that the dynamics can produce
+        // any. Under conductance-based synapses and short-term depression the
+        // cord is graded across the whole range 0.08 to 1.0 - mean rate 8 to
+        // 26 Hz, silent at rest, and never more than 1.4% of cells pinned at
+        // the refractory ceiling - so this is the middle of a broad plateau
+        // rather than the peak of a narrow one, which is the difference
+        // between a calibration and a fit.
         //
-        // A calibration against firing statistics said 0.04 to 0.08, agreeing
-        // with the published whole-brain model by dimension. That calibration
-        // was run before `LifParams::v_min` existed, and the missing floor is
-        // exactly what made heavily innervated cells look quiet: they were at
-        // -274 against a threshold of +1, not weakly driven. Every number in
-        // that sweep is a measurement of a different model, so the scale it
-        // chose cannot be carried over.
-        //
-        // What is actually known, now that the floor exists: no single scale
-        // puts this cord in a graded regime. Below the transition it recruits
-        // nothing, above it the whole cord, and the leg's muscles sit either
-        // pinned at the refractory ceiling or pinned at the inhibitory
-        // reversal. That is an argument for per-connection-type gains
-        // (`physiology::Physiology`), not for a better global number.
-        Wiring { weight_scale: 0.6, shuffle_seed: None, size_limit: Some(10.0), min_synapses: 5 }
+        // For contrast, and for why the earlier numbers here were withdrawn:
+        // with current-based synapses NO scale worked. Recruitment jumped from
+        // nothing to the whole cord with nothing in between, 70% of cells were
+        // silent, 6% were pinned, and the leg's flexors outfired its extensors
+        // 35 to 1.
+        Wiring { weight_scale: 0.3, shuffle_seed: None, size_limit: Some(10.0), min_synapses: 5 }
     }
 }
 
