@@ -59,7 +59,22 @@ fn main() {
         let scene = flybody::flight_scene(std::path::Path::new(&base), scratch.path(), flight).unwrap();
         (scene, Timing { neural_per_control: 1, physics_per_control: fly::Timing::substeps(flight.timestep).unwrap(), physics_dt: flight.timestep })
     } else {
-        (std::path::PathBuf::from(env("BRAIN_FLYBODY_XML")), Timing::default())
+        // `TIMESTEP` reproduces a viewer's integrator. The demo runs the body
+        // at a coarser step than a search does, and the floor is softened to
+        // match it, so a tuning validated here at the default and then watched
+        // there is being watched in a different experiment.
+        let timing = match std::env::var("TIMESTEP").ok().and_then(|v| v.parse::<f64>().ok()) {
+            Some(dt) => Timing {
+                neural_per_control: 1,
+                physics_per_control: fly::Timing::substeps(dt).unwrap_or_else(|e| {
+                    eprintln!("{e}");
+                    std::process::exit(2)
+                }),
+                physics_dt: dt,
+            },
+            None => Timing::default(),
+        };
+        (std::path::PathBuf::from(env("BRAIN_FLYBODY_XML")), timing)
     };
     let model = Model::from_xml(&mj, &model_path).unwrap();
     let gpu = gpu_core::testgpu::dev(&neuro::KERNELS);
@@ -172,6 +187,64 @@ fn main() {
     tuning.apply(&mut sf, &c, shuffled_wiring).expect("the tuning applies to the shuffle too");
     let shuffled = run(&mut sf, command);
     row("shuffled", &shuffled);
+
+    // THE DURATION CONTROL, and it is the one that catches an animal which
+    // does not fall over and does not walk either.
+    //
+    // Every row above ran for exactly as long as the search's episodes did,
+    // which means none of them can see the failure that matters most: a
+    // tuning that is a TRANSIENT. An objective built on net displacement over
+    // a two-second episode is fully satisfied by a lunge, and a lunge scores
+    // well, passes the paralysed control, passes the shuffle, and finishes
+    // upright. It then stops. The creature that produced the numbers above
+    // travels 0.46 body lengths a second for two seconds and 0.02 for the next
+    // ten, which is worse than the connectome as imported and was invisible
+    // until somebody watched the screen.
+    //
+    // So: the same tuning, held for three times as long, against the same
+    // baseline held for three times as long. A behaviour that is real does not
+    // care how long it is asked to keep going.
+    let long = ticks * 3;
+    println!("\nheld for {long} ticks ({:.0} s), three times the episode it was tuned on:", long as f64 * fly::CONTROL_PERIOD);
+    let run_long = |f: &mut Fly, command: f32| {
+        let cfg = RewardConfig { objective, ticks: long, command, ..RewardConfig::default() };
+        episode(f, cfg, Condition::Frozen, &mut Lcg::new(1)).expect("an episode runs")
+    };
+    let mut f2 = {
+        let model = Model::from_xml(&mj, &model_path).unwrap();
+        let mut f = Fly::new(gpu_core::testgpu::dev(&neuro::KERNELS), &c, model, fly::cord_lif(), wiring, timing, Coupling::default()).unwrap();
+        if air {
+            f.enable_flight(fly::Wingbeat { hz: 180.0, ..fly::Wingbeat::default() }).unwrap();
+        }
+        f.set_food(f_food);
+        f
+    };
+    let seconds_long = long as f64 * fly::CONTROL_PERIOD;
+    let row_long = |label: &str, e: &fly::learn::Episode| {
+        println!(
+            "{label:>12}  {:>9.5}  {:>9.4}  {:>8}  {:>8.2}  {:>7.2}  {:>9}  {}",
+            e.score(),
+            e.net,
+            "",
+            e.net / 0.25 / seconds_long,
+            e.tipped,
+            e.spikes,
+            if e.terminated { "ended early" } else { "ran to the end" }
+        );
+    };
+    let imported_long = run_long(&mut f2, 1.0);
+    row_long("as imported", &imported_long);
+    tuning.apply(&mut f2, &c, wiring).expect("the tuning applies");
+    let tuned_long = run_long(&mut f2, command);
+    row_long("tuned", &tuned_long);
+    let (a, b) = (tuned_long.net / seconds_long, imported_long.net / seconds_long);
+    if a <= b {
+        println!(
+            "\n  FAILED: over {seconds_long:.0} s the tuning travels {a:.4} cm/s against the imported"
+        );
+        println!("  connectome's {b:.4}. It is a transient: the objective's episode was short");
+        println!("  enough that a lunge satisfies it, and nothing above could see that.");
+    }
 
     println!("\nthe tuned row has to beat every other, and `tipped` has to be small:");
     println!("a walk that finishes more than a radian from upright is a slide, and a");
