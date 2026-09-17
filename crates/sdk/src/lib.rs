@@ -38,6 +38,7 @@
 //! | `text` | [`TextGenerationPipeline`] -- text generation (qwen3, from a local checkpoint path) |
 //! | `vision` | [`EmbeddingPipeline`] -- text embedding (CLIP); [`DetectionPipeline`] -- object detection (YOLOv8); [`SegmentPipeline`] -- promptable segmentation (SAM 2.1); [`DepthPipeline`] -- monocular depth (ZipDepth); named for the `brain_arch::Domain` they resolve under, not the capability, since there is no `Embedding`/`Detection`/`Segmentation`/`Depth` domain |
 //! | `audio` | [`TranscribePipeline`] -- speech-to-text (qwen3-asr, offline); [`TtsPipeline`] -- text-to-speech (Qwen3-TTS: speak/clone_voice/design) |
+//! | `video` | [`VideoPipeline`] -- text-to-video (Wan2.1 T2V) |
 //! | `full` | every surface; this is `default` |
 //!
 //! `device` and `resolve` are infrastructure tiers that a surface selects for
@@ -124,6 +125,8 @@ mod text;
 mod tts;
 #[cfg(feature = "image")]
 mod upscale;
+#[cfg(feature = "video")]
+mod video;
 #[cfg(feature = "creature")]
 mod view;
 
@@ -173,6 +176,8 @@ pub use text::{GeneratedText, TextGenerationOptions, TextGenerationPipeline, Tex
 pub use tts::{Audio, TtsOptions, TtsPipeline, TtsPipelineBuilder};
 #[cfg(feature = "image")]
 pub use upscale::{UpscaleOptions, UpscalePipeline, UpscalePipelineBuilder};
+#[cfg(feature = "video")]
+pub use video::{Video, VideoOptions, VideoPipeline, VideoPipelineBuilder};
 #[cfg(feature = "creature")]
 pub use view::{Steering, View};
 

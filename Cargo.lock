@@ -399,6 +399,7 @@ dependencies = [
  "brain-sam2",
  "brain-testutil",
  "brain-timesfm3",
+ "brain-wan",
  "brain-wm-display",
  "brain-yolov8",
  "brain-zipdepth",

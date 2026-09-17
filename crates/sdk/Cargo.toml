@@ -28,7 +28,7 @@ path = "src/lib.rs"
 # baseline (`Cargo.toml`'s `brain = { default-features = false }`) is what
 # makes a consumer name its surfaces explicitly.
 default = ["full"]
-full = ["image", "creature", "forecast", "text", "vision", "audio", "decision"]
+full = ["image", "creature", "forecast", "text", "vision", "audio", "decision", "video"]
 
 # --- surfaces: one per brain_arch::Domain the SDK has a public type for.
 #     A surface is the only thing a consumer names.
@@ -87,6 +87,14 @@ decision = ["device", "dep:brain-decide", "dep:brain-data", "dep:brain-checkpoin
 # unset, resolved from the checkpoint" contract `qwen3tts::caps::
 # gen_opts_from` already established for the wire path.
 audio = ["resolve", "dep:brain-qwen3asr", "dep:brain-audio", "dep:brain-qwen3tts", "dep:brain-data"]
+# `brain::VideoPipeline` (Wan2.1 text-to-video). Selects `imagetype` for
+# `imaging::video`'s encode helper `Video::save` writes through - the same
+# "cheap to select twice" reasoning `vision` already uses for `Image`.
+# `dep:brain-data` is wan's own `data::rng::random_seed` for an unset seed,
+# the same contract `audio` above already needs it for. ltxv (this bucket's
+# other served architecture) is a tracked future extension, not folded in
+# here - see the roadmap for why.
+video = ["resolve", "imagetype", "dep:brain-wan", "dep:brain-data"]
 
 # --- infrastructure: selected BY a surface, never named by a consumer.
 # `brain::Device`.
@@ -141,6 +149,7 @@ brain-rrdbnet = { workspace = true, optional = true }
 brain-sam2 = { workspace = true, optional = true }
 brain-timesfm3 = { workspace = true, optional = true }
 brain-s3dit = { workspace = true, optional = true }
+brain-wan = { workspace = true, optional = true }
 brain-wm-display = { workspace = true, optional = true }
 brain-yolov8 = { workspace = true, optional = true }
 brain-zipdepth = { workspace = true, optional = true }

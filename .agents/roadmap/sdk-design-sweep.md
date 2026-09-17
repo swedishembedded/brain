@@ -27,7 +27,7 @@ all - the fly/flybody/connectome stack is unregistered).
 | Multimodal/VLM/OCR | 9 | 8 | none | `omni_cli.rs`, `document_study_cli.rs` + 5 `resident_*.rs` | yes (qwen3vl) |
 | Image generation | 6 | 6 | **YES - `ImagePipeline`** (flux2+s3dit only) | `flux2_cli.rs` + `s3dit::caps::ZAction` | yes (flux2, s3dit) |
 | Restoration/upscaling/VAE | 5 | 5 | **PARTIAL - `UpscalePipeline`** (RRDBNet) + **`RestorePipeline`** (CodeFormer; SUPIR/VQGAN deferred, see Phase 2.5/2.7) | no dedicated CLI; `resident_restore/upscale/supir.rs` | no |
-| Video generation | 2 | 2 | none | `wan_cli.rs`, `ltxv_cli.rs` | yes (wan) |
+| Video generation | 2 | 2 | **PARTIAL - `VideoPipeline`** (Wan2.1 T2V; ltxv deferred, see Phase 5.1) | `wan_cli.rs`, `ltxv_cli.rs` | yes (wan) |
 | ASR | 2 | 2 | none | **no CLI at all** - `resident_asr.rs` only | no |
 | TTS/music/speech codec | 7 | 3 | **PARTIAL - `TtsPipeline`** (Qwen3-TTS: speak/clone_voice/design; cosyvoice/minimaxmusic3 deferred, see Phase 4.1) | `tts_cli.rs` + `tts_serve.rs` | no |
 | Vision/detection/segmentation | 4 | 4 | **PARTIAL - `DetectionPipeline`** (YOLOv8) + **`SegmentPipeline`** (SAM2) + **`DepthPipeline`** (ZipDepth; label is a VLM captioning workflow, not a single-arch capability, out of scope here - see Phase 3.1/3.2/3.3) | `yolo_cli.rs`, `sam2_cli.rs`, `depth_cli.rs`, `label_cli.rs` | no |
@@ -1289,3 +1289,106 @@ Phase 3.3), `cargo test -p brain --features audio --test tts_pipeline`
 (3 passed), `cargo test -p brain --features audio --tests` (full audio
 surface suite, no regressions), `bash scripts/gates/check-no-doc-citations.sh`
 (clean), and a full `cargo build --workspace --exclude brain-vulkan`.
+
+### Phase 5.1 - `VideoPipeline` (Wan2.1 T2V) - the video generation bucket's first pipeline, and a real "invisible to the scanner" gap found while reusing the crate's own fixture
+
+Covers **Wan2.1 T2V only**, over the already-existing `wan::spec::WanSpec`
+(a real, already-migrated `ArchSpec` - `wan` was already resolver-based in
+`crates/catalog`, unlike most archs this campaign has picked up cold).
+`ltxv` (this bucket's other served architecture) is deferred, the same
+"pick the more complete/migrated architecture in the bucket first" reasoning
+Phase 4.1 used for qwen3tts over cosyvoice/minimaxmusic3 - `ltxv`'s catalog
+registration still uses `always!()`, not a resolved `Assembly`.
+
+**`VideoPipelineBuilder::load` never asks for a variant**: `WanSpec::
+assemble`'s own comment already establishes that Wan's variant is NEVER
+unrecoverable from the DiT's own tensor shapes (`dit_config_from_shapes`
+matches an EXACT (dim, layer-count) pair against a real, named variant or
+fails) - unlike flux2's klein-vs-base ambiguity, a resolved Wan `dit` always
+names one full variant. `assembly.variant` is read straight off the
+resolved `Assembly` and fed to `wan::caps::config_from_name`, the same
+"the checkpoint itself is the variant" pattern the CodeFormer/SAM2/RRDBNet
+pipelines already established for their own single-preset or
+shape-derived configs.
+
+**`VideoPipeline` is the second pipeline in this crate (after
+`SegmentPipeline`) to hold resident device state behind a `Mutex`**:
+`wan::caps`'s own module doc explains why residency matters here more than
+anywhere else in this crate - "a 480p run is measured in tens of minutes...
+a cold call pays a slow load plus 5.7 GB of upload; a second request at the
+same size pays neither." `generate_with` locks a `Mutex<Option<wan::
+pipeline::HotDit>>` and calls the SAME `wan::pipeline::generate_hot`
+`WanProvider`'s own `generate_on` helper calls - one implementation of
+generation, shared by CLI/D-Bus and the SDK, per rule 10.
+
+**Scope this pipeline deliberately does NOT cover**: `lora_train` (a
+training entry point - the same open, per-pipeline "no training call yet"
+gap rule 9 tracks for every pipeline in this crate, not a narrower cut this
+milestone introduced) and I2V (`wan::caps`'s own module doc says the crate
+has no 36-channel input path or CLIP vision tower yet - advertising an
+action that cannot run would be worse than not advertising it, the same
+reasoning that module doc gives for the served `t2v` action itself).
+Progress/cancellation stay at M5's SIMPLE default (`CancelToken::default()`,
+a no-op progress closure) - `generate_hot`'s own `progress`/`cancel`
+parameters are real and load-bearing (a 480p run needs both to be a servable
+action at all), but wiring them through to a public SDK-level progress API
+is the same tracked M5b gap every other pipeline in this crate still has,
+not a new one.
+
+**A real, independent "invisible to the real scanner" gap found while
+building this milestone's own fixture, in a DIFFERENT spec than any prior
+phase's bug**: `wan::spec::tests`' own `t2v_1_3b_fixture` (the fixture this
+milestone's SDK test reproduces) writes its "prove `resolve()`'s root
+inference lands on the right directory" sibling file as `other-vendor/
+unrelated.bin` - but that test hand-builds its `ArtifactRecord`s directly
+(`ArtifactRecord { path, kind: ArtifactKind::Opaque, .. }`), the SAME
+"never goes through the real scanner" gap this campaign already found in
+`RrdbnetSpec`/`Sam2Spec`, just manifesting differently here: going through
+the REAL `brain_modelstore::inventory::scan` showed that `inventory::scan`
+never emits a record for a `.bin` file at all (`kind_of_extension` does not
+recognize the extension), so the sibling silently vanishes from the scanned
+inventory, `brain_modelstore::resolve::common_root` collapses onto the
+single vendor directory instead of the intended common ancestor, and
+`vendor_dir`-based cross-role matching (`WanSpec`'s own tokenizer/
+text_encoder vocab-compatibility check) breaks - the `tokenizer` role
+stopped classifying, silently, only reachable through the FULL `resolve()`
+call, not `WanSpec::classify` alone. This crate's own test suite has never
+caught this because it never goes through the real scanner either. Not
+fixed in `wan::spec::tests` itself (out of scope for this SDK milestone,
+which does not otherwise touch that crate) - fixed only in this milestone's
+own fixture, by using `.gguf` (a recognized extension, the same one `tests/
+tts_pipeline.rs`'s own sibling file already uses) instead of `.bin`. Also
+found and worked around: a `brain.manifest.json` anywhere in a directory
+collapses the WHOLE directory into one `ArtifactKind::Compound` record,
+hiding every other file in it from a content-based, per-file classifier
+like `WanSpec::classify` - so this fixture satisfies `Store::local`'s own
+presence check by naming the DiT file `model.brain.safetensors`
+(`Store`'s own `BASE_WEIGHTS_FILE` fallback name) instead of adding a
+manifest, keeping every real file individually visible to the scanner.
+
+**A fast, real end-to-end RESOLUTION test** (not a full forward pass -
+see below): because `dit_config_from_shapes`/`is_wan_vae`/
+`is_wan_text_encoder` all read shapes/marker tensors rather than full
+weight content, `video_pipeline.rs` reaches a real `Resolved` assembly and
+a real, constructed `VideoPipeline` in under a second, reusing
+`wan::spec::tests`' own minimal-tensor fixture discipline (one marker
+tensor per DiT block, a 4-channel toy VAE, a 100-token toy vocabulary).
+
+**Not a full forward pass, by design**: `wan::pipeline::generate_hot` needs
+every DiT block's REAL weights to build the transformer at all (this
+fixture carries only one marker tensor per block, matching `wan::spec::
+tests`' own discipline for staying fast), so `.generate()` fails cleanly
+(`Error::Backend`) rather than running a genuine multi-minute video
+generation - the same "resolution proven, full forward pass not" scope
+`TtsPipeline`'s/`TranscribePipeline`'s own tests already accepted, for a
+different underlying ceiling (there: a real tokenizer; here: a
+would-be-genuinely-huge complete tensor set with no practical shrink
+lever, `WanConfig`'s two presets being fixed, named, resolver-gated exact
+shapes, not derived like RRDBNet/YOLOv8/ZipDepth's).
+
+Verified with `cargo build -p brain --features video` (clean), `bash
+scripts/gates/check-sdk-features.sh` (OK, `video` compiles standalone,
+clean on the first attempt), `cargo test -p brain --features video --test
+video_pipeline` (3 passed, under 10s total), `bash scripts/gates/
+check-no-doc-citations.sh` (clean), and a full `cargo build --workspace
+--exclude brain-vulkan`.
