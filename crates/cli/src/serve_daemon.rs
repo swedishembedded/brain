@@ -326,6 +326,11 @@ pub fn detach_process(ready: &Path, pid_file: &Path, log: &Path, timeout: Durati
     // instantly against a server that is not up yet.
     let _ = std::fs::remove_file(ready);
 
+    // Opened BEFORE the fork, or the daemon's first lines - the ones saying
+    // what it decided to serve - would be written while the parent was still
+    // working out where to start reading.
+    let mut tail = LogTail::from_end(log);
+
     // Everything below forks, so it must happen before any thread or async
     // runtime exists: only the forking thread survives into the child, and a
     // runtime whose worker threads vanished is unusable.
@@ -338,7 +343,7 @@ pub fn detach_process(ready: &Path, pid_file: &Path, log: &Path, timeout: Durati
         // wait for the real daemon to come up before reporting success.
         let mut status = 0;
         unsafe { libc::waitpid(first, &mut status, 0) };
-        match wait_ready(ready, pid_file, timeout) {
+        match wait_ready(ready, pid_file, &mut tail, timeout) {
             Ok(pid) => {
                 println!("brain serve: detached, pid {pid}");
                 println!("brain serve: log {}", log.display());
@@ -386,11 +391,46 @@ fn redirect_stdio(log: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Wait for the detached server to record its pid and report itself listening.
-fn wait_ready(ready: &Path, pid_file: &Path, timeout: Duration) -> Result<i32, String> {
+/// Follows a log file, handing whatever has been appended since the last look
+/// to a sink.
+///
+/// This exists so that waiting for a cold start is not silent. Scanning a model
+/// directory and activating a first checkpoint takes minutes, and a caller
+/// shown nothing for the whole of it cannot tell a slow start from a dead one
+/// -- which is precisely how a server that never finished binding came to be
+/// read as a hung script.
+struct LogTail(Option<File>);
+
+impl LogTail {
+    /// Opens `path` positioned at its current end, so only what is written from
+    /// now on is echoed; the previous run's log is not this run's progress.
+    /// Created if absent, since the daemon has not opened it yet.
+    fn from_end(path: &Path) -> LogTail {
+        let opened = OpenOptions::new().read(true).append(true).create(true).open(path);
+        LogTail(opened.ok().and_then(|mut f| f.seek(io::SeekFrom::End(0)).ok().map(|_| f)))
+    }
+
+    /// Copy everything appended since the previous call into `out`.
+    ///
+    /// Every failure here is ignored on purpose: this is a progress display,
+    /// and losing it must never be the reason a start is reported as failed.
+    fn pump(&mut self, out: &mut impl Write) {
+        let Some(f) = &mut self.0 else { return };
+        let mut buf = Vec::new();
+        if f.read_to_end(&mut buf).is_ok() && !buf.is_empty() {
+            let _ = out.write_all(&buf);
+            let _ = out.flush();
+        }
+    }
+}
+
+/// Wait for the detached server to record its pid and report itself listening,
+/// echoing its log to stderr meanwhile so the wait shows its work.
+fn wait_ready(ready: &Path, pid_file: &Path, tail: &mut LogTail, timeout: Duration) -> Result<i32, String> {
     let deadline = Instant::now() + timeout;
     let mut seen_pid = None;
     while Instant::now() < deadline {
+        tail.pump(&mut io::stderr());
         if seen_pid.is_none() {
             seen_pid = running(pid_file);
         }
@@ -400,14 +440,17 @@ fn wait_ready(ready: &Path, pid_file: &Path, timeout: Duration) -> Result<i32, S
             // would run to the full timeout against a process that has
             // already exited.
             if !alive(pid) {
+                tail.pump(&mut io::stderr());
                 return Err("the server exited during startup".to_string());
             }
             if ready.exists() {
+                tail.pump(&mut io::stderr());
                 return Ok(pid);
             }
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+    tail.pump(&mut io::stderr());
     match seen_pid {
         Some(_) => Err(format!("the server did not become ready within {}s", timeout.as_secs())),
         None => Err(format!("the server did not start within {}s", timeout.as_secs())),
@@ -460,6 +503,40 @@ mod tests {
                 Claim::HeldBy(pid) => panic!("the claim was never released (held by {pid:?})"),
             }
         }
+    }
+
+    /// The waiting parent must show the caller what the daemon is doing.
+    ///
+    /// A cold start is minutes of model scanning and activation, and `-d` used
+    /// to print nothing at all for the whole of it -- so a genuine failure and
+    /// a slow load looked identical from the outside, and the only way to tell
+    /// them apart was to go and find the log by hand. Echoing from the end of
+    /// the log (not its start) is the point: the previous run's output is not
+    /// this run's progress.
+    #[test]
+    fn the_wait_echoes_only_what_the_new_run_writes_to_the_log() {
+        let log = tmp("tail").join("serve.log");
+        std::fs::write(&log, "a previous run said this\n").unwrap();
+
+        let mut tail = LogTail::from_end(&log);
+        let mut seen: Vec<u8> = Vec::new();
+
+        // Nothing new yet.
+        tail.pump(&mut seen);
+        assert!(seen.is_empty(), "echoed before anything was written: {seen:?}");
+
+        let mut f = OpenOptions::new().append(true).open(&log).unwrap();
+        writeln!(f, "brain serve: scanning model dir").unwrap();
+        f.flush().unwrap();
+        tail.pump(&mut seen);
+        assert_eq!(String::from_utf8_lossy(&seen), "brain serve: scanning model dir\n");
+
+        // A second pump must not repeat what it already showed.
+        writeln!(f, "brain serve: ready").unwrap();
+        f.flush().unwrap();
+        seen.clear();
+        tail.pump(&mut seen);
+        assert_eq!(String::from_utf8_lossy(&seen), "brain serve: ready\n");
     }
 
     /// A crashed server leaves a pidfile behind. It must not block the next

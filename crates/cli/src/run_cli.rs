@@ -121,7 +121,10 @@ D-BUS CONTROL SURFACE
 PROCESS LIFECYCLE
   -d, --detach           run in the background and return once every requested
                          surface is listening (not merely once the process has
-                         started). Prints the pid; output goes to the log below.
+                         started). Prints the pid; output goes to the log below,
+                         and is echoed here while the wait lasts - a cold start
+                         scans the model directory and activates a checkpoint
+                         before anything binds, which is minutes, not seconds.
                          A requested surface that cannot bind ends the process
                          rather than serving the rest, since readiness is the
                          AND of all of them and would otherwise never arrive.
