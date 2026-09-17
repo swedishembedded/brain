@@ -477,6 +477,18 @@ impl Connectome {
         self.network_keeping(scale, size_limit, min_synapses, &std::collections::HashSet::new())
     }
 
+    /// [`Self::network_keeping`] with a separate gain on inhibitory synapses.
+    pub fn network_balanced(
+        &self,
+        scale: f32,
+        size_limit: Option<f32>,
+        min_synapses: u32,
+        keep: &std::collections::HashSet<(u32, u32)>,
+        inhibitory_gain: f32,
+    ) -> neuro::Csc {
+        self.build_network(scale, size_limit, min_synapses, keep, inhibitory_gain)
+    }
+
     /// The same, with `keep` exempt from the synapse floor.
     ///
     /// The floor exists because reconstruction assigns a great many one- and
@@ -501,6 +513,17 @@ impl Connectome {
         min_synapses: u32,
         keep: &std::collections::HashSet<(u32, u32)>,
     ) -> neuro::Csc {
+        self.build_network(scale, size_limit, min_synapses, keep, 1.0)
+    }
+
+    fn build_network(
+        &self,
+        scale: f32,
+        size_limit: Option<f32>,
+        min_synapses: u32,
+        keep: &std::collections::HashSet<(u32, u32)>,
+        inhibitory_gain: f32,
+    ) -> neuro::Csc {
         let mut csc = if min_synapses > 1 {
             let mut edges: Vec<(u32, u32, f32)> = Vec::new();
             for post in 0..self.csc.n as usize {
@@ -519,7 +542,13 @@ impl Connectome {
         };
         let signs: Vec<f32> = csc.pre.iter().map(|p| self.neurons.get(*p as usize).map_or(0.0, |n| n.nt.sign())).collect();
         for (w, sign) in csc.w.iter_mut().zip(&signs) {
-            *w *= sign * scale;
+            // Inhibition is scaled separately. A connectome counts contacts,
+            // not conductances, and there is no reason a GABAergic contact
+            // should be worth the same current as a cholinergic one; the
+            // published whole-brain model of this animal carries exactly this
+            // factor and finds the network best behaved when inhibition is
+            // several times the stronger. `1.0` is the connectome as counted.
+            *w *= sign * scale * if *sign < 0.0 { inhibitory_gain } else { 1.0 };
         }
         if let Some(limit) = size_limit {
             let _ = csc.scale_by_post(&self.excitability(limit));

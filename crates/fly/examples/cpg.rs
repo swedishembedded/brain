@@ -72,7 +72,12 @@ fn main() {
         println!("  {name}: {} cells", cells.len());
     }
 
-    let wiring = Wiring { min_synapses: num("MIN_SYNAPSES", 5), ..Wiring::default() };
+    let wiring = Wiring {
+        min_synapses: num("MIN_SYNAPSES", 5),
+        weight_scale: num("SCALE", 0.3f32),
+        inhibitory_gain: num("IE", 1.0f32),
+        ..Wiring::default()
+    };
     let ticks: usize = num("TICKS", 1500);
     let settle: usize = num("SETTLE", 250);
     let dt = 0.002;
@@ -81,9 +86,23 @@ fn main() {
     // A fly rests 7 mV below threshold and its chloride reversal sits about
     // 20 mV below rest, so the physiological value is near -3. Swept because
     // the oscillation this example reports turned out to DEPEND on it.
-    let lif = || fly::LifParams { v_min: num("V_MIN", -3.0f32), ..fly::cord_lif() };
+    // Spike-frequency adaptation: a slow current that builds while a cell
+    // fires and decays when it stops. It is the classic burst terminator, and
+    // a population that cannot stop firing cannot alternate with another.
+    let lif = || fly::LifParams {
+        v_min: num("V_MIN", -3.0f32),
+        adapt_increment: num("ADAPT", 0.0f32),
+        adapt_decay: num("ADAPT_DECAY", 0.98f32),
+        ..fly::cord_lif()
+    };
     let build = |seed: Option<u64>| {
-        let mut graph = c.network(wiring.weight_scale, wiring.size_limit, wiring.min_synapses);
+        let mut graph = c.network_balanced(
+            wiring.weight_scale,
+            wiring.size_limit,
+            wiring.min_synapses,
+            &std::collections::HashSet::new(),
+            wiring.inhibitory_gain,
+        );
         if let Some(s) = seed {
             graph = graph.shuffled_sources(s);
         }
@@ -221,7 +240,13 @@ fn main() {
         .iter()
         .map(|t| (t.to_string(), sub.population(|n| n.cell_type == *t)))
         .collect();
-    let graph = sub.network(wiring.weight_scale, wiring.size_limit, wiring.min_synapses);
+    let graph = sub.network_balanced(
+        wiring.weight_scale,
+        wiring.size_limit,
+        wiring.min_synapses,
+        &std::collections::HashSet::new(),
+        wiring.inhibitory_gain,
+    );
     println!(
         "\nthe circuit alone: {} neurons, {} edges, driving {command_type}",
         sub.neurons.len(),
@@ -271,7 +296,13 @@ fn main() {
     let no_inhibition = c.subgraph(|n| members.contains(&n.cell_type.as_str()) && n.cell_type != "IN16B036");
     let ni_command = no_inhibition.population(|n| n.cell_type == command_type);
     let ni_e2 = no_inhibition.population(|n| n.cell_type == "INXXX466");
-    let ni_graph = no_inhibition.network(wiring.weight_scale, wiring.size_limit, wiring.min_synapses);
+    let ni_graph = no_inhibition.network_balanced(
+        wiring.weight_scale,
+        wiring.size_limit,
+        wiring.min_synapses,
+        &std::collections::HashSet::new(),
+        wiring.inhibitory_gain,
+    );
     let mut ni = SpikingNet::new(gpu_core::testgpu::dev(&neuro::KERNELS), &ni_graph, lif()).expect("it runs");
     let series = run(&mut ni, &ni_command, best_iso, &[ni_e2.as_slice()]);
     row("without IN16B036", &analyse(&series[0], dt, BAND));

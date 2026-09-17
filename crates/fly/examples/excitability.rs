@@ -141,9 +141,9 @@ fn main() {
         .unwrap_or_else(|_| vec![0.6, 0.3, 0.15, 0.08, 0.04, 0.02, 0.01]);
 
     let measure = |scale: f32| -> Measured {
-        let w = Wiring { weight_scale: scale, ..Wiring::default() };
+        let w = Wiring { weight_scale: scale, inhibitory_gain: num("IE", 1.0f32), ..Wiring::default() };
         let exempt = mb.plastic_pairs(&c);
-        let graph = c.network_keeping(w.weight_scale, w.size_limit, w.min_synapses, &exempt);
+        let graph = c.network_balanced(w.weight_scale, w.size_limit, w.min_synapses, &exempt, w.inhibitory_gain);
         let mut net =
             SpikingNet::new(gpu_core::testgpu::dev(&neuro::KERNELS), &graph, fly::cord_lif()).expect("it runs");
         let mut spike = vec![0.0f32; n];

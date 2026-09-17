@@ -157,6 +157,14 @@ pub fn cord_lif() -> LifParams {
         // animal found stabilising.
         std_release: 0.85,
         std_recover: dt_ms / 150.0,
+        // Spike-frequency adaptation ON. A slow current that builds while a
+        // cell fires and decays when it stops, so a burst terminates itself -
+        // and a population that cannot stop firing cannot alternate with
+        // another, which is what a gait is made of. Swept against the leg
+        // motor pool's rhythm under tonic command: 0.204 at zero, 0.305 at
+        // 0.4, 0.190 at 1.0, so this is a peak rather than a monotone knob.
+        adapt_increment: 0.4,
+        adapt_decay: 0.98,
         ..LifParams::default()
     }
 }
@@ -200,6 +208,15 @@ pub struct Wiring {
     /// Drop every pair connected by fewer than this many synapses. See
     /// [`connectome::Connectome::network`]. `1` keeps everything.
     pub min_synapses: u32,
+    /// How much more an inhibitory contact is worth than an excitatory one.
+    ///
+    /// A connectome counts contacts, not conductances, and nothing says a
+    /// GABAergic contact carries the same current as a cholinergic one. The
+    /// published whole-brain model of this animal carries this factor
+    /// explicitly and finds the network best behaved with inhibition several
+    /// times the stronger. `1.0` is the connectome as counted, and is the
+    /// control.
+    pub inhibitory_gain: f32,
 }
 
 impl Default for Wiring {
@@ -217,7 +234,7 @@ impl Default for Wiring {
         // nothing to the whole cord with nothing in between, 70% of cells were
         // silent, 6% were pinned, and the leg's flexors outfired its extensors
         // 35 to 1.
-        Wiring { weight_scale: 0.3, shuffle_seed: None, size_limit: Some(10.0), min_synapses: 5 }
+        Wiring { weight_scale: 0.3, shuffle_seed: None, size_limit: Some(10.0), min_synapses: 5, inhibitory_gain: 1.0 }
     }
 }
 
@@ -273,10 +290,16 @@ impl Default for Coupling {
             load_gain: 0.05,
             activation_decay: 0.8,
             activation_gain: 0.05,
-            // Ten depressor neurons per leg: at 0.15 a third of them firing
-            // together in one tick is already a firm grip, which is the
-            // regime a stance phase should sit in.
-            adhesion_gain: 0.15,
+            // OFF by default, and the measurement says why. Adhesion only
+            // helps a foot that is being put down and picked up: gripping
+            // during stance is what stops a leg sliding, and gripping during
+            // swing is glue. With no gait the tarsus muscles fire steadily on
+            // all six legs, so a non-zero gain grips continuously and the
+            // animal is pinned to the floor - measured at 0.195 body lengths
+            // per second with the claws off against 0.024 with them at 0.4.
+            //
+            // Turn it on when there is a rhythm for it to be in phase with.
+            adhesion_gain: 0.0,
             // 24 power motor neurons firing at up to one spike per control
             // tick reach full power in a few ticks at this gain, which is the
             // right order for a thorax that spins up over a handful of
@@ -510,8 +533,13 @@ impl Fly {
         // with an empty exemption is `network`, bit for bit.
         let mb = connectome::MushroomBody::find(c, connectome::mushroom_body::Policy::default());
         let exempt = mb.plastic_pairs(c);
-        let mut graph =
-            c.network_keeping(wiring.weight_scale, wiring.size_limit, wiring.min_synapses, &exempt);
+        let mut graph = c.network_balanced(
+            wiring.weight_scale,
+            wiring.size_limit,
+            wiring.min_synapses,
+            &exempt,
+            wiring.inhibitory_gain,
+        );
         if let Some(seed) = wiring.shuffle_seed {
             // The structural control: same in-degrees, same weights, sources
             // randomly reassigned. Applied AFTER signing so the sign
