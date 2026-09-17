@@ -359,6 +359,38 @@ pub struct Unmapped {
 pub struct MotorMap {
     pub drives: Vec<Drive>,
     pub unmapped: Vec<Unmapped>,
+    /// Claw adhesion, one entry per leg that has both an adhesion actuator
+    /// and motor neurons to command it.
+    ///
+    /// Adhesion is a SEPARATE actuator in this body and nothing about driving
+    /// the leg joints engages it. That is not a detail of the model: this
+    /// animal's published walking depends on it, the adhesion actuators were
+    /// added to the physics engine for exactly this reason, and a fly whose
+    /// feet cannot grip has its legs slide out from under it however good the
+    /// rhythm driving them is. Every walking result in this repository up to
+    /// now was produced with all eight adhesion actuators at zero.
+    pub adhesion: Vec<Adhesion>,
+}
+
+/// One leg's grip, and the motor neurons that decide it.
+///
+/// Driven by the tarsus muscles rather than by contact or by a phase
+/// variable, because the connectome names them: `Ta_depressor` presses the
+/// tarsus onto the substrate and `Ta_levator` lifts it off, ten and five
+/// neurons per segment in MANC. Taking the grip from the animal's own
+/// depressor population keeps the claw on the same footing as every other
+/// muscle here - it is commanded by the cord, not by the simulator noticing
+/// that a foot is down.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Adhesion {
+    pub segment: Segment,
+    pub side: Side,
+    /// Index into the actuator-name list.
+    pub actuator: usize,
+    /// Motor neurons that press the tarsus down.
+    pub depressor: Vec<u32>,
+    /// Motor neurons that lift it.
+    pub levator: Vec<u32>,
 }
 
 impl MotorMap {
@@ -409,6 +441,11 @@ fn parse_sub_class(sub: &str) -> Option<(Segment, String)> {
 /// `actuators` is taken as a plain name list rather than a loaded model so the
 /// map is testable with no MuJoCo present, and so the same function serves a
 /// model loaded from any source.
+/// The adhesion actuator for one leg, by flybody's own naming.
+pub fn claw_actuator(seg: Segment, side: Side) -> String {
+    format!("adhere_claw_{}_{}", seg.suffix(), side.suffix())
+}
+
 pub fn build(c: &Connectome, actuators: &[String]) -> MotorMap {
     let mut map = MotorMap::default();
     for (i, n) in c.neurons.iter().enumerate() {
@@ -452,6 +489,32 @@ pub fn build(c: &Connectome, actuators: &[String]) -> MotorMap {
             continue;
         };
         map.drives.push(Drive { neuron, actuator, polarity: action.polarity });
+    }
+
+    // Claw adhesion, from the tarsus muscles of each leg.
+    for (seg, side, _) in LEGS.iter() {
+        let want = claw_actuator(*seg, *side);
+        let Some(actuator) = actuators.iter().position(|a| *a == want) else {
+            continue;
+        };
+        let mut adhesion = Adhesion { segment: *seg, side: *side, actuator, depressor: Vec::new(), levator: Vec::new() };
+        for (i, n) in c.neurons.iter().enumerate() {
+            if n.super_class != "motor" || !matches!(n.class.as_str(), "fl" | "ml" | "hl") {
+                continue;
+            }
+            let Some((s, muscle)) = parse_sub_class(&n.sub_class) else { continue };
+            if s != *seg || Side::parse(&n.soma_side) != Some(*side) {
+                continue;
+            }
+            match muscle.as_str() {
+                "Ta_depressor" => adhesion.depressor.push(i as u32),
+                "Ta_levator" => adhesion.levator.push(i as u32),
+                _ => {}
+            }
+        }
+        if !adhesion.depressor.is_empty() {
+            map.adhesion.push(adhesion);
+        }
     }
     map
 }

@@ -237,6 +237,13 @@ pub struct Coupling {
     pub activation_decay: f32,
     /// Activation added per polarity-weighted motor spike.
     pub activation_gain: f32,
+    /// How much one tarsus-depressor spike adds to a claw's grip.
+    ///
+    /// Separate from `activation_gain` because adhesion is a different kind of
+    /// actuator: it takes a force in `[0, 1]` rather than a signed muscle
+    /// command, it saturates rather than opposing an antagonist, and there are
+    /// ten depressor neurons per leg against the dozens driving a joint.
+    pub adhesion_gain: f32,
     /// Wingbeat power added per power-motor-neuron spike, before the same
     /// decay the leg activation uses. The power muscles are asynchronous, so
     /// this is a RATE-to-amplitude conversion and not a per-spike impulse on a
@@ -257,6 +264,10 @@ impl Default for Coupling {
             load_gain: 0.05,
             activation_decay: 0.8,
             activation_gain: 0.05,
+            // Ten depressor neurons per leg: at 0.15 a third of them firing
+            // together in one tick is already a firm grip, which is the
+            // regime a stance phase should sit in.
+            adhesion_gain: 0.15,
             // 24 power motor neurons firing at up to one spike per control
             // tick reach full power in a few ticks at this gain, which is the
             // right order for a thorax that spins up over a handful of
@@ -328,6 +339,14 @@ pub struct Fly {
     excite: Vec<f32>,
     /// Per-actuator muscle activation, carried across ticks.
     activation: Vec<f32>,
+    /// Claw grip per adhesion actuator, low-passed the same way activation is.
+    ///
+    /// Adhesion is a separate actuator that nothing about driving the leg
+    /// joints engages, and this animal's published walking depends on it.
+    /// Every walking measurement in this crate before this field existed ran
+    /// with all eight adhesion actuators at zero, which is a fly walking on
+    /// ice.
+    grip: Vec<f32>,
     /// Motor spikes on each actuator THIS tick, split by polarity:
     /// `[agonist, antagonist]`.
     ///
@@ -435,6 +454,7 @@ impl Fly {
         let actuator_names: Vec<String> =
             model.actuator_names().into_iter().map(|n| n.unwrap_or_default()).collect();
         let map = flybody::build(c, &actuator_names);
+        let n_adhesion = map.adhesion.len();
         if map.mapped() == 0 {
             return Err("no motor neuron attached to any actuator; the body cannot be driven".to_string());
         }
@@ -552,6 +572,7 @@ impl Fly {
             odour: [0.0; 2],
             food: None,
             last_antenna_spikes: (0, 0),
+            grip: vec![0.0; n_adhesion],
             mb,
             learning_sites,
             appetitive,
@@ -896,6 +917,9 @@ impl Fly {
         self.last_proprio_spikes = 0;
         self.last_antenna_spikes = (0, 0);
         self.last_mb_spikes = (0, 0);
+        for g in self.grip.iter_mut() {
+            *g = 0.0;
+        }
         self.reinforcement = 0.0;
         self.control_tick = 0;
     }
@@ -1164,6 +1188,9 @@ impl Fly {
         for a in self.activation.iter_mut() {
             *a *= self.coupling.activation_decay;
         }
+        for g in self.grip.iter_mut() {
+            *g *= self.coupling.activation_decay;
+        }
         for o in self.opposed.iter_mut() {
             *o = [0.0; 2];
         }
@@ -1194,6 +1221,16 @@ impl Fly {
                     self.opposed[d.actuator][usize::from(d.polarity < 0.0)] += 1.0;
                     motor_spikes += 1;
                 }
+            }
+            // The claw grips when the cord presses the tarsus down and lets go
+            // when it lifts it. Depressor minus levator rather than depressor
+            // alone, so a leg in swing actively releases instead of waiting
+            // for the grip to decay - which is the difference between a leg
+            // that lifts and one that drags its foot.
+            for (g, a) in self.grip.iter_mut().zip(&self.map.adhesion) {
+                let down = a.depressor.iter().filter(|&&i| spike[i as usize] > 0.5).count() as f32;
+                let up = a.levator.iter().filter(|&&i| spike[i as usize] > 0.5).count() as f32;
+                *g += self.coupling.adhesion_gain * (down - up);
             }
             if self.wingbeat.is_some() && self.wing_hold.is_none() {
                 for d in &self.wing_drives {
@@ -1230,12 +1267,18 @@ impl Fly {
         let cord = began.elapsed();
 
         // --- act ---------------------------------------------------------
-        let ctrl: Vec<f64> = self
+        let mut ctrl: Vec<f64> = self
             .activation
             .iter()
             .zip(&self.muscle)
             .map(|(a, m)| (a * m).clamp(-1.0, 1.0) as f64)
             .collect();
+        // Adhesion actuators take a grip force in [0, 1]: a claw cannot push.
+        for (g, a) in self.grip.iter().zip(&self.map.adhesion) {
+            if let Some(slot) = ctrl.get_mut(a.actuator) {
+                *slot = (*g).clamp(0.0, 1.0) as f64 * self.muscle.get(a.actuator).copied().unwrap_or(1.0) as f64;
+            }
+        }
         self.data.set(&self.model, StateSpec::CTRL, &ctrl)?;
 
         // --- integrate ---------------------------------------------------

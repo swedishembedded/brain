@@ -366,6 +366,19 @@ pub struct RewardConfig {
     pub ticks: u32,
     /// Descending command held for the episode.
     pub command: f32,
+    /// Which descending cell type carries it. `None` drives the whole
+    /// descending population uniformly.
+    ///
+    /// The distinction is not a refinement. A connectome study screened every
+    /// descending neuron in this cord and found that tonic drive of ONE type,
+    /// DNg100, produces rhythmic leg motor output through a three-neuron
+    /// oscillator; this crate reproduces that at a fixed drive with the
+    /// shuffle failing. An episode that instead barrages all 1,328 descending
+    /// neurons at once is not that experiment - it drives the cord's every
+    /// command pathway simultaneously, including the ones for standing still
+    /// and for turning, and the measured gait score under it is 0.015, which
+    /// is no rhythm at all.
+    pub command_type: Option<&'static str>,
     /// Exponential-moving-average rate for the reward baseline.
     ///
     /// The neuromodulator is a reward PREDICTION ERROR, not a reward: without
@@ -383,6 +396,7 @@ impl Default for RewardConfig {
             objective: Objective::Displacement,
             ticks: 300,
             command: 2.0,
+            command_type: None,
             baseline_rate: 0.01,
             modulator_gain: 50.0,
         }
@@ -462,8 +476,18 @@ pub fn episode_with(
         }
     }
     fly.reset();
-    let cmd = vec![cfg.command; fly.descending_count()];
-    fly.set_descending(&cmd)?;
+    match cfg.command_type {
+        Some(t) => {
+            let n = fly.drive_cell_type(t, cfg.command)?;
+            if n == 0 {
+                return Err(format!("no descending neuron of type {t:?} in this connectome"));
+            }
+        }
+        None => {
+            let cmd = vec![cfg.command; fly.descending_count()];
+            fly.set_descending(&cmd)?;
+        }
+    }
     fly.set_plasticity(condition.plastic());
 
     // Reference-state initialisation: an imitation episode starts ON the
