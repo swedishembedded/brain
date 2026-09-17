@@ -127,7 +127,7 @@ help:
 	@echo "  make forecast/perf-gate      forecasting perf regression gate (vs baselines)"
 	@echo "  make wm/perf-gate            world-model perf regression gate (vs baselines)"
 	@echo "  make qwen/serving-perf-gate  qwen serving perf regression gate (vs baselines)"
-	@echo "  make experiment/fly/<name>/{build,run}  build, then run, a fly experiment"
+	@echo "  make crates/<crate>/examples/<name>/{build,run}   build, then run, a crate example"
 	@echo "  make kernels-table           regenerate docs/reference/kernels.md from the .wgsl sources"
 	@echo "  make kernels-table/check     fail if that catalogue has drifted (part of test/full)"
 	@echo "  make cuda-table              regenerate docs/reference/kernels-cuda.md from crates/kernels-cuda"
@@ -751,43 +751,48 @@ test/rl:
 kernels-regen:
 	scripts/build/kernels-regen.sh
 
-# The fly's experiments: built by one target, run by another.
+# A crate's cargo EXAMPLES, built by one target and run by another.
 #
-# Split the same way samples are, and for the same reason - an experiment is
-# an ordinary binary once built, and a `run` that shelled out to cargo would
-# make the toolchain a runtime dependency of every measurement.
+# The target path mirrors the source path, exactly as `samples/<a>/<b>` does:
+# `crates/fly/examples/cpg.rs` is `make crates/fly/examples/cpg/{build,run}`.
+# There is no separate category for these. They are examples of a crate, they
+# live in that crate's directory, and the target says so.
 #
-# The hazard the split reintroduces is worth naming, because it has already
-# been paid for. `cargo build -p brain-fly` does not build examples, so a
-# change to the objective can be committed, believed, and simply not be in the
-# binary a search executes. That happened: a walk search ran for forty
-# generations against an objective without its attitude termination, found the
-# slide that termination exists to refuse, and reported a score that no replay
-# could reproduce. An hour of CPU, and the only symptom was a number that did
-# not survive re-measurement. `run` therefore prints the binary it is about to
-# execute and when that file was built, which is exactly the fact that would
-# have made it obvious at the time.
-#
-#   make experiment/fly/search/build
-#   make experiment/fly/search/run ENV="ARENA=air OUT=/tmp/t.txt"
-#   make experiment/fly/replay/run ENV="ARENA=air" ARGS=/tmp/t.txt
-#
-# Under `experiment/` rather than at the top level, and NOT under `samples/`:
-# a sample is a demonstration someone runs to see the thing work, and these
-# are measurements that print numbers and controls. `samples/fly/interactive`
-# is the demonstration; `experiment/fly/cpg/run` is the experiment behind it.
+#   make crates/fly/examples/walk_search/build
+#   make crates/fly/examples/walk_search/run ENV="OUT=/tmp/walk.txt"
+#   make crates/fly/examples/replay/run ARGS=/tmp/walk.txt
 #
 # ENV carries the run's own `NAME=value` settings, ARGS its positional
 # arguments. Everything the examples read from the wider environment
 # (BRAIN_CONNECTOME_DIR, BRAIN_FLYBODY_XML, ...) is expected to be set already,
 # as `tools/buzzfly/collect.sh`'s env.sh sets it.
-fly_example = $(if $(filter search,$*),walk_search,$*)
-experiment/fly/%/build:
-	cargo build --release --offline -p brain-fly --example $(fly_example)
+#
+# Split build from run for the reason samples are split: an example is an
+# ordinary binary once built, and a `run` that shelled out to cargo would make
+# the toolchain a runtime dependency of every measurement.
+#
+# The hazard that split reintroduces is worth naming, because it has already
+# been paid for. `cargo build -p brain-fly` does not build examples, so a
+# change to an objective can be committed, believed, and simply not be in the
+# binary a search executes. That happened: a walk search ran for forty
+# generations against an objective without its attitude termination, found the
+# slide that termination exists to refuse, and reported a score no replay could
+# reproduce. An hour of CPU, and the only symptom was a number that did not
+# survive re-measurement. `run` therefore prints the binary it is about to
+# execute and when that file was built, which is exactly the fact that would
+# have made it obvious at the time.
+example_crate = $(word 1,$(subst /, ,$*))
+example_name = $(word 3,$(subst /, ,$*))
+example_pkg = $(shell sed -n 's/^name = "\(.*\)"/\1/p' crates/$(example_crate)/Cargo.toml 2>/dev/null | head -1)
 
-experiment/fly/%/run:
-	@bin="target/release/examples/$(fly_example)"; \
-	test -x "$$bin" || { echo "not built: $$bin"; echo "run: make experiment/fly/$*/build"; exit 2; }; \
+crates/%/build:
+	@test -n "$(example_pkg)" || { echo "no crate at crates/$(example_crate)"; exit 2; }
+	cargo build --release --offline -p $(example_pkg) --example $(example_name)
+
+crates/%/run:
+	@test -n "$(example_pkg)" || { echo "no crate at crates/$(example_crate)"; exit 2; }
+	@bin="target/release/examples/$(example_name)"; \
+	test -x "$$bin" || { echo "not built: $$bin"; echo "run: make crates/$(example_crate)/examples/$(example_name)/build"; exit 2; }; \
 	echo "$$bin (built $$(date -r "$$bin" '+%Y-%m-%d %H:%M:%S'))"; \
 	exec env $(ENV) "$$bin" $(ARGS)
 
