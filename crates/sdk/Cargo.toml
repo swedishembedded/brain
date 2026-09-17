@@ -32,12 +32,14 @@ full = ["image", "creature", "forecast", "text", "vision", "audio", "decision"]
 
 # --- surfaces: one per brain_arch::Domain the SDK has a public type for.
 #     A surface is the only thing a consumer names.
-# `brain::ImagePipeline` (flux2/s3dit text-to-image) and `brain::
-# UpscalePipeline` (RRDBNet super-resolution) - two public types under one
-# feature, since both architectures are registered `Domain::Image` and both
-# return `brain::Image`. Generation and upscaling are different capabilities
-# ("one pipeline type per capability"), not two backends of one pipeline.
-image = ["resolve", "dep:brain-flux2", "dep:brain-s3dit", "dep:brain-imaging", "dep:brain-rrdbnet"]
+# `brain::ImagePipeline` (flux2/s3dit text-to-image), `brain::
+# UpscalePipeline` (RRDBNet super-resolution) and `brain::RestorePipeline`
+# (CodeFormer face restoration) - three public types under one feature, since
+# all three architectures are registered `Domain::Image` and all three
+# return `brain::Image`. Generation, upscaling and restoration are different
+# capabilities ("one pipeline type per capability"), not backends of one
+# pipeline.
+image = ["resolve", "dep:brain-flux2", "dep:brain-s3dit", "dep:brain-imaging", "dep:brain-rrdbnet", "dep:brain-codeformer"]
 # `brain::ForecastPipeline`. Covers kronos and timesfm3 - the two forecasting
 # architectures with a real model-store `ArchSpec` today
 # (`kronos::spec::KronosSpec`, `timesfm3::spec::Timesfm3Spec`); chronos2 and
@@ -97,6 +99,7 @@ brain-modelstore.workspace = true
 brain-audio = { workspace = true, optional = true }
 brain-checkpoint = { workspace = true, optional = true }
 brain-clip = { workspace = true, optional = true }
+brain-codeformer = { workspace = true, optional = true }
 brain-connectome = { workspace = true, optional = true }
 brain-data = { workspace = true, optional = true }
 brain-decide = { workspace = true, optional = true }

@@ -119,26 +119,45 @@ pub struct Session {
     model: CodeFormer,
 }
 
+/// [`Session::restore`]'s output: restored pixels (HWC, `[0,1]`) at the
+/// graph's fixed square side, plus the number of codes predicted (the same
+/// `codes` field [`Session::restore_face`] surfaces in its `Outcome`).
+pub struct RestoreOutput {
+    pub pixels: Vec<f32>,
+    pub side: u32,
+    pub codes: usize,
+}
+
 impl Session {
     pub fn new(model: CodeFormer) -> Session {
         Session { model }
     }
 
-    /// Run one `restore_face` invocation (already validated against
-    /// [`restore_spec`]).
-    pub fn restore_face(&self, inv: &Invocation) -> ActionResult {
-        let (hwc, w, h) = capability::blob::decode_image(inv, "image")?;
-        let side = self.model.config().img_size();
-        let fidelity = inv.get_f64("w").unwrap_or(0.5) as f32;
+    /// The config this session's graph was built for - `dim_embd`/`n_layers`/
+    /// `img_size` and the rest of [`CodeFormerConfig`], the same accessor
+    /// `rrdbnet::caps::Session::config` gives for its own fixed-per-build
+    /// shape.
+    pub fn config(&self) -> &CodeFormerConfig {
+        self.model.config()
+    }
+
+    /// [`Session::restore_face`]'s typed core, over raw pixels/dimensions
+    /// rather than a wire-format [`Invocation`] - the same
+    /// decode-then-typed-core split `rrdbnet::caps::Upscaler` established,
+    /// so a caller with pixels already in hand (`crates/sdk`'s
+    /// `RestorePipeline`) does not have to round-trip through a `Blob` to
+    /// reach it.
+    pub fn restore(&self, hwc: &[f32], w: u32, h: u32, fidelity: f32) -> Result<RestoreOutput, String> {
         if !(0.0..=1.0).contains(&fidelity) {
             return Err(format!("restore: w must be in [0, 1], got {fidelity}"));
         }
+        let side = self.model.config().img_size();
 
         // Resize to the graph's square and map [0,1] -> [-1,1], both on the
         // device (`resize_bilinear` + the one `film_chan` affine). The layout
         // permutation around them is host glue by the `crates/imaging` rule.
         let ctx = Ctx::new(self.model.gpu());
-        let chw = imaging::pixels::hwc_to_chw(&hwc, 3, h as usize, w as usize);
+        let chw = imaging::pixels::hwc_to_chw(hwc, 3, h as usize, w as usize);
         let src = ctx.upload("restore.caps.src", &chw);
         let (small, shape) = ctx.resize(&src, Shape::new(1, 3, h, w), side, side, Filter::Bilinear, AlignCorners::HalfPixel);
         let signed = ctx.affine(&small, shape, &[2.0; 3], &[-1.0; 3]);
@@ -152,14 +171,23 @@ impl Session {
         let restored = ctx.download(&unit, shape.numel());
         let hwc_out = imaging::pixels::chw_to_hwc(&restored, 3, side as usize, side as usize);
 
+        Ok(RestoreOutput { pixels: hwc_out, side, codes: out.indices.len() })
+    }
+
+    /// Run one `restore_face` invocation (already validated against
+    /// [`restore_spec`]).
+    pub fn restore_face(&self, inv: &Invocation) -> ActionResult {
+        let (hwc, w, h) = capability::blob::decode_image(inv, "image")?;
+        let fidelity = inv.get_f64("w").unwrap_or(0.5) as f32;
+        let out = self.restore(&hwc, w, h, fidelity)?;
         Ok(Outcome::new()
-            .set("width", json!(side))
-            .set("height", json!(side))
+            .set("width", json!(out.side))
+            .set("height", json!(out.side))
             .set("source_width", json!(w))
             .set("source_height", json!(h))
             .set("w", json!(fidelity))
-            .set("codes", json!(out.indices.len()))
-            .blob("image", capability::blob::image_blob(&hwc_out, side, side, 3)))
+            .set("codes", json!(out.codes))
+            .blob("image", capability::blob::image_blob(&out.pixels, out.side, out.side, 3)))
     }
 }
 

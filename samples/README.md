@@ -140,7 +140,7 @@ than a timing on this one:
 | nothing (bare core: `Error` only) | 9 |
 | `device` tier | 18 |
 | `resolve` tier | 27 |
-| `image` surface | 39 |
+| `image` surface | 42 |
 | *(before surfaces existed: everything, always)* | *69* |
 
 Cargo compiles one brain subtree per distinct feature combination, so samples

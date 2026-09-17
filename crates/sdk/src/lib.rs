@@ -32,7 +32,7 @@
 //!
 //! | feature | what it adds |
 //! |---|---|
-//! | `image` | [`ImagePipeline`], [`Image`] -- text-to-image and image editing; [`UpscalePipeline`] -- super-resolution |
+//! | `image` | [`ImagePipeline`], [`Image`] -- text-to-image and image editing; [`UpscalePipeline`] -- super-resolution; [`RestorePipeline`] -- blind face restoration |
 //! | `creature` | [`Creature`], [`View`] -- a connectome running a body, and a window onto it |
 //! | `forecast` | [`ForecastPipeline`] -- time-series forecasting (kronos, timesfm3) |
 //! | `text` | [`TextGenerationPipeline`] -- text generation (qwen3, from a local checkpoint path) |
@@ -106,6 +106,8 @@ pub use conversion::{
 pub mod flow;
 pub use flow::{EvalReport, Flow, Stages, TrainReport};
 
+#[cfg(feature = "image")]
+mod restore;
 #[cfg(feature = "text")]
 mod text;
 #[cfg(feature = "image")]
@@ -145,6 +147,8 @@ pub use ::forecast::{Block, Capabilities, Forecast, ForecastSpec, Item, Panel, R
 pub use image::Image;
 #[cfg(feature = "image")]
 pub use pipeline::{ImageGenerationOptions, ImagePipeline, ImagePipelineBuilder};
+#[cfg(feature = "image")]
+pub use restore::{RestoreOptions, RestorePipeline, RestorePipelineBuilder};
 #[cfg(feature = "text")]
 pub use text::{GeneratedText, TextGenerationOptions, TextGenerationPipeline, TextGenerationPipelineBuilder};
 #[cfg(feature = "image")]

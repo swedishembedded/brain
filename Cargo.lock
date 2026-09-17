@@ -374,6 +374,7 @@ dependencies = [
  "brain-capability",
  "brain-checkpoint",
  "brain-clip",
+ "brain-codeformer",
  "brain-connectome",
  "brain-data",
  "brain-decide",

@@ -26,7 +26,7 @@ all - the fly/flybody/connectome stack is unregistered).
 | Text decoders | 8 | 6 | none | fragmented: 6 model-specific `*_cli.rs` + `resident_llm.rs` | yes (qwen3) |
 | Multimodal/VLM/OCR | 9 | 8 | none | `omni_cli.rs`, `document_study_cli.rs` + 5 `resident_*.rs` | yes (qwen3vl) |
 | Image generation | 6 | 6 | **YES - `ImagePipeline`** (flux2+s3dit only) | `flux2_cli.rs` + `s3dit::caps::ZAction` | yes (flux2, s3dit) |
-| Restoration/upscaling/VAE | 5 | 5 | **PARTIAL - `UpscalePipeline`** (RRDBNet only; CodeFormer/SUPIR/VQGAN deferred, see Phase 2.5) | no dedicated CLI; `resident_restore/upscale/supir.rs` | no |
+| Restoration/upscaling/VAE | 5 | 5 | **PARTIAL - `UpscalePipeline`** (RRDBNet) + **`RestorePipeline`** (CodeFormer; SUPIR/VQGAN deferred, see Phase 2.5/2.7) | no dedicated CLI; `resident_restore/upscale/supir.rs` | no |
 | Video generation | 2 | 2 | none | `wan_cli.rs`, `ltxv_cli.rs` | yes (wan) |
 | ASR | 2 | 2 | none | **no CLI at all** - `resident_asr.rs` only | no |
 | TTS/music/speech codec | 7 | 3 | none | `tts_cli.rs` + `tts_serve.rs` | no |
@@ -64,10 +64,11 @@ when a milestone actually starts one):
    returning the same `Image` domain type), TTS/music, video generation, then
    3D/world models last - `SplatPipeline` is closer to `Creature` (stateful,
    steppable) than to `ImagePipeline`, and world models have no settled
-   domain object yet. **Started**: `UpscalePipeline` (RRDBNet), Phase 2.5.
-   Restoration (CodeFormer, needs a new `spec.rs` first) and vision/detection
-   (YOLOv8 boxes / SAM2 masks - a different domain object than `Image`, not a
-   sibling of this pipeline) are the next candidates within this bucket.
+   domain object yet. **Done**: `UpscalePipeline` (RRDBNet, Phase 2.5) and
+   `RestorePipeline` (CodeFormer, Phase 2.6/2.7 - construction only, two
+   real forward-pass gaps found and tracked, not fixed). Vision/detection
+   (YOLOv8 boxes / SAM2 masks - a different domain object than `Image`, not
+   a sibling of either) is the next candidate within this bucket.
 
 ## `crates/sdk` self-audit findings
 
@@ -362,8 +363,8 @@ including the `samples/imagegen/*` samples that link `crates/sdk` directly.
   - [x] **Phase 2.3** - `EmbeddingPipeline` (CLIP text towers only).
   - [x] **Phase 2.4** - `TranscribePipeline` (qwen3-asr only).
   - [x] **Phase 2.5** - `UpscalePipeline` (RRDBNet only) - see its own section above for the real `RrdbnetSpec` bug this one found and fixed, and the new `Image::open`/`Image::from_rgb8` public API it needed.
-  - [x] **Phase 2.6** - `codeformer::spec::CodeFormerSpec`, the prerequisite Phase 2.5 named - see its own section below. No SDK `RestorePipeline` type yet; that is still the next step within this bucket.
-  - [ ] Next within the restoration/upscaling bucket: a `RestorePipeline` SDK type built on `CodeFormerSpec`. SUPIR and VQGAN stay deferred with the reasons already on record.
+  - [x] **Phase 2.6** - `codeformer::spec::CodeFormerSpec`, the prerequisite Phase 2.5 named - see its own section below.
+  - [x] **Phase 2.7** - `RestorePipeline` (CodeFormer) - see its own section below for two real, NOT-fixed forward-pass infrastructure gaps this one found (a `backend-wgpu` buffer-reclaim ceiling, a `wgsl-cpu` JIT coverage gap), which cap this pipeline's own test at construction, not a real `.restore()` call. SUPIR and VQGAN stay deferred with the reasons already on record.
   - [ ] Still entirely uncovered domain buckets: vision/detection (YOLOv8/SAM2 - a different domain object than `Image`), TTS/music, video generation, 3D/world models. See the domain inventory table.
 
 ### Phase 2.1 - `ForecastPipeline` (done)
@@ -692,9 +693,9 @@ over the same checkpoint) - `crates/sdk/tests/upscale_pipeline.rs`.
 
 Writes exactly the prerequisite Phase 2.5's "Not done" list named: a real
 `ArchSpec` for CodeFormer's single `"weights"` role, `crates/codeformer/src/
-spec.rs`. No SDK `RestorePipeline` type yet - that is still open, tracked
-above - but everything ELSE this spec unlocks was migrated in the same
-change, not left half-wired:
+spec.rs`. The `RestorePipeline` SDK type it unlocks is Phase 2.7, below -
+everything ELSE this spec unlocks was migrated in the same change as the
+spec itself, not left half-wired:
 
 - `crates/catalog/src/lib.rs`'s `ModelEntry` for `codeformer` now resolves
   `weights` through the model store instead of `from_env!("BRAIN_CODEFORMER_
@@ -758,17 +759,108 @@ hand-built `ArtifactRecord` with an explicitly chosen `kind` - the exact
 class of bug `RrdbnetSpec`'s own equivalent test caught after the fact, only
 this time written correctly from day one rather than needing a fix.
 
-**Not done, tracked for later**: the `RestorePipeline` SDK type itself (this
-was scoped as the prerequisite, not the pipeline - see the milestone
-checklist); `crates/cli/src/resident_restore.rs`'s served/D-Bus path still
-reads `BRAIN_CODEFORMER_WEIGHTS` directly rather than the resolver, the same
-tracked (not silent) gap `resident_upscale.rs` already has for `rrdbnet`.
+**Not done, tracked for later**: `crates/cli/src/resident_restore.rs`'s
+served/D-Bus path still reads `BRAIN_CODEFORMER_WEIGHTS` directly rather
+than the resolver, the same tracked (not silent) gap `resident_upscale.rs`
+already has for `rrdbnet`.
 
 Verified with `cargo test -p brain-codeformer --lib` (26 passed, 6 new),
 `cargo test -p brain-catalog --lib` (9 passed, including
 `every_listed_model_is_constructible_by_name` and `imgpipe_stage_ids_match_
 the_catalog`), `cargo test -p brain-cli` (full suite), and a full
 `cargo build -p brain-arch -p brain-codeformer -p brain-catalog -p brain-cli`.
+
+### Phase 2.7 - `RestorePipeline` (CodeFormer) - construction succeeds; two real, unfixed forward-pass gaps found reaching that far
+
+Covers **CodeFormer only**, resolved through `loader::resolve_structured`
+against the just-added `codeformer::spec::CodeFormerSpec`'s one `"weights"`
+role - a deliberate SEPARATE public type from `ImagePipeline`/
+`UpscalePipeline` rather than a third backend inside either: generation,
+upscaling and restoration are different capabilities (rule 2), so
+`RestorePipeline` joins the SAME `image` Cargo feature the other two use
+(CodeFormer's `brain_arch` row is registered the same `Domain::Image`).
+
+**`codeformer::caps::Session` gained a typed core, the same
+decode-then-typed-core split `rrdbnet::caps::Upscaler` already established**:
+before this pipeline, `Session::restore_face`'s resize/normalize/`model.
+restore`/denormalize sequence was inlined directly inside its
+`Invocation`-decoding wrapper, with no way to call it over raw pixels.
+Factored out as `Session::restore(hwc, w, h, fidelity) -> Result<
+RestoreOutput, String>`, with `restore_face` now a thin wrapper calling it -
+one implementation, two callers (the capability action, and `crate::sdk`'s
+`RestorePipeline`), matching how `run_upscale` wraps `Upscaler::upscale`
+rather than duplicating its body. `Session::config()` (new) gives the SDK's
+`Debug` impl the same `dim_embd`/`n_layers`/`img_size` accessor `rrdbnet::
+caps::Session::config` already has.
+
+**Two real, independent, NOT-fixed gaps this pipeline's own fixture
+discipline found, in shared forward-pass/backend infrastructure this crate
+does not own** - the fourth and fifth time in a row this campaign's fixture
+discipline has found a real bug by being the first thing to actually
+dispatch a code path (qwen3asr's import panic in Phase 2.4; the flux2
+precision bug M10; `RrdbnetSpec`'s wrong `ArtifactKind` in Phase 2.5) -
+except this time NEITHER is fixed in this milestone, because neither has a
+device available in this environment to safely verify a fix against:
+
+- **`backend-wgpu`**: calling the real `.restore()` on a complete fixture
+  aborts with "2.37 GiB of device buffers were dropped without an
+  intervening `poll_wait()`", over this dev machine's small integrated
+  GPU's 2 GiB single-buffer ceiling - exactly the failure mode `gpu_core::
+  transient`'s own module doc names and provides the fix pattern for
+  (`Transient`/`reclaiming`), but CodeFormer's ~59-block encoder +
+  9-layer transformer + generator walk (`crates/codeformer/src/model.rs`,
+  `vqgan::model::run_blocks`) calls neither anywhere on its forward path.
+  A correct fix needs to reclaim periodically WITHIN that walk (wrapping
+  the whole `.restore()` call once, at the outside, reclaims too late - the
+  accumulation trips the ceiling before the call can return) - real surgery
+  in code this milestone did not otherwise touch, on a device too small to
+  safely confirm the fix doesn't also break a "the pinned encoder taps must
+  survive to the generator" invariant that same walk depends on.
+- **`wgsl-cpu`**: the same call on the CPU JIT backend instead fails
+  differently - "`matmul_reg3` was not JIT-compiled (unsupported work-group
+  structure)" - a kernel-coverage gap the code-prediction Transformer's
+  attention/FFN matmuls hit that has nothing to do with the wgpu finding
+  above.
+
+Both are plausibly unexercised anywhere else in this workspace:
+`crates/codeformer/tests/parity.rs`'s own real-forward-pass tests all gate
+on `BRAIN_CODEFORMER_WEIGHTS` (a license-gated real checkpoint), silently
+skipped in any environment - this one included - that has not fetched one.
+This milestone's all-zero-but-COMPLETE synthetic fixture (built from
+`CodeFormerConfig::tensor_manifest()`, the same discipline
+`write_complete_rrdb_checkpoint` used in Phase 2.5, just at CodeFormer's one
+real fixed size rather than a shrinkable one) is the first thing in this
+workspace to force CodeFormer's real graph to actually dispatch with no
+real weights required anywhere - and it does dispatch, far enough to prove
+both gaps are real, before either backend can finish.
+
+**Test ceiling, honestly scoped rather than pretended away**:
+`crates/sdk/tests/restore_pipeline.rs` proves `from_pretrained` resolves,
+classifies, imports all 515 real tensors and builds the whole real-size
+graph - reaching further than `tests/image_pipeline.rs`'s flux2/s3dit
+backends do at all (their weights are too large to fixture even at
+construction) - but does not call `.restore()`, for the two reasons above.
+This is the SAME "prove resolve -> dispatch -> construction succeeds, stay
+honest about what's past reach" ceiling `ImagePipeline`'s own flux2/s3dit
+tests document, not a new kind of gap. `RestoreOptions::fidelity`
+out-of-range is still tested end to end (validated before any GPU work, so
+it never meets either gap). Construction alone takes ~70-85s against the
+real 515-tensor/512x512-graph fixture on this dev machine - slower than
+every prior pipeline's fixture in this crate, because CodeFormer has no
+"tiny" config to shrink to the way RRDBNet's does (Phase 2.5's own doc);
+accepted as the real cost of proving genuine, complete-checkpoint
+construction rather than a lighter, less honest fixture.
+
+**Not done, tracked for later**: fixing either of the two gaps above (needs
+a device this environment does not have); CLI migration
+(`resident_restore.rs` still builds its own `Session` inline, same as
+Phase 2.6 already tracked); once fixed, revisiting whether `.restore()`
+itself can join the test.
+
+Verified with `cargo test -p brain-codeformer --lib` (26 passed, no
+regressions from the `caps.rs` refactor), `cargo build -p brain --features
+image` (clean), `cargo test -p brain --features image` (all pipelines'
+suites green, including this one's 4 tests).
 
 Findings 8, 11, 14, 18-20, 23-24 are real but not yet milestoned - pick them
 up opportunistically when touching the same file for another reason, or spin

@@ -13,11 +13,11 @@ publish = false
 [dependencies]
 # The ONLY brain dependency a sample may have is the SDK facade, and it must
 # NAME the surfaces it uses - see samples/README.md rules 1 and 2. This sample
-# uses `image` and nothing else, so it links 38 brain crates instead of 69.
+# uses `image` and nothing else, so it links 42 brain crates instead of 69.
 brain = { workspace = true, features = ["image"] }
 
 [package.metadata.brain]
 # `make check/samples` fails if the real `cargo tree` closure exceeds this.
 # A budget that has to be raised in the same commit as a new dependency is the
 # point: closure growth becomes a decision instead of a drift.
-max-brain-crates = 40
+max-brain-crates = 43
