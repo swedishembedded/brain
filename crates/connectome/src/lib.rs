@@ -36,21 +36,82 @@ pub enum Nt {
     Serotonin,
     Octopamine,
     Histamine,
+    Tyramine,
 }
 
 impl Nt {
-    /// Codex spells these `ACH`, `GLUT`, `GABA`, `DA`, `SER`, `OCT`, `HIST`.
+    /// One transmitter name, in any spelling either dataset uses.
+    ///
+    /// `HA` and `TYR` are here because BANC uses them and their absence was
+    /// not a small gap: `HA` is how 928 of its photoreceptors spell histamine,
+    /// and a name this function does not recognise is not treated as unknown,
+    /// it falls through to the machine prediction instead.
     pub fn parse(s: &str) -> Option<Nt> {
         Some(match s.trim().to_ascii_uppercase().as_str() {
             "ACH" | "ACETYLCHOLINE" => Nt::Acetylcholine,
             "GLUT" | "GLUTAMATE" => Nt::Glutamate,
             "GABA" => Nt::Gaba,
             "DA" | "DOPAMINE" => Nt::Dopamine,
-            "SER" | "SEROTONIN" => Nt::Serotonin,
+            "SER" | "SEROTONIN" | "5HT" => Nt::Serotonin,
             "OCT" | "OCTOPAMINE" => Nt::Octopamine,
-            "HIST" | "HISTAMINE" => Nt::Histamine,
+            "HIST" | "HISTAMINE" | "HA" => Nt::Histamine,
+            "TYR" | "TYRAMINE" => Nt::Tyramine,
             _ => return None,
         })
+    }
+
+    /// Whether this transmitter gates a fast ionotropic synapse.
+    ///
+    /// The distinction decides which member of a co-transmitting cell's list
+    /// sets the sign of its synapses in a model whose only currency is fast
+    /// current. Dopamine, serotonin, octopamine and tyramine act through
+    /// G-protein-coupled receptors over hundreds of milliseconds; they are
+    /// carried because they identify a cell and because a neuromodulatory
+    /// pathway needs them, not because they push a membrane this tick.
+    pub fn is_fast(self) -> bool {
+        matches!(self, Nt::Acetylcholine | Nt::Glutamate | Nt::Gaba | Nt::Histamine)
+    }
+
+    /// A verified transmitter field, which may name several.
+    ///
+    /// BANC's verified column is a LIST: `GABA,NITRIC_OXIDE` on 2,878 cells,
+    /// `HISTAMINE,ACETYLCHOLINE` on 914, `ACETYLCHOLINE,NITRIC_OXIDE,DOPAMINE`
+    /// on 666. Parsing it as one name fails on all of them, and failure here
+    /// is not "unknown" - [`NtPrior::best`] then falls back to the machine
+    /// PREDICTION, so a human annotation is discarded in favour of a guess it
+    /// sometimes contradicts. Across BANC that is 5,872 neurons, 315 of which
+    /// end up with the opposite sign, and essentially every photoreceptor in
+    /// the dataset. MANC has none, which is why running only the cord never
+    /// showed it.
+    ///
+    /// Resolution, in order:
+    ///
+    /// * names that are not transmitters at all are dropped. Nitric oxide is
+    ///   a gas that diffuses through membranes and has no synapse to sign;
+    ///   listing it says something true about the cell and nothing about its
+    ///   synaptic sign.
+    /// * if one FAST transmitter remains, it sets the sign.
+    /// * if several do, the cell genuinely co-releases two fast transmitters
+    ///   and the pair is returned so the caller can see the ambiguity rather
+    ///   than inherit a silent choice. Histamine precedes acetylcholine
+    ///   because that is the photoreceptor case this arises in, and the
+    ///   histamine-gated chloride channel is the fast synapse there.
+    /// * if none do, the cell is modulatory and the first name is returned.
+    pub fn parse_verified(s: &str) -> (Option<Nt>, bool) {
+        let named: Vec<Nt> = s.split(',').filter_map(Nt::parse).collect();
+        let mut fast: Vec<Nt> = named.iter().copied().filter(|n| n.is_fast()).collect();
+        // Precedence among co-released fast transmitters, documented above.
+        fast.sort_by_key(|n| match n {
+            Nt::Histamine => 0,
+            Nt::Gaba => 1,
+            Nt::Glutamate => 2,
+            _ => 3,
+        });
+        match (fast.first(), named.first()) {
+            (Some(&f), _) => (Some(f), fast.len() > 1),
+            (None, Some(&m)) => (Some(m), false),
+            (None, None) => (None, false),
+        }
     }
 
     /// The sign this transmitter is USUALLY given in a *Drosophila* model.
@@ -74,7 +135,7 @@ impl Nt {
     /// prior whose width is [`NtPrior::strength`], and the sign is fitted.
     pub fn conventional_sign(self) -> f32 {
         match self {
-            Nt::Acetylcholine | Nt::Dopamine | Nt::Serotonin | Nt::Octopamine => 1.0,
+            Nt::Acetylcholine | Nt::Dopamine | Nt::Serotonin | Nt::Octopamine | Nt::Tyramine => 1.0,
             Nt::Glutamate | Nt::Gaba | Nt::Histamine => -1.0,
         }
     }
@@ -90,6 +151,10 @@ pub struct NtPrior {
     /// A human-verified transmitter. BANC has one for about 41% of its
     /// neurons; Janelia's MANC export has none at all.
     pub verified: Option<Nt>,
+    /// The verification named more than one FAST transmitter, so the sign
+    /// here is a choice among them rather than a reading of the data. See
+    /// [`Nt::parse_verified`].
+    pub co_released: bool,
 }
 
 impl NtPrior {
@@ -113,7 +178,13 @@ impl NtPrior {
     /// does not support for half the animal.
     pub fn strength(&self) -> f32 {
         if self.verified.is_some() {
-            1.0
+            // A cell verified to co-release two fast transmitters of opposite
+            // sign is not fully known, whatever the precedence rule picked.
+            if self.co_released {
+                0.5
+            } else {
+                1.0
+            }
         } else if self.predicted.is_some() {
             self.confidence.clamp(0.0, 1.0)
         } else {
@@ -236,25 +307,31 @@ impl Connectome {
     /// its in-degree, counts in every population, and contributes nothing.
     /// That is a deletion, and a silent one, so it is worth a number.
     ///
-    /// The aggregate is reassuring and the distribution is not. In BANC 17.7%
-    /// of neurons have no predicted transmitter and they carry 1.4% of all
-    /// synapses, so the average cost is small. But the loss is concentrated in
-    /// whichever cells the predictor found hard, and one of them is APL: a
-    /// single neuron with 22,430 output synapses that provides the feedback
-    /// inhibition normalising the entire mushroom body. Losing it costs 0.05%
-    /// of the graph and all of the sparse odour code.
+    /// The aggregate is reassuring and the distribution need not be: in BANC
+    /// 17.7% of neurons have no transmitter and they carry 1.4% of all
+    /// synapses, but the loss sits wherever the annotation was hardest rather
+    /// than spread evenly, so a single well-connected cell can matter far more
+    /// than its share of the graph.
+    ///
+    /// Counted AFTER [`Nt::parse_verified`] resolves the verified column, and
+    /// that ordering is the point. Reading that column as a single name left
+    /// 5,872 BANC neurons falling back to a machine prediction, which is a
+    /// worse failure than silence because it is invisible here: the cell has
+    /// a transmitter, so it is not counted, and the transmitter is a guess.
     pub fn silenced(&self) -> (usize, u64) {
-        let mut neurons = 0;
+        // One pass over the edge list, not one per silent neuron. BANC has
+        // 33,272 cells with no predicted transmitter and 13.6M edges, and
+        // asking the question the other way round is 4.5e11 comparisons: it
+        // ran for ten minutes on one core, allocating nothing, before anything
+        // printed.
+        let mute: Vec<bool> = self.neurons.iter().map(|n| n.nt.best().is_none()).collect();
         let mut synapses = 0u64;
-        for (i, n) in self.neurons.iter().enumerate() {
-            if n.nt.best().is_some() {
-                continue;
+        for (pre, w) in self.csc.pre.iter().zip(&self.csc.w) {
+            if mute.get(*pre as usize).copied().unwrap_or(false) {
+                synapses += *w as u64;
             }
-            neurons += 1;
-            let i = i as u32;
-            synapses += self.csc.pre.iter().zip(&self.csc.w).filter(|(p, _)| **p == i).map(|(_, w)| *w as u64).sum::<u64>();
         }
-        (neurons, synapses)
+        (mute.iter().filter(|m| **m).count(), synapses)
     }
 
     /// Assert a transmitter for cells this dataset's predictor abstained on.

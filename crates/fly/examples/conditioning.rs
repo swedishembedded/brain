@@ -28,16 +28,12 @@ fn main() {
         "cord" => Cns::Cord,
         _ => Cns::BrainAndCord,
     };
-    let mut c = fly::cns::load(env("BRAIN_CONNECTOME_DIR"), which).unwrap_or_else(|e| {
+    let c = fly::cns::load(env("BRAIN_CONNECTOME_DIR"), which).unwrap_or_else(|e| {
         eprintln!("{e}");
         std::process::exit(2)
     });
     let (silent_cells, silent_synapses) = c.silenced();
-    println!("cells with no predicted transmitter: {silent_cells}, carrying {silent_synapses} synapses that are multiplied by zero");
-    for (cell, n) in fly::conditioning::restore_known_transmitters(&mut c) {
-        println!("  restored {cell} x{n} from the literature");
-    }
-    let c = c;
+    println!("cells with no transmitter at all: {silent_cells}, carrying {silent_synapses} synapses that are multiplied by zero");
 
     // Two sparse patterns over real, named glomeruli. Disjoint, so the
     // discrimination being tested is not confounded by shared input.
@@ -133,6 +129,15 @@ fn main() {
         "condition", "A before", "A after", "index A", "index B", "A - B"
     );
     let mut rows: Vec<(String, f64)> = Vec::new();
+    // One apparatus per GRAPH, not one per condition. `reset` restores the
+    // connectome's own weights along with the dynamical state, which is
+    // exactly what starting a fresh condition means, and rebuilding instead
+    // re-derived a multi-million-edge network six times over without changing
+    // anything that was being measured.
+    let mut shuffled_app = build(Some(0x5EED)).unwrap_or_else(|e| {
+        eprintln!("{e}");
+        std::process::exit(1)
+    });
     for (label, pairing, shuffled, plastic) in [
         ("paired", Pairing::Paired, false, true),
         ("unpaired", Pairing::Unpaired, false, true),
@@ -141,17 +146,9 @@ fn main() {
         ("paired, frozen", Pairing::Paired, false, false),
         ("paired, shuffled", Pairing::Paired, true, true),
     ] {
-        let mut app = if shuffled {
-            build(Some(0x5EED)).unwrap_or_else(|e| {
-                eprintln!("{e}");
-                std::process::exit(1)
-            })
-        } else {
-            build(None).unwrap_or_else(|e| {
-                eprintln!("{e}");
-                std::process::exit(1)
-            })
-        };
+        let app = if shuffled { &mut shuffled_app } else { &mut app };
+        app.reset();
+        app.set_plasticity(true);
         let comp = app.compartment_driven_by(&c, &dan_type).unwrap_or(comp);
         let before_a = app.test(&a, &p);
         let before_b = app.test(&b, &p);

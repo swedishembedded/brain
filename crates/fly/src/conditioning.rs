@@ -46,35 +46,6 @@ use neuro::{DynamicalSystem, LifParams, PlasticityParams, Port, SpikingNet};
 
 use crate::Wiring;
 
-/// Transmitters the mushroom body needs and BANC's classifier abstained on.
-///
-/// Sign comes from a predicted transmitter, and a cell with no prediction gets
-/// a sign of zero, so it is not weakened but DELETED while still counting as a
-/// neuron. Across BANC that costs 1.4% of synapses and is fair enough. It is
-/// not fair for APL.
-///
-/// APL is one neuron per hemisphere that receives from the whole Kenyon-cell
-/// population and inhibits the whole Kenyon-cell population, and it is the
-/// reason the odour code is sparse: it is a gain control that holds the number
-/// of responding cells roughly constant however strong the odour. It is
-/// GABAergic, which is not in doubt - it is the fly's counterpart of the
-/// locust giant GABAergic neuron, and the sparseness of Kenyon-cell responses
-/// has been shown to depend on it. BANC's predictor returns nothing for it,
-/// so its 22,430 output synapses are multiplied by zero, and the mushroom body
-/// runs with no normalisation at all. That is 0.05% of the graph and all of
-/// the odour code.
-///
-/// Returned rather than applied silently, and applied here rather than at
-/// import, because this is knowledge added to a dataset and every use of it
-/// should have to say so.
-pub fn restore_known_transmitters(c: &mut Connectome) -> Vec<(String, usize)> {
-    [("APL", connectome::Nt::Gaba), ("DPM", connectome::Nt::Serotonin)]
-        .into_iter()
-        .map(|(t, nt)| (t.to_string(), c.assume_transmitter(t, nt)))
-        .filter(|(_, n)| *n > 0)
-        .collect()
-}
-
 /// An odour, as the glomeruli its receptor neurons project to.
 ///
 /// Not an arbitrary input vector. BANC names every olfactory receptor neuron

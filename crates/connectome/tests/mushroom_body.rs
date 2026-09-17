@@ -229,3 +229,89 @@ fn the_synapse_floor_does_not_delete_the_sparse_kenyon_cell_pathway() {
     assert!(survivors.contains(&(1, 2)), "KC 2 -> MBON11 is exempt");
     assert!(!survivors.contains(&(0, 6)), "KC 1 -> an ordinary cell is not exempt and is below the floor");
 }
+
+/// The cell that makes the odour code sparse is present, verified, and
+/// correctly signed.
+///
+/// APL is one neuron per hemisphere that receives from the whole Kenyon-cell
+/// population and inhibits the whole Kenyon-cell population: the gain control
+/// that keeps the number of responding cells roughly constant however strong
+/// the odour. I asserted, in a commit message and in two comments, that BANC
+/// gives it no transmitter and that its 22,430 output synapses were therefore
+/// multiplied by zero. That was wrong and I had not checked it: BANC carries
+/// `Verified NT type = GABA` for APL, the import has always read it, and the
+/// inhibition has always been there. This is the check I should have written
+/// instead of the claim.
+#[test]
+fn the_cell_that_makes_kenyon_coding_sparse_is_verified_inhibitory() {
+    let Ok(root) = std::env::var("BRAIN_CONNECTOME_DIR") else {
+        eprintln!("skipping: set BRAIN_CONNECTOME_DIR");
+        return;
+    };
+    let Ok((neurons, edges)) = connectome::find(&root, "banc") else {
+        eprintln!("skipping: no banc dataset under {root}");
+        return;
+    };
+    let c = load("banc", &neurons, &edges).expect("BANC loads");
+    let apl = c.population(|n| n.cell_type == "APL");
+    assert!(!apl.is_empty(), "BANC has no cell typed APL");
+    for &i in &apl {
+        let nt = c.neurons[i as usize].nt;
+        assert_eq!(nt.verified, Some(connectome::Nt::Gaba), "APL is verified GABAergic");
+        assert_eq!(nt.sign(), -1.0, "and must therefore inhibit");
+        assert_eq!(nt.strength(), 1.0, "a verified transmitter is believed fully");
+    }
+}
+
+/// A verified transmitter must never be discarded in favour of a guess.
+///
+/// BANC's verified column is a LIST, and parsing it as a single name fails on
+/// 5,872 neurons: `GABA,NITRIC_OXIDE` on 2,878, `HISTAMINE,ACETYLCHOLINE` on
+/// 914, `ACETYLCHOLINE,NITRIC_OXIDE,DOPAMINE` on 666, plus 928 photoreceptors
+/// spelling histamine `HA`. Failure was not treated as "unknown": `best()`
+/// falls back to the machine prediction, so a human annotation lost to a
+/// parse error became a guess, and on 315 neurons a guess of the opposite
+/// sign. Essentially every photoreceptor in the dataset was affected, which
+/// is why this had to be found before anything is built on vision.
+#[test]
+fn a_verified_transmitter_survives_being_written_as_a_list() {
+    // Unit first, so the rule is pinned without needing the dataset.
+    use connectome::Nt;
+    assert_eq!(Nt::parse_verified("GABA,NITRIC_OXIDE"), (Some(Nt::Gaba), false), "nitric oxide has no synapse to sign");
+    assert_eq!(Nt::parse_verified("HA"), (Some(Nt::Histamine), false), "HA is how BANC spells histamine");
+    assert_eq!(Nt::parse_verified("TYR"), (Some(Nt::Tyramine), false));
+    assert_eq!(
+        Nt::parse_verified("HISTAMINE,ACETYLCHOLINE"),
+        (Some(Nt::Histamine), true),
+        "a co-releasing photoreceptor is signed by its fast channel, and the ambiguity is reported"
+    );
+    assert_eq!(
+        Nt::parse_verified("ACETYLCHOLINE,NITRIC_OXIDE,DOPAMINE"),
+        (Some(Nt::Acetylcholine), false),
+        "one fast transmitter among three names"
+    );
+    assert_eq!(Nt::parse_verified("NITRIC_OXIDE"), (None, false), "no transmitter that signs anything");
+    assert_eq!(Nt::parse_verified(""), (None, false));
+
+    let Ok(root) = std::env::var("BRAIN_CONNECTOME_DIR") else {
+        eprintln!("skipping the dataset half: set BRAIN_CONNECTOME_DIR");
+        return;
+    };
+    let Ok((neurons, edges)) = connectome::find(&root, "banc") else {
+        return;
+    };
+    let c = load("banc", &neurons, &edges).expect("BANC loads");
+
+    // Every photoreceptor must be inhibitory, because histamine is, and
+    // because the alternative is a visual system wired backwards.
+    let pr = c.population(|n| n.class == "photoreceptor_neuron");
+    assert!(pr.len() > 1500, "BANC has about 1,840 photoreceptors, found {}", pr.len());
+    let signed: Vec<u32> = pr.iter().copied().filter(|&i| c.neurons[i as usize].nt.sign() < 0.0).collect();
+    eprintln!("photoreceptors: {} of {} inhibitory", signed.len(), pr.len());
+    assert!(
+        signed.len() * 10 >= pr.len() * 9,
+        "only {} of {} photoreceptors are inhibitory; histamine is, so the verified column is being lost",
+        signed.len(),
+        pr.len()
+    );
+}

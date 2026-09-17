@@ -155,10 +155,15 @@ fn read_neurons(r: impl Read, cov: &mut Coverage) -> Result<(BTreeMap<u64, u32>,
             continue;
         }
         let get = |c: Option<usize>| c.map(|i| fields[i].trim().to_string()).unwrap_or_default();
+        // The verified column may name several transmitters, and a list that
+        // fails to parse is not "unknown": it falls through to the machine
+        // prediction. See `Nt::parse_verified`.
+        let verified = c_ver.map(|i| Nt::parse_verified(&fields[i])).unwrap_or((None, false));
         let nt = NtPrior {
             predicted: c_pred.and_then(|i| Nt::parse(&fields[i])),
             confidence: c_conf.and_then(|i| fields[i].trim().parse::<f32>().ok()).unwrap_or(0.0),
-            verified: c_ver.and_then(|i| Nt::parse(&fields[i])),
+            verified: verified.0,
+            co_released: verified.1,
         };
         index.insert(root_id, out.len() as u32);
         out.push(Neuron {
