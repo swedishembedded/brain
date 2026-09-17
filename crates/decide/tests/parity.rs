@@ -24,7 +24,8 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use decide::config::EncoderConfig;
-use decide::model::{Encoder, PIPELINES};
+use decide::kern::PIPELINES;
+use decide::model::Encoder;
 
 /// Per-element tolerance, set from what this actually measures rather than
 /// from a round number: the worst stage over both backends is `l0.ffn_act` at

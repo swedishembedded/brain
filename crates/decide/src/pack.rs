@@ -119,7 +119,7 @@ impl Packer {
 
     /// Pad up to the next legal span start.
     fn align_to_boundary(&mut self) {
-        while self.ids.len() as u32 % self.align != 0 {
+        while !(self.ids.len() as u32).is_multiple_of(self.align) {
             self.ids.push(self.pad_id);
             self.types.push(SEG_STATE);
         }
@@ -234,7 +234,7 @@ mod tests {
         let packed = p.finish();
         // stride 7: rows 0..10, 7..17, 14..24, 21..25.
         assert_eq!(packed.window_spans(), &[(0, 10), (10, 10), (20, 10), (30, 4)]);
-        let mut seen = vec![false; 26];
+        let mut seen = [false; 26];
         let mut at = 0usize;
         for (w, &(_, len)) in packed.window_spans().iter().enumerate() {
             let start = w * 7;
@@ -284,6 +284,6 @@ mod tests {
         assert_eq!(packed.windows, 2);
         assert_eq!(packed.window_spans(), &[(0, 2), (2, 2)]);
         assert_eq!(packed.slot_spans(), &[(4, 2)]);
-        assert_eq!(packed.types, vec![SEG_STATE; 4].into_iter().chain([SEG_SLOT; 2]).collect::<Vec<_>>());
+        assert_eq!(packed.types, [SEG_STATE, SEG_STATE, SEG_STATE, SEG_STATE, SEG_SLOT, SEG_SLOT]);
     }
 }

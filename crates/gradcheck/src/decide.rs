@@ -14,7 +14,8 @@
 //! objective, only on the adjoint.
 
 use decide::config::EncoderConfig;
-use decide::model::{Encoder, PIPELINES};
+use decide::kern::PIPELINES;
+use decide::model::Encoder;
 
 use crate::CheckModel;
 

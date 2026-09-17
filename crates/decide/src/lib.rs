@@ -22,10 +22,14 @@
 //! structural instead of a promise.
 
 pub mod config;
+pub mod head;
+pub mod kern;
 pub mod import;
 pub mod init;
+pub mod loss;
 pub mod model;
 pub mod pack;
+pub mod primitives;
 
 pub use config::EncoderConfig;
 pub use model::Encoder;

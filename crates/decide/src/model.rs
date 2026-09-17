@@ -40,70 +40,6 @@ use paramstore::{ParamStore, Role};
 
 use crate::config::EncoderConfig;
 
-// ---- kernel indices (order matches PIPELINES) ----
-const K_EMBED: usize = 0;
-const K_MATMUL: usize = 1;
-const K_MATMUL_REG3: usize = 2;
-const K_BIAS_ADD: usize = 3;
-const K_ADD2: usize = 4;
-const K_GELU_ERF: usize = 5;
-const K_LAYERNORM: usize = 6;
-const K_LN_STATS: usize = 7;
-const K_LAYERNORM_DX: usize = 8;
-const K_SCORES_CROSS: usize = 9;
-const K_SOFTMAX_CROSS: usize = 10;
-const K_APPLY_CROSS: usize = 11;
-// 12-14 are the cooperative LayerNorm trio, resolved by NAME (see PIPELINES).
-const K_MATMUL_DX: usize = 15;
-const K_MATMUL_DW: usize = 16;
-const K_MATMUL_DX_REG: usize = 17;
-const K_MATMUL_DW_REG: usize = 18;
-const K_BIAS_GRAD: usize = 19;
-const K_GELU_ERF_BWD: usize = 20;
-const K_LN_DGAMMA: usize = 21;
-const K_LN_DBETA: usize = 22;
-const K_EMB_BWD: usize = 23;
-const K_DSCORES_CROSS: usize = 24;
-const K_DQ_CROSS: usize = 25;
-const K_DK_CROSS_ACC: usize = 26;
-const K_DV_CROSS_ACC: usize = 27;
-
-/// Every kernel this model dispatches. `layernorm_rows` has no index of its own
-/// because `block::LayerNormIds::resolve` picks it BY NAME when the device
-/// supports workgroup reductions; it must be registered for that lookup to
-/// find it.
-pub const PIPELINES: &[(&str, &str)] = &[
-    ("embed", kernels::EMBED),
-    ("matmul", kernels::MATMUL),
-    ("matmul_reg3", kernels::MATMUL_REG3),
-    ("bias_add", kernels::BIAS_ADD),
-    ("add2", kernels::ADD2),
-    ("gelu_erf", kernels::GELU_ERF),
-    ("layernorm", kernels::LAYERNORM),
-    ("ln_stats", kernels::LN_STATS),
-    ("layernorm_dx", kernels::LAYERNORM_DX),
-    ("attn_scores_cross", kernels::ATTN_SCORES_CROSS),
-    ("attn_softmax_cross", kernels::ATTN_SOFTMAX_CROSS),
-    ("attn_apply_cross", kernels::ATTN_APPLY_CROSS),
-    ("layernorm_rows", kernels::LAYERNORM_ROWS),
-    ("ln_stats_rows", kernels::LN_STATS_ROWS),
-    ("layernorm_dx_rows", kernels::LAYERNORM_DX_ROWS),
-    // ---- reverse pass ----
-    ("matmul_dx", kernels::MATMUL_DX),
-    ("matmul_dw", kernels::MATMUL_DW),
-    ("matmul_dx_reg", kernels::MATMUL_DX_REG),
-    ("matmul_dw_reg", kernels::MATMUL_DW_REG),
-    ("bias_grad", kernels::BIAS_GRAD),
-    ("gelu_erf_bwd", kernels::GELU_ERF_BWD),
-    ("layernorm_dgamma", kernels::LAYERNORM_DGAMMA),
-    ("layernorm_dbeta", kernels::LAYERNORM_DBETA),
-    ("emb_bwd", kernels::EMB_BWD),
-    ("attn_bwd_dscores_cross", kernels::ATTN_BWD_DSCORES_CROSS),
-    ("attn_bwd_dq_cross", kernels::ATTN_BWD_DQ_CROSS),
-    ("attn_bwd_dk_cross_acc", kernels::ATTN_BWD_DK_CROSS_ACC),
-    ("attn_bwd_dv_cross_acc", kernels::ATTN_BWD_DV_CROSS_ACC),
-];
-
 /// Attention-slab budget for the chunked path: the `[heads, chunk, len]` score
 /// and probability slabs are sized against it, so `chunk` falls as the longest
 /// span grows and the allocation stays bounded whatever a caller asks for.
@@ -178,6 +114,7 @@ struct Bwd {
 
 pub struct Encoder {
     pub gpu: Gpu,
+    k: crate::kern::Ids,
     pub cfg: EncoderConfig,
     pub ps: ParamStore,
     /// Capacity in rows; a call may use fewer.
@@ -280,7 +217,9 @@ impl Encoder {
             })
             .collect();
         let cfg_layers = cfg.n_layers;
+        let k = crate::kern::Ids::resolve(&gpu);
         let mut e = Encoder {
+            k,
             cap_rows,
             rows: 0,
             spans: Vec::new(),
@@ -340,7 +279,7 @@ impl Encoder {
     }
 
     fn gemm(&self, m: u32, n: u32) -> (usize, u32) {
-        block::pick_gemm(m as usize, n as usize, K_MATMUL, K_MATMUL_REG3, false)
+        block::pick_gemm(m as usize, n as usize, self.k.matmul, self.k.matmul_reg3, false)
     }
 
     /// Load one packed call: `ids`/`type_ids` are the flat token and segment
@@ -406,20 +345,20 @@ impl Encoder {
         let h = c.d_model;
         let ff = c.d_ff;
         let hd = c.head_dim();
-        let ln = block::LayerNormIds::resolve(g, K_LAYERNORM, K_LN_STATS, K_LAYERNORM_DX);
-        let cross = block::CrossIds { scores: K_SCORES_CROSS, softmax: K_SOFTMAX_CROSS, apply: K_APPLY_CROSS };
+        let ln = block::LayerNormIds::resolve(g, self.k.layernorm, self.k.ln_stats, self.k.layernorm_dx);
+        let cross = block::CrossIds { scores: self.k.scores_cross, softmax: self.k.softmax_cross, apply: self.k.apply_cross };
         // ---- embeddings ----
         // `embed` Params: [width, rows]; bufs [index(u32), table, out]. The
         // position and segment tables are gathered the same way as the token
         // table rather than added by stride, because packed spans do not share
         // one sequence length (see the module docs).
         let mut s = vec![
-            g.step(K_EMBED, &[&self.ids, self.w("tok.weight"), &self.e_tok], &[h, n], n * h),
-            g.step(K_EMBED, &[&self.pos_ids, self.w("pos.weight"), &self.e_pos], &[h, n], n * h),
-            g.step(K_EMBED, &[&self.type_ids, self.w("type.weight"), &self.e_type], &[h, n], n * h),
+            g.step(self.k.embed, &[&self.ids, self.w("tok.weight"), &self.e_tok], &[h, n], n * h),
+            g.step(self.k.embed, &[&self.pos_ids, self.w("pos.weight"), &self.e_pos], &[h, n], n * h),
+            g.step(self.k.embed, &[&self.type_ids, self.w("type.weight"), &self.e_type], &[h, n], n * h),
         ];
-        s.push(g.step(K_ADD2, &[&self.e_tok, &self.e_pos, &self.sum1], &[n * h], n * h));
-        s.push(g.step(K_ADD2, &[&self.sum1, &self.e_type, &self.sum2], &[n * h], n * h));
+        s.push(g.step(self.k.add2, &[&self.e_tok, &self.e_pos, &self.sum1], &[n * h], n * h));
+        s.push(g.step(self.k.add2, &[&self.sum1, &self.e_type, &self.sum2], &[n * h], n * h));
         s.push(block::layernorm_fwd(
             g,
             &ln,
@@ -438,7 +377,7 @@ impl Encoder {
 
             let (mk, mt) = self.gemm(n, 3 * h);
             s.push(g.step(mk, &[&self.x[l], self.w(&format!("{p}.qkv.weight")), &lb.qkv], &[n, h, 3 * h], mt));
-            s.push(g.step(K_BIAS_ADD, &[&lb.qkv, self.w(&format!("{p}.qkv.bias"))], &[n, 3 * h], n * 3 * h));
+            s.push(g.step(self.k.bias_add, &[&lb.qkv, self.w(&format!("{p}.qkv.bias"))], &[n, 3 * h], n * 3 * h));
 
             // Self-attention within each span, independently. q/k/v live at
             // 0/H/2H of the fused row.
@@ -465,9 +404,9 @@ impl Encoder {
 
             let (mk, mt) = self.gemm(n, h);
             s.push(g.step(mk, &[&lb.ctx, self.w(&format!("{p}.proj.weight")), &lb.attn_out], &[n, h, h], mt));
-            s.push(g.step(K_BIAS_ADD, &[&lb.attn_out, self.w(&format!("{p}.proj.bias"))], &[n, h], n * h));
+            s.push(g.step(self.k.bias_add, &[&lb.attn_out, self.w(&format!("{p}.proj.bias"))], &[n, h], n * h));
             // POST-LayerNorm: the residual is added first and normalized after.
-            s.push(g.step(K_ADD2, &[&self.x[l], &lb.attn_out, &lb.res_pre], &[n * h], n * h));
+            s.push(g.step(self.k.add2, &[&self.x[l], &lb.attn_out, &lb.res_pre], &[n * h], n * h));
             s.push(block::layernorm_fwd(
                 g,
                 &ln,
@@ -482,12 +421,12 @@ impl Encoder {
 
             let (mk, mt) = self.gemm(n, ff);
             s.push(g.step(mk, &[&lb.res, self.w(&format!("{p}.fc1.weight")), &lb.h], &[n, h, ff], mt));
-            s.push(g.step(K_BIAS_ADD, &[&lb.h, self.w(&format!("{p}.fc1.bias"))], &[n, ff], n * ff));
-            s.push(g.step(K_GELU_ERF, &[&lb.h, &lb.h_act], &[n * ff], n * ff));
+            s.push(g.step(self.k.bias_add, &[&lb.h, self.w(&format!("{p}.fc1.bias"))], &[n, ff], n * ff));
+            s.push(g.step(self.k.gelu_erf, &[&lb.h, &lb.h_act], &[n * ff], n * ff));
             let (mk, mt) = self.gemm(n, h);
             s.push(g.step(mk, &[&lb.h_act, self.w(&format!("{p}.fc2.weight")), &lb.mlp_out], &[n, ff, h], mt));
-            s.push(g.step(K_BIAS_ADD, &[&lb.mlp_out, self.w(&format!("{p}.fc2.bias"))], &[n, h], n * h));
-            s.push(g.step(K_ADD2, &[&lb.res, &lb.mlp_out, &lb.ffn_pre], &[n * h], n * h));
+            s.push(g.step(self.k.bias_add, &[&lb.mlp_out, self.w(&format!("{p}.fc2.bias"))], &[n, h], n * h));
+            s.push(g.step(self.k.add2, &[&lb.res, &lb.mlp_out, &lb.ffn_pre], &[n * h], n * h));
             s.push(block::layernorm_fwd(
                 g,
                 &ln,
@@ -538,6 +477,24 @@ impl Encoder {
         self.gpu.submit(&[], &bw.steps);
     }
 
+    /// The final hidden states' device buffer - what the head reads.
+    pub fn hidden_buf(&self) -> &DeviceBuffer {
+        &self.x[self.cfg.n_layers as usize]
+    }
+
+    /// The buffer the reverse pass is seeded from. The head writes its
+    /// hidden-state gradient straight into this, so a decision step costs no
+    /// copy between the two halves.
+    pub fn seed_buf(&self) -> &DeviceBuffer {
+        &self.bwd.as_ref().expect("seed_buf on an inference build").dx[self.cfg.n_layers as usize]
+    }
+
+    /// Run the reverse pass against whatever already sits in [`Encoder::seed_buf`].
+    pub fn backward_seeded(&self) {
+        let bw = self.bwd.as_ref().expect("backward on an inference build");
+        self.gpu.submit(&[], &bw.steps);
+    }
+
     /// Read one parameter's current value.
     pub fn read_weight(&self, name: &str) -> Vec<f32> {
         self.gpu.read(self.w(name), self.numel(name))
@@ -579,17 +536,17 @@ impl Encoder {
         let h = c.d_model;
         let ff = c.d_ff;
         let hd = c.head_dim();
-        let ln = block::LayerNormIds::resolve(g, K_LAYERNORM, K_LN_STATS, K_LAYERNORM_DX);
-        let cross = block::CrossIds { scores: K_SCORES_CROSS, softmax: K_SOFTMAX_CROSS, apply: K_APPLY_CROSS };
+        let ln = block::LayerNormIds::resolve(g, self.k.layernorm, self.k.ln_stats, self.k.layernorm_dx);
+        let cross = block::CrossIds { scores: self.k.scores_cross, softmax: self.k.softmax_cross, apply: self.k.apply_cross };
         let cross_bwd = block::CrossBwdIds {
-            dscores: K_DSCORES_CROSS,
-            dq: K_DQ_CROSS,
-            dk_acc: K_DK_CROSS_ACC,
-            dv_acc: K_DV_CROSS_ACC,
+            dscores: self.k.dscores_cross,
+            dq: self.k.dq_cross,
+            dk_acc: self.k.dk_cross_acc,
+            dv_acc: self.k.dv_cross_acc,
         };
         let gr = |name: &str| self.ps.g(name);
-        let dw_gemm = |m: u32, k: u32| block::pick_gemm(m as usize, k as usize, K_MATMUL_DW, K_MATMUL_DW_REG, false);
-        let dx_gemm = |m: u32, k: u32| block::pick_gemm(m as usize, k as usize, K_MATMUL_DX, K_MATMUL_DX_REG, false);
+        let dw_gemm = |m: u32, k: u32| block::pick_gemm(m as usize, k as usize, self.k.matmul_dw, self.k.matmul_dw_reg, false);
+        let dx_gemm = |m: u32, k: u32| block::pick_gemm(m as usize, k as usize, self.k.matmul_dx, self.k.matmul_dx_reg, false);
         let mut s: Vec<Step> = Vec::new();
 
         for l in (0..c.n_layers as usize).rev() {
@@ -601,8 +558,8 @@ impl Encoder {
             // `layernorm_dgamma` Params: [d_model, n_rows]; bufs [dy, x, mean, inv, dgamma].
             // `layernorm_dbeta`  Params: [d_model, n_rows]; bufs [dy, dbeta].
             s.push(block::ln_stats_fwd(g, &ln, &lb.ffn_pre, &bw.mean, &bw.inv, h, n, c.eps));
-            s.push(g.step(K_LN_DGAMMA, &[d_out, &lb.ffn_pre, &bw.mean, &bw.inv, gr(&format!("{p}.ln2.weight"))], &[h, n], h));
-            s.push(g.step(K_LN_DBETA, &[d_out, gr(&format!("{p}.ln2.bias"))], &[h, n], h));
+            s.push(g.step(self.k.ln_dgamma, &[d_out, &lb.ffn_pre, &bw.mean, &bw.inv, gr(&format!("{p}.ln2.weight"))], &[h, n], h));
+            s.push(g.step(self.k.ln_dbeta, &[d_out, gr(&format!("{p}.ln2.bias"))], &[h, n], h));
             s.push(block::layernorm_dx_bwd(g, &ln, &lb.ffn_pre, self.w(&format!("{p}.ln2.weight")), d_out, &bw.d_ffn_pre, h, n, c.eps));
 
             // `ffn_pre = res + mlp_out`, so the MLP branch's incoming grad IS
@@ -610,28 +567,28 @@ impl Encoder {
             // `bias_grad`  Params: [m, n]; bufs [dy, dbias] - one thread per feature.
             // `matmul_dw`  Params: [m, k, n]; bufs [dy, x, dw] - ACCUMULATES.
             // `matmul_dx`  Params: [m, k, n, accumulate]; bufs [dy, w, dx].
-            s.push(g.step(K_BIAS_GRAD, &[&bw.d_ffn_pre, gr(&format!("{p}.fc2.bias"))], &[n, h], h));
+            s.push(g.step(self.k.bias_grad, &[&bw.d_ffn_pre, gr(&format!("{p}.fc2.bias"))], &[n, h], h));
             let (dw, dwt) = dw_gemm(h, ff);
             s.push(g.step(dw, &[&bw.d_ffn_pre, &lb.h_act, gr(&format!("{p}.fc2.weight"))], &[n, ff, h], dwt));
             let (dx, dxt) = dx_gemm(n, ff);
             s.push(g.step(dx, &[&bw.d_ffn_pre, self.w(&format!("{p}.fc2.weight")), &bw.d_h_act], &[n, ff, h, 0], dxt));
             // The activation backward reads the PRE-activation hidden, never
             // the activated one.
-            s.push(g.step(K_GELU_ERF_BWD, &[&lb.h, &bw.d_h_act, &bw.d_h], &[n * ff], n * ff));
-            s.push(g.step(K_BIAS_GRAD, &[&bw.d_h, gr(&format!("{p}.fc1.bias"))], &[n, ff], ff));
+            s.push(g.step(self.k.gelu_erf_bwd, &[&lb.h, &bw.d_h_act, &bw.d_h], &[n * ff], n * ff));
+            s.push(g.step(self.k.bias_grad, &[&bw.d_h, gr(&format!("{p}.fc1.bias"))], &[n, ff], ff));
             let (dw, dwt) = dw_gemm(ff, h);
             s.push(g.step(dw, &[&bw.d_h, &lb.res, gr(&format!("{p}.fc1.weight"))], &[n, h, ff], dwt));
             let (dx, dxt) = dx_gemm(n, h);
             s.push(g.step(dx, &[&bw.d_h, self.w(&format!("{p}.fc1.weight")), &bw.d_tmp], &[n, h, ff, 0], dxt));
-            s.push(g.step(K_ADD2, &[&bw.d_ffn_pre, &bw.d_tmp, &bw.d_res], &[n * h], n * h));
+            s.push(g.step(self.k.add2, &[&bw.d_ffn_pre, &bw.d_tmp, &bw.d_res], &[n * h], n * h));
 
             // ---- LN1, then the attention branch ----
             s.push(block::ln_stats_fwd(g, &ln, &lb.res_pre, &bw.mean, &bw.inv, h, n, c.eps));
-            s.push(g.step(K_LN_DGAMMA, &[&bw.d_res, &lb.res_pre, &bw.mean, &bw.inv, gr(&format!("{p}.ln1.weight"))], &[h, n], h));
-            s.push(g.step(K_LN_DBETA, &[&bw.d_res, gr(&format!("{p}.ln1.bias"))], &[h, n], h));
+            s.push(g.step(self.k.ln_dgamma, &[&bw.d_res, &lb.res_pre, &bw.mean, &bw.inv, gr(&format!("{p}.ln1.weight"))], &[h, n], h));
+            s.push(g.step(self.k.ln_dbeta, &[&bw.d_res, gr(&format!("{p}.ln1.bias"))], &[h, n], h));
             s.push(block::layernorm_dx_bwd(g, &ln, &lb.res_pre, self.w(&format!("{p}.ln1.weight")), &bw.d_res, &bw.d_res_pre, h, n, c.eps));
 
-            s.push(g.step(K_BIAS_GRAD, &[&bw.d_res_pre, gr(&format!("{p}.proj.bias"))], &[n, h], h));
+            s.push(g.step(self.k.bias_grad, &[&bw.d_res_pre, gr(&format!("{p}.proj.bias"))], &[n, h], h));
             let (dw, dwt) = dw_gemm(h, h);
             s.push(g.step(dw, &[&bw.d_res_pre, &lb.ctx, gr(&format!("{p}.proj.weight"))], &[n, h, h], dwt));
             let (dx, dxt) = dx_gemm(n, h);
@@ -665,27 +622,27 @@ impl Encoder {
                 &mut s,
             );
 
-            s.push(g.step(K_BIAS_GRAD, &[&bw.d_qkv, gr(&format!("{p}.qkv.bias"))], &[n, 3 * h], 3 * h));
+            s.push(g.step(self.k.bias_grad, &[&bw.d_qkv, gr(&format!("{p}.qkv.bias"))], &[n, 3 * h], 3 * h));
             let (dw, dwt) = dw_gemm(3 * h, h);
             s.push(g.step(dw, &[&bw.d_qkv, &self.x[l], gr(&format!("{p}.qkv.weight"))], &[n, h, 3 * h], dwt));
             let (dx, dxt) = dx_gemm(n, h);
             s.push(g.step(dx, &[&bw.d_qkv, self.w(&format!("{p}.qkv.weight")), &bw.d_tmp], &[n, h, 3 * h, 0], dxt));
             // `res_pre = x + attn_out`: the block input receives the residual
             // pass-through AND the attention branch.
-            s.push(g.step(K_ADD2, &[&bw.d_res_pre, &bw.d_tmp, &bw.dx[l]], &[n * h], n * h));
+            s.push(g.step(self.k.add2, &[&bw.d_res_pre, &bw.d_tmp, &bw.dx[l]], &[n * h], n * h));
         }
 
         // ---- embeddings ----
         s.push(block::ln_stats_fwd(g, &ln, &self.sum2, &bw.mean, &bw.inv, h, n, c.eps));
-        s.push(g.step(K_LN_DGAMMA, &[&bw.dx[0], &self.sum2, &bw.mean, &bw.inv, gr("emb_ln.weight")], &[h, n], h));
-        s.push(g.step(K_LN_DBETA, &[&bw.dx[0], gr("emb_ln.bias")], &[h, n], h));
+        s.push(g.step(self.k.ln_dgamma, &[&bw.dx[0], &self.sum2, &bw.mean, &bw.inv, gr("emb_ln.weight")], &[h, n], h));
+        s.push(g.step(self.k.ln_dbeta, &[&bw.dx[0], gr("emb_ln.bias")], &[h, n], h));
         s.push(block::layernorm_dx_bwd(g, &ln, &self.sum2, self.w("emb_ln.weight"), &bw.dx[0], &bw.d_sum, h, n, c.eps));
         // Three gathers summed: addition fans the gradient out unchanged, so
         // every table scatters the SAME `d_sum` through its own index buffer.
         // `emb_bwd` Params: [n_rows, width, rows_in_table]; bufs [index(u32), d_x, grad_table].
-        s.push(g.step(K_EMB_BWD, &[&self.ids, &bw.d_sum, gr("tok.weight")], &[n, h, c.vocab], c.vocab * h));
-        s.push(g.step(K_EMB_BWD, &[&self.pos_ids, &bw.d_sum, gr("pos.weight")], &[n, h, c.max_positions], c.max_positions * h));
-        s.push(g.step(K_EMB_BWD, &[&self.type_ids, &bw.d_sum, gr("type.weight")], &[n, h, c.type_vocab], c.type_vocab * h));
+        s.push(g.step(self.k.emb_bwd, &[&self.ids, &bw.d_sum, gr("tok.weight")], &[n, h, c.vocab], c.vocab * h));
+        s.push(g.step(self.k.emb_bwd, &[&self.pos_ids, &bw.d_sum, gr("pos.weight")], &[n, h, c.max_positions], c.max_positions * h));
+        s.push(g.step(self.k.emb_bwd, &[&self.type_ids, &bw.d_sum, gr("type.weight")], &[n, h, c.type_vocab], c.type_vocab * h));
         s
     }
 
