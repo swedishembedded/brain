@@ -151,21 +151,7 @@ impl Session {
             }
         }
         let (hwc, w, h) = capability::blob::decode_image(inv, "image")?;
-        let s = self.model.cfg.image_size;
-
-        // Resize to the model's square input ON THE DEVICE (`resize_bilinear`)
-        // — a host loop over a 4K frame would be invisible to `--device`. The
-        // layout permutation around it is host glue by the `crates/imaging`
-        // rule. `Sam2::preprocess` then applies the model's own pixel_mean/std,
-        // so this path adds no second normalisation.
-        let chw = imaging::pixels::hwc_to_chw(&hwc, 3, h as usize, w as usize);
-        let ctx = Ctx::new(&self.model.gpu);
-        let src = ctx.upload("sam2.caps.src", &chw);
-        let (dev, out_shape) = ctx.resize(&src, Shape::new(1, 3, h, w), s, s, Filter::Bilinear, AlignCorners::HalfPixel);
-        let resized = ctx.download(&dev, out_shape.numel());
-
-        let img = self.model.preprocess(&resized);
-        let enc = self.model.encode(&img);
+        let enc = self.encode_pixels(&hwc, w, h);
         self.cache = Some((key, w, h, enc));
         Ok((w, h))
     }
@@ -175,21 +161,96 @@ impl Session {
     pub fn segment(&mut self, inv: &Invocation) -> ActionResult {
         let (src_coords, labels) = parse_prompt(inv)?;
         let (w, h) = self.ensure_encoded(inv)?;
+        let multimask = inv.get_bool("multimask").unwrap_or(true);
+        let out = self.run_prompt(w, h, &src_coords, &labels, multimask)?;
+        Ok(Outcome::new()
+            .set("width", json!(out.width))
+            .set("height", json!(out.height))
+            .set("masks", json!(out.masks))
+            .set("best", json!(out.best))
+            .set("iou", json!(out.iou))
+            .set("ious", json!(out.ious))
+            .set("area", json!(out.area))
+            .set("object_score", json!(out.object_score))
+            .blob("mask", capability::blob::image_blob(&out.mask, out.width, out.height, 1).with_media(Media::Mask)))
+    }
+
+    /// [`Session::segment`]'s typed core, over raw pixels/dimensions rather
+    /// than a wire-format [`Invocation`] - the same decode-then-typed-core
+    /// split `codeformer::caps::Session::restore`/`rrdbnet::caps::Upscaler`
+    /// already established, so a caller with pixels already in hand
+    /// (`crates/sdk`'s `SegmentPipeline`) does not have to round-trip
+    /// through a `Blob` to reach it. Caches the trunk encoding by a hash of
+    /// `hwc` itself - a DIFFERENT cache key than [`Session::ensure_encoded`]'s
+    /// (a hash of the wire-format blob bytes), since a typed caller has no
+    /// blob to hash cheaply before deciding whether to decode; equally
+    /// content-addressed, just over the representation each caller actually
+    /// has first.
+    pub fn segment_typed(&mut self, hwc: &[f32], w: u32, h: u32, coords_src: &[(f32, f32)], labels: &[f32], multimask: bool) -> Result<SegmentOutput, String> {
+        self.ensure_encoded_pixels(hwc, w, h);
+        self.run_prompt(w, h, coords_src, labels, multimask)
+    }
+
+    /// Encode `hwc` (source-image HWC `f32` `[0,1]`, `w*h*3`) if it is not
+    /// already the one cached.
+    fn ensure_encoded_pixels(&mut self, hwc: &[f32], w: u32, h: u32) {
+        let key = pixel_key(hwc);
+        if let Some((k, cw, ch, _)) = &self.cache {
+            if *k == key && *cw == w && *ch == h {
+                return;
+            }
+        }
+        let enc = self.encode_pixels(hwc, w, h);
+        self.cache = Some((key, w, h, enc));
+    }
+
+    /// The device-side resize/normalize/trunk-encode sequence both
+    /// [`Session::ensure_encoded`] and [`Session::ensure_encoded_pixels`]
+    /// need on a cache miss - the one real implementation, cached by two
+    /// different keys for the two different callers above.
+    fn encode_pixels(&self, hwc: &[f32], w: u32, h: u32) -> Encoded {
+        let s = self.model.cfg.image_size;
+        // Resize to the model's square input ON THE DEVICE (`resize_bilinear`)
+        // — a host loop over a 4K frame would be invisible to `--device`. The
+        // layout permutation around it is host glue by the `crates/imaging`
+        // rule. `Sam2::preprocess` then applies the model's own pixel_mean/std,
+        // so this path adds no second normalisation.
+        let chw = imaging::pixels::hwc_to_chw(hwc, 3, h as usize, w as usize);
+        let ctx = Ctx::new(&self.model.gpu);
+        let src = ctx.upload("sam2.caps.src", &chw);
+        let (dev, out_shape) = ctx.resize(&src, Shape::new(1, 3, h, w), s, s, Filter::Bilinear, AlignCorners::HalfPixel);
+        let resized = ctx.download(&dev, out_shape.numel());
+        let img = self.model.preprocess(&resized);
+        self.model.encode(&img)
+    }
+
+    /// One prompt against whichever image is ALREADY cached at `(w, h)` - the
+    /// shared "prompt in model space, decode, resample+squash the mask" math
+    /// [`Session::segment`]/[`Session::segment_typed`] both need, factored out
+    /// so encoding (two different cache-key strategies above) and prompting
+    /// (one implementation) do not have to be the same function.
+    fn run_prompt(&self, w: u32, h: u32, coords_src: &[(f32, f32)], labels: &[f32], multimask: bool) -> Result<SegmentOutput, String> {
+        if coords_src.is_empty() {
+            return Err("sam2 segment: give at least one point or a box prompt".into());
+        }
+        if coords_src.len() != labels.len() {
+            return Err(format!("sam2 segment: {} coords but {} labels", coords_src.len(), labels.len()));
+        }
         let s = self.model.cfg.image_size as f32;
         // Source pixels -> the model's square frame. The resize above is a plain
         // (non-aspect-preserving) stretch, exactly like the reference's
         // `Resize((1024, 1024))`, so each axis scales independently.
         let (sx, sy) = (s / w as f32, s / h as f32);
-        let coords: Vec<(f32, f32)> = src_coords.into_iter().map(|(x, y)| (x * sx, y * sy)).collect();
+        let coords: Vec<(f32, f32)> = coords_src.iter().map(|&(x, y)| (x * sx, y * sy)).collect();
 
         let prompt = Prompt {
             coords,
-            labels,
+            labels: labels.to_vec(),
             // The reference downsamples a full-resolution mask prompt with
             // `interpolate(antialias=True)`, which brain has no kernel for (see
             // the crate docs), so no mask prompt is exposed over the wire.
             mask_lowres: None,
-            multimask_output: inv.get_bool("multimask").unwrap_or(true),
+            multimask_output: multimask,
         };
         let enc = &self.cache.as_ref().expect("encoded above").3;
         let dec = self.model.decode(enc, &prompt);
@@ -212,22 +273,43 @@ impl Session {
 
         let px = (w * h) as usize;
         let best = dec.best_iou_index.min(n as usize - 1);
-        let mask = &all[best * px..(best + 1) * px];
+        let mask = all[best * px..(best + 1) * px].to_vec();
         // A reduction to one scalar — host by the `crates/imaging` rule (the
         // readback dominates, and the per-pixel work already ran on the device).
         let area = mask.iter().filter(|&&p| p > 0.5).count();
+        let object_score = self.model.gpu.read(&dec.object_score_logits, 1)[0];
 
-        Ok(Outcome::new()
-            .set("width", json!(w))
-            .set("height", json!(h))
-            .set("masks", json!(n))
-            .set("best", json!(best))
-            .set("iou", json!(dec.ious.get(best).copied().unwrap_or(0.0)))
-            .set("ious", json!(dec.ious))
-            .set("area", json!(area))
-            .set("object_score", json!(self.model.gpu.read(&dec.object_score_logits, 1)[0]))
-            .blob("mask", capability::blob::image_blob(mask, w, h, 1).with_media(Media::Mask)))
+        Ok(SegmentOutput { mask, width: w, height: h, masks: n, best, iou: dec.ious.get(best).copied().unwrap_or(0.0), ious: dec.ious.clone(), area, object_score })
     }
+}
+
+/// [`Session::segment_typed`]'s output: the winning mask (sigmoid
+/// probability, source grid, `width*height`) plus the same metadata
+/// [`Session::segment`]'s `Outcome` carries over the wire.
+pub struct SegmentOutput {
+    pub mask: Vec<f32>,
+    pub width: u32,
+    pub height: u32,
+    pub masks: u32,
+    pub best: usize,
+    pub iou: f32,
+    pub ious: Vec<f32>,
+    pub area: usize,
+    pub object_score: f32,
+}
+
+/// A cheap FNV-1a over raw pixel floats' bit patterns - [`Session::
+/// segment_typed`]'s cache key, the pixel-based counterpart to
+/// [`Session::image_key`]'s wire-blob-based one.
+fn pixel_key(hwc: &[f32]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &v in hwc {
+        for byte in v.to_bits().to_le_bytes() {
+            h ^= byte as u64;
+            h = h.wrapping_mul(0x100_0000_01b3);
+        }
+    }
+    h
 }
 
 /// A parsed prompt in **source-image pixels**: the `(x, y)` clicks and their

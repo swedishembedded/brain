@@ -61,17 +61,18 @@ creature = ["device", "dep:brain-fly", "dep:brain-connectome", "dep:brain-flybod
 # loader/model-store dependency belongs here until an `ArchSpec` exists to
 # use it.
 text = ["device", "dep:brain-qwen3", "dep:brain-data", "dep:brain-checkpoint", "dep:serde_json"]
-# `brain::EmbeddingPipeline` (CLIP text embedding) and `brain::
-# DetectionPipeline` (YOLOv8 object detection) - two public types under one
-# feature. Named `vision`, not `embedding`/`detection` - `brain_arch::Domain`
-# has no `Embedding`/`Detection` variant (CLIP's own `arch!` row is
-# registered `Vision` since the same released checkpoint also holds an image
-# tower; YOLOv8's is `Vision` too), and this workspace's rule is that a
-# surface name is a `Domain` variant, full stop - inventing a second word for
-# the same modality is exactly what that rule exists to prevent. A future
-# vision pipeline (segmentation, depth) joins this SAME feature rather than
-# getting its own, for the same reason.
-vision = ["resolve", "dep:brain-clip", "dep:brain-yolov8"]
+# `brain::EmbeddingPipeline` (CLIP text embedding), `brain::
+# DetectionPipeline` (YOLOv8 object detection) and `brain::SegmentPipeline`
+# (SAM 2.1 promptable segmentation) - three public types under one feature.
+# Named `vision`, not `embedding`/`detection`/`segmentation` -
+# `brain_arch::Domain` has no variant for any of those (CLIP's own `arch!`
+# row is registered `Vision` since the same released checkpoint also holds
+# an image tower; YOLOv8's and SAM2's are `Vision` too), and this
+# workspace's rule is that a surface name is a `Domain` variant, full stop -
+# inventing a second word for the same modality is exactly what that rule
+# exists to prevent. A future vision pipeline (depth) joins this SAME
+# feature rather than getting its own, for the same reason.
+vision = ["resolve", "dep:brain-clip", "dep:brain-yolov8", "dep:brain-sam2"]
 # `brain::DecisionPipeline`. Selects `device` only, not `resolve`: like `text`,
 # this architecture has no model-store `ArchSpec`, so there is nothing for a
 # resolver to resolve a hub id against - and a decision model is two artifacts
@@ -119,6 +120,7 @@ brain-neuro = { workspace = true, optional = true }
 brain-qwen3 = { workspace = true, optional = true }
 brain-qwen3asr = { workspace = true, optional = true }
 brain-rrdbnet = { workspace = true, optional = true }
+brain-sam2 = { workspace = true, optional = true }
 brain-timesfm3 = { workspace = true, optional = true }
 brain-s3dit = { workspace = true, optional = true }
 brain-wm-display = { workspace = true, optional = true }

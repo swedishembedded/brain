@@ -30,7 +30,7 @@ all - the fly/flybody/connectome stack is unregistered).
 | Video generation | 2 | 2 | none | `wan_cli.rs`, `ltxv_cli.rs` | yes (wan) |
 | ASR | 2 | 2 | none | **no CLI at all** - `resident_asr.rs` only | no |
 | TTS/music/speech codec | 7 | 3 | none | `tts_cli.rs` + `tts_serve.rs` | no |
-| Vision/detection/segmentation | 4 | 4 | **PARTIAL - `DetectionPipeline`** (YOLOv8; SAM2 segmentation/depth/label deferred, see Phase 3.1) | `yolo_cli.rs`, `sam2_cli.rs`, `depth_cli.rs`, `label_cli.rs` | no |
+| Vision/detection/segmentation | 4 | 4 | **PARTIAL - `DetectionPipeline`** (YOLOv8) + **`SegmentPipeline`** (SAM2; depth/label deferred, see Phase 3.1/3.2) | `yolo_cli.rs`, `sam2_cli.rs`, `depth_cli.rs`, `label_cli.rs` | no |
 | Embedding towers | 3 | 3 | none | **no CLI at all** - `resident_clip/arcface/t5encoder.rs` | no |
 | Forecasting | 4 | 0 (CLI-local) | none | **one unified entry**: `forecast_cli.rs` + generic `resident_forecast.rs` | yes (`brain forecast finetune`) |
 | 3D/scene | 2 | 0 (CLI-local) | none | `splat_cli.rs`, `mirror_cli.rs` | no |
@@ -367,7 +367,8 @@ including the `samples/imagegen/*` samples that link `crates/sdk` directly.
   - [x] **Phase 2.6** - `codeformer::spec::CodeFormerSpec`, the prerequisite Phase 2.5 named - see its own section below.
   - [x] **Phase 2.7** - `RestorePipeline` (CodeFormer) - see its own section below for two real forward-pass infrastructure bugs this one found AND FIXED (a duplicate kernel registration that broke the CPU JIT backend; a `backend-wgpu` buffer-reclaim ceiling from two unpolled `Builder` scopes) - this pipeline's test reaches a genuine, complete `.restore()` forward pass at CodeFormer's real fixed geometry, the strongest end-to-end proof of any pipeline in this crate so far. SUPIR and VQGAN stay deferred with the reasons already on record.
   - [x] **Phase 3.1** - `DetectionPipeline` (YOLOv8 only) - the vision/detection domain bucket's first pipeline, and its first NEW domain object (`Detection`, not `Image`). See its own section below.
-  - [ ] Still open within vision/detection: `SegmentPipeline` (SAM2 - already has a real `spec.rs`, unlike YOLOv8 before this milestone; masks are a different domain object again, not boxes). Still entirely uncovered domain buckets: TTS/music, video generation, 3D/world models. See the domain inventory table.
+  - [x] **Phase 3.2** - `SegmentPipeline` (SAM 2.1) - see its own section below for a real, independent `Sam2Spec` bug found and fixed (the SAME `ArtifactKind::Opaque`-vs-`Torch` mistake `RrdbnetSpec` had), and a genuine end-to-end `.segment()` forward pass at SAM 2.1's real fixed geometry.
+  - [ ] Still entirely uncovered domain buckets: TTS/music, video generation, 3D/world models. See the domain inventory table.
 
 ### Phase 2.1 - `ForecastPipeline` (done)
 
@@ -963,6 +964,99 @@ Verified with `cargo test -p brain-yolov8 --lib` (46 passed, 6 new, no
 regressions), `cargo build -p brain --features vision` (clean), `cargo test
 -p brain --features vision` (all pipelines' suites green, including this
 one's 4 tests), and a full `cargo build --workspace --exclude brain-vulkan`.
+
+### Phase 3.2 - `SegmentPipeline` (SAM 2.1) - a real, independent `Sam2Spec` bug found AND fixed, and a genuine end-to-end forward pass
+
+Covers **SAM 2.1 only**, resolved through the SAME `loader::resolve_structured`
+call every earlier pipeline uses, against the ALREADY-EXISTING `sam2::spec::
+Sam2Spec` - unlike YOLOv8 (Phase 3.1), SAM2 already had a real `ArchSpec`
+before this milestone, so the work here is the pipeline plus a bug this
+milestone's own fixture discipline found in that pre-existing spec.
+
+**A real, independent bug found AND fixed while testing this pipeline, in
+`crates/sam2/src/spec.rs` itself - the SAME mistake `rrdbnet::spec::
+RrdbnetSpec` had before Phase 2.5, found a second time in a DIFFERENT spec
+this session did not otherwise touch**: `Sam2Spec::classify` checked
+`rec.kind == ArtifactKind::Opaque` for a `.pt`/`.pth` candidate, but
+`brain_modelstore::inventory::scan` classifies a real, readable `.pt`/`.pth`
+archive as `ArtifactKind::Torch` - so `Sam2Spec` had NEVER successfully
+classified a real, scanner-produced checkpoint; every one of its own
+pre-existing unit tests passed anyway because they all hand-build an
+`ArtifactRecord` with an explicitly chosen `kind: ArtifactKind::Opaque`,
+never going through the real scanner - the identical structural gap
+`RrdbnetSpec`'s own tests had. This means `brain sam2 track`/`brain do sam2
+segment` (the resolver-migrated CLI paths `crates/cli/src/sam2_cli.rs`
+already routes through `Sam2Spec`) could never actually resolve a real
+installed SAM2 checkpoint either - not a theoretical gap, a live one, exactly
+like `RrdbnetSpec`'s was. Fixed by changing the two `ArtifactKind::Opaque`
+comparisons to `Torch`, updating the five existing hand-built test fixtures
+to match reality, and adding a new regression test that classifies through
+the REAL `brain_modelstore::inventory::scan`
+(`classify_recognizes_a_real_pt_file_scanned_by_the_real_inventory_scanner`),
+the same discipline that already caught `RrdbnetSpec`'s version of this bug
+and is now proven to generalize to a second, independently-written spec.
+
+**`sam2::caps::Session` gained a typed core, the same decode-then-typed-core
+split `codeformer::caps::Session::restore`/`rrdbnet::caps::Upscaler` already
+established - but with a real subtlety the earlier two didn't have**: the
+"encode once, prompt many" cache (`Session::ensure_encoded`) skips the wire
+`Blob` decode entirely on a cache hit, a real, documented cost saving. A
+naive refactor that routed `segment(inv)` through a typed `segment_typed`
+taking already-decoded pixels would have paid that decode unconditionally
+even on a hit. Instead, only the "resize+normalize+trunk-encode" dispatch
+sequence was factored into one shared `encode_pixels`, called from TWO
+different cache-key strategies (`ensure_encoded`, unchanged, still hashing
+the wire blob's bytes before ever decoding; the new `ensure_encoded_pixels`,
+hashing the pixels a typed caller already has in hand) - and the actual
+prompt/decode/mask-emit math was factored into a separate `run_prompt`,
+assuming an image is already encoded, shared verbatim by both `segment` and
+the new `segment_typed`. One real implementation of the segmentation math,
+two independently-optimal encode paths, not a false unification that would
+have quietly regressed the documented caching behavior.
+
+**`Mask`, the vision/detection bucket's second non-`Image`, non-`Detection`
+domain object**: a per-pixel sigmoid-probability grid at source-image
+resolution plus SAM 2.1's own IoU confidence estimate and pixel-area count -
+genuinely a third distinct pipeline shape in this crate (`image(+opts) ->
+Image` for generation/upscaling/restoration, `image(+opts) -> Vec<Detection>`
+for detection, and now `image + prompt(+opts) -> Mask` for segmentation).
+`brain::Prompt` is a NEW typed builder (`.point(x, y, foreground)`/
+`.bbox(x1, y1, x2, y2)`) over `sam2::caps::parse_prompt`'s own
+box-before-points ordering convention, replacing that function's
+`"x1,y1,x2,y2"`/`"x,y;x,y"` string parsing for the in-process caller -
+`SegmentPipeline` is also this crate's first pipeline whose SIMPLE call
+takes a prompt argument at all, since SAM 2.1 has no "segment everything"
+default the way every other pipeline's options are all optional.
+
+**A genuine end-to-end test, at SAM 2.1's real fixed geometry, like
+`RestorePipeline`'s and unlike RRDBNet/YOLOv8's**: `sam2::spec::Sam2Spec`
+only accepts a trunk width of exactly 96 (tiny) or 144 (large) - there is no
+synthetic in-between size the real resolver would classify at all, so
+`crates/sdk/tests/segment_pipeline.rs` builds a COMPLETE `hiera_tiny`
+checkpoint (via `sam2::import::manifest_for`, the exact tensor list
+`sam2::caps::load` itself validates against) and reaches a real
+`.segment()` forward pass through the whole graph - trunk, FPN neck, prompt
+encoder, mask decoder - at the model's real 1024x1024 frame. Unlike
+`RestorePipeline`'s own CodeFormer fixture, this one hit NO forward-pass
+infrastructure bugs on the wgpu backend (~150-170s total for the file's 4
+tests) - the `backend-wgpu` buffer-reclaim ceiling Phase 2.7 found and
+fixed in `codeformer::model::CodeFormer::build` does not reproduce here,
+plausibly because SAM2's 12-block trunk (`stages: [1,2,7,2]`) is a much
+shorter unpolled-scope walk than CodeFormer's ~59-block one.
+
+**Not done, tracked for later**: CLI migration is NOT a new gap here -
+`sam2_cli.rs`/`resident_sam2.rs` already route through `Sam2Spec` (they were
+just silently broken by the bug above, now fixed); the video/tracking path
+(`sam2::video`, `crate::model::Sam2::track`-style multi-frame memory bank)
+is out of scope for this single-image pipeline, the same "genuinely
+different call shape" reasoning that deferred nemotronasr's streaming ASR
+in Phase 2.4.
+
+Verified with `cargo test -p brain-sam2 --lib` (29 passed, 1 new, no
+regressions from the `caps.rs`/`spec.rs` changes), `cargo build -p brain
+--features vision` (clean), `cargo test -p brain --features vision --test
+segment_pipeline` (4 passed), and a full `cargo build --workspace --exclude
+brain-vulkan`.
 
 Findings 8, 11, 14, 18-20, 23-24 are real but not yet milestoned - pick them
 up opportunistically when touching the same file for another reason, or spin

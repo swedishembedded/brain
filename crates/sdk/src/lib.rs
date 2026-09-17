@@ -36,7 +36,7 @@
 //! | `creature` | [`Creature`], [`View`] -- a connectome running a body, and a window onto it |
 //! | `forecast` | [`ForecastPipeline`] -- time-series forecasting (kronos, timesfm3) |
 //! | `text` | [`TextGenerationPipeline`] -- text generation (qwen3, from a local checkpoint path) |
-//! | `vision` | [`EmbeddingPipeline`] -- text embedding (CLIP); [`DetectionPipeline`] -- object detection (YOLOv8); named for the `brain_arch::Domain` they resolve under, not the capability, since there is no `Embedding`/`Detection` domain |
+//! | `vision` | [`EmbeddingPipeline`] -- text embedding (CLIP); [`DetectionPipeline`] -- object detection (YOLOv8); [`SegmentPipeline`] -- promptable segmentation (SAM 2.1); named for the `brain_arch::Domain` they resolve under, not the capability, since there is no `Embedding`/`Detection`/`Segmentation` domain |
 //! | `audio` | [`TranscribePipeline`] -- speech-to-text (qwen3-asr, offline) |
 //! | `full` | every surface; this is `default` |
 //!
@@ -110,6 +110,8 @@ pub use flow::{EvalReport, Flow, Stages, TrainReport};
 
 #[cfg(feature = "image")]
 mod restore;
+#[cfg(feature = "vision")]
+mod segment;
 #[cfg(feature = "text")]
 mod text;
 #[cfg(feature = "image")]
@@ -153,6 +155,8 @@ pub use image::Image;
 pub use pipeline::{ImageGenerationOptions, ImagePipeline, ImagePipelineBuilder};
 #[cfg(feature = "image")]
 pub use restore::{RestoreOptions, RestorePipeline, RestorePipelineBuilder};
+#[cfg(feature = "vision")]
+pub use segment::{Mask, Prompt, SegmentOptions, SegmentPipeline, SegmentPipelineBuilder};
 #[cfg(feature = "text")]
 pub use text::{GeneratedText, TextGenerationOptions, TextGenerationPipeline, TextGenerationPipelineBuilder};
 #[cfg(feature = "image")]

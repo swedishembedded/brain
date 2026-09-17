@@ -78,11 +78,17 @@ impl ArchSpec for Sam2Spec {
     fn classify(&self, records: &[ArtifactRecord], _inventory_root: &Path) -> Vec<(usize, String, Confidence)> {
         let mut out = Vec::new();
         for (idx, rec) in records.iter().enumerate() {
-            if !rec.usable() || !matches!(rec.kind, ArtifactKind::Opaque | ArtifactKind::Safetensors) {
+            // A real `.pt`/`.pth` archive the scanner could actually read the
+            // pickle/zip container of classifies `Torch`, not `Opaque` -
+            // `Opaque` here NEVER matches a real checkpoint scanned by
+            // `brain_modelstore::inventory::scan` (only this spec's own
+            // hand-built unit-test records used to), the same silent dead end
+            // `rrdbnet::spec::RrdbnetSpec` had before it was fixed.
+            if !rec.usable() || !matches!(rec.kind, ArtifactKind::Torch | ArtifactKind::Safetensors) {
                 continue;
             }
-            let is_pt = rec.kind == ArtifactKind::Opaque && matches!(rec.path.extension().and_then(|e| e.to_str()), Some("pt" | "pth"));
-            if rec.kind == ArtifactKind::Opaque && !is_pt {
+            let is_pt = rec.kind == ArtifactKind::Torch && matches!(rec.path.extension().and_then(|e| e.to_str()), Some("pt" | "pth"));
+            if rec.kind == ArtifactKind::Torch && !is_pt {
                 continue;
             }
             let Some(embed_dim) = patch_embed_out_channels(rec) else { continue };
@@ -153,7 +159,7 @@ mod tests {
         let large = dir.join("facebook").join("sam2.1_hiera_large.pt");
         write_checkpoint_pt(&large, 144);
 
-        let records = vec![complete(tiny, ArtifactKind::Opaque), complete(large, ArtifactKind::Opaque)];
+        let records = vec![complete(tiny, ArtifactKind::Torch), complete(large, ArtifactKind::Torch)];
         let out = Sam2Spec.classify(&records, dir.as_path());
         assert_eq!(out, vec![(0, "weights".to_string(), Confidence::Derived), (1, "weights".to_string(), Confidence::Derived)], "{out:?}");
     }
@@ -167,7 +173,7 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, b"not a real torch.save archive").unwrap();
 
-        let records = vec![complete(path, ArtifactKind::Opaque)];
+        let records = vec![complete(path, ArtifactKind::Torch)];
         let out = Sam2Spec.classify(&records, dir.as_path());
         assert_eq!(out, Vec::new(), "{out:?}");
     }
@@ -180,7 +186,7 @@ mod tests {
         let dir = tmp("unsupported-width");
         let path = dir.join("facebook").join("sam2.1_hiera_small.pt");
         write_checkpoint_pt(&path, 112); // hiera_small's real embed_dim - not wired up here yet
-        let records = vec![complete(path, ArtifactKind::Opaque)];
+        let records = vec![complete(path, ArtifactKind::Torch)];
         let out = Sam2Spec.classify(&records, dir.as_path());
         assert_eq!(out, Vec::new(), "{out:?}");
     }
@@ -191,7 +197,7 @@ mod tests {
         let path = dir.join("facebook").join("sam2.1_hiera_tiny.pt");
         write_checkpoint_pt(&path, 96);
 
-        let records = vec![complete(path.clone(), ArtifactKind::Opaque)];
+        let records = vec![complete(path.clone(), ArtifactKind::Torch)];
         let spec = Sam2Spec;
         let specs: Vec<&dyn ArchSpec> = vec![&spec];
         let out = resolve("sam2", &records, &specs, &BTreeMap::new());
@@ -213,7 +219,7 @@ mod tests {
         let path = dir.join("facebook").join("sam2.1_hiera_tiny.pt");
         write_checkpoint_pt(&path, 96);
 
-        let records = vec![complete(path, ArtifactKind::Opaque)];
+        let records = vec![complete(path, ArtifactKind::Torch)];
         let spec = Sam2Spec;
         let specs: Vec<&dyn ArchSpec> = vec![&spec];
         let mut overrides = BTreeMap::new();
@@ -223,5 +229,27 @@ mod tests {
             Resolution::Missing(m) => assert!(m.roles.iter().any(|r| r.doc.contains("does not match")), "{m:?}"),
             other => panic!("expected Missing (assemble error), got {other:?}"),
         }
+    }
+
+    /// Regression pin for the bug every other test in this file could not
+    /// have caught: they all hand-build an `ArtifactRecord` with an
+    /// explicitly chosen `kind`, so a `classify` that checked the WRONG
+    /// `ArtifactKind` still passed every one of them. This test goes through
+    /// the REAL scanner (`brain_modelstore::inventory::scan`) instead, the
+    /// same one `loader::resolve_structured` uses in production - a real
+    /// `.pt` file must classify as `weights` end to end, with no hand-picked
+    /// `ArtifactKind` anywhere in this test.
+    #[test]
+    fn classify_recognizes_a_real_pt_file_scanned_by_the_real_inventory_scanner() {
+        let dir = tmp("real-scanner");
+        let path = dir.join("facebook").join("sam2.1_hiera_tiny.pt");
+        write_checkpoint_pt(&path, 96);
+
+        let records = brain_modelstore::inventory::scan(&dir);
+        assert_eq!(records.len(), 1, "{records:?}");
+        assert_eq!(records[0].kind, ArtifactKind::Torch, "a real .pt scans as Torch, not Opaque - this is exactly what classify() must check");
+
+        let out = Sam2Spec.classify(&records, dir.as_path());
+        assert_eq!(out, vec![(0, "weights".to_string(), Confidence::Derived)], "{out:?}");
     }
 }

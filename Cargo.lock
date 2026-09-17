@@ -395,6 +395,7 @@ dependencies = [
  "brain-qwen3asr",
  "brain-rrdbnet",
  "brain-s3dit",
+ "brain-sam2",
  "brain-testutil",
  "brain-timesfm3",
  "brain-wm-display",
