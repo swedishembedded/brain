@@ -120,10 +120,18 @@ export BRAIN_FLY_REFERENCE="$BUZZFLY_DIR/reference/REFERENCE_PLACEHOLDER"
 # the one thing here guaranteed to be wrong somewhere else. An existing
 # setting always wins, so a machine with MuJoCo somewhere unusual is not
 # overridden.
+#
+# The conventional roots are spelled as overridable defaults rather than
+# literals so that a machine that installs MuJoCo elsewhere can redirect the
+# SEARCH without having to know its exact version-suffixed directory name (the
+# glob is appended outside the expansion, so `${BRAIN_MUJOCO_OPT}` names a
+# parent, not a match).
 if [ -z "${BRAIN_MUJOCO_DIR:-}" ]; then
 	for _buzzfly_mj in \
 		"${MUJOCO_DIR:-}" "${MUJOCO_PATH:-}" \
-		"$HOME"/.mujoco/mujoco-* /opt/mujoco-* /usr/local/mujoco-*; do
+		"${BRAIN_MUJOCO_HOME:-$HOME/.mujoco}"/mujoco-* \
+		"${BRAIN_MUJOCO_OPT:-/opt}"/mujoco-* \
+		"${BRAIN_MUJOCO_LOCAL:-/usr/local}"/mujoco-*; do
 		if [ -n "$_buzzfly_mj" ] && [ -f "$_buzzfly_mj/lib/libmujoco.so" ]; then
 			export BRAIN_MUJOCO_DIR="$_buzzfly_mj"
 			break
