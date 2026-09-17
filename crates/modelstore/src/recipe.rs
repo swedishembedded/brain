@@ -263,7 +263,20 @@ const FILES_RECIPES: &[FilesRecipe] = &[
         // it by accident (unlike a bare `config.json`, which every
         // transformers-shaped repo has).
         signature: &["speech_tokenizer/config.json"],
-        repos: &[],
+        // Repo-pinned for PRECEDENCE, not for identification: the signature
+        // above already identifies a TTS repo unambiguously on its own. The
+        // pin exists because `qwen3asr`'s deliberately broad
+        // `vocab.json`+`merges.txt`+`preprocessor_config.json` trio ALSO
+        // matches this repo (it ships all three alongside the codec), and
+        // two `FilesRecipe`s with no `repos` both report
+        // `Specificity::NamedFiles`, tie, and make `select` refuse the pull
+        // outright -- the same collision `qwen35`'s own `repos` row above
+        // resolves against the same over-broad recipe. `matches` ANDs the
+        // repo gate with the signature, so adding a SECOND upstream TTS repo
+        // means adding its name here too; this list is the declared
+        // `default_ref` in `crates/arch`'s `qwen3tts` row, and nothing else
+        // is advertised as pullable today.
+        repos: &["Qwen/Qwen3-TTS-12Hz-0.6B-Base"],
         // Whole repo: `TransformersRecipe`'s curated fetch (config.json,
         // tokenizer.json/tokenizer_config.json, model.safetensors) misses
         // the nested `speech_tokenizer/` codec checkpoint entirely, plus
@@ -1650,6 +1663,40 @@ mod tests {
         let listing = qwen35_fp8_listing();
         let matched = recipes().into_iter().find(|x| x.matches(&r, &listing)).unwrap();
         assert_eq!(matched.id(), "qwen35", "must not fall through to qwen3asr's broader signature");
+    }
+
+    /// `Qwen/Qwen3-TTS-12Hz-0.6B-Base` -- the ONLY repo `arch`'s `qwen3tts`
+    /// row declares as its `default_ref`, and so the one `brain models list`
+    /// advertises as pullable -- ships BOTH recipes' signatures: nested
+    /// `speech_tokenizer/config.json` (qwen3tts) and the
+    /// `vocab.json`+`merges.txt`+`preprocessor_config.json` trio
+    /// (qwen3asr). Both are `FilesRecipe`s with no `repos`, so both reported
+    /// `Specificity::NamedFiles`, tied, and `select` refused the pull with
+    /// `AmbiguousRecipe` -- an advertised model that could not actually be
+    /// fetched. Listing is the real upstream one (13 files, HF API).
+    #[test]
+    fn qwen3tts_repo_is_not_ambiguous_against_qwen3asrs_broader_signature() {
+        let r = ModelRef::new("Qwen", "Qwen3-TTS-12Hz-0.6B-Base", None);
+        let listing: Vec<String> = [
+            ".gitattributes",
+            "README.md",
+            "config.json",
+            "generation_config.json",
+            "merges.txt",
+            "model.safetensors",
+            "preprocessor_config.json",
+            "speech_tokenizer/config.json",
+            "speech_tokenizer/configuration.json",
+            "speech_tokenizer/model.safetensors",
+            "speech_tokenizer/preprocessor_config.json",
+            "tokenizer_config.json",
+            "vocab.json",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        let picked = select(recipes(), &r, &listing).expect("a TTS repo must resolve to exactly one recipe");
+        assert_eq!(picked.id(), "qwen3tts", "a repo carrying the speech_tokenizer codec is TTS, not ASR");
     }
 
     /// The fix above must not cost `qwen3asr` its own real repo.
