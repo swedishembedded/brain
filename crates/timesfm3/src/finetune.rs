@@ -52,6 +52,7 @@ use forecast::train_data::{self, Series, Window, WindowRef};
 use crate::config::Timesfm3Config;
 use crate::preprocess::{self, BuiltInput, DecodeShape};
 use crate::train::{LoraCfg, Timesfm3Train, TRAIN_PIPELINES};
+use gpu_core::Gpu;
 
 /// The close price - column 3 of an OHLCV bar. TimesFM-3 is fine-tuned here
 /// as a UNIVARIATE forecaster over it, rather than over all five columns as
@@ -216,7 +217,11 @@ pub fn eval_universe_loss(cfg: &Timesfm3Config, weights: &HashMap<String, Vec<f3
     let step = (windows.len() / 300).max(1);
     let refs: Vec<WindowRef> = windows.into_iter().step_by(step).collect();
     let examples = build_examples(cfg, series, &refs, context, horizon);
-    mean_loss(cfg, weights, None, &examples, context, horizon, 1)
+    // One device for this call, dropped with it. Building per `mean_loss`
+    // instead would put several live devices on one card, which deadlocks the
+    // NVIDIA driver in a large fraction of runs.
+    let gpu = Gpu::new(TRAIN_PIPELINES);
+    mean_loss(&gpu, cfg, weights, None, &examples, context, horizon, 1)
 }
 
 fn build_examples(cfg: &Timesfm3Config, series: &[Series], refs: &[WindowRef], context: usize, horizon: usize) -> Vec<Example> {
@@ -261,14 +266,19 @@ fn batch_of(cfg: &Timesfm3Config, group: &[&Example], horizon: usize) -> (Vec<f3
 
 /// The mean objective of one weight set over `examples`, at batch size `b`.
 /// A trailing partial batch is dropped: the graph is built for a fixed `b`.
-fn mean_loss(cfg: &Timesfm3Config, weights: &HashMap<String, Vec<f32>>, lora: Option<&LoraCfg>, examples: &[Example], context: usize, horizon: usize, b: usize) -> f32 {
+fn mean_loss(gpu: &Gpu, cfg: &Timesfm3Config, weights: &HashMap<String, Vec<f32>>, lora: Option<&LoraCfg>, examples: &[Example], context: usize, horizon: usize, b: usize) -> f32 {
     if examples.len() < b {
         return f32::NAN;
     }
     let n = patch_rows(cfg, context);
     let rows = b * n;
     let zeros = vec![0f32; rows * cfg.resblock_in_dim()];
-    let dev = gpu_core::testgpu::dev(TRAIN_PIPELINES);
+    // A handle on the CALLER's device. Sharing is stated here rather than
+    // taken from a pool: `gpu_core::testgpu` is a fixture for test binaries
+    // and says so ("Production code must NOT use this"), yet this evaluation
+    // path reached into it, which made a public API depend on test
+    // infrastructure for its device lifecycle.
+    let dev = gpu.share_or_new(TRAIN_PIPELINES);
     let m = match lora {
         None => Timesfm3Train::new_on(dev, cfg.clone(), &zeros, &vec![false; rows], b, 1, n, weights),
         Some(lc) => Timesfm3Train::new_lora_on(dev, cfg.clone(), lc.clone(), &zeros, &vec![false; rows], b, 1, n, weights),
@@ -310,9 +320,12 @@ pub fn finetune_universe(cfg: &Timesfm3Config, base: &HashMap<String, Vec<f32>>,
     let zeros = vec![0f32; rows * cfg.resblock_in_dim()];
     let mask0 = vec![false; rows];
 
-    let base_val = mean_loss(cfg, base, None, &val, context, horizon, b);
+    // One device for the whole fine-tune: both evaluations and the trainer
+    // share it explicitly.
+    let gpu = Gpu::new(TRAIN_PIPELINES);
+    let base_val = mean_loss(&gpu, cfg, base, None, &val, context, horizon, b);
 
-    let dev = gpu_core::testgpu::dev(TRAIN_PIPELINES);
+    let dev = gpu.share_or_new(TRAIN_PIPELINES);
     let m = match &opts.lora {
         None => Timesfm3Train::new_on(dev, cfg.clone(), &zeros, &mask0, b, 1, n, base),
         Some(lc) => Timesfm3Train::new_lora_on(dev, cfg.clone(), lc.clone(), &zeros, &mask0, b, 1, n, base),
@@ -339,7 +352,7 @@ pub fn finetune_universe(cfg: &Timesfm3Config, base: &HashMap<String, Vec<f32>>,
     }
 
     let weights = m.to_reference_weights();
-    let ft_val = if steps == 0 { f32::NAN } else { mean_loss(cfg, &weights, None, &val, context, horizon, b) };
+    let ft_val = if steps == 0 { f32::NAN } else { mean_loss(&gpu, cfg, &weights, None, &val, context, horizon, b) };
     // Lower held-out pinball loss wins, and a non-finite number never does -
     // `kronos::train::finetune`'s rule, so one CLI gate line means the same
     // thing whichever model produced it.
