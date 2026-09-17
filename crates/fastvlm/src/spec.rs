@@ -60,8 +60,20 @@ impl ArchSpec for FastvlmSpec {
 
     fn validate(&self, assembly: &Assembly) -> Result<(), String> {
         let weights = assembly.roles.get("weights").ok_or("fastvlm validate: assembly has no weights role")?;
-        if !weights.join("tokenizer.json").is_file() {
-            return Err(format!("fastvlm validate: {} has no sibling tokenizer.json", weights.display()));
+        // Mirror `data::qwen_tokenizer::QwenBpe::from_dir`, which is what
+        // `caps.rs` actually loads with: a unified `tokenizer.json` when the
+        // checkpoint has one, otherwise the split `vocab.json` + `merges.txt`
+        // pair. Demanding the unified file alone rejected `apple/FastVLM-0.5B`
+        // -- the one repo this architecture's recipe declares -- which ships
+        // only the split shape, so the gate refused a checkpoint the loader
+        // handles natively.
+        let unified = weights.join("tokenizer.json").is_file();
+        let split = weights.join("vocab.json").is_file() && weights.join("merges.txt").is_file();
+        if !unified && !split {
+            return Err(format!(
+                "fastvlm validate: {} has neither a sibling tokenizer.json nor a vocab.json + merges.txt pair",
+                weights.display()
+            ));
         }
         Ok(())
     }
@@ -91,6 +103,57 @@ mod tests {
         if with_tokenizer {
             std::fs::write(dir.join("tokenizer.json"), b"{}").unwrap();
         }
+    }
+
+    /// `apple/FastVLM-0.5B`, the one repo this architecture's own recipe
+    /// declares, ships `vocab.json` + `merges.txt` + `added_tokens.json` and
+    /// NO unified `tokenizer.json` -- the recipe's own comment says so, which
+    /// is exactly why it fetches the whole listing instead of
+    /// `TransformersRecipe`'s curated subset.
+    ///
+    /// `data::qwen_tokenizer::QwenBpe::from_dir` (what `caps.rs` actually
+    /// loads with) handles both shapes: unified file when present, else the
+    /// split vocab/merges pair. `validate` demanded the unified file, so it
+    /// rejected the real release as incompatible after the resolver had
+    /// correctly found it -- a checkpoint brain could load, refused by the
+    /// gate in front of the loader.
+    #[test]
+    fn validate_accepts_the_split_vocab_and_merges_tokenizer_the_real_release_ships() {
+        let dir = tmp("split-tokenizer");
+        let ckpt = dir.join("apple").join("FastVLM-0.5B");
+        write_checkpoint_dir(&ckpt, HF_ARCHITECTURE, false);
+        std::fs::write(ckpt.join("vocab.json"), br#"{"a":0,"b":1}"#).unwrap();
+        std::fs::write(ckpt.join("merges.txt"), "#version: 0.1\na b\n").unwrap();
+
+        let assembly = Assembly {
+            id: "apple/FastVLM-0.5B".to_string(),
+            arch: "fastvlm".to_string(),
+            variant: None,
+            roles: BTreeMap::from([("weights".to_string(), ckpt.clone())]),
+            provenance: Vec::new(),
+        };
+        FastvlmSpec
+            .validate(&assembly)
+            .expect("the split vocab/merges shape is what the real release ships");
+    }
+
+    /// The fix must not let a directory with NEITHER tokenizer shape pass:
+    /// that one really cannot be loaded, and saying so here is the whole
+    /// point of a header-only compatibility gate.
+    #[test]
+    fn validate_still_rejects_a_checkpoint_with_no_tokenizer_at_all() {
+        let dir = tmp("no-tokenizer");
+        let ckpt = dir.join("apple").join("FastVLM-0.5B");
+        write_checkpoint_dir(&ckpt, HF_ARCHITECTURE, false);
+
+        let assembly = Assembly {
+            id: "apple/FastVLM-0.5B".to_string(),
+            arch: "fastvlm".to_string(),
+            variant: None,
+            roles: BTreeMap::from([("weights".to_string(), ckpt)]),
+            provenance: Vec::new(),
+        };
+        assert!(FastvlmSpec.validate(&assembly).is_err());
     }
 
     #[test]
