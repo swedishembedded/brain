@@ -127,6 +127,8 @@ help:
 	@echo "  make forecast/perf-gate      forecasting perf regression gate (vs baselines)"
 	@echo "  make wm/perf-gate            world-model perf regression gate (vs baselines)"
 	@echo "  make qwen/serving-perf-gate  qwen serving perf regression gate (vs baselines)"
+	@echo "  make fly/search ENV=... ARGS=...   search the fly's parameters (builds first)"
+	@echo "  make fly/replay ARGS=tuning.txt     re-measure a tuning against its controls"
 	@echo "  make kernels-table           regenerate docs/reference/kernels.md from the .wgsl sources"
 	@echo "  make kernels-table/check     fail if that catalogue has drifted (part of test/full)"
 	@echo "  make cuda-table              regenerate docs/reference/kernels-cuda.md from crates/kernels-cuda"
@@ -737,6 +739,28 @@ test/rl:
 # file; merge conflicts in lib.rs are resolved by union-ing wgsl/ + this target.
 kernels-regen:
 	scripts/build/kernels-regen.sh
+
+# The fly's experiments, BUILT BEFORE THEY RUN.
+#
+# `cargo build -p brain-fly` does not build examples, so a change to the
+# objective can be committed, believed, and then not be in the binary a search
+# actually executes. That happened: a walk search ran for forty generations
+# against an objective without its attitude termination, found the slide that
+# termination exists to refuse, and reported a score that no replay could
+# reproduce. An hour of CPU, and the only symptom was a number that did not
+# survive being re-measured.
+#
+#   make fly/search ENV="ARENA=air OUT=/tmp/t.txt"
+#   make fly/replay ENV="ARENA=air" ARGS=/tmp/t.txt
+#
+# ENV carries the run's own `NAME=value` settings, ARGS its positional
+# arguments. Everything the examples read from the wider environment
+# (BRAIN_CONNECTOME_DIR, BRAIN_FLYBODY_XML, ...) is expected to be set already,
+# as `tools/buzzfly/collect.sh`'s env.sh sets it.
+fly_example = $(if $(filter search,$*),walk_search,$*)
+fly/%:
+	@cargo build --release --offline -p brain-fly --example $(fly_example)
+	@env $(ENV) ./target/release/examples/$(fly_example) $(ARGS)
 
 # Regenerate docs/reference/kernels.md's catalogue from crates/kernels/wgsl/.
 # Every column is derived from the sources, so the table cannot be edited by

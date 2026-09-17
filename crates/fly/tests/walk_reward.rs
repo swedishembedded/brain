@@ -272,3 +272,62 @@ fn a_walk_that_ends_on_its_back_scores_nothing() {
     assert_eq!(strict.score(), 0.0, "an episode that ended immediately still scored {}", strict.score());
     assert!(!normal.terminated, "a standing fly tripped a one-radian attitude threshold");
 }
+
+/// An episode has to be reproducible after OTHER episodes, not just after
+/// itself.
+///
+/// The existing gate runs the same episode twice in a row and compares. That
+/// passes on a creature which drifts, because two consecutive episodes drift
+/// together. What a search actually does is evaluate hundreds of different
+/// parameter sets against one creature and compare their scores, and this is
+/// the property that makes those comparisons mean anything: the same
+/// parameters, before and after other work, have to give the same answer.
+///
+/// It was not true. Measured: a tuning scored 0.0954 when the search
+/// re-evaluated it after 600-odd episodes, and 0.0 in a fresh process - the
+/// same parameters, the same seed, a deterministic episode.
+#[test]
+fn the_same_parameters_score_the_same_before_and_after_other_episodes() {
+    let Some(mut fly) = rig() else { return };
+    let Some(root) = std::env::var_os("BRAIN_CONNECTOME_DIR").filter(|v| !v.is_empty()) else { return };
+    let (neurons, edges) = connectome::find(std::path::PathBuf::from(root), "manc").expect("MANC");
+    let c = connectome::load("manc", &neurons, &edges).expect("MANC loads");
+    let gains = fly::learn::GainSearch::new(&c, Wiring::default());
+    let base = fly.lif();
+
+    // Everything a search sets, set the same way every time - WEIGHTS
+    // included, because a search changes those on every evaluation and a
+    // creature that remembered the last ones would make every comparison it
+    // draws a comparison with history in it.
+    let measure = |fly: &mut Fly| {
+        fly.set_weights(&gains.weights(&gains.unit_gains())).expect("unit gains");
+        fly.set_lif(base).expect("the published dynamics");
+        fly.set_coupling(Coupling::default());
+        run(fly, 1.0)
+    };
+
+    let first = measure(&mut fly);
+
+    // Other work, of the kind a search does: different weights, different
+    // dynamics, different coupling, episode after episode.
+    for k in 0..12 {
+        let f = 0.2 + 0.05 * k as f32;
+        let mut g = gains.unit_gains();
+        for (i, v) in g.iter_mut().enumerate() {
+            *v = 0.3 + 0.2 * ((i + k) % 7) as f32;
+        }
+        fly.set_weights(&gains.weights(&g)).expect("a legal weight vector");
+        fly.set_lif(neuro::LifParams { dt_over_tau_syn: f, dt_over_tau_inh: f * 0.5, ..base })
+            .expect("a legal parameter set");
+        fly.set_coupling(Coupling { activation_gain: 0.02 + 0.02 * k as f32, ..Coupling::default() });
+        run(&mut fly, 1.0 + 0.1 * k as f32);
+    }
+
+    let again = measure(&mut fly);
+    assert_eq!(
+        (first.net, first.ticks, first.spikes),
+        (again.net, again.ticks, again.spikes),
+        "the same parameters gave a different episode after other episodes had run; \
+         every comparison a search makes is between numbers measured this way"
+    );
+}

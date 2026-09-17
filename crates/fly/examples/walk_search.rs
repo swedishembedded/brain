@@ -249,6 +249,25 @@ fn main() {
 
     let (s, net, gait) = evaluate(&mut f, &best_params, 1);
     println!("\nbest found: score {s:.5} (net {net:.4} cm, gait {gait:.3}) against {base:.5} as imported");
+
+    // The same parameters again, applied the way a REPLAY applies them: out of
+    // a `Tuning` rather than out of this loop's own knob vector. The two
+    // should agree exactly, and when they do not it is this search that is
+    // wrong - a result that only reproduces inside the process that found it
+    // is not a result.
+    let t = fly::tuning::from_knobs(es.knobs(), &best_params);
+    let report = t.apply(&mut f, &c, wiring).expect("its own tuning applies");
+    let objective = if air { Objective::flight() } else { Objective::walk() };
+    let cfg = RewardConfig { objective, ticks, command: t.command().unwrap_or(1.0), ..RewardConfig::default() };
+    let round_trip = episode(&mut f, cfg, Condition::Frozen, &mut Lcg::new(1)).expect("an episode runs");
+    if (round_trip.score() - s).abs() > 1e-9 {
+        println!(
+            "WARNING: replayed through a Tuning it scores {:.5}, not {s:.5} ({} gains matched, {} unknown)",
+            round_trip.score(),
+            report.gains,
+            report.unknown.len()
+        );
+    }
     println!("{:.2} body lengths per second", net / 0.25 / (ticks as f64 * fly::CONTROL_PERIOD));
     for (k, v) in es.knobs().iter().zip(&best_params) {
         println!("  {:<28} {v:.4}", k.name);
