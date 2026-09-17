@@ -62,6 +62,7 @@ import argparse
 import hashlib
 import json
 import os
+import sys
 
 import cv2
 import numpy as np
@@ -112,6 +113,10 @@ def save(out_dir, name, tensors, manifest):
         sha = hashlib.sha256(f.read()).hexdigest()
     manifest[name] = {"sha256": sha, "tensors": {k: list(v.shape) for k, v in tensors.items()}}
     print(f"wrote {path} ({len(tensors)} tensors)", flush=True)
+
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from golden_source import source_block  # noqa: E402  (tools/goldens is this file's own dir)
 
 
 def main():
@@ -222,8 +227,34 @@ def main():
         manifest,
     )
 
+    # `source` is the checkpoint-provenance block every dumper writes; the input
+    # photograph, which used to hold that key, is `photo` - they are different
+    # facts and only one of them decides whether these tensors can be compared
+    # against a given set of weights.
+    #
+    # BiSeNet ships no config file, so `identity` is read off the state dict
+    # that was just loaded: the segmentation class count and the width of the
+    # ResNet-18 trunk's last stage are exactly what a differently-shaped
+    # parsing checkpoint would disagree on, and `crates/bisenet::config` pins
+    # both on the reading side.
+    import facexlib
+
+    weights = os.path.join(os.path.dirname(facexlib.__file__), "weights", "parsing_bisenet.pth")
+    sd = model.state_dict()
     with open(os.path.join(out_dir, "face_parsing_manifest.json"), "w") as f:
-        json.dump({"source": os.path.abspath(args.photo), "kps": kps.tolist(), "files": manifest}, f, indent=2)
+        json.dump({
+            "photo": os.path.abspath(args.photo),
+            "kps": kps.tolist(),
+            "files": manifest,
+            "source": source_block(
+                checkpoint="facexlib/parsing_bisenet",
+                files=[weights] if os.path.exists(weights) else [],
+                identity={
+                    "num_class": int(sd["conv_out.conv_out.weight"].shape[0]),
+                    "resnet_stage4_channels": int(sd["cp.resnet.layer4.1.conv2.weight"].shape[0]),
+                },
+            ),
+        }, f, indent=2)
     print("done", flush=True)
 
 

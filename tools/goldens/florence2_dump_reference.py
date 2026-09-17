@@ -31,6 +31,7 @@ import argparse
 import hashlib
 import json
 import os
+import sys
 
 import numpy as np
 import torch
@@ -172,6 +173,10 @@ def dump_davit(model, pixel_values, out_dir, manifest):
     return projected
 
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from golden_source import source_block  # noqa: E402  (tools/goldens is this file's own dir)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--checkpoint", required=True)
@@ -200,7 +205,33 @@ def main():
     lm.model.decoder.embed_tokens.weight = lm.model.shared.weight
     lm.lm_head.weight = lm.model.shared.weight
 
-    manifest = {"config": model.config.to_dict(), "seed": SEED}
+    cfg = model.config.to_dict()
+    manifest = {"config": cfg, "seed": SEED}
+    # WHICH checkpoint this dump came from. Read out of the config dict just
+    # stored rather than retyped, so a tier whose fields differ cannot be
+    # described by base's numbers. Both halves are named: the text tower's
+    # width/depth/vocab and the DaViT stage schedule each fix tensor shapes in
+    # a different file of this dump, and `Florence-2-base` and `-large` differ
+    # in both.
+    text, vis = cfg["text_config"], cfg["vision_config"]
+    manifest["source"] = source_block(
+        checkpoint="microsoft/Florence-2-base",
+        files=sorted(
+            os.path.join(args.checkpoint, f)
+            for f in os.listdir(args.checkpoint)
+            if f.endswith((".safetensors", ".bin"))
+        ),
+        identity={
+            "d_model": text["d_model"],
+            "encoder_layers": text["encoder_layers"],
+            "decoder_layers": text["decoder_layers"],
+            "encoder_attention_heads": text["encoder_attention_heads"],
+            "encoder_ffn_dim": text["encoder_ffn_dim"],
+            "vocab_size": text["vocab_size"],
+            "dim_embed": vis["dim_embed"],
+            "depths": vis["depths"],
+        },
+    )
     pixel_values = fixed_image(batch=1)
     image_features = dump_davit(model, pixel_values, args.out, manifest)
     dump_encdec(model, image_features, args.out, manifest)
