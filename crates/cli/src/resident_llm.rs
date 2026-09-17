@@ -148,18 +148,27 @@ fn weights_int8_bytes(cfg: &qwen3::config::QwenConfig) -> u64 {
 /// (`kv_pool_bytes_at_the_new_ctx_default_fits_the_igpu_budget`); fp32 is not.
 const MAX_FP32_KV_POOL_BYTES: u64 = 8 << 30;
 
-/// WebGPU's own spec-mandated floor for `maxStorageBufferBindingSize`
-/// (2047 MiB, not 2048 - the spec's limit is `2^31 - 1` bytes, one byte
-/// short of a clean power of two). Every compliant device, including
-/// every backend this engine runs on, guarantees AT LEAST this many bytes
-/// per single storage-buffer binding; some report more, but a live
-/// query needs an actual device, which neither `estimate()` nor this
-/// pre-placement point in `activate()` has picked yet. Checking against
-/// the floor rather than guessing a real device's own (possibly larger)
-/// limit keeps this pre-flight check honest: it can refuse a config that
-/// would actually be fine on THIS box's cards, never accept one that
-/// would crash on some compliant device.
-const WEBGPU_MIN_STORAGE_BINDING_BYTES: u64 = 2047 * (1 << 20);
+/// The largest per-binding size ANY device can report: wgpu clamps
+/// `max_storage_buffer_binding_size` to `i32::MAX` on every backend, so a
+/// buffer over this is unservable everywhere and can be refused without
+/// knowing which card will run it.
+///
+/// This is an upper bound, and only an upper bound. It was previously
+/// documented as the opposite - the size "every backend this engine runs on
+/// guarantees AT LEAST" - which conflated two different numbers. WebGPU
+/// guarantees 128 MiB (`maxStorageBufferBindingSize`'s spec default); real
+/// adapters report anywhere from that floor, on software rasterisers and
+/// mobile, up to 4 GiB on desktop discrete cards. A Tesla P40 on Vulkan
+/// reports 2047 MiB; llvmpipe reports 128 MiB.
+///
+/// So no constant can decide whether a given sizing fits: checking the floor
+/// refuses sizings real cards run fine, and checking the ceiling accepts
+/// sizings that die on a software fallback. This one is deliberately the
+/// ceiling, because its job is only to catch the absurd early, before
+/// weights are read. The question that actually matters - does THIS device
+/// accept this binding - is answered against the device's own queried limit
+/// where the device exists, in `qwen3::serve::check_kv_bindings_fit`.
+const WGPU_MAX_REPORTABLE_BINDING_BYTES: u64 = 2047 * (1 << 20);
 
 /// Run `f` placed on the residency-assigned device: a GPU assignment becomes a
 /// scoped (thread-local) selection in the canonical device registry, so every
@@ -428,19 +437,76 @@ impl Default for QwenServeConfig {
 /// line, not an arbitrary byte-granularity sweep result.
 const AUTO_CTX_TIERS: &[u32] = &[2048, 4096, 8192, 16384, 24576, 32768, 40960, 49152, 65536, 98304, 131072, 196608, 262144];
 
-/// The largest tier in [`AUTO_CTX_TIERS`] whose real weights+KV+scratch
-/// total (the SAME formulas `estimate()`/`activate()` build from) fits
-/// `budget_bytes`, given `weight_bytes` is fixed (independent of `ctx`).
-/// Never a closed-form approximation - costs are monotonically increasing
-/// in `ctx`, so the first tier that overflows ends the search.
+/// What one `(ctx, batch, prefill)` sizing costs on the device: the totals a
+/// budget has to cover, and the largest SINGLE binding a driver has to accept.
+///
+/// One definition, because three used to exist. `auto_ctx_for_budget` summed
+/// the totals, `check_fp32_kv_pool_fits` recomputed the KV pool, and
+/// `check_buffers_fit_one_binding` recomputed both and divided out a
+/// per-buffer worst case - each from the same underlying formulas, none
+/// obliged to agree with the others. They didn't: the sizer accepted a ctx
+/// whose per-layer KV binding the guard's own arithmetic would have refused,
+/// which is how a serving lane ended up panicking inside `create_bind_group`.
+/// Sharing the arithmetic makes that class of disagreement unrepresentable
+/// rather than merely fixed.
+struct PoolProfile {
+    /// Whole KV pool: every layer's K and V, plus int8 scales.
+    kv_bytes: u64,
+    /// Paged-attention scratch (`scores` + `probs`).
+    scratch_bytes: u64,
+    /// The largest single storage binding this sizing implies.
+    ///
+    /// `Engine::from_map_with_gpu` allocates one K and one V buffer PER LAYER
+    /// (never one combined buffer), so the worst KV binding is
+    /// `kv_bytes / n_layers / 2` - slightly an over-estimate, since it also
+    /// divides in the much smaller per-slot int8 scale buffers, which only
+    /// makes every check stricter. `scores`/`probs` are each exactly half of
+    /// the scratch total.
+    largest_binding: u64,
+}
+
+impl PoolProfile {
+    fn new(cfg: &qwen3::config::QwenConfig, block_size: u32, num_blocks: u32, max_batch: u32, max_prefill: u32, cap: u32, kv_int8: bool, fused_prefill_available: bool) -> PoolProfile {
+        let kv_bytes = qwen3::serve::kv_pool_bytes(cfg, block_size, num_blocks, kv_int8);
+        let scratch_bytes = qwen3::serve::paged_attn_scratch_bytes(cfg, max_batch, max_prefill, cap, fused_prefill_available);
+        let per_layer_kv = kv_bytes / cfg.n_layers.max(1) as u64 / 2;
+        PoolProfile { kv_bytes, scratch_bytes, largest_binding: per_layer_kv.max(scratch_bytes / 2) }
+    }
+
+    /// The profile for a whole `ctx`, deriving the pool geometry itself.
+    fn at_ctx(cfg: &qwen3::config::QwenConfig, ctx: u32, max_batch: u32, max_prefill_cap: u32, kv_int8: bool, fused_prefill_available: bool) -> PoolProfile {
+        let (block_size, mb, max_blocks_per_seq, num_blocks, max_prefill) = QwenResident::pool_sizing(ctx, max_batch, max_prefill_cap);
+        PoolProfile::new(cfg, block_size, num_blocks, mb, max_prefill, max_blocks_per_seq * block_size, kv_int8, fused_prefill_available)
+    }
+
+    /// Total device bytes, given the ctx-independent weight cost.
+    fn total(&self, weight_bytes: u64) -> u64 {
+        weight_bytes + self.kv_bytes + self.scratch_bytes
+    }
+
+    /// Whether every single binding fits what a compliant device guarantees.
+    fn bindings_fit(&self) -> bool {
+        self.largest_binding <= WGPU_MAX_REPORTABLE_BINDING_BYTES
+    }
+}
+
+/// The largest tier in [`AUTO_CTX_TIERS`] that both fits `budget_bytes` and
+/// stays bindable, given `weight_bytes` is fixed (independent of `ctx`).
+///
+/// Fitting the budget was once the only test, which let this choose a ctx no
+/// driver would bind - total VRAM and per-binding size are independent limits,
+/// and a KV pool spread over many layers can clear the first while any single
+/// layer's buffer breaks the second. Both are monotonically increasing in
+/// `ctx`, so the first tier that fails either still ends the search.
+///
+/// `fused_prefill_available` is `false` here on purpose: this runs before a
+/// device is chosen, so the never-fused scratch worst case is the only honest
+/// assumption. `activate()` re-checks with the real answer.
 fn auto_ctx_for_budget(weight_bytes: u64, budget_bytes: u64, cfg: &qwen3::config::QwenConfig, max_batch: u32, max_prefill_cap: u32, kv_int8: bool) -> u32 {
     let mut best = AUTO_CTX_TIERS[0];
     for &ctx in AUTO_CTX_TIERS {
-        let (block_size, mb, max_blocks_per_seq, num_blocks, max_prefill) = QwenResident::pool_sizing(ctx, max_batch, max_prefill_cap);
-        let kv_bytes = qwen3::serve::kv_pool_bytes(cfg, block_size, num_blocks, kv_int8);
-        let cap = max_blocks_per_seq * block_size;
-        let scratch_bytes = qwen3::serve::paged_attn_scratch_bytes(cfg, mb, max_prefill, cap, false);
-        if weight_bytes + kv_bytes + scratch_bytes <= budget_bytes {
+        let profile = PoolProfile::at_ctx(cfg, ctx, max_batch, max_prefill_cap, kv_int8, false);
+        if profile.total(weight_bytes) <= budget_bytes && profile.bindings_fit() {
             best = ctx;
         } else {
             break;
@@ -661,7 +727,7 @@ impl QwenResident {
     /// read) so a test can drive it directly at whatever `num_blocks` trips
     /// the ceiling, without needing a real multi-GiB allocation to prove it.
     fn check_fp32_kv_pool_fits(cfg: &qwen3::config::QwenConfig, block_size: u32, num_blocks: u32, ctx: u32, path: &str) -> Result<(), String> {
-        let pool_bytes = qwen3::serve::kv_pool_bytes(cfg, block_size, num_blocks, false);
+        let pool_bytes = PoolProfile::new(cfg, block_size, num_blocks, 1, 1, block_size, false, true).kv_bytes;
         if pool_bytes <= MAX_FP32_KV_POOL_BYTES {
             return Ok(());
         }
@@ -728,20 +794,16 @@ impl QwenResident {
         path: &str,
         fused_prefill_available: bool,
     ) -> Result<(), String> {
-        let kv_bytes = qwen3::serve::kv_pool_bytes(cfg, block_size, num_blocks, kv_int8);
-        let per_layer_kv_buffer = kv_bytes / cfg.n_layers as u64 / 2;
-        let scratch_bytes = qwen3::serve::paged_attn_scratch_bytes(cfg, max_batch, max_prefill, cap, fused_prefill_available);
-        let per_scratch_buffer = scratch_bytes / 2;
-        let worst = per_layer_kv_buffer.max(per_scratch_buffer);
-        if worst <= WEBGPU_MIN_STORAGE_BINDING_BYTES {
+        let profile = PoolProfile::new(cfg, block_size, num_blocks, max_batch, max_prefill, cap, kv_int8, fused_prefill_available);
+        if profile.bindings_fit() {
             return Ok(());
         }
         Err(format!(
             "qwen: {path}: at ctx={ctx} (kv_int8={kv_int8}) the largest single device buffer this engine \
-             would allocate is {:.2} GiB, over WebGPU's own {:.2} GiB per-buffer floor -- lower --qwen-ctx \
-             or --qwen-max-prefill",
-            worst as f64 / (1u64 << 30) as f64,
-            WEBGPU_MIN_STORAGE_BINDING_BYTES as f64 / (1u64 << 30) as f64,
+             would allocate is {:.0} MiB, over the {:.0} MiB no device can exceed -- lower \
+             --qwen-ctx or --qwen-max-prefill",
+            profile.largest_binding as f64 / (1u64 << 20) as f64,
+            WGPU_MAX_REPORTABLE_BINDING_BYTES as f64 / (1u64 << 20) as f64,
         ))
     }
 }
@@ -1412,8 +1474,8 @@ mod tests {
         // Small, ordinary sizing on both dtypes: comfortably under.
         assert!(QwenResident::check_buffers_fit_one_binding(&cfg, 16, 64, 4, 16, 256, true, 2048, "test.safetensors", false).is_ok());
         assert!(QwenResident::check_buffers_fit_one_binding(&cfg, 16, 64, 4, 16, 256, false, 2048, "test.safetensors", false).is_ok());
-        // num_blocks=3,000,000 -> per-layer fp32 KV buffer ~2.86 GiB, over
-        // the 2047 MiB floor - even though this SAME sizing's fp32 TOTAL
+        // num_blocks=3,000,000 -> per-layer fp32 KV buffer ~2.86 GiB, far over
+        // the 128 MiB floor - even though this SAME sizing's fp32 TOTAL
         // pool (~11.4 GiB) is what `check_fp32_kv_pool_fits`'s own test
         // above already catches; this checks the independent per-buffer path.
         // The KV term does not depend on `fused_prefill_available` at all,
@@ -1421,7 +1483,11 @@ mod tests {
         for fused in [false, true] {
             let err = QwenResident::check_buffers_fit_one_binding(&cfg, 16, 3_000_000, 4, 16, 256, false, 100_000_000, "test.safetensors", fused)
                 .expect_err("a ~2.86 GiB single buffer must be refused, not attempted");
-            assert!(err.contains("test.safetensors") && err.contains("GiB"), "{err}");
+            // Names the checkpoint and the requested ctx -- the two things an
+            // operator needs to act. Deliberately not the size unit: that is
+            // presentation, and pinning it here broke this test when the
+            // message moved from GiB to MiB without any behaviour changing.
+            assert!(err.contains("test.safetensors") && err.contains("100000000"), "{err}");
         }
     }
 
@@ -1435,7 +1501,7 @@ mod tests {
         // dominates: 20_000^2 * 4 = 1.6e9 words -> per-buffer ~5.96 GiB.
         let err = QwenResident::check_buffers_fit_one_binding(&cfg, 16, 64, 4, 20_000, 320_000, true, 100_000_000, "test.safetensors", false)
             .expect_err("a ~5.96 GiB scratch buffer must be refused, not attempted");
-        assert!(err.contains("test.safetensors") && err.contains("GiB"), "{err}");
+        assert!(err.contains("test.safetensors") && err.contains("100000000"), "{err}");
     }
 
     /// REGRESSION target: this exact shape (Qwen3-8B, ctx=32768, the default
@@ -1460,6 +1526,66 @@ mod tests {
             QwenResident::check_buffers_fit_one_binding(&cfg, block_size, num_blocks, max_batch, max_prefill, cap, true, 32768, "test.safetensors", true).is_ok(),
             "the fused kernel's real scratch buffer must fit, once activate() actually knows the device supports it"
         );
+    }
+
+    /// The pre-flight constant is an upper bound, not a floor, and the two
+    /// must not be confused again: it exists to catch sizings no device could
+    /// ever accept, while whether a sizing fits THIS device is decided
+    /// against that device's own queried limit.
+    #[test]
+    fn the_preflight_constant_is_the_ceiling_no_device_can_exceed() {
+        assert_eq!(WGPU_MAX_REPORTABLE_BINDING_BYTES, 2047 * (1 << 20));
+        assert!(
+            WGPU_MAX_REPORTABLE_BINDING_BYTES > 128 * (1 << 20),
+            "a real adapter may report as little as WebGPU's 128 MiB guarantee; this constant is \
+             deliberately NOT that number, so it must never be used to decide a real device fits"
+        );
+    }
+
+    /// The auto-sizer and the pre-flight guard must not disagree about what
+    /// fits, because between them they decide whether a server runs at all.
+    ///
+    /// They did. Auto-sizing picked ctx=98304 for a real Qwen3-0.6B on a
+    /// 24 GiB card; the guard waved it through against the wrong floor; and
+    /// the engine then died inside create_bind_group with "Buffer binding 5
+    /// range 201588736 exceeds max_*_buffer_binding_size limit 134217728" --
+    /// a wgpu validation panic on a lane, mid-request, rather than a refusal.
+    #[test]
+    fn auto_sizing_never_picks_a_ctx_the_binding_guard_would_refuse() {
+        let cfg = qwen3::config::QwenConfig::qwen3_0_6b();
+        let (max_batch, max_prefill_cap) = (16u32, 512u32);
+        // A budget far past any real card, so the binding limit is the only
+        // thing that can bound the answer.
+        let ctx = auto_ctx_for_budget(0, u64::MAX / 4, &cfg, max_batch, max_prefill_cap, true);
+
+        let (block_size, mb, max_blocks_per_seq, num_blocks, max_prefill) =
+            QwenResident::pool_sizing(ctx, max_batch, max_prefill_cap);
+        let cap = max_blocks_per_seq * block_size;
+        QwenResident::check_buffers_fit_one_binding(
+            &cfg, block_size, num_blocks, mb, max_prefill, cap, true, ctx, "qwen3-0.6b", true,
+        )
+        .unwrap_or_else(|e| panic!("auto-sizing chose ctx={ctx}, which its own guard refuses: {e}"));
+    }
+
+    /// The sizing that crashed a real server is device-dependent, and that is
+    /// the whole point: one layer's K pool at ctx=98304 on Qwen3-0.6B is
+    /// 201588736 bytes, which a Tesla P40 (2047 MiB limit) binds happily and
+    /// llvmpipe (128 MiB) refuses. No constant can answer this, so the
+    /// pre-flight ceiling must NOT refuse it and the per-device check must.
+    #[test]
+    fn a_sizing_only_some_devices_accept_is_left_to_the_device() {
+        let cfg = qwen3::config::QwenConfig::qwen3_0_6b();
+        let ctx = 98304u32;
+        let (block_size, mb, max_blocks_per_seq, num_blocks, max_prefill) =
+            QwenResident::pool_sizing(ctx, 16, 512);
+        let cap = max_blocks_per_seq * block_size;
+        let profile = PoolProfile::new(&cfg, block_size, num_blocks, mb, max_prefill, cap, true, true);
+        assert!(profile.largest_binding > 128 * (1 << 20), "too big for a 128 MiB device");
+        assert!(profile.largest_binding < WGPU_MAX_REPORTABLE_BINDING_BYTES, "but fine on a desktop card");
+        QwenResident::check_buffers_fit_one_binding(
+            &cfg, block_size, num_blocks, mb, max_prefill, cap, true, ctx, "qwen3-0.6b", true,
+        )
+        .expect("the early ceiling must not refuse a sizing real hardware runs");
     }
 
     /// The plan's ctx=24576 sizing table (from the planning notes)
