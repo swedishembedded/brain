@@ -25,6 +25,8 @@ qwen3tts-synth = ["brain-runtime/qwen3tts"]
 # D-Bus control surface: compiled into the default build so `brain serve --dbus`
 # always works, but only served when the `--dbus` flag is passed.
 brain-dbus.workspace = true
+# Detached serving (`brain serve -d`): fork/setsid/flock/kill.
+libc.workspace = true
 brain-shutdown.workspace = true
 brain-arch.workspace = true
 # `gguf::route` - the one seam that answers "which model is this GGUF", and

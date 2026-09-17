@@ -87,6 +87,7 @@ mod resident_worldmirror2;
 mod resolve;
 mod roofline_cli;
 mod run_cli;
+mod serve_daemon;
 mod sam2_cli;
 mod splat_cli;
 mod supply;

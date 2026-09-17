@@ -34,13 +34,22 @@ pub mod stream;
 use residency::Executor;
 
 /// Which bus to connect to.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub enum BusKind {
     /// Per-user session bus (default; no policy file / root needed).
     #[default]
     Session,
     /// System-wide bus (needs a `system.d` policy to be callable by non-root).
     System,
+    /// An explicit bus address (`unix:path=/run/brain/bus`, `tcp:host=...`).
+    ///
+    /// The session bus is discovered from the environment, so it is invisible
+    /// to a process that did not inherit it -- which a DETACHED server never
+    /// does, since the shell that launched it is gone. Naming the address makes
+    /// a long-lived bus reachable without one. `brain_model::dbus::BusKind` on
+    /// the client side has always accepted a raw address; this is the serving
+    /// half of the same capability.
+    Address(String),
 }
 
 /// Options for [`serve`].
@@ -113,9 +122,10 @@ pub fn serve(executor: Executor, opts: DbusOpts, serve_opts: ServeOpts) -> anyho
         // snapshot source is independent of the served `Manager` instance.
         let stats_executor = executor.clone();
         let manager = service::Manager::new(executor).with_supplier(supplier);
-        let builder = match opts.bus {
+        let builder = match &opts.bus {
             BusKind::Session => zbus::connection::Builder::session()?,
             BusKind::System => zbus::connection::Builder::system()?,
+            BusKind::Address(addr) => zbus::connection::Builder::address(addr.as_str())?,
         };
         let conn = builder
             .name(opts.name.as_str())?
@@ -123,7 +133,7 @@ pub fn serve(executor: Executor, opts: DbusOpts, serve_opts: ServeOpts) -> anyho
             .build()
             .await?;
         eprintln!("brain: serving {} on the {:?} bus at {OBJECT_PATH}", opts.name, opts.bus);
-        match opts.bus {
+        match &opts.bus {
             BusKind::Session => {
                 eprintln!("brain: connect with: braintop --name {}", opts.name);
                 // zbus::connection::Builder::session() (used above) resolves this
@@ -139,6 +149,7 @@ pub fn serve(executor: Executor, opts: DbusOpts, serve_opts: ServeOpts) -> anyho
                 }
             }
             BusKind::System => eprintln!("brain: connect with: braintop --system --name {}", opts.name),
+            BusKind::Address(addr) => eprintln!("brain: connect with: braintop --address \"{addr}\" --name {}", opts.name),
         }
         // The well-known name is owned and the object is served: this is a true
         // "up" point. zbus 5's `Builder::name` acquires the name during `build()`

@@ -112,6 +112,27 @@ D-BUS CONTROL SURFACE
                          scripts/build/com.swedishembedded.Brain1.conf to
                          /usr/share/dbus-1/system.d/ yourself.
   --dbus-name NAME       request NAME instead of com.swedishembedded.Brain1
+  --dbus-address ADDR    serve on an explicit bus address (unix:path=/run/brain/bus)
+                         instead of the one discovered from the environment.
+                         A DETACHED server inherits no session bus, since the
+                         shell that launched it is gone, so this is how -d and
+                         --dbus are combined.
+
+PROCESS LIFECYCLE
+  -d, --detach           run in the background and return once every requested
+                         surface is listening (not merely once the process has
+                         started). Prints the pid; output goes to the log below.
+  --reload               stop whatever server is already running, then take its
+                         place. Imperative: nothing watches anything, so a
+                         restart only ever happens when asked for.
+  --stop                 stop the running server.
+  --status               report whether one is running, and its pid.
+
+  At most one server runs per user at a time, enforced by an exclusive lock on
+  the pidfile rather than by matching process names, so a crash leaves nothing
+  to clean up and one user's server never blocks another's. State lives under
+  $BRAIN_RUNTIME_DIR, else $XDG_RUNTIME_DIR/brain, else <tmpdir>/brain-<uid>:
+  serve.pid, serve.log and (when -d is used without --ready-file) serve.ready.
 
 SERVING OPTIONS
   --models-dir DIR       directory scanned at startup for the served catalog
@@ -348,6 +369,14 @@ pub fn run_serve(args: &[String]) {
     let mut openrouter: Option<Vec<SocketAddr>> = None;
     let mut api_keys_out: Option<String> = None;
     let mut ready_file: Option<String> = None;
+    // Detached serving (`-d`), imperative replacement (`--reload`) and the two
+    // lifecycle queries -- see `crate::serve_daemon`.
+    let mut detach = false;
+    let mut reload = false;
+    let mut do_stop = false;
+    let mut do_status = false;
+    // An explicit bus address, for a bus that outlives the launching shell.
+    let mut dbus_addr: Option<String> = None;
     // Diagnostic verbosity (`-v`/`--verbose [0-3]`, else $BRAIN_VERBOSE) -- see
     // HELP above for what each tier gates. Parsed and installed globally now
     // (`main::install_verbosity`, run before any subcommand including this
@@ -377,6 +406,14 @@ pub fn run_serve(args: &[String]) {
                 dbus_system = true;
             }
             "--dbus-name" => dbus_name = Some(val(args, &mut i, "--dbus-name")),
+            "--dbus-address" => {
+                dbus = true;
+                dbus_addr = Some(val(args, &mut i, "--dbus-address"));
+            }
+            "-d" | "--detach" => detach = true,
+            "--reload" => reload = true,
+            "--stop" => do_stop = true,
+            "--status" => do_status = true,
             "--reserve-gb" => dbus_reserve_gb = parsed(args, &mut i, "--reserve-gb"),
             "--models-dir" => models_dir = Some(val(args, &mut i, "--models-dir")),
             "--watch-adapters" => watch_adapters = Some(val(args, &mut i, "--watch-adapters")),
@@ -409,6 +446,71 @@ pub fn run_serve(args: &[String]) {
         }
         i += 1;
     }
+    // ── Lifecycle: --status / --stop / --reload / -d ─────────────────────────
+    let pid_path = crate::serve_daemon::pid_path();
+    if do_status {
+        match crate::serve_daemon::running(&pid_path) {
+            Some(pid) => println!("brain serve: running, pid {pid} (log {})", crate::serve_daemon::log_path().display()),
+            None => println!("brain serve: not running"),
+        }
+        return;
+    }
+    if do_stop {
+        match crate::serve_daemon::stop(&pid_path, crate::serve_daemon::STOP_TIMEOUT) {
+            Ok(Some(pid)) => println!("brain serve: stopped pid {pid}"),
+            Ok(None) => println!("brain serve: not running"),
+            Err(e) => {
+                eprintln!("brain serve: --stop: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+    if reload {
+        match crate::serve_daemon::stop(&pid_path, crate::serve_daemon::STOP_TIMEOUT) {
+            Ok(Some(pid)) => eprintln!("brain serve: --reload: replaced pid {pid}"),
+            Ok(None) => {}
+            Err(e) => {
+                eprintln!("brain serve: --reload: {e}");
+                std::process::exit(1);
+            }
+        }
+    } else if let Some(pid) = crate::serve_daemon::running(&pid_path) {
+        // Advisory: the authoritative claim is the flock the server itself
+        // takes below. Checking here turns the common case into one clear
+        // message instead of a server that starts and immediately loses the
+        // race for the bus name.
+        eprintln!("brain serve: already running (pid {pid}); use --reload to replace it, or --stop");
+        std::process::exit(1);
+    }
+    if detach {
+        // `-d` has to wait on something, and `--ready-file` is already exactly
+        // that signal, so a detached run always has one even when the caller
+        // did not ask for it.
+        let ready_path = ready_file.clone().map(std::path::PathBuf::from).unwrap_or_else(crate::serve_daemon::default_ready_path);
+        ready_file = Some(ready_path.to_string_lossy().into_owned());
+        let log = crate::serve_daemon::log_path();
+        if let Err(e) = crate::serve_daemon::detach(&ready_path, &pid_path, &log, crate::serve_daemon::READY_TIMEOUT) {
+            eprintln!("brain serve: -d: {e}");
+            std::process::exit(1);
+        }
+        // Only the daemon reaches here.
+    }
+    // The single-instance claim, taken by whichever process actually serves.
+    // Held for the rest of this process's life; the kernel releases it when
+    // the process dies, however abruptly.
+    match crate::serve_daemon::claim(&pid_path) {
+        Ok(crate::serve_daemon::Claim::Ours(guard)) => guard.hold_forever(),
+        Ok(crate::serve_daemon::Claim::HeldBy(pid)) => {
+            eprintln!("brain serve: another server holds {} (pid {:?})", pid_path.display(), pid);
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("brain serve: {}: {e}", pid_path.display());
+            std::process::exit(1);
+        }
+    }
+
     if !args.iter().any(|a| a == "--seed") {
         cfg.seed = data::rng::random_seed();
         eprintln!("brain serve: no --seed given, using random seed {} (pass --seed {} to reproduce)", cfg.seed, cfg.seed);
@@ -440,6 +542,7 @@ pub fn run_serve(args: &[String]) {
         return run_apis(RunApis {
             dbus,
             dbus_system,
+            dbus_addr,
             dbus_name,
             reserve_gb: dbus_reserve_gb,
             models_dir,
@@ -678,6 +781,11 @@ pub(crate) fn host_ram_available() -> u64 {
 struct RunApis {
     dbus: bool,
     dbus_system: bool,
+    /// `--dbus-address ADDR`: serve on an explicit bus rather than the one
+    /// discovered from the environment. A detached server inherits no session
+    /// bus (the shell that launched it is gone), so this is how it reaches a
+    /// long-lived one.
+    dbus_addr: Option<String>,
     dbus_name: Option<String>,
     reserve_gb: u64,
     models_dir: Option<String>,
@@ -796,7 +904,13 @@ fn run_apis(a: RunApis) {
 
     let dbus_handle = if a.dbus {
         let opts = brain_dbus::DbusOpts {
-            bus: if a.dbus_system { brain_dbus::BusKind::System } else { brain_dbus::BusKind::Session },
+            // An explicit address wins over both defaults: it is the only one
+            // the caller had to name deliberately.
+            bus: match (&a.dbus_addr, a.dbus_system) {
+                (Some(addr), _) => brain_dbus::BusKind::Address(addr.clone()),
+                (None, true) => brain_dbus::BusKind::System,
+                (None, false) => brain_dbus::BusKind::Session,
+            },
             name: a.dbus_name.unwrap_or_else(|| "com.swedishembedded.Brain1".to_string()),
         };
         let e = executor.clone();
