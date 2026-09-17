@@ -24,7 +24,7 @@ use crate::config::EncoderConfig;
 const STD: f32 = 0.02;
 
 fn is_norm_gain(name: &str) -> bool {
-    name.ends_with("_ln.weight") || name.ends_with("ln1.weight") || name.ends_with("ln2.weight")
+    name.ends_with("_ln.weight") || name.ends_with("ln1.weight") || name.ends_with("ln2.weight") || name == "head.ln.weight"
 }
 
 fn is_bias(name: &str) -> bool {
@@ -32,9 +32,19 @@ fn is_bias(name: &str) -> bool {
 }
 
 pub fn init_weights(cfg: &EncoderConfig, seed: u64) -> HashMap<String, Vec<f32>> {
+    fill(cfg.tensor_manifest(), seed)
+}
+
+/// The head's weights. Always fresh: the head has no pretrained counterpart,
+/// which is exactly why it takes a larger learning rate than the encoder.
+pub fn init_head(cfg: &EncoderConfig, seed: u64) -> HashMap<String, Vec<f32>> {
+    fill(crate::head::tensor_manifest(cfg), seed)
+}
+
+fn fill(manifest: Vec<(String, Vec<usize>)>, seed: u64) -> HashMap<String, Vec<f32>> {
     let mut rng = Rng::new(seed);
     let mut w = HashMap::new();
-    for (name, shape) in cfg.tensor_manifest() {
+    for (name, shape) in manifest {
         let numel: usize = shape.iter().product();
         let v = if is_norm_gain(&name) {
             vec![1.0; numel]

@@ -477,6 +477,11 @@ impl Encoder {
         self.gpu.submit(&[], &bw.steps);
     }
 
+    /// Block until this device has finished what it was given.
+    pub fn poll_wait(&self) {
+        self.gpu.poll_wait();
+    }
+
     /// The final hidden states' device buffer - what the head reads.
     pub fn hidden_buf(&self) -> &DeviceBuffer {
         &self.x[self.cfg.n_layers as usize]

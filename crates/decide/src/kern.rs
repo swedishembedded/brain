@@ -49,6 +49,12 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("attn_bwd_dq_cross", kernels::ATTN_BWD_DQ_CROSS),
     ("attn_bwd_dk_cross_acc", kernels::ATTN_BWD_DK_CROSS_ACC),
     ("attn_bwd_dv_cross_acc", kernels::ATTN_BWD_DV_CROSS_ACC),
+    // AdamW and its gradient-clipping stage.
+    ("adamw", kernels::ADAMW),
+    ("gradnorm_sq", kernels::GRADNORM_SQ),
+    ("grad_scale", kernels::GRAD_SCALE),
+    ("clip_coef", kernels::CLIP_COEF),
+    ("grad_scale_buf", kernels::GRAD_SCALE_BUF),
 ];
 
 macro_rules! ids {
@@ -98,4 +104,17 @@ ids! {
     dq_cross => "attn_bwd_dq_cross",
     dk_cross_acc => "attn_bwd_dk_cross_acc",
     dv_cross_acc => "attn_bwd_dv_cross_acc",
+    adamw => "adamw",
+    gradnorm_sq => "gradnorm_sq",
+    grad_scale => "grad_scale",
+    clip_coef => "clip_coef",
+    grad_scale_buf => "grad_scale_buf",
+}
+
+impl Ids {
+    /// The optimizer's five kernel slots, in the order `optim::Optim::new`
+    /// takes them.
+    pub fn optimizer(&self) -> optim::Optim {
+        optim::Optim::new(self.adamw, self.gradnorm_sq, self.grad_scale, self.clip_coef, self.grad_scale_buf)
+    }
 }

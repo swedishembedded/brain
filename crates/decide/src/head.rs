@@ -177,7 +177,7 @@ impl Head {
     pub fn set_call(
         &mut self,
         hidden: &DeviceBuffer,
-        d_hidden_out: &DeviceBuffer,
+        d_hidden_out: Option<&DeviceBuffer>,
         state_rows: u32,
         cls_rows: &[u32],
     ) {
@@ -199,6 +199,35 @@ impl Head {
     pub fn forward(&self) -> Vec<f32> {
         self.gpu.submit(&[], &self.steps);
         self.gpu.read(&self.score, self.n_slots as usize)
+    }
+
+    /// Block until this device has finished what it was given.
+    pub fn poll_wait(&self) {
+        self.gpu.poll_wait();
+    }
+
+    /// L2 norm of each forward stage, for localizing a dead path.
+    ///
+    /// A stage that reads zero when the one before it does not is where the
+    /// wiring broke; every stage reading zero means the encoder handed over
+    /// nothing. Cheap enough to call from a test, never on a hot path.
+    pub fn stage_norms(&self) -> Vec<(&'static str, f32)> {
+        let h = self.cfg.d_model as usize;
+        let s = self.n_slots as usize;
+        let r = self.state_rows as usize;
+        let n = |b: &DeviceBuffer, len: usize| -> f32 {
+            self.gpu.read(b, len).iter().map(|v| v * v).sum::<f32>().sqrt()
+        };
+        vec![
+            ("cls", n(&self.cls, s * h)),
+            ("q", n(&self.q, s * h)),
+            ("kv", n(&self.kv, r * 2 * h)),
+            ("probs", n(&self.probs, self.cfg.n_heads as usize * s * r)),
+            ("ctx", n(&self.ctx, s * h)),
+            ("sum", n(&self.sum, s * h)),
+            ("out", n(&self.out, s * h)),
+            ("score", n(&self.score, s)),
+        ]
     }
 
     fn build_steps(&self, hidden: &DeviceBuffer) -> Vec<Step> {
@@ -246,11 +275,15 @@ impl Head {
         st
     }
 
-    fn rebuild_bwd(&mut self, hidden: &DeviceBuffer, d_hidden_out: &DeviceBuffer) {
+    fn rebuild_bwd(&mut self, hidden: &DeviceBuffer, d_hidden_out: Option<&DeviceBuffer>) {
         if self.bwd.is_none() {
             return;
         }
-        let steps = self.build_bwd_steps(hidden, d_hidden_out);
+        // A trainable head with nowhere to put its hidden-state gradient would
+        // silently train the head alone, so the absence is refused rather than
+        // defaulted.
+        let out = d_hidden_out.expect("a trainable head needs the encoder's seed buffer");
+        let steps = self.build_bwd_steps(hidden, out);
         if let Some(b) = &mut self.bwd {
             b.steps = steps;
         }

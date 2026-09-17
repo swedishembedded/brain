@@ -21,7 +21,9 @@
 //! rather than with the state: it is what makes question independence
 //! structural instead of a promise.
 
+pub mod banking77;
 pub mod config;
+pub mod decide;
 pub mod head;
 pub mod kern;
 pub mod import;
@@ -32,4 +34,5 @@ pub mod pack;
 pub mod primitives;
 
 pub use config::EncoderConfig;
+pub use decide::{Decide, Example, Limits};
 pub use model::Encoder;
