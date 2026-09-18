@@ -118,7 +118,7 @@ per-model-port shape:
 - `brain run` (the event-driven stdio controller) is now `brain serve
   --stdio`.
 - `brain import-gguf` is now `brain import`.
-- `brain pid ...` is now `brain toypid ...`.
+- `brain toypid ...` is now `brain toypid ...`.
 - `brain capabilities` is now `brain caps`.
 - The bare `brain train|eval|generate` (which meant the sparse-MoE toy task)
   is now namespaced: `brain train toymoe`, `brain toymoe eval`, etc.

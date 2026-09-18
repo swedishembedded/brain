@@ -26,7 +26,7 @@ use crate::args::{canon_verb, Args};
 pub fn run_omni(argv: &[String]) {
     match argv.first().map(|s| canon_verb(s)) {
         Some("import") => import(&argv[1..]),
-        other => eprintln!("usage: brain omni import --hf <dir> --out <file>  (got {other:?})"),
+        other => eprintln!("usage: brain qwen3omnimoe import --hf <dir> --out <file>  (got {other:?})"),
     }
 }
 
@@ -37,7 +37,7 @@ fn import(argv: &[String]) {
     let id = a.take_str("--id");
     a.finish();
     let Some(hf) = hf else {
-        eprintln!("usage: brain omni import --hf <HF checkpoint dir> [--out FILE] [--id VENDOR/REPO]");
+        eprintln!("usage: brain qwen3omnimoe import --hf <HF checkpoint dir> [--out FILE] [--id VENDOR/REPO]");
         std::process::exit(2);
     };
     let t = std::time::Instant::now();
@@ -48,7 +48,7 @@ fn import(argv: &[String]) {
             println!("serve it GPU-resident with:  BRAIN_QWEN3OMNIMOE_INT8_CHECKPOINT={out} brain serve --dbus --openai");
         }
         Err(e) => {
-            eprintln!("brain omni import: {e}");
+            eprintln!("brain qwen3omnimoe import: {e}");
             std::process::exit(1);
         }
     }

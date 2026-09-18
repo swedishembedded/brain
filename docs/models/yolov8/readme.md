@@ -44,20 +44,41 @@ path.
 
 ```bash
 # train a detector from scratch
-brain yolo train --weights out/yolo.safetensors
+brain yolov8 train --weights out/yolo.safetensors
 
 # fine-tune an existing checkpoint
-brain yolo fine-tune --weights out/yolo.safetensors
+brain yolov8 fine-tune --weights out/yolo.safetensors
 
 # evaluate: reports precision, recall, mAP@0.5
-brain yolo eval --weights out/yolo.safetensors --data data/detect
+brain yolov8 eval --weights out/yolo.safetensors --data data/detect
 
 # run detection on an image
-brain yolo detect --weights out/yolo.safetensors --image photo.jpg --conf 0.25 --iou 0.45
+brain yolov8 detect --weights out/yolo.safetensors --image photo.ppm --conf 0.25 --iou 0.45
 ```
 
-`brain yolo train`'s defaults are 200 steps, batch size 4, learning rate
+`brain yolov8 train`'s defaults are 200 steps, batch size 4, learning rate
 1e-3, weight decay 1e-2 - override as needed.
+
+### The training data
+
+`make data/detect` generates the detection dataset brain trains against -
+coloured shapes on a dark field, with ground-truth boxes and classes. It is
+synthetic on purpose: every box is exact by construction, so a detector that
+misses one has a bug rather than a labelling dispute, and the generator can
+dial the specific difficulty being tested.
+
+![a grid of synthetic detection scenes: red, green and blue squares and circles at varying sizes and positions, each with its ground-truth box and class index drawn on](img/dataset_multi_object.png)
+
+The generator (`crates/data/src/gen_detect.rs`) varies each axis separately -
+object count, scale, class and background - so a training failure can be
+attributed to one of them:
+
+| | |
+|---|---|
+| ![](img/dataset_classification.png) | **class** - shape and colour identify the class |
+| ![](img/dataset_localization.png) | **localization** - one object, anywhere in the frame |
+| ![](img/dataset_scale.png) | **scale** - the same class across a wide size range |
+| ![](img/dataset_background.png) | **background** - distractor texture the detector must ignore |
 
 For continuous inference, an event-driven controller can map a camera frame
 straight to a detection event:
@@ -85,7 +106,7 @@ brain run --yolo out/yolo.safetensors
 brain can quantize the detector to INT8 and run it on an Intel NPU (Meteor
 Lake and newer) via OpenVINO, through a separate export -> quantize -> run ->
 bench pipeline (`brain npu export/quantize/run/bench`, or
-`brain yolo detect --device npu` as a shortcut). See
+`brain yolov8 detect --device npu` as a shortcut). See
 [the NPU export page](npu.md) for the full command reference, and
 [the configuration reference](../../using/configuration.md) and the NPU note
 in [the hardware page](../../introduction/hardware.md) for setup.

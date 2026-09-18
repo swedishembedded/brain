@@ -19,15 +19,15 @@ trip.
 
 ## Getting the weights
 
-There's no published checkpoint or model id — `brain pid train` produces
+There's no published checkpoint or model id - `brain toypid train` produces
 your own from simulated plant data; there's nothing to fetch.
 
 ## Running it
 
 ```bash
-brain pid train    --out pid.safetensors
-brain pid rollout  --weights pid.safetensors
-brain pid profile  --weights pid.safetensors
+brain toypid train    --out pid.safetensors
+brain toypid rollout  --weights pid.safetensors
+brain toypid profile  --weights pid.safetensors
 ```
 
 `train` runs DAgger — an exploration policy drives a grid of simulated
@@ -54,5 +54,5 @@ WebGPU-capable browser (Chrome/Edge 113+).
 The browser build is inference-only — there's no training or loss readback
 in-wasm, only native training. There's no `import` or `serve` subcommand:
 unlike brain's imported models, there's no upstream checkpoint for this
-model, so weights only ever come from `brain pid train` and are consumed by
+model, so weights only ever come from `brain toypid train` and are consumed by
 `rollout`, `profile`, and the web demo.

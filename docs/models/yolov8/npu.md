@@ -36,7 +36,7 @@ brain npu quantize --weights out/yolo.safetensors --calib calib/ --out out/yolo.
 # structural ONNX check (always) + compile/op-coverage check on a device (needs OpenVINO)
 brain npu check    --onnx out/yolo.int8.onnx [--ov-device NPU]
 
-# run on the NPU; output format identical to `brain yolo detect`
+# run on the NPU; output format identical to `brain yolov8 detect`
 brain npu run      --onnx out/yolo.int8.onnx --image sample.ppm --ov-device NPU \
                    [--conf 0.25 --iou 0.45 --nc 80 --reg-max 16 --cache-dir out/npu-cache \
                     --hint latency|throughput --turbo --allow-fallback]
@@ -48,7 +48,7 @@ brain npu bench    --onnx out/yolo.int8.onnx --ov-device NPU --hint throughput [
 brain npu sim      --weights out/yolo.safetensors --data data/detect [--calib calib/ --num-calib 300]
 
 # convenience: route `yolo detect` through the NPU (auto-exports fp32)
-brain yolo detect  --weights out/yolo.safetensors --image sample.ppm --device npu
+brain yolov8 detect  --weights out/yolo.safetensors --image sample.ppm --device npu
 ```
 
 ## Install (Meteor Lake / NPU 3720)

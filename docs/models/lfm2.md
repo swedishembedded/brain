@@ -25,7 +25,7 @@ that's what Qwen3 is for.
 auto-fetched on first use (opt-in: `--autofetch`). To import a checkpoint you already have locally:
 
 ```bash
-brain lfm import --hf <hf_dir> --out lfm-350m.safetensors
+brain lfm2 import --hf <hf_dir> --out lfm-350m.safetensors
 ```
 
 To serve a checkpoint, point `BRAIN_LFM2` (and `BRAIN_LFM2_TOKENIZER`) at it.

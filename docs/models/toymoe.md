@@ -36,7 +36,7 @@ brain generate --weights F --prompt 1,2,3,4 --max-new N --temperature X --top-k 
 `brain eval` sweeps context lengths and reports train-orbit, validation-
 orbit, and unseen-orbit accuracy against the random baseline, so
 memorization and generalization show up as separate numbers. For the dense
-baseline decoder instead, use `brain gpt …`.
+baseline decoder instead, use `brain gpt2 …`.
 
 ### Federated / sharded training
 

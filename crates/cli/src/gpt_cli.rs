@@ -26,7 +26,7 @@ pub fn run_gpt(argv: &[String]) {
         Some("train") => train(&argv[1..]),
         Some("infer") => gen(&argv[1..]),
         Some("eval") => eval(&argv[1..]),
-        other => eprintln!("usage: brain gpt <train|infer|eval> ...  (got {other:?})"),
+        other => eprintln!("usage: brain gpt2 <train|infer|eval> ...  (got {other:?})"),
     }
 }
 
@@ -39,7 +39,7 @@ fn eval(args: &[String]) {
     let seed = a.u64_or("--seed", 99);
     a.finish();
     if weights.is_empty() || data_dir.is_empty() {
-        eprintln!("usage: brain gpt eval --weights F --data <dir> [--batches N --samples M]");
+        eprintln!("usage: brain gpt2 eval --weights F --data <dir> [--batches N --samples M]");
         return;
     }
     let dir = Path::new(&data_dir);
@@ -59,7 +59,7 @@ fn eval(args: &[String]) {
 fn train(args: &[String]) {
     let mut a = Args::new(args);
     let Some(dir) = a.positional() else {
-        eprintln!("usage: brain gpt train <data_dir> [flags]");
+        eprintln!("usage: brain gpt2 train <data_dir> [flags]");
         return;
     };
     let mut o = TrainOpts::default();
@@ -111,7 +111,7 @@ fn gen(args: &[String]) {
     let mut seed = a.u64_or("--seed", 1234);
     a.finish();
     if weights.is_empty() {
-        eprintln!("usage: brain gpt infer --weights F [--data <dir>] [--prompt ... --max-new N --temp X --top-k K]");
+        eprintln!("usage: brain gpt2 infer --weights F [--data <dir>] [--prompt ... --max-new N --temp X --top-k K]");
         return;
     }
     if !args.iter().any(|s| s == "--seed") {

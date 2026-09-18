@@ -8,6 +8,19 @@ waveform instead of just text. Reach for it when you want one model handling
 mixed-modality input and, optionally, a spoken reply, rather than wiring
 separate ASR/VLM/TTS models together yourself.
 
+## How the signal flows
+
+Five components in series - a Thinker that reads every modality, a Talker that
+turns its hidden state into codec tokens, an MTP predictor for the residual
+codebooks, and a Code2Wav vocoder that renders them to a waveform. This is
+brain's own implementation, drawn from it: a **solid** box is implemented and
+parity-validated against real weights, a **dashed** one is a documented gap.
+
+[![Qwen3-Omni signal flow through brain's implementation: text, audio, image and video inputs through their tokenizers and towers, spliced with M-RoPE into the Thinker MoE decoder, then Talker, MTP code predictor and Code2Wav vocoder to a 24 kHz waveform](qwen-omni-dataflow.png)](qwen-omni-dataflow.png)
+
+Every number on it comes from the shipped config or a measured run, and the
+gaps are drawn rather than described - which is the point of having it.
+
 ## Support
 
 | Capability | Supported |
@@ -52,7 +65,7 @@ It wants a brain-native W8A16 checkpoint, which is not the format you
 downloaded - convert once (~8 minutes, 66 GB in, 33.6 GB out):
 
 ```bash
-brain omni import --hf /path/to/Qwen3-Omni-30B-A3B-Instruct \
+brain qwen3omnimoe import --hf /path/to/Qwen3-Omni-30B-A3B-Instruct \
                   --out /path/to/Qwen3-Omni-30B-A3B-Instruct-W8A16.safetensors
 ```
 

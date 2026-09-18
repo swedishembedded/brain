@@ -24,16 +24,16 @@ carry.
 ## Getting the weights
 
 `brain/gpt` is a reserved built-in id with no upstream checkpoint - there's
-nothing to fetch. Train your own with `brain gpt train`, or point
+nothing to fetch. Train your own with `brain gpt2 train`, or point
 `BRAIN_GPT2_WEIGHTS` at an existing brain-format checkpoint to serve one you
 already have.
 
 ## Running it
 
 ```bash
-brain gpt train <data_dir> --out gpt.safetensors --steps 2000
-brain gpt eval  --weights gpt.safetensors --data <data_dir>
-brain gpt gen   --weights gpt.safetensors --prompt "..." --max-new 200
+brain gpt2 train <data_dir> --out gpt.safetensors --steps 2000
+brain gpt2 eval  --weights gpt.safetensors --data <data_dir>
+brain gpt2 infer   --weights gpt.safetensors --prompt "..." --max-new 200
 ```
 
 `gen` / `sample` / `generate` are all accepted as aliases for the same
@@ -41,7 +41,7 @@ inference path. Generation uses an incremental KV-cache, so long completions
 don't recompute the whole prefix each step.
 
 > Bare `brain train` / `brain eval` / `brain generate` (no `gpt`) run brain's
-> separate toy Sparse MoE model, not this one - always say `brain gpt …` to
+> separate toy Sparse MoE model, not this one - always say `brain gpt2 …` to
 > reach this decoder.
 
 To serve it over HTTP or D-Bus:
