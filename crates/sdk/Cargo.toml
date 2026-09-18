@@ -103,7 +103,7 @@ study = ["device", "dep:brain-rl", "dep:brain-data", "dep:brain-checkpoint", "de
 # contract `qwen3tts::caps::gen_opts_from` already established for the wire
 # path. minimaxmusic3 (this bucket's third served architecture) stays a
 # tracked future extension - see the roadmap for why.
-audio = ["resolve", "dep:brain-qwen3asr", "dep:brain-audio", "dep:brain-qwen3tts", "dep:brain-cosyvoice", "dep:brain-data"]
+audio = ["resolve", "dep:brain-qwen3asr", "dep:brain-audio", "dep:brain-qwen3tts", "dep:brain-cosyvoice", "dep:brain-minimaxmusic3", "dep:brain-data"]
 # `brain::VideoPipeline` (Wan2.1 text-to-video). Selects `imagetype` for
 # `imaging::video`'s encode helper `Video::save` writes through - the same
 # "cheap to select twice" reasoning `vision` already uses for `Image`.
@@ -180,6 +180,7 @@ brain-gpu-core = { workspace = true, optional = true }
 brain-imaging = { workspace = true, optional = true }
 brain-kronos = { workspace = true, optional = true }
 brain-loader = { workspace = true, optional = true }
+brain-minimaxmusic3 = { workspace = true, optional = true }
 brain-model = { workspace = true, optional = true }
 brain-mujoco = { workspace = true, optional = true }
 brain-neuro = { workspace = true, optional = true }

@@ -411,6 +411,7 @@ dependencies = [
  "brain-imaging",
  "brain-kronos",
  "brain-loader",
+ "brain-minimaxmusic3",
  "brain-model",
  "brain-modelref",
  "brain-modelstore",

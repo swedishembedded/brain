@@ -29,7 +29,7 @@ all - the fly/flybody/connectome stack is unregistered).
 | Restoration/upscaling/VAE | 5 | 5 | **PARTIAL - `UpscalePipeline`** (RRDBNet) + **`RestorePipeline`** (CodeFormer; SUPIR/VQGAN deferred, see Phase 2.5/2.7) | no dedicated CLI; `resident_restore/upscale/supir.rs` | no |
 | Video generation | 2 | 2 | **PARTIAL - `VideoPipeline`** (Wan2.1 T2V; ltxv deferred, see Phase 5.1) | `wan_cli.rs`, `ltxv_cli.rs` | yes (wan) |
 | ASR | 2 | 2 | **PARTIAL - `TranscribePipeline`** (qwen3-asr only; nemotron + streaming deferred, see Phase 2.4) | **no CLI at all** - `resident_asr.rs` only | no |
-| TTS/music/speech codec | 7 | 3 | **PARTIAL - `TtsPipeline`** (Qwen3-TTS: speak/clone_voice/design; cosyvoice/minimaxmusic3 deferred, see Phase 4.1) | `tts_cli.rs` + `tts_serve.rs` | no |
+| TTS/music/speech codec | 7 | 3 | **PARTIAL - `TtsPipeline`** (Qwen3-TTS: speak/clone_voice/design; CosyVoice2/3: clone_voice) **+ `MusicPipeline`** (MiniMax Music 3: lyrics+caption-to-song); remaining speech-codec architectures deferred | `tts_cli.rs` + `tts_serve.rs` | no |
 | Vision/detection/segmentation | 4 | 4 | **PARTIAL - `DetectionPipeline`** (YOLOv8) + **`SegmentPipeline`** (SAM2) + **`DepthPipeline`** (ZipDepth; label is a VLM captioning workflow, not a single-arch capability, out of scope here - see Phase 3.1/3.2/3.3) | `yolo_cli.rs`, `sam2_cli.rs`, `depth_cli.rs`, `label_cli.rs` | no |
 | Embedding towers | 3 | 3 | none | **no CLI at all** - `resident_clip/arcface/t5encoder.rs` | no |
 | Forecasting | 4 | 0 (CLI-local) | none | **one unified entry**: `forecast_cli.rs` + generic `resident_forecast.rs` | yes (`brain forecast finetune`) |
@@ -469,7 +469,35 @@ including the `samples/imagegen/*` samples that link `crates/sdk` directly.
         == "qwen35"` is refused with a clean, named `Error::Backend` before
         ever reaching `load_inference`, with every pre-existing test in
         `text_pipeline.rs` (whose fixtures carry no card at all) unaffected.
-  - [ ] Still entirely uncovered domain buckets: 3D/world models (lowest priority - no settled domain object yet, `SplatPipeline` closer to `Creature` than `ImagePipeline`). See the domain inventory table. Also still open within buckets already started: ltxv (video), minimaxmusic3 (TTS/music), Text decoders bucket (`TextGenerationPipeline` scoped to qwen3 only, 5 more decoders behind it - a real, larger gap than Phase 2.2c's fix: `qwen35`'s own load path differs enough from qwen3's - footprint-based sizing, int8 tier, GPU pipeline construction, a ~108GB fp32 real model - to need its own design pass, not a copy of the `Backend` enum pattern `TtsPipeline`'s CosyVoice addition used), Multimodal/VLM/OCR beyond qwen3vl (8 more served archs, plus video/tool-calling on qwen3vl itself - assessed this session: none of fastvlm/llava/moondream3/deepseek2ocr share qwen3vl's `Resident`-style chat+tools call shape, so none fit `VisionLanguagePipeline` as a same-type second backend the way CosyVoice fit `TtsPipeline`), ASR bucket beyond qwen3-asr (nemotron, streaming - a genuinely different call shape, already documented as deliberately deferred in `crates/sdk/src/asr.rs`'s own module doc).
+  - [x] **Phase 4.4** - `MusicPipeline` (MiniMax Music 3) - the TTS/music
+        bucket's second pipeline, a NEW type rather than a `TtsPipeline`
+        third backend: lyrics+caption in (not a speaker/voice to render text
+        in), up to five minutes of 44.1 kHz STEREO out - a genuinely
+        different call shape and a genuinely different output domain (see
+        `crates/sdk/src/music.rs`'s own module doc for why this earns
+        `Song`, not a `channels` field bolted onto `Audio`).
+        `minimaxmusic3::spec::MinimaxMusic3Spec`/`caps.rs` already existed
+        and read as production-representative (unlike ltxv - see that
+        model's own module doc: "today's DiT is a tiny random-weight
+        smoke-test pipeline" by default, real weights "only ever proven
+        correct at REDUCED DEPTH / one block" - explicitly NOT the same
+        maturity bar, and correctly still deferred). Applied the resolve-
+        before-`Store::local` ordering PROACTIVELY from the start (the
+        fourth time this campaign has needed it - Phase 4.2/2.2b/6.1/5.1b
+        each found the naive order broken the hard way first). `Song::save`
+        reuses `audio::wav::write_multi`, already-existing multi-channel
+        infrastructure `crate::Audio::save`'s own mono `audio::wav::write`
+        call is the one-channel special case of - no new WAV-writing code
+        needed. Resolution-only test coverage, the same ceiling
+        `tests/vlm_pipeline.rs` accepted for qwen3vl: MinimaxMusic3Spec
+        classifies across five genuinely different on-disk shapes (one real
+        HF `language_model` dir, four brain-native components with no
+        `config.json` of their own, classified by tensor NAME alone),
+        reverse-engineering all four native tensor-name manifests for a
+        synthetic fixture is out of scope here - what IS proven is an
+        unparseable id refused cleanly and a `Missing` naming all six roles,
+        never a panic, never a network attempt.
+  - [ ] Still entirely uncovered domain buckets: 3D/world models (lowest priority - no settled domain object yet, `SplatPipeline` closer to `Creature` than `ImagePipeline`). See the domain inventory table. Also still open within buckets already started: ltxv (video, unproven past one block - see Phase 4.4's own note), Text decoders bucket (`TextGenerationPipeline` scoped to qwen3 only, 5 more decoders behind it - a real, larger gap than Phase 2.2c's fix: `qwen35`'s own load path differs enough from qwen3's - footprint-based sizing, int8 tier, GPU pipeline construction, a ~108GB fp32 real model - to need its own design pass, not a copy of the `Backend` enum pattern `TtsPipeline`'s CosyVoice addition used), Multimodal/VLM/OCR beyond qwen3vl (8 more served archs, plus video/tool-calling on qwen3vl itself - assessed this session: none of fastvlm/llava/moondream3/deepseek2ocr share qwen3vl's `Resident`-style chat+tools call shape, so none fit `VisionLanguagePipeline` as a same-type second backend the way CosyVoice fit `TtsPipeline`), ASR bucket beyond qwen3-asr (nemotron, streaming - a genuinely different call shape, already documented as deliberately deferred in `crates/sdk/src/asr.rs`'s own module doc).
 
 ### Phase 2.1 - `ForecastPipeline` (done)
 

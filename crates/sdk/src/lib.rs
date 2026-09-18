@@ -37,7 +37,7 @@
 //! | `forecast` | [`ForecastPipeline`] -- time-series forecasting (kronos, timesfm3) |
 //! | `text` | [`TextGenerationPipeline`] -- text generation (qwen3, from a local checkpoint path or a hub id) |
 //! | `vision` | [`EmbeddingPipeline`] -- text embedding (CLIP); [`DetectionPipeline`] -- object detection (YOLOv8); [`SegmentPipeline`] -- promptable segmentation (SAM 2.1); [`DepthPipeline`] -- monocular depth (ZipDepth); named for the `brain_arch::Domain` they resolve under, not the capability, since there is no `Embedding`/`Detection`/`Segmentation`/`Depth` domain |
-//! | `audio` | [`TranscribePipeline`] -- speech-to-text (qwen3-asr, offline); [`TtsPipeline`] -- text-to-speech (Qwen3-TTS: speak/clone_voice/design; CosyVoice: clone_voice) |
+//! | `audio` | [`TranscribePipeline`] -- speech-to-text (qwen3-asr, offline); [`TtsPipeline`] -- text-to-speech (Qwen3-TTS: speak/clone_voice/design; CosyVoice: clone_voice); [`MusicPipeline`] -- lyrics+caption-to-song (MiniMax Music 3) |
 //! | `video` | [`VideoPipeline`] -- text-to-video (Wan2.1 T2V) |
 //! | `multimodal` | [`VisionLanguagePipeline`] -- vision-language (Qwen3-VL: 1-8 images + text in, text out) |
 //! | `full` | every surface; this is `default` |
@@ -102,6 +102,8 @@ mod forecast;
 mod image;
 #[cfg(feature = "image")]
 mod pipeline;
+#[cfg(feature = "audio")]
+mod music;
 /// `brain::DecisionPipeline` - calibrated probabilities over options supplied
 /// per request. Its own surface because its output space lives in the CALL,
 /// which no generative pipeline's shape can express.
@@ -197,6 +199,8 @@ pub use segment::{Mask, Prompt, SegmentOptions, SegmentPipeline, SegmentPipeline
 pub use text::{GeneratedText, TextGenerationOptions, TextGenerationPipeline, TextGenerationPipelineBuilder};
 #[cfg(feature = "audio")]
 pub use tts::{Audio, TtsOptions, TtsPipeline, TtsPipelineBuilder};
+#[cfg(feature = "audio")]
+pub use music::{MusicOptions, MusicPipeline, MusicPipelineBuilder, Song};
 #[cfg(feature = "image")]
 pub use upscale::{UpscaleOptions, UpscalePipeline, UpscalePipelineBuilder};
 #[cfg(feature = "video")]
