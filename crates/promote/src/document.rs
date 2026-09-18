@@ -85,7 +85,7 @@ use crate::gate::GateConfig;
 ///
 /// A malformed document-study dataset is untrusted input crossing a process
 /// boundary - a served capability action, a CLI `--dataset` load, sven's own
-/// shell-out to `brain document-study` - and every variant here used to be an
+/// shell-out to a document study - and every variant here used to be an
 /// `assert!`/`panic!`. Panicking mid-training (deep past where a checkpoint
 /// has already started loading) leaves a caller with a Rust panic tail as its
 /// only diagnostic and no way to check a dataset up front; a named,

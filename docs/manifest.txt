@@ -24,6 +24,7 @@ docs/using/security.md
 samples/README.md
 samples/decision/arena/README.md
 samples/decision/doom/README.md
+samples/decision/intents/README.md
 samples/decision/salesagent/README.md
 samples/decision/triage/README.md
 samples/fly/interactive/README.md
@@ -72,6 +73,7 @@ samples/shell/imagegen/lora/README.md
 samples/shell/imagegen/portrait-from-refs/README.md
 samples/shell/restore/upscale/README.md
 samples/shell/videogen/ltxv/README.md
+samples/study/document/README.md
 # END SAMPLES MANIFEST
 
 == What brain can do

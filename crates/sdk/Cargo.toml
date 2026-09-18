@@ -31,7 +31,7 @@ default = ["full"]
 # `viewport` is in here despite being a tier rather than a surface, for the
 # reason the comment above gives: `cargo test -p brain` runs whatever `full`
 # selects, and a feature nobody builds is a feature whose tests never run.
-full = ["image", "creature", "forecast", "text", "vision", "audio", "decision", "video", "viewport"]
+full = ["image", "creature", "forecast", "text", "vision", "audio", "decision", "study", "video", "viewport"]
 
 # --- presentation tier, not a surface. `brain::viewport`: a window and an RGB8
 #     canvas with the drawing an instrument panel needs, or the same canvas with
@@ -90,6 +90,10 @@ vision = ["resolve", "imagetype", "dep:brain-clip", "dep:brain-yolov8", "dep:bra
 # resolver to resolve a hub id against - and a decision model is two artifacts
 # (an imported encoder, a trained head) where a hub id names only the first.
 decision = ["device", "dep:brain-decide", "dep:brain-data", "dep:brain-checkpoint"]
+# `brain::DocumentStudy` - teach a model a batch of documents and gate whether
+# it learned them. Architecture-agnostic machinery (`brain-rl` is generic over
+# `model::Model`), so the decoder crates it monomorphises for come with it.
+study = ["device", "dep:brain-rl", "dep:brain-data", "dep:brain-checkpoint", "dep:brain-model", "dep:brain-loader", "dep:brain-qwen3", "dep:brain-qwen35", "dep:brain-qwen35moe", "dep:serde_json", "dep:serde"]
 # `brain::TranscribePipeline` (qwen3-asr, offline, fixed window; nemotronasr's
 # streaming path needs a genuinely different call shape, a tracked future
 # extension, not folded in here) and `brain::TtsPipeline` (Qwen3-TTS
@@ -134,6 +138,7 @@ imagetype = ["dep:brain-imaging"]
 # changed shape with a feature would be exactly the behaviour-by-feature this
 # design forbids.
 brain-capability.workspace = true
+brain-arch.workspace = true
 brain-modelref.workspace = true
 brain-modelstore.workspace = true
 brain-audio = { workspace = true, optional = true }
@@ -155,6 +160,9 @@ brain-model = { workspace = true, optional = true }
 brain-mujoco = { workspace = true, optional = true }
 brain-neuro = { workspace = true, optional = true }
 brain-qwen3 = { workspace = true, optional = true }
+brain-qwen35 = { workspace = true, optional = true }
+brain-qwen35moe = { workspace = true, optional = true }
+brain-rl = { workspace = true, optional = true }
 brain-qwen3asr = { workspace = true, optional = true }
 brain-qwen3tts = { workspace = true, optional = true }
 brain-rrdbnet = { workspace = true, optional = true }
@@ -170,6 +178,7 @@ brain-appopts.workspace = true
 brain-yolov8 = { workspace = true, optional = true }
 brain-zipdepth = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
 tempfile = { workspace = true, optional = true }
 
 [dev-dependencies]

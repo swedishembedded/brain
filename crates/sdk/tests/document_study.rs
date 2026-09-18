@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! `brain document-study` end to end: the local (sven + brain, no whale)
+//! `sample-study-document` end to end: the local (sven + brain, no whale)
 //! entry point to `rl::document::run_document_study`
 //! (continuous-learning roadmap B9).
 //!
@@ -41,7 +41,6 @@
 //! info@swedishembedded.com.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use qwen3::config::QwenConfig;
 
@@ -70,18 +69,26 @@ fn skip() -> bool {
     false
 }
 
-fn bin() -> PathBuf {
-    let mut p = std::env::current_exe().unwrap();
-    p.pop();
-    if p.ends_with("deps") {
-        p.pop();
-    }
-    p.push("brain");
-    p
+/// The study the sample drives, configured exactly as its flags would.
+fn study(arch: &str, dir: &Path, weights: &Path, dataset: &Path, adapters: &Path, report: &Path) -> brain::DocumentStudy {
+    brain::DocumentStudy::from_pretrained(weights.to_string_lossy().into_owned())
+        .expect("from_pretrained")
+        .arch(arch)
+        .dataset(dataset)
+        .adapter_dir(adapters)
+        .report(report)
+        .work_dir(dir.join("work"))
+        .lora(4)
+        .alpha(8.0)
+        .eval_per_cycle(EVAL_PER_CYCLE)
+        .steps(STEPS)
+        .seed(7)
+        .null_gate_seed(8)
+        .quiet(true)
 }
 
 fn tmp(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("brain-cli-document-study-{name}-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("sample-study-document-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
@@ -161,33 +168,10 @@ fn write_base_dir(dir: &Path) -> PathBuf {
     weights
 }
 
-fn run(arch: &str, dir: &Path, weights: &Path, dataset: &Path, adapters: &Path, report: &Path) -> std::process::Output {
-    Command::new(bin())
-        .args(["document-study", "--arch", arch])
-        .arg("--weights")
-        .arg(weights)
-        .arg("--dataset")
-        .arg(dataset)
-        .arg("--adapter-dir")
-        .arg(adapters)
-        .arg("--report")
-        .arg(report)
-        .arg("--work-dir")
-        .arg(dir.join("work"))
-        .args(["--lora", "4", "--alpha", "8"])
-        .args(["--eval-per-cycle", &EVAL_PER_CYCLE.to_string()])
-        .args(["--steps", &STEPS.to_string()])
-        .args(["--seqs", &SEQS.to_string()])
-        .args(["--batch", &BATCH.to_string()])
-        .output()
-        .expect("run brain document-study")
-}
-
-/// `--dry-run` takes only `--dataset` - no `--weights`, no `--adapter-dir`,
-/// no `--report` - because it never resolves a base, loads a checkpoint or
-/// touches a device at all.
-fn run_dry_run(dataset: &Path) -> std::process::Output {
-    Command::new(bin()).args(["document-study", "--dataset"]).arg(dataset).arg("--dry-run").output().expect("run brain document-study --dry-run")
+/// `validate_dataset` takes only the dataset - no weights, no checkpoint, no
+/// device at all - which is what makes it usable before a GPU-bound run.
+fn dry_run(dataset: &Path) -> brain::Result<brain::DatasetSummary> {
+    brain::DocumentStudy::validate_dataset(dataset)
 }
 
 /// One full round trip: a dataset of frozen triples in, a gated study with
@@ -207,9 +191,7 @@ fn a_document_study_writes_a_report_and_publishes_an_adapter_only_on_promote() {
 
     let adapters = dir.join("adapters");
     let report_path = dir.join("report.json");
-    let out = run("qwen3", &dir, &weights, &dataset, &adapters, &report_path);
-    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-    assert!(out.status.success(), "document-study exited {:?}\n{stderr}", out.status.code());
+    let outcome = study("qwen3", &dir, &weights, &dataset, &adapters, &report_path).sft(SEQS, BATCH, 1e-4).run().expect("the study must run");
 
     // ---- 1. The report is always written, win or lose ---------------------
     let text = std::fs::read_to_string(&report_path).unwrap_or_else(|e| panic!("{}: {e}", report_path.display()));
@@ -279,10 +261,8 @@ fn a_malformed_dataset_is_refused_before_any_training_starts() {
 
     let adapters = dir.join("adapters");
     let report_path = dir.join("report.json");
-    let out = run("qwen3", &dir, &weights, &dataset, &adapters, &report_path);
-    assert!(!out.status.success(), "a malformed dataset must fail the command");
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("typo_field"), "the failure must name the offending field, got:\n{stderr}");
+    let e = study("qwen3", &dir, &weights, &dataset, &adapters, &report_path).run().expect_err("a malformed dataset must be refused").to_string();
+    assert!(e.contains("typo_field"), "the failure must name the offending field, got:\n{e}");
     assert!(!report_path.exists(), "a dataset that never parsed produced no study, so there is nothing to report");
 }
 
@@ -298,12 +278,13 @@ fn an_unregistered_architecture_is_refused_and_names_the_registered_ones() {
     let dataset = dir.join("dataset.json");
     std::fs::write(&dataset, serde_json::json!({"cycles": [triples()], "anchors": anchors()}).to_string()).unwrap();
 
-    let out = run("gpt2", &dir, &weights, &dataset, &dir.join("adapters"), &dir.join("report.json"));
-    assert!(!out.status.success(), "an unregistered --arch must fail the command");
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("gpt2"), "the refusal must name the architecture that was asked for, got:\n{stderr}");
+    let e = study("gpt2", &dir, &weights, &dataset, &dir.join("adapters"), &dir.join("report.json"))
+        .run()
+        .expect_err("an unregistered arch must be refused")
+        .to_string();
+    assert!(e.contains("gpt2"), "the refusal must name the architecture that was asked for, got:\n{e}");
     for known in ["qwen3", "qwen35", "qwen35moe"] {
-        assert!(stderr.contains(known), "the refusal must list {known}, got:\n{stderr}");
+        assert!(e.contains(known), "the refusal must list {known}, got:\n{e}");
     }
 }
 
@@ -321,13 +302,10 @@ fn a_dry_run_reports_a_well_formed_dataset_ok_without_touching_a_checkpoint() {
     let dataset = dir.join("dataset.json");
     std::fs::write(&dataset, serde_json::json!({"cycles": [triples()], "anchors": anchors()}).to_string()).unwrap();
 
-    let out = run_dry_run(&dataset);
-    assert!(out.status.success(), "a well-formed dataset must pass --dry-run: {}", String::from_utf8_lossy(&out.stderr));
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("dataset OK"), "must report a clear pass, got:\n{stdout}");
-    assert!(stdout.contains("1 cycle"), "must report the cycle count, got:\n{stdout}");
-    assert!(stdout.contains(&format!("{} triple", FACTS_PER_CYCLE * PROBES_PER_FACT)), "must report the triple count, got:\n{stdout}");
-    assert!(stdout.contains("3 anchor"), "must report the anchor count, got:\n{stdout}");
+    let s = dry_run(&dataset).expect("a well-formed dataset must validate");
+    assert_eq!(s.cycles, 1, "must report the cycle count");
+    assert_eq!(s.triples, FACTS_PER_CYCLE * PROBES_PER_FACT, "must report the triple count");
+    assert_eq!(s.anchors, 3, "must report the anchor count");
 }
 
 /// The exact failure Task 1's `Result`-returning validation produces,
@@ -352,9 +330,7 @@ fn a_dry_run_reports_the_specific_failure_and_exits_non_zero_without_touching_a_
     let dataset = dir.join("dataset.json");
     std::fs::write(&dataset, serde_json::json!({"cycles": [few], "anchors": anchors()}).to_string()).unwrap();
 
-    let out = run_dry_run(&dataset);
-    assert!(!out.status.success(), "a cycle below the held-out floor must fail --dry-run");
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("held-out probes"), "the failure must name the specific rule, got:\n{stderr}");
-    assert!(stderr.contains("below the pre-registered floor of 48"), "the failure must name the floor, got:\n{stderr}");
+    let e = dry_run(&dataset).expect_err("a cycle below the held-out floor must be refused").to_string();
+    assert!(e.contains("held-out probes"), "the failure must name the specific rule, got:\n{e}");
+    assert!(e.contains("below the pre-registered floor of 48"), "the failure must name the floor, got:\n{e}");
 }

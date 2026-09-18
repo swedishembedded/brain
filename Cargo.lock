@@ -371,6 +371,7 @@ name = "brain"
 version = "1.1.0"
 dependencies = [
  "brain-appopts",
+ "brain-arch",
  "brain-audio",
  "brain-capability",
  "brain-checkpoint",
@@ -393,8 +394,11 @@ dependencies = [
  "brain-mujoco",
  "brain-neuro",
  "brain-qwen3",
+ "brain-qwen35",
+ "brain-qwen35moe",
  "brain-qwen3asr",
  "brain-qwen3tts",
+ "brain-rl",
  "brain-rrdbnet",
  "brain-s3dit",
  "brain-sam2",
@@ -405,6 +409,7 @@ dependencies = [
  "brain-wm-display",
  "brain-yolov8",
  "brain-zipdepth",
+ "serde",
  "serde_json",
  "tempfile",
 ]
@@ -5341,6 +5346,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "sample-decision-intents"
+version = "1.1.0"
+dependencies = [
+ "brain",
+]
+
+[[package]]
 name = "sample-decision-salesagent"
 version = "1.1.0"
 dependencies = [
@@ -5370,6 +5382,13 @@ dependencies = [
 
 [[package]]
 name = "sample-imagegen-generate"
+version = "1.1.0"
+dependencies = [
+ "brain",
+]
+
+[[package]]
+name = "sample-study-document"
 version = "1.1.0"
 dependencies = [
  "brain",

@@ -1,0 +1,23 @@
+[package]
+# Package names under samples/ are derived from the path:
+# `samples/study/document` -> `sample-study-document`. The Makefile's
+# `samples/%/{build,run}` rules depend on that mapping; `make check/samples`
+# enforces it.
+name = "sample-study-document"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sample application: teach a model a batch of documents and gate whether it learned them, through the public brain SDK."
+publish = false
+
+[dependencies]
+# The ONLY brain dependency a sample may have is the SDK facade, and it must
+# NAME the surfaces it uses - see samples/README.md rules 1 and 2. This one
+# uses `study` and nothing else.
+brain = { workspace = true, features = ["study"] }
+
+[package.metadata.brain]
+# `make check/samples` fails if the real `cargo tree` closure exceeds this.
+# Measured at 50: a study monomorphises over three decoder architectures, so
+# it carries more than an inference-only surface does.
+max-brain-crates = 52

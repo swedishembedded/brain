@@ -1,81 +1,64 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! `brain document-study` - run the gated document-learning study on a batch
-//! of frozen `{fact, probe_question, expected_answer}` triples, write a
-//! machine-readable verdict, and publish the adapter only if the gate
-//! promoted (continuous-learning roadmap B9).
+//! Teaching a model a batch of documents, and gating whether it learned them.
 //!
-//! ```text
-//! brain document-study --arch <name> --weights BASE --dataset FILE.json
-//!                      --adapter-dir DIR --report FILE.json
-//!                      [--work-dir DIR --lora RANK --alpha A
-//!                       --eval-per-cycle N --steps N --seqs N --batch B
-//!                       --lr X --seed S --null-gate-seed S
-//!                       --models-dir DIR --quiet]
+//! A **document study** trains a LoRA adapter on frozen
+//! `{fact, probe_question, expected_answer}` triples under `Regime::Sft`,
+//! scores the result against a pre-registered bar
+//! (`promote::document::document_gate_config`), and runs a NULL-GATE control
+//! arm beside it so the resulting number says something about the gate rather
+//! than only about the run. The adapter is published only if the gate
+//! promoted.
+//!
+//! ```no_run
+//! # fn main() -> brain::Result<()> {
+//! use brain::DocumentStudy;
+//!
+//! let outcome = DocumentStudy::from_pretrained("Qwen/Qwen3-0.6B")?
+//!     .dataset("facts.json")
+//!     .adapter_dir("adapters/")
+//!     .run()?;
+//!
+//! println!("{}", outcome.table());
+//! if let Some(adapter) = outcome.published() {
+//!     println!("promoted -> {}", adapter.display());
+//! }
+//! # Ok(()) }
 //! ```
 //!
-//! ## Why this command exists
+//! ## Why this is architecture-driven rather than one model's verb
 //!
-//! [`rl::document::run_document_study`] has been a real, tested study since
-//! `B5′` - it trains a LoRA adapter on a batch of facts under
-//! `Regime::Sft`, gates promotion on `promote::document::
-//! document_gate_config`'s pre-registered bar, and runs the null-gate control
-//! arm beside it so the resulting number says something about the gate. But
-//! it was reachable only from a Rust test: nothing shipped could run one.
+//! `rl::continual::run_study` is generic over `M: model::Model` and
+//! `rl::document::DocumentCurriculum` names no model type at all, so the
+//! study is architecture-agnostic machinery. Nesting it under one model would
+//! tie a general capability to one consumer and invite the next consumer to
+//! grow a second copy. [`ARCHS`] is the registry a new architecture joins by
+//! adding one row.
 //!
-//! ## Why it is TOP-LEVEL and `--arch`-driven, not a qwen3 subcommand
-//!
-//! `rl::continual::run_study` is generic over `M: model::Model`, and
-//! `rl::document::DocumentCurriculum` names no model type at all - the study
-//! is architecture-agnostic machinery, and nesting its only entry point under
-//! one model's verb tree would tie a general capability to one consumer and
-//! invite the next consumer to grow a second copy. So this follows
-//! `brain bench eval --arch <name>`'s shape instead: one top-level command,
-//! an architecture NAME that selects which `Model` impl it monomorphises for,
-//! and a registry ([`ARCHS`]) that a new architecture joins by adding one row
-//! - the same "add one line" seam `bench::arch` documents.
-//!
-//! Everything a study needs beyond `M: Model` lives in [`StudyArch`], which
-//! is exactly two things: how that architecture spells a LoRA overlay of the
-//! requested rank, and how to widen its context to the curriculum's shape.
-//! Nothing else here is architecture-specific - the checkpoint is read
-//! through `ModelConfig::from_json`, the study base is built by the generic
-//! `rl::continual::overlay_adapter`, and the study itself by
-//! `rl::document::run_document_study`.
-//!
-//! **What bounds the registry today is the TOKENIZER, not the model.**
+//! **What bounds that registry is the TOKENIZER, not the model.**
 //! `DocumentCurriculum` is generic over the model but hard-wired to
-//! `data::qwen_tokenizer::QwenBpe` (its `Env`/`Ver` associated types name
-//! that type, and `data::chat::prepare_chat_samples` takes it), so an
-//! architecture qualifies iff it loads an HF `tokenizer.json` BPE and its
-//! config can carry a LoRA overlay. That is why the registered rows are the
-//! Qwen-family decoders and a GPT-tokenizer architecture is absent - a fact
-//! about `DocumentCurriculum`'s signature, not a choice made here.
+//! `data::qwen_tokenizer::QwenBpe`, so an architecture qualifies iff it loads
+//! an HF `tokenizer.json` BPE and its config can carry a LoRA overlay. That is
+//! why the registered rows are the Qwen-family decoders - a fact about
+//! `DocumentCurriculum`'s signature, not a choice made here.
 //!
 //! ## What it does NOT do
 //!
-//! It computes nothing the study did not already compute. Every number in
-//! the report comes from the two [`rl::continual::StudyReport`]s
+//! It computes nothing the study did not already compute. Every number in the
+//! outcome comes from the two `rl::continual::StudyReport`s
 //! `run_document_study` returns, and the adapter it publishes is the file
 //! `rl::improve::cycle` already wrote when the gate promoted - copied, not
-//! retrained. A command that re-scored anything here would be reporting a
+//! retrained. A surface that re-scored anything here would be reporting a
 //! different measurement from the one the gate actually made.
 //!
-//! Per-FACT rows (roadmap `B8`) are deliberately absent: a per-fact verdict
-//! needs the candidate arm's own `(task id, score)` pairs
-//! (`promote::document::fact_verdicts`), and `rl::continual::CycleRecord`
-//! collapses those to means before the study report is built. Reconstructing
-//! them here would mean a second decode pass - a different measurement from
-//! the gate's, presented as if it were the gate's. The report names each
-//! cycle's facts instead, so a caller knows what the cycle's number is about.
-//!
-//! Swedish Embedded AB builds the operator-facing surfaces that turn a gated
-//! continual-learning study into something a team can actually run, read and
-//! act on - one command, one machine-readable verdict, one adapter a live
-//! server picks up. If your team needs expertise shipping continuous learning
-//! as an operable product rather than a notebook, you can procure our
-//! services by sending an email to info@swedishembedded.com.
+//! Swedish Embedded AB implements continual-learning pipelines whose promotion
+//! decisions are gated by pre-registered criteria and their own controls. If
+//! your team needs a model that can be taught something new without silently
+//! forgetting what it knew, you can procure our services by sending an email
+//! to info@swedishembedded.com.
+
+use crate::{Error, Result};
 
 use std::path::{Path, PathBuf};
 
@@ -90,14 +73,10 @@ use rl::document::{self, DocumentCurriculum, DocumentStudyConfig, DocumentStudyR
 use rl::gate::{Cause, Decision};
 use rl::improve::AdapterMeta;
 
-const USAGE: &str = "usage: brain document-study --arch NAME --weights BASE --dataset FILE.json --adapter-dir DIR --report FILE.json \
-     [--work-dir DIR --lora RANK --alpha A --eval-per-cycle N --steps N --seqs N --batch B --lr X --seed S --null-gate-seed S \
-      --models-dir DIR --quiet]\n   or: brain document-study --dataset FILE.json --dry-run";
 
 /// The architecture a study runs against when `--arch` is omitted. Named,
 /// not silent: the study's measured recipe (`SftConfig::default`) was tuned
 /// on this family.
-const DEFAULT_ARCH: &str = "qwen3";
 
 // ---------------------------------------------------------------------------
 // The architecture seam
@@ -308,160 +287,6 @@ struct Inputs<'a> {
     verbose: bool,
 }
 
-pub fn run(args: &[String]) {
-    let mut a = crate::args::Args::new(args);
-    let arch = a.str_or("--arch", DEFAULT_ARCH);
-    let weights = a.take_str("--weights").unwrap_or_default();
-    let dataset = a.take_str("--dataset").unwrap_or_default();
-    let adapter_dir = a.take_str("--adapter-dir").unwrap_or_default();
-    let report_path = a.take_str("--report").unwrap_or_default();
-    let work_dir = a.take_str("--work-dir");
-    let rank = a.u32_or("--lora", 8);
-    let alpha = a.f32_or("--alpha", rank as f32 * 2.0);
-    let eval_per_cycle = a.usize_or("--eval-per-cycle", MIN_HELD_OUT_PROBES);
-    let steps = a.u32_or("--steps", DocumentStudyConfig::default().steps_per_cycle);
-    let seqs = a.usize_or("--seqs", SftConfig::default().seqs);
-    let batch = a.u32_or("--batch", SftConfig::default().batch);
-    let lr = a.f32_or("--lr", SftConfig::default().lr);
-    let mut seed = a.u64_or("--seed", DocumentStudyConfig::default().seed);
-    let mut null_gate_seed = a.u64_or("--null-gate-seed", DocumentStudyConfig::default().null_gate_seed);
-    if !args.iter().any(|s| s == "--seed") {
-        seed = data::rng::random_seed();
-        eprintln!("document study: no --seed given, using random seed {seed} (pass --seed {seed} to reproduce)");
-    }
-    if !args.iter().any(|s| s == "--null-gate-seed") {
-        null_gate_seed = data::rng::random_seed();
-        eprintln!("document study: no --null-gate-seed given, using random seed {null_gate_seed} (pass --null-gate-seed {null_gate_seed} to reproduce)");
-    }
-    let models_dir = a.take_str("--models-dir");
-    let quiet = a.take_flag("--quiet");
-    let dry_run = a.take_flag("--dry-run");
-    a.finish();
-
-    if dataset.is_empty() {
-        eprintln!("{USAGE}");
-        std::process::exit(2);
-    }
-    if dry_run {
-        // No weights resolution, no checkpoint load, no device - just the
-        // dataset through the same validation the real run applies before
-        // it does any of those. The seam a caller (sven's own shell-out to
-        // this command) uses to check a dataset up front, before paying for
-        // the expensive, GPU-bound training run.
-        run_dry_run(Path::new(&dataset));
-        return;
-    }
-    if weights.is_empty() || adapter_dir.is_empty() || report_path.is_empty() {
-        eprintln!("{USAGE}");
-        std::process::exit(2);
-    }
-    if rank == 0 {
-        eprintln!("--lora RANK must be > 0: a document study trains a LoRA adapter");
-        std::process::exit(2);
-    }
-    let Some((_, study)) = ARCHS.iter().find(|(name, _)| *name == arch) else {
-        eprintln!("--arch {arch:?}: no document study is registered for it (known: {})", arch_names());
-        std::process::exit(2);
-    };
-
-    // ---- The dataset is validated BEFORE anything touches the base -------
-    //
-    // It is the one input brain did not produce, and it is fully checkable
-    // on its own: a batch that would be refused after a multi-minute model
-    // load is a batch that should have been refused at the first read.
-    let raw = read_dataset(Path::new(&dataset));
-    let cycles = match validate_cycles(raw.cycles) {
-        Ok(c) => c,
-        Err(e) => fail(&format!("{dataset}: {e}")),
-    };
-    let anchors = match FactBatch::new(raw.anchors) {
-        Ok(b) => vec![b],
-        Err(e) => fail(&format!("{dataset}: anchors: {e}")),
-    };
-
-    // ---- The base, its tokenizer and its chat template -------------------
-    let store_root = loader::model_dir::resolve(models_dir.as_deref());
-    let (base_weights, base_dir, base_id) = match crate::qwen_cli::resolve_base(&weights, store_root.as_deref()) {
-        Ok(t) => t,
-        Err(e) => fail(&e),
-    };
-    let tok_path = base_dir.join("tokenizer.json");
-    let tok = match QwenBpe::from_file(tok_path.to_str().unwrap_or_default()) {
-        Ok(t) => t,
-        Err(e) => fail(&format!("{}: {e}", tok_path.display())),
-    };
-    let tmpl = match ChatTemplate::from_model_dir(&base_dir) {
-        Ok(t) => t,
-        Err(e) => fail(&format!("{e}")),
-    };
-
-    let work_dir = work_dir.map(PathBuf::from).unwrap_or_else(|| DocumentStudyConfig::default().work_dir);
-    if let Err(e) = std::fs::create_dir_all(&work_dir) {
-        fail(&format!("{}: {e}", work_dir.display()));
-    }
-    // The gated arm's adapters land here; the version already present is
-    // what "a NEW adapter was produced" is measured against, so re-using a
-    // work directory cannot republish a previous run's adapter.
-    let gated_adapters = work_dir.join("gated").join("adapters");
-    let before = rl::improve::latest_adapter(&gated_adapters).ok().flatten().map(|(v, _)| v);
-
-    let inputs = Inputs {
-        base_weights: &base_weights,
-        base_id: &base_id,
-        dataset: &dataset,
-        cycles: &cycles,
-        anchors: &anchors,
-        tok: &tok,
-        tmpl: &tmpl,
-        rank,
-        alpha,
-        work_dir: &work_dir,
-        steps,
-        eval_per_cycle,
-        sft: SftConfig { seqs, batch, lr, min_lr: lr * 0.1, ..SftConfig::default() },
-        seed,
-        null_gate_seed,
-        verbose: !quiet,
-    };
-    let report = match study(&inputs) {
-        Ok(r) => r,
-        Err(e) => fail(&format!("{e}")),
-    };
-    println!("{}", report.table());
-    println!("{}", report.summary());
-
-    // ---- Publish, but only on a real promote -----------------------------
-    let adapter_dir = Path::new(&adapter_dir);
-    if let Err(e) = std::fs::create_dir_all(adapter_dir) {
-        fail(&format!("{}: {e}", adapter_dir.display()));
-    }
-    let promoted = report.gated.promotions > 0;
-    let published = if promoted {
-        let latest = match rl::improve::latest_adapter(&gated_adapters) {
-            Ok(Some((v, p))) if Some(v) != before => p,
-            Ok(_) => fail(&format!(
-                "the gate promoted {} cycle(s) but no new adapter appeared in {} - refusing to publish a stale one",
-                report.gated.promotions,
-                gated_adapters.display()
-            )),
-            Err(e) => fail(&format!("{}: {e}", gated_adapters.display())),
-        };
-        match publish_adapter(&latest, adapter_dir) {
-            Ok(p) => {
-                println!("promoted: published {}", p.display());
-                Some(p)
-            }
-            Err(e) => fail(&format!("publishing {}: {e}", latest.display())),
-        }
-    } else {
-        println!("rejected: no adapter published (the report says which check failed)");
-        None
-    };
-
-    let json = build_report(&report, &cycles, &arch, &dataset, &base_id, promoted, published.as_deref());
-    write_report(Path::new(&report_path), &json);
-}
-
 /// The architecture-generic half of the command: read the base's config
 /// through `ModelConfig`, build the curriculum, give the base a zero-delta
 /// LoRA overlay wide enough for that curriculum, and run the study.
@@ -517,35 +342,28 @@ fn run_for<A: StudyArch>(i: &Inputs) -> std::io::Result<DocumentStudyReport> {
     document::run_document_study::<A::M>(&spec, &curr, &cfg)
 }
 
-/// Read and structurally validate the dataset, exiting with the offending
-/// line/field named rather than a default.
-fn read_dataset(path: &Path) -> DocumentDataset {
-    let text = match std::fs::read_to_string(path) {
-        Ok(t) => t,
-        Err(e) => fail(&format!("{}: {e}", path.display())),
-    };
-    let ds: DocumentDataset = match serde_json::from_str(&text) {
-        Ok(d) => d,
-        Err(e) => fail(&format!("{}: {e}", path.display())),
-    };
+/// Read and structurally validate the dataset, naming the offending
+/// line/field rather than defaulting it.
+fn read_dataset(path: &Path) -> Result<DocumentDataset> {
+    let at = |e: String| Error::Backend(format!("{}: {e}", path.display()));
+    let text = std::fs::read_to_string(path).map_err(|e| at(e.to_string()))?;
+    let ds: DocumentDataset = serde_json::from_str(&text).map_err(|e| at(e.to_string()))?;
     if ds.cycles.is_empty() {
-        fail(&format!("{}: no cycles - a study needs at least one batch of fact triples", path.display()));
+        return Err(at("no cycles - a study needs at least one batch of fact triples".into()));
     }
     if ds.anchors.is_empty() {
-        fail(&format!(
-            "{}: the anchor suite is empty - Regime::Sft mixes it into EVERY cycle's draw, and without it cycle 1's training \
-             distribution is one document alone",
-            path.display()
-        ));
+        return Err(at("the anchor suite is empty - Regime::Sft mixes it into EVERY cycle's draw, and without it cycle 1's \
+                       training distribution is one document alone"
+            .into()));
     }
-    ds
+    Ok(ds)
 }
 
 /// Every cycle's batch through [`FactBatch::new`], naming which cycle failed
 /// rather than which triple alone - shared between the real run and
 /// [`run_dry_run`], so the two can never come to validate a dataset
 /// differently.
-fn validate_cycles(raw: Vec<Vec<FactProbe>>) -> Result<Vec<FactBatch>, String> {
+fn validate_cycles(raw: Vec<Vec<FactProbe>>) -> std::result::Result<Vec<FactBatch>, String> {
     raw.into_iter().enumerate().map(|(i, c)| FactBatch::new(c).map_err(|e| format!("cycle {i}: {e}"))).collect()
 }
 
@@ -566,19 +384,14 @@ fn validate_cycles(raw: Vec<Vec<FactProbe>>) -> Result<Vec<FactBatch>, String> {
 /// throwaway tokenizer built from the dataset's own text runs the identical
 /// validation [`DocumentCurriculum::new`] would, with no real tokenizer, no
 /// checkpoint and no device anywhere in reach.
-fn run_dry_run(path: &Path) {
-    let raw = read_dataset(path);
+pub fn validate(path: &Path) -> Result<DatasetSummary> {
+    let at = |e: String| Error::Backend(format!("{}: {e}", path.display()));
+    let raw = read_dataset(path)?;
     let n_cycles = raw.cycles.len();
     let n_anchors = raw.anchors.len();
 
-    let cycles = match validate_cycles(raw.cycles) {
-        Ok(c) => c,
-        Err(e) => fail(&format!("{}: {e}", path.display())),
-    };
-    let anchors = match FactBatch::new(raw.anchors) {
-        Ok(b) => b,
-        Err(e) => fail(&format!("{}: anchors: {e}", path.display())),
-    };
+    let cycles = validate_cycles(raw.cycles).map_err(at)?;
+    let anchors = FactBatch::new(raw.anchors).map_err(|e| at(format!("anchors: {e}")))?;
 
     let corpus: String = cycles
         .iter()
@@ -588,13 +401,19 @@ fn run_dry_run(path: &Path) {
         .collect();
     let tok = data::tokenizer::CharTokenizer::from_corpus(&corpus);
     for (i, batch) in cycles.iter().enumerate() {
-        if let Err(e) = document::train_probe_split(batch, &tok) {
-            fail(&format!("{}: cycle {i}: {e}", path.display()));
-        }
+        document::train_probe_split(batch, &tok).map_err(|e| at(format!("cycle {i}: {e}")))?;
     }
 
-    let n_triples: usize = cycles.iter().map(|b| b.triples().len()).sum();
-    println!("dataset OK: {n_cycles} cycle(s), {n_triples} triple(s), {n_anchors} anchor(s)");
+    Ok(DatasetSummary { cycles: n_cycles, triples: cycles.iter().map(|b| b.triples().len()).sum(), anchors: n_anchors })
+}
+
+/// What [`validate`] found: the shape of a dataset that passed every check
+/// the real study applies before it touches a checkpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DatasetSummary {
+    pub cycles: usize,
+    pub triples: usize,
+    pub anchors: usize,
 }
 
 /// Copy `src` into `dir` as the next `adapter-{n:06}.safetensors` version -
@@ -626,17 +445,13 @@ fn publish_adapter(src: &Path, dir: &Path) -> std::io::Result<PathBuf> {
     Ok(dst)
 }
 
-fn write_report(path: &Path, json: &Report) {
+fn write_report(path: &Path, json: &Report) -> Result<()> {
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            fail(&format!("{}: {e}", parent.display()));
-        }
+        std::fs::create_dir_all(parent).map_err(|e| Error::Backend(format!("{}: {e}", parent.display())))?;
     }
     let text = serde_json::to_string_pretty(json).expect("the report is plain data and always serializes");
-    if let Err(e) = std::fs::write(path, text) {
-        fail(&format!("{}: {e}", path.display()));
-    }
-    println!("report: {}", path.display());
+    std::fs::write(path, text).map_err(|e| Error::Backend(format!("{}: {e}", path.display())))?;
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -708,10 +523,6 @@ fn describe(d: Decision) -> (&'static str, Option<String>) {
     }
 }
 
-fn fail(msg: &str) -> ! {
-    eprintln!("brain document-study: {msg}");
-    std::process::exit(1);
-}
 
 #[cfg(test)]
 mod tests {
@@ -829,5 +640,327 @@ mod tests {
         for (id, _) in ARCHS {
             assert!(brain_arch::by_id(id).is_some(), "{id:?} is not a brain_arch registry id - --arch would not agree with the rest of the CLI");
         }
+    }
+}
+
+
+/// A base checkpoint from a path, a model directory, or a `vendor/repo`
+/// reference resolved against the store.
+///
+/// Returns `(weights file, its directory, the canonical id)`. The directory
+/// is what the tokenizer and chat template are read from, and the id is what
+/// the adapter card records as the base it derives from - which is why a
+/// bare file synthesizes a `local/<stem>` id rather than using the filename:
+/// the adapter ref grammar needs a `vendor/repo`.
+fn resolve_base(base: &str, store_root: Option<&Path>) -> std::result::Result<(PathBuf, PathBuf, String), String> {
+    let path = Path::new(base);
+    if path.is_dir() {
+        // A `<root>/<vendor>/<repo>` checkout: the store itself knows which
+        // file in it is servable, so the layout rule lives in one place.
+        let unservable = || format!("{}: a directory with no servable checkpoint in it", path.display());
+        let repo = path.file_name().and_then(|s| s.to_str()).ok_or_else(unservable)?;
+        let parent = path.parent().ok_or_else(unservable)?;
+        let vendor = parent.file_name().and_then(|s| s.to_str()).ok_or_else(unservable)?;
+        let root = parent.parent().ok_or_else(unservable)?;
+        let r = brain_modelref::ModelRef::parse(&format!("{vendor}/{repo}")).map_err(|_| unservable())?;
+        let local = brain_modelstore::Store::new(root).local(&r).ok_or_else(unservable)?;
+        return Ok((local.weights, local.dir, r.to_string()));
+    }
+    if path.is_file() {
+        let dir = path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("base");
+        return Ok((path.to_path_buf(), dir, format!("local/{stem}")));
+    }
+    let r = brain_modelref::ModelRef::parse(base).map_err(|e| format!("{base}: not a file, and not a valid model ref ({e})"))?;
+    let root = store_root.ok_or_else(|| "no models directory resolved (set models_dir or BRAIN_MODELS_DIR)".to_string())?;
+    let store = brain_modelstore::Store::new(root);
+    let local = store.local(&r).ok_or_else(|| format!("{base}: not found in the model store at {}", root.display()))?;
+    Ok((local.weights, local.dir, r.to_string()))
+}
+
+// ---------------------------------------------------------------------------
+// The public surface
+// ---------------------------------------------------------------------------
+
+/// A configured document study, ready to run.
+///
+/// Built by [`DocumentStudy::from_pretrained`] and configured by the setters
+/// below; every one has a default that is a real, defensible choice, so a
+/// caller who only names a base and a dataset gets a study that runs.
+pub struct DocumentStudy {
+    arch: String,
+    weights: String,
+    models_dir: Option<String>,
+    dataset: Option<PathBuf>,
+    adapter_dir: Option<PathBuf>,
+    report_path: Option<PathBuf>,
+    work_dir: Option<PathBuf>,
+    rank: u32,
+    alpha: Option<f32>,
+    steps: u32,
+    eval_per_cycle: usize,
+    sft: SftConfig,
+    seed: u64,
+    null_gate_seed: u64,
+    verbose: bool,
+}
+
+impl std::fmt::Debug for DocumentStudy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DocumentStudy").field("arch", &self.arch).field("weights", &self.weights).field("rank", &self.rank).finish_non_exhaustive()
+    }
+}
+
+/// The architecture a study runs for when the caller does not say.
+pub const DEFAULT_ARCH: &str = "qwen3";
+
+impl DocumentStudy {
+    /// A study against `weights` - a checkpoint path, a model directory, or a
+    /// `vendor/repo` reference resolved through the model store.
+    ///
+    /// Both seeds are drawn randomly here rather than defaulted to a
+    /// constant, because a study whose seed nobody chose should not silently
+    /// be the same study every time. [`DocumentStudy::seed`] pins it, and the
+    /// value used is reported in the outcome so a run is reproducible after
+    /// the fact.
+    pub fn from_pretrained(weights: impl Into<String>) -> Result<DocumentStudy> {
+        Ok(DocumentStudy {
+            arch: DEFAULT_ARCH.to_string(),
+            weights: weights.into(),
+            models_dir: None,
+            dataset: None,
+            adapter_dir: None,
+            report_path: None,
+            work_dir: None,
+            rank: 8,
+            alpha: None,
+            steps: DocumentStudyConfig::default().steps_per_cycle,
+            eval_per_cycle: MIN_HELD_OUT_PROBES,
+            sft: SftConfig::default(),
+            seed: data::rng::random_seed(),
+            null_gate_seed: data::rng::random_seed(),
+            verbose: true,
+        })
+    }
+
+    /// Which architecture's `Model` impl to monomorphise for. See [`ARCHS`].
+    pub fn arch(mut self, arch: impl Into<String>) -> Self {
+        self.arch = arch.into();
+        self
+    }
+    /// The frozen `{fact, probe_question, expected_answer}` batches. Required.
+    pub fn dataset(mut self, path: impl Into<PathBuf>) -> Self {
+        self.dataset = Some(path.into());
+        self
+    }
+    /// Where a PROMOTED adapter is published. Required for a real run.
+    pub fn adapter_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.adapter_dir = Some(dir.into());
+        self
+    }
+    /// Where to write the machine-readable verdict, if anywhere.
+    pub fn report(mut self, path: impl Into<PathBuf>) -> Self {
+        self.report_path = Some(path.into());
+        self
+    }
+    /// Scratch space for the study's own base and per-cycle adapters.
+    pub fn work_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.work_dir = Some(dir.into());
+        self
+    }
+    /// The model store to resolve `weights` against, when it is a reference.
+    pub fn models_dir(mut self, dir: impl Into<String>) -> Self {
+        self.models_dir = Some(dir.into());
+        self
+    }
+    /// LoRA rank. `alpha` defaults to `2 * rank` unless set separately.
+    pub fn lora(mut self, rank: u32) -> Self {
+        self.rank = rank;
+        self
+    }
+    /// LoRA alpha, overriding the `2 * rank` default.
+    pub fn alpha(mut self, alpha: f32) -> Self {
+        self.alpha = Some(alpha);
+        self
+    }
+    /// Training steps per cycle.
+    pub fn steps(mut self, steps: u32) -> Self {
+        self.steps = steps;
+        self
+    }
+    /// Held-out probes evaluated per cycle.
+    pub fn eval_per_cycle(mut self, n: usize) -> Self {
+        self.eval_per_cycle = n;
+        self
+    }
+    /// Sequences, batch size and learning rate for the SFT inner loop.
+    pub fn sft(mut self, seqs: usize, batch: u32, lr: f32) -> Self {
+        self.sft = SftConfig { seqs, batch, lr, min_lr: lr * 0.1, ..SftConfig::default() };
+        self
+    }
+    /// Pin the study seed, making the run reproducible.
+    pub fn seed(mut self, seed: u64) -> Self {
+        self.seed = seed;
+        self
+    }
+    /// Pin the null-gate control arm's seed.
+    pub fn null_gate_seed(mut self, seed: u64) -> Self {
+        self.null_gate_seed = seed;
+        self
+    }
+    /// Per-cycle progress on stdout. On by default.
+    pub fn quiet(mut self, quiet: bool) -> Self {
+        self.verbose = !quiet;
+        self
+    }
+
+    /// The seeds this study will use, so a caller can report them before a
+    /// multi-hour run rather than after it.
+    pub fn seeds(&self) -> (u64, u64) {
+        (self.seed, self.null_gate_seed)
+    }
+
+    /// Every registered architecture id.
+    pub fn architectures() -> Vec<&'static str> {
+        ARCHS.iter().map(|(n, _)| *n).collect()
+    }
+
+    /// Validate the dataset exactly as [`DocumentStudy::run`] would, and do
+    /// nothing else: no weights resolution, no checkpoint load, no device.
+    ///
+    /// This is the seam a caller that did not produce the dataset uses to
+    /// know in advance whether it is well-formed, before paying for the
+    /// GPU-bound training run. It runs the SAME checks, from the same code,
+    /// so the two can never come to disagree about what a valid dataset is.
+    pub fn validate_dataset(path: impl AsRef<Path>) -> Result<DatasetSummary> {
+        validate(path.as_ref())
+    }
+
+    /// Run the study: train, gate, and publish the adapter only if the gate
+    /// promoted.
+    pub fn run(&self) -> Result<StudyOutcome> {
+        let dataset = self.dataset.as_ref().ok_or_else(|| Error::MissingArgument("dataset: a study needs frozen fact triples to learn".into()))?;
+        let adapter_dir = self
+            .adapter_dir
+            .as_ref()
+            .ok_or_else(|| Error::MissingArgument("adapter_dir: a study needs somewhere to publish a promoted adapter".into()))?;
+        if self.rank == 0 {
+            return Err(Error::MissingArgument("lora rank must be > 0: a document study trains a LoRA adapter".into()));
+        }
+        let (_, study) = ARCHS
+            .iter()
+            .find(|(name, _)| *name == self.arch)
+            .ok_or_else(|| Error::UnsupportedArchitecture(format!("{}: no document study is registered for it (known: {})", self.arch, arch_names())))?;
+
+        // The dataset is validated BEFORE anything touches the base: it is
+        // the one input brain did not produce, it is fully checkable on its
+        // own, and a batch that would be refused after a multi-minute model
+        // load is one that should have been refused at the first read.
+        let raw = read_dataset(dataset)?;
+        let cycles = validate_cycles(raw.cycles).map_err(|e| Error::Backend(format!("{}: {e}", dataset.display())))?;
+        let anchors = vec![FactBatch::new(raw.anchors).map_err(|e| Error::Backend(format!("{}: anchors: {e}", dataset.display())))?];
+
+        let store_root = loader::model_dir::resolve(self.models_dir.as_deref());
+        let (base_weights, base_dir, base_id) = resolve_base(&self.weights, store_root.as_deref()).map_err(Error::ModelNotFound)?;
+        let tok_path = base_dir.join("tokenizer.json");
+        let tok = QwenBpe::from_file(tok_path.to_str().unwrap_or_default()).map_err(|e| Error::Backend(format!("{}: {e}", tok_path.display())))?;
+        let tmpl = ChatTemplate::from_model_dir(&base_dir).map_err(|e| Error::Backend(e.to_string()))?;
+
+        let work_dir = self.work_dir.clone().unwrap_or_else(|| DocumentStudyConfig::default().work_dir);
+        std::fs::create_dir_all(&work_dir).map_err(|e| Error::Backend(format!("{}: {e}", work_dir.display())))?;
+
+        // The gated arm's adapters land here; the version already present is
+        // what "a NEW adapter was produced" is measured against, so re-using
+        // a work directory cannot republish a previous run's adapter.
+        let gated_adapters = work_dir.join("gated").join("adapters");
+        let before = rl::improve::latest_adapter(&gated_adapters).ok().flatten().map(|(v, _)| v);
+
+        let dataset_str = dataset.to_string_lossy().into_owned();
+        let inputs = Inputs {
+            base_weights: &base_weights,
+            base_id: &base_id,
+            dataset: &dataset_str,
+            cycles: &cycles,
+            anchors: &anchors,
+            tok: &tok,
+            tmpl: &tmpl,
+            rank: self.rank,
+            alpha: self.alpha.unwrap_or(self.rank as f32 * 2.0),
+            work_dir: &work_dir,
+            steps: self.steps,
+            eval_per_cycle: self.eval_per_cycle,
+            sft: self.sft.clone(),
+            seed: self.seed,
+            null_gate_seed: self.null_gate_seed,
+            verbose: self.verbose,
+        };
+        let report = study(&inputs).map_err(|e| Error::Backend(e.to_string()))?;
+
+        std::fs::create_dir_all(adapter_dir).map_err(|e| Error::Backend(format!("{}: {e}", adapter_dir.display())))?;
+        let promoted = report.gated.promotions > 0;
+        let published = if promoted {
+            let latest = match rl::improve::latest_adapter(&gated_adapters) {
+                Ok(Some((v, p))) if Some(v) != before => p,
+                Ok(_) => {
+                    return Err(Error::Backend(format!(
+                        "the gate promoted {} cycle(s) but no new adapter appeared in {} - refusing to publish a stale one",
+                        report.gated.promotions,
+                        gated_adapters.display()
+                    )))
+                }
+                Err(e) => return Err(Error::Backend(format!("{}: {e}", gated_adapters.display()))),
+            };
+            Some(publish_adapter(&latest, adapter_dir).map_err(|e| Error::Backend(format!("publishing {}: {e}", latest.display())))?)
+        } else {
+            None
+        };
+
+        let json = build_report(&report, &cycles, &self.arch, &dataset_str, &base_id, promoted, published.as_deref());
+        if let Some(p) = &self.report_path {
+            write_report(p, &json)?;
+        }
+        Ok(StudyOutcome { report, json, published })
+    }
+}
+
+/// What a study decided, and what it produced.
+pub struct StudyOutcome {
+    report: DocumentStudyReport,
+    json: Report,
+    published: Option<PathBuf>,
+}
+
+impl std::fmt::Debug for StudyOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StudyOutcome").field("promoted", &self.promoted()).field("published", &self.published).finish_non_exhaustive()
+    }
+}
+
+impl StudyOutcome {
+    /// Whether the gate promoted at least one cycle. `false` means no
+    /// adapter was published, and [`StudyOutcome::table`] says which check
+    /// failed.
+    pub fn promoted(&self) -> bool {
+        self.report.gated.promotions > 0
+    }
+    /// The published adapter, when the gate promoted.
+    pub fn published(&self) -> Option<&Path> {
+        self.published.as_deref()
+    }
+    /// The per-cycle table, gated arm beside its null-gate control.
+    pub fn table(&self) -> String {
+        self.report.table()
+    }
+    /// One-line verdict.
+    pub fn summary(&self) -> String {
+        self.report.summary()
+    }
+    /// The machine-readable verdict, as written to `report` when set.
+    pub fn json(&self) -> String {
+        serde_json::to_string_pretty(&self.json).expect("the report is plain data and always serializes")
+    }
+    /// The study's own report, for a caller that wants the raw counters.
+    pub fn report(&self) -> &DocumentStudyReport {
+        &self.report
     }
 }

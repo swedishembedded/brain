@@ -108,6 +108,15 @@ mod pipeline;
 pub mod decision;
 #[cfg(feature = "decision")]
 pub use decision::{Choice, DecisionPipeline, DecisionPipelineBuilder, TrainSpec};
+
+/// Teaching a model a batch of documents, and gating whether it learned them.
+/// Its own surface because the unit is a STUDY - train, score against a
+/// pre-registered bar, run a null-gate control beside it, publish only on a
+/// promote - which no inference pipeline's shape can express.
+#[cfg(feature = "study")]
+pub mod study;
+#[cfg(feature = "study")]
+pub use study::{DatasetSummary, DocumentStudy, StudyOutcome};
 #[cfg(feature = "decision")]
 pub mod control;
 #[cfg(feature = "decision")]

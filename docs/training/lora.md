@@ -62,19 +62,37 @@ model.
 
 ## Teaching a model a document, with a gate
 
-```
-brain document-study --arch <name> --weights BASE --dataset facts.json \
-                     --adapter-dir DIR --report report.json
+This is a **library capability**, reached through the SDK rather than a
+`brain` subcommand, because the thing that makes it useful is that it is
+embeddable - an agent deciding to teach itself something reaches for a
+library, not a subprocess:
+
+```rust
+use brain::DocumentStudy;
+
+let outcome = DocumentStudy::from_pretrained("Qwen/Qwen3-0.6B")?
+    .dataset("facts.json")
+    .adapter_dir("adapters/")
+    .report("report.json")
+    .run()?;
 ```
 
-trains a LoRA adapter on a batch of frozen
+`samples/study/document/` is the worked example driving it from a command
+line:
+
+```bash
+make samples/study/document/run ARGS="--weights BASE --dataset facts.json \
+                                     --adapter-dir DIR --report report.json"
+```
+
+It trains a LoRA adapter on a batch of frozen
 `{fact, probe_question, expected_answer}` triples and decides, against a
 pre-registered statistical bar, whether the result is good enough to
-promote. It is one command, not a pipeline: the dataset goes in, a verdict
-comes out.
+promote. The dataset goes in, a verdict comes out.
 
-- `--arch <name>` - which architecture the base checkpoint is
+- `--arch <name>` / `.arch(..)` - which architecture the base checkpoint is
   (`qwen3`, `qwen35`, `qwen35moe`; defaults to `qwen3`).
+  `DocumentStudy::architectures()` lists them at run time.
 - `--dataset FILE.json` -
   `{"cycles": [[{"fact": …, "probe_question": …, "expected_answer": …}, …]],
   "anchors": [ … ]}`. Each entry of `cycles` is one batch the study trains
