@@ -48,14 +48,25 @@ for why.
       that real, pre-existing weight-size ceiling, then assert a clean
       `Error::Backend`; real success is exercised only by each backend's own
       `#[ignore]`-gated real-checkpoint tests elsewhere in the workspace.
-- [ ] Adapters via store `owner/name` refs: `crates/cli/src/model_dir.rs`'s
-      `resident_for` only wires a store-resolved adapter into the "qwen"
-      residency arm (`QwenResident::from_card_configured`'s `adapter`
-      param); neither `flux2::spec::Flux2Spec` nor `s3dit::spec::S3ditSpec`
-      declares an adapter role at all, so there is nothing for
-      `ImagePipeline::load_lora` to resolve a store reference against --
-      only a literal filesystem path works today (`adapter_source_path`'s
-      gate).
+- [ ] Adapters via store `owner/name` refs - bigger than it first looked;
+      re-diagnosed while scoping it as a Phase item, not mechanical wiring.
+      The model store's adapter convention
+      (`brain_modelstore::Store::adapter_weights_path`, `ModelRef::adapter()`,
+      files under `<base>/adapters/<owner>/<name>/<tag>/`) is not an
+      `ArchSpec`-role gap at all - it is a SEPARATE, `ModelRef`-level
+      mechanism `Store::local` resolves directly, architecture-agnostic in
+      principle. The REAL gap: nothing ever WRITES a flux2/s3dit adapter into
+      that convention. `crates/cli/src/qwen_cli.rs`'s `finetune_lora` is the
+      only writer that exists, qwen3-only; `flux2::lora::save_adapter`/
+      `s3dit`'s own finetune save to a caller-given path with no store
+      integration at all. So wiring `ImagePipeline::load_lora` to accept a
+      store reference needs an answer to a real design question FIRST: is
+      there a `brain flux2 finetune --lora`-shaped writer to point it at, or
+      does this stay path-only until `ImagePipeline` gets a real
+      training/finetune entry point (finding 7, still open) that could write
+      one? Picking a convention for EXTERNALLY-sourced LoRAs (downloaded, not
+      trained by this workspace) is a second, related question the qwen3 path
+      never had to answer. Not scoped for a mechanical fix.
 - [x] TextGenerationPipeline/EmbeddingPipeline/TranscribePipeline/
       ForecastPipeline/UpscalePipeline: built (Phase 2.1-2.5 - see
       `.agents/roadmap/sdk-design-sweep.md`, the live tracker for this line
