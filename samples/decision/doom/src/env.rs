@@ -771,6 +771,8 @@ impl DoomEnv {
         let by = |tag: Tag| self.opts.iter().position(|o| o.tag == tag);
         let hurt_badly = self.state.player.health < 40;
         let threat_near = self.state.visible_threats().next().map(|t| t.distance) < Some(600);
+        // Close enough that walking past it means taking hits the whole way.
+        let in_my_face = self.state.visible_threats().next().map(|t| t.distance) < Some(300);
         let underfoot = |d: i32| self.state.pickups.iter().any(|p| p.visible && p.distance < d);
 
         // Standing in slime: anywhere else will do, and the exit route is
@@ -847,7 +849,18 @@ impl DoomEnv {
                 // option aims down a straight line through walls, and taking
                 // it is the behaviour this whole exercise exists to stop
                 // demonstrating.
-                Tag::Exit => self.state.exit.as_ref().is_some_and(|e| e.route_bearing.is_some()),
+                //
+                // And not with something shooting at you from close range.
+                // Under `speedrun` the exit is first in the order and a route
+                // almost always exists, so the exit won every single decision
+                // and the teacher crossed the whole of E1M1 with one kill,
+                // taking fire the entire way. A speedrunner shoots what is in
+                // their face and then runs; anything further off is not worth
+                // the ammunition.
+                Tag::Exit => {
+                    self.state.exit.as_ref().is_some_and(|e| e.route_bearing.is_some())
+                        && !(by(Tag::Attack).is_some() && in_my_face)
+                }
                 _ => false,
             };
             if take {

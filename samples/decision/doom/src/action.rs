@@ -79,6 +79,18 @@ const FACING_TOL: i32 = 20;
 /// reporting the ceiling at 0, 42, 0, 42.
 const DOOR_TICS: u32 = 30;
 
+/// How long to hold `forward` to cover a given distance, in tics.
+///
+/// A standing start covers about 22 units in eight tics and more than that
+/// once the player is already moving. A fixed stride past a waypoint 21 units
+/// away lands the player in the next cell along, whose route points back at
+/// the one just left - measured on E1M1, a follower bouncing between two cells
+/// 45 units apart for the rest of the episode. Walking the distance that is
+/// actually there is what a player does and it does not oscillate.
+fn walk_tics(distance: i32) -> u32 {
+    (distance / 8).clamp(2, MOVE_TICS as i32) as u32
+}
+
 fn json_turn(angle: i32) -> String {
     format!("{{\"type\":\"turn-to\",\"angle\":{}}}", angle.rem_euclid(360))
 }
@@ -222,10 +234,12 @@ pub fn options(state: &State) -> Vec<Option_> {
                 room: e.route_clearance.unwrap_or(e.clearance),
             });
         } else {
+            // As far as the next waypoint, not a fixed stride.
+            let step = e.route_distance.unwrap_or(away);
             out.push(Option_ {
                 text: format!("head for the level exit, {away} units of walking ahead"),
                 commands: "[{\"type\":\"forward\",\"amount\":8},{\"type\":\"use\"}]".into(),
-                tics: MOVE_TICS,
+                tics: walk_tics(step),
                 tag: Tag::Exit,
                 room: e.route_clearance.unwrap_or(e.clearance),
             });
