@@ -31,6 +31,116 @@
 
 pub use appopts::{help_of, Args, Hardware, Options};
 
+
+/// Where the model comes from and where it goes: the four flags every
+/// application that loads or trains a decision model needs.
+///
+/// Factored out because it is the part two otherwise unrelated groups share -
+/// a reinforcement-learning run and a supervised one disagree about almost
+/// everything else, and agree exactly here. Spelling `--encoder` twice in two
+/// groups is how the two come to accept slightly different things.
+#[cfg(feature = "decision")]
+#[derive(Clone, Debug, Default)]
+pub struct ModelOptions {
+    /// Directory holding the pretrained sentence encoder.
+    pub encoder: String,
+    /// Trained head to start from, or to run.
+    pub head: Option<String>,
+    /// Where a trained head is written.
+    pub save: String,
+    pub seed: u64,
+}
+
+#[cfg(feature = "decision")]
+impl ModelOptions {
+    pub fn new(encoder: &str, save: &str) -> ModelOptions {
+        ModelOptions {
+            encoder: encoder.to_string(),
+            head: None,
+            save: save.to_string(),
+            seed: crate::ControlSpec::default().seed,
+        }
+    }
+
+    /// Take the flags, keeping whatever this value already holds as the
+    /// default.
+    pub fn take_over(mut self, args: &mut Args) -> Result<ModelOptions, String> {
+        self.encoder = args.str_or("--encoder", &self.encoder.clone());
+        self.head = args.take_str("--head").or(self.head);
+        self.save = args.str_or("--save", &self.save.clone());
+        self.seed = args.u64_or("--seed", self.seed);
+        Ok(self)
+    }
+
+    /// Fail with the remedy attached when no encoder was named. Every
+    /// application needs this check and none of them should word it
+    /// differently.
+    pub fn require_encoder(&self) -> Result<&str, String> {
+        if self.encoder.is_empty() {
+            return Err("--encoder DIR is required: it is the pretrained sentence encoder the \
+                        model reads with (`brain pull sentence-transformers/all-MiniLM-L6-v2` \
+                        fetches one)"
+                .into());
+        }
+        Ok(&self.encoder)
+    }
+}
+
+#[cfg(feature = "decision")]
+impl Options for ModelOptions {
+    fn take(args: &mut Args) -> Result<ModelOptions, String> {
+        ModelOptions::new("", "out/head.safetensors").take_over(args)
+    }
+
+    fn help() -> &'static str {
+        "  --encoder DIR       pretrained sentence encoder
+  --head FILE         start from (or run) these head weights
+  --save FILE         where a trained head is written
+  --seed N"
+    }
+}
+
+/// Supervised training of a decision head: learn to pick the right option from
+/// labelled examples, with no environment in the loop.
+///
+/// The counterpart to [`ControlOptions`]. Same model flags, different training
+/// question - which is exactly why the model flags are their own group.
+#[cfg(feature = "decision")]
+#[derive(Clone, Debug)]
+pub struct SupervisedOptions {
+    pub model: ModelOptions,
+    /// Optimizer steps.
+    pub steps: usize,
+    /// Examples held back from training and scored afterwards.
+    pub eval: usize,
+}
+
+#[cfg(feature = "decision")]
+impl SupervisedOptions {
+    pub fn new(model: ModelOptions) -> SupervisedOptions {
+        SupervisedOptions { model, steps: 2000, eval: 500 }
+    }
+
+    pub fn take_over(mut self, args: &mut Args) -> Result<SupervisedOptions, String> {
+        self.model = self.model.take_over(args)?;
+        self.steps = args.usize_or("--steps", self.steps);
+        self.eval = args.usize_or("--eval", self.eval);
+        Ok(self)
+    }
+}
+
+#[cfg(feature = "decision")]
+impl Options for SupervisedOptions {
+    fn take(args: &mut Args) -> Result<SupervisedOptions, String> {
+        SupervisedOptions::new(ModelOptions::new("", "out/head.safetensors")).take_over(args)
+    }
+
+    fn help() -> &'static str {
+        "  --steps N           optimizer steps
+  --eval N            examples to score afterwards"
+    }
+}
+
 /// Every flag needed to configure a reinforcement-learning control run.
 ///
 /// These are the knobs of [`crate::ControlSpec`] plus the two paths a run

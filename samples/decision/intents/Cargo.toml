@@ -1,0 +1,17 @@
+[package]
+# Package names under samples/ are derived from the path:
+# `samples/decision/intents` -> `sample-decision-intents`.
+name = "sample-decision-intents"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sample application: does a decision model actually READ its options? Trains on some intents and scores on intents it has never seen."
+publish = false
+
+[dependencies]
+# The ONLY brain dependency a sample may have is the SDK facade, and it must
+# NAME the surfaces it uses - see samples/README.md rules 1 and 2.
+brain = { workspace = true, features = ["decision"] }
+
+[package.metadata.brain]
+max-brain-crates = 30

@@ -139,6 +139,13 @@ pub trait Env {
 /// apart and could not be told apart at all. 200 halves that.
 pub const EVAL_SEEDS: std::ops::Range<u64> = 1_000_000..1_000_200;
 
+/// One demonstration: the state, the options that were offered, and which of
+/// them the teacher took.
+type Demo = (String, Vec<String>, usize);
+/// One teacher episode: what it scored, and what it did - kept together so the
+/// bad ones can be dropped whole rather than a step at a time.
+type TeacherRun = (f32, Vec<Demo>);
+
 /// One recorded step of one episode.
 struct Step {
     observation: String,
@@ -375,7 +382,7 @@ impl<E: Env> ControlPipeline<E> {
         let ce = decide::loss::LossConfig::cross_entropy();
         // Grouped BY EPISODE, with what that episode scored, so the bad ones
         // can be dropped before any of them is learned from.
-        let mut runs: Vec<(f32, Vec<(String, Vec<String>, usize)>)> = Vec::new();
+        let mut runs: Vec<TeacherRun> = Vec::new();
         for _ in 0..episodes {
             self.episode_seed += 1;
             let mut obs = self.env.reset(self.episode_seed);
@@ -427,8 +434,7 @@ impl<E: Env> ControlPipeline<E> {
                 );
             }
         }
-        let demos: Vec<(String, Vec<String>, usize)> =
-            runs.into_iter().flat_map(|(_, d)| d).collect();
+        let demos: Vec<Demo> = runs.into_iter().flat_map(|(_, d)| d).collect();
         if demos.is_empty() {
             return Ok(0.0);
         }

@@ -33,7 +33,9 @@
 
 use std::path::Path;
 
-use decide::banking77::{Banking77, OptionSampler};
+pub use decide::banking77::Banking77;
+
+use decide::banking77::OptionSampler;
 use decide::decide::{Decide, Example, Limits};
 use decide::loss::LossConfig;
 use decide::primitives::{Answer, Opt, Question};
@@ -49,6 +51,13 @@ use crate::{Device, Error, Result};
 pub struct Choice {
     /// The highest-probability option, verbatim as it was supplied.
     pub choice: String,
+    /// WHERE that option was in the list the caller supplied.
+    ///
+    /// Not derivable from [`Choice::choice`] in general: two options may carry
+    /// the same text, and a caller that matched on the string would silently
+    /// act on the first of them. A caller mapping the answer back onto its own
+    /// data - an action, a row, an intent id - needs the position.
+    pub index: usize,
     /// Every option's probability, in the order they were supplied. Always
     /// returned in full, so a caller who prefers the maximum probability or
     /// the margin over [`Choice::confidence`] can compute it.
@@ -83,6 +92,30 @@ pub fn banking77(dir: impl AsRef<std::path::Path>) -> Result<Banking77> {
 }
 
 pub use decide::banking77::Banking77 as Banking77Data;
+pub use decide::banking77::IntentSplit;
+/// The deterministic PRNG the option sampler draws with. Re-exported so a
+/// caller can reproduce an evaluation exactly.
+pub use data::rng::Rng;
+
+/// Hold `n_unseen` intents back from training, chosen by a fixed seed.
+///
+/// The point of the split is what it measures: a model trained only on the
+/// rest and then asked to pick a held-back intent BY NAME has to have read the
+/// option text, because it has never seen an example of that intent and there
+/// is no index for it to have learned.
+pub fn intent_holdout(n_categories: usize, n_unseen: usize, seed: u64) -> IntentSplit {
+    IntentSplit::holdout(n_categories, n_unseen, seed)
+}
+
+/// Draw the option set one example is scored against: `gold` plus a random
+/// number of distractors from `pool`, gold at a random position.
+///
+/// The same sampler training uses, exposed so an evaluation can draw from the
+/// same distribution. Scoring against all the options when training saw a
+/// handful measures a different, easier task.
+pub fn draw_options(gold: usize, pool: &[usize], rng: &mut Rng) -> (Vec<usize>, usize) {
+    OptionSampler::default().draw(gold, pool, rng)
+}
 
 impl std::fmt::Debug for DecisionPipeline {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -127,7 +160,13 @@ impl DecisionPipeline {
         let mut answers = self.model.decide(state, std::slice::from_ref(&q)).map_err(Error::Backend)?;
         match answers.pop() {
             Some(Answer::Choice { choice, probabilities, confidence }) => {
-                Ok(Choice { choice, probabilities, confidence })
+                let index = probabilities
+                    .iter()
+                    .enumerate()
+                    .max_by(|a, b| a.1 .1.total_cmp(&b.1 .1))
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+                Ok(Choice { choice, index, probabilities, confidence })
             }
             _ => Err(Error::Backend("the model did not return a choice".into())),
         }

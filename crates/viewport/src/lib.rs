@@ -35,8 +35,10 @@
 //! our services by sending an email to info@swedishembedded.com.
 
 pub mod canvas;
+pub mod record;
 
 pub use canvas::Canvas;
+pub use record::Recorder;
 
 use wm_display::sink::{FrameSink, Hud};
 use wm_display::window::SdlWindow;
@@ -51,6 +53,7 @@ pub struct Viewport {
     canvas: Canvas,
     window: Option<SdlWindow>,
     title: String,
+    recorder: Option<Recorder>,
     /// Why there is no window, if there isn't one. Reported once by the
     /// caller; a silent fallback to headless is how a run ends up with nobody
     /// noticing the display never came up.
@@ -84,7 +87,13 @@ impl Viewport {
             Ok(w) => (Some(w), None),
             Err(e) => (None, Some(e)),
         };
-        Ok(Viewport { canvas, window, title: title.to_string(), headless_because: why })
+        Ok(Viewport {
+            canvas,
+            window,
+            title: title.to_string(),
+            recorder: None,
+            headless_because: why,
+        })
     }
 
     /// Open without even trying to find a display.
@@ -93,6 +102,7 @@ impl Viewport {
             canvas: Canvas::new(width, height),
             window: None,
             title: String::new(),
+            recorder: None,
             headless_because: Some("asked for a headless run".into()),
         }
     }
@@ -105,8 +115,31 @@ impl Viewport {
         &mut self.canvas
     }
 
-    /// Put the canvas on screen. Does nothing when there is no window.
+    /// Record every presented frame into an MP4 at `path`.
+    ///
+    /// Encoded as it goes, through an `ffmpeg` pipe - see [`record`]. An
+    /// absent ffmpeg is an error the caller can report and carry on from
+    /// rather than a reason to stop.
+    pub fn record(&mut self, path: impl AsRef<std::path::Path>, fps: u32) -> Result<(), String> {
+        self.recorder =
+            Some(Recorder::start(path, self.canvas.width(), self.canvas.height(), fps.max(1))?);
+        Ok(())
+    }
+
+    /// Close the recording and return how many frames it holds and where.
+    pub fn finish_recording(&mut self) -> Option<Result<(u64, std::path::PathBuf), String>> {
+        self.recorder.take().map(|r| r.finish())
+    }
+
+    /// Put the canvas on screen, and into the recording if one is open.
+    ///
+    /// Recording happens HERE rather than at the caller so that what is
+    /// recorded is exactly what was presented - the two cannot drift, and a
+    /// headless run records the frames it would have shown.
     pub fn present(&mut self) {
+        if let Some(r) = self.recorder.as_mut() {
+            r.frame(self.canvas.pixels());
+        }
         if let Some(w) = self.window.as_mut() {
             let hud = Hud { model: self.title.clone(), ..Hud::default() };
             w.frame(self.canvas.pixels(), self.canvas.width(), self.canvas.height(), &hud);
