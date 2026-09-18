@@ -22,6 +22,15 @@ CLI use, no env var needed. To point at a different checkpoint, set
 `x4plus_anime_6B` checkpoints also work - the scale factor is read from the
 checkpoint itself).
 
+## What it produces
+
+![a golden retriever behind a red apple on a wooden table, upscaled 4x from 512x512 to 2048x2048: individual hairs in the coat and the speckling on the apple skin are resolved](../quickstart/img/upscaled.png)
+
+A 512x512 source at `--tile 128`, upscaled 4x to 2048x2048. Tiling is what
+keeps the memory cost bounded by the tile rather than the canvas; the halo the
+released net needs is real, and the overlap is cropped rather than blended
+because blending measured worse.
+
 ## Running it
 
 ```bash
