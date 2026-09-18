@@ -147,3 +147,24 @@ fn from_pretrained_predicts_depth_over_a_real_tiny_fixture_end_to_end() {
     assert!(depth.values.iter().all(|v| (0.0..=1.0).contains(v)), "{:?}", depth.values);
     assert!(depth.min <= depth.max, "min {} > max {}", depth.min, depth.max);
 }
+
+/// The real, confirmed gap `DepthPipelineBuilder::load`'s own doc names:
+/// unlike the test above (which uses [`mark_locally_present`] purely to
+/// satisfy `Store::local`'s own generic check cheaply, with no bearing on
+/// whether the real bug is present), THIS fixture places the checkpoint at
+/// EXACTLY the repo path `model_id` itself names, with no separate manifest
+/// anywhere else in the store - the same shape a real `hf download
+/// skchen1993/ZipDepth --local-dir $BRAIN_MODELS_DIR/skchen1993/ZipDepth`
+/// produces. Before the resolve-first fix, this reached `Error::Download`
+/// ("not found: skchen1993/ZipDepth@main") - a real network hub query for a
+/// reference that was already fully present on disk - confirmed empirically
+/// while building this fix. Now it resolves and builds cleanly, with no
+/// network access at any point.
+#[test]
+fn from_pretrained_resolves_a_real_fixture_at_its_own_named_path_with_no_store_local_shortcut() {
+    let root = scratch_root("no-shortcut");
+    write_complete_zipdepth_checkpoint(&root.join("skchen1993").join("ZipDepth").join("model.pt"), &tiny_cfg());
+
+    let pipe = with_models_dir(&root, || brain::DepthPipeline::from_pretrained("skchen1993/ZipDepth"));
+    pipe.expect("a real checkpoint at exactly its own model_id's path must resolve with no Store::local shortcut and no network access");
+}

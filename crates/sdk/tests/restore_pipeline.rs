@@ -209,3 +209,24 @@ fn restore_with_rejects_fidelity_out_of_range() {
     let err = pipe.restore_with(&input, brain::RestoreOptions::new().fidelity(2.0)).unwrap_err();
     assert!(matches!(err, brain::Error::Backend(_)), "{err:?}");
 }
+
+/// The real, confirmed gap `RestorePipelineBuilder::load`'s own doc names:
+/// unlike every other fixture in this file (which use `mark_locally_present`
+/// purely to satisfy `Store::local`'s own generic check cheaply, with no
+/// bearing on whether the real bug is present), THIS fixture places the
+/// checkpoint at EXACTLY the repo path `model_id` itself names, with no
+/// separate manifest anywhere else in the store - the same shape a real `hf
+/// download sczhou/CodeFormer --local-dir $BRAIN_MODELS_DIR/sczhou/CodeFormer`
+/// produces. Before the resolve-first fix, this reached `Error::Download`
+/// ("not found: sczhou/CodeFormer@main") - a real network hub query for a
+/// reference that was already fully present on disk - confirmed empirically
+/// while building this fix. Now it resolves and builds cleanly, with no
+/// network access at any point.
+#[test]
+fn from_pretrained_resolves_a_real_fixture_at_its_own_named_path_with_no_store_local_shortcut() {
+    let root = scratch_root("no-shortcut");
+    write_complete_codeformer_checkpoint(&root.join("sczhou").join("CodeFormer").join("codeformer.pth"));
+
+    let pipe = with_models_dir(&root, || brain::RestorePipeline::from_pretrained("sczhou/CodeFormer"));
+    pipe.expect("a real checkpoint at exactly its own model_id's path must resolve with no Store::local shortcut and no network access");
+}

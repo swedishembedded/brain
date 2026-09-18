@@ -497,6 +497,31 @@ including the `samples/imagegen/*` samples that link `crates/sdk` directly.
         synthetic fixture is out of scope here - what IS proven is an
         unparseable id refused cleanly and a `Missing` naming all six roles,
         never a panic, never a network attempt.
+  - [x] **Phase 3.4** - the SAME `Store::local`-ordering bug, found
+        SYSTEMICALLY across the vision/detection bucket rather than one
+        pipeline at a time: `DepthPipelineBuilder`/`EmbeddingPipelineBuilder`/
+        `RestorePipelineBuilder::load` all still used the naive order.
+        Checked EVERY naive-order pipeline against
+        `brain_modelstore::recipe`'s `FILES_RECIPES`/dedicated-`Recipe`
+        list (the actual determinant: a real checkpoint whose on-disk shape
+        a recipe converts into a compound `brain.manifest.json` works fine
+        under the naive order regardless; one with NO matching recipe does
+        not, because `plan()` fails outright even for an already-local
+        checkpoint) - `sam2`/`rrdbnet`/`yolov8` all have one (confirmed by
+        reading `FILES_RECIPES`/`YoloRecipe`, not assumed) and are FINE as
+        naive-order code, `zipdepth`/`clip`/`codeformer` have none and are
+        NOT. Confirmed empirically for all three, not just reasoned about: a
+        real fixture at EXACTLY the repo path its own `model_id` names, with
+        no `mark_locally_present`-style manifest anywhere else in the store,
+        reached `Error::Download("not found: <id>@main")` for
+        zipdepth/codeformer and `Error::ModelNotFound("...: no config.json in
+        repo")` for clip (SDXL's real `model_index.json`-keyed layout, not
+        `TransformersRecipe`'s expected top-level `config.json`) - a real
+        network hub query, or a real classification refusal, for a
+        checkpoint that was already fully present on disk. Fixed all three
+        with the same resolve-first reordering as Phase 4.2/2.2b/6.1/5.1b;
+        each gained a NEW test proving the exact fixture that used to fail
+        now resolves with no `Store::local` shortcut and no network access.
   - [ ] Still entirely uncovered domain buckets: 3D/world models (lowest priority - no settled domain object yet, `SplatPipeline` closer to `Creature` than `ImagePipeline`). See the domain inventory table. Also still open within buckets already started: ltxv (video, unproven past one block - see Phase 4.4's own note), Text decoders bucket (`TextGenerationPipeline` scoped to qwen3 only, 5 more decoders behind it - a real, larger gap than Phase 2.2c's fix: `qwen35`'s own load path differs enough from qwen3's - footprint-based sizing, int8 tier, GPU pipeline construction, a ~108GB fp32 real model - to need its own design pass, not a copy of the `Backend` enum pattern `TtsPipeline`'s CosyVoice addition used), Multimodal/VLM/OCR beyond qwen3vl (8 more served archs, plus video/tool-calling on qwen3vl itself - assessed this session: none of fastvlm/llava/moondream3/deepseek2ocr share qwen3vl's `Resident`-style chat+tools call shape, so none fit `VisionLanguagePipeline` as a same-type second backend the way CosyVoice fit `TtsPipeline`), ASR bucket beyond qwen3-asr (nemotron, streaming - a genuinely different call shape, already documented as deliberately deferred in `crates/sdk/src/asr.rs`'s own module doc).
 
 ### Phase 2.1 - `ForecastPipeline` (done)

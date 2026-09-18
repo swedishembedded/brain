@@ -169,17 +169,26 @@ impl EmbeddingPipelineBuilder {
     /// Resolve `model_id` and build a real [`EmbeddingPipeline`].
     ///
     /// 1. [`Device`] is applied to this process (see [`crate::device::apply`]).
-    /// 2. `model_id` is parsed and, under `DownloadPolicy::IfMissing`, fetched
-    ///    only when nothing local already resolves it (mirrors
-    ///    [`crate::ImagePipelineBuilder::load`]/[`crate::ForecastPipelineBuilder::load`]
-    ///    exactly).
-    /// 3. `crates/loader`'s resolver looks for CLIP's `"towers"` role: a
-    ///    released SDXL-layout directory holding `text_encoder/`,
-    ///    `text_encoder_2/`, `tokenizer/` and `tokenizer_2/` - the same
-    ///    directory several image-generation checkpoints in this store may
-    ///    already carry (SDXL's own text conditioning). The optional
-    ///    `"eva"` role (EVA-CLIP's image tower) is not needed for text
-    ///    embedding and is not required to resolve.
+    /// 2. [`resolve_arch`] is tried FIRST against CLIP's `"towers"` role,
+    ///    before ever consulting `Store::local`/`plan` - deliberately the
+    ///    reverse of the naive "check `Store::local`, then fetch-if-missing,
+    ///    then resolve" order, for the same real reason
+    ///    `crate::tts::TtsPipelineBuilder::load`/`crate::depth::DepthPipelineBuilder::load`
+    ///    already apply it: `ClipSpec::classify` reads a released SDXL-layout
+    ///    directory's own subdirectories directly, a strictly wider net than
+    ///    `Store::local`'s narrow "a compound `brain.manifest.json`, or a
+    ///    bare `model.brain.safetensors`" shapes - and a real SDXL release
+    ///    (no `brain_modelstore::recipe::FilesRecipe` entry exists for CLIP)
+    ///    has neither: it carries `model_index.json`, not the top-level
+    ///    `config.json` `plan()`'s `TransformersRecipe` catch-all looks for,
+    ///    so `Store::local` never recognizes even an already-downloaded
+    ///    release and `plan()` fails outright - confirmed empirically while
+    ///    building this fix (`Error::ModelNotFound("...: no config.json in
+    ///    repo")` against a real local fixture with no network access at
+    ///    all).
+    /// 3. Only on `Missing` does `model_id` get parsed and, under
+    ///    `DownloadPolicy::IfMissing`, fetched - then resolution is retried
+    ///    once.
     /// 4. `clip::caps::Session::load` opens the resolved directory's
     ///    tokenizer(s); the text tower itself builds lazily, on first
     ///    [`EmbeddingPipeline::embed`]/[`EmbeddingPipeline::embed_batch`]
@@ -190,18 +199,21 @@ impl EmbeddingPipelineBuilder {
         crate::device::apply(&device)?;
 
         let reference = brain_modelref::ModelRef::parse(&model_id).map_err(|e| Error::ModelNotFound(format!("{model_id}: {e}")))?;
-
-        let root = loader::model_dir::resolve(None).ok_or_else(|| Error::Backend("no models directory configured (set BRAIN_MODELS_DIR, or $HOME)".to_string()))?;
-        let store = brain_modelstore::Store::new(root);
-        let hub = brain_modelstore::HfHub::new();
-
-        if store.local(&reference).is_none() {
-            let plan = brain_modelstore::plan(&reference, &store, &hub)?;
-            loader::supply::execute_plan(&store, &hub, &plan, &model_id, &mut |_name, _got, _total| {}).map_err(Error::Download)?;
-        }
-
         let overrides: BTreeMap<String, String> = BTreeMap::new();
-        let ResolvedArch::Clip(assembly) = resolve_arch(&overrides)?;
+        let ResolvedArch::Clip(assembly) = match resolve_arch(&overrides) {
+            Ok(arch) => arch,
+            Err(Error::Missing(_)) => {
+                let root = loader::model_dir::resolve(None).ok_or_else(|| Error::Backend("no models directory configured (set BRAIN_MODELS_DIR, or $HOME)".to_string()))?;
+                let store = brain_modelstore::Store::new(root);
+                let hub = brain_modelstore::HfHub::new();
+                if store.local(&reference).is_none() {
+                    let plan = brain_modelstore::plan(&reference, &store, &hub)?;
+                    loader::supply::execute_plan(&store, &hub, &plan, &model_id, &mut |_name, _got, _total| {}).map_err(Error::Download)?;
+                }
+                resolve_arch(&overrides)?
+            }
+            Err(e) => return Err(e),
+        };
         let dir = assembly.roles.get("towers").ok_or_else(|| Error::Backend(format!("clip: resolved assembly {:?} has no towers role", assembly.id)))?;
 
         let gpu = gpu_core::Gpu::new(clip::model::TEXT_PIPELINES);

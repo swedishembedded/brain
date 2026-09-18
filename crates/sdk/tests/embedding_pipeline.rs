@@ -100,3 +100,29 @@ fn from_pretrained_rejects_an_unparseable_model_id() {
     let err = brain::EmbeddingPipeline::from_pretrained("../not/a/valid/ref").unwrap_err();
     assert!(matches!(err, brain::Error::ModelNotFound(_)), "{err:?}");
 }
+
+/// The real, confirmed gap `EmbeddingPipelineBuilder::load`'s own doc names:
+/// unlike the test above (which uses [`mark_locally_present`] purely to
+/// satisfy `Store::local`'s own generic check cheaply, with no bearing on
+/// whether the real bug is present), THIS fixture places the checkpoint at
+/// EXACTLY the repo path `model_id` itself names, with no separate manifest
+/// anywhere else in the store - the same shape a real `hf download
+/// stabilityai/stable-diffusion-xl-base-1.0 --local-dir
+/// $BRAIN_MODELS_DIR/stabilityai/stable-diffusion-xl-base-1.0` produces.
+/// Before the resolve-first fix, this reached `Error::ModelNotFound("...: no
+/// config.json in repo")` - `plan()`'s `TransformersRecipe` catch-all looks
+/// for a top-level `config.json`, which SDXL's own `model_index.json`-keyed
+/// layout does not carry - confirmed empirically while building this fix.
+/// Now it resolves and reaches `Session::load`, failing cleanly on the
+/// fixture's own empty tokenizer directories instead.
+#[test]
+fn from_pretrained_resolves_a_real_fixture_at_its_own_named_path_with_no_store_local_shortcut() {
+    let root = scratch_root("no-shortcut");
+    write_sdxl_tower_root(&root.join("stabilityai").join("stable-diffusion-xl-base-1.0"));
+
+    let err = with_models_dir(&root, || brain::EmbeddingPipeline::from_pretrained("stabilityai/stable-diffusion-xl-base-1.0").unwrap_err());
+    match &err {
+        brain::Error::Backend(msg) => assert!(!msg.is_empty(), "must name what went wrong"),
+        other => panic!("expected a clean Error::Backend from an empty tokenizer directory, got {other:?}"),
+    }
+}
