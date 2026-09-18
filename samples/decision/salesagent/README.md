@@ -546,7 +546,38 @@ almost exactly the gap between this sample and that ceiling, and swapping a
 
 Reproduce the embedding row with `tools/salesconv_embedding_baseline.py`.
 
-### 6.3 What each metric means
+### 6.3 Where the accuracy is actually lost
+
+Fitting the same logistic probe on each frozen representation splits the gap,
+which nothing else does - a low score can otherwise always be blamed on the
+head, the objective or the budget:
+
+| frozen representation + logistic probe | accuracy | AUC |
+|---|---:|---:|
+| MiniLM-L6, 384-d (this sample's encoder) | 0.601 | 0.653 |
+| bge-base, 768-d - twice the width, twice the layers | **0.581** | 0.639 |
+| Azure, 3072-d (the paper's) | **0.798** | **0.878** |
+| *this sample's full model, on MiniLM* | *0.707* | *0.798* |
+
+Two things follow, and the second was a surprise.
+
+**The head is not the problem.** It reaches 0.707 from a representation worth
+0.601, so the cross-attention and the fine-tuning are adding ten points of real
+work.
+
+**But a bigger encoder does not help.** bge-base is 2.4x the parameters of
+MiniLM-L6 and scores *below* it. So "the local encoder is too small" is
+refuted: both sentence encoders sit at 0.58-0.60 against Azure's 0.798, and the
+20-point gap is not capacity. What is left is that both are trained on SHORT
+inputs - MiniLM at 128 tokens - for a RETRIEVAL objective, under which two
+conversations that read alike but end differently are supposed to land near
+each other. That is exactly the distinction this task needs, and it is the one
+the objective trains away.
+
+Reproduce with `salesconv_embed`, which dumps the embeddings this table was
+fitted on.
+
+### 6.4 What each metric means
 
 | metric | what it means | reference point |
 |---|---|---|
@@ -580,7 +611,8 @@ to fool yourself with:
 | | **`phi` is two layers** with the paper's stated MSE + L2, without the batch normalization and dropout it also lists |
 | | **turn sampling is end-weighted** - an addition, not in the paper, and needed: see 5.3 |
 | **Not done** | the 1.2M-conversation private training set (this uses the 100k public one); ensembles; adversarial counter-examples; the orchestration layer, vector search, CRM connectors and 8-bit quantization, which are product surface rather than method |
-| **Known gap** | each window restarts its position ids at zero, so the head cannot tell window 1 from window 3 except by content. On a task where recency decides, that is a real handicap; conversations average ~318 tokens, so 2-3 windows |
+| **Known gap** | **the encoder is the ceiling, and a bigger one does not lift it.** A linear probe on the frozen state embedding reads 0.601 where the head reaches 0.707, so cross-attention and fine-tuning add ten points on top of the representation - but the representation is the limit, and swapping MiniLM-L6 (384-d, 6 layers) for bge-base (768-d, 12 layers) made it *worse*, 0.581. Azure's 3072-d sits at 0.798. Scaling the local encoder is not the fix; see 6.4 |
+| | each window restarts its position ids at zero, so the head cannot tell window 1 from window 3 except by content. On a task where recency decides, that is a real handicap; conversations average ~318 tokens, so 2-3 windows |
 | | the head gathers each slot's `[CLS]`, but this checkpoint is a sentence-transformer whose sentence representation is the **mean** - its `[CLS]` was never trained to be one. Measured but not yet changed |
 | | **it does not beat bag-of-words on accuracy** (0.707 against 0.730). It wins on calibration, not on picking the winner |
 | | **the router barely routes** - 92% of conversations land in one band. The band ordering is right, the spread is not useful yet |

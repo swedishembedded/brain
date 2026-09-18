@@ -47,7 +47,12 @@ fn main() {
     let head = decide::init::init_head(&cfg, 0);
     let gpu = gpu_core::Gpu::new(decide::kern::PIPELINES);
     let limits = Limits { cap_rows: 8192, cap_slots: 8, max_span: 256, overlap: 32 };
-    let mut m = Decide::new_on(gpu, cfg, tok, limits, &init, &head, true);
+    // INFERENCE mode: this reads the encoder's forward output and nothing
+    // else, so building a reverse tape per call - which a training build does,
+    // and which for a 12-layer encoder is most of the work - would be paid for
+    // nothing. It was, at first: 2.4 seconds per conversation.
+    let cfg_width = cfg.d_model;
+    let mut m = Decide::new_on(gpu, cfg, tok, limits, &init, &head, false);
 
     let convs = decide::salesconv::SalesConversations::load(Path::new(&data)).expect("dataset");
     // The head is untrained and its scores are ignored; only the encoder's
@@ -74,5 +79,5 @@ fn main() {
             }
         }
     }
-    eprintln!("\nwrote {n} rows of {} dims to {out}", 384);
+    eprintln!("\nwrote {n} rows of {} dims to {out}", cfg_width);
 }
