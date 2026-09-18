@@ -254,6 +254,27 @@ Brain trains and runs neural networks from scratch, in Rust.
 
 A word-for-word match of the sentence rendered into `doc.png`.
 
+### A connectome, running
+
+Not a checkpoint port. A real *Drosophila* nervous system, reconstructed from
+electron microscopy by other people's published work, executed as a spiking
+network on the GPU and driving a body in MuJoCo through the animal's own motor
+neurons:
+
+```bash
+$ make samples/fly/interactive/run ARGS="--connectome $BRAIN_CONNECTOME_DIR --body $BRAIN_FLYBODY_FRUITFLY_XML --frames 240"
+23665 neurons, 330 motor neurons attached to 44 actuators, 407 unmapped - loaded in 7.9 s
+frame 240 tick 4080: drive 1.50 | 18185 spikes (198 motor) | 10.7 BL/s now
+```
+
+![four frames of the connectome-driven fruit fly on a grid floor, labelled with the simulation tick and the spike counts at that tick](docs/quickstart/img/fly-strip.jpg)
+
+The wiring is the model; the parameters that make it *function* exist in no
+file and have to be found in a body, against consequences. So what gets gated
+at the end is a behaviour rather than a tensor - and
+[`docs/models/fly.md`](docs/models/fly.md) says plainly which behaviours are
+there and which are not. "Moves its legs" is done. "Walks" is not.
+
 ### Forecasting, scored against held-out truth
 
 ```bash

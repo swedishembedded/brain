@@ -83,6 +83,31 @@ Behaviour is gated by objectives that carry their own controls
 and a no-stimulus row. A creature that behaves the same with the wiring
 shuffled was not using the wiring, and the control is what makes that visible.
 
+## What it looks like running
+
+Four frames from one run of the interactive sample, headless. The camera
+tracks the animal, so the translation shows in the floor grid moving beneath
+it; the legs change pose because the motor neurons are driving them.
+
+![four frames of the connectome-driven fruit fly on a grid floor, its legs in a different pose in each, labelled with the simulation tick and the spike counts at that tick](../quickstart/img/fly-strip.jpg)
+
+```text
+23665 neurons, 330 motor neurons attached to 44 actuators, 407 unmapped - loaded in 7.9 s
+frame  60 tick 1020: drive 1.50 | 19044 spikes (209 motor) | -0.31,-0.13 | 1.7 BL/s now
+frame 120 tick 2040: drive 1.50 | 16226 spikes (198 motor) | -0.59,-0.21 | 1.3 BL/s now
+frame 180 tick 3060: drive 1.50 | 17518 spikes (300 motor) | -0.61,-0.47 | 0.6 BL/s now
+frame 240 tick 4080: drive 1.50 | 18185 spikes (198 motor) | -0.54,-0.63 | 10.7 BL/s now
+```
+
+Every line is the cord's own state: how many of its 23,665 neurons spiked on
+that control tick, how many of those were motor neurons, where the body had
+got to, and how fast it was going in body-lengths per second. The descending
+drive is constant at 1.50 throughout - nothing is steering, and nothing is
+touching a joint directly.
+
+Read the velocity column with the table below in mind: the body IS moving and
+the legs ARE driven, and that is all this shows. A gait it is not.
+
 ## What works and what does not
 
 This is the honest state, and it is deliberately stricter than "it moves".
@@ -106,8 +131,15 @@ There is no `brain fly` subcommand; this is not a servable architecture. It is
 reached through the interactive sample and the crate's examples.
 
 ```bash
-make samples/fly/interactive/run ARGS="--connectome <dir>/manc-codex --body <dir>/floor.xml"
+. /path/to/buzzfly/env.sh
+make samples/fly/interactive/run \
+  ARGS="--connectome $BRAIN_CONNECTOME_DIR --body $BRAIN_FLYBODY_FRUITFLY_XML"
 ```
+
+`--body` takes the BARE body (`fruitfly.xml`), not a ready-made scene: this
+sample builds its own world around it - sky, light, a floor sized to what the
+animal will be doing - so passing `floor.xml` fails in MuJoCo's parser with
+`repeated name 'floor' in geom`.
 
 `W`/`S` change how hard the brain tells the cord to go, `A`/`D` bias the two
 halves of the descending population against each other - nothing touches a
@@ -120,7 +152,8 @@ It runs headless too, which is how it is exercised with no display attached:
 
 ```bash
 SDL_VIDEODRIVER=dummy make samples/fly/interactive/run \
-  ARGS="--connectome <dir>/manc-codex --body <dir>/floor.xml --frames 150 --shot fly.ppm"
+  ARGS="--connectome $BRAIN_CONNECTOME_DIR --body $BRAIN_FLYBODY_FRUITFLY_XML \
+        --frames 150 --shot fly.ppm"
 ```
 
 The examples under `crates/fly/examples/` are the measurement surface - gait

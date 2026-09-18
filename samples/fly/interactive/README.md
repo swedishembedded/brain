@@ -3,8 +3,9 @@
 A real *Drosophila* connectome driving a real body, in a window.
 
 ```bash
-make samples/fly/interactive/run ARGS="--connectome /path/to/resources/connectome \
-                                       --body /path/to/flybody/floor.xml"
+. /path/to/buzzfly/env.sh
+make samples/fly/interactive/run ARGS="--connectome $BRAIN_CONNECTOME_DIR \
+                                       --body $BRAIN_FLYBODY_FRUITFLY_XML"
 ```
 
 ## What it demonstrates
@@ -32,9 +33,17 @@ make samples/fly/interactive/run ARGS="--connectome /path/to/resources/connectom
   own search path. It is loaded at run time; nothing here builds against it.
 * **The MANC connectome export**, a directory containing `manc-codex/` with
   `neurons.csv.gz` and `connections_princeton.csv.gz`.
-* **The flybody MJCF** - the scene WITH a ground plane. A body file with no
-  floor simulates a fly falling forever, and every other reading still looks
-  healthy while it does.
+* **The flybody MJCF** - the BARE body (`fruitfly.xml`,
+  `$BRAIN_FLYBODY_FRUITFLY_XML`), not a scene. This sample builds its own
+  world around it (`flybody::scene::world`: sky, light, a grid floor sized to
+  what the animal will be doing, and an explicit `<statistic extent>` so the
+  camera frames a 2.5 mm animal rather than a 20 cm plain). Passing a ready-
+  made scene such as `floor.xml` fails at MuJoCo's parser with `repeated name
+  'floor' in geom`, because the world already has one.
+
+  The distinction is why `env.sh` exports both: `$BRAIN_FLYBODY_XML` is a
+  loadable scene, for the examples that call `Model::from_xml` themselves;
+  `$BRAIN_FLYBODY_FRUITFLY_XML` is the body those that build a world need.
 * A GPU for the spiking network, and EGL for the renderer. There is no display
   server requirement: rendering goes through an EGL device context, so this
   works over SSH.
@@ -47,7 +56,8 @@ the whole path - connectome, body, renderer, window blit - is exercised under
 
 ```bash
 SDL_VIDEODRIVER=dummy make samples/fly/interactive/run \
-  ARGS="--connectome ... --body ... --frames 150 --shot fly.ppm"
+  ARGS="--connectome $BRAIN_CONNECTOME_DIR --body $BRAIN_FLYBODY_FRUITFLY_XML \
+        --frames 150 --shot fly.ppm"
 ```
 
 ## Driving the camera
