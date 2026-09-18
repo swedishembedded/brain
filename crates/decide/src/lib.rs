@@ -35,6 +35,7 @@ pub mod policy;
 pub mod primitives;
 pub mod routing;
 pub mod salesconv;
+pub mod value;
 
 pub use config::EncoderConfig;
 pub use decide::{Decide, Example, Limits};

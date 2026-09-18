@@ -430,6 +430,14 @@ matches it has learned to read these conversations the way the generator wrote
 them - a real, checkable task, and not evidence about real-world conversion.
 The two should never be quoted as if they were the same number.
 
+**The reinforcement learning here is degenerate, and the sibling sample is
+where it is not.** A conversation is REPLAYED: the model's answer cannot change
+what the customer says next, so there is no state distribution to shift and
+every turn's return is its own reward. The sequential objective reduces to a
+trust-region-regularized proper scoring rule - correct, and not an interesting
+use of policy gradient. `samples/decision/arena` is the same machinery in an
+environment that responds, where PPO takes a cloned policy from 44% to 79%.
+
 [ds]: https://huggingface.co/datasets/DeepMostInnovations/saas-sales-conversations
 [p1]: https://arxiv.org/abs/2503.23303
 [p2]: https://arxiv.org/abs/2510.01237

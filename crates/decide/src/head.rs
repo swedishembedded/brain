@@ -216,7 +216,21 @@ impl Head {
     /// Apply one AdamW update to the head's parameters, on the HEAD's handle -
     /// see the encoder's own note on why the handle matters.
     pub fn adamw_step(&self, opt: &optim::Optim, t: u32, lr: f32, wd: f32, clip: Option<f32>) {
-        opt.step(&self.gpu, &self.ps, t, lr, wd, 0.9, 0.999, 1e-8, clip, 1.0);
+        self.adamw_step_scaled(opt, t, lr, wd, clip, 1.0)
+    }
+
+    /// [`Self::adamw_step`] with the accumulated gradient scaled - `1/n` for a
+    /// minibatch of `n`, so one learning rate survives a change of batch size.
+    pub fn adamw_step_scaled(
+        &self,
+        opt: &optim::Optim,
+        t: u32,
+        lr: f32,
+        wd: f32,
+        clip: Option<f32>,
+        scale: f32,
+    ) {
+        opt.step(&self.gpu, &self.ps, t, lr, wd, 0.9, 0.999, 1e-8, clip, scale);
     }
 
     /// Block until this device has finished what it was given.
@@ -259,6 +273,17 @@ impl Head {
             ("out", n(&self.out, s * h)),
             ("score", n(&self.score, s)),
         ]
+    }
+
+    /// One parameter's accumulated gradient, for a test that needs to see what
+    /// a backward pass actually added.
+    pub fn read_grad(&self, name: &str) -> Vec<f32> {
+        let n: usize = tensor_manifest(&self.cfg)
+            .into_iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, s)| s.iter().product())
+            .unwrap_or_else(|| panic!("no head parameter {name:?}"));
+        self.gpu.read(self.ps.g(name), n)
     }
 
     /// This half's device handle - what a profiler times its steps on.

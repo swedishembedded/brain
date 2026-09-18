@@ -506,7 +506,21 @@ impl Encoder {
     /// half's handle would race this half's next forward and it would read
     /// weights from before the update.
     pub fn adamw_step(&self, opt: &optim::Optim, t: u32, lr: f32, wd: f32, clip: Option<f32>) {
-        opt.step(&self.gpu, &self.ps, t, lr, wd, 0.9, 0.999, 1e-8, clip, 1.0);
+        self.adamw_step_scaled(opt, t, lr, wd, clip, 1.0)
+    }
+
+    /// [`Self::adamw_step`] with the accumulated gradient scaled - `1/n` for a
+    /// minibatch of `n`, so one learning rate survives a change of batch size.
+    pub fn adamw_step_scaled(
+        &self,
+        opt: &optim::Optim,
+        t: u32,
+        lr: f32,
+        wd: f32,
+        clip: Option<f32>,
+        scale: f32,
+    ) {
+        opt.step(&self.gpu, &self.ps, t, lr, wd, 0.9, 0.999, 1e-8, clip, scale);
     }
 
     /// Block until this device has finished what it was given.

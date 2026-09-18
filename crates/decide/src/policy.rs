@@ -192,6 +192,116 @@ pub fn target_entropy(target: f32) -> f32 {
     bernoulli_entropy(target.clamp(0.0, 1.0) as f64) as f32
 }
 
+/// One step of a CONTROL policy: which option was taken, how likely it was
+/// when it was taken, and how much better the outcome turned out than expected.
+#[derive(Clone, Copy, Debug)]
+pub struct Act {
+    /// `pi_old(a)` - the probability the collecting policy gave this action.
+    /// PPO's denominator, and what lets one rollout be reused for several
+    /// update passes.
+    pub old_prob: f32,
+    /// Which option was taken, indexing the score vector.
+    pub action: usize,
+    /// The advantage: return-to-go against a baseline.
+    pub advantage: f32,
+}
+
+/// Clipped policy-gradient loss and `dL/d(score)` for one control step, over a
+/// categorical policy of any width.
+///
+/// **This is the case where maximizing reward is the right objective**, and it
+/// is worth saying next to [`policy_loss`], where it is not. A probability
+/// estimate is graded by a proper scoring rule because its optimum must be the
+/// conditional RATE. A control policy is graded by return because its optimum
+/// should be the best available ACTION - converging onto one option is the
+/// goal, not a failure. The entropy term is what keeps it from getting there
+/// before it has explored.
+///
+/// The other difference is the one that makes this genuinely reinforcement
+/// learning: the environment RESPONDS. An action changes what state the next
+/// decision is made from, so the policy shifts its own data distribution, and
+/// PPO's trust region is doing real work rather than degenerating into a
+/// regularizer on a fixed dataset.
+///
+/// `scores` are the raw option scores, one per option the caller supplied.
+/// **The option set may differ at every step** - only `action` has to index
+/// into this call's own.
+pub fn choice_loss(scores: &[f32], act: &Act, cfg: &PolicyConfig) -> (f32, Vec<f32>) {
+    assert!(act.action < scores.len(), "action {} is outside the {} options", act.action, scores.len());
+    let p = crate::loss::softmax(scores);
+    let a = act.action;
+    let adv = act.advantage as f64;
+    let old = (act.old_prob as f64).clamp(1e-8, 1.0);
+    let ratio = p[a] as f64 / old;
+
+    // --- clipped surrogate ---
+    let (lo, hi) = (1.0 - cfg.clip as f64, 1.0 + cfg.clip as f64);
+    let clipped = ratio.clamp(lo, hi);
+    let (unclipped_obj, clipped_obj) = (ratio * adv, clipped * adv);
+    // PPO maximizes the MINIMUM of the two, so the loss is its negation. Where
+    // the clipped branch wins the objective no longer depends on the ratio and
+    // the gradient is exactly zero - that is the trust region, not an
+    // approximation of one.
+    let take_unclipped = unclipped_obj <= clipped_obj;
+    let surrogate = -unclipped_obj.min(clipped_obj);
+
+    // --- entropy bonus ---
+    let ent: f64 = -p.iter().map(|&pi| (pi as f64) * (pi as f64).max(1e-12).ln()).sum::<f64>();
+    let beta = cfg.entropy as f64;
+    let loss = (surrogate - beta * ent) as f32;
+
+    // --- gradient, through the softmax jacobian dp_j/dz_i = p_j(d_ij - p_i) ---
+    let mut d = vec![0.0f32; scores.len()];
+    for (i, di) in d.iter_mut().enumerate() {
+        let pi = p[i] as f64;
+        let delta = if i == a { 1.0 } else { 0.0 };
+        // d(ratio)/dz_i = ratio * (delta_ia - p_i).
+        let d_surr = if take_unclipped { -adv * ratio * (delta - pi) } else { 0.0 };
+        // dH/dz_i = -p_i (ln p_i + H), and the loss SUBTRACTS beta * H.
+        let d_ent = beta * pi * ((pi.max(1e-12)).ln() + ent);
+        *di = (d_surr + d_ent) as f32;
+    }
+    (loss, d)
+}
+
+/// Discounted return-to-go for each step of one episode.
+pub fn returns_to_go(rewards: &[f32], gamma: f32) -> Vec<f32> {
+    let mut out = vec![0.0f32; rewards.len()];
+    let mut acc = 0.0f32;
+    for i in (0..rewards.len()).rev() {
+        acc = rewards[i] + gamma * acc;
+        out[i] = acc;
+    }
+    out
+}
+
+/// Centre and scale a batch of returns into advantages.
+///
+/// The baseline is the batch mean, which is the cheapest unbiased choice: a
+/// baseline may depend on anything except the action taken, and a statistic of
+/// the whole batch does not. Scaling by the standard deviation keeps the step
+/// size meaningful when an environment's reward scale changes - without it,
+/// tuning the learning rate means re-tuning it per reward function.
+///
+/// A batch with no spread returns all zeros rather than dividing by it: every
+/// step did equally well, so there is nothing to push toward.
+pub fn normalize(advantages: &mut [f32]) {
+    if advantages.is_empty() {
+        return;
+    }
+    let n = advantages.len() as f32;
+    let mean = advantages.iter().sum::<f32>() / n;
+    let var = advantages.iter().map(|&a| (a - mean) * (a - mean)).sum::<f32>() / n;
+    let sd = var.sqrt();
+    if sd < 1e-6 {
+        advantages.fill(0.0);
+        return;
+    }
+    for a in advantages.iter_mut() {
+        *a = (*a - mean) / sd;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -346,7 +456,116 @@ mod tests {
         assert!(regularized < plain - 0.02, "entropy {regularized:.3} did not pull below {plain:.3}");
     }
 
+    /// The control objective's gradient, over a width a fixed-head policy could
+    /// not have, and in both PPO branches.
+    #[test]
+    fn the_choice_gradient_matches_finite_differences() {
+        let cfg = PolicyConfig { clip: 0.2, entropy: 0.05, gamma: 1.0 };
+        for (z, act, what) in [
+            (vec![0.3f32, -0.4, 0.9], Act { old_prob: 0.30, action: 0, advantage: 1.2 }, "in region, positive"),
+            (vec![0.3f32, -0.4, 0.9], Act { old_prob: 0.30, action: 2, advantage: -0.8 }, "in region, negative"),
+            // A collecting probability far from the current policy pushes the
+            // ratio outside the trust region in each direction.
+            (vec![3.0f32, -1.0, -1.0], Act { old_prob: 0.02, action: 0, advantage: 0.9 }, "clipped above"),
+            (vec![-3.0f32, 1.0, 1.0], Act { old_prob: 0.90, action: 0, advantage: -0.9 }, "clipped below"),
+            // Widths a fixed output layer would have to be rebuilt for.
+            (vec![0.1f32; 7], Act { old_prob: 1.0 / 7.0, action: 5, advantage: 0.5 }, "seven options"),
+            (vec![0.2f32, -0.1], Act { old_prob: 0.55, action: 1, advantage: 0.4 }, "two options"),
+        ] {
+            let (_, d) = choice_loss(&z, &act, &cfg);
+            check(what, |s| choice_loss(s, &act, &cfg).0, &z, &d);
+        }
+    }
+
+    /// A clipped ratio must contribute NO gradient - the trust region is the
+    /// whole reason a rollout may be reused for several passes.
+    #[test]
+    fn a_clipped_choice_ratio_stops_the_gradient() {
+        let cfg = PolicyConfig { clip: 0.2, entropy: 0.0, gamma: 1.0 };
+        let z = vec![4.0f32, 0.0, 0.0];
+        let act = Act { old_prob: 0.02, action: 0, advantage: 1.0 };
+        let (_, d) = choice_loss(&z, &act, &cfg);
+        assert!(d.iter().all(|v| v.abs() < 1e-7), "the clipped branch produced a gradient: {d:?}");
+        // ...and in the region it must not be zero, or the case above passes
+        // for a function that never learns.
+        let act = Act { old_prob: 0.33, action: 0, advantage: 1.0 };
+        let (_, d) = choice_loss(&[0.1f32, 0.0, 0.0], &act, &cfg);
+        assert!(d.iter().any(|v| v.abs() > 1e-4), "in-region gradient vanished: {d:?}");
+    }
+
+    /// **The control objective converges onto the BEST action** - which is the
+    /// opposite of what `policy_loss` must do, and the difference is the point.
+    ///
+    /// A three-armed bandit whose middle arm pays best. A probability estimator
+    /// graded by a proper scoring rule would settle on the payout RATES; a
+    /// control policy graded by return should end up taking arm 1 almost
+    /// always.
+    #[test]
+    fn the_control_optimum_is_the_best_action() {
+        let payouts = [0.1f32, 0.9, 0.3];
+        let cfg = PolicyConfig { clip: 0.2, entropy: 0.001, gamma: 1.0 };
+        let mut z = vec![0.0f32; 3];
+        let mut rng = data::rng::Rng::new(8);
+        for t in 0..8000 {
+            let p = crate::loss::softmax(&z);
+            // Sample an arm from the policy.
+            let (mut u, mut a) = (rng.next_f32(), 2usize);
+            for (i, &pi) in p.iter().enumerate() {
+                if u < pi {
+                    a = i;
+                    break;
+                }
+                u -= pi;
+            }
+            let reward = if rng.next_f32() < payouts[a] { 1.0 } else { 0.0 };
+            // Baseline: the policy's own expected payout, which depends on the
+            // state and the policy but never on the action drawn.
+            let expected: f32 = p.iter().zip(&payouts).map(|(&pi, &q)| pi * q).sum();
+            let act = Act { old_prob: p[a], action: a, advantage: reward - expected };
+            let (_, d) = choice_loss(&z, &act, &cfg);
+            let lr = 0.5 / (1.0 + t as f32 / 2000.0);
+            for (zi, di) in z.iter_mut().zip(&d) {
+                *zi -= lr * di;
+            }
+        }
+        let p = crate::loss::softmax(&z);
+        assert!(p[1] > 0.9, "the policy did not commit to the best arm: {p:?}");
+    }
+
+    /// Returns-to-go must accumulate BACKWARD from the end, discounted. Getting
+    /// the direction wrong credits an action with what happened before it.
+    #[test]
+    fn returns_accumulate_backward_from_the_end() {
+        let r = [0.0f32, 0.0, 1.0];
+        let g = returns_to_go(&r, 0.5);
+        assert!((g[2] - 1.0).abs() < 1e-6, "terminal return {}", g[2]);
+        assert!((g[1] - 0.5).abs() < 1e-6, "one step out {}", g[1]);
+        assert!((g[0] - 0.25).abs() < 1e-6, "two steps out {}", g[0]);
+        // Undiscounted, every step carries the whole episode's reward.
+        assert_eq!(returns_to_go(&[1.0, 2.0, 3.0], 1.0), vec![6.0, 5.0, 3.0]);
+    }
+
+    /// Advantages must be centred, so a batch where everything went equally
+    /// well pushes nowhere.
+    #[test]
+    fn advantages_are_centred_and_a_flat_batch_pushes_nowhere() {
+        let mut a = vec![1.0f32, 2.0, 3.0, 4.0];
+        normalize(&mut a);
+        let mean: f32 = a.iter().sum::<f32>() / 4.0;
+        assert!(mean.abs() < 1e-5, "not centred: {a:?}");
+        let sd = (a.iter().map(|v| v * v).sum::<f32>() / 4.0).sqrt();
+        assert!((sd - 1.0).abs() < 1e-5, "not scaled: {a:?}");
+        // No spread: every step did equally well and there is nothing to learn
+        // from, which must not become a division by zero.
+        let mut flat = vec![2.5f32; 5];
+        normalize(&mut flat);
+        assert!(flat.iter().all(|&v| v == 0.0), "a flat batch produced {flat:?}");
+        let mut empty: Vec<f32> = Vec::new();
+        normalize(&mut empty);
+    }
+
     /// Fitting a soft target must reproduce the target, not its argmax: a
+    /// model trained on a 0.7 label should say 0.7.    /// Fitting a soft target must reproduce the target, not its argmax: a
     /// model trained on a 0.7 label should say 0.7.
     #[test]
     fn the_soft_target_optimum_is_the_target() {

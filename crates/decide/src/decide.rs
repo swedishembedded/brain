@@ -75,6 +75,7 @@ pub struct Decide {
     enc_opt: Option<optim::Optim>,
     head_opt: Option<optim::Optim>,
     step: u32,
+    frozen_encoder: bool,
 }
 
 /// A request laid out for the device: the packed token stream, where each
@@ -149,6 +150,7 @@ impl Decide {
             enc_opt: train.then(|| ids.optimizer()),
             head_opt: train.then(|| ids.optimizer()),
             step: 0,
+            frozen_encoder: false,
             }
     }
 
@@ -286,12 +288,42 @@ impl Decide {
         head_lr: f32,
         objective: impl FnOnce(&[f32]) -> (f32, Vec<f32>),
     ) -> Result<f32, String> {
+        self.zero_grads();
+        let l = self.accumulate(state, question, objective)?;
+        self.adamw(enc_lr, head_lr);
+        Ok(l)
+    }
+
+    /// Clear both halves' parameter gradients.
+    ///
+    /// Public because a caller accumulating a MINIBATCH owns the cycle: zero
+    /// once, [`Decide::accumulate`] over the batch, then [`Decide::adamw`] once.
+    /// [`Decide::train_step_with`] is that cycle for a batch of one.
+    pub fn zero_grads(&mut self) {
+        if !self.frozen_encoder {
+            self.enc.zero_grads();
+        }
+        self.head.zero_grads();
+    }
+
+    /// Forward and backward for ONE example, ACCUMULATING into the parameter
+    /// gradients without stepping the optimizer.
+    ///
+    /// The building block of a minibatch. Parameter gradients accumulate by
+    /// construction here, so a caller sums several examples and steps once -
+    /// which is what every policy-gradient implementation does, and what a
+    /// per-example step is not: a single transition's gradient is a very noisy
+    /// estimate, and Adam applied to it directly chases the noise.
+    pub fn accumulate(
+        &mut self,
+        state: &str,
+        question: &Question,
+        objective: impl FnOnce(&[f32]) -> (f32, Vec<f32>),
+    ) -> Result<f32, String> {
         let scores = self.score(state, std::slice::from_ref(question))?;
         let (l, d_score) = objective(&scores[0]);
         assert_eq!(d_score.len(), scores[0].len(), "one score gradient per option");
 
-        self.enc.zero_grads();
-        self.head.zero_grads();
         // The head writes its hidden-state gradient straight into the
         // encoder's seed buffer, so the two halves need no copy between them.
         self.head.backward(self.enc.seed_buf(), &d_score);
@@ -300,10 +332,26 @@ impl Decide {
         // encoder's reverse pass reads the seed buffer the head's reverse pass
         // writes, so it has to wait for it - see the forward's own wait.
         self.head.poll_wait();
-        self.enc.backward_seeded();
-
-        self.adamw(enc_lr, head_lr);
+        // The encoder's reverse pass is roughly two thirds of a training step,
+        // and a frozen encoder has no use for it: nothing downstream reads the
+        // gradient it would compute. The head still writes into the seed
+        // buffer because that is where its own reverse pass puts the
+        // hidden-state gradient; it is simply never consumed.
+        if !self.frozen_encoder {
+            self.enc.backward_seeded();
+        }
         Ok(l)
+    }
+
+    /// The encoder's mean-pooled sentence embedding of the state, for the call
+    /// just made.
+    ///
+    /// One readback of the hidden states, no per-layer traffic - cheap enough
+    /// for a rollout loop, unlike [`Decide::repr_snapshot`]. This is the fixed
+    /// feature a critic is fitted on when the encoder is frozen.
+    pub fn state_embedding(&self) -> Vec<f32> {
+        let h = self.cfg.d_model as usize;
+        self.enc.pooled_mean()[..h].to_vec()
     }
 
     /// The representations the confidence signals of [`crate::routing`] are
@@ -343,14 +391,48 @@ impl Decide {
     /// near-uniform distribution while the SAME weights, reloaded into a fresh
     /// process, answered correctly. Same root cause as the forward's own wait.
     pub fn adamw(&mut self, enc_lr: f32, head_lr: f32) {
+        self.adamw_scaled(enc_lr, head_lr, 1.0)
+    }
+
+    /// [`Decide::adamw`] with the accumulated gradient scaled by `scale`.
+    ///
+    /// A minibatch of `n` examples accumulates `n` gradients, so `1.0 / n`
+    /// turns the sum into the mean and keeps one learning rate meaningful
+    /// across batch sizes.
+    pub fn adamw_scaled(&mut self, enc_lr: f32, head_lr: f32, scale: f32) {
         self.step += 1;
         let t = self.step;
         if let Some(o) = &self.enc_opt {
-            self.enc.adamw_step(o, t, enc_lr, 0.01, Some(1.0));
+            if !self.frozen_encoder {
+                self.enc.adamw_step_scaled(o, t, enc_lr, 0.01, Some(1.0), scale);
+            }
         }
         if let Some(o) = &self.head_opt {
-            self.head.adamw_step(o, t, head_lr, 0.01, Some(1.0));
+            self.head.adamw_step_scaled(o, t, head_lr, 0.01, Some(1.0), scale);
         }
+    }
+
+    /// Train the head only, leaving the imported encoder exactly as it was.
+    ///
+    /// Two reasons a caller wants this, and they point the same way:
+    ///
+    /// * **Stability.** A reinforcement signal is far noisier than a labelled
+    ///   one, and moving 22M pretrained parameters on a few hundred
+    ///   high-variance gradients is a good way to destroy the language
+    ///   understanding that made the option text readable in the first place.
+    /// * **Speed.** The encoder's reverse pass is about two thirds of a
+    ///   training step. Freezing it skips that pass AND its optimizer update,
+    ///   so a step costs roughly what a forward does.
+    ///
+    /// The forward is unchanged, so the frozen encoder still supplies the
+    /// representation; only the head learns from it.
+    pub fn set_encoder_frozen(&mut self, frozen: bool) {
+        self.frozen_encoder = frozen;
+    }
+
+    /// Whether the encoder is being held fixed.
+    pub fn encoder_frozen(&self) -> bool {
+        self.frozen_encoder
     }
 
     /// Write the head's weights to a brain `.safetensors`.

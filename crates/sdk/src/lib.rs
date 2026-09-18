@@ -97,6 +97,10 @@ pub mod decision;
 #[cfg(feature = "decision")]
 pub use decision::{Choice, DecisionPipeline, DecisionPipelineBuilder, TrainSpec};
 #[cfg(feature = "decision")]
+pub mod control;
+#[cfg(feature = "decision")]
+pub use control::{ControlPipeline, ControlPipelineBuilder, ControlSpec, Env, Rollout};
+#[cfg(feature = "decision")]
 pub mod conversion;
 #[cfg(feature = "decision")]
 pub use conversion::{
