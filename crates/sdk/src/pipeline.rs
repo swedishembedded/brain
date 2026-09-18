@@ -438,30 +438,11 @@ enum ResolvedArch {
 /// truly foreign store already has [`Error::Missing`]'s structured `roles`
 /// to read either way.
 fn resolve_arch(overrides: &BTreeMap<String, String>) -> Result<ResolvedArch> {
-    use brain_modelstore::resolve::Resolution;
+    use crate::resolve_policy::{try_two, Resolved2};
 
-    let flux2_outcome = loader::resolve_structured("flux2", &flux2::spec::Flux2Spec, overrides).map_err(Error::Backend)?;
-    if matches!(flux2_outcome, Resolution::Resolved(_)) {
-        let Resolution::Resolved(a) = flux2_outcome else { unreachable!("just matched") };
-        return Ok(ResolvedArch::Flux2(*a));
-    }
-
-    let s3dit_outcome = loader::resolve_structured("s3dit", &s3dit::spec::S3ditSpec, overrides).map_err(Error::Backend)?;
-    if matches!(s3dit_outcome, Resolution::Resolved(_)) {
-        let Resolution::Resolved(a) = s3dit_outcome else { unreachable!("just matched") };
-        return Ok(ResolvedArch::S3dit(*a));
-    }
-
-    // Both `Resolved` cases already returned above; only `Ambiguous`/
-    // `Missing` combinations can reach here.
-    match (flux2_outcome, s3dit_outcome) {
-        (Resolution::Ambiguous(a), _) => Err(Error::Ambiguous(a)),
-        (_, Resolution::Ambiguous(a)) => Err(Error::Ambiguous(a)),
-        (f, _) => match f {
-            Resolution::Missing(m) => Err(Error::Missing(m)),
-            Resolution::Resolved(_) => unreachable!("Resolved handled above"),
-            Resolution::Ambiguous(_) => unreachable!("Ambiguous handled above"),
-        },
+    match try_two("flux2", &flux2::spec::Flux2Spec, "s3dit", &s3dit::spec::S3ditSpec, overrides)? {
+        Resolved2::A(a) => Ok(ResolvedArch::Flux2(a)),
+        Resolved2::B(a) => Ok(ResolvedArch::S3dit(a)),
     }
 }
 

@@ -99,7 +99,14 @@ pub(crate) enum Resolved2 {
 /// one that found none, and falls back to `a`'s own outcome when both are
 /// plain `Missing` (an arbitrary tie-break, not a claim that `a` is the more
 /// likely answer).
-fn try_two(a_arch: &str, a_spec: &dyn ArchSpec, b_arch: &str, b_spec: &dyn ArchSpec, overrides: &BTreeMap<String, String>) -> Result<Resolved2> {
+///
+/// `pub(crate)` (not just this module's own [`resolve_two_with_policy`]):
+/// `crate::pipeline::resolve_arch` calls this directly too, since flux2/s3dit
+/// dispatch is the exact same two-way tie-break with no policy/fetch wrapper
+/// around it (`ImagePipelineBuilder` keeps its own progress-reporting fetch
+/// path, per this module's own doc - only the tie-break itself was ever
+/// duplicated).
+pub(crate) fn try_two(a_arch: &str, a_spec: &dyn ArchSpec, b_arch: &str, b_spec: &dyn ArchSpec, overrides: &BTreeMap<String, String>) -> Result<Resolved2> {
     let a_outcome = loader::resolve_structured(a_arch, a_spec, overrides).map_err(Error::Backend)?;
     if matches!(a_outcome, Resolution::Resolved(_)) {
         let Resolution::Resolved(a) = a_outcome else { unreachable!("just matched") };

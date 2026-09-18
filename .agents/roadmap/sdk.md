@@ -140,14 +140,18 @@ for why.
       `ImagePipeline` (flux2/s3dit) keeps its own inline version because it
       alone also reports download/build progress through caller-supplied
       closures, a capability neither shared helper carries.
-- [ ] `resolve_arch`'s two-architecture tie-break: when a store resolves
-      NEITHER flux2 nor s3dit, the reported `Error::Ambiguous`/
-      `Error::Missing` prefers whichever architecture found real (if
-      ambiguous) evidence over one that found none, and falls back to
-      flux2's own outcome when both are plain `Missing` -- an arbitrary
-      tie-break (flux2 is tried first), not a claim that flux2 is the more
-      likely answer. A third image architecture would need this dispatch
-      generalized past its current two-way `if`/`if` shape.
+- [x] `resolve_arch`'s two-architecture tie-break: done. `resolve_arch` now
+      calls `crate::resolve_policy::try_two` (made `pub(crate)`) instead of
+      carrying its own byte-for-byte copy of the same `if`/`if` tie-break -
+      the duplication `resolve_two_with_policy` (Phase 6.5) left in place
+      because it only needed `try_two`'s LOGIC, not its policy/fetch
+      wrapper (`ImagePipelineBuilder` keeps its own progress-reporting fetch
+      path). Same observable behavior (flux2 tried first, `Ambiguous` beats
+      `Missing`, two `Missing`s report flux2's), now one implementation
+      instead of two. `cargo test -p brain --features image --test
+      image_pipeline` (6 passed, including both backends' own dispatch
+      tests) and `cargo clippy -p brain --features full --all-targets`
+      (clean on both touched files) confirm no behavior change.
 - [ ] `steps` has no upper bound anywhere in the call chain, on either
       backend: neither `ImageGenerationOptions`, nor flux2's
       `resolved_steps`, nor s3dit's `HotPipeline::generate` (which only
