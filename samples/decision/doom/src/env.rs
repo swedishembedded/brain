@@ -584,12 +584,28 @@ impl DoomEnv {
         }
     }
 
+    /// Record something that makes the rest of the run meaningless, and say
+    /// so the first time.
+    ///
+    /// The `Env` trait has no error channel: a step returns a reward and a
+    /// done flag, so a broken environment is indistinguishable from an episode
+    /// that ended early with nothing gained. Twelve PPO iterations were spent
+    /// that way - `return +0.00, steps 8` for eight episodes, over and over,
+    /// with the cause recorded in a field nothing in the training path reads.
+    fn fail(&mut self, msg: String) {
+        if self.fault.is_none() {
+            eprintln!("doom: {msg}");
+            eprintln!("doom: the rest of this run is measuring nothing.");
+            self.fault = Some(msg);
+        }
+    }
+
     /// Take an option and record the outcome. Shared by the SDK's rollout
     /// (through [`Env::step`]) and by this sample's own inspected loop, so the
     /// two cannot disagree about what a step is.
     pub fn apply(&mut self, action: usize, probs: Vec<f32>) -> (f32, bool) {
         let Some(opt) = self.opts.get(action).cloned() else {
-            self.fault = Some(format!("the policy chose option {action} of {}", self.opts.len()));
+            self.fail(format!("the policy chose option {action} of {}", self.opts.len()));
             return (0.0, true);
         };
         // While recording, the step is run ONE TIC AT A TIME so every rendered
@@ -614,7 +630,7 @@ impl DoomEnv {
                 match self.doom.step(cmds, 1) {
                     Ok(j) => last = j,
                     Err(e) => {
-                        self.fault = Some(format!("the game stopped answering: {e}"));
+                        self.fail(format!("the game stopped answering: {e}"));
                         return (0.0, true);
                     }
                 }
@@ -638,7 +654,7 @@ impl DoomEnv {
             match self.doom.step(&opt.commands, opt.tics) {
                 Ok(j) => j,
                 Err(e) => {
-                    self.fault = Some(format!("the game stopped answering: {e}"));
+                    self.fail(format!("the game stopped answering: {e}"));
                     return (0.0, true);
                 }
             }
@@ -651,7 +667,7 @@ impl DoomEnv {
         match State::parse(&json) {
             Ok(s) => self.state = s,
             Err(e) => {
-                self.fault = Some(e);
+                self.fail(e);
                 return (0.0, true);
             }
         }
@@ -709,14 +725,14 @@ impl DoomEnv {
         let json = match self.doom.reset(&self.cfg, seed, start) {
             Ok(j) => j,
             Err(e) => {
-                self.fault = Some(format!("could not restart the level: {e}"));
+                self.fail(format!("could not restart the level: {e}"));
                 return String::new();
             }
         };
         match State::parse(&json) {
             Ok(s) => self.state = s,
             Err(e) => {
-                self.fault = Some(e);
+                self.fail(e);
                 return String::new();
             }
         }
@@ -732,7 +748,7 @@ impl DoomEnv {
         self.commit_tag = None;
         if self.arena > 0 {
             if let Err(e) = self.build_arena(seed) {
-                self.fault = Some(e);
+                self.fail(e);
                 return String::new();
             }
         }
