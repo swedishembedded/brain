@@ -287,6 +287,21 @@ $ curl http://127.0.0.1:8799/v1/chat/completions -H "Authorization: Bearer $APIK
 The same weights, behind a local OpenAI-compatible API - and the same models
 over Anthropic- and OpenRouter-compatible endpoints, D-Bus, or the Rust SDK.
 
+`braintop` shows what that server is actually doing. After four concurrent
+requests to one model:
+
+```console
+$ braintop --cli | grep -E '^executor\.|resident=true'
+model.Qwen/Qwen3-0.6B.resident=true
+executor.builds=1      executor.batches=2     executor.jobs=5
+executor.queue_peak=4  executor.max_batch=4   executor.evictions=0
+```
+
+Five jobs, a queue that reached four, served in two batches - continuous
+batching rather than five sequential passes, with the model built once and
+nothing evicted to make room. See
+[`docs/using/monitoring.md`](docs/using/monitoring.md).
+
 ## Install and first run
 
 ```bash
