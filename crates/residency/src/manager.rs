@@ -47,6 +47,7 @@ use capability::{ActionResult, Invocation, Manifest, Progress};
 use crate::budget::Budgets;
 use crate::lru::Residents;
 use crate::multi::{pick_devices, MultiDeviceCost, MultiDeviceResidentModel};
+use crate::runplan::{Eviction, PlanError, Placement, RunPlan};
 use crate::place::{could_ever_fit, no_exclude, pick_device, plan_eviction_with, CostAware, EvictionPolicy};
 use crate::{Device, Instance, InstanceKey, MemCost, ResidentModel, Tier};
 
@@ -337,6 +338,192 @@ impl ResidencyManager {
     /// [`Self::resident_count`], which only counts single-device ones).
     pub fn resident_multi_count(&self) -> usize {
         self.multi_residents.len()
+    }
+
+    /// **What would happen if this job started?** - the same computation
+    /// [`Self::placeable`] performs, with its reasoning kept instead of
+    /// collapsed into a bool.
+    ///
+    /// Answers required memory, where it already is (if anywhere), which
+    /// device it would go to, exactly which residents would be evicted to
+    /// make room and what that frees, every device it could run on at all,
+    /// and the bytes that would cross into device memory to activate it.
+    ///
+    /// Mutates nothing and reserves nothing. See [`crate::runplan`]'s own
+    /// module doc on why a plan is a prediction rather than a reservation,
+    /// and why that distinction is stated rather than hidden.
+    ///
+    /// # Errors
+    ///
+    /// [`PlanError`] when no such model is registered, or when the model
+    /// cannot derive an instance key for this action and these parameters.
+    /// A model that IS registered and CAN derive a key but cannot fit
+    /// anywhere is not an error: that is a successful plan whose `refusal`
+    /// says so, which is a strictly more useful answer than a failure.
+    pub fn plan(&self, model: &str, action: &str, inv: &Invocation) -> Result<RunPlan, PlanError> {
+        let key = self
+            .instance_key_for(model, action, inv)
+            .ok_or_else(|| PlanError::UnknownModel { model: model.to_string() })?;
+        let exclude: crate::runplan::Excluded = HashSet::new();
+
+        // A multi-device model is planned through its own cost shape - it
+        // names several devices at once, so `pick_device`'s single-device
+        // answer would be meaningless for it.
+        if let Some(m) = self.multi_models.get(model) {
+            let cost = m.estimate_multi(&key);
+            let devices: Vec<Device> = cost.devices().collect();
+            // `MultiDeviceCost` reports accelerator bytes per device plus
+            // one host figure, so the aggregate is the sum of the per-device
+            // shares and the single `ram()` - never a per-device ram that
+            // does not exist.
+            let mut required = MemCost::new(0, cost.ram());
+            for device in &devices {
+                required.vram += cost.on(*device);
+            }
+            let resident = self.multi_residents.get(&key).map(|e| Placement {
+                // A multi-device instance has no single device; the first
+                // in its own declared order is the one a caller means by
+                // "where is it", and the rest are reachable from the
+                // residency report. Named rather than invented.
+                device: e.devices.first().copied().unwrap_or(Device::Cpu),
+                tier: Tier::Hot,
+            });
+            let placeable = resident.is_some()
+                || pick_devices(&cost, &self.budgets, &exclude).is_some();
+            return Ok(RunPlan {
+                model: model.to_string(),
+                action: action.to_string(),
+                instance_key: key.config.clone(),
+                required,
+                resident_on: resident.clone(),
+                device: devices.first().copied(),
+                // Multi-device eviction is per-device inside `claim_multi`
+                // and is not projected here rather than being guessed at.
+                evict: Vec::new(),
+                supported_devices: devices.clone(),
+                estimated_transfer: if resident.is_some() { 0 } else { required.vram },
+                refusal: if placeable || devices.is_empty() {
+                    None
+                } else {
+                    Some(format!(
+                        "'{model}' needs {} devices this host cannot currently supply together",
+                        cost.devices().count()
+                    ))
+                },
+            });
+        }
+
+        let m = self
+            .models
+            .get(model)
+            .ok_or_else(|| PlanError::UnknownModel { model: model.to_string() })?;
+        let cost = m.estimate(&key);
+        let supported = crate::runplan::supported_devices(&cost, &self.budgets);
+
+        if let Some(entry) = self.residents.get(&key) {
+            return Ok(RunPlan {
+                model: model.to_string(),
+                action: action.to_string(),
+                instance_key: key.config.clone(),
+                required: cost,
+                resident_on: Some(Placement { device: entry.device, tier: entry.tier }),
+                device: Some(entry.device),
+                evict: Vec::new(),
+                supported_devices: supported,
+                // Already there: nothing crosses a bus to start this job.
+                estimated_transfer: 0,
+                refusal: None,
+            });
+        }
+
+        // Fits as things stand: no eviction, no disruption.
+        if let Some(device) = pick_device(&cost, &self.budgets, &exclude) {
+            return Ok(RunPlan {
+                model: model.to_string(),
+                action: action.to_string(),
+                instance_key: key.config.clone(),
+                required: cost,
+                resident_on: None,
+                device: Some(device),
+                evict: Vec::new(),
+                supported_devices: supported,
+                estimated_transfer: crate::runplan::transfer_for(&cost, Some(device)),
+                refusal: None,
+            });
+        }
+
+        // Does not fit as things stand. What would it cost to make it fit?
+        // The victims come from the SAME policy `claim` would apply, in the
+        // same order, so the answer is a prediction of what will actually
+        // happen rather than a plausible-looking one.
+        if let Some(plan) = plan_eviction_with(
+            &*self.eviction,
+            &cost,
+            &self.budgets,
+            &self.residents,
+            std::slice::from_ref(&key),
+            &exclude,
+        ) {
+            let evict = plan
+                .victims
+                .iter()
+                .map(|victim| Eviction {
+                    model: crate::runplan::model_of(victim),
+                    instance_key: victim.config.clone(),
+                    device: plan.device,
+                    frees: self
+                        .residents
+                        .get(victim)
+                        .map(|e| match plan.device {
+                            Device::Cpu => e.cost.ram,
+                            Device::Gpu(_) => e.cost.vram,
+                            Device::Npu(_) => e.cost.npu,
+                        })
+                        .unwrap_or(0),
+                })
+                .collect();
+            return Ok(RunPlan {
+                model: model.to_string(),
+                action: action.to_string(),
+                instance_key: key.config.clone(),
+                required: cost,
+                resident_on: None,
+                device: Some(plan.device),
+                evict,
+                supported_devices: supported,
+                estimated_transfer: crate::runplan::transfer_for(&cost, Some(plan.device)),
+                refusal: None,
+            });
+        }
+
+        // Nowhere to put it, and nothing that could be moved out of the way.
+        // The refusal names the reason a caller can act on: too big for any
+        // device this host has, versus every device being occupied by
+        // something unevictable.
+        let refusal = if could_ever_fit(&cost, &self.budgets) {
+            format!(
+                "'{model}' needs {} device bytes, and every device large enough is fully \
+                 occupied by instances that cannot be evicted right now",
+                cost.vram.max(cost.ram)
+            )
+        } else {
+            format!(
+                "'{model}' needs {} device bytes, more than any device on this host has",
+                cost.vram.max(cost.ram)
+            )
+        };
+        Ok(RunPlan {
+            model: model.to_string(),
+            action: action.to_string(),
+            instance_key: key.config.clone(),
+            required: cost,
+            resident_on: None,
+            device: None,
+            evict: Vec::new(),
+            supported_devices: supported,
+            estimated_transfer: 0,
+            refusal: Some(refusal),
+        })
     }
 
     /// Could `key` run **now** on a device not in `exclude`? A resident instance is
@@ -1161,6 +1348,116 @@ mod tests {
         fn run(&mut self, _a: &str, _i: &Invocation, _p: &mut dyn FnMut(Progress)) -> ActionResult {
             Ok(Outcome::new().blob("out", Blob::new(Media::Bytes, vec![1])))
         }
+    }
+
+    /// The whole point of `plan`: the prediction it makes is the decision
+    /// `claim` then actually takes, victim for victim. If these two could
+    /// disagree, a caller showing "starting this will evict Qwen3 14B"
+    /// would be lying, which is worse than saying nothing.
+    #[test]
+    fn a_plan_predicts_exactly_the_eviction_that_then_happens() {
+        let live = Arc::new(AtomicU32::new(0));
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 24 * GB, 2 * GB);
+        let mut mgr = ResidencyManager::new(budgets);
+        for n in ["a", "b", "c"] {
+            mgr.register(Arc::new(Fake { name: n.into(), vram: 10 * GB, live: live.clone() }));
+        }
+
+        // Nothing loaded: `a` fits outright and disturbs nobody.
+        let plan = mgr.plan("a", "run", &Invocation::new()).expect("a is registered");
+        assert!(plan.runnable());
+        assert!(!plan.disturbs_residents(), "an empty card evicts nothing");
+        assert_eq!(plan.device, Some(Device::Gpu(0)));
+        assert_eq!(plan.required.vram, 10 * GB);
+        assert_eq!(plan.estimated_transfer, 10 * GB, "10 GB has to cross the bus");
+        assert_eq!(plan.resident_on, None);
+
+        mgr.run("a", "run", &Invocation::new(), &mut |_| {}).unwrap();
+        mgr.run("b", "run", &Invocation::new(), &mut |_| {}).unwrap();
+
+        // Already resident: no load, no transfer, no disruption.
+        let plan = mgr.plan("a", "run", &Invocation::new()).unwrap();
+        assert_eq!(
+            plan.resident_on.as_ref().map(|p| p.device),
+            Some(Device::Gpu(0)),
+            "a is hot, and the plan says where"
+        );
+        assert_eq!(plan.estimated_transfer, 0, "nothing crosses a bus for a hot instance");
+
+        // 20 of 22 GB used. `c` needs 10, so something must go -- and the
+        // plan names WHICH, before anything happens.
+        let plan = mgr.plan("c", "run", &Invocation::new()).unwrap();
+        assert!(plan.runnable(), "it can run, at a price");
+        assert!(plan.disturbs_residents());
+        let predicted: Vec<&str> = plan.evict.iter().map(|e| e.model.as_str()).collect();
+        assert_eq!(predicted, vec!["a"], "LRU picks a, and the plan says so");
+        assert_eq!(plan.evict[0].frees, 10 * GB);
+        assert_eq!(plan.evict[0].device, Device::Gpu(0));
+
+        // Now actually run it, and check the prediction held.
+        mgr.run("c", "run", &Invocation::new(), &mut |_| {}).unwrap();
+        let hot: Vec<String> = mgr.residency().into_iter().map(|(k, _, _)| k.model).collect();
+        assert!(!hot.contains(&"a".to_string()), "the predicted victim is the real one");
+        assert!(hot.contains(&"c".to_string()) && hot.contains(&"b".to_string()));
+    }
+
+    /// A model too big for any device is a successful plan that says so,
+    /// not an error -- "it cannot run here" is exactly the answer a caller
+    /// asked for, and a caller that gets an error instead has to guess
+    /// whether the model is missing or merely too large.
+    #[test]
+    fn a_model_that_cannot_fit_anywhere_plans_a_refusal_rather_than_erroring() {
+        let live = Arc::new(AtomicU32::new(0));
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 8 * GB, 0);
+        let mut mgr = ResidencyManager::new(budgets);
+        mgr.register(Arc::new(Fake { name: "huge".into(), vram: 40 * GB, live }));
+
+        let plan = mgr.plan("huge", "run", &Invocation::new()).expect("it IS registered");
+        assert!(!plan.runnable());
+        assert_eq!(plan.device, None);
+        assert!(plan.evict.is_empty(), "nothing to evict when nothing would help");
+        assert!(
+            plan.supported_devices.is_empty(),
+            "no device on this host could ever hold it"
+        );
+        let refusal = plan.refusal.as_deref().expect("just asserted not runnable");
+        assert!(
+            refusal.contains("more than any device on this host has"),
+            "the refusal must distinguish too-big from merely-occupied: {refusal}"
+        );
+    }
+
+    /// An unregistered model is the one genuine error: there is no estimate
+    /// to make, so there is nothing honest to say about it.
+    #[test]
+    fn planning_an_unregistered_model_is_an_error_not_an_empty_plan() {
+        let mgr = ResidencyManager::new(Budgets::new());
+        let err = mgr.plan("nope", "run", &Invocation::new()).unwrap_err();
+        assert_eq!(err, PlanError::UnknownModel { model: "nope".to_string() });
+        assert!(err.to_string().contains("no model 'nope' is registered"));
+    }
+
+    /// The JSON a remote caller sees carries the answer, the reasoning and
+    /// the device names brain's own `--device` flag accepts -- so a caller
+    /// can hand a plan's answer straight back as a request.
+    #[test]
+    fn the_wire_shape_carries_the_reasoning_and_reusable_device_names() {
+        let live = Arc::new(AtomicU32::new(0));
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(1), 24 * GB, 2 * GB);
+        let mut mgr = ResidencyManager::new(budgets);
+        mgr.register(Arc::new(Fake { name: "m".into(), vram: 10 * GB, live }));
+
+        let v = mgr.plan("m", "run", &Invocation::new()).unwrap().to_json();
+        assert_eq!(v["model"], "m");
+        assert_eq!(v["device"], "gpu1", "the same spelling --device accepts");
+        assert_eq!(v["required"]["vram"], 10 * GB);
+        assert_eq!(v["estimated_transfer"], 10 * GB);
+        assert_eq!(v["runnable"], true);
+        assert_eq!(v["evict"], serde_json::json!([]));
+        assert_eq!(v["supported_devices"], serde_json::json!(["gpu1"]));
     }
 
     #[test]

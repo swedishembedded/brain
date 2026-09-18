@@ -175,6 +175,11 @@ enum Msg {
     /// A stats query: the dispatcher (the sole owner of the [`ResidencyManager`])
     /// replies with a residency + budget snapshot. Mirrors how [`Stats`] is
     /// exposed, but read straight from the manager rather than the counters.
+    /// Ask the dispatcher what starting one job would require and disturb
+    /// - see [`Executor::plan`]. Answered on the dispatcher thread because
+    /// that thread owns the manager, so a plan is consistent with the
+    /// residency it describes rather than racing it.
+    Plan { model: String, action: String, inv: Box<Invocation>, reply: Sender<Result<crate::RunPlan, crate::PlanError>> },
     Report(Sender<crate::ResidencyReport>),
     /// An in-flight query: the dispatcher replies with one [`InFlightJob`] per job
     /// currently queued OR running. Handled like [`Msg::Report`] - read from the
@@ -475,6 +480,38 @@ impl Executor {
     /// the dispatcher - the only thread that owns the [`ResidencyManager`] - so it
     /// is always consistent with scheduling. Returns an empty report if the
     /// dispatcher is gone. Mirrors [`stats`](Self::stats).
+    /// **What would happen if this job started?** - required memory, where
+    /// it already is, which device it would go to, exactly which residents
+    /// would be evicted to make room, every device it could run on, and the
+    /// bytes that would cross into device memory.
+    ///
+    /// Round-trips through the dispatcher, the one thread that owns the
+    /// manager, so the answer is consistent with the residency it describes
+    /// instead of racing it. Reserves nothing: see [`crate::runplan`]'s own
+    /// doc on why a plan is a prediction, not a reservation.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::PlanError`] when no such model is registered here, or when
+    /// the model cannot derive an instance key for these parameters. An
+    /// executor that has already shut down reports the same
+    /// `UnknownModel` - from the caller's side the model is, in fact, no
+    /// longer servable here.
+    pub fn plan(&self, model: &str, action: &str, inv: Invocation) -> Result<crate::RunPlan, crate::PlanError> {
+        let (tx, rx) = channel();
+        let msg = Msg::Plan {
+            model: model.to_string(),
+            action: action.to_string(),
+            inv: Box::new(inv),
+            reply: tx,
+        };
+        let gone = || Err(crate::PlanError::UnknownModel { model: model.to_string() });
+        if self.tx.send(msg).is_err() {
+            return gone();
+        }
+        rx.recv().unwrap_or_else(|_| gone())
+    }
+
     pub fn residency(&self) -> crate::ResidencyReport {
         let (tx, rx) = channel();
         if self.tx.send(Msg::Report(tx)).is_err() {
@@ -689,6 +726,9 @@ fn on_msg(msg: Msg, queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, runnin
                     r.building = false;
                 }
             }
+        }
+        Msg::Plan { model, action, inv, reply } => {
+            let _ = reply.send(mgr.plan(&model, &action, &inv));
         }
         Msg::Report(tx) => {
             let _ = tx.send(mgr.report());
@@ -1211,6 +1251,70 @@ fn run_group(handle: &InstanceHandle, action: &str, jobs: Vec<Pending>) {
 
 #[cfg(test)]
 mod tests {
+
+    /// `Executor::plan` must answer through the live dispatcher, not a
+    /// snapshot: a plan taken while something is resident has to know about
+    /// it, or it would promise a free card that is not free.
+    #[test]
+    fn plan_through_the_executor_sees_what_is_actually_resident() {
+        let mut budgets = crate::budget::Budgets::new();
+        budgets.set(Device::Cpu, 8 << 30, 0);
+        let exec = Executor::start(
+            vec![Arc::new(PlanFake { name: "p".into(), ram: 2 << 30 })],
+            budgets,
+            Policy::default(),
+        );
+
+        let before = exec.plan("p", "run", Invocation::new()).expect("registered");
+        assert!(before.runnable());
+        assert_eq!(before.resident_on, None, "nothing loaded yet");
+
+        let _ = exec.run_blocking("p", "run", Invocation::new(), |_| {});
+
+        let after = exec.plan("p", "run", Invocation::new()).expect("registered");
+        assert!(
+            after.resident_on.is_some(),
+            "after a real run the plan must see the instance it left hot: {after:?}"
+        );
+        assert_eq!(after.estimated_transfer, 0, "already resident, nothing to move");
+        exec.shutdown();
+    }
+
+    /// An unregistered model is an error rather than an empty plan, through
+    /// the executor exactly as through the manager.
+    #[test]
+    fn plan_through_the_executor_refuses_an_unregistered_model() {
+        let exec = Executor::start(Vec::new(), crate::budget::Budgets::new(), Policy::default());
+        let err = exec.plan("nope", "run", Invocation::new()).unwrap_err();
+        assert_eq!(err, crate::PlanError::UnknownModel { model: "nope".to_string() });
+        exec.shutdown();
+    }
+
+    /// A CPU-resident model whose bytes never cross a bus.
+    struct PlanFake {
+        name: String,
+        ram: u64,
+    }
+    struct PlanInst;
+    impl ResidentModel for PlanFake {
+        fn manifest(&self) -> Manifest {
+            Manifest::new(&self.name, "fake", vec![capability::ActionSpec::new("run", "run")])
+        }
+        fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+            InstanceKey::new(&self.name, "default")
+        }
+        fn estimate(&self, _k: &InstanceKey) -> crate::MemCost {
+            crate::MemCost::new(0, self.ram)
+        }
+        fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn crate::Instance>, String> {
+            Ok(Box::new(PlanInst))
+        }
+    }
+    impl crate::Instance for PlanInst {
+        fn run(&mut self, _a: &str, _i: &Invocation, _p: &mut dyn FnMut(Progress)) -> ActionResult {
+            Ok(capability::Outcome::new())
+        }
+    }
     use super::*;
     use crate::budget::Budgets;
     use crate::{Instance, MemCost, MultiDeviceCost};

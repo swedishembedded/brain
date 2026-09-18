@@ -37,14 +37,17 @@ pub mod model;
 pub mod multi;
 pub mod place;
 pub mod plan;
+pub mod runplan;
 pub mod scheduler;
 pub mod supply;
+
 
 pub use devpool::DevicePool;
 pub use executor::{Executor, InFlightJob, Job};
 pub use manager::{DeviceBudget, InstancePlacement, ResidencyManager, ResidencyReport};
 pub use model::{Instance, ResidentModel};
 pub use multi::{MultiDeviceCost, MultiDeviceResidentModel};
+pub use runplan::{Eviction, PlanError, Placement, RunPlan};
 pub use scheduler::Policy;
 pub use supply::{ModelSupplier, Supply};
 
