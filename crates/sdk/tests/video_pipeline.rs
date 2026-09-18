@@ -113,18 +113,22 @@ fn write_tokenizer_json(path: &Path) {
 /// The exact on-disk shape `wan::spec::WanSpec::classify` reads for a
 /// t2v-1.3B assembly, real dims for everything `dit_config_from_shapes`/
 /// `validate` check, toy content everywhere else. The DiT file is named
-/// `model.brain.safetensors` - `brain_modelstore::Store::BASE_WEIGHTS_FILE`,
-/// the name `Store::local`'s own fallback path looks for directly, so this
-/// repo is "locally present" with no `brain.manifest.json` at all -
-/// deliberately: a manifest's presence collapses the WHOLE directory into
-/// one `ArtifactKind::Compound` record (real scanner behavior found while
-/// building this fixture), which would hide every other file in it from
-/// `WanSpec::classify`'s own content-based, per-file checks.
-/// `classify_uses_content_not_filename` (this crate's own test) already
-/// proves classification never depends on the filename either way.
+/// `diffusion_pytorch_model.safetensors` - a REAL Wan release's own
+/// diffusers-convention filename (`wan::spec::tests::t2v_1_3b_fixture`'s own
+/// naming, mirrored here rather than reinvented), deliberately NOT
+/// `brain_modelstore::Store::BASE_WEIGHTS_FILE`'s magic fallback name: this
+/// repo has no `brain.manifest.json` either (a manifest's presence collapses
+/// the WHOLE directory into one `ArtifactKind::Compound` record, real
+/// scanner behavior found while building this fixture, which would hide
+/// every other file in it from `WanSpec::classify`'s own content-based,
+/// per-file checks), so a REAL Wan release's own layout genuinely satisfies
+/// neither of `Store::local`'s two recognized shapes - proving
+/// `VideoPipelineBuilder::load`'s resolve-first ordering (see that
+/// function's own doc) actually matters, not just a convenient coincidence
+/// of this fixture's file naming.
 fn write_wan_checkpoint(repo: &Path) {
     let cfg = WanConfig::t2v_1_3b();
-    write_dit_safetensors(&repo.join("model.brain.safetensors"), &cfg);
+    write_dit_safetensors(&repo.join("diffusion_pytorch_model.safetensors"), &cfg);
     write_vae_pth(&repo.join("Wan2.1_VAE.pth"));
     write_t5_pth(&repo.join("models_t5_umt5-xxl-enc-bf16.pth"), cfg.text_dim);
     write_tokenizer_json(&repo.join("tokenizer.json"));
@@ -178,17 +182,17 @@ fn from_pretrained_names_the_missing_role_when_the_store_is_empty() {
 }
 
 /// The full facade path against a real, content-classified local fixture,
-/// with no network access at any point: reference parses, `Store::local`
-/// resolves it (the DiT file is named `model.brain.safetensors` -
-/// `Store`'s own `BASE_WEIGHTS_FILE` fallback name, a real, openable
-/// safetensors file - see `write_wan_checkpoint`'s own doc for why this
-/// fixture carries no `brain.manifest.json` at all), `loader::
-/// resolve_structured` finds all four roles via `WanSpec::classify`'s real
-/// content checks and derives the `t2v-1.3B` variant from the DiT's own
-/// shapes, and `VideoPipelineBuilder::load` builds a real `VideoPipeline`.
-/// `.generate()` then reaches `wan::pipeline::generate_hot`, which fails
-/// cleanly on the incomplete (marker-only) DiT tensor set rather than
-/// resolution itself failing.
+/// with no network access at any point: reference parses, `loader::
+/// resolve_structured` (tried FIRST - see `VideoPipelineBuilder::load`'s own
+/// doc for why) finds all four roles via `WanSpec::classify`'s real content
+/// checks against the fixture's REAL-WORLD filenames (see
+/// `write_wan_checkpoint`'s own doc - `Store::local` itself would find
+/// nothing here, since neither of its two recognized shapes matches a real
+/// Wan release's own layout) and derives the `t2v-1.3B` variant from the
+/// DiT's own shapes, and `VideoPipelineBuilder::load` builds a real
+/// `VideoPipeline`. `.generate()` then reaches `wan::pipeline::generate_hot`,
+/// which fails cleanly on the incomplete (marker-only) DiT tensor set rather
+/// than resolution itself failing.
 #[test]
 fn from_pretrained_resolves_wan_from_a_real_local_fixture_with_no_network_access() {
     let root = scratch_root("resolve");

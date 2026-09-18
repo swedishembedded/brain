@@ -246,14 +246,26 @@ impl VideoPipelineBuilder {
     /// Resolve `model_id` and build a real [`VideoPipeline`].
     ///
     /// 1. [`Device`] is applied to this process (see [`crate::device::apply`]).
-    /// 2. `model_id` is parsed and, under `DownloadPolicy::IfMissing`,
-    ///    fetched only when nothing local already resolves it (mirrors every
-    ///    other pipeline in this crate).
-    /// 3. `crates/loader`'s resolver looks for `wan::spec::WanSpec`'s four
-    ///    roles (`dit`, `vae`, `text_encoder`, `tokenizer`) and derives the
-    ///    variant from the resolved `dit`'s own tensor shapes.
-    /// 4. [`wan::pipeline::Paths::from_assembly`] builds the concrete
-    ///    per-file paths; the DiT itself loads lazily on the first
+    /// 2. `crates/loader`'s resolver is tried FIRST against
+    ///    `wan::spec::WanSpec`'s four roles (`dit`, `vae`, `text_encoder`,
+    ///    `tokenizer`), before ever consulting `Store::local`/`plan` -
+    ///    deliberately the reverse of the naive "check `Store::local`, then
+    ///    fetch-if-missing, then resolve" order, for the same real reason
+    ///    `crate::tts::TtsPipelineBuilder::load`/`crate::text::resolve_hub_weights`
+    ///    do it: `WanSpec::classify` reads raw file content (a `.pth`'s own
+    ///    tensor names/shapes, a GGUF's KV metadata, a safetensors file's own
+    ///    shapes), a strictly wider net than `Store::local`'s narrow "a
+    ///    compound `brain.manifest.json`, or a bare `model.brain.safetensors`"
+    ///    shapes - and a real Wan release's own native filenames
+    ///    (`Wan2.1_VAE.pth`, `models_t5_umt5-xxl-enc-bf16.pth`, a diffusers-
+    ///    named DiT safetensors shard) satisfy NEITHER, so `Store::local`
+    ///    would otherwise never recognize even an already-downloaded release.
+    /// 3. Only on `Missing` does `model_id` get parsed and, under
+    ///    `DownloadPolicy::IfMissing`, fetched (mirrors every other pipeline
+    ///    in this crate) - then resolution is retried once.
+    /// 4. The resolved variant is derived from the `dit`'s own tensor
+    ///    shapes and [`wan::pipeline::Paths::from_assembly`] builds the
+    ///    concrete per-file paths; the DiT itself loads lazily on the first
     ///    `.generate()` (`wan::caps`'s own module doc - "only `WanProvider`
     ///    (execution) loads anything").
     pub fn load(self) -> Result<VideoPipeline> {
@@ -261,23 +273,29 @@ impl VideoPipelineBuilder {
 
         crate::device::apply(&device)?;
 
+        // Parsed unconditionally, before ever trying to resolve: a
+        // malformed `model_id` must fail the same way regardless of what
+        // happens to already be resolvable in the store (mirrors
+        // `crate::tts::TtsPipelineBuilder::load`'s own ordering).
         let reference = brain_modelref::ModelRef::parse(&model_id).map_err(|e| Error::ModelNotFound(format!("{model_id}: {e}")))?;
-
-        let root = loader::model_dir::resolve(None).ok_or_else(|| Error::Backend("no models directory configured (set BRAIN_MODELS_DIR, or $HOME)".to_string()))?;
-        let store = brain_modelstore::Store::new(root);
-        let hub = brain_modelstore::HfHub::new();
-
-        if store.local(&reference).is_none() {
-            let plan = brain_modelstore::plan(&reference, &store, &hub)?;
-            loader::supply::execute_plan(&store, &hub, &plan, &model_id, &mut |_name, _got, _total| {}).map_err(Error::Download)?;
-        }
-
         let overrides: BTreeMap<String, String> = BTreeMap::new();
-        let outcome = loader::resolve_structured("wan", &wan::spec::WanSpec, &overrides).map_err(Error::Backend)?;
-        let assembly = match outcome {
+        let assembly = match loader::resolve_structured("wan", &wan::spec::WanSpec, &overrides).map_err(Error::Backend)? {
             brain_modelstore::resolve::Resolution::Resolved(a) => *a,
             brain_modelstore::resolve::Resolution::Ambiguous(a) => return Err(Error::Ambiguous(a)),
-            brain_modelstore::resolve::Resolution::Missing(m) => return Err(Error::Missing(m)),
+            brain_modelstore::resolve::Resolution::Missing(_) => {
+                let root = loader::model_dir::resolve(None).ok_or_else(|| Error::Backend("no models directory configured (set BRAIN_MODELS_DIR, or $HOME)".to_string()))?;
+                let store = brain_modelstore::Store::new(root);
+                let hub = brain_modelstore::HfHub::new();
+                if store.local(&reference).is_none() {
+                    let plan = brain_modelstore::plan(&reference, &store, &hub)?;
+                    loader::supply::execute_plan(&store, &hub, &plan, &model_id, &mut |_name, _got, _total| {}).map_err(Error::Download)?;
+                }
+                match loader::resolve_structured("wan", &wan::spec::WanSpec, &overrides).map_err(Error::Backend)? {
+                    brain_modelstore::resolve::Resolution::Resolved(a) => *a,
+                    brain_modelstore::resolve::Resolution::Ambiguous(a) => return Err(Error::Ambiguous(a)),
+                    brain_modelstore::resolve::Resolution::Missing(m) => return Err(Error::Missing(m)),
+                }
+            }
         };
 
         let variant = assembly.variant.as_deref().ok_or_else(|| Error::Backend(format!("wan: resolved assembly {:?} names no variant", assembly.id)))?;
