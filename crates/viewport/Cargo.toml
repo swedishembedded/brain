@@ -1,0 +1,23 @@
+[package]
+name = "brain-viewport"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "A window and a drawing surface for sample applications: an RGB8 canvas presented through SDL2 when a display exists, written to a PNG when one does not, with the SAME pixels either way."
+
+[lib]
+name = "viewport"
+path = "src/lib.rs"
+
+[dependencies]
+# The SDL2 window itself, already hand-rolled once in this workspace. This
+# crate adds the canvas and the headless half; it does not open a second FFI
+# surface onto SDL.
+brain-wm-display.workspace = true
+# The drawing primitives (text, panels, bars, plots, indexed blit) and the PNG
+# encoder. All pure and host-side, which is what lets a headless run produce
+# the same image a window shows.
+brain-imaging.workspace = true
+
+[dev-dependencies]
+brain-testutil.workspace = true

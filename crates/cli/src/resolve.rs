@@ -353,6 +353,11 @@ const RESOLVER_MIGRATED_ARCHS: &[&str] = &[
     "timesfm3",
     "s3dit",
     "codeformer",
+    "scrfd",
+    "arcface",
+    "clip",
+    "florence2",
+    "flux1",
 ];
 
 fn dispatch_arch(arch: &str, rest: Vec<String>) {
@@ -590,6 +595,33 @@ mod tests {
 
     fn s(args: &[&str]) -> Vec<String> {
         args.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// Declaring an architecture resolver-migrated is TWO edits, and making
+    /// only the first is worse than making neither.
+    ///
+    /// [`RESOLVER_MIGRATED_ARCHS`] suppresses the env-based auto-fetch
+    /// (`attempt_fetch`), and `resolver_cli::with_arch_spec` is what supplies
+    /// the `ArchSpec` that is supposed to replace it. An architecture listed
+    /// here but absent there gets neither: `run_generic_migrated` returns
+    /// `None`, dispatch falls through to the env path it was migrated off,
+    /// and auto-fetch is already disabled - so it fails asking for a
+    /// `BRAIN_*` variable on a checkpoint sitting in the model store.
+    ///
+    /// Only the [`ARCH_TO_MODEL`] half is constrained: an architecture with
+    /// its own [`ARCH_HANDLERS`] entry returns from that branch before
+    /// `run_generic_migrated` is ever reached, and resolves through its own
+    /// `_cli.rs` instead.
+    #[test]
+    fn every_generically_dispatched_migrated_arch_has_a_spec() {
+        let generic: Vec<&str> = RESOLVER_MIGRATED_ARCHS
+            .iter()
+            .copied()
+            .filter(|a| !ARCH_HANDLERS.iter().any(|(id, _)| id == a))
+            .filter(|a| ARCH_TO_MODEL.iter().any(|(id, _)| id == a))
+            .collect();
+        let missing: Vec<&str> = generic.iter().copied().filter(|a| !crate::resolver_cli::has_arch_spec(a)).collect();
+        assert!(missing.is_empty(), "declared resolver-migrated but resolver_cli cannot build their ArchSpec: {missing:?}");
     }
 
     #[test]

@@ -271,6 +271,13 @@ pub fn extract_role_overrides(spec: &dyn ArchSpec, args: &[String]) -> (BTreeMap
 /// hand-writing the resolve/extract-overrides call again per architecture.
 /// `flux2` has its own dedicated command (`flux2_cli::resolve_flux2`) and is
 /// not reached generically, so it has no row here.
+/// Whether [`with_arch_spec`] can build an `ArchSpec` for `arch` - the
+/// half of "resolver-migrated" that actually replaces the env path, checked
+/// against `resolve::RESOLVER_MIGRATED_ARCHS` by that module's own test.
+pub fn has_arch_spec(arch: &str) -> bool {
+    with_arch_spec(arch, |_| ()).is_some()
+}
+
 fn with_arch_spec<R>(arch: &str, f: impl FnOnce(&dyn ArchSpec) -> R) -> Option<R> {
     match arch {
         "qwen3asr" => Some(f(&qwen3asr::spec::Qwen3AsrSpec)),
@@ -280,6 +287,19 @@ fn with_arch_spec<R>(arch: &str, f: impl FnOnce(&dyn ArchSpec) -> R) -> Option<R
         "codeformer" => Some(f(&codeformer::spec::CodeFormerSpec)),
         "timesfm3" => Some(f(&timesfm3::spec::Timesfm3Spec)),
         "s3dit" => Some(f(&s3dit::spec::S3ditSpec)),
+        "kronos" => Some(f(&kronos::spec::KronosSpec)),
+        "qwen3vl" => Some(f(&qwen3vl::spec::Qwen3VlSpec)),
+        "fastvlm" => Some(f(&fastvlm::spec::FastvlmSpec)),
+        "deepseek2ocr" => Some(f(&deepseek2ocr::spec::Deepseek2ocrSpec)),
+        "scrfd" => Some(f(&scrfd::spec::ScrfdSpec)),
+        "arcface" => Some(f(&arcface::spec::ArcFaceSpec)),
+        "clip" => Some(f(&clip::spec::ClipSpec)),
+        "florence2" => Some(f(&florence2::spec::Florence2Spec)),
+        "flux1" => Some(f(&flux1::spec::Flux1Spec)),
+        "llava" => Some(f(&llava::spec::LlavaSpec)),
+        "pulid" => Some(f(&pulid::spec::PulidSpec)),
+        "cosyvoice" => Some(f(&cosyvoice::spec::CosyVoiceSpec)),
+        "minimaxmusic3" => Some(f(&minimaxmusic3::spec::MinimaxMusic3Spec)),
         _ => None,
     }
 }

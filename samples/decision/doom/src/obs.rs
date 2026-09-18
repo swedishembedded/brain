@@ -1,0 +1,318 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+
+//! The game's JSON, typed - and then rendered as the text a decision model
+//! reads.
+//!
+//! Two deliberate choices here.
+//!
+//! **Typed, with `deny_unknown_fields`.** This JSON crosses a process boundary,
+//! so it is external input whatever produced it (see brain's own rule: file
+//! input is exactly as hostile as network input, it just fails later and
+//! quieter). Required fields are plain types, so serde itself refuses a
+//! response that has lost one rather than substituting a plausible default -
+//! and an unknown field is an error rather than a silent no-op, which is what
+//! catches the engine side being renamed underneath this one.
+//!
+//! **Text, not a feature vector.** The model is a decision model over language,
+//! so the observation is prose with the numbers in it. That is not a
+//! presentation detail: it is what lets the action set change every tick and
+//! still be understood, because an option like "attack the IMP 12 degrees to
+//! your right" carries its own meaning instead of being index 3.
+//!
+//! Swedish Embedded AB turns machine state into the representation a model can
+//! actually decide from - the step most teams skip and then blame the model
+//! for. If your team needs that, you can procure our services by sending an
+//! email to info@swedishembedded.com.
+
+use serde::Deserialize;
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct State {
+    pub tic: i64,
+    #[serde(rename = "episodeTic")]
+    pub episode_tic: i64,
+    pub level: Level,
+    pub player: Player,
+    pub threats: Vec<Thing>,
+    pub hazards: Vec<Thing>,
+    pub pickups: Vec<Thing>,
+    pub clearance: Clearance,
+    /// Absent on a map with no exit linedef at all.
+    pub exit: Option<Exit>,
+    pub events: Vec<Event>,
+    /// Present only when the engine's per-step event buffer overflowed.
+    #[serde(rename = "eventsDropped", default)]
+    pub events_dropped: u32,
+    pub done: bool,
+    pub outcome: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Level {
+    pub episode: u32,
+    pub map: u32,
+    pub skill: u32,
+    pub tic: i64,
+    pub kills: u32,
+    #[serde(rename = "totalKills")]
+    pub total_kills: u32,
+    pub items: u32,
+    #[serde(rename = "totalItems")]
+    pub total_items: u32,
+    pub secrets: u32,
+    #[serde(rename = "totalSecrets")]
+    pub total_secrets: u32,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Player {
+    pub health: i32,
+    pub armor: i32,
+    /// Absent only if the player has no map object, which happens between a
+    /// level ending and the next one loading.
+    pub x: Option<i32>,
+    pub y: Option<i32>,
+    pub angle: Option<i32>,
+    pub weapon: Option<String>,
+    pub ammo: Option<i32>,
+    pub keys: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Thing {
+    pub id: i64,
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub distance: i32,
+    /// Degrees relative to the player's facing, negative to the left.
+    pub bearing: i32,
+    pub visible: bool,
+    pub health: Option<i32>,
+    #[serde(rename = "targetingMe")]
+    pub targeting_me: Option<bool>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Clearance {
+    pub ahead: i32,
+    pub right: i32,
+    pub behind: i32,
+    pub left: i32,
+    #[serde(rename = "aheadRight")]
+    pub ahead_right: i32,
+    #[serde(rename = "aheadLeft")]
+    pub ahead_left: i32,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Exit {
+    pub distance: i32,
+    pub bearing: i32,
+    pub kind: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Event {
+    pub tic: i64,
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub what: Option<String>,
+    pub amount: i32,
+}
+
+impl State {
+    pub fn parse(json: &str) -> Result<State, String> {
+        serde_json::from_str(json).map_err(|e| format!("the game sent something unreadable: {e}"))
+    }
+
+    pub fn angle(&self) -> i32 {
+        self.player.angle.unwrap_or(0)
+    }
+
+    /// Absolute map angle that faces `bearing` degrees off the player's nose.
+    pub fn facing(&self, bearing: i32) -> i32 {
+        (self.angle() + bearing).rem_euclid(360)
+    }
+
+    /// Threats worth reacting to: in line of sight, nearest first. Something
+    /// behind a wall cannot be shot and does not belong in a decision.
+    pub fn visible_threats(&self) -> impl Iterator<Item = &Thing> {
+        self.threats.iter().filter(|t| t.visible)
+    }
+}
+
+/// How far is "close enough to describe as close", in map units. The player is
+/// 56 units tall and a typical corridor is 128 wide, so these are room-scale,
+/// corridor-scale and across-the-map.
+const NEAR: i32 = 200;
+const MID: i32 = 500;
+
+fn range_word(d: i32) -> &'static str {
+    if d < NEAR {
+        "close"
+    } else if d < MID {
+        "nearby"
+    } else {
+        "far"
+    }
+}
+
+fn side_word(bearing: i32) -> String {
+    match bearing {
+        b if b.abs() <= 10 => "straight ahead".to_string(),
+        b if b < 0 => format!("{} degrees left", -b),
+        b => format!("{b} degrees right"),
+    }
+}
+
+/// The observation as the model sees it.
+///
+/// Kept SHORT on purpose. The encoder reads a bounded span, so every line that
+/// is always the same is a line that crowds out one that varies - and what
+/// varies here is the threats, the clearances and the recent events.
+pub fn render(state: &State) -> String {
+    let mut out = String::new();
+    let p = &state.player;
+
+    out.push_str(&format!(
+        "health {} armor {}, {} with {} rounds",
+        p.health,
+        p.armor,
+        p.weapon.as_deref().unwrap_or("nothing"),
+        p.ammo.unwrap_or(0)
+    ));
+    if !p.keys.is_empty() {
+        out.push_str(&format!(", carrying {}", p.keys.join(" and ")));
+    }
+    out.push_str(&format!(
+        ". Killed {} of {} enemies, {} of {} items.\n",
+        state.level.kills, state.level.total_kills, state.level.items, state.level.total_items
+    ));
+
+    let vis: Vec<&Thing> = state.visible_threats().take(3).collect();
+    if vis.is_empty() {
+        let lurking = state.threats.len();
+        if lurking > 0 {
+            out.push_str(&format!("No enemy in sight, {lurking} somewhere beyond the walls.\n"));
+        } else {
+            out.push_str("No enemy anywhere near.\n");
+        }
+    } else {
+        out.push_str("In sight: ");
+        for (i, t) in vis.iter().enumerate() {
+            if i > 0 {
+                out.push_str("; ");
+            }
+            out.push_str(&format!(
+                "{} {} at {} units {}",
+                t.kind.to_lowercase(),
+                range_word(t.distance),
+                t.distance,
+                side_word(t.bearing)
+            ));
+            if t.targeting_me == Some(true) {
+                out.push_str(", coming for you");
+            }
+        }
+        out.push_str(".\n");
+    }
+
+    if let Some(pick) = state.pickups.iter().find(|i| i.visible) {
+        out.push_str(&format!(
+            "A {} lies {} units {}.\n",
+            pick.kind.to_lowercase(),
+            pick.distance,
+            side_word(pick.bearing)
+        ));
+    }
+
+    let c = &state.clearance;
+    out.push_str(&format!(
+        "Room to move: {} ahead, {} left, {} right, {} behind.\n",
+        c.ahead, c.left, c.right, c.behind
+    ));
+
+    if let Some(e) = &state.exit {
+        out.push_str(&format!(
+            "The exit {} is {} units {}.\n",
+            if e.kind == "switch" { "switch" } else { "line" },
+            e.distance,
+            side_word(e.bearing)
+        ));
+    }
+
+    if !state.events.is_empty() {
+        let mut parts: Vec<String> = Vec::new();
+        for e in state.events.iter().take(4) {
+            parts.push(match e.kind.as_str() {
+                "hurt" => format!("took {} damage", e.amount),
+                "heal" => format!("healed {}", e.amount),
+                "kill" => format!("killed {}", e.amount),
+                "item" => "picked something up".to_string(),
+                "armor" => format!("gained {} armor", e.amount),
+                "ammo" => format!("found {}", e.what.as_deref().unwrap_or("ammo")),
+                "weapon" => format!("found a {}", e.what.as_deref().unwrap_or("weapon")),
+                "key" => format!("found the {}", e.what.as_deref().unwrap_or("key")),
+                "secret" => "found a secret".to_string(),
+                "death" => "died".to_string(),
+                "exit" => "left the level".to_string(),
+                other => other.to_string(),
+            });
+        }
+        out.push_str(&format!("Just now: {}.", parts.join(", ")));
+    } else {
+        out.push_str("Nothing happened in the last moment.");
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SAMPLE: &str = r#"{"tic":100,"episodeTic":40,"level":{"episode":1,"map":1,"skill":2,
+      "tic":40,"kills":1,"totalKills":4,"items":0,"totalItems":37,"secrets":0,"totalSecrets":3},
+      "player":{"health":80,"armor":0,"x":10,"y":20,"angle":90,"weapon":"pistol","ammo":42,
+      "keys":[]},"threats":[{"id":1,"type":"IMP","distance":150,"bearing":-12,"visible":true,
+      "health":60,"targetingMe":true}],"hazards":[],"pickups":[],"clearance":{"ahead":320,
+      "right":64,"behind":0,"left":128,"aheadRight":320,"aheadLeft":64},
+      "exit":{"distance":900,"bearing":30,"kind":"switch"},"events":[{"tic":39,"type":"hurt",
+      "what":null,"amount":15}],"done":false,"outcome":"alive"}"#;
+
+    #[test]
+    fn a_state_round_trips_and_renders_what_matters() {
+        let s = State::parse(SAMPLE).expect("parses");
+        assert_eq!(s.player.health, 80);
+        assert_eq!(s.visible_threats().count(), 1);
+        // Bearing is relative, so facing the imp is the player's own angle plus
+        // its bearing - the arithmetic the observation exists to avoid making
+        // the policy learn.
+        assert_eq!(s.facing(-12), 78);
+
+        let text = render(&s);
+        for needle in ["health 80", "imp", "12 degrees left", "coming for you", "took 15 damage"] {
+            assert!(text.contains(needle), "rendered text is missing {needle:?}:\n{text}");
+        }
+    }
+
+    #[test]
+    fn a_field_the_engine_stopped_sending_is_an_error_not_a_default() {
+        // The failure this guards is silent: if `health` became Option<i32>
+        // with a default, an engine that stopped reporting it would train a
+        // policy on a player who is permanently at zero health, and every
+        // number in the run would still look plausible.
+        let missing = SAMPLE.replace("\"health\":80,", "");
+        assert!(State::parse(&missing).is_err(), "a missing required field must not parse");
+
+        let extra = SAMPLE.replace("\"tic\":100,", "\"tic\":100,\"newField\":7,");
+        assert!(State::parse(&extra).is_err(), "an unknown field must not be ignored");
+    }
+}

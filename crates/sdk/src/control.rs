@@ -172,6 +172,15 @@ pub struct ControlPipeline<E: Env> {
     /// Mean squared error of the last critic fit - whether the baseline is
     /// worth trusting.
     critic_mse: f32,
+    /// Episode horizon for [`Stages::run_eval`] and [`Flow::play`].
+    ///
+    /// Set from [`ControlSpec::max_steps`] when a run trains, and settable on
+    /// the builder for a pipeline that only loads weights. It used to be the
+    /// constant 40 in both places, which silently truncated any environment
+    /// whose episodes are longer than a toy's: an agent that needs 200
+    /// decisions to reach a goal was scored as never reaching it, and the
+    /// number looked like a policy failure rather than a harness one.
+    max_steps: usize,
 }
 
 impl<E: Env> std::fmt::Debug for ControlPipeline<E> {
@@ -213,6 +222,7 @@ impl<E: Env> ControlPipeline<E> {
             // sized for a control loop rather than a document.
             limits: Limits { cap_rows: 1024, cap_slots: 32, max_span: 256, overlap: 32 },
             seed: 0,
+            max_steps: ControlSpec::default().max_steps,
         }
     }
 
@@ -498,6 +508,26 @@ impl<E: Env> ControlPipeline<E> {
         Ok(loss / seen.max(1) as f32)
     }
 
+    /// The environment this pipeline acts in.
+    ///
+    /// A caller that drives its own loop with [`ControlPipeline::policy`] -
+    /// to show the distribution, to score against a scripted baseline on the
+    /// same episodes, to record a transcript - needs to reach the environment
+    /// it is stepping. Without this the only way to act is [`Flow::play`],
+    /// which prints and discards.
+    pub fn env(&self) -> &E {
+        &self.env
+    }
+
+    pub fn env_mut(&mut self) -> &mut E {
+        &mut self.env
+    }
+
+    /// The episode horizon evaluation and play use.
+    pub fn max_steps(&self) -> usize {
+        self.max_steps
+    }
+
     pub fn save_head(&self, path: impl AsRef<str>) -> Result<()> {
         self.model.save_head(path.as_ref()).map_err(Error::Backend)
     }
@@ -627,6 +657,7 @@ impl<E: Env> Stages for ControlPipeline<E> {
         let mut step = 0usize;
         let mut last_loss = 0.0f32;
         self.model.set_encoder_frozen(spec.freeze_encoder);
+        self.max_steps = spec.max_steps;
         println!(
             "  {} iterations x {} episodes, {} PPO passes each, encoder {}",
             spec.iterations,
@@ -680,7 +711,7 @@ impl<E: Env> Stages for ControlPipeline<E> {
         let (mut total, mut wins, mut steps) = (0.0f32, 0usize, 0usize);
         let n = EVAL_SEEDS.count();
         for seed in EVAL_SEEDS {
-            let (st, ret, won) = self.episode(seed, true, 40, false)?;
+            let (st, ret, won) = self.episode(seed, true, self.max_steps, false)?;
             total += ret;
             wins += usize::from(won);
             steps += st.len();
@@ -705,7 +736,7 @@ impl<E: Env> Stages for ControlPipeline<E> {
 
     /// One interactive turn plays one episode and prints it.
     fn run_turn(&mut self, _input: &str) -> Result<String> {
-        let r = self.show(1, 40)?;
+        let r = self.show(1, self.max_steps)?;
         Ok(format!("  return {:+.2}", r.mean_return))
     }
 }
@@ -715,7 +746,8 @@ impl<E: Env> Flow<ControlPipeline<E>> {
     /// shows what the policy learned rather than summarizing it.
     pub fn play(self, n: usize) -> Flow<ControlPipeline<E>> {
         self.stage("play", move |p| {
-            let r = p.show(n, 40)?;
+            let n_steps = p.max_steps;
+            let r = p.show(n, n_steps)?;
             Ok(Some(format!("{} episodes, mean return {:+.2}, {} won", r.episodes, r.mean_return, r.wins)))
         })
     }
@@ -728,6 +760,7 @@ pub struct ControlPipelineBuilder<E: Env> {
     device: Device,
     limits: Limits,
     seed: u64,
+    max_steps: usize,
 }
 
 impl<E: Env> ControlPipelineBuilder<E> {
@@ -752,6 +785,13 @@ impl<E: Env> ControlPipelineBuilder<E> {
         self
     }
 
+    /// Episode horizon for evaluation and play on a pipeline that is not going
+    /// to be trained. A trained one takes it from its [`ControlSpec`].
+    pub fn max_steps(mut self, n: usize) -> ControlPipelineBuilder<E> {
+        self.max_steps = n;
+        self
+    }
+
     pub fn load(self) -> Result<ControlPipeline<E>> {
         let model =
             crate::decision::load_decide(&self.dir, self.head.as_deref(), &self.device, self.limits, self.seed)?;
@@ -764,6 +804,7 @@ impl<E: Env> ControlPipelineBuilder<E> {
             last: Rollout::default(),
             critic: Critic::new(cfg_width, CRITIC_HIDDEN, self.seed ^ 0x1c1),
             critic_mse: 0.0,
+            max_steps: self.max_steps,
         })
     }
 }

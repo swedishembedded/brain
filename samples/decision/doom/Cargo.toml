@@ -1,0 +1,28 @@
+[package]
+# Package names under samples/ are derived from the path:
+# `samples/decision/doom` -> `sample-decision-doom`. The Makefile's
+# `samples/%/{build,run}` rules depend on that mapping; `make check/samples`
+# enforces it.
+name = "sample-decision-doom"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sample application: a decision model learning to play DOOM from the game's own structured state, with the decisions visible while it plays."
+publish = false
+
+[dependencies]
+# The ONLY brain dependency a sample may have is the SDK facade, and it must
+# NAME the surfaces it uses - see samples/README.md rules 1 and 2.
+#   decision  ControlPipeline / Env: the policy and its training loop
+#   image     writing a frame to a PNG, rather than a fourth hand-rolled encoder
+#   viewport  the window and the in-frame inspector UI
+brain = { workspace = true, features = ["decision", "image", "viewport"] }
+# The game speaks JSON over a socket. Everything else here is std: the HTTP
+# client is ~60 lines against one keep-alive connection, which is less than
+# the configuration an HTTP crate would need.
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[package.metadata.brain]
+# `make check/samples` fails if the real `cargo tree` closure exceeds this.
+max-brain-crates = 40

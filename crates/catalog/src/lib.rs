@@ -207,6 +207,26 @@ macro_rules! always {
 /// Ignores the [`Assembly`] [`ModelEntry::provider`] is called with - still
 /// env-only, same as before this parameter existed.
 #[macro_export]
+/// The DIRECTORY holding a role's resolved artifact.
+///
+/// A spec's role resolves to the file the resolver actually classified (an
+/// `.onnx` graph, a `.pth` checkpoint), but a provider that loads SEVERAL
+/// released files by their published names - antelopev2's detector and
+/// embedder graphs, say - is constructed from the directory that holds them.
+/// This is the one conversion between the two, so a provider never re-derives
+/// it and a role never has to be declared twice to mean both.
+pub fn role_dir(assembly: &Assembly, role: &str) -> Result<String, String> {
+    let path = assembly.role_path(role)?;
+    let p = std::path::Path::new(&path);
+    // Already a directory (a spec whose role names one) is returned as-is.
+    if p.is_dir() {
+        return Ok(path);
+    }
+    p.parent()
+        .map(|d| d.to_string_lossy().into_owned())
+        .ok_or_else(|| format!("{role}: {path} has no parent directory"))
+}
+
 macro_rules! from_env {
     ($ctor:path, $msg:literal) => {
         |_assembly: &$crate::__reexport::Assembly| $ctor().map(|p| std::sync::Arc::new(p) as std::sync::Arc<dyn $crate::__reexport::Provider>).ok_or($msg.to_string())
@@ -405,26 +425,26 @@ pub fn models() -> Vec<ModelEntry> {
         },
         ModelEntry {
             manifest: scrfd::caps::manifest,
-            provider: from_env!(
-                scrfd::caps::ScrfdProvider::from_env,
-                "set BRAIN_SCRFD_DIR to a directory holding scrfd_10g_bnkps.onnx"
-            ),
+            provider: |assembly: &Assembly| {
+                let dir = role_dir(assembly, "weights")?;
+                Ok(Arc::new(scrfd::caps::ScrfdProvider::new(dir)) as Arc<dyn Provider>)
+            },
             resident: None,
         },
         ModelEntry {
             manifest: florence2::caps::manifest,
-            provider: from_env!(
-                florence2::caps::Florence2Provider::from_env,
-                "set BRAIN_FLORENCE2_DIR to a directory holding config.json, model.safetensors and tokenizer.json"
-            ),
+            provider: |assembly: &Assembly| {
+                let dir = role_dir(assembly, "weights")?;
+                Ok(Arc::new(florence2::caps::Florence2Provider::new(dir)) as Arc<dyn Provider>)
+            },
             resident: None,
         },
         ModelEntry {
             manifest: arcface::caps::manifest,
-            provider: from_env!(
-                arcface::caps::ArcFaceProvider::from_env,
-                "set BRAIN_ARCFACE_DIR to a directory holding glintr100.onnx (+ scrfd_10g_bnkps.onnx for the default aligned path)"
-            ),
+            provider: |assembly: &Assembly| {
+                let dir = role_dir(assembly, "weights")?;
+                Ok(Arc::new(arcface::caps::ArcFaceProvider::new(dir)) as Arc<dyn Provider>)
+            },
             resident: None,
         },
         ModelEntry {
@@ -476,10 +496,10 @@ pub fn models() -> Vec<ModelEntry> {
         },
         ModelEntry {
             manifest: clip::caps::manifest,
-            provider: from_env!(
-                clip::caps::ClipProvider::from_env,
-                "set BRAIN_CLIP_DIR to a checkpoint root holding tokenizer/ (CLIP-L) and/or tokenizer_2/ (OpenCLIP-bigG)"
-            ),
+            provider: |assembly: &Assembly| {
+                let dir = role_dir(assembly, "towers")?;
+                Ok(Arc::new(clip::caps::ClipProvider::new(dir)) as Arc<dyn Provider>)
+            },
             resident: None,
         },
         ModelEntry {
@@ -529,10 +549,10 @@ pub fn models() -> Vec<ModelEntry> {
         },
         ModelEntry {
             manifest: flux1::caps::manifest,
-            provider: from_env!(
-                flux1::caps::Flux1Provider::from_env,
-                "set BRAIN_FLUX1_DIR to a released diffusers FLUX.1 checkpoint root holding transformer/"
-            ),
+            provider: |assembly: &Assembly| {
+                let dir = role_dir(assembly, "root")?;
+                Ok(Arc::new(flux1::caps::Flux1Provider::new(dir)) as Arc<dyn Provider>)
+            },
             resident: None,
         },
         ModelEntry {

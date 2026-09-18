@@ -1,0 +1,340 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+
+//! The game, as a subprocess and a socket.
+//!
+//! RESTful-DOOM is the 1993 engine with an HTTP API inside its game loop. This
+//! module owns its whole lifetime: find the binary, pick a free port, start it
+//! headless and in lockstep, wait until it answers, and kill it when the
+//! [`Doom`] value is dropped - including when the run panics, because a Doom
+//! left running holds the port and the next run fails to start for a reason
+//! that has nothing to do with the next run.
+//!
+//! **Nothing here knows an absolute path.** The engine binary and the IWAD are
+//! located at run time from flags, then environment, then `PATH` - see
+//! [`Paths::resolve`]. A sample that bakes in where a machine keeps its files
+//! runs on exactly one machine.
+//!
+//! Swedish Embedded AB builds the supervision layer around simulators and
+//! hardware-in-the-loop rigs - process lifetime, transport, and a reproducible
+//! episode - for customers training controllers against them. If your team
+//! needs that, you can procure our services by sending an email to
+//! info@swedishembedded.com.
+
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
+
+/// Where the two things this sample cannot ship live on THIS machine.
+#[derive(Clone, Debug)]
+pub struct Paths {
+    pub binary: PathBuf,
+    pub wad: PathBuf,
+}
+
+/// What a missing piece of the environment looks like, with the remedy
+/// attached. Rule 5 of `samples/README.md`: say what is missing and leave
+/// cleanly.
+#[derive(Debug)]
+pub struct Missing {
+    pub what: &'static str,
+    pub remedy: String,
+}
+
+impl std::fmt::Display for Missing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}\n  {}", self.what, self.remedy)
+    }
+}
+
+impl Paths {
+    /// Resolve the engine binary and the IWAD, in the order a user would
+    /// expect: what they just typed, then what they configured, then what is
+    /// on the `PATH` or in the conventional data directory.
+    pub fn resolve(binary: Option<&str>, wad: Option<&str>) -> Result<Paths, Missing> {
+        let binary = binary
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("RESTFUL_DOOM").map(PathBuf::from))
+            .or_else(|| which("restful-doom"))
+            .ok_or_else(|| Missing {
+                what: "no restful-doom binary",
+                remedy: "run ./fetch-data.sh, or pass --doom-bin PATH, or set $RESTFUL_DOOM"
+                    .into(),
+            })?;
+        if !binary.exists() {
+            return Err(Missing {
+                what: "the restful-doom binary does not exist",
+                remedy: format!("checked {}", binary.display()),
+            });
+        }
+
+        let wad = wad
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("DOOM_WAD").map(PathBuf::from))
+            .or_else(|| {
+                std::env::var_os("DOOM_WAD_DIR").map(|d| PathBuf::from(d).join("doom1.wad"))
+            })
+            .ok_or_else(|| Missing {
+                what: "no IWAD",
+                remedy: "run ./fetch-data.sh, or pass --wad PATH, or set $DOOM_WAD".into(),
+            })?;
+        if !wad.exists() {
+            return Err(Missing {
+                what: "the IWAD does not exist",
+                remedy: format!("checked {}", wad.display()),
+            });
+        }
+        Ok(Paths { binary, wad })
+    }
+}
+
+fn which(name: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|d| d.join(name))
+        .find(|p| p.is_file())
+}
+
+/// A port nothing is listening on right now.
+///
+/// Asked of the OS rather than picked from a range: several runs share a
+/// machine (an evaluation sweep runs episodes in parallel), and a fixed port
+/// makes the second one fail with "address in use" at a moment that looks like
+/// a bug in the sample.
+fn free_port() -> std::io::Result<u16> {
+    let l = TcpListener::bind("127.0.0.1:0")?;
+    let port = l.local_addr()?.port();
+    drop(l);
+    Ok(port)
+}
+
+/// A running game, owned.
+pub struct Doom {
+    child: Child,
+    conn: TcpStream,
+    pub port: u16,
+    /// Every request and reply, if the caller asked for a transcript. This is
+    /// the artifact to read when a policy does something inexplicable: it is
+    /// the exact JSON the model saw, in order.
+    log: Option<std::fs::File>,
+}
+
+/// How to start the game.
+#[derive(Clone, Debug)]
+pub struct Config {
+    pub episode: u32,
+    pub map: u32,
+    /// 0..=4, sk_baby .. sk_nightmare.
+    pub skill: u32,
+    /// Show the engine's own SDL window. Off by default and normally left off:
+    /// the sample draws the framebuffer itself, with the decision overlay on
+    /// top, so a second window would show the same game with less in it.
+    pub engine_window: bool,
+}
+
+impl Default for Config {
+    fn default() -> Config {
+        Config { episode: 1, map: 1, skill: 2, engine_window: false }
+    }
+}
+
+impl Doom {
+    pub fn start(paths: &Paths, cfg: &Config, log: Option<PathBuf>) -> std::io::Result<Doom> {
+        let port = free_port()?;
+        let mut cmd = Command::new(&paths.binary);
+        cmd.arg("-iwad")
+            .arg(&paths.wad)
+            .arg("-apiport")
+            .arg(port.to_string())
+            // The agent is the clock: nothing advances except on /api/step.
+            .arg("-apilockstep")
+            .arg("-warp")
+            .arg(cfg.episode.to_string())
+            .arg(cfg.map.to_string())
+            // -skill is 1-based on the command line and 0-based in the API.
+            .arg("-skill")
+            .arg((cfg.skill + 1).to_string())
+            .arg("-nosound")
+            .arg("-nomusic")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        if !cfg.engine_window {
+            // -noblit keeps the engine RENDERING into its 320x200 framebuffer
+            // (which is what /api/frame reads) while skipping the blit, upscale
+            // and present that would put it on a screen. Measured on E1M1 it is
+            // most of the cost of a tic, and the sample presents the frame
+            // itself anyway.
+            cmd.arg("-noblit");
+            cmd.env("SDL_VIDEODRIVER", "dummy");
+            cmd.env("SDL_AUDIODRIVER", "dummy");
+        }
+        let mut child = cmd.spawn()?;
+
+        // Wait for the line the engine prints once the socket is up, rather
+        // than sleeping a guessed interval: a cold start on a loaded machine
+        // takes longer than any constant anyone would write here.
+        let stdout = child.stdout.take().expect("piped");
+        let ready = wait_for_listening(stdout, Duration::from_secs(30));
+        if !ready {
+            let _ = child.kill();
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "restful-doom did not open its API port within 30s",
+            ));
+        }
+
+        let conn = connect(port, Duration::from_secs(10)).inspect_err(|_| {
+            let _ = child.kill();
+        })?;
+        let log = log.map(std::fs::File::create).transpose()?;
+        Ok(Doom { child, conn, port, log })
+    }
+
+    /// One request/response over the kept-alive connection.
+    fn call(&mut self, method: &str, path: &str, body: Option<&str>) -> std::io::Result<String> {
+        let body = body.unwrap_or("");
+        let req = format!(
+            "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n\
+             Content-Length: {}\r\nConnection: keep-alive\r\n\r\n{body}",
+            body.len()
+        );
+        self.conn.write_all(req.as_bytes())?;
+        self.conn.flush()?;
+        let resp = read_response(&mut self.conn)?;
+        if let Some(f) = self.log.as_mut() {
+            // One JSON object per line: `jq`-able, and greppable by tic.
+            let _ = writeln!(f, "{{\"req\":{{\"method\":\"{method}\",\"path\":\"{path}\",\"body\":{}}},\"resp\":{}}}",
+                if body.is_empty() { "null" } else { body }, resp);
+        }
+        Ok(resp)
+    }
+
+    pub fn state(&mut self) -> std::io::Result<String> {
+        self.call("GET", "/api/state", None)
+    }
+
+    /// Apply `actions` and run exactly `tics` tics. Returns the state after.
+    pub fn step(&mut self, actions: &str, tics: u32) -> std::io::Result<String> {
+        let body = format!("{{\"tics\":{tics},\"actions\":{actions}}}");
+        self.call("POST", "/api/step", Some(&body))
+    }
+
+    pub fn reset(&mut self, cfg: &Config, seed: u64) -> std::io::Result<String> {
+        let body = format!(
+            "{{\"episode\":{},\"map\":{},\"skill\":{},\"seed\":{}}}",
+            cfg.episode,
+            cfg.map,
+            cfg.skill,
+            seed % 65536
+        );
+        self.call("POST", "/api/episode", Some(&body))
+    }
+
+    pub fn frame(&mut self) -> std::io::Result<String> {
+        self.call("GET", "/api/frame", None)
+    }
+}
+
+impl Drop for Doom {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn wait_for_listening(stdout: std::process::ChildStdout, timeout: Duration) -> bool {
+    let start = Instant::now();
+    let mut reader = BufReader::new(stdout);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) => return false,
+            Ok(_) => {
+                if line.contains("Listening for connections") {
+                    // Drain the rest in the background; a full pipe buffer
+                    // would block the engine's own printf mid-tic.
+                    std::thread::spawn(move || {
+                        let mut sink = Vec::new();
+                        let mut r = reader;
+                        let _ = r.read_to_end(&mut sink);
+                    });
+                    return true;
+                }
+            }
+            Err(_) => return false,
+        }
+        if start.elapsed() > timeout {
+            return false;
+        }
+    }
+}
+
+fn connect(port: u16, timeout: Duration) -> std::io::Result<TcpStream> {
+    let start = Instant::now();
+    loop {
+        match TcpStream::connect(("127.0.0.1", port)) {
+            Ok(s) => {
+                // The game is frozen between steps, so a reply arrives only
+                // after the engine runs the tics; Nagle would add a round trip
+                // to every one of them.
+                s.set_nodelay(true)?;
+                return Ok(s);
+            }
+            Err(e) if start.elapsed() > timeout => return Err(e),
+            Err(_) => std::thread::sleep(Duration::from_millis(20)),
+        }
+    }
+}
+
+/// Read one HTTP response and return its body.
+///
+/// Content-Length is required, which is the whole reason the engine's HTTP
+/// layer was rewritten to send one: without it the end of a body is only
+/// knowable by the connection closing, and a closed connection per step is a
+/// TCP handshake per step.
+fn read_response(conn: &mut TcpStream) -> std::io::Result<String> {
+    let mut buf: Vec<u8> = Vec::with_capacity(8192);
+    let mut chunk = [0u8; 8192];
+    let head_end = loop {
+        if let Some(i) = find(&buf, b"\r\n\r\n") {
+            break i + 4;
+        }
+        let n = conn.read(&mut chunk)?;
+        if n == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "the game closed the connection",
+            ));
+        }
+        buf.extend_from_slice(&chunk[..n]);
+    };
+    let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+    let len: usize = head
+        .lines()
+        .find_map(|l| {
+            let (k, v) = l.split_once(':')?;
+            k.eq_ignore_ascii_case("content-length").then(|| v.trim().parse().ok())?
+        })
+        .ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "response has no Content-Length")
+        })?;
+    while buf.len() < head_end + len {
+        let n = conn.read(&mut chunk)?;
+        if n == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "the game closed the connection mid-body",
+            ));
+        }
+        buf.extend_from_slice(&chunk[..n]);
+    }
+    Ok(String::from_utf8_lossy(&buf[head_end..head_end + len]).to_string())
+}
+
+fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    hay.windows(needle.len()).position(|w| w == needle)
+}

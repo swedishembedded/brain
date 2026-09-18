@@ -292,3 +292,268 @@ pub fn draw_text(rgb: &mut [u8], w: u32, h: u32, x0: u32, y0: u32, text: &str, p
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+//  Panels, bars and plots
+//
+//  Enough of an immediate-mode drawing surface to build an instrument panel
+//  around a model's output: filled and outlined boxes, labelled bars, and a
+//  line plot with its own axis range.
+//
+//  Here rather than in the window crate on purpose. These are pure functions
+//  over an RGB8 buffer, so a headless run draws EXACTLY the panel a human sees
+//  and can write it to a PNG - which is what makes a screenshot in a README a
+//  measurement rather than an illustration, and what lets the whole overlay be
+//  unit-tested with no display attached.
+// ---------------------------------------------------------------------------
+
+/// Clamp a rect to the buffer and run `f(x, y, offset)` over every pixel in it.
+fn for_rect(w: u32, h: u32, x: i32, y: i32, rw: u32, rh: u32, mut f: impl FnMut(u32, u32, usize)) {
+    let x0 = x.max(0) as u32;
+    let y0 = y.max(0) as u32;
+    let x1 = ((x + rw as i32).max(0) as u32).min(w);
+    let y1 = ((y + rh as i32).max(0) as u32).min(h);
+    for yy in y0..y1 {
+        for xx in x0..x1 {
+            f(xx, yy, ((yy * w + xx) * 3) as usize);
+        }
+    }
+}
+
+/// Fill a rectangle with a solid colour.
+pub fn fill_rect(rgb: &mut [u8], w: u32, h: u32, x: i32, y: i32, rw: u32, rh: u32, c: [u8; 3]) {
+    for_rect(w, h, x, y, rw, rh, |_, _, o| {
+        if o + 2 < rgb.len() {
+            rgb[o] = c[0];
+            rgb[o + 1] = c[1];
+            rgb[o + 2] = c[2];
+        }
+    });
+}
+
+/// Blend a colour over a rectangle. `alpha` is 0..=255, 255 being opaque.
+///
+/// Panels sit ON the frame rather than beside it, so the game stays visible
+/// underneath a readout instead of being cropped by it.
+pub fn blend_rect(
+    rgb: &mut [u8],
+    w: u32,
+    h: u32,
+    x: i32,
+    y: i32,
+    rw: u32,
+    rh: u32,
+    c: [u8; 3],
+    alpha: u8,
+) {
+    let a = alpha as u32;
+    let ia = 255 - a;
+    for_rect(w, h, x, y, rw, rh, |_, _, o| {
+        if o + 2 < rgb.len() {
+            for k in 0..3 {
+                rgb[o + k] = ((rgb[o + k] as u32 * ia + c[k] as u32 * a) / 255) as u8;
+            }
+        }
+    });
+}
+
+/// Outline a rectangle, one pixel wide.
+pub fn stroke_rect(rgb: &mut [u8], w: u32, h: u32, x: i32, y: i32, rw: u32, rh: u32, c: [u8; 3]) {
+    fill_rect(rgb, w, h, x, y, rw, 1, c);
+    fill_rect(rgb, w, h, x, y + rh as i32 - 1, rw, 1, c);
+    fill_rect(rgb, w, h, x, y, 1, rh, c);
+    fill_rect(rgb, w, h, x + rw as i32 - 1, y, 1, rh, c);
+}
+
+/// A horizontal bar filled to `frac` of its width, on a darker track.
+///
+/// `frac` is clamped rather than asserted: these display live model output
+/// (a probability that summed to 1.0 in f32, a health fraction during a frame
+/// where the value changed), and a panic in the drawing code is a far worse
+/// outcome than a bar pinned at one end.
+pub fn bar(
+    rgb: &mut [u8],
+    w: u32,
+    h: u32,
+    x: i32,
+    y: i32,
+    rw: u32,
+    rh: u32,
+    frac: f32,
+    fg: [u8; 3],
+    track: [u8; 3],
+) {
+    fill_rect(rgb, w, h, x, y, rw, rh, track);
+    let f = frac.clamp(0.0, 1.0);
+    let filled = (rw as f32 * f).round() as u32;
+    if filled > 0 {
+        fill_rect(rgb, w, h, x, y, filled, rh, fg);
+    }
+}
+
+/// A line plot of `series` inside the given rect, auto-scaled to its own range.
+///
+/// Draws a zero line when the range spans it, because for a reward trace "above
+/// or below zero" is the first thing a reader wants and a plot that only shows
+/// shape cannot answer it.
+pub fn plot(
+    rgb: &mut [u8],
+    w: u32,
+    h: u32,
+    x: i32,
+    y: i32,
+    rw: u32,
+    rh: u32,
+    series: &[f32],
+    c: [u8; 3],
+) {
+    if rw < 2 || rh < 2 || series.is_empty() {
+        return;
+    }
+    let mut lo = f32::INFINITY;
+    let mut hi = f32::NEG_INFINITY;
+    for v in series {
+        if v.is_finite() {
+            lo = lo.min(*v);
+            hi = hi.max(*v);
+        }
+    }
+    if !lo.is_finite() || !hi.is_finite() {
+        return;
+    }
+    if (hi - lo).abs() < 1e-9 {
+        lo -= 0.5;
+        hi += 0.5;
+    }
+    let to_y = |v: f32| -> i32 {
+        let t = ((v - lo) / (hi - lo)).clamp(0.0, 1.0);
+        y + rh as i32 - 1 - (t * (rh - 1) as f32).round() as i32
+    };
+
+    if lo < 0.0 && hi > 0.0 {
+        fill_rect(rgb, w, h, x, to_y(0.0), rw, 1, [70, 70, 80]);
+    }
+
+    // One column per pixel: with more samples than columns each column shows
+    // the mean of its bucket, so a long run stays readable instead of aliasing
+    // down to whichever sample happened to land on a pixel.
+    let cols = rw as usize;
+    let mut prev: Option<i32> = None;
+    for col in 0..cols {
+        let a = series.len() * col / cols;
+        let b = (series.len() * (col + 1) / cols).max(a + 1).min(series.len());
+        if a >= series.len() {
+            break;
+        }
+        let bucket = &series[a..b];
+        let mean = bucket.iter().copied().filter(|v| v.is_finite()).sum::<f32>()
+            / bucket.len().max(1) as f32;
+        let yy = to_y(mean);
+        let xx = x + col as i32;
+        match prev {
+            // Join to the previous column so a steep change reads as a line
+            // rather than as two disconnected dots.
+            Some(py) => {
+                let (from, to) = if py <= yy { (py, yy) } else { (yy, py) };
+                fill_rect(rgb, w, h, xx, from, 1, (to - from + 1) as u32, c);
+            }
+            None => fill_rect(rgb, w, h, xx, yy, 1, 1, c),
+        }
+        prev = Some(yy);
+    }
+}
+
+/// Expand an indexed image through a 256-entry RGB palette, scaled `scale`x,
+/// into an RGB8 buffer at `(x, y)`.
+///
+/// The palette arrives with the pixels rather than being assumed: an engine
+/// that tints its own output (Doom's damage flash, a radiation suit) changes
+/// the palette and not the indices, so a fixed table would show the wrong
+/// picture at exactly the moments worth looking at.
+pub fn blit_indexed(
+    rgb: &mut [u8],
+    w: u32,
+    h: u32,
+    x: i32,
+    y: i32,
+    src: &[u8],
+    sw: u32,
+    sh: u32,
+    palette: &[u8],
+    scale: u32,
+) {
+    if palette.len() < 768 || scale == 0 {
+        return;
+    }
+    for sy in 0..sh {
+        for sx in 0..sw {
+            let Some(&idx) = src.get((sy * sw + sx) as usize) else {
+                return;
+            };
+            let p = idx as usize * 3;
+            let c = [palette[p], palette[p + 1], palette[p + 2]];
+            fill_rect(
+                rgb,
+                w,
+                h,
+                x + (sx * scale) as i32,
+                y + (sy * scale) as i32,
+                scale,
+                scale,
+                c,
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod panel_tests {
+    use super::*;
+
+    fn px(buf: &[u8], w: u32, x: u32, y: u32) -> [u8; 3] {
+        let o = ((y * w + x) * 3) as usize;
+        [buf[o], buf[o + 1], buf[o + 2]]
+    }
+
+    #[test]
+    fn drawing_outside_the_buffer_clips_instead_of_panicking() {
+        // Every one of these is a real call shape: a panel anchored to the
+        // right edge, a bar whose value overflowed, a plot in a window the
+        // user made smaller than the layout assumed.
+        let (w, h) = (16u32, 8u32);
+        let mut buf = vec![0u8; (w * h * 3) as usize];
+        fill_rect(&mut buf, w, h, -4, -4, 8, 8, [255, 0, 0]);
+        fill_rect(&mut buf, w, h, 12, 4, 100, 100, [0, 255, 0]);
+        stroke_rect(&mut buf, w, h, -2, 6, 40, 40, [0, 0, 255]);
+        bar(&mut buf, w, h, 0, 0, 10, 2, 7.5, [255, 255, 255], [10, 10, 10]);
+        plot(&mut buf, w, h, 0, 0, 40, 40, &[1.0, -1.0, f32::NAN], [255, 255, 0]);
+        assert_eq!(px(&buf, w, 0, 0), [255, 255, 255], "the bar clamped and filled");
+    }
+
+    #[test]
+    fn a_bar_shows_the_fraction_it_was_given() {
+        let (w, h) = (10u32, 1u32);
+        let mut buf = vec![0u8; (w * h * 3) as usize];
+        bar(&mut buf, w, h, 0, 0, 10, 1, 0.3, [255, 255, 255], [0, 0, 0]);
+        assert_eq!(px(&buf, w, 2, 0), [255, 255, 255]);
+        assert_eq!(px(&buf, w, 3, 0), [0, 0, 0]);
+    }
+
+    #[test]
+    fn an_indexed_blit_uses_the_palette_it_was_handed() {
+        // The tint case: the same indices through a different palette must
+        // produce a different picture, which is the whole reason the palette
+        // travels with the frame.
+        let (w, h) = (4u32, 4u32);
+        let mut buf = vec![0u8; (w * h * 3) as usize];
+        let src = [1u8, 1, 1, 1];
+        let mut pal = vec![0u8; 768];
+        pal[3..6].copy_from_slice(&[10, 20, 30]);
+        blit_indexed(&mut buf, w, h, 0, 0, &src, 2, 2, &pal, 2);
+        assert_eq!(px(&buf, w, 3, 3), [10, 20, 30]);
+
+        pal[3..6].copy_from_slice(&[200, 0, 0]);
+        blit_indexed(&mut buf, w, h, 0, 0, &src, 2, 2, &pal, 2);
+        assert_eq!(px(&buf, w, 3, 3), [200, 0, 0]);
+    }
+}
