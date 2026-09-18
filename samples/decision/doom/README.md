@@ -127,11 +127,22 @@ doom train $D --arena 3 --skill 2 --mission clear --max-steps 120 \
   --iterations 10 --episodes 10 --warmup 14 --warmup-keep 0.6 \
   --save out/doom-arena.safetensors
 
-# Learn to FINISH THE LEVEL: start at the exit and walk the start back.
+# Learn to FINISH THE LEVEL from the level's own spawn.
+doom train $D --mission speedrun --max-steps 260 \
+  --iterations 12 --episodes 8 --warmup 12 --warmup-keep 0.7 \
+  --save out/doom-spawn.safetensors
+
+# The same, from a reverse curriculum: start AT the exit and walk the start
+# back as the policy keeps finishing. Worth it when the teacher cannot
+# finish the level on its own, which on a new map it may not.
 doom train $D --curriculum --mission speedrun --max-steps 100 \
   --iterations 14 --episodes 10 --warmup 12 --warmup-keep 0.7 \
   --save out/doom-curriculum.safetensors
 ```
+
+A flag nothing recognises stops the run rather than warning: `--warmup-episodes`
+for `--warmup` is otherwise a training run whose output says nothing about
+having ignored it.
 
 Each ends by scoring the trained policy AND the scripted player over the same
 episodes, which is the only comparison that means anything.
@@ -250,6 +261,88 @@ Four details in there are load-bearing, and each was wrong once:
   and the policy cannot remember - every decision is an independent forward
   pass. Leaving it out is what made the first trained policy lose; see
   [run 1](#run-1---it-lost-to-the-scripted-player).
+
+## Where the route comes from
+
+This is worth being precise about, because "the model does pathfinding" would
+be a false claim and "the engine tells it where to go" would be a misleading
+one.
+
+**The geometry is solved in the engine, in a standard format.** The level's
+walkable floor is sampled onto a **uniform 32-unit grid** - half the player's
+width - and the engine computes, once per level:
+
+- `walk[]`, whether a 32-unit body fits in each cell;
+- `edges[]`, which of the eight steps out of each cell a player can take;
+- a **breadth-first distance field** over those steps, flooded from a standing
+  spot at the exit.
+
+The agent is then given two numbers from it: **how far the exit is along ground
+it can walk** and **which way to set off**, the latter by descending the field
+a few cells and aiming at the furthest point it could walk straight at. That is
+a waypoint, string-pulled - the classic grid-plus-funnel arrangement, not
+anything learned.
+
+**What is not in the engine is the decision.** The route is one option among
+the ones rebuilt every step, competing with attacking, taking a pickup, backing
+off, sidestepping, and opening a door. Nothing makes the agent follow it. That
+is the dilemma you actually face in a game: *the exit is 3400 units that way,
+there is a sergeant at 180 units, and a medikit 90 units off the path* - and
+that trade-off is the decision the model is trained to make. A route solves
+"which way is the exit", which is geometry and has a right answer. It does not
+solve "is the exit what I should be doing", which does not.
+
+A sector graph was tried first and was wrong: sector adjacency says two sectors
+share a line, not that a body can get between them, and a follower oscillated
+for 400 decisions inside one convex room. The grid replaced it.
+
+Four bugs in the grid are worth knowing about, because each produced an agent
+that looked broken while every probe said the floor was clear:
+
+- **A sight ray is not a body.** Every crossing test started as a ray, and a
+  ray is a point: it threads gaps a 32-unit body wedges in. Testing one point
+  across the gap is not enough either - a doorway exactly the player's width
+  fails whenever its middle lands on a cell boundary, which is an accident of
+  where the level sits on the grid.
+- **Steps have to exist in both directions.** A traverse between two points is
+  not bit-for-bit the same run in reverse, so asking from each end in turn gave
+  128 one-way steps on E1M1. A breadth-first field over a graph like that has
+  **local minima** - a cell one step further from the exit than its neighbour,
+  with no step to it - and the descent stops dead while the field itself looks
+  perfectly sensible.
+- **Diagonals cut corners.** Both cells either side of a corner being roomy
+  says nothing about getting between them. A diagonal is only allowed where one
+  of the two L-shaped ways round it is allowed, as steps.
+- **Seeding at the exit line's midpoint puts the seed inside a wall**, and any
+  walkable spot can be a sealed pocket on the far side of the switch. The seed
+  is chosen from the spots the player can actually reach.
+
+### Doors
+
+The route runs **through** shut doors, on purpose, because a player opens them.
+So "the way out starts 7 degrees to your right" while the player cannot walk
+there is the normal state of affairs at every door in the game, and an agent
+told only a bearing can do nothing but press into it - which is exactly what it
+did, at the first door 1400 units from E1M1's spawn, for the rest of every
+episode.
+
+The observation now names what is in the way and whether pressing use will open
+it, and there is an option aimed at the door. Aimed matters: `use` reaches 64
+units in the direction the player is **facing**, so a generic "push on the wall
+in front of you" is useless against a door off to one side. Facing it and
+opening it are separate decisions, and the option holds for thirty tics because
+that is what a door needs to rise - pressing again while it moves sends it back
+down.
+
+### Slime
+
+Nukage and lava end a run as surely as a monster does, and the straight way
+across E1M1's big room is through the slime: health drained from 106 to 0 over
+five hundred decisions with almost none of it from monsters. Three things
+handle it. The distance field **excludes damaging sectors**, falling back to
+allowing them only when that leaves the exit unreachable. The observation says
+`standingInDamage` so the agent knows why it is losing health. And the scripted
+teacher treats standing in damage as overriding everything else.
 
 ## Learning to navigate rather than learning to walk into walls
 
@@ -493,6 +586,38 @@ The curriculum did not solve navigation. It removed the need for it, by making
 the path short enough that local information suffices. That distinction is the
 whole of the remaining work.
 
+#### Run 6 - from the level's own spawn, which is the only run that counts
+
+Runs 4 and 5 both start the episode somewhere convenient: run 4 places monsters
+around the player, run 5 places the player near the exit. Neither is E1M1.
+Starting at the level's own spawn, the scripted player had **never once**
+reached the exit, and a warm start cannot clone a demonstration that does not
+exist.
+
+It was not the reward, the horizon, the curriculum or the model. It was four
+bugs in the route and one in the option list, and each of them produced an
+agent that looked broken while every probe reported open floor:
+
+| what was wrong | what it looked like |
+|---|---|
+| steps existed one way and not the other | the field had local minima; the route said "no route at all" 400 units from the spawn |
+| diagonals cut corners the straight steps forbid | turned into a wall, slid along it, was sent back, forever |
+| the crossing test was a sight ray | a route pointing confidently at a wall 20 units ahead |
+| `use` is aimed, and the route runs through shut doors | pressed forward against E1M1's first door for the rest of every episode |
+| a fixed stride past a 21-unit waypoint | bounced between two cells 45 units apart, bearing swinging 133 degrees |
+
+With those fixed, from E1M1's own spawn, under `speedrun` orders:
+
+```
+step  100  hp 107  kills 3/6  items 17  return +15.18  alive
+step  160  hp 107  kills 5/6  items 17  return +23.14  alive
+step  192  hp 107  kills 5/6  items 17  return +41.25  exited
+```
+
+**192 decisions, five of six monsters dead, 107 health, level ended.** Three
+doors opened on the way. That is the scripted player - the bar the policy has
+to clear - and it is the first time it has existed at all.
+
 #### Where that leaves it
 
 Five runs, and the shape of the story is that **every one of the problems was in
@@ -505,11 +630,13 @@ the experiment rather than in the model**:
 | 3 | one mission, 250 decisions | game score ahead, zero kills for EITHER player |
 | 4 | arena start | **+0.78 return** over the scripted player |
 | 5 | reverse curriculum | **completes the level, 10 of 10 episodes** |
+| 6 | the route the teacher follows is fixed | **the scripted player finishes E1M1 from its own spawn** |
 
-Not one of those five changes was a hyperparameter. They were: a reward that
+Not one of those six changes was a hyperparameter. They were: a reward that
 paid for walking into walls, an observation missing the history the teacher
-decided on, an episode that never reached combat, and a goal reward that never
-fired. The model and the training loop were the same throughout.
+decided on, an episode that never reached combat, a goal reward that never
+fired, and a route with dead ends in it. The model and the training loop were
+the same throughout.
 
 ### What would move this next
 
@@ -537,9 +664,18 @@ In the order the measurements point at, not in the order they are interesting:
 
 ## What is not claimed
 
-- **"Completes E1M1" means from a curriculum start, not from the level spawn.**
-  The policy finishes 9 of 10 episodes beginning a bounded random walk from the
-  exit. Walking the curriculum back to the real spawn is the remaining work.
+- **The run from E1M1's own spawn is the SCRIPTED player, not the policy.** It
+  starts where the level starts, kills five of six monsters, opens three doors
+  and ends the level in 192 decisions, in one continuous episode. That is the
+  bar, and it is what the recorded video shows. The trained policy finishes
+  from a curriculum start, and training one from the spawn now that a
+  demonstration of finishing exists is the next run, not a result.
+- **E1M2 and E1M3 cannot be routed at all**, and the engine says why: the
+  exit's own side of the level is 216 cells on one and 48 on the other, walled
+  off from everything the player can reach. A distance field over geometry
+  cannot cross a teleporter or a wall that a switch lowers, and that is what
+  those two exits are behind. Transfer to an unseen map is a fair question and
+  this is not yet a fair test of it.
 - **The fighting policy and the finishing policy are different runs.** Nothing
   here yet trains one policy that does both.
 - The sentence encoder is frozen by default (`--train-encoder` to change it):
@@ -549,8 +685,9 @@ In the order the measurements point at, not in the order they are interesting:
 - `--mix` trains one policy over three missions; whether it has learned to
   *read* the instruction rather than average over them is measured by scoring
   it per mission, which is what `eval --mission` does.
-- Only E1M1 is exercised. `--map` accepts the rest of the shareware episode,
-  and a policy that only works on one map has memorised it.
+- Only E1M1 is exercised end to end. `--map` accepts the rest of the shareware
+  episode and the scripted player explores them, but see the routing note
+  above: on E1M2 and E1M3 it is exploring, not heading anywhere.
 
 ---
 

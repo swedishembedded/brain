@@ -43,6 +43,19 @@ if [ ! -x "$doom_src/src/restful-doom" ]; then
   exit 1
 fi
 doom_bin="$doom_src/src/restful-doom"
+
+# The sample needs a specific set of agent endpoints, and an engine without
+# them does not fail - it answers, with fields missing. The route then reads as
+# "this level has no exit" and the run looks like a policy that will not leave
+# the spawn. Checking the strings in the binary is crude and it is instant.
+for route in api/state api/step api/episode api/frame api/map api/route; do
+  if ! grep -qa -- "$route" "$doom_bin"; then
+    echo "   $doom_bin has no $route endpoint." >&2
+    echo "   This is an older engine than the sample needs. Pull $DOOM_REPO" >&2
+    echo "   again and rebuild:  ( cd $doom_src && git pull && make -j\$(nproc) )" >&2
+    exit 1
+  fi
+done
 echo "   engine: $doom_bin"
 
 # ------------------------------------------------------------------ the WAD
