@@ -89,7 +89,7 @@ here (items already tracked there are not repeated - see that file's own
 | 5 | 6 | `crates/sdk/src/error.rs:70-71` | `Error::Cancelled` is a dead public variant - unreachable with no public cancel entry point | fixed (M5) |
 | 6 | 8 | crate-wide | no `.capabilities()`/manifest introspection anywhere in `crates/sdk` | fixed (M8) |
 | 7 | 9 | crate-wide | no training/finetune entry point at all in `crates/sdk` (the adjacent Dataset-layer gap is tracked in `sdk.md`; the missing training call itself was not) | open (Phase 2, per-pipeline) |
-| 8 | 9/4 | `crates/sdk/src/creature.rs:492-500` | `set_plasticity`/`reward` mutate learned synapse weights with no `save()`/`load()` counterpart - all learning dies with the process | open (backlog) |
+| 8 | 9/4 | `crates/sdk/src/creature.rs:492-500` | `set_plasticity`/`reward` mutate learned synapse weights with no `save()`/`load()` counterpart - all learning dies with the process | fixed (M11) |
 | 9 | 7 | `crates/sdk/src/creature.rs:157` | `Creature::build` acquires its GPU via `gpu_core::testgpu::dev` - TEST-SUPPORT infra, weak-reference lifetime, shipping on the production SDK path | fixed (M3) |
 | 10 | 7/13 | `crates/sdk/src/creature.rs` + `Cargo.toml` | `CreatureBuilder` has no `Device` knob at all, yet the `creature` feature's doc comment claims it "selects `device`" | fixed (M3) |
 | 11 | 5 | `crates/sdk/src/pipeline.rs:416-424,432-435` | `ImagePipelineBuilder::size` is silently IGNORED on a flux2-backed pipeline (the s3dit half of this asymmetry is tracked in `sdk.md`; the flux2 silent no-op was not) | fixed (M10b) |
@@ -386,6 +386,27 @@ including the `samples/imagegen/*` samples that link `crates/sdk` directly.
       test possible past this point without a real multi-GB flux2 build (the
       same documented ceiling `tests/image_pipeline.rs`'s own module doc
       explains).
+- [x] **M11** - finding 8: `set_plasticity`/`reward` mutate a `Creature`'s
+      learned synapse weights with no way to persist them - all learning
+      died with the process, CLI included, since `fly::Fly` already exposes
+      the raw state (`weights()`/`set_weights()`) but nothing in this
+      workspace ever wired a save/load path onto it. Added
+      `Creature::weights`/`set_weights`/`save_weights`/`load_weights`, the
+      last two as a one-tensor safetensors checkpoint
+      (`checkpoint::st::save_safetensors`/`load_safetensors`) - the same
+      format every other numeric-vector checkpoint in this workspace uses,
+      not a bespoke binary format, and free in the `creature` feature's
+      build graph (`brain-checkpoint` was already a transitive dependency
+      via `brain-fly`/`brain-connectome`, confirmed via `cargo tree`).
+      `weights_tensor`, the `"weights"`-tensor lookup, is factored out
+      testable with no real `Creature`/GPU/MuJoCo handle in hand (2 unit
+      tests); `tests/creature.rs` gained
+      `save_and_load_weights_round_trips_through_a_real_connectome`,
+      gated on the same `BRAIN_CONNECTOME_DIR`/`BRAIN_FLYBODY_XML` env vars
+      the file's other real-fixture tests already use - it ran for real (not
+      skipped) in this session's environment, perturbing the weights before
+      saving so a bug that silently kept the OLD weights could not pass by
+      coincidence.
 - [ ] **Phase 2** - new pipelines, in the priority order above: Forecast, Text, Embedding, ASR, then the rest. Each gets its own sub-roadmap section here (or its own file, linked from here) when it starts, written against the full `sdk-design.md` checklist from day one - including an end-to-end test, learning from M10 rather than repeating the `flux2_cli.rs` duplication gap a second time. Design each pipeline's progress/cancellation surface (rule 8) toward the `run.start()/subscribe()/cancel()/result()` shape `.agents/roadmap/orchestration-hsm.md` proposes, rather than reinventing M5's synchronous `generate_with_progress(cancel, on_progress)` a second time - M5's shape stays the right SIMPLE default, but a new pipeline's ADVANCED tier should point at where this is heading.
   - [x] **Phase 2.1** - `ForecastPipeline` (kronos, timesfm3).
   - [x] **Phase 2.2** - `TextGenerationPipeline` (qwen3 only, local path only at first).

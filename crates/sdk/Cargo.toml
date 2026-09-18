@@ -64,7 +64,7 @@ forecast = ["resolve", "dep:brain-forecast", "dep:brain-kronos", "dep:brain-time
 # `<vendor>/<repo>` checkpoint, so it is loaded from a path rather than through
 # the model store. When that changes this feature gains `resolve`, not a
 # parallel resolver.
-creature = ["device", "dep:brain-fly", "dep:brain-connectome", "dep:brain-flybody", "dep:brain-mujoco", "dep:brain-neuro", "dep:brain-wm-display", "dep:tempfile"]
+creature = ["device", "dep:brain-fly", "dep:brain-connectome", "dep:brain-flybody", "dep:brain-mujoco", "dep:brain-neuro", "dep:brain-wm-display", "dep:tempfile", "dep:brain-checkpoint", "dep:serde_json"]
 # `brain::TextGenerationPipeline`. Covers qwen3 only. Accepts a literal local
 # checkpoint path OR a `<vendor>/<repo>` hub id (through `crates/qwen3`'s own
 # `qwen3::spec::Qwen3Spec`, same as every resolver-backed pipeline) - a local

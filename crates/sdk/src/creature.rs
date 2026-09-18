@@ -53,6 +53,15 @@ fn missing_argument(e: String) -> Error {
     Error::MissingArgument(e)
 }
 
+/// [`Creature::load_weights`]'s tensor lookup, factored out so it is
+/// testable with no real `Creature`/GPU/MuJoCo handle in hand: a
+/// [`checkpoint::st::StModel`] with no `"weights"` tensor -- a checkpoint
+/// saved by something other than [`Creature::save_weights`] -- is a named
+/// [`Error::Backend`], never a panic.
+fn weights_tensor(model: &checkpoint::st::StModel, display: &str) -> Result<Vec<f32>, Error> {
+    model.tensors.get("weights").cloned().ok_or_else(|| Error::Backend(format!("{display}: no 'weights' tensor")))
+}
+
 /// How a creature is assembled. Values, not features: a step count and a
 /// weight scale are configuration, and configuration belongs in a builder.
 pub struct CreatureBuilder {
@@ -709,6 +718,53 @@ impl Creature {
         self.inner.modulate(delta);
     }
 
+    /// The cord's current synaptic weights: `fly::Fly::weights`'s raw,
+    /// per-edge vector -- what [`Creature::set_plasticity`]/[`Creature::reward`]
+    /// actually mutate, not a coarse per-class summary.
+    pub fn weights(&self) -> Vec<f32> {
+        self.inner.weights()
+    }
+
+    /// Overwrite the cord's synaptic weights directly.
+    /// `w.len()` must equal this creature's own connectome edge count
+    /// (`self.weights().len()`) -- a mismatch is a named [`Error::Backend`],
+    /// never a panic (`fly::Fly::set_weights`'s own contract).
+    pub fn set_weights(&mut self, w: &[f32]) -> Result<(), Error> {
+        self.inner.set_weights(w).map_err(Error::Backend)
+    }
+
+    /// Persist [`Creature::weights`] to `path`, as a one-tensor safetensors
+    /// checkpoint (`"weights"`, `[len]`, F32) -- the same format every
+    /// other numeric-vector checkpoint in this workspace uses
+    /// (`checkpoint::st::save_safetensors`), so what [`Creature::set_plasticity`]/
+    /// [`Creature::reward`] learned survives the process instead of dying
+    /// with it: no save/load counterpart existed anywhere in the
+    /// workspace, CLI included, before this.
+    pub fn save_weights(&self, path: impl AsRef<std::path::Path>) -> Result<(), Error> {
+        let path = path.as_ref();
+        let display = path.display().to_string();
+        let name = path.to_str().ok_or_else(|| Error::Backend(format!("{display}: not valid UTF-8")))?;
+        let w = self.weights();
+        let len = w.len() as u64;
+        checkpoint::st::save_safetensors(name, &[("weights".to_string(), vec![len], w)], &serde_json::json!({}), None).map_err(|e| Error::Backend(format!("{display}: {e}")))
+    }
+
+    /// [`Creature::save_weights`]'s counterpart: read a one-tensor
+    /// safetensors checkpoint's `"weights"` tensor back and apply it via
+    /// [`Creature::set_weights`]. Refuses cleanly (never a panic) on a
+    /// checkpoint with no `"weights"` tensor, or one whose length does not
+    /// match this creature's own connectome edge count -- a checkpoint
+    /// saved from a different dataset/wiring than the one this creature was
+    /// built with.
+    pub fn load_weights(&mut self, path: impl AsRef<std::path::Path>) -> Result<(), Error> {
+        let path = path.as_ref();
+        let display = path.display().to_string();
+        let name = path.to_str().ok_or_else(|| Error::Backend(format!("{display}: not valid UTF-8")))?;
+        let model = checkpoint::st::load_safetensors(name).map_err(|e| Error::Backend(format!("{display}: {e}")))?;
+        let w = weights_tensor(&model, &display)?;
+        self.set_weights(&w)
+    }
+
     /// Deliver an appetitive reinforcer as current into the dopaminergic cells
     /// that carry it, the way the optogenetic experiments do.
     ///
@@ -780,4 +836,35 @@ pub struct Beat {
     pub cord: std::time::Duration,
     /// Wall time spent in the body's physics, over the same ticks.
     pub body: std::time::Duration,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::{BTreeMap, HashMap};
+
+    fn model_with(tensors: HashMap<String, Vec<f32>>) -> checkpoint::st::StModel {
+        checkpoint::st::StModel { tensors, metadata: BTreeMap::new() }
+    }
+
+    /// [`Creature::save_weights`]/[`Creature::load_weights`]'s whole point:
+    /// a checkpoint carrying a `"weights"` tensor round-trips it exactly.
+    #[test]
+    fn weights_tensor_reads_a_present_tensor_back() {
+        let model = model_with(HashMap::from([("weights".to_string(), vec![1.0, -2.5, 3.0])]));
+        assert_eq!(weights_tensor(&model, "test.safetensors").unwrap(), vec![1.0, -2.5, 3.0]);
+    }
+
+    /// A checkpoint saved by something other than [`Creature::save_weights`]
+    /// (no `"weights"` tensor at all) is a named [`Error::Backend`] naming
+    /// the path, never a panic.
+    #[test]
+    fn weights_tensor_refuses_a_checkpoint_with_no_weights_tensor_by_name() {
+        let model = model_with(HashMap::from([("something_else".to_string(), vec![0.0])]));
+        let err = weights_tensor(&model, "no-weights.safetensors").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("no-weights.safetensors"), "{msg}");
+        assert!(msg.contains("weights"), "{msg}");
+        assert!(matches!(err, Error::Backend(_)));
+    }
 }
