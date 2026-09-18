@@ -36,6 +36,8 @@
 
 use std::sync::{Arc, Mutex};
 
+use capability::presentation::maturity;
+use capability::ModelPresentation;
 use capability::{
     Action, ActionResult, ActionSpec, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType, Progress,
     Provider,
@@ -84,6 +86,17 @@ pub fn segment_spec() -> ActionSpec {
 /// The full, static capability manifest — safe to build with no weights loaded.
 pub fn manifest() -> Manifest {
     Manifest::new(MODEL, "SAM 2.1 promptable segmentation (image path): points and boxes -> masks.", vec![segment_spec()])
+        .with_presentation(
+            ModelPresentation::default()
+                .display_name("SAM 2.1")
+                .vendor("Meta")
+                .family("SAM")
+                .version("2.1")
+                .task_tags(&["segmentation"])
+                .maturity(maturity::STABLE)
+                .default_action("segment")
+                .license("apache-2.0"),
+        )
 }
 
 /// Read a SAM 2.1 release checkpoint (`sam2.1_hiera_*.pt`, or an equivalent

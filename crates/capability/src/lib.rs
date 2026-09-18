@@ -36,6 +36,9 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 
 pub mod blob;
+pub mod presentation;
+
+pub use presentation::{ActionPresentation, ModelPresentation};
 
 // ===================== descriptors (the self-describing schema) =====================
 
@@ -239,11 +242,15 @@ pub struct ActionSpec {
     pub outputs: Vec<BlobSpec>,
     /// Whether the action emits progress updates while running.
     pub streaming: bool,
+    /// How this action should be presented and what encodings it accepts -
+    /// see [`presentation`]. Same all-absent default as
+    /// [`Manifest::presentation`].
+    pub presentation: ActionPresentation,
 }
 
 impl ActionSpec {
     pub fn new(name: &str, summary: &str) -> ActionSpec {
-        ActionSpec { name: name.into(), summary: summary.into(), params: Vec::new(), inputs: Vec::new(), outputs: Vec::new(), streaming: false }
+        ActionSpec { name: name.into(), summary: summary.into(), params: Vec::new(), inputs: Vec::new(), outputs: Vec::new(), streaming: false, presentation: ActionPresentation::default() }
     }
     pub fn param(mut self, p: ParamSpec) -> ActionSpec {
         self.params.push(p);
@@ -261,13 +268,23 @@ impl ActionSpec {
         self.streaming = true;
         self
     }
+    /// Builder setter for [`Self::presentation`].
+    pub fn with_presentation(mut self, presentation: ActionPresentation) -> ActionSpec {
+        self.presentation = presentation;
+        self
+    }
     pub fn to_json(&self) -> Value {
-        json!({
+        let mut v = json!({
             "name": self.name, "summary": self.summary, "streaming": self.streaming,
             "params": self.params.iter().map(|p| p.to_json()).collect::<Vec<_>>(),
             "inputs": self.inputs.iter().map(|b| b.to_json()).collect::<Vec<_>>(),
             "outputs": self.outputs.iter().map(|b| b.to_json()).collect::<Vec<_>>(),
-        })
+        });
+        let presentation = self.presentation.to_json();
+        if !presentation.is_null() {
+            v["presentation"] = presentation;
+        }
+        v
     }
 
     /// This action as a REMOTE caller sees it: every host-resolved param
@@ -385,17 +402,30 @@ pub struct Manifest {
     /// server admits it, then rejects it after already paying the connection
     /// setup cost). `None` for non-chat models, or when not yet known.
     pub max_context_tokens: Option<u64>,
+    /// What this model is CALLED, who made it, and what kind of task it
+    /// performs - see [`presentation`]. Defaults to all-absent, which
+    /// serializes to nothing, so a manifest that declares none of it is
+    /// byte-identical on the wire to one from before this field existed.
+    pub presentation: ModelPresentation,
 }
 
 impl Manifest {
     pub fn new(model: &str, summary: &str, actions: Vec<ActionSpec>) -> Manifest {
-        Manifest { model: model.into(), summary: summary.into(), actions, max_context_tokens: None }
+        Manifest { model: model.into(), summary: summary.into(), actions, max_context_tokens: None, presentation: ModelPresentation::default() }
     }
     /// Builder setter for [`Self::max_context_tokens`]. Kept as a separate
     /// setter (rather than a `new()` parameter) so the other ~35 existing
     /// `Manifest::new()` call sites across non-chat model kinds are untouched.
     pub fn with_max_context_tokens(mut self, tokens: u64) -> Manifest {
         self.max_context_tokens = Some(tokens);
+        self
+    }
+    /// Builder setter for [`Self::presentation`], kept separate from
+    /// `new()` for exactly the reason the setter above is: the ~35 existing
+    /// `Manifest::new()` call sites stay untouched, and a model opts in to
+    /// describing itself rather than being forced to.
+    pub fn with_presentation(mut self, presentation: ModelPresentation) -> Manifest {
+        self.presentation = presentation;
         self
     }
     /// This manifest as a REMOTE caller sees it - [`ActionSpec::for_serving`]
@@ -411,6 +441,10 @@ impl Manifest {
         let mut v = json!({ "model": self.model, "summary": self.summary, "actions": self.actions.iter().map(|a| a.to_json()).collect::<Vec<_>>() });
         if let Some(t) = self.max_context_tokens {
             v["max_context_tokens"] = json!(t);
+        }
+        let presentation = self.presentation.to_json();
+        if !presentation.is_null() {
+            v["presentation"] = presentation;
         }
         v
     }

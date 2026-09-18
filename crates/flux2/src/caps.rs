@@ -15,6 +15,8 @@
 //! unless `BRAIN_FLUX2_ALLOW_NC=1`, and print the attribution notice once when
 //! enabled.
 
+use capability::presentation::maturity;
+use capability::ModelPresentation;
 use capability::{ActionSpec, BlobSpec, Manifest, Media, ParamSpec, ParamType};
 use serde_json::json;
 
@@ -99,6 +101,19 @@ pub fn manifest() -> Manifest {
         MODEL,
         "FLUX.2 Klein (Black Forest Labs) — MMDiT text-to-image + reference-image editing (4B/9B, distilled klein + undistilled base), with LoRA personalisation.",
         vec![text2image, edit, lora_train],
+    )
+    .with_presentation(
+        ModelPresentation::default()
+            .display_name("FLUX.2 Klein")
+            .vendor("Black Forest Labs")
+            .family("FLUX.2")
+            .version("Klein")
+            .task_tags(&["image-generation", "image-editing", "lora-training"])
+            .maturity(maturity::STABLE)
+            .default_action("text2image")
+            // The 9B weights are non-commercial; a caller deploying this
+            // has to know before it runs, not after.
+            .license("flux-2-nc"),
     )
 }
 

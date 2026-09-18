@@ -22,6 +22,8 @@
 
 use std::sync::{Arc, Mutex};
 
+use capability::presentation::maturity;
+use capability::ModelPresentation;
 use capability::{
     Action, ActionResult, ActionSpec, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec,
     ParamType, Progress, Provider,
@@ -64,6 +66,17 @@ pub fn manifest() -> Manifest {
         MODEL,
         "Real-ESRGAN x4 super-resolution (the RRDBNet generator; the discriminator is training-only).",
         vec![upscale_spec()],
+    )
+    .with_presentation(
+        ModelPresentation::default()
+            .display_name("Real-ESRGAN")
+            .vendor("Tencent ARC")
+            .family("Real-ESRGAN")
+            .version("x4")
+            .task_tags(&["upscale", "restoration"])
+            .maturity(maturity::STABLE)
+            .default_action("upscale")
+            .license("bsd-3-clause"),
     )
 }
 
