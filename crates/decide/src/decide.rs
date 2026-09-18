@@ -76,6 +76,9 @@ pub struct Decide {
     head_opt: Option<optim::Optim>,
     step: u32,
     frozen_encoder: bool,
+    /// How many leading spans of the last call were state windows - what
+    /// `state_embedding` has to pool over.
+    last_windows: usize,
 }
 
 /// A request laid out for the device: the packed token stream, where each
@@ -151,6 +154,7 @@ impl Decide {
             head_opt: train.then(|| ids.optimizer()),
             step: 0,
             frozen_encoder: false,
+            last_windows: 1,
             }
     }
 
@@ -238,6 +242,7 @@ impl Decide {
 
     /// Encode a packed request and score every option, flat and in pack order.
     pub fn run_packed(&mut self, req: &Request) -> Vec<f32> {
+        self.last_windows = req.packed.windows;
         self.enc.set_batch(&req.packed.ids, &req.packed.types, &req.packed.spans);
         self.enc.forward();
         // MUST NOT BE REMOVED. The head holds a different `Gpu` handle to the
@@ -351,7 +356,34 @@ impl Decide {
     /// feature a critic is fitted on when the encoder is frozen.
     pub fn state_embedding(&self) -> Vec<f32> {
         let h = self.cfg.d_model as usize;
-        self.enc.pooled_mean()[..h].to_vec()
+        let pooled = self.enc.pooled_mean();
+        let spans = self.enc.spans();
+        // EVERY state window, length-weighted - not just the first.
+        //
+        // This returned `pooled[..h]`, the first window alone. A conversation
+        // averages nearly two windows here, so the embedding covered roughly
+        // its first half and missed the closing turns - which on this task
+        // carry almost all of the signal. A linear probe on it scored 0.569
+        // where the same probe on a whole-conversation embedding scores much
+        // higher, and nothing said so: a partial embedding is a perfectly
+        // ordinary-looking vector.
+        //
+        // Windows overlap by design, so their shared tokens count twice in
+        // this mean. That is a small bias toward the middle of a conversation
+        // and far smaller than ignoring its second half.
+        let windows = self.last_windows.max(1).min(spans.len());
+        let total: f32 = spans[..windows].iter().map(|&(_, l)| l as f32).sum();
+        if total <= 0.0 {
+            return pooled[..h].to_vec();
+        }
+        let mut out = vec![0.0f32; h];
+        for (w, &(_, len)) in spans[..windows].iter().enumerate() {
+            let k = len as f32 / total;
+            for (c, o) in out.iter_mut().enumerate() {
+                *o += k * pooled[w * h + c];
+            }
+        }
+        out
     }
 
     /// The representations the confidence signals of [`crate::routing`] are

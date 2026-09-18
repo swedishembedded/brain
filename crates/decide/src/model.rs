@@ -540,6 +540,11 @@ impl Encoder {
         &self.bwd.as_ref().expect("seed_buf on an inference build").dx[self.cfg.n_layers as usize]
     }
 
+    /// The `(row0, len)` of each sequence in the current batch.
+    pub fn spans(&self) -> &[(u32, u32)] {
+        &self.spans
+    }
+
     /// This half's device handle - what a profiler times its steps on.
     pub fn gpu(&self) -> &Gpu {
         &self.gpu
