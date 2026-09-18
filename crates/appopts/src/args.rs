@@ -77,11 +77,32 @@ impl Args {
         }
         None
     }
-    /// Warn about any leftover (unrecognised) tokens. Call once at the end.
+    /// The tokens nothing claimed.
+    pub fn leftovers(&self) -> Vec<String> {
+        self.toks
+            .iter()
+            .zip(&self.used)
+            .filter(|(_, u)| !**u)
+            .map(|(t, _)| t.clone())
+            .collect()
+    }
+    /// Refuse to run with a flag nobody understood. Call once at the end.
+    ///
+    /// This used to print a line and carry on, which is the same failure mode
+    /// `--device` has its own test about: the job runs, it finishes, it prints
+    /// numbers, and the numbers are for a configuration nobody asked for.
+    /// `--warmup-episodes` for `--warmup` cost a training run that way, and
+    /// nothing in its output said so.
     pub fn finish(&self) {
-        let extra: Vec<&String> = self.toks.iter().zip(&self.used).filter(|(_, u)| !**u).map(|(t, _)| t).collect();
+        let extra = self.leftovers();
         if !extra.is_empty() {
-            eprintln!("ignoring unrecognised args: {extra:?}");
+            eprintln!(
+                "unrecognised: {}\n  nothing here understands that flag, and running \
+                 without it would run something other than what was asked for. \
+                 --help lists what there is.",
+                extra.join(" ")
+            );
+            std::process::exit(2);
         }
     }
 }

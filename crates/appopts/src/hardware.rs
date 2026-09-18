@@ -100,6 +100,18 @@ mod tests {
     }
 
     #[test]
+    fn a_flag_nobody_claimed_is_not_silently_dropped() {
+        // The same failure as a typo'd --device and just as quiet: the run
+        // completes, prints numbers, and the numbers are for a configuration
+        // nobody asked for.
+        let argv: Vec<String> =
+            ["--device", "cpu", "--warmup-episodes", "16"].iter().map(|s| s.to_string()).collect();
+        let mut args = Args::new(&argv);
+        Hardware::take(&mut args).expect("parses");
+        assert_eq!(args.leftovers(), vec!["--warmup-episodes", "16"]);
+    }
+
+    #[test]
     fn a_typo_is_an_error_not_a_silent_fallback() {
         // Running the whole job on every device because `--device gpu0` was
         // typed `--device gpu:0` is worse than not running it: the numbers
