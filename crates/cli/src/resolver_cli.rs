@@ -298,8 +298,17 @@ fn with_arch_spec<R>(arch: &str, f: impl FnOnce(&dyn ArchSpec) -> R) -> Option<R
         "flux1" => Some(f(&flux1::spec::Flux1Spec)),
         "llava" => Some(f(&llava::spec::LlavaSpec)),
         "pulid" => Some(f(&pulid::spec::PulidSpec)),
+        "vqgan" => Some(f(&vqgan::spec::VqganSpec)),
+        "sdxlunet" => Some(f(&sdxlunet::spec::SdxlunetSpec)),
+        "controlnet" => Some(f(&controlnet::spec::ControlnetSpec)),
+        "t5encoder" => Some(f(&t5encoder::spec::T5encoderSpec)),
         "cosyvoice" => Some(f(&cosyvoice::spec::CosyVoiceSpec)),
         "minimaxmusic3" => Some(f(&minimaxmusic3::spec::MinimaxMusic3Spec)),
+        "pulid" => Some(f(&pulid::spec::PulidSpec)),
+        "vqgan" => Some(f(&vqgan::spec::VqganSpec)),
+        "sdxlunet" => Some(f(&sdxlunet::spec::SdxlunetSpec)),
+        "controlnet" => Some(f(&controlnet::spec::ControlnetSpec)),
+        "t5encoder" => Some(f(&t5encoder::spec::T5encoderSpec)),
         _ => None,
     }
 }

@@ -449,10 +449,10 @@ pub fn models() -> Vec<ModelEntry> {
         },
         ModelEntry {
             manifest: vqgan::caps::manifest,
-            provider: from_env!(
-                vqgan::caps::VqganProvider::from_env,
-                "set BRAIN_VQGAN_WEIGHTS to an existing VQGAN checkpoint (or its directory)"
-            ),
+            provider: |assembly: &Assembly| {
+                let weights = assembly.role_path("weights")?;
+                Ok(Arc::new(vqgan::caps::VqganProvider::new(weights)) as Arc<dyn Provider>)
+            },
             resident: None,
         },
         ModelEntry {
@@ -504,28 +504,27 @@ pub fn models() -> Vec<ModelEntry> {
         },
         ModelEntry {
             manifest: t5encoder::caps::manifest,
-            provider: from_env!(
-                t5encoder::caps::T5encoderProvider::from_env,
-                "set BRAIN_T5ENCODER_DIR to a checkpoint root holding text_encoder_2/+tokenizer_2/ \
-                 (flux_xxl) and/or wan/ (wan_umt5)"
-            ),
+            provider: |assembly: &Assembly| {
+                let root = assembly.role_path("root")?;
+                Ok(Arc::new(t5encoder::caps::T5encoderProvider::new(root)) as Arc<dyn Provider>)
+            },
             resident: None,
         },
         ModelEntry {
             manifest: sdxlunet::caps::manifest,
-            provider: from_env!(
-                sdxlunet::caps::SdxlProvider::from_env,
-                "set BRAIN_SDXL_DIR to a released diffusers SDXL checkpoint root holding unet/"
-            ),
+            provider: |assembly: &Assembly| {
+                let root = assembly.role_path("root")?;
+                Ok(Arc::new(sdxlunet::caps::SdxlProvider::new(root)) as Arc<dyn Provider>)
+            },
             resident: None,
         },
         ModelEntry {
             manifest: controlnet::caps::manifest,
-            provider: from_env!(
-                controlnet::caps::ControlnetProvider::from_env,
-                "set BRAIN_SDXL_DIR (the backbone) and BRAIN_CONTROLNET_DIR (a released \
-                 diffusers SDXL ControlNetModel checkpoint)"
-            ),
+            provider: |assembly: &Assembly| {
+                let sdxl = assembly.role_path("sdxl")?;
+                let control = assembly.role_path("control")?;
+                Ok(Arc::new(controlnet::caps::ControlnetProvider::new(sdxl, control)) as Arc<dyn Provider>)
+            },
             resident: None,
         },
         // SUPIR photo-realistic restoration: a frozen SDXL backbone
@@ -557,10 +556,18 @@ pub fn models() -> Vec<ModelEntry> {
         },
         ModelEntry {
             manifest: pulid::caps::manifest,
-            provider: from_env!(
-                pulid::caps::PulidProvider::from_env,
-                "set BRAIN_FLUX1_DIR, BRAIN_PULID_DIR, BRAIN_ARCFACE_DIR, BRAIN_CLIP_DIR and BRAIN_BISENET_DIR"
-            ),
+            // Five roles, and they are not all the same shape: `flux1` is a
+            // released pipeline ROOT and `pulid` is the adapter FILE
+            // `import::read` opens, while `arcface`/`clip`/`bisenet` are
+            // directories their loaders join a published filename onto.
+            provider: |assembly: &Assembly| {
+                let flux1 = assembly.role_path("flux1")?;
+                let pulid_w = assembly.role_path("pulid")?;
+                let arcface = role_dir(assembly, "arcface")?;
+                let clip = role_dir(assembly, "clip")?;
+                let bisenet = role_dir(assembly, "bisenet")?;
+                Ok(Arc::new(pulid::caps::PulidProvider::new(flux1, pulid_w, arcface, clip, bisenet)) as Arc<dyn Provider>)
+            },
             resident: None,
         },
         // DeepSeek-OCR: a document image in, decoded text out. Multi-file

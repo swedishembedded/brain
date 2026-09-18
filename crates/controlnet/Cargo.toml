@@ -33,6 +33,7 @@ brain-imaging.workspace = true
 # `brain-clip`/`brain-diffusion` dependency - only the VAE decode is still
 # driven directly from here.
 brain-capability.workspace = true
+brain-modelstore.workspace = true # spec: model-store resolution of the backbone + control pair
 brain-vae.workspace = true
 serde_json.workspace = true
 

@@ -99,4 +99,5 @@ pub mod config;
 pub mod hostbias;
 pub mod import;
 pub mod model;
+pub mod spec;
 pub mod train;

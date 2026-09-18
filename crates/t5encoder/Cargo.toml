@@ -21,6 +21,7 @@ brain-checkpoint.workspace = true
 # same tokenizer for the served `encode` action.
 brain-data.workspace = true
 brain-capability.workspace = true
+brain-modelstore.workspace = true # spec: model-store resolution of either released layout
 serde_json.workspace = true
 
 [dev-dependencies]

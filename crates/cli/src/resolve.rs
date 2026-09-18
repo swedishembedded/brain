@@ -358,6 +358,13 @@ const RESOLVER_MIGRATED_ARCHS: &[&str] = &[
     "clip",
     "florence2",
     "flux1",
+    "pulid",
+    "vqgan",
+    "sdxlunet",
+    "controlnet",
+    "t5encoder",
+    "cosyvoice",
+    "minimaxmusic3",
 ];
 
 fn dispatch_arch(arch: &str, rest: Vec<String>) {
@@ -622,6 +629,54 @@ mod tests {
             .collect();
         let missing: Vec<&str> = generic.iter().copied().filter(|a| !crate::resolver_cli::has_arch_spec(a)).collect();
         assert!(missing.is_empty(), "declared resolver-migrated but resolver_cli cannot build their ArchSpec: {missing:?}");
+    }
+
+    /// Whether `arch`'s served model declares a host-side weights param -
+    /// `capability`'s own marker for "this names something only the machine
+    /// running the action can know".
+    fn declares_host_env_weights(arch: &str) -> bool {
+        let Some((_, model)) = ARCH_TO_MODEL.iter().find(|(id, _)| *id == arch) else { return false };
+        crate::catalog::manifests()
+            .into_iter()
+            .find(|m| m.model == *model)
+            .is_some_and(|m| m.actions.iter().any(|a| a.params.iter().any(|p| p.host_env.is_some())))
+    }
+
+    /// The CONVERSE of the test above, and the one that catches work that
+    /// was done and then not switched on.
+    ///
+    /// An architecture reachable through the generic dispatch, for which
+    /// `resolver_cli` can already build an `ArchSpec`, has everything it
+    /// needs to resolve its weights from the model store - so leaving it OFF
+    /// `RESOLVER_MIGRATED_ARCHS` means a user sets a `BRAIN_*` variable for a
+    /// checkpoint brain could have found, and nothing anywhere says so. That
+    /// is precisely how `kronos`, `qwen3vl`, `fastvlm` and `deepseek2ocr`
+    /// sat half-wired.
+    ///
+    /// Adding a spec is therefore the same edit as turning it on, and this
+    /// fails if the two are ever separated again.
+    #[test]
+    fn every_generic_arch_with_a_spec_is_declared_migrated() {
+        let stranded: Vec<&str> = ARCH_TO_MODEL
+            .iter()
+            .map(|(id, _)| *id)
+            .filter(|a| !ARCH_HANDLERS.iter().any(|(id, _)| id == a))
+            .filter(|a| crate::resolver_cli::has_arch_spec(a))
+            .filter(|a| !RESOLVER_MIGRATED_ARCHS.contains(a))
+            // An architecture whose action already declares a `host_env`
+            // weights param is in a working, declared state (state 2 of
+            // `catalog::tests::every_model_declares_how_it_finds_its_weights`).
+            // Declaring it migrated WITHOUT also making its provider read the
+            // Assembly would suppress auto-fetch while changing nothing else -
+            // the exact half-wired state this pair of tests exists to prevent.
+            // So it is migrated when its provider is, not before.
+            .filter(|a| !declares_host_env_weights(a))
+            .collect();
+        assert!(
+            stranded.is_empty(),
+            "these architectures have a usable ArchSpec but are not declared resolver-migrated, so they \
+             still demand a BRAIN_* variable for weights the model store can find: {stranded:?}"
+        );
     }
 
     #[test]

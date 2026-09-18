@@ -256,6 +256,57 @@ fn resolver_spec_for(model_id: &str) -> Option<(&'static str, Box<dyn ArchSpec>)
     if model_id == deepseek2ocr::caps::MODEL {
         return Some(("deepseek2ocr", Box::new(deepseek2ocr::spec::Deepseek2ocrSpec)));
     }
+    if model_id == sam2::caps::MODEL {
+        return Some(("sam2", Box::new(sam2::spec::Sam2Spec)));
+    }
+    if model_id == codeformer::caps::MODEL {
+        return Some(("codeformer", Box::new(codeformer::spec::CodeFormerSpec)));
+    }
+    if model_id == rrdbnet::caps::MODEL {
+        return Some(("rrdbnet", Box::new(rrdbnet::spec::RrdbnetSpec)));
+    }
+    if model_id == scrfd::caps::MODEL {
+        return Some(("scrfd", Box::new(scrfd::spec::ScrfdSpec)));
+    }
+    if model_id == arcface::caps::MODEL {
+        return Some(("arcface", Box::new(arcface::spec::ArcFaceSpec)));
+    }
+    if model_id == clip::caps::MODEL {
+        return Some(("clip", Box::new(clip::spec::ClipSpec)));
+    }
+    if model_id == florence2::caps::MODEL {
+        return Some(("florence2", Box::new(florence2::spec::Florence2Spec)));
+    }
+    if model_id == flux1::caps::MODEL {
+        return Some(("flux1", Box::new(flux1::spec::Flux1Spec)));
+    }
+    if model_id == pulid::caps::MODEL {
+        return Some(("pulid", Box::new(pulid::spec::PulidSpec)));
+    }
+    if model_id == vqgan::caps::MODEL {
+        return Some(("vqgan", Box::new(vqgan::spec::VqganSpec)));
+    }
+    if model_id == sdxlunet::caps::MODEL {
+        return Some(("sdxlunet", Box::new(sdxlunet::spec::SdxlunetSpec)));
+    }
+    if model_id == controlnet::caps::MODEL {
+        return Some(("controlnet", Box::new(controlnet::spec::ControlnetSpec)));
+    }
+    if model_id == t5encoder::caps::MODEL {
+        return Some(("t5encoder", Box::new(t5encoder::spec::T5encoderSpec)));
+    }
+    if model_id == nemotronasr::caps::MODEL {
+        return Some(("nemotronasr", Box::new(nemotronasr::spec::NemotronAsrSpec)));
+    }
+    if model_id == qwen3asr::caps::MODEL {
+        return Some(("qwen3asr", Box::new(qwen3asr::spec::Qwen3AsrSpec)));
+    }
+    if model_id == flux2::caps::MODEL {
+        return Some(("flux2", Box::new(flux2::spec::Flux2Spec)));
+    }
+    if model_id == wan::caps::MODEL {
+        return Some(("wan", Box::new(wan::spec::WanSpec)));
+    }
     None
 }
 
@@ -351,6 +402,123 @@ pub fn multi_residents(gpus: &[(u32, u64)], reserved: u64) -> Vec<Arc<dyn reside
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The SERVED half of "resolver-migrated", and the one a CLI test cannot
+    /// see.
+    ///
+    /// `crate::resolve::dispatch_arch` hands `provider_from_assembly` a REAL
+    /// assembly it resolved itself, so a migrated architecture works from the
+    /// command line as soon as its `ModelEntry.provider` reads one. Every
+    /// other caller - D-Bus, HTTP, `build_executor` - goes through
+    /// [`provider`] instead, which resolves via [`resolver_spec_for`] and
+    /// falls back to [`empty_assembly`] for anything absent from it.
+    ///
+    /// So an entry whose provider reads a role while its model is missing
+    /// from `resolver_spec_for` is broken in exactly one direction: fine on
+    /// the CLI, "assembly 'local/…' has no <role> role" when served. This
+    /// asserts the two agree, by CONSTRUCTING every listed model against an
+    /// empty assembly and requiring that anything which needs a role is
+    /// registered to get one.
+    #[test]
+    fn every_assembly_reading_provider_is_registered_for_the_served_path() {
+        let empty = empty_assembly();
+        let mut unregistered = Vec::new();
+        for m in manifests() {
+            let id = m.model;
+            // Does this entry's provider actually need a resolved role?
+            let needs_role = match provider_from_assembly(&id, &empty) {
+                Err(e) => e.contains("has no") && e.contains("role"),
+                Ok(_) => false,
+            };
+            if needs_role && resolver_spec_for(&id).is_none() {
+                unregistered.push(id);
+            }
+        }
+        assert!(
+            unregistered.is_empty(),
+            "these models build their provider from an Assembly but have no resolver_spec_for entry, so every served surface hands them an empty one: {unregistered:?}"
+        );
+    }
+
+    /// Every catalog model is in exactly ONE of three declared states for
+    /// how it finds its weights, and a model in none of them fails here
+    /// rather than at a user's first run.
+    ///
+    /// 1. **Resolver-backed** - the provider reads a role off the `Assembly`,
+    ///    and `resolver_spec_for` supplies a real one. Nothing to configure:
+    ///    the checkpoint is found by scanning the model store.
+    /// 2. **Weights as an action parameter** - the provider needs none, and
+    ///    the action declares a `host_env` param the caller may pass
+    ///    explicitly or let `ActionSpec::validate` fill from that variable.
+    /// 3. **Env-only provider** - listed by name below, with the reason it
+    ///    cannot classify from disk.
+    ///
+    /// The point is that state 3 is a CHOICE someone made and wrote down,
+    /// not a default a new model falls into by being added. Together with
+    /// `every_assembly_reading_provider_is_registered_for_the_served_path`
+    /// (which catches a HALF-migrated model), this makes "weights stopped
+    /// being findable and nobody noticed" a compile-time-adjacent failure
+    /// instead of a support question.
+    #[test]
+    fn every_model_declares_how_it_finds_its_weights() {
+        /// Models that legitimately still take their weights from the
+        /// environment, each with the reason it cannot classify from disk.
+        const ENV_ONLY: &[(&str, &str)] = &[
+            (
+                "deepseek-ai/DeepSeek-OCR-2",
+                "no vendor-published GGUF exists; community conversions vary in layout and carry no \
+                 declaration to classify on, so there is nothing stable for an ArchSpec to key off yet",
+            ),
+            (
+                "brain/ltxv",
+                "`ltxv::spec` exists and the CLI resolves through it, but the served manifest declares no \
+                 weights param at all - t2v's default is the tiny random-weight smoke config, and the real \
+                 22B path is reached by `--dit`/$BRAIN_LTXV_DIT on the dedicated CLI only. Registering it \
+                 here means giving `LtxvProvider` the roles first, which belongs with making the real-weight \
+                 path servable rather than with this gate",
+            ),
+        ];
+
+        /// Models that need no weights at all: pure composition over OTHER
+        /// models' weights, or a deterministic mock.
+        const NO_WEIGHTS: &[&str] = &[
+            "brain/imgpipe",
+            "brain/imageops",
+            "brain/demo",
+            "brain/mock",
+            // A rasterizer, not a learned model: `render` takes the scene
+            // itself as an `--in scene=` PLY blob and `fit` optimizes one.
+            "brain/splat",
+        ];
+
+        let empty = empty_assembly();
+        let mut undeclared = Vec::new();
+        for m in manifests() {
+            let id = m.model.clone();
+            if NO_WEIGHTS.contains(&id.as_str()) || ENV_ONLY.iter().any(|(n, _)| *n == id) {
+                continue;
+            }
+            // State 1: the provider needs a resolved role, and gets one.
+            if resolver_spec_for(&id).is_some() {
+                continue;
+            }
+            // State 2: some action names a host-side weights param.
+            if m.actions.iter().any(|a| a.params.iter().any(|p| p.host_env.is_some() || p.host_resolved)) {
+                continue;
+            }
+            // A provider that cannot even be built from an empty assembly is
+            // half-migrated; that is the sibling test's business, not this one.
+            if provider_from_assembly(&id, &empty).is_err() {
+                continue;
+            }
+            undeclared.push(id);
+        }
+        assert!(
+            undeclared.is_empty(),
+            "these models are in none of the three declared weight-acquisition states - make one true, \
+             or add the model to ENV_ONLY with the reason: {undeclared:?}"
+        );
+    }
 
     /// Two entries claiming the same id would make `provider` resolve by
     /// position, which is a coin flip.

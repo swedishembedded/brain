@@ -43,6 +43,7 @@ pub mod init;
 pub mod int8;
 pub mod model;
 pub mod pipeline;
+pub mod spec;
 pub mod sampler;
 pub mod textenc;
 pub mod train;
