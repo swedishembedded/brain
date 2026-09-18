@@ -502,7 +502,39 @@ impl ImagePipelineBuilder {
     ///
     /// Every failure path returns a typed [`Error`] -- never a panic on a
     /// caller-reachable input.
+    ///
+    /// Reports neither download nor build progress -- see
+    /// [`ImagePipelineBuilder::load_with_progress`] for a caller that needs
+    /// either.
     pub fn load(self) -> Result<ImagePipeline> {
+        self.load_with_progress(&mut |_name, _got, _total| {}, &mut |_msg| {})
+    }
+
+    /// [`ImagePipelineBuilder::load`] plus the two progress closures this
+    /// milestone's own `generate_with_progress` pattern extends to build
+    /// time: `on_download` mirrors [`loader::supply::execute_plan`]'s own
+    /// `(name, bytes_so_far, total_bytes)` -- `total_bytes` is `None` when
+    /// the server never reported a `Content-Length` -- called once per
+    /// chunk while step 2 below fetches a checkpoint that was not already
+    /// local; `on_build` mirrors [`s3dit::pipeline::HotPipeline::build_adapted`]'s
+    /// own `progress: impl FnMut(&str)`, a short stage label ("loading
+    /// tokenizer", ...) called as step 5 assembles an s3dit-backed
+    /// pipeline's DiT/VAE graphs.
+    ///
+    /// `on_build` is never called on a flux2-resolved pipeline: neither
+    /// [`flux2::build_resolved`] nor [`flux2::Pipeline::build_sized`] takes
+    /// a build-progress hook at all today -- a real, confirmed asymmetry
+    /// between the two backends (like [`ImagePipelineBuilder::size`]'s own
+    /// documented one), not an oversight here.
+    ///
+    /// Both closures are call-scoped, not stored on this builder -- the
+    /// same reason [`ImagePipeline::generate_with_progress`] takes its own
+    /// `on_progress` as a call parameter rather than a boxed field on
+    /// [`ImagePipeline`]: a closure that outlives the one call it reports
+    /// on would need a lifetime or an `Arc`/`Box<dyn ... + Send>` bound this
+    /// crate does not otherwise require, for a capability every caller here
+    /// already gets for free by supplying one only where it is used.
+    pub fn load_with_progress(self, on_download: &mut dyn FnMut(&str, u64, Option<u64>), on_build: &mut dyn FnMut(&str)) -> Result<ImagePipeline> {
         let ImagePipelineBuilder { model_id, device, dtype, size } = self;
 
         crate::device::apply(&device)?;
@@ -514,10 +546,12 @@ impl ImagePipelineBuilder {
         let hub = brain_modelstore::HfHub::new();
 
         // DownloadPolicy::IfMissing: a reference that already resolves
-        // locally is never re-checked against the network at all.
+        // locally is never re-checked against the network at all, so
+        // `on_download` is simply never called in that (common, already-
+        // fetched) case.
         if store.local(&reference).is_none() {
             let plan = brain_modelstore::plan(&reference, &store, &hub)?;
-            loader::supply::execute_plan(&store, &hub, &plan, &model_id, &mut |_name, _got, _total| {}).map_err(Error::Download)?;
+            loader::supply::execute_plan(&store, &hub, &plan, &model_id, on_download).map_err(Error::Download)?;
         }
 
         let overrides: BTreeMap<String, String> = BTreeMap::new();
@@ -547,7 +581,7 @@ impl ImagePipelineBuilder {
                 let (width, height) = size.unwrap_or(S3DIT_DEFAULT_SIZE);
                 let hifi = dtype == DType::F32;
 
-                let pipe = s3dit::pipeline::HotPipeline::build_adapted(&paths, width, height, s3dit::pipeline::DEFAULT_CAP_LEN, hifi, None, |_| {}).map_err(Error::Backend)?;
+                let pipe = s3dit::pipeline::HotPipeline::build_adapted(&paths, width, height, s3dit::pipeline::DEFAULT_CAP_LEN, hifi, None, on_build).map_err(Error::Backend)?;
 
                 Ok(ImagePipeline { backend: Backend::S3dit(Box::new(S3ditBackend { pipe, paths, width, height, hifi, adapter: None })) })
             }

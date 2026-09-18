@@ -404,3 +404,30 @@ fn from_pretrained_dispatches_to_s3dit_and_resolves_a_real_local_fixture_with_no
         other => panic!("expected a clean Error::Backend from incomplete DiT construction, got {other:?}"),
     }
 }
+
+/// [`ImagePipelineBuilder::load_with_progress`]'s `on_build` closure: on the
+/// SAME fixture and failure as the test above, `HotPipeline::build_adapted`
+/// reports its first stage ("loading tokenizer") before it ever reaches the
+/// fixture's deliberately incomplete DiT tensor set -- so a caller watching
+/// build progress sees at least that one message even though the call still
+/// ends in the same clean `Error::Backend`. `on_download` never fires here:
+/// `Store::local` resolves the fixture with no network access at all (see
+/// the test above's own doc), the same "never called when nothing was
+/// fetched" contract [`ImagePipelineBuilder::load_with_progress`]'s own doc
+/// states.
+#[test]
+fn load_with_progress_reports_s3dit_build_stages_before_the_same_clean_failure() {
+    let root = build_unambiguous_s3dit_store();
+    mark_locally_present(&root, "local", "s3dit-sdk-test", "zimage");
+
+    let mut build_msgs: Vec<String> = Vec::new();
+    let mut download_calls = 0u32;
+    let err = with_models_dir(&root, || {
+        brain::ImagePipeline::builder("local/s3dit-sdk-test")
+            .load_with_progress(&mut |_name, _got, _total| download_calls += 1, &mut |msg| build_msgs.push(msg.to_string()))
+            .unwrap_err()
+    });
+    assert!(matches!(err, brain::Error::Backend(_)), "expected the same clean Error::Backend the no-progress test gets, got {err:?}");
+    assert!(!build_msgs.is_empty(), "HotPipeline::build_adapted must report at least its first stage before failing on the incomplete tensor set");
+    assert_eq!(download_calls, 0, "a locally-resolved fixture must never invoke on_download");
+}

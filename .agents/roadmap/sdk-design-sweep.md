@@ -85,7 +85,7 @@ here (items already tracked there are not repeated - see that file's own
 | 1 | 14/2 | `crates/sdk/src/creature.rs` | `Creature` has zero tests, inline or integration - the only public surface with none | fixed (M4) |
 | 2 | 14 | `crates/sdk/src/view.rs:11-14` | `View::frame`'s documented headless-capture behavior is untested | fixed (M4) |
 | 3 | 8 | `crates/sdk/src/pipeline.rs:321,331` | `generate`/`generate_with` hardcode `&CancelToken::default()` and a no-op progress closure; no public way to supply either | fixed (M5) |
-| 4 | 8 | `crates/sdk/src/pipeline.rs:300,481,504` | download and s3dit-build progress are likewise discarded | open (M5b - split out, see below: three different progress shapes to plumb, not one) |
+| 4 | 8 | `crates/sdk/src/pipeline.rs:300,481,504` | download and s3dit-build progress are likewise discarded | fixed (M5b) |
 | 5 | 6 | `crates/sdk/src/error.rs:70-71` | `Error::Cancelled` is a dead public variant - unreachable with no public cancel entry point | fixed (M5) |
 | 6 | 8 | crate-wide | no `.capabilities()`/manifest introspection anywhere in `crates/sdk` | fixed (M8) |
 | 7 | 9 | crate-wide | no training/finetune entry point at all in `crates/sdk` (the adjacent Dataset-layer gap is tracked in `sdk.md`; the missing training call itself was not) | open (Phase 2, per-pipeline) |
@@ -240,16 +240,26 @@ including the `samples/imagegen/*` samples that link `crates/sdk` directly.
       `backend_err_or_cancelled` and unit-tested directly, since neither
       existing fixture reaches a live pipeline to exercise it end to end
       (same documented ceiling as `tests/image_pipeline.rs`).
-- [ ] **M5b** - download progress (`ImagePipelineBuilder::load`'s
+- [x] **M5b** - download progress (`ImagePipelineBuilder::load`'s
       `execute_plan` call, finding 4) and s3dit build progress
-      (`HotPipeline::build_adapted`'s `impl FnMut(&str)`) are still
-      discarded. Split out because these are two MORE distinct progress
-      closure shapes (`FnMut(&str, u64, Option<u64>)` for downloads,
-      `FnMut(&str)` for the s3dit build) on top of generate's
-      `FnMut(u32, u32, &str)`, plumbed through a builder that is consumed by
-      value rather than a `&self` call - needs its own design pass for
-      where a boxed closure lives on `ImagePipelineBuilder`, not a
-      copy-paste of M5's pattern.
+      (`HotPipeline::build_adapted`'s `impl FnMut(&str)`) are now plumbed
+      through a new `ImagePipelineBuilder::load_with_progress(self,
+      on_download: &mut dyn FnMut(&str, u64, Option<u64>), on_build: &mut
+      dyn FnMut(&str))`, which `load()` delegates to with two no-op
+      closures - the design question the original note raised ("where does
+      a boxed closure live on a by-value builder") resolved by NOT storing
+      either closure on the builder at all: both are call-scoped parameters,
+      exactly mirroring `ImagePipeline::generate_with_progress`'s own
+      shape, rather than new builder state with its own lifetime/`Send`
+      questions. `on_build` is a real no-op on a flux2-resolved pipeline
+      (documented, not hidden): neither `flux2::build_resolved` nor
+      `Pipeline::build_sized` takes a build-progress hook at all today.
+      Proven against the s3dit fixture `image_pipeline.rs` already carries:
+      `load_with_progress_reports_s3dit_build_stages_before_the_same_clean_failure`
+      shows `on_build` fires at least once (`HotPipeline::build_adapted`'s
+      own "loading tokenizer" stage) before the same clean `Error::Backend`
+      the no-progress test gets, and `on_download` never fires against a
+      fixture `Store::local` already resolves with no network access.
 - [x] **M6** - split `Error::Backend`'s catch-all, partially (findings 12,
       13). Added the two clearly load-bearing variants - `LicenseRequired`
       (a caller plausibly wants to react differently: surface the terms,
