@@ -81,6 +81,10 @@ pub struct CreatureBuilder {
     device: Device,
 }
 
+/// [`CreatureBuilder::arena`]'s parameter, re-exported (not reinvented) for
+/// the same reason [`MotorMap`] below is: it is already the one structured
+/// representation of ground-vs-air, not a second one this crate would
+/// otherwise have to keep in sync with it.
 pub use flybody::Arena;
 /// [`Creature::motor_map`]'s return type, re-exported (not reinvented) for
 /// the same reason [`Arena`] is: it is already the one structured
