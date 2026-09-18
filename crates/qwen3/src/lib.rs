@@ -20,6 +20,7 @@ pub mod serve;
 pub mod finetune;
 pub mod lora;
 pub mod shard;
+pub mod spec;
 pub mod toolcall_eval;
 pub mod tp;
 

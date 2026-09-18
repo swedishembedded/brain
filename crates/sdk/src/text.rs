@@ -2,16 +2,22 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! [`TextGenerationPipeline`]: brain's text-generation surface, over qwen3
-//! (the most complete decoder LM in this workspace) - loaded from a literal
-//! local checkpoint path, not a `<vendor>/<repo>` hub id.
+//! (the most complete decoder LM in this workspace) - loaded from EITHER a
+//! literal local checkpoint path OR a `<vendor>/<repo>` hub id, through the
+//! SAME [`TextGenerationPipeline::from_pretrained`] call (rule 2: never a
+//! separate API for "load from disk" vs. "load from the hub").
 //!
-//! Unlike [`crate::ImagePipeline`]/[`crate::ForecastPipeline`], this
-//! pipeline does NOT go through `crates/loader`'s resolver: `crates/qwen3`
-//! declares no model-store `ArchSpec` at all (unlike `kronos`/`timesfm3`,
-//! which do), so there is nothing for a resolver to resolve a hub id
-//! against - this is a real, tracked gap (writing `crates/qwen3/src/spec.rs`
-//! is upstream work in that crate, mirroring `crates/qwen35/src/spec.rs`'s
-//! own `["weights", "tokenizer"]`-role shape), not something to fake here.
+//! **How the two are told apart, unambiguously**: a string that names a
+//! real file already on disk (`Path::new(s).is_file()`) is ALWAYS a local
+//! path - never guessed at, never re-interpreted as a hub id even if it
+//! happens to look like one (a relative path with exactly one `/`, e.g.
+//! `out/qwen3-4b.safetensors`, would otherwise parse as a syntactically
+//! valid `<vendor>/<repo>` reference). Only a string that is NOT an
+//! existing local file is tried as a hub id, through
+//! `qwen3::spec::Qwen3Spec` (the SAME resolver `brain do qwen3
+//! chat_generate`/`brain qwen3 chat` use) - fetched under
+//! `DownloadPolicy::IfMissing` when nothing local already resolves it,
+//! mirroring every other pipeline in this crate.
 //!
 //! Built on the SAME sequence `qwen3::caps::GenerateAction` (the served
 //! `brain do qwen3 chat_generate` / HTTP `/v1/chat/completions` path) runs -
@@ -26,15 +32,18 @@
 //! A checkpoint's own on-disk shape decides how much you need to pass:
 //!
 //! ```no_run
-//! // A .gguf ships its own embedded tokenizer - one argument is enough.
-//! let pipe = brain::TextGenerationPipeline::from_pretrained("/models/qwen3-4b-q8_0.gguf")?;
+//! // A .gguf ships its own embedded tokenizer - one argument is enough,
+//! // whether given as a local path or (as here) a hub id resolved through
+//! // Qwen3Spec.
+//! let pipe = brain::TextGenerationPipeline::from_pretrained("unsloth/Qwen3-4B-GGUF")?;
 //! let out = pipe.generate("Explain DMA in one sentence.")?;
 //! println!("{}", out.text);
 //! # Ok::<(), brain::Error>(())
 //! ```
 //!
 //! A brain-format `.safetensors` checkpoint has no embedded tokenizer, so it
-//! needs one named explicitly:
+//! needs one named explicitly (a local path override always wins over
+//! whatever a hub id's own resolved `tokenizer` role would supply):
 //!
 //! ```no_run
 //! let pipe = brain::TextGenerationPipeline::builder("/models/qwen3-4b.safetensors")
@@ -42,6 +51,9 @@
 //!     .load()?;
 //! # Ok::<(), brain::Error>(())
 //! ```
+
+use std::collections::BTreeMap;
+use std::path::Path;
 
 use serde_json::json;
 
@@ -154,8 +166,8 @@ impl TextGenerationOptions {
     }
 }
 
-/// `brain`'s text-generation pipeline. See this module's doc for why it
-/// loads from a literal path rather than a hub id.
+/// `brain`'s text-generation pipeline. See this module's doc for how it
+/// tells a local checkpoint path apart from a hub id.
 pub struct TextGenerationPipeline {
     model: qwen3::Qwen,
     tok: data::qwen_tokenizer::QwenBpe,
@@ -266,26 +278,35 @@ impl TextGenerationPipelineBuilder {
         self
     }
 
-    /// Load `weights_path` and build a real [`TextGenerationPipeline`].
+    /// Load `weights_path` (a local path or a hub id - see this module's
+    /// doc for how the two are told apart) and build a real
+    /// [`TextGenerationPipeline`].
     ///
-    /// 1. [`Device`] is applied to this process (see [`crate::device::resolve`],
-    ///    the `device`-tier function alone, not [`crate::device::apply`]'s
-    ///    model-shard placement layer: this pipeline does no model-store
-    ///    resolution to place shards for in the first place).
-    /// 2. The checkpoint is opened (`checkpoint::weightio::WeightReader::open`)
+    /// 1. [`Device`] is applied to this process (see [`crate::device::apply`]
+    ///    - the same call every other `resolve`-tier pipeline in this crate
+    ///    makes, now that a hub id genuinely can reach `crates/loader`'s
+    ///    model-store resolution below).
+    /// 2. If `weights_path` does not name a real local file,
+    ///    [`resolve_hub_weights`] resolves it as a hub id through
+    ///    `qwen3::spec::Qwen3Spec`, fetching it first if nothing local
+    ///    already resolves it.
+    /// 3. The checkpoint is opened (`checkpoint::weightio::WeightReader::open`)
     ///    to read its config AND to fail cleanly here, before any GPU work,
     ///    on a bad path - `qwen3::Qwen::load_inference` itself panics on
     ///    open failure, so this facade never calls it on an unopened path.
-    /// 3. The tokenizer resolves: an explicit [`TextGenerationPipelineBuilder::tokenizer`]
-    ///    wins; else the checkpoint's own embedded GGUF tokenizer; else a
-    ///    named [`Error::MissingArgument`].
-    /// 4. `qwen3::footprint::place_and_build` picks a device by real VRAM
+    /// 4. The tokenizer resolves: an explicit [`TextGenerationPipelineBuilder::tokenizer`]
+    ///    wins; else the checkpoint's own embedded GGUF tokenizer; else, for
+    ///    a hub id, the resolved `tokenizer` role from step 2; else a named
+    ///    [`Error::MissingArgument`].
+    /// 5. `qwen3::footprint::place_and_build` picks a device by real VRAM
     ///    budget (within whatever step 1 already narrowed the ambient
     ///    selection to) and builds the inference-only model.
     pub fn load(self) -> Result<TextGenerationPipeline> {
         let TextGenerationPipelineBuilder { weights, tokenizer, device, capacity } = self;
 
-        crate::device::resolve(&device)?;
+        crate::device::apply(&device)?;
+
+        let (weights, resolved_tokenizer) = if Path::new(&weights).is_file() { (weights, None) } else { resolve_hub_weights(&weights)? };
 
         let reader = checkpoint::weightio::WeightReader::open(&weights).map_err(|e| Error::Backend(format!("qwen3: {weights}: {e}")))?;
         let cfg = qwen3::QwenConfig::from_json(&reader.config());
@@ -294,8 +315,10 @@ impl TextGenerationPipelineBuilder {
             data::qwen_tokenizer::QwenBpe::from_file(t).map_err(Error::Backend)?
         } else if let Some(gt) = reader.tokenizer() {
             data::qwen_tokenizer::QwenBpe::from_gguf(&gt).map_err(Error::Backend)?
+        } else if let Some(rt) = &resolved_tokenizer {
+            data::qwen_tokenizer::QwenBpe::from_file(rt).map_err(Error::Backend)?
         } else {
-            return Err(Error::MissingArgument(format!("{weights}: no tokenizer embedded (not a .gguf) and none given; call .tokenizer(path)")));
+            return Err(Error::MissingArgument(format!("{weights}: no tokenizer embedded (not a .gguf), none resolved, and none given; call .tokenizer(path)")));
         };
         drop(reader);
 
@@ -304,4 +327,56 @@ impl TextGenerationPipelineBuilder {
 
         Ok(TextGenerationPipeline { model, tok, capacity })
     }
+}
+
+/// Resolve `model_id` as a `<vendor>/<repo>` hub reference through
+/// `qwen3::spec::Qwen3Spec`, returning the resolved `weights` path and,
+/// when the assembly also carries a `tokenizer` role, that path too (a
+/// caller's own [`TextGenerationPipelineBuilder::tokenizer`] still wins over
+/// this - see [`TextGenerationPipelineBuilder::load`]'s own doc).
+///
+/// Tries resolution FIRST, before ever consulting `Store::local`/`plan` -
+/// deliberately the reverse of the naive "check `Store::local`, then
+/// fetch-if-missing, then resolve" order, for the same real reason
+/// `crate::tts::TtsPipelineBuilder::load` does: `Qwen3Spec::classify` reads
+/// raw file content (a GGUF's own `general.architecture` KV), a strictly
+/// wider net than `Store::local`'s narrow "a compound `brain.manifest.json`,
+/// or a bare `model.brain.safetensors`" shapes - and a real GGUF release
+/// (the common case for qwen3, unlike a converted `.safetensors` checkpoint)
+/// has neither, so `Store::local` would otherwise never recognize even an
+/// already-downloaded release and `plan()` would fall through to
+/// `TransformersRecipe`'s catch-all, which does not know how to read a bare
+/// GGUF's `config.json` (it doesn't have one) and fails outright.
+fn resolve_hub_weights(model_id: &str) -> Result<(String, Option<String>)> {
+    use brain_modelstore::resolve::Resolution;
+
+    let reference = brain_modelref::ModelRef::parse(model_id)
+        .map_err(|e| Error::ModelNotFound(format!("{model_id}: not an existing local file, and not a valid <vendor>/<repo> hub reference either ({e})")))?;
+    let overrides: BTreeMap<String, String> = BTreeMap::new();
+
+    let assembly = match loader::resolve_structured("qwen3", &qwen3::spec::Qwen3Spec, &overrides).map_err(Error::Backend)? {
+        Resolution::Resolved(a) => *a,
+        Resolution::Ambiguous(a) => return Err(Error::Ambiguous(a)),
+        Resolution::Missing(_) => {
+            let root = loader::model_dir::resolve(None).ok_or_else(|| Error::Backend("no models directory configured (set BRAIN_MODELS_DIR, or $HOME)".to_string()))?;
+            let store = brain_modelstore::Store::new(root);
+            let hub = brain_modelstore::HfHub::new();
+            if store.local(&reference).is_none() {
+                let plan = brain_modelstore::plan(&reference, &store, &hub)?;
+                loader::supply::execute_plan(&store, &hub, &plan, model_id, &mut |_name, _got, _total| {}).map_err(Error::Download)?;
+            }
+            match loader::resolve_structured("qwen3", &qwen3::spec::Qwen3Spec, &overrides).map_err(Error::Backend)? {
+                Resolution::Resolved(a) => *a,
+                Resolution::Ambiguous(a) => return Err(Error::Ambiguous(a)),
+                Resolution::Missing(m) => return Err(Error::Missing(m)),
+            }
+        }
+    };
+
+    let weights = assembly.roles.get("weights").ok_or_else(|| Error::Backend(format!("qwen3: resolved assembly {:?} has no weights role", assembly.id)))?;
+    if !weights.exists() {
+        return Err(Error::Backend(format!("qwen3: resolved assembly {:?} is missing weights at {}", assembly.id, weights.display())));
+    }
+    let tokenizer = assembly.roles.get("tokenizer").map(|p| p.to_string_lossy().into_owned());
+    Ok((weights.to_string_lossy().into_owned(), tokenizer))
 }

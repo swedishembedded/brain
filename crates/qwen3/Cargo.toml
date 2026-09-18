@@ -25,6 +25,7 @@ brain-gguf.workspace = true
 brain-kernels.workspace = true
 brain-data.workspace = true
 brain-promote.workspace = true
+brain-modelstore.workspace = true
 serde_json.workspace = true
 bytemuck.workspace = true
 wgpu.workspace = true

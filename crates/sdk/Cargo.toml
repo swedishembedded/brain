@@ -65,14 +65,13 @@ forecast = ["resolve", "dep:brain-forecast", "dep:brain-kronos", "dep:brain-time
 # the model store. When that changes this feature gains `resolve`, not a
 # parallel resolver.
 creature = ["device", "dep:brain-fly", "dep:brain-connectome", "dep:brain-flybody", "dep:brain-mujoco", "dep:brain-neuro", "dep:brain-wm-display", "dep:tempfile"]
-# `brain::TextGenerationPipeline`. Covers qwen3 only, and from a literal local
-# checkpoint path, not a `<vendor>/<repo>` hub id: `crates/qwen3` has no
-# model-store `ArchSpec` at all yet (unlike kronos/timesfm3 above), so there
-# is nothing for a resolver to resolve a hub id against - the same reason
-# `creature` selects no resolver. Selects `device` only, not `resolve` - no
-# loader/model-store dependency belongs here until an `ArchSpec` exists to
-# use it.
-text = ["device", "dep:brain-qwen3", "dep:brain-data", "dep:brain-checkpoint", "dep:serde_json"]
+# `brain::TextGenerationPipeline`. Covers qwen3 only. Accepts a literal local
+# checkpoint path OR a `<vendor>/<repo>` hub id (through `crates/qwen3`'s own
+# `qwen3::spec::Qwen3Spec`, same as every resolver-backed pipeline) - a local
+# path wins whenever the string names a real file on disk, so this never
+# guesses between the two. Selects `resolve` now that `Qwen3Spec` exists to
+# resolve a hub id against.
+text = ["resolve", "dep:brain-qwen3", "dep:brain-data", "dep:brain-checkpoint", "dep:serde_json"]
 # `brain::EmbeddingPipeline` (CLIP text embedding), `brain::
 # DetectionPipeline` (YOLOv8 object detection) and `brain::SegmentPipeline`
 # (SAM 2.1 promptable segmentation) - three public types under one feature.

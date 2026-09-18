@@ -360,7 +360,8 @@ including the `samples/imagegen/*` samples that link `crates/sdk` directly.
       whole-workspace build - see that section for exact counts.
 - [ ] **Phase 2** - new pipelines, in the priority order above: Forecast, Text, Embedding, ASR, then the rest. Each gets its own sub-roadmap section here (or its own file, linked from here) when it starts, written against the full `sdk-design.md` checklist from day one - including an end-to-end test, learning from M10 rather than repeating the `flux2_cli.rs` duplication gap a second time. Design each pipeline's progress/cancellation surface (rule 8) toward the `run.start()/subscribe()/cancel()/result()` shape `.agents/roadmap/orchestration-hsm.md` proposes, rather than reinventing M5's synchronous `generate_with_progress(cancel, on_progress)` a second time - M5's shape stays the right SIMPLE default, but a new pipeline's ADVANCED tier should point at where this is heading.
   - [x] **Phase 2.1** - `ForecastPipeline` (kronos, timesfm3).
-  - [x] **Phase 2.2** - `TextGenerationPipeline` (qwen3 only).
+  - [x] **Phase 2.2** - `TextGenerationPipeline` (qwen3 only, local path only at first).
+  - [x] **Phase 2.2b** - `qwen3::spec::Qwen3Spec` (Phase 2.2's own tracked prerequisite) - `TextGenerationPipeline::from_pretrained` now also accepts a hub id, resolved through it. See its own section below (inserted after 2.2) for a real Store::local-ordering bug this would have reintroduced, caught before shipping.
   - [x] **Phase 2.3** - `EmbeddingPipeline` (CLIP text towers only).
   - [x] **Phase 2.4** - `TranscribePipeline` (qwen3-asr only).
   - [x] **Phase 2.5** - `UpscalePipeline` (RRDBNet only) - see its own section above for the real `RrdbnetSpec` bug this one found and fixed, and the new `Image::open`/`Image::from_rgb8` public API it needed.
@@ -488,6 +489,96 @@ type that ALSO dispatches across the other decoder families the way
 asks for long-term - this milestone proves the shape on the single
 most-complete backend first, deliberately not the full consolidation in one
 change.
+
+### Phase 2.2b - `qwen3::spec::Qwen3Spec`, closing Phase 2.2's own tracked gap, plus `TextGenerationPipeline::from_pretrained` accepting a hub id
+
+Writes the `ArchSpec` Phase 2.2 named as prerequisite work and deferred -
+`crates/qwen3/src/spec.rs`, mirroring `crates/qwen35/src/spec.rs::Qwen35Spec`
+structurally (same `["weights", "tokenizer"]` role pair, same GGUF-vs-
+brain-format-safetensors duality, same GGUF-self-satisfies-its-own-tokenizer
+fallback), adjusted for qwen3's own real constants:
+`general.architecture == "qwen3"` (`crate::gguf_import::GGUF_ARCHITECTURE`)
+for a GGUF release, `ModelCard.family == "qwen"` (NOT `"qwen3"` -
+`crate::import::convert`'s own `ModelCard::new(id, "qwen")`, the family
+string qwen3's own brain-format conversion has always written) for a
+brain-format `.safetensors` checkpoint. 7 new unit tests, mirroring
+`Qwen35Spec`'s own test suite one-for-one, all passing on the first attempt.
+
+**`TextGenerationPipeline::from_pretrained` now accepts EITHER a local path
+or a hub id, through the SAME call** - the real, tracked gap Phase 2.2 left
+open (rule 2: "never a separate API for load-from-disk vs. load-from-hub").
+The two are told apart with NO guessing: a string that names a real file
+already on disk (`Path::new(s).is_file()`) is always a local path, even if
+it happens to be syntactically parseable as `<vendor>/<repo>` too (a
+relative path with exactly one `/`, e.g. `out/qwen3-4b.safetensors`, is a
+real, checked-for ambiguity - see `crates/sdk/src/text.rs`'s own module doc).
+Only a string that is NOT an existing local file is tried as a hub id.
+
+**A real bug this milestone's own new hub-id path would have reintroduced,
+caught before it shipped by applying the lesson Phase 4.2 already
+learned**: a naive "check `Store::local`, fetch-if-missing, then resolve"
+order (the shape every OTHER pipeline in this crate uses) would have failed
+the exact same way cosyvoice did - a real, already-downloaded qwen3 GGUF
+release (the common case; `unsloth/Qwen3-4B-GGUF`-shaped, cited directly in
+`Qwen35Spec`'s own test fixture comments for its sibling architecture) is
+neither a compound `brain.manifest.json` nor a bare `model.brain.safetensors`,
+so `Store::local` would never recognize it and `plan()` would fall through
+to `TransformersRecipe`'s catch-all, which cannot read a bare GGUF's
+(nonexistent) `config.json`. `resolve_hub_weights` tries `qwen3::spec::
+Qwen3Spec` resolution FIRST, exactly mirroring `TtsPipelineBuilder::load`'s
+own fix, before ever consulting `Store::local`/`plan`.
+
+**`crate::device::apply` replaces the bare `crate::device::resolve` this
+pipeline called before** - a real, small inconsistency this milestone's own
+`check-sdk-features.sh` run against `--features text` alone surfaced as a
+"function never used" warning (harmless in a `--features full` build, since
+other surfaces call `apply` too, but a genuine dead-code path in a narrow
+standalone `text`-only build). `text` now selects `resolve` (not bare
+`device`) since a hub id genuinely can reach `crates/loader`'s model-store
+resolution - `apply` is the call every OTHER `resolve`-tier pipeline
+(`EmbeddingPipeline`/`DetectionPipeline`/`SegmentPipeline`/`DepthPipeline`)
+already makes, so this also fixes an inconsistency, not just a warning.
+
+**Test fixture**: `crates/sdk/tests/text_pipeline.rs` gained two tests - one
+confirming a nonexistent-and-unparseable string now surfaces as
+`Error::ModelNotFound` (naming BOTH reasons: not a local file, not a valid
+hub reference - the prior test asserted `Error::Backend` here, which was
+correct for the old "always a local path" contract but is now the less
+precise answer), and one confirming a relative, hub-shaped-but-missing
+reference reaches the resolver and comes back `Error::Missing` - using the
+SAME `Store::local`-satisfying-but-role-incomplete manifest trick
+`tests/depth_pipeline.rs`'s own `mark_locally_present` uses, so this stays
+fully offline (no real network call to check a plausible-looking repo id
+against the real hub). Reaching a full, real model CONSTRUCTION from a fake
+GGUF hub fixture is deliberately NOT attempted - `Qwen35Spec`'s own test
+suite stops at `resolve()` too, never a full model build, and reproducing a
+valid minimal GGUF `Qwen::load_inference` would accept is unproven,
+out-of-scope territory this milestone does not take on either.
+
+**Not done, tracked for later** (unchanged from Phase 2.2's own list): CLI
+migration (the six qwen-family CLI files); a `TextGenerationPipeline` that
+ALSO dispatches across the other decoder families (GLM/LFM/GPT/qwen35/
+qwen35moe) the way `ImagePipeline` dispatches across flux2/s3dit - each of
+those needs its OWN `ArchSpec` first, the identical prerequisite-then-wire
+shape this phase just executed for qwen3, repeatable per architecture.
+
+Verified with `cargo test -p brain-qwen3 --lib spec::` (7 passed, all on the
+first attempt), `cargo build -p brain --no-default-features --features
+text` (clean, no warnings - confirms the `device::apply` fix), `bash
+scripts/gates/check-sdk-features.sh` (OK, every surface including `text`
+still compiles standalone), `cargo test -p brain --features text --test
+text_pipeline` (4 passed: 2 existing + 2 new), `bash scripts/gates/
+check-no-doc-citations.sh` (clean), `bash scripts/gates/check-doc-links.sh`
+(169 pages resolve), `bash scripts/gates/check-scripts.sh` (PASS).
+`cargo test -p brain-qwen3 --lib` (full crate suite) has 3 PRE-EXISTING
+failures, unrelated to this change: `serve::tests::*`, a real hardware
+constraint ("needs a single 2293760000-byte buffer but this device's
+queried max_buffer_size is 2147483647 bytes") in code last touched by an
+unrelated earlier commit (`ff9818e32`, "decide the KV binding limit from
+the device, not a constant") - `spec.rs` is pure file-classification code
+with no GPU/wgpu path at all, so there is no mechanism by which it could
+cause a buffer-allocation failure elsewhere; confirmed via `git log` that
+`serve.rs` was untouched by this session.
 
 ### Phase 2.3 - `EmbeddingPipeline` (done, scoped to CLIP text embedding)
 
