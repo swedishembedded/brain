@@ -111,24 +111,31 @@ for why.
       (`image`, `creature`); an embedder who only wants one backend no
       longer links the other's dependency closure. Enforced by
       `scripts/gates/check-sdk-features.sh` (`make check/sdk-features`).
-- [ ] s3dit's build-time size/cap_len/hifi coupling: `s3dit::pipeline::
-      HotPipeline::build_adapted` records its DiT/VAE graphs for exactly one
-      `(width, height, cap_len, hifi)` shape at construction
-      (`check_build_shape`), unlike flux2 where size is a per-generate-call
-      `GenOpts` field. This milestone resolved the asymmetry pragmatically:
-      `ImagePipelineBuilder::size` is a LOAD-time-only option for an
-      s3dit-backed pipeline, and `ImageGenerationOptions::size` on
-      `generate_with` is VALIDATED against it (a mismatch is a named
-      `Error::Backend`, never silently ignored or silently resized) rather
-      than applied. `cap_len` (the caption token capacity) and `hifi` (fp32
-      vs int8 DiT) are similarly build-time-only and not exposed as SDK
-      builder knobs at all yet -- `ImagePipelineBuilder::load` always builds
-      s3dit at `s3dit::pipeline::DEFAULT_CAP_LEN` and `hifi = (dtype ==
-      DType::F32)`, a literal-but-surprising reading of `DType::F32` that
-      maps to the HEAVIER 2-GPU fp32 build (`brain do z-image text2image`'s
-      own CLI default is `int8`, not `fp32`) -- an embedder relying on this
-      SDK's `DType::F32` default gets a different, heavier build than the
-      CLI's own default for the same architecture.
+- [x] s3dit's build-time size/cap_len/hifi coupling: the `cap_len`/`hifi`
+      half is done. `ImagePipelineBuilder::cap_len(u32)` (default
+      `s3dit::pipeline::DEFAULT_CAP_LEN`, unchanged) and
+      `ImagePipelineBuilder::hifi(bool)` (default `None`, still deriving
+      `dtype == DType::F32` when unset - the pre-existing reading, only
+      named now, not changed) are new builder knobs threaded through BOTH
+      s3dit build sites (`ImagePipelineBuilder::load`/`load_with_progress`
+      and `ImagePipeline::load_lora`'s rebuild), stored on `S3ditBackend`
+      the same way `width`/`height` already are so an adapter reload never
+      silently drops a caller-requested capacity/precision back to the
+      default. Purely additive - no default changed, so this does not yet
+      touch the OTHER half of this gap (the surprising DEFAULT itself:
+      `DType::F32` mapping onto the heavier 2-GPU hifi build when the CLI's
+      own default is int8 - now escapable via `.hifi(false)`, but still the
+      out-of-the-box behavior for a caller who never calls either knob).
+      Proven with two new fixture tests:
+      `cap_len_reaches_the_s3dit_build_and_is_validated_before_the_dit_is_opened`
+      (`cap_len(0)` fails `check_cap_len`'s own message BEFORE the DiT
+      checkpoint opens - an earlier, distinct wall from the default
+      cap_len's "incomplete tensor set" failure the pre-existing tests
+      reach, proving the value is genuinely threaded through and not
+      silently defaulted) and `hifi_override_still_reaches_a_real_build_
+      attempt` (`.hifi(true)` with no `.dtype(...)` call reaches the same
+      clean build failure). Size/`ImageGenerationOptions::size` validation
+      (the part already fixed) is untouched.
 - [x] `DownloadPolicy`: done - see `.agents/roadmap/sdk-design-sweep.md`
       Phase 6.3/6.4/6.5. Every pipeline builder in the crate now has a
       `.download_policy(...)` knob selecting `Offline`/`IfMissing`/

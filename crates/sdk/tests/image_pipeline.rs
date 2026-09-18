@@ -459,3 +459,38 @@ fn load_with_progress_reports_s3dit_build_stages_before_the_same_clean_failure()
     assert!(!build_msgs.is_empty(), "HotPipeline::build_adapted must report at least its first stage before failing on the incomplete tensor set");
     assert_eq!(download_calls, 0, "a locally-resolved fixture must never invoke on_download");
 }
+
+/// [`ImagePipelineBuilder::cap_len`] is genuinely threaded through to
+/// `HotPipeline::build_adapted`, not silently ignored: `cap_len(0)` fails
+/// `s3dit::pipeline::check_cap_len`'s own "at least 1" check BEFORE the DiT
+/// checkpoint is ever opened - an earlier, differently-worded failure than
+/// the two tests above's "incomplete tensor set" wall (which only the
+/// crate's DEFAULT cap_len of 512 reaches), so passing here proves the
+/// value reached `check_build_shape` rather than the default silently
+/// winning.
+#[test]
+fn cap_len_reaches_the_s3dit_build_and_is_validated_before_the_dit_is_opened() {
+    let root = build_unambiguous_s3dit_store();
+    mark_locally_present(&root, "local", "s3dit-sdk-test", "zimage");
+
+    let err = with_models_dir(&root, || brain::ImagePipeline::builder("local/s3dit-sdk-test").cap_len(0).load().unwrap_err());
+    match &err {
+        brain::Error::Backend(msg) => assert!(msg.contains("cap_len"), "expected check_cap_len's own message, got {msg:?}"),
+        other => panic!("expected a clean Error::Backend from check_cap_len, got {other:?}"),
+    }
+}
+
+/// [`ImagePipelineBuilder::hifi`] overrides the `dtype == DType::F32`
+/// default: calling `.hifi(true)` with NO `.dtype(...)` call still reaches
+/// the SAME clean failure the two tests above reach (proving the pipeline
+/// really tried to build, at whatever hifi setting this resolved to) rather
+/// than, say, panicking on a hifi-specific code path this fixture cannot
+/// reach with a complete tensor set either way.
+#[test]
+fn hifi_override_still_reaches_a_real_build_attempt() {
+    let root = build_unambiguous_s3dit_store();
+    mark_locally_present(&root, "local", "s3dit-sdk-test", "zimage");
+
+    let err = with_models_dir(&root, || brain::ImagePipeline::builder("local/s3dit-sdk-test").hifi(true).load().unwrap_err());
+    assert!(matches!(err, brain::Error::Backend(_)), "expected a clean Error::Backend from incomplete DiT construction, got {err:?}");
+}

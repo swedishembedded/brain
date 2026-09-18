@@ -242,6 +242,13 @@ struct S3ditBackend {
     width: u32,
     height: u32,
     hifi: bool,
+    /// The caption capacity this pipeline was BUILT for
+    /// ([`ImagePipelineBuilder::cap_len`], default
+    /// [`s3dit::pipeline::DEFAULT_CAP_LEN`]) -- read back by
+    /// [`ImagePipeline::load_lora`]'s rebuild for the same reason
+    /// [`S3ditBackend::width`]/`height` are: folding an adapter in must not
+    /// silently drop a caller-requested capacity back to the default.
+    cap_len: u32,
     /// The one adapter folded in, if any -- same reason as
     /// [`Flux2Backend::adapter`]: `HotPipeline::build_adapted`'s `adapter:
     /// Option<&str>` only takes one at BUILD time.
@@ -275,7 +282,16 @@ impl std::fmt::Debug for ImagePipeline {
                 .field("forward_tokens", &b.forward_tokens)
                 .field("adapter", &b.adapter)
                 .finish(),
-            Backend::S3dit(b) => f.debug_struct("ImagePipeline").field("backend", &"s3dit").field("paths", &b.paths).field("width", &b.width).field("height", &b.height).field("hifi", &b.hifi).field("adapter", &b.adapter).finish(),
+            Backend::S3dit(b) => f
+                .debug_struct("ImagePipeline")
+                .field("backend", &"s3dit")
+                .field("paths", &b.paths)
+                .field("width", &b.width)
+                .field("height", &b.height)
+                .field("cap_len", &b.cap_len)
+                .field("hifi", &b.hifi)
+                .field("adapter", &b.adapter)
+                .finish(),
         }
     }
 }
@@ -292,6 +308,8 @@ impl ImagePipeline {
             device: Device::default(),
             dtype: DType::F32,
             size: None,
+            cap_len: s3dit::pipeline::DEFAULT_CAP_LEN,
+            hifi: None,
             download_policy: loader::DownloadPolicy::default(),
         }
     }
@@ -343,7 +361,7 @@ impl ImagePipeline {
             }
             Backend::S3dit(b) => {
                 b.adapter = Some(spec.path);
-                b.pipe = s3dit::pipeline::HotPipeline::build_adapted(&b.paths, b.width, b.height, s3dit::pipeline::DEFAULT_CAP_LEN, b.hifi, b.adapter.as_deref(), |_| {}).map_err(Error::Backend)?;
+                b.pipe = s3dit::pipeline::HotPipeline::build_adapted(&b.paths, b.width, b.height, b.cap_len, b.hifi, b.adapter.as_deref(), |_| {}).map_err(Error::Backend)?;
             }
         }
         Ok(())
@@ -454,6 +472,8 @@ pub struct ImagePipelineBuilder {
     device: Device,
     dtype: DType,
     size: Option<(u32, u32)>,
+    cap_len: u32,
+    hifi: Option<bool>,
     download_policy: loader::DownloadPolicy,
 }
 
@@ -499,6 +519,36 @@ impl ImagePipelineBuilder {
         self
     }
 
+    /// s3dit's caption capacity, a BUILD-time property like
+    /// [`ImagePipelineBuilder::size`] -- `s3dit::pipeline::HotPipeline::
+    /// build_adapted`'s `cap_len` argument, checked up front against the
+    /// resolved DiT's own RoPE table size ([`s3dit::pipeline::
+    /// check_cap_len`]) rather than silently ignored past its capacity.
+    /// Defaults to [`s3dit::pipeline::DEFAULT_CAP_LEN`] (512, unchanged from
+    /// before this knob existed) when never called. Silently unused on a
+    /// flux2-resolved pipeline -- flux2 has no caption-capacity concept, the
+    /// same "asymmetric knob, documented rather than enforced" precedent
+    /// [`ImageGenerationOptions`]'s own `guidance` field already sets on the
+    /// other backend.
+    pub fn cap_len(mut self, cap_len: u32) -> Self {
+        self.cap_len = cap_len;
+        self
+    }
+
+    /// s3dit's execution precision: `true` builds the fp32 ("hifi") DiT
+    /// (needs 2 GPUs to shard, [`s3dit::pipeline::hifi_needs_window`]),
+    /// `false` the int8 one. Defaults to [`ImagePipelineBuilder::dtype`]
+    /// being exactly [`DType::F32`] when never called explicitly -- the
+    /// pre-existing reading this knob did not change, only named: an
+    /// embedder who wants int8 s3dit execution independent of what `dtype`
+    /// they asked for (or fp32 execution without also touching `dtype`, a
+    /// flux2-only precision request) now has a way to say so directly
+    /// instead of the two decisions staying coupled through one field.
+    pub fn hifi(mut self, hifi: bool) -> Self {
+        self.hifi = Some(hifi);
+        self
+    }
+
     /// Resolve `model_id` and build a real [`ImagePipeline`].
     ///
     /// 1. [`Device`] is applied to this process (see [`crate::device::apply`]).
@@ -518,15 +568,19 @@ impl ImagePipelineBuilder {
     ///    variant/config is looked up, and the executable precision is
     ///    resolved (flux2: [`flux2::pipeline::effective_dit_precision`], a
     ///    `.gguf` source always executes through FLUX.2's packed-int8 path
-    ///    whatever [`DType`] was requested; s3dit: `hifi = dtype ==
-    ///    DType::F32`, the literal "fp32 execution" reading of `DType::F32`).
+    ///    whatever [`DType`] was requested; s3dit: `hifi =
+    ///    ImagePipelineBuilder::hifi().unwrap_or(dtype == DType::F32)` --
+    ///    explicit [`ImagePipelineBuilder::hifi`] wins, else the same
+    ///    literal "fp32 execution" reading of `DType::F32` as before this
+    ///    knob existed).
     /// 5. The backend's own `build_sized`/`build_adapted` builds the
     ///    pipeline: flux2 at no adapters, `max_batch = 1`, and a
     ///    forward/output token ceiling derived from
     ///    [`ImagePipelineBuilder::size`] when set (else its own conservative
     ///    1024x1024 default); s3dit at [`ImagePipelineBuilder::size`]'s
     ///    width/height directly (no adapter,
-    ///    [`s3dit::pipeline::DEFAULT_CAP_LEN`] caption capacity).
+    ///    [`ImagePipelineBuilder::cap_len`]'s caption capacity, default
+    ///    [`s3dit::pipeline::DEFAULT_CAP_LEN`]).
     ///
     /// Every failure path returns a typed [`Error`] -- never a panic on a
     /// caller-reachable input.
@@ -563,7 +617,7 @@ impl ImagePipelineBuilder {
     /// crate does not otherwise require, for a capability every caller here
     /// already gets for free by supplying one only where it is used.
     pub fn load_with_progress(self, on_download: &mut dyn FnMut(&str, u64, Option<u64>), on_build: &mut dyn FnMut(&str)) -> Result<ImagePipeline> {
-        let ImagePipelineBuilder { model_id, device, dtype, size, download_policy } = self;
+        let ImagePipelineBuilder { model_id, device, dtype, size, cap_len, hifi, download_policy } = self;
 
         crate::device::apply(&device)?;
 
@@ -624,11 +678,11 @@ impl ImagePipelineBuilder {
             ResolvedArch::S3dit(assembly) => {
                 let paths = s3dit::pipeline::Paths::from_assembly(&assembly).map_err(Error::Backend)?;
                 let (width, height) = size.unwrap_or(S3DIT_DEFAULT_SIZE);
-                let hifi = dtype == DType::F32;
+                let hifi = hifi.unwrap_or(dtype == DType::F32);
 
-                let pipe = s3dit::pipeline::HotPipeline::build_adapted(&paths, width, height, s3dit::pipeline::DEFAULT_CAP_LEN, hifi, None, on_build).map_err(Error::Backend)?;
+                let pipe = s3dit::pipeline::HotPipeline::build_adapted(&paths, width, height, cap_len, hifi, None, on_build).map_err(Error::Backend)?;
 
-                Ok(ImagePipeline { backend: Backend::S3dit(Box::new(S3ditBackend { pipe, paths, width, height, hifi, adapter: None })) })
+                Ok(ImagePipeline { backend: Backend::S3dit(Box::new(S3ditBackend { pipe, paths, width, height, cap_len, hifi, adapter: None })) })
             }
         }
     }
