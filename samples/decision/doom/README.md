@@ -267,10 +267,60 @@ teacher choosing differently on history the policy could not see.
 #### Run 2 - the same run, with the agent's own history in the observation
 
 `This is new ground.` / `You keep coming back here - 6 times now.` /
-`You have not actually moved for 4 decisions.` Everything else identical, so
-the comparison isolates one change.
+`You have not actually moved for 4 decisions.` / `22 patches explored.`
+Everything else identical, so the comparison isolates one change.
 
-*(in progress)*
+| | return | kills | items |
+|---|---:|---:|---:|
+| scripted | **+6.39** | 0.2 | 1.1 |
+| policy (run 1) | +3.20 | 0.0 | 1.0 |
+| policy (run 2) | +5.87 | **0.3** | 0.7 |
+
+**The gap closes from -3.19 to -0.52 on one change to the observation**, and on
+kills the policy passes the scripted player. Nothing about the training changed;
+the policy was simply being asked to act on state it could not see.
+
+#### Run 3 - one mission, a longer episode, a longer warm start
+
+140 decisions was not enough for either player to reach much combat, so: a
+single mission, 250 decisions, 16 warm-start episodes over 12 passes.
+
+| | return | game score | kills | items |
+|---|---:|---:|---:|---:|
+| scripted | **+7.41** | -0.59 | 0.0 | 1.0 |
+| policy | +4.27 | **-0.29** | 0.0 | 1.0 |
+
+![run 3](docs/training-run3.png)
+
+The rollout return climbs from +9.26 to +13.23 and the policy ends **+0.30
+ahead on the game's own score** and 3.13 behind on total return - i.e. it plays
+DOOM slightly better and explores less.
+
+And **neither player killed anything in twelve episodes**. That is the finding
+that matters, and it is not about the policy at all: at 250 decisions from the
+level start, an agent spends the episode getting out of the spawn area. A
+scripted probe on another seed reaches two kills in the same budget, so combat
+is rare and high-variance rather than absent - which makes the game score a
+statistic with almost no events in it, and no training run can learn from a
+signal that mostly is not there.
+
+#### Where that leaves it
+
+**The policy does not yet beat the scripted player on total return.** It is
+level with or slightly ahead on the game's own score in both runs 2 and 3, and
+behind on exploration. The honest summary is that the system learns - the
+return climbs, the diagnosis of run 1 was confirmed by run 2's single change -
+and that the EXPERIMENT is still mis-shaped for what is being asked of it.
+
+The next change is not a hyperparameter. It is the initial state: an episode
+that begins in contact with the problem rather than a few hundred decisions
+away from it. That is what
+[ViZDoom's scenario set](https://github.com/Farama-Foundation/ViZDoom) exists
+for - `defend_the_center`, `deadly_corridor`, `health_gathering` are all hand-made
+starting positions, for exactly this reason - and this API can already do it:
+`POST /api/world/objects` spawns a monster at a distance, and `PATCH
+/api/world/objects/{id}` moves the player. A randomised start in a room that
+has something in it turns combat from a rare event into every episode.
 
 ### What would move this next
 

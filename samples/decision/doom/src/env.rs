@@ -535,35 +535,15 @@ impl DoomEnv {
             }
         }
 
-        // Somewhere to go. Every movement option knows the clearance it was
+        // Somewhere to go. Every movement option carries the clearance it was
         // built from, so this is a choice among measured distances rather than
         // a fixed preference order.
-        let room = |tag: Tag| -> i32 {
-            let c = &self.state.clearance;
-            match tag {
-                Tag::Advance => c.ahead,
-                Tag::Retreat => c.behind,
-                _ => 0,
-            }
-        };
         let mut best: Option<(i32, usize)> = None;
         for (i, o) in self.opts.iter().enumerate() {
             let score = match o.tag {
-                Tag::Exit => {
-                    // The exit is the goal, so it wins any tie it can reach.
-                    self.state.exit.as_ref().map_or(0, |e| e.clearance) + 400
-                }
-                Tag::Advance | Tag::Retreat => room(o.tag),
-                // Left and right are both tagged Explore and their clearances
-                // are not distinguishable from the tag, so they are scored on
-                // the number in their own text - which is the clearance they
-                // were built from. Reading it back is ugly; the alternative is
-                // a second copy of the layout in two places.
-                Tag::Explore => o
-                    .text
-                    .split_whitespace()
-                    .find_map(|w| w.parse::<i32>().ok())
-                    .unwrap_or(0),
+                // The exit is the goal, so it wins any tie it can reach.
+                Tag::Exit => o.room + 400,
+                Tag::Advance | Tag::Retreat | Tag::Explore => o.room,
                 _ => 0,
             };
             // Backing away is a last resort: it is how a greedy walker
@@ -582,9 +562,7 @@ impl DoomEnv {
                 .iter()
                 .enumerate()
                 .filter(|(_, o)| matches!(o.tag, Tag::Explore | Tag::Advance))
-                .map(|(i, o)| {
-                    (o.text.split_whitespace().find_map(|w| w.parse::<i32>().ok()).unwrap_or(0), i)
-                })
+                .map(|(i, o)| (o.room, i))
                 .collect();
             if let Some(&(_, i)) = away.iter().max_by_key(|(room, _)| *room) {
                 self.commit = COMMIT_STEPS;

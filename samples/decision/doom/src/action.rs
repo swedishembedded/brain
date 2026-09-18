@@ -34,6 +34,14 @@ pub struct Option_ {
     /// What this option is trying to do, for the inspector and for the
     /// scripted teacher. Never shown to the model.
     pub tag: Tag,
+    /// How far there is to walk the way this option goes, for the options that
+    /// go somewhere; 0 for the ones that do not.
+    ///
+    /// Carried on the option rather than looked up again by whoever needs it.
+    /// The scripted player used to recover it by scanning the option's own
+    /// TEXT for the first integer, which worked only because no monster in
+    /// DOOM has a digit in its name.
+    pub room: i32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -85,6 +93,7 @@ pub fn options(state: &State) -> Vec<Option_> {
             commands: format!("[{},{{\"type\":\"shoot\"}}]", json_turn(facing)),
             tics: FIGHT_TICS,
             tag: Tag::Attack,
+            room: 0,
         });
     }
 
@@ -103,6 +112,7 @@ pub fn options(state: &State) -> Vec<Option_> {
             ),
             tics: MOVE_TICS,
             tag: Tag::Grab,
+            room: p.distance,
         });
     }
 
@@ -113,6 +123,7 @@ pub fn options(state: &State) -> Vec<Option_> {
             commands: "[{\"type\":\"forward\",\"amount\":8}]".into(),
             tics: MOVE_TICS,
             tag: Tag::Advance,
+            room: c.ahead,
         });
     }
     if c.ahead_left >= MIN_ROOM {
@@ -124,6 +135,7 @@ pub fn options(state: &State) -> Vec<Option_> {
             ),
             tics: MOVE_TICS,
             tag: Tag::Explore,
+            room: c.ahead_left,
         });
     }
     if c.ahead_right >= MIN_ROOM {
@@ -135,6 +147,7 @@ pub fn options(state: &State) -> Vec<Option_> {
             ),
             tics: MOVE_TICS,
             tag: Tag::Explore,
+            room: c.ahead_right,
         });
     }
     if c.behind >= MIN_ROOM {
@@ -143,6 +156,7 @@ pub fn options(state: &State) -> Vec<Option_> {
             commands: "[{\"type\":\"backward\",\"amount\":8}]".into(),
             tics: MOVE_TICS,
             tag: Tag::Retreat,
+            room: c.behind,
         });
     }
 
@@ -165,6 +179,7 @@ pub fn options(state: &State) -> Vec<Option_> {
             ),
             tics: MOVE_TICS,
             tag: Tag::Exit,
+            room: e.clearance,
         });
     }
 
@@ -178,6 +193,7 @@ pub fn options(state: &State) -> Vec<Option_> {
         commands: "[{\"type\":\"use\"},{\"type\":\"forward\",\"amount\":4}]".into(),
         tics: MOVE_TICS,
         tag: Tag::Use,
+        room: 0,
     });
 
     // --- look around ------------------------------------------------------
@@ -190,6 +206,7 @@ pub fn options(state: &State) -> Vec<Option_> {
         commands: format!("[{}]", json_turn(state.facing(180))),
         tics: FIGHT_TICS,
         tag: Tag::Explore,
+        room: 0,
     });
 
     out
