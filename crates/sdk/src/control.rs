@@ -356,19 +356,31 @@ impl<E: Env> ControlPipeline<E> {
     /// ones the teacher reaches - which is the point. Cloning a teacher on
     /// states the learner would visit instead is a different and much harder
     /// problem; this is the cheap half, and PPO handles the rest.
+    /// Behaviour cloning: play `episodes` under the scripted teacher and fit
+    /// the policy to the best of what it did.
+    ///
+    /// The episodes are driven BY the teacher, so the states visited are the
+    /// ones the teacher reaches - which is the point. Cloning a teacher on
+    /// states the learner would visit instead is a different and much harder
+    /// problem; this is the cheap half, and PPO handles the rest.
     fn clone_teacher(
         &mut self,
         episodes: usize,
         epochs: usize,
         max_steps: usize,
+        keep: f32,
         log: &mut dyn FnMut(usize, f32),
         step: &mut usize,
     ) -> Result<f32> {
         let ce = decide::loss::LossConfig::cross_entropy();
-        let mut demos: Vec<(String, Vec<String>, usize)> = Vec::new();
+        // Grouped BY EPISODE, with what that episode scored, so the bad ones
+        // can be dropped before any of them is learned from.
+        let mut runs: Vec<(f32, Vec<(String, Vec<String>, usize)>)> = Vec::new();
         for _ in 0..episodes {
             self.episode_seed += 1;
             let mut obs = self.env.reset(self.episode_seed);
+            let mut demos = Vec::new();
+            let mut ret = 0.0f32;
             for _ in 0..max_steps {
                 let options = self.env.actions();
                 if options.is_empty() {
@@ -378,13 +390,45 @@ impl<E: Env> ControlPipeline<E> {
                     return Ok(0.0);
                 };
                 demos.push((obs.clone(), options, teacher));
-                let (next, _, done) = self.env.step(teacher);
+                let (next, reward, done) = self.env.step(teacher);
+                ret += reward;
                 obs = next;
                 if done {
                     break;
                 }
             }
+            runs.push((ret, demos));
         }
+
+        // FILTERED behaviour cloning: keep the best `keep` of the teacher's
+        // episodes and throw the rest away.
+        //
+        // A scripted teacher is not uniformly good - it is good in the
+        // situations it was written for and arbitrary everywhere else, and a
+        // heuristic navigator's bad episodes are bad in a specific, learnable
+        // way: it walks into a wall and keeps walking into it. Cloning those
+        // teaches the policy exactly that, and the policy gradient then has to
+        // spend its samples unlearning something it was deliberately taught.
+        // Keeping the top fraction by return is the cheapest form of the
+        // filtering the imitation-learning literature calls Filtered BC, and
+        // it needs nothing the run does not already have.
+        let keep = keep.clamp(0.0, 1.0);
+        if keep < 1.0 && runs.len() > 1 {
+            runs.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+            let n = ((runs.len() as f32 * keep).round() as usize).clamp(1, runs.len());
+            let dropped = runs.len() - n;
+            let worst = runs.last().map(|r| r.0).unwrap_or(0.0);
+            runs.truncate(n);
+            if dropped > 0 {
+                println!(
+                    "    warm start: kept {n} of {} scripted episodes (best {:+.2}, dropped down to {worst:+.2})",
+                    n + dropped,
+                    runs.first().map(|r| r.0).unwrap_or(0.0)
+                );
+            }
+        }
+        let demos: Vec<(String, Vec<String>, usize)> =
+            runs.into_iter().flat_map(|(_, d)| d).collect();
         if demos.is_empty() {
             return Ok(0.0);
         }
@@ -565,6 +609,14 @@ pub struct ControlSpec {
     /// Episodes of scripted play to clone before the policy gradient starts.
     /// Zero, or an environment with no [`Env::demo`], skips the phase.
     pub warmup_episodes: usize,
+    /// What fraction of the teacher's episodes to actually clone, best first.
+    ///
+    /// 1.0 clones everything, which is right for a teacher that is uniformly
+    /// mediocre and wrong for one that is good in the situations it was
+    /// written for and arbitrary elsewhere - see [`ControlPipeline::
+    /// clone_teacher`]. Lower it when the teacher has failure modes worth not
+    /// teaching.
+    pub warmup_keep: f32,
     /// Passes over the collected demonstrations.
     ///
     /// Needed because the demonstrations are a small fixed dataset and one
@@ -599,6 +651,7 @@ impl Default for ControlSpec {
             seed: 0,
             warmup_episodes: 60,
             warmup_epochs: 12,
+            warmup_keep: 1.0,
             freeze_encoder: true,
         }
     }
@@ -631,6 +684,11 @@ impl ControlSpec {
     }
     pub fn warmup_epochs(mut self, n: usize) -> ControlSpec {
         self.warmup_epochs = n;
+        self
+    }
+    /// See [`ControlSpec::warmup_keep`].
+    pub fn warmup_keep(mut self, f: f32) -> ControlSpec {
+        self.warmup_keep = f;
         self
     }
     /// Fine-tune the encoder as well as the head. See
@@ -666,8 +724,14 @@ impl<E: Env> Stages for ControlPipeline<E> {
             if spec.freeze_encoder { "frozen" } else { "fine-tuned" }
         );
         if spec.warmup_episodes > 0 {
-            let bc =
-                self.clone_teacher(spec.warmup_episodes, spec.warmup_epochs, spec.max_steps, log, &mut step)?;
+            let bc = self.clone_teacher(
+                spec.warmup_episodes,
+                spec.warmup_epochs,
+                spec.max_steps,
+                spec.warmup_keep,
+                log,
+                &mut step,
+            )?;
             if step > 0 {
                 println!(
                     "    warm start: {} scripted episodes x {} passes, final loss {bc:.4}",

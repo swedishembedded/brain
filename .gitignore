@@ -83,3 +83,7 @@ scripts/gates/*-perf-baselines.json
 
 # MuJoCo writes this next to the working directory whenever it warns.
 MUJOCO_LOG.TXT
+
+# A sample's own fetched data: the DOOM engine build and its IWAD. Game data is
+# not ours to redistribute and an engine build is a build artifact.
+samples/decision/doom/.data/

@@ -24,7 +24,7 @@ struct Wire {
     palette: String,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Frame {
     pub width: u32,
     pub height: u32,

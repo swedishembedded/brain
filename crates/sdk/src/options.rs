@@ -52,6 +52,8 @@ pub struct ControlOptions {
     pub max_steps: usize,
     pub warmup_episodes: usize,
     pub warmup_epochs: usize,
+    /// Fraction of the teacher's episodes to clone, best first.
+    pub warmup_keep: f32,
     pub entropy: Option<f32>,
     pub seed: u64,
     /// Fine-tune the encoder as well as the head.
@@ -75,6 +77,7 @@ impl ControlOptions {
             max_steps: d.max_steps,
             warmup_episodes: d.warmup_episodes,
             warmup_epochs: d.warmup_epochs,
+            warmup_keep: d.warmup_keep,
             entropy: None,
             seed: d.seed,
             train_encoder: !d.freeze_encoder,
@@ -90,6 +93,7 @@ impl ControlOptions {
             .max_steps(self.max_steps)
             .warmup_episodes(self.warmup_episodes)
             .warmup_epochs(self.warmup_epochs)
+            .warmup_keep(self.warmup_keep)
             .train_encoder(self.train_encoder)
             .seed(self.seed);
         if let Some(e) = self.entropy {
@@ -112,6 +116,10 @@ impl ControlOptions {
         self.max_steps = args.usize_or("--max-steps", self.max_steps);
         self.warmup_episodes = args.usize_or("--warmup", self.warmup_episodes);
         self.warmup_epochs = args.usize_or("--warmup-epochs", self.warmup_epochs);
+        if let Some(k) = args.take_str("--warmup-keep") {
+            self.warmup_keep =
+                k.parse().map_err(|_| format!("--warmup-keep: {k:?} is not a number"))?;
+        }
         if let Some(e) = args.take_str("--entropy") {
             self.entropy =
                 Some(e.parse().map_err(|_| format!("--entropy: {e:?} is not a number"))?);
@@ -138,6 +146,7 @@ impl Options for ControlOptions {
   --max-steps N       decisions per episode
   --warmup N          scripted episodes cloned before the policy gradient
   --warmup-epochs N   passes over those demonstrations
+  --warmup-keep F     fraction of scripted episodes to clone, best first  [1.0]
   --entropy F         exploration bonus
   --train-encoder     fine-tune the encoder, not just the head
   --seed N"

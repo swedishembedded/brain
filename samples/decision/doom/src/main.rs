@@ -37,157 +37,156 @@
 mod action;
 mod doom;
 mod env;
+mod frame;
 mod obs;
 mod view;
 
-use brain::{ControlPipeline, ControlSpec};
+use brain::options::{Args as Args_, ControlOptions, Hardware, Options, ViewOptions};
+use brain::ControlPipeline;
 use doom::{Config, Doom, Paths};
 use env::{DoomEnv, Mission};
 
-struct Args {
-    command: String,
-    doom_bin: Option<String>,
-    wad: Option<String>,
-    encoder: String,
-    head: Option<String>,
-    save: String,
-    mission: Mission,
-    mix: bool,
-    cfg: Config,
-    iterations: usize,
-    episodes: usize,
-    epochs: usize,
-    warmup: usize,
-    max_steps: usize,
-    eval_episodes: usize,
-    play: usize,
-    window: bool,
-    frames: Option<String>,
-    transcript: Option<String>,
-    fps: u32,
-    entropy: Option<f32>,
-    seed: u64,
+/// This sample's own options, on top of the shared groups.
+///
+/// Only the flags that are genuinely about DOOM live here. The hardware
+/// selection, the training knobs and the window flags come from
+/// `brain::options`, which is where the `brain` binary and every other sample
+/// get them - so `--device`, `--episodes` and `--window` mean exactly the same
+/// thing here as they do there, and adding one to the shared set adds it to
+/// all of them at once.
+pub struct Args {
+    pub command: String,
+    pub doom_bin: Option<String>,
+    pub wad: Option<String>,
+    pub cfg: Config,
+    pub mission: Mission,
+    pub mix: bool,
+    pub eval_episodes: usize,
+    pub play: usize,
+    pub transcript: Option<String>,
+    pub hardware: Hardware,
+    pub train: ControlOptions,
+    pub view: ViewOptions,
 }
 
-const USAGE: &str = "\
-usage: doom <train|eval|play|probe> [options]
+impl Args {
+    pub fn encoder(&self) -> &str {
+        &self.train.encoder
+    }
+    pub fn head(&self) -> Option<&String> {
+        self.train.head.as_ref()
+    }
+    pub fn max_steps(&self) -> usize {
+        self.train.max_steps
+    }
+    pub fn seed(&self) -> u64 {
+        self.train.seed
+    }
+    pub fn device(&self) -> brain::Device {
+        self.hardware.device.clone()
+    }
+}
+
+fn usage() -> String {
+    format!(
+        "\
+usage: doom <train|eval|play|probe|bench> [options]
 
   train    warm-start on the scripted player, then improve it by PPO
   eval     score a policy and the scripted player on the SAME episodes
   play     run episodes and show every decision as it is made
   probe    one scripted episode, for artifacts and for checking the plumbing
+  bench    time one decision against state length and option count
 
-where to find the game (no path is ever baked in)
-  --doom-bin PATH     the restful-doom binary   [$RESTFUL_DOOM, then $PATH]
-  --wad PATH          an IWAD                   [$DOOM_WAD, $DOOM_WAD_DIR/doom1.wad]
-  --encoder DIR       sentence encoder          [$BRAIN_MINILM_DIR]
+the game (no path is ever baked in, and nothing is read from the environment)
+  --doom-bin PATH     the restful-doom binary   [found on $PATH]
+  --wad PATH          an IWAD
 
 what to play
   --episode N --map N --skill 0..4      [1 1 2]
   --mission clear|speedrun|survive      [clear]
   --mix               sample a mission per episode, so the policy must read it
-  --max-steps N       decisions per episode     [220]
+  --eval-episodes N   episodes to score over   [24]
+  --play N            episodes for `play`      [3]
+  --transcript FILE   write every request and reply as JSON lines
+
+hardware
+{}
 
 training
-  --iterations N --episodes N --epochs N --warmup N   [10 12 2 40]
-  --entropy F         exploration bonus
-  --head FILE         start from (or, for eval/play, use) these weights
-  --save FILE         where to write them       [out/doom-policy.safetensors]
-  --seed N
+{}
 
-looking at it
-  --window            open a window (otherwise headless, which is the default
-                      on a machine with no display)
-  --frames DIR        write every decision's frame + overlay as a PNG
-  --transcript FILE   write every request and reply as JSON lines
-  --fps N             cap the window's pace so a human can follow it   [12]
-  --play N            episodes for `play`      [3]
-  --eval-episodes N   episodes for `eval`      [24]
-";
+watching
+{}
+",
+        Hardware::help(),
+        ControlOptions::help(),
+        ViewOptions::help()
+    )
+}
 
 fn parse_args() -> Result<Args, String> {
-    let home = std::env::var("HOME").unwrap_or_default();
     let argv: Vec<String> = std::env::args().skip(1).collect();
     if argv.is_empty() || argv[0] == "-h" || argv[0] == "--help" {
-        println!("{USAGE}");
+        println!("{}", usage());
         std::process::exit(0);
     }
-    let mut a = Args {
-        command: argv[0].clone(),
-        doom_bin: None,
-        wad: None,
-        encoder: std::env::var("BRAIN_MINILM_DIR").unwrap_or_else(|_| {
-            format!("{home}/.local/share/brain/models/sentence-transformers/all-MiniLM-L6-v2")
-        }),
-        head: None,
-        save: "out/doom-policy.safetensors".into(),
-        mission: Mission::Clear,
-        mix: false,
-        cfg: Config::default(),
-        iterations: 10,
-        episodes: 12,
-        epochs: 2,
-        warmup: 40,
-        max_steps: 220,
-        eval_episodes: 24,
-        play: 3,
-        window: false,
-        frames: None,
-        transcript: None,
-        fps: 12,
-        entropy: None,
-        seed: 11,
+    let command = argv[0].clone();
+    if !["train", "eval", "play", "probe", "bench"].contains(&command.as_str()) {
+        return Err(format!("unknown command {command:?}\n\n{}", usage()));
+    }
+
+    let mut args = Args_::new(&argv[1..]);
+    let hardware = Hardware::take(&mut args)?;
+    let view = ViewOptions::take(&mut args)?;
+
+    // This sample's own defaults, then the shared flags on top. A DOOM episode
+    // is a couple of hundred decisions, not the forty a toy environment needs,
+    // and the warm start is shorter because each demonstration costs a game
+    // step rather than a table lookup.
+    let mut train = ControlOptions::new("", "out/doom-policy.safetensors");
+    train.max_steps = 140;
+    train.iterations = 10;
+    train.episodes = 12;
+    train.warmup_episodes = 12;
+    train.warmup_epochs = 6;
+    let train = train.take_over(&mut args)?;
+    if train.encoder.is_empty() {
+        return Err("--encoder DIR is required: it is the pretrained sentence encoder the \
+                    policy reads with (`brain pull sentence-transformers/all-MiniLM-L6-v2` \
+                    fetches one)"
+            .into());
+    }
+
+    let mission = match args.take_str("--mission") {
+        Some(m) => Mission::parse(&m).ok_or_else(|| format!("unknown mission {m:?}"))?,
+        None => Mission::Clear,
     };
-    if !["train", "eval", "play", "probe"].contains(&a.command.as_str()) {
-        return Err(format!("unknown command {:?}\n\n{USAGE}", a.command));
-    }
-    let mut i = 1;
-    while i < argv.len() {
-        let mut want = || -> Result<String, String> {
-            argv.get(i + 1).cloned().ok_or_else(|| format!("{} needs a value", argv[i]))
-        };
-        let mut consumed = 2;
-        match argv[i].as_str() {
-            "--doom-bin" => a.doom_bin = Some(want()?),
-            "--wad" => a.wad = Some(want()?),
-            "--encoder" => a.encoder = want()?,
-            "--head" => a.head = Some(want()?),
-            "--save" => a.save = want()?,
-            "--mission" => {
-                let m = want()?;
-                a.mission = Mission::parse(&m).ok_or_else(|| format!("unknown mission {m:?}"))?;
-            }
-            "--episode" => a.cfg.episode = want()?.parse().map_err(|_| "--episode")?,
-            "--map" => a.cfg.map = want()?.parse().map_err(|_| "--map")?,
-            "--skill" => a.cfg.skill = want()?.parse().map_err(|_| "--skill")?,
-            "--iterations" => a.iterations = want()?.parse().map_err(|_| "--iterations")?,
-            "--episodes" => a.episodes = want()?.parse().map_err(|_| "--episodes")?,
-            "--epochs" => a.epochs = want()?.parse().map_err(|_| "--epochs")?,
-            "--warmup" => a.warmup = want()?.parse().map_err(|_| "--warmup")?,
-            "--max-steps" => a.max_steps = want()?.parse().map_err(|_| "--max-steps")?,
-            "--eval-episodes" => a.eval_episodes = want()?.parse().map_err(|_| "--eval-episodes")?,
-            "--play" => a.play = want()?.parse().map_err(|_| "--play")?,
-            "--frames" => a.frames = Some(want()?),
-            "--transcript" => a.transcript = Some(want()?),
-            "--fps" => a.fps = want()?.parse().map_err(|_| "--fps")?,
-            "--entropy" => a.entropy = want()?.parse().ok(),
-            "--seed" => a.seed = want()?.parse().map_err(|_| "--seed")?,
-            "--mix" => {
-                a.mix = true;
-                consumed = 1;
-            }
-            "--window" => {
-                a.window = true;
-                consumed = 1;
-            }
-            other => return Err(format!("unknown argument {other:?}\n\n{USAGE}")),
-        }
-        i += consumed;
-    }
-    if a.cfg.skill > 4 {
+    let cfg = Config {
+        episode: args.u32_or("--episode", 1),
+        map: args.u32_or("--map", 1),
+        skill: args.u32_or("--skill", 2),
+        engine_window: false,
+    };
+    if cfg.skill > 4 {
         return Err("--skill must be 0..4".into());
     }
-    Ok(a)
+    let parsed = Args {
+        command,
+        doom_bin: args.take_str("--doom-bin"),
+        wad: args.take_str("--wad"),
+        cfg,
+        mission,
+        mix: args.take_flag("--mix"),
+        eval_episodes: args.usize_or("--eval-episodes", 24),
+        play: args.usize_or("--play", 3),
+        transcript: args.take_str("--transcript"),
+        hardware,
+        train,
+        view,
+    };
+    args.finish();
+    Ok(parsed)
 }
 
 fn main() {
@@ -202,11 +201,11 @@ fn run() -> Result<(), String> {
 
     let paths = Paths::resolve(args.doom_bin.as_deref(), args.wad.as_deref())
         .map_err(|m| format!("{m}"))?;
-    if !std::path::Path::new(&args.encoder).join("config.json").exists() {
+    if !std::path::Path::new(args.encoder()).join("config.json").exists() {
         return Err(format!(
             "no sentence encoder at {}\n  run `brain pull sentence-transformers/all-MiniLM-L6-v2`, \
              or pass --encoder DIR",
-            args.encoder
+            args.encoder()
         ));
     }
 
@@ -226,6 +225,7 @@ fn run() -> Result<(), String> {
     match args.command.as_str() {
         "probe" => view::probe(env, &args),
         "play" => view::play(env, &args),
+        "bench" => view::bench(env, &args),
         "eval" => evaluate(env, &args),
         _ => train(env, &args),
     }
@@ -234,35 +234,58 @@ fn run() -> Result<(), String> {
 /// Warm-start on the scripted player, then improve it with PPO.
 fn train(env: DoomEnv, args: &Args) -> Result<(), String> {
     let inspect = env.inspect.clone();
-    let mut spec = ControlSpec::default()
-        .iterations(args.iterations)
-        .episodes(args.episodes)
-        .epochs(args.epochs)
-        .max_steps(args.max_steps)
-        .warmup_episodes(args.warmup)
-        .seed(args.seed);
-    if let Some(e) = args.entropy {
-        spec.policy.entropy = e;
-    }
+    // The shared group builds the spec: one place decides what every flag
+    // means, so this sample cannot quietly disagree with the next one about
+    // what --epochs does.
+    let spec = args.train.spec();
 
     // A window during training is optional and shows the SAME inspector the
     // play command does, fed from the environment as the rollouts run.
     let watcher = view::watch(inspect, args);
 
-    let mut builder = ControlPipeline::builder(&args.encoder, env).seed(args.seed);
-    if let Some(h) = &args.head {
+    let mut builder =
+        ControlPipeline::builder(args.encoder(), env).seed(args.seed()).device(args.device());
+    if let Some(h) = args.head() {
         builder = builder.head(h);
     }
-    let chain = brain::Flow::new(builder.load())
-        .train(spec)
-        .evaluate()
-        .save(&args.save)
-        .report();
+    // No `.evaluate()` stage here. The SDK's evaluation runs a fixed 200
+    // episodes, which is the right number for a game whose episodes are forty
+    // decisions long and the wrong one for this: at this horizon it is 40
+    // minutes of wall clock after every training run, and it scores the policy
+    // against nothing. What follows instead scores the policy and the scripted
+    // player over the same episodes, which is the comparison that means
+    // something.
+    let chain = brain::Flow::new(builder.load()).train(spec).save(&args.train.save).report();
     let out = chain.finish().map_err(|e| format!("{e}"));
     watcher.stop();
-    out?;
-    println!("doom: wrote {}", args.save);
+    let mut pipe = out?;
+    println!("doom: wrote {}\n", args.train.save);
+
+    let seeds: Vec<u64> = (0..args.eval_episodes as u64).map(|i| 5_000_000 + i).collect();
+    println!("doom: scoring both players over the same {} episodes", seeds.len());
+    let mut pt = view::Timing::default();
+    let mut st = view::Timing::default();
+    let learned = view::score_policy(&mut pipe, &seeds, args.max_steps(), None, &mut pt)?;
+    let script = view::score_scripted(pipe.env_mut(), &seeds, args.max_steps(), &mut st)?;
+    report(&script, &learned);
+    pt.print("policy");
+    st.print("scripted");
     Ok(())
+}
+
+fn report(script: &view::Score, learned: &view::Score) {
+    println!(
+        "\n{:<10} {:>8} {:>8} {:>8} {:>8} {:>8}",
+        "", "return", "kills", "items", "exits", "deaths"
+    );
+    script.row("scripted");
+    learned.row("policy");
+    let delta = learned.mean_return - script.mean_return;
+    println!(
+        "\ndoom: the policy is {:+.2} return per episode against the scripted player{}",
+        delta,
+        if delta > 0.0 { "" } else { " - it has not beaten it yet" }
+    );
 }
 
 /// Score the policy and the scripted player on the SAME episodes.
@@ -275,30 +298,27 @@ fn evaluate(mut env: DoomEnv, args: &Args) -> Result<(), String> {
     let seeds: Vec<u64> = (0..args.eval_episodes as u64).map(|i| 5_000_000 + i).collect();
 
     println!("\ndoom: scripted player over {} episodes", seeds.len());
-    let script = view::score_scripted(&mut env, &seeds, args.max_steps)?;
+    let mut st = view::Timing::default();
+    let script = view::score_scripted(&mut env, &seeds, args.max_steps(), &mut st)?;
     script.print("scripted");
+    st.print("scripted");
 
-    let Some(head) = args.head.as_ref() else {
+    let Some(head) = args.head() else {
         println!("\ndoom: no --head given, so only the reference bar was measured");
         return Ok(());
     };
     println!("\ndoom: policy {head} over the same {} episodes", seeds.len());
-    let mut pipe = ControlPipeline::builder(&args.encoder, env)
+    let mut pipe = ControlPipeline::builder(args.encoder(), env)
         .head(head)
-        .seed(args.seed)
+        .seed(args.seed())
+        .device(args.device())
         .load()
         .map_err(|e| format!("{e}"))?;
-    let learned = view::score_policy(&mut pipe, &seeds, args.max_steps, None)?;
+    let mut pt = view::Timing::default();
+    let learned = view::score_policy(&mut pipe, &seeds, args.max_steps(), None, &mut pt)?;
     learned.print("policy");
+    pt.print("policy");
 
-    println!("\n{:<10} {:>8} {:>8} {:>8} {:>8} {:>8}", "", "return", "kills", "items", "exits", "deaths");
-    script.row("scripted");
-    learned.row("policy");
-    let delta = learned.mean_return - script.mean_return;
-    println!(
-        "\ndoom: the policy is {:+.2} return per episode against the scripted player{}",
-        delta,
-        if delta > 0.0 { "" } else { " - it has not beaten it yet" }
-    );
+    report(&script, &learned);
     Ok(())
 }

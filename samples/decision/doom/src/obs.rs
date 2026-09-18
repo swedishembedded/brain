@@ -27,6 +27,13 @@
 
 use serde::Deserialize;
 
+// `deny_unknown_fields` means every field the engine sends has to be named
+// here, and a few of them are named for that reason alone: they pin the
+// contract rather than feed a decision. Removing one would not remove the
+// field from the wire, it would make the response stop parsing - so these are
+// load-bearing precisely by existing. Rust's dead-code lint cannot see that,
+// which is what the allow is for.
+#[allow(dead_code)]
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct State {
@@ -49,6 +56,13 @@ pub struct State {
     pub outcome: String,
 }
 
+// `deny_unknown_fields` means every field the engine sends has to be named
+// here, and a few of them are named for that reason alone: they pin the
+// contract rather than feed a decision. Removing one would not remove the
+// field from the wire, it would make the response stop parsing - so these are
+// load-bearing precisely by existing. Rust's dead-code lint cannot see that,
+// which is what the allow is for.
+#[allow(dead_code)]
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Level {
@@ -70,6 +84,9 @@ pub struct Level {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Player {
+    // x/y are not part of any decision - a policy navigating by coordinates
+    // would be memorising one map - but they are how the environment notices
+    // that it has stopped moving. See `DoomEnv::stuck`.
     pub health: i32,
     pub armor: i32,
     /// Absent only if the player has no map object, which happens between a
@@ -82,6 +99,13 @@ pub struct Player {
     pub keys: Vec<String>,
 }
 
+// `deny_unknown_fields` means every field the engine sends has to be named
+// here, and a few of them are named for that reason alone: they pin the
+// contract rather than feed a decision. Removing one would not remove the
+// field from the wire, it would make the response stop parsing - so these are
+// load-bearing precisely by existing. Rust's dead-code lint cannot see that,
+// which is what the allow is for.
+#[allow(dead_code)]
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Thing {
@@ -116,8 +140,19 @@ pub struct Exit {
     pub distance: i32,
     pub bearing: i32,
     pub kind: String,
+    /// How far the player would get setting off toward it right now. The exit
+    /// is usually behind a wall, and without this an agent cannot tell "walk
+    /// that way" from "walk into that".
+    pub clearance: i32,
 }
 
+// `deny_unknown_fields` means every field the engine sends has to be named
+// here, and a few of them are named for that reason alone: they pin the
+// contract rather than feed a decision. Removing one would not remove the
+// field from the wire, it would make the response stop parsing - so these are
+// load-bearing precisely by existing. Rust's dead-code lint cannot see that,
+// which is what the allow is for.
+#[allow(dead_code)]
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Event {
@@ -193,8 +228,13 @@ pub fn render(state: &State) -> String {
         out.push_str(&format!(", carrying {}", p.keys.join(" and ")));
     }
     out.push_str(&format!(
-        ". Killed {} of {} enemies, {} of {} items.\n",
-        state.level.kills, state.level.total_kills, state.level.items, state.level.total_items
+        ". Killed {} of {} enemies, {} of {} items, {} of {} secrets.\n",
+        state.level.kills,
+        state.level.total_kills,
+        state.level.items,
+        state.level.total_items,
+        state.level.secrets,
+        state.level.total_secrets
     ));
 
     let vis: Vec<&Thing> = state.visible_threats().take(3).collect();
@@ -218,11 +258,30 @@ pub fn render(state: &State) -> String {
                 t.distance,
                 side_word(t.bearing)
             ));
+            // Whether a target is nearly dead changes which one to shoot next,
+            // and it is the kind of thing that is obvious on screen and absent
+            // from a state that reports only positions.
+            if let Some(h) = t.health {
+                if h <= 20 {
+                    out.push_str(", nearly dead");
+                }
+            }
             if t.targeting_me == Some(true) {
                 out.push_str(", coming for you");
             }
         }
         out.push_str(".\n");
+    }
+
+    if let Some(b) = state.hazards.iter().find(|b| b.visible && b.distance < 400) {
+        // A barrel beside a monster is a free kill and beside the player is a
+        // way to die, so where they are belongs in the state.
+        out.push_str(&format!(
+            "An explosive {} sits {} units {}.\n",
+            b.kind.to_lowercase(),
+            b.distance,
+            side_word(b.bearing)
+        ));
     }
 
     if let Some(pick) = state.pickups.iter().find(|i| i.visible) {
@@ -242,10 +301,11 @@ pub fn render(state: &State) -> String {
 
     if let Some(e) = &state.exit {
         out.push_str(&format!(
-            "The exit {} is {} units {}.\n",
+            "The exit {} is {} units {}, with {} units of clear floor that way.\n",
             if e.kind == "switch" { "switch" } else { "line" },
             e.distance,
-            side_word(e.bearing)
+            side_word(e.bearing),
+            e.clearance
         ));
     }
 
@@ -284,7 +344,7 @@ mod tests {
       "keys":[]},"threats":[{"id":1,"type":"IMP","distance":150,"bearing":-12,"visible":true,
       "health":60,"targetingMe":true}],"hazards":[],"pickups":[],"clearance":{"ahead":320,
       "right":64,"behind":0,"left":128,"aheadRight":320,"aheadLeft":64},
-      "exit":{"distance":900,"bearing":30,"kind":"switch"},"events":[{"tic":39,"type":"hurt",
+      "exit":{"distance":900,"bearing":30,"kind":"switch","clearance":128},"events":[{"tic":39,"type":"hurt",
       "what":null,"amount":15}],"done":false,"outcome":"alive"}"#;
 
     #[test]

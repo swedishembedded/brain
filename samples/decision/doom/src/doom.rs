@@ -21,7 +21,7 @@
 //! needs that, you can procure our services by sending an email to
 //! info@swedishembedded.com.
 
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -50,17 +50,20 @@ impl std::fmt::Display for Missing {
 }
 
 impl Paths {
-    /// Resolve the engine binary and the IWAD, in the order a user would
-    /// expect: what they just typed, then what they configured, then what is
-    /// on the `PATH` or in the conventional data directory.
+    /// Resolve the engine binary and the IWAD from what the caller typed,
+    /// falling back only to `PATH` for the binary.
+    ///
+    /// No environment variable configures either. A run should be reproducible
+    /// from its own command line, and "it works on my machine" is usually an
+    /// exported variable three weeks old. `PATH` is the one exception and is
+    /// not configuration: it is how every program on a Unix finds another.
     pub fn resolve(binary: Option<&str>, wad: Option<&str>) -> Result<Paths, Missing> {
         let binary = binary
             .map(PathBuf::from)
-            .or_else(|| std::env::var_os("RESTFUL_DOOM").map(PathBuf::from))
             .or_else(|| which("restful-doom"))
             .ok_or_else(|| Missing {
                 what: "no restful-doom binary",
-                remedy: "run ./fetch-data.sh, or pass --doom-bin PATH, or set $RESTFUL_DOOM"
+                remedy: "run ./fetch-data.sh (it prints the flags to use), or pass --doom-bin PATH"
                     .into(),
             })?;
         if !binary.exists() {
@@ -70,16 +73,10 @@ impl Paths {
             });
         }
 
-        let wad = wad
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("DOOM_WAD").map(PathBuf::from))
-            .or_else(|| {
-                std::env::var_os("DOOM_WAD_DIR").map(|d| PathBuf::from(d).join("doom1.wad"))
-            })
-            .ok_or_else(|| Missing {
-                what: "no IWAD",
-                remedy: "run ./fetch-data.sh, or pass --wad PATH, or set $DOOM_WAD".into(),
-            })?;
+        let wad = wad.map(PathBuf::from).ok_or_else(|| Missing {
+            what: "no IWAD",
+            remedy: "pass --wad PATH; ./fetch-data.sh downloads one and prints the flag".into(),
+        })?;
         if !wad.exists() {
             return Err(Missing {
                 what: "the IWAD does not exist",
@@ -173,20 +170,23 @@ impl Doom {
         }
         let mut child = cmd.spawn()?;
 
-        // Wait for the line the engine prints once the socket is up, rather
-        // than sleeping a guessed interval: a cold start on a loaded machine
-        // takes longer than any constant anyone would write here.
-        let stdout = child.stdout.take().expect("piped");
-        let ready = wait_for_listening(stdout, Duration::from_secs(30));
-        if !ready {
-            let _ = child.kill();
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "restful-doom did not open its API port within 30s",
-            ));
+        // Drain the engine's own output on a thread. It has to be drained
+        // whatever else happens: a full pipe buffer blocks the engine inside a
+        // printf in the middle of a tic, and the symptom is a game that
+        // freezes after a few hundred steps for no visible reason.
+        if let Some(out) = child.stdout.take() {
+            std::thread::spawn(move || {
+                let mut sink = Vec::new();
+                let mut r = BufReader::new(out);
+                let _ = r.read_to_end(&mut sink);
+            });
         }
 
-        let conn = connect(port, Duration::from_secs(10)).inspect_err(|_| {
+        // Readiness is "the port accepts a connection", not "the engine
+        // printed that it is listening". Its stdout is a pipe here, so libc
+        // makes it block-buffered and that line does not arrive until several
+        // kilobytes later - waiting for it deadlocks until the timeout.
+        let conn = connect(port, Duration::from_secs(60), &mut child).inspect_err(|_| {
             let _ = child.kill();
         })?;
         let log = log.map(std::fs::File::create).transpose()?;
@@ -210,10 +210,6 @@ impl Doom {
                 if body.is_empty() { "null" } else { body }, resp);
         }
         Ok(resp)
-    }
-
-    pub fn state(&mut self) -> std::io::Result<String> {
-        self.call("GET", "/api/state", None)
     }
 
     /// Apply `actions` and run exactly `tics` tics. Returns the state after.
@@ -245,35 +241,7 @@ impl Drop for Doom {
     }
 }
 
-fn wait_for_listening(stdout: std::process::ChildStdout, timeout: Duration) -> bool {
-    let start = Instant::now();
-    let mut reader = BufReader::new(stdout);
-    let mut line = String::new();
-    loop {
-        line.clear();
-        match reader.read_line(&mut line) {
-            Ok(0) => return false,
-            Ok(_) => {
-                if line.contains("Listening for connections") {
-                    // Drain the rest in the background; a full pipe buffer
-                    // would block the engine's own printf mid-tic.
-                    std::thread::spawn(move || {
-                        let mut sink = Vec::new();
-                        let mut r = reader;
-                        let _ = r.read_to_end(&mut sink);
-                    });
-                    return true;
-                }
-            }
-            Err(_) => return false,
-        }
-        if start.elapsed() > timeout {
-            return false;
-        }
-    }
-}
-
-fn connect(port: u16, timeout: Duration) -> std::io::Result<TcpStream> {
+fn connect(port: u16, timeout: Duration, child: &mut Child) -> std::io::Result<TcpStream> {
     let start = Instant::now();
     loop {
         match TcpStream::connect(("127.0.0.1", port)) {
@@ -284,8 +252,22 @@ fn connect(port: u16, timeout: Duration) -> std::io::Result<TcpStream> {
                 s.set_nodelay(true)?;
                 return Ok(s);
             }
-            Err(e) if start.elapsed() > timeout => return Err(e),
-            Err(_) => std::thread::sleep(Duration::from_millis(20)),
+            Err(e) => {
+                // An engine that failed on its own - a missing WAD, a bad
+                // argument - would otherwise be reported as a timeout, sixty
+                // seconds later, with the real message on a stream nobody
+                // reads.
+                if let Ok(Some(status)) = child.try_wait() {
+                    return Err(std::io::Error::other(format!(
+                        "the engine exited before opening its API port ({status}); \
+                         run it by hand with the same -iwad to see why"
+                    )));
+                }
+                if start.elapsed() > timeout {
+                    return Err(e);
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
         }
     }
 }

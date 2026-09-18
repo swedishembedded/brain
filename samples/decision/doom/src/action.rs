@@ -52,6 +52,9 @@ pub enum Tag {
 /// millisecond of latency is never the thing holding the game up.
 const FIGHT_TICS: u32 = 4;
 const MOVE_TICS: u32 = 6;
+/// Less floor than this is not somewhere to walk: the player is 32 units wide
+/// and covers about 40 in one decision, so under 64 is a step into a wall.
+const MIN_ROOM: i32 = 64;
 
 fn json_turn(angle: i32) -> String {
     format!("{{\"type\":\"turn-to\",\"angle\":{}}}", angle.rem_euclid(360))
@@ -104,7 +107,7 @@ pub fn options(state: &State) -> Vec<Option_> {
     }
 
     // --- move -------------------------------------------------------------
-    if c.ahead >= 64 {
+    if c.ahead >= MIN_ROOM {
         out.push(Option_ {
             text: format!("walk forward, {} units of open floor ahead", c.ahead),
             commands: "[{\"type\":\"forward\",\"amount\":8}]".into(),
@@ -112,7 +115,7 @@ pub fn options(state: &State) -> Vec<Option_> {
             tag: Tag::Advance,
         });
     }
-    if c.ahead_left >= 64 {
+    if c.ahead_left >= MIN_ROOM {
         out.push(Option_ {
             text: format!("turn left and go that way, {} units of room", c.ahead_left),
             commands: format!(
@@ -123,7 +126,7 @@ pub fn options(state: &State) -> Vec<Option_> {
             tag: Tag::Explore,
         });
     }
-    if c.ahead_right >= 64 {
+    if c.ahead_right >= MIN_ROOM {
         out.push(Option_ {
             text: format!("turn right and go that way, {} units of room", c.ahead_right),
             commands: format!(
@@ -134,7 +137,7 @@ pub fn options(state: &State) -> Vec<Option_> {
             tag: Tag::Explore,
         });
     }
-    if c.behind >= 64 {
+    if c.behind >= MIN_ROOM {
         out.push(Option_ {
             text: "back away from whatever is in front of you".into(),
             commands: "[{\"type\":\"backward\",\"amount\":8}]".into(),
@@ -144,7 +147,12 @@ pub fn options(state: &State) -> Vec<Option_> {
     }
 
     // --- the exit ---------------------------------------------------------
-    if let Some(e) = &state.exit {
+    //
+    // Offered only when there is somewhere to go. The exit is usually behind
+    // a wall, and an option that walks into it is worse than no option: it is
+    // the most attractive-looking thing on the list and it does nothing, which
+    // is exactly the trap the scripted player fell into for whole episodes.
+    if let Some(e) = state.exit.as_ref().filter(|e| e.clearance >= MIN_ROOM) {
         out.push(Option_ {
             text: format!(
                 "head for the level exit, {} units away, {}",

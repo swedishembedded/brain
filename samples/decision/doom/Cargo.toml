@@ -14,9 +14,11 @@ publish = false
 # The ONLY brain dependency a sample may have is the SDK facade, and it must
 # NAME the surfaces it uses - see samples/README.md rules 1 and 2.
 #   decision  ControlPipeline / Env: the policy and its training loop
-#   image     writing a frame to a PNG, rather than a fourth hand-rolled encoder
-#   viewport  the window and the in-frame inspector UI
-brain = { workspace = true, features = ["decision", "image", "viewport"] }
+#   viewport  the window, the in-frame inspector UI, and writing it to a PNG
+#
+# Not `image`: the PNG comes out of `viewport`, and naming the image surface
+# to get an encoder would link the whole diffusion stack for it.
+brain = { workspace = true, features = ["decision", "viewport"] }
 # The game speaks JSON over a socket. Everything else here is std: the HTTP
 # client is ~60 lines against one keep-alive connection, which is less than
 # the configuration an HTTP crate would need.
@@ -25,4 +27,4 @@ serde_json = { workspace = true }
 
 [package.metadata.brain]
 # `make check/samples` fails if the real `cargo tree` closure exceeds this.
-max-brain-crates = 40
+max-brain-crates = 33
