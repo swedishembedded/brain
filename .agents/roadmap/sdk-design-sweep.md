@@ -95,7 +95,7 @@ here (items already tracked there are not repeated - see that file's own
 | 11 | 5 | `crates/sdk/src/pipeline.rs:416-424,432-435` | `ImagePipelineBuilder::size` is silently IGNORED on a flux2-backed pipeline (the s3dit half of this asymmetry is tracked in `sdk.md`; the flux2 silent no-op was not) | fixed (M10b) |
 | 12 | 6 | `crates/sdk/src/error.rs:62-66` | `Error::Backend` is an untyped catch-all for ~8 semantically distinct failures (license refusal, no models dir, size mismatch, bad extension, missing builder arg, GPU/MuJoCo failure...) | partially fixed (M6 - see below) |
 | 13 | 6 | `crates/sdk/src/creature.rs:129-130` | a caller-programming error (missing required builder field) is typed as `Error::Backend`, indistinguishable from a real backend crash | fixed (M6) |
-| 14 | 8/4 | `crates/sdk/src/creature.rs:276-278,414-416` | `wiring()`/`wing_wiring()` return a pre-rendered human summary string; no structured/programmatic accessor | open (backlog) |
+| 14 | 8/4 | `crates/sdk/src/creature.rs:276-278,414-416` | `wiring()`/`wing_wiring()` return a pre-rendered human summary string; no structured/programmatic accessor | fixed (M12) |
 | 15 | 3 | `crates/sdk/src/creature.rs:257-268` | `Creature::fruit_fly()` has two mandatory runtime-checked fields and no simple zero-arg path | **wontfix (M7)** - see below |
 | 16 | 13/10 | `crates/fly/examples/watch.rs:18-60` | hand-builds `Fly`/`SdlWindow`/`Renderer` independently of `Creature`/`View` | **not a violation on reconsideration (M7)** - see below |
 | 17 | 13 | `docs/` | no user-facing SDK page exists for either surface (rustdoc itself is compliant) | fixed (M9) |
@@ -407,6 +407,29 @@ including the `samples/imagegen/*` samples that link `crates/sdk` directly.
       skipped) in this session's environment, perturbing the weights before
       saving so a bug that silently kept the OLD weights could not pass by
       coincidence.
+- [x] **M12** - finding 14: `wiring()`/`wing_wiring()` returned only a
+      pre-rendered human summary string, with no programmatic accessor.
+      `flybody::MotorMap` was ALREADY fully structured
+      (`mapped()`/`actuators_driven()`/`neurons_for()`/`unmapped`/`adhesion`)
+      but entirely unreachable from `Creature` - added
+      `Creature::motor_map(&self) -> &flybody::MotorMap` alongside the
+      existing `wiring()`, re-exported (not reinvented) the same way
+      [`Arena`] already is. The wing half needed one small upstream change,
+      since `fly::Fly::wing_summary` only ever computed its counts as local
+      variables and threw them away: added `fly::WingWiring` (a small
+      `power`/`amplitude`/`angle_of_attack` struct) and
+      `Fly::wing_wiring() -> WingWiring`, refactored `wing_summary` to
+      render its string FROM it rather than a separately-derived
+      computation, and exposed it as `Creature::wing_wiring_counts()`.
+      Proven with real fixtures at both layers: `crates/fly/tests/
+      flight.rs`'s existing `wing_summary().starts_with("24 power")`
+      assertion gained a sibling `wing_wiring().power == 24` (same fact, two
+      representations, both pinned), and `tests/creature.rs`'s
+      `build_drive_step_and_reset_a_real_fly` gained assertions that
+      `motor_map().mapped() > 0` and that `wing_wiring()`'s string is
+      rendered from EXACTLY `wing_wiring_counts()`'s own numbers, both
+      running for real (not skipped) against this session's real
+      connectome/body fixtures.
 - [ ] **Phase 2** - new pipelines, in the priority order above: Forecast, Text, Embedding, ASR, then the rest. Each gets its own sub-roadmap section here (or its own file, linked from here) when it starts, written against the full `sdk-design.md` checklist from day one - including an end-to-end test, learning from M10 rather than repeating the `flux2_cli.rs` duplication gap a second time. Design each pipeline's progress/cancellation surface (rule 8) toward the `run.start()/subscribe()/cancel()/result()` shape `.agents/roadmap/orchestration-hsm.md` proposes, rather than reinventing M5's synchronous `generate_with_progress(cancel, on_progress)` a second time - M5's shape stays the right SIMPLE default, but a new pipeline's ADVANCED tier should point at where this is heading.
   - [x] **Phase 2.1** - `ForecastPipeline` (kronos, timesfm3).
   - [x] **Phase 2.2** - `TextGenerationPipeline` (qwen3 only, local path only at first).

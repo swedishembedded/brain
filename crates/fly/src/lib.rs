@@ -350,6 +350,14 @@ pub struct Tick {
     pub body: std::time::Duration,
 }
 
+/// Wing motor neuron counts by role - see [`Fly::wing_wiring`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WingWiring {
+    pub power: usize,
+    pub amplitude: usize,
+    pub angle_of_attack: usize,
+}
+
 /// A connectome, a body, and the wiring between them.
 pub struct Fly {
     net: SpikingNet,
@@ -684,17 +692,26 @@ impl Fly {
         self.wing_cmd
     }
 
-    /// How many wing motor neurons attached, by role.
-    pub fn wing_summary(&self) -> String {
-        let (mut power, mut amp, mut aoa) = (0, 0, 0);
+    /// How many wing motor neurons attached, by role - the structured
+    /// counts [`Self::wing_summary`]'s prose is rendered from, for a caller
+    /// that wants to test or compare them programmatically rather than
+    /// parse a sentence.
+    pub fn wing_wiring(&self) -> WingWiring {
+        let mut w = WingWiring::default();
         for d in &self.wing_drives {
             match d.action {
-                flybody::WingAction::Power => power += 1,
-                flybody::WingAction::Amplitude(_) => amp += 1,
-                flybody::WingAction::AngleOfAttack(_) => aoa += 1,
+                flybody::WingAction::Power => w.power += 1,
+                flybody::WingAction::Amplitude(_) => w.amplitude += 1,
+                flybody::WingAction::AngleOfAttack(_) => w.angle_of_attack += 1,
             }
         }
-        format!("{power} power, {amp} amplitude, {aoa} angle-of-attack wing motor neurons")
+        w
+    }
+
+    /// How many wing motor neurons attached, by role.
+    pub fn wing_summary(&self) -> String {
+        let w = self.wing_wiring();
+        format!("{} power, {} amplitude, {} angle-of-attack wing motor neurons", w.power, w.amplitude, w.angle_of_attack)
     }
 
     /// Each leg's fore-aft swing command, in `flybody::LEGS` order.

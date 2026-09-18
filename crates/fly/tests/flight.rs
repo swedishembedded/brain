@@ -100,6 +100,10 @@ fn the_wings_carry_most_of_the_body_and_a_still_wing_carries_none_of_it() {
         "all 24 power motor neurons should attach: {}",
         rig.fly.wing_summary()
     );
+    // The structured counts wing_summary's prose is rendered from must agree
+    // with the string above - two representations of the same fact, not two
+    // separately-derived ones.
+    assert_eq!(rig.fly.wing_wiring().power, 24);
     // 180 Hz rather than the animal's 218: this airframe's own hinge resonates
     // lower than the real thorax does, and the frequency was measured by a
     // sweep rather than assumed from the biology.

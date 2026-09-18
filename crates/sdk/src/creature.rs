@@ -82,6 +82,14 @@ pub struct CreatureBuilder {
 }
 
 pub use flybody::Arena;
+/// [`Creature::motor_map`]'s return type, re-exported (not reinvented) for
+/// the same reason [`Arena`] is: it is already the one structured
+/// representation of this fact, not a second one this crate would otherwise
+/// have to keep in sync with it.
+pub use flybody::MotorMap;
+/// [`Creature::wing_wiring_counts`]'s return type -- same reasoning as
+/// [`MotorMap`].
+pub use fly::WingWiring;
 
 impl CreatureBuilder {
     /// Where the connectome export is.
@@ -436,6 +444,14 @@ impl Creature {
         self.inner.motor_map().summary()
     }
 
+    /// [`Creature::wiring`]'s prose, structured: every actuator's driving
+    /// motor neurons, unmapped ones, and claw adhesion -- for a caller who
+    /// wants to test or compare the wiring programmatically rather than
+    /// parse [`Creature::wiring`]'s sentence.
+    pub fn motor_map(&self) -> &flybody::MotorMap {
+        self.inner.motor_map()
+    }
+
     /// Set the standing descending command: how hard the brain is telling the
     /// cord to go.
     pub fn drive(&mut self, forward: f32) {
@@ -619,6 +635,13 @@ impl Creature {
     /// How many motor neurons attached to the wings, by role.
     pub fn wing_wiring(&self) -> String {
         self.inner.wing_summary()
+    }
+
+    /// [`Creature::wing_wiring`]'s prose, structured: the same counts by
+    /// role, for a caller who wants to test or compare them programmatically
+    /// rather than parse [`Creature::wing_wiring`]'s sentence.
+    pub fn wing_wiring_counts(&self) -> fly::WingWiring {
+        self.inner.wing_wiring()
     }
 
     /// Heading and body pitch, in radians. Pitch is positive nose-up.

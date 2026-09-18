@@ -72,6 +72,15 @@ fn build_drive_step_and_reset_a_real_fly() {
 
     assert!(fly.neurons() > 0, "a real MANC export has neurons");
     assert!(!fly.wiring().is_empty(), "a real body has a motor map");
+    // `Creature::motor_map` is `Creature::wiring`'s prose, structured -
+    // real finding 14: only the pre-rendered summary was reachable before.
+    assert!(fly.motor_map().mapped() > 0, "a real body has motor neurons attached to actuators");
+    // Same for `wing_wiring_counts` vs `wing_wiring`'s prose - proven
+    // structurally (the string must be rendered FROM these exact counts,
+    // whatever they are on this fixture's body) rather than pinning a
+    // fixture-specific number this test does not otherwise depend on.
+    let wings = fly.wing_wiring_counts();
+    assert!(fly.wing_wiring().starts_with(&format!("{} power", wings.power)), "{}", fly.wing_wiring());
 
     let start = fly.position();
     fly.drive(2.0);

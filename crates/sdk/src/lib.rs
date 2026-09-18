@@ -169,7 +169,7 @@ pub use model::dispatch::Precision as DType;
 #[cfg(feature = "audio")]
 pub use asr::{Transcript, TranscribePipeline, TranscribePipelineBuilder};
 #[cfg(feature = "creature")]
-pub use creature::{Arena, Beat, Creature, CreatureBuilder};
+pub use creature::{Arena, Beat, Creature, CreatureBuilder, MotorMap, WingWiring};
 #[cfg(feature = "vision")]
 pub use depth::{DepthMap, DepthOptions, DepthPipeline, DepthPipelineBuilder};
 #[cfg(feature = "vision")]
