@@ -41,6 +41,7 @@ mod perf_cli;
 mod perf_engine;
 mod pid_cli;
 mod placement;
+mod plan_cli;
 mod pull_cli;
 mod quantize_cli;
 mod qwen35_cli;
@@ -368,6 +369,18 @@ HTTP INFERENCE APIS (brain as an OpenAI / Anthropic / OpenRouter backend)
       openrouter 8789). OpenAI/OpenRouter base URL: http://127.0.0.1:PORT
       *or* http://127.0.0.1:PORT/v1 -- both work.  Full reference:
       brain serve --help
+
+CAPACITY (will this run here, and what will it cost me)
+  brain plan <model> <action> [--params JSON] [--json]
+             [--bus session|system|<address>] [--name <bus name>]
+      Asks a running `brain serve --dbus` daemon what would happen if this
+      action ran on it NOW: memory required, whether it is already resident and
+      where, which device it would be placed on, exactly what would be evicted
+      to make room, and every device it could run on at all. Reserves nothing
+      and loads nothing. Exits 0 when it would run, 1 when it would not, so a
+      script can branch on the answer without parsing the text.
+      Needs the daemon because a plan describes a LIVE host: a fresh process
+      has nothing resident and would always report room it does not have.
 
 EVENT/STDIO CONTROLLER
   brain serve --stdio [--gpt <ckpt>] [--yolo <ckpt>] [--conf X] [--max-new N --temp X --top-k K --seed S]
@@ -1319,6 +1332,7 @@ fn main() {
         // reader to run, and honouring it costs one arm.
         Some("pull") | Some("fetch") => std::process::exit(pull_cli::run_pull(&argv[2..])),
         Some("models") => std::process::exit(models_cli::run_models(&argv[2..])),
+        Some("plan") => std::process::exit(plan_cli::run_plan(&argv[2..])),
         Some("gguf") => std::process::exit(gguf_cli::run_gguf(&argv[2..])),
         Some("roofline") => std::process::exit(roofline_cli::run_roofline(&argv[2..])),
         Some("serve") => run_cli::run_serve(&argv[2..]),
@@ -1523,6 +1537,15 @@ mod tests {
         let (path, rest) = parse_config(["brain".to_string(), "--config".to_string(), "/x.yaml".to_string(), "caps".to_string()].to_vec());
         assert_eq!(rest, ["brain", "caps"].map(String::from).to_vec(), "`brain help` documents --config, which parse_config does not strip");
         assert_eq!(path.as_deref(), Some("/x.yaml"));
+    }
+
+    /// `brain plan` must be reachable and documented -- see the `pull` test below for why
+    /// both halves matter. The exit-code contract is documented too: it is the whole reason
+    /// a script would call this rather than reading `stats_snapshot` and guessing.
+    #[test]
+    fn the_plan_verb_is_documented_including_its_exit_code_contract() {
+        assert!(HELP.contains("brain plan <model> <action>"), "`brain plan` missing from `brain help`");
+        assert!(HELP.contains("Exits 0 when it would run"), "`brain help` does not document the exit code a script branches on");
     }
 
     /// `brain pull` must be reachable and documented -- an undocumented verb

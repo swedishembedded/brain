@@ -21,12 +21,15 @@
 //! batching stay uniform across both.
 //!
 //! Layering (kept deliberately thin — no model code here):
+//! - [`client`] - the client-side proxy for the same interface, kept beside
+//!   the service so the two declarations of one method cannot drift.
 //! - [`fd`] — memfd/mmap FD transport.
 //! - [`service`] — the zbus `Manager` interface (validate → build an
 //!   `Invocation` → submit a `residency::Job` → reply/stream frames).
 //! - [`stream`] — the `Subscribe`/`StreamTranscribe` SEQPACKET frame protocol.
 //! - `serve` — wires a Tokio runtime + a zbus connection + the executor together.
 
+pub mod client;
 pub mod fd;
 pub mod service;
 pub mod stream;

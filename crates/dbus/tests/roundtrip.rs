@@ -342,3 +342,48 @@ fn admit_deadline_sheds_a_saturated_lane() {
         eprintln!("admit-deadline ok: second Run shed in {elapsed:?}");
     });
 }
+
+/// **`Plan` answers over the bus, through the real client proxy.**
+///
+/// The two halves that must agree - `service::Manager::plan` and
+/// `client::ManagerProxy::plan` - are two independent declarations of one method
+/// signature. This is the only thing that can catch them drifting: a rename, an argument
+/// reordered, a return type changed on one side only, all become a failure here rather
+/// than a runtime `UnknownMethod` on a user's machine.
+///
+/// It also pins the property that makes a plan worth asking for: it is answered WITHOUT
+/// loading anything. `rev` is registered but cold, and the plan comes back describing
+/// where it would go rather than putting it there.
+#[test]
+fn plan_answers_over_the_bus_without_making_anything_resident() {
+    if std::env::var("DBUS_SESSION_BUS_ADDRESS").map(|s| s.is_empty()).unwrap_or(true) {
+        brain_testutil::skip_unavailable("no session bus (run under `dbus-run-session -- cargo test ...`)");
+        return;
+    }
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    rt.block_on(async {
+        let rev: Arc<dyn residency::ResidentModel> = Arc::new(residency::bridge::ProviderResident::stateless(Arc::new(RevProvider)));
+        let mut budgets = residency::budget::Budgets::new();
+        budgets.set(residency::Device::Gpu(0), 24 << 30, 0);
+        let executor = residency::Executor::start(vec![rev], budgets, residency::Policy::default());
+        let manager = brain_dbus::service::Manager::new(executor);
+        let name = format!("com.swedishembedded.Brain1.plantest{}", std::process::id());
+        let _conn = zbus::connection::Builder::session().unwrap().name(name.as_str()).unwrap().serve_at(brain_dbus::OBJECT_PATH, manager).unwrap().build().await.unwrap();
+
+        let client = zbus::Connection::session().await.unwrap();
+        let proxy = brain_dbus::client::ManagerProxy::builder(&client).destination(name.as_str()).unwrap().path(brain_dbus::OBJECT_PATH).unwrap().build().await.unwrap();
+
+        let json = proxy.plan("rev", "reverse", r#"{"text":"brain"}"#).await.expect("Plan must answer over the bus");
+        let plan: serde_json::Value = serde_json::from_str(&json).expect("Plan returns RunPlan JSON");
+        assert_eq!(plan["model"], "rev");
+        assert_eq!(plan["action"], "reverse");
+        assert_eq!(plan["runnable"], true, "a weightless provider on a 24 GiB budget must be runnable: {json}");
+        assert!(plan["resident_on"].is_null(), "planning must not load anything: {json}");
+        eprintln!("plan ok: Plan(rev.reverse) -> {json}");
+
+        // A model this host does not serve is an honest refusal, not an empty plan and not
+        // an auto-fetch - the caller only asked a question.
+        let err = proxy.plan("nosuch", "reverse", "{}").await.expect_err("an unknown model must refuse");
+        assert!(format!("{err}").contains("nosuch"), "the refusal must name what was asked for: {err}");
+    });
+}

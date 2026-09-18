@@ -664,7 +664,8 @@ impl Manager {
     /// from the live executor via `brain-stats`. One-shot pull; `StatsStream`
     /// pushes the same document live at >=2 Hz.
     async fn stats_snapshot(&self) -> String {
-        brain_stats::snapshot_from_executor(&self.executor).to_json_string()
+        let exec = self.executor.clone();
+        blocking_query(move || brain_stats::snapshot_from_executor(&exec).to_json_string(), "{}").await
     }
 
     /// JSON array of just the currently-resident models
@@ -675,7 +676,30 @@ impl Manager {
     /// already exposes, strictly narrowed, so it carries no new
     /// authorization or input-validation surface.
     async fn resident_models(&self) -> String {
-        resident_models_json(&self.executor)
+        let exec = self.executor.clone();
+        blocking_query(move || resident_models_json(&exec), "[]").await
+    }
+
+    /// **What would happen if this ran here?** - required memory, whether it is already
+    /// resident and where, which device it would be placed on, exactly which residents
+    /// would be evicted to make room, every device it could run on at all, and the bytes
+    /// that would cross into device memory. Returns a `residency::RunPlan` as JSON.
+    ///
+    /// Reserves nothing and loads nothing: this is a prediction about the host as it is
+    /// right now, which is precisely why it has to be answered by the daemon that owns the
+    /// residency rather than computed by a fresh process (one with nothing resident would
+    /// always answer "plenty of room, nothing to evict").
+    ///
+    /// Deliberately NOT behind the edge-concurrency permit every `Run` takes: a plan does
+    /// no compute, and "will this fit?" is most worth answering exactly when the box is
+    /// busy. It also never auto-fetches - a model this host does not serve is an honest
+    /// `PlanError`, not a reason to start a download for a caller who only asked a question.
+    async fn plan(&self, model: String, action: String, params: String) -> fdo::Result<String> {
+        let model = resolve_model_alias(model);
+        let inv = self.build_inv(&params, HashMap::new(), "").map_err(fdo::Error::Failed)?;
+        let exec = self.executor.clone();
+        let planned = tokio::task::spawn_blocking(move || exec.plan(&model, &action, inv)).await.map_err(|e| fdo::Error::Failed(format!("plan task failed: {e}")))?;
+        planned.map(|plan| plan.to_json().to_string()).map_err(|e| fdo::Error::Failed(e.to_string()))
     }
 
     /// Live stats: the same JSON document as `StatsSnapshot`, emitted on a timer by
@@ -707,6 +731,28 @@ impl Manager {
     async fn models(&self) -> Vec<String> {
         self.list_models().await
     }
+}
+
+/// Runs a read-only executor query off the async runtime's worker threads.
+///
+/// Every one of these round-trips a message through the dispatcher - the only thread that
+/// owns the `ResidencyManager` - and that dispatcher may be busy building a model when the
+/// message arrives. Calling one directly from an async method parks a tokio worker for
+/// however long that takes, which under a small worker pool stalls unrelated D-Bus traffic
+/// on the same connection. `spawn_blocking` is the same escape hatch
+/// [`Manager::ensure_resident`] already uses for its own blocking call.
+///
+/// A join failure yields `fallback` rather than an error: these are read-only status
+/// surfaces whose callers (braintop, a dashboard) poll on a timer, and an empty document
+/// they can retry is more useful to them than a bus error.
+async fn blocking_query<F>(f: F, fallback: &str) -> String
+where
+    F: FnOnce() -> String + Send + 'static,
+{
+    tokio::task::spawn_blocking(f).await.unwrap_or_else(|e| {
+        eprintln!("brain dbus: read-only query task failed: {e}");
+        fallback.to_string()
+    })
 }
 
 /// The JSON `Manager::resident_models` returns - a plain function so it is
