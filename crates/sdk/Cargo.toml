@@ -31,7 +31,7 @@ default = ["full"]
 # `viewport` is in here despite being a tier rather than a surface, for the
 # reason the comment above gives: `cargo test -p brain` runs whatever `full`
 # selects, and a feature nobody builds is a feature whose tests never run.
-full = ["image", "creature", "forecast", "text", "vision", "audio", "decision", "study", "video", "viewport"]
+full = ["image", "creature", "forecast", "text", "vision", "audio", "decision", "study", "video", "multimodal", "viewport"]
 
 # --- presentation tier, not a surface. `brain::viewport`: a window and an RGB8
 #     canvas with the drawing an instrument panel needs, or the same canvas with
@@ -112,6 +112,28 @@ audio = ["resolve", "dep:brain-qwen3asr", "dep:brain-audio", "dep:brain-qwen3tts
 # other served architecture) is a tracked future extension, not folded in
 # here - see the roadmap for why.
 video = ["resolve", "imagetype", "dep:brain-wan", "dep:brain-data"]
+# `brain::VisionLanguagePipeline` (Qwen3-VL: 1-8 images + text in, text out).
+# This bucket's first SDK pipeline - the Multimodal/VLM/OCR domain had none
+# before this. Selects `imagetype` for `brain::Image`, the caller-facing
+# image type every input is given as, and `text` for `brain::GeneratedText` -
+# qwen3vl's own `Resident::generate` runs the identical `qwen3::chat::
+# SeqState::finish` outcome shape `TextGenerationPipeline` already returns
+# through that type, since it is built on the SAME chat/decode infrastructure
+# (qwen3vl is a vision tower spliced onto a qwen3 decoder), so this is real
+# reuse, not a dependency picked only to satisfy the compiler. Reuses
+# `qwen3vl::caps::Resident::generate` directly (the SAME function the served
+# `brain do qwen3vl generate` action and the residency adapter both call -
+# rule 10), not a second implementation of its chat-templating/
+# image-preprocessing/DeepStack glue. Video input and tool-calling are real,
+# already-implemented capabilities of `Resident::generate` this milestone
+# does not expose yet - tracked future extensions, the same class of
+# narrowing `TtsPipeline`'s own `lora_train`/progress gaps already document,
+# not something faked here. Every other served Multimodal/VLM/OCR
+# architecture (8 more) stays a tracked future extension - see the roadmap
+# for why qwen3vl was picked first (a real, resolver-ready `ArchSpec` and an
+# already-exercised, deterministic-tested `generate` path, unlike some
+# siblings in this bucket).
+multimodal = ["resolve", "imagetype", "text", "dep:brain-qwen3vl"]
 
 # --- infrastructure: selected BY a surface, never named by a consumer.
 # `brain::Device`.
@@ -167,6 +189,7 @@ brain-qwen35moe = { workspace = true, optional = true }
 brain-rl = { workspace = true, optional = true }
 brain-qwen3asr = { workspace = true, optional = true }
 brain-qwen3tts = { workspace = true, optional = true }
+brain-qwen3vl = { workspace = true, optional = true }
 brain-rrdbnet = { workspace = true, optional = true }
 brain-sam2 = { workspace = true, optional = true }
 brain-timesfm3 = { workspace = true, optional = true }

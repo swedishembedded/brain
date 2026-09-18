@@ -421,6 +421,7 @@ dependencies = [
  "brain-qwen35moe",
  "brain-qwen3asr",
  "brain-qwen3tts",
+ "brain-qwen3vl",
  "brain-rl",
  "brain-rrdbnet",
  "brain-s3dit",

@@ -230,7 +230,12 @@ impl TextGenerationPipeline {
     }
 }
 
-fn generated_text_from_outcome(o: capability::Outcome) -> Result<GeneratedText> {
+/// `pub(crate)`: also reused by `crate::vlm`, which shares the exact same
+/// `Outcome` shape (`qwen3::chat::SeqState::finish`'s own
+/// `text`/`prompt_tokens`/`completion_tokens`/`finish_reason` fields) since
+/// `qwen3vl::caps::Resident::generate` runs that SAME shared function - one
+/// implementation, not two.
+pub(crate) fn generated_text_from_outcome(o: capability::Outcome) -> Result<GeneratedText> {
     let text = o.outputs.get("text").and_then(|v| v.as_str()).ok_or_else(|| Error::Backend("qwen3: generation outcome carries no text".to_string()))?.to_string();
     let prompt_tokens = o.outputs.get("prompt_tokens").and_then(|v| v.as_i64()).unwrap_or(0).max(0) as u32;
     let completion_tokens = o.outputs.get("completion_tokens").and_then(|v| v.as_i64()).unwrap_or(0).max(0) as u32;

@@ -24,7 +24,7 @@ all - the fly/flybody/connectome stack is unregistered).
 | Domain bucket | Archs | Served | SDK pipeline | CLI shape | LoRA/finetune |
 |---|---|---|---|---|---|
 | Text decoders | 8 | 6 | none | fragmented: 6 model-specific `*_cli.rs` + `resident_llm.rs` | yes (qwen3) |
-| Multimodal/VLM/OCR | 9 | 8 | none | `omni_cli.rs`, `document_study_cli.rs` + 5 `resident_*.rs` | yes (qwen3vl) |
+| Multimodal/VLM/OCR | 9 | 8 | **PARTIAL - `VisionLanguagePipeline`** (Qwen3-VL only; 8 more served archs deferred, see Phase 6.1) | `omni_cli.rs`, `document_study_cli.rs` + 5 `resident_*.rs` | yes (qwen3vl) |
 | Image generation | 6 | 6 | **YES - `ImagePipeline`** (flux2+s3dit only) | `flux2_cli.rs` + `s3dit::caps::ZAction` | yes (flux2, s3dit) |
 | Restoration/upscaling/VAE | 5 | 5 | **PARTIAL - `UpscalePipeline`** (RRDBNet) + **`RestorePipeline`** (CodeFormer; SUPIR/VQGAN deferred, see Phase 2.5/2.7) | no dedicated CLI; `resident_restore/upscale/supir.rs` | no |
 | Video generation | 2 | 2 | **PARTIAL - `VideoPipeline`** (Wan2.1 T2V; ltxv deferred, see Phase 5.1) | `wan_cli.rs`, `ltxv_cli.rs` | yes (wan) |
@@ -373,7 +373,8 @@ including the `samples/imagegen/*` samples that link `crates/sdk` directly.
   - [x] **Phase 4.1** - `TtsPipeline` (Qwen3-TTS: speak/clone_voice/design) - the TTS/music bucket's first pipeline - see its own section below. cosyvoice/minimaxmusic3 deferred.
   - [x] **Phase 5.1** - `VideoPipeline` (Wan2.1 T2V) - the video generation bucket's first pipeline - see its own section below for a real "invisible to the real scanner" gap found (a `.bin` sibling silently vanishing from `inventory::scan`). ltxv deferred (still `always!()`-registered, not resolver-based).
   - [x] **Phase 4.2** - CosyVoice (cosyvoice2) joins `TtsPipeline` via `clone_voice` - see its own section below (inserted after 4.1) for a real bug found and fixed (`Store::local` never recognizes ANY cosyvoice checkpoint, even a real one - no `FilesRecipe` entry exists for it), how `speak`/`design` return `Error::MissingArgument` on this backend, and `samples/tts/clone`, a real Rust sample requested mid-sweep. minimaxmusic3 still deferred.
-  - [ ] Still entirely uncovered domain buckets: 3D/world models (lowest priority - no settled domain object yet, `SplatPipeline` closer to `Creature` than `ImagePipeline`). See the domain inventory table. Also still open within buckets already started: ltxv (video), minimaxmusic3 (TTS/music), cosyvoice3 variant validation (cosyvoice2 only proven end to end), Text decoders bucket (`TextGenerationPipeline` scoped to qwen3 only, 5 more decoders + ~9 multimodal/VLM/OCR decoders behind it per the priority-order note), ASR bucket beyond qwen3-asr (nemotron, streaming).
+  - [x] **Phase 6.1** - `VisionLanguagePipeline` (Qwen3-VL: 1-8 images + text in, text out) - the Multimodal/VLM/OCR domain bucket's first pipeline. See its own section below for why qwen3vl was picked first, and a real `Store::local`-ordering bug caught before shipping (the same class Phase 4.2/2.2b each found the hard way). Video input, tool-calling, and 8 more served architectures in this bucket stay deferred.
+  - [ ] Still entirely uncovered domain buckets: 3D/world models (lowest priority - no settled domain object yet, `SplatPipeline` closer to `Creature` than `ImagePipeline`). See the domain inventory table. Also still open within buckets already started: ltxv (video), minimaxmusic3 (TTS/music), cosyvoice3 variant validation (cosyvoice2 only proven end to end), Text decoders bucket (`TextGenerationPipeline` scoped to qwen3 only, 5 more decoders behind it), Multimodal/VLM/OCR beyond qwen3vl (8 more served archs, plus video/tool-calling on qwen3vl itself), ASR bucket beyond qwen3-asr (nemotron, streaming).
 
 ### Phase 2.1 - `ForecastPipeline` (done)
 
@@ -1650,3 +1651,123 @@ clean on the first attempt), `cargo test -p brain --features video --test
 video_pipeline` (3 passed, under 10s total), `bash scripts/gates/
 check-no-doc-citations.sh` (clean), and a full `cargo build --workspace
 --exclude brain-vulkan`.
+
+### Phase 6.1 - `VisionLanguagePipeline` (Qwen3-VL) - the Multimodal/VLM/OCR domain bucket's first pipeline
+
+Covers **Qwen3-VL only**, over the already-existing `qwen3vl::spec::
+Qwen3VlSpec` (a real, resolver-ready `ArchSpec` since before this session -
+one `weights` role, a checkpoint directory classified by real
+`config.json` content, `architectures[0] == "Qwen3VLForConditionalGeneration"`,
+never the directory's name). Picked first among this bucket's 8 other served
+architectures for the same reason Phase 4.1 picked qwen3tts over
+cosyvoice/minimaxmusic3: a real, already-exercised `generate` path
+(`qwen3vl::caps`'s own module doc: "Real, working, but validation-tier",
+backed by a deterministic regression test with a hardcoded pre-change-output
+assertion), not the "no checkpoint or reference dump exists in this
+environment, treat a first real generation as the actual test" ceiling
+`crates/flux1`'s own pipeline module doc carries for its own (unrelated)
+architecture - a real, meaningfully different risk class this milestone
+explicitly checked for and steered around before committing to a target.
+
+**ONE pipeline type, reusing `qwen3vl::caps::Resident::generate` directly -
+not a second implementation.** `Resident::generate`'s own doc already states
+its purpose exactly: "The body `GenerateAction::run` used to hold directly,
+extracted so a residency-scheduled instance and the direct provider execute
+byte-for-byte the same code." `VisionLanguagePipeline::ask_multi_with`
+builds a plain `capability::Invocation` (prompt + numbered image blobs) and
+calls that SAME function - the identical shape
+[`crate::TextGenerationPipeline`] already established (build an
+`Invocation`, call into `qwen3::chat`'s shared parsing/generation), not
+"capability-dispatch machinery in the loop" (no `Provider`/`Action` trait
+object, no routing - just the plain data types and the shared function every
+other caller of this checkpoint already goes through).
+
+**`GeneratedText` reused, not reinvented** - `qwen3vl::caps::Resident::
+generate` runs `qwen3::chat::SeqState::finish` internally (the SAME
+completion-outcome shape `TextGenerationPipeline`'s own `qwen3::chat::
+parse_request`+`SeqState`+`generate_kv_stream` sequence produces, since
+Qwen3-VL is a vision tower spliced onto a qwen3 decoder), so this pipeline's
+`ask`/`ask_multi` return the EXISTING `brain::GeneratedText` type via the
+now-`pub(crate)` `crate::text::generated_text_from_outcome` helper, rather
+than a parallel, near-identical struct. The `multimodal` Cargo feature
+selects `text` for exactly this reason (documented inline in `Cargo.toml`,
+not just "needed to compile") - a real dependency relationship, not a
+feature picked only to satisfy the compiler.
+
+**ONE capability, not three call shapes** - `ask(image, prompt)` is a
+one-image special case of `ask_multi(images, prompt)` (`std::slice::
+from_ref`), never a separate implementation: `qwen3vl::caps`'s own doc
+frames multi-image as numbered blob keys (`image`, `image1`, ...) contiguous
+from `image`, so a single image is just the one-element case of the same
+convention, not a different one.
+
+**A real, independent bug this milestone would have reintroduced a THIRD
+time, caught before it shipped by checking for it up front this time**
+(rather than discovering it via a failing test, as Phase 4.2/2.2b each did
+once): a real, already-downloaded qwen3vl checkpoint directory (`hf
+download Qwen/Qwen3-VL-4B-Instruct --local-dir $BRAIN_MODELS_DIR/Qwen/
+Qwen3-VL-4B-Instruct`, the standard HF layout - `config.json` +
+`model.safetensors` shards + `tokenizer.json`) satisfies neither of
+`Store::local`'s two recognized shapes (a compound `brain.manifest.json`, or
+a bare `model.brain.safetensors`), so the naive "check `Store::local`,
+fetch-if-missing, then resolve" order every OTHER pipeline in this crate
+uses would fail the exact same way cosyvoice (Phase 4.2) and a raw qwen3
+GGUF release (Phase 2.2b) both did. `VisionLanguagePipelineBuilder::load`
+tries `resolve_structured` FIRST, from the start, applying the now-
+three-times-confirmed fix directly rather than waiting to hit it.
+
+**A real, confirmed ceiling this milestone's own fixture-building hit
+empirically, not assumed**: unlike every OTHER resolver-backed pipeline's
+own test (`tts_pipeline.rs`/`video_pipeline.rs`/...), which reach a real
+CONSTRUCTED pipeline against fake-content-but-real-shape tensors and then
+show the first call failing cleanly, `qwen3vl`'s own weight-upload path
+(`brain_paramstore`) PANICS - `missing init weight tok.weight: ... not
+present in this source` - the instant a declared tensor is absent from the
+source file, confirmed by actually building a tiny (if minimal) real HF
+config + fake safetensors fixture and running it through
+`VisionLanguagePipeline::from_pretrained`. This mirrors
+`TextGenerationPipelineBuilder::load`'s own documented reason for
+pre-checking `WeightReader::open` before calling the equally panicking
+`Qwen::load_inference` - the difference is `text.rs` has an earlier public
+stopping point (checkpoint-open, then a clean tokenizer-precedence error)
+this pipeline does not, since resolution and construction are one call with
+no earlier hook. Reproducing a full, real tensor manifest for both the
+vision tower AND the text decoder (unlike qwen3tts's/wan's own three-or-four
+-role fixtures) is real, separate fixture-building work this milestone does
+not take on - not fixed here (`brain_paramstore`'s panic-on-missing-tensor
+is a workspace-wide, intentional "this should never happen with a real
+checkpoint" invariant, the same class every other model-loading call in
+this crate already accepts panicking on, not a `qwen3vl`-specific bug).
+
+**Scope this pipeline deliberately does NOT cover**: video input and
+tool-calling, both REAL, already-implemented capabilities of `Resident::
+generate` itself (`video_frames`/`tool_choice`/`tools` parameters this
+pipeline always passes as `None`/`ToolChoice::Auto`/`&[]`) - tracked future
+extensions, the same class of narrowing `TtsPipeline`'s own `lora_train`/
+progress gaps already document, not silently unsupported. The other 8
+served Multimodal/VLM/OCR architectures (qwen3omnimoe, fastvlm, llava,
+moondream3, deepseekocr2/deepseek2ocr, qwen35/qwen35moe's own VLM shape)
+stay tracked future extensions too.
+
+**Test fixture**: `crates/sdk/tests/vlm_pipeline.rs` proves the reachable
+ceiling - an unparseable model id (`Error::ModelNotFound`) and a real,
+content-classifiable checkpoint with no sibling `tokenizer.json`
+(`Error::Missing`, via `Qwen3VlSpec::validate`'s own rejection, fully
+offline via the same generic `Store::local`-satisfying manifest trick
+`tests/text_pipeline.rs`'s own hub-id-missing test uses). `check_image_count`
+(the images.is_empty()/too-many-images gate) is factored out and unit-tested
+directly inside `crates/sdk/src/vlm.rs`'s own `#[cfg(test)]` module - the
+same "testable with no real pipeline in hand" shape `crate::pipeline::
+check_s3dit_size`/`adapter_source_path` already established - since it is an
+instance method's precondition with no way to reach it from an integration
+test without first building a working pipeline (out of reach - see above).
+
+Verified with `cargo build -p brain --no-default-features --features
+multimodal` (clean, one pre-existing dead-code warning shared with the
+`vision`-alone build, not introduced here), `bash scripts/gates/
+check-sdk-features.sh` (OK, `multimodal` compiles standalone), `cargo test
+-p brain --features multimodal --lib vlm::` (4 passed), `cargo test -p
+brain --features multimodal --test vlm_pipeline` (2 passed, both under
+0.2s - confirms no accidental network reach), `bash scripts/gates/
+check-no-doc-citations.sh` (clean), `bash scripts/gates/check-doc-links.sh`
+(169 pages resolve), `bash scripts/gates/check-scripts.sh` (PASS).
