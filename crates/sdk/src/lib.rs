@@ -85,6 +85,8 @@ pub use viewport;
 
 #[cfg(feature = "audio")]
 mod asr;
+#[cfg(feature = "auto")]
+mod auto;
 #[cfg(feature = "creature")]
 mod creature;
 #[cfg(feature = "vision")]
@@ -181,6 +183,8 @@ pub use loader::DownloadPolicy;
 
 #[cfg(feature = "audio")]
 pub use asr::{Transcript, TranscribePipeline, TranscribePipelineBuilder};
+#[cfg(feature = "auto")]
+pub use auto::{AutoPipeline, AutoPipelineBuilder};
 #[cfg(feature = "creature")]
 pub use creature::{Arena, Beat, Creature, CreatureBuilder, MotorMap, WingWiring};
 #[cfg(feature = "vision")]

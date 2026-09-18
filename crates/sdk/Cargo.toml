@@ -31,7 +31,7 @@ default = ["full"]
 # `viewport` is in here despite being a tier rather than a surface, for the
 # reason the comment above gives: `cargo test -p brain` runs whatever `full`
 # selects, and a feature nobody builds is a feature whose tests never run.
-full = ["image", "creature", "forecast", "text", "vision", "audio", "decision", "study", "video", "multimodal", "viewport"]
+full = ["image", "creature", "forecast", "text", "vision", "audio", "decision", "study", "video", "multimodal", "auto", "viewport"]
 
 # --- presentation tier, not a surface. `brain::viewport`: a window and an RGB8
 #     canvas with the drawing an instrument panel needs, or the same canvas with
@@ -134,6 +134,23 @@ video = ["resolve", "imagetype", "dep:brain-wan", "dep:brain-data"]
 # already-exercised, deterministic-tested `generate` path, unlike some
 # siblings in this bucket).
 multimodal = ["resolve", "imagetype", "text", "dep:brain-qwen3vl"]
+# `brain::AutoPipeline` - hand it ANY `<vendor>/<repo>` this crate has a
+# pipeline for and get the right concrete TYPE back (an enum, one variant
+# per pipeline - see `src/auto.rs`'s own doc for why an enum and not a
+# trait object). A cross-cutting DISPATCH surface, not a `brain_arch::Domain`
+# the way every other surface name is (rule 13's own convention) - it names
+# no architecture of its own and adds no dependency past what selecting every
+# other surface already would, so it earns an exception rather than bending
+# that rule to fit it. Deliberately pulls in EVERY other resolver-backed
+# surface as a hard prerequisite, not an optional subset: `AutoPipeline`
+# promises "hand it any supported model id", and a build missing half the
+# pipeline features would silently narrow that promise into something this
+# type never claims to be - a caller who wants dispatch over a NARROWER set
+# already has that by naming the concrete pipeline types directly. Does NOT
+# pull in `creature`/`decision` (neither has a `from_pretrained` this
+# dispatches through - see this feature's own module doc) or `text` alone
+# (already implied by `multimodal`).
+auto = ["image", "forecast", "vision", "audio", "video", "multimodal"]
 
 # --- infrastructure: selected BY a surface, never named by a consumer.
 # `brain::Device`.

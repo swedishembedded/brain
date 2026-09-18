@@ -44,7 +44,14 @@ if not feats:
 # modalities and so are not `Domain` variants. `viewport` is one of them: a
 # window and a canvas, with no model behind it.
 TIERS = {"device", "resolve", "imagetype", "full", "default", "viewport"}
-surfaces = sorted(set(feats) - TIERS)
+# Named directly by a consumer (so not a TIER), but deliberately not a
+# `Domain` variant either: `auto` is a DISPATCH surface crossing every other
+# one (`brain::AutoPipeline` hands back whichever concrete pipeline type a
+# model id resolves to), not a claim about one architecture's modality - see
+# `crates/sdk/src/auto.rs`'s own module doc. An explicit, named exception
+# here rather than silently widening rule 1's own check for everyone.
+CROSS_CUTTING = {"auto"}
+surfaces = sorted(set(feats) - TIERS - CROSS_CUTTING)
 
 # 1. surface names are brain_arch::Domain variants, kebab-cased.
 arch = open("crates/arch/src/lib.rs").read()
@@ -88,7 +95,7 @@ if cat.get("features"):
         "the one model crate's Provider directly; the generic dispatch machinery "
         "is in brain-capability, not here.")
 
-print(f"  surfaces: {', '.join(surfaces) or '(none)'}")
+print(f"  surfaces: {', '.join(sorted(surfaces) + sorted(CROSS_CUTTING & set(feats))) or '(none)'}")
 sys.exit(0 if ok else 1)
 PY
 

@@ -3,9 +3,10 @@
 The rules this crate (and every future pipeline/CLI/Python surface) is held to
 are `.agents/rules/sdk-design.md`. Several "not yet done" items below are that
 document's own review checklist failing today, tracked here rather than
-re-stated there: no `AutoPipeline` and no multi-architecture dispatch on most
-of the pipelines that DO exist (rule 2 - see `.agents/roadmap/
-sdk-design-sweep.md` for the per-pipeline scope), the CLI building its own
+re-stated there: no multi-architecture dispatch on most of the pipelines
+that DO exist (rule 2 - see `.agents/roadmap/sdk-design-sweep.md` for the
+per-pipeline scope; `AutoPipeline` itself is done - see that file's Phase
+6.6), the CLI building its own
 `flux2::Pipeline`/`HotPipeline` instead of calling `ImagePipeline` (rule 10),
 and `brain-py` driving a subprocess instead of a direct binding (rule 10).
 
@@ -83,12 +84,14 @@ for why.
       `Completion` group (`chosen`/`rejected` picked by reward sign within
       one in-memory group) -- there is no way to load pre-collected
       preference pairs from a file.
-- [ ] AutoPipeline: not built. `ImagePipeline::from_pretrained` does its own
-      two-architecture dispatch internally, but there is no public
-      multi-modal `AutoPipeline`-style type that a caller could hand ANY
-      supported model id -- image, text, embedding -- and get the right
-      pipeline TYPE back; today a caller must already know they want
-      `ImagePipeline` specifically.
+- [x] AutoPipeline: done - see `.agents/roadmap/sdk-design-sweep.md` Phase
+      6.6. `brain::AutoPipeline::from_pretrained` tries every known
+      architecture's resolver against the current model store and hands
+      back the matching concrete pipeline type, boxed, as one of 15 enum
+      variants - a new `auto` surface feature (not a `Domain` variant,
+      `scripts/gates/check-sdk-features.sh` now names it an explicit
+      cross-cutting exception) that pulls in every other resolver-backed
+      surface as a hard prerequisite.
 - [ ] CLI migration onto the SDK: `crates/cli/src/flux2_cli.rs` and
       `s3dit::caps::ZAction`/`crates/cli/src/resident.rs` each still
       construct their own `flux2::Pipeline`/`s3dit::pipeline::HotPipeline`
