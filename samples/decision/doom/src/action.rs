@@ -47,6 +47,8 @@ pub struct Option_ {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tag {
     Attack,
+    /// Move sideways without changing facing.
+    Sidestep,
     Grab,
     Advance,
     Explore,
@@ -65,6 +67,8 @@ const MOVE_TICS: u32 = 6;
 const MIN_ROOM: i32 = 64;
 /// How far `use` reaches, in map units - DOOM's own USERANGE.
 const USE_RANGE: i32 = 64;
+/// Close enough to "facing it" that turning again would waste a decision.
+const FACING_TOL: i32 = 20;
 
 fn json_turn(angle: i32) -> String {
     format!("{{\"type\":\"turn-to\",\"angle\":{}}}", angle.rem_euclid(360))
@@ -176,38 +180,70 @@ pub fn options(state: &State) -> Vec<Option_> {
             (Some(b), Some(d)) => (b, d),
             _ => (e.bearing, e.distance),
         };
+
+        // TURNING AND WALKING ARE SEPARATE DECISIONS.
+        //
+        // Doing both in one step is what wedged a follower on every corner: it
+        // turns over the step's tics while walking, so it walks along the
+        // ARC of the turn and into the inside of the corner, and the engine
+        // slides it back along the wall it is pressed against. Measured, that
+        // is 13% of the way to the exit and then four hundred decisions going
+        // nowhere. Facing first and moving second costs one extra decision at
+        // each corner and actually gets round it.
+        if e.distance <= USE_RANGE {
+            // Close enough to press. Face the exit ITSELF, not the route,
+            // which has already delivered the player here.
+            out.push(Option_ {
+                text: format!("press the level exit, {} units {}", e.distance,
+                              bearing_phrase(e.bearing)),
+                commands: format!("[{},{{\"type\":\"use\"}}]", json_turn(state.facing(e.bearing))),
+                tics: FIGHT_TICS,
+                tag: Tag::Exit,
+                room: e.route_clearance.unwrap_or(e.clearance),
+            });
+        } else if bearing.abs() > FACING_TOL {
+            out.push(Option_ {
+                text: format!(
+                    "turn to face the way out, the exit is {away} units of walking {}",
+                    bearing_phrase(bearing)
+                ),
+                commands: format!("[{}]", json_turn(state.facing(bearing))),
+                tics: FIGHT_TICS,
+                tag: Tag::Exit,
+                room: e.route_clearance.unwrap_or(e.clearance),
+            });
+        } else {
+            out.push(Option_ {
+                text: format!("head for the level exit, {away} units of walking ahead"),
+                commands: "[{\"type\":\"forward\",\"amount\":8},{\"type\":\"use\"}]".into(),
+                tics: MOVE_TICS,
+                tag: Tag::Exit,
+                room: e.route_clearance.unwrap_or(e.clearance),
+            });
+        }
+    }
+
+    // --- sidestep ----------------------------------------------------------
+    //
+    // Strafing moves without turning, which is the only way off a corner the
+    // player is pressed into: turning to face the open side and walking turns
+    // back INTO the corner on the way round.
+    if c.left >= MIN_ROOM {
         out.push(Option_ {
-            text: format!(
-                "head for the level exit, {} units away, {}",
-                away,
-                bearing_phrase(bearing)
-            ),
-            // Turn onto it, then either press it or walk to it.
-            //
-            // `use` reaches 64 map units (DOOM's USERANGE), so inside that
-            // there is nothing to walk toward and walking is actively harmful:
-            // eight tics of forward carries the player straight past the
-            // switch, and the result is an agent that oscillates around the
-            // exit pressing at empty air. Measured before this: distances of
-            // 32, 34, 59, 94, 99, 78, 42, 19 on consecutive decisions, never
-            // triggering.
-            //
-            // Further out it walks AND presses, because whether this exit is a
-            // switch to press or a line to walk over is a property of the
-            // level, and doing both works on either.
-            commands: if e.distance <= USE_RANGE {
-                // Close enough to press: face the exit ITSELF, not the route,
-                // which has already delivered the player here.
-                format!("[{},{{\"type\":\"use\"}}]", json_turn(state.facing(e.bearing)))
-            } else {
-                format!(
-                    "[{},{{\"type\":\"forward\",\"amount\":8}},{{\"type\":\"use\"}}]",
-                    json_turn(state.facing(bearing))
-                )
-            },
+            text: format!("sidestep left without turning, {} units of room", c.left),
+            commands: "[{\"type\":\"strafe-left\",\"amount\":8}]".into(),
             tics: MOVE_TICS,
-            tag: Tag::Exit,
-            room: e.route_clearance.unwrap_or(e.clearance),
+            tag: Tag::Sidestep,
+            room: c.left,
+        });
+    }
+    if c.right >= MIN_ROOM {
+        out.push(Option_ {
+            text: format!("sidestep right without turning, {} units of room", c.right),
+            commands: "[{\"type\":\"strafe-right\",\"amount\":8}]".into(),
+            tics: MOVE_TICS,
+            tag: Tag::Sidestep,
+            room: c.right,
         });
     }
 

@@ -88,11 +88,12 @@ pub struct Level {
     pub total_secrets: u32,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Player {
-    /// The player's own map-object id, for addressing it on the object
-    /// endpoints. Never shown to the model.
+    /// The player's own map-object id. Part of the schema; the sample places
+    /// episodes through the episode endpoint rather than by object id.
     pub id: i64,
     // x/y are not part of any decision - a policy navigating by coordinates
     // would be memorising one map - but they are how the environment notices
@@ -107,6 +108,11 @@ pub struct Player {
     pub weapon: Option<String>,
     pub ammo: Option<i32>,
     pub keys: Vec<String>,
+    /// The floor underfoot is damaging. A player sees the screen flash and
+    /// their health tick down; without it an agent crosses a nukage pool
+    /// wondering why it is dying.
+    #[serde(rename = "standingInDamage", default)]
+    pub standing_in_damage: bool,
 }
 
 // `deny_unknown_fields` means every field the engine sends has to be named
@@ -310,6 +316,10 @@ pub fn render(state: &State, history: History) -> String {
         state.level.secrets,
         state.level.total_secrets
     ));
+
+    if state.player.standing_in_damage {
+        out.push_str("THE FLOOR HERE IS BURNING YOU - get off it.\n");
+    }
 
     let vis: Vec<&Thing> = state.visible_threats().take(3).collect();
     if vis.is_empty() {

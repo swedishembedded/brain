@@ -218,9 +218,21 @@ impl Doom {
         self.call("POST", "/api/step", Some(&body))
     }
 
-    pub fn reset(&mut self, cfg: &Config, seed: u64) -> std::io::Result<String> {
+    /// Restart the level. `start_distance`, when set, places the player that
+    /// many map units of WALKING from the exit rather than at the level's own
+    /// spawn - see `DoomEnv::curriculum`.
+    pub fn reset(
+        &mut self,
+        cfg: &Config,
+        seed: u64,
+        start_distance: Option<i32>,
+    ) -> std::io::Result<String> {
+        let start = match start_distance {
+            Some(d) => format!(",\"startDistance\":{d}"),
+            None => String::new(),
+        };
         let body = format!(
-            "{{\"episode\":{},\"map\":{},\"skill\":{},\"seed\":{}}}",
+            "{{\"episode\":{},\"map\":{},\"skill\":{},\"seed\":{}{start}}}",
             cfg.episode,
             cfg.map,
             cfg.skill,
@@ -235,13 +247,6 @@ impl Doom {
 
     pub fn map(&mut self) -> std::io::Result<String> {
         self.call("GET", "/api/map", None)
-    }
-
-    /// Move an object to a map position, relinking it so collision still
-    /// works. Used to place an episode's start, never by the agent.
-    pub fn teleport(&mut self, id: i64, x: f32, y: f32) -> std::io::Result<String> {
-        let body = format!("{{\"position\":{{\"x\":{x},\"y\":{y},\"z\":0}}}}");
-        self.call("PATCH", &format!("/api/world/objects/{id}"), Some(&body))
     }
 
     /// Put a thing on the floor `distance` units away, `bearing` degrees

@@ -151,12 +151,7 @@ const EXPLORE_CELL: i32 = 128;
 /// that must have finished, and how much further back it then goes.
 const CURRICULUM_WINDOW: usize = 8;
 const CURRICULUM_ADVANCE: f32 = 0.6;
-const CURRICULUM_STEP: u32 = 2;
-/// Attempts to place an episode before giving up.
-const CURRICULUM_TRIES: usize = 5;
-/// How close the exit has to be before the scripted player simply takes it.
-/// Two decisions' worth of walking.
-const EXIT_TAKE_IT: i32 = 300;
+const CURRICULUM_STEP: i32 = 400;
 /// Decisions to hold one direction for once circling is detected. Long enough
 /// to clear the cycle's own diameter at the walking speed one decision buys.
 const COMMIT_STEPS: u32 = 8;
@@ -191,8 +186,8 @@ pub struct Inspect {
     pub game_tic: i64,
     /// Decisions in a row that moved the player nowhere.
     pub stuck: u32,
-    /// How far back the reverse curriculum has moved the episode's start, in
-    /// decisions of random walk. Zero when the curriculum is off.
+    /// How far from the exit the episode started, in map units. Zero when the
+    /// curriculum is off.
     pub back_steps: u32,
     /// Reward per step for the episode so far, for the chart.
     pub history: Vec<f32>,
@@ -283,25 +278,25 @@ pub struct DoomEnv {
     /// cheat: the game, the actions, the reward and the opponent are
     /// unchanged, and both players face the identical arena on a given seed.
     arena: usize,
-    /// Reverse curriculum: start the episode near the exit and walk it back as
-    /// the policy succeeds.
+    /// Reverse curriculum: start the episode near the exit and move the start
+    /// further away as the policy succeeds.
     ///
     /// The problem it solves is not difficulty, it is SILENCE. Reaching the
-    /// exit of E1M1 from the level's own start pays once, several hundred
-    /// decisions later, and across four training runs it never happened even
-    /// once - so the exit reward contributed exactly nothing to any gradient
-    /// the policy ever took. A reward that never fires is not a hard reward,
-    /// it is an absent one.
+    /// exit of E1M1 from the level's own spawn pays once, a thousand decisions
+    /// later, and across five training runs it never happened - so the exit
+    /// reward contributed exactly nothing to any gradient the policy ever
+    /// took. A reward that never fires is not a hard reward, it is an absent
+    /// one. This is Florensa et al.'s reverse curriculum, the standard answer.
     ///
-    /// So the episode starts where the reward IS. Teleport to the exit, random
-    /// walk `back_steps` decisions away from it, and begin there. The policy
-    /// learns to finish from a spot it can reach, and the start retreats along
-    /// whatever path the walk happened to take as it keeps succeeding - which
-    /// is Florensa et al.'s reverse curriculum, and the standard answer to a
-    /// goal reward that never fires.
+    /// The start is a DISTANCE ALONG THE ROUTE, not a random walk from the
+    /// goal. A random walk was tried first and is worse in every way that
+    /// matters: it wanders, two stages of it are not comparable, and nobody
+    /// can say how hard a given stage is. "Start 1500 units of walking from
+    /// the exit" means the same thing every episode and grows cleanly to the
+    /// whole level - on E1M1 the spawn is 5344 units out.
     curriculum: bool,
-    /// How far back the start currently is, in decisions of random walk.
-    back_steps: u32,
+    /// How far from the exit episodes currently start, in map units.
+    start_distance: i32,
     /// Recent episode outcomes, for deciding when to move the start back.
     recent_wins: std::collections::VecDeque<bool>,
     warned_dropped: bool,
@@ -336,7 +331,7 @@ impl DoomEnv {
             frames_per_tic: false,
             arena: 0,
             curriculum: false,
-            back_steps: 0,
+            start_distance: 0,
             recent_wins: std::collections::VecDeque::new(),
             warned_dropped: false,
             fault: None,
@@ -360,87 +355,19 @@ impl DoomEnv {
         self.curriculum = on;
     }
 
-    /// Start episodes this far back from the exit, rather than at it.
+    /// Start episodes this many map units of walking from the exit.
     ///
-    /// The curriculum's depth is TRAINING state and is not saved with the
-    /// head, so a policy trained out to 36 decisions of walk-back is, on a
-    /// fresh run, asked to finish from zero - two decisions, every time.
-    /// Evaluating or recording a curriculum policy therefore has to say how
-    /// hard to make it, and this is where that number comes from.
-    pub fn set_start_back(&mut self, n: u32) {
-        self.back_steps = n;
+    /// The curriculum's reach is TRAINING state and is not saved with the
+    /// head, so a policy trained out to 3000 units is, on a fresh run, asked
+    /// to finish from zero - two decisions, every time. Evaluating or
+    /// recording a curriculum policy therefore has to say how hard to make it,
+    /// and this is where that number comes from.
+    pub fn set_start_distance(&mut self, units: i32) {
+        self.start_distance = units;
     }
 
-    /// Record how an episode ended and move the start back once the policy is
-    /// reliably finishing from where it is.
-    ///
-    /// Advanced on a WINDOW rather than a single success, because one win from
-    /// two decisions away is luck; and by a small step, because a start that
-    /// jumps past what the policy can do puts it back to the silent regime the
-    /// curriculum exists to escape.
-    fn note_outcome(&mut self, won: bool) {
-        if !self.curriculum {
-            return;
-        }
-        self.recent_wins.push_back(won);
-        if self.recent_wins.len() > CURRICULUM_WINDOW {
-            self.recent_wins.pop_front();
-        }
-        if self.recent_wins.len() < CURRICULUM_WINDOW {
-            return;
-        }
-        let wins = self.recent_wins.iter().filter(|w| **w).count();
-        if wins as f32 / self.recent_wins.len() as f32 >= CURRICULUM_ADVANCE {
-            self.back_steps += CURRICULUM_STEP;
-            self.recent_wins.clear();
-            println!(
-                "doom: curriculum - {wins}/{} finished, moving the start back to {} decisions",
-                CURRICULUM_WINDOW, self.back_steps
-            );
-        }
-    }
-
-    /// Place the episode at the exit, then walk it `back_steps` away.
-    ///
-    /// Returns whether the placement worked. A walk that ends the episode -
-    /// the player wanders back over the exit line, or falls somewhere lethal -
-    /// leaves the level unusable, so the caller restarts.
-    fn walk_back_from_exit(&mut self, seed: u64) -> Result<bool, String> {
-        let Some(spot) = self.state.exit.as_ref().and_then(|e| e.spot) else {
-            return Err("this level reports no walkable spot at its exit, so the curriculum \
-                        has nowhere to start from"
-                .into());
-        };
-        let id = self.state.player.id;
-        self.doom.teleport(id, spot.x, spot.y).map_err(|e| format!("teleport: {e}"))?;
-        let json = self.doom.step("[]", 1).map_err(|e| format!("{e}"))?;
-        self.state = State::parse(&json)?;
-
-        let mut rng = Rng::new(seed ^ 0xbac6_0000);
-        for _ in 0..self.back_steps {
-            let opts = action::options(&self.state);
-            // Only the options that GO somewhere: the walk is meant to cover
-            // ground away from the exit, and "shoot" or "press the wall" moves
-            // the start nowhere.
-            let moves: Vec<&Option_> = opts
-                .iter()
-                .filter(|o| matches!(o.tag, Tag::Advance | Tag::Explore | Tag::Retreat))
-                .collect();
-            let pick = match moves.len() {
-                0 => opts.first(),
-                n => Some(moves[(rng.next_u64() % n as u64) as usize]),
-            };
-            let Some(opt) = pick else { break };
-            let json = self.doom.step(&opt.commands, opt.tics).map_err(|e| format!("{e}"))?;
-            self.state = State::parse(&json)?;
-            if self.state.done {
-                // Wandered back out of the level. Start over rather than train
-                // on an episode that is already finished.
-                return Ok(false);
-            }
-        }
-        Ok(true)
-    }
+    /// Start every episode with `n` monsters around the player. See
+    /// [`DoomEnv::arena`].
     pub fn set_arena(&mut self, n: usize) {
         self.arena = n;
     }
@@ -473,8 +400,6 @@ impl DoomEnv {
                 .filter(|&(_, room)| room >= 160)
                 .collect();
             if open.is_empty() {
-                // Boxed in at the level's own start. Nothing to be done about
-                // it here, and reporting it beats spawning into a wall.
                 return Err(format!(
                     "no open direction to place arena monster {} of {}",
                     i + 1,
@@ -493,13 +418,13 @@ impl DoomEnv {
         Ok(())
     }
 
-    /// What the agent has done recently - the part of the observation the game
-    /// does not report. See [`History`].
     /// What the game itself scored this episode, with no exploration bonus.
     pub fn extrinsic(&self) -> f32 {
         self.extrinsic
     }
 
+    /// What the agent has done recently - the part of the observation the game
+    /// does not report. See [`History`].
     pub fn history(&self) -> History {
         let cell = self.cell();
         History {
@@ -517,11 +442,6 @@ impl DoomEnv {
         &self.opts
     }
 
-    /// How many times this episode has been in the patch of floor the player
-    /// now stands on, counting this visit.
-    ///
-    /// 128 units to a patch: a corridor's width, so moving to a new patch is a
-    /// real change of place and pacing about a room is not.
     fn cell(&self) -> (i32, i32) {
         (
             self.state.player.x.unwrap_or(0).div_euclid(EXPLORE_CELL),
@@ -534,6 +454,35 @@ impl DoomEnv {
         let n = self.visited.entry(cell).or_insert(0);
         *n += 1;
         *n
+    }
+
+    /// Record how an episode ended and move the start back once the policy is
+    /// reliably finishing from where it is.
+    ///
+    /// Advanced on a WINDOW rather than a single success, because one win from
+    /// two decisions away is luck; and by a small step, because a start that
+    /// jumps past what the policy can do puts it back to the silent regime the
+    /// curriculum exists to escape.
+    fn note_outcome(&mut self, won: bool) {
+        if !self.curriculum {
+            return;
+        }
+        self.recent_wins.push_back(won);
+        if self.recent_wins.len() > CURRICULUM_WINDOW {
+            self.recent_wins.pop_front();
+        }
+        if self.recent_wins.len() < CURRICULUM_WINDOW {
+            return;
+        }
+        let wins = self.recent_wins.iter().filter(|w| **w).count();
+        if wins as f32 / self.recent_wins.len() as f32 >= CURRICULUM_ADVANCE {
+            self.start_distance += CURRICULUM_STEP;
+            self.recent_wins.clear();
+            println!(
+                "doom: curriculum - {wins}/{} finished, starting {} units from the exit",
+                CURRICULUM_WINDOW, self.start_distance
+            );
+        }
     }
 
     /// Reward for what just happened, under the current mission.
@@ -626,7 +575,7 @@ impl DoomEnv {
             i.map = self.state.level.map;
             i.game_tic = self.state.episode_tic;
             i.stuck = self.stuck;
-            i.back_steps = self.back_steps;
+            i.back_steps = self.start_distance.max(0) as u32;
             i.health = self.state.player.health;
             if i.step <= 1 {
                 i.history.clear();
@@ -756,7 +705,8 @@ impl DoomEnv {
             self.mission = Mission::ALL[(seed as usize) % Mission::ALL.len()];
         }
         self.episode = seed;
-        let json = match self.doom.reset(&self.cfg, seed) {
+        let start = self.curriculum.then_some(self.start_distance);
+        let json = match self.doom.reset(&self.cfg, seed, start) {
             Ok(j) => j,
             Err(e) => {
                 self.fault = Some(format!("could not restart the level: {e}"));
@@ -780,47 +730,6 @@ impl DoomEnv {
         self.visited.clear();
         self.commit = 0;
         self.commit_tag = None;
-        if self.curriculum {
-            // A walk that wanders back over the exit leaves the level already
-            // finished; try again from a fresh level a few times before giving
-            // up, rather than training on it.
-            let mut placed = false;
-            for attempt in 0..CURRICULUM_TRIES {
-                match self.walk_back_from_exit(seed + attempt as u64 * 7919) {
-                    Ok(true) => {
-                        placed = true;
-                        break;
-                    }
-                    Ok(false) => {
-                        let json = match self.doom.reset(&self.cfg, seed) {
-                            Ok(j) => j,
-                            Err(e) => {
-                                self.fault = Some(format!("could not restart: {e}"));
-                                return String::new();
-                            }
-                        };
-                        match State::parse(&json) {
-                            Ok(st) => self.state = st,
-                            Err(e) => {
-                                self.fault = Some(e);
-                                return String::new();
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        self.fault = Some(e);
-                        return String::new();
-                    }
-                }
-            }
-            if !placed {
-                self.fault = Some(format!(
-                    "could not place an episode {} decisions back from the exit in {} tries",
-                    self.back_steps, CURRICULUM_TRIES
-                ));
-                return String::new();
-            }
-        }
         if self.arena > 0 {
             if let Err(e) = self.build_arena(seed) {
                 self.fault = Some(e);
@@ -840,9 +749,9 @@ impl DoomEnv {
     /// That last clause is the whole of its navigation and it is deliberately
     /// crude - a greedy hill climb with no memory, so it circles a level
     /// rather than solving one, never retreats from a fight it is losing,
-    /// never prioritises the enemy that is actually shooting at it, and does
-    /// exactly the same thing whatever the orders say. It is meant to be a
-    /// floor worth clearing, not a solution.
+    /// never prioritises the enemy that is actually shooting at it, and plans
+    /// nothing beyond the next decision. It is meant to be a floor worth
+    /// clearing, not a solution.
     ///
     /// It was WORSE than this before: it aimed at the exit whether or not
     /// there was floor between, and spent whole episodes shoving at the wall
@@ -861,30 +770,77 @@ impl DoomEnv {
     pub fn scripted(&mut self) -> Option<usize> {
         let by = |tag: Tag| self.opts.iter().position(|o| o.tag == tag);
         let hurt_badly = self.state.player.health < 40;
+        let threat_near = self.state.visible_threats().next().map(|t| t.distance) < Some(600);
+        let underfoot = |d: i32| self.state.pickups.iter().any(|p| p.visible && p.distance < d);
 
-        // The exit, when it is close enough to simply take.
+        // Standing in slime: anywhere else will do, and the exit route is
+        // already computed to avoid it.
+        if self.state.player.standing_in_damage {
+            if let Some(i) = by(Tag::Exit) {
+                return Some(i);
+            }
+            let best_move = self
+                .opts
+                .iter()
+                .enumerate()
+                .filter(|(_, o)| matches!(o.tag, Tag::Advance | Tag::Explore | Tag::Sidestep))
+                .max_by_key(|(_, o)| o.room);
+            if let Some((i, _)) = best_move {
+                return Some(i);
+            }
+        }
+
+        // STAYING ALIVE COMES FIRST, whatever the orders say.
         //
-        // Ahead of everything else, because a player standing next to the way
-        // out should take it - and because the warm start clones this: a
-        // teacher that wanders off to collect a health potion it is standing
-        // on never demonstrates finishing a level, so the policy never sees
-        // one finished. Measured: placed 122 units from the exit switch, the
-        // earlier version spent its whole episode picking up items.
-        if let Some(i) = by(Tag::Exit) {
-            if self.state.exit.as_ref().is_some_and(|e| e.distance < EXIT_TAKE_IT) {
+        // Without this the scripted player stands in the open trading shots
+        // until it dies - measured, dead at decision 550 with two thirds of
+        // the level crossed and the exit in reach. Backing off or sidestepping
+        // while hurt is the cheapest possible tactic and it is the difference
+        // between a teacher that finishes levels and one that does not.
+        if hurt_badly && threat_near {
+            if let Some(i) = by(Tag::Grab) {
+                if self.state.pickups.iter().any(|p| p.visible && p.distance < 400) {
+                    return Some(i);
+                }
+            }
+            // Sidestep rather than back away where there is room: strafing
+            // keeps the enemy in front, so the next decision can still shoot.
+            if let Some(i) = by(Tag::Sidestep) {
+                return Some(i);
+            }
+            if let Some(i) = by(Tag::Retreat) {
                 return Some(i);
             }
         }
 
-        // Something in range and in sight: shoot it.
-        if let Some(i) = by(Tag::Attack) {
-            if self.state.visible_threats().next().map(|t| t.distance) < Some(600) {
-                return Some(i);
-            }
-        }
-        // Something on the floor worth stepping on.
-        if let Some(i) = by(Tag::Grab) {
-            if hurt_badly || self.state.pickups.iter().any(|p| p.visible && p.distance < 200) {
+        // THE ORDERS DECIDE THE ORDER. Until this was mission-aware the
+        // scripted player did the same thing whatever it was told, and under
+        // `speedrun` that meant collecting sixteen items over four hundred
+        // decisions and never once setting off for the exit - so the warm
+        // start cloned a player that had never finished a level, and the
+        // policy had no demonstration of finishing to learn from.
+        let order: &[Tag] = match self.mission {
+            Mission::Clear => &[Tag::Attack, Tag::Grab, Tag::Exit],
+            Mission::Speedrun => &[Tag::Exit, Tag::Attack, Tag::Grab],
+            Mission::Survive => &[Tag::Grab, Tag::Attack, Tag::Exit],
+        };
+
+        for tag in order {
+            let Some(i) = by(*tag) else { continue };
+            let take = match tag {
+                Tag::Attack => threat_near,
+                Tag::Grab => {
+                    hurt_badly
+                        || underfoot(if self.mission == Mission::Speedrun { 100 } else { 200 })
+                }
+                // Only when the engine gave a real route. Without one the
+                // option aims down a straight line through walls, and taking
+                // it is the behaviour this whole exercise exists to stop
+                // demonstrating.
+                Tag::Exit => self.state.exit.as_ref().is_some_and(|e| e.route_bearing.is_some()),
+                _ => false,
+            };
+            if take {
                 return Some(i);
             }
         }
@@ -895,7 +851,6 @@ impl DoomEnv {
         let mut best: Option<(i32, usize)> = None;
         for (i, o) in self.opts.iter().enumerate() {
             let score = match o.tag {
-                // The exit is the goal, so it wins any tie it can reach.
                 Tag::Exit => o.room + 400,
                 Tag::Advance | Tag::Retreat | Tag::Explore => o.room,
                 _ => 0,
@@ -908,8 +863,8 @@ impl DoomEnv {
             }
         }
 
-        // Going round in circles: stop chasing the exit for a while and
-        // commit to one direction long enough to leave the cycle behind.
+        // Going round in circles: commit to one direction long enough to leave
+        // the cycle behind.
         if self.commit == 0 && self.circling() {
             let away: Vec<(i32, usize)> = self
                 .opts
@@ -931,14 +886,12 @@ impl DoomEnv {
                     return Some(i);
                 }
             }
-            // The kind of move committed to is no longer on offer, so the
-            // commitment is over rather than silently ignored.
             self.commit = 0;
         }
 
         // Nothing has room: shove at whatever is in the way, then try each way
-        // out in turn. Rotating matters - the first version always shoved, and
-        // shoving is right for a door and useless for a wall.
+        // out in turn. Rotating matters - always shoving is right for a door
+        // and useless for a wall.
         if self.stuck >= 3 || best.is_none() {
             let mut ways: Vec<usize> = Vec::new();
             if let Some(i) = by(Tag::Use) {
