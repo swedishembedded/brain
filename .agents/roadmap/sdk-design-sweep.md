@@ -28,7 +28,7 @@ all - the fly/flybody/connectome stack is unregistered).
 | Image generation | 6 | 6 | **YES - `ImagePipeline`** (flux2+s3dit only) | `flux2_cli.rs` + `s3dit::caps::ZAction` | yes (flux2, s3dit) |
 | Restoration/upscaling/VAE | 5 | 5 | **PARTIAL - `UpscalePipeline`** (RRDBNet) + **`RestorePipeline`** (CodeFormer; SUPIR/VQGAN deferred, see Phase 2.5/2.7) | no dedicated CLI; `resident_restore/upscale/supir.rs` | no |
 | Video generation | 2 | 2 | **PARTIAL - `VideoPipeline`** (Wan2.1 T2V; ltxv deferred, see Phase 5.1) | `wan_cli.rs`, `ltxv_cli.rs` | yes (wan) |
-| ASR | 2 | 2 | none | **no CLI at all** - `resident_asr.rs` only | no |
+| ASR | 2 | 2 | **PARTIAL - `TranscribePipeline`** (qwen3-asr only; nemotron + streaming deferred, see Phase 2.4) | **no CLI at all** - `resident_asr.rs` only | no |
 | TTS/music/speech codec | 7 | 3 | **PARTIAL - `TtsPipeline`** (Qwen3-TTS: speak/clone_voice/design; cosyvoice/minimaxmusic3 deferred, see Phase 4.1) | `tts_cli.rs` + `tts_serve.rs` | no |
 | Vision/detection/segmentation | 4 | 4 | **PARTIAL - `DetectionPipeline`** (YOLOv8) + **`SegmentPipeline`** (SAM2) + **`DepthPipeline`** (ZipDepth; label is a VLM captioning workflow, not a single-arch capability, out of scope here - see Phase 3.1/3.2/3.3) | `yolo_cli.rs`, `sam2_cli.rs`, `depth_cli.rs`, `label_cli.rs` | no |
 | Embedding towers | 3 | 3 | none | **no CLI at all** - `resident_clip/arcface/t5encoder.rs` | no |
@@ -368,7 +368,10 @@ including the `samples/imagegen/*` samples that link `crates/sdk` directly.
   - [x] **Phase 2.7** - `RestorePipeline` (CodeFormer) - see its own section below for two real forward-pass infrastructure bugs this one found AND FIXED (a duplicate kernel registration that broke the CPU JIT backend; a `backend-wgpu` buffer-reclaim ceiling from two unpolled `Builder` scopes) - this pipeline's test reaches a genuine, complete `.restore()` forward pass at CodeFormer's real fixed geometry, the strongest end-to-end proof of any pipeline in this crate so far. SUPIR and VQGAN stay deferred with the reasons already on record.
   - [x] **Phase 3.1** - `DetectionPipeline` (YOLOv8 only) - the vision/detection domain bucket's first pipeline, and its first NEW domain object (`Detection`, not `Image`). See its own section below.
   - [x] **Phase 3.2** - `SegmentPipeline` (SAM 2.1) - see its own section below for a real, independent `Sam2Spec` bug found and fixed (the SAME `ArtifactKind::Opaque`-vs-`Torch` mistake `RrdbnetSpec` had), and a genuine end-to-end `.segment()` forward pass at SAM 2.1's real fixed geometry.
-  - [ ] Still entirely uncovered domain buckets: TTS/music, video generation, 3D/world models. See the domain inventory table.
+  - [x] **Phase 3.3** - `DepthPipeline` (ZipDepth) - completes the vision/detection bucket - see its own section below for a real `cfg_for_checkpoint` shape bug fixed, and a real `vision`/`image` feature-split bug the gate itself found.
+  - [x] **Phase 4.1** - `TtsPipeline` (Qwen3-TTS: speak/clone_voice/design) - the TTS/music bucket's first pipeline - see its own section below. cosyvoice/minimaxmusic3 deferred.
+  - [x] **Phase 5.1** - `VideoPipeline` (Wan2.1 T2V) - the video generation bucket's first pipeline - see its own section below for a real "invisible to the real scanner" gap found (a `.bin` sibling silently vanishing from `inventory::scan`). ltxv deferred (still `always!()`-registered, not resolver-based).
+  - [ ] Still entirely uncovered domain buckets: 3D/world models (lowest priority - no settled domain object yet, `SplatPipeline` closer to `Creature` than `ImagePipeline`). See the domain inventory table. Also still open within buckets already started: ltxv (video), cosyvoice/minimaxmusic3 (TTS/music), Text decoders bucket (`TextGenerationPipeline` scoped to qwen3 only, 5 more decoders + ~9 multimodal/VLM/OCR decoders behind it per the priority-order note), ASR bucket beyond qwen3-asr (nemotron, streaming).
 
 ### Phase 2.1 - `ForecastPipeline` (done)
 
