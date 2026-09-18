@@ -208,12 +208,37 @@ fn side_word(bearing: i32) -> String {
     }
 }
 
+/// What the agent has done recently, which the game itself does not report.
+///
+/// This is in the observation because a DECISION DEPENDS ON IT and the policy
+/// is memoryless. Each decision is an independent forward pass with no
+/// recurrence, so anything the agent needs to remember has to be in what it
+/// reads - and "am I going in circles" is exactly that.
+///
+/// Leaving it out was a real, measured defect rather than an omission. The
+/// scripted teacher uses both of these fields, so cloning it taught the policy
+/// a mapping that does not exist: the same observation, with the teacher
+/// choosing differently depending on history the policy could not see. And a
+/// GREEDY policy without them cannot leave a loop at all - it is deterministic,
+/// so if the best action in a state returns it to that state, it takes the
+/// same action forever. Measured: sampled rollouts averaged +7.19 while the
+/// greedy evaluation of the same weights scored +3.20, which is that loop.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct History {
+    /// Decisions in a row that moved the player nowhere.
+    pub stuck: u32,
+    /// Times this patch of floor has been entered this episode, including now.
+    pub visits_here: u32,
+    /// Distinct patches entered this episode.
+    pub patches: usize,
+}
+
 /// The observation as the model sees it.
 ///
 /// Kept SHORT on purpose. The encoder reads a bounded span, so every line that
 /// is always the same is a line that crowds out one that varies - and what
 /// varies here is the threats, the clearances and the recent events.
-pub fn render(state: &State) -> String {
+pub fn render(state: &State, history: History) -> String {
     let mut out = String::new();
     let p = &state.player;
 
@@ -309,6 +334,20 @@ pub fn render(state: &State) -> String {
         ));
     }
 
+    // Where the agent has been. See `History` for why this is not optional.
+    out.push_str(&match history.visits_here {
+        0 | 1 => "This is new ground.".to_string(),
+        2..=4 => format!("You have been through here {} times.", history.visits_here),
+        n => format!("You keep coming back here - {n} times now, and it is wearing thin."),
+    });
+    if history.stuck >= 2 {
+        out.push_str(&format!(
+            " You have not actually moved for {} decisions.",
+            history.stuck
+        ));
+    }
+    out.push_str(&format!(" {} patches of this level explored.\n", history.patches));
+
     if !state.events.is_empty() {
         let mut parts: Vec<String> = Vec::new();
         for e in state.events.iter().take(4) {
@@ -357,7 +396,7 @@ mod tests {
         // the policy learn.
         assert_eq!(s.facing(-12), 78);
 
-        let text = render(&s);
+        let text = render(&s, History::default());
         for needle in ["health 80", "imp", "12 degrees left", "coming for you", "took 15 damage"] {
             assert!(text.contains(needle), "rendered text is missing {needle:?}:\n{text}");
         }

@@ -80,6 +80,8 @@ impl Timing {
 pub struct Score {
     pub episodes: usize,
     pub mean_return: f32,
+    /// The mean of what the GAME scored, with the exploration bonus removed.
+    pub mean_game: f32,
     pub kills: f32,
     pub items: f32,
     pub exits: usize,
@@ -90,23 +92,24 @@ pub struct Score {
 impl Score {
     pub fn print(&self, who: &str) {
         println!(
-            "  {who}: {} episodes, return {:+.2}, {:.1} kills, {:.1} items, {} exits, \
-             {} deaths, {:.0} steps",
-            self.episodes, self.mean_return, self.kills, self.items, self.exits, self.deaths,
-            self.steps
+            "  {who}: {} episodes, return {:+.2} ({:+.2} from the game itself), \
+             {:.1} kills, {:.1} items, {} exits, {} deaths, {:.0} steps",
+            self.episodes, self.mean_return, self.mean_game, self.kills, self.items, self.exits,
+            self.deaths, self.steps
         );
     }
 
     pub fn row(&self, who: &str) {
         println!(
-            "{:<10} {:>8.2} {:>8.1} {:>8.1} {:>8} {:>8}",
-            who, self.mean_return, self.kills, self.items, self.exits, self.deaths
+            "{:<10} {:>8.2} {:>8.2} {:>8.1} {:>8.1} {:>8} {:>8}",
+            who, self.mean_return, self.mean_game, self.kills, self.items, self.exits, self.deaths
         );
     }
 }
 
 struct Tally {
     ret: f32,
+    game: f32,
     kills: f32,
     items: f32,
     exits: usize,
@@ -117,12 +120,13 @@ struct Tally {
 
 impl Tally {
     fn new() -> Tally {
-        Tally { ret: 0.0, kills: 0.0, items: 0.0, exits: 0, deaths: 0, steps: 0.0, n: 0 }
+        Tally { ret: 0.0, game: 0.0, kills: 0.0, items: 0.0, exits: 0, deaths: 0, steps: 0.0, n: 0 }
     }
 
     fn add(&mut self, env: &DoomEnv, total: f32, steps: usize) {
         let s = env.state();
         self.ret += total;
+        self.game += env.extrinsic();
         self.kills += s.level.kills as f32;
         self.items += s.level.items as f32;
         self.exits += usize::from(s.outcome == "exited");
@@ -136,6 +140,7 @@ impl Tally {
         Score {
             episodes: self.n,
             mean_return: self.ret / n,
+            mean_game: self.game / n,
             kills: self.kills / n,
             items: self.items / n,
             exits: self.exits,
@@ -214,7 +219,7 @@ pub fn score_policy(
             }
             total += r;
             steps += 1;
-            observation = obs::render(pipe.env().state());
+            observation = obs::render(pipe.env().state(), pipe.env().history());
             if let Some(v) = viewer.as_deref_mut() {
                 if !v.tick(&pipe.env().inspect)? {
                     return Ok(tally.finish());
@@ -388,9 +393,6 @@ pub fn draw(c: &mut Canvas, i: &Inspect) {
         }
         let p = i.probs.get(n).copied();
         let chosen = n == i.chosen;
-        // The bar is the point: a flat set of bars is a policy that has not
-        // made up its mind, and that reads instantly where four decimal
-        // places do not.
         let label = match p {
             Some(p) => format!("{:>3.0}% {}", p * 100.0, opt),
             None => format!("     {opt}"),
@@ -398,8 +400,11 @@ pub fn draw(c: &mut Canvas, i: &Inspect) {
         let lines = wrap(&label, (pw / 6 - 4) as usize);
         let block = (lines.len() as u32 * Canvas::line_height(1)) as i32;
 
-        // The probability bar sits BEHIND the whole option, and the text is
-        // always drawn bright. Dark text on the highlighted bar was the first
+        // The bar is the point: a flat set of bars is a policy that has not
+        // made up its mind and a single full one is a policy that has
+        // collapsed, and both read instantly where four decimal places do
+        // not. It sits BEHIND the whole option, and the text is always drawn
+        // bright. Dark text on the highlighted bar was the first
         // attempt and it is invisible: draw_text darkens whatever is under it
         // for contrast, so the bright bar it was meant to read against is not
         // there by the time the glyphs land.

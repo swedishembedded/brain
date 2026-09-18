@@ -57,7 +57,7 @@ use brain::Env;
 use crate::action::{self, Option_, Tag};
 use crate::doom::{Config, Doom};
 use crate::frame::Frame;
-use crate::obs::{self, State};
+use crate::obs::{self, History, State};
 
 /// What the agent is being told to do this episode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -223,6 +223,9 @@ pub struct DoomEnv {
     commit: u32,
     commit_tag: Option<Tag>,
     total: f32,
+    /// The part of the return the game itself scores - see
+    /// [`DoomEnv::reward`].
+    extrinsic: f32,
     steps: u32,
     exited: bool,
     episode: u64,
@@ -253,6 +256,7 @@ impl DoomEnv {
             commit: 0,
             commit_tag: None,
             total: 0.0,
+            extrinsic: 0.0,
             steps: 0,
             exited: false,
             episode: 0,
@@ -269,6 +273,22 @@ impl DoomEnv {
         self.capture_frames = on;
     }
 
+    /// What the agent has done recently - the part of the observation the game
+    /// does not report. See [`History`].
+    /// What the game itself scored this episode, with no exploration bonus.
+    pub fn extrinsic(&self) -> f32 {
+        self.extrinsic
+    }
+
+    pub fn history(&self) -> History {
+        let cell = self.cell();
+        History {
+            stuck: self.stuck,
+            visits_here: self.visited.get(&cell).copied().unwrap_or(0),
+            patches: self.visited.len(),
+        }
+    }
+
     pub fn state(&self) -> &State {
         &self.state
     }
@@ -282,18 +302,30 @@ impl DoomEnv {
     ///
     /// 128 units to a patch: a corridor's width, so moving to a new patch is a
     /// real change of place and pacing about a room is not.
-    fn visit(&mut self) -> u32 {
-        let (x, y) = (
+    fn cell(&self) -> (i32, i32) {
+        (
             self.state.player.x.unwrap_or(0).div_euclid(EXPLORE_CELL),
             self.state.player.y.unwrap_or(0).div_euclid(EXPLORE_CELL),
-        );
-        let n = self.visited.entry((x, y)).or_insert(0);
+        )
+    }
+
+    fn visit(&mut self) -> u32 {
+        let cell = self.cell();
+        let n = self.visited.entry(cell).or_insert(0);
         *n += 1;
         *n
     }
 
     /// Reward for what just happened, under the current mission.
-    fn reward(&mut self) -> f32 {
+    ///
+    /// Returns `(total, extrinsic)`. They are separated because the
+    /// exploration bonus is most of the total - measured, about 92% of a
+    /// 140-decision episode - so a comparison on total return is mostly a
+    /// comparison of who covered more floor. That is a real thing to measure
+    /// and it is not what the GAME scores, and conflating them lets a policy
+    /// look better or worse than it plays. The extrinsic half is kills, items,
+    /// damage and the exit: DOOM's own opinion.
+    fn reward(&mut self) -> (f32, f32) {
         let w = self.mission.weights();
         let mut r = -STEP_COST;
         for e in &self.state.events {
@@ -312,6 +344,8 @@ impl DoomEnv {
                 _ => 0.0,
             };
         }
+        let extrinsic = r;
+
         // The exploration bonus. 1/sqrt(n) rather than first-visit-only so
         // that a patch stays slightly worth revisiting - a strictly one-shot
         // bonus makes a corridor already walked worth exactly nothing, and an
@@ -319,7 +353,7 @@ impl DoomEnv {
         // for the crossing.
         let n = self.visit();
         r += w.explore / (n as f32).sqrt();
-        r
+        (r, extrinsic)
     }
 
     fn publish(&mut self, chosen: usize, reward: f32, probs: Vec<f32>) {
@@ -341,7 +375,7 @@ impl DoomEnv {
             if let Some(f) = frame {
                 i.frame = f;
             }
-            i.observation = obs::render(&self.state);
+            i.observation = obs::render(&self.state, self.history());
             i.options = self.opts.iter().map(|o| o.text.clone()).collect();
             i.probs = probs;
             i.chosen = chosen;
@@ -412,8 +446,9 @@ impl DoomEnv {
             );
             self.warned_dropped = true;
         }
-        let r = self.reward();
+        let (r, extrinsic) = self.reward();
         self.total += r;
+        self.extrinsic += extrinsic;
         if self.state.outcome == "exited" {
             self.exited = true;
         }
@@ -444,6 +479,7 @@ impl DoomEnv {
             }
         }
         self.total = 0.0;
+        self.extrinsic = 0.0;
         self.steps = 0;
         self.exited = false;
         self.last_pos = None;
@@ -454,7 +490,7 @@ impl DoomEnv {
         self.commit_tag = None;
         self.opts = action::options(&self.state);
         self.publish(0, 0.0, Vec::new());
-        obs::render(&self.state)
+        obs::render(&self.state, self.history())
     }
 
     /// The scripted player this run is measured against, and warm-started from.
@@ -601,7 +637,7 @@ impl Env for DoomEnv {
 
     fn step(&mut self, action: usize) -> (String, f32, bool) {
         let (r, done) = self.apply(action, Vec::new());
-        (obs::render(&self.state), r, done)
+        (obs::render(&self.state, self.history()), r, done)
     }
 
     fn objective(&self) -> String {

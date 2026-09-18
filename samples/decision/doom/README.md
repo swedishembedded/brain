@@ -124,10 +124,11 @@ In sight: former human sergeant close at 180 units 12 degrees left, coming for y
 An explosive barrel sits 279 units 78 degrees right.
 Room to move: 320 ahead, 44 left, 320 right, 320 behind.
 The exit switch is 2217 units 53 degrees left, with 0 units of clear floor that way.
+You have been through here 3 times. You have not actually moved for 4 decisions. 22 patches of this level explored.
 Just now: took 15 damage.
 ```
 
-Three details in there are load-bearing, and each was wrong once:
+Four details in there are load-bearing, and each was wrong once:
 
 - **Bearings, not map angles.** "12 degrees left" is actionable; "at 143
   degrees" needs the reader to know its own facing and do the subtraction.
@@ -139,6 +140,10 @@ Three details in there are load-bearing, and each was wrong once:
   a player along whatever they brush, so a decorative pillar beside the path
   read as a wall, and the option list hid "walk forward" at a spot the player
   then crossed 83 units of.
+- **The last line is the agent's own history**, which the game does not report
+  and the policy cannot remember - every decision is an independent forward
+  pass. Leaving it out is what made the first trained policy lose; see
+  [run 1](#run-1---it-lost-to-the-scripted-player).
 
 ## Learning to navigate rather than learning to walk into walls
 
@@ -229,13 +234,70 @@ the 35 Hz clock entirely: measured with no model in the loop, **2 966 tics/s,
 
 ### Does it learn?
 
-*(This section is filled in from real runs as they complete - see
-`out/train-run*.log`. Charts are generated from a run's own stdout by
-`./plot-run.py out/train-run1.log docs/`.)*
+Runs in order, each one a real run whose log is kept. Charts come from a run's
+own stdout (`./plot-run.py out/train-run1.log docs/`).
 
-![warm start](docs/warmstart-loss.png)
+#### Run 1 - it lost to the scripted player
+
+10 iterations x 12 episodes, 140 decisions each, E1M1 at Ultra-Violence, the
+mission sampled per episode. 39 162 optimizer steps, 19 minutes.
+
+| | return | kills | items | exits | deaths |
+|---|---:|---:|---:|---:|---:|
+| scripted | **+6.39** | 0.2 | 1.1 | 0 | 0 |
+| policy | +3.20 | 0.0 | 1.0 | 0 | 0 |
 
 ![training](docs/training.png)
+
+The rollout return climbed (+6.30 to +7.19) and the critic fitted, and the
+policy still lost by 3.19. **The diagnostic is the gap between those two
+numbers**: rollouts are SAMPLED and averaged +7.19, while the greedy evaluation
+of the same weights scored +3.20. A policy whose sampling beats its own argmax
+is not a weak policy, it is a policy in a loop - greedy is deterministic, so if
+the best action in a state returns it to that state, it takes the same action
+forever, and sampling is the only thing that was breaking out.
+
+Which is a bug in the **observation**, not in the training. The policy is
+memoryless: each decision is an independent forward pass with no recurrence. It
+was not told how long it had been stuck or whether it had stood here before -
+but the scripted teacher it was cloned from uses exactly those two facts, so
+cloning taught it a mapping that does not exist, the same observation with the
+teacher choosing differently on history the policy could not see.
+
+#### Run 2 - the same run, with the agent's own history in the observation
+
+`This is new ground.` / `You keep coming back here - 6 times now.` /
+`You have not actually moved for 4 decisions.` Everything else identical, so
+the comparison isolates one change.
+
+*(in progress)*
+
+### What would move this next
+
+In the order the measurements point at, not in the order they are interesting:
+
+1. **A longer episode.** At 140 decisions on E1M1 neither player reaches enough
+   combat for the game's own score to differentiate them - measured, +0.09
+   against -0.01, both of them noise around zero. The scripted player needs
+   about 250 decisions before it has killed anything. Until the horizon is past
+   that, the comparison is almost entirely a comparison of who covered more
+   floor.
+2. **A warm start that converges.** Cloning stops at a cross-entropy of about
+   0.5 over roughly eight options, which is a policy agreeing with the teacher
+   maybe 60% of the time. The pipeline's own documentation is explicit that a
+   clone which has not converged leaves the policy gradient starting from
+   something that is neither the teacher nor random.
+3. **One mission at a time first.** `--mix` splits an already small budget
+   three ways and asks the policy to learn instruction-following on top of
+   playing. Beat the baseline on `clear` alone, then re-introduce the mix and
+   measure per-mission.
+4. **Batching decisions across parallel games.** The profile says 6.8 ms of
+   every decision is fixed cost paid per CALL - two device syncs and the
+   dispatch overhead of a six-layer encoder. Eight games stepping together
+   would amortise it eight ways, and the engine already packs one state and all
+   its options into a single batch; what it cannot yet do is pack several
+   states. That is the one change with a multiple in it rather than a
+   percentage.
 
 ## What is not claimed
 

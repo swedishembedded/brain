@@ -275,16 +275,17 @@ fn train(env: DoomEnv, args: &Args) -> Result<(), String> {
 
 fn report(script: &view::Score, learned: &view::Score) {
     println!(
-        "\n{:<10} {:>8} {:>8} {:>8} {:>8} {:>8}",
-        "", "return", "kills", "items", "exits", "deaths"
+        "\n{:<10} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8}",
+        "", "return", "game", "kills", "items", "exits", "deaths"
     );
     script.row("scripted");
     learned.row("policy");
     let delta = learned.mean_return - script.mean_return;
+    let game = learned.mean_game - script.mean_game;
     println!(
-        "\ndoom: the policy is {:+.2} return per episode against the scripted player{}",
-        delta,
-        if delta > 0.0 { "" } else { " - it has not beaten it yet" }
+        "\ndoom: the policy is {delta:+.2} return and {game:+.2} game score per episode \
+         against the scripted player{}",
+        if delta > 0.0 && game > 0.0 { "" } else { " - it has not beaten it yet" }
     );
 }
 

@@ -66,7 +66,10 @@ def main():
     outdir.mkdir(parents=True, exist_ok=True)
     losses, iters = parse(log)
 
-    if losses:
+    # The trainer logs a loss line per warm-start EPOCH, so a short warm start
+    # yields two or three points - a chart of which says less than the number
+    # does. Only draw it when there is a curve to see.
+    if len(losses) >= 5:
         fig, ax = plt.subplots(figsize=(6, 3), dpi=140)
         ax.plot([s for s, _ in losses], [v for _, v in losses], color=GOOD, linewidth=1.6)
         style(ax, "Warm start: cloning the scripted player", "optimizer step", "cross-entropy")
