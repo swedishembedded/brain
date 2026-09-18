@@ -104,6 +104,23 @@ pub const MAX_PROBE_PROMPT: usize = 8192;
 pub const DEFAULT_GATE_MAX_NEW: i64 = 32;
 
 /// The full, static capability manifest — safe to build with no weights loaded.
+/// Recorded-dispatch budget for the resident decoder's tape.
+///
+/// The tape repeats per token, so this only has to hold one token's worth
+/// plus whatever runs alongside it; at capacity the never-reused entries are
+/// the ones dropped, so a repeating tape survives. Entries pin their
+/// buffers, but every buffer here is a resident model buffer that outlives
+/// the cache anyway.
+const STEP_CACHE_ENTRIES: usize = 65536;
+
+/// Whether to arm the recorded-dispatch cache. On unless
+/// `BRAIN_QWEN_STEP_CACHE=0` - an A/B seam for measuring what the recording
+/// is worth on a given driver, and an escape hatch if one ever disagrees.
+fn step_cache_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("BRAIN_QWEN_STEP_CACHE").map(|v| v != "0").unwrap_or(true))
+}
+
 pub fn manifest() -> Manifest {
     let generate = ActionSpec::new("generate", "generate tokens continuing a prompt (KV-cache decode, one Progress per token)")
         .streaming()
@@ -366,6 +383,19 @@ impl Action for GenerateAction {
                     }
                 })?
             };
+            // An incremental decoder re-records its WHOLE tape every token -
+            // roughly 800 dispatches for Qwen3-0.6B - and on wgpu each one
+            // builds a fresh uniform buffer plus a fresh bind group, both
+            // host-side driver calls. Measured on an Arc iGPU: 7826 uniforms
+            // and 7826 bind groups for 19 tokens. `stepcache` exists for
+            // exactly this shape (see its own module doc, which names the
+            // incremental decoder) and returns the dispatch a miss would have
+            // built, bit for bit. Armed here because this handle's buffers are
+            // a resident model's weights and scratch, which outlive the cache
+            // anyway - the condition `enable_step_cache` asks for.
+            if step_cache_enabled() {
+                model.gpu().enable_step_cache(STEP_CACHE_ENTRIES);
+            }
             let head = model.read_weight(model.cfg.head_weight());
             *guard = Some(Hot { precision: precision.clone(), weights: weights.clone(), cap, model, head });
         }
