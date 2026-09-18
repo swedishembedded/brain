@@ -403,6 +403,7 @@ dependencies = [
  "brain-cosyvoice",
  "brain-data",
  "brain-decide",
+ "brain-florence2",
  "brain-flux2",
  "brain-fly",
  "brain-flybody",

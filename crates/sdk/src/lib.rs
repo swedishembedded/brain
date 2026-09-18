@@ -36,7 +36,7 @@
 //! | `creature` | [`Creature`], [`View`] -- a connectome running a body, and a window onto it |
 //! | `forecast` | [`ForecastPipeline`] -- time-series forecasting (kronos, timesfm3) |
 //! | `text` | [`TextGenerationPipeline`] -- text generation (qwen3, from a local checkpoint path or a hub id) |
-//! | `vision` | [`EmbeddingPipeline`] -- text embedding (CLIP); [`DetectionPipeline`] -- object detection (YOLOv8); [`SegmentPipeline`] -- promptable segmentation (SAM 2.1); [`DepthPipeline`] -- monocular depth (ZipDepth); named for the `brain_arch::Domain` they resolve under, not the capability, since there is no `Embedding`/`Detection`/`Segmentation`/`Depth` domain |
+//! | `vision` | [`EmbeddingPipeline`] -- text embedding (CLIP); [`DetectionPipeline`] -- object detection (YOLOv8); [`SegmentPipeline`] -- promptable segmentation (SAM 2.1); [`DepthPipeline`] -- monocular depth (ZipDepth); [`GroundingPipeline`] -- open-vocabulary visual grounding (Florence-2); named for the `brain_arch::Domain` they resolve under, not the capability, since there is no `Embedding`/`Detection`/`Segmentation`/`Depth`/`Grounding` domain |
 //! | `audio` | [`TranscribePipeline`] -- speech-to-text (qwen3-asr, offline); [`TtsPipeline`] -- text-to-speech (Qwen3-TTS: speak/clone_voice/design; CosyVoice: clone_voice); [`MusicPipeline`] -- lyrics+caption-to-song (MiniMax Music 3) |
 //! | `video` | [`VideoPipeline`] -- text-to-video (Wan2.1 T2V) |
 //! | `multimodal` | [`VisionLanguagePipeline`] -- vision-language (Qwen3-VL: 1-8 images + text in, text out) |
@@ -98,6 +98,8 @@ mod error;
 mod embedding;
 #[cfg(feature = "forecast")]
 mod forecast;
+#[cfg(feature = "vision")]
+mod ground;
 #[cfg(feature = "imagetype")]
 mod image;
 #[cfg(feature = "image")]
@@ -180,6 +182,8 @@ pub use detect::{DetectOptions, Detection, DetectionPipeline, DetectionPipelineB
 pub use embedding::{Embedding, EmbeddingPipeline, EmbeddingPipelineBuilder};
 #[cfg(feature = "forecast")]
 pub use forecast::{ForecastPipeline, ForecastPipelineBuilder};
+#[cfg(feature = "vision")]
+pub use ground::{GroundedBox, GroundingOptions, GroundingPipeline, GroundingPipelineBuilder};
 /// The forecasting domain types [`ForecastPipeline::forecast_with`] needs
 /// for anything past the simple `.forecast(series, horizon)` call --
 /// re-exported from `brain-forecast`, not reinvented (that crate IS the
