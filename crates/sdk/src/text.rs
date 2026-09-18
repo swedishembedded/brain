@@ -305,8 +305,8 @@ impl TextGenerationPipelineBuilder {
     ///
     /// 1. [`Device`] is applied to this process (see [`crate::device::apply`]
     ///    - the same call every other `resolve`-tier pipeline in this crate
-    ///    makes, now that a hub id genuinely can reach `crates/loader`'s
-    ///    model-store resolution below).
+    ///      makes, now that a hub id genuinely can reach `crates/loader`'s
+    ///      model-store resolution below).
     /// 2. If `weights_path` does not name a real local file,
     ///    [`resolve_hub_weights`] resolves it as a hub id through
     ///    `qwen3::spec::Qwen3Spec`, fetching it first if nothing local

@@ -385,7 +385,7 @@ impl TtsPipelineBuilder {
     ///
     /// 1. [`Device`] is applied to this process (see [`crate::device::apply`])
     ///    - every call still builds its own `Gpu` lazily (see this module's
-    ///    doc), but that construction reads the SAME ambient placement.
+    ///      doc), but that construction reads the SAME ambient placement.
     /// 2. [`resolve_arch`] (via [`crate::resolve_policy::resolve_two_with_policy`])
     ///    tries `crates/loader`'s resolver against
     ///    `qwen3tts::spec::Qwen3TtsSpec`'s two roles (`weights_dir`, `ckpt`)
