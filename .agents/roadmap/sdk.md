@@ -116,17 +116,16 @@ for why.
       SDK's `DType::F32` default gets a different, heavier build than the
       CLI's own default for the same architecture.
 - [x] `DownloadPolicy`: done - see `.agents/roadmap/sdk-design-sweep.md`
-      Phase 6.3/6.4. Every single-architecture pipeline builder
-      (`ImagePipeline`, depth, embedding, restore, ground, music, video, vlm,
-      text, detect, segment, upscale, asr) now has a `.download_policy(...)`
-      knob selecting `Offline`/`IfMissing`/`AlwaysCheck`, sharing one
-      `crate::resolve_policy::resolve_with_policy` implementation rather than
-      13 independent copies. Still open: the two TWO-architecture builders
-      (`TtsPipeline`'s qwen3tts/cosyvoice dispatch, `ForecastPipeline`'s
-      kronos/timesfm3 dispatch) - each would need its own tie-break-aware
-      policy match, the same "second generalization this milestone does not
-      need yet" `resolve_policy.rs`'s own module doc already names for
-      `ImagePipeline`'s flux2/s3dit dispatch.
+      Phase 6.3/6.4/6.5. Every pipeline builder in the crate now has a
+      `.download_policy(...)` knob selecting `Offline`/`IfMissing`/
+      `AlwaysCheck`: the 12 single-architecture builders (depth, embedding,
+      restore, ground, music, video, vlm, text, detect, segment, upscale,
+      asr) share `crate::resolve_policy::resolve_with_policy`; `TtsPipeline`
+      (qwen3tts/cosyvoice) and `ForecastPipeline` (kronos/timesfm3) share the
+      new two-architecture `crate::resolve_policy::resolve_two_with_policy`;
+      `ImagePipeline` (flux2/s3dit) keeps its own inline version because it
+      alone also reports download/build progress through caller-supplied
+      closures, a capability neither shared helper carries.
 - [ ] `resolve_arch`'s two-architecture tie-break: when a store resolves
       NEITHER flux2 nor s3dit, the reported `Error::Ambiguous`/
       `Error::Missing` prefers whichever architecture found real (if

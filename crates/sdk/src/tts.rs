@@ -264,7 +264,7 @@ impl TtsPipeline {
     }
 
     pub fn builder(model_id: impl AsRef<str>) -> TtsPipelineBuilder {
-        TtsPipelineBuilder { model_id: model_id.as_ref().to_string(), device: Device::default() }
+        TtsPipelineBuilder { model_id: model_id.as_ref().to_string(), device: Device::default(), download_policy: loader::DownloadPolicy::default() }
     }
 
     /// The real, static `capability::Manifest` the resolved backend's own
@@ -364,6 +364,7 @@ impl TtsPipeline {
 pub struct TtsPipelineBuilder {
     model_id: String,
     device: Device,
+    download_policy: loader::DownloadPolicy,
 }
 
 impl TtsPipelineBuilder {
@@ -372,12 +373,21 @@ impl TtsPipelineBuilder {
         self
     }
 
+    /// How [`TtsPipelineBuilder::load`] may use the network to resolve
+    /// `model_id`. Defaults to [`loader::DownloadPolicy::IfMissing`] -- see
+    /// that type's own doc for what each variant means.
+    pub fn download_policy(mut self, policy: loader::DownloadPolicy) -> Self {
+        self.download_policy = policy;
+        self
+    }
+
     /// Resolve `model_id` and build a real [`TtsPipeline`].
     ///
     /// 1. [`Device`] is applied to this process (see [`crate::device::apply`])
     ///    - every call still builds its own `Gpu` lazily (see this module's
     ///    doc), but that construction reads the SAME ambient placement.
-    /// 2. [`resolve_arch`] tries `crates/loader`'s resolver against
+    /// 2. [`resolve_arch`] (via [`crate::resolve_policy::resolve_two_with_policy`])
+    ///    tries `crates/loader`'s resolver against
     ///    `qwen3tts::spec::Qwen3TtsSpec`'s two roles (`weights_dir`, `ckpt`)
     ///    first, then `cosyvoice::spec::CosyVoiceSpec`'s four (`llm`, `flow`,
     ///    `hift`, `tokenizer`) only when qwen3tts did not resolve - the same
@@ -388,9 +398,10 @@ impl TtsPipelineBuilder {
     ///    already-local checkpoint never touches `Store::local`/`plan` at
     ///    all.
     /// 3. Only when step 2 reports the model genuinely missing everywhere:
-    ///    `model_id` is fetched under `DownloadPolicy::IfMissing` (skipped
-    ///    if `Store::local` already recognizes it), then step 2 retries
-    ///    once.
+    ///    `model_id` is fetched under
+    ///    [`TtsPipelineBuilder::download_policy`] (default
+    ///    [`loader::DownloadPolicy::IfMissing`], skipped if `Store::local`
+    ///    already recognizes it), then step 2 retries once.
     /// 4. Each architecture's own `*Paths::from_assembly` builds the concrete
     ///    per-file paths, and this builder checks every file each backend's
     ///    calls need (qwen3tts: `talker`/`mtp`/`codec`, `speaker` is
@@ -402,24 +413,18 @@ impl TtsPipelineBuilder {
     ///    returning, so a broken checkpoint fails at `load()` rather than on
     ///    the first call.
     pub fn load(self) -> Result<TtsPipeline> {
-        let TtsPipelineBuilder { model_id, device } = self;
+        let TtsPipelineBuilder { model_id, device, download_policy } = self;
 
         crate::device::apply(&device)?;
 
-        let reference = brain_modelref::ModelRef::parse(&model_id).map_err(|e| Error::ModelNotFound(format!("{model_id}: {e}")))?;
-        let overrides: BTreeMap<String, String> = BTreeMap::new();
-
-        // Try what's already resolvable on disk FIRST, before ever
-        // consulting `Store::local`/`plan` - deliberately the REVERSE order
-        // every other pipeline in this crate uses (`ImagePipeline`/
-        // `ForecastPipeline`/`VideoPipeline` all check `Store::local` then
-        // unconditionally fetch-if-missing before resolving). This is not a
-        // stylistic choice: `Qwen3TtsSpec`/`CosyVoiceSpec::classify` read raw
-        // file content, a strictly WIDER net than `Store::local`'s narrower
-        // "a compound `brain.manifest.json`, or a bare
-        // `model.brain.safetensors`" shapes - and CosyVoice has neither.
-        // Real gap this milestone found reaching this crate's first genuine
-        // end-to-end resolution of a real local cosyvoice fixture:
+        // Resolution is tried FIRST, before ever consulting `Store::local`/
+        // `plan` - deliberately the REVERSE of the naive "check
+        // `Store::local`, then fetch-if-missing, then resolve" order (see
+        // `crate::resolve_policy`'s own module doc). Not a stylistic choice:
+        // `Qwen3TtsSpec`/`CosyVoiceSpec::classify` read raw file content, a
+        // strictly WIDER net than `Store::local`'s narrower "a compound
+        // `brain.manifest.json`, or a bare `model.brain.safetensors`"
+        // shapes - and CosyVoice has neither. Real gap this order fixes:
         // `brain_modelstore` has no `FilesRecipe` entry for cosyvoice (no
         // conversion step either, unlike qwen3tts's `brain tts import`), so
         // `Store::local` never recognizes even a real, already-downloaded
@@ -434,22 +439,8 @@ impl TtsPipelineBuilder {
         // `brain_modelstore` to actually FETCH one) is real future work,
         // out of scope here - this only fixes RESOLVING what is already
         // local, not automatic acquisition, for cosyvoice specifically.
-        match resolve_arch(&overrides) {
-            Ok(arch) => return build_from(arch),
-            Err(Error::Missing(_)) => {}
-            Err(e) => return Err(e),
-        }
-
-        let root = loader::model_dir::resolve(None).ok_or_else(|| Error::Backend("no models directory configured (set BRAIN_MODELS_DIR, or $HOME)".to_string()))?;
-        let store = brain_modelstore::Store::new(root);
-        let hub = brain_modelstore::HfHub::new();
-
-        if store.local(&reference).is_none() {
-            let plan = brain_modelstore::plan(&reference, &store, &hub)?;
-            loader::supply::execute_plan(&store, &hub, &plan, &model_id, &mut |_name, _got, _total| {}).map_err(Error::Download)?;
-        }
-
-        build_from(resolve_arch(&overrides)?)
+        let overrides: BTreeMap<String, String> = BTreeMap::new();
+        build_from(resolve_arch(&overrides, &model_id, download_policy)?)
     }
 }
 
@@ -496,30 +487,18 @@ enum ResolvedArch {
 /// the roadmap for why it was picked first), then cosyvoice only when
 /// qwen3tts did not resolve. minimaxmusic3 (this bucket's third served
 /// architecture) is not tried here at all - see this module's own doc.
-fn resolve_arch(overrides: &BTreeMap<String, String>) -> Result<ResolvedArch> {
-    use brain_modelstore::resolve::Resolution;
-
-    let qwen3tts_outcome = loader::resolve_structured("qwen3tts", &qwen3tts::spec::Qwen3TtsSpec, overrides).map_err(Error::Backend)?;
-    if matches!(qwen3tts_outcome, Resolution::Resolved(_)) {
-        let Resolution::Resolved(a) = qwen3tts_outcome else { unreachable!("just matched") };
-        return Ok(ResolvedArch::Qwen3Tts(*a));
-    }
-
-    let cosyvoice_outcome = loader::resolve_structured("cosyvoice", &cosyvoice::spec::CosyVoiceSpec, overrides).map_err(Error::Backend)?;
-    if matches!(cosyvoice_outcome, Resolution::Resolved(_)) {
-        let Resolution::Resolved(a) = cosyvoice_outcome else { unreachable!("just matched") };
-        return Ok(ResolvedArch::CosyVoice(*a));
-    }
-
-    // Both `Resolved` cases already returned above; only `Ambiguous`/
-    // `Missing` combinations can reach here.
-    match (qwen3tts_outcome, cosyvoice_outcome) {
-        (Resolution::Ambiguous(a), _) => Err(Error::Ambiguous(a)),
-        (_, Resolution::Ambiguous(a)) => Err(Error::Ambiguous(a)),
-        (q, _) => match q {
-            Resolution::Missing(m) => Err(Error::Missing(m)),
-            Resolution::Resolved(_) => unreachable!("Resolved handled above"),
-            Resolution::Ambiguous(_) => unreachable!("Ambiguous handled above"),
-        },
-    }
+fn resolve_arch(overrides: &BTreeMap<String, String>, model_id: &str, download_policy: loader::DownloadPolicy) -> Result<ResolvedArch> {
+    let resolved = crate::resolve_policy::resolve_two_with_policy(
+        "qwen3tts",
+        &qwen3tts::spec::Qwen3TtsSpec,
+        "cosyvoice",
+        &cosyvoice::spec::CosyVoiceSpec,
+        model_id,
+        overrides,
+        download_policy,
+    )?;
+    Ok(match resolved {
+        crate::resolve_policy::Resolved2::A(a) => ResolvedArch::Qwen3Tts(a),
+        crate::resolve_policy::Resolved2::B(a) => ResolvedArch::CosyVoice(a),
+    })
 }

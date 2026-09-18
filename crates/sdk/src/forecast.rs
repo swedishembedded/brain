@@ -58,7 +58,7 @@ impl ForecastPipeline {
     }
 
     pub fn builder(model_id: impl AsRef<str>) -> ForecastPipelineBuilder {
-        ForecastPipelineBuilder { model_id: model_id.as_ref().to_string(), device: Device::default() }
+        ForecastPipelineBuilder { model_id: model_id.as_ref().to_string(), device: Device::default(), download_policy: loader::DownloadPolicy::default() }
     }
 
     /// This model's capability-negotiation self-description: context/horizon
@@ -106,32 +106,13 @@ enum ResolvedArch {
 /// [`crate::pipeline::resolve_arch`] tries flux2 first: it was the first one
 /// wired in), then timesfm3 only when kronos did not resolve. See this
 /// module's doc for why chronos2/fincast are not tried here at all.
-fn resolve_arch(overrides: &BTreeMap<String, String>) -> Result<ResolvedArch> {
-    use brain_modelstore::resolve::Resolution;
-
-    let kronos_outcome = loader::resolve_structured("kronos", &kronos::spec::KronosSpec, overrides).map_err(Error::Backend)?;
-    if matches!(kronos_outcome, Resolution::Resolved(_)) {
-        let Resolution::Resolved(a) = kronos_outcome else { unreachable!("just matched") };
-        return Ok(ResolvedArch::Kronos(*a));
-    }
-
-    let timesfm3_outcome = loader::resolve_structured("timesfm3", &timesfm3::spec::Timesfm3Spec, overrides).map_err(Error::Backend)?;
-    if matches!(timesfm3_outcome, Resolution::Resolved(_)) {
-        let Resolution::Resolved(a) = timesfm3_outcome else { unreachable!("just matched") };
-        return Ok(ResolvedArch::Timesfm3(*a));
-    }
-
-    // Both `Resolved` cases already returned above; only `Ambiguous`/
-    // `Missing` combinations can reach here.
-    match (kronos_outcome, timesfm3_outcome) {
-        (Resolution::Ambiguous(a), _) => Err(Error::Ambiguous(a)),
-        (_, Resolution::Ambiguous(a)) => Err(Error::Ambiguous(a)),
-        (k, _) => match k {
-            Resolution::Missing(m) => Err(Error::Missing(m)),
-            Resolution::Resolved(_) => unreachable!("Resolved handled above"),
-            Resolution::Ambiguous(_) => unreachable!("Ambiguous handled above"),
-        },
-    }
+fn resolve_arch(overrides: &BTreeMap<String, String>, model_id: &str, download_policy: loader::DownloadPolicy) -> Result<ResolvedArch> {
+    let resolved =
+        crate::resolve_policy::resolve_two_with_policy("kronos", &kronos::spec::KronosSpec, "timesfm3", &timesfm3::spec::Timesfm3Spec, model_id, overrides, download_policy)?;
+    Ok(match resolved {
+        crate::resolve_policy::Resolved2::A(a) => ResolvedArch::Kronos(a),
+        crate::resolve_policy::Resolved2::B(a) => ResolvedArch::Timesfm3(a),
+    })
 }
 
 /// Builds a [`ForecastPipeline`]. `.device(...)` is the only knob this
@@ -140,6 +121,7 @@ fn resolve_arch(overrides: &BTreeMap<String, String>) -> Result<ResolvedArch> {
 pub struct ForecastPipelineBuilder {
     model_id: String,
     device: Device,
+    download_policy: loader::DownloadPolicy,
 }
 
 impl ForecastPipelineBuilder {
@@ -148,42 +130,38 @@ impl ForecastPipelineBuilder {
         self
     }
 
+    /// How [`ForecastPipelineBuilder::load`] may use the network to resolve
+    /// `model_id`. Defaults to [`loader::DownloadPolicy::IfMissing`] -- see
+    /// that type's own doc for what each variant means.
+    pub fn download_policy(mut self, policy: loader::DownloadPolicy) -> Self {
+        self.download_policy = policy;
+        self
+    }
+
     /// Resolve `model_id` and build a real [`ForecastPipeline`].
     ///
     /// 1. [`Device`] is applied to this process (see [`crate::device::apply`]).
-    /// 2. `model_id` is parsed and, under `DownloadPolicy::IfMissing`, fetched
-    ///    only when nothing local already resolves it - a checkpoint already
-    ///    on disk is never re-checked against the network (mirrors
-    ///    [`crate::ImagePipelineBuilder::load`] exactly; see that type's own
-    ///    doc for the download step's detail).
-    /// 3. [`resolve_arch`] tries the resolver against each known forecasting
-    ///    architecture's roles.
-    /// 4. The resolved architecture's own `Forecaster::load` builds the
+    /// 2. [`resolve_arch`] (via [`crate::resolve_policy::resolve_two_with_policy`])
+    ///    tries the resolver against each known forecasting architecture's
+    ///    roles FIRST; only on `Missing` does `model_id` get parsed and,
+    ///    under [`ForecastPipelineBuilder::download_policy`] (default
+    ///    [`loader::DownloadPolicy::IfMissing`]), fetched - then resolution
+    ///    is retried once. kronos/timesfm3 both have working recipes, so
+    ///    unlike `crate::tts::TtsPipelineBuilder::load`'s own reorder this
+    ///    closes no live bug, only unifies onto one resolve strategy.
+    /// 3. The resolved architecture's own `Forecaster::load` builds the
     ///    model: kronos from its two resolved roles (`tokenizer`, `decoder`),
     ///    timesfm3 from its one (`weights`).
     ///
     /// Every failure path returns a typed [`Error`] - never a panic on a
     /// caller-reachable input.
     pub fn load(self) -> Result<ForecastPipeline> {
-        let ForecastPipelineBuilder { model_id, device } = self;
+        let ForecastPipelineBuilder { model_id, device, download_policy } = self;
 
         crate::device::apply(&device)?;
 
-        let reference = brain_modelref::ModelRef::parse(&model_id).map_err(|e| Error::ModelNotFound(format!("{model_id}: {e}")))?;
-
-        let root = loader::model_dir::resolve(None).ok_or_else(|| Error::Backend("no models directory configured (set BRAIN_MODELS_DIR, or $HOME)".to_string()))?;
-        let store = brain_modelstore::Store::new(root);
-        let hub = brain_modelstore::HfHub::new();
-
-        // DownloadPolicy::IfMissing: a reference that already resolves
-        // locally is never re-checked against the network at all.
-        if store.local(&reference).is_none() {
-            let plan = brain_modelstore::plan(&reference, &store, &hub)?;
-            loader::supply::execute_plan(&store, &hub, &plan, &model_id, &mut |_name, _got, _total| {}).map_err(Error::Download)?;
-        }
-
         let overrides: BTreeMap<String, String> = BTreeMap::new();
-        match resolve_arch(&overrides)? {
+        match resolve_arch(&overrides, &model_id, download_policy)? {
             ResolvedArch::Kronos(assembly) => {
                 let tok = assembly.roles.get("tokenizer").ok_or_else(|| Error::Backend(format!("kronos: resolved assembly {:?} has no tokenizer role", assembly.id)))?;
                 let dec = assembly.roles.get("decoder").ok_or_else(|| Error::Backend(format!("kronos: resolved assembly {:?} has no decoder role", assembly.id)))?;
