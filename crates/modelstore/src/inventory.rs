@@ -496,7 +496,20 @@ fn compound_records(dir: &Path, scan_root: &Path, cache: &BTreeMap<PathBuf, Cach
         if rel_path.is_absolute() || rel_path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
             continue;
         }
-        push_file_record(&dir.join(rel_path), scan_root, ArtifactKind::Compound, cache, probed, &mut out);
+        let role_path = dir.join(rel_path);
+        push_file_record(&role_path, scan_root, ArtifactKind::Compound, cache, probed, &mut out);
+        // ...and, when the role names a single weight FILE, again under the
+        // kind its extension implies. The manifest replaces the generic walk
+        // for this directory, so without this the file's ONLY record is
+        // `Compound` - and no `ArchSpec::classify` accepts `Compound`; they
+        // all gate on `Torch`/`Safetensors`/`Gguf`/`Onnx` before reading a
+        // checkpoint's own tensor shapes. A `brain pull`ed single-file
+        // checkpoint was therefore invisible to its own architecture, the
+        // same defect `hfdir_record` already fixes for the directory case
+        // (see `a_pulled_hf_checkpoint_is_both_compound_and_hfdir`).
+        if let Some(kind) = role_path.file_name().and_then(|f| f.to_str()).and_then(kind_of_extension) {
+            push_file_record(&role_path, scan_root, kind, cache, probed, &mut out);
+        }
     }
     Some(out)
 }
@@ -958,6 +971,50 @@ mod tests {
         let hfdir: Vec<&ArtifactRecord> = found.iter().filter(|r| r.kind == ArtifactKind::HfDir && r.path == dir).collect();
         assert_eq!(hfdir.len(), 1, "a pulled HF checkpoint must still be classifiable by its arch: {found:?}");
         assert!(hfdir[0].usable(), "{found:?}");
+    }
+
+    /// The other shape `brain pull` leaves behind: a manifest whose role
+    /// names a single WEIGHT FILE rather than a directory
+    /// (`facebook/sam2.1-hiera-tiny` -> `sam2.1_hiera_tiny.pt`,
+    /// `schwgHao/RealESRGAN_x4plus` -> `RealESRGAN_x4plus.pth`, and every
+    /// other recipe whose `roles` point at a file).
+    ///
+    /// This is the single-file twin of
+    /// `a_pulled_hf_checkpoint_is_both_compound_and_hfdir`, and it had the
+    /// same defect that one fixed for directories: the manifest REPLACES the
+    /// per-file walk, so the only record for the file was `Compound` - and no
+    /// `ArchSpec::classify` in the workspace accepts `Compound` (they gate on
+    /// `Torch`/`Safetensors`/`Gguf` before reading a checkpoint's own tensor
+    /// shapes). `brain sam2 segment` and `brain rrdbnet upscale` therefore
+    /// both failed with "no artifact classifies as weights for arch ..." on a
+    /// checkpoint `brain pull` had just fetched successfully, while
+    /// `brain models list` cheerfully reported the same checkpoint as local.
+    ///
+    /// The file must keep its extension-derived kind so its own architecture
+    /// can classify it exactly as it would any other checkpoint on disk.
+    #[test]
+    fn a_pulled_single_file_checkpoint_keeps_its_extension_kind() {
+        let root = scratch_root("compound-single-file");
+        let dir = root.join("facebook").join("sam2.1-hiera-tiny");
+        let weights = dir.join("sam2.1_hiera_tiny.safetensors");
+        tiny_safetensors(&weights);
+        let manifest = crate::CompoundManifest {
+            id: "facebook/sam2.1-hiera-tiny".to_string(),
+            family: "sam2".to_string(),
+            roles: BTreeMap::from([("weights".to_string(), "sam2.1_hiera_tiny.safetensors".to_string())]),
+        };
+        std::fs::write(dir.join(crate::MANIFEST_FILE), serde_json::to_vec(&manifest).unwrap()).unwrap();
+
+        let found = scan(&root);
+        let typed: Vec<&ArtifactRecord> = found.iter().filter(|r| r.kind == ArtifactKind::Safetensors && r.path == weights).collect();
+        assert_eq!(typed.len(), 1, "a pulled single-file checkpoint must still be classifiable by its arch: {found:?}");
+        assert!(typed[0].usable(), "{found:?}");
+        // The manifest's own description of the role survives alongside it,
+        // exactly as it does for the directory case.
+        assert!(
+            found.iter().any(|r| r.kind == ArtifactKind::Compound && r.path == weights),
+            "the manifest's own role record must survive: {found:?}"
+        );
     }
 
     #[test]
