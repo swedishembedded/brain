@@ -241,6 +241,7 @@ pub fn score_policy(
 /// last published.
 pub struct Viewer {
     vp: Viewport,
+    recording: bool,
     frame_dir: Option<std::path::PathBuf>,
     saved: u32,
     min_frame: Duration,
@@ -250,7 +251,7 @@ pub struct Viewer {
 
 impl Viewer {
     pub fn new(args: &Args) -> Result<Viewer, String> {
-        let vp = if args.view.window {
+        let mut vp = if args.view.window {
             let v = Viewport::open("brain: doom decisions", WIDTH, HEIGHT)?;
             if let Some(why) = &v.headless_because {
                 // Said out loud. A run that quietly fell back to headless after
@@ -262,8 +263,21 @@ impl Viewer {
         } else {
             Viewport::headless(WIDTH, HEIGHT)
         };
+        let mut recording = false;
+        if let Some(path) = &args.record {
+            // A failed recording is reported and the run carries on: ffmpeg is
+            // an optional tool and losing a video is not worth losing a run.
+            match vp.record(path, args.view.fps) {
+                Ok(()) => {
+                    recording = true;
+                    println!("doom: recording to {path} at {} fps", args.view.fps);
+                }
+                Err(e) => eprintln!("doom: not recording ({e})"),
+            }
+        }
         Ok(Viewer {
             vp,
+            recording,
             frame_dir: args.view.frames.as_ref().map(std::path::PathBuf::from),
             saved: 0,
             min_frame: Duration::from_millis(1000 / args.view.fps.clamp(1, 240) as u64),
@@ -272,8 +286,15 @@ impl Viewer {
         })
     }
 
+    /// Whether anything is going to LOOK at the game's framebuffer.
+    ///
+    /// Fetching it costs a round trip and ~85KB a step, so it is only paid for
+    /// when somebody is watching - and recording counts. Leaving `recording`
+    /// out of this is not a small bug: a `--record` run with no window
+    /// produced a 48-second video of a black rectangle captioned NO FRAME
+    /// CAPTURED, with the decision panel beside it working perfectly.
     pub fn wants_frames(&self) -> bool {
-        self.vp.has_window() || self.frame_dir.is_some()
+        self.vp.has_window() || self.frame_dir.is_some() || self.recording
     }
 
     /// Draw one decision. Returns false when the user asked to quit.
@@ -287,6 +308,11 @@ impl Viewer {
             self.saved += 1;
         }
         if !self.vp.has_window() {
+            // present() is what feeds the recorder, so a headless recording
+            // still has to go through it.
+            if self.recording {
+                self.vp.present();
+            }
             return Ok(true);
         }
         self.vp.present();
@@ -320,6 +346,17 @@ impl Viewer {
     }
 
     fn episode_done(&mut self) {}
+
+    /// Close any recording and say where it went.
+    pub fn finish(&mut self) {
+        match self.vp.finish_recording() {
+            Some(Ok((frames, path))) => {
+                println!("doom: wrote {} ({frames} frames)", path.display())
+            }
+            Some(Err(e)) => eprintln!("doom: the recording did not finish cleanly: {e}"),
+            None => {}
+        }
+    }
 }
 
 /// Lay out one decision on the canvas.
@@ -584,6 +621,7 @@ pub fn play(env: DoomEnv, args: &Args) -> Result<(), String> {
     let seeds: Vec<u64> = (0..args.play as u64).map(|i| 9_000_000 + i).collect();
     let mut timing = Timing::default();
     let score = score_policy(&mut pipe, &seeds, args.max_steps(), Some(&mut viewer), &mut timing)?;
+    viewer.finish();
     score.print("policy");
     timing.print("policy");
     Ok(())
@@ -623,6 +661,7 @@ pub fn probe(mut env: DoomEnv, args: &Args) -> Result<(), String> {
             break;
         }
     }
+    viewer.finish();
     println!("doom: probe finished, return {total:+.2}, {}", env.state().outcome);
     if let Some(d) = &args.view.frames {
         println!("doom: wrote decision PNGs to {d}");

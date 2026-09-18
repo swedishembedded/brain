@@ -304,23 +304,72 @@ is rare and high-variance rather than absent - which makes the game score a
 statistic with almost no events in it, and no training run can learn from a
 signal that mostly is not there.
 
+#### Run 4 - an episode that starts in contact with the problem
+
+`--arena 3` places three monsters around the player at the start of every
+episode, on open floor and in sight, drawn from the episode's own seed so both
+players meet the identical arena.
+
+This is scenario design, not a cheat, and it is the same move
+[ViZDoom](https://github.com/Farama-Foundation/ViZDoom) makes -
+`defend_the_center`, `deadly_corridor` and `health_gathering` are all hand-made
+starting positions, for exactly this reason. The game, the actions, the reward
+and the opponent are unchanged. What changes is that every episode now contains
+the thing being scored.
+
+The effect on the experiment is visible before any training. The scripted
+player kills three monsters inside the first twenty decisions, and the spread
+of its episodes narrows from +2.87..+11.06 to +9.23..+11.31 - it is no longer
+mostly measuring whether a run happened to stumble into a corridor.
+
+With that, over 16 episodes at 120 decisions:
+
+| | return | game score | kills | items |
+|---|---:|---:|---:|---:|
+| scripted | +10.35 | **+5.01** | 3.0 | 1.2 |
+| policy | **+11.12** | +4.89 | 3.0 | 0.6 |
+
+**The policy beats the scripted player on return, +0.78 per episode**, killing
+the same three monsters and covering more ground. On DOOM's own score the two
+are a statistical tie (+4.89 against +5.01); the policy gives up the difference
+in items, picking up 0.6 against 1.2.
+
+So: the first win on the headline metric, and a tie on the game's own. Worth
+being precise about what that is and is not. It is a measured improvement over
+a real baseline on a fair comparison - same seeds, same arenas, same horizon.
+It is not "the policy plays DOOM better than a scripted bot" in any general
+sense: this is one map, one skill, one scenario, three monsters, and the
+scripted player still collects more of what is lying around.
+
+#### Watching it
+
+```bash
+doom play --head out/doom-policy-arena.safetensors --arena 3 --record out/run.mp4
+```
+
+`--record` encodes every decision straight into an MP4 as it is drawn - piped
+to `ffmpeg` as raw frames, so the memory cost is one frame and there are no
+intermediate images to clean up. It works headless, which is the point: the
+video from a training server is the same video a window would have shown.
+
 #### Where that leaves it
 
-**The policy does not yet beat the scripted player on total return.** It is
-level with or slightly ahead on the game's own score in both runs 2 and 3, and
-behind on exploration. The honest summary is that the system learns - the
-return climbs, the diagnosis of run 1 was confirmed by run 2's single change -
-and that the EXPERIMENT is still mis-shaped for what is being asked of it.
+Four runs, and the shape of the story is that **three of the four problems were
+in the experiment rather than the model**:
 
-The next change is not a hyperparameter. It is the initial state: an episode
-that begins in contact with the problem rather than a few hundred decisions
-away from it. That is what
-[ViZDoom's scenario set](https://github.com/Farama-Foundation/ViZDoom) exists
-for - `defend_the_center`, `deadly_corridor`, `health_gathering` are all hand-made
-starting positions, for exactly this reason - and this API can already do it:
-`POST /api/world/objects` spawns a monster at a distance, and `PATCH
-/api/world/objects/{id}` moves the player. A randomised start in a room that
-has something in it turns combat from a rare event into every episode.
+| run | change | result |
+|---|---|---|
+| 1 | baseline | -3.19 return; diagnosed as a greedy loop |
+| 2 | agent's history in the observation | -0.52, and ahead on kills |
+| 3 | one mission, 250 decisions | game score ahead, zero kills for EITHER player |
+| 4 | arena start | **+0.78 return**, tie on game score |
+
+What is still open, in order: the policy collects fewer items than the scripted
+player, which is the whole of its game-score deficit; it has never been asked to
+finish a level; and `--mix` instruction-following has not been measured
+per-mission. The exploration bonus is also still most of the total return, so
+"return" and "plays DOOM well" are not the same axis and the table above
+deliberately shows both.
 
 ### What would move this next
 

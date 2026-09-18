@@ -61,9 +61,11 @@ pub struct Args {
     pub cfg: Config,
     pub mission: Mission,
     pub mix: bool,
+    pub arena: usize,
     pub eval_episodes: usize,
     pub play: usize,
     pub transcript: Option<String>,
+    pub record: Option<String>,
     pub hardware: Hardware,
     pub train: ControlOptions,
     pub view: ViewOptions,
@@ -106,9 +108,15 @@ what to play
   --episode N --map N --skill 0..4      [1 1 2]
   --mission clear|speedrun|survive      [clear]
   --mix               sample a mission per episode, so the policy must read it
+  --arena N           start each episode with N monsters around the player, on
+                      open floor and in sight. 0 plays the level as it ships,
+                      where an episode is spent leaving the spawn area and
+                      neither player reaches enough combat to be scored.
   --eval-episodes N   episodes to score over   [24]
   --play N            episodes for `play`      [3]
   --transcript FILE   write every request and reply as JSON lines
+  --record FILE.mp4   encode every decision straight into an MP4 as it is
+                      drawn - streamed to ffmpeg, no intermediate images
 
 hardware
 {}
@@ -178,9 +186,11 @@ fn parse_args() -> Result<Args, String> {
         cfg,
         mission,
         mix: args.take_flag("--mix"),
+        arena: args.usize_or("--arena", 0),
         eval_episodes: args.usize_or("--eval-episodes", 24),
         play: args.usize_or("--play", 3),
         transcript: args.take_str("--transcript"),
+        record: args.take_str("--record"),
         hardware,
         train,
         view,
@@ -220,7 +230,11 @@ fn run() -> Result<(), String> {
     let game = Doom::start(&paths, &args.cfg, args.transcript.as_ref().map(Into::into))
         .map_err(|e| format!("could not start the game: {e}"))?;
     println!("doom: engine up on port {}, lockstep", game.port);
-    let env = DoomEnv::new(game, args.cfg.clone(), args.mission, args.mix);
+    let mut env = DoomEnv::new(game, args.cfg.clone(), args.mission, args.mix);
+    env.set_arena(args.arena);
+    if args.arena > 0 {
+        println!("doom: arena - {} monsters placed around the player each episode", args.arena);
+    }
 
     match args.command.as_str() {
         "probe" => view::probe(env, &args),

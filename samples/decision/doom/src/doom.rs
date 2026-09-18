@@ -232,6 +232,15 @@ impl Doom {
     pub fn frame(&mut self) -> std::io::Result<String> {
         self.call("GET", "/api/frame", None)
     }
+
+    /// Put a thing on the floor `distance` units away, `bearing` degrees
+    /// clockwise from where the player is facing.
+    pub fn spawn(&mut self, kind: &str, distance: i32, bearing: i32) -> std::io::Result<String> {
+        let body = format!(
+            "{{\"type\":\"{kind}\",\"distance\":{distance},\"bearing\":{bearing}}}"
+        );
+        self.call("POST", "/api/world/objects", Some(&body))
+    }
 }
 
 impl Drop for Doom {

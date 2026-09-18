@@ -52,6 +52,7 @@
 
 use std::sync::{Arc, Mutex};
 
+use brain::decision::Rng;
 use brain::Env;
 
 use crate::action::{self, Option_, Tag};
@@ -188,6 +189,18 @@ pub struct Inspect {
     pub frame: Frame,
 }
 
+/// The monsters an arena episode draws from, weakest first.
+///
+/// Three of DOOM's easiest, on purpose: the question being asked is whether a
+/// policy learns to fight at all, and a Baron of Hell answers it by killing
+/// every episode before either player has made a decision worth scoring.
+const ARENA_MONSTERS: [&str; 3] = ["FORMER HUMAN", "FORMER HUMAN SERGEANT", "IMP"];
+
+/// Where an arena spawn may go: the six directions the observation reports
+/// clearance for. A monster is only placed down one with room, so it starts on
+/// open floor and in sight rather than inside a wall.
+const ARENA_BEARINGS: [i32; 6] = [0, -45, 45, -90, 90, 180];
+
 pub struct DoomEnv {
     doom: Doom,
     cfg: Config,
@@ -233,6 +246,20 @@ pub struct DoomEnv {
     /// Fetch the framebuffer with every observation. Off unless something is
     /// drawing it.
     capture_frames: bool,
+    /// Monsters to place around the player at the start of every episode.
+    ///
+    /// Zero plays the level as it ships. Above zero is a SCENARIO, which is
+    /// what makes the experiment answerable: measured on E1M1 at 250
+    /// decisions, neither the scripted player nor the policy killed anything
+    /// in twelve episodes, because an episode is spent getting out of the
+    /// spawn area. A metric with no events in it cannot separate two players.
+    ///
+    /// This is the same move ViZDoom makes - `defend_the_center`,
+    /// `deadly_corridor` and `health_gathering` are all hand-made starting
+    /// positions - and for the same reason. It is scenario design, not a
+    /// cheat: the game, the actions, the reward and the opponent are
+    /// unchanged, and both players face the identical arena on a given seed.
+    arena: usize,
     warned_dropped: bool,
     /// Set when the game itself failed (the process died, the socket broke).
     /// An environment that silently returns a terminal state on an I/O error
@@ -262,6 +289,7 @@ impl DoomEnv {
             episode: 0,
             inspect: Arc::new(Mutex::new(Inspect::default())),
             capture_frames: false,
+            arena: 0,
             warned_dropped: false,
             fault: None,
         }
@@ -271,6 +299,60 @@ impl DoomEnv {
     /// [`Inspect::frame`] for what it costs.
     pub fn capture_frames(&mut self, on: bool) {
         self.capture_frames = on;
+    }
+
+    /// Start every episode with `n` monsters around the player. See
+    /// [`DoomEnv::arena`].
+    pub fn set_arena(&mut self, n: usize) {
+        self.arena = n;
+    }
+
+    /// Place the episode's monsters, on open floor and in sight.
+    ///
+    /// Driven by the episode seed, so the arena is a property of the seed and
+    /// both players meet the same one - which is what makes the comparison a
+    /// comparison.
+    fn build_arena(&mut self, seed: u64) -> Result<(), String> {
+        let mut rng = Rng::new(seed ^ 0x0a4e_a000);
+        for i in 0..self.arena {
+            let c = self.state.clearance;
+            // Only directions with room, and never further than the room they
+            // have - a monster behind a wall is a monster neither player can
+            // reach and an episode that scores nothing.
+            let open: Vec<(i32, i32)> = ARENA_BEARINGS
+                .iter()
+                .map(|&b| {
+                    let room = match b {
+                        0 => c.ahead,
+                        -45 => c.ahead_left,
+                        45 => c.ahead_right,
+                        -90 => c.left,
+                        90 => c.right,
+                        _ => c.behind,
+                    };
+                    (b, room)
+                })
+                .filter(|&(_, room)| room >= 160)
+                .collect();
+            if open.is_empty() {
+                // Boxed in at the level's own start. Nothing to be done about
+                // it here, and reporting it beats spawning into a wall.
+                return Err(format!(
+                    "no open direction to place arena monster {} of {}",
+                    i + 1,
+                    self.arena
+                ));
+            }
+            let (bearing, room) = open[(rng.next_u64() % open.len() as u64) as usize];
+            let distance = 96 + (rng.next_u64() % (room - 96).max(1) as u64) as i32;
+            let kind = ARENA_MONSTERS[(rng.next_u64() % ARENA_MONSTERS.len() as u64) as usize];
+            self.doom.spawn(kind, distance, bearing).map_err(|e| format!("spawn: {e}"))?;
+        }
+        // One tic so the spawns are in the world before the first observation
+        // describes it.
+        let json = self.doom.step("[]", 1).map_err(|e| format!("{e}"))?;
+        self.state = State::parse(&json)?;
+        Ok(())
     }
 
     /// What the agent has done recently - the part of the observation the game
@@ -488,6 +570,12 @@ impl DoomEnv {
         self.visited.clear();
         self.commit = 0;
         self.commit_tag = None;
+        if self.arena > 0 {
+            if let Err(e) = self.build_arena(seed) {
+                self.fault = Some(e);
+                return String::new();
+            }
+        }
         self.opts = action::options(&self.state);
         self.publish(0, 0.0, Vec::new());
         obs::render(&self.state, self.history())
