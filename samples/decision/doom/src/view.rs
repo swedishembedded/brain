@@ -300,6 +300,15 @@ impl Viewer {
     /// Draw one decision. Returns false when the user asked to quit.
     pub fn tick(&mut self, inspect: &Arc<Mutex<Inspect>>) -> Result<bool, String> {
         let snapshot = inspect.lock().map_err(|_| "the inspector lock broke")?.clone();
+
+        // Recording gets every frame of the decision; the window and the PNG
+        // dump get the last, which is the state the decision ended in.
+        if self.recording && snapshot.frames.len() > 1 {
+            for f in &snapshot.frames[..snapshot.frames.len() - 1] {
+                draw_at(self.vp.canvas(), &snapshot, Some(f));
+                self.vp.present();
+            }
+        }
         draw(self.vp.canvas(), &snapshot);
 
         if let Some(dir) = &self.frame_dir {
@@ -364,17 +373,28 @@ impl Viewer {
 /// Pure: canvas in, canvas out, no window and no I/O, so the whole panel is
 /// exercised by a headless run and by the test at the bottom of this file.
 pub fn draw(c: &mut Canvas, i: &Inspect) {
+    draw_at(c, i, i.frames.last())
+}
+
+/// Lay out one decision, showing `frame` as the game.
+///
+/// Split from [`draw`] so a recording can walk the frames of ONE decision -
+/// the panel is the same for all of them, because they are all the same
+/// decision, and only the picture moves.
+pub fn draw_at(c: &mut Canvas, i: &Inspect, frame: Option<&crate::frame::Frame>) {
     c.clear(BG);
 
     // ---- the game ---------------------------------------------------------
-    let (fw, fh) = (i.frame.width.max(320), i.frame.height.max(200));
+    let empty = crate::frame::Frame::default();
+    let f = frame.unwrap_or(&empty);
+    let (fw, fh) = (f.width.max(320), f.height.max(200));
     let scale = Canvas::fit_scale(fw, fh, 660, 420);
     let (gw, gh) = (fw * scale, fh * scale);
-    if i.frame.is_empty() {
+    if f.is_empty() {
         c.fill(8, 8, gw, gh, [0, 0, 0]);
         c.text(16, 16, "NO FRAME CAPTURED", 2, DIM);
     } else {
-        c.blit_indexed(8, 8, &i.frame.pixels, fw, fh, &i.frame.palette, scale);
+        c.blit_indexed(8, 8, &f.pixels, fw, fh, &f.palette, scale);
     }
     c.outline(8, 8, gw, gh, [60, 60, 75]);
 
@@ -617,6 +637,7 @@ pub fn play(env: DoomEnv, args: &Args) -> Result<(), String> {
         .load()
         .map_err(|e| format!("{e}"))?;
     pipe.env_mut().capture_frames(viewer.wants_frames());
+    pipe.env_mut().frames_per_tic(args.smooth_video());
 
     let seeds: Vec<u64> = (0..args.play as u64).map(|i| 9_000_000 + i).collect();
     let mut timing = Timing::default();
@@ -636,6 +657,7 @@ pub fn play(env: DoomEnv, args: &Args) -> Result<(), String> {
 pub fn probe(mut env: DoomEnv, args: &Args) -> Result<(), String> {
     let mut viewer = Viewer::new(args)?;
     env.capture_frames(viewer.wants_frames());
+    env.frames_per_tic(args.smooth_video());
     env.start(args.seed());
 
     println!("doom: scripted probe, {} decisions", args.max_steps());

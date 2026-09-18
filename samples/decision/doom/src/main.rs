@@ -62,6 +62,7 @@ pub struct Args {
     pub mission: Mission,
     pub mix: bool,
     pub arena: usize,
+    pub curriculum: bool,
     pub eval_episodes: usize,
     pub play: usize,
     pub transcript: Option<String>,
@@ -77,6 +78,10 @@ impl Args {
     }
     pub fn head(&self) -> Option<&String> {
         self.train.head.as_ref()
+    }
+    /// Whether a run wants one frame per tic rather than per decision.
+    pub fn smooth_video(&self) -> bool {
+        self.record.is_some()
     }
     pub fn max_steps(&self) -> usize {
         self.train.max_steps
@@ -108,6 +113,10 @@ what to play
   --episode N --map N --skill 0..4      [1 1 2]
   --mission clear|speedrun|survive      [clear]
   --mix               sample a mission per episode, so the policy must read it
+  --curriculum        reverse curriculum: start each episode AT the exit and
+                      walk it further back as the policy keeps finishing. The
+                      exit reward has never once fired from the level's own
+                      start, and a reward that never fires trains nothing.
   --arena N           start each episode with N monsters around the player, on
                       open floor and in sight. 0 plays the level as it ships,
                       where an episode is spent leaving the spawn area and
@@ -187,6 +196,7 @@ fn parse_args() -> Result<Args, String> {
         mission,
         mix: args.take_flag("--mix"),
         arena: args.usize_or("--arena", 0),
+        curriculum: args.take_flag("--curriculum"),
         eval_episodes: args.usize_or("--eval-episodes", 24),
         play: args.usize_or("--play", 3),
         transcript: args.take_str("--transcript"),
@@ -232,6 +242,10 @@ fn run() -> Result<(), String> {
     println!("doom: engine up on port {}, lockstep", game.port);
     let mut env = DoomEnv::new(game, args.cfg.clone(), args.mission, args.mix);
     env.set_arena(args.arena);
+    env.set_curriculum(args.curriculum);
+    if args.curriculum {
+        println!("doom: reverse curriculum - episodes start at the exit and walk back");
+    }
     if args.arena > 0 {
         println!("doom: arena - {} monsters placed around the player each episode", args.arena);
     }

@@ -233,6 +233,13 @@ impl Doom {
         self.call("GET", "/api/frame", None)
     }
 
+    /// Move an object to a map position, relinking it so collision still
+    /// works. Used to place an episode's start, never by the agent.
+    pub fn teleport(&mut self, id: i64, x: f32, y: f32) -> std::io::Result<String> {
+        let body = format!("{{\"position\":{{\"x\":{x},\"y\":{y},\"z\":0}}}}");
+        self.call("PATCH", &format!("/api/world/objects/{id}"), Some(&body))
+    }
+
     /// Put a thing on the floor `distance` units away, `bearing` degrees
     /// clockwise from where the player is facing.
     pub fn spawn(&mut self, kind: &str, distance: i32, bearing: i32) -> std::io::Result<String> {

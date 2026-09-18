@@ -63,6 +63,8 @@ const MOVE_TICS: u32 = 6;
 /// Less floor than this is not somewhere to walk: the player is 32 units wide
 /// and covers about 40 in one decision, so under 64 is a step into a wall.
 const MIN_ROOM: i32 = 64;
+/// How far `use` reaches, in map units - DOOM's own USERANGE.
+const USE_RANGE: i32 = 64;
 
 fn json_turn(angle: i32) -> String {
     format!("{{\"type\":\"turn-to\",\"angle\":{}}}", angle.rem_euclid(360))
@@ -162,21 +164,39 @@ pub fn options(state: &State) -> Vec<Option_> {
 
     // --- the exit ---------------------------------------------------------
     //
-    // Offered only when there is somewhere to go. The exit is usually behind
-    // a wall, and an option that walks into it is worse than no option: it is
-    // the most attractive-looking thing on the list and it does nothing, which
-    // is exactly the trap the scripted player fell into for whole episodes.
-    if let Some(e) = state.exit.as_ref().filter(|e| e.clearance >= MIN_ROOM) {
+    // Offered when there is enough room to COVER THE DISTANCE, which is not
+    // the same as a fixed amount of room. Requiring MIN_ROOM unconditionally
+    // hid this option exactly when the player was standing next to the exit -
+    // 32 units away with 40 units of clearance - so an agent placed at the
+    // goal was not offered the goal.
+    if let Some(e) = state.exit.as_ref().filter(|e| e.clearance >= MIN_ROOM.min(e.distance)) {
         out.push(Option_ {
             text: format!(
                 "head for the level exit, {} units away, {}",
                 e.distance,
                 bearing_phrase(e.bearing)
             ),
-            commands: format!(
-                "[{},{{\"type\":\"forward\",\"amount\":8}}]",
-                json_turn(state.facing(e.bearing))
-            ),
+            // Turn onto it, then either press it or walk to it.
+            //
+            // `use` reaches 64 map units (DOOM's USERANGE), so inside that
+            // there is nothing to walk toward and walking is actively harmful:
+            // eight tics of forward carries the player straight past the
+            // switch, and the result is an agent that oscillates around the
+            // exit pressing at empty air. Measured before this: distances of
+            // 32, 34, 59, 94, 99, 78, 42, 19 on consecutive decisions, never
+            // triggering.
+            //
+            // Further out it walks AND presses, because whether this exit is a
+            // switch to press or a line to walk over is a property of the
+            // level, and doing both works on either.
+            commands: if e.distance <= USE_RANGE {
+                format!("[{},{{\"type\":\"use\"}}]", json_turn(state.facing(e.bearing)))
+            } else {
+                format!(
+                    "[{},{{\"type\":\"forward\",\"amount\":8}},{{\"type\":\"use\"}}]",
+                    json_turn(state.facing(e.bearing))
+                )
+            },
             tics: MOVE_TICS,
             tag: Tag::Exit,
             room: e.clearance,
@@ -228,8 +248,8 @@ mod tests {
         let base = format!(
             r#"{{"tic":1,"episodeTic":1,"level":{{"episode":1,"map":1,"skill":2,"tic":1,
             "kills":0,"totalKills":4,"items":0,"totalItems":3,"secrets":0,"totalSecrets":1}},
-            "player":{{"health":100,"armor":0,"x":0,"y":0,"angle":90,"weapon":"pistol",
-            "ammo":50,"keys":[]}},{json_patch},"events":[],"done":false,"outcome":"alive"}}"#
+            "player":{{"id":0,"health":100,"armor":0,"x":0,"y":0,"angle":90,
+            "weapon":"pistol","ammo":50,"keys":[]}},{json_patch},"events":[],"done":false,"outcome":"alive"}}"#
         );
         State::parse(&base).expect("test state parses")
     }

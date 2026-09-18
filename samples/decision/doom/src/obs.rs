@@ -84,6 +84,9 @@ pub struct Level {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Player {
+    /// The player's own map-object id, for addressing it on the object
+    /// endpoints. Never shown to the model.
+    pub id: i64,
     // x/y are not part of any decision - a policy navigating by coordinates
     // would be memorising one map - but they are how the environment notices
     // that it has stopped moving. See `DoomEnv::stuck`.
@@ -144,6 +147,20 @@ pub struct Exit {
     /// is usually behind a wall, and without this an agent cannot tell "walk
     /// that way" from "walk into that".
     pub clearance: i32,
+    /// A walkable place to stand to use this exit, when the engine found one.
+    ///
+    /// Never shown to the model - it is how a CURRICULUM places an episode
+    /// near the goal, which is a property of the experiment and not of the
+    /// situation the agent is deciding in.
+    pub spot: Option<Spot>,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Spot {
+    pub x: f32,
+    pub y: f32,
 }
 
 // `deny_unknown_fields` means every field the engine sends has to be named
@@ -379,11 +396,11 @@ mod tests {
 
     const SAMPLE: &str = r#"{"tic":100,"episodeTic":40,"level":{"episode":1,"map":1,"skill":2,
       "tic":40,"kills":1,"totalKills":4,"items":0,"totalItems":37,"secrets":0,"totalSecrets":3},
-      "player":{"health":80,"armor":0,"x":10,"y":20,"angle":90,"weapon":"pistol","ammo":42,
-      "keys":[]},"threats":[{"id":1,"type":"IMP","distance":150,"bearing":-12,"visible":true,
+      "player":{"id":0,"health":80,"armor":0,"x":10,"y":20,"angle":90,"weapon":"pistol",
+      "ammo":42,"keys":[]},"threats":[{"id":1,"type":"IMP","distance":150,"bearing":-12,"visible":true,
       "health":60,"targetingMe":true}],"hazards":[],"pickups":[],"clearance":{"ahead":320,
       "right":64,"behind":0,"left":128,"aheadRight":320,"aheadLeft":64},
-      "exit":{"distance":900,"bearing":30,"kind":"switch","clearance":128},"events":[{"tic":39,"type":"hurt",
+      "exit":{"distance":900,"bearing":30,"kind":"switch","clearance":128,"spot":null},"events":[{"tic":39,"type":"hurt",
       "what":null,"amount":15}],"done":false,"outcome":"alive"}"#;
 
     #[test]

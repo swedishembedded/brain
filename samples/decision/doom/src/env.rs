@@ -147,6 +147,16 @@ const CIRCLE_WINDOW: usize = 16;
 const CIRCLE_RADIUS: i32 = 160;
 /// Side of the patch of floor the exploration bonus counts visits to.
 const EXPLORE_CELL: i32 = 128;
+/// Episodes the curriculum judges before moving the start, the share of them
+/// that must have finished, and how much further back it then goes.
+const CURRICULUM_WINDOW: usize = 8;
+const CURRICULUM_ADVANCE: f32 = 0.6;
+const CURRICULUM_STEP: u32 = 2;
+/// Attempts to place an episode before giving up.
+const CURRICULUM_TRIES: usize = 5;
+/// How close the exit has to be before the scripted player simply takes it.
+/// Two decisions' worth of walking.
+const EXIT_TAKE_IT: i32 = 300;
 /// Decisions to hold one direction for once circling is detected. Long enough
 /// to clear the cycle's own diameter at the walking speed one decision buys.
 const COMMIT_STEPS: u32 = 8;
@@ -183,10 +193,15 @@ pub struct Inspect {
     pub stuck: u32,
     /// Reward per step for the episode so far, for the chart.
     pub history: Vec<f32>,
-    /// The game's own framebuffer, when frame capture is on. Empty otherwise -
-    /// fetching it costs a round trip and 85KB per step, which is most of a
-    /// training step, so it is only paid for when somebody is looking.
-    pub frame: Frame,
+    /// The game's framebuffer, one per TIC of the decision just taken, oldest
+    /// first. Empty when frame capture is off - it costs a round trip and 85KB
+    /// each, which is most of a training step, so it is only paid for when
+    /// somebody is looking.
+    ///
+    /// Per tic rather than per decision because a decision spans four to six
+    /// of them: keeping only the last throws away five sixths of the motion,
+    /// and a recording made from those looks like the player is teleporting.
+    pub frames: Vec<Frame>,
 }
 
 /// The monsters an arena episode draws from, weakest first.
@@ -246,6 +261,9 @@ pub struct DoomEnv {
     /// Fetch the framebuffer with every observation. Off unless something is
     /// drawing it.
     capture_frames: bool,
+    /// Fetch a frame for every tic rather than every decision. See
+    /// [`Inspect::frames`].
+    frames_per_tic: bool,
     /// Monsters to place around the player at the start of every episode.
     ///
     /// Zero plays the level as it ships. Above zero is a SCENARIO, which is
@@ -260,6 +278,27 @@ pub struct DoomEnv {
     /// cheat: the game, the actions, the reward and the opponent are
     /// unchanged, and both players face the identical arena on a given seed.
     arena: usize,
+    /// Reverse curriculum: start the episode near the exit and walk it back as
+    /// the policy succeeds.
+    ///
+    /// The problem it solves is not difficulty, it is SILENCE. Reaching the
+    /// exit of E1M1 from the level's own start pays once, several hundred
+    /// decisions later, and across four training runs it never happened even
+    /// once - so the exit reward contributed exactly nothing to any gradient
+    /// the policy ever took. A reward that never fires is not a hard reward,
+    /// it is an absent one.
+    ///
+    /// So the episode starts where the reward IS. Teleport to the exit, random
+    /// walk `back_steps` decisions away from it, and begin there. The policy
+    /// learns to finish from a spot it can reach, and the start retreats along
+    /// whatever path the walk happened to take as it keeps succeeding - which
+    /// is Florensa et al.'s reverse curriculum, and the standard answer to a
+    /// goal reward that never fires.
+    curriculum: bool,
+    /// How far back the start currently is, in decisions of random walk.
+    back_steps: u32,
+    /// Recent episode outcomes, for deciding when to move the start back.
+    recent_wins: std::collections::VecDeque<bool>,
     warned_dropped: bool,
     /// Set when the game itself failed (the process died, the socket broke).
     /// An environment that silently returns a terminal state on an I/O error
@@ -289,7 +328,11 @@ impl DoomEnv {
             episode: 0,
             inspect: Arc::new(Mutex::new(Inspect::default())),
             capture_frames: false,
+            frames_per_tic: false,
             arena: 0,
+            curriculum: false,
+            back_steps: 0,
+            recent_wins: std::collections::VecDeque::new(),
             warned_dropped: false,
             fault: None,
         }
@@ -301,8 +344,92 @@ impl DoomEnv {
         self.capture_frames = on;
     }
 
-    /// Start every episode with `n` monsters around the player. See
-    /// [`DoomEnv::arena`].
+    /// Keep a frame for every tic, not just the last of each decision. Costs a
+    /// round trip per tic; only worth it when recording.
+    pub fn frames_per_tic(&mut self, on: bool) {
+        self.frames_per_tic = on;
+    }
+
+    /// Turn the reverse curriculum on. See [`DoomEnv::curriculum`].
+    pub fn set_curriculum(&mut self, on: bool) {
+        self.curriculum = on;
+    }
+
+    /// How far back the curriculum has moved the start, in decisions.
+    pub fn back_steps(&self) -> u32 {
+        self.back_steps
+    }
+
+    /// Record how an episode ended and move the start back once the policy is
+    /// reliably finishing from where it is.
+    ///
+    /// Advanced on a WINDOW rather than a single success, because one win from
+    /// two decisions away is luck; and by a small step, because a start that
+    /// jumps past what the policy can do puts it back to the silent regime the
+    /// curriculum exists to escape.
+    fn note_outcome(&mut self, won: bool) {
+        if !self.curriculum {
+            return;
+        }
+        self.recent_wins.push_back(won);
+        if self.recent_wins.len() > CURRICULUM_WINDOW {
+            self.recent_wins.pop_front();
+        }
+        if self.recent_wins.len() < CURRICULUM_WINDOW {
+            return;
+        }
+        let wins = self.recent_wins.iter().filter(|w| **w).count();
+        if wins as f32 / self.recent_wins.len() as f32 >= CURRICULUM_ADVANCE {
+            self.back_steps += CURRICULUM_STEP;
+            self.recent_wins.clear();
+            println!(
+                "doom: curriculum - {wins}/{} finished, moving the start back to {} decisions",
+                CURRICULUM_WINDOW, self.back_steps
+            );
+        }
+    }
+
+    /// Place the episode at the exit, then walk it `back_steps` away.
+    ///
+    /// Returns whether the placement worked. A walk that ends the episode -
+    /// the player wanders back over the exit line, or falls somewhere lethal -
+    /// leaves the level unusable, so the caller restarts.
+    fn walk_back_from_exit(&mut self, seed: u64) -> Result<bool, String> {
+        let Some(spot) = self.state.exit.as_ref().and_then(|e| e.spot) else {
+            return Err("this level reports no walkable spot at its exit, so the curriculum \
+                        has nowhere to start from"
+                .into());
+        };
+        let id = self.state.player.id;
+        self.doom.teleport(id, spot.x, spot.y).map_err(|e| format!("teleport: {e}"))?;
+        let json = self.doom.step("[]", 1).map_err(|e| format!("{e}"))?;
+        self.state = State::parse(&json)?;
+
+        let mut rng = Rng::new(seed ^ 0xbac6_0000);
+        for _ in 0..self.back_steps {
+            let opts = action::options(&self.state);
+            // Only the options that GO somewhere: the walk is meant to cover
+            // ground away from the exit, and "shoot" or "press the wall" moves
+            // the start nowhere.
+            let moves: Vec<&Option_> = opts
+                .iter()
+                .filter(|o| matches!(o.tag, Tag::Advance | Tag::Explore | Tag::Retreat))
+                .collect();
+            let pick = match moves.len() {
+                0 => opts.first(),
+                n => Some(moves[(rng.next_u64() % n as u64) as usize]),
+            };
+            let Some(opt) = pick else { break };
+            let json = self.doom.step(&opt.commands, opt.tics).map_err(|e| format!("{e}"))?;
+            self.state = State::parse(&json)?;
+            if self.state.done {
+                // Wandered back out of the level. Start over rather than train
+                // on an episode that is already finished.
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
     pub fn set_arena(&mut self, n: usize) {
         self.arena = n;
     }
@@ -438,24 +565,28 @@ impl DoomEnv {
         (r, extrinsic)
     }
 
-    fn publish(&mut self, chosen: usize, reward: f32, probs: Vec<f32>) {
-        let frame = if self.capture_frames {
-            match self.doom.frame().map_err(|e| e.to_string()).and_then(|j| Frame::parse(&j)) {
-                Ok(f) => Some(f),
-                Err(e) => {
-                    // A frame nobody can draw is a display problem, never a
-                    // reason to end an episode - the policy is not reading it.
-                    eprintln!("doom: could not read the framebuffer: {e}");
-                    self.capture_frames = false;
-                    None
-                }
+    /// Fetch the framebuffer, or turn capture off if it cannot be read.
+    ///
+    /// A frame nobody can draw is a display problem and never a reason to end
+    /// an episode - the policy is not reading it.
+    fn grab_frame(&mut self) -> Option<Frame> {
+        if !self.capture_frames {
+            return None;
+        }
+        match self.doom.frame().map_err(|e| e.to_string()).and_then(|j| Frame::parse(&j)) {
+            Ok(f) => Some(f),
+            Err(e) => {
+                eprintln!("doom: could not read the framebuffer: {e}");
+                self.capture_frames = false;
+                None
             }
-        } else {
-            None
-        };
+        }
+    }
+
+    fn publish(&mut self, chosen: usize, reward: f32, probs: Vec<f32>, frames: Vec<Frame>) {
         if let Ok(mut i) = self.inspect.lock() {
-            if let Some(f) = frame {
-                i.frame = f;
+            if !frames.is_empty() {
+                i.frames = frames;
             }
             i.observation = obs::render(&self.state, self.history());
             i.options = self.opts.iter().map(|o| o.text.clone()).collect();
@@ -490,13 +621,44 @@ impl DoomEnv {
             self.fault = Some(format!("the policy chose option {action} of {}", self.opts.len()));
             return (0.0, true);
         };
-        let json = match self.doom.step(&opt.commands, opt.tics) {
-            Ok(j) => j,
-            Err(e) => {
-                self.fault = Some(format!("the game stopped answering: {e}"));
-                return (0.0, true);
+        // While recording, the step is run ONE TIC AT A TIME so every rendered
+        // frame can be kept. The engine's key handling is unchanged by the
+        // split - `forward` holds its key for a countdown of tics and the turn
+        // servo closes its angle per tic, both of which carry across separate
+        // step calls - so the game sees the same decision either way. It costs
+        // a round trip per tic and is only done when something is recording.
+        let mut frames = Vec::new();
+        let per_tic = self.capture_frames && self.frames_per_tic;
+        let json = if per_tic {
+            let mut last = String::new();
+            for t in 0..opt.tics {
+                let cmds = if t == 0 { opt.commands.as_str() } else { "[]" };
+                match self.doom.step(cmds, 1) {
+                    Ok(j) => last = j,
+                    Err(e) => {
+                        self.fault = Some(format!("the game stopped answering: {e}"));
+                        return (0.0, true);
+                    }
+                }
+                if let Some(f) = self.grab_frame() {
+                    frames.push(f);
+                }
+            }
+            last
+        } else {
+            match self.doom.step(&opt.commands, opt.tics) {
+                Ok(j) => j,
+                Err(e) => {
+                    self.fault = Some(format!("the game stopped answering: {e}"));
+                    return (0.0, true);
+                }
             }
         };
+        if !per_tic {
+            if let Some(f) = self.grab_frame() {
+                frames.push(f);
+            }
+        }
         match State::parse(&json) {
             Ok(s) => self.state = s,
             Err(e) => {
@@ -535,7 +697,11 @@ impl DoomEnv {
             self.exited = true;
         }
         self.opts = action::options(&self.state);
-        self.publish(action, r, probs);
+        self.publish(action, r, probs, frames);
+        if self.state.done {
+            let won = self.exited;
+            self.note_outcome(won);
+        }
         (r, self.state.done)
     }
 
@@ -570,6 +736,47 @@ impl DoomEnv {
         self.visited.clear();
         self.commit = 0;
         self.commit_tag = None;
+        if self.curriculum {
+            // A walk that wanders back over the exit leaves the level already
+            // finished; try again from a fresh level a few times before giving
+            // up, rather than training on it.
+            let mut placed = false;
+            for attempt in 0..CURRICULUM_TRIES {
+                match self.walk_back_from_exit(seed + attempt as u64 * 7919) {
+                    Ok(true) => {
+                        placed = true;
+                        break;
+                    }
+                    Ok(false) => {
+                        let json = match self.doom.reset(&self.cfg, seed) {
+                            Ok(j) => j,
+                            Err(e) => {
+                                self.fault = Some(format!("could not restart: {e}"));
+                                return String::new();
+                            }
+                        };
+                        match State::parse(&json) {
+                            Ok(st) => self.state = st,
+                            Err(e) => {
+                                self.fault = Some(e);
+                                return String::new();
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        self.fault = Some(e);
+                        return String::new();
+                    }
+                }
+            }
+            if !placed {
+                self.fault = Some(format!(
+                    "could not place an episode {} decisions back from the exit in {} tries",
+                    self.back_steps, CURRICULUM_TRIES
+                ));
+                return String::new();
+            }
+        }
         if self.arena > 0 {
             if let Err(e) = self.build_arena(seed) {
                 self.fault = Some(e);
@@ -577,7 +784,8 @@ impl DoomEnv {
             }
         }
         self.opts = action::options(&self.state);
-        self.publish(0, 0.0, Vec::new());
+        let frames = self.grab_frame().into_iter().collect();
+        self.publish(0, 0.0, Vec::new(), frames);
         obs::render(&self.state, self.history())
     }
 
@@ -609,6 +817,20 @@ impl DoomEnv {
     pub fn scripted(&mut self) -> Option<usize> {
         let by = |tag: Tag| self.opts.iter().position(|o| o.tag == tag);
         let hurt_badly = self.state.player.health < 40;
+
+        // The exit, when it is close enough to simply take.
+        //
+        // Ahead of everything else, because a player standing next to the way
+        // out should take it - and because the warm start clones this: a
+        // teacher that wanders off to collect a health potion it is standing
+        // on never demonstrates finishing a level, so the policy never sees
+        // one finished. Measured: placed 122 units from the exit switch, the
+        // earlier version spent its whole episode picking up items.
+        if let Some(i) = by(Tag::Exit) {
+            if self.state.exit.as_ref().is_some_and(|e| e.distance < EXIT_TAKE_IT) {
+                return Some(i);
+            }
+        }
 
         // Something in range and in sight: shoot it.
         if let Some(i) = by(Tag::Attack) {
@@ -735,8 +957,8 @@ impl Env for DoomEnv {
 /// unwrap.
 const EMPTY: &str = r#"{"tic":0,"episodeTic":0,"level":{"episode":0,"map":0,"skill":0,"tic":0,
   "kills":0,"totalKills":0,"items":0,"totalItems":0,"secrets":0,"totalSecrets":0},
-  "player":{"health":0,"armor":0,"x":null,"y":null,"angle":null,"weapon":null,"ammo":null,
-  "keys":[]},"threats":[],"hazards":[],"pickups":[],"clearance":{"ahead":0,"right":0,
+  "player":{"id":0,"health":0,"armor":0,"x":null,"y":null,"angle":null,"weapon":null,
+  "ammo":null,"keys":[]},"threats":[],"hazards":[],"pickups":[],"clearance":{"ahead":0,"right":0,
   "behind":0,"left":0,"aheadRight":0,"aheadLeft":0},"exit":null,"events":[],"done":false,
   "outcome":"alive"}"#;
 
