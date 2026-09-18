@@ -790,6 +790,16 @@ impl DoomEnv {
             }
         }
 
+        // A SHUT DOOR IS NOT A DECISION. The route goes through doors because
+        // a player opens them, so the only thing to do at one is open it -
+        // every other option leads away from the exit, and the movement
+        // options are scored on clearance, which a closed door reads as zero.
+        // Without this the teacher demonstrated walking into E1M1's first
+        // door for as long as the episode lasted.
+        if let Some(i) = by(Tag::Open) {
+            return Some(i);
+        }
+
         // STAYING ALIVE COMES FIRST, whatever the orders say.
         //
         // Without this the scripted player stands in the open trading shots

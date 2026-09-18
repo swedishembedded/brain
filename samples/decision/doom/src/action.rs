@@ -54,6 +54,8 @@ pub enum Tag {
     Explore,
     Retreat,
     Use,
+    /// Open the specific thing the route is blocked by.
+    Open,
     Exit,
 }
 
@@ -69,6 +71,13 @@ const MIN_ROOM: i32 = 64;
 const USE_RANGE: i32 = 64;
 /// Close enough to "facing it" that turning again would waste a decision.
 const FACING_TOL: i32 = 20;
+/// How long to stand still while a door rises.
+///
+/// A DOOM door opens at 2 units a tic, so a head-high one needs about thirty.
+/// Pressing use again before it is up re-triggers it and sends it back DOWN,
+/// which is what a follower did four times in a row at E1M1's first door while
+/// reporting the ceiling at 0, 42, 0, 42.
+const DOOR_TICS: u32 = 30;
 
 fn json_turn(angle: i32) -> String {
     format!("{{\"type\":\"turn-to\",\"angle\":{}}}", angle.rem_euclid(360))
@@ -247,6 +256,48 @@ pub fn options(state: &State) -> Vec<Option_> {
         });
     }
 
+    // --- the door on the route --------------------------------------------
+    //
+    // The route runs THROUGH shut doors, because a player opens them. So the
+    // engine saying "the way out starts 7 degrees to your right" and the
+    // player being unable to walk there is the normal state of affairs at
+    // every door in the game, and without an option aimed at the door the
+    // agent presses forward against it until the episode ends.
+    //
+    // Aimed, and in two phases, because `use` reaches 64 units in the
+    // direction the player is FACING: the untargeted option below is useless
+    // against a door off to one side, which is how a follower stood at
+    // E1M1's first door facing 74 degrees away from it.
+    if let Some(b) = state.exit.as_ref().and_then(|e| e.blocked_by.as_ref()) {
+        if b.kind == "door" && b.distance <= USE_RANGE {
+            if b.bearing.abs() > FACING_TOL {
+                out.push(Option_ {
+                    text: format!(
+                        "turn to face the shut door on the way out, {} units {}",
+                        b.distance,
+                        bearing_phrase(b.bearing)
+                    ),
+                    commands: format!("[{}]", json_turn(state.facing(b.bearing))),
+                    tics: FIGHT_TICS,
+                    tag: Tag::Open,
+                    room: 0,
+                });
+            } else {
+                out.push(Option_ {
+                    text: format!(
+                        "open the shut door blocking the way out, {} units {}",
+                        b.distance,
+                        bearing_phrase(b.bearing)
+                    ),
+                    commands: "[{\"type\":\"use\"}]".into(),
+                    tics: DOOR_TICS,
+                    tag: Tag::Open,
+                    room: 0,
+                });
+            }
+        }
+    }
+
     // --- open what is in the way ------------------------------------------
     //
     // Always offered. A door reads as "no clearance ahead", which is exactly
@@ -346,6 +397,32 @@ mod tests {
         // 90 + (-12): the turn is absolute because the engine's turn keys
         // cannot name a direction.
         assert!(attack.commands.contains("\"angle\":78"), "{}", attack.commands);
+    }
+
+    #[test]
+    fn a_shut_door_on_the_route_can_be_faced_and_then_opened() {
+        // The route runs THROUGH doors, so this is the state at every door in
+        // the game: a bearing to walk, and a body that cannot walk it. Both
+        // phases have to exist or the agent stands at the door pressing use
+        // into the wall beside it.
+        let walled = r#""threats":[],"hazards":[],"pickups":[],
+            "clearance":{"ahead":0,"right":0,"behind":0,"left":0,"aheadRight":0,"aheadLeft":0},
+            "exit":{"distance":900,"bearing":40,"kind":"switch","clearance":0,
+                    "pathDistance":1200,"routeBearing":40,"routeDistance":32,
+                    "routeClearance":0,
+                    "blockedBy":{"kind":"door","bearing":%B,"distance":24}}"#;
+
+        let aside = options(&state(&walled.replace("%B", "40")));
+        let turn = aside.iter().find(|o| o.tag == Tag::Open).expect("a way to face the door");
+        assert!(turn.commands.contains("turn-to"), "{}", turn.commands);
+        assert!(turn.text.contains("shut door"), "{}", turn.text);
+
+        let facing = options(&state(&walled.replace("%B", "3")));
+        let open = facing.iter().find(|o| o.tag == Tag::Open).expect("a way to open the door");
+        assert!(open.commands.contains("use"), "{}", open.commands);
+        // Long enough for the door to rise. Pressing use again while it is
+        // moving sends it back down.
+        assert!(open.tics >= DOOR_TICS, "{} tics", open.tics);
     }
 
     #[test]

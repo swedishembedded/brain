@@ -182,6 +182,24 @@ pub struct Exit {
     pub route_distance: Option<i32>,
     #[serde(rename = "routeClearance")]
     pub route_clearance: Option<i32>,
+    /// What stands between the player and the next step of the route.
+    ///
+    /// The route runs through shut doors on purpose, because a player opens
+    /// them - so "the way there starts left and the player cannot walk left"
+    /// is the normal state of affairs at every door in the game, not an error.
+    /// Without this the agent has a bearing and no idea why walking it does
+    /// nothing.
+    #[serde(rename = "blockedBy")]
+    pub blocked_by: Option<Blocker>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Blocker {
+    /// `door` when pressing use against it opens it, `wall` when it does not.
+    pub kind: String,
+    pub bearing: i32,
+    pub distance: i32,
 }
 
 #[allow(dead_code)]
@@ -404,6 +422,20 @@ pub fn render(state: &State, history: History) -> String {
                 side_word(e.bearing),
                 e.clearance
             )),
+        }
+        if let Some(b) = &e.blocked_by {
+            out.push_str(&match b.kind.as_str() {
+                "door" => format!(
+                    "A SHUT DOOR is in the way, {} units {} - open it.\n",
+                    b.distance,
+                    side_word(b.bearing)
+                ),
+                _ => format!(
+                    "A wall is in the way {} units {} - the route goes round it.\n",
+                    b.distance,
+                    side_word(b.bearing)
+                ),
+            });
         }
     }
 
