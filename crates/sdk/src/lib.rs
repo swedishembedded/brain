@@ -169,6 +169,13 @@ pub use gpu_core::devices::DeviceSpec as Device;
 /// `Pipeline::build_sized` takes (`model::dispatch::Precision`).
 #[cfg(feature = "resolve")]
 pub use model::dispatch::Precision as DType;
+/// How a pipeline builder may use the network to resolve a `model_id`.
+/// Re-exported, not reinvented: the SAME type `loader::supply::
+/// ensure_default_weights` already takes. See
+/// [`ImagePipelineBuilder::download_policy`] for the one builder that
+/// exposes it as a knob today.
+#[cfg(feature = "resolve")]
+pub use loader::DownloadPolicy;
 
 #[cfg(feature = "audio")]
 pub use asr::{Transcript, TranscribePipeline, TranscribePipelineBuilder};

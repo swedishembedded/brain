@@ -287,7 +287,13 @@ impl ImagePipeline {
     }
 
     pub fn builder(model_id: impl AsRef<str>) -> ImagePipelineBuilder {
-        ImagePipelineBuilder { model_id: model_id.as_ref().to_string(), device: Device::default(), dtype: DType::F32, size: None }
+        ImagePipelineBuilder {
+            model_id: model_id.as_ref().to_string(),
+            device: Device::default(),
+            dtype: DType::F32,
+            size: None,
+            download_policy: loader::DownloadPolicy::default(),
+        }
     }
 
     /// What this pipeline's backend can do, per action: the SAME static
@@ -467,6 +473,7 @@ pub struct ImagePipelineBuilder {
     device: Device,
     dtype: DType,
     size: Option<(u32, u32)>,
+    download_policy: loader::DownloadPolicy,
 }
 
 impl ImagePipelineBuilder {
@@ -477,6 +484,16 @@ impl ImagePipelineBuilder {
 
     pub fn dtype(mut self, dtype: DType) -> Self {
         self.dtype = dtype;
+        self
+    }
+
+    /// How [`ImagePipelineBuilder::load`]/[`ImagePipelineBuilder::load_with_progress`]
+    /// may use the network to resolve `model_id`. Defaults to
+    /// [`loader::DownloadPolicy::IfMissing`] -- see that type's own doc for
+    /// what each variant means; this crate does not reinvent the policy,
+    /// only exposes the knob `crates/loader` already defines.
+    pub fn download_policy(mut self, policy: loader::DownloadPolicy) -> Self {
+        self.download_policy = policy;
         self
     }
 
@@ -504,11 +521,11 @@ impl ImagePipelineBuilder {
     /// Resolve `model_id` and build a real [`ImagePipeline`].
     ///
     /// 1. [`Device`] is applied to this process (see [`crate::device::apply`]).
-    /// 2. `model_id` is parsed and, under `DownloadPolicy::IfMissing` (the
-    ///    one policy this milestone's builder offers -- see
-    ///    [`loader::DownloadPolicy`]'s own doc for the other two), fetched
-    ///    only when nothing local already resolves it: a checkpoint already
-    ///    on disk is never re-checked against the network.
+    /// 2. `model_id` is parsed and, under [`ImagePipelineBuilder::download_policy`]
+    ///    (default [`loader::DownloadPolicy::IfMissing`] -- see that type's
+    ///    own doc for what each variant does), fetched accordingly: never,
+    ///    under `Offline`; only when nothing local already resolves it,
+    ///    under `IfMissing`; or unconditionally, under `AlwaysCheck`.
     /// 3. [`resolve_arch`] tries `crates/loader`'s resolver against each
     ///    known image architecture's roles, with no role override stated --
     ///    the same resolver `brain flux2 generate` / `brain do z-image
@@ -565,7 +582,7 @@ impl ImagePipelineBuilder {
     /// crate does not otherwise require, for a capability every caller here
     /// already gets for free by supplying one only where it is used.
     pub fn load_with_progress(self, on_download: &mut dyn FnMut(&str, u64, Option<u64>), on_build: &mut dyn FnMut(&str)) -> Result<ImagePipeline> {
-        let ImagePipelineBuilder { model_id, device, dtype, size } = self;
+        let ImagePipelineBuilder { model_id, device, dtype, size, download_policy } = self;
 
         crate::device::apply(&device)?;
 
@@ -575,13 +592,30 @@ impl ImagePipelineBuilder {
         let store = brain_modelstore::Store::new(root);
         let hub = brain_modelstore::HfHub::new();
 
-        // DownloadPolicy::IfMissing: a reference that already resolves
-        // locally is never re-checked against the network at all, so
-        // `on_download` is simply never called in that (common, already-
-        // fetched) case.
-        if store.local(&reference).is_none() {
-            let plan = brain_modelstore::plan(&reference, &store, &hub)?;
-            loader::supply::execute_plan(&store, &hub, &plan, &model_id, on_download).map_err(Error::Download)?;
+        // Mirrors `loader::supply::ensure_default_weights_with`'s own
+        // per-variant match, the one other place this workspace already
+        // implements `DownloadPolicy` - not a second, independently-drifting
+        // reading of what each variant means.
+        match download_policy {
+            loader::DownloadPolicy::Offline => {
+                // Never touch the network: a reference not already local is
+                // left for `resolve_arch` below to report as `Missing`/
+                // `Ambiguous`, never a download attempt.
+            }
+            loader::DownloadPolicy::IfMissing => {
+                // A reference that already resolves locally is never
+                // re-checked against the network at all, so `on_download`
+                // is simply never called in that (common, already-fetched)
+                // case.
+                if store.local(&reference).is_none() {
+                    let plan = brain_modelstore::plan(&reference, &store, &hub)?;
+                    loader::supply::execute_plan(&store, &hub, &plan, &model_id, on_download).map_err(Error::Download)?;
+                }
+            }
+            loader::DownloadPolicy::AlwaysCheck => {
+                let plan = brain_modelstore::plan(&reference, &store, &hub)?;
+                loader::supply::execute_plan(&store, &hub, &plan, &model_id, on_download).map_err(Error::Download)?;
+            }
         }
 
         let overrides: BTreeMap<String, String> = BTreeMap::new();

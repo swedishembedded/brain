@@ -259,6 +259,34 @@ fn from_pretrained_names_every_missing_role_when_the_store_is_otherwise_empty() 
     }
 }
 
+/// `DownloadPolicy::Offline` never reaches the network, proven the same way
+/// `crates/modelstore/src/hub.rs`'s own tests prove `BRAIN_HUB_ENDPOINT`
+/// wins over the real `huggingface.co` default: point `HfHub` at a loopback
+/// port nothing listens on, then show a reference that resolves NEITHER
+/// locally nor from any real hub still comes back as the resolver's own
+/// clean `Error::Missing` rather than an `Error::Download` wrapping a
+/// connection failure -- the ONLY way `Missing` (not a connection error) can
+/// come back here is if `ImagePipelineBuilder::load`'s `Offline` arm never
+/// called `brain_modelstore::plan`/`execute_plan` at all. The default
+/// `DownloadPolicy::IfMissing` is deliberately NOT exercised against this
+/// same bogus endpoint here -- that would need a real connect-refused round
+/// trip to observe the contrast, which is exactly the network dependency
+/// this test exists to avoid.
+#[test]
+fn download_policy_offline_never_touches_the_network() {
+    let root = scratch_root("offline");
+    let _serial = brain_testutil::env_lock();
+    std::env::set_var("BRAIN_MODELS_DIR", &*root);
+    std::env::set_var("BRAIN_HUB_ENDPOINT", "http://127.0.0.1:1");
+
+    let err = brain::ImagePipeline::builder("nonexistent-vendor/nonexistent-repo").download_policy(brain::DownloadPolicy::Offline).load().unwrap_err();
+
+    std::env::remove_var("BRAIN_MODELS_DIR");
+    std::env::remove_var("BRAIN_HUB_ENDPOINT");
+
+    assert!(matches!(err, brain::Error::Missing(_)), "Offline must never attempt a fetch, got {err:?}");
+}
+
 /// The full facade path against a real local fixture, with no network
 /// access at any point: reference parses, `Store::local` resolves it (no
 /// fetch attempted), `loader::resolve_structured` finds exactly one

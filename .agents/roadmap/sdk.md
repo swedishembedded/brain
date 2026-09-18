@@ -115,12 +115,14 @@ for why.
       own CLI default is `int8`, not `fp32`) -- an embedder relying on this
       SDK's `DType::F32` default gets a different, heavier build than the
       CLI's own default for the same architecture.
-- [ ] `DownloadPolicy`: `ImagePipelineBuilder::load` hardcodes
-      `loader::DownloadPolicy::IfMissing` (fetch only when nothing local
-      resolves); there is no builder method to select `Offline` (refuse to
-      touch the network at all) or `AlwaysCheck` (always consult the hub
-      even when a local copy might already resolve), though `crates/loader`
-      already defines both.
+- [x] `DownloadPolicy` on `ImagePipeline`: done - see
+      `.agents/roadmap/sdk-design-sweep.md` Phase 6.3.
+      `ImagePipelineBuilder::download_policy(...)` now selects `Offline` or
+      `AlwaysCheck`, not only the hardcoded `IfMissing` default. Still open:
+      the same knob on the other resolve-based pipeline builders (depth,
+      embedding, restore, ground, tts, music, video, vlm, text, detect,
+      segment, upscale, asr, forecast) - a mechanical follow-up, each one
+      identical to `ImagePipelineBuilder`'s own three-arm match.
 - [ ] `resolve_arch`'s two-architecture tie-break: when a store resolves
       NEITHER flux2 nor s3dit, the reported `Error::Ambiguous`/
       `Error::Missing` prefers whichever architecture found real (if
