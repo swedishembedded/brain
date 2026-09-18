@@ -174,6 +174,13 @@ pub struct Exit {
     /// whose exit the engine could not route to.
     #[serde(rename = "pathDistance")]
     pub path_distance: Option<i32>,
+    /// What the route actually leads to: absent for the exit itself, or the
+    /// colour of the key the exit is locked behind.
+    ///
+    /// A level whose exit needs a key gives the agent two jobs in sequence.
+    /// The engine does the first one - it routes to the key - but calling a
+    /// key "the exit" would be a lie the agent has no way to catch.
+    pub goal: Option<String>,
     #[serde(rename = "routeBearing")]
     pub route_bearing: Option<i32>,
     /// How far the next waypoint on the route is. Part of the schema; the
@@ -408,12 +415,21 @@ pub fn render(state: &State, history: History) -> String {
         // points through walls, and an agent given both has to learn which of
         // two contradictory numbers to believe.
         match (e.path_distance, e.route_bearing) {
-            (Some(path), Some(bearing)) => out.push_str(&format!(
-                "The exit {} is {} units of walking away, and the way there starts {}.\n",
-                if e.kind == "switch" { "switch" } else { "line" },
-                path,
-                side_word(bearing)
-            )),
+            (Some(path), Some(bearing)) => out.push_str(&match &e.goal {
+                Some(key) => format!(
+                    "The way out is LOCKED and needs the {} key. The key is {} units of \
+                     walking away, and the way there starts {}.\n",
+                    key.to_uppercase(),
+                    path,
+                    side_word(bearing)
+                ),
+                None => format!(
+                    "The exit {} is {} units of walking away, and the way there starts {}.\n",
+                    if e.kind == "switch" { "switch" } else { "line" },
+                    path,
+                    side_word(bearing)
+                ),
+            }),
             _ => out.push_str(&format!(
                 "The exit {} is {} units away as the crow flies, {}, with {} units of clear \
                  floor that way.\n",

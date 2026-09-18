@@ -211,7 +211,31 @@ pub fn options(state: &State) -> Vec<Option_> {
         // is 13% of the way to the exit and then four hundred decisions going
         // nowhere. Facing first and moving second costs one extra decision at
         // each corner and actually gets round it.
-        if e.distance <= USE_RANGE {
+        // When the way out is locked, the option that matters is the KEY, and
+        // it is a different act from pressing a switch: you walk onto a key,
+        // you do not use it. Saying so in the option text is the whole point -
+        // the model reads what an option MEANS.
+        if let Some(key) = &e.goal {
+            let text = if bearing.abs() > FACING_TOL {
+                format!("turn toward the {} key that unlocks the way out, {away} units of \
+                         walking {}", key, bearing_phrase(bearing))
+            } else {
+                format!("go and get the {key} key that unlocks the way out, {away} units of \
+                         walking ahead")
+            };
+            let commands = if bearing.abs() > FACING_TOL {
+                format!("[{}]", json_turn(state.facing(bearing)))
+            } else {
+                "[{\"type\":\"forward\",\"amount\":8}]".into()
+            };
+            out.push(Option_ {
+                text,
+                commands,
+                tics: if bearing.abs() > FACING_TOL { FIGHT_TICS } else { walk_tics(away) },
+                tag: Tag::Exit,
+                room: e.route_clearance.unwrap_or(e.clearance),
+            });
+        } else if e.distance <= USE_RANGE {
             // Close enough to press. Face the exit ITSELF, not the route,
             // which has already delivered the player here.
             out.push(Option_ {
@@ -437,6 +461,26 @@ mod tests {
         // Long enough for the door to rise. Pressing use again while it is
         // moving sends it back down.
         assert!(open.tics >= DOOR_TICS, "{} tics", open.tics);
+    }
+
+    #[test]
+    fn a_locked_way_out_offers_the_key_and_not_the_exit() {
+        // A level whose exit needs a key gives the agent two jobs in sequence.
+        // The route does the first one, and the option has to SAY so - "head
+        // for the level exit" pointed at a keycard is a lie the model has no
+        // way to catch, and the whole claim here is that it reads what an
+        // option means.
+        let locked = r#""threats":[],"hazards":[],"pickups":[],
+            "clearance":{"ahead":320,"right":0,"behind":0,"left":0,"aheadRight":0,"aheadLeft":0},
+            "exit":{"distance":2688,"bearing":4,"kind":"switch","clearance":320,
+                    "pathDistance":2112,"goal":"red","routeBearing":6,
+                    "routeDistance":184,"routeClearance":320}"#;
+        let opts = options(&state(locked));
+        let way = opts.iter().find(|o| o.tag == Tag::Exit).expect("a way onward");
+        assert!(way.text.contains("red key"), "{}", way.text);
+        // You WALK ONTO a key. Pressing use on one does nothing.
+        assert!(way.commands.contains("forward"), "{}", way.commands);
+        assert!(!way.commands.contains("use"), "{}", way.commands);
     }
 
     #[test]
