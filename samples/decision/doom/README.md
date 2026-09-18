@@ -609,14 +609,24 @@ agent that looked broken while every probe reported open floor:
 With those fixed, from E1M1's own spawn, under `speedrun` orders:
 
 ```
-step  100  hp 107  kills 3/6  items 17  return +15.18  alive
-step  160  hp 107  kills 5/6  items 17  return +23.14  alive
-step  192  hp 107  kills 5/6  items 17  return +41.25  exited
+step  120  hp 101  kills 4/6  items 1  return +25.60  alive
+step  180  hp 101  kills 6/6  items 1  return +40.11  exited
 ```
 
-**192 decisions, five of six monsters dead, 107 health, level ended.** Three
-doors opened on the way. That is the scripted player - the bar the policy has
-to clear - and it is the first time it has existed at all.
+**180 decisions, all six monsters dead, 101 health, level ended.** Three doors
+opened on the way. That is the scripted player - the bar the policy has to
+clear - and it is the first time it has existed at all.
+
+Then the policy, warm-started on that and improved by PPO, from the same spawn:
+
+```
+policy: 1 episodes, return +37.75, 4.0 kills, 17.0 items, 1 exits, 0 deaths, 166 steps
+```
+
+One continuous episode, no curriculum, no arena, nothing placed near the goal.
+Over twelve scored episodes it finishes **6 of 12**, the same as the scripted
+player, while scoring 5.19 lower in return - so it has learned to finish the
+level and has not yet learned to do it better than the script.
 
 #### Where that leaves it
 
@@ -631,6 +641,7 @@ the experiment rather than in the model**:
 | 4 | arena start | **+0.78 return** over the scripted player |
 | 5 | reverse curriculum | **completes the level, 10 of 10 episodes** |
 | 6 | the route the teacher follows is fixed | **the scripted player finishes E1M1 from its own spawn** |
+| 7 | trained on that, from the spawn | **the policy finishes E1M1 from the spawn, 6 of 12; still behind on return** |
 
 Not one of those six changes was a hyperparameter. They were: a reward that
 paid for walking into walls, an observation missing the history the teacher
@@ -664,18 +675,22 @@ In the order the measurements point at, not in the order they are interesting:
 
 ## What is not claimed
 
-- **The run from E1M1's own spawn is the SCRIPTED player, not the policy.** It
-  starts where the level starts, kills five of six monsters, opens three doors
-  and ends the level in 192 decisions, in one continuous episode. That is the
-  bar, and it is what the recorded video shows. The trained policy finishes
-  from a curriculum start, and training one from the spawn now that a
-  demonstration of finishing exists is the next run, not a result.
-- **E1M2 and E1M3 cannot be routed at all**, and the engine says why: the
-  exit's own side of the level is 216 cells on one and 48 on the other, walled
-  off from everything the player can reach. A distance field over geometry
-  cannot cross a teleporter or a wall that a switch lowers, and that is what
-  those two exits are behind. Transfer to an unseen map is a fair question and
-  this is not yet a fair test of it.
+- **The policy finishes E1M1 from the spawn but does not beat the script.**
+  Six of twelve scored episodes end the level, which is what the scripted
+  player manages on the same twelve, and the policy is 5.19 behind on return.
+  Finishing is a result; winning is not one yet.
+- **E1M2 cannot be routed**, and E1M3 only recently could. E1M3's exit came out
+  unreachable because the grid was built with `P_CheckPosition`, which counts
+  the monsters standing in the level when it loads - several of its 74 start in
+  doorways, and each one was recorded as a wall for good. The grid describes
+  the level now and E1M3's exit is 76 cells from its spawn. E1M2's exit still
+  sits on a 229-cell island with no door, lift or switch bordering both sides
+  and plain wall in the nearest gap, and that one is not diagnosed.
+- **Nothing here opens a locked door.** The route crosses a keycard door as if
+  it were open, because to the geometry it is just a two-sided line. E1M3's
+  exit is behind the blue door and E1M2's behind the red one, so the route
+  leads the agent to a door it cannot open and does not say so. Keys are the
+  next thing this needs, not a tuning pass.
 - **The fighting policy and the finishing policy are different runs.** Nothing
   here yet trains one policy that does both.
 - The sentence encoder is frozen by default (`--train-encoder` to change it):
@@ -686,8 +701,9 @@ In the order the measurements point at, not in the order they are interesting:
   *read* the instruction rather than average over them is measured by scoring
   it per mission, which is what `eval --mission` does.
 - Only E1M1 is exercised end to end. `--map` accepts the rest of the shareware
-  episode and the scripted player explores them, but see the routing note
-  above: on E1M2 and E1M3 it is exploring, not heading anywhere.
+  episode; E1M3 now routes and the scripted player crosses it but cannot finish
+  it without the blue key, and on E1M2 it is exploring rather than heading
+  anywhere.
 
 ---
 
