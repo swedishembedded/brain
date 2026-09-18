@@ -115,14 +115,18 @@ for why.
       own CLI default is `int8`, not `fp32`) -- an embedder relying on this
       SDK's `DType::F32` default gets a different, heavier build than the
       CLI's own default for the same architecture.
-- [x] `DownloadPolicy` on `ImagePipeline`: done - see
-      `.agents/roadmap/sdk-design-sweep.md` Phase 6.3.
-      `ImagePipelineBuilder::download_policy(...)` now selects `Offline` or
-      `AlwaysCheck`, not only the hardcoded `IfMissing` default. Still open:
-      the same knob on the other resolve-based pipeline builders (depth,
-      embedding, restore, ground, tts, music, video, vlm, text, detect,
-      segment, upscale, asr, forecast) - a mechanical follow-up, each one
-      identical to `ImagePipelineBuilder`'s own three-arm match.
+- [x] `DownloadPolicy`: done - see `.agents/roadmap/sdk-design-sweep.md`
+      Phase 6.3/6.4. Every single-architecture pipeline builder
+      (`ImagePipeline`, depth, embedding, restore, ground, music, video, vlm,
+      text, detect, segment, upscale, asr) now has a `.download_policy(...)`
+      knob selecting `Offline`/`IfMissing`/`AlwaysCheck`, sharing one
+      `crate::resolve_policy::resolve_with_policy` implementation rather than
+      13 independent copies. Still open: the two TWO-architecture builders
+      (`TtsPipeline`'s qwen3tts/cosyvoice dispatch, `ForecastPipeline`'s
+      kronos/timesfm3 dispatch) - each would need its own tie-break-aware
+      policy match, the same "second generalization this milestone does not
+      need yet" `resolve_policy.rs`'s own module doc already names for
+      `ImagePipeline`'s flux2/s3dit dispatch.
 - [ ] `resolve_arch`'s two-architecture tie-break: when a store resolves
       NEITHER flux2 nor s3dit, the reported `Error::Ambiguous`/
       `Error::Missing` prefers whichever architecture found real (if

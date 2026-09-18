@@ -140,6 +140,8 @@ pub use conversion::{
 pub mod flow;
 pub use flow::{EvalReport, Flow, Stages, TrainReport};
 
+#[cfg(feature = "resolve")]
+mod resolve_policy;
 #[cfg(feature = "image")]
 mod restore;
 #[cfg(feature = "vision")]

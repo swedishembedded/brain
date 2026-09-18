@@ -177,3 +177,28 @@ fn a_local_checkpoint_declaring_a_different_architecture_is_refused_before_load_
         other => panic!("expected a clean Error::Backend naming the architecture mismatch, got {other:?}"),
     }
 }
+
+/// `DownloadPolicy::Offline` never reaches the network -- same proof shape
+/// as `crates/sdk/tests/image_pipeline.rs`'s own
+/// `download_policy_offline_never_touches_the_network`: point `HfHub` at a
+/// loopback port nothing listens on, and show a hub-shaped reference
+/// resolving neither locally nor from any real hub still comes back the
+/// resolver's own clean `Error::Missing`, never a connection-error-flavored
+/// `Error::Download`.
+#[test]
+fn download_policy_offline_never_touches_the_network() {
+    let _serial = brain_testutil::env_lock();
+    let root = std::env::temp_dir().join(format!("brain-sdk-text-pipeline-offline-{}", std::process::id()));
+    std::fs::remove_dir_all(&root).ok();
+    std::fs::create_dir_all(&root).unwrap();
+    std::env::set_var("BRAIN_MODELS_DIR", &root);
+    std::env::set_var("BRAIN_HUB_ENDPOINT", "http://127.0.0.1:1");
+
+    let err = brain::TextGenerationPipeline::builder("nonexistent-vendor/nonexistent-repo").download_policy(brain::DownloadPolicy::Offline).load().unwrap_err();
+
+    std::env::remove_var("BRAIN_MODELS_DIR");
+    std::env::remove_var("BRAIN_HUB_ENDPOINT");
+    std::fs::remove_dir_all(&root).ok();
+
+    assert!(matches!(err, brain::Error::Missing(_)), "Offline must never attempt a fetch, got {err:?}");
+}

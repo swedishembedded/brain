@@ -162,7 +162,7 @@ impl SegmentPipeline {
     }
 
     pub fn builder(model_id: impl AsRef<str>) -> SegmentPipelineBuilder {
-        SegmentPipelineBuilder { model_id: model_id.as_ref().to_string(), device: Device::default() }
+        SegmentPipelineBuilder { model_id: model_id.as_ref().to_string(), device: Device::default(), download_policy: loader::DownloadPolicy::default() }
     }
 
     /// The real, static `capability::Manifest` this session's action
@@ -199,6 +199,7 @@ impl SegmentPipeline {
 pub struct SegmentPipelineBuilder {
     model_id: String,
     device: Device,
+    download_policy: loader::DownloadPolicy,
 }
 
 impl SegmentPipelineBuilder {
@@ -207,41 +208,38 @@ impl SegmentPipelineBuilder {
         self
     }
 
+    /// How [`SegmentPipelineBuilder::load`] may use the network to resolve
+    /// `model_id`. Defaults to [`loader::DownloadPolicy::IfMissing`] -- see
+    /// that type's own doc for what each variant means.
+    pub fn download_policy(mut self, policy: loader::DownloadPolicy) -> Self {
+        self.download_policy = policy;
+        self
+    }
+
     /// Resolve `model_id` and build a real [`SegmentPipeline`].
     ///
     /// 1. [`Device`] is applied to this process (see [`crate::device::apply`]).
-    /// 2. `model_id` is parsed and, under `DownloadPolicy::IfMissing`,
-    ///    fetched only when nothing local already resolves it (mirrors every
-    ///    other pipeline in this crate).
-    /// 3. `crates/loader`'s resolver looks for `sam2::spec::Sam2Spec`'s one
-    ///    `"weights"` role, and derives `tiny`/`large` from the checkpoint's
-    ///    OWN trunk width (`sam2::spec`'s own doc) rather than trusting a
-    ///    separate claim.
-    /// 4. `sam2::caps::load` re-reads the SAME checkpoint at the resolved
+    /// 2. `crates/loader`'s resolver is tried FIRST against
+    ///    `sam2::spec::Sam2Spec`'s one `"weights"` role, and derives
+    ///    `tiny`/`large` from the checkpoint's OWN trunk width (`sam2::spec`'s
+    ///    own doc) rather than trusting a separate claim. Only on `Missing`
+    ///    does `model_id` get parsed and, under
+    ///    [`SegmentPipelineBuilder::download_policy`] (default
+    ///    [`loader::DownloadPolicy::IfMissing`]), fetched - then resolution
+    ///    is retried once. See [`crate::resolve_policy::resolve_with_policy`],
+    ///    shared by every pipeline builder that resolves this way - SAM 2.1
+    ///    has a working recipe, so unlike some siblings this reorder closes
+    ///    no live bug, only unifies every pipeline builder onto one resolve
+    ///    strategy.
+    /// 3. `sam2::caps::load` re-reads the SAME checkpoint at the resolved
     ///    variant's config and builds the model on a fresh [`gpu_core::Gpu`].
     pub fn load(self) -> Result<SegmentPipeline> {
-        let SegmentPipelineBuilder { model_id, device } = self;
+        let SegmentPipelineBuilder { model_id, device, download_policy } = self;
 
         crate::device::apply(&device)?;
 
-        let reference = brain_modelref::ModelRef::parse(&model_id).map_err(|e| Error::ModelNotFound(format!("{model_id}: {e}")))?;
-
-        let root = loader::model_dir::resolve(None).ok_or_else(|| Error::Backend("no models directory configured (set BRAIN_MODELS_DIR, or $HOME)".to_string()))?;
-        let store = brain_modelstore::Store::new(root);
-        let hub = brain_modelstore::HfHub::new();
-
-        if store.local(&reference).is_none() {
-            let plan = brain_modelstore::plan(&reference, &store, &hub)?;
-            loader::supply::execute_plan(&store, &hub, &plan, &model_id, &mut |_name, _got, _total| {}).map_err(Error::Download)?;
-        }
-
         let overrides: BTreeMap<String, String> = BTreeMap::new();
-        let outcome = loader::resolve_structured("sam2", &sam2::spec::Sam2Spec, &overrides).map_err(Error::Backend)?;
-        let assembly = match outcome {
-            brain_modelstore::resolve::Resolution::Resolved(a) => *a,
-            brain_modelstore::resolve::Resolution::Ambiguous(a) => return Err(Error::Ambiguous(a)),
-            brain_modelstore::resolve::Resolution::Missing(m) => return Err(Error::Missing(m)),
-        };
+        let assembly = crate::resolve_policy::resolve_with_policy("sam2", &sam2::spec::Sam2Spec, &model_id, &overrides, download_policy)?;
         let weights = assembly.roles.get("weights").ok_or_else(|| Error::Backend(format!("sam2: resolved assembly {:?} has no weights role", assembly.id)))?;
         let variant = assembly.variant.as_deref().ok_or_else(|| Error::Backend(format!("sam2: resolved assembly {:?} has no variant", assembly.id)))?;
 

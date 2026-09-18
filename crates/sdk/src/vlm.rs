@@ -163,6 +163,7 @@ impl VisionLanguagePipeline {
             device: Device::default(),
             max_pixels: qwen3vl::caps::DEFAULT_SERVE_MAX_PIXELS,
             precision: qwen3vl::caps::Precision::default(),
+            download_policy: loader::DownloadPolicy::default(),
         }
     }
 
@@ -230,6 +231,7 @@ pub struct VisionLanguagePipelineBuilder {
     device: Device,
     max_pixels: u32,
     precision: qwen3vl::caps::Precision,
+    download_policy: loader::DownloadPolicy,
 }
 
 impl VisionLanguagePipelineBuilder {
@@ -255,6 +257,14 @@ impl VisionLanguagePipelineBuilder {
         Ok(self)
     }
 
+    /// How [`VisionLanguagePipelineBuilder::load`] may use the network to
+    /// resolve `model_id`. Defaults to [`loader::DownloadPolicy::IfMissing`]
+    /// -- see that type's own doc for what each variant means.
+    pub fn download_policy(mut self, policy: loader::DownloadPolicy) -> Self {
+        self.download_policy = policy;
+        self
+    }
+
     /// Resolve `model_id` and build a real [`VisionLanguagePipeline`].
     ///
     /// 1. [`Device`] is applied to this process (see [`crate::device::apply`]).
@@ -270,41 +280,23 @@ impl VisionLanguagePipelineBuilder {
     ///    plain qwen3 decoder, would misread a multimodal `config.json` and
     ///    fail or (worse) attempt the wrong conversion.
     /// 3. Only when nothing resolves: `model_id` is fetched under
-    ///    `DownloadPolicy::IfMissing` (skipped if `Store::local` already
-    ///    recognizes it some other way), then resolution retries once.
+    ///    [`VisionLanguagePipelineBuilder::download_policy`] (default
+    ///    [`loader::DownloadPolicy::IfMissing`], skipped if `Store::local`
+    ///    already recognizes it some other way), then resolution retries
+    ///    once. See [`crate::resolve_policy::resolve_with_policy`], shared
+    ///    by every pipeline builder that resolves this way.
     /// 4. `qwen3vl::caps::Resident::load_on` builds the resident model at
     ///    this builder's `max_pixels`/`precision`, letting device placement
     ///    fall to whatever step 1 already narrowed the ambient selection to
     ///    (`gpu: None`) - the same pattern every other resolver-backed
     ///    pipeline in this crate uses.
     pub fn load(self) -> Result<VisionLanguagePipeline> {
-        use brain_modelstore::resolve::Resolution;
-
-        let VisionLanguagePipelineBuilder { model_id, device, max_pixels, precision } = self;
+        let VisionLanguagePipelineBuilder { model_id, device, max_pixels, precision, download_policy } = self;
 
         crate::device::apply(&device)?;
 
-        let reference = brain_modelref::ModelRef::parse(&model_id).map_err(|e| Error::ModelNotFound(format!("{model_id}: {e}")))?;
         let overrides: BTreeMap<String, String> = BTreeMap::new();
-
-        let assembly = match loader::resolve_structured("qwen3vl", &qwen3vl::spec::Qwen3VlSpec, &overrides).map_err(Error::Backend)? {
-            Resolution::Resolved(a) => *a,
-            Resolution::Ambiguous(a) => return Err(Error::Ambiguous(a)),
-            Resolution::Missing(_) => {
-                let root = loader::model_dir::resolve(None).ok_or_else(|| Error::Backend("no models directory configured (set BRAIN_MODELS_DIR, or $HOME)".to_string()))?;
-                let store = brain_modelstore::Store::new(root);
-                let hub = brain_modelstore::HfHub::new();
-                if store.local(&reference).is_none() {
-                    let plan = brain_modelstore::plan(&reference, &store, &hub)?;
-                    loader::supply::execute_plan(&store, &hub, &plan, &model_id, &mut |_name, _got, _total| {}).map_err(Error::Download)?;
-                }
-                match loader::resolve_structured("qwen3vl", &qwen3vl::spec::Qwen3VlSpec, &overrides).map_err(Error::Backend)? {
-                    Resolution::Resolved(a) => *a,
-                    Resolution::Ambiguous(a) => return Err(Error::Ambiguous(a)),
-                    Resolution::Missing(m) => return Err(Error::Missing(m)),
-                }
-            }
-        };
+        let assembly = crate::resolve_policy::resolve_with_policy("qwen3vl", &qwen3vl::spec::Qwen3VlSpec, &model_id, &overrides, download_policy)?;
 
         let weights = assembly.roles.get("weights").ok_or_else(|| Error::Backend(format!("qwen3vl: resolved assembly {:?} has no weights role", assembly.id)))?;
         let resident = qwen3vl::caps::Resident::load_on(&weights.to_string_lossy(), max_pixels, precision, None).map_err(Error::Backend)?;

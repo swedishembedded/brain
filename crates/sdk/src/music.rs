@@ -140,7 +140,7 @@ impl MusicPipeline {
     }
 
     pub fn builder(model_id: impl AsRef<str>) -> MusicPipelineBuilder {
-        MusicPipelineBuilder { model_id: model_id.as_ref().to_string(), device: Device::default() }
+        MusicPipelineBuilder { model_id: model_id.as_ref().to_string(), device: Device::default(), download_policy: loader::DownloadPolicy::default() }
     }
 
     /// The real, static `capability::Manifest` this session's action
@@ -171,11 +171,20 @@ impl MusicPipeline {
 pub struct MusicPipelineBuilder {
     model_id: String,
     device: Device,
+    download_policy: loader::DownloadPolicy,
 }
 
 impl MusicPipelineBuilder {
     pub fn device(mut self, device: Device) -> Self {
         self.device = device;
+        self
+    }
+
+    /// How [`MusicPipelineBuilder::load`] may use the network to resolve
+    /// `model_id`. Defaults to [`loader::DownloadPolicy::IfMissing`] -- see
+    /// that type's own doc for what each variant means.
+    pub fn download_policy(mut self, policy: loader::DownloadPolicy) -> Self {
+        self.download_policy = policy;
         self
     }
 
@@ -194,38 +203,22 @@ impl MusicPipelineBuilder {
     ///    bare `model.brain.safetensors`" shapes - and a real MiniMax Music 3
     ///    release's own multi-directory layout satisfies neither.
     /// 3. Only on `Missing` does `model_id` get parsed and, under
-    ///    `DownloadPolicy::IfMissing`, fetched - then resolution is retried
-    ///    once.
+    ///    [`MusicPipelineBuilder::download_policy`] (default
+    ///    [`loader::DownloadPolicy::IfMissing`]), fetched - then resolution
+    ///    is retried once. See [`crate::resolve_policy::resolve_with_policy`],
+    ///    shared by every pipeline builder that resolves this way.
     /// 4. [`minimaxmusic3::generate::Paths::from_assembly`] builds the
     ///    concrete per-role directories; nothing loads until the first
     ///    `.generate()` (`minimaxmusic3::caps`'s own module doc - this
     ///    provider is stateless, four of the five components' host weights
     ///    warm in `minimaxmusic3::weightcache` on first use instead).
     pub fn load(self) -> Result<MusicPipeline> {
-        let MusicPipelineBuilder { model_id, device } = self;
+        let MusicPipelineBuilder { model_id, device, download_policy } = self;
 
         crate::device::apply(&device)?;
 
-        let reference = brain_modelref::ModelRef::parse(&model_id).map_err(|e| Error::ModelNotFound(format!("{model_id}: {e}")))?;
         let overrides: BTreeMap<String, String> = BTreeMap::new();
-        let assembly = match loader::resolve_structured("minimaxmusic3", &minimaxmusic3::spec::MinimaxMusic3Spec, &overrides).map_err(Error::Backend)? {
-            brain_modelstore::resolve::Resolution::Resolved(a) => *a,
-            brain_modelstore::resolve::Resolution::Ambiguous(a) => return Err(Error::Ambiguous(a)),
-            brain_modelstore::resolve::Resolution::Missing(_) => {
-                let root = loader::model_dir::resolve(None).ok_or_else(|| Error::Backend("no models directory configured (set BRAIN_MODELS_DIR, or $HOME)".to_string()))?;
-                let store = brain_modelstore::Store::new(root);
-                let hub = brain_modelstore::HfHub::new();
-                if store.local(&reference).is_none() {
-                    let plan = brain_modelstore::plan(&reference, &store, &hub)?;
-                    loader::supply::execute_plan(&store, &hub, &plan, &model_id, &mut |_name, _got, _total| {}).map_err(Error::Download)?;
-                }
-                match loader::resolve_structured("minimaxmusic3", &minimaxmusic3::spec::MinimaxMusic3Spec, &overrides).map_err(Error::Backend)? {
-                    brain_modelstore::resolve::Resolution::Resolved(a) => *a,
-                    brain_modelstore::resolve::Resolution::Ambiguous(a) => return Err(Error::Ambiguous(a)),
-                    brain_modelstore::resolve::Resolution::Missing(m) => return Err(Error::Missing(m)),
-                }
-            }
-        };
+        let assembly = crate::resolve_policy::resolve_with_policy("minimaxmusic3", &minimaxmusic3::spec::MinimaxMusic3Spec, &model_id, &overrides, download_policy)?;
 
         let paths = minimaxmusic3::generate::Paths::from_assembly(&assembly).map_err(Error::Backend)?;
 

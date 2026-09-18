@@ -204,7 +204,7 @@ impl VideoPipeline {
     }
 
     pub fn builder(model_id: impl AsRef<str>) -> VideoPipelineBuilder {
-        VideoPipelineBuilder { model_id: model_id.as_ref().to_string(), device: Device::default() }
+        VideoPipelineBuilder { model_id: model_id.as_ref().to_string(), device: Device::default(), download_policy: loader::DownloadPolicy::default() }
     }
 
     /// The real, static `capability::Manifest` this session's action
@@ -235,11 +235,20 @@ impl VideoPipeline {
 pub struct VideoPipelineBuilder {
     model_id: String,
     device: Device,
+    download_policy: loader::DownloadPolicy,
 }
 
 impl VideoPipelineBuilder {
     pub fn device(mut self, device: Device) -> Self {
         self.device = device;
+        self
+    }
+
+    /// How [`VideoPipelineBuilder::load`] may use the network to resolve
+    /// `model_id`. Defaults to [`loader::DownloadPolicy::IfMissing`] -- see
+    /// that type's own doc for what each variant means.
+    pub fn download_policy(mut self, policy: loader::DownloadPolicy) -> Self {
+        self.download_policy = policy;
         self
     }
 
@@ -261,42 +270,23 @@ impl VideoPipelineBuilder {
     ///    named DiT safetensors shard) satisfy NEITHER, so `Store::local`
     ///    would otherwise never recognize even an already-downloaded release.
     /// 3. Only on `Missing` does `model_id` get parsed and, under
-    ///    `DownloadPolicy::IfMissing`, fetched (mirrors every other pipeline
-    ///    in this crate) - then resolution is retried once.
+    ///    [`VideoPipelineBuilder::download_policy`] (default
+    ///    [`loader::DownloadPolicy::IfMissing`]), fetched (mirrors every
+    ///    other pipeline in this crate) - then resolution is retried once.
+    ///    See [`crate::resolve_policy::resolve_with_policy`], shared by
+    ///    every pipeline builder that resolves this way.
     /// 4. The resolved variant is derived from the `dit`'s own tensor
     ///    shapes and [`wan::pipeline::Paths::from_assembly`] builds the
     ///    concrete per-file paths; the DiT itself loads lazily on the first
     ///    `.generate()` (`wan::caps`'s own module doc - "only `WanProvider`
     ///    (execution) loads anything").
     pub fn load(self) -> Result<VideoPipeline> {
-        let VideoPipelineBuilder { model_id, device } = self;
+        let VideoPipelineBuilder { model_id, device, download_policy } = self;
 
         crate::device::apply(&device)?;
 
-        // Parsed unconditionally, before ever trying to resolve: a
-        // malformed `model_id` must fail the same way regardless of what
-        // happens to already be resolvable in the store (mirrors
-        // `crate::tts::TtsPipelineBuilder::load`'s own ordering).
-        let reference = brain_modelref::ModelRef::parse(&model_id).map_err(|e| Error::ModelNotFound(format!("{model_id}: {e}")))?;
         let overrides: BTreeMap<String, String> = BTreeMap::new();
-        let assembly = match loader::resolve_structured("wan", &wan::spec::WanSpec, &overrides).map_err(Error::Backend)? {
-            brain_modelstore::resolve::Resolution::Resolved(a) => *a,
-            brain_modelstore::resolve::Resolution::Ambiguous(a) => return Err(Error::Ambiguous(a)),
-            brain_modelstore::resolve::Resolution::Missing(_) => {
-                let root = loader::model_dir::resolve(None).ok_or_else(|| Error::Backend("no models directory configured (set BRAIN_MODELS_DIR, or $HOME)".to_string()))?;
-                let store = brain_modelstore::Store::new(root);
-                let hub = brain_modelstore::HfHub::new();
-                if store.local(&reference).is_none() {
-                    let plan = brain_modelstore::plan(&reference, &store, &hub)?;
-                    loader::supply::execute_plan(&store, &hub, &plan, &model_id, &mut |_name, _got, _total| {}).map_err(Error::Download)?;
-                }
-                match loader::resolve_structured("wan", &wan::spec::WanSpec, &overrides).map_err(Error::Backend)? {
-                    brain_modelstore::resolve::Resolution::Resolved(a) => *a,
-                    brain_modelstore::resolve::Resolution::Ambiguous(a) => return Err(Error::Ambiguous(a)),
-                    brain_modelstore::resolve::Resolution::Missing(m) => return Err(Error::Missing(m)),
-                }
-            }
-        };
+        let assembly = crate::resolve_policy::resolve_with_policy("wan", &wan::spec::WanSpec, &model_id, &overrides, download_policy)?;
 
         let variant = assembly.variant.as_deref().ok_or_else(|| Error::Backend(format!("wan: resolved assembly {:?} names no variant", assembly.id)))?;
         let cfg = wan::caps::config_from_name(variant).map_err(Error::Backend)?;

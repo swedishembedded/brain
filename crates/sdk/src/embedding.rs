@@ -100,7 +100,7 @@ impl EmbeddingPipeline {
     }
 
     pub fn builder(model_id: impl AsRef<str>) -> EmbeddingPipelineBuilder {
-        EmbeddingPipelineBuilder { model_id: model_id.as_ref().to_string(), device: Device::default(), tower: DEFAULT_TOWER.to_string() }
+        EmbeddingPipelineBuilder { model_id: model_id.as_ref().to_string(), device: Device::default(), tower: DEFAULT_TOWER.to_string(), download_policy: loader::DownloadPolicy::default() }
     }
 
     /// Embed one string.
@@ -133,15 +133,9 @@ enum ResolvedArch {
     Clip(capability::Assembly),
 }
 
-fn resolve_arch(overrides: &BTreeMap<String, String>) -> Result<ResolvedArch> {
-    use brain_modelstore::resolve::Resolution;
-
-    let outcome = loader::resolve_structured("clip", &clip::spec::ClipSpec, overrides).map_err(Error::Backend)?;
-    match outcome {
-        Resolution::Resolved(a) => Ok(ResolvedArch::Clip(*a)),
-        Resolution::Ambiguous(a) => Err(Error::Ambiguous(a)),
-        Resolution::Missing(m) => Err(Error::Missing(m)),
-    }
+fn resolve_arch(overrides: &BTreeMap<String, String>, model_id: &str, download_policy: loader::DownloadPolicy) -> Result<ResolvedArch> {
+    let assembly = crate::resolve_policy::resolve_with_policy("clip", &clip::spec::ClipSpec, model_id, overrides, download_policy)?;
+    Ok(ResolvedArch::Clip(assembly))
 }
 
 /// Builds an [`EmbeddingPipeline`]. `.device(...)`/`.tower(...)` are the
@@ -150,6 +144,7 @@ pub struct EmbeddingPipelineBuilder {
     model_id: String,
     device: Device,
     tower: String,
+    download_policy: loader::DownloadPolicy,
 }
 
 impl EmbeddingPipelineBuilder {
@@ -163,6 +158,14 @@ impl EmbeddingPipelineBuilder {
     /// is fixed per pipeline rather than a per-call choice.
     pub fn tower(mut self, tower: impl Into<String>) -> Self {
         self.tower = tower.into();
+        self
+    }
+
+    /// How [`EmbeddingPipelineBuilder::load`] may use the network to resolve
+    /// `model_id`. Defaults to [`loader::DownloadPolicy::IfMissing`] -- see
+    /// that type's own doc for what each variant means.
+    pub fn download_policy(mut self, policy: loader::DownloadPolicy) -> Self {
+        self.download_policy = policy;
         self
     }
 
@@ -187,33 +190,21 @@ impl EmbeddingPipelineBuilder {
     ///    repo")` against a real local fixture with no network access at
     ///    all).
     /// 3. Only on `Missing` does `model_id` get parsed and, under
-    ///    `DownloadPolicy::IfMissing`, fetched - then resolution is retried
-    ///    once.
+    ///    [`EmbeddingPipelineBuilder::download_policy`] (default
+    ///    [`loader::DownloadPolicy::IfMissing`]), fetched - then resolution
+    ///    is retried once. See [`crate::resolve_policy::resolve_with_policy`],
+    ///    shared by every pipeline builder that resolves this way.
     /// 4. `clip::caps::Session::load` opens the resolved directory's
     ///    tokenizer(s); the text tower itself builds lazily, on first
     ///    [`EmbeddingPipeline::embed`]/[`EmbeddingPipeline::embed_batch`]
     ///    call (`Session`'s own design - see that type's doc).
     pub fn load(self) -> Result<EmbeddingPipeline> {
-        let EmbeddingPipelineBuilder { model_id, device, tower } = self;
+        let EmbeddingPipelineBuilder { model_id, device, tower, download_policy } = self;
 
         crate::device::apply(&device)?;
 
-        let reference = brain_modelref::ModelRef::parse(&model_id).map_err(|e| Error::ModelNotFound(format!("{model_id}: {e}")))?;
         let overrides: BTreeMap<String, String> = BTreeMap::new();
-        let ResolvedArch::Clip(assembly) = match resolve_arch(&overrides) {
-            Ok(arch) => arch,
-            Err(Error::Missing(_)) => {
-                let root = loader::model_dir::resolve(None).ok_or_else(|| Error::Backend("no models directory configured (set BRAIN_MODELS_DIR, or $HOME)".to_string()))?;
-                let store = brain_modelstore::Store::new(root);
-                let hub = brain_modelstore::HfHub::new();
-                if store.local(&reference).is_none() {
-                    let plan = brain_modelstore::plan(&reference, &store, &hub)?;
-                    loader::supply::execute_plan(&store, &hub, &plan, &model_id, &mut |_name, _got, _total| {}).map_err(Error::Download)?;
-                }
-                resolve_arch(&overrides)?
-            }
-            Err(e) => return Err(e),
-        };
+        let ResolvedArch::Clip(assembly) = resolve_arch(&overrides, &model_id, download_policy)?;
         let dir = assembly.roles.get("towers").ok_or_else(|| Error::Backend(format!("clip: resolved assembly {:?} has no towers role", assembly.id)))?;
 
         let gpu = gpu_core::Gpu::new(clip::model::TEXT_PIPELINES);

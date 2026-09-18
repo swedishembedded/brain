@@ -192,7 +192,13 @@ impl TextGenerationPipeline {
     }
 
     pub fn builder(weights_path: impl AsRef<str>) -> TextGenerationPipelineBuilder {
-        TextGenerationPipelineBuilder { weights: weights_path.as_ref().to_string(), tokenizer: None, device: Device::default(), capacity: DEFAULT_CAPACITY }
+        TextGenerationPipelineBuilder {
+            weights: weights_path.as_ref().to_string(),
+            tokenizer: None,
+            device: Device::default(),
+            capacity: DEFAULT_CAPACITY,
+            download_policy: loader::DownloadPolicy::default(),
+        }
     }
 
     /// Generate one completion from `prompt`, at every default
@@ -257,6 +263,7 @@ pub struct TextGenerationPipelineBuilder {
     tokenizer: Option<String>,
     device: Device,
     capacity: u32,
+    download_policy: loader::DownloadPolicy,
 }
 
 impl TextGenerationPipelineBuilder {
@@ -280,6 +287,15 @@ impl TextGenerationPipelineBuilder {
     /// fixed at build time rather than resized per call.
     pub fn capacity(mut self, capacity: u32) -> Self {
         self.capacity = capacity;
+        self
+    }
+
+    /// How [`TextGenerationPipelineBuilder::load`] may use the network to
+    /// resolve a hub-id `weights_path` (unused for a literal local path).
+    /// Defaults to [`loader::DownloadPolicy::IfMissing`] -- see that type's
+    /// own doc for what each variant means.
+    pub fn download_policy(mut self, policy: loader::DownloadPolicy) -> Self {
+        self.download_policy = policy;
         self
     }
 
@@ -307,7 +323,7 @@ impl TextGenerationPipelineBuilder {
     ///    budget (within whatever step 1 already narrowed the ambient
     ///    selection to) and builds the inference-only model.
     pub fn load(self) -> Result<TextGenerationPipeline> {
-        let TextGenerationPipelineBuilder { weights, tokenizer, device, capacity } = self;
+        let TextGenerationPipelineBuilder { weights, tokenizer, device, capacity, download_policy } = self;
 
         crate::device::apply(&device)?;
 
@@ -315,7 +331,7 @@ impl TextGenerationPipelineBuilder {
             check_local_weights_architecture(&weights)?;
             (weights, None)
         } else {
-            resolve_hub_weights(&weights)?
+            resolve_hub_weights(&weights, download_policy)?
         };
 
         let reader = checkpoint::weightio::WeightReader::open(&weights).map_err(|e| Error::Backend(format!("qwen3: {weights}: {e}")))?;
@@ -388,31 +404,14 @@ fn check_local_weights_architecture(weights: &str) -> Result<()> {
 /// already-downloaded release and `plan()` would fall through to
 /// `TransformersRecipe`'s catch-all, which does not know how to read a bare
 /// GGUF's `config.json` (it doesn't have one) and fails outright.
-fn resolve_hub_weights(model_id: &str) -> Result<(String, Option<String>)> {
-    use brain_modelstore::resolve::Resolution;
-
-    let reference = brain_modelref::ModelRef::parse(model_id)
-        .map_err(|e| Error::ModelNotFound(format!("{model_id}: not an existing local file, and not a valid <vendor>/<repo> hub reference either ({e})")))?;
+/// `model_id` named neither an existing local file (the caller's own check,
+/// before this is reached) nor resolves as a hub id: [`Error::ModelNotFound`]
+/// from [`crate::resolve_policy::resolve_with_policy`]'s own `ModelRef::parse`
+/// already names `model_id` and the parse failure, so this does not add a
+/// second, redundant "not a valid reference" wrapper around it.
+fn resolve_hub_weights(model_id: &str, download_policy: loader::DownloadPolicy) -> Result<(String, Option<String>)> {
     let overrides: BTreeMap<String, String> = BTreeMap::new();
-
-    let assembly = match loader::resolve_structured("qwen3", &qwen3::spec::Qwen3Spec, &overrides).map_err(Error::Backend)? {
-        Resolution::Resolved(a) => *a,
-        Resolution::Ambiguous(a) => return Err(Error::Ambiguous(a)),
-        Resolution::Missing(_) => {
-            let root = loader::model_dir::resolve(None).ok_or_else(|| Error::Backend("no models directory configured (set BRAIN_MODELS_DIR, or $HOME)".to_string()))?;
-            let store = brain_modelstore::Store::new(root);
-            let hub = brain_modelstore::HfHub::new();
-            if store.local(&reference).is_none() {
-                let plan = brain_modelstore::plan(&reference, &store, &hub)?;
-                loader::supply::execute_plan(&store, &hub, &plan, model_id, &mut |_name, _got, _total| {}).map_err(Error::Download)?;
-            }
-            match loader::resolve_structured("qwen3", &qwen3::spec::Qwen3Spec, &overrides).map_err(Error::Backend)? {
-                Resolution::Resolved(a) => *a,
-                Resolution::Ambiguous(a) => return Err(Error::Ambiguous(a)),
-                Resolution::Missing(m) => return Err(Error::Missing(m)),
-            }
-        }
-    };
+    let assembly = crate::resolve_policy::resolve_with_policy("qwen3", &qwen3::spec::Qwen3Spec, model_id, &overrides, download_policy)?;
 
     let weights = assembly.roles.get("weights").ok_or_else(|| Error::Backend(format!("qwen3: resolved assembly {:?} has no weights role", assembly.id)))?;
     if !weights.exists() {
