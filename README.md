@@ -164,8 +164,6 @@ $ brain codeformer restore_face --w 1.0 --in image=degraded.png --out image=rest
 $ brain arcface embed --align false --in image=restored.png --out embedding=restored.bin
 ```
 
-![four faces side by side: the original, a 96px JPEG-crushed copy, and two CodeFormer restorations at w=0.0 and w=1.0, each labelled with its ArcFace cosine to the original identity](docs/quickstart/img/face-restore.jpg)
-
 CodeFormer's fidelity dial `w` trades restored *quality* against fidelity to
 the input pixels, and ArcFace measures exactly that trade:
 
@@ -267,8 +265,6 @@ forward + assembly: 99.2s, 812224 gaussians
 $ brain splat render scene/scene.ply --eye 0.53,-0.28,0.12 --target 0.02,-0.03,1.02 --out view.ppm
 scene/scene.ply: 812224 gaussians -> view.ppm (640x480, tiled, 1496463 isects, 195 ms)
 ```
-
-![top row: four photographs of a pair of headphones on a desk from different angles; bottom row: four rendered views of the reconstructed 3D scene from viewpoints between the recovered cameras](docs/quickstart/img/worldmirror2-headphones.jpg)
 
 The bottom row is rendered from camera positions **between** the ones the model
 recovered, so none of them is a photograph played back. It is sharp where the
