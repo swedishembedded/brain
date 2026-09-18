@@ -399,6 +399,7 @@ dependencies = [
  "brain-sam2",
  "brain-testutil",
  "brain-timesfm3",
+ "brain-viewport",
  "brain-wan",
  "brain-wm-display",
  "brain-yolov8",
@@ -2353,6 +2354,15 @@ dependencies = [
  "brain-model",
  "brain-testutil",
  "serde_json",
+]
+
+[[package]]
+name = "brain-viewport"
+version = "1.1.0"
+dependencies = [
+ "brain-imaging",
+ "brain-testutil",
+ "brain-wm-display",
 ]
 
 [[package]]
@@ -5306,6 +5316,15 @@ name = "sample-decision-arena"
 version = "1.1.0"
 dependencies = [
  "brain",
+]
+
+[[package]]
+name = "sample-decision-doom"
+version = "1.1.0"
+dependencies = [
+ "brain",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -71,6 +71,12 @@
 //! over its own model stack, you can procure our services by sending an
 //! email to info@swedishembedded.com.
 
+/// A window and a canvas for a sample application - see [`viewport`]. Not a
+/// model surface: it is how a run SHOWS what it is doing, on a desk or as a
+/// PNG from a machine with no display.
+#[cfg(feature = "viewport")]
+pub use viewport;
+
 #[cfg(feature = "audio")]
 mod asr;
 #[cfg(feature = "creature")]

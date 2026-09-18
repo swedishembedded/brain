@@ -16,11 +16,13 @@ OpenCLIP-bigG (two text towers) with an EVA-CLIP image tower.
 
 ## Getting the weights
 
-Model id: `brain/clip`. Set `BRAIN_CLIP_DIR` to a checkpoint root in the SDXL
-layout: `text_encoder/` (CLIP-L) and/or `text_encoder_2/` (OpenCLIP-bigG)
+Model id: `brain/clip`. Put a checkpoint root in the SDXL layout under the
+models directory (`--models-dir` / `BRAIN_MODELS_DIR`) and brain resolves it by
+scanning: `text_encoder/` (CLIP-L) and/or `text_encoder_2/` (OpenCLIP-bigG)
 weight directories, `tokenizer/` and/or `tokenizer_2/` BPE directories (at
 least one tokenizer must be present), and the EVA-CLIP image tower file
 (`EVA02_CLIP_L_336_psz14_s6B.pt`) at the root if you want image embeddings.
+`BRAIN_CLIP_DIR` still works as an explicit pin.
 
 ## Running it
 

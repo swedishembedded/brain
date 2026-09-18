@@ -22,9 +22,12 @@ assumptions in it.
 
 ## Getting the weights
 
-Model id: `brain/florence2` - not auto-fetched. Set `BRAIN_FLORENCE2_DIR` to
-a directory holding the released `microsoft/Florence-2-base` checkpoint:
-`config.json`, `model.safetensors`, `tokenizer.json`. Read directly - no
+Model id: `brain/florence2` - not auto-fetched. Put the released
+`microsoft/Florence-2-base` checkpoint under the models directory
+(`--models-dir` / `BRAIN_MODELS_DIR`) and brain resolves it by scanning;
+`BRAIN_FLORENCE2_DIR` still works as an explicit pin. The checkpoint is its
+three released files - `config.json`, `model.safetensors`, `tokenizer.json` -
+read directly, with no
 separate import/conversion step; the few host-side transforms the vision
 tower needs (a channel-attention scale fold, a synthesized position-embedding
 table) happen automatically on load.

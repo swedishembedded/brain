@@ -40,7 +40,10 @@ if not feats:
     bad("crates/sdk/Cargo.toml has no [features] table")
     sys.exit(1)
 
-TIERS = {"device", "resolve", "imagetype", "full", "default"}
+# Tiers are infrastructure a surface or a consumer selects; they are not
+# modalities and so are not `Domain` variants. `viewport` is one of them: a
+# window and a canvas, with no model behind it.
+TIERS = {"device", "resolve", "imagetype", "full", "default", "viewport"}
 surfaces = sorted(set(feats) - TIERS)
 
 # 1. surface names are brain_arch::Domain variants, kebab-cased.

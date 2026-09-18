@@ -21,12 +21,15 @@ detects with this model first.)
 
 ## Getting the weights
 
-Model id: `brain/scrfd` - not auto-fetched. Set `BRAIN_SCRFD_DIR` to a
-directory holding the released ONNX graph under its antelopev2 name,
-`scrfd_10g_bnkps.onnx`. It is read directly - no import or conversion step.
-(The antelopev2 release ships `glintr100.onnx`, the
-[ArcFace](arcface.md) embedder, in the same directory; pointing both
-`BRAIN_SCRFD_DIR` and `BRAIN_ARCFACE_DIR` at it serves both models.)
+Model id: `brain/scrfd` - not auto-fetched. Put the released ONNX graph, under
+its antelopev2 name `scrfd_10g_bnkps.onnx`, anywhere in the models directory
+(`--models-dir` / `BRAIN_MODELS_DIR`); brain finds it by scanning and reads it
+directly, with no import or conversion step and no variable to export.
+
+The antelopev2 release ships `glintr100.onnx`, the [ArcFace](arcface.md)
+embedder, in the same directory - so one copy of that release serves both
+models. `BRAIN_SCRFD_DIR` still works as an explicit pin when you want one
+exact directory used.
 
 ## Running it
 

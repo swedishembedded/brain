@@ -30,6 +30,15 @@ path = "src/lib.rs"
 default = ["full"]
 full = ["image", "creature", "forecast", "text", "vision", "audio", "decision", "video"]
 
+# --- presentation tier, not a surface. `brain::viewport`: a window and an RGB8
+#     canvas with the drawing an instrument panel needs, or the same canvas with
+#     no window on a machine that has no display. It is a TIER rather than a
+#     surface because it is not a `brain_arch::Domain` - nothing here is a model
+#     - and it is separate from any surface because showing a system's state is
+#     orthogonal to which model produced it. Samples may name it; the `brain`
+#     CLI does not select it and does not link it.
+viewport = ["dep:brain-viewport"]
+
 # --- surfaces: one per brain_arch::Domain the SDK has a public type for.
 #     A surface is the only thing a consumer names.
 # `brain::ImagePipeline` (flux2/s3dit text-to-image), `brain::
@@ -151,6 +160,7 @@ brain-timesfm3 = { workspace = true, optional = true }
 brain-s3dit = { workspace = true, optional = true }
 brain-wan = { workspace = true, optional = true }
 brain-wm-display = { workspace = true, optional = true }
+brain-viewport = { workspace = true, optional = true }
 brain-yolov8 = { workspace = true, optional = true }
 brain-zipdepth = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }

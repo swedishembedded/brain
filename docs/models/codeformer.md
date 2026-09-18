@@ -19,8 +19,10 @@ detail from its own learned prior.
 
 ## Getting the weights
 
-Model id: `brain/codeformer`. Set `BRAIN_CODEFORMER_WEIGHTS` to a `codeformer.pth`
-checkpoint file, or to a directory containing one.
+Model id: `brain/codeformer`. Put a `codeformer.pth` checkpoint under the
+models directory (`--models-dir` / `BRAIN_MODELS_DIR`) and brain finds it by
+scanning - `brain codeformer restore_face` needs no variable set.
+`BRAIN_CODEFORMER_WEIGHTS` still works as an explicit pin to one file.
 
 ## Running it
 

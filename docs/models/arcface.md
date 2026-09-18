@@ -23,12 +23,15 @@ crop you give it, with no detector involved.
 
 ## Getting the weights
 
-Model id: `brain/arcface` - not auto-fetched. Set `BRAIN_ARCFACE_DIR` to a
-directory holding the released ONNX graph under its antelopev2 name,
-`glintr100.onnx`. Keep `scrfd_10g_bnkps.onnx` (the [SCRFD](scrfd.md) detector)
-beside it - the antelopev2 release ships them together - or the default
-`align = true` path has no detector to run and says so. Both are read directly
-- no import or conversion step.
+Model id: `brain/arcface` - not auto-fetched. Put the released ONNX graph,
+under its antelopev2 name `glintr100.onnx`, anywhere in the models directory
+(`--models-dir` / `BRAIN_MODELS_DIR`) and brain finds it by scanning - no
+variable to export, no import or conversion step.
+
+Keep `scrfd_10g_bnkps.onnx` (the [SCRFD](scrfd.md) detector) beside it, as the
+antelopev2 release ships them, or the default `align = true` path has no
+detector to run and says so. `BRAIN_ARCFACE_DIR` still works as an explicit
+pin.
 
 ## Running it
 

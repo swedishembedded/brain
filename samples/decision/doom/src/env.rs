@@ -35,6 +35,7 @@ use brain::Env;
 
 use crate::action::{self, Option_, Tag};
 use crate::doom::{Config, Doom};
+use crate::frame::Frame;
 use crate::obs::{self, State};
 
 /// What the agent is being told to do this episode.
@@ -138,6 +139,10 @@ pub struct Inspect {
     pub items: u32,
     /// Reward per step for the episode so far, for the chart.
     pub history: Vec<f32>,
+    /// The game's own framebuffer, when frame capture is on. Empty otherwise -
+    /// fetching it costs a round trip and 85KB per step, which is most of a
+    /// training step, so it is only paid for when somebody is looking.
+    pub frame: Frame,
 }
 
 pub struct DoomEnv {
@@ -154,6 +159,9 @@ pub struct DoomEnv {
     exited: bool,
     episode: u64,
     pub inspect: Arc<Mutex<Inspect>>,
+    /// Fetch the framebuffer with every observation. Off unless something is
+    /// drawing it.
+    capture_frames: bool,
     /// Set when the game itself failed (the process died, the socket broke).
     /// An environment that silently returns a terminal state on an I/O error
     /// teaches the policy that the error was a legal end to an episode.
@@ -175,8 +183,15 @@ impl DoomEnv {
             exited: false,
             episode: 0,
             inspect: Arc::new(Mutex::new(Inspect::default())),
+            capture_frames: false,
             fault: None,
         }
+    }
+
+    /// Fetch and publish the framebuffer with every step. See
+    /// [`Inspect::frame`] for what it costs.
+    pub fn capture_frames(&mut self, on: bool) {
+        self.capture_frames = on;
     }
 
     pub fn state(&self) -> &State {
@@ -218,8 +233,25 @@ impl DoomEnv {
         r
     }
 
-    fn publish(&self, chosen: usize, reward: f32, probs: Vec<f32>) {
+    fn publish(&mut self, chosen: usize, reward: f32, probs: Vec<f32>) {
+        let frame = if self.capture_frames {
+            match self.doom.frame().map_err(|e| e.to_string()).and_then(|j| Frame::parse(&j)) {
+                Ok(f) => Some(f),
+                Err(e) => {
+                    // A frame nobody can draw is a display problem, never a
+                    // reason to end an episode - the policy is not reading it.
+                    eprintln!("doom: could not read the framebuffer: {e}");
+                    self.capture_frames = false;
+                    None
+                }
+            }
+        } else {
+            None
+        };
         if let Ok(mut i) = self.inspect.lock() {
+            if let Some(f) = frame {
+                i.frame = f;
+            }
             i.observation = obs::render(&self.state);
             i.options = self.opts.iter().map(|o| o.text.clone()).collect();
             i.probs = probs;
