@@ -97,7 +97,7 @@ shape.
 - `image` input - raw HWC f32 pixels in `[0,1]`.
 - No official GGUF release of SUPIR exists; `supir::import::GGUF_ARCHITECTURE`
   (`"sdxl"`, a borrowed spelling - see that constant's own doc) is registered
-  with `brain import-gguf` so a future release auto-dispatches with no CLI
+  with `brain import` so a future release auto-dispatches with no CLI
   change, though nothing can be converted against it today.
 
 ## Hardware and limits

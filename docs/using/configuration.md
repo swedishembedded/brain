@@ -164,7 +164,7 @@ See [`docs/using/serving.md`](serving.md) for what admission/backpressure means 
 | `BRAIN_QWEN_CTX` | Qwen built context length | 24576 |
 | `BRAIN_QWEN_MAX_BATCH` | Qwen serving batch slots | 16 |
 | `BRAIN_QWEN_KV_INT8` | int8 KV cache (`0` opts out) | on |
-| `BRAIN_QWEN_KV_CALIB` | per-head KV clip ranges from `brain qwen calib` | unset |
+| `BRAIN_QWEN_KV_CALIB` | per-head KV clip ranges from `brain qwen3 calib` | unset |
 | `BRAIN_QWEN35MOE_CTX` | Qwen3.5 MoE built context length | model default |
 | `BRAIN_QWEN35MOE_MAX_BATCH` | Qwen3.5 MoE serving batch slots | model default |
 | `BRAIN_QWEN35_CTX` | Qwen3.8-27B dense built context length | 4096 |

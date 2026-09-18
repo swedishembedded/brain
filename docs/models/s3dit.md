@@ -38,7 +38,7 @@ the store would otherwise pick.
 
 ### From a GGUF
 
-`brain import-gguf` also accepts a quantized Z-Image DiT (unsloth publishes
+`brain import` also accepts a quantized Z-Image DiT (unsloth publishes
 `Z-Image-GGUF` and `Z-Image-Turbo-GGUF`), converting it to a brain-native
 safetensors checkpoint that `BRAIN_S3DIT_DIT` can point at. These files declare
 `general.architecture = "lumina2"`, which real Lumina2 releases also use, so the
