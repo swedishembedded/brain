@@ -262,8 +262,10 @@ Weights: both `generate` and `finetune` resolve dit/vae/text_encoder/tokenizer
 from the models directory (--models-dir / BRAIN_MODELS_DIR) -
 --dit/--text-encoder/--variant (--variant only, on `finetune`) name a role
 outright, and an ambiguous or missing outcome prints every real candidate and
-exits rather than guessing. BRAIN_FLUX2_{DIT,VAE,TE,TOKENIZER} still work too,
-as overrides into that same resolver rather than a separate required path.
+exits rather than guessing. The BRAIN_FLUX2_{DIT,VAE,TE,TOKENIZER} variables
+are read by the SERVED path (`resident_flux2`), not by this command: here a
+role is named by its own flag, so that an ambiguity report can print the flag
+you must actually type.
 Text-encoder placement (env): BRAIN_FLUX2_TE_DEVICE=gpu<i>[:i8] (truncated shard on that card)";
 
 pub fn run_flux2(args: &[String]) {

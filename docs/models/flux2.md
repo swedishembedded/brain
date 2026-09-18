@@ -21,15 +21,27 @@ model's extra flexibility for speed.
 
 ## Getting the weights
 
-Model id: `brain/flux2-klein`. Weights are not auto-fetched - point brain at
-a local diffusers-layout checkout:
+Model id: `brain/flux2-klein`. Weights are not auto-fetched - put a
+diffusers-layout checkout (or a GGUF) under the models directory
+(`--models-dir` / `BRAIN_MODELS_DIR`) and brain finds the four roles by
+scanning it.
+
+`brain flux2 generate` and `brain flux2 finetune` resolve those roles from
+that scan, and each role has **one flag, spelled as the role is**, for the
+cases the scan cannot decide on its own - several candidate DiTs in the store,
+say. An ambiguous or missing role prints every real candidate and exits rather
+than guessing, naming the flag to pass:
 
 ```bash
-export BRAIN_FLUX2_DIT=…/FLUX.2-klein-4B/transformer
-export BRAIN_FLUX2_VAE=…/FLUX.2-klein-4B/vae
-export BRAIN_FLUX2_TE=…/FLUX.2-klein-4B/text_encoder
-export BRAIN_FLUX2_TOKENIZER=…/FLUX.2-klein-4B/tokenizer/tokenizer.json
+brain flux2 generate --prompt "…" --out fox.png \
+    --dit …/FLUX.2-klein-4B-GGUF/Q8_0.gguf \
+    --vae …/flux2-vae.safetensors \
+    --text-encoder …/FLUX.2-klein-4B/text_encoder \
+    --tokenizer …/FLUX.2-klein-4B/tokenizer/tokenizer.json
 ```
+
+The `BRAIN_FLUX2_{DIT,VAE,TE,TOKENIZER}` variables belong to the **served**
+path (`brain serve`, below), not to these two commands.
 
 ### Serving more than one checkpoint at once
 
@@ -45,14 +57,13 @@ ambiguous choice, and each is resolved against the SAME shared `vae`/
 checkpoint (nothing else in its own directory) still serves as long as a
 compatible VAE/text-encoder/tokenizer exists somewhere on disk.
 
-`BRAIN_FLUX2_DIT` (and the other three variables) still work exactly as
-before when set - they pin one exact instance, the same single-resident
-behavior this section's example above always had.
+Setting `BRAIN_FLUX2_DIT` (and the other three variables) pins one exact
+instance instead, which is the single-resident behavior to reach for when the
+store holds more checkpoints than you want served.
 
-`brain flux2 finetune` resolves its four weights the same way as `generate`/
-`infer` (`--text-encoder`/`--variant` name a role outright, same as
-`generate`'s `--dit`/`--text-encoder`/`--variant`); `BRAIN_FLUX2_*` work as
-the same overrides there too, not a separate required path.
+`brain flux2 finetune` resolves its four weights exactly the way `generate`
+does - by scanning the models directory, with one flag per role for what the
+scan cannot decide.
 
 ## Running it
 
