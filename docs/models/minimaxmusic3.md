@@ -7,7 +7,7 @@ coherent structure (intro/verse/chorus/bridge/outro). Reach for it when you
 need a first-draft song from a text brief, not for editing or remixing
 existing audio (there is no audio-conditioned path).
 
-**Status: fully wired, unvalidated end-to-end on this machine.** All five
+**Status: fully wired, with no end-to-end run on real weights recorded.** All five
 components - condition encoder, vocoder, RVQ depth decoder, the
 flow-matching DiT, and the Global LLM (a real Qwen3-8B, reused verbatim
 from `crates/qwen3`) - have import + forward, each verified at real
@@ -21,8 +21,9 @@ prompt assembly, the CFG-guided AR sampling loop, chunked DiT denoising,
 vocoder crop-and-stitch - is implemented, unit/structurally tested, and
 wired all the way through the CLI/D-Bus serving contract (`brain
 minimaxmusic3 generate`), but a real, real-checkpoint end-to-end run
-could **not** be validated on this development machine: whole-8B-model
-residency exceeds what either of this machine's backends can hold (see
+could **not** be validated on the hardware it has been developed against:
+whole-8B-model residency exceeds what either of that machine's backends can
+hold (see
 "Hardware and limits" below) - a measured, diagnosed gap, not an
 unwritten feature. See this repo's own roadmap ledger
 (`.agents/roadmap/minimaxmusic3.md`) for the live milestone history.
@@ -34,7 +35,7 @@ unwritten feature. See this repo's own roadmap ledger
 | Inference              | [x] |
 | Training from scratch  | [x] (per-component, library-level - vocoder/depth decoder/DiT; no CLI verb) |
 | LoRA fine-tune         | [x] (per-component, library-level; no CLI verb) |
-| INT8                   | [x] (DiT storage tier; the Global LLM's own int8 path does not actually shrink memory on this machine's CPU backend - see "Hardware and limits") |
+| INT8                   | [x] (DiT storage tier; the Global LLM's own int8 path does not shrink memory on a CPU backend, which does not execute int8 compute - see "Hardware and limits") |
 | CLI (`brain minimaxmusic3 generate`) | [x] |
 | HTTP API               | [ ] (D-Bus and the event API are wired; a dedicated HTTP route is not) |
 | D-Bus                  | [x] |
@@ -131,8 +132,8 @@ Whole-8B-model residency (the Global LLM) does not fit on the machine
 this port was built on, on either of its backends: the CPU-JIT backend's
 `int8` request silently promotes to fp32 (no backend in this workspace
 executes real int8 compute yet - `backend-cpu`'s own
-`caps().numeric.int8_dot` is `false`), and this machine's actual GPU (an
-Intel integrated Vulkan device, not a discrete card) caps single buffers
+`caps().numeric.int8_dot` is `false`), and an integrated Intel Vulkan
+device, which is what it has been run against, caps single buffers
 at 2047 MiB, below the ~3.28 GB embedding/`lm_head` tensors regardless of
 dtype. Measured directly (a single Global LLM instance OOM-kills on this
 machine's ~26 GB available RAM). Neither is a defect in this port - both

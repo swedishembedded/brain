@@ -244,7 +244,8 @@ mirroring the reference's own `CosyVoiceFrontEnd.frontend_zero_shot` +
 Each stage's checkpoint is imported, used, and dropped in its own block scope
 before the next stage's import runs (`minimaxmusic3::generate`'s own
 "sequential-stage RAM discipline", followed here for the same reason: `llm.pt`
-alone is 2 GB, and this box has 30 GB RAM and no discrete GPU).
+alone is 2 GB, and it has been run on a host with 30 GB RAM and no discrete
+GPU).
 
 **Verification**: `crates/cosyvoice/tests/pipeline_e2e.rs`, three rungs -
 (1) `extract_prompt_mel` against the real `mel_real_*` golden (cosine
@@ -313,7 +314,7 @@ caller builds the `Blob` directly (D-Bus/HTTP), while the CLI's shared
 every ASR-style audio input in this workspace already follows) - a real
 fidelity ceiling on that one path, not a correctness bug.
 
-Validated end to end against real weights on this machine, through the
+Validated end to end against real weights, through the
 served CLI verb itself (not just the underlying `pipeline::generate`
 function) - `brain cosyvoice synth --text ... --ref_text ... --in
 ref_audio=resources/cosyvoice/source/asset/zero_shot_prompt.wav --out
@@ -382,9 +383,9 @@ needed no separate fold step. The flow decoder (the largest single cost and
 the largest topology-engineering effort - a conformer encoder plus a
 56-transformer/14-resnet UNet, neither with prior ONNX-topology precedent in
 this crate) is not yet exported - recorded as the prioritized next step, not
-silently skipped. No OpenVINO runtime is installed on this box, so every
-export is validated structurally, not against a running NPU or its CPU/GPU
-OpenVINO fallback.
+silently skipped. The export is validated structurally rather than against a
+running NPU or its CPU/GPU OpenVINO fallback, because no OpenVINO runtime was
+available where it was checked.
 
 Weights env vars:
 

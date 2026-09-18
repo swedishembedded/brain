@@ -90,7 +90,7 @@ no per-model HTTP or D-Bus code was added for this. `max_pixels` and
 for a bigger capacity or a different precision tier builds (and budgets) a
 separate instance rather than silently reusing or evicting another one; see
 `resident_qwen3vl.rs`'s module doc for the derived (not measured - no real
-checkpoint has been run through this resident on this machine)
+checkpoint has been run through this resident yet)
 `FP32_BYTES`/`INT8_BYTES` footprint arithmetic.
 
 ## Options

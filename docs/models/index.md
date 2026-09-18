@@ -40,6 +40,7 @@ named on the model's own page (see
 | [`deepseekocr2`](deepseekocr2.md) | document image → text/markdown, global view only (no auto-fetch - no vendor GGUF exists yet) | [x] |
 | [`qwen3omnimoe`](qwen3omnimoe/readme.md) | text/audio/image/video → text, plus spoken output | [x] |
 | [`moondream3`](moondream3.md) | image + instruction → text (captioning) | [x] |
+| [`florence2`](florence2.md) | visual grounding: a phrase + an image → a bounding box | [x] |
 
 ## Speech
 
@@ -54,7 +55,7 @@ named on the model's own page (see
 
 | Architecture | Solves | Infer | LoRA |
 |---|---|:---:|:---:|
-| [`minimaxmusic3`](minimaxmusic3.md) | lyrics+caption -> full song (Qwen3-8B AR + flow-matching DiT + DAC vocoder) | [x] (unvalidated end-to-end on this machine - RAM) | library only |
+| [`minimaxmusic3`](minimaxmusic3.md) | lyrics+caption -> full song (Qwen3-8B AR + flow-matching DiT + DAC vocoder) | [x] (no end-to-end run on real weights recorded yet - the five components together exceed the host memory it has been run on) | library only |
 
 ## Image generation and editing
 
@@ -77,7 +78,7 @@ named on the model's own page (see
 | Architecture | Solves | Infer | LoRA |
 |---|---|:---:|:---:|
 | [`wan`](wan.md) ⤓ | text-to-video (image-to-video not implemented) | [x] | library only |
-| [`ltxv`](ltxv.md) | text-to-video+audio (two-stream A/V DiT) -- in progress, not yet runnable | [ ] | [ ] |
+| [`ltxv`](ltxv.md) | text-to-video+audio (two-stream A/V DiT); the pipeline runs end to end as a **smoke test** only - the real 22B transformer and the Gemma-4 text encoder are not yet imported, so it does not generate usable video | [ ] | [ ] |
 
 ## Vision and 3D
 
@@ -105,6 +106,29 @@ named on the model's own page (see
 | [`diamond`](diamond.md) | playable, action-conditioned video (Atari-100k) | [x] | [x] |
 | [`genieredux`](genieredux.md) | playable, action-conditioned video (CoinRun) | [ ] | [ ] |
 
+## A digital animal
+
+Not a checkpoint port, and not servable - a real *Drosophila* connectome run as
+a spiking network, driving a body in MuJoCo through the animal's own motor
+neurons. What is gated at the end is a behaviour rather than a tensor.
+
+- [the fruit fly](fly.md) - 178,860 neurons, 15,902,235 synapses, closed
+  sensorimotor loop; see the page for what is and is not achieved.
+
+## Toy architectures
+
+brain's own tasks, with no upstream reference to import or parity-check
+against. They are real - gradient-checked and benchmarked like anything else -
+and they exist so a change to the engine can be tested against an architecture
+that is fully understood. They are excluded from `brain caps` and
+`brain --help`.
+
+| Architecture | Solves | Infer | Train |
+|---|---|:---:|:---:|
+| [`toymoe`](toymoe.md) | sparse Mixture-of-Experts decoder (RMSNorm/RoPE, top-k) | [x] | [x] |
+| [`toypid`](toypid.md) | PID event/effect transformer; backs the WebGPU browser demo | [x] | [x] |
+| [`toyseq2seq`](toyseq2seq.md) | encoder-decoder transformer (bidirectional encoder + cross-attention decoder) | [x] | [x] |
+
 ## Not yet servable
 
 These are parity-gated architecture ports with no CLI/HTTP/D-Bus serving
@@ -119,6 +143,7 @@ Not independently servable - reached only as part of another architecture's
 composed pipeline: [`deepseek2`](deepseek2.md), [`sam1`](sam1.md),
 [`mimi`](mimi.md), [`ecapatdnn`](ecapatdnn.md), [`autoencoderkl`](autoencoderkl.md),
 [`s3tokenizer`](s3tokenizer.md) (`cosyvoice`'s FSQ speech tokenizer),
+[`gemma4`](gemma4.md) (`ltxv`'s text tower),
 [`campplus`](campplus.md) (`cosyvoice`'s 192-d speaker encoder).
 
 Notes on the columns:

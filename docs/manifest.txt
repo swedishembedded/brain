@@ -10,6 +10,7 @@ docs/introduction/hardware.md
 
 == Using brain
 docs/using/cli.md
+docs/using/sdk.md
 docs/using/models-and-weights.md
 docs/using/configuration.md
 docs/using/serving.md
@@ -94,6 +95,7 @@ docs/models/qwen3vl.md
 docs/models/vlm.md
 docs/models/fastvlm.md
 docs/models/moondream3.md
+docs/models/florence2.md
 docs/models/llava.md
 docs/models/deepseek2ocr.md
 docs/models/deepseekocr2.md
@@ -142,6 +144,7 @@ docs/models/timesfm3.md
 docs/models/world-models.md
 docs/models/diamond.md
 docs/models/genieredux.md
+docs/models/fly.md
 docs/models/toymoe.md
 docs/models/toypid.md
 docs/models/toyseq2seq.md
@@ -162,6 +165,10 @@ docs/performance/benchmarking.md
 
 == Reference
 docs/reference/kernels.md
+docs/reference/kernels-cuda.md
+
+== Compliance
+docs/compliance/third-party-models.md
 
 == About
 docs/about.md
