@@ -57,7 +57,7 @@ use brain::Env;
 
 use crate::action::{self, Option_, Tag};
 use crate::doom::{Config, Doom};
-use crate::frame::Frame;
+use crate::frame::{Frame, Map};
 use crate::obs::{self, History, State};
 
 /// What the agent is being told to do this episode.
@@ -191,6 +191,9 @@ pub struct Inspect {
     pub game_tic: i64,
     /// Decisions in a row that moved the player nowhere.
     pub stuck: u32,
+    /// How far back the reverse curriculum has moved the episode's start, in
+    /// decisions of random walk. Zero when the curriculum is off.
+    pub back_steps: u32,
     /// Reward per step for the episode so far, for the chart.
     pub history: Vec<f32>,
     /// The game's framebuffer, one per TIC of the decision just taken, oldest
@@ -202,6 +205,8 @@ pub struct Inspect {
     /// of them: keeping only the last throws away five sixths of the motion,
     /// and a recording made from those looks like the player is teleporting.
     pub frames: Vec<Frame>,
+    /// What the agent knows about where it can go and where it has been.
+    pub known: Map,
 }
 
 /// The monsters an arena episode draws from, weakest first.
@@ -355,9 +360,15 @@ impl DoomEnv {
         self.curriculum = on;
     }
 
-    /// How far back the curriculum has moved the start, in decisions.
-    pub fn back_steps(&self) -> u32 {
-        self.back_steps
+    /// Start episodes this far back from the exit, rather than at it.
+    ///
+    /// The curriculum's depth is TRAINING state and is not saved with the
+    /// head, so a policy trained out to 36 decisions of walk-back is, on a
+    /// fresh run, asked to finish from zero - two decisions, every time.
+    /// Evaluating or recording a curriculum policy therefore has to say how
+    /// hard to make it, and this is where that number comes from.
+    pub fn set_start_back(&mut self, n: u32) {
+        self.back_steps = n;
     }
 
     /// Record how an episode ended and move the start back once the policy is
@@ -584,7 +595,17 @@ impl DoomEnv {
     }
 
     fn publish(&mut self, chosen: usize, reward: f32, probs: Vec<f32>, frames: Vec<Frame>) {
+        // The map changes slowly - a cell a step - so it is fetched with the
+        // frames rather than on its own schedule, and only when drawing.
+        let map = if self.capture_frames {
+            self.doom.map().ok().and_then(|j| Map::parse(&j).ok())
+        } else {
+            None
+        };
         if let Ok(mut i) = self.inspect.lock() {
+            if let Some(m) = map {
+                i.known = m;
+            }
             if !frames.is_empty() {
                 i.frames = frames;
             }
@@ -605,6 +626,7 @@ impl DoomEnv {
             i.map = self.state.level.map;
             i.game_tic = self.state.episode_tic;
             i.stuck = self.stuck;
+            i.back_steps = self.back_steps;
             i.health = self.state.player.health;
             if i.step <= 1 {
                 i.history.clear();
@@ -629,6 +651,13 @@ impl DoomEnv {
         // a round trip per tic and is only done when something is recording.
         let mut frames = Vec::new();
         let per_tic = self.capture_frames && self.frames_per_tic;
+        // Events accumulated across the tics of this decision. Each response
+        // DRAINS the engine's event log, so stepping tic by tic and keeping
+        // only the last state loses every event from the earlier tics - which
+        // is most of them, including the kill or the level exit that the
+        // decision was about. Measured: a recorded run that finished the level
+        // four times out of four and scored -0.07 for it.
+        let mut carried: Vec<crate::obs::Event> = Vec::new();
         let json = if per_tic {
             let mut last = String::new();
             for t in 0..opt.tics {
@@ -638,6 +667,17 @@ impl DoomEnv {
                     Err(e) => {
                         self.fault = Some(format!("the game stopped answering: {e}"));
                         return (0.0, true);
+                    }
+                }
+                if let Ok(st) = State::parse(&last) {
+                    carried.extend(st.events.iter().cloned());
+                    if st.done {
+                        // The decision ended the episode; running its
+                        // remaining tics would step past the end.
+                        if let Some(f) = self.grab_frame() {
+                            frames.push(f);
+                        }
+                        break;
                     }
                 }
                 if let Some(f) = self.grab_frame() {
@@ -665,6 +705,10 @@ impl DoomEnv {
                 self.fault = Some(e);
                 return (0.0, true);
             }
+        }
+        if per_tic {
+            // The final response's own events are already in `carried`.
+            self.state.events = carried;
         }
         self.steps += 1;
         let pos = (self.state.player.x.unwrap_or(0), self.state.player.y.unwrap_or(0));
@@ -959,7 +1003,7 @@ const EMPTY: &str = r#"{"tic":0,"episodeTic":0,"level":{"episode":0,"map":0,"ski
   "kills":0,"totalKills":0,"items":0,"totalItems":0,"secrets":0,"totalSecrets":0},
   "player":{"id":0,"health":0,"armor":0,"x":null,"y":null,"angle":null,"weapon":null,
   "ammo":null,"keys":[]},"threats":[],"hazards":[],"pickups":[],"clearance":{"ahead":0,"right":0,
-  "behind":0,"left":0,"aheadRight":0,"aheadLeft":0},"exit":null,"events":[],"done":false,
+  "behind":0,"left":0,"aheadRight":0,"aheadLeft":0},"exit":null,"unexplored":null,"events":[],"done":false,
   "outcome":"alive"}"#;
 
 #[cfg(test)]

@@ -169,12 +169,18 @@ pub fn options(state: &State) -> Vec<Option_> {
     // hid this option exactly when the player was standing next to the exit -
     // 32 units away with 40 units of clearance - so an agent placed at the
     // goal was not offered the goal.
-    if let Some(e) = state.exit.as_ref().filter(|e| e.clearance >= MIN_ROOM.min(e.distance)) {
+    if let Some(e) = state.exit.as_ref().filter(|e| route_usable(e)) {
+        // Prefer the ROUTE bearing where the engine could compute one: it
+        // points down the corridor rather than at the wall the exit is behind.
+        let (bearing, away) = match (e.route_bearing, e.path_distance) {
+            (Some(b), Some(d)) => (b, d),
+            _ => (e.bearing, e.distance),
+        };
         out.push(Option_ {
             text: format!(
                 "head for the level exit, {} units away, {}",
-                e.distance,
-                bearing_phrase(e.bearing)
+                away,
+                bearing_phrase(bearing)
             ),
             // Turn onto it, then either press it or walk to it.
             //
@@ -190,16 +196,18 @@ pub fn options(state: &State) -> Vec<Option_> {
             // switch to press or a line to walk over is a property of the
             // level, and doing both works on either.
             commands: if e.distance <= USE_RANGE {
+                // Close enough to press: face the exit ITSELF, not the route,
+                // which has already delivered the player here.
                 format!("[{},{{\"type\":\"use\"}}]", json_turn(state.facing(e.bearing)))
             } else {
                 format!(
                     "[{},{{\"type\":\"forward\",\"amount\":8}},{{\"type\":\"use\"}}]",
-                    json_turn(state.facing(e.bearing))
+                    json_turn(state.facing(bearing))
                 )
             },
             tics: MOVE_TICS,
             tag: Tag::Exit,
-            room: e.clearance,
+            room: e.route_clearance.unwrap_or(e.clearance),
         });
     }
 
@@ -230,6 +238,23 @@ pub fn options(state: &State) -> Vec<Option_> {
     });
 
     out
+}
+
+/// Whether heading for the exit is worth offering.
+///
+/// When the engine computed a ROUTE, always: the route is a path over ground
+/// the player can walk, so there is by construction somewhere to go. Gating it
+/// on a clearance probe hid the option exactly where the corridor turns - the
+/// straight ray is short at a corner, which is the one moment the route
+/// bearing is most worth following.
+///
+/// Without a route there is only the straight line, which does point through
+/// walls, so that one is gated.
+fn route_usable(e: &crate::obs::Exit) -> bool {
+    match (e.route_bearing, e.path_distance) {
+        (Some(_), Some(_)) => true,
+        _ => e.clearance >= MIN_ROOM.min(e.distance),
+    }
 }
 
 fn bearing_phrase(b: i32) -> String {

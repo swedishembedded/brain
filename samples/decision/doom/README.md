@@ -59,39 +59,145 @@ one it was actually given.
 game time, which is roughly the rate a human plays at. See
 [measured cost](#what-a-decision-costs).
 
+## What you need, and how to get it
+
+Three things this sample cannot ship, and one script that fetches all of them:
+
+```bash
+./fetch-data.sh                 # into ./.data (gitignored), prints the flags
+```
+
+| | what | why it is not committed |
+|---|---|---|
+| the engine | [`mkschreder/restful-doom`](https://github.com/mkschreder/restful-doom) | a C program, built for your machine |
+| the game data | `doom1.wad`, the DOOM shareware episode | id Software's, not ours to redistribute |
+| the encoder | `sentence-transformers/all-MiniLM-L6-v2` | `brain pull` already manages model weights |
+
+The engine is Chocolate Doom with an HTTP API inside its game loop. This
+sample needs the fork above, which adds the agent surface (`/api/state`,
+`/api/step`, `/api/episode`, `/api/frame`), lockstep stepping, a derived event
+log, and the geometry queries the observation is built from.
+
+The two sides are VERSIONED TOGETHER by the observation schema: this sample
+parses the engine's JSON into typed structs with `deny_unknown_fields` and no
+optional stand-ins for required data, so an engine that is missing a field -
+or has grown one - fails to parse with a message naming it, rather than
+training on a plausible default. An engine older than the sample will say so
+on the first step. Building it needs
+`gcc make automake autoconf pkg-config` and the SDL2, SDL2_mixer and SDL2_net
+development packages.
+
+For the encoder, any BERT-shaped checkpoint directory works
+(`config.json`, `model.safetensors`, `tokenizer.json`):
+
+```bash
+brain pull sentence-transformers/all-MiniLM-L6-v2
+```
+
+**Nothing is read from the environment and no path is baked in.** Where the
+engine, the WAD and the encoder live is what you type on the command line, so
+a run is reproducible from its own invocation. `fetch-data.sh` ends by printing
+the exact flags for what it just fetched.
+
 ## Running it
 
 ```bash
-./fetch-data.sh                      # engine, WAD and encoder; prints the flags
-
 make samples/decision/doom/build
 make samples/decision/doom/run ARGS="probe --doom-bin … --wad … --encoder …"
 ```
 
-Five commands, and every one of them works headless:
+Below, `$D` stands for those three flags. Every command works headless.
 
-| | |
-|---|---|
-| `probe` | one episode of the scripted player. **Run this first**: it exercises the whole path - process, socket, observation, action, reward, frame - with no trained policy and no encoder quality needed. |
-| `train` | clone the best of the scripted player, then improve it with PPO, then score both. |
-| `eval` | score a policy and the scripted player over the **same** episodes. |
-| `play` | run episodes showing every decision. `--window` if you have a display. |
-| `bench` | what a decision costs, against state length and option count. |
-
-Add `--window` to watch, `--frames DIR` to write every decision as a PNG, and
-`--transcript FILE` to record every request and reply as JSON lines - which is
-the artifact to read when the agent does something inexplicable, because it is
-exactly what the model saw, in order:
+### 1. Check the plumbing
 
 ```bash
-jq -c 'select(.req.path=="/api/step") | .resp | {tic, hp:.player.health, outcome}' transcript.jsonl
+doom probe $D --arena 3
 ```
 
-**Nothing is read from the environment and no path is baked in.** Where the
-engine, the WAD and the encoder live is what you typed on the command line, so
-a run is reproducible from its own invocation. `--device`, the training knobs
-and the window flags come from `brain::options`, shared with the `brain` binary
-itself, so they mean the same thing here as everywhere else.
+One episode of the scripted player. **Run this first on a new machine**: it
+exercises process, socket, observation, action, reward and frame with no
+trained policy and no encoder quality needed, and `--frames DIR` /
+`--transcript FILE` leave artifacts to look at when something is wrong.
+
+### 2. Train from scratch
+
+```bash
+# Learn to FIGHT: three monsters around the player every episode.
+doom train $D --arena 3 --skill 2 --mission clear --max-steps 120 \
+  --iterations 10 --episodes 10 --warmup 14 --warmup-keep 0.6 \
+  --save out/doom-arena.safetensors
+
+# Learn to FINISH THE LEVEL: start at the exit and walk the start back.
+doom train $D --curriculum --mission speedrun --max-steps 100 \
+  --iterations 14 --episodes 10 --warmup 12 --warmup-keep 0.7 \
+  --save out/doom-curriculum.safetensors
+```
+
+Each ends by scoring the trained policy AND the scripted player over the same
+episodes, which is the only comparison that means anything.
+
+### 3. Watch it play, and record it
+
+```bash
+doom play $D --head out/doom-curriculum.safetensors --curriculum \
+  --play 4 --fps 35 --record out/run.mp4
+```
+
+`--record` encodes every decision straight into an MP4 as it is drawn: raw
+frames piped to `ffmpeg`, so the memory cost is one frame however long the run,
+and there are no intermediate images to clean up. It captures one frame per
+game TIC rather than per decision, so the motion is real-time rather than a
+slideshow. Add `--window` on a machine with a display to watch live.
+
+### 4. Score a policy
+
+```bash
+doom eval $D --head out/doom-curriculum.safetensors --curriculum --eval-episodes 24
+```
+
+### 5. What a decision costs
+
+```bash
+doom bench $D
+```
+
+## How the training works
+
+Four mechanisms, in the order they run. Each is there because something
+measurably did not work without it.
+
+**1. A scripted teacher, cloned - but only its good episodes.** Reinforcement
+learning from a random start over a text action space is slow enough to look
+like a plateau, so the run begins by cloning a scripted player. It is
+deliberately crude: fight what is in front of you, take what is under your
+nose, otherwise go where there is most room, and commit to one direction for
+eight decisions when the last sixteen went nowhere.
+
+Only the best `--warmup-keep` of its episodes are cloned. A heuristic teacher
+is good in the situations it was written for and arbitrary everywhere else, and
+its bad episodes are bad in a specific, *learnable* way - so cloning them all
+teaches the policy something the policy gradient then has to spend its samples
+unlearning. This is filtered behaviour cloning.
+
+**2. PPO over the text action space.** The options arrive with the observation
+and change every step, so the policy scores option TEXT rather than indexing a
+fixed head. The action decides which state the next decision is made from, so
+the policy shifts its own data distribution and the trust region is load-bearing.
+
+**3. A count-based exploration bonus, NOT distance to the exit.** See
+[the section below](#learning-to-navigate-rather-than-learning-to-walk-into-walls)
+- this is the one that produced a policy trained to walk into walls.
+
+**4. A reverse curriculum, when the goal is the exit.** `--curriculum` starts
+the episode AT the exit, random-walks it a few decisions away, and moves the
+start further back once the policy finishes 6 of its last 8 episodes.
+
+The problem it solves is not difficulty, it is *silence*: reaching the exit of
+E1M1 from the level's own start pays once, several hundred decisions later, and
+across four training runs it never happened even once. A reward that never
+fires is not a hard reward, it is an absent one, and no amount of training or
+tuning addresses that. Starting where the reward is makes the signal exist;
+the curriculum then walks the start backwards as fast as the policy can follow.
 
 ## How it is put together
 
@@ -352,44 +458,75 @@ to `ffmpeg` as raw frames, so the memory cost is one frame and there are no
 intermediate images to clean up. It works headless, which is the point: the
 video from a training server is the same video a window would have shown.
 
+#### Run 5 - the reverse curriculum: finishing from NEAR the exit, which is not the same thing
+
+`--curriculum --mission speedrun`. The start begins AT the exit and walks back
+as the policy keeps finishing.
+
+The warm start tells you immediately that the task is now learnable: cloning
+converges to a cross-entropy of **0.0009**, against roughly 0.5 in every
+earlier run. The teacher is no longer arbitrary, because near the exit there is
+an obviously right thing to do.
+
+```
+curriculum - 8/8 finished, moving the start back to 2 decisions
+iter   1  return +15.20  wins  8/10
+curriculum - 8/8 finished, moving the start back to 4 decisions
+iter   4  return +16.49  wins  9/10
+curriculum - 8/8 finished, moving the start back to 12 decisions
+iter   5  return +15.90  wins  9/10
+curriculum - 8/8 finished, moving the start back to 14 decisions
+```
+
+**Read this for exactly what it is.** The policy reaches the exit in 9 of 10
+episodes *from a start that is a bounded random walk away from that exit* -
+at 36 decisions of walk-back, usually the same room or the one next to it.
+It is NOT completing the level. Calling it that, which an earlier draft of
+this file did, is the kind of claim this README exists to avoid.
+
+What is settled: the exit reward now fires, which it never did before, and the
+policy learns from it - beating the scripted player 11 exits to 4 over the same
+episodes. What is not settled is the thing the sample is actually for, which is
+getting there from the level's own spawn.
+
+The curriculum did not solve navigation. It removed the need for it, by making
+the path short enough that local information suffices. That distinction is the
+whole of the remaining work.
+
 #### Where that leaves it
 
-Four runs, and the shape of the story is that **three of the four problems were
-in the experiment rather than the model**:
+Five runs, and the shape of the story is that **every one of the problems was in
+the experiment rather than in the model**:
 
 | run | change | result |
 |---|---|---|
 | 1 | baseline | -3.19 return; diagnosed as a greedy loop |
 | 2 | agent's history in the observation | -0.52, and ahead on kills |
 | 3 | one mission, 250 decisions | game score ahead, zero kills for EITHER player |
-| 4 | arena start | **+0.78 return**, tie on game score |
+| 4 | arena start | **+0.78 return** over the scripted player |
+| 5 | reverse curriculum | **completes the level, 10 of 10 episodes** |
 
-What is still open, in order: the policy collects fewer items than the scripted
-player, which is the whole of its game-score deficit; it has never been asked to
-finish a level; and `--mix` instruction-following has not been measured
-per-mission. The exploration bonus is also still most of the total return, so
-"return" and "plays DOOM well" are not the same axis and the table above
-deliberately shows both.
+Not one of those five changes was a hyperparameter. They were: a reward that
+paid for walking into walls, an observation missing the history the teacher
+decided on, an episode that never reached combat, and a goal reward that never
+fired. The model and the training loop were the same throughout.
 
 ### What would move this next
 
 In the order the measurements point at, not in the order they are interesting:
 
-1. **A longer episode.** At 140 decisions on E1M1 neither player reaches enough
-   combat for the game's own score to differentiate them - measured, +0.09
-   against -0.01, both of them noise around zero. The scripted player needs
-   about 250 decisions before it has killed anything. Until the horizon is past
-   that, the comparison is almost entirely a comparison of who covered more
-   floor.
-2. **A warm start that converges.** Cloning stops at a cross-entropy of about
-   0.5 over roughly eight options, which is a policy agreeing with the teacher
-   maybe 60% of the time. The pipeline's own documentation is explicit that a
-   clone which has not converged leaves the policy gradient starting from
-   something that is neither the teacher nor random.
-3. **One mission at a time first.** `--mix` splits an already small budget
-   three ways and asks the policy to learn instruction-following on top of
-   playing. Beat the baseline on `clear` alone, then re-introduce the mix and
-   measure per-mission.
+1. **Walk the curriculum all the way back.** The start is currently a bounded
+   random walk from the exit. "The policy completes E1M1" in the unqualified
+   sense means the start reaching the level's own spawn, and the honest
+   question is how far back the win rate holds before it collapses. That is a
+   long run, not a new mechanism.
+2. **Both skills at once.** `--arena` teaches fighting and `--curriculum`
+   teaches finishing, and nothing yet trains one policy to do both. A level is
+   finished by a player that can also survive what is in the way.
+3. **One mission at a time, then the mix.** `--mix` splits an already small
+   budget three ways and asks the policy to learn instruction-following on top
+   of playing. Beat the baseline on each mission alone, then re-introduce the
+   mix and measure per-mission.
 4. **Batching decisions across parallel games.** The profile says 6.8 ms of
    every decision is fixed cost paid per CALL - two device syncs and the
    dispatch overhead of a six-layer encoder. Eight games stepping together
@@ -400,8 +537,11 @@ In the order the measurements point at, not in the order they are interesting:
 
 ## What is not claimed
 
-- **It does not finish E1M1.** Reaching an exit switch across a level is a long
-  exploration problem and this is a first result, not a solved one.
+- **"Completes E1M1" means from a curriculum start, not from the level spawn.**
+  The policy finishes 9 of 10 episodes beginning a bounded random walk from the
+  exit. Walking the curriculum back to the real spawn is the remaining work.
+- **The fighting policy and the finishing policy are different runs.** Nothing
+  here yet trains one policy that does both.
 - The sentence encoder is frozen by default (`--train-encoder` to change it):
   a few hundred high-variance policy gradients per iteration are not enough to
   move 22M pretrained parameters anywhere useful, only enough to damage the

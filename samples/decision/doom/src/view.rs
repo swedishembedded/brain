@@ -415,6 +415,11 @@ pub fn draw_at(c: &mut Canvas, i: &Inspect, frame: Option<&crate::frame::Frame>)
         i.secrets,
         if i.stuck >= 3 { format!("  STUCK x{}", i.stuck) } else { String::new() }
     );
+    let stats = if i.back_steps > 0 {
+        format!("{stats}  START -{}", i.back_steps)
+    } else {
+        stats
+    };
     c.text(8, (gh + 16) as i32, &head, 2, DIM);
     c.text(8, (gh + 16 + Canvas::line_height(2)) as i32, &stats, 2, INK);
 
@@ -481,6 +486,9 @@ pub fn draw_at(c: &mut Canvas, i: &Inspect, frame: Option<&crate::frame::Frame>)
         y += block + 8;
     }
 
+    // ---- what the agent knows about the level -----------------------------
+    draw_map(c, i, px, (HEIGHT - 120 - MAP_H) as i32, pw - 12, MAP_H);
+
     // ---- what it earned ---------------------------------------------------
     let plot_y = (HEIGHT - 104) as i32;
     c.shade(px, plot_y, pw, 96, PANEL, 235);
@@ -493,6 +501,70 @@ pub fn draw_at(c: &mut Canvas, i: &Inspect, frame: Option<&crate::frame::Frame>)
         1,
         if i.total >= 0.0 { GOOD } else { BAD },
     );
+}
+
+/// Height of the minimap panel.
+const MAP_H: u32 = 330;
+
+/// The level as the agent knows it: where it can go, where it has been, and
+/// which way it is facing.
+///
+/// Deliberately the SAME grid the route and frontier searches read, rather
+/// than a prettier drawing of the level - a picture that came from somewhere
+/// else would eventually disagree with what the agent decided on, and the
+/// whole point of showing it is to be able to trust the correspondence.
+fn draw_map(c: &mut Canvas, i: &Inspect, x: i32, y: i32, w: u32, h: u32) {
+    c.shade(x, y, w, h, PANEL, 235);
+    c.text(x + 6, y + 4, "WHERE IT CAN GO, AND WHERE IT HAS BEEN", 1, DIM);
+    let m = &i.known;
+    if m.is_empty() {
+        c.text(x + 6, y + 20, "NO MAP", 1, DIM);
+        return;
+    }
+
+    let top = y + 18;
+    let avail_h = h.saturating_sub(24);
+    // Whole pixels per cell, so a cell is a crisp block rather than a smear.
+    let scale = Canvas::fit_scale(m.width, m.height, w - 12, avail_h);
+    let ox = x + 6;
+    // The grid's y grows north; the screen's grows down, so it is flipped
+    // here. Drawing it unflipped puts the player at the wrong end of the
+    // level, which reads as a broken sensor rather than a broken viewer.
+    let oy = top;
+
+    for cy in 0..m.height {
+        for cx in 0..m.width {
+            let v = m.cells[(cy * m.width + cx) as usize];
+            let colour = match v {
+                // Walked, and merely reachable. The contrast between them is
+                // the useful thing on this panel, so it is a large one.
+                2 => [90, 200, 120],
+                1 => [64, 68, 86],
+                _ => continue,
+            };
+            let sx = ox + (cx * scale) as i32;
+            let sy = oy + ((m.height - 1 - cy) * scale) as i32;
+            c.fill(sx, sy, scale, scale, colour);
+        }
+    }
+
+    if let Some((pcx, pcy, angle)) = m.player {
+        let sx = ox + (pcx * scale) as i32 + scale as i32 / 2;
+        let sy = oy + ((m.height - 1 - pcy) * scale) as i32 + scale as i32 / 2;
+        // A stub in the direction of travel. Map angles grow anticlockwise and
+        // screen y grows down, hence the negated sine.
+        let r = (angle as f32).to_radians();
+        let len = (scale * 4).max(6) as f32;
+        let ex = sx + (r.cos() * len) as i32;
+        let ey = sy - (r.sin() * len) as i32;
+        let steps = len as i32;
+        for t in 0..=steps {
+            let px2 = sx + (ex - sx) * t / steps.max(1);
+            let py2 = sy + (ey - sy) * t / steps.max(1);
+            c.fill(px2, py2, 1, 1, PICK);
+        }
+        c.fill(sx - 1, sy - 1, 3, 3, [255, 255, 255]);
+    }
 }
 
 /// Break `s` into lines of at most `cols` characters, on spaces where it can.

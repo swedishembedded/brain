@@ -233,6 +233,10 @@ impl Doom {
         self.call("GET", "/api/frame", None)
     }
 
+    pub fn map(&mut self) -> std::io::Result<String> {
+        self.call("GET", "/api/map", None)
+    }
+
     /// Move an object to a map position, relinking it so collision still
     /// works. Used to place an episode's start, never by the agent.
     pub fn teleport(&mut self, id: i64, x: f32, y: f32) -> std::io::Result<String> {

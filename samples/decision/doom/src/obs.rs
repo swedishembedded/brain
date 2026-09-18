@@ -48,6 +48,13 @@ pub struct State {
     pub clearance: Clearance,
     /// Absent on a map with no exit linedef at all.
     pub exit: Option<Exit>,
+    /// The nearest place the player has not walked, and the way to it.
+    ///
+    /// Served by the engine but NOT shown to the model. With a walkable route
+    /// to the exit available there is nothing to explore for, and a sensor
+    /// that is in the observation because it might help is one nobody can
+    /// measure the value of.
+    pub unexplored: Option<Frontier>,
     pub events: Vec<Event>,
     /// Present only when the engine's per-step event buffer overflowed.
     #[serde(rename = "eventsDropped", default)]
@@ -137,6 +144,7 @@ pub struct Clearance {
     pub ahead_left: i32,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Exit {
@@ -153,6 +161,30 @@ pub struct Exit {
     /// near the goal, which is a property of the experiment and not of the
     /// situation the agent is deciding in.
     pub spot: Option<Spot>,
+    /// How far the exit is ALONG WALKABLE GROUND, and which way to set off.
+    ///
+    /// This is the honest version of `bearing` and `distance` above, which
+    /// measure a straight line that goes through walls. Absent on a level
+    /// whose exit the engine could not route to.
+    #[serde(rename = "pathDistance")]
+    pub path_distance: Option<i32>,
+    #[serde(rename = "routeBearing")]
+    pub route_bearing: Option<i32>,
+    /// How far the next waypoint on the route is. Part of the schema; the
+    /// decision is made on the bearing and the total, not on this.
+    #[serde(rename = "routeDistance")]
+    pub route_distance: Option<i32>,
+    #[serde(rename = "routeClearance")]
+    pub route_clearance: Option<i32>,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Frontier {
+    pub distance: i32,
+    pub bearing: i32,
+    pub clearance: i32,
 }
 
 #[allow(dead_code)]
@@ -342,13 +374,27 @@ pub fn render(state: &State, history: History) -> String {
     ));
 
     if let Some(e) = &state.exit {
-        out.push_str(&format!(
-            "The exit {} is {} units {}, with {} units of clear floor that way.\n",
-            if e.kind == "switch" { "switch" } else { "line" },
-            e.distance,
-            side_word(e.bearing),
-            e.clearance
-        ));
+        // The ROUTE, when the engine could compute one - how far the exit is
+        // along ground a player can walk, and which way to set off. The
+        // straight-line bearing is deliberately not shown alongside it: it
+        // points through walls, and an agent given both has to learn which of
+        // two contradictory numbers to believe.
+        match (e.path_distance, e.route_bearing) {
+            (Some(path), Some(bearing)) => out.push_str(&format!(
+                "The exit {} is {} units of walking away, and the way there starts {}.\n",
+                if e.kind == "switch" { "switch" } else { "line" },
+                path,
+                side_word(bearing)
+            )),
+            _ => out.push_str(&format!(
+                "The exit {} is {} units away as the crow flies, {}, with {} units of clear \
+                 floor that way.\n",
+                if e.kind == "switch" { "switch" } else { "line" },
+                e.distance,
+                side_word(e.bearing),
+                e.clearance
+            )),
+        }
     }
 
     // Where the agent has been. See `History` for why this is not optional.
@@ -400,7 +446,9 @@ mod tests {
       "ammo":42,"keys":[]},"threats":[{"id":1,"type":"IMP","distance":150,"bearing":-12,"visible":true,
       "health":60,"targetingMe":true}],"hazards":[],"pickups":[],"clearance":{"ahead":320,
       "right":64,"behind":0,"left":128,"aheadRight":320,"aheadLeft":64},
-      "exit":{"distance":900,"bearing":30,"kind":"switch","clearance":128,"spot":null},"events":[{"tic":39,"type":"hurt",
+      "exit":{"distance":900,"bearing":30,"kind":"switch","clearance":128,"spot":null,
+      "pathDistance":1400,"routeBearing":-40,"routeDistance":90,"routeClearance":200},
+      "unexplored":null,"events":[{"tic":39,"type":"hurt",
       "what":null,"amount":15}],"done":false,"outcome":"alive"}"#;
 
     #[test]

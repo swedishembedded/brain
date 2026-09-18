@@ -23,20 +23,24 @@ say() { printf '\n== %s\n' "$*"; }
 # sample needs the fork with the agent endpoints (/api/state, /api/step,
 # /api/episode, /api/frame) and lockstep mode; upstream has the original
 # human-facing API only.
-doom_src="${RESTFUL_DOOM_SRC:-$data/restful-doom}"
+DOOM_REPO="https://github.com/mkschreder/restful-doom"
+doom_src="$data/restful-doom"
 if [ ! -x "$doom_src/src/restful-doom" ]; then
-  say "building the engine in $doom_src"
-  if [ ! -d "$doom_src" ]; then
-    echo "   No engine source found."
-    echo "   Point RESTFUL_DOOM_SRC at a checkout of the fork with the agent"
-    echo "   endpoints, or clone it into $doom_src, then re-run this script."
-    echo
-    echo "   It needs: gcc, make, automake, autoconf, pkg-config, SDL2,"
-    echo "   SDL2_mixer and SDL2_net development packages."
-    exit 1
+  if [ ! -d "$doom_src/.git" ]; then
+    say "cloning the engine from $DOOM_REPO"
+    git clone --depth 1 "$DOOM_REPO" "$doom_src"
   fi
+  say "building the engine in $doom_src"
+  # Needs: gcc, make, automake, autoconf, pkg-config, and the SDL2, SDL2_mixer
+  # and SDL2_net development packages. On Debian/Ubuntu:
+  #   apt-get install build-essential automake autoconf pkg-config \
+  #                   libsdl2-dev libsdl2-mixer-dev libsdl2-net-dev
   ( cd "$doom_src" && [ -f configure ] || ./autogen.sh )
   ( cd "$doom_src" && make -j"$(nproc)" )
+fi
+if [ ! -x "$doom_src/src/restful-doom" ]; then
+  echo "   the engine did not build; see the output above" >&2
+  exit 1
 fi
 doom_bin="$doom_src/src/restful-doom"
 echo "   engine: $doom_bin"

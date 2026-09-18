@@ -63,6 +63,7 @@ pub struct Args {
     pub mix: bool,
     pub arena: usize,
     pub curriculum: bool,
+    pub start_back: u32,
     pub eval_episodes: usize,
     pub play: usize,
     pub transcript: Option<String>,
@@ -117,6 +118,10 @@ what to play
                       walk it further back as the policy keeps finishing. The
                       exit reward has never once fired from the level's own
                       start, and a reward that never fires trains nothing.
+  --start-back N      with --curriculum, begin episodes N decisions of walk
+                      back from the exit. Training grows this on its own; a
+                      policy being evaluated or recorded has to be told, since
+                      the depth reached is not saved with the weights.
   --arena N           start each episode with N monsters around the player, on
                       open floor and in sight. 0 plays the level as it ships,
                       where an episode is spent leaving the spawn area and
@@ -197,6 +202,7 @@ fn parse_args() -> Result<Args, String> {
         mix: args.take_flag("--mix"),
         arena: args.usize_or("--arena", 0),
         curriculum: args.take_flag("--curriculum"),
+        start_back: args.u32_or("--start-back", 0),
         eval_episodes: args.usize_or("--eval-episodes", 24),
         play: args.usize_or("--play", 3),
         transcript: args.take_str("--transcript"),
@@ -243,8 +249,12 @@ fn run() -> Result<(), String> {
     let mut env = DoomEnv::new(game, args.cfg.clone(), args.mission, args.mix);
     env.set_arena(args.arena);
     env.set_curriculum(args.curriculum);
+    env.set_start_back(args.start_back);
     if args.curriculum {
-        println!("doom: reverse curriculum - episodes start at the exit and walk back");
+        println!(
+            "doom: reverse curriculum - episodes start {} decisions back from the exit",
+            args.start_back
+        );
     }
     if args.arena > 0 {
         println!("doom: arena - {} monsters placed around the player each episode", args.arena);

@@ -110,3 +110,65 @@ mod tests {
         assert!(e.contains("carries 1 bytes"), "{e}");
     }
 }
+
+/// The explored map, as the engine's own grid.
+///
+/// Drawn by the inspector so a viewer can see what the agent knows: where it
+/// can go, where it has been, and which way it is facing. Comes from the same
+/// grid the route and frontier searches read, so the picture and the decision
+/// cannot disagree.
+#[derive(Clone, Default)]
+pub struct Map {
+    pub width: u32,
+    pub height: u32,
+    /// One byte a cell: 0 unreachable, 1 reachable, 2 walked.
+    pub cells: Vec<u8>,
+    /// The player's cell and facing, when the engine reported one.
+    pub player: Option<(u32, u32, i32)>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MapWire {
+    width: u32,
+    height: u32,
+    #[allow(dead_code)]
+    cell: u32,
+    #[allow(dead_code)]
+    legend: String,
+    cells: String,
+    player: Option<MapPlayer>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MapPlayer {
+    x: u32,
+    y: u32,
+    angle: i32,
+}
+
+impl Map {
+    pub fn is_empty(&self) -> bool {
+        self.cells.is_empty()
+    }
+
+    pub fn parse(json: &str) -> Result<Map, String> {
+        let w: MapWire = serde_json::from_str(json).map_err(|e| format!("unreadable map: {e}"))?;
+        let cells = base64(&w.cells)?;
+        if cells.len() != (w.width * w.height) as usize {
+            return Err(format!(
+                "map says {}x{} but carries {} cells",
+                w.width,
+                w.height,
+                cells.len()
+            ));
+        }
+        Ok(Map {
+            width: w.width,
+            height: w.height,
+            cells,
+            player: w.player.map(|p| (p.x, p.y, p.angle)),
+        })
+    }
+}
