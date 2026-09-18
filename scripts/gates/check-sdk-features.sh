@@ -48,9 +48,14 @@ TIERS = {"device", "resolve", "imagetype", "full", "default", "viewport"}
 # `Domain` variant either: `auto` is a DISPATCH surface crossing every other
 # one (`brain::AutoPipeline` hands back whichever concrete pipeline type a
 # model id resolves to), not a claim about one architecture's modality - see
-# `crates/sdk/src/auto.rs`'s own module doc. An explicit, named exception
-# here rather than silently widening rule 1's own check for everyone.
-CROSS_CUTTING = {"auto"}
+# `crates/sdk/src/auto.rs`'s own module doc. `study` is the same shape from
+# the other direction: it is a TRAINING capability layered on top of
+# existing `Domain::Text` architectures (its own `ARCHS` registry in
+# `crates/sdk/src/study.rs` is qwen3/qwen35/qwen35moe, each already
+# `Domain::Text`), bounded by the tokenizer they share rather than by any
+# one modality - see that module's own doc. Explicit, named exceptions here
+# rather than silently widening rule 1's own check for everyone.
+CROSS_CUTTING = {"auto", "study"}
 surfaces = sorted(set(feats) - TIERS - CROSS_CUTTING)
 
 # 1. surface names are brain_arch::Domain variants, kebab-cased.
