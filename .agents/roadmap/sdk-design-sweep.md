@@ -92,7 +92,7 @@ here (items already tracked there are not repeated - see that file's own
 | 8 | 9/4 | `crates/sdk/src/creature.rs:492-500` | `set_plasticity`/`reward` mutate learned synapse weights with no `save()`/`load()` counterpart - all learning dies with the process | open (backlog) |
 | 9 | 7 | `crates/sdk/src/creature.rs:157` | `Creature::build` acquires its GPU via `gpu_core::testgpu::dev` - TEST-SUPPORT infra, weak-reference lifetime, shipping on the production SDK path | fixed (M3) |
 | 10 | 7/13 | `crates/sdk/src/creature.rs` + `Cargo.toml` | `CreatureBuilder` has no `Device` knob at all, yet the `creature` feature's doc comment claims it "selects `device`" | fixed (M3) |
-| 11 | 5 | `crates/sdk/src/pipeline.rs:416-424,432-435` | `ImagePipelineBuilder::size` is silently IGNORED on a flux2-backed pipeline (the s3dit half of this asymmetry is tracked in `sdk.md`; the flux2 silent no-op was not) | open (backlog) |
+| 11 | 5 | `crates/sdk/src/pipeline.rs:416-424,432-435` | `ImagePipelineBuilder::size` is silently IGNORED on a flux2-backed pipeline (the s3dit half of this asymmetry is tracked in `sdk.md`; the flux2 silent no-op was not) | fixed (M10b) |
 | 12 | 6 | `crates/sdk/src/error.rs:62-66` | `Error::Backend` is an untyped catch-all for ~8 semantically distinct failures (license refusal, no models dir, size mismatch, bad extension, missing builder arg, GPU/MuJoCo failure...) | partially fixed (M6 - see below) |
 | 13 | 6 | `crates/sdk/src/creature.rs:129-130` | a caller-programming error (missing required builder field) is typed as `Error::Backend`, indistinguishable from a real backend crash | fixed (M6) |
 | 14 | 8/4 | `crates/sdk/src/creature.rs:276-278,414-416` | `wiring()`/`wing_wiring()` return a pre-rendered human summary string; no structured/programmatic accessor | open (backlog) |
@@ -368,6 +368,24 @@ including the `samples/imagegen/*` samples that link `crates/sdk` directly.
       duplication section above. 4 new unit tests in `build.rs` plus full
       regression runs across `brain-flux2`/`brain-cli`/`brain` (sdk) and a
       whole-workspace build - see that section for exact counts.
+- [x] **M10b** - finding 11: `ImagePipelineBuilder::size` was silently
+      IGNORED on a flux2-backed pipeline (flux2 always built at its own
+      1024x1024 default forward-token ceiling regardless of what a caller
+      asked for). New `forward_tokens_for(width, height)` reuses flux2's own
+      `gen_tokens_per_forward` at a caller-chosen canvas instead of the
+      hardcoded default; `ImagePipelineBuilder::load_with_progress` picks it
+      when `.size(...)` was called. Also fixed the same bug's other half:
+      `ImagePipeline::load_lora`'s flux2 rebuild recomputed
+      `default_forward_tokens()` from scratch, so folding an adapter in
+      would have silently SHRUNK a caller-requested ceiling back to the
+      default - `Flux2Backend` now records its own built `forward_tokens`
+      (mirroring `S3ditBackend::width`/`height`'s existing pattern) and
+      `load_lora` reuses it. 2 new unit tests
+      (`forward_tokens_for_matches_the_default_at_the_default_canvas`,
+      `forward_tokens_for_grows_with_a_larger_requested_canvas`); no fixture
+      test possible past this point without a real multi-GB flux2 build (the
+      same documented ceiling `tests/image_pipeline.rs`'s own module doc
+      explains).
 - [ ] **Phase 2** - new pipelines, in the priority order above: Forecast, Text, Embedding, ASR, then the rest. Each gets its own sub-roadmap section here (or its own file, linked from here) when it starts, written against the full `sdk-design.md` checklist from day one - including an end-to-end test, learning from M10 rather than repeating the `flux2_cli.rs` duplication gap a second time. Design each pipeline's progress/cancellation surface (rule 8) toward the `run.start()/subscribe()/cancel()/result()` shape `.agents/roadmap/orchestration-hsm.md` proposes, rather than reinventing M5's synchronous `generate_with_progress(cancel, on_progress)` a second time - M5's shape stays the right SIMPLE default, but a new pipeline's ADVANCED tier should point at where this is heading.
   - [x] **Phase 2.1** - `ForecastPipeline` (kronos, timesfm3).
   - [x] **Phase 2.2** - `TextGenerationPipeline` (qwen3 only, local path only at first).

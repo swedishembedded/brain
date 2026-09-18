@@ -147,6 +147,18 @@ fn default_forward_tokens() -> u32 {
     flux2::pipeline::gen_tokens_per_forward(&flux2::GenOpts::default())
 }
 
+/// [`default_forward_tokens`] at a caller-chosen canvas
+/// ([`ImagePipelineBuilder::size`]) instead of flux2's own 1024x1024
+/// default -- the same `gen_tokens_per_forward` computation, over a
+/// [`flux2::GenOpts`] with only `width`/`height` overridden (`tile` and
+/// every other field stay at `GenOpts::default()`, exactly like
+/// [`default_forward_tokens`] itself), so a larger requested canvas gets a
+/// larger built ceiling rather than being silently capped at the default
+/// one.
+fn forward_tokens_for(width: u32, height: u32) -> u32 {
+    flux2::pipeline::gen_tokens_per_forward(&flux2::GenOpts { width, height, ..flux2::GenOpts::default() })
+}
+
 /// The s3dit-backed pipeline's build-time size default, when
 /// [`ImagePipelineBuilder::size`] is never called: flux2's own default
 /// canvas ([`flux2::GenOpts::default`]) so the two backends agree on "the
@@ -203,6 +215,14 @@ struct Flux2Backend {
     cfg: flux2::Flux2Config,
     paths: flux2::Paths,
     precision: DType,
+    /// The forward-token ceiling this pipeline was BUILT for
+    /// ([`default_forward_tokens`] or, when [`ImagePipelineBuilder::size`]
+    /// was called, [`forward_tokens_for`]) -- read back by
+    /// [`ImagePipeline::load_lora`]'s rebuild so folding an adapter in never
+    /// silently shrinks a caller-requested ceiling back to the default, the
+    /// same class of bug [`S3ditBackend::width`]/`height` already guards
+    /// against on the other backend.
+    forward_tokens: u32,
     /// The one adapter folded in, if any -- flux2's `Pipeline` only takes
     /// adapters at BUILD time (`Pipeline::build_sized`'s `adapters:
     /// &[AdapterSpec]`; there is no post-construction "add an adapter" call
@@ -246,7 +266,15 @@ pub struct ImagePipeline {
 impl std::fmt::Debug for ImagePipeline {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.backend {
-            Backend::Flux2(b) => f.debug_struct("ImagePipeline").field("backend", &"flux2").field("cfg", &b.cfg).field("paths", &b.paths).field("precision", &b.precision).field("adapter", &b.adapter).finish(),
+            Backend::Flux2(b) => f
+                .debug_struct("ImagePipeline")
+                .field("backend", &"flux2")
+                .field("cfg", &b.cfg)
+                .field("paths", &b.paths)
+                .field("precision", &b.precision)
+                .field("forward_tokens", &b.forward_tokens)
+                .field("adapter", &b.adapter)
+                .finish(),
             Backend::S3dit(b) => f.debug_struct("ImagePipeline").field("backend", &"s3dit").field("paths", &b.paths).field("width", &b.width).field("height", &b.height).field("hifi", &b.hifi).field("adapter", &b.adapter).finish(),
         }
     }
@@ -304,7 +332,7 @@ impl ImagePipeline {
             Backend::Flux2(b) => {
                 b.adapter = Some(spec);
                 let adapters: Vec<flux2::AdapterSpec> = b.adapter.iter().cloned().collect();
-                let n = default_forward_tokens();
+                let n = b.forward_tokens;
                 b.pipe = flux2::Pipeline::build_sized(&b.cfg, &b.paths, n, n, &adapters, b.precision, 1).map_err(Error::Backend)?;
             }
             Backend::S3dit(b) => {
@@ -454,13 +482,13 @@ impl ImagePipelineBuilder {
 
     /// The pipeline's build-time size.
     ///
-    /// On a flux2-backed pipeline this is currently UNUSED: flux2 stays
-    /// sized at its own conservative default ceiling
-    /// ([`default_forward_tokens`]) regardless, and per-call sizing keeps
-    /// working through [`ImageGenerationOptions::size`] up to that ceiling,
-    /// exactly as it did before this method existed. Accepted (not refused)
-    /// on a flux2-backed builder anyway, so calling code that does not yet
-    /// know which backend it will get does not have to special-case it.
+    /// On a flux2-backed pipeline this sets the built forward-token ceiling
+    /// ([`forward_tokens_for`]) instead of flux2's own conservative
+    /// 1024x1024 default ([`default_forward_tokens`]) -- a caller who knows
+    /// they need a larger canvas than the default no longer has to hit a
+    /// silent cap at generate time; [`ImageGenerationOptions::size`] still
+    /// works per call, up to WHATEVER ceiling this method (or its default)
+    /// set, exactly as before.
     ///
     /// On an s3dit-backed pipeline this IS the build shape
     /// (`HotPipeline::build_adapted`'s `width`/`height`) -- s3dit has no
@@ -495,10 +523,12 @@ impl ImagePipelineBuilder {
     ///    whatever [`DType`] was requested; s3dit: `hifi = dtype ==
     ///    DType::F32`, the literal "fp32 execution" reading of `DType::F32`).
     /// 5. The backend's own `build_sized`/`build_adapted` builds the
-    ///    pipeline: flux2 at this milestone's conservative defaults (no
-    ///    adapters, a 1024x1024 forward/output ceiling, `max_batch = 1`);
-    ///    s3dit at [`ImagePipelineBuilder::size`]'s width/height (no
-    ///    adapter, [`s3dit::pipeline::DEFAULT_CAP_LEN`] caption capacity).
+    ///    pipeline: flux2 at no adapters, `max_batch = 1`, and a
+    ///    forward/output token ceiling derived from
+    ///    [`ImagePipelineBuilder::size`] when set (else its own conservative
+    ///    1024x1024 default); s3dit at [`ImagePipelineBuilder::size`]'s
+    ///    width/height directly (no adapter,
+    ///    [`s3dit::pipeline::DEFAULT_CAP_LEN`] caption capacity).
     ///
     /// Every failure path returns a typed [`Error`] -- never a panic on a
     /// caller-reachable input.
@@ -571,10 +601,10 @@ impl ImagePipelineBuilder {
                 let variant_name = assembly.variant.clone().ok_or_else(|| Error::Backend(format!("flux2: resolved assembly {:?} has no variant", assembly.id)))?;
                 flux2::caps::check_license(&variant_name).map_err(Error::LicenseRequired)?;
 
-                let n = default_forward_tokens();
+                let n = size.map(|(w, h)| forward_tokens_for(w, h)).unwrap_or_else(default_forward_tokens);
                 let (pipe, cfg, precision, _variant) = flux2::build_resolved(flux2::VariantSource::Assembly(&assembly), &paths, n, n, &[], dtype, false, 1).map_err(Error::Backend)?;
 
-                Ok(ImagePipeline { backend: Backend::Flux2(Box::new(Flux2Backend { pipe, cfg, paths, precision, adapter: None })) })
+                Ok(ImagePipeline { backend: Backend::Flux2(Box::new(Flux2Backend { pipe, cfg, paths, precision, forward_tokens: n, adapter: None })) })
             }
             ResolvedArch::S3dit(assembly) => {
                 let paths = s3dit::pipeline::Paths::from_assembly(&assembly).map_err(Error::Backend)?;
@@ -631,6 +661,27 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("not yet wired"), "{msg}");
         assert!(matches!(err, Error::Backend(_)));
+    }
+
+    /// [`forward_tokens_for`] at flux2's own default canvas matches
+    /// [`default_forward_tokens`] exactly -- the whole point of routing
+    /// through the SAME `gen_tokens_per_forward` computation rather than a
+    /// second, hand-derived formula that could silently drift from it.
+    #[test]
+    fn forward_tokens_for_matches_the_default_at_the_default_canvas() {
+        let want = default_forward_tokens();
+        let d = flux2::GenOpts::default();
+        assert_eq!(forward_tokens_for(d.width, d.height), want);
+    }
+
+    /// The real gap finding 11 documented: a caller who asks for a LARGER
+    /// canvas than flux2's own 1024x1024 default must get a larger built
+    /// ceiling, not a silent cap back down to the default.
+    #[test]
+    fn forward_tokens_for_grows_with_a_larger_requested_canvas() {
+        let default_n = default_forward_tokens();
+        let bigger_n = forward_tokens_for(2048, 2048);
+        assert!(bigger_n > default_n, "2048x2048 ({bigger_n}) must need more forward tokens than the 1024x1024 default ({default_n})");
     }
 
     /// Every [`ImageGenerationOptions`] field left unset keeps flux2's own
