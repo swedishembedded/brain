@@ -157,11 +157,19 @@ struct Params {
 // current. These two and a tonic bias (which needs no kernel support, since
 // the drive port already carries per-neuron current) are the physiological
 // parameters a connectome does not contain and a fitted model has to supply.
-@group(0) @binding(7) var<storage, read>       tau_scale:  array<f32>;
-@group(0) @binding(8) var<storage, read>       gain_scale: array<f32>;
+//
+// INTERLEAVED `(tau_scale, gain_scale)` per neuron, in ONE binding, because
+// the budget is eight storage buffers (the WebGPU minimum limit) and two
+// separate arrays put this kernel at nine - at which point wgpu refuses to
+// create the pipeline at all and the kernel has no GPU path. They pair
+// naturally: both are per-neuron multipliers on a uniform parameter, always
+// written together by `SpikingNet::set_cell_scales`, and always read together
+// for the same `i`, so one fetch of `cell[2i]`/`cell[2i+1]` also touches one
+// cache line instead of two.
+@group(0) @binding(7) var<storage, read>       cell:    array<f32>;
 /// Fraction of each neuron's vesicle pool still available, one per PREsynaptic
 /// neuron. Read by `syn_gather_csc` when it weighs that neuron's spikes.
-@group(0) @binding(9) var<storage, read_write> depress:    array<f32>;
+@group(0) @binding(8) var<storage, read_write> depress: array<f32>;
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>,
@@ -191,8 +199,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
         return;
     }
 
-    let a = p.a * tau_scale[i];
-    let r = p.r * gain_scale[i];
+    let a = p.a * cell[2u * i];
+    let r = p.r * cell[2u * i + 1u];
     let g_e = max(syn[2u * i], 0.0) * r;
     let g_i = max(-syn[2u * i + 1u], 0.0) * r;
 

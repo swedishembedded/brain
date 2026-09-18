@@ -270,11 +270,16 @@ pub struct SpikingNet {
     isyn: DeviceBuffer,
     /// Spike-frequency adaptation current, one per neuron.
     adapt: DeviceBuffer,
-    /// Per-neuron multipliers on `dt/tau` and on the input resistance. Both
-    /// are 1.0 unless [`SpikingNet::set_cell_scales`] says otherwise, and at
-    /// 1.0 the arithmetic is exactly the uniform model's.
-    tau_scale: DeviceBuffer,
-    gain_scale: DeviceBuffer,
+    /// Per-neuron multipliers on `dt/tau` and on the input resistance,
+    /// INTERLEAVED `(tau, gain)` per neuron in one buffer. Both are 1.0 unless
+    /// [`SpikingNet::set_cell_scales`] says otherwise, and at 1.0 the
+    /// arithmetic is exactly the uniform model's.
+    ///
+    /// One buffer rather than two because `lif_step` is on the eight-storage-
+    /// buffer budget (`crates/kernels/tests/binding_budget.rs`); they pair
+    /// naturally, being written together and read together for the same
+    /// neuron.
+    cell: DeviceBuffer,
     /// Presynaptic vesicle pool, one per neuron. 1.0 is fully recovered.
     depress: DeviceBuffer,
     /// Excitatory and inhibitory current, interleaved `(e, i)` per neuron, so
@@ -350,11 +355,9 @@ impl SpikingNet {
         let adapt = gpu.buffer("neuro.adapt", nb, live);
         let syn = gpu.buffer("neuro.syn", bytes(2 * n as usize), live);
         let drive = gpu.buffer("neuro.drive", nb, live);
-        let tau_scale = gpu.buffer("neuro.tau_scale", nb, live);
-        let gain_scale = gpu.buffer("neuro.gain_scale", nb, live);
+        let cell = gpu.buffer("neuro.cell", bytes(2 * n as usize), live);
         let depress = gpu.buffer("neuro.depress", nb, live);
-        gpu.write_f32(&tau_scale, &vec![1.0; n as usize]);
-        gpu.write_f32(&gain_scale, &vec![1.0; n as usize]);
+        gpu.write_f32(&cell, &vec![1.0; 2 * n as usize]);
         gpu.write_f32(&depress, &vec![1.0; n as usize]);
 
         let mut net = SpikingNet {
@@ -370,8 +373,7 @@ impl SpikingNet {
             spike,
             isyn,
             adapt,
-            tau_scale,
-            gain_scale,
+            cell,
             depress,
             syn,
             drive,
@@ -655,8 +657,13 @@ impl SpikingNet {
                 return Err(format!("{name} must be positive and finite, got {bad}"));
             }
         }
-        self.gpu.write_f32(&self.tau_scale, tau_scale);
-        self.gpu.write_f32(&self.gain_scale, gain_scale);
+        // Interleaved `(tau, gain)` per neuron, the layout `lif_step` reads.
+        let mut cell = vec![0.0f32; 2 * n];
+        for i in 0..n {
+            cell[2 * i] = tau_scale[i];
+            cell[2 * i + 1] = gain_scale[i];
+        }
+        self.gpu.write_f32(&self.cell, &cell);
         Ok(())
     }
 
@@ -715,8 +722,7 @@ impl DynamicalSystem for SpikingNet {
                 &self.drive,
                 &self.spike,
                 &self.adapt,
-                &self.tau_scale,
-                &self.gain_scale,
+                &self.cell,
                 &self.depress,
             ],
             &self.lif_params(),
