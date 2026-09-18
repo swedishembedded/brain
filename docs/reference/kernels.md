@@ -211,6 +211,7 @@ load of it must already be bare-identifier-indexed.
 | [`elu`](../../crates/kernels/wgsl/elu.wgsl) | ELU (Exponential Linear Unit) forward:  y = x  if x > 0, y = alpha*(exp(x)-1) otherwise | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - | f32 |
 | [`elu_bwd`](../../crates/kernels/wgsl/elu_bwd.wgsl) | ELU backward - gradient w.r.t | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - | f32 |
 | [`emb_bwd`](../../crates/kernels/wgsl/emb_bwd.wgsl) | Embedding backward (also the tied lm_head's weight) | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | - | - | f32 |
+| [`emb_bwd_uniq`](../../crates/kernels/wgsl/emb_bwd_uniq.wgsl) | Embedding backward over the DISTINCT looked-up rows only - compact twin of emb_bwd | one thread per (distinct row, channel), serial scan of the tokens | 3/5 | ✓ | ✓ | - | - | f32 |
 | [`embed`](../../crates/kernels/wgsl/embed.wgsl) | Embedding gather: x[t, c] = emb[token[t], c] | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - | f32\|bf16\|f16 |
 | [`embed_tile`](../../crates/kernels/wgsl/embed_tile.wgsl) | Embedding gather over a VOCAB TILE | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - | f32\|bf16\|f16 |
 | [`exp`](../../crates/kernels/wgsl/exp.wgsl) | Elementwise exponential | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - | f32 |
@@ -315,7 +316,7 @@ load of it must already be bare-identifier-indexed.
 | [`layernorm_rows`](../../crates/kernels/wgsl/layernorm_rows.wgsl) | LayerNorm forward, one WORKGROUP per row - the coalesced variant | 64-thread workgroup tile, 1 barrier | 4/5 | ✓ | ✓ | ✓ | - | f32 |
 | [`leaky_relu`](../../crates/kernels/wgsl/leaky_relu.wgsl) | Leaky ReLU forward:  y = x        if x >= 0 y = slope*x  otherwise | one thread per output element | 3/5 | native | ✓ | ✓ | - | f32 |
 | [`leaky_relu_bwd`](../../crates/kernels/wgsl/leaky_relu_bwd.wgsl) | Leaky ReLU backward - gradient w.r.t | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - | f32 |
-| [`lif_step`](../../crates/kernels/wgsl/lif_step.wgsl) | Leaky integrate-and-fire membrane update, threshold, reset and refractory countdown | one thread per neuron | 3/5 | ✓ | ✓ | - | - | f32 |
+| [`lif_step`](../../crates/kernels/wgsl/lif_step.wgsl) | Leaky integrate-and-fire membrane update, with per-neuron physiology, threshold, reset and refractory countdown | one thread per neuron | 3/5 | ✓ | ✓ | - | - | f32 |
 | [`ln_head`](../../crates/kernels/wgsl/ln_head.wgsl) | Strided per-head LayerNorm (QK-norm) | one thread per output element, 3 nested serial reductions | 1/5 | ✓ | ✓ | - | - | f32 |
 | [`ln_head_dgb`](../../crates/kernels/wgsl/ln_head_dgb.wgsl) | Strided per-head LayerNorm backward (parameter grads) | one thread per output element, 4 nested serial reductions | 1/5 | ✓ | ✓ | - | - | f32 |
 | [`ln_head_dx`](../../crates/kernels/wgsl/ln_head_dx.wgsl) | Strided per-head LayerNorm backward (input grad), the ln_head companion | one thread per output element, 4 nested serial reductions | 1/5 | ✓ | ✓ | - | - | f32 |
@@ -390,7 +391,8 @@ load of it must already be bare-identifier-indexed.
 | [`na3d_scores`](../../crates/kernels/wgsl/na3d_scores.wgsl) | 3D neighborhood-attention (windowed, self-attention) QK scores | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | - | - | f32 |
 | [`nchw_nlc`](../../crates/kernels/wgsl/nchw_nlc.wgsl) | Layout permutation NCHW -> NLC [N, L=H*W, C] (gather) - spec | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
 | [`neuro_elig`](../../crates/kernels/wgsl/neuro_elig.wgsl) | Per-synapse eligibility trace over a CSC column: e <- e*decay + x_pre*x_post | one thread per postsynaptic neuron over its edge range, no barrier | 3/5 | ✓ | ✓ | - | - | f32 |
-| [`neuro_learn`](../../crates/kernels/wgsl/neuro_learn.wgsl) | Three-factor weight update: w <- clamp(w + eta*e*delta, w_min, w_max) | one thread per synapse | 3/5 | ✓ | ✓ | - | - | f32 |
+| [`neuro_learn`](../../crates/kernels/wgsl/neuro_learn.wgsl) | Three-factor weight update at sited synapses: w <- clamp(w + eta*m[site]*e, lo, hi) | one thread per synapse | 3/5 | ✓ | ✓ | - | - | f32 |
+| [`neuro_modulate`](../../crates/kernels/wgsl/neuro_modulate.wgsl) | Per-compartment neuromodulator from its own neurons' spikes | one thread per compartment over its source list, no barrier | 3/5 | ✓ | ✓ | - | - | f32 |
 | [`neuro_trace`](../../crates/kernels/wgsl/neuro_trace.wgsl) | Exponentially-decaying activity trace: x <- x*decay + spike | one thread per neuron | 3/5 | ✓ | ✓ | - | - | f32 |
 | [`nlc_bias_nchw`](../../crates/kernels/wgsl/nlc_bias_nchw.wgsl) | NLC -> NCHW with a per-channel bias - the epilogue of a conv lowered to a row-major GEMM | 64-thread workgroup tile, 1 barrier | 4/5 | ✓ | ✓ | - | - | f32 |
 | [`nlc_nchw`](../../crates/kernels/wgsl/nlc_nchw.wgsl) | Layout permutation NLC [N, L=H*W, C] -> NCHW (gather) - exact inverse AND adjoint of nchw_nlc | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
