@@ -174,6 +174,67 @@ fn write_cosyvoice_checkpoint(root: &Path) {
     write_cosyvoice_tokenizer_json(&root.join("FunAudioLLM").join("CosyVoice-BlankEN").join("tokenizer.json"));
 }
 
+/// CosyVoice 3's llm.pt shape: no `llm_embedding.weight` (the
+/// `Qwen2LM`-vs-`CosyVoice3LM` split `cosyvoice::spec::llm_variant` tells
+/// apart by that tensor's ABSENCE, not a name of its own) - mirrors
+/// `cosyvoice::spec::tests`' own `write_llm_pt` at `Variant::CosyVoice3`.
+fn write_cosyvoice3_llm_pt(path: &Path) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    checkpoint::torchpt_write::write(
+        path.to_str().unwrap(),
+        &[
+            t("llm.model.model.embed_tokens.weight", vec![COSYVOICE_TOY_TEXT_VOCAB, 32]),
+            t("speech_embedding.weight", vec![6561, 32]),
+            t("llm_decoder.weight", vec![6561, 32]),
+        ],
+    )
+    .unwrap();
+}
+
+/// CosyVoice 3's flow.pt shape (`decoder.estimator.transformer_blocks.*`,
+/// the DiT estimator rather than CosyVoice 2's UNet) - mirrors
+/// `cosyvoice::spec::tests`' own `write_flow_pt` at `Variant::CosyVoice3`.
+fn write_cosyvoice3_flow_pt(path: &Path) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    checkpoint::torchpt_write::write(
+        path.to_str().unwrap(),
+        &[
+            t("input_embedding.weight", vec![6561, 80]),
+            t("spk_embed_affine_layer.weight", vec![80, 192]),
+            t("decoder.estimator.transformer_blocks.0.attn.to_q.weight", vec![1024, 1024]),
+        ],
+    )
+    .unwrap();
+}
+
+/// CosyVoice 3's hift.pt shape (`conv_pre`'s weight-normed kernel width 5,
+/// vs CosyVoice 2's 7) - mirrors `cosyvoice::spec::tests`' own
+/// `write_hift_pt` at `Variant::CosyVoice3`.
+fn write_cosyvoice3_hift_pt(path: &Path) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    checkpoint::torchpt_write::write(
+        path.to_str().unwrap(),
+        &[
+            t("f0_predictor.classifier.weight", vec![1, 512]),
+            t("m_source.l_linear.weight", vec![1, 8]),
+            t("conv_pre.parametrizations.weight.original0", vec![512, 1, 1]),
+            t("conv_pre.parametrizations.weight.original1", vec![512, 80, 5]),
+        ],
+    )
+    .unwrap();
+}
+
+/// A full, unambiguous CosyVoice 3 fixture - the same real-world layout
+/// [`write_cosyvoice_checkpoint`] documents for CosyVoice 2, at CosyVoice
+/// 3's own tensor shapes.
+fn write_cosyvoice3_checkpoint(root: &Path) {
+    let vendor = root.join("FunAudioLLM").join("CosyVoice3-0.5B");
+    write_cosyvoice3_llm_pt(&vendor.join("llm.pt"));
+    write_cosyvoice3_flow_pt(&vendor.join("flow.pt"));
+    write_cosyvoice3_hift_pt(&vendor.join("hift.pt"));
+    write_cosyvoice_tokenizer_json(&root.join("FunAudioLLM").join("CosyVoice-BlankEN").join("tokenizer.json"));
+}
+
 /// `CosyVoicePaths::from_assembly` reads `BRAIN_S3TOKENIZER_V2`/
 /// `BRAIN_CAMPPLUS_DIR` directly (see that function's own doc: both roles
 /// are not yet resolver-migrated) - this only needs to exist, not hold real
@@ -321,4 +382,36 @@ fn clone_voice_without_ref_text_is_a_missing_argument_error_on_a_cosyvoice_resol
         .expect("a content-classifiable CosyVoice 2 checkpoint must resolve and pass the existence check");
 
     assert!(matches!(pipe.clone_voice("hello", &voice, None).unwrap_err(), brain::Error::MissingArgument(_)));
+}
+
+/// The roadmap's own tracked gap: `CosyVoiceSpec::classify` has told
+/// CosyVoice 2 and 3 apart by tensor content since Phase 4.2 landed (see
+/// `cosyvoice::spec::tests::classify_tells_cosyvoice2_and_cosyvoice3_*_apart_by_*`),
+/// but until now nothing proved `TtsPipeline::from_pretrained` itself
+/// resolves a CosyVoice 3-shaped checkpoint end to end - only CosyVoice 2
+/// had SDK-level coverage. Same ceiling as the CosyVoice 2 fixture test
+/// above: resolution and the existence check succeed against fake tensor
+/// content, and `.clone_voice_with(..., TtsOptions::new().variant("cosyvoice3"))`
+/// (required - see [`TtsOptions::variant`]'s own doc: the default is
+/// CosyVoice 2, independent of which generation actually resolved) reaches
+/// `cosyvoice::pipeline::generate`'s real CosyVoice 3 branch
+/// (`CosyVoiceLm::load_cosyvoice3`), which fails cleanly on the fake
+/// CAM++/S3Tokenizer content rather than resolution itself failing.
+#[test]
+fn from_pretrained_resolves_cosyvoice3_from_a_real_local_fixture_with_no_network_access() {
+    let root = scratch_root("resolve-cosyvoice3");
+    write_cosyvoice3_checkpoint(&root);
+    write_unrelated_sibling(&root);
+    let voice = root.join("reference.wav");
+    write_wav(&voice, 1.0, 16000);
+
+    let pipe = with_models_dir(&root, || with_cosyvoice_env(&root, || brain::TtsPipeline::from_pretrained("FunAudioLLM/CosyVoice3-0.5B")));
+    let pipe = pipe.expect("a content-classifiable CosyVoice 3 checkpoint (fake tensor content, real shapes) must resolve and pass the existence check");
+
+    let opts = brain::TtsOptions::new().variant("cosyvoice3");
+    let err = pipe.clone_voice_with("hello from a fixture", &voice, Some("the reference transcript"), opts).unwrap_err();
+    match err {
+        brain::Error::Backend(msg) => assert!(!msg.is_empty(), "must name what went wrong"),
+        other => panic!("expected a clean Error::Backend from the fake CAM++/S3Tokenizer content, got {other:?}"),
+    }
 }
