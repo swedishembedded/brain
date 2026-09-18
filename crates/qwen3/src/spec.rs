@@ -51,11 +51,14 @@ pub struct Qwen3Spec;
 const ROLES: &[&str] = &["weights", "tokenizer"];
 
 /// `general.architecture` a Qwen3 GGUF release declares
-/// (`crate::gguf_import::GGUF_ARCHITECTURE`).
-const GGUF_ARCHITECTURE: &str = "qwen3";
+/// (`crate::gguf_import::GGUF_ARCHITECTURE`). `pub`, not `pub(crate)`: also
+/// read directly by `crates/sdk/src/text.rs`'s own local-path architecture
+/// check, the same literal rather than a second copy that could drift.
+pub const GGUF_ARCHITECTURE: &str = "qwen3";
 /// `ModelCard.family` a brain-format Qwen3 checkpoint declares
-/// (`crate::import::convert`'s own `ModelCard::new(id, "qwen")`).
-const CARD_FAMILY: &str = "qwen";
+/// (`crate::import::convert`'s own `ModelCard::new(id, "qwen")`). `pub` for
+/// the same reason as [`GGUF_ARCHITECTURE`].
+pub const CARD_FAMILY: &str = "qwen";
 
 fn classify_gguf(idx: usize, rec: &ArtifactRecord, out: &mut Vec<(usize, String, Confidence)>) {
     let Ok(g) = MmapGguf::open(&rec.path.to_string_lossy()) else { return };

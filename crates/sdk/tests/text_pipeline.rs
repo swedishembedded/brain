@@ -147,3 +147,33 @@ fn an_explicit_but_nonexistent_tokenizer_path_fails_cleanly() {
         other => panic!("expected a clean Error::Backend from the bad tokenizer path, got {other:?}"),
     }
 }
+
+/// A LOCAL path whose checkpoint positively declares a DIFFERENT
+/// architecture (`ModelCard.family == "qwen35"`, not qwen3's own `"qwen"`)
+/// is refused BEFORE `Qwen::load_inference` -- the local-path counterpart
+/// to what `Qwen3Spec::classify` already guarantees for free on the hub-id
+/// path (see `check_local_weights_architecture`'s own doc in
+/// `crates/sdk/src/text.rs`). Without this check, this exact fixture would
+/// instead reach `Qwen::load_inference`'s panic-on-mismatched-tensor-names
+/// deep inside model construction -- the same class of unchecked panic this
+/// module's own `WeightReader::open`-before-`load_inference` ordering
+/// already guards against for a bad PATH, now also guarded for a bad
+/// ARCHITECTURE at a real, openable one.
+#[test]
+fn a_local_checkpoint_declaring_a_different_architecture_is_refused_before_load_inference() {
+    static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("brain-sdk-text-pipeline-wrong-arch-{}-{n}.safetensors", std::process::id()));
+    let card = checkpoint::st::ModelCard::new("some/qwen35-checkpoint", "qwen35");
+    checkpoint::st::save_safetensors(path.to_str().unwrap(), &[("w".to_string(), vec![4], vec![1.0f32, 2.0, 3.0, 4.0])], &serde_json::json!({}), Some(&card)).unwrap();
+
+    let err = brain::TextGenerationPipeline::from_pretrained(path.to_str().unwrap()).unwrap_err();
+    std::fs::remove_file(&path).ok();
+    match &err {
+        brain::Error::Backend(msg) => {
+            assert!(msg.contains("qwen35"), "{msg}");
+            assert!(msg.contains("qwen"), "{msg}");
+        }
+        other => panic!("expected a clean Error::Backend naming the architecture mismatch, got {other:?}"),
+    }
+}

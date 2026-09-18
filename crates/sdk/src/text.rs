@@ -311,7 +311,12 @@ impl TextGenerationPipelineBuilder {
 
         crate::device::apply(&device)?;
 
-        let (weights, resolved_tokenizer) = if Path::new(&weights).is_file() { (weights, None) } else { resolve_hub_weights(&weights)? };
+        let (weights, resolved_tokenizer) = if Path::new(&weights).is_file() {
+            check_local_weights_architecture(&weights)?;
+            (weights, None)
+        } else {
+            resolve_hub_weights(&weights)?
+        };
 
         let reader = checkpoint::weightio::WeightReader::open(&weights).map_err(|e| Error::Backend(format!("qwen3: {weights}: {e}")))?;
         let cfg = qwen3::QwenConfig::from_json(&reader.config());
@@ -332,6 +337,37 @@ impl TextGenerationPipelineBuilder {
 
         Ok(TextGenerationPipeline { model, tok, capacity })
     }
+}
+
+/// A LOCAL path's own counterpart to what `Qwen3Spec::classify` already
+/// guarantees for free on the hub-id path: refuse a checkpoint by name that
+/// positively declares a DIFFERENT architecture, rather than reaching
+/// `qwen3::Qwen::load_inference`'s panic-on-mismatched-tensor-names deep
+/// inside the model build (the same class of unchecked-panic gap this
+/// module's `WeightReader::open`-before-`load_inference` ordering already
+/// guards against for a bad PATH -- this guards the same call for a bad
+/// ARCHITECTURE at a real, openable path). Only refuses on POSITIVE
+/// evidence of a mismatch (`general.architecture`/`ModelCard.family` both
+/// present and different from qwen3's own) -- a checkpoint that carries
+/// neither marker at all (an unlabeled `.safetensors`, or a `.gguf` with no
+/// `general.architecture` KV) is let through unchanged, exactly like
+/// `Qwen3Spec::classify_gguf`/`classify_safetensors` themselves only assert
+/// a POSITIVE match rather than reject an absence of one.
+fn check_local_weights_architecture(weights: &str) -> Result<()> {
+    if weights.ends_with(".gguf") {
+        if let Ok(g) = checkpoint::gguf::MmapGguf::open(weights) {
+            if let Some(arch) = g.kv().get("general.architecture").and_then(|v| v.as_str()) {
+                if arch != qwen3::spec::GGUF_ARCHITECTURE {
+                    return Err(Error::Backend(format!("{weights}: general.architecture is {arch:?}, not {:?} -- this is not a qwen3 checkpoint", qwen3::spec::GGUF_ARCHITECTURE)));
+                }
+            }
+        }
+    } else if let Ok(Some(card)) = checkpoint::st::read_card(weights) {
+        if card.family != qwen3::spec::CARD_FAMILY {
+            return Err(Error::Backend(format!("{weights}: ModelCard.family is {:?}, not {:?} -- this is not a qwen3 checkpoint", card.family, qwen3::spec::CARD_FAMILY)));
+        }
+    }
+    Ok(())
 }
 
 /// Resolve `model_id` as a `<vendor>/<repo>` hub reference through

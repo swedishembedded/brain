@@ -447,7 +447,28 @@ including the `samples/imagegen/*` samples that link `crates/sdk` directly.
   - [x] **Phase 4.2** - CosyVoice (cosyvoice2) joins `TtsPipeline` via `clone_voice` - see its own section below (inserted after 4.1) for a real bug found and fixed (`Store::local` never recognizes ANY cosyvoice checkpoint, even a real one - no `FilesRecipe` entry exists for it), how `speak`/`design` return `Error::MissingArgument` on this backend, and `samples/tts/clone`, a real Rust sample requested mid-sweep. minimaxmusic3 still deferred.
   - [x] **Phase 6.1** - `VisionLanguagePipeline` (Qwen3-VL: 1-8 images + text in, text out) - the Multimodal/VLM/OCR domain bucket's first pipeline. See its own section below for why qwen3vl was picked first, and a real `Store::local`-ordering bug caught before shipping (the same class Phase 4.2/2.2b each found the hard way). Video input, tool-calling, and 8 more served architectures in this bucket stay deferred.
   - [x] **Phase 4.3** - cosyvoice3 variant validation: `crates/sdk/tests/tts_pipeline.rs` gained `from_pretrained_resolves_cosyvoice3_from_a_real_local_fixture_with_no_network_access`, a CosyVoice 3-shaped fixture (no `llm_embedding.weight`, `decoder.estimator.transformer_blocks.*`, hift conv_pre kernel width 5 - mirroring `cosyvoice::spec::tests`' own generation-telling-apart tensors) proving `TtsPipeline::from_pretrained` + `.clone_voice_with(..., TtsOptions::new().variant("cosyvoice3"))` resolves end to end. Zero production code changed - `cosyvoice::pipeline::generate`'s CosyVoice 3 branch (`CosyVoiceLm::load_cosyvoice3`) already existed and worked; only SDK-level proof was missing. Closes the gap Phase 4.2 left open.
-  - [ ] Still entirely uncovered domain buckets: 3D/world models (lowest priority - no settled domain object yet, `SplatPipeline` closer to `Creature` than `ImagePipeline`). See the domain inventory table. Also still open within buckets already started: ltxv (video), minimaxmusic3 (TTS/music), Text decoders bucket (`TextGenerationPipeline` scoped to qwen3 only, 5 more decoders behind it), Multimodal/VLM/OCR beyond qwen3vl (8 more served archs, plus video/tool-calling on qwen3vl itself), ASR bucket beyond qwen3-asr (nemotron, streaming).
+  - [x] **Phase 2.2c** - closed a real unchecked-panic gap
+        `TextGenerationPipelineBuilder::load`'s local-path branch had:
+        unlike the hub-id path (`Qwen3Spec::classify`, free architecture
+        checking), a literal local checkpoint path skipped architecture
+        validation entirely and went straight to `Qwen::load_inference`,
+        which panics on mismatched tensor names rather than erroring
+        cleanly - the same unchecked-panic class this module's own
+        `WeightReader::open`-before-`load_inference` ordering already
+        guards against for a bad PATH, just not yet for a bad ARCHITECTURE.
+        Promoted `qwen3::spec::{GGUF_ARCHITECTURE, CARD_FAMILY}` to `pub`
+        (one literal, not a second copy) and added
+        `check_local_weights_architecture`, which refuses a checkpoint by
+        name ONLY on POSITIVE evidence of a mismatch (a declared
+        `general.architecture`/`ModelCard.family` that isn't qwen3's own) -
+        a checkpoint carrying neither marker is let through unchanged,
+        mirroring `Qwen3Spec::classify_gguf`/`classify_safetensors`'s own
+        "assert a positive match, never reject an absence of one"
+        contract. New test proves a checkpoint declaring `ModelCard.family
+        == "qwen35"` is refused with a clean, named `Error::Backend` before
+        ever reaching `load_inference`, with every pre-existing test in
+        `text_pipeline.rs` (whose fixtures carry no card at all) unaffected.
+  - [ ] Still entirely uncovered domain buckets: 3D/world models (lowest priority - no settled domain object yet, `SplatPipeline` closer to `Creature` than `ImagePipeline`). See the domain inventory table. Also still open within buckets already started: ltxv (video), minimaxmusic3 (TTS/music), Text decoders bucket (`TextGenerationPipeline` scoped to qwen3 only, 5 more decoders behind it - a real, larger gap than Phase 2.2c's fix: `qwen35`'s own load path differs enough from qwen3's - footprint-based sizing, int8 tier, GPU pipeline construction, a ~108GB fp32 real model - to need its own design pass, not a copy of the `Backend` enum pattern `TtsPipeline`'s CosyVoice addition used), Multimodal/VLM/OCR beyond qwen3vl (8 more served archs, plus video/tool-calling on qwen3vl itself - assessed this session: none of fastvlm/llava/moondream3/deepseek2ocr share qwen3vl's `Resident`-style chat+tools call shape, so none fit `VisionLanguagePipeline` as a same-type second backend the way CosyVoice fit `TtsPipeline`), ASR bucket beyond qwen3-asr (nemotron, streaming - a genuinely different call shape, already documented as deliberately deferred in `crates/sdk/src/asr.rs`'s own module doc).
 
 ### Phase 2.1 - `ForecastPipeline` (done)
 
