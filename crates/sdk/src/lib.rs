@@ -71,6 +71,11 @@
 //! over its own model stack, you can procure our services by sending an
 //! email to info@swedishembedded.com.
 
+/// Command-line option groups every application built on brain can compose -
+/// see [`options`]. The mechanism and the hardware selection are shared with
+/// the `brain` binary itself, so `--device` means one thing everywhere.
+pub mod options;
+
 /// A window and a canvas for a sample application - see [`viewport`]. Not a
 /// model surface: it is how a run SHOWS what it is doing, on a desk or as a
 /// PNG from a machine with no display.

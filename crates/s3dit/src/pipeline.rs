@@ -62,8 +62,8 @@ pub const DEFAULT_CAP_LEN: u32 = 512;
 /// frames.
 ///
 /// Caption token `i` takes RoPE id `1+i` on axis 0 and image row `f` takes
-/// `cap_len+1+f`, so every id must land inside the axis-0 table (`axes_lens[0]`
-/// - 1536 at Z-Image-Turbo's shape). `dit::rope::tables_for_ids` enforces that
+/// `cap_len+1+f`, so every id must land inside the axis-0 table (`axes_lens[0]`,
+/// which is 1536 at Z-Image-Turbo's shape). `dit::rope::tables_for_ids` enforces that
 /// with an assert, i.e. a panic in the middle of a multi-gigabyte build, which
 /// is why [`check_cap_len`] rejects an impossible capacity up front instead.
 ///

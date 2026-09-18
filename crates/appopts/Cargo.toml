@@ -1,0 +1,16 @@
+[package]
+name = "brain-appopts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The options every application built on brain parses: a consuming flag grammar and the shared --device/--backend selection, so the CLI and the samples resolve hardware the same way from one implementation."
+
+[lib]
+name = "appopts"
+path = "src/lib.rs"
+
+[dependencies]
+# For DeviceSpec/Backend and applying the resolved set process-wide. This is
+# what makes --device here mean exactly what --device means on the CLI: the
+# same parser and the same resolution, not a second grammar that agrees today.
+brain-gpu-core.workspace = true

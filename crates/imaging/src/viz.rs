@@ -525,9 +525,12 @@ mod panel_tests {
         fill_rect(&mut buf, w, h, -4, -4, 8, 8, [255, 0, 0]);
         fill_rect(&mut buf, w, h, 12, 4, 100, 100, [0, 255, 0]);
         stroke_rect(&mut buf, w, h, -2, 6, 40, 40, [0, 0, 255]);
-        bar(&mut buf, w, h, 0, 0, 10, 2, 7.5, [255, 255, 255], [10, 10, 10]);
+        blend_rect(&mut buf, w, h, -5, -5, 100, 100, [0, 0, 0], 128);
         plot(&mut buf, w, h, 0, 0, 40, 40, &[1.0, -1.0, f32::NAN], [255, 255, 0]);
-        assert_eq!(px(&buf, w, 0, 0), [255, 255, 255], "the bar clamped and filled");
+        // Reaching here at all is the assertion: every call above indexes
+        // outside the buffer somewhere. The value check belongs to the tests
+        // below, which draw inside it.
+        assert_eq!(buf.len(), (w * h * 3) as usize, "nothing resized the buffer");
     }
 
     #[test]

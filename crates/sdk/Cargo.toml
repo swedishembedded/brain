@@ -28,7 +28,10 @@ path = "src/lib.rs"
 # baseline (`Cargo.toml`'s `brain = { default-features = false }`) is what
 # makes a consumer name its surfaces explicitly.
 default = ["full"]
-full = ["image", "creature", "forecast", "text", "vision", "audio", "decision", "video"]
+# `viewport` is in here despite being a tier rather than a surface, for the
+# reason the comment above gives: `cargo test -p brain` runs whatever `full`
+# selects, and a feature nobody builds is a feature whose tests never run.
+full = ["image", "creature", "forecast", "text", "vision", "audio", "decision", "video", "viewport"]
 
 # --- presentation tier, not a surface. `brain::viewport`: a window and an RGB8
 #     canvas with the drawing an instrument panel needs, or the same canvas with
@@ -161,6 +164,9 @@ brain-s3dit = { workspace = true, optional = true }
 brain-wan = { workspace = true, optional = true }
 brain-wm-display = { workspace = true, optional = true }
 brain-viewport = { workspace = true, optional = true }
+# Not optional: the option grammar is the one thing every consumer of this
+# crate has, whichever surfaces it names.
+brain-appopts.workspace = true
 brain-yolov8 = { workspace = true, optional = true }
 brain-zipdepth = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }

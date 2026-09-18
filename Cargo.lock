@@ -370,6 +370,7 @@ checksum = "dc0b364ead1874514c8c2855ab558056ebfeb775653e7ae45ff72f28f8f3166c"
 name = "brain"
 version = "1.1.0"
 dependencies = [
+ "brain-appopts",
  "brain-audio",
  "brain-capability",
  "brain-checkpoint",
@@ -436,6 +437,13 @@ dependencies = [
  "tower",
  "tower-http",
  "uuid",
+]
+
+[[package]]
+name = "brain-appopts"
+version = "1.1.0"
+dependencies = [
+ "brain-gpu-core",
 ]
 
 [[package]]
@@ -719,6 +727,7 @@ version = "1.1.0"
 dependencies = [
  "axum",
  "brain-apiserve",
+ "brain-appopts",
  "brain-arcface",
  "brain-arch",
  "brain-audio",

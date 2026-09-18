@@ -112,6 +112,7 @@ default-members = [
     # Built and tested with the engine so its gates actually run, but nothing
     # in `crates/cli` depends on it - see crates/viewport/src/lib.rs.
     "crates/viewport",
+    "crates/appopts",
     "crates/diamond",
     "crates/genieredux",
     "crates/vision",
@@ -276,6 +277,8 @@ brain-wm-display = { path = "crates/wm-display" }
 # The samples' window + canvas. Never a CLI dependency: it is the applications'
 # half of the workspace, reached through the SDK's `viewport` surface.
 brain-viewport = { path = "crates/viewport" }
+# The option grammar the CLI and the samples share.
+brain-appopts = { path = "crates/appopts" }
 brain-diamond = { path = "crates/diamond" }
 brain-genieredux = { path = "crates/genieredux" }
 brain-vision = { path = "crates/vision" }

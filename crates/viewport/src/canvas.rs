@@ -134,7 +134,7 @@ impl Canvas {
             }
         }
         let img = imaging::Rgb8::new(self.width, self.height, self.pixels.clone())
-            .map_err(|e| format!("{e}"))?;
+            .map_err(|e| e.to_string())?;
         imaging::codec::save_png(path, &img)
     }
 }

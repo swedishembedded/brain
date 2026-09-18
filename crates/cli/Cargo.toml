@@ -46,6 +46,7 @@ brain-backend-cpu.workspace = true
 brain-backend-vulkan.workspace = true
 brain-wm-core.workspace = true
 brain-diamond.workspace = true
+brain-appopts.workspace = true
 brain-wm-display.workspace = true
 brain-toymoe.workspace = true
 brain-gpt2.workspace = true
