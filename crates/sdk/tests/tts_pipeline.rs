@@ -5,22 +5,28 @@
 // the same reason `tests/transcribe_pipeline.rs` gates itself on `audio`.
 #![cfg(feature = "audio")]
 
-//! End-to-end coverage of `TtsPipeline::from_pretrained`'s resolution path
-//! against a real local, synthetic, fully offline fixture reproducing
+//! End-to-end coverage of `TtsPipeline::from_pretrained`'s resolution path,
+//! against a real local, synthetic, fully offline fixture for EACH backend:
 //! `crates/qwen3tts/src/spec.rs`'s own (private) `write_qwen3tts_checkpoint`
-//! test fixture shape - mirroring `tests/transcribe_pipeline.rs`'s
-//! established pattern for this exact class of ceiling.
+//! shape for Qwen3-TTS, and `crates/cosyvoice/src/spec.rs`'s own (private)
+//! `fixture`/`write_{llm,flow,hift}_pt` shape for CosyVoice - mirroring
+//! `tests/transcribe_pipeline.rs`'s established pattern for this exact class
+//! of ceiling.
 //!
-//! ## Why this stops short of a successful `.speak(...)`
+//! ## Why this stops short of a successful `.speak(...)`/`.clone_voice(...)`
 //!
-//! `qwen3tts::pipeline::synth` needs a real tokenizer
+//! `qwen3tts::pipeline::synth`/`clone` need a real tokenizer
 //! (`data::qwen_tokenizer::QwenBpe::from_dir`, via `prompt::load_tokenizer`)
-//! and real Talker/MTP/codec checkpoints - the same real-content ceiling
-//! `TranscribePipeline`'s and `TextGenerationPipeline`'s/`EmbeddingPipeline`'s
-//! own tests document. So this test proves resolution through to
-//! `TtsPipelineBuilder::load`'s own existence check (or, with all three
-//! files present but fake, through to `qwen3tts::pipeline::synth` itself)
-//! succeeding or failing cleanly - never a panic.
+//! and real Talker/MTP/codec checkpoints; `cosyvoice::pipeline::generate`
+//! needs real CAM++/S3Tokenizer checkpoints (`BRAIN_CAMPPLUS_DIR`/
+//! `BRAIN_S3TOKENIZER_V2` - not yet resolver-migrated, so this test points
+//! them at empty scratch directories) on top of its own real llm/flow/hift
+//! weights - the same real-content ceiling `TranscribePipeline`'s and
+//! `TextGenerationPipeline`'s/`EmbeddingPipeline`'s own tests document. So
+//! this test proves resolution through to `TtsPipelineBuilder::load`'s own
+//! existence check (or, with every file present but fake, through to the
+//! backend's own generation entry point) succeeding or failing cleanly -
+//! never a panic.
 
 use std::path::{Path, PathBuf};
 
@@ -92,6 +98,100 @@ fn write_unrelated_sibling(root: &Path) {
     std::fs::write(dir.join("unrelated.gguf"), b"not a real gguf").unwrap();
 }
 
+fn t(name: &str, shape: Vec<usize>) -> checkpoint::torchpt_write::TensorOut {
+    let n: usize = shape.iter().product::<usize>().max(1);
+    checkpoint::torchpt_write::TensorOut { name: name.to_string(), shape, data: vec![0.0; n] }
+}
+
+const COSYVOICE_TOY_TEXT_VOCAB: usize = 200;
+
+/// Only the tensors `cosyvoice::spec::CosyVoiceSpec`'s own `llm_variant`/
+/// `llm_text_vocab_size` actually read, at CosyVoice 2's own shape
+/// (`llm_embedding.weight` present) - mirrors that module's own private
+/// `write_llm_pt` test helper exactly, since it is not exported for reuse.
+fn write_cosyvoice_llm_pt(path: &Path) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    checkpoint::torchpt_write::write(
+        path.to_str().unwrap(),
+        &[
+            t("llm.model.model.embed_tokens.weight", vec![COSYVOICE_TOY_TEXT_VOCAB, 32]),
+            t("speech_embedding.weight", vec![6561, 32]),
+            t("llm_decoder.weight", vec![6561, 32]),
+            t("llm_embedding.weight", vec![2, 32]),
+        ],
+    )
+    .unwrap();
+}
+
+/// CosyVoice 2's flow.pt shape (`decoder.estimator.down_blocks.*`, the UNet
+/// CFM estimator) - mirrors `cosyvoice::spec::tests`' own `write_flow_pt`.
+fn write_cosyvoice_flow_pt(path: &Path) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    checkpoint::torchpt_write::write(
+        path.to_str().unwrap(),
+        &[
+            t("input_embedding.weight", vec![6561, 80]),
+            t("spk_embed_affine_layer.weight", vec![80, 192]),
+            t("decoder.estimator.down_blocks.0.0.mlp.1.weight", vec![256, 256]),
+        ],
+    )
+    .unwrap();
+}
+
+/// CosyVoice 2's hift.pt shape (`conv_pre`'s weight-normed kernel width 7) -
+/// mirrors `cosyvoice::spec::tests`' own `write_hift_pt`.
+fn write_cosyvoice_hift_pt(path: &Path) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    checkpoint::torchpt_write::write(
+        path.to_str().unwrap(),
+        &[
+            t("f0_predictor.classifier.weight", vec![1, 512]),
+            t("m_source.l_linear.weight", vec![1, 8]),
+            t("conv_pre.parametrizations.weight.original0", vec![512, 1, 1]),
+            t("conv_pre.parametrizations.weight.original1", vec![512, 80, 7]),
+        ],
+    )
+    .unwrap();
+}
+
+fn write_cosyvoice_tokenizer_json(path: &Path) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let vocab: serde_json::Map<String, serde_json::Value> = (0..COSYVOICE_TOY_TEXT_VOCAB).map(|i| (format!("t{i}"), serde_json::json!(i))).collect();
+    std::fs::write(path, serde_json::to_vec(&serde_json::json!({"model": {"vocab": vocab}, "added_tokens": []})).unwrap()).unwrap();
+}
+
+/// A full, unambiguous CosyVoice 2 fixture: `llm`/`flow`/`hift` under
+/// `FunAudioLLM/CosyVoice2-0.5B/`, a compatible tokenizer under the sibling
+/// real-world repo `FunAudioLLM/CosyVoice-BlankEN/`, plus
+/// [`write_unrelated_sibling`] for `resolve()`'s own root inference - the
+/// same real-world layout `cosyvoice::spec::tests`' own `fixture` helper
+/// documents.
+fn write_cosyvoice_checkpoint(root: &Path) {
+    let vendor = root.join("FunAudioLLM").join("CosyVoice2-0.5B");
+    write_cosyvoice_llm_pt(&vendor.join("llm.pt"));
+    write_cosyvoice_flow_pt(&vendor.join("flow.pt"));
+    write_cosyvoice_hift_pt(&vendor.join("hift.pt"));
+    write_cosyvoice_tokenizer_json(&root.join("FunAudioLLM").join("CosyVoice-BlankEN").join("tokenizer.json"));
+}
+
+/// `CosyVoicePaths::from_assembly` reads `BRAIN_S3TOKENIZER_V2`/
+/// `BRAIN_CAMPPLUS_DIR` directly (see that function's own doc: both roles
+/// are not yet resolver-migrated) - this only needs to exist, not hold real
+/// weights, since resolution/construction never reads its contents (only
+/// `cosyvoice::pipeline::generate`'s own import step would, past this test's
+/// documented ceiling). Must run INSIDE `with_models_dir`'s closure: both
+/// helpers share one process-wide env lock
+/// (`brain_testutil::env_lock`, non-reentrant), so nesting a second
+/// acquisition would deadlock.
+fn with_cosyvoice_env<T>(dir: &Path, f: impl FnOnce() -> T) -> T {
+    std::env::set_var("BRAIN_S3TOKENIZER_V2", dir);
+    std::env::set_var("BRAIN_CAMPPLUS_DIR", dir);
+    let out = f();
+    std::env::remove_var("BRAIN_S3TOKENIZER_V2");
+    std::env::remove_var("BRAIN_CAMPPLUS_DIR");
+    out
+}
+
 #[test]
 fn from_pretrained_rejects_an_unparseable_model_id() {
     let err = brain::TtsPipeline::from_pretrained("../not/a/valid/ref").unwrap_err();
@@ -153,4 +253,72 @@ fn from_pretrained_names_the_missing_role_when_the_store_is_empty() {
         }
         other => panic!("expected Error::Missing, got {other:?}"),
     }
+}
+
+fn write_wav(path: &Path, seconds: f32, sample_rate: u32) {
+    let n = ((seconds * sample_rate as f32) as usize).max(1);
+    audio::wav::write(path, &vec![0.0f32; n], sample_rate).unwrap();
+}
+
+/// The full facade path against a real, content-classified local CosyVoice 2
+/// fixture, with no network access at any point: reference parses,
+/// `Store::local` resolves it, `resolve_arch` tries qwen3tts first (this
+/// fixture has nothing qwen3tts-shaped, so that try returns `Missing` and is
+/// silently discarded - the same first-architecture fallback
+/// `ForecastPipeline`'s own `resolve_arch` documents), then
+/// `cosyvoice::spec::CosyVoiceSpec` resolves it and
+/// `TtsPipelineBuilder::load`'s own existence check passes.
+/// `.clone_voice(...)` then reaches `cosyvoice::pipeline::generate`, which
+/// fails cleanly on the fake CAM++/S3Tokenizer weight content (both env vars
+/// point at an empty scratch directory) rather than resolution itself
+/// failing.
+#[test]
+fn from_pretrained_resolves_cosyvoice_from_a_real_local_fixture_with_no_network_access() {
+    let root = scratch_root("resolve-cosyvoice");
+    write_cosyvoice_checkpoint(&root);
+    write_unrelated_sibling(&root);
+    let voice = root.join("reference.wav");
+    write_wav(&voice, 1.0, 16000);
+
+    let pipe = with_models_dir(&root, || with_cosyvoice_env(&root, || brain::TtsPipeline::from_pretrained("FunAudioLLM/CosyVoice2-0.5B")));
+    let pipe = pipe.expect("a content-classifiable CosyVoice 2 checkpoint (fake tensor content, real shapes) must resolve and pass the existence check");
+
+    let err = pipe.clone_voice("hello from a fixture", &voice, Some("the reference transcript")).unwrap_err();
+    match err {
+        brain::Error::Backend(msg) => assert!(!msg.is_empty(), "must name what went wrong"),
+        other => panic!("expected a clean Error::Backend from the fake CAM++/S3Tokenizer content, got {other:?}"),
+    }
+}
+
+/// `speak`/`design` are Qwen3-TTS-only call shapes (see `crates/sdk/src/
+/// tts.rs`'s own module doc) - a CosyVoice-resolved pipeline returns
+/// `Error::MissingArgument` for both, knowable before any backend call.
+#[test]
+fn speak_and_design_are_missing_argument_errors_on_a_cosyvoice_resolved_pipeline() {
+    let root = scratch_root("cosyvoice-wrong-actions");
+    write_cosyvoice_checkpoint(&root);
+    write_unrelated_sibling(&root);
+
+    let pipe = with_models_dir(&root, || with_cosyvoice_env(&root, || brain::TtsPipeline::from_pretrained("FunAudioLLM/CosyVoice2-0.5B")))
+        .expect("a content-classifiable CosyVoice 2 checkpoint must resolve and pass the existence check");
+
+    assert!(matches!(pipe.speak("hello").unwrap_err(), brain::Error::MissingArgument(_)));
+    assert!(matches!(pipe.design("hello", "cheerful", None).unwrap_err(), brain::Error::MissingArgument(_)));
+}
+
+/// CosyVoice's `clone_voice` has no x-vector-only mode - omitting `ref_text`
+/// is a caller-programming error, knowable before any backend call, the same
+/// class `speak`/`design` already return on this backend.
+#[test]
+fn clone_voice_without_ref_text_is_a_missing_argument_error_on_a_cosyvoice_resolved_pipeline() {
+    let root = scratch_root("cosyvoice-no-ref-text");
+    write_cosyvoice_checkpoint(&root);
+    write_unrelated_sibling(&root);
+    let voice = root.join("reference.wav");
+    write_wav(&voice, 1.0, 16000);
+
+    let pipe = with_models_dir(&root, || with_cosyvoice_env(&root, || brain::TtsPipeline::from_pretrained("FunAudioLLM/CosyVoice2-0.5B")))
+        .expect("a content-classifiable CosyVoice 2 checkpoint must resolve and pass the existence check");
+
+    assert!(matches!(pipe.clone_voice("hello", &voice, None).unwrap_err(), brain::Error::MissingArgument(_)));
 }

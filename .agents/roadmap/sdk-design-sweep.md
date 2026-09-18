@@ -371,7 +371,8 @@ including the `samples/imagegen/*` samples that link `crates/sdk` directly.
   - [x] **Phase 3.3** - `DepthPipeline` (ZipDepth) - completes the vision/detection bucket - see its own section below for a real `cfg_for_checkpoint` shape bug fixed, and a real `vision`/`image` feature-split bug the gate itself found.
   - [x] **Phase 4.1** - `TtsPipeline` (Qwen3-TTS: speak/clone_voice/design) - the TTS/music bucket's first pipeline - see its own section below. cosyvoice/minimaxmusic3 deferred.
   - [x] **Phase 5.1** - `VideoPipeline` (Wan2.1 T2V) - the video generation bucket's first pipeline - see its own section below for a real "invisible to the real scanner" gap found (a `.bin` sibling silently vanishing from `inventory::scan`). ltxv deferred (still `always!()`-registered, not resolver-based).
-  - [ ] Still entirely uncovered domain buckets: 3D/world models (lowest priority - no settled domain object yet, `SplatPipeline` closer to `Creature` than `ImagePipeline`). See the domain inventory table. Also still open within buckets already started: ltxv (video), cosyvoice/minimaxmusic3 (TTS/music), Text decoders bucket (`TextGenerationPipeline` scoped to qwen3 only, 5 more decoders + ~9 multimodal/VLM/OCR decoders behind it per the priority-order note), ASR bucket beyond qwen3-asr (nemotron, streaming).
+  - [x] **Phase 4.2** - CosyVoice (cosyvoice2) joins `TtsPipeline` via `clone_voice` - see its own section below (inserted after 4.1) for a real bug found and fixed (`Store::local` never recognizes ANY cosyvoice checkpoint, even a real one - no `FilesRecipe` entry exists for it), how `speak`/`design` return `Error::MissingArgument` on this backend, and `samples/tts/clone`, a real Rust sample requested mid-sweep. minimaxmusic3 still deferred.
+  - [ ] Still entirely uncovered domain buckets: 3D/world models (lowest priority - no settled domain object yet, `SplatPipeline` closer to `Creature` than `ImagePipeline`). See the domain inventory table. Also still open within buckets already started: ltxv (video), minimaxmusic3 (TTS/music), cosyvoice3 variant validation (cosyvoice2 only proven end to end), Text decoders bucket (`TextGenerationPipeline` scoped to qwen3 only, 5 more decoders + ~9 multimodal/VLM/OCR decoders behind it per the priority-order note), ASR bucket beyond qwen3-asr (nemotron, streaming).
 
 ### Phase 2.1 - `ForecastPipeline` (done)
 
@@ -1292,6 +1293,169 @@ Phase 3.3), `cargo test -p brain --features audio --test tts_pipeline`
 (3 passed), `cargo test -p brain --features audio --tests` (full audio
 surface suite, no regressions), `bash scripts/gates/check-no-doc-citations.sh`
 (clean), and a full `cargo build --workspace --exclude brain-vulkan`.
+
+### Phase 4.2 - CosyVoice joins `TtsPipeline`, a real "Store::local never recognizes it" bug found and fixed, plus `samples/tts/clone` (a real Rust sample requested mid-sweep, not a Phase item)
+
+Covers **CosyVoice 2 only** (`cosyvoice2` variant), over the already-existing
+`cosyvoice::spec::CosyVoiceSpec` (a real `ArchSpec` since before this
+session, same as Qwen3-TTS's own `Qwen3TtsSpec` was for Phase 4.1) - `variant`
+defaults to `cosyvoice2` because `cosyvoice::caps::manifest`'s own doc
+already says "only cosyvoice2 is servable today"; `cosyvoice3` is reachable
+through `TtsOptions::variant("cosyvoice3")` for a caller who has that
+checkpoint, unvalidated by this milestone's own test the way `cosyvoice2` is.
+minimaxmusic3 (this bucket's third served architecture) stays deferred -
+still no shrink lever for a full forward pass, the same reason Phase 4.1
+picked qwen3tts first.
+
+**`TtsPipeline` forks internally, not into a sibling type** - `resolve_arch`
+tries `qwen3tts` first (unchanged order/tie-break reasoning from
+`ForecastPipeline`'s own kronos-first precedent: it is the more complete of
+the two), then `cosyvoice` only when qwen3tts did not resolve. Past
+`TtsPipelineBuilder::load`, every method dispatches on an internal
+`Backend` enum - the same shape `ImagePipeline` (flux2 vs s3dit) and
+`ForecastPipeline` (kronos vs timesfm3) already established, rule 2's "one
+pipeline type per capability."
+
+**CosyVoice's one action does not fit `speak`/`design` at all - only
+`clone_voice`, at REDUCED fidelity.** `cosyvoice::caps::manifest`'s own doc
+frames `synth` as "zero-shot voice cloning: target text + a reference audio
+clip and its transcript" - there is no speaker-free mode (unlike Qwen3-TTS's
+`speak`) and no VoiceDesign/CustomVoice action at all. A CosyVoice-resolved
+pipeline's `speak`/`design` return `Error::MissingArgument` - knowable
+before any backend call, the SAME class of caller-programming error M6
+introduced for `CreatureBuilder`'s required-field checks, not a new
+variant. `clone_voice`'s own `ref_text: Option<&str>` stays optional in the
+public signature (Qwen3-TTS genuinely supports x-vector-only cloning with
+it unset) but a CosyVoice-resolved pipeline rejects `None` with the same
+`Error::MissingArgument`, since CosyVoice has no x-vector-only mode either -
+documented on the method, not silently coerced to an empty string the way
+an earlier draft of this milestone briefly considered (that would have
+handed CosyVoice's `generate` an empty transcript and produced a confusing
+downstream failure instead of a clear one at the call boundary).
+
+**`TtsOptions` grows two CosyVoice-only knobs** (`variant`, `n_timesteps`)
+that Qwen3-TTS silently ignores - the same "the other backend's fields are
+inert" shape already accepted elsewhere in this crate for split call
+surfaces. `seed` is the one field both backends' own `GenOpts` already
+carry, so it stays shared.
+
+**A real, independent judgment call, not a bug**: `CosyVoicePaths::
+from_assembly` still reads `BRAIN_S3TOKENIZER_V2`/`BRAIN_CAMPPLUS_DIR`
+directly from the environment (that function's own doc: neither role is
+resolver-migrated yet) - this milestone did not migrate them, since doing so
+would mean giving `s3tokenizer`/`campplus` their own `ArchSpec`s, a
+prerequisite-crate-first shape like Phase 2.6's `CodeFormerSpec` was for
+Phase 2.7, not a small addition to an SDK pipeline. `TtsPipelineBuilder::
+load`'s own existence check only verifies `llm.pt`/`flow.pt`/`hift.pt`
+under their resolved directories (mirroring qwen3tts's own `talker`/`mtp`/
+`codec` check) - `s3tokenizer`/`campplus` stay a call-time failure inside
+`cosyvoice::pipeline::generate` itself, the same ceiling qwen3tts's own
+`speaker` (clone-only) role already accepts.
+
+**A real, independent bug found reaching this crate's first genuine
+end-to-end resolution of a real local cosyvoice fixture - `Store::local`
+never recognizes ANY cosyvoice checkpoint at all, even a real one.**
+`TtsPipelineBuilder::load` (copied wholesale from `ForecastPipeline`'s own
+"check `Store::local`, fetch-if-missing, THEN resolve" order) hit
+`ModelNotFound("FunAudioLLM/CosyVoice2-0.5B: config.json has no
+architecture")` against the test fixture below, despite every file
+`CosyVoiceSpec::classify` needs being genuinely present and content-correct.
+Root cause: `brain_modelstore` has no `FilesRecipe` entry for cosyvoice (no
+conversion step either, unlike qwen3tts's `brain tts import`), so
+`Store::local` - which only recognizes a compound `brain.manifest.json` or a
+bare `model.brain.safetensors`, neither of which a raw cosyvoice checkpoint
+ever has - returns `None`, and `plan()` falls through to
+`TransformersRecipe`'s catch-all, which reads `config.json` for an
+`architectures` field cosyvoice's repo does not carry and fails outright.
+This is not fixture-only: a real user who `hf download`s
+`FunAudioLLM/CosyVoice2-0.5B` into `$BRAIN_MODELS_DIR/FunAudioLLM/
+CosyVoice2-0.5B` (the same layout every other architecture in this workspace
+uses) and calls `TtsPipeline::from_pretrained` would hit the exact same
+failure with real weights sitting right there. Fixed IN THIS CRATE ONLY
+(not `brain_modelstore`'s shared recipe/plan machinery, out of scope here -
+a cosyvoice `FilesRecipe` that can actually FETCH a checkpoint is real,
+separate future work) by reordering `TtsPipelineBuilder::load` to try
+`resolve_arch` FIRST - a real, content-based scan that reads raw file
+content directly (`CosyVoiceSpec::classify`'s own per-file torch-checkpoint
+reads), a strictly wider net than `Store::local`'s narrow "converted
+checkpoint" shapes - and only fall through to `Store::local`/`plan`/download
+when `resolve_arch` reports the model genuinely missing everywhere. This is
+the REVERSE of every other pipeline in this crate (`ImagePipeline`/
+`ForecastPipeline`/`VideoPipeline` all check-then-resolve, never
+resolve-then-check) - deliberate, documented inline, and verified not to
+regress any of them: it does not touch their code, and `TtsPipeline`'s own
+existing qwen3tts tests (which already satisfied `Store::local` via its
+compound manifest, so resolving on the first try was always possible) still
+pass unchanged, now doing STRICTLY LESS work (skipping a redundant
+`Store::local`/`plan` round trip) rather than different work.
+
+**Test fixture**: `crates/sdk/tests/tts_pipeline.rs` reproduces
+`cosyvoice::spec::tests`' own (private) `fixture`/`write_{llm,flow,hift}_pt`
+shape - a CosyVoice 2 checkpoint under `FunAudioLLM/CosyVoice2-0.5B/` with a
+compatible tokenizer under the sibling real-world repo
+`FunAudioLLM/CosyVoice-BlankEN/` - proving resolution reaches a real,
+constructed `TtsPipeline`, then `.clone_voice(...)` reaches
+`cosyvoice::pipeline::generate`, which fails cleanly (`Error::Backend`) on
+the fake CAM++/S3Tokenizer weight content (both env vars point at an empty
+scratch directory) rather than resolution itself failing - the same
+"resolution proven, full forward pass not" ceiling every pipeline in this
+crate accepts. Two more tests prove the `Error::MissingArgument` dispatch
+(`speak`/`design` unconditionally, `clone_voice` when `ref_text` is `None`)
+without needing a real forward pass at all.
+
+**`samples/tts/clone`, a genuinely new Rust sample** (not itself a roadmap
+Phase item - added because it was asked for directly while this milestone
+was in progress, and it is the first real end-to-end USE of
+`TtsPipeline::clone_voice` this campaign has produced): `--voice PATH
+--text TEXT [--ref-text TEXT] [--out PATH] [--model ID]`, defaulting to
+Qwen3-TTS (`Qwen/Qwen3-TTS-12Hz-0.6B-Base`, the same real model id
+`crates/qwen3tts/src/spec.rs`'s own test fixture and `docs/models/
+qwen3tts.md` already use). With no `--out`, the cloned clip plays on the
+default audio output device instead of being written to disk - the first
+sample in this workspace to need real audio PLAYBACK (every existing
+sample either writes a file or drives a window). `rodio` (pure Rust,
+`default-features = false, features = ["playback"]`) is the one new
+third-party dependency this needed; `brain::Audio`'s own samples
+(`samples/README.md`'s own doc: "already decoded f32 PCM") feed
+`rodio::buffer::SamplesBuffer` directly, no WAV encode/decode round-trip
+through a temp file. `samples/README.md` rule 1 ("a sample may depend
+freely on third-party crates") covers this with no gate change needed; the
+27 new third-party crates `rodio`'s `playback` feature pulls in (cpal +
+platform backends) do not count against `max-brain-crates`, which only
+counts `brain-*` crates.
+
+**A real, pre-existing gap this sample's own `make docs` prep found and
+fixed in passing**: `docs/manifest.txt`'s generated Samples part was
+already stale before this milestone touched it -
+`samples/decision/{arena,salesagent,triage}/README.md` existed on disk but
+were never listed, silently invisible to `make docs`. Re-running
+`scripts/build/gen-samples-manifest.py` (this milestone's own new sample
+made that necessary anyway) picked up all three alongside the new
+`samples/tts/clone/README.md` - not a regression this milestone introduced,
+a decay from whenever those three samples themselves landed without the
+generator being re-run.
+
+Verified with `cargo build -p brain --features audio` (clean), `cargo build
+-p sample-tts-clone` (clean on the first attempt, once `max-brain-crates`
+was corrected from an initial wrong guess of 30 to the real measured 65 -
+`audio` now pulls in BOTH qwen3tts and cosyvoice transitively), `bash
+scripts/gates/check-samples.sh` (OK - 7 Rust samples including
+`sample-tts-clone` at 65 brain crates/budget 66, plus the incremental-rebuild
+assertion against `sample-tts-clone` itself: rebuild compiled exactly 1
+crate, 0 of them brain crates), `cargo test -p brain --features audio --test
+tts_pipeline` (6 passed: the 3 existing qwen3tts tests unchanged, plus 3 new
+cosyvoice ones - a real local-fixture resolve-through-to-a-clean-
+`Error::Backend`, and two `Error::MissingArgument` dispatch tests),
+`cargo test -p brain --features audio --tests` (full audio surface suite -
+transcribe/tts/upscale/video all still pass, no regressions from the
+`TtsPipelineBuilder::load` reordering), `bash scripts/gates/
+check-sdk-features.sh` (OK, every surface including `audio` still compiles
+standalone), `bash scripts/gates/check-no-doc-citations.sh` (clean, after
+fixing one real citation this milestone's own doc comment introduced), `bash
+scripts/gates/check-doc-links.sh` (169 pages resolve), `python3
+scripts/build/gen-samples-manifest.py --check` (clean after the
+regeneration above), and a full `cargo build --workspace --exclude
+brain-vulkan`.
 
 ### Phase 5.1 - `VideoPipeline` (Wan2.1 T2V) - the video generation bucket's first pipeline, and a real "invisible to the scanner" gap found while reusing the crate's own fixture
 
