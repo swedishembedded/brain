@@ -22,7 +22,7 @@ a discrete graphics card.
 ## Getting the weights
 
 There's no fetched model here - splat works directly on Inria-format `.ply`
-scene files, whether produced by `brain mirror infer`, brain's own `fit`
+scene files, whether produced by `brain worldmirror2 infer`, brain's own `fit`
 (below), or another Gaussian Splatting tool.
 
 ## Running it
@@ -52,11 +52,11 @@ the scene from its bounds. Viewer controls:
 
 `fit` optimizes an existing `.ply` scene against a set of posed target
 photos - the same rasterizer, run backward. `--cameras` takes the
-`cameras.json` format `brain mirror infer` produces (a list of camera poses
+`cameras.json` format `brain worldmirror2 infer` produces (a list of camera poses
 and intrinsics); `--images` is a directory of P6 PPM photos (or a
 comma-separated list) in the same order as the cameras, and each image's
 size must match its camera. This is how you turn a starting point cloud
-(from `brain mirror`, or your own SfM/COLMAP output converted to `.ply`)
+(from `brain worldmirror2`, or your own SfM/COLMAP output converted to `.ply`)
 into a scene that actually reproduces your photos.
 
 ## Options
