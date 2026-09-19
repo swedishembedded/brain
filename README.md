@@ -151,31 +151,39 @@ dog is the one thing sam2 marked, so it is the one thing this leaves alone.
 
 ### Three models checking each other's work
 
-A face pipeline where the last model scores the middle one. SCRFD finds the
-face and its five landmarks, those landmarks align a 512x512 crop, CodeFormer
-restores a crushed copy of it, and ArcFace says whether it is still the same
-person - a number none of the three could produce alone:
+A face pipeline where the last model audits the middle one. SCRFD finds the
+face and its five landmarks, a 4-DOF similarity warp onto those landmarks cuts
+an aligned 512x512 crop (`crates/arcface/src/align.rs`, the same solve
+`arcface embed --align true` runs), CodeFormer restores a degraded copy of it,
+and ArcFace answers the question that decides whether the restoration is
+usable at all: is this still the same person?
 
 ```bash
-$ brain scrfd detect --in image=face.png --json
-{"count":1,"faces":[{"bbox":[181.77,97.49,332.09,298.27],"kps":[[222.07,182.04],…],"score":0.759}],…}
+$ brain scrfd detect --in image=portrait.png --json
+{"count":1,"faces":[{"bbox":[183.68,92.30,335.61,301.54],"kps":[[221.75,179.17],…],"score":0.899}],…}
 
 $ brain codeformer restore_face --w 1.0 --in image=degraded.png --out image=restored.png
 $ brain arcface embed --align false --in image=restored.png --out embedding=restored.bin
 ```
 
-CodeFormer's fidelity dial `w` trades restored *quality* against fidelity to
-the input pixels, and ArcFace measures exactly that trade:
+![five aligned faces side by side: the generated original, a 160px JPEG q40 copy of it, and three CodeFormer restorations of that copy at w=0.0, w=0.5 and w=1.0, each labelled with its ArcFace cosine to the original identity](docs/quickstart/img/face-restore.jpg)
 
-| `w` | 0.0 | 0.3 | 0.5 | 0.7 | 0.9 | 1.0 |
-|---|---|---|---|---|---|---|
-| cosine to the original identity | +0.17 | +0.33 | +0.44 | +0.54 | +0.59 | +0.61 |
+`w` is not a quality slider. It decides how much of the output comes from the
+input pixels and how much from CodeFormer's learned prior, and at `w=0` the
+prior wins outright: the middle panel is a sharper, more attractive face than
+the original that belongs to **somebody else**, and it is the panel a demo
+reel would pick. At `w=1.0` the damage is repaired and the person survives it,
++0.8806 against an original the JPEG itself only left at +0.9159.
 
-Monotonic, as the dial claims. Note what it also shows: the 96px crush
-destroyed identity that **no** setting fully recovers - the un-restored input
-still scores +0.73, higher than any restoration of it. `w=0` produces the
-best-looking face and the least faithful one. That is the honest shape of
-blind restoration, and it is why the dial exists.
+The control that pins the cause down: run `w=0` on the **undamaged** original
+and it still collapses to +0.31. The identity is not lost to the compression,
+it is spent on the prior - so the dial is the thing to set, and ArcFace is
+what lets you set it on evidence rather than on taste. The full grid, three
+damage levels by four `w` values, is in
+[`docs/models/codeformer.md`](docs/models/codeformer.md).
+
+Every pixel in that figure came out of this repo: the original is `brain s3dit
+text2image` output, not a photograph of a real person.
 
 ### Virtual staging with a LoRA you trained
 
