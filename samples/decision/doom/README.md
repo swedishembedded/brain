@@ -947,14 +947,20 @@ In the order the measurements point at, not in the order they are interesting:
   the scripted player finishes all three; seeing only what it has looked at,
   it finishes E1M1 and does not finish E1M2 or E1M3. The honest number is the
   second one.
-- **Teleporters are not in the route.** A teleport linedef moves the player
-  instantly, and the distance field is over geometry, so the two cells either
-  side of one are as far apart as the level is wide. The shareware episode
-  puts the first teleporters in E1M5 - E1M1 to E1M4 have none - so held-out
-  runs use E1M4, and anything from E1M5 on is a level the route cannot fully
-  describe rather than a level the policy failed. Joining the cells at a
-  teleport line to the cells at its landing spot is the fix, and it is an edge
-  in the graph rather than a new mechanism.
+- **Teleporters are not in the route, which is a smaller gap than it sounds.**
+  A teleport linedef moves the player instantly and the distance field is over
+  geometry, so the two cells either side of one are as far apart as the level
+  is wide. But nothing breaks when the player steps on one: the field floods
+  from wherever they are over whatever they have seen, so it re-plans from
+  where they land, which is exactly what happens to a player who walks onto a
+  pad without knowing what it is. What the route cannot do is PLAN through
+  one - it will never aim at a teleporter as a way of getting somewhere - so
+  on a level whose exit is only reachable that way the agent has to find it by
+  exploring, as a first-time player does.
+  This has not been exercised end to end: the shareware episode puts the first
+  teleporters in E1M5, and the scripted player does not survive E1M5's opening
+  nukage, so no teleport has yet happened in a run. Held-out runs use E1M4,
+  which has none.
 - **`--record` changes the run it records.** Measured on E1M1, same seed, same
   everything else: without it the scripted player finishes in 247 decisions,
   with it the run stalls at 400 with the same six kills. Capture is not the
