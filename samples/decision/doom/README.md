@@ -147,7 +147,26 @@ having ignored it.
 Each ends by scoring the trained policy AND the scripted player over the same
 episodes, which is the only comparison that means anything.
 
-### 3. Watch it play, and record it
+### 3. Prove it generalizes, which is the only claim that matters
+
+Train on some levels and score on one that was not among them. A policy that
+has learned a level scores well on it and badly on the next; a policy that has
+learned to PLAY does not care which level it is in.
+
+```bash
+# learn on three levels
+doom train --maps 1,2,3 --mission speedrun --max-steps 400            --iterations 10 --episodes 6 --warmup 12 --warmup-keep 0.5            --save out/doom-explore.safetensors
+
+# and score on two it has never been in, against the same baseline
+doom eval  --maps 4,5 --mission speedrun --max-steps 900 --eval-episodes 8            --head out/doom-explore.safetensors
+```
+
+The scored table has an `exits` column and a `burned` one. The first is
+whether it finished; the second is health lost to burning floor, which is the
+single most reliable way to die on a level nobody has walked before and the
+one thing an agent that has merely memorised a route will not have learned.
+
+### 4. Watch it play, and record it
 
 ```bash
 doom play $D --head out/doom-curriculum.safetensors --curriculum \
@@ -160,13 +179,13 @@ and there are no intermediate images to clean up. It captures one frame per
 game TIC rather than per decision, so the motion is real-time rather than a
 slideshow. Add `--window` on a machine with a display to watch live.
 
-### 4. Score a policy
+### 5. Score a policy
 
 ```bash
 doom eval $D --head out/doom-curriculum.safetensors --curriculum --eval-episodes 24
 ```
 
-### 5. What a decision costs
+### 6. What a decision costs
 
 ```bash
 doom bench $D

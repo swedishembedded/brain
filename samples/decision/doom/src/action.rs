@@ -162,9 +162,25 @@ pub fn options(state: &State) -> Vec<Option_> {
     }
 
     // --- move -------------------------------------------------------------
+    //
+    // Every way of moving says whether it walks into burning floor, and from
+    // how far. The observation reports that per direction, but an agent then
+    // has to work out for itself which option goes which way - and it is the
+    // one thing on a level like E1M3 that reliably ends a run, so it belongs
+    // in the option rather than beside it. A player does not deduce that the
+    // corridor ahead is nukage; they look at it.
+    let burn = state.burning_floor.unwrap_or_default();
+    let hot = |d: Option<i32>| match d {
+        Some(at) => format!(", and the floor starts burning {at} units along"),
+        None => String::new(),
+    };
     if c.ahead >= MIN_ROOM {
         out.push(Option_ {
-            text: format!("walk forward, {} units of open floor ahead", c.ahead),
+            text: format!(
+                "walk forward, {} units of open floor ahead{}",
+                c.ahead,
+                hot(burn.ahead)
+            ),
             commands: "[{\"type\":\"forward\",\"amount\":8}]".into(),
             tics: MOVE_TICS,
             tag: Tag::Advance,
@@ -173,7 +189,11 @@ pub fn options(state: &State) -> Vec<Option_> {
     }
     if c.ahead_left >= MIN_ROOM {
         out.push(Option_ {
-            text: format!("turn left and go that way, {} units of room", c.ahead_left),
+            text: format!(
+                "turn left and go that way, {} units of room{}",
+                c.ahead_left,
+                hot(burn.ahead_left)
+            ),
             commands: format!(
                 "[{},{{\"type\":\"forward\",\"amount\":8}}]",
                 json_turn(state.facing(-45))
@@ -186,8 +206,9 @@ pub fn options(state: &State) -> Vec<Option_> {
     if c.ahead_right >= MIN_ROOM {
         out.push(Option_ {
             text: format!(
-                "turn right and go that way, {} units of room",
-                c.ahead_right
+                "turn right and go that way, {} units of room{}",
+                c.ahead_right,
+                hot(burn.ahead_right)
             ),
             commands: format!(
                 "[{},{{\"type\":\"forward\",\"amount\":8}}]",
@@ -200,7 +221,10 @@ pub fn options(state: &State) -> Vec<Option_> {
     }
     if c.behind >= MIN_ROOM {
         out.push(Option_ {
-            text: "back away from whatever is in front of you".into(),
+            text: format!(
+                "back away from whatever is in front of you{}",
+                hot(burn.behind)
+            ),
             commands: "[{\"type\":\"backward\",\"amount\":8}]".into(),
             tics: MOVE_TICS,
             tag: Tag::Retreat,
@@ -349,7 +373,11 @@ pub fn options(state: &State) -> Vec<Option_> {
     // back INTO the corner on the way round.
     if c.left >= MIN_ROOM {
         out.push(Option_ {
-            text: format!("sidestep left without turning, {} units of room", c.left),
+            text: format!(
+                "sidestep left without turning, {} units of room{}",
+                c.left,
+                hot(burn.left)
+            ),
             commands: "[{\"type\":\"strafe-left\",\"amount\":8}]".into(),
             tics: MOVE_TICS,
             tag: Tag::Sidestep,
@@ -358,7 +386,11 @@ pub fn options(state: &State) -> Vec<Option_> {
     }
     if c.right >= MIN_ROOM {
         out.push(Option_ {
-            text: format!("sidestep right without turning, {} units of room", c.right),
+            text: format!(
+                "sidestep right without turning, {} units of room{}",
+                c.right,
+                hot(burn.right)
+            ),
             commands: "[{\"type\":\"strafe-right\",\"amount\":8}]".into(),
             tics: MOVE_TICS,
             tag: Tag::Sidestep,
