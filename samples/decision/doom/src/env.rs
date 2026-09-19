@@ -198,6 +198,13 @@ const EXPLORE_CELL: i32 = 128;
 const CURRICULUM_WINDOW: usize = 8;
 const CURRICULUM_ADVANCE: f32 = 0.6;
 const CURRICULUM_STEP: i32 = 400;
+/// Decisions of going nowhere before the teacher stops repeating itself.
+///
+/// Six, because the slowest thing here that legitimately leaves the player
+/// standing still is a door: one press and thirty tics to rise, which is five
+/// to eight decisions. Any rule that was going to work has had its chance by
+/// then, and at two the teacher gave up on doors it had only just pressed.
+const STUCK_TRY_SOMETHING_ELSE: u32 = 6;
 /// Decisions to hold one direction for once circling is detected. Long enough
 /// to clear the cycle's own diameter at the walking speed one decision buys.
 const COMMIT_STEPS: u32 = 8;
@@ -286,6 +293,8 @@ pub struct DoomEnv {
     /// baseline that is broken makes the learned number unreadable.
     last_pos: Option<(i32, i32)>,
     stuck: u32,
+    /// The kinds of thing already tried since the player last moved.
+    tried: std::collections::HashSet<Tag>,
     /// The last few positions, for noticing that the player is going round in
     /// circles rather than merely standing still. Greedy navigation's
     /// characteristic failure is not being stuck, it is a two-step cycle -
@@ -380,6 +389,7 @@ impl DoomEnv {
             opts: Vec::new(),
             last_pos: None,
             stuck: 0,
+            tried: std::collections::HashSet::new(),
             recent: std::collections::VecDeque::new(),
             visited: std::collections::HashMap::new(),
             commit: 0,
@@ -780,6 +790,9 @@ impl DoomEnv {
             Some(p) if (p.0 - pos.0).abs() + (p.1 - pos.1).abs() < 24 => self.stuck + 1,
             _ => 0,
         };
+        if self.stuck == 0 {
+            self.tried.clear();
+        }
         self.last_pos = Some(pos);
         self.recent.push_back(pos);
         if self.recent.len() > CIRCLE_WINDOW {
@@ -871,6 +884,7 @@ impl DoomEnv {
         self.exited = false;
         self.last_pos = None;
         self.stuck = 0;
+        self.tried.clear();
         self.recent.clear();
         self.visited.clear();
         self.commit = 0;
@@ -915,8 +929,50 @@ impl DoomEnv {
             .all(|(x, y)| (x - cx).abs() + (y - cy).abs() < CIRCLE_RADIUS)
     }
 
+    /// The scripted player, with one rule wrapped round it: do not keep doing
+    /// something that is not working.
+    ///
+    /// Every version of this teacher has eventually been caught repeating one
+    /// action for hundreds of decisions - pressing at a door the `use` ray
+    /// misses, strafing into the wall beside the barrel it is trying to get
+    /// round, walking at a route it cannot follow. Each was fixed where it
+    /// was found, and the next one appeared somewhere else, because the fault
+    /// is not in any of those rules. It is that a rule which fires on a
+    /// condition, and does not change the condition, fires again.
+    ///
+    /// So: once the player has stopped moving, each KIND of thing is tried at
+    /// most once until it moves again. What that buys is not cleverness, it
+    /// is exhaustion - the teacher works through what it has rather than
+    /// hammering the first thing on the list.
     pub fn scripted(&mut self) -> Option<usize> {
-        let by = |tag: Tag| self.opts.iter().position(|o| o.tag == tag);
+        // Once everything on offer has been tried, start again rather than
+        // run out of ideas. Exhaustion is meant to be a rotation, not a
+        // one-shot: a door takes one press and thirty tics to rise, during
+        // which the player has not moved, so a rule that never presses twice
+        // gives up on the door it only just missed.
+        if self.opts.iter().all(|o| self.tried.contains(&o.tag)) {
+            self.tried.clear();
+        }
+        let pick = self.choose();
+        if let Some(i) = pick {
+            if self.stuck >= STUCK_TRY_SOMETHING_ELSE {
+                if let Some(o) = self.opts.get(i) {
+                    self.tried.insert(o.tag);
+                }
+            }
+        }
+        pick
+    }
+
+    fn choose(&mut self) -> Option<usize> {
+        let stuck = self.stuck;
+        let tried = &self.tried;
+        let by = |tag: Tag| {
+            if stuck >= STUCK_TRY_SOMETHING_ELSE && tried.contains(&tag) {
+                return None;
+            }
+            self.opts.iter().position(|o| o.tag == tag)
+        };
         let hurt_badly = self.state.player.health < 40;
         let threat_near = self.state.visible_threats().next().map(|t| t.distance) < Some(600);
         // Close enough that walking past it means taking hits the whole way.
@@ -1068,6 +1124,9 @@ impl DoomEnv {
         // a fixed preference order.
         let mut best: Option<(i32, usize)> = None;
         for (i, o) in self.opts.iter().enumerate() {
+            if stuck >= STUCK_TRY_SOMETHING_ELSE && tried.contains(&o.tag) {
+                continue;
+            }
             let score = match o.tag {
                 Tag::Exit => o.room + 400,
                 Tag::Advance | Tag::Retreat | Tag::Explore => o.room,

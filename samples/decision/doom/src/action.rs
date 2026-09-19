@@ -44,7 +44,7 @@ pub struct Option_ {
     pub room: i32,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Tag {
     Attack,
     /// Move sideways without changing facing.
