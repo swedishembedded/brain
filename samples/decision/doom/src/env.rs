@@ -118,12 +118,24 @@ impl Mission {
                 exit: 3.0,
                 explore: 0.10,
             },
+            // Speedrun's exploration bonus is a tenth of the others' and its
+            // exit is worth more than twice as much, and those two numbers are
+            // not free. PPO optimises the DISCOUNTED return: at gamma 0.99 an
+            // exit reward arriving 150 decisions away is worth 0.22 of its
+            // face value, while each step's exploration bonus is worth nearly
+            // all of its own. At 0.20 a 300-decision wander was worth about 19
+            // discounted and the exit about 3.3 - wandering paid six times
+            // better than finishing, and a policy cloned from a teacher that
+            // finishes six times out of six was trained back down to zero out
+            // of four over eight iterations, correctly maximising what it had
+            // been given. Here the exit is worth about 8.8 against at most 1.9
+            // for covering the whole level.
             Mission::Speedrun => Weights {
                 kill: 0.2,
                 item: 0.1,
                 hurt: 0.02,
-                exit: 15.0,
-                explore: 0.20,
+                exit: 40.0,
+                explore: 0.02,
             },
             Mission::Survive => Weights {
                 kill: 0.3,
