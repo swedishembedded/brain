@@ -297,6 +297,45 @@ impl SplatGrads {
     }
 }
 
+/// Words per gradient record in `recs`, the layout `splat_bwd_emit.wgsl`
+/// writes and `splat_grad_reduce.wgsl` reads: five sigma partials, the opacity
+/// partial, three weighted colour partials, and the gaussian id bitcast into
+/// the tenth slot as the sort key. Declared once here because the host sizes
+/// the buffer and only the kernels know the stride - `record_width` in
+/// `crates/kernels/tests/` gates the two against each other.
+pub const RECORD_WORDS: usize = 10;
+
+/// How many gradient records fit in ONE storage binding of `limit` bytes.
+///
+/// This is a real ceiling, not a tunable: `recs` is bound as a single
+/// storage buffer, so a pass needing more records than this cannot run on the
+/// device at all, however much memory is free.
+pub fn max_records_for_binding(limit: u64) -> usize {
+    (limit / (RECORD_WORDS * 4) as u64) as usize
+}
+
+/// The capacity to allocate for a pass needing `need` records, or an error
+/// naming what the device refused.
+///
+/// A quarter of headroom keeps a fit whose record count drifts upward from
+/// reallocating every step, but the headroom is CLAMPED to the binding limit:
+/// exceeding it to leave room to grow would fail a pass that would otherwise
+/// have run.
+pub fn record_capacity(need: usize, limit: u64) -> Result<usize, String> {
+    let ceiling = max_records_for_binding(limit);
+    if need > ceiling {
+        return Err(format!(
+            "this backward pass needs {need} gradient records ({:.1} GiB) but one storage binding \
+             on this device holds {ceiling} ({} MiB). The scene is too dense to differentiate at \
+             this image size: reduce it with `--prune` (voxel-merge duplicate gaussians across \
+             overlapping views) or `--min-opacity`, or fit against smaller images.",
+            (need * RECORD_WORDS * 4) as f64 / (1u64 << 30) as f64,
+            limit >> 20,
+        ));
+    }
+    Ok((need + need / 4).min(ceiling))
+}
+
 /// Backward scratch. The record buffers start at `rec_cap` (default 64·px)
 /// and [grow][BwdScratch::reserve_records] to fit whatever the scene actually
 /// emits: how many gaussians each pixel's alpha-composite touches is a
@@ -314,6 +353,7 @@ pub struct BwdScratch {
     granges: DeviceBuffer,
     pgrad: DeviceBuffer,
     rec_cap: usize,
+    limit: Option<u64>,
 }
 
 impl BwdScratch {
@@ -331,6 +371,7 @@ impl BwdScratch {
             granges: gpu.storage(2 * max_n as u64),
             pgrad: gpu.storage(9 * max_n as u64),
             rec_cap: 0,
+            limit: None,
         };
         s.alloc_records(gpu, cap);
         s
@@ -348,17 +389,27 @@ impl BwdScratch {
     }
 
     /// Make room for `need` gradient records, reallocating if the current
-    /// buffers are too small. A quarter of headroom keeps a fit whose record
-    /// count drifts upward as gaussians grow from reallocating every step.
+    /// buffers are too small - see [`record_capacity`] for the headroom and
+    /// the device ceiling it is clamped to.
     ///
     /// Nothing is preserved across a grow, and nothing needs to be: the
     /// records for one `render_bwd` are written and consumed inside that one
     /// call.
-    pub fn reserve_records(&mut self, gpu: &Gpu, need: usize) {
+    pub fn reserve_records(&mut self, gpu: &Gpu, need: usize) -> Result<(), String> {
         if need <= self.rec_cap {
-            return;
+            return Ok(());
         }
-        self.alloc_records(gpu, need + need / 4);
+        let cap = record_capacity(need, self.limit.unwrap_or_else(|| gpu.max_storage_binding_bytes()))?;
+        self.alloc_records(gpu, cap);
+        Ok(())
+    }
+
+    /// Pretend the device's per-binding limit is `bytes`, so a test can force
+    /// the banding path without building a scene big enough to reach the real
+    /// one.
+    pub fn with_binding_limit(mut self, bytes: u64) -> BwdScratch {
+        self.limit = Some(bytes);
+        self
     }
 }
 
@@ -366,6 +417,13 @@ impl Renderer {
     /// Backward through the LAST `render()` call: upstream RGBA image grads
     /// `dimg` (`W*H*4`) → accumulate parameter grads. Returns the gradient
     /// record count; `scr` grows to fit it.
+    ///
+    /// `Err` when the pass needs more records than one storage binding on this
+    /// device holds. That is recoverable and the caller is the only one who can
+    /// recover it: the gradients are a sum over pixels, so rendering and
+    /// differentiating the frame in horizontal bands and letting them
+    /// accumulate gives the same answer within a bounded record buffer
+    /// (`splat::opt::fit` does exactly that).
     #[allow(clippy::too_many_arguments)]
     pub fn render_bwd(
         &mut self,
@@ -376,7 +434,7 @@ impl Renderer {
         dimg: &DeviceBuffer,
         scr: &mut BwdScratch,
         grads: &SplatGrads,
-    ) -> usize {
+    ) -> Result<usize, String> {
         let (n_isects, vals_in_b, tiles_x, tiles_y) =
             self.last.expect("render() must run before render_bwd()");
         let _ = n_isects;
@@ -395,9 +453,9 @@ impl Renderer {
         gpu.submit(&[], &steps);
         let n_recs = gpu.read(scr.px_scan.total(), 1)[0].to_bits() as usize;
         if n_recs == 0 {
-            return 0;
+            return Ok(0);
         }
-        scr.reserve_records(gpu, n_recs);
+        scr.reserve_records(gpu, n_recs)?;
 
         // pass B: emit records, sort by gaussian id, segment-reduce, project VJP
         let mut steps = Vec::new();
@@ -459,7 +517,7 @@ impl Renderer {
             s.n as u32,
         ));
         gpu.submit(&[&scr.granges, &scr.pgrad], &steps);
-        n_recs
+        Ok(n_recs)
     }
 }
 

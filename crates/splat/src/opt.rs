@@ -148,7 +148,9 @@ pub fn fit(gpu: &Gpu, ks: Kernels, init: &Splats, targets: &[TargetView], cfg: &
             }
             loss_sum += lsum / (px as f64 * 3.0);
             gpu.write(&dimg, cast(&d));
-            renderer.render_bwd(gpu, &gs, &t.cam, &opts, &dimg, &mut bscr, &grads);
+            renderer
+                .render_bwd(gpu, &gs, &t.cam, &opts, &dimg, &mut bscr, &grads)
+                .unwrap_or_else(|e| panic!("{e}"));
         }
         let ts = it as i32 + 1;
         let bc1 = 1.0 - 0.9f32.powi(ts);

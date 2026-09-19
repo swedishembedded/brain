@@ -16,3 +16,8 @@ path = "src/lib.rs"
 # (`brain-gpu-core` already depends on both this crate and `brain-backend-api`
 # directly).
 brain-backend-api.workspace = true
+
+[dev-dependencies]
+# `record_width` gates the splat gradient-record stride against the host
+# constant that sizes the buffer; the check is meaningless without both sides.
+brain-splat.workspace = true

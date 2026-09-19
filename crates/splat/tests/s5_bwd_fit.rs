@@ -93,7 +93,7 @@ fn gradcheck_vs_autograd() {
     g.submit(&[&grads.d_gauss, &grads.d_opac, &grads.d_colors], &[]);
     let dimg: DeviceBuffer = g.storage_init("dimg", &wimg);
     let mut bscr = BwdScratch::new(&g, base.len(), px, 0);
-    let nrecs = ren.render_bwd(&g, &gs, &c, &o, &dimg, &mut bscr, &grads);
+    let nrecs = ren.render_bwd(&g, &gs, &c, &o, &dimg, &mut bscr, &grads).expect("fits");
     assert!(nrecs > 0);
     let d_gauss = g.read(&grads.d_gauss, 10 * base.len());
     let d_opac = g.read(&grads.d_opac, base.len());
@@ -217,7 +217,7 @@ fn a_scratch_too_small_for_the_scene_grows_instead_of_aborting() {
         g.submit(&[&grads.d_gauss, &grads.d_opac, &grads.d_colors], &[]);
         let dimg: DeviceBuffer = g.storage_init("dimg", &wimg);
         let mut bscr = BwdScratch::new(&g, s.len(), px, rec_cap);
-        let n = ren.render_bwd(&g, &gs, &c, &o, &dimg, &mut bscr, &grads);
+        let n = ren.render_bwd(&g, &gs, &c, &o, &dimg, &mut bscr, &grads).expect("fits");
         (
             n,
             g.read(&grads.d_gauss, 10 * s.len()),
@@ -234,4 +234,89 @@ fn a_scratch_too_small_for_the_scene_grows_instead_of_aborting() {
     assert_eq!(gauss_small, gauss_ample, "gaussian grads differ after a grow");
     assert_eq!(opac_small, opac_ample, "opacity grads differ after a grow");
     assert_eq!(col_small, col_ample, "color grads differ after a grow");
+}
+
+
+/// Growing the record scratch to whatever the scene needs runs into a second
+/// wall: one storage binding cannot exceed the device's
+/// `max_storage_buffer_binding_size`, and a dense enough scene needs more
+/// record bytes than that. The scratch must refuse it by NAME - what ran out,
+/// what the device allows, and which knob shrinks the scene - rather than
+/// growing past the limit and letting the backend reject the bind group with
+/// a validation error that mentions neither gaussians nor records.
+#[test]
+fn a_scene_too_dense_for_one_binding_says_so_in_its_own_terms() {
+    // what wgpu actually reports on this class of card: i32::MAX rounded down
+    let limit = 2_147_483_644u64;
+    let fits = splat::renderer::max_records_for_binding(limit);
+    assert_eq!(fits, limit as usize / (splat::renderer::RECORD_WORDS * 4));
+
+    let err = splat::renderer::record_capacity(fits + 1, limit)
+        .expect_err("a count past the binding limit must not be silently allocated");
+    for want in ["gradient record", "--prune", "2047 MiB"] {
+        assert!(err.contains(want), "message {err:?} does not mention {want:?}");
+    }
+    // One below the limit is allocatable, and headroom never pushes it over.
+    let cap = splat::renderer::record_capacity(fits - 1, limit).expect("fits");
+    assert!(cap <= fits, "headroom grew the capacity past the binding limit ({cap} > {fits})");
+    assert!(cap >= fits - 1, "capacity {cap} is below what the pass needs");
+}
+
+
+
+/// Cropping the camera is NOT a way around the record ceiling, and this pins
+/// down why so the next person does not lose a day to it.
+///
+/// It looks exact: gradients are a sum over pixels, so rendering the frame in
+/// horizontal strips and letting them accumulate should give what the whole
+/// frame gives. It does not, because `splat_project.wgsl` clamps each
+/// gaussian's 3D covariance against the FRUSTUM before projecting it
+/// (`lim_y_pos = (height - cy)/fy + 0.3*tan_fovy`, the standard EWA
+/// approximation). A cropped camera is a different frustum, so the projected
+/// covariance - and every gradient through it - is a different function.
+///
+/// Measured here rather than asserted, so that if the projection ever stops
+/// depending on the frustum this test fails and says banding became available.
+#[test]
+fn cropping_the_camera_does_not_decompose_the_backward() {
+    let g = Gpu::new_cpu(splat::PIPELINES);
+    let ks = Kernels::at(0);
+    let s = scene(16, 0x8a5d);
+    let c = Camera::look_at([0.0, 0.0, 0.0], [0.0, 0.0, 4.0], [0.0, -1.0, 0.0], 60.0, 32, 32);
+    let o = RenderOpts::default();
+    let px = (c.width * c.height) as usize;
+    let mut r = Lcg(0x77);
+    let wimg: Vec<f32> = (0..px * 4).map(|i| if i % 4 == 3 { 0.0 } else { r.next() - 0.5 }).collect();
+
+    let run = |bands: u32| -> Vec<f32> {
+        let mut ren = Renderer::new(&g, ks, s.len(), c.width, c.height, 0);
+        let gs = GpuSplats::upload(&g, &s);
+        let grads = SplatGrads::new(&g, s.len());
+        g.submit(&[&grads.d_gauss, &grads.d_opac, &grads.d_colors], &[]);
+        let mut bscr = BwdScratch::new(&g, s.len(), px, 0);
+        let rows = c.height.div_ceil(bands);
+        let mut y0 = 0;
+        while y0 < c.height {
+            let h = rows.min(c.height - y0);
+            let band = Camera { cy: c.cy - y0 as f32, height: h, ..c };
+            ren.render(&g, &gs, &band, &o);
+            let n = (band.width * h * 4) as usize;
+            let off = (y0 * c.width * 4) as usize;
+            let dimg: DeviceBuffer = g.storage_init("dimg", &wimg[off..off + n]);
+            ren.render_bwd(&g, &gs, &band, &o, &dimg, &mut bscr, &grads).expect("fits");
+            y0 += h;
+        }
+        g.read(&grads.d_gauss, 10 * s.len())
+    };
+
+    let whole = run(1);
+    let split = run(2);
+    let scale = whole.iter().fold(0.0f32, |m, v| m.max(v.abs())).max(1e-6);
+    let worst = whole.iter().zip(&split).map(|(x, y)| (x - y).abs()).fold(0.0f32, f32::max) / scale;
+    assert!(
+        worst > 1e-3,
+        "two cropped bands now reproduce the whole-frame gradient to {worst:.3e} relative. If the \
+         projection no longer depends on the frustum, banding the backward by camera crop became \
+         exact - which is the cheap way past the per-binding record ceiling, and worth taking."
+    );
 }
