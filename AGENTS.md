@@ -768,8 +768,13 @@ fast and scalable kernel - not a naive one.
 18. **GenieRedux-G** (`crates/genieredux`) - CoinRun ST-transformer world model
     (QK-normalized biased attention, GEGLU FFN, PEG); tokenizer/MaskGIT dynamics
     in progress. `brain diamond {play,replay,bench,import,finetune,export}`
-    (`diamond` is the one served world-model architecture today; SDL window
-    via `crates/wm-display`).
+    (SDL window via `crates/wm-display`). **Neither has a `caps.rs`, a
+    residency adapter, or D-Bus wiring** - both are CLI-only and do not meet
+    this file's own "every new model ships the full serving contract" bar
+    above. Interactive real-time play may not fit `Run`/`Subscribe` as-is; per
+    that same bullet, the surface should be extended rather than carved out as
+    a silent exception. Open design item, tracked in
+    `.agents/roadmap/completion-plan.md` Phase 2.1.
 
 ### A digital animal (not a checkpoint port)
 
