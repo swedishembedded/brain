@@ -53,7 +53,7 @@ original's embedding):
 
 | input | degraded | `w=0.0` | `w=0.5` | `w=0.7` | `w=1.0` |
 |---|---|---|---|---|---|
-| undamaged original | +1.0000 | +0.3064 | +0.8008 | | +0.9498 |
+| undamaged original | +1.0000 | +0.3064 | +0.8008 | +0.8911 | +0.9498 |
 | 256px, JPEG q60 | +0.9765 | +0.2921 | +0.7759 | +0.8804 | +0.9394 |
 | 160px, JPEG q40 | +0.9159 | +0.3378 | +0.6991 | +0.8137 | +0.8806 |
 | 112px, JPEG q30 + blur | +0.7893 | +0.3204 | +0.6487 | +0.7252 | +0.7747 |
@@ -72,9 +72,9 @@ Three things this says, none of which is obvious from the flag's help text:
   identity DRIFT, which is the failure mode blind restoration actually has,
   and it is worth having precisely because the eye cannot see it - the drifted
   output looks better, not worse.
-- **`w=1.0` costs about 0.02 to 0.04 of cosine** and buys back the detail. That
-  is the setting for anything where the output stands in for a person:
-  evidence, identity documents, archive restoration.
+- **`w=1.0` costs 0.015 to 0.05 of cosine** and buys back the detail. That is
+  the setting for anything where the output stands in for a person: evidence,
+  identity documents, archive restoration.
 
 The default `w=0.5` sits closer to the prior than most callers expect - it
 gives up roughly 0.20 of cosine even on a perfectly clean input.

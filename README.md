@@ -172,8 +172,9 @@ $ brain arcface embed --align false --in image=restored.png --out embedding=rest
 input pixels and how much from CodeFormer's learned prior, and at `w=0` the
 prior wins outright: the middle panel is a sharper, more attractive face than
 the original that belongs to **somebody else**, and it is the panel a demo
-reel would pick. At `w=1.0` the damage is repaired and the person survives it,
-+0.8806 against an original the JPEG itself only left at +0.9159.
+reel would pick. At `w=1.0` the damage is repaired and the person survives it:
++0.8806, three hundredths below the +0.9159 the compressed input already
+scores, in exchange for detail the compressed input does not have.
 
 The control that pins the cause down: run `w=0` on the **undamaged** original
 and it still collapses to +0.31. The identity is not lost to the compression,
