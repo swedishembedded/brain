@@ -251,10 +251,10 @@ rows closed since this table was written.**
 | `diamond` / `genieredux` | no `caps.rs`; AGENTS.md calls `diamond` "the one served world-model architecture", which the tree does not support | **still open, unchanged.** No decision recorded anywhere. decide: either serve it properly or correct the claim. An interactive-play model may genuinely not fit `Run`/`Subscribe` - if so, **extend the D-Bus surface**, per the invariant, and say so |
 | `glmdsa` | **DONE**, fully. `glmdsa::caps` + a `catalog.rs` entry; `brain caps` went 36 -> 37 models on a box with no GLM checkpoint. `GlmResident::manifest` now returns `glmdsa::caps::manifest_resident()`, so the served and direct surfaces are one definition | closed: `resident_llm.rs:298-315` documents `run_batch` is deliberately serial for a real architectural reason (no batch axis in MLA/MoE - not an unstated default), and `samples/python/llm/glmdsa/glmdsa.py` is a real `--dbus` client |
 | `qwen3vl` | **DONE.** `crates/cli/src/resident_qwen3vl.rs` exists, `catalog.rs:248` registers it, `samples/python/vision/qwen3vl-caption/qwen3vl_caption.py` exists | none |
-| `gpt2`, `toymoe`, `toypid`, `toyseq2seq`, `toyautoencoder` | manifest via resident only (`GptResident`), no `caps.rs` | **still open, unchanged.** low priority - these are the toy/baseline models; decide explicitly whether the contract applies to them and record the answer rather than leaving it ambiguous |
+| `gpt2`, `toymoe`, `toypid`, `toyseq2seq`, `toyautoencoder` | manifest via resident only (`GptResident`), no `caps.rs` | **DECIDED, not open** - see "Accepted, not open work" below: the contract does not apply, they are training baselines with no served checkpoint |
 
 **Sequencing:** the only remaining work in this section is `diamond`/`genieredux`
-(a design decision about its action shape) and the toy-model contract question.
+(a design decision about its action shape, still open).
 
 ### 2.2 Missing examples
 
@@ -469,6 +469,18 @@ Record these so they stop reading as backlog:
 - Wan FLF2V/VACE - explicitly out of scope for the first landing.
 - Full-size GLM-5.2 (78 layers / 256 experts / 155k vocab) - not runnable on
   this hardware; used for import shape validation only.
+- **The serving-contract invariant does not apply to `gpt2`, `toymoe`, `toypid`,
+  `toyseq2seq`, `toyautoencoder` (decided 2026-09-19).** Every one of these is a
+  from-scratch training baseline that exists to validate the engine's own
+  primitives against a real reference implementation - `gpt2` is explicitly
+  "nanogpt-parity baseline" (AGENTS.md), `toypid` backs the WebGPU browser demo
+  rather than any served checkpoint, and none of the five ships a real,
+  downloadable pretrained checkpoint a caller would ask brain to serve. They stay
+  reachable through `GptResident`/the dedicated CLI (`brain gpt2/toymoe/toypid
+  {train,eval,infer}` etc.) for training and gradcheck use, and are deliberately
+  NOT given `caps.rs`/a catalog entry/a D-Bus sample - there is no served-model
+  use case a manifest entry would serve. Revisit only if one of them grows a real
+  released checkpoint someone wants to query over D-Bus.
 
 ---
 
