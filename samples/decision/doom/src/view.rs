@@ -143,7 +143,7 @@ impl Tally {
         }
     }
 
-    fn add(&mut self, env: &DoomEnv, total: f32, steps: usize) {
+    fn add(&mut self, env: &mut DoomEnv, total: f32, steps: usize) {
         let s = env.state();
         self.ret += total;
         self.game += env.extrinsic();
@@ -159,6 +159,11 @@ impl Tally {
             self.n,
             env.report()
         );
+        // An episode that ended by going nowhere also says what the route made
+        // of the spot it stopped in. See `DoomEnv::stall_detail`.
+        if let Some(route) = env.stall_detail() {
+            println!("      route: {route}");
+        }
     }
 
     fn finish(self) -> Score {
@@ -261,7 +266,7 @@ pub fn score_policy(
                 break;
             }
         }
-        tally.add(pipe.env(), total, steps);
+        tally.add(pipe.env_mut(), total, steps);
         if let Some(v) = viewer.as_deref_mut() {
             v.episode_done();
         }

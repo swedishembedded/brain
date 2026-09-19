@@ -766,7 +766,10 @@ impl DoomEnv {
         if !self.progress.stalled() {
             return None;
         }
-        self.doom.route().ok()
+        Some(match self.doom.route() {
+            Ok(j) => j,
+            Err(e) => format!("could not be asked: {e}"),
+        })
     }
 
     pub fn start(&mut self, seed: u64) -> String {

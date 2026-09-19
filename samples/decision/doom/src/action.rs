@@ -73,6 +73,15 @@ const MIN_ROOM: i32 = 64;
 const USE_RANGE: i32 = 64;
 /// Close enough to "facing it" that turning again would waste a decision.
 const FACING_TOL: i32 = 20;
+/// The same, for anything that is going to be pressed rather than walked at.
+///
+/// `use` is a RAY sixty-four units long cast along the player's facing, so a
+/// few degrees is a miss: twenty degrees off a door fifty-six units away is
+/// eleven units to one side, which is past the end of a door frame the player
+/// is already standing beside. Measured on E1M1, whose exit door the scripted
+/// player pressed four hundred and forty-five times in a row from ten units
+/// off its west end, with the bearing reading eleven degrees the whole time.
+const AIM_TOL: i32 = 4;
 /// How long to stand still while a door rises.
 ///
 /// A DOOM door opens at 2 units a tic, so a head-high one needs about thirty.
@@ -355,7 +364,7 @@ pub fn options(state: &State) -> Vec<Option_> {
                     tag: Tag::Switch,
                     room: sw.distance,
                 });
-            } else if sw.bearing.abs() > FACING_TOL {
+            } else if sw.bearing.abs() > AIM_TOL {
                 out.push(Option_ {
                     text: format!(
                         "turn to face the switch that opens the way out, {} units {}",
@@ -382,7 +391,7 @@ pub fn options(state: &State) -> Vec<Option_> {
             }
         }
         if b.kind == "door" && b.distance <= USE_RANGE {
-            if b.bearing.abs() > FACING_TOL {
+            if b.bearing.abs() > AIM_TOL {
                 out.push(Option_ {
                     text: format!(
                         "turn to face the shut door on the way out, {} units {}",
