@@ -213,6 +213,18 @@ impl Head {
             .collect()
     }
 
+    /// Load head parameters back, the inverse of [`Self::weights`].
+    ///
+    /// For keeping the BEST policy of a training run rather than the last
+    /// one. A policy gradient's return per iteration is not monotone - it
+    /// steps past a good solution and comes back - so the weights that exist
+    /// when the loop happens to stop are not the weights the run earned.
+    pub fn set_weights(&self, w: &[(String, Vec<f32>)]) {
+        for (name, values) in w {
+            self.gpu.write_f32(self.w(name), values);
+        }
+    }
+
     /// Apply one AdamW update to the head's parameters, on the HEAD's handle -
     /// see the encoder's own note on why the handle matters.
     pub fn adamw_step(&self, opt: &optim::Optim, t: u32, lr: f32, wd: f32, clip: Option<f32>) {

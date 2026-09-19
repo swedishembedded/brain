@@ -479,6 +479,16 @@ impl Decide {
         Ok(())
     }
 
+    /// Every head parameter, for snapshotting mid-run.
+    pub fn head_weights(&self) -> Vec<(String, Vec<f32>)> {
+        self.head.weights()
+    }
+
+    /// Put a snapshot back. See [`decide::head::Head::set_weights`].
+    pub fn set_head_weights(&self, w: &[(String, Vec<f32>)]) {
+        self.head.set_weights(w);
+    }
+
     /// Steps taken so far - the AdamW time index, which a resumed run must
     /// carry so the bias correction stays continuous.
     pub fn steps_taken(&self) -> u32 {

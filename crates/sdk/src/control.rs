@@ -745,6 +745,17 @@ impl<E: Env> Stages for ControlPipeline<E> {
                 );
             }
         }
+        // The BEST iteration's weights, not the last one's.
+        //
+        // A policy gradient's return per iteration is not monotone: it steps
+        // past a good solution and comes back. Measured on this repository's
+        // DOOM sample, one run went 2 wins of 6, then 3 of 6, then 0 of 6 -
+        // so the weights that exist when the loop happens to stop are not the
+        // weights the run earned, and scoring them measures where the walk
+        // ended rather than what was learned. Snapshotting costs one readback
+        // of the head per iteration, which is nothing beside a rollout.
+        let mut best_return = f32::NEG_INFINITY;
+        let mut best: Option<(usize, Vec<(String, Vec<f32>)>)> = None;
         for it in 0..spec.iterations {
             let (batch, stats) = self.rollout(spec.episodes, spec.max_steps)?;
             if batch.is_empty() {
@@ -771,6 +782,20 @@ impl<E: Env> Stages for ControlPipeline<E> {
                 stats.steps,
                 self.critic_mse
             );
+            if stats.mean_return > best_return {
+                best_return = stats.mean_return;
+                best = Some((it + 1, self.model.head_weights()));
+            }
+        }
+        if let Some((it, w)) = best {
+            if it != spec.iterations {
+                println!(
+                    "    keeping iteration {it}, which returned {best_return:+.2} - the last \
+                     one returned {:+.2}",
+                    self.last.mean_return
+                );
+                self.model.set_head_weights(&w);
+            }
         }
         Ok(TrainReport { steps: step, final_loss: last_loss, seconds: 0.0 })
     }
