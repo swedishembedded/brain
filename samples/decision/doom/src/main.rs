@@ -60,6 +60,8 @@ pub struct Args {
     pub doom_bin: Option<String>,
     pub wad: Option<String>,
     pub cfg: Config,
+    /// The levels episodes are drawn from.
+    pub maps: Vec<u32>,
     pub mission: Mission,
     pub mix: bool,
     pub arena: usize,
@@ -114,6 +116,10 @@ the game (no path is ever baked in, and nothing is read from the environment)
 
 what to play
   --episode N --map N --skill 0..4      [1 1 2]
+  --maps 1,2,3        draw each episode's level from this list instead of one.
+                      Training on several and scoring on a level that was not
+                      among them is the only measurement that separates having
+                      learned to play from having learned a level
   --mission clear|speedrun|survive      [clear]
   --full-map          give the route the WHOLE level instead of only the part
                       the player has seen. A control, not a way to play: it
@@ -204,8 +210,26 @@ fn parse_args() -> Result<Args, String> {
     if cfg.skill > 4 {
         return Err("--skill must be 0..4".into());
     }
+    let maps: Vec<u32> = match args.take_str("--maps") {
+        Some(list) => {
+            let mut out = Vec::new();
+            for part in list.split(',') {
+                out.push(
+                    part.trim()
+                        .parse()
+                        .map_err(|_| format!("--maps: {part:?} is not a level number"))?,
+                );
+            }
+            if out.is_empty() {
+                return Err("--maps needs at least one level".into());
+            }
+            out
+        }
+        None => vec![cfg.map],
+    };
     let parsed = Args {
         command,
+        maps,
         doom_bin: args.take_str("--doom-bin"),
         wad: args.take_str("--wad"),
         cfg,
@@ -253,7 +277,11 @@ fn run() -> Result<(), String> {
     println!(
         "doom: E{}M{} at skill {}, {}",
         args.cfg.episode,
-        args.cfg.map,
+        args.maps
+            .iter()
+            .map(|m| m.to_string())
+            .collect::<Vec<_>>()
+            .join("/"),
         args.cfg.skill,
         if args.mix {
             "orders sampled per episode".into()
@@ -271,6 +299,7 @@ fn run() -> Result<(), String> {
     .map_err(|e| format!("could not start the game: {e}"))?;
     println!("doom: engine up on port {}, lockstep", game.port);
     let mut env = DoomEnv::new(game, args.cfg.clone(), args.mission, args.mix);
+    env.set_maps(args.maps.clone());
     env.set_arena(args.arena);
     env.set_curriculum(args.curriculum);
     env.set_start_distance(args.start_distance);

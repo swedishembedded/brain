@@ -56,6 +56,10 @@ pub struct Progress {
     /// Patches of floor over the last [`STALL_WINDOW`] decisions.
     recent: VecDeque<(i32, i32)>,
     pos: (i32, i32),
+    /// Every patch of floor entered this episode, not just the recent ones.
+    /// Under fair play this is the closest thing to a measure of how much of
+    /// the level the run actually saw.
+    covered: std::collections::HashSet<(i32, i32)>,
     health: i32,
     kills: u32,
     total_kills: u32,

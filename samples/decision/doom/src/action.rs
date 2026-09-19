@@ -58,6 +58,8 @@ pub enum Tag {
     Open,
     /// Go to, and press, the switch that opens what the route is blocked by.
     Switch,
+    /// Remove whatever is standing in the way of the route.
+    Clear,
     Exit,
 }
 
@@ -353,6 +355,56 @@ pub fn options(state: &State) -> Vec<Option_> {
         // of zero height that a switch a hundred units to one side raises;
         // told it was a wall, a follower shoved at it for six hundred
         // decisions with the switch in plain view.
+        // Something standing in the way is shot, not walked round: a barrel
+        // explodes, a monster dies, and a decoration is the one case where
+        // going round is the answer - which the movement options already
+        // offer. Aimed, because a shot goes where the player is facing.
+        if b.kind == "thing" && b.alive != Some(true) {
+            // A barrel or a lamp. Shooting a barrel forty units away is how
+            // the player dies, not how it gets past, so the answer is to
+            // step round - sideways, because turning and walking would aim
+            // straight back at the thing.
+            let what = b.what.as_deref().unwrap_or("it").to_lowercase();
+            let (dir, word) = if b.bearing >= 0 {
+                ("left", "left")
+            } else {
+                ("right", "right")
+            };
+            out.push(Option_ {
+                text: format!("step {word} round the {what} in your way"),
+                commands: format!("[{{\"type\":\"strafe-{dir}\",\"amount\":8}}]"),
+                tics: MOVE_TICS,
+                tag: Tag::Clear,
+                room: 0,
+            });
+        } else if b.kind == "thing" {
+            let what = b.what.as_deref().unwrap_or("it").to_lowercase();
+            if b.bearing.abs() > AIM_TOL {
+                out.push(Option_ {
+                    text: format!(
+                        "turn to face the {what} blocking your way, {} units {}",
+                        b.distance,
+                        bearing_phrase(b.bearing)
+                    ),
+                    commands: format!("[{}]", json_turn(state.facing(b.bearing))),
+                    tics: FIGHT_TICS,
+                    tag: Tag::Clear,
+                    room: 0,
+                });
+            } else {
+                out.push(Option_ {
+                    text: format!(
+                        "shoot the {what} blocking your way, {} units {}",
+                        b.distance,
+                        bearing_phrase(b.bearing)
+                    ),
+                    commands: "[{\"type\":\"shoot\"}]".into(),
+                    tics: FIGHT_TICS,
+                    tag: Tag::Clear,
+                    room: 0,
+                });
+            }
+        }
         if let Some(sw) = &b.switch {
             if sw.distance > USE_RANGE {
                 out.push(Option_ {

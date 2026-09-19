@@ -249,6 +249,14 @@ pub struct DoomEnv {
     pub mission: Mission,
     /// Fixed for the run, or sampled per episode when training over a mix.
     mission_mix: bool,
+    /// The levels episodes are drawn from, one per episode.
+    ///
+    /// A policy trained on one level can learn that level: where its exit is,
+    /// which way to leave the first room. Several levels is what makes that
+    /// strategy stop paying and leaves only the ability - and it costs
+    /// nothing, because a level is chosen by the same seed that already makes
+    /// an episode reproducible.
+    maps: Vec<u32>,
     state: State,
     opts: Vec<Option_>,
     /// Where the player was, and for how many steps it has not changed.
@@ -337,11 +345,13 @@ pub struct DoomEnv {
 
 impl DoomEnv {
     pub fn new(doom: Doom, cfg: Config, mission: Mission, mission_mix: bool) -> DoomEnv {
+        let only = vec![cfg.map];
         DoomEnv {
             doom,
             cfg,
             mission,
             mission_mix,
+            maps: only,
             state: State::parse(EMPTY).expect("the empty state is well formed"),
             opts: Vec::new(),
             last_pos: None,
@@ -378,6 +388,13 @@ impl DoomEnv {
     /// round trip per tic; only worth it when recording.
     pub fn frames_per_tic(&mut self, on: bool) {
         self.frames_per_tic = on;
+    }
+
+    /// Draw each episode's level from this list.
+    pub fn set_maps(&mut self, maps: Vec<u32>) {
+        if !maps.is_empty() {
+            self.maps = maps;
+        }
     }
 
     /// Turn the reverse curriculum on. See [`DoomEnv::curriculum`].
@@ -791,6 +808,10 @@ impl DoomEnv {
             self.mission = Mission::ALL[(seed as usize) % Mission::ALL.len()];
         }
         self.episode = seed;
+        // Which level, from the same seed. Mixed differently from the mission
+        // so that "map 2" and "survive" do not always arrive together, which
+        // would make either one unlearnable from the other.
+        self.cfg.map = self.maps[(seed.wrapping_mul(0x9e37_79b9) >> 16) as usize % self.maps.len()];
         let start = self.curriculum.then_some(self.start_distance);
         let json = match self.doom.reset(&self.cfg, seed, start) {
             Ok(j) => j,
@@ -892,6 +913,20 @@ impl DoomEnv {
         // options are scored on clearance, which a closed door reads as zero.
         // Without this the teacher demonstrated walking into E1M1's first
         // door for as long as the episode lasted.
+        // SOMETHING STANDING IN THE WAY, once it has actually stopped the
+        // player. The route is over geometry and cannot see who is standing
+        // in it, so a barrel in a doorway is a perfectly good route the
+        // player cannot walk - but "a solid thing is on the line to the next
+        // waypoint" is true constantly in a level full of furniture, and
+        // acting on it every time is a player who sidesteps for ever. Not
+        // moving for two decisions is what turns it from a fact into a
+        // problem.
+        if self.stuck >= 2 {
+            if let Some(i) = by(Tag::Clear) {
+                return Some(i);
+            }
+        }
+
         if let Some(i) = by(Tag::Open) {
             return Some(i);
         }

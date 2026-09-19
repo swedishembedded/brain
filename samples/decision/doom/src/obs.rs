@@ -214,8 +214,13 @@ pub struct Exit {
 #[serde(deny_unknown_fields)]
 pub struct Blocker {
     /// `door` when pressing use against it opens it, `switch` when something
-    /// elsewhere opens it, `wall` when nothing does.
+    /// elsewhere opens it, `thing` when it is a monster or a barrel standing
+    /// in the way, `wall` when nothing does.
     pub kind: String,
+    /// What that thing is, when the blocker is one, and whether it is alive -
+    /// something to shoot, as against a barrel or a lamp to walk round.
+    pub what: Option<String>,
+    pub alive: Option<bool>,
     pub bearing: i32,
     pub distance: i32,
     /// Where that something else is. Present with `switch` and only then.
@@ -487,6 +492,17 @@ pub fn render(state: &State, history: History) -> String {
                     "A SHUT DOOR is in the way, {} units {} - open it.\n",
                     b.distance,
                     side_word(b.bearing)
+                ),
+                "thing" => format!(
+                    "A {} IS IN YOUR WAY, {} units {} - {}.\n",
+                    b.what.as_deref().unwrap_or("something").to_lowercase(),
+                    b.distance,
+                    side_word(b.bearing),
+                    if b.alive == Some(true) {
+                        "kill it"
+                    } else {
+                        "go round it"
+                    }
                 ),
                 "switch" => match &b.switch {
                     Some(sw) => format!(
