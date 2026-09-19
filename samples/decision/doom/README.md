@@ -316,6 +316,60 @@ that looked broken while every probe said the floor was clear:
 - **Seeding at the exit line's midpoint puts the seed inside a wall**, and any
   walkable spot can be a sealed pocket on the far side of the switch. The seed
   is chosen from the spots the player can actually reach.
+- **A two-sided line with no gap in it is usually a wall.** The crossing test
+  asked only whether a line was one-sided or marked blocking, and a sector
+  whose floor and ceiling are at the same height is neither - which is how a
+  mapper of 1993 draws a diagonal wall with a texture of its own. The route
+  crossed E1M2's and the player could not. The test that distinguishes them
+  from a shut door, which looks identical, is not "is there room now" but "can
+  there ever be": a special on the line, or a tagged sector something else
+  operates.
+- **The engine's own path traverse misses lines on an exact diagonal.**
+  `P_PathTraverse` steps the blockmap one axis at a time, and a trace at
+  exactly 45 degrees - every diagonal step on a square grid, so two thirds of
+  this grid's steps - can pass through a block corner and skip the block
+  beyond it. Measured on E1M3: the step north out of a cell sees the blue door
+  and is refused; the step north-east out of the same cell, crossing the same
+  door sixteen units further along, sees no lines at all. The route ran
+  through a locked door, never asked for the key, and the player stood at that
+  door for thirteen hundred decisions while every diagnostic agreed the route
+  was fine. The crossing test now takes every line in the segment's bounding
+  box and asks each directly, which cannot fail that way.
+- **A level can have two exits.** E1M3's secret exit has a lower line number
+  than its normal one, so taking the first match sent every route to it,
+  across a hellslime pit, with the blue key the normal exit needs never asked
+  for. The normal exit first; the secret one only if a level has no other.
+
+### Keys and switches
+
+A level's exit is often not reachable by walking, and the level says why in
+its own data. Two cases, both handled the same way: the way is shut, so the
+route leads to **whatever opens it** instead, by flooding the same field from
+somewhere else.
+
+A **locked door** is a wall until its key is held. The field then floods from
+the key, `exit.goal` says which colour, and the observation says "the way out
+is LOCKED and needs the RED key" rather than calling a keycard the exit.
+Picking the key up changes which doors are walls, the grid is rebuilt on that,
+and the route goes back to pointing at the exit with nothing else having to
+notice.
+
+A **sector only a switch opens** - a lift, a switch-door, a raising floor - is
+also a wall, and unlike a door the player cannot open it by standing in front
+of it. The route leads to a standing spot in front of the switch that operates
+that sector's tag. Which switch is the whole difficulty: a level has a dozen
+and all but one are irrelevant, and taking the first sent E1M2's player
+fourteen hundred units the wrong way to press something that opened nothing.
+The one that matters has the player on one side of it and the exit on the
+other, which is answerable without opening anything - flood the exit's own
+island, then sample just off each of that sector's lines and see which island
+the cell there belongs to. Off the lines rather than inside the sector,
+because these things are often a few units thick and no cell centre lands
+inside them at all.
+
+Arriving is half the job for a switch and all of it for a key: you walk onto a
+key, and you have to press a switch. An agent told only "you have arrived"
+wanders off, which E1M2's did for twelve hundred decisions.
 
 ### Doors
 
@@ -649,6 +703,59 @@ decided on, an episode that never reached combat, a goal reward that never
 fired, and a route with dead ends in it. The model and the training loop were
 the same throughout.
 
+### Reading a run that went wrong
+
+A return of +19.39 says nothing about what went wrong in the episode that
+earned it, and at this horizon most episodes end for a reason worth reading.
+Every scored episode now ends with one line saying which of three things
+happened - it finished, it died, or it stopped making progress - and the
+numbers that distinguish them:
+
+```
+doom: finished in 366 decisions; 21 of 41 kills, 100 health; closed on the red
+      key from 2112 units to 32 at decision 76; closed on the switch that opens
+      the way from 5728 units to 0 at decision 290; closed on the exit from
+      1312 units to 32 at decision 365; damage 14 to FORMER HUMAN
+
+doom: died at decision 533 to IMP, at (234, -1552); 42 of 74 kills, 0 health;
+      closed on the blue key from 4576 units to 64 at decision 195; closed on
+      the exit from 7616 units to 480 at decision 531; damage 105 to IMP
+
+doom: stalled: the last 60 of 1400 decisions covered 3 patches of floor around
+      (-1420, 2059); ... a wall in the way
+```
+
+Three pieces of machinery make those lines possible, and each was added
+because a question could not be answered without it.
+
+**The engine attributes damage.** `P_DamageMobj` tells the API what hit the
+player, so the `hurt` and `death` events carry the inflictor's name - or, when
+the engine hands over no inflictor, which only a damaging floor does, the
+sector special by name. "Died at decision 276" is not a diagnosis; "died to an
+IMP having lost most of its health to nukage" is - the first says fight
+better, the second says route elsewhere.
+
+**Each goal is measured on its own.** The route leads to a key while the way
+out is locked, then to a switch, then to the exit. Measured as one number that
+reads as "closed to 32 units and then fell back to 6944", which describes the
+one thing that went right as the failure.
+
+**Stalling is a distinct outcome, and the commonest one.** A walker shuttling
+between two cells for three hundred decisions still earns a healthy return
+from the exploration bonus, and from the score alone reads exactly like an
+episode that walked half the level. An episode that ends that way also asks
+the engine what the route made of the spot it stopped in - `api/route` returns
+the player's cell, its eight neighbours, the chain of cells the field would
+have it follow, and, when the player is standing somewhere the field never
+reached, what lies in between. That last one is how the diagonal walls were
+found. It is asked there and then, while the level is still in the state that
+produced it, which walking back to the same coordinates afterwards does not
+reproduce.
+
+`--engine-log FILE` keeps the engine's own account alongside it: how many
+steps it refused and for what, which cells it could not reach, which of the
+four questions it ended up answering.
+
 ### What would move this next
 
 In the order the measurements point at, not in the order they are interesting:
@@ -679,18 +786,10 @@ In the order the measurements point at, not in the order they are interesting:
   Six of twelve scored episodes end the level, which is what the scripted
   player manages on the same twelve, and the policy is 5.19 behind on return.
   Finishing is a result; winning is not one yet.
-- **E1M2 cannot be routed**, and E1M3 only recently could. E1M3's exit came out
-  unreachable because the grid was built with `P_CheckPosition`, which counts
-  the monsters standing in the level when it loads - several of its 74 start in
-  doorways, and each one was recorded as a wall for good. The grid describes
-  the level now and E1M3's exit is 76 cells from its spawn. E1M2's exit still
-  sits on a 229-cell island with no door, lift or switch bordering both sides
-  and plain wall in the nearest gap, and that one is not diagnosed.
-- **Nothing here opens a locked door.** The route crosses a keycard door as if
-  it were open, because to the geometry it is just a two-sided line. E1M3's
-  exit is behind the blue door and E1M2's behind the red one, so the route
-  leads the agent to a door it cannot open and does not say so. Keys are the
-  next thing this needs, not a tuning pass.
+- **E1M3 is not finished.** The scripted player crosses it - blue key at
+  decision 195, within 480 units of the exit at 531 - and then loses a fight.
+  That is a combat failure, not a routing one, and the teacher's combat is
+  deliberately crude.
 - **The fighting policy and the finishing policy are different runs.** Nothing
   here yet trains one policy that does both.
 - The sentence encoder is frozen by default (`--train-encoder` to change it):
@@ -700,10 +799,8 @@ In the order the measurements point at, not in the order they are interesting:
 - `--mix` trains one policy over three missions; whether it has learned to
   *read* the instruction rather than average over them is measured by scoring
   it per mission, which is what `eval --mission` does.
-- Only E1M1 is exercised end to end. `--map` accepts the rest of the shareware
-  episode; E1M3 now routes and the scripted player crosses it but cannot finish
-  it without the blue key, and on E1M2 it is exploring rather than heading
-  anywhere.
+- **Two of the three maps are exercised end to end.** The scripted player
+  finishes E1M1 and E1M2 from their own spawns; E1M3 it does not.
 
 ---
 
