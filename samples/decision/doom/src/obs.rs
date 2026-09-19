@@ -154,13 +154,21 @@ pub struct Clearance {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Exit {
-    pub distance: i32,
-    pub bearing: i32,
-    pub kind: String,
+    /// Where the exit is, as the crow flies - ABSENT until the player has
+    /// laid eyes on it.
+    ///
+    /// That absence is the point. Knowing where a level's exit is before
+    /// walking a step of the level is the one piece of knowledge a player
+    /// cannot have, and an agent given it is following a line rather than
+    /// finding a way out. The route below still exists while this is absent:
+    /// it leads to the edge of what has been explored.
+    pub distance: Option<i32>,
+    pub bearing: Option<i32>,
+    pub kind: Option<String>,
     /// How far the player would get setting off toward it right now. The exit
     /// is usually behind a wall, and without this an agent cannot tell "walk
     /// that way" from "walk into that".
-    pub clearance: i32,
+    pub clearance: Option<i32>,
     /// A walkable place to stand to use this exit, when the engine found one.
     ///
     /// Never shown to the model - it is how a CURRICULUM places an episode
@@ -174,8 +182,10 @@ pub struct Exit {
     /// whose exit the engine could not route to.
     #[serde(rename = "pathDistance")]
     pub path_distance: Option<i32>,
-    /// What the route actually leads to: absent for the exit itself, or the
-    /// colour of the key the exit is locked behind.
+    /// What the route actually leads to: absent for the exit itself, the
+    /// colour of a key the exit is locked behind, "switch" for something that
+    /// opens the way, or "unexplored" when the exit has not been found and
+    /// the job is to go and look.
     ///
     /// A level whose exit needs a key gives the agent two jobs in sequence.
     /// The engine does the first one - it routes to the key - but calling a
@@ -344,30 +354,25 @@ pub fn render(state: &State, history: History) -> String {
     if !p.keys.is_empty() {
         out.push_str(&format!(", carrying {}", p.keys.join(" and ")));
     }
+    // The player's own tally, and NOT the level's census. DOOM shows a player
+    // how many monsters a level holds on the intermission screen, after it is
+    // over - never during. "Killed 5 of 6" tells an agent the level is nearly
+    // clear, which is a thing it would otherwise have to work out by looking.
     out.push_str(&format!(
-        ". Killed {} of {} enemies, {} of {} items, {} of {} secrets.\n",
-        state.level.kills,
-        state.level.total_kills,
-        state.level.items,
-        state.level.total_items,
-        state.level.secrets,
-        state.level.total_secrets
+        ". Killed {}, picked up {}, found {} secrets.\n",
+        state.level.kills, state.level.items, state.level.secrets
     ));
 
     if state.player.standing_in_damage {
         out.push_str("THE FLOOR HERE IS BURNING YOU - get off it.\n");
     }
 
+    // Only what can be seen. Counting what is behind the walls told an agent
+    // that a room it had not entered held seven monsters, which is not
+    // something a player knows - they have sound, and sound is not a census.
     let vis: Vec<&Thing> = state.visible_threats().take(3).collect();
     if vis.is_empty() {
-        let lurking = state.threats.len();
-        if lurking > 0 {
-            out.push_str(&format!(
-                "No enemy in sight, {lurking} somewhere beyond the walls.\n"
-            ));
-        } else {
-            out.push_str("No enemy anywhere near.\n");
-        }
+        out.push_str("No enemy in sight.\n");
     } else {
         out.push_str("In sight: ");
         for (i, t) in vis.iter().enumerate() {
@@ -429,29 +434,52 @@ pub fn render(state: &State, history: History) -> String {
         // points through walls, and an agent given both has to learn which of
         // two contradictory numbers to believe.
         match (e.path_distance, e.route_bearing) {
-            (Some(path), Some(bearing)) => out.push_str(&match &e.goal {
-                Some(key) => format!(
-                    "The way out is LOCKED and needs the {} key. The key is {} units of \
+            (Some(path), Some(bearing)) => {
+                out.push_str(&match e.goal.as_deref() {
+                    // The exit has not been found. The route leads to the edge of
+                    // what has been explored, and saying so is the difference
+                    // between an agent following a line to a goal it was handed
+                    // and one that is looking for the way out.
+                    Some("unexplored") => format!(
+                        "You have NOT found the way out. The nearest ground nobody has looked \
+                     at is {path} units of walking away, and the way there starts {}.\n",
+                        side_word(bearing)
+                    ),
+                    Some("switch") => format!(
+                        "The way on is shut. The switch that opens it is {path} units of \
                      walking away, and the way there starts {}.\n",
-                    key.to_uppercase(),
-                    path,
+                        side_word(bearing)
+                    ),
+                    Some(key) => format!(
+                        "The way out is LOCKED and needs the {} key. The key is {path} units of \
+                     walking away, and the way there starts {}.\n",
+                        key.to_uppercase(),
+                        side_word(bearing)
+                    ),
+                    None => {
+                        format!(
+                    "The exit {} is {path} units of walking away, and the way there starts \
+                     {}.\n",
+                    if e.kind.as_deref() == Some("switch") { "switch" } else { "line" },
                     side_word(bearing)
-                ),
-                None => format!(
-                    "The exit {} is {} units of walking away, and the way there starts {}.\n",
-                    if e.kind == "switch" { "switch" } else { "line" },
-                    path,
-                    side_word(bearing)
-                ),
-            }),
-            _ => out.push_str(&format!(
-                "The exit {} is {} units away as the crow flies, {}, with {} units of clear \
-                 floor that way.\n",
-                if e.kind == "switch" { "switch" } else { "line" },
-                e.distance,
-                side_word(e.bearing),
-                e.clearance
-            )),
+                )
+                    }
+                })
+            }
+            _ => {
+                if let (Some(d), Some(b), Some(c)) = (e.distance, e.bearing, e.clearance) {
+                    out.push_str(&format!(
+                        "The exit {} is {d} units away as the crow flies, {}, with {c} units \
+                         of clear floor that way.\n",
+                        if e.kind.as_deref() == Some("switch") {
+                            "switch"
+                        } else {
+                            "line"
+                        },
+                        side_word(b)
+                    ));
+                }
+            }
         }
         if let Some(b) = &e.blocked_by {
             out.push_str(&match b.kind.as_str() {

@@ -115,6 +115,9 @@ the game (no path is ever baked in, and nothing is read from the environment)
 what to play
   --episode N --map N --skill 0..4      [1 1 2]
   --mission clear|speedrun|survive      [clear]
+  --full-map          give the route the WHOLE level instead of only the part
+                      the player has seen. A control, not a way to play: it
+                      hands the agent a solved map of rooms nobody has been in
   --mix               sample a mission per episode, so the policy must read it
   --curriculum        reverse curriculum: start each episode AT the exit and
                       walk it further back as the policy keeps finishing. The
@@ -196,6 +199,7 @@ fn parse_args() -> Result<Args, String> {
         map: args.u32_or("--map", 1),
         skill: args.u32_or("--skill", 2),
         engine_window: false,
+        full_map: args.take_flag("--full-map"),
     };
     if cfg.skill > 4 {
         return Err("--skill must be 0..4".into());

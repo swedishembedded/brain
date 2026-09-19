@@ -125,6 +125,11 @@ pub struct Config {
     pub map: u32,
     /// 0..=4, sk_baby .. sk_nightmare.
     pub skill: u32,
+    /// Whether the route may only cross ground the player has seen. The
+    /// alternative is a distance field over the whole level, which is a
+    /// solved map: it exists as a CONTROL to measure this one against, not as
+    /// a way to play.
+    pub full_map: bool,
     /// Show the engine's own SDL window. Off by default and normally left off:
     /// the sample draws the framebuffer itself, with the decision overlay on
     /// top, so a second window would show the same game with less in it.
@@ -138,6 +143,7 @@ impl Default for Config {
             map: 1,
             skill: 2,
             engine_window: false,
+            full_map: false,
         }
     }
 }
@@ -268,11 +274,12 @@ impl Doom {
             None => String::new(),
         };
         let body = format!(
-            "{{\"episode\":{},\"map\":{},\"skill\":{},\"seed\":{}{start}}}",
+            "{{\"episode\":{},\"map\":{},\"skill\":{},\"seed\":{},\"mapKnowledge\":\"{}\"{start}}}",
             cfg.episode,
             cfg.map,
             cfg.skill,
-            seed % 65536
+            seed % 65536,
+            if cfg.full_map { "full" } else { "seen" }
         );
         self.call("POST", "/api/episode", Some(&body))
     }

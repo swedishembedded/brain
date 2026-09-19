@@ -214,9 +214,11 @@ pub fn options(state: &State) -> Vec<Option_> {
     if let Some(e) = state.exit.as_ref().filter(|e| route_usable(e)) {
         // Prefer the ROUTE bearing where the engine could compute one: it
         // points down the corridor rather than at the wall the exit is behind.
-        let (bearing, away) = match (e.route_bearing, e.path_distance) {
-            (Some(b), Some(d)) => (b, d),
-            _ => (e.bearing, e.distance),
+        let Some((bearing, away)) = (match (e.route_bearing, e.path_distance) {
+            (Some(b), Some(d)) => Some((b, d)),
+            _ => e.bearing.zip(e.distance),
+        }) else {
+            return out;
         };
 
         // TURNING AND WALKING ARE SEPARATE DECISIONS.
@@ -232,19 +234,23 @@ pub fn options(state: &State) -> Vec<Option_> {
         // it is a different act from pressing a switch: you walk onto a key,
         // you do not use it. Saying so in the option text is the whole point -
         // the model reads what an option MEANS.
-        if let Some(key) = &e.goal {
+        if let Some(goal) = &e.goal {
+            // What the route leads to, said plainly. The model reads what an
+            // option MEANS, so an option that says "the exit" while pointing
+            // at a keycard, a switch or a corridor nobody has walked down is
+            // a lie it has no way to catch.
+            let what = match goal.as_str() {
+                "unexplored" => "ground nobody has looked at yet".to_string(),
+                "switch" => "the switch that opens the way on".to_string(),
+                key => format!("the {key} key that unlocks the way out"),
+            };
             let text = if bearing.abs() > FACING_TOL {
                 format!(
-                    "turn toward the {} key that unlocks the way out, {away} units of \
-                         walking {}",
-                    key,
+                    "turn toward {what}, {away} units of walking {}",
                     bearing_phrase(bearing)
                 )
             } else {
-                format!(
-                    "go and get the {key} key that unlocks the way out, {away} units of \
-                         walking ahead"
-                )
+                format!("go to {what}, {away} units of walking ahead")
             };
             let commands = if bearing.abs() > FACING_TOL {
                 format!("[{}]", json_turn(state.facing(bearing)))
@@ -260,24 +266,24 @@ pub fn options(state: &State) -> Vec<Option_> {
                     walk_tics(away)
                 },
                 tag: Tag::Exit,
-                room: e.route_clearance.unwrap_or(e.clearance),
+                room: e.route_clearance.or(e.clearance).unwrap_or(0),
             });
-        } else if e.distance <= USE_RANGE {
+        } else if e.distance.is_some_and(|d| d <= USE_RANGE) {
             // Close enough to press. Face the exit ITSELF, not the route,
             // which has already delivered the player here.
             out.push(Option_ {
                 text: format!(
                     "press the level exit, {} units {}",
-                    e.distance,
-                    bearing_phrase(e.bearing)
+                    e.distance.unwrap_or(0),
+                    bearing_phrase(e.bearing.unwrap_or(0))
                 ),
                 commands: format!(
                     "[{},{{\"type\":\"use\"}}]",
-                    json_turn(state.facing(e.bearing))
+                    json_turn(state.facing(e.bearing.unwrap_or(0)))
                 ),
                 tics: FIGHT_TICS,
                 tag: Tag::Exit,
-                room: e.route_clearance.unwrap_or(e.clearance),
+                room: e.route_clearance.or(e.clearance).unwrap_or(0),
             });
         } else if bearing.abs() > FACING_TOL {
             out.push(Option_ {
@@ -288,7 +294,7 @@ pub fn options(state: &State) -> Vec<Option_> {
                 commands: format!("[{}]", json_turn(state.facing(bearing))),
                 tics: FIGHT_TICS,
                 tag: Tag::Exit,
-                room: e.route_clearance.unwrap_or(e.clearance),
+                room: e.route_clearance.or(e.clearance).unwrap_or(0),
             });
         } else {
             // As far as the next waypoint, not a fixed stride.
@@ -298,7 +304,7 @@ pub fn options(state: &State) -> Vec<Option_> {
                 commands: "[{\"type\":\"forward\",\"amount\":8},{\"type\":\"use\"}]".into(),
                 tics: walk_tics(step),
                 tag: Tag::Exit,
-                room: e.route_clearance.unwrap_or(e.clearance),
+                room: e.route_clearance.or(e.clearance).unwrap_or(0),
             });
         }
     }
@@ -461,7 +467,10 @@ pub fn options(state: &State) -> Vec<Option_> {
 fn route_usable(e: &crate::obs::Exit) -> bool {
     match (e.route_bearing, e.path_distance) {
         (Some(_), Some(_)) => true,
-        _ => e.clearance >= MIN_ROOM.min(e.distance),
+        _ => match (e.clearance, e.distance) {
+            (Some(c), Some(d)) => c >= MIN_ROOM.min(d),
+            _ => false,
+        },
     }
 }
 
