@@ -98,6 +98,13 @@ fn render(argv: &[String]) {
     // and can exceed it, which silently drops the depth-latest splats and shows
     // up as bright flares where an occluder went missing.
     let isect_cap = a.usize_or("--isect-cap", 0);
+    // The 2D anti-alias dilation, in PIXELS SQUARED, added to every splat's
+    // screen-space covariance. It exists so splats smaller than a pixel do not
+    // alias as the camera moves, and it is not free: it is a blur, and at the
+    // reference default of 0.3 it costs most of the high-frequency content of
+    // a scene whose splats are around a pixel across - which is every
+    // reconstruction with roughly one gaussian per source pixel.
+    let eps2d = a.f32_or("--eps2d", RenderOpts::default().eps2d);
     a.finish();
 
     let cam = match (eye, target) {
@@ -112,6 +119,7 @@ fn render(argv: &[String]) {
         bg,
         mode: if depth_view { Mode::Depth } else { Mode::Color },
         antialiased: aa,
+        eps2d,
         ..Default::default()
     };
 

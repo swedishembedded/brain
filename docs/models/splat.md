@@ -69,7 +69,8 @@ into a scene that actually reproduces your photos.
 | `--fov D` | `render`, `view` | vertical field of view in degrees |
 | `--depth` | `render` | render the depth view instead of color |
 | `--bg r,g,b` | `render`, `view` | background color |
-| `--aa` | `render` | enable anti-aliasing |
+| `--aa` | `render` | opacity compensation for the dilation below |
+| `--eps2d X` | `render` | anti-alias dilation in px^2 (default `0.3`). **This is a blur** - see below |
 | `--naive` | `render` | use the reference (non-tiled) rasterizer instead of the tiled pipeline |
 | `--bench N` | `render` | print steady-state per-frame timing over N warm re-renders |
 | `--isect-cap N` | `render` | tile-instance budget (default: 8 per gaussian). A frame that exceeds it drops its depth-latest splats and says `CLAMPED` |
@@ -78,6 +79,44 @@ into a scene that actually reproduces your photos.
 | `--images <dir\|list>` | `fit` | target photos, one per camera, in order |
 | `--iters N` | `fit` | optimization steps (default `200`) |
 | `--lr X` | `fit` | learning rate (default `5e-3`) |
+
+## Sharpness, and the anti-alias dilation
+
+Every splat's screen-space covariance gets a constant added to its diagonal
+before rasterizing - `eps2d`, in pixels squared, `0.3` by default, the
+reference 3DGS value. It is there because splats smaller than a pixel alias
+badly as the camera moves, and it is a low-pass filter: it costs detail, and
+on a reconstruction it costs a lot of it.
+
+Measured on a scene built to be a perfect representation of a test image (one
+gaussian per pixel, 0.25 px across), rendered from the camera it was built
+for, as a fraction of the source image's high-frequency content:
+
+| `--eps2d` | fraction of the source's detail | PSNR |
+|---|---|---|
+| `0.3` (default) | 0.30 | 21.5 dB |
+| `0.1` | 0.80 | 34.7 dB |
+| `0` | 0.98 | 44.9 dB |
+
+And on a real six-photograph reconstruction, rendered from a camera the model
+recovered:
+
+| `--eps2d` | fraction of the photograph's detail | PSNR |
+|---|---|---|
+| `0.3` (default) | 0.42 | 21.5 dB |
+| `0.15` | 0.54 | 20.9 dB |
+| `0.05` | 0.65 | 20.0 dB |
+| `0` | 0.73 | 19.2 dB |
+
+Note which way PSNR moves. Blurring a slightly-wrong scene IMPROVES its
+mean-squared error while destroying its detail, so accuracy alone will tell
+you the default is the best setting and it is not. That is what
+`splat::quality::sharpness_ratio` exists to measure, and what the
+`s6`/`s7` test gates hold.
+
+For a still frame of a reconstruction, drop it: `--eps2d 0.05` or `0`. Keep
+the default for a moving camera, where the aliasing it prevents is worse than
+the sharpness it costs.
 
 ## When a render says CLAMPED
 
