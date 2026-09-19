@@ -153,7 +153,8 @@ impl Progress {
     /// a route to measure against.
     fn route_line(&self) -> Option<String> {
         let (start, best, last) = (self.start_path?, self.best_path?, self.last_path?);
-        let goal = match &self.goal {
+        let goal = match self.goal.as_deref() {
+            Some("switch") => "the switch that opens the way".to_string(),
             Some(k) => format!("the {k} key"),
             None => "the exit".to_string(),
         };

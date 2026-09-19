@@ -203,8 +203,20 @@ pub struct Exit {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Blocker {
-    /// `door` when pressing use against it opens it, `wall` when it does not.
+    /// `door` when pressing use against it opens it, `switch` when something
+    /// elsewhere opens it, `wall` when nothing does.
     pub kind: String,
+    pub bearing: i32,
+    pub distance: i32,
+    /// Where that something else is. Present with `switch` and only then.
+    #[serde(rename = "switch")]
+    pub switch: Option<Opener>,
+}
+
+/// Where the switch is that opens what the route is blocked by.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Opener {
     pub bearing: i32,
     pub distance: i32,
 }
@@ -448,6 +460,21 @@ pub fn render(state: &State, history: History) -> String {
                     b.distance,
                     side_word(b.bearing)
                 ),
+                "switch" => match &b.switch {
+                    Some(sw) => format!(
+                        "The way on is SHUT, {} units {}, and pushing on it does nothing: \
+                         a switch {} units {} opens it. Go and press that.\n",
+                        b.distance,
+                        side_word(b.bearing),
+                        sw.distance,
+                        side_word(sw.bearing)
+                    ),
+                    None => format!(
+                        "The way on is shut {} units {} and something elsewhere opens it.\n",
+                        b.distance,
+                        side_word(b.bearing)
+                    ),
+                },
                 _ => format!(
                     "A wall is in the way {} units {} - the route goes round it.\n",
                     b.distance,

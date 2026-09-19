@@ -56,6 +56,8 @@ pub enum Tag {
     Use,
     /// Open the specific thing the route is blocked by.
     Open,
+    /// Go to, and press, the switch that opens what the route is blocked by.
+    Switch,
     Exit,
 }
 
@@ -329,6 +331,56 @@ pub fn options(state: &State) -> Vec<Option_> {
     // against a door off to one side, which is how a follower stood at
     // E1M1's first door facing 74 degrees away from it.
     if let Some(b) = state.exit.as_ref().and_then(|e| e.blocked_by.as_ref()) {
+        // What is in the way opens from somewhere else. Pushing on it does
+        // nothing at all - the player has to walk to the switch and press
+        // that - so this is a different job from opening a door, and the only
+        // one that makes progress. E1M2's way on from the red key is a sector
+        // of zero height that a switch a hundred units to one side raises;
+        // told it was a wall, a follower shoved at it for six hundred
+        // decisions with the switch in plain view.
+        if let Some(sw) = &b.switch {
+            if sw.distance > USE_RANGE {
+                out.push(Option_ {
+                    text: format!(
+                        "go to the switch that opens the way out, {} units {}",
+                        sw.distance,
+                        bearing_phrase(sw.bearing)
+                    ),
+                    commands: format!(
+                        "[{},{{\"type\":\"forward\",\"amount\":{}}}]",
+                        json_turn(state.facing(sw.bearing)),
+                        walk_tics(sw.distance)
+                    ),
+                    tics: walk_tics(sw.distance),
+                    tag: Tag::Switch,
+                    room: sw.distance,
+                });
+            } else if sw.bearing.abs() > FACING_TOL {
+                out.push(Option_ {
+                    text: format!(
+                        "turn to face the switch that opens the way out, {} units {}",
+                        sw.distance,
+                        bearing_phrase(sw.bearing)
+                    ),
+                    commands: format!("[{}]", json_turn(state.facing(sw.bearing))),
+                    tics: FIGHT_TICS,
+                    tag: Tag::Switch,
+                    room: 0,
+                });
+            } else {
+                out.push(Option_ {
+                    text: format!(
+                        "press the switch that opens the way out, {} units {}",
+                        sw.distance,
+                        bearing_phrase(sw.bearing)
+                    ),
+                    commands: "[{\"type\":\"use\"}]".into(),
+                    tics: DOOR_TICS,
+                    tag: Tag::Switch,
+                    room: 0,
+                });
+            }
+        }
         if b.kind == "door" && b.distance <= USE_RANGE {
             if b.bearing.abs() > FACING_TOL {
                 out.push(Option_ {
@@ -523,6 +575,48 @@ mod tests {
         // You WALK ONTO a key. Pressing use on one does nothing.
         assert!(way.commands.contains("forward"), "{}", way.commands);
         assert!(!way.commands.contains("use"), "{}", way.commands);
+    }
+
+    #[test]
+    fn a_way_out_a_switch_opens_offers_the_switch_and_not_the_wall() {
+        // DOOM's walls are full of sectors some switch elsewhere raises, and
+        // from in front of one there is nothing to push: the agent has to walk
+        // to the switch and press THAT. Offering "push on the wall" here is
+        // what had a player shoving at E1M2's for six hundred decisions with
+        // the switch a hundred units off to its left.
+        let walled = r#""threats":[],"hazards":[],"pickups":[],
+            "clearance":{"ahead":0,"right":200,"behind":200,"left":200,
+                         "aheadRight":0,"aheadLeft":0},
+            "exit":{"distance":1302,"bearing":-77,"kind":"switch","clearance":26,
+                    "pathDistance":1248,"routeBearing":7,"routeDistance":32,
+                    "routeClearance":0,
+                    "blockedBy":{"kind":"switch","bearing":7,"distance":25,
+                                 "switch":{"bearing":%B,"distance":%D}}}"#;
+
+        // Far off: walk to it.
+        let away = options(&state(&walled.replace("%B", "-40").replace("%D", "108")));
+        let go = away
+            .iter()
+            .find(|o| o.tag == Tag::Switch)
+            .expect("a way to the switch");
+        assert!(go.text.contains("switch"), "{}", go.text);
+        assert!(go.commands.contains("forward"), "{}", go.commands);
+        assert!(!go.commands.contains("\"use\""), "{}", go.commands);
+
+        // Standing at it and facing it: press it.
+        let here = options(&state(&walled.replace("%B", "2").replace("%D", "40")));
+        let press = here
+            .iter()
+            .find(|o| o.tag == Tag::Switch)
+            .expect("a way to press it");
+        assert!(press.commands.contains("use"), "{}", press.commands);
+
+        // And the observation says so, rather than calling it a wall.
+        let text = crate::obs::render(
+            &state(&walled.replace("%B", "-40").replace("%D", "108")),
+            crate::obs::History::default(),
+        );
+        assert!(text.contains("switch"), "{text}");
     }
 
     #[test]

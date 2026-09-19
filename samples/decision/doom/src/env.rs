@@ -881,6 +881,15 @@ impl DoomEnv {
             return Some(i);
         }
 
+        // NOR IS A SWITCH. Same argument, one step further off: what is in the
+        // way opens from somewhere else, so the only thing that makes progress
+        // is walking to the switch and pressing it. Every other option leads
+        // away from the exit and the movement options read the shut way as
+        // zero clearance.
+        if let Some(i) = by(Tag::Switch) {
+            return Some(i);
+        }
+
         // STAYING ALIVE COMES FIRST, whatever the orders say.
         //
         // Without this the scripted player stands in the open trading shots
