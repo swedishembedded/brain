@@ -856,6 +856,50 @@ observation did not say:
   step closer refused from where it is and open from two feet away. The last
   resort is now the middle of the cell it is already in.
 
+### Run 9 - does it learn that slime is bad?
+
+The sharpest test there is, because it is falsifiable and because burning
+floor is the thing that actually ends runs on a level like E1M3. Eight PPO
+iterations of six episodes, warm-started from the scripted player - which is
+naive about slime, dies in it every episode, and is deliberately left that
+way, since hard-coding the answer into the teacher and then observing the
+policy do it would prove nothing.
+
+```
+              return     game    kills    items    exits   deaths   burned
+scripted       -4.79    -7.64     15.0      3.0        0        4     95.0
+policy         +1.93    -1.88     17.8      3.8        0        1     66.5
+```
+
+**Deaths 4 of 4 down to 1 of 4, and health lost to the floor down by 30%.**
+The mean return over each iteration's rollout:
+
+```
+-0.79   +2.46   +2.83   +0.17   +1.60   +4.24   +6.08   +4.95
+```
+
+The best single episode the teacher managed was -1.30, and the policy passes
+it in two iterations. By iteration 7 every episode runs the full 400 decisions
+without ending early, which is another way of saying it has stopped dying.
+
+It has NOT stopped wading: 66.5 points of health per episode still go into the
+floor, and neither player finishes E1M3 inside 400 decisions. What it has
+shown is that the signal is there and the gradient follows it.
+
+Two things had to be true before any of this could happen, and neither was
+about the policy:
+
+- **The feature has to be in the state.** The observation said only that the
+  floor the player was ALREADY STANDING ON was burning them. Nothing
+  distinguished a corridor from a corridor with a pool in it until the agent
+  was in the pool, so "learn that slime is bad" was not a hard problem, it was
+  an unlearnable one.
+- **The reward has to agree.** Nukage does 5 points every 32 tics and a
+  decision is 4 to 6 of them, so at the old hurt weight a decision spent
+  wading cost 0.018 while a decision spent exploring paid 0.02. Wading was
+  profitable. The agent that kept doing it was not failing to learn; it was
+  correctly learning what it had been told.
+
 ### What would move this next
 
 In the order the measurements point at, not in the order they are interesting:
