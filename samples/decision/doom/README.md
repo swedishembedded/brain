@@ -262,6 +262,50 @@ Four details in there are load-bearing, and each was wrong once:
   pass. Leaving it out is what made the first trained policy lose; see
   [run 1](#run-1---it-lost-to-the-scripted-player).
 
+## What the agent is NOT told, and why that matters more than what it is
+
+An agent handed the answer is not solving the problem, and the way that shows
+up is subtle: it plays well and learns nothing transferable. The route used to
+be a breadth-first distance field over the **whole level**, flooded from the
+exit at level load - through doors that had not been opened, past a key whose
+existence was not yet known - and handed over as a bearing every step. A
+policy trained against that follows a line painted on the floor. Watch it play
+and it takes the same path through the level every time, because the path was
+never its decision.
+
+So the observation was audited against what a player at the controls can
+actually have. What went:
+
+| Was in it | Why a player cannot have it |
+|---|---|
+| The exit's position, from the first tic | You cannot know where a level's exit is before walking a step of it |
+| A route to it over unexplored ground | A solved map of rooms nobody has entered |
+| Which key the exit needs | Before ever seeing the locked door |
+| Which switch opens the way | Found by flooding the exit's own island |
+| Monsters behind walls, with bearings | "7 somewhere beyond the walls" is a census; a player has sound |
+| `Killed 5 of 6` | DOOM shows the totals on the intermission screen, after the level |
+
+What stayed is what a player sees or feels: health, armour, weapon, ammo,
+keys carried; monsters **in sight**, with distance, bearing, whether they are
+nearly dead and whether they are coming for you; visible pickups and barrels;
+how much room there is in six directions; that the floor is burning and which
+way its edge lies; and what just happened.
+
+The engine already knew what had been seen, because the renderer marks every
+wall it draws with `ML_MAPPED` for the automap. That is the honest map. The
+distance field now floods **only over sectors with a wall the player has
+looked at**, and when the exit has not been found the route leads to the
+**frontier** - the nearest cell with a step into somewhere unseen - and says
+so. The exit becomes the goal the moment it has been seen.
+
+That turns "which way to the exit" into "where is there still something to
+find", which is a question a player can answer too. `--full-map` restores the
+old behaviour as a control to measure the honest one against.
+
+Measured on E1M1: the scripted player explores the level and finishes it in
+**238 decisions**, against 156 with the whole map handed to it - and it takes
+a different route, because it is looking rather than following.
+
 ## Where the route comes from
 
 This is worth being precise about, because "the model does pathfinding" would
@@ -756,6 +800,43 @@ reproduce.
 steps it refused and for what, which cells it could not reach, which of the
 four questions it ended up answering.
 
+### Run 8 - an honest map, and what it costs
+
+Everything before this was measured with the whole level handed to the route.
+Those numbers are not wrong, they are answers to an easier question, and they
+are kept above for exactly that reason. Under fair play, with the scripted
+player:
+
+| | with the whole map | seeing only what it has looked at |
+|---|---|---|
+| E1M1 | finishes, 156 decisions | **finishes, 247 decisions** |
+| E1M2 | finishes, 366 decisions | stalls two cells from the frontier |
+| E1M3 | finishes, 688 decisions | dies in the hellslime it explores into |
+
+The teacher is a **greedy nearest-frontier explorer with no memory of which
+way it has already tried**, which is a deliberately low floor and now a much
+lower one. It finishes E1M1 by exploring it. On the other two it gets a good
+way in and then loses to the same two things a bad human player loses to:
+walking in circles, and walking into the slime.
+
+Three classes of bug were found by watching it fail, and each was a thing the
+observation did not say:
+
+- **Something standing in the way.** The grid is geometry and knows nothing
+  about who is standing in it - that is what stops a sleeping imp being
+  recorded as a wall for the whole level - so a perfectly good route can be
+  one the player cannot walk, and from outside that is indistinguishable from
+  a route that is wrong. `blockedBy` now carries what it is and whether it is
+  alive: a monster is something to shoot, a barrel is something to walk round,
+  and shooting the barrel forty units in front of you is how the player dies.
+- **Where the slime ends.** A player in a pool can see its edge. An agent told
+  only "the floor here is burning you" cannot, and the route is no help - it
+  is pointed wherever the run is going, which on E1M3 is across more of it.
+- **Where in a cell you are standing.** Which neighbours you can walk straight
+  at depends on it, so a follower that has clipped a doorframe finds every
+  step closer refused from where it is and open from two feet away. The last
+  resort is now the middle of the cell it is already in.
+
 ### What would move this next
 
 In the order the measurements point at, not in the order they are interesting:
@@ -799,8 +880,13 @@ In the order the measurements point at, not in the order they are interesting:
 - `--mix` trains one policy over three missions; whether it has learned to
   *read* the instruction rather than average over them is measured by scoring
   it per mission, which is what `eval --mission` does.
-- **Two of the three maps are exercised end to end.** The scripted player
-  finishes E1M1 and E1M2 from their own spawns; E1M3 it does not.
+- **Only E1M1 is finished under fair play.** With the whole map handed to it
+  the scripted player finishes all three; seeing only what it has looked at,
+  it finishes E1M1 and does not finish E1M2 or E1M3. The honest number is the
+  second one.
+- **The policy has not been retrained against the honest observation.** Every
+  learned number above was measured against a solved map, which is an easier
+  problem than the one the sample now poses.
 
 ---
 
