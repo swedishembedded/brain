@@ -26,7 +26,7 @@
 //!     limit is 8, count was 9
 //! ```
 //!
-//! - so every consumer of that kernel loses its GPU path outright, and the
+//! So every consumer of that kernel loses its GPU path outright, and the
 //! panic names a wgpu internal rather than the kernel's own budget. A test is
 //! how that becomes "this kernel has nine bindings, the limit is eight".
 //!

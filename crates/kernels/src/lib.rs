@@ -1524,6 +1524,23 @@ pub fn src(name: &str) -> &'static str {
         .unwrap_or_else(|| panic!("unknown WGSL kernel: {name:?}"))
 }
 
+/// `adamw.wgsl`'s per-tensor descriptor buffer, whose layout is a contract
+/// between that kernel and every caller that dispatches it.
+///
+/// It exists as a function rather than as each caller's own literal because a
+/// caller that writes a SHORTER buffer than the kernel reads does not fail:
+/// the out-of-range read yields zero, and a zero `lr_mult` silently multiplies
+/// every parameter update by nothing. The optimizer runs, the loss does not
+/// move, and the only symptom is a training run that quietly does not train.
+/// Sizing the buffer from this array's own length is what makes the next
+/// widening of the descriptor reach every caller.
+///
+/// `lr_mult` is the tensor's LoRA+ learning-rate multiplier - `1.0` for an
+/// ordinary tensor.
+pub fn adamw_desc(numel: usize, lr_mult: f32) -> [u32; 2] {
+    [numel as u32, lr_mult.to_bits()]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

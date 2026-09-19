@@ -193,8 +193,9 @@ impl Optim {
         // this field existed) - written once, here, never again (neither can
         // change for the life of this graph).
         for (name, numel) in ps.opt_params() {
-            let desc = gpu.storage(2);
-            gpu.write(&desc, &[*numel as u32, f(ps.lr_mult_of(name))]);
+            let words = kernels::adamw_desc(*numel, ps.lr_mult_of(name));
+            let desc = gpu.storage(words.len() as u64);
+            gpu.write(&desc, &words);
             steps.push(gpu.step_buf(
                 self.adamw,
                 &hparams,

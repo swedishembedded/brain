@@ -74,7 +74,7 @@ pub fn fit(gpu: &Gpu, ks: Kernels, init: &Splats, targets: &[TargetView], cfg: &
     let grads = SplatGrads::new(gpu, n);
     let dimg = gpu.storage(4 * max_px as u64);
     let mut renderer = Renderer::new(gpu, ks, n, maxw, maxh, 0);
-    let bscr = BwdScratch::new(gpu, n, max_px, 0);
+    let mut bscr = BwdScratch::new(gpu, n, max_px, 0);
     let opts = RenderOpts { mode: Mode::Color, ..Default::default() };
 
     // `adamw.wgsl` (M6.4) binds param/grad/m/v PLUS a per-tensor `numel`
@@ -87,8 +87,12 @@ pub fn fit(gpu: &Gpu, ks: Kernels, init: &Splats, targets: &[TargetView], cfg: &
     let unit_coef = gpu.storage(1);
     gpu.write(&unit_coef, &[f(1.0)]);
     let mk_desc = |numel: usize| {
-        let d = gpu.storage(1);
-        gpu.write(&d, &[numel as u32]);
+        // Shape AND contents from `adamw.wgsl`'s own declaration of them - a
+        // descriptor one word short of what the kernel reads does not fail,
+        // it zeroes the update. No LoRA+ groups here, so every tensor is 1.0.
+        let words = kernels::adamw_desc(numel, 1.0);
+        let d = gpu.storage(words.len() as u64);
+        gpu.write(&d, &words);
         d
     };
     let desc_geo = mk_desc(10 * n);
@@ -144,7 +148,7 @@ pub fn fit(gpu: &Gpu, ks: Kernels, init: &Splats, targets: &[TargetView], cfg: &
             }
             loss_sum += lsum / (px as f64 * 3.0);
             gpu.write(&dimg, cast(&d));
-            renderer.render_bwd(gpu, &gs, &t.cam, &opts, &dimg, &bscr, &grads);
+            renderer.render_bwd(gpu, &gs, &t.cam, &opts, &dimg, &mut bscr, &grads);
         }
         let ts = it as i32 + 1;
         let bc1 = 1.0 - 0.9f32.powi(ts);
