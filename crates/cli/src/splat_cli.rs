@@ -93,6 +93,11 @@ fn render(argv: &[String]) {
     let eye = vec3(&mut a, "--eye");
     let target = vec3(&mut a, "--target");
     let up = vec3(&mut a, "--up").unwrap_or([0.0, -1.0, 0.0]);
+    // 0 = the renderer's own default (8 per gaussian). A scene whose gaussians
+    // have grown - anything `splat fit` has optimized - covers more tiles each
+    // and can exceed it, which silently drops the depth-latest splats and shows
+    // up as bright flares where an occluder went missing.
+    let isect_cap = a.usize_or("--isect-cap", 0);
     a.finish();
 
     let cam = match (eye, target) {
@@ -112,7 +117,7 @@ fn render(argv: &[String]) {
 
     let g = Gpu::new(splat::PIPELINES);
     let ks = Kernels::at(0);
-    let mut r = Renderer::new(&g, ks, s.len(), width, height, 0);
+    let mut r = Renderer::new(&g, ks, s.len(), width, height, isect_cap);
     let t0 = std::time::Instant::now();
     let (img, how) = if naive {
         let sorted = sorted_by_depth(&s, &cam);
@@ -138,6 +143,13 @@ fn render(argv: &[String]) {
 
     write_ppm(&out, &img, width as usize, height as usize, depth_view);
     println!("{path}: {} gaussians -> {out} ({width}x{height}, {how}, {ms:.0} ms{})", s.len(), if bench > 0 { "/frame steady-state" } else { "" });
+    if how.contains("CLAMPED") {
+        eprintln!(
+            "splat render: the tile-instance buffer overflowed and the depth-latest splats were \
+             dropped from this frame - raise it with --isect-cap (try {})",
+            (s.len() * 16).max(1 << 21)
+        );
+    }
 }
 
 fn view(argv: &[String]) {

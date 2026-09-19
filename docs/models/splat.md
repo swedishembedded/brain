@@ -72,11 +72,25 @@ into a scene that actually reproduces your photos.
 | `--aa` | `render` | enable anti-aliasing |
 | `--naive` | `render` | use the reference (non-tiled) rasterizer instead of the tiled pipeline |
 | `--bench N` | `render` | print steady-state per-frame timing over N warm re-renders |
+| `--isect-cap N` | `render` | tile-instance budget (default: 8 per gaussian). A frame that exceeds it drops its depth-latest splats and says `CLAMPED` |
 | `--frames N` | `view` | exit the viewer after N frames (scripted/headless runs) |
 | `--cameras <path>` | `fit` | camera poses/intrinsics (default `out/mirror/cameras.json`) |
 | `--images <dir\|list>` | `fit` | target photos, one per camera, in order |
 | `--iters N` | `fit` | optimization steps (default `200`) |
 | `--lr X` | `fit` | learning rate (default `5e-3`) |
+
+## When a render says CLAMPED
+
+The tiled rasterizer sorts one instance per (gaussian, tile) pair out of a
+buffer sized 8 instances per gaussian. Big screen-space gaussians touch dozens
+of tiles each, so a scene whose gaussians have GROWN - which is every scene
+`fit` has optimized - can exceed that budget. The overflowing tail is dropped
+rather than the frame failing, and because the tail is depth-latest, what you
+see is a missing occluder: a bright flare where something should have been in
+front of something else.
+
+`--isect-cap N` raises the budget; the render line says how many instances the
+frame actually wanted, so `--isect-cap` that number and re-render.
 
 ## Serving (D-Bus)
 
