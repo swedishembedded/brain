@@ -15,7 +15,9 @@ against the NPU export via OpenVINO.
       generic D-Bus executor, staged tokenize/encode/head pipelining so
       requests overlap, an NPU device lane, and batched padding (zeroed pad
       states plus an additive key mask)
-- [ ] Python D-Bus embedding client example
+- [x] Python D-Bus embedding client example - `samples/python/embedding/lfm2-embed/lfm2_embed.py`,
+      exercising both `embed` (per-token hidden states + mean-pooled embedding)
+      and `fill_mask` over D-Bus
 - [ ] `brain perf` integration: a resident-backed concurrency benchmarking
       target, an NPU perf target, and a full model x device x concurrency
       table

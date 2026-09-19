@@ -8,6 +8,7 @@ samples/shell/dbus/busctl-smoke/busctl_smoke.sh	run	BRAIN_DBUS_EXTERNAL=1 reuses
 samples/python/dbus/detect-pipeline/detect_pipeline.py	skip	needs real z-image + yolo weights; the mock model has no detect action
 samples/python/embedding/clip-embed/clip_embed.py	skip	hardcodes brain/clip (no --model override); needs BRAIN_CLIP_DIR
 samples/python/embedding/embed-document/embed_document.py	run	--model mock exercises the fd-in/fd-out embed contract for real
+samples/python/embedding/lfm2-embed/lfm2_embed.py	skip	hardcodes brain/lfm2 (no --model override); needs BRAIN_LFM2 + BRAIN_LFM2_TOKENIZER
 samples/python/embedding/t5-embed/t5_embed.py	skip	hardcodes brain/t5encoder (no --model override); needs BRAIN_T5ENCODER_DIR
 samples/python/forecast/forecast-client/forecast_client.py	run	--model mock exercises the forecast wire contract for real
 samples/python/imagegen/controlnet/controlnet_generate.py	skip	hardcodes brain/sdxl-controlnet (no --model override); needs BRAIN_SDXL_DIR + BRAIN_CONTROLNET_DIR

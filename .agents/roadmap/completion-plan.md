@@ -240,50 +240,54 @@ are not standalone models.
 
 ### 2.1 No capability surface at all - the real gaps
 
+**Re-audited 2026-09-19 against the tree (not the ledgers): four of these six
+rows closed since this table was written.**
+
 | model | state | work |
 |---|---|---|
-| `moondream3` | no `caps.rs`, no catalog entry, no CLI; reachable only from tests | full contract: caps + resident + catalog + example. Decoder is gradient-checked and import-covered, so the model half is done - this is the serving half only |
-| `splat` | no `caps.rs`; `brain splat` CLI only | caps (`render`/`fit`) + resident + D-Bus + example |
-| `worldmirror2` | no `caps.rs`; `brain worldmirror2` CLI only | caps (`reconstruct`) + resident + example |
-| `diamond` / `genieredux` | no `caps.rs`; AGENTS.md calls `diamond` "the one served world-model architecture", which the tree does not support | decide: either serve it properly or correct the claim. An interactive-play model may genuinely not fit `Run`/`Subscribe` - if so, **extend the D-Bus surface**, per the invariant, and say so |
-| `glmdsa` | **DONE.** `glmdsa::caps` + a `catalog.rs` entry; `brain caps` went 36 -> 37 models on a box with no GLM checkpoint | the real gap was narrower than "no serving contract": `GlmResident` was always registered and scheduled, but its manifest only exists when `BRAIN_GLMDSA_WEIGHTS` is set, so GLM was the one model whose *discoverability* depended on deployment state. `GlmResident::manifest` now returns `glmdsa::caps::manifest_resident()`, so the served and direct surfaces are one definition. Remaining: `run_batch`, an `examples/` client |
-| `qwen3vl` | catalog entry, `resident: None`, explicitly "no residency adapter yet" | residency adapter, matching `fastvlm`'s stateless `ProviderResident` registration (`resident.rs:179`) |
-| `gpt2`, `toymoe`, `toypid`, `toyseq2seq`, `toyautoencoder` | manifest via resident only (`GptResident`), no `caps.rs` | low priority - these are the toy/baseline models; decide explicitly whether the contract applies to them and record the answer rather than leaving it ambiguous |
+| `moondream3` | **DONE.** `crates/moondream3/src/caps.rs`, `crates/cli/src/resident_moondream3.rs`, `catalog.rs:254`, `samples/python/vision/moondream3-caption/moondream3_caption.py` | none |
+| `splat` | **DONE.** `crates/splat/src/caps.rs` (`render`/`fit`), `crates/cli/src/resident_splat.rs`, `catalog.rs:181-183`, `samples/python/vision/splat/{splat_fit,splat_render}.py` | none |
+| `worldmirror2` | **DONE.** `crates/worldmirror2/src/caps.rs` (`reconstruct`), `crates/cli/src/resident_worldmirror2.rs`, `catalog.rs:194-196`, `samples/python/vision/worldmirror2-reconstruct/worldmirror2_reconstruct.py` | none |
+| `diamond` / `genieredux` | no `caps.rs`; AGENTS.md calls `diamond` "the one served world-model architecture", which the tree does not support | **still open, unchanged.** No decision recorded anywhere. decide: either serve it properly or correct the claim. An interactive-play model may genuinely not fit `Run`/`Subscribe` - if so, **extend the D-Bus surface**, per the invariant, and say so |
+| `glmdsa` | **DONE**, fully. `glmdsa::caps` + a `catalog.rs` entry; `brain caps` went 36 -> 37 models on a box with no GLM checkpoint. `GlmResident::manifest` now returns `glmdsa::caps::manifest_resident()`, so the served and direct surfaces are one definition | closed: `resident_llm.rs:298-315` documents `run_batch` is deliberately serial for a real architectural reason (no batch axis in MLA/MoE - not an unstated default), and `samples/python/llm/glmdsa/glmdsa.py` is a real `--dbus` client |
+| `qwen3vl` | **DONE.** `crates/cli/src/resident_qwen3vl.rs` exists, `catalog.rs:248` registers it, `samples/python/vision/qwen3vl-caption/qwen3vl_caption.py` exists | none |
+| `gpt2`, `toymoe`, `toypid`, `toyseq2seq`, `toyautoencoder` | manifest via resident only (`GptResident`), no `caps.rs` | **still open, unchanged.** low priority - these are the toy/baseline models; decide explicitly whether the contract applies to them and record the answer rather than leaving it ambiguous |
 
-**Sequencing:** `glmdsa` first (smallest delta - the resident already exists,
-only `caps.rs` is missing, and it closes a gap AGENTS.md names explicitly), then
-`qwen3vl` (one adapter), then `moondream3` (full contract, but the model is
-done), then the three vision/3D/world models (each needs a design decision about
-its action shape).
+**Sequencing:** the only remaining work in this section is `diamond`/`genieredux`
+(a design decision about its action shape) and the toy-model contract question.
 
 ### 2.2 Missing examples
 
-- `qwen3tts` - no D-Bus client example (`qwen3tts.md`), *and* it still carries a
-  private socket-based serving side-channel that the same ledger says should be
-  consolidated into D-Bus. Do both in one change: consolidating the transport is
-  what makes the example writable.
-- `lfm2` - no Python D-Bus embedding client (`lfm2.md`).
+- `qwen3tts` - **DONE.** `samples/python/tts/qwen3tts-speak/qwen3tts_speak.py`
+  is a real D-Bus client (uses `BrainDBus`); its docstring refers to the
+  private socket serving side-channel in the past tense, confirming the
+  transport consolidation also happened.
+- `lfm2` - **DONE.** `samples/python/embedding/lfm2-embed/lfm2_embed.py`
+  exercises both `embed` and `fill_mask` over D-Bus.
 
 ### 2.3 `run_batch` serial defaults that are not justified
 
-The invariant permits a serial `run_batch` only *with a stated reason*. These
-have a batchable forward and no stated reason:
+The invariant permits a serial `run_batch` only *with a stated reason*.
+**Re-audited 2026-09-19:** two rows are still exactly as stated, two are
+partially closed (real progress landed but the row's specific ask remains
+open), one (`glmdsa`, formerly here too) closed - see 2.1.
 
-| model | why it should batch |
-|---|---|
-| `chronos2` + `fincast` | share a batchable transformer core; equal-shape contexts could share one forward (`forecast.md`) |
-| `arcface` | input batches trivially; only the graph is pre-allocated at N=1 (`scrfd.md`) |
-| `vqgan` / `codeformer` | batch size is hardcoded to 1 in the **shared** `vae::blocks` builder - so the fix lands in the shared builder and pays off for every VAE-family model at once, not just these two |
-| `lfm2` | length-bucketed batching + zeroed pad states with an additive key mask (bidirectional attention has no causal mask to hide padding) |
-| `s3dit` | listed as an explicit open item |
+| model | why it should batch | status |
+|---|---|---|
+| `chronos2` + `fincast` | share a batchable transformer core; equal-shape contexts could share one forward (`forecast.md`) | **still open.** `Chronos2CpuInstance`/`FincastCpuInstance` (`crates/cli/src/resident_forecast.rs:198-204,369-376`) have no `run_batch` override and no justifying comment - contrast with the sibling `Timesfm3Instance` in the same file, which has a real grouped `run_batch` (~line 1177) |
+| `arcface` | input batches trivially; only the graph is pre-allocated at N=1 (`scrfd.md`) | **still open.** `crates/cli/src/resident_arcface.rs:24-37` still documents the graph fixed at N=1; the suggested follow-up (a `Yolo::load(path,batch)`-style widened graph) is not done |
+| `vqgan` / `codeformer` | batch size is hardcoded to 1 in the **shared** `vae::blocks` builder | **partially done.** `vae::blocks::Builder::set_batch` now exists (`crates/vae/src/blocks.rs:921-941`) and both `vqgan::model::Vqgan::new_batched` (`crates/vqgan/src/model.rs:236-254`) and `codeformer::model::CodeFormer` (`crates/codeformer/src/model.rs:212-220`) use it - the shared-builder fix landed. Remaining: the CLI residents were never switched over - `VqganInstance`/`RestoreInstance` in `crates/cli/src/resident_restore.rs` still call the N=1 constructor and their own doc comments (lines 19-30, 98, 161) are now stale relative to the crates they wrap. Wire `activate` to `new_batched` and add a real `run_batch` |
+| `lfm2` | length-bucketed batching + zeroed pad states with an additive key mask (bidirectional attention has no causal mask to hide padding) | **partially done.** `LfmInstance::run_batch` (`crates/cli/src/resident_lfm.rs:178-200`) is a real batched forward, not a serial loop - but only for exact-length matches; padding within a group currently repeats the last sequence rather than using zeroed-pad-states + an additive key mask, which the file's own doc still calls out as not yet landed |
+| `s3dit` | listed as an explicit open item | **still open.** `ZImageInstance` (`crates/cli/src/resident.rs:719-762`) has no `run_batch` override and no justifying comment, unlike arcface/vqgan/glmdsa/lfm2, which all document why |
 
 `scrfd`'s detector (graph pinned N=1), `qwen3tts`/`cosyvoice` (autoregressive),
 and the per-request multi-step samplers (`sdxlunet`, `controlnet`, `flux1`,
 `pulid`, `flux2`) are legitimately serial and already say so in-file - leave
 them, but verify each really does carry the comment.
 
-The `vae::blocks` batch-size fix is the highest-leverage item in this section:
-one shared builder, several models.
+The `vae::blocks` batch-size fix landed and is the highest-leverage item in
+this section (one shared builder, several models) - the CLI-side wiring for
+`vqgan`/`codeformer` is what remains.
 
 ---
 
@@ -298,14 +302,19 @@ shipped under real constraints, not a template".
 
 ### 3.1 Missing entry points, ordered by cost
 
+**Re-audited 2026-09-19: `sdxlunet` and `controlnet` are done - both landed as
+inline `#[test]`s inside `crates/gradcheck/src/`, not under `crates/gradcheck/tests/`,
+which is why the original grep-for-tests/ verification method (top of this
+file) missed them. The other four rows are unchanged.**
+
 | model | missing | note |
 |---|---|---|
-| `sdxlunet` | `check_unet` | **do this first.** Its own ledger says the graph is built entirely from existing conv/transformer blocks, so the backward composes existing adjoints - no new kernel work. Highest ratio of invariant-closed to effort |
-| `controlnet` | `check_controlnet` | the trainable copy *is* the UNet's blocks (recorded by `sdxlunet::model::Rec`), so it follows directly from `check_unet` |
-| `flux1` | `check_flux1` | full-depth fp32 does not fit one card; gate at reduced depth as the forward parity already does |
-| `pulid` | `check_pulid` | blocked by a real structural issue its ledger names: the forward reuses buffers across layers in an inference shape, so a training-mode forward with per-layer allocation is a prerequisite. Scope that first |
-| `chronos2` | `build_backward` + `impl model::Model` + `check_chronos2` | today's path is inference-only, per-op-submit; needs SSA buffers |
-| `deepseek2ocr` | only `check_deepseekocr_relpos*` | the composite has an exact adjoint reaching input pixels but no model-level entry point |
+| `sdxlunet` | ~~`check_unet`~~ **DONE.** `pub fn check_unet` at `crates/gradcheck/src/unet.rs:137`, `#[test]`-wired in the same file (lines 176-196), re-exported `gradcheck/src/lib.rs:40` | closed |
+| `controlnet` | ~~`check_controlnet`~~ **DONE.** `pub fn check_controlnet` at `crates/gradcheck/src/controlnet.rs:184`, `#[test]`-wired (lines 207-240), re-exported `gradcheck/src/lib.rs:50-54` | closed |
+| `flux1` | `check_flux1` | **still open.** `crates/flux1/src/lib.rs:25-27`: "Scope today: forward parity only." full-depth fp32 does not fit one card; gate at reduced depth as the forward parity already does |
+| `pulid` | `check_pulid` | **still open.** `crates/pulid/src/lib.rs:57-58` confirms it's still a stated follow-up, blocked by the same real structural issue its ledger names: the forward reuses buffers across layers in an inference shape, so a training-mode forward with per-layer allocation is a prerequisite. Scope that first |
+| `chronos2` | `build_backward` + `impl model::Model` + `check_chronos2` | **still open.** `crates/chronos2/src/model.rs:130-157` remains inference-only, per-op-submit (not SSA); `crates/chronos2/src/train.rs` is a separate host-side CPU-only FD-validated backward, not a `crates/gradcheck` entry point |
+| `deepseek2ocr` | only `check_deepseekocr_relpos*` | **still open, confirmed.** `crates/gradcheck/src/deepseekocr.rs:358-399` - the composite has an exact adjoint reaching input pixels but no model-level entry point; its own doc header says "no model crate consumes these kernels yet, so the harness IS the fixture" |
 | `instantid` | none | forward is not implemented at all - this is a Phase 5 item, not Phase 3 |
 
 ### 3.2 Use the right oracle

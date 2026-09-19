@@ -100,8 +100,9 @@ produces an ONNX graph validated on real NPU hardware (fp32 only).
         function itself at the model level instead. Closing this needs a tiny
         committed GLM checkpoint with a char vocab, which is its own item, not
         something to manufacture as a side effect of unrelated work.
-- [x] A runnable `examples/` client for GLM, like the other served models have
-      (`examples/llm/glmdsa.py`, D-Bus only - GLM's `generate` is not
+- [x] A runnable client for GLM, like the other served models have
+      (`samples/python/llm/glmdsa/glmdsa.py`, moved there from `examples/llm/`
+      in the examples/ -> samples/ consolidation - D-Bus only, GLM's `generate` is not
       `.streaming()`, see the item above, so it is not reachable over
       `/v1/chat/completions`/`/v1/messages`; `--openai`/`--anthropic` are
       refused with that explanation rather than silently doing nothing).

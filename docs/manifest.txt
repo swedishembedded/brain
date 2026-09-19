@@ -37,6 +37,7 @@ samples/python/dbus/brain-dbus/README.md
 samples/python/dbus/detect-pipeline/README.md
 samples/python/embedding/clip-embed/README.md
 samples/python/embedding/embed-document/README.md
+samples/python/embedding/lfm2-embed/README.md
 samples/python/embedding/t5-embed/README.md
 samples/python/forecast/forecast-client/README.md
 samples/python/imagegen/controlnet/README.md
