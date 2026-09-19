@@ -893,6 +893,13 @@ impl DoomEnv {
         // Standing in slime: anywhere else will do, and the exit route is
         // already computed to avoid it.
         if self.state.player.standing_in_damage {
+            // The way OUT of it, when the engine could see one. Taking the
+            // route instead is what killed the scripted player on E1M3: the
+            // route led across more nukage, because that is where the run was
+            // going, and health does not last that long.
+            if let Some(i) = by(Tag::Escape) {
+                return Some(i);
+            }
             if let Some(i) = by(Tag::Exit) {
                 return Some(i);
             }

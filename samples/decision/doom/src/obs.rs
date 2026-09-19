@@ -113,6 +113,12 @@ pub struct Player {
     /// wondering why it is dying.
     #[serde(rename = "standingInDamage", default)]
     pub standing_in_damage: bool,
+    /// Which way the nearest floor that is not burning lies, when the player
+    /// is standing on floor that is. A player can see where a pool ends; an
+    /// agent told only that the floor is burning cannot, and the route is no
+    /// help because it is pointed wherever the run is going.
+    #[serde(rename = "dryLand")]
+    pub dry_land: Option<Opener>,
 }
 
 // `deny_unknown_fields` means every field the engine sends has to be named
@@ -369,7 +375,14 @@ pub fn render(state: &State, history: History) -> String {
     ));
 
     if state.player.standing_in_damage {
-        out.push_str("THE FLOOR HERE IS BURNING YOU - get off it.\n");
+        match &state.player.dry_land {
+            Some(d) => out.push_str(&format!(
+                "THE FLOOR HERE IS BURNING YOU - dry ground is {} units {}.\n",
+                d.distance,
+                side_word(d.bearing)
+            )),
+            None => out.push_str("THE FLOOR HERE IS BURNING YOU - get off it.\n"),
+        }
     }
 
     // Only what can be seen. Counting what is behind the walls told an agent

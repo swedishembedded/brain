@@ -60,6 +60,8 @@ pub enum Tag {
     Switch,
     /// Remove whatever is standing in the way of the route.
     Clear,
+    /// Get off floor that is burning the player.
+    Escape,
     Exit,
 }
 
@@ -203,6 +205,35 @@ pub fn options(state: &State) -> Vec<Option_> {
             tics: MOVE_TICS,
             tag: Tag::Retreat,
             room: c.behind,
+        });
+    }
+
+    // --- get off the burning floor ----------------------------------------
+    //
+    // First in the list because nothing else matters while health is draining
+    // for free. Aimed at the edge of the pool, which is a thing the player can
+    // see and the route cannot help with: the route is pointed wherever the
+    // run is going, and on a level like E1M3 that is across more of it.
+    if let Some(d) = state
+        .player
+        .dry_land
+        .as_ref()
+        .filter(|_| state.player.standing_in_damage)
+    {
+        out.push(Option_ {
+            text: format!(
+                "get off the burning floor, {} units {}",
+                d.distance,
+                bearing_phrase(d.bearing)
+            ),
+            commands: format!(
+                "[{},{{\"type\":\"forward\",\"amount\":{}}}]",
+                json_turn(state.facing(d.bearing)),
+                walk_tics(d.distance)
+            ),
+            tics: walk_tics(d.distance),
+            tag: Tag::Escape,
+            room: d.distance,
         });
     }
 
