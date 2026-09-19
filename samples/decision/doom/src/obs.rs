@@ -52,8 +52,8 @@ pub struct State {
     /// sludge takes health off you. Without this the agent cannot learn it at
     /// all: nothing distinguishes a corridor from a corridor with a pool in
     /// it until it is already standing in the pool.
-    #[serde(rename = "burningFloor")]
-    pub burning_floor: Option<Burning>,
+    #[serde(rename = "burningFloor", default)]
+    pub burning_floor: Vec<Burning>,
     /// Absent on a map with no exit linedef at all.
     pub exit: Option<Exit>,
     /// The nearest place the player has not walked, and the way to it.
@@ -274,36 +274,25 @@ pub struct Spot {
 // load-bearing precisely by existing. Rust's dead-code lint cannot see that,
 // which is what the allow is for.
 #[allow(dead_code)]
-/// Distance to burning floor per direction, where there is any.
-#[derive(Clone, Copy, Debug, Default, Deserialize)]
+/// A patch of burning floor the player can see, as it looks: roughly which
+/// way, roughly how wide, and how far to its near edge.
+///
+/// A player does not deduce that the floor ahead is nukage - they look at it.
+/// This is a scan of the view rather than a probe down the directions they
+/// might walk, so a pool off to one side of the corridor is seen, and one
+/// behind them is not.
+#[derive(Clone, Copy, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Burning {
-    pub ahead: Option<i32>,
-    pub right: Option<i32>,
-    pub behind: Option<i32>,
-    pub left: Option<i32>,
-    #[serde(rename = "aheadRight")]
-    pub ahead_right: Option<i32>,
-    #[serde(rename = "aheadLeft")]
-    pub ahead_left: Option<i32>,
+    pub bearing: i32,
+    pub width: i32,
+    pub distance: i32,
 }
 
 impl Burning {
-    /// The directions that burn, nearest first, as (word, distance).
-    pub fn ways(&self) -> Vec<(&'static str, i32)> {
-        let mut out: Vec<(&'static str, i32)> = [
-            ("ahead", self.ahead),
-            ("to your right", self.right),
-            ("behind you", self.behind),
-            ("to your left", self.left),
-            ("ahead and right", self.ahead_right),
-            ("ahead and left", self.ahead_left),
-        ]
-        .into_iter()
-        .filter_map(|(w, d)| d.map(|d| (w, d)))
-        .collect();
-        out.sort_by_key(|(_, d)| *d);
-        out
+    /// Whether walking `distance` units on this bearing goes into it.
+    pub fn in_the_way(&self, bearing: i32, distance: i32) -> bool {
+        (bearing - self.bearing).abs() <= self.width / 2 + 10 && self.distance <= distance
     }
 }
 
@@ -488,18 +477,22 @@ pub fn render(state: &State, history: History) -> String {
 
     // Where the floor burns, which is a thing a player can see and the single
     // most reliable way to die on a level like E1M3.
-    if let Some(b) = &state.burning_floor {
-        let ways = b.ways();
-        if !ways.is_empty() {
-            out.push_str("BURNING FLOOR: ");
-            for (i, (word, d)) in ways.iter().take(3).enumerate() {
-                if i > 0 {
-                    out.push_str(", ");
-                }
-                out.push_str(&format!("{d} units {word}"));
+    if !state.burning_floor.is_empty() {
+        let mut seen = state.burning_floor.clone();
+        seen.sort_by_key(|b| b.distance);
+        out.push_str("BURNING FLOOR in sight: ");
+        for (i, b) in seen.iter().take(3).enumerate() {
+            if i > 0 {
+                out.push_str(", ");
             }
-            out.push_str(".\n");
+            out.push_str(&format!(
+                "{} units {}, {} degrees wide",
+                b.distance,
+                side_word(b.bearing),
+                b.width
+            ));
         }
+        out.push_str(". Do not walk into it.\n");
     }
 
     if let Some(e) = &state.exit {

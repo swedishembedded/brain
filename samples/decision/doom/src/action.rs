@@ -169,9 +169,15 @@ pub fn options(state: &State) -> Vec<Option_> {
     // one thing on a level like E1M3 that reliably ends a run, so it belongs
     // in the option rather than beside it. A player does not deduce that the
     // corridor ahead is nukage; they look at it.
-    let burn = state.burning_floor.unwrap_or_default();
-    let hot = |d: Option<i32>| match d {
-        Some(at) => format!(", and the floor starts burning {at} units along"),
+    // Whether walking a given way, for a given distance, goes into any patch
+    // of burning floor the player can see.
+    let hot = |bearing: i32, distance: i32| match state
+        .burning_floor
+        .iter()
+        .filter(|b| b.in_the_way(bearing, distance))
+        .min_by_key(|b| b.distance)
+    {
+        Some(b) => format!(", and the floor starts burning {} units along", b.distance),
         None => String::new(),
     };
     if c.ahead >= MIN_ROOM {
@@ -179,7 +185,7 @@ pub fn options(state: &State) -> Vec<Option_> {
             text: format!(
                 "walk forward, {} units of open floor ahead{}",
                 c.ahead,
-                hot(burn.ahead)
+                hot(0, c.ahead)
             ),
             commands: "[{\"type\":\"forward\",\"amount\":8}]".into(),
             tics: MOVE_TICS,
@@ -192,7 +198,7 @@ pub fn options(state: &State) -> Vec<Option_> {
             text: format!(
                 "turn left and go that way, {} units of room{}",
                 c.ahead_left,
-                hot(burn.ahead_left)
+                hot(-45, c.ahead_left)
             ),
             commands: format!(
                 "[{},{{\"type\":\"forward\",\"amount\":8}}]",
@@ -208,7 +214,7 @@ pub fn options(state: &State) -> Vec<Option_> {
             text: format!(
                 "turn right and go that way, {} units of room{}",
                 c.ahead_right,
-                hot(burn.ahead_right)
+                hot(45, c.ahead_right)
             ),
             commands: format!(
                 "[{},{{\"type\":\"forward\",\"amount\":8}}]",
@@ -223,7 +229,7 @@ pub fn options(state: &State) -> Vec<Option_> {
         out.push(Option_ {
             text: format!(
                 "back away from whatever is in front of you{}",
-                hot(burn.behind)
+                hot(180, c.behind)
             ),
             commands: "[{\"type\":\"backward\",\"amount\":8}]".into(),
             tics: MOVE_TICS,
@@ -376,7 +382,7 @@ pub fn options(state: &State) -> Vec<Option_> {
             text: format!(
                 "sidestep left without turning, {} units of room{}",
                 c.left,
-                hot(burn.left)
+                hot(-90, c.left)
             ),
             commands: "[{\"type\":\"strafe-left\",\"amount\":8}]".into(),
             tics: MOVE_TICS,
@@ -389,7 +395,7 @@ pub fn options(state: &State) -> Vec<Option_> {
             text: format!(
                 "sidestep right without turning, {} units of room{}",
                 c.right,
-                hot(burn.right)
+                hot(90, c.right)
             ),
             commands: "[{\"type\":\"strafe-right\",\"amount\":8}]".into(),
             tics: MOVE_TICS,
@@ -750,6 +756,32 @@ mod tests {
             crate::obs::History::default(),
         );
         assert!(text.contains("switch"), "{text}");
+    }
+
+    #[test]
+    fn a_way_that_walks_into_the_fire_says_so() {
+        // The one thing on a level like E1M3 that reliably ends a run, and
+        // the agent can only weigh it if the option it is weighing carries
+        // it. A patch ahead is in the way of walking forward; the same patch
+        // is not in the way of walking away from it.
+        let seen = r#""threats":[],"hazards":[],"pickups":[],
+            "clearance":{"ahead":320,"right":0,"behind":320,"left":0,
+                         "aheadRight":0,"aheadLeft":0},
+            "burningFloor":[{"bearing":0,"width":20,"distance":96}]"#;
+        let opts = options(&state(seen));
+        let fwd = opts
+            .iter()
+            .find(|o| o.tag == Tag::Advance)
+            .expect("somewhere to walk");
+        assert!(fwd.text.contains("burning 96 units along"), "{}", fwd.text);
+        let back = opts
+            .iter()
+            .find(|o| o.tag == Tag::Retreat)
+            .expect("somewhere to back off to");
+        assert!(!back.text.contains("burning"), "{}", back.text);
+
+        let text = crate::obs::render(&state(seen), crate::obs::History::default());
+        assert!(text.contains("BURNING FLOOR in sight"), "{text}");
     }
 
     #[test]
