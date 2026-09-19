@@ -94,8 +94,14 @@ impl Score {
         println!(
             "  {who}: {} episodes, return {:+.2} ({:+.2} from the game itself), \
              {:.1} kills, {:.1} items, {} exits, {} deaths, {:.0} steps",
-            self.episodes, self.mean_return, self.mean_game, self.kills, self.items, self.exits,
-            self.deaths, self.steps
+            self.episodes,
+            self.mean_return,
+            self.mean_game,
+            self.kills,
+            self.items,
+            self.exits,
+            self.deaths,
+            self.steps
         );
     }
 
@@ -108,6 +114,10 @@ impl Score {
 }
 
 struct Tally {
+    /// Who is playing, for the per-episode line. An episode's SCORE says
+    /// nothing about why it ended, and at this horizon most of them end for a
+    /// reason worth reading - see [`crate::report`].
+    who: &'static str,
     ret: f32,
     game: f32,
     kills: f32,
@@ -119,8 +129,18 @@ struct Tally {
 }
 
 impl Tally {
-    fn new() -> Tally {
-        Tally { ret: 0.0, game: 0.0, kills: 0.0, items: 0.0, exits: 0, deaths: 0, steps: 0.0, n: 0 }
+    fn new(who: &'static str) -> Tally {
+        Tally {
+            who,
+            ret: 0.0,
+            game: 0.0,
+            kills: 0.0,
+            items: 0.0,
+            exits: 0,
+            deaths: 0,
+            steps: 0.0,
+            n: 0,
+        }
     }
 
     fn add(&mut self, env: &DoomEnv, total: f32, steps: usize) {
@@ -133,6 +153,12 @@ impl Tally {
         self.deaths += usize::from(s.outcome == "dead");
         self.steps += steps as f32;
         self.n += 1;
+        println!(
+            "  {} ep {:<2} {total:+7.2}  {}",
+            self.who,
+            self.n,
+            env.report()
+        );
     }
 
     fn finish(self) -> Score {
@@ -157,7 +183,7 @@ pub fn score_scripted(
     max_steps: usize,
     timing: &mut Timing,
 ) -> Result<Score, String> {
-    let mut tally = Tally::new();
+    let mut tally = Tally::new("scripted");
     for &seed in seeds {
         env.start(seed);
         let (mut total, mut steps) = (0.0f32, 0usize);
@@ -189,20 +215,26 @@ pub fn score_policy(
     mut viewer: Option<&mut Viewer>,
     timing: &mut Timing,
 ) -> Result<Score, String> {
-    let mut tally = Tally::new();
+    let mut tally = Tally::new("policy");
     for &seed in seeds {
         let mut observation = pipe.env_mut().start(seed);
         let (mut total, mut steps) = (0.0f32, 0usize);
         for _ in 0..max_steps {
-            let options: Vec<String> =
-                pipe.env().options().iter().map(|o| o.text.clone()).collect();
+            let options: Vec<String> = pipe
+                .env()
+                .options()
+                .iter()
+                .map(|o| o.text.clone())
+                .collect();
             if options.is_empty() {
                 break;
             }
             // The distribution, not just the argmax: this is what the inspector
             // shows and what makes a decision readable.
             let t0 = std::time::Instant::now();
-            let probs = pipe.policy(&observation, &options).map_err(|e| format!("{e}"))?;
+            let probs = pipe
+                .policy(&observation, &options)
+                .map_err(|e| format!("{e}"))?;
             timing.policy_ns += t0.elapsed().as_nanos();
             let mut best = 0;
             for (i, p) in probs.iter().enumerate() {
@@ -299,7 +331,10 @@ impl Viewer {
 
     /// Draw one decision. Returns false when the user asked to quit.
     pub fn tick(&mut self, inspect: &Arc<Mutex<Inspect>>) -> Result<bool, String> {
-        let snapshot = inspect.lock().map_err(|_| "the inspector lock broke")?.clone();
+        let snapshot = inspect
+            .lock()
+            .map_err(|_| "the inspector lock broke")?
+            .clone();
 
         // Recording gets every frame of the decision; the window and the PNG
         // dump get the last, which is the state the decision ended in.
@@ -404,7 +439,12 @@ pub fn draw_at(c: &mut Canvas, i: &Inspect, frame: Option<&crate::frame::Frame>)
     // over and became unreadable at exactly the width most windows are.
     let head = format!(
         "E{}M{} SEED {} STEP {} TIC {} - {}",
-        1, i.map, i.episode, i.step, i.game_tic, i.mission.to_uppercase()
+        1,
+        i.map,
+        i.episode,
+        i.step,
+        i.game_tic,
+        i.mission.to_uppercase()
     );
     let stats = format!(
         "HP {} KILLS {}/{} ITEMS {} SECRETS {}{}",
@@ -413,7 +453,11 @@ pub fn draw_at(c: &mut Canvas, i: &Inspect, frame: Option<&crate::frame::Frame>)
         i.total_kills,
         i.items,
         i.secrets,
-        if i.stuck >= 3 { format!("  STUCK x{}", i.stuck) } else { String::new() }
+        if i.stuck >= 3 {
+            format!("  STUCK x{}", i.stuck)
+        } else {
+            String::new()
+        }
     );
     let stats = if i.back_steps > 0 {
         format!("{stats}  START -{}", i.back_steps)
@@ -425,7 +469,15 @@ pub fn draw_at(c: &mut Canvas, i: &Inspect, frame: Option<&crate::frame::Frame>)
 
     let hp = (i.health.max(0) as f32 / 100.0).min(1.0);
     let bar_y = (gh + 20 + 2 * Canvas::line_height(2)) as i32;
-    c.bar(8, bar_y, gw, 8, hp, if hp > 0.34 { GOOD } else { BAD }, PANEL);
+    c.bar(
+        8,
+        bar_y,
+        gw,
+        8,
+        hp,
+        if hp > 0.34 { GOOD } else { BAD },
+        PANEL,
+    );
 
     // ---- what the model was given -----------------------------------------
     let obs_y = bar_y + 14;
@@ -471,8 +523,15 @@ pub fn draw_at(c: &mut Canvas, i: &Inspect, frame: Option<&crate::frame::Frame>)
         // for contrast, so the bright bar it was meant to read against is not
         // there by the time the glyphs land.
         if let Some(p) = p {
-            c.bar(px + 6, y, pw - 12, block as u32 + 4, p,
-                  if chosen { [110, 80, 20] } else { [40, 46, 64] }, [28, 28, 36]);
+            c.bar(
+                px + 6,
+                y,
+                pw - 12,
+                block as u32 + 4,
+                p,
+                if chosen { [110, 80, 20] } else { [40, 46, 64] },
+                [28, 28, 36],
+            );
         }
         if chosen {
             // A solid edge, which reads at a glance and does not depend on
@@ -480,8 +539,13 @@ pub fn draw_at(c: &mut Canvas, i: &Inspect, frame: Option<&crate::frame::Frame>)
             c.fill(px + 2, y, 3, block as u32 + 4, PICK);
         }
         for (k, chunk) in lines.iter().enumerate() {
-            c.text(px + 10, y + 2 + (k as u32 * Canvas::line_height(1)) as i32,
-                   &chunk.to_uppercase(), 1, if chosen { PICK } else { INK });
+            c.text(
+                px + 10,
+                y + 2 + (k as u32 * Canvas::line_height(1)) as i32,
+                &chunk.to_uppercase(),
+                1,
+                if chosen { PICK } else { INK },
+            );
         }
         y += block + 8;
     }
@@ -492,12 +556,23 @@ pub fn draw_at(c: &mut Canvas, i: &Inspect, frame: Option<&crate::frame::Frame>)
     // ---- what it earned ---------------------------------------------------
     let plot_y = (HEIGHT - 104) as i32;
     c.shade(px, plot_y, pw, 96, PANEL, 235);
-    c.text(px + 6, plot_y + 4, "REWARD PER DECISION, THIS EPISODE", 1, DIM);
+    c.text(
+        px + 6,
+        plot_y + 4,
+        "REWARD PER DECISION, THIS EPISODE",
+        1,
+        DIM,
+    );
     c.plot(px + 6, plot_y + 20, pw - 12, 50, &i.history, GOOD);
     c.text(
         px + 6,
         plot_y + 74,
-        &format!("LAST {:+.3}   EPISODE {:+.2}   {}", i.reward, i.total, i.outcome.to_uppercase()),
+        &format!(
+            "LAST {:+.3}   EPISODE {:+.2}   {}",
+            i.reward,
+            i.total,
+            i.outcome.to_uppercase()
+        ),
         1,
         if i.total >= 0.0 { GOOD } else { BAD },
     );
@@ -515,7 +590,13 @@ const MAP_H: u32 = 330;
 /// whole point of showing it is to be able to trust the correspondence.
 fn draw_map(c: &mut Canvas, i: &Inspect, x: i32, y: i32, w: u32, h: u32) {
     c.shade(x, y, w, h, PANEL, 235);
-    c.text(x + 6, y + 4, "WHERE IT CAN GO, AND WHERE IT HAS BEEN", 1, DIM);
+    c.text(
+        x + 6,
+        y + 4,
+        "WHERE IT CAN GO, AND WHERE IT HAS BEEN",
+        1,
+        DIM,
+    );
     let m = &i.known;
     if m.is_empty() {
         c.text(x + 6, y + 20, "NO MAP", 1, DIM);
@@ -648,7 +729,10 @@ pub fn watch(inspect: Arc<Mutex<Inspect>>, args: &Args) -> Watcher {
             std::thread::sleep(Duration::from_millis(1000 / fps as u64));
         }
     });
-    Watcher { stop, handle: Some(handle) }
+    Watcher {
+        stop,
+        handle: Some(handle),
+    }
 }
 
 /// Time one decision, against the two things its cost could scale with.
@@ -667,13 +751,23 @@ pub fn bench(env: DoomEnv, args: &Args) -> Result<(), String> {
         .map_err(|e| format!("{e}"))?;
 
     let word = "corridor imp shotgun ";
-    println!("\n  {:>7} {:>8} {:>10} {:>12}", "state", "options", "ms/call", "calls/s");
-    for &(state_words, n_opts) in
-        &[(4usize, 1usize), (4, 8), (4, 24), (40, 1), (40, 8), (40, 24), (200, 8)]
-    {
+    println!(
+        "\n  {:>7} {:>8} {:>10} {:>12}",
+        "state", "options", "ms/call", "calls/s"
+    );
+    for &(state_words, n_opts) in &[
+        (4usize, 1usize),
+        (4, 8),
+        (4, 24),
+        (40, 1),
+        (40, 8),
+        (40, 24),
+        (200, 8),
+    ] {
         let state = word.repeat(state_words);
-        let options: Vec<String> =
-            (0..n_opts).map(|i| format!("attack the imp {i} degrees to your left")).collect();
+        let options: Vec<String> = (0..n_opts)
+            .map(|i| format!("attack the imp {i} degrees to your left"))
+            .collect();
         // Warm: the first call of a run pays for pipeline creation on the
         // device, which is not what a decision costs.
         for _ in 0..3 {
@@ -685,7 +779,10 @@ pub fn bench(env: DoomEnv, args: &Args) -> Result<(), String> {
             pipe.policy(&state, &options).map_err(|e| format!("{e}"))?;
         }
         let ms = t.elapsed().as_secs_f64() * 1000.0 / n as f64;
-        println!("  {state_words:>7} {n_opts:>8} {ms:>10.2} {:>12.0}", 1000.0 / ms);
+        println!(
+            "  {state_words:>7} {n_opts:>8} {ms:>10.2} {:>12.0}",
+            1000.0 / ms
+        );
     }
     println!(
         "\n  (state is in words; the observation this sample builds is about 60-90 \
@@ -713,7 +810,13 @@ pub fn play(env: DoomEnv, args: &Args) -> Result<(), String> {
 
     let seeds: Vec<u64> = (0..args.play as u64).map(|i| 9_000_000 + i).collect();
     let mut timing = Timing::default();
-    let score = score_policy(&mut pipe, &seeds, args.max_steps(), Some(&mut viewer), &mut timing)?;
+    let score = score_policy(
+        &mut pipe,
+        &seeds,
+        args.max_steps(),
+        Some(&mut viewer),
+        &mut timing,
+    )?;
     viewer.finish();
     score.print("policy");
     timing.print("policy");
@@ -756,7 +859,11 @@ pub fn probe(mut env: DoomEnv, args: &Args) -> Result<(), String> {
         }
     }
     viewer.finish();
-    println!("doom: probe finished, return {total:+.2}, {}", env.state().outcome);
+    println!("doom: probe finished, return {total:+.2}");
+    println!("doom: {}", env.report());
+    if let Some(route) = env.stall_detail() {
+        println!("doom: the route, where it stopped: {route}");
+    }
     if let Some(d) = &args.view.frames {
         println!("doom: wrote decision PNGs to {d}");
     }

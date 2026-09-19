@@ -39,6 +39,7 @@ mod doom;
 mod env;
 mod frame;
 mod obs;
+mod report;
 mod view;
 
 use brain::options::{Args as Args_, ControlOptions, Hardware, Options, ViewOptions};
@@ -175,10 +176,12 @@ fn parse_args() -> Result<Args, String> {
     train.warmup_epochs = 6;
     let train = train.take_over(&mut args)?;
     if train.encoder.is_empty() {
-        return Err("--encoder DIR is required: it is the pretrained sentence encoder the \
+        return Err(
+            "--encoder DIR is required: it is the pretrained sentence encoder the \
                     policy reads with (`brain pull sentence-transformers/all-MiniLM-L6-v2` \
                     fetches one)"
-            .into());
+                .into(),
+        );
     }
 
     let mission = match args.take_str("--mission") {
@@ -228,7 +231,10 @@ fn run() -> Result<(), String> {
 
     let paths = Paths::resolve(args.doom_bin.as_deref(), args.wad.as_deref())
         .map_err(|m| format!("{m}"))?;
-    if !std::path::Path::new(args.encoder()).join("config.json").exists() {
+    if !std::path::Path::new(args.encoder())
+        .join("config.json")
+        .exists()
+    {
         return Err(format!(
             "no sentence encoder at {}\n  run `brain pull sentence-transformers/all-MiniLM-L6-v2`, \
              or pass --encoder DIR",
@@ -241,7 +247,11 @@ fn run() -> Result<(), String> {
         args.cfg.episode,
         args.cfg.map,
         args.cfg.skill,
-        if args.mix { "orders sampled per episode".into() } else { format!("orders: {}", args.mission.name()) }
+        if args.mix {
+            "orders sampled per episode".into()
+        } else {
+            format!("orders: {}", args.mission.name())
+        }
     );
 
     let game = Doom::start(&paths, &args.cfg, args.transcript.as_ref().map(Into::into))
@@ -258,7 +268,10 @@ fn run() -> Result<(), String> {
         );
     }
     if args.arena > 0 {
-        println!("doom: arena - {} monsters placed around the player each episode", args.arena);
+        println!(
+            "doom: arena - {} monsters placed around the player each episode",
+            args.arena
+        );
     }
 
     match args.command.as_str() {
@@ -282,8 +295,9 @@ fn train(env: DoomEnv, args: &Args) -> Result<(), String> {
     // play command does, fed from the environment as the rollouts run.
     let watcher = view::watch(inspect, args);
 
-    let mut builder =
-        ControlPipeline::builder(args.encoder(), env).seed(args.seed()).device(args.device());
+    let mut builder = ControlPipeline::builder(args.encoder(), env)
+        .seed(args.seed())
+        .device(args.device());
     if let Some(h) = args.head() {
         builder = builder.head(h);
     }
@@ -294,14 +308,22 @@ fn train(env: DoomEnv, args: &Args) -> Result<(), String> {
     // against nothing. What follows instead scores the policy and the scripted
     // player over the same episodes, which is the comparison that means
     // something.
-    let chain = brain::Flow::new(builder.load()).train(spec).save(&args.train.save).report();
+    let chain = brain::Flow::new(builder.load())
+        .train(spec)
+        .save(&args.train.save)
+        .report();
     let out = chain.finish().map_err(|e| format!("{e}"));
     watcher.stop();
     let mut pipe = out?;
     println!("doom: wrote {}\n", args.train.save);
 
-    let seeds: Vec<u64> = (0..args.eval_episodes as u64).map(|i| 5_000_000 + i).collect();
-    println!("doom: scoring both players over the same {} episodes", seeds.len());
+    let seeds: Vec<u64> = (0..args.eval_episodes as u64)
+        .map(|i| 5_000_000 + i)
+        .collect();
+    println!(
+        "doom: scoring both players over the same {} episodes",
+        seeds.len()
+    );
     let mut pt = view::Timing::default();
     let mut st = view::Timing::default();
     let learned = view::score_policy(&mut pipe, &seeds, args.max_steps(), None, &mut pt)?;
@@ -324,7 +346,11 @@ fn report(script: &view::Score, learned: &view::Score) {
     println!(
         "\ndoom: the policy is {delta:+.2} return and {game:+.2} game score per episode \
          against the scripted player{}",
-        if delta > 0.0 && game > 0.0 { "" } else { " - it has not beaten it yet" }
+        if delta > 0.0 && game > 0.0 {
+            ""
+        } else {
+            " - it has not beaten it yet"
+        }
     );
 }
 
@@ -335,7 +361,9 @@ fn report(script: &view::Score, learned: &view::Score) {
 /// number that matters here is the difference between two columns of this
 /// table rather than either column alone.
 fn evaluate(mut env: DoomEnv, args: &Args) -> Result<(), String> {
-    let seeds: Vec<u64> = (0..args.eval_episodes as u64).map(|i| 5_000_000 + i).collect();
+    let seeds: Vec<u64> = (0..args.eval_episodes as u64)
+        .map(|i| 5_000_000 + i)
+        .collect();
 
     println!("\ndoom: scripted player over {} episodes", seeds.len());
     let mut st = view::Timing::default();
@@ -347,7 +375,10 @@ fn evaluate(mut env: DoomEnv, args: &Args) -> Result<(), String> {
         println!("\ndoom: no --head given, so only the reference bar was measured");
         return Ok(());
     };
-    println!("\ndoom: policy {head} over the same {} episodes", seeds.len());
+    println!(
+        "\ndoom: policy {head} over the same {} episodes",
+        seeds.len()
+    );
     let mut pipe = ControlPipeline::builder(args.encoder(), env)
         .head(head)
         .seed(args.seed())

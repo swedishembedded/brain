@@ -42,18 +42,34 @@ impl Frame {
     pub fn parse(json: &str) -> Result<Frame, String> {
         let w: Wire = serde_json::from_str(json).map_err(|e| format!("unreadable frame: {e}"))?;
         if w.format != "indexed8" {
-            return Err(format!("the game sent a {:?} frame, which this cannot draw", w.format));
+            return Err(format!(
+                "the game sent a {:?} frame, which this cannot draw",
+                w.format
+            ));
         }
         let pixels = base64(&w.pixels)?;
         let palette = base64(&w.palette)?;
         let want = (w.width * w.height) as usize;
         if pixels.len() != want {
-            return Err(format!("frame says {}x{} but carries {} bytes", w.width, w.height, pixels.len()));
+            return Err(format!(
+                "frame says {}x{} but carries {} bytes",
+                w.width,
+                w.height,
+                pixels.len()
+            ));
         }
         if palette.len() < 768 {
-            return Err(format!("a 256-colour palette needs 768 bytes, got {}", palette.len()));
+            return Err(format!(
+                "a 256-colour palette needs 768 bytes, got {}",
+                palette.len()
+            ));
         }
-        Ok(Frame { width: w.width, height: w.height, pixels, palette })
+        Ok(Frame {
+            width: w.width,
+            height: w.height,
+            pixels,
+            palette,
+        })
     }
 }
 
@@ -94,12 +110,19 @@ mod tests {
         // The three residues are where a hand-rolled codec goes wrong, and the
         // symptom is a frame that is right except for its last pixels - which
         // reads as a rendering artefact rather than as a decoder bug.
-        for (encoded, expect) in
-            [("", &b""[..]), ("QQ==", b"A"), ("QUI=", b"AB"), ("QUJD", b"ABC"), ("QUJDRA==", b"ABCD")]
-        {
+        for (encoded, expect) in [
+            ("", &b""[..]),
+            ("QQ==", b"A"),
+            ("QUI=", b"AB"),
+            ("QUJD", b"ABC"),
+            ("QUJDRA==", b"ABCD"),
+        ] {
             assert_eq!(base64(encoded).expect("decodes"), expect, "{encoded:?}");
         }
-        assert!(base64("QQ*=").is_err(), "a non-base64 byte must be an error");
+        assert!(
+            base64("QQ*=").is_err(),
+            "a non-base64 byte must be an error"
+        );
     }
 
     #[test]

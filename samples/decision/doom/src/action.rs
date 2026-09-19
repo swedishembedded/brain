@@ -92,7 +92,10 @@ fn walk_tics(distance: i32) -> u32 {
 }
 
 fn json_turn(angle: i32) -> String {
-    format!("{{\"type\":\"turn-to\",\"angle\":{}}}", angle.rem_euclid(360))
+    format!(
+        "{{\"type\":\"turn-to\",\"angle\":{}}}",
+        angle.rem_euclid(360)
+    )
 }
 
 /// Build the option list for this state.
@@ -167,7 +170,10 @@ pub fn options(state: &State) -> Vec<Option_> {
     }
     if c.ahead_right >= MIN_ROOM {
         out.push(Option_ {
-            text: format!("turn right and go that way, {} units of room", c.ahead_right),
+            text: format!(
+                "turn right and go that way, {} units of room",
+                c.ahead_right
+            ),
             commands: format!(
                 "[{},{{\"type\":\"forward\",\"amount\":8}}]",
                 json_turn(state.facing(45))
@@ -217,11 +223,17 @@ pub fn options(state: &State) -> Vec<Option_> {
         // the model reads what an option MEANS.
         if let Some(key) = &e.goal {
             let text = if bearing.abs() > FACING_TOL {
-                format!("turn toward the {} key that unlocks the way out, {away} units of \
-                         walking {}", key, bearing_phrase(bearing))
+                format!(
+                    "turn toward the {} key that unlocks the way out, {away} units of \
+                         walking {}",
+                    key,
+                    bearing_phrase(bearing)
+                )
             } else {
-                format!("go and get the {key} key that unlocks the way out, {away} units of \
-                         walking ahead")
+                format!(
+                    "go and get the {key} key that unlocks the way out, {away} units of \
+                         walking ahead"
+                )
             };
             let commands = if bearing.abs() > FACING_TOL {
                 format!("[{}]", json_turn(state.facing(bearing)))
@@ -231,7 +243,11 @@ pub fn options(state: &State) -> Vec<Option_> {
             out.push(Option_ {
                 text,
                 commands,
-                tics: if bearing.abs() > FACING_TOL { FIGHT_TICS } else { walk_tics(away) },
+                tics: if bearing.abs() > FACING_TOL {
+                    FIGHT_TICS
+                } else {
+                    walk_tics(away)
+                },
                 tag: Tag::Exit,
                 room: e.route_clearance.unwrap_or(e.clearance),
             });
@@ -239,9 +255,15 @@ pub fn options(state: &State) -> Vec<Option_> {
             // Close enough to press. Face the exit ITSELF, not the route,
             // which has already delivered the player here.
             out.push(Option_ {
-                text: format!("press the level exit, {} units {}", e.distance,
-                              bearing_phrase(e.bearing)),
-                commands: format!("[{},{{\"type\":\"use\"}}]", json_turn(state.facing(e.bearing))),
+                text: format!(
+                    "press the level exit, {} units {}",
+                    e.distance,
+                    bearing_phrase(e.bearing)
+                ),
+                commands: format!(
+                    "[{},{{\"type\":\"use\"}}]",
+                    json_turn(state.facing(e.bearing))
+                ),
                 tics: FIGHT_TICS,
                 tag: Tag::Exit,
                 room: e.route_clearance.unwrap_or(e.clearance),
@@ -426,15 +448,26 @@ mod tests {
             "clearance":{"ahead":320,"right":0,"behind":0,"left":0,"aheadRight":0,"aheadLeft":0}"#,
         );
         let opts = options(&s);
-        let attack = opts.iter().find(|o| o.tag == Tag::Attack).expect("an attack option");
+        let attack = opts
+            .iter()
+            .find(|o| o.tag == Tag::Attack)
+            .expect("an attack option");
         // The MEANING is in the text - this is the whole claim of a decision
         // model over a fixed-head policy, so it is worth a test rather than a
         // comment.
         assert!(attack.text.contains("imp"), "{}", attack.text);
-        assert!(attack.text.contains("12 degrees to your left"), "{}", attack.text);
+        assert!(
+            attack.text.contains("12 degrees to your left"),
+            "{}",
+            attack.text
+        );
         // 90 + (-12): the turn is absolute because the engine's turn keys
         // cannot name a direction.
-        assert!(attack.commands.contains("\"angle\":78"), "{}", attack.commands);
+        assert!(
+            attack.commands.contains("\"angle\":78"),
+            "{}",
+            attack.commands
+        );
     }
 
     #[test]
@@ -451,12 +484,18 @@ mod tests {
                     "blockedBy":{"kind":"door","bearing":%B,"distance":24}}"#;
 
         let aside = options(&state(&walled.replace("%B", "40")));
-        let turn = aside.iter().find(|o| o.tag == Tag::Open).expect("a way to face the door");
+        let turn = aside
+            .iter()
+            .find(|o| o.tag == Tag::Open)
+            .expect("a way to face the door");
         assert!(turn.commands.contains("turn-to"), "{}", turn.commands);
         assert!(turn.text.contains("shut door"), "{}", turn.text);
 
         let facing = options(&state(&walled.replace("%B", "3")));
-        let open = facing.iter().find(|o| o.tag == Tag::Open).expect("a way to open the door");
+        let open = facing
+            .iter()
+            .find(|o| o.tag == Tag::Open)
+            .expect("a way to open the door");
         assert!(open.commands.contains("use"), "{}", open.commands);
         // Long enough for the door to rise. Pressing use again while it is
         // moving sends it back down.
@@ -476,7 +515,10 @@ mod tests {
                     "pathDistance":2112,"goal":"red","routeBearing":6,
                     "routeDistance":184,"routeClearance":320}"#;
         let opts = options(&state(locked));
-        let way = opts.iter().find(|o| o.tag == Tag::Exit).expect("a way onward");
+        let way = opts
+            .iter()
+            .find(|o| o.tag == Tag::Exit)
+            .expect("a way onward");
         assert!(way.text.contains("red key"), "{}", way.text);
         // You WALK ONTO a key. Pressing use on one does nothing.
         assert!(way.commands.contains("forward"), "{}", way.commands);

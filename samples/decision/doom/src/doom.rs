@@ -133,7 +133,12 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Config {
-        Config { episode: 1, map: 1, skill: 2, engine_window: false }
+        Config {
+            episode: 1,
+            map: 1,
+            skill: 2,
+            engine_window: false,
+        }
     }
 }
 
@@ -190,7 +195,12 @@ impl Doom {
             let _ = child.kill();
         })?;
         let log = log.map(std::fs::File::create).transpose()?;
-        Ok(Doom { child, conn, port, log })
+        Ok(Doom {
+            child,
+            conn,
+            port,
+            log,
+        })
     }
 
     /// One request/response over the kept-alive connection.
@@ -249,12 +259,20 @@ impl Doom {
         self.call("GET", "/api/map", None)
     }
 
+    /// The route's own working: the player's cell, its eight neighbours, and,
+    /// when the player is standing somewhere the distance field never reached,
+    /// what lies between here and the part of the level that the route does
+    /// understand. Only fetched when a run has gone wrong, since
+    /// it costs a round trip and answers a question nobody asks while the
+    /// player is making progress.
+    pub fn route(&mut self) -> std::io::Result<String> {
+        self.call("GET", "/api/route", None)
+    }
+
     /// Put a thing on the floor `distance` units away, `bearing` degrees
     /// clockwise from where the player is facing.
     pub fn spawn(&mut self, kind: &str, distance: i32, bearing: i32) -> std::io::Result<String> {
-        let body = format!(
-            "{{\"type\":\"{kind}\",\"distance\":{distance},\"bearing\":{bearing}}}"
-        );
+        let body = format!("{{\"type\":\"{kind}\",\"distance\":{distance},\"bearing\":{bearing}}}");
         self.call("POST", "/api/world/objects", Some(&body))
     }
 }
@@ -324,10 +342,14 @@ fn read_response(conn: &mut TcpStream) -> std::io::Result<String> {
         .lines()
         .find_map(|l| {
             let (k, v) = l.split_once(':')?;
-            k.eq_ignore_ascii_case("content-length").then(|| v.trim().parse().ok())?
+            k.eq_ignore_ascii_case("content-length")
+                .then(|| v.trim().parse().ok())?
         })
         .ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, "response has no Content-Length")
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "response has no Content-Length",
+            )
         })?;
     while buf.len() < head_end + len {
         let n = conn.read(&mut chunk)?;

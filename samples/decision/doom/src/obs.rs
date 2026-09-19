@@ -350,7 +350,9 @@ pub fn render(state: &State, history: History) -> String {
     if vis.is_empty() {
         let lurking = state.threats.len();
         if lurking > 0 {
-            out.push_str(&format!("No enemy in sight, {lurking} somewhere beyond the walls.\n"));
+            out.push_str(&format!(
+                "No enemy in sight, {lurking} somewhere beyond the walls.\n"
+            ));
         } else {
             out.push_str("No enemy anywhere near.\n");
         }
@@ -467,7 +469,10 @@ pub fn render(state: &State, history: History) -> String {
             history.stuck
         ));
     }
-    out.push_str(&format!(" {} patches of this level explored.\n", history.patches));
+    out.push_str(&format!(
+        " {} patches of this level explored.\n",
+        history.patches
+    ));
 
     if !state.events.is_empty() {
         let mut parts: Vec<String> = Vec::new();
@@ -520,8 +525,17 @@ mod tests {
         assert_eq!(s.facing(-12), 78);
 
         let text = render(&s, History::default());
-        for needle in ["health 80", "imp", "12 degrees left", "coming for you", "took 15 damage"] {
-            assert!(text.contains(needle), "rendered text is missing {needle:?}:\n{text}");
+        for needle in [
+            "health 80",
+            "imp",
+            "12 degrees left",
+            "coming for you",
+            "took 15 damage",
+        ] {
+            assert!(
+                text.contains(needle),
+                "rendered text is missing {needle:?}:\n{text}"
+            );
         }
     }
 
@@ -532,9 +546,15 @@ mod tests {
         // policy on a player who is permanently at zero health, and every
         // number in the run would still look plausible.
         let missing = SAMPLE.replace("\"health\":80,", "");
-        assert!(State::parse(&missing).is_err(), "a missing required field must not parse");
+        assert!(
+            State::parse(&missing).is_err(),
+            "a missing required field must not parse"
+        );
 
         let extra = SAMPLE.replace("\"tic\":100,", "\"tic\":100,\"newField\":7,");
-        assert!(State::parse(&extra).is_err(), "an unknown field must not be ignored");
+        assert!(
+            State::parse(&extra).is_err(),
+            "an unknown field must not be ignored"
+        );
     }
 }

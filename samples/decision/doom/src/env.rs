@@ -59,6 +59,7 @@ use crate::action::{self, Option_, Tag};
 use crate::doom::{Config, Doom};
 use crate::frame::{Frame, Map};
 use crate::obs::{self, History, State};
+use crate::report::Progress;
 
 /// What the agent is being told to do this episode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -110,13 +111,27 @@ impl Mission {
             // level; speedrunning wants to cover it faster and cares little
             // about what it meets; surviving would rather sit still, so its
             // bonus is smallest and its damage term largest.
-            Mission::Clear => Weights { kill: 1.5, item: 0.2, hurt: 0.02, exit: 3.0, explore: 0.10 },
-            Mission::Speedrun => {
-                Weights { kill: 0.2, item: 0.1, hurt: 0.02, exit: 15.0, explore: 0.20 }
-            }
-            Mission::Survive => {
-                Weights { kill: 0.3, item: 0.4, hurt: 0.08, exit: 5.0, explore: 0.05 }
-            }
+            Mission::Clear => Weights {
+                kill: 1.5,
+                item: 0.2,
+                hurt: 0.02,
+                exit: 3.0,
+                explore: 0.10,
+            },
+            Mission::Speedrun => Weights {
+                kill: 0.2,
+                item: 0.1,
+                hurt: 0.02,
+                exit: 15.0,
+                explore: 0.20,
+            },
+            Mission::Survive => Weights {
+                kill: 0.3,
+                item: 0.4,
+                hurt: 0.08,
+                exit: 5.0,
+                explore: 0.05,
+            },
         }
     }
 }
@@ -300,6 +315,8 @@ pub struct DoomEnv {
     /// Recent episode outcomes, for deciding when to move the start back.
     recent_wins: std::collections::VecDeque<bool>,
     warned_dropped: bool,
+    /// How this episode has been going, for the line printed when it ends.
+    progress: Progress,
     /// Set when the game itself failed (the process died, the socket broke).
     /// An environment that silently returns a terminal state on an I/O error
     /// teaches the policy that the error was a legal end to an episode.
@@ -334,6 +351,7 @@ impl DoomEnv {
             start_distance: 0,
             recent_wins: std::collections::VecDeque::new(),
             warned_dropped: false,
+            progress: Progress::new(),
             fault: None,
         }
     }
@@ -409,7 +427,9 @@ impl DoomEnv {
             let (bearing, room) = open[(rng.next_u64() % open.len() as u64) as usize];
             let distance = 96 + (rng.next_u64() % (room - 96).max(1) as u64) as i32;
             let kind = ARENA_MONSTERS[(rng.next_u64() % ARENA_MONSTERS.len() as u64) as usize];
-            self.doom.spawn(kind, distance, bearing).map_err(|e| format!("spawn: {e}"))?;
+            self.doom
+                .spawn(kind, distance, bearing)
+                .map_err(|e| format!("spawn: {e}"))?;
         }
         // One tic so the spawns are in the world before the first observation
         // describes it.
@@ -533,7 +553,12 @@ impl DoomEnv {
         if !self.capture_frames {
             return None;
         }
-        match self.doom.frame().map_err(|e| e.to_string()).and_then(|j| Frame::parse(&j)) {
+        match self
+            .doom
+            .frame()
+            .map_err(|e| e.to_string())
+            .and_then(|j| Frame::parse(&j))
+        {
             Ok(f) => Some(f),
             Err(e) => {
                 eprintln!("doom: could not read the framebuffer: {e}");
@@ -605,7 +630,10 @@ impl DoomEnv {
     /// two cannot disagree about what a step is.
     pub fn apply(&mut self, action: usize, probs: Vec<f32>) -> (f32, bool) {
         let Some(opt) = self.opts.get(action).cloned() else {
-            self.fail(format!("the policy chose option {action} of {}", self.opts.len()));
+            self.fail(format!(
+                "the policy chose option {action} of {}",
+                self.opts.len()
+            ));
             return (0.0, true);
         };
         // While recording, the step is run ONE TIC AT A TIME so every rendered
@@ -676,7 +704,10 @@ impl DoomEnv {
             self.state.events = carried;
         }
         self.steps += 1;
-        let pos = (self.state.player.x.unwrap_or(0), self.state.player.y.unwrap_or(0));
+        let pos = (
+            self.state.player.x.unwrap_or(0),
+            self.state.player.y.unwrap_or(0),
+        );
         // 24 map units is about a third of the player's own width, so anything
         // under it over a whole decision is not movement.
         self.stuck = match self.last_pos {
@@ -699,6 +730,7 @@ impl DoomEnv {
             );
             self.warned_dropped = true;
         }
+        self.progress.note(&self.state);
         let (r, extrinsic) = self.reward();
         self.total += r;
         self.extrinsic += extrinsic;
@@ -712,6 +744,29 @@ impl DoomEnv {
             self.note_outcome(won);
         }
         (r, self.state.done)
+    }
+
+    /// One line saying how the episode that just ended ended, and where it
+    /// stopped making progress. See [`crate::report`].
+    pub fn report(&self) -> String {
+        self.progress.report(&self.state.outcome)
+    }
+
+    /// What the route makes of where the player is standing, asked only when
+    /// an episode ended by going nowhere.
+    ///
+    /// A stall is the one outcome the observation cannot explain on its own:
+    /// the route hands out a bearing whatever happens, and a bearing computed
+    /// by falling back to a cell six away looks exactly like one that leads
+    /// somewhere. This is the engine being asked directly, at the spot where
+    /// it went wrong, while the level is still in the state that produced it -
+    /// which is not reproducible afterwards by walking back to the same
+    /// coordinates, because the doors and lifts have moved since.
+    pub fn stall_detail(&mut self) -> Option<String> {
+        if !self.progress.stalled() {
+            return None;
+        }
+        self.doom.route().ok()
     }
 
     pub fn start(&mut self, seed: u64) -> String {
@@ -746,6 +801,7 @@ impl DoomEnv {
         self.visited.clear();
         self.commit = 0;
         self.commit_tag = None;
+        self.progress = Progress::new();
         if self.arena > 0 {
             if let Err(e) = self.build_arena(seed) {
                 self.fail(e);
@@ -780,7 +836,9 @@ impl DoomEnv {
             return false;
         }
         let (cx, cy) = *self.recent.back().expect("non-empty");
-        self.recent.iter().all(|(x, y)| (x - cx).abs() + (y - cy).abs() < CIRCLE_RADIUS)
+        self.recent
+            .iter()
+            .all(|(x, y)| (x - cx).abs() + (y - cy).abs() < CIRCLE_RADIUS)
     }
 
     pub fn scripted(&mut self) -> Option<usize> {
@@ -789,7 +847,12 @@ impl DoomEnv {
         let threat_near = self.state.visible_threats().next().map(|t| t.distance) < Some(600);
         // Close enough that walking past it means taking hits the whole way.
         let in_my_face = self.state.visible_threats().next().map(|t| t.distance) < Some(300);
-        let underfoot = |d: i32| self.state.pickups.iter().any(|p| p.visible && p.distance < d);
+        let underfoot = |d: i32| {
+            self.state
+                .pickups
+                .iter()
+                .any(|p| p.visible && p.distance < d)
+        };
 
         // Standing in slime: anywhere else will do, and the exit route is
         // already computed to avoid it.
@@ -827,7 +890,12 @@ impl DoomEnv {
         // between a teacher that finishes levels and one that does not.
         if hurt_badly && threat_near {
             if let Some(i) = by(Tag::Grab) {
-                if self.state.pickups.iter().any(|p| p.visible && p.distance < 400) {
+                if self
+                    .state
+                    .pickups
+                    .iter()
+                    .any(|p| p.visible && p.distance < 400)
+                {
                     return Some(i);
                 }
             }
@@ -859,7 +927,11 @@ impl DoomEnv {
                 Tag::Attack => threat_near,
                 Tag::Grab => {
                     hurt_badly
-                        || underfoot(if self.mission == Mission::Speedrun { 100 } else { 200 })
+                        || underfoot(if self.mission == Mission::Speedrun {
+                            100
+                        } else {
+                            200
+                        })
                 }
                 // Only when the engine gave a real route. Without one the
                 // option aims down a straight line through walls, and taking
@@ -874,7 +946,10 @@ impl DoomEnv {
                 // their face and then runs; anything further off is not worth
                 // the ammunition.
                 Tag::Exit => {
-                    self.state.exit.as_ref().is_some_and(|e| e.route_bearing.is_some())
+                    self.state
+                        .exit
+                        .as_ref()
+                        .is_some_and(|e| e.route_bearing.is_some())
                         && !(by(Tag::Attack).is_some() && in_my_face)
                 }
                 _ => false,
@@ -896,7 +971,11 @@ impl DoomEnv {
             };
             // Backing away is a last resort: it is how a greedy walker
             // oscillates in place, one step forward and one step back forever.
-            let score = if o.tag == Tag::Retreat { score / 4 } else { score };
+            let score = if o.tag == Tag::Retreat {
+                score / 4
+            } else {
+                score
+            };
             if score > 0 && best.is_none_or(|(s, _)| score > s) {
                 best = Some((score, i));
             }
@@ -937,7 +1016,11 @@ impl DoomEnv {
                 ways.push(i);
             }
             ways.extend(
-                self.opts.iter().enumerate().filter(|(_, o)| o.tag == Tag::Explore).map(|(i, _)| i),
+                self.opts
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, o)| o.tag == Tag::Explore)
+                    .map(|(i, _)| i),
             );
             if let Some(i) = by(Tag::Retreat) {
                 ways.push(i);
