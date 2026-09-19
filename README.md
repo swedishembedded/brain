@@ -153,35 +153,36 @@ dog is the one thing sam2 marked, so it is the one thing this leaves alone.
 
 A face pipeline where the last model audits the middle one. SCRFD finds the
 face and its five landmarks, a 4-DOF similarity warp onto those landmarks cuts
-an aligned 512x512 crop (`crates/arcface/src/align.rs`, the same solve
-`arcface embed --align true` runs), CodeFormer restores a degraded copy of it,
-and ArcFace answers the question that decides whether the restoration is
-usable at all: is this still the same person?
+the aligned 512x512 crop CodeFormer expects, CodeFormer restores a degraded
+copy of it, and ArcFace answers the question that decides whether the
+restoration can be used at all: is this still the same person?
 
 ```bash
 $ brain scrfd detect --in image=portrait.png --json
-{"count":1,"faces":[{"bbox":[183.68,92.30,335.61,301.54],"kps":[[221.75,179.17],…],"score":0.899}],…}
+{"count":1,"faces":[{"bbox":[139.20,105.75,374.52,416.26],"kps":[[204.40,224.54],…],"score":0.858}],…}
 
 $ brain codeformer restore_face --w 1.0 --in image=degraded.png --out image=restored.png
 $ brain arcface embed --align false --in image=restored.png --out embedding=restored.bin
 ```
 
-![five aligned faces side by side: the generated original, a 160px JPEG q40 copy of it, and three CodeFormer restorations of that copy at w=0.0, w=0.5 and w=1.0, each labelled with its ArcFace cosine to the original identity](docs/quickstart/img/face-restore.jpg)
+![four aligned faces side by side: a sharp generated original, a copy destroyed to 112px with blur, noise and JPEG q35, and two CodeFormer restorations of that copy at w=0.0 and w=1.0, each labelled with its PSNR and ArcFace cosine against the original](docs/quickstart/img/face-restore.jpg)
 
-`w` is not a quality slider. It decides how much of the output comes from the
-input pixels and how much from CodeFormer's learned prior, and at `w=0` the
-prior wins outright: the middle panel is a sharper, more attractive face than
-the original that belongs to **somebody else**, and it is the panel a demo
-reel would pick. At `w=1.0` the damage is repaired and the person survives it:
-+0.8806, three hundredths below the +0.9159 the compressed input already
-scores, in exchange for detail the compressed input does not have.
+The input is a face destroyed past legibility, and what comes back is sharp and
+is the same man. Both measures agree rather than only the eye: against the
+original, PSNR rises 28.47 -> 29.24 dB and the ArcFace cosine rises
++0.7316 -> +0.7929. The restoration is closer to the truth than the thing it
+was handed, on a pixel measure *and* on an identity measure.
 
-The control that pins the cause down: run `w=0` on the **undamaged** original
-and it still collapses to +0.31. The identity is not lost to the compression,
-it is spent on the prior - so the dial is the thing to set, and ArcFace is
-what lets you set it on evidence rather than on taste. The full grid, three
-damage levels by four `w` values, is in
-[`docs/models/codeformer.md`](docs/models/codeformer.md).
+`w` is what decides that, and it is not a quality slider - it sets how much of
+the output comes from the input pixels versus CodeFormer's learned prior. The
+`w=0.0` panel looks perfectly good and is worse than its own input on both
+counts. Nothing in the picture tells you that; the third model does. Which is
+the whole point of running three: the one that would fool you is not the one
+scoring the result.
+
+The full grid, four damage levels by four `w` values on both measures -
+including the damage threshold below which restoring at all makes things
+worse - is in [`docs/models/codeformer.md`](docs/models/codeformer.md).
 
 Every pixel in that figure came out of this repo: the original is `brain s3dit
 text2image` output, not a photograph of a real person.
