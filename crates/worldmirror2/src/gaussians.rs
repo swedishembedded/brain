@@ -78,7 +78,9 @@ impl Default for AssembleOpts {
 
 /// Read the GS head outputs for all frames and build the host scene.
 /// `frames_chw` = the raw [0,1] input frames (color source). Also returns the
-/// per-gaussian sigmoid merge weights (channel 12) for `splat::prune`.
+/// per-gaussian sigmoid merge weights for `splat::prune` - the same values
+/// the scene's opacities carry, since the merge weight IS the opacity of the
+/// assembled scene.
 pub fn assemble(
     gpu: &Gpu,
     model: &Mirror,
@@ -100,7 +102,17 @@ pub fn assemble(
         for py in 0..height as usize {
             for px in 0..width as usize {
                 let i = py * width as usize + px;
-                let op = sigmoid(gsp[7 * hw + i]);
+                // Channel 11, the learned merge weight, IS the opacity of the
+                // assembled scene - not channel 7, the raw opacity head. The
+                // reference's assembly substitutes it (see
+                // `splat::prune::voxel_merge`, which computes the same thing
+                // as a weighted mean when it merges), and the difference is
+                // not cosmetic: measured on a six-photograph reconstruction
+                // rendered from the camera the model recovered for it, channel
+                // 7 gives 12.5 dB carrying 7% of the photograph's detail, and
+                // channel 11 gives 22.5 dB carrying 47%. Channel 7 renders as
+                // a milky smear.
+                let op = sigmoid(gsp[11 * hw + i]);
                 if op < opts.min_opacity {
                     continue;
                 }
@@ -132,7 +144,7 @@ pub fn assemble(
                     gsp[9 * hw + i] * SH_C0 + rgb[hw + i],
                     gsp[10 * hw + i] * SH_C0 + rgb[2 * hw + i],
                 ]);
-                weights.push(sigmoid(gsp[11 * hw + i]));
+                weights.push(op);
             }
         }
     }
