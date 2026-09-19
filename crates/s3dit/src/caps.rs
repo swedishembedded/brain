@@ -36,7 +36,7 @@ fn cap_len_param() -> ParamSpec {
 
 /// Shared generation params (steps / guidance / seed / size).
 fn gen_params(spec: ActionSpec) -> ActionSpec {
-    spec.param(ParamSpec::new("steps", ParamType::Int, "denoising steps (Turbo≈8)").default(json!(8)).min(1.0).max(150.0).step(1.0))
+    spec.param(ParamSpec::new("steps", ParamType::Int, "denoising steps (Turbo≈8)").default(json!(8)).min(1.0).max(crate::pipeline::MAX_STEPS as f64).step(1.0))
         .param(ParamSpec::new("guidance", ParamType::Float, "classifier-free guidance scale; 0 disables (Turbo default)").default(json!(0.0)).min(0.0).max(30.0).step(0.1))
         .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (omit for random)"))
         .param(ParamSpec::new("width", ParamType::Int, "output width, px").default(json!(1024)).min(64.0).max(2048.0).step(8.0))

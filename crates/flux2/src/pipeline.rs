@@ -2294,6 +2294,10 @@ fn denoise_group_on<D: Denoiser>(
         let (lh, lw) = (layout.lh, layout.lw);
         let n_gen = layout.n_gen();
         let steps = r.steps_for(cfg.distilled);
+        if steps > MAX_STEPS as usize {
+            out[i] = Err(format!("steps {steps} exceeds the maximum of {MAX_STEPS} denoising steps"));
+            continue;
+        }
         progress(0, max_steps_hint + 2, "encoding prompt");
         let ctx = d.encode_prompt(&r.prompt);
         let cf = !cfg.distilled && o.guidance > 1.0;
@@ -2574,6 +2578,16 @@ pub fn resolved_steps(opts: &GenOpts, distilled: bool) -> u32 {
     }
     opts.steps.unwrap_or(if distilled { 4 } else { 50 })
 }
+
+/// Denoising-step ceiling, enforced in [`generate_batch_on`] before a request
+/// enters the sampling loop. Not invented here: it is the exact `.max(150.0)`
+/// `crates/flux2/src/caps.rs`'s own `steps` `ParamSpec` already declares (and
+/// `crates/s3dit/src/pipeline.rs`'s own `MAX_STEPS` mirrors) - previously only
+/// advertised in the capability manifest for discovery UIs
+/// (`capability::ActionSpec::validate` never reads `ParamSpec::min`/`max`),
+/// never actually checked, so `steps(u32::MAX)` reached the sampling loop
+/// unrefused.
+pub const MAX_STEPS: u32 = 150;
 
 impl BatchRequest {
     /// Resolved step count ([`resolved_steps`] on this request's options).
@@ -3717,6 +3731,24 @@ mod tests {
             &diffusion::scheduler::klein_sigmas(12, n_gen)[..12],
             "a base variant honours the caller's step count"
         );
+    }
+
+    #[test]
+    fn an_absurd_step_count_is_refused_before_the_sampling_loop() {
+        let (w, h) = (128u32, 96u32);
+        // A base variant so the caller's count reaches `resolved_steps`
+        // unclamped by the distilled 4-step lock - the same shape the
+        // previous test uses to prove the count stands.
+        let base = Stub { cfg: Flux2Config { distilled: false, ..Flux2Config::klein_4b() }, seen: Default::default(), sigmas: Default::default() };
+        let req = BatchRequest {
+            prompt: "a staged bedroom".into(),
+            refs: vec![source(h, w)],
+            opts: GenOpts { width: w, height: h, steps: Some(MAX_STEPS + 1), guidance: 1.0, ..GenOpts::default() },
+            cancel: Default::default(),
+        };
+        let err = generate_batch_on(&base, std::slice::from_ref(&req), &mut |_, _, _| {}).pop().unwrap().expect_err("an over-the-ceiling step count must be refused");
+        assert!(err.contains("exceeds the maximum"), "expected the MAX_STEPS message, got {err:?}");
+        assert!(base.sigmas.borrow().is_empty(), "refused before the sampling loop ever ran");
     }
 
     /// A `w x h` interleaved-RGB `[0,1]` horizontal ramp. Smooth, so a correct

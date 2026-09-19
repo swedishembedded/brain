@@ -159,15 +159,32 @@ for why.
       image_pipeline` (6 passed, including both backends' own dispatch
       tests) and `cargo clippy -p brain --features full --all-targets`
       (clean on both touched files) confirm no behavior change.
-- [ ] `steps` has no upper bound anywhere in the call chain, on either
-      backend: neither `ImageGenerationOptions`, nor flux2's
-      `resolved_steps`, nor s3dit's `HotPipeline::generate` (which only
-      floors it to `.max(1)`) refuses an absurd value -- a caller who passes
-      `steps(u32::MAX)` gets a denoise loop that many iterations long, not a
-      clean refusal. Pre-existing in both backends' own APIs; deliberately
-      not given an SDK-only clamp here, which would only hide the same gap
-      from every other caller of `flux2`/`s3dit` directly. Recorded in
-      detail in the security-audit section below.
+- [x] `steps` has no upper bound anywhere in the call chain: done, fixed in
+      BOTH backends directly (not with an SDK-only clamp, which would have
+      hidden the gap from every other caller of `flux2`/`s3dit`). Neither
+      backend's own capability manifest declares this as decorative:
+      `crates/flux2/src/caps.rs` and `crates/s3dit/src/caps.rs` each already
+      independently declared `.max(150.0)` on the `steps` `ParamSpec` --
+      `capability::ActionSpec::validate` never reads `ParamSpec::min`/`max`
+      (only discovery UIs do), so that ceiling was never actually enforced.
+      `150` is therefore not invented here; it is the one number both
+      backends had already converged on. `flux2::pipeline::MAX_STEPS` and
+      `s3dit::pipeline::MAX_STEPS` (both `pub const 150`) are now the single
+      source of truth each crate's own `caps.rs` reads via
+      `crate::pipeline::MAX_STEPS as f64` instead of a repeated literal, and
+      each backend's own `generate` path refuses a request over the ceiling
+      BEFORE the sampling loop: flux2's `generate_batch_on` per-request (same
+      `out[i] = Err(..); continue` convention `encode_image` failures already
+      use), s3dit's new `check_steps` free function (mirrors the sibling
+      `check_cap_len`/`fit_caption` shape, called from `HotPipeline::generate`
+      right after the existing `.max(1)` floor). Proven with
+      `an_absurd_step_count_is_refused_before_the_sampling_loop` (flux2, via
+      the existing `Stub` denoiser harness -- asserts the stub's sampling
+      loop never ran) and `an_absurd_step_count_is_refused_by_name` (s3dit,
+      a pure unit test of `check_steps`). `capability::ActionSpec::validate`
+      itself still does not generically enforce `min`/`max` for every
+      `ParamSpec` -- a separate, cross-cutting gap affecting every model with
+      a ranged param, not scoped into this fix.
 - [ ] Prompt-length handling is INCONSISTENT between the two backends this
       one SDK type now fronts: flux2 silently TRUNCATES an overlong prompt
       to `cfg.txt_len` tokens (an `eprintln!` warning, never an `Err`,
@@ -199,10 +216,10 @@ The sections that DO apply, with real attention paid:
   pre-existing checks in each backend's own code (flux2's fixed build-time
   forward-token ceiling; s3dit's `check_build_shape` RoPE-table
   addressable-size check, now reached at `ImagePipelineBuilder::size` time)
-  -- verified, not assumed, by reading both call paths. `steps` has NO
-  upper bound in either backend (see "Not yet done" above) -- a real,
-  pre-existing gap this milestone deliberately did not paper over with an
-  SDK-only clamp, because that would mask the same gap from `flux2`/`s3dit`
+  -- verified, not assumed, by reading both call paths. `steps` is now
+  bounded in both backends themselves (`flux2::pipeline::MAX_STEPS`/
+  `s3dit::pipeline::MAX_STEPS`, see "Not yet done" above for detail) rather
+  than with an SDK-only clamp, so the fix also covers `flux2`/`s3dit`
   callers who bypass this crate entirely. Prompt length is bounded, but
   INCONSISTENTLY (flux2 truncates silently; s3dit refuses cleanly) -- also
   recorded above rather than fixed here, since the fix belongs in flux2's

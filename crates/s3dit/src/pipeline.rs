@@ -58,6 +58,16 @@ const ENCODER_GPU8_BYTES: u64 = 10 << 30;
 /// 64 -> 512 grows the quadratic joint sequence by 11%, not by a multiple.
 pub const DEFAULT_CAP_LEN: u32 = 512;
 
+/// Denoising-step ceiling, enforced in [`HotPipeline::generate`] before the
+/// sampling loop. Not invented here: it is the exact `.max(150.0)`
+/// `crates/s3dit/src/caps.rs`'s own `steps` `ParamSpec` already declares (and
+/// `crates/flux2/src/pipeline.rs`'s own `MAX_STEPS` mirrors) - previously only
+/// advertised in the capability manifest for discovery UIs
+/// (`capability::ActionSpec::validate` never reads `ParamSpec::min`/`max`),
+/// never actually checked, so `steps(u32::MAX)` reached the sampling loop
+/// unrefused.
+pub const MAX_STEPS: u32 = 150;
+
 /// The largest caption capacity `cfg` can be built for over `n_frames` latent
 /// frames.
 ///
@@ -162,6 +172,14 @@ pub fn fit_caption(mut tokens: Vec<u32>, cap_len: usize) -> Result<(Vec<u32>, us
     let content = tokens.len();
     tokens.resize(cap_len, PAD_TOKEN);
     Ok((tokens, content))
+}
+
+/// Reject a step count past [`MAX_STEPS`], before the sampling loop runs.
+pub fn check_steps(steps: u32) -> Result<(), String> {
+    if steps > MAX_STEPS {
+        return Err(format!("steps {steps} exceeds the maximum of {MAX_STEPS} denoising steps"));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug)]
@@ -968,6 +986,7 @@ impl HotPipeline {
     /// `Err("cancelled")` (pass an unarmed `Default` token to run uninterrupted).
     pub fn generate(&self, prompt: &str, seed: u64, steps: u32, cancel: &capability::CancelToken, mut progress: impl FnMut(u32, u32, &str)) -> Result<Image, String> {
         let steps = steps.max(1);
+        check_steps(steps)?;
         let total = steps + 2;
 
         // 1. tokenize, then fit to the built capacity -- masked-padded when it
@@ -1613,6 +1632,15 @@ mod caption_capacity_tests {
         // Exactly at capacity is not an overflow: no padding, no refusal.
         let (ids, content) = fit_caption(vec![1, 2, 3], 3).unwrap();
         assert_eq!((ids.len(), content), (3, 3));
+    }
+
+    #[test]
+    fn an_absurd_step_count_is_refused_by_name() {
+        let err = check_steps(MAX_STEPS + 1).unwrap_err();
+        for needle in [&(MAX_STEPS + 1).to_string(), &MAX_STEPS.to_string()] {
+            assert!(err.contains(needle.as_str()), "refusal must name {needle}: {err}");
+        }
+        assert!(check_steps(MAX_STEPS).is_ok(), "exactly at the ceiling is not an overflow");
     }
 
     /// The default capacity has to fit the prompts this model is actually
