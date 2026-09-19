@@ -45,10 +45,8 @@ brain worldmirror2 demo --weights out/mirror.safetensors --images photos/
 ## What it produces
 
 Four hand-held photographs of one object, with no poses, no calibration and no
-structure-from-motion step, and four rendered views from camera positions
-**between** the ones it recovered - viewpoints no photograph was taken from:
-
-![top row: four photographs of a pair of headphones on a desk from different angles; bottom row: four rendered views of the reconstructed 3D scene from viewpoints between the recovered cameras](../quickstart/img/worldmirror2-headphones.jpg)
+structure-from-motion step, in; a Gaussian-splat scene and the camera each
+photograph was taken from, out:
 
 ```console
 $ brain worldmirror2 infer --weights mirror.safetensors --images views/ --maps --out scene

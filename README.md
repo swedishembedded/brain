@@ -261,27 +261,6 @@ Brain trains and runs neural networks from scratch, in Rust.
 
 A word-for-word match of the sentence rendered into `doc.png`.
 
-### Photographs to a 3D scene
-
-Four hand-held photos of one object - no poses, no calibration, no
-structure-from-motion - in, a Gaussian-splat scene out, in one feed-forward
-pass:
-
-```bash
-$ brain worldmirror2 infer --weights mirror.safetensors --images views/ --out scene
-forward + assembly: 99.2s, 812224 gaussians
-
-$ brain splat render scene/scene.ply --eye 0.53,-0.28,0.12 --target 0.02,-0.03,1.02 --out view.ppm
-scene/scene.ply: 812224 gaussians -> view.ppm (640x480, tiled, 1496463 isects, 195 ms)
-```
-
-The bottom row is rendered from camera positions **between** the ones the model
-recovered, so none of them is a photograph played back. It is sharp where the
-four cameras saw the object and smears where they did not, which is what a
-feed-forward reconstruction from four views honestly looks like -
-[`splat fit`](docs/models/splat.md) optimises a scene further when you need
-arbitrary viewpoints.
-
 ### A connectome, running
 
 Not a checkpoint port. A real *Drosophila* nervous system, reconstructed from
