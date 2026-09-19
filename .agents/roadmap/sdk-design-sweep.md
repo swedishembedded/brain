@@ -633,6 +633,28 @@ schema, so these tests prove construction through checkpoint-open and
 config-parse, then a clean `Error::MissingArgument` at the tokenizer step -
 never reaching the heavier `Qwen::load_inference` call, and never a panic.
 
+**Closed later, in the same session as `.agents/roadmap/sdk.md`'s "Full
+end-to-end generation test coverage" investigation**:
+`QwenBpe::from_json_bytes` turned out to already accept arbitrary JSON bytes
+- the missing piece was never a constructor, only a fixture nobody had
+written. `crates/sdk/tests/text_pipeline.rs`'s
+`a_fully_synthetic_checkpoint_and_tokenizer_reach_a_real_generate` builds
+one: a curated 23-entry vocab (`data::bpe::bytes_to_unicode()`-mapped, one
+id per `QwenConfig::tiny()` lm_head row, covering exactly the one test
+prompt) plus a real `param_list()`-driven tiny checkpoint (the same
+`(name, numel)`-manifest discipline `Flux2Config::tensor_manifest()` uses),
+and reaches a genuine `Qwen::load_inference` -> `generate_kv_stream` forward
+pass end to end, confirmed running on this box's real GPU
+(`adapter: Intel(R) Arc(tm) Graphics (MTL)`, printed by the test itself).
+This is `TextGenerationPipeline`'s first real end-to-end
+`from_pretrained -> generate -> inspect the result` test, the same
+`sdk-design.md` rule 14 aspiration `RestorePipeline`/`UpscalePipeline`
+already met (Phase 2.5/2.7) - and both fixture helpers
+(`tiny_tokenizer_json`/`tiny_qwen3_checkpoint`) are reusable as-is by
+`crates/sdk/tests/image_pipeline.rs`'s own still-open gap, since flux2/s3dit
+both embed a qwen3-family text encoder in the SAME tensor-naming/tokenizer
+format - see that bullet's own scoped plan in `sdk.md`.
+
 **Not done, tracked for later**: kronos/timesfm3-style model-store
 resolution (needs `qwen3::spec::Qwen3Spec` first, see above); CLI migration
 (the SIX qwen-family CLI files - `qwen_cli.rs`/`qwen35_cli.rs`/

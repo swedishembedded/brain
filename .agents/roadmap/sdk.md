@@ -49,6 +49,96 @@ for why.
       that real, pre-existing weight-size ceiling, then assert a clean
       `Error::Backend`; real success is exercised only by each backend's own
       `#[ignore]`-gated real-checkpoint tests elsewhere in the workspace.
+
+      **Scoped while investigating this milestone; (1) and (2) below are now
+      DONE, landed as their own commit** - splits into independently-landable
+      pieces, several closer to done than they looked:
+
+      1. **[x] Both backends' text encoders share ONE real blocker, already
+         named in `crates/sdk/tests/text_pipeline.rs`'s own module doc**:
+         `data::qwen_tokenizer::QwenBpe` has no synthetic/in-memory
+         constructor - but `QwenBpe::from_json_bytes` already accepts
+         ARBITRARY JSON bytes (confirmed by reading it), and a miss during
+         BPE encoding is silently DROPPED, never a panic
+         (`encode_piece`'s own comment: "a miss cannot occur for a complete
+         byte-level vocab; drop it rather than emitting an UNK"). **Closed
+         narrower than first scoped, and better for it**: rather than all 256
+         `bytes_to_unicode()` bytes, a 23-entry vocab exactly matching
+         `QwenConfig::tiny()`'s own lm_head width (one id per byte in
+         `'a'..='w'`, covering one curated test prompt) is enough - complete
+         for what the test needs, not universal, the same scoping judgment
+         `model_smoke.rs`'s own tiny configs already use elsewhere in this
+         campaign. No ChatML specials needed either: `.chat(false)` sends the
+         prompt verbatim.
+      2. **[x] A real forward-capable tiny Qwen3 weights fixture, the
+         genuinely new tracing task**: `qwen3::model` has no
+         `tensor_manifest()`-style enumerator under that name, but
+         `QwenConfig::param_list()` (`crates/qwen3/src/config.rs:448`) already
+         IS exactly that - `(name, numel)` pairs covering every tensor
+         `Qwen::new_impl`'s `ParamStore::new_src` reads, found by tracing
+         `new_impl` rather than assuming no such list existed. `param_list()`
+         called on the SAME `QwenConfig::tiny()` `QwenConfig::from_json`'s
+         `{}`-header default already resolves to (Phase 2.2's own fixture)
+         means the header and the tensor set cannot drift apart by
+         construction.
+
+         Both landed together in `crates/sdk/tests/text_pipeline.rs`'s
+         `a_fully_synthetic_checkpoint_and_tokenizer_reach_a_real_generate` -
+         `TextGenerationPipeline`'s first real end-to-end
+         `from_pretrained -> generate -> inspect the result` test, confirmed
+         running a real forward pass on this box's actual GPU. Full detail
+         and the "why closed narrower" reasoning: `sdk-design-sweep.md`'s
+         Phase 2.2 section, "Closed later" addendum. The two fixture helpers
+         (`tiny_tokenizer_json`/`tiny_qwen3_checkpoint`) are reusable as-is
+         for flux2/s3dit's own text-encoder fixture below, since both embed a
+         qwen3-family text encoder in the same tensor-naming/tokenizer
+         format - NOT yet done for either backend (items 3/4 below are still
+         open; the shared building block is what changed, not the image
+         gap's own status).
+      3. **flux2's own DiT/VAE fixture is otherwise mechanical**:
+         `Flux2Config` is fully `pub` and `Pipeline::build_with(cfg, paths,
+         ...)` already accepts an arbitrary one - confirmed nothing in
+         `crates/flux2` needs new code for the DiT half, `model_smoke.rs`'s
+         `cfg.tensor_manifest()` fill-loop is the exact pattern, just never
+         written to a safetensors FILE and driven through the full
+         `Paths`-based `build_with` (every existing use calls
+         `Flux2Model::new` directly). The VAE fixture (needs
+         `bn.running_mean`/`bn.running_var` plus its own tensor set) is
+         untraced. **Reaching this through crates/sdk's OWN public API
+         needs one real design call**: `Flux2Config::from_name`'s 4 names
+         are the only entry point a `capability::Assembly`'s `variant`
+         string can reach, and `.agents/rules/sdk-design.md`'s own review
+         checklist forbids a backend-specific config type crossing the
+         PUBLIC boundary - so a 5th, real public variant name is out. The
+         escape that avoids the conflict entirely: a `test-fixtures`
+         Cargo feature on `brain-flux2` (default off), gating one new arm on
+         `from_name`, enabled only from `crates/sdk`'s own
+         `[dev-dependencies]` entry for `brain-flux2` - invisible to any
+         normal (non-dev, non-test) build of anything depending on
+         `crates/sdk` as a library, including `brain-cli`'s release binary
+         (dev-dependency features never reach a crate's own downstream
+         consumers, only that crate's own test/example targets).
+      4. **s3dit needs real (small) code, not just a fixture**:
+         `s3dit::import::dit_config_from_shapes` (derives a `ZImageConfig`
+         from a checkpoint's own tensor shapes) and
+         `qwen3::import::config_from_hf` (derives an arbitrary `QwenConfig`
+         from a HF `config.json`) already exist, used only by the
+         GGUF-import/conversion tooling - `s3dit::pipeline::dit_config` and
+         the inline `QwenConfig::qwen3_4b()` call sites never call either.
+         Wiring them in (read `<dit_dir>/config.json`/`<te>/config.json`
+         when present, fall back to `turbo()`/`qwen3_4b()` when absent - so
+         the real shipped Z-Image-Turbo checkpoint, which does not ship
+         these files, keeps its current behavior unchanged) is the same
+         class of change as this session's `check_steps`/`check_prompt_
+         length` extractions, not a design decision.
+
+      None of the four needs a product decision that blocks starting; (1) and
+      (2), now done, were the highest-leverage first step since closing them
+      unblocked `TextGenerationPipeline`'s own real-`.generate()` gap
+      immediately and leaves reusable fixture helpers for (3)/(4)'s own
+      text-encoder half. (3) and (4) remain open: flux2's DiT/VAE fixture
+      plus the `test-fixtures` feature-gate design, and s3dit's
+      `dit_config`/`config_from_hf` wiring.
 - [ ] Adapters via store `owner/name` refs - bigger than it first looked;
       re-diagnosed while scoping it as a Phase item, not mechanical wiring.
       The model store's adapter convention

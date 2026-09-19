@@ -19,21 +19,27 @@
 //! named error rather than silently falling back to "not found" the way a
 //! genuinely-missing local path does.
 //!
-//! ## Why this stops short of a successful `.generate(...)`
+//! ## Why this stops short of a successful `.generate(...)` -- most of it, not all of it
 //!
 //! `QwenConfig::from_json`'s own defaults happen to equal `QwenConfig::tiny()`
 //! exactly (both default to `vocab: 23, n_layers: 2, d_model: 16, ...`), so
 //! an empty `{}` config header is enough to prove the checkpoint opens and
 //! parses - genuinely cheaper than `ImagePipeline`'s fixtures, which need
-//! real classifiable tensor shapes. What stays out of reach is the
-//! TOKENIZER: `data::qwen_tokenizer::QwenBpe` has no synthetic/in-memory
-//! constructor, only `from_file`/`from_dir`/`from_gguf`/`from_json_bytes`
-//! reading a real HF `tokenizer.json` schema (vocab map, merges, chat
-//! template) - reproducing a valid minimal one is a real, separate fixture
-//! project this milestone does not take on. So these tests prove
-//! construction through checkpoint-open and config-parse, then a clean,
+//! real classifiable tensor shapes. Most tests below stop there: a clean,
 //! named `Error::MissingArgument` at the tokenizer-resolution step - never a
 //! panic, and never reaching the (much heavier) `Qwen::load_inference` call.
+//!
+//! [`a_fully_synthetic_checkpoint_and_tokenizer_reach_a_real_generate`] goes
+//! all the way, closing the gap this doc used to describe as out of reach:
+//! `QwenBpe::from_json_bytes` already accepts ARBITRARY JSON bytes (it was
+//! never missing a constructor, just a fixture nobody had written), and
+//! `QwenConfig::tiny()`'s own `param_list()` (`(name, numel)` pairs, the same
+//! discipline `Flux2Config::tensor_manifest()` uses) is a complete,
+//! mechanical recipe for a real, forward-capable checkpoint at 23-token
+//! vocab / 2-layer / 16-dim scale. See that test's own doc for the fixture
+//! design (a curated small vocab, not a universal one - reproducing an HF
+//! tokenizer.json byte-for-byte is still out of scope, this only needs to
+//! cover the one prompt under test).
 
 use std::path::{Path, PathBuf};
 
@@ -201,4 +207,82 @@ fn download_policy_offline_never_touches_the_network() {
     std::fs::remove_dir_all(&root).ok();
 
     assert!(matches!(err, brain::Error::Missing(_)), "Offline must never attempt a fetch, got {err:?}");
+}
+
+/// A minimal, COMPLETE (for this one prompt, not universal text) tokenizer:
+/// every byte of `a_prompt_within_vocab` maps to a distinct id in
+/// `0..QwenConfig::tiny().vocab` (23), so the decode side can also round-trip
+/// every id the tiny model's 23-wide lm_head can ever sample - not just the
+/// prompt's own characters. `data::bpe::bytes_to_unicode()` is the SAME
+/// byte<->char table `QwenBpe::encode_piece` looks up through, so a vocab key
+/// built any other way (e.g. the literal ASCII byte) would silently miss on
+/// every lookup (see [`data::qwen_tokenizer::QwenBpe`]'s own "a miss ... drop
+/// it" contract - the failure mode would be an empty encode, not a panic, so
+/// this is worth getting right on purpose rather than debugging it by
+/// symptom).
+const VOCAB_LETTERS: std::ops::RangeInclusive<u8> = b'a'..=b'w'; // 23 letters
+const PROMPT_WITHIN_VOCAB: &str = "cabbage"; // every char in 'a'..='w'
+
+fn tiny_tokenizer_json() -> serde_json::Value {
+    let byte_encoder = data::bpe::bytes_to_unicode();
+    let vocab: serde_json::Map<String, serde_json::Value> = VOCAB_LETTERS
+        .enumerate()
+        .map(|(id, b)| (byte_encoder[b as usize].to_string(), serde_json::json!(id as u32)))
+        .collect();
+    assert_eq!(vocab.len(), qwen3::QwenConfig::tiny().vocab as usize, "the vocab must exactly cover the tiny config's lm_head width");
+    serde_json::json!({ "model": { "vocab": vocab, "merges": [] } })
+}
+
+/// A real, forward-capable `QwenConfig::tiny()` checkpoint: every tensor
+/// `param_list()` names, filled with small deterministic non-constant values
+/// (the same fill `crates/flux2/tests/model_smoke.rs` uses for its own
+/// from-scratch synthetic DiT) - not all-zero, so a degenerate all-equal
+/// softmax cannot mask a real indexing bug. The `{}` header is deliberate,
+/// not a placeholder: `QwenConfig::from_json`'s own defaults already equal
+/// `QwenConfig::tiny()` exactly (this file's module doc), so `param_list()`
+/// called on that SAME `tiny()` is guaranteed to match what `load_inference`
+/// reads back, with no risk of the header and the tensor set drifting apart.
+fn tiny_qwen3_checkpoint(tag: &str) -> Scratch {
+    static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("brain-sdk-text-pipeline-real-{tag}-{}-{n}.safetensors", std::process::id()));
+    let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = qwen3::QwenConfig::tiny()
+        .param_list()
+        .into_iter()
+        .map(|(name, numel)| {
+            let data: Vec<f32> = (0..numel).map(|i| ((i % 13) as f32 - 6.0) * 0.01).collect();
+            (name, vec![numel as u64], data)
+        })
+        .collect();
+    checkpoint::st::save_safetensors(path.to_str().unwrap(), &tensors, &serde_json::json!({}), None).unwrap();
+    Scratch(path)
+}
+
+/// The gap this file's module doc used to call out of reach: resolve ->
+/// open -> parse -> tokenize -> build -> a REAL `generate_kv_stream` forward
+/// pass -> detokenize, entirely on a from-scratch synthetic fixture, no
+/// network and no real checkpoint anywhere. `.chat(false)` sends
+/// `PROMPT_WITHIN_VOCAB` to the model VERBATIM (no ChatML template, so the
+/// fixture tokenizer needs no `<|im_start|>`/`<|im_end|>` specials) - the
+/// output is not meaningful text (every weight is a small synthetic filler
+/// value, not a trained parameter), but every stage between the public SDK
+/// entry point and a real per-token sample runs for real, which is the
+/// thing this test exists to prove reachable at all.
+#[test]
+fn a_fully_synthetic_checkpoint_and_tokenizer_reach_a_real_generate() {
+    let ckpt = tiny_qwen3_checkpoint("real-generate");
+    let tok_path = std::env::temp_dir().join(format!("brain-sdk-text-pipeline-real-generate-tokenizer-{}.json", std::process::id()));
+    std::fs::write(&tok_path, serde_json::to_vec(&tiny_tokenizer_json()).unwrap()).unwrap();
+    let tok_path = Scratch(tok_path);
+
+    let pipe = brain::TextGenerationPipeline::builder(ckpt.to_str().unwrap()).tokenizer(tok_path.to_str().unwrap()).load().expect("a fully-synthetic but complete checkpoint + tokenizer must build");
+
+    let out = pipe
+        .generate_with(PROMPT_WITHIN_VOCAB, brain::TextGenerationOptions::new().chat(false).max_new_tokens(4))
+        .expect("a real forward pass over a synthetic checkpoint must still produce a completion");
+
+    assert_eq!(out.prompt_tokens as usize, PROMPT_WITHIN_VOCAB.len(), "every char of the prompt is a single known vocab entry, so encoding must not drop or merge any of them");
+    assert_eq!(out.completion_tokens, 4, "no eos/stop token exists in this fixture's vocab, so generation must run the full requested budget");
+    assert_eq!(out.finish_reason, "length");
+    assert!(out.text.chars().all(|c| VOCAB_LETTERS.clone().any(|b| b as char == c)), "every decoded char must come from the fixture's own vocab, got {:?}", out.text);
 }
