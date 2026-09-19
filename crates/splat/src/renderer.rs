@@ -297,7 +297,11 @@ impl SplatGrads {
     }
 }
 
-/// Backward scratch (record buffer sized `rec_cap`, default 64·px).
+/// Backward scratch. The record buffers start at `rec_cap` (default 64·px)
+/// and [grow][BwdScratch::reserve_records] to fit whatever the scene actually
+/// emits: how many gaussians each pixel's alpha-composite touches is a
+/// property of the scene and the camera, and nothing knows it until the
+/// forward pass has run.
 pub struct BwdScratch {
     counts_px: DeviceBuffer,
     px_scan: ScanScratch,
@@ -315,27 +319,53 @@ pub struct BwdScratch {
 impl BwdScratch {
     pub fn new(gpu: &Gpu, max_n: usize, max_px: usize, rec_cap: usize) -> BwdScratch {
         let cap = if rec_cap == 0 { (64 * max_px).clamp(1 << 20, 64 << 20) } else { rec_cap };
-        BwdScratch {
+        let mut s = BwdScratch {
             counts_px: gpu.storage(max_px as u64),
             px_scan: ScanScratch::new(gpu, max_px),
-            recs: gpu.storage(10 * cap as u64),
-            rkeys_a: gpu.storage(cap as u64),
-            rvals_a: gpu.storage(cap as u64),
-            rkeys_b: gpu.storage(cap as u64),
-            rvals_b: gpu.storage(cap as u64),
-            rsort: SortScratch::new(gpu, cap),
+            recs: gpu.storage(0),
+            rkeys_a: gpu.storage(0),
+            rvals_a: gpu.storage(0),
+            rkeys_b: gpu.storage(0),
+            rvals_b: gpu.storage(0),
+            rsort: SortScratch::new(gpu, 1),
             granges: gpu.storage(2 * max_n as u64),
             pgrad: gpu.storage(9 * max_n as u64),
-            rec_cap: cap,
+            rec_cap: 0,
+        };
+        s.alloc_records(gpu, cap);
+        s
+    }
+
+    /// Size the record-keyed buffers for exactly `cap` records.
+    fn alloc_records(&mut self, gpu: &Gpu, cap: usize) {
+        self.recs = gpu.storage(10 * cap as u64);
+        self.rkeys_a = gpu.storage(cap as u64);
+        self.rvals_a = gpu.storage(cap as u64);
+        self.rkeys_b = gpu.storage(cap as u64);
+        self.rvals_b = gpu.storage(cap as u64);
+        self.rsort = SortScratch::new(gpu, cap);
+        self.rec_cap = cap;
+    }
+
+    /// Make room for `need` gradient records, reallocating if the current
+    /// buffers are too small. A quarter of headroom keeps a fit whose record
+    /// count drifts upward as gaussians grow from reallocating every step.
+    ///
+    /// Nothing is preserved across a grow, and nothing needs to be: the
+    /// records for one `render_bwd` are written and consumed inside that one
+    /// call.
+    pub fn reserve_records(&mut self, gpu: &Gpu, need: usize) {
+        if need <= self.rec_cap {
+            return;
         }
+        self.alloc_records(gpu, need + need / 4);
     }
 }
 
 impl Renderer {
     /// Backward through the LAST `render()` call: upstream RGBA image grads
     /// `dimg` (`W*H*4`) → accumulate parameter grads. Returns the gradient
-    /// record count (panics if the record capacity would overflow — raise
-    /// `rec_cap` or shrink the fit image).
+    /// record count; `scr` grows to fit it.
     #[allow(clippy::too_many_arguments)]
     pub fn render_bwd(
         &mut self,
@@ -344,7 +374,7 @@ impl Renderer {
         cam: &Camera,
         o: &RenderOpts,
         dimg: &DeviceBuffer,
-        scr: &BwdScratch,
+        scr: &mut BwdScratch,
         grads: &SplatGrads,
     ) -> usize {
         let (n_isects, vals_in_b, tiles_x, tiles_y) =
@@ -364,14 +394,10 @@ impl Renderer {
         record_scan(gpu, &self.ks, &scr.counts_px, px, &scr.px_scan, &mut steps);
         gpu.submit(&[], &steps);
         let n_recs = gpu.read(scr.px_scan.total(), 1)[0].to_bits() as usize;
-        assert!(
-            n_recs <= scr.rec_cap,
-            "gradient records {n_recs} exceed capacity {} — raise rec_cap",
-            scr.rec_cap
-        );
         if n_recs == 0 {
             return 0;
         }
+        scr.reserve_records(gpu, n_recs);
 
         // pass B: emit records, sort by gaussian id, segment-reduce, project VJP
         let mut steps = Vec::new();

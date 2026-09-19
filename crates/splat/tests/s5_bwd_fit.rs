@@ -92,8 +92,8 @@ fn gradcheck_vs_autograd() {
     let grads = SplatGrads::new(&g, base.len());
     g.submit(&[&grads.d_gauss, &grads.d_opac, &grads.d_colors], &[]);
     let dimg: DeviceBuffer = g.storage_init("dimg", &wimg);
-    let bscr = BwdScratch::new(&g, base.len(), px, 0);
-    let nrecs = ren.render_bwd(&g, &gs, &c, &o, &dimg, &bscr, &grads);
+    let mut bscr = BwdScratch::new(&g, base.len(), px, 0);
+    let nrecs = ren.render_bwd(&g, &gs, &c, &o, &dimg, &mut bscr, &grads);
     assert!(nrecs > 0);
     let d_gauss = g.read(&grads.d_gauss, 10 * base.len());
     let d_opac = g.read(&grads.d_opac, base.len());
@@ -188,4 +188,50 @@ fn fit_recovers_perturbed_scene() {
         (mse_end as f64) < mse0 * 0.35,
         "fit did not converge: start {mse0:.6} end {mse_end:.6}"
     );
+}
+
+/// A scene's gradient-record count is a property of the scene and the camera -
+/// how many gaussians each pixel's alpha-composite actually touches - and no
+/// caller knows it before the forward pass has run. So the scratch cannot be
+/// sized correctly up front, and sizing it by a per-pixel guess means a dense
+/// enough scene aborts the whole fit. It must grow to whatever the pass needs,
+/// and the gradients it then produces must be the same ones an amply-sized
+/// scratch would have produced.
+#[test]
+fn a_scratch_too_small_for_the_scene_grows_instead_of_aborting() {
+    let g = Gpu::new_cpu(splat::PIPELINES);
+    let ks = Kernels::at(0);
+    let s = scene(24, 0x9a11);
+    let c = cam();
+    let o = RenderOpts::default();
+    let px = (c.width * c.height) as usize;
+
+    let mut r = Lcg(0x1234);
+    let wimg: Vec<f32> = (0..px * 4).map(|i| if i % 4 == 3 { 0.0 } else { r.next() - 0.5 }).collect();
+
+    let grads_for = |rec_cap: usize| -> (usize, Vec<f32>, Vec<f32>, Vec<f32>) {
+        let mut ren = Renderer::new(&g, ks, s.len(), c.width, c.height, 0);
+        let gs = GpuSplats::upload(&g, &s);
+        ren.render(&g, &gs, &c, &o);
+        let grads = SplatGrads::new(&g, s.len());
+        g.submit(&[&grads.d_gauss, &grads.d_opac, &grads.d_colors], &[]);
+        let dimg: DeviceBuffer = g.storage_init("dimg", &wimg);
+        let mut bscr = BwdScratch::new(&g, s.len(), px, rec_cap);
+        let n = ren.render_bwd(&g, &gs, &c, &o, &dimg, &mut bscr, &grads);
+        (
+            n,
+            g.read(&grads.d_gauss, 10 * s.len()),
+            g.read(&grads.d_opac, s.len()),
+            g.read(&grads.d_colors, 3 * s.len()),
+        )
+    };
+
+    // One record per pixel is far below what 24 overlapping gaussians emit.
+    let (n_small, gauss_small, opac_small, col_small) = grads_for(px);
+    let (n_ample, gauss_ample, opac_ample, col_ample) = grads_for(64 * px);
+    assert!(n_ample > px, "test is vacuous: the scene fits in the undersized scratch ({n_ample} records)");
+    assert_eq!(n_small, n_ample, "record count changed with the scratch size");
+    assert_eq!(gauss_small, gauss_ample, "gaussian grads differ after a grow");
+    assert_eq!(opac_small, opac_ample, "opacity grads differ after a grow");
+    assert_eq!(col_small, col_ample, "color grads differ after a grow");
 }
