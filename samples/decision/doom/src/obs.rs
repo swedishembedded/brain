@@ -46,6 +46,14 @@ pub struct State {
     pub hazards: Vec<Thing>,
     pub pickups: Vec<Thing>,
     pub clearance: Clearance,
+    /// How far away the floor starts burning, in each of the six directions
+    /// that has any. A player sees nukage - it is a different floor, and
+    /// everybody learns within a minute of their first game that the green
+    /// sludge takes health off you. Without this the agent cannot learn it at
+    /// all: nothing distinguishes a corridor from a corridor with a pool in
+    /// it until it is already standing in the pool.
+    #[serde(rename = "burningFloor")]
+    pub burning_floor: Option<Burning>,
     /// Absent on a map with no exit linedef at all.
     pub exit: Option<Exit>,
     /// The nearest place the player has not walked, and the way to it.
@@ -266,6 +274,39 @@ pub struct Spot {
 // load-bearing precisely by existing. Rust's dead-code lint cannot see that,
 // which is what the allow is for.
 #[allow(dead_code)]
+/// Distance to burning floor per direction, where there is any.
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Burning {
+    pub ahead: Option<i32>,
+    pub right: Option<i32>,
+    pub behind: Option<i32>,
+    pub left: Option<i32>,
+    #[serde(rename = "aheadRight")]
+    pub ahead_right: Option<i32>,
+    #[serde(rename = "aheadLeft")]
+    pub ahead_left: Option<i32>,
+}
+
+impl Burning {
+    /// The directions that burn, nearest first, as (word, distance).
+    pub fn ways(&self) -> Vec<(&'static str, i32)> {
+        let mut out: Vec<(&'static str, i32)> = [
+            ("ahead", self.ahead),
+            ("to your right", self.right),
+            ("behind you", self.behind),
+            ("to your left", self.left),
+            ("ahead and right", self.ahead_right),
+            ("ahead and left", self.ahead_left),
+        ]
+        .into_iter()
+        .filter_map(|(w, d)| d.map(|d| (w, d)))
+        .collect();
+        out.sort_by_key(|(_, d)| *d);
+        out
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Event {
@@ -444,6 +485,22 @@ pub fn render(state: &State, history: History) -> String {
         "Room to move: {} ahead, {} left, {} right, {} behind.\n",
         c.ahead, c.left, c.right, c.behind
     ));
+
+    // Where the floor burns, which is a thing a player can see and the single
+    // most reliable way to die on a level like E1M3.
+    if let Some(b) = &state.burning_floor {
+        let ways = b.ways();
+        if !ways.is_empty() {
+            out.push_str("BURNING FLOOR: ");
+            for (i, (word, d)) in ways.iter().take(3).enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(&format!("{d} units {word}"));
+            }
+            out.push_str(".\n");
+        }
+    }
 
     if let Some(e) = &state.exit {
         // The ROUTE, when the engine could compute one - how far the exit is

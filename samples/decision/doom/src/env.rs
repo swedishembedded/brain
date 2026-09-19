@@ -130,10 +130,19 @@ impl Mission {
             // of four over eight iterations, correctly maximising what it had
             // been given. Here the exit is worth about 8.8 against at most 1.9
             // for covering the whole level.
+            // `hurt` is set from arithmetic, not from feel. Nukage does 5
+            // points every 32 tics and a decision is 4 to 6 of them, so a
+            // tick lands about every five and a half decisions: at 0.02 a
+            // decision spent wading cost 0.018 and a decision spent exploring
+            // paid 0.02, and wading through a pool to reach new ground was
+            // therefore FREE. That is not an agent failing to learn that
+            // slime is bad, it is an agent correctly learning that it is not.
+            // At 0.06 a decision in nukage costs 0.055 against an exploration
+            // bonus of at most 0.02, and one in hellslime costs 0.22.
             Mission::Speedrun => Weights {
                 kill: 0.2,
                 item: 0.1,
-                hurt: 0.02,
+                hurt: 0.06,
                 exit: 40.0,
                 explore: 0.02,
             },
@@ -159,6 +168,16 @@ struct Weights {
     /// level's worth of them.
     explore: f32,
 }
+
+/// What the engine calls a floor that hurts, for telling damage from the
+/// ground apart from damage from a monster.
+const BURNING: [&str; 5] = [
+    "nukage",
+    "hellslime",
+    "super hellslime",
+    "a damaging floor",
+    "the exit floor",
+];
 
 /// Paid on death under every mission. Large enough that dying is never the
 /// cheap way to end a bad episode, which it is if the only alternative is a
@@ -289,6 +308,11 @@ pub struct DoomEnv {
     /// The part of the return the game itself scores - see
     /// [`DoomEnv::reward`].
     extrinsic: f32,
+    /// Health lost to burning floor this episode. Scored separately because
+    /// "does it learn that slime is bad" is a question about this number and
+    /// nothing else, and it is invisible in a return that mixes it with
+    /// everything else the episode did.
+    floor_damage: u32,
     steps: u32,
     exited: bool,
     episode: u64,
@@ -362,6 +386,7 @@ impl DoomEnv {
             commit_tag: None,
             total: 0.0,
             extrinsic: 0.0,
+            floor_damage: 0,
             steps: 0,
             exited: false,
             episode: 0,
@@ -472,6 +497,11 @@ impl DoomEnv {
         self.extrinsic
     }
 
+    /// Health lost to burning floor this episode.
+    pub fn floor_damage(&self) -> u32 {
+        self.floor_damage
+    }
+
     /// What the agent has done recently - the part of the observation the game
     /// does not report. See [`History`].
     pub fn history(&self) -> History {
@@ -563,6 +593,13 @@ impl DoomEnv {
             };
         }
         let extrinsic = r;
+        for e in &self.state.events {
+            // The engine names the cause; a floor is the one with no
+            // inflictor, and it names which floor.
+            if e.kind == "hurt" && matches!(e.what.as_deref(), Some(w) if BURNING.contains(&w)) {
+                self.floor_damage += e.amount.max(0) as u32;
+            }
+        }
 
         // The exploration bonus. 1/sqrt(n) rather than first-visit-only so
         // that a patch stays slightly worth revisiting - a strictly one-shot
@@ -829,6 +866,7 @@ impl DoomEnv {
         }
         self.total = 0.0;
         self.extrinsic = 0.0;
+        self.floor_damage = 0;
         self.steps = 0;
         self.exited = false;
         self.last_pos = None;

@@ -378,8 +378,8 @@ fn train(env: DoomEnv, args: &Args) -> Result<(), String> {
 
 fn report(script: &view::Score, learned: &view::Score) {
     println!(
-        "\n{:<10} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8}",
-        "", "return", "game", "kills", "items", "exits", "deaths"
+        "\n{:<10} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8}",
+        "", "return", "game", "kills", "items", "exits", "deaths", "burned"
     );
     script.row("scripted");
     learned.row("policy");

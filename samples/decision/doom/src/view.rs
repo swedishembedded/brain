@@ -79,6 +79,9 @@ impl Timing {
 /// One episode's worth of outcome, for both the policy and the script.
 pub struct Score {
     pub episodes: usize,
+    /// Mean health lost to burning floor per episode. The answer to "has it
+    /// learned that slime is bad", which no other column here contains.
+    pub floor_damage: f32,
     pub mean_return: f32,
     /// The mean of what the GAME scored, with the exploration bonus removed.
     pub mean_game: f32,
@@ -93,7 +96,8 @@ impl Score {
     pub fn print(&self, who: &str) {
         println!(
             "  {who}: {} episodes, return {:+.2} ({:+.2} from the game itself), \
-             {:.1} kills, {:.1} items, {} exits, {} deaths, {:.0} steps",
+             {:.1} kills, {:.1} items, {} exits, {} deaths, {:.0} steps, \
+             {:.1} health burned off by the floor",
             self.episodes,
             self.mean_return,
             self.mean_game,
@@ -101,14 +105,22 @@ impl Score {
             self.items,
             self.exits,
             self.deaths,
-            self.steps
+            self.steps,
+            self.floor_damage
         );
     }
 
     pub fn row(&self, who: &str) {
         println!(
-            "{:<10} {:>8.2} {:>8.2} {:>8.1} {:>8.1} {:>8} {:>8}",
-            who, self.mean_return, self.mean_game, self.kills, self.items, self.exits, self.deaths
+            "{:<10} {:>8.2} {:>8.2} {:>8.1} {:>8.1} {:>8} {:>8} {:>8.1}",
+            who,
+            self.mean_return,
+            self.mean_game,
+            self.kills,
+            self.items,
+            self.exits,
+            self.deaths,
+            self.floor_damage
         );
     }
 }
@@ -125,6 +137,7 @@ struct Tally {
     exits: usize,
     deaths: usize,
     steps: f32,
+    floor: f32,
     n: usize,
 }
 
@@ -139,6 +152,7 @@ impl Tally {
             exits: 0,
             deaths: 0,
             steps: 0.0,
+            floor: 0.0,
             n: 0,
         }
     }
@@ -152,6 +166,7 @@ impl Tally {
         self.exits += usize::from(s.outcome == "exited");
         self.deaths += usize::from(s.outcome == "dead");
         self.steps += steps as f32;
+        self.floor += env.floor_damage() as f32;
         self.n += 1;
         println!(
             "  {} ep {:<2} {total:+7.2}  {}",
@@ -177,6 +192,7 @@ impl Tally {
             exits: self.exits,
             deaths: self.deaths,
             steps: self.steps / n,
+            floor_damage: self.floor / n,
         }
     }
 }
