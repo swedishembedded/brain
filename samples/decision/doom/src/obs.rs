@@ -378,6 +378,16 @@ pub struct History {
 
 /// The observation as the model sees it.
 ///
+/// The observation states FACTS and gives no advice.
+///
+/// It said "a shut door is in the way - open it", "the floor here is burning
+/// you - get off it", "do not walk into it". Every one of those is the answer
+/// to the decision the agent is about to make, written into the question. A
+/// player looking at a door sees a door; nobody tells them to open it. What
+/// to do about a fact is the whole of what there is to learn here, and an
+/// observation that contains it is teaching a lookup table rather than a
+/// policy.
+///
 /// Kept SHORT on purpose. The encoder reads a bounded span, so every line that
 /// is always the same is a line that crowds out one that varies - and what
 /// varies here is the threats, the clearances and the recent events.
@@ -411,7 +421,7 @@ pub fn render(state: &State, history: History) -> String {
                 d.distance,
                 side_word(d.bearing)
             )),
-            None => out.push_str("THE FLOOR HERE IS BURNING YOU - get off it.\n"),
+            None => out.push_str("THE FLOOR HERE IS BURNING YOU.\n"),
         }
     }
 
@@ -492,7 +502,7 @@ pub fn render(state: &State, history: History) -> String {
                 b.width
             ));
         }
-        out.push_str(". Do not walk into it.\n");
+        out.push_str(".\n");
     }
 
     if let Some(e) = &state.exit {
@@ -552,25 +562,25 @@ pub fn render(state: &State, history: History) -> String {
         if let Some(b) = &e.blocked_by {
             out.push_str(&match b.kind.as_str() {
                 "door" => format!(
-                    "A SHUT DOOR is in the way, {} units {} - open it.\n",
+                    "A SHUT DOOR is in the way, {} units {}.\n",
                     b.distance,
                     side_word(b.bearing)
                 ),
                 "thing" => format!(
-                    "A {} IS IN YOUR WAY, {} units {} - {}.\n",
+                    "A {} IS IN YOUR WAY, {} units {}, and it is {}.\n",
                     b.what.as_deref().unwrap_or("something").to_lowercase(),
                     b.distance,
                     side_word(b.bearing),
                     if b.alive == Some(true) {
-                        "kill it"
+                        "alive"
                     } else {
-                        "go round it"
+                        "not alive"
                     }
                 ),
                 "switch" => match &b.switch {
                     Some(sw) => format!(
                         "The way on is SHUT, {} units {}, and pushing on it does nothing: \
-                         a switch {} units {} opens it. Go and press that.\n",
+                         a switch {} units {} opens it.\n",
                         b.distance,
                         side_word(b.bearing),
                         sw.distance,
