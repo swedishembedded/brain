@@ -24,11 +24,17 @@ pub struct FitCfg {
     /// Clamp every step: scales into [min_scale, 0.3], opacity into [ε, 1-ε].
     pub min_scale: f32,
     pub log_every: usize,
+    /// The anti-alias dilation the fit optimizes UNDER. It is part of the
+    /// forward model being inverted, so the optimizer folds compensation for
+    /// it into the gaussians: a scene fitted at one value and rendered at
+    /// another comes out wrong in the direction of the difference. Render with
+    /// the same value.
+    pub eps2d: f32,
 }
 
 impl Default for FitCfg {
     fn default() -> Self {
-        FitCfg { iters: 200, lr: 5e-3, min_scale: 1e-4, log_every: 20 }
+        FitCfg { iters: 200, lr: 5e-3, min_scale: 1e-4, log_every: 20, eps2d: RenderOpts::default().eps2d }
     }
 }
 
@@ -75,7 +81,7 @@ pub fn fit(gpu: &Gpu, ks: Kernels, init: &Splats, targets: &[TargetView], cfg: &
     let dimg = gpu.storage(4 * max_px as u64);
     let mut renderer = Renderer::new(gpu, ks, n, maxw, maxh, 0);
     let mut bscr = BwdScratch::new(gpu, n, max_px, 0);
-    let opts = RenderOpts { mode: Mode::Color, ..Default::default() };
+    let opts = RenderOpts { mode: Mode::Color, eps2d: cfg.eps2d, ..Default::default() };
 
     // `adamw.wgsl` (M6.4) binds param/grad/m/v PLUS a per-tensor `numel`
     // descriptor and a device-resident grad-scale coefficient, and reads its

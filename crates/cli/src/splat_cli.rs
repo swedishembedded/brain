@@ -414,6 +414,10 @@ fn fit_cmd(argv: &[String]) {
     let out = crate::args::strip_out_name_prefix(&a.str_or("--out", "out/fitted.ply"), "scene").to_string();
     let iters = a.usize_or("--iters", 200);
     let lr = a.f32_or("--lr", 5e-3);
+    // Part of the forward model, not a display setting: render the result with
+    // this same value or the optimizer's compensation for it shows up as blur
+    // (rendered higher) or as aliasing (rendered lower).
+    let eps2d = a.f32_or("--eps2d", FitCfg::default().eps2d);
     a.finish();
 
     let cams_json: serde_json::Value =
@@ -468,13 +472,13 @@ fn fit_cmd(argv: &[String]) {
     let g = Gpu::new(splat::PIPELINES);
     let ks = Kernels::at(0);
     println!("fitting {} gaussians against {} views ({} iters, lr {lr}) …", s.len(), targets.len(), iters);
-    let cfg = FitCfg { iters, lr, ..Default::default() };
+    let cfg = FitCfg { iters, lr, eps2d, ..Default::default() };
     let (fitted, mse) = splat_fit(&g, ks, &s, &targets, &cfg, &mut |_it, _mse| true);
     splat::ply::write(&out, &fitted).unwrap_or_else(|e| {
         eprintln!("PLY write failed: {e}");
         std::process::exit(1);
     });
-    println!("{path} -> {out} (final mse {mse:.6})");
+    println!("{path} -> {out} (final mse {mse:.6}, fitted at --eps2d {eps2d}; render it with the same value)");
 }
 
 /// Tight RGB24 bytes → an image file (P6, or PNG when `path` says `.png`).

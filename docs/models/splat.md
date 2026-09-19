@@ -78,6 +78,7 @@ into a scene that actually reproduces your photos.
 | `--cameras <path>` | `fit` | camera poses/intrinsics (default `out/mirror/cameras.json`) |
 | `--images <dir\|list>` | `fit` | target photos, one per camera, in order |
 | `--iters N` | `fit` | optimization steps (default `200`) |
+| `--eps2d X` | `fit` | the dilation to optimize UNDER (default `0.3`); render the result with the same value |
 | `--lr X` | `fit` | learning rate (default `5e-3`) |
 
 ## Sharpness, and the anti-alias dilation
@@ -114,9 +115,36 @@ you the default is the best setting and it is not. That is what
 `splat::quality::sharpness_ratio` exists to measure, and what the
 `s6`/`s7` test gates hold.
 
-For a still frame of a reconstruction, drop it: `--eps2d 0.05` or `0`. Keep
-the default for a moving camera, where the aliasing it prevents is worse than
-the sharpness it costs.
+### Which value to use
+
+**The dilation is part of the forward model `fit` inverts, not a display
+setting.** The optimizer folds compensation for it into the gaussians, so a
+fitted scene has to be rendered at the value it was fitted under. `fit` prints
+that value when it finishes, and both commands take `--eps2d`.
+
+Measured on the same six-photograph reconstruction after a full-resolution
+fit at the 0.3 default:
+
+| rendered at | fraction of the photograph's detail | PSNR |
+|---|---|---|
+| `0.3` (**what the fit used**) | **0.92** | **29.1 dB** |
+| `0.2` | 1.22 | 28.5 dB |
+| `0.1` | 1.67 | 26.3 dB |
+| `0.05` | 1.90 | 24.4 dB |
+
+Above 1.0 is not extra sharpness, it is aliasing: detail the photograph does
+not contain, produced by removing a blur the gaussians were shaped to cancel.
+Both measures agree that matching is correct.
+
+So:
+
+* **fitted scene** - render at the `--eps2d` it was fitted under. Changing it
+  is a way to make the scene wrong, not a quality dial.
+* **raw feed-forward scene, never fitted** - nothing has compensated for
+  anything, so lowering it does recover real detail (0.42 to 0.73 in the table
+  above). `--eps2d 0.05` is a reasonable still-frame setting there.
+* **moving camera** - keep the default. The aliasing it prevents is worse than
+  the sharpness it costs.
 
 ## When a render says CLAMPED
 

@@ -275,6 +275,7 @@ fn fit(inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         lr: inv.get_f64("lr").unwrap_or(5e-3) as f32,
         min_scale: inv.get_f64("min_scale").unwrap_or(1e-4) as f32,
         log_every: 0,
+        ..Default::default()
     };
 
     let gpu = Gpu::new(PIPELINES);
@@ -460,7 +461,7 @@ mod caps_tests {
         for v in init.means.iter_mut() {
             *v += (r.next() - 0.5) * 0.08;
         }
-        let cfg = FitCfg { iters: 40, lr: 5e-3, min_scale: 1e-4, log_every: 0 };
+        let cfg = FitCfg { iters: 40, lr: 5e-3, min_scale: 1e-4, log_every: 0, ..Default::default() };
         (gpu, ks, init, targets, cfg)
     }
 

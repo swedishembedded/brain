@@ -144,3 +144,54 @@ fn the_antialias_dilation_costs_most_of_the_fine_detail() {
          dilation is no longer being applied."
     );
 }
+
+/// The dilation is part of the forward model `fit` inverts, not a display
+/// setting applied afterwards, so the optimizer folds compensation for it into
+/// the gaussians. Rendering a fitted scene at a DIFFERENT value un-does that
+/// compensation: higher comes out blurred, lower comes out aliased.
+///
+/// Measured on a real six-photograph reconstruction fitted under the 0.3
+/// default: rendered at 0.3 it carries 0.92 of the photographs' detail at 29.1
+/// dB; at 0.05 it carries 1.90 - nearly twice the source's high-frequency
+/// content, which is aliasing, not sharpness - at 24.4 dB. Both measures agree
+/// that matching is right, and this pins the coupling so it cannot be
+/// refactored apart.
+#[test]
+fn a_scene_must_be_rendered_at_the_dilation_it_was_fitted_under() {
+    use splat::opt::{fit, FitCfg, TargetView};
+
+    let g = Gpu::new_cpu(splat::PIPELINES);
+    let ks = splat::Kernels::at(0);
+    let (w, h) = (64u32, 64u32);
+    let cam = camera(w, h);
+    let (wu, hu) = (w as usize, h as usize);
+    let img = source(wu, hu);
+    let truth = one_splat_per_pixel(&img, &cam, 0.3);
+
+    const FITTED_AT: f32 = 0.3;
+    let target = TargetView { cam, rgb: render(&g, &truth, &cam, FITTED_AT) };
+
+    // Start from flattened colours so the fit has to put the detail back.
+    let mut init = truth.clone();
+    for v in init.colors.iter_mut() {
+        *v = 0.5 + (*v - 0.5) * 0.3;
+    }
+    let cfg = FitCfg { iters: 120, lr: 1e-2, log_every: 0, eps2d: FITTED_AT, ..Default::default() };
+    let (fitted, _) = fit(&g, ks, &init, std::slice::from_ref(&target), &cfg, &mut |_, _| true);
+
+    let matched = sharpness_ratio(&render(&g, &fitted, &cam, FITTED_AT), &target.rgb, wu, hu);
+    let lower = sharpness_ratio(&render(&g, &fitted, &cam, 0.0), &target.rgb, wu, hu);
+
+    assert!(
+        (matched - 1.0).abs() < (lower - 1.0).abs(),
+        "rendering the fitted scene at the dilation it was fitted under ({FITTED_AT}) gives \
+         {matched:.3}x the target's detail, and rendering it at 0.0 gives {lower:.3}x - which is \
+         CLOSER to 1.0. The fit no longer bakes in compensation for the dilation, so the two are \
+         no longer coupled and `--eps2d` on `fit` and on `render` need not agree."
+    );
+    assert!(
+        (0.75..1.3).contains(&matched),
+        "a scene fitted and rendered at the same dilation reproduces its own target at only \
+         {matched:.3}x its high-frequency content"
+    );
+}
