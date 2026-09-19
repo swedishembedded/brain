@@ -86,3 +86,48 @@ fn a_frozen_encoder_does_not_move_and_the_head_still_learns() {
         "the head learned very differently when frozen: {head_frozen} vs {head_live}"
     );
 }
+
+/// Learning from KEPT features is the same computation as learning from the
+/// text, and the encoder is the part that is skipped.
+///
+/// The whole claim of `Decide::score_keeping` is that a frozen encoder's
+/// output for a state and its options cannot change, so it may be computed
+/// once and reused - which is only worth anything if it is exactly the same
+/// number. An approximation here would be a silent one: training would still
+/// run, still converge to something, and be wrong.
+#[test]
+fn kept_features_score_exactly_as_the_text_does() {
+    let Some(mut m) = tiny_model(true) else { return };
+    let q = question();
+    let state = "hp 40 ammo 2 | demon range 1";
+
+    let from_text = m.score(state, std::slice::from_ref(&q)).expect("score")[0].clone();
+    let (from_keeping, kept) = m.score_keeping(state, &q).expect("score_keeping");
+    assert_eq!(from_text.len(), from_keeping.len());
+    for (a, b) in from_text.iter().zip(&from_keeping) {
+        assert!((a - b).abs() < 1e-5, "scoring twice disagreed: {a} vs {b}");
+    }
+
+    // And the head, run from the kept rows alone, sees the same scores.
+    let mut seen = Vec::new();
+    m.accumulate_kept(&kept, |sc| {
+        seen = sc.to_vec();
+        (0.0, vec![0.0; sc.len()])
+    })
+    .expect("accumulate_kept");
+    assert_eq!(seen.len(), from_text.len());
+    for (a, b) in from_text.iter().zip(&seen) {
+        assert!((a - b).abs() < 1e-4, "the head disagreed with the encoder path: {a} vs {b}");
+    }
+}
+
+/// And it refuses to run when the encoder is NOT frozen, where the features
+/// would be one update stale and the ratio PPO clips would be wrong.
+#[test]
+fn kept_features_are_refused_on_a_trainable_encoder() {
+    let Some(mut m) = tiny_model(true) else { return };
+    let q = question();
+    let (_, kept) = m.score_keeping("hp 40 ammo 2", &q).expect("score_keeping");
+    m.set_encoder_frozen(false);
+    assert!(m.accumulate_kept(&kept, |sc| (0.0, vec![0.0; sc.len()])).is_err());
+}

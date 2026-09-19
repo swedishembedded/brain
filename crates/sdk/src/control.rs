@@ -155,6 +155,10 @@ struct Step {
     advantage: f32,
     /// The encoder's pooled embedding of this observation - the critic's input.
     feature: Vec<f32>,
+    /// The encoder's output for this step, when the encoder is frozen. What
+    /// makes learning from the step cost the head alone rather than another
+    /// six-layer forward pass - see `decide::decide::Features`.
+    kept: Option<decide::decide::Features>,
     /// What the critic should have predicted here.
     value_target: f32,
 }
@@ -254,6 +258,27 @@ impl<E: Env> ControlPipeline<E> {
         Ok((decide::loss::softmax(&scores[0]), self.model.state_embedding()))
     }
 
+    /// As [`Self::policy_and_feature`], and keep the encoder's output so that
+    /// learning from this step does not have to compute it again.
+    ///
+    /// Only worth doing with a frozen encoder, where the output cannot have
+    /// changed by the time it is read - otherwise the features would be one
+    /// update stale and the ratio PPO clips would be wrong.
+    fn policy_keeping(
+        &mut self,
+        observation: &str,
+        options: &[String],
+    ) -> Result<(Vec<f32>, Vec<f32>, Option<decide::decide::Features>)> {
+        if !self.model.encoder_is_frozen() {
+            let (p, f) = self.policy_and_feature(observation, options)?;
+            return Ok((p, f, None));
+        }
+        let q = self.question(options);
+        let (scores, kept) =
+            self.model.score_keeping(observation, &q).map_err(Error::Backend)?;
+        Ok((decide::loss::softmax(&scores), self.model.state_embedding(), Some(kept)))
+    }
+
     /// The highest-probability action - what a deployed agent would take.
     pub fn best(&mut self, observation: &str, options: &[String]) -> Result<(usize, f32)> {
         let p = self.policy(observation, options)?;
@@ -282,7 +307,7 @@ impl<E: Env> ControlPipeline<E> {
                 ended = true;
                 break;
             }
-            let (probs, feature) = self.policy_and_feature(&obs, &options)?;
+            let (probs, feature, kept) = self.policy_keeping(&obs, &options)?;
             let (action, prob) = if greedy {
                 let mut b = 0;
                 for (i, &pi) in probs.iter().enumerate() {
@@ -317,6 +342,7 @@ impl<E: Env> ControlPipeline<E> {
                 old_prob: prob,
                 advantage: 0.0,
                 feature,
+                kept,
                 value_target: 0.0,
             });
             rewards.push(reward);
@@ -539,12 +565,23 @@ impl<E: Env> ControlPipeline<E> {
             self.model.zero_grads();
             for (slot, &i) in chunk.iter().enumerate() {
                 let s = &batch[i];
-                let q = self.question(&s.options);
                 let act = Act { old_prob: s.old_prob, action: s.action, advantage: adv[slot] };
-                loss += self
-                    .model
-                    .accumulate(&s.observation, &q, |sc| policy::choice_loss(sc, &act, cfg))
-                    .map_err(Error::Backend)?;
+                // The encoder's output for this step was kept when the step
+                // was taken, and a frozen encoder cannot have changed it - so
+                // this is the head alone. See `decide::decide::Features` for what
+                // that is worth.
+                loss += match &s.kept {
+                    Some(f) => self
+                        .model
+                        .accumulate_kept(f, |sc| policy::choice_loss(sc, &act, cfg))
+                        .map_err(Error::Backend)?,
+                    None => {
+                        let q = self.question(&s.options);
+                        self.model
+                            .accumulate(&s.observation, &q, |sc| policy::choice_loss(sc, &act, cfg))
+                            .map_err(Error::Backend)?
+                    }
+                };
                 seen += 1;
             }
             // The accumulated sum becomes a mean, so one learning rate means

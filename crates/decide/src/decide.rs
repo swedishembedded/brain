@@ -68,6 +68,10 @@ const STEP_CACHE_ENTRIES: usize = 65536;
 
 pub struct Decide {
     pub enc: Encoder,
+    /// Device-side scratch the kept features are uploaded into. Grown to the
+    /// largest call seen and reused, so learning from a rollout allocates
+    /// once rather than per step.
+    kept: Option<KeptBuf>,
     pub head: Head,
     pub tok: WordPiece,
     pub cfg: EncoderConfig,
@@ -89,6 +93,45 @@ pub struct Request {
     pub cls_rows: Vec<u32>,
     pub arity: Vec<usize>,
     pub state_rows: u32,
+}
+
+/// Device scratch for [`Features`] on their way back to the head.
+struct KeptBuf {
+    buf: gpu_core::DeviceBuffer,
+    len_floats: usize,
+}
+
+/// The encoder's output for one call, kept so that a FROZEN encoder is not
+/// run again to produce a number that cannot have changed.
+///
+/// PPO reads every rollout step once per epoch, so with four epochs the same
+/// observation and the same options were tokenized and pushed through a
+/// six-layer, 22M-parameter encoder five times over - once to act, four more
+/// to learn from having acted - and the encoder is not being trained, so four
+/// of those five runs computed a constant. Measured on this repository's DOOM
+/// sample: the update was 80% of a training iteration's wall clock and the
+/// game itself was 1.5%.
+///
+/// Only the rows the head actually reads are kept: the state's, which it
+/// cross-attends over, and one `[CLS]` row per option. The option's other
+/// tokens have done their work inside the encoder by then.
+#[derive(Clone)]
+pub struct Features {
+    /// `(state_rows + n_slots) * hidden`, state rows first.
+    hidden: Vec<f32>,
+    state_rows: u32,
+    n_slots: u32,
+}
+
+impl Features {
+    /// Floats kept. What caching a rollout costs in memory.
+    pub fn len(&self) -> usize {
+        self.hidden.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.hidden.is_empty()
+    }
 }
 
 /// What [`Decide::repr_snapshot`] hands the confidence signals.
@@ -155,7 +198,8 @@ impl Decide {
             step: 0,
             frozen_encoder: false,
             last_windows: 1,
-            }
+            kept: None,
+        }
     }
 
     /// Tokenize and pack one request, then encode it and score every option.
@@ -260,6 +304,84 @@ impl Decide {
             self.head.set_call(self.enc.hidden_buf(), None, req.state_rows, &req.cls_rows);
         }
         self.head.forward()
+    }
+
+    /// Score one question and keep the encoder's output for it.
+    ///
+    /// The scores are what the caller would have got from [`Self::score`];
+    /// the [`Features`] are what makes learning from this step later cost the
+    /// head alone. See [`Features`].
+    pub fn score_keeping(
+        &mut self,
+        state: &str,
+        question: &Question,
+    ) -> Result<(Vec<f32>, Features), String> {
+        let req = self.pack_request(state, std::slice::from_ref(question))?;
+        let scores = self.run_packed(&req);
+        let h = self.cfg.d_model as usize;
+        let rows = req.packed.ids.len();
+        let slab = self.enc.gpu().read(self.enc.hidden_buf(), rows * h);
+        let mut hidden = Vec::with_capacity((req.state_rows as usize + req.cls_rows.len()) * h);
+        hidden.extend_from_slice(&slab[..req.state_rows as usize * h]);
+        for &r in &req.cls_rows {
+            let at = r as usize * h;
+            hidden.extend_from_slice(&slab[at..at + h]);
+        }
+        Ok((
+            scores,
+            Features {
+                hidden,
+                state_rows: req.state_rows,
+                n_slots: req.cls_rows.len() as u32,
+            },
+        ))
+    }
+
+    /// One accumulation step from kept features, running the head alone.
+    ///
+    /// Exactly what [`Self::accumulate`] computes when the encoder is frozen,
+    /// without the encoder: its output for this state and these options is
+    /// already known and cannot have changed. Refuses to run on a TRAINABLE
+    /// encoder, where the features would be stale by one update.
+    pub fn accumulate_kept(
+        &mut self,
+        f: &Features,
+        objective: impl FnOnce(&[f32]) -> (f32, Vec<f32>),
+    ) -> Result<f32, String> {
+        if !self.frozen_encoder {
+            return Err("accumulate_kept needs a frozen encoder: a trainable one \
+                        changes what the features would have been"
+                .into());
+        }
+        if self.kept.as_ref().is_none_or(|b| b.len_floats < f.hidden.len()) {
+            let cap = f.hidden.len().max(1);
+            self.kept = Some(KeptBuf {
+                buf: self.enc.gpu().buffer(
+                    "kept_hidden",
+                    (cap * 4) as u64,
+                    gpu_core::BufUsage::STORAGE | gpu_core::BufUsage::COPY_DST,
+                ),
+                len_floats: cap,
+            });
+        }
+        let kept = self.kept.as_ref().expect("just allocated");
+        self.enc.gpu().write_f32(&kept.buf, &f.hidden);
+        self.enc.poll_wait();
+        // The rows were compacted when they were kept: the state first, then
+        // one row per option, so the slot rows are the ones after the state.
+        let cls: Vec<u32> = (0..f.n_slots).map(|i| f.state_rows + i).collect();
+        // The head still needs somewhere to put its hidden-state gradient,
+        // even though a frozen encoder never reads it - the same arrangement
+        // the text path uses, and the reason the encoder's reverse pass is
+        // simply not run rather than not wired.
+        let seed = self.enc.is_trainable().then(|| self.enc.seed_buf());
+        self.head.set_call(&kept.buf, seed, f.state_rows, &cls);
+        let scores = self.head.forward();
+        let (l, d_score) = objective(&scores);
+        assert_eq!(d_score.len(), scores.len(), "one score gradient per option");
+        self.head.backward(self.enc.seed_buf(), &d_score);
+        self.head.poll_wait();
+        Ok(l)
     }
 
     /// Answer every question about one state.
@@ -477,6 +599,12 @@ impl Decide {
             self.head.weights().into_iter().map(|(n, v)| (n, vec![v.len() as u64], v)).collect();
         checkpoint::save(path, self.cfg.to_json(), &tensors);
         Ok(())
+    }
+
+    /// Whether the encoder's weights are held still. A caller that wants to
+    /// keep the encoder's output and reuse it has to know.
+    pub fn encoder_is_frozen(&self) -> bool {
+        self.frozen_encoder
     }
 
     /// Every head parameter, for snapshotting mid-run.
