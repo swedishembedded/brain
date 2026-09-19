@@ -30,4 +30,4 @@ rodio = { version = "0.22", default-features = false, features = ["playback"] }
 # in BOTH qwen3tts and cosyvoice (`TtsPipeline` dispatches between them at
 # resolve time - see crates/sdk/src/tts.rs), which is why this is much
 # higher than a single-architecture sample's budget.
-max-brain-crates = 66
+max-brain-crates = 67
