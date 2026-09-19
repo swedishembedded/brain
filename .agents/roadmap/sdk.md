@@ -185,16 +185,30 @@ for why.
       itself still does not generically enforce `min`/`max` for every
       `ParamSpec` -- a separate, cross-cutting gap affecting every model with
       a ranged param, not scoped into this fix.
-- [ ] Prompt-length handling is INCONSISTENT between the two backends this
-      one SDK type now fronts: flux2 silently TRUNCATES an overlong prompt
-      to `cfg.txt_len` tokens (an `eprintln!` warning, never an `Err`,
-      `crates/flux2/src/pipeline.rs`'s encode path), while s3dit cleanly
-      REFUSES one past its built `cap_len` capacity (`fit_caption`). A
-      caller cannot tell, from `brain::Error` alone, which behavior they are
-      going to get for an overlong prompt -- fixing flux2's own truncation
-      behavior is out of this milestone's scope (it is flux2's, not the
-      SDK's, to change), but the inconsistency is now doubly visible with
-      one facade type fronting both.
+- [x] Prompt-length handling is now CONSISTENT between the two backends this
+      one SDK type fronts: fixed in flux2 directly (not with an SDK-only
+      translation, which would have left direct `flux2` callers with the old
+      silent-truncation behavior). `Pipeline::encode_prompt` used to
+      `eprintln!` a warning and `ids.truncate(cfg.txt_len)` - conditioning on
+      a PREFIX of the user's prompt (audit F18) - and now returns
+      `Result<Vec<f32>, String>`, refusing via the new
+      `check_prompt_length(token_count, txt_len)` free function (mirrors
+      `s3dit::pipeline::check_cap_len`/`fit_caption`'s own shape) exactly the
+      way s3dit's `fit_caption` already refused past `cap_len`. Both call
+      sites in `generate_batch_on` (the real prompt and the CFG-uncond empty
+      one) propagate the error through the same `out[i] = Err(e); continue`
+      per-request convention `encode_image` failures already used, so a
+      caller now gets the SAME `brain::Error::Backend` shape for an overlong
+      prompt regardless of which backend resolved. Confirmed no caller
+      outside `crates/flux2/src/pipeline.rs` called `encode_prompt` directly
+      (grep across `crates/cli`, `crates/sdk`, `crates/flux2/tests`) and no
+      test exercised the truncate-and-continue path, so this was a contained
+      change: the `Denoiser` trait declaration, its one production impl, and
+      three test-stub impls, plus the two call sites - no ripple into
+      `crates/sdk`/`crates/cli`, both of which already propagate `Result`
+      end to end. Proven with `an_overlong_prompt_is_refused_not_truncated`
+      (a pure unit test of `check_prompt_length`, mirroring
+      `an_absurd_step_count_is_refused_by_name`'s shape on the s3dit side).
 
 ## Security audit (Part 3, this milestone)
 
@@ -220,10 +234,11 @@ The sections that DO apply, with real attention paid:
   bounded in both backends themselves (`flux2::pipeline::MAX_STEPS`/
   `s3dit::pipeline::MAX_STEPS`, see "Not yet done" above for detail) rather
   than with an SDK-only clamp, so the fix also covers `flux2`/`s3dit`
-  callers who bypass this crate entirely. Prompt length is bounded, but
-  INCONSISTENTLY (flux2 truncates silently; s3dit refuses cleanly) -- also
-  recorded above rather than fixed here, since the fix belongs in flux2's
-  own encode path, not this facade.
+  callers who bypass this crate entirely. Prompt length is now bounded
+  CONSISTENTLY: fixed in flux2's own encode path (`Pipeline::encode_prompt`
+  now refuses via `check_prompt_length`, matching s3dit's pre-existing
+  `fit_caption` refusal, see "Not yet done" above for detail) rather than
+  patched over in this facade, so the fix covers direct `flux2` callers too.
 - **§3 Resource safety & backpressure.** This crate has no admission
   control, queue, or concurrency limit of its own -- by design, since it is
   a library, not a server (documented in `crates/sdk/src/lib.rs`'s own

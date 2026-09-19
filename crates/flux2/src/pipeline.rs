@@ -1705,15 +1705,17 @@ impl Pipeline {
 
     /// Prompt → `[txt_len, context_in_dim]` conditioning (masked-pad,
     /// layers 9/18/27 concatenated per token).
-    pub fn encode_prompt(&self, prompt: &str) -> Vec<f32> {
+    ///
+    /// REFUSES a prompt over `txt_len` rather than conditioning on a PREFIX
+    /// of it (audit F18 - this used to truncate behind an `eprintln!`
+    /// warning, the same silent-partial-conditioning bug class
+    /// `s3dit::pipeline::fit_caption`'s own doc names and refuses by
+    /// contract; flux2 was the odd one out between this crate's two
+    /// backends, not a case where both behaviors were equally valid).
+    pub fn encode_prompt(&self, prompt: &str) -> Result<Vec<f32>, String> {
         let templated = self.tok.apply_chat_template_no_think(&[("user", prompt)]);
         let mut ids = self.tok.encode(&templated);
-        if ids.len() > self.cfg.txt_len {
-            // Loud, not silent: the conditioning is computed from a PREFIX of
-            // the user's prompt (audit F18).
-            eprintln!("flux2: prompt is {} tokens but the model's text window is {} -- conditioning on the first {} tokens only", ids.len(), self.cfg.txt_len, self.cfg.txt_len);
-        }
-        ids.truncate(self.cfg.txt_len);
+        check_prompt_length(ids.len(), self.cfg.txt_len)?;
         let content = ids.len();
         ids.resize(self.cfg.txt_len, PAD_TOKEN);
         let taps = self.te.encode_hiddens_padded(&ids, content, &TAP_LAYERS);
@@ -1724,7 +1726,7 @@ impl Pipeline {
                 ctx.extend_from_slice(&tap[row * d..(row + 1) * d]);
             }
         }
-        ctx
+        Ok(ctx)
     }
 
     /// VAE-encode an RGB image (`[-1,1]` CHW) to packed+normalized latent
@@ -1945,7 +1947,7 @@ fn dump_latent(z: &[f32], lh: usize, lw: usize) {
 /// sampler behind it to drift.
 trait Denoiser {
     fn cfg(&self) -> &Flux2Config;
-    fn encode_prompt(&self, prompt: &str) -> Vec<f32>;
+    fn encode_prompt(&self, prompt: &str) -> Result<Vec<f32>, String>;
     fn encode_image(&self, chw: &[f32], h: u32, w: u32) -> Result<Vec<f32>, String>;
     fn decode_tokens(&self, tokens: &[f32], lh: usize, lw: usize) -> Result<Vec<u8>, String>;
     fn max_batch(&self) -> u32;
@@ -1956,7 +1958,7 @@ impl Denoiser for Pipeline {
     fn cfg(&self) -> &Flux2Config {
         &self.cfg
     }
-    fn encode_prompt(&self, prompt: &str) -> Vec<f32> {
+    fn encode_prompt(&self, prompt: &str) -> Result<Vec<f32>, String> {
         Pipeline::encode_prompt(self, prompt)
     }
     fn encode_image(&self, chw: &[f32], h: u32, w: u32) -> Result<Vec<f32>, String> {
@@ -2148,6 +2150,18 @@ fn layout_of(txt_len: usize, r: &Anchored) -> Result<crate::refcond::JointLayout
     canvas_layout(txt_len, &r.refs, &r.opts)
 }
 
+/// Reject a prompt whose token count overflows `txt_len` rather than
+/// conditioning on a PREFIX of it. See [`Pipeline::encode_prompt`]'s own doc
+/// (audit F18) for why refusing, not truncating, is the contract - the same
+/// one `s3dit::pipeline::fit_caption` already enforces for its own caption
+/// capacity.
+fn check_prompt_length(token_count: usize, txt_len: usize) -> Result<(), String> {
+    if token_count > txt_len {
+        return Err(format!("flux2: this prompt is {token_count} tokens but the model's text window is {txt_len}; shorten the prompt"));
+    }
+    Ok(())
+}
+
 /// [`layout_of`] over the parts of a request that decide the layout, so the
 /// sizing entry points ([`ref_tokens_per_forward`]) build the SAME layout the
 /// sampler runs rather than a second reading of the same rules.
@@ -2299,9 +2313,25 @@ fn denoise_group_on<D: Denoiser>(
             continue;
         }
         progress(0, max_steps_hint + 2, "encoding prompt");
-        let ctx = d.encode_prompt(&r.prompt);
+        let ctx = match d.encode_prompt(&r.prompt) {
+            Ok(c) => c,
+            Err(e) => {
+                out[i] = Err(e);
+                continue;
+            }
+        };
         let cf = !cfg.distilled && o.guidance > 1.0;
-        let ctx_uncond = if cf { Some(d.encode_prompt("")) } else { None };
+        let ctx_uncond = if cf {
+            match d.encode_prompt("") {
+                Ok(c) => Some(c),
+                Err(e) => {
+                    out[i] = Err(e);
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
         let mut ref_tokens: Vec<f32> = Vec::new();
         let mut failed = None;
         // Every supplied reference conditions the model. The first one does
@@ -2793,11 +2823,11 @@ mod tests {
         fn cfg(&self) -> &Flux2Config {
             &self.cfg
         }
-        fn encode_prompt(&self, prompt: &str) -> Vec<f32> {
+        fn encode_prompt(&self, prompt: &str) -> Result<Vec<f32>, String> {
             let d = self.cfg.context_in_dim;
-            (0..self.cfg.txt_len * d)
+            Ok((0..self.cfg.txt_len * d)
                 .map(|i| ((i + prompt.len()) as f32 * 0.017).sin())
-                .collect()
+                .collect())
         }
         fn encode_image(&self, chw: &[f32], h: u32, w: u32) -> Result<Vec<f32>, String> {
             let (h, w) = (h as usize, w as usize);
@@ -3395,7 +3425,7 @@ mod tests {
         fn cfg(&self) -> &Flux2Config {
             self.0.cfg()
         }
-        fn encode_prompt(&self, prompt: &str) -> Vec<f32> {
+        fn encode_prompt(&self, prompt: &str) -> Result<Vec<f32>, String> {
             self.0.encode_prompt(prompt)
         }
         fn encode_image(&self, chw: &[f32], h: u32, w: u32) -> Result<Vec<f32>, String> {
@@ -3749,6 +3779,15 @@ mod tests {
         let err = generate_batch_on(&base, std::slice::from_ref(&req), &mut |_, _, _| {}).pop().unwrap().expect_err("an over-the-ceiling step count must be refused");
         assert!(err.contains("exceeds the maximum"), "expected the MAX_STEPS message, got {err:?}");
         assert!(base.sigmas.borrow().is_empty(), "refused before the sampling loop ever ran");
+    }
+
+    #[test]
+    fn an_overlong_prompt_is_refused_not_truncated() {
+        let err = check_prompt_length(9, 8).unwrap_err();
+        for needle in ["9", "8"] {
+            assert!(err.contains(needle), "refusal must name {needle}: {err}");
+        }
+        assert!(check_prompt_length(8, 8).is_ok(), "exactly at the window is not an overflow");
     }
 
     /// A `w x h` interleaved-RGB `[0,1]` horizontal ramp. Smooth, so a correct
@@ -4266,7 +4305,7 @@ mod tests {
         fn cfg(&self) -> &Flux2Config {
             self.stub.cfg()
         }
-        fn encode_prompt(&self, prompt: &str) -> Vec<f32> {
+        fn encode_prompt(&self, prompt: &str) -> Result<Vec<f32>, String> {
             self.stub.encode_prompt(prompt)
         }
         fn encode_image(&self, chw: &[f32], h: u32, w: u32) -> Result<Vec<f32>, String> {
