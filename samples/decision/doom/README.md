@@ -884,6 +884,14 @@ In the order the measurements point at, not in the order they are interesting:
   the scripted player finishes all three; seeing only what it has looked at,
   it finishes E1M1 and does not finish E1M2 or E1M3. The honest number is the
   second one.
+- **`--record` changes the run it records.** Measured on E1M1, same seed, same
+  everything else: without it the scripted player finishes in 247 decisions,
+  with it the run stalls at 400 with the same six kills. Capture is not the
+  cause - `--frames`, which grabs one image per DECISION, finishes in 247 like
+  the uninstrumented run. What differs is that recording steps the game one
+  TIC at a time so every rendered frame can be kept, and something about that
+  split is not equivalent to asking for the same tics in one call. A recorded
+  run is therefore an illustration and not evidence.
 - **The policy has not been retrained against the honest observation.** Every
   learned number above was measured against a solved map, which is an easier
   problem than the one the sample now poses.
