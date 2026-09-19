@@ -68,6 +68,7 @@ pub struct Args {
     pub eval_episodes: usize,
     pub play: usize,
     pub transcript: Option<String>,
+    pub engine_log: Option<String>,
     pub record: Option<String>,
     pub hardware: Hardware,
     pub train: ControlOptions,
@@ -131,6 +132,8 @@ what to play
   --eval-episodes N   episodes to score over   [24]
   --play N            episodes for `play`      [3]
   --transcript FILE   write every request and reply as JSON lines
+  --engine-log FILE   keep the engine's own output, which is where its route
+                      builder explains what it could and could not reach
   --record FILE.mp4   encode every decision straight into an MP4 as it is
                       drawn - streamed to ffmpeg, no intermediate images
 
@@ -210,6 +213,7 @@ fn parse_args() -> Result<Args, String> {
         eval_episodes: args.usize_or("--eval-episodes", 24),
         play: args.usize_or("--play", 3),
         transcript: args.take_str("--transcript"),
+        engine_log: args.take_str("--engine-log"),
         record: args.take_str("--record"),
         hardware,
         train,
@@ -254,8 +258,13 @@ fn run() -> Result<(), String> {
         }
     );
 
-    let game = Doom::start(&paths, &args.cfg, args.transcript.as_ref().map(Into::into))
-        .map_err(|e| format!("could not start the game: {e}"))?;
+    let game = Doom::start(
+        &paths,
+        &args.cfg,
+        args.transcript.as_ref().map(Into::into),
+        args.engine_log.as_ref().map(Into::into),
+    )
+    .map_err(|e| format!("could not start the game: {e}"))?;
     println!("doom: engine up on port {}, lockstep", game.port);
     let mut env = DoomEnv::new(game, args.cfg.clone(), args.mission, args.mix);
     env.set_arena(args.arena);

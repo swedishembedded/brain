@@ -21,7 +21,7 @@
 //! needs that, you can procure our services by sending an email to
 //! info@swedishembedded.com.
 
-use std::io::{BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -143,7 +143,15 @@ impl Default for Config {
 }
 
 impl Doom {
-    pub fn start(paths: &Paths, cfg: &Config, log: Option<PathBuf>) -> std::io::Result<Doom> {
+    /// Start the engine. `log` is the JSON transcript of this side of the
+    /// conversation; `engine_log` is the engine's OWN output, which is where
+    /// its route builder explains itself.
+    pub fn start(
+        paths: &Paths,
+        cfg: &Config,
+        log: Option<PathBuf>,
+        engine_log: Option<PathBuf>,
+    ) -> std::io::Result<Doom> {
         let port = free_port()?;
         let mut cmd = Command::new(&paths.binary);
         cmd.arg("-iwad")
@@ -179,11 +187,29 @@ impl Doom {
         // whatever else happens: a full pipe buffer blocks the engine inside a
         // printf in the middle of a tic, and the symptom is a game that
         // freezes after a few hundred steps for no visible reason.
+        //
+        // Kept rather than dropped when asked for. The engine says a great
+        // deal worth reading while it builds its route - which cells it could
+        // not reach, what stands between the two halves of a level, how long
+        // the grid took - and it is the only account of why a route came out
+        // the way it did. Dropping it means every such question has to be
+        // asked again by hand, against a level in a state that is no longer
+        // the one that produced the answer.
         if let Some(out) = child.stdout.take() {
+            let mut sink = engine_log.map(std::fs::File::create).transpose()?;
             std::thread::spawn(move || {
-                let mut sink = Vec::new();
+                // Bytes, not lines: the engine prints the WAD's own text, and
+                // a line of it that is not UTF-8 must not stop the reader.
+                // One that did deadlocked the game a few hundred steps later,
+                // with the pipe full and the engine blocked inside a printf.
                 let mut r = BufReader::new(out);
-                let _ = r.read_to_end(&mut sink);
+                let mut line = Vec::new();
+                while r.read_until(b'\n', &mut line).unwrap_or(0) > 0 {
+                    if let Some(f) = sink.as_mut() {
+                        let _ = f.write_all(&line);
+                    }
+                    line.clear();
+                }
             });
         }
 
