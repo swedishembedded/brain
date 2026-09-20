@@ -1811,27 +1811,33 @@ impl<E: Env> ControlPipeline<E> {
     /// contains - which is why it is the only phase whose result is not
     /// bounded above by the teacher.
     ///
-    /// The loss is the cost-sensitive one the counterfactual makes available:
+    /// The update is proportional feedback toward a measured target, and the
+    /// two halves of it are built by [`outcome_target`] and [`outcome_pull`]:
     ///
     /// ```text
-    /// L = - sum_i  w_i * log p(c_i)        w_i = s_i - mean(s at this state)
+    /// target_i = softmax(s / tau)_i       w = max(s) - min(s)
+    /// grad_i   = w * (belief_i - target_i)
     /// ```
     ///
-    /// Two properties of that weighting are load-bearing and both come from
-    /// leaving the advantages RAW rather than normalising them per state.
+    /// The target is a proper distribution, so the objective is bounded below
+    /// by its own entropy and the gradient vanishes when belief and target
+    /// agree instead of paying for ever-smaller probabilities. The weight is
+    /// the state's raw spread, which is what carries the magnitude the
+    /// softmax normalised away. Both of those matter here - see
+    /// [`outcome_target`] for the unbounded first version and the measurement
+    /// that caught it.
     ///
-    /// They sum to zero at every state, so the softmax's normalising term
-    /// cancels out of the gradient and only the candidates that were actually
-    /// measured are moved. An option nobody tried gets no opinion pushed onto
-    /// it, which is correct: nothing here knows what it was worth.
+    /// Leaving the spread RAW rather than normalising it per state is what
+    /// makes a decision where every candidate led to the same place
+    /// contribute almost exactly nothing, on its own, with no threshold
+    /// needed. That matters more here than it would elsewhere: measured on
+    /// this sample, 71% of decisions are that state, and per-state
+    /// normalisation would give them the same pull as the ones that decide
+    /// the episode.
     ///
-    /// And a state where every candidate led to the same place contributes a
-    /// gradient of almost exactly zero, on its own, with no threshold needed.
-    /// That matters more here than it would elsewhere: measured on this
-    /// sample, 71% of decisions are that state. Normalising the advantages
-    /// per state - which is what one would reach for - would give those
-    /// decisions the same pull as the ones that decide the episode, and the
-    /// update would spend most of its magnitude on noise.
+    /// Only the candidates that were actually measured are moved. An option
+    /// nobody tried gets no opinion pushed onto it, which is correct: nothing
+    /// here knows what it was worth.
     fn fit_outcomes(
         &mut self,
         probes: &[Probe],
