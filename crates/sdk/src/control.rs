@@ -632,7 +632,7 @@ impl<E: Env> ControlPipeline<E> {
         cfg: &PolicyConfig,
         order: &mut [usize],
         lr_scale: f32,
-    ) -> Result<(f32, f32)> {
+    ) -> Result<(f32, f32, usize, usize)> {
         // Shuffled, because consecutive steps of one episode are correlated
         // and a sequential pass would walk the policy along a trajectory
         // instead of averaging over the batch.
@@ -654,6 +654,7 @@ impl<E: Env> ControlPipeline<E> {
         // (4 for Atari, 32 for continuous control) and step once per
         // minibatch.
         let mut stopped = false;
+        let mut steps_taken = 0usize;
         for chunk in order.chunks(MINIBATCH) {
             if stopped {
                 break;
@@ -662,6 +663,7 @@ impl<E: Env> ControlPipeline<E> {
             // implementations do it - not over the whole rollout.
             let mut adv: Vec<f32> = chunk.iter().map(|&i| batch[i].advantage).collect();
             policy::normalize(&mut adv);
+            let mut here = 0.0f64;
             self.model.zero_grads();
             for (slot, &i) in chunk.iter().enumerate() {
                 let s = &batch[i];
@@ -691,7 +693,19 @@ impl<E: Env> ControlPipeline<E> {
                     }
                 };
                 drift += moved as f64;
+                here += moved as f64;
                 seen += 1;
+            }
+            // BEFORE this minibatch's step, not after the whole pass. A guard
+            // that can only fire once an epoch of thirty-odd steps is done is
+            // a report and not a guard: measured on this repository's DOOM
+            // sample with it reporting only, one pass moved the policy 0.0403
+            // on the first iteration and 0.1718 on the second, against a
+            // threshold of 0.02. This is where reference implementations put
+            // it, and it bounds the overshoot by one minibatch.
+            if cfg.target_kl > 0.0 && here / chunk.len() as f64 > cfg.target_kl as f64 {
+                stopped = true;
+                continue;
             }
             // The accumulated sum becomes a mean, so one learning rate means
             // the same thing whatever the minibatch happened to hold.
@@ -700,9 +714,11 @@ impl<E: Env> ControlPipeline<E> {
                 HEAD_LR * lr_scale,
                 1.0 / chunk.len() as f32,
             );
+            steps_taken += 1;
         }
         let n = seen.max(1) as f32;
-        Ok((loss / n, (drift / seen.max(1) as f64) as f32))
+        let offered = order.len().div_ceil(MINIBATCH);
+        Ok((loss / n, (drift / seen.max(1) as f64) as f32, steps_taken, offered))
     }
 
     /// The environment this pipeline acts in.
@@ -997,10 +1013,13 @@ impl<E: Env> Stages for ControlPipeline<E> {
             // away from.
             let lr_scale = 1.0 - (it as f32 / spec.iterations.max(1) as f32);
             let (mut drift, mut passes) = (0.0f32, 0usize);
+            let (mut took, mut offered) = (0usize, 0usize);
             for _ in 0..spec.epochs {
-                let (l, d) = self.update(&batch, &spec.policy, &mut order, lr_scale)?;
+                let (l, d, t, o) = self.update(&batch, &spec.policy, &mut order, lr_scale)?;
                 last_loss = l;
                 drift = d;
+                took += t;
+                offered += o;
                 passes += 1;
                 step += batch.len();
                 log(step, last_loss);
@@ -1025,10 +1044,10 @@ impl<E: Env> Stages for ControlPipeline<E> {
                     None => String::new(),
                 }
             );
-            if passes < spec.epochs {
+            if passes < spec.epochs || took < offered {
                 println!(
-                    "           stopped after {passes} of {} passes: the policy had \
-                     moved {drift:.4} from the one that collected the batch",
+                    "           took {took} of {offered} minibatch steps over {passes} of \
+                     {} passes; the policy had moved {drift:.4}",
                     spec.epochs
                 );
             }
