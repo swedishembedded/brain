@@ -1272,6 +1272,12 @@ impl DoomEnv {
 }
 
 impl Env for DoomEnv {
+    /// How far this episode got, for picking which iteration to keep. See
+    /// [`crate::report::Score`] for why return is not enough on its own.
+    fn progress(&self) -> Option<f32> {
+        Some(self.score(self.max_steps).value())
+    }
+
     fn reset(&mut self, seed: u64) -> String {
         self.start(seed)
     }

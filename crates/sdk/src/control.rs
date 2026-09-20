@@ -103,6 +103,23 @@ pub trait Env {
         false
     }
 
+    /// How far the episode that just ended GOT, when the environment can say.
+    ///
+    /// Return is a poor way to rank two runs that both fell short of the
+    /// goal, because in a task whose reward is mostly one payment at the end,
+    /// neither of them collected it: an episode that crossed nine tenths of a
+    /// level and died scores about what one that pressed against a wall
+    /// scores. A training run choosing which iteration to keep is then
+    /// choosing between numbers that are largely noise.
+    ///
+    /// An environment that can measure partial progress says so here and it
+    /// is used to pick the iteration to keep. `None` - the default, and what
+    /// every environment that has not thought about it returns - falls back
+    /// to mean return, which is the behaviour this had before.
+    fn progress(&self) -> Option<f32> {
+        None
+    }
+
     /// A scripted action for the current situation, for the warm-start phase -
     /// an index into the most recent [`Env::actions`].
     ///
@@ -170,6 +187,9 @@ pub struct Rollout {
     pub steps: usize,
     pub mean_return: f32,
     pub wins: usize,
+    /// Mean of [`Env::progress`] over the episodes, when the environment
+    /// measures it.
+    pub mean_progress: Option<f32>,
 }
 
 pub struct ControlPipeline<E: Env> {
@@ -499,12 +519,17 @@ impl<E: Env> ControlPipeline<E> {
     fn rollout(&mut self, episodes: usize, max_steps: usize) -> Result<(Vec<Step>, Rollout)> {
         let mut batch = Vec::new();
         let (mut total, mut wins) = (0.0f32, 0usize);
+        let (mut got, mut measured) = (0.0f32, 0usize);
         for _ in 0..episodes {
             self.episode_seed += 1;
             let seed = self.episode_seed;
             let (steps, ret, won) = self.episode(seed, false, max_steps, false)?;
             total += ret;
             wins += usize::from(won);
+            if let Some(p) = self.env.progress() {
+                got += p;
+                measured += 1;
+            }
             batch.extend(steps);
         }
         // Advantages are already centred by the critic; this rescales them so
@@ -528,6 +553,7 @@ impl<E: Env> ControlPipeline<E> {
             steps: batch.len(),
             mean_return: total / episodes.max(1) as f32,
             wins,
+            mean_progress: (measured > 0).then(|| got / measured as f32),
         };
         Ok((batch, stats))
     }
@@ -631,7 +657,13 @@ impl<E: Env> ControlPipeline<E> {
             total += ret;
             wins += usize::from(won);
         }
-        Ok(Rollout { episodes: n, steps: 0, mean_return: total / n.max(1) as f32, wins })
+        Ok(Rollout {
+            episodes: n,
+            steps: 0,
+            mean_return: total / n.max(1) as f32,
+            wins,
+            mean_progress: None,
+        })
     }
 }
 
@@ -791,7 +823,8 @@ impl<E: Env> Stages for ControlPipeline<E> {
         // weights the run earned, and scoring them measures where the walk
         // ended rather than what was learned. Snapshotting costs one readback
         // of the head per iteration, which is nothing beside a rollout.
-        let mut best_return = f32::NEG_INFINITY;
+        let mut best_rank = f32::NEG_INFINITY;
+        let mut best_by = Rollout::default();
         let mut best: Option<(usize, Vec<(String, Vec<f32>)>)> = None;
         for it in 0..spec.iterations {
             let (batch, stats) = self.rollout(spec.episodes, spec.max_steps)?;
@@ -811,26 +844,40 @@ impl<E: Env> Stages for ControlPipeline<E> {
             }
             self.last = stats;
             println!(
-                "    iter {:>3}  return {:+.2}  wins {:>3}/{:<3}  steps {:>5}  critic mse {:.3}",
+                "    iter {:>3}  return {:+.2}  wins {:>3}/{:<3}  steps {:>5}  critic mse {:.3}{}",
                 it + 1,
                 stats.mean_return,
                 stats.wins,
                 stats.episodes,
                 stats.steps,
-                self.critic_mse
+                self.critic_mse,
+                match stats.mean_progress {
+                    Some(p) => format!("  progress {p:.2}"),
+                    None => String::new(),
+                }
             );
-            if stats.mean_return > best_return {
-                best_return = stats.mean_return;
+            // Ranked on how far the episodes GOT when the environment can
+            // say, and on return only when it cannot. See `Env::progress`.
+            let rank = stats.mean_progress.unwrap_or(stats.mean_return);
+            if best.is_none() || rank > best_rank {
+                best_rank = rank;
                 best = Some((it + 1, self.model.head_weights()));
+                best_by = stats;
             }
         }
         if let Some((it, w)) = best {
             if it != spec.iterations {
-                println!(
-                    "    keeping iteration {it}, which returned {best_return:+.2} - the last \
-                     one returned {:+.2}",
-                    self.last.mean_return
-                );
+                match (best_by.mean_progress, self.last.mean_progress) {
+                    (Some(b), Some(l)) => println!(
+                        "    keeping iteration {it}, which got {b:.2} of the way - the last \
+                         one got {l:.2}"
+                    ),
+                    _ => println!(
+                        "    keeping iteration {it}, which returned {:+.2} - the last \
+                         one returned {:+.2}",
+                        best_by.mean_return, self.last.mean_return
+                    ),
+                }
                 self.model.set_head_weights(&w);
             }
         }
