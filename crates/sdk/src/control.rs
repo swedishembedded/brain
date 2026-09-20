@@ -653,7 +653,11 @@ impl<E: Env> ControlPipeline<E> {
         // implementations split a rollout into a handful of minibatches
         // (4 for Atari, 32 for continuous control) and step once per
         // minibatch.
+        let mut stopped = false;
         for chunk in order.chunks(MINIBATCH) {
+            if stopped {
+                break;
+            }
             // Per-MINIBATCH advantage normalization, which is where reference
             // implementations do it - not over the whole rollout.
             let mut adv: Vec<f32> = chunk.iter().map(|&i| batch[i].advantage).collect();
