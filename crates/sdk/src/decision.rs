@@ -476,5 +476,29 @@ pub(crate) fn load_decide(
 
     crate::device::resolve(device)?;
     let gpu = gpu_core::Gpu::new(decide::kern::PIPELINES);
-    Ok(Decide::new_on(gpu, cfg, tok, limits, &enc_init, &head_init, true))
+    let mut model = Decide::new_on(gpu, cfg, tok, limits, &enc_init, &head_init, true);
+    model.set_provenance(decide::decide::Provenance {
+        base: base_reference(path),
+        ..Default::default()
+    });
+    Ok(model)
+}
+
+/// The encoder directory, as the Hugging Face reference it came from.
+///
+/// A head is an adapter and an adapter that does not name its base is
+/// unloadable. `brain pull` lays a model down under `<vendor>/<repo>`, so the
+/// last two components of the directory ARE the reference; anything else
+/// falls back to the leaf, which is at least a name someone can search for.
+fn base_reference(dir: &Path) -> String {
+    let parts: Vec<&str> = dir
+        .components()
+        .filter_map(|c| c.as_os_str().to_str())
+        .filter(|s| !s.is_empty() && *s != "/")
+        .collect();
+    match parts.len() {
+        0 => String::new(),
+        1 => parts[0].to_string(),
+        n => format!("{}/{}", parts[n - 2], parts[n - 1]),
+    }
 }

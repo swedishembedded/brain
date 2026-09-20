@@ -83,6 +83,29 @@ pub struct Decide {
     /// How many leading spans of the last call were state windows - what
     /// `state_embedding` has to pool over.
     last_windows: usize,
+    /// What this head is an adapter TO, and what it was trained for. Written
+    /// into the checkpoint so that the file needs nothing out of band. See
+    /// [`Provenance`].
+    provenance: Provenance,
+}
+
+/// What a saved head needs to say about itself to be loadable by someone who
+/// was not there when it was trained.
+///
+/// A head is 445k floats that mean nothing without the encoder they attach to
+/// and the task they were fitted for. Four samples in this repository emit
+/// byte-identically-shaped files; without this they are distinguishable only
+/// by filename.
+#[derive(Clone, Debug, Default)]
+pub struct Provenance {
+    /// The encoder these weights attach to, as a Hugging Face reference -
+    /// `sentence-transformers/all-MiniLM-L6-v2`.
+    pub base: String,
+    /// The fully-qualified id of this head, `vendor/repo`.
+    pub id: String,
+    /// What it was trained on and how. Free-form, and written verbatim into
+    /// the checkpoint's config so nothing about a run is lost.
+    pub task: serde_json::Value,
 }
 
 /// A request laid out for the device: the packed token stream, where each
@@ -199,7 +222,18 @@ impl Decide {
             frozen_encoder: false,
             last_windows: 1,
             kept: None,
+            provenance: Provenance::default(),
         }
+    }
+
+    /// Record what this head attaches to and what it was trained for, so the
+    /// checkpoint it writes needs nothing out of band. See [`Provenance`].
+    pub fn set_provenance(&mut self, p: Provenance) {
+        self.provenance = p;
+    }
+
+    pub fn provenance(&self) -> &Provenance {
+        &self.provenance
     }
 
     /// Tokenize and pack one request, then encode it and score every option.
@@ -627,10 +661,71 @@ impl Decide {
     /// Only the head: the encoder is imported from a published checkpoint and
     /// re-importing it is free, so a run's artifact is the part that did not
     /// exist before it.
+    /// Write the head as a stand-alone safetensors adapter.
+    ///
+    /// TENSORS KEEP THEIR REAL SHAPES. They used to be flattened - a 384x384
+    /// projection written as `[147456]` - which loads fine here, because this
+    /// crate looks parameters up by name and reads the flat buffer, and is
+    /// useless to anyone else: a reader outside this repository would have to
+    /// be told the shapes out of band, which is the one thing a safetensors
+    /// file exists to avoid.
+    ///
+    /// The card names the encoder these weights attach to. A head is 445k
+    /// floats that mean nothing without it.
     pub fn save_head(&self, path: &str) -> Result<(), String> {
-        let tensors: Vec<(String, Vec<u64>, Vec<f32>)> =
-            self.head.weights().into_iter().map(|(n, v)| (n, vec![v.len() as u64], v)).collect();
-        checkpoint::save(path, self.cfg.to_json(), &tensors);
+        let shapes: HashMap<String, Vec<usize>> =
+            crate::head::tensor_manifest(&self.cfg).into_iter().collect();
+        let mut n_params = 0u64;
+        let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = self
+            .head
+            .weights()
+            .into_iter()
+            .map(|(name, v)| {
+                n_params += v.len() as u64;
+                let shape = shapes
+                    .get(&name)
+                    .map(|s| s.iter().map(|&d| d as u64).collect())
+                    .unwrap_or_else(|| vec![v.len() as u64]);
+                (name, shape, v)
+            })
+            .collect();
+
+        let p = &self.provenance;
+        let mut config = self.cfg.to_json();
+        if let Some(o) = config.as_object_mut() {
+            // Everything a reader needs that the encoder's own config does not
+            // say: what to attach these weights to, and what they were fitted
+            // for.
+            o.insert("adapter_of".into(), serde_json::json!(p.base));
+            o.insert("head".into(), serde_json::json!("option-head"));
+            if !p.task.is_null() {
+                o.insert("trained_for".into(), p.task.clone());
+            }
+        }
+        let (vendor, repo) = match p.id.split_once('/') {
+            Some((v, r)) => (Some(v.to_string()), Some(r.to_string())),
+            None => (None, None),
+        };
+        let card = checkpoint::st::ModelCard {
+            schema_version: 1,
+            id: if p.id.is_empty() { "option-head".into() } else { p.id.clone() },
+            display_name: None,
+            family: "option-head".into(),
+            architecture: Some("minilm-l6-option-head".into()),
+            variant_of: None,
+            adapter: Some(checkpoint::st::Adapter {
+                kind: "option-head".into(),
+                base: (!p.base.is_empty()).then(|| p.base.clone()),
+                ..Default::default()
+            }),
+            param_count: Some(n_params),
+            embedding_dim: Some(self.cfg.d_model as u64),
+            license: Some("Apache-2.0".into()),
+            vendor,
+            repo,
+            ..Default::default()
+        };
+        checkpoint::save_carded(path, config, &tensors, &card);
         Ok(())
     }
 

@@ -125,6 +125,7 @@ that is fully understood. They are excluded from `brain caps` and
 
 | Architecture | Solves | Infer | Train |
 |---|---|:---:|:---:|
+| [`optionhead`](optionhead.md) | ranks runtime-supplied natural-language options against a situation; a 445k adapter over a frozen sentence encoder | [x] | [x] |
 | [`toymoe`](toymoe.md) | sparse Mixture-of-Experts decoder (RMSNorm/RoPE, top-k) | [x] | [x] |
 | [`toypid`](toypid.md) | PID event/effect transformer; backs the WebGPU browser demo | [x] | [x] |
 | [`toyseq2seq`](toyseq2seq.md) | encoder-decoder transformer (bidirectional encoder + cross-attention decoder) | [x] | [x] |

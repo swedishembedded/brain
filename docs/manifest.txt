@@ -88,6 +88,7 @@ docs/inference/world-models.md
 
 == Model catalog
 docs/models/index.md
+docs/models/optionhead.md
 docs/models/qwen3.md
 docs/models/qwen35moe.md
 docs/models/qwen35.md

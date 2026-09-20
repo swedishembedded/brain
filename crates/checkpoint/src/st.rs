@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// LoRA / adapter descriptor.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Adapter {
     pub kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -70,7 +70,11 @@ pub struct Modalities {
 }
 
 /// Portable model metadata carried inside a safetensors file's `__metadata__`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// `Default` so that a writer can set the handful of fields that apply to it
+/// and leave the rest absent, rather than spelling out twenty `None`s and
+/// getting one of them wrong.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ModelCard {
     pub schema_version: u32,
     pub id: String,

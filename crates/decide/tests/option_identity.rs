@@ -103,3 +103,45 @@ fn every_forward_stage_of_the_head_produces_something() {
     let dead: Vec<&str> = norms.iter().filter(|(_, v)| *v == 0.0).map(|(n, _)| *n).collect();
     assert!(dead.is_empty(), "these head stages produced all zeros: {dead:?}");
 }
+
+/// A saved head has to stand on its own: real shapes, and a card naming the
+/// encoder it attaches to.
+///
+/// It used to write every tensor flattened - a 384x384 projection as
+/// `[147456]` - which loads fine here, because this crate looks parameters up
+/// by name and reads the flat buffer, and is useless to anyone else. A reader
+/// outside this repository would have to be told the shapes out of band,
+/// which is the one thing a safetensors file exists to prevent.
+#[test]
+fn a_saved_head_says_what_shape_it_is_and_what_it_attaches_to() {
+    let cfg = EncoderConfig::mini_lm_l6();
+    let Some(mut d) = model(&cfg) else {
+        return;
+    };
+    d.set_provenance(decide::decide::Provenance {
+        base: "sentence-transformers/all-MiniLM-L6-v2".into(),
+        id: "swedishembedded/minilm-l6-option-head-test".into(),
+        task: serde_json::json!({ "sample": "test" }),
+    });
+    let path = std::env::temp_dir().join(format!("head-card-{}.safetensors", std::process::id()));
+    let path = path.to_str().expect("utf-8 temp path");
+    d.save_head(path).expect("save");
+
+    let tensors = checkpoint::safetensors::read(path).expect("read back");
+    let by_name: std::collections::HashMap<_, _> =
+        tensors.iter().map(|t| (t.name.as_str(), t)).collect();
+    // The projections are matrices, and the file now says so.
+    assert_eq!(by_name["head.wq.weight"].shape, vec![384, 384]);
+    assert_eq!(by_name["head.wkv.weight"].shape, vec![768, 384]);
+    assert_eq!(by_name["head.score.weight"].shape, vec![1, 384]);
+    assert_eq!(by_name["head.ln.weight"].shape, vec![384]);
+
+    let card = checkpoint::st::read_card(path).expect("a card").expect("a card");
+    assert_eq!(card.id, "swedishembedded/minilm-l6-option-head-test");
+    assert_eq!(card.vendor.as_deref(), Some("swedishembedded"));
+    assert_eq!(card.param_count, Some(444_673));
+    let adapter = card.adapter.expect("an adapter descriptor");
+    assert_eq!(adapter.base.as_deref(), Some("sentence-transformers/all-MiniLM-L6-v2"));
+
+    std::fs::remove_file(path).ok();
+}

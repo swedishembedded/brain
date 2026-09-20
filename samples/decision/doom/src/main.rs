@@ -419,7 +419,32 @@ fn train(env: DoomEnv, args: &Args) -> Result<(), String> {
     // against nothing. What follows instead scores the policy and the scripted
     // player over the same episodes, which is the comparison that means
     // something.
-    let chain = brain::Flow::new(builder.load())
+    // Named and described BEFORE the chain runs, because the chain is what
+    // writes the file. A head is an adapter to a specific encoder fitted for
+    // a specific task, and a checkpoint that says neither is 1.7 MB nobody
+    // can use.
+    let started = builder.load().map(|mut p| {
+        p.describe(
+            "swedishembedded/minilm-l6-option-head-doom",
+            serde_json::json!({
+                "sample": "decision/doom",
+                "task": "choose the next action in DOOM from the options the game offers",
+                "mission": args.mission.name(),
+                "levels": if args.scenarios.is_empty() {
+                    serde_json::json!({ "kind": "game", "maps": args.maps })
+                } else {
+                    serde_json::json!({ "kind": "generated", "scenarios": args.scenarios })
+                },
+                "decisions_per_episode": args.max_steps(),
+                "iterations": spec.iterations,
+                "episodes_per_iteration": spec.episodes,
+                "warm_start_episodes": spec.warmup_episodes,
+                "encoder": "frozen",
+            }),
+        );
+        p
+    });
+    let chain = brain::Flow::new(started)
         .train(spec)
         .save(&args.train.save)
         .report();

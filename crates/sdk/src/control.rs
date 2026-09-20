@@ -792,6 +792,21 @@ impl<E: Env> ControlPipeline<E> {
         self.model.save_head(path.as_ref()).map_err(Error::Backend)
     }
 
+    /// Name this head and say what it was trained for, so the checkpoint it
+    /// writes stands on its own. See `decide::decide::Provenance`.
+    ///
+    /// The base encoder is already known - it is the directory the pipeline
+    /// loaded - so a caller supplies only the half it knows: which head this
+    /// is, and what it was fitted to do.
+    pub fn describe(&mut self, id: impl Into<String>, task: serde_json::Value) {
+        let base = self.model.provenance().base.clone();
+        self.model.set_provenance(decide::decide::Provenance {
+            base,
+            id: id.into(),
+            task,
+        });
+    }
+
     /// Play `n` episodes greedily, printing each step.
     pub fn show(&mut self, n: usize, max_steps: usize) -> Result<Rollout> {
         let (mut total, mut wins) = (0.0f32, 0usize);
