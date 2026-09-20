@@ -845,7 +845,11 @@ pub fn play(env: DoomEnv, args: &Args) -> Result<(), String> {
     pipe.env_mut().capture_frames(viewer.wants_frames());
     pipe.env_mut().frames_per_tic(args.smooth_video());
 
-    let seeds: Vec<u64> = (0..args.play as u64).map(|i| 9_000_000 + i).collect();
+    // `--seed` picks WHICH episodes, so that two runs of `play` can be
+    // different runs. Without it every invocation replayed the same one,
+    // which makes "three runs for comparison" three copies of one run.
+    let seeds: Vec<u64> =
+        (0..args.play as u64).map(|i| 9_000_000 + args.seed().wrapping_mul(97) + i).collect();
     let mut timing = Timing::default();
     let score = score_policy(
         &mut pipe,
