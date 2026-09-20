@@ -719,7 +719,7 @@ impl DoomEnv {
         // step calls - so the game sees the same decision either way. It costs
         // a round trip per tic and is only done when something is recording.
         let mut frames = Vec::new();
-        let per_tic = self.capture_frames && self.frames_per_tic;
+        let per_tic = self.frames_per_tic;
         // Events accumulated across the tics of this decision. Each response
         // DRAINS the engine's event log, so stepping tic by tic and keeping
         // only the last state loses every event from the earlier tics - which

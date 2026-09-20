@@ -72,6 +72,11 @@ pub struct Args {
     pub transcript: Option<String>,
     pub engine_log: Option<String>,
     pub record: Option<String>,
+    /// Advance the game one tic at a time, as recording has to. On its own
+    /// this captures nothing: it is here so that "stepping tic by tic" can be
+    /// measured apart from "keeping every frame", which is the only way to
+    /// tell which of the two changes a run.
+    pub tic_steps: bool,
     pub hardware: Hardware,
     pub train: ControlOptions,
     pub view: ViewOptions,
@@ -86,7 +91,7 @@ impl Args {
     }
     /// Whether a run wants one frame per tic rather than per decision.
     pub fn smooth_video(&self) -> bool {
-        self.record.is_some()
+        self.record.is_some() || self.tic_steps
     }
     pub fn max_steps(&self) -> usize {
         self.train.max_steps
@@ -143,6 +148,9 @@ what to play
   --transcript FILE   write every request and reply as JSON lines
   --engine-log FILE   keep the engine's own output, which is where its route
                       builder explains what it could and could not reach
+  --tic-steps         advance the game one tic at a time, as recording does,
+                      without capturing anything - for telling apart whether
+                      stepping or capturing is what changes a recorded run
   --record FILE.mp4   encode every decision straight into an MP4 as it is
                       drawn - streamed to ffmpeg, no intermediate images
 
@@ -243,6 +251,7 @@ fn parse_args() -> Result<Args, String> {
         transcript: args.take_str("--transcript"),
         engine_log: args.take_str("--engine-log"),
         record: args.take_str("--record"),
+        tic_steps: args.take_flag("--tic-steps"),
         hardware,
         train,
         view,
