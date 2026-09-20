@@ -164,6 +164,8 @@ pub struct ControlOptions {
     pub warmup_epochs: usize,
     /// Fraction of the teacher's episodes to clone, best first.
     pub warmup_keep: f32,
+    /// Episodes on a fixed block of worlds, scored after every iteration.
+    pub gauge_episodes: usize,
     pub entropy: Option<f32>,
     /// Weight on staying near the policy the warm start produced. See
     /// `decide::policy::PolicyConfig::anchor`.
@@ -194,6 +196,7 @@ impl ControlOptions {
             warmup_episodes: d.warmup_episodes,
             warmup_epochs: d.warmup_epochs,
             warmup_keep: d.warmup_keep,
+            gauge_episodes: d.gauge_episodes,
             entropy: None,
             anchor: None,
             target_kl: None,
@@ -212,6 +215,7 @@ impl ControlOptions {
             .warmup_episodes(self.warmup_episodes)
             .warmup_epochs(self.warmup_epochs)
             .warmup_keep(self.warmup_keep)
+            .gauge_episodes(self.gauge_episodes)
             .train_encoder(self.train_encoder)
             .seed(self.seed);
         if let Some(e) = self.entropy {
@@ -240,6 +244,7 @@ impl ControlOptions {
         self.max_steps = args.usize_or("--max-steps", self.max_steps);
         self.warmup_episodes = args.usize_or("--warmup", self.warmup_episodes);
         self.warmup_epochs = args.usize_or("--warmup-epochs", self.warmup_epochs);
+        self.gauge_episodes = args.usize_or("--gauge", self.gauge_episodes);
         if let Some(k) = args.take_str("--warmup-keep") {
             self.warmup_keep =
                 k.parse().map_err(|_| format!("--warmup-keep: {k:?} is not a number"))?;
@@ -286,6 +291,13 @@ impl Options for ControlOptions {
                       it: the two phases optimise different objectives, and
                       where return is sparse and noisy the pull is mostly
                       noise. 0 (the default) is no anchor
+  --gauge N           score the policy on the SAME N worlds after every
+                      iteration, and keep the iteration that did best on
+                      them. Without it the comparison is between scores taken
+                      on worlds that moved: measured here, a player that
+                      cannot change at all scores 0.59 to 0.73 across five
+                      blocks of sixteen generated levels, which is most of the
+                      movement a training run appears to show
   --target-kl F       abandon the remaining passes over a batch once the
                       policy has moved this far from the one that collected
                       it. Clipping alone is not a trust region: it silences

@@ -428,9 +428,7 @@ fn train(env: DoomEnv, args: &Args) -> Result<(), String> {
     let mut pipe = out?;
     println!("doom: wrote {}\n", args.train.save);
 
-    let seeds: Vec<u64> = (0..args.eval_episodes as u64)
-        .map(|i| 5_000_000 + i)
-        .collect();
+    let seeds: Vec<u64> = eval_seeds(args);
     println!(
         "doom: scoring both players over the same {} episodes",
         seeds.len()
@@ -443,6 +441,23 @@ fn train(env: DoomEnv, args: &Args) -> Result<(), String> {
     pt.print("policy");
     st.print("scripted");
     Ok(())
+}
+
+/// The episodes an evaluation is scored over.
+///
+/// FIXED for a given `--seed`, which is the whole point: the worlds a policy
+/// is judged on must not move while the policy does, or the difference
+/// between two scores is mostly the difference between two sets of worlds.
+/// On a generated level the seed IS the world, so this matters here far more
+/// than it does on a fixed map.
+///
+/// `--seed` shifts the whole block, which is how the spread BETWEEN blocks
+/// gets measured - the part of a score that is the draw rather than the
+/// player.
+fn eval_seeds(args: &Args) -> Vec<u64> {
+    (0..args.eval_episodes as u64)
+        .map(|i| 5_000_000 + args.seed().wrapping_mul(1009) + i)
+        .collect()
 }
 
 fn report(script: &view::Score, learned: &view::Score) {
@@ -472,9 +487,7 @@ fn report(script: &view::Score, learned: &view::Score) {
 /// number that matters here is the difference between two columns of this
 /// table rather than either column alone.
 fn evaluate(mut env: DoomEnv, args: &Args) -> Result<(), String> {
-    let seeds: Vec<u64> = (0..args.eval_episodes as u64)
-        .map(|i| 5_000_000 + i)
-        .collect();
+    let seeds: Vec<u64> = eval_seeds(args);
 
     println!("\ndoom: scripted player over {} episodes", seeds.len());
     let mut st = view::Timing::default();

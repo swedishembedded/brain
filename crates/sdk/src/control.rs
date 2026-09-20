@@ -689,6 +689,49 @@ impl<E: Env> ControlPipeline<E> {
         &mut self.env
     }
 
+    /// Score the policy on a FIXED block of episodes, the same block every
+    /// time, and say how far they got.
+    ///
+    /// The rollout cannot answer this. Its episodes come from a seed that
+    /// advances, so every iteration is scored on a different set of worlds -
+    /// and where the environment generates its world from the seed, the seed
+    /// IS the world. Measured on this repository's DOOM scenarios: the
+    /// scripted player, which cannot learn or degrade, scores between 0.59
+    /// and 0.73 across five blocks of sixteen worlds. That is a standard
+    /// deviation of 0.048 at sixteen episodes, or 0.068 at eight - against
+    /// which a policy's actual iteration-to-iteration movement of 0.079 is
+    /// almost entirely the draw.
+    ///
+    /// So the alternatives are compared under identical conditions instead:
+    /// same worlds, same action-sampler stream. This is the oldest trick in
+    /// simulation optimisation - common random numbers - and it does not
+    /// reduce the variance of either score, it removes the variance from
+    /// their DIFFERENCE, which is the only quantity anybody wanted.
+    fn gauge(&mut self, episodes: usize, max_steps: usize) -> Result<Option<f32>> {
+        if episodes == 0 {
+            return Ok(None);
+        }
+        // Set aside the stream the rollout is using, so that gauging does not
+        // change which episodes training goes on to see.
+        let saved_rng = self.rng.clone();
+        let saved_seed = self.episode_seed;
+        self.rng = data::rng::Rng::new(0x6a11_6e00);
+        let (mut got, mut measured) = (0.0f32, 0usize);
+        for i in 0..episodes {
+            // A block no rollout will ever draw, so the policy is judged on
+            // worlds it was not just trained on.
+            self.episode_seed = 0x4000_0000 + i as u64;
+            self.episode(self.episode_seed, false, max_steps, false)?;
+            if let Some(p) = self.env.progress() {
+                got += p;
+                measured += 1;
+            }
+        }
+        self.rng = saved_rng;
+        self.episode_seed = saved_seed;
+        Ok((measured > 0).then(|| got / measured as f32))
+    }
+
     /// The episode horizon evaluation and play use.
     pub fn max_steps(&self) -> usize {
         self.max_steps
@@ -745,6 +788,11 @@ pub struct ControlSpec {
     /// clone_teacher`]. Lower it when the teacher has failure modes worth not
     /// teaching.
     pub warmup_keep: f32,
+    /// Episodes on a FIXED block of worlds, scored after every iteration, to
+    /// decide which iteration to keep. `0` falls back to the rollout's own
+    /// numbers, which are measured on worlds that move. See
+    /// `ControlPipeline::gauge`.
+    pub gauge_episodes: usize,
     /// Passes over the collected demonstrations.
     ///
     /// Needed because the demonstrations are a small fixed dataset and one
@@ -780,6 +828,7 @@ impl Default for ControlSpec {
             warmup_episodes: 60,
             warmup_epochs: 12,
             warmup_keep: 1.0,
+            gauge_episodes: 0,
             freeze_encoder: true,
         }
     }
@@ -814,6 +863,12 @@ impl ControlSpec {
         self.warmup_epochs = n;
         self
     }
+    /// See [`ControlSpec::gauge_episodes`].
+    pub fn gauge_episodes(mut self, n: usize) -> ControlSpec {
+        self.gauge_episodes = n;
+        self
+    }
+
     /// See [`ControlSpec::warmup_keep`].
     pub fn warmup_keep(mut self, f: f32) -> ControlSpec {
         self.warmup_keep = f;
@@ -932,9 +987,16 @@ impl<E: Env> Stages for ControlPipeline<E> {
                     spec.epochs
                 );
             }
-            // Ranked on how far the episodes GOT when the environment can
-            // say, and on return only when it cannot. See `Env::progress`.
-            let rank = stats.mean_progress.unwrap_or(stats.mean_return);
+            // Ranked on the FIXED block when there is one, because the
+            // rollout's own episodes are drawn from worlds that move and the
+            // difference between two of those scores is mostly the draw.
+            let gauged = self.gauge(spec.gauge_episodes, spec.max_steps)?;
+            if let Some(g) = gauged {
+                println!("           on the fixed block: {g:.3}");
+            }
+            let rank = gauged
+                .or(stats.mean_progress)
+                .unwrap_or(stats.mean_return);
             if best.is_none() || rank > best_rank {
                 best_rank = rank;
                 best = Some((it + 1, self.model.head_weights()));
