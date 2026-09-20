@@ -1232,26 +1232,91 @@ samples still inside the band, and four passes over a two-thousand-step batch
 in minibatches of sixty-four is about a hundred and twenty optimizer steps -
 so an iteration can end a long way from the policy whose data justified it.
 
-Every reference implementation guards this by measuring the divergence and
-abandoning the rest of the passes. Spinning Up calls it early stopping and
-defaults the threshold to 0.01, and is explicit that the clipped objective
-alone does not keep a policy inside a trust region. This had no version of
-it, which is the actual defect.
+Measured with the guard reporting rather than acting: one pass moved the
+policy 0.0403 on the first iteration and 0.1718 on the second, against a
+threshold of 0.02 and Spinning Up's default of 0.01. Checking once a pass is
+finished is too coarse to bind. Checked before each minibatch step instead,
+an iteration takes 13 of 60 steps rather than all 120.
 
-`--target-kl` is that guard, on by default at 0.02, measured with Schulman's
-k3 estimator `(r - 1) - ln r` on the action taken - unbiased, never negative,
-and quieter than `-ln r`, which matters because a stopping rule built on
-something that can come out negative stops on noise. When it fires, the run
-says how many passes it managed and how far the policy had gone.
+That is a real defect and it is fixed. It did not make the policy better.
 
-`--anchor` is the other half and is off by default: the full
-`KL(pi || reference)` against the policy the warm start produced. A policy
-gradient started from a cloned policy has no reason to stay near it, because
-the two phases optimise different objectives - and where return is sparse and
-its estimate noisy, what is left pulling is mostly noise. Holding the update
-near a fixed reference is how RLHF keeps a tuned model near the one it was
-tuned from, and it is the same problem.
+#### What the measurement was actually doing
 
+The number every one of those judgements rested on came from the rollout,
+whose episodes are drawn from a seed that advances - so each iteration was
+scored on DIFFERENT WORLDS. Where the environment generates its world from
+the seed, the seed IS the world.
+
+The scripted player, which cannot learn or degrade, over five blocks of
+sixteen generated levels:
+
+```
+0.69  0.73  0.59  0.67  0.63        mean 0.662, sd 0.048
+```
+
+A spread of 0.14 from a player that never changed. At eight episodes that is
+a standard deviation of 0.068, against the 0.079 a training run moves between
+iterations. **There was no collapse.** The 0.83 that started the whole
+investigation was a lucky draw: the same policy scores 0.83 on its rollout
+and 0.658 on a fixed block, and 0.658 is where its teacher sits.
+
+`--gauge N` scores every iteration on the SAME N worlds with the same
+action-sampler stream. This is common random numbers, which simulation
+optimisation has used for forty years and which nothing in the PPO literature
+mentions, because a fixed Atari level does not have this problem. It does not
+reduce the variance of either score - it removes the variance from their
+difference, which is the only quantity anybody wanted.
+
+#### Six things tried, and what each was worth
+
+Every arm below was gauged on the same sixteen worlds. The teacher scores
+0.662 on them.
+
+| change | did what it claimed | made the policy better |
+| --- | --- | --- |
+| route-distance shaping | yes, at the predicted magnitude | no: +0.023 +- 0.040 |
+| fixed-block gauge | yes - exposed 0.17 of phantom signal | it is a measurement |
+| trust region that binds | yes - 120 steps to 13 | no |
+| step ten times smaller | yes - 16% of batch used to 62% | no, worse |
+| batch four times bigger | no - 4x the data, 2% applied | no |
+| unbiased advantage (lambda 1) | yes - the exit reaches decision one | no |
+| mean of the iterates | beat a typical iterate, lost to the best | no |
+
+```
+control   lr 3e-4  lambda .95   mean 0.640
+smallstep lr 3e-5  lambda .95   mean 0.642
+bigbatch  32 episodes           mean 0.657
+fullret   lambda 1.0            mean 0.665      teacher 0.662
+```
+
+Every arm sits on the teacher's line. Two of the six were genuine defects and
+are fixed on their own merits. None of them improved the policy.
+
+The final scored comparison, both players over the same 24 episodes:
+
+```
+             return    game   kills  items  exits  deaths  burned  progress
+scripted      16.14   13.93    5.3    0.0     10      5     35.8     0.70
+policy        15.51   12.87    5.0    0.0     10      2     64.4     0.73
+```
+
+Parity. The same exits, fewer deaths, a shade more progress, and a lower
+score on the reward it was trained on - which is the objective and the metric
+disagreeing, with the metric on the right side of it. Twelve iterations of
+policy gradient bought what behaviour cloning already had.
+
+#### What is not known
+
+The likeliest explanation is scale: about 24,000 decisions against the 10^6
+to 10^7 at which PPO is known to work. But that comparison is to networks
+learning perception AND control from pixels, and this learns 445k parameters
+on top of perception that is already solved, so the right figure may be much
+smaller and is not known here.
+
+What is known is that the teacher can be queried at any state, for free,
+without limit - and that it has only ever been used for offline cloning from
+twenty-four episodes. Interactive imitation rolls the POLICY out and asks the
+TEACHER what it would have done there. Nothing here has tried it.
 
 ### What would move this next
 
@@ -1283,6 +1348,12 @@ In the order the measurements point at, not in the order they are interesting:
 
 ## What is not claimed
 
+- **Reinforcement learning has not beaten behaviour cloning here.** Twelve
+  iterations of PPO over generated scenarios end at the teacher's score: same
+  exits, fewer deaths, a shade more progress, less return. Six interventions
+  on the learner were measured and none improved it. What the sample
+  demonstrates today is an environment, an observation, and a policy that
+  IMITATES a hand-written teacher - not one that improves on it.
 - **Generalization is not proven.** A policy trained on E1M1-E1M3 does not
   finish E1M4, and neither does the teacher. It survives longer and kills more
   than the teacher there, which is worth something and is not the claim.
