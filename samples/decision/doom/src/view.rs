@@ -802,9 +802,15 @@ pub fn bench(env: DoomEnv, args: &Args) -> Result<(), String> {
         .map_err(|e| format!("{e}"))?;
 
     let word = "corridor imp shotgun ";
+    // Two columns, because they are two different numbers and only one of
+    // them is what a run pays. `same` repeats one decision; `fresh` changes
+    // the words at every call, which is what a game does - and a decision
+    // whose token ids it has not seen before is a decision the model has to
+    // re-record its dispatch graph for. Benchmarking the repeat alone
+    // measures a case that never occurs.
     println!(
-        "\n  {:>7} {:>8} {:>10} {:>12}",
-        "state", "options", "ms/call", "calls/s"
+        "\n  {:>7} {:>8} {:>12} {:>12} {:>12}",
+        "state", "options", "same ms", "fresh ms", "fresh/s"
     );
     for &(state_words, n_opts) in &[
         (4usize, 1usize),
@@ -829,10 +835,18 @@ pub fn bench(env: DoomEnv, args: &Args) -> Result<(), String> {
         for _ in 0..n {
             pipe.policy(&state, &options).map_err(|e| format!("{e}"))?;
         }
-        let ms = t.elapsed().as_secs_f64() * 1000.0 / n as f64;
+        let same = t.elapsed().as_secs_f64() * 1000.0 / n as f64;
+        let t = std::time::Instant::now();
+        for k in 0..n {
+            let opts: Vec<String> = (0..n_opts)
+                .map(|i| format!("attack the imp {} degrees to your left", i * 31 + k * 7))
+                .collect();
+            pipe.policy(&state, &opts).map_err(|e| format!("{e}"))?;
+        }
+        let fresh = t.elapsed().as_secs_f64() * 1000.0 / n as f64;
         println!(
-            "  {state_words:>7} {n_opts:>8} {ms:>10.2} {:>12.0}",
-            1000.0 / ms
+            "  {state_words:>7} {n_opts:>8} {same:>12.2} {fresh:>12.2} {:>12.0}",
+            1000.0 / fresh
         );
     }
     println!(
