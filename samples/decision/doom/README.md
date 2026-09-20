@@ -1104,6 +1104,102 @@ scripted runs at engine seeds 19265 and 19266 are byte-identical for all 156
 decisions. The variety in a rollout comes almost entirely from the policy's
 own sampling, which is variety in the ACTIONS and none at all in the WORLD.
 
+### Run 11 - what PPO could see, and what it could not
+
+Trained on six generated scenarios, thirty iterations of eight episodes,
+warm-started from the scripted player. It did not improve on the warm start.
+It made it worse and then held it there:
+
+```
+iteration 1  (the cloned policy, before any update)   5/8 wins   progress 0.84
+iterations 2-11  (after the policy gradient)          2-3/8      progress 0.69 +- 0.06
+```
+
+A spread of 0.06 across ten iterations is not sampling noise. PPO found a
+stable optimum and it was worse than where it started, which is a documented
+failure mode for a behaviour-cloned policy handed a sparse return: the two
+phases optimise different objectives and nothing anchors the second to the
+first.
+
+The arithmetic says which signal did it. The advantage estimator weights a
+reward `k` steps ahead by `(gamma * lambda)^k`, and `gamma * lambda` is
+0.9405 here:
+
+```
+a reward  11 decisions ahead reaches this step with weight 0.509
+a reward 100 decisions ahead                               0.002
+a reward 200 decisions ahead                               0.000005
+```
+
+A half-life of 11.3 decisions. And in a finishing episode the exit is **89%
+of the return, paid on a single step**. So every decision before roughly the
+last thirty was learning from the dense terms alone - and the largest dense
+term was the exploration bonus, which pays for covering NEW floor.
+
+The signal the gradient could see rewarded wandering. The signal that
+rewarded finishing could not be seen from where the work was done. PPO
+correctly maximised the one it could see, which is the same lesson as the
+nukage weight in run 9 and the straight-line shaping before that: an agent
+that keeps doing the wrong thing is usually an agent correctly optimising
+what it was given.
+
+The implementation itself checks out against the reference list of PPO
+details - clipped surrogate, GAE, shuffled minibatches, per-minibatch
+advantage normalisation, linear learning-rate decay, about 2000 transitions
+split 32 ways, which is MuJoCo's own recipe. Nothing there is the problem.
+
+#### The dense term that agrees with the sparse one
+
+Cells of ROUTE closed on the goal since the last decision, where route
+distance is over walkable ground the player has actually seen.
+
+This is the shaping rejected earlier, with the reason for the rejection taken
+away. That one used a STRAIGHT LINE, which goes through walls: pressing
+against the wall the exit is behind reduced it, so the agent was paid to walk
+into walls, and it did. Route distance does not fall when the player walks
+into a wall, because the route does not go through it.
+
+It is the undiscounted difference rather than Ng, Harada and Russell's
+`gamma * phi(s') - phi(s)`, and that is deliberate. With a negative potential
+the discounted form leaves a residue of `d * (1 - gamma)` when nothing
+happens at all - at a goal 5300 units away, a decision spent standing
+perfectly still earns 1.66 cells' worth of progress. The difference form pays
+exactly nothing for standing still, exactly nothing for going out and coming
+back, and exactly nothing for walking into a wall, at any distance. Those
+three are the properties that matter; strict invariance under a discount the
+shaping does not share is not, and the code says so rather than assuming it.
+
+It refuses to pay for two things. Unexplored ground is not a goal, because
+the frontier moves every time it is reached and paying to close on it is
+paying the exploration bonus twice under another name. And a distance that
+jumps further than a player could walk in one decision is the route
+re-planning over ground just seen, which is the map getting better rather
+than the player getting closer.
+
+#### The bug the fix exposed
+
+The shaping did nothing at all, and the warm start coming back byte-identical
+is what gave it away. **None of the scenarios had an exit linedef.** They
+ended by calling `G_ExitLevel` from C on picking up the armour, which works
+and leaves the map with no exit line - so the route had no goal for the whole
+episode, fell back to frontier exploration, and there was no route distance
+to a goal to shape against. The term was exactly zero on every episode.
+
+That is much worse than a disabled reward term. It means the scenarios could
+not teach what the real levels test: on a real level the route acquires a
+goal the moment the exit is seen and the agent practises heading for it; on a
+scenario it never had one to practise on.
+
+Both scenarios whose task is to GET somewhere now end at a line, which is how
+a DOOM level ends. The teacher went from finishing 3 of 14 my-way-home
+episodes to 24 of 24 across both, by exploring until it sees the marked room
+and then going there.
+
+`--approach 0` turns the term off, which is the ablation - same code, same
+maps, same seed, one weight zeroed. The geometry changed in the same commit
+that added the term, so the eleven iterations above are no longer a
+comparison and a fresh pair is needed.
+
 ### What would move this next
 
 In the order the measurements point at, not in the order they are interesting:
