@@ -375,6 +375,9 @@ pub struct DoomEnv {
     warned_dropped: bool,
     /// How this episode has been going, for the line printed when it ends.
     progress: Progress,
+    /// What the player has seen and can no longer see. See
+    /// [`crate::memory::Memory`].
+    memory: crate::memory::Memory,
     /// Set when the game itself failed (the process died, the socket broke).
     /// An environment that silently returns a terminal state on an I/O error
     /// teaches the policy that the error was a legal end to an episode.
@@ -415,6 +418,7 @@ impl DoomEnv {
             recent_wins: std::collections::VecDeque::new(),
             warned_dropped: false,
             progress: Progress::new(),
+            memory: crate::memory::Memory::new(),
             fault: None,
         }
     }
@@ -515,7 +519,17 @@ impl DoomEnv {
         // describes it.
         let json = self.doom.step("[]", 1).map_err(|e| format!("{e}"))?;
         self.state = State::parse(&json)?;
+        self.remember();
         Ok(())
+    }
+
+    /// Fold the settled observation into the player's memory, and put back
+    /// what it now recalls. Called once per observation, after any last
+    /// adjustment to the state, because what is remembered has to be what
+    /// the agent was actually shown.
+    fn remember(&mut self) {
+        self.memory.observe(&self.state);
+        self.state.recalled = self.memory.recall(&self.state);
     }
 
     /// What the game itself scored this episode, with no exploration bonus.
@@ -795,6 +809,7 @@ impl DoomEnv {
             // The final response's own events are already in `carried`.
             self.state.events = carried;
         }
+        self.remember();
         self.steps += 1;
         let pos = (
             self.state.player.x.unwrap_or(0),
@@ -908,6 +923,10 @@ impl DoomEnv {
         self.stuck = 0;
         self.tried.clear();
         self.recent.clear();
+        // A new episode is a new world: nothing seen in the last one is
+        // anywhere now, least of all on a level that is built fresh.
+        self.memory.clear();
+        self.remember();
         self.visited.clear();
         self.commit = 0;
         self.commit_tag = None;
@@ -1004,6 +1023,14 @@ impl DoomEnv {
                 .pickups
                 .iter()
                 .any(|p| p.visible && p.distance < d)
+                // One it saw a moment ago counts too, and at a longer reach:
+                // the whole point of remembering it is that going back for it
+                // is now a thing that can be decided rather than stumbled on.
+                || self
+                    .state
+                    .recalled
+                    .iter()
+                    .any(|r| r.class != crate::memory::Class::Threat && r.distance < d * 3)
         };
 
         // Standing in slime: anywhere else will do, and the exit route is

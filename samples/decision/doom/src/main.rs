@@ -38,6 +38,7 @@ mod action;
 mod doom;
 mod env;
 mod frame;
+mod memory;
 mod obs;
 mod report;
 mod view;

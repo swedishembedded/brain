@@ -161,6 +161,44 @@ pub fn options(state: &State) -> Vec<Option_> {
         });
     }
 
+    // Something seen a moment ago and no longer in view. Without this the
+    // only way anything is ever collected is by walking into it: the option
+    // to go and get a medikit disappears in the same decision the player
+    // stops looking at it. Items only - a monster has moved since, and
+    // "go to where it was" is an invitation to walk into where it is not.
+    //
+    // Only when there is floor that way. The option walks a STRAIGHT LINE at
+    // where the thing was, and a remembered medikit two rooms away through a
+    // wall turns "go back for it" into "walk at that wall" - measured on
+    // health-gathering-supreme, where offering it unguarded cost the scripted
+    // player three extra deaths in twenty-four episodes. The route is what
+    // knows the way round corners, and it does not yet take a remembered
+    // thing as a goal.
+    for r in state
+        .recalled
+        .iter()
+        .filter(|r| r.class != crate::memory::Class::Threat)
+        .filter(|r| c.toward(r.bearing) >= r.distance.min(300))
+        .take(2)
+    {
+        out.push(Option_ {
+            text: format!(
+                "go back for the {} you saw, {} units {}",
+                r.kind.to_lowercase(),
+                r.distance,
+                bearing_phrase(r.bearing)
+            ),
+            commands: format!(
+                "[{},{{\"type\":\"forward\",\"amount\":{}}}]",
+                json_turn(state.facing(r.bearing)),
+                walk_tics(r.distance)
+            ),
+            tics: walk_tics(r.distance),
+            tag: Tag::Grab,
+            room: r.distance,
+        });
+    }
+
     // --- move -------------------------------------------------------------
     //
     // Every way of moving says whether it walks into burning floor, and from

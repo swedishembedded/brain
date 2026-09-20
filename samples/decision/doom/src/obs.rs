@@ -63,6 +63,11 @@ pub struct State {
     /// that is in the observation because it might help is one nobody can
     /// measure the value of.
     pub unexplored: Option<Frontier>,
+    /// What the player saw a moment ago and can no longer see. Filled in by
+    /// the environment from [`crate::memory::Memory`], not by the engine -
+    /// this is the agent's memory, not the world's.
+    #[serde(skip)]
+    pub recalled: Vec<crate::memory::Recalled>,
     pub events: Vec<Event>,
     /// Present only when the engine's per-step event buffer overflowed.
     #[serde(rename = "eventsDropped", default)]
@@ -166,6 +171,23 @@ pub struct Clearance {
     pub ahead_right: i32,
     #[serde(rename = "aheadLeft")]
     pub ahead_left: i32,
+}
+
+impl Clearance {
+    /// How much floor there is in roughly this direction. The engine probes
+    /// six of them, so this is the nearest probe, not a measurement along the
+    /// bearing itself.
+    pub fn toward(&self, bearing: i32) -> i32 {
+        let b = ((bearing % 360) + 360) % 360;
+        match b {
+            0..=22 | 338..=359 => self.ahead,
+            23..=67 => self.ahead_left,
+            68..=112 => self.left,
+            113..=247 => self.behind,
+            248..=292 => self.right,
+            _ => self.ahead_right,
+        }
+    }
 }
 
 #[allow(dead_code)]
@@ -463,6 +485,29 @@ pub fn render(state: &State, history: History) -> String {
         out.push_str(".\n");
     }
 
+    // What was in sight a moment ago and is not now. A player who looks left,
+    // sees a medikit and then looks right has not forgotten the medikit, and
+    // an observation that drops it the instant the head turns makes picking
+    // anything up a matter of walking into it by accident.
+    if !state.recalled.is_empty() {
+        out.push_str("Last seen: ");
+        for (i, r) in state.recalled.iter().enumerate() {
+            if i > 0 {
+                out.push_str("; ");
+            }
+            out.push_str(&format!(
+                "{} {} units {}",
+                r.kind.to_lowercase(),
+                r.distance,
+                side_word(r.bearing)
+            ));
+            if r.class == crate::memory::Class::Threat {
+                out.push_str(", which moves");
+            }
+        }
+        out.push_str(".\n");
+    }
+
     if let Some(b) = state.hazards.iter().find(|b| b.visible && b.distance < 400) {
         // A barrel beside a monster is a free kill and beside the player is a
         // way to die, so where they are belongs in the state.
@@ -650,6 +695,41 @@ pub fn render(state: &State, history: History) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn what_was_seen_and_is_no_longer_in_view_is_still_said() {
+        let mut s = State::parse(SAMPLE).expect("parses");
+        s.recalled = vec![
+            crate::memory::Recalled {
+                id: 7,
+                kind: "Medikit".into(),
+                class: crate::memory::Class::Pickup,
+                bearing: 170,
+                distance: 220,
+                health: None,
+                ago: 3,
+            },
+            crate::memory::Recalled {
+                id: 9,
+                kind: "FORMER HUMAN SERGEANT".into(),
+                class: crate::memory::Class::Threat,
+                bearing: -80,
+                distance: 340,
+                health: Some(12),
+                ago: 2,
+            },
+        ];
+        let text = render(&s, History::default());
+        assert!(text.contains("Last seen:"), "{text}");
+        assert!(text.contains("medikit 220 units"), "{text}");
+        // A monster has moved since; an item has not, and the difference is
+        // the whole of what makes the memory usable.
+        assert!(text.contains("which moves"), "{text}");
+        assert!(
+            !text.contains("medikit 220 units behind you, which moves"),
+            "an item does not walk off: {text}"
+        );
+    }
 
     const SAMPLE: &str = r#"{"tic":100,"episodeTic":40,"level":{"episode":1,"map":1,"skill":2,
       "tic":40,"kills":1,"totalKills":4,"items":0,"totalItems":37,"secrets":0,"totalSecrets":3},
