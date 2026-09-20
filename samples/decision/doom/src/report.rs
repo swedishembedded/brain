@@ -125,6 +125,54 @@ impl Score {
     }
 }
 
+/// The learning signal the gauge itself defines.
+///
+/// A run is kept or discarded on [`Score::value`], so that is what a decision
+/// should be paid for moving. `Score` can score a PREFIX - `toward_best` is a
+/// running maximum, `alive` is health now, `lasted` is decisions so far - so
+/// the value exists after every decision, and the difference between two
+/// consecutive values is what the decision in between was worth.
+///
+/// Undiscounted, those differences sum to exactly the final gauge:
+///
+/// ```text
+/// sum_t [ M(h_t+1) - M(h_t) ]  =  M(h_T) - M(h_0)  =  M(h_T)
+/// ```
+///
+/// because an episode begins with nothing covered, nothing survived and
+/// nothing finished, so `M(h_0)` is zero. That identity is the point of the
+/// type: it is an algebraic guarantee that maximising return maximises the
+/// gauge, rather than a hope that separately chosen weights for kills, items
+/// and floor covered happen to rank two runs the way the gauge ranks them.
+/// They did not. Measured on this sample, about 92% of a shaped episode's
+/// return was the exploration bonus, which the gauge does not read at all -
+/// so every iteration was trained on one quantity and kept on another.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Gauge {
+    paid: f32,
+}
+
+impl Gauge {
+    /// One per episode. Starting at zero is what makes the sum come out at
+    /// the gauge rather than at the gauge minus wherever the last run ended.
+    pub fn new() -> Gauge {
+        Gauge::default()
+    }
+
+    /// What the decision that arrived at `now` was worth: everything `now` is
+    /// worth that has not already been paid for.
+    pub fn credit(&mut self, now: f32) -> f32 {
+        let moved = now - self.paid;
+        self.paid = now;
+        moved
+    }
+
+    /// Everything credited so far, which is the gauge as of now.
+    pub fn paid(&self) -> f32 {
+        self.paid
+    }
+}
+
 impl Progress {
     pub fn new() -> Progress {
         Progress::default()
@@ -314,6 +362,37 @@ impl Progress {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Whatever a run scored, that is what it was paid - no more, no less.
+    ///
+    /// This is the property the shaped reward did not have and could not be
+    /// given by tuning, because it weighs things the gauge never looks at.
+    #[test]
+    fn a_run_is_paid_exactly_what_it_scored() {
+        // The prefix scores of one run, decision by decision: some ground
+        // closed, a stretch where nothing moved, damage that took back part
+        // of what was covered, then the exit.
+        let run = [0.10, 0.22, 0.22, 0.18, 0.31, 1.25];
+        let mut g = Gauge::new();
+        let paid: f32 = run.iter().map(|&v| g.credit(v)).sum();
+        let scored = *run.last().expect("a run has decisions");
+        assert!(
+            (paid - scored).abs() < 1e-6,
+            "the run scored {scored} and the policy was paid {paid}"
+        );
+        assert!((g.paid() - scored).abs() < 1e-6);
+
+        // The setback has to COST, or the sum could not come out - a reward
+        // that clipped it to zero would pay more than the run was worth and
+        // the guarantee would be gone.
+        let mut g = Gauge::new();
+        g.credit(0.22);
+        assert!(g.credit(0.18) < 0.0, "losing ground has to cost what gaining it paid");
+
+        // A fresh gauge per episode: one carried over would charge the next
+        // run for where the last one finished.
+        assert_eq!(Gauge::new().paid(), 0.0);
+    }
 
     #[test]
     fn a_run_that_did_not_finish_still_has_a_number_on_it() {

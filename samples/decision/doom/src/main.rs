@@ -46,7 +46,7 @@ mod view;
 use brain::options::{Args as Args_, ControlOptions, Hardware, Options, ViewOptions};
 use brain::ControlPipeline;
 use doom::{Config, Doom, Paths};
-use env::{DoomEnv, Mission};
+use env::{DoomEnv, Mission, Payment};
 
 /// This sample's own options, on top of the shared groups.
 ///
@@ -67,6 +67,8 @@ pub struct Args {
     pub scenarios: Vec<String>,
     /// Overrides the mission's route-closing weight, for ablating it.
     pub approach: Option<f32>,
+    /// What a decision is paid for. See [`Payment`].
+    pub payment: Payment,
     pub mission: Mission,
     pub mix: bool,
     pub arena: usize,
@@ -146,6 +148,15 @@ what to play
                         my-way-home               find the armour in a new maze
                         predict-position          a walking target, a slow rocket
                         take-cover                dodge, and keep dodging
+  --reward gauge|shaped
+                      what a decision is paid for.               [shaped]
+                      `gauge` pays it what it moved the SCORE the run is
+                      finally kept on, so an episode's undiscounted return IS
+                      that score - training and selection then optimise one
+                      number instead of two. `shaped` is the weighted sum of
+                      kills, items, damage, floor newly walked and route
+                      closed: measured, about 92% of it is the exploration
+                      bonus, which the score does not read at all
   --approach F        what a 32-unit cell of ROUTE closed on the goal pays.
                       Defaults to the mission's own. `--approach 0` turns it
                       off, which is the ablation: without it the only dense
@@ -290,11 +301,21 @@ fn parse_args() -> Result<Args, String> {
         ),
         None => None,
     };
+    let payment = match args.take_str("--reward") {
+        Some(v) => Payment::parse(v.trim()).ok_or_else(|| {
+            format!(
+                "--reward: {v:?} is not one of {}",
+                Payment::ALL.map(|p| p.name()).join(", ")
+            )
+        })?,
+        None => Payment::Shaped,
+    };
     let parsed = Args {
         command,
         maps,
         scenarios,
         approach,
+        payment,
         doom_bin: args.take_str("--doom-bin"),
         wad: args.take_str("--wad"),
         cfg,
@@ -369,6 +390,7 @@ fn run() -> Result<(), String> {
     env.set_scenarios(args.scenarios.clone());
     env.set_max_steps(args.max_steps());
     env.set_approach(args.approach);
+    env.set_payment(args.payment);
     env.set_arena(args.arena);
     env.set_curriculum(args.curriculum);
     env.set_start_distance(args.start_distance);

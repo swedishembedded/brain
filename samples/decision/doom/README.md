@@ -254,8 +254,32 @@ doom bench $D
 
 ## How the training works
 
-Four mechanisms, in the order they run. Each is there because something
+Five mechanisms, in the order they run. Each is there because something
 measurably did not work without it.
+
+**0. Being paid for the thing you are judged on.** `--reward gauge` pays a
+decision exactly what it moved the score the run is finally kept or discarded
+on, so an episode's undiscounted return *is* that score:
+
+```text
+sum_t [ M(h_t+1) - M(h_t) ]  =  M(h_T) - M(h_0)  =  M(h_T)
+```
+
+That identity is algebra, not tuning. It holds because the score can be
+computed on a PREFIX - how far along the route the run has ever got, how much
+health it has now, how many decisions it has survived - so it exists after
+every decision and the difference between two of them is what the decision in
+between was worth.
+
+The default, `--reward shaped`, is the older scheme: separately chosen weights
+for kills, items, damage taken, floor newly walked and route closed. It has no
+such guarantee, and measured on this sample about 92% of a shaped episode's
+return was the exploration bonus - a quantity the score does not read at all.
+Every training run before this one was therefore *trained* on one number and
+*kept* on another, and the gap between them was never small.
+
+The check is visible in any run's own log: under `--reward gauge` an episode's
+`return` and its `progress` print the same number, to the decimal place.
 
 **1. A scripted teacher, cloned - but only its good episodes.** Reinforcement
 learning from a random start over a text action space is slow enough to look

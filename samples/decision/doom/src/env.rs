@@ -59,7 +59,39 @@ use crate::action::{self, Option_, Tag};
 use crate::doom::{Config, Doom};
 use crate::frame::{Frame, Map};
 use crate::obs::{self, History, State};
-use crate::report::Progress;
+use crate::report::{Gauge, Progress};
+
+/// What a decision is paid for.
+///
+/// The two are not two tunings of one idea. [`Payment::Shaped`] is a weighted
+/// sum over things that happened - kills, items, damage, floor newly walked -
+/// and [`Payment::Gauge`] is the movement of the single number a run is
+/// finally kept or discarded on. Only the second has any guarantee of
+/// agreeing with that number; see [`crate::report::Gauge`] for the identity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Payment {
+    /// DOOM's own events under the mission's weights, plus an exploration
+    /// bonus and route shaping.
+    Shaped,
+    /// What the decision changed about [`crate::report::Score::value`].
+    Gauge,
+}
+
+impl Payment {
+    pub const ALL: [Payment; 2] = [Payment::Shaped, Payment::Gauge];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Payment::Shaped => "shaped",
+            Payment::Gauge => "gauge",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Payment> {
+        Payment::ALL.into_iter().find(|p| p.name() == name)
+    }
+}
+
 
 /// What the agent is being told to do this episode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -344,6 +376,11 @@ pub struct DoomEnv {
     /// Overrides the mission's own `approach` weight, for measuring what that
     /// term is worth by turning it off. See [`CELL`].
     approach_weight: Option<f32>,
+    /// What a decision is paid for. See [`Payment`].
+    payment: Payment,
+    /// How much of the gauge this episode has already been paid for. Reset
+    /// with the episode, or the next run starts in debt.
+    gauge: Gauge,
     /// The decision budget an episode is given, so that "how far it got" can
     /// be a fraction rather than a count.
     max_steps: u32,
@@ -462,6 +499,8 @@ impl DoomEnv {
             mission_mix,
             maps: only,
             approach_weight: None,
+            payment: Payment::Shaped,
+            gauge: Gauge::new(),
             max_steps: 400,
             scenarios: Vec::new(),
             state: State::parse(EMPTY).expect("the empty state is well formed"),
@@ -518,6 +557,12 @@ impl DoomEnv {
     /// to decide; `Some(0.0)` is the ablation.
     pub fn set_approach(&mut self, w: Option<f32>) {
         self.approach_weight = w;
+    }
+
+    /// Pay decisions for what they moved the gauge, or by the mission's
+    /// weights. See [`Payment`].
+    pub fn set_payment(&mut self, p: Payment) {
+        self.payment = p;
     }
 
     /// How many decisions an episode is allowed, for scoring how far one got.
@@ -969,7 +1014,17 @@ impl DoomEnv {
             self.warned_dropped = true;
         }
         self.progress.note(&self.state);
-        let (r, extrinsic) = self.reward();
+        let (shaped, extrinsic) = self.reward();
+        // Both halves are computed whichever one is being paid: `reward` also
+        // keeps the floor-damage tally the observation reads and the route
+        // bookkeeping the shaping term needs, and the extrinsic number is
+        // reported either way. Only which of them the policy learns from
+        // changes here.
+        let closed = self.gauge.credit(self.score(self.max_steps).value());
+        let r = match self.payment {
+            Payment::Shaped => shaped,
+            Payment::Gauge => closed,
+        };
         self.total += r;
         self.extrinsic += extrinsic;
         if self.state.outcome == "exited" {
@@ -1018,6 +1073,23 @@ impl DoomEnv {
     }
 
     pub fn start(&mut self, seed: u64) -> String {
+        // Check the run that just ended before anything is reset. Paying a
+        // decision what it moved the gauge is only worth doing if what the
+        // episode was PAID adds up to what it SCORED, and there are paths -
+        // an engine that stopped answering, a state that would not parse -
+        // that end an episode without paying for the decision that ended it.
+        // Those are exactly the episodes whose return is a lie, and silently
+        // learning from them is how a reward becomes untrustworthy without
+        // anyone noticing.
+        if self.payment == Payment::Gauge && self.steps > 0 {
+            let scored = self.gauge.paid();
+            if (self.total - scored).abs() > 1e-3 {
+                eprintln!(
+                    "doom: episode {} was paid {:+.4} for a run that scored {scored:.4}",
+                    self.episode, self.total
+                );
+            }
+        }
         if self.mission_mix {
             // One policy, several orders: which one this episode runs under is
             // part of what the policy has to read.
@@ -1068,6 +1140,7 @@ impl DoomEnv {
         self.commit = 0;
         self.commit_tag = None;
         self.progress = Progress::new();
+        self.gauge = Gauge::new();
         if self.arena > 0 {
             if let Err(e) = self.build_arena(seed) {
                 self.fail(e);
