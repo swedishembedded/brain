@@ -1041,6 +1041,8 @@ impl<E: Env> Stages for ControlPipeline<E> {
         // ended rather than what was learned. Snapshotting costs one readback
         // of the head per iteration, which is nothing beside a rollout.
         let mut best_rank = f32::NEG_INFINITY;
+        let mut last_rank = f32::NEG_INFINITY;
+        let mut best_ranked_on = "";
         let mut best_by = Rollout::default();
         let mut best: Option<(usize, Vec<(String, Vec<f32>)>)> = None;
         // The running mean of the iterates, which is a different candidate
@@ -1126,11 +1128,20 @@ impl<E: Env> Stages for ControlPipeline<E> {
             let rank = gauged
                 .or(stats.mean_progress)
                 .unwrap_or(stats.mean_return);
+            let ranked_on = if gauged.is_some() {
+                "on the fixed block"
+            } else if stats.mean_progress.is_some() {
+                "over its own episodes"
+            } else {
+                "in return"
+            };
             if best.is_none() || rank > best_rank {
                 best_rank = rank;
+                best_ranked_on = ranked_on;
                 best = Some((it + 1, self.model.head_weights()));
                 best_by = stats;
             }
+            last_rank = rank;
         }
         // Both candidates, measured on the same worlds, and the better one
         // kept. Averaging is a claim about the shape of the sequence, not a
@@ -1155,17 +1166,15 @@ impl<E: Env> Stages for ControlPipeline<E> {
         }
         if let Some((it, w)) = best {
             if it != spec.iterations {
-                match (best_by.mean_progress, self.last.mean_progress) {
-                    (Some(b), Some(l)) => println!(
-                        "    keeping iteration {it}, which got {b:.2} of the way - the last \
-                         one got {l:.2}"
-                    ),
-                    _ => println!(
-                        "    keeping iteration {it}, which returned {:+.2} - the last \
-                         one returned {:+.2}",
-                        best_by.mean_return, self.last.mean_return
-                    ),
-                }
+                // The SAME number the choice was made on. Reporting the
+                // rollout's progress next to a decision taken on the fixed
+                // block is two different measurements and one decision, which
+                // reads as though the wrong iteration was kept.
+                println!(
+                    "    keeping iteration {it}, which scored {best_rank:.3} \
+                     {best_ranked_on} - the last one scored {last_rank:.3}"
+                );
+                let _ = &best_by;
                 self.model.set_head_weights(&w);
             }
         }
