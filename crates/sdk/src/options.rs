@@ -170,6 +170,8 @@ pub struct ControlOptions {
     pub average: usize,
     /// The head's learning rate, which trades against the trust region.
     pub head_lr: Option<f32>,
+    /// The bias/variance dial on the advantage estimator.
+    pub gae_lambda: Option<f32>,
     pub entropy: Option<f32>,
     /// Weight on staying near the policy the warm start produced. See
     /// `decide::policy::PolicyConfig::anchor`.
@@ -203,6 +205,7 @@ impl ControlOptions {
             gauge_episodes: d.gauge_episodes,
             average: d.average,
             head_lr: None,
+            gae_lambda: None,
             entropy: None,
             anchor: None,
             target_kl: None,
@@ -224,6 +227,7 @@ impl ControlOptions {
             .gauge_episodes(self.gauge_episodes)
             .average(self.average)
             .head_lr(self.head_lr.unwrap_or(0.0))
+            .gae_lambda(self.gae_lambda.unwrap_or(0.0))
             .train_encoder(self.train_encoder)
             .seed(self.seed);
         if let Some(e) = self.entropy {
@@ -254,6 +258,10 @@ impl ControlOptions {
         self.warmup_epochs = args.usize_or("--warmup-epochs", self.warmup_epochs);
         self.gauge_episodes = args.usize_or("--gauge", self.gauge_episodes);
         self.average = args.usize_or("--average", self.average);
+        if let Some(l) = args.take_str("--gae-lambda") {
+            self.gae_lambda =
+                Some(l.parse().map_err(|_| format!("--gae-lambda: {l:?} is not a number"))?);
+        }
         if let Some(l) = args.take_str("--head-lr") {
             self.head_lr =
                 Some(l.parse().map_err(|_| format!("--head-lr: {l:?} is not a number"))?);
@@ -319,6 +327,12 @@ impl Options for ControlOptions {
                       the last thing played, and Polyak-Ruppert averaging
                       reaches the optimal asymptotic variance under far looser
                       step-size tuning than any single iterate
+  --gae-lambda F      the bias/variance dial on the advantage estimator. At
+                      1.0 the advantage is the full return minus a baseline -
+                      noisy, unbiased, and it carries a reward paid at the
+                      exit back to the first decision. At the usual 0.95 it
+                      does not: `gamma * lambda` is 0.9405, so a reward a
+                      hundred decisions ahead arrives with weight 0.002
   --head-lr F         the head's step size, which trades against
                       `--target-kl` rather than standing alone. Too large and
                       the divergence budget is spent in a handful of

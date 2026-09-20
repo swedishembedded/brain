@@ -228,6 +228,9 @@ pub struct ControlPipeline<E: Env> {
     rng: data::rng::Rng,
     /// Advances across every rollout so a run never replays one episode.
     episode_seed: u64,
+    /// See [`ControlSpec::gae_lambda`]. Held here because the estimator runs
+    /// inside an episode, which does not see the spec.
+    gae_lambda: f32,
     /// The head as the warm start left it - the policy the anchor holds to.
     /// `None` when there was no warm start, or no anchor asked for.
     reference: Option<Vec<(String, Vec<f32>)>>,
@@ -425,7 +428,7 @@ impl<E: Env> ControlPipeline<E> {
             }
         };
         let values: Vec<f32> = steps.iter().map(|s| self.critic.predict(&s.feature)).collect();
-        let adv = gae(&rewards, &values, GAMMA, GAE_LAMBDA, truncated_value);
+        let adv = gae(&rewards, &values, GAMMA, self.gae_lambda, truncated_value);
         for ((s, a), v) in steps.iter_mut().zip(&adv).zip(&values) {
             s.advantage = *a;
             // The critic's regression target is the advantage plus what it
@@ -844,6 +847,18 @@ pub struct ControlSpec {
     /// Average the head over the last `average` iterates and keep that if it
     /// gauges better than the best single one. `0` is off.
     pub average: usize,
+    /// The bias/variance dial on the advantage estimator, overriding
+    /// [`GAE_LAMBDA`].
+    ///
+    /// At 1.0 the advantage is the full return minus a baseline: unbiased,
+    /// noisy, and - the point here - it carries a reward paid at the end of
+    /// an episode all the way back to its first decision. At the usual 0.95
+    /// it does not. With `gamma * lambda` at 0.9405 the weight on a reward a
+    /// hundred decisions ahead is 0.002, so on a task whose return is mostly
+    /// one payment at the exit, every decision before roughly the last thirty
+    /// is learning from the dense terms alone and the value function never
+    /// sees the goal.
+    pub gae_lambda: f32,
     /// The head's learning rate.
     ///
     /// Worth a flag because it trades against the trust region rather than
@@ -891,6 +906,7 @@ impl Default for ControlSpec {
             warmup_keep: 1.0,
             gauge_episodes: 0,
             average: 0,
+            gae_lambda: GAE_LAMBDA,
             head_lr: HEAD_LR,
             freeze_encoder: true,
         }
@@ -935,6 +951,14 @@ impl ControlSpec {
     /// See [`ControlSpec::average`].
     pub fn average(mut self, n: usize) -> ControlSpec {
         self.average = n;
+        self
+    }
+
+    /// See [`ControlSpec::gae_lambda`].
+    pub fn gae_lambda(mut self, l: f32) -> ControlSpec {
+        if l > 0.0 {
+            self.gae_lambda = l;
+        }
         self
     }
 
@@ -983,6 +1007,8 @@ impl<E: Env> Stages for ControlPipeline<E> {
             spec.epochs,
             if spec.freeze_encoder { "frozen" } else { "fine-tuned" }
         );
+        // The estimator runs inside an episode, which never sees the spec.
+        self.gae_lambda = spec.gae_lambda;
         if spec.warmup_episodes > 0 {
             let bc = self.clone_teacher(
                 spec.warmup_episodes,
@@ -1243,6 +1269,7 @@ impl<E: Env> ControlPipelineBuilder<E> {
             rng: data::rng::Rng::new(self.seed ^ 0xc0ffee),
             episode_seed: 0,
             reference: None,
+            gae_lambda: GAE_LAMBDA,
             last: Rollout::default(),
             critic: Critic::new(cfg_width, CRITIC_HIDDEN, self.seed ^ 0x1c1),
             critic_mse: 0.0,
