@@ -900,32 +900,101 @@ about the policy:
   profitable. The agent that kept doing it was not failing to learn; it was
   correctly learning what it had been told.
 
+### Run 10 - the held-out level, which is the claim that matters
+
+Trained on E1M1, E1M2 and E1M3 under fair play; scored on **E1M4, which the
+policy has never been in**. Ten iterations of six episodes, warm-started from
+the scripted player, encoder frozen. The rollout returns:
+
+```
++15.83  +13.68  +10.76  +13.47  +15.59  +9.33  +15.86  +8.98  +7.03  +0.10
+```
+
+Iteration 7 is kept, not iteration 10. That is not a detail: the run ENDS on
+its worst policy, and until the SDK learned to keep the best one, training
+handed back +0.10 and 0 of 6 wins while +15.86 and 2 of 6 sat discarded four
+iterations back. One earlier generalization run was thrown away for this
+reason before the cause was found.
+
+On the three levels it trained on, six episodes each:
+
+```
+              return     game    kills    items    exits   deaths   burned
+scripted       14.29    11.40      8.7      1.7        2        2      0.0
+policy          9.02     5.32      9.5      1.2        1        1     22.0
+```
+
+On E1M4, which neither player has seen:
+
+```
+              return     game    kills    items    exits   deaths   burned
+scripted       -4.70    -7.99      5.3      0.0        0        4      0.0
+policy         -3.74    -8.75      9.7      0.3        0        5     29.3
+```
+
+**Neither finishes. Generalization is not proven.** What the policy does do on
+unfamiliar ground is survive longer and fight better - 689 decisions against
+461, 9.7 kills against 5.3 - and it is ahead on return by 0.96 while behind on
+the game's own score by 0.75. It explores where the teacher stalls: the
+scripted player spends its last 60 decisions circling two patches of floor,
+five times out of six dying to the same imp at the same spot at decision 241.
+
+Three things this measures, in the order they bind:
+
+- **Survival is the constraint, not the horizon.** Every policy episode ends
+  in a death between decision 566 and 740, out of 900 allowed. It does not run
+  out of time; it runs out of health while still exploring. Raising the
+  decision cap would change nothing.
+- **The slime lesson did not travel.** It burned 0.0 on the training levels
+  and 29.3 on E1M4, and nukage lands the killing blow in two of six episodes.
+  Run 9 showed the gradient follows the burning-floor feature; this shows what
+  it learned was closer to "this pool" than to "burning floor".
+- **The teacher cannot demonstrate the thing being asked for.** It has never
+  finished an unfamiliar level either - 0 exits here, and its best two
+  episodes stall having come within 192 units of E1M4's exit. A warm start can
+  only bootstrap behaviour someone can show.
+
+The shape of the failure is why the next step is not more iterations of the
+same run. Six episodes over three fixed levels is closer to three situations
+sampled twice than to eighteen samples: DOOM is deterministic, so the engine
+seed changes monster fire timing and damage rolls and nothing else. Two
+scripted runs at engine seeds 19265 and 19266 are byte-identical for all 156
+decisions. The variety in a rollout comes almost entirely from the policy's
+own sampling, which is variety in the ACTIONS and none at all in the WORLD.
+
 ### What would move this next
 
 In the order the measurements point at, not in the order they are interesting:
 
-1. **Walk the curriculum all the way back.** The start is currently a bounded
-   random walk from the exit. "The policy completes E1M1" in the unqualified
-   sense means the start reaching the level's own spawn, and the honest
-   question is how far back the win rate holds before it collapses. That is a
-   long run, not a new mechanism.
-2. **Both skills at once.** `--arena` teaches fighting and `--curriculum`
+1. **Train on situations the levels cannot supply.** Run 10's failure is a
+   variety failure before it is a learning failure: three fixed, deterministic
+   levels give a rollout three distinct worlds, whatever the seed. What is
+   needed is many small worlds that each pose ONE problem - survive a floor
+   that hurts you by collecting the medkits scattered over it; find a goal
+   from a spawn point and facing you were dropped at at random - and a fresh
+   one every episode. The real levels then stop being the training set and
+   become the validation set, which is the only role in which "it has never
+   seen this level" means anything.
+2. **Value health against death honestly.** Dying costs 5.0 and a 25-point
+   medkit pays 0.6, so twenty-five points of health are worth a twentieth of
+   the thing they prevent. Every held-out episode ended in a death with
+   decisions to spare; this is the term that governs those.
+3. **Both skills at once.** `--arena` teaches fighting and `--curriculum`
    teaches finishing, and nothing yet trains one policy to do both. A level is
    finished by a player that can also survive what is in the way.
-3. **One mission at a time, then the mix.** `--mix` splits an already small
-   budget three ways and asks the policy to learn instruction-following on top
-   of playing. Beat the baseline on each mission alone, then re-introduce the
-   mix and measure per-mission.
-4. **Batching decisions across parallel games.** The profile says 6.8 ms of
-   every decision is fixed cost paid per CALL - two device syncs and the
-   dispatch overhead of a six-layer encoder. Eight games stepping together
-   would amortise it eight ways, and the engine already packs one state and all
-   its options into a single batch; what it cannot yet do is pack several
-   states. That is the one change with a multiple in it rather than a
-   percentage.
+4. **Batching decisions across parallel games.** Caching the frozen encoder's
+   output already took a decision from about 32 ms to 7 and an iteration from
+   7-10 minutes to 3.3, which moved the bottleneck but did not remove it: what
+   is left is fixed cost paid per CALL - two device syncs and the dispatch
+   overhead of a six-layer encoder. Eight games stepping together would
+   amortise it eight ways, and the engine already packs one state and all its
+   options into a single batch; what it cannot yet do is pack several states.
 
 ## What is not claimed
 
+- **Generalization is not proven.** A policy trained on E1M1-E1M3 does not
+  finish E1M4, and neither does the teacher. It survives longer and kills more
+  than the teacher there, which is worth something and is not the claim.
 - **The policy finishes E1M1 from the spawn but does not beat the script.**
   Six of twelve scored episodes end the level, which is what the scripted
   player manages on the same twelve, and the policy is 5.19 behind on return.
@@ -961,17 +1030,19 @@ In the order the measurements point at, not in the order they are interesting:
   teleporters in E1M5, and the scripted player does not survive E1M5's opening
   nukage, so no teleport has yet happened in a run. Held-out runs use E1M4,
   which has none.
-- **`--record` changes the run it records.** Measured on E1M1, same seed, same
-  everything else: without it the scripted player finishes in 247 decisions,
-  with it the run stalls at 400 with the same six kills. Capture is not the
-  cause - `--frames`, which grabs one image per DECISION, finishes in 247 like
-  the uninstrumented run. What differs is that recording steps the game one
-  TIC at a time so every rendered frame can be kept, and something about that
-  split is not equivalent to asking for the same tics in one call. A recorded
-  run is therefore an illustration and not evidence.
-- **The policy has not been retrained against the honest observation.** Every
-  learned number above was measured against a solved map, which is an easier
-  problem than the one the sample now poses.
+- **`--record` does not reproduce a run exactly.** Recording steps the game one
+  TIC at a time so every rendered frame can be kept, and a recorded run used
+  to diverge badly from the run it was recording - the scripted player
+  finished E1M1 in 247 decisions without it and stalled at 400 with it. The
+  cause was not capture: `--tic-steps` does the stepping without the capture,
+  and the two agreed at every decision boundary for 160 decisions before
+  parting. It was the route re-deciding which frontier to head for only when
+  the seen set GREW, so the goal depended on when it was last asked rather
+  than on the world. The route now re-decides when the player changes cell as
+  well, and a recorded run tracks an unrecorded one far longer and ends the
+  same way - 228 decisions against 226, same kills, same health, both
+  finishing. It is still not bit-identical, so a recording is a close
+  illustration of a run and not the run itself.
 
 ---
 
