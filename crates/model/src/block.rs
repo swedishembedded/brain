@@ -1358,6 +1358,97 @@ pub fn flash_bidir_fwd(
     }
 }
 
+/// One dispatch of fused bidirectional attention over ALL spans.
+///
+/// [`flash_bidir_fwd`] dispatches once per span, which gives each one
+/// `heads * ceil(len/BR)` workgroups. A packed encoder request is a couple of
+/// long windows and a tail of very short option slots, so that is twelve to
+/// twenty-four workgroups per dispatch against a card with thirty compute
+/// units and up - most of the machine idle for the whole of it, however good
+/// the kernel is. This dispatches the SUM instead, so the grid grows with the
+/// batch and with the option count and fills a wider GPU by construction.
+///
+/// `work` must be the buffer [`flash_spans_table`] filled, for these spans.
+/// The caller owns it because it only changes when the spans do, which is
+/// exactly when a recorded step list is rebuilt.
+///
+/// Returns `None` when the device cannot run the kernel, so a caller falls
+/// back to [`flash_bidir_fwd`] or the materialised trio rather than
+/// discovering it at dispatch time.
+#[allow(clippy::too_many_arguments)]
+pub fn flash_bidir_spans_step(
+    g: &Gpu,
+    kind: usize,
+    heads: u32,
+    head_dim: u32,
+    d_out: u32,
+    qkv: &DeviceBuffer,
+    stride: u32,
+    q_off: u32,
+    k_off: u32,
+    v_off: u32,
+    ctx: &DeviceBuffer,
+    work: &DeviceBuffer,
+    spans: &[(u32, u32)],
+) -> Step {
+    assert!(head_dim <= 128, "flash_attn_bidir_spans: head_dim {head_dim} > 128");
+    let nwg = flash_spans_workgroups(heads, spans);
+    g.step(
+        kind,
+        &[qkv, ctx, work],
+        // `bsz`, `n_heads` and `tcols` are carried for layout compatibility
+        // with the rest of the family; this kernel reads its span, head and
+        // tile from `work` and ignores them.
+        &[1, heads, 0, head_dim, stride, q_off, k_off, v_off, d_out],
+        nwg * FLASH_SPANS_WS,
+    )
+}
+
+/// Threads per workgroup the ragged kernel declares. Its `BR` is
+/// [`FLASH_SPANS_BR`]; both are the kernel's, and a caller must size its grid
+/// from these and never from figures of its own.
+pub const FLASH_SPANS_WS: u32 = 256;
+/// Query rows one ragged-span workgroup owns.
+pub const FLASH_SPANS_BR: u32 = 128;
+/// Workgroup memory the ragged kernel needs - the same tiles as
+/// `flash_attn_bidir_reg2`, hence the same figure.
+const FLASH_SPANS_SHARED: u32 = 49152;
+
+/// Whether this device can run [`flash_bidir_spans_step`] at all.
+///
+/// `workgroup_reductions` is the correctness half - the kernel needs two
+/// top-level barriers the Cranelift CPU JIT cannot split a body at - and the
+/// other two are capacity. Read from `DeviceCaps`, never from a backend name,
+/// so a device that gains the capability is served without an edit here.
+pub fn flash_spans_supported(caps: &DeviceCaps) -> bool {
+    caps.workgroup_reductions
+        && caps.max_workgroup_size >= FLASH_SPANS_WS
+        && caps.workgroup_mem_bytes >= FLASH_SPANS_SHARED
+}
+
+/// How many workgroups these spans need: one per (span, head, query tile).
+pub fn flash_spans_workgroups(heads: u32, spans: &[(u32, u32)]) -> u32 {
+    spans.iter().map(|&(_, len)| heads * len.div_ceil(FLASH_SPANS_BR)).sum()
+}
+
+/// The work table the ragged kernel reads: `(row0, len, head, q_tile)` per
+/// workgroup, in dispatch order.
+///
+/// Built here rather than in the kernel because the alternative is a
+/// prefix-sum search over spans inside every workgroup, recomputed by all 256
+/// threads, to answer a question the host already knows.
+pub fn flash_spans_table(heads: u32, spans: &[(u32, u32)]) -> Vec<u32> {
+    let mut t = Vec::with_capacity(flash_spans_workgroups(heads, spans) as usize * 4);
+    for &(row0, len) in spans {
+        for h in 0..heads {
+            for qt in 0..len.div_ceil(FLASH_SPANS_BR) {
+                t.extend_from_slice(&[row0, len, h, qt]);
+            }
+        }
+    }
+    t
+}
+
 /// Workgroup memory `flash_attn_cross_reg2` needs - the same tiles, hence the
 /// same figure, as [`FLASH_REG2_SHARED`]; named separately so a future rung of
 /// the cross ladder with different tiles cannot silently inherit this one.
@@ -2821,7 +2912,8 @@ mod kv_cache_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        flash_gate, gemm_tile, gemm_variant, pick_gemm, tiles_with_budget, GemmTile, GemmVariants,
+        flash_gate, flash_spans_supported, flash_spans_table, flash_spans_workgroups, gemm_tile,
+        gemm_variant, pick_gemm, tiles_with_budget, GemmTile, GemmVariants, FLASH_SPANS_BR,
         TILE_BUDGET_FRACTION, TILE_BUDGET_WORDS,
     };
     use gpu_core::{DeviceCaps, DeviceClass};
@@ -2864,6 +2956,56 @@ mod tests {
         assert_eq!(gemm_tile(541, 1536, &big), GemmTile::Narrow, "60 workgroups on 100 units");
         // And a shape large enough to fill even that.
         assert_eq!(gemm_tile(4096, 4096, &big), GemmTile::Wide, "1024 workgroups on 100 units");
+    }
+
+    /// The ragged kernel is offered only where all three of its requirements
+    /// hold, and `workgroup_reductions` is the one that is a CORRECTNESS gate
+    /// rather than a capacity one: the Cranelift CPU JIT splits a kernel body
+    /// at one barrier and this kernel needs two, so a device that says no must
+    /// be refused however much workgroup memory it has.
+    #[test]
+    fn the_ragged_kernel_is_refused_unless_every_requirement_holds() {
+        let base = || DeviceCaps {
+            workgroup_mem_bytes: 49152,
+            max_workgroup_size: 256,
+            ..DeviceCaps::portable_baseline(DeviceClass::DiscreteGpu)
+        };
+        assert!(flash_spans_supported(&base()));
+        assert!(!flash_spans_supported(&DeviceCaps { workgroup_reductions: false, ..base() }));
+        assert!(!flash_spans_supported(&DeviceCaps { max_workgroup_size: 128, ..base() }));
+        assert!(!flash_spans_supported(&DeviceCaps { workgroup_mem_bytes: 16384, ..base() }));
+        assert!(!flash_spans_supported(&DeviceCaps::portable_baseline(DeviceClass::Cpu)));
+    }
+
+    /// The work table names every workgroup the dispatch will launch, in
+    /// dispatch order, and nothing else. A table shorter than the grid leaves
+    /// workgroups reading past it; a longer one launches none for the excess
+    /// and silently drops queries.
+    #[test]
+    fn the_work_table_describes_exactly_the_workgroups_that_will_run() {
+        // Ragged on purpose, including a span that needs three query tiles and
+        // one far shorter than a tile.
+        let spans = [(0u32, 13u32), (13, 300), (313, 128), (441, 129), (570, 7)];
+        let heads = 12u32;
+        let table = flash_spans_table(heads, &spans);
+        let nwg = flash_spans_workgroups(heads, &spans);
+        assert_eq!(table.len() as u32, nwg * 4, "one (row0, len, head, tile) per workgroup");
+
+        // Every entry must name a real span, a real head, and a tile inside
+        // that span.
+        for e in table.chunks(4) {
+            let (row0, len, head, qt) = (e[0], e[1], e[2], e[3]);
+            assert!(spans.contains(&(row0, len)), "entry names a span that was not asked for");
+            assert!(head < heads);
+            assert!(qt < len.div_ceil(FLASH_SPANS_BR), "tile {qt} is past the end of a {len}-row span");
+        }
+        // And every (span, head, tile) appears exactly once.
+        let mut seen: Vec<(u32, u32, u32)> =
+            table.chunks(4).map(|e| (e[0], e[2], e[3])).collect();
+        let before = seen.len();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), before, "a workgroup was named twice");
     }
 
     /// A backend that reports nothing still gets a defensible answer, and it

@@ -51,6 +51,11 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("flash_attn_bidir_reg", kernels::FLASH_ATTN_BIDIR_REG),
     ("flash_attn_bidir_reg2", kernels::FLASH_ATTN_BIDIR_REG2),
     ("flash_attn_bidir_split", kernels::FLASH_ATTN_BIDIR_SPLIT),
+    // The same arithmetic over ALL spans in one dispatch. A packed request
+    // here is a couple of long windows and ten short option slots, and one
+    // dispatch per span is twelve to twenty-four workgroups against a card
+    // with thirty compute units.
+    ("flash_attn_bidir_spans", kernels::FLASH_ATTN_BIDIR_SPANS),
     ("matmul_dx", kernels::MATMUL_DX),
     ("matmul_dw", kernels::MATMUL_DW),
     ("matmul_dx_reg", kernels::MATMUL_DX_REG),
@@ -136,6 +141,7 @@ ids! {
     flash_bidir_reg => "flash_attn_bidir_reg",
     flash_bidir_reg2 => "flash_attn_bidir_reg2",
     flash_bidir_split => "flash_attn_bidir_split",
+    flash_bidir_spans => "flash_attn_bidir_spans",
     matmul_dx => "matmul_dx",
     matmul_dw => "matmul_dw",
     matmul_dx_reg => "matmul_dx_reg",

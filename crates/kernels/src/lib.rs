@@ -382,6 +382,10 @@ pub const FLASH_ATTN_BIDIR_REG: &str = include_str!("../wgsl/flash_attn_bidir_re
 pub const FLASH_ATTN_BIDIR_REG2: &str = include_str!("../wgsl/flash_attn_bidir_reg2.wgsl");
 /// `wgsl/flash_attn_bidir_split.wgsl`
 pub const FLASH_ATTN_BIDIR_SPLIT: &str = include_str!("../wgsl/flash_attn_bidir_split.wgsl");
+/// `FLASH_ATTN_BIDIR_REG2`'s arithmetic over RAGGED spans in one dispatch,
+/// addressed from a host-built work table. See the kernel's own header for
+/// why a packed encoder request cannot fill a GPU one span at a time.
+pub const FLASH_ATTN_BIDIR_SPANS: &str = include_str!("../wgsl/flash_attn_bidir_spans.wgsl");
 /// `wgsl/flash_attn_causal_gqa.wgsl`
 pub const FLASH_ATTN_CAUSAL_GQA: &str = include_str!("../wgsl/flash_attn_causal_gqa.wgsl");
 /// `wgsl/flash_attn_cross_reg2.wgsl`
@@ -1192,6 +1196,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("flash_attn_bidir_reg", FLASH_ATTN_BIDIR_REG),
     ("flash_attn_bidir_reg2", FLASH_ATTN_BIDIR_REG2),
     ("flash_attn_bidir_split", FLASH_ATTN_BIDIR_SPLIT),
+    ("flash_attn_bidir_spans", FLASH_ATTN_BIDIR_SPANS),
     ("flash_attn_causal_gqa", FLASH_ATTN_CAUSAL_GQA),
     ("flash_attn_cross_reg2", FLASH_ATTN_CROSS_REG2),
     ("focal_dice_grad", FOCAL_DICE_GRAD),

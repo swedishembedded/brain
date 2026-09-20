@@ -149,6 +149,10 @@ pub struct Encoder {
     /// so it wants K laid out that way and this is where the transposed copy
     /// lives. `[d_model, longest span]`, rewritten once per span.
     kt: DeviceBuffer,
+    /// `(row0, len, head, q_tile)` per workgroup, for the ragged-span flash
+    /// kernel. Rewritten whenever the spans change, which is exactly when the
+    /// step list is rebuilt. See `block::flash_spans_table`.
+    flash_work: DeviceBuffer,
     steps: Vec<Step>,
     bwd: Option<Bwd>,
 }
@@ -253,6 +257,10 @@ impl Encoder {
             scores: gpu.storage(slab),
             probs: gpu.storage(slab),
             kt: gpu.storage(h * cfg.max_positions as u64),
+            // One entry per workgroup, four u32 each. The worst case is every
+            // row its own span, which is the most workgroups a given row
+            // count can produce.
+            flash_work: gpu.storage(cap_rows as u64 * cfg.n_heads as u64 * 4),
             steps: Vec::new(),
             bwd: None,
             gpu,
@@ -402,6 +410,11 @@ impl Encoder {
         self.uniq_n = uniq_n;
         if changed {
             self.spans = spans.to_vec();
+            // Before `build_steps`, which records a dispatch sized from this
+            // table: the two must describe the same spans or the kernel reads
+            // a row range that is not the one it was dispatched for.
+            let table = block::flash_spans_table(self.cfg.n_heads, &self.spans);
+            self.gpu.write(&self.flash_work, &table);
             self.steps = self.build_steps();
             self.rebuild_bwd();
         }
@@ -443,12 +456,26 @@ impl Encoder {
         // the training and inference graphs stay the same forward, which is
         // the property this constructor's documentation promises and the
         // reason a parity number cannot move with how an encoder was built.
-        let flash = g.caps().workgroup_reductions.then_some(block::FlashIds {
-            bidir: self.k.flash_bidir,
-            split: Some(self.k.flash_bidir_split),
-            reg: Some(self.k.flash_bidir_reg),
-            reg2: Some(self.k.flash_bidir_reg2),
-        });
+        //
+        // Three rungs, best first. The ragged kernel covers every span in one
+        // dispatch and is the only one whose GRID grows with the request, so
+        // it is the one that fills a wider card without a constant to retune;
+        // the per-span fused path is next; the materialised trio is the
+        // reference the other two must agree with and the only one the
+        // Cranelift CPU JIT can run.
+        let caps = g.caps();
+        let flash = if block::flash_spans_supported(&caps) {
+            Ok(self.k.flash_bidir_spans)
+        } else if caps.workgroup_reductions {
+            Err(Some(block::FlashIds {
+                bidir: self.k.flash_bidir,
+                split: Some(self.k.flash_bidir_split),
+                reg: Some(self.k.flash_bidir_reg),
+                reg2: Some(self.k.flash_bidir_reg2),
+            }))
+        } else {
+            Err(None)
+        };
         // ---- embeddings ----
         // `embed` Params: [width, rows]; bufs [index(u32), table, out]. The
         // position and segment tables are gathered the same way as the token
@@ -484,7 +511,24 @@ impl Encoder {
             // Self-attention within each span, independently. q/k/v live at
             // 0/H/2H of the fused row.
             match flash {
-                Some(ids) => block::flash_bidir_fwd(
+                // One dispatch over every span. `self.flash_work` was filled
+                // by `set_batch` for exactly these spans.
+                Ok(kind) => s.push(block::flash_bidir_spans_step(
+                    g,
+                    kind,
+                    c.n_heads,
+                    hd,
+                    h,
+                    &lb.qkv,
+                    3 * h,
+                    0,
+                    h,
+                    2 * h,
+                    &lb.ctx,
+                    &self.flash_work,
+                    &self.spans,
+                )),
+                Err(Some(ids)) => block::flash_bidir_fwd(
                     g,
                     ids,
                     c.n_heads,
@@ -499,7 +543,7 @@ impl Encoder {
                     &self.spans,
                     &mut s,
                 ),
-                None => block::chunked_bidir_fwd(
+                Err(None) => block::chunked_bidir_fwd(
                     g,
                     &cross,
                     Some(&km),
