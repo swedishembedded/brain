@@ -293,6 +293,30 @@ impl Keep {
     }
 }
 
+/// The candidate that measured best, or `None` when the decision did not
+/// discriminate.
+///
+/// A probe where every candidate led to the same place has no right answer to
+/// score a policy against, and averaging those in measures an arbitrary
+/// argmax over a flat set rather than anything about the policy. Measured on
+/// this sample, 40% to 52% of probed decisions are that decision - enough to
+/// dominate any number they are allowed into.
+fn measured_best(scored: &[f32]) -> Option<usize> {
+    let hi = scored.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let lo = scored.iter().copied().fold(f32::INFINITY, f32::min);
+    // The same tolerance `probe` counts `pivotal` with: two trajectories that
+    // differ only in which way the player faced for one decision score the
+    // same to within rounding.
+    if !(hi - lo > 1e-3) {
+        return None;
+    }
+    scored
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(k, _)| k)
+}
+
 /// How far the policy has moved, over the candidates a probe measured, from
 /// the policy that measured them.
 ///
@@ -2089,6 +2113,43 @@ impl<E: Env> ControlPipeline<E> {
         Ok((loss, (moved / probes.len() as f64) as f32, drift, passes))
     }
 
+    /// How much of the policy's belief sits on the candidate that actually
+    /// measured best, over the probes where the choice made a difference.
+    ///
+    /// Forward only. Read on probes the fit did NOT see, before and after,
+    /// this is the number that says whether an outcome-fitted update learned
+    /// anything about the decision or only about the decisions it was shown.
+    /// The distinction is the whole question: the branch scores are exact -
+    /// everything is deterministic from a restored snapshot - but exact is
+    /// not the same as generalizable, and a margin of a few hundredths in a
+    /// system where one different decision changes the rest of the episode
+    /// can be a fact about that trajectory rather than about that state.
+    fn outcome_belief(&mut self, probes: &[Probe]) -> Result<Option<(f32, usize)>> {
+        let (mut got, mut n) = (0.0f64, 0usize);
+        for p in probes {
+            let scored: Vec<f32> = p.tried.iter().map(|(_, s)| *s).collect();
+            let Some(best) = measured_best(&scored) else {
+                continue;
+            };
+            let q = self.question(&p.options);
+            let scores = self
+                .model
+                .score(&p.observation, std::slice::from_ref(&q))
+                .map_err(Error::Backend)?;
+            let picked: Vec<usize> = p
+                .tried
+                .iter()
+                .map(|&(c, _)| c)
+                .filter(|&c| c < scores[0].len())
+                .collect();
+            let among: Vec<f32> = picked.iter().map(|&c| scores[0][c]).collect();
+            let mine = decide::loss::softmax(&among);
+            got += mine.get(best).copied().unwrap_or(0.0) as f64;
+            n += 1;
+        }
+        Ok((n > 0).then(|| ((got / n as f64) as f32, n)))
+    }
+
     /// Rounds of: probe the policy's own decisions, find out what the
     /// alternatives were actually worth, and move toward whichever won.
     ///
@@ -2123,7 +2184,7 @@ impl<E: Env> ControlPipeline<E> {
                 spec.deviate,
                 spec.max_steps,
             )?;
-            let Some((room, probes)) = probed else {
+            let Some((room, mut probes)) = probed else {
                 println!("    improve: the environment cannot go back to a decision");
                 return Ok(());
             };
@@ -2131,7 +2192,21 @@ impl<E: Env> ControlPipeline<E> {
                 println!("    improve: no decision could be probed");
                 return Ok(());
             }
+            // A quarter of them held back, for the only question that decides
+            // whether this phase is worth running at all: does fitting the
+            // measured outcome at some decisions change what the policy
+            // believes at decisions it was not shown? See
+            // [`Self::outcome_belief`]. Shuffled first, because probes arrive
+            // in episode order and the last quarter of a run is not a sample
+            // of it.
+            for i in (1..probes.len()).rev() {
+                let j = (self.rng.next_u64() % (i as u64 + 1)) as usize;
+                probes.swap(i, j);
+            }
+            let held = probes.split_off(probes.len() - probes.len() / 4);
+            let unseen_before = self.outcome_belief(&held)?;
             let (loss, on_best, drift, passes) = self.fit_outcomes(&probes, spec, log, step)?;
+            let unseen_after = self.outcome_belief(&held)?;
             let after = self.gauge(spec.gauge_episodes, spec.max_steps)?;
             println!(
                 "    improve {:>2}  {} decisions probed ({} game steps)  {:.0}% of them mattered  \
@@ -2152,6 +2227,15 @@ impl<E: Env> ControlPipeline<E> {
             // because "it stopped early" and "it ran out of passes" are
             // different states of the world and only one of them means the
             // budget is the thing to change.
+            // The pair, in the order the `fit` command reports its own: what
+            // the update did where it was applied, then what it did where it
+            // was not. Only the second one can tell them apart.
+            if let (Some((b, n)), Some((a, _))) = (unseen_before, unseen_after) {
+                println!(
+                    "             on {n} probes it did not fit, the best-measured option went \
+                     from {b:.2} to {a:.2} of the policy's belief"
+                );
+            }
             if passes < spec.warmup_epochs {
                 println!(
                     "             stopped after {passes} of {} passes: the policy had moved \
@@ -2828,6 +2912,25 @@ mod keep_tests {
         let mut k = Keep::starting(0.770, w(0.0));
         k.offer(1, 0.770, || w(1.0));
         assert_eq!(k.best().0, 0);
+    }
+}
+
+#[cfg(test)]
+mod measured_best_tests {
+    use super::measured_best;
+
+    #[test]
+    fn a_decision_where_every_candidate_led_to_the_same_place_has_no_right_answer() {
+        assert_eq!(measured_best(&[0.5, 0.5, 0.5]), None);
+        // And within the tolerance, which is the case that actually occurs:
+        // two trajectories differing only in a facing score the same to
+        // within rounding.
+        assert_eq!(measured_best(&[0.5000, 0.5002, 0.4999]), None);
+    }
+
+    #[test]
+    fn the_best_measured_candidate_is_named_when_there_is_one() {
+        assert_eq!(measured_best(&[0.40, 0.72, 0.31]), Some(1));
     }
 }
 
