@@ -884,6 +884,20 @@ pub fn play(env: DoomEnv, args: &Args) -> Result<(), String> {
 /// process, socket, observation, action, reward, frame - without needing a
 /// trained policy or even an encoder to be any good, and it leaves behind the
 /// PNGs and the JSON transcript to look at when something is wrong.
+/// The whole observation and the whole option list, which is the only thing
+/// the model ever sees and the one thing every other line of a probe is a
+/// summary of rather than a sample of.
+fn show_what_the_model_reads(env: &DoomEnv, when: &str) -> Result<(), String> {
+    let seen = env.inspect.lock().map_err(|e| e.to_string())?;
+    println!("\n--- what the model reads, {when} ---\n{}", seen.observation);
+    println!("--- and what it may choose ---");
+    for (i, o) in seen.options.iter().enumerate() {
+        println!("  {i:>2}. {o}");
+    }
+    println!("---\n");
+    Ok(())
+}
+
 pub fn probe(mut env: DoomEnv, args: &Args) -> Result<(), String> {
     let mut viewer = Viewer::new(args)?;
     env.capture_frames(viewer.wants_frames());
@@ -892,6 +906,10 @@ pub fn probe(mut env: DoomEnv, args: &Args) -> Result<(), String> {
 
     println!("doom: scripted probe, {} decisions", args.max_steps());
     let mut total = 0.0f32;
+    // How often the player had something out of sight worth remembering. A
+    // plumbing check: if this is zero, the memory is not reaching the model
+    // whatever its own tests say.
+    let mut recalled = 0usize;
     for step in 0..args.max_steps() {
         let Some(a) = env.scripted() else { break };
         let (r, done) = env.apply(a, Vec::new());
@@ -899,6 +917,7 @@ pub fn probe(mut env: DoomEnv, args: &Args) -> Result<(), String> {
             return Err(f.clone());
         }
         total += r;
+        recalled += usize::from(!env.state().recalled.is_empty());
         if !viewer.tick(&env.inspect)? {
             break;
         }
@@ -908,13 +927,22 @@ pub fn probe(mut env: DoomEnv, args: &Args) -> Result<(), String> {
                 "  step {step:>4}  hp {:>3}  kills {}/{}  items {}  return {total:+.2}  {}",
                 s.player.health, s.level.kills, s.level.total_kills, s.level.items, s.outcome
             );
+            if step == 0 {
+                show_what_the_model_reads(&env, "at the start")?;
+            }
         }
         if done {
             break;
         }
     }
     viewer.finish();
-    println!("doom: probe finished, return {total:+.2}");
+    // The last one is the interesting one: by then the player has been
+    // somewhere, and has something to remember about where it has been.
+    show_what_the_model_reads(&env, "at the end")?;
+    println!(
+        "doom: probe finished, return {total:+.2}; something was remembered on \
+         {recalled} decisions"
+    );
     println!("doom: {}", env.report());
     if let Some(route) = env.stall_detail() {
         println!("doom: the route, where it stopped: {route}");
