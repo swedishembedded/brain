@@ -789,6 +789,7 @@ mod tests {
             anchor_incumbent: 0.9,
             entropy_candidate: 2.0,
             entropy_incumbent: 2.0,
+            anchor_blocks: &[],
         };
 
         // The hazard the pre-registered config exists to close: the DEFAULT
@@ -893,6 +894,7 @@ mod tests {
             anchor_incumbent: 0.9,
             entropy_candidate: 2.0,
             entropy_incumbent: 2.0,
+            anchor_blocks: &[],
         };
         let report = gate(&input, &document_gate_config());
         assert_eq!(report.decision, Decision::Promote, "57 of 60 probes flipping must promote in aggregate under the document gate config");

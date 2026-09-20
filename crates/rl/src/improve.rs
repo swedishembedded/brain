@@ -159,6 +159,13 @@ pub struct Evaluation<'a> {
     /// scored by the same deterministic decode, or the comparison is noise.
     pub rollout: &'a RolloutParams,
     pub gate_cfg: &'a GateConfig,
+    /// Anchor block size for [`crate::gate::Cause::BlockRegressed`]: `anchor`
+    /// is chunked into fixed-size blocks of this length, in order, for the
+    /// per-block regression check. `0` (the default a single-environment
+    /// caller gets by not setting this) means "no block structure" - the
+    /// check stays off exactly as [`GateConfig::max_block_drop`]'s own
+    /// default already ensures.
+    pub anchor_block_len: usize,
 }
 
 /// Where [`cycle`] writes, and what it stamps on what it writes.
@@ -356,6 +363,16 @@ fn score_and_gate<M: Model>(incumbent_path: &Path, candidate_path: &Path, eval: 
     let candidate = split(decode_checkpoint::<M>(candidate_path, &all, eval.verifier, eval.rollout));
 
     let headline = |a: &ArmScores| if a.anchor.is_empty() { mean(&a.held_out) } else { mean(&a.anchor) };
+    let anchor_blocks: Vec<(f64, f64)> = if eval.anchor_block_len == 0 {
+        Vec::new()
+    } else {
+        candidate
+            .anchor
+            .chunks(eval.anchor_block_len)
+            .zip(incumbent.anchor.chunks(eval.anchor_block_len))
+            .map(|(c, i)| (mean(c), mean(i)))
+            .collect()
+    };
     let input = GateInput {
         candidate_scores: &candidate.held_out,
         incumbent_scores: &incumbent.held_out,
@@ -363,6 +380,7 @@ fn score_and_gate<M: Model>(incumbent_path: &Path, candidate_path: &Path, eval: 
         anchor_incumbent: headline(&incumbent),
         entropy_candidate: candidate.mean_entropy,
         entropy_incumbent: incumbent.mean_entropy,
+        anchor_blocks: &anchor_blocks,
     };
     (gate(&input, eval.gate_cfg), candidate, incumbent)
 }

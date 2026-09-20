@@ -764,6 +764,10 @@ pub fn gate_lora(inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> Action
             anchor_incumbent: headline(&incumbent),
             entropy_candidate: candidate.mean_entropy,
             entropy_incumbent: incumbent.mean_entropy,
+            // This flat-tail anchor (see the comment above) has no block
+            // structure, so the per-block check stays off - the same
+            // behavior `max_block_drop`'s own default already gives.
+            anchor_blocks: &[],
         },
         &cfg,
     );
@@ -930,6 +934,7 @@ fn cause_name(cause: Cause) -> &'static str {
         Cause::NotSignificant { .. } => "NotSignificant",
         Cause::EffectTooSmall { .. } => "EffectTooSmall",
         Cause::AnchorRegressed { .. } => "AnchorRegressed",
+        Cause::BlockRegressed { .. } => "BlockRegressed",
         Cause::Degenerate { .. } => "Degenerate",
     }
 }

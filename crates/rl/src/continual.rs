@@ -542,6 +542,7 @@ fn cause_name(c: crate::gate::Cause) -> &'static str {
         crate::gate::Cause::NotSignificant { .. } => "notsig",
         crate::gate::Cause::EffectTooSmall { .. } => "effect",
         crate::gate::Cause::AnchorRegressed { .. } => "anchor",
+        crate::gate::Cause::BlockRegressed { .. } => "block",
         crate::gate::Cause::Degenerate { .. } => "degen",
     }
 }
@@ -1038,7 +1039,7 @@ pub fn run_study<M: Model, C: Curriculum>(spec: &StudySpec, curr: &C, cfg: &Stud
         let outcome = improve::cycle::<M, _>(
             &incumbent,
             objective,
-            &Evaluation { held_out, anchor: &anchor, verifier: &verifier, rollout: &greedy_params, gate_cfg: &cfg.gate },
+            &Evaluation { held_out, anchor: &anchor, verifier: &verifier, rollout: &greedy_params, gate_cfg: &cfg.gate, anchor_block_len: cfg.eval_per_cycle },
             &opts,
             CycleArtifacts {
                 train_out: &train_out,

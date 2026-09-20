@@ -154,7 +154,7 @@ const SFT_REHEARSAL: usize = 4;
 /// was rejected as degenerate at entropy ratio 0.078 before this was found.
 /// Collapse is instead measured directly, by the number of DISTINCT greedy
 /// completions across the probes (the `distinct` column below).
-const GATE: GateConfig = GateConfig { alpha: 0.05, min_effect_size: 0.05, anchor_budget: 0.10, min_entropy_ratio: 0.0 };
+const GATE: GateConfig = GateConfig { alpha: 0.05, min_effect_size: 0.05, anchor_budget: 0.10, min_entropy_ratio: 0.0, max_block_drop: f64::INFINITY };
 
 /// The pre-registered targets, sized from a 5-seed single-cycle measurement
 /// before any of them was scored. Printed with observed-vs-target and a

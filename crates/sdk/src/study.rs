@@ -517,6 +517,9 @@ fn describe(d: Decision) -> (&'static str, Option<String>) {
             ("reject", Some(format!("effect_too_small: effect {effect_size:.4} < floor {min_effect_size}")))
         }
         Decision::Reject(Cause::AnchorRegressed { delta, budget }) => ("reject", Some(format!("anchor_regressed: delta {delta:.4} > budget {budget}"))),
+        Decision::Reject(Cause::BlockRegressed { block, delta, max_drop }) => {
+            ("reject", Some(format!("block_regressed: block {block} delta {delta:.4} > max_drop {max_drop}")))
+        }
         Decision::Reject(Cause::Degenerate { entropy_ratio, min_entropy_ratio }) => {
             ("reject", Some(format!("degenerate: entropy ratio {entropy_ratio:.4} < floor {min_entropy_ratio}")))
         }

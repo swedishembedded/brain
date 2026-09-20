@@ -132,7 +132,7 @@ const STUDY_SEED: u64 = 1;
 /// sharply by A3 below, over the distinct greedy completions the servable
 /// model produced across its probes. A collapsed policy emits ONE completion
 /// for every prompt; a correct one emits a different completion per prompt.
-const GATE: GateConfig = GateConfig { alpha: 0.05, min_effect_size: 0.05, anchor_budget: 0.10, min_entropy_ratio: 0.0 };
+const GATE: GateConfig = GateConfig { alpha: 0.05, min_effect_size: 0.05, anchor_budget: 0.10, min_entropy_ratio: 0.0, max_block_drop: f64::INFINITY };
 /// A3's real non-degeneracy floor: at least this fraction of the servable
 /// model's decoded probes must produce DISTINCT completions.
 const PREREG_MIN_DISTINCT_FRAC: f64 = 0.50;

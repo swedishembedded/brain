@@ -181,6 +181,7 @@ fn improve_cycle_end_to_end_promotes_a_genuinely_better_candidate() {
             verifier: &FracMatchVerifier,
             rollout: &greedy_rollout_params(),
             gate_cfg: &GateConfig { min_entropy_ratio: 0.0, ..GateConfig::default() },
+            anchor_block_len: 0,
         },
         &opts,
         CycleArtifacts {
@@ -261,6 +262,7 @@ fn improve_cycle_rejects_a_deliberately_worse_candidate_and_retains_the_incumben
             verifier: &FracMatchVerifier,
             rollout: &greedy_rollout_params(),
             gate_cfg: &GateConfig { min_entropy_ratio: 0.0, ..GateConfig::default() },
+            anchor_block_len: 0,
         },
         &opts,
         CycleArtifacts {
@@ -289,7 +291,7 @@ fn improve_cycle_rejects_a_deliberately_worse_candidate_and_retains_the_incumben
     let outcome = improve::cycle::<Qwen, _>(
         &incumbent_path,
         sabotage,
-        &Evaluation { held_out: &held_out, anchor: &[], verifier: &FracMatchVerifier, rollout: &greedy_rollout_params(), gate_cfg: &GateConfig::default() },
+        &Evaluation { held_out: &held_out, anchor: &[], verifier: &FracMatchVerifier, rollout: &greedy_rollout_params(), gate_cfg: &GateConfig::default(), anchor_block_len: 0 },
         &FitOpts { steps: 2, grad_accum: 1, eval_interval: 0, eval_batches: 0, seed: 999, checkpoint_secs: 0, ..FitOpts::default() },
         CycleArtifacts {
             train_out: &dir.join("train_sabotaged.safetensors"),
