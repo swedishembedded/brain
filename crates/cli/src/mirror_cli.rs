@@ -87,6 +87,34 @@ fn select_frames(paths: &[String], stride: usize, max: usize) -> Vec<String> {
         .collect()
 }
 
+/// Black out every pixel the mask leaves unlit, in place.
+///
+/// The mask is resized to the frame with nearest-neighbour sampling: it is a
+/// keep/drop decision per pixel, and interpolating it would invent
+/// half-transparent border pixels the model would then try to explain.
+///
+/// This exists for TURNTABLE captures. The model assumes one rigid scene and a
+/// moving camera; a turntable gives it a rotating object in front of a
+/// stationary background, which is not that, and the static part is evidence
+/// for a camera that never moved. Mask the background away and what is left -
+/// an object turning in front of nothing - is exactly equivalent to a camera
+/// orbiting a still object, which is what the model was trained on. One mask
+/// covers the whole capture, because the camera does not move.
+fn apply_mask(img: &mut imaging::Rgb8, mask: &imaging::Rgb8) {
+    let (mw, mh) = (mask.w as usize, mask.h as usize);
+    let (w, h) = (img.w as usize, img.h as usize);
+    for y in 0..h {
+        let my = y * mh / h;
+        for x in 0..w {
+            let mx = x * mw / w;
+            if mask.px[(my * mw + mx) * 3] < 128 {
+                let i = (y * w + x) * 3;
+                img.px[i..i + 3].fill(0);
+            }
+        }
+    }
+}
+
 /// How the caller narrowed a long capture down to the frames the model sees.
 #[derive(Clone, Copy)]
 pub struct FrameSel {
@@ -108,7 +136,23 @@ impl Default for FrameSel {
 
 /// Every frame the model will see, from a directory, a comma-separated list,
 /// or a video file.
-fn gather(spec: &str, sel: &FrameSel) -> Vec<imaging::Rgb8> {
+fn gather(spec: &str, sel: &FrameSel, mask: Option<&str>) -> Vec<imaging::Rgb8> {
+    let mask = mask.map(|m| {
+        imaging::load(m).unwrap_or_else(|e| {
+            eprintln!("{e}");
+            std::process::exit(1);
+        })
+    });
+    let mut frames = gather_unmasked(spec, sel);
+    if let Some(m) = &mask {
+        for f in frames.iter_mut() {
+            apply_mask(f, m);
+        }
+    }
+    frames
+}
+
+fn gather_unmasked(spec: &str, sel: &FrameSel) -> Vec<imaging::Rgb8> {
     let p = std::path::Path::new(spec);
     if p.is_file() && VIDEO_EXTS.contains(&ext_of(p).as_str()) {
         if !imaging::video::ffmpeg_available() {
@@ -157,8 +201,8 @@ fn gather(spec: &str, sel: &FrameSel) -> Vec<imaging::Rgb8> {
 }
 
 /// Load + preprocess frames; returns (raw [0,1] CHW concat, frame count, grid).
-fn load_frames(spec: &str, cfg: &MirrorConfig, sel: &FrameSel) -> (Vec<f32>, usize, usize, usize) {
-    let images = gather(spec, sel);
+fn load_frames(spec: &str, cfg: &MirrorConfig, sel: &FrameSel, mask: Option<&str>) -> (Vec<f32>, usize, usize, usize) {
+    let images = gather(spec, sel, mask);
     let mut all = Vec::new();
     let mut grid = None;
     for img in &images {
@@ -195,10 +239,11 @@ fn with_scene<R>(
     max_depth: f32,
     prune_voxel: f32,
     sel: &FrameSel,
+    mask: Option<&str>,
     k: impl FnOnce(&Gpu, &Mirror, &Splats, &[splat::types::Camera], usize, u32, u32) -> R,
 ) -> R {
     let cfg = MirrorConfig::default();
-    let (frames, s, hp, wp) = load_frames(images, &cfg, sel);
+    let (frames, s, hp, wp) = load_frames(images, &cfg, sel, mask);
     let (w, h) = ((wp * cfg.patch) as u32, (hp * cfg.patch) as u32);
     eprintln!("loading {weights} …");
     let init = worldmirror2::import::load_weights(weights, &cfg).unwrap_or_else(|e| {
@@ -350,12 +395,13 @@ fn infer(argv: &[String]) {
         max: a.usize_or("--max-frames", if is_video(&images) { 48 } else { 0 }),
         fps: a.f32_or("--fps", 0.0) as f64,
     };
+    let mask = a.take_str("--mask");
 
     a.finish();
 
     std::fs::create_dir_all(&out_dir).ok();
     let ply_path = ply.unwrap_or_else(|| format!("{out_dir}/scene.ply"));
-    with_scene(&weights, &images, min_op, max_depth, prune, &sel, |gpu, model, splats, cams, s, w, h| {
+    with_scene(&weights, &images, min_op, max_depth, prune, &sel, mask.as_deref(), |gpu, model, splats, cams, s, w, h| {
         splat::ply::write(&ply_path, splats).unwrap_or_else(|e| {
             eprintln!("PLY write failed: {e}");
             std::process::exit(1);
@@ -393,10 +439,11 @@ fn demo(argv: &[String]) {
         max: a.usize_or("--max-frames", if is_video(&images) { 48 } else { 0 }),
         fps: a.f32_or("--fps", 0.0) as f64,
     };
+    let mask = a.take_str("--mask");
 
     a.finish();
 
-    let (splats, init_cam) = with_scene(&weights, &images, min_op, max_depth, prune, &sel, |_gpu, _model, splats, cams, _s, _w, _h| {
+    let (splats, init_cam) = with_scene(&weights, &images, min_op, max_depth, prune, &sel, mask.as_deref(), |_gpu, _model, splats, cams, _s, _w, _h| {
         let init_cam = cams.first().map(|c| splat::types::Camera {
             width,
             height,
@@ -477,6 +524,25 @@ mod tests {
         // sees them - a sequence's frame order is its baseline structure.
         assert_eq!(got, vec!["a.jpeg", "b.JPG", "c.png", "d.ppm"], "wrong set or wrong order");
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A mask is a keep/drop decision per pixel, so it is sampled, never
+    /// interpolated - a resized mask that blends would create half-lit border
+    /// pixels, and the model would dutifully reconstruct the blend.
+    #[test]
+    fn a_mask_blacks_out_what_it_does_not_cover_at_any_size() {
+        // 2x2 mask: keep the left column, drop the right
+        let mask = imaging::Rgb8::new(2, 2, vec![255, 255, 255, 0, 0, 0, 255, 255, 255, 0, 0, 0]).unwrap();
+        // a 4x4 frame of solid white
+        let mut img = imaging::Rgb8::new(4, 4, vec![200u8; 4 * 4 * 3]).unwrap();
+        super::apply_mask(&mut img, &mask);
+        for y in 0..4 {
+            for x in 0..4 {
+                let v = img.px[(y * 4 + x) * 3];
+                let want = if x < 2 { 200 } else { 0 };
+                assert_eq!(v, want, "pixel ({x},{y}) is {v}, expected {want} after a 2x2 mask on a 4x4 frame");
+            }
+        }
     }
 
     /// Frame selection has to happen BEFORE the model sees the sequence: a

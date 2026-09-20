@@ -42,6 +42,36 @@ brain splat view out/mirror/scene.ply
 brain worldmirror2 demo --weights out/mirror.safetensors --images photos/
 ```
 
+## Turntable captures need a mask
+
+This model assumes ONE RIGID SCENE and a moving camera. A turntable gives it
+the opposite: a rotating object in front of a stationary background. Those are
+not the same thing, and the model can only fit one of them - the static part
+of the frame is evidence for a camera that never moved, working directly
+against the rotation the object shows.
+
+Mask the background away and the contradiction goes with it. What remains, an
+object turning in front of nothing, is exactly equivalent to a camera orbiting
+a still object, which is the case the model was trained on. Because the camera
+does not move, ONE mask covers the whole capture.
+
+The mask is any image: white where the object sweeps, black elsewhere. It is
+sampled rather than interpolated when resized, so a mask at a different
+resolution to the footage is fine.
+
+A capture's own motion will draw the mask for you - the pixels that change
+over the clip are the ones that rotate:
+
+```bash
+ffmpeg -i turntable.mp4 -vf "select='not(mod(n\,10))'" -vsync 0 f%03d.png
+# then: mask = white where the per-pixel standard deviation across f*.png is high
+brain worldmirror2 infer --weights mirror.safetensors --images turntable.mp4 \
+    --mask mask.png --max-frames 24 --out scene
+```
+
+Shooting the camera around a stationary object avoids all of this and is
+always the better capture when it is possible.
+
 ## What it produces
 
 Four hand-held photographs of one object, with no poses, no calibration and no
@@ -96,6 +126,7 @@ normal-map PPM for inspection.
 | `--stride N` | use every Nth input frame |
 | `--max-frames N` | use at most N frames, spread ACROSS the capture rather than taking a prefix (default: unbounded for a directory, 48 for a video) |
 | `--fps X` | resample a video to X frames per second before selecting (default: the clip's own rate) |
+| `--mask <image>` | black out everything the mask does not cover, in every frame - for turntable captures, see below |
 
 The trunk's global attention is quadratic in frame count, so a long capture
 needs thinning before it reaches the model - hence the video default. The
