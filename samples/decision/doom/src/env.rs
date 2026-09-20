@@ -117,6 +117,7 @@ impl Mission {
                 hurt: 0.02,
                 exit: 3.0,
                 explore: 0.10,
+                approach: 0.02,
             },
             // Speedrun's exploration bonus is a tenth of the others' and its
             // exit is worth more than twice as much, and those two numbers are
@@ -145,6 +146,12 @@ impl Mission {
                 hurt: 0.06,
                 exit: 40.0,
                 explore: 0.02,
+                // Per 32-unit cell closed along the route. A level whose exit
+                // is 5300 units of walking away is about 165 cells, so a full
+                // traversal pays about 3.3 against the exit's 40 - enough to
+                // be visible to an estimator that cannot see the exit, small
+                // enough that finishing is still overwhelmingly what pays.
+                approach: 0.02,
             },
             Mission::Survive => Weights {
                 kill: 0.3,
@@ -152,9 +159,58 @@ impl Mission {
                 hurt: 0.08,
                 exit: 5.0,
                 explore: 0.05,
+                approach: 0.01,
             },
         }
     }
+}
+
+/// How much a cell of progress along the route is worth, and the rules that
+/// keep it from being the straight-line shaping that was rejected before.
+///
+/// PPO's advantage estimator has a half-life of about eleven decisions here
+/// (`gamma * lambda` is 0.9405), so a reward paid at the exit reaches a
+/// decision a hundred steps earlier with a weight of 0.002 and one two
+/// hundred steps earlier with 0.000005. In a finishing episode the exit is
+/// 89% of the return, paid on a single step. Everything before the last
+/// thirty decisions is therefore learning from the dense terms alone - and
+/// the dense term used to be the exploration bonus, which pays for covering
+/// NEW floor. So the signal the gradient could see rewarded wandering and the
+/// signal it could not see rewarded finishing, and PPO correctly optimised
+/// the one it could see: over ten iterations it took a cloned policy from
+/// 5 wins in 8 down to 3, and held it there to within 0.06.
+///
+/// The fix is a potential-based term on the ROUTE distance, which is the
+/// distance over walkable ground the player has actually seen. The straight
+/// line was rejected for good reason - it goes through walls, so pressing
+/// against the wall the exit is behind reduces it and the agent was paid to
+/// do that. Route distance does not fall when the player walks into a wall,
+/// because the route does not go through the wall. Going out and back nets
+/// `(gamma - 1)(phi(a) + phi(b))`, which is nothing, so oscillation still
+/// pays nothing.
+const CELL: f32 = 32.0;
+
+/// A re-plan is not movement. The route changes its mind when the seen set
+/// grows, and the distance can jump by more than a player could walk; paying
+/// for that would be paying for the map improving rather than for progress.
+/// A decision moves the player at most a couple of hundred units.
+const REPLAN_JUMP: i32 = 256;
+
+/// Cells of route closed between two decisions, or nothing when the two
+/// distances do not describe the same walk.
+fn cells_closed(before: Option<i32>, after: Option<i32>, comparable: bool) -> f32 {
+    if !comparable {
+        return 0.0;
+    }
+    let (Some(before), Some(after)) = (before, after) else {
+        return 0.0;
+    };
+    // A re-plan is not movement. The route changes its mind when the seen set
+    // grows, and the distance can jump by more than a player could walk.
+    if (before - after).abs() > REPLAN_JUMP {
+        return 0.0;
+    }
+    (before - after) as f32 / CELL
 }
 
 struct Weights {
@@ -167,6 +223,8 @@ struct Weights {
     /// the n-th. The only thing filling the gap between one decision and a
     /// level's worth of them.
     explore: f32,
+    /// Per 32-unit cell of route closed on the goal. See [`CELL`].
+    approach: f32,
 }
 
 /// What the engine calls a floor that hurts, for telling damage from the
@@ -381,6 +439,10 @@ pub struct DoomEnv {
     /// What the player has seen and can no longer see. See
     /// [`crate::memory::Memory`].
     memory: crate::memory::Memory,
+    /// The route distance to the goal at the last decision, and which goal it
+    /// was measured to. See [`CELL`].
+    approach_from: Option<i32>,
+    approach_goal: Option<String>,
     /// Set when the game itself failed (the process died, the socket broke).
     /// An environment that silently returns a terminal state on an I/O error
     /// teaches the policy that the error was a legal end to an episode.
@@ -423,6 +485,8 @@ impl DoomEnv {
             warned_dropped: false,
             progress: Progress::new(),
             memory: crate::memory::Memory::new(),
+            approach_from: None,
+            approach_goal: None,
             fault: None,
         }
     }
@@ -660,7 +724,49 @@ impl DoomEnv {
         // for the crossing.
         let n = self.visit();
         r += w.explore / (n as f32).sqrt();
+        r += self.approach(w.approach);
         (r, extrinsic)
+    }
+
+    /// Potential-based shaping on the route distance to the goal: cells of
+    /// route actually closed since the last decision.
+    ///
+    /// This is `phi(s') - phi(s)` with `phi = -distance` and NO discount on
+    /// the potential, and the undiscounted form is the point. Ng, Harada and
+    /// Russell's term is `gamma * phi(s') - phi(s)`, which for a negative
+    /// potential leaves a residue of `d * (1 - gamma)` when nothing happens -
+    /// at gamma 0.99 and a goal 5300 units away that is a decision spent
+    /// standing perfectly still earning 1.66 cells' worth of progress. The
+    /// difference form pays exactly nothing for standing still, exactly
+    /// nothing for going out and coming back, and exactly nothing for walking
+    /// into a wall, at any distance. Those three are the properties that
+    /// matter here; strict policy invariance under a discount the shaping
+    /// does not share is not.
+    ///
+    /// See [`CELL`] for why this exists at all and why the straight-line
+    /// version of it did not work.
+    fn approach(&mut self, weight: f32) -> f32 {
+        let goal = self
+            .state
+            .exit
+            .as_ref()
+            .and_then(|e| e.goal.clone());
+        let here = self
+            .state
+            .exit
+            .as_ref()
+            .and_then(|e| e.path_distance);
+
+        // Unexplored ground is not a goal. The frontier moves every time it
+        // is reached, so closing on it happens over and over and paying for
+        // that is paying for the exploration bonus twice under another name.
+        let real_goal = goal.as_deref() != Some("unexplored");
+        let was = self.approach_from.take();
+        let same_goal = self.approach_goal == goal;
+        self.approach_goal = goal;
+        self.approach_from = if real_goal { here } else { None };
+
+        weight * cells_closed(was, here, same_goal && real_goal)
     }
 
     /// Fetch the framebuffer, or turn capture off if it cannot be read.
@@ -945,6 +1051,8 @@ impl DoomEnv {
         // A new episode is a new world: nothing seen in the last one is
         // anywhere now, least of all on a level that is built fresh.
         self.memory.clear();
+        self.approach_from = None;
+        self.approach_goal = None;
         self.remember();
         self.visited.clear();
         self.commit = 0;
@@ -1329,6 +1437,46 @@ const EMPTY: &str = r#"{"tic":0,"episodeTic":0,"level":{"episode":0,"map":0,"ski
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn closing_on_the_goal_pays_and_nothing_else_does() {
+        // One cell closed is one cell paid.
+        assert!((cells_closed(Some(1000), Some(968), true) - 1.0).abs() < 1e-6);
+
+        // Standing still pays nothing, at any distance. The discounted form
+        // of potential shaping does not have this property - with a negative
+        // potential it leaves a residue proportional to the distance, and at
+        // 5300 units that residue is worth more than a cell of real progress.
+        for d in [100, 1000, 5300] {
+            assert_eq!(cells_closed(Some(d), Some(d), true), 0.0);
+        }
+
+        // Out and back nets exactly nothing, which is what stops the reward
+        // from paying for the two-step cycle greedy navigation falls into.
+        let out = cells_closed(Some(1000), Some(900), true);
+        let back = cells_closed(Some(900), Some(1000), true);
+        assert_eq!(out + back, 0.0);
+
+        // Walking away costs what walking toward pays.
+        assert!(cells_closed(Some(900), Some(1000), true) < 0.0);
+    }
+
+    #[test]
+    fn a_route_that_changed_its_mind_is_not_progress() {
+        // The goal moved: the two distances are to different places.
+        assert_eq!(cells_closed(Some(4000), Some(100), false), 0.0);
+
+        // The goal is the same but the distance jumped further than anyone
+        // could walk in one decision - the route re-planned over ground that
+        // had just been seen, and paying for that is paying for the MAP
+        // getting better rather than for the player getting closer.
+        assert_eq!(cells_closed(Some(4000), Some(100), true), 0.0);
+        assert_eq!(cells_closed(Some(100), Some(4000), true), 0.0);
+
+        // Nothing to compare against on the first decision of an episode.
+        assert_eq!(cells_closed(None, Some(1000), true), 0.0);
+        assert_eq!(cells_closed(Some(1000), None, true), 0.0);
+    }
 
     #[test]
     fn the_empty_state_parses() {
