@@ -80,6 +80,44 @@ into a scene that actually reproduces your photos.
 | `--iters N` | `fit` | optimization steps (default `200`) |
 | `--eps2d X` | `fit` | the dilation to optimize UNDER (default `0.3`); render the result with the same value |
 | `--lr X` | `fit` | learning rate (default `5e-3`) |
+| `--densify N` | `fit` | run density control every N iterations (default off) |
+| `--densify-frac F` | `fit` | fraction of gaussians treated as under-reconstructed per step (default `0.05`) |
+| `--max-gaussians N` | `fit` | refuse to grow past N |
+
+## Density control: when the fit may ADD gaussians
+
+Without it, a fit has exactly one way to cover a region it cannot represent:
+make the gaussians it already has bigger. That is visible in a real
+reconstruction's size distribution, before and after a 500-iteration fit, as
+projected screen size:
+
+| | median | p90 | p99 |
+|---|---|---|---|
+| feed-forward | 0.61 px | 1.34 px | 3.34 px |
+| after fitting | 0.37 px | 2.69 px | 8.72 px |
+
+Most gaussians get smaller while a tail grows into blobs - detail appearing
+where it can, and bloat where it cannot.
+
+`--densify N` turns on the reference behaviour: every N iterations, the
+gaussians whose positional gradient is still largest are subdivided (the big
+ones SPLIT into two at 1/1.6 the scale along their dominant axis, the small
+ones CLONE), and anything below `prune_opacity` is dropped. On a scene
+deliberately started eight times too coarse for its target, 160 iterations
+took it from 64 to 395 gaussians and cut final MSE by 32% against the same fit
+with density control off.
+
+**It is off by default, and that is deliberate.** Density control fixes a
+scene too SPARSE to hold its detail. A feed-forward reconstruction is the
+opposite problem - it starts at one gaussian per source pixel per view, so six
+photographs give 1.2M and a 48-frame video gives ~9.7M before anything is
+added. Growing that pushes the backward past the device's gradient-record
+ceiling and fails the run. On dense scenes reach for `--prune` instead.
+
+Staging the run costs something on its own: Adam's momentum restarts at each
+density-control boundary, measured at ~3.5% worse final loss than one unbroken
+run. Density control has to earn that back before it pays at all, which is why
+it is a flag rather than a default.
 
 ## Sharpness, and the anti-alias dilation
 

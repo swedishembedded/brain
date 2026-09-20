@@ -24,6 +24,29 @@ pub struct FitCfg {
     /// Clamp every step: scales into [min_scale, 0.3], opacity into [ε, 1-ε].
     pub min_scale: f32,
     pub log_every: usize,
+    /// Run density control every N iterations, 0 = never (a fixed set of
+    /// gaussians, which is all this optimizer could ever do before).
+    ///
+    /// OFF by default, which is the conservative choice rather than the
+    /// obvious one. Density control is the fix for a scene too SPARSE to hold
+    /// its detail, and a feed-forward reconstruction is the opposite problem:
+    /// it starts at one gaussian per source pixel per view, so a 48-frame
+    /// video arrives at ~9.7M gaussians before anything is added. Growing that
+    /// pushes the backward past the per-binding gradient-record ceiling, which
+    /// fails the run outright. Turn it on for sparse scenes; reach for
+    /// `splat::prune` on dense ones.
+    pub densify_every: usize,
+    /// Skip density control until this iteration, so the gradients it reads
+    /// describe the scene rather than the first few steps of chaos.
+    pub densify_after: usize,
+    /// Fraction of gaussians, by positional-gradient magnitude, considered
+    /// under-reconstructed at each density-control step.
+    pub densify_frac: f32,
+    /// Drop gaussians below this opacity at each density-control step.
+    pub prune_opacity: f32,
+    /// Refuse to grow past this many gaussians, 0 = the device decides. A
+    /// runaway subdivision is a much worse failure than a soft scene.
+    pub max_gaussians: usize,
     /// The anti-alias dilation the fit optimizes UNDER. It is part of the
     /// forward model being inverted, so the optimizer folds compensation for
     /// it into the gaussians: a scene fitted at one value and rendered at
@@ -34,7 +57,18 @@ pub struct FitCfg {
 
 impl Default for FitCfg {
     fn default() -> Self {
-        FitCfg { iters: 200, lr: 5e-3, min_scale: 1e-4, log_every: 20, eps2d: RenderOpts::default().eps2d }
+        FitCfg {
+            iters: 200,
+            lr: 5e-3,
+            min_scale: 1e-4,
+            log_every: 20,
+            densify_every: 0,
+            densify_after: 30,
+            densify_frac: 0.05,
+            prune_opacity: 0.02,
+            max_gaussians: 0,
+            eps2d: RenderOpts::default().eps2d,
+        }
     }
 }
 
@@ -54,6 +88,125 @@ pub struct TargetView {
 /// `splat::caps::fit` polls the invocation's cancel token from its own.
 pub fn fit(gpu: &Gpu, ks: Kernels, init: &Splats, targets: &[TargetView], cfg: &FitCfg, on_step: &mut dyn FnMut(usize, f32) -> bool) -> (Splats, f32) {
     assert!(!targets.is_empty());
+    // With density control off there is exactly ONE stage, and this is the
+    // function it always was - same buffers, same Adam state, start to finish.
+    let stage_len = if cfg.densify_every == 0 { cfg.iters } else { cfg.densify_every };
+    let mut scene = init.clone();
+    let mut loss = 0.0f32;
+    let mut done = 0usize;
+    let mut stop = false;
+    while done < cfg.iters && !stop {
+        let iters = stage_len.min(cfg.iters - done);
+        let (next, l, grad, aborted) = fit_stage(gpu, ks, &scene, targets, cfg, iters, done, on_step);
+        scene = next;
+        loss = l;
+        done += iters;
+        stop = aborted;
+        if cfg.densify_every > 0 && done >= cfg.densify_after && done < cfg.iters && !stop {
+            let before = scene.len();
+            densify(&mut scene, &grad, cfg);
+            if cfg.log_every > 0 && scene.len() != before {
+                println!("fit iter {done:4}: density control {before} -> {} gaussians", scene.len());
+            }
+        }
+    }
+    (scene, loss)
+}
+
+/// Grow the scene where the loss is still pulling hardest, and drop what has
+/// gone transparent.
+///
+/// `grad` is the accumulated magnitude of each gaussian's positional gradient.
+/// Upstream 3DGS thresholds that at an absolute 2e-4; a FRACTION is used here
+/// instead because this loss is normalized per pixel and per view, so the
+/// absolute scale of a gradient depends on image size and view count and no
+/// constant transfers between scenes. A fraction also bounds growth by
+/// construction, which an absolute threshold does not.
+///
+/// Large gaussians SPLIT (two children at 1/1.6 the scale, offset along the
+/// parent's dominant axis) and small ones CLONE, following the reference: a
+/// big gaussian covering detail it cannot represent needs subdividing, while a
+/// small one in an under-populated region needs a neighbour.
+fn densify(scene: &mut Splats, grad: &[f32], cfg: &FitCfg) {
+    let n = scene.len();
+    if n == 0 || grad.len() != n {
+        return;
+    }
+    let cap = if cfg.max_gaussians > 0 { cfg.max_gaussians } else { usize::MAX };
+    if n >= cap {
+        return;
+    }
+
+    // the gradient threshold, as a fraction of the population
+    let want = ((n as f32 * cfg.densify_frac) as usize).min(cap - n);
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&a, &b| grad[b].total_cmp(&grad[a]));
+    let chosen: std::collections::HashSet<usize> = order.into_iter().take(want).collect();
+
+    // "large" relative to THIS scene, so the rule does not depend on units
+    let mut sizes: Vec<f32> = (0..n).map(|i| scene.scales[i * 3..i * 3 + 3].iter().fold(0.0f32, |m, &v| m.max(v))).collect();
+    sizes.sort_by(f32::total_cmp);
+    let big = sizes[(n as f32 * 0.8) as usize % n];
+
+    let mut out = Splats::default();
+    let push = |o: &mut Splats, i: usize, dm: [f32; 3], shrink: f32| {
+        for (k, d) in dm.iter().enumerate() {
+            o.means.push(scene.means[i * 3 + k] + d);
+        }
+        o.quats.extend_from_slice(&scene.quats[i * 4..i * 4 + 4]);
+        for k in 0..3 {
+            o.scales.push((scene.scales[i * 3 + k] * shrink).max(cfg.min_scale));
+        }
+        o.opacities.push(scene.opacities[i]);
+        o.colors.extend_from_slice(&scene.colors[i * 3..i * 3 + 3]);
+    };
+    for i in 0..n {
+        if scene.opacities[i] < cfg.prune_opacity {
+            continue; // pruned: too transparent to be carrying anything
+        }
+        let s = &scene.scales[i * 3..i * 3 + 3];
+        let axis = (0..3).max_by(|&a, &b| s[a].total_cmp(&s[b])).unwrap();
+        if chosen.contains(&i) && s[axis] >= big {
+            // split: two smaller children straddling the parent's long axis,
+            // rotated into world space by the parent's own orientation
+            let q = &scene.quats[i * 4..i * 4 + 4];
+            let nq = (q.iter().map(|v| v * v).sum::<f32>()).sqrt().max(1e-8);
+            let (w, x, y, z) = (q[0] / nq, q[1] / nq, q[2] / nq, q[3] / nq);
+            let col = match axis {
+                0 => [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y + w * z), 2.0 * (x * z - w * y)],
+                1 => [2.0 * (x * y - w * z), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z + w * x)],
+                _ => [2.0 * (x * z + w * y), 2.0 * (y * z - w * x), 1.0 - 2.0 * (x * x + y * y)],
+            };
+            let d = s[axis] * 0.5;
+            push(&mut out, i, [col[0] * d, col[1] * d, col[2] * d], 1.0 / 1.6);
+            push(&mut out, i, [-col[0] * d, -col[1] * d, -col[2] * d], 1.0 / 1.6);
+        } else if chosen.contains(&i) {
+            // clone: a second gaussian for the optimizer to walk off the first
+            push(&mut out, i, [0.0; 3], 1.0);
+            push(&mut out, i, [0.0; 3], 1.0);
+        } else {
+            push(&mut out, i, [0.0; 3], 1.0);
+        }
+    }
+    if !out.is_empty() {
+        *scene = out;
+    }
+}
+
+/// One run of the optimizer over a FIXED set of gaussians. Returns the scene,
+/// the last loss, each gaussian's accumulated positional-gradient magnitude,
+/// and whether `on_step` asked to stop.
+#[allow(clippy::too_many_arguments)]
+fn fit_stage(
+    gpu: &Gpu,
+    ks: Kernels,
+    init: &Splats,
+    targets: &[TargetView],
+    cfg: &FitCfg,
+    iters: usize,
+    it0: usize,
+    on_step: &mut dyn FnMut(usize, f32) -> bool,
+) -> (Splats, f32, Vec<f32>, bool) {
     let n = init.len();
     let (maxw, maxh) = targets
         .iter()
@@ -117,7 +270,14 @@ pub fn fit(gpu: &Gpu, ks: Kernels, init: &Splats, targets: &[TargetView], cfg: &
     };
 
     let mut last_loss = 0.0f32;
-    for it in 0..cfg.iters {
+    let mut aborted = false;
+    // Positional-gradient magnitude per gaussian, averaged over the tail of
+    // the stage. Read back over a WINDOW rather than every iteration: one
+    // iteration is noisy and every iteration would be 40 bytes per gaussian
+    // per step off the device for a signal that is used once.
+    let window = iters.clamp(1, 4);
+    let mut gsum = vec![0.0f32; n];
+    for it in 0..iters {
         // zero grads
         gpu.submit(&[&grads.d_gauss, &grads.d_opac, &grads.d_colors], &[]);
         let mut loss_sum = 0.0f64;
@@ -158,6 +318,12 @@ pub fn fit(gpu: &Gpu, ks: Kernels, init: &Splats, targets: &[TargetView], cfg: &
                 .render_bwd(gpu, &gs, &t.cam, &opts, &dimg, &mut bscr, &grads)
                 .unwrap_or_else(|e| panic!("{e}"));
         }
+        // Adam's bias correction counts from the start of THIS stage, because
+        // its moments do too: m and v are fresh buffers per stage, and pairing
+        // zeroed moments with a bias correction for a much later timestep is
+        // not a well-formed Adam step. Staging still costs something - measured
+        // at ~3.5% worse final loss than a single unbroken run, from losing the
+        // momentum - which density control has to earn back before it pays.
         let ts = it as i32 + 1;
         let bc1 = 1.0 - 0.9f32.powi(ts);
         let bc2 = 1.0 - 0.999f32.powi(ts);
@@ -179,11 +345,21 @@ pub fn fit(gpu: &Gpu, ks: Kernels, init: &Splats, targets: &[TargetView], cfg: &
         }
         gpu.write(&p_op, cast(&op));
 
-        last_loss = (loss_sum / targets.len() as f64) as f32;
-        if cfg.log_every > 0 && (it % cfg.log_every == 0 || it + 1 == cfg.iters) {
-            println!("fit iter {it:4}: mse {last_loss:.6}");
+        if cfg.densify_every > 0 && it + window >= iters {
+            let dg = gpu.read(&grads.d_gauss, 10 * n);
+            for i in 0..n {
+                let (a, b, c) = (dg[i * 10], dg[i * 10 + 1], dg[i * 10 + 2]);
+                gsum[i] += (a * a + b * b + c * c).sqrt();
+            }
         }
-        if !on_step(it, last_loss) {
+
+        last_loss = (loss_sum / targets.len() as f64) as f32;
+        let global = it0 + it;
+        if cfg.log_every > 0 && (global.is_multiple_of(cfg.log_every) || global + 1 == cfg.iters) {
+            println!("fit iter {global:4}: mse {last_loss:.6}");
+        }
+        if !on_step(global, last_loss) {
+            aborted = true;
             break;
         }
     }
@@ -200,7 +376,7 @@ pub fn fit(gpu: &Gpu, ks: Kernels, init: &Splats, targets: &[TargetView], cfg: &
         out.opacities.push(op[i]);
         out.colors.extend_from_slice(&col[i * 3..i * 3 + 3]);
     }
-    (out, last_loss)
+    (out, last_loss, gsum, aborted)
 }
 
 fn cast(v: &[f32]) -> &[u32] {

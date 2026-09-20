@@ -98,7 +98,7 @@ fn a_fitted_scene_reproduces_its_views_sharply_and_not_merely_closely() {
     let ks = Kernels::at(0);
     let (w, h) = (72u32, 72u32);
     let truth = board(16);
-    let (targets, mut ren) = views(&g, ks, &truth, w, h);
+    let (targets, _ren) = views(&g, ks, &truth, w, h);
 
     // Knock it out: colours toward flat grey, positions jittered. Flattening
     // the colours is what removes the edges, so the fit has to put the
@@ -116,6 +116,9 @@ fn a_fitted_scene_reproduces_its_views_sharply_and_not_merely_closely() {
     let (fitted, _) = fit(&g, ks, &init, &targets, &cfg, &mut |_, _| true);
 
     let o = RenderOpts::default();
+    // `fit` may return more gaussians than it was given, so size the renderer
+    // from what came back rather than from what went in.
+    let mut ren = Renderer::new(&g, ks, fitted.len().max(truth.len()), w, h, 0);
     let gs = GpuSplats::upload(&g, &fitted);
     let (wu, hu) = (w as usize, h as usize);
     for (i, t) in targets.iter().enumerate() {

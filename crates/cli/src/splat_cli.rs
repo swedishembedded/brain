@@ -418,6 +418,13 @@ fn fit_cmd(argv: &[String]) {
     // this same value or the optimizer's compensation for it shows up as blur
     // (rendered higher) or as aliasing (rendered lower).
     let eps2d = a.f32_or("--eps2d", FitCfg::default().eps2d);
+    // Density control: let the fit ADD gaussians where the loss is still
+    // pulling. Off unless asked, because a feed-forward scene is already
+    // dense and growing it can push the backward past the device's
+    // gradient-record ceiling mid-run.
+    let densify_every = a.usize_or("--densify", 0);
+    let densify_frac = a.f32_or("--densify-frac", FitCfg::default().densify_frac);
+    let max_gaussians = a.usize_or("--max-gaussians", 0);
     a.finish();
 
     let cams_json: serde_json::Value =
@@ -472,13 +479,16 @@ fn fit_cmd(argv: &[String]) {
     let g = Gpu::new(splat::PIPELINES);
     let ks = Kernels::at(0);
     println!("fitting {} gaussians against {} views ({} iters, lr {lr}) …", s.len(), targets.len(), iters);
-    let cfg = FitCfg { iters, lr, eps2d, ..Default::default() };
+    let cfg = FitCfg { iters, lr, eps2d, densify_every, densify_frac, max_gaussians, ..Default::default() };
     let (fitted, mse) = splat_fit(&g, ks, &s, &targets, &cfg, &mut |_it, _mse| true);
+    let grown = fitted.len();
     splat::ply::write(&out, &fitted).unwrap_or_else(|e| {
         eprintln!("PLY write failed: {e}");
         std::process::exit(1);
     });
-    println!("{path} -> {out} (final mse {mse:.6}, fitted at --eps2d {eps2d}; render it with the same value)");
+    println!(
+        "{path} -> {out} ({grown} gaussians, final mse {mse:.6}, fitted at --eps2d {eps2d}; render it with the same value)"
+    );
 }
 
 /// Tight RGB24 bytes → an image file (P6, or PNG when `path` says `.png`).
