@@ -36,7 +36,7 @@ pub fn run_mirror(argv: &[String]) {
 
 /// Extensions `imaging::load` decodes. It dispatches on the BYTES, not the
 /// name, so this list only has to keep non-images out of a directory listing.
-const IMAGE_EXTS: [&str; 7] = ["ppm", "png", "jpg", "jpeg", "bmp", "tif", "tiff"];
+pub const IMAGE_EXTS: [&str; 7] = ["ppm", "png", "jpg", "jpeg", "bmp", "tif", "tiff"];
 
 /// Extensions treated as a video to decode frames from.
 const VIDEO_EXTS: [&str; 6] = ["mp4", "mov", "mkv", "webm", "avi", "m4v"];
@@ -51,7 +51,7 @@ fn ext_of(p: &std::path::Path) -> String {
     p.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase()
 }
 
-fn collect_images(spec: &str) -> Vec<String> {
+pub fn collect_images(spec: &str) -> Vec<String> {
     let p = std::path::Path::new(spec);
     if p.is_dir() {
         let mut v: Vec<String> = std::fs::read_dir(p)

@@ -53,9 +53,15 @@ the scene from its bounds. Viewer controls:
 `fit` optimizes an existing `.ply` scene against a set of posed target
 photos - the same rasterizer, run backward. `--cameras` takes the
 `cameras.json` format `brain worldmirror2 infer` produces (a list of camera poses
-and intrinsics); `--images` is a directory of P6 PPM photos (or a
-comma-separated list) in the same order as the cameras, and each image's
-size must match its camera. This is how you turn a starting point cloud
+and intrinsics); `--images` is a directory (or comma-separated list) of
+photographs in the same order as the cameras - PPM, PNG, JPEG, BMP or TIFF.
+
+Targets are resampled to their camera's size, so the SAME folder that produced
+a reconstruction can be fitted against without a conversion step. A camera
+recovered by `worldmirror2 infer` describes the model's own 518-px grid, never
+the photograph's full resolution, so they essentially never match already. A
+target whose ASPECT differs from its camera by more than 5% is refused instead
+of stretched. This is how you turn a starting point cloud
 (from `brain worldmirror2`, or your own SfM/COLMAP output converted to `.ply`)
 into a scene that actually reproduces your photos.
 

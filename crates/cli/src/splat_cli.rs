@@ -446,21 +446,11 @@ fn fit_cmd(argv: &[String]) {
             height: c["height"].as_u64().unwrap() as u32,
         });
     }
-    let paths: Vec<String> = {
-        let p = std::path::Path::new(&images);
-        if p.is_dir() {
-            let mut v: Vec<String> = std::fs::read_dir(p)
-                .expect("readable dir")
-                .filter_map(|e| e.ok())
-                .map(|e| e.path().to_string_lossy().into_owned())
-                .filter(|n| n.ends_with(".ppm"))
-                .collect();
-            v.sort();
-            v
-        } else {
-            images.split(',').map(|x| x.trim().to_string()).collect()
-        }
-    };
+    // The SAME collection `worldmirror2 infer` uses. These were separate
+    // copies, and only one of them learned to read a JPEG - so a scene
+    // reconstructed straight from a folder of photographs could not then be
+    // fitted against those same photographs.
+    let paths = crate::mirror_cli::collect_images(&images);
     assert_eq!(paths.len(), cams.len(), "image count must match camera count");
     let targets: Vec<TargetView> = paths
         .iter()
@@ -470,8 +460,35 @@ fn fit_cmd(argv: &[String]) {
                 eprintln!("{e}");
                 std::process::exit(1);
             });
-            assert_eq!((img.w, img.h), (cam.width, cam.height), "{pth}: size vs camera");
-            let rgb = img.to_hwc_unit();
+            // A camera recovered by `worldmirror2 infer` is written for the
+            // model's own grid, not for the photograph's full resolution, so
+            // the same folder that produced the scene is almost never already
+            // the right size. Resample instead of refusing: a target view is
+            // defined by its camera, and the camera says how big it is.
+            let rgb = if (img.w, img.h) == (cam.width, cam.height) {
+                img.to_hwc_unit()
+            } else {
+                // Tolerated, not exact: the model's own preprocessing rounds
+                // the short side to a multiple of its 14px patch grid (1536
+                // becomes 392, not 388.5), so a camera it recovered is ~1% off
+                // the photograph's true aspect by construction. Anything
+                // further apart is a real mismatch - portrait against
+                // landscape, or the wrong folder - and stretching it would
+                // have the fit chase the distortion.
+                let skew = (img.w as f32 / img.h as f32) / (cam.width as f32 / cam.height as f32);
+                if !(0.95..1.05).contains(&skew) {
+                    eprintln!(
+                        "{pth} is {}x{} but its camera is {}x{}, a {:.0}% different aspect ratio. \
+                         Resampling would stretch the target and the fit would chase the \
+                         distortion; crop the photographs to the camera's aspect first.",
+                        img.w, img.h, cam.width, cam.height, (skew - 1.0).abs() * 100.0
+                    );
+                    std::process::exit(2);
+                }
+                imaging::host::resize_bilinear_hwc(
+                    &img.to_hwc_unit(), 3, img.w, img.h, cam.width, cam.height,
+                )
+            };
             TargetView { cam: *cam, rgb }
         })
         .collect();
@@ -528,6 +545,25 @@ pub fn write_ppm(path: &str, rgba: &[f32], w: usize, h: usize, normalize: bool) 
 
 #[cfg(test)]
 mod tests {
+    /// `worldmirror2 infer` and `splat fit` are used back to back on the same
+    /// folder - reconstruct from photographs, then optimize the scene against
+    /// those photographs - and each had its OWN copy of "collect the images in
+    /// this directory". Only one of them was taught to read anything but
+    /// `.ppm`, so the pair stopped composing on exactly the input a user
+    /// arrives with. One function now serves both.
+    #[test]
+    fn fit_collects_the_same_inputs_the_reconstruction_did() {
+        let d = std::env::temp_dir().join(format!("brain-fit-collect-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        for n in ["a.jpeg", "b.png", "c.ppm", "cameras.json"] {
+            std::fs::write(d.join(n), b"x").unwrap();
+        }
+        let got = crate::mirror_cli::collect_images(d.to_str().unwrap());
+        assert_eq!(got.len(), 3, "fit would refuse photographs infer accepts: {got:?}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     /// `render --out` and `fit --out` both took the generic
     /// capability-manifest `name=path` form (documented by `brain caps
     /// splat`, and what `brain do`/D-Bus actually send) literally, writing a
