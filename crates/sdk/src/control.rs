@@ -293,6 +293,32 @@ impl Keep {
     }
 }
 
+/// How far the policy has moved, over the candidates a probe measured, from
+/// the policy that measured them.
+///
+/// The forward KL from the collecting policy, which is what `--target-kl`
+/// means in the PPO loop - so one flag bounds the movement of both updates
+/// and a reader does not have to learn two notions of "too far".
+///
+/// The outcome fit needs it for a reason the gain limit does not cover.
+/// [`OUTCOME_GAIN_LIMIT`] bounds what any ONE decision may pull; nothing
+/// bounded how far the whole update travelled, and fitting a few dozen
+/// probed states hard enough moves a head that answers for thousands of
+/// states nobody measured. Measured: two rounds took a DOOM policy's fixed
+/// block from 0.780 to 0.440 while the belief on the best-measured option
+/// climbed from 0.09 to 0.21 - the update reaching its target and taking the
+/// rest of the policy with it, which is exactly the failure a trust region
+/// exists to stop.
+fn candidate_drift(old: &[f32], new: &[f32]) -> f32 {
+    let mut kl = 0.0f64;
+    for (o, n) in old.iter().zip(new) {
+        let o = (*o as f64).clamp(1e-8, 1.0);
+        let n = (*n as f64).clamp(1e-8, 1.0);
+        kl += o * (o / n).ln();
+    }
+    (kl as f32).max(0.0)
+}
+
 /// The distribution over measured candidates that an outcome-fitted update
 /// aims at, and how much that decision's opinion is worth.
 ///
@@ -365,6 +391,12 @@ struct Probe {
     /// always the teacher's own choice, so a caller can say what the update
     /// gained over it.
     tried: Vec<(usize, f32)>,
+    /// What the policy believed about those same candidates when it measured
+    /// them, renormalised over the ones tried. The fit's trust region is
+    /// distance from THIS - see [`candidate_drift`] - and it has to be the
+    /// policy that collected the probe rather than whatever the head says by
+    /// the time an epoch reaches it.
+    belief: Vec<f32>,
 }
 
 /// One recorded step of one episode.
@@ -1636,6 +1668,17 @@ impl<E: Env> ControlPipeline<E> {
                         Some((scored, tried)) => {
                             spent += scored.iter().map(|b| b.steps).sum::<usize>();
                             let theirs = scored[0].score;
+                            let mut belief: Vec<f32> =
+                                tried.iter().map(|&c| probs.get(c).copied().unwrap_or(0.0)).collect();
+                            let mass: f32 = belief.iter().sum();
+                            if mass > 0.0 {
+                                for b in belief.iter_mut() {
+                                    *b /= mass;
+                                }
+                            } else {
+                                let flat = 1.0 / belief.len().max(1) as f32;
+                                belief.fill(flat);
+                            }
                             probes.push(Probe {
                                 label: self.env.label(),
                                 observation: obs.clone(),
@@ -1645,6 +1688,7 @@ impl<E: Env> ControlPipeline<E> {
                                     .zip(&scored)
                                     .map(|(&c, b)| (c, b.score))
                                     .collect(),
+                                belief,
                             });
                             let best =
                                 scored.iter().map(|b| b.score).fold(f32::NEG_INFINITY, f32::max);
@@ -1905,13 +1949,13 @@ impl<E: Env> ControlPipeline<E> {
     fn fit_outcomes(
         &mut self,
         probes: &[Probe],
-        epochs: usize,
-        head_lr: f32,
+        spec: &ControlSpec,
         log: &mut dyn FnMut(usize, f32),
         step: &mut usize,
-    ) -> Result<(f32, f32)> {
+    ) -> Result<(f32, f32, f32, usize)> {
+        let (epochs, head_lr) = (spec.warmup_epochs, spec.head_lr);
         if probes.is_empty() {
-            return Ok((0.0, 0.0));
+            return Ok((0.0, 0.0, 0.0, 0));
         }
         // What each decision is aiming at, and how much its opinion is worth.
         // The weights are scaled by the batch MEAN rather than centred: a
@@ -1943,21 +1987,37 @@ impl<E: Env> ControlPipeline<E> {
 
         let mut loss = 0.0f32;
         let mut moved = 0.0f64;
+        // How far this fit has carried the policy from the one that collected
+        // the probes, and whether that is what stopped it. The gain limit
+        // above bounds what one decision may pull; this bounds the whole
+        // update, which is the part that was missing - see [`candidate_drift`].
+        let mut drift = 0.0f32;
+        let mut passes = 0usize;
+        let mut spent = false;
         let mut order: Vec<usize> = (0..probes.len()).collect();
         for _ in 0..epochs.max(1) {
+            if spent {
+                break;
+            }
             for i in (1..order.len()).rev() {
                 let j = (self.rng.next_u64() % (i as u64 + 1)) as usize;
                 order.swap(i, j);
             }
             let mut epoch_loss = 0.0f32;
             moved = 0.0;
+            let mut travelled = 0.0f64;
+            let mut counted = 0usize;
             for chunk in order.chunks(MINIBATCH) {
+                if spent {
+                    break;
+                }
                 self.model.zero_grads();
                 for &i in chunk {
                     let p = &probes[i];
                     let (target, weight) = &aims[i];
                     let q = self.question(&p.options);
                     let mut shift = 0.0f32;
+                    let mut here = 0.0f32;
                     epoch_loss += self
                         .model
                         .accumulate(&p.observation, &q, |scores| {
@@ -1996,11 +2056,25 @@ impl<E: Env> ControlPipeline<E> {
                             if let Some(k) = top {
                                 shift = mine.get(k).copied().unwrap_or(0.0);
                             }
+                            // Measured on the SAME forward the update is
+                            // computed from, so it costs nothing beyond the
+                            // pass that was happening anyway.
+                            here = candidate_drift(&p.belief, &mine);
                             (weight * l, grad)
                         })
                         .map_err(Error::Backend)?;
                     moved += shift as f64;
+                    travelled += here as f64;
+                    counted += 1;
                     *step += 1;
+                }
+                // BEFORE the step this minibatch would take, for the reason
+                // the PPO loop puts its own guard there: a check that can
+                // only fire after a whole pass is a report, not a guard.
+                drift = (travelled / counted.max(1) as f64) as f32;
+                if spec.policy.target_kl > 0.0 && drift > spec.policy.target_kl {
+                    spent = true;
+                    break;
                 }
                 self.model.adamw_scaled(
                     ENCODER_LR,
@@ -2008,10 +2082,11 @@ impl<E: Env> ControlPipeline<E> {
                     1.0 / chunk.len() as f32,
                 );
             }
+            passes += 1;
             loss = epoch_loss / probes.len() as f32;
             log(*step, loss);
         }
-        Ok((loss, (moved / probes.len() as f64) as f32))
+        Ok((loss, (moved / probes.len() as f64) as f32, drift, passes))
     }
 
     /// Rounds of: probe the policy's own decisions, find out what the
@@ -2056,8 +2131,7 @@ impl<E: Env> ControlPipeline<E> {
                 println!("    improve: no decision could be probed");
                 return Ok(());
             }
-            let (loss, on_best) =
-                self.fit_outcomes(&probes, spec.warmup_epochs, spec.head_lr, log, step)?;
+            let (loss, on_best, drift, passes) = self.fit_outcomes(&probes, spec, log, step)?;
             let after = self.gauge(spec.gauge_episodes, spec.max_steps)?;
             println!(
                 "    improve {:>2}  {} decisions probed ({} game steps)  {:.0}% of them mattered  \
@@ -2074,6 +2148,17 @@ impl<E: Env> ControlPipeline<E> {
                     _ => String::new(),
                 }
             );
+            // Said out loud when the trust region is what ended the fit,
+            // because "it stopped early" and "it ran out of passes" are
+            // different states of the world and only one of them means the
+            // budget is the thing to change.
+            if passes < spec.warmup_epochs {
+                println!(
+                    "             stopped after {passes} of {} passes: the policy had moved \
+                     {drift:.4} from the one that measured the probes, against a budget of {:.4}",
+                    spec.warmup_epochs, spec.policy.target_kl
+                );
+            }
             keep.offer(round + 1, after.unwrap_or(-loss), || self.model.head_weights());
             before = after;
         }
@@ -2743,6 +2828,46 @@ mod keep_tests {
         let mut k = Keep::starting(0.770, w(0.0));
         k.offer(1, 0.770, || w(1.0));
         assert_eq!(k.best().0, 0);
+    }
+}
+
+#[cfg(test)]
+mod drift_tests {
+    use super::candidate_drift;
+
+    /// The quantity the outcome fit's trust region fires on: how far the
+    /// policy has moved, over the candidates a probe actually measured, from
+    /// the policy that measured them.
+    ///
+    /// This exists because without it the fit had a cap on what any one
+    /// decision could pull and no cap at all on how far the whole update
+    /// travelled. Measured on a DOOM run, two rounds took the fixed block
+    /// from 0.780 to 0.440 while the objective it optimises kept improving -
+    /// the update was reaching its own target and taking the rest of the
+    /// policy with it.
+    #[test]
+    fn a_policy_that_has_not_moved_has_not_drifted() {
+        let p = [0.6, 0.3, 0.1];
+        assert!(candidate_drift(&p, &p) < 1e-6, "an unmoved policy must read zero");
+    }
+
+    #[test]
+    fn drift_grows_with_the_distance_moved() {
+        let old = [0.6, 0.3, 0.1];
+        let near = candidate_drift(&old, &[0.55, 0.32, 0.13]);
+        let far = candidate_drift(&old, &[0.1, 0.3, 0.6]);
+        assert!(near > 0.0, "a moved policy must read above zero: {near}");
+        assert!(far > near, "further must read further: {near} then {far}");
+    }
+
+    /// It is the forward KL from the collecting policy, which is what makes
+    /// `--target-kl` mean the same thing here as it does in the PPO loop.
+    #[test]
+    fn it_is_the_divergence_from_the_policy_that_collected_the_probe() {
+        let old = [0.5, 0.5];
+        let new = [0.25, 0.75];
+        let want = 0.5 * (0.5f32 / 0.25).ln() + 0.5 * (0.5f32 / 0.75).ln();
+        assert!((candidate_drift(&old, &new) - want).abs() < 1e-6);
     }
 }
 
