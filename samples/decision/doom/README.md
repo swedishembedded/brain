@@ -182,7 +182,7 @@ become the exam.
 
 ```bash
 # learn on generated problems only - the policy never sees a DOOM level
-doom train --scenario my-way-home,health-gathering,deadly-corridor,basic            --mission speedrun --max-steps 400 --iterations 30 --episodes 8            --warmup 24 --warmup-keep 0.5 --save out/doom-scenarios.safetensors
+doom train --scenario my-way-home,health-gathering,deadly-corridor,defend-the-line,take-cover            --mission speedrun --max-steps 400 --iterations 30 --episodes 8            --warmup 24 --warmup-keep 0.5 --save out/doom-scenarios.safetensors
 
 # and score on the real game, which it has never been in
 doom eval  --maps 1,2,3,4,5 --mission speedrun --max-steps 900            --eval-episodes 10 --head out/doom-scenarios.safetensors
@@ -205,15 +205,21 @@ corner.
 
 | scenario | the one thing it asks |
 | --- | --- |
-| `basic` | see a monster, face it, shoot it |
-| `deadly-corridor` | advance to the armour under fire from both sides |
+| `basic` | see a monster, face it, shoot it. Both players solve it every time, so it teaches a trained policy nothing and is left out of the mix above |
+| `deadly-corridor` | advance the length of a corridor under fire from both sides |
 | `defend-the-center` | a ring closing in, with ammunition running out |
 | `defend-the-line` | the same, with a wall behind you and monsters that shoot |
 | `health-gathering` | a floor that burns, and medkits scattered over it |
 | `health-gathering-supreme` | the same, with the medkits out of sight in a maze |
-| `my-way-home` | dropped anywhere in a fresh maze, facing anywhere: find the armour |
+| `my-way-home` | dropped anywhere in a fresh maze, facing anywhere: find the marked room |
 | `predict-position` | a target walking the far wall, and a rocket that takes time |
 | `take-cover` | fireballs from across the room, and more of them coming |
+
+The two whose task is to GET somewhere end at an exit LINE, because that is
+how a DOOM level ends and the route can only lead to something it can see a
+line for. The others have no exit and none is invented for them: on
+`health-gathering` and `take-cover` the task is to last, and the route
+correctly spends the whole episode leading to unexplored ground.
 
 A generated level is published under a lump of its own rather than into an
 `ExMy` slot, and the episode and map the engine believes it is playing never
