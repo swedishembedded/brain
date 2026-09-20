@@ -862,7 +862,7 @@ fn upscale(args: &[String]) -> Result<(), String> {
     };
 
     let in_path = std::path::Path::new(&input);
-    let decoded = imaging::video::decode_frames_rgb8(in_path, &imaging::video::VideoDecodeOpts { fps: None, max_frames: 0 })?;
+    let decoded = imaging::video::decode_frames_rgb8(in_path, &imaging::video::VideoDecodeOpts { fps: None, max_frames: 0, spread: 0 })?;
     let (w, h) = (decoded[0].w, decoded[0].h);
     if let Some(bad) = decoded.iter().position(|f| (f.w, f.h) != (w, h)) {
         return Err(format!("{input} changes size at frame {bad} ({}x{} after {w}x{h}) - a clip has one resolution", decoded[bad].w, decoded[bad].h));
@@ -986,7 +986,7 @@ fn v2v(args: &[String]) -> Result<(), String> {
     let paths = resolve_ltxv(&overrides, None)?;
 
     let in_path = std::path::Path::new(&input);
-    let decoded = imaging::video::decode_frames_rgb8(in_path, &imaging::video::VideoDecodeOpts { fps: None, max_frames: 0 })?;
+    let decoded = imaging::video::decode_frames_rgb8(in_path, &imaging::video::VideoDecodeOpts { fps: None, max_frames: 0, spread: 0 })?;
     let (w, h) = (decoded[0].w, decoded[0].h);
     if let Some(bad) = decoded.iter().position(|f| (f.w, f.h) != (w, h)) {
         return Err(format!("{input} changes size at frame {bad} ({}x{} after {w}x{h}) - a clip has one resolution", decoded[bad].w, decoded[bad].h));

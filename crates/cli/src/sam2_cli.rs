@@ -129,7 +129,7 @@ impl Clip {
             (Some(v), _) => {
                 let p = Path::new(v);
                 let rate = fps.or_else(|| imaging::video::probe_fps(p)).unwrap_or(24.0);
-                let opts = imaging::video::VideoDecodeOpts { fps, max_frames: max };
+                let opts = imaging::video::VideoDecodeOpts { fps, max_frames: max, spread: 0 };
                 let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| v.to_string());
                 (imaging::video::decode_frames(p, &opts)?, name, rate)
             }

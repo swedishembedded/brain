@@ -115,16 +115,21 @@ fn gather(spec: &str, sel: &FrameSel) -> Vec<imaging::Rgb8> {
             eprintln!("reading {spec} needs the ffmpeg CLI on PATH (Debian/Ubuntu: apt-get install ffmpeg)");
             std::process::exit(1);
         }
+        // Selection happens INSIDE ffmpeg: `spread` asks for N frames spaced
+        // over the whole clip, so the frames nobody wants are dropped before
+        // they are converted and nothing is staged on disk. Decoding the clip
+        // and thinning afterwards cost a full decode and a temp file per
+        // frame to keep a couple of dozen.
         let opts = imaging::video::VideoDecodeOpts {
             fps: if sel.fps > 0.0 { Some(sel.fps) } else { None },
-            // decode generously, then thin across the whole clip below - an
-            // ffmpeg frame cap truncates, turning an orbit into an arc
             max_frames: 0,
+            spread: if sel.fps > 0.0 { 0 } else { sel.max as u32 },
         };
         let frames = imaging::video::decode_frames_rgb8(p, &opts).unwrap_or_else(|e| {
             eprintln!("{e}");
             std::process::exit(1);
         });
+        // `--stride` (and an explicit --fps with a cap) still thin what came back
         let n = frames.len();
         let idx = select_frames(&(0..n).map(|i| format!("{i:08}")).collect::<Vec<_>>(), sel.stride, sel.max);
         let keep: Vec<usize> = idx.iter().map(|k| k.parse().unwrap()).collect();

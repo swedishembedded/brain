@@ -50,7 +50,21 @@ pub struct VideoDecodeOpts {
     pub fps: Option<f64>,
     /// Stop after this many frames. `0` means unbounded (still implicitly
     /// capped by the clip's own duration at the chosen `fps`).
+    ///
+    /// This TRUNCATES: it keeps the first N frames and stops. For a capture
+    /// that has to be covered rather than sampled from its opening seconds -
+    /// an orbit, a turntable - use `spread` instead.
     pub max_frames: u32,
+    /// Ask for about this many frames spaced evenly across the WHOLE clip,
+    /// `0` to disable. Overrides `fps`, which it derives from the clip's
+    /// duration.
+    ///
+    /// The distinction from `max_frames` is the difference between covering a
+    /// rotation and covering its first few degrees. It is also what lets a
+    /// long capture be decoded cheaply: ffmpeg drops the unwanted frames
+    /// before they are ever converted, so asking for 24 frames from a
+    /// ten-minute clip costs 24 frames of work, not the clip.
+    pub spread: u32,
 }
 
 impl Default for VideoDecodeOpts {
@@ -58,7 +72,7 @@ impl Default for VideoDecodeOpts {
     /// few seconds of video, not a full-length feature), matching the scale
     /// `qwen3omnimoe::mm::encode_video_frames` is validated at.
     fn default() -> VideoDecodeOpts {
-        VideoDecodeOpts { fps: Some(1.0), max_frames: 32 }
+        VideoDecodeOpts { fps: Some(1.0), max_frames: 32, spread: 0 }
     }
 }
 
@@ -85,38 +99,109 @@ pub fn decode_frames_rgb8(path: &Path, opts: &VideoDecodeOpts) -> Result<Vec<Rgb
         return Err(format!("imaging::video: {} does not exist", path.display()));
     }
 
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("brain-video-decode-{}-{n}", std::process::id()));
-    std::fs::create_dir_all(&dir).map_err(|e| format!("imaging::video: creating {}: {e}", dir.display()))?;
-    let _cleanup = TempDirGuard(&dir);
+    let (w, h) = probe_size(path).ok_or_else(|| {
+        format!("imaging::video: ffprobe could not read the frame size of {}", path.display())
+    })?;
+
+    // `spread` needs the clip's length to turn "about N frames" into a rate.
+    let fps = match (opts.spread, probe_duration(path)) {
+        (n, Some(d)) if n > 0 && d > 0.0 => Some((n as f64 - 0.5).max(1.0) / d),
+        (n, None) if n > 0 => {
+            return Err(format!(
+                "imaging::video: spread={n} needs the duration of {}, which ffprobe did not report",
+                path.display()
+            ))
+        }
+        _ => opts.fps,
+    };
 
     let mut cmd = Command::new("ffmpeg");
-    cmd.arg("-y").arg("-i").arg(path);
-    if let Some(fps) = opts.fps {
+    cmd.arg("-v").arg("error").arg("-i").arg(path);
+    if let Some(fps) = fps {
         cmd.arg("-vf").arg(format!("fps={fps}"));
     }
     if opts.max_frames > 0 {
         cmd.arg("-frames:v").arg(opts.max_frames.to_string());
     }
-    cmd.arg(dir.join("frame_%05d.ppm"));
-    let out = cmd.output().map_err(|e| format!("imaging::video: spawning ffmpeg: {e}"))?;
-    if !out.status.success() {
-        return Err(format!("imaging::video: ffmpeg exited {}: {}", out.status, String::from_utf8_lossy(&out.stderr)));
-    }
+    // Raw RGB straight down a pipe: no container, no per-frame encode, and
+    // nothing written to disk. The frame size is fixed and known, so the
+    // stream is self-delimiting.
+    cmd.args(["-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"]);
+    cmd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
 
-    let mut entries: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
-        .map_err(|e| format!("imaging::video: reading {}: {e}", dir.display()))?
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|ext| ext == "ppm"))
-        .collect();
-    entries.sort();
-    if entries.is_empty() {
+    let mut child = cmd.spawn().map_err(|e| format!("imaging::video: spawning ffmpeg: {e}"))?;
+    let mut stdout = child.stdout.take().expect("piped");
+    let frame_bytes = (w as usize) * (h as usize) * 3;
+    let mut out = Vec::new();
+    let mut buf = vec![0u8; frame_bytes];
+    loop {
+        match read_exact_or_eof(&mut stdout, &mut buf)? {
+            0 => break,
+            n if n == frame_bytes => out.push(Rgb8::new(w, h, buf.clone())?),
+            n => {
+                return Err(format!(
+                    "imaging::video: {} ended mid-frame ({n} of {frame_bytes} bytes)",
+                    path.display()
+                ))
+            }
+        }
+    }
+    let status = child.wait().map_err(|e| format!("imaging::video: waiting for ffmpeg: {e}"))?;
+    if !status.success() {
+        let mut err = String::new();
+        if let Some(mut e) = child.stderr.take() {
+            use std::io::Read;
+            let _ = e.read_to_string(&mut err);
+        }
+        return Err(format!("imaging::video: ffmpeg exited {status}: {err}"));
+    }
+    if out.is_empty() {
         return Err(format!("imaging::video: ffmpeg produced no frames for {}", path.display()));
     }
+    Ok(out)
+}
 
-    entries.iter().map(crate::codec::load).collect()
+/// Fill `buf`, returning how many bytes were read: `buf.len()` normally, `0`
+/// at a clean end of stream, anything else for a truncated final frame.
+fn read_exact_or_eof(r: &mut impl std::io::Read, buf: &mut [u8]) -> Result<usize, String> {
+    let mut got = 0;
+    while got < buf.len() {
+        match r.read(&mut buf[got..]) {
+            Ok(0) => break,
+            Ok(n) => got += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(format!("imaging::video: reading ffmpeg output: {e}")),
+        }
+    }
+    Ok(got)
+}
+
+/// The video's pixel dimensions, via `ffprobe`.
+pub fn probe_size(path: &Path) -> Option<(u32, u32)> {
+    let out = Command::new("ffprobe")
+        .args(["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x"])
+        .arg(path)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let (w, h) = text.trim().split_once('x')?;
+    Some((w.trim().parse().ok()?, h.trim().parse().ok()?))
+}
+
+/// The video's duration in seconds, via `ffprobe`.
+pub fn probe_duration(path: &Path) -> Option<f64> {
+    let out = Command::new("ffprobe")
+        .args(["-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1"])
+        .arg(path)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout).trim().parse::<f64>().ok().filter(|d| *d > 0.0)
 }
 
 /// The video's own average frame rate, via `ffprobe`.
@@ -476,7 +561,7 @@ mod tests {
             .expect("spawning ffmpeg to encode the test clip");
         assert!(enc.status.success(), "encoding the test clip failed: {}", String::from_utf8_lossy(&enc.stderr));
 
-        let frames = decode_frames(&clip, &VideoDecodeOpts { fps: Some(2.0), max_frames: 3 }).expect("decode_frames on a real clip must succeed");
+        let frames = decode_frames(&clip, &VideoDecodeOpts { fps: Some(2.0), max_frames: 3, spread: 0 }).expect("decode_frames on a real clip must succeed");
         assert_eq!(frames.len(), 3, "fps=2 duration=2 max_frames=3 must yield exactly 3 frames");
         for (hwc, w, h) in &frames {
             assert_eq!((*w, *h), (32, 16), "frame dims must match the encoded clip");
@@ -525,7 +610,7 @@ mod tests {
         assert_eq!(got, Encoded::Video(out.clone()));
         assert!(out.metadata().expect("output exists").len() > 0);
 
-        let back = decode_frames(&out, &VideoDecodeOpts { fps: Some(8.0), max_frames: 8 }).expect("decode back");
+        let back = decode_frames(&out, &VideoDecodeOpts { fps: Some(8.0), max_frames: 8, spread: 0 }).expect("decode back");
         assert_eq!(back.len(), 8, "8 frames in, 8 frames out");
         assert_eq!((back[0].1, back[0].2), (32, 16));
         let d: f32 = back[0].0.iter().zip(&back[7].0).map(|(a, b)| (a - b).abs()).sum();
@@ -573,7 +658,7 @@ mod tests {
 
         // The picture must survive the second input: an unqualified filter or
         // a missing `-map` can drop the video stream instead of the audio.
-        let back = decode_frames(&out, &VideoDecodeOpts { fps: Some(8.0), max_frames: 16 }).expect("decode the muxed clip back");
+        let back = decode_frames(&out, &VideoDecodeOpts { fps: Some(8.0), max_frames: 16, spread: 0 }).expect("decode the muxed clip back");
         assert_eq!(back.len(), 16, "muxing audio must not change the frame count");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -654,7 +739,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let out = dir.join("odd.mp4");
         encode_frames(&moving_block(4, 7, 5), &out, 4.0, &VideoEncodeOpts::default()).expect("encode odd dims");
-        let back = decode_frames(&out, &VideoDecodeOpts { fps: Some(4.0), max_frames: 4 }).expect("decode back");
+        let back = decode_frames(&out, &VideoDecodeOpts { fps: Some(4.0), max_frames: 4, spread: 0 }).expect("decode back");
         assert_eq!((back[0].1, back[0].2), (8, 6), "odd dims must be padded up, not truncated");
         let _ = std::fs::remove_dir_all(&dir);
     }
