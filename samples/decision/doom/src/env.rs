@@ -1008,7 +1008,15 @@ impl DoomEnv {
 
         // Standing in slime: anywhere else will do, and the exit route is
         // already computed to avoid it.
-        if self.state.player.standing_in_damage {
+        //
+        // Unless there IS nowhere else. On a level whose whole floor burns,
+        // "get out of it" has no answer, and taking the branch anyway sent
+        // the player in a straight line to the nearest wall to die there -
+        // every episode, at decision 102, with the medkits that would have
+        // kept it alive still on the floor. Burning floor is only an
+        // emergency while somewhere dry exists; otherwise it is the weather,
+        // and the ordinary order of business applies.
+        if self.state.player.standing_in_damage && self.state.player.dry_land.is_some() {
             // The way OUT of it, when the engine could see one. Taking the
             // route instead is what killed the scripted player on E1M3: the
             // route led across more nukage, because that is where the run was
