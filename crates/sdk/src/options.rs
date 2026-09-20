@@ -166,6 +166,14 @@ pub struct ControlOptions {
     pub warmup_keep: f32,
     /// Rounds of DAgger between the warm start and the policy gradient.
     pub dagger: usize,
+    /// Rounds of outcome-fitted improvement after the imitation phases.
+    pub improve: usize,
+    /// Decisions probed per improvement round.
+    pub states: usize,
+    /// Alternatives tried at each, beside the teacher's own.
+    pub alternatives: usize,
+    /// Decisions a probe departs from the teacher for.
+    pub deviate: usize,
     /// Episodes on a fixed block of worlds, scored after every iteration.
     pub gauge_episodes: usize,
     /// Average the head over the last N iterates as a second candidate.
@@ -205,6 +213,10 @@ impl ControlOptions {
             warmup_epochs: d.warmup_epochs,
             warmup_keep: d.warmup_keep,
             dagger: d.dagger,
+            improve: d.improve,
+            states: d.states,
+            alternatives: d.alternatives,
+            deviate: d.deviate,
             gauge_episodes: d.gauge_episodes,
             average: d.average,
             head_lr: None,
@@ -228,6 +240,8 @@ impl ControlOptions {
             .warmup_epochs(self.warmup_epochs)
             .warmup_keep(self.warmup_keep)
             .dagger(self.dagger)
+            .improve(self.improve)
+            .probing(self.states, self.alternatives, self.deviate)
             .gauge_episodes(self.gauge_episodes)
             .average(self.average)
             .head_lr(self.head_lr.unwrap_or(0.0))
@@ -261,6 +275,10 @@ impl ControlOptions {
         self.warmup_episodes = args.usize_or("--warmup", self.warmup_episodes);
         self.warmup_epochs = args.usize_or("--warmup-epochs", self.warmup_epochs);
         self.dagger = args.usize_or("--dagger", self.dagger);
+        self.improve = args.usize_or("--improve", self.improve);
+        self.states = args.usize_or("--states", self.states);
+        self.alternatives = args.usize_or("--alternatives", self.alternatives);
+        self.deviate = args.usize_or("--deviate", self.deviate);
         self.gauge_episodes = args.usize_or("--gauge", self.gauge_episodes);
         self.average = args.usize_or("--average", self.average);
         if let Some(l) = args.take_str("--gae-lambda") {
@@ -310,6 +328,17 @@ impl Options for ControlOptions {
   --warmup N          scripted episodes cloned before the policy gradient
   --warmup-epochs N   passes over those demonstrations
   --warmup-keep F     fraction of scripted episodes to clone, best first  [1.0]
+  --improve N         rounds of probing what a DIFFERENT action was worth and
+                      moving toward whichever actually scored better. The only
+                      phase whose ceiling is not the teacher: cloning and
+                      --dagger fit the teacher's CHOICE, this fits the measured
+                      OUTCOME. Shaped by the three below
+  --states N          decisions probed per round, by --improve or `whatif` [200]
+  --alternatives N    other actions tried at each of them                    [2]
+  --deviate N         decisions in a row a probe departs from the teacher for
+                      before handing back. 1 is the cost-to-go of a single
+                      action, which a teacher good at recovering makes
+                      uninformative - it undoes whatever one decision did    [30]
   --dagger N          rounds of running the STUDENT and asking the teacher what
                       it would have done at every state the student reached,
                       aggregating those labels and refitting. Cloning only ever
