@@ -183,6 +183,33 @@ struct Step {
     reference: Option<Vec<f32>>,
 }
 
+/// The running mean of `n` head snapshots, folding in one more.
+///
+/// Incremental so that only one extra copy of the head is ever held, however
+/// many iterates go into it.
+fn mean_of(
+    so_far: Option<Vec<(String, Vec<f32>)>>,
+    next: Vec<(String, Vec<f32>)>,
+    n: usize,
+) -> Vec<(String, Vec<f32>)> {
+    let Some(mut acc) = so_far else {
+        return next;
+    };
+    let k = n as f32 + 1.0;
+    for (a, b) in acc.iter_mut().zip(&next) {
+        if a.0 != b.0 || a.1.len() != b.1.len() {
+            // A head that changed shape mid-run is not a thing that happens,
+            // and averaging across one silently would be worse than keeping
+            // what we have.
+            return next;
+        }
+        for (x, y) in a.1.iter_mut().zip(&b.1) {
+            *x += (*y - *x) / k;
+        }
+    }
+    acc
+}
+
 /// What one rollout produced.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Rollout {
@@ -793,6 +820,9 @@ pub struct ControlSpec {
     /// numbers, which are measured on worlds that move. See
     /// `ControlPipeline::gauge`.
     pub gauge_episodes: usize,
+    /// Average the head over the last `average` iterates and keep that if it
+    /// gauges better than the best single one. `0` is off.
+    pub average: usize,
     /// Passes over the collected demonstrations.
     ///
     /// Needed because the demonstrations are a small fixed dataset and one
@@ -829,6 +859,7 @@ impl Default for ControlSpec {
             warmup_epochs: 12,
             warmup_keep: 1.0,
             gauge_episodes: 0,
+            average: 0,
             freeze_encoder: true,
         }
     }
@@ -866,6 +897,12 @@ impl ControlSpec {
     /// See [`ControlSpec::gauge_episodes`].
     pub fn gauge_episodes(mut self, n: usize) -> ControlSpec {
         self.gauge_episodes = n;
+        self
+    }
+
+    /// See [`ControlSpec::average`].
+    pub fn average(mut self, n: usize) -> ControlSpec {
+        self.average = n;
         self
     }
 
@@ -940,6 +977,10 @@ impl<E: Env> Stages for ControlPipeline<E> {
         let mut best_rank = f32::NEG_INFINITY;
         let mut best_by = Rollout::default();
         let mut best: Option<(usize, Vec<(String, Vec<f32>)>)> = None;
+        // The running mean of the iterates, which is a different candidate
+        // from the best of them and often a better one. See `mean_of`.
+        let mut running: Option<Vec<(String, Vec<f32>)>> = None;
+        let mut averaged = 0usize;
         for it in 0..spec.iterations {
             let (batch, stats) = self.rollout(spec.episodes, spec.max_steps)?;
             if batch.is_empty() {
@@ -994,6 +1035,24 @@ impl<E: Env> Stages for ControlPipeline<E> {
             if let Some(g) = gauged {
                 println!("           on the fixed block: {g:.3}");
             }
+            // Keeping the BEST iterate selects partly for luck: the score it
+            // is chosen on carries noise, so the winner is the iteration that
+            // drew the kindest worlds as much as the one that learned most.
+            // The MEAN of the iterates has no such failure mode, and it is
+            // what two separate traditions point at for a sequence that
+            // random-walks around a good solution rather than converging onto
+            // one - fictitious play, whose convergence is in the time average
+            // of play and not in the last thing played, and Polyak-Ruppert
+            // averaging, which attains the optimal asymptotic variance under
+            // far less delicate step-size tuning than any single iterate.
+            //
+            // Averaging weights is usually dismissed as intractable for deep
+            // networks. Here the encoder is frozen and the head is small, so
+            // it is a few thousand floats.
+            if spec.average > 0 && it + 1 > spec.iterations.saturating_sub(spec.average) {
+                running = Some(mean_of(running.take(), self.model.head_weights(), averaged));
+                averaged += 1;
+            }
             let rank = gauged
                 .or(stats.mean_progress)
                 .unwrap_or(stats.mean_return);
@@ -1001,6 +1060,27 @@ impl<E: Env> Stages for ControlPipeline<E> {
                 best_rank = rank;
                 best = Some((it + 1, self.model.head_weights()));
                 best_by = stats;
+            }
+        }
+        // Both candidates, measured on the same worlds, and the better one
+        // kept. Averaging is a claim about the shape of the sequence, not a
+        // law, so it is checked rather than assumed.
+        if let (Some(mean), Some((_, bw))) = (&running, &best) {
+            let live = self.model.head_weights();
+            self.model.set_head_weights(mean);
+            let m = self.gauge(spec.gauge_episodes, spec.max_steps)?;
+            self.model.set_head_weights(bw);
+            let b = self.gauge(spec.gauge_episodes, spec.max_steps)?;
+            self.model.set_head_weights(&live);
+            if let (Some(m), Some(b)) = (m, b) {
+                println!(
+                    "    the mean of the last {averaged} iterates scores {m:.3} on the \
+                     fixed block, the best single one {b:.3}"
+                );
+                if m > b {
+                    self.model.set_head_weights(mean);
+                    return Ok(TrainReport { steps: step, final_loss: last_loss, seconds: 0.0 });
+                }
             }
         }
         if let Some((it, w)) = best {
@@ -1124,5 +1204,35 @@ impl<E: Env> ControlPipelineBuilder<E> {
             critic_mse: 0.0,
             max_steps: self.max_steps,
         })
+    }
+}
+
+#[cfg(test)]
+mod averaging_tests {
+    use super::mean_of;
+
+    fn head(v: &[f32]) -> Vec<(String, Vec<f32>)> {
+        vec![("w".to_string(), v.to_vec())]
+    }
+
+    /// The mean has to be the mean, folded in one iterate at a time and
+    /// holding only one extra copy of the head however many go into it.
+    #[test]
+    fn the_running_mean_is_the_mean() {
+        let mut acc = None;
+        for (n, v) in [[0.0f32, 4.0], [2.0, 8.0], [4.0, 0.0]].iter().enumerate() {
+            acc = Some(mean_of(acc.take(), head(v), n));
+        }
+        let got = &acc.unwrap()[0].1;
+        assert!((got[0] - 2.0).abs() < 1e-6, "{got:?}");
+        assert!((got[1] - 4.0).abs() < 1e-6, "{got:?}");
+    }
+
+    /// One iterate averages to itself, which is what makes the first fold a
+    /// special case worth having a test for rather than a branch to trust.
+    #[test]
+    fn one_iterate_averages_to_itself() {
+        let got = mean_of(None, head(&[1.0, -2.0]), 0);
+        assert_eq!(got[0].1, vec![1.0, -2.0]);
     }
 }

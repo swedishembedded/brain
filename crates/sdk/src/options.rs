@@ -166,6 +166,8 @@ pub struct ControlOptions {
     pub warmup_keep: f32,
     /// Episodes on a fixed block of worlds, scored after every iteration.
     pub gauge_episodes: usize,
+    /// Average the head over the last N iterates as a second candidate.
+    pub average: usize,
     pub entropy: Option<f32>,
     /// Weight on staying near the policy the warm start produced. See
     /// `decide::policy::PolicyConfig::anchor`.
@@ -197,6 +199,7 @@ impl ControlOptions {
             warmup_epochs: d.warmup_epochs,
             warmup_keep: d.warmup_keep,
             gauge_episodes: d.gauge_episodes,
+            average: d.average,
             entropy: None,
             anchor: None,
             target_kl: None,
@@ -216,6 +219,7 @@ impl ControlOptions {
             .warmup_epochs(self.warmup_epochs)
             .warmup_keep(self.warmup_keep)
             .gauge_episodes(self.gauge_episodes)
+            .average(self.average)
             .train_encoder(self.train_encoder)
             .seed(self.seed);
         if let Some(e) = self.entropy {
@@ -245,6 +249,7 @@ impl ControlOptions {
         self.warmup_episodes = args.usize_or("--warmup", self.warmup_episodes);
         self.warmup_epochs = args.usize_or("--warmup-epochs", self.warmup_epochs);
         self.gauge_episodes = args.usize_or("--gauge", self.gauge_episodes);
+        self.average = args.usize_or("--average", self.average);
         if let Some(k) = args.take_str("--warmup-keep") {
             self.warmup_keep =
                 k.parse().map_err(|_| format!("--warmup-keep: {k:?} is not a number"))?;
@@ -298,6 +303,14 @@ impl Options for ControlOptions {
                       cannot change at all scores 0.59 to 0.73 across five
                       blocks of sixteen generated levels, which is most of the
                       movement a training run appears to show
+  --average N         also try the MEAN of the last N iterates, and keep it
+                      if it gauges better than the best single one. Keeping
+                      the best selects partly for luck, because the score it
+                      is chosen on carries noise; a mean does not. Fictitious
+                      play converges in the time average of play rather than
+                      the last thing played, and Polyak-Ruppert averaging
+                      reaches the optimal asymptotic variance under far looser
+                      step-size tuning than any single iterate
   --target-kl F       abandon the remaining passes over a batch once the
                       policy has moved this far from the one that collected
                       it. Clipping alone is not a trust region: it silences
