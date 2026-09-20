@@ -622,9 +622,15 @@ impl<E: Env> ControlPipeline<E> {
             env,
             head: None,
             device: Device::default(),
-            // An observation is short and the action list is small, so this is
-            // sized for a control loop rather than a document.
-            limits: Limits { cap_rows: 1024, cap_slots: 32, max_span: 256, overlap: 32 },
+            // A control loop rather than a document - but a request is the
+            // state split into windows PLUS one span per option, and the
+            // option list is rebuilt from the world at every step, so the row
+            // count is data and not a constant. Measured on the DOOM sample,
+            // a late-episode decision with fifteen options packs just over a
+            // thousand rows; at 1024 a run died in its twenty-sixth minute
+            // with everything it had learned thrown away, which is the cost
+            // of sizing this to the typical request instead of the long one.
+            limits: Limits { cap_rows: 3072, cap_slots: 32, max_span: 256, overlap: 32 },
             seed: 0,
             max_steps: ControlSpec::default().max_steps,
         }
