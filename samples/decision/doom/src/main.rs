@@ -44,7 +44,7 @@ mod report;
 mod view;
 
 use brain::options::{Args as Args_, ControlOptions, Hardware, Options, ViewOptions};
-use brain::ControlPipeline;
+use brain::{Candidates, ControlPipeline};
 use doom::{Config, Doom, Paths};
 use env::{DoomEnv, Mission, Payment};
 
@@ -73,6 +73,10 @@ pub struct Args {
     pub states: usize,
     /// Alternatives it tries at each of them, beside the teacher's own.
     pub alternatives: usize,
+    /// How many decisions in a row a branch departs from the teacher for.
+    pub deviate: usize,
+    /// Draw the alternatives at random rather than by the policy's ranking.
+    pub wide: bool,
     pub mission: Mission,
     pub mix: bool,
     pub arena: usize,
@@ -172,6 +176,17 @@ what to play
                       bonus, which the score does not read at all
   --states N          decisions `whatif` returns to                        [60]
   --alternatives N    other actions it tries at each of them                 [2]
+  --wide              draw the alternatives at RANDOM rather than from what the
+                      policy ranks highest. The control: a policy fitted to the
+                      teacher ranks the teacher's near-duplicates highest, so
+                      the default asks about the actions least likely to lead
+                      anywhere different
+  --deviate N         decisions in a row a branch departs from the teacher for
+                      before handing back to it. 1 is the cost-to-go of a
+                      single action and measures nothing here, because the
+                      teacher recovers from whatever one decision did. A
+                      strategy better than the teacher's may need several
+                      decisions in a row to show it                          [1]
   --approach F        what a 32-unit cell of ROUTE closed on the goal pays.
                       Defaults to the mission's own. `--approach 0` turns it
                       off, which is the ablation: without it the only dense
@@ -342,6 +357,8 @@ fn parse_args() -> Result<Args, String> {
         eval_episodes: args.usize_or("--eval-episodes", 24),
         states: args.usize_or("--states", 60),
         alternatives: args.usize_or("--alternatives", 2),
+        deviate: args.usize_or("--deviate", 1),
+        wide: args.take_flag("--wide"),
         play: args.usize_or("--play", 3),
         transcript: args.take_str("--transcript"),
         engine_log: args.take_str("--engine-log"),
@@ -619,12 +636,26 @@ fn whatif(env: DoomEnv, args: &Args) -> Result<(), String> {
         pipe.warm_start(&spec, &mut quiet).map_err(|e| format!("{e}"))?;
     }
     println!(
-        "doom: {} decisions from {} episodes, {} alternatives each, the teacher finishing \
-         every branch",
-        args.states, spec.episodes, args.alternatives
+        "doom: {} decisions from {} episodes, {} {} alternatives each, {}, then the \
+         teacher finishing every branch",
+        args.states,
+        spec.episodes,
+        args.alternatives,
+        if args.wide { "random" } else { "contested" },
+        match args.deviate {
+            0 | 1 => "one decision off the teacher".to_string(),
+            n => format!("{n} decisions of the policy carrying on"),
+        }
     );
     let found = pipe
-        .counterfactual(spec.episodes, args.states, args.alternatives, spec.max_steps)
+        .counterfactual(
+            spec.episodes,
+            args.states,
+            args.alternatives,
+            if args.wide { Candidates::Wide } else { Candidates::Contested },
+            args.deviate,
+            spec.max_steps,
+        )
         .map_err(|e| format!("{e}"))?;
     let Some(c) = found else {
         return Err("the environment has no scripted player to finish the branches".into());
@@ -642,14 +673,21 @@ fn whatif(env: DoomEnv, args: &Args) -> Result<(), String> {
     }
     println!(
         "\n  {} decisions, {} game steps\n  \
+         at {:.0}% of them the options did not all lead to the same place\n  \
          the choice was worth {:.3} of score between its best and worst option\n  \
          some alternative beat the teacher at {:.0}% of them, by {:.3} when it did\n  \
          picking the best of what was offered would gain {:.3} a decision over the teacher",
-        c.states, c.steps, c.spread, c.beaten * 100.0, c.gain, c.regret
+        c.states,
+        c.steps,
+        c.pivotal * 100.0,
+        c.spread,
+        c.beaten * 100.0,
+        c.gain,
+        c.regret
     );
     println!(
         "\n{}",
-        if c.spread < 0.01 {
+        if c.pivotal < 0.1 {
             "doom: the choice barely matters at these decisions - every option leads to \
              about the same place, so there is nothing here for any method to learn and \
              the thing to change is WHERE the decisions are sampled from"

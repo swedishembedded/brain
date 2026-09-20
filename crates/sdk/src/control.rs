@@ -313,6 +313,21 @@ impl std::fmt::Display for Agreement {
     }
 }
 
+/// Which alternatives a counterfactual spends its game steps on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Candidates {
+    /// The ones the policy ranks highest after the teacher's own - what
+    /// training would actually move toward, and so the right set for
+    /// deciding whether to train on measured outcomes.
+    ///
+    /// It is the wrong set for asking whether room exists at all: a policy
+    /// fitted to the teacher ranks the teacher's near-duplicates highest, so
+    /// this asks about the actions least likely to lead anywhere different.
+    Contested,
+    /// Drawn at random from everything on offer. The control for the above.
+    Wide,
+}
+
 /// Whether a different action would have been worth taking.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Counterfactual {
@@ -334,7 +349,22 @@ pub struct Counterfactual {
     pub regret: f32,
     /// Mean spread between the best and worst candidate at a point - whether
     /// the choice matters at all, before asking who makes it well.
+    ///
+    /// A MEAN over decisions, so it hides the shape. A task where one
+    /// decision in ten decides the episode and the other nine are free reads
+    /// the same here as one where every decision nudges the outcome slightly,
+    /// and those two want completely different things done about them - see
+    /// [`Counterfactual::pivotal`].
     pub spread: f32,
+    /// Fraction of decisions where the candidates did NOT all lead to the
+    /// same place.
+    ///
+    /// The number to read first. A policy can only be better than a teacher
+    /// where the choice has a consequence, so this is the share of decisions
+    /// any method could possibly improve - and if it is near zero the task
+    /// has no room at the level of single decisions however good the learner
+    /// is.
+    pub pivotal: f32,
     /// Game steps spent measuring.
     pub steps: usize,
 }
@@ -1293,6 +1323,8 @@ impl<E: Env> ControlPipeline<E> {
         episodes: usize,
         states: usize,
         alternatives: usize,
+        from: Candidates,
+        deviate: usize,
         max_steps: usize,
     ) -> Result<Option<Counterfactual>> {
         // How often to stop and branch. Spread over the whole of every
@@ -1304,6 +1336,7 @@ impl<E: Env> ControlPipeline<E> {
         let every = (total / want).max(1);
 
         let (mut beaten, mut gain, mut regret, mut spread) = (0usize, 0.0f64, 0.0f64, 0.0f64);
+        let mut pivotal = 0usize;
         let (mut measured, mut adrift, mut spent) = (0usize, 0usize, 0usize);
         let mut since = self.rng.next_u64() as usize % every;
 
@@ -1323,7 +1356,11 @@ impl<E: Env> ControlPipeline<E> {
                 since += 1;
                 if since >= every && measured + adrift < want {
                     since = 0;
-                    match self.branch(&options, &probs, teacher, alternatives, t, max_steps)? {
+                    match self
+                        .branch(
+                            &options, &probs, teacher, alternatives, from, deviate, t, max_steps,
+                        )?
+                    {
                         Some(scored) => {
                             spent += scored.iter().map(|b| b.steps).sum::<usize>();
                             let theirs = scored[0].score;
@@ -1341,6 +1378,7 @@ impl<E: Env> ControlPipeline<E> {
                             }
                             regret += (best - theirs) as f64;
                             spread += (best - worst) as f64;
+                            pivotal += usize::from(best - worst > 1e-3);
                             measured += 1;
                         }
                         None => adrift += 1,
@@ -1374,6 +1412,7 @@ impl<E: Env> ControlPipeline<E> {
             gain: (gain / beaten.max(1) as f64) as f32,
             regret: (regret / n) as f32,
             spread: (spread / n) as f32,
+            pivotal: (pivotal as f64 / n) as f32,
             steps: spent,
         }))
     }
@@ -1389,15 +1428,25 @@ impl<E: Env> ControlPipeline<E> {
         probs: &[f32],
         teacher: usize,
         alternatives: usize,
+        from: Candidates,
+        deviate: usize,
         at: usize,
         max_steps: usize,
     ) -> Result<Option<Vec<Branch>>> {
-        let mut best_first: Vec<usize> = (0..options.len()).collect();
-        best_first.sort_by(|&a, &b| {
-            probs[b].partial_cmp(&probs[a]).unwrap_or(std::cmp::Ordering::Equal)
-        });
+        let mut pick: Vec<usize> = (0..options.len()).collect();
+        match from {
+            Candidates::Contested => pick.sort_by(|&a, &b| {
+                probs[b].partial_cmp(&probs[a]).unwrap_or(std::cmp::Ordering::Equal)
+            }),
+            Candidates::Wide => {
+                for i in (1..pick.len()).rev() {
+                    let j = (self.rng.next_u64() % (i as u64 + 1)) as usize;
+                    pick.swap(i, j);
+                }
+            }
+        }
         let mut candidates = vec![teacher];
-        for c in best_first {
+        for c in pick {
             if candidates.len() > alternatives {
                 break;
             }
@@ -1429,9 +1478,38 @@ impl<E: Env> ControlPipeline<E> {
                     return Ok(None);
                 }
             }
-            let (_, _, mut done) = self.env.step(c);
+            let (mut obs, _, mut done) = self.env.step(c);
             let mut steps = 1usize;
             let mut t = at + 1;
+            // The deviation, and then the teacher. `deviate` decisions of it
+            // in all, of which the candidate action was the first, and the
+            // rest are the POLICY carrying on from there.
+            //
+            // One is the cost-to-go of a single action. More is a different
+            // question, and the reason to ask it is that a teacher good at
+            // recovering makes the first one uninformative: it undoes
+            // whatever one decision did, so every candidate scores what the
+            // teacher scores. A strategy that is better than the teacher's
+            // may need several decisions in a row to show it, and this is
+            // the dial that lets it.
+            while !done && t < at + deviate.max(1) && t < max_steps {
+                let options = self.env.actions();
+                if options.is_empty() {
+                    break;
+                }
+                let probs = self.policy(&obs, &options)?;
+                let mut best = 0;
+                for (i, &pi) in probs.iter().enumerate() {
+                    if pi > probs[best] {
+                        best = i;
+                    }
+                }
+                let (next, _, d) = self.env.step(best);
+                obs = next;
+                done = d;
+                steps += 1;
+                t += 1;
+            }
             while !done && t < max_steps {
                 if self.env.actions().is_empty() {
                     break;
