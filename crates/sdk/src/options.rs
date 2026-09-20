@@ -168,6 +168,8 @@ pub struct ControlOptions {
     pub gauge_episodes: usize,
     /// Average the head over the last N iterates as a second candidate.
     pub average: usize,
+    /// The head's learning rate, which trades against the trust region.
+    pub head_lr: Option<f32>,
     pub entropy: Option<f32>,
     /// Weight on staying near the policy the warm start produced. See
     /// `decide::policy::PolicyConfig::anchor`.
@@ -200,6 +202,7 @@ impl ControlOptions {
             warmup_keep: d.warmup_keep,
             gauge_episodes: d.gauge_episodes,
             average: d.average,
+            head_lr: None,
             entropy: None,
             anchor: None,
             target_kl: None,
@@ -220,6 +223,7 @@ impl ControlOptions {
             .warmup_keep(self.warmup_keep)
             .gauge_episodes(self.gauge_episodes)
             .average(self.average)
+            .head_lr(self.head_lr.unwrap_or(0.0))
             .train_encoder(self.train_encoder)
             .seed(self.seed);
         if let Some(e) = self.entropy {
@@ -250,6 +254,10 @@ impl ControlOptions {
         self.warmup_epochs = args.usize_or("--warmup-epochs", self.warmup_epochs);
         self.gauge_episodes = args.usize_or("--gauge", self.gauge_episodes);
         self.average = args.usize_or("--average", self.average);
+        if let Some(l) = args.take_str("--head-lr") {
+            self.head_lr =
+                Some(l.parse().map_err(|_| format!("--head-lr: {l:?} is not a number"))?);
+        }
         if let Some(k) = args.take_str("--warmup-keep") {
             self.warmup_keep =
                 k.parse().map_err(|_| format!("--warmup-keep: {k:?} is not a number"))?;
@@ -311,6 +319,12 @@ impl Options for ControlOptions {
                       the last thing played, and Polyak-Ruppert averaging
                       reaches the optimal asymptotic variance under far looser
                       step-size tuning than any single iterate
+  --head-lr F         the head's step size, which trades against
+                      `--target-kl` rather than standing alone. Too large and
+                      the divergence budget is spent in a handful of
+                      minibatches and the rest of the rollout is never used;
+                      measured here at 3e-4, an iteration took 5 of 64 steps,
+                      discarding 92% of what it had just collected
   --target-kl F       abandon the remaining passes over a batch once the
                       policy has moved this far from the one that collected
                       it. Clipping alone is not a trust region: it silences

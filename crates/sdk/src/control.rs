@@ -631,6 +631,7 @@ impl<E: Env> ControlPipeline<E> {
         batch: &[Step],
         cfg: &PolicyConfig,
         order: &mut [usize],
+        head_lr: f32,
         lr_scale: f32,
     ) -> Result<(f32, f32, usize, usize)> {
         // Shuffled, because consecutive steps of one episode are correlated
@@ -711,7 +712,7 @@ impl<E: Env> ControlPipeline<E> {
             // the same thing whatever the minibatch happened to hold.
             self.model.adamw_scaled(
                 ENCODER_LR * lr_scale,
-                HEAD_LR * lr_scale,
+                head_lr * lr_scale,
                 1.0 / chunk.len() as f32,
             );
             steps_taken += 1;
@@ -843,6 +844,16 @@ pub struct ControlSpec {
     /// Average the head over the last `average` iterates and keep that if it
     /// gauges better than the best single one. `0` is off.
     pub average: usize,
+    /// The head's learning rate.
+    ///
+    /// Worth a flag because it trades against the trust region rather than
+    /// standing alone. A step size too large for the region exhausts the
+    /// divergence budget in a handful of minibatches, and the rest of the
+    /// rollout is never used: measured here at 3e-4, an iteration took five
+    /// of sixty-four minibatch steps, so ninety-two per cent of the
+    /// transitions that had just been collected were discarded. A smaller
+    /// step lets the whole batch contribute for the same total travel.
+    pub head_lr: f32,
     /// Passes over the collected demonstrations.
     ///
     /// Needed because the demonstrations are a small fixed dataset and one
@@ -880,6 +891,7 @@ impl Default for ControlSpec {
             warmup_keep: 1.0,
             gauge_episodes: 0,
             average: 0,
+            head_lr: HEAD_LR,
             freeze_encoder: true,
         }
     }
@@ -923,6 +935,14 @@ impl ControlSpec {
     /// See [`ControlSpec::average`].
     pub fn average(mut self, n: usize) -> ControlSpec {
         self.average = n;
+        self
+    }
+
+    /// See [`ControlSpec::head_lr`].
+    pub fn head_lr(mut self, lr: f32) -> ControlSpec {
+        if lr > 0.0 {
+            self.head_lr = lr;
+        }
         self
     }
 
@@ -1015,7 +1035,8 @@ impl<E: Env> Stages for ControlPipeline<E> {
             let (mut drift, mut passes) = (0.0f32, 0usize);
             let (mut took, mut offered) = (0usize, 0usize);
             for _ in 0..spec.epochs {
-                let (l, d, t, o) = self.update(&batch, &spec.policy, &mut order, lr_scale)?;
+                let (l, d, t, o) =
+                    self.update(&batch, &spec.policy, &mut order, spec.head_lr, lr_scale)?;
                 last_loss = l;
                 drift = d;
                 took += t;
