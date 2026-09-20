@@ -34,15 +34,34 @@ pub fn run_mirror(argv: &[String]) {
     }
 }
 
+/// Extensions `imaging::load` decodes. It dispatches on the BYTES, not the
+/// name, so this list only has to keep non-images out of a directory listing.
+const IMAGE_EXTS: [&str; 7] = ["ppm", "png", "jpg", "jpeg", "bmp", "tif", "tiff"];
+
+/// Extensions treated as a video to decode frames from.
+const VIDEO_EXTS: [&str; 6] = ["mp4", "mov", "mkv", "webm", "avi", "m4v"];
+
+/// Does `spec` name a video file (rather than a directory or an image list)?
+fn is_video(spec: &str) -> bool {
+    let p = std::path::Path::new(spec);
+    p.is_file() && VIDEO_EXTS.contains(&ext_of(p).as_str())
+}
+
+fn ext_of(p: &std::path::Path) -> String {
+    p.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase()
+}
+
 fn collect_images(spec: &str) -> Vec<String> {
     let p = std::path::Path::new(spec);
     if p.is_dir() {
         let mut v: Vec<String> = std::fs::read_dir(p)
             .expect("readable dir")
             .filter_map(|e| e.ok())
-            .map(|e| e.path().to_string_lossy().into_owned())
-            .filter(|n| n.ends_with(".ppm"))
+            .map(|e| e.path())
+            .filter(|p| IMAGE_EXTS.contains(&ext_of(p).as_str()))
+            .map(|p| p.to_string_lossy().into_owned())
             .collect();
+        // Sorted, so a capture's own frame order is the order the model sees.
         v.sort();
         v
     } else {
@@ -50,24 +69,98 @@ fn collect_images(spec: &str) -> Vec<String> {
     }
 }
 
-/// Load + preprocess frames; returns (raw [0,1] CHW concat, frame count, grid).
-fn load_frames(spec: &str, cfg: &MirrorConfig) -> (Vec<f32>, usize, usize, usize) {
-    let paths = collect_images(spec);
-    if paths.is_empty() {
-        eprintln!("no .ppm images found in {spec}");
-        std::process::exit(2);
+/// Take every `stride`-th frame, then thin to at most `max` of those.
+///
+/// The cap SPANS the sequence rather than truncating it: a 360-degree orbit
+/// capped to a prefix would become a 60-degree one, which is a far worse
+/// reconstruction than the same budget spread over the whole path. Never
+/// returns an empty set for a non-empty input.
+fn select_frames(paths: &[String], stride: usize, max: usize) -> Vec<String> {
+    let stride = stride.max(1);
+    let strided: Vec<String> = paths.iter().step_by(stride).cloned().collect();
+    let strided = if strided.is_empty() { paths[..paths.len().min(1)].to_vec() } else { strided };
+    if max == 0 || strided.len() <= max {
+        return strided;
     }
-    let mut all = Vec::new();
-    let mut grid = None;
-    for path in &paths {
-        let img = imaging::load(path).unwrap_or_else(|e| {
+    (0..max)
+        .map(|i| strided[i * (strided.len() - 1) / (max - 1).max(1)].clone())
+        .collect()
+}
+
+/// How the caller narrowed a long capture down to the frames the model sees.
+#[derive(Clone, Copy)]
+pub struct FrameSel {
+    pub stride: usize,
+    pub max: usize,
+    /// Frames per second to resample a VIDEO to before selecting. 0 = native.
+    pub fps: f64,
+}
+
+impl Default for FrameSel {
+    fn default() -> FrameSel {
+        // Unbounded by default: a directory of photographs is already the set
+        // the user chose. A video gets a cap, because 60 seconds at 30fps is
+        // 1800 frames through a trunk whose global attention is quadratic in
+        // frame count.
+        FrameSel { stride: 1, max: 0, fps: 0.0 }
+    }
+}
+
+/// Every frame the model will see, from a directory, a comma-separated list,
+/// or a video file.
+fn gather(spec: &str, sel: &FrameSel) -> Vec<imaging::Rgb8> {
+    let p = std::path::Path::new(spec);
+    if p.is_file() && VIDEO_EXTS.contains(&ext_of(p).as_str()) {
+        if !imaging::video::ffmpeg_available() {
+            eprintln!("reading {spec} needs the ffmpeg CLI on PATH (Debian/Ubuntu: apt-get install ffmpeg)");
+            std::process::exit(1);
+        }
+        let opts = imaging::video::VideoDecodeOpts {
+            fps: if sel.fps > 0.0 { Some(sel.fps) } else { None },
+            // decode generously, then thin across the whole clip below - an
+            // ffmpeg frame cap truncates, turning an orbit into an arc
+            max_frames: 0,
+        };
+        let frames = imaging::video::decode_frames_rgb8(p, &opts).unwrap_or_else(|e| {
             eprintln!("{e}");
             std::process::exit(1);
         });
+        let n = frames.len();
+        let idx = select_frames(&(0..n).map(|i| format!("{i:08}")).collect::<Vec<_>>(), sel.stride, sel.max);
+        let keep: Vec<usize> = idx.iter().map(|k| k.parse().unwrap()).collect();
+        eprintln!("{spec}: {n} frame(s) decoded, using {}", keep.len());
+        keep.into_iter().map(|i| frames[i].clone()).collect()
+    } else {
+        let paths = select_frames(&collect_images(spec), sel.stride, sel.max);
+        if paths.is_empty() {
+            eprintln!(
+                "no images found in {spec} (looked for {}; a video needs one of {})",
+                IMAGE_EXTS.join("/"), VIDEO_EXTS.join("/")
+            );
+            std::process::exit(2);
+        }
+        paths
+            .iter()
+            .map(|path| {
+                imaging::load(path).unwrap_or_else(|e| {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                })
+            })
+            .collect()
+    }
+}
+
+/// Load + preprocess frames; returns (raw [0,1] CHW concat, frame count, grid).
+fn load_frames(spec: &str, cfg: &MirrorConfig, sel: &FrameSel) -> (Vec<f32>, usize, usize, usize) {
+    let images = gather(spec, sel);
+    let mut all = Vec::new();
+    let mut grid = None;
+    for img in &images {
         let (iw, ih) = (img.w as usize, img.h as usize);
         let target = preprocess::adaptive_target(iw, ih, cfg.img, cfg.patch);
         let (nw, nh) = preprocess::resize_dims(iw, ih, target, cfg.patch);
-        let resized = preprocess::resize_bicubic(&img, nw, nh);
+        let resized = preprocess::resize_bicubic(img, nw, nh);
         let (cw, ch) = (nw.min(target), nh.min(target));
         let (x0, y0) = ((nw - cw) / 2, (nh - ch) / 2);
         for c in 0..3 {
@@ -82,7 +175,7 @@ fn load_frames(spec: &str, cfg: &MirrorConfig) -> (Vec<f32>, usize, usize, usize
         grid = Some(g);
     }
     let (wp, hp) = grid.unwrap();
-    (all, paths.len(), hp, wp)
+    (all, images.len(), hp, wp)
 }
 
 /// Run the model, assemble the scene, then hand everything to `k` (the model
@@ -96,10 +189,11 @@ fn with_scene<R>(
     min_op: f32,
     max_depth: f32,
     prune_voxel: f32,
+    sel: &FrameSel,
     k: impl FnOnce(&Gpu, &Mirror, &Splats, &[splat::types::Camera], usize, u32, u32) -> R,
 ) -> R {
     let cfg = MirrorConfig::default();
-    let (frames, s, hp, wp) = load_frames(images, &cfg);
+    let (frames, s, hp, wp) = load_frames(images, &cfg, sel);
     let (w, h) = ((wp * cfg.patch) as u32, (hp * cfg.patch) as u32);
     eprintln!("loading {weights} …");
     let init = worldmirror2::import::load_weights(weights, &cfg).unwrap_or_else(|e| {
@@ -243,11 +337,20 @@ fn infer(argv: &[String]) {
     let min_op = a.f32_or("--min-opacity", 0.01);
     let max_depth = a.f32_or("--max-depth", 0.0);
     let prune = a.f32_or("--prune", 0.0);
+    // Frame selection, for a capture longer than a handful of stills. A video
+    // gets a default cap because the trunk's global attention is quadratic in
+    // frame count; an explicit directory of photographs is left alone.
+    let sel = FrameSel {
+        stride: a.usize_or("--stride", 1),
+        max: a.usize_or("--max-frames", if is_video(&images) { 48 } else { 0 }),
+        fps: a.f32_or("--fps", 0.0) as f64,
+    };
+
     a.finish();
 
     std::fs::create_dir_all(&out_dir).ok();
     let ply_path = ply.unwrap_or_else(|| format!("{out_dir}/scene.ply"));
-    with_scene(&weights, &images, min_op, max_depth, prune, |gpu, model, splats, cams, s, w, h| {
+    with_scene(&weights, &images, min_op, max_depth, prune, &sel, |gpu, model, splats, cams, s, w, h| {
         splat::ply::write(&ply_path, splats).unwrap_or_else(|e| {
             eprintln!("PLY write failed: {e}");
             std::process::exit(1);
@@ -277,9 +380,18 @@ fn demo(argv: &[String]) {
     let min_op = a.f32_or("--min-opacity", 0.01);
     let max_depth = a.f32_or("--max-depth", 0.0);
     let prune = a.f32_or("--prune", 0.0);
+    // Frame selection, for a capture longer than a handful of stills. A video
+    // gets a default cap because the trunk's global attention is quadratic in
+    // frame count; an explicit directory of photographs is left alone.
+    let sel = FrameSel {
+        stride: a.usize_or("--stride", 1),
+        max: a.usize_or("--max-frames", if is_video(&images) { 48 } else { 0 }),
+        fps: a.f32_or("--fps", 0.0) as f64,
+    };
+
     a.finish();
 
-    let (splats, init_cam) = with_scene(&weights, &images, min_op, max_depth, prune, |_gpu, _model, splats, cams, _s, _w, _h| {
+    let (splats, init_cam) = with_scene(&weights, &images, min_op, max_depth, prune, &sel, |_gpu, _model, splats, cams, _s, _w, _h| {
         let init_cam = cams.first().map(|c| splat::types::Camera {
             width,
             height,
@@ -337,5 +449,47 @@ mod tests {
     #[test]
     fn infer_out_accepts_the_documented_name_equals_path_form() {
         assert_eq!(crate::args::strip_out_name_prefix("scene=out/mirror", "scene"), "out/mirror");
+    }
+
+    /// A directory of photographs is the ordinary way to reach this model, and
+    /// for a long time only `.ppm` counted - so a folder straight off a camera
+    /// or a video extraction produced "no images found", and every caller
+    /// converted by hand first. `imaging::load` decodes by sniffing the bytes,
+    /// not the extension, so the narrow filter bought nothing.
+    #[test]
+    fn a_directory_of_ordinary_photographs_is_accepted() {
+        let d = std::env::temp_dir().join(format!("brain-mirror-collect-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        for n in ["b.JPG", "a.jpeg", "d.ppm", "c.png", "notes.txt", "scene.ply"] {
+            std::fs::write(d.join(n), b"x").unwrap();
+        }
+        let got: Vec<String> = super::collect_images(d.to_str().unwrap())
+            .iter()
+            .map(|p| std::path::Path::new(p).file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        // sorted, so the order a capture wrote them in is the order the model
+        // sees them - a sequence's frame order is its baseline structure.
+        assert_eq!(got, vec!["a.jpeg", "b.JPG", "c.png", "d.ppm"], "wrong set or wrong order");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Frame selection has to happen BEFORE the model sees the sequence: a
+    /// 60-second orbit at 30fps is 1800 frames, and the trunk's global
+    /// attention is quadratic in frame count.
+    #[test]
+    fn a_frame_sequence_can_be_subsampled_and_capped() {
+        let frames: Vec<String> = (0..20).map(|i| format!("f{i:03}.png")).collect();
+        assert_eq!(super::select_frames(&frames, 1, 0).len(), 20);
+        assert_eq!(super::select_frames(&frames, 4, 0), vec!["f000.png", "f004.png", "f008.png", "f012.png", "f016.png"]);
+        // a cap spreads its picks across the WHOLE sequence rather than taking
+        // a prefix, or a 360-degree orbit would become a 60-degree one.
+        let capped = super::select_frames(&frames, 1, 5);
+        assert_eq!(capped.len(), 5);
+        assert_eq!(capped.first().unwrap(), "f000.png");
+        assert!(capped.last().unwrap().as_str() >= "f015.png", "cap took a prefix instead of spanning: {capped:?}");
+        // stride and cap compose, and neither can produce an empty set
+        assert_eq!(super::select_frames(&frames, 100, 0).len(), 1);
+        assert_eq!(super::select_frames(&frames, 1, 99).len(), 20);
     }
 }

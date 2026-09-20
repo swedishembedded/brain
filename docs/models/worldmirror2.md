@@ -68,9 +68,16 @@ viewpoints, optimise it afterwards with [`splat fit`](splat.md).
 
 ## Options
 
-`--images` takes either a directory of P6 PPM photos or a comma-separated
-list; any aspect ratio is fine - non-square inputs are resized and cropped
-automatically. `infer` writes `scene.ply` (the Gaussian scene) and
+`--images` takes a directory, a comma-separated list, or a **video file**
+(`.mp4/.mov/.mkv/.webm/.avi/.m4v`, needs `ffmpeg` on `PATH`). A directory is
+read in sorted order, so a capture's own frame numbering is the order the
+model sees. PPM, PNG, JPEG, BMP and TIFF all decode; any aspect ratio is fine,
+since non-square inputs are resized and cropped automatically.
+
+This model was built for sequences, not for a handful of stills: the paper
+evaluates it at 2-8 views (sparse) and 32-64 (dense), and reports the margin
+over prior work GROWING with view count. A slow orbit video is the input it
+wants. `infer` writes `scene.ply` (the Gaussian scene) and
 `cameras.json` (the recovered camera for each input photo) into `--out`
 (default `out/mirror/`); `--maps` additionally writes a per-frame depth and
 normal-map PPM for inspection.
@@ -86,6 +93,15 @@ normal-map PPM for inspection.
 | `--max-depth X` | drop gaussians beyond this depth (default: no limit) |
 | `--prune VOXEL` | voxel-merge duplicate gaussians across overlapping views - try `0.002` for multi-view scenes |
 | `--frames N` (`demo`) | cap the interactive viewer to N frames, for scripted/headless runs |
+| `--stride N` | use every Nth input frame |
+| `--max-frames N` | use at most N frames, spread ACROSS the capture rather than taking a prefix (default: unbounded for a directory, 48 for a video) |
+| `--fps X` | resample a video to X frames per second before selecting (default: the clip's own rate) |
+
+The trunk's global attention is quadratic in frame count, so a long capture
+needs thinning before it reaches the model - hence the video default. The
+spread-not-truncate rule matters: capping a 360-degree orbit to its first N
+frames leaves a 60-degree arc, which reconstructs far worse than the same
+budget spread over the whole path.
 
 `brain worldmirror2 export-npu` exports individual model stages as ONNX for
 running on the Intel NPU or CPU via OpenVINO - an advanced path for NPU
