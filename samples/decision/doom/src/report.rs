@@ -69,6 +69,60 @@ pub struct Progress {
     goal: Option<String>,
     /// Progress against the goals the route has already finished with.
     reached: Vec<String>,
+    /// The largest fraction of the way to a real goal this episode ever
+    /// covered. See [`Progress::score`].
+    toward_best: f32,
+    had_route: bool,
+}
+
+/// How far an episode got, on a scale that still means something when it did
+/// not finish.
+///
+/// Return does not. An episode that crossed nine tenths of a level and then
+/// died scores about what one that pressed against a wall for four hundred
+/// decisions scores, because almost all of the return is the one payment at
+/// the exit that neither of them collected. A training run choosing its best
+/// policy by mean return is therefore choosing between numbers that are
+/// mostly noise, and two runs of the same level cannot be told apart at all
+/// unless one of them happened to finish.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Score {
+    pub finished: bool,
+    /// Fraction of the way to a goal worth walking to - the exit, or the key
+    /// or switch that opens it. `None` when the route only ever led to
+    /// unexplored ground, which moves every time it is reached and so cannot
+    /// be made progress against.
+    pub toward: Option<f32>,
+    /// Health left, as a fraction of full. Zero if it died.
+    pub alive: f32,
+    /// Decisions survived, as a fraction of those allowed.
+    pub lasted: f32,
+    /// Distinct patches of floor entered.
+    pub seen: usize,
+}
+
+impl Score {
+    /// One number, for ranking two runs against each other.
+    ///
+    /// Finishing beats everything, and finishing in good health beats
+    /// finishing on fumes. Short of that, what counts is how far along the
+    /// way it got, discounted by how close it came to dying: nine tenths of
+    /// the way and dead (0.45) still beats a tenth of the way alive (0.10),
+    /// which is the ordering a person reading the two runs would give.
+    ///
+    /// When there was no goal to walk toward, lasting IS the task - that is
+    /// the whole of health-gathering - and it is scaled down so that it can
+    /// never outrank having actually got somewhere.
+    pub fn value(&self) -> f32 {
+        let condition = 0.5 + 0.5 * self.alive;
+        if self.finished {
+            return 1.0 + 0.25 * self.alive;
+        }
+        match self.toward {
+            Some(f) => f * condition,
+            None => 0.5 * self.lasted * condition,
+        }
+    }
 }
 
 impl Progress {
@@ -117,15 +171,54 @@ impl Progress {
                 }
             }
             self.blocked = exit.blocked_by.as_ref().map(|b| b.kind.clone());
+
+            // Kept across goal changes, unlike start_path and best_path: a
+            // run that reached the blue key and then set off for the exit has
+            // made progress twice, and resetting would throw the first away.
+            // Unexplored ground is not a goal in this sense - it moves every
+            // time it is reached, so "closed on it" says nothing about how
+            // far through the level the run is.
+            if self.goal.as_deref() != Some("unexplored") {
+                self.had_route = true;
+                if let (Some(start), Some(best)) = (self.start_path, self.best_path) {
+                    if start > 0 {
+                        let f = ((start - best) as f32 / start as f32).clamp(0.0, 1.0);
+                        self.toward_best = self.toward_best.max(f);
+                    }
+                }
+            }
         }
         self.pos = (state.player.x.unwrap_or(0), state.player.y.unwrap_or(0));
         self.health = state.player.health;
         self.kills = state.level.kills;
         self.total_kills = state.level.total_kills;
-        self.recent
-            .push_back((self.pos.0.div_euclid(PATCH), self.pos.1.div_euclid(PATCH)));
+        let patch = (self.pos.0.div_euclid(PATCH), self.pos.1.div_euclid(PATCH));
+        self.covered.insert(patch);
+        self.recent.push_back(patch);
         if self.recent.len() > STALL_WINDOW {
             self.recent.pop_front();
+        }
+    }
+
+    /// How far this episode got, as a thing two runs can be compared on.
+    ///
+    /// `allowed` is the decision budget the episode was given, so that
+    /// "lasted" means a fraction rather than a count.
+    pub fn score(&self, finished: bool, allowed: u32) -> Score {
+        Score {
+            finished,
+            toward: self.had_route.then_some(self.toward_best),
+            alive: if self.killed_by.is_some() {
+                0.0
+            } else {
+                (self.health as f32 / 100.0).clamp(0.0, 1.0)
+            },
+            lasted: if allowed == 0 {
+                0.0
+            } else {
+                (self.steps as f32 / allowed as f32).clamp(0.0, 1.0)
+            },
+            seen: self.covered.len(),
         }
     }
 
@@ -221,6 +314,103 @@ impl Progress {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_run_that_did_not_finish_still_has_a_number_on_it() {
+        // Two runs of the same level, neither of which finished. One crossed
+        // most of it and died; the other barely left the spawn and lived.
+        // Return puts them within noise of each other; this has to not.
+        let nearly = Score {
+            finished: false,
+            toward: Some(0.9),
+            alive: 0.0,
+            lasted: 0.7,
+            seen: 60,
+        };
+        let barely = Score {
+            finished: false,
+            toward: Some(0.1),
+            alive: 1.0,
+            lasted: 1.0,
+            seen: 6,
+        };
+        assert!(
+            nearly.value() > barely.value(),
+            "nine tenths of the way and dead beats a tenth of the way alive: {} vs {}",
+            nearly.value(),
+            barely.value()
+        );
+    }
+
+    #[test]
+    fn finishing_outranks_any_amount_of_getting_close() {
+        let finished = Score {
+            finished: true,
+            toward: Some(1.0),
+            alive: 0.01,
+            lasted: 1.0,
+            seen: 10,
+        };
+        let close = Score {
+            finished: false,
+            toward: Some(0.99),
+            alive: 1.0,
+            lasted: 0.5,
+            seen: 200,
+        };
+        assert!(finished.value() > close.value());
+        // And finishing in one piece beats finishing on fumes.
+        let healthy = Score {
+            alive: 1.0,
+            ..finished
+        };
+        assert!(healthy.value() > finished.value());
+    }
+
+    #[test]
+    fn with_nowhere_to_walk_to_lasting_is_the_whole_of_the_task() {
+        // health-gathering: no exit, so no route to make progress against.
+        // Surviving longer is the only thing that separates two runs.
+        let long = Score {
+            finished: false,
+            toward: None,
+            alive: 0.8,
+            lasted: 1.0,
+            seen: 40,
+        };
+        let short = Score {
+            lasted: 0.3,
+            alive: 0.0,
+            ..long
+        };
+        assert!(long.value() > short.value());
+        // But it cannot outrank a run that actually went somewhere.
+        let went = Score {
+            finished: false,
+            toward: Some(0.95),
+            alive: 0.5,
+            lasted: 0.5,
+            seen: 40,
+        };
+        assert!(went.value() > long.value());
+    }
+
+    #[test]
+    fn unexplored_ground_is_not_something_to_make_progress_against() {
+        // The frontier moves every time it is reached, so "closed on it from
+        // 64 units to 0" happens over and over and says nothing about how far
+        // through a level a run is.
+        let mut p = Progress::new();
+        for _ in 0..4 {
+            p.note(&goal_state(0, 0, 64, Some("unexplored")));
+            p.note(&goal_state(0, 0, 0, Some("unexplored")));
+        }
+        let s = p.score(false, 100);
+        assert!(
+            s.toward.is_none(),
+            "there was never a goal worth measuring against"
+        );
+    }
 
     fn state(x: i32, y: i32, path: Option<i32>, events: &str) -> State {
         let p = match path {

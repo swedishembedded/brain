@@ -90,6 +90,12 @@ pub struct Score {
     pub exits: usize,
     pub deaths: usize,
     pub steps: f32,
+    /// Mean of [`crate::report::Score::value`] over the episodes: how far
+    /// each one GOT, counting the ones that did not finish. Return cannot
+    /// answer that - almost all of it is the single payment at the exit - so
+    /// two runs that both fell short are indistinguishable by return and
+    /// separable by this.
+    pub progress: f32,
 }
 
 impl Score {
@@ -97,7 +103,7 @@ impl Score {
         println!(
             "  {who}: {} episodes, return {:+.2} ({:+.2} from the game itself), \
              {:.1} kills, {:.1} items, {} exits, {} deaths, {:.0} steps, \
-             {:.1} health burned off by the floor",
+             {:.1} health burned off by the floor, progress {:.2}",
             self.episodes,
             self.mean_return,
             self.mean_game,
@@ -106,13 +112,14 @@ impl Score {
             self.exits,
             self.deaths,
             self.steps,
-            self.floor_damage
+            self.floor_damage,
+            self.progress
         );
     }
 
     pub fn row(&self, who: &str) {
         println!(
-            "{:<10} {:>8.2} {:>8.2} {:>8.1} {:>8.1} {:>8} {:>8} {:>8.1}",
+            "{:<10} {:>8.2} {:>8.2} {:>8.1} {:>8.1} {:>8} {:>8} {:>8.1} {:>9.2}",
             who,
             self.mean_return,
             self.mean_game,
@@ -120,7 +127,8 @@ impl Score {
             self.items,
             self.exits,
             self.deaths,
-            self.floor_damage
+            self.floor_damage,
+            self.progress
         );
     }
 }
@@ -138,6 +146,7 @@ struct Tally {
     deaths: usize,
     steps: f32,
     floor: f32,
+    progress: f32,
     n: usize,
 }
 
@@ -153,11 +162,12 @@ impl Tally {
             deaths: 0,
             steps: 0.0,
             floor: 0.0,
+            progress: 0.0,
             n: 0,
         }
     }
 
-    fn add(&mut self, env: &mut DoomEnv, total: f32, steps: usize) {
+    fn add(&mut self, env: &mut DoomEnv, total: f32, steps: usize, allowed: usize) {
         let s = env.state();
         self.ret += total;
         self.game += env.extrinsic();
@@ -167,11 +177,14 @@ impl Tally {
         self.deaths += usize::from(s.outcome == "dead");
         self.steps += steps as f32;
         self.floor += env.floor_damage() as f32;
+        let got = env.score(allowed as u32);
+        self.progress += got.value();
         self.n += 1;
         println!(
-            "  {} ep {:<2} {total:+7.2}  {}",
+            "  {} ep {:<2} {total:+7.2}  progress {:.2}  {}",
             self.who,
             self.n,
+            got.value(),
             env.report()
         );
         // An episode that ended by going nowhere also says what the route made
@@ -193,6 +206,7 @@ impl Tally {
             deaths: self.deaths,
             steps: self.steps / n,
             floor_damage: self.floor / n,
+            progress: self.progress / n,
         }
     }
 }
@@ -223,7 +237,7 @@ pub fn score_scripted(
                 break;
             }
         }
-        tally.add(env, total, steps);
+        tally.add(env, total, steps, max_steps);
     }
     Ok(tally.finish())
 }
@@ -298,7 +312,7 @@ pub fn score_policy(
                 break;
             }
         }
-        tally.add(pipe.env_mut(), total, steps);
+        tally.add(pipe.env_mut(), total, steps, max_steps);
         if let Some(v) = viewer.as_deref_mut() {
             v.episode_done();
         }

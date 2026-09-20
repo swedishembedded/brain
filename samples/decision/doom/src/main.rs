@@ -349,6 +349,7 @@ fn run() -> Result<(), String> {
     let mut env = DoomEnv::new(game, args.cfg.clone(), args.mission, args.mix);
     env.set_maps(args.maps.clone());
     env.set_scenarios(args.scenarios.clone());
+    env.set_max_steps(args.max_steps());
     env.set_arena(args.arena);
     env.set_curriculum(args.curriculum);
     env.set_start_distance(args.start_distance);
@@ -427,8 +428,8 @@ fn train(env: DoomEnv, args: &Args) -> Result<(), String> {
 
 fn report(script: &view::Score, learned: &view::Score) {
     println!(
-        "\n{:<10} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8}",
-        "", "return", "game", "kills", "items", "exits", "deaths", "burned"
+        "\n{:<10} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>9}",
+        "", "return", "game", "kills", "items", "exits", "deaths", "burned", "progress"
     );
     script.row("scripted");
     learned.row("policy");

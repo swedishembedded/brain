@@ -283,6 +283,9 @@ pub struct DoomEnv {
     /// nothing, because a level is chosen by the same seed that already makes
     /// an episode reproducible.
     maps: Vec<u32>,
+    /// The decision budget an episode is given, so that "how far it got" can
+    /// be a fraction rather than a count.
+    max_steps: u32,
     /// The scenarios episodes are drawn from, one per episode, in place of the
     /// levels. A scenario is a level the engine builds from the episode's own
     /// seed, so "several levels" becomes "a new level every episode" - which
@@ -393,6 +396,7 @@ impl DoomEnv {
             mission,
             mission_mix,
             maps: only,
+            max_steps: 400,
             scenarios: Vec::new(),
             state: State::parse(EMPTY).expect("the empty state is well formed"),
             opts: Vec::new(),
@@ -439,6 +443,13 @@ impl DoomEnv {
     pub fn set_maps(&mut self, maps: Vec<u32>) {
         if !maps.is_empty() {
             self.maps = maps;
+        }
+    }
+
+    /// How many decisions an episode is allowed, for scoring how far one got.
+    pub fn set_max_steps(&mut self, n: usize) {
+        if n > 0 {
+            self.max_steps = n as u32;
         }
     }
 
@@ -860,6 +871,13 @@ impl DoomEnv {
     /// stopped making progress. See [`crate::report`].
     pub fn report(&self) -> String {
         self.progress.report(&self.state.outcome)
+    }
+
+    /// How far the episode that just ended actually got, on a scale that is
+    /// still readable when it did not finish. See [`crate::report::Score`].
+    pub fn score(&self, allowed: u32) -> crate::report::Score {
+        self.progress
+            .score(self.state.outcome == "exited", allowed)
     }
 
     /// What the route makes of where the player is standing, asked only when
