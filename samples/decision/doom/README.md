@@ -166,6 +166,61 @@ whether it finished; the second is health lost to burning floor, which is the
 single most reliable way to die on a level nobody has walked before and the
 one thing an agent that has merely memorised a route will not have learned.
 
+### 3b. Train on problems, and keep the levels for the exam
+
+Three fixed levels are not three worlds' worth of practice. DOOM is
+deterministic: the same level at a different seed is the same level, so a
+rollout over three maps presents three situations however many episodes it
+runs. And each of those situations asks for everything at once - navigate,
+fight, survive a burning floor, find a switch - so nothing in the return says
+which part was learned.
+
+`--scenario` plays levels the engine BUILDS instead of the game's own, one
+drawn per episode, each generated fresh from that episode's seed. There is no
+map to memorise. The game's own levels then stop being training data and
+become the exam.
+
+```bash
+# learn on generated problems only - the policy never sees a DOOM level
+doom train --scenario my-way-home,health-gathering,deadly-corridor,basic            --mission speedrun --max-steps 400 --iterations 30 --episodes 8            --warmup 24 --warmup-keep 0.5 --save out/doom-scenarios.safetensors
+
+# and score on the real game, which it has never been in
+doom eval  --maps 1,2,3,4,5 --mission speedrun --max-steps 900            --eval-episodes 10 --head out/doom-scenarios.safetensors
+```
+
+The nine are ViZDoom's scenarios, rebuilt on this engine. The designs are
+theirs; none of the files are. Theirs are UDMF geometry driven by compiled
+ACS and this engine reads neither - and porting the observation onto
+ViZDoom's engine would mean losing most of it. Its state gives line endpoints
+and a blocking flag, with no sector special, no linedef special and no
+automap flag, so burning floor, doors, switches, the exit and the fair-play
+seen set are all underivable there. Training and scoring have to produce the
+SAME TEXT or nothing transfers, which makes one engine a correctness
+requirement rather than a convenience.
+
+Rebuilding them here buys something ViZDoom does not have. Its scenarios
+randomise placement inside one fixed map; these generate the map, so a maze
+is a different maze every episode rather than the same one entered from a new
+corner.
+
+| scenario | the one thing it asks |
+| --- | --- |
+| `basic` | see a monster, face it, shoot it |
+| `deadly-corridor` | advance to the armour under fire from both sides |
+| `defend-the-center` | a ring closing in, with ammunition running out |
+| `defend-the-line` | the same, with a wall behind you and monsters that shoot |
+| `health-gathering` | a floor that burns, and medkits scattered over it |
+| `health-gathering-supreme` | the same, with the medkits out of sight in a maze |
+| `my-way-home` | dropped anywhere in a fresh maze, facing anywhere: find the armour |
+| `predict-position` | a target walking the far wall, and a rocket that takes time |
+| `take-cover` | fireballs from across the room, and more of them coming |
+
+A generated level is published under a lump of its own rather than into an
+`ExMy` slot, and the episode and map the engine believes it is playing never
+move off 1 and 1. Nothing of the game's own is displaced, the same process
+can score on E1M1 straight afterwards, and the sky, the music and the
+intermission art stay the ones the IWAD actually ships.
+
 ### 4. Watch it play, and record it
 
 ```bash
@@ -256,7 +311,8 @@ Everything, as prose, because that is what a decision model reads:
 
 ```
 health 101 armor 0, pistol with 50 rounds. Killed 2 of 29 enemies, 1 of 37 items, 0 of 3 secrets.
-In sight: former human sergeant close at 180 units 12 degrees left, coming for you.
+In sight: former human sergeant close at 180 units 12 degrees left, coming for you, the one you have been hitting.
+Last seen: medikit 220 units behind you; imp 340 units to your right, which moves.
 An explosive barrel sits 279 units 78 degrees right.
 Room to move: 320 ahead, 44 left, 320 right, 320 behind.
 The exit switch is 2217 units 53 degrees left, with 0 units of clear floor that way.
@@ -280,6 +336,11 @@ Four details in there are load-bearing, and each was wrong once:
   and the policy cannot remember - every decision is an independent forward
   pass. Leaving it out is what made the first trained policy lose; see
   [run 1](#run-1---it-lost-to-the-scripted-player).
+- **`Last seen` is the second half of the same idea.** The policy has no
+  memory of its own, so what it saw a moment ago has to arrive in the
+  observation or not at all. It is placed from where the player is standing
+  NOW, and a monster is dropped from it far sooner than an item, because a
+  monster has moved since and an item has not.
 
 ## What the agent is NOT told, and why that matters more than what it is
 
@@ -324,6 +385,49 @@ old behaviour as a control to measure the honest one against.
 Measured on E1M1: the scripted player explores the level and finishes it in
 **238 decisions**, against 156 with the whole map handed to it - and it takes
 a different route, because it is looking rather than following.
+
+### What it IS told, that it was not before: what it just saw
+
+Fair play cuts the other way too. If the observation is only what is in line
+of sight right now, then turning away from a medikit deletes it: the option
+to go and get it disappears in the same decision the player stops looking at
+it, and the only way anything is ever picked up is by walking into it. That
+is not honesty, it is amnesia. A player looks left, sees a medikit, looks
+right to check the corridor, and the medikit is still behind their shoulder.
+
+So what has been seen is kept for a while. Nothing enters that memory which
+was not in an observation the agent was already shown - it is the same
+information, held rather than discarded one decision later.
+
+Two details make it a memory rather than a map:
+
+- **It is stored as a position and reported as a bearing.** Walking away from
+  a remembered medikit turns it into "220 units behind you", which is true
+  rather than stale. The map coordinates never leave the module, because a
+  policy told where things are in map units would be memorising a map -
+  the one thing the generated levels exist to make worthless.
+- **A monster goes stale and an item does not.** A monster is forgotten after
+  ten decisions out of sight, because by then it could be anywhere. An item
+  is forgotten only on evidence: the player reached the spot and found
+  nothing, which is also what picking it up looks like from here.
+
+The same memory answers a second question the observation could not. Two
+identical sergeants at mirrored bearings produce two option sentences that
+differ only in "left" or "right", and a memoryless policy flipping between
+them is responding correctly to a state in which they are indistinguishable -
+which, watching a recorded run, is the thing that least resembles someone
+playing. The memory holds the most health each thing was ever seen with, so
+anything below its own best is one this player has been shooting, and the
+attack option says so. One bit, derived from what was already shown, and
+nothing a player looking at the screen would not know.
+
+The go-back option is offered only when there is floor in that direction. It
+walks a straight line at where the thing was, so a remembered medikit two
+rooms away through a wall would otherwise turn "go back for it" into "walk at
+that wall" - measured on health-gathering-supreme, offering it unguarded cost
+the scripted player three extra deaths in twenty-four episodes. What knows
+the way round a corner is the route, and the route does not yet take a
+remembered thing as a goal.
 
 ## Where the route comes from
 
@@ -788,6 +892,44 @@ doom: stalled: the last 60 of 1400 decisions covered 3 patches of floor around
       (-1420, 2059); ... a wall in the way
 ```
 
+Beside each one is a **progress** number, because the line is prose and two
+runs need comparing. Return cannot do it: almost all of it is the single
+payment at the exit, which neither of two failing runs collected, so an
+episode that crossed nine tenths of E1M3 and died reads much like one that
+shuttled between two cells for four hundred decisions. On the levels this
+sample actually struggles with, nearly every episode is one of those two.
+
+Progress is what a person reading the two runs would say instead. Finishing
+beats everything, and finishing in good health beats finishing on fumes.
+Short of that it is how far along the way the run got, by ROUTE distance over
+walkable ground, discounted by how close it came to dying:
+
+```
+died at decision 368 on E1M3, a quarter of the way        0.23
+stalled at a switch on E1M3, a third of the way, 44 hp    0.36
+finished E1M1 with 101 health                             1.25
+```
+
+This is not the distance shaping that was rejected earlier and should not be
+confused with it. That was a per-step payment for closing a STRAIGHT LINE,
+which in a building goes through walls and paid the agent to walk into them.
+This is one number at the end of an episode, computed from the best approach
+the run ever made, so ground walked twice earns nothing and there is no
+per-step gradient in it at all.
+
+Two things it deliberately refuses to count. Unexplored ground is not a goal:
+the frontier moves every time it is reached, so "closed on it from 64 units
+to 0" happens over and over and says nothing about how far through a level a
+run is. And where there is nothing to walk toward - which is the whole of
+health-gathering - lasting IS the task, scaled so it can never outrank a run
+that actually went somewhere.
+
+A training run uses the same number to decide which iteration to keep. The
+first generalization run ended on its worst policy with four better
+iterations behind it, because it was ranking them by mean return; `Env::progress`
+is how an environment says how far its episodes got, and the SDK ranks on
+that when it is answered.
+
 Three pieces of machinery make those lines possible, and each was added
 because a question could not be answered without it.
 
@@ -966,19 +1108,19 @@ own sampling, which is variety in the ACTIONS and none at all in the WORLD.
 
 In the order the measurements point at, not in the order they are interesting:
 
-1. **Train on situations the levels cannot supply.** Run 10's failure is a
-   variety failure before it is a learning failure: three fixed, deterministic
-   levels give a rollout three distinct worlds, whatever the seed. What is
-   needed is many small worlds that each pose ONE problem - survive a floor
-   that hurts you by collecting the medkits scattered over it; find a goal
-   from a spawn point and facing you were dropped at at random - and a fresh
-   one every episode. The real levels then stop being the training set and
-   become the validation set, which is the only role in which "it has never
-   seen this level" means anything.
+1. **Give the route a remembered thing as a goal.** The memory says a medikit
+   was 300 units to the left; the option that acts on it walks a straight line
+   at that spot, which in a maze is a wall. The route is the thing that knows
+   the way round a corner, and it cannot currently be pointed at an arbitrary
+   place. It floods from the goal, so one flood answers one goal - flooding
+   from the PLAYER instead would give the walking distance to every cell at
+   once, and any number of targets could be read off a single predecessor
+   tree. That is a real rework of `api_route.c` and the only remaining hole
+   in the perception story.
 2. **Value health against death honestly.** Dying costs 5.0 and a 25-point
    medkit pays 0.6, so twenty-five points of health are worth a twentieth of
-   the thing they prevent. Every held-out episode ended in a death with
-   decisions to spare; this is the term that governs those.
+   the thing they prevent. Every held-out episode of run 10 ended in a death
+   with decisions to spare; this is the term that governs those.
 3. **Both skills at once.** `--arena` teaches fighting and `--curriculum`
    teaches finishing, and nothing yet trains one policy to do both. A level is
    finished by a player that can also survive what is in the way.
@@ -995,6 +1137,12 @@ In the order the measurements point at, not in the order they are interesting:
 - **Generalization is not proven.** A policy trained on E1M1-E1M3 does not
   finish E1M4, and neither does the teacher. It survives longer and kills more
   than the teacher there, which is worth something and is not the claim.
+- **The route cannot be pointed at a remembered thing.** It floods from its
+  own goal, so "walk to where that medikit was" has to be a straight line,
+  and the option is withheld when there is no floor that way rather than
+  routed round the corner. In an open room this costs nothing; in a maze it
+  is the difference between a memory that can be acted on and one that can
+  only be read.
 - **The policy finishes E1M1 from the spawn but does not beat the script.**
   Six of twelve scored episodes end the level, which is what the scripted
   player manages on the same twelve, and the policy is 5.19 behind on return.
