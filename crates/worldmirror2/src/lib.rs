@@ -19,4 +19,5 @@ pub mod gaussians;
 pub mod import;
 pub mod model;
 pub mod preprocess;
+pub mod priors;
 pub mod rope2d;

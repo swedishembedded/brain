@@ -123,12 +123,65 @@ pub const PATCH_START: usize = 7;
 /// Global-attention score-slab budget (auto-chunks queries under it).
 const ATTN_BUDGET: u64 = 1 << 30;
 
+/// `pose_embed` and `ray_embed`: `Linear -> GELU -> Linear`, the trunk's own
+/// MLP activation.
+struct PriorMlp {
+    dim: usize,
+    pose_w0: Vec<f32>, pose_b0: Vec<f32>, pose_w2: Vec<f32>, pose_b2: Vec<f32>,
+    ray_w0: Vec<f32>, ray_b0: Vec<f32>, ray_w2: Vec<f32>, ray_b2: Vec<f32>,
+}
+
+fn gelu_erf(x: f32) -> f32 {
+    0.5 * x * (1.0 + libm_erf(x * std::f32::consts::FRAC_1_SQRT_2))
+}
+
+/// Abramowitz-Stegun 7.1.26, which is what the GELU kernel evaluates.
+fn libm_erf(x: f32) -> f32 {
+    let s = x.signum();
+    let x = x.abs();
+    let t = 1.0 / (1.0 + 0.327_591_1 * x);
+    let y = 1.0 - (((((1.061_405_4 * t - 1.453_152) * t) + 1.421_413_7) * t - 0.284_496_74) * t + 0.254_829_6) * t * (-x * x).exp();
+    s * y
+}
+
+impl PriorMlp {
+    fn eval(&self, w0: &[f32], b0: &[f32], w2: &[f32], b2: &[f32], x: &[f32]) -> Vec<f32> {
+        let (d, n) = (self.dim, x.len());
+        let mut h = vec![0.0f32; d];
+        for (o, hv) in h.iter_mut().enumerate() {
+            let mut a = b0.get(o).copied().unwrap_or(0.0);
+            for (i, xv) in x.iter().enumerate().take(n) {
+                a += w0[o * n + i] * xv;
+            }
+            *hv = gelu_erf(a);
+        }
+        let mut out = vec![0.0f32; d];
+        for (o, ov) in out.iter_mut().enumerate() {
+            let mut a = b2.get(o).copied().unwrap_or(0.0);
+            for (i, hv) in h.iter().enumerate() {
+                a += w2[o * d + i] * hv;
+            }
+            *ov = a;
+        }
+        out
+    }
+    fn pose(&self, v: &[f32; 7]) -> Vec<f32> {
+        self.eval(&self.pose_w0, &self.pose_b0, &self.pose_w2, &self.pose_b2, v)
+    }
+    fn ray(&self, v: &[f32; 4]) -> Vec<f32> {
+        self.eval(&self.ray_w0, &self.ray_b0, &self.ray_w2, &self.ray_b2, v)
+    }
+}
+
 /// Per-shape buffers + the recorded forward (DINOv2 encode + trunk).
 struct Built {
     s: usize,
     hp: usize,
     wp: usize,
     frames_in: DeviceBuffer,
+    /// `[s, PATCH_START, C]` trunk special tokens. Rewritable per call, so a
+    /// pose/intrinsics prior does not force the graph to be re-recorded.
+    heads: DeviceBuffer,
     #[allow(dead_code)]
     conv_raw: DeviceBuffer,
     #[allow(dead_code)]
@@ -167,6 +220,11 @@ pub struct Mirror {
     /// (cam+reg variants; pose/ray rows zero).
     trunk_head_f0: Vec<f32>,
     trunk_head_fr: Vec<f32>,
+    /// `pose_embed`/`ray_embed` kept on the HOST: they are two-layer MLPs
+    /// producing ONE token per frame, so a handful of frames is a few million
+    /// multiply-adds - not worth a dispatch, and keeping them here lets the
+    /// prior tokens be rebuilt per call without re-recording the graph.
+    prior_mlp: PriorMlp,
     rope_periods: Vec<f32>,
     cam_init9: Vec<f32>,
     built: Option<Built>,
@@ -214,6 +272,18 @@ impl Mirror {
         };
         let trunk_head_f0 = head(0);
         let trunk_head_fr = head(1);
+        let take = |n: &str| -> Vec<f32> { init.get(n).cloned().unwrap_or_default() };
+        let prior_mlp = PriorMlp {
+            dim: c,
+            pose_w0: take(&format!("{VGT}.pose_embed.0.weight")),
+            pose_b0: take(&format!("{VGT}.pose_embed.0.bias")),
+            pose_w2: take(&format!("{VGT}.pose_embed.2.weight")),
+            pose_b2: take(&format!("{VGT}.pose_embed.2.bias")),
+            ray_w0: take(&format!("{VGT}.ray_embed.0.weight")),
+            ray_b0: take(&format!("{VGT}.ray_embed.0.bias")),
+            ray_w2: take(&format!("{VGT}.ray_embed.2.weight")),
+            ray_b2: take(&format!("{VGT}.ray_embed.2.bias")),
+        };
         let rope_periods = init[&format!("{VGT}.frame_blocks.0.attn.rope.periods")].clone();
         let cam_init9 = init["cam_head.init_token"].clone();
 
@@ -232,6 +302,7 @@ impl Mirror {
             pos_patch,
             trunk_head_f0,
             trunk_head_fr,
+            prior_mlp,
             rope_periods,
             cam_init9,
             built: None,
@@ -460,18 +531,24 @@ impl Mirror {
         let trunk_tokens = gpu.storage(rows_t as u64 * c as u64);
         let zeros = gpu.storage(rows_t as u64 * c as u64);
         let tap_tmp = gpu.storage(rows_t as u64 * c as u64);
-        let head_f0 = gpu.storage_init("mirror.trunk_head_f0", &self.trunk_head_f0);
-        let head_fr = gpu.storage_init("mirror.trunk_head_fr", &self.trunk_head_fr);
+        // One slab of [s, PATCH_START, C] rather than the two shared rows this
+        // used to bind. Frames differed only by cam/reg variant before, so two
+        // sufficed; a pose and intrinsics token are PER FRAME, and writing
+        // them means each frame needs its own head row.
+        let mut heads = Vec::with_capacity(s * PATCH_START * c);
+        for fi in 0..s {
+            heads.extend_from_slice(if fi == 0 { &self.trunk_head_f0 } else { &self.trunk_head_fr });
+        }
+        let head_all = gpu.storage_init("mirror.trunk_heads", &heads);
         let (cos, sin) = crate::rope2d::rope_tables(&self.rope_periods, hp, wp, PATCH_START);
         let rope_cos = gpu.storage_init("mirror.rope_cos", &cos);
         let rope_sin = gpu.storage_init("mirror.rope_sin", &sin);
         for fi in 0..s {
             let row0 = (fi * td_t) as u64;
-            let head = if fi == 0 { &head_f0 } else { &head_fr };
             steps.push(gpu.step_sliced(
                 self.base + K_AXPY,
-                &[&trunk_tokens, head],
-                &[(row0 * c as u64, 0), (0, 0)],
+                &[&trunk_tokens, &head_all],
+                &[(row0 * c as u64, 0), ((fi * PATCH_START * c) as u64, 0)],
                 &[(PATCH_START * c) as u32, f(1.0)],
                 (PATCH_START * c) as u32,
             ));
@@ -575,6 +652,7 @@ impl Mirror {
             hp,
             wp,
             frames_in,
+            heads: head_all.clone(),
             conv_raw,
             conv_out,
             tokens,
@@ -599,6 +677,24 @@ impl Mirror {
     /// (concatenated): ImageNet normalization happens here (reference parity -
     /// the VGT normalizes internally), then DINOv2 → trunk → heads → camera.
     pub fn forward(&mut self, frames_chw: &[f32], s: usize, hp: usize, wp: usize) {
+        self.forward_with_priors(frames_chw, s, hp, wp, None)
+    }
+
+    /// [`Self::forward`] with known cameras written into the trunk's pose and
+    /// intrinsics tokens.
+    ///
+    /// `priors` is one entry per frame or `None`. Absent priors leave those
+    /// token rows ZERO, which is not a fallback but the case the model was
+    /// trained for: each prior is dropped independently with probability 0.5
+    /// during training, by zeroing exactly these rows.
+    pub fn forward_with_priors(
+        &mut self,
+        frames_chw: &[f32],
+        s: usize,
+        hp: usize,
+        wp: usize,
+        priors: Option<&[crate::priors::CameraPrior]>,
+    ) {
         let rebuild = match &self.built {
             Some(b) => b.s != s || b.hp != hp || b.wp != wp,
             None => true,
@@ -609,6 +705,31 @@ impl Mirror {
         let b = self.built.as_ref().unwrap();
         let hw = hp * self.cfg.patch * wp * self.cfg.patch;
         assert_eq!(frames_chw.len(), s * 3 * hw);
+
+        // Rewrite the special-token slab: cam/reg as built, pose and
+        // intrinsics from the priors when there are any. Done every call
+        // because the slab is shared across calls at one shape and a previous
+        // call's priors must not leak into this one.
+        {
+            let c = self.cfg.dim;
+            let (w, h) = ((wp * self.cfg.patch) as u32, (hp * self.cfg.patch) as u32);
+            let mut heads = Vec::with_capacity(s * PATCH_START * c);
+            let pose_vecs = priors.map(crate::priors::pose_vectors);
+            for fi in 0..s {
+                let base = if fi == 0 { &self.trunk_head_f0 } else { &self.trunk_head_fr };
+                heads.extend_from_slice(base);
+                let row = heads.len() - PATCH_START * c;
+                if let (Some(p), Some(pv)) = (priors, pose_vecs.as_ref()) {
+                    if fi < p.len() {
+                        let pose = self.prior_mlp.pose(&pv[fi]);
+                        let ray = self.prior_mlp.ray(&crate::priors::intrinsic_vector(&p[fi], w, h));
+                        heads[row + 5 * c..row + 6 * c].copy_from_slice(&pose);
+                        heads[row + 6 * c..row + 7 * c].copy_from_slice(&ray);
+                    }
+                }
+            }
+            self.gpu.write(&b.heads, bytemuck_cast(&heads));
+        }
         let mut norm = Vec::with_capacity(frames_chw.len());
         for fr in 0..s {
             for ch in 0..3 {

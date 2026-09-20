@@ -161,7 +161,7 @@ fn the_scene_looks_like_the_photographs_it_was_built_from() {
             let u8s = |v: &[f32]| -> Vec<u8> { v.iter().map(|x| (x.clamp(0.0, 1.0) * 255.0) as u8).collect() };
             for (tag, px) in [("render", u8s(&rgb)), ("photo", u8s(&want))] {
                 let img = imaging::Rgb8::new(w, h, px).expect("frame");
-                imaging::save(&format!("{dir}/{i:02}-{tag}.png"), &img).expect("dump");
+                imaging::save(format!("{dir}/{i:02}-{tag}.png"), &img).expect("dump");
             }
         }
         eprintln!("photograph {i}: {db:.2} dB, sharpness {sharp:.3}");
