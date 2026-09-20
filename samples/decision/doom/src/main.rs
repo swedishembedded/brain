@@ -114,10 +114,15 @@ impl Args {
 fn usage() -> String {
     format!(
         "\
-usage: doom <train|eval|play|probe|bench> [options]
+usage: doom <train|eval|fit|play|probe|bench> [options]
 
   train    warm-start on the scripted player, then improve it by PPO
   eval     score a policy and the scripted player on the SAME episodes
+  fit      fit the head to the scripted player and ask how often it agrees,
+           on the episodes it was fitted to and on episodes it has not seen.
+           No reward, no critic - it asks only whether the decision is
+           EXPRESSIBLE from what the agent reads, which every other question
+           about the policy is downstream of
   play     run episodes and show every decision as it is made
   probe    one scripted episode, for artifacts and for checking the plumbing
   bench    time one decision against state length and option count
@@ -215,7 +220,7 @@ fn parse_args() -> Result<Args, String> {
         std::process::exit(0);
     }
     let command = argv[0].clone();
-    if !["train", "eval", "play", "probe", "bench"].contains(&command.as_str()) {
+    if !["train", "eval", "fit", "play", "probe", "bench"].contains(&command.as_str()) {
         return Err(format!("unknown command {command:?}\n\n{}", usage()));
     }
 
@@ -412,6 +417,7 @@ fn run() -> Result<(), String> {
         "play" => view::play(env, &args),
         "bench" => view::bench(env, &args),
         "eval" => evaluate(env, &args),
+        "fit" => fit(env, &args),
         _ => train(env, &args),
     }
 }
@@ -487,6 +493,78 @@ fn train(env: DoomEnv, args: &Args) -> Result<(), String> {
     report(&script, &learned);
     pt.print("policy");
     st.print("scripted");
+    Ok(())
+}
+
+/// Can the model express the teacher's decisions at all?
+///
+/// Every other question about this policy is downstream of that one and none
+/// of them can be answered while it is open. A policy gradient improves a
+/// policy the architecture is able to represent; if the observation the agent
+/// reads and the head that ranks its options cannot reproduce a decision even
+/// when handed the answer, no budget of rollouts will find it, and a run that
+/// fails to improve says nothing about the algorithm.
+///
+/// So: fit the head to the scripted player with plain supervised learning,
+/// then ask how often it agrees - on the episodes it was fitted to, and on
+/// episodes generated from seeds it has never been given. No reward is
+/// involved, no critic, no advantage. See
+/// `brain::ControlPipeline::teacher_agreement` for how the three numbers are
+/// read.
+fn fit(env: DoomEnv, args: &Args) -> Result<(), String> {
+    let spec = args.train.spec();
+    let mut builder = ControlPipeline::builder(args.encoder(), env)
+        .seed(args.seed())
+        .device(args.device());
+    if let Some(h) = args.head() {
+        builder = builder.head(h);
+    }
+    let mut pipe = builder.load().map_err(|e| format!("{e}"))?;
+    println!(
+        "doom: fitting the {} to {} scripted episodes x {} passes, then asking how \
+         often it agrees",
+        if spec.freeze_encoder { "head" } else { "head AND the encoder" },
+        spec.warmup_episodes,
+        spec.warmup_epochs
+    );
+    let probed = pipe
+        .probe_teacher(
+            spec.warmup_episodes,
+            spec.warmup_epochs,
+            spec.max_steps,
+            spec.warmup_keep,
+            args.eval_episodes,
+            spec.freeze_encoder,
+        )
+        .map_err(|e| format!("{e}"))?;
+    let Some((before, fitted, unseen)) = probed else {
+        return Err("the environment has no scripted player to compare against".into());
+    };
+    println!("\n  before fitting, on unseen episodes   {before}");
+    println!("  after fitting, on the same episodes  {fitted}");
+    println!("  after fitting, on unseen episodes    {unseen}");
+    let floor = unseen.floor();
+    println!(
+        "\n{}",
+        if before.top1 > floor + 0.25 {
+            "doom: an UNFITTED head already agrees with the teacher far more than a \
+             constant policy does - the measurement is wrong, and the two numbers under \
+             it mean nothing until it is explained"
+        } else if fitted.top1 < floor + 0.15 {
+            "doom: the head cannot reproduce the teacher even on the episodes it was \
+             fitted to. The decision is not expressible from what the agent reads, and \
+             no amount of policy gradient will find it - what the observation carries is \
+             what to fix"
+        } else if unseen.top1 < fitted.top1 * 0.7 {
+            "doom: it reproduces the episodes it was fitted to and not the ones it was \
+             not - it memorised them. More DISTINCT worlds, not more steps in these"
+        } else {
+            "doom: the representation carries the decision, on worlds it has never seen. \
+             What is left to explain is ACTING: the states a policy reaches once it stops \
+             being steered by the teacher are not these states, and nothing here has \
+             labelled those"
+        }
+    );
     Ok(())
 }
 

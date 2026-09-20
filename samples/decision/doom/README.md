@@ -227,6 +227,58 @@ move off 1 and 1. Nothing of the game's own is displaced, the same process
 can score on E1M1 straight afterwards, and the sky, the music and the
 intermission art stay the ones the IWAD actually ships.
 
+### 3c. Ask whether the decision is expressible at all
+
+Every other question about this policy is downstream of one: given the
+observation the agent reads and the head that ranks its options, can it
+reproduce a decision *even when handed the answer*? A policy gradient improves
+a policy the architecture is able to represent. If the answer is no, no budget
+of rollouts finds it, and a run that fails to improve says nothing about the
+algorithm.
+
+```bash
+doom fit $D --scenario my-way-home,health-gathering,deadly-corridor,defend-the-line,take-cover \
+  --mission speedrun --max-steps 100 --warmup 16 --warmup-epochs 10 --eval-episodes 8
+```
+
+No reward, no critic, no advantage. It fits the head to the scripted player by
+plain supervised learning, then reports how often the head's own best action IS
+the teacher's - before fitting, on the episodes it was fitted to, and on
+episodes generated from seeds it has never been given. Three numbers, and only
+their shape means anything:
+
+| before | fitted | unseen | what is wrong |
+| --- | --- | --- | --- |
+| at floor | at floor | at floor | the decision is not expressible from what the agent reads |
+| at floor | high | at floor | it memorised the episodes; more DISTINCT worlds |
+| at floor | high | high | the representation is fine and the failure is in ACTING |
+| **above floor** | - | - | the measurement is broken and nothing under it counts |
+
+The floor is the better of guessing uniformly and always naming the same
+position in the option list. The second of those is the one that matters: the
+teacher does not choose uniformly and the options do not arrive in a random
+order, so a head that reads nothing useful still beats `1/n` by favouring
+wherever the answer usually sits.
+
+**Measured**, frozen encoder, five generated scenarios, 100 decisions:
+
+```text
+before fitting, on unseen episodes   23.0% of 712 decisions  (guessing 10.9%, always-the-same-position 24.9%)
+after fitting, on the same episodes  84.8% of 1366 decisions
+after fitting, on unseen episodes    88.8% of 712 decisions  (0.83 probability on the teacher's action)
+```
+
+The unfitted head sits exactly at the constant-policy floor, which is the
+control that makes the other two readable. After fitting it reproduces the
+teacher 88.8% of the time **on worlds it has never seen** - higher than on the
+ones it was fitted to.
+
+So the frozen 384-number representation carries the decision, 445k parameters
+are enough to express it, and 96 distinct worlds are enough to generalize from.
+All three of those were live suspicions and all three are now closed. What is
+left is the fourth row of the table: everything above is measured on states the
+TEACHER visits, and a policy acting on its own does not visit them.
+
 ### 4. Watch it play, and record it
 
 ```bash

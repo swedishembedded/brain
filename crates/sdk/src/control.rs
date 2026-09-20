@@ -210,6 +210,65 @@ fn mean_of(
     acc
 }
 
+/// How well the policy reproduces the teacher on states the teacher reaches.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Agreement {
+    /// Decisions compared.
+    pub states: usize,
+    /// Fraction where the policy's own best action WAS the teacher's.
+    pub top1: f32,
+    /// Mean probability the policy put on the teacher's action - the same
+    /// question without the argmax, so that "nearly right everywhere" and
+    /// "right half the time and lost the rest" stop reading the same.
+    pub top1_prob: f32,
+    /// Mean number of options offered, so `top1` can be read against the
+    /// chance level it has to beat.
+    pub options: f32,
+    /// The largest share any single option POSITION took of the teacher's
+    /// choices - what a policy that always answers "the third one" would
+    /// score.
+    pub majority: f32,
+}
+
+impl Agreement {
+    /// What top-1 agreement a policy that read nothing would get.
+    ///
+    /// `1/options` is the floor, and it is the wrong number to compare
+    /// against on its own: the teacher does not choose uniformly, and the
+    /// options do not arrive in a random order, so a head that reads nothing
+    /// useful still beats `1/options` by simply preferring wherever the
+    /// teacher's answer usually sits. [`Agreement::majority`] is the baseline
+    /// that has to be beaten for a number to mean anything.
+    pub fn chance(&self) -> f32 {
+        if self.options > 0.0 {
+            1.0 / self.options
+        } else {
+            0.0
+        }
+    }
+
+    /// The baseline a number has to beat to say anything: the better of
+    /// guessing uniformly and always naming the same position.
+    pub fn floor(&self) -> f32 {
+        self.chance().max(self.majority)
+    }
+}
+
+impl std::fmt::Display for Agreement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{:.1}% of {} decisions ({:.2} on the teacher's action; guessing {:.1}%, \
+             always-the-same-position {:.1}%)",
+            self.top1 * 100.0,
+            self.states,
+            self.top1_prob,
+            self.chance() * 100.0,
+            self.majority * 100.0
+        )
+    }
+}
+
 /// What one rollout produced.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Rollout {
@@ -781,6 +840,142 @@ impl<E: Env> ControlPipeline<E> {
         self.rng = saved_rng;
         self.episode_seed = saved_seed;
         Ok((measured > 0).then(|| got / measured as f32))
+    }
+
+    /// How often the policy's own choice IS the teacher's, on states the
+    /// teacher reaches.
+    ///
+    /// A supervised question asked of a reinforcement-learning setup, and the
+    /// cheapest one there is: no reward, no critic, no advantage estimate.
+    /// The episode is driven BY the teacher and the policy is asked, at each
+    /// of its states, what it would have done instead.
+    ///
+    /// Asked on the episodes the head was fitted to and again on episodes it
+    /// has never seen, the pair says which of three things is wrong when a
+    /// trained policy still does not play well:
+    ///
+    /// * near chance on both - the observation and the head cannot express
+    ///   the decision at all. No policy-gradient budget finds what is not
+    ///   there, and the thing to fix is what the agent is allowed to read.
+    /// * high on the fitted episodes, near chance on the unseen ones - it
+    ///   memorised them, and the fix is more distinct worlds rather than more
+    ///   steps in the ones it has.
+    /// * high on both - the representation is sufficient and the failure is
+    ///   in ACTING: compounding error once the policy leaves the states the
+    ///   teacher visits, or credit assignment. That is where labelling the
+    ///   states the policy itself reaches is worth the samples and a larger
+    ///   PPO budget is not.
+    ///
+    /// Returns `None` when the environment has no teacher to ask.
+    pub fn teacher_agreement(
+        &mut self,
+        seeds: &[u64],
+        max_steps: usize,
+    ) -> Result<Option<Agreement>> {
+        // The teacher drives, so nothing here consumes the action sampler -
+        // but an episode still has to leave the training stream where it
+        // found it, or probing would change which worlds training sees.
+        let saved = self.episode_seed;
+        let (mut hits, mut states, mut on_teacher, mut offered) = (0usize, 0usize, 0.0f64, 0usize);
+        // How often the teacher's answer was the first option, the second,
+        // and so on - the constant policy this has to beat.
+        let mut by_position: Vec<usize> = Vec::new();
+        for &seed in seeds {
+            let mut obs = self.env.reset(seed);
+            for _ in 0..max_steps {
+                let options = self.env.actions();
+                if options.is_empty() {
+                    break;
+                }
+                let Some(teacher) = self.env.demo() else {
+                    self.episode_seed = saved;
+                    return Ok(None);
+                };
+                let probs = self.policy(&obs, &options)?;
+                let mut best = 0;
+                for (i, &pi) in probs.iter().enumerate() {
+                    if pi > probs[best] {
+                        best = i;
+                    }
+                }
+                hits += usize::from(best == teacher);
+                on_teacher += probs.get(teacher).copied().unwrap_or(0.0) as f64;
+                offered += options.len();
+                if by_position.len() <= teacher {
+                    by_position.resize(teacher + 1, 0);
+                }
+                by_position[teacher] += 1;
+                states += 1;
+                let (next, _, done) = self.env.step(teacher);
+                obs = next;
+                if done {
+                    break;
+                }
+            }
+        }
+        self.episode_seed = saved;
+        if states == 0 {
+            return Ok(None);
+        }
+        let n = states as f32;
+        Ok(Some(Agreement {
+            states,
+            top1: hits as f32 / n,
+            top1_prob: (on_teacher / states as f64) as f32,
+            options: offered as f32 / n,
+            majority: by_position.iter().copied().max().unwrap_or(0) as f32 / n,
+        }))
+    }
+
+    /// Fit the head to the teacher and measure what it learned, on the
+    /// episodes it was fitted to and on episodes it was not.
+    ///
+    /// The three numbers are reported together because only their SHAPE means
+    /// anything - see [`Self::teacher_agreement`]. The first is taken before
+    /// any fitting, and it is the control: an untouched head has no reason to
+    /// agree with the teacher more often than chance, so a "before" that is
+    /// not near chance means the measurement is wrong and the other two
+    /// numbers are not worth reading.
+    pub fn probe_teacher(
+        &mut self,
+        episodes: usize,
+        epochs: usize,
+        max_steps: usize,
+        keep: f32,
+        holdout: usize,
+        freeze_encoder: bool,
+    ) -> Result<Option<(Agreement, Agreement, Agreement)>> {
+        // The SAME encoder setting training uses, or this answers a question
+        // about a different model. Frozen, the fit has 445k parameters to do
+        // it with and the observation has already been compressed to 384
+        // numbers by weights that never saw DOOM; unfrozen it has 22M and can
+        // move the compression itself. Which of those two can reproduce the
+        // teacher is exactly the difference between "the head is too small"
+        // and "the representation threw the answer away", and running the
+        // probe both ways is how they are told apart.
+        self.model.set_encoder_frozen(freeze_encoder);
+        // The block no rollout and no gauge will ever draw.
+        let unseen: Vec<u64> = (0..holdout as u64).map(|i| 0x5000_0000 + i).collect();
+        // The seeds `clone_teacher` is about to draw, which is what makes the
+        // "fitted on" number a measurement of fitting rather than of luck.
+        let fitted: Vec<u64> = (1..=episodes as u64).map(|i| self.episode_seed + i).collect();
+
+        let before = match self.teacher_agreement(&unseen, max_steps)? {
+            Some(a) => a,
+            None => return Ok(None),
+        };
+        let mut step = 0usize;
+        let mut quiet = |_: usize, _: f32| {};
+        self.clone_teacher(episodes, epochs, max_steps, keep, &mut quiet, &mut step)?;
+        let on_fitted = match self.teacher_agreement(&fitted, max_steps)? {
+            Some(a) => a,
+            None => return Ok(None),
+        };
+        let on_unseen = match self.teacher_agreement(&unseen, max_steps)? {
+            Some(a) => a,
+            None => return Ok(None),
+        };
+        Ok(Some((before, on_fitted, on_unseen)))
     }
 
     /// The episode horizon evaluation and play use.

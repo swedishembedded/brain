@@ -120,7 +120,7 @@ pub use study::{DatasetSummary, DocumentStudy, StudyOutcome};
 #[cfg(feature = "decision")]
 pub mod control;
 #[cfg(feature = "decision")]
-pub use control::{ControlPipeline, ControlPipelineBuilder, ControlSpec, Env, Rollout};
+pub use control::{Agreement, ControlPipeline, ControlPipelineBuilder, ControlSpec, Env, Rollout};
 #[cfg(feature = "decision")]
 pub mod conversion;
 #[cfg(feature = "decision")]
