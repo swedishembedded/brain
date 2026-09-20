@@ -101,7 +101,7 @@ fn s3_forward_is_finite() {
     let cam = model.cam_pred_raw();
     assert!(cam.iter().all(|v| v.is_finite()), "camera pred has NaN: {cam:?}");
     let (splats, cams, weights) =
-        assemble(model.gpu(), &model, &frames, s, w as u32, h as u32, &AssembleOpts::default());
+        assemble(model.gpu(), &model, &frames, s, w as u32, h as u32, &AssembleOpts::default(), None);
     assert_eq!(cams.len(), s);
     assert!(splats.means.iter().all(|v| v.is_finite()), "NaN means");
     assert!(!splats.is_empty());

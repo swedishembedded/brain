@@ -118,7 +118,7 @@ fn the_scene_looks_like_the_photographs_it_was_built_from() {
     drop(init);
     model.forward(&frames, s, hp, wp);
     let opts = AssembleOpts { min_opacity: 0.02, max_depth: 0.0, ..Default::default() };
-    let (splats, cams, _) = assemble(model.gpu(), &model, &frames, s, w, h, &opts);
+    let (splats, cams, _) = assemble(model.gpu(), &model, &frames, s, w, h, &opts, None);
     assert_eq!(cams.len(), s, "one recovered camera per photograph");
     eprintln!("assembled {} gaussians", splats.len());
     for (i, c) in cams.iter().enumerate() {

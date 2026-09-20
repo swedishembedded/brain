@@ -120,7 +120,7 @@ fn run_direct(cfg: MirrorConfig, init: &HashMap<String, Vec<f32>>, frames: &[(Ve
     let mut model = Mirror::new(gpu, cfg, init, 0);
     let chw: Vec<f32> = frames.iter().flat_map(|(hwc, fw, fh)| caps::hwc_to_chw(hwc, *fw, *fh)).collect();
     model.forward(&chw, s, hp, wp);
-    let (splats, cams, _weights) = assemble(model.gpu(), &model, &chw, s, w, h, &AssembleOpts::default());
+    let (splats, cams, _weights) = assemble(model.gpu(), &model, &chw, s, w, h, &AssembleOpts::default(), None);
     (splats, cams)
 }
 

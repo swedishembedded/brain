@@ -133,8 +133,19 @@ pub fn assemble(
     width: u32,
     height: u32,
     opts: &AssembleOpts,
+    known: Option<&[Camera]>,
 ) -> (Splats, Vec<Camera>, Vec<f32>) {
-    let cams = decode_cameras(&model.cam_pred_raw(), s, width, height);
+    // Back-project through the cameras the caller KNOWS when it has them, and
+    // through the predicted ones otherwise. The reference does exactly this
+    // and says why: gaussian positions are depth unprojected through a camera,
+    // so a camera error becomes a position error for every pixel of that
+    // frame. Conditioning the trunk on a pose only informs the features; it
+    // does not stop the camera head from being the thing the geometry is
+    // built on.
+    let cams = match known {
+        Some(k) if k.len() == s => k.to_vec(),
+        _ => decode_cameras(&model.cam_pred_raw(), s, width, height),
+    };
     let hw = (width * height) as usize;
     let mut out = Splats::default();
     let mut weights = Vec::new();

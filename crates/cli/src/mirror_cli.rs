@@ -323,12 +323,21 @@ fn with_scene<R>(
     eprintln!("running WorldMirror-2 on {s} frame(s) at {w}x{h} …");
     let t0 = std::time::Instant::now();
     let priors = poses.map(|p| read_camera_priors(p, s));
+    // The same known cameras become the back-projection cameras, not just a
+    // hint to the trunk - see `gaussians::assemble`.
+    let known: Option<Vec<splat::types::Camera>> = priors.as_ref().map(|ps| {
+        ps.iter()
+            .map(|p| splat::types::Camera {
+                c2w: p.c2w, fx: p.fx, fy: p.fy, cx: p.cx, cy: p.cy, width: w, height: h,
+            })
+            .collect()
+    });
     if priors.is_some() {
         eprintln!("conditioning on {s} known camera(s) from the pose prior");
     }
     model.forward_with_priors(&frames, s, hp, wp, priors.as_deref());
     let opts = AssembleOpts { min_opacity: min_op, max_depth, gs_mask_threshold: gs_mask, edge_depth_rtol: edge_rtol };
-    let (mut splats, cams, weights) = assemble(model.gpu(), &model, &frames, s, w, h, &opts);
+    let (mut splats, cams, weights) = assemble(model.gpu(), &model, &frames, s, w, h, &opts, known.as_deref());
     eprintln!(
         "forward + assembly: {:.1}s, {} gaussians",
         t0.elapsed().as_secs_f32(),
