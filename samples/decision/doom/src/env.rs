@@ -541,6 +541,7 @@ impl DoomEnv {
     fn remember(&mut self) {
         self.memory.observe(&self.state);
         self.state.recalled = self.memory.recall(&self.state);
+        self.state.wounded = self.memory.wounded();
     }
 
     /// What the game itself scored this episode, with no exploration bonus.

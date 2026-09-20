@@ -125,12 +125,21 @@ pub fn options(state: &State) -> Vec<Option_> {
     // --- fight ------------------------------------------------------------
     for t in state.visible_threats().take(3) {
         let facing = state.facing(t.bearing);
+        // Naming the one already being fought is what makes finishing it
+        // choosable. The two options are otherwise the same sentence with a
+        // different bearing in it.
+        let already = if state.wounded.contains(&t.id) {
+            ", which you have wounded"
+        } else {
+            ""
+        };
         out.push(Option_ {
             text: format!(
-                "attack the {} {} units away, {}",
+                "attack the {} {} units away, {}{}",
                 t.kind.to_lowercase(),
                 t.distance,
-                bearing_phrase(t.bearing)
+                bearing_phrase(t.bearing),
+                already
             ),
             // Turn onto it and fire in the same step: the turn servo closes
             // the angle over the step's tics, so firing after it is aimed at

@@ -68,6 +68,11 @@ pub struct State {
     /// this is the agent's memory, not the world's.
     #[serde(skip)]
     pub recalled: Vec<crate::memory::Recalled>,
+    /// Ids of things carrying less health than the most they have been seen
+    /// with: the ones this player has been shooting. See
+    /// [`crate::memory::Memory::wounded`].
+    #[serde(skip)]
+    pub wounded: Vec<i64>,
     pub events: Vec<Event>,
     /// Present only when the engine's per-step event buffer overflowed.
     #[serde(rename = "eventsDropped", default)]
@@ -477,6 +482,13 @@ pub fn render(state: &State, history: History) -> String {
                 if h <= 20 {
                     out.push_str(", nearly dead");
                 }
+            }
+            // And which one you have already been shooting. Two identical
+            // sergeants at mirrored bearings read identically otherwise, and
+            // a memoryless policy has no reason to finish one before starting
+            // on the other.
+            if state.wounded.contains(&t.id) {
+                out.push_str(", the one you have been hitting");
             }
             if t.targeting_me == Some(true) {
                 out.push_str(", coming for you");

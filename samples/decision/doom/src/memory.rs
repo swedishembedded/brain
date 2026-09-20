@@ -92,6 +92,10 @@ struct Held {
     x: f64,
     y: f64,
     health: Option<i32>,
+    /// The most health it has ever been seen with. A monster below its own
+    /// best is one that has been shot, which is how a player knows which of
+    /// two identical sergeants they have been fighting.
+    best_health: Option<i32>,
     ago: u32,
 }
 
@@ -167,6 +171,9 @@ impl Memory {
             h.x = x;
             h.y = y;
             h.health = t.health;
+            if let Some(n) = t.health {
+                h.best_health = Some(h.best_health.map_or(n, |b| b.max(n)));
+            }
             h.kind.clone_from(&t.kind);
             h.ago = 0;
             return;
@@ -178,6 +185,7 @@ impl Memory {
             x,
             y,
             health: t.health,
+            best_health: t.health,
             ago: 0,
         });
     }
@@ -199,6 +207,26 @@ impl Memory {
                 None => true,
             }
         });
+    }
+
+    /// Everything seen this episode that is now carrying less health than the
+    /// most it was ever seen with.
+    ///
+    /// This is what tells two identical sergeants apart. The policy is
+    /// memoryless and the option text is the same for both, so with nothing
+    /// to separate them it has no reason to finish one before starting on the
+    /// other - and flipping between them is the correct response to a state
+    /// in which they are indistinguishable. A player is never in that
+    /// position: they can see which one they have been hitting.
+    pub fn wounded(&self) -> Vec<i64> {
+        self.held
+            .iter()
+            .filter(|h| match (h.health, h.best_health) {
+                (Some(now), Some(best)) => now < best,
+                _ => false,
+            })
+            .map(|h| h.id)
+            .collect()
     }
 
     /// What is worth saying, nearest first. Only things out of sight: what
@@ -348,6 +376,38 @@ mod tests {
             .expect("remembered");
         assert_eq!(sergeant.distance, 100, "where it was last, not where it was first");
         assert_eq!(sergeant.health, Some(8));
+    }
+
+    #[test]
+    fn the_one_you_have_been_shooting_is_the_one_carrying_less_than_it_had() {
+        let mut m = Memory::new();
+        let two = |a: i32, b: i32| {
+            State::parse(&build(
+                0,
+                0,
+                0,
+                &format!(
+                    r#""pickups":[],"hazards":[],"threats":[
+                    {{"id":1,"type":"FORMER HUMAN SERGEANT","distance":300,"bearing":-30,
+                      "visible":true,"health":{a},"targetingMe":true}},
+                    {{"id":2,"type":"FORMER HUMAN SERGEANT","distance":300,"bearing":30,
+                      "visible":true,"health":{b},"targetingMe":true}}]"#
+                ),
+            ))
+            .unwrap()
+        };
+
+        m.observe(&two(30, 30));
+        assert!(m.wounded().is_empty(), "nothing has been hit yet");
+
+        m.observe(&two(12, 30));
+        assert_eq!(m.wounded(), vec![1], "the left one has been hit");
+
+        // Healing is not a thing DOOM monsters do, but a monster spawning
+        // later with more health than this one must not make this one read as
+        // unhurt again.
+        m.observe(&two(12, 30));
+        assert_eq!(m.wounded(), vec![1]);
     }
 
     #[test]
