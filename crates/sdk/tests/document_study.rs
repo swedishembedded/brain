@@ -231,6 +231,24 @@ fn a_document_study_writes_a_report_and_publishes_an_adapter_only_on_promote() {
         assert_eq!(facts.len(), FACTS_PER_CYCLE, "one row per DISTINCT fact");
     }
 
+    // ---- 1b. The typed accessors agree with the JSON they were built from -
+    // a caller must be able to match on `CycleOutcome::decision` directly
+    // instead of parsing `reject_cause`'s formatted string.
+    for (arm, typed) in [("gated", outcome.gated_cycles()), ("null_gate", outcome.null_gate_cycles())] {
+        assert_eq!(typed.len(), 1, "{arm} must have one typed outcome per cycle");
+        let row = &r[arm]["cycles"][0];
+        let cyc = &typed[0];
+        let json_decision = row["decision"].as_str().unwrap();
+        let typed_promoted = matches!(cyc.decision, brain::Decision::Promote);
+        assert_eq!(typed_promoted, json_decision == "promote", "{arm}: the typed decision must agree with the JSON string form");
+        assert_eq!(row["reject_cause"].is_null(), typed_promoted, "{arm}: reject_cause is null iff the typed decision is Promote");
+        assert!((cyc.baseline_pass_rate - row["baseline_pass_rate"].as_f64().unwrap()).abs() < 1e-12);
+        assert!((cyc.post_training_pass_rate - row["post_training_pass_rate"].as_f64().unwrap()).abs() < 1e-12);
+        assert!((cyc.anchor_delta - row["anchor_delta"].as_f64().unwrap()).abs() < 1e-12);
+        assert!(cyc.worst_block_delta.is_finite() && cyc.worst_block_delta >= 0.0, "{arm}: worst_block_delta must be a non-negative real number, got {}", cyc.worst_block_delta);
+        assert!(!cyc.retention_row.is_empty(), "{arm}: a cycle's retention row must carry at least its own diagonal entry");
+    }
+
     // ---- 2. The adapter is published only on a promote --------------------
     let published = rl::improve::latest_adapter(&adapters).expect("the adapter directory must exist either way");
     if decision == "promote" {

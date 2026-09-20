@@ -123,7 +123,7 @@ pub use decision::{Choice, DecisionPipeline, DecisionPipelineBuilder, TrainSpec}
 #[cfg(feature = "study")]
 pub mod study;
 #[cfg(feature = "study")]
-pub use study::{DatasetSummary, DocumentStudy, StudyOutcome};
+pub use study::{Cause, CycleOutcome, DatasetSummary, Decision, DocumentStudy, StudyOutcome};
 #[cfg(feature = "decision")]
 pub mod control;
 #[cfg(feature = "decision")]

@@ -70,7 +70,7 @@ use model::{Model, ModelConfig};
 use qwen3::config::LoraCfg;
 use rl::continual::{self, Curriculum, SftConfig, StudyReport, StudySpec};
 use rl::document::{self, DocumentCurriculum, DocumentStudyConfig, DocumentStudyReport, FactBatch, FactProbe, MIN_HELD_OUT_PROBES};
-use rl::gate::{Cause, Decision};
+pub use rl::gate::{Cause, Decision};
 use rl::improve::AdapterMeta;
 
 
@@ -228,6 +228,54 @@ struct ArmReport {
     bwt: f64,
     promotions: usize,
     cycles: Vec<CycleRow>,
+}
+
+/// One cycle's typed outcome, one arm - the same numbers [`StudyOutcome::
+/// table`] prints and [`StudyOutcome::json`] serializes, without the prose:
+/// a caller acts on `decision` directly instead of parsing `reject_cause`'s
+/// formatted string. Read straight off that cycle's own
+/// `rl::continual::CycleRecord`, so it can never disagree with either of
+/// those.
+#[derive(Clone, Debug)]
+pub struct CycleOutcome {
+    pub cycle: usize,
+    pub label: String,
+    /// What the REAL gate said, always - the null-gate arm carries it too,
+    /// it just does not act on it (see `applied_promote`).
+    pub decision: Decision,
+    /// What actually carried forward. Differs from `decision` only in the
+    /// null-gate arm, where a coin decides.
+    pub applied_promote: bool,
+    /// The incumbent arm on this cycle's frozen probes.
+    pub baseline_pass_rate: f64,
+    /// The candidate arm on the same probes, after training.
+    pub post_training_pass_rate: f64,
+    /// `R[k][0..=k]` from the servable arm - this cycle's retention row.
+    pub retention_row: Vec<f64>,
+    /// `anchor_incumbent - anchor_candidate` (the POOLED anchor headline);
+    /// positive means regression.
+    pub anchor_delta: f64,
+    /// The largest single anchor-BLOCK regression this cycle's gate saw,
+    /// never negative - `0.0` when no block regressed or the per-block
+    /// check was not enabled (`promote::gate::GateConfig::max_block_drop`).
+    /// A candidate can clear `anchor_delta`'s pooled budget and still have a
+    /// nonzero number here; that gap is the whole reason the block check
+    /// exists.
+    pub worst_block_delta: f64,
+}
+
+fn cycle_outcome(rec: &rl::continual::CycleRecord) -> CycleOutcome {
+    CycleOutcome {
+        cycle: rec.cycle,
+        label: rec.label.clone(),
+        decision: rec.gate_decision,
+        applied_promote: rec.applied_promote,
+        baseline_pass_rate: rec.heldout_incumbent,
+        post_training_pass_rate: rec.heldout_candidate,
+        retention_row: rec.retention_row.clone(),
+        anchor_delta: rec.report.anchor_delta,
+        worst_block_delta: rec.report.worst_block_delta,
+    }
 }
 
 /// The whole study, as a caller (sven's ledger, an operator, a later
@@ -965,5 +1013,17 @@ impl StudyOutcome {
     /// The study's own report, for a caller that wants the raw counters.
     pub fn report(&self) -> &DocumentStudyReport {
         &self.report
+    }
+    /// The gated arm's per-cycle outcomes, typed - the same rows [`StudyOutcome::
+    /// table`] prints and [`StudyOutcome::json`] serializes, without the
+    /// prose. A caller matches `CycleOutcome::decision` directly instead of
+    /// parsing a rejection string.
+    pub fn gated_cycles(&self) -> Vec<CycleOutcome> {
+        self.report.gated.records.iter().map(cycle_outcome).collect()
+    }
+    /// The null-gate control arm's per-cycle outcomes, likewise - what the
+    /// gate would have said had nothing acted on it.
+    pub fn null_gate_cycles(&self) -> Vec<CycleOutcome> {
+        self.report.null_gate.records.iter().map(cycle_outcome).collect()
     }
 }
