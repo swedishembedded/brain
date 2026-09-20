@@ -69,6 +69,10 @@ pub struct Args {
     pub approach: Option<f32>,
     /// What a decision is paid for. See [`Payment`].
     pub payment: Payment,
+    /// Decision points `whatif` returns to.
+    pub states: usize,
+    /// Alternatives it tries at each of them, beside the teacher's own.
+    pub alternatives: usize,
     pub mission: Mission,
     pub mix: bool,
     pub arena: usize,
@@ -114,10 +118,14 @@ impl Args {
 fn usage() -> String {
     format!(
         "\
-usage: doom <train|eval|fit|play|probe|bench> [options]
+usage: doom <train|eval|fit|whatif|play|probe|bench> [options]
 
   train    warm-start on the scripted player, then improve it by PPO
   eval     score a policy and the scripted player on the SAME episodes
+  whatif   go back to decisions the policy made, take a DIFFERENT action
+           there, let the teacher finish, and score the whole trajectory.
+           Imitation can only reach the teacher; this is the one measurement
+           whose answer can be better than it
   fit      fit the head to the scripted player and ask how often it agrees,
            on the episodes it was fitted to and on episodes it has not seen.
            No reward, no critic - it asks only whether the decision is
@@ -162,6 +170,8 @@ what to play
                       kills, items, damage, floor newly walked and route
                       closed: measured, about 92% of it is the exploration
                       bonus, which the score does not read at all
+  --states N          decisions `whatif` returns to                        [60]
+  --alternatives N    other actions it tries at each of them                 [2]
   --approach F        what a 32-unit cell of ROUTE closed on the goal pays.
                       Defaults to the mission's own. `--approach 0` turns it
                       off, which is the ablation: without it the only dense
@@ -220,7 +230,7 @@ fn parse_args() -> Result<Args, String> {
         std::process::exit(0);
     }
     let command = argv[0].clone();
-    if !["train", "eval", "fit", "play", "probe", "bench"].contains(&command.as_str()) {
+    if !["train", "eval", "fit", "whatif", "play", "probe", "bench"].contains(&command.as_str()) {
         return Err(format!("unknown command {command:?}\n\n{}", usage()));
     }
 
@@ -330,6 +340,8 @@ fn parse_args() -> Result<Args, String> {
         curriculum: args.take_flag("--curriculum"),
         start_distance: args.usize_or("--start-distance", 0) as i32,
         eval_episodes: args.usize_or("--eval-episodes", 24),
+        states: args.usize_or("--states", 60),
+        alternatives: args.usize_or("--alternatives", 2),
         play: args.usize_or("--play", 3),
         transcript: args.take_str("--transcript"),
         engine_log: args.take_str("--engine-log"),
@@ -418,6 +430,7 @@ fn run() -> Result<(), String> {
         "bench" => view::bench(env, &args),
         "eval" => evaluate(env, &args),
         "fit" => fit(env, &args),
+        "whatif" => whatif(env, &args),
         _ => train(env, &args),
     }
 }
@@ -563,6 +576,91 @@ fn fit(env: DoomEnv, args: &Args) -> Result<(), String> {
              What is left to explain is ACTING: the states a policy reaches once it stops \
              being steered by the teacher are not these states, and nothing here has \
              labelled those"
+        }
+    );
+    Ok(())
+}
+
+/// Would a different action have been worth taking?
+///
+/// The go/no-go before building anything that learns from the answer. Every
+/// method this sample has tried asks which action the TEACHER took, and the
+/// best any of them can do is reach the teacher - measured, they all do, and
+/// the teacher is where the policy already was. The only question left whose
+/// answer can beat it is this one.
+///
+/// So it is asked directly, before a line of algorithm is written for it: go
+/// back to decisions the policy actually faced, take something other than
+/// what the teacher chose, let the teacher play the rest out, and score the
+/// whole trajectory. If the teacher's action is best nearly everywhere there
+/// is no improvement signal to learn from and that is the finding; if it is
+/// not, the size of the gap is the budget everything downstream has to work
+/// inside.
+fn whatif(env: DoomEnv, args: &Args) -> Result<(), String> {
+    let spec = args.train.spec();
+    let mut builder = ControlPipeline::builder(args.encoder(), env)
+        .seed(args.seed())
+        .device(args.device());
+    if let Some(h) = args.head() {
+        builder = builder.head(h);
+    }
+    let mut pipe = builder.load().map_err(|e| format!("{e}"))?;
+    // The policy only decides which alternatives are worth the game steps, so
+    // it has to be a policy rather than a fresh head - but it does not have
+    // to be a good one, and a supplied head skips a warm start that would
+    // cost more than the measurement does.
+    if args.head().is_none() {
+        println!(
+            "doom: no --head, so warm-starting on {} scripted episodes first - the policy \
+             is what picks which alternatives are worth trying",
+            spec.warmup_episodes
+        );
+        let mut quiet = |_: usize, _: f32| {};
+        pipe.warm_start(&spec, &mut quiet).map_err(|e| format!("{e}"))?;
+    }
+    println!(
+        "doom: {} decisions from {} episodes, {} alternatives each, the teacher finishing \
+         every branch",
+        args.states, spec.episodes, args.alternatives
+    );
+    let found = pipe
+        .counterfactual(spec.episodes, args.states, args.alternatives, spec.max_steps)
+        .map_err(|e| format!("{e}"))?;
+    let Some(c) = found else {
+        return Err("the environment has no scripted player to finish the branches".into());
+    };
+    if c.adrift > 0 {
+        println!(
+            "\ndoom: {} of {} decisions could not be returned to - the replay did not land \
+             where it started, so nothing below is measuring what it says it is",
+            c.adrift,
+            c.adrift + c.states
+        );
+    }
+    if c.states == 0 {
+        return Err("no decision could be returned to".into());
+    }
+    println!(
+        "\n  {} decisions, {} game steps\n  \
+         the choice was worth {:.3} of score between its best and worst option\n  \
+         some alternative beat the teacher at {:.0}% of them, by {:.3} when it did\n  \
+         picking the best of what was offered would gain {:.3} a decision over the teacher",
+        c.states, c.steps, c.spread, c.beaten * 100.0, c.gain, c.regret
+    );
+    println!(
+        "\n{}",
+        if c.spread < 0.01 {
+            "doom: the choice barely matters at these decisions - every option leads to \
+             about the same place, so there is nothing here for any method to learn and \
+             the thing to change is WHERE the decisions are sampled from"
+        } else if c.regret < 0.01 {
+            "doom: the teacher is already choosing the best of what is offered, near \
+             enough. There is no improvement signal in this teacher, and beating it needs \
+             a better one or a wider candidate set - not a better learner"
+        } else {
+            "doom: there IS room above the teacher, and this is how much of it. Training a \
+             ranker on measured outcomes rather than on the teacher's choice is worth \
+             building, and this number is the ceiling it has to be judged against"
         }
     );
     Ok(())

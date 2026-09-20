@@ -41,7 +41,7 @@ const STALL_PATCHES: usize = 4;
 const PATCH: i32 = 128;
 
 /// What happened over one episode, accumulated as it runs.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Progress {
     steps: u32,
     /// Route distance to the exit at the start, at its best, and last seen.

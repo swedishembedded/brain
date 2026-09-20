@@ -99,7 +99,7 @@ struct Held {
     ago: u32,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Memory {
     held: Vec<Held>,
 }

@@ -309,6 +309,22 @@ impl Doom {
         self.call("GET", "/api/route", None)
     }
 
+    /// Hold the state the level is in right now, to come back to.
+    ///
+    /// Not a replay of the actions that led here: the observation reads which
+    /// lines the RENDERER has drawn, and rendering is not part of the
+    /// deterministic simulation, so a replayed prefix arrives at the same
+    /// player with a different idea of what has been seen. The savegame
+    /// format archives line flags, so this does not.
+    pub fn snapshot(&mut self) -> std::io::Result<String> {
+        self.call("POST", "/api/snapshot", Some("{}"))
+    }
+
+    /// Put back what [`Doom::snapshot`] held.
+    pub fn restore(&mut self) -> std::io::Result<String> {
+        self.call("POST", "/api/snapshot/restore", Some("{}"))
+    }
+
     /// Put a thing on the floor `distance` units away, `bearing` degrees
     /// clockwise from where the player is facing.
     pub fn spawn(&mut self, kind: &str, distance: i32, bearing: i32) -> std::io::Result<String> {

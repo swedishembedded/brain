@@ -279,6 +279,43 @@ All three of those were live suspicions and all three are now closed. What is
 left is the fourth row of the table: everything above is measured on states the
 TEACHER visits, and a policy acting on its own does not visit them.
 
+### 3d. Ask what a different action would have been worth
+
+The one question imitation cannot ask. Cloning and DAgger both ask which
+action the teacher TOOK; only "what if a different one is taken" has an answer
+that can be better than the teacher's.
+
+```bash
+doom whatif $D --head out/doom-dagger.safetensors --scenario my-way-home,health-gathering,deadly-corridor,defend-the-line,take-cover \
+  --reward gauge --episodes 4 --states 24 --alternatives 2
+```
+
+The student plays. At a sampled spread of its decisions the engine is asked to
+**hold**; then for each candidate action - the teacher's own, plus the two the
+policy ranks highest among the rest - take it, let the teacher play the rest of
+the episode out, score the **whole** trajectory including the student's prefix,
+and restore. One repetition per candidate is exact rather than sampled: the
+teacher is a script and the engine is lockstep, so nothing in a continuation
+draws a random number.
+
+**Going back is a real snapshot, not a replay of the actions that led there.**
+That distinction cost a day and is worth stating: the observation reads
+`ML_MAPPED` to decide what the player has seen, `ML_MAPPED` is set by the
+renderer, and rendering is not part of the deterministic simulation. Replaying
+a prefix reached the same player and the same monsters with a *different set of
+options* three times in ten - and the replays that did survive were the short
+prefixes, so what was left was biased as well as smaller. The engine's
+`/api/snapshot` writes the vanilla savegame path to memory instead of a slot,
+and the savegame format archives line flags. `Env::hold` and `Env::resume` are
+the SDK's side of it, and `DoomEnv` restores what lives on the client too -
+what the agent remembers seeing, which floor it has walked, how far along the
+route it has ever got - because half a run restored is worse than no restore
+at all, since it looks like an answer.
+
+The measurement checks itself: after every restore, the options offered must be
+the options that were offered before, or the decision is discarded and counted.
+With the check on and off the numbers are byte-identical, across 66 restores.
+
 ### 4. Watch it play, and record it
 
 ```bash
@@ -802,6 +839,25 @@ Agreement more than doubles and heads for the 88.8% ceiling. The score does
 not follow it up; on the same eight worlds it drifts slightly down, and the
 selection kept round 1. Scored afterwards against the scripted player over 16
 shared episodes: **0.73 to its 0.76, 6 exits each**.
+
+**4. Would a different action have been worth taking?** Not one action, no.
+22 decisions, three candidates each, the teacher finishing every branch:
+
+```text
+the choice was worth 0.003 of score between its best and worst option
+some alternative beat the teacher at 9% of them, by 0.012 when it did
+picking the best of what was offered would gain 0.001 a decision over the teacher
+```
+
+The prefix-replay version of the same experiment, before the engine could go
+back properly, said 0.003 / 7% / 0.002 on a different and partly invalid
+sample. Two methods, one answer.
+
+What that measures is the teacher's cost-to-go: the value of taking an action
+*and then following the teacher*. It being flat does not mean there is no room
+above the teacher - it means a **single** deviation buys nothing, because this
+teacher recovers from anything one decision can do to it. Whether a sustained
+deviation buys something is a different question and not answered here.
 
 **Which is the answer.** Every imitation method has the teacher as its ceiling,
 and this teacher scores 0.76 on those episodes. Making the student agree with

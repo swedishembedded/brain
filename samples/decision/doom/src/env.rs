@@ -487,6 +487,8 @@ pub struct DoomEnv {
     /// An environment that silently returns a terminal state on an I/O error
     /// teaches the policy that the error was a legal end to an episode.
     pub fault: Option<String>,
+    /// What [`Env::hold`] kept, for [`Env::resume`] to put back.
+    held: Option<Held>,
 }
 
 impl DoomEnv {
@@ -531,6 +533,7 @@ impl DoomEnv {
             approach_from: None,
             approach_goal: None,
             fault: None,
+            held: None,
         }
     }
 
@@ -1505,6 +1508,94 @@ impl Env for DoomEnv {
     fn demo(&mut self) -> Option<usize> {
         self.scripted()
     }
+
+    fn hold(&mut self) -> bool {
+        if self.doom.snapshot().is_err() {
+            return false;
+        }
+        self.held = Some(Held {
+            state: self.state.clone(),
+            opts: self.opts.clone(),
+            last_pos: self.last_pos,
+            stuck: self.stuck,
+            tried: self.tried.clone(),
+            recent: self.recent.clone(),
+            visited: self.visited.clone(),
+            commit: self.commit,
+            commit_tag: self.commit_tag,
+            total: self.total,
+            extrinsic: self.extrinsic,
+            floor_damage: self.floor_damage,
+            steps: self.steps,
+            exited: self.exited,
+            progress: self.progress.clone(),
+            memory: self.memory.clone(),
+            gauge: self.gauge,
+            approach_from: self.approach_from,
+            approach_goal: self.approach_goal.clone(),
+        });
+        true
+    }
+
+    fn resume(&mut self) -> Option<String> {
+        let held = self.held.clone()?;
+        if self.doom.restore().is_err() {
+            return None;
+        }
+        self.state = held.state;
+        self.opts = held.opts;
+        self.last_pos = held.last_pos;
+        self.stuck = held.stuck;
+        self.tried = held.tried;
+        self.recent = held.recent;
+        self.visited = held.visited;
+        self.commit = held.commit;
+        self.commit_tag = held.commit_tag;
+        self.total = held.total;
+        self.extrinsic = held.extrinsic;
+        self.floor_damage = held.floor_damage;
+        self.steps = held.steps;
+        self.exited = held.exited;
+        self.progress = held.progress;
+        self.memory = held.memory;
+        self.gauge = held.gauge;
+        self.approach_from = held.approach_from;
+        self.approach_goal = held.approach_goal;
+        Some(obs::render(&self.state, self.history()))
+    }
+}
+
+/// Everything about a run that lives on THIS side of the socket.
+///
+/// A snapshot of the engine puts back the level, the player and the monsters.
+/// It does not put back what this side has accumulated about the run - what
+/// the agent remembers seeing, which patches of floor it has walked, how far
+/// along the route it has ever got - and every one of those is read by the
+/// observation or by the score. Restoring half of a run would produce an
+/// observation no run ever saw and a score no run ever earned, which is a
+/// worse failure than not being able to go back at all, because it looks
+/// like an answer.
+#[derive(Clone)]
+struct Held {
+    state: State,
+    opts: Vec<Option_>,
+    last_pos: Option<(i32, i32)>,
+    stuck: u32,
+    tried: std::collections::HashSet<Tag>,
+    recent: std::collections::VecDeque<(i32, i32)>,
+    visited: std::collections::HashMap<(i32, i32), u32>,
+    commit: u32,
+    commit_tag: Option<Tag>,
+    total: f32,
+    extrinsic: f32,
+    floor_damage: u32,
+    steps: u32,
+    exited: bool,
+    progress: Progress,
+    memory: crate::memory::Memory,
+    gauge: Gauge,
+    approach_from: Option<i32>,
+    approach_goal: Option<String>,
 }
 
 /// A state that parses but describes nothing, so the environment has a valid

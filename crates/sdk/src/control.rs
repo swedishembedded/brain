@@ -141,6 +141,31 @@ pub trait Env {
     fn demo(&mut self) -> Option<usize> {
         None
     }
+
+    /// Hold the state this environment is in right now, so that a caller can
+    /// come back to it and try something else. `false` when it cannot.
+    ///
+    /// Default: it cannot. An environment that cannot go back is a complete
+    /// environment; what it cannot do is say what a DIFFERENT action would
+    /// have been worth, and [`ControlPipeline::counterfactual`] reports that
+    /// rather than approximating it by replaying the actions that led here.
+    /// Replay is not the same thing: any part of an observation derived from
+    /// something outside the simulation - what has been rendered, what a
+    /// client has accumulated about the run - does not come back with it.
+    ///
+    /// Only one state is held at a time; holding again replaces it.
+    fn hold(&mut self) -> bool {
+        false
+    }
+
+    /// Go back to what [`Env::hold`] held, and give the observation there.
+    ///
+    /// `None` when nothing is held or the environment could not go back, and
+    /// in that case the environment is left as it was rather than half
+    /// restored.
+    fn resume(&mut self) -> Option<String> {
+        None
+    }
 }
 
 /// The seeds [`Stages::run_eval`] scores on.
@@ -162,6 +187,25 @@ type Demo = (String, Vec<String>, usize);
 /// One teacher episode: what it scored, and what it did - kept together so the
 /// bad ones can be dropped whole rather than a step at a time.
 type TeacherRun = (f32, Vec<Demo>);
+
+/// One decision of a student episode, measured against its alternatives.
+///
+/// There is no prefix here and no replay. Going back is [`Env::hold`] and
+/// [`Env::resume`]: replaying the actions that led to a decision reaches the
+/// same simulation and not the same OBSERVATION, because an observation can
+/// read things the simulation does not own - what has been rendered, what a
+/// client has accumulated about the run - and those do not come back with a
+/// list of actions. Measured on this repository's DOOM sample before the
+/// engine could go back properly, three decisions in ten replayed to a
+/// different set of options and had to be thrown away, and the ones that
+/// survived were the short prefixes.
+struct Branch {
+    /// What the whole trajectory scored, taking this action here and letting
+    /// the teacher finish.
+    score: f32,
+    /// Game steps it cost to find out.
+    steps: usize,
+}
 
 /// One recorded step of one episode.
 struct Step {
@@ -267,6 +311,32 @@ impl std::fmt::Display for Agreement {
             self.majority * 100.0
         )
     }
+}
+
+/// Whether a different action would have been worth taking.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Counterfactual {
+    /// Decision points actually measured.
+    pub states: usize,
+    /// Points thrown away because the replay did not land back where it
+    /// started. Anything but zero and the method is unsound - see
+    /// [`ControlPipeline::counterfactual`].
+    pub adrift: usize,
+    /// Fraction of points where SOME alternative scored better than the
+    /// action the teacher chose.
+    pub beaten: f32,
+    /// Mean amount by which the best alternative beat the teacher, over the
+    /// points where one did.
+    pub gain: f32,
+    /// Mean over ALL points of `best - teacher`: what a policy that always
+    /// picked the best of the candidates offered here would gain over the
+    /// teacher. The ceiling on what this signal is worth.
+    pub regret: f32,
+    /// Mean spread between the best and worst candidate at a point - whether
+    /// the choice matters at all, before asking who makes it well.
+    pub spread: f32,
+    /// Game steps spent measuring.
+    pub steps: usize,
 }
 
 /// What one rollout produced.
@@ -1167,6 +1237,224 @@ impl<E: Env> ControlPipeline<E> {
             None => return Ok(None),
         };
         Ok(Some((before, on_fitted, on_unseen)))
+    }
+
+    /// Clone the teacher, as a training run's first phase does.
+    ///
+    /// Public because a diagnostic needs a policy before it can measure
+    /// anything, and there is no reason for each of them to hold its own
+    /// slightly different idea of what cloning means.
+    pub fn warm_start(
+        &mut self,
+        spec: &ControlSpec,
+        log: &mut dyn FnMut(usize, f32),
+    ) -> Result<f32> {
+        self.model.set_encoder_frozen(spec.freeze_encoder);
+        self.max_steps = spec.max_steps;
+        let mut step = 0usize;
+        self.clone_teacher(
+            spec.warmup_episodes,
+            spec.warmup_epochs,
+            spec.max_steps,
+            spec.warmup_keep,
+            log,
+            &mut step,
+        )
+    }
+
+    /// Would a different action have been worth taking?
+    ///
+    /// The one question imitation cannot ask. Cloning and DAgger both ask
+    /// which action the teacher TOOK; neither asks what happens if a
+    /// different one is taken instead, and only the second has an answer
+    /// that can be better than the teacher's.
+    ///
+    /// The student plays. At a sampled fraction of its decisions the
+    /// environment is asked to HOLD, and then, for each candidate action:
+    /// take it, let the TEACHER play the rest of the episode out, score the
+    /// whole trajectory - the student's prefix included - with
+    /// [`Env::progress`], and resume. The candidates are the teacher's own
+    /// choice plus the `alternatives` the policy ranks highest among the
+    /// rest, because those are the ones training would actually move toward
+    /// and the rest are not worth the game steps.
+    ///
+    /// Scoring the WHOLE trajectory rather than the continuation is the
+    /// point: an action is worth what the run that contains it is worth, and
+    /// a continuation scored alone ranks an action by where it happened to
+    /// start.
+    ///
+    /// One repetition per candidate is EXACT rather than a sample, because
+    /// nothing in the continuation draws a random number - the teacher is a
+    /// script and the engine is lockstep.
+    ///
+    /// Returns `None` when the environment has no teacher, or cannot go back.
+    pub fn counterfactual(
+        &mut self,
+        episodes: usize,
+        states: usize,
+        alternatives: usize,
+        max_steps: usize,
+    ) -> Result<Option<Counterfactual>> {
+        // How often to stop and branch. Spread over the whole of every
+        // episode rather than taken from the front: the first decisions of a
+        // level are the ones every run agrees about, and measuring those
+        // would measure the start of a level and call it the level.
+        let want = states.max(1);
+        let total = episodes.max(1) * max_steps.max(1);
+        let every = (total / want).max(1);
+
+        let (mut beaten, mut gain, mut regret, mut spread) = (0usize, 0.0f64, 0.0f64, 0.0f64);
+        let (mut measured, mut adrift, mut spent) = (0usize, 0usize, 0usize);
+        let mut since = self.rng.next_u64() as usize % every;
+
+        for _ in 0..episodes {
+            self.episode_seed += 1;
+            let mut obs = self.env.reset(self.episode_seed);
+            for t in 0..max_steps {
+                let options = self.env.actions();
+                if options.is_empty() {
+                    break;
+                }
+                let Some(teacher) = self.env.demo() else {
+                    return Ok(None);
+                };
+                let probs = self.policy(&obs, &options)?;
+
+                since += 1;
+                if since >= every && measured + adrift < want {
+                    since = 0;
+                    match self.branch(&options, &probs, teacher, alternatives, t, max_steps)? {
+                        Some(scored) => {
+                            spent += scored.iter().map(|b| b.steps).sum::<usize>();
+                            let theirs = scored[0].score;
+                            let best =
+                                scored.iter().map(|b| b.score).fold(f32::NEG_INFINITY, f32::max);
+                            let worst =
+                                scored.iter().map(|b| b.score).fold(f32::INFINITY, f32::min);
+                            // A tolerance, because two trajectories that
+                            // differ only in which way the player faced for
+                            // one decision score the same to within rounding,
+                            // and calling that an improvement counts noise.
+                            if best > theirs + 1e-3 {
+                                beaten += 1;
+                                gain += (best - theirs) as f64;
+                            }
+                            regret += (best - theirs) as f64;
+                            spread += (best - worst) as f64;
+                            measured += 1;
+                        }
+                        None => adrift += 1,
+                    }
+                }
+
+                let mut u = self.rng.next_f32();
+                let mut chosen = probs.len() - 1;
+                for (i, &pi) in probs.iter().enumerate() {
+                    if u < pi {
+                        chosen = i;
+                        break;
+                    }
+                    u -= pi;
+                }
+                let (next, _, done) = self.env.step(chosen);
+                obs = next;
+                if done {
+                    break;
+                }
+            }
+        }
+        if measured == 0 {
+            return Ok(Some(Counterfactual { adrift, steps: spent, ..Default::default() }));
+        }
+        let n = measured as f64;
+        Ok(Some(Counterfactual {
+            states: measured,
+            adrift,
+            beaten: (beaten as f64 / n) as f32,
+            gain: (gain / beaten.max(1) as f64) as f32,
+            regret: (regret / n) as f32,
+            spread: (spread / n) as f32,
+            steps: spent,
+        }))
+    }
+
+    /// Try each candidate action from where the environment is standing, and
+    /// leave it standing exactly there.
+    ///
+    /// The teacher's own action is always first, because every number the
+    /// caller computes is relative to it.
+    fn branch(
+        &mut self,
+        options: &[String],
+        probs: &[f32],
+        teacher: usize,
+        alternatives: usize,
+        at: usize,
+        max_steps: usize,
+    ) -> Result<Option<Vec<Branch>>> {
+        let mut best_first: Vec<usize> = (0..options.len()).collect();
+        best_first.sort_by(|&a, &b| {
+            probs[b].partial_cmp(&probs[a]).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let mut candidates = vec![teacher];
+        for c in best_first {
+            if candidates.len() > alternatives {
+                break;
+            }
+            if c != teacher {
+                candidates.push(c);
+            }
+        }
+        if !self.env.hold() {
+            return Ok(None);
+        }
+        let mut out = Vec::with_capacity(candidates.len());
+        for (i, &c) in candidates.iter().enumerate() {
+            // Not before the first: the environment is already standing
+            // where `hold` was called, and resuming onto it would cost a
+            // level reload for nothing.
+            if i > 0 {
+                if self.env.resume().is_none() {
+                    return Ok(None);
+                }
+                // Going back has to arrive where it left, and the options on
+                // offer are the cheapest thing that says so - they are
+                // derived from most of the state an observation reads. This
+                // check is the reason the method is trustworthy: with the
+                // actions-replayed version it failed three times in ten, and
+                // silently comparing two candidates evaluated from different
+                // states is exactly the kind of wrong that looks like a
+                // result.
+                if self.env.actions() != options {
+                    return Ok(None);
+                }
+            }
+            let (_, _, mut done) = self.env.step(c);
+            let mut steps = 1usize;
+            let mut t = at + 1;
+            while !done && t < max_steps {
+                if self.env.actions().is_empty() {
+                    break;
+                }
+                let Some(next) = self.env.demo() else {
+                    break;
+                };
+                let (_, _, d) = self.env.step(next);
+                done = d;
+                steps += 1;
+                t += 1;
+            }
+            let Some(score) = self.env.progress() else {
+                return Ok(None);
+            };
+            out.push(Branch { score, steps });
+        }
+        // And back to where the student was, so the episode it is in the
+        // middle of carries on as if none of this had happened.
+        if self.env.resume().is_none() {
+            return Ok(None);
+        }
+        Ok(Some(out))
     }
 
     /// The episode horizon evaluation and play use.
