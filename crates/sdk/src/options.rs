@@ -164,6 +164,8 @@ pub struct ControlOptions {
     pub warmup_epochs: usize,
     /// Fraction of the teacher's episodes to clone, best first.
     pub warmup_keep: f32,
+    /// Rounds of DAgger between the warm start and the policy gradient.
+    pub dagger: usize,
     /// Episodes on a fixed block of worlds, scored after every iteration.
     pub gauge_episodes: usize,
     /// Average the head over the last N iterates as a second candidate.
@@ -202,6 +204,7 @@ impl ControlOptions {
             warmup_episodes: d.warmup_episodes,
             warmup_epochs: d.warmup_epochs,
             warmup_keep: d.warmup_keep,
+            dagger: d.dagger,
             gauge_episodes: d.gauge_episodes,
             average: d.average,
             head_lr: None,
@@ -224,6 +227,7 @@ impl ControlOptions {
             .warmup_episodes(self.warmup_episodes)
             .warmup_epochs(self.warmup_epochs)
             .warmup_keep(self.warmup_keep)
+            .dagger(self.dagger)
             .gauge_episodes(self.gauge_episodes)
             .average(self.average)
             .head_lr(self.head_lr.unwrap_or(0.0))
@@ -256,6 +260,7 @@ impl ControlOptions {
         self.max_steps = args.usize_or("--max-steps", self.max_steps);
         self.warmup_episodes = args.usize_or("--warmup", self.warmup_episodes);
         self.warmup_epochs = args.usize_or("--warmup-epochs", self.warmup_epochs);
+        self.dagger = args.usize_or("--dagger", self.dagger);
         self.gauge_episodes = args.usize_or("--gauge", self.gauge_episodes);
         self.average = args.usize_or("--average", self.average);
         if let Some(l) = args.take_str("--gae-lambda") {
@@ -305,6 +310,12 @@ impl Options for ControlOptions {
   --warmup N          scripted episodes cloned before the policy gradient
   --warmup-epochs N   passes over those demonstrations
   --warmup-keep F     fraction of scripted episodes to clone, best first  [1.0]
+  --dagger N          rounds of running the STUDENT and asking the teacher what
+                      it would have done at every state the student reached,
+                      aggregating those labels and refitting. Cloning only ever
+                      sees the teacher's own trajectory, so the student's first
+                      mistake takes it somewhere the dataset is silent about and
+                      the errors compound; this is what puts labels there
   --entropy F         exploration bonus
   --anchor F          hold the policy near the one the warm start produced,
                       by the divergence between them. A policy gradient

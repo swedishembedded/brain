@@ -521,7 +521,6 @@ impl<E: Env> ControlPipeline<E> {
         log: &mut dyn FnMut(usize, f32),
         step: &mut usize,
     ) -> Result<f32> {
-        let ce = decide::loss::LossConfig::cross_entropy();
         // Grouped BY EPISODE, with what that episode scored, so the bad ones
         // can be dropped before any of them is learned from.
         let mut runs: Vec<TeacherRun> = Vec::new();
@@ -577,9 +576,29 @@ impl<E: Env> ControlPipeline<E> {
             }
         }
         let demos: Vec<Demo> = runs.into_iter().flat_map(|(_, d)| d).collect();
+        self.fit_demos(&demos, epochs, log, step)
+    }
+
+    /// Fit the head to a set of labelled decisions, by ordinary supervised
+    /// learning.
+    ///
+    /// Separate from whoever collected them, because the two sources of
+    /// labels this run has - the teacher's own trajectory, and the states the
+    /// student reached with the teacher asked at each of them - differ only in
+    /// collection and must be learned from identically. A DAgger round that
+    /// fitted with its own slightly different loop would be comparing two
+    /// things at once.
+    fn fit_demos(
+        &mut self,
+        demos: &[Demo],
+        epochs: usize,
+        log: &mut dyn FnMut(usize, f32),
+        step: &mut usize,
+    ) -> Result<f32> {
         if demos.is_empty() {
             return Ok(0.0);
         }
+        let ce = decide::loss::LossConfig::cross_entropy();
         let mut loss = 0.0f32;
         let mut order: Vec<usize> = (0..demos.len()).collect();
         for _ in 0..epochs.max(1) {
@@ -609,6 +628,178 @@ impl<E: Env> ControlPipeline<E> {
             log(*step, loss);
         }
         Ok(loss)
+    }
+
+    /// One round of labels from the states the STUDENT reaches.
+    ///
+    /// The student acts; the teacher is asked, at every state the student
+    /// arrived at, what it would have done there - and its answer is recorded
+    /// WITHOUT being executed. That is the whole difference from cloning, and
+    /// it is the point.
+    ///
+    /// Behaviour cloning only ever sees the teacher's own trajectory. The
+    /// student's first mistake takes it somewhere that trajectory says nothing
+    /// about, so it makes a second, which takes it somewhere stranger still:
+    /// the errors compound, and the classic bound on them is quadratic in the
+    /// episode's length rather than linear. Training on the distribution the
+    /// student itself induces is what makes them linear again - it is the
+    /// dataset-aggregation loop of Ross, Gordon and Bagnell (2011), and here
+    /// it costs nothing but game steps, because this environment's teacher
+    /// answers for free at any state.
+    ///
+    /// The student SAMPLES rather than taking its best action: one greedy
+    /// trajectory per world is one path through it, and the round exists to
+    /// cover the ways the student can go wrong, not to show off the way it
+    /// currently goes right.
+    ///
+    /// Returns the labelled decisions, how far the student's own episodes got,
+    /// and how often it already agreed with the teacher - which is the number
+    /// that says whether the round had anything to teach.
+    fn label_student(
+        &mut self,
+        episodes: usize,
+        max_steps: usize,
+    ) -> Result<Option<(Vec<Demo>, Option<f32>, f32)>> {
+        let mut demos: Vec<Demo> = Vec::new();
+        let (mut got, mut measured) = (0.0f32, 0usize);
+        let (mut agreed, mut seen) = (0usize, 0usize);
+        for _ in 0..episodes {
+            self.episode_seed += 1;
+            let mut obs = self.env.reset(self.episode_seed);
+            for _ in 0..max_steps {
+                let options = self.env.actions();
+                if options.is_empty() {
+                    break;
+                }
+                // Asked, and its answer NOT executed. A teacher that
+                // remembers what it has already suggested - this sample's does,
+                // to rotate out of a stuck spot - therefore rotates on
+                // suggestions the student never took. That makes its label in a
+                // stuck state a function of how often it has been asked as well
+                // as of the state, which is real label noise; it is the same
+                // noise cloning already learns from, because there too the
+                // teacher rotates while the player stands still.
+                let Some(teacher) = self.env.demo() else {
+                    return Ok(None);
+                };
+                let probs = self.policy(&obs, &options)?;
+                let mut best = 0;
+                for (i, &pi) in probs.iter().enumerate() {
+                    if pi > probs[best] {
+                        best = i;
+                    }
+                }
+                agreed += usize::from(best == teacher);
+                seen += 1;
+                let mut u = self.rng.next_f32();
+                let mut chosen = probs.len() - 1;
+                for (i, &pi) in probs.iter().enumerate() {
+                    if u < pi {
+                        chosen = i;
+                        break;
+                    }
+                    u -= pi;
+                }
+                demos.push((std::mem::take(&mut obs), options, teacher));
+                let (next, _, done) = self.env.step(chosen);
+                obs = next;
+                if done {
+                    break;
+                }
+            }
+            if let Some(p) = self.env.progress() {
+                got += p;
+                measured += 1;
+            }
+        }
+        Ok(Some((
+            demos,
+            (measured > 0).then(|| got / measured as f32),
+            agreed as f32 / seen.max(1) as f32,
+        )))
+    }
+
+    /// Rounds of run-the-student, label-it-with-the-teacher, refit.
+    ///
+    /// The aggregation is the algorithm: every round's labels are KEPT and
+    /// the fit is over all of them, so the dataset grows toward the states
+    /// the student actually reaches while never forgetting the ones the
+    /// teacher showed it. Fitting on the newest round alone would be a moving
+    /// target, and is the variant the original paper shows can cycle.
+    ///
+    /// The roll-in is the pure student, with no mixing back toward the
+    /// teacher. The warm start already IS the mixed first round - it is the
+    /// teacher driving, at a mixing weight of one - so the schedule this
+    /// implements is the standard one, with beta dropped to zero after it.
+    fn dagger(
+        &mut self,
+        spec: &ControlSpec,
+        log: &mut dyn FnMut(usize, f32),
+        step: &mut usize,
+    ) -> Result<()> {
+        let mut aggregate: Vec<Demo> = Vec::new();
+        let (mut best, mut best_rank) = (None, f32::NEG_INFINITY);
+        // What one round's worth of labels is, taken from the first round.
+        // See the pass count below.
+        let mut unit = 0usize;
+        for round in 0..spec.dagger {
+            let Some((demos, progress, agreed)) =
+                self.label_student(spec.episodes, spec.max_steps)?
+            else {
+                println!("    dagger: the environment has no teacher to label with");
+                return Ok(());
+            };
+            let fresh = demos.len();
+            if fresh == 0 {
+                println!("    dagger: the student produced no decisions to label");
+                return Ok(());
+            }
+            aggregate.extend(demos);
+            if unit == 0 {
+                unit = aggregate.len();
+            }
+            // A constant amount of OPTIMIZATION per round, not a constant
+            // number of passes. The aggregate grows by one round's labels
+            // every round by construction, so a fixed pass count makes the
+            // fifth round cost five times the first for no reason: the head
+            // is already fitted to all but the newest of what is in there.
+            // Passes are set so every round does about the work the first one
+            // did, which makes the whole phase linear in rounds instead of
+            // quadratic.
+            let epochs = (spec.warmup_epochs * unit / aggregate.len().max(1)).max(1);
+            let loss = self.fit_demos(&aggregate, epochs, log, step)?;
+            let gauged = self.gauge(spec.gauge_episodes, spec.max_steps)?;
+            println!(
+                "    dagger {:>2}  {fresh} new labels ({} in all, {epochs} passes)  the \
+                 student had already agreed {:.0}%  loss {loss:.4}{}{}",
+                round + 1,
+                aggregate.len(),
+                agreed * 100.0,
+                match progress {
+                    Some(p) => format!("  its own episodes {p:.2}"),
+                    None => String::new(),
+                },
+                match gauged {
+                    Some(g) => format!("  fixed block {g:.3}"),
+                    None => String::new(),
+                }
+            );
+            // Refitting on a bigger set is not monotone either: a round that
+            // adds mostly labels for states the student has stopped visiting
+            // can move the head away from the ones it is in now.
+            let rank = gauged.or(progress).unwrap_or(-loss);
+            if best.is_none() || rank > best_rank {
+                best_rank = rank;
+                best = Some((round + 1, self.model.head_weights()));
+            }
+        }
+        if let Some((round, w)) = best {
+            if round != spec.dagger {
+                println!("    keeping dagger round {round}, which scored {best_rank:.3}");
+                self.model.set_head_weights(&w);
+            }
+        }
+        Ok(())
     }
 
     /// Collect a batch of episodes under the current policy.
@@ -1049,6 +1240,16 @@ pub struct ControlSpec {
     /// clone_teacher`]. Lower it when the teacher has failure modes worth not
     /// teaching.
     pub warmup_keep: f32,
+    /// Rounds of DAgger between the warm start and the policy gradient. `0`
+    /// is off.
+    ///
+    /// Each round runs the STUDENT, asks the teacher what it would have done
+    /// at every state the student reached, adds those labels to everything
+    /// collected so far and refits. It is the only phase of this run that
+    /// puts a label on a state the teacher would never have visited, which is
+    /// most of the states a student sees once it is acting on its own. See
+    /// [`ControlPipeline::label_student`].
+    pub dagger: usize,
     /// Episodes on a FIXED block of worlds, scored after every iteration, to
     /// decide which iteration to keep. `0` falls back to the rollout's own
     /// numbers, which are measured on worlds that move. See
@@ -1114,6 +1315,7 @@ impl Default for ControlSpec {
             warmup_episodes: 60,
             warmup_epochs: 12,
             warmup_keep: 1.0,
+            dagger: 0,
             gauge_episodes: 0,
             average: 0,
             gae_lambda: GAE_LAMBDA,
@@ -1153,6 +1355,12 @@ impl ControlSpec {
         self
     }
     /// See [`ControlSpec::gauge_episodes`].
+    /// Rounds of DAgger between the warm start and the policy gradient.
+    pub fn dagger(mut self, n: usize) -> ControlSpec {
+        self.dagger = n;
+        self
+    }
+
     pub fn gauge_episodes(mut self, n: usize) -> ControlSpec {
         self.gauge_episodes = n;
         self
@@ -1234,9 +1442,21 @@ impl<E: Env> Stages for ControlPipeline<E> {
                     spec.warmup_episodes, spec.warmup_epochs
                 );
             }
-            // Whatever the cloning produced is what the anchor holds to. Read
-            // once, here, because every later update moves the head away from
-            // it and the point is to remember where it started.
+        }
+        // BEFORE the anchor is read, because the policy the anchor holds to
+        // should be the best imitation this run can produce and not the first
+        // one it happened to fit.
+        if spec.dagger > 0 {
+            println!(
+                "    {} rounds of labelling the states the student reaches, {} episodes each",
+                spec.dagger, spec.episodes
+            );
+            self.dagger(spec, log, &mut step)?;
+        }
+        if spec.warmup_episodes > 0 {
+            // Whatever the imitation phases produced is what the anchor holds
+            // to. Read once, here, because every later update moves the head
+            // away from it and the point is to remember where it started.
             if spec.policy.anchor > 0.0 {
                 self.reference = Some(self.model.head_weights());
             }

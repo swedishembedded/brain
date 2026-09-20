@@ -346,6 +346,25 @@ its bad episodes are bad in a specific, *learnable* way - so cloning them all
 teaches the policy something the policy gradient then has to spend its samples
 unlearning. This is filtered behaviour cloning.
 
+**1b. Labelling the states the STUDENT reaches, not only the teacher's.**
+`--dagger N` runs the student, asks the teacher at every state the student
+arrived at what it would have done there, records the answer *without
+executing it*, aggregates with everything collected so far and refits.
+
+Cloning only ever produces labels on the teacher's own trajectory. The
+student's first mistake takes it somewhere that trajectory is silent about, so
+it makes a second; the errors compound, and the classic bound on them grows
+with the SQUARE of the episode's length rather than linearly. Labelling where
+the student actually goes is what makes them linear again.
+
+Each round does a constant amount of optimization rather than a constant number
+of passes: the aggregate grows by one round's labels every round, so a fixed
+pass count would make the fifth round cost five times the first to re-fit a
+head that is already fitted to all but the newest of it.
+
+**Measured**, and the measurement is the point - see
+[what it found](#what-the-imitation-route-is-worth-and-where-it-stops).
+
 **2. PPO over the text action space.** The options arrive with the observation
 and change every step, so the policy scores option TEXT rather than indexing a
 fixed head. The action decides which state the next decision is made from, so
@@ -733,6 +752,72 @@ next person does not have to rediscover which lever is which.
 The game itself is ~6 ms per decision at 6 tics, and lockstep decouples it from
 the 35 Hz clock entirely: measured with no model in the loop, **2 966 tics/s,
 85x realtime**.
+
+### What the imitation route is worth, and where it stops
+
+Three measurements, in the order they were taken. Together they close the
+question of why six separate interventions on the policy gradient produced two
+real bug fixes and no improvement.
+
+**1. Can the model express the decision?** Yes, comfortably. `doom fit` on five
+generated scenarios, frozen encoder, 100 decisions:
+
+| | agreement with the teacher | floor |
+| --- | ---: | ---: |
+| unfitted head, unseen episodes | 23.0% | 24.9% |
+| fitted head, the fitted episodes | 84.8% | 21.6% |
+| fitted head, **unseen** episodes | **88.8%** | 24.9% |
+
+The frozen 384-number representation carries it, 444,673 parameters express it,
+and 96 distinct worlds are enough to generalize from. Three live suspicions,
+all three closed.
+
+**2. Does that survive the policy acting on its own?** No - and this is the
+largest single effect anywhere in this sample. The first `--dagger` round
+reports how often the student already agreed with the teacher *at the states
+the student itself reached*:
+
+```text
+88.8%  on states the TEACHER reaches
+  34%  on states the STUDENT reaches
+```
+
+A 55-point collapse. Behaviour cloning had taught the policy the teacher's
+decisions on the teacher's trajectory, and on its own trajectory it was barely
+above the constant-policy floor. Nothing before this had measured it.
+
+**3. Does closing that gap help?** It closes, and it does not help. Five rounds,
+8 episodes each, gauge reward, scored after every round on the same eight
+worlds:
+
+| round | agreement on its own states | fixed block |
+| ---: | ---: | ---: |
+| 1 | 34% | 0.670 |
+| 2 | 65% | 0.646 |
+| 3 | 78% | 0.615 |
+| 4 | 80% | 0.634 |
+| 5 | 76% | 0.596 |
+
+Agreement more than doubles and heads for the 88.8% ceiling. The score does
+not follow it up; on the same eight worlds it drifts slightly down, and the
+selection kept round 1. Scored afterwards against the scripted player over 16
+shared episodes: **0.73 to its 0.76, 6 exits each**.
+
+**Which is the answer.** Every imitation method has the teacher as its ceiling,
+and this teacher scores 0.76 on those episodes. Making the student agree with
+it more often cannot carry the student past it - it can only carry the student
+*to* it, which is where the student already was. Behaviour cloning, DAgger and
+PPO on top of both now all land in the same place, for a reason that is
+measured rather than guessed: the imitation route is finished, not stuck.
+
+What is left is the one thing none of them does. All three ask *which action
+did the teacher take*. None asks *what happens if a different action is taken
+instead* - which is the only question whose answer can be better than the
+teacher's, and the one this environment is unusually well set up to answer:
+the levels are generated from a seed, the engine is deterministic, the teacher
+will play out any continuation for free at 5 ms a decision, and since
+`--reward gauge` the score of a whole trajectory IS the training objective
+rather than a proxy for it.
 
 ### Does it learn?
 
