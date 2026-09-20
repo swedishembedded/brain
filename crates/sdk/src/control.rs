@@ -245,6 +245,54 @@ const OUTCOME_GAIN_LIMIT: f32 = 4.0;
 /// gain when an alternative beats the teacher - asks for about four to one.
 const OUTCOME_TEMPERATURE: f32 = 0.05;
 
+/// The best head a phase has seen, INCLUDING the one it was handed.
+///
+/// Every phase of a control run picks a winner from a score that carries
+/// noise - the fixed block, the student's own progress - and "keep the best
+/// round" is the right rule for that. What was wrong is where the comparison
+/// started: at the first round, never at the policy the phase inherited. So a
+/// phase whose every round made things worse still adopted one of them, and a
+/// run could leave a phase worse off than it entered it with nothing in the
+/// log saying so.
+///
+/// Seeding the comparison with the incoming policy makes "do nothing" a
+/// candidate, which is what it has to be for a phase to be safe to add to a
+/// pipeline. See `keep_tests`.
+struct Keep {
+    at: usize,
+    rank: f32,
+    weights: Vec<(String, Vec<f32>)>,
+}
+
+impl Keep {
+    /// Start from what the phase was handed, at whatever it scores.
+    fn starting(rank: f32, weights: Vec<(String, Vec<f32>)>) -> Keep {
+        Keep { at: 0, rank, weights }
+    }
+
+    /// Offer a round's result, and say whether it won. The weights are read
+    /// only if it does, because reading them is a device readback and most
+    /// rounds lose.
+    fn offer(
+        &mut self,
+        at: usize,
+        rank: f32,
+        weights: impl FnOnce() -> Vec<(String, Vec<f32>)>,
+    ) -> bool {
+        if rank <= self.rank {
+            return false;
+        }
+        self.at = at;
+        self.rank = rank;
+        self.weights = weights();
+        true
+    }
+
+    fn best(&self) -> (usize, &[(String, Vec<f32>)]) {
+        (self.at, &self.weights)
+    }
+}
+
 /// The distribution over measured candidates that an outcome-fitted update
 /// aims at, and how much that decision's opinion is worth.
 ///
@@ -1022,7 +1070,12 @@ impl<E: Env> ControlPipeline<E> {
         step: &mut usize,
     ) -> Result<()> {
         let mut aggregate: Vec<Demo> = Vec::new();
-        let (mut best, mut best_rank) = (None, f32::NEG_INFINITY);
+        // The warm start's own policy is a candidate, because refitting on a
+        // bigger set is not monotone and a phase that only ever compares its
+        // own rounds cannot conclude that none of them helped. See [`Keep`].
+        let entered = self.gauge(spec.gauge_episodes, spec.max_steps)?;
+        let mut keep =
+            Keep::starting(entered.unwrap_or(f32::NEG_INFINITY), self.model.head_weights());
         // What one round's worth of labels is, taken from the first round.
         // See the pass count below.
         let mut unit = 0usize;
@@ -1071,17 +1124,22 @@ impl<E: Env> ControlPipeline<E> {
             // Refitting on a bigger set is not monotone either: a round that
             // adds mostly labels for states the student has stopped visiting
             // can move the head away from the ones it is in now.
-            let rank = gauged.or(progress).unwrap_or(-loss);
-            if best.is_none() || rank > best_rank {
-                best_rank = rank;
-                best = Some((round + 1, self.model.head_weights()));
-            }
+            keep.offer(round + 1, gauged.or(progress).unwrap_or(-loss), || {
+                self.model.head_weights()
+            });
         }
-        if let Some((round, w)) = best {
-            if round != spec.dagger {
-                println!("    keeping dagger round {round}, which scored {best_rank:.3}");
-                self.model.set_head_weights(&w);
-            }
+        let (round, w) = keep.best();
+        if round != spec.dagger {
+            println!(
+                "    keeping {}, which scored {:.3}",
+                match round {
+                    0 => "the policy the warm start produced".to_string(),
+                    n => format!("dagger round {n}"),
+                },
+                keep.rank
+            );
+            let w = w.to_vec();
+            self.model.set_head_weights(&w);
         }
         Ok(())
     }
@@ -1972,7 +2030,15 @@ impl<E: Env> ControlPipeline<E> {
         log: &mut dyn FnMut(usize, f32),
         step: &mut usize,
     ) -> Result<()> {
-        let (mut best, mut best_rank) = (None, f32::NEG_INFINITY);
+        // What the imitation phases produced, and what it scores. Every round
+        // below has to beat this to be adopted, or the phase hands it back.
+        let entered = self.gauge(spec.gauge_episodes, spec.max_steps)?;
+        let mut keep = Keep::starting(entered.unwrap_or(f32::NEG_INFINITY), self.model.head_weights());
+        // Carried rather than re-measured. A round's score going IN is the one
+        // the round before it left behind - same policy, same worlds, same
+        // action stream - so gauging it again spends a block of episodes to
+        // re-derive a number that cannot have moved.
+        let mut before = entered;
         for round in 0..spec.improve {
             let probed = self.probe(
                 spec.episodes,
@@ -1990,7 +2056,6 @@ impl<E: Env> ControlPipeline<E> {
                 println!("    improve: no decision could be probed");
                 return Ok(());
             }
-            let before = self.gauge(spec.gauge_episodes, spec.max_steps)?;
             let (loss, on_best) =
                 self.fit_outcomes(&probes, spec.warmup_epochs, spec.head_lr, log, step)?;
             let after = self.gauge(spec.gauge_episodes, spec.max_steps)?;
@@ -2009,17 +2074,21 @@ impl<E: Env> ControlPipeline<E> {
                     _ => String::new(),
                 }
             );
-            let rank = after.unwrap_or(-loss);
-            if best.is_none() || rank > best_rank {
-                best_rank = rank;
-                best = Some((round + 1, self.model.head_weights()));
-            }
+            keep.offer(round + 1, after.unwrap_or(-loss), || self.model.head_weights());
+            before = after;
         }
-        if let Some((round, w)) = best {
-            if round != spec.improve {
-                println!("    keeping improve round {round}, which scored {best_rank:.3}");
-                self.model.set_head_weights(&w);
-            }
+        let (round, w) = keep.best();
+        if round != spec.improve {
+            println!(
+                "    keeping {}, which scored {:.3}",
+                match round {
+                    0 => "the policy the imitation phases produced".to_string(),
+                    n => format!("improve round {n}"),
+                },
+                keep.rank
+            );
+            let w = w.to_vec();
+            self.model.set_head_weights(&w);
         }
         Ok(())
     }
@@ -2369,11 +2438,20 @@ impl<E: Env> Stages for ControlPipeline<E> {
         // weights the run earned, and scoring them measures where the walk
         // ended rather than what was learned. Snapshotting costs one readback
         // of the head per iteration, which is nothing beside a rollout.
-        let mut best_rank = f32::NEG_INFINITY;
         let mut last_rank = f32::NEG_INFINITY;
         let mut best_ranked_on = "";
-        let mut best_by = Rollout::default();
-        let mut best: Option<(usize, Vec<(String, Vec<f32>)>)> = None;
+        // The policy the run entered the loop with is a candidate too - see
+        // [`Keep`]. Only when there is a fixed block to rank it on: without
+        // one an iteration is ranked on its own rollout, and the policy that
+        // has not run one has no comparable number. Then the starting rank is
+        // negative infinity and the first iteration takes it, as before.
+        let entered = if spec.gauge_episodes > 0 {
+            self.gauge(spec.gauge_episodes, spec.max_steps)?
+        } else {
+            None
+        };
+        let mut keep =
+            Keep::starting(entered.unwrap_or(f32::NEG_INFINITY), self.model.head_weights());
         // The running mean of the iterates, which is a different candidate
         // from the best of them and often a better one. See `mean_of`.
         let mut running: Option<Vec<(String, Vec<f32>)>> = None;
@@ -2464,22 +2542,20 @@ impl<E: Env> Stages for ControlPipeline<E> {
             } else {
                 "in return"
             };
-            if best.is_none() || rank > best_rank {
-                best_rank = rank;
+            if keep.offer(it + 1, rank, || self.model.head_weights()) {
                 best_ranked_on = ranked_on;
-                best = Some((it + 1, self.model.head_weights()));
-                best_by = stats;
             }
             last_rank = rank;
         }
         // Both candidates, measured on the same worlds, and the better one
         // kept. Averaging is a claim about the shape of the sequence, not a
         // law, so it is checked rather than assumed.
-        if let (Some(mean), Some((_, bw))) = (&running, &best) {
+        if let Some(mean) = &running {
             let live = self.model.head_weights();
             self.model.set_head_weights(mean);
             let m = self.gauge(spec.gauge_episodes, spec.max_steps)?;
-            self.model.set_head_weights(bw);
+            let bw = keep.best().1.to_vec();
+            self.model.set_head_weights(&bw);
             let b = self.gauge(spec.gauge_episodes, spec.max_steps)?;
             self.model.set_head_weights(&live);
             if let (Some(m), Some(b)) = (m, b) {
@@ -2493,19 +2569,23 @@ impl<E: Env> Stages for ControlPipeline<E> {
                 }
             }
         }
-        if let Some((it, w)) = best {
-            if it != spec.iterations {
-                // The SAME number the choice was made on. Reporting the
-                // rollout's progress next to a decision taken on the fixed
-                // block is two different measurements and one decision, which
-                // reads as though the wrong iteration was kept.
-                println!(
-                    "    keeping iteration {it}, which scored {best_rank:.3} \
-                     {best_ranked_on} - the last one scored {last_rank:.3}"
-                );
-                let _ = &best_by;
-                self.model.set_head_weights(&w);
-            }
+        let (it, w) = keep.best();
+        if it != spec.iterations {
+            // The SAME number the choice was made on. Reporting the rollout's
+            // progress next to a decision taken on the fixed block is two
+            // different measurements and one decision, which reads as though
+            // the wrong iteration was kept.
+            println!(
+                "    keeping {}, which scored {:.3} {} - the last one scored {last_rank:.3}",
+                match it {
+                    0 => "the policy the imitation phases produced".to_string(),
+                    n => format!("iteration {n}"),
+                },
+                keep.rank,
+                if it == 0 { "on the fixed block" } else { best_ranked_on }
+            );
+            let w = w.to_vec();
+            self.model.set_head_weights(&w);
         }
         Ok(TrainReport { steps: step, final_loss: last_loss, seconds: 0.0 })
     }
@@ -2613,6 +2693,56 @@ impl<E: Env> ControlPipelineBuilder<E> {
             critic_mse: 0.0,
             max_steps: self.max_steps,
         })
+    }
+}
+
+#[cfg(test)]
+mod keep_tests {
+    use super::Keep;
+
+    fn w(tag: f32) -> Vec<(String, Vec<f32>)> {
+        vec![("head.weight".into(), vec![tag])]
+    }
+
+    /// A phase that cannot improve on what it was handed hands it back.
+    ///
+    /// This is the one that was wrong, in all three phases at once: the
+    /// comparison started at the first round rather than at the policy the
+    /// phase inherited, so "keep the best round" meant "keep the least bad
+    /// round" whenever no round was actually an improvement - and a run could
+    /// only ever leave a phase worse off than it entered it.
+    #[test]
+    fn rounds_that_are_all_worse_keep_the_policy_the_phase_started_with() {
+        let mut k = Keep::starting(0.770, w(0.0));
+        k.offer(1, 0.731, || w(1.0));
+        k.offer(2, 0.742, || w(2.0));
+        k.offer(3, 0.700, || w(3.0));
+        let (at, weights) = k.best();
+        assert_eq!(at, 0, "a phase with no good round kept one of its bad ones");
+        assert_eq!(weights[0].1, vec![0.0]);
+    }
+
+    /// And it still takes a round that IS better - the guard must not become a
+    /// refusal to learn.
+    #[test]
+    fn the_best_round_is_kept_when_there_is_one() {
+        let mut k = Keep::starting(0.770, w(0.0));
+        k.offer(1, 0.731, || w(1.0));
+        k.offer(2, 0.812, || w(2.0));
+        k.offer(3, 0.790, || w(3.0));
+        let (at, weights) = k.best();
+        assert_eq!(at, 2);
+        assert_eq!(weights[0].1, vec![2.0]);
+    }
+
+    /// A tie goes to whatever came first. Every rank here carries noise, so
+    /// two scores that came out equal are evidence of nothing, and the policy
+    /// that has been moved less is the one to keep.
+    #[test]
+    fn an_equal_score_is_not_a_reason_to_move() {
+        let mut k = Keep::starting(0.770, w(0.0));
+        k.offer(1, 0.770, || w(1.0));
+        assert_eq!(k.best().0, 0);
     }
 }
 
