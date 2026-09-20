@@ -2423,6 +2423,64 @@ fn fast_tier_caps() -> DeviceCaps {
 /// `WorkgroupPerOutput` in the candidate list and takes the first variant it
 /// CAN express - `RegisterTiled` maps to `reg2`, anything else (`Reference`,
 /// or every candidate filtered out) maps to `naive`.
+/// Which of two register tilings of the same GEMM fills a given device at a
+/// given shape.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GemmTile {
+    /// The 128x128 output tile: more reuse per workgroup, fewer workgroups.
+    Wide,
+    /// The 64x64 output tile: four times as many workgroups over the same
+    /// output, each doing a quarter of the work.
+    Narrow,
+}
+
+/// Compute units to assume when the backend does not report them.
+///
+/// wgpu exposes no such query, so on every wgpu-backed device this is what
+/// decides. It is the SM count of the card this rule was measured on, which
+/// makes it a starting point rather than a constant: a backend that DOES
+/// report `compute_units` - the CUDA path does - gets the right number for
+/// its own hardware with nothing here to change. That is the whole reason
+/// this reads `DeviceCaps` rather than taking a number from a table.
+const ASSUMED_COMPUTE_UNITS: u32 = 30;
+
+/// Pick the tiling by whether the wide one can cover this device even once.
+///
+/// A tile's advantage is reuse, and reuse can only be spent if there are
+/// enough workgroups to keep the machine busy. Below one workgroup per
+/// compute unit the wide tile leaves part of the device idle for the whole
+/// dispatch, and the narrow one - four times the workgroups over the same
+/// output - wins despite doing more total work. Measured at 541 packed rows
+/// on a 30-SM card:
+///
+/// ```text
+///   shape                 128x128    64x64    wide workgroups
+///   541x384x1152          0.282 ms  0.330 ms       45
+///   541x384x384           0.209 ms  0.174 ms       15
+///   541x384x1536          0.268 ms  0.349 ms       60
+///   541x1536x384          0.545 ms  0.416 ms       15
+/// ```
+///
+/// [`GemmTile::Narrow`] is only ever ADVICE: this says which tiling would be
+/// faster, not that the caller has one. A caller that registered no narrow
+/// kernel ignores it, and a caller whose narrow kernel cannot run on this
+/// device must check that itself - `matmul_reg3_64` is `@cpu no`, and the
+/// class check below is why asking here is not enough on its own.
+pub fn gemm_tile(m: u32, n: u32, caps: &DeviceCaps) -> GemmTile {
+    // A device with no 256-thread workgroup runs neither tiling, and the CPU
+    // JIT runs the wide one only because it has a native implementation of
+    // it. Neither is a place to be recommending a different kernel.
+    if caps.class == DeviceClass::Cpu || caps.max_workgroup_size < 256 {
+        return GemmTile::Wide;
+    }
+    let units = caps.compute_units.unwrap_or(ASSUMED_COMPUTE_UNITS);
+    if m.div_ceil(128) * n.div_ceil(128) >= units {
+        GemmTile::Wide
+    } else {
+        GemmTile::Narrow
+    }
+}
+
 pub fn pick_gemm(m: usize, n: usize, naive: usize, reg2: usize, force_naive: bool) -> (usize, u32) {
     if force_naive {
         return (naive, (m * n) as u32);
@@ -2762,8 +2820,59 @@ mod kv_cache_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{flash_gate, gemm_variant, pick_gemm, tiles_with_budget, GemmVariants, TILE_BUDGET_FRACTION, TILE_BUDGET_WORDS};
+    use super::{
+        flash_gate, gemm_tile, gemm_variant, pick_gemm, tiles_with_budget, GemmTile, GemmVariants,
+        TILE_BUDGET_FRACTION, TILE_BUDGET_WORDS,
+    };
     use gpu_core::{DeviceCaps, DeviceClass};
+
+    fn gpu_with(units: Option<u32>) -> DeviceCaps {
+        DeviceCaps { compute_units: units, ..DeviceCaps::portable_baseline(DeviceClass::DiscreteGpu) }
+    }
+
+    /// The narrow tiling is never recommended to a device that cannot run it.
+    ///
+    /// `matmul_reg3_64` is `@cpu no`. The CPU JIT runs the wide one only
+    /// because that kernel has a native implementation, so "which is faster"
+    /// is the wrong question there and the answer must be the one that
+    /// exists. This is a CORRECTNESS property, not a tuning one, and it is
+    /// the reason this rule reads real caps instead of the discrete-GPU
+    /// baseline `pick_gemm` assumes.
+    #[test]
+    fn a_device_that_cannot_run_the_narrow_tile_is_never_offered_it() {
+        let cpu = DeviceCaps::portable_baseline(DeviceClass::Cpu);
+        // A shape that would take the narrow tile on any GPU.
+        assert_eq!(gemm_tile(541, 384, &cpu), GemmTile::Wide);
+        let tiny_wg = DeviceCaps { max_workgroup_size: 64, ..gpu_with(Some(30)) };
+        assert_eq!(gemm_tile(541, 384, &tiny_wg), GemmTile::Wide);
+    }
+
+    /// The crossover MOVES with the device, which is the whole point of
+    /// reading caps rather than tabulating a threshold.
+    ///
+    /// `541x384` produces fifteen wide workgroups and `541x1536` produces
+    /// sixty. A thirty-unit card should take the narrow tile for the first
+    /// and the wide one for the second; a hundred-unit card should take the
+    /// narrow tile for both, because sixty workgroups no longer fill it.
+    #[test]
+    fn the_crossover_follows_the_devices_own_width() {
+        let small = gpu_with(Some(30));
+        assert_eq!(gemm_tile(541, 384, &small), GemmTile::Narrow, "15 workgroups on 30 units");
+        assert_eq!(gemm_tile(541, 1536, &small), GemmTile::Wide, "60 workgroups on 30 units");
+
+        let big = gpu_with(Some(100));
+        assert_eq!(gemm_tile(541, 1536, &big), GemmTile::Narrow, "60 workgroups on 100 units");
+        // And a shape large enough to fill even that.
+        assert_eq!(gemm_tile(4096, 4096, &big), GemmTile::Wide, "1024 workgroups on 100 units");
+    }
+
+    /// A backend that reports nothing still gets a defensible answer, and it
+    /// is the same one the reporting path would give for this hardware.
+    #[test]
+    fn an_unreporting_backend_falls_back_rather_than_guessing_wildly() {
+        assert_eq!(gemm_tile(541, 384, &gpu_with(None)), gemm_tile(541, 384, &gpu_with(Some(30))));
+        assert_eq!(gemm_tile(541, 1536, &gpu_with(None)), gemm_tile(541, 1536, &gpu_with(Some(30))));
+    }
 
     /// The shared outer gate is exactly `workgroup_reductions AND extra` - no
     /// more, no less - at all four truth-table points. This is what makes it

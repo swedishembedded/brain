@@ -113,23 +113,7 @@ struct Bwd {
 }
 
 
-/// How many workgroups a 128x128-tiled GEMM must produce before it is worth
-/// preferring over the 64x64 tile.
-///
-/// One per SM on this repository's own hardware (30 SMs): below that the
-/// wider tile cannot cover the machine even once, and its better arithmetic
-/// intensity has nowhere to be spent. It is a threshold on OCCUPANCY of the
-/// machine, not on the matrix, which is why it is expressed in workgroups
-/// rather than in rows or columns.
-///
-/// Measured on an IDLE card - which is the only kind worth measuring on. The
-/// first version of this constant was 60, fitted to numbers taken while a
-/// second process held the card at 100%, and under that contention the 64x64
-/// tile appeared to beat the 128x128 one on `qkv` by a factor of four. On a
-/// quiet card it loses to it by 15%. Three consecutive runs of the same
-/// unchanged code read 22.9, 34.8 and 43.7 ms while contended, and 10.52,
-/// 10.55 and 10.60 ms when not.
-const TILE128_MIN_WORKGROUPS: u32 = 30;
+
 
 pub struct Encoder {
     pub gpu: Gpu,
@@ -313,6 +297,11 @@ impl Encoder {
 
     /// Which GEMM kernel, and how many invocations it wants.
     ///
+    /// The tiling comes from [`block::gemm_tile`], which reads THIS device's
+    /// caps - so the rule follows the hardware rather than a number measured
+    /// on one card, and a device that cannot run the narrow kernel is never
+    /// offered it.
+    ///
     /// The shared `pick_gemm` answers a TRAINING-shaped question - is this
     /// output big enough to be worth a tile at all - and then hands every
     /// tiled shape to the 128x128 kernel. That is the wrong last step for an
@@ -338,16 +327,19 @@ impl Encoder {
     /// to memorise: below that point its better arithmetic intensity has
     /// nowhere to be spent.
     fn gemm(&self, m: u32, n: u32) -> (usize, u32) {
-        let (naive, threads) =
+        let (kind, threads) =
             block::pick_gemm(m as usize, n as usize, self.k.matmul, self.k.matmul_reg3, false);
-        if naive != self.k.matmul_reg3 {
-            return (naive, threads);
+        // `pick_gemm` answers "is this worth tiling at all", against a
+        // hardcoded discrete-GPU baseline. If it said no, it said no.
+        if kind != self.k.matmul_reg3 {
+            return (kind, threads);
         }
-        let wide = m.div_ceil(128) * n.div_ceil(128);
-        if wide >= TILE128_MIN_WORKGROUPS {
-            return (self.k.matmul_reg3, threads);
+        match block::gemm_tile(m, n, &self.gpu.caps()) {
+            block::GemmTile::Wide => (self.k.matmul_reg3, threads),
+            block::GemmTile::Narrow => {
+                (self.k.matmul_reg3_64, m.div_ceil(64) * n.div_ceil(64) * 256)
+            }
         }
-        (self.k.matmul_reg3_64, m.div_ceil(64) * n.div_ceil(64) * 256)
     }
 
     /// Load one packed call: `ids`/`type_ids` are the flat token and segment
