@@ -84,6 +84,9 @@ pub fn probe(seed: u64) -> Probe {
         .flat_map(|(i, &(_, l))| std::iter::repeat_n((i % 2) as u32, l as usize))
         .collect();
     enc.set_batch(&ids, &types, SPANS);
+    // The batch never changes after this, so the reverse pass is recorded
+    // once here rather than by every one of the checker's thousands of calls.
+    enc.prepare_reverse();
 
     let mut rng = data::rng::Lcg::new(seed ^ 0xA5A5_1234);
     let w = (0..(rows * cfg.d_model)).map(|_| rng.signed()).collect();

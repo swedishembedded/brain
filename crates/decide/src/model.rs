@@ -155,6 +155,18 @@ pub struct Encoder {
     flash_work: DeviceBuffer,
     steps: Vec<Step>,
     bwd: Option<Bwd>,
+    /// Set when a batch arrives that the recorded reverse pass no longer
+    /// describes. Cleared by [`Encoder::prepare_reverse`], which a caller runs
+    /// before the pass itself; until then nothing has been recorded.
+    ///
+    /// Recording it eagerly is what a decision loop cannot afford: the
+    /// rollouts, the DAgger rounds and the counterfactual probes set a batch
+    /// per decision and not one of them runs a backward.
+    reverse_stale: bool,
+    /// How many times each graph has been recorded. A decision loop pays this
+    /// on the host, per decision, and the two conditions that trigger it are
+    /// different - see `crates/decide/tests/graph_records.rs`.
+    records: (u64, u64),
 }
 
 impl Encoder {
@@ -263,6 +275,8 @@ impl Encoder {
             flash_work: gpu.storage(cap_rows as u64 * cfg.n_heads as u64 * 4),
             steps: Vec::new(),
             bwd: None,
+            reverse_stale: false,
+            records: (0, 0),
             gpu,
             cfg,
             ps,
@@ -402,13 +416,20 @@ impl Encoder {
             self.gpu.write(&self.uniq[i], &u);
             uniq_n[i] = u.len() as u32;
         }
-        // The distinct count is both a kernel parameter and a thread count, so
-        // a call that repacks the same span layout with different tokens still
-        // needs its reverse pass re-recorded.
-        let changed = self.rows != ids.len() as u32 || self.spans != spans || self.uniq_n != uniq_n;
+        // Two conditions, because the two graphs bake in different things.
+        //
+        // The forward bakes in the row count and the span table and nothing
+        // about which ids arrived, so repeating a shape with new tokens - what
+        // a decision loop does at every step - re-records nothing.
+        //
+        // The reverse additionally bakes in the DISTINCT count of each index
+        // stream, which is both a kernel parameter and a thread count for the
+        // embedding scatter, so it does have to follow the tokens.
+        let reshaped = self.rows != ids.len() as u32 || self.spans != spans;
+        let rescattered = self.uniq_n != uniq_n;
         self.rows = ids.len() as u32;
         self.uniq_n = uniq_n;
-        if changed {
+        if reshaped {
             self.spans = spans.to_vec();
             // Before `build_steps`, which records a dispatch sized from this
             // table: the two must describe the same spans or the kernel reads
@@ -416,8 +437,33 @@ impl Encoder {
             let table = block::flash_spans_table(self.cfg.n_heads, &self.spans);
             self.gpu.write(&self.flash_work, &table);
             self.steps = self.build_steps();
+            self.records.0 += 1;
+        }
+        if reshaped || rescattered {
+            self.reverse_stale = true;
+        }
+    }
+
+    /// Record the reverse pass for the batch that is set, if it is not already.
+    ///
+    /// Called by whoever is about to run one. Deferring it to here rather than
+    /// doing it in [`Encoder::set_batch`] is what keeps a decision loop from
+    /// paying to record a pass nobody submits; [`Encoder::backward`] and
+    /// [`Encoder::backward_seeded`] refuse to run until it has been called, so
+    /// forgetting it is a named panic rather than a gradient for the wrong
+    /// batch.
+    pub fn prepare_reverse(&mut self) {
+        if self.reverse_stale {
             self.rebuild_bwd();
         }
+    }
+
+    /// How many times the forward and the reverse graph have been recorded.
+    ///
+    /// Host work a decision loop pays per decision, which is why it is worth
+    /// being able to count rather than infer from a wall clock.
+    pub fn graph_records(&self) -> (u64, u64) {
+        self.records
     }
 
 
@@ -608,9 +654,11 @@ impl Encoder {
     /// Re-record the reverse pass. Called whenever the spans change, for the
     /// same reason the forward is: `chunked_bidir_bwd` bakes them in.
     fn rebuild_bwd(&mut self) {
+        self.reverse_stale = false;
         if self.bwd.is_none() {
             return;
         }
+        self.records.1 += 1;
         // Built BEFORE the mutable borrow: `build_bwd_steps` reads the
         // forward's own buffers through `&self`.
         let steps = self.build_bwd_steps();
@@ -633,6 +681,7 @@ impl Encoder {
     /// Seed the reverse pass with the objective's gradient on the final hidden
     /// states, `[rows, H]` row-major, and run it.
     pub fn backward(&self, d_hidden: &[f32]) {
+        assert!(!self.reverse_stale, "backward before prepare_reverse: the recorded reverse pass describes a different batch");
         let bw = self.bwd.as_ref().expect("backward on an inference build");
         let want = (self.rows * self.cfg.d_model) as usize;
         assert_eq!(d_hidden.len(), want, "d_hidden must be [rows, H] = {want}");
@@ -705,6 +754,7 @@ impl Encoder {
 
     /// Run the reverse pass against whatever already sits in [`Encoder::seed_buf`].
     pub fn backward_seeded(&self) {
+        assert!(!self.reverse_stale, "backward before prepare_reverse: the recorded reverse pass describes a different batch");
         let bw = self.bwd.as_ref().expect("backward on an inference build");
         self.gpu.submit(&[], &bw.steps);
     }

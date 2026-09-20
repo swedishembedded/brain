@@ -547,6 +547,9 @@ impl Decide {
         // buffer because that is where its own reverse pass puts the
         // hidden-state gradient; it is simply never consumed.
         if !self.frozen_encoder {
+            // Recorded here rather than when the batch was set: every decision
+            // of a rollout sets one and none of them reach this line.
+            self.enc.prepare_reverse();
             self.enc.backward_seeded();
         }
         Ok(l)

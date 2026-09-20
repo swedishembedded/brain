@@ -234,6 +234,7 @@ fn timed_step(m: &mut Decide, state: &str, qs: &[Question], loss: &LossConfig) -
     m.head.poll_wait();
     let t = lap(&mut out, "head.backward (device)", t);
 
+    m.enc.prepare_reverse();
     m.enc.backward_seeded();
     m.enc.poll_wait();
     let t = lap(&mut out, "enc.backward (device)", t);
