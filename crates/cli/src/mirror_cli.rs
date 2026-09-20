@@ -238,6 +238,9 @@ fn with_scene<R>(
     min_op: f32,
     max_depth: f32,
     prune_voxel: f32,
+    gs_mask: f32,
+    edge_rtol: f32,
+    scale_q: f32,
     sel: &FrameSel,
     mask: Option<&str>,
     k: impl FnOnce(&Gpu, &Mirror, &Splats, &[splat::types::Camera], usize, u32, u32) -> R,
@@ -259,7 +262,7 @@ fn with_scene<R>(
     eprintln!("running WorldMirror-2 on {s} frame(s) at {w}x{h} …");
     let t0 = std::time::Instant::now();
     model.forward(&frames, s, hp, wp);
-    let opts = AssembleOpts { min_opacity: min_op, max_depth };
+    let opts = AssembleOpts { min_opacity: min_op, max_depth, gs_mask_threshold: gs_mask, edge_depth_rtol: edge_rtol };
     let (mut splats, cams, weights) = assemble(model.gpu(), &model, &frames, s, w, h, &opts);
     eprintln!(
         "forward + assembly: {:.1}s, {} gaussians",
@@ -269,7 +272,12 @@ fn with_scene<R>(
     if prune_voxel > 0.0 {
         let before = splats.len();
         splats = splat::prune::voxel_merge(&splats, &weights, prune_voxel, 0);
-        eprintln!("voxel prune ({prune_voxel}): {before} -> {} gaussians", splats.len());
+        eprintln!("voxel fusion ({prune_voxel}): {before} -> {} gaussians", splats.len());
+    }
+    if scale_q > 0.0 && scale_q < 1.0 {
+        let before = splats.len();
+        splats = splat::prune::drop_largest_scales(&splats, scale_q);
+        eprintln!("largest-scale rejection (q={scale_q}): {before} -> {} gaussians", splats.len());
     }
     k(model.gpu(), &model, &splats, &cams, s, w, h)
 }
@@ -386,7 +394,14 @@ fn infer(argv: &[String]) {
     let maps = a.take_flag("--maps");
     let min_op = a.f32_or("--min-opacity", 0.01);
     let max_depth = a.f32_or("--max-depth", 0.0);
-    let prune = a.f32_or("--prune", 0.0);
+    // Reference defaults. Fusion collapses the near-duplicate surfaces that
+    // overlapping views each predict at slightly different depths, and without
+    // it the scene is those duplicates stacked - which is what a viewer sees
+    // as translucent superposition.
+    let prune = a.f32_or("--prune", 0.002);
+    let gs_mask = a.f32_or("--gs-mask-threshold", 0.5);
+    let edge_rtol = a.f32_or("--edge-depth-threshold", 0.03);
+    let scale_q = a.f32_or("--max-scale-quantile", 0.98);
     // Frame selection, for a capture longer than a handful of stills. A video
     // gets a default cap because the trunk's global attention is quadratic in
     // frame count; an explicit directory of photographs is left alone.
@@ -401,7 +416,7 @@ fn infer(argv: &[String]) {
 
     std::fs::create_dir_all(&out_dir).ok();
     let ply_path = ply.unwrap_or_else(|| format!("{out_dir}/scene.ply"));
-    with_scene(&weights, &images, min_op, max_depth, prune, &sel, mask.as_deref(), |gpu, model, splats, cams, s, w, h| {
+    with_scene(&weights, &images, min_op, max_depth, prune, gs_mask, edge_rtol, scale_q, &sel, mask.as_deref(), |gpu, model, splats, cams, s, w, h| {
         splat::ply::write(&ply_path, splats).unwrap_or_else(|e| {
             eprintln!("PLY write failed: {e}");
             std::process::exit(1);
@@ -430,7 +445,14 @@ fn demo(argv: &[String]) {
     let frames_cap = a.opt_u32("--frames").map(|n| n as u64);
     let min_op = a.f32_or("--min-opacity", 0.01);
     let max_depth = a.f32_or("--max-depth", 0.0);
-    let prune = a.f32_or("--prune", 0.0);
+    // Reference defaults. Fusion collapses the near-duplicate surfaces that
+    // overlapping views each predict at slightly different depths, and without
+    // it the scene is those duplicates stacked - which is what a viewer sees
+    // as translucent superposition.
+    let prune = a.f32_or("--prune", 0.002);
+    let gs_mask = a.f32_or("--gs-mask-threshold", 0.5);
+    let edge_rtol = a.f32_or("--edge-depth-threshold", 0.03);
+    let scale_q = a.f32_or("--max-scale-quantile", 0.98);
     // Frame selection, for a capture longer than a handful of stills. A video
     // gets a default cap because the trunk's global attention is quadratic in
     // frame count; an explicit directory of photographs is left alone.
@@ -443,7 +465,7 @@ fn demo(argv: &[String]) {
 
     a.finish();
 
-    let (splats, init_cam) = with_scene(&weights, &images, min_op, max_depth, prune, &sel, mask.as_deref(), |_gpu, _model, splats, cams, _s, _w, _h| {
+    let (splats, init_cam) = with_scene(&weights, &images, min_op, max_depth, prune, gs_mask, edge_rtol, scale_q, &sel, mask.as_deref(), |_gpu, _model, splats, cams, _s, _w, _h| {
         let init_cam = cams.first().map(|c| splat::types::Camera {
             width,
             height,

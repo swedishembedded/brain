@@ -68,12 +68,56 @@ fn sigmoid(x: f32) -> f32 {
 pub struct AssembleOpts {
     pub min_opacity: f32,
     pub max_depth: f32,
+    /// Keep a pixel only where the GS head's own validity mask, after a
+    /// sigmoid, is above this. The reference thresholds at 0.5; `0` disables.
+    pub gs_mask_threshold: f32,
+    /// Relative depth tolerance for silhouette rejection. A pixel whose depth
+    /// differs from a 4-neighbour by more than this fraction sits ON a
+    /// discontinuity, where the predicted depth is a blend of two surfaces
+    /// and the gaussian lands between them. Reference `0.03`; `0` disables.
+    pub edge_depth_rtol: f32,
 }
 
 impl Default for AssembleOpts {
     fn default() -> Self {
-        AssembleOpts { min_opacity: 0.01, max_depth: 0.0 }
+        AssembleOpts { min_opacity: 0.01, max_depth: 0.0, gs_mask_threshold: 0.5, edge_depth_rtol: 0.03 }
     }
+}
+
+/// Flag every pixel that sits on a depth discontinuity.
+///
+/// `rtol` is relative, as upstream's `depth_edge(..., rtol=...)` is: what
+/// matters at a silhouette is the RATIO of the two depths, not their
+/// difference, so the same test works at any distance. Both sides of a step
+/// are flagged, because the blend that makes the pixel unreliable straddles
+/// it.
+pub fn depth_edges(z: &[f32], w: usize, h: usize, rtol: f32) -> Vec<bool> {
+    let mut out = vec![false; w * h];
+    if rtol <= 0.0 {
+        return out;
+    }
+    for y in 0..h {
+        for x in 0..w {
+            let i = y * w + x;
+            let a = z[i];
+            if !(a.is_finite() && a > 0.0) {
+                out[i] = true;
+                continue;
+            }
+            let mut nb = [None; 4];
+            if x > 0 { nb[0] = Some(z[i - 1]); }
+            if x + 1 < w { nb[1] = Some(z[i + 1]); }
+            if y > 0 { nb[2] = Some(z[i - w]); }
+            if y + 1 < h { nb[3] = Some(z[i + w]); }
+            for b in nb.into_iter().flatten() {
+                if !(b.is_finite() && b > 0.0) || (a - b).abs() / a.min(b) > rtol {
+                    out[i] = true;
+                    break;
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Read the GS head outputs for all frames and build the host scene.
@@ -95,10 +139,16 @@ pub fn assemble(
     let mut out = Splats::default();
     let mut weights = Vec::new();
     for (fi, cam) in cams.iter().enumerate() {
+        // The GS depth head emits THREE channels - depth, confidence, and a
+        // validity mask - laid out like `Head::Depth`'s. Only the first was
+        // ever read, so pixels the model itself reports as not-geometry became
+        // gaussians anyway.
         let gsd = gpu.read(model.head_out(Head::GsDepth, fi), 3 * hw);
         let gsp = gpu.read(model.head_out(Head::GsParams, fi), 12 * hw);
         let rgb = &frames_chw[fi * 3 * hw..(fi + 1) * 3 * hw];
         let m = &cam.c2w;
+        let depth: Vec<f32> = gsd[..hw].iter().map(|v| v.exp()).collect();
+        let edge = depth_edges(&depth, width as usize, height as usize, opts.edge_depth_rtol);
         for py in 0..height as usize {
             for px in 0..width as usize {
                 let i = py * width as usize + px;
@@ -116,7 +166,13 @@ pub fn assemble(
                 if op < opts.min_opacity {
                     continue;
                 }
-                let z = gsd[i].exp();
+                if opts.gs_mask_threshold > 0.0 && sigmoid(gsd[2 * hw + i]) < opts.gs_mask_threshold {
+                    continue;
+                }
+                if edge[i] {
+                    continue;
+                }
+                let z = depth[i];
                 if opts.max_depth > 0.0 && z > opts.max_depth {
                     continue;
                 }
@@ -127,12 +183,13 @@ pub fn assemble(
                     m[4] * xc + m[5] * yc + m[6] * z + m[7],
                     m[8] * xc + m[9] * yc + m[10] * z + m[11],
                 ]);
-                out.quats.extend_from_slice(&[
-                    gsp[i],
-                    gsp[hw + i],
-                    gsp[2 * hw + i],
-                    gsp[3 * hw + i],
-                ]);
+                // Normalized here, not left to the renderer. The module doc
+                // has always said "quat wxyz normalized" and the code did not
+                // do it; upstream normalizes before encoding, and a
+                // non-unit quaternion scales the covariance it rotates.
+                let q = [gsp[i], gsp[hw + i], gsp[2 * hw + i], gsp[3 * hw + i]];
+                let qn = (q.iter().map(|v| v * v).sum::<f32>()).sqrt().max(1e-8);
+                out.quats.extend_from_slice(&[q[0] / qn, q[1] / qn, q[2] / qn, q[3] / qn]);
                 out.scales.extend_from_slice(&[
                     gsp[4 * hw + i].exp().min(0.3),
                     gsp[5 * hw + i].exp().min(0.3),

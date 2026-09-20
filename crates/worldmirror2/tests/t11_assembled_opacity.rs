@@ -87,7 +87,7 @@ fn an_assembled_gaussians_opacity_is_the_learned_merge_weight() {
 
     // min_opacity 0 and max_depth 0 keep every pixel, so the two vectors line
     // up one-to-one and can be compared directly.
-    let opts = AssembleOpts { min_opacity: 0.0, max_depth: 0.0 };
+    let opts = AssembleOpts { min_opacity: 0.0, max_depth: 0.0, gs_mask_threshold: 0.0, edge_depth_rtol: 0.0 };
     let (splats, cams, weights) = assemble(model.gpu(), &model, &frames, s, w as u32, h as u32, &opts);
     assert_eq!(cams.len(), s);
     assert_eq!(splats.len(), s * h * w, "nothing should have been filtered at min_opacity 0");
@@ -109,5 +109,19 @@ fn an_assembled_gaussians_opacity_is_the_learned_merge_weight() {
     assert!(
         splats.opacities.iter().all(|o| (0.0..=1.0).contains(o)),
         "opacities must be a sigmoid output"
+    );
+
+    // The module doc has claimed "quat wxyz normalized" since it was written,
+    // and the code copied the four raw head channels straight through. A
+    // non-unit quaternion does not just rotate a gaussian's covariance, it
+    // SCALES it, so the splat is the wrong size in a direction that depends on
+    // the prediction. Renderers that defensively renormalize hid this; the PLY
+    // on disk still carried it.
+    let worst = (0..splats.len())
+        .map(|i| (splats.quats[i * 4..i * 4 + 4].iter().map(|v| v * v).sum::<f32>().sqrt() - 1.0).abs())
+        .fold(0.0f32, f32::max);
+    assert!(
+        worst < 1e-5,
+        "the worst assembled quaternion is off unit length by {worst:.3e}; assembly must normalize"
     );
 }

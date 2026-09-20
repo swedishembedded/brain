@@ -117,7 +117,7 @@ fn the_scene_looks_like_the_photographs_it_was_built_from() {
     let mut model = Mirror::new(gpu, cfg, &init, 0);
     drop(init);
     model.forward(&frames, s, hp, wp);
-    let opts = AssembleOpts { min_opacity: 0.02, max_depth: 0.0 };
+    let opts = AssembleOpts { min_opacity: 0.02, max_depth: 0.0, ..Default::default() };
     let (splats, cams, _) = assemble(model.gpu(), &model, &frames, s, w, h, &opts);
     assert_eq!(cams.len(), s, "one recovered camera per photograph");
     eprintln!("assembled {} gaussians", splats.len());

@@ -223,7 +223,7 @@ pub fn run_reconstruct(session: &mut Session, inv: &Invocation) -> ActionResult 
 
     let model = &mut session.model;
     model.forward(&frames_chw, s, hp, wp);
-    let opts = AssembleOpts { min_opacity, max_depth };
+    let opts = AssembleOpts { min_opacity, max_depth, ..Default::default() };
     let (mut splats, cams, gweights) = assemble(model.gpu(), model, &frames_chw, s, w, h, &opts);
     if prune_voxel > 0.0 {
         splats = splat::prune::voxel_merge(&splats, &gweights, prune_voxel, 0);

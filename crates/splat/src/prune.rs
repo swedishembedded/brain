@@ -78,3 +78,41 @@ pub fn voxel_merge(splats: &Splats, weights: &[f32], voxel: f32, max_points: usi
     }
     out
 }
+
+/// Drop the gaussians whose LARGEST axis is above the `q` quantile of that
+/// statistic, matching the reference's `save_gs_ply` (`q = 0.98`).
+///
+/// A feed-forward head predicts a scale per pixel, and the tail of that
+/// distribution is enormous translucent splats sitting over the whole scene.
+/// There are few of them - two in a hundred - and they are enough to make a
+/// sharp reconstruction look as though it was rendered through frosted glass,
+/// because each one covers thousands of pixels at low opacity.
+///
+/// `q >= 1.0` keeps everything.
+pub fn drop_largest_scales(s: &Splats, q: f32) -> Splats {
+    let n = s.len();
+    if n == 0 || q >= 1.0 {
+        return s.clone();
+    }
+    let biggest = |i: usize| s.scales[i * 3..i * 3 + 3].iter().fold(0.0f32, |m, &v| m.max(v));
+    let mut sorted: Vec<f32> = (0..n).map(biggest).collect();
+    sorted.sort_by(f32::total_cmp);
+    // `torch.quantile`'s linear interpolation, so the count matches upstream
+    let pos = q.clamp(0.0, 1.0) as f64 * (n - 1) as f64;
+    let (lo, frac) = (pos.floor() as usize, pos - pos.floor());
+    let hi = (lo + 1).min(n - 1);
+    let thresh = sorted[lo] as f64 + (sorted[hi] - sorted[lo]) as f64 * frac;
+
+    let mut out = Splats::default();
+    for i in 0..n {
+        if biggest(i) as f64 > thresh {
+            continue;
+        }
+        out.means.extend_from_slice(&s.means[i * 3..i * 3 + 3]);
+        out.quats.extend_from_slice(&s.quats[i * 4..i * 4 + 4]);
+        out.scales.extend_from_slice(&s.scales[i * 3..i * 3 + 3]);
+        out.opacities.push(s.opacities[i]);
+        out.colors.extend_from_slice(&s.colors[i * 3..i * 3 + 3]);
+    }
+    out
+}
