@@ -41,6 +41,39 @@ pub const IMAGE_EXTS: [&str; 7] = ["ppm", "png", "jpg", "jpeg", "bmp", "tif", "t
 /// Extensions treated as a video to decode frames from.
 const VIDEO_EXTS: [&str; 6] = ["mp4", "mov", "mkv", "webm", "avi", "m4v"];
 
+/// Read known cameras from the `cameras.json` shape `infer` itself writes, so
+/// a reconstruction's own output can be fed straight back as a prior.
+fn read_camera_priors(path: &str, s: usize) -> Vec<worldmirror2::priors::CameraPrior> {
+    let text = std::fs::read_to_string(path).unwrap_or_else(|e| {
+        eprintln!("cannot read {path}: {e}");
+        std::process::exit(1);
+    });
+    let j: serde_json::Value = serde_json::from_str(&text).unwrap_or_else(|e| {
+        eprintln!("{path}: {e}");
+        std::process::exit(1);
+    });
+    let arr = j.as_array().unwrap_or_else(|| {
+        eprintln!("{path}: expected a JSON array of cameras");
+        std::process::exit(1);
+    });
+    if arr.len() != s {
+        eprintln!("{path} holds {} camera(s) but the run has {s} frame(s); a pose prior is per frame", arr.len());
+        std::process::exit(2);
+    }
+    arr.iter()
+        .map(|c| {
+            let m: Vec<f32> = c["c2w"].as_array().expect("c2w").iter().map(|v| v.as_f64().unwrap() as f32).collect();
+            worldmirror2::priors::CameraPrior {
+                c2w: m.try_into().expect("16 c2w entries"),
+                fx: c["fx"].as_f64().unwrap_or(0.0) as f32,
+                fy: c["fy"].as_f64().unwrap_or(0.0) as f32,
+                cx: c["cx"].as_f64().unwrap_or(0.0) as f32,
+                cy: c["cy"].as_f64().unwrap_or(0.0) as f32,
+            }
+        })
+        .collect()
+}
+
 /// Does `spec` name a video file (rather than a directory or an image list)?
 fn is_video(spec: &str) -> bool {
     let p = std::path::Path::new(spec);
@@ -245,6 +278,7 @@ fn with_scene<R>(
     min_op: f32,
     max_depth: f32,
     prune_voxel: f32,
+    poses: Option<&str>,
     gs_mask: f32,
     edge_rtol: f32,
     scale_q: f32,
@@ -288,7 +322,11 @@ fn with_scene<R>(
     drop(init);
     eprintln!("running WorldMirror-2 on {s} frame(s) at {w}x{h} …");
     let t0 = std::time::Instant::now();
-    model.forward(&frames, s, hp, wp);
+    let priors = poses.map(|p| read_camera_priors(p, s));
+    if priors.is_some() {
+        eprintln!("conditioning on {s} known camera(s) from the pose prior");
+    }
+    model.forward_with_priors(&frames, s, hp, wp, priors.as_deref());
     let opts = AssembleOpts { min_opacity: min_op, max_depth, gs_mask_threshold: gs_mask, edge_depth_rtol: edge_rtol };
     let (mut splats, cams, weights) = assemble(model.gpu(), &model, &frames, s, w, h, &opts);
     eprintln!(
@@ -432,6 +470,10 @@ fn infer(argv: &[String]) {
     // The reference's inference default, independent of the checkpoint's
     // native grid. Roughly 3.4x the samples of 518 on a square image.
     let target = a.usize_or("--target-size", 952);
+    // Known cameras, in the `cameras.json` shape `infer` writes. WorldMirror
+    // is an any-prior model: supplying these fills trunk rows that are
+    // otherwise zero.
+    let poses = a.take_str("--poses");
     // Frame selection, for a capture longer than a handful of stills. A video
     // gets a default cap because the trunk's global attention is quadratic in
     // frame count; an explicit directory of photographs is left alone.
@@ -446,7 +488,7 @@ fn infer(argv: &[String]) {
 
     std::fs::create_dir_all(&out_dir).ok();
     let ply_path = ply.unwrap_or_else(|| format!("{out_dir}/scene.ply"));
-    with_scene(&weights, &images, min_op, max_depth, prune, gs_mask, edge_rtol, scale_q, &sel, mask.as_deref(), target, |gpu, model, splats, cams, s, w, h| {
+    with_scene(&weights, &images, min_op, max_depth, prune, poses.as_deref(), gs_mask, edge_rtol, scale_q, &sel, mask.as_deref(), target, |gpu, model, splats, cams, s, w, h| {
         splat::ply::write(&ply_path, splats).unwrap_or_else(|e| {
             eprintln!("PLY write failed: {e}");
             std::process::exit(1);
@@ -486,6 +528,10 @@ fn demo(argv: &[String]) {
     // The reference's inference default, independent of the checkpoint's
     // native grid. Roughly 3.4x the samples of 518 on a square image.
     let target = a.usize_or("--target-size", 952);
+    // Known cameras, in the `cameras.json` shape `infer` writes. WorldMirror
+    // is an any-prior model: supplying these fills trunk rows that are
+    // otherwise zero.
+    let poses = a.take_str("--poses");
     // Frame selection, for a capture longer than a handful of stills. A video
     // gets a default cap because the trunk's global attention is quadratic in
     // frame count; an explicit directory of photographs is left alone.
@@ -498,7 +544,7 @@ fn demo(argv: &[String]) {
 
     a.finish();
 
-    let (splats, init_cam) = with_scene(&weights, &images, min_op, max_depth, prune, gs_mask, edge_rtol, scale_q, &sel, mask.as_deref(), target, |_gpu, _model, splats, cams, _s, _w, _h| {
+    let (splats, init_cam) = with_scene(&weights, &images, min_op, max_depth, prune, poses.as_deref(), gs_mask, edge_rtol, scale_q, &sel, mask.as_deref(), target, |_gpu, _model, splats, cams, _s, _w, _h| {
         let init_cam = cams.first().map(|c| splat::types::Camera {
             width,
             height,
