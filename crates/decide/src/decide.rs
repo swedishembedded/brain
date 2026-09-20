@@ -384,6 +384,39 @@ impl Decide {
         Ok(l)
     }
 
+    /// The head's scores for kept features, forward only.
+    ///
+    /// [`Self::accumulate_kept`] without the reverse pass, for when the
+    /// question is what a set of weights WOULD say rather than how to change
+    /// them - reading a reference policy off a batch already collected, for
+    /// instance, where running a backward pass would be both wasted work and
+    /// a gradient nobody asked for.
+    pub fn score_kept(&mut self, f: &Features) -> Result<Vec<f32>, String> {
+        if !self.frozen_encoder {
+            return Err("score_kept needs a frozen encoder: a trainable one \
+                        changes what the features would have been"
+                .into());
+        }
+        if self.kept.as_ref().is_none_or(|b| b.len_floats < f.hidden.len()) {
+            let cap = f.hidden.len().max(1);
+            self.kept = Some(KeptBuf {
+                buf: self.enc.gpu().buffer(
+                    "kept_hidden",
+                    (cap * 4) as u64,
+                    gpu_core::BufUsage::STORAGE | gpu_core::BufUsage::COPY_DST,
+                ),
+                len_floats: cap,
+            });
+        }
+        let kept = self.kept.as_ref().expect("just allocated");
+        self.enc.gpu().write_f32(&kept.buf, &f.hidden);
+        self.enc.poll_wait();
+        let cls: Vec<u32> = (0..f.n_slots).map(|i| f.state_rows + i).collect();
+        let seed = self.enc.is_trainable().then(|| self.enc.seed_buf());
+        self.head.set_call(&kept.buf, seed, f.state_rows, &cls);
+        Ok(self.head.forward())
+    }
+
     /// Answer every question about one state.
     pub fn decide(&mut self, state: &str, questions: &[Question]) -> Result<Vec<Answer>, String> {
         let scores = self.score(state, questions)?;

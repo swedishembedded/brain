@@ -76,6 +76,32 @@ pub struct PolicyConfig {
     /// is weighted `gamma^k`, so early small talk is not held to the same
     /// standard as the closing exchange. `1.0` weights every turn equally.
     pub gamma: f32,
+    /// Weight on the divergence from a REFERENCE policy - the anchor.
+    ///
+    /// A policy gradient started from a cloned policy has no reason to stay
+    /// near it. The two phases optimise different objectives, so once the
+    /// cloning stops, the update pulls only toward return; where return is
+    /// sparse and its estimate noisy, that pull is mostly noise, and the
+    /// demonstrated behaviour is walked away from rather than improved on.
+    /// Holding the update near a fixed reference is how RLHF keeps a tuned
+    /// model near the one it was tuned from, and it is the same problem.
+    ///
+    /// `0.0` - the default, and what every caller that has not thought about
+    /// it gets - is no anchor and exactly the behaviour this had before.
+    pub anchor: f32,
+    /// How far the policy may drift from the one that COLLECTED the batch
+    /// before the remaining passes over it are abandoned.
+    ///
+    /// Clipping alone is not a trust region. It zeroes the gradient of any
+    /// sample that has moved too far, but the samples still inside the band
+    /// keep pushing, and several passes over a batch in minibatches is
+    /// hundreds of optimizer steps - so a policy can end an iteration a long
+    /// way from the one whose data justified the step. Every reference
+    /// implementation guards this by measuring the divergence and stopping,
+    /// and it is the guard this had no version of.
+    ///
+    /// `0.0` disables it. Spinning Up's default is 0.01.
+    pub target_kl: f32,
 }
 
 impl Default for PolicyConfig {
@@ -84,7 +110,7 @@ impl Default for PolicyConfig {
     /// that a median-length conversation's first turn still carries about a
     /// third of the weight of its last.
     fn default() -> PolicyConfig {
-        PolicyConfig { clip: 0.2, entropy: 0.01, gamma: 0.92 }
+        PolicyConfig { clip: 0.2, entropy: 0.01, gamma: 0.92, anchor: 0.0, target_kl: 0.02 }
     }
 }
 
@@ -206,6 +232,24 @@ pub struct Act {
     pub advantage: f32,
 }
 
+/// What the reference policy would have done here, over this step's own
+/// options. `None` when there is no anchor to hold to.
+pub type Reference<'a> = Option<&'a [f32]>;
+
+/// How far the policy has moved from the one that collected this step, as
+/// `KL(pi_old || pi_new)` estimated from the single action taken.
+///
+/// Schulman's k3 estimator, `(r - 1) - ln r` with `r = pi_new(a) / pi_old(a)`:
+/// unbiased, never negative, and far quieter than the `-ln r` estimator - a
+/// stopping rule built on a quantity that can come out negative stops on
+/// noise.
+pub fn drift(scores: &[f32], act: &Act) -> f32 {
+    let p = crate::loss::softmax(scores);
+    let old = (act.old_prob as f64).clamp(1e-8, 1.0);
+    let r = ((p[act.action] as f64) / old).max(1e-8);
+    (((r - 1.0) - r.ln()) as f32).max(0.0)
+}
+
 /// Clipped policy-gradient loss and `dL/d(score)` for one control step, over a
 /// categorical policy of any width.
 ///
@@ -227,6 +271,22 @@ pub struct Act {
 /// **The option set may differ at every step** - only `action` has to index
 /// into this call's own.
 pub fn choice_loss(scores: &[f32], act: &Act, cfg: &PolicyConfig) -> (f32, Vec<f32>) {
+    choice_loss_anchored(scores, act, None, cfg)
+}
+
+/// [`choice_loss`], plus a pull toward what `reference` would have done.
+///
+/// The divergence is the full `KL(pi || reference)` over the option set, not
+/// a one-sample estimate of it: the set is a handful of options wide and
+/// every score is already in hand, so the exact quantity costs nothing and
+/// carries none of the variance an estimator would add to a gradient that is
+/// already noisy.
+pub fn choice_loss_anchored(
+    scores: &[f32],
+    act: &Act,
+    reference: Reference,
+    cfg: &PolicyConfig,
+) -> (f32, Vec<f32>) {
     assert!(act.action < scores.len(), "action {} is outside the {} options", act.action, scores.len());
     let p = crate::loss::softmax(scores);
     let a = act.action;
@@ -248,7 +308,22 @@ pub fn choice_loss(scores: &[f32], act: &Act, cfg: &PolicyConfig) -> (f32, Vec<f
     // --- entropy bonus ---
     let ent: f64 = -p.iter().map(|&pi| (pi as f64) * (pi as f64).max(1e-12).ln()).sum::<f64>();
     let beta = cfg.entropy as f64;
-    let loss = (surrogate - beta * ent) as f32;
+
+    // --- the anchor ---
+    let kappa = cfg.anchor as f64;
+    let reference = reference.filter(|r| kappa > 0.0 && r.len() == scores.len());
+    let kl: f64 = match reference {
+        Some(r) => p
+            .iter()
+            .zip(r.iter())
+            .map(|(&pi, &ri)| {
+                let (pi, ri) = (pi as f64, (ri as f64).max(1e-12));
+                if pi <= 0.0 { 0.0 } else { pi * (pi / ri).ln() }
+            })
+            .sum(),
+        None => 0.0,
+    };
+    let loss = (surrogate - beta * ent + kappa * kl) as f32;
 
     // --- gradient, through the softmax jacobian dp_j/dz_i = p_j(d_ij - p_i) ---
     let mut d = vec![0.0f32; scores.len()];
@@ -259,7 +334,15 @@ pub fn choice_loss(scores: &[f32], act: &Act, cfg: &PolicyConfig) -> (f32, Vec<f
         let d_surr = if take_unclipped { -adv * ratio * (delta - pi) } else { 0.0 };
         // dH/dz_i = -p_i (ln p_i + H), and the loss SUBTRACTS beta * H.
         let d_ent = beta * pi * ((pi.max(1e-12)).ln() + ent);
-        *di = (d_surr + d_ent) as f32;
+        // d(KL)/dz_i = p_i (ln(p_i / r_i) - KL), and the loss ADDS kappa * KL.
+        let d_kl = match reference {
+            Some(r) => {
+                let ri = (r[i] as f64).max(1e-12);
+                kappa * pi * ((pi.max(1e-12) / ri).ln() - kl)
+            }
+            None => 0.0,
+        };
+        *di = (d_surr + d_ent + d_kl) as f32;
     }
     (loss, d)
 }
@@ -305,6 +388,70 @@ pub fn normalize(advantages: &mut [f32]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A stopping rule is only as good as the quantity it stops on: zero
+    /// when the policy has not moved, never negative, and growing with the
+    /// distance travelled in either direction.
+    #[test]
+    fn the_drift_measures_travel_from_the_policy_that_collected_the_step() {
+        let scores = [1.0f32, 0.0, 0.0];
+        let p = crate::loss::softmax(&scores);
+
+        // Collected by this very policy: no travel.
+        let still = Act { old_prob: p[0], action: 0, advantage: 1.0 };
+        assert!(drift(&scores, &still) < 1e-6, "{}", drift(&scores, &still));
+
+        // Moved, in either direction, costs something - and the estimator is
+        // never negative, which a stopping rule built on `-ln r` would be.
+        let up = Act { old_prob: p[0] * 0.5, action: 0, advantage: 1.0 };
+        let down = Act { old_prob: (p[0] * 2.0).min(1.0), action: 0, advantage: 1.0 };
+        assert!(drift(&scores, &up) > 0.0);
+        assert!(drift(&scores, &down) > 0.0);
+
+        // And further is further.
+        let far = Act { old_prob: p[0] * 0.1, action: 0, advantage: 1.0 };
+        assert!(drift(&scores, &far) > drift(&scores, &up));
+    }
+
+    /// The anchor has to pull toward the reference and nowhere else: off by
+    /// default, zero when the policy already agrees with the reference, and
+    /// pushing the taken action's score DOWN when the policy has drifted onto
+    /// something the reference thought unlikely.
+    #[test]
+    fn the_anchor_pulls_a_drifted_policy_back_and_is_otherwise_silent() {
+        let act = Act { old_prob: 0.5, action: 0, advantage: 1.0 };
+        let scores = [2.0f32, 0.0, 0.0];
+        let here = crate::loss::softmax(&scores);
+
+        // Off unless asked for, and then bit-identical to the unanchored form.
+        let off = PolicyConfig { anchor: 0.0, ..PolicyConfig::default() };
+        let (l0, g0) = choice_loss(&scores, &act, &off);
+        let (l1, g1) = choice_loss_anchored(&scores, &act, Some(&here), &off);
+        assert_eq!(l0, l1);
+        assert_eq!(g0, g1);
+
+        // Anchored to ITSELF costs nothing and bends nothing: KL(p || p) = 0.
+        let on = PolicyConfig { anchor: 0.5, ..PolicyConfig::default() };
+        let (l2, g2) = choice_loss_anchored(&scores, &act, Some(&here), &on);
+        assert!((l2 - l0).abs() < 1e-5, "{l2} vs {l0}");
+        for (a, b) in g2.iter().zip(&g0) {
+            assert!((a - b).abs() < 1e-5, "{a} vs {b}");
+        }
+
+        // Anchored to a reference that preferred a DIFFERENT option: the loss
+        // rises, and the gradient on the option the policy has drifted onto
+        // is more positive than it was - which is the direction that lowers
+        // its score.
+        let elsewhere = crate::loss::softmax(&[0.0f32, 2.0, 0.0]);
+        let (l3, g3) = choice_loss_anchored(&scores, &act, Some(&elsewhere), &on);
+        assert!(l3 > l0, "diverging from the reference has to cost: {l3} vs {l0}");
+        assert!(
+            g3[0] > g0[0],
+            "the drifted option's score should be pushed down: {} vs {}",
+            g3[0],
+            g0[0]
+        );
+    }
     use crate::primitives::sigmoid;
 
     fn fd(f: impl Fn(&[f32]) -> f32, z: &[f32]) -> Vec<f32> {
@@ -345,7 +492,7 @@ mod tests {
         let rates = [0.7f32, 0.2];
         // No discount and no entropy: this is a statement about the REWARD,
         // and both of those deliberately move the optimum (see below).
-        let cfg = PolicyConfig { clip: 1e9, entropy: 0.0, gamma: 1.0 };
+        let cfg = PolicyConfig { clip: 1e9, entropy: 0.0, gamma: 1.0, anchor: 0.0, target_kl: 0.02 };
         let mut z = [0.0f32; 2];
         let mut rng = data::rng::Rng::new(4);
         let n = 60000;
@@ -397,7 +544,7 @@ mod tests {
 
     #[test]
     fn the_policy_gradient_matches_finite_differences() {
-        let cfg = PolicyConfig { clip: 1e9, entropy: 0.05, gamma: 0.9 };
+        let cfg = PolicyConfig { clip: 1e9, entropy: 0.05, gamma: 0.9, anchor: 0.0, target_kl: 0.02 };
         for (z, turn, what) in [
             ([0.3f32], Turn { old_prob: 0.57, outcome: true, turns_to_end: 0 }, "converted, at the end"),
             ([-0.4], Turn { old_prob: 0.40, outcome: false, turns_to_end: 4 }, "lost, discounted"),
@@ -412,7 +559,7 @@ mod tests {
     /// other: a policy that has drifted must still be able to come back.
     #[test]
     fn the_trust_region_stops_travel_but_not_return() {
-        let cfg = PolicyConfig { clip: 0.2, entropy: 0.0, gamma: 1.0 };
+        let cfg = PolicyConfig { clip: 0.2, entropy: 0.0, gamma: 1.0, anchor: 0.0, target_kl: 0.02 };
         // Committed ~0.9, collected at 0.5: the ratio is ~1.8, far above the
         // band. The outcome says go higher still, so the update must stop.
         let z = [2.2f32];
@@ -427,7 +574,7 @@ mod tests {
     /// The discount has to actually weight a turn by its distance from the end.
     #[test]
     fn the_discount_weights_turns_by_distance_to_the_outcome() {
-        let cfg = PolicyConfig { clip: 1e9, entropy: 0.0, gamma: 0.5 };
+        let cfg = PolicyConfig { clip: 1e9, entropy: 0.0, gamma: 0.5, anchor: 0.0, target_kl: 0.02 };
         let z = [0.2f32];
         let near = policy_loss(&z, &Turn { old_prob: 0.55, outcome: true, turns_to_end: 0 }, &cfg).1[0].abs();
         let far = policy_loss(&z, &Turn { old_prob: 0.55, outcome: true, turns_to_end: 3 }, &cfg).1[0].abs();
@@ -440,7 +587,7 @@ mod tests {
     #[test]
     fn entropy_regularization_pulls_toward_the_middle() {
         let settle = |beta: f32| -> f32 {
-            let cfg = PolicyConfig { clip: 1e9, entropy: beta, gamma: 1.0 };
+            let cfg = PolicyConfig { clip: 1e9, entropy: beta, gamma: 1.0, anchor: 0.0, target_kl: 0.02 };
             let mut z = [0.0f32];
             let mut rng = data::rng::Rng::new(6);
             for t in 0..40000 {
@@ -460,7 +607,7 @@ mod tests {
     /// not have, and in both PPO branches.
     #[test]
     fn the_choice_gradient_matches_finite_differences() {
-        let cfg = PolicyConfig { clip: 0.2, entropy: 0.05, gamma: 1.0 };
+        let cfg = PolicyConfig { clip: 0.2, entropy: 0.05, gamma: 1.0, anchor: 0.0, target_kl: 0.02 };
         for (z, act, what) in [
             (vec![0.3f32, -0.4, 0.9], Act { old_prob: 0.30, action: 0, advantage: 1.2 }, "in region, positive"),
             (vec![0.3f32, -0.4, 0.9], Act { old_prob: 0.30, action: 2, advantage: -0.8 }, "in region, negative"),
@@ -481,7 +628,7 @@ mod tests {
     /// whole reason a rollout may be reused for several passes.
     #[test]
     fn a_clipped_choice_ratio_stops_the_gradient() {
-        let cfg = PolicyConfig { clip: 0.2, entropy: 0.0, gamma: 1.0 };
+        let cfg = PolicyConfig { clip: 0.2, entropy: 0.0, gamma: 1.0, anchor: 0.0, target_kl: 0.02 };
         let z = vec![4.0f32, 0.0, 0.0];
         let act = Act { old_prob: 0.02, action: 0, advantage: 1.0 };
         let (_, d) = choice_loss(&z, &act, &cfg);
@@ -503,7 +650,7 @@ mod tests {
     #[test]
     fn the_control_optimum_is_the_best_action() {
         let payouts = [0.1f32, 0.9, 0.3];
-        let cfg = PolicyConfig { clip: 0.2, entropy: 0.001, gamma: 1.0 };
+        let cfg = PolicyConfig { clip: 0.2, entropy: 0.001, gamma: 1.0, anchor: 0.0, target_kl: 0.02 };
         let mut z = vec![0.0f32; 3];
         let mut rng = data::rng::Rng::new(8);
         for t in 0..8000 {

@@ -165,6 +165,12 @@ pub struct ControlOptions {
     /// Fraction of the teacher's episodes to clone, best first.
     pub warmup_keep: f32,
     pub entropy: Option<f32>,
+    /// Weight on staying near the policy the warm start produced. See
+    /// `decide::policy::PolicyConfig::anchor`.
+    pub anchor: Option<f32>,
+    /// How far the policy may drift from the one that collected a batch
+    /// before the rest of the passes over it are abandoned.
+    pub target_kl: Option<f32>,
     pub seed: u64,
     /// Fine-tune the encoder as well as the head.
     pub train_encoder: bool,
@@ -189,6 +195,8 @@ impl ControlOptions {
             warmup_epochs: d.warmup_epochs,
             warmup_keep: d.warmup_keep,
             entropy: None,
+            anchor: None,
+            target_kl: None,
             seed: d.seed,
             train_encoder: !d.freeze_encoder,
         }
@@ -208,6 +216,12 @@ impl ControlOptions {
             .seed(self.seed);
         if let Some(e) = self.entropy {
             s.policy.entropy = e;
+        }
+        if let Some(a) = self.anchor {
+            s.policy.anchor = a;
+        }
+        if let Some(k) = self.target_kl {
+            s.policy.target_kl = k;
         }
         s
     }
@@ -234,6 +248,14 @@ impl ControlOptions {
             self.entropy =
                 Some(e.parse().map_err(|_| format!("--entropy: {e:?} is not a number"))?);
         }
+        if let Some(a) = args.take_str("--anchor") {
+            self.anchor =
+                Some(a.parse().map_err(|_| format!("--anchor: {a:?} is not a number"))?);
+        }
+        if let Some(k) = args.take_str("--target-kl") {
+            self.target_kl =
+                Some(k.parse().map_err(|_| format!("--target-kl: {k:?} is not a number"))?);
+        }
         self.seed = args.u64_or("--seed", self.seed);
         self.train_encoder |= args.take_flag("--train-encoder");
         Ok(self)
@@ -258,6 +280,17 @@ impl Options for ControlOptions {
   --warmup-epochs N   passes over those demonstrations
   --warmup-keep F     fraction of scripted episodes to clone, best first  [1.0]
   --entropy F         exploration bonus
+  --anchor F          hold the policy near the one the warm start produced,
+                      by the divergence between them. A policy gradient
+                      started from a cloned policy has no reason to stay near
+                      it: the two phases optimise different objectives, and
+                      where return is sparse and noisy the pull is mostly
+                      noise. 0 (the default) is no anchor
+  --target-kl F       abandon the remaining passes over a batch once the
+                      policy has moved this far from the one that collected
+                      it. Clipping alone is not a trust region: it silences
+                      the samples that have travelled while the rest keep
+                      pushing. 0 disables it
   --train-encoder     fine-tune the encoder, not just the head
   --seed N"
     }

@@ -178,6 +178,9 @@ struct Step {
     kept: Option<decide::decide::Features>,
     /// What the critic should have predicted here.
     value_target: f32,
+    /// What the policy the warm start produced would have done here. Filled
+    /// in once per rollout, after collection. See `PolicyConfig::anchor`.
+    reference: Option<Vec<f32>>,
 }
 
 /// What one rollout produced.
@@ -198,6 +201,9 @@ pub struct ControlPipeline<E: Env> {
     rng: data::rng::Rng,
     /// Advances across every rollout so a run never replays one episode.
     episode_seed: u64,
+    /// The head as the warm start left it - the policy the anchor holds to.
+    /// `None` when there was no warm start, or no anchor asked for.
+    reference: Option<Vec<(String, Vec<f32>)>>,
     last: Rollout,
     critic: Critic,
     /// Mean squared error of the last critic fit - whether the baseline is
@@ -364,6 +370,7 @@ impl<E: Env> ControlPipeline<E> {
                 feature,
                 kept,
                 value_target: 0.0,
+                reference: None,
             });
             rewards.push(reward);
             total += reward;
@@ -545,6 +552,7 @@ impl<E: Env> ControlPipeline<E> {
         // output layer starts at zero), so the advantages degrade exactly to
         // return-minus-batch-mean and nothing is worse than it was before the
         // critic existed.
+        self.note_reference(&mut batch)?;
         let features: Vec<Vec<f32>> = batch.iter().map(|s| s.feature.clone()).collect();
         let targets: Vec<f32> = batch.iter().map(|s| s.value_target).collect();
         self.critic_mse = self.critic.fit(&features, &targets, 60, 0.02, 1e-5);
@@ -558,6 +566,38 @@ impl<E: Env> ControlPipeline<E> {
         Ok((batch, stats))
     }
 
+    /// What the reference policy would have done at every step of a batch.
+    ///
+    /// Two weight swaps and one forward pass over the batch, once per
+    /// iteration - not per epoch, because the reference does not move. The
+    /// head is small and the encoder's output was kept when the step was
+    /// taken, so this is cheap next to the rollout that produced the batch.
+    fn note_reference(&mut self, batch: &mut [Step]) -> Result<()> {
+        let Some(reference) = self.reference.clone() else {
+            return Ok(());
+        };
+        let live = self.model.head_weights();
+        self.model.set_head_weights(&reference);
+        let mut failed = None;
+        for s in batch.iter_mut() {
+            let Some(f) = &s.kept else { continue };
+            match self.model.score_kept(f) {
+                Ok(scores) => s.reference = Some(decide::loss::softmax(&scores)),
+                Err(e) => {
+                    failed = Some(e);
+                    break;
+                }
+            }
+        }
+        // The live weights go back whatever happened: leaving the reference
+        // installed would silently undo the whole run.
+        self.model.set_head_weights(&live);
+        match failed {
+            Some(e) => Err(Error::Backend(e)),
+            None => Ok(()),
+        }
+    }
+
     /// One PPO pass over a collected batch.
     fn update(
         &mut self,
@@ -565,7 +605,7 @@ impl<E: Env> ControlPipeline<E> {
         cfg: &PolicyConfig,
         order: &mut [usize],
         lr_scale: f32,
-    ) -> Result<f32> {
+    ) -> Result<(f32, f32)> {
         // Shuffled, because consecutive steps of one episode are correlated
         // and a sequential pass would walk the policy along a trajectory
         // instead of averaging over the batch.
@@ -575,6 +615,9 @@ impl<E: Env> ControlPipeline<E> {
         }
         let mut loss = 0.0f32;
         let mut seen = 0usize;
+        // How far this pass moved the policy away from the one that collected
+        // the batch. See `PolicyConfig::target_kl`.
+        let mut drift = 0.0f64;
         // MINIBATCHES, not single transitions. One optimizer step per
         // transition is the thing this used to do and it is not policy
         // gradient in any recognizable sense: a single step's advantage is an
@@ -596,18 +639,27 @@ impl<E: Env> ControlPipeline<E> {
                 // was taken, and a frozen encoder cannot have changed it - so
                 // this is the head alone. See `decide::decide::Features` for what
                 // that is worth.
+                let reference = s.reference.as_deref();
+                let mut moved = 0.0f32;
                 loss += match &s.kept {
                     Some(f) => self
                         .model
-                        .accumulate_kept(f, |sc| policy::choice_loss(sc, &act, cfg))
+                        .accumulate_kept(f, |sc| {
+                            moved = policy::drift(sc, &act);
+                            policy::choice_loss_anchored(sc, &act, reference, cfg)
+                        })
                         .map_err(Error::Backend)?,
                     None => {
                         let q = self.question(&s.options);
                         self.model
-                            .accumulate(&s.observation, &q, |sc| policy::choice_loss(sc, &act, cfg))
+                            .accumulate(&s.observation, &q, |sc| {
+                                moved = policy::drift(sc, &act);
+                                policy::choice_loss_anchored(sc, &act, reference, cfg)
+                            })
                             .map_err(Error::Backend)?
                     }
                 };
+                drift += moved as f64;
                 seen += 1;
             }
             // The accumulated sum becomes a mean, so one learning rate means
@@ -618,7 +670,8 @@ impl<E: Env> ControlPipeline<E> {
                 1.0 / chunk.len() as f32,
             );
         }
-        Ok(loss / seen.max(1) as f32)
+        let n = seen.max(1) as f32;
+        Ok((loss / n, (drift / seen.max(1) as f64) as f32))
     }
 
     /// The environment this pipeline acts in.
@@ -722,7 +775,7 @@ impl Default for ControlSpec {
             max_steps: 40,
             // Entropy higher than a supervised run would want: a control policy
             // that commits early stops seeing the states it has not solved.
-            policy: PolicyConfig { clip: 0.2, entropy: 0.02, gamma: 0.99 },
+            policy: PolicyConfig { clip: 0.2, entropy: 0.02, gamma: 0.99, anchor: 0.0, target_kl: 0.02 },
             seed: 0,
             warmup_episodes: 60,
             warmup_epochs: 12,
@@ -813,6 +866,12 @@ impl<E: Env> Stages for ControlPipeline<E> {
                     spec.warmup_episodes, spec.warmup_epochs
                 );
             }
+            // Whatever the cloning produced is what the anchor holds to. Read
+            // once, here, because every later update moves the head away from
+            // it and the point is to remember where it started.
+            if spec.policy.anchor > 0.0 {
+                self.reference = Some(self.model.head_weights());
+            }
         }
         // The BEST iteration's weights, not the last one's.
         //
@@ -837,10 +896,20 @@ impl<E: Env> Stages for ControlPipeline<E> {
             // good, which is most of how a well-initialized policy gets walked
             // away from.
             let lr_scale = 1.0 - (it as f32 / spec.iterations.max(1) as f32);
+            let (mut drift, mut passes) = (0.0f32, 0usize);
             for _ in 0..spec.epochs {
-                last_loss = self.update(&batch, &spec.policy, &mut order, lr_scale)?;
+                let (l, d) = self.update(&batch, &spec.policy, &mut order, lr_scale)?;
+                last_loss = l;
+                drift = d;
+                passes += 1;
                 step += batch.len();
                 log(step, last_loss);
+                // Clipping is not a trust region on its own: it silences the
+                // samples that have moved too far while the rest keep pushing.
+                // This is the guard that actually binds.
+                if spec.policy.target_kl > 0.0 && d > spec.policy.target_kl {
+                    break;
+                }
             }
             self.last = stats;
             println!(
@@ -856,6 +925,13 @@ impl<E: Env> Stages for ControlPipeline<E> {
                     None => String::new(),
                 }
             );
+            if passes < spec.epochs {
+                println!(
+                    "           stopped after {passes} of {} passes: the policy had \
+                     moved {drift:.4} from the one that collected the batch",
+                    spec.epochs
+                );
+            }
             // Ranked on how far the episodes GOT when the environment can
             // say, and on return only when it cannot. See `Env::progress`.
             let rank = stats.mean_progress.unwrap_or(stats.mean_return);
@@ -980,6 +1056,7 @@ impl<E: Env> ControlPipelineBuilder<E> {
             env: self.env,
             rng: data::rng::Rng::new(self.seed ^ 0xc0ffee),
             episode_seed: 0,
+            reference: None,
             last: Rollout::default(),
             critic: Critic::new(cfg_width, CRITIC_HIDDEN, self.seed ^ 0x1c1),
             critic_mse: 0.0,
