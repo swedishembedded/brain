@@ -1203,8 +1203,55 @@ and then going there.
 
 `--approach 0` turns the term off, which is the ablation - same code, same
 maps, same seed, one weight zeroed. The geometry changed in the same commit
-that added the term, so the eleven iterations above are no longer a
-comparison and a fresh pair is needed.
+that added the term, so the eleven iterations above were no longer a
+comparison and a fresh pair was run.
+
+#### The ablation, which says the reward was not the problem
+
+```
+A (approach 0)     warm start 0.83 | post-warm mean 0.670 +- 0.024 (n=11)
+B (approach 0.02)  warm start 0.83 | post-warm mean 0.693 +- 0.032 (n=7)
+
+B - A = +0.023 +- 0.040   ->  no measurable difference
+```
+
+The term does nothing. Both arms fall from the warm start's 0.83 to about
+0.67 and oscillate there with a spread of 0.08, and the shaped arm is inside
+the noise of the unshaped one. The arithmetic about the estimator's horizon
+is still true; fixing it did not help, so it was not what was wrong.
+
+What the arms DO say is worth more than what the term was supposed to say.
+The policy is thrown off the cloned optimum by the FIRST update and then
+random-walks: that is not a reward problem, it is an update-size problem.
+
+#### Clipping is not a trust region
+
+PPO's clipped objective zeroes the gradient of any sample that has already
+moved too far from the policy that collected it. It does nothing about the
+samples still inside the band, and four passes over a two-thousand-step batch
+in minibatches of sixty-four is about a hundred and twenty optimizer steps -
+so an iteration can end a long way from the policy whose data justified it.
+
+Every reference implementation guards this by measuring the divergence and
+abandoning the rest of the passes. Spinning Up calls it early stopping and
+defaults the threshold to 0.01, and is explicit that the clipped objective
+alone does not keep a policy inside a trust region. This had no version of
+it, which is the actual defect.
+
+`--target-kl` is that guard, on by default at 0.02, measured with Schulman's
+k3 estimator `(r - 1) - ln r` on the action taken - unbiased, never negative,
+and quieter than `-ln r`, which matters because a stopping rule built on
+something that can come out negative stops on noise. When it fires, the run
+says how many passes it managed and how far the policy had gone.
+
+`--anchor` is the other half and is off by default: the full
+`KL(pi || reference)` against the policy the warm start produced. A policy
+gradient started from a cloned policy has no reason to stay near it, because
+the two phases optimise different objectives - and where return is sparse and
+its estimate noisy, what is left pulling is mostly noise. Holding the update
+near a fixed reference is how RLHF keeps a tuned model near the one it was
+tuned from, and it is the same problem.
+
 
 ### What would move this next
 
