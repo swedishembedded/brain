@@ -66,12 +66,16 @@ use serde::{Deserialize, Serialize};
 
 use data::chat_template::ChatTemplate;
 use data::qwen_tokenizer::QwenBpe;
+use model::rollout::RolloutParams;
+use model::serve::SampleParams;
 use model::{Model, ModelConfig};
 use qwen3::config::LoraCfg;
+pub use rl::env::{Environment, Reward, Step, StepOutcome, Task, Verifier};
 use rl::continual::{self, Curriculum, SftConfig, StudyReport, StudySpec};
 use rl::document::{self, DocumentCurriculum, DocumentStudyConfig, DocumentStudyReport, FactBatch, FactProbe, MIN_HELD_OUT_PROBES};
 pub use rl::gate::{Cause, Decision};
 use rl::improve::AdapterMeta;
+use rl::objective::grpo::{Grpo, GrpoConfig};
 
 
 /// The architecture a study runs against when `--arch` is omitted. Named,
@@ -1026,4 +1030,307 @@ impl StudyOutcome {
     pub fn null_gate_cycles(&self) -> Vec<CycleOutcome> {
         self.report.null_gate.records.iter().map(cycle_outcome).collect()
     }
+}
+
+// ---------------------------------------------------------------------------
+// Improve - one GRPO cycle over a caller-supplied Environment/Verifier
+// ---------------------------------------------------------------------------
+
+/// GRPO knobs for [`Improve::run`].
+///
+/// `Default` gives a configuration that RUNS, not one that is known to work:
+/// the continuous-learning roadmap's own measurement found a single GRPO
+/// improve cycle scoring 0.271 against a 0.354 untrained baseline on the one
+/// task family tried, while the SFT-driven path ([`DocumentStudy`]) scored
+/// 0.932/0.815 on the same shape of problem. This surface exists so an
+/// arbitrary `Environment`/`Verifier`-driven GRPO loop is reachable at all -
+/// not as a claim that GRPO is the right objective for a given task. Compare
+/// a promoted candidate against a fresh, untrained control before trusting
+/// it.
+#[derive(Clone, Debug)]
+pub struct ImproveOptions {
+    /// Completions sampled per prompt. `1` selects the RFT/STaR degenerate
+    /// path (rejection sampling); `>= 2` is ordinary GRPO.
+    pub group_size: usize,
+    /// PPO-style clip band half-width (`eps` in `clip(r, 1-eps, 1+eps)`).
+    pub clip_eps: f32,
+    /// Rollout sampling temperature. `0.0` is greedy, which starves GRPO of
+    /// the reward variance a group needs to learn anything from - this
+    /// default is deliberately not `0.0`.
+    pub temperature: f32,
+    /// Max completion length sampled per prompt.
+    pub max_new: usize,
+    /// Training steps.
+    pub steps: u32,
+    pub lr: f32,
+    pub seed: u64,
+}
+
+impl Default for ImproveOptions {
+    fn default() -> Self {
+        ImproveOptions { group_size: 4, clip_eps: 0.2, temperature: 0.8, max_new: 32, steps: 100, lr: 5e-3, seed: data::rng::random_seed() }
+    }
+}
+
+/// What one improve cycle decided, and what it produced. SDK-owned, flat
+/// data rather than a re-export of `rl::improve::CycleOutcome` - see
+/// [`CycleOutcome`]'s own doc comment for why.
+#[derive(Debug)]
+pub struct ImproveOutcome {
+    pub decision: Decision,
+    pub p_value: f64,
+    pub effect_size: f64,
+    /// `anchor_incumbent - anchor_candidate`; positive means regression.
+    /// Always `0.0` here - a single improve cycle has no retention suite to
+    /// pool (see [`Improve::run`]'s own doc comment).
+    pub anchor_delta: f64,
+    /// Always `0.0` for the same reason.
+    pub worst_block_delta: f64,
+    pub entropy_ratio: f64,
+    /// The published adapter, when the gate promoted.
+    pub adapter_path: Option<PathBuf>,
+}
+
+/// A configured GRPO improve cycle, ready to run against a caller-supplied
+/// [`Environment`]/[`Verifier`].
+///
+/// Trains one LoRA candidate from `weights` over `env`'s tasks, scored by
+/// `verifier`, gates the result against the untouched incumbent on a
+/// SEPARATE task draw ([`Improve::held_out_seed`]), and publishes a
+/// versioned adapter only on promote - the same `rl::improve::cycle`
+/// [`DocumentStudy`] is built on top of, exposed directly here instead of
+/// behind a fixed document curriculum. One cycle, one comparison: a caller
+/// that wants a multi-cycle retention study over its own task family should
+/// reach for `rl::continual::run_study` directly (not yet an SDK surface);
+/// this is the single-shot primitive underneath it.
+///
+/// Read [`ImproveOptions`]'s own doc comment before trusting a promote.
+pub struct Improve {
+    arch: String,
+    weights: String,
+    models_dir: Option<String>,
+    adapter_dir: Option<PathBuf>,
+    work_dir: Option<PathBuf>,
+    rank: u32,
+    alpha: Option<f32>,
+    seed: u64,
+    held_out_seed: u64,
+}
+
+impl std::fmt::Debug for Improve {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Improve").field("arch", &self.arch).field("weights", &self.weights).field("rank", &self.rank).finish_non_exhaustive()
+    }
+}
+
+impl Improve {
+    /// An improve cycle against `weights` - a checkpoint path, a model
+    /// directory, or a `vendor/repo` reference resolved through the model
+    /// store. Both seeds are drawn randomly here rather than defaulted to a
+    /// constant, for the same reason [`DocumentStudy::from_pretrained`]
+    /// does: a run whose seed nobody chose should not silently be the same
+    /// run every time.
+    pub fn from_pretrained(weights: impl Into<String>) -> Result<Improve> {
+        Ok(Improve {
+            arch: DEFAULT_ARCH.to_string(),
+            weights: weights.into(),
+            models_dir: None,
+            adapter_dir: None,
+            work_dir: None,
+            rank: 8,
+            alpha: None,
+            seed: data::rng::random_seed(),
+            held_out_seed: data::rng::random_seed(),
+        })
+    }
+    /// Which architecture's `Model` impl to monomorphise for. See [`Improve::architectures`].
+    pub fn arch(mut self, arch: impl Into<String>) -> Self {
+        self.arch = arch.into();
+        self
+    }
+    /// Where a PROMOTED adapter is published. Required.
+    pub fn adapter_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.adapter_dir = Some(dir.into());
+        self
+    }
+    /// Scratch space for this cycle's own LoRA-overlaid base and training
+    /// checkpoint.
+    pub fn work_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.work_dir = Some(dir.into());
+        self
+    }
+    /// The model store to resolve `weights` against, when it is a reference.
+    pub fn models_dir(mut self, dir: impl Into<String>) -> Self {
+        self.models_dir = Some(dir.into());
+        self
+    }
+    /// LoRA rank. `alpha` defaults to `2 * rank` unless set separately.
+    pub fn lora(mut self, rank: u32) -> Self {
+        self.rank = rank;
+        self
+    }
+    /// LoRA alpha, overriding the `2 * rank` default.
+    pub fn alpha(mut self, alpha: f32) -> Self {
+        self.alpha = Some(alpha);
+        self
+    }
+    /// Pin the training seed, making the run reproducible.
+    pub fn seed(mut self, seed: u64) -> Self {
+        self.seed = seed;
+        self
+    }
+    /// Pin the seed the gate's held-out probe is drawn with - deliberately a
+    /// SEPARATE knob from `seed`, so the eval draw cannot silently collide
+    /// with whatever the training draw happened to sample.
+    pub fn held_out_seed(mut self, seed: u64) -> Self {
+        self.held_out_seed = seed;
+        self
+    }
+    /// Every registered architecture id.
+    pub fn architectures() -> Vec<&'static str> {
+        ARCHS.iter().map(|(n, _)| *n).collect()
+    }
+
+    /// Run one improve cycle: train `opts.group_size`-way GRPO over `env`'s
+    /// tasks scored by `verifier`, gate the trained candidate against the
+    /// untouched incumbent on a held-out draw of `env`'s own tasks, and
+    /// publish a versioned adapter only on promote.
+    pub fn run<E: Environment, V: Verifier + Clone>(&self, env: E, verifier: V, opts: &ImproveOptions) -> Result<ImproveOutcome> {
+        let adapter_dir = self
+            .adapter_dir
+            .as_ref()
+            .ok_or_else(|| Error::MissingArgument("adapter_dir: an improve cycle needs somewhere to publish a promoted adapter".into()))?;
+        if self.rank == 0 {
+            return Err(Error::MissingArgument("lora rank must be > 0: an improve cycle trains a LoRA adapter".into()));
+        }
+
+        let store_root = loader::model_dir::resolve(self.models_dir.as_deref());
+        let (base_weights, _base_dir, base_id) = resolve_base(&self.weights, store_root.as_deref()).map_err(Error::ModelNotFound)?;
+
+        let work_dir = self.work_dir.clone().unwrap_or_else(|| std::env::temp_dir().join("brain-improve"));
+        std::fs::create_dir_all(&work_dir).map_err(|e| Error::Backend(format!("{}: {e}", work_dir.display())))?;
+
+        let outcome = match self.arch.as_str() {
+            "qwen3" => run_improve_for::<Qwen3, E, V>(self, env, verifier, opts, &base_weights, &base_id, &work_dir),
+            "qwen35" => run_improve_for::<Qwen35, E, V>(self, env, verifier, opts, &base_weights, &base_id, &work_dir),
+            "qwen35moe" => run_improve_for::<Qwen35Moe, E, V>(self, env, verifier, opts, &base_weights, &base_id, &work_dir),
+            other => return Err(Error::UnsupportedArchitecture(format!("{other}: no improve cycle is registered for it (known: {})", arch_names()))),
+        }
+        .map_err(|e| Error::Backend(e.to_string()))?;
+
+        std::fs::create_dir_all(adapter_dir).map_err(|e| Error::Backend(format!("{}: {e}", adapter_dir.display())))?;
+        let published = match (outcome.decision, &outcome.adapter_path) {
+            (Decision::Promote, Some(staged)) => Some(publish_adapter(staged, adapter_dir).map_err(|e| Error::Backend(format!("publishing {}: {e}", staged.display())))?),
+            _ => None,
+        };
+
+        Ok(ImproveOutcome {
+            decision: outcome.decision,
+            p_value: outcome.report.p_value,
+            effect_size: outcome.report.effect_size,
+            anchor_delta: outcome.report.anchor_delta,
+            worst_block_delta: outcome.report.worst_block_delta,
+            entropy_ratio: outcome.report.entropy_ratio,
+            adapter_path: published,
+        })
+    }
+}
+
+/// One [`Improve::run`] call, monomorphised for architecture `A`. Reuses
+/// [`StudyArch`] wholesale (an improve cycle needs exactly the same two
+/// facts about an architecture a document study does: its LoRA overlay, and
+/// how to fold that overlay into a base config) rather than a second,
+/// near-identical trait - passing `block = base_cfg.block_size()` makes
+/// [`StudyArch::study_config`]'s widening a no-op, since an improve cycle
+/// does not (yet) grow the context beyond what the base already has.
+#[allow(clippy::too_many_arguments)]
+fn run_improve_for<A: StudyArch, E: Environment, V: Verifier + Clone>(
+    imp: &Improve,
+    env: E,
+    verifier: V,
+    opts: &ImproveOptions,
+    base_weights: &Path,
+    base_id: &str,
+    work_dir: &Path,
+) -> std::io::Result<rl::improve::CycleOutcome> {
+    let base_cfg = <<A::M as Model>::Config as ModelConfig>::from_json(&checkpoint::read_config(base_weights.to_str().unwrap_or_default()));
+    let alpha = imp.alpha.unwrap_or(imp.rank as f32 * 2.0);
+    let lora = A::lora(imp.rank, alpha);
+    let targets = lora.targets.clone();
+    let block = base_cfg.block_size();
+    let study_cfg = A::study_config(&base_cfg, lora, block);
+
+    // The cycle's own base: the caller's weights plus a ZERO adapter - same
+    // reasoning as `DocumentStudy`'s `study-base.safetensors` (this module's
+    // doc comment on `run_for` explains why the caller's own file is never
+    // written to).
+    let base_with_lora = work_dir.join("improve-base.safetensors");
+    continual::overlay_adapter::<A::M>(base_weights, &study_cfg, imp.seed, &base_with_lora)?;
+
+    let env_name = env.name().to_string();
+    let held_out = env.tasks(imp.held_out_seed);
+    let eval_verifier = verifier.clone();
+
+    let rollout = RolloutParams { max_new: opts.max_new, sample: SampleParams { temp: opts.temperature, ..SampleParams::greedy() }, eos: None };
+    let grpo_cfg = GrpoConfig { group_size: opts.group_size, clip_eps: opts.clip_eps, kl_beta: 0.0, seq_len: block as usize, rollout, max_attempts: 8 };
+    let objective = Grpo::new(env, verifier, grpo_cfg);
+
+    let fit = model::FitOpts {
+        steps: opts.steps,
+        batch_size: 1,
+        block_size: block,
+        lr: opts.lr,
+        min_lr: opts.lr * 0.1,
+        warmup: 0,
+        decay_iters: opts.steps,
+        weight_decay: 0.0,
+        grad_clip: 1.0,
+        grad_accum: opts.group_size as u32,
+        eval_interval: 0,
+        eval_batches: 0,
+        seed: opts.seed,
+        checkpoint_secs: 0,
+        mask_before: None,
+        mask_per_line: false,
+        align_to_lines: false,
+    };
+
+    let train_out = work_dir.join("train.safetensors");
+    let adapter_out_dir = work_dir.join("adapters");
+    // The gate's own decode must be greedy (both arms scored the same way -
+    // see `promote::gate`'s module doc), independent of the TRAINING
+    // rollout's exploration temperature above.
+    let greedy = RolloutParams { max_new: opts.max_new, sample: SampleParams::greedy(), eos: None };
+
+    rl::improve::cycle::<A::M, _>(
+        &base_with_lora,
+        objective,
+        &rl::improve::Evaluation {
+            held_out: &held_out,
+            anchor: &[],
+            verifier: &eval_verifier,
+            rollout: &greedy,
+            gate_cfg: &rl::gate::GateConfig::default(),
+            anchor_block_len: 0,
+        },
+        &fit,
+        rl::improve::CycleArtifacts {
+            train_out: &train_out,
+            adapter_out_dir: &adapter_out_dir,
+            adapter: AdapterMeta { rank: imp.rank, alpha, targets: &targets, family: "qwen", base_id, dataset_id: Some(&env_name) },
+            provenance: rl::improve::ProvenanceInput {
+                regime: "grpo".to_string(),
+                seed: opts.seed,
+                hyperparams: serde_json::json!({
+                    "group_size": opts.group_size,
+                    "clip_eps": opts.clip_eps,
+                    "temperature": opts.temperature,
+                    "steps": opts.steps,
+                    "lr": opts.lr,
+                }),
+                environment: env_name.clone(),
+                cycle: 0,
+            },
+        },
+    )
 }
