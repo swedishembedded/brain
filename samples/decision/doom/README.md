@@ -539,26 +539,40 @@ often cannot carry the student past it - only *to* it, which is where the
 student already was. Cloning, DAgger and PPO over both now land in the same
 place for a measured reason.
 
-**4. Is there room above the teacher?** Yes, and it is small. `doom whatif` goes
-back to decisions the policy faced, takes something other than what the teacher
-chose, lets the teacher play the rest out, and scores the whole trajectory -
-prefix included - with the same gauge the run is judged on. Over 159 decisions,
-three candidates each:
+**4. Is there room above the teacher?** Yes, and it is concentrated. `doom
+whatif` goes back to decisions the policy faced, takes something other than what
+the teacher chose, lets the teacher play the rest out, and scores the whole
+trajectory - prefix included - with the same gauge the run is judged on. Two
+runs of 20 episodes, three candidates at each of ~160 decisions, differing only
+in how long the departure from the teacher is held before handing back:
 
-```text
-the choice was worth 0.018 of score between its best and worst option
-some alternative beat the teacher at 13% of them, by 0.064 when it did
-picking the best of what was offered would gain 0.008 a decision over the teacher
-```
+| held for | the options all led to the same place | some alternative beat the teacher | by | gain a decision |
+|---|---:|---:|---:|---:|
+| 1 decision | - | 13% | 0.064 | 0.008 |
+| 30 decisions | 71% of the time | **17%** | **0.072** | **0.012** |
 
-An earlier 22-decision sample of the same measurement said 0.003 / 9% / 0.001,
-which is a warning about reading small samples rather than a second result.
+Read the first column first. At **71% of decisions every candidate leads to the
+same place**, so no method can improve them and no method should be judged on
+them. Of the 29% where the choice has a consequence at all, the teacher fails to
+pick the best available at roughly **three in five** - worth 0.072 of a score
+whose full range is 1.25.
 
-That is the teacher's cost-to-go, and it is not flat. At roughly one decision in
-eight there is a better action available than the one the teacher takes, worth
-0.064 of a score whose full range is 1.25. This is the only signal measured here
-that is not bounded above by the teacher, and it is what a ranker trained on
-measured outcomes rather than on the teacher's choice would be learning from.
+Holding the deviation longer raises every number, which is the point of the
+dial: a teacher good at recovering undoes whatever one decision did, so a
+single-action deviation understates by construction. It is also why an earlier
+22-decision sample of this measurement said 0.003 / 9% / 0.001 and had to be
+discarded - a warning about reading small samples, not a second result.
+
+This is the only signal measured in this sample that is **not bounded above by
+the teacher**, and it is what a ranker trained on measured outcomes rather than
+on the teacher's choice would be learning from.
+
+`--wide` draws the alternatives at random instead of from what the policy ranks
+highest. The default is the right set for deciding whether to train on this,
+since it is what an update would move toward; it is the wrong set for asking
+whether room exists, because a policy fitted to the teacher ranks the teacher's
+near-duplicates highest and so asks about the actions least likely to lead
+anywhere different.
 
 **Going back is a real snapshot, not a replay of the actions that led there.**
 That distinction is load-bearing: the observation reads `ML_MAPPED` to decide
@@ -571,8 +585,8 @@ path to memory instead of a slot, and that format archives line flags.
 `Env::hold` and `Env::resume` are the SDK's side; `DoomEnv` restores what lives
 on the client too, because half a run restored is worse than no restore - it
 looks like an answer. The measurement checks itself: after every restore the
-options offered must be the options offered before, and across 66 restores the
-numbers with the check on and off were byte-identical.
+options offered must be the options offered before, or the decision is discarded
+and counted. Across both runs above, 966 restores, it never fired.
 
 ### Two things the policy demonstrably learned
 
@@ -617,8 +631,9 @@ closer to "this pool" than to "burning floor".
   generated scenarios ends at the teacher's score. Six interventions on the
   learner were measured and none improved it. What the sample demonstrates today
   is an environment, an observation, and a policy that **imitates** a
-  hand-written teacher - not one that improves on it. The measurement in part 4
-  above says there is room to improve on it; nothing here has taken it yet.
+  hand-written teacher - not one that improves on it. Part 4 above measures the
+  room that exists to improve on it - the teacher is beatable at about one
+  decision in six, worth 0.072 - and nothing here has taken it yet.
 - **Generalization is not proven.** A policy trained on E1M1-E1M3 does not
   finish E1M4, and neither does the teacher.
 - **The policy finishes E1M1 from the spawn but does not beat the script.** Six
