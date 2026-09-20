@@ -201,13 +201,20 @@ fn gather_unmasked(spec: &str, sel: &FrameSel) -> Vec<imaging::Rgb8> {
 }
 
 /// Load + preprocess frames; returns (raw [0,1] CHW concat, frame count, grid).
-fn load_frames(spec: &str, cfg: &MirrorConfig, sel: &FrameSel, mask: Option<&str>) -> (Vec<f32>, usize, usize, usize) {
+fn load_frames(spec: &str, cfg: &MirrorConfig, sel: &FrameSel, mask: Option<&str>, target: usize) -> (Vec<f32>, usize, usize, usize) {
     let images = gather(spec, sel, mask);
     let mut all = Vec::new();
     let mut grid = None;
     for img in &images {
         let (iw, ih) = (img.w as usize, img.h as usize);
-        let target = preprocess::adaptive_target(iw, ih, cfg.img, cfg.patch);
+        // `cfg.img` is the checkpoint's NATIVE grid, the size its position
+        // embedding was trained at - not a ceiling on inference. The model
+        // interpolates that embedding to whatever grid it is handed
+        // (`Mirror::new`, torch-bicubic parity), which is what WorldMirror-2's
+        // normalized RoPE was added to support. Using the native size as the
+        // preprocessing target held every reconstruction to 518 and roughly a
+        // third of the reference's sample count.
+        let target = preprocess::adaptive_target(iw, ih, target, cfg.patch);
         let (nw, nh) = preprocess::resize_dims(iw, ih, target, cfg.patch);
         let resized = preprocess::resize_bicubic(img, nw, nh);
         let (cw, ch) = (nw.min(target), nh.min(target));
@@ -243,10 +250,12 @@ fn with_scene<R>(
     scale_q: f32,
     sel: &FrameSel,
     mask: Option<&str>,
+    target: usize,
     k: impl FnOnce(&Gpu, &Mirror, &Splats, &[splat::types::Camera], usize, u32, u32) -> R,
 ) -> R {
     let cfg = MirrorConfig::default();
-    let (frames, s, hp, wp) = load_frames(images, &cfg, sel, mask);
+    let (frames, s, hp, wp) = load_frames(images, &cfg, sel, mask, target);
+
     let (w, h) = ((wp * cfg.patch) as u32, (hp * cfg.patch) as u32);
     eprintln!("loading {weights} …");
     let init = worldmirror2::import::load_weights(weights, &cfg).unwrap_or_else(|e| {
@@ -257,6 +266,24 @@ fn with_scene<R>(
     let pipes: Vec<(&str, &str)> =
         worldmirror2::model::PIPELINES.iter().chain(splat::PIPELINES.iter()).copied().collect();
     let gpu = Gpu::new(&pipes);
+    // The trunk's global attention is quadratic in TOTAL tokens, and one
+    // attention buffer has to fit a single storage binding. Refuse in terms of
+    // the two knobs that fix it rather than failing inside a bind group.
+    let tokens = s * hp * wp;
+    let need = (tokens as u64).saturating_mul(tokens as u64).saturating_mul(4);
+    let limit = gpu.max_storage_binding_bytes();
+    if limit > 0 && need > limit {
+        eprintln!(
+            "{s} frame(s) at target size {target} is {tokens} trunk tokens, whose global attention \
+             needs {:.2} GiB in one buffer against this device's {:.2} GiB binding limit. Lower \
+             --target-size (the reference default is 952, the checkpoint's native grid is {}), or \
+             use fewer frames (--max-frames/--stride).",
+            need as f64 / (1u64 << 30) as f64,
+            limit as f64 / (1u64 << 30) as f64,
+            cfg.img
+        );
+        std::process::exit(2);
+    }
     let mut model = Mirror::new(gpu, cfg, &init, 0);
     drop(init);
     eprintln!("running WorldMirror-2 on {s} frame(s) at {w}x{h} …");
@@ -402,6 +429,9 @@ fn infer(argv: &[String]) {
     let gs_mask = a.f32_or("--gs-mask-threshold", 0.5);
     let edge_rtol = a.f32_or("--edge-depth-threshold", 0.03);
     let scale_q = a.f32_or("--max-scale-quantile", 0.98);
+    // The reference's inference default, independent of the checkpoint's
+    // native grid. Roughly 3.4x the samples of 518 on a square image.
+    let target = a.usize_or("--target-size", 952);
     // Frame selection, for a capture longer than a handful of stills. A video
     // gets a default cap because the trunk's global attention is quadratic in
     // frame count; an explicit directory of photographs is left alone.
@@ -416,7 +446,7 @@ fn infer(argv: &[String]) {
 
     std::fs::create_dir_all(&out_dir).ok();
     let ply_path = ply.unwrap_or_else(|| format!("{out_dir}/scene.ply"));
-    with_scene(&weights, &images, min_op, max_depth, prune, gs_mask, edge_rtol, scale_q, &sel, mask.as_deref(), |gpu, model, splats, cams, s, w, h| {
+    with_scene(&weights, &images, min_op, max_depth, prune, gs_mask, edge_rtol, scale_q, &sel, mask.as_deref(), target, |gpu, model, splats, cams, s, w, h| {
         splat::ply::write(&ply_path, splats).unwrap_or_else(|e| {
             eprintln!("PLY write failed: {e}");
             std::process::exit(1);
@@ -453,6 +483,9 @@ fn demo(argv: &[String]) {
     let gs_mask = a.f32_or("--gs-mask-threshold", 0.5);
     let edge_rtol = a.f32_or("--edge-depth-threshold", 0.03);
     let scale_q = a.f32_or("--max-scale-quantile", 0.98);
+    // The reference's inference default, independent of the checkpoint's
+    // native grid. Roughly 3.4x the samples of 518 on a square image.
+    let target = a.usize_or("--target-size", 952);
     // Frame selection, for a capture longer than a handful of stills. A video
     // gets a default cap because the trunk's global attention is quadratic in
     // frame count; an explicit directory of photographs is left alone.
@@ -465,7 +498,7 @@ fn demo(argv: &[String]) {
 
     a.finish();
 
-    let (splats, init_cam) = with_scene(&weights, &images, min_op, max_depth, prune, gs_mask, edge_rtol, scale_q, &sel, mask.as_deref(), |_gpu, _model, splats, cams, _s, _w, _h| {
+    let (splats, init_cam) = with_scene(&weights, &images, min_op, max_depth, prune, gs_mask, edge_rtol, scale_q, &sel, mask.as_deref(), target, |_gpu, _model, splats, cams, _s, _w, _h| {
         let init_cam = cams.first().map(|c| splat::types::Camera {
             width,
             height,
