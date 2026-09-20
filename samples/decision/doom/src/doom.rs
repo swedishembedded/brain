@@ -123,6 +123,10 @@ pub struct Doom {
 pub struct Config {
     pub episode: u32,
     pub map: u32,
+    /// A level the engine BUILDS rather than one it loads, named by the
+    /// scenario it poses. When set, it decides the episode and map, and the
+    /// seed shapes the world rather than only the dice.
+    pub scenario: Option<String>,
     /// 0..=4, sk_baby .. sk_nightmare.
     pub skill: u32,
     /// Whether the route may only cross ground the player has seen. The
@@ -141,6 +145,7 @@ impl Default for Config {
         Config {
             episode: 1,
             map: 1,
+            scenario: None,
             skill: 2,
             engine_window: false,
             full_map: false,
@@ -273,10 +278,12 @@ impl Doom {
             Some(d) => format!(",\"startDistance\":{d}"),
             None => String::new(),
         };
+        let where_ = match &cfg.scenario {
+            Some(name) => format!("\"scenario\":\"{name}\""),
+            None => format!("\"episode\":{},\"map\":{}", cfg.episode, cfg.map),
+        };
         let body = format!(
-            "{{\"episode\":{},\"map\":{},\"skill\":{},\"seed\":{},\"mapKnowledge\":\"{}\"{start}}}",
-            cfg.episode,
-            cfg.map,
+            "{{{where_},\"skill\":{},\"seed\":{},\"mapKnowledge\":\"{}\"{start}}}",
             cfg.skill,
             seed % 65536,
             if cfg.full_map { "full" } else { "seen" }

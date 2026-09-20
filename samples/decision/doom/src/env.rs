@@ -283,6 +283,11 @@ pub struct DoomEnv {
     /// nothing, because a level is chosen by the same seed that already makes
     /// an episode reproducible.
     maps: Vec<u32>,
+    /// The scenarios episodes are drawn from, one per episode, in place of the
+    /// levels. A scenario is a level the engine builds from the episode's own
+    /// seed, so "several levels" becomes "a new level every episode" - which
+    /// is the only arrangement in which memorising the map pays nothing.
+    scenarios: Vec<String>,
     state: State,
     opts: Vec<Option_>,
     /// Where the player was, and for how many steps it has not changed.
@@ -385,6 +390,7 @@ impl DoomEnv {
             mission,
             mission_mix,
             maps: only,
+            scenarios: Vec::new(),
             state: State::parse(EMPTY).expect("the empty state is well formed"),
             opts: Vec::new(),
             last_pos: None,
@@ -430,6 +436,16 @@ impl DoomEnv {
         if !maps.is_empty() {
             self.maps = maps;
         }
+    }
+
+    /// Play generated scenarios instead of the game's own levels, drawing one
+    /// per episode from this list. Overrides `set_maps`.
+    pub fn set_scenarios(&mut self, names: Vec<String>) {
+        self.scenarios = names;
+    }
+
+    pub fn scenarios(&self) -> &[String] {
+        &self.scenarios
     }
 
     /// Turn the reverse curriculum on. See [`DoomEnv::curriculum`].
@@ -861,7 +877,13 @@ impl DoomEnv {
         // Which level, from the same seed. Mixed differently from the mission
         // so that "map 2" and "survive" do not always arrive together, which
         // would make either one unlearnable from the other.
-        self.cfg.map = self.maps[(seed.wrapping_mul(0x9e37_79b9) >> 16) as usize % self.maps.len()];
+        let pick = (seed.wrapping_mul(0x9e37_79b9) >> 16) as usize;
+        if self.scenarios.is_empty() {
+            self.cfg.scenario = None;
+            self.cfg.map = self.maps[pick % self.maps.len()];
+        } else {
+            self.cfg.scenario = Some(self.scenarios[pick % self.scenarios.len()].clone());
+        }
         let start = self.curriculum.then_some(self.start_distance);
         let json = match self.doom.reset(&self.cfg, seed, start) {
             Ok(j) => j,

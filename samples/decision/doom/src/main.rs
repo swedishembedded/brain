@@ -62,6 +62,8 @@ pub struct Args {
     pub cfg: Config,
     /// The levels episodes are drawn from.
     pub maps: Vec<u32>,
+    /// Generated scenarios episodes are drawn from, instead of levels.
+    pub scenarios: Vec<String>,
     pub mission: Mission,
     pub mix: bool,
     pub arena: usize,
@@ -125,6 +127,22 @@ what to play
                       Training on several and scoring on a level that was not
                       among them is the only measurement that separates having
                       learned to play from having learned a level
+  --scenario NAME[,NAME...]
+                      play levels the engine BUILDS instead of the game's own,
+                      one drawn per episode, each a fresh map from that
+                      episode's seed. There is no map to memorise, so what a
+                      policy takes away from them is the skill and not the
+                      level. The game's own levels are then free to be what a
+                      run is SCORED on:
+                        basic                     one monster: see, face, shoot
+                        deadly-corridor           advance under fire
+                        defend-the-center         a ring closing in
+                        defend-the-line           the same, from a wall
+                        health-gathering          a burning floor and medkits
+                        health-gathering-supreme  the same, in a maze
+                        my-way-home               find the armour in a new maze
+                        predict-position          a walking target, a slow rocket
+                        take-cover                dodge, and keep dodging
   --mission clear|speedrun|survive      [clear]
   --full-map          give the route the WHOLE level instead of only the part
                       the player has seen. A control, not a way to play: it
@@ -213,6 +231,7 @@ fn parse_args() -> Result<Args, String> {
         map: args.u32_or("--map", 1),
         skill: args.u32_or("--skill", 2),
         engine_window: false,
+        scenario: None,
         full_map: args.take_flag("--full-map"),
     };
     if cfg.skill > 4 {
@@ -235,9 +254,28 @@ fn parse_args() -> Result<Args, String> {
         }
         None => vec![cfg.map],
     };
+    // A scenario is a level the engine builds. Named here, it replaces the
+    // game's own levels for every episode of the run; the real levels are
+    // then free to be what a run is SCORED on, which is the only role in
+    // which "it has never seen this level" means anything.
+    let scenarios: Vec<String> = match args.take_str("--scenario") {
+        Some(list) => {
+            let out: Vec<String> = list
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if out.is_empty() {
+                return Err("--scenario needs at least one name".into());
+            }
+            out
+        }
+        None => Vec::new(),
+    };
     let parsed = Args {
         command,
         maps,
+        scenarios,
         doom_bin: args.take_str("--doom-bin"),
         wad: args.take_str("--wad"),
         cfg,
@@ -309,6 +347,7 @@ fn run() -> Result<(), String> {
     println!("doom: engine up on port {}, lockstep", game.port);
     let mut env = DoomEnv::new(game, args.cfg.clone(), args.mission, args.mix);
     env.set_maps(args.maps.clone());
+    env.set_scenarios(args.scenarios.clone());
     env.set_arena(args.arena);
     env.set_curriculum(args.curriculum);
     env.set_start_distance(args.start_distance);

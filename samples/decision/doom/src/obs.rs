@@ -83,6 +83,10 @@ pub struct State {
 pub struct Level {
     pub episode: u32,
     pub map: u32,
+    /// Present only when the level was BUILT rather than loaded, naming the
+    /// problem it poses.
+    #[serde(default)]
+    pub scenario: Option<String>,
     pub skill: u32,
     pub tic: i64,
     pub kills: u32,
