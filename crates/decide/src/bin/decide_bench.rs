@@ -54,10 +54,27 @@ struct Stat {
 }
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    // Which card, as a FLAG. A benchmark on a card another process is also
+    // using measures the other process: taken while a second job held GPU 0
+    // at 100%, three consecutive runs of this bench read 22.9, 34.8 and 43.7
+    // ms for the same unchanged code. Pin explicitly and check the card is
+    // idle before believing anything below.
+    if let Some(i) = args.iter().position(|a| a == "--gpu") {
+        let idx: u32 = args.get(i + 1).and_then(|v| v.parse().ok()).expect("--gpu N");
+        args.drain(i..=i + 1);
+        gpu_core::devices::set_ambient_gpu(Some(idx));
+        println!("pinned to GPU {idx}");
+    }
     let n_opts: usize = args.first().and_then(|a| a.parse().ok()).unwrap_or(OPTIONS.len());
     let reps: usize = args.get(1).and_then(|a| a.parse().ok()).unwrap_or(10);
     let state_mult: usize = args.get(2).and_then(|a| a.parse().ok()).unwrap_or(1);
+    // How many times to repeat the message, to profile at a LENGTH rather
+    // than at this file's own. Attention is quadratic in packed rows, so a
+    // profile taken at a hundred rows does not rank the kernels the way a
+    // profile at five hundred does - and five hundred is what a real
+    // observation costs in this repository's DOOM sample.
+    let state_len: usize = args.get(3).and_then(|a| a.parse().ok()).unwrap_or(1);
 
     let tok_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata/decide/tokenizer/tokenizer.json");
     let tok = match data::wordpiece::WordPiece::from_file(tok_path) {
@@ -82,8 +99,9 @@ fn main() {
     // dispatch's params - changes every step. `state_mult` > 1 cycles a set of
     // lengths so the bench pays that cost instead of hiding it behind a shape
     // that repeats.
+    let long = STATE.repeat(state_len.max(1));
     let states: Vec<String> =
-        (0..state_mult.max(1)).map(|i| STATE[..STATE.len() - i * 7].to_string()).collect();
+        (0..state_mult.max(1)).map(|i| long[..long.len() - i * 7].to_string()).collect();
     let state = states[0].clone();
     let q = Question::Choice {
         instructions: INSTRUCTIONS.to_string(),

@@ -112,6 +112,25 @@ struct Bwd {
     steps: Vec<Step>,
 }
 
+
+/// How many workgroups a 128x128-tiled GEMM must produce before it is worth
+/// preferring over the 64x64 tile.
+///
+/// One per SM on this repository's own hardware (30 SMs): below that the
+/// wider tile cannot cover the machine even once, and its better arithmetic
+/// intensity has nowhere to be spent. It is a threshold on OCCUPANCY of the
+/// machine, not on the matrix, which is why it is expressed in workgroups
+/// rather than in rows or columns.
+///
+/// Measured on an IDLE card - which is the only kind worth measuring on. The
+/// first version of this constant was 60, fitted to numbers taken while a
+/// second process held the card at 100%, and under that contention the 64x64
+/// tile appeared to beat the 128x128 one on `qkv` by a factor of four. On a
+/// quiet card it loses to it by 15%. Three consecutive runs of the same
+/// unchanged code read 22.9, 34.8 and 43.7 ms while contended, and 10.52,
+/// 10.55 and 10.60 ms when not.
+const TILE128_MIN_WORKGROUPS: u32 = 30;
+
 pub struct Encoder {
     pub gpu: Gpu,
     k: crate::kern::Ids,
@@ -141,6 +160,11 @@ pub struct Encoder {
     layers: Vec<LayerBufs>,
     scores: DeviceBuffer,
     probs: DeviceBuffer,
+    /// K for one span, transposed to key-minor. See [`block::KeyMinor`]: the
+    /// scores kernel reads K with the key index as its fastest thread index,
+    /// so it wants K laid out that way and this is where the transposed copy
+    /// lives. `[d_model, longest span]`, rewritten once per span.
+    kt: DeviceBuffer,
     steps: Vec<Step>,
     bwd: Option<Bwd>,
 }
@@ -244,6 +268,7 @@ impl Encoder {
             layers,
             scores: gpu.storage(slab),
             probs: gpu.storage(slab),
+            kt: gpu.storage(h * cfg.max_positions as u64),
             steps: Vec::new(),
             bwd: None,
             gpu,
@@ -286,8 +311,43 @@ impl Encoder {
         self.ps.w(name)
     }
 
+    /// Which GEMM kernel, and how many invocations it wants.
+    ///
+    /// The shared `pick_gemm` answers a TRAINING-shaped question - is this
+    /// output big enough to be worth a tile at all - and then hands every
+    /// tiled shape to the 128x128 kernel. That is the wrong last step for an
+    /// encoder, because an encoder's linears are not large: at a few hundred
+    /// packed rows this model's `proj` and `fc2` produce a 541x384 output,
+    /// and a 128x128 tile covers that in FIFTEEN workgroups. The card has
+    /// thirty SMs, so half of it is idle before the inner loop executes an
+    /// instruction.
+    ///
+    /// So the tile is chosen by whether it leaves the machine full. Measured
+    /// on this repository's own hardware at 541 packed rows:
+    ///
+    /// ```text
+    ///   shape                128x128 tile      64x64 tile     workgroups
+    ///   qkv  541x384x1152      0.282 ms         0.330 ms       45 vs 162
+    ///   proj 541x384x384       0.209 ms         0.174 ms       15 vs  54
+    ///   fc1  541x384x1536      0.268 ms         0.349 ms       60 vs 216
+    ///   fc2  541x1536x384      0.545 ms         0.416 ms       15 vs  54
+    /// ```
+    ///
+    /// The wider tile wins wherever it covers the thirty SMs at least once
+    /// and loses wherever it does not, which is the rule rather than a table
+    /// to memorise: below that point its better arithmetic intensity has
+    /// nowhere to be spent.
     fn gemm(&self, m: u32, n: u32) -> (usize, u32) {
-        block::pick_gemm(m as usize, n as usize, self.k.matmul, self.k.matmul_reg3, false)
+        let (naive, threads) =
+            block::pick_gemm(m as usize, n as usize, self.k.matmul, self.k.matmul_reg3, false);
+        if naive != self.k.matmul_reg3 {
+            return (naive, threads);
+        }
+        let wide = m.div_ceil(128) * n.div_ceil(128);
+        if wide >= TILE128_MIN_WORKGROUPS {
+            return (self.k.matmul_reg3, threads);
+        }
+        (self.k.matmul_reg3_64, m.div_ceil(64) * n.div_ceil(64) * 256)
     }
 
     /// Load one packed call: `ids`/`type_ids` are the flat token and segment
@@ -355,6 +415,7 @@ impl Encoder {
         }
     }
 
+
     pub fn forward(&self) {
         self.gpu.submit(&[], &self.steps);
     }
@@ -368,6 +429,11 @@ impl Encoder {
         let hd = c.head_dim();
         let ln = block::LayerNormIds::resolve(g, self.k.layernorm, self.k.ln_stats, self.k.layernorm_dx);
         let cross = block::CrossIds { scores: self.k.scores_cross, softmax: self.k.softmax_cross, apply: self.k.apply_cross };
+        // K read key-minor. The transpose is one dispatch per span, hoisted
+        // out of the query-chunk loop by `chunked_bidir_fwd`, and it is what
+        // turns the scores kernel's per-lane loads from one transaction each
+        // into coalesced ones.
+        let km = block::KeyMinor { transpose: self.k.kv_k_headt, scores: self.k.scores_cross_kt, kt: &self.kt };
         // ---- embeddings ----
         // `embed` Params: [width, rows]; bufs [index(u32), table, out]. The
         // position and segment tables are gathered the same way as the token
@@ -405,7 +471,7 @@ impl Encoder {
             block::chunked_bidir_fwd(
                 g,
                 &cross,
-                None,
+                Some(&km),
                 c.n_heads,
                 hd,
                 h,

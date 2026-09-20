@@ -83,6 +83,8 @@ pub struct Decide {
     /// How many leading spans of the last call were state windows - what
     /// `state_embedding` has to pool over.
     last_windows: usize,
+    /// Packed rows the encoder ran over for the last call.
+    last_rows: usize,
     /// What this head is an adapter TO, and what it was trained for. Written
     /// into the checkpoint so that the file needs nothing out of band. See
     /// [`Provenance`].
@@ -221,6 +223,7 @@ impl Decide {
             step: 0,
             frozen_encoder: false,
             last_windows: 1,
+            last_rows: 0,
             kept: None,
             provenance: Provenance::default(),
         }
@@ -318,8 +321,20 @@ impl Decide {
         Ok(Request { packed, cls_rows, arity, state_rows })
     }
 
+    /// Rows the encoder ran over for the last call, and how many windows they
+    /// were split into.
+    ///
+    /// The shape of what a decision costs. A request that does not fit
+    /// `Limits::max_span` is encoded as several OVERLAPPING windows and each
+    /// is a full forward pass, so two observations of similar length can cost
+    /// very differently depending on which side of the span they fall.
+    pub fn last_shape(&self) -> (usize, usize) {
+        (self.last_rows, self.last_windows)
+    }
+
     /// Encode a packed request and score every option, flat and in pack order.
     pub fn run_packed(&mut self, req: &Request) -> Vec<f32> {
+        self.last_rows = req.packed.ids.len();
         self.last_windows = req.packed.windows;
         self.enc.set_batch(&req.packed.ids, &req.packed.types, &req.packed.spans);
         self.enc.forward();

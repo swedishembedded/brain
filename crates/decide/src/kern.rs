@@ -27,6 +27,20 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("emb_bwd_uniq", kernels::EMB_BWD_UNIQ),
     ("matmul", kernels::MATMUL),
     ("matmul_reg3", kernels::MATMUL_REG3),
+    // The same kernel retiled to a 64x64 output tile. Registered because a
+    // 128x128 tile is the wrong shape for an ENCODER's linears: at a few
+    // hundred packed rows, `proj` and `fc2` are 541x384 outputs, which is
+    // fifteen workgroups - half the card idle whatever the inner loop does.
+    // See `Encoder::gemm` for the rule that picks between them.
+    ("matmul_reg3_64", kernels::MATMUL_REG3_64),
+    // Attention scores against a KEY-MINOR copy of K, and the transpose that
+    // produces it. `attn_scores_cross` reads K with the key index as the
+    // fastest thread index while K is key-MAJOR, so consecutive lanes read
+    // addresses a fused row apart and every load is its own transaction - a
+    // defect that kernel's own header documents and says cannot be fixed
+    // inside it. This is the fix it names.
+    ("kv_k_headt", kernels::KV_K_HEADT),
+    ("attn_scores_cross_kt", kernels::ATTN_SCORES_CROSS_KT),
     ("matmul_dx", kernels::MATMUL_DX),
     ("matmul_dw", kernels::MATMUL_DW),
     ("matmul_dx_reg", kernels::MATMUL_DX_REG),
@@ -105,6 +119,9 @@ ids! {
     emb_bwd => "emb_bwd",
     matmul => "matmul",
     matmul_reg3 => "matmul_reg3",
+    matmul_reg3_64 => "matmul_reg3_64",
+    kv_k_headt => "kv_k_headt",
+    scores_cross_kt => "attn_scores_cross_kt",
     matmul_dx => "matmul_dx",
     matmul_dw => "matmul_dw",
     matmul_dx_reg => "matmul_dx_reg",
