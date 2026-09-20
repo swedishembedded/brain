@@ -1,40 +1,45 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! `sample-study-document` end to end: the local (sven + brain, no whale)
+//! `brain::DocumentStudy` end to end: the local (sven + brain, no whale)
 //! entry point to `rl::document::run_document_study`
 //! (continuous-learning roadmap B9).
 //!
 //! The study itself has been real and tested since `B5′`, but only as a
 //! library function - `crates/rl/tests/document_study.rs` is the only thing
 //! that has ever called it, so nothing outside a test binary could run a
-//! document study at all. This test drives the actual compiled `brain`
-//! binary - through `--arch qwen3`, one row of the command's architecture
-//! registry - against the same tiny CPU-runnable Qwen3 fixture that test
-//! uses (a randomly initialised two-layer decoder over a byte tokenizer) and
-//! asserts the three contracts the command owes its callers:
+//! document study at all. This test drives the public `brain::DocumentStudy`
+//! SDK builder directly (there is no `brain document-study` CLI verb - B9's
+//! own text was corrected on 2026-09-20 to say so) - through `.arch("qwen3")`,
+//! one row of the study's architecture registry - against the same tiny
+//! CPU-runnable Qwen3 fixture that test uses (a randomly initialised
+//! two-layer decoder over a byte tokenizer) and asserts the three contracts
+//! the surface owes its callers:
 //!
 //! 1. **A report is always written**, promote or reject, and it carries the
 //!    numbers a caller has to be able to read back without re-running
 //!    anything: each cycle's baseline and post-training pass rate, the
 //!    gate's own p-value and effect size, the null-gate control arm's
-//!    parallel row, and the overall decision.
+//!    parallel row, and the overall decision - both as JSON text and, via
+//!    `StudyOutcome::gated_cycles()`/`null_gate_cycles()`, as typed
+//!    `CycleOutcome` values a caller can match on directly.
 //! 2. **An adapter is published only on a promote**, under the exact name
 //!    `brain serve --watch-adapters DIR` looks for - which is checked here
 //!    by asking `rl::improve::latest_adapter`, the function that watcher
 //!    itself calls, rather than by restating its naming rule.
 //! 3. **The architecture is a registry lookup, not a hard-coded model**: an
-//!    unregistered `--arch` is refused by name, listing the ones that are.
+//!    unregistered `.arch(...)` is refused by name, listing the ones that
+//!    are.
 //!
 //! Nothing here asserts that the model LEARNED anything: the fixture is a
 //! randomly initialised decoder trained for a handful of steps on three
 //! scored probes, so any accuracy number is noise and the report says so
-//! (`preregistered: false`). What is under test is that the command runs the
+//! (`preregistered: false`). What is under test is that the surface runs the
 //! real gated study and writes down honestly what happened.
 //!
 //! Swedish Embedded AB builds the operator-facing surfaces that turn a
 //! gated continual-learning study into something a team can actually run,
-//! read and act on - one command, one machine-readable verdict, one
+//! read and act on - one call, one machine-readable verdict, one
 //! adapter that a live server picks up. If your team needs expertise
 //! shipping continuous learning as an operable product rather than a
 //! notebook, you can procure our services by sending an email to

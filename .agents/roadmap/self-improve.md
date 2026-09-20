@@ -1470,7 +1470,13 @@ keyed by a config fingerprint), T1 ~380 s, T2 ~1030 s, T3 ~370 s.
 - **P19c - the two runnable demos** - DONE, see the P19c section below.
 - **P20 - `brain improve` CLI verb.** Needs `crates/cli` verb registration,
   capability-manifest wiring and the e2e examples manifest; deliberately out
-  of scope here.
+  of scope here. **Decided 2026-09-20 (`.agents/roadmap/continuous-learning.md`
+  B9's correction): the primary surface is the SDK, not a CLI verb** -
+  `brain::Improve` (`crates/sdk/src/study.rs`) exposes `rl::improve::cycle`
+  generically over any caller `Environment`/`Verifier` through GRPO. A CLI
+  verb remains buildable as a thin wrapper over the identical SDK call, but
+  is not required to make the loop callable from outside a test binary - the
+  SDK surface already does that.
 
 ## P19c - two runnable demos over the harness - DONE
 
@@ -2204,6 +2210,22 @@ study's own metric.
 
 ### What this section deliberately does NOT do
 
+**Update 2026-09-20: the per-anchor-block gate clause below is now
+implemented.** `gate::Cause::BlockRegressed` and `GateConfig::max_block_drop`
+exist (`crates/promote/src/gate.rs`), `improve::Evaluation` carries
+`anchor_block_len` so `score_and_gate` can chunk the anchor scores it already
+collects into blocks, and `continual::run_study` passes its own
+`eval_per_cycle` as that chunk size. `max_block_drop` defaults to
+`f64::INFINITY` (off), exactly as this note originally specified, so the
+reproduction numbers recorded above (ACC 0.271, cycle 11's own outcome,
+etc.) are unchanged by this - the clause only fires for a caller that opts
+in with a finite `max_block_drop`. `crates/rl/tests/improve_cycle.rs` WAS
+touched (both `Evaluation` literals there gained `anchor_block_len: 0`, a
+no-op), which is the one deviation from this section's original scope note
+below; the edit is mechanical and does not change either test's assertions.
+The rest of the original note is left as the historical record of why this
+was deferred the first time:
+
 It does not implement the per-anchor-BLOCK gate clause the design pass
 recommended (`gate::Cause::BlockRegressed`, `GateConfig::max_block_drop`).
 That clause is separable and defaulted-off by design, and the only way to
@@ -2212,7 +2234,7 @@ a field to `GateConfig` and to `improve::Evaluation`, which forces edits into
 `crates/rl/tests/improve_cycle.rs` - the one thing this phase was told to
 leave untouched. The recorded defect it targets is real (cycle 11's
 promotion took T1 0.90 -> 0.67 and T4 0.35 -> 0.06 while the POOLED anchor
-mean stayed inside budget) and it remains open.
+mean stayed inside budget) and it remained open until the update above.
 
 It states no number about `Regime::Sft`'s continual-learning behavior. The
 only SFT execution done here was a 2-cycle, 200-step plumbing smoke run to

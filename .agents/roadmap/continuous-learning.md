@@ -244,6 +244,19 @@ adapter someone else already trained and promoted, not to train one
 itself; a future training-side trigger for this loop must publish through
 `rl::improve::cycle`, not reintroduce an ungated shortcut.
 
+**Known gap, recorded not built (2026-09-20): no automatic rollback after a
+live swap.** `Executor::evict`/`ResidencyManager::evict` refuse to swap out a
+PINNED (mid-flight) model, which is real protection against tearing an
+in-progress request - but once a promoted adapter IS swapped in, nothing
+reverts it automatically if it later turns out to be bad. `crates/residency`
+has no stage/validate/commit/rollback state machine; gating happens entirely
+upstream, before an adapter file ever reaches the watched directory, so a
+gate that promoted wrongly (or a corrupted file written after promotion)
+stays live until a human intervenes. Closing this needs a real staged-slot
+API (`stage`/`validate`/`commit`/`rollback`) in `crates/residency`, which is
+a materially bigger change than the swap plumbing above and was explicitly
+left out of this milestone.
+
 ### B8 - per-fact promote/reject reporting
 `StudyReport::matrix_table()` (`continual.rs:596`) reports per-*cycle*
 rows. A batch of N facts trained and gated together produces one verdict for
@@ -257,16 +270,33 @@ construct a batch where the aggregate gate promotes but one fact's probe
 still fails post-training, assert the report names it.
 **Commit:** one.
 
-### B9 - `brain document-study`, the local entry point (DONE)
+### B9 - `brain::DocumentStudy`, the local entry point (DONE - shipped as an SDK surface, not a CLI verb; corrected 2026-09-20)
 `B5′` made the study real; nothing shipped could run one. `rl::document::
 run_document_study` was reachable only from `crates/rl/tests/
 document_study.rs`, so the sven+brain loop had no way to train, gate and
 publish a document adapter without a whale graph in front of it. This
-milestone is that command, and nothing more:
+milestone is that entry point, and nothing more.
 
-```
-brain document-study --arch <name> --weights BASE --dataset FILE.json
-                     --adapter-dir DIR --report FILE.json [...]
+**Correction:** this section originally specified a top-level `brain
+document-study` CLI verb. What actually shipped is `brain::DocumentStudy`
+in `crates/sdk/src/study.rs` - a builder over `run_document_study`, exported
+through the public `brain` SDK crate (feature `study`) - plus a Rust sample
+at `samples/study/document`. There is no `document-study` arm in
+`crates/cli/src/main.rs`; the sample's own module doc states the position
+this milestone now also records: a training capability like this is "a
+library capability, not a verb belonging to the engine's own command line."
+No functional gap follows from this - the SDK surface is the primary,
+directly-embeddable one, and a caller that wants a subprocess boundary can
+already shell out to the sample. The paragraph below describing the
+mechanism is accurate; only the "top-level command" framing was wrong.
+
+```rust
+let outcome = brain::DocumentStudy::from_pretrained(weights)?
+    .arch(name)
+    .dataset("FILE.json")
+    .adapter_dir("DIR")
+    .report("FILE.json")
+    .run()?;
 ```
 
 - reads `{"cycles": [[{fact, probe_question, expected_answer}, …], …],
@@ -278,26 +308,37 @@ brain document-study --arch <name> --weights BASE --dataset FILE.json
 - **always** writes the JSON report - per cycle: the facts trained, the
   incumbent's and the candidate's pass rate on that cycle's frozen probes,
   the gate's own `p_value`/`effect_size`/reject cause, the null-gate arm's
-  parallel row, plus `promoted`/`decision` overall;
+  parallel row, plus `promoted`/`decision` overall - and, since the gate
+  self-improve gap closed below, `StudyOutcome::gated_cycles()`/
+  `null_gate_cycles()` expose the same numbers as typed `CycleOutcome`
+  values, not just report text;
 - on a promote only, publishes the adapter `rl::improve::cycle` already
-  wrote into `--adapter-dir` as `adapter-{n:06}.safetensors`, one past the
+  wrote into `adapter_dir` as `adapter-{n:06}.safetensors`, one past the
   HIGHEST version already there - named through `rl::improve::
   latest_adapter`, the same function `brain serve --watch-adapters DIR`
   calls, so producer and consumer cannot drift.
 
-**Top-level and `--arch`-driven, deliberately - not `brain qwen3
-document-study`.** `run_study` is generic over `M: model::Model` and
+**Architecture-generic and `arch()`-driven, deliberately - not
+`Qwen3DocumentStudy`.** `run_study` is generic over `M: model::Model` and
 `DocumentCurriculum` names no model type, so the study is architecture-
 agnostic machinery; hanging its only entry point off one model's verb tree
 would tie a general capability to one consumer and invite the next consumer
 to grow a second copy (the workspace's most expensive recurring defect).
-It follows `brain bench eval --arch <name>` instead: one top-level command,
-a `brain_arch` id selecting which `Model` impl it monomorphises for, and a
-registry a new architecture joins by adding one row. Everything
-architecture-specific is a two-method `StudyArch` impl (how that
+Everything architecture-specific is a two-method `StudyArch` impl (how that
 architecture spells a LoRA overlay, how to widen its context); the base is
 read through `ModelConfig::from_json` and overlaid by the generic
-`continual::overlay_adapter`.
+`continual::overlay_adapter`. `brain::Improve` (added alongside the gate fix
+below) reuses this same `StudyArch` registry for a GRPO-over-any-Environment
+cycle - one registry, two entry points, rather than a second copy of the
+per-architecture plumbing.
+
+**`brain improve` (P20) stays unimplemented as a CLI verb for the same
+reason B9 itself is not one**: `.agents/roadmap/self-improve.md`'s P20 item
+predates this correction and should be read in light of it - the decision is
+SDK-first, not "CLI, eventually." A `brain improve` verb remains buildable
+as a thin wrapper calling the identical `brain::Improve`/`brain::
+DocumentStudy` code, per this repo's rule that a served/CLI surface must
+call the same function the SDK does - it is simply not the primary surface.
 
 **What bounds that registry is the TOKENIZER, not the model.**
 `DocumentCurriculum`'s `Env`/`Ver` associated types name

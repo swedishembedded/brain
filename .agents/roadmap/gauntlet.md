@@ -1,9 +1,12 @@
 # gauntlet - roadmap
 
-**Status: designed, not implemented.** Nothing in this file is code today -
-see `.agents/roadmap/self-improve.md` for the training-regime substrate
-(P7-P18) this depends on, all of which is itself still TODO as of this
-writing.
+**Status: designed, not implemented.** Nothing in this file is code today,
+and no directory or file under `crates/` names `alien*` or `gauntlet*` -
+verified 2026-09-20. The training-regime substrate this depends on
+(`.agents/roadmap/self-improve.md` P10 rollout, P11 `Environment`/
+`Verifier`, P12 GRPO, P16 the gate) is DONE, not TODO - this file's
+prerequisites are met; the gauntlet itself was simply never started. See
+"Sequencing" below.
 
 The Weight-Learning Gauntlet answers a different question than
 `.agents/roadmap/self-improve.md`'s continuous-training loop, and a
@@ -251,11 +254,13 @@ under normal training-run variance).
 
 ## Sequencing
 
-Not started. Depends on `.agents/roadmap/self-improve.md` P10 (rollout),
-P11 (`Environment`/`Verifier`), P12 (GRPO/RFT), and P16 (the gate) landing
-first - the gauntlet is a set of `Environment`/`Verifier` implementations
-plus a curriculum runner and the retention-matrix/plasticity artifact
-collection over that substrate, not a parallel training mechanism. When
-picked up, `AlienAPI` (extending `toolcall`) is the natural first
-environment - it is the only one of the five with an already-calibrated,
-measured-learnable base task to extend rather than calibrate from zero.
+Not started - but its prerequisites are, as of 2026-09-20, all landed:
+`.agents/roadmap/self-improve.md` P10 (rollout), P11 (`Environment`/
+`Verifier`), P12 (GRPO/RFT) and P16 (the gate) are DONE. Nothing blocks
+picking this up except that nobody has - the gauntlet is a set of
+`Environment`/`Verifier` implementations plus a curriculum runner and the
+retention-matrix/plasticity artifact collection over that substrate, not a
+parallel training mechanism. When picked up, `AlienAPI` (extending
+`toolcall`) is the natural first environment - it is the only one of the
+five with an already-calibrated, measured-learnable base task to extend
+rather than calibrate from zero.
