@@ -142,6 +142,19 @@ pub trait Env {
         None
     }
 
+    /// What KIND of situation this episode is, when the environment has more
+    /// than one kind. `None` when it does not.
+    ///
+    /// Used to break a measurement down by where it came from. A single
+    /// average over a mixed environment answers "is there a signal" and never
+    /// "where is the signal", and those want different things done about them:
+    /// a number that is the same everywhere is a property of the task, and one
+    /// that lives in a tenth of it is an instruction about where to spend the
+    /// probe budget.
+    fn label(&self) -> Option<String> {
+        None
+    }
+
     /// Hold the state this environment is in right now, so that a caller can
     /// come back to it and try something else. `false` when it cannot.
     ///
@@ -205,6 +218,105 @@ struct Branch {
     score: f32,
     /// Game steps it cost to find out.
     steps: usize,
+}
+
+/// The most gain any one decision may have in the loop.
+///
+/// The update is proportional feedback - see [`outcome_pull`] - and a
+/// decision's weight is its gain. Weights are divided by the batch mean, so a
+/// typical decision sits at 1, but the distribution behind that mean is badly
+/// skewed: measured on this sample about seven decisions in ten have almost no
+/// spread at all, which drags the mean down and leaves the few that decide an
+/// episode sitting tens of times above it. One decision with a gain of 40 is
+/// one decision steering a whole minibatch, and a loop whose gain depends on
+/// the draw is a loop that is stable on some batches and not others.
+///
+/// Four is a limit, not a tuning: it says a decision may matter several times
+/// more than the average one and not arbitrarily more. This is the same job
+/// PPO's clipped ratio does for a policy gradient, arrived at from the other
+/// direction.
+const OUTCOME_GAIN_LIMIT: f32 = 4.0;
+
+/// How sharply a measured margin becomes a preference.
+///
+/// The gauge runs 0 to 1.25 and a real margin between two candidates is a few
+/// hundredths of it, so the temperature has to be of that order or the target
+/// is uniform and says nothing. At 0.05 a margin of 0.07 - the measured mean
+/// gain when an alternative beats the teacher - asks for about four to one.
+const OUTCOME_TEMPERATURE: f32 = 0.05;
+
+/// The distribution over measured candidates that an outcome-fitted update
+/// aims at, and how much that decision's opinion is worth.
+///
+/// Returns `(target, weight)`. The target is a softmax over the scores, so it
+/// is a proper distribution and the cross-entropy toward it is bounded below
+/// by its own entropy. The weight is the decision's raw spread, which is what
+/// carries the magnitude the target normalised away.
+///
+/// Splitting those two is the whole design, and the first version got it
+/// wrong in a way worth recording. It used the centred scores directly as
+/// weights on a sum of log-probabilities - cost-sensitive cross-entropy, the
+/// obvious construction. That objective is UNBOUNDED: a candidate with a
+/// negative weight contributes `+|w| log p`, which falls without limit as its
+/// probability goes to zero, so the optimizer can always do better by driving
+/// the worst option's probability further down and it spends everything doing
+/// that. Measured on this sample, one round took the fixed block from 0.683
+/// to 0.549 and drove the best-measured option down to 0.11 of the policy's
+/// belief, with the loss going negative on the way - which is the symptom to
+/// recognise, since a cross-entropy cannot.
+fn outcome_target(scored: &[f32]) -> (Vec<f32>, f32) {
+    if scored.is_empty() {
+        return (Vec::new(), 0.0);
+    }
+    let best = scored.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let worst = scored.iter().copied().fold(f32::INFINITY, f32::min);
+    let mut target: Vec<f32> = scored
+        .iter()
+        .map(|&s| (((s - best) / OUTCOME_TEMPERATURE) as f64).exp() as f32)
+        .collect();
+    let sum: f32 = target.iter().sum();
+    if sum > 0.0 {
+        for t in target.iter_mut() {
+            *t /= sum;
+        }
+    }
+    (target, best - worst)
+}
+
+/// What the update pulls on each measured candidate's logit, given what the
+/// policy currently believes among them.
+///
+/// Proportional feedback: `gain * (belief - setpoint)`. It vanishes once the
+/// two agree, which is the property that makes the loop settle.
+///
+/// The first version of this had no feedback term at all. Its pull was the
+/// candidate's own advantage, a constant with respect to what the policy
+/// currently believed - feedforward, driving an integrator (the optimizer)
+/// with a fixed input. That ramps without bound, and it did: one round took
+/// the fixed block from 0.683 to 0.549 and left the best-measured option
+/// holding 0.11 of the policy's belief. Written as a loss, the same fact is
+/// that a negatively weighted log-probability is unbounded below; written as
+/// a loop, it is an open one.
+fn outcome_pull(belief: &[f32], target: &[f32], weight: f32) -> Vec<f32> {
+    belief.iter().zip(target).map(|(&p, &t)| weight * (p - t)).collect()
+}
+
+/// One decision, the candidates tried there, and what each was actually
+/// worth.
+///
+/// The unit an outcome-fitted update learns from. Unlike a demonstration it
+/// carries no opinion about which action was right - only a number per
+/// candidate, measured by playing the run out and scoring it.
+struct Probe {
+    /// What kind of situation it came from, for the breakdown. See
+    /// [`Env::label`].
+    label: Option<String>,
+    observation: String,
+    options: Vec<String>,
+    /// `(option, what the whole trajectory scored taking it)`. The first is
+    /// always the teacher's own choice, so a caller can say what the update
+    /// gained over it.
+    tried: Vec<(usize, f32)>,
 }
 
 /// One recorded step of one episode.
@@ -328,8 +440,69 @@ pub enum Candidates {
     Wide,
 }
 
-/// Whether a different action would have been worth taking.
+/// Where a probe's wall clock went.
+///
+/// Kept because a probe is the most expensive thing this pipeline does and
+/// its cost is not where one would guess: the policy calls are the obvious
+/// candidate and were not the answer.
 #[derive(Clone, Copy, Debug, Default)]
+pub struct Spend {
+    /// How many decisions the policy was asked for, so `deciding` can be read
+    /// per call rather than in total.
+    pub decisions: usize,
+    /// How many packed rows the encoder ran over, and how many overlapping
+    /// windows those were split into. A request past `Limits::max_span` costs
+    /// one full forward pass PER WINDOW.
+    pub tokens: usize,
+    pub windows: usize,
+    pub deciding: std::time::Duration,
+    pub stepping: std::time::Duration,
+    pub holding: std::time::Duration,
+    pub resuming: std::time::Duration,
+    pub scoring: std::time::Duration,
+}
+
+impl Spend {
+    pub fn total(&self) -> std::time::Duration {
+        self.deciding + self.stepping + self.holding + self.resuming + self.scoring
+    }
+}
+
+impl std::fmt::Display for Spend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let t = self.total().as_secs_f32().max(1e-6);
+        let pct = |d: std::time::Duration| d.as_secs_f32() / t * 100.0;
+        write!(
+            f,
+            "{:.0}s over {} decisions ({:.1} ms each, {} rows in {:.2} windows) = deciding {:.0}% \
+             stepping {:.0}% holding {:.0}% resuming {:.0}% scoring {:.0}%",
+            t,
+            self.decisions,
+            self.deciding.as_secs_f32() * 1000.0 / self.decisions.max(1) as f32,
+            self.tokens / self.decisions.max(1),
+            self.windows as f32 / self.decisions.max(1) as f32,
+            pct(self.deciding),
+            pct(self.stepping),
+            pct(self.holding),
+            pct(self.resuming),
+            pct(self.scoring)
+        )
+    }
+}
+
+/// One kind of situation, and how much room a probe found in it.
+#[derive(Clone, Debug, Default)]
+pub struct Situation {
+    pub label: String,
+    pub states: usize,
+    /// Share of them where the candidates did not all lead to the same place.
+    pub pivotal: f32,
+    /// Mean `best - teacher` over them.
+    pub regret: f32,
+}
+
+/// Whether a different action would have been worth taking.
+#[derive(Clone, Debug, Default)]
 pub struct Counterfactual {
     /// Decision points actually measured.
     pub states: usize,
@@ -367,6 +540,11 @@ pub struct Counterfactual {
     pub pivotal: f32,
     /// Game steps spent measuring.
     pub steps: usize,
+    /// Where the wall clock went.
+    pub spend: Spend,
+    /// The same numbers split by [`Env::label`], worst-first by room. Empty
+    /// when the environment does not label its episodes.
+    pub by_situation: Vec<Situation>,
 }
 
 /// What one rollout produced.
@@ -1327,6 +1505,26 @@ impl<E: Env> ControlPipeline<E> {
         deviate: usize,
         max_steps: usize,
     ) -> Result<Option<Counterfactual>> {
+        Ok(self.probe(episodes, states, alternatives, from, deviate, max_steps)?.map(|(c, _)| c))
+    }
+
+    /// As [`Self::counterfactual`], and keep what every branch was worth.
+    ///
+    /// The summary is what a person reads; the probes are what an update
+    /// learns from, and they are the same measurement rather than two runs of
+    /// it - so the room a round reports is exactly the room its update had to
+    /// work with. See [`Self::fit_outcomes`].
+    fn probe(
+        &mut self,
+        episodes: usize,
+        states: usize,
+        alternatives: usize,
+        from: Candidates,
+        deviate: usize,
+        max_steps: usize,
+    ) -> Result<Option<(Counterfactual, Vec<Probe>)>> {
+        let mut probes: Vec<Probe> = Vec::new();
+        let mut spend = Spend::default();
         // How often to stop and branch. Spread over the whole of every
         // episode rather than taken from the front: the first decisions of a
         // level are the ones every run agrees about, and measuring those
@@ -1337,6 +1535,9 @@ impl<E: Env> ControlPipeline<E> {
 
         let (mut beaten, mut gain, mut regret, mut spread) = (0usize, 0.0f64, 0.0f64, 0.0f64);
         let mut pivotal = 0usize;
+        // label -> (decisions, pivotal, summed room)
+        let mut per: std::collections::HashMap<String, (usize, usize, f64)> =
+            std::collections::HashMap::new();
         let (mut measured, mut adrift, mut spent) = (0usize, 0usize, 0usize);
         let mut since = self.rng.next_u64() as usize % every;
 
@@ -1351,7 +1552,13 @@ impl<E: Env> ControlPipeline<E> {
                 let Some(teacher) = self.env.demo() else {
                     return Ok(None);
                 };
+                let mark = std::time::Instant::now();
                 let probs = self.policy(&obs, &options)?;
+                spend.deciding += mark.elapsed();
+                spend.decisions += 1;
+                let (rows, wins) = self.model.last_shape();
+                spend.tokens += rows;
+                spend.windows += wins;
 
                 since += 1;
                 if since >= every && measured + adrift < want {
@@ -1359,11 +1566,22 @@ impl<E: Env> ControlPipeline<E> {
                     match self
                         .branch(
                             &options, &probs, teacher, alternatives, from, deviate, t, max_steps,
+                            &mut spend,
                         )?
                     {
-                        Some(scored) => {
+                        Some((scored, tried)) => {
                             spent += scored.iter().map(|b| b.steps).sum::<usize>();
                             let theirs = scored[0].score;
+                            probes.push(Probe {
+                                label: self.env.label(),
+                                observation: obs.clone(),
+                                options: options.clone(),
+                                tried: tried
+                                    .iter()
+                                    .zip(&scored)
+                                    .map(|(&c, b)| (c, b.score))
+                                    .collect(),
+                            });
                             let best =
                                 scored.iter().map(|b| b.score).fold(f32::NEG_INFINITY, f32::max);
                             let worst =
@@ -1379,6 +1597,12 @@ impl<E: Env> ControlPipeline<E> {
                             regret += (best - theirs) as f64;
                             spread += (best - worst) as f64;
                             pivotal += usize::from(best - worst > 1e-3);
+                            if let Some(l) = self.env.label() {
+                                let e = per.entry(l).or_insert((0, 0, 0.0));
+                                e.0 += 1;
+                                e.1 += usize::from(best - worst > 1e-3);
+                                e.2 += (best - theirs) as f64;
+                            }
                             measured += 1;
                         }
                         None => adrift += 1,
@@ -1394,18 +1618,35 @@ impl<E: Env> ControlPipeline<E> {
                     }
                     u -= pi;
                 }
+                let mark = std::time::Instant::now();
                 let (next, _, done) = self.env.step(chosen);
+                spend.stepping += mark.elapsed();
                 obs = next;
                 if done {
                     break;
                 }
             }
         }
+        let mut by_situation: Vec<Situation> = per
+            .into_iter()
+            .map(|(label, (states, pivot, room))| Situation {
+                label,
+                states,
+                pivotal: pivot as f32 / states.max(1) as f32,
+                regret: (room / states.max(1) as f64) as f32,
+            })
+            .collect();
+        by_situation.sort_by(|a, b| {
+            b.regret.partial_cmp(&a.regret).unwrap_or(std::cmp::Ordering::Equal)
+        });
         if measured == 0 {
-            return Ok(Some(Counterfactual { adrift, steps: spent, ..Default::default() }));
+            return Ok(Some((
+                Counterfactual { adrift, steps: spent, by_situation, spend, ..Default::default() },
+                probes,
+            )));
         }
         let n = measured as f64;
-        Ok(Some(Counterfactual {
+        Ok(Some((Counterfactual {
             states: measured,
             adrift,
             beaten: (beaten as f64 / n) as f32,
@@ -1414,7 +1655,9 @@ impl<E: Env> ControlPipeline<E> {
             spread: (spread / n) as f32,
             pivotal: (pivotal as f64 / n) as f32,
             steps: spent,
-        }))
+            by_situation,
+            spend,
+        }, probes)))
     }
 
     /// Try each candidate action from where the environment is standing, and
@@ -1432,7 +1675,8 @@ impl<E: Env> ControlPipeline<E> {
         deviate: usize,
         at: usize,
         max_steps: usize,
-    ) -> Result<Option<Vec<Branch>>> {
+        spend: &mut Spend,
+    ) -> Result<Option<(Vec<Branch>, Vec<usize>)>> {
         let mut pick: Vec<usize> = (0..options.len()).collect();
         match from {
             Candidates::Contested => pick.sort_by(|&a, &b| {
@@ -1454,7 +1698,10 @@ impl<E: Env> ControlPipeline<E> {
                 candidates.push(c);
             }
         }
-        if !self.env.hold() {
+        let mark = std::time::Instant::now();
+        let held = self.env.hold();
+        spend.holding += mark.elapsed();
+        if !held {
             return Ok(None);
         }
         let mut out = Vec::with_capacity(candidates.len());
@@ -1463,7 +1710,10 @@ impl<E: Env> ControlPipeline<E> {
             // where `hold` was called, and resuming onto it would cost a
             // level reload for nothing.
             if i > 0 {
-                if self.env.resume().is_none() {
+                let mark = std::time::Instant::now();
+                let back = self.env.resume();
+                spend.resuming += mark.elapsed();
+                if back.is_none() {
                     return Ok(None);
                 }
                 // Going back has to arrive where it left, and the options on
@@ -1478,7 +1728,9 @@ impl<E: Env> ControlPipeline<E> {
                     return Ok(None);
                 }
             }
+            let mark = std::time::Instant::now();
             let (mut obs, _, mut done) = self.env.step(c);
+            spend.stepping += mark.elapsed();
             let mut steps = 1usize;
             let mut t = at + 1;
             // The deviation, and then the teacher. `deviate` decisions of it
@@ -1497,14 +1749,22 @@ impl<E: Env> ControlPipeline<E> {
                 if options.is_empty() {
                     break;
                 }
+                let mark = std::time::Instant::now();
                 let probs = self.policy(&obs, &options)?;
+                spend.deciding += mark.elapsed();
+                spend.decisions += 1;
+                let (rows, wins) = self.model.last_shape();
+                spend.tokens += rows;
+                spend.windows += wins;
                 let mut best = 0;
                 for (i, &pi) in probs.iter().enumerate() {
                     if pi > probs[best] {
                         best = i;
                     }
                 }
+                let mark = std::time::Instant::now();
                 let (next, _, d) = self.env.step(best);
+                spend.stepping += mark.elapsed();
                 obs = next;
                 done = d;
                 steps += 1;
@@ -1517,22 +1777,239 @@ impl<E: Env> ControlPipeline<E> {
                 let Some(next) = self.env.demo() else {
                     break;
                 };
+                let mark = std::time::Instant::now();
                 let (_, _, d) = self.env.step(next);
+                spend.stepping += mark.elapsed();
                 done = d;
                 steps += 1;
                 t += 1;
             }
-            let Some(score) = self.env.progress() else {
+            let mark = std::time::Instant::now();
+            let scored = self.env.progress();
+            spend.scoring += mark.elapsed();
+            let Some(score) = scored else {
                 return Ok(None);
             };
             out.push(Branch { score, steps });
         }
         // And back to where the student was, so the episode it is in the
         // middle of carries on as if none of this had happened.
-        if self.env.resume().is_none() {
+        let mark = std::time::Instant::now();
+        let back = self.env.resume();
+        spend.resuming += mark.elapsed();
+        if back.is_none() {
             return Ok(None);
         }
-        Ok(Some(out))
+        Ok(Some((out, candidates)))
+    }
+
+    /// Move the policy toward whichever candidate actually scored better.
+    ///
+    /// The update every other phase of this run cannot do. Cloning and DAgger
+    /// fit the teacher's CHOICE, so their ceiling is the teacher. This fits
+    /// the measured OUTCOME, so its ceiling is whatever the candidate set
+    /// contains - which is why it is the only phase whose result is not
+    /// bounded above by the teacher.
+    ///
+    /// The loss is the cost-sensitive one the counterfactual makes available:
+    ///
+    /// ```text
+    /// L = - sum_i  w_i * log p(c_i)        w_i = s_i - mean(s at this state)
+    /// ```
+    ///
+    /// Two properties of that weighting are load-bearing and both come from
+    /// leaving the advantages RAW rather than normalising them per state.
+    ///
+    /// They sum to zero at every state, so the softmax's normalising term
+    /// cancels out of the gradient and only the candidates that were actually
+    /// measured are moved. An option nobody tried gets no opinion pushed onto
+    /// it, which is correct: nothing here knows what it was worth.
+    ///
+    /// And a state where every candidate led to the same place contributes a
+    /// gradient of almost exactly zero, on its own, with no threshold needed.
+    /// That matters more here than it would elsewhere: measured on this
+    /// sample, 71% of decisions are that state. Normalising the advantages
+    /// per state - which is what one would reach for - would give those
+    /// decisions the same pull as the ones that decide the episode, and the
+    /// update would spend most of its magnitude on noise.
+    fn fit_outcomes(
+        &mut self,
+        probes: &[Probe],
+        epochs: usize,
+        head_lr: f32,
+        log: &mut dyn FnMut(usize, f32),
+        step: &mut usize,
+    ) -> Result<(f32, f32)> {
+        if probes.is_empty() {
+            return Ok((0.0, 0.0));
+        }
+        // What each decision is aiming at, and how much its opinion is worth.
+        // The weights are scaled by the batch MEAN rather than centred: a
+        // decision where nothing mattered has a spread near zero and should
+        // contribute nothing, and centring would hand it a negative weight -
+        // an instruction to actively unlearn a decision that was never wrong.
+        let mut aims: Vec<(Vec<f32>, f32)> = Vec::with_capacity(probes.len());
+        for p in probes {
+            let scored: Vec<f32> = p.tried.iter().map(|(_, s)| *s).collect();
+            aims.push(outcome_target(&scored));
+        }
+        let mean_spread = (aims.iter().map(|(_, w)| *w as f64).sum::<f64>()
+            / aims.len().max(1) as f64)
+            .max(1e-6) as f32;
+        let mut limited = 0usize;
+        for (_, w) in aims.iter_mut() {
+            *w /= mean_spread;
+            if *w > OUTCOME_GAIN_LIMIT {
+                *w = OUTCOME_GAIN_LIMIT;
+                limited += 1;
+            }
+        }
+        if limited > 0 {
+            println!(
+                "      {limited} of {} decisions were above the gain limit and were held at it",
+                aims.len()
+            );
+        }
+
+        let mut loss = 0.0f32;
+        let mut moved = 0.0f64;
+        let mut order: Vec<usize> = (0..probes.len()).collect();
+        for _ in 0..epochs.max(1) {
+            for i in (1..order.len()).rev() {
+                let j = (self.rng.next_u64() % (i as u64 + 1)) as usize;
+                order.swap(i, j);
+            }
+            let mut epoch_loss = 0.0f32;
+            moved = 0.0;
+            for chunk in order.chunks(MINIBATCH) {
+                self.model.zero_grads();
+                for &i in chunk {
+                    let p = &probes[i];
+                    let (target, weight) = &aims[i];
+                    let q = self.question(&p.options);
+                    let mut shift = 0.0f32;
+                    epoch_loss += self
+                        .model
+                        .accumulate(&p.observation, &q, |scores| {
+                            let mut grad = vec![0.0f32; scores.len()];
+                            // A softmax over the CANDIDATE logits alone. The
+                            // decision is which of the options that were
+                            // actually measured is best; the ones nobody tried
+                            // are not evidence either way and must not be
+                            // moved by a claim nothing supports.
+                            let picked: Vec<usize> = p
+                                .tried
+                                .iter()
+                                .map(|&(c, _)| c)
+                                .filter(|&c| c < scores.len())
+                                .collect();
+                            let among: Vec<f32> = picked.iter().map(|&c| scores[c]).collect();
+                            let mine = decide::loss::softmax(&among);
+                            let mut l = 0.0f32;
+                            let pull = outcome_pull(&mine, target, *weight);
+                            for (k, &c) in picked.iter().enumerate() {
+                                let t = target.get(k).copied().unwrap_or(0.0);
+                                l -= t * (mine[k].max(1e-12)).ln();
+                                grad[c] = pull[k];
+                            }
+                            // How much of the policy's belief among the
+                            // candidates sits on the one that actually
+                            // measured best - the number this update exists
+                            // to raise.
+                            let top = target
+                                .iter()
+                                .enumerate()
+                                .max_by(|a, b| {
+                                    a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal)
+                                })
+                                .map(|(k, _)| k);
+                            if let Some(k) = top {
+                                shift = mine.get(k).copied().unwrap_or(0.0);
+                            }
+                            (weight * l, grad)
+                        })
+                        .map_err(Error::Backend)?;
+                    moved += shift as f64;
+                    *step += 1;
+                }
+                self.model.adamw_scaled(
+                    ENCODER_LR,
+                    head_lr,
+                    1.0 / chunk.len() as f32,
+                );
+            }
+            loss = epoch_loss / probes.len() as f32;
+            log(*step, loss);
+        }
+        Ok((loss, (moved / probes.len() as f64) as f32))
+    }
+
+    /// Rounds of: probe the policy's own decisions, find out what the
+    /// alternatives were actually worth, and move toward whichever won.
+    ///
+    /// Reports what it could have gained beside what it did, because the two
+    /// together are the only honest way to read a round. The counterfactual
+    /// already measures the room available - "picking the best of what was
+    /// offered would gain this much a decision" - so a round that gains
+    /// nothing against a measured room of zero is a round with nothing to do,
+    /// and a round that gains nothing against a room of 0.012 is a broken
+    /// update. Those two look identical in a score.
+    fn improve(
+        &mut self,
+        spec: &ControlSpec,
+        log: &mut dyn FnMut(usize, f32),
+        step: &mut usize,
+    ) -> Result<()> {
+        let (mut best, mut best_rank) = (None, f32::NEG_INFINITY);
+        for round in 0..spec.improve {
+            let probed = self.probe(
+                spec.episodes,
+                spec.states,
+                spec.alternatives,
+                Candidates::Contested,
+                spec.deviate,
+                spec.max_steps,
+            )?;
+            let Some((room, probes)) = probed else {
+                println!("    improve: the environment cannot go back to a decision");
+                return Ok(());
+            };
+            if probes.is_empty() {
+                println!("    improve: no decision could be probed");
+                return Ok(());
+            }
+            let before = self.gauge(spec.gauge_episodes, spec.max_steps)?;
+            let (loss, on_best) =
+                self.fit_outcomes(&probes, spec.warmup_epochs, spec.head_lr, log, step)?;
+            let after = self.gauge(spec.gauge_episodes, spec.max_steps)?;
+            println!(
+                "    improve {:>2}  {} decisions probed ({} game steps)  {:.0}% of them mattered  \
+                 room {:.3}/decision  loss {loss:.4}  the best-measured option now holds \
+                 {:.2} of the policy's belief{}",
+                round + 1,
+                room.states,
+                room.steps,
+                room.pivotal * 100.0,
+                room.regret,
+                on_best,
+                match (before, after) {
+                    (Some(b), Some(a)) => format!("  fixed block {b:.3} -> {a:.3}"),
+                    _ => String::new(),
+                }
+            );
+            let rank = after.unwrap_or(-loss);
+            if best.is_none() || rank > best_rank {
+                best_rank = rank;
+                best = Some((round + 1, self.model.head_weights()));
+            }
+        }
+        if let Some((round, w)) = best {
+            if round != spec.improve {
+                println!("    keeping improve round {round}, which scored {best_rank:.3}");
+                self.model.set_head_weights(&w);
+            }
+        }
+        Ok(())
     }
 
     /// The episode horizon evaluation and play use.
@@ -1606,6 +2083,24 @@ pub struct ControlSpec {
     /// clone_teacher`]. Lower it when the teacher has failure modes worth not
     /// teaching.
     pub warmup_keep: f32,
+    /// Rounds of outcome-fitted improvement after the imitation phases. `0`
+    /// is off.
+    ///
+    /// The only phase of a run whose ceiling is not the teacher. See
+    /// [`ControlPipeline::improve`].
+    pub improve: usize,
+    /// Decisions probed per improvement round.
+    pub states: usize,
+    /// Alternatives tried at each probed decision, beside the teacher's own.
+    pub alternatives: usize,
+    /// Decisions a probe departs from the teacher for before handing back.
+    ///
+    /// One measures the cost-to-go of a single action, which a teacher good
+    /// at recovering makes uninformative: it undoes whatever one decision
+    /// did. Measured on this repository's DOOM sample, going from 1 to 30
+    /// raised the share of decisions with a better alternative available from
+    /// 13% to 17% and the gain from 0.064 to 0.072.
+    pub deviate: usize,
     /// Rounds of DAgger between the warm start and the policy gradient. `0`
     /// is off.
     ///
@@ -1681,6 +2176,10 @@ impl Default for ControlSpec {
             warmup_episodes: 60,
             warmup_epochs: 12,
             warmup_keep: 1.0,
+            improve: 0,
+            states: 200,
+            alternatives: 2,
+            deviate: 30,
             dagger: 0,
             gauge_episodes: 0,
             average: 0,
@@ -1721,6 +2220,21 @@ impl ControlSpec {
         self
     }
     /// See [`ControlSpec::gauge_episodes`].
+    /// Rounds of outcome-fitted improvement after the imitation phases.
+    pub fn improve(mut self, n: usize) -> ControlSpec {
+        self.improve = n;
+        self
+    }
+
+    /// How a probe is shaped: decisions per round, alternatives at each, and
+    /// how long a branch departs from the teacher for.
+    pub fn probing(mut self, states: usize, alternatives: usize, deviate: usize) -> ControlSpec {
+        self.states = states;
+        self.alternatives = alternatives;
+        self.deviate = deviate;
+        self
+    }
+
     /// Rounds of DAgger between the warm start and the policy gradient.
     pub fn dagger(mut self, n: usize) -> ControlSpec {
         self.dagger = n;
@@ -1818,6 +2332,13 @@ impl<E: Env> Stages for ControlPipeline<E> {
                 spec.dagger, spec.episodes
             );
             self.dagger(spec, log, &mut step)?;
+        }
+        if spec.improve > 0 {
+            println!(
+                "    {} rounds of probing what a different action was worth, {} decisions each",
+                spec.improve, spec.states
+            );
+            self.improve(spec, log, &mut step)?;
         }
         if spec.warmup_episodes > 0 {
             // Whatever the imitation phases produced is what the anchor holds
@@ -2080,6 +2601,99 @@ impl<E: Env> ControlPipelineBuilder<E> {
             critic_mse: 0.0,
             max_steps: self.max_steps,
         })
+    }
+}
+
+#[cfg(test)]
+mod outcome_tests {
+    use super::{outcome_pull, outcome_target};
+
+    /// The candidate that MEASURED better is the one the update aims at,
+    /// whichever of them the teacher chose. This is the only thing the
+    /// improvement phase does that imitation could not have done.
+    #[test]
+    fn the_candidate_that_scored_better_is_the_one_aimed_at() {
+        // The teacher's own action first, as `Probe::tried` orders them, and
+        // it is NOT the best here - the case worth having a test for.
+        let (target, weight) = outcome_target(&[0.40, 0.72, 0.31]);
+        assert!(target[1] > 0.9, "the best-measured candidate must take the mass: {target:?}");
+        assert!(target[2] < target[0], "the worst-measured must take the least: {target:?}");
+        assert!((weight - 0.41).abs() < 1e-5, "the weight is the decision's own spread");
+
+        // And a policy that currently prefers the wrong one is pulled off it.
+        let pull = outcome_pull(&[0.6, 0.3, 0.1], &target, weight);
+        assert!(pull[1] < 0.0, "the better candidate must be pushed up: {pull:?}");
+        assert!(pull[0] > 0.0, "the one the policy wrongly prefers must come down: {pull:?}");
+    }
+
+    /// A decision where every candidate led to the same place contributes
+    /// nothing, with no threshold anywhere.
+    ///
+    /// Measured on this repository's DOOM sample, 71% of decisions are that
+    /// decision. The weight is the decision's raw spread and is NOT centred
+    /// across the batch: centring would hand a flat decision a negative
+    /// weight, which is an instruction to unlearn a decision that was never
+    /// wrong.
+    #[test]
+    fn a_decision_that_changed_nothing_pulls_nothing() {
+        let (_, weight) = outcome_target(&[0.62, 0.62, 0.62]);
+        assert_eq!(weight, 0.0);
+        let (small, light) = outcome_target(&[0.620, 0.621, 0.620]);
+        let (_, heavy) = outcome_target(&[0.40, 0.72, 0.31]);
+        assert!(heavy > light * 100.0, "a decision worth 0.001 must weigh far less than one worth 0.41");
+        let pull = outcome_pull(&[0.4, 0.3, 0.3], &small, light);
+        assert!(pull.iter().all(|p| p.abs() < 1e-3), "a flat decision must barely pull: {pull:?}");
+    }
+
+    /// The loop is proportional feedback, so its response is proportional to
+    /// the error and reverses with it. Neither is true of a feedforward drive,
+    /// which is what the version this replaced applied.
+    #[test]
+    fn the_pull_is_proportional_to_the_error_and_reverses_with_it() {
+        // A margin of a few hundredths, which is what a real one is here. A
+        // decisive margin - 0.3 say - saturates the target to nearly one-hot
+        // at this temperature, and a setpoint of 0.998 leaves no room above
+        // it to test the reversal with.
+        let (target, weight) = outcome_target(&[0.40, 0.45, 0.31]);
+        assert!(target[1] > 0.6 && target[1] < 0.8, "a soft setpoint to move around: {target:?}");
+
+        let small = outcome_pull(&[0.30, 0.60, 0.10], &target, weight);
+        let large = outcome_pull(&[0.80, 0.10, 0.10], &target, weight);
+        assert!(
+            large[1].abs() > small[1].abs(),
+            "a bigger error must pull harder: {small:?} vs {large:?}"
+        );
+
+        // Believing MORE than was measured pulls the other way. A loop that
+        // only ever pushed one direction would drive every measured winner to
+        // certainty regardless of by how little it won.
+        let over = outcome_pull(&[0.10, 0.85, 0.05], &target, weight);
+        assert!(over[1] > 0.0, "a belief past the setpoint must be pulled back: {over:?}");
+    }
+
+    /// The update STOPS once the policy already believes what was measured.
+    ///
+    /// The regression test for the bug that made the first version of this
+    /// unusable. It weighted a sum of log-probabilities by the centred
+    /// scores, which is unbounded below: a negative weight pays more the
+    /// smaller the probability gets, so the optimizer drove the worst option
+    /// toward zero without limit and took the policy with it - one round from
+    /// 0.683 to 0.549 on the fixed block, with the loss going negative, which
+    /// a cross-entropy cannot do.
+    #[test]
+    fn nothing_is_pulled_once_the_policy_agrees_with_the_measurement() {
+        let (target, weight) = outcome_target(&[0.40, 0.72, 0.31]);
+        let pull = outcome_pull(&target, &target, weight);
+        assert!(
+            pull.iter().all(|p| p.abs() < 1e-6),
+            "a policy that already agrees must be left alone: {pull:?}"
+        );
+        // And the pull shrinks monotonically as the policy approaches it,
+        // rather than growing the way an unbounded objective's does.
+        let far = outcome_pull(&[0.8, 0.1, 0.1], &target, weight);
+        let near = outcome_pull(&[0.2, 0.7, 0.1], &target, weight);
+        let size = |v: &[f32]| v.iter().map(|x| x.abs()).sum::<f32>();
+        assert!(size(&near) < size(&far), "getting closer must pull less, not more");
     }
 }
 

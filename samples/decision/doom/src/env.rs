@@ -1509,6 +1509,17 @@ impl Env for DoomEnv {
         self.scripted()
     }
 
+    /// Which generated scenario this episode is, or which of the game's own
+    /// levels. What a measurement is broken down BY, since the nine scenarios
+    /// ask for entirely different things and an average over them describes
+    /// none of them.
+    fn label(&self) -> Option<String> {
+        match &self.cfg.scenario {
+            Some(name) => Some(name.clone()),
+            None => Some(format!("E{}M{}", self.cfg.episode, self.cfg.map)),
+        }
+    }
+
     fn hold(&mut self) -> bool {
         if self.doom.snapshot().is_err() {
             return false;

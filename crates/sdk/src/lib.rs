@@ -129,7 +129,7 @@ pub mod control;
 #[cfg(feature = "decision")]
 pub use control::{
     Agreement, Candidates, ControlPipeline, ControlPipelineBuilder, ControlSpec, Counterfactual,
-    Env, Rollout,
+    Env, Rollout, Situation, Spend,
 };
 #[cfg(feature = "decision")]
 pub mod conversion;

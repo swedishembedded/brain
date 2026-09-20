@@ -69,12 +69,6 @@ pub struct Args {
     pub approach: Option<f32>,
     /// What a decision is paid for. See [`Payment`].
     pub payment: Payment,
-    /// Decision points `whatif` returns to.
-    pub states: usize,
-    /// Alternatives it tries at each of them, beside the teacher's own.
-    pub alternatives: usize,
-    /// How many decisions in a row a branch departs from the teacher for.
-    pub deviate: usize,
     /// Draw the alternatives at random rather than by the policy's ranking.
     pub wide: bool,
     pub mission: Mission,
@@ -174,19 +168,11 @@ what to play
                       kills, items, damage, floor newly walked and route
                       closed: measured, about 92% of it is the exploration
                       bonus, which the score does not read at all
-  --states N          decisions `whatif` returns to                        [60]
-  --alternatives N    other actions it tries at each of them                 [2]
   --wide              draw the alternatives at RANDOM rather than from what the
                       policy ranks highest. The control: a policy fitted to the
                       teacher ranks the teacher's near-duplicates highest, so
                       the default asks about the actions least likely to lead
                       anywhere different
-  --deviate N         decisions in a row a branch departs from the teacher for
-                      before handing back to it. 1 is the cost-to-go of a
-                      single action and measures nothing here, because the
-                      teacher recovers from whatever one decision did. A
-                      strategy better than the teacher's may need several
-                      decisions in a row to show it                          [1]
   --approach F        what a 32-unit cell of ROUTE closed on the goal pays.
                       Defaults to the mission's own. `--approach 0` turns it
                       off, which is the ablation: without it the only dense
@@ -355,9 +341,6 @@ fn parse_args() -> Result<Args, String> {
         curriculum: args.take_flag("--curriculum"),
         start_distance: args.usize_or("--start-distance", 0) as i32,
         eval_episodes: args.usize_or("--eval-episodes", 24),
-        states: args.usize_or("--states", 60),
-        alternatives: args.usize_or("--alternatives", 2),
-        deviate: args.usize_or("--deviate", 1),
         wide: args.take_flag("--wide"),
         play: args.usize_or("--play", 3),
         transcript: args.take_str("--transcript"),
@@ -638,11 +621,11 @@ fn whatif(env: DoomEnv, args: &Args) -> Result<(), String> {
     println!(
         "doom: {} decisions from {} episodes, {} {} alternatives each, {}, then the \
          teacher finishing every branch",
-        args.states,
+        spec.states,
         spec.episodes,
-        args.alternatives,
+        spec.alternatives,
         if args.wide { "random" } else { "contested" },
-        match args.deviate {
+        match spec.deviate {
             0 | 1 => "one decision off the teacher".to_string(),
             n => format!("{n} decisions of the policy carrying on"),
         }
@@ -650,10 +633,10 @@ fn whatif(env: DoomEnv, args: &Args) -> Result<(), String> {
     let found = pipe
         .counterfactual(
             spec.episodes,
-            args.states,
-            args.alternatives,
+            spec.states,
+            spec.alternatives,
             if args.wide { Candidates::Wide } else { Candidates::Contested },
-            args.deviate,
+            spec.deviate,
             spec.max_steps,
         )
         .map_err(|e| format!("{e}"))?;
@@ -685,6 +668,19 @@ fn whatif(env: DoomEnv, args: &Args) -> Result<(), String> {
         c.gain,
         c.regret
     );
+    println!("  where the time went: {}", c.spend);
+    if !c.by_situation.is_empty() {
+        println!("\n  {:<26} {:>10} {:>10} {:>10}", "", "decisions", "mattered", "room");
+        for s in &c.by_situation {
+            println!(
+                "  {:<26} {:>10} {:>9.0}% {:>10.3}",
+                s.label,
+                s.states,
+                s.pivotal * 100.0,
+                s.regret
+            );
+        }
+    }
     println!(
         "\n{}",
         if c.pivotal < 0.1 {
