@@ -341,6 +341,9 @@ pub struct DoomEnv {
     /// nothing, because a level is chosen by the same seed that already makes
     /// an episode reproducible.
     maps: Vec<u32>,
+    /// Overrides the mission's own `approach` weight, for measuring what that
+    /// term is worth by turning it off. See [`CELL`].
+    approach_weight: Option<f32>,
     /// The decision budget an episode is given, so that "how far it got" can
     /// be a fraction rather than a count.
     max_steps: u32,
@@ -458,6 +461,7 @@ impl DoomEnv {
             mission,
             mission_mix,
             maps: only,
+            approach_weight: None,
             max_steps: 400,
             scenarios: Vec::new(),
             state: State::parse(EMPTY).expect("the empty state is well formed"),
@@ -508,6 +512,12 @@ impl DoomEnv {
         if !maps.is_empty() {
             self.maps = maps;
         }
+    }
+
+    /// Override the mission's route-closing weight. `None` leaves the mission
+    /// to decide; `Some(0.0)` is the ablation.
+    pub fn set_approach(&mut self, w: Option<f32>) {
+        self.approach_weight = w;
     }
 
     /// How many decisions an episode is allowed, for scoring how far one got.
@@ -724,7 +734,7 @@ impl DoomEnv {
         // for the crossing.
         let n = self.visit();
         r += w.explore / (n as f32).sqrt();
-        r += self.approach(w.approach);
+        r += self.approach(self.approach_weight.unwrap_or(w.approach));
         (r, extrinsic)
     }
 

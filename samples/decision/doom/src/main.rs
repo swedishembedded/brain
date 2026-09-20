@@ -65,6 +65,8 @@ pub struct Args {
     pub maps: Vec<u32>,
     /// Generated scenarios episodes are drawn from, instead of levels.
     pub scenarios: Vec<String>,
+    /// Overrides the mission's route-closing weight, for ablating it.
+    pub approach: Option<f32>,
     pub mission: Mission,
     pub mix: bool,
     pub arena: usize,
@@ -144,6 +146,13 @@ what to play
                         my-way-home               find the armour in a new maze
                         predict-position          a walking target, a slow rocket
                         take-cover                dodge, and keep dodging
+  --approach F        what a 32-unit cell of ROUTE closed on the goal pays.
+                      Defaults to the mission's own. `--approach 0` turns it
+                      off, which is the ablation: without it the only dense
+                      reward is the exploration bonus, and the exit - 89% of a
+                      finishing episode's return, paid on one step - is
+                      invisible to an advantage estimator whose half-life is
+                      eleven decisions
   --mission clear|speedrun|survive      [clear]
   --full-map          give the route the WHOLE level instead of only the part
                       the player has seen. A control, not a way to play: it
@@ -273,10 +282,19 @@ fn parse_args() -> Result<Args, String> {
         }
         None => Vec::new(),
     };
+    let approach = match args.take_str("--approach") {
+        Some(v) => Some(
+            v.trim()
+                .parse::<f32>()
+                .map_err(|_| format!("--approach: {v:?} is not a number"))?,
+        ),
+        None => None,
+    };
     let parsed = Args {
         command,
         maps,
         scenarios,
+        approach,
         doom_bin: args.take_str("--doom-bin"),
         wad: args.take_str("--wad"),
         cfg,
@@ -350,6 +368,7 @@ fn run() -> Result<(), String> {
     env.set_maps(args.maps.clone());
     env.set_scenarios(args.scenarios.clone());
     env.set_max_steps(args.max_steps());
+    env.set_approach(args.approach);
     env.set_arena(args.arena);
     env.set_curriculum(args.curriculum);
     env.set_start_distance(args.start_distance);
