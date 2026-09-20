@@ -192,6 +192,33 @@ impl Doom {
             cmd.env("SDL_VIDEODRIVER", "dummy");
             cmd.env("SDL_AUDIODRIVER", "dummy");
         }
+        // Ask the KERNEL to kill the engine when this process dies, whatever
+        // kills it. `Drop` below already does it for an ordinary exit, but a
+        // destructor cannot run on SIGKILL, and a training run is exactly the
+        // kind of long job that gets killed rather than asked to stop -
+        // leaving a 250 MB engine holding a GPU context and a port for as
+        // long as the machine is up. Five were found still running from
+        // earlier interrupted runs of this sample before this existed.
+        #[cfg(target_os = "linux")]
+        unsafe {
+            use std::os::unix::process::CommandExt;
+            cmd.pre_exec(|| {
+                // PR_SET_PDEATHSIG is per-THREAD: it fires when the thread
+                // that forked exits, which is not necessarily the process. It
+                // is set here anyway because the alternative - nothing - loses
+                // the common case, and the spawning thread here lives as long
+                // as the run does.
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                // And if the parent already died between fork and here, there
+                // will never be another signal to deliver.
+                if libc::getppid() == 1 {
+                    libc::_exit(0);
+                }
+                Ok(())
+            });
+        }
         let mut child = cmd.spawn()?;
 
         // Drain the engine's own output on a thread. It has to be drained

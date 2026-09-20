@@ -24,6 +24,10 @@ brain = { workspace = true, features = ["decision", "viewport"] }
 # the configuration an HTTP crate would need.
 serde = { workspace = true }
 serde_json = { workspace = true }
+# Only for PR_SET_PDEATHSIG: the kernel has to reap the engine when a training
+# run is killed, and a Rust destructor cannot run on SIGKILL.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = { workspace = true }
 
 [package.metadata.brain]
 # `make check/samples` fails if the real `cargo tree` closure exceeds this.

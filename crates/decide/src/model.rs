@@ -416,6 +416,12 @@ impl Encoder {
     }
 
 
+    /// The recorded forward dispatches, for a profiler that wants to time
+    /// this pass without running the model around it.
+    pub fn steps(&self) -> &[gpu_core::Step] {
+        &self.steps
+    }
+
     pub fn forward(&self) {
         self.gpu.submit(&[], &self.steps);
     }
@@ -434,6 +440,23 @@ impl Encoder {
         // turns the scores kernel's per-lane loads from one transaction each
         // into coalesced ones.
         let km = block::KeyMinor { transpose: self.k.kv_k_headt, scores: self.k.scores_cross_kt, kt: &self.kt };
+        // Fused attention, on any device that can run it.
+        //
+        // Gated on `workgroup_reductions` alone, which is a CORRECTNESS gate:
+        // the kernel needs two top-level barriers the Cranelift CPU JIT does
+        // not provide. NOT gated on trainability, even though the fused
+        // kernel writes no score slab and a backward might have wanted to
+        // read one - `chunked_bidir_bwd` recomputes scores and probs from the
+        // cached qkv for itself and reads nothing the forward left behind, so
+        // the training and inference graphs stay the same forward, which is
+        // the property this constructor's documentation promises and the
+        // reason a parity number cannot move with how an encoder was built.
+        let flash = g.caps().workgroup_reductions.then_some(block::FlashIds {
+            bidir: self.k.flash_bidir,
+            split: Some(self.k.flash_bidir_split),
+            reg: Some(self.k.flash_bidir_reg),
+            reg2: Some(self.k.flash_bidir_reg2),
+        });
         // ---- embeddings ----
         // `embed` Params: [width, rows]; bufs [index(u32), table, out]. The
         // position and segment tables are gathered the same way as the token
@@ -468,26 +491,43 @@ impl Encoder {
 
             // Self-attention within each span, independently. q/k/v live at
             // 0/H/2H of the fused row.
-            block::chunked_bidir_fwd(
-                g,
-                &cross,
-                Some(&km),
-                c.n_heads,
-                hd,
-                h,
-                &lb.qkv,
-                3 * h,
-                0,
-                h,
-                2 * h,
-                &lb.ctx,
-                &self.scores,
-                &self.probs,
-                &self.spans,
-                self.chunk,
-                None,
-                &mut s,
-            );
+            match flash {
+                Some(ids) => block::flash_bidir_fwd(
+                    g,
+                    ids,
+                    c.n_heads,
+                    hd,
+                    h,
+                    &lb.qkv,
+                    3 * h,
+                    0,
+                    h,
+                    2 * h,
+                    &lb.ctx,
+                    &self.spans,
+                    &mut s,
+                ),
+                None => block::chunked_bidir_fwd(
+                    g,
+                    &cross,
+                    Some(&km),
+                    c.n_heads,
+                    hd,
+                    h,
+                    &lb.qkv,
+                    3 * h,
+                    0,
+                    h,
+                    2 * h,
+                    &lb.ctx,
+                    &self.scores,
+                    &self.probs,
+                    &self.spans,
+                    self.chunk,
+                    None,
+                    &mut s,
+                ),
+            }
 
             let (mk, mt) = self.gemm(n, h);
             s.push(g.step(mk, &[&lb.ctx, self.w(&format!("{p}.proj.weight")), &lb.attn_out], &[n, h, h], mt));
