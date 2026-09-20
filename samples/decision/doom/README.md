@@ -1137,6 +1137,17 @@ In the order the measurements point at, not in the order they are interesting:
 - **Generalization is not proven.** A policy trained on E1M1-E1M3 does not
   finish E1M4, and neither does the teacher. It survives longer and kills more
   than the teacher there, which is worth something and is not the claim.
+- **"In sight" means line of sight, not field of view.** The engine reports a
+  thing when `P_CheckSight` can draw an unobstructed line to it, and that test
+  has no cone in it: a monster directly behind the player is reported exactly
+  as one in front. A player at the controls sees about ninety degrees. This is
+  the one place the observation gives MORE than a player has, it is
+  inconsistent with the burning-floor scan beside it - which does use a proper
+  ninety-degree fan - and it is why the memory added above matters less than
+  it should. Turning away from a medikit does not currently lose it; only a
+  wall does. Narrowing it is the experiment that would make the memory
+  load-bearing, and it would make every measurement above incomparable, so it
+  has not been done yet.
 - **The route cannot be pointed at a remembered thing.** It floods from its
   own goal, so "walk to where that medikit was" has to be a straight line,
   and the option is withheld when there is no floor that way rather than
