@@ -173,7 +173,10 @@ pub struct ControlOptions {
     /// Alternatives tried at each, beside the teacher's own.
     pub alternatives: usize,
     /// Decisions a probe departs from the teacher for.
-    pub deviate: usize,
+    pub beta: f32,
+    pub credit: usize,
+    pub repeats: usize,
+    pub wide: bool,
     /// Episodes on a fixed block of worlds, scored after every iteration.
     pub gauge_episodes: usize,
     /// Average the head over the last N iterates as a second candidate.
@@ -216,7 +219,10 @@ impl ControlOptions {
             improve: d.improve,
             states: d.states,
             alternatives: d.alternatives,
-            deviate: d.deviate,
+            beta: d.beta,
+            credit: d.credit,
+            repeats: d.repeats,
+            wide: d.wide,
             gauge_episodes: d.gauge_episodes,
             average: d.average,
             head_lr: None,
@@ -241,7 +247,7 @@ impl ControlOptions {
             .warmup_keep(self.warmup_keep)
             .dagger(self.dagger)
             .improve(self.improve)
-            .probing(self.states, self.alternatives, self.deviate)
+            .probing(self.states, self.alternatives, self.beta, self.credit, self.repeats, self.wide)
             .gauge_episodes(self.gauge_episodes)
             .average(self.average)
             .head_lr(self.head_lr.unwrap_or(0.0))
@@ -278,7 +284,15 @@ impl ControlOptions {
         self.improve = args.usize_or("--improve", self.improve);
         self.states = args.usize_or("--states", self.states);
         self.alternatives = args.usize_or("--alternatives", self.alternatives);
-        self.deviate = args.usize_or("--deviate", self.deviate);
+        self.beta = args.f32_or("--beta", self.beta);
+        self.credit = args.usize_or("--credit", self.credit);
+        self.repeats = args.usize_or("--repeats", self.repeats);
+        // Never `self.wide || take_flag(..)`: `||` short-circuits, so a
+        // default of true would leave the flag unconsumed and the run would
+        // die reporting it as unrecognised.
+        if args.take_flag("--contested") {
+            self.wide = false;
+        }
         self.gauge_episodes = args.usize_or("--gauge", self.gauge_episodes);
         self.average = args.usize_or("--average", self.average);
         if let Some(l) = args.take_str("--gae-lambda") {
@@ -335,10 +349,25 @@ impl Options for ControlOptions {
                       OUTCOME. Shaped by the three below
   --states N          decisions probed per round, by --improve or `whatif` [200]
   --alternatives N    other actions tried at each of them                    [2]
-  --deviate N         decisions in a row a probe departs from the teacher for
-                      before handing back. 1 is the cost-to-go of a single
-                      action, which a teacher good at recovering makes
-                      uninformative - it undoes whatever one decision did    [30]
+  --beta F            how often a probe's roll-out is the TEACHER rather than
+                      the policy, drawn once per probed decision           [0.5]
+                      Teacher-only roll-outs leave the learner blind to its own
+                      compounding errors; policy-only roll-outs turn this into
+                      full RL, which is the problem the phase exists to avoid.
+                      The mixture is what LOLS shows works
+  --credit N          decisions past the branch point a candidate is scored
+                      over. 0 scores to the end of the episode               [0]
+                      A shorter window stops a candidate's score being decided
+                      by what happened three hundred decisions later
+  --repeats N         roll-outs averaged per candidate                       [1]
+                      One roll-out of a long episode is a single draw of a
+                      system where any decision changes everything after it
+  --contested         draw the alternatives from what the policy ranks highest
+                      instead of UNIFORMLY, which is the default. The control,
+                      not a way to probe: taking the policy's own favourites
+                      makes which actions a probe even considers depend on the
+                      policy being trained, and the sample-complexity result
+                      behind this phase is stated for uniform exploration
   --dagger N          rounds of running the STUDENT and asking the teacher what
                       it would have done at every state the student reached,
                       aggregating those labels and refitting. Cloning only ever

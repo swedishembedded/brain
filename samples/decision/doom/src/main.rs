@@ -69,8 +69,6 @@ pub struct Args {
     pub approach: Option<f32>,
     /// What a decision is paid for. See [`Payment`].
     pub payment: Payment,
-    /// Draw the alternatives at random rather than by the policy's ranking.
-    pub wide: bool,
     pub mission: Mission,
     pub mix: bool,
     pub arena: usize,
@@ -168,11 +166,6 @@ what to play
                       kills, items, damage, floor newly walked and route
                       closed: measured, about 92% of it is the exploration
                       bonus, which the score does not read at all
-  --wide              draw the alternatives at RANDOM rather than from what the
-                      policy ranks highest. The control: a policy fitted to the
-                      teacher ranks the teacher's near-duplicates highest, so
-                      the default asks about the actions least likely to lead
-                      anywhere different
   --approach F        what a 32-unit cell of ROUTE closed on the goal pays.
                       Defaults to the mission's own. `--approach 0` turns it
                       off, which is the ablation: without it the only dense
@@ -341,7 +334,6 @@ fn parse_args() -> Result<Args, String> {
         curriculum: args.take_flag("--curriculum"),
         start_distance: args.usize_or("--start-distance", 0) as i32,
         eval_episodes: args.usize_or("--eval-episodes", 24),
-        wide: args.take_flag("--wide"),
         play: args.usize_or("--play", 3),
         transcript: args.take_str("--transcript"),
         engine_log: args.take_str("--engine-log"),
@@ -619,15 +611,22 @@ fn whatif(env: DoomEnv, args: &Args) -> Result<(), String> {
         pipe.warm_start(&spec, &mut quiet).map_err(|e| format!("{e}"))?;
     }
     println!(
-        "doom: {} decisions from {} episodes, {} {} alternatives each, {}, then the \
-         teacher finishing every branch",
+        "doom: {} decisions from {} episodes, {} {} alternatives each, {} roll-out{} per \
+         candidate finishing {}, scored over {}",
         spec.states,
         spec.episodes,
         spec.alternatives,
-        if args.wide { "random" } else { "contested" },
-        match spec.deviate {
-            0 | 1 => "one decision off the teacher".to_string(),
-            n => format!("{n} decisions of the policy carrying on"),
+        if spec.wide { "uniformly drawn" } else { "contested" },
+        spec.repeats,
+        if spec.repeats == 1 { "" } else { "s" },
+        match spec.beta {
+            b if b >= 1.0 => "with the teacher".to_string(),
+            b if b <= 0.0 => "with the policy".to_string(),
+            b => format!("with the teacher {:.0}% of the time and the policy otherwise", b * 100.0),
+        },
+        match spec.credit {
+            0 => "the rest of the episode".to_string(),
+            n => format!("the next {n} decisions"),
         }
     );
     let found = pipe
@@ -635,9 +634,8 @@ fn whatif(env: DoomEnv, args: &Args) -> Result<(), String> {
             spec.episodes,
             spec.states,
             spec.alternatives,
-            if args.wide { Candidates::Wide } else { Candidates::Contested },
-            spec.deviate,
-            spec.max_steps,
+            if spec.wide { Candidates::Wide } else { Candidates::Contested },
+            &spec,
         )
         .map_err(|e| format!("{e}"))?;
     let Some(c) = found else {
@@ -658,11 +656,15 @@ fn whatif(env: DoomEnv, args: &Args) -> Result<(), String> {
         "\n  {} decisions, {} game steps\n  \
          at {:.0}% of them the options did not all lead to the same place\n  \
          the choice was worth {:.3} of score between its best and worst option\n  \
+         re-running ONE option moved its own score by {:.3}, which is what that \
+         {:.3} has to beat to mean anything\n  \
          some alternative beat the teacher at {:.0}% of them, by {:.3} when it did\n  \
          picking the best of what was offered would gain {:.3} a decision over the teacher",
         c.states,
         c.steps,
         c.pivotal * 100.0,
+        c.spread,
+        c.noise,
         c.spread,
         c.beaten * 100.0,
         c.gain,
