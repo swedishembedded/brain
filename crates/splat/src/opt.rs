@@ -76,6 +76,15 @@ pub struct FitCfg {
     /// hides in and alias in every other. The fixed `min_scale` cannot express
     /// that limit, because the limit is a property of where the cameras were.
     pub mip_scale: f32,
+    /// Largest a gaussian may be, in PIXELS as its own cameras see it.
+    ///
+    /// The bound used to be 0.3 in world units, a constant with no relation to
+    /// the scene: on a capture whose camera orbit has radius 0.5 that is 141
+    /// pixels, so the optimizer was free to cover a gap with a splat spanning
+    /// a fifth of the frame. Those are the streaks that make a fitted scene
+    /// look like hair from any angle it was not fitted at. A bound in pixels
+    /// is a bound on the detail the cameras could actually have resolved.
+    pub max_scale_pixels: f32,
     /// Fraction of the LARGE gaussians to split each round regardless of what
     /// the gradient says, and to reseed at a probed depth. 0 disables it.
     ///
@@ -122,6 +131,7 @@ impl Default for FitCfg {
             eps2d: RenderOpts::default().eps2d,
             antialiased: RenderOpts::default().antialiased,
             mip_scale: crate::mip::DEFAULT_SCALE,
+            max_scale_pixels: 16.0,
             explore_frac: 0.05,
             sh_degree: 0,
             pose_lr: 0.0,
@@ -162,6 +172,34 @@ pub fn fit(gpu: &Gpu, ks: Kernels, init: &Splats, targets: &[TargetView], cfg: &
 
 fn fit_inner(gpu: &Gpu, ks: Kernels, init: &Splats, targets: &[TargetView], cfg: &FitCfg, on_step: &mut dyn FnMut(usize, f32) -> bool) -> (Splats, Vec<Camera>, f32) {
     assert!(!targets.is_empty());
+    // Fit in a frame where the scene is about one unit across.
+    //
+    // A reconstruction has no intrinsic units - photograph a model railway or
+    // a mountain and the pipeline sees the same rays - but the optimizer is
+    // full of quantities that do: a minimum scale in world units, and above
+    // all a learning rate, because Adam's step is a fixed DISTANCE rather than
+    // a fixed fraction. On a scene a hundred times too big the fit can barely
+    // move geometry at all; a hundred times too small and every step
+    // overshoots. Measured across that range the same fit varied by 8 dB and
+    // went from blur at one end to speckle at the other.
+    //
+    // Normalising once at the door fixes the whole class at a stroke, and it
+    // is exactly equivalent: intrinsics are in pixels, so scaling the world
+    // and the camera positions together changes no rendered image.
+    let k = scene_unit(init, targets);
+    if (k - 1.0).abs() > 1e-6 {
+        let scaled_init = rescale_scene(init, k);
+        let scaled: Vec<TargetView> = targets
+            .iter()
+            .map(|t| TargetView { cam: rescale_cam(&t.cam, k), rgb: t.rgb.clone() })
+            .collect();
+        let (s, c, l) = fit_inner(gpu, ks, &scaled_init, &scaled, cfg, on_step);
+        return (
+            rescale_scene(&s, 1.0 / k),
+            c.iter().map(|c| rescale_cam(c, 1.0 / k)).collect(),
+            l,
+        );
+    }
     // With density control off there is exactly ONE stage, and this is the
     // function it always was - same buffers, same Adam state, start to finish.
     let stage_len = if cfg.densify_every == 0 { cfg.iters } else { cfg.densify_every };
@@ -443,6 +481,16 @@ fn fit_stage(
     } else {
         vec![cfg.min_scale; n]
     };
+    // The same conversion gives the ceiling: `smoothing_sigma` is "this many
+    // pixels, in world units, at the rate this gaussian was best sampled".
+    let ceil: Vec<f32> = if cfg.max_scale_pixels > 0.0 {
+        crate::mip::smoothing_sigma(init, cams, cfg.max_scale_pixels)
+            .into_iter()
+            .map(|v| if v > 0.0 { v } else { 0.3 })
+            .collect()
+    } else {
+        vec![0.3; n]
+    };
 
     // `adamw.wgsl` (M6.4) binds param/grad/m/v PLUS a per-tensor `numel`
     // descriptor and a device-resident grad-scale coefficient, and reads its
@@ -666,8 +714,9 @@ fn fit_stage(
         let tm = std::time::Instant::now();
         for i in 0..n {
             let lo = floor[i.min(floor.len() - 1)];
+            let hi = ceil[i.min(ceil.len() - 1)].max(lo);
             for k in 3..6 {
-                geo[i * 10 + k] = geo[i * 10 + k].clamp(lo, 0.3);
+                geo[i * 10 + k] = geo[i * 10 + k].clamp(lo, hi);
             }
             if cfg.max_aspect > 1.0 {
                 // Raise the short axes to the longest one's fair share rather
@@ -775,6 +824,54 @@ fn compose_local(c2w: &[f32; 16], omega: &[f64; 3], tau: &[f64; 3]) -> [f32; 16]
         }
         out[i * 4 + 3] =
             (c2w[i * 4 + 3] as f64 + (0..3).map(|t| r[i * 3 + t] * tau[t]).sum::<f64>()) as f32;
+    }
+    out
+}
+
+/// The factor that puts a scene roughly one unit across, from the spread of
+/// the cameras and the scene together - the cameras are what define what
+/// "close" means for a capture, and a scene with one stray gaussian at
+/// infinity should not be judged by it.
+fn scene_unit(s: &Splats, targets: &[TargetView]) -> f32 {
+    let mut lo = [f32::MAX; 3];
+    let mut hi = [f32::MIN; 3];
+    let mut note = |p: [f32; 3]| {
+        for k in 0..3 {
+            lo[k] = lo[k].min(p[k]);
+            hi[k] = hi[k].max(p[k]);
+        }
+    };
+    for t in targets {
+        note([t.cam.c2w[3], t.cam.c2w[7], t.cam.c2w[11]]);
+    }
+    // a coarse subsample is plenty for an order of magnitude
+    let step = (s.len() / 4096).max(1);
+    for i in (0..s.len()).step_by(step) {
+        note([s.means[i * 3], s.means[i * 3 + 1], s.means[i * 3 + 2]]);
+    }
+    let ext = (0..3).map(|k| hi[k] - lo[k]).fold(0.0f32, f32::max);
+    if ext.is_finite() && ext > 1e-20 {
+        1.0 / ext
+    } else {
+        1.0
+    }
+}
+
+fn rescale_scene(s: &Splats, k: f32) -> Splats {
+    let mut out = s.clone();
+    for v in out.means.iter_mut() {
+        *v *= k;
+    }
+    for v in out.scales.iter_mut() {
+        *v *= k;
+    }
+    out
+}
+
+fn rescale_cam(c: &Camera, k: f32) -> Camera {
+    let mut out = *c;
+    for i in 0..3 {
+        out.c2w[i * 4 + 3] *= k;
     }
     out
 }

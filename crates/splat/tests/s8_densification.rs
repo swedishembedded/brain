@@ -401,3 +401,103 @@ fn a_view_dependent_surface_needs_view_dependent_colour() {
          harmonics are not reaching the loss."
     );
 }
+
+/// A fit may not cover a gap with a splat the size of the room.
+///
+/// Bounding a gaussian's axes by a constant in WORLD units is a bound on
+/// nothing: what 0.3 means depends entirely on how big the scene is, and on a
+/// capture whose camera orbit has radius 0.5 it permits a splat spanning a
+/// fifth of the frame. The optimizer takes that offer, because inflating one
+/// gaussian is the cheapest way to cover a region it cannot otherwise explain,
+/// and the result is a scene that looks correct from the views it was fitted
+/// to and like hair from every other.
+///
+/// The bound that means something is in pixels, through the cameras.
+#[test]
+fn a_fit_may_not_grow_a_splat_past_what_its_cameras_resolve() {
+    let g = Gpu::new_cpu(splat::PIPELINES);
+    let ks = Kernels::at(0);
+    let (w, h) = (64u32, 64u32);
+    // A SMALL scene, which is the whole point. The old bound of 0.3 world
+    // units is only about 6 px on a scene three units away, and roughly 140 on
+    // a real capture whose camera orbit has radius 0.5 - the bug is invisible
+    // at one scale and ruinous at the other, which is what a bound in world
+    // units gets you.
+    const K: f32 = 0.1;
+    let mut truth = board(16, false);
+    for v in truth.means.iter_mut() {
+        *v *= K;
+    }
+    for v in truth.scales.iter_mut() {
+        *v *= K;
+    }
+    let cam_at = |e: [f32; 3]| {
+        Camera::look_at(e, [0.0, 0.0, 3.0 * K], [0.0, -1.0, 0.0], 55.0, w, h)
+    };
+    let o = RenderOpts::default();
+    let mut ren = Renderer::new(&g, ks, truth.len(), w, h, 0);
+    let gs = GpuSplats::upload(&g, &truth);
+    let shots: Vec<TargetView> = [[0.0, 0.0, 0.0], [0.7 * K, -0.25 * K, 0.3 * K], [-0.7 * K, 0.25 * K, 0.3 * K]]
+        .iter()
+        .map(|e| {
+            let c = cam_at(*e);
+            ren.render(&g, &gs, &c, &o);
+            let img = ren.read_rgba(&g, w, h);
+            TargetView { cam: c, rgb: img.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect() }
+        })
+        .collect();
+
+    // Start from a tenth of the gaussians, so covering the scene is the
+    // cheapest thing the optimizer can do and growing them is how it does it.
+    let mut init = Splats::default();
+    for i in (0..truth.len()).step_by(10) {
+        init.means.extend_from_slice(&truth.means[i * 3..i * 3 + 3]);
+        init.quats.extend_from_slice(&truth.quats[i * 4..i * 4 + 4]);
+        init.scales.extend_from_slice(&truth.scales[i * 3..i * 3 + 3]);
+        init.opacities.push(truth.opacities[i]);
+        init.colors.extend_from_slice(&truth.colors[i * 3..i * 3 + 3]);
+    }
+
+    let cams: Vec<Camera> = shots.iter().map(|t| t.cam).collect();
+    let biggest = |s: &Splats, limit_px: f32| -> f32 {
+        // express every gaussian's longest axis in pixels, at the rate its own
+        // cameras sampled it
+        let unit = splat::mip::smoothing_sigma(s, &cams, 1.0);
+        let mut worst = 0.0f32;
+        for i in 0..s.len() {
+            if unit[i] <= 0.0 {
+                continue;
+            }
+            let lng = s.scales[i * 3].max(s.scales[i * 3 + 1]).max(s.scales[i * 3 + 2]);
+            worst = worst.max(lng / unit[i]);
+        }
+        let _ = limit_px;
+        worst
+    };
+
+    // A deliberately tight cap, so the mechanism is exercised rather than
+    // merely present. The shipped default is looser; what is under test is
+    // that the bound is expressed through the cameras and actually binds.
+    let base = FitCfg { iters: 150, lr: 8e-3, log_every: 0, max_scale_pixels: 4.0, ..Default::default() };
+    let (bounded, _) = fit(&g, ks, &init, &shots, &base, &mut |_, _| true);
+    let (loose, _) =
+        fit(&g, ks, &init, &shots, &FitCfg { max_scale_pixels: 0.0, ..base }, &mut |_, _| true);
+
+    let b = biggest(&bounded, base.max_scale_pixels);
+    let l = biggest(&loose, 0.0);
+    // Measured against where the gaussians ENDED UP, while the bound was
+    // computed from where they started, so a gaussian that drifted toward a
+    // camera legitimately measures larger than its own limit. The headroom is
+    // for that drift, not for the bound failing to bind.
+    assert!(
+        b <= base.max_scale_pixels * 1.75,
+        "the bounded fit produced a splat {b:.1} px across against a limit of {}",
+        base.max_scale_pixels
+    );
+    assert!(
+        l > b * 2.0,
+        "the unbounded fit reached {l:.1} px and the bounded one {b:.1} px. They are supposed to \
+         differ a lot here - if they do not, this scene never tempted the optimizer to inflate \
+         anything and the test proves nothing."
+    );
+}
