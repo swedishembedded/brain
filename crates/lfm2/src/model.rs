@@ -365,6 +365,10 @@ pub struct Lfm {
     head: Option<HeadGather>,
     ce_grad_uni: DeviceBuffer,
     bwd_steps: Vec<Step>,
+    /// The seeded-backward twin of `bwd_steps` - see [`Lfm::seed_buf`]/
+    /// [`Lfm::backward_seeded`]. Built alongside `bwd_steps` whenever `train`
+    /// is set; empty on an inference build.
+    seeded_bwd_steps: Vec<Step>,
     /// Chunked-training attention slabs (`[heads, chunk, t]`; size-1 otherwise).
     slab_scores: DeviceBuffer,
     slab_probs: DeviceBuffer,
@@ -452,6 +456,7 @@ impl Lfm {
         let mut m = Lfm::new_impl_chunkedtrain(cfg, b, t, init, slab_budget_bytes, head_cap);
         m.fwd_steps = m.forward_steps();
         m.bwd_steps = m.backward_steps();
+        m.seeded_bwd_steps = m.seeded_backward_steps();
         m
     }
 
@@ -534,6 +539,7 @@ impl Lfm {
         }
         if train {
             m.bwd_steps = m.backward_steps();
+            m.seeded_bwd_steps = m.seeded_backward_steps();
         }
         m
     }
@@ -719,6 +725,7 @@ impl Lfm {
             head: None,
             ce_grad_uni: gpu.uniform_dynamic(4),
             bwd_steps: Vec::new(),
+            seeded_bwd_steps: Vec::new(),
             slab_scores: st(1),
             slab_probs: st(1),
             slab_dscores: st(1),
@@ -1219,18 +1226,9 @@ impl Lfm {
     fn backward_steps(&self) -> Vec<Step> {
         let c = &self.cfg;
         let bw = self.bwd.as_ref().expect("train mode");
-        let Regime::Materialized { layers, res, .. } = &self.regime else {
-            panic!("backward: materialized regime only");
-        };
         let n = self.b * self.t;
         let d = c.d_model;
-        let ff = c.d_ff;
         let v = c.vocab;
-        let hd = c.head_dim;
-        let hq = c.q_dim();
-        let hkv = c.kv_dim();
-        let (nh, nkv, group) = (c.n_heads, c.n_kv_heads, c.group());
-        let theta = c.rope_theta;
         let head = c.head_weight();
         let mut s: Vec<Step> = Vec::new();
 
@@ -1258,26 +1256,69 @@ impl Lfm {
             let (bk, bt) = dx_kernel(n, d);
             s.push(self.gpu.step(bk, &[&bw.d_logits, self.w(head), &bw.d_xn], &[n, d, v, 0], bt));
         }
+        self.trunk_backward_steps(&mut s);
+        s
+    }
+
+    /// The seeded-backward step list: whatever gradient the caller has
+    /// already written into [`Lfm::seed_buf`] (`bw.d_xn`, the gradient of
+    /// `xn_final` - the SAME buffer `backward_steps`'s own CE path computes
+    /// into before calling [`Self::trunk_backward_steps`]) walks back through
+    /// the final norm, every layer and the tied embedding table. No head, no
+    /// CE - an external objective (contrastive, or anything else) owns the
+    /// loss and its own gradient on the pooled/unpooled hidden states; this
+    /// is where that gradient re-enters the encoder.
+    fn seeded_backward_steps(&self) -> Vec<Step> {
+        let mut s: Vec<Step> = Vec::new();
+        self.trunk_backward_steps(&mut s);
+        s
+    }
+
+    /// Final RMSNorm backward, every layer's FFN + mixer backward, and the
+    /// tied embedding table's backward - the exact adjoint of everything in
+    /// [`Lfm::build_steps`] from `xn_final` down to the token embedding.
+    /// Shared by [`Self::backward_steps`] (which computes `bw.d_xn` from the
+    /// CE loss first) and [`Self::seeded_backward_steps`] (whose caller
+    /// writes `bw.d_xn` directly) - MATERIALIZED regime only (the chunked-
+    /// TRAINING regime is also `Regime::Materialized`, see that variant's own
+    /// doc; only the pure-inference chunked builder is not, and never builds
+    /// `self.bwd` at all).
+    fn trunk_backward_steps(&self, s: &mut Vec<Step>) {
+        let c = &self.cfg;
+        let bw = self.bwd.as_ref().expect("train mode");
+        let Regime::Materialized { layers, res, .. } = &self.regime else {
+            panic!("trunk backward: materialized regime only");
+        };
+        let n = self.b * self.t;
+        let d = c.d_model;
+        let ff = c.d_ff;
+        let v = c.vocab;
+        let hd = c.head_dim;
+        let hq = c.q_dim();
+        let hkv = c.kv_dim();
+        let (nh, nkv, group) = (c.n_heads, c.n_kv_heads, c.group());
+        let theta = c.rope_theta;
+
         let last = c.n_layers() as usize;
-        self.norm_bwd(&mut s, &res[last], "norm.weight", &bw.d_xn, &bw.dres[last], &bw.inv, d, n);
+        self.norm_bwd(s, &res[last], "norm.weight", &bw.d_xn, &bw.dres[last], &bw.inv, d, n);
 
         for (l, lb) in layers.iter().enumerate().rev() {
             let p = |name: &str| format!("blocks.{l}.{name}");
             let cb = &lb.common;
 
             // ---- FFN backward (input grad = dres[l+1]) ----
-            self.lin_bwd(&mut s, &bw.dres[l + 1], &cb.h, &p("mlp.down.weight"), &bw.d_h, n, ff, d, 0);
+            self.lin_bwd(s, &bw.dres[l + 1], &cb.h, &p("mlp.down.weight"), &bw.d_h, n, ff, d, 0);
             s.push(self.gpu.step(SILU_DA, &[&cb.gate_pre, &cb.up, &bw.d_h, &bw.d_gate_pre], &[n * ff], n * ff));
             s.push(self.gpu.step(SILU_DB, &[&cb.gate_pre, &bw.d_h, &bw.d_up], &[n * ff], n * ff));
-            self.lin_bwd(&mut s, &bw.d_up, &cb.xn2, &p("mlp.up.weight"), &bw.d_xn, n, d, ff, 0);
-            self.lin_bwd(&mut s, &bw.d_gate_pre, &cb.xn2, &p("mlp.gate.weight"), &bw.d_xn, n, d, ff, 1);
-            self.norm_bwd(&mut s, &cb.xmid, &p("ln2.weight"), &bw.d_xn, &bw.d_tmp, &bw.inv, d, n);
+            self.lin_bwd(s, &bw.d_up, &cb.xn2, &p("mlp.up.weight"), &bw.d_xn, n, d, ff, 0);
+            self.lin_bwd(s, &bw.d_gate_pre, &cb.xn2, &p("mlp.gate.weight"), &bw.d_xn, n, d, ff, 1);
+            self.norm_bwd(s, &cb.xmid, &p("ln2.weight"), &bw.d_xn, &bw.d_tmp, &bw.inv, d, n);
             s.push(self.gpu.step(ADD2, &[&bw.dres[l + 1], &bw.d_tmp, &bw.dxmid], &[n * d], n * d));
 
             // ---- mixer backward (input grad = dxmid) ----
             match &lb.mixer {
                 MixerBufs::Attn(ab) => {
-                    self.lin_bwd(&mut s, &bw.dxmid, &ab.ctx, &p("attn.wo.weight"), &bw.d_ctx, n, hq, d, 0);
+                    self.lin_bwd(s, &bw.dxmid, &ab.ctx, &p("attn.wo.weight"), &bw.d_ctx, n, hq, d, 0);
                     match self.train_chunk {
                         None => s.extend(block::bidir_bwd(
                             &self.gpu, &Self::bidir_ids(), &self.bidir(), &ab.qkv, &ab.probs, &bw.d_ctx, &bw.d_scores, &bw.d_qkv,
@@ -1289,7 +1330,7 @@ impl Lfm {
                             block::chunked_bidir_bwd(
                                 &self.gpu, &fwd_ids, None, &bwd_ids, c.n_heads, hd, hq, &ab.qkv, 3 * d, 0, d, 2 * d,
                                 &bw.d_ctx, &bw.d_qkv, &self.slab_scores, &self.slab_probs, &self.slab_dscores,
-                                &spans, chunk, None, &mut s,
+                                &spans, chunk, None, s,
                             );
                         }
                     }
@@ -1301,15 +1342,15 @@ impl Lfm {
                     // RoPE backward in place, then QK-norm backward.
                     s.push(self.rope_bwd_step(&bw.d_q, n, nh, hd, hq, self.t, theta));
                     s.push(self.rope_bwd_step(&bw.d_k, n, nkv, hd, hkv, self.t, theta));
-                    self.norm_bwd(&mut s, &ab.q_pre, &p("attn.q_norm.weight"), &bw.d_q, &bw.dq_pre, &bw.inv, hd, n * nh);
-                    self.norm_bwd(&mut s, &ab.k_pre, &p("attn.k_norm.weight"), &bw.d_k, &bw.dk_pre, &bw.inv, hd, n * nkv);
-                    self.lin_bwd(&mut s, &bw.d_v, &cb.xn1, &p("attn.wv.weight"), &bw.d_xn, n, d, hkv, 0);
-                    self.lin_bwd(&mut s, &bw.dk_pre, &cb.xn1, &p("attn.wk.weight"), &bw.d_xn, n, d, hkv, 1);
-                    self.lin_bwd(&mut s, &bw.dq_pre, &cb.xn1, &p("attn.wq.weight"), &bw.d_xn, n, d, hq, 1);
+                    self.norm_bwd(s, &ab.q_pre, &p("attn.q_norm.weight"), &bw.d_q, &bw.dq_pre, &bw.inv, hd, n * nh);
+                    self.norm_bwd(s, &ab.k_pre, &p("attn.k_norm.weight"), &bw.d_k, &bw.dk_pre, &bw.inv, hd, n * nkv);
+                    self.lin_bwd(s, &bw.d_v, &cb.xn1, &p("attn.wv.weight"), &bw.d_xn, n, d, hkv, 0);
+                    self.lin_bwd(s, &bw.dk_pre, &cb.xn1, &p("attn.wk.weight"), &bw.d_xn, n, d, hkv, 1);
+                    self.lin_bwd(s, &bw.dq_pre, &cb.xn1, &p("attn.wq.weight"), &bw.d_xn, n, d, hq, 1);
                 }
                 MixerBufs::Conv(cv) => {
                     // out_proj backward: d_gated (d_mix1).
-                    self.lin_bwd(&mut s, &bw.dxmid, &cv.gated, &p("conv.out_proj.weight"), &bw.d_mix1, n, d, d, 0);
+                    self.lin_bwd(s, &bw.dxmid, &cv.gated, &p("conv.out_proj.weight"), &bw.d_mix1, n, d, d, 0);
                     // y = C ⊙ conv_out:  d_C (d_mix2) and d_conv_out (d_mix3).
                     s.push(self.gpu.step(MUL, &[&bw.d_mix1, &cv.conv_out, &bw.d_mix2], &[n * d], n * d));
                     s.push(self.gpu.step(MUL, &[&bw.d_mix1, &cv.cg, &bw.d_mix3], &[n * d], n * d));
@@ -1330,18 +1371,17 @@ impl Lfm {
                     s.push(self.gpu.step(MUL, &[&bw.d_mix4, &cv.xg, &bw.d_mix1], &[n * d], n * d));
                     s.push(self.gpu.step(MUL, &[&bw.d_mix4, &cv.bg, &bw.d_mix3], &[n * d], n * d));
                     // in_proj row-thirds backward (B rows 0..d, C d..2d, X 2d..3d).
-                    self.sliced_lin_bwd(&mut s, &bw.d_mix1, &cb.xn1, &p("conv.in_proj.weight"), 0, &bw.d_xn, n, d, d, 0);
-                    self.sliced_lin_bwd(&mut s, &bw.d_mix2, &cb.xn1, &p("conv.in_proj.weight"), d, &bw.d_xn, n, d, d, 1);
-                    self.sliced_lin_bwd(&mut s, &bw.d_mix3, &cb.xn1, &p("conv.in_proj.weight"), 2 * d, &bw.d_xn, n, d, d, 1);
+                    self.sliced_lin_bwd(s, &bw.d_mix1, &cb.xn1, &p("conv.in_proj.weight"), 0, &bw.d_xn, n, d, d, 0);
+                    self.sliced_lin_bwd(s, &bw.d_mix2, &cb.xn1, &p("conv.in_proj.weight"), d, &bw.d_xn, n, d, d, 1);
+                    self.sliced_lin_bwd(s, &bw.d_mix3, &cb.xn1, &p("conv.in_proj.weight"), 2 * d, &bw.d_xn, n, d, d, 1);
                 }
             }
-            self.norm_bwd(&mut s, &res[l], &p("ln1.weight"), &bw.d_xn, &bw.d_tmp, &bw.inv, d, n);
+            self.norm_bwd(s, &res[l], &p("ln1.weight"), &bw.d_xn, &bw.d_tmp, &bw.inv, d, n);
             s.push(self.gpu.step(ADD2, &[&bw.dxmid, &bw.d_tmp, &bw.dres[l]], &[n * d], n * d));
         }
 
         // Embedding backward (tied: accumulates onto the head grad in tok.weight).
         s.push(self.gpu.step(EMB_BWD, &[&self.tokens, &bw.dres[0], self.ps.g("tok.weight")], &[n, d, v], v * d));
-        s
     }
 
     pub fn backward(&self) {
@@ -1359,6 +1399,34 @@ impl Lfm {
                 self.gpu.submit(&[], &self.bwd_steps);
             }
         }
+    }
+
+    /// The buffer [`Lfm::backward_seeded`] reads from: the gradient of
+    /// `xn_final` (this model's own final hidden state, per row - the SAME
+    /// per-token layout [`Lfm::read_hidden`] returns), `[rows, d_model]`
+    /// row-major. A caller with an external objective (contrastive,
+    /// or anything else) writes its own gradient here directly - no copy
+    /// between an external head and this model, the same reason
+    /// `decide::Encoder::seed_buf` exists.
+    ///
+    /// This model has no MLM head or CE loss in this path at all: unlike
+    /// [`Lfm::backward`], which computes this same buffer FROM the checkpoint's
+    /// own masked-LM objective, `backward_seeded` trusts whatever is already
+    /// here. Every row must be written - there is no gather/scatter step to
+    /// leave an unsupervised row at zero the way the MLM head's gathered path
+    /// does, so a caller pooling over a subset of rows (mean pooling, for
+    /// instance) must broadcast its own gradient back to every row itself.
+    pub fn seed_buf(&self) -> &DeviceBuffer {
+        &self.bwd.as_ref().expect("seed_buf on an inference build").d_xn
+    }
+
+    /// Run the reverse pass against whatever already sits in [`Lfm::seed_buf`] -
+    /// the final RMSNorm, every layer, and the tied embedding table, exactly
+    /// [`Lfm::backward`]'s own trunk, with no head and no CE computed first.
+    /// See [`Lfm::seed_buf`]'s own doc for what the caller owes it.
+    pub fn backward_seeded(&self) {
+        assert!(!self.seeded_bwd_steps.is_empty(), "backward_seeded: model built without training graphs");
+        self.gpu.submit(&[], &self.seeded_bwd_steps);
     }
 
     pub fn zero_grads(&self) {

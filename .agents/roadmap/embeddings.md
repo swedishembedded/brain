@@ -42,7 +42,15 @@ downstream project.
       mechanism, out of this track's scope.
 - [x] LFM2.5-Encoder gains YaRN long-context RoPE scaling
       (`LfmConfig::rope_scaling`) - see `.agents/roadmap/lfm2.md` for the
-      detail and what it does not yet cover (seeded backward).
+      detail.
+- [x] LFM2.5-Encoder gains a seeded backward pass (`Lfm::seed_buf`/
+      `backward_seeded`) - an external objective's gradient on the final
+      hidden states now reaches every encoder parameter, gradient-checked
+      directly against finite differences
+      (`lfm_seeded_analytic_grads_match_finite_differences`). This is the
+      primitive full-encoder contrastive fine-tuning needs; the SDK-level
+      training loop that actually DRIVES it with `EmbeddingTrainer`'s InfoNCE
+      objective is not yet built - see `.agents/roadmap/lfm2.md`.
 - [x] `lfm2::caps`'s `embed` action gains a `normalize` param, defaulting to
       `false` so the existing raw-mean output stays byte-identical for every
       caller that predates it.
@@ -77,11 +85,13 @@ downstream project.
 
 ## Not yet done
 
-- [ ] A seeded backward pass for LFM2 (`prepare_reverse`/`seed_buf`/
-      `backward_seeded`, mirroring `crates/decide/src/model.rs`), so
-      `EmbeddingTrainer`'s InfoNCE objective (or an equivalent) can fine-tune
-      the full encoder rather than only a frozen-embedding projection head.
-      See `.agents/roadmap/lfm2.md`.
+- [ ] An SDK-level training loop over LFM2's new seeded backward - neither
+      `brain::EmbeddingTrainer` nor a sibling type yet unfreezes and steps a
+      live `lfm2::Lfm::new_train` through `seed_buf`/`backward_seeded` with
+      an InfoNCE (or other) objective; today `EmbeddingTrainer` only trains a
+      frozen-embedding projection head, over either backbone. Needed before a
+      SAMPLE can demonstrate full-encoder fine-tuning at all: samples may
+      only depend on `brain`, never `brain-lfm2` directly.
 - [ ] LFM2 at 32768 tokens is unvalidated extrapolation to 4x its native
       8192-token training extent - real quality there needs continued
       pretraining, not just the RoPE math being correct (which is tested).

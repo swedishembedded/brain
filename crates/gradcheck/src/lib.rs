@@ -106,6 +106,12 @@ pub use timesfm3::{check_timesfm3, check_timesfm3_lora, check_timesfm3_one_layer
 pub mod decide;
 pub use decide::check_decide;
 
+/// LFM2's SEEDED backward (an external objective's own gradient on the
+/// final hidden states, not the checkpoint's masked-LM CE) - same "fixed
+/// linear readout" isolation `decide` uses, over the different entry point.
+pub mod lfm2_seeded;
+pub use lfm2_seeded::check_lfm_seeded;
+
 pub mod florence2;
 pub use florence2::{check_florence2, check_florence2_lora};
 
@@ -1803,6 +1809,21 @@ mod tests {
             return;
         }
         let report = check_lfm(7);
+        report.print();
+        assert_grad_gate(&report, "model");
+    }
+
+    /// The seeded entry point (`Lfm::seed_buf`/`backward_seeded`) - an
+    /// external objective's gradient on `xn_final`, not the checkpoint's own
+    /// CE, must reach every parameter correctly. See `lfm2_seeded`'s own
+    /// module doc for why this is checked separately from the CE path above
+    /// rather than assumed to follow from it.
+    #[test]
+    fn lfm_seeded_analytic_grads_match_finite_differences() {
+        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+            return;
+        }
+        let report = check_lfm_seeded(7);
         report.print();
         assert_grad_gate(&report, "model");
     }

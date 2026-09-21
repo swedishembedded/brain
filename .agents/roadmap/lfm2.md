@@ -19,12 +19,29 @@ against the NPU export via OpenVINO.
       LFM2 is now reachable from `brain::EmbeddingPipeline` as a third
       backend (routed by `ModelCard.family` for a local file, by resolver
       fallback for a hub id) - see `.agents/roadmap/embeddings.md`.
-- [ ] A seeded backward pass (`prepare_reverse`/`seed_buf`/`backward_seeded`,
-      mirroring `crates/decide/src/model.rs`) for full-encoder contrastive
-      fine-tuning - today only the checkpoint's own MLM objective has a
-      backward path; training the encoder against an external (e.g.
-      InfoNCE) objective needs a way to seed the reverse pass from outside
-      the model, which does not exist yet.
+- [x] A seeded backward pass (`Lfm::seed_buf`/`backward_seeded`, mirroring
+      `crates/decide/src/model.rs`'s `seed_buf`/`backward_seeded` - no
+      `prepare_reverse`/staleness tracking needed here, since LFM2's step
+      lists are built once at a fixed `(b, t)` rather than re-recorded per
+      variable-span batch the way `decide::Encoder` is). `backward_steps`
+      (the checkpoint's own MLM path) was refactored into a shared
+      `trunk_backward_steps` (final RMSNorm through the tied embedding
+      table) plus a small CE-only prefix; `seeded_backward_steps` is that
+      SAME trunk with no CE and no head at all - an external objective's
+      gradient on `xn_final` re-enters the encoder exactly where the CE
+      path's own gradient used to. Gradient-checked directly against finite
+      differences (`crates/gradcheck/src/lfm2_seeded.rs`,
+      `lfm_seeded_analytic_grads_match_finite_differences`) over every
+      parameter, isolated with the same fixed-random-linear-readout
+      objective `crates/decide`'s own probe uses.
+      **What this does NOT yet include**: an SDK-level training loop or
+      sample that actually drives full-encoder fine-tuning with this primitive
+      - `brain::EmbeddingTrainer` (`crates/sdk/src/embed_train.rs`) still only
+      trains a frozen-embedding projection head; wiring it (or a sibling
+      type) to ALSO unfreeze and step a live `Lfm::new_train` through
+      `seed_buf`/`backward_seeded` is real, separate, not-yet-built work.
+      Samples may only depend on `brain` (not `brain-lfm2` directly), so a
+      sample demonstrating this needs that SDK-level surface first.
 - [ ] 8k-context training: the masked-row gather before the MLM head needs a
       chunked-regime builder, since materializing full-vocabulary logits at
       8k context exceeds the device's per-buffer size limit
