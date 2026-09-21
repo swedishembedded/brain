@@ -1572,6 +1572,20 @@ impl Env for DoomEnv {
         }
     }
 
+    /// WHICH world, not what kind of one.
+    ///
+    /// A scenario is built by the engine from the episode's own seed, so one
+    /// scenario name covers as many distinct layouts as there are seeds - and
+    /// a trajectory through one of them is a sequence of turns that fits no
+    /// other. The game's own levels have fixed geometry and are their own
+    /// instance.
+    fn instance(&self) -> Option<String> {
+        self.cfg
+            .scenario
+            .as_ref()
+            .map(|name| format!("{name}#{}", self.episode))
+    }
+
     fn hold(&mut self) -> bool {
         self.hold_at(0)
     }

@@ -155,6 +155,21 @@ pub trait Env {
         None
     }
 
+    /// WHICH world this episode is, when [`Env::label`] names a KIND of world
+    /// the environment generates many of. `None` when the label already
+    /// identifies it.
+    ///
+    /// A level with fixed geometry is its own instance and needs nothing
+    /// here. A generated one does: every maze drawn from one scenario shares
+    /// that scenario's label, and anything that keeps "the best run per
+    /// label" then holds the best run over all the mazes ever generated -
+    /// which is the run that drew the easiest one. Its decisions are about a
+    /// layout no other episode has, so cloning them teaches turns that lead
+    /// somewhere else.
+    fn instance(&self) -> Option<String> {
+        None
+    }
+
     /// Hold the state this environment is in right now, so that a caller can
     /// come back to it and try something else. `false` when it cannot.
     ///
@@ -354,6 +369,109 @@ impl Keep {
 
     fn best(&self) -> (usize, &[(String, Vec<f32>)]) {
         (self.at, &self.weights)
+    }
+}
+
+/// How many distinct worlds of one KIND the archive keeps a run for.
+///
+/// One is what a generated scenario used to get, and one is the run that drew
+/// the easiest maze: every later round then cloned that single trajectory, so
+/// the search kept finding new worlds and the compression kept being handed
+/// the same old one. A level with fixed geometry has exactly one instance and
+/// is unaffected at any cap above zero.
+const KEEP_PER_KIND: usize = 8;
+
+/// One world's best run, and what kind of world it was.
+#[derive(Clone)]
+struct Solved {
+    /// What KIND - [`Env::label`]. Many instances can share it.
+    kind: String,
+    /// WHICH one - [`Env::instance`], falling back to the label. Unique.
+    instance: String,
+    score: f32,
+    demos: Vec<Demo>,
+}
+
+/// The runs worth cloning: the best one per world, capped per kind of world.
+///
+/// Keyed by instance, so finding a way through a hard world is never undone
+/// by finding a better way through an easy one - that is the failure a greedy
+/// top-N archive has, and it deletes exactly the stepping stone worth having.
+/// Capped per kind, so an environment that generates a fresh world every
+/// episode does not turn self-imitation into cloning everything it has ever
+/// played, most of which it played badly.
+#[derive(Default)]
+struct Archive {
+    by_instance: std::collections::HashMap<String, Solved>,
+}
+
+impl Archive {
+    /// Offer a run. `true` when the archive now holds it.
+    fn offer(&mut self, kind: &str, instance: &str, score: f32, demos: Vec<Demo>) -> bool {
+        if let Some(had) = self.by_instance.get(instance) {
+            if score <= had.score {
+                return false;
+            }
+        }
+        self.by_instance.insert(
+            instance.to_string(),
+            Solved {
+                kind: kind.to_string(),
+                instance: instance.to_string(),
+                score,
+                demos,
+            },
+        );
+        // Over the cap, the weakest world of this kind goes - which may be the
+        // one just offered, and then nothing was gained.
+        let mut of_kind: Vec<(String, f32)> = self
+            .by_instance
+            .values()
+            .filter(|s| s.kind == kind)
+            .map(|s| (s.instance.clone(), s.score))
+            .collect();
+        if of_kind.len() > KEEP_PER_KIND {
+            of_kind.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+            let (drop, _) = of_kind.remove(0);
+            self.by_instance.remove(&drop);
+            if drop == instance {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn len(&self) -> usize {
+        self.by_instance.len()
+    }
+
+    /// The weakest run being cloned, which is the bar the search has to clear.
+    fn worst(&self) -> f32 {
+        self.by_instance
+            .values()
+            .map(|s| s.score)
+            .fold(f32::INFINITY, f32::min)
+    }
+
+    /// Every archived decision, for the fit to clone.
+    fn demos(&self) -> Vec<Demo> {
+        self.by_instance.values().flat_map(|s| s.demos.iter().cloned()).collect()
+    }
+
+    /// The best run per kind, which is what a reader wants to see: one line
+    /// per scenario, not one per world.
+    fn by_kind(&self) -> Vec<(String, f32, usize)> {
+        let mut acc: std::collections::HashMap<&str, (f32, usize)> =
+            std::collections::HashMap::new();
+        for s in self.by_instance.values() {
+            let e = acc.entry(&s.kind).or_insert((f32::NEG_INFINITY, 0));
+            e.0 = e.0.max(s.score);
+            e.1 += 1;
+        }
+        let mut out: Vec<(String, f32, usize)> =
+            acc.into_iter().map(|(k, (v, n))| (k.to_string(), v, n)).collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
     }
 }
 
@@ -2328,7 +2446,7 @@ impl<E: Env> ControlPipeline<E> {
     /// a greedy top-N fills with copies of whichever level is easiest and
     /// deletes the only trajectory that ever solved a hard one - which is the
     /// stepping stone this loop exists to keep.
-    fn read_archive(path: &str) -> Vec<(String, f32, Vec<Demo>)> {
+    fn read_archive(path: &str) -> Vec<Solved> {
         let Ok(text) = std::fs::read_to_string(path) else {
             return Vec::new();
         };
@@ -2355,18 +2473,28 @@ impl<E: Env> ControlPipeline<E> {
             .map(|rows| {
                 rows.iter()
                     .filter_map(|r| {
-                        Some((
-                            r.get("label")?.as_str()?.to_string(),
-                            r.get("score")?.as_f64()? as f32,
-                            r.get("demos")?.as_array()?.iter().filter_map(demo).collect(),
-                        ))
+                        // An archive written before a world had an identity of
+                        // its own names only the kind, and that kind IS the
+                        // instance for a level with fixed geometry, which is
+                        // all such an archive can hold.
+                        let kind = r.get("kind").or_else(|| r.get("label"))?.as_str()?.to_string();
+                        let instance = match r.get("instance").and_then(|i| i.as_str()) {
+                            Some(i) => i.to_string(),
+                            None => kind.clone(),
+                        };
+                        Some(Solved {
+                            kind,
+                            instance,
+                            score: r.get("score")?.as_f64()? as f32,
+                            demos: r.get("demos")?.as_array()?.iter().filter_map(demo).collect(),
+                        })
                     })
                     .collect()
             })
             .unwrap_or_default()
     }
 
-    fn write_archive(path: &str, kept: &[(String, f32, Vec<Demo>)]) {
+    fn write_archive(path: &str, kept: &Archive) {
         if let Some(dir) = std::path::Path::new(path).parent() {
             let _ = std::fs::create_dir_all(dir);
         }
@@ -2374,12 +2502,14 @@ impl<E: Env> ControlPipeline<E> {
         // half-file where the only record of a solved level used to be.
         let tmp = format!("{path}.partial");
         let rows: Vec<serde_json::Value> = kept
-            .iter()
-            .map(|(label, score, demos)| {
+            .by_instance
+            .values()
+            .map(|s| {
                 serde_json::json!({
-                    "label": label,
-                    "score": score,
-                    "demos": demos
+                    "kind": s.kind,
+                    "instance": s.instance,
+                    "score": s.score,
+                    "demos": s.demos
                         .iter()
                         .map(|d| serde_json::json!({
                             "objective": d.objective,
@@ -2429,17 +2559,18 @@ impl<E: Env> ControlPipeline<E> {
     /// what it carries - see [`Env::cell`] - so picking up a key makes every
     /// place reachable with it new, and the search files those and goes on.
     /// Nothing says that keys open doors.
-    fn explore(&mut self, spec: &ControlSpec) -> Result<Vec<(String, f32, Vec<Demo>)>> {
+    fn explore(&mut self, spec: &ControlSpec) -> Result<Option<Solved>> {
         let slots = self.env.slots();
         if slots == 0 || spec.explore == 0 {
-            return Ok(Vec::new());
+            return Ok(None);
         }
         // cell -> (slot holding it, score of the run that got there, how many
         // times it has been chosen to explore from)
         let mut seen: std::collections::HashMap<String, (usize, f32, u32)> =
             std::collections::HashMap::new();
-        let mut best: std::collections::HashMap<String, (f32, Vec<Demo>)> =
-            std::collections::HashMap::new();
+        // One reset, so one world: the search's whole yield is the best
+        // trajectory it found IN that world.
+        let mut best: Option<(f32, Vec<Demo>)> = None;
         let mut next_slot = 1usize;
         let (mut steps, mut restores) = (0usize, 0usize);
 
@@ -2452,7 +2583,8 @@ impl<E: Env> ControlPipeline<E> {
         // cell and the selection rule does it without a special case.
         self.episode_seed += 1;
         let mut obs = self.env.reset(self.episode_seed);
-        let label = self.env.label().unwrap_or_else(|| "world".into());
+        let kind = self.env.label().unwrap_or_else(|| "world".into());
+        let instance = self.env.instance().unwrap_or_else(|| kind.clone());
         // The starting point, so the archive is never empty and the first
         // pick has somewhere to go.
         if let Some(cell) = self.env.cell() {
@@ -2466,10 +2598,10 @@ impl<E: Env> ControlPipeline<E> {
         // an empty list.
         if seen.is_empty() {
             println!(
-                "    explore: {label} could not hold its starting state, so there is \
+                "    explore: {instance} could not hold its starting state, so there is \
                  nothing to return to"
             );
-            return Ok(Vec::new());
+            return Ok(None);
         }
         let mut refused = 0usize;
 
@@ -2579,9 +2711,8 @@ impl<E: Env> ControlPipeline<E> {
                         seen.insert(cell, (slot, scored, visits));
                     }
                 }
-                let slot = best.entry(label.clone()).or_insert((f32::NEG_INFINITY, Vec::new()));
-                if scored > slot.0 {
-                    *slot = (scored, trail.clone());
+                if best.as_ref().is_none_or(|(v, _)| scored > *v) {
+                    best = Some((scored, trail.clone()));
                 }
             }
         }
@@ -2589,15 +2720,15 @@ impl<E: Env> ControlPipeline<E> {
             println!("    explore: {refused} resumes were REFUSED - the archive is not restorable");
         }
         println!(
-            "    explore: {} cells found over {steps} random steps, {restores} resumed from, \
-             best {}",
+            "    explore: {} cells found in {instance} over {steps} random steps, \
+             {restores} resumed from, best {}",
             seen.len(),
-            best.values()
-                .map(|(v, _)| format!("{v:.2}"))
-                .collect::<Vec<_>>()
-                .join("/")
+            match &best {
+                Some((v, _)) => format!("{v:.2}"),
+                None => "nothing".to_string(),
+            }
         );
-        Ok(best.into_iter().map(|(l, (v, d))| (l, v, d)).collect())
+        Ok(best.map(|(v, d)| Solved { kind, instance, score: v, demos: d }))
     }
 
     /// Rounds of: play, keep the episodes that actually scored best, and
@@ -2635,29 +2766,30 @@ impl<E: Env> ControlPipeline<E> {
             Keep::starting(entered.unwrap_or(f32::NEG_INFINITY), self.model.head_weights());
         let mut before = entered;
         // Everything that has ever been worth keeping, on this run and on
-        // every run before it.
-        //
-        // Keyed by level: the best trajectory for EACH, not the best N
-        // overall. A greedy top-N fills with copies of whichever level is
-        // easiest and deletes the only run that ever solved a hard one, which
-        // is precisely the stepping stone worth keeping.
-        let mut best: std::collections::HashMap<String, (f32, Vec<Demo>)> =
-            std::collections::HashMap::new();
+        // every run before it. See [`Archive`].
+        let mut best = Archive::default();
         if let Some(path) = &spec.archive {
-            for (label, score, demos) in Self::read_archive(path) {
-                best.insert(label, (score, demos));
+            for s in Self::read_archive(path) {
+                best.offer(&s.kind, &s.instance, s.score, s.demos);
             }
-            if !best.is_empty() {
-                let mut had: Vec<String> = best
+            if best.len() > 0 {
+                let had: Vec<String> = best
+                    .by_kind()
                     .iter()
-                    .map(|(l, (v, _))| format!("{l} {v:.2}"))
+                    .map(|(k, v, n)| match n {
+                        1 => format!("{k} {v:.2}"),
+                        n => format!("{k} {v:.2} (best of {n} worlds)"),
+                    })
                     .collect();
-                had.sort();
-                println!("    archive: carrying {} solved from before - {}", best.len(), had.join(", "));
+                println!(
+                    "    archive: carrying {} solved from before - {}",
+                    best.len(),
+                    had.join(", ")
+                );
             }
         }
         for round in 0..spec.self_imitate {
-            let mut fresh: Vec<(String, f32, Vec<Demo>)> = Vec::new();
+            let mut fresh: Vec<Solved> = Vec::new();
             for _ in 0..spec.episodes {
                 self.episode_seed += 1;
                 let mut obs = self.env.reset(self.episode_seed);
@@ -2692,46 +2824,42 @@ impl<E: Env> ControlPipeline<E> {
                     println!("    self-imitation: the environment does not score an episode");
                     return Ok(());
                 };
-                // What it was played on, so the archive can keep one per
-                // level. Environments with nothing to say fall into one
-                // bucket, which is the old behaviour.
-                let label = self.env.label().unwrap_or_else(|| "world".into());
-                fresh.push((label, scored, demos));
+                // WHICH world it was played on, and what kind of world
+                // that is. The archive keeps a run per world and caps how
+                // many worlds of a kind it keeps. Environments with nothing
+                // to say fall into one bucket, which is the old behaviour.
+                let kind = self.env.label().unwrap_or_else(|| "world".into());
+                let instance = self.env.instance().unwrap_or_else(|| kind.clone());
+                fresh.push(Solved { kind, instance, score: scored, demos });
             }
             // The search runs first, so what it finds is in the archive
             // before this round's fit reads it.
-            for (label, score, demos) in self.explore(spec)? {
-                fresh.push((label, score, demos));
+            if let Some(found) = self.explore(spec)? {
+                fresh.push(found);
             }
-            let played: Vec<f32> = fresh.iter().map(|r| r.1).collect();
+            let played: Vec<f32> = fresh.iter().map(|r| r.score).collect();
             let mean = played.iter().sum::<f32>() / played.len().max(1) as f32;
             let top = played.iter().copied().fold(f32::NEG_INFINITY, f32::max);
 
-            // Each level keeps its own best run, so finding a way through a
-            // hard level is never undone by finding a better way through an
+            // Each world keeps its own best run, so finding a way through
+            // a hard one is never undone by finding a better way through an
             // easy one.
             let mut gained = 0usize;
-            for (label, score, demos) in fresh {
-                let slot = best.entry(label).or_insert((f32::NEG_INFINITY, Vec::new()));
-                if score > slot.0 {
-                    *slot = (score, demos);
+            for s in fresh {
+                if best.offer(&s.kind, &s.instance, s.score, s.demos) {
                     gained += 1;
                 }
             }
             if let Some(path) = &spec.archive {
-                let kept: Vec<(String, f32, Vec<Demo>)> = best
-                    .iter()
-                    .map(|(l, (v, d))| (l.clone(), *v, d.clone()))
-                    .collect();
-                Self::write_archive(path, &kept);
+                Self::write_archive(path, &best);
             }
-            let bar = best.values().map(|(v, _)| *v).fold(f32::INFINITY, f32::min);
-            let demos: Vec<Demo> = best.values().flat_map(|(_, d)| d.iter().cloned()).collect();
+            let bar = best.worst();
+            let demos: Vec<Demo> = best.demos();
             let loss = self.fit_demos(&demos, spec.warmup_epochs, log, step)?;
             let after = self.gauge(spec.gauge_episodes, spec.max_steps)?;
             println!(
                 "    self-imitate {:>2}  played {} episodes (mean {mean:.2}, best {top:.2})  \
-                 archive holds {} levels, worst {bar:.2} ({gained} improved)  {} decisions \
+                 archive holds {} worlds, worst {bar:.2} ({gained} improved)  {} decisions \
                  cloned  loss {loss:.4}{}",
                 round + 1,
                 spec.episodes,
@@ -3887,6 +4015,91 @@ mod keep_tests {
         let mut k = Keep::starting(0.770, w(0.0));
         k.offer(1, 0.770, || w(1.0));
         assert_eq!(k.best().0, 0);
+    }
+}
+
+#[cfg(test)]
+mod archive_tests {
+    use super::{Archive, Demo, KEEP_PER_KIND};
+
+    fn demo(tag: &str) -> Vec<Demo> {
+        vec![Demo {
+            objective: "reach the exit".into(),
+            observation: tag.into(),
+            options: vec!["walk forward".into()],
+            action: 0,
+        }]
+    }
+
+    /// The defect: every maze a scenario generates shared that scenario's
+    /// name, so the archive held ONE run for all of them - the run that drew
+    /// the easiest maze - and every later round cloned its turns onto layouts
+    /// that did not have them.
+    #[test]
+    fn two_worlds_of_one_kind_each_keep_their_own_run() {
+        let mut a = Archive::default();
+        a.offer("maze", "maze#1", 0.90, demo("easy"));
+        a.offer("maze", "maze#2", 0.30, demo("hard"));
+        assert_eq!(a.len(), 2, "one scenario's mazes collapsed onto a single run");
+        let seen: Vec<String> = a.demos().iter().map(|d| d.observation.clone()).collect();
+        assert!(seen.contains(&"easy".to_string()) && seen.contains(&"hard".to_string()));
+    }
+
+    /// And within one world it is still the best run that is kept.
+    #[test]
+    fn a_better_run_on_the_same_world_replaces_it_and_a_worse_one_does_not() {
+        let mut a = Archive::default();
+        assert!(a.offer("maze", "maze#1", 0.30, demo("first")));
+        assert!(a.offer("maze", "maze#1", 0.70, demo("better")));
+        assert!(!a.offer("maze", "maze#1", 0.50, demo("worse")));
+        assert_eq!(a.len(), 1);
+        assert_eq!(a.demos()[0].observation, "better");
+    }
+
+    /// An environment that draws a fresh world every episode would otherwise
+    /// archive every episode it ever played, which is cloning its own bad
+    /// play. The cap bounds it, and takes the weakest world first.
+    #[test]
+    fn the_cap_drops_the_weakest_world_of_that_kind() {
+        let mut a = Archive::default();
+        for i in 0..KEEP_PER_KIND {
+            a.offer("maze", &format!("maze#{i}"), 0.50 + i as f32 * 0.01, demo("kept"));
+        }
+        assert_eq!(a.len(), KEEP_PER_KIND);
+        // Better than the weakest: it goes in and the weakest goes out.
+        assert!(a.offer("maze", "maze#new", 0.90, demo("strong")));
+        assert_eq!(a.len(), KEEP_PER_KIND);
+        assert!(!a.by_instance.contains_key("maze#0"));
+        // Worse than everything: it does not displace anything.
+        assert!(!a.offer("maze", "maze#weak", 0.01, demo("weak")));
+        assert_eq!(a.len(), KEEP_PER_KIND);
+        assert!(!a.by_instance.contains_key("maze#weak"));
+    }
+
+    /// The cap is per KIND, so a scenario that has filled it cannot evict
+    /// another scenario's only solved world.
+    #[test]
+    fn one_kind_filling_up_does_not_evict_another() {
+        let mut a = Archive::default();
+        a.offer("level", "E1M4", 0.20, demo("the only run through E1M4"));
+        for i in 0..KEEP_PER_KIND + 4 {
+            a.offer("maze", &format!("maze#{i}"), 0.50 + i as f32 * 0.01, demo("maze"));
+        }
+        assert!(a.by_instance.contains_key("E1M4"));
+        assert_eq!(a.by_kind().len(), 2);
+    }
+
+    /// A level with fixed geometry is its own instance, so nothing about the
+    /// cap changes what it used to do: one run, replaced only by a better one.
+    #[test]
+    fn a_fixed_level_still_keeps_exactly_its_best_run() {
+        let mut a = Archive::default();
+        a.offer("E1M1", "E1M1", 0.41, demo("a"));
+        a.offer("E1M1", "E1M1", 0.63, demo("b"));
+        a.offer("E1M2", "E1M2", 0.22, demo("c"));
+        assert_eq!(a.len(), 2);
+        assert_eq!(a.worst(), 0.22);
+        assert_eq!(a.by_kind(), vec![("E1M1".to_string(), 0.63, 1), ("E1M2".to_string(), 0.22, 1)]);
     }
 }
 
