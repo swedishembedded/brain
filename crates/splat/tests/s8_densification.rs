@@ -257,3 +257,66 @@ fn the_split_criterion_sees_a_gaussian_that_straddles_a_detail() {
          test is built on is not happening and it is checking nothing."
     );
 }
+
+/// Exploration must reach the one direction the gradient cannot.
+///
+/// A splat's image-plane gradient is orthogonal to the viewing ray, so no
+/// amount of training pushes a gaussian nearer or further - it can only slide
+/// across the frame. Classic density control inherits that limitation exactly,
+/// because every child it makes is displaced along its parent's own axes,
+/// which is a rotation of the same plane. So a gaussian at the wrong DEPTH
+/// stays at the wrong depth forever, and the region stays soft.
+///
+/// The check is geometric and needs no fit: after a densification round, some
+/// child must sit at a materially different distance from the cameras than any
+/// gaussian that existed before.
+#[test]
+fn exploration_moves_gaussians_along_the_one_axis_the_gradient_cannot() {
+    let eye = [0.0f32, 0.0, 0.0];
+    let dist = |s: &Splats, i: usize| {
+        let d = [s.means[i * 3] - eye[0], s.means[i * 3 + 1] - eye[1], s.means[i * 3 + 2] - eye[2]];
+        (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
+    };
+    // a slab all at one depth, so any change in depth is unambiguous
+    let mut s = Splats::default();
+    for i in 0..600 {
+        let a = i as f32 * 0.37;
+        s.means.extend_from_slice(&[a.sin() * 0.6, a.cos() * 0.6, 4.0]);
+        s.quats.extend_from_slice(&[1.0, 0.0, 0.0, 0.0]);
+        s.scales.extend_from_slice(&[0.10, 0.10, 0.10]);
+        s.opacities.push(0.9);
+        s.colors.extend_from_slice(&[0.5, 0.5, 0.5]);
+    }
+    let before: Vec<f32> = (0..s.len()).map(|i| dist(&s, i)).collect();
+    let (lo, hi) = (
+        before.iter().cloned().fold(f32::MAX, f32::min),
+        before.iter().cloned().fold(f32::MIN, f32::max),
+    );
+
+    // no gradient signal at all: nothing is "chosen", so anything that happens
+    // is exploration and only exploration
+    let grad = vec![0.0f32; s.len()];
+    let cfg = FitCfg { densify_every: 1, densify_frac: 0.0, explore_frac: 0.25, ..Default::default() };
+
+    let mut explored = s.clone();
+    splat::opt::densify_for_test(&mut explored, &grad, &cfg, eye);
+    let moved = (0..explored.len())
+        .map(|i| dist(&explored, i))
+        .filter(|&d| d < lo - 1e-3 || d > hi + 1e-3)
+        .count();
+    assert!(moved > 0, "exploration produced no gaussian at a new depth ({} total)", explored.len());
+
+    let mut plain = s.clone();
+    let off = FitCfg { explore_frac: 0.0, ..cfg };
+    splat::opt::densify_for_test(&mut plain, &grad, &off, eye);
+    let moved_off = (0..plain.len())
+        .map(|i| dist(&plain, i))
+        .filter(|&d| d < lo - 1e-3 || d > hi + 1e-3)
+        .count();
+    assert_eq!(moved_off, 0, "density control without exploration changed a depth, so this test proves nothing");
+
+    // and it must stay deterministic: a fit has to give the same answer twice
+    let mut again = s.clone();
+    splat::opt::densify_for_test(&mut again, &grad, &cfg, eye);
+    assert_eq!(again.means, explored.means, "exploration is not reproducible");
+}

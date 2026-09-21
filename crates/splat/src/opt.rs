@@ -76,6 +76,18 @@ pub struct FitCfg {
     /// hides in and alias in every other. The fixed `min_scale` cannot express
     /// that limit, because the limit is a property of where the cameras were.
     pub mip_scale: f32,
+    /// Fraction of the LARGE gaussians to split each round regardless of what
+    /// the gradient says, and to reseed at a probed depth. 0 disables it.
+    ///
+    /// Two gates keep a blurry region blurry no matter how many views see it.
+    /// A splat's image-plane gradient is orthogonal to the viewing ray, so
+    /// nothing ever pushes a gaussian along depth - a wrongly-placed one can
+    /// only slide sideways. And alpha blending attenuates the gradient
+    /// reaching anything behind something else, so an occluded region never
+    /// reaches the split threshold. Neither is a thresholding problem, so no
+    /// choice of threshold escapes them; the way out is to try anyway,
+    /// occasionally, without asking the gradient for permission.
+    pub explore_frac: f32,
 }
 
 impl Default for FitCfg {
@@ -94,6 +106,7 @@ impl Default for FitCfg {
             eps2d: RenderOpts::default().eps2d,
             antialiased: RenderOpts::default().antialiased,
             mip_scale: crate::mip::DEFAULT_SCALE,
+            explore_frac: 0.05,
         }
     }
 }
@@ -130,7 +143,19 @@ pub fn fit(gpu: &Gpu, ks: Kernels, init: &Splats, targets: &[TargetView], cfg: &
         stop = aborted;
         if cfg.densify_every > 0 && done >= cfg.densify_after && done < cfg.iters && !stop {
             let before = scene.len();
-            densify(&mut scene, &grad, cfg);
+            // Where the cameras are, so exploration can probe ALONG the
+            // viewing ray - the one direction the gradient cannot supply.
+            let eye = {
+                let mut c = [0.0f64; 3];
+                for t in targets {
+                    let m = t.cam.c2w;
+                    for k in 0..3 {
+                        c[k] += m[k * 4 + 3] as f64 / targets.len() as f64;
+                    }
+                }
+                [c[0] as f32, c[1] as f32, c[2] as f32]
+            };
+            densify(&mut scene, &grad, cfg, eye);
             if cfg.log_every > 0 && scene.len() != before {
                 println!("fit iter {done:4}: density control {before} -> {} gaussians", scene.len());
             }
@@ -153,7 +178,23 @@ pub fn fit(gpu: &Gpu, ks: Kernels, init: &Splats, targets: &[TargetView], cfg: &
 /// parent's dominant axis) and small ones CLONE, following the reference: a
 /// big gaussian covering detail it cannot represent needs subdividing, while a
 /// small one in an under-populated region needs a neighbour.
-fn densify(scene: &mut Splats, grad: &[f32], cfg: &FitCfg) {
+/// Deterministic per-gaussian jitter in [0,1). A fit has to give the same
+/// answer twice, so exploration is pseudo-random in the scene's own indices
+/// rather than in wall-clock entropy.
+fn jitter(i: usize, salt: u64) -> f32 {
+    let mut z = (i as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ salt.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    ((z ^ (z >> 31)) >> 40) as f32 / (1u32 << 24) as f32
+}
+
+/// Density control as a step, for tests that need to look at what it did
+/// rather than at how a whole fit came out.
+pub fn densify_for_test(scene: &mut Splats, grad: &[f32], cfg: &FitCfg, eye: [f32; 3]) {
+    densify(scene, grad, cfg, eye)
+}
+
+fn densify(scene: &mut Splats, grad: &[f32], cfg: &FitCfg, eye: [f32; 3]) {
     let n = scene.len();
     if n == 0 || grad.len() != n {
         return;
@@ -192,7 +233,26 @@ fn densify(scene: &mut Splats, grad: &[f32], cfg: &FitCfg) {
         }
         let s = &scene.scales[i * 3..i * 3 + 3];
         let axis = (0..3).max_by(|&a, &b| s[a].total_cmp(&s[b])).unwrap();
-        if chosen.contains(&i) && s[axis] >= big {
+        // Exploration: a share of the large gaussians split whether or not the
+        // gradient asked, and one in four of those has a child pushed along
+        // the viewing ray instead of along the parent's axis.
+        let explore = cfg.explore_frac > 0.0 && s[axis] >= big && jitter(i, 0x5eed) < cfg.explore_frac;
+        if explore && !chosen.contains(&i) && jitter(i, 0xd39d) < 0.25 {
+            let d = [
+                scene.means[i * 3] - eye[0],
+                scene.means[i * 3 + 1] - eye[1],
+                scene.means[i * 3 + 2] - eye[2],
+            ];
+            let l = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt().max(1e-6);
+            // a step scaled to the gaussian, not to the scene, so a near
+            // object is not flung past a far one
+            let step = s[axis] * (0.5 + 2.0 * jitter(i, 0xa17e));
+            let u = [d[0] / l * step, d[1] / l * step, d[2] / l * step];
+            push(&mut out, i, [0.0; 3], 1.0);
+            push(&mut out, i, u, 1.0);
+            continue;
+        }
+        if (chosen.contains(&i) || explore) && s[axis] >= big {
             // split: two smaller children straddling the parent's long axis,
             // rotated into world space by the parent's own orientation
             let q = &scene.quats[i * 4..i * 4 + 4];
