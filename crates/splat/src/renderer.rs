@@ -162,9 +162,9 @@ impl Renderer {
             &[s.n as u32, tiles_x, tiles_y, TILE],
             s.n as u32,
         ));
-        record_scan(gpu, &self.ks, &self.counts, s.n, &self.count_scan, &mut steps);
+        let ctotal = record_scan(gpu, &self.ks, &self.counts, s.n, &self.count_scan, &mut steps);
         gpu.submit(&[], &steps);
-        let total = gpu.read(self.count_scan.total(), 1)[0].to_bits() as usize;
+        let total = gpu.read(ctotal, 1)[0].to_bits() as usize;
         let clamped = total > self.isect_cap;
         let n_isects = total.min(self.isect_cap);
 
@@ -332,14 +332,18 @@ pub fn max_records_for_binding(limit: u64) -> usize {
 /// reallocating every step, but the headroom is CLAMPED to the binding limit:
 /// exceeding it to leave room to grow would fail a pass that would otherwise
 /// have run.
+///
+/// [`Renderer::render_bwd`] splits the frame into row bands until each fits, so
+/// reaching this error means a SINGLE row of pixels is past the ceiling, which
+/// no further splitting can help.
 pub fn record_capacity(need: usize, limit: u64) -> Result<usize, String> {
     let ceiling = max_records_for_binding(limit);
     if need > ceiling {
         return Err(format!(
-            "this backward pass needs {need} gradient records ({:.1} GiB) but one storage binding \
-             on this device holds {ceiling} ({} MiB). The scene is too dense to differentiate at \
-             this image size: reduce it with `--prune` (voxel-merge duplicate gaussians across \
-             overlapping views) or `--min-opacity`, or fit against smaller images.",
+            "one row of pixels needs {need} gradient records ({:.1} GiB) but one storage binding \
+             on this device holds {ceiling} ({} MiB), and a row cannot be split further. The scene \
+             is too dense to differentiate at this image width: thin it with `--prune` \
+             (voxel-merge duplicate gaussians across overlapping views) or `--min-opacity`.",
             (need * RECORD_WORDS * 4) as f64 / (1u64 << 30) as f64,
             limit >> 20,
         ));
@@ -429,13 +433,19 @@ impl Renderer {
     /// `dimg` (`W*H*4`) → accumulate parameter grads. Returns the gradient
     /// record count; `scr` grows to fit it.
     ///
-    /// `Err` when the pass needs more records than one storage binding on this
-    /// device holds. That is recoverable and the caller is the only one who can
-    /// recover it: the gradients are a sum over pixels, so rendering and
-    /// differentiating the frame in horizontal bands and letting them
-    /// accumulate gives the same answer within a bounded record buffer
-    /// (`splat::opt::fit` does exactly that).
-    #[allow(clippy::too_many_arguments)]
+    /// Differentiate the frame last [rendered][Self::render] against `dimg`
+    /// (the whole frame's dL/dRGBA), accumulating into `grads`. Returns the
+    /// number of gradient records the pass emitted.
+    ///
+    /// A dense scene can need more records for one frame than a single storage
+    /// binding on the device holds, whatever memory is free. The loss is a sum
+    /// over pixels, so this splits the ROWS until each group fits and lets the
+    /// groups accumulate, which is exact. It bands the pixel walk and nothing
+    /// else: `cam` stays the whole frame, because the projection clamps each
+    /// covariance against the frustum and a shorter camera would be a different
+    /// function to differentiate.
+    ///
+    /// `Err` only when a single row of pixels is itself past the ceiling.
     pub fn render_bwd(
         &mut self,
         gpu: &Gpu,
@@ -446,25 +456,56 @@ impl Renderer {
         scr: &mut BwdScratch,
         grads: &SplatGrads,
     ) -> Result<usize, String> {
+        let limit = scr.limit.unwrap_or_else(|| gpu.max_storage_binding_bytes());
+        self.bwd_rows(gpu, s, cam, o, dimg, scr, grads, 0, cam.height, limit)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn bwd_rows(
+        &mut self,
+        gpu: &Gpu,
+        s: &GpuSplats,
+        cam: &Camera,
+        o: &RenderOpts,
+        dimg: &DeviceBuffer,
+        scr: &mut BwdScratch,
+        grads: &SplatGrads,
+        y0: u32,
+        rows: u32,
+        limit: u64,
+    ) -> Result<usize, String> {
         let (n_isects, vals_in_b, tiles_x, tiles_y) =
             self.last.expect("render() must run before render_bwd()");
         let _ = n_isects;
         let vals = if vals_in_b { &self.vals_b } else { &self.vals_a };
-        let px = (cam.width * cam.height) as usize;
+        let rows = rows.min(cam.height.saturating_sub(y0));
+        if rows == 0 {
+            return Ok(0);
+        }
+        let px = (cam.width * rows) as usize;
 
         // pass A: per-pixel record counts -> offsets + total
         let mut steps = Vec::new();
         steps.push(gpu.step(
             self.ks.splat_bwd_count,
             &[&self.proj, vals, &self.ranges, &scr.counts_px],
-            &[cam.width, cam.height, tiles_x, tiles_y],
+            &[cam.width, rows, tiles_x, tiles_y, y0],
             px as u32,
         ));
-        record_scan(gpu, &self.ks, &scr.counts_px, px, &scr.px_scan, &mut steps);
+        let rtotal = record_scan(gpu, &self.ks, &scr.counts_px, px, &scr.px_scan, &mut steps);
         gpu.submit(&[], &steps);
-        let n_recs = gpu.read(scr.px_scan.total(), 1)[0].to_bits() as usize;
+        let n_recs = gpu.read(rtotal, 1)[0].to_bits() as usize;
         if n_recs == 0 {
             return Ok(0);
+        }
+        // Too dense to emit in one go: halve the band and let the two halves
+        // accumulate. Nothing has been written to `grads` yet, so splitting
+        // here costs only this band's count pass.
+        if n_recs > max_records_for_binding(limit) && rows > 1 {
+            let h = rows / 2;
+            let a = self.bwd_rows(gpu, s, cam, o, dimg, scr, grads, y0, h, limit)?;
+            let b = self.bwd_rows(gpu, s, cam, o, dimg, scr, grads, y0 + h, rows - h, limit)?;
+            return Ok(a + b);
         }
         scr.reserve_records(gpu, n_recs)?;
 
@@ -489,8 +530,8 @@ impl Renderer {
             self.ks.splat_bwd_emit,
             &[&self.proj, &s.colors, vals, &self.ranges, dimg, &scr.counts_px, &scr.recs],
             &[
-                cam.width, cam.height, tiles_x, tiles_y,
-                f(o.bg[0]), f(o.bg[1]), f(o.bg[2]), 0,
+                cam.width, rows, tiles_x, tiles_y,
+                f(o.bg[0]), f(o.bg[1]), f(o.bg[2]), y0,
             ],
             px as u32,
         ));

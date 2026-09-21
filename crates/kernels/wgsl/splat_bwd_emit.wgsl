@@ -20,6 +20,11 @@
 // record keys (gaussian id) go to `keys` for the radix sort; offsets come
 // from the scanned per-pixel counts. dimg is the upstream RGBA gradient
 // (dL/d rgb, dL/d alpha_out). One invocation per pixel.
+//
+// `height` is the number of ROWS this dispatch covers and `y0` the first of
+// them (see splat_bwd_count). `dimg` is the whole frame and indexed by
+// absolute pixel; `offsets` is band-local, because the records of one band are
+// numbered from zero in a buffer sized for that band alone.
 
 struct Params {
     width: u32,
@@ -29,7 +34,7 @@ struct Params {
     bg_r: f32,
     bg_g: f32,
     bg_b: f32,
-    pad0: u32,
+    y0: u32,
 };
 
 @group(0) @binding(0) var<uniform> p: Params;
@@ -47,16 +52,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     let idx = gid.y * (nwg.x * 64u) + gid.x;
     if (idx >= p.width * p.height) { return; }
     let px = idx % p.width;
-    let py = idx / p.width;
+    let py = p.y0 + idx / p.width;
     let fx = f32(px) + 0.5;
     let fy = f32(py) + 0.5;
     let tile = (py / 16u) * p.tiles_x + (px / 16u);
     let start = ranges[tile * 2u];
     let end = ranges[tile * 2u + 1u];
-    let vr = dimg[idx * 4u];
-    let vg = dimg[idx * 4u + 1u];
-    let vb = dimg[idx * 4u + 2u];
-    let va_out = dimg[idx * 4u + 3u];
+    let a = (py * p.width + px) * 4u;
+    let vr = dimg[a];
+    let vg = dimg[a + 1u];
+    let vb = dimg[a + 2u];
+    let va_out = dimg[a + 3u];
 
     // pass 1: total composited color (to derive suffixes) + final T
     var t = 1.0;

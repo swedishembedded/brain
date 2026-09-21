@@ -14,12 +14,19 @@
 // (same walk as the forward compositing: alpha >= 1/255, stop at T <= 1e-4).
 // The counts are prefix-scanned into record offsets for splat_bwd_emit.
 // One invocation per pixel.
+//
+// `height` is the number of ROWS this dispatch covers and `y0` the first of
+// them, so a frame whose records exceed one storage binding can be
+// differentiated in horizontal bands. `counts` is indexed band-locally; the
+// tile lookup uses the absolute row, so the band sees the same projection and
+// the same sorted ids the whole frame does.
 
 struct Params {
     width: u32,
     height: u32,
     tiles_x: u32,
     tiles_y: u32,
+    y0: u32,
 };
 
 @group(0) @binding(0) var<uniform> p: Params;
@@ -34,7 +41,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     let idx = gid.y * (nwg.x * 64u) + gid.x;
     if (idx >= p.width * p.height) { return; }
     let px = idx % p.width;
-    let py = idx / p.width;
+    let py = p.y0 + idx / p.width;
     let fx = f32(px) + 0.5;
     let fy = f32(py) + 0.5;
     let tile = (py / 16u) * p.tiles_x + (px / 16u);

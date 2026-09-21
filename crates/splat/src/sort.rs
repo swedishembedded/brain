@@ -44,26 +44,28 @@ impl ScanScratch {
         ScanScratch { levels, max_n }
     }
 
-    /// Buffer whose element 0 holds the grand total once the scan has run.
-    pub fn total(&self) -> &DeviceBuffer {
-        &self.levels.last().unwrap().0
-    }
 }
 
 /// Record an in-place exclusive prefix scan of `data[0..n]` (u32 payload).
-/// After execution `ScanScratch::total()` holds the sum of the scanned range.
-pub fn record_scan(
+///
+/// Returns the buffer whose element 0 holds the sum of the scanned range. That
+/// is NOT a fixed level of the scratch: the tower is sized for `max_n` and a
+/// shorter scan bottoms out lower in it, so a caller that reuses one scratch
+/// for varying lengths has to read the buffer this hands back.
+pub fn record_scan<'a>(
     gpu: &Gpu,
     ks: &Kernels,
     data: &DeviceBuffer,
     n: usize,
-    scratch: &ScanScratch,
+    scratch: &'a ScanScratch,
     steps: &mut Vec<Step>,
-) {
+) -> &'a DeviceBuffer {
     assert!(n >= 1 && n <= scratch.max_n, "scan n={n} exceeds scratch max {}", scratch.max_n);
-    record_scan_level(gpu, ks, data, n, scratch, 0, steps);
+    let top = record_scan_level(gpu, ks, data, n, scratch, 0, steps);
+    &scratch.levels[top].0
 }
 
+/// Returns the level whose buffer holds the grand total.
 fn record_scan_level(
     gpu: &Gpu,
     ks: &Kernels,
@@ -72,15 +74,17 @@ fn record_scan_level(
     scratch: &ScanScratch,
     level: usize,
     steps: &mut Vec<Step>,
-) {
+) -> usize {
     let sums = &scratch.levels[level].0;
     let nb = n.div_ceil(SCAN_BLOCK_LEN);
     let params = [n as u32, SCAN_BLOCK_LEN as u32];
     steps.push(gpu.step(ks.scan_block, &[data, sums], &params, nb as u32));
-    if nb > 1 {
-        record_scan_level(gpu, ks, sums, nb, scratch, level + 1, steps);
-        steps.push(gpu.step(ks.scan_add, &[data, sums], &params, n as u32));
+    if nb == 1 {
+        return level;
     }
+    let top = record_scan_level(gpu, ks, sums, nb, scratch, level + 1, steps);
+    steps.push(gpu.step(ks.scan_add, &[data, sums], &params, n as u32));
+    top
 }
 
 /// Scratch for a radix sort of up to `max_n` (key, value) pairs: the

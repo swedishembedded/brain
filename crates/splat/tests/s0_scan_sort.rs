@@ -48,11 +48,42 @@ fn check_scan(g: &Gpu, ks: &Kernels, n: usize, seed: u64) {
     let buf = ubuf(g, &data);
     let scratch = ScanScratch::new(g, n);
     let mut steps = Vec::new();
-    record_scan(g, ks, &buf, n, &scratch, &mut steps);
+    let t = record_scan(g, ks, &buf, n, &scratch, &mut steps);
     g.submit(&[], &steps);
 
     assert_eq!(read_u32(g, &buf, n), expect, "scan mismatch n={n}");
-    assert_eq!(read_u32(g, scratch.total(), 1)[0], total, "scan total n={n}");
+    assert_eq!(read_u32(g, t, 1)[0], total, "scan total n={n}");
+}
+
+/// Scanning fewer elements than the scratch was built for must still report
+/// the right total.
+///
+/// The scratch is a tower of per-block sum levels sized for its maximum, and a
+/// shorter scan bottoms out on a LOWER level - so "the total is in the top
+/// level" is only true at full size, and reading it otherwise returns whatever
+/// the previous full-size scan left behind. That is how a caller that reuses
+/// one scratch for varying lengths - differentiating a frame in bands, say -
+/// silently gets a stale count.
+fn check_scan_in_oversized_scratch(g: &Gpu, ks: &Kernels, n: usize, max_n: usize, seed: u64) {
+    let mut r = Lcg(seed);
+    let data: Vec<u32> = (0..max_n).map(|_| r.next_u32() % 1000).collect();
+    let total: u32 = data[..n].iter().sum();
+    let scratch = ScanScratch::new(g, max_n);
+
+    // Prime every level with the full-size scan, so a stale read is wrong
+    // rather than accidentally right.
+    let warm = ubuf(g, &data);
+    let mut steps = Vec::new();
+    let t = record_scan(g, ks, &warm, max_n, &scratch, &mut steps);
+    g.submit(&[], &steps);
+    let full = read_u32(g, t, 1)[0];
+    assert_eq!(full, data.iter().sum::<u32>(), "full-size scan total");
+
+    let buf = ubuf(g, &data[..n]);
+    let mut steps = Vec::new();
+    let t = record_scan(g, ks, &buf, n, &scratch, &mut steps);
+    g.submit(&[], &steps);
+    assert_eq!(read_u32(g, t, 1)[0], total, "scan total n={n} in scratch for {max_n}");
 }
 
 fn check_sort(g: &Gpu, ks: &Kernels, n: usize, key_bits: u32, seed: u64) {
@@ -95,6 +126,11 @@ fn run_all(g: &Gpu) {
         [(1usize, 32u32), (255, 8), (256, 8), (257, 16), (65537, 16), (200_000, 32)].iter().enumerate()
     {
         check_sort(g, &ks, n, bits, 0xab1e + i as u64);
+    }
+    // One scratch, shrinking scans: each of these bottoms out on a different
+    // level of the tower built for 65537.
+    for (i, &n) in [1usize, 255, 4096, 65536].iter().enumerate() {
+        check_scan_in_oversized_scratch(g, &ks, n, 65537, 0xc0de + i as u64);
     }
 }
 
