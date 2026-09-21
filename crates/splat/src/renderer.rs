@@ -472,7 +472,7 @@ impl Renderer {
         // extra syncs, which is the price of finding out which stage is the
         // expensive one - and the answer is not obvious from the code.
         let prof = std::env::var_os("BRAIN_SPLAT_PROFILE").is_some();
-        let mut flush = |gpu: &Gpu, steps: &mut Vec<gpu_core::Step>, what: &'static str| {
+        let flush = |gpu: &Gpu, steps: &mut Vec<gpu_core::Step>, what: &'static str| {
             if !prof {
                 return;
             }

@@ -88,6 +88,13 @@ pub struct FitCfg {
     /// choice of threshold escapes them; the way out is to try anyway,
     /// occasionally, without asking the gradient for permission.
     pub explore_frac: f32,
+    /// Spherical-harmonic degree for view-dependent colour: 0, 1, 2 or 3.
+    ///
+    /// At 0 a gaussian looks the same from everywhere, so the only way a fit
+    /// can explain a surface that is brighter from one side is to move
+    /// geometry - which is why glossy objects come back as smears of
+    /// duplicated surfaces at slightly different depths.
+    pub sh_degree: u32,
 }
 
 impl Default for FitCfg {
@@ -107,6 +114,7 @@ impl Default for FitCfg {
             antialiased: RenderOpts::default().antialiased,
             mip_scale: crate::mip::DEFAULT_SCALE,
             explore_frac: 0.05,
+            sh_degree: 0,
         }
     }
 }
@@ -349,6 +357,26 @@ fn fit_stage(
     let p_geo = gpu.storage_init("fit.geo", &packed);
     let p_op = gpu.storage_init("fit.op", &init.opacities);
     let p_col = gpu.storage_init("fit.col", &init.colors);
+    // View-dependent colour. `p_col` stays the base (what a degree-0 scene
+    // shows from everywhere) and `p_sh` holds what varies with direction, so
+    // a fit with sh_degree 0 is byte-for-byte the fit that was here before.
+    let ksh = match cfg.sh_degree {
+        0 => 0usize,
+        1 => 3,
+        2 => 8,
+        _ => 15,
+    };
+    let sh_init: Vec<f32> = match (&init.sh_rest, ksh) {
+        (_, 0) => Vec::new(),
+        (Some((d, r)), _) if (((*d + 1) * (*d + 1) - 1) as usize) == ksh && r.len() == n * 3 * ksh => r.clone(),
+        _ => vec![0.0; n * 3 * ksh],
+    };
+    let p_sh = gpu.storage_init("fit.sh", if sh_init.is_empty() { &[0.0f32] } else { &sh_init });
+    let col_view = gpu.storage(3 * n as u64);
+    let d_base = gpu.storage(3 * n as u64);
+    let d_sh = gpu.storage((3 * n * ksh).max(1) as u64);
+    let shn = (3 * n * ksh).max(1) as u64;
+    let (m_sh, v_sh) = (gpu.storage(shn), gpu.storage(shn));
     let means = gpu.storage(3 * n as u64);
     let scales = gpu.storage(3 * n as u64);
     let quats = gpu.storage(4 * n as u64);
@@ -401,6 +429,7 @@ fn fit_stage(
     let desc_geo = mk_desc(10 * n);
     let desc_op = mk_desc(n);
     let desc_col = mk_desc(3 * n);
+    let desc_sh = mk_desc((3 * n * ksh).max(1));
     let hparams = gpu.uniform_dynamic(8);
 
     let adamw_step = |bufs: [&DeviceBuffer; 4], desc: &DeviceBuffer, numel: usize| {
@@ -425,7 +454,18 @@ fn fit_stage(
     for it in 0..iters {
         // zero grads
         let t0 = std::time::Instant::now();
-        gpu.submit(&[&grads.d_gauss, &grads.d_opac, &grads.d_colors, &grads.d_absgrad, &grads.d_sumgrad], &[]);
+        gpu.submit(
+            &[
+                &grads.d_gauss,
+                &grads.d_opac,
+                &grads.d_colors,
+                &grads.d_absgrad,
+                &grads.d_sumgrad,
+                &d_base,
+                &d_sh,
+            ],
+            &[],
+        );
         prof.add("zero grads", t0.elapsed());
         let mut loss_sum = 0.0f64;
         for t in targets {
@@ -440,13 +480,25 @@ fn fit_stage(
             );
             gpu.submit(&[], &[unpack]);
             prof.add("unpack params", tm.elapsed());
+            let eye = [t.cam.c2w[3], t.cam.c2w[7], t.cam.c2w[11]];
+            let sh_params =
+                [n as u32, ksh as u32, 0, 0, f(eye[0]), f(eye[1]), f(eye[2]), 0];
+            if ksh > 0 {
+                let e = gpu.step(
+                    ks.splat_sh,
+                    &[&means, &p_col, &p_sh, &col_view, &d_base, &d_sh],
+                    &sh_params,
+                    n as u32,
+                );
+                gpu.submit(&[], &[e]);
+            }
             let gs = GpuSplats {
                 n,
                 means: means.clone(),
                 quats: quats.clone(),
                 scales: scales.clone(),
                 opacities: p_op.clone(),
-                colors: p_col.clone(),
+                colors: if ksh > 0 { col_view.clone() } else { p_col.clone() },
             };
             let tm = std::time::Instant::now();
             renderer.render(gpu, &gs, &t.cam, &opts);
@@ -476,6 +528,21 @@ fn fit_stage(
                 .render_bwd(gpu, &gs, &t.cam, &opts, &dimg, &mut bscr, &grads)
                 .unwrap_or_else(|e| panic!("{e}"));
             prof.add("render backward", tm.elapsed());
+            if ksh > 0 {
+                // The rasterizer wrote d/d(colour shown from HERE); split it
+                // between the base and the direction-dependent part while the
+                // direction that produced it is still the current one.
+                let mut vjp = sh_params;
+                vjp[2] = 1;
+                let e = gpu.step(
+                    ks.splat_sh,
+                    &[&means, &p_col, &p_sh, &grads.d_colors, &d_base, &d_sh],
+                    &vjp,
+                    n as u32,
+                );
+                gpu.submit(&[], &[e]);
+                gpu.submit(&[&grads.d_colors], &[]);
+            }
         }
         // Adam's bias correction counts from the start of THIS stage, because
         // its moments do too: m and v are fresh buffers per stage, and pairing
@@ -490,7 +557,12 @@ fn fit_stage(
         gpu.write(&hparams, &[f(cfg.lr), f(0.9), f(0.999), f(1e-8), f(0.0), f(bc1), f(bc2), f(1.0)]);
         adamw_step([&p_geo, &grads.d_gauss, &m_geo, &v_geo], &desc_geo, 10 * n);
         adamw_step([&p_op, &grads.d_opac, &m_op, &v_op], &desc_op, n);
-        adamw_step([&p_col, &grads.d_colors, &m_col, &v_col], &desc_col, 3 * n);
+        if ksh > 0 {
+            adamw_step([&p_col, &d_base, &m_col, &v_col], &desc_col, 3 * n);
+            adamw_step([&p_sh, &d_sh, &m_sh, &v_sh], &desc_sh, 3 * n * ksh);
+        } else {
+            adamw_step([&p_col, &grads.d_colors, &m_col, &v_col], &desc_col, 3 * n);
+        }
         prof.add("adamw", tm.elapsed());
         // projected-gradient clamps (host; N is fit-sized)
         let tm = std::time::Instant::now();
@@ -555,6 +627,9 @@ fn fit_stage(
     let op = gpu.read(&p_op, n);
     let col = gpu.read(&p_col, 3 * n);
     let mut out = Splats::default();
+    if ksh > 0 {
+        out.sh_rest = Some((cfg.sh_degree, gpu.read(&p_sh, 3 * n * ksh)));
+    }
     for i in 0..n {
         out.means.extend_from_slice(&geo[i * 10..i * 10 + 3]);
         out.scales.extend_from_slice(&geo[i * 10 + 3..i * 10 + 6]);

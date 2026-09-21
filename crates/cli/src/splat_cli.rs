@@ -605,6 +605,10 @@ fn fit_cmd(argv: &[String]) {
     // both directions. Fit for the renderer that will show it.
     let inria = a.take_flag("--inria-lowpass");
     let mip_scale = a.f32_or("--mip-scale", FitCfg::default().mip_scale);
+    // View-dependent colour. Every extra degree is more freedom to explain a
+    // view away without moving geometry, which cuts both ways when the views
+    // are few, so it is a dial rather than a default.
+    let sh_degree = a.u32_or("--sh-degree", FitCfg::default().sh_degree);
     // Density control: let the fit ADD gaussians where the loss is still
     // pulling. Off unless asked, because a feed-forward scene is already
     // dense and growing it can push the backward past the device's
@@ -692,6 +696,7 @@ fn fit_cmd(argv: &[String]) {
         densify_every,
         densify_frac,
         max_gaussians,
+        sh_degree,
         ..Default::default()
     };
     let (fitted, mse) = splat_fit(&g, ks, &s, &targets, &cfg, &mut |_it, _mse| true);
@@ -701,7 +706,10 @@ fn fit_cmd(argv: &[String]) {
         std::process::exit(1);
     });
     println!(
-        "{path} -> {out} ({grown} gaussians, final mse {mse:.6}, fitted at --eps2d {eps2d}; render it with the same value)"
+        "{path} -> {out} ({grown} gaussians, final mse {mse:.6}, fitted at --eps2d {} with \
+         compensation {}; render it the same way)",
+        cfg.eps2d,
+        cfg.antialiased
     );
 }
 

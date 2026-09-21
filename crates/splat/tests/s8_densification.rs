@@ -320,3 +320,84 @@ fn exploration_moves_gaussians_along_the_one_axis_the_gradient_cannot() {
     splat::opt::densify_for_test(&mut again, &grad, &cfg, eye);
     assert_eq!(again.means, explored.means, "exploration is not reproducible");
 }
+
+/// A surface that looks different from different sides cannot be fitted by a
+/// scene whose colour does not depend on where you look from.
+///
+/// Give the fit the SAME geometry photographed from three angles, with the
+/// appearance genuinely changing between them - a glossy object, in miniature.
+/// With degree-0 colour the optimizer has exactly two moves: average the views
+/// and be wrong everywhere, or move geometry until the views disagree less,
+/// which is how a shiny object turns into a smear of duplicated surfaces at
+/// slightly different depths. Give it somewhere honest to put the variation
+/// and it stops doing that.
+#[test]
+fn a_view_dependent_surface_needs_view_dependent_colour() {
+    let g = Gpu::new_cpu(splat::PIPELINES);
+    let ks = Kernels::at(0);
+    let (w, h) = (48u32, 48u32);
+    let cams = [
+        Camera::look_at([-1.6, 0.0, 0.4], [0.0, 0.0, 4.0], [0.0, -1.0, 0.0], 60.0, w, h),
+        Camera::look_at([0.0, 0.0, 0.0], [0.0, 0.0, 4.0], [0.0, -1.0, 0.0], 60.0, w, h),
+        Camera::look_at([1.6, 0.0, 0.4], [0.0, 0.0, 4.0], [0.0, -1.0, 0.0], 60.0, w, h),
+    ];
+    // one flat slab, three appearances
+    let tints: [[f32; 3]; 3] = [[0.85, 0.20, 0.20], [0.30, 0.75, 0.30], [0.20, 0.25, 0.90]];
+    let slab = |tint: [f32; 3]| {
+        let mut s = Splats::default();
+        for iy in 0..14 {
+            for ix in 0..14 {
+                let (fx, fy) = (ix as f32 * 0.16 - 1.04, iy as f32 * 0.16 - 1.04);
+                s.means.extend_from_slice(&[fx, fy, 4.0]);
+                s.quats.extend_from_slice(&[1.0, 0.0, 0.0, 0.0]);
+                s.scales.extend_from_slice(&[0.10, 0.10, 0.10]);
+                s.opacities.push(0.95);
+                let shade = 0.6 + 0.4 * ((ix + iy) % 2) as f32;
+                s.colors.extend_from_slice(&[tint[0] * shade, tint[1] * shade, tint[2] * shade]);
+            }
+        }
+        s
+    };
+
+    let o = RenderOpts::default();
+    let mut ren = Renderer::new(&g, ks, slab(tints[0]).len(), w, h, 0);
+    let targets: Vec<TargetView> = cams
+        .iter()
+        .zip(&tints)
+        .map(|(c, t)| {
+            let truth = slab(*t);
+            let gs = GpuSplats::upload(&g, &truth);
+            ren.render(&g, &gs, c, &o);
+            let rgba = ren.read_rgba(&g, w, h);
+            TargetView {
+                cam: *c,
+                rgb: rgba.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect(),
+            }
+        })
+        .collect();
+
+    // start from the middle appearance, so neither fit is handed the answer
+    let init = slab([0.45, 0.40, 0.45]);
+    let score = |deg: u32| -> f64 {
+        let cfg = FitCfg { iters: 160, lr: 1e-2, log_every: 0, sh_degree: deg, ..Default::default() };
+        let (fitted, _) = fit(&g, ks, &init, &targets, &cfg, &mut |_, _| true);
+        let mut r = Renderer::new(&g, ks, fitted.len(), w, h, 0);
+        let gs = GpuSplats::upload(&g, &fitted);
+        // rendered through the same colour model the fit used
+        let mut acc = 0.0;
+        for t in &targets {
+            let rgb = splat::sh::render_rgb(&g, ks, &mut r, &gs, &fitted, &t.cam, &o);
+            acc += psnr(&rgb, &t.rgb);
+        }
+        acc / targets.len() as f64
+    };
+
+    let flat = score(0);
+    let view_dep = score(2);
+    assert!(
+        view_dep > flat + 4.0,
+        "view-dependent colour scored {view_dep:.1} dB against flat colour's {flat:.1} dB. It is \
+         supposed to be able to represent this and flat colour is not, so a small gap means the \
+         harmonics are not reaching the loss."
+    );
+}

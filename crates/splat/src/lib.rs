@@ -11,16 +11,17 @@
 //! pipelines in a single `Gpu` (kernel `kind` indices are per-`Gpu`
 //! positional).
 
+pub mod align;
 pub mod caps;
 pub mod mip;
 pub mod opt;
-pub mod align;
 pub mod orient;
 pub mod ply;
 pub mod prune;
 pub mod quality;
 pub mod reference;
 pub mod renderer;
+pub mod sh;
 pub mod sort;
 pub mod types;
 
@@ -45,6 +46,7 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("splat_grad_reduce", kernels::SPLAT_GRAD_REDUCE),
     ("splat_project_bwd", kernels::SPLAT_PROJECT_BWD),
     ("splat_unpack", kernels::SPLAT_UNPACK),
+    ("splat_sh", kernels::SPLAT_SH),
     ("adamw", kernels::ADAMW),
 ];
 
@@ -69,6 +71,7 @@ pub struct Kernels {
     pub splat_grad_reduce: usize,
     pub splat_project_bwd: usize,
     pub splat_unpack: usize,
+    pub splat_sh: usize,
     pub adamw: usize,
 }
 
@@ -94,7 +97,8 @@ impl Kernels {
             splat_grad_reduce: base + 14,
             splat_project_bwd: base + 15,
             splat_unpack: base + 16,
-            adamw: base + 17,
+            splat_sh: base + 17,
+            adamw: base + 18,
         }
     }
 }
