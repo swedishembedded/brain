@@ -568,7 +568,7 @@ fn side_word(bearing: i32) -> String {
 /// so if the best action in a state returns it to that state, it takes the
 /// same action forever. Measured: sampled rollouts averaged +7.19 while the
 /// greedy evaluation of the same weights scored +3.20, which is that loop.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct History {
     /// Decisions in a row that moved the player nowhere.
     pub stuck: u32,
@@ -576,6 +576,17 @@ pub struct History {
     pub visits_here: u32,
     /// Distinct patches entered this episode.
     pub patches: usize,
+    /// What the player is part-way through doing, and how many more decisions
+    /// it means to spend on it.
+    ///
+    /// Without this the same observation has two right answers. A player
+    /// going round in circles commits to one direction for several decisions
+    /// to break out of the loop, so it walks PAST things it would otherwise
+    /// turn toward - and from outside, a decision taken under a commitment
+    /// and one taken fresh look identical while being labelled differently.
+    /// Cloning that teaches the average of two behaviours and neither of
+    /// them.
+    pub seeing_through: Option<(String, u32)>,
 }
 
 /// The observation as the model sees it.
@@ -868,6 +879,12 @@ pub fn render(state: &State, history: History) -> String {
             history.stuck
         ));
     }
+    if let Some((what, left)) = &history.seeing_through {
+        out.push_str(&format!(
+            " You decided to {what} and are seeing it through for {left} more \
+             decisions rather than changing your mind every step."
+        ));
+    }
     out.push_str(&format!(
         " {} patches of this level explored.\n",
         history.patches
@@ -975,7 +992,7 @@ mod tests {
         );
     }
 
-    const SAMPLE: &str = r#"{"tic":100,"episodeTic":40,"level":{"episode":1,"map":1,"skill":2,
+    pub const SAMPLE: &str = r#"{"tic":100,"episodeTic":40,"level":{"episode":1,"map":1,"skill":2,
       "tic":40,"kills":1,"totalKills":4,"items":0,"totalItems":37,"secrets":0,"totalSecrets":3},
       "player":{"id":0,"health":80,"armor":0,"x":10,"y":20,"angle":90,"weapon":"pistol",
       "ammo":42,"keys":[]},"threats":[{"id":1,"type":"IMP","distance":150,"bearing":-12,"visible":true,
@@ -1146,5 +1163,35 @@ mod weapon_tests {
     fn the_fist_does_not_outrank_a_loaded_gun() {
         let s = carrying("pistol", &format!("{FIST},{PISTOL}"));
         assert_eq!(s.better_weapon().map(|w| w.name.as_str()), None);
+    }
+}
+
+#[cfg(test)]
+mod commitment_tests {
+    use super::{render, History, State};
+
+    /// The same observation cannot have two right answers.
+    ///
+    /// A player going round in circles commits to one direction for several
+    /// decisions to break the loop, so it walks PAST things it would
+    /// otherwise turn toward. Leaving that out of what the model reads means
+    /// a decision taken under a commitment and one taken fresh look
+    /// identical while being labelled differently, and cloning them teaches
+    /// the average of two behaviours and neither.
+    #[test]
+    fn what_the_player_is_seeing_through_is_said() {
+        let s = State::parse(super::tests::SAMPLE).expect("parses");
+        let plain = render(&s, History::default());
+        assert!(!plain.contains("seeing it through"), "{plain}");
+
+        let committed = render(
+            &s,
+            History {
+                seeing_through: Some(("walk forward, 320 units of open floor ahead".into(), 5)),
+                ..History::default()
+            },
+        );
+        assert!(committed.contains("walk forward"), "{committed}");
+        assert!(committed.contains("5 more"), "{committed}");
     }
 }

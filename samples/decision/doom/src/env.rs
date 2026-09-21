@@ -798,6 +798,18 @@ impl DoomEnv {
             stuck: self.stuck,
             visits_here: self.visited.get(&cell).copied().unwrap_or(0),
             patches: self.visited.len(),
+            // What is being seen through, in the words the option itself
+            // used. A commitment changes which action is right without
+            // changing anything else the model can see, so leaving it out
+            // gives the same observation two different labels.
+            seeing_through: match (self.commit, self.commit_tag) {
+                (0, _) | (_, None) => None,
+                (left, Some(tag)) => self
+                    .opts
+                    .iter()
+                    .find(|o| o.tag == tag)
+                    .map(|o| (o.text.clone(), left)),
+            },
         }
     }
 
