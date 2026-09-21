@@ -223,7 +223,7 @@ fn a_fitted_scene_is_still_right_from_a_view_it_never_saw() {
     }
     let cfg = FitCfg { iters: 200, lr: 8e-3, log_every: 0, ..Default::default() };
     let (fitted, _) = fit(&g, ks, &init, train, &cfg, &mut |_, _| true);
-    let loose = FitCfg { iters: 200, lr: 8e-3, log_every: 0, max_aspect: 0.0, ..Default::default() };
+    let loose = FitCfg { iters: 200, lr: 8e-3, log_every: 0, max_needle: 0.0, ..Default::default() };
     let (needly, _) = fit(&g, ks, &init, train, &loose, &mut |_, _| true);
 
     let o = RenderOpts::default();

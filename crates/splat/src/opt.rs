@@ -23,16 +23,23 @@ pub struct FitCfg {
     pub lr: f32,
     /// Clamp every step: scales into [min_scale, 0.3], opacity into [ε, 1-ε].
     pub min_scale: f32,
-    /// Largest ratio a gaussian's longest axis may have to its shortest,
+    /// Largest ratio a gaussian's longest axis may have to its MIDDLE one.
     /// 0 = unconstrained.
     ///
-    /// Bounding each axis says how BIG a gaussian may be and nothing about its
-    /// SHAPE, and the optimizer exploits the difference: a needle lined up with
-    /// a training view's ray lowers that view's loss while being invisible in
-    /// it, and is a streak across every other view. That is not a small
-    /// effect - a real 23-view scene went from 0.1% of gaussians above 10:1
-    /// as the model emitted them to 40.7% after fitting, reaching 3000:1.
-    pub max_aspect: f32,
+    /// Sort a gaussian's axes a >= b >= c and the two ways it can be
+    /// anisotropic are not equally wrong. A DISC - a close to b, both far
+    /// above c - is a surface element, which is what a reconstruction of a
+    /// surface is supposed to contain. A NEEDLE - a far above b and c - is
+    /// always wrong: lined up with a training view's ray it lowers that view's
+    /// loss while being invisible in it, and is a streak from every other
+    /// direction.
+    ///
+    /// So the bound is on a/b, not a/c. Bounding a/c is wrong twice over: it
+    /// permits needles right up to the limit while forbidding the thin discs a
+    /// surface actually wants. Measured on a real capture, the model emits
+    /// gaussians with a/b at the 90th percentile of 1.94, and fitting under an
+    /// a/c bound took that to 9.29 with 27.7% of the scene past 3:1.
+    pub max_needle: f32,
     pub log_every: usize,
     /// Run density control every N iterations, 0 = never (a fixed set of
     /// gaussians, which is all this optimizer could ever do before).
@@ -121,7 +128,7 @@ impl Default for FitCfg {
             iters: 200,
             lr: 5e-3,
             min_scale: 1e-4,
-            max_aspect: 10.0,
+            max_needle: 2.0,
             log_every: 20,
             densify_every: 0,
             densify_after: 30,
@@ -718,15 +725,26 @@ fn fit_stage(
             for k in 3..6 {
                 geo[i * 10 + k] = geo[i * 10 + k].clamp(lo, hi);
             }
-            if cfg.max_aspect > 1.0 {
-                // Raise the short axes to the longest one's fair share rather
-                // than shrinking the long axis: shrinking would fight the
-                // gradient that grew it, while a floor simply refuses the
-                // degenerate shape.
-                let lo = geo[i * 10 + 3].max(geo[i * 10 + 4]).max(geo[i * 10 + 5]) / cfg.max_aspect;
-                for k in 3..6 {
-                    geo[i * 10 + k] = geo[i * 10 + k].max(lo);
+            if cfg.max_needle > 1.0 {
+                // Raise the MIDDLE axis to the longest one's fair share, and
+                // leave the shortest alone. That refuses a needle while still
+                // permitting a disc, and it raises rather than shrinks so the
+                // constraint does not fight the gradient that grew the long
+                // axis - it just declines the degenerate shape.
+                let (mut i0, mut i1) = (3usize, 4usize);
+                let mut i2 = 5usize;
+                // sort the three axis indices by scale, descending
+                if geo[i * 10 + i1] > geo[i * 10 + i0] {
+                    std::mem::swap(&mut i0, &mut i1);
                 }
+                if geo[i * 10 + i2] > geo[i * 10 + i0] {
+                    std::mem::swap(&mut i0, &mut i2);
+                }
+                if geo[i * 10 + i2] > geo[i * 10 + i1] {
+                    std::mem::swap(&mut i1, &mut i2);
+                }
+                let want = geo[i * 10 + i0] / cfg.max_needle;
+                geo[i * 10 + i1] = geo[i * 10 + i1].max(want);
             }
         }
         prof.add("clamp: host loop", tm.elapsed());
