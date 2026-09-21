@@ -7,6 +7,7 @@
 //!   brain worldmirror2 infer  --weights F --images <dir|a.ppm,b.ppm,…> [--out DIR]
 //!         [--ply scene.ply] [--maps] [--min-opacity X] [--max-depth X]
 //!         [--prune VOXEL]   (voxel-merge duplicates, try 0.002 for multi-view)
+//!         [--keep-camera-frame]  (write in frame 0's frame, not an upright one)
 //!   brain worldmirror2 demo   --weights F --images <…> [viewer flags] [--prune VOXEL]
 //!
 //! Inputs are P6 PPM images; any aspect ratio (the DINOv2 pos-embed is
@@ -378,6 +379,28 @@ fn write_maps(gpu: &Gpu, model: &Mirror, fi: usize, w: u32, h: u32, out_dir: &st
     crate::splat_cli::write_ppm_rgb(&format!("{out_dir}/normal_{fi:02}.ppm"), &nrgb, w as usize, h as usize);
 }
 
+/// Re-express a scene and its cameras in the frame the cameras describe: the
+/// vertical is the axis they sweep about, the origin is where they all look.
+fn upright(
+    splats: &splat::types::Splats,
+    cams: &[splat::types::Camera],
+) -> (splat::types::Splats, Vec<splat::types::Camera>) {
+    let mats: Vec<[f64; 16]> = cams
+        .iter()
+        .map(|c| std::array::from_fn(|i| c.c2w[i] as f64))
+        .collect();
+    let (r, centre) = splat::orient::frame_from_cameras(&mats, -1.0);
+    let moved = cams
+        .iter()
+        .zip(&mats)
+        .map(|(c, m)| {
+            let t = splat::orient::transform_c2w(m, &r, &centre);
+            splat::types::Camera { c2w: std::array::from_fn(|i| t[i] as f32), ..*c }
+        })
+        .collect();
+    (splat::orient::apply(splats, &r, &centre), moved)
+}
+
 fn write_cameras_json(path: &str, cams: &[splat::types::Camera]) {
     let arr: Vec<serde_json::Value> = cams
         .iter()
@@ -489,12 +512,24 @@ fn infer(argv: &[String]) {
         fps: a.f32_or("--fps", 0.0) as f64,
     };
     let mask = a.take_str("--mask");
+    // The model anchors the world to the FIRST frame - its c2w comes back as
+    // the identity - so a scene written in that frame opens tipped by however
+    // the camera happened to be held, 63 degrees on a real capture, with the
+    // subject off to one side of a viewer's default view. That angle is an
+    // artifact of which photograph came first, not information about the
+    // scene, so land the result in the frame the cameras describe instead.
+    let keep_frame = a.take_flag("--keep-camera-frame");
 
     a.finish();
 
     std::fs::create_dir_all(&out_dir).ok();
     let ply_path = ply.unwrap_or_else(|| format!("{out_dir}/scene.ply"));
     with_scene(&weights, &images, min_op, max_depth, prune, poses.as_deref(), gs_mask, edge_rtol, scale_q, &sel, mask.as_deref(), target, |gpu, model, splats, cams, s, w, h| {
+        let reframed = (!keep_frame && cams.len() >= 3).then(|| upright(splats, cams));
+        let (splats, cams) = match &reframed {
+            Some((sp, cm)) => (sp, &cm[..]),
+            None => (splats, cams),
+        };
         splat::ply::write(&ply_path, splats).unwrap_or_else(|e| {
             eprintln!("PLY write failed: {e}");
             std::process::exit(1);
