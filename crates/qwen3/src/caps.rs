@@ -43,6 +43,18 @@
 //! supplies only the two things that need a model: what the incumbent
 //! decodes, and what the same base with the candidate adapter folded in
 //! decodes.
+//!
+//! `embed`: last-token pooled, L2-normalized text embedding - the Qwen3
+//! decoder used the way Qwen3-Embedding is meant to be, not the way `generate`
+//! is. It goes through [`crate::model::Qwen::prefill`] on a **decode-only**
+//! build ([`crate::model::Qwen::from_reader_decode`]), which costs `O(T)`
+//! memory (a KV cache sized to the request), never the batched forward's
+//! `O(T^2)` `scores`/`probs` - the only path that stays sane at a real
+//! Qwen3-Embedding-0.6B context (32768 tokens). Deliberately a separate
+//! `host_env` namespace (`BRAIN_QWEN_EMBED_*`) from `generate`'s
+//! (`BRAIN_QWEN_WEIGHTS`/`BRAIN_QWEN_TOKENIZER`): an embedding checkpoint and
+//! a chat checkpoint are different files, and a resident process serving both
+//! actions must be able to point each at its own.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -218,10 +230,28 @@ pub fn manifest() -> Manifest {
     ))
     .output(BlobSpec::new("report", Media::Text, "the full GateReport as JSON: the decision, every number behind it, the bars it was judged against, and a per-fact landed/not-landed row"));
 
+    // Not `.streaming()`: an embedding is one artifact, so `ttfa == e2e`,
+    // same reasoning as `lfm2::caps`'s one-shot actions.
+    let embed = ActionSpec::new(
+        "embed",
+        "last-token pooled, L2-normalized text embedding (KV-cache decode path, bounded by the checkpoint's configured context)",
+    )
+    .param(ParamSpec::new("weights", ParamType::Str, "path to a brain-format Qwen3-Embedding checkpoint (.safetensors)").required().host_env("BRAIN_QWEN_EMBED_WEIGHTS"))
+    .param(ParamSpec::new("tokenizer", ParamType::Str, "path to the checkpoint's tokenizer.json").required().host_env("BRAIN_QWEN_EMBED_TOKENIZER"))
+    .param(ParamSpec::new("text", ParamType::Str, "input text; falls back to the 'text' input blob for long documents"))
+    .input(BlobSpec::new("text", Media::Text, "input document (used when the 'text' param is absent)"))
+    .param(ParamSpec::new(
+        "instruction",
+        ParamType::Str,
+        "optional task instruction, rendered as 'Instruct: {instruction}\\nQuery: {text}' (the Qwen3-Embedding query convention); omit when embedding a passage/document",
+    ))
+    .param(ParamSpec::new("max_tokens", ParamType::Int, "truncate the input to this many tokens (0 = no limit, still bounded by the checkpoint's context)").default(json!(0)))
+    .output(BlobSpec::new("embeddings", Media::Bytes, "LE-f32 [dim] L2-normalized embedding"));
+
     Manifest::new(
         MODEL,
-        "Qwen3 dense decoder - autoregressive text generation with per-token streaming, plus LoRA fine-tuning on a chat dataset and the promote/reject gate over the adapter it produces.",
-        vec![generate, lora_train, lora_gate],
+        "Qwen3 dense decoder - autoregressive text generation with per-token streaming, LoRA fine-tuning on a chat dataset, the promote/reject gate over the adapter it produces, and last-token-pooled text embedding.",
+        vec![generate, lora_train, lora_gate, embed],
     )
 }
 
@@ -244,6 +274,10 @@ struct Hot {
 #[derive(Default)]
 pub struct QwenProvider {
     hot: Arc<Mutex<Option<Hot>>>,
+    /// `embed`'s own resident slot, deliberately separate from `hot`: it is a
+    /// decode-only build (different graph shape entirely) and, in practice, a
+    /// different checkpoint file (`BRAIN_QWEN_EMBED_WEIGHTS`) from `generate`'s.
+    hot_embed: Arc<Mutex<Option<HotEmbed>>>,
 }
 
 impl QwenProvider {
@@ -268,6 +302,7 @@ impl Provider for QwenProvider {
             // the checkpoint on disk at `weights`, not whatever a previous
             // request happened to leave loaded.
             "lora_gate" => Some(Arc::new(LoraGateAction) as Arc<dyn Action>),
+            "embed" => Some(Arc::new(EmbedAction { hot: self.hot_embed.clone() }) as Arc<dyn Action>),
             _ => None,
         }
     }
@@ -939,6 +974,150 @@ fn cause_name(cause: Cause) -> &'static str {
     }
 }
 
+/// `embed`'s resident (hot) model: a **decode-only** build plus the key that
+/// fixes it. Unlike `generate`'s `Hot`, reuse only requires `cap >= need` (no
+/// separate `precision` axis) - there is no LM head to read back, since a
+/// decode-only build applies it host-side only for `generate`'s sampling loop,
+/// which `embed` never runs.
+struct HotEmbed {
+    weights: String,
+    tokenizer_path: String,
+    cap: u32,
+    tok: QwenBpe,
+    model: Qwen,
+}
+
+struct EmbedAction {
+    hot: Arc<Mutex<Option<HotEmbed>>>,
+}
+
+impl Action for EmbedAction {
+    fn spec(&self) -> ActionSpec {
+        manifest().actions.into_iter().find(|a| a.name == "embed").expect("known action")
+    }
+
+    fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        let weights = inv.get_str("weights").ok_or("qwen embed: missing required param 'weights'")?;
+        if !Path::new(&weights).exists() {
+            return Err(format!("qwen embed: weights not found at '{weights}'"));
+        }
+        let tokenizer_path = inv.get_str("tokenizer").ok_or("qwen embed: missing required param 'tokenizer'")?;
+        let text = input_text_for(inv, "qwen embed")?;
+        let instruction = inv.get_str("instruction").filter(|s| !s.is_empty());
+
+        let mut guard = self.hot.lock().map_err(|_| "qwen embed: hot model lock poisoned")?;
+        let tok_reusable = matches!(&*guard, Some(h) if h.tokenizer_path == tokenizer_path);
+        if !tok_reusable {
+            *guard = None;
+        }
+        let tok_tmp;
+        let tok: &QwenBpe = match &*guard {
+            Some(h) => &h.tok,
+            None => {
+                tok_tmp = QwenBpe::from_file(&tokenizer_path)?;
+                &tok_tmp
+            }
+        };
+
+        // The Qwen3-Embedding query convention: a task instruction plus the
+        // query, on one line, with no instruction at all for passage/document
+        // embedding (asymmetric retrieval - queries and passages are encoded
+        // differently by design, not a brain-specific choice).
+        let content = match &instruction {
+            Some(instr) => format!("Instruct: {instr}\nQuery: {text}"),
+            None => text.clone(),
+        };
+        let mut ids: Vec<u32> = tok.encode(&content);
+        let max_tokens = inv.get_i64("max_tokens").unwrap_or(0);
+        if max_tokens > 0 {
+            ids.truncate(max_tokens as usize);
+        }
+        // An EOS token gives the pooled position something the checkpoint was
+        // actually trained to summarize into, rather than whatever content
+        // token happens to end the input.
+        if let Some(eos) = tok.special_id("<|endoftext|>") {
+            ids.push(eos);
+        }
+        if ids.is_empty() {
+            return Err("qwen embed: empty input".to_string());
+        }
+        let need = ids.len() as u32;
+
+        let reuse = matches!(&*guard, Some(h) if h.weights == weights && h.cap >= need);
+        if !reuse {
+            let old_tok = guard.take().map(|h| h.tok);
+            let tok_owned = match old_tok {
+                Some(t) if tok_reusable => t,
+                _ => QwenBpe::from_file(&tokenizer_path)?,
+            };
+            let reader = checkpoint::weightio::WeightReader::open(&weights).map_err(|e| format!("qwen embed: cannot open {weights}: {e}"))?;
+            let cfg = crate::config::QwenConfig::from_json(&reader.config());
+            if need > cfg.block_size {
+                return Err(format!(
+                    "qwen embed: input is {need} tokens, past this checkpoint's configured context of {} - re-export it with a wider block_size/rope_scaling for a longer context",
+                    cfg.block_size
+                ));
+            }
+            let shard = crate::model::Shard::whole(cfg.n_layers as usize);
+            let cap = need.max(64).min(cfg.block_size);
+            // Refuse an over-budget checkpoint legibly BEFORE dispatching a
+            // device allocation, same discipline as `generate`/`lora_gate`.
+            let (cfg_for_build, shard_for_build) = (cfg.clone(), shard.clone());
+            let model = crate::footprint::place_and_build(&cfg_for_build, &shard_for_build, gpu_core::select::Dtype::F32, 1, cap, false, true, "qwen3", move || {
+                Qwen::from_reader_decode(&reader, cap)
+            })?;
+            *guard = Some(HotEmbed { weights: weights.clone(), tokenizer_path: tokenizer_path.clone(), cap, tok: tok_owned, model });
+        }
+        let hot = guard.as_ref().expect("hot model present");
+        let model = &hot.model;
+
+        progress(Progress::step(1, 2, "prefill"));
+        // A resident decode-only model's KV cache carries state (`dec_pos`)
+        // across calls; reset it before every request or the second request
+        // on a reused model would prefill starting at the FIRST request's end
+        // position, past the KV cache it was actually sized for.
+        model.reset_cache();
+        let inputs: Vec<crate::model::PrefillInput> = ids.iter().map(|&t| crate::model::PrefillInput::Token(t)).collect();
+        let mut hidden = model.prefill(&inputs);
+
+        progress(Progress::step(2, 2, "normalize"));
+        l2_normalize(&mut hidden);
+
+        let d = hidden.len();
+        let bytes: Vec<u8> = hidden.iter().flat_map(|f| f.to_le_bytes()).collect();
+        let blob = Blob::new(Media::Bytes, bytes).with_meta(json!({"shape": [d], "dtype": "f32le"}));
+        Ok(Outcome::new()
+            .set("tokens", json!(ids.len()))
+            .set("dim", json!(d))
+            .set("mean", json!(hidden))
+            .blob("embeddings", blob))
+    }
+}
+
+/// `embed`'s input text: the `text` param, else the `text` blob (long
+/// documents) - the same fallback `lfm2::caps::input_text` implements, with
+/// `who` naming the caller in the error so it does not read as `lfm`'s.
+fn input_text_for(inv: &Invocation, who: &str) -> Result<String, String> {
+    if let Some(t) = inv.get_str("text").filter(|t| !t.is_empty()) {
+        return Ok(t);
+    }
+    if let Some(b) = inv.blobs.get("text") {
+        return String::from_utf8(b.bytes.clone()).map_err(|e| format!("{who}: text blob is not UTF-8: {e}"));
+    }
+    Err(format!("{who}: provide the 'text' param or a 'text' input blob"))
+}
+
+/// L2-normalize in place. A zero vector (degenerate input) is left as-is
+/// rather than divided by zero.
+fn l2_normalize(v: &mut [f32]) {
+    let norm = v.iter().map(|x| (*x as f64) * (*x as f64)).sum::<f64>().sqrt();
+    if norm > 0.0 {
+        for x in v.iter_mut() {
+            *x = (*x as f64 / norm) as f32;
+        }
+    }
+}
+
 /// Run `f`, converting a panic into a clean error naming what failed.
 ///
 /// `promote::document`'s own dataset checks (`FactBatch::new`,
@@ -1055,11 +1234,125 @@ mod tests {
     /// is the only place those facts can live, and `lora_train -> lora_gate`
     /// being TWO actions is what makes the whale graph two nodes.
     #[test]
-    fn manifest_lists_generate_lora_train_and_lora_gate() {
+    fn manifest_lists_generate_lora_train_lora_gate_and_embed() {
         let m = manifest();
         assert_eq!(m.model, MODEL);
         let names: Vec<_> = m.actions.iter().map(|a| a.name.as_str()).collect();
-        assert_eq!(names, ["generate", "lora_train", "lora_gate"]);
+        assert_eq!(names, ["generate", "lora_train", "lora_gate", "embed"]);
+    }
+
+    /// The `embed` action must match the shape `crates/apiserve/src/catalog.rs`
+    /// requires to route `/v1/embeddings` to it: an action literally named
+    /// `embed` with a `text` param, one-shot (not streaming, per the module
+    /// doc's `ttfa == e2e` reasoning), and its own `host_env` namespace
+    /// (separate from `generate`'s) so a resident process can serve a chat
+    /// checkpoint and an embedding checkpoint at the same time.
+    #[test]
+    fn embed_action_matches_the_v1_embeddings_dispatch_contract() {
+        let m = manifest();
+        let embed = m.actions.iter().find(|a| a.name == "embed").expect("embed action present");
+        assert!(!embed.streaming, "embed: one-shot, ttfa == e2e");
+        assert!(embed.params.iter().any(|p| p.name == "text"));
+        let weights = embed.params.iter().find(|p| p.name == "weights").expect("weights param");
+        assert!(weights.required);
+        assert_eq!(weights.host_env.as_deref(), Some("BRAIN_QWEN_EMBED_WEIGHTS"));
+        let tokenizer = embed.params.iter().find(|p| p.name == "tokenizer").expect("tokenizer param");
+        assert_eq!(tokenizer.host_env.as_deref(), Some("BRAIN_QWEN_EMBED_TOKENIZER"));
+    }
+
+    #[test]
+    fn missing_embed_weights_is_a_clean_error() {
+        let mut r = Registry::new();
+        r.register(Arc::new(QwenProvider::new()));
+        let err = r
+            .run(MODEL, "embed", Invocation::new().set("weights", json!("/nonexistent/qwen-embed.safetensors")).set("tokenizer", json!("t")).set("text", json!("hi")), &mut |_| {})
+            .unwrap_err();
+        assert!(err.contains("not found"), "got: {err}");
+    }
+
+    /// End-to-end over a tiny synthetic checkpoint: the pooled embedding must
+    /// be finite, L2-normalized (unit norm), and dimensioned `d_model`. Also
+    /// proves the resident decode-only model survives a SECOND request at a
+    /// different length without error - the `reset_cache` call is what makes
+    /// that safe (a stale `dec_pos` would either panic past the KV cache's
+    /// capacity or silently prefill starting mid-cache).
+    #[test]
+    fn embed_produces_a_unit_norm_d_model_vector_and_is_reusable() {
+        let dir = std::env::temp_dir().join(format!("qwen-caps-embed-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // `write_byte_tokenizer` assigns ids across the full printable-ASCII +
+        // space/newline range (~96 tokens); `QwenConfig::tiny`'s vocab of 23
+        // is too small to index that, the same fix `a_trained_adapter_blob_
+        // folds_into_the_base_and_changes_its_weights` needed above.
+        let cfg = QwenConfig { vocab: 128, ..QwenConfig::tiny() };
+        let ckpt = dir.join("model.safetensors");
+        write_tiny_checkpoint(&ckpt, &cfg, 7);
+        write_byte_tokenizer(&dir);
+
+        let mut r = Registry::new();
+        r.register(Arc::new(QwenProvider::new()));
+
+        let run = |text: &str| -> serde_json::Value {
+            let out = r
+                .run(
+                    MODEL,
+                    "embed",
+                    Invocation::new()
+                        .set("weights", json!(ckpt.to_str().unwrap()))
+                        .set("tokenizer", json!(dir.join("tokenizer.json").to_str().unwrap()))
+                        .set("text", json!(text)),
+                    &mut |_| {},
+                )
+                .unwrap();
+            out.outputs
+        };
+
+        let first = run("hello world");
+        let dim = first["dim"].as_u64().unwrap() as usize;
+        assert_eq!(dim, cfg.d_model as usize);
+        let mean: Vec<f64> = first["mean"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect();
+        assert_eq!(mean.len(), dim);
+        let norm = mean.iter().map(|x| x * x).sum::<f64>().sqrt();
+        assert!((norm - 1.0).abs() < 1e-4, "expected unit norm, got {norm}");
+        assert!(mean.iter().all(|x| x.is_finite()));
+
+        // A second, shorter request on the same resident model.
+        let second = run("hi");
+        let mean2: Vec<f64> = second["mean"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect();
+        let norm2 = mean2.iter().map(|x| x * x).sum::<f64>().sqrt();
+        assert!((norm2 - 1.0).abs() < 1e-4, "expected unit norm on the reused model, got {norm2}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An input past the checkpoint's own `block_size` must fail with a clear
+    /// message naming the configured context, not silently truncate or build
+    /// an oversized allocation.
+    #[test]
+    fn embed_refuses_input_past_the_checkpoints_configured_context() {
+        let dir = std::env::temp_dir().join(format!("qwen-caps-embed-overflow-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = QwenConfig::tiny(); // block_size 12
+        let ckpt = dir.join("model.safetensors");
+        write_tiny_checkpoint(&ckpt, &cfg, 7);
+        write_byte_tokenizer(&dir);
+
+        let mut r = Registry::new();
+        r.register(Arc::new(QwenProvider::new()));
+        let long_text: String = std::iter::repeat_n('x', 64).collect();
+        let err = r
+            .run(
+                MODEL,
+                "embed",
+                Invocation::new()
+                    .set("weights", json!(ckpt.to_str().unwrap()))
+                    .set("tokenizer", json!(dir.join("tokenizer.json").to_str().unwrap()))
+                    .set("text", json!(long_text)),
+                &mut |_| {},
+            )
+            .unwrap_err();
+        assert!(err.contains("configured context"), "got: {err}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// `lora_gate`'s I/O shape: the candidate adapter and the frozen probe set

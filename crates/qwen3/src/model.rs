@@ -416,6 +416,21 @@ fn align_head_tiles(base: &[(u32, u32)], vocab: u32) -> Vec<(u32, u32)> {
     out
 }
 
+/// Element count of the `scores`/`probs`/`d_scores` attention buffers a
+/// [`Qwen::new_impl`] build allocates: `n_heads * ctx` for a decode-only
+/// build, `b * n_heads * t * t` for a batched forward. Every factor is
+/// widened to `u64` BEFORE multiplying -- computing `b * n_heads * t * t` in
+/// `u32` overflows past `t ~= 16384` (16 heads * 16384^2 already exceeds
+/// `u32::MAX`), silently wrapping in release and panicking in debug, well
+/// inside the long-context range this crate now serves.
+fn attn_score_elems(decode_only: bool, b: u32, n_heads: u32, t: u32) -> u64 {
+    if decode_only {
+        n_heads as u64 * t as u64
+    } else {
+        b as u64 * n_heads as u64 * t as u64 * t as u64
+    }
+}
+
 fn dx_kernel_bw(m: u32, k: u32) -> (usize, u32) {
     let naive = std::env::var("BRAIN_QWEN_NAIVE_MM").map(|v| v != "0").unwrap_or(false);
     block::pick_gemm(m as usize, k as usize, MATMUL_DX, MATMUL_DX_REG, naive)
@@ -892,7 +907,7 @@ impl Qwen {
         let v = cfg.vocab as u64;
         let hq = cfg.q_dim() as u64;
         let hkv = cfg.kv_dim() as u64;
-        let bht2 = if decode_only { cfg.n_heads as u64 * t as u64 } else { (b * cfg.n_heads * t * t) as u64 };
+        let bht2 = attn_score_elems(decode_only, b, cfg.n_heads, t);
         let st = |x: u64| gpu.storage(x);
 
         let tokens = gpu.buffer(
@@ -2865,6 +2880,26 @@ mod tests {
 
     fn gpu_disabled() -> bool {
         std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+    }
+
+    /// `b * n_heads * t * t` computed in `u32` before widening overflows at
+    /// t=16384 with 16 heads; the fixed helper must widen every factor first
+    /// and return the correct product at 32768, where a Qwen3-Embedding-sized
+    /// context lands.
+    #[test]
+    fn attn_score_elems_does_not_overflow_at_32k_context() {
+        let t = 32768u32;
+        let n_heads = 16u32;
+        let b = 1u32;
+        let got = attn_score_elems(false, b, n_heads, t);
+        let expect = (b as u64) * (n_heads as u64) * (t as u64) * (t as u64);
+        assert_eq!(got, expect);
+        assert!(got > u32::MAX as u64, "this case exists to prove the product exceeds u32 range");
+    }
+
+    #[test]
+    fn attn_score_elems_decode_only_is_linear_in_context() {
+        assert_eq!(attn_score_elems(true, 1, 16, 32768), 16 * 32768);
     }
 
     /// The streaming mmap load (`from_reader_inference`) uploads byte-identical
