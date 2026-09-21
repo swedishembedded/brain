@@ -40,6 +40,10 @@ pub struct FitCfg {
     /// gaussians with a/b at the 90th percentile of 1.94, and fitting under an
     /// a/c bound took that to 9.29 with 27.7% of the scene past 3:1.
     pub max_needle: f32,
+    /// Bound on b/c, the flatness of a gaussian - see [`clamp_axes`]. A
+    /// surface element is legitimately a disc, so this is looser than
+    /// `max_needle` rather than absent, which is what it used to be.
+    pub max_flat: f32,
     pub log_every: usize,
     /// Run density control every N iterations, 0 = never (a fixed set of
     /// gaussians, which is all this optimizer could ever do before).
@@ -91,6 +95,13 @@ pub struct FitCfg {
     /// a fifth of the frame. Those are the streaks that make a fitted scene
     /// look like hair from any angle it was not fitted at. A bound in pixels
     /// is a bound on the detail the cameras could actually have resolved.
+    ///
+    /// It was then set to 16 pixels, which never bound: measured on a real
+    /// capture that ceiling has a median of 0.0358 world units against a
+    /// median gaussian of 0.00134, twenty seven times larger, so a fit simply
+    /// grew everything until it reached it. The reconstruction this fits emits
+    /// SUB-pixel gaussians (median 0.6 px), and a couple of pixels is already
+    /// generous headroom over that.
     pub max_scale_pixels: f32,
     /// Fraction of the LARGE gaussians to split each round regardless of what
     /// the gradient says, and to reseed at a probed depth. 0 disables it.
@@ -129,6 +140,7 @@ impl Default for FitCfg {
             lr: 5e-3,
             min_scale: 1e-4,
             max_needle: 2.0,
+            max_flat: 4.0,
             log_every: 20,
             densify_every: 0,
             densify_after: 30,
@@ -138,7 +150,7 @@ impl Default for FitCfg {
             eps2d: RenderOpts::default().eps2d,
             antialiased: RenderOpts::default().antialiased,
             mip_scale: crate::mip::DEFAULT_SCALE,
-            max_scale_pixels: 16.0,
+            max_scale_pixels: 2.0,
             explore_frac: 0.05,
             sh_degree: 0,
             pose_lr: 0.0,
@@ -754,27 +766,7 @@ fn fit_stage(
             for k in 3..6 {
                 geo[i * 10 + k] = geo[i * 10 + k].clamp(lo, hi);
             }
-            if cfg.max_needle > 1.0 {
-                // Raise the MIDDLE axis to the longest one's fair share, and
-                // leave the shortest alone. That refuses a needle while still
-                // permitting a disc, and it raises rather than shrinks so the
-                // constraint does not fight the gradient that grew the long
-                // axis - it just declines the degenerate shape.
-                let (mut i0, mut i1) = (3usize, 4usize);
-                let mut i2 = 5usize;
-                // sort the three axis indices by scale, descending
-                if geo[i * 10 + i1] > geo[i * 10 + i0] {
-                    std::mem::swap(&mut i0, &mut i1);
-                }
-                if geo[i * 10 + i2] > geo[i * 10 + i0] {
-                    std::mem::swap(&mut i0, &mut i2);
-                }
-                if geo[i * 10 + i2] > geo[i * 10 + i1] {
-                    std::mem::swap(&mut i1, &mut i2);
-                }
-                let want = geo[i * 10 + i0] / cfg.max_needle;
-                geo[i * 10 + i1] = geo[i * 10 + i1].max(want);
-            }
+            clamp_axes(&mut geo[i * 10 + 3..i * 10 + 6], cfg.max_needle, cfg.max_flat);
         }
         prof.add("clamp: host loop", tm.elapsed());
         let tm = std::time::Instant::now();
@@ -898,6 +890,49 @@ fn compose_local(c2w: &[f32; 16], omega: &[f64; 3], tau: &[f64; 3]) -> [f32; 16]
 /// the cameras and the scene together - the cameras are what define what
 /// "close" means for a capture, and a scene with one stray gaussian at
 /// infinity should not be judged by it.
+/// Bound a gaussian's SHAPE, in place, by raising its two smaller axes.
+///
+/// Sorted `a >= b >= c`, there are two independent ratios and both have to be
+/// bounded, because a fit will escape through whichever one is left free.
+///
+/// `a/b` is prolateness - a stick. Bounding it is what refuses a needle, and
+/// it has to be bounded on a/b rather than a/c: an a/c bound permits needles
+/// right up to the limit while forbidding the thin discs a surface actually
+/// wants. Measured on a real capture, fitting under an a/c bound took the 90th
+/// percentile of a/b from 1.94 to 9.29.
+///
+/// `b/c` is flatness - a disc. A surface element IS a disc, so this one gets a
+/// looser bound rather than none, which is what it had. Left free, a 400
+/// iteration fit took the 99th percentile of b/c from 4.14 to 26.34 while a/b
+/// sat pinned at its own bound of 2.00, and grew the longest axis nearly
+/// ninefold. A 14 x 7 x 0.26 pixel blade is not a surface element, and seen
+/// edge on it is exactly the needle the other bound exists to refuse - which
+/// is how a scene that scores 28.8 dB against its own training views renders
+/// as fur from a grazing angle.
+///
+/// Raising rather than shrinking keeps the constraint from fighting the
+/// gradient that grew the long axis: it declines the degenerate shape without
+/// discarding what the fit learned.
+fn clamp_axes(s: &mut [f32], max_needle: f32, max_flat: f32) {
+    // sort the three axis indices by scale, descending
+    let (mut i0, mut i1, mut i2) = (0usize, 1usize, 2usize);
+    if s[i1] > s[i0] {
+        std::mem::swap(&mut i0, &mut i1);
+    }
+    if s[i2] > s[i0] {
+        std::mem::swap(&mut i0, &mut i2);
+    }
+    if s[i2] > s[i1] {
+        std::mem::swap(&mut i1, &mut i2);
+    }
+    if max_needle > 1.0 {
+        s[i1] = s[i1].max(s[i0] / max_needle);
+    }
+    if max_flat > 1.0 {
+        s[i2] = s[i2].max(s[i1] / max_flat);
+    }
+}
+
 fn scene_unit(s: &Splats, targets: &[TargetView]) -> f32 {
     let mut lo = [f32::MAX; 3];
     let mut hi = [f32::MIN; 3];
@@ -944,4 +979,58 @@ fn rescale_cam(c: &Camera, k: f32) -> Camera {
 
 fn cast(v: &[f32]) -> &[u32] {
     unsafe { core::slice::from_raw_parts(v.as_ptr() as *const u32, v.len()) }
+}
+
+#[cfg(test)]
+mod shape_tests {
+    use super::*;
+
+    fn sorted(s: [f32; 3]) -> (f32, f32, f32) {
+        let mut v = s;
+        v.sort_by(f32::total_cmp);
+        (v[2], v[1], v[0])
+    }
+
+    /// Both degenerate shapes are refused, not just the one that looks like a
+    /// stick. A blade is a needle seen edge on, and a fit will find whichever
+    /// ratio is left unbounded.
+    #[test]
+    fn a_blade_is_refused_as_firmly_as_a_needle() {
+        let (needle_max, flat_max) = (2.0f32, 4.0f32);
+        for raw in [
+            [1.0, 0.5, 0.25],        // already fine
+            [1.0, 0.02, 0.01],       // a needle
+            [1.0, 0.9, 0.004],       // a blade: a/b fine, b/c 225:1
+            [0.03, 0.015, 0.00026],  // what a real 400-iteration fit produced
+            [1e-6, 1e-9, 1e-12],     // degenerate but positive
+        ] {
+            let mut s = raw;
+            clamp_axes(&mut s, needle_max, flat_max);
+            let (a, b, c) = sorted(s);
+            assert!(
+                a / b <= needle_max * 1.001,
+                "{raw:?} -> {s:?}: a/b is {:.2}, past the {needle_max} bound", a / b
+            );
+            assert!(
+                b / c <= flat_max * 1.001,
+                "{raw:?} -> {s:?}: b/c is {:.2}, past the {flat_max} bound", b / c
+            );
+            // and the overall anisotropy is bounded by the product, which is
+            // what makes a gaussian look like itself from any direction
+            assert!(a / c <= needle_max * flat_max * 1.001, "{raw:?} -> {s:?}: a/c is {:.2}", a / c);
+        }
+    }
+
+    /// The bound RAISES the small axes and never shrinks the large one, so it
+    /// declines a degenerate shape without discarding what the fit learned
+    /// about the direction that actually carries detail.
+    #[test]
+    fn clamping_a_shape_never_shrinks_it() {
+        let raw = [0.03, 0.015, 0.00026];
+        let mut s = raw;
+        clamp_axes(&mut s, 2.0, 4.0);
+        for k in 0..3 {
+            assert!(s[k] >= raw[k], "axis {k} shrank: {raw:?} -> {s:?}");
+        }
+    }
 }

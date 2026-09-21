@@ -788,6 +788,14 @@ fn fit_cmd(argv: &[String]) {
     let g = Gpu::new(splat::PIPELINES);
     let ks = Kernels::at(0);
     println!("fitting {} gaussians against {} views ({} iters, lr {lr}) …", s.len(), targets.len(), iters);
+    // How large a fitted gaussian may get, in pixels of the view that samples
+    // it best. A gaussian wider than a couple of pixels cannot carry detail
+    // the cameras resolved; it can only blur it, and from a grazing angle a
+    // scene of them is fog. The two shape bounds cap the axis RATIOS - see
+    // `splat::opt::clamp_axes` - which is a separate question from size.
+    let max_scale_pixels = a.f32_or("--max-scale-pixels", 2.0);
+    let max_needle = a.f32_or("--max-needle", 2.0);
+    let max_flat = a.f32_or("--max-flat", 4.0);
     let cfg = FitCfg {
         iters,
         lr,
@@ -799,6 +807,9 @@ fn fit_cmd(argv: &[String]) {
         max_gaussians,
         sh_degree,
         pose_lr,
+        max_scale_pixels,
+        max_needle,
+        max_flat,
         ..Default::default()
     };
     let (fitted, refined, mse) =
