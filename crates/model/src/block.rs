@@ -1182,6 +1182,147 @@ pub fn chunked_bidir_fwd(
     }
 }
 
+/// Windowed twin of [`CrossIds`]'s materialized scores kernel - what
+/// [`chunked_bidir_fwd_win`] dispatches through. softmax/apply are the SAME
+/// kernels [`CrossIds`] already names: a masked score reads `-3.4e38`, which
+/// exponentiates to 0, and a symmetric window always keeps `j == q0+i` live,
+/// so no row is ever fully masked and neither kernel needs a windowed
+/// variant.
+#[derive(Clone, Copy)]
+pub struct CrossWinIds {
+    /// `attn_scores_cross_win` pipeline index.
+    pub scores: usize,
+}
+
+/// Key-minor twin of [`CrossWinIds`], mirroring [`KeyMinor`]. The transpose
+/// itself does not window - a span's keys are the same regardless of which
+/// queries will end up masked from them - so `transpose` is the same
+/// `kv_k_headt` pipeline index a caller already resolved for [`KeyMinor`].
+#[derive(Clone, Copy)]
+pub struct KeyMinorWin<'a> {
+    /// `kv_k_headt` pipeline index.
+    pub transpose: usize,
+    /// `attn_scores_cross_kt_win` pipeline index.
+    pub scores: usize,
+    /// `[d_model, max_kn]` scratch, rewritten per span - same buffer a caller
+    /// would size for [`KeyMinor::kt`].
+    pub kt: &'a DeviceBuffer,
+}
+
+/// Windowed twin of [`cross_scores_step`]. `window`/`q0` are passed
+/// separately rather than added to [`CrossScoreArgs`] because that struct is
+/// shared by every UNWINDOWED caller (sam1, pulid, clip, moondream3,
+/// toyseq2seq, deepseekocr, the vit gradcheck probes) and none of them needs
+/// to grow two fields they would never set.
+#[allow(clippy::too_many_arguments)]
+fn cross_scores_win_step(
+    g: &Gpu,
+    k: &CrossWinIds,
+    km: Option<&KeyMinorWin>,
+    a: CrossScoreArgs,
+    q0: u32,
+    window: u32,
+    q: &DeviceBuffer,
+    q_slice: (u64, u64),
+    kv: &DeviceBuffer,
+    kv_slice: (u64, u64),
+    scores: &DeviceBuffer,
+) -> Step {
+    let CrossScoreArgs { heads, head_dim, q_stride, q_off, kv_stride, k_off, qn, kn } = a;
+    match km {
+        Some(km) => g.step_sliced(
+            km.scores,
+            &[q, km.kt, scores],
+            &[q_slice, (0, 0), (0, 0)],
+            &[1, heads, qn, kn, head_dim, q_stride, q_off, q0, window],
+            heads * qn * kn,
+        ),
+        None => g.step_sliced(
+            k.scores,
+            &[q, kv, scores],
+            &[q_slice, kv_slice, (0, 0)],
+            &[1, heads, qn, kn, head_dim, q_stride, kv_stride, q_off, k_off, q0, window],
+            heads * qn * kn,
+        ),
+    }
+}
+
+/// Windowed twin of [`chunked_bidir_fwd`]: BIDIRECTIONAL local-window
+/// self-attention over packed spans, for models (ModernBERT's local-attention
+/// layers) whose layers bound `|global_i - global_j|` in BOTH directions,
+/// rather than attending the whole span. Every parameter matches
+/// [`chunked_bidir_fwd`] except the added `window` and the windowed kernel
+/// ids - there is no `rel` (relative-position bias) parameter, since no
+/// caller of this entry point needs one yet; add it if one does, following
+/// [`chunked_bidir_fwd`]'s own precedent rather than guessing its shape now.
+#[allow(clippy::too_many_arguments)]
+pub fn chunked_bidir_fwd_win(
+    g: &Gpu,
+    k: &CrossWinIds,
+    softmax: usize,
+    apply: usize,
+    km: Option<&KeyMinorWin>,
+    window: u32,
+    heads: u32,
+    head_dim: u32,
+    d_out: u32,
+    qkv: &DeviceBuffer,
+    stride: u32,
+    q_off: u32,
+    k_off: u32,
+    v_off: u32,
+    ctx: &DeviceBuffer,
+    scores: &DeviceBuffer,
+    probs: &DeviceBuffer,
+    spans: &[(u32, u32)],
+    chunk: u32,
+    steps: &mut Vec<Step>,
+) {
+    for &(row0, len) in spans {
+        let kv_row_off = row0 as u64 * stride as u64;
+        if let Some(km) = km {
+            // Once per span, outside the chunk loop - see [`KeyMinor`]'s own
+            // doc for why the transpose is hoisted this way.
+            steps.push(g.step_sliced(
+                km.transpose,
+                &[qkv, km.kt],
+                &[(kv_row_off, 0), (0, 0)],
+                &[len, d_out, stride, k_off],
+                d_out * len,
+            ));
+        }
+        let mut q0 = 0u32;
+        while q0 < len {
+            let qn = chunk.min(len - q0);
+            let q_row_off = (row0 + q0) as u64 * stride as u64;
+            let ctx_off = (row0 + q0) as u64 * d_out as u64;
+            let sa = CrossScoreArgs { heads, head_dim, q_stride: stride, q_off, kv_stride: stride, k_off, qn, kn: len };
+            steps.push(cross_scores_win_step(
+                g,
+                k,
+                km,
+                sa,
+                q0,
+                window,
+                qkv,
+                (q_row_off, 0),
+                qkv,
+                (kv_row_off, 0),
+                scores,
+            ));
+            steps.push(g.step(softmax, &[scores, probs], &[1, heads, qn, len], heads * qn));
+            steps.push(g.step_sliced(
+                apply,
+                &[probs, qkv, ctx],
+                &[(0, 0), (kv_row_off, 0), (ctx_off, 0)],
+                &[1, heads, qn, len, head_dim, stride, v_off, d_out],
+                heads * qn * head_dim,
+            ));
+            q0 += qn;
+        }
+    }
+}
+
 /// The workspace-wide OUTER gate for asking any flash-attention family for a
 /// dispatch at all - the check every caller must make BEFORE it may even call
 /// [`flash_bidir_variant`] or [`flash_cross_supported`], both of which pick a

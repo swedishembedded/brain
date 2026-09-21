@@ -156,6 +156,10 @@ pub const ATTN_SCORES_CAUSAL_BIAS: &str = include_str!("../wgsl/attn_scores_caus
 pub const ATTN_SCORES_CROSS: &str = include_str!("../wgsl/attn_scores_cross.wgsl");
 /// `wgsl/attn_scores_cross_kt.wgsl`
 pub const ATTN_SCORES_CROSS_KT: &str = include_str!("../wgsl/attn_scores_cross_kt.wgsl");
+/// `wgsl/attn_scores_cross_kt_win.wgsl`
+pub const ATTN_SCORES_CROSS_KT_WIN: &str = include_str!("../wgsl/attn_scores_cross_kt_win.wgsl");
+/// `wgsl/attn_scores_cross_win.wgsl`
+pub const ATTN_SCORES_CROSS_WIN: &str = include_str!("../wgsl/attn_scores_cross_win.wgsl");
 /// `wgsl/attn_scores_full.wgsl`
 pub const ATTN_SCORES_FULL: &str = include_str!("../wgsl/attn_scores_full.wgsl");
 /// `wgsl/attn_scores_masked.wgsl`
@@ -380,12 +384,10 @@ pub const FLASH_ATTN_BIDIR: &str = include_str!("../wgsl/flash_attn_bidir.wgsl")
 pub const FLASH_ATTN_BIDIR_REG: &str = include_str!("../wgsl/flash_attn_bidir_reg.wgsl");
 /// `wgsl/flash_attn_bidir_reg2.wgsl`
 pub const FLASH_ATTN_BIDIR_REG2: &str = include_str!("../wgsl/flash_attn_bidir_reg2.wgsl");
+/// `wgsl/flash_attn_bidir_spans.wgsl`
+pub const FLASH_ATTN_BIDIR_SPANS: &str = include_str!("../wgsl/flash_attn_bidir_spans.wgsl");
 /// `wgsl/flash_attn_bidir_split.wgsl`
 pub const FLASH_ATTN_BIDIR_SPLIT: &str = include_str!("../wgsl/flash_attn_bidir_split.wgsl");
-/// `FLASH_ATTN_BIDIR_REG2`'s arithmetic over RAGGED spans in one dispatch,
-/// addressed from a host-built work table. See the kernel's own header for
-/// why a packed encoder request cannot fill a GPU one span at a time.
-pub const FLASH_ATTN_BIDIR_SPANS: &str = include_str!("../wgsl/flash_attn_bidir_spans.wgsl");
 /// `wgsl/flash_attn_causal_gqa.wgsl`
 pub const FLASH_ATTN_CAUSAL_GQA: &str = include_str!("../wgsl/flash_attn_causal_gqa.wgsl");
 /// `wgsl/flash_attn_cross_reg2.wgsl`
@@ -968,18 +970,20 @@ pub const SPLAT_BWD_KEYS: &str = include_str!("../wgsl/splat_bwd_keys.wgsl");
 pub const SPLAT_EMIT: &str = include_str!("../wgsl/splat_emit.wgsl");
 /// `wgsl/splat_grad_reduce.wgsl`
 pub const SPLAT_GRAD_REDUCE: &str = include_str!("../wgsl/splat_grad_reduce.wgsl");
-pub const SPLAT_SH: &str = include_str!("../wgsl/splat_sh.wgsl");
-pub const SPLAT_POSE_GRAD: &str = include_str!("../wgsl/splat_pose_grad.wgsl");
 /// `wgsl/splat_naive.wgsl`
 pub const SPLAT_NAIVE: &str = include_str!("../wgsl/splat_naive.wgsl");
 /// `wgsl/splat_pack_rgba8.wgsl`
 pub const SPLAT_PACK_RGBA8: &str = include_str!("../wgsl/splat_pack_rgba8.wgsl");
+/// `wgsl/splat_pose_grad.wgsl`
+pub const SPLAT_POSE_GRAD: &str = include_str!("../wgsl/splat_pose_grad.wgsl");
 /// `wgsl/splat_project.wgsl`
 pub const SPLAT_PROJECT: &str = include_str!("../wgsl/splat_project.wgsl");
 /// `wgsl/splat_project_bwd.wgsl`
 pub const SPLAT_PROJECT_BWD: &str = include_str!("../wgsl/splat_project_bwd.wgsl");
 /// `wgsl/splat_rasterize.wgsl`
 pub const SPLAT_RASTERIZE: &str = include_str!("../wgsl/splat_rasterize.wgsl");
+/// `wgsl/splat_sh.wgsl`
+pub const SPLAT_SH: &str = include_str!("../wgsl/splat_sh.wgsl");
 /// `wgsl/splat_tile_count.wgsl`
 pub const SPLAT_TILE_COUNT: &str = include_str!("../wgsl/splat_tile_count.wgsl");
 /// `wgsl/splat_tile_ranges.wgsl`
@@ -1089,6 +1093,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("attn_scores_causal_bias", ATTN_SCORES_CAUSAL_BIAS),
     ("attn_scores_cross", ATTN_SCORES_CROSS),
     ("attn_scores_cross_kt", ATTN_SCORES_CROSS_KT),
+    ("attn_scores_cross_kt_win", ATTN_SCORES_CROSS_KT_WIN),
+    ("attn_scores_cross_win", ATTN_SCORES_CROSS_WIN),
     ("attn_scores_full", ATTN_SCORES_FULL),
     ("attn_scores_masked", ATTN_SCORES_MASKED),
     ("attn_scores_qk", ATTN_SCORES_QK),
@@ -1201,8 +1207,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("flash_attn_bidir", FLASH_ATTN_BIDIR),
     ("flash_attn_bidir_reg", FLASH_ATTN_BIDIR_REG),
     ("flash_attn_bidir_reg2", FLASH_ATTN_BIDIR_REG2),
-    ("flash_attn_bidir_split", FLASH_ATTN_BIDIR_SPLIT),
     ("flash_attn_bidir_spans", FLASH_ATTN_BIDIR_SPANS),
+    ("flash_attn_bidir_split", FLASH_ATTN_BIDIR_SPLIT),
     ("flash_attn_causal_gqa", FLASH_ATTN_CAUSAL_GQA),
     ("flash_attn_cross_reg2", FLASH_ATTN_CROSS_REG2),
     ("focal_dice_grad", FOCAL_DICE_GRAD),
@@ -1494,13 +1500,13 @@ pub const ALL: &[(&str, &str)] = &[
     ("splat_bwd_keys", SPLAT_BWD_KEYS),
     ("splat_emit", SPLAT_EMIT),
     ("splat_grad_reduce", SPLAT_GRAD_REDUCE),
-    ("splat_sh", SPLAT_SH),
-    ("splat_pose_grad", SPLAT_POSE_GRAD),
     ("splat_naive", SPLAT_NAIVE),
     ("splat_pack_rgba8", SPLAT_PACK_RGBA8),
+    ("splat_pose_grad", SPLAT_POSE_GRAD),
     ("splat_project", SPLAT_PROJECT),
     ("splat_project_bwd", SPLAT_PROJECT_BWD),
     ("splat_rasterize", SPLAT_RASTERIZE),
+    ("splat_sh", SPLAT_SH),
     ("splat_tile_count", SPLAT_TILE_COUNT),
     ("splat_tile_ranges", SPLAT_TILE_RANGES),
     ("splat_unpack", SPLAT_UNPACK),
