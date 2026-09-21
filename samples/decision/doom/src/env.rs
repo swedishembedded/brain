@@ -1294,9 +1294,9 @@ impl DoomEnv {
             self.opts.iter().position(|o| o.tag == tag)
         };
         let hurt_badly = self.state.player.health < 40;
-        let threat_near = self.state.visible_threats().next().map(|t| t.distance) < Some(600);
+        let threat_near = self.state.threat_within(600);
         // Close enough that walking past it means taking hits the whole way.
-        let in_my_face = self.state.visible_threats().next().map(|t| t.distance) < Some(300);
+        let in_my_face = self.state.threat_within(300);
         let underfoot = |d: i32| {
             self.state
                 .pickups

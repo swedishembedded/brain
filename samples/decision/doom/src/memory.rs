@@ -47,9 +47,18 @@ use crate::obs::{Player, State, Thing};
 /// coming for you is somewhere else entirely.
 pub const MONSTER_MEMORY: u32 = 10;
 
-/// How close counts as having got there. A player who walks over the spot an
-/// item was on and does not pick anything up has learned that it has gone.
+/// How close counts as having got there.
 pub const REACHED: i32 = 56;
+
+/// How far off the nose the spot has to be to count as having been LOOKED at.
+///
+/// Being near something is not evidence about it. A player standing on the
+/// other side of a wall from a medikit is within arm's length of it and has
+/// learned nothing; so is one who walked past it and turned away. What
+/// unseats the memory is having looked where it was and not seen it, and
+/// looking is a cone - about ninety degrees for a player at the controls,
+/// which is forty-five either side.
+pub const LOOKED: i32 = 45;
 
 /// How many remembered things are worth saying. Past a handful this is no
 /// longer memory, it is a map.
@@ -128,6 +137,8 @@ struct Held {
 #[derive(Clone, Default)]
 pub struct Memory {
     held: Vec<Held>,
+    /// Whether something was picked up in the observation being folded in.
+    took: bool,
 }
 
 /// Where a thing at this bearing and distance is standing.
@@ -170,6 +181,11 @@ impl Memory {
     /// forget what there is evidence has gone.
     pub fn observe(&mut self, state: &State) {
         let p = &state.player;
+        // Something was collected this step, so whatever is being stood on is
+        // the thing that went. The engine says one was taken without saying
+        // which, and the nearest remembered one is the answer that is right
+        // whenever the question is asked at all.
+        self.took = state.events.iter().any(|e| e.kind == "item");
         if p.x.is_none() || p.y.is_none() || p.angle.is_none() {
             return;
         }
@@ -218,6 +234,7 @@ impl Memory {
     }
 
     fn forget(&mut self, p: &Player) {
+        let took = self.took;
         self.held.retain(|h| {
             if h.ago == 0 {
                 return true;
@@ -225,12 +242,18 @@ impl Memory {
             if !h.class.stays_put() {
                 return h.ago <= MONSTER_MEMORY;
             }
-            // It stays put, so the only thing that unseats the memory is
-            // having been there. Out of sight AND within arm's length of
-            // where it was means it is not there any more - which is also
-            // what picking it up looks like from here.
+            // It stays put, so what unseats the memory is EVIDENCE that it
+            // has gone, and being nearby is not evidence: a player on the far
+            // side of a wall from a medikit is within arm's length of it and
+            // has learned nothing, and so is one who walked past and turned
+            // away. Two things count - having picked something up while
+            // standing on it, and having looked where it was and not seen it.
             match from_here(p, h.x, h.y) {
-                Some((_, d)) => d > REACHED,
+                Some((bearing, d)) if d <= REACHED => {
+                    !(took || bearing.abs() <= LOOKED)
+                }
+                Some(_) => true,
+                // Nothing to place it against, so nothing was learned.
                 None => true,
             }
         });
@@ -541,5 +564,64 @@ mod path_tests {
         m.routed(&[]);
         let state = State::parse(&super::tests::build(0, 0, 180, super::tests::NOTHING)).unwrap();
         assert_eq!(m.recall(&state).iter().find(|r| r.id == 7).unwrap().path, None);
+    }
+}
+
+#[cfg(test)]
+mod expiry_tests {
+    use super::*;
+
+    /// Saw a medikit 200 units east, then walked onto the spot.
+    fn walked_onto_it(angle: i32, events: &str) -> Memory {
+        let mut m = Memory::new();
+        m.observe(&State::parse(&super::tests::build(
+            0,
+            0,
+            0,
+            r#""pickups":[{"id":7,"type":"Medikit","distance":200,"bearing":0,"visible":true}],"threats":[],"hazards":[]"#,
+        )).unwrap());
+        let on_top = super::tests::build(200, 0, angle, super::tests::NOTHING)
+            .replace(r#""events":[]"#, &format!(r#""events":[{events}]"#));
+        m.observe(&State::parse(&on_top).unwrap());
+        m
+    }
+
+    fn still_there(m: &Memory) -> bool {
+        m.held.iter().any(|h| h.id == 7)
+    }
+
+    /// The one that was wrong. Standing near where something was, while
+    /// facing away from it, is not evidence that it has gone - and it was
+    /// deleting remembered items on nothing but proximity.
+    #[test]
+    fn being_near_it_while_looking_elsewhere_is_not_evidence() {
+        assert!(still_there(&walked_onto_it(180, "")), "forgotten without looking");
+    }
+
+    /// Looked where it was and did not see it: it has gone.
+    #[test]
+    fn looking_at_the_spot_and_seeing_nothing_is_evidence() {
+        assert!(!still_there(&walked_onto_it(0, "")));
+    }
+
+    /// And picking something up while standing on it settles it whichever
+    /// way the player happens to be facing.
+    #[test]
+    fn collecting_something_there_is_evidence() {
+        let taken = r#"{"tic":2,"type":"item","what":"Medikit","amount":25}"#;
+        assert!(!still_there(&walked_onto_it(180, taken)));
+    }
+
+    /// Far away and facing it is not evidence either: seeing nothing at 400
+    /// units says nothing about what is on the floor there.
+    #[test]
+    fn looking_from_a_distance_is_not_evidence() {
+        let mut m = Memory::new();
+        m.observe(&State::parse(&super::tests::build(
+            0, 0, 0,
+            r#""pickups":[{"id":7,"type":"Medikit","distance":200,"bearing":0,"visible":true}],"threats":[],"hazards":[]"#,
+        )).unwrap());
+        m.observe(&State::parse(&super::tests::build(-200, 0, 0, super::tests::NOTHING)).unwrap());
+        assert!(still_there(&m));
     }
 }

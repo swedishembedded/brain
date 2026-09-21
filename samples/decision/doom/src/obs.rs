@@ -387,6 +387,18 @@ impl State {
         self.threats.iter().filter(|t| t.visible)
     }
 
+    /// Whether anything in view is within `units`.
+    ///
+    /// Written out because the obvious spelling of it is wrong in a way that
+    /// nothing reports. `threats().next().map(|t| t.distance) < Some(600)`
+    /// reads as "the nearest one is closer than 600", and `None` orders
+    /// BELOW `Some` in Rust - so an empty list compares less than any
+    /// distance and the answer is "yes, something is near" precisely when
+    /// there is nothing there at all.
+    pub fn threat_within(&self, units: i32) -> bool {
+        self.visible_threats().any(|t| t.distance < units)
+    }
+
     /// The enemies in view worth naming, worst first.
     ///
     /// Whatever is SHOOTING at you leads, then whatever is nearest. One
@@ -908,5 +920,59 @@ mod tests {
             State::parse(&extra).is_err(),
             "an unknown field must not be ignored"
         );
+    }
+}
+
+#[cfg(test)]
+mod threat_within_tests {
+    use super::State;
+
+    fn with(threats: &str) -> State {
+        State::parse(&format!(
+            r#"{{"tic":1,"episodeTic":1,"level":{{"episode":1,"map":1,"skill":2,"tic":1,
+            "kills":0,"totalKills":4,"items":0,"totalItems":3,"secrets":0,"totalSecrets":1}},
+            "player":{{"id":0,"health":100,"armor":0,"x":0,"y":0,"angle":90,
+            "weapon":"pistol","ammo":50,"keys":[]}},
+            "threats":[{threats}],"hazards":[],"pickups":[],
+            "clearance":{{"ahead":320,"right":0,"behind":0,"left":0,"aheadRight":0,"aheadLeft":0}},
+            "events":[],"done":false,"outcome":"alive"}}"#
+        ))
+        .expect("parses")
+    }
+
+    const IMP_AT_450: &str = r#"{"id":9,"type":"IMP","distance":450,"bearing":0,
+        "visible":true,"health":60,"targetingMe":true}"#;
+
+    /// The one that was wrong. An empty list of threats compared LESS than
+    /// any distance, so the teacher believed something was on top of it in
+    /// exactly the rooms where nothing was.
+    #[test]
+    fn nothing_in_view_is_not_something_nearby() {
+        assert!(!with("").threat_within(600));
+        assert!(!with("").threat_within(300));
+    }
+
+    #[test]
+    fn something_inside_the_reach_is_near_and_outside_it_is_not() {
+        assert!(with(IMP_AT_450).threat_within(600));
+        assert!(!with(IMP_AT_450).threat_within(300));
+    }
+
+    /// The NEAREST one decides, whatever order they arrive in.
+    #[test]
+    fn a_far_enemy_does_not_hide_a_close_one() {
+        let both = format!(
+            r#"{{"id":1,"type":"IMP","distance":900,"bearing":0,"visible":true,
+               "health":60,"targetingMe":false}},{IMP_AT_450}"#
+        );
+        assert!(with(&both).threat_within(600));
+    }
+
+    /// Out of sight is out of the question: this reads what is in view.
+    #[test]
+    fn something_out_of_sight_is_not_in_view() {
+        let hidden = r#"{"id":9,"type":"IMP","distance":100,"bearing":0,
+            "visible":false,"health":60,"targetingMe":true}"#;
+        assert!(!with(hidden).threat_within(600));
     }
 }
