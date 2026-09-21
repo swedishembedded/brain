@@ -252,18 +252,36 @@ pub fn options(state: &State) -> Vec<Option_> {
 
     // --- take something ---------------------------------------------------
     if let Some(p) = state.pickups.iter().find(|p| p.visible && p.distance < 700) {
+        // FACE FIRST, THEN WALK - the same split the exit option makes, and
+        // for the same reason. Turning while walking walks the ARC of the
+        // turn, so a pickup 100 degrees off the nose is approached along a
+        // curve that ends against the wall on the inside of it. Measured on
+        // E1M3, where the level starts with three pickups around the player:
+        // the scripted player spent its whole episode within 60 units of its
+        // own spawn, revisiting the same patch fourteen times, and killed
+        // nothing in eight hundred decisions.
+        let far_off = p.bearing.abs() > FACING_TOL;
         out.push(Option_ {
-            text: format!(
-                "go and pick up the {} {} units away, {}",
-                p.kind.to_lowercase(),
-                p.distance,
-                bearing_phrase(p.bearing)
-            ),
-            commands: format!(
-                "[{},{{\"type\":\"forward\",\"amount\":8}}]",
-                json_turn(state.facing(p.bearing))
-            ),
-            tics: MOVE_TICS,
+            text: if far_off {
+                format!(
+                    "turn toward the {} {} units away, {}",
+                    p.kind.to_lowercase(),
+                    p.distance,
+                    bearing_phrase(p.bearing)
+                )
+            } else {
+                format!(
+                    "go and pick up the {} {} units away, straight ahead",
+                    p.kind.to_lowercase(),
+                    p.distance
+                )
+            },
+            commands: if far_off {
+                format!("[{}]", json_turn(state.facing(p.bearing)))
+            } else {
+                "[{\"type\":\"forward\",\"amount\":8}]".into()
+            },
+            tics: if far_off { FIGHT_TICS } else { MOVE_TICS },
             tag: Tag::Grab,
             room: p.distance,
         });
@@ -1093,5 +1111,42 @@ mod lift_tests {
         // And holds still long enough for the platform to actually move.
         assert_eq!(ride.tics, RIDE_TICS);
         assert!(ride.text.contains("lift"), "{}", ride.text);
+    }
+}
+
+#[cfg(test)]
+mod approach_tests {
+    use super::tests::state;
+    use super::*;
+
+    fn stimpak_at(bearing: i32) -> State {
+        state(&format!(
+            r#""threats":[],"hazards":[],
+            "pickups":[{{"id":7,"type":"Stimpak","distance":104,"bearing":{bearing},"visible":true}}],
+            "clearance":{{"ahead":182,"right":79,"behind":145,"left":205,"aheadRight":90,"aheadLeft":90}}"#
+        ))
+    }
+
+    /// Turning and walking in one step walks the ARC of the turn, into the
+    /// inside of whatever corner is there. The exit option was split for this
+    /// reason and going to a pickup was not, so a level that starts the
+    /// player beside three of them kept it there: on E1M3 the scripted player
+    /// stayed within 60 units of its spawn for eight hundred decisions.
+    #[test]
+    fn a_pickup_off_to_the_side_is_turned_toward_before_it_is_walked_to() {
+        let opts = options(&stimpak_at(108));
+        let grab = opts.iter().find(|o| o.tag == Tag::Grab).expect("a way to it");
+        assert!(grab.commands.contains("turn-to"), "{}", grab.commands);
+        assert!(!grab.commands.contains("forward"), "turned and walked at once: {}", grab.commands);
+        assert!(grab.text.starts_with("turn toward"), "{}", grab.text);
+    }
+
+    /// And once it is ahead, walking is the whole act - no turn, so no arc.
+    #[test]
+    fn a_pickup_already_ahead_is_walked_to() {
+        let opts = options(&stimpak_at(2));
+        let grab = opts.iter().find(|o| o.tag == Tag::Grab).expect("a way to it");
+        assert!(grab.commands.contains("forward"), "{}", grab.commands);
+        assert!(!grab.commands.contains("turn-to"), "{}", grab.commands);
     }
 }
