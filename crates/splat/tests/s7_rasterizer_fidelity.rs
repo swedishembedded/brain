@@ -308,3 +308,54 @@ fn band_limiting_leaves_no_gaussian_below_what_its_cameras_sampled() {
     }
     assert!(widened > 1000, "the filter touched almost nothing ({widened})");
 }
+
+/// Where a back-projected gaussian belongs, to within half a pixel.
+///
+/// A pixel is an AREA, and the rasterizer samples it at its centre - pixel
+/// `n` is sampled at `n + 0.5`. So unprojecting pixel `n` has to use `n + 0.5`
+/// too, or every gaussian in the scene lands half a pixel up and half a pixel
+/// left of the detail it was made from. That is 0.7 px diagonally, and a
+/// feed-forward reconstruction's splats have a standard deviation around
+/// 0.46 px, so the offset is roughly one and a half sigma: each pixel ends up
+/// reading its neighbour's gaussian.
+///
+/// The damage does not look like a shift, which is what makes it survive
+/// inspection. It looks like the scene is slightly out of focus, and it caps
+/// reconstruction quality at a number low enough to be blamed on the model.
+#[test]
+fn unprojecting_a_pixel_must_use_its_centre() {
+    let g = Gpu::new_cpu(splat::PIPELINES);
+    let (w, h) = (128u32, 128u32);
+    let cam = camera(w, h);
+    let img = source(w as usize, h as usize);
+    let (wu, hu) = (w as usize, h as usize);
+
+    // the same scene, built from pixel CORNERS instead of pixel centres
+    let mut off = one_splat_per_pixel(&img, &cam, 0.46);
+    let z = 3.0f32;
+    for i in 0..off.len() {
+        off.means[i * 3] -= 0.5 * z / cam.fx;
+        off.means[i * 3 + 1] -= 0.5 * z / cam.fy;
+    }
+    let centred = one_splat_per_pixel(&img, &cam, 0.46);
+
+    // Measured only at low dilation, and that is the point. At the reference
+    // eps2d of 0.3 the offset scene scores HIGHER - 21.9 dB against 18.4 -
+    // because a half-pixel diagonal offset spreads each pixel evenly over four
+    // neighbours, which is a 2x2 box blur, and PSNR rewards smoothness once
+    // the dilation has removed the detail that would have distinguished them.
+    // So the default render setting does not merely hide this error, it
+    // endorses it, and any check run there would have called the bug an
+    // improvement.
+    for (eps, floor) in [(0.0f32, 8.0f64), (0.05, 5.0)] {
+        let a = psnr(&render(&g, &centred, &cam, eps), &img);
+        let b = psnr(&render(&g, &off, &cam, eps), &img);
+        assert!(
+            a > b + floor,
+            "at eps2d {eps}, centre-aligned gives {a:.1} dB and corner-aligned {b:.1} dB. Half a \
+             pixel is supposed to cost a great deal here - if it does not, this test cannot \
+             detect the error it exists to detect."
+        );
+    }
+
+}

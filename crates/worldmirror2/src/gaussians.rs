@@ -187,8 +187,14 @@ pub fn assemble(
                 if opts.max_depth > 0.0 && z > opts.max_depth {
                     continue;
                 }
-                let xc = (px as f32 - cam.cx) * z / cam.fx;
-                let yc = (py as f32 - cam.cy) * z / cam.fy;
+                // A pixel is an AREA and the rasterizer samples it at its
+                // centre, so unprojecting pixel n has to use n + 0.5. Without
+                // it every gaussian in the scene lands half a pixel up and
+                // half a pixel left of the detail it was made from - 0.7 px
+                // diagonally, against a median splat standard deviation of
+                // 0.46 px.
+                let xc = (px as f32 + 0.5 - cam.cx) * z / cam.fx;
+                let yc = (py as f32 + 0.5 - cam.cy) * z / cam.fy;
                 out.means.extend_from_slice(&[
                     m[0] * xc + m[1] * yc + m[2] * z + m[3],
                     m[4] * xc + m[5] * yc + m[6] * z + m[7],

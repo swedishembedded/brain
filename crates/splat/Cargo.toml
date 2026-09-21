@@ -18,3 +18,4 @@ serde_json.workspace = true
 
 [dev-dependencies]
 bytemuck.workspace = true
+brain-imaging.workspace = true
