@@ -42,7 +42,21 @@ downstream project.
       mechanism, out of this track's scope.
 - [x] LFM2.5-Encoder gains YaRN long-context RoPE scaling
       (`LfmConfig::rope_scaling`) - see `.agents/roadmap/lfm2.md` for the
-      detail and what it does not yet cover (SDK wiring, seeded backward).
+      detail and what it does not yet cover (seeded backward).
+- [x] `lfm2::caps`'s `embed` action gains a `normalize` param, defaulting to
+      `false` so the existing raw-mean output stays byte-identical for every
+      caller that predates it.
+- [x] `brain::EmbeddingPipeline` resolves LFM2 as a third backend
+      (`crates/lfm2/src/spec.rs`'s new `Lfm2Spec`, the same seam
+      `qwen3::spec::Qwen3Spec` gives Qwen3). A local `.safetensors` file
+      routes by `ModelCard.family`; a hub id tries Qwen3's resolver first
+      (the pre-existing default) and falls back to LFM2's only on a genuine
+      `Missing`. The SDK's LFM2 arm always L2-normalizes (a different
+      default from the capability action above, deliberately - the SDK
+      surface has no pre-existing caller to stay byte-identical for, and
+      matching Qwen3's own always-normalized SDK contract is what makes
+      `Embedding::cosine_similarity` mean the same thing regardless of which
+      backbone resolved).
 
 ## Explicitly out of scope for this track
 
@@ -63,11 +77,6 @@ downstream project.
 
 ## Not yet done
 
-- [ ] `brain::EmbeddingPipeline` does not yet resolve to LFM2 as a third
-      backend - needs `crates/lfm2/src/spec.rs` (an `ArchSpec`, the same
-      seam `qwen3::spec::Qwen3Spec` gives the Qwen3 backbone) and an
-      `EmbeddingOptions`-level way to reach LFM2's un-normalized-by-default
-      `embed` action honestly.
 - [ ] A seeded backward pass for LFM2 (`prepare_reverse`/`seed_buf`/
       `backward_seeded`, mirroring `crates/decide/src/model.rs`), so
       `EmbeddingTrainer`'s InfoNCE objective (or an equivalent) can fine-tune

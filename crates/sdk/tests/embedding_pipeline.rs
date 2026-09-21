@@ -259,3 +259,95 @@ fn a_request_past_the_built_capacity_is_refused() {
         other => panic!("expected Error::Backend naming the capacity, got {other:?}"),
     }
 }
+
+// ---- LFM2 backend: a real local checkpoint, no network, no real weights ----
+
+/// A tiny, randomly initialised LFM2.5 checkpoint plus the same merge-free
+/// byte-level `tokenizer.json` the Qwen3 fixture above uses - LFM2 reads the
+/// SAME `data::qwen_tokenizer::QwenBpe` format. Written with
+/// `checkpoint::save_carded` (not the plain `checkpoint::save` every other
+/// fixture in this file uses): `EmbeddingPipeline`'s LFM2-vs-Qwen3 routing
+/// reads `ModelCard.family` (`brain::EmbeddingPipeline`'s own doc), and
+/// plain `save` writes no card at all (`checkpoint::save`'s own doc:
+/// delegates to `st::save_safetensors(..., None)`) - a real `brain import`
+/// always calls the carded path (`lfm2::import::remap`), so this fixture
+/// matches that, not the card-less convenience every other test here uses
+/// for a checkpoint nothing needs to classify.
+#[cfg(feature = "text")]
+fn write_lfm2_embed_base(dir: &Path, block: u32) -> PathBuf {
+    std::fs::create_dir_all(dir).unwrap();
+
+    let cfg = lfm2::LfmConfig { vocab: 256, block_size: block, ..lfm2::LfmConfig::tiny() };
+    let init = lfm2::init::init_weights(&cfg, 11);
+    let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = cfg
+        .param_list()
+        .into_iter()
+        .map(|(name, n)| (name.clone(), vec![n as u64], init.get(&name).unwrap_or_else(|| panic!("init missing {name}")).clone()))
+        .collect();
+    let weights = dir.join("lfm2-embed.safetensors");
+    let card = checkpoint::st::ModelCard::new("brain/lfm2", lfm2::spec::CARD_FAMILY);
+    checkpoint::save_carded(weights.to_str().unwrap(), cfg.to_json(), &tensors, &card);
+
+    let mut vocab = serde_json::Map::new();
+    for (i, c) in data::bpe::bytes_to_unicode().iter().enumerate() {
+        vocab.insert(c.to_string(), serde_json::json!(i));
+    }
+    std::fs::write(dir.join("tokenizer.json"), serde_json::json!({"model": {"vocab": vocab, "merges": []}}).to_string()).unwrap();
+
+    weights
+}
+
+/// The card-family routing this milestone adds: `ModelCard.family == "lfm"`
+/// (`checkpoint::save`'s config carries `"model": "lfm"`, which
+/// `checkpoint::st::read_card` reads back as the family) must resolve to the
+/// LFM2 backend, not the pre-existing Qwen3 default - proving
+/// `resolve_text_backend` actually distinguishes the two rather than always
+/// falling through to Qwen3 the way it did before this backend existed.
+#[cfg(feature = "text")]
+#[test]
+fn lfm2_backend_embeds_a_real_checkpoint_and_returns_a_unit_norm_vector() {
+    let root = scratch_root("lfm2-embed");
+    let weights = write_lfm2_embed_base(&root, 32);
+
+    let pipe = brain::EmbeddingPipeline::builder(weights.to_str().unwrap()).capacity(32).tokenizer(root.join("tokenizer.json").to_str().unwrap()).load().unwrap();
+    let v = pipe.embed("hello world").unwrap();
+
+    assert_eq!(v.dim(), 16, "LfmConfig::tiny d_model");
+    let norm: f64 = v.as_slice().iter().map(|x| *x as f64 * *x as f64).sum::<f64>().sqrt();
+    assert!((norm - 1.0).abs() < 1e-4, "expected unit norm, got {norm}");
+}
+
+/// The rebuild-on-length-change path (`Backend::Lfm2::hot`): two different
+/// inputs on the SAME pipeline must both succeed and both come back unit
+/// norm - proving the mutex-guarded resident cache correctly rebuilds rather
+/// than reusing a graph sized for the wrong length.
+#[cfg(feature = "text")]
+#[test]
+fn lfm2_backend_rebuilds_when_the_request_length_changes() {
+    let root = scratch_root("lfm2-embed-rebuild");
+    let weights = write_lfm2_embed_base(&root, 64);
+    let pipe = brain::EmbeddingPipeline::builder(weights.to_str().unwrap()).capacity(64).tokenizer(root.join("tokenizer.json").to_str().unwrap()).load().unwrap();
+
+    for text in ["hi", "a somewhat longer sentence than the first one"] {
+        let v = pipe.embed(text).unwrap();
+        let norm: f64 = v.as_slice().iter().map(|x| *x as f64 * *x as f64).sum::<f64>().sqrt();
+        assert!((norm - 1.0).abs() < 1e-4, "{text:?}: expected unit norm, got {norm}");
+    }
+}
+
+/// `instruction` is a Qwen3-Embedding-only option (see
+/// `EmbeddingOptions::instruction`'s own doc) - an LFM2-backed pipeline must
+/// refuse it, not silently ignore it.
+#[cfg(feature = "text")]
+#[test]
+fn lfm2_backend_refuses_the_instruction_option() {
+    let root = scratch_root("lfm2-embed-instruction");
+    let weights = write_lfm2_embed_base(&root, 32);
+    let pipe = brain::EmbeddingPipeline::builder(weights.to_str().unwrap()).capacity(32).tokenizer(root.join("tokenizer.json").to_str().unwrap()).load().unwrap();
+
+    let err = pipe.embed_with("hello world", brain::EmbeddingOptions::new().instruction("Given a query, retrieve relevant passages")).unwrap_err();
+    match err {
+        brain::Error::Backend(msg) => assert!(msg.contains("instruction"), "got: {msg}"),
+        other => panic!("expected Error::Backend naming 'instruction', got {other:?}"),
+    }
+}

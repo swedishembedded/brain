@@ -11,14 +11,14 @@ against the NPU export via OpenVINO.
 - [x] YaRN long-context RoPE scaling (`LfmConfig::rope_scaling`,
       `rope_base_yarn`/`rope_base_yarn_bwd` kernels) - a checkpoint can be
       configured for a 32768-token context and the kernel/wiring is
-      gradient-checked and tested against the existing plain path. What
-      this does NOT cover: quality at 4x the model's native 8192-token
-      training extent is unvalidated extrapolation without continued
-      pretraining, and it is not yet reachable from `brain::EmbeddingPipeline`
-      (needs its own `crates/lfm2/src/spec.rs` `ArchSpec`, the same seam
-      `qwen3::spec::Qwen3Spec` gave the Qwen3 backbone) or from an `embed`
-      action `normalize` param (today's `embed` still returns the raw,
-      unnormalized mean - see `crates/lfm2/src/caps.rs`).
+      gradient-checked and tested against the existing plain path. Quality
+      at 4x the model's native 8192-token training extent is unvalidated
+      extrapolation without continued pretraining.
+- [x] `embed` action `normalize` param (default `false`, byte-identical for
+      every existing caller) and `crates/lfm2/src/spec.rs`'s `Lfm2Spec` -
+      LFM2 is now reachable from `brain::EmbeddingPipeline` as a third
+      backend (routed by `ModelCard.family` for a local file, by resolver
+      fallback for a hub id) - see `.agents/roadmap/embeddings.md`.
 - [ ] A seeded backward pass (`prepare_reverse`/`seed_buf`/`backward_seeded`,
       mirroring `crates/decide/src/model.rs`) for full-encoder contrastive
       fine-tuning - today only the checkpoint's own MLM objective has a

@@ -55,7 +55,7 @@
 //! # Ok::<(), brain::Error>(())
 //! ```
 
-#[cfg(feature = "vision")]
+#[cfg(any(feature = "vision", feature = "text"))]
 use std::collections::BTreeMap;
 #[cfg(feature = "text")]
 use std::path::Path;
@@ -209,6 +209,25 @@ enum Backend {
         /// past it is refused, not silently truncated or rebuilt.
         capacity: u32,
     },
+    /// LFM2.5-Encoder: bidirectional, so - unlike Qwen3's decode-only
+    /// KV-cache build, reusable at any length up to its built capacity -
+    /// the graph must be built at the EXACT request length (unmasked padding
+    /// corrupts bidirectional attention; see `lfm2::caps::EncoderAction`'s
+    /// own doc, which this mirrors). `hot` is the resident (length, model)
+    /// pair, rebuilt only when the request length changes - the same
+    /// rebuild-on-length-change rule that capability action uses, behind a
+    /// `Mutex` because `EmbeddingPipeline::embed`/`embed_batch` take `&self`.
+    #[cfg(feature = "text")]
+    Lfm2 {
+        weights: String,
+        tok: data::qwen_tokenizer::QwenBpe,
+        /// The longest request this pipeline will build for - refused past
+        /// this, never silently truncated. No fixed KV cache to reserve
+        /// ahead of time the way Qwen3's `capacity` does; this bounds the
+        /// chunked-attention slab math instead.
+        capacity: u32,
+        hot: std::sync::Mutex<Option<(u32, lfm2::Lfm)>>,
+    },
 }
 
 impl std::fmt::Debug for EmbeddingPipeline {
@@ -218,6 +237,8 @@ impl std::fmt::Debug for EmbeddingPipeline {
             Backend::Clip { tower, .. } => f.debug_struct("EmbeddingPipeline").field("backend", &"clip").field("tower", tower).finish(),
             #[cfg(feature = "text")]
             Backend::Qwen3 { capacity, .. } => f.debug_struct("EmbeddingPipeline").field("backend", &"qwen3").field("capacity", capacity).finish(),
+            #[cfg(feature = "text")]
+            Backend::Lfm2 { capacity, .. } => f.debug_struct("EmbeddingPipeline").field("backend", &"lfm2").field("capacity", capacity).finish(),
         }
     }
 }
@@ -278,6 +299,13 @@ impl EmbeddingPipeline {
             }
             #[cfg(feature = "text")]
             Backend::Qwen3 { model, tok, capacity } => texts.iter().map(|t| qwen3_embed_one(model, tok, *capacity, t, &opts)).collect::<Result<Vec<_>>>()?,
+            #[cfg(feature = "text")]
+            Backend::Lfm2 { weights, tok, capacity, hot } => {
+                if opts.instruction.is_some() {
+                    return Err(Error::Backend("embedding: 'instruction' is a Qwen3-Embedding option; this pipeline resolved to the LFM2.5-Encoder backend".to_string()));
+                }
+                texts.iter().map(|t| lfm2_embed_one(weights, tok, *capacity, hot, t, &opts)).collect::<Result<Vec<_>>>()?
+            }
         };
 
         if let Some(d) = opts.dimensions {
@@ -339,6 +367,70 @@ fn qwen3_embed_one(model: &qwen3::Qwen, tok: &data::qwen_tokenizer::QwenBpe, cap
     let mut hidden = model.prefill(&inputs);
     l2_normalize(&mut hidden);
     Ok(hidden)
+}
+
+/// Attention-slab budget for LFM2's chunked long-context path - the same
+/// value `lfm2::caps`'s own `EncoderAction` uses (that constant is private
+/// to that module, so this is a second literal, not a shared one; see that
+/// module's own doc for the derivation).
+#[cfg(feature = "text")]
+const LFM2_SLAB_BUDGET: u64 = 512 << 20;
+
+/// One LFM2.5-Encoder call: mean pooling over every hidden-state row (the
+/// SAME sequence `lfm2::caps::EncoderAction`'s `embed` action runs), always
+/// L2-normalized here (unlike that capability action's own `normalize:
+/// false` default - a served action owes existing callers byte-identical
+/// output; this SDK surface has no such caller yet and matches
+/// `qwen3_embed_one`'s own always-normalized contract instead, so
+/// `Embedding::cosine_similarity` means the same thing regardless of which
+/// backbone resolved).
+///
+/// Bidirectional attention means the graph is rebuilt at the EXACT request
+/// length whenever it changes (`hot`'s own doc) - a real, different cost
+/// profile from Qwen3's KV-cache reuse, which is why this is a `Mutex`, not
+/// a plain field: [`EmbeddingPipeline::embed`]/`embed_batch` take `&self`.
+#[cfg(feature = "text")]
+fn lfm2_embed_one(weights: &str, tok: &data::qwen_tokenizer::QwenBpe, capacity: u32, hot: &std::sync::Mutex<Option<(u32, lfm2::Lfm)>>, text: &str, opts: &EmbeddingOptions) -> Result<Vec<f32>> {
+    use data::tokenizer::Tokenizer;
+
+    let mut ids: Vec<u32> = tok.template_prefix().to_vec();
+    ids.extend(tok.encode(text));
+    if let Some(mt) = opts.max_tokens {
+        ids.truncate(mt as usize);
+    }
+    if ids.is_empty() {
+        return Err(Error::Backend("lfm2 embedding: empty input".to_string()));
+    }
+    let need = ids.len() as u32;
+    if need > capacity {
+        return Err(Error::Backend(format!(
+            "lfm2 embedding: input is {need} tokens, past this pipeline's built capacity ({capacity} tokens) -- rebuild with .capacity({need}) or larger"
+        )));
+    }
+
+    let mut guard = hot.lock().map_err(|_| Error::Backend("lfm2 embedding: hot model lock poisoned".to_string()))?;
+    let reuse = matches!(&*guard, Some((len, _)) if *len == need);
+    if !reuse {
+        let model = lfm2::Lfm::load_inference_chunked(weights, 1, need, LFM2_SLAB_BUDGET, 0);
+        *guard = Some((need, model));
+    }
+    let (_, model) = guard.as_ref().expect("hot model present");
+
+    model.set_tokens(&ids);
+    model.forward();
+    let d = model.cfg.d_model as usize;
+    let hidden = &model.read_hidden()[..ids.len() * d];
+    let mut mean = vec![0.0f32; d];
+    for row in hidden.chunks_exact(d) {
+        for (m, &x) in mean.iter_mut().zip(row) {
+            *m += x;
+        }
+    }
+    for x in &mut mean {
+        *x /= ids.len() as f32;
+    }
+    l2_normalize(&mut mean);
+    Ok(mean)
 }
 
 /// L2-normalize in place. A zero vector (degenerate input) is left as-is
@@ -438,26 +530,25 @@ impl EmbeddingPipelineBuilder {
     }
 }
 
-/// `text`-only build: every `model_id` resolves against Qwen3 - a literal
-/// local checkpoint path directly, else a hub id through `qwen3::spec::Qwen3Spec`
-/// (the same resolver `crate::text::TextGenerationPipeline` uses).
+/// `text`-only build: every `model_id` resolves against Qwen3 or LFM2 - see
+/// [`resolve_text_backend`]'s own doc for how the two are told apart.
 #[cfg(all(feature = "text", not(feature = "vision")))]
 impl EmbeddingPipelineBuilder {
-    /// Resolve `model_id` and build a real [`EmbeddingPipeline`] over Qwen3.
-    /// See [`load_qwen3`]'s own doc for the local-path-vs-hub-id rule.
+    /// Resolve `model_id` and build a real [`EmbeddingPipeline`] over Qwen3
+    /// or LFM2. See [`resolve_text_backend`]'s own doc for the rule.
     pub fn load(self) -> Result<EmbeddingPipeline> {
         crate::device::apply(&self.device)?;
-        Ok(EmbeddingPipeline { backend: load_qwen3(&self.model_id, self.capacity, self.tokenizer, self.download_policy)? })
+        Ok(EmbeddingPipeline { backend: resolve_text_backend(&self.model_id, self.capacity, self.tokenizer, self.download_policy)? })
     }
 }
 
-/// Both features on: a literal local file always resolves as Qwen3 (CLIP's
-/// own resolution reads a directory, never a bare file - see
-/// [`load_qwen3`]'s doc), otherwise CLIP's directory-shaped resolution is
-/// tried first (preserving this pipeline's original CLIP-only default
-/// behavior exactly, for a caller who never asked for the `text` feature's
-/// new capability) and Qwen3's hub resolution is the fallback when CLIP's
-/// resolution reports the model genuinely missing.
+/// Both features on: a literal local file always resolves against Qwen3 or
+/// LFM2 (CLIP's own resolution reads a directory, never a bare file - see
+/// [`resolve_text_backend`]'s doc), otherwise CLIP's directory-shaped
+/// resolution is tried first (preserving this pipeline's original CLIP-only
+/// default behavior exactly, for a caller who never asked for the `text`
+/// feature's new capability) and the text backends are the fallback when
+/// CLIP's resolution reports the model genuinely missing.
 #[cfg(all(feature = "vision", feature = "text"))]
 impl EmbeddingPipelineBuilder {
     pub fn load(self) -> Result<EmbeddingPipeline> {
@@ -465,12 +556,12 @@ impl EmbeddingPipelineBuilder {
         let EmbeddingPipelineBuilder { model_id, device: _, tower, capacity, tokenizer, download_policy } = self;
 
         if Path::new(&model_id).is_file() {
-            return Ok(EmbeddingPipeline { backend: load_qwen3(&model_id, capacity, tokenizer, download_policy)? });
+            return Ok(EmbeddingPipeline { backend: resolve_text_backend(&model_id, capacity, tokenizer, download_policy)? });
         }
 
         match load_clip(&model_id, tower, download_policy) {
             Ok(backend) => Ok(EmbeddingPipeline { backend }),
-            Err(Error::Missing(_)) => Ok(EmbeddingPipeline { backend: load_qwen3(&model_id, capacity, tokenizer, download_policy)? }),
+            Err(Error::Missing(_)) => Ok(EmbeddingPipeline { backend: resolve_text_backend(&model_id, capacity, tokenizer, download_policy)? }),
             Err(e) => Err(e),
         }
     }
@@ -501,6 +592,41 @@ fn load_clip(model_id: &str, tower: String, download_policy: loader::DownloadPol
     let gpu = gpu_core::Gpu::new(clip::model::TEXT_PIPELINES);
     let session = clip::caps::Session::load(&dir.to_string_lossy(), gpu).map_err(Error::Backend)?;
     Ok(Backend::Clip { session, tower })
+}
+
+/// Resolve `model_id` against Qwen3 or LFM2 - the two `text`-feature
+/// backbones.
+///
+/// A literal local file ([`Path::is_file`]) is classified by its
+/// `ModelCard.family`: `"lfm"` ([`lfm2::spec::CARD_FAMILY`]) routes to
+/// [`load_lfm2`]; everything else - including a `.gguf` (which carries no
+/// brain `ModelCard` at all) or a `ModelCard`-less file - routes to
+/// [`load_qwen3`], preserving that function's own pre-existing "let an
+/// unlabeled checkpoint through" behavior exactly (`crate::text::check_local_weights_architecture`'s
+/// own doc: only a POSITIVE, different-architecture marker is ever refused).
+///
+/// A hub id (not a local file) tries [`load_qwen3`]'s resolver FIRST - the
+/// pre-existing default for every caller before LFM2 was a reachable
+/// backend at all - and only falls back to [`load_lfm2`] when Qwen3's own
+/// resolution reports the model genuinely `Missing`, the same two-way
+/// tie-break [`EmbeddingPipelineBuilder::load`]'s CLIP-vs-text cascade
+/// already uses one level up.
+#[cfg(feature = "text")]
+fn resolve_text_backend(model_id: &str, capacity: u32, tokenizer: Option<String>, download_policy: loader::DownloadPolicy) -> Result<Backend> {
+    if Path::new(model_id).is_file() {
+        if let Ok(Some(card)) = checkpoint::st::read_card(model_id) {
+            if card.family == lfm2::spec::CARD_FAMILY {
+                return load_lfm2(model_id, capacity, tokenizer, download_policy);
+            }
+        }
+        return load_qwen3(model_id, capacity, tokenizer, download_policy);
+    }
+
+    match load_qwen3(model_id, capacity, tokenizer.clone(), download_policy) {
+        Ok(backend) => Ok(backend),
+        Err(Error::Missing(_)) => load_lfm2(model_id, capacity, tokenizer, download_policy),
+        Err(e) => Err(e),
+    }
 }
 
 /// Resolve `model_id` as a Qwen3-Embedding checkpoint and build a real
@@ -552,4 +678,42 @@ fn load_qwen3(model_id: &str, capacity: u32, tokenizer: Option<String>, download
         .map_err(Error::Backend)?;
 
     Ok(Backend::Qwen3 { model, tok, capacity })
+}
+
+/// Resolve `model_id` as an LFM2.5-Encoder checkpoint and build a real
+/// `Backend::Lfm2`. The `Lfm` model itself builds LAZILY, on the first
+/// [`EmbeddingPipeline::embed`]/`embed_batch` call - the same "resolve now,
+/// build on first use" split [`load_clip`] already establishes, and a real
+/// necessity here specifically: bidirectional attention needs the graph
+/// sized to the EXACT request length (see `Backend::Lfm2`'s own doc), which
+/// is not knowable at `load()` time at all.
+///
+/// Same local-path-vs-hub-id rule as [`load_qwen3`]: a literal local file is
+/// used directly; otherwise `model_id` resolves through
+/// [`lfm2::spec::Lfm2Spec`] (the model-store resolver). Unlike Qwen3, LFM2.5
+/// has no embedded-tokenizer format (no GGUF path exists for this arch at
+/// all - see [`lfm2::spec`]'s own doc) - an explicit
+/// [`EmbeddingPipelineBuilder::tokenizer`] or the resolver's own pick is the
+/// only two sources, checked in that order.
+#[cfg(feature = "text")]
+fn load_lfm2(model_id: &str, capacity: u32, tokenizer: Option<String>, download_policy: loader::DownloadPolicy) -> Result<Backend> {
+    let (weights, resolved_tokenizer) = if Path::new(model_id).is_file() {
+        (model_id.to_string(), None)
+    } else {
+        let overrides: BTreeMap<String, String> = BTreeMap::new();
+        let assembly = crate::resolve_policy::resolve_with_policy("lfm2", &lfm2::spec::Lfm2Spec, model_id, &overrides, download_policy)?;
+        let w = assembly.roles.get("weights").ok_or_else(|| Error::Backend(format!("lfm2: resolved assembly {:?} has no weights role", assembly.id)))?;
+        if !w.exists() {
+            return Err(Error::Backend(format!("lfm2: resolved assembly {:?} is missing weights at {}", assembly.id, w.display())));
+        }
+        let t = assembly.roles.get("tokenizer").map(|p| p.to_string_lossy().into_owned());
+        (w.to_string_lossy().into_owned(), t)
+    };
+
+    let tok_path = tokenizer
+        .or(resolved_tokenizer)
+        .ok_or_else(|| Error::MissingArgument(format!("{weights}: no tokenizer resolved for this LFM2.5 checkpoint; call .tokenizer(path)")))?;
+    let tok = data::qwen_tokenizer::QwenBpe::from_file(&tok_path).map_err(Error::Backend)?;
+
+    Ok(Backend::Lfm2 { weights, tok, capacity, hot: std::sync::Mutex::new(None) })
 }

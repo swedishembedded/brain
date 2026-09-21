@@ -114,16 +114,21 @@ let v = pipe.embed("a whale submarine")?;
 println!("{} dims", v.len());
 ```
 
-One type, two backbones, dispatched from `model_id`: CLIP's text towers
+One type, three backbones, dispatched from `model_id`: CLIP's text towers
 (CLIP-L by default; `.builder(id).tower("openclip_bigg")` for the larger
-one, behind the `vision` Cargo feature), and, for a real 32768-token
-context, the Qwen3 decoder used the way Qwen3-Embedding is meant to be -
-last-token pooled, L2-normalized (behind the `text` Cargo feature). Neither
-feature is named `embedding` - both backbones already have a registered
-architecture domain in this workspace (CLIP's `Vision`, Qwen3's `Text`).
+one, behind the `vision` Cargo feature), the Qwen3 decoder used the way
+Qwen3-Embedding is meant to be - last-token pooled, L2-normalized, a real
+32768-token context (behind the `text` Cargo feature) - and LFM2.5-Encoder,
+a bidirectional encoder with its own long-context YaRN scaling (also
+`text`). Neither feature is named `embedding` - every backbone already has a
+registered architecture domain in this workspace (CLIP's `Vision`, Qwen3's
+and LFM2's `Text`).
 
-A literal local checkpoint path always resolves to the Qwen3 backbone
-(CLIP's own resolution reads a released directory, never a bare file):
+A literal local checkpoint path resolves to Qwen3 or LFM2 by the
+checkpoint's own `ModelCard.family` (CLIP's own resolution reads a released
+directory, never a bare file, so it is never in this decision at all); a
+hub id tries Qwen3's resolver first (the pre-existing default), falling
+back to LFM2's only when Qwen3 reports the model genuinely missing:
 
 ```rust
 let pipe = brain::EmbeddingPipeline::builder("/models/qwen3-embedding-0.6b.safetensors")
@@ -139,11 +144,21 @@ println!("{:.3}", query.cosine_similarity(&passage));
 ```
 
 `pipe.embed_batch(&["a", "b", "c"])` runs one batched forward on the CLIP
-backbone; the Qwen3 backbone has no batched forward on its decode-only
-build, so it loops one prefill per string instead - see
-`EmbeddingPipeline::embed_batch_with`'s own doc. `EmbeddingOptions::dimensions(n)`
-truncates AND renormalizes by default, deliberately differing from the
-`/v1/embeddings` HTTP endpoint, which does not re-project after truncating.
+backbone; Qwen3's decode-only build and LFM2's exact-length bidirectional
+build both have no batched forward, so each loops one call per string
+instead - see `EmbeddingPipeline::embed_batch_with`'s own doc.
+`EmbeddingOptions::dimensions(n)` truncates AND renormalizes by default,
+deliberately differing from the `/v1/embeddings` HTTP endpoint, which does
+not re-project after truncating. `EmbeddingOptions::instruction` is a
+Qwen3-Embedding-only option, refused (not silently ignored) on the CLIP or
+LFM2 backbones.
+
+LFM2 is bidirectional: its graph is rebuilt at the EXACT request length
+whenever that length changes (unmasked padding corrupts bidirectional
+attention), so `.capacity(n)` bounds the longest request it will build for
+rather than reserving a fixed KV cache the way Qwen3's does. Quality at a
+real long context is unvalidated extrapolation past LFM2.5's native
+8192-token training extent - see `.agents/roadmap/lfm2.md`.
 
 ### Contrastive fine-tuning over frozen embeddings
 

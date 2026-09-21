@@ -62,6 +62,10 @@ pub fn manifest() -> Manifest {
         .output(BlobSpec::new("predictions", Media::Text, "JSON: [{row, tokens: [{id, token, logit}]}]"));
     let embed = common(ActionSpec::new("embed", "bidirectional encoding: per-token hidden states + mean-pooled embedding"))
         .param(ParamSpec::new("max_tokens", ParamType::Int, "truncate the input to this many tokens (0 = no limit)").default(json!(0)))
+        .param(
+            ParamSpec::new("normalize", ParamType::Bool, "L2-normalize the mean-pooled embedding before returning it")
+                .default(json!(false)),
+        )
         .output(BlobSpec::new("embeddings", Media::Bytes, "LE-f32 [n_tokens, dim] hidden states; shape in blob meta"));
     Manifest::new(MODEL, "LFM2.5 bidirectional encoder — fill-mask and long-context embeddings (8k).", vec![fill_mask, embed])
 }
@@ -230,6 +234,19 @@ impl Action for EncoderAction {
                 for x in &mut mean {
                     *x /= n as f32;
                 }
+                // `false` by default: the raw, un-normalized mean stays
+                // byte-identical for every caller that predates this param -
+                // see `EmbeddingPipeline`'s own doc for why the SDK's Qwen3
+                // backbone always normalizes but this one does not by default
+                // (a genuinely different existing-caller compatibility bar).
+                if inv.get_bool("normalize").unwrap_or(false) {
+                    let norm = mean.iter().map(|x| *x as f64 * *x as f64).sum::<f64>().sqrt();
+                    if norm > 0.0 {
+                        for x in &mut mean {
+                            *x = (*x as f64 / norm) as f32;
+                        }
+                    }
+                }
                 let bytes: Vec<u8> = hidden.iter().flat_map(|f| f.to_le_bytes()).collect();
                 let blob = Blob::new(Media::Bytes, bytes).with_meta(json!({"shape": [n, d], "dtype": "f32le"}));
                 Ok(Outcome::new()
@@ -266,6 +283,73 @@ mod tests {
             .unwrap();
         assert_eq!(inv.get_i64("topk"), Some(5));
         assert_eq!(manifest().to_json()["actions"][1]["name"], "embed");
+    }
+
+    /// `normalize` defaults to `false` - the SAME behavior every caller
+    /// before this param existed already gets, byte-identical.
+    #[test]
+    fn embed_normalize_defaults_to_false_and_leaves_the_raw_mean_unnormalized() {
+        let e = manifest().actions.into_iter().find(|a| a.name == "embed").expect("embed action");
+        let n = e.params.iter().find(|p| p.name == "normalize").expect("normalize param");
+        assert_eq!(n.default, Some(json!(false)));
+    }
+
+    /// End to end over a tiny synthetic checkpoint: `normalize: true` must
+    /// actually L2-normalize the returned mean, and the default (unset) run
+    /// must NOT - the two runs over the identical input must differ exactly
+    /// where the norm does.
+    #[test]
+    fn embed_normalize_true_l2_normalizes_the_mean_and_false_leaves_it_raw() {
+        let dir = std::env::temp_dir().join(format!("lfm2-caps-normalize-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // `write_byte_tokenizer`-equivalent below assigns ids across the full
+        // printable-ASCII + space/newline range (~96 tokens); `LfmConfig::tiny`'s
+        // vocab of 23 is too small to index that.
+        let cfg = crate::config::LfmConfig { vocab: 256, ..crate::config::LfmConfig::tiny() };
+        let init = crate::init::init_weights(&cfg, 7);
+        let tensors: Vec<(String, Vec<u64>, Vec<f32>)> =
+            cfg.param_list().into_iter().map(|(name, n)| (name.clone(), vec![n as u64], init.get(&name).unwrap().clone())).collect();
+        let weights = dir.join("tiny.safetensors");
+        checkpoint::save(weights.to_str().unwrap(), cfg.to_json(), &tensors);
+
+        let mut vocab = serde_json::Map::new();
+        for (i, c) in data::bpe::bytes_to_unicode().iter().enumerate() {
+            vocab.insert(c.to_string(), json!(i));
+        }
+        std::fs::write(dir.join("tokenizer.json"), json!({"model": {"vocab": vocab, "merges": []}}).to_string()).unwrap();
+
+        let mut r = Registry::new();
+        r.register(Arc::new(LfmProvider::new()));
+        let run = |normalize: bool| -> Vec<f64> {
+            let out = r
+                .run(
+                    MODEL,
+                    "embed",
+                    Invocation::new()
+                        .set("weights", json!(weights.to_str().unwrap()))
+                        .set("tokenizer", json!(dir.join("tokenizer.json").to_str().unwrap()))
+                        .set("text", json!("hello world"))
+                        .set("normalize", json!(normalize)),
+                    &mut |_| {},
+                )
+                .unwrap();
+            out.outputs["mean"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect()
+        };
+
+        let raw = run(false);
+        let raw_norm = raw.iter().map(|x| x * x).sum::<f64>().sqrt();
+        assert!(raw_norm > 0.0 && (raw_norm - 1.0).abs() > 1e-6, "a random-init tiny model's raw mean must not already be unit norm (got {raw_norm})");
+
+        let normalized = run(true);
+        let normalized_norm = normalized.iter().map(|x| x * x).sum::<f64>().sqrt();
+        assert!((normalized_norm - 1.0).abs() < 1e-6, "normalize: true must return a unit-norm vector, got norm {normalized_norm}");
+
+        // Same direction, different magnitude: normalized == raw / raw_norm.
+        for (n, r) in normalized.iter().zip(&raw) {
+            assert!((n - r / raw_norm).abs() < 1e-5, "normalized value should be raw/||raw||");
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

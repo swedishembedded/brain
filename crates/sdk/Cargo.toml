@@ -71,7 +71,7 @@ creature = ["device", "dep:brain-fly", "dep:brain-connectome", "dep:brain-flybod
 # path wins whenever the string names a real file on disk, so this never
 # guesses between the two. Selects `resolve` now that `Qwen3Spec` exists to
 # resolve a hub id against.
-text = ["resolve", "dep:brain-qwen3", "dep:brain-data", "dep:brain-checkpoint", "dep:serde_json"]
+text = ["resolve", "dep:brain-qwen3", "dep:brain-lfm2", "dep:brain-data", "dep:brain-checkpoint", "dep:serde_json"]
 # `brain::EmbeddingPipeline` (CLIP text embedding), `brain::
 # DetectionPipeline` (YOLOv8 object detection) and `brain::SegmentPipeline`
 # (SAM 2.1 promptable segmentation) - three public types under one feature.
@@ -197,6 +197,7 @@ brain-forecast = { workspace = true, optional = true }
 brain-gpu-core = { workspace = true, optional = true }
 brain-imaging = { workspace = true, optional = true }
 brain-kronos = { workspace = true, optional = true }
+brain-lfm2 = { workspace = true, optional = true }
 brain-loader = { workspace = true, optional = true }
 brain-minimaxmusic3 = { workspace = true, optional = true }
 brain-model = { workspace = true, optional = true }
