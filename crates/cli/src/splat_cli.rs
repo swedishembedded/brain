@@ -38,8 +38,9 @@ pub fn run_splat(argv: &[String]) {
         Some("fit") => fit_cmd(&argv[1..]),
         Some("orient") => orient_cmd(&argv[1..]),
         Some("merge") => merge_cmd(&argv[1..]),
+        Some("prune") => prune_cmd(&argv[1..]),
         other => {
-            eprintln!("usage: brain splat <info|render|view|fit|orient|merge> ...  (got {other:?})");
+            eprintln!("usage: brain splat <info|render|view|fit|orient|merge|prune> ...  (got {other:?})");
             std::process::exit(2);
         }
     }
@@ -474,6 +475,93 @@ fn orient_cmd(argv: &[String]) {
     println!("{path} -> {out} ({} gaussians, re-framed; cameras -> {cams_out})", oriented.len());
 }
 
+/// Fuse duplicate gaussians and drop the faint ones.
+///
+/// A pixel-aligned reconstruction emits one gaussian per source pixel per
+/// view, so a surface seen by twelve cameras is represented twelve times over.
+/// That is not detail, it is the same detail counted repeatedly, and it buys
+/// the optimizer enough freedom to memorise its training views.
+fn prune_cmd(argv: &[String]) {
+    let mut a = Args::new(argv);
+    let (path, s) = load(&mut a);
+    let mut voxel = a.f32_or("--voxel", 0.0);
+    // A voxel in world units means nothing without knowing how big the scene
+    // is. Two gaussians closer together than the finest detail any camera
+    // resolved cannot be told apart by any training view, so THAT is the
+    // distance to fuse at, and it is stated in pixels.
+    let voxel_px = a.f32_or("--voxel-pixels", if voxel > 0.0 { 0.0 } else { 2.0 });
+    let cams_path = a.take_str("--cameras");
+    let min_op = a.f32_or("--min-opacity", 0.0);
+    let max_points = a.usize_or("--max-gaussians", 0);
+    let out = crate::args::strip_out_name_prefix(&a.str_or("--out", "out/pruned.ply"), "scene").to_string();
+    a.finish();
+
+    let kept: Vec<usize> = (0..s.len()).filter(|&i| s.opacities[i] >= min_op).collect();
+    let mut t = Splats::default();
+    for i in kept {
+        t.means.extend_from_slice(&s.means[i * 3..i * 3 + 3]);
+        t.quats.extend_from_slice(&s.quats[i * 4..i * 4 + 4]);
+        t.scales.extend_from_slice(&s.scales[i * 3..i * 3 + 3]);
+        t.opacities.push(s.opacities[i]);
+        t.colors.extend_from_slice(&s.colors[i * 3..i * 3 + 3]);
+    }
+    let after_op = t.len();
+    if voxel_px > 0.0 {
+        let cams = read_cameras(&cams_path.clone().unwrap_or_else(|| {
+            eprintln!("prune: --voxel-pixels needs --cameras (it is the cameras that set the scale)");
+            std::process::exit(2);
+        }));
+        let mut sig: Vec<f32> =
+            splat::mip::smoothing_sigma(&t, &cams, voxel_px).into_iter().filter(|&v| v > 0.0).collect();
+        if sig.is_empty() {
+            eprintln!("prune: no gaussian is visible from any of those cameras");
+            std::process::exit(2);
+        }
+        sig.sort_by(f32::total_cmp);
+        voxel = sig[sig.len() / 2];
+        println!("  {voxel_px} px at the median sampling rate is {voxel:.5} in world units");
+    }
+    if voxel > 0.0 {
+        let w = t.opacities.clone();
+        t = splat::prune::voxel_merge(&t, &w, voxel, max_points);
+    }
+    splat::ply::write(&out, &t).unwrap_or_else(|e| {
+        eprintln!("PLY write failed: {e}");
+        std::process::exit(1);
+    });
+    println!(
+        "{path} -> {out}: {} -> {after_op} (opacity) -> {} gaussians",
+        s.len(),
+        t.len()
+    );
+}
+
+fn read_cameras(path: &str) -> Vec<Camera> {
+    let j: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap_or_else(|e| {
+            eprintln!("cannot read {path}: {e}");
+            std::process::exit(1);
+        }))
+        .expect("valid cameras.json");
+    j.as_array()
+        .expect("array")
+        .iter()
+        .map(|c| {
+            let m: Vec<f32> =
+                c["c2w"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap() as f32).collect();
+            Camera {
+                c2w: m.try_into().expect("16 c2w entries"),
+                fx: c["fx"].as_f64().unwrap() as f32,
+                fy: c["fy"].as_f64().unwrap() as f32,
+                cx: c["cx"].as_f64().unwrap() as f32,
+                cy: c["cy"].as_f64().unwrap() as f32,
+                width: c["width"].as_u64().unwrap() as u32,
+                height: c["height"].as_u64().unwrap() as u32,
+            }
+        })
+        .collect()
+}
+
 fn read_cams(path: &str) -> Vec<[f64; 16]> {
     let text = std::fs::read_to_string(path).unwrap_or_else(|e| {
         eprintln!("cannot read {path}: {e}");
@@ -618,25 +706,7 @@ fn fit_cmd(argv: &[String]) {
     let max_gaussians = a.usize_or("--max-gaussians", 0);
     a.finish();
 
-    let cams_json: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&cams_path).unwrap_or_else(|e| {
-            eprintln!("cannot read {cams_path}: {e}");
-            std::process::exit(1);
-        }))
-        .expect("valid cameras.json");
-    let mut cams = Vec::new();
-    for c in cams_json.as_array().expect("array") {
-        let m: Vec<f32> = c["c2w"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap() as f32).collect();
-        cams.push(Camera {
-            c2w: m.try_into().expect("16 c2w entries"),
-            fx: c["fx"].as_f64().unwrap() as f32,
-            fy: c["fy"].as_f64().unwrap() as f32,
-            cx: c["cx"].as_f64().unwrap() as f32,
-            cy: c["cy"].as_f64().unwrap() as f32,
-            width: c["width"].as_u64().unwrap() as u32,
-            height: c["height"].as_u64().unwrap() as u32,
-        });
-    }
+    let cams = read_cameras(&cams_path);
     // The SAME collection `worldmirror2 infer` uses. These were separate
     // copies, and only one of them learned to read a JPEG - so a scene
     // reconstructed straight from a folder of photographs could not then be
