@@ -251,7 +251,15 @@ pub fn options(state: &State) -> Vec<Option_> {
     }
 
     // --- take something ---------------------------------------------------
-    if let Some(p) = state.pickups.iter().find(|p| p.visible && p.distance < 700) {
+    // The nearest one WORTH taking, not simply the nearest. An item the
+    // engine will refuse to hand over never leaves the floor, so an option
+    // chosen because it is there stays choosable for ever - see
+    // `State::worth_taking`.
+    if let Some(p) = state
+        .pickups
+        .iter()
+        .find(|p| p.visible && p.distance < 700 && state.worth_taking(p))
+    {
         // FACE FIRST, THEN WALK - the same split the exit option makes, and
         // for the same reason. Turning while walking walks the ARC of the
         // turn, so a pickup 100 degrees off the nose is approached along a
@@ -1119,10 +1127,13 @@ mod approach_tests {
     use super::tests::state;
     use super::*;
 
-    fn stimpak_at(bearing: i32) -> State {
+    /// An ammo clip rather than a stimpak: this is about the GEOMETRY of the
+    /// approach, and a stimpak at full health is refused by the engine and so
+    /// is correctly never offered.
+    fn pickup_at(bearing: i32) -> State {
         state(&format!(
             r#""threats":[],"hazards":[],
-            "pickups":[{{"id":7,"type":"Stimpak","distance":104,"bearing":{bearing},"visible":true}}],
+            "pickups":[{{"id":7,"type":"Ammo clip","distance":104,"bearing":{bearing},"visible":true}}],
             "clearance":{{"ahead":182,"right":79,"behind":145,"left":205,"aheadRight":90,"aheadLeft":90}}"#
         ))
     }
@@ -1134,7 +1145,7 @@ mod approach_tests {
     /// stayed within 60 units of its spawn for eight hundred decisions.
     #[test]
     fn a_pickup_off_to_the_side_is_turned_toward_before_it_is_walked_to() {
-        let opts = options(&stimpak_at(108));
+        let opts = options(&pickup_at(108));
         let grab = opts.iter().find(|o| o.tag == Tag::Grab).expect("a way to it");
         assert!(grab.commands.contains("turn-to"), "{}", grab.commands);
         assert!(!grab.commands.contains("forward"), "turned and walked at once: {}", grab.commands);
@@ -1144,9 +1155,61 @@ mod approach_tests {
     /// And once it is ahead, walking is the whole act - no turn, so no arc.
     #[test]
     fn a_pickup_already_ahead_is_walked_to() {
-        let opts = options(&stimpak_at(2));
+        let opts = options(&pickup_at(2));
         let grab = opts.iter().find(|o| o.tag == Tag::Grab).expect("a way to it");
         assert!(grab.commands.contains("forward"), "{}", grab.commands);
         assert!(!grab.commands.contains("turn-to"), "{}", grab.commands);
+    }
+}
+
+#[cfg(test)]
+mod saturated_tests {
+    use super::tests::state;
+    use super::*;
+
+    fn a_stimpak_and_a_clip(health: i32) -> State {
+        let mut s = state(
+            r#""threats":[],"hazards":[],
+            "pickups":[{"id":7,"type":"Stimpak","distance":112,"bearing":0,"visible":true},
+                       {"id":8,"type":"Ammo clip","distance":160,"bearing":0,"visible":true}],
+            "clearance":{"ahead":182,"right":79,"behind":145,"left":205,"aheadRight":90,"aheadLeft":90}"#,
+        );
+        s.player.health = health;
+        s
+    }
+
+    /// The one that held two of the nine levels for their whole episode.
+    ///
+    /// DOOM refuses a stimpak at full health and leaves it lying there, so an
+    /// option chosen because the item is present stays choosable for ever:
+    /// the player paces over it until the decisions run out. Twelve hundred
+    /// decisions, no kills, full health, inside 80 units of one item.
+    #[test]
+    fn an_item_the_engine_will_refuse_is_not_offered() {
+        let opts = options(&a_stimpak_and_a_clip(100));
+        let grab = opts.iter().find(|o| o.tag == Tag::Grab).expect("something to take");
+        assert!(
+            grab.text.contains("ammo clip"),
+            "went for a stimpak at full health: {}",
+            grab.text
+        );
+    }
+
+    /// And it IS offered the moment it would do something.
+    #[test]
+    fn the_same_item_is_offered_once_it_would_heal() {
+        let opts = options(&a_stimpak_and_a_clip(99));
+        let grab = opts.iter().find(|o| o.tag == Tag::Grab).expect("something to take");
+        assert!(grab.text.contains("stimpak"), "{}", grab.text);
+    }
+
+    /// A potion goes past 100, so full health is no reason to leave one.
+    #[test]
+    fn a_pickup_that_exceeds_full_health_is_still_worth_taking() {
+        let mut s = a_stimpak_and_a_clip(100);
+        s.pickups[0].kind = "Health Potion".into();
+        let opts = options(&s);
+        let grab = opts.iter().find(|o| o.tag == Tag::Grab).expect("something to take");
+        assert!(grab.text.contains("health potion"), "{}", grab.text);
     }
 }

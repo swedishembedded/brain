@@ -160,6 +160,9 @@ pub struct Player {
 // load-bearing precisely by existing. Rust's dead-code lint cannot see that,
 // which is what the allow is for.
 #[allow(dead_code)]
+/// What `P_GiveBody` will not go past, from the engine's own `MAXHEALTH`.
+pub const MAX_HEALTH: i32 = 100;
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Thing {
@@ -393,6 +396,33 @@ impl State {
 
     /// Threats worth reacting to: in line of sight, nearest first. Something
     /// behind a wall cannot be shot and does not belong in a decision.
+    /// Whether walking onto this thing would actually do anything.
+    ///
+    /// DOOM does not pick up what it cannot give you. `P_TouchSpecialThing`
+    /// returns WITHOUT removing the thing when the effect would be wasted -
+    /// `P_GiveBody` refuses at full health, and a stimpak on the floor at 100
+    /// health stays on the floor however many times you walk over it.
+    ///
+    /// That matters far more than it sounds. Anything that picks the nearest
+    /// item and heads for it will head for that one forever: the item never
+    /// goes away, so the reason for choosing it never goes away either, and
+    /// the player paces over it until the episode ends. Measured, this is
+    /// exactly what held the scripted player on two of the nine levels - 1200
+    /// decisions, no kills, full health, inside 80 units of one medikit.
+    ///
+    /// Health is the case that bites, because full health is the normal state
+    /// of a player who has not been hit yet. The same rule governs ammunition
+    /// at capacity and armour you already beat; those need the carried
+    /// amounts to decide and are not answered here.
+    pub fn worth_taking(&self, thing: &Thing) -> bool {
+        match thing.kind.to_lowercase().as_str() {
+            // The two that heal, and the only two `P_GiveBody` refuses. The
+            // potion and the soulsphere go past 100 and are always worth it.
+            "stimpak" | "medikit" => self.player.health < MAX_HEALTH,
+            _ => true,
+        }
+    }
+
     pub fn visible_threats(&self) -> impl Iterator<Item = &Thing> {
         self.threats.iter().filter(|t| t.visible)
     }
