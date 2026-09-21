@@ -47,6 +47,7 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("splat_project_bwd", kernels::SPLAT_PROJECT_BWD),
     ("splat_unpack", kernels::SPLAT_UNPACK),
     ("splat_sh", kernels::SPLAT_SH),
+    ("splat_pose_grad", kernels::SPLAT_POSE_GRAD),
     ("adamw", kernels::ADAMW),
 ];
 
@@ -72,6 +73,7 @@ pub struct Kernels {
     pub splat_project_bwd: usize,
     pub splat_unpack: usize,
     pub splat_sh: usize,
+    pub splat_pose_grad: usize,
     pub adamw: usize,
 }
 
@@ -98,7 +100,8 @@ impl Kernels {
             splat_project_bwd: base + 15,
             splat_unpack: base + 16,
             splat_sh: base + 17,
-            adamw: base + 18,
+            splat_pose_grad: base + 18,
+            adamw: base + 19,
         }
     }
 }

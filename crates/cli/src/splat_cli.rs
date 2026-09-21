@@ -20,7 +20,7 @@
 //! Esc quit. With no --eye, the camera is auto-framed from the scene bounds.
 
 use gpu_core::Gpu;
-use splat::opt::{fit as splat_fit, FitCfg, TargetView};
+use splat::opt::{FitCfg, TargetView};
 use splat::renderer::{rgba_to_rgb, sorted_by_depth, GpuSplats, Renderer};
 use splat::types::{auto_camera, cross3, norm3, Camera, Mode, RenderOpts, Splats};
 use splat::Kernels;
@@ -496,10 +496,25 @@ fn prune_cmd(argv: &[String]) {
     // rendering it through one that compensates energy dims the whole scene.
     let a_recal = a.take_flag("--recalibrate-opacity");
     let max_points = a.usize_or("--max-gaussians", 0);
+    // Multiply every opacity, for asking what a scene would look like if its
+    // gaussians were as confident as they should be.
+    let gain = a.f32_or("--opacity-gain", 1.0);
+    // A contiguous slice, for asking what ONE frame's gaussians look like when
+    // nothing else in the scene is there to cover for them.
+    let range = a.take_str("--range");
     let out = crate::args::strip_out_name_prefix(&a.str_or("--out", "out/pruned.ply"), "scene").to_string();
     a.finish();
 
-    let kept: Vec<usize> = (0..s.len()).filter(|&i| s.opacities[i] >= min_op).collect();
+    let (lo, hi) = match &range {
+        Some(r) => {
+            let (a0, b0) = r.split_once(':').expect("--range START:COUNT");
+            let st: usize = a0.parse().expect("range start");
+            let ct: usize = b0.parse().expect("range count");
+            (st.min(s.len()), (st + ct).min(s.len()))
+        }
+        None => (0, s.len()),
+    };
+    let kept: Vec<usize> = (lo..hi).filter(|&i| s.opacities[i] >= min_op).collect();
     let mut t = Splats::default();
     for i in kept {
         t.means.extend_from_slice(&s.means[i * 3..i * 3 + 3]);
@@ -510,6 +525,11 @@ fn prune_cmd(argv: &[String]) {
     }
     if let (true, Some(cp)) = (a_recal, cams_path.as_ref()) {
         t = splat::mip::recalibrate_opacity(&t, &read_cameras(cp), splat::types::RenderOpts::default().eps2d);
+    }
+    if gain != 1.0 {
+        for v in t.opacities.iter_mut() {
+            *v = (*v * gain).clamp(1e-4, 1.0 - 1e-4);
+        }
     }
     let after_op = t.len();
     if voxel_px > 0.0 {
@@ -703,6 +723,11 @@ fn fit_cmd(argv: &[String]) {
     // view away without moving geometry, which cuts both ways when the views
     // are few, so it is a dial rather than a default.
     let sh_degree = a.u32_or("--sh-degree", FitCfg::default().sh_degree);
+    // Refine the cameras alongside the scene. A pipeline that predicts its own
+    // poses hands this step cameras that are wrong, and a pose error is a
+    // position error for every pixel of that frame.
+    let pose_lr = a.f32_or("--pose-lr", FitCfg::default().pose_lr);
+    let cams_out = a.take_str("--cameras-out");
     // Density control: let the fit ADD gaussians where the loss is still
     // pulling. Off unless asked, because a feed-forward scene is already
     // dense and growing it can push the backward past the device's
@@ -773,9 +798,31 @@ fn fit_cmd(argv: &[String]) {
         densify_frac,
         max_gaussians,
         sh_degree,
+        pose_lr,
         ..Default::default()
     };
-    let (fitted, mse) = splat_fit(&g, ks, &s, &targets, &cfg, &mut |_it, _mse| true);
+    let (fitted, refined, mse) =
+        splat::opt::fit_bundle(&g, ks, &s, &targets, &cfg, &mut |_it, _mse| true);
+    if pose_lr > 0.0 {
+        // The refined poses ARE part of the result: a scene fitted against
+        // moved cameras only means anything when read back with those cameras.
+        let path = cams_out.clone().unwrap_or_else(|| format!("{out}.cameras.json"));
+        let js: Vec<serde_json::Value> = refined
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "c2w": c.c2w.iter().map(|v| *v as f64).collect::<Vec<f64>>(),
+                    "fx": c.fx, "fy": c.fy, "cx": c.cx, "cy": c.cy,
+                    "width": c.width, "height": c.height,
+                })
+            })
+            .collect();
+        std::fs::write(&path, serde_json::to_string_pretty(&js).unwrap()).unwrap_or_else(|e| {
+            eprintln!("cannot write {path}: {e}");
+            std::process::exit(1);
+        });
+        println!("refined cameras -> {path}");
+    }
     let grown = fitted.len();
     splat::ply::write(&out, &fitted).unwrap_or_else(|e| {
         eprintln!("PLY write failed: {e}");

@@ -95,6 +95,15 @@ pub struct FitCfg {
     /// geometry - which is why glossy objects come back as smears of
     /// duplicated surfaces at slightly different depths.
     pub sh_degree: u32,
+    /// Step size for refining the CAMERAS, in radians and world units per
+    /// iteration. 0 freezes them, which is what `fit` does.
+    ///
+    /// A pipeline that predicts its own poses hands the optimizer cameras that
+    /// are wrong, and gaussian positions are depth unprojected through a
+    /// camera - so a pose error is a position error for every pixel of that
+    /// frame, and no amount of moving gaussians reconciles two frames that
+    /// disagree about where they were taken from.
+    pub pose_lr: f32,
 }
 
 impl Default for FitCfg {
@@ -115,6 +124,7 @@ impl Default for FitCfg {
             mip_scale: crate::mip::DEFAULT_SCALE,
             explore_frac: 0.05,
             sh_degree: 0,
+            pose_lr: 0.0,
         }
     }
 }
@@ -133,18 +143,37 @@ pub struct TargetView {
 /// end of whichever iteration just ran. `crates/cli/src/splat_cli.rs::fit_cmd`
 /// passes a closure that only prints and always returns `true`;
 /// `splat::caps::fit` polls the invocation's cancel token from its own.
+/// Fit the scene AND the cameras, returning the refined poses.
+pub fn fit_bundle(
+    gpu: &Gpu,
+    ks: Kernels,
+    init: &Splats,
+    targets: &[TargetView],
+    cfg: &FitCfg,
+    on_step: &mut dyn FnMut(usize, f32) -> bool,
+) -> (Splats, Vec<Camera>, f32) {
+    fit_inner(gpu, ks, init, targets, cfg, on_step)
+}
+
 pub fn fit(gpu: &Gpu, ks: Kernels, init: &Splats, targets: &[TargetView], cfg: &FitCfg, on_step: &mut dyn FnMut(usize, f32) -> bool) -> (Splats, f32) {
+    let (s, _, l) = fit_inner(gpu, ks, init, targets, cfg, on_step);
+    (s, l)
+}
+
+fn fit_inner(gpu: &Gpu, ks: Kernels, init: &Splats, targets: &[TargetView], cfg: &FitCfg, on_step: &mut dyn FnMut(usize, f32) -> bool) -> (Splats, Vec<Camera>, f32) {
     assert!(!targets.is_empty());
     // With density control off there is exactly ONE stage, and this is the
     // function it always was - same buffers, same Adam state, start to finish.
     let stage_len = if cfg.densify_every == 0 { cfg.iters } else { cfg.densify_every };
     let mut scene = init.clone();
+    let mut cams: Vec<Camera> = targets.iter().map(|t| t.cam).collect();
     let mut loss = 0.0f32;
     let mut done = 0usize;
     let mut stop = false;
     while done < cfg.iters && !stop {
         let iters = stage_len.min(cfg.iters - done);
-        let (next, l, grad, aborted) = fit_stage(gpu, ks, &scene, targets, cfg, iters, done, on_step);
+        let (next, l, grad, aborted) =
+            fit_stage(gpu, ks, &scene, targets, &mut cams, cfg, iters, done, on_step);
         scene = next;
         loss = l;
         done += iters;
@@ -169,7 +198,7 @@ pub fn fit(gpu: &Gpu, ks: Kernels, init: &Splats, targets: &[TargetView], cfg: &
             }
         }
     }
-    (scene, loss)
+    (scene, cams, loss)
 }
 
 /// Grow the scene where the loss is still pulling hardest, and drop what has
@@ -336,6 +365,7 @@ fn fit_stage(
     ks: Kernels,
     init: &Splats,
     targets: &[TargetView],
+    cams: &mut [Camera],
     cfg: &FitCfg,
     iters: usize,
     it0: usize,
@@ -345,6 +375,13 @@ fn fit_stage(
     let (maxw, maxh) = targets
         .iter()
         .fold((0u32, 0u32), |(mw, mh), t| (mw.max(t.cam.width), mh.max(t.cam.height)));
+    // Pose refinement state: six numbers per camera with their own Adam
+    // moments, so `pose_lr` means the same thing whatever the scene's scale
+    // and however many gaussians happen to be pulling on it.
+    const POSE_SLOTS: usize = 4096;
+    let pose_buf = gpu.storage(6 * POSE_SLOTS as u64);
+    let mut pose_m = vec![[0.0f64; 6]; targets.len()];
+    let mut pose_v = vec![[0.0f64; 6]; targets.len()];
     let max_px = (maxw * maxh) as usize;
 
     // ---- parameter buffers ----
@@ -398,9 +435,8 @@ fn fit_stage(
     // The per-gaussian scale floor, from where the cameras actually were.
     // Computed once from the starting geometry: a fit moves means by far less
     // than it would take to change which view sampled a point most densely.
-    let cams: Vec<Camera> = targets.iter().map(|t| t.cam).collect();
     let floor: Vec<f32> = if cfg.mip_scale > 0.0 {
-        crate::mip::smoothing_sigma(init, &cams, cfg.mip_scale)
+        crate::mip::smoothing_sigma(init, cams, cfg.mip_scale)
             .into_iter()
             .map(|v| v.max(cfg.min_scale))
             .collect()
@@ -468,8 +504,15 @@ fn fit_stage(
         );
         prof.add("zero grads", t0.elapsed());
         let mut loss_sum = 0.0f64;
-        for t in targets {
-            let px = (t.cam.width * t.cam.height) as usize;
+        // Running totals of the pose reduction. It is LINEAR in the gaussian
+        // gradients, and those accumulate across views, so differencing the
+        // running total gives each view's own contribution exactly - no extra
+        // buffer and no per-view zeroing.
+        let mut pose_running = [0.0f64; 6];
+        let mut pose_grads: Vec<[f64; 6]> = vec![[0.0; 6]; targets.len()];
+        for (vi, t) in targets.iter().enumerate() {
+            let cam = cams[vi];
+            let px = (cam.width * cam.height) as usize;
             // unpack params for the forward
             let tm = std::time::Instant::now();
             let unpack = gpu.step(
@@ -480,7 +523,7 @@ fn fit_stage(
             );
             gpu.submit(&[], &[unpack]);
             prof.add("unpack params", tm.elapsed());
-            let eye = [t.cam.c2w[3], t.cam.c2w[7], t.cam.c2w[11]];
+            let eye = [cam.c2w[3], cam.c2w[7], cam.c2w[11]];
             let sh_params =
                 [n as u32, ksh as u32, 0, 0, f(eye[0]), f(eye[1]), f(eye[2]), 0];
             if ksh > 0 {
@@ -501,11 +544,11 @@ fn fit_stage(
                 colors: if ksh > 0 { col_view.clone() } else { p_col.clone() },
             };
             let tm = std::time::Instant::now();
-            renderer.render(gpu, &gs, &t.cam, &opts);
+            renderer.render(gpu, &gs, &cam, &opts);
             prof.add("render forward", tm.elapsed());
             // host loss: MSE over rgb; alpha unsupervised
             let tm = std::time::Instant::now();
-            let img = renderer.read_rgba(gpu, t.cam.width, t.cam.height);
+            let img = renderer.read_rgba(gpu, cam.width, cam.height);
             prof.add("read image back", tm.elapsed());
             let tm = std::time::Instant::now();
             let mut d = vec![0.0f32; px * 4];
@@ -525,9 +568,31 @@ fn fit_stage(
             prof.add("upload dL/dimg", tm.elapsed());
             let tm = std::time::Instant::now();
             renderer
-                .render_bwd(gpu, &gs, &t.cam, &opts, &dimg, &mut bscr, &grads)
+                .render_bwd(gpu, &gs, &cam, &opts, &dimg, &mut bscr, &grads)
                 .unwrap_or_else(|e| panic!("{e}"));
             prof.add("render backward", tm.elapsed());
+            if cfg.pose_lr > 0.0 {
+                let tm = std::time::Instant::now();
+                let step = gpu.step(
+                    ks.splat_pose_grad,
+                    &[&means, &quats, &grads.d_gauss, &pose_buf],
+                    &[n as u32, POSE_SLOTS as u32, 0, 0, f(eye[0]), f(eye[1]), f(eye[2]), 0],
+                    POSE_SLOTS as u32,
+                );
+                gpu.submit(&[], &[step]);
+                let part = gpu.read(&pose_buf, 6 * POSE_SLOTS);
+                let mut total = [0.0f64; 6];
+                for c in part.chunks_exact(6) {
+                    for k in 0..6 {
+                        total[k] += c[k] as f64;
+                    }
+                }
+                for k in 0..6 {
+                    pose_grads[vi][k] = total[k] - pose_running[k];
+                    pose_running[k] = total[k];
+                }
+                prof.add("pose gradient", tm.elapsed());
+            }
             if ksh > 0 {
                 // The rasterizer wrote d/d(colour shown from HERE); split it
                 // between the base and the direction-dependent part while the
@@ -564,6 +629,36 @@ fn fit_stage(
             adamw_step([&p_col, &grads.d_colors, &m_col, &v_col], &desc_col, 3 * n);
         }
         prof.add("adamw", tm.elapsed());
+
+        if cfg.pose_lr > 0.0 {
+            let ts = it as i32 + 1;
+            let (b1, b2) = (0.9f64, 0.999f64);
+            let (bc1, bc2) = (1.0 - b1.powi(ts), 1.0 - b2.powi(ts));
+            for vi in 0..cams.len() {
+                // The reduction measured a SCENE motion about the camera
+                // centre; the camera moves the opposite way, and in its own
+                // frame, which is what keeps rotation and translation from
+                // trading against each other.
+                let r = rot3(&cams[vi].c2w);
+                let du = rt_mul(&r, &pose_grads[vi][3..6]);
+                let dv = rt_mul(&r, &pose_grads[vi][0..3]);
+                let g = [-du[0], -du[1], -du[2], -dv[0], -dv[1], -dv[2]];
+                let mut om = [0.0f64; 3];
+                let mut ta = [0.0f64; 3];
+                for k in 0..6 {
+                    pose_m[vi][k] = b1 * pose_m[vi][k] + (1.0 - b1) * g[k];
+                    pose_v[vi][k] = b2 * pose_v[vi][k] + (1.0 - b2) * g[k] * g[k];
+                    let step = -(cfg.pose_lr as f64) * (pose_m[vi][k] / bc1)
+                        / ((pose_v[vi][k] / bc2).sqrt() + 1e-12);
+                    if k < 3 {
+                        om[k] = step;
+                    } else {
+                        ta[k - 3] = step;
+                    }
+                }
+                cams[vi].c2w = compose_local(&cams[vi].c2w, &om, &ta);
+            }
+        }
         // projected-gradient clamps (host; N is fit-sized)
         let tm = std::time::Instant::now();
         let mut geo = gpu.read(&p_geo, 10 * n);
@@ -638,6 +733,50 @@ fn fit_stage(
         out.colors.extend_from_slice(&col[i * 3..i * 3 + 3]);
     }
     (out, last_loss, gsum, aborted)
+}
+
+/// Row-major 3x3 rotation block of a row-major 4x4.
+fn rot3(m: &[f32; 16]) -> [f64; 9] {
+    std::array::from_fn(|i| m[(i / 3) * 4 + i % 3] as f64)
+}
+
+/// `R^T v`, which takes a world-frame vector into the camera's own frame.
+fn rt_mul(r: &[f64; 9], v: &[f64]) -> [f64; 3] {
+    std::array::from_fn(|i| (0..3).map(|k| r[k * 3 + i] * v[k]).sum())
+}
+
+/// `c2w * [exp(omega^) | tau]`: move the camera in its OWN frame.
+fn compose_local(c2w: &[f32; 16], omega: &[f64; 3], tau: &[f64; 3]) -> [f32; 16] {
+    let th = (omega[0] * omega[0] + omega[1] * omega[1] + omega[2] * omega[2]).sqrt();
+    // Rodrigues, with the small-angle limit taken where the series is better
+    // conditioned than the closed form.
+    let (a, b) = if th < 1e-8 {
+        (1.0, 0.5)
+    } else {
+        (th.sin() / th, (1.0 - th.cos()) / (th * th))
+    };
+    let k = [
+        [0.0, -omega[2], omega[1]],
+        [omega[2], 0.0, -omega[0]],
+        [-omega[1], omega[0], 0.0],
+    ];
+    let mut d = [[0.0f64; 3]; 3];
+    for i in 0..3 {
+        for j in 0..3 {
+            let kk: f64 = (0..3).map(|t| k[i][t] * k[t][j]).sum();
+            d[i][j] = if i == j { 1.0 } else { 0.0 } + a * k[i][j] + b * kk;
+        }
+    }
+    let r = rot3(c2w);
+    let mut out = *c2w;
+    for i in 0..3 {
+        for j in 0..3 {
+            out[i * 4 + j] = (0..3).map(|t| r[i * 3 + t] * d[t][j]).sum::<f64>() as f32;
+        }
+        out[i * 4 + 3] =
+            (c2w[i * 4 + 3] as f64 + (0..3).map(|t| r[i * 3 + t] * tau[t]).sum::<f64>()) as f32;
+    }
+    out
 }
 
 fn cast(v: &[f32]) -> &[u32] {

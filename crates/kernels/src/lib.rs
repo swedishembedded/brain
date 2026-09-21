@@ -965,6 +965,7 @@ pub const SPLAT_EMIT: &str = include_str!("../wgsl/splat_emit.wgsl");
 /// `wgsl/splat_grad_reduce.wgsl`
 pub const SPLAT_GRAD_REDUCE: &str = include_str!("../wgsl/splat_grad_reduce.wgsl");
 pub const SPLAT_SH: &str = include_str!("../wgsl/splat_sh.wgsl");
+pub const SPLAT_POSE_GRAD: &str = include_str!("../wgsl/splat_pose_grad.wgsl");
 /// `wgsl/splat_naive.wgsl`
 pub const SPLAT_NAIVE: &str = include_str!("../wgsl/splat_naive.wgsl");
 /// `wgsl/splat_pack_rgba8.wgsl`
@@ -1488,6 +1489,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("splat_emit", SPLAT_EMIT),
     ("splat_grad_reduce", SPLAT_GRAD_REDUCE),
     ("splat_sh", SPLAT_SH),
+    ("splat_pose_grad", SPLAT_POSE_GRAD),
     ("splat_naive", SPLAT_NAIVE),
     ("splat_pack_rgba8", SPLAT_PACK_RGBA8),
     ("splat_project", SPLAT_PROJECT),
