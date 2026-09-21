@@ -48,6 +48,13 @@ fn main() {
         r.render(&g, &gs, &cam, &o);
         let rgba = r.read_rgba(&g, cam.width, cam.height);
         let got: Vec<f32> = rgba.chunks_exact(4).flat_map(|q| [q[0], q[1], q[2]]).collect();
+        if let Ok(d) = std::env::var("EXACT_EVAL_DUMP") {
+            let px: Vec<u8> = got.iter().map(|v| (v.clamp(0.0, 1.0) * 255.0) as u8).collect();
+            let mut f = std::fs::File::create(format!("{d}/render_{i:02}.ppm")).unwrap();
+            use std::io::Write;
+            write!(f, "P6\n{} {}\n255\n", cam.width, cam.height).unwrap();
+            f.write_all(&px).unwrap();
+        }
         let (db, sh) = (psnr(&got, &want), sharpness_ratio(&got, &want, cam.width as usize, cam.height as usize));
         println!("  view {i}: PSNR {db:6.2} dB   sharpness {sh:.3}");
         ps.push(db); ss.push(sh);
