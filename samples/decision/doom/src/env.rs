@@ -1465,6 +1465,40 @@ impl DoomEnv {
             return Some(i);
         }
 
+        // Something to fight and a better gun in the pack: draw it first.
+        //
+        // The pack is no use. Nothing here ever changed weapon, so the
+        // scripted player fought the whole campaign with the pistol it starts
+        // the first level holding, however many shotguns it walked over. On
+        // E1M3 that is five monsters at once eighty-five units from the spawn
+        // and a loaded shotgun it never selected.
+        //
+        // Worth it even with something close, and worth it especially when
+        // hurt. The swap costs about half a second with nothing in hand,
+        // once, and the gun it puts there is worth several times the one it
+        // takes away for the rest of the episode.
+        //
+        // ABOVE the branch that backs away while hurt, which is why this
+        // failed to help the first time it was tried. On E1M3 the shotgun is
+        // picked up during the opening fight, by which point health is under
+        // forty and that branch returns first - so the check ran only while
+        // there was nothing better to draw, and stopped running the moment
+        // there was. Being hurt is when the better gun matters most.
+        if threat_near {
+            if let Some(better) = self.state.better_weapon() {
+                let want = format!("draw the {}", better.name);
+                if let Some(i) = self
+                    .opts
+                    .iter()
+                    .position(|o| o.tag == Tag::Arm && o.text == want)
+                {
+                    if !(stuck >= STUCK_TRY_SOMETHING_ELSE && tried.contains(&Tag::Arm)) {
+                        return Some(i);
+                    }
+                }
+            }
+        }
+
         // STAYING ALIVE COMES FIRST, whatever the orders say.
         //
         // Without this the scripted player stands in the open trading shots

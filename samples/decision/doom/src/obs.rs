@@ -196,6 +196,28 @@ impl Weapon {
     pub fn loaded(&self) -> bool {
         self.ammo != 0
     }
+
+    /// How much this is worth having in hand against something in front of
+    /// you. Higher is better.
+    ///
+    /// The ordinary DOOM preference, and the reason it is not just damage per
+    /// second: the rocket launcher sits below the shotgun because most
+    /// fighting happens inside its blast radius, and the chainsaw sits above
+    /// the fist because it is a fist that keeps going. What matters for the
+    /// scripted player is only that the ORDER is sane; a policy is free to
+    /// disagree, and the whole list is offered to it either way.
+    pub fn worth(&self) -> u8 {
+        match self.name.to_lowercase().as_str() {
+            "bfg9000" | "bfg" => 7,
+            "plasma rifle" | "plasma gun" => 6,
+            "chaingun" => 5,
+            "shotgun" | "super shotgun" => 4,
+            "rocket launcher" => 3,
+            "pistol" => 2,
+            "chainsaw" => 1,
+            _ => 0,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]
@@ -414,6 +436,28 @@ impl State {
     /// of a player who has not been hit yet. The same rule governs ammunition
     /// at capacity and armour you already beat; those need the carried
     /// amounts to decide and are not answered here.
+    /// The best thing the player is carrying that can be fired right now.
+    ///
+    /// `None` when what is already in hand is as good as it gets. A better
+    /// gun in the pack is no use in the pack, and nothing was drawing it:
+    /// measured on E1M3, the scripted player met five monsters eighty-five
+    /// units from its spawn, shot at them with the pistol it started the
+    /// episode holding, and died at decision 36 with a loaded shotgun it had
+    /// picked up and never selected.
+    pub fn better_weapon(&self) -> Option<&Weapon> {
+        let in_hand = self
+            .player
+            .weapons
+            .iter()
+            .find(|w| Some(w.name.as_str()) == self.player.weapon.as_deref())
+            .map_or(0, |w| w.worth());
+        self.player
+            .weapons
+            .iter()
+            .filter(|w| w.loaded() && w.worth() > in_hand)
+            .max_by_key(|w| w.worth())
+    }
+
     pub fn worth_taking(&self, thing: &Thing) -> bool {
         self.worth_taking_kind(&thing.kind)
     }
@@ -1027,5 +1071,69 @@ mod threat_within_tests {
         let hidden = r#"{"id":9,"type":"IMP","distance":100,"bearing":0,
             "visible":false,"health":60,"targetingMe":true}"#;
         assert!(!with(hidden).threat_within(600));
+    }
+}
+
+#[cfg(test)]
+mod weapon_tests {
+    use super::State;
+
+    fn carrying(weapon: &str, weapons: &str) -> State {
+        State::parse(&format!(
+            r#"{{"tic":1,"episodeTic":1,"level":{{"episode":1,"map":1,"skill":2,"tic":1,
+            "kills":0,"totalKills":4,"items":0,"totalItems":3,"secrets":0,"totalSecrets":1}},
+            "player":{{"id":0,"health":100,"armor":0,"x":0,"y":0,"angle":90,
+            "weapon":"{weapon}","ammo":50,"weapons":[{weapons}],"keys":[]}},
+            "threats":[],"hazards":[],"pickups":[],
+            "clearance":{{"ahead":320,"right":0,"behind":0,"left":0,"aheadRight":0,"aheadLeft":0}},
+            "events":[],"done":false,"outcome":"alive"}}"#
+        ))
+        .expect("parses")
+    }
+
+    const FIST: &str = r#"{"name":"fist","slot":1,"ammo":-1}"#;
+    const PISTOL: &str = r#"{"name":"pistol","slot":2,"ammo":50}"#;
+    const SHOTGUN: &str = r#"{"name":"shotgun","slot":3,"ammo":8}"#;
+    const CHAINGUN: &str = r#"{"name":"chaingun","slot":4,"ammo":50}"#;
+
+    /// The one that killed the scripted player on E1M3: it met five monsters
+    /// eighty-five units from its spawn, shot at them with the pistol it
+    /// started the episode holding, and died at decision 36 carrying a loaded
+    /// shotgun it had picked up and never selected.
+    #[test]
+    fn a_better_gun_in_the_pack_is_found() {
+        let s = carrying("pistol", &format!("{FIST},{PISTOL},{SHOTGUN}"));
+        assert_eq!(s.better_weapon().map(|w| w.name.as_str()), Some("shotgun"));
+    }
+
+    /// The BEST of them, not merely a better one.
+    #[test]
+    fn the_best_of_several_is_the_one_chosen() {
+        let s = carrying("pistol", &format!("{FIST},{PISTOL},{SHOTGUN},{CHAINGUN}"));
+        assert_eq!(s.better_weapon().map(|w| w.name.as_str()), Some("chaingun"));
+    }
+
+    /// Already holding the best: nothing to do, and saying otherwise would
+    /// swap weapons for ever.
+    #[test]
+    fn holding_the_best_already_asks_for_no_swap() {
+        let s = carrying("shotgun", &format!("{FIST},{PISTOL},{SHOTGUN}"));
+        assert_eq!(s.better_weapon().map(|w| w.name.as_str()), None);
+    }
+
+    /// An empty gun is not an upgrade. Drawing it would be worse than useless.
+    #[test]
+    fn a_gun_with_no_ammunition_is_not_better() {
+        let empty = r#"{"name":"shotgun","slot":3,"ammo":0}"#;
+        let s = carrying("pistol", &format!("{FIST},{PISTOL},{empty}"));
+        assert_eq!(s.better_weapon().map(|w| w.name.as_str()), None);
+    }
+
+    /// The fist never needs ammunition and is never the answer while a gun
+    /// with rounds in it is being carried.
+    #[test]
+    fn the_fist_does_not_outrank_a_loaded_gun() {
+        let s = carrying("pistol", &format!("{FIST},{PISTOL}"));
+        assert_eq!(s.better_weapon().map(|w| w.name.as_str()), None);
     }
 }
