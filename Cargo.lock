@@ -411,6 +411,7 @@ dependencies = [
  "brain-gpu-core",
  "brain-imaging",
  "brain-kronos",
+ "brain-lfm2",
  "brain-loader",
  "brain-minimaxmusic3",
  "brain-model",
@@ -1517,6 +1518,7 @@ dependencies = [
  "brain-gpu-core",
  "brain-kernels",
  "brain-model",
+ "brain-modelstore",
  "brain-optim",
  "brain-paramstore",
  "brain-testutil",
@@ -2236,6 +2238,7 @@ version = "1.1.0"
 dependencies = [
  "brain-capability",
  "brain-gpu-core",
+ "brain-imaging",
  "brain-kernels",
  "bytemuck",
  "serde_json",
@@ -5567,6 +5570,7 @@ name = "sample-decision-doom"
 version = "1.1.0"
 dependencies = [
  "brain",
+ "libc",
  "serde",
  "serde_json",
 ]
@@ -5618,6 +5622,42 @@ name = "sample-study-document"
 version = "1.1.0"
 dependencies = [
  "brain",
+]
+
+[[package]]
+name = "sample-text-embed"
+version = "1.1.0"
+dependencies = [
+ "brain",
+]
+
+[[package]]
+name = "sample-text-embed-train"
+version = "1.1.0"
+dependencies = [
+ "brain",
+]
+
+[[package]]
+name = "sample-text-encoder-finetune"
+version = "1.1.0"
+dependencies = [
+ "brain",
+]
+
+[[package]]
+name = "sample-text-retrieve"
+version = "1.1.0"
+dependencies = [
+ "brain",
+]
+
+[[package]]
+name = "sample-text-retrieve-json"
+version = "1.1.0"
+dependencies = [
+ "brain",
+ "serde_json",
 ]
 
 [[package]]
