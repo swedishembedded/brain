@@ -145,6 +145,26 @@ build, so it loops one prefill per string instead - see
 truncates AND renormalizes by default, deliberately differing from the
 `/v1/embeddings` HTTP endpoint, which does not re-project after truncating.
 
+### Contrastive fine-tuning over frozen embeddings
+
+`brain::EmbeddingTrainer` (also `text`) trains a small linear refinement on
+top of embeddings a pipeline already produced - a symmetric (CLIP-style)
+InfoNCE objective over `(anchor, positive)` pairs, entirely on the host
+(the batch is a few dozen vectors, nowhere near where GPU dispatch pays for
+itself). It does NOT fine-tune the backbone itself - that needs a seeded
+backward pass the engine does not have yet - so cache the pipeline's
+embeddings once and train against the cache:
+
+```rust
+let anchors: Vec<brain::Embedding> = pipe.embed_batch(&queries)?;
+let positives: Vec<brain::Embedding> = pipe.embed_batch(&matching_passages)?;
+let mut trainer = brain::EmbeddingTrainer::new(anchors[0].dim(), 42);
+for _ in 0..steps {
+    let loss = trainer.step(&anchors, &positives, 0.05);
+}
+let refined = trainer.project(&pipe.embed("a new query")?);
+```
+
 ## Speech-to-text
 
 ```rust
@@ -169,7 +189,7 @@ Name the surfaces you use and you get their dependencies and nothing else:
 | `image` | `ImagePipeline`, `Image` - text-to-image and image editing |
 | `creature` | `Creature`, `View` - a connectome running a body, and a window onto it |
 | `forecast` | `ForecastPipeline` - time-series forecasting |
-| `text` | `TextGenerationPipeline` - text generation, from a local checkpoint path; also the Qwen3 backbone of `EmbeddingPipeline` (32768-token context) |
+| `text` | `TextGenerationPipeline` - text generation, from a local checkpoint path; also the Qwen3 backbone of `EmbeddingPipeline` (32768-token context) and `EmbeddingTrainer` (contrastive fine-tuning over frozen embeddings) |
 | `vision` | `EmbeddingPipeline` - CLIP text embedding (named for CLIP's registered domain, not the capability) |
 | `audio` | `TranscribePipeline` - speech-to-text (qwen3-asr, offline) |
 | `full` | every surface; this is the default |

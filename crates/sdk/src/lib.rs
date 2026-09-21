@@ -98,6 +98,8 @@ mod device;
 mod error;
 #[cfg(any(feature = "vision", feature = "text"))]
 mod embedding;
+#[cfg(feature = "text")]
+mod embed_train;
 #[cfg(feature = "forecast")]
 mod forecast;
 #[cfg(feature = "vision")]
@@ -198,6 +200,8 @@ pub use depth::{DepthMap, DepthOptions, DepthPipeline, DepthPipelineBuilder};
 pub use detect::{DetectOptions, Detection, DetectionPipeline, DetectionPipelineBuilder};
 #[cfg(any(feature = "vision", feature = "text"))]
 pub use embedding::{Embedding, EmbeddingOptions, EmbeddingPipeline, EmbeddingPipelineBuilder};
+#[cfg(feature = "text")]
+pub use embed_train::EmbeddingTrainer;
 #[cfg(feature = "forecast")]
 pub use forecast::{ForecastPipeline, ForecastPipelineBuilder};
 #[cfg(feature = "vision")]
