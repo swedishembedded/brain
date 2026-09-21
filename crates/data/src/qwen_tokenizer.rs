@@ -19,6 +19,58 @@
 //! [`QwenBpe::template_prefix`] - callers that want HF-equivalent single-sequence
 //! encodings prepend it; `encode()` itself stays template-free. `vocab_size()`
 //! reports the model vocab used to size the embedding table.
+//!
+//! **A second pre-tokenizer mode, for a bare `ByteLevel` pre-tokenizer with no
+//! explicit pattern** (`{"type": "ByteLevel", "use_regex": true}`, no nested
+//! `Sequence`/`Split` - the shape `answerdotai/ModernBERT-large` and
+//! `convaiinnovations/laya`'s own `tokenizer/tokenizer.json` ship, verified
+//! against the real file this session). Qwen/LFM2.5 always declare an
+//! explicit `Split{pattern: {Regex: ...}}` step (the cl100k-style pattern
+//! above); when a file has none at all, the real `tokenizers` library's own
+//! compiled-in default is the ORIGINAL GPT-2 regex instead:
+//!   's|'t|'re|'ve|'m|'ll|'d | ?\p{L}+ | ?\p{N}+ | ?[^\s\p{L}\p{N}]+ | \s+(?!\S) | \s+
+//! reproduced as [`pretokenize_gpt2_default`], a SEPARATE scanner from the
+//! cl100k one above (not a parameterization of it) - verified against the
+//! real `tokenizers` library's own `pre_tokenizer.pre_tokenize_str` (the raw
+//! pre-token boundaries, not just final BPE ids, which can hide a pretokenizer
+//! difference behind a coincidentally-equal merge) this session to differ on
+//! THREE axes, not the two originally suspected:
+//! 1. Contractions match **case-SENSITIVELY** (`"DON'T"` splits as `DON`+`'`+`T`,
+//!    not the `'t` contraction cl100k's `(?i:...)` would match).
+//! 2. Digit runs are **uncapped** (`\p{N}+`, not `\p{N}{1,K}`; `"1234567890"`
+//!    is one pre-token).
+//! 3. The letter/digit/symbol branches' optional prefix is **space-only**
+//!    (` ?\p{L}+`/` ?\p{N}+`/` ?[^\s\p{L}\p{N}]+`), never cl100k's
+//!    "any non-letter/digit/newline char" (`(hello` pre-tokenizes as `(` +
+//!    `hello`, two tokens, not one `(hello` the way cl100k's
+//!    `[^\r\n\p{L}\p{N}]?\p{L}+` would absorb it) - and the symbol branch
+//!    never absorbs trailing newlines (no `[\r\n]*` tail).
+//!
+//! Whitespace-run splitting itself needs no separate branch: the SAME
+//! "greedy run, minus its last char unless the run ends the string or is
+//! already length 1" rule this file's cl100k scanner already applies to a
+//! pure space/tab run (see `pretokenize_impl`'s own comment) reproduces
+//! `\s+(?!\S)|\s+`'s backtracking exactly when applied to ANY `\s` run
+//! including embedded newlines - traced by hand against
+//! `pre_tokenize_str("a\n\n\nb")` (splits `\n\n\n` into `\n\n`+`\n`, not one
+//! 3-char run) and cross-checked with Python's `regex` module reproducing the
+//! literal pattern. GPT-2-default therefore has no `\s*[\r\n]+` early branch
+//! at all (cl100k's own extra rule for newline-containing runs), it is simply
+//! the general run-reservation rule with no special case for `\n`.
+//! `crates/modernbert/tests/tokenizer_diff.rs` pins the differential this
+//! produces against the real Laya tokenizer. The mode is selected once, from
+//! the file's own `pre_tokenizer` shape ([`pretokenizer_mode`] below), never
+//! guessed from vocab size or model family.
+//!
+//! **Known residual gap, not closed here**: this file applies no Unicode
+//! normalization at all, while Laya's `tokenizer.json` declares an `NFC`
+//! normalizer. This only matters for already-decomposed input (e.g. `"e" +
+//! COMBINING ACUTE ACCENT` instead of precomposed `"é"`), which
+//! `build_sequence`'s own inputs (state JSON blobs, short instruction/option
+//! strings) are not expected to contain in practice; verified empirically
+//! that NFC-normalized and already-precomposed text tokenize identically
+//! either way, so the gap is real but narrow, the same "documented, not
+//! silently trusted" treatment [`is_letter`]'s own doc gives its residual gap.
 
 use std::collections::HashMap;
 
@@ -34,8 +86,14 @@ pub struct QwenBpe {
     /// (content, id) for special/added tokens, longest content first.
     specials: Vec<(String, u32)>,
     vocab_size: usize,
-    /// Max digits per pre-token (`\p{N}{1,K}` in the pre-tokenizer pattern).
+    /// Max digits per pre-token (`\p{N}{1,K}` in the pre-tokenizer pattern),
+    /// cl100k-mode only - unused when [`Self::gpt2_default`] is set (that
+    /// scanner is always uncapped).
     digit_run_max: usize,
+    /// `true` selects [`pretokenize_gpt2_default`] instead of the cl100k
+    /// scanner (`pretokenize_impl`) - see the module doc's "a second
+    /// pre-tokenizer mode" section for what and why.
+    gpt2_default: bool,
     /// Special-token ids a `TemplateProcessing` post-processor prepends to a
     /// single-sequence encoding (empty when the file declares none).
     template_prefix: Vec<u32>,
@@ -216,6 +274,12 @@ impl QwenBpe {
             specials,
             vocab_size,
             digit_run_max: digit_run_max_from_pre(tok.pre.as_deref()),
+            // A GGUF never carries the bare-ByteLevel/GPT-2-default
+            // ambiguity (it only ever names a pre-tokenizer, never a
+            // pattern) - every mapped scheme in `digit_run_max_from_pre` is
+            // cl100k-style, case-insensitive, same as the safe pre-existing
+            // default.
+            gpt2_default: false,
             // Qwen declares no single-sequence template prefix.
             template_prefix: Vec::new(),
         })
@@ -281,7 +345,7 @@ impl QwenBpe {
         // Vocab size = max id + 1 (covers added tokens beyond the base table).
         let vocab_size = decoder.keys().copied().max().map(|m| m as usize + 1).unwrap_or(0);
 
-        let digit_run_max = digit_run_max_from(&j["pre_tokenizer"]);
+        let (digit_run_max, gpt2_default) = pretokenizer_mode(&j["pre_tokenizer"]);
         let template_prefix = template_prefix_from(&j["post_processor"], &encoder);
 
         Ok(QwenBpe {
@@ -293,6 +357,7 @@ impl QwenBpe {
             specials,
             vocab_size,
             digit_run_max,
+            gpt2_default,
             template_prefix,
         })
     }
@@ -439,6 +504,15 @@ impl Tokenizer for QwenBpe {
 }
 
 impl QwenBpe {
+    /// Pre-tokenize one already-special-free span, per [`Self::gpt2_default`].
+    fn pretokenize(&self, text: &str) -> Vec<String> {
+        if self.gpt2_default {
+            pretokenize_gpt2_default(text)
+        } else {
+            pretokenize_digits(text, self.digit_run_max)
+        }
+    }
+
     fn encode_with_specials(&self, text: &str, out: &mut Vec<u32>) {
         // Split on special-token literals first (longest-first), BPE the gaps.
         let mut rest = text;
@@ -454,7 +528,7 @@ impl QwenBpe {
             }
             if let Some((pos, content, id)) = best {
                 if pos > 0 {
-                    for piece in pretokenize_digits(&rest[..pos], self.digit_run_max) {
+                    for piece in self.pretokenize(&rest[..pos]) {
                         self.encode_piece(&piece, out);
                     }
                 }
@@ -463,7 +537,7 @@ impl QwenBpe {
                 continue 'outer;
             }
             // No specials left: BPE the remainder.
-            for piece in pretokenize_digits(rest, self.digit_run_max) {
+            for piece in self.pretokenize(rest) {
                 self.encode_piece(&piece, out);
             }
             break;
@@ -483,6 +557,28 @@ fn digit_run_max_from(pre: &serde_json::Value) -> usize {
         }
     }
     1
+}
+
+/// Which pre-tokenizer regex family a `tokenizer.json`'s own `pre_tokenizer`
+/// selects, as `(digit_run_max, gpt2_default)` - see the module doc's "a
+/// second pre-tokenizer mode" section for the empirical justification. A
+/// **bare** `ByteLevel` pre-tokenizer (`pre_tokenizer.type == "ByteLevel"` at
+/// the TOP level, not nested inside a `Sequence`) names no explicit pattern at
+/// all, which the real `tokenizers` library resolves to the original GPT-2
+/// default ([`pretokenize_gpt2_default`]). Qwen/LFM2.5 always wrap their
+/// `ByteLevel` step inside a `Sequence` alongside an explicit
+/// `Split{pattern: ...}` (confirmed against a real Qwen3-4B `tokenizer.json`
+/// this session), so this check cannot misfire on either of them - it looks
+/// at the pre-tokenizer's own declared `type`, never guesses from vocab size
+/// or model family. `digit_run_max` is meaningless in `gpt2_default` mode
+/// (that scanner is always uncapped) and returned as `usize::MAX` only for a
+/// tidy return type.
+fn pretokenizer_mode(pre: &serde_json::Value) -> (usize, bool) {
+    if pre.get("type").and_then(serde_json::Value::as_str) == Some("ByteLevel") {
+        (usize::MAX, true)
+    } else {
+        (digit_run_max_from(pre), false)
+    }
 }
 
 /// `K` in `\p{N}{1,K}` for a GGUF's `tokenizer.ggml.pre` scheme.
@@ -711,6 +807,142 @@ pub fn pretokenize_digits(text: &str, digit_run_max: usize) -> Vec<String> {
     toks
 }
 
+/// The real `tokenizers` library's compiled-in GPT-2 default pre-tokenizer
+/// regex, for a bare `ByteLevel` pre-tokenizer with no explicit `pattern`
+/// (see the module doc's "a second pre-tokenizer mode" section - Laya's own
+/// `tokenizer.json` is the concrete case). A SEPARATE scanner from
+/// [`pretokenize_digits`], not a parameterization of it - the two patterns
+/// diverge on more than the digit cap (see the module doc):
+///
+///   's|'t|'re|'ve|'m|'ll|'d | ?\p{L}+ | ?\p{N}+ | ?[^\s\p{L}\p{N}]+ | \s+(?!\S) | \s+
+///
+/// Differences from [`pretokenize_digits`]'s cl100k scanner, all verified
+/// against the real `tokenizers` library's `pre_tokenizer.pre_tokenize_str`
+/// this session:
+/// - contractions match case-SENSITIVELY (no `(?i:...)`);
+/// - digit runs are uncapped (no `digit_run_max`);
+/// - the letter/digit/symbol branches' optional prefix is a literal SPACE
+///   only, never cl100k's "any non-letter/digit/newline char" - so `(hello`
+///   pre-tokenizes as `(` + `hello`, two tokens, not one;
+/// - the symbol branch never absorbs trailing newlines (no `[\r\n]*` tail);
+/// - there is no separate `\s*[\r\n]+` branch for newline-containing runs -
+///   see below for why the general whitespace-run rule already covers it.
+pub fn pretokenize_gpt2_default(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let n = chars.len();
+    let mut toks: Vec<String> = Vec::new();
+    let mut i = 0;
+
+    const CONTRACTIONS: [&[char]; 7] =
+        [&['s'], &['t'], &['r', 'e'], &['v', 'e'], &['m'], &['l', 'l'], &['d']];
+
+    while i < n {
+        // 1) 's|'t|'re|'ve|'m|'ll|'d - case-SENSITIVE, unlike cl100k's `(?i:...)`.
+        if chars[i] == '\'' {
+            let mut matched = None;
+            for suf in CONTRACTIONS {
+                if i + 1 + suf.len() <= n && chars[i + 1..i + 1 + suf.len()].iter().zip(suf).all(|(a, b)| a == b) {
+                    matched = Some(1 + suf.len());
+                    break;
+                }
+            }
+            if let Some(len) = matched {
+                toks.push(chars[i..i + len].iter().collect());
+                i += len;
+                continue;
+            }
+        }
+
+        // 2) ' ?\p{L}+' - optional SPACE prefix only (not any non-alnum char).
+        if is_letter(chars[i]) {
+            let mut j = i;
+            while j < n && is_letter(chars[j]) {
+                j += 1;
+            }
+            toks.push(chars[i..j].iter().collect());
+            i = j;
+            continue;
+        }
+        if chars[i] == ' ' && i + 1 < n && is_letter(chars[i + 1]) {
+            let mut j = i + 1;
+            while j < n && is_letter(chars[j]) {
+                j += 1;
+            }
+            toks.push(chars[i..j].iter().collect());
+            i = j;
+            continue;
+        }
+
+        // 3) ' ?\p{N}+' - optional SPACE prefix, uncapped run (unlike
+        // cl100k's `\p{N}{1,K}`, which has no leading-space branch at all).
+        if is_digit(chars[i]) {
+            let mut j = i;
+            while j < n && is_digit(chars[j]) {
+                j += 1;
+            }
+            toks.push(chars[i..j].iter().collect());
+            i = j;
+            continue;
+        }
+        if chars[i] == ' ' && i + 1 < n && is_digit(chars[i + 1]) {
+            let mut j = i + 1;
+            while j < n && is_digit(chars[j]) {
+                j += 1;
+            }
+            toks.push(chars[i..j].iter().collect());
+            i = j;
+            continue;
+        }
+
+        // 4) ' ?[^\s\p{L}\p{N}]+' - optional SPACE prefix, no trailing `[\r\n]*`.
+        {
+            let has_space = chars[i] == ' ';
+            let p = if has_space { i + 1 } else { i };
+            if p < n && is_symbol(chars[p]) {
+                let start = i;
+                let mut j = p;
+                while j < n && is_symbol(chars[j]) {
+                    j += 1;
+                }
+                toks.push(chars[start..j].iter().collect());
+                i = j;
+                continue;
+            }
+        }
+
+        // 5) '\s+(?!\S)|\s+' over the WHOLE run (spaces, tabs, newlines alike -
+        // no special `\s*[\r\n]+` branch). The lookahead-constrained greedy
+        // match is equivalent, for any run of `\s` chars, to "the whole run
+        // if it ends the string or has length 1, else the run minus its
+        // last char" - traced by hand against the real library's own
+        // `pre_tokenize_str` and cross-checked against Python's `regex`
+        // module on the literal pattern (see the module doc). The reserved
+        // last char becomes the next iteration's own length-1 run, which the
+        // same rule then emits whole (its `j - 1 == i` case) - so this single
+        // rule, applied repeatedly, reproduces the same 2-step split
+        // `pre_tokenize_str("a\n\n\nb")` shows (`\n\n` then `\n`).
+        if is_ws(chars[i]) {
+            let mut j = i;
+            while j < n && is_ws(chars[j]) {
+                j += 1;
+            }
+            if j == n || j - 1 == i {
+                toks.push(chars[i..j].iter().collect());
+                i = j;
+            } else {
+                toks.push(chars[i..j - 1].iter().collect());
+                i = j - 1;
+            }
+            continue;
+        }
+
+        // Fallback: emit one char to guarantee progress.
+        toks.push(chars[i..i + 1].iter().collect());
+        i += 1;
+    }
+    toks
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -897,6 +1129,85 @@ mod tests {
         assert_eq!(qwen_pretokenize("Hello, world"), vec!["Hello", ",", " world"]);
         assert_eq!(qwen_pretokenize("a1b"), vec!["a", "1", "b"]);
         assert_eq!(qwen_pretokenize("über café"), vec!["über", " café"]);
+    }
+
+    /// [`pretokenize_gpt2_default`] pinned against the REAL `tokenizers`
+    /// library's own `pre_tokenizer.pre_tokenize_str` (the raw pre-token
+    /// boundaries, not just final BPE ids - see the module doc) run on
+    /// Laya's actual `tokenizer/tokenizer.json` this session. Every case here
+    /// is a real divergence from [`qwen_pretokenize`] (the cl100k scanner) on
+    /// the same input, which is the point: contractions are case-sensitive,
+    /// digit runs are uncapped, and only a literal space (never other
+    /// punctuation) may prefix a letter/digit/symbol run.
+    #[test]
+    fn gpt2_default_pretokenizer_matches_the_real_tokenizers_library() {
+        let cases: &[(&str, &[&str])] = &[
+            ("don't", &["don", "'t"]),
+            ("DON'T", &["DON", "'", "T"]), // case-sensitive: no 'T contraction
+            ("Don'T", &["Don", "'", "T"]),
+            ("can't", &["can", "'t"]),
+            ("CAN'T", &["CAN", "'", "T"]),
+            ("I'm", &["I", "'m"]),
+            ("I'M", &["I", "'", "M"]),
+            ("it's", &["it", "'s"]),
+            ("IT'S", &["IT", "'", "S"]),
+            ("1234567890", &["1234567890"]), // uncapped, unlike cl100k's K=1/3
+            ("12345", &["12345"]),
+            ("hello world", &["hello", " world"]),
+            ("multiple    spaces", &["multiple", "   ", " spaces"]),
+            ("newline\ntest", &["newline", "\n", "test"]),
+            ("cafe naive uber", &["cafe", " naive", " uber"]),
+            ("(hello", &["(", "hello"]), // no non-space letter-prefix absorption
+            ("3(hello world)", &["3", "(", "hello", " world", ")"]),
+            ("foo(bar", &["foo", "(", "bar"]),
+            ("a 123", &["a", " 123"]), // digit branch DOES take a leading space
+            ("a  123", &["a", " ", " 123"]),
+            ("end of line \n", &["end", " of", " line", " \n"]),
+            ("trailing space \n next", &["trailing", " space", " \n", " next"]),
+            ("multi\n\n\n\nline", &["multi", "\n\n\n", "\n", "line"]),
+            ("a\n\n\nb", &["a", "\n\n", "\n", "b"]), // no `\s*[\r\n]+` special-case
+            ("!!!\n\nx", &["!!!", "\n", "\n", "x"]), // symbol branch: no trailing nl absorption
+            ("a!!!\nb", &["a", "!!!", "\n", "b"]),
+            ("hello!!!", &["hello", "!!!"]),
+            ("a: b", &["a", ":", " b"]),
+            ("3!", &["3", "!"]),
+            (
+                "Testing punctuation: ,.;:!?()[]{}",
+                &["Testing", " punctuation", ":", " ,.;:!?()[]{}"],
+            ),
+            (
+                "under_score and-dash and.dot",
+                &["under", "_", "score", " and", "-", "dash", " and", ".", "dot"],
+            ),
+            ("192.168.1.1", &["192", ".", "168", ".", "1", ".", "1"]),
+            ("user@example.com", &["user", "@", "example", ".", "com"]),
+        ];
+        for (text, want) in cases {
+            let got = pretokenize_gpt2_default(text);
+            assert_eq!(got, *want, "pretokenize_gpt2_default({text:?})");
+        }
+    }
+
+    /// [`pretokenizer_mode`]'s own detection: a bare `ByteLevel`
+    /// `pre_tokenizer` (Laya's own shape) selects the GPT-2 default; a
+    /// `Sequence` wrapping an explicit `Split{pattern}` (Qwen/LFM2.5's own
+    /// shape, reproduced here) does not, regardless of what the wrapped
+    /// `ByteLevel` step inside that `Sequence` looks like.
+    #[test]
+    fn pretokenizer_mode_selects_gpt2_default_only_for_a_bare_byte_level_pre_tokenizer() {
+        let bare = serde_json::json!({"type": "ByteLevel", "add_prefix_space": false, "trim_offsets": true, "use_regex": true});
+        assert_eq!(pretokenizer_mode(&bare), (usize::MAX, true));
+
+        let wrapped = serde_json::json!({
+            "type": "Sequence",
+            "pretokenizers": [
+                {"type": "Split", "pattern": {"Regex": "(?i:'s|'t)|\\p{N}"}, "behavior": "Isolated", "invert": false},
+                {"type": "ByteLevel", "add_prefix_space": false, "trim_offsets": false, "use_regex": false},
+            ],
+        });
+        let (k, gpt2_default) = pretokenizer_mode(&wrapped);
+        assert!(!gpt2_default);
+        assert_eq!(k, 1); // bare `\p{N}`, no `{1,K}` in the wrapped pattern
     }
 
     /// The digit-run cap is read from the GGUF's `tokenizer.ggml.pre` NAME (a
