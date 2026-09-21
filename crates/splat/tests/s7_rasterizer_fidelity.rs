@@ -134,9 +134,9 @@ fn the_antialias_dilation_costs_most_of_the_fine_detail() {
     let dflt = sharpness_ratio(&render(&g, &scene, &cam, RenderOpts::default().eps2d), &img, wu, hu);
 
     assert!(
-        (0.14..0.32).contains(&dflt),
+        (0.20..0.45).contains(&dflt),
         "the default low-pass (eps2d={}, compensation {}) leaves {dflt:.3}x of the source's \
-         high-frequency content (measured 0.207 when this was written; with the filter off, \
+         high-frequency content (measured 0.298 when this was written; with the filter off, \
          {off:.3}). Outside that range either the rasterizer changed or the filter did - and \
          the second silently changes every render this repo produces.",
         RenderOpts::default().eps2d,

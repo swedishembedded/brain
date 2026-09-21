@@ -492,6 +492,9 @@ fn prune_cmd(argv: &[String]) {
     let voxel_px = a.f32_or("--voxel-pixels", if voxel > 0.0 { 0.0 } else { 2.0 });
     let cams_path = a.take_str("--cameras");
     let min_op = a.f32_or("--min-opacity", 0.0);
+    // A reconstruction predicts opacity with no anti-alias filter in mind, so
+    // rendering it through one that compensates energy dims the whole scene.
+    let a_recal = a.take_flag("--recalibrate-opacity");
     let max_points = a.usize_or("--max-gaussians", 0);
     let out = crate::args::strip_out_name_prefix(&a.str_or("--out", "out/pruned.ply"), "scene").to_string();
     a.finish();
@@ -504,6 +507,9 @@ fn prune_cmd(argv: &[String]) {
         t.scales.extend_from_slice(&s.scales[i * 3..i * 3 + 3]);
         t.opacities.push(s.opacities[i]);
         t.colors.extend_from_slice(&s.colors[i * 3..i * 3 + 3]);
+    }
+    if let (true, Some(cp)) = (a_recal, cams_path.as_ref()) {
+        t = splat::mip::recalibrate_opacity(&t, &read_cameras(cp), splat::types::RenderOpts::default().eps2d);
     }
     let after_op = t.len();
     if voxel_px > 0.0 {

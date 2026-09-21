@@ -138,8 +138,28 @@ pub struct RenderOpts {
     /// the splat. Without it, dilation makes a splat blurrier AND brighter,
     /// and the default kernel size costs most of a scene's fine detail.
     ///
-    /// Inria-trained PLYs were fitted under the uncompensated dilation at
-    /// `eps2d = 0.3` and must be rendered that way to look as intended.
+    /// Whether it WINS depends on how big the splats are, and a pixel-aligned
+    /// reconstruction is not the regime the technique was designed for.
+    /// Measured against a box-downsampled reference:
+    ///
+    /// ```text
+    ///   splat std   inria 0.3   mip 0.1
+    ///     0.30 px    20.7 dB     12.1 dB
+    ///     0.50 px    18.0 dB     20.1 dB
+    /// ```
+    ///
+    /// The crossover sits near half a pixel because that is where the
+    /// compensation stops being a correction and starts being most of the
+    /// opacity. A feed-forward pass emits one gaussian per source pixel and
+    /// lands at a median projected size of 0.46 px with 60% below half a
+    /// pixel, so it sits on the losing side: on a real capture, fitted and
+    /// scored against held-out photographs, the Mip filter gives 21.98 dB
+    /// against the dilation's 22.70 dB.
+    ///
+    /// So the default is the dilation, which is also what Inria-trained PLYs
+    /// and the viewers that render them expect. Turn this on for scenes whose
+    /// splats are comfortably larger than a pixel, and use
+    /// [`crate::mip::recalibrate_opacity`] when switching a scene over.
     pub antialiased: bool,
     pub eps2d: f32,
     pub near: f32,
@@ -151,8 +171,8 @@ impl Default for RenderOpts {
         RenderOpts {
             bg: [0.0; 3],
             mode: Mode::Color,
-            antialiased: true,
-            eps2d: 0.1,
+            antialiased: false,
+            eps2d: 0.3,
             near: 0.01,
             far: 1e10,
         }
