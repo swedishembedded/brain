@@ -75,6 +75,7 @@ samples/shell/imagegen/portrait-from-refs/README.md
 samples/shell/restore/upscale/README.md
 samples/shell/videogen/ltxv/README.md
 samples/study/document/README.md
+samples/text/embed-train/README.md
 samples/text/embed/README.md
 samples/text/retrieve-json/README.md
 samples/text/retrieve/README.md

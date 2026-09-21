@@ -1,0 +1,22 @@
+[package]
+# Package names under samples/ are derived from the path:
+# `samples/text/embed-train` -> `sample-text-embed-train`. The Makefile's
+# `samples/%/{build,run}` rules depend on that mapping; `make check/samples`
+# enforces it.
+name = "sample-text-embed-train"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sample application: contrastively fine-tune a projection head over frozen embeddings with brain::EmbeddingTrainer, reporting recall@1 before and after."
+publish = false
+
+[dependencies]
+# The ONLY brain dependency a sample may have is the SDK facade, and it must
+# NAME the surfaces it uses - see samples/README.md rules 1 and 2.
+brain = { workspace = true, features = ["text"] }
+
+[package.metadata.brain]
+# `make check/samples` fails if the real `cargo tree` closure exceeds this.
+# Same closure as the other samples/text/* programs: the `text` surface
+# pulls in the whole qwen3 engine stack once.
+max-brain-crates = 31
