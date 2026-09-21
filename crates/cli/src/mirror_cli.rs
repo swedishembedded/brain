@@ -300,21 +300,18 @@ fn with_scene<R>(
     let pipes: Vec<(&str, &str)> =
         worldmirror2::model::PIPELINES.iter().chain(splat::PIPELINES.iter()).copied().collect();
     let gpu = Gpu::new(&pipes);
-    // The trunk's global attention is quadratic in TOTAL tokens, and one
-    // attention buffer has to fit a single storage binding. Refuse in terms of
-    // the two knobs that fix it rather than failing inside a bind group.
-    let tokens = s * hp * wp;
-    let need = (tokens as u64).saturating_mul(tokens as u64).saturating_mul(4);
+    // What a shape actually costs in ONE binding. Global attention is
+    // query-chunked, so this is not the token count squared - an earlier
+    // version assumed it was and refused frame/resolution combinations that
+    // run comfortably.
+    let need = worldmirror2::model::largest_binding_bytes(&cfg, s, hp, wp);
     let limit = gpu.max_storage_binding_bytes();
     if limit > 0 && need > limit {
         eprintln!(
-            "{s} frame(s) at target size {target} is {tokens} trunk tokens, whose global attention \
-             needs {:.2} GiB in one buffer against this device's {:.2} GiB binding limit. Lower \
-             --target-size (the reference default is 952, the checkpoint's native grid is {}), or \
-             use fewer frames (--max-frames/--stride).",
-            need as f64 / (1u64 << 30) as f64,
-            limit as f64 / (1u64 << 30) as f64,
-            cfg.img
+            "{s} frame(s) at {}x{} needs {:.2} GiB in one storage binding against this device's \
+             {:.2} GiB limit. Lower --target-size or use fewer frames (--max-frames/--stride).",
+            wp * cfg.patch, hp * cfg.patch,
+            need as f64 / (1u64 << 30) as f64, limit as f64 / (1u64 << 30) as f64
         );
         std::process::exit(2);
     }

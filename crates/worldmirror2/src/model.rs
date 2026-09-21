@@ -173,6 +173,25 @@ impl PriorMlp {
     }
 }
 
+/// The largest SINGLE storage binding a forward at this shape will need.
+///
+/// Not the token count squared. Global attention is query-chunked
+/// (`attn_chunk_for` sizes the score slab under [`ATTN_BUDGET`]), so the
+/// scores buffer never holds a full `tokens x tokens` matrix and frame count
+/// does not enter quadratically. What actually competes for the largest
+/// binding is the per-frame span slab, the chunked global slab, and the MLP
+/// hidden state - and on this model the answer is ~1 GiB across every shape
+/// that fits in memory at all.
+pub fn largest_binding_bytes(cfg: &MirrorConfig, s: usize, hp: usize, wp: usize) -> u64 {
+    let td_t = (PATCH_START + hp * wp) as u64;
+    let rows = s as u64 * td_t;
+    let (c, heads, mlp) = (cfg.dim as u64, cfg.heads as u64, (cfg.dim * cfg.mlp_ratio) as u64);
+    let span_slab = heads * td_t * td_t * 4;
+    let qkv = 3 * rows * c * 4;
+    let hidden = rows * mlp * 4;
+    span_slab.max(ATTN_BUDGET).max(qkv).max(hidden)
+}
+
 /// Per-shape buffers + the recorded forward (DINOv2 encode + trunk).
 struct Built {
     s: usize,
