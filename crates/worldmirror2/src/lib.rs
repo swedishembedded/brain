@@ -19,5 +19,8 @@ pub mod gaussians;
 pub mod import;
 pub mod model;
 pub mod preprocess;
+// The `brain-recon` seam: this model, presented to the model-agnostic
+// long-capture pipeline.
+pub mod recon_impl;
 pub mod priors;
 pub mod rope2d;

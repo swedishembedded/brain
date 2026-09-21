@@ -18,6 +18,10 @@ brain-vision.workspace = true
 brain-imaging.workspace = true
 brain-model.workspace = true
 brain-splat.workspace = true
+# `recon_impl.rs` - this model behind the model-agnostic reconstruction
+# pipeline's `ReconstructionModel` trait. The dependency only ever points this
+# way: `brain-recon` must not know any model.
+brain-recon.workspace = true
 serde_json.workspace = true
 # `caps.rs` - the serving contract's capability surface.
 brain-capability.workspace = true
