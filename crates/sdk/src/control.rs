@@ -2736,6 +2736,8 @@ impl<E: Env> ControlPipeline<E> {
         let (mut steps, mut restores) = (0usize, 0usize);
         // Cells whose slot was taken to hold a better one. See below.
         let mut evicted = 0usize;
+        // Set by the resume that opens every exploring episode, below.
+        #[allow(unused_assignments)]
         let mut obs = String::new();
 
         // THE ARCHIVE OUTLIVES THE ROUND.
@@ -2769,7 +2771,10 @@ impl<E: Env> ControlPipeline<E> {
             }
             None => {
                 self.episode_seed += 1;
-                obs = self.env.reset(self.episode_seed);
+                // The level has to be stood up, but the observation at its
+                // front door is not the one anything here decides on: every
+                // exploring episode begins by resuming into a cell.
+                let _ = self.env.reset(self.episode_seed);
                 let kind = self.env.label().unwrap_or_else(|| "world".into());
                 let instance = self.env.instance().unwrap_or_else(|| kind.clone());
                 let mut seen: std::collections::HashMap<String, (usize, f32, u32)> =
