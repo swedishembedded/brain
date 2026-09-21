@@ -62,8 +62,6 @@ pub enum Tag {
     Arm,
     /// Fire while moving across the line of fire.
     Circle,
-    /// Stand still and let the moment pass.
-    Hold,
     /// Remove whatever is standing in the way of the route.
     Clear,
     /// Get off floor that is burning the player.

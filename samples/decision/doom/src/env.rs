@@ -1413,7 +1413,9 @@ impl DoomEnv {
                 self.commit = 0;
                 self.commit_tag = None;
             }
-        } else if self.circling() && matches!(tag, Tag::Explore | Tag::Advance) {
+        } else if self.circling()
+            && matches!(tag, Tag::Explore | Tag::Advance | Tag::Exit | Tag::Grab)
+        {
             self.commit = COMMIT_STEPS;
             self.commit_tag = Some(tag);
         }
@@ -1514,6 +1516,30 @@ impl DoomEnv {
         // zero clearance.
         if let Some(i) = by(Tag::Switch) {
             return Some(i);
+        }
+
+        // A commitment already made outranks deciding again.
+        //
+        // Choosing afresh every decision, with two things both worth walking
+        // to, is a limit cycle: turn toward one, turn back toward the other,
+        // arrive at neither. Measured on E1M1 - the easiest level in the game
+        // - the last hundred and fifty decisions of a nine hundred decision
+        // run alternate between two headings a hundred and forty degrees
+        // apart, and the level's own count of returns to that spot reads six
+        // hundred and ten. Two kills, full health, no way out found.
+        //
+        // This lived at the BOTTOM of this function, below the branches that
+        // pick a goal and return, so it could never apply to the two goals
+        // that were fighting each other.
+        if self.commit > 0 {
+            self.commit -= 1;
+            if let Some(t) = self.commit_tag {
+                if let Some(i) = by(t) {
+                    return Some(i);
+                }
+            }
+            self.commit = 0;
+            self.commit_tag = None;
         }
 
         // Something to fight and a better gun in the pack: draw it first.
@@ -1693,15 +1719,6 @@ impl DoomEnv {
                 self.commit_tag = Some(self.opts[i].tag);
                 return Some(i);
             }
-        }
-        if self.commit > 0 {
-            self.commit -= 1;
-            if let Some(tag) = self.commit_tag {
-                if let Some(i) = by(tag) {
-                    return Some(i);
-                }
-            }
-            self.commit = 0;
         }
 
         // Nothing has room: shove at whatever is in the way, then try each way
