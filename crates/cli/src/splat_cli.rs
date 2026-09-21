@@ -6,7 +6,9 @@
 //!   brain splat info   <scene.ply>
 //!   brain splat render <scene.ply> --out img.ppm [--width N --height N]
 //!        [--eye x,y,z --target x,y,z --up x,y,z --fov D] [--depth] [--bg r,g,b]
-//!        [--aa] [--naive]
+//!        [--aa | --inria-lowpass] [--naive]
+//!   brain splat fit    ... [--inria-lowpass]  # fit for an Inria-convention
+//!        viewer (uncompensated dilation at 0.3) instead of the Mip filter
 //!   brain splat merge  <a.ply,b.ply,...> --cameras <a.json,b.json,...>
 //!        --overlap K --out merged.ply [--cameras-out J] [--prune VOXEL]
 //!        # K = how many trailing frames of each chunk lead the next one
@@ -93,7 +95,10 @@ fn render(argv: &[String]) {
     let depth_view = a.take_flag("--depth");
     let naive = a.take_flag("--naive");
     let bench = a.u32_or("--bench", 0);
-    let aa = a.take_flag("--aa");
+    // The low-pass a scene was FITTED under is part of it; rendering under a
+    // different one un-does the compensation the optimizer folded in.
+    let inria_render = a.take_flag("--inria-lowpass");
+    let aa = a.take_flag("--aa") || (!inria_render && RenderOpts::default().antialiased);
     let bg = vec3(&mut a, "--bg").unwrap_or([0.0; 3]);
     let eye = vec3(&mut a, "--eye");
     let target = vec3(&mut a, "--target");
@@ -109,7 +114,8 @@ fn render(argv: &[String]) {
     // reference default of 0.3 it costs most of the high-frequency content of
     // a scene whose splats are around a pixel across - which is every
     // reconstruction with roughly one gaussian per source pixel.
-    let eps2d = a.f32_or("--eps2d", RenderOpts::default().eps2d);
+    let eps2d =
+        a.f32_or("--eps2d", if inria_render { 0.3 } else { RenderOpts::default().eps2d });
     a.finish();
 
     let cam = match (eye, target) {
@@ -594,6 +600,11 @@ fn fit_cmd(argv: &[String]) {
     // this same value or the optimizer's compensation for it shows up as blur
     // (rendered higher) or as aliasing (rendered lower).
     let eps2d = a.f32_or("--eps2d", FitCfg::default().eps2d);
+    // Inria-convention viewers render the uncompensated dilation, and a scene
+    // fitted under one low-pass and rendered under another comes out wrong in
+    // both directions. Fit for the renderer that will show it.
+    let inria = a.take_flag("--inria-lowpass");
+    let mip_scale = a.f32_or("--mip-scale", FitCfg::default().mip_scale);
     // Density control: let the fit ADD gaussians where the loss is still
     // pulling. Off unless asked, because a feed-forward scene is already
     // dense and growing it can push the backward past the device's
@@ -672,7 +683,17 @@ fn fit_cmd(argv: &[String]) {
     let g = Gpu::new(splat::PIPELINES);
     let ks = Kernels::at(0);
     println!("fitting {} gaussians against {} views ({} iters, lr {lr}) …", s.len(), targets.len(), iters);
-    let cfg = FitCfg { iters, lr, eps2d, densify_every, densify_frac, max_gaussians, ..Default::default() };
+    let cfg = FitCfg {
+        iters,
+        lr,
+        eps2d: if inria { 0.3 } else { eps2d },
+        antialiased: !inria,
+        mip_scale,
+        densify_every,
+        densify_frac,
+        max_gaussians,
+        ..Default::default()
+    };
     let (fitted, mse) = splat_fit(&g, ks, &s, &targets, &cfg, &mut |_it, _mse| true);
     let grown = fitted.len();
     splat::ply::write(&out, &fitted).unwrap_or_else(|e| {

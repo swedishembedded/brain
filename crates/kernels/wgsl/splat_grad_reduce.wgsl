@@ -15,6 +15,15 @@
 // depth_bits=0 over the sorted keys (segment = gaussian id). Outputs the
 // per-gaussian 2D gradient bundle pgrad[N*9] = {v_xy(2), v_conic(3), v_op,
 // v_rgb(3)} and the color grads directly. One invocation per gaussian.
+//
+// Also accumulates `absgrad[N]`: the sum over records of the MAGNITUDE of each
+// record's 2D position gradient, as opposed to the magnitude of their sum.
+// Density control needs the former. A gaussian spanning an edge gets pushed
+// one way by the pixels on one side and the other way by the pixels on the
+// other; those cancel in the sum, so the usual criterion reads "well fitted"
+// for exactly the gaussians that are too big and blurring a detail. Summing
+// magnitudes cannot cancel, and because one record is one pixel the sum also
+// grows with the area a gaussian covers.
 
 struct Params {
     n_gauss: u32,
@@ -26,6 +35,8 @@ struct Params {
 @group(0) @binding(3) var<storage, read>       ranges:   array<u32>; // n_gauss*2
 @group(0) @binding(4) var<storage, read_write> pgrad:    array<f32>; // N*9
 @group(0) @binding(5) var<storage, read_write> d_colors: array<f32>; // N*3 (+=)
+@group(0) @binding(6) var<storage, read_write> absgrad:  array<f32>; // N (+=)
+@group(0) @binding(7) var<storage, read_write> sumgrad:  array<f32>; // N*2 (+=)
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>,
@@ -34,6 +45,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     if (g >= p.n_gauss) { return; }
     var acc: array<f32, 9>;
     for (var k = 0u; k < 9u; k = k + 1u) { acc[k] = 0.0; }
+    var absacc = 0.0;
     let start = ranges[g * 2u];
     let end = ranges[g * 2u + 1u];
     for (var j = start; j < end; j = j + 1u) {
@@ -41,7 +53,13 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
         for (var k = 0u; k < 9u; k = k + 1u) {
             acc[k] = acc[k] + recs[r + k];
         }
+        absacc = absacc + sqrt(recs[r] * recs[r] + recs[r + 1u] * recs[r + 1u]);
     }
+    absgrad[g] = absgrad[g] + absacc;
+    // and the summed 2D gradient across views, which is the reference
+    // criterion - kept so the two can be compared rather than assumed.
+    sumgrad[g * 2u] = sumgrad[g * 2u] + acc[0];
+    sumgrad[g * 2u + 1u] = sumgrad[g * 2u + 1u] + acc[1];
     for (var k = 0u; k < 9u; k = k + 1u) {
         pgrad[g * 9u + k] = acc[k];
     }

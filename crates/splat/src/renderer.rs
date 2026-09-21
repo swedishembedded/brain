@@ -285,6 +285,15 @@ pub struct SplatGrads {
     pub d_gauss: DeviceBuffer,  // N*10: d_means(3), d_scales(3), d_quats(4)
     pub d_opac: DeviceBuffer,   // N
     pub d_colors: DeviceBuffer, // N*3
+    /// N: sum of per-pixel 2D position gradient MAGNITUDES (AbsGS), the
+    /// criterion density control splits on. Not a gradient - nothing consumes
+    /// it in the chain rule - so it is accumulated alongside rather than
+    /// inside `d_gauss`.
+    pub d_absgrad: DeviceBuffer,
+    /// N*2: the summed 2D position gradient, which is what upstream 3DGS
+    /// splits on. Kept beside [`Self::d_absgrad`] so the difference between
+    /// the two criteria is a measurement rather than a claim.
+    pub d_sumgrad: DeviceBuffer,
 }
 
 impl SplatGrads {
@@ -293,6 +302,8 @@ impl SplatGrads {
             d_gauss: gpu.storage(10 * n as u64),
             d_opac: gpu.storage(n as u64),
             d_colors: gpu.storage(3 * n as u64),
+            d_absgrad: gpu.storage(n as u64),
+            d_sumgrad: gpu.storage(2 * n as u64),
         }
     }
 }
@@ -506,7 +517,7 @@ impl Renderer {
         ));
         steps.push(gpu.step(
             self.ks.splat_grad_reduce,
-            &[&scr.recs, svals, &scr.granges, &scr.pgrad, &grads.d_colors],
+            &[&scr.recs, svals, &scr.granges, &scr.pgrad, &grads.d_colors, &grads.d_absgrad, &grads.d_sumgrad],
             &[s.n as u32],
             s.n as u32,
         ));

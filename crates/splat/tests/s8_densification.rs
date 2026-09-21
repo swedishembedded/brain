@@ -191,3 +191,69 @@ fn fitting_does_not_stretch_gaussians_into_needles() {
         aspect(&unclamped)
     );
 }
+
+/// Density control must not be blind to the gaussians it exists to find.
+///
+/// A gaussian big enough to straddle a detail is pushed one way by the pixels
+/// on one side and the other way by the pixels on the other. Those pushes
+/// cancel in the summed gradient, so the standard criterion - the magnitude of
+/// the summed 2D position gradient - reports the blurriest gaussian in the
+/// scene as perfectly converged and never splits it. That is the whole
+/// mechanism behind reconstructions that stay soft no matter how long they
+/// train, and it is why AbsGS sums magnitudes instead.
+///
+/// Constructed so the cancellation is exact rather than approximate: one
+/// gaussian centred in frame with a uniform image-space gradient. The pull
+/// from every pixel left of centre is the exact negative of its mirror on the
+/// right, so the summed criterion is zero by symmetry while every pixel is
+/// telling the gaussian something.
+#[test]
+fn the_split_criterion_sees_a_gaussian_that_straddles_a_detail() {
+    use splat::renderer::{BwdScratch, SplatGrads};
+
+    let g = Gpu::new_cpu(splat::PIPELINES);
+    let ks = Kernels::at(0);
+    let (w, h) = (64u32, 64u32);
+    let cam = Camera::look_at([0.0, 0.0, 0.0], [0.0, 0.0, 4.0], [0.0, -1.0, 0.0], 60.0, w, h);
+
+    let s = Splats {
+        means: vec![0.0, 0.0, 4.0],
+        quats: vec![1.0, 0.0, 0.0, 0.0],
+        scales: vec![0.5, 0.5, 0.5],
+        opacities: vec![0.8],
+        colors: vec![0.9, 0.9, 0.9],
+        sh_rest: None,
+    };
+    let px = (w * h) as usize;
+    let o = RenderOpts::default();
+    let mut ren = Renderer::new(&g, ks, 1, w, h, 0);
+    let gs = GpuSplats::upload(&g, &s);
+    ren.render(&g, &gs, &cam, &o);
+
+    // uniform dL/dimg: symmetric about the gaussian, so the SUM cancels
+    let wimg: Vec<f32> = (0..px * 4).map(|i| if i % 4 == 3 { 0.0 } else { 1.0 }).collect();
+    let dimg = g.storage_init("dimg", &wimg);
+    let grads = SplatGrads::new(&g, 1);
+    g.submit(
+        &[&grads.d_gauss, &grads.d_opac, &grads.d_colors, &grads.d_absgrad, &grads.d_sumgrad],
+        &[],
+    );
+    let mut scr = BwdScratch::new(&g, 1, px, 0);
+    ren.render_bwd(&g, &gs, &cam, &o, &dimg, &mut scr, &grads).expect("fits");
+
+    let sg = g.read(&grads.d_sumgrad, 2);
+    let summed = (sg[0] * sg[0] + sg[1] * sg[1]).sqrt();
+    let homodirectional = g.read(&grads.d_absgrad, 1)[0];
+
+    assert!(
+        homodirectional > 1e-3,
+        "the homodirectional criterion is {homodirectional:.3e}: every pixel is pulling on this \
+         gaussian, so it must not read as zero"
+    );
+    assert!(
+        summed < 0.02 * homodirectional,
+        "the summed criterion reads {summed:.3e} against a homodirectional {homodirectional:.3e}. \
+         These are supposed to disagree by a lot here - if they do not, the cancellation this \
+         test is built on is not happening and it is checking nothing."
+    );
+}

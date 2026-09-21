@@ -63,6 +63,19 @@ pub struct FitCfg {
     /// another comes out wrong in the direction of the difference. Render with
     /// the same value.
     pub eps2d: f32,
+    /// Put the energy back when the low-pass spreads it (Mip-Splatting's 2D
+    /// Mip filter). Clear it only to fit a scene for a viewer that renders
+    /// Inria's uncompensated dilation.
+    pub antialiased: bool,
+    /// Floor every gaussian's axes at the finest detail its own cameras
+    /// sampled, scaled by this (Mip-Splatting's 3D smoothing filter as a
+    /// constraint rather than a post-hoc convolution). 0 disables it.
+    ///
+    /// Without a floor the optimizer is free to shrink a gaussian below the
+    /// pixel that supervises it, where it can lower the loss on the views it
+    /// hides in and alias in every other. The fixed `min_scale` cannot express
+    /// that limit, because the limit is a property of where the cameras were.
+    pub mip_scale: f32,
 }
 
 impl Default for FitCfg {
@@ -79,6 +92,8 @@ impl Default for FitCfg {
             prune_opacity: 0.02,
             max_gaussians: 0,
             eps2d: RenderOpts::default().eps2d,
+            antialiased: RenderOpts::default().antialiased,
+            mip_scale: crate::mip::DEFAULT_SCALE,
         }
     }
 }
@@ -285,7 +300,25 @@ fn fit_stage(
     let dimg = gpu.storage(4 * max_px as u64);
     let mut renderer = Renderer::new(gpu, ks, n, maxw, maxh, 0);
     let mut bscr = BwdScratch::new(gpu, n, max_px, 0);
-    let opts = RenderOpts { mode: Mode::Color, eps2d: cfg.eps2d, ..Default::default() };
+    let opts = RenderOpts {
+        mode: Mode::Color,
+        eps2d: cfg.eps2d,
+        antialiased: cfg.antialiased,
+        ..Default::default()
+    };
+
+    // The per-gaussian scale floor, from where the cameras actually were.
+    // Computed once from the starting geometry: a fit moves means by far less
+    // than it would take to change which view sampled a point most densely.
+    let cams: Vec<Camera> = targets.iter().map(|t| t.cam).collect();
+    let floor: Vec<f32> = if cfg.mip_scale > 0.0 {
+        crate::mip::smoothing_sigma(init, &cams, cfg.mip_scale)
+            .into_iter()
+            .map(|v| v.max(cfg.min_scale))
+            .collect()
+    } else {
+        vec![cfg.min_scale; n]
+    };
 
     // `adamw.wgsl` (M6.4) binds param/grad/m/v PLUS a per-tensor `numel`
     // descriptor and a device-resident grad-scale coefficient, and reads its
@@ -332,7 +365,7 @@ fn fit_stage(
     for it in 0..iters {
         // zero grads
         let t0 = std::time::Instant::now();
-        gpu.submit(&[&grads.d_gauss, &grads.d_opac, &grads.d_colors], &[]);
+        gpu.submit(&[&grads.d_gauss, &grads.d_opac, &grads.d_colors, &grads.d_absgrad, &grads.d_sumgrad], &[]);
         prof.add("zero grads", t0.elapsed());
         let mut loss_sum = 0.0f64;
         for t in targets {
@@ -405,8 +438,9 @@ fn fit_stage(
         prof.add("clamp: read geo", tm.elapsed());
         let tm = std::time::Instant::now();
         for i in 0..n {
+            let lo = floor[i.min(floor.len() - 1)];
             for k in 3..6 {
-                geo[i * 10 + k] = geo[i * 10 + k].clamp(cfg.min_scale, 0.3);
+                geo[i * 10 + k] = geo[i * 10 + k].clamp(lo, 0.3);
             }
             if cfg.max_aspect > 1.0 {
                 // Raise the short axes to the longest one's fair share rather
@@ -431,10 +465,14 @@ fn fit_stage(
 
         if cfg.densify_every > 0 && it + window >= iters {
             let tm = std::time::Instant::now();
-            let dg = gpu.read(&grads.d_gauss, 10 * n);
+            // The homodirectional criterion, summed per pixel in the reduction
+            // rather than taken as the norm of the summed gradient here. The
+            // two differ most for exactly the gaussians density control exists
+            // to find: one big enough to straddle an edge is pulled both ways,
+            // and the norm of the sum reports it as converged.
+            let ag = gpu.read(&grads.d_absgrad, n);
             for i in 0..n {
-                let (a, b, c) = (dg[i * 10], dg[i * 10 + 1], dg[i * 10 + 2]);
-                gsum[i] += (a * a + b * b + c * c).sqrt();
+                gsum[i] += ag[i];
             }
             prof.add("densify grad readback", tm.elapsed());
         }
