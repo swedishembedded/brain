@@ -99,8 +99,17 @@ fn fusion_pulls_disagreeing_views_onto_one_surface() {
     };
 
     let before = err(&depths);
-    fuse_depths(&mut depths, &confs, &cams, w, h, 0.05);
+    let support = fuse_depths(&mut depths, &confs, &cams, w, h, 0.05);
     let after = err(&depths);
+    // and the count of agreeing views comes back, because it is the only
+    // honest measure of whether a piece of geometry is real
+    let seen: usize = support.iter().map(|s| s.iter().filter(|&&v| v > 0).count()).sum();
+    let total: usize = support.iter().map(|s| s.len()).sum();
+    assert!(
+        seen > total / 2,
+        "only {seen} of {total} pixels had ANY other view agree, on a scene where all four see \
+         the same plane"
+    );
     println!("  mean relative depth error: {:.4}% -> {:.4}%", before * 100.0, after * 100.0);
     assert!(
         after < before * 0.6,
@@ -129,7 +138,11 @@ fn fusion_refuses_to_average_across_an_occlusion() {
     let mut depths = vec![near.clone(), far.clone()];
     let confs = vec![vec![1.0f32; hw], vec![1.0f32; hw]];
 
-    fuse_depths(&mut depths, &confs, &cams, w, h, 0.05);
+    let support = fuse_depths(&mut depths, &confs, &cams, w, h, 0.05);
+    assert!(
+        support.iter().all(|s| s.iter().all(|&v| v == 0)),
+        "two surfaces that share nothing must support each other nowhere"
+    );
     let moved0 = depths[0].iter().zip(&near).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
     let moved1 = depths[1].iter().zip(&far).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
     assert!(

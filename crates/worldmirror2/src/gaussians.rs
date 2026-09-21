@@ -79,6 +79,19 @@ pub fn decode_cameras(raw: &[f32], s: usize, width: u32, height: u32) -> Vec<Cam
 ///
 /// `conf` is the depth head's second channel, which the model emits to say how
 /// much each of its own depths is worth.
+///
+/// Returns, per frame and pixel, how many OTHER frames agreed that a surface
+/// is there - the count the fused depth was averaged over.
+///
+/// That count is the honest measure of whether a piece of geometry is real.
+/// A pixel a dozen views agree about is a surface; one that stands alone is a
+/// guess, and the places where a depth map guesses are exactly the places it
+/// cannot see properly - thin structures, silhouettes, anything dark or
+/// specular. Those guesses are individually consistent with the view that made
+/// them, so they project correctly onto every training image and the optimizer
+/// never learns they are wrong. They are only visible as smears from a
+/// direction nothing was fitted against, which is precisely why they have to
+/// be rejected on agreement rather than on appearance.
 pub fn fuse_depths(
     depth: &mut [Vec<f32>],
     conf: &[Vec<f32>],
@@ -86,25 +99,27 @@ pub fn fuse_depths(
     width: u32,
     height: u32,
     rtol: f32,
-) {
+) -> Vec<Vec<u16>> {
     let s = cams.len();
     if s < 2 || depth.len() != s || conf.len() != s {
-        return;
+        return vec![vec![0u16; (width * height) as usize]; depth.len()];
     }
     let (w, h) = (width as usize, height as usize);
     let hw = w * h;
     let views: Vec<[f32; 12]> = cams.iter().map(|c| c.viewmat()).collect();
-    let out: Vec<Vec<f32>> = (0..s)
+    let out: Vec<(Vec<f32>, Vec<u16>)> = (0..s)
         .map(|i| {
             let ci = &cams[i];
             let mi = &ci.c2w;
             let mut fused = vec![0.0f32; hw];
+            let mut support = vec![0u16; hw];
             for py in 0..h {
                 for px in 0..w {
                     let k = py * w + px;
                     let zi = depth[i][k];
                     let mut acc = (conf[i][k] * zi) as f64;
                     let mut wsum = conf[i][k] as f64;
+                    let mut agree = 0u16;
                     if zi <= 0.0 {
                         fused[k] = zi;
                         continue;
@@ -158,16 +173,21 @@ pub fn fuse_depths(
                         }
                         acc += (conf[j][kj] * cand) as f64;
                         wsum += conf[j][kj] as f64;
+                        agree += 1;
                     }
                     fused[k] = if wsum > 0.0 { (acc / wsum) as f32 } else { zi };
+                    support[k] = agree;
                 }
             }
-            fused
+            (fused, support)
         })
         .collect();
-    for (d, f) in depth.iter_mut().zip(out) {
+    let mut sup = Vec::with_capacity(s);
+    for (d, (f, c)) in depth.iter_mut().zip(out) {
         *d = f;
+        sup.push(c);
     }
+    sup
 }
 
 fn sigmoid(x: f32) -> f32 {
@@ -191,11 +211,14 @@ pub struct AssembleOpts {
     /// geometry, rejecting pairs that differ by more than this fraction as
     /// occlusions rather than disagreements. 0 disables it.
     pub fuse_depth_rtol: f32,
+    /// Keep a pixel only if at least this many OTHER frames agreed there is a
+    /// surface there. 0 keeps everything.
+    pub min_support: u16,
 }
 
 impl Default for AssembleOpts {
     fn default() -> Self {
-        AssembleOpts { min_opacity: 0.01, max_depth: 0.0, gs_mask_threshold: 0.5, edge_depth_rtol: 0.03, fuse_depth_rtol: 0.05 }
+        AssembleOpts { min_opacity: 0.01, max_depth: 0.0, gs_mask_threshold: 0.5, edge_depth_rtol: 0.03, fuse_depth_rtol: 0.05, min_support: 0 }
     }
 }
 
@@ -275,14 +298,16 @@ pub fn assemble(
         .iter()
         .map(|g| g[..hw].iter().map(|v| v.exp()).collect())
         .collect();
-    if opts.fuse_depth_rtol > 0.0 && s > 1 {
+    let support = if opts.fuse_depth_rtol > 0.0 && s > 1 {
         // the head's second channel is its own confidence in the first
         let confs: Vec<Vec<f32>> = gsd_all
             .iter()
             .map(|g| g[hw..2 * hw].iter().map(|v| 1.0 + v.exp()).collect())
             .collect();
-        fuse_depths(&mut depths, &confs, &cams, width, height, opts.fuse_depth_rtol);
-    }
+        fuse_depths(&mut depths, &confs, &cams, width, height, opts.fuse_depth_rtol)
+    } else {
+        Vec::new()
+    };
 
     let mut out = Splats::default();
     let mut weights = Vec::new();
@@ -319,6 +344,11 @@ pub fn assemble(
                 }
                 if edge[i] {
                     continue;
+                }
+                if opts.min_support > 0
+                    && support.get(fi).is_some_and(|s| s[i] < opts.min_support)
+                {
+                    continue; // no other view agrees a surface is here
                 }
                 let z = depth[i];
                 if opts.max_depth > 0.0 && z > opts.max_depth {

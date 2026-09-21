@@ -283,6 +283,7 @@ fn with_scene<R>(
     gs_mask: f32,
     edge_rtol: f32,
     fuse_rtol: f32,
+    min_support: u16,
     scale_q: f32,
     sel: &FrameSel,
     mask: Option<&str>,
@@ -341,6 +342,7 @@ fn with_scene<R>(
         gs_mask_threshold: gs_mask,
         edge_depth_rtol: edge_rtol,
         fuse_depth_rtol: fuse_rtol,
+        min_support,
     };
     let (mut splats, cams, weights) = assemble(model.gpu(), &model, &frames, s, w, h, &opts, known.as_deref());
     eprintln!(
@@ -506,6 +508,12 @@ fn infer(argv: &[String]) {
     // it becomes geometry. Pairs differing by more than this are an occlusion,
     // not a disagreement, and averaging them invents a surface in neither.
     let fuse_rtol = a.f32_or("--fuse-depth", 0.05);
+    // Keep a pixel only where other frames agree a surface is there. Where a
+    // depth map guesses - thin structures, silhouettes, anything dark or
+    // specular - the guess is consistent with the view that made it, so it
+    // projects correctly onto every training image and a fit never learns it
+    // is wrong. It shows up as a smear from everywhere else.
+    let min_support = a.u32_or("--min-support", 0) as u16;
     let scale_q = a.f32_or("--max-scale-quantile", 0.98);
     // The reference's inference default, independent of the checkpoint's
     // native grid. Roughly 3.4x the samples of 518 on a square image.
@@ -535,7 +543,7 @@ fn infer(argv: &[String]) {
 
     std::fs::create_dir_all(&out_dir).ok();
     let ply_path = ply.unwrap_or_else(|| format!("{out_dir}/scene.ply"));
-    with_scene(&weights, &images, min_op, max_depth, prune, poses.as_deref(), gs_mask, edge_rtol, fuse_rtol, scale_q, &sel, mask.as_deref(), target, |gpu, model, splats, cams, s, w, h| {
+    with_scene(&weights, &images, min_op, max_depth, prune, poses.as_deref(), gs_mask, edge_rtol, fuse_rtol, min_support, scale_q, &sel, mask.as_deref(), target, |gpu, model, splats, cams, s, w, h| {
         let reframed = (!keep_frame && cams.len() >= 3).then(|| upright(splats, cams));
         let (splats, cams) = match &reframed {
             Some((sp, cm)) => (sp, &cm[..]),
@@ -576,11 +584,16 @@ fn demo(argv: &[String]) {
     let prune = a.f32_or("--prune", 0.002);
     let gs_mask = a.f32_or("--gs-mask-threshold", 0.5);
     let edge_rtol = a.f32_or("--edge-depth-threshold", 0.03);
-    let fuse_rtol = a.f32_or("--fuse-depth", 0.05);
     // Settle the frames' disagreement about where the surface is before any of
     // it becomes geometry. Pairs differing by more than this are an occlusion,
     // not a disagreement, and averaging them invents a surface in neither.
     let fuse_rtol = a.f32_or("--fuse-depth", 0.05);
+    // Keep a pixel only where other frames agree a surface is there. Where a
+    // depth map guesses - thin structures, silhouettes, anything dark or
+    // specular - the guess is consistent with the view that made it, so it
+    // projects correctly onto every training image and a fit never learns it
+    // is wrong. It shows up as a smear from everywhere else.
+    let min_support = a.u32_or("--min-support", 0) as u16;
     let scale_q = a.f32_or("--max-scale-quantile", 0.98);
     // The reference's inference default, independent of the checkpoint's
     // native grid. Roughly 3.4x the samples of 518 on a square image.
@@ -601,7 +614,7 @@ fn demo(argv: &[String]) {
 
     a.finish();
 
-    let (splats, init_cam) = with_scene(&weights, &images, min_op, max_depth, prune, poses.as_deref(), gs_mask, edge_rtol, fuse_rtol, scale_q, &sel, mask.as_deref(), target, |_gpu, _model, splats, cams, _s, _w, _h| {
+    let (splats, init_cam) = with_scene(&weights, &images, min_op, max_depth, prune, poses.as_deref(), gs_mask, edge_rtol, fuse_rtol, min_support, scale_q, &sel, mask.as_deref(), target, |_gpu, _model, splats, cams, _s, _w, _h| {
         let init_cam = cams.first().map(|c| splat::types::Camera {
             width,
             height,
