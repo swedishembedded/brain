@@ -1798,6 +1798,16 @@ impl Env for DoomEnv {
         self.exited
     }
 
+    /// What went wrong with the simulation, if anything.
+    ///
+    /// The engine dying, a reply that will not parse, an action that is not
+    /// on the list. None of those are the episode ending and none of them say
+    /// anything about the policy, so the pipeline stops rather than fitting
+    /// to them.
+    fn fault(&self) -> Option<String> {
+        self.fault.clone()
+    }
+
     fn demo(&mut self) -> Option<usize> {
         self.scripted()
     }

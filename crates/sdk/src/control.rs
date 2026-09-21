@@ -85,6 +85,21 @@ pub trait Env {
     /// return the next observation, the reward, and whether the episode ended.
     fn step(&mut self, action: usize) -> (String, f32, bool);
 
+    /// Whether the simulation itself has gone wrong, and how.
+    ///
+    /// A failure is not an ending. `step` can only say "done", so an
+    /// environment whose engine died, whose reply would not parse, or which
+    /// was handed an action that does not exist had no way to say so: it
+    /// reported a terminal transition worth zero reward, and the learner duly
+    /// fitted to it. Whatever the policy did before the failure was then
+    /// taught as the thing that ended the episode with nothing, which is a
+    /// lesson about this code rather than about the game.
+    ///
+    /// Checked after every step. `None` means the last step was real.
+    fn fault(&self) -> Option<String> {
+        None
+    }
+
     /// What the model is being asked to do, prepended to every option. Fixed
     /// for the life of an environment.
     fn objective(&self) -> String {
@@ -1208,6 +1223,11 @@ impl<E: Env> ControlPipeline<E> {
                 println!("       -> {} ({:.0}%)", options[action], prob * 100.0);
             }
             let (next, reward, done) = self.env.step(action);
+            // Before anything is recorded: a failure is not a transition, and
+            // the steps taken before one are not evidence about the policy.
+            if let Some(why) = self.env.fault() {
+                return Err(Error::Backend(format!("the environment failed: {why}")));
+            }
             steps.push(Step {
                 observation: obs,
                 options,
@@ -1256,13 +1276,6 @@ impl<E: Env> ControlPipeline<E> {
         Ok((steps, total, self.env.won()))
     }
 
-    /// Behaviour cloning: play `episodes` under the scripted teacher and fit
-    /// the policy to what it did.
-    ///
-    /// The episodes are driven BY the teacher, so the states visited are the
-    /// ones the teacher reaches - which is the point. Cloning a teacher on
-    /// states the learner would visit instead is a different and much harder
-    /// problem; this is the cheap half, and PPO handles the rest.
     /// Behaviour cloning: play `episodes` under the scripted teacher and fit
     /// the policy to the best of what it did.
     ///
