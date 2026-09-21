@@ -82,6 +82,17 @@ pub use select::{select, sharpness, viewpoint_change, Dropped, SelectOpts, Selec
 #[derive(Clone, Default)]
 pub struct ChunkScene {
     pub splats: Splats,
+    /// Optional per-frame depth prior, in the chunk's own units and aligned
+    /// with `cameras`. Empty when the model has nothing to say.
+    ///
+    /// This is the one thing a reconstruction knows that a photograph does
+    /// not. A splat's image-plane gradient is orthogonal to its own viewing
+    /// ray, so an RGB loss is structurally blind to distance: measured against
+    /// analytic ground truth, a scene slid 5.7% along every ray while still
+    /// rendering correctly was left at 6.21% error by an RGB-only fit and
+    /// pulled back to 0.08% once the same depth was supervised. Handing the
+    /// prior forward is what lets a fit see the axis it otherwise cannot.
+    pub depth: Vec<DepthPrior>,
     /// One camera per frame of the chunk, in the chunk's own frame, in the
     /// order the frames were handed over.
     pub cameras: Vec<Camera>,
@@ -89,6 +100,22 @@ pub struct ChunkScene {
     /// when duplicates are merged. A model that has nothing better to say here
     /// should return its opacities.
     pub weights: Vec<f32>,
+}
+
+/// One frame's depth prior and how far each pixel of it is to be trusted.
+///
+/// The confidence is not a volume knob. A fit's step is normalised per
+/// parameter, so scaling every pixel's trust by a constant changes nothing;
+/// what it expresses is which pixels deserve more weight than which OTHERS. A
+/// multi-view agreement count is exactly that signal, which is why the model
+/// that has one should put it here rather than a flat 1.0.
+#[derive(Clone, Debug, Default)]
+pub struct DepthPrior {
+    /// `w * h`, in the chunk's own units. 0 means "no prior for this pixel".
+    pub depth: Vec<f32>,
+    /// `w * h`, relative weight per pixel. Empty means "trust all of it
+    /// equally", which is weaker than it sounds - see the type doc.
+    pub conf: Vec<f32>,
 }
 
 /// What a pipeline needs from a reconstruction model. Implemented by the model

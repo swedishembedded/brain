@@ -129,6 +129,15 @@ pub struct Reconstruction {
     pub splats: Splats,
     /// One camera per planned frame, in the world frame.
     pub cameras: Vec<Camera>,
+    /// One depth prior per planned frame, in WORLD units, aligned with
+    /// `cameras`. Empty when the model offered none.
+    ///
+    /// A depth is a distance, so it is invariant under the rigid part of any
+    /// later reframing and only the registration SCALE touched it. That is
+    /// what makes it still meaningful next to the world cameras here, and
+    /// usable directly as a fit's prior along the one axis an image cannot
+    /// constrain.
+    pub depth: Vec<crate::DepthPrior>,
     pub reports: Vec<ChunkReport>,
 }
 
@@ -219,12 +228,13 @@ pub fn reconstruct_plan(
     }
 
     let mut placed: Vec<Option<Camera>> = vec![None; plan.frames];
+    let mut placed_depth: Vec<Option<crate::DepthPrior>> = vec![None; plan.frames];
     let mut parts: Vec<Splats> = Vec::new();
     let mut weights: Vec<f32> = Vec::new();
     let mut reports = Vec::new();
 
     for (ci, chunk) in plan.chunks.iter().enumerate() {
-        let scene = model
+        let mut scene = model
             .reconstruct(&frames[chunk.range()])
             .map_err(|reason| PipelineError::ChunkFailed { chunk: ci, reason })?;
         if scene.cameras.len() != chunk.len {
@@ -308,6 +318,14 @@ pub fn reconstruct_plan(
                 scale: m.s,
                 gaussians: scene.splats.len(),
             };
+            // A depth is a DISTANCE, so registration's scale applies to it and
+            // its rotation and translation do not. Carrying the prior into
+            // world units here is what lets a later fit use it at all.
+            for d in scene.depth.iter_mut() {
+                for v in d.depth.iter_mut() {
+                    *v *= m.s as f32;
+                }
+            }
             (apply_sim3(&scene.splats, &m), cams, report)
         };
 
@@ -329,8 +347,12 @@ pub fn reconstruct_plan(
         for (k, cam) in world_cams.into_iter().enumerate() {
             // First placement wins: a frame's pose belongs to the chunk that
             // put it in the world, and re-placing it would move the anchor
-            // every later chunk registers against.
-            placed[chunk.start + k].get_or_insert(cam);
+            // every later chunk registers against. Its depth prior travels
+            // with it, for the same reason - the two have to agree.
+            if placed[chunk.start + k].is_none() {
+                placed[chunk.start + k] = Some(cam);
+                placed_depth[chunk.start + k] = scene.depth.get(k).cloned();
+            }
         }
         reports.push(report);
     }
@@ -355,7 +377,12 @@ pub fn reconstruct_plan(
             .collect();
         splats = splat::orient::apply(&splats, &r, &centre);
     }
-    Ok(Reconstruction { splats, cameras, reports })
+    let depth: Vec<crate::DepthPrior> = if placed_depth.iter().any(|d| d.is_some()) {
+        placed_depth.into_iter().map(Option::unwrap_or_default).collect()
+    } else {
+        Vec::new()
+    };
+    Ok(Reconstruction { splats, cameras, depth, reports })
 }
 
 // ------------------------------------------------------------- the whole run

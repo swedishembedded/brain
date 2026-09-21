@@ -269,8 +269,19 @@ fn local_scene(chunk: usize, splats: &Splats, cams: &[Camera]) -> ChunkScene {
         .collect();
     let moved = apply_sim3(splats, &w);
     let weights = moved.opacities.clone();
-    ChunkScene { splats: moved, cameras, weights }
+    // A depth prior in the CHUNK's own units: the same number for every pixel
+    // of every frame, so what the pipeline did to it is readable from the
+    // value alone. `chunk_world`'s scale is what should have been applied.
+    let depth = cams
+        .iter()
+        .map(|_| recon::DepthPrior { depth: vec![DEPTH_IN_CHUNK; 4], conf: vec![1.0, 0.5, 0.25, 0.0] })
+        .collect();
+    ChunkScene { splats: moved, cameras, weights, depth }
 }
+
+/// Arbitrary, and the point is that it is: what the test reads back is this
+/// number times the registration scale.
+const DEPTH_IN_CHUNK: f32 = 3.0;
 
 // ------------------------------------------------------------ accumulation
 
@@ -602,4 +613,47 @@ fn the_frames_per_pass_come_from_the_model() {
         assert!(cap.scene.worst_relative() < 1e-6, "worst residual {:.3e}", cap.scene.worst_relative());
     }
     let _ = std::fs::remove_dir_all(&d);
+}
+
+/// A depth prior is a DISTANCE, so registering a chunk scales it and nothing
+/// else touches it.
+///
+/// This is the one axis an RGB loss cannot constrain - a splat's image-plane
+/// gradient is orthogonal to its own viewing ray - so a prior that arrives in
+/// the wrong units is worse than none: it would anchor the fit confidently to
+/// the wrong place. Measured against analytic ground truth, supervising the
+/// right depth took a scene slid 5.7% along every ray back to 0.08%, while an
+/// RGB-only fit left it at 6.21%.
+#[test]
+fn a_depth_prior_arrives_in_world_units() {
+    let n = 8usize;
+    let cams = truth_cameras(n);
+    let plan = plan_chunks(n, 5, 3).unwrap();
+    let truth = truth_scene(12);
+    let nchunks = plan.chunks.len();
+    let parts: Vec<Splats> = (0..nchunks).map(|c| subset(&truth, 12, |i| i % nchunks == c)).collect();
+    let opts = ReconstructOpts { voxel: 0.0, max_scale_quantile: 1.0, orient: false, ..Default::default() };
+    let mut model = Fixture::new(&plan, cams, parts, 5);
+    let out = reconstruct_plan(&blank_frames(n), &plan, &mut model, &opts).expect("registers");
+
+    assert_eq!(out.depth.len(), n, "one prior per planned frame");
+    for (i, d) in out.depth.iter().enumerate() {
+        assert!(!d.depth.is_empty(), "frame {i} lost its prior");
+        // Whichever chunk placed this frame, its prior must have been scaled
+        // by that chunk's own registration scale - and the reports say what
+        // that was.
+        let want: Vec<f32> = out
+            .reports
+            .iter()
+            .map(|r| DEPTH_IN_CHUNK * r.scale as f32)
+            .collect();
+        assert!(
+            want.iter().any(|w| (d.depth[0] - w).abs() <= 1e-4 * w.abs().max(1.0)),
+            "frame {i} carries depth {} which is {DEPTH_IN_CHUNK} times none of the registration \
+             scales {:?}",
+            d.depth[0],
+            out.reports.iter().map(|r| r.scale).collect::<Vec<_>>()
+        );
+        assert_eq!(d.conf, vec![1.0, 0.5, 0.25, 0.0], "frame {i}: confidence is not a distance and must not be scaled");
+    }
 }
