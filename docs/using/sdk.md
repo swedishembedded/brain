@@ -166,8 +166,7 @@ real long context is unvalidated extrapolation past LFM2.5's native
 top of embeddings a pipeline already produced - a symmetric (CLIP-style)
 InfoNCE objective over `(anchor, positive)` pairs, entirely on the host
 (the batch is a few dozen vectors, nowhere near where GPU dispatch pays for
-itself). It does NOT fine-tune the backbone itself - that needs a seeded
-backward pass the engine does not have yet - so cache the pipeline's
+itself). It does NOT fine-tune the backbone itself - cache the pipeline's
 embeddings once and train against the cache:
 
 ```rust
@@ -179,6 +178,30 @@ for _ in 0..steps {
 }
 let refined = trainer.project(&pipe.embed("a new query")?);
 ```
+
+### Full-encoder contrastive fine-tuning (LFM2.5-Encoder only)
+
+`brain::EncoderFineTuner` (also `text`) trains the SAME InfoNCE objective,
+but re-runs a live LFM2.5-Encoder's own forward and backward every step
+instead of a frozen-embedding cache - it is training the checkpoint's own
+weights, driving `lfm2::model::Lfm`'s seeded backward pass. Qwen3 has no
+seeded backward pass built, so this surface is LFM2-only. Because LFM2's
+bidirectional attention has no padding mask, every text in a training batch
+must tokenize to at least a fixed `seq_len` (shorter is refused, not padded):
+
+```rust
+let mut tuner = brain::EncoderFineTuner::open(
+    "/models/lfm2-encoder.safetensors", "/models/lfm2-encoder/tokenizer.json",
+    queries.len(), 32,
+)?;
+for _ in 0..steps {
+    let loss = tuner.step(&queries, &matching_passages, 3e-5)?;
+}
+tuner.save("/models/lfm2-encoder-finetuned.safetensors");
+```
+
+`samples/text/encoder-finetune` runs this end to end, reporting recall@1
+before and after against `EmbeddingPipeline`.
 
 ## Speech-to-text
 
@@ -204,7 +227,7 @@ Name the surfaces you use and you get their dependencies and nothing else:
 | `image` | `ImagePipeline`, `Image` - text-to-image and image editing |
 | `creature` | `Creature`, `View` - a connectome running a body, and a window onto it |
 | `forecast` | `ForecastPipeline` - time-series forecasting |
-| `text` | `TextGenerationPipeline` - text generation, from a local checkpoint path; also the Qwen3 backbone of `EmbeddingPipeline` (32768-token context) and `EmbeddingTrainer` (contrastive fine-tuning over frozen embeddings) |
+| `text` | `TextGenerationPipeline` - text generation, from a local checkpoint path; also the Qwen3/LFM2.5-Encoder backbones of `EmbeddingPipeline` (32768-token context), `EmbeddingTrainer` (contrastive fine-tuning over frozen embeddings), and `EncoderFineTuner` (full-encoder contrastive fine-tuning, LFM2 only) |
 | `vision` | `EmbeddingPipeline` - CLIP text embedding (named for CLIP's registered domain, not the capability) |
 | `audio` | `TranscribePipeline` - speech-to-text (qwen3-asr, offline) |
 | `full` | every surface; this is the default |

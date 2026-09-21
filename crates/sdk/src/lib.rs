@@ -35,7 +35,7 @@
 //! | `image` | [`ImagePipeline`], [`Image`] -- text-to-image and image editing; [`UpscalePipeline`] -- super-resolution; [`RestorePipeline`] -- blind face restoration |
 //! | `creature` | [`Creature`], [`View`] -- a connectome running a body, and a window onto it |
 //! | `forecast` | [`ForecastPipeline`] -- time-series forecasting (kronos, timesfm3) |
-//! | `text` | [`TextGenerationPipeline`] -- text generation (qwen3, from a local checkpoint path or a hub id) |
+//! | `text` | [`TextGenerationPipeline`] -- text generation (qwen3, from a local checkpoint path or a hub id); [`EmbeddingPipeline`]'s Qwen3/LFM2.5-Encoder backends (long-context text embedding); [`EmbeddingTrainer`] -- contrastive training of a frozen-backbone projection head; [`EncoderFineTuner`] -- full-encoder contrastive fine-tuning (LFM2.5-Encoder only, via its seeded backward pass) |
 //! | `vision` | [`EmbeddingPipeline`] -- text embedding (CLIP); [`DetectionPipeline`] -- object detection (YOLOv8); [`SegmentPipeline`] -- promptable segmentation (SAM 2.1); [`DepthPipeline`] -- monocular depth (ZipDepth); [`GroundingPipeline`] -- open-vocabulary visual grounding (Florence-2); named for the `brain_arch::Domain` they resolve under, not the capability, since there is no `Embedding`/`Detection`/`Segmentation`/`Depth`/`Grounding` domain |
 //! | `audio` | [`TranscribePipeline`] -- speech-to-text (qwen3-asr, offline); [`TtsPipeline`] -- text-to-speech (Qwen3-TTS: speak/clone_voice/design; CosyVoice: clone_voice); [`MusicPipeline`] -- lyrics+caption-to-song (MiniMax Music 3) |
 //! | `video` | [`VideoPipeline`] -- text-to-video (Wan2.1 T2V) |
@@ -100,6 +100,8 @@ mod error;
 mod embedding;
 #[cfg(feature = "text")]
 mod embed_train;
+#[cfg(feature = "text")]
+mod embed_finetune;
 #[cfg(feature = "forecast")]
 mod forecast;
 #[cfg(feature = "vision")]
@@ -202,6 +204,8 @@ pub use detect::{DetectOptions, Detection, DetectionPipeline, DetectionPipelineB
 pub use embedding::{Embedding, EmbeddingOptions, EmbeddingPipeline, EmbeddingPipelineBuilder};
 #[cfg(feature = "text")]
 pub use embed_train::EmbeddingTrainer;
+#[cfg(feature = "text")]
+pub use embed_finetune::EncoderFineTuner;
 #[cfg(feature = "forecast")]
 pub use forecast::{ForecastPipeline, ForecastPipelineBuilder};
 #[cfg(feature = "vision")]

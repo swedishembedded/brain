@@ -4,11 +4,15 @@
 //! [`EmbeddingTrainer`]: a contrastively-trained linear refinement over a
 //! FROZEN embedding backbone.
 //!
-//! No engine crate in this workspace has a contrastive (InfoNCE) objective,
-//! and training the backbone itself needs a seeded backward pass neither
-//! `qwen3` nor `lfm2` has yet - real, unbuilt work, tracked separately. What
-//! this milestone trains instead is the projection head alone, over
-//! embeddings the backbone already produced: host arithmetic, deliberately,
+//! No engine crate in this workspace has a contrastive (InfoNCE) objective of
+//! its own, so this type owns one: `info_nce_core` (below), shared with
+//! `crate::embed_finetune::EncoderFineTuner`, which pushes the SAME loss
+//! back through a live LFM2 encoder's own seeded backward pass instead of
+//! this type's projection head - see that module's own doc for why it is a
+//! separate type rather than a mode of this one (only LFM2, not Qwen3, has a
+//! seeded backward pass to drive). What this type trains is the projection
+//! head alone, over embeddings the backbone already produced: host
+//! arithmetic, deliberately,
 //! the same reasoning `crates/decide/src/loss.rs`'s own module doc gives for
 //! why its (comparably small) objective lives on the host rather than as a
 //! WGSL kernel - a `dim x dim` linear layer over a batch of a few dozen
@@ -134,25 +138,27 @@ fn project_fwd(w: &[f32], b: &[f32], dim: usize, x: &[f32]) -> (Vec<f32>, Vec<f3
 /// L2-normalize backward: given `z`'s norm and `u = z/||z||`, push a
 /// gradient w.r.t. `u` back to a gradient w.r.t. `z`.
 /// `du/dz = (I - u u^T) / ||z||`.
-fn normalize_bwd(u: &[f32], norm: f64, d_u: &[f32]) -> Vec<f32> {
+pub(crate) fn normalize_bwd(u: &[f32], norm: f64, d_u: &[f32]) -> Vec<f32> {
     let dot: f64 = u.iter().zip(d_u).map(|(&ui, &dui)| ui as f64 * dui as f64).sum();
     u.iter().zip(d_u).map(|(&ui, &dui)| ((dui as f64 - ui as f64 * dot) / norm) as f32).collect()
 }
 
-/// Forward + backward over one batch: the symmetric InfoNCE loss, and
-/// `(loss, dW, db)` - the accumulated gradient from BOTH the anchor pass and
-/// the positive pass, since both share the same `W`/`b` (a siamese head).
-fn info_nce_backward(w: &[f32], b: &[f32], dim: usize, anchors: &[&[f32]], positives: &[&[f32]], temperature: f32) -> (f32, Vec<f32>, Vec<f32>) {
-    let batch = anchors.len();
+/// The symmetric InfoNCE loss over already-unit-norm vectors, and its
+/// gradient with respect to THOSE vectors themselves (`d_ua[i] = dL/d(ua[i])`,
+/// likewise `d_up`) - the part of this objective that has nothing to do with
+/// how `ua`/`up` were produced. [`info_nce_backward`] (below) calls this and
+/// pushes the result back through this type's own linear-plus-normalize
+/// head; `crate::embed_finetune::EncoderFineTuner` calls it directly and
+/// pushes the result back through a live encoder's own mean-pool instead -
+/// same loss, two different things sitting behind the L2-normalize.
+///
+/// `S[i][j] = cosine(anchor_i, positive_j) / tau`; inputs are already unit
+/// norm, so the dot product IS the cosine similarity.
+pub(crate) fn info_nce_core(dim: usize, ua: &[&[f32]], up: &[&[f32]], temperature: f32) -> (f32, Vec<Vec<f32>>, Vec<Vec<f32>>) {
+    let batch = ua.len();
+    assert_eq!(up.len(), batch, "one positive per anchor");
     let tau = temperature as f64;
 
-    let a_fwd: Vec<(Vec<f32>, Vec<f32>)> = anchors.iter().map(|x| project_fwd(w, b, dim, x)).collect();
-    let p_fwd: Vec<(Vec<f32>, Vec<f32>)> = positives.iter().map(|x| project_fwd(w, b, dim, x)).collect();
-    let ua: Vec<&Vec<f32>> = a_fwd.iter().map(|(_, u)| u).collect();
-    let up: Vec<&Vec<f32>> = p_fwd.iter().map(|(_, u)| u).collect();
-
-    // S[i][j] = cosine(anchor_i, positive_j) / tau. Inputs are already unit
-    // norm, so the dot product IS the cosine similarity.
     let mut s = vec![0.0f64; batch * batch];
     for i in 0..batch {
         for j in 0..batch {
@@ -193,6 +199,45 @@ fn info_nce_backward(w: &[f32], b: &[f32], dim: usize, anchors: &[&[f32]], posit
 
     // dL/d(u_anchor_i) = sum_j dS[i][j] * u_positive_j / tau
     // dL/d(u_positive_j) = sum_i dS[i][j] * u_anchor_i / tau
+    let mut d_ua = vec![vec![0.0f32; dim]; batch];
+    let mut d_up = vec![vec![0.0f32; dim]; batch];
+    for i in 0..batch {
+        let mut acc = vec![0.0f64; dim];
+        for j in 0..batch {
+            let scale = d_s[i * batch + j] / tau;
+            for k in 0..dim {
+                acc[k] += scale * up[j][k] as f64;
+            }
+        }
+        d_ua[i] = acc.iter().map(|v| *v as f32).collect();
+    }
+    for j in 0..batch {
+        let mut acc = vec![0.0f64; dim];
+        for i in 0..batch {
+            let scale = d_s[i * batch + j] / tau;
+            for k in 0..dim {
+                acc[k] += scale * ua[i][k] as f64;
+            }
+        }
+        d_up[j] = acc.iter().map(|v| *v as f32).collect();
+    }
+
+    (loss, d_ua, d_up)
+}
+
+/// Forward + backward over one batch: the symmetric InfoNCE loss, and
+/// `(loss, dW, db)` - the accumulated gradient from BOTH the anchor pass and
+/// the positive pass, since both share the same `W`/`b` (a siamese head).
+fn info_nce_backward(w: &[f32], b: &[f32], dim: usize, anchors: &[&[f32]], positives: &[&[f32]], temperature: f32) -> (f32, Vec<f32>, Vec<f32>) {
+    let batch = anchors.len();
+
+    let a_fwd: Vec<(Vec<f32>, Vec<f32>)> = anchors.iter().map(|x| project_fwd(w, b, dim, x)).collect();
+    let p_fwd: Vec<(Vec<f32>, Vec<f32>)> = positives.iter().map(|x| project_fwd(w, b, dim, x)).collect();
+    let ua: Vec<&[f32]> = a_fwd.iter().map(|(_, u)| u.as_slice()).collect();
+    let up: Vec<&[f32]> = p_fwd.iter().map(|(_, u)| u.as_slice()).collect();
+
+    let (loss, d_ua, d_up) = info_nce_core(dim, &ua, &up, temperature);
+
     let mut d_w = vec![0.0f32; dim * dim];
     let mut d_b = vec![0.0f32; dim];
     let mut accumulate = |x: &[f32], z: &[f32], u: &[f32], d_u: &[f32]| {
@@ -207,26 +252,10 @@ fn info_nce_backward(w: &[f32], b: &[f32], dim: usize, anchors: &[&[f32]], posit
         }
     };
     for i in 0..batch {
-        let mut d_u = vec![0.0f64; dim];
-        for j in 0..batch {
-            let scale = d_s[i * batch + j] / tau;
-            for k in 0..dim {
-                d_u[k] += scale * up[j][k] as f64;
-            }
-        }
-        let d_u: Vec<f32> = d_u.iter().map(|v| *v as f32).collect();
-        accumulate(anchors[i], &a_fwd[i].0, ua[i], &d_u);
+        accumulate(anchors[i], &a_fwd[i].0, ua[i], &d_ua[i]);
     }
     for j in 0..batch {
-        let mut d_u = vec![0.0f64; dim];
-        for i in 0..batch {
-            let scale = d_s[i * batch + j] / tau;
-            for k in 0..dim {
-                d_u[k] += scale * ua[i][k] as f64;
-            }
-        }
-        let d_u: Vec<f32> = d_u.iter().map(|v| *v as f32).collect();
-        accumulate(positives[j], &p_fwd[j].0, up[j], &d_u);
+        accumulate(positives[j], &p_fwd[j].0, up[j], &d_up[j]);
     }
 
     (loss, d_w, d_b)

@@ -1444,6 +1444,12 @@ impl Lfm {
     pub fn write_weight(&self, name: &str, data: &[f32]) {
         self.gpu.write(self.w(name), bytemuck::cast_slice(data));
     }
+    /// Writes a `ModelCard` (`family: "lfm"`) alongside the weights -
+    /// WITHOUT one, `brain::EmbeddingPipeline`'s card-family routing
+    /// (`resolve_text_backend`) cannot tell this checkpoint apart from a
+    /// Qwen3 one and silently misroutes it (the exact bug a missing-card
+    /// test fixture caught during the SDK's own LFM2 backend work - see
+    /// `crates/sdk/tests/embedding_pipeline.rs`'s `write_lfm2_embed_base`).
     pub fn save(&self, path: &str) {
         let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = self
             .ps
@@ -1451,7 +1457,8 @@ impl Lfm {
             .iter()
             .map(|(name, _)| (name.clone(), vec![self.ps.numel(name) as u64], self.read_weight(name)))
             .collect();
-        checkpoint::save(path, self.cfg.to_json(), &tensors);
+        let card = checkpoint::st::ModelCard::new("brain/lfm2", crate::spec::CARD_FAMILY);
+        checkpoint::save_carded(path, self.cfg.to_json(), &tensors, &card);
     }
 
     /// Run the forward graph; returns the masked-CE loss (materialized regime;

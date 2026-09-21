@@ -18,5 +18,6 @@ brain = { workspace = true, features = ["text"] }
 [package.metadata.brain]
 # `make check/samples` fails if the real `cargo tree` closure exceeds this.
 # Same closure as the other samples/text/* programs: the `text` surface
-# pulls in the whole qwen3 engine stack once.
-max-brain-crates = 31
+# pulls in the whole qwen3 engine stack once, plus `brain-lfm2` (the
+# LFM2.5-Encoder backend `EmbeddingPipeline`/`EmbeddingTrainer` also share).
+max-brain-crates = 32

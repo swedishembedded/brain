@@ -1,0 +1,23 @@
+[package]
+# Package names under samples/ are derived from the path:
+# `samples/text/encoder-finetune` -> `sample-text-encoder-finetune`. The
+# Makefile's `samples/%/{build,run}` rules depend on that mapping;
+# `make check/samples` enforces it.
+name = "sample-text-encoder-finetune"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sample application: full-encoder contrastive fine-tuning of LFM2.5-Encoder with brain::EncoderFineTuner, reporting recall@1 before and after via brain::EmbeddingPipeline."
+publish = false
+
+[dependencies]
+# The ONLY brain dependency a sample may have is the SDK facade, and it must
+# NAME the surfaces it uses - see samples/README.md rules 1 and 2.
+brain = { workspace = true, features = ["text"] }
+
+[package.metadata.brain]
+# `make check/samples` fails if the real `cargo tree` closure exceeds this.
+# Same closure as every other samples/text/* program: the `text` surface
+# pulls in the whole qwen3 + lfm2 engine stack once, regardless of which
+# backend a given run actually resolves to.
+max-brain-crates = 32

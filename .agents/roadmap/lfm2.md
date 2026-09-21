@@ -33,15 +33,24 @@ against the NPU export via OpenVINO.
       differences (`crates/gradcheck/src/lfm2_seeded.rs`,
       `lfm_seeded_analytic_grads_match_finite_differences`) over every
       parameter, isolated with the same fixed-random-linear-readout
-      objective `crates/decide`'s own probe uses.
-      **What this does NOT yet include**: an SDK-level training loop or
-      sample that actually drives full-encoder fine-tuning with this primitive
-      - `brain::EmbeddingTrainer` (`crates/sdk/src/embed_train.rs`) still only
-      trains a frozen-embedding projection head; wiring it (or a sibling
-      type) to ALSO unfreeze and step a live `Lfm::new_train` through
-      `seed_buf`/`backward_seeded` is real, separate, not-yet-built work.
-      Samples may only depend on `brain` (not `brain-lfm2` directly), so a
-      sample demonstrating this needs that SDK-level surface first.
+      objective `crates/decide`'s own probe uses. Driven end to end by
+      `brain::EncoderFineTuner` (`crates/sdk/src/embed_finetune.rs`): loads a
+      trainable `Lfm` via `Lfm::load_train`, forwards a fixed
+      `[2*batch_size, seq_len]` batch, mean-pools and L2-normalizes each row's
+      own sequence, computes the symmetric InfoNCE loss and gradient over
+      those pooled vectors (`crates/sdk/src/embed_train.rs`'s `info_nce_core`,
+      extracted so `EmbeddingTrainer`'s frozen-head path and this full-encoder
+      path share the same loss math), scatters `dL/d(pooled)/seq_len` across
+      every row of the sequence it pooled from (mean pool's own adjoint),
+      then `backward_seeded` plus one `adamw_step`. `samples/text/
+      encoder-finetune` demonstrates it end to end (recall@1 before/after,
+      via `brain::EmbeddingPipeline` on the checkpoint `EncoderFineTuner::save`
+      writes out).
+      **The real constraint this adds**: LFM2's bidirectional attention has
+      no padding mask, so every training batch must tokenize to at least a
+      fixed `seq_len` set at construction - a shorter text is refused, not
+      padded, and there is no mixed-length batching (mixed-length batched
+      INFERENCE is the same open item below).
 - [ ] 8k-context training: the masked-row gather before the MLM head needs a
       chunked-regime builder, since materializing full-vocabulary logits at
       8k context exceeds the device's per-buffer size limit

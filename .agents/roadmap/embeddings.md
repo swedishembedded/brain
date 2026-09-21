@@ -27,12 +27,14 @@ downstream project.
       gap below. Gradient-checked against finite differences directly (no
       `crates/gradcheck` integration - this objective has no GPU `ParamStore`
       for that trait's `CheckModel` shape to describe).
-- [x] Four samples: `samples/text/embed` (inference, including a real
+- [x] Five samples: `samples/text/embed` (inference, including a real
       long-document 32k example), `samples/text/retrieve` (exact
       brute-force top-k, explicitly NOT an ANN index), `samples/text/retrieve-json`
       (retrieval feeding a decoder for prompt-validated, NOT
       grammar-constrained, JSON output), `samples/text/embed-train`
-      (before/after recall@1 over `EmbeddingTrainer`).
+      (before/after recall@1 over `EmbeddingTrainer`, frozen backbone),
+      `samples/text/encoder-finetune` (before/after recall@1 over
+      `EncoderFineTuner`, full LFM2 backbone fine-tune).
 - [x] `qwen3::caps` moved off `BRAIN_QWEN_WEIGHTS`/`BRAIN_QWEN_TOKENIZER`
       (`host_env`) onto the model-store resolver (`ParamSpec::host_resolved()`,
       `qwen3::spec::Qwen3Spec`) for `generate`/`lora_train`/`lora_gate`/`embed`
@@ -48,9 +50,19 @@ downstream project.
       hidden states now reaches every encoder parameter, gradient-checked
       directly against finite differences
       (`lfm_seeded_analytic_grads_match_finite_differences`). This is the
-      primitive full-encoder contrastive fine-tuning needs; the SDK-level
-      training loop that actually DRIVES it with `EmbeddingTrainer`'s InfoNCE
-      objective is not yet built - see `.agents/roadmap/lfm2.md`.
+      primitive full-encoder contrastive fine-tuning needs - see
+      `.agents/roadmap/lfm2.md`.
+- [x] `brain::EncoderFineTuner`: full-encoder contrastive fine-tuning that
+      DRIVES the seeded backward pass above with the same symmetric InfoNCE
+      objective `EmbeddingTrainer` trains a frozen-backbone head with
+      (`crates/sdk/src/embed_train.rs`'s `info_nce_core`, extracted and
+      shared by both). Re-runs LFM2's own forward and backward every step -
+      LFM2-only, since only that backbone has a seeded backward pass built.
+      Every training batch must tokenize to at least a fixed `seq_len`
+      (LFM2's bidirectional attention has no padding mask, so a batch cannot
+      mix lengths); a shorter text is refused, not padded. `samples/text/
+      encoder-finetune` demonstrates it end to end (recall@1 before/after,
+      the same before/after discipline `samples/text/embed-train` uses).
 - [x] `lfm2::caps`'s `embed` action gains a `normalize` param, defaulting to
       `false` so the existing raw-mean output stays byte-identical for every
       caller that predates it.
@@ -85,13 +97,12 @@ downstream project.
 
 ## Not yet done
 
-- [ ] An SDK-level training loop over LFM2's new seeded backward - neither
-      `brain::EmbeddingTrainer` nor a sibling type yet unfreezes and steps a
-      live `lfm2::Lfm::new_train` through `seed_buf`/`backward_seeded` with
-      an InfoNCE (or other) objective; today `EmbeddingTrainer` only trains a
-      frozen-embedding projection head, over either backbone. Needed before a
-      SAMPLE can demonstrate full-encoder fine-tuning at all: samples may
-      only depend on `brain`, never `brain-lfm2` directly.
+- [ ] `EncoderFineTuner` batches only same-length-after-truncation text (a
+      fixed `seq_len` fixed at construction) - no ragged/mixed-length
+      training batch, the same underlying limitation
+      `.agents/roadmap/lfm2.md` already tracks for inference. A real corpus
+      of naturally varying-length passages needs either length-bucketed
+      batches or a real padding+mask scheme, neither built.
 - [ ] LFM2 at 32768 tokens is unvalidated extrapolation to 4x its native
       8192-token training extent - real quality there needs continued
       pretraining, not just the RoPE math being correct (which is tested).
