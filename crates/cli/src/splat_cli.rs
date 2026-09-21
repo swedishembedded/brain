@@ -7,6 +7,9 @@
 //!   brain splat render <scene.ply> --out img.ppm [--width N --height N]
 //!        [--eye x,y,z --target x,y,z --up x,y,z --fov D] [--depth] [--bg r,g,b]
 //!        [--aa] [--naive]
+//!   brain splat merge  <a.ply,b.ply,...> --cameras <a.json,b.json,...>
+//!        --overlap K --out merged.ply [--cameras-out J] [--prune VOXEL]
+//!        # K = how many trailing frames of each chunk lead the next one
 //!   brain splat view   <scene.ply> [--width N --height N --fov D --bg r,g,b]
 //!        [--frames N]                # interactive fly-through (WASD + mouse)
 //!
@@ -32,8 +35,9 @@ pub fn run_splat(argv: &[String]) {
         Some("view") => view(&argv[1..]),
         Some("fit") => fit_cmd(&argv[1..]),
         Some("orient") => orient_cmd(&argv[1..]),
+        Some("merge") => merge_cmd(&argv[1..]),
         other => {
-            eprintln!("usage: brain splat <info|render|view|fit|orient> ...  (got {other:?})");
+            eprintln!("usage: brain splat <info|render|view|fit|orient|merge> ...  (got {other:?})");
             std::process::exit(2);
         }
     }
@@ -462,6 +466,117 @@ fn orient_cmd(argv: &[String]) {
         std::process::exit(1);
     });
     println!("{path} -> {out} ({} gaussians, re-framed; cameras -> {cams_out})", oriented.len());
+}
+
+fn read_cams(path: &str) -> Vec<[f64; 16]> {
+    let text = std::fs::read_to_string(path).unwrap_or_else(|e| {
+        eprintln!("cannot read {path}: {e}");
+        std::process::exit(1);
+    });
+    let j: serde_json::Value = serde_json::from_str(&text).expect("valid cameras.json");
+    j.as_array()
+        .expect("array of cameras")
+        .iter()
+        .map(|c| {
+            let v: Vec<f64> = c["c2w"].as_array().unwrap().iter().map(|x| x.as_f64().unwrap()).collect();
+            v.try_into().unwrap()
+        })
+        .collect()
+}
+
+/// Chain chunks of one long capture into a single scene.
+///
+/// Chunk i+1 is aligned onto chunk i using the frames they share, and the
+/// resulting similarity is composed along the chain so everything lands in the
+/// first chunk's world. Composing means drift accumulates - each link's error
+/// is carried by every chunk after it - so the per-link residual is printed
+/// rather than hidden; it is the number that says whether the overlap was big
+/// enough.
+fn merge_cmd(argv: &[String]) {
+    let mut a = Args::new(argv);
+    let plys: Vec<String> =
+        a.positional().unwrap_or_default().split(',').filter(|s| !s.is_empty()).map(String::from).collect();
+    let cam_paths: Vec<String> =
+        a.str_or("--cameras", "").split(',').filter(|s| !s.is_empty()).map(String::from).collect();
+    let overlap = a.usize_or("--overlap", 0);
+    let out = crate::args::strip_out_name_prefix(&a.str_or("--out", "out/merged.ply"), "scene").to_string();
+    let cams_out = a.str_or("--cameras-out", &format!("{out}.cameras.json"));
+    let prune = a.f32_or("--prune", 0.0);
+    a.finish();
+
+    if plys.len() < 2 || cam_paths.len() != plys.len() {
+        eprintln!("merge: give N scenes and N cameras.json, comma separated (got {} and {})", plys.len(), cam_paths.len());
+        std::process::exit(2);
+    }
+    if overlap < 2 {
+        eprintln!("merge: --overlap must be at least 2 shared frames; a single shared frame fixes no scale");
+        std::process::exit(2);
+    }
+
+    let cams: Vec<Vec<[f64; 16]>> = cam_paths.iter().map(|p| read_cams(p)).collect();
+    let mut world = splat::align::Sim3::default();
+    let mut parts: Vec<Splats> = Vec::new();
+    let mut all: Vec<[f64; 16]> = Vec::new();
+    for (i, path) in plys.iter().enumerate() {
+        let s = splat::ply::read(path).unwrap_or_else(|e| {
+            eprintln!("cannot read {path}: {e}");
+            std::process::exit(1);
+        });
+        if i > 0 {
+            let prev = &cams[i - 1];
+            let cur = &cams[i];
+            if prev.len() < overlap || cur.len() < overlap {
+                eprintln!("merge: chunk {i} has fewer cameras than the stated overlap");
+                std::process::exit(2);
+            }
+            // the LAST `overlap` frames of the previous chunk are the FIRST
+            // `overlap` frames of this one
+            let tail: Vec<[f64; 16]> = prev[prev.len() - overlap..].to_vec();
+            let head: Vec<[f64; 16]> = cur[..overlap].to_vec();
+            let step = splat::align::sim3_from_cameras(&tail, &head).unwrap_or_else(|| {
+                eprintln!("merge: chunk {i} does not overlap the one before it usefully");
+                std::process::exit(2);
+            });
+            let res = splat::align::camera_residual(&tail, &head, &step);
+            let span = {
+                let e: Vec<[f64; 3]> = tail.iter().map(|m| [m[3], m[7], m[11]]).collect();
+                let c = [
+                    e.iter().map(|p| p[0]).sum::<f64>() / e.len() as f64,
+                    e.iter().map(|p| p[1]).sum::<f64>() / e.len() as f64,
+                    e.iter().map(|p| p[2]).sum::<f64>() / e.len() as f64,
+                ];
+                e.iter()
+                    .map(|p| ((p[0] - c[0]).powi(2) + (p[1] - c[1]).powi(2) + (p[2] - c[2]).powi(2)).sqrt())
+                    .fold(0.0f64, f64::max)
+                    .max(1e-9)
+            };
+            println!(
+                "  chunk {i}: scale x{:.4}, shared cameras land {:.4} off ({:.1}% of the overlap's own span)",
+                step.s, res, 100.0 * res / span
+            );
+            world = world.after(&step);
+        }
+        for m in &cams[i] {
+            all.push(splat::align::transform_c2w_sim3(m, &world));
+        }
+        parts.push(splat::align::apply_sim3(&s, &world));
+    }
+
+    let mut merged = splat::align::concat(&parts);
+    if prune > 0.0 {
+        // Overlapping chunks cover the same surface twice, which a viewer
+        // sees as stacked translucency. Fuse by opacity: a confident gaussian
+        // should outvote a faint duplicate of itself.
+        let w = merged.opacities.clone();
+        merged = splat::prune::voxel_merge(&merged, &w, prune, 0);
+    }
+    splat::ply::write(&out, &merged).unwrap_or_else(|e| {
+        eprintln!("PLY write failed: {e}");
+        std::process::exit(1);
+    });
+    let js: Vec<serde_json::Value> = all.iter().map(|m| serde_json::json!({ "c2w": m.to_vec() })).collect();
+    std::fs::write(&cams_out, serde_json::to_string_pretty(&js).unwrap()).ok();
+    println!("{} chunks -> {out} ({} gaussians; cameras -> {cams_out})", plys.len(), merged.len());
 }
 
 fn fit_cmd(argv: &[String]) {

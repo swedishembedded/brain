@@ -87,6 +87,26 @@ pub fn sim3_from_cameras(a: &[[f64; 16]], b: &[[f64; 16]]) -> Option<Sim3> {
     Some(Sim3 { s, r, t: [ca[0] - s * rb[0], ca[1] - s * rb[1], ca[2] - s * rb[2]] })
 }
 
+impl Sim3 {
+    /// `self` applied AFTER `inner`. Chaining chunks means composing these,
+    /// and composition is why a long capture drifts: every link's error is
+    /// carried by every chunk that follows it.
+    pub fn after(&self, inner: &Sim3) -> Sim3 {
+        let mut r = [0.0f64; 9];
+        for i in 0..3 {
+            for j in 0..3 {
+                r[i * 3 + j] = (0..3).map(|k| self.r[i * 3 + k] * inner.r[k * 3 + j]).sum();
+            }
+        }
+        let ri = mul3(&self.r, &inner.t);
+        Sim3 {
+            s: self.s * inner.s,
+            r,
+            t: [self.s * ri[0] + self.t[0], self.s * ri[1] + self.t[1], self.s * ri[2] + self.t[2]],
+        }
+    }
+}
+
 /// How far the shared cameras land from where they should, worst case. This is
 /// the honest read on whether two chunks really do overlap.
 pub fn camera_residual(a: &[[f64; 16]], b: &[[f64; 16]], m: &Sim3) -> f64 {
@@ -259,6 +279,21 @@ fn largest_eigenvector4(m: &[[f64; 4]; 4]) -> [f64; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn composing_two_hops_equals_doing_them_one_after_the_other() {
+        let a = Sim3 { s: 1.7, r: [0., -1., 0., 1., 0., 0., 0., 0., 1.], t: [0.5, -2.0, 3.0] };
+        let b = Sim3 { s: 0.4, r: [1., 0., 0., 0., 0., -1., 0., 1., 0.], t: [-1.0, 0.25, 0.5] };
+        let p = [0.3, -1.4, 2.2];
+        let step = |m: &Sim3, v: [f64; 3]| {
+            let r = mul3(&m.r, &v);
+            [m.s * r[0] + m.t[0], m.s * r[1] + m.t[1], m.s * r[2] + m.t[2]]
+        };
+        let want = step(&a, step(&b, p));
+        let got = step(&a.after(&b), p);
+        let err = (0..3).map(|k| (want[k] - got[k]).abs()).fold(0.0, f64::max);
+        assert!(err < 1e-12, "composed hop lands {err:.2e} from the two separate hops");
+    }
 
     #[test]
     fn nearest_rotation_recovers_a_known_rotation() {
