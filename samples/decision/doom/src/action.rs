@@ -85,6 +85,7 @@ const MIN_ROOM: i32 = 64;
 /// widths: enough that the extra ground covered is not immediately spent
 /// overshooting whatever is at the end of it.
 const RUN_ROOM: i32 = 256;
+const CIRCLE_TARGETS: usize = 2;
 /// How far `use` reaches, in map units - DOOM's own USERANGE.
 const USE_RANGE: i32 = 64;
 /// Close enough to "facing it" that turning again would waste a decision.
@@ -164,6 +165,11 @@ pub fn options(state: &State) -> Vec<Option_> {
     }
 
     // --- fight ------------------------------------------------------------
+    // How many of the things shooting at you get a circle-strafe pair. Every
+    // option costs a decision its share of attention and the encoder its
+    // share of time, and a room with six shooters in it would otherwise put
+    // twelve near-identical sentences in front of the model.
+    let mut circling = 0usize;
     for t in state.threats_in_view() {
         let facing = state.facing(t.bearing);
         // Naming the one already being fought is what makes finishing it
@@ -201,7 +207,8 @@ pub fn options(state: &State) -> Vec<Option_> {
         // the next shot comes. Offered only for the things actually shooting
         // at you, and only to a side with room to move, because a circle
         // strafe into a wall is just standing still while being shot.
-        if t.targeting_me == Some(true) {
+        if t.targeting_me == Some(true) && circling < CIRCLE_TARGETS {
+            circling += 1;
             for (name, key, room) in [("left", "strafe-left", c.left), ("right", "strafe-right", c.right)] {
                 if room < MIN_ROOM {
                     continue;

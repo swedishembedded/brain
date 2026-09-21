@@ -379,6 +379,21 @@ fn outcome_pull(belief: &[f32], costs: &[f32]) -> (f32, Vec<f32>) {
     (l, grad)
 }
 
+/// How well a critic predicts the score an episode finally reaches.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ValueFit {
+    /// Error on the episodes it was fitted to.
+    pub train_rmse: f32,
+    /// Error on episodes it has never seen. The number that matters.
+    pub test_rmse: f32,
+    /// Standard deviation of the thing being predicted, so the error above
+    /// can be read as a fraction of it. An error equal to this is a critic
+    /// that has learned the mean and nothing else.
+    pub spread: f32,
+    pub states: usize,
+    pub episodes: usize,
+}
+
 /// One decision, the candidates tried there, and what each was actually
 /// worth.
 ///
@@ -727,7 +742,7 @@ impl<E: Env> ControlPipeline<E> {
             // thousand rows; at 1024 a run died in its twenty-sixth minute
             // with everything it had learned thrown away, which is the cost
             // of sizing this to the typical request instead of the long one.
-            limits: Limits { cap_rows: 3072, cap_slots: 32, max_span: 256, overlap: 32 },
+            limits: Limits { cap_rows: 4096, cap_slots: 64, max_span: 256, overlap: 32 },
             seed: 0,
             max_steps: ControlSpec::default().max_steps,
         }
@@ -1583,6 +1598,17 @@ impl<E: Env> ControlPipeline<E> {
         )
     }
 
+    /// Fit a critic to predict how an episode ends, and report its error on
+    /// episodes it has never seen. See [`Self::probe_value`].
+    pub fn value_fit(
+        &mut self,
+        episodes: usize,
+        max_steps: usize,
+        epochs: usize,
+    ) -> Result<Option<ValueFit>> {
+        self.probe_value(episodes, max_steps, epochs)
+    }
+
     /// Would a different action have been worth taking?
     ///
     /// The one question imitation cannot ask. Cloning and DAgger both ask
@@ -1996,6 +2022,118 @@ impl<E: Env> ControlPipeline<E> {
             return Ok(None);
         }
         Ok(Some((out, candidates)))
+    }
+
+    /// Can a value function predict how an episode ENDS from where it is?
+    ///
+    /// The question everything model-based downstream of it depends on, asked
+    /// on its own before any of it is built. The score this sample is kept on
+    /// is computable on a prefix, so the value of a state IS the final score
+    /// reachable from it, and ranking actions needs no reward decomposition
+    /// at all:
+    ///
+    /// ```text
+    /// Q(s, a) = V(step(s, a))
+    /// ```
+    ///
+    /// Which matters because of what it replaces. Estimating that same Q by
+    /// rolling out to the horizon and reading the score costs a rollout per
+    /// candidate and carries the variance of one path through a system where
+    /// any decision changes everything after it - measured on this sample, a
+    /// noise of 0.073 against a signal of 0.048. A critic is one forward pass
+    /// and is deterministic; its error is approximation error, which more
+    /// data reduces, rather than path noise, which it does not.
+    ///
+    /// So this reports the held-out error against the spread of the thing
+    /// being predicted. Split BY EPISODE, never by step: consecutive states
+    /// of one episode share almost everything including the answer, and a
+    /// step-level split would let the training set memorise the test set's
+    /// episodes and report an error that means nothing.
+    fn probe_value(
+        &mut self,
+        episodes: usize,
+        max_steps: usize,
+        epochs: usize,
+    ) -> Result<Option<ValueFit>> {
+        // (features of every state, what that episode finally scored)
+        let mut runs: Vec<(Vec<Vec<f32>>, f32)> = Vec::new();
+        for _ in 0..episodes {
+            self.episode_seed += 1;
+            let mut obs = self.env.reset(self.episode_seed);
+            let mut feats = Vec::new();
+            for _ in 0..max_steps {
+                let options = self.env.actions();
+                if options.is_empty() {
+                    break;
+                }
+                let (probs, feature) = self.policy_and_feature(&obs, &options)?;
+                feats.push(feature);
+                let mut u = self.rng.next_f32();
+                let mut chosen = probs.len() - 1;
+                for (i, &pi) in probs.iter().enumerate() {
+                    if u < pi {
+                        chosen = i;
+                        break;
+                    }
+                    u -= pi;
+                }
+                let (next, _, done) = self.env.step(chosen);
+                obs = next;
+                if done {
+                    break;
+                }
+            }
+            let Some(scored) = self.env.progress() else {
+                return Ok(None);
+            };
+            runs.push((feats, scored));
+        }
+        if runs.len() < 4 {
+            return Ok(None);
+        }
+        let cut = (runs.len() * 4 / 5).max(1).min(runs.len() - 1);
+        let (train, test) = runs.split_at(cut);
+        let flat = |rs: &[(Vec<Vec<f32>>, f32)]| {
+            let mut x = Vec::new();
+            let mut y = Vec::new();
+            for (feats, scored) in rs {
+                for f in feats {
+                    x.push(f.clone());
+                    y.push(*scored);
+                }
+            }
+            (x, y)
+        };
+        let (xtr, ytr) = flat(train);
+        let (xte, yte) = flat(test);
+        if xtr.is_empty() || xte.is_empty() {
+            return Ok(None);
+        }
+        let d = xtr[0].len();
+        let mut critic = Critic::new(d, CRITIC_HIDDEN, self.rng.next_u64());
+        critic.fit(&xtr, &ytr, epochs, 0.02, 1e-5);
+        let rmse = |x: &[Vec<f32>], y: &[f32]| {
+            (x.iter()
+                .zip(y)
+                .map(|(f, &t)| {
+                    let e = (critic.predict(f) - t) as f64;
+                    e * e
+                })
+                .sum::<f64>()
+                / x.len().max(1) as f64)
+                .sqrt() as f32
+        };
+        let mean = yte.iter().sum::<f32>() / yte.len() as f32;
+        let sd = (yte.iter().map(|&t| ((t - mean) as f64).powi(2)).sum::<f64>()
+            / yte.len() as f64)
+            .sqrt() as f32;
+        Ok(Some(ValueFit {
+            train_rmse: rmse(&xtr, &ytr),
+            test_rmse: rmse(&xte, &yte),
+            spread: sd,
+            states: xtr.len() + xte.len(),
+            episodes: runs.len(),
+        }))
     }
 
     /// Rounds of: play, keep the episodes that actually scored best, and
