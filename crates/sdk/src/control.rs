@@ -179,6 +179,41 @@ pub trait Env {
     fn resume(&mut self) -> Option<String> {
         None
     }
+
+    /// Hold the state in a NUMBERED slot, and say whether it took.
+    ///
+    /// [`Env::hold`] holds one state, which is what a counterfactual needs -
+    /// go back to this decision. A search that returns to promising places
+    /// needs many, because its whole advantage is resuming from where it got
+    /// to rather than from the start: the depth it can reach stops being
+    /// exponential in the length of an episode. `slots` says how many there
+    /// are, and zero means the environment cannot do this at all.
+    fn hold_at(&mut self, _slot: usize) -> bool {
+        false
+    }
+
+    /// Go back to what a numbered slot is holding.
+    fn resume_from(&mut self, _slot: usize) -> Option<String> {
+        None
+    }
+
+    /// How many numbered slots there are. Zero disables the search entirely.
+    fn slots(&self) -> usize {
+        0
+    }
+
+    /// A coarse name for WHERE the run is, for an archive to key on.
+    ///
+    /// The one piece of judgement a search like this needs, and it wants to
+    /// be as free of the game as possible: two states with the same name are
+    /// treated as the same place and only one of them is kept. Position
+    /// rounded to a grid plus what the player is CARRYING is enough, and the
+    /// carrying half is what matters - picking up a key makes every cell
+    /// reachable with it new, so the search files them and goes on from
+    /// there. Nothing has to tell it that keys open doors.
+    fn cell(&self) -> Option<String> {
+        None
+    }
 }
 
 /// The seeds [`Stages::run_eval`] scores on.
@@ -196,7 +231,23 @@ pub const EVAL_SEEDS: std::ops::Range<u64> = 1_000_000..1_000_200;
 
 /// One demonstration: the state, the options that were offered, and which of
 /// them the teacher took.
-type Demo = (String, Vec<String>, usize);
+/// One decision, with everything needed to reconstruct the question it was
+/// an answer to.
+///
+/// The objective is part of it. Without it a demonstration was replayed
+/// against whatever objective the environment happened to be holding when it
+/// was fitted, so under `--mix` - where the mission is drawn per episode and
+/// prepended to every option - examples gathered under "kill everything"
+/// could all be trained as though they had been gathered under "reach the
+/// exit". The observation is the same, the right action is not, and nothing
+/// in the record said which had been asked.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct Demo {
+    objective: String,
+    observation: String,
+    options: Vec<String>,
+    action: usize,
+}
 /// One teacher episode: what it scored, and what it did - kept together so the
 /// bad ones can be dropped whole rather than a step at a time.
 type TeacherRun = (f32, Vec<Demo>);
@@ -233,6 +284,29 @@ struct Branch {
     noise: f32,
     /// Game steps it cost to find out.
     steps: usize,
+}
+
+/// The option that means the same as `prev`, if one is on offer.
+///
+/// An option list rebuilt from the world every step has no stable index, so
+/// repeating an action has to be done by intention rather than by number.
+/// Options here are sentences whose opening words carry the intention and
+/// whose numbers carry the situation - "walk forward, 320 units of open floor
+/// ahead" - so the longest shared run of opening words identifies it.
+///
+/// Two words at minimum, or "turn left and go that way" would count as a
+/// repeat of "turn right and go that way".
+fn same_again(prev: &str, options: &[String]) -> Option<usize> {
+    let words = |s: &str| s.split_whitespace().map(str::to_string).collect::<Vec<_>>();
+    let p = words(prev);
+    let mut best: Option<(usize, usize)> = None;
+    for (i, o) in options.iter().enumerate() {
+        let shared = words(o).iter().zip(&p).take_while(|(a, b)| a == b).count();
+        if shared >= 2 && best.is_none_or(|(n, _)| shared > n) {
+            best = Some((shared, i));
+        }
+    }
+    best.map(|(_, i)| i)
 }
 
 /// The best head a phase has seen, INCLUDING the one it was handed.
@@ -404,6 +478,11 @@ struct Probe {
     /// What kind of situation it came from, for the breakdown. See
     /// [`Env::label`].
     label: Option<String>,
+    /// The objective this decision was taken under, for the same reason a
+    /// [`Demo`] carries one: a probe is replayed, and replaying it against
+    /// whatever objective the environment holds later asks a different
+    /// question of the same observation.
+    objective: String,
     observation: String,
     options: Vec<String>,
     /// `(option, what the whole trajectory scored taking it)`. The first is
@@ -688,6 +767,13 @@ pub struct ControlPipeline<E: Env> {
     /// Mean squared error of the last critic fit - whether the baseline is
     /// worth trusting.
     critic_mse: f32,
+    /// The reward discount the advantage estimator uses.
+    ///
+    /// Read from the spec rather than baked in: it was the constant 0.99
+    /// while the sample's own reward was built to telescope to the final
+    /// score undiscounted, so the estimator was optimising something the run
+    /// was not kept on. See [`GAMMA`].
+    gamma: f32,
     /// Episode horizon for [`Stages::run_eval`] and [`Flow::play`].
     ///
     /// Set from [`ControlSpec::max_steps`] when a run trains, and settable on
@@ -708,14 +794,48 @@ impl<E: Env> std::fmt::Debug for ControlPipeline<E> {
 /// The encoder arrives pretrained and the head does not.
 const ENCODER_LR: f32 = 1e-5;
 const HEAD_LR: f32 = 3e-4;
-/// Reward discount. Episodes here are short, so this barely discounts - it is
-/// present so a long episode does not weight its first move like its last.
-const GAMMA: f32 = 0.99;
+/// The discount used when a caller has not chosen one.
+///
+/// ONE, not 0.99, and the difference is the whole task. Under `--reward
+/// gauge` a decision is paid what it moved the score the run is finally kept
+/// on, so an episode's UNDISCOUNTED return is exactly that score. Discount it
+/// and that identity breaks:
+///
+/// ```text
+/// sum_t gamma^t (M_t+1 - M_t)
+///     = -M_0 + (1-gamma) sum_t gamma^(t-1) M_t + gamma^(T-1) M_T
+/// ```
+///
+/// The middle term is score held EARLY, which the gauge does not reward and
+/// the run is not kept on. At 0.99 the ranking inverts on cases that matter:
+/// 0.4 gained at decision 0 and lost again by 200 discounts to about 0.35,
+/// while 1.5 gained once at decision 300 discounts to about 0.07 - so a run
+/// that ended with nothing outranks one that finished the level.
+///
+/// A finite-horizon task scored on where the run ended wants no discount at
+/// all. `--gamma` is there for a caller whose task genuinely prefers sooner
+/// to later.
+const GAMMA: f32 = 1.0;
 /// The bias/variance dial on the advantage estimator: 0 is the one-step TD
 /// error and 1 is the full return minus the baseline. The usual middle.
 const GAE_LAMBDA: f32 = 0.95;
 /// The critic's hidden width, over the encoder's 384-d pooled embedding.
 const CRITIC_HIDDEN: usize = 64;
+
+/// How often an exploring episode starts from a place already found rather
+/// than from the level's own start.
+///
+/// Not always: a search that never starts fresh stops sampling the opening of
+/// a level, and the opening is where every trajectory has to begin.
+const RESUME_CHANCE: f32 = 0.8;
+
+/// How often an exploring step repeats what it just did.
+///
+/// Go-Explore's own value for Atari, and the single most load-bearing
+/// constant in the search. Without it exploration is a random walk, which
+/// covers ground like the square root of the steps taken and therefore
+/// covers almost none.
+const REPEAT_CHANCE: f32 = 0.95;
 /// Transitions per optimizer step. Reference PPO splits a rollout into a
 /// handful of minibatches; with a few hundred transitions per iteration this
 /// is that handful.
@@ -749,8 +869,15 @@ impl<E: Env> ControlPipeline<E> {
     }
 
     fn question(&self, options: &[String]) -> Question {
+        self.question_for(&self.env.objective(), options)
+    }
+
+    /// The question as it was ASKED, rather than as the environment would ask
+    /// it now. A record that is replayed has to carry its own objective - see
+    /// [`Demo`].
+    fn question_for(&self, objective: &str, options: &[String]) -> Question {
         Question::Choice {
-            instructions: self.env.objective(),
+            instructions: objective.to_string(),
             options: options.iter().map(Opt::new).collect(),
         }
     }
@@ -883,7 +1010,7 @@ impl<E: Env> ControlPipeline<E> {
             }
         };
         let values: Vec<f32> = steps.iter().map(|s| self.critic.predict(&s.feature)).collect();
-        let adv = gae(&rewards, &values, GAMMA, self.gae_lambda, truncated_value);
+        let adv = gae(&rewards, &values, self.gamma, self.gae_lambda, truncated_value);
         for ((s, a), v) in steps.iter_mut().zip(&adv).zip(&values) {
             s.advantage = *a;
             // The critic's regression target is the advantage plus what it
@@ -933,7 +1060,7 @@ impl<E: Env> ControlPipeline<E> {
                 let Some(teacher) = self.env.demo() else {
                     return Ok(0.0);
                 };
-                demos.push((obs.clone(), options, teacher));
+                demos.push(Demo { objective: self.env.objective(), observation: obs.clone(), options, action: teacher });
                 let (next, reward, done) = self.env.step(teacher);
                 ret += reward;
                 obs = next;
@@ -1006,11 +1133,15 @@ impl<E: Env> ControlPipeline<E> {
             for chunk in order.chunks(MINIBATCH) {
                 self.model.zero_grads();
                 for &d in chunk {
-                    let (obs, options, teacher) = &demos[d];
-                    let q = self.question(options);
+                    let demo = &demos[d];
+                    // The objective it was COLLECTED under, not whichever one
+                    // the environment is holding now. See [`Demo`].
+                    let q = self.question_for(&demo.objective, &demo.options);
                     epoch_loss += self
                         .model
-                        .accumulate(obs, &q, |sc| decide::loss::decision_loss(sc, *teacher, &ce))
+                        .accumulate(&demo.observation, &q, |sc| {
+                            decide::loss::decision_loss(sc, demo.action, &ce)
+                        })
                         .map_err(Error::Backend)?;
                     *step += 1;
                 }
@@ -1096,7 +1227,7 @@ impl<E: Env> ControlPipeline<E> {
                     }
                     u -= pi;
                 }
-                demos.push((std::mem::take(&mut obs), options, teacher));
+                demos.push(Demo { objective: self.env.objective(), observation: std::mem::take(&mut obs), options, action: teacher });
                 let (next, _, done) = self.env.step(chosen);
                 obs = next;
                 if done {
@@ -1723,6 +1854,7 @@ impl<E: Env> ControlPipeline<E> {
                             }
                             probes.push(Probe {
                                 label: self.env.label(),
+                                objective: self.env.objective(),
                                 observation: obs.clone(),
                                 options: options.clone(),
                                 tried: tried
@@ -2185,6 +2317,196 @@ impl<E: Env> ControlPipeline<E> {
         }
     }
 
+    /// Search for successful trajectories by returning to places it has been.
+    ///
+    /// The half of a search-and-compress loop that this sample was missing.
+    /// Sampling from the policy's own distribution can only find trajectories
+    /// a short distance from what it already does - measured here, after one
+    /// round nine episodes in ten beat nothing at all - so the archive stops
+    /// filling and the compression has nothing new to compress.
+    ///
+    /// The fix is not more sampling, it is resuming. Keep an archive of the
+    /// places the run has been, go back to one, and explore from THERE. The
+    /// depth reachable then stops being exponential in the length of an
+    /// episode, because a strategy four hundred decisions deep is reached by
+    /// four hundred decisions of archive plus a handful of new ones rather
+    /// than by four hundred lucky draws in a row. This is Go-Explore, and its
+    /// expensive requirement - a simulator that can be restored to any state
+    /// - is the one thing already built here.
+    ///
+    /// Two properties are worth being explicit about.
+    ///
+    /// **It does not use the policy.** Exploration is random over the options
+    /// the game offers, which costs an engine step and no forward pass:
+    /// measured on this sample, about 4 ms against 100 ms with a network in
+    /// the loop. The policy's job is the other half, compressing what this
+    /// finds.
+    ///
+    /// **It is told nothing about the game.** A cell is where the run is and
+    /// what it carries - see [`Env::cell`] - so picking up a key makes every
+    /// place reachable with it new, and the search files those and goes on.
+    /// Nothing says that keys open doors.
+    fn explore(&mut self, spec: &ControlSpec) -> Result<Vec<(String, f32, Vec<Demo>)>> {
+        let slots = self.env.slots();
+        if slots == 0 || spec.explore == 0 {
+            return Ok(Vec::new());
+        }
+        // cell -> (slot holding it, score of the run that got there, how many
+        // times it has been chosen to explore from)
+        let mut seen: std::collections::HashMap<String, (usize, f32, u32)> =
+            std::collections::HashMap::new();
+        let mut best: std::collections::HashMap<String, (f32, Vec<Demo>)> =
+            std::collections::HashMap::new();
+        let mut next_slot = 1usize;
+        let (mut steps, mut restores) = (0usize, 0usize);
+
+        // The level is stood up ONCE. After that every exploring episode
+        // resumes from a cell, and there is no reset anywhere in the loop -
+        // an environment that begins an episode throws every held state away,
+        // because a snapshot of the last episode would restore the wrong
+        // level. There is also no "sometimes start fresh" branch: the level's
+        // own start is already a cell, so starting fresh is resuming THAT
+        // cell and the selection rule does it without a special case.
+        self.episode_seed += 1;
+        let mut obs = self.env.reset(self.episode_seed);
+        let label = self.env.label().unwrap_or_else(|| "world".into());
+        // The starting point, so the archive is never empty and the first
+        // pick has somewhere to go.
+        if let Some(cell) = self.env.cell() {
+            if self.env.hold_at(next_slot) {
+                seen.insert(cell, (next_slot, self.env.progress().unwrap_or(0.0), 0));
+                next_slot += 1;
+            }
+        }
+        let mut refused = 0usize;
+
+        for _ in 0..spec.explore {
+            let mut trail: Vec<Demo> = Vec::new();
+
+            // Go back to a cell chosen with probability proportional to
+            //
+            //     W = 1 / sqrt(C_seen + 1)
+            //
+            // which is the selection weight Go-Explore reports (Ecoffet et
+            // al., "First return, then explore", Extended Data Table 1). A
+            // cell seen once is worth about seven times one seen fifty times,
+            // so the frontier is favoured without the rest of the archive
+            // ever being cut off - which is the detachment the archive exists
+            // to prevent. Sampling from the distribution rather than taking
+            // the N least-seen matters for the same reason.
+            let pick = {
+                let weights: Vec<(&String, f64)> = seen
+                    .iter()
+                    .map(|(c, (_, _, n))| (c, 1.0 / ((*n as f64) + 1.0).sqrt()))
+                    .collect();
+                let total: f64 = weights.iter().map(|(_, w)| *w).sum();
+                let mut u = self.rng.next_f32() as f64 * total;
+                let mut chosen = weights[weights.len() - 1].0;
+                for (c, w) in &weights {
+                    if u < *w {
+                        chosen = c;
+                        break;
+                    }
+                    u -= *w;
+                }
+                chosen.clone()
+            };
+            let slot = match seen.get_mut(&pick) {
+                Some((slot, _, n)) => {
+                    *n += 1;
+                    *slot
+                }
+                None => continue,
+            };
+            match self.env.resume_from(slot) {
+                Some(o) => {
+                    obs = o;
+                    restores += 1;
+                }
+                // A refusal is reported, never papered over by starting the
+                // level again - a search that quietly restarts is a search
+                // that explores the opening a thousand times and says it
+                // resumed.
+                None => {
+                    refused += 1;
+                    continue;
+                }
+            }
+
+            // What was done last, so it can be done again. See below.
+            let mut last: Option<String> = None;
+            for _ in 0..spec.explore_steps {
+                let options = self.env.actions();
+                if options.is_empty() {
+                    break;
+                }
+                // KEEP DOING THE SAME THING, 95% of the time.
+                //
+                // "To help explore in a consistent direction, the probability
+                // of repeating the previous action is 95% for Atari and 90%
+                // for robotics" - Go-Explore, Methods. Without it, uniform
+                // random per step is a random walk: it covers distance like
+                // the square root of the steps taken, so a hundred steps go
+                // almost nowhere and the archive stops growing. Measured here
+                // before this was added, twenty-four times the search budget
+                // bought one and a third times the cells.
+                //
+                // An option list that is rebuilt every step has no stable
+                // action INDEX, so "the same action" is matched on the text -
+                // "walk forward, 320 units" and "walk forward, 288 units" are
+                // the same intention with a different number in it.
+                let a = match last.as_deref().filter(|_| self.rng.next_f32() < REPEAT_CHANCE) {
+                    Some(prev) => same_again(prev, &options)
+                        .unwrap_or_else(|| (self.rng.next_u64() as usize) % options.len()),
+                    None => (self.rng.next_u64() as usize) % options.len(),
+                };
+                last = Some(options[a].clone());
+                trail.push(Demo { objective: self.env.objective(), observation: obs.clone(), options, action: a });
+                let (next, _, done) = self.env.step(a);
+                obs = next;
+                steps += 1;
+                if done {
+                    break;
+                }
+                let Some(cell) = self.env.cell() else { continue };
+                let scored = self.env.progress().unwrap_or(0.0);
+                let fresh = !seen.contains_key(&cell);
+                let better = seen.get(&cell).is_some_and(|(_, v, _)| scored > *v);
+                if (fresh || better) && next_slot < slots {
+                    let slot = match seen.get(&cell) {
+                        Some((s, _, _)) if better => *s,
+                        _ => {
+                            let s = next_slot;
+                            next_slot += 1;
+                            s
+                        }
+                    };
+                    if self.env.hold_at(slot) {
+                        let visits = seen.get(&cell).map(|(_, _, n)| *n).unwrap_or(0);
+                        seen.insert(cell, (slot, scored, visits));
+                    }
+                }
+                let slot = best.entry(label.clone()).or_insert((f32::NEG_INFINITY, Vec::new()));
+                if scored > slot.0 {
+                    *slot = (scored, trail.clone());
+                }
+            }
+        }
+        if refused > 0 {
+            println!("    explore: {refused} resumes were REFUSED - the archive is not restorable");
+        }
+        println!(
+            "    explore: {} cells found over {steps} random steps, {restores} resumed from, \
+             best {}",
+            seen.len(),
+            best.values()
+                .map(|(v, _)| format!("{v:.2}"))
+                .collect::<Vec<_>>()
+                .join("/")
+        );
+        Ok(best.into_iter().map(|(l, (v, d))| (l, v, d)).collect())
+    }
+
     /// Rounds of: play, keep the episodes that actually scored best, and
     /// clone those.
     ///
@@ -2266,7 +2588,7 @@ impl<E: Env> ControlPipeline<E> {
                         }
                         u -= pi;
                     }
-                    demos.push((obs.clone(), options, chosen));
+                    demos.push(Demo { objective: self.env.objective(), observation: obs.clone(), options, action: chosen });
                     let (next, _, done) = self.env.step(chosen);
                     obs = next;
                     if done {
@@ -2282,6 +2604,11 @@ impl<E: Env> ControlPipeline<E> {
                 // bucket, which is the old behaviour.
                 let label = self.env.label().unwrap_or_else(|| "world".into());
                 fresh.push((label, scored, demos));
+            }
+            // The search runs first, so what it finds is in the archive
+            // before this round's fit reads it.
+            for (label, score, demos) in self.explore(spec)? {
+                fresh.push((label, score, demos));
             }
             let played: Vec<f32> = fresh.iter().map(|r| r.1).collect();
             let mean = played.iter().sum::<f32>() / played.len().max(1) as f32;
@@ -2354,7 +2681,7 @@ impl<E: Env> ControlPipeline<E> {
             let Some(best) = measured_best(&scored) else {
                 continue;
             };
-            let q = self.question(&p.options);
+            let q = self.question_for(&p.objective, &p.options);
             let scores = self
                 .model
                 .score(&p.observation, std::slice::from_ref(&q))
@@ -2438,7 +2765,7 @@ impl<E: Env> ControlPipeline<E> {
                 for &i in chunk {
                     let p = &probes[i];
                     let c = &costs[i];
-                    let q = self.question(&p.options);
+                    let q = self.question_for(&p.objective, &p.options);
                     let mut shift = 0.0f32;
                     let mut here = 0.0f32;
                     epoch_loss += self
@@ -2718,6 +3045,14 @@ pub struct ControlSpec {
     /// every generation starts its search from nothing and a level solved in
     /// one generation can be silently lost in the next.
     pub archive: Option<String>,
+    /// Exploring episodes run before each round of self-imitation. `0` is off.
+    ///
+    /// See [`ControlPipeline::explore`]. This is the SEARCH half: it costs no
+    /// forward passes and its job is to put trajectories in the archive that
+    /// the policy could not have found by sampling itself.
+    pub explore: usize,
+    /// Steps taken by each exploring episode after it resumes.
+    pub explore_steps: usize,
     /// Rounds of playing, keeping the best episodes and cloning those. `0`
     /// is off.
     ///
@@ -2847,7 +3182,7 @@ impl Default for ControlSpec {
             max_steps: 40,
             // Entropy higher than a supervised run would want: a control policy
             // that commits early stops seeing the states it has not solved.
-            policy: PolicyConfig { clip: 0.2, entropy: 0.02, gamma: 0.99, anchor: 0.0, target_kl: 0.02 },
+            policy: PolicyConfig { clip: 0.2, entropy: 0.02, gamma: GAMMA, anchor: 0.0, target_kl: 0.02 },
             seed: 0,
             warmup_episodes: 60,
             warmup_epochs: 12,
@@ -2855,6 +3190,8 @@ impl Default for ControlSpec {
             improve: 0,
             states: 200,
             alternatives: 2,
+            explore: 0,
+            explore_steps: 60,
             archive: None,
             self_imitate: 0,
             beta: 0.5,
@@ -2928,6 +3265,13 @@ impl ControlSpec {
         self.credit = credit;
         self.repeats = repeats;
         self.wide = wide;
+        self
+    }
+
+    /// Exploring episodes per round, and how far each goes after resuming.
+    pub fn exploring(mut self, episodes: usize, steps: usize) -> ControlSpec {
+        self.explore = episodes;
+        self.explore_steps = steps;
         self
     }
 
@@ -3015,6 +3359,7 @@ impl<E: Env> Stages for ControlPipeline<E> {
         );
         // The estimator runs inside an episode, which never sees the spec.
         self.gae_lambda = spec.gae_lambda;
+        self.gamma = spec.policy.gamma;
         if spec.warmup_episodes > 0 {
             let bc = self.clone_teacher(
                 spec.warmup_episodes,
@@ -3322,11 +3667,51 @@ impl<E: Env> ControlPipelineBuilder<E> {
             episode_seed: 0,
             reference: None,
             gae_lambda: GAE_LAMBDA,
+            gamma: GAMMA,
             last: Rollout::default(),
             critic: Critic::new(cfg_width, CRITIC_HIDDEN, self.seed ^ 0x1c1),
             critic_mse: 0.0,
             max_steps: self.max_steps,
         })
+    }
+}
+
+#[cfg(test)]
+mod repeat_tests {
+    use super::same_again;
+
+    /// Repeating an action has to survive the numbers in the sentence
+    /// changing, because they change at every step - the room ahead is 320
+    /// units and then 288.
+    #[test]
+    fn the_same_intention_is_found_again_when_its_numbers_have_moved() {
+        let options = vec![
+            "attack the imp 150 units away, 12 degrees to your left".to_string(),
+            "walk forward, 288 units of open floor ahead".to_string(),
+            "turn around to see what is behind you".to_string(),
+        ];
+        assert_eq!(same_again("walk forward, 320 units of open floor ahead", &options), Some(1));
+    }
+
+    /// And must not mistake the opposite intention for the same one. Without
+    /// the two-word minimum, "turn left and go that way" and "turn right and
+    /// go that way" share their first word and a search would wander.
+    #[test]
+    fn the_opposite_way_is_not_the_same_action() {
+        let options = vec![
+            "turn right and go that way, 320 units of room".to_string(),
+            "push on the wall or door directly in front of you".to_string(),
+        ];
+        assert_eq!(same_again("turn left and go that way, 288 units of room", &options), None);
+    }
+
+    /// When the intention is simply no longer available - the imp is dead,
+    /// the door is open - there is nothing to repeat and the caller falls
+    /// back to choosing afresh.
+    #[test]
+    fn an_intention_that_is_gone_is_reported_gone() {
+        let options = vec!["walk forward, 96 units of open floor ahead".to_string()];
+        assert_eq!(same_again("attack the imp 150 units away, straight ahead", &options), None);
     }
 }
 
