@@ -38,6 +38,10 @@ use splat::Kernels;
 /// that the teeth test can show accuracy waving it through.
 const ACCURACY_FLOOR_DB: f64 = 24.0;
 const SHARPNESS_BAND: std::ops::Range<f64> = 0.70..1.60;
+/// A view the fit never saw is held to a lower bar than one it optimized
+/// against - it is a harder question, and the gap between the two is itself
+/// the thing worth watching.
+const HELD_OUT_FLOOR_DB: f64 = 21.0;
 
 struct Lcg(u64);
 impl Lcg {
@@ -187,5 +191,66 @@ fn the_gate_rejects_a_blurred_render_that_accuracy_alone_accepts() {
     assert!(
         !SHARPNESS_BAND.contains(&sharp),         "the blurred render kept {sharp:.2}x of the sharpness, inside the {SHARPNESS_BAND:?} band \
          the gate above allows - the band is too wide to catch a smear"
+    );
+}
+
+/// A scene has to be right from somewhere it was NOT fitted.
+///
+/// Every other measure here renders the views the fit optimized against, and a
+/// fit can satisfy those while producing something unusable. It reaches for
+/// shapes that are invisible from the view that created them - a needle lined
+/// up with a training ray costs nothing in that frame and streaks across every
+/// other. Measured on a real reconstruction: 32.7 dB from its own cameras, and
+/// a picture full of hairs the moment the camera moved.
+///
+/// So one view is held OUT of the fit and scored afterwards. That is the
+/// number that says whether a scene models the subject or merely reproduces
+/// its inputs.
+#[test]
+fn a_fitted_scene_is_still_right_from_a_view_it_never_saw() {
+    let g = Gpu::new_cpu(splat::PIPELINES);
+    let ks = Kernels::at(0);
+    let (w, h) = (72u32, 72u32);
+    let truth = board(16);
+    let all = views(&g, ks, &truth, w, h).0;
+
+    // fit on every view but the last, score on the last
+    let (train, test) = all.split_at(all.len() - 1);
+    let mut init = truth.clone();
+    let mut r = Lcg(0xfeed);
+    for v in init.colors.iter_mut() {
+        *v = 0.5 + (*v - 0.5) * 0.25 + (r.next() - 0.5) * 0.1;
+    }
+    let cfg = FitCfg { iters: 200, lr: 8e-3, log_every: 0, ..Default::default() };
+    let (fitted, _) = fit(&g, ks, &init, train, &cfg, &mut |_, _| true);
+    let loose = FitCfg { iters: 200, lr: 8e-3, log_every: 0, max_aspect: 0.0, ..Default::default() };
+    let (needly, _) = fit(&g, ks, &init, train, &loose, &mut |_, _| true);
+
+    let o = RenderOpts::default();
+    let mut ren = Renderer::new(&g, ks, fitted.len().max(truth.len()), w, h, 0);
+    let gs = GpuSplats::upload(&g, &fitted);
+    let t = &test[0];
+    ren.render(&g, &gs, &t.cam, &o);
+    let rgba = ren.read_rgba(&g, w, h);
+    let rgb: Vec<f32> = rgba.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect();
+    let (wu, hu) = (w as usize, h as usize);
+    let db = psnr(&rgb, &t.rgb);
+    let sharp = sharpness_ratio(&rgb, &t.rgb, wu, hu);
+    // the same view, from a fit allowed to make needles
+    let gs2 = GpuSplats::upload(&g, &needly);
+    ren.render(&g, &gs2, &t.cam, &o);
+    let r2 = ren.read_rgba(&g, w, h);
+    let rgb2: Vec<f32> = r2.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect();
+    eprintln!("CAL held-out: clamped {db:.2} dB / {sharp:.3}  |  unclamped {:.2} dB / {:.3}",
+              psnr(&rgb2, &t.rgb), sharpness_ratio(&rgb2, &t.rgb, wu, hu));
+    assert!(
+        db > HELD_OUT_FLOOR_DB,
+        "held out of the fit, the scene renders at {db:.1} dB - it reproduces its inputs rather \
+         than modelling the subject"
+    );
+    assert!(
+        SHARPNESS_BAND.contains(&sharp),
+        "held out of the fit, the scene carries {sharp:.2}x the target's high-frequency content; \
+         above the band is the streaking a training-view metric cannot see"
     );
 }
