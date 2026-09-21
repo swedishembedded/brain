@@ -1,0 +1,22 @@
+[package]
+# Package names under samples/ are derived from the path:
+# `samples/text/retrieve` -> `sample-text-retrieve`. The Makefile's
+# `samples/%/{build,run}` rules depend on that mapping; `make check/samples`
+# enforces it.
+name = "sample-text-retrieve"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sample application: exact brute-force top-k retrieval over a text corpus, through brain::EmbeddingPipeline."
+publish = false
+
+[dependencies]
+# The ONLY brain dependency a sample may have is the SDK facade, and it must
+# NAME the surfaces it uses - see samples/README.md rules 1 and 2.
+brain = { workspace = true, features = ["text"] }
+
+[package.metadata.brain]
+# `make check/samples` fails if the real `cargo tree` closure exceeds this.
+# Measured at 31 (`text`'s qwen3 backbone pulls in its full engine stack -
+# kernels, gpu-core, model, checkpoint, data - not a lightweight surface).
+max-brain-crates = 31
