@@ -802,6 +802,17 @@ impl DoomEnv {
             // used. A commitment changes which action is right without
             // changing anything else the model can see, so leaving it out
             // gives the same observation two different labels.
+            // Only once it is actually deciding anything: below the
+            // threshold the teacher ignores this, and saying it would be
+            // noise in the place a decision is made.
+            already_tried: if self.stuck >= STUCK_TRY_SOMETHING_ELSE {
+                let mut names: Vec<String> =
+                    self.tried.iter().map(|t| format!("{t:?}").to_lowercase()).collect();
+                names.sort();
+                names
+            } else {
+                Vec::new()
+            },
             seeing_through: match (self.commit, self.commit_tag) {
                 (0, _) | (_, None) => None,
                 (left, Some(tag)) => self

@@ -587,6 +587,13 @@ pub struct History {
     /// Cloning that teaches the average of two behaviours and neither of
     /// them.
     pub seeing_through: Option<(String, u32)>,
+    /// Kinds of thing already attempted since the player last actually moved.
+    ///
+    /// The same argument as `seeing_through`, in the other direction: once a
+    /// player is properly stuck it stops repeating what has not worked, so
+    /// the right answer at an unchanged observation depends on what has
+    /// already been tried there. Empty until that matters.
+    pub already_tried: Vec<String>,
 }
 
 /// The observation as the model sees it.
@@ -877,6 +884,12 @@ pub fn render(state: &State, history: History) -> String {
         out.push_str(&format!(
             " You have not actually moved for {} decisions.",
             history.stuck
+        ));
+    }
+    if !history.already_tried.is_empty() {
+        out.push_str(&format!(
+            " You have already tried {} here without getting anywhere.",
+            history.already_tried.join(", ")
         ));
     }
     if let Some((what, left)) = &history.seeing_through {
@@ -1193,5 +1206,22 @@ mod commitment_tests {
         );
         assert!(committed.contains("walk forward"), "{committed}");
         assert!(committed.contains("5 more"), "{committed}");
+    }
+
+    /// The other half of the same argument: once properly stuck the teacher
+    /// stops repeating what has not worked, so the right answer at an
+    /// unchanged observation depends on what has already been tried there.
+    #[test]
+    fn what_has_already_been_tried_is_said_once_it_matters() {
+        let s = State::parse(super::tests::SAMPLE).expect("parses");
+        assert!(!render(&s, History::default()).contains("already tried"));
+        let stuck = render(
+            &s,
+            History {
+                already_tried: vec!["use".into(), "explore".into()],
+                ..History::default()
+            },
+        );
+        assert!(stuck.contains("already tried use, explore"), "{stuck}");
     }
 }
