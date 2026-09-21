@@ -31,8 +31,9 @@ pub fn run_splat(argv: &[String]) {
         Some("render") => render(&argv[1..]),
         Some("view") => view(&argv[1..]),
         Some("fit") => fit_cmd(&argv[1..]),
+        Some("orient") => orient_cmd(&argv[1..]),
         other => {
-            eprintln!("usage: brain splat <info|render|view|fit> ...  (got {other:?})");
+            eprintln!("usage: brain splat <info|render|view|fit|orient> ...  (got {other:?})");
             std::process::exit(2);
         }
     }
@@ -403,6 +404,66 @@ pub fn run_viewer(
 /// Optimize a scene against posed target images (the rasterizer-backward
 /// demo): cameras.json is the `brain mirror infer` format; images are P6 PPMs
 /// in index order matching the cameras.
+/// Rigidly re-frame a scene so it opens the right way up.
+///
+/// A feed-forward reconstruction's world frame is the FIRST camera's frame -
+/// `c2w[0]` comes back as the identity - so "up" in the file is whichever way
+/// the camera happened to be held, and every viewer shows the scene tipped by
+/// that angle. Measured on a real capture: 63 degrees.
+///
+/// The recovered cameras say which way is really up. They orbit the subject,
+/// so the normal of the plane they lie in IS the scene's vertical, and their
+/// rays intersect at its centre. Both come out of the cameras alone, with no
+/// assumption about the subject.
+///
+/// Rigid, so it changes nothing measurable: means rotate, quaternions compose,
+/// scales and opacities are untouched, and `cameras.json` is rewritten by the
+/// same transform so a later `fit` still lines up.
+fn orient_cmd(argv: &[String]) {
+    let mut a = Args::new(argv);
+    let (path, s) = load(&mut a);
+    let cams_path = a.str_or("--cameras", "out/mirror/cameras.json");
+    let out = crate::args::strip_out_name_prefix(&a.str_or("--out", "out/oriented.ply"), "scene").to_string();
+    let cams_out = a.str_or("--cameras-out", &format!("{out}.cameras.json"));
+    // brain's world is y-down, so "up" is -Y; a viewer expecting y-up gets
+    // there with one flip rather than a different scene on disk.
+    let up_sign = if a.take_flag("--y-up") { 1.0f64 } else { -1.0 };
+    a.finish();
+
+    let text = std::fs::read_to_string(&cams_path).unwrap_or_else(|e| {
+        eprintln!("cannot read {cams_path}: {e}");
+        std::process::exit(1);
+    });
+    let mut j: serde_json::Value = serde_json::from_str(&text).expect("valid cameras.json");
+    let arr = j.as_array_mut().expect("array of cameras");
+    let mats: Vec<[f64; 16]> = arr
+        .iter()
+        .map(|c| {
+            let v: Vec<f64> = c["c2w"].as_array().unwrap().iter().map(|x| x.as_f64().unwrap()).collect();
+            v.try_into().unwrap()
+        })
+        .collect();
+    if mats.len() < 3 {
+        eprintln!("orient: need at least 3 cameras to find the orbit plane, got {}", mats.len());
+        std::process::exit(2);
+    }
+    let (rot, centre) = splat::orient::frame_from_cameras(&mats, up_sign);
+    let oriented = splat::orient::apply(&s, &rot, &centre);
+    splat::ply::write(&out, &oriented).unwrap_or_else(|e| {
+        eprintln!("PLY write failed: {e}");
+        std::process::exit(1);
+    });
+    for (c, m) in arr.iter_mut().zip(&mats) {
+        let t = splat::orient::transform_c2w(m, &rot, &centre);
+        c["c2w"] = serde_json::json!(t.to_vec());
+    }
+    std::fs::write(&cams_out, serde_json::to_string_pretty(&j).unwrap()).unwrap_or_else(|e| {
+        eprintln!("cannot write {cams_out}: {e}");
+        std::process::exit(1);
+    });
+    println!("{path} -> {out} ({} gaussians, re-framed; cameras -> {cams_out})", oriented.len());
+}
+
 fn fit_cmd(argv: &[String]) {
     let mut a = Args::new(argv);
     let (path, s) = load(&mut a);

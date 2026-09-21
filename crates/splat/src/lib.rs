@@ -13,6 +13,7 @@
 
 pub mod caps;
 pub mod opt;
+pub mod orient;
 pub mod ply;
 pub mod prune;
 pub mod quality;
