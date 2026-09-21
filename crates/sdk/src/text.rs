@@ -369,7 +369,7 @@ impl TextGenerationPipelineBuilder {
 /// `general.architecture` KV) is let through unchanged, exactly like
 /// `Qwen3Spec::classify_gguf`/`classify_safetensors` themselves only assert
 /// a POSITIVE match rather than reject an absence of one.
-fn check_local_weights_architecture(weights: &str) -> Result<()> {
+pub(crate) fn check_local_weights_architecture(weights: &str) -> Result<()> {
     if weights.ends_with(".gguf") {
         if let Ok(g) = checkpoint::gguf::MmapGguf::open(weights) {
             if let Some(arch) = g.kv().get("general.architecture").and_then(|v| v.as_str()) {
@@ -409,7 +409,7 @@ fn check_local_weights_architecture(weights: &str) -> Result<()> {
 /// from [`crate::resolve_policy::resolve_with_policy`]'s own `ModelRef::parse`
 /// already names `model_id` and the parse failure, so this does not add a
 /// second, redundant "not a valid reference" wrapper around it.
-fn resolve_hub_weights(model_id: &str, download_policy: loader::DownloadPolicy) -> Result<(String, Option<String>)> {
+pub(crate) fn resolve_hub_weights(model_id: &str, download_policy: loader::DownloadPolicy) -> Result<(String, Option<String>)> {
     let overrides: BTreeMap<String, String> = BTreeMap::new();
     let assembly = crate::resolve_policy::resolve_with_policy("qwen3", &qwen3::spec::Qwen3Spec, model_id, &overrides, download_policy)?;
 

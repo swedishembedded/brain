@@ -114,11 +114,36 @@ let v = pipe.embed("a whale submarine")?;
 println!("{} dims", v.len());
 ```
 
-Covers CLIP's text towers (CLIP-L by default; `.builder(id).tower("openclip_bigg")`
-for the larger one). `pipe.embed_batch(&["a", "b", "c"])` runs one batched
-forward rather than a loop. Behind the `vision` Cargo feature - CLIP's own
-registered architecture domain, since there is no dedicated embedding
-domain in this workspace.
+One type, two backbones, dispatched from `model_id`: CLIP's text towers
+(CLIP-L by default; `.builder(id).tower("openclip_bigg")` for the larger
+one, behind the `vision` Cargo feature), and, for a real 32768-token
+context, the Qwen3 decoder used the way Qwen3-Embedding is meant to be -
+last-token pooled, L2-normalized (behind the `text` Cargo feature). Neither
+feature is named `embedding` - both backbones already have a registered
+architecture domain in this workspace (CLIP's `Vision`, Qwen3's `Text`).
+
+A literal local checkpoint path always resolves to the Qwen3 backbone
+(CLIP's own resolution reads a released directory, never a bare file):
+
+```rust
+let pipe = brain::EmbeddingPipeline::builder("/models/qwen3-embedding-0.6b.safetensors")
+    .tokenizer("/models/qwen3-embedding-0.6b/tokenizer.json")
+    .capacity(32768)
+    .load()?;
+let query = pipe.embed_with(
+    "what does the report say about Q3 revenue",
+    brain::EmbeddingOptions::new().instruction("Given a query, retrieve relevant passages"),
+)?;
+let passage = pipe.embed("Q3 revenue rose 12% year over year...")?;
+println!("{:.3}", query.cosine_similarity(&passage));
+```
+
+`pipe.embed_batch(&["a", "b", "c"])` runs one batched forward on the CLIP
+backbone; the Qwen3 backbone has no batched forward on its decode-only
+build, so it loops one prefill per string instead - see
+`EmbeddingPipeline::embed_batch_with`'s own doc. `EmbeddingOptions::dimensions(n)`
+truncates AND renormalizes by default, deliberately differing from the
+`/v1/embeddings` HTTP endpoint, which does not re-project after truncating.
 
 ## Speech-to-text
 
@@ -144,7 +169,7 @@ Name the surfaces you use and you get their dependencies and nothing else:
 | `image` | `ImagePipeline`, `Image` - text-to-image and image editing |
 | `creature` | `Creature`, `View` - a connectome running a body, and a window onto it |
 | `forecast` | `ForecastPipeline` - time-series forecasting |
-| `text` | `TextGenerationPipeline` - text generation, from a local checkpoint path |
+| `text` | `TextGenerationPipeline` - text generation, from a local checkpoint path; also the Qwen3 backbone of `EmbeddingPipeline` (32768-token context) |
 | `vision` | `EmbeddingPipeline` - CLIP text embedding (named for CLIP's registered domain, not the capability) |
 | `audio` | `TranscribePipeline` - speech-to-text (qwen3-asr, offline) |
 | `full` | every surface; this is the default |

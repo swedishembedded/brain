@@ -96,7 +96,7 @@ mod detect;
 #[cfg(feature = "device")]
 mod device;
 mod error;
-#[cfg(feature = "vision")]
+#[cfg(any(feature = "vision", feature = "text"))]
 mod embedding;
 #[cfg(feature = "forecast")]
 mod forecast;
@@ -196,8 +196,8 @@ pub use creature::{Arena, Beat, Creature, CreatureBuilder, MotorMap, WingWiring}
 pub use depth::{DepthMap, DepthOptions, DepthPipeline, DepthPipelineBuilder};
 #[cfg(feature = "vision")]
 pub use detect::{DetectOptions, Detection, DetectionPipeline, DetectionPipelineBuilder};
-#[cfg(feature = "vision")]
-pub use embedding::{Embedding, EmbeddingPipeline, EmbeddingPipelineBuilder};
+#[cfg(any(feature = "vision", feature = "text"))]
+pub use embedding::{Embedding, EmbeddingOptions, EmbeddingPipeline, EmbeddingPipelineBuilder};
 #[cfg(feature = "forecast")]
 pub use forecast::{ForecastPipeline, ForecastPipelineBuilder};
 #[cfg(feature = "vision")]
