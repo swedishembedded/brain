@@ -76,7 +76,7 @@ pub fn render_spec() -> ActionSpec {
         .param(vec3_param("target", "camera look-at point 'x,y,z' (pairs with 'eye')"))
         .param(vec3_param("up", "camera up vector 'x,y,z'").default(json!("0,-1,0")))
         .param(ParamSpec::new("depth", ParamType::Bool, "render alpha-weighted expected depth (replicated to RGB) instead of color").default(json!(false)))
-        .param(ParamSpec::new("antialiased", ParamType::Bool, "multiply the AA blur compensation into opacity (gsplat 'antialiased' mode; Inria-trained PLYs expect false)").default(json!(false)))
+        .param(ParamSpec::new("antialiased", ParamType::Bool, "put back the energy the low-pass spreads out, by scaling opacity (Mip-Splatting's 2D Mip filter); Inria-trained PLYs were fitted without it and expect false at eps2d 0.3").default(json!(RenderOpts::default().antialiased)))
         .param(vec3_param("bg", "background color 'r,g,b' in [0,1]").default(json!("0,0,0")))
         .input(BlobSpec::new("scene", Media::Bytes, "the scene: Inria-layout binary PLY").required())
         .output(BlobSpec::new("image", Media::Image, "the rendered image, RGB f32 (raw expected-depth values when 'depth' is set, not normalized)"))
@@ -198,7 +198,7 @@ fn render(inv: &Invocation, hot: &Mutex<Option<(u64, RenderSession)>>) -> Action
     let opts = RenderOpts {
         bg: get_vec3_or(inv, "bg", [0.0; 3])?,
         mode: if inv.get_bool("depth").unwrap_or(false) { Mode::Depth } else { Mode::Color },
-        antialiased: inv.get_bool("antialiased").unwrap_or(false),
+        antialiased: inv.get_bool("antialiased").unwrap_or(RenderOpts::default().antialiased),
         ..Default::default()
     };
     sess.renderer.render(&sess.gpu, &sess.gs, &cam, &opts);

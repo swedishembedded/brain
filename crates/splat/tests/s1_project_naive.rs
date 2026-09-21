@@ -41,7 +41,8 @@ fn one_gaussian() -> (Splats, Camera) {
 #[test]
 fn analytic_isotropic_projection() {
     let (s, cam) = one_gaussian();
-    let o = RenderOpts::default();
+    // The closed form below is Inria's: dilate by 0.3, leave opacity alone.
+    let o = RenderOpts { antialiased: false, eps2d: 0.3, ..Default::default() };
     let p = reference::project_one(&s, 0, &cam, &o).expect("visible");
 
     // Closed form: z=4, rz=.25, sigma2d = (fx*rz*s)^2 = 6.25, blurred 6.55.
@@ -232,4 +233,28 @@ fn ply_serialize_roundtrip_within_tolerance() {
     assert!(max_scales < 1e-4, "scales {max_scales}");
     assert!(max_colors < 1e-5, "colors {max_colors}");
     assert!(max_opac < 1e-5, "opacities {max_opac}");
+}
+
+/// The same gaussian under the 2D Mip filter, in closed form.
+///
+/// Widening an isotropic 2D gaussian from variance `v` to `v + eps` spreads
+/// its mass by exactly `(v + eps) / v`, so preserving energy means scaling
+/// opacity by `v / (v + eps)`. Anything else and a dilated splat is brighter
+/// than the one it replaced, which is the error the filter exists to undo.
+#[test]
+fn the_mip_filter_scales_opacity_by_exactly_the_energy_it_spreads() {
+    let (s, cam) = one_gaussian();
+    let o = RenderOpts { antialiased: true, eps2d: 0.1, ..Default::default() };
+    let p = reference::project_one(&s, 0, &cam, &o).expect("visible");
+
+    let var0 = 6.25f32;
+    let var1 = var0 + o.eps2d;
+    assert!((p.conic[0] - 1.0 / var1).abs() < 1e-6, "conic_a {}", p.conic[0]);
+    let want = 0.9 * (var0 / var1);
+    assert!(
+        (p.opacity - want).abs() < 1e-5,
+        "opacity {} is not the energy-preserving {want} (a factor of {})",
+        p.opacity,
+        p.opacity / want
+    );
 }

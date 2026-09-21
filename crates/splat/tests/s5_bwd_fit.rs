@@ -73,7 +73,10 @@ fn gradcheck_vs_autograd() {
     let ks = Kernels::at(0);
     let base = scene(6, 0x5eed);
     let c = cam();
-    let o = RenderOpts::default();
+    // The golden was produced by an autograd reference running Inria 3DGS:
+    // plain dilation, no opacity compensation. Pin those, so this test keeps
+    // checking the thing it has a reference for.
+    let o = RenderOpts { antialiased: false, eps2d: 0.3, ..Default::default() };
     let px = (c.width * c.height) as usize;
     let mut r = Lcg(0xabcd);
     let wimg: Vec<f32> = (0..px * 4).map(|i| if i % 4 == 3 { 0.0 } else { r.next() - 0.5 }).collect();
@@ -319,4 +322,97 @@ fn cropping_the_camera_does_not_decompose_the_backward() {
          projection no longer depends on the frustum, banding the backward by camera crop became \
          exact - which is the cheap way past the per-binding record ceiling, and worth taking."
     );
+}
+
+/// The 2D Mip filter's opacity compensation has to be differentiated too.
+///
+/// Dilating the screen-space covariance without touching opacity makes a
+/// splat both blurrier and brighter, which is why Mip-Splatting scales opacity
+/// by `sqrt(|S| / |S + eps I|)` to put the energy back. That factor depends on
+/// the covariance, so it is part of the forward model and the backward has to
+/// carry it - and it did not: the kernel said so in a comment and the advice
+/// was to fit with compensation off. Fitting under a forward the backward does
+/// not model optimises the wrong thing.
+///
+/// Finite differences, so this needs no external reference.
+#[test]
+fn the_mip_filters_opacity_compensation_is_differentiated() {
+    let g = Gpu::new_cpu(splat::PIPELINES);
+    let ks = Kernels::at(0);
+    let base = scene(5, 0x51ce);
+    let c = cam();
+    let o = RenderOpts { antialiased: true, eps2d: 0.1, ..Default::default() };
+    let px = (c.width * c.height) as usize;
+    let mut r = Lcg(0x77aa);
+    let wimg: Vec<f32> = (0..px * 4).map(|i| if i % 4 == 3 { 0.0 } else { r.next() - 0.5 }).collect();
+
+    let render_loss = |s: &Splats| -> f64 {
+        let mut ren = Renderer::new(&g, ks, s.len(), c.width, c.height, 0);
+        let gs = GpuSplats::upload(&g, s);
+        ren.render(&g, &gs, &c, &o);
+        loss(&ren.read_rgba(&g, c.width, c.height), &wimg)
+    };
+
+    let mut ren = Renderer::new(&g, ks, base.len(), c.width, c.height, 0);
+    let gs = GpuSplats::upload(&g, &base);
+    ren.render(&g, &gs, &c, &o);
+    let grads = SplatGrads::new(&g, base.len());
+    g.submit(&[&grads.d_gauss, &grads.d_opac, &grads.d_colors], &[]);
+    let dimg: DeviceBuffer = g.storage_init("dimg", &wimg);
+    let mut bscr = BwdScratch::new(&g, base.len(), px, 0);
+    ren.render_bwd(&g, &gs, &c, &o, &dimg, &mut bscr, &grads).expect("fits");
+    let d_gauss = g.read(&grads.d_gauss, 10 * base.len());
+    let d_opac = g.read(&grads.d_opac, base.len());
+
+    // Scales and opacity are the two the compensation touches: opacity
+    // directly, scales through the covariance the compensation is built from.
+    // A splat's truncation radius is `ceil`ed to whole pixels, so a step large
+    // enough to move it changes which tiles the splat touches and the loss
+    // jumps. That is a real discontinuity in the forward, not a gradient
+    // error, but it wrecks a finite difference: at h=1e-3 one gaussian here
+    // reads -0.041 against a true -0.559, and at h=2e-4 it reads -0.55939.
+    const H: f32 = 2e-4;
+    let mut worst = (0.0f64, String::new());
+    let mut rows: Vec<(f64, String)> = Vec::new();
+    let mut checked = 0;
+    for gi in 0..base.len() {
+        for k in 0..3 {
+            let mut up = base.clone();
+            let mut dn = base.clone();
+            up.scales[gi * 3 + k] += H;
+            dn.scales[gi * 3 + k] -= H;
+            let fd = (render_loss(&up) - render_loss(&dn)) / (2.0 * H) as f64;
+            let an = d_gauss[gi * 10 + 3 + k] as f64;
+            let rel = (an - fd).abs() / an.abs().max(fd.abs()).max(1e-2);
+            if fd.abs() > 1e-2 {
+                checked += 1;
+                rows.push((rel, format!("scale[{gi}][{k}]: analytic {an:.5} vs finite-difference {fd:.5}")));
+                if rel > worst.0 {
+                    worst = (rel, format!("scale[{gi}][{k}]: analytic {an:.5} vs finite-difference {fd:.5}"));
+                }
+            }
+        }
+        let mut up = base.clone();
+        let mut dn = base.clone();
+        up.opacities[gi] += H;
+        dn.opacities[gi] -= H;
+        let fd = (render_loss(&up) - render_loss(&dn)) / (2.0 * H) as f64;
+        let an = d_opac[gi] as f64;
+        let rel = (an - fd).abs() / an.abs().max(fd.abs()).max(1e-2);
+        if fd.abs() > 1e-2 {
+            checked += 1;
+            rows.push((rel, format!("opacity[{gi}]: analytic {an:.5} vs finite-difference {fd:.5}")));
+            if rel > worst.0 {
+                worst = (rel, format!("opacity[{gi}]: analytic {an:.5} vs finite-difference {fd:.5}"));
+            }
+        }
+    }
+    assert!(checked > 8, "too few non-trivial gradients exercised ({checked})");
+    if worst.0 >= 0.05 {
+        rows.sort_by(|a: &(f64, String), b| b.0.partial_cmp(&a.0).unwrap());
+        for (r, m) in rows.iter().take(12) {
+            println!("  {:6.1}%  {m}", 100.0 * r);
+        }
+    }
+    assert!(worst.0 < 0.05, "worst disagreement {:.1}%: {}", 100.0 * worst.0, worst.1);
 }

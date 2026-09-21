@@ -14,8 +14,9 @@
 // 2D gradients pgrad = {v_xy, v_conic(a,b,c), v_opacity, v_rgb(handled by
 // grad_reduce)} and produce gradients w.r.t. the 3D parameters:
 //   d_gauss[N*10] = {d_mean_w(3), d_scale_linear(3), d_quat_raw(4)},
-//   d_opac[N] (w.r.t. the [0,1] opacity input; the antialiased compensation
-//   chain is NOT modeled — run fit with aa off).
+//   d_opac[N] (w.r.t. the [0,1] opacity input, including the 2D Mip filter's
+//   opacity compensation when aa is set: that factor is built from the 2D
+//   covariance, so it contributes to the scale and quaternion gradients too).
 // Recomputes the forward quantities (cheap O(N)); culled gaussians (radius 0
 // in proj) get zero grads. Flat local arrays only (CPU-JIT safe). One
 // invocation per gaussian.
@@ -24,7 +25,7 @@ struct Params {
     n: u32,
     width: u32,
     height: u32,
-    pad0: u32,
+    aa: u32,      // 1 = the forward compensated opacity; differentiate that too
     fx: f32,
     fy: f32,
     cx: f32,
@@ -149,7 +150,40 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     let va = pgrad[i * 9u + 2u];
     let vb = pgrad[i * 9u + 3u];
     let vc = pgrad[i * 9u + 4u];
-    d_opac[i] = d_opac[i] + pgrad[i * 9u + 5u];
+    let v_op = pgrad[i * 9u + 5u];
+
+    // ---- 2D Mip filter: opacity compensation ----
+    // The forward writes op' = op * sqrt(|S| / |S + eps I|), putting back the
+    // energy the dilation spread out. That factor is a function of the 2D
+    // covariance, so it sends gradient to the covariance as well as scaling
+    // the one that reaches opacity. The unblurred covariance is what |S| is
+    // taken of, and the dilation is an additive constant, so d/d(blurred) and
+    // d/d(unblurred) are the same map and these terms simply add into vs.
+    var mip_a = 0.0;
+    var mip_b = 0.0;
+    var mip_c = 0.0;
+    if (p.aa != 0u) {
+        let a0 = ba - p.eps2d;
+        let c0 = bc - p.eps2d;
+        let b0 = bb;
+        let d0 = a0 * c0 - b0 * b0;
+        let floored = 0.005 * 0.005;
+        let ratio = d0 / det;
+        let comp = sqrt(max(floored, ratio));
+        d_opac[i] = d_opac[i] + v_op * comp;
+        if (ratio > floored) {
+            // op is not bound here, but the forward stored op * comp, and comp
+            // is positive by construction, so the input opacity comes back
+            // exactly.
+            let op_in = proj[i * 9u + 5u] / comp;
+            let k = v_op * op_in / (2.0 * comp) / (det * det);
+            mip_a = k * (c0 * det - d0 * bc);
+            mip_c = k * (a0 * det - d0 * ba);
+            mip_b = k * (-2.0 * b0 * (det - d0));
+        }
+    } else {
+        d_opac[i] = d_opac[i] + v_op;
+    }
 
     // conic -> blurred Sigma2: VS2 = -C G C, C=[[ka,kb],[kb,kc]],
     // G=[[va, vb/2],[vb/2, vc]] (b appears twice in the quadratic form)
@@ -166,10 +200,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     let w11 = -(t10 * kb + t11 * kc);
     // symmetric VS2 (flat 2x2)
     var vs: array<f32, 4>;
-    vs[0] = w00;
-    vs[1] = 0.5 * (w01 + w10);
+    vs[0] = w00 + mip_a;
+    vs[1] = 0.5 * (w01 + w10) + 0.5 * mip_b;
     vs[2] = vs[1];
-    vs[3] = w11;
+    vs[3] = w11 + mip_c;
 
     // VSc = J^T VS2 J (3x3 sym); VJ = 2 VS2 J Sc (2x3)
     var vsc: array<f32, 9>;

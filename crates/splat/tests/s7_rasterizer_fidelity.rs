@@ -79,8 +79,12 @@ fn one_splat_per_pixel(img: &[f32], cam: &Camera, std_px: f32) -> Splats {
 }
 
 fn render(g: &Gpu, s: &Splats, cam: &Camera, eps2d: f32) -> Vec<f32> {
+    render_with(g, s, cam, eps2d, RenderOpts::default().antialiased)
+}
+
+fn render_with(g: &Gpu, s: &Splats, cam: &Camera, eps2d: f32, antialiased: bool) -> Vec<f32> {
     let ks = splat::Kernels::at(0);
-    let o = RenderOpts { eps2d, ..Default::default() };
+    let o = RenderOpts { eps2d, antialiased, ..Default::default() };
     let mut r = Renderer::new(g, ks, s.len(), cam.width, cam.height, s.len() * 16);
     let gs = GpuSplats::upload(g, s);
     r.render(g, &gs, cam, &o);
@@ -130,12 +134,13 @@ fn the_antialias_dilation_costs_most_of_the_fine_detail() {
     let dflt = sharpness_ratio(&render(&g, &scene, &cam, RenderOpts::default().eps2d), &img, wu, hu);
 
     assert!(
-        (0.20..0.45).contains(&dflt),
-        "the default eps2d={} leaves {dflt:.3}x of the source's high-frequency content \
-         (measured 0.298 when this was written; with the dilation off, {off:.3}). Outside that \
-         range either the rasterizer changed or the dilation did - and the second silently \
-         changes every render this repo produces.",
-        RenderOpts::default().eps2d
+        (0.14..0.32).contains(&dflt),
+        "the default low-pass (eps2d={}, compensation {}) leaves {dflt:.3}x of the source's \
+         high-frequency content (measured 0.207 when this was written; with the filter off, \
+         {off:.3}). Outside that range either the rasterizer changed or the filter did - and \
+         the second silently changes every render this repo produces.",
+        RenderOpts::default().eps2d,
+        RenderOpts::default().antialiased
     );
     assert!(
         off > dflt * 2.0,
@@ -194,4 +199,112 @@ fn a_scene_must_be_rendered_at_the_dilation_it_was_fitted_under() {
         "a scene fitted and rendered at the same dilation reproduces its own target at only \
          {matched:.3}x its high-frequency content"
     );
+}
+
+/// Box-downsample by 2: the band-limited truth a half-resolution render is
+/// supposed to approximate.
+fn halve(img: &[f32], w: usize, h: usize) -> Vec<f32> {
+    let (hw, hh) = (w / 2, h / 2);
+    let mut out = vec![0.0f32; hw * hh * 3];
+    for y in 0..hh {
+        for x in 0..hw {
+            for c in 0..3 {
+                let s: f32 = [(0, 0), (1, 0), (0, 1), (1, 1)]
+                    .iter()
+                    .map(|(dx, dy)| img[((2 * y + dy) * w + 2 * x + dx) * 3 + c])
+                    .sum();
+                out[(y * hw + x) * 3 + c] = s / 4.0;
+            }
+        }
+    }
+    out
+}
+
+/// Nearest-free bilinear upsample by 2: the most a band-limited source can
+/// honestly claim at twice its own sampling rate.
+fn doubled(img: &[f32], w: usize, h: usize) -> Vec<f32> {
+    let (dw, dh) = (w * 2, h * 2);
+    let mut out = vec![0.0f32; dw * dh * 3];
+    for y in 0..dh {
+        for x in 0..dw {
+            let (fx, fy) = ((x as f32 + 0.5) / 2.0 - 0.5, (y as f32 + 0.5) / 2.0 - 0.5);
+            let (x0, y0) = (fx.floor().max(0.0) as usize, fy.floor().max(0.0) as usize);
+            let (x1, y1) = ((x0 + 1).min(w - 1), (y0 + 1).min(h - 1));
+            let (tx, ty) = (fx - x0 as f32, fy - y0 as f32);
+            for c in 0..3 {
+                let p = |xx: usize, yy: usize| img[(yy * w + xx) * 3 + c];
+                let top = p(x0, y0) * (1.0 - tx) + p(x1, y0) * tx;
+                let bot = p(x0, y1) * (1.0 - tx) + p(x1, y1) * tx;
+                out[(y * dw + x) * 3 + c] = top * (1.0 - ty) + bot * ty;
+            }
+        }
+    }
+    out
+}
+
+/// Zooming OUT is the screen-space filter's job, and doing it without the
+/// energy compensation is simply wrong.
+///
+/// At half the sampling rate each pixel covers four of the original, so the
+/// honest answer is the box average. Inria's dilation inflates every splat's
+/// footprint and leaves its opacity alone, so the result is both blurred and
+/// too bright; Mip-Splatting's 2D Mip filter scales opacity by
+/// `sqrt(|S| / |S + eps I|)` and lands much closer.
+#[test]
+fn zooming_out_needs_the_energy_the_dilation_throws_away() {
+    let g = Gpu::new_cpu(splat::PIPELINES);
+    let (w, h) = (128u32, 128u32);
+    let cam = camera(w, h);
+    let img = source(w as usize, h as usize);
+    // Sized so the splats tile the plane rather than sitting as separate
+    // dots, which is the regime a real reconstruction lands in.
+    let scene = one_splat_per_pixel(&img, &cam, 0.5);
+    let truth = halve(&img, w as usize, h as usize);
+    let half = Camera::look_at([0.0, 0.0, 0.0], [0.0, 0.0, 3.0], [0.0, -1.0, 0.0], 55.0, w / 2, h / 2);
+
+    let inria = psnr(&render_with(&g, &scene, &half, 0.3, false), &truth);
+    let mip = psnr(&render_with(&g, &scene, &half, 0.1, true), &truth);
+    assert!(
+        mip > inria + 1.5,
+        "at half the sampling rate the Mip filter gives {mip:.1} dB against the dilation's \
+         {inria:.1} dB - the compensation is not earning its place"
+    );
+}
+
+/// What the 3D filter guarantees, stated directly.
+///
+/// A PSNR proxy for this is treacherous - it mostly measures whatever the
+/// synthetic scene happens to look like - so the property is checked as a
+/// property: after filtering, no gaussian is narrower than the finest detail
+/// any of its own cameras could resolve, and none has been widened much past
+/// it either. That is the whole contract, and it is what stops a fit from
+/// hiding error in splats smaller than a pixel.
+#[test]
+fn band_limiting_leaves_no_gaussian_below_what_its_cameras_sampled() {
+    let (w, h) = (96u32, 96u32);
+    let cam = camera(w, h);
+    let img = source(w as usize, h as usize);
+    let scene = one_splat_per_pixel(&img, &cam, 0.08);
+    let filtered = splat::mip::apply_3d_filter(&scene, &[cam], splat::mip::DEFAULT_SCALE);
+    let sigma = splat::mip::smoothing_sigma(&scene, &[cam], splat::mip::DEFAULT_SCALE);
+
+    let mut widened = 0;
+    for i in 0..scene.len() {
+        if sigma[i] <= 0.0 {
+            continue;
+        }
+        widened += 1;
+        for k in 0..3 {
+            let got = filtered.scales[i * 3 + k];
+            assert!(got >= sigma[i], "gaussian {i} axis {k} is {got:.5}, below its own limit {:.5}", sigma[i]);
+            let want = (scene.scales[i * 3 + k].powi(2) + sigma[i] * sigma[i]).sqrt();
+            assert!((got - want).abs() < 1e-6, "gaussian {i} axis {k}: {got:.6} is not the convolution {want:.6}");
+        }
+        // widening spreads the mass, so it must not also brighten
+        assert!(
+            filtered.opacities[i] < scene.opacities[i],
+            "gaussian {i} was widened without paying for it in opacity"
+        );
+    }
+    assert!(widened > 1000, "the filter touched almost nothing ({widened})");
 }

@@ -132,8 +132,14 @@ pub enum Mode {
 pub struct RenderOpts {
     pub bg: [f32; 3],
     pub mode: Mode,
-    /// Multiply the anti-alias blur compensation into opacity (gsplat
-    /// `antialiased` mode). Inria-trained PLYs expect `false`.
+    /// Put back the energy the low-pass spread out, by scaling opacity by
+    /// `sqrt(|S| / |S + eps I|)` - Mip-Splatting's 2D Mip filter, which
+    /// approximates a box filter over the pixel rather than simply inflating
+    /// the splat. Without it, dilation makes a splat blurrier AND brighter,
+    /// and the default kernel size costs most of a scene's fine detail.
+    ///
+    /// Inria-trained PLYs were fitted under the uncompensated dilation at
+    /// `eps2d = 0.3` and must be rendered that way to look as intended.
     pub antialiased: bool,
     pub eps2d: f32,
     pub near: f32,
@@ -145,8 +151,8 @@ impl Default for RenderOpts {
         RenderOpts {
             bg: [0.0; 3],
             mode: Mode::Color,
-            antialiased: false,
-            eps2d: 0.3,
+            antialiased: true,
+            eps2d: 0.1,
             near: 0.01,
             far: 1e10,
         }

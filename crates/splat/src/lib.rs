@@ -12,6 +12,7 @@
 //! positional).
 
 pub mod caps;
+pub mod mip;
 pub mod opt;
 pub mod align;
 pub mod orient;

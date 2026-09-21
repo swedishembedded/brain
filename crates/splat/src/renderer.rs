@@ -515,7 +515,7 @@ impl Renderer {
         pp[0] = s.n as u32;
         pp[1] = cam.width;
         pp[2] = cam.height;
-        pp[3] = 0;
+        pp[3] = o.antialiased as u32;
         pp[4] = f(cam.fx);
         pp[5] = f(cam.fy);
         pp[6] = f(cam.cx);
