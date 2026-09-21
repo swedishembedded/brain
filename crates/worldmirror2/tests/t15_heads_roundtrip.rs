@@ -41,6 +41,9 @@ fn heads(s: usize, w: u32, h: u32, seed: u64) -> HeadOutputs {
             .collect(),
         gsp: (0..s).map(|_| (0..12 * hw).map(|_| r.next() * 2.0 - 1.0).collect()).collect(),
         rgb: (0..s).map(|_| (0..3 * hw).map(|_| r.next()).collect()).collect(),
+        pts: (0..s).map(|_| (0..4 * hw).map(|_| r.next() - 0.5).collect()).collect(),
+        norm: (0..s).map(|_| (0..4 * hw).map(|_| r.next() - 0.5).collect()).collect(),
+        depth: (0..s).map(|_| (0..3 * hw).map(|_| r.next() - 0.5).collect()).collect(),
         width: w,
         height: h,
     }
@@ -83,6 +86,10 @@ fn a_dumped_forward_pass_reassembles_into_the_same_scene() {
     assert_eq!(back.width, hd.width);
     assert_eq!(back.height, hd.height);
     assert_eq!(back.len(), hd.len());
+    // every head round-trips, not only the two assembly used to read
+    assert_eq!(back.pts, hd.pts, "the pointmap head did not survive the dump");
+    assert_eq!(back.norm, hd.norm, "the normals head did not survive the dump");
+    assert_eq!(back.depth, hd.depth, "the depth head did not survive the dump");
     let (got, _, gwt) = assemble_from(&back, &cs, &opts);
     assert_eq!(got.len(), want.len(), "reloaded heads assembled a different number of gaussians");
     assert_eq!(got.means, want.means, "means differ");

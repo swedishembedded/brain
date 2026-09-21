@@ -190,6 +190,51 @@ pub fn fuse_depths(
     sup
 }
 
+/// The pointmap head's world-space prediction, re-expressed as a DEPTH along
+/// each pixel's own viewing ray, plus its confidence.
+///
+/// Turning a point back into a depth looks like throwing information away, and
+/// it is - deliberately. The component of a pointmap across the ray is a
+/// disagreement with the camera the scene is being built on, and honouring it
+/// would put a gaussian somewhere the pixel it came from does not look. What
+/// is worth having from the second head is its opinion about DISTANCE, which
+/// is the axis the gaussian branch is least certain about.
+fn points_as_depth(pts: &[f32], cam: &Camera, width: usize, height: usize) -> (Vec<f32>, Vec<f32>) {
+    let hw = width * height;
+    let m = &cam.c2w;
+    // world -> camera is the inverse of the rigid c2w: R^T (p - t)
+    let t = [m[3], m[7], m[11]];
+    let mut depth = vec![0.0f32; hw];
+    let mut conf = vec![0.0f32; hw];
+    for i in 0..hw {
+        let p = [inv_log(pts[i]) - t[0], inv_log(pts[hw + i]) - t[1], inv_log(pts[2 * hw + i]) - t[2]];
+        // third row of R^T is the camera's forward axis
+        depth[i] = m[2] * p[0] + m[6] * p[1] + m[10] * p[2];
+        conf[i] = 1.0 + pts[3 * hw + i].exp();
+    }
+    (depth, conf)
+}
+
+/// The normals head, activated: unit vector plus confidence. Predicted in the
+/// camera's frame, like the depth it accompanies, so it is rotated into world
+/// here to be comparable with geometry-derived normals.
+fn head_normals(norm: &[f32], cam: &Camera, width: usize, height: usize) -> Vec<[f32; 3]> {
+    let hw = width * height;
+    let m = &cam.c2w;
+    (0..hw)
+        .map(|i| {
+            let v = [norm[i], norm[hw + i], norm[2 * hw + i]];
+            let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+            let v = if l > 1e-20 { [v[0] / l, v[1] / l, v[2] / l] } else { [0.0, 0.0, -1.0] };
+            [
+                m[0] * v[0] + m[1] * v[1] + m[2] * v[2],
+                m[4] * v[0] + m[5] * v[1] + m[6] * v[2],
+                m[8] * v[0] + m[9] * v[1] + m[10] * v[2],
+            ]
+        })
+        .collect()
+}
+
 /// Per-pixel surface normal in WORLD space, from the geometry the depth map
 /// itself implies: the cross product of the two tangents between neighbouring
 /// back-projected points.
@@ -296,6 +341,11 @@ pub struct AssembleOpts {
     /// Keep a pixel only if at least this many OTHER frames agreed there is a
     /// surface there. 0 keeps everything.
     pub min_support: u16,
+    /// Where a gaussian's position comes from. The model predicts the scene's
+    /// geometry twice, through two heads that fail differently.
+    pub position_from: PositionSource,
+    /// Where the surface normal comes from when `surface_align` is on.
+    pub normals_from: NormalSource,
     /// Lay each gaussian flat against the surface it sits on, at this
     /// thickness ratio. 0 keeps the orientation the model predicted.
     ///
@@ -332,7 +382,7 @@ pub struct AssembleOpts {
 
 impl Default for AssembleOpts {
     fn default() -> Self {
-        AssembleOpts { min_opacity: 0.01, max_depth: 0.0, gs_mask_threshold: 0.5, edge_depth_rtol: 0.03, fuse_depth_rtol: 0.05, min_support: 0, conf_percentile: 0.0, surface_align: 4.0 }
+        AssembleOpts { min_opacity: 0.01, max_depth: 0.0, gs_mask_threshold: 0.5, edge_depth_rtol: 0.03, fuse_depth_rtol: 0.05, min_support: 0, conf_percentile: 0.0, surface_align: 4.0, position_from: PositionSource::GsDepth, normals_from: NormalSource::Geometry }
     }
 }
 
@@ -387,17 +437,68 @@ pub struct HeadOutputs {
     pub gsp: Vec<Vec<f32>>,
     /// per frame, `3 * w * h`: the [0,1] input frame, the colour source
     pub rgb: Vec<Vec<f32>>,
+    /// per frame, `4 * w * h`: the POINTMAP head, pre-activation. A second,
+    /// independent estimate of where every pixel is - already in world
+    /// coordinates rather than a depth to unproject - with its own confidence
+    /// in the fourth channel.
+    pub pts: Vec<Vec<f32>>,
+    /// per frame, `4 * w * h`: the NORMALS head, pre-activation, plus its
+    /// confidence in the fourth channel.
+    pub norm: Vec<Vec<f32>>,
+    /// per frame, `3 * w * h`: the plain depth head, pre-activation. Predicted
+    /// separately from the gaussian branch's own depth, so the two disagreeing
+    /// is information rather than noise.
+    pub depth: Vec<Vec<f32>>,
     pub width: u32,
     pub height: u32,
 }
 
+/// `sign(x) * (exp(|x|) - 1)`, the reference's `inv_log` attribute activation.
+/// The pointmap head is trained through it, so its raw output means nothing
+/// without it.
+pub fn inv_log(x: f32) -> f32 {
+    x.signum() * x.abs().exp_m1()
+}
+
+/// Where a gaussian's position comes from.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum PositionSource {
+    /// Unproject the gaussian branch's own depth through the camera. What the
+    /// reference does for the splat path, and the default.
+    #[default]
+    GsDepth,
+    /// The pointmap head's world-space prediction, used directly. A different
+    /// estimate through a different head, so it fails differently.
+    Points,
+    /// Confidence-weighted blend of the two, each expressed as a depth along
+    /// the pixel's own ray so the blend cannot move a point sideways.
+    Blend,
+}
+
+/// Where the surface normal for [`AssembleOpts::surface_align`] comes from.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum NormalSource {
+    /// Cross product of the tangents between neighbouring back-projected
+    /// points: guaranteed consistent with where the gaussians actually are.
+    #[default]
+    Geometry,
+    /// The normals head's own prediction.
+    Head,
+}
+
 impl HeadOutputs {
-    /// Read every frame's heads off the device.
+    /// Read every frame's heads off the device - all of them, not only the
+    /// gaussian branch. The pointmap, the normals and the plain depth head are
+    /// separate predictions of the same scene, and a second opinion is only
+    /// useful if it is available.
     pub fn read(gpu: &Gpu, model: &Mirror, s: usize, width: u32, height: u32) -> HeadOutputs {
         let hw = (width * height) as usize;
         HeadOutputs {
             gsd: (0..s).map(|fi| gpu.read(model.head_out(Head::GsDepth, fi), 3 * hw)).collect(),
             gsp: (0..s).map(|fi| gpu.read(model.head_out(Head::GsParams, fi), 12 * hw)).collect(),
+            pts: (0..s).map(|fi| gpu.read(model.head_out(Head::Points, fi), 4 * hw)).collect(),
+            norm: (0..s).map(|fi| gpu.read(model.head_out(Head::Normals, fi), 4 * hw)).collect(),
+            depth: (0..s).map(|fi| gpu.read(model.head_out(Head::Depth, fi), 3 * hw)).collect(),
             rgb: Vec::new(),
             width,
             height,
@@ -433,6 +534,11 @@ impl HeadOutputs {
         for fi in 0..self.len() {
             write_f32(&dir.join(format!("gsd_{fi:03}.f32")), &self.gsd[fi])?;
             write_f32(&dir.join(format!("gsp_{fi:03}.f32")), &self.gsp[fi])?;
+            for (tag, v) in [("pts", &self.pts), ("norm", &self.norm), ("dep", &self.depth)] {
+                if let Some(p) = v.get(fi) {
+                    write_f32(&dir.join(format!("{tag}_{fi:03}.f32")), p)?;
+                }
+            }
             if let Some(rgb) = self.rgb.get(fi) {
                 write_f32(&dir.join(format!("rgb_{fi:03}.f32")), rgb)?;
             }
@@ -463,6 +569,18 @@ impl HeadOutputs {
             out.gsd.push(read_f32(&dir.join(format!("gsd_{fi:03}.f32")), 3 * hw)?);
             out.gsp.push(read_f32(&dir.join(format!("gsp_{fi:03}.f32")), 12 * hw)?);
             out.rgb.push(read_f32(&dir.join(format!("rgb_{fi:03}.f32")), 3 * hw)?);
+            // Optional: a dump written before these heads were carried still
+            // loads, and assembly falls back to the gaussian branch alone.
+            for (tag, v, n) in [
+                ("pts", &mut out.pts, 4 * hw),
+                ("norm", &mut out.norm, 4 * hw),
+                ("dep", &mut out.depth, 3 * hw),
+            ] {
+                let p = dir.join(format!("{tag}_{fi:03}.f32"));
+                if p.exists() {
+                    v.push(read_f32(&p, n)?);
+                }
+            }
         }
         Ok(out)
     }
@@ -541,6 +659,30 @@ pub fn assemble_from(
         .iter()
         .map(|g| g[..hw].iter().map(|v| v.exp()).collect())
         .collect();
+    // The pointmap head is a second, independent estimate of the same
+    // geometry. Taken alone it replaces the gaussian branch's depth; blended,
+    // each pixel is a confidence-weighted average of the two, which is the
+    // same reconciliation `fuse_depths` performs across views applied across
+    // HEADS - and for the same reason, since neither head can see its own
+    // error along the ray.
+    if opts.position_from != PositionSource::GsDepth && heads.pts.len() == s {
+        for (fi, cam) in cams.iter().enumerate() {
+            let (pd, pc) = points_as_depth(&heads.pts[fi], cam, width as usize, height as usize);
+            let gc: Vec<f32> = heads.gsd[fi][hw..2 * hw].iter().map(|v| 1.0 + v.exp()).collect();
+            for i in 0..hw {
+                if !(pd[i] > 0.0) {
+                    continue;
+                }
+                depths[fi][i] = match opts.position_from {
+                    PositionSource::Points => pd[i],
+                    _ => {
+                        let (a, b) = (gc[i], pc[i]);
+                        (a * depths[fi][i] + b * pd[i]) / (a + b).max(1e-12)
+                    }
+                };
+            }
+        }
+    }
     let support = if opts.fuse_depth_rtol > 0.0 && s > 1 {
         // the head's second channel is its own confidence in the first
         let confs: Vec<Vec<f32>> = heads
@@ -578,8 +720,14 @@ pub fn assemble_from(
         let m = &cam.c2w;
         let depth = std::mem::take(&mut depths[fi]);
         let edge = depth_edges(&depth, width as usize, height as usize, opts.edge_depth_rtol);
-        let normals = (opts.surface_align > 1.0)
-            .then(|| depth_normals(&depth, cam, width as usize, height as usize));
+        let normals = (opts.surface_align > 1.0).then(|| {
+            match opts.normals_from {
+                NormalSource::Head if heads.norm.len() == s => {
+                    head_normals(&heads.norm[fi], cam, width as usize, height as usize)
+                }
+                _ => depth_normals(&depth, cam, width as usize, height as usize),
+            }
+        });
         for py in 0..height as usize {
             for px in 0..width as usize {
                 let i = py * width as usize + px;

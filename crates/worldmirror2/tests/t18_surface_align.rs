@@ -50,7 +50,7 @@ fn tilted_plane(w: u32, h: u32, cam: &Camera, slope: f32) -> HeadOutputs {
             gsp[11 * hw + i] = 3.0; // merge weight -> opacity ~0.95
         }
     }
-    HeadOutputs { gsd: vec![gsd], gsp: vec![gsp], rgb: vec![vec![0.5; 3 * hw]], width: w, height: h }
+    HeadOutputs { gsd: vec![gsd], gsp: vec![gsp], rgb: vec![vec![0.5; 3 * hw]], width: w, height: h, ..Default::default() }
 }
 
 #[test]

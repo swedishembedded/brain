@@ -15,7 +15,7 @@
 
 use gpu_core::Gpu;
 use worldmirror2::config::MirrorConfig;
-use worldmirror2::gaussians::{assemble, assemble_from, frame_maps, AssembleOpts, HeadOutputs};
+use worldmirror2::gaussians::{assemble, assemble_from, frame_maps, AssembleOpts, HeadOutputs, NormalSource, PositionSource};
 use worldmirror2::model::Mirror;
 use worldmirror2::preprocess;
 use splat::types::Splats;
@@ -287,6 +287,8 @@ fn with_scene<R>(
     min_support: u16,
     conf_pct: f32,
     surf: f32,
+    pos_from: PositionSource,
+    nrm_from: NormalSource,
     scale_q: f32,
     sel: &FrameSel,
     mask: Option<&str>,
@@ -366,6 +368,8 @@ fn with_scene<R>(
         min_support,
         conf_percentile: conf_pct,
         surface_align: surf,
+        position_from: pos_from,
+        normals_from: nrm_from,
     };
     let (mut splats, cams, weights) = assemble(model.gpu(), &model, &frames, s, w, h, &opts, known.as_deref());
     eprintln!(
@@ -451,6 +455,32 @@ fn upright(
         })
         .collect();
     (splat::orient::apply(splats, &r, &centre), moved)
+}
+
+/// `--position-from gsdepth|points|blend` and `--normals-from geometry|head`:
+/// the model predicts the scene's geometry through more than one head, and
+/// which one the scene is built on is a question worth being able to ask.
+fn position_source(v: Option<&str>) -> PositionSource {
+    match v.unwrap_or("gsdepth") {
+        "gsdepth" => PositionSource::GsDepth,
+        "points" => PositionSource::Points,
+        "blend" => PositionSource::Blend,
+        other => {
+            eprintln!("--position-from {other} (gsdepth|points|blend)");
+            std::process::exit(2);
+        }
+    }
+}
+
+fn normal_source(v: Option<&str>) -> NormalSource {
+    match v.unwrap_or("geometry") {
+        "geometry" => NormalSource::Geometry,
+        "head" => NormalSource::Head,
+        other => {
+            eprintln!("--normals-from {other} (geometry|head)");
+            std::process::exit(2);
+        }
+    }
 }
 
 fn write_cameras_json(path: &str, cams: &[splat::types::Camera]) {
@@ -563,6 +593,8 @@ fn infer(argv: &[String]) {
     // Lay each gaussian flat against its surface; the model's own orientation
     // is not aligned to anything (see `AssembleOpts::surface_align`).
     let surf = a.f32_or("--surface-align", 4.0);
+    let pos_from = position_source(a.take_str("--position-from").as_deref());
+    let nrm_from = normal_source(a.take_str("--normals-from").as_deref());
     let scale_q = a.f32_or("--max-scale-quantile", 0.98);
     // The reference's inference default, independent of the checkpoint's
     // native grid. Roughly 3.4x the samples of 518 on a square image.
@@ -598,7 +630,7 @@ fn infer(argv: &[String]) {
 
     std::fs::create_dir_all(&out_dir).ok();
     let ply_path = ply.unwrap_or_else(|| format!("{out_dir}/scene.ply"));
-    with_scene(&weights, &images, min_op, max_depth, prune, poses.as_deref(), gs_mask, edge_rtol, fuse_rtol, min_support, conf_pct, surf, scale_q, &sel, mask.as_deref(), target, frames_out.as_deref(), heads_out.as_deref(), |gpu, model, splats, cams, s, w, h| {
+    with_scene(&weights, &images, min_op, max_depth, prune, poses.as_deref(), gs_mask, edge_rtol, fuse_rtol, min_support, conf_pct, surf, pos_from, nrm_from, scale_q, &sel, mask.as_deref(), target, frames_out.as_deref(), heads_out.as_deref(), |gpu, model, splats, cams, s, w, h| {
         let reframed = (!keep_frame && cams.len() >= 3).then(|| upright(splats, cams));
         let (splats, cams) = match &reframed {
             Some((sp, cm)) => (sp, &cm[..]),
@@ -644,6 +676,8 @@ fn assemble_cmd(argv: &[String]) {
     // 0 keeps the orientation the model predicted, which is not aligned to
     // anything (see `AssembleOpts::surface_align`).
     let surf = a.f32_or("--surface-align", 4.0);
+    let pos_from = position_source(a.take_str("--position-from").as_deref());
+    let nrm_from = normal_source(a.take_str("--normals-from").as_deref());
     let prune_voxel = a.f32_or("--prune", 0.0);
     let scale_q = a.f32_or("--max-scale-quantile", 0.98);
     let keep_frame = a.take_flag("--keep-camera-frame");
@@ -667,6 +701,8 @@ fn assemble_cmd(argv: &[String]) {
         min_support,
         conf_percentile: conf_pct,
         surface_align: surf,
+        position_from: pos_from,
+        normals_from: nrm_from,
     };
     let (mut splats, cams, weights) = assemble_from(&heads, &cams, &opts);
     println!("{} frame(s) -> {} gaussians", heads.len(), splats.len());
@@ -730,6 +766,8 @@ fn demo(argv: &[String]) {
     // Lay each gaussian flat against its surface; the model's own orientation
     // is not aligned to anything (see `AssembleOpts::surface_align`).
     let surf = a.f32_or("--surface-align", 4.0);
+    let pos_from = position_source(a.take_str("--position-from").as_deref());
+    let nrm_from = normal_source(a.take_str("--normals-from").as_deref());
     let scale_q = a.f32_or("--max-scale-quantile", 0.98);
     // The reference's inference default, independent of the checkpoint's
     // native grid. Roughly 3.4x the samples of 518 on a square image.
@@ -750,7 +788,7 @@ fn demo(argv: &[String]) {
 
     a.finish();
 
-    let (splats, init_cam) = with_scene(&weights, &images, min_op, max_depth, prune, poses.as_deref(), gs_mask, edge_rtol, fuse_rtol, min_support, conf_pct, surf, scale_q, &sel, mask.as_deref(), target, None, None, |_gpu, _model, splats, cams, _s, _w, _h| {
+    let (splats, init_cam) = with_scene(&weights, &images, min_op, max_depth, prune, poses.as_deref(), gs_mask, edge_rtol, fuse_rtol, min_support, conf_pct, surf, pos_from, nrm_from, scale_q, &sel, mask.as_deref(), target, None, None, |_gpu, _model, splats, cams, _s, _w, _h| {
         let init_cam = cams.first().map(|c| splat::types::Camera {
             width,
             height,
