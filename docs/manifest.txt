@@ -76,6 +76,7 @@ samples/shell/restore/upscale/README.md
 samples/shell/videogen/ltxv/README.md
 samples/study/document/README.md
 samples/text/embed/README.md
+samples/text/retrieve-json/README.md
 samples/text/retrieve/README.md
 samples/tts/clone/README.md
 # END SAMPLES MANIFEST

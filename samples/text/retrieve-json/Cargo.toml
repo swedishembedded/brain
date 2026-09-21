@@ -1,0 +1,27 @@
+[package]
+# Package names under samples/ are derived from the path:
+# `samples/text/retrieve-json` -> `sample-text-retrieve-json`. The Makefile's
+# `samples/%/{build,run}` rules depend on that mapping; `make check/samples`
+# enforces it.
+name = "sample-text-retrieve-json"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sample application: retrieval-augmented JSON generation - embed, retrieve, then prompt a decoder for validated structured output, with a bounded retry on malformed JSON."
+publish = false
+
+[dependencies]
+# The ONLY brain dependency a sample may have is the SDK facade, and it must
+# NAME the surfaces it uses - see samples/README.md rules 1 and 2. `text`
+# covers both EmbeddingPipeline's Qwen3 backend and TextGenerationPipeline.
+brain = { workspace = true, features = ["text"] }
+# A sample may depend freely on third-party crates (samples/README.md rule
+# 1) - this one validates the decoder's output as JSON.
+serde_json.workspace = true
+
+[package.metadata.brain]
+# `make check/samples` fails if the real `cargo tree` closure exceeds this.
+# Same closure as sample-text-embed/sample-text-retrieve: the `text` surface
+# pulls in the whole qwen3 engine stack once, shared by both pipelines this
+# sample builds.
+max-brain-crates = 31
