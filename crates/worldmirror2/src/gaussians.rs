@@ -190,6 +190,88 @@ pub fn fuse_depths(
     sup
 }
 
+/// Per-pixel surface normal in WORLD space, from the geometry the depth map
+/// itself implies: the cross product of the two tangents between neighbouring
+/// back-projected points.
+///
+/// Derived from the depth rather than read from the normals head, so it agrees
+/// with where the gaussians are actually being put. A head-predicted normal
+/// that disagreed with the depth would tilt a disc off the surface it is
+/// supposed to lie in.
+fn depth_normals(depth: &[f32], cam: &Camera, width: usize, height: usize) -> Vec<[f32; 3]> {
+    let m = &cam.c2w;
+    let cam_pt = |px: usize, py: usize| -> [f32; 3] {
+        let z = depth[py * width + px];
+        [(px as f32 + 0.5 - cam.cx) * z / cam.fx, (py as f32 + 0.5 - cam.cy) * z / cam.fy, z]
+    };
+    let mut out = vec![[0.0f32; 3]; width * height];
+    for py in 0..height {
+        for px in 0..width {
+            let (x0, x1) = (px.saturating_sub(1), (px + 1).min(width - 1));
+            let (y0, y1) = (py.saturating_sub(1), (py + 1).min(height - 1));
+            let (a, b) = (cam_pt(x1, py), cam_pt(x0, py));
+            let (c, d) = (cam_pt(px, y1), cam_pt(px, y0));
+            let u = [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+            let v = [c[0] - d[0], c[1] - d[1], c[2] - d[2]];
+            let n = [
+                u[1] * v[2] - u[2] * v[1],
+                u[2] * v[0] - u[0] * v[2],
+                u[0] * v[1] - u[1] * v[0],
+            ];
+            let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+            let n = if len > 1e-20 { [n[0] / len, n[1] / len, n[2] / len] } else { [0.0, 0.0, -1.0] };
+            // camera -> world (rotation only)
+            out[py * width + px] = [
+                m[0] * n[0] + m[1] * n[1] + m[2] * n[2],
+                m[4] * n[0] + m[5] * n[1] + m[6] * n[2],
+                m[8] * n[0] + m[9] * n[1] + m[10] * n[2],
+            ];
+        }
+    }
+    out
+}
+
+/// A unit quaternion (wxyz) whose THIRD local axis is `n`, with the other two
+/// spanning the surface. Which two is arbitrary - the disc is symmetric in its
+/// own plane - so this picks whichever reference axis `n` is least parallel to.
+fn quat_with_z(n: [f32; 3]) -> [f32; 4] {
+    let up = if n[2].abs() < 0.9 { [0.0, 0.0, 1.0] } else { [1.0, 0.0, 0.0] };
+    let mut t = [
+        up[1] * n[2] - up[2] * n[1],
+        up[2] * n[0] - up[0] * n[2],
+        up[0] * n[1] - up[1] * n[0],
+    ];
+    let l = (t[0] * t[0] + t[1] * t[1] + t[2] * t[2]).sqrt().max(1e-20);
+    for v in t.iter_mut() {
+        *v /= l;
+    }
+    let b = [
+        n[1] * t[2] - n[2] * t[1],
+        n[2] * t[0] - n[0] * t[2],
+        n[0] * t[1] - n[1] * t[0],
+    ];
+    // columns (t, b, n) as a rotation matrix -> quaternion (Shepperd)
+    let (m00, m01, m02) = (t[0], b[0], n[0]);
+    let (m10, m11, m12) = (t[1], b[1], n[1]);
+    let (m20, m21, m22) = (t[2], b[2], n[2]);
+    let tr = m00 + m11 + m22;
+    let q = if tr > 0.0 {
+        let s = (tr + 1.0).sqrt() * 2.0;
+        [0.25 * s, (m21 - m12) / s, (m02 - m20) / s, (m10 - m01) / s]
+    } else if m00 > m11 && m00 > m22 {
+        let s = (1.0 + m00 - m11 - m22).sqrt() * 2.0;
+        [(m21 - m12) / s, 0.25 * s, (m01 + m10) / s, (m02 + m20) / s]
+    } else if m11 > m22 {
+        let s = (1.0 + m11 - m00 - m22).sqrt() * 2.0;
+        [(m02 - m20) / s, (m01 + m10) / s, 0.25 * s, (m12 + m21) / s]
+    } else {
+        let s = (1.0 + m22 - m00 - m11).sqrt() * 2.0;
+        [(m10 - m01) / s, (m02 + m20) / s, (m12 + m21) / s, 0.25 * s]
+    };
+    let l = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]).sqrt().max(1e-20);
+    [q[0] / l, q[1] / l, q[2] / l, q[3] / l]
+}
+
 fn sigmoid(x: f32) -> f32 {
     1.0 / (1.0 + (-x).exp())
 }
@@ -214,6 +296,27 @@ pub struct AssembleOpts {
     /// Keep a pixel only if at least this many OTHER frames agreed there is a
     /// surface there. 0 keeps everything.
     pub min_support: u16,
+    /// Lay each gaussian flat against the surface it sits on, at this
+    /// thickness ratio. 0 keeps the orientation the model predicted.
+    ///
+    /// 4:1 by default, chosen by looking at 4 against 8 and against the
+    /// model's own orientation on a real capture at a grazing angle, which is
+    /// the view that shows the difference.
+    ///
+    /// The model does not orient its gaussians to anything: measured on a real
+    /// capture, the angle between a gaussian's shortest axis and the surface
+    /// normal implied by its own depth map is indistinguishable from random
+    /// (median |cos| 0.416 against 0.5 for random, 5.0% within 20 degrees
+    /// against 6% by chance), and they are near-isotropic anyway (b/c median
+    /// 1.38). So each one is a little ball sitting at the right depth rather
+    /// than a piece of surface.
+    ///
+    /// A disc lying IN the surface covers more of it per gaussian and is
+    /// thinner THROUGH it, which is the shape a surface element should have -
+    /// the observation behind 2D Gaussian Splatting and Gaussian Surfels. The
+    /// normal comes from the depth map's own geometry rather than the normals
+    /// head, so it is consistent with the points actually being placed.
+    pub surface_align: f32,
     /// Drop this percentage of pixels, the least confident first, by the depth
     /// head's own confidence channel. 0 keeps everything.
     ///
@@ -229,7 +332,7 @@ pub struct AssembleOpts {
 
 impl Default for AssembleOpts {
     fn default() -> Self {
-        AssembleOpts { min_opacity: 0.01, max_depth: 0.0, gs_mask_threshold: 0.5, edge_depth_rtol: 0.03, fuse_depth_rtol: 0.05, min_support: 0, conf_percentile: 0.0 }
+        AssembleOpts { min_opacity: 0.01, max_depth: 0.0, gs_mask_threshold: 0.5, edge_depth_rtol: 0.03, fuse_depth_rtol: 0.05, min_support: 0, conf_percentile: 0.0, surface_align: 4.0 }
     }
 }
 
@@ -475,6 +578,8 @@ pub fn assemble_from(
         let m = &cam.c2w;
         let depth = std::mem::take(&mut depths[fi]);
         let edge = depth_edges(&depth, width as usize, height as usize, opts.edge_depth_rtol);
+        let normals = (opts.surface_align > 1.0)
+            .then(|| depth_normals(&depth, cam, width as usize, height as usize));
         for py in 0..height as usize {
             for px in 0..width as usize {
                 let i = py * width as usize + px;
@@ -532,14 +637,28 @@ pub fn assemble_from(
                 // has always said "quat wxyz normalized" and the code did not
                 // do it; upstream normalizes before encoding, and a
                 // non-unit quaternion scales the covariance it rotates.
-                let q = [gsp[i], gsp[hw + i], gsp[2 * hw + i], gsp[3 * hw + i]];
-                let qn = (q.iter().map(|v| v * v).sum::<f32>()).sqrt().max(1e-8);
-                out.quats.extend_from_slice(&[q[0] / qn, q[1] / qn, q[2] / qn, q[3] / qn]);
-                out.scales.extend_from_slice(&[
+                let sc = [
                     gsp[4 * hw + i].exp().min(0.3),
                     gsp[5 * hw + i].exp().min(0.3),
                     gsp[6 * hw + i].exp().min(0.3),
-                ]);
+                ];
+                match &normals {
+                    Some(nm) => {
+                        // Keep the size the model chose - it is calibrated to
+                        // the sampling rate - and only change the SHAPE: the
+                        // two in-plane axes take the largest of the three, the
+                        // one along the normal is thinned by the ratio.
+                        let r = sc[0].max(sc[1]).max(sc[2]);
+                        out.quats.extend_from_slice(&quat_with_z(nm[i]));
+                        out.scales.extend_from_slice(&[r, r, r / opts.surface_align]);
+                    }
+                    None => {
+                        let q = [gsp[i], gsp[hw + i], gsp[2 * hw + i], gsp[3 * hw + i]];
+                        let qn = (q.iter().map(|v| v * v).sum::<f32>()).sqrt().max(1e-8);
+                        out.quats.extend_from_slice(&[q[0] / qn, q[1] / qn, q[2] / qn, q[3] / qn]);
+                        out.scales.extend_from_slice(&sc);
+                    }
+                }
                 out.opacities.push(op);
                 out.colors.extend_from_slice(&[
                     gsp[8 * hw + i] * SH_C0 + rgb[i],
