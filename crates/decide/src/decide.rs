@@ -674,12 +674,12 @@ impl Decide {
         self.frozen_encoder
     }
 
-    /// Write the head's weights to a brain `.safetensors`.
+    /// Write the head as a stand-alone safetensors adapter.
     ///
     /// Only the head: the encoder is imported from a published checkpoint and
     /// re-importing it is free, so a run's artifact is the part that did not
-    /// exist before it.
-    /// Write the head as a stand-alone safetensors adapter.
+    /// exist before it. That holds while the encoder is FROZEN, which is the
+    /// default, and stops holding the moment it is not - see below.
     ///
     /// TENSORS KEEP THEIR REAL SHAPES. They used to be flattened - a 384x384
     /// projection written as `[147456]` - which loads fine here, because this
@@ -691,6 +691,22 @@ impl Decide {
     /// The card names the encoder these weights attach to. A head is 445k
     /// floats that mean nothing without it.
     pub fn save_head(&self, path: &str) -> Result<(), String> {
+        // A checkpoint that cannot reproduce the model it came from is worse
+        // than no checkpoint, because nothing downstream can tell.
+        //
+        // This file carries the head and names the encoder it attaches to.
+        // Load it back and the encoder is the published one, so if training
+        // moved the encoder, what comes back is not what was saved: a run
+        // would select a policy on its measured score, write this, and the
+        // next run would inherit a different policy under the same name and
+        // go on comparing it against that score.
+        if !self.frozen_encoder {
+            return Err(format!(
+                "cannot write {path}: the encoder was trained, and this format \
+                 carries only the head. Loading it back would attach the head to \
+                 the PUBLISHED encoder, which is not the model being saved"
+            ));
+        }
         let shapes: HashMap<String, Vec<usize>> =
             crate::head::tensor_manifest(&self.cfg).into_iter().collect();
         let mut n_params = 0u64;
