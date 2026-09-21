@@ -167,6 +167,7 @@ pub struct ControlOptions {
     /// Rounds of DAgger between the warm start and the policy gradient.
     pub dagger: usize,
     /// Rounds of outcome-fitted improvement after the imitation phases.
+    pub archive: Option<String>,
     pub self_imitate: usize,
     pub improve: usize,
     /// Decisions probed per improvement round.
@@ -217,6 +218,7 @@ impl ControlOptions {
             warmup_epochs: d.warmup_epochs,
             warmup_keep: d.warmup_keep,
             dagger: d.dagger,
+            archive: d.archive.clone(),
             self_imitate: d.self_imitate,
             improve: d.improve,
             states: d.states,
@@ -248,6 +250,7 @@ impl ControlOptions {
             .warmup_epochs(self.warmup_epochs)
             .warmup_keep(self.warmup_keep)
             .dagger(self.dagger)
+            .archive(self.archive.clone())
             .self_imitate(self.self_imitate)
             .improve(self.improve)
             .probing(self.states, self.alternatives, self.beta, self.credit, self.repeats, self.wide)
@@ -284,6 +287,9 @@ impl ControlOptions {
         self.warmup_episodes = args.usize_or("--warmup", self.warmup_episodes);
         self.warmup_epochs = args.usize_or("--warmup-epochs", self.warmup_epochs);
         self.dagger = args.usize_or("--dagger", self.dagger);
+        if let Some(a) = args.take_str("--archive") {
+            self.archive = Some(a);
+        }
         self.self_imitate = args.usize_or("--self-imitate", self.self_imitate);
         self.improve = args.usize_or("--improve", self.improve);
         self.states = args.usize_or("--states", self.states);
@@ -346,6 +352,12 @@ impl Options for ControlOptions {
   --warmup N          scripted episodes cloned before the policy gradient
   --warmup-epochs N   passes over those demonstrations
   --warmup-keep F     fraction of scripted episodes to clone, best first  [1.0]
+  --archive FILE      where successful trajectories are kept BETWEEN runs.
+                      The durable artifact of the loop: the weights are a
+                      lossy compression of the archive and can be rebuilt from
+                      it, a trajectory that solved a level cannot. Without one
+                      every generation searches from nothing and a level
+                      solved once can be quietly lost again
   --self-imitate N    rounds of playing --episodes episodes, keeping the best
                       --warmup-keep of everything played so far and cloning
                       those. The improvement operator whose signal is the

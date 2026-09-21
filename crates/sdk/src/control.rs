@@ -1870,6 +1870,24 @@ impl<E: Env> ControlPipeline<E> {
         if !held {
             return Ok(None);
         }
+        // COMMON RANDOM NUMBERS. Every candidate at this decision is rolled
+        // out against the same stream of draws, so what separates two of them
+        // is the action and not the dice.
+        //
+        // This is the technique `gauge` already uses, and for the identical
+        // reason it gives: it does not reduce the variance of any one score,
+        // it removes the variance from their DIFFERENCE, which is the only
+        // quantity a counterfactual is asking about. Without it, two rollouts
+        // of a four-hundred-decision episode diverge chaotically on their own
+        // and the gap between candidates is mostly which draws each happened
+        // to get. Measured without it on this sample: re-running ONE candidate
+        // moved its own score by 0.073 against a gap between DIFFERENT
+        // candidates of 0.048.
+        //
+        // Drawn once per decision, so different decisions still see different
+        // worlds and the probe is not measuring one lucky stream.
+        let stream = self.rng.next_u64();
+        let outer_rng = self.rng.clone();
         let mut out = Vec::with_capacity(candidates.len());
         // One draw for the WHOLE state, not one per candidate. LOLS draws per
         // candidate, which is unbiased in expectation over many examples; at
@@ -1897,6 +1915,9 @@ impl<E: Env> ControlPipeline<E> {
             // each can be read without the other contaminating it.
             let mut by_rollout: [Vec<f32>; 2] = [Vec::new(), Vec::new()];
             for (r, &use_reference) in reference_rollout.iter().enumerate() {
+            // The same draws for every candidate, and a different set per
+            // repeat so that repeats still measure something.
+            self.rng = data::rng::Rng::new(stream ^ ((r as u64 + 1) << 32));
             // Not before the very first roll-out: the environment is already
             // standing where `hold` was called, and resuming onto it would
             // cost a level reload for nothing.
@@ -2013,6 +2034,8 @@ impl<E: Env> ControlPipeline<E> {
                 steps: steps_all,
             });
         }
+        // The episode's own stream, picked up where the probe interrupted it.
+        self.rng = outer_rng;
         // And back to where the student was, so the episode it is in the
         // middle of carries on as if none of this had happened.
         let mark = std::time::Instant::now();
@@ -2136,6 +2159,32 @@ impl<E: Env> ControlPipeline<E> {
         }))
     }
 
+    /// Read the archive of successful trajectories back off disk.
+    ///
+    /// Keyed by what the episode was played ON, so the archive holds the best
+    /// run of every LEVEL rather than the best runs overall. Without the key
+    /// a greedy top-N fills with copies of whichever level is easiest and
+    /// deletes the only trajectory that ever solved a hard one - which is the
+    /// stepping stone this loop exists to keep.
+    fn read_archive(path: &str) -> Vec<(String, f32, Vec<Demo>)> {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return Vec::new();
+        };
+        serde_json::from_str(&text).unwrap_or_default()
+    }
+
+    fn write_archive(path: &str, kept: &[(String, f32, Vec<Demo>)]) {
+        if let Some(dir) = std::path::Path::new(path).parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        // Written beside and renamed, so an interrupted write cannot leave a
+        // half-file where the only record of a solved level used to be.
+        let tmp = format!("{path}.partial");
+        if serde_json::to_string(kept).ok().and_then(|t| std::fs::write(&tmp, t).ok()).is_some() {
+            let _ = std::fs::rename(&tmp, path);
+        }
+    }
+
     /// Rounds of: play, keep the episodes that actually scored best, and
     /// clone those.
     ///
@@ -2170,13 +2219,30 @@ impl<E: Env> ControlPipeline<E> {
         let mut keep_best =
             Keep::starting(entered.unwrap_or(f32::NEG_INFINITY), self.model.head_weights());
         let mut before = entered;
-        // The best episodes seen by ANY round, bounded to one round's worth.
-        // Bounded because an unbounded elite set is mostly old episodes from
-        // a worse policy, and re-sorted every round because that is what
-        // makes the set monotone.
-        let mut elite: Vec<TeacherRun> = Vec::new();
+        // Everything that has ever been worth keeping, on this run and on
+        // every run before it.
+        //
+        // Keyed by level: the best trajectory for EACH, not the best N
+        // overall. A greedy top-N fills with copies of whichever level is
+        // easiest and deletes the only run that ever solved a hard one, which
+        // is precisely the stepping stone worth keeping.
+        let mut best: std::collections::HashMap<String, (f32, Vec<Demo>)> =
+            std::collections::HashMap::new();
+        if let Some(path) = &spec.archive {
+            for (label, score, demos) in Self::read_archive(path) {
+                best.insert(label, (score, demos));
+            }
+            if !best.is_empty() {
+                let mut had: Vec<String> = best
+                    .iter()
+                    .map(|(l, (v, _))| format!("{l} {v:.2}"))
+                    .collect();
+                had.sort();
+                println!("    archive: carrying {} solved from before - {}", best.len(), had.join(", "));
+            }
+        }
         for round in 0..spec.self_imitate {
-            let mut fresh: Vec<TeacherRun> = Vec::new();
+            let mut fresh: Vec<(String, f32, Vec<Demo>)> = Vec::new();
             for _ in 0..spec.episodes {
                 self.episode_seed += 1;
                 let mut obs = self.env.reset(self.episode_seed);
@@ -2211,28 +2277,45 @@ impl<E: Env> ControlPipeline<E> {
                     println!("    self-imitation: the environment does not score an episode");
                     return Ok(());
                 };
-                fresh.push((scored, demos));
+                // What it was played on, so the archive can keep one per
+                // level. Environments with nothing to say fall into one
+                // bucket, which is the old behaviour.
+                let label = self.env.label().unwrap_or_else(|| "world".into());
+                fresh.push((label, scored, demos));
             }
-            let played: Vec<f32> = fresh.iter().map(|r| r.0).collect();
+            let played: Vec<f32> = fresh.iter().map(|r| r.1).collect();
             let mean = played.iter().sum::<f32>() / played.len().max(1) as f32;
-            let best = played.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let top = played.iter().copied().fold(f32::NEG_INFINITY, f32::max);
 
-            elite.extend(fresh);
-            elite.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-            let room = ((spec.episodes as f32 * spec.warmup_keep).round() as usize)
-                .clamp(1, elite.len());
-            elite.truncate(room);
-            let bar = elite.last().map(|r| r.0).unwrap_or(0.0);
-
-            let demos: Vec<Demo> = elite.iter().flat_map(|r| r.1.iter().cloned()).collect();
+            // Each level keeps its own best run, so finding a way through a
+            // hard level is never undone by finding a better way through an
+            // easy one.
+            let mut gained = 0usize;
+            for (label, score, demos) in fresh {
+                let slot = best.entry(label).or_insert((f32::NEG_INFINITY, Vec::new()));
+                if score > slot.0 {
+                    *slot = (score, demos);
+                    gained += 1;
+                }
+            }
+            if let Some(path) = &spec.archive {
+                let kept: Vec<(String, f32, Vec<Demo>)> = best
+                    .iter()
+                    .map(|(l, (v, d))| (l.clone(), *v, d.clone()))
+                    .collect();
+                Self::write_archive(path, &kept);
+            }
+            let bar = best.values().map(|(v, _)| *v).fold(f32::INFINITY, f32::min);
+            let demos: Vec<Demo> = best.values().flat_map(|(_, d)| d.iter().cloned()).collect();
             let loss = self.fit_demos(&demos, spec.warmup_epochs, log, step)?;
             let after = self.gauge(spec.gauge_episodes, spec.max_steps)?;
             println!(
-                "    self-imitate {:>2}  played {} episodes (mean {mean:.2}, best {best:.2})  \
-                 kept {} of them, none below {bar:.2}  {} decisions cloned  loss {loss:.4}{}",
+                "    self-imitate {:>2}  played {} episodes (mean {mean:.2}, best {top:.2})  \
+                 archive holds {} levels, worst {bar:.2} ({gained} improved)  {} decisions \
+                 cloned  loss {loss:.4}{}",
                 round + 1,
                 spec.episodes,
-                elite.len(),
+                best.len(),
                 demos.len(),
                 match (before, after) {
                     (Some(b), Some(a)) => format!("  fixed block {b:.3} -> {a:.3}"),
@@ -2602,7 +2685,7 @@ impl<E: Env> ControlPipeline<E> {
 }
 
 /// What a control run needs.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct ControlSpec {
     /// How many rollout-then-update cycles.
     pub iterations: usize,
@@ -2626,6 +2709,15 @@ pub struct ControlSpec {
     /// clone_teacher`]. Lower it when the teacher has failure modes worth not
     /// teaching.
     pub warmup_keep: f32,
+    /// Where the archive of successful trajectories lives between runs.
+    ///
+    /// The durable artifact of a search-and-compress loop is the ARCHIVE, not
+    /// the weights: the weights are a lossy compression of it that can be
+    /// rebuilt, and a trajectory that solved a level is evidence that cannot
+    /// be. Held only in memory, it is erased whenever the process ends, so
+    /// every generation starts its search from nothing and a level solved in
+    /// one generation can be silently lost in the next.
+    pub archive: Option<String>,
     /// Rounds of playing, keeping the best episodes and cloning those. `0`
     /// is off.
     ///
@@ -2763,6 +2855,7 @@ impl Default for ControlSpec {
             improve: 0,
             states: 200,
             alternatives: 2,
+            archive: None,
             self_imitate: 0,
             beta: 0.5,
             credit: 0,
@@ -2835,6 +2928,12 @@ impl ControlSpec {
         self.credit = credit;
         self.repeats = repeats;
         self.wide = wide;
+        self
+    }
+
+    /// Where the archive of successful trajectories lives between runs.
+    pub fn archive(mut self, path: Option<String>) -> ControlSpec {
+        self.archive = path;
         self
     }
 
