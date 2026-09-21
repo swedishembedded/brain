@@ -261,10 +261,17 @@ pub fn score_policy(
     timing: &mut Timing,
 ) -> Result<Score, String> {
     let mut tally = Tally::new("policy");
-    // Seeded from the episode list, so a score is reproducible even though
-    // the decisions it is made of are drawn.
-    let mut rng = brain::decision::Rng::new(0x5eed_d00d ^ seeds.first().copied().unwrap_or(0));
     for &seed in seeds {
+        // Seeded PER EPISODE, so a score is reproducible AND the episodes are
+        // independent of one another.
+        //
+        // One stream advanced across the whole block meant every episode's
+        // draws depended on how long its predecessors had run: a policy that
+        // survived four decisions longer in episode one handed episode two a
+        // different set of dice, so two policies were never compared on the
+        // same worlds after the first divergence. That is the variance this
+        // block exists to remove.
+        let mut rng = brain::decision::Rng::new(0x5eed_d00d ^ seed);
         let mut observation = pipe.env_mut().start(seed);
         let (mut total, mut steps) = (0.0f32, 0usize);
         for _ in 0..max_steps {
