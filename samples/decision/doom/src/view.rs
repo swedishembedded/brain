@@ -219,6 +219,9 @@ pub fn score_scripted(
     timing: &mut Timing,
 ) -> Result<Score, String> {
     let mut tally = Tally::new("scripted");
+    // Scoring is measurement: it must leave the curriculum where it found it,
+    // or the two players are not facing the same arena on a given seed.
+    env.counting(false);
     for &seed in seeds {
         env.start(seed);
         let (mut total, mut steps) = (0.0f32, 0usize);
@@ -261,6 +264,9 @@ pub fn score_policy(
     timing: &mut Timing,
 ) -> Result<Score, String> {
     let mut tally = Tally::new("policy");
+    // See `score_scripted`: measuring must not move the curriculum, or the
+    // baseline that follows plays the same seeds from a different start.
+    pipe.env_mut().counting(false);
     for &seed in seeds {
         // Seeded PER EPISODE, so a score is reproducible AND the episodes are
         // independent of one another.

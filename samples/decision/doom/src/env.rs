@@ -792,6 +792,18 @@ impl DoomEnv {
 
     /// What the agent has done recently - the part of the observation the game
     /// does not report. See [`History`].
+    /// Measure without moving the goalposts.
+    ///
+    /// The pipeline wraps its own measurements in this, but the policy and
+    /// the scripted baseline are scored by walking the environment directly,
+    /// so they never saw it. With a curriculum running, the policy's block of
+    /// seeds could advance the start distance part way through, and the
+    /// baseline then played the SAME seeds from a different starting point -
+    /// which is the one property a shared seed block exists to guarantee.
+    pub fn counting(&mut self, on: bool) {
+        self.curriculum.set_counting(on);
+    }
+
     pub fn history(&self) -> History {
         let cell = self.cell();
         History {
