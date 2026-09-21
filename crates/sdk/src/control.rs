@@ -241,7 +241,7 @@ pub const EVAL_SEEDS: std::ops::Range<u64> = 1_000_000..1_000_200;
 /// could all be trained as though they had been gathered under "reach the
 /// exit". The observation is the same, the right action is not, and nothing
 /// in the record said which had been asked.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug)]
 struct Demo {
     objective: String,
     observation: String,
@@ -2302,7 +2302,38 @@ impl<E: Env> ControlPipeline<E> {
         let Ok(text) = std::fs::read_to_string(path) else {
             return Vec::new();
         };
-        serde_json::from_str(&text).unwrap_or_default()
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+            return Vec::new();
+        };
+        // Written by hand rather than derived, because the SDK's serde
+        // derive is behind a feature this surface does not enable and an
+        // archive format is not worth widening a dependency for.
+        let demo = |d: &serde_json::Value| -> Option<Demo> {
+            Some(Demo {
+                objective: d.get("objective")?.as_str()?.to_string(),
+                observation: d.get("observation")?.as_str()?.to_string(),
+                options: d
+                    .get("options")?
+                    .as_array()?
+                    .iter()
+                    .filter_map(|o| Some(o.as_str()?.to_string()))
+                    .collect(),
+                action: d.get("action")?.as_u64()? as usize,
+            })
+        };
+        v.as_array()
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|r| {
+                        Some((
+                            r.get("label")?.as_str()?.to_string(),
+                            r.get("score")?.as_f64()? as f32,
+                            r.get("demos")?.as_array()?.iter().filter_map(demo).collect(),
+                        ))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     fn write_archive(path: &str, kept: &[(String, f32, Vec<Demo>)]) {
@@ -2312,7 +2343,29 @@ impl<E: Env> ControlPipeline<E> {
         // Written beside and renamed, so an interrupted write cannot leave a
         // half-file where the only record of a solved level used to be.
         let tmp = format!("{path}.partial");
-        if serde_json::to_string(kept).ok().and_then(|t| std::fs::write(&tmp, t).ok()).is_some() {
+        let rows: Vec<serde_json::Value> = kept
+            .iter()
+            .map(|(label, score, demos)| {
+                serde_json::json!({
+                    "label": label,
+                    "score": score,
+                    "demos": demos
+                        .iter()
+                        .map(|d| serde_json::json!({
+                            "objective": d.objective,
+                            "observation": d.observation,
+                            "options": d.options,
+                            "action": d.action,
+                        }))
+                        .collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        if serde_json::to_string(&rows)
+            .ok()
+            .and_then(|t| std::fs::write(&tmp, t).ok())
+            .is_some()
+        {
             let _ = std::fs::rename(&tmp, path);
         }
     }
