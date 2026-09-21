@@ -951,6 +951,11 @@ pub struct Rollout {
 }
 
 pub struct ControlPipeline<E: Env> {
+    /// The cells the search has reached in the world it is exploring, the
+    /// slot holding each, and the next free slot. Carried between rounds:
+    /// see `explore`, where rebuilding it every round was the difference
+    /// between a search that compounds and four copies of the first round.
+    explored: Option<(String, std::collections::HashMap<String, (usize, f32, u32)>, usize)>,
     model: Decide,
     env: E,
     rng: data::rng::Rng,
@@ -2674,35 +2679,59 @@ impl<E: Env> ControlPipeline<E> {
         if slots == 0 || spec.explore == 0 {
             return Ok(None);
         }
-        // cell -> (slot holding it, score of the run that got there, how many
-        // times it has been chosen to explore from)
-        let mut seen: std::collections::HashMap<String, (usize, f32, u32)> =
-            std::collections::HashMap::new();
-        // One reset, so one world: the search's whole yield is the best
-        // trajectory it found IN that world.
         let mut best: Option<(f32, Vec<Demo>)> = None;
-        let mut next_slot = 1usize;
         let (mut steps, mut restores) = (0usize, 0usize);
+        let mut obs = String::new();
 
-        // The level is stood up ONCE. After that every exploring episode
-        // resumes from a cell, and there is no reset anywhere in the loop -
-        // an environment that begins an episode throws every held state away,
-        // because a snapshot of the last episode would restore the wrong
-        // level. There is also no "sometimes start fresh" branch: the level's
-        // own start is already a cell, so starting fresh is resuming THAT
-        // cell and the selection rule does it without a special case.
-        self.episode_seed += 1;
-        let mut obs = self.env.reset(self.episode_seed);
-        let kind = self.env.label().unwrap_or_else(|| "world".into());
-        let instance = self.env.instance().unwrap_or_else(|| kind.clone());
-        // The starting point, so the archive is never empty and the first
-        // pick has somewhere to go.
-        if let Some(cell) = self.env.cell() {
-            if self.env.hold_at(next_slot) {
-                seen.insert(cell, (next_slot, self.env.progress().unwrap_or(0.0), 0));
-                next_slot += 1;
+        // THE ARCHIVE OUTLIVES THE ROUND.
+        //
+        // This is the whole mechanism, and it was missing. The cells lived in
+        // a local, so every round reset the level, searched from the spawn
+        // with an empty archive, found its twenty-odd cells and threw them
+        // away. Four rounds of that is the first round four times: measured
+        // on E1M1, 27 cells then 26 then 30 then 25, and nothing the search
+        // produced ever beat what the policy already had.
+        //
+        // Go-Explore compounds because the archive grows. A cell reached in
+        // one round is somewhere the NEXT round can set off from, so the
+        // frontier moves outward instead of being rediscovered. The held
+        // states survive a reset - they are snapshots of a level, and the
+        // level is the same one - so the only thing that had to change is
+        // where the map lives.
+        let here = self.env.instance().or_else(|| self.env.label());
+        let carried = match self.explored.take() {
+            Some((was, cells, slot)) if Some(&was) == here.as_ref() && !cells.is_empty() => {
+                Some((was, cells, slot))
             }
-        }
+            // A different world, or nothing yet. Whatever was held belongs to
+            // a level that is no longer standing.
+            _ => None,
+        };
+        let (kind, instance, mut seen, mut next_slot) = match carried {
+            Some((was, cells, slot)) => {
+                let kind = self.env.label().unwrap_or_else(|| was.clone());
+                (kind, was, cells, slot)
+            }
+            None => {
+                self.episode_seed += 1;
+                obs = self.env.reset(self.episode_seed);
+                let kind = self.env.label().unwrap_or_else(|| "world".into());
+                let instance = self.env.instance().unwrap_or_else(|| kind.clone());
+                let mut seen: std::collections::HashMap<String, (usize, f32, u32)> =
+                    std::collections::HashMap::new();
+                let mut next_slot = 1usize;
+                // The starting point, so the archive is never empty and the
+                // first pick has somewhere to go.
+                if let Some(cell) = self.env.cell() {
+                    if self.env.hold_at(next_slot) {
+                        seen.insert(cell, (next_slot, self.env.progress().unwrap_or(0.0), 0));
+                        next_slot += 1;
+                    }
+                }
+                (kind, instance, seen, next_slot)
+            }
+        };
+        let carried_cells = seen.len();
         // Nowhere to return TO. An environment that cannot name a cell or
         // cannot hold one has no archive, and the selection below would index
         // an empty list.
@@ -2830,14 +2859,17 @@ impl<E: Env> ControlPipeline<E> {
             println!("    explore: {refused} resumes were REFUSED - the archive is not restorable");
         }
         println!(
-            "    explore: {} cells found in {instance} over {steps} random steps, \
-             {restores} resumed from, best {}",
+            "    explore: {} cells in {instance} ({carried_cells} carried in) over \
+             {steps} random steps, {restores} resumed from, best {}",
             seen.len(),
             match &best {
                 Some((v, _)) => format!("{v:.2}"),
                 None => "nothing".to_string(),
             }
         );
+        // Hand the archive on. Next round sets off from the frontier this
+        // one reached instead of from the level's front door.
+        self.explored = Some((instance.clone(), seen, next_slot));
         Ok(best.map(|(v, d)| Solved { kind, instance, score: v, demos: d }))
     }
 
@@ -4030,6 +4062,7 @@ impl<E: Env> ControlPipelineBuilder<E> {
             crate::decision::load_decide(&self.dir, self.head.as_deref(), &self.device, self.limits, self.seed)?;
         let cfg_width = model.cfg.d_model as usize;
         Ok(ControlPipeline {
+            explored: None,
             model,
             env: self.env,
             rng: data::rng::Rng::new(self.seed ^ 0xc0ffee),
