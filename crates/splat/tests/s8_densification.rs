@@ -136,3 +136,58 @@ fn density_control_leaves_an_adequate_scene_alone() {
         truth.len(), out.len()
     );
 }
+
+/// A fitted gaussian has to stay a blob rather than becoming a hair.
+///
+/// `fit` clamped each axis to `[min_scale, 0.3]` INDEPENDENTLY, which bounds
+/// how big a gaussian gets and says nothing about its shape. The optimizer
+/// exploited that: a needle aligned with a training view's ray lowers that
+/// view's loss and is invisible in it, while from any other angle it is a
+/// streak across the frame. Measured on a real 23-view reconstruction, the
+/// model's own output was 0.1% needles (worst axis ratio 54:1) and the same
+/// scene after 400 iterations of fitting was 40.7% needles at up to 3000:1 -
+/// entirely manufactured by the fit, and entirely invisible to a metric that
+/// only renders the views it was fitted to.
+#[test]
+fn fitting_does_not_stretch_gaussians_into_needles() {
+    let g = Gpu::new_cpu(splat::PIPELINES);
+    let ks = Kernels::at(0);
+    let (w, h) = (64u32, 64u32);
+    let truth = board(16, false);
+    let t = targets(&g, ks, &truth, w, h);
+
+    // start from a scene that must move a long way, which is when the
+    // optimizer reaches for degenerate shapes
+    let mut init = board(8, true);
+    for v in init.means.iter_mut() {
+        *v *= 1.04;
+    }
+
+    let aspect = |s: &Splats| -> f32 {
+        (0..s.len())
+            .map(|i| {
+                let a = &s.scales[i * 3..i * 3 + 3];
+                a.iter().fold(0.0f32, |m, &v| m.max(v)) / a.iter().fold(f32::MAX, |m, &v| m.min(v)).max(1e-12)
+            })
+            .fold(0.0f32, f32::max)
+    };
+
+    let cfg = FitCfg { iters: 200, lr: 2e-2, log_every: 0, max_aspect: 6.0, ..Default::default() };
+    let (fitted, _) = fit(&g, ks, &init, &t, &cfg, &mut |_, _| true);
+    let worst = aspect(&fitted);
+    assert!(
+        worst <= 6.0 + 1e-3,
+        "a fitted gaussian reached {worst:.1}:1 against a {}:1 cap; the clamp is not binding",
+        cfg.max_aspect
+    );
+
+    // and the cap has to be the thing doing it - without one, the same fit
+    // reaches for far more extreme shapes
+    let loose = FitCfg { iters: 200, lr: 2e-2, log_every: 0, max_aspect: 0.0, ..Default::default() };
+    let (unclamped, _) = fit(&g, ks, &init, &t, &loose, &mut |_, _| true);
+    assert!(
+        aspect(&unclamped) > worst * 1.5,
+        "the unclamped fit only reached {:.1}:1, so this test is not exercising the clamp",
+        aspect(&unclamped)
+    );
+}

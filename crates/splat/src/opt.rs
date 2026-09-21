@@ -23,6 +23,16 @@ pub struct FitCfg {
     pub lr: f32,
     /// Clamp every step: scales into [min_scale, 0.3], opacity into [ε, 1-ε].
     pub min_scale: f32,
+    /// Largest ratio a gaussian's longest axis may have to its shortest,
+    /// 0 = unconstrained.
+    ///
+    /// Bounding each axis says how BIG a gaussian may be and nothing about its
+    /// SHAPE, and the optimizer exploits the difference: a needle lined up with
+    /// a training view's ray lowers that view's loss while being invisible in
+    /// it, and is a streak across every other view. That is not a small
+    /// effect - a real 23-view scene went from 0.1% of gaussians above 10:1
+    /// as the model emitted them to 40.7% after fitting, reaching 3000:1.
+    pub max_aspect: f32,
     pub log_every: usize,
     /// Run density control every N iterations, 0 = never (a fixed set of
     /// gaussians, which is all this optimizer could ever do before).
@@ -61,6 +71,7 @@ impl Default for FitCfg {
             iters: 200,
             lr: 5e-3,
             min_scale: 1e-4,
+            max_aspect: 10.0,
             log_every: 20,
             densify_every: 0,
             densify_after: 30,
@@ -336,6 +347,16 @@ fn fit_stage(
         for i in 0..n {
             for k in 3..6 {
                 geo[i * 10 + k] = geo[i * 10 + k].clamp(cfg.min_scale, 0.3);
+            }
+            if cfg.max_aspect > 1.0 {
+                // Raise the short axes to the longest one's fair share rather
+                // than shrinking the long axis: shrinking would fight the
+                // gradient that grew it, while a floor simply refuses the
+                // degenerate shape.
+                let lo = geo[i * 10 + 3].max(geo[i * 10 + 4]).max(geo[i * 10 + 5]) / cfg.max_aspect;
+                for k in 3..6 {
+                    geo[i * 10 + k] = geo[i * 10 + k].max(lo);
+                }
             }
         }
         gpu.write(&p_geo, cast(&geo));
