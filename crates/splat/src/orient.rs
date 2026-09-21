@@ -208,7 +208,7 @@ fn rotation_taking(from: [f64; 3], to: [f64; 3]) -> [f64; 9] {
 }
 
 /// wxyz quaternion of a row-major rotation.
-fn quat_of(r: &[f64; 9]) -> [f64; 4] {
+pub(crate) fn quat_of(r: &[f64; 9]) -> [f64; 4] {
     let t = r[0] + r[4] + r[8];
     if t > 0.0 {
         let s = (t + 1.0).sqrt() * 2.0;
@@ -225,7 +225,7 @@ fn quat_of(r: &[f64; 9]) -> [f64; 4] {
     }
 }
 
-fn qmul(a: &[f64; 4], b: &[f64; 4]) -> [f64; 4] {
+pub(crate) fn qmul(a: &[f64; 4], b: &[f64; 4]) -> [f64; 4] {
     [
         a[0] * b[0] - a[1] * b[1] - a[2] * b[2] - a[3] * b[3],
         a[0] * b[1] + a[1] * b[0] + a[2] * b[3] - a[3] * b[2],
