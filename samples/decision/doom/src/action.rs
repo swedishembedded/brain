@@ -315,6 +315,7 @@ pub fn options(state: &State) -> Vec<Option_> {
         .recalled
         .iter()
         .filter(|r| r.class != crate::memory::Class::Threat)
+        .filter(|r| state.worth_taking_kind(&r.kind))
         .filter(|r| r.path.is_some() || c.toward(r.bearing) >= r.distance.min(300))
         .take(2)
     {
@@ -851,7 +852,11 @@ mod tests {
     const NOTHING: &str = r#""threats":[],"hazards":[],"pickups":[],
         "clearance":{"ahead":0,"right":0,"behind":0,"left":0,"aheadRight":0,"aheadLeft":0}"#;
 
-    /// A medikit behind the wall in front of you.
+    /// Something behind the wall in front of you.
+    ///
+    /// A shotgun rather than a medikit: this is about the ROUTE, and a
+    /// medikit at full health is refused by the engine and so is correctly
+    /// never offered at all.
     ///
     /// The straight line to it is 180 degrees off the nose and there is no
     /// floor that way. A player who walked past it knows the way back is out
@@ -860,7 +865,7 @@ mod tests {
         let mut s = state(NOTHING);
         s.recalled = vec![crate::memory::Recalled {
             id: 7,
-            kind: "Medikit".into(),
+            kind: "Shotgun".into(),
             class: crate::memory::Class::Pickup,
             bearing: 180,
             distance: 220,

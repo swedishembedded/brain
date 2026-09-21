@@ -415,7 +415,20 @@ impl State {
     /// at capacity and armour you already beat; those need the carried
     /// amounts to decide and are not answered here.
     pub fn worth_taking(&self, thing: &Thing) -> bool {
-        match thing.kind.to_lowercase().as_str() {
+        self.worth_taking_kind(&thing.kind)
+    }
+
+    /// The same question about something REMEMBERED rather than in view.
+    ///
+    /// It has to be asked there too, and forgetting to ask it is worse there.
+    /// A thing that cannot be picked up is never picked up, so it is never
+    /// seen to leave, so it is remembered for the rest of the episode - and
+    /// an option to walk back to it stays on the list long after the item
+    /// itself has gone out of sight. Measured on E1M4: the player walked out
+    /// of the room, remembered a medikit it could not use, and spent the rest
+    /// of the episode walking back to where it had been.
+    pub fn worth_taking_kind(&self, kind: &str) -> bool {
+        match kind.to_lowercase().as_str() {
             // The two that heal, and the only two `P_GiveBody` refuses. The
             // potion and the soulsphere go past 100 and are always worth it.
             "stimpak" | "medikit" => self.player.health < MAX_HEALTH,
