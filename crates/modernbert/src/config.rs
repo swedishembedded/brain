@@ -225,9 +225,26 @@ impl ModernBertConfig {
                 .collect(),
             None => (0..n_layers).map(|l| if l % global_every == 0 { LayerAttn::Full } else { LayerAttn::Local }).collect(),
         };
+        // Two schemas exist for the SAME field, both real: the actual
+        // released `answerdotai/ModernBERT-large/config.json` (verified by
+        // fetching it directly) predates the nested shape and uses flat
+        // `global_rope_theta`/`local_rope_theta` scalars with no
+        // `rope_parameters` key at all; a config re-saved by a current
+        // `transformers` install (e.g. this crate's own parity-dump scripts)
+        // uses the nested `rope_parameters.{full,sliding}_attention.
+        // rope_theta` shape instead and omits the flat keys. Reading only one
+        // shape silently falls back to the hardcoded default on whichever
+        // file uses the other - which happened to be invisible here because
+        // the released checkpoint's real thetas equal those defaults, not
+        // because the lookup was actually reading them.
         let rope = v.get("rope_parameters");
-        let theta = |key: &str, default: f32| -> f32 {
-            rope.and_then(|r| r.get(key)).and_then(|r| r.get("rope_theta")).and_then(Value::as_f64).map(|x| x as f32).unwrap_or(default)
+        let theta = |key: &str, legacy_key: &str, default: f32| -> f32 {
+            rope.and_then(|r| r.get(key))
+                .and_then(|r| r.get("rope_theta"))
+                .and_then(Value::as_f64)
+                .or_else(|| v.get(legacy_key).and_then(Value::as_f64))
+                .map(|x| x as f32)
+                .unwrap_or(default)
         };
         let local_attention = u("local_attention").unwrap_or(128);
         Ok(ModernBertConfig {
@@ -237,10 +254,20 @@ impl ModernBertConfig {
             n_heads: u("num_attention_heads")?,
             d_ff: u("intermediate_size")?,
             max_positions: u("max_position_embeddings")?,
-            eps: v.get("layer_norm_eps").and_then(Value::as_f64).map(|x| x as f32).unwrap_or(1e-5),
+            // Same two-schema story as the thetas below: the real released
+            // file has `layer_norm_eps`; a config re-saved by a current
+            // `transformers` install has `norm_eps` instead (verified: a
+            // fresh `ModernBertConfig(...).to_dict()` on this container's
+            // installed 5.15 omits `layer_norm_eps` entirely). Try both.
+            eps: v
+                .get("norm_eps")
+                .or_else(|| v.get("layer_norm_eps"))
+                .and_then(Value::as_f64)
+                .map(|x| x as f32)
+                .unwrap_or(1e-5),
             layer_types,
-            rope_theta_full: theta("full_attention", 160_000.0),
-            rope_theta_local: theta("sliding_attention", 10_000.0),
+            rope_theta_full: theta("full_attention", "global_rope_theta", 160_000.0),
+            rope_theta_local: theta("sliding_attention", "local_rope_theta", 10_000.0),
             window: local_attention / 2,
             cls_token_id: u("cls_token_id").unwrap_or(50281),
             sep_token_id: u("sep_token_id").unwrap_or(50282),
@@ -299,6 +326,47 @@ mod tests {
         });
         let cfg = ModernBertConfig::from_hf_json(&v).unwrap();
         assert_eq!(cfg.window, 3, "local_attention is the FULL width; window is the per-side radius");
+    }
+
+    /// The ACTUAL released `answerdotai/ModernBERT-large/config.json` shape
+    /// (fetched and confirmed this session): flat `global_rope_theta`/
+    /// `local_rope_theta` and `layer_norm_eps`, no `rope_parameters` key at
+    /// all. Before this test the theta/eps lookups only understood the
+    /// nested `rope_parameters` shape and silently fell back to their
+    /// hardcoded defaults on a file exactly like this one - invisible only
+    /// because the real checkpoint's thetas happen to equal those defaults.
+    #[test]
+    fn from_hf_json_reads_the_real_checkpoints_flat_legacy_theta_and_eps_keys() {
+        let v = serde_json::json!({
+            "model_type": "modernbert", "vocab_size": 100, "hidden_size": 64, "num_hidden_layers": 4,
+            "num_attention_heads": 4, "intermediate_size": 19, "max_position_embeddings": 64,
+            "global_attn_every_n_layers": 2, "local_attention": 6,
+            "global_rope_theta": 999_000.0, "local_rope_theta": 111.0, "layer_norm_eps": 2e-5,
+        });
+        let cfg = ModernBertConfig::from_hf_json(&v).unwrap();
+        assert_eq!(cfg.rope_theta_full, 999_000.0);
+        assert_eq!(cfg.rope_theta_local, 111.0);
+        assert_eq!(cfg.eps, 2e-5);
+    }
+
+    /// The shape a config RE-SAVED by a current `transformers` install uses
+    /// instead (confirmed this session: a fresh `ModernBertConfig(...).
+    /// to_dict()` on the installed 5.15 omits `layer_norm_eps`/
+    /// `global_rope_theta`/`local_rope_theta` entirely and uses these keys) -
+    /// the nested shape must keep working too, not just the legacy one.
+    #[test]
+    fn from_hf_json_reads_the_nested_rope_parameters_and_norm_eps_keys() {
+        let v = serde_json::json!({
+            "model_type": "modernbert", "vocab_size": 100, "hidden_size": 64, "num_hidden_layers": 4,
+            "num_attention_heads": 4, "intermediate_size": 19, "max_position_embeddings": 64,
+            "global_attn_every_n_layers": 2, "local_attention": 6,
+            "rope_parameters": {"full_attention": {"rope_theta": 777_000.0}, "sliding_attention": {"rope_theta": 222.0}},
+            "norm_eps": 3e-5,
+        });
+        let cfg = ModernBertConfig::from_hf_json(&v).unwrap();
+        assert_eq!(cfg.rope_theta_full, 777_000.0);
+        assert_eq!(cfg.rope_theta_local, 222.0);
+        assert_eq!(cfg.eps, 3e-5);
     }
 
     #[test]

@@ -2482,6 +2482,20 @@ pub fn layernorm_fwd(
     g.step(kind, &[x, gamma, beta, out], &[d, rows, f(eps)], threads)
 }
 
+/// LayerNorm forward, WEIGHT-ONLY: `y = (x-mean)/sqrt(var+eps) * gamma`, no
+/// bias term at all (not a biased LayerNorm riding a zeroed `beta` buffer -
+/// `layernorm_nobias.wgsl` never allocates one). For architectures whose
+/// `norm_bias: false` (ModernBERT/`brain-modernbert` today) means there is no
+/// bias tensor in the checkpoint to load in the first place.
+///
+/// `kernel` is the caller's own `layernorm_nobias` pipeline index - no
+/// `LayerNormIds`-style cooperative-variant seam yet, since the first adopter
+/// (`crates/modernbert`) has no need for one at its current row counts; add
+/// one here (mirroring [`ln_variant`]) if a future caller does.
+pub fn layernorm_nobias_fwd(g: &Gpu, kernel: usize, x: &DeviceBuffer, gamma: &DeviceBuffer, out: &DeviceBuffer, d: u32, rows: u32, eps: f32) -> Step {
+    g.step(kernel, &[x, gamma, out], &[d, rows, f(eps)], rows)
+}
+
 /// Per-row `mean` + `1/sqrt(var+eps)` (feeds `layernorm_dgamma`).
 pub fn ln_stats_fwd(
     g: &Gpu,

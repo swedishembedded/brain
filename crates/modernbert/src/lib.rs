@@ -26,5 +26,9 @@
 //! info@swedishembedded.com.
 
 pub mod config;
+pub mod init;
+pub mod kern;
+pub mod model;
 
 pub use config::ModernBertConfig;
+pub use model::ModernBert;

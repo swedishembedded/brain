@@ -51,6 +51,10 @@ __pycache__/
 crates/diamond/tests/fixtures/
 /out/wm-demos/
 
+# ModernBERT/Laya parity fixtures (regenerate with
+# scripts/parity-dump/modernbert.py) - same never-commit-goldens convention.
+crates/modernbert/tests/fixtures/
+
 # depth demo test artifacts (never commit — regenerable)
 photo.ppm
 *-depth.ppm

@@ -562,6 +562,8 @@ pub const LAYERNORM_DGAMMA: &str = include_str!("../wgsl/layernorm_dgamma.wgsl")
 pub const LAYERNORM_DX: &str = include_str!("../wgsl/layernorm_dx.wgsl");
 /// `wgsl/layernorm_dx_rows.wgsl`
 pub const LAYERNORM_DX_ROWS: &str = include_str!("../wgsl/layernorm_dx_rows.wgsl");
+/// `wgsl/layernorm_nobias.wgsl`
+pub const LAYERNORM_NOBIAS: &str = include_str!("../wgsl/layernorm_nobias.wgsl");
 /// `wgsl/layernorm_rows.wgsl`
 pub const LAYERNORM_ROWS: &str = include_str!("../wgsl/layernorm_rows.wgsl");
 /// `wgsl/leaky_relu.wgsl`
@@ -1296,6 +1298,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("layernorm_dgamma", LAYERNORM_DGAMMA),
     ("layernorm_dx", LAYERNORM_DX),
     ("layernorm_dx_rows", LAYERNORM_DX_ROWS),
+    ("layernorm_nobias", LAYERNORM_NOBIAS),
     ("layernorm_rows", LAYERNORM_ROWS),
     ("leaky_relu", LEAKY_RELU),
     ("leaky_relu_bwd", LEAKY_RELU_BWD),
