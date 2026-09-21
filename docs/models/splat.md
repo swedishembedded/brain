@@ -204,14 +204,30 @@ leaves them:
 | no density control | 0.010884 | 256 |
 | heuristic, `--densify-frac 0.05` (default) | 0.010820 | 55 |
 | heuristic, `--densify-frac 0.30` | 0.008462 | 158 |
-| heuristic, `--densify-frac 1.00` and above | 0.007801 | 400 |
-| MCMC | 0.004440 | 400 |
+| heuristic, `--densify-frac 1.00` and above | 0.006916 | 400 |
+| MCMC | 0.006626 | 400 |
 
-It is not a free win everywhere. On a scene with nothing wasted in it, where
-every gradient is informative, the gradient-targeted heuristic is still ahead
-(0.006774 against 0.008868 on the same budget from a uniform coarse start).
-Relocation pays where budget is being wasted, and it is worth knowing which of
-the two a scene is before choosing.
+About 4% at an equal budget, and it renders 22.4 dB against 22.1.
+
+That margin was 43% when this was first measured, against a fit with no bound
+on how FLAT a gaussian could become and none on how far it could be INFLATED.
+Both bounds landed since, and they take away part of what relocation was
+fixing: a heuristic that can no longer answer a badly placed gaussian by
+stretching it into a blade is a much stronger baseline. The old number is not
+reproducible and is not worth quoting.
+
+It is not a free win everywhere either. On a scene with nothing wasted in it,
+where every gradient is informative, the gradient-targeted heuristic is still
+ahead (0.006774 against 0.008868 on the same budget from a uniform coarse
+start). Relocation pays where budget is being wasted, and it is worth knowing
+which of the two a scene is before choosing.
+
+One interaction to know about: `--max-growth` bounds a gaussian against the
+size it had at the start of a density-control stage, and relocation
+deliberately SHRINKS what it moves - that opacity and scale correction is what
+keeps a relocation from changing the rendered image. Leaving the bound on caps
+how fast a relocated gaussian takes up its new place, and measured here it was
+enough to reverse the comparison outright.
 
 ## Sharpness, and the anti-alias dilation
 
