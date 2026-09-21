@@ -8,6 +8,23 @@ against the NPU export via OpenVINO.
 
 ## Not yet done
 
+- [x] YaRN long-context RoPE scaling (`LfmConfig::rope_scaling`,
+      `rope_base_yarn`/`rope_base_yarn_bwd` kernels) - a checkpoint can be
+      configured for a 32768-token context and the kernel/wiring is
+      gradient-checked and tested against the existing plain path. What
+      this does NOT cover: quality at 4x the model's native 8192-token
+      training extent is unvalidated extrapolation without continued
+      pretraining, and it is not yet reachable from `brain::EmbeddingPipeline`
+      (needs its own `crates/lfm2/src/spec.rs` `ArchSpec`, the same seam
+      `qwen3::spec::Qwen3Spec` gave the Qwen3 backbone) or from an `embed`
+      action `normalize` param (today's `embed` still returns the raw,
+      unnormalized mean - see `crates/lfm2/src/caps.rs`).
+- [ ] A seeded backward pass (`prepare_reverse`/`seed_buf`/`backward_seeded`,
+      mirroring `crates/decide/src/model.rs`) for full-encoder contrastive
+      fine-tuning - today only the checkpoint's own MLM objective has a
+      backward path; training the encoder against an external (e.g.
+      InfoNCE) objective needs a way to seed the reverse pass from outside
+      the model, which does not exist yet.
 - [ ] 8k-context training: the masked-row gather before the MLM head needs a
       chunked-regime builder, since materializing full-vocabulary logits at
       8k context exceeds the device's per-buffer size limit

@@ -1,0 +1,82 @@
+# embeddings - roadmap
+
+Long-context text embedding, retrieval, retrieval-augmented generation, and
+contrastive fine-tuning over frozen embeddings, reachable through the public
+`brain` SDK. Written in terms of "a caller" throughout - nothing here names a
+downstream project.
+
+## What shipped
+
+- [x] **A 32768-token embedding backbone.** `qwen3::caps`'s new `embed`
+      action pools the Qwen3 decoder's last-token final-norm hidden state
+      through `Qwen::prefill`'s decode-only KV-cache path (`O(T)` memory,
+      never the batched forward's `O(T^2)` `scores`/`probs`), L2-normalizes
+      on the host, and supports the Qwen3-Embedding instruction-prefix query
+      convention. A latent `u32` overflow in the batched-forward attention
+      score buffer sizing (`b * n_heads * t * t` computed before widening to
+      `u64`) was found and fixed while sizing this action's allocations -
+      real for any long-context batched caller, not only this one.
+- [x] **`brain::EmbeddingPipeline` becomes multi-architecture**: CLIP's text
+      towers (`vision` feature, unchanged default behavior) and the Qwen3
+      backbone above (`text` feature), dispatched from the resolved
+      architecture per sdk-design rule 2. `EmbeddingOptions` (instruction,
+      max_tokens, dimensions, normalize) and `Embedding::cosine_similarity`.
+- [x] **`brain::EmbeddingTrainer`**: a host-side, symmetric (CLIP-style)
+      InfoNCE-trained linear projection over frozen embeddings, near-identity
+      initialized. Does NOT fine-tune either backbone - see the seeded-backward
+      gap below. Gradient-checked against finite differences directly (no
+      `crates/gradcheck` integration - this objective has no GPU `ParamStore`
+      for that trait's `CheckModel` shape to describe).
+- [x] Four samples: `samples/text/embed` (inference, including a real
+      long-document 32k example), `samples/text/retrieve` (exact
+      brute-force top-k, explicitly NOT an ANN index), `samples/text/retrieve-json`
+      (retrieval feeding a decoder for prompt-validated, NOT
+      grammar-constrained, JSON output), `samples/text/embed-train`
+      (before/after recall@1 over `EmbeddingTrainer`).
+- [x] `qwen3::caps` moved off `BRAIN_QWEN_WEIGHTS`/`BRAIN_QWEN_TOKENIZER`
+      (`host_env`) onto the model-store resolver (`ParamSpec::host_resolved()`,
+      `qwen3::spec::Qwen3Spec`) for `generate`/`lora_train`/`lora_gate`/`embed`
+      alike - see `.agents/roadmap/continuous-learning.md`'s B3a update. The
+      separate `brain serve` residency-scheduler hot-swap resident
+      (`crate::resident_llm::QwenResident`) is unaffected, a different
+      mechanism, out of this track's scope.
+- [x] LFM2.5-Encoder gains YaRN long-context RoPE scaling
+      (`LfmConfig::rope_scaling`) - see `.agents/roadmap/lfm2.md` for the
+      detail and what it does not yet cover (SDK wiring, seeded backward).
+
+## Explicitly out of scope for this track
+
+- Token-level (grammar/schema) constrained decoding. `samples/text/retrieve-json`
+  validates a decoder's JSON output after the fact and retries; the real hook
+  point is named (`qwen3::sample::sample_logits`, following the
+  `model::serve::apply_no_repeat_ngram` precedent) but not built.
+- An ANN/vector index. `samples/text/retrieve`'s flat scan is the right size
+  for a sample; a real corpus needs a real index (HNSW, IVF, ...) over the
+  same `Embedding` vectors this SDK already produces - a data-structure
+  concern, not a model capability this crate should own.
+- A `Domain::Embedding` architecture-vocabulary variant. Both backbones
+  already have a registered domain (CLIP's `Vision`, Qwen3's `Text`); adding
+  one would be a new capability-vocabulary concept for no behavior gained.
+- Matryoshka-style nested-dimension re-projection. `EmbeddingTrainer`'s
+  projection head is deliberately same-dimension (a learned refinement, not
+  a truncation scheme).
+
+## Not yet done
+
+- [ ] `brain::EmbeddingPipeline` does not yet resolve to LFM2 as a third
+      backend - needs `crates/lfm2/src/spec.rs` (an `ArchSpec`, the same
+      seam `qwen3::spec::Qwen3Spec` gives the Qwen3 backbone) and an
+      `EmbeddingOptions`-level way to reach LFM2's un-normalized-by-default
+      `embed` action honestly.
+- [ ] A seeded backward pass for LFM2 (`prepare_reverse`/`seed_buf`/
+      `backward_seeded`, mirroring `crates/decide/src/model.rs`), so
+      `EmbeddingTrainer`'s InfoNCE objective (or an equivalent) can fine-tune
+      the full encoder rather than only a frozen-embedding projection head.
+      See `.agents/roadmap/lfm2.md`.
+- [ ] LFM2 at 32768 tokens is unvalidated extrapolation to 4x its native
+      8192-token training extent - real quality there needs continued
+      pretraining, not just the RoPE math being correct (which is tested).
+- [ ] The Qwen3-Embedding-0.6B int8 paged KV cache: fp32 is roughly 7.5 GiB
+      at 32768 tokens for a 0.6B model; the existing int8 paged-KV serving
+      path (`crates/qwen3/src/serve.rs`) was not wired into the `embed`
+      action, which stays fp32 and decode-only (no paged batching).
