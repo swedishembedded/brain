@@ -73,6 +73,9 @@ pub struct Progress {
     /// covered. See [`Progress::score`].
     toward_best: f32,
     had_route: bool,
+    /// What the run has taken off the level so far. Monotone, so it can be
+    /// read at any point in the episode and never goes down.
+    haul: Haul,
 }
 
 /// What surviving the whole horizon is worth to a run that never found
@@ -84,6 +87,37 @@ pub struct Progress {
 /// that crossed most of a level and died, which is the ordering a person
 /// reading the two runs would give.
 const LASTING: f32 = 0.2;
+
+/// What a full clear is worth on top of getting out, split the way DOOM's own
+/// intermission screen splits it.
+///
+/// Kills lead because they are the bulk of a level and the thing most likely
+/// to kill you back; items and secrets are equal and smaller because a level
+/// can hold three of one and forty of the other. They sum to 1.0, so a
+/// finished run scores 1.0 for the exit, up to 1.0 more for the clear, and up
+/// to 0.25 for walking out in good health.
+const KILLS_WORTH: f32 = 0.5;
+const ITEMS_WORTH: f32 = 0.25;
+const SECRETS_WORTH: f32 = 0.25;
+
+/// What a run took off a level, each as a fraction of what the level held.
+///
+/// All three are monotone counters, which is what lets them live in a score
+/// that has to be computable on a PREFIX - see [`Gauge`].
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Haul {
+    pub kills: f32,
+    pub items: f32,
+    pub secrets: f32,
+}
+
+impl Haul {
+    /// The three weighted into one number in `0..=1`.
+    fn value(&self) -> f32 {
+        (KILLS_WORTH * self.kills + ITEMS_WORTH * self.items + SECRETS_WORTH * self.secrets)
+            .clamp(0.0, 1.0)
+    }
+}
 
 /// How far an episode got, on a scale that still means something when it did
 /// not finish.
@@ -109,6 +143,11 @@ pub struct Score {
     pub lasted: f32,
     /// Distinct patches of floor entered.
     pub seen: usize,
+    /// What the run took off the level: kills, items and secrets, each as a
+    /// fraction of what the level held. This is three quarters of what DOOM
+    /// itself calls finishing a level, and a score that leaves it out ranks a
+    /// run that sprinted past everything level with one that cleared the map.
+    pub haul: Haul,
 }
 
 impl Score {
@@ -135,11 +174,16 @@ impl Score {
     /// a large negative payment for the one decision that found the exit.
     pub fn value(&self) -> f32 {
         let condition = 0.5 + 0.5 * self.alive;
+        let haul = self.haul.value();
         if self.finished {
-            return 1.0 + 0.25 * self.alive;
+            return 1.0 + haul + 0.25 * self.alive;
         }
         let lasting = LASTING * self.lasted;
-        self.toward.map_or(lasting, |f| f.max(lasting)) * condition
+        let went = self.toward.map_or(lasting, |f| f.max(lasting)) * condition;
+        // Halved, so that everything an unfinished run can show for itself
+        // together stays under the 1.0 that walking out of the level is worth
+        // on its own. A level cleared but not left is not a level finished.
+        0.5 * (went + haul)
     }
 }
 
@@ -254,6 +298,14 @@ impl Progress {
                 }
             }
         }
+        let frac = |got: u32, total: u32| if total == 0 { 1.0 } else { got as f32 / total as f32 };
+        // A level with none of a thing counts as having taken all of it: a
+        // map with no secrets must not be unclearable.
+        self.haul = Haul {
+            kills: frac(state.level.kills, state.level.total_kills),
+            items: frac(state.level.items, state.level.total_items),
+            secrets: frac(state.level.secrets, state.level.total_secrets),
+        };
         self.pos = (state.player.x.unwrap_or(0), state.player.y.unwrap_or(0));
         self.health = state.player.health;
         self.kills = state.level.kills;
@@ -285,6 +337,7 @@ impl Progress {
                 (self.steps as f32 / allowed as f32).clamp(0.0, 1.0)
             },
             seen: self.covered.len(),
+            haul: self.haul,
         }
     }
 
@@ -423,6 +476,7 @@ mod tests {
             alive: 0.0,
             lasted: 0.7,
             seen: 60,
+            haul: Haul::default(),
         };
         let barely = Score {
             finished: false,
@@ -430,6 +484,7 @@ mod tests {
             alive: 1.0,
             lasted: 1.0,
             seen: 6,
+            haul: Haul::default(),
         };
         assert!(
             nearly.value() > barely.value(),
@@ -447,6 +502,7 @@ mod tests {
             alive: 0.01,
             lasted: 1.0,
             seen: 10,
+            haul: Haul::default(),
         };
         let close = Score {
             finished: false,
@@ -454,6 +510,7 @@ mod tests {
             alive: 1.0,
             lasted: 0.5,
             seen: 200,
+            haul: Haul::default(),
         };
         assert!(finished.value() > close.value());
         // And finishing in one piece beats finishing on fumes.
@@ -474,6 +531,7 @@ mod tests {
             alive: 0.8,
             lasted: 1.0,
             seen: 40,
+            haul: Haul::default(),
         };
         let short = Score {
             lasted: 0.3,
@@ -488,6 +546,7 @@ mod tests {
             alive: 0.5,
             lasted: 0.5,
             seen: 40,
+            haul: Haul::default(),
         };
         assert!(went.value() > long.value());
     }
@@ -502,6 +561,56 @@ mod tests {
     /// its goal. Under `--reward gauge`, which pays a decision the difference
     /// between consecutive scores, the one decision that discovered the way
     /// out was paid a large negative reward for it.
+    /// The score has to BE the definition of success, or a loop that climbs
+    /// it climbs something else. Doom's own definition is the level finished
+    /// with every monster killed, every item taken and every secret found -
+    /// which is the intermission screen it shows you - so all four have to be
+    /// in the number a run is kept on.
+    #[test]
+    fn a_full_clear_outranks_a_bare_exit() {
+        let bare = Score {
+            finished: true,
+            toward: Some(1.0),
+            alive: 1.0,
+            lasted: 0.3,
+            haul: Haul::default(),
+            seen: 40,
+        };
+        let full = Score {
+            haul: Haul { kills: 1.0, items: 1.0, secrets: 1.0 },
+            ..bare
+        };
+        assert!(
+            full.value() > bare.value(),
+            "clearing the level scored no better than walking out of it: {:.3} vs {:.3}",
+            full.value(),
+            bare.value()
+        );
+        assert!(full.value() > 2.0, "a full clear is the top of the scale: {:.3}", full.value());
+    }
+
+    /// And killing things is worth something even to a run that never gets
+    /// out, or there is no gradient toward clearing a level at all.
+    #[test]
+    fn what_a_run_cleared_counts_even_when_it_did_not_finish() {
+        let empty = Score {
+            finished: false,
+            toward: Some(0.3),
+            alive: 1.0,
+            lasted: 0.5,
+            haul: Haul::default(),
+            seen: 40,
+        };
+        let fought = Score {
+            haul: Haul { kills: 0.8, items: 0.5, secrets: 0.0 },
+            ..empty
+        };
+        assert!(fought.value() > empty.value());
+        // But it never reaches a run that actually got out.
+        let out = Score { finished: true, ..empty };
+        assert!(out.value() > fought.value(), "not finishing outranked finishing");
+    }
+
     #[test]
     fn discovering_the_way_out_never_costs_a_run_anything() {
         let before = Score {
@@ -510,6 +619,7 @@ mod tests {
             alive: 1.0,
             lasted: 0.5,
             seen: 40,
+            haul: Haul::default(),
         };
         // The very next decision, with the exit now in view and none of the
         // way to it covered. Nothing about the run has got worse.
