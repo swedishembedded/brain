@@ -74,7 +74,17 @@ pub enum Tag {
 /// A decision every ~4-8 tics is about 5-9 per second of game time, which is
 /// the rate a human plays at and slow enough that a decision model with a
 /// millisecond of latency is never the thing holding the game up.
-const FIGHT_TICS: u32 = 4;
+/// How long an attack decision lasts.
+///
+/// Measured against the engine's own weapon timing rather than chosen: the
+/// pistol's cycle is about sixteen tics, so a four-tic attack asked the game
+/// to fire four times as often as any weapon can and got one shot in four.
+/// An option called "attack" that usually does not attack is an option the
+/// policy cannot learn the meaning of.
+///
+/// Faster weapons fire more than once inside it, which is correct - the
+/// trigger is held and the weapon's own state machine decides.
+const FIGHT_TICS: u32 = 16;
 /// Tics to hold while a weapon is lowered and the next one raised.
 const ARM_TICS: u32 = 18;
 const MOVE_TICS: u32 = 6;

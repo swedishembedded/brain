@@ -488,7 +488,8 @@ pub struct DoomEnv {
     /// teaches the policy that the error was a legal end to an episode.
     pub fault: Option<String>,
     /// What [`Env::hold`] kept, for [`Env::resume`] to put back.
-    held: Option<Held>,
+    /// The client-side half of every held state, by slot.
+    slots: std::collections::HashMap<usize, Held>,
 }
 
 impl DoomEnv {
@@ -533,7 +534,7 @@ impl DoomEnv {
             approach_from: None,
             approach_goal: None,
             fault: None,
-            held: None,
+            slots: std::collections::HashMap::new(),
         }
     }
 
@@ -918,6 +919,9 @@ impl DoomEnv {
             ));
             return (0.0, true);
         };
+        // The teacher's memory advances from what actually happened, not from
+        // having been asked. See `DoomEnv::scripted`.
+        self.note_executed(opt.tag);
         // While recording, the step is run ONE TIC AT A TIME so every rendered
         // frame can be kept. The engine's key handling is unchanged by the
         // split - `forward` holds its key for a countdown of tics and the turn
@@ -1198,7 +1202,28 @@ impl DoomEnv {
     /// most once until it moves again. What that buys is not cleverness, it
     /// is exhaustion - the teacher works through what it has rather than
     /// hammering the first thing on the list.
+    /// What the teacher would do here. A QUESTION, not a move.
+    ///
+    /// Asking used to change the answer to the next question: it recorded the
+    /// option as tried and could start a commitment, whether or not the
+    /// action was ever executed. DAgger asks at every state the STUDENT
+    /// reaches and executes the student's choice instead, so the teacher was
+    /// being told it had tried things that never happened - label noise with
+    /// no cause but bookkeeping.
+    ///
+    /// The bookkeeping now advances from what was actually EXECUTED, in
+    /// [`DoomEnv::note_executed`], which is what "have I tried this" and "am
+    /// I committed to a direction" were always supposed to mean.
     pub fn scripted(&mut self) -> Option<usize> {
+        let saved = (self.tried.clone(), self.commit, self.commit_tag);
+        let pick = self.scripted_inner();
+        self.tried = saved.0;
+        self.commit = saved.1;
+        self.commit_tag = saved.2;
+        pick
+    }
+
+    fn scripted_inner(&mut self) -> Option<usize> {
         // Once everything on offer has been tried, start again rather than
         // run out of ideas. Exhaustion is meant to be a rotation, not a
         // one-shot: a door takes one press and thirty tics to rise, during
@@ -1216,6 +1241,33 @@ impl DoomEnv {
             }
         }
         pick
+    }
+
+    /// Advance the teacher's own memory from an action that was EXECUTED.
+    ///
+    /// Whoever chose it. "I have tried the door" is a fact about the run, not
+    /// about who was asked, so a student that walks into a wall makes the
+    /// teacher's next suggestion account for it exactly as the teacher's own
+    /// step would have.
+    fn note_executed(&mut self, tag: Tag) {
+        if self.opts.iter().all(|o| self.tried.contains(&o.tag)) {
+            self.tried.clear();
+        }
+        if self.stuck >= STUCK_TRY_SOMETHING_ELSE {
+            self.tried.insert(tag);
+        }
+        // A commitment is kept only while it is being followed.
+        if self.commit > 0 {
+            if self.commit_tag == Some(tag) {
+                self.commit -= 1;
+            } else {
+                self.commit = 0;
+                self.commit_tag = None;
+            }
+        } else if self.circling() && matches!(tag, Tag::Explore | Tag::Advance) {
+            self.commit = COMMIT_STEPS;
+            self.commit_tag = Some(tag);
+        }
     }
 
     fn choose(&mut self) -> Option<usize> {
@@ -1521,10 +1573,16 @@ impl Env for DoomEnv {
     }
 
     fn hold(&mut self) -> bool {
-        if self.doom.snapshot().is_err() {
+        self.hold_at(0)
+    }
+
+    fn hold_at(&mut self, slot: usize) -> bool {
+        if self.doom.snapshot_at(slot).is_err() {
             return false;
         }
-        self.held = Some(Held {
+        // The client's own half of the state, kept beside the engine's. Half
+        // a run restored is worse than none, because it looks like an answer.
+        self.slots.insert(slot, Held {
             state: self.state.clone(),
             opts: self.opts.clone(),
             last_pos: self.last_pos,
@@ -1548,9 +1606,39 @@ impl Env for DoomEnv {
         true
     }
 
+    fn slots(&self) -> usize {
+        // What the engine was built with. See api_snapshot.h.
+        4096
+    }
+
+    /// Where the run is, coarsely, and what it is carrying.
+    ///
+    /// The grid is 128 units - four of the engine's route cells, about a
+    /// corridor and a half - so that shuffling on the spot is the same place
+    /// and walking into the next room is not. Keys are in the name because
+    /// carrying one makes everywhere reachable with it somewhere new, which
+    /// is how a search discovers that keys open doors without being told.
+    fn cell(&self) -> Option<String> {
+        let p = &self.state.player;
+        let (x, y) = (p.x?, p.y?);
+        let mut keys = p.keys.clone();
+        keys.sort();
+        Some(format!(
+            "{}:{}:{}:{}",
+            self.cfg.map,
+            x.div_euclid(128),
+            y.div_euclid(128),
+            keys.join("+")
+        ))
+    }
+
     fn resume(&mut self) -> Option<String> {
-        let held = self.held.clone()?;
-        if self.doom.restore().is_err() {
+        self.resume_from(0)
+    }
+
+    fn resume_from(&mut self, slot: usize) -> Option<String> {
+        let held = self.slots.get(&slot).cloned()?;
+        if self.doom.restore_from(slot).is_err() {
             return None;
         }
         self.state = held.state;
