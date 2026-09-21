@@ -1595,16 +1595,30 @@ impl DoomEnv {
         // decisions and never once setting off for the exit - so the warm
         // start cloned a player that had never finished a level, and the
         // policy had no demonstration of finishing to learn from.
+        // Circling before standing still and firing, wherever fighting comes
+        // in the order.
+        //
+        // It is the same act plus movement: the option fires AND crosses the
+        // line of fire, so against anything whose shot travels it is strictly
+        // better, and against a hitscanner it is the difference between being
+        // where the next shot goes and not. Nothing here ever chose one - the
+        // options have been built and offered at every fight and no branch
+        // could take them - so the scripted player stood in the open trading
+        // shots for the whole campaign.
+        //
+        // They only exist when something is actually shooting at the player
+        // and there is room to move to that side, so preferring them cannot
+        // fire at nothing or strafe into a wall.
         let order: &[Tag] = match self.mission {
-            Mission::Clear => &[Tag::Attack, Tag::Grab, Tag::Exit],
-            Mission::Speedrun => &[Tag::Exit, Tag::Attack, Tag::Grab],
-            Mission::Survive => &[Tag::Grab, Tag::Attack, Tag::Exit],
+            Mission::Clear => &[Tag::Circle, Tag::Attack, Tag::Grab, Tag::Exit],
+            Mission::Speedrun => &[Tag::Exit, Tag::Circle, Tag::Attack, Tag::Grab],
+            Mission::Survive => &[Tag::Grab, Tag::Circle, Tag::Attack, Tag::Exit],
         };
 
         for tag in order {
             let Some(i) = by(*tag) else { continue };
             let take = match tag {
-                Tag::Attack => threat_near,
+                Tag::Circle | Tag::Attack => threat_near,
                 Tag::Grab => {
                     hurt_badly
                         || underfoot(if self.mission == Mission::Speedrun {
