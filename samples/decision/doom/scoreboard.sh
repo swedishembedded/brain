@@ -13,7 +13,7 @@ set -u
 CSV=$1; GEN=$2; HEAD=${3:-}
 : "${DOOM_BIN:?}" "${WAD:?}" "${ENC:?}" "${DBIN:?}"
 SKILL=${SKILL:-3}
-STEPS=${STEPS:-900}
+STEPS=${STEPS:-600}
 EPISODES=${EPISODES:-2}
 WHO=scripted
 ARGS=()
