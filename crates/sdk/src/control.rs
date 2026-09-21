@@ -357,6 +357,35 @@ impl Keep {
     }
 }
 
+/// Which of a round's two policies a number was measured on.
+///
+/// A round measures, then updates. The rollout it scores was drawn by the
+/// weights it ENTERED with, and so is any progress or agreement number taken
+/// while collecting; a fixed-block gauge is run after the update and measures
+/// what the round PRODUCED. Both are handed to the same [`Keep`], and pairing
+/// one with the other's weights keeps whatever happens to follow the best
+/// score rather than the policy that earned it.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Scored {
+    /// The weights that drew the rollout.
+    Entering,
+    /// The weights the update left behind.
+    Produced,
+}
+
+/// The number a round is ranked on, and which of its two policies owns it.
+///
+/// `None` when the round measured nothing comparable, which leaves the caller
+/// its own last resort - a fit loss belongs to the weights the fit produced,
+/// not to the ones it started from.
+fn ranking(gauged: Option<f32>, entering: Option<f32>) -> Option<(f32, Scored)> {
+    match (gauged, entering) {
+        (Some(g), _) => Some((g, Scored::Produced)),
+        (None, Some(e)) => Some((e, Scored::Entering)),
+        (None, None) => None,
+    }
+}
+
 /// The candidate that measured best, or `None` when the decision did not
 /// discriminate.
 ///
@@ -822,12 +851,6 @@ const GAE_LAMBDA: f32 = 0.95;
 /// The critic's hidden width, over the encoder's 384-d pooled embedding.
 const CRITIC_HIDDEN: usize = 64;
 
-/// How often an exploring episode starts from a place already found rather
-/// than from the level's own start.
-///
-/// Not always: a search that never starts fresh stops sampling the opening of
-/// a level, and the opening is where every trajectory has to begin.
-const RESUME_CHANCE: f32 = 0.8;
 
 /// How often an exploring step repeats what it just did.
 ///
@@ -1275,6 +1298,10 @@ impl<E: Env> ControlPipeline<E> {
         // See the pass count below.
         let mut unit = 0usize;
         for round in 0..spec.dagger {
+            // The weights the student is about to be driven with. Its own
+            // progress over those episodes is a number about THIS policy, not
+            // about whatever the refit below leaves behind. See [`Scored`].
+            let entering = self.model.head_weights();
             let Some((demos, progress, agreed)) =
                 self.label_student(spec.episodes, spec.max_steps)?
             else {
@@ -1319,8 +1346,11 @@ impl<E: Env> ControlPipeline<E> {
             // Refitting on a bigger set is not monotone either: a round that
             // adds mostly labels for states the student has stopped visiting
             // can move the head away from the ones it is in now.
-            keep.offer(round + 1, gauged.or(progress).unwrap_or(-loss), || {
-                self.model.head_weights()
+            let (rank, whose) =
+                ranking(gauged, progress).unwrap_or((-loss, Scored::Produced));
+            keep.offer(round + 1, rank, || match whose {
+                Scored::Entering => entering.clone(),
+                Scored::Produced => self.model.head_weights(),
             });
         }
         let (round, w) = keep.best();
@@ -2431,6 +2461,16 @@ impl<E: Env> ControlPipeline<E> {
                 next_slot += 1;
             }
         }
+        // Nowhere to return TO. An environment that cannot name a cell or
+        // cannot hold one has no archive, and the selection below would index
+        // an empty list.
+        if seen.is_empty() {
+            println!(
+                "    explore: {label} could not hold its starting state, so there is \
+                 nothing to return to"
+            );
+            return Ok(Vec::new());
+        }
         let mut refused = 0usize;
 
         for _ in 0..spec.explore {
@@ -3489,6 +3529,10 @@ impl<E: Env> Stages for ControlPipeline<E> {
         let mut running: Option<Vec<(String, Vec<f32>)>> = None;
         let mut averaged = 0usize;
         for it in 0..spec.iterations {
+            // The weights the rollout is about to be drawn from. Without a
+            // fixed block the round's rank IS that rollout's score, and the
+            // score belongs to the policy that produced it. See [`Scored`].
+            let entering = self.model.head_weights();
             let (batch, stats) = self.rollout(spec.episodes, spec.max_steps)?;
             if batch.is_empty() {
                 return Err(Error::Backend("the environment produced no steps to learn from".into()));
@@ -3564,9 +3608,8 @@ impl<E: Env> Stages for ControlPipeline<E> {
                 running = Some(mean_of(running.take(), self.model.head_weights(), averaged));
                 averaged += 1;
             }
-            let rank = gauged
-                .or(stats.mean_progress)
-                .unwrap_or(stats.mean_return);
+            let (rank, whose) = ranking(gauged, stats.mean_progress)
+                .unwrap_or((stats.mean_return, Scored::Entering));
             let ranked_on = if gauged.is_some() {
                 "on the fixed block"
             } else if stats.mean_progress.is_some() {
@@ -3574,7 +3617,36 @@ impl<E: Env> Stages for ControlPipeline<E> {
             } else {
                 "in return"
             };
-            if keep.offer(it + 1, rank, || self.model.head_weights()) {
+            // Numbered by the iterate the score belongs to. A rollout drawn
+            // before the update scores the policy the round INHERITED, which
+            // is the previous round's product.
+            let at = match whose {
+                Scored::Entering => it,
+                Scored::Produced => it + 1,
+            };
+            if keep.offer(at, rank, || match whose {
+                Scored::Entering => entering.clone(),
+                Scored::Produced => self.model.head_weights(),
+            }) {
+                best_ranked_on = ranked_on;
+            }
+            last_rank = rank;
+        }
+        // Every rank in that loop belongs to the rollout that PRECEDED its
+        // update, so with no fixed block the last update's policy has been
+        // measured by nothing at all. One more rollout is what makes it a
+        // candidate, and it costs what any other iteration's rollout costs.
+        if spec.gauge_episodes == 0 && spec.iterations > 0 {
+            let (_, stats) = self.rollout(spec.episodes, spec.max_steps)?;
+            self.last = stats;
+            let rank = stats.mean_progress.unwrap_or(stats.mean_return);
+            let ranked_on = if stats.mean_progress.is_some() {
+                "over its own episodes"
+            } else {
+                "in return"
+            };
+            println!("    the last iterate scores {rank:.3} {ranked_on}");
+            if keep.offer(spec.iterations, rank, || self.model.head_weights()) {
                 best_ranked_on = ranked_on;
             }
             last_rank = rank;
@@ -3815,6 +3887,72 @@ mod keep_tests {
         let mut k = Keep::starting(0.770, w(0.0));
         k.offer(1, 0.770, || w(1.0));
         assert_eq!(k.best().0, 0);
+    }
+}
+
+#[cfg(test)]
+mod ranking_tests {
+    use super::{ranking, Keep, Scored};
+
+    fn w(tag: f32) -> Vec<(String, Vec<f32>)> {
+        vec![("head.weight".into(), vec![tag])]
+    }
+
+    #[test]
+    fn a_fixed_block_score_belongs_to_the_weights_the_round_produced() {
+        assert_eq!(ranking(Some(0.81), Some(0.42)), Some((0.81, Scored::Produced)));
+    }
+
+    #[test]
+    fn without_a_block_a_rounds_own_score_belongs_to_the_weights_it_entered_with() {
+        assert_eq!(ranking(None, Some(0.42)), Some((0.42, Scored::Entering)));
+    }
+
+    #[test]
+    fn a_round_that_measured_nothing_has_nothing_to_rank() {
+        assert_eq!(ranking(None, None), None);
+    }
+
+    /// The defect, played out over three rounds.
+    ///
+    /// Each round rolls out, scores what it rolled out, then updates. Round 2
+    /// draws the best rollout and its update then walks the policy off. Paired
+    /// the way this loop used to - the score from before the update, the
+    /// weights from after it - the run keeps round 2's post-update policy,
+    /// which is not the one that scored 0.90 and need not resemble it.
+    #[test]
+    fn the_weights_kept_are_the_ones_the_score_was_measured_on() {
+        let rounds = [(1.0f32, 0.40f32, 10.0f32), (2.0, 0.90, 20.0), (3.0, 0.50, 30.0)];
+        let mut k = Keep::starting(f32::NEG_INFINITY, w(0.0));
+        for (round, (entering, own, produced)) in rounds.iter().enumerate() {
+            let (rank, whose) = ranking(None, Some(*own)).unwrap();
+            k.offer(round + 1, rank, || {
+                w(match whose {
+                    Scored::Entering => *entering,
+                    Scored::Produced => *produced,
+                })
+            });
+        }
+        assert_eq!(
+            k.best().1[0].1,
+            vec![2.0],
+            "kept the policy that FOLLOWED the best score instead of the one that got it"
+        );
+    }
+
+    /// And a gauged round still keeps what the gauge measured, which is the
+    /// updated policy. The fix must not swap the pairing the other way.
+    #[test]
+    fn a_gauged_round_keeps_the_policy_the_gauge_ran_on() {
+        let mut k = Keep::starting(f32::NEG_INFINITY, w(0.0));
+        let (rank, whose) = ranking(Some(0.81), Some(0.42)).unwrap();
+        k.offer(1, rank, || {
+            w(match whose {
+                Scored::Entering => 1.0,
+                Scored::Produced => 20.0,
+            })
+        });
+        assert_eq!(k.best().1[0].1, vec![20.0]);
     }
 }
 
