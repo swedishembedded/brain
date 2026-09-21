@@ -208,6 +208,46 @@ fn densify(scene: &mut Splats, grad: &[f32], cfg: &FitCfg) {
 /// the last loss, each gaussian's accumulated positional-gradient magnitude,
 /// and whether `on_step` asked to stop.
 #[allow(clippy::too_many_arguments)]
+/// Where an iteration's wall clock goes.
+///
+/// Every phase below ends at a device sync - a readback, or a submit the next
+/// readback waits on - so host timing is a faithful account rather than an
+/// approximation, and it is the only account that includes the host-side work
+/// and the transfers, which is where a splat fit tends to actually spend its
+/// day. Set `BRAIN_SPLAT_PROFILE=1` to print it.
+#[derive(Default)]
+struct Prof {
+    on: bool,
+    t: Vec<(&'static str, f64)>,
+}
+
+impl Prof {
+    fn new() -> Prof {
+        Prof { on: std::env::var_os("BRAIN_SPLAT_PROFILE").is_some(), t: Vec::new() }
+    }
+    fn add(&mut self, k: &'static str, d: std::time::Duration) {
+        if !self.on {
+            return;
+        }
+        match self.t.iter_mut().find(|(n, _)| *n == k) {
+            Some(e) => e.1 += d.as_secs_f64(),
+            None => self.t.push((k, d.as_secs_f64())),
+        }
+    }
+    fn report(&self, iters: usize, n: usize, views: usize) {
+        if !self.on || iters == 0 {
+            return;
+        }
+        let total: f64 = self.t.iter().map(|(_, v)| v).sum();
+        println!("\nfit profile: {n} gaussians x {views} view(s), {iters} iters, {total:.1}s total");
+        let mut rows = self.t.clone();
+        rows.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        for (k, v) in rows {
+            println!("  {k:22} {:8.1} ms/iter  {:5.1}%", 1e3 * v / iters as f64, 100.0 * v / total);
+        }
+    }
+}
+
 fn fit_stage(
     gpu: &Gpu,
     ks: Kernels,
@@ -288,13 +328,17 @@ fn fit_stage(
     // per step off the device for a signal that is used once.
     let window = iters.clamp(1, 4);
     let mut gsum = vec![0.0f32; n];
+    let mut prof = Prof::new();
     for it in 0..iters {
         // zero grads
+        let t0 = std::time::Instant::now();
         gpu.submit(&[&grads.d_gauss, &grads.d_opac, &grads.d_colors], &[]);
+        prof.add("zero grads", t0.elapsed());
         let mut loss_sum = 0.0f64;
         for t in targets {
             let px = (t.cam.width * t.cam.height) as usize;
             // unpack params for the forward
+            let tm = std::time::Instant::now();
             let unpack = gpu.step(
                 ks.splat_unpack,
                 &[&p_geo, &means, &scales, &quats],
@@ -302,6 +346,7 @@ fn fit_stage(
                 n as u32,
             );
             gpu.submit(&[], &[unpack]);
+            prof.add("unpack params", tm.elapsed());
             let gs = GpuSplats {
                 n,
                 means: means.clone(),
@@ -310,9 +355,14 @@ fn fit_stage(
                 opacities: p_op.clone(),
                 colors: p_col.clone(),
             };
+            let tm = std::time::Instant::now();
             renderer.render(gpu, &gs, &t.cam, &opts);
+            prof.add("render forward", tm.elapsed());
             // host loss: MSE over rgb; alpha unsupervised
+            let tm = std::time::Instant::now();
             let img = renderer.read_rgba(gpu, t.cam.width, t.cam.height);
+            prof.add("read image back", tm.elapsed());
+            let tm = std::time::Instant::now();
             let mut d = vec![0.0f32; px * 4];
             let scale = 2.0 / (px as f32 * 3.0);
             let mut lsum = 0.0f64;
@@ -324,10 +374,15 @@ fn fit_stage(
                 }
             }
             loss_sum += lsum / (px as f64 * 3.0);
+            prof.add("host loss + dL/dimg", tm.elapsed());
+            let tm = std::time::Instant::now();
             gpu.write(&dimg, cast(&d));
+            prof.add("upload dL/dimg", tm.elapsed());
+            let tm = std::time::Instant::now();
             renderer
                 .render_bwd(gpu, &gs, &t.cam, &opts, &dimg, &mut bscr, &grads)
                 .unwrap_or_else(|e| panic!("{e}"));
+            prof.add("render backward", tm.elapsed());
         }
         // Adam's bias correction counts from the start of THIS stage, because
         // its moments do too: m and v are fresh buffers per stage, and pairing
@@ -338,12 +393,17 @@ fn fit_stage(
         let ts = it as i32 + 1;
         let bc1 = 1.0 - 0.9f32.powi(ts);
         let bc2 = 1.0 - 0.999f32.powi(ts);
+        let tm = std::time::Instant::now();
         gpu.write(&hparams, &[f(cfg.lr), f(0.9), f(0.999), f(1e-8), f(0.0), f(bc1), f(bc2), f(1.0)]);
         adamw_step([&p_geo, &grads.d_gauss, &m_geo, &v_geo], &desc_geo, 10 * n);
         adamw_step([&p_op, &grads.d_opac, &m_op, &v_op], &desc_op, n);
         adamw_step([&p_col, &grads.d_colors, &m_col, &v_col], &desc_col, 3 * n);
+        prof.add("adamw", tm.elapsed());
         // projected-gradient clamps (host; N is fit-sized)
+        let tm = std::time::Instant::now();
         let mut geo = gpu.read(&p_geo, 10 * n);
+        prof.add("clamp: read geo", tm.elapsed());
+        let tm = std::time::Instant::now();
         for i in 0..n {
             for k in 3..6 {
                 geo[i * 10 + k] = geo[i * 10 + k].clamp(cfg.min_scale, 0.3);
@@ -359,19 +419,24 @@ fn fit_stage(
                 }
             }
         }
+        prof.add("clamp: host loop", tm.elapsed());
+        let tm = std::time::Instant::now();
         gpu.write(&p_geo, cast(&geo));
         let mut op = gpu.read(&p_op, n);
         for v in op.iter_mut() {
             *v = v.clamp(1e-4, 1.0 - 1e-4);
         }
         gpu.write(&p_op, cast(&op));
+        prof.add("clamp: write back", tm.elapsed());
 
         if cfg.densify_every > 0 && it + window >= iters {
+            let tm = std::time::Instant::now();
             let dg = gpu.read(&grads.d_gauss, 10 * n);
             for i in 0..n {
                 let (a, b, c) = (dg[i * 10], dg[i * 10 + 1], dg[i * 10 + 2]);
                 gsum[i] += (a * a + b * b + c * c).sqrt();
             }
+            prof.add("densify grad readback", tm.elapsed());
         }
 
         last_loss = (loss_sum / targets.len() as f64) as f32;
@@ -384,6 +449,8 @@ fn fit_stage(
             break;
         }
     }
+
+    prof.report(iters, n, targets.len());
 
     // read back the optimized scene
     let geo = gpu.read(&p_geo, 10 * n);

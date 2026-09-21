@@ -457,6 +457,21 @@ impl Renderer {
         }
         scr.reserve_records(gpu, n_recs)?;
 
+        // Stage timings, on request. Splitting the submissions costs a few
+        // extra syncs, which is the price of finding out which stage is the
+        // expensive one - and the answer is not obvious from the code.
+        let prof = std::env::var_os("BRAIN_SPLAT_PROFILE").is_some();
+        let mut flush = |gpu: &Gpu, steps: &mut Vec<gpu_core::Step>, what: &'static str| {
+            if !prof {
+                return;
+            }
+            let t = std::time::Instant::now();
+            let taken = std::mem::take(steps);
+            gpu.submit(&[], &taken);
+            gpu.read(&self.proj, 1);
+            eprintln!("    bwd {what}: {:.1} ms", 1e3 * t.elapsed().as_secs_f64());
+        };
+
         // pass B: emit records, sort by gaussian id, segment-reduce, project VJP
         let mut steps = Vec::new();
         steps.push(gpu.step(
@@ -474,11 +489,13 @@ impl Renderer {
             &[n_recs as u32],
             n_recs as u32,
         ));
+        flush(gpu, &mut steps, "emit + keys");
         let key_bits = 32u32.min((s.n.next_power_of_two().trailing_zeros()).max(1) + 1);
         let in_b = record_sort_pairs(
             gpu, &self.ks, &scr.rkeys_a, &scr.rvals_a, &scr.rkeys_b, &scr.rvals_b,
             n_recs, key_bits, &scr.rsort, &mut steps,
         );
+        flush(gpu, &mut steps, "sort records by gaussian");
         let (skeys, svals) = if in_b { (&scr.rkeys_b, &scr.rvals_b) } else { (&scr.rkeys_a, &scr.rvals_a) };
         // segment ranges over gaussian ids (tile_ranges with depth_bits = 0)
         steps.push(gpu.step(
@@ -516,7 +533,15 @@ impl Renderer {
             &pp,
             s.n as u32,
         ));
+        if prof {
+            eprintln!("    bwd records: {n_recs}");
+        }
+        let t = std::time::Instant::now();
         gpu.submit(&[&scr.granges, &scr.pgrad], &steps);
+        if prof {
+            gpu.read(&self.proj, 1);
+            eprintln!("    bwd ranges + reduce + project: {:.1} ms", 1e3 * t.elapsed().as_secs_f64());
+        }
         Ok(n_recs)
     }
 }
