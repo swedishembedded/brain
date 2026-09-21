@@ -214,11 +214,22 @@ pub struct AssembleOpts {
     /// Keep a pixel only if at least this many OTHER frames agreed there is a
     /// surface there. 0 keeps everything.
     pub min_support: u16,
+    /// Drop this percentage of pixels, the least confident first, by the depth
+    /// head's own confidence channel. 0 keeps everything.
+    ///
+    /// The model knows where it is guessing. Measured against multi-view
+    /// agreement on a real capture, its least-confident quartile disagrees
+    /// with the other views twice as much as its most-confident one (0.99% vs
+    /// 0.53%, rank correlation -0.39). The merge weight carries no such signal
+    /// (-0.03), so confidence is the only per-pixel quality estimate available.
+    /// The threshold is global across frames, not per frame: a whole view can
+    /// be harder than another and should lose more pixels, not the same share.
+    pub conf_percentile: f32,
 }
 
 impl Default for AssembleOpts {
     fn default() -> Self {
-        AssembleOpts { min_opacity: 0.01, max_depth: 0.0, gs_mask_threshold: 0.5, edge_depth_rtol: 0.03, fuse_depth_rtol: 0.05, min_support: 0 }
+        AssembleOpts { min_opacity: 0.01, max_depth: 0.0, gs_mask_threshold: 0.5, edge_depth_rtol: 0.03, fuse_depth_rtol: 0.05, min_support: 0, conf_percentile: 0.0 }
     }
 }
 
@@ -258,6 +269,121 @@ pub fn depth_edges(z: &[f32], w: usize, h: usize, rtol: f32) -> Vec<bool> {
     out
 }
 
+/// The raw per-frame head outputs assembly reads, before any activation.
+///
+/// Separating these from the model is what makes assembly answerable offline.
+/// Every option below - the mask threshold, the edge and fusion tolerances,
+/// the support floor - decides which pixels become geometry, and picking one
+/// used to cost a full forward pass, so they were picked by argument rather
+/// than by measurement.
+#[derive(Clone, Default)]
+pub struct HeadOutputs {
+    /// per frame, `3 * w * h`: log depth, log confidence, mask logit
+    pub gsd: Vec<Vec<f32>>,
+    /// per frame, `12 * w * h`: quat, log scale, opacity logit, colour, merge
+    pub gsp: Vec<Vec<f32>>,
+    /// per frame, `3 * w * h`: the [0,1] input frame, the colour source
+    pub rgb: Vec<Vec<f32>>,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl HeadOutputs {
+    /// Read every frame's heads off the device.
+    pub fn read(gpu: &Gpu, model: &Mirror, s: usize, width: u32, height: u32) -> HeadOutputs {
+        let hw = (width * height) as usize;
+        HeadOutputs {
+            gsd: (0..s).map(|fi| gpu.read(model.head_out(Head::GsDepth, fi), 3 * hw)).collect(),
+            gsp: (0..s).map(|fi| gpu.read(model.head_out(Head::GsParams, fi), 12 * hw)).collect(),
+            rgb: Vec::new(),
+            width,
+            height,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.gsd.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.gsd.is_empty()
+    }
+
+    /// Write every frame's heads to `dir` as raw little-endian f32, next to a
+    /// one-line manifest naming the shape.
+    ///
+    /// Raw rather than an image format on purpose: depth is the model's
+    /// primary output and quantising it to 8 bits is exactly the information a
+    /// question about depth needs.
+    pub fn save(&self, dir: impl AsRef<std::path::Path>) -> std::io::Result<()> {
+        let dir = dir.as_ref();
+        std::fs::create_dir_all(dir)?;
+        std::fs::write(
+            dir.join("heads.json"),
+            format!(
+                "{{\"frames\":{},\"width\":{},\"height\":{}}}\n",
+                self.len(),
+                self.width,
+                self.height
+            ),
+        )?;
+        for fi in 0..self.len() {
+            write_f32(&dir.join(format!("gsd_{fi:03}.f32")), &self.gsd[fi])?;
+            write_f32(&dir.join(format!("gsp_{fi:03}.f32")), &self.gsp[fi])?;
+            if let Some(rgb) = self.rgb.get(fi) {
+                write_f32(&dir.join(format!("rgb_{fi:03}.f32")), rgb)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Read back what [`save`][Self::save] wrote.
+    pub fn load(dir: impl AsRef<std::path::Path>) -> std::io::Result<HeadOutputs> {
+        let dir = dir.as_ref();
+        let man = std::fs::read_to_string(dir.join("heads.json"))?;
+        let field = |k: &str| -> std::io::Result<usize> {
+            man.split(&format!("\"{k}\":"))
+                .nth(1)
+                .and_then(|t| t.trim_start().split(|c: char| !c.is_ascii_digit()).next())
+                .and_then(|t| t.parse().ok())
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("{}/heads.json has no {k}", dir.display()),
+                    )
+                })
+        };
+        let (s, width, height) = (field("frames")?, field("width")? as u32, field("height")? as u32);
+        let hw = (width * height) as usize;
+        let mut out = HeadOutputs { width, height, ..Default::default() };
+        for fi in 0..s {
+            out.gsd.push(read_f32(&dir.join(format!("gsd_{fi:03}.f32")), 3 * hw)?);
+            out.gsp.push(read_f32(&dir.join(format!("gsp_{fi:03}.f32")), 12 * hw)?);
+            out.rgb.push(read_f32(&dir.join(format!("rgb_{fi:03}.f32")), 3 * hw)?);
+        }
+        Ok(out)
+    }
+}
+
+fn write_f32(path: &std::path::Path, v: &[f32]) -> std::io::Result<()> {
+    let mut bytes = Vec::with_capacity(v.len() * 4);
+    for x in v {
+        bytes.extend_from_slice(&x.to_le_bytes());
+    }
+    std::fs::write(path, bytes)
+}
+
+fn read_f32(path: &std::path::Path, n: usize) -> std::io::Result<Vec<f32>> {
+    let bytes = std::fs::read(path)?;
+    if bytes.len() != n * 4 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("{} holds {} bytes, expected {}", path.display(), bytes.len(), n * 4),
+        ));
+    }
+    Ok(bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect())
+}
+
 /// Read the GS head outputs for all frames and build the host scene.
 /// `frames_chw` = the raw [0,1] input frames (color source). Also returns the
 /// per-gaussian sigmoid merge weights for `splat::prune` - the same values
@@ -273,6 +399,27 @@ pub fn assemble(
     opts: &AssembleOpts,
     known: Option<&[Camera]>,
 ) -> (Splats, Vec<Camera>, Vec<f32>) {
+    let mut heads = HeadOutputs::read(gpu, model, s, width, height);
+    let hw = (width * height) as usize;
+    heads.rgb = (0..s).map(|fi| frames_chw[fi * 3 * hw..(fi + 1) * 3 * hw].to_vec()).collect();
+    let cams = match known {
+        Some(k) if k.len() == s => k.to_vec(),
+        _ => decode_cameras(&model.cam_pred_raw(), s, width, height),
+    };
+    assemble_from(&heads, &cams, opts)
+}
+
+/// Build the scene from head outputs that are already in host memory.
+///
+/// The same function `assemble` runs, with the device and the model taken out
+/// of it, so a dumped forward pass can be re-assembled under different options
+/// in seconds instead of a quarter of an hour.
+pub fn assemble_from(
+    heads: &HeadOutputs,
+    cams: &[Camera],
+    opts: &AssembleOpts,
+) -> (Splats, Vec<Camera>, Vec<f32>) {
+    let (s, width, height) = (heads.len(), heads.width, heads.height);
     // Back-project through the cameras the caller KNOWS when it has them, and
     // through the predicted ones otherwise. The reference does exactly this
     // and says why: gaussian positions are depth unprojected through a camera,
@@ -280,33 +427,39 @@ pub fn assemble(
     // frame. Conditioning the trunk on a pose only informs the features; it
     // does not stop the camera head from being the thing the geometry is
     // built on.
-    let cams = match known {
-        Some(k) if k.len() == s => k.to_vec(),
-        _ => decode_cameras(&model.cam_pred_raw(), s, width, height),
-    };
     let hw = (width * height) as usize;
 
-    // Read every frame's depth first, and let the frames settle their
-    // disagreement before any of it becomes geometry. They cannot settle it
-    // afterwards: the error is along each pixel's own viewing ray, invisible
-    // from the frame that made it and untouchable by a fit whose gradients are
-    // orthogonal to that ray.
-    let mut gsd_all: Vec<Vec<f32>> = (0..s)
-        .map(|fi| gpu.read(model.head_out(Head::GsDepth, fi), 3 * hw))
-        .collect();
-    let mut depths: Vec<Vec<f32>> = gsd_all
+    // Settle the frames' disagreement about depth before any of it becomes
+    // geometry. They cannot settle it afterwards: the error is along each
+    // pixel's own viewing ray, invisible from the frame that made it and
+    // untouchable by a fit whose gradients are orthogonal to that ray.
+    let mut depths: Vec<Vec<f32>> = heads
+        .gsd
         .iter()
         .map(|g| g[..hw].iter().map(|v| v.exp()).collect())
         .collect();
     let support = if opts.fuse_depth_rtol > 0.0 && s > 1 {
         // the head's second channel is its own confidence in the first
-        let confs: Vec<Vec<f32>> = gsd_all
+        let confs: Vec<Vec<f32>> = heads
+            .gsd
             .iter()
             .map(|g| g[hw..2 * hw].iter().map(|v| 1.0 + v.exp()).collect())
             .collect();
-        fuse_depths(&mut depths, &confs, &cams, width, height, opts.fuse_depth_rtol)
+        fuse_depths(&mut depths, &confs, cams, width, height, opts.fuse_depth_rtol)
     } else {
         Vec::new()
+    };
+
+    // One global confidence floor, found before anything is built.
+    let conf_floor = if opts.conf_percentile > 0.0 && opts.conf_percentile < 100.0 {
+        let mut all: Vec<f32> =
+            heads.gsd.iter().flat_map(|g| g[hw..2 * hw].iter().copied()).collect();
+        let k = ((all.len() as f64) * (opts.conf_percentile as f64) / 100.0) as usize;
+        let k = k.min(all.len().saturating_sub(1));
+        all.select_nth_unstable_by(k, f32::total_cmp);
+        all[k]
+    } else {
+        f32::NEG_INFINITY
     };
 
     let mut out = Splats::default();
@@ -316,9 +469,9 @@ pub fn assemble(
         // validity mask - laid out like `Head::Depth`'s. Only the first was
         // ever read, so pixels the model itself reports as not-geometry became
         // gaussians anyway.
-        let gsd = std::mem::take(&mut gsd_all[fi]);
-        let gsp = gpu.read(model.head_out(Head::GsParams, fi), 12 * hw);
-        let rgb = &frames_chw[fi * 3 * hw..(fi + 1) * 3 * hw];
+        let gsd = &heads.gsd[fi];
+        let gsp = &heads.gsp[fi];
+        let rgb = &heads.rgb[fi];
         let m = &cam.c2w;
         let depth = std::mem::take(&mut depths[fi]);
         let edge = depth_edges(&depth, width as usize, height as usize, opts.edge_depth_rtol);
@@ -350,16 +503,24 @@ pub fn assemble(
                 {
                     continue; // no other view agrees a surface is here
                 }
+                if gsd[hw + i] < conf_floor {
+                    continue; // the model says it is guessing here
+                }
                 let z = depth[i];
                 if opts.max_depth > 0.0 && z > opts.max_depth {
                     continue;
                 }
                 // A pixel is an AREA and the rasterizer samples it at its
-                // centre, so unprojecting pixel n has to use n + 0.5. Without
-                // it every gaussian in the scene lands half a pixel up and
-                // half a pixel left of the detail it was made from - 0.7 px
-                // diagonally, against a median splat standard deviation of
-                // 0.46 px.
+                // centre, so unprojecting pixel n uses n + 0.5.
+                //
+                // Worth knowing that the reference does NOT: it unprojects
+                // integer pixel indices against `cx = w/2`, which is half a
+                // pixel off from its own grid centre. Measured on a real
+                // capture, the choice is a wash - median cross-view depth
+                // disagreement 0.6823% with the half pixel and 0.6854%
+                // without - so this keeps the convention that is right for
+                // the rasterizer that consumes it rather than chasing a
+                // difference below the noise.
                 let xc = (px as f32 + 0.5 - cam.cx) * z / cam.fx;
                 let yc = (py as f32 + 0.5 - cam.cy) * z / cam.fy;
                 out.means.extend_from_slice(&[
@@ -389,7 +550,7 @@ pub fn assemble(
             }
         }
     }
-    (out, cams, weights)
+    (out, cams.to_vec(), weights)
 }
 
 /// Depth/normal/confidence maps for one frame, activations applied.

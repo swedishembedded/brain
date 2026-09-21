@@ -562,7 +562,7 @@ fn prune_cmd(argv: &[String]) {
     );
 }
 
-fn read_cameras(path: &str) -> Vec<Camera> {
+pub fn read_cameras(path: &str) -> Vec<Camera> {
     let j: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(path).unwrap_or_else(|e| {
             eprintln!("cannot read {path}: {e}");
