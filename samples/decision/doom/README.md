@@ -361,10 +361,28 @@ sum_t [ M(h_t+1) - M(h_t) ]  =  M(h_T) - M(h_0)  =  M(h_T)
 ```
 
 That identity is algebra, not tuning. It holds because the score can be computed
-on a **prefix** - how far along the route the run has ever got, how much health
-it has now, how many decisions it has survived - so it exists after every
-decision. The check is visible in any run's log: under `--reward gauge` an
-episode's `return` and its `progress` print the same number.
+on a **prefix** - how far along the route the run has ever got, how many
+monsters it has killed, items taken and secrets found, how much health it has
+now, how many decisions it has survived - every one of those either a running
+maximum or a monotone counter, so the score exists after every decision. The
+check is visible in any run's log: under `--reward gauge` an episode's `return`
+and its `progress` print the same number.
+
+**The score is DOOM's own definition of finishing a level**, which is what the
+intermission screen reports:
+
+```text
+finished                       1.0
+  + full clear            up to 1.0     kills .5, items .25, secrets .25
+  + walked out healthy    up to 0.25
+not finished              under 1.0
+```
+
+So above 1.0 means it got out, and 2.0 means it got out having taken the level
+apart. That is deliberate: a loop can only climb the number it is given, so the
+number has to be the goal. Leaving kills, items and secrets out of it - which
+this scored for most of its life - ranks a run that sprinted past everything
+level with one that cleared the map.
 
 The default, `--reward shaped`, is the older scheme: separately chosen weights
 for kills, items, damage taken, floor newly walked and route closed. It has no
@@ -454,191 +472,67 @@ is still in the state that produced it.
 
 ## What was measured
 
-Every number below is a real run on this repository's own hardware (two Tesla
-P40s, one used). Nothing is projected.
+**The measurements have been reset.** Everything this section used to report
+was taken against an agent and a score that no longer exist, and a stale number
+presented as current is worse than no number at all. What changed, and why none
+of the old figures carry over:
 
-### What a decision costs
+- **The score is now the definition of done.** It reads the level finished,
+  every monster killed, every item taken, every secret found - what DOOM's own
+  intermission screen reports. It used to read none of the last three, so a run
+  that sprinted past everything scored what a run that cleared the map scored.
+- **Finding the way out used to cost a run most of its score.** The route leads
+  to unexplored ground until the exit has been seen; the score read that as two
+  alternative branches and switched between them at the moment of discovery,
+  when none of the way to it had been covered. Measured on E1M7, the same
+  policy scored 0.48 stopped at 120 decisions and 0.00 allowed 900, having
+  ended closer to its goal.
+- **The agent could not choose a weapon.** It was told what was in its hands
+  and nothing about the rest of what it carried, and there was no option to
+  change, so every fight used whatever the last pickup left behind.
+- **It saw three enemies**, in engine order, so whatever was shooting at it
+  could be dropped in favour of three harmless ones standing nearer.
+- **Everything moved at walking pace**, and firing while moving could not be
+  expressed at all.
 
-`doom bench` times one decision against the two things its cost could scale
-with:
+Any of those alone would invalidate a comparison; together they mean the
+numbers were measuring a different problem. The reference bar is being
+remeasured from zero, on every level of the episode, at Ultra-Violence.
 
-| state (words) | options | ms/call |
-|---:|---:|---:|
-| 4 | 1 | 6.8 |
-| 4 | 8 | 9.9 |
-| 4 | 24 | 17.0 |
-| 40 | 8 | 10.7 |
-| 200 | 8 | 24.7 |
+What survives is not numeric. It is the set of things that turned out to be
+true about the METHOD, each of which cost a measurement to find:
 
-Which decomposes into **6.8 ms fixed, 0.09 ms per state word, 0.44 ms per
-option**. Nearly half of a short decision is the fixed cost of running a
-six-layer encoder at all rather than anything about the text - per-dispatch cost
-and two device syncs, not something this sample can edit its prose out of. The
-game itself is ~5 ms per decision, and lockstep decouples it from the 35 Hz
-clock entirely: with no model in the loop, **2 966 tics/s, 85x realtime**.
+- **Imitation cannot exceed its teacher**, and this teacher finishes one level
+  of nine under fair play. Cloning and DAgger produce a better and a more
+  robust copy of that; neither produces a mechanism for beating it.
+- **A phase that selects its best round must include the policy it was handed**
+  in that comparison, or a phase whose every round made things worse still
+  adopts one of them.
+- **An outcome-fitted phase has to aggregate** across rounds and roll out with
+  a mixture of the learner and the teacher. Fitting only the newest round is
+  Follow-the-Last-Leader, which has linear regret; rolling out with the learner
+  alone is full reinforcement learning, which is the problem that phase exists
+  to avoid.
+- **A Monte Carlo rollout is a high-variance way to value an action.** Re-run
+  one candidate and its own score moves; if it moves by more than the gap
+  between candidates, no learner can recover a ranking from it. Measuring that
+  noise is cheap and belongs beside any claim about how much room there is.
+- **Going back to a decision has to be a real snapshot**, not a replay of the
+  actions that led there. See below.
 
-### Where the learning actually stands
-
-Four measurements, in the order they were taken. Together they close the
-question of why six separate interventions on the policy gradient produced two
-real bug fixes and no improvement.
-
-**1. Can the model express the decision?** Yes, comfortably. `doom fit` fits the
-head to the teacher by plain supervised learning - no reward, no critic - then
-asks how often its own best action IS the teacher's:
-
-| | agreement | floor |
-|---|---:|---:|
-| unfitted head, unseen episodes | 23.0% | 24.9% |
-| fitted head, the fitted episodes | 84.8% | 21.6% |
-| fitted head, **unseen** episodes | **88.8%** | 24.9% |
-
-The floor is the better of guessing uniformly and always naming the same
-position in the option list. The second matters: the teacher does not choose
-uniformly and the options do not arrive in a random order, so a head that reads
-nothing useful still beats `1/n`. The unfitted head sits exactly at that floor,
-which is the control that makes the other two readable.
-
-So the frozen 384-number representation carries the decision, 444,673 parameters
-express it, and 96 distinct worlds are enough to generalize from. Three live
-suspicions, all three closed.
-
-**2. Does that survive the policy acting on its own?** No, and this is the
-largest single effect anywhere in this sample:
-
-```text
-88.8%  agreement on states the TEACHER reaches
-  34%  agreement on states the STUDENT reaches
-```
-
-Cloning only ever produces labels on the teacher's trajectory. The student's
-first mistake takes it somewhere that trajectory is silent about, so it makes a
-second; the errors compound, and the classic bound on them grows with the
-**square** of the episode's length rather than linearly.
-
-**3. Does closing that gap help?** It closes, and it does not help. `--dagger N`
-runs the student, asks the teacher at every state the student reached what it
-would have done there, records the answer *without executing it*, aggregates
-with everything collected so far and refits:
-
-| round | agreement on its own states | fixed block |
-| ---: | ---: | ---: |
-| 1 | 34% | 0.670 |
-| 2 | 65% | 0.646 |
-| 3 | 78% | 0.615 |
-| 4 | 80% | 0.634 |
-| 5 | 76% | 0.596 |
-
-Agreement more than doubles and heads for the 88.8% ceiling. The score does not
-follow it up, and scored afterwards against the scripted player over 16 shared
-episodes: **0.73 to its 0.76, six exits each**.
-
-Which is the answer rather than another null. Every imitation method has the
-teacher as its ceiling, and this teacher scores 0.76. Agreeing with it more
-often cannot carry the student past it - only *to* it, which is where the
-student already was. Cloning, DAgger and PPO over both now land in the same
-place for a measured reason.
-
-**4. Is there room above the teacher?** Yes, and it is concentrated. `doom
-whatif` goes back to decisions the policy faced, takes something other than what
-the teacher chose, lets the teacher play the rest out, and scores the whole
-trajectory - prefix included - with the same gauge the run is judged on. Two
-runs of 20 episodes, three candidates at each of ~160 decisions, differing only
-in how long the departure from the teacher is held before handing back:
-
-| held for | the options all led to the same place | some alternative beat the teacher | by | gain a decision |
-|---|---:|---:|---:|---:|
-| 1 decision | - | 13% | 0.064 | 0.008 |
-| 30 decisions | 71% of the time | **17%** | **0.072** | **0.012** |
-
-Read the first column first. At **71% of decisions every candidate leads to the
-same place**, so no method can improve them and no method should be judged on
-them. Of the 29% where the choice has a consequence at all, the teacher fails to
-pick the best available at roughly **three in five** - worth 0.072 of a score
-whose full range is 1.25.
-
-Holding the deviation longer raises every number, which is the point of the
-dial: a teacher good at recovering undoes whatever one decision did, so a
-single-action deviation understates by construction. It is also why an earlier
-22-decision sample of this measurement said 0.003 / 9% / 0.001 and had to be
-discarded - a warning about reading small samples, not a second result.
-
-This is the only signal measured in this sample that is **not bounded above by
-the teacher**, and it is what a ranker trained on measured outcomes rather than
-on the teacher's choice would be learning from.
-
-`--wide` draws the alternatives at random instead of from what the policy ranks
-highest. The default is the right set for deciding whether to train on this,
-since it is what an update would move toward; it is the wrong set for asking
-whether room exists, because a policy fitted to the teacher ranks the teacher's
-near-duplicates highest and so asks about the actions least likely to lead
-anywhere different.
-
-**Going back is a real snapshot, not a replay of the actions that led there.**
-That distinction is load-bearing: the observation reads `ML_MAPPED` to decide
-what the player has seen, `ML_MAPPED` is set by the renderer, and rendering is
-not part of the deterministic simulation. Replaying a prefix reached the same
-player and monsters with a *different set of options* three times in ten - and
-the replays that survived were the short prefixes, so what was left was biased
-as well as smaller. The engine's `/api/snapshot` writes the vanilla savegame
-path to memory instead of a slot, and that format archives line flags.
-`Env::hold` and `Env::resume` are the SDK's side; `DoomEnv` restores what lives
-on the client too, because half a run restored is worse than no restore - it
-looks like an answer. The measurement checks itself: after every restore the
-options offered must be the options offered before, or the decision is discarded
-and counted. Across both runs above, 966 restores, it never fired.
-
-### Two things the policy demonstrably learned
-
-**Slime is bad.** Eight PPO iterations of six episodes on E1M3, warm-started
-from a teacher that is naive about slime, dies in it every episode, and is
-deliberately left that way:
-
-```
-              return     game    kills    items    exits   deaths   burned
-scripted       -4.79    -7.64     15.0      3.0        0        4     95.0
-policy         +1.93    -1.88     17.8      3.8        0        1     66.5
-```
-
-Deaths 4 of 4 down to 1 of 4, health lost to the floor down 30%. It has not
-stopped wading and neither player finishes E1M3, but the signal is there and the
-gradient follows it. Two things had to be true first, and neither was about the
-policy: the feature has to be **in the state** (the observation used to say only
-that the floor already underfoot was burning, so "learn that slime is bad" was
-unlearnable rather than hard), and the reward has to **agree** (nukage does 5
-points every 32 tics and a decision is 4 to 6 of them, so at the old weight
-wading cost 0.018 while exploring paid 0.02 - wading was profitable, and the
-agent that kept doing it was correctly learning what it had been told).
-
-**On unfamiliar ground it survives longer and fights better.** Trained on
-E1M1-E1M3 under fair play, scored on **E1M4**, which neither player has seen:
-
-```
-              return     game    kills    items    exits   deaths   burned
-scripted       -4.70    -7.99      5.3      0.0        0        4      0.0
-policy         -3.74    -8.75      9.7      0.3        0        5     29.3
-```
-
-Neither finishes. The policy lasts 689 decisions against 461 and kills 9.7
-against 5.3, where the teacher spends its last 60 decisions circling two patches
-of floor and dies to the same imp at the same spot five times out of six. It
-burned 0.0 on the training levels and 29.3 here, so what it learned in run 9 was
-closer to "this pool" than to "burning floor".
 
 ## What is not claimed
 
-- **Reinforcement learning has not beaten behaviour cloning here.** PPO over
-  generated scenarios ends at the teacher's score. Six interventions on the
-  learner were measured and none improved it. What the sample demonstrates today
-  is an environment, an observation, and a policy that **imitates** a
-  hand-written teacher - not one that improves on it. Part 4 above measures the
-  room that exists to improve on it - the teacher is beatable at about one
-  decision in six, worth 0.072 - and nothing here has taken it yet.
-- **Generalization is not proven.** A policy trained on E1M1-E1M3 does not
-  finish E1M4, and neither does the teacher.
-- **The policy finishes E1M1 from the spawn but does not beat the script.** Six
-  of twelve scored episodes end the level, which is what the scripted player
-  manages on the same twelve. Finishing is a result; winning is not one yet.
+- **Nothing here has beaten the teacher yet.** Every phase this sample ships
+  is either imitation, whose ceiling is the teacher by construction, or an
+  outcome-fitted phase whose signal has not yet been shown to clear the noise
+  of measuring it. What the sample demonstrates today is an environment, an
+  observation and a policy that **imitates** a hand-written teacher.
+- **The teacher itself finishes one level of nine** under fair play, so it is a
+  bootstrap and not a path to a cleared episode. Beating it is necessary and
+  nowhere near sufficient.
+- **Generalization is not proven**, and no current number bears on it.
+- **Nothing has been measured at Ultra-Violence** until the reset above.
 - **"In sight" means line of sight, not field of view.** The engine reports a
   thing when `P_CheckSight` can draw an unobstructed line to it, and that test
   has no cone in it: a monster directly behind the player is reported exactly as
@@ -646,8 +540,9 @@ closer to "this pool" than to "burning floor".
   one place the observation gives MORE than a player has, it is inconsistent
   with the burning-floor scan beside it - which does use a proper ninety-degree
   fan - and it is why the memory matters less than it should: turning away from
-  a medikit does not currently lose it, only a wall does. Narrowing it would
-  make every measurement above incomparable, so it has not been done.
+  a medikit does not currently lose it, only a wall does. This is the one place
+  left where the observation gives MORE than a player has, and it should be
+  narrowed to a cone.
 - **The route cannot be pointed at a remembered thing.** It floods from its own
   goal, so "walk to where that medikit was" has to be a straight line, and the
   option is withheld when there is no floor that way rather than routed round
