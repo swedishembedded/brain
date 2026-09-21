@@ -393,6 +393,11 @@ impl Curriculum {
 /// to eight decisions. Any rule that was going to work has had its chance by
 /// then, and at two the teacher gave up on doors it had only just pressed.
 const STUCK_TRY_SOMETHING_ELSE: u32 = 6;
+/// Decisions of finding nowhere new before the player starts trying walls.
+///
+/// Long enough that crossing a room already walked does not set it off, short
+/// enough to matter inside one episode.
+const STALE_TRY_THE_WALLS: u32 = 12;
 /// Decisions to hold one direction for once circling is detected. Long enough
 /// to clear the cycle's own diameter at the walking speed one decision buys.
 const COMMIT_STEPS: u32 = 8;
@@ -497,6 +502,8 @@ pub struct DoomEnv {
     /// baseline that is broken makes the learned number unreadable.
     last_pos: Option<(i32, i32)>,
     stuck: u32,
+    /// Decisions since the player last walked somewhere new. See `visit`.
+    stale: u32,
     /// The kinds of thing already tried since the player last moved.
     tried: std::collections::HashSet<Tag>,
     /// The last few positions, for noticing that the player is going round in
@@ -589,6 +596,7 @@ impl DoomEnv {
             opts: Vec::new(),
             last_pos: None,
             stuck: 0,
+            stale: 0,
             tried: std::collections::HashSet::new(),
             recent: std::collections::VecDeque::new(),
             visited: std::collections::HashMap::new(),
@@ -796,9 +804,26 @@ impl DoomEnv {
 
     fn visit(&mut self) -> u32 {
         let cell = self.cell();
+        let fresh = !self.visited.contains_key(&cell);
         let n = self.visited.entry(cell).or_insert(0);
         *n += 1;
-        *n
+        let n = *n;
+        // How long since the player last set foot anywhere new.
+        //
+        // Being STUCK and being out of IDEAS are different failures and want
+        // different things done. Stuck is not moving, and the rotation in
+        // `choose` handles it. Out of ideas is moving perfectly well around
+        // ground already walked, finding nothing, for ever - which is what
+        // happens in a room whose only way on is a switch on its wall. E1M8
+        // opens with exactly that room, and a player that shoves at walls
+        // only when it cannot move never presses it. That level has never
+        // been played past its first room.
+        if fresh {
+            self.stale = 0;
+        } else {
+            self.stale = self.stale.saturating_add(1);
+        }
+        n
     }
 
     /// Tell the curriculum how the episode that just ended ended.
@@ -1207,6 +1232,7 @@ impl DoomEnv {
         self.exited = false;
         self.last_pos = None;
         self.stuck = 0;
+        self.stale = 0;
         self.tried.clear();
         self.recent.clear();
         // A new episode is a new world: nothing seen in the last one is
@@ -1582,7 +1608,11 @@ impl DoomEnv {
         // Nothing has room: shove at whatever is in the way, then try each way
         // out in turn. Rotating matters - always shoving is right for a door
         // and useless for a wall.
-        if self.stuck >= 3 || best.is_none() {
+        // Nowhere new for a long time and no route to anywhere either: the
+        // level is not saying where to go and walking is not finding out.
+        // Try the walls.
+        let out_of_ideas = self.stale >= STALE_TRY_THE_WALLS && self.state.exit.is_none();
+        if self.stuck >= 3 || out_of_ideas || best.is_none() {
             let mut ways: Vec<usize> = Vec::new();
             if let Some(i) = by(Tag::Use) {
                 ways.push(i);
@@ -1598,7 +1628,15 @@ impl DoomEnv {
                 ways.push(i);
             }
             if !ways.is_empty() {
-                return Some(ways[(self.stuck.max(3) as usize - 3) % ways.len()]);
+                // Rotate on whichever counter opened this branch: shove, then
+                // each way out in turn. Always shoving is right for a door
+                // and useless for a wall.
+                let turn = if self.stuck >= 3 {
+                    self.stuck as usize - 3
+                } else {
+                    self.stale as usize
+                };
+                return Some(ways[turn % ways.len()]);
             }
         }
         best.map(|(_, i)| i).or_else(|| by(Tag::Use)).or(Some(0))
@@ -1694,6 +1732,7 @@ impl Env for DoomEnv {
             opts: self.opts.clone(),
             last_pos: self.last_pos,
             stuck: self.stuck,
+            stale: self.stale,
             tried: self.tried.clone(),
             recent: self.recent.clone(),
             visited: self.visited.clone(),
@@ -1752,6 +1791,7 @@ impl Env for DoomEnv {
         self.opts = held.opts;
         self.last_pos = held.last_pos;
         self.stuck = held.stuck;
+        self.stale = held.stale;
         self.tried = held.tried;
         self.recent = held.recent;
         self.visited = held.visited;
@@ -1787,6 +1827,7 @@ struct Held {
     opts: Vec<Option_>,
     last_pos: Option<(i32, i32)>,
     stuck: u32,
+    stale: u32,
     tried: std::collections::HashSet<Tag>,
     recent: std::collections::VecDeque<(i32, i32)>,
     visited: std::collections::HashMap<(i32, i32), u32>,
