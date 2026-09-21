@@ -152,6 +152,17 @@ of the marketplace-facing manifest entirely. `s3dit`'s own `caps.rs:68`
 still uses filesystem path params for some inputs - that's precedent for
 what *not* to copy, not what to follow.
 
+**Update 2026-09-21:** DONE, and since superseded on one detail -
+`weights`/`tokenizer` on `generate`/`lora_train`/`lora_gate`/`embed` all
+moved from `host_env("BRAIN_QWEN_WEIGHTS"/"BRAIN_QWEN_TOKENIZER")` to
+`host_resolved()`, resolved through the model store
+(`crate::spec::Qwen3Spec`) the same way `qwen35`/`fastvlm`/`sam2` and the
+rest of that migration track already work - see
+`crates/cli/src/catalog.rs`'s `resolver_spec_for` and
+`crates/catalog/src/lib.rs`'s `qwen3::caps::manifest` entry. The
+`Manifest::for_serving` projection this paragraph describes still holds;
+only which mechanism does the projecting changed.
+
 **Test-first:**
 - `manifest_lists_generate_and_lora_train` (mirrors `flux2/src/caps.rs:372`'s
   `assert_eq!(names, […])`) - red today, qwen3's manifest has one action;

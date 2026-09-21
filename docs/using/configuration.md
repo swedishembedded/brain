@@ -98,7 +98,7 @@ served, with no error.
 
 | Variable | Serves | Value |
 | --- | --- | --- |
-| `BRAIN_QWEN_WEIGHTS` + `BRAIN_QWEN_TOKENIZER` | Qwen3 chat (`generate`) | `.brain` checkpoint + `tokenizer.json` |
+| `BRAIN_QWEN_WEIGHTS` + `BRAIN_QWEN_TOKENIZER` | the `brain serve` scheduler's continuous-learning hot-swap resident ONLY (`crate::resident_llm::QwenResident`, see `docs/models/qwen3.md`) | checkpoint + `tokenizer.json`. The `brain caps`/`brain do qwen …` capability path (`generate`/`lora_train`/`lora_gate`/`embed`) does NOT read this variable - it is resolved from the model store instead (`qwen3::spec::Qwen3Spec`), same as the `FLUX2`/`S3DIT` rows below; an explicit `weights`/`tokenizer` param on the request still overrides the resolver's own pick |
 | `BRAIN_QWEN35MOE_WEIGHTS` + `BRAIN_QWEN35MOE_TOKENIZER` | Qwen3.5 MoE chat | checkpoint (produced by `brain import`) + `tokenizer.json` |
 | `BRAIN_GPT2_WEIGHTS` | char-level GPT baseline | checkpoint (embeds its vocab) |
 | `BRAIN_GLMDSA_WEIGHTS` | GLM decoder | checkpoint (char-level) |

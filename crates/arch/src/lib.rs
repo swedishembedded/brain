@@ -272,6 +272,11 @@ pub const ARCHS: &[Arch] = &[
     // and never a community (bartowski/unsloth) repo, which is a different
     // vendor namespace `Variant`'s one `reference` field cannot also name.
     // The 0.6B/1.7B vendor GGUF repos ship Q8_0 only; 4B and up ship five.
+    // `weights_env` is empty: `weights`/`tokenizer` are resolved through
+    // `qwen3::spec::Qwen3Spec` (the model-store resolver) instead of
+    // `BRAIN_QWEN_WEIGHTS`/`BRAIN_QWEN_TOKENIZER` - see
+    // `crates/cli/src/catalog.rs`'s `resolver_spec_for`, same shape as
+    // `qwen35`'s own row.
     arch!("qwen3", "Qwen3 dense decoder", Text, LlamaCpp, "brain-qwen3", hf: &["Qwen3ForCausalLM", "qwen3"], default_ref: Some("Qwen/Qwen3-0.6B"),
         variants: &[
             Variant { reference: "Qwen/Qwen3-0.6B", params: 596_000_000, quants: &["Q8_0"] },

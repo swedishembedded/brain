@@ -342,6 +342,7 @@ const RESOLVER_MIGRATED_ARCHS: &[&str] = &[
     "kronos",
     "ltxv",
     "qwen35",
+    "qwen3",
     "qwen3vl",
     "fastvlm",
     "moondream3",

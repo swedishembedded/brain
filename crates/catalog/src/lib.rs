@@ -319,9 +319,16 @@ pub fn models() -> Vec<ModelEntry> {
             provider: always!(ltxv::caps::LtxvProvider::new()),
             resident: None,
         },
+        // `weights`/`tokenizer` are resolved through `qwen3::spec::Qwen3Spec`
+        // (see that module's doc) instead of `BRAIN_QWEN_WEIGHTS`/
+        // `BRAIN_QWEN_TOKENIZER` - same shape as `qwen35`'s own entry above.
         ModelEntry {
             manifest: qwen3::caps::manifest,
-            provider: always!(qwen3::caps::QwenProvider::new()),
+            provider: |assembly: &Assembly| {
+                let weights = assembly.roles.get("weights").map(|p| p.to_string_lossy().into_owned());
+                let tokenizer = assembly.roles.get("tokenizer").map(|p| p.to_string_lossy().into_owned());
+                Ok(Arc::new(qwen3::caps::QwenProvider::new().with_defaults(weights, tokenizer)) as Arc<dyn Provider>)
+            },
             resident: None,
         },
         // GLM-5.2. Same shape as qwen3 above: `weights` is a per-invocation

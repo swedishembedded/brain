@@ -24,11 +24,16 @@
 //! `lora_train` asks a caller for a `data` folder and a `save` path, which a
 //! scheduler placing work on a machine it has never seen cannot answer;
 //! here the only filesystem facts are the base checkpoint and its tokenizer,
-//! and both are `host_env` params `Manifest::for_serving` projects out of
-//! every off-machine surface. Progress on this action is **stage-level**
-//! (prepare → train → save), not per-step: `finetune::finetune` exposes no
-//! per-step callback, and claiming a step timeline it cannot produce would
-//! be worse than saying so.
+//! both `host_resolved` params `Manifest::for_serving` projects out of every
+//! off-machine surface exactly like `host_env` does - resolved through the
+//! model store (`crate::spec::Qwen3Spec`) rather than a bare
+//! `BRAIN_QWEN_WEIGHTS`/`BRAIN_QWEN_TOKENIZER` env var, so `brain do qwen
+//! generate` and the generic `ARCH_TO_MODEL` dispatch get the same
+//! scan/resolve/fetch-if-missing convenience `brain pull` and every other
+//! resolver-migrated architecture already have. Progress on this action is
+//! **stage-level** (prepare → train → save), not per-step:
+//! `finetune::finetune` exposes no per-step callback, and claiming a step
+//! timeline it cannot produce would be worse than saying so.
 //!
 //! `lora_gate`: the OTHER half of a continuous-learning cycle - a candidate
 //! adapter blob plus a frozen probe set in, a `GateReport` and a
@@ -50,11 +55,13 @@
 //! build ([`crate::model::Qwen::from_reader_decode`]), which costs `O(T)`
 //! memory (a KV cache sized to the request), never the batched forward's
 //! `O(T^2)` `scores`/`probs` - the only path that stays sane at a real
-//! Qwen3-Embedding-0.6B context (32768 tokens). Deliberately a separate
-//! `host_env` namespace (`BRAIN_QWEN_EMBED_*`) from `generate`'s
-//! (`BRAIN_QWEN_WEIGHTS`/`BRAIN_QWEN_TOKENIZER`): an embedding checkpoint and
-//! a chat checkpoint are different files, and a resident process serving both
-//! actions must be able to point each at its own.
+//! Qwen3-Embedding-0.6B context (32768 tokens). `weights`/`tokenizer` are the
+//! SAME `host_resolved` params `generate`/`lora_train`/`lora_gate` declare,
+//! resolved through the same `crate::spec::Qwen3Spec` - a store holding more
+//! than one qwen3-family checkpoint (a chat checkpoint AND an embedding
+//! checkpoint) resolves `Ambiguous`, same as any other architecture with
+//! multiple candidates for one role, and a caller names `weights` explicitly
+//! to disambiguate.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -136,13 +143,23 @@ fn step_cache_enabled() -> bool {
 pub fn manifest() -> Manifest {
     let generate = ActionSpec::new("generate", "generate tokens continuing a prompt (KV-cache decode, one Progress per token)")
         .streaming()
-        .param(ParamSpec::new("weights", ParamType::Str, "path to a brain-format Qwen checkpoint (.safetensors)").required().host_env("BRAIN_QWEN_WEIGHTS"))
+        .param(
+            ParamSpec::new("weights", ParamType::Str, "path to a brain-format Qwen checkpoint (.safetensors); overrides the model-store resolver's own pick when set")
+                .host_resolved(),
+        )
         .param(ParamSpec::new(
             "prompt",
             ParamType::Str,
             "the prompt: text (with a tokenizer) or whitespace/comma-separated token ids (without); ignored when `messages` is set",
         ))
-        .param(ParamSpec::new("tokenizer", ParamType::Str, "path to tokenizer.json; omit to feed/return raw token ids").host_env("BRAIN_QWEN_TOKENIZER"))
+        .param(
+            ParamSpec::new(
+                "tokenizer",
+                ParamType::Str,
+                "path to tokenizer.json; omit to use the model-store resolver's own pick, or an empty string to force the raw token-id path even when one is configured",
+            )
+            .host_resolved(),
+        )
         .param(ParamSpec::new("max_new", ParamType::Int, "number of new tokens to generate").default(json!(DEFAULT_MAX_NEW)).min(1.0).max(32768.0).step(1.0))
         .param(ParamSpec::new("temp", ParamType::Float, "sampling temperature (<= 0 = greedy)").default(json!(0.0)).min(0.0).max(2.0).step(0.01))
         .param(ParamSpec::new("top_k", ParamType::Int, "top-k filter (40 = standard; 1 = greedy; 0 or negative = disabled)").default(json!(40)).min(0.0).max(1000.0).step(1.0))
@@ -169,18 +186,23 @@ pub fn manifest() -> Manifest {
         .output(BlobSpec::new("text", Media::Text, "the generated text (space-separated token ids when no tokenizer is given)"));
 
     // Every param below is a real per-request knob; the two filesystem facts
-    // (base checkpoint, tokenizer) are `host_env`, so `for_serving` drops
-    // them and a remote caller is never asked for a path it cannot answer.
+    // (base checkpoint, tokenizer) are `host_resolved`, so `for_serving`
+    // drops them and a remote caller is never asked for a path it cannot
+    // answer - resolved through the model store (`crate::spec::Qwen3Spec`),
+    // same as `generate`.
     let lora_train = ActionSpec::new("lora_train", "train a LoRA adapter on a masked chat dataset (JSONL blob in, adapter checkpoint blob out)")
         .streaming()
-        .param(ParamSpec::new("weights", ParamType::Str, "path to the base brain-format Qwen checkpoint (.safetensors)").required().host_env("BRAIN_QWEN_WEIGHTS"))
+        .param(
+            ParamSpec::new("weights", ParamType::Str, "path to the base brain-format Qwen checkpoint (.safetensors); overrides the model-store resolver's own pick when set")
+                .host_resolved(),
+        )
         .param(
             ParamSpec::new(
                 "tokenizer",
                 ParamType::Str,
-                "path to the base checkpoint's tokenizer.json; its directory also supplies the chat template. Omit to use the tokenizer.json beside 'weights'",
+                "path to the base checkpoint's tokenizer.json; its directory also supplies the chat template. Omit to use the model-store resolver's own pick, or the tokenizer.json beside 'weights' when the resolver has none",
             )
-            .host_env("BRAIN_QWEN_TOKENIZER"),
+            .host_resolved(),
         )
         .param(ParamSpec::new("rank", ParamType::Int, "LoRA rank (capacity/size tradeoff)").default(json!(8)).min(1.0).max(256.0).step(1.0))
         .param(ParamSpec::new("alpha", ParamType::Float, "LoRA alpha; omit for 2*rank").min(0.0).max(1024.0))
@@ -204,10 +226,21 @@ pub fn manifest() -> Manifest {
         "gate a candidate LoRA adapter against a frozen probe set (adapter + probes in, a GateReport and a promote/reject decision out)",
     )
     .streaming()
-    .param(ParamSpec::new("weights", ParamType::Str, "path to the base brain-format Qwen checkpoint the adapter was trained on").required().host_env("BRAIN_QWEN_WEIGHTS"))
     .param(
-        ParamSpec::new("tokenizer", ParamType::Str, "path to the base checkpoint's tokenizer.json; omit to use the tokenizer.json beside 'weights'")
-            .host_env("BRAIN_QWEN_TOKENIZER"),
+        ParamSpec::new(
+            "weights",
+            ParamType::Str,
+            "path to the base brain-format Qwen checkpoint the adapter was trained on; overrides the model-store resolver's own pick when set",
+        )
+        .host_resolved(),
+    )
+    .param(
+        ParamSpec::new(
+            "tokenizer",
+            ParamType::Str,
+            "path to the base checkpoint's tokenizer.json; omit to use the model-store resolver's own pick, or the tokenizer.json beside 'weights' when the resolver has none",
+        )
+        .host_resolved(),
     )
     .param(
         ParamSpec::new("max_new", ParamType::Int, "completion budget per probe; the verifier scores the first LINE of what comes back")
@@ -236,8 +269,14 @@ pub fn manifest() -> Manifest {
         "embed",
         "last-token pooled, L2-normalized text embedding (KV-cache decode path, bounded by the checkpoint's configured context)",
     )
-    .param(ParamSpec::new("weights", ParamType::Str, "path to a brain-format Qwen3-Embedding checkpoint (.safetensors)").required().host_env("BRAIN_QWEN_EMBED_WEIGHTS"))
-    .param(ParamSpec::new("tokenizer", ParamType::Str, "path to the checkpoint's tokenizer.json").required().host_env("BRAIN_QWEN_EMBED_TOKENIZER"))
+    .param(
+        ParamSpec::new("weights", ParamType::Str, "path to a brain-format Qwen3-Embedding checkpoint (.safetensors); overrides the model-store resolver's own pick when set")
+            .host_resolved(),
+    )
+    .param(
+        ParamSpec::new("tokenizer", ParamType::Str, "path to the checkpoint's tokenizer.json; omit to use the model-store resolver's own pick")
+            .host_resolved(),
+    )
     .param(ParamSpec::new("text", ParamType::Str, "input text; falls back to the 'text' input blob for long documents"))
     .input(BlobSpec::new("text", Media::Text, "input document (used when the 'text' param is absent)"))
     .param(ParamSpec::new(
@@ -271,18 +310,37 @@ struct Hot {
 
 /// The executable Qwen model behind the manifest. Construction is free — the
 /// checkpoint loads lazily on the first `generate` and stays resident.
+///
+/// `default_weights`/`default_tokenizer` are the model-store resolver's own
+/// pick (`crate::spec::Qwen3Spec`), used by every action whenever a request
+/// omits the corresponding param - see [`GenerateAction::run`] and its
+/// siblings. Either may be `None` (a caller must then always name it
+/// explicitly).
 #[derive(Default)]
 pub struct QwenProvider {
     hot: Arc<Mutex<Option<Hot>>>,
     /// `embed`'s own resident slot, deliberately separate from `hot`: it is a
-    /// decode-only build (different graph shape entirely) and, in practice, a
-    /// different checkpoint file (`BRAIN_QWEN_EMBED_WEIGHTS`) from `generate`'s.
+    /// decode-only build (a different graph shape entirely), and in
+    /// practice usually a different checkpoint file from `generate`'s (an
+    /// embedding-trained checkpoint vs. a chat one) even when both resolve
+    /// through the same `Qwen3Spec`.
     hot_embed: Arc<Mutex<Option<HotEmbed>>>,
+    default_weights: Option<String>,
+    default_tokenizer: Option<String>,
 }
 
 impl QwenProvider {
     pub fn new() -> QwenProvider {
         QwenProvider::default()
+    }
+
+    /// Bind the resolved `weights`/`tokenizer` roles (see
+    /// `crate::spec::Qwen3Spec`) as this provider's own per-request
+    /// fallback, shared by every action - either may be absent.
+    pub fn with_defaults(mut self, weights: Option<String>, tokenizer: Option<String>) -> QwenProvider {
+        self.default_weights = weights;
+        self.default_tokenizer = tokenizer;
+        self
     }
 }
 
@@ -291,18 +349,19 @@ impl Provider for QwenProvider {
         manifest()
     }
     fn action(&self, name: &str) -> Option<Arc<dyn Action>> {
+        let (dw, dt) = (self.default_weights.clone(), self.default_tokenizer.clone());
         match name {
-            "generate" => Some(Arc::new(GenerateAction { hot: self.hot.clone() }) as Arc<dyn Action>),
+            "generate" => Some(Arc::new(GenerateAction { hot: self.hot.clone(), default_weights: dw, default_tokenizer: dt }) as Arc<dyn Action>),
             // Training holds no resident state: it builds its own trainable
             // graph from the base checkpoint and drops it, so it shares
             // nothing with `generate`'s hot inference model.
-            "lora_train" => Some(Arc::new(LoraTrainAction) as Arc<dyn Action>),
+            "lora_train" => Some(Arc::new(LoraTrainAction { default_weights: dw, default_tokenizer: dt }) as Arc<dyn Action>),
             // Gating holds no resident state either, and deliberately does
             // not reuse `generate`'s hot model: the incumbent arm must be
             // the checkpoint on disk at `weights`, not whatever a previous
             // request happened to leave loaded.
-            "lora_gate" => Some(Arc::new(LoraGateAction) as Arc<dyn Action>),
-            "embed" => Some(Arc::new(EmbedAction { hot: self.hot_embed.clone() }) as Arc<dyn Action>),
+            "lora_gate" => Some(Arc::new(LoraGateAction { default_weights: dw, default_tokenizer: dt }) as Arc<dyn Action>),
+            "embed" => Some(Arc::new(EmbedAction { hot: self.hot_embed.clone(), default_weights: dw, default_tokenizer: dt }) as Arc<dyn Action>),
             _ => None,
         }
     }
@@ -310,6 +369,8 @@ impl Provider for QwenProvider {
 
 struct GenerateAction {
     hot: Arc<Mutex<Option<Hot>>>,
+    default_weights: Option<String>,
+    default_tokenizer: Option<String>,
 }
 
 impl Action for GenerateAction {
@@ -318,7 +379,11 @@ impl Action for GenerateAction {
     }
 
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        let weights = inv.get_str("weights").ok_or("qwen generate: missing required param 'weights'")?;
+        let weights = inv
+            .get_str("weights")
+            .filter(|s| !s.is_empty())
+            .or_else(|| self.default_weights.clone())
+            .ok_or("qwen generate: no checkpoint (pass 'weights', or configure one through the models directory)")?;
         if !Path::new(&weights).exists() {
             return Err(format!("qwen generate: weights not found at '{weights}'"));
         }
@@ -332,7 +397,10 @@ impl Action for GenerateAction {
         // no detokenization possible). With one, requests go through the same
         // chat-template/tool-call/stop-string/cancellation logic the HTTP/D-Bus
         // serving path runs (`crate::chat`), so `brain do` and HTTP cannot diverge.
-        let tok = match inv.get_str("tokenizer").filter(|p| !p.is_empty()) {
+        // An explicit empty string opts out of `default_tokenizer` (the
+        // resolved pick), for a caller that genuinely wants the raw token-id
+        // path despite a resolved tokenizer being configured.
+        let tok = match inv.get_str("tokenizer").filter(|p| !p.is_empty()).or_else(|| self.default_tokenizer.clone()) {
             Some(p) => Some(QwenBpe::from_file(&p)?),
             None => None,
         };
@@ -480,7 +548,10 @@ impl Action for GenerateAction {
 
 /// `lora_train`: stateless. It builds a trainable graph from the base
 /// checkpoint, trains, writes the adapter, and drops everything.
-struct LoraTrainAction;
+struct LoraTrainAction {
+    default_weights: Option<String>,
+    default_tokenizer: Option<String>,
+}
 
 impl Action for LoraTrainAction {
     fn spec(&self) -> ActionSpec {
@@ -488,8 +559,33 @@ impl Action for LoraTrainAction {
     }
 
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        train_lora(inv, progress)
+        train_lora(&with_resolved_defaults(inv, &self.default_weights, &self.default_tokenizer), progress)
     }
+}
+
+/// Inject the provider's resolved `weights`/`tokenizer` defaults into a
+/// CLONE of `inv`, for the actions (`lora_train`, `lora_gate`) whose
+/// existing body already reads `weights`/`tokenizer` straight off the
+/// invocation - the same effect [`GenerateAction::run`]'s own
+/// `.filter(...).or_else(...)` chain has, without touching either body.
+/// An explicit (non-empty) param on `inv` is left exactly as the caller set
+/// it; an explicit EMPTY string is also left alone (both actions' own
+/// "beside weights"/no-tokenizer fallbacks read an absent key, not an empty
+/// one, so there is nothing for this function to opt out of the way
+/// `GenerateAction`'s raw-token-id path needs to).
+fn with_resolved_defaults(inv: &Invocation, default_weights: &Option<String>, default_tokenizer: &Option<String>) -> Invocation {
+    let mut out = inv.clone();
+    if out.get_str("weights").filter(|s| !s.is_empty()).is_none() {
+        if let Some(w) = default_weights {
+            out = out.set("weights", json!(w));
+        }
+    }
+    if out.get_str("tokenizer").filter(|s| !s.is_empty()).is_none() {
+        if let Some(t) = default_tokenizer {
+            out = out.set("tokenizer", json!(t));
+        }
+    }
+    out
 }
 
 /// The `lora_train` action body, exposed the way `flux2::caps::train_action`
@@ -651,7 +747,10 @@ fn read_jsonl_blob(inv: &Invocation, name: &str, scratch: &Path) -> Result<Optio
 
 /// `lora_gate`: stateless, like `lora_train`. It builds each arm from bytes
 /// on disk, scores it, drops it.
-struct LoraGateAction;
+struct LoraGateAction {
+    default_weights: Option<String>,
+    default_tokenizer: Option<String>,
+}
 
 impl Action for LoraGateAction {
     fn spec(&self) -> ActionSpec {
@@ -659,7 +758,7 @@ impl Action for LoraGateAction {
     }
 
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        gate_lora(inv, progress)
+        gate_lora(&with_resolved_defaults(inv, &self.default_weights, &self.default_tokenizer), progress)
     }
 }
 
@@ -989,6 +1088,8 @@ struct HotEmbed {
 
 struct EmbedAction {
     hot: Arc<Mutex<Option<HotEmbed>>>,
+    default_weights: Option<String>,
+    default_tokenizer: Option<String>,
 }
 
 impl Action for EmbedAction {
@@ -997,11 +1098,19 @@ impl Action for EmbedAction {
     }
 
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        let weights = inv.get_str("weights").ok_or("qwen embed: missing required param 'weights'")?;
+        let weights = inv
+            .get_str("weights")
+            .filter(|s| !s.is_empty())
+            .or_else(|| self.default_weights.clone())
+            .ok_or("qwen embed: no checkpoint (pass 'weights', or configure one through the models directory)")?;
         if !Path::new(&weights).exists() {
             return Err(format!("qwen embed: weights not found at '{weights}'"));
         }
-        let tokenizer_path = inv.get_str("tokenizer").ok_or("qwen embed: missing required param 'tokenizer'")?;
+        let tokenizer_path = inv
+            .get_str("tokenizer")
+            .filter(|s| !s.is_empty())
+            .or_else(|| self.default_tokenizer.clone())
+            .ok_or("qwen embed: no tokenizer (pass 'tokenizer', or configure one through the models directory)")?;
         let text = input_text_for(inv, "qwen embed")?;
         let instruction = inv.get_str("instruction").filter(|s| !s.is_empty());
 
@@ -1244,9 +1353,9 @@ mod tests {
     /// The `embed` action must match the shape `crates/apiserve/src/catalog.rs`
     /// requires to route `/v1/embeddings` to it: an action literally named
     /// `embed` with a `text` param, one-shot (not streaming, per the module
-    /// doc's `ttfa == e2e` reasoning), and its own `host_env` namespace
-    /// (separate from `generate`'s) so a resident process can serve a chat
-    /// checkpoint and an embedding checkpoint at the same time.
+    /// doc's `ttfa == e2e` reasoning), and `weights`/`tokenizer` resolved
+    /// through the model store (same as `generate`) rather than required
+    /// per-request.
     #[test]
     fn embed_action_matches_the_v1_embeddings_dispatch_contract() {
         let m = manifest();
@@ -1254,10 +1363,10 @@ mod tests {
         assert!(!embed.streaming, "embed: one-shot, ttfa == e2e");
         assert!(embed.params.iter().any(|p| p.name == "text"));
         let weights = embed.params.iter().find(|p| p.name == "weights").expect("weights param");
-        assert!(weights.required);
-        assert_eq!(weights.host_env.as_deref(), Some("BRAIN_QWEN_EMBED_WEIGHTS"));
+        assert!(!weights.required, "resolved through the model store, not required per-request");
+        assert!(weights.host_resolved, "the checkpoint is the HOST's fact, not a caller's");
         let tokenizer = embed.params.iter().find(|p| p.name == "tokenizer").expect("tokenizer param");
-        assert_eq!(tokenizer.host_env.as_deref(), Some("BRAIN_QWEN_EMBED_TOKENIZER"));
+        assert!(tokenizer.host_resolved);
     }
 
     #[test]
@@ -1397,8 +1506,8 @@ mod tests {
             "the trained adapter must come back as a retrievable Bytes blob"
         );
         let w = lt.params.iter().find(|p| p.name == "weights").expect("base weights param");
-        assert!(w.required);
-        assert_eq!(w.host_env.as_deref(), Some("BRAIN_QWEN_WEIGHTS"), "the base checkpoint is the HOST's fact, not a caller's");
+        assert!(!w.required, "resolved through the model store, not required per-request");
+        assert!(w.host_resolved, "the base checkpoint is the HOST's fact, not a caller's");
     }
 
     /// REGRESSION GUARD for the BlobSpec discipline above: `s3dit::caps`'s
@@ -1675,17 +1784,21 @@ mod tests {
         let g = &m.actions[0];
         assert_eq!(g.name, "generate");
         assert!(g.streaming, "generate must stream (one Progress per token)");
-        assert!(g.params.iter().any(|p| p.name == "weights" && p.required));
+        assert!(g.params.iter().any(|p| p.name == "weights" && p.host_resolved), "resolved through the model store, not a caller-required param");
         // `prompt` is NOT required: `messages` (the shared chat-serving parse)
         // can supply the request instead, matching `resident_llm`'s spec.
         assert!(g.params.iter().any(|p| p.name == "prompt" && !p.required));
         assert!(g.params.iter().any(|p| p.name == "messages"));
         assert_eq!(g.params.iter().find(|p| p.name == "max_new").unwrap().default, Some(json!(DEFAULT_MAX_NEW)));
         assert_eq!(g.outputs[0].media, Media::Text);
-        // validation: defaults fill, missing required rejected, no weights loaded.
+        // validation: defaults fill, unknown params rejected, no weights loaded.
         let inv = g.validate(Invocation::new().set("weights", json!("w")).set("prompt", json!("1 2"))).unwrap();
         assert_eq!(inv.get_i64("max_new"), Some(DEFAULT_MAX_NEW));
-        assert!(g.validate(Invocation::new().set("prompt", json!("1"))).is_err());
+        // `weights` is `host_resolved`, not `required`: a request naming none
+        // is schema-VALID (the model store may still resolve one) - the "no
+        // checkpoint" failure is a `run()`-time concern
+        // (`missing_weights_is_a_clean_error` covers it), not a `validate()` one.
+        assert!(g.validate(Invocation::new().set("prompt", json!("1"))).is_ok());
         assert!(g.validate(Invocation::new().set("weights", json!("w")).set("prompt", json!("1")).set("bogus", json!(1))).is_err());
         // the manifest round-trips to JSON for discovery.
         assert_eq!(manifest().to_json()["actions"][0]["name"], "generate");
@@ -1752,6 +1865,43 @@ mod tests {
         }
         let text = String::from_utf8(out.blobs["text"].bytes.clone()).unwrap();
         assert_eq!(text.split_whitespace().count() as u64, n);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The resolved-default path: a provider bound via `with_defaults` serves
+    /// a request that names no `weights` at all, using the bound path - the
+    /// whole point of moving `weights`/`tokenizer` off `BRAIN_QWEN_WEIGHTS`/
+    /// `BRAIN_QWEN_TOKENIZER` and onto the model-store resolver
+    /// (`crate::spec::Qwen3Spec`). Covers `generate` and `embed`, the two
+    /// actions with their own resident state to key by the resolved path.
+    #[test]
+    fn a_bound_default_weights_path_is_used_when_a_request_omits_one() {
+        let cfg = QwenConfig::tiny();
+        let init = crate::init::init_weights(&cfg, 7);
+        let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = cfg
+            .param_list()
+            .into_iter()
+            .map(|(name, n)| (name.clone(), vec![n as u64], init.get(&name).unwrap_or_else(|| panic!("init missing {name}")).clone()))
+            .collect();
+        let dir = std::env::temp_dir().join(format!("qwen-caps-bound-default-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tiny.safetensors");
+        checkpoint::save(path.to_str().unwrap(), cfg.to_json(), &tensors);
+
+        let mut reg = Registry::new();
+        reg.register(Arc::new(QwenProvider::new().with_defaults(Some(path.to_str().unwrap().to_string()), None)));
+
+        // `generate`: no `weights` param at all, raw token-id path (no
+        // `tokenizer` default bound either).
+        let out = reg.run(MODEL, "generate", Invocation::new().set("prompt", json!("1 2 3")).set("max_new", json!(2)), &mut |_| {}).unwrap();
+        assert_eq!(out.outputs["tokens"].as_u64().unwrap(), 2);
+
+        // `embed`: no `weights` param either, but `tokenizer` still has no
+        // bound default here, so it must fail naming exactly that - proving
+        // the two defaults are tracked and applied independently.
+        let err = reg.run(MODEL, "embed", Invocation::new().set("text", json!("hi")), &mut |_| {}).unwrap_err();
+        assert!(err.contains("no tokenizer"), "got: {err}");
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

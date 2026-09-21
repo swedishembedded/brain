@@ -244,6 +244,9 @@ fn resolver_spec_for(model_id: &str) -> Option<(&'static str, Box<dyn ArchSpec>)
     if model_id == qwen35::caps::MODEL {
         return Some(("qwen35", Box::new(qwen35::spec::Qwen35Spec)));
     }
+    if model_id == qwen3::caps::MODEL {
+        return Some(("qwen3", Box::new(qwen3::spec::Qwen3Spec)));
+    }
     if model_id == qwen3vl::caps::MODEL {
         return Some(("qwen3vl", Box::new(qwen3vl::spec::Qwen3VlSpec)));
     }
