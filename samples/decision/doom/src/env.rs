@@ -288,6 +288,104 @@ const EXPLORE_CELL: i32 = 128;
 const CURRICULUM_WINDOW: usize = 8;
 const CURRICULUM_ADVANCE: f32 = 0.6;
 const CURRICULUM_STEP: i32 = 400;
+/// Reverse curriculum: start the episode near the exit and move the start
+/// further away as the policy succeeds.
+///
+/// The problem it solves is not difficulty, it is SILENCE. Reaching the exit
+/// of E1M1 from the level's own spawn pays once, a thousand decisions later,
+/// and across five training runs it never happened - so the exit reward
+/// contributed exactly nothing to any gradient the policy ever took. A reward
+/// that never fires is not a hard reward, it is an absent one. This is
+/// Florensa et al.'s reverse curriculum, the standard answer.
+///
+/// The start is a DISTANCE ALONG THE ROUTE, not a random walk from the goal.
+/// A random walk was tried first and is worse in every way that matters: it
+/// wanders, two stages of it are not comparable, and nobody can say how hard
+/// a given stage is. "Start 1500 units of walking from the exit" means the
+/// same thing every episode and grows cleanly to the whole level - on E1M1
+/// the spawn is 5344 units out.
+///
+/// It is TRAINING state, and it is the only state here that outlives an
+/// episode, which is what makes [`Curriculum::set_counting`] necessary.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Curriculum {
+    /// Off by default: an environment plays the level as it ships until a run
+    /// asks for the curriculum.
+    on: bool,
+    /// How far from the exit episodes currently start, in map units.
+    start_distance: i32,
+    /// Whether the episodes arriving now COUNT - see
+    /// [`Curriculum::set_counting`].
+    counting: bool,
+    /// Recent episode outcomes, for deciding when to move the start back.
+    recent: std::collections::VecDeque<bool>,
+}
+
+impl Default for Curriculum {
+    /// Counting, because a plain episode is a training episode: the thing
+    /// that has to be declared is a MEASUREMENT, and a default that had to be
+    /// switched on would silently do nothing for an environment nobody
+    /// remembered to switch it on for.
+    fn default() -> Curriculum {
+        Curriculum {
+            on: false,
+            start_distance: 0,
+            counting: true,
+            recent: std::collections::VecDeque::new(),
+        }
+    }
+}
+
+impl Curriculum {
+    /// How far out to start the next episode, or `None` when the curriculum
+    /// is off and the level is played as it ships.
+    ///
+    /// Read whether or not the episode counts: an evaluation has to face the
+    /// same task training does, or it is measuring something else.
+    fn start(&self) -> Option<i32> {
+        self.on.then_some(self.start_distance)
+    }
+
+    /// Whether the episodes arriving from now on are TRAINING.
+    ///
+    /// A measurement - a fixed-block score, a hypothetical roll-out that asks
+    /// what a different action would have been worth - is an episode from in
+    /// here and indistinguishable from a real one. Left counting, those
+    /// episodes feed the window that decides when the start moves back, so
+    /// the difficulty the next training episode faces depends on how often
+    /// the run stopped to measure itself.
+    fn set_counting(&mut self, on: bool) {
+        self.counting = on;
+    }
+
+    /// Record how an episode ended, and say so when that moved the start
+    /// back: `(wins in the window, the new distance)`.
+    ///
+    /// Advanced on a WINDOW rather than a single success, because one win
+    /// from two decisions away is luck; and by a small step, because a start
+    /// that jumps past what the policy can do puts it back in the silent
+    /// regime the curriculum exists to escape.
+    fn note(&mut self, won: bool) -> Option<(usize, i32)> {
+        if !self.on || !self.counting {
+            return None;
+        }
+        self.recent.push_back(won);
+        if self.recent.len() > CURRICULUM_WINDOW {
+            self.recent.pop_front();
+        }
+        if self.recent.len() < CURRICULUM_WINDOW {
+            return None;
+        }
+        let wins = self.recent.iter().filter(|w| **w).count();
+        if (wins as f32 / self.recent.len() as f32) < CURRICULUM_ADVANCE {
+            return None;
+        }
+        self.start_distance += CURRICULUM_STEP;
+        self.recent.clear();
+        Some((wins, self.start_distance))
+    }
+}
+
 /// Decisions of going nowhere before the teacher stops repeating itself.
 ///
 /// Six, because the slowest thing here that legitimately leaves the player
@@ -452,27 +550,8 @@ pub struct DoomEnv {
     /// cheat: the game, the actions, the reward and the opponent are
     /// unchanged, and both players face the identical arena on a given seed.
     arena: usize,
-    /// Reverse curriculum: start the episode near the exit and move the start
-    /// further away as the policy succeeds.
-    ///
-    /// The problem it solves is not difficulty, it is SILENCE. Reaching the
-    /// exit of E1M1 from the level's own spawn pays once, a thousand decisions
-    /// later, and across five training runs it never happened - so the exit
-    /// reward contributed exactly nothing to any gradient the policy ever
-    /// took. A reward that never fires is not a hard reward, it is an absent
-    /// one. This is Florensa et al.'s reverse curriculum, the standard answer.
-    ///
-    /// The start is a DISTANCE ALONG THE ROUTE, not a random walk from the
-    /// goal. A random walk was tried first and is worse in every way that
-    /// matters: it wanders, two stages of it are not comparable, and nobody
-    /// can say how hard a given stage is. "Start 1500 units of walking from
-    /// the exit" means the same thing every episode and grows cleanly to the
-    /// whole level - on E1M1 the spawn is 5344 units out.
-    curriculum: bool,
-    /// How far from the exit episodes currently start, in map units.
-    start_distance: i32,
-    /// Recent episode outcomes, for deciding when to move the start back.
-    recent_wins: std::collections::VecDeque<bool>,
+    /// How far out episodes start and when that moves. See [`Curriculum`].
+    curriculum: Curriculum,
     warned_dropped: bool,
     /// How this episode has been going, for the line printed when it ends.
     progress: Progress,
@@ -525,9 +604,7 @@ impl DoomEnv {
             capture_frames: false,
             frames_per_tic: false,
             arena: 0,
-            curriculum: false,
-            start_distance: 0,
-            recent_wins: std::collections::VecDeque::new(),
+            curriculum: Curriculum::default(),
             warned_dropped: false,
             progress: Progress::new(),
             memory: crate::memory::Memory::new(),
@@ -586,9 +663,9 @@ impl DoomEnv {
         &self.scenarios
     }
 
-    /// Turn the reverse curriculum on. See [`DoomEnv::curriculum`].
+    /// Turn the reverse curriculum on. See [`Curriculum`].
     pub fn set_curriculum(&mut self, on: bool) {
-        self.curriculum = on;
+        self.curriculum.on = on;
     }
 
     /// Start episodes this many map units of walking from the exit.
@@ -599,7 +676,7 @@ impl DoomEnv {
     /// recording a curriculum policy therefore has to say how hard to make it,
     /// and this is where that number comes from.
     pub fn set_start_distance(&mut self, units: i32) {
-        self.start_distance = units;
+        self.curriculum.start_distance = units;
     }
 
     /// Start every episode with `n` monsters around the player. See
@@ -724,31 +801,12 @@ impl DoomEnv {
         *n
     }
 
-    /// Record how an episode ended and move the start back once the policy is
-    /// reliably finishing from where it is.
-    ///
-    /// Advanced on a WINDOW rather than a single success, because one win from
-    /// two decisions away is luck; and by a small step, because a start that
-    /// jumps past what the policy can do puts it back to the silent regime the
-    /// curriculum exists to escape.
+    /// Tell the curriculum how the episode that just ended ended.
     fn note_outcome(&mut self, won: bool) {
-        if !self.curriculum {
-            return;
-        }
-        self.recent_wins.push_back(won);
-        if self.recent_wins.len() > CURRICULUM_WINDOW {
-            self.recent_wins.pop_front();
-        }
-        if self.recent_wins.len() < CURRICULUM_WINDOW {
-            return;
-        }
-        let wins = self.recent_wins.iter().filter(|w| **w).count();
-        if wins as f32 / self.recent_wins.len() as f32 >= CURRICULUM_ADVANCE {
-            self.start_distance += CURRICULUM_STEP;
-            self.recent_wins.clear();
+        if let Some((wins, distance)) = self.curriculum.note(won) {
             println!(
-                "doom: curriculum - {wins}/{} finished, starting {} units from the exit",
-                CURRICULUM_WINDOW, self.start_distance
+                "doom: curriculum - {wins}/{CURRICULUM_WINDOW} finished, starting {distance} \
+                 units from the exit"
             );
         }
     }
@@ -897,7 +955,7 @@ impl DoomEnv {
             i.map = self.state.level.map;
             i.game_tic = self.state.episode_tic;
             i.stuck = self.stuck;
-            i.back_steps = self.start_distance.max(0) as u32;
+            i.back_steps = self.curriculum.start_distance.max(0) as u32;
             i.health = self.state.player.health;
             if i.step <= 1 {
                 i.history.clear();
@@ -1127,7 +1185,7 @@ impl DoomEnv {
         } else {
             self.cfg.scenario = Some(self.scenarios[pick % self.scenarios.len()].clone());
         }
-        let start = self.curriculum.then_some(self.start_distance);
+        let start = self.curriculum.start();
         let json = match self.doom.reset(&self.cfg, seed, start) {
             Ok(j) => j,
             Err(e) => {
@@ -1611,6 +1669,12 @@ impl Env for DoomEnv {
             .map(|name| format!("{name}#{}", self.episode))
     }
 
+    /// The reverse curriculum is the one thing here that outlives an episode,
+    /// so it is the one thing a measurement can damage. See [`Curriculum`].
+    fn set_counting(&mut self, on: bool) {
+        self.curriculum.set_counting(on);
+    }
+
     fn hold(&mut self) -> bool {
         self.hold_at(0)
     }
@@ -1749,6 +1813,39 @@ const EMPTY: &str = r#"{"tic":0,"episodeTic":0,"level":{"episode":0,"map":0,"ski
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Training difficulty must survive being measured.
+    ///
+    /// The defect: the curriculum window was fed by every episode that ended,
+    /// and an episode that ends is all a fixed-block score or a hypothetical
+    /// roll-out looks like from in here. A gauge of eight episodes that went
+    /// well therefore moved the start 400 units further out on its own, and a
+    /// probe did it again for every branch it rolled out - so how hard the
+    /// next training episode was depended on how often the run had stopped to
+    /// measure itself, and two runs with identical policies and different
+    /// gauge budgets were not training on the same task.
+    #[test]
+    fn measuring_the_policy_leaves_the_curriculum_where_it_found_it() {
+        let mut c = Curriculum { on: true, ..Curriculum::default() };
+        // Part-way through a window, which is the state a measurement has to
+        // preserve: the outcomes already banked as well as the distance.
+        c.note(true);
+        let before = c.clone();
+
+        c.set_counting(false);
+        for _ in 0..CURRICULUM_WINDOW * 2 {
+            assert_eq!(c.note(true), None, "a measured episode reported curriculum progress");
+        }
+        c.set_counting(true);
+        assert_eq!(c, before, "a measurement moved the training curriculum");
+
+        // And the training episodes either side of it still advance it, on
+        // their own window and nobody else's.
+        for _ in 0..CURRICULUM_WINDOW - 2 {
+            assert_eq!(c.note(true), None);
+        }
+        assert_eq!(c.note(true), Some((CURRICULUM_WINDOW, CURRICULUM_STEP)));
+    }
 
     #[test]
     fn closing_on_the_goal_pays_and_nothing_else_does() {

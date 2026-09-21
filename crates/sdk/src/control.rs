@@ -170,6 +170,22 @@ pub trait Env {
         None
     }
 
+    /// Whether the episodes from now on COUNT as training.
+    ///
+    /// An environment that carries state ACROSS episodes - a curriculum that
+    /// moves the start as the policy succeeds, a tally of how the last few
+    /// went - cannot tell a measurement from the real thing on its own: a
+    /// fixed-block score and a hypothetical roll-out both look exactly like an
+    /// episode from in there. Left counting, they move what the next TRAINING
+    /// episode faces, so how a run trains depends on how often it stopped to
+    /// look at itself, and two runs of the same policy on different gauge
+    /// budgets are not running the same experiment.
+    ///
+    /// Counting is the default and the pipeline turns it off around every
+    /// measurement it takes, so an environment that keeps nothing across
+    /// episodes can ignore this entirely.
+    fn set_counting(&mut self, _on: bool) {}
+
     /// Hold the state this environment is in right now, so that a caller can
     /// come back to it and try something else. `false` when it cannot.
     ///
@@ -930,6 +946,8 @@ pub struct ControlPipeline<E: Env> {
     /// decisions to reach a goal was scored as never reaching it, and the
     /// number looked like a policy failure rather than a harness one.
     max_steps: usize,
+    /// How many measurements are in progress. See [`ControlPipeline::measuring`].
+    measurements: usize,
 }
 
 impl<E: Env> std::fmt::Debug for ControlPipeline<E> {
@@ -1675,6 +1693,26 @@ impl<E: Env> ControlPipeline<E> {
         &mut self.env
     }
 
+    /// Run `f` as a MEASUREMENT: nothing the environment sees while it runs
+    /// counts as training. See [`Env::set_counting`].
+    ///
+    /// A scope rather than two calls at the call site because the things that
+    /// need it are the things that give up half way - a probe that cannot go
+    /// back, an episode whose engine died - and a flag left off by an early
+    /// return would silently stop the rest of the run from training. Nested,
+    /// because a measurement is allowed to contain one; counting resumes when
+    /// the outermost finishes.
+    fn measuring<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
+        self.measurements += 1;
+        self.env.set_counting(false);
+        let out = f(self);
+        self.measurements -= 1;
+        if self.measurements == 0 {
+            self.env.set_counting(true);
+        }
+        out
+    }
+
     /// Score the policy on a FIXED block of episodes, the same block every
     /// time, and say how far they got.
     ///
@@ -1703,16 +1741,19 @@ impl<E: Env> ControlPipeline<E> {
         let saved_seed = self.episode_seed;
         self.rng = data::rng::Rng::new(0x6a11_6e00);
         let (mut got, mut measured) = (0.0f32, 0usize);
-        for i in 0..episodes {
-            // A block no rollout will ever draw, so the policy is judged on
-            // worlds it was not just trained on.
-            self.episode_seed = 0x4000_0000 + i as u64;
-            self.episode(self.episode_seed, false, max_steps, false)?;
-            if let Some(p) = self.env.progress() {
-                got += p;
-                measured += 1;
+        self.measuring(|p| -> Result<()> {
+            for i in 0..episodes {
+                // A block no rollout will ever draw, so the policy is judged
+                // on worlds it was not just trained on.
+                p.episode_seed = 0x4000_0000 + i as u64;
+                p.episode(p.episode_seed, false, max_steps, false)?;
+                if let Some(scored) = p.env.progress() {
+                    got += scored;
+                    measured += 1;
+                }
             }
-        }
+            Ok(())
+        })?;
         self.rng = saved_rng;
         self.episode_seed = saved_seed;
         Ok((measured > 0).then(|| got / measured as f32))
@@ -1756,41 +1797,43 @@ impl<E: Env> ControlPipeline<E> {
         // How often the teacher's answer was the first option, the second,
         // and so on - the constant policy this has to beat.
         let mut by_position: Vec<usize> = Vec::new();
-        for &seed in seeds {
-            let mut obs = self.env.reset(seed);
-            for _ in 0..max_steps {
-                let options = self.env.actions();
-                if options.is_empty() {
-                    break;
-                }
-                let Some(teacher) = self.env.demo() else {
-                    self.episode_seed = saved;
-                    return Ok(None);
-                };
-                let probs = self.policy(&obs, &options)?;
-                let mut best = 0;
-                for (i, &pi) in probs.iter().enumerate() {
-                    if pi > probs[best] {
-                        best = i;
+        let asked = self.measuring(|p| -> Result<bool> {
+            for &seed in seeds {
+                let mut obs = p.env.reset(seed);
+                for _ in 0..max_steps {
+                    let options = p.env.actions();
+                    if options.is_empty() {
+                        break;
+                    }
+                    let Some(teacher) = p.env.demo() else {
+                        return Ok(false);
+                    };
+                    let probs = p.policy(&obs, &options)?;
+                    let mut best = 0;
+                    for (i, &pi) in probs.iter().enumerate() {
+                        if pi > probs[best] {
+                            best = i;
+                        }
+                    }
+                    hits += usize::from(best == teacher);
+                    on_teacher += probs.get(teacher).copied().unwrap_or(0.0) as f64;
+                    offered += options.len();
+                    if by_position.len() <= teacher {
+                        by_position.resize(teacher + 1, 0);
+                    }
+                    by_position[teacher] += 1;
+                    states += 1;
+                    let (next, _, done) = p.env.step(teacher);
+                    obs = next;
+                    if done {
+                        break;
                     }
                 }
-                hits += usize::from(best == teacher);
-                on_teacher += probs.get(teacher).copied().unwrap_or(0.0) as f64;
-                offered += options.len();
-                if by_position.len() <= teacher {
-                    by_position.resize(teacher + 1, 0);
-                }
-                by_position[teacher] += 1;
-                states += 1;
-                let (next, _, done) = self.env.step(teacher);
-                obs = next;
-                if done {
-                    break;
-                }
             }
-        }
+            Ok(true)
+        })?;
         self.episode_seed = saved;
-        if states == 0 {
+        if !asked || states == 0 {
             return Ok(None);
         }
         let n = states as f32;
@@ -3213,15 +3256,18 @@ impl<E: Env> ControlPipeline<E> {
     /// Play `n` episodes greedily, printing each step.
     pub fn show(&mut self, n: usize, max_steps: usize) -> Result<Rollout> {
         let (mut total, mut wins) = (0.0f32, 0usize);
-        for i in 0..n {
-            self.episode_seed += 1;
-            let seed = self.episode_seed;
-            println!("\n  episode {} (seed {seed})", i + 1);
-            let (_, ret, won) = self.episode(seed, true, max_steps, true)?;
-            println!("       = return {ret:+.2}, {}", if won { "WON" } else { "lost" });
-            total += ret;
-            wins += usize::from(won);
-        }
+        self.measuring(|p| -> Result<()> {
+            for i in 0..n {
+                p.episode_seed += 1;
+                let seed = p.episode_seed;
+                println!("\n  episode {} (seed {seed})", i + 1);
+                let (_, ret, won) = p.episode(seed, true, max_steps, true)?;
+                println!("       = return {ret:+.2}, {}", if won { "WON" } else { "lost" });
+                total += ret;
+                wins += usize::from(won);
+            }
+            Ok(())
+        })?;
         Ok(Rollout {
             episodes: n,
             steps: 0,
@@ -3827,12 +3873,15 @@ impl<E: Env> Stages for ControlPipeline<E> {
         // actually do, on situations it has not been updated against.
         let (mut total, mut wins, mut steps) = (0.0f32, 0usize, 0usize);
         let n = EVAL_SEEDS.count();
-        for seed in EVAL_SEEDS {
-            let (st, ret, won) = self.episode(seed, true, self.max_steps, false)?;
-            total += ret;
-            wins += usize::from(won);
-            steps += st.len();
-        }
+        self.measuring(|p| -> Result<()> {
+            for seed in EVAL_SEEDS {
+                let (st, ret, won) = p.episode(seed, true, p.max_steps, false)?;
+                total += ret;
+                wins += usize::from(won);
+                steps += st.len();
+            }
+            Ok(())
+        })?;
         Ok(EvalReport {
             accuracy: wins as f32 / n as f32,
             items: n,
@@ -3925,6 +3974,7 @@ impl<E: Env> ControlPipelineBuilder<E> {
             critic: Critic::new(cfg_width, CRITIC_HIDDEN, self.seed ^ 0x1c1),
             critic_mse: 0.0,
             max_steps: self.max_steps,
+            measurements: 0,
         })
     }
 }
