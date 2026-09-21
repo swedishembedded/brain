@@ -13,7 +13,16 @@ set -u
 CSV=$1; GEN=$2; HEAD=${3:-}
 : "${DOOM_BIN:?}" "${WAD:?}" "${ENC:?}" "${DBIN:?}"
 SKILL=${SKILL:-3}
-STEPS=${STEPS:-600}
+# Long enough for the task to be the one being scored.
+#
+# Success here is every monster, every item, every secret and the way out,
+# and that takes time: E1M6 holds 177 monsters. At six hundred decisions the
+# episode ends long before any of that is settled, so the number rewards
+# whatever pays fastest and punishes anything that invests. Measured, it
+# inverts a verdict: facing a remembered thing before walking to it reads as
+# six kills worse over three seeds at six hundred, and as twenty-five percent
+# MORE progress at three thousand, where E1M1 alone goes from 0.17 to 0.46.
+STEPS=${STEPS:-3000}
 EPISODES=${EPISODES:-2}
 WHO=scripted
 ARGS=()

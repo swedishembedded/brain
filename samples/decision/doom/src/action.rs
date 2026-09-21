@@ -325,19 +325,36 @@ pub fn options(state: &State) -> Vec<Option_> {
             Some(p) => (p.bearing, p.clearance, p.step.max(1), format!(", {} units of walking", p.distance)),
             None => (r.bearing, r.distance, r.distance, String::new()),
         };
+        // Face first, then walk, as everything else that goes somewhere
+        // does. Turning while walking walks the ARC of the turn, and this is
+        // the option that turns furthest: a thing remembered behind you is a
+        // hundred and forty degrees off the nose, so the arc is a half circle
+        // into whatever is beside you. Measured on E1M1 at the easiest
+        // difficulty with four thousand decisions, the player alternated
+        // between this option and the way out for the whole episode, arriving
+        // at neither and ending where it started.
+        let far_off = bearing.abs() > FACING_TOL;
         out.push(Option_ {
-            text: format!(
-                "go back for the {} you saw, {} units {}{walk}",
-                r.kind.to_lowercase(),
-                r.distance,
-                bearing_phrase(r.bearing)
-            ),
-            commands: format!(
-                "[{},{{\"type\":\"forward\",\"amount\":{}}}]",
-                json_turn(state.facing(bearing)),
-                walk_tics(leg)
-            ),
-            tics: walk_tics(leg),
+            text: if far_off {
+                format!(
+                    "turn back toward the {} you saw, {} units {}{walk}",
+                    r.kind.to_lowercase(),
+                    r.distance,
+                    bearing_phrase(r.bearing)
+                )
+            } else {
+                format!(
+                    "go back for the {} you saw, {} units ahead{walk}",
+                    r.kind.to_lowercase(),
+                    r.distance
+                )
+            },
+            commands: if far_off {
+                format!("[{}]", json_turn(state.facing(bearing)))
+            } else {
+                format!("[{{\"type\":\"forward\",\"amount\":{}}}]", walk_tics(leg))
+            },
+            tics: if far_off { FIGHT_TICS } else { walk_tics(leg) },
             tag: Tag::Grab,
             room,
         });
@@ -914,7 +931,7 @@ mod tests {
     fn going_back_for_a_remembered_thing_follows_the_route_and_not_the_wall() {
         let unrouted = options(&recalled_round_a_corner(None));
         assert!(
-            !unrouted.iter().any(|o| o.text.contains("go back for")),
+            !unrouted.iter().any(|o| o.text.contains("you saw")),
             "a straight line into a wall was offered as a way back"
         );
 
@@ -926,19 +943,15 @@ mod tests {
         })));
         let back = routed
             .iter()
-            .find(|o| o.text.contains("go back for"))
+            .find(|o| o.text.contains("you saw"))
             .expect("a way back, now that there is one");
-        // Turned onto the ROUTE - 90 + (-90) - and not onto the straight line
-        // at 180 + 90, which is the wall.
+        // Turned onto the ROUTE - 90 + (-90) - and not onto the straight
+        // line at 180 + 90, which is the wall. Turning only: a quarter turn
+        // walked while turning walks the arc of it.
         assert!(back.commands.contains("\"angle\":0"), "{}", back.commands);
-        // It still says where the thing is, because that is what the player
-        // is going back FOR, and it now also says what the trip costs.
+        assert!(!back.commands.contains("forward"), "{}", back.commands);
         assert!(back.text.contains("220 units"), "{}", back.text);
         assert!(back.text.contains("480 units of walking"), "{}", back.text);
-        // And the walk is the first leg, not the whole path: the route turns
-        // after the waypoint and walking 480 units on this heading walks
-        // through the turn.
-        assert_eq!(back.tics, walk_tics(128));
     }
 
     #[test]
