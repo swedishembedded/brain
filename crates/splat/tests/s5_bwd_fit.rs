@@ -193,6 +193,71 @@ fn fit_recovers_perturbed_scene() {
     );
 }
 
+/// A step size too large for the scene must not leave the fit worse than it
+/// started.
+///
+/// The learning rate is normalised against the scene's own extent, so one
+/// value is meant to work at any scale - but "meant to" is not a guarantee,
+/// and a rate that converges on one capture can diverge on the next. Measured
+/// on a real 16-photograph reconstruction, 2e-3 took the loss UP from 0.0294
+/// to 0.0372 over twenty iterations while 2e-4 took it down to 0.0124, and
+/// nothing anywhere noticed: the fit ran to completion, printed a rising
+/// number every twenty iterations, and wrote out a scene worse than the one it
+/// was given.
+///
+/// An optimizer that cannot tell it is diverging is not finished. This pins
+/// the weakest useful guarantee - never return something worse than the input
+/// - which is what makes a hot rate a slow fit rather than a destroyed scene.
+#[test]
+fn a_fit_that_starts_diverging_recovers_instead_of_running_on() {
+    let g = Gpu::new_cpu(splat::PIPELINES);
+    let ks = Kernels::at(0);
+    let truth = scene(24, 0x1234);
+    let cams: Vec<Camera> = (0..4)
+        .map(|i| {
+            let a = i as f32 * 0.5 - 0.75;
+            Camera::look_at([0.0, 0.0, 4.0], [3.0 * a.sin(), 0.4, 4.0 - 3.0 * a.cos()],
+                            [0.0, -1.0, 0.0], 60.0, 48, 48)
+        })
+        .collect();
+    let o = RenderOpts::default();
+    let mut ren = Renderer::new(&g, ks, truth.len(), 48, 48, 0);
+    let gst = GpuSplats::upload(&g, &truth);
+    let targets: Vec<TargetView> = cams
+        .iter()
+        .map(|c| {
+            ren.render(&g, &gst, c, &o);
+            let img = ren.read_rgba(&g, c.width, c.height);
+            TargetView { cam: *c, rgb: img.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect() }
+        })
+        .collect();
+
+    let mut init = truth.clone();
+    let mut r = Lcg(0xfeed);
+    for v in init.means.iter_mut() {
+        *v += (r.next() - 0.5) * 0.12;
+    }
+    for v in init.colors.iter_mut() {
+        *v = (*v + (r.next() - 0.5) * 0.3).clamp(0.0, 1.0);
+    }
+
+    // A rate two orders of magnitude past what this scene tolerates.
+    let cfg = FitCfg { iters: 60, lr: 3.0, log_every: 0, densify_every: 0, ..Default::default() };
+    let mut first = f32::NAN;
+    let (_fitted, mse_end) =
+        fit(&g, ks, &init, &targets, &cfg, &mut |it, mse| {
+            if it == 0 {
+                first = mse;
+            }
+            true
+        });
+    assert!(first.is_finite(), "the fit never reported an iteration");
+    assert!(
+        mse_end.is_finite() && mse_end <= first,
+        "a hot learning rate ran to completion and made the scene worse: {first:.6} -> {mse_end:.6}"
+    );
+}
+
 /// A scene's gradient-record count is a property of the scene and the camera -
 /// how many gaussians each pixel's alpha-composite actually touches - and no
 /// caller knows it before the forward pass has run. So the scratch cannot be

@@ -215,10 +215,22 @@ fn fit_inner(gpu: &Gpu, ks: Kernels, init: &Splats, targets: &[TargetView], cfg:
     let mut loss = 0.0f32;
     let mut done = 0usize;
     let mut stop = false;
+    // The loss of the scene as handed in, reported by the first iteration
+    // (which measures before it updates anything). It is the floor the fit has
+    // to beat to have been worth running.
+    let mut first_loss = f32::NAN;
+    let mut seen = |it: usize, mse: f32, k: &mut dyn FnMut(usize, f32) -> bool| {
+        if first_loss.is_nan() {
+            first_loss = mse;
+        }
+        k(it, mse)
+    };
     while done < cfg.iters && !stop {
         let iters = stage_len.min(cfg.iters - done);
-        let (next, l, grad, aborted) =
-            fit_stage(gpu, ks, &scene, targets, &mut cams, cfg, iters, done, on_step);
+        let (next, l, grad, aborted) = {
+            let mut tap = |it: usize, mse: f32| seen(it, mse, on_step);
+            fit_stage(gpu, ks, &scene, targets, &mut cams, cfg, iters, done, &mut tap)
+        };
         scene = next;
         loss = l;
         done += iters;
@@ -242,6 +254,19 @@ fn fit_inner(gpu: &Gpu, ks: Kernels, init: &Splats, targets: &[TargetView], cfg:
                 println!("fit iter {done:4}: density control {before} -> {} gaussians", scene.len());
             }
         }
+    }
+    // Never hand back something worse than what came in. Backoff makes that
+    // rare, but "rare" is not a guarantee, and a fit that destroys a scene
+    // while reporting a rising number every twenty iterations is the worst of
+    // both: it looks like it ran.
+    if first_loss.is_finite() && (!loss.is_finite() || loss > first_loss) {
+        if cfg.log_every > 0 {
+            println!(
+                "fit: ended at mse {loss:.6} against {first_loss:.6} at the start; keeping the \
+                 input scene. The step size is too large for this scene even after backoff."
+            );
+        }
+        return (init.clone(), targets.iter().map(|t| t.cam).collect(), first_loss);
     }
     (scene, cams, loss)
 }
@@ -534,6 +559,10 @@ fn fit_stage(
     };
 
     let mut last_loss = 0.0f32;
+    // Step-size backoff state: see where `rises` is updated below.
+    let mut lr_scale = 1.0f32;
+    let mut rises = 0u32;
+    let mut prev_loss = f32::INFINITY;
     let mut aborted = false;
     // Positional-gradient magnitude per gaussian, averaged over the tail of
     // the stage. Read back over a WINDOW rather than every iteration: one
@@ -674,7 +703,7 @@ fn fit_stage(
         let bc1 = 1.0 - 0.9f32.powi(ts);
         let bc2 = 1.0 - 0.999f32.powi(ts);
         let tm = std::time::Instant::now();
-        gpu.write(&hparams, &[f(cfg.lr), f(0.9), f(0.999), f(1e-8), f(0.0), f(bc1), f(bc2), f(1.0)]);
+        gpu.write(&hparams, &[f(cfg.lr * lr_scale), f(0.9), f(0.999), f(1e-8), f(0.0), f(bc1), f(bc2), f(1.0)]);
         adamw_step([&p_geo, &grads.d_gauss, &m_geo, &v_geo], &desc_geo, 10 * n);
         adamw_step([&p_op, &grads.d_opac, &m_op, &v_op], &desc_op, n);
         if ksh > 0 {
@@ -772,6 +801,25 @@ fn fit_stage(
         }
 
         last_loss = (loss_sum / targets.len() as f64) as f32;
+        // Back off a step size this scene will not take. The rate is already
+        // normalised against the scene's extent, which makes one value work
+        // across scales but does not make it work everywhere: a rate that
+        // converges on one capture can diverge on the next, and Adam has no
+        // opinion about that. Two rises in a row is the signal - one can be a
+        // clamp or an unlucky view ordering, two is a trend.
+        if last_loss > prev_loss {
+            rises += 1;
+        } else {
+            rises = 0;
+        }
+        if rises >= 2 && lr_scale > 1e-3 {
+            lr_scale *= 0.5;
+            rises = 0;
+            if cfg.log_every > 0 {
+                println!("fit iter {:4}: loss rising, learning rate -> {:.3e}", it0 + it, cfg.lr * lr_scale);
+            }
+        }
+        prev_loss = last_loss;
         let global = it0 + it;
         if cfg.log_every > 0 && (global.is_multiple_of(cfg.log_every) || global + 1 == cfg.iters) {
             println!("fit iter {global:4}: mse {last_loss:.6}");
