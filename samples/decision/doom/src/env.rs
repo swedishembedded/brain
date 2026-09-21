@@ -1405,6 +1405,17 @@ impl DoomEnv {
             }
         }
 
+        // A lift on the route beats everything the orders rank, because it
+        // is not a preference - it is the only way the route goes on. The
+        // floor ahead is higher than a player climbs, and walking at it is
+        // holding forward against a wall. Pressing use and waiting is the
+        // act, and waiting is the part no other option can express.
+        if let Some(i) = by(Tag::Ride) {
+            if !in_my_face {
+                return Some(i);
+            }
+        }
+
         // THE ORDERS DECIDE THE ORDER. Until this was mission-aware the
         // scripted player did the same thing whatever it was told, and under
         // `speedrun` that meant collecting sixteen items over four hundred

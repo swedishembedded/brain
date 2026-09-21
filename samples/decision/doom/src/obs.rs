@@ -283,6 +283,16 @@ pub struct Exit {
     /// nothing.
     #[serde(rename = "blockedBy")]
     pub blocked_by: Option<Blocker>,
+    /// Whether the next step of the route is one to RIDE rather than walk:
+    /// the floor beyond it is higher than a player can climb and something in
+    /// the level moves it. A lift, in other words.
+    ///
+    /// The one situation where standing still is progress. An agent told only
+    /// "walk that way" holds forward against a wall that was about to come
+    /// down for it, and from outside that is indistinguishable from being
+    /// stuck.
+    #[serde(rename = "routeIsLift")]
+    pub route_is_lift: Option<bool>,
 }
 
 #[derive(Clone, Debug, Deserialize)]

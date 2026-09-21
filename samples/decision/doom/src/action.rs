@@ -68,12 +68,20 @@ pub enum Tag {
     Clear,
     /// Get off floor that is burning the player.
     Escape,
+    /// Operate the lift the route runs through, and wait for it.
+    Ride,
     Exit,
 }
 
 /// A decision every ~4-8 tics is about 5-9 per second of game time, which is
 /// the rate a human plays at and slow enough that a decision model with a
 /// millisecond of latency is never the thing holding the game up.
+/// How long the player waits on a lift after calling it.
+///
+/// A DOOM lift takes a little over three seconds to come down, wait and go
+/// back up. Deciding again every few tics while standing on one is a decision
+/// about nothing; this is long enough for the platform to actually move.
+const RIDE_TICS: u32 = 64;
 /// How long an attack decision lasts.
 ///
 /// Measured against the engine's own weapon timing rather than chosen: the
@@ -431,6 +439,27 @@ pub fn options(state: &State) -> Vec<Option_> {
             return out;
         };
 
+        // The way on is a LIFT: the floor beyond is higher than a player
+        // climbs and something in the level moves it. Pressing use calls it
+        // down, and then the thing to do is wait - which is the one situation
+        // where standing still is progress, and the one an agent offered only
+        // "walk that way" cannot express. It holds forward against a wall
+        // that was about to come down for it, and from outside that is
+        // indistinguishable from being stuck.
+        if e.route_is_lift == Some(true) {
+            out.push(Option_ {
+                text: format!(
+                    "operate the lift {bearing_text} and wait for it - the way on is \
+                     up it, not past it",
+                    bearing_text = bearing_phrase(bearing)
+                ),
+                commands: format!("[{},{{\"type\":\"use\"}}]", json_turn(state.facing(bearing))),
+                tics: RIDE_TICS,
+                tag: Tag::Ride,
+                room: e.route_clearance.or(e.clearance).unwrap_or(0),
+            });
+        }
+
         // TURNING AND WALKING ARE SEPARATE DECISIONS.
         //
         // Doing both in one step is what wedged a follower on every corner: it
@@ -783,7 +812,7 @@ fn bearing_phrase(b: i32) -> String {
 mod tests {
     use super::*;
 
-    fn state(json_patch: &str) -> State {
+    pub fn state(json_patch: &str) -> State {
         let base = format!(
             r#"{{"tic":1,"episodeTic":1,"level":{{"episode":1,"map":1,"skill":2,"tic":1,
             "kills":0,"totalKills":4,"items":0,"totalItems":3,"secrets":0,"totalSecrets":1}},
@@ -1024,5 +1053,45 @@ mod tests {
             "clearance":{"ahead":320,"right":0,"behind":0,"left":0,"aheadRight":0,"aheadLeft":0}"#,
         ));
         assert!(open.iter().any(|o| o.tag == Tag::Advance));
+    }
+}
+
+#[cfg(test)]
+mod lift_tests {
+    use super::tests::state;
+    use super::*;
+
+    fn on_a_lift(is_lift: bool) -> State {
+        let lift = if is_lift { r#","routeIsLift":true"# } else { "" };
+        state(&format!(
+            r#""threats":[],"hazards":[],"pickups":[],
+            "clearance":{{"ahead":64,"right":0,"behind":320,"left":0,"aheadRight":0,"aheadLeft":0}},
+            "exit":{{"distance":900,"bearing":30,"kind":"switch","clearance":64,
+                    "pathDistance":1200,"routeBearing":30,"routeDistance":32,
+                    "routeClearance":64{lift}}}"#
+        ))
+    }
+
+    /// The gap this closes. The floor the route runs up is higher than a
+    /// player can climb, so every option that says "walk" walks into it. The
+    /// act is to press use and WAIT, and waiting is the thing no other option
+    /// in the list can express.
+    #[test]
+    fn a_lift_on_the_route_can_be_operated_and_waited_on() {
+        assert!(
+            !options(&on_a_lift(false)).iter().any(|o| o.tag == Tag::Ride),
+            "a lift was offered where the route said there was none"
+        );
+        let opts = options(&on_a_lift(true));
+        let ride = opts
+            .iter()
+            .find(|o| o.tag == Tag::Ride)
+            .expect("a way to operate the lift");
+        // Faces the route and presses use: 90 + 30.
+        assert!(ride.commands.contains("\"angle\":120"), "{}", ride.commands);
+        assert!(ride.commands.contains("use"), "{}", ride.commands);
+        // And holds still long enough for the platform to actually move.
+        assert_eq!(ride.tics, RIDE_TICS);
+        assert!(ride.text.contains("lift"), "{}", ride.text);
     }
 }
