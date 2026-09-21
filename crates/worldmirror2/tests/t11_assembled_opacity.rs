@@ -87,7 +87,7 @@ fn an_assembled_gaussians_opacity_is_the_learned_merge_weight() {
 
     // min_opacity 0 and max_depth 0 keep every pixel, so the two vectors line
     // up one-to-one and can be compared directly.
-    let opts = AssembleOpts { min_opacity: 0.0, max_depth: 0.0, gs_mask_threshold: 0.0, edge_depth_rtol: 0.0 };
+    let opts = AssembleOpts { min_opacity: 0.0, max_depth: 0.0, gs_mask_threshold: 0.0, edge_depth_rtol: 0.0, fuse_depth_rtol: 0.0 };
     let (splats, cams, weights) = assemble(model.gpu(), &model, &frames, s, w as u32, h as u32, &opts, None);
     assert_eq!(cams.len(), s);
     assert_eq!(splats.len(), s * h * w, "nothing should have been filtered at min_opacity 0");

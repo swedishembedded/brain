@@ -59,6 +59,117 @@ pub fn decode_cameras(raw: &[f32], s: usize, width: u32, height: u32) -> Vec<Cam
         .collect()
 }
 
+/// Reconcile per-view depth maps against each other, in place.
+///
+/// Each frame's depth is individually good and they disagree with each other.
+/// The disagreement is along the viewing ray, which is the one direction it is
+/// invisible from the frame that made it, and the one direction a fit cannot
+/// correct - a splat's image-plane gradient is orthogonal to its own ray. So
+/// it has to be settled here, before the depths become geometry.
+///
+/// For every pixel of every frame, the point it implies is projected into
+/// every other frame. Where that frame's own depth agrees to within `rtol`,
+/// the two are looking at the same surface, and its opinion - expressed back
+/// along THIS pixel's ray, so the pixel keeps its own direction and only its
+/// distance changes - joins a confidence-weighted average. Where the depths
+/// disagree by more than `rtol` they are looking at different surfaces, one
+/// occluding the other, and averaging them would invent a surface that is in
+/// neither; the same relative test silhouette rejection uses, for the same
+/// reason.
+///
+/// `conf` is the depth head's second channel, which the model emits to say how
+/// much each of its own depths is worth.
+pub fn fuse_depths(
+    depth: &mut [Vec<f32>],
+    conf: &[Vec<f32>],
+    cams: &[Camera],
+    width: u32,
+    height: u32,
+    rtol: f32,
+) {
+    let s = cams.len();
+    if s < 2 || depth.len() != s || conf.len() != s {
+        return;
+    }
+    let (w, h) = (width as usize, height as usize);
+    let hw = w * h;
+    let views: Vec<[f32; 12]> = cams.iter().map(|c| c.viewmat()).collect();
+    let out: Vec<Vec<f32>> = (0..s)
+        .map(|i| {
+            let ci = &cams[i];
+            let mi = &ci.c2w;
+            let mut fused = vec![0.0f32; hw];
+            for py in 0..h {
+                for px in 0..w {
+                    let k = py * w + px;
+                    let zi = depth[i][k];
+                    let mut acc = (conf[i][k] * zi) as f64;
+                    let mut wsum = conf[i][k] as f64;
+                    if zi <= 0.0 {
+                        fused[k] = zi;
+                        continue;
+                    }
+                    // the ray this pixel looks along, in world space
+                    let (xc, yc) = ((px as f32 + 0.5 - ci.cx) / ci.fx, (py as f32 + 0.5 - ci.cy) / ci.fy);
+                    let dir = [
+                        mi[0] * xc + mi[1] * yc + mi[2],
+                        mi[4] * xc + mi[5] * yc + mi[6],
+                        mi[8] * xc + mi[9] * yc + mi[10],
+                    ];
+                    let eye = [mi[3], mi[7], mi[11]];
+                    let p = [eye[0] + zi * dir[0], eye[1] + zi * dir[1], eye[2] + zi * dir[2]];
+                    for j in 0..s {
+                        if j == i {
+                            continue;
+                        }
+                        let vj = &views[j];
+                        let cj = &cams[j];
+                        let zj = vj[8] * p[0] + vj[9] * p[1] + vj[10] * p[2] + vj[11];
+                        if zj <= 1e-6 {
+                            continue;
+                        }
+                        let xj = vj[0] * p[0] + vj[1] * p[1] + vj[2] * p[2] + vj[3];
+                        let yj = vj[4] * p[0] + vj[5] * p[1] + vj[6] * p[2] + vj[7];
+                        let (ux, uy) = (cj.fx * xj / zj + cj.cx, cj.fy * yj / zj + cj.cy);
+                        if ux < 0.0 || uy < 0.0 || ux >= w as f32 || uy >= h as f32 {
+                            continue;
+                        }
+                        let kj = (uy as usize).min(h - 1) * w + (ux as usize).min(w - 1);
+                        let dj = depth[j][kj];
+                        if dj <= 0.0 || ((dj - zj) / zj).abs() > rtol {
+                            continue; // different surfaces, not a disagreement
+                        }
+                        // j's surface point, expressed as a distance along
+                        // THIS pixel's ray: the pixel keeps its direction.
+                        let mj = &cj.c2w;
+                        let (xk, yk) = ((ux - cj.cx) / cj.fx, (uy - cj.cy) / cj.fy);
+                        let dj3 = [
+                            mj[0] * xk + mj[1] * yk + mj[2],
+                            mj[4] * xk + mj[5] * yk + mj[6],
+                            mj[8] * xk + mj[9] * yk + mj[10],
+                        ];
+                        let ej = [mj[3], mj[7], mj[11]];
+                        let q = [ej[0] + dj * dj3[0], ej[1] + dj * dj3[1], ej[2] + dj * dj3[2]];
+                        let along = (q[0] - eye[0]) * dir[0] + (q[1] - eye[1]) * dir[1] + (q[2] - eye[2]) * dir[2];
+                        let dd = dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2];
+                        let cand = along / dd.max(1e-12);
+                        if cand <= 0.0 {
+                            continue;
+                        }
+                        acc += (conf[j][kj] * cand) as f64;
+                        wsum += conf[j][kj] as f64;
+                    }
+                    fused[k] = if wsum > 0.0 { (acc / wsum) as f32 } else { zi };
+                }
+            }
+            fused
+        })
+        .collect();
+    for (d, f) in depth.iter_mut().zip(out) {
+        *d = f;
+    }
+}
+
 fn sigmoid(x: f32) -> f32 {
     1.0 / (1.0 + (-x).exp())
 }
@@ -76,11 +187,15 @@ pub struct AssembleOpts {
     /// discontinuity, where the predicted depth is a blend of two surfaces
     /// and the gaussian lands between them. Reference `0.03`; `0` disables.
     pub edge_depth_rtol: f32,
+    /// Reconcile the per-view depth maps against each other before they become
+    /// geometry, rejecting pairs that differ by more than this fraction as
+    /// occlusions rather than disagreements. 0 disables it.
+    pub fuse_depth_rtol: f32,
 }
 
 impl Default for AssembleOpts {
     fn default() -> Self {
-        AssembleOpts { min_opacity: 0.01, max_depth: 0.0, gs_mask_threshold: 0.5, edge_depth_rtol: 0.03 }
+        AssembleOpts { min_opacity: 0.01, max_depth: 0.0, gs_mask_threshold: 0.5, edge_depth_rtol: 0.03, fuse_depth_rtol: 0.05 }
     }
 }
 
@@ -147,6 +262,28 @@ pub fn assemble(
         _ => decode_cameras(&model.cam_pred_raw(), s, width, height),
     };
     let hw = (width * height) as usize;
+
+    // Read every frame's depth first, and let the frames settle their
+    // disagreement before any of it becomes geometry. They cannot settle it
+    // afterwards: the error is along each pixel's own viewing ray, invisible
+    // from the frame that made it and untouchable by a fit whose gradients are
+    // orthogonal to that ray.
+    let mut gsd_all: Vec<Vec<f32>> = (0..s)
+        .map(|fi| gpu.read(model.head_out(Head::GsDepth, fi), 3 * hw))
+        .collect();
+    let mut depths: Vec<Vec<f32>> = gsd_all
+        .iter()
+        .map(|g| g[..hw].iter().map(|v| v.exp()).collect())
+        .collect();
+    if opts.fuse_depth_rtol > 0.0 && s > 1 {
+        // the head's second channel is its own confidence in the first
+        let confs: Vec<Vec<f32>> = gsd_all
+            .iter()
+            .map(|g| g[hw..2 * hw].iter().map(|v| 1.0 + v.exp()).collect())
+            .collect();
+        fuse_depths(&mut depths, &confs, &cams, width, height, opts.fuse_depth_rtol);
+    }
+
     let mut out = Splats::default();
     let mut weights = Vec::new();
     for (fi, cam) in cams.iter().enumerate() {
@@ -154,11 +291,11 @@ pub fn assemble(
         // validity mask - laid out like `Head::Depth`'s. Only the first was
         // ever read, so pixels the model itself reports as not-geometry became
         // gaussians anyway.
-        let gsd = gpu.read(model.head_out(Head::GsDepth, fi), 3 * hw);
+        let gsd = std::mem::take(&mut gsd_all[fi]);
         let gsp = gpu.read(model.head_out(Head::GsParams, fi), 12 * hw);
         let rgb = &frames_chw[fi * 3 * hw..(fi + 1) * 3 * hw];
         let m = &cam.c2w;
-        let depth: Vec<f32> = gsd[..hw].iter().map(|v| v.exp()).collect();
+        let depth = std::mem::take(&mut depths[fi]);
         let edge = depth_edges(&depth, width as usize, height as usize, opts.edge_depth_rtol);
         for py in 0..height as usize {
             for px in 0..width as usize {
