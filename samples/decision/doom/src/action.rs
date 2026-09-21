@@ -592,6 +592,41 @@ pub fn options(state: &State) -> Vec<Option_> {
         }
     }
 
+    // --- somewhere to go when the route has nothing ------------------------
+    //
+    // The engine reports the nearest ground nobody has looked at whether or
+    // not it can route to a goal, and when it cannot route at all that is the
+    // only navigation anything has. It was parsed and read by nothing, so on
+    // a level whose route field cannot be built the agent was handed no goal
+    // of any kind and had to find its way by clearance alone.
+    if state.exit.is_none() {
+        if let Some(f) = state.unexplored.filter(|f| f.distance > 0) {
+            let far_off = f.bearing.abs() > FACING_TOL;
+            out.push(Option_ {
+                text: if far_off {
+                    format!(
+                        "turn toward ground nobody has looked at, {} units {}",
+                        f.distance,
+                        bearing_phrase(f.bearing)
+                    )
+                } else {
+                    format!(
+                        "go to ground nobody has looked at, {} units ahead",
+                        f.distance
+                    )
+                },
+                commands: if far_off {
+                    format!("[{}]", json_turn(state.facing(f.bearing)))
+                } else {
+                    "[{\"type\":\"forward\",\"amount\":8}]".into()
+                },
+                tics: if far_off { FIGHT_TICS } else { MOVE_TICS },
+                tag: Tag::Explore,
+                room: f.clearance,
+            });
+        }
+    }
+
     // --- fall back the way you came ---------------------------------------
     //
     // Backing AWAY aims at nothing: it walks opposite whatever is in front,
@@ -1305,5 +1340,51 @@ mod fallback_tests {
         let back = opts.iter().find(|o| o.tag == Tag::Fallback).expect("a way back");
         assert!(back.commands.contains("forward"), "{}", back.commands);
         assert!(!back.commands.contains("turn-to"), "{}", back.commands);
+    }
+}
+
+#[cfg(test)]
+mod frontier_tests {
+    use super::tests::state;
+    use super::*;
+
+    /// The engine reports the nearest ground nobody has looked at whether or
+    /// not it can route anywhere, and when it cannot route at all that is the
+    /// only navigation there is. It was parsed and read by nothing, so on a
+    /// level whose route field cannot be built the agent got no goal at all
+    /// and had to find its way by clearance alone.
+    #[test]
+    fn with_no_route_the_frontier_is_still_somewhere_to_go() {
+        let s = state(
+            r#""threats":[],"hazards":[],"pickups":[],
+            "unexplored":{"distance":512,"bearing":26,"clearance":200},
+            "clearance":{"ahead":320,"right":80,"behind":80,"left":80,"aheadRight":80,"aheadLeft":80}"#,
+        );
+        let go = options(&s)
+            .into_iter()
+            .find(|o| o.tag == Tag::Explore && o.text.contains("nobody has looked at"))
+            .expect("somewhere to go");
+        // A quarter turn off the nose, so it faces first rather than walking
+        // the arc.
+        assert!(go.commands.contains("turn-to"), "{}", go.commands);
+        assert!(go.text.contains("512 units"), "{}", go.text);
+    }
+
+    /// And it is not offered alongside a real route, which already leads
+    /// there and says what it leads to.
+    #[test]
+    fn a_real_route_is_not_second_guessed() {
+        let s = state(
+            r#""threats":[],"hazards":[],"pickups":[],
+            "unexplored":{"distance":512,"bearing":26,"clearance":200},
+            "exit":{"distance":900,"bearing":30,"kind":"switch","clearance":64,
+                    "pathDistance":1200,"routeBearing":30,"routeDistance":32,
+                    "routeClearance":64,"goal":"unexplored"},
+            "clearance":{"ahead":320,"right":80,"behind":80,"left":80,"aheadRight":80,"aheadLeft":80}"#,
+        );
+        assert!(
+            !options(&s).iter().any(|o| o.text.contains("nobody has looked at,")),
+            "offered a second frontier beside the route's own"
+        );
     }
 }
