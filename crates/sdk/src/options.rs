@@ -167,6 +167,7 @@ pub struct ControlOptions {
     /// Rounds of DAgger between the warm start and the policy gradient.
     pub dagger: usize,
     /// Rounds of outcome-fitted improvement after the imitation phases.
+    pub self_imitate: usize,
     pub improve: usize,
     /// Decisions probed per improvement round.
     pub states: usize,
@@ -216,6 +217,7 @@ impl ControlOptions {
             warmup_epochs: d.warmup_epochs,
             warmup_keep: d.warmup_keep,
             dagger: d.dagger,
+            self_imitate: d.self_imitate,
             improve: d.improve,
             states: d.states,
             alternatives: d.alternatives,
@@ -246,6 +248,7 @@ impl ControlOptions {
             .warmup_epochs(self.warmup_epochs)
             .warmup_keep(self.warmup_keep)
             .dagger(self.dagger)
+            .self_imitate(self.self_imitate)
             .improve(self.improve)
             .probing(self.states, self.alternatives, self.beta, self.credit, self.repeats, self.wide)
             .gauge_episodes(self.gauge_episodes)
@@ -281,6 +284,7 @@ impl ControlOptions {
         self.warmup_episodes = args.usize_or("--warmup", self.warmup_episodes);
         self.warmup_epochs = args.usize_or("--warmup-epochs", self.warmup_epochs);
         self.dagger = args.usize_or("--dagger", self.dagger);
+        self.self_imitate = args.usize_or("--self-imitate", self.self_imitate);
         self.improve = args.usize_or("--improve", self.improve);
         self.states = args.usize_or("--states", self.states);
         self.alternatives = args.usize_or("--alternatives", self.alternatives);
@@ -342,6 +346,14 @@ impl Options for ControlOptions {
   --warmup N          scripted episodes cloned before the policy gradient
   --warmup-epochs N   passes over those demonstrations
   --warmup-keep F     fraction of scripted episodes to clone, best first  [1.0]
+  --self-imitate N    rounds of playing --episodes episodes, keeping the best
+                      --warmup-keep of everything played so far and cloning
+                      those. The improvement operator whose signal is the
+                      EPISODE: measured here, a policy's own episodes on the
+                      same worlds score 0.20 to 1.20, where the gap between
+                      the best and worst action at one decision is 0.027 and
+                      the noise on measuring it is about the same. It ratchets
+                      because the kept set only ever improves
   --improve N         rounds of probing what a DIFFERENT action was worth and
                       moving toward whichever actually scored better. The only
                       phase whose ceiling is not the teacher: cloning and

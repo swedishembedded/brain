@@ -216,12 +216,20 @@ struct Branch {
     /// What the trajectory scored, taking this action here and playing the
     /// roll-out out - averaged over the roll-outs if there was more than one.
     score: f32,
-    /// How far apart those roll-outs were, best to worst. The share of a
-    /// candidate's score that is the PATH rather than the action, and the
-    /// number that says whether a measured margin between two candidates
-    /// means anything: a margin smaller than this is inside the noise of the
-    /// thing measuring it. Zero with a single roll-out, which is the case
-    /// where nothing here can tell.
+    /// How far apart roll-outs of the SAME candidate under the SAME roll-out
+    /// policy landed, best to worst.
+    ///
+    /// The share of a candidate's score that is the path rather than the
+    /// action, and the number that says whether a measured margin between two
+    /// candidates means anything: a margin smaller than this is inside the
+    /// noise of the thing measuring it.
+    ///
+    /// Within a roll-out policy, never across. A teacher continuation and a
+    /// policy continuation differ systematically - the teacher is better -
+    /// so comparing one of each would report that difference as noise and
+    /// would do it most loudly exactly where the teacher is most worth
+    /// beating. Zero unless some roll-out policy was run at least twice,
+    /// which is the honest answer when nothing here can tell.
     noise: f32,
     /// Game steps it cost to find out.
     steps: usize,
@@ -1855,7 +1863,9 @@ impl<E: Env> ControlPipeline<E> {
         for (i, &c) in candidates.iter().enumerate() {
             let mut total = 0.0f64;
             let mut steps_all = 0usize;
-            let (mut hi, mut lo) = (f32::NEG_INFINITY, f32::INFINITY);
+            // Kept apart by which policy rolled it out, so the spread within
+            // each can be read without the other contaminating it.
+            let mut by_rollout: [Vec<f32>; 2] = [Vec::new(), Vec::new()];
             for (r, &use_reference) in reference_rollout.iter().enumerate() {
             // Not before the very first roll-out: the environment is already
             // standing where `hold` was called, and resuming onto it would
@@ -1951,8 +1961,7 @@ impl<E: Env> ControlPipeline<E> {
                 return Ok(None);
             };
             total += score as f64;
-            hi = hi.max(score);
-            lo = lo.min(score);
+            by_rollout[usize::from(use_reference)].push(score);
             steps_all += steps;
             }
             // Averaged over the roll-outs, which is the whole point of having
@@ -1960,9 +1969,17 @@ impl<E: Env> ControlPipeline<E> {
             // episode is one draw of a system where any decision changes
             // everything after it, and its ordering of the candidates is
             // partly a fact about that path rather than about this state.
+            let noise = by_rollout
+                .iter()
+                .filter(|g| g.len() > 1)
+                .map(|g| {
+                    g.iter().copied().fold(f32::NEG_INFINITY, f32::max)
+                        - g.iter().copied().fold(f32::INFINITY, f32::min)
+                })
+                .fold(0.0f32, f32::max);
             out.push(Branch {
                 score: (total / reference_rollout.len().max(1) as f64) as f32,
-                noise: if reference_rollout.len() > 1 { hi - lo } else { 0.0 },
+                noise,
                 steps: steps_all,
             });
         }
@@ -1975,6 +1992,128 @@ impl<E: Env> ControlPipeline<E> {
             return Ok(None);
         }
         Ok(Some((out, candidates)))
+    }
+
+    /// Rounds of: play, keep the episodes that actually scored best, and
+    /// clone those.
+    ///
+    /// The cheapest improvement OPERATOR this environment admits, and the one
+    /// whose signal is largest. A policy's own episodes on the same worlds
+    /// score anywhere from 0.20 to 1.20 here; the gap between the best and
+    /// worst ACTION at a single decision is 0.027, against a re-run noise of
+    /// about the same. Credit assignment at the episode is working with a
+    /// signal some thirty times larger than credit assignment at the
+    /// decision, for a tenth of the game steps - no snapshots, no branches,
+    /// no cost-to-go estimate to be wrong about.
+    ///
+    /// It ratchets because the elite set only ever improves: each round adds
+    /// its own episodes, re-sorts, and keeps the best of everything seen. The
+    /// policy is therefore always being fitted to behaviour better than its
+    /// own average, which is the one property that makes a loop like this
+    /// climb rather than drift. It is bounded above by the best the policy
+    /// can stumble into, so exploration is what eventually limits it - not
+    /// the teacher, which is what makes this the first phase here whose
+    /// ceiling is not the teacher AND whose signal is not inside its own
+    /// noise.
+    ///
+    /// Scored on [`Env::progress`] rather than on return, so that what an
+    /// episode is KEPT for is exactly what the run is judged on.
+    fn self_imitate(
+        &mut self,
+        spec: &ControlSpec,
+        log: &mut dyn FnMut(usize, f32),
+        step: &mut usize,
+    ) -> Result<()> {
+        let entered = self.gauge(spec.gauge_episodes, spec.max_steps)?;
+        let mut keep_best =
+            Keep::starting(entered.unwrap_or(f32::NEG_INFINITY), self.model.head_weights());
+        let mut before = entered;
+        // The best episodes seen by ANY round, bounded to one round's worth.
+        // Bounded because an unbounded elite set is mostly old episodes from
+        // a worse policy, and re-sorted every round because that is what
+        // makes the set monotone.
+        let mut elite: Vec<TeacherRun> = Vec::new();
+        for round in 0..spec.self_imitate {
+            let mut fresh: Vec<TeacherRun> = Vec::new();
+            for _ in 0..spec.episodes {
+                self.episode_seed += 1;
+                let mut obs = self.env.reset(self.episode_seed);
+                let mut demos = Vec::new();
+                for _ in 0..spec.max_steps {
+                    let options = self.env.actions();
+                    if options.is_empty() {
+                        break;
+                    }
+                    let probs = self.policy(&obs, &options)?;
+                    // SAMPLED. The exploration this phase lives on is the
+                    // policy's own spread over the options: a greedy rollout
+                    // would produce one trajectory per world and there would
+                    // be no best of anything to keep.
+                    let mut u = self.rng.next_f32();
+                    let mut chosen = probs.len() - 1;
+                    for (i, &pi) in probs.iter().enumerate() {
+                        if u < pi {
+                            chosen = i;
+                            break;
+                        }
+                        u -= pi;
+                    }
+                    demos.push((obs.clone(), options, chosen));
+                    let (next, _, done) = self.env.step(chosen);
+                    obs = next;
+                    if done {
+                        break;
+                    }
+                }
+                let Some(scored) = self.env.progress() else {
+                    println!("    self-imitation: the environment does not score an episode");
+                    return Ok(());
+                };
+                fresh.push((scored, demos));
+            }
+            let played: Vec<f32> = fresh.iter().map(|r| r.0).collect();
+            let mean = played.iter().sum::<f32>() / played.len().max(1) as f32;
+            let best = played.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+
+            elite.extend(fresh);
+            elite.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+            let room = ((spec.episodes as f32 * spec.warmup_keep).round() as usize)
+                .clamp(1, elite.len());
+            elite.truncate(room);
+            let bar = elite.last().map(|r| r.0).unwrap_or(0.0);
+
+            let demos: Vec<Demo> = elite.iter().flat_map(|r| r.1.iter().cloned()).collect();
+            let loss = self.fit_demos(&demos, spec.warmup_epochs, log, step)?;
+            let after = self.gauge(spec.gauge_episodes, spec.max_steps)?;
+            println!(
+                "    self-imitate {:>2}  played {} episodes (mean {mean:.2}, best {best:.2})  \
+                 kept {} of them, none below {bar:.2}  {} decisions cloned  loss {loss:.4}{}",
+                round + 1,
+                spec.episodes,
+                elite.len(),
+                demos.len(),
+                match (before, after) {
+                    (Some(b), Some(a)) => format!("  fixed block {b:.3} -> {a:.3}"),
+                    _ => String::new(),
+                }
+            );
+            keep_best.offer(round + 1, after.unwrap_or(-loss), || self.model.head_weights());
+            before = after;
+        }
+        let (round, w) = keep_best.best();
+        if round != spec.self_imitate {
+            println!(
+                "    keeping {}, which scored {:.3}",
+                match round {
+                    0 => "the policy the imitation phases produced".to_string(),
+                    n => format!("self-imitation round {n}"),
+                },
+                keep_best.rank
+            );
+            let w = w.to_vec();
+            self.model.set_head_weights(&w);
+        }
+        Ok(())
     }
 
     /// How much of the policy's belief sits on the candidate that actually
@@ -2345,6 +2484,14 @@ pub struct ControlSpec {
     /// clone_teacher`]. Lower it when the teacher has failure modes worth not
     /// teaching.
     pub warmup_keep: f32,
+    /// Rounds of playing, keeping the best episodes and cloning those. `0`
+    /// is off.
+    ///
+    /// See [`ControlPipeline::self_imitate`]. The improvement operator whose
+    /// signal is the episode rather than the decision, which on this sample
+    /// is some thirty times larger and an order of magnitude cheaper to
+    /// collect.
+    pub self_imitate: usize,
     /// Rounds of outcome-fitted improvement after the imitation phases. `0`
     /// is off.
     ///
@@ -2474,6 +2621,7 @@ impl Default for ControlSpec {
             improve: 0,
             states: 200,
             alternatives: 2,
+            self_imitate: 0,
             beta: 0.5,
             credit: 0,
             repeats: 1,
@@ -2545,6 +2693,12 @@ impl ControlSpec {
         self.credit = credit;
         self.repeats = repeats;
         self.wide = wide;
+        self
+    }
+
+    /// Rounds of playing, keeping the best episodes and cloning those.
+    pub fn self_imitate(mut self, n: usize) -> ControlSpec {
+        self.self_imitate = n;
         self
     }
 
@@ -2645,6 +2799,13 @@ impl<E: Env> Stages for ControlPipeline<E> {
                 spec.dagger, spec.episodes
             );
             self.dagger(spec, log, &mut step)?;
+        }
+        if spec.self_imitate > 0 {
+            println!(
+                "    {} rounds of playing {} episodes and cloning the best of them",
+                spec.self_imitate, spec.episodes
+            );
+            self.self_imitate(spec, log, &mut step)?;
         }
         if spec.improve > 0 {
             println!(
