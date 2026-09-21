@@ -663,6 +663,20 @@ impl DoomEnv {
     /// the agent was actually shown.
     fn remember(&mut self) {
         self.memory.observe(&self.state);
+        // And ask the engine the way back to each of them, so that "go back
+        // for the medikit you saw" is a walk round the corner rather than a
+        // heading into the wall the corner is made of. A failed call leaves
+        // every path `None`, which is the straight-line behaviour and not a
+        // wrong route.
+        let goals = self.memory.goals();
+        let places: Vec<(f64, f64)> = goals.iter().map(|(_, x, y)| (*x, *y)).collect();
+        let paths = self.doom.route_to(&places).unwrap_or_default();
+        let answered: Vec<(i64, Option<crate::memory::Path>)> = goals
+            .iter()
+            .enumerate()
+            .map(|(i, (id, _, _))| (*id, paths.get(i).copied().flatten()))
+            .collect();
+        self.memory.routed(&answered);
         self.state.recalled = self.memory.recall(&self.state);
         self.state.wounded = self.memory.wounded();
     }

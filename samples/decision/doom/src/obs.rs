@@ -830,6 +830,7 @@ mod tests {
                 distance: 220,
                 health: None,
                 ago: 3,
+                path: None,
             },
             crate::memory::Recalled {
                 id: 9,
@@ -839,6 +840,7 @@ mod tests {
                 distance: 340,
                 health: Some(12),
                 ago: 2,
+                path: None,
             },
         ];
         let text = render(&s, History::default());

@@ -267,35 +267,44 @@ pub fn options(state: &State) -> Vec<Option_> {
     // stops looking at it. Items only - a monster has moved since, and
     // "go to where it was" is an invitation to walk into where it is not.
     //
-    // Only when there is floor that way. The option walks a STRAIGHT LINE at
-    // where the thing was, and a remembered medikit two rooms away through a
-    // wall turns "go back for it" into "walk at that wall" - measured on
-    // health-gathering-supreme, where offering it unguarded cost the scripted
-    // player three extra deaths in twenty-four episodes. The route is what
-    // knows the way round corners, and it does not yet take a remembered
-    // thing as a goal.
+    // Routed when the engine could find a way there, which is the difference
+    // between going back for something and walking at the wall between here
+    // and it. A route is a path over ground the player can walk, so it needs
+    // no clearance gate - the same reasoning as `route_usable`, and for the
+    // same reason: the straight ray is shortest exactly at the corner where
+    // the route is most worth following.
+    //
+    // Without one there is only the straight line, and that one IS gated:
+    // measured on health-gathering-supreme, offering it unguarded cost the
+    // scripted player three extra deaths in twenty-four episodes.
     for r in state
         .recalled
         .iter()
         .filter(|r| r.class != crate::memory::Class::Threat)
-        .filter(|r| c.toward(r.bearing) >= r.distance.min(300))
+        .filter(|r| r.path.is_some() || c.toward(r.bearing) >= r.distance.min(300))
         .take(2)
     {
+        let (bearing, room, leg, walk) = match r.path {
+            // As far as the next waypoint, not the whole way: the bearing
+            // points a few cells along and the path turns after that.
+            Some(p) => (p.bearing, p.clearance, p.step.max(1), format!(", {} units of walking", p.distance)),
+            None => (r.bearing, r.distance, r.distance, String::new()),
+        };
         out.push(Option_ {
             text: format!(
-                "go back for the {} you saw, {} units {}",
+                "go back for the {} you saw, {} units {}{walk}",
                 r.kind.to_lowercase(),
                 r.distance,
                 bearing_phrase(r.bearing)
             ),
             commands: format!(
                 "[{},{{\"type\":\"forward\",\"amount\":{}}}]",
-                json_turn(state.facing(r.bearing)),
-                walk_tics(r.distance)
+                json_turn(state.facing(bearing)),
+                walk_tics(leg)
             ),
-            tics: walk_tics(r.distance),
+            tics: walk_tics(leg),
             tag: Tag::Grab,
-            room: r.distance,
+            room,
         });
     }
 
@@ -786,6 +795,61 @@ mod tests {
 
     const NOTHING: &str = r#""threats":[],"hazards":[],"pickups":[],
         "clearance":{"ahead":0,"right":0,"behind":0,"left":0,"aheadRight":0,"aheadLeft":0}"#;
+
+    /// A medikit behind the wall in front of you.
+    ///
+    /// The straight line to it is 180 degrees off the nose and there is no
+    /// floor that way. A player who walked past it knows the way back is out
+    /// through the door on the left, and so does the route.
+    fn recalled_round_a_corner(path: Option<crate::memory::Path>) -> State {
+        let mut s = state(NOTHING);
+        s.recalled = vec![crate::memory::Recalled {
+            id: 7,
+            kind: "Medikit".into(),
+            class: crate::memory::Class::Pickup,
+            bearing: 180,
+            distance: 220,
+            health: None,
+            ago: 3,
+            path,
+        }];
+        s
+    }
+
+    /// The gap this closes: with no way to ask for a route, going back for
+    /// something was a straight line at where it was, so it had to be
+    /// withheld wherever a wall stood in the way - which is most of a level,
+    /// and is why items were only ever collected by walking into them.
+    #[test]
+    fn going_back_for_a_remembered_thing_follows_the_route_and_not_the_wall() {
+        let unrouted = options(&recalled_round_a_corner(None));
+        assert!(
+            !unrouted.iter().any(|o| o.text.contains("go back for")),
+            "a straight line into a wall was offered as a way back"
+        );
+
+        let routed = options(&recalled_round_a_corner(Some(crate::memory::Path {
+            bearing: -90,
+            distance: 480,
+            clearance: 256,
+            step: 128,
+        })));
+        let back = routed
+            .iter()
+            .find(|o| o.text.contains("go back for"))
+            .expect("a way back, now that there is one");
+        // Turned onto the ROUTE - 90 + (-90) - and not onto the straight line
+        // at 180 + 90, which is the wall.
+        assert!(back.commands.contains("\"angle\":0"), "{}", back.commands);
+        // It still says where the thing is, because that is what the player
+        // is going back FOR, and it now also says what the trip costs.
+        assert!(back.text.contains("220 units"), "{}", back.text);
+        assert!(back.text.contains("480 units of walking"), "{}", back.text);
+        // And the walk is the first leg, not the whole path: the route turns
+        // after the waypoint and walking 480 units on this heading walks
+        // through the turn.
+        assert_eq!(back.tics, walk_tics(128));
+    }
 
     #[test]
     fn the_list_is_never_empty_even_walled_in() {

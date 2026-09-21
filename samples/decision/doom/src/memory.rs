@@ -69,6 +69,28 @@ impl Class {
     }
 }
 
+/// The walk to a remembered thing, round whatever is between here and there.
+///
+/// A bearing and a distance again, so nothing about the map reaches a policy -
+/// but they are the bearing to set off on and the length of the WALK, which in
+/// a corridor is a different direction and a longer way than the straight line
+/// to the same place.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Path {
+    pub bearing: i32,
+    /// How far the walk is. Longer than the straight line whenever there are
+    /// corners in it, and that difference is what decides whether going back
+    /// is worth the trip.
+    pub distance: i32,
+    /// Open floor that way, so an option can say whether setting off is a
+    /// step or a wall.
+    pub clearance: i32,
+    /// How far the FIRST leg is. The bearing points at a waypoint a few cells
+    /// along rather than at the far end, so walking the whole path on this
+    /// heading walks past the corner it turns at.
+    pub step: i32,
+}
+
 /// Something out of sight, placed from where the player is standing now.
 #[derive(Clone, Debug)]
 pub struct Recalled {
@@ -82,6 +104,9 @@ pub struct Recalled {
     pub health: Option<i32>,
     /// Decisions since it was last seen.
     pub ago: u32,
+    /// The way back to it, when someone has asked the engine. `None` when
+    /// nobody asked, or when there is no walkable way there.
+    pub path: Option<Path>,
 }
 
 #[derive(Clone, Debug)]
@@ -97,6 +122,7 @@ struct Held {
     /// two identical sergeants they have been fighting.
     best_health: Option<i32>,
     ago: u32,
+    path: Option<Path>,
 }
 
 #[derive(Clone, Default)]
@@ -187,6 +213,7 @@ impl Memory {
             health: t.health,
             best_health: t.health,
             ago: 0,
+            path: None,
         });
     }
 
@@ -207,6 +234,33 @@ impl Memory {
                 None => true,
             }
         });
+    }
+
+    /// Where the things worth walking back to are, in map units, for whoever
+    /// can ask the engine the way.
+    ///
+    /// The only place coordinates leave this module, and they go to the
+    /// ENGINE rather than into an observation. A policy told where it is on
+    /// the map would be memorising a map, which is the one thing the
+    /// generated levels exist to make worthless.
+    ///
+    /// Only things that stay put: a monster has moved since, so the way to
+    /// where it was is the way to where it is not.
+    pub fn goals(&self) -> Vec<(i64, f64, f64)> {
+        self.held
+            .iter()
+            .filter(|h| h.ago > 0 && h.class.stays_put())
+            .map(|h| (h.id, h.x, h.y))
+            .collect()
+    }
+
+    /// Fold the answers back in, by id. Anything not answered for loses
+    /// whatever path it had, because a route computed from somewhere the
+    /// player is no longer standing is worse than none.
+    pub fn routed(&mut self, paths: &[(i64, Option<Path>)]) {
+        for h in self.held.iter_mut() {
+            h.path = paths.iter().find(|(id, _)| *id == h.id).and_then(|(_, p)| *p);
+        }
     }
 
     /// Everything seen this episode that is now carrying less health than the
@@ -248,6 +302,7 @@ impl Memory {
                     distance,
                     health: h.health,
                     ago: h.ago,
+                    path: h.path,
                 })
             })
             .collect();
@@ -268,7 +323,7 @@ mod tests {
         State::parse(&build(0, 0, 0, r#""pickups":[{"id":7,"type":"Medikit","distance":200,"bearing":0,"visible":true}],"threats":[{"id":9,"type":"FORMER HUMAN SERGEANT","distance":300,"bearing":-90,"visible":true,"health":30,"targetingMe":false}],"hazards":[]"#)).unwrap()
     }
 
-    fn build(x: i32, y: i32, angle: i32, things: &str) -> String {
+    pub fn build(x: i32, y: i32, angle: i32, things: &str) -> String {
         format!(
             r#"{{"tic":1,"episodeTic":1,
             "level":{{"episode":1,"map":1,"skill":2,"tic":1,"kills":0,"totalKills":0,
@@ -282,7 +337,7 @@ mod tests {
         )
     }
 
-    const NOTHING: &str = r#""pickups":[],"threats":[],"hazards":[]"#;
+    pub const NOTHING: &str = r#""pickups":[],"threats":[],"hazards":[]"#;
 
     #[test]
     fn what_was_seen_is_still_there_after_turning_away_from_it() {
@@ -429,5 +484,62 @@ mod tests {
         let blind = State::parse(&build(0, 0, 0, NOTHING)).unwrap();
         m.observe(&blind);
         assert!(m.recall(&blind).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+
+    fn seen_then_turned_away() -> Memory {
+        let mut m = Memory::new();
+        m.observe(&State::parse(&super::tests::build(
+            0,
+            0,
+            0,
+            r#""pickups":[{"id":7,"type":"Medikit","distance":200,"bearing":0,"visible":true}],"threats":[{"id":9,"type":"IMP","distance":300,"bearing":0,"visible":true,"health":60,"targetingMe":false}],"hazards":[]"#,
+        )).unwrap());
+        m.observe(&State::parse(&super::tests::build(0, 0, 180, super::tests::NOTHING)).unwrap());
+        m
+    }
+
+    /// The engine has to be asked the way to a place, so the place has to
+    /// leave here. Items only: the way to where a monster was is the way to
+    /// where it is not.
+    #[test]
+    fn the_things_worth_walking_back_to_are_offered_for_routing() {
+        let m = seen_then_turned_away();
+        let goals = m.goals();
+        assert_eq!(goals.len(), 1, "expected the medikit and only the medikit");
+        assert_eq!(goals[0].0, 7);
+        assert!((goals[0].1 - 200.0).abs() < 1.0, "the medikit was 200 units east");
+    }
+
+    /// The answer comes back on the recalled thing, beside the straight line
+    /// to it, so an option can offer the walk instead of the wall.
+    #[test]
+    fn a_route_answered_for_reaches_the_recalled_thing() {
+        let mut m = seen_then_turned_away();
+        m.routed(&[(7, Some(Path { bearing: -40, distance: 330, clearance: 256, step: 128 }))]);
+        let state = State::parse(&super::tests::build(0, 0, 180, super::tests::NOTHING)).unwrap();
+        let r = m.recall(&state);
+        let kit = r.iter().find(|r| r.id == 7).expect("the medikit is remembered");
+        assert_eq!(kit.path, Some(Path { bearing: -40, distance: 330, clearance: 256, step: 128 }));
+        // And the straight line is still there and still different: 180 off
+        // the nose at 200 units, against a 330-unit walk starting 40 to the
+        // left. Offering only one of the two would be losing information.
+        assert_eq!(kit.distance, 200);
+    }
+
+    /// A stale route is worse than none: it is a heading, and a heading
+    /// computed from somewhere the player is no longer standing points
+    /// somewhere they never wanted to go.
+    #[test]
+    fn a_thing_not_answered_for_loses_the_route_it_had() {
+        let mut m = seen_then_turned_away();
+        m.routed(&[(7, Some(Path { bearing: -40, distance: 330, clearance: 256, step: 128 }))]);
+        m.routed(&[]);
+        let state = State::parse(&super::tests::build(0, 0, 180, super::tests::NOTHING)).unwrap();
+        assert_eq!(m.recall(&state).iter().find(|r| r.id == 7).unwrap().path, None);
     }
 }

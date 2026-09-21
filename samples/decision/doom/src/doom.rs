@@ -26,6 +26,7 @@ use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
+use crate::memory::Path;
 
 /// Where the two things this sample cannot ship live on THIS machine.
 #[derive(Clone, Debug)]
@@ -344,6 +345,46 @@ impl Doom {
     /// player is making progress.
     pub fn route(&mut self) -> std::io::Result<String> {
         self.call("GET", "/api/route", None)
+    }
+
+    /// The way to each of these places, round whatever is between here and
+    /// there, in the order they were asked about.
+    ///
+    /// The level's own route answers "which way onward" and nothing else, so
+    /// going back for something seen and walked past could only ever be a
+    /// straight line at where it was - a heading into the wall between here
+    /// and there, in anything but an open room.
+    ///
+    /// One call for all of them: this is on the path of every decision that
+    /// remembers anything, and four round trips per decision is four times
+    /// the latency of one.
+    pub fn route_to(&mut self, places: &[(f64, f64)]) -> std::io::Result<Vec<Option<Path>>> {
+        if places.is_empty() {
+            return Ok(Vec::new());
+        }
+        let to: Vec<String> = places
+            .iter()
+            .map(|(x, y)| format!("{{\"x\":{x:.0},\"y\":{y:.0}}}"))
+            .collect();
+        let body = format!("{{\"to\":[{}]}}", to.join(","));
+        let reply = self.call("POST", "/api/route", Some(&body))?;
+        let v: serde_json::Value = serde_json::from_str(&reply)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+        Ok(v["routes"]
+            .as_array()
+            .map(|rows| {
+                rows.iter()
+                    .map(|r| {
+                        r["reachable"].as_bool().unwrap_or(false).then(|| Path {
+                            bearing: r["bearing"].as_i64().unwrap_or(0) as i32,
+                            distance: r["pathDistance"].as_i64().unwrap_or(0) as i32,
+                            clearance: r["clearance"].as_i64().unwrap_or(0) as i32,
+                            step: r["stepDistance"].as_i64().unwrap_or(0) as i32,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default())
     }
 
     /// Hold the state the level is in right now, to come back to.
