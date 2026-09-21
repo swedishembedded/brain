@@ -991,6 +991,9 @@ pub struct Rollout {
 }
 
 pub struct ControlPipeline<E: Env> {
+    /// Whether this pipeline began from trained weights rather than from
+    /// nothing. See the warm start in `run_train`.
+    started_from_head: bool,
     /// The cells the search has reached in the world it is exploring, the
     /// slot holding each, and the next free slot. Carried between rounds:
     /// see `explore`, where rebuilding it every round was the difference
@@ -3884,7 +3887,27 @@ impl<E: Env> Stages for ControlPipeline<E> {
         // The estimator runs inside an episode, which never sees the spec.
         self.gae_lambda = spec.gae_lambda;
         self.gamma = spec.policy.gamma;
-        if spec.warmup_episodes > 0 {
+        // A WARM START IS A START.
+        //
+        // Cloning the teacher is how a policy gets off the ground when it has
+        // nothing: sampling a good action out of a text action space takes
+        // longer than any budget here allows. It is not how a policy that
+        // already plays gets better, and doing it anyway undoes the run
+        // before it.
+        //
+        // A generation that loads the last one's weights and then clones the
+        // teacher again is pulled back toward a player that has never
+        // finished a level. The improvement is thrown away at the start of
+        // every generation and the whole sequence is capped at the teacher,
+        // which is the one thing this loop exists to get past.
+        let continuing = self.started_from_head;
+        if continuing && spec.warmup_episodes > 0 {
+            println!(
+                "    no warm start: continuing from weights that already play. \
+                 Cloning the teacher again would undo them"
+            );
+        }
+        if spec.warmup_episodes > 0 && !continuing {
             let bc = self.clone_teacher(
                 spec.warmup_episodes,
                 spec.warmup_epochs,
@@ -4221,6 +4244,7 @@ impl<E: Env> ControlPipelineBuilder<E> {
         let cfg_width = model.cfg.d_model as usize;
         Ok(ControlPipeline {
             explored: None,
+            started_from_head: self.head.is_some(),
             model,
             env: self.env,
             rng: data::rng::Rng::new(self.seed ^ 0xc0ffee),
