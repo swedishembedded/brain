@@ -179,6 +179,10 @@ what to play
                       invisible to an advantage estimator whose half-life is
                       eleven decisions
   --mission clear|speedrun|survive      [clear]
+  --engine-window     open the game's own window and play in it, with the
+                      observation the model read and the option it chose drawn
+                      over the frame. Costs the blit and the present, so it is
+                      for watching a run rather than for training in
   --full-map          give the route the WHOLE level instead of only the part
                       the player has seen. A control, not a way to play: it
                       hands the agent a solved map of rooms nobody has been in
@@ -265,7 +269,7 @@ fn parse_args() -> Result<Args, String> {
         episode: args.u32_or("--episode", 1),
         map: args.u32_or("--map", 1),
         skill: args.u32_or("--skill", 2),
-        engine_window: false,
+        engine_window: args.take_flag("--engine-window"),
         scenario: None,
         full_map: args.take_flag("--full-map"),
     };

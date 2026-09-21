@@ -1367,7 +1367,11 @@ impl DoomEnv {
                     .state
                     .recalled
                     .iter()
-                    .any(|r| r.class != crate::memory::Class::Threat && r.distance < d * 3)
+                    .any(|r| {
+                        r.class != crate::memory::Class::Threat
+                            && r.distance < d * 3
+                            && self.state.worth_taking_kind(&r.kind)
+                    })
         };
 
         // Standing in slime: anywhere else will do, and the exit route is
