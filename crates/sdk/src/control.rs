@@ -707,6 +707,43 @@ fn mean_of(
     acc
 }
 
+/// One roll-out a branch runs: which candidate it tries, and under what.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Trial {
+    /// The action being tried - an index into the decision's options.
+    candidate: usize,
+    /// Where that action sits in the branch's candidate list, so a caller can
+    /// accumulate by candidate. Nothing a trial is measured UNDER may depend
+    /// on it.
+    at: usize,
+    /// Which repeat of this candidate this is. It is also the draw stream:
+    /// every candidate's repeat `r` is rolled out against the same numbers,
+    /// which is what makes the DIFFERENCE between two of them readable.
+    repeat: usize,
+    /// Rolled out by the reference policy rather than by the learner.
+    reference: bool,
+    /// Put the held state back before this trial runs, and check that it
+    /// arrived.
+    restore: bool,
+}
+
+/// Every roll-out a branch has to run, in the order it runs them.
+///
+/// One rule, and it is the whole reason this is a function rather than two
+/// nested loops: what a candidate is measured under may not depend on where
+/// in the list it sits. Same draws, same roll-out policy, same restored and
+/// checked starting state, in whatever order the candidates were assembled -
+/// so reordering them reorders the work and changes no number.
+fn branch_plan(candidates: &[usize], reference_rollout: &[bool]) -> Vec<Trial> {
+    let mut plan = Vec::with_capacity(candidates.len() * reference_rollout.len());
+    for (at, &candidate) in candidates.iter().enumerate() {
+        for (repeat, &reference) in reference_rollout.iter().enumerate() {
+            plan.push(Trial { candidate, at, repeat, reference, restore: true });
+        }
+    }
+    plan
+}
+
 /// How well the policy reproduces the teacher on states the teacher reaches.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Agreement {
@@ -2211,7 +2248,6 @@ impl<E: Env> ControlPipeline<E> {
         // worlds and the probe is not measuring one lucky stream.
         let stream = self.rng.next_u64();
         let outer_rng = self.rng.clone();
-        let mut out = Vec::with_capacity(candidates.len());
         // One draw for the WHOLE state, not one per candidate. LOLS draws per
         // candidate, which is unbiased in expectation over many examples; at
         // one roll-out each it would mean candidate A is scored under the
@@ -2231,46 +2267,84 @@ impl<E: Env> ControlPipeline<E> {
         } else {
             (0..k).map(|r| (r as f32) < k as f32 * spec.beta).collect()
         };
-        for (i, &c) in candidates.iter().enumerate() {
-            let mut total = 0.0f64;
-            let mut steps_all = 0usize;
-            // Kept apart by which policy rolled it out, so the spread within
-            // each can be read without the other contaminating it.
-            let mut by_rollout: [Vec<f32>; 2] = [Vec::new(), Vec::new()];
-            for (r, &use_reference) in reference_rollout.iter().enumerate() {
+        // HYPOTHETICAL, all of it: these roll-outs ask what WOULD have
+        // happened. An environment that let any of it into what it carries
+        // between episodes would be taught by decisions nobody took, and by
+        // each of them once per candidate and once per repeat.
+        let rolled = self.measuring(|p| {
+            p.branch_rollouts(options, &candidates, &reference_rollout, stream, horizon, at, spend)
+        })?;
+        // The episode's own stream, picked up where the probe interrupted it.
+        self.rng = outer_rng;
+        // And back to where the student was, so the episode it is in the
+        // middle of carries on as if none of this had happened - including
+        // when the roll-outs were ABANDONED half way, which used to return
+        // from here directly and leave the training episode standing wherever
+        // the abandoned roll-out had got to, reading an observation from the
+        // branch point and drawing from the branch's stream.
+        let mark = std::time::Instant::now();
+        let back = self.env.resume();
+        spend.resuming += mark.elapsed();
+        if back.is_none() {
+            return Ok(None);
+        }
+        Ok(rolled.map(|scored| (scored, candidates)))
+    }
+
+    /// Run every trial [`branch_plan`] asks for and score the candidates.
+    ///
+    /// Separate from [`Self::branch`] so that all of it - including the paths
+    /// that give up half way, which is what a probe does whenever the
+    /// environment cannot go back - runs inside one measuring scope.
+    #[allow(clippy::too_many_arguments)]
+    fn branch_rollouts(
+        &mut self,
+        options: &[String],
+        candidates: &[usize],
+        reference_rollout: &[bool],
+        stream: u64,
+        horizon: usize,
+        at: usize,
+        spend: &mut Spend,
+    ) -> Result<Option<Vec<Branch>>> {
+        let mut total = vec![0.0f64; candidates.len()];
+        let mut steps_all = vec![0usize; candidates.len()];
+        // Kept apart by which policy rolled it out, so the spread within each
+        // can be read without the other contaminating it.
+        let mut by_rollout: Vec<[Vec<f32>; 2]> =
+            (0..candidates.len()).map(|_| [Vec::new(), Vec::new()]).collect();
+        for trial in branch_plan(candidates, reference_rollout) {
             // The same draws for every candidate, and a different set per
             // repeat so that repeats still measure something.
-            self.rng = data::rng::Rng::new(stream ^ ((r as u64 + 1) << 32));
-            // Not before the very first roll-out: the environment is already
-            // standing where `hold` was called, and resuming onto it would
-            // cost a level reload for nothing.
-            if i > 0 || r > 0 {
-                let mark = std::time::Instant::now();
-                let back = self.env.resume();
-                spend.resuming += mark.elapsed();
-                if back.is_none() {
-                    return Ok(None);
-                }
-                // Going back has to arrive where it left, and the options on
-                // offer are the cheapest thing that says so - they are
-                // derived from most of the state an observation reads. This
-                // check is the reason the method is trustworthy: with the
-                // actions-replayed version it failed three times in ten, and
-                // silently comparing two candidates evaluated from different
-                // states is exactly the kind of wrong that looks like a
-                // result.
-                if self.env.actions() != options {
-                    return Ok(None);
-                }
+            self.rng = data::rng::Rng::new(stream ^ ((trial.repeat as u64 + 1) << 32));
+            // Every trial, the first one included. The environment is already
+            // standing where `hold` was called when the first one starts, so
+            // this looks like an engine call for nothing - but restoring is
+            // the thing the whole method rests on rather than a free identity,
+            // and the check below is how it is known to have worked.
+            let mark = std::time::Instant::now();
+            let back = self.env.resume();
+            spend.resuming += mark.elapsed();
+            if back.is_none() {
+                return Ok(None);
+            }
+            // Going back has to arrive where it left, and the options on
+            // offer are the cheapest thing that says so - they are derived
+            // from most of the state an observation reads. This check is the
+            // reason the method is trustworthy: with the actions-replayed
+            // version it failed three times in ten, and silently comparing
+            // two candidates evaluated from different states is exactly the
+            // kind of wrong that looks like a result.
+            if self.env.actions() != options {
+                return Ok(None);
             }
             let mark = std::time::Instant::now();
-            let (mut obs, _, mut done) = self.env.step(c);
+            let (mut obs, _, mut done) = self.env.step(trial.candidate);
             spend.stepping += mark.elapsed();
             let mut steps = 1usize;
             let mut t = at + 1;
             // The roll-out: the reference to the end of the window, or the
-            // policy to the end of it, chosen once above with probability
-            // `--beta`.
+            // policy to the end of it, chosen with probability `--beta`.
             //
             // LOLS Table 1 is what this implements. Rolling out with the
             // reference alone leaves the learner blind to its own compounding
@@ -2287,7 +2361,7 @@ impl<E: Env> ControlPipeline<E> {
                 if options.is_empty() {
                     break;
                 }
-                let action = if use_reference {
+                let action = if trial.reference {
                     match self.env.demo() {
                         Some(a) => a,
                         None => break,
@@ -2334,40 +2408,33 @@ impl<E: Env> ControlPipeline<E> {
             let Some(score) = scored else {
                 return Ok(None);
             };
-            total += score as f64;
-            by_rollout[usize::from(use_reference)].push(score);
-            steps_all += steps;
-            }
-            // Averaged over the roll-outs, which is the whole point of having
-            // more than one: a single roll-out of a four-hundred-decision
-            // episode is one draw of a system where any decision changes
-            // everything after it, and its ordering of the candidates is
-            // partly a fact about that path rather than about this state.
-            let noise = by_rollout
-                .iter()
-                .filter(|g| g.len() > 1)
-                .map(|g| {
-                    g.iter().copied().fold(f32::NEG_INFINITY, f32::max)
-                        - g.iter().copied().fold(f32::INFINITY, f32::min)
+            total[trial.at] += score as f64;
+            by_rollout[trial.at][usize::from(trial.reference)].push(score);
+            steps_all[trial.at] += steps;
+        }
+        let repeats = reference_rollout.len().max(1) as f64;
+        Ok(Some(
+            (0..candidates.len())
+                .map(|i| Branch {
+                    // Averaged over the roll-outs, which is the whole point of
+                    // having more than one: a single roll-out of a
+                    // four-hundred-decision episode is one draw of a system
+                    // where any decision changes everything after it, and its
+                    // ordering of the candidates is partly a fact about that
+                    // path rather than about this state.
+                    score: (total[i] / repeats) as f32,
+                    noise: by_rollout[i]
+                        .iter()
+                        .filter(|g| g.len() > 1)
+                        .map(|g| {
+                            g.iter().copied().fold(f32::NEG_INFINITY, f32::max)
+                                - g.iter().copied().fold(f32::INFINITY, f32::min)
+                        })
+                        .fold(0.0f32, f32::max),
+                    steps: steps_all[i],
                 })
-                .fold(0.0f32, f32::max);
-            out.push(Branch {
-                score: (total / reference_rollout.len().max(1) as f64) as f32,
-                noise,
-                steps: steps_all,
-            });
-        }
-        // The episode's own stream, picked up where the probe interrupted it.
-        self.rng = outer_rng;
-        // And back to where the student was, so the episode it is in the
-        // middle of carries on as if none of this had happened.
-        let mark = std::time::Instant::now();
-        let back = self.env.resume();
-        spend.resuming += mark.elapsed();
-        if back.is_none() {
-            return Ok(None);
-        }
-        Ok(Some((out, candidates)))
+                .collect(),
+        ))
     }
 
     /// Can a value function predict how an episode ENDS from where it is?
@@ -4391,5 +4458,53 @@ mod averaging_tests {
     fn one_iterate_averages_to_itself() {
         let got = mean_of(None, head(&[1.0, -2.0]), 0);
         assert_eq!(got[0].1, vec![1.0, -2.0]);
+    }
+}
+
+#[cfg(test)]
+mod branch_tests {
+    use super::branch_plan;
+
+    /// The defect: the teacher's own branch ran from the live state, because
+    /// the environment was already standing on the branch point and restoring
+    /// onto it looked like an engine call for nothing. It is not for nothing.
+    /// Restoring is the thing being trusted, and the check that it landed
+    /// where it left - the options on offer are unchanged - ran before every
+    /// OTHER roll-out. So the one score every reported number is relative to
+    /// was the one score taken from a state the restore path had never been
+    /// asked to reproduce and nothing had checked, and a restore that quietly
+    /// dropped part of the run would read as the alternatives being worse
+    /// than the teacher.
+    #[test]
+    fn every_candidate_is_measured_from_a_restored_state() {
+        let plan = branch_plan(&[3, 0, 7], &[false, true]);
+        assert_eq!(plan.len(), 6);
+        for t in &plan {
+            assert!(t.restore, "a roll-out was measured from an unrestored state: {t:?}");
+        }
+    }
+
+    /// And the order the candidates were assembled in must not reach the
+    /// measurement. Two candidates compared under different conditions is not
+    /// a comparison, and the condition that differed was which of them got
+    /// the privileged first slot - which is always the teacher's, so the
+    /// asymmetry fell the same way at every probed decision rather than
+    /// averaging out over them.
+    #[test]
+    fn the_order_candidates_are_tried_in_does_not_change_what_they_get() {
+        let under = |candidates: &[usize], c: usize| -> Vec<(usize, bool, bool)> {
+            branch_plan(candidates, &[false, true])
+                .into_iter()
+                .filter(|t| t.candidate == c)
+                .map(|t| (t.repeat, t.reference, t.restore))
+                .collect()
+        };
+        for c in [3, 0, 7] {
+            assert_eq!(
+                under(&[3, 0, 7], c),
+                under(&[7, 3, 0], c),
+                "candidate {c} was measured differently for having been listed elsewhere"
+            );
+        }
     }
 }
