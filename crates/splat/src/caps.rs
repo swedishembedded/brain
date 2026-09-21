@@ -265,7 +265,7 @@ fn fit(inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
             if (w, h) != (cam.width, cam.height) {
                 return Err(format!("splat fit: view {i} is {}x{} but its frame is {w}x{h}", cam.width, cam.height));
             }
-            Ok(TargetView { cam, rgb })
+            Ok(TargetView::new(cam, rgb))
         })
         .collect::<Result<_, _>>()?;
 
@@ -449,7 +449,7 @@ mod caps_tests {
             .map(|c| {
                 ren.render(&gpu, &gst, c, &opts);
                 let img = ren.read_rgba(&gpu, c.width, c.height);
-                TargetView { cam: *c, rgb: rgba_to_rgb(&img) }
+                TargetView::new(*c, rgba_to_rgb(&img))
             })
             .collect();
 

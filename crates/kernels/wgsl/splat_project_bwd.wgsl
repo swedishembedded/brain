@@ -12,7 +12,7 @@
 //
 // 3DGS backward, stage 5: EWA projection VJP. Per gaussian, take the reduced
 // 2D gradients pgrad = {v_xy, v_conic(a,b,c), v_opacity, v_rgb(handled by
-// grad_reduce)} and produce gradients w.r.t. the 3D parameters:
+// grad_reduce), v_depth} and produce gradients w.r.t. the 3D parameters:
 //   d_gauss[N*10] = {d_mean_w(3), d_scale_linear(3), d_quat_raw(4)},
 //   d_opac[N] (w.r.t. the [0,1] opacity input, including the 2D Mip filter's
 //   opacity compensation when aa is set: that factor is built from the 2D
@@ -44,7 +44,7 @@ struct Params {
 @group(0) @binding(2) var<storage, read>       quats:   array<f32>; // N*4 (raw)
 @group(0) @binding(3) var<storage, read>       scales:  array<f32>; // N*3 linear
 @group(0) @binding(4) var<storage, read>       proj:    array<f32>; // N*9 fwd out
-@group(0) @binding(5) var<storage, read>       pgrad:   array<f32>; // N*9
+@group(0) @binding(5) var<storage, read>       pgrad:   array<f32>; // N*10
 @group(0) @binding(6) var<storage, read_write> d_gauss: array<f32>; // N*10 (+=)
 @group(0) @binding(7) var<storage, read_write> d_opac:  array<f32>; // N (+=)
 
@@ -145,12 +145,18 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     let kc = ba / det;
 
     // ---- upstream 2D grads ----
-    let v_mx2 = pgrad[i * 9u];
-    let v_my2 = pgrad[i * 9u + 1u];
-    let va = pgrad[i * 9u + 2u];
-    let vb = pgrad[i * 9u + 3u];
-    let vc = pgrad[i * 9u + 4u];
-    let v_op = pgrad[i * 9u + 5u];
+    let v_mx2 = pgrad[i * 10u];
+    let v_my2 = pgrad[i * 10u + 1u];
+    let va = pgrad[i * 10u + 2u];
+    let vb = pgrad[i * 10u + 3u];
+    let vc = pgrad[i * 10u + 4u];
+    let v_op = pgrad[i * 10u + 5u];
+    // dL/d(camera-space z) from the composited depth output. The rasterizer
+    // writes z straight out, so this is the ONE gradient path that points
+    // along the viewing ray - every other one reaches the mean through the
+    // projected 2D position or the projected covariance, both of which are
+    // functions of x/z and y/z and so say nothing about distance.
+    let v_dep = pgrad[i * 10u + 9u];
 
     // ---- 2D Mip filter: opacity compensation ----
     // The forward writes op' = op * sqrt(|S| / |S + eps I|), putting back the
@@ -248,6 +254,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     } else {
         v_yc = v_yc + vj[5] * (-p.fy * rz * rz);
     }
+    v_zc = v_zc + v_dep;
     let dmx = p.r00 * v_xc + p.r10 * v_yc + p.r20 * v_zc;
     let dmy = p.r01 * v_xc + p.r11 * v_yc + p.r21 * v_zc;
     let dmz = p.r02 * v_xc + p.r12 * v_yc + p.r22 * v_zc;

@@ -96,7 +96,7 @@ fn gradcheck_vs_autograd() {
     g.submit(&[&grads.d_gauss, &grads.d_opac, &grads.d_colors], &[]);
     let dimg: DeviceBuffer = g.storage_init("dimg", &wimg);
     let mut bscr = BwdScratch::new(&g, base.len(), px, 0);
-    let nrecs = ren.render_bwd(&g, &gs, &c, &o, &dimg, &mut bscr, &grads).expect("fits");
+    let nrecs = ren.render_bwd(&g, &gs, &c, &o, &dimg, None, &mut bscr, &grads).expect("fits");
     assert!(nrecs > 0);
     let d_gauss = g.read(&grads.d_gauss, 10 * base.len());
     let d_opac = g.read(&grads.d_opac, base.len());
@@ -153,7 +153,7 @@ fn fit_recovers_perturbed_scene() {
             ren.render(&g, &gst, c, &o);
             let img = ren.read_rgba(&g, c.width, c.height);
             let rgb: Vec<f32> = img.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect();
-            TargetView { cam: *c, rgb }
+            TargetView::new(*c, rgb)
         })
         .collect();
 
@@ -228,7 +228,7 @@ fn a_fit_that_starts_diverging_recovers_instead_of_running_on() {
         .map(|c| {
             ren.render(&g, &gst, c, &o);
             let img = ren.read_rgba(&g, c.width, c.height);
-            TargetView { cam: *c, rgb: img.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect() }
+            TargetView::new(*c, img.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect())
         })
         .collect();
 
@@ -285,7 +285,7 @@ fn a_scratch_too_small_for_the_scene_grows_instead_of_aborting() {
         g.submit(&[&grads.d_gauss, &grads.d_opac, &grads.d_colors], &[]);
         let dimg: DeviceBuffer = g.storage_init("dimg", &wimg);
         let mut bscr = BwdScratch::new(&g, s.len(), px, rec_cap);
-        let n = ren.render_bwd(&g, &gs, &c, &o, &dimg, &mut bscr, &grads).expect("fits");
+        let n = ren.render_bwd(&g, &gs, &c, &o, &dimg, None, &mut bscr, &grads).expect("fits");
         (
             n,
             g.read(&grads.d_gauss, 10 * s.len()),
@@ -385,7 +385,7 @@ fn band_equivalence(g: &Gpu) {
         }
         let dimg: DeviceBuffer = g.storage_init("dimg", &wimg);
         ren.render(g, &gs, &c, &o);
-        let n = ren.render_bwd(g, &gs, &c, &o, &dimg, &mut bscr, &grads).expect("bands must fit");
+        let n = ren.render_bwd(g, &gs, &c, &o, &dimg, None, &mut bscr, &grads).expect("bands must fit");
         (g.read(&grads.d_gauss, 10 * s.len()), n)
     };
 
@@ -442,7 +442,7 @@ fn the_mip_filters_opacity_compensation_is_differentiated() {
     g.submit(&[&grads.d_gauss, &grads.d_opac, &grads.d_colors], &[]);
     let dimg: DeviceBuffer = g.storage_init("dimg", &wimg);
     let mut bscr = BwdScratch::new(&g, base.len(), px, 0);
-    ren.render_bwd(&g, &gs, &c, &o, &dimg, &mut bscr, &grads).expect("fits");
+    ren.render_bwd(&g, &gs, &c, &o, &dimg, None, &mut bscr, &grads).expect("fits");
     let d_gauss = g.read(&grads.d_gauss, 10 * base.len());
     let d_opac = g.read(&grads.d_opac, base.len());
 

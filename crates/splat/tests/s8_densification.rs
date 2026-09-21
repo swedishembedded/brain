@@ -63,7 +63,7 @@ fn targets(g: &Gpu, ks: Kernels, truth: &Splats, w: u32, h: u32) -> Vec<TargetVi
         .map(|c| {
             ren.render(g, &gs, c, &o);
             let img = ren.read_rgba(g, c.width, c.height);
-            TargetView { cam: *c, rgb: img.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect() }
+            TargetView::new(*c, img.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect())
         })
         .collect()
 }
@@ -266,7 +266,7 @@ fn the_split_criterion_sees_a_gaussian_that_straddles_a_detail() {
         &[],
     );
     let mut scr = BwdScratch::new(&g, 1, px, 0);
-    ren.render_bwd(&g, &gs, &cam, &o, &dimg, &mut scr, &grads).expect("fits");
+    ren.render_bwd(&g, &gs, &cam, &o, &dimg, None, &mut scr, &grads).expect("fits");
 
     let sg = g.read(&grads.d_sumgrad, 2);
     let summed = (sg[0] * sg[0] + sg[1] * sg[1]).sqrt();
@@ -396,10 +396,7 @@ fn a_view_dependent_surface_needs_view_dependent_colour() {
             let gs = GpuSplats::upload(&g, &truth);
             ren.render(&g, &gs, c, &o);
             let rgba = ren.read_rgba(&g, w, h);
-            TargetView {
-                cam: *c,
-                rgb: rgba.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect(),
-            }
+            TargetView::new(*c, rgba.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect())
         })
         .collect();
 
@@ -466,7 +463,7 @@ fn inflatable_scene(g: &Gpu, ks: Kernels) -> (Splats, Vec<TargetView>) {
             let c = cam_at(*e);
             ren.render(&g, &gs, &c, &o);
             let img = ren.read_rgba(&g, w, h);
-            TargetView { cam: c, rgb: img.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect() }
+            TargetView::new(c, img.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect())
         })
         .collect();
 

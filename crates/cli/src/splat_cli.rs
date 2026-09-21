@@ -781,7 +781,7 @@ fn fit_cmd(argv: &[String]) {
                     &img.to_hwc_unit(), 3, img.w, img.h, cam.width, cam.height,
                 )
             };
-            TargetView { cam: *cam, rgb }
+            TargetView::new(*cam, rgb)
         })
         .collect();
 

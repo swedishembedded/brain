@@ -90,6 +90,10 @@ pub struct Renderer {
     isect_cap: usize,
     pub proj: DeviceBuffer,
     pub img: DeviceBuffer,
+    /// Per-pixel expected depth of the last [`Renderer::render`], written by
+    /// the same compositing pass that produced `img` - see
+    /// [`Renderer::read_depth`].
+    pub depth: DeviceBuffer,
     packed: DeviceBuffer,
     counts: DeviceBuffer,
     count_scan: ScanScratch,
@@ -121,6 +125,7 @@ impl Renderer {
             isect_cap: cap,
             proj: gpu.storage(9 * max_n as u64),
             img: gpu.storage(4 * max_px as u64),
+            depth: gpu.storage(max_px as u64),
             packed: gpu.storage(max_px as u64),
             counts: gpu.storage(max_n as u64),
             count_scan: ScanScratch::new(gpu, max_n),
@@ -197,7 +202,7 @@ impl Renderer {
         }
         steps.push(gpu.step(
             self.ks.splat_rasterize,
-            &[&self.proj, &s.colors, vals, &self.ranges, &self.img],
+            &[&self.proj, &s.colors, vals, &self.ranges, &self.img, &self.depth],
             &[
                 cam.width,
                 cam.height,
@@ -240,6 +245,14 @@ impl Renderer {
         gpu.read(&self.img, (w * h) as usize * 4)
     }
 
+    /// Read the per-pixel EXPECTED depth of the last [`Renderer::render`]:
+    /// `(sum_i z_i alpha_i T_i) / A` in camera-space units, 0 where the frame
+    /// has no geometry. Available from any render, not only `Mode::Depth` -
+    /// depth supervision needs the colour and the depth of the same frame.
+    pub fn read_depth(&self, gpu: &Gpu, w: u32, h: u32) -> Vec<f32> {
+        gpu.read(&self.depth, (w * h) as usize)
+    }
+
     /// Project + composite in **buffer order** (caller sorts by depth) and
     /// read back RGBA f32.
     pub fn render_naive_gpu(
@@ -279,6 +292,50 @@ impl Renderer {
     }
 }
 
+/// Below this alpha a pixel's expected depth is not supervised.
+///
+/// Expected depth is the accumulated depth divided by the accumulated alpha,
+/// so where a frame is nearly transparent the quotient is the ratio of two
+/// numbers that are nearly zero - numerically meaningless in fp32, and
+/// meaningless as geometry too, because there is nothing there to anchor. The
+/// gradient is not actually amplified by the division (the weights of the
+/// gaussians at such a pixel sum back to that same alpha), so this is a
+/// numerical floor rather than a stability hack.
+pub const MIN_DEPTH_ALPHA: f32 = 1e-2;
+
+/// Split a per-pixel dL/d(EXPECTED depth) into the two channels
+/// [`Renderer::render_bwd`] consumes, accumulating into both.
+///
+/// The forward reports `D = Dacc / A` with `Dacc = sum_i z_i alpha_i T_i` and
+/// `A` the alpha output. So one upstream gradient reaches the rasterizer by
+/// two routes - through the composite and through its normalizer - and a
+/// caller that forgets the second gets a gradient that is wrong by exactly the
+/// amount the geometry's opacity is about to change. Doing the split once,
+/// here, is what keeps `splat::opt` and the gradient gate differentiating the
+/// same function.
+///
+/// `v_dn`, `depth` and `ddepth` are `W*H`; `rgba` and `dimg` are `W*H*4`.
+pub fn add_expected_depth_vjp(
+    v_dn: &[f32],
+    depth: &[f32],
+    rgba: &[f32],
+    dimg: &mut [f32],
+    ddepth: &mut [f32],
+) {
+    assert_eq!(v_dn.len(), depth.len());
+    assert_eq!(v_dn.len(), ddepth.len());
+    assert_eq!(rgba.len(), 4 * v_dn.len());
+    assert_eq!(dimg.len(), 4 * v_dn.len());
+    for i in 0..v_dn.len() {
+        let a = rgba[i * 4 + 3];
+        if v_dn[i] == 0.0 || a < MIN_DEPTH_ALPHA {
+            continue;
+        }
+        ddepth[i] += v_dn[i] / a;
+        dimg[i * 4 + 3] -= v_dn[i] * depth[i] / a;
+    }
+}
+
 /// Per-gaussian gradient buffers the backward accumulates into (caller
 /// clears/consumes them; layouts match splat_project_bwd/splat_grad_reduce).
 pub struct SplatGrads {
@@ -310,11 +367,11 @@ impl SplatGrads {
 
 /// Words per gradient record in `recs`, the layout `splat_bwd_emit.wgsl`
 /// writes and `splat_grad_reduce.wgsl` reads: five sigma partials, the opacity
-/// partial, three weighted colour partials, and the gaussian id bitcast into
-/// the tenth slot as the sort key. Declared once here because the host sizes
-/// the buffer and only the kernels know the stride - `record_width` in
-/// `crates/kernels/tests/` gates the two against each other.
-pub const RECORD_WORDS: usize = 10;
+/// partial, three weighted colour partials, the depth partial, and the
+/// gaussian id bitcast into the last slot as the sort key. Declared once here
+/// because the host sizes the buffer and only the kernels know the stride -
+/// `record_width` in `crates/kernels/tests/` gates the two against each other.
+pub const RECORD_WORDS: usize = 11;
 
 /// How many gradient records fit in ONE storage binding of `limit` bytes.
 ///
@@ -367,6 +424,12 @@ pub struct BwdScratch {
     rsort: SortScratch,
     granges: DeviceBuffer,
     pgrad: DeviceBuffer,
+    /// A permanently zero `W*H` buffer bound as the depth-gradient input when
+    /// the caller supplies none. The emit kernel always reads that binding, so
+    /// an RGB-only backward needs something there that contributes nothing -
+    /// and one zeroed allocation per scratch is cheaper than branching the
+    /// kernel or carrying a second pipeline.
+    no_depth: DeviceBuffer,
     rec_cap: usize,
     limit: Option<u64>,
 }
@@ -384,17 +447,19 @@ impl BwdScratch {
             rvals_b: gpu.storage(0),
             rsort: SortScratch::new(gpu, 1),
             granges: gpu.storage(2 * max_n as u64),
-            pgrad: gpu.storage(9 * max_n as u64),
+            pgrad: gpu.storage(10 * max_n as u64),
+            no_depth: gpu.storage(max_px as u64),
             rec_cap: 0,
             limit: None,
         };
+        gpu.submit(&[&s.no_depth], &[]);
         s.alloc_records(gpu, cap);
         s
     }
 
     /// Size the record-keyed buffers for exactly `cap` records.
     fn alloc_records(&mut self, gpu: &Gpu, cap: usize) {
-        self.recs = gpu.storage(10 * cap as u64);
+        self.recs = gpu.storage(RECORD_WORDS as u64 * cap as u64);
         self.rkeys_a = gpu.storage(cap as u64);
         self.rvals_a = gpu.storage(cap as u64);
         self.rkeys_b = gpu.storage(cap as u64);
@@ -437,6 +502,14 @@ impl Renderer {
     /// (the whole frame's dL/dRGBA), accumulating into `grads`. Returns the
     /// number of gradient records the pass emitted.
     ///
+    /// `ddepth` (`W*H`, `None` = no depth supervision) is dL/d(**accumulated**
+    /// depth `sum_i z_i alpha_i T_i`), the unnormalized composite. What the
+    /// forward reports is the EXPECTED depth, that quantity divided by the
+    /// alpha output, so a caller supervising expected depth must also put the
+    /// normalizer's share into `dimg`'s alpha channel -
+    /// [`add_expected_depth_vjp`] is the one place that does the split, and
+    /// callers should use it rather than repeat it.
+    ///
     /// A dense scene can need more records for one frame than a single storage
     /// binding on the device holds, whatever memory is free. The loss is a sum
     /// over pixels, so this splits the ROWS until each group fits and lets the
@@ -446,6 +519,7 @@ impl Renderer {
     /// function to differentiate.
     ///
     /// `Err` only when a single row of pixels is itself past the ceiling.
+    #[allow(clippy::too_many_arguments)]
     pub fn render_bwd(
         &mut self,
         gpu: &Gpu,
@@ -453,11 +527,12 @@ impl Renderer {
         cam: &Camera,
         o: &RenderOpts,
         dimg: &DeviceBuffer,
+        ddepth: Option<&DeviceBuffer>,
         scr: &mut BwdScratch,
         grads: &SplatGrads,
     ) -> Result<usize, String> {
         let limit = scr.limit.unwrap_or_else(|| gpu.max_storage_binding_bytes());
-        self.bwd_rows(gpu, s, cam, o, dimg, scr, grads, 0, cam.height, limit)
+        self.bwd_rows(gpu, s, cam, o, dimg, ddepth, scr, grads, 0, cam.height, limit)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -468,6 +543,7 @@ impl Renderer {
         cam: &Camera,
         o: &RenderOpts,
         dimg: &DeviceBuffer,
+        ddepth: Option<&DeviceBuffer>,
         scr: &mut BwdScratch,
         grads: &SplatGrads,
         y0: u32,
@@ -503,8 +579,8 @@ impl Renderer {
         // here costs only this band's count pass.
         if n_recs > max_records_for_binding(limit) && rows > 1 {
             let h = rows / 2;
-            let a = self.bwd_rows(gpu, s, cam, o, dimg, scr, grads, y0, h, limit)?;
-            let b = self.bwd_rows(gpu, s, cam, o, dimg, scr, grads, y0 + h, rows - h, limit)?;
+            let a = self.bwd_rows(gpu, s, cam, o, dimg, ddepth, scr, grads, y0, h, limit)?;
+            let b = self.bwd_rows(gpu, s, cam, o, dimg, ddepth, scr, grads, y0 + h, rows - h, limit)?;
             return Ok(a + b);
         }
         scr.reserve_records(gpu, n_recs)?;
@@ -528,7 +604,10 @@ impl Renderer {
         let mut steps = Vec::new();
         steps.push(gpu.step(
             self.ks.splat_bwd_emit,
-            &[&self.proj, &s.colors, vals, &self.ranges, dimg, &scr.counts_px, &scr.recs],
+            &[
+                &self.proj, &s.colors, vals, &self.ranges, dimg, &scr.counts_px, &scr.recs,
+                ddepth.unwrap_or(&scr.no_depth),
+            ],
             &[
                 cam.width, rows, tiles_x, tiles_y,
                 f(o.bg[0]), f(o.bg[1]), f(o.bg[2]), y0,

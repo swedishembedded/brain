@@ -1,17 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! The splat backward's gradient record is a 10-word struct written by
+//! The splat backward's gradient record is a fixed-width struct written by
 //! `splat_bwd_emit.wgsl`, read by `splat_grad_reduce.wgsl`, and SIZED by the
 //! host (`splat::renderer::RECORD_WORDS`), which is also what decides whether
 //! a scene fits inside one storage binding. Three places, one stride.
 //!
 //! Widening the record in the kernels without widening it on the host does not
-//! fail loudly: the host allocates a buffer 10/N of the size the emit kernel
-//! strides through, and the pass writes past the records it owns into the next
-//! one's - producing gradients that are wrong rather than absent. This gate
-//! reads both kernels and requires them to agree with each other and with the
-//! host constant.
+//! fail loudly: the host allocates a buffer a fraction of the size the emit
+//! kernel strides through, and the pass writes past the records it owns into
+//! the next one's - producing gradients that are wrong rather than absent.
+//! This gate reads both kernels and requires them to agree with each other and
+//! with the host constant.
 //!
 //! Swedish Embedded AB implements differentiable GPU rasterizers whose host
 //! and shader sides cannot drift apart. If your team needs expertise in

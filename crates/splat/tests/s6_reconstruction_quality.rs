@@ -88,7 +88,7 @@ fn views(g: &Gpu, ks: Kernels, truth: &Splats, w: u32, h: u32) -> (Vec<TargetVie
         .map(|c| {
             ren.render(g, &gs, c, &o);
             let img = ren.read_rgba(g, c.width, c.height);
-            TargetView { cam: *c, rgb: img.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect() }
+            TargetView::new(*c, img.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect())
         })
         .collect();
     (t, ren)

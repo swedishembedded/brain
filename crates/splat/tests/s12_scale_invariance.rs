@@ -126,7 +126,7 @@ fn run(g: &Gpu, ks: Kernels, k: f32) -> Outcome {
     let targets: Vec<TargetView> = all[..3]
         .iter()
         .zip(&shots)
-        .map(|(c, rgb)| TargetView { cam: *c, rgb: rgb.clone() })
+        .map(|(c, rgb)| TargetView::new(*c, rgb.clone()))
         .collect();
 
     // start from a subsample, so the fit has to grow the scene and is tempted

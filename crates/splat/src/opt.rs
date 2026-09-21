@@ -137,6 +137,27 @@ pub struct FitCfg {
     /// geometry - which is why glossy objects come back as smears of
     /// duplicated surfaces at slightly different depths.
     pub sh_degree: u32,
+    /// Weight of the DEPTH term relative to RGB, 0 = off (and then a fit is
+    /// byte-for-byte the RGB-only fit it always was).
+    ///
+    /// A splat's image-plane gradient is orthogonal to its own viewing ray, so
+    /// a scene placed at the wrong DISTANCE and scaled to subtend the same
+    /// angle renders the identical image and has an exactly zero RGB gradient.
+    /// Measured against an analytic ground truth, a reconstruction put a thin
+    /// object 5.7% too far away, entirely systematically: no amount of RGB
+    /// optimization touches that, because the loss cannot see it.
+    ///
+    /// The term is an ANCHOR, not a source of truth. The depth a caller has is
+    /// the same model's, and that model is what was 5.7% wrong; supervising
+    /// against a single view's prediction re-imposes exactly the error being
+    /// removed. Feed it a MULTI-VIEW FUSED depth with per-pixel confidence
+    /// ([`TargetView::with_depth`]) - cross-view disagreement measured 1.1%
+    /// per-view against 0.41% fused - and what it buys is geometry that stops
+    /// drifting: an RGB-only fit measured over 400 iterations grew the longest
+    /// gaussian axis nearly ninefold and took the flatness ratio from 4.14 to
+    /// 26.34, which is blades that look right from the training cameras and
+    /// render as fur from anywhere else.
+    pub depth_weight: f32,
     /// Step size for refining the CAMERAS, in radians and world units per
     /// iteration. 0 freezes them, which is what `fit` does.
     ///
@@ -169,15 +190,74 @@ impl Default for FitCfg {
             max_growth: 2.0,
             explore_frac: 0.05,
             sh_degree: 0,
+            depth_weight: 0.0,
             pose_lr: 0.0,
         }
     }
 }
 
-/// One posed target view: camera + RGB f32 `[W*H*3]` in [0,1].
+/// One posed target view: camera + RGB f32 `[W*H*3]` in [0,1], plus the
+/// optional per-pixel supervision RGB alone cannot carry.
+#[derive(Clone)]
 pub struct TargetView {
     pub cam: Camera,
     pub rgb: Vec<f32>,
+    /// Per-pixel depth prior `[W*H]`, in the SCENE's own world units, 0 = no
+    /// data at that pixel. Compared against the render's expected depth; see
+    /// [`FitCfg::depth_weight`] for what it is and is not good for.
+    pub depth: Option<Vec<f32>>,
+    /// How far to trust each depth pixel, `[W*H]`, `None` = fully.
+    ///
+    /// Anchoring hard where the prior is wrong is worse than not anchoring at
+    /// all, and a depth prior is wrong in a way that varies across the frame -
+    /// a multi-view fusion knows at every pixel how many views agreed, and
+    /// that number, normalized, is exactly what belongs here.
+    pub depth_conf: Option<Vec<f32>>,
+    /// Per-pixel loss weight `[W*H]` in [0,1], `None` = supervise everything.
+    ///
+    /// The loss otherwise covers every pixel including background the
+    /// reconstruction has no geometry for, and against a black render
+    /// background that is a large permanent error - which the optimizer
+    /// answers by dragging gaussians outward to cover it. A mask lets the
+    /// caller say those pixels are not evidence. It divides out of the
+    /// normalizer too, so the reported MSE stays the MSE of the pixels that
+    /// were actually supervised.
+    pub mask: Option<Vec<f32>>,
+}
+
+impl TargetView {
+    /// A view supervised by its colours alone - what `fit` has always done.
+    pub fn new(cam: Camera, rgb: Vec<f32>) -> TargetView {
+        TargetView { cam, rgb, depth: None, depth_conf: None, mask: None }
+    }
+
+    /// Add a depth prior `[W*H]` (0 = no data) and, optionally, how much to
+    /// trust each of its pixels.
+    pub fn with_depth(mut self, depth: Vec<f32>, conf: Option<Vec<f32>>) -> TargetView {
+        self.depth = Some(depth);
+        self.depth_conf = conf;
+        self
+    }
+
+    /// Restrict supervision to the pixels `mask` `[W*H]` weights.
+    pub fn with_mask(mut self, mask: Vec<f32>) -> TargetView {
+        self.mask = Some(mask);
+        self
+    }
+
+    /// Per-pixel loss weight, 1 where no mask was given.
+    fn weight(&self, i: usize) -> f32 {
+        self.mask.as_ref().map_or(1.0, |m| m[i])
+    }
+
+    /// Sum of the per-pixel weights: the loss normalizer, so a masked fit's
+    /// MSE is comparable with an unmasked one's.
+    fn weight_sum(&self, px: usize) -> f64 {
+        match &self.mask {
+            None => px as f64,
+            Some(m) => m.iter().take(px).map(|v| *v as f64).sum(),
+        }
+    }
 }
 
 /// Fit `init` against the targets; returns the optimized scene and the final
@@ -226,7 +306,17 @@ fn fit_inner(gpu: &Gpu, ks: Kernels, init: &Splats, targets: &[TargetView], cfg:
         let scaled_init = rescale_scene(init, k);
         let scaled: Vec<TargetView> = targets
             .iter()
-            .map(|t| TargetView { cam: rescale_cam(&t.cam, k), rgb: t.rgb.clone() })
+            .map(|t| TargetView {
+                cam: rescale_cam(&t.cam, k),
+                rgb: t.rgb.clone(),
+                // A depth prior is in world units, so it rescales with the
+                // world. Carrying it through unscaled would have the depth
+                // term anchor the scene to a distance the normalization just
+                // moved, which is a silent, total corruption of the fit.
+                depth: t.depth.as_ref().map(|d| d.iter().map(|v| v * k).collect()),
+                depth_conf: t.depth_conf.clone(),
+                mask: t.mask.clone(),
+            })
             .collect();
         let (s, c, l) = fit_inner(gpu, ks, &scaled_init, &scaled, cfg, on_step);
         return (
@@ -521,6 +611,7 @@ fn fit_stage(
     let (m_col, v_col) = adam(3 * n);
     let grads = SplatGrads::new(gpu, n);
     let dimg = gpu.storage(4 * max_px as u64);
+    let ddepth = gpu.storage(max_px as u64);
     let mut renderer = Renderer::new(gpu, ks, n, maxw, maxh, 0);
     let mut bscr = BwdScratch::new(gpu, n, max_px, 0);
     let opts = RenderOpts {
@@ -671,26 +762,80 @@ fn fit_stage(
             // host loss: MSE over rgb; alpha unsupervised
             let tm = std::time::Instant::now();
             let img = renderer.read_rgba(gpu, cam.width, cam.height);
+            let want_depth = cfg.depth_weight > 0.0 && t.depth.is_some();
+            let rendered_depth =
+                if want_depth { renderer.read_depth(gpu, cam.width, cam.height) } else { Vec::new() };
             prof.add("read image back", tm.elapsed());
             let tm = std::time::Instant::now();
             let mut d = vec![0.0f32; px * 4];
-            let scale = 2.0 / (px as f32 * 3.0);
+            // The mask divides out of the normalizer as well as multiplying
+            // into the loss, so the number reported is the MSE of the pixels
+            // that were actually supervised - comparable with an unmasked run
+            // rather than diluted by however much of the frame was excluded.
+            let wsum = t.weight_sum(px);
+            if wsum <= 0.0 {
+                continue; // this view's mask keeps nothing
+            }
+            let scale = (2.0 / (wsum * 3.0)) as f32;
             let mut lsum = 0.0f64;
             for i in 0..px {
+                let m = t.weight(i);
+                if m == 0.0 {
+                    continue;
+                }
                 for c in 0..3 {
                     let diff = img[i * 4 + c] - t.rgb[i * 3 + c];
-                    lsum += (diff * diff) as f64;
-                    d[i * 4 + c] = scale * diff;
+                    lsum += (m * diff * diff) as f64;
+                    d[i * 4 + c] = scale * m * diff;
                 }
             }
-            loss_sum += lsum / (px as f64 * 3.0);
+            loss_sum += lsum / (wsum * 3.0);
+            // The depth term, on the SAME normalizer, so `depth_weight` reads
+            // as a ratio against RGB rather than as a number whose meaning
+            // depends on how much of the frame carries a depth prior.
+            let mut ddepth_h = vec![0.0f32; px];
+            if want_depth {
+                let tgt = t.depth.as_ref().unwrap();
+                let dscale = (2.0 * cfg.depth_weight as f64 / wsum) as f32;
+                let mut vdn = vec![0.0f32; px];
+                let mut dsum = 0.0f64;
+                for i in 0..px {
+                    let w = t.weight(i) * t.depth_conf.as_ref().map_or(1.0, |c| c[i]);
+                    if w <= 0.0 || tgt[i] <= 0.0 {
+                        continue; // masked out, distrusted, or no prior here
+                    }
+                    let diff = rendered_depth[i] - tgt[i];
+                    dsum += (w * diff * diff) as f64;
+                    vdn[i] = dscale * w * diff;
+                }
+                // The depth term belongs in the REPORTED loss too, not only in
+                // the gradient. Everything that watches the loss - the step
+                // size backoff, the guarantee that a fit never returns
+                // something worse than it was given, the number printed every
+                // few iterations - has to be watching the objective actually
+                // being minimised. Leaving depth out of it made the guard
+                // compare a different function: on a scene that already
+                // renders correctly but sits at the wrong depth, RGB error
+                // RISES as the depth term does its job, so the fit was
+                // correctly moving the geometry and then handing back the
+                // untouched input.
+                loss_sum += cfg.depth_weight as f64 * dsum / wsum as f64;
+                crate::renderer::add_expected_depth_vjp(&vdn, &rendered_depth, &img, &mut d, &mut ddepth_h);
+            }
             prof.add("host loss + dL/dimg", tm.elapsed());
             let tm = std::time::Instant::now();
             gpu.write(&dimg, cast(&d));
+            if want_depth {
+                gpu.write(&ddepth, cast(&ddepth_h));
+            }
             prof.add("upload dL/dimg", tm.elapsed());
             let tm = std::time::Instant::now();
             renderer
-                .render_bwd(gpu, &gs, &cam, &opts, &dimg, &mut bscr, &grads)
+                .render_bwd(
+                    gpu, &gs, &cam, &opts, &dimg,
+                    if want_depth { Some(&ddepth) } else { None },
+                    &mut bscr, &grads,
+                )
                 .unwrap_or_else(|e| panic!("{e}"));
             prof.add("render backward", tm.elapsed());
             if cfg.pose_lr > 0.0 {

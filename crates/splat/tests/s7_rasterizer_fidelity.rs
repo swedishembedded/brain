@@ -175,7 +175,7 @@ fn a_scene_must_be_rendered_at_the_dilation_it_was_fitted_under() {
     let truth = one_splat_per_pixel(&img, &cam, 0.3);
 
     const FITTED_AT: f32 = 0.3;
-    let target = TargetView { cam, rgb: render(&g, &truth, &cam, FITTED_AT) };
+    let target = TargetView::new(cam, render(&g, &truth, &cam, FITTED_AT));
 
     // Start from flattened colours so the fit has to put the detail back.
     let mut init = truth.clone();

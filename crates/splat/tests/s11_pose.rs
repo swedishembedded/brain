@@ -133,7 +133,7 @@ fn a_fit_can_recover_cameras_that_were_handed_to_it_wrong() {
         .collect();
 
     let targets: Vec<TargetView> =
-        wrong.iter().zip(&shots).map(|(c, rgb)| TargetView { cam: *c, rgb: rgb.clone() }).collect();
+        wrong.iter().zip(&shots).map(|(c, rgb)| TargetView::new(*c, rgb.clone())).collect();
 
     let before: f64 = {
         let mut acc = 0.0;

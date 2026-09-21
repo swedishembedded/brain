@@ -125,6 +125,50 @@ density-control boundary, measured at ~3.5% worse final loss than one unbroken
 run. Density control has to earn that back before it pays at all, which is why
 it is a flag rather than a default.
 
+## Depth supervision, and per-view masks
+
+The RGB loss cannot see one axis. A splat's image-plane gradient is orthogonal
+to its own viewing ray, so a scene placed at the wrong DISTANCE and scaled to
+subtend the same angle renders the **identical image** and has an exactly zero
+RGB gradient. Measured against an analytic ground truth, a reconstruction put a
+thin object 5.7% too far away, entirely systematically.
+
+`splat::opt::FitCfg::depth_weight` (default `0.0`, so nothing changes unless
+asked) adds a term on the renderer's per-pixel **expected depth**
+`D = (Σ z·α·T) / A`, differentiated end to end. `TargetView::with_depth` supplies
+the prior and, per pixel, how far to trust it; `TargetView::with_mask` weights
+the whole loss per pixel and divides back out of the normalizer, so a masked
+run's reported MSE stays comparable with an unmasked one's.
+
+**The depth term is an ANCHOR, not a source of truth.** The prior a caller has
+comes from the same model whose depth is 5.7% wrong; supervising against a
+single view's prediction re-imposes exactly that error. Feed it a multi-view
+FUSED depth with the fusion's own per-pixel agreement as the confidence
+(cross-view disagreement measured 1.1% per view against 0.41% fused). What it
+buys is geometry that stops drifting: an RGB-only fit measured over 400
+iterations grew the longest gaussian axis nearly ninefold and took the flatness
+ratio from 4.14 to 26.34 - large flat blades that look right from the training
+cameras and render as fur at a grazing angle.
+
+Two properties are worth knowing before turning it on, both measured in
+`crates/splat/tests/s13_depth_supervision.rs`:
+
+* **Confidence is a relative weight between pixels, not a volume knob.** AdamW's
+  step is normalized per parameter, and along the viewing ray there is no RGB
+  gradient competing for the direction, so scaling every depth residual by the
+  same constant leaves the step identical. What confidence does control is where
+  a gaussian settles when its pixels disagree: given a +10% prior on half its
+  pixels and a -10% prior on the other half, equal trust lands it on the truth
+  (measured +0.02%) and 3:1 trust lands it at the weighted mean (+4.96% against a
+  predicted +5.00%). A confidence of zero is off.
+* **Depth is not supervised where the frame is transparent** (accumulated alpha
+  below `splat::renderer::MIN_DEPTH_ALPHA`): an expected depth there is the ratio
+  of two near-zeros. The term holds geometry in place; it does not create it.
+
+On the headline case - a scene slid 5.7% along every viewing ray, rendering the
+correct image - an RGB-only fit leaves 6.21% of depth error after 150 iterations
+and the same fit with `depth_weight: 1.0` leaves 0.08%.
+
 ## Sharpness, and the anti-alias dilation
 
 Every splat's screen-space covariance gets a constant added to its diagonal

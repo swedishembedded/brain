@@ -16,6 +16,12 @@
 // invocations walk the SAME sorted range, so loads are coherent — no
 // workgroup memory, no barriers (CPU-JIT safe by construction).
 // mode 0 = color, 1 = expected depth. img is RGBA f32.
+//
+// The expected depth D = (sum_i z_i alpha_i T_i) / A is written to its own
+// `depth` buffer on EVERY pass, not only under mode 1. A fit supervised by
+// depth needs the colour and the depth of the same frame, and rendering the
+// scene twice to get them would double the cost of the one stage that walks
+// every sorted instance.
 
 struct Params {
     width: u32,
@@ -34,6 +40,7 @@ struct Params {
 @group(0) @binding(3) var<storage, read>       vals:   array<u32>; // sorted gaussian ids
 @group(0) @binding(4) var<storage, read>       ranges: array<u32>; // n_tiles*2
 @group(0) @binding(5) var<storage, read_write> img:    array<f32>; // W*H*4
+@group(0) @binding(6) var<storage, read_write> depth:  array<f32>; // W*H
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>,
@@ -118,9 +125,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
         let t = tr[k];
         let a = 1.0 - t;
         let o = (py * p.width + px) * 4u;
+        var d = 0.0;
+        if (a > 1e-6) { d = dep[k] / a; }
+        depth[py * p.width + px] = d;
         if (p.mode == 1u) {
-            var d = 0.0;
-            if (a > 1e-6) { d = dep[k] / a; }
             img[o] = d;
             img[o + 1u] = d;
             img[o + 2u] = d;
