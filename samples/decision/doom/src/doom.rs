@@ -277,11 +277,21 @@ impl Doom {
         );
         self.conn.write_all(req.as_bytes())?;
         self.conn.flush()?;
-        let resp = read_response(&mut self.conn)?;
+        let (status, resp) = read_response(&mut self.conn)?;
         if let Some(f) = self.log.as_mut() {
             // One JSON object per line: `jq`-able, and greppable by tic.
             let _ = writeln!(f, "{{\"req\":{{\"method\":\"{method}\",\"path\":\"{path}\",\"body\":{}}},\"resp\":{}}}",
                 if body.is_empty() { "null" } else { body }, resp);
+        }
+        // A reply that is not a 2xx is a FAILED call, not a call that returned
+        // some JSON. Treating every reply as success hid a restore that the
+        // engine had refused - the search counted 395 resumes that never
+        // happened and explored from the level's start every time, which is
+        // indistinguishable from a search that does not work.
+        if !(200..300).contains(&status) {
+            return Err(std::io::Error::other(format!(
+                "{method} {path} -> HTTP {status}: {resp}"
+            )));
         }
         Ok(resp)
     }
@@ -344,12 +354,27 @@ impl Doom {
     /// player with a different idea of what has been seen. The savegame
     /// format archives line flags, so this does not.
     pub fn snapshot(&mut self) -> std::io::Result<String> {
-        self.call("POST", "/api/snapshot", Some("{}"))
+        self.snapshot_at(0)
     }
 
     /// Put back what [`Doom::snapshot`] held.
     pub fn restore(&mut self) -> std::io::Result<String> {
-        self.call("POST", "/api/snapshot/restore", Some("{}"))
+        self.restore_from(0)
+    }
+
+    /// Hold the world in a numbered slot.
+    ///
+    /// A counterfactual needs one slot - go back to THIS decision. A search
+    /// that returns to promising places needs thousands, because the whole
+    /// point is to resume from where it got to rather than from the spawn,
+    /// and what it got to is everywhere it has ever been.
+    pub fn snapshot_at(&mut self, slot: usize) -> std::io::Result<String> {
+        self.call("POST", "/api/snapshot", Some(&format!("{{\"slot\":{slot}}}")))
+    }
+
+    /// Put back what a numbered slot is holding.
+    pub fn restore_from(&mut self, slot: usize) -> std::io::Result<String> {
+        self.call("POST", "/api/snapshot/restore", Some(&format!("{{\"slot\":{slot}}}")))
     }
 
     /// Put a thing on the floor `distance` units away, `bearing` degrees
@@ -404,7 +429,7 @@ fn connect(port: u16, timeout: Duration, child: &mut Child) -> std::io::Result<T
 /// layer was rewritten to send one: without it the end of a body is only
 /// knowable by the connection closing, and a closed connection per step is a
 /// TCP handshake per step.
-fn read_response(conn: &mut TcpStream) -> std::io::Result<String> {
+fn read_response(conn: &mut TcpStream) -> std::io::Result<(u16, String)> {
     let mut buf: Vec<u8> = Vec::with_capacity(8192);
     let mut chunk = [0u8; 8192];
     let head_end = loop {
@@ -421,6 +446,12 @@ fn read_response(conn: &mut TcpStream) -> std::io::Result<String> {
         buf.extend_from_slice(&chunk[..n]);
     };
     let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+    // "HTTP/1.1 404 Not Found" - the status the caller has to be able to see.
+    let status: u16 = head
+        .split_whitespace()
+        .nth(1)
+        .and_then(|c| c.parse().ok())
+        .unwrap_or(0);
     let len: usize = head
         .lines()
         .find_map(|l| {
@@ -444,7 +475,7 @@ fn read_response(conn: &mut TcpStream) -> std::io::Result<String> {
         }
         buf.extend_from_slice(&chunk[..n]);
     }
-    Ok(String::from_utf8_lossy(&buf[head_end..head_end + len]).to_string())
+    Ok((status, String::from_utf8_lossy(&buf[head_end..head_end + len]).to_string()))
 }
 
 fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
