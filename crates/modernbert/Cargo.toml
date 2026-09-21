@@ -1,0 +1,25 @@
+[package]
+name = "brain-modernbert"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "ModernBERT: pre-LN bidirectional encoder with alternating full/local-window RoPE attention and a GeGLU MLP, plus Laya's decision head on top of it."
+
+[lib]
+name = "modernbert"
+path = "src/lib.rs"
+
+[dependencies]
+brain-checkpoint.workspace = true
+brain-gpu-core.workspace = true
+brain-kernels.workspace = true
+brain-model.workspace = true
+brain-paramstore.workspace = true
+brain-optim.workspace = true
+brain-data.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+# `testutil::skip` - a parity fixture absent from this checkout is a skip,
+# not a failure; see `crates/diamond/tests/parity.rs` for the precedent.
+brain-testutil.workspace = true
