@@ -425,12 +425,23 @@ fn densify(scene: &mut Splats, grad: &[f32], cfg: &FitCfg, eye: [f32; 3]) {
         return;
     }
     let cap = if cfg.max_gaussians > 0 { cfg.max_gaussians } else { usize::MAX };
-    if n >= cap {
-        return;
-    }
+
+    // How many SECOND children the whole round may emit. The cap bounded the
+    // gradient-chosen set only, so exploration spent budget nobody had
+    // counted and a fit handed a hard limit of 256 came back with 258. What
+    // the limit is about is the final count, so it is tracked against the
+    // survivors: everything that is not pruned is emitted whatever happens.
+    //
+    // Being AT the cap used to return here, which also skipped the prune -
+    // so a scene that started at its budget kept every transparent gaussian
+    // it had forever, and density control on it was a no-op rather than a
+    // redistribution. Running out of room to grow is not a reason to stop
+    // reclaiming.
+    let alive = (0..n).filter(|&i| scene.opacities[i] >= cfg.prune_opacity).count();
+    let mut extras = cap.saturating_sub(alive);
 
     // the gradient threshold, as a fraction of the population
-    let want = ((n as f32 * cfg.densify_frac) as usize).min(cap - n);
+    let want = ((n as f32 * cfg.densify_frac) as usize).min(extras);
     let mut order: Vec<usize> = (0..n).collect();
     order.sort_by(|&a, &b| grad[b].total_cmp(&grad[a]));
     let chosen: std::collections::HashSet<usize> = order.into_iter().take(want).collect();
@@ -458,11 +469,15 @@ fn densify(scene: &mut Splats, grad: &[f32], cfg: &FitCfg, eye: [f32; 3]) {
         }
         let s = &scene.scales[i * 3..i * 3 + 3];
         let axis = (0..3).max_by(|&a, &b| s[a].total_cmp(&s[b])).unwrap();
+        // Anything with no budget for a second child is carried over
+        // unchanged, which is what the loop already does for a gaussian
+        // nothing selected.
+        let room = extras > 0;
         // Exploration: a share of the large gaussians split whether or not the
         // gradient asked, and one in four of those has a child pushed along
         // the viewing ray instead of along the parent's axis.
         let explore = cfg.explore_frac > 0.0 && s[axis] >= big && jitter(i, 0x5eed) < cfg.explore_frac;
-        if explore && !chosen.contains(&i) && jitter(i, 0xd39d) < 0.25 {
+        if room && explore && !chosen.contains(&i) && jitter(i, 0xd39d) < 0.25 {
             let d = [
                 scene.means[i * 3] - eye[0],
                 scene.means[i * 3 + 1] - eye[1],
@@ -473,11 +488,12 @@ fn densify(scene: &mut Splats, grad: &[f32], cfg: &FitCfg, eye: [f32; 3]) {
             // object is not flung past a far one
             let step = s[axis] * (0.5 + 2.0 * jitter(i, 0xa17e));
             let u = [d[0] / l * step, d[1] / l * step, d[2] / l * step];
+            extras -= 1;
             push(&mut out, i, [0.0; 3], 1.0);
             push(&mut out, i, u, 1.0);
             continue;
         }
-        if (chosen.contains(&i) || explore) && s[axis] >= big {
+        if room && (chosen.contains(&i) || explore) && s[axis] >= big {
             // split: two smaller children straddling the parent's long axis,
             // rotated into world space by the parent's own orientation
             let q = &scene.quats[i * 4..i * 4 + 4];
@@ -489,10 +505,12 @@ fn densify(scene: &mut Splats, grad: &[f32], cfg: &FitCfg, eye: [f32; 3]) {
                 _ => [2.0 * (x * z + w * y), 2.0 * (y * z - w * x), 1.0 - 2.0 * (x * x + y * y)],
             };
             let d = s[axis] * 0.5;
+            extras -= 1;
             push(&mut out, i, [col[0] * d, col[1] * d, col[2] * d], 1.0 / 1.6);
             push(&mut out, i, [-col[0] * d, -col[1] * d, -col[2] * d], 1.0 / 1.6);
-        } else if chosen.contains(&i) {
+        } else if room && chosen.contains(&i) {
             // clone: a second gaussian for the optimizer to walk off the first
+            extras -= 1;
             push(&mut out, i, [0.0; 3], 1.0);
             push(&mut out, i, [0.0; 3], 1.0);
         } else {
