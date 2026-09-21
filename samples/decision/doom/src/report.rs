@@ -88,6 +88,7 @@ pub struct Progress {
 /// reading the two runs would give.
 const LASTING: f32 = 0.2;
 
+
 /// What a full clear is worth on top of getting out, split the way DOOM's own
 /// intermission screen splits it.
 ///
@@ -173,7 +174,18 @@ impl Score {
     /// closer to its goal than it did at 120. Under `--reward gauge` that is
     /// a large negative payment for the one decision that found the exit.
     pub fn value(&self) -> f32 {
-        let condition = 0.5 + 0.5 * self.alive;
+        // Health is a TIEBREAKER over ground already covered, not a discount
+        // on it. Walking most of the way to the exit and then dying does not
+        // un-walk it, and failing to finish is already the difference between
+        // this branch and the one above.
+        //
+        // It used to halve the distance covered on death, and that made the
+        // score disagree with what a run is supposed to be judged on. A
+        // player that never fired a shot, at full health, outranked the same
+        // player killing nine of a level's eighty-five: measured on E1M4,
+        // 0.14 against 0.09. Anything learning from that number learns to
+        // stand still, which is the opposite of the task.
+        let condition = 0.9 + 0.1 * self.alive;
         let haul = self.haul.value();
         if self.finished {
             return 1.0 + haul + 0.25 * self.alive;
@@ -549,6 +561,55 @@ mod tests {
             haul: Haul::default(),
         };
         assert!(went.value() > long.value());
+    }
+
+    /// Playing must beat standing still, or the number teaches standing
+    /// still.
+    ///
+    /// Two runs that got equally far along the way: one killed a tenth of the
+    /// level and died for it, the other never fired a shot and finished the
+    /// episode untouched. Health used to HALVE the ground already covered, so
+    /// the second outranked the first - measured on E1M4, 0.14 against 0.09,
+    /// on the very run where the player went from never firing a shot to nine
+    /// kills. Dying does not un-walk the distance walked, and not finishing
+    /// is already the difference between this and the branch above.
+    #[test]
+    fn a_run_that_fought_and_died_beats_one_that_stood_still_unharmed() {
+        let idle = Score {
+            finished: false,
+            toward: Some(0.28),
+            alive: 1.0,
+            lasted: 1.0,
+            seen: 12,
+            haul: Haul::default(),
+        };
+        let fought = Score {
+            alive: 0.0,
+            lasted: 0.6,
+            haul: Haul { kills: 0.11, ..Haul::default() },
+            ..idle
+        };
+        assert!(
+            fought.value() > idle.value(),
+            "standing still outranked playing: idle {:.3}, fought {:.3}",
+            idle.value(),
+            fought.value()
+        );
+    }
+
+    /// And health still breaks a tie between two runs that did the same.
+    #[test]
+    fn health_still_separates_two_runs_that_achieved_the_same() {
+        let hurt = Score {
+            finished: false,
+            toward: Some(0.5),
+            alive: 0.1,
+            lasted: 1.0,
+            seen: 12,
+            haul: Haul::default(),
+        };
+        let whole = Score { alive: 1.0, ..hurt };
+        assert!(whole.value() > hurt.value());
     }
 
     /// Finding the way out must never lower a run's score.
