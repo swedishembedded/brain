@@ -623,6 +623,9 @@ pub struct Counterfactual {
     /// path the roll-out happened to take. Needs `--repeats 2` or more to be
     /// anything but zero.
     pub noise: f32,
+    /// Roll-outs run per candidate, so a reader can tell "the noise is zero"
+    /// from "nobody measured the noise".
+    pub repeats: usize,
     /// Fraction of decisions where the candidates did NOT all lead to the
     /// same place.
     ///
@@ -1777,6 +1780,7 @@ impl<E: Env> ControlPipeline<E> {
             regret: (regret / n) as f32,
             spread: (spread / n) as f32,
             noise: (noise / n) as f32,
+            repeats: spec.repeats.max(1),
             pivotal: (pivotal as f64 / n) as f32,
             steps: spent,
             by_situation,

@@ -685,7 +685,17 @@ fn whatif(env: DoomEnv, args: &Args) -> Result<(), String> {
     }
     println!(
         "\n{}",
-        if c.pivotal < 0.1 {
+        if c.noise > 0.0 && c.noise >= c.spread {
+            "doom: the room is inside the noise of the thing measuring it - re-running ONE \
+             option moves its own score by more than the gap between different options, so \
+             which candidate 'won' is mostly which trajectory it happened to get. Averaging \
+             more roll-outs per candidate is the only thing that changes this; no learner can \
+             recover a ranking that is not there"
+        } else if c.noise == 0.0 && c.repeats < 2 {
+            "doom: nothing here measured its own noise - one roll-out per candidate cannot say \
+             whether a margin is the action or the trajectory. Run it again with --repeats 2 \
+             or more before believing the number above"
+        } else if c.pivotal < 0.1 {
             "doom: the choice barely matters at these decisions - every option leads to \
              about the same place, so there is nothing here for any method to learn and \
              the thing to change is WHERE the decisions are sampled from"
