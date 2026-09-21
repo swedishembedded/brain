@@ -75,6 +75,16 @@ pub struct Progress {
     had_route: bool,
 }
 
+/// What surviving the whole horizon is worth to a run that never found
+/// anything to walk toward.
+///
+/// It has to clear two bars at once. Big enough that discovering the way out
+/// cannot cost a run more than it is worth - see [`Score::value`], where this
+/// is a floor - and small enough that merely lasting never outranks a run
+/// that crossed most of a level and died, which is the ordering a person
+/// reading the two runs would give.
+const LASTING: f32 = 0.2;
+
 /// How far an episode got, on a scale that still means something when it did
 /// not finish.
 ///
@@ -113,15 +123,23 @@ impl Score {
     /// When there was no goal to walk toward, lasting IS the task - that is
     /// the whole of health-gathering - and it is scaled down so that it can
     /// never outrank having actually got somewhere.
+    ///
+    /// Lasting is a FLOOR on the score, not an alternative to it. The route
+    /// leads to unexplored ground until the exit, a key or a switch has
+    /// actually been seen, so a run switches from one to the other the moment
+    /// it finds the way out - and at that moment it has covered none of the
+    /// way to it. Read as alternatives, discovering the way out therefore
+    /// COST a run most of its score: measured on E1M7, the same policy scored
+    /// 0.48 stopped at 120 decisions and 0.00 allowed 900, having ended
+    /// closer to its goal than it did at 120. Under `--reward gauge` that is
+    /// a large negative payment for the one decision that found the exit.
     pub fn value(&self) -> f32 {
         let condition = 0.5 + 0.5 * self.alive;
         if self.finished {
             return 1.0 + 0.25 * self.alive;
         }
-        match self.toward {
-            Some(f) => f * condition,
-            None => 0.5 * self.lasted * condition,
-        }
+        let lasting = LASTING * self.lasted;
+        self.toward.map_or(lasting, |f| f.max(lasting)) * condition
     }
 }
 
@@ -472,6 +490,37 @@ mod tests {
             seen: 40,
         };
         assert!(went.value() > long.value());
+    }
+
+    /// Finding the way out must never lower a run's score.
+    ///
+    /// The route leads to unexplored ground until the exit, a key or a switch
+    /// has actually been seen, and at that moment the score stops being
+    /// "how long did it last" and becomes "how far along the way is it" -
+    /// which is nothing yet. Measured on E1M7: the same policy scored 0.48
+    /// stopped at 120 decisions and 0.00 allowed 900, having ended CLOSER to
+    /// its goal. Under `--reward gauge`, which pays a decision the difference
+    /// between consecutive scores, the one decision that discovered the way
+    /// out was paid a large negative reward for it.
+    #[test]
+    fn discovering_the_way_out_never_costs_a_run_anything() {
+        let before = Score {
+            finished: false,
+            toward: None,
+            alive: 1.0,
+            lasted: 0.5,
+            seen: 40,
+        };
+        // The very next decision, with the exit now in view and none of the
+        // way to it covered. Nothing about the run has got worse.
+        let after = Score { toward: Some(0.0), ..before };
+        assert!(
+            after.value() >= before.value(),
+            "discovering the goal cost the run {:.3}, going {:.3} -> {:.3}",
+            before.value() - after.value(),
+            before.value(),
+            after.value()
+        );
     }
 
     #[test]
