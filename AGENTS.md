@@ -923,6 +923,7 @@ front-end to depend on.
 | `yolov8` / `vision` | detector; shared conv-net blocks (spec-driven `Conv` incl. fused/register-tiled eval paths, `BatchNorm`, `PReLU`, `MaxPool`/`AvgPool`, `SPPF`, bottlenecks, `fold_bn`) |
 | `zipdepth` | ZipDepth: model/blocks/import/fuse, `Predictor`, viz/stereo/effects, INT8 calib |
 | `worldmirror2` / `splat` | WorldMirror-2; 3DGS rasterizer + PLY IO + `fit` + viewer |
+| `recon` | model-agnostic long-capture orchestration: mixed photo/video ingest, sharpness + near-duplicate frame selection, overlapping chunk planning, Sim3 chunk registration behind a residual gate, global fuse/prune/orient. Knows no model - one asks it via `ReconstructionModel` (`worldmirror2::recon_impl`) how many frames a pass holds and what grid it wants |
 | `scrfd` / `arcface` / `sam2` / `clip` | SCRFD face detection; ArcFace identity embedding (+ the 5-point alignment and its trainer); SAM 2.1 promptable segmentation (image path + the video memory bank); CLIP-L/OpenCLIP-bigG/EVA-CLIP text+image towers |
 | `diffusion` / `dit` / `vae` / `s3dit` | flow-matching core; shared DiT blocks; AutoencoderKL; Z-Image |
 | `flux1` / `flux2` / `t5encoder` | FLUX.1/Kontext 12B MMDiT + edit path; FLUX.2 Klein 4B/9B MMDiT; T5-XXL and umT5-XXL text-conditioning encoders |

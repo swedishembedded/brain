@@ -1,0 +1,21 @@
+[package]
+name = "brain-recon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Model-agnostic 3D reconstruction orchestration: mixed image/video ingest, sharpness and near-duplicate frame selection, overlapping chunk planning, Sim3 chunk registration with a residual quality gate, and the global fuse/prune/orient finish."
+
+[lib]
+name = "recon"
+path = "src/lib.rs"
+
+[dependencies]
+# Splats, cameras, the Sim3 registration primitives, voxel fusion and the
+# upright re-framing. Everything here is scene geometry, not model weights.
+brain-splat.workspace = true
+# Decoding a folder of photographs and a clip into one frame set.
+brain-imaging.workspace = true
+
+[dev-dependencies]
+# `data::rng::Lcg` - the one deterministic test PRNG (tests only).
+brain-data.workspace = true
