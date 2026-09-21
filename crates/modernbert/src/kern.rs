@@ -8,13 +8,20 @@
 //! from position, so a kernel this crate forgot to register fails loudly at
 //! construction instead of running whatever happens to sit at that slot.
 //!
-//! Deliberately a SMALL list next to `decide::kern::PIPELINES`: ModernBERT
-//! has no GQA/causal path, no learned position or token-type table, no
-//! bias-add anywhere in the trunk (`attention_bias`/`mlp_bias`/`norm_bias`
-//! are all false on the released config), and this milestone's attention
+//! Deliberately a SMALL list next to `decide::kern::PIPELINES`: ModernBERT's
+//! own trunk has no GQA/causal path, no learned position or token-type
+//! table, no bias-add anywhere (`attention_bias`/`mlp_bias`/`norm_bias` are
+//! all false on the released config), and this milestone's attention
 //! dispatch deliberately skips the key-minor transpose optimisation and the
 //! fused flash kernels - see `model.rs`'s module doc for why the plain
 //! materialized rungs are the right starting point here.
+//!
+//! `laya.rs`'s decision head is the opposite shape (standard biased
+//! `nn.TransformerEncoderLayer`s, see its own module doc), which is why
+//! `bias_add`/`layernorm`/`relu_inplace` are registered below even though
+//! nothing in the trunk needs them - one pipeline list for the whole crate,
+//! same reasoning as `decide::kern::PIPELINES` serving both `Encoder` and
+//! `Head`.
 
 use gpu_core::Gpu;
 
@@ -44,6 +51,12 @@ pub const PIPELINES: &[(&str, &str)] = &[
     // must use this rung unconditionally until the fused flash kernel grows
     // its own window support - see `model.rs`'s module doc.
     ("attn_scores_cross_win", kernels::ATTN_SCORES_CROSS_WIN),
+    // Laya M3's head only: standard biased Linear/LayerNorm plus a plain
+    // (non-gated) ReLU FFN activation - see `laya.rs`'s module doc for why
+    // this is the opposite bias/activation convention from the trunk above.
+    ("bias_add", kernels::BIAS_ADD),
+    ("layernorm", kernels::LAYERNORM),
+    ("relu_inplace", kernels::RELU_INPLACE),
 ];
 
 macro_rules! ids {
@@ -79,4 +92,7 @@ ids! {
     softmax_cross => "attn_softmax_cross",
     apply_cross => "attn_apply_cross",
     scores_cross_win => "attn_scores_cross_win",
+    bias_add => "bias_add",
+    layernorm => "layernorm",
+    relu_inplace => "relu_inplace",
 }

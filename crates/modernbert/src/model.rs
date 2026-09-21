@@ -374,6 +374,14 @@ impl ModernBert {
         self.read(&self.hidden)
     }
 
+    /// The final hidden states' DEVICE buffer - what `laya::LayaHead` reads,
+    /// mirroring `decide::model::Encoder::hidden_buf`. A head built on top of
+    /// this encoder dispatches straight against this buffer rather than
+    /// paying a host round trip through [`ModernBert::hidden`] first.
+    pub fn hidden_buf(&self) -> &DeviceBuffer {
+        &self.hidden
+    }
+
     /// Mean of the final hidden states over each span. `[spans, H]`. No pad
     /// rows to exclude - see the module doc's packing note.
     pub fn pooled_mean(&self) -> Vec<f32> {

@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-"""Dump a tiny random-weight ModernBERT reference fixture for brain's
-`brain-modernbert` parity test.
+"""Dump a tiny random-weight ModernBERT + Laya decision-head reference
+fixture for brain's `brain-modernbert` parity tests.
 
 Runs the REAL `transformers.models.modernbert.modeling_modernbert.
 ModernBertModel` (this container has torch 2.13 / transformers 5.15
@@ -12,6 +12,14 @@ installed) on a tiny fixed-seed config matching `ModernBertConfig::tiny()`
 different-length sequences, and dumps every weight, the input ids/spans, and
 the reference (unpadded, per-sequence) hidden states as raw little-endian f32
 blobs + manifest.json.
+
+It ALSO builds `convaiinnovations/laya`'s own `DecisionModel` wrapper
+(`rl_common.py`, Apache-2.0) around that SAME tiny encoder - a small inline
+copy of the class rather than a new pip dependency - runs it on a synthetic
+packed batch with real marker positions and qtypes, and dumps the head's own
+weights, `marker_pos`/`marker_mask`/`qtype`, and both `logits` (option
+scores) and `act_logits` under the manifest's `head_weights`/`head_inputs`/
+`head_output` sections, read by `crates/modernbert/tests/laya_parity.rs`.
 
 This script is resource-prep tooling: it is NEVER part of brain's build/test
 path. Fixtures are NOT committed (`brain-never-commit-goldens` - see
@@ -34,6 +42,7 @@ import json
 import pathlib
 
 import torch
+import torch.nn as nn
 from transformers.models.modernbert.modeling_modernbert import ModernBertConfig, ModernBertModel
 
 SEED = 0
@@ -76,6 +85,55 @@ CFG = ModernBertConfig(
     attn_implementation="eager",
 )
 SPANS = [12, 9]  # both > 2*window=6, and DIFFERENT lengths (packed, not padded)
+
+# Laya M3: synthetic marker layout for the decision head, over the SAME two
+# packed sequences above. Front-packed (valid markers first) so a flat
+# "valid options only" comparison needs no masking on the Rust side - see
+# `crates/modernbert/src/laya.rs`'s own module doc on why brain never pads.
+HEAD_LAYERS = 2
+MAX_OPTIONS = 3
+# question 0 (len 12): 3 real options; question 1 (len 9): 2 real options and
+# one masked-out padding slot - different arities on purpose, the same
+# `k.clamp(min=2)`/`topk(2)` edge this fixture exists to exercise.
+MARKER_POS = [[2, 5, 8], [1, 4, 0]]
+MARKER_MASK = [[True, True, True], [True, True, False]]
+QTYPE = [0, 2]
+
+
+class DecisionHead(nn.Module):
+    """`convaiinnovations/laya`'s own `rl_common.DecisionModel`, minus the
+    encoder (passed the encoder's hidden states directly) - an inline copy,
+    not a new pip dependency, kept byte-for-byte faithful to the real module
+    names (`head.layers.*`, `scorer.*`, `act_head.*`, `type_emb.*`) so the
+    dumped weights need no renaming to match the real checkpoint's own.
+    """
+
+    def __init__(self, d: int, head_layers: int = HEAD_LAYERS, n_act: int = 2):
+        super().__init__()
+        nhead = max(1, d // 64)
+        layer = nn.TransformerEncoderLayer(d, nhead, 4 * d, dropout=0.0, batch_first=True, norm_first=True)
+        self.head = nn.TransformerEncoder(layer, head_layers)
+        self.type_emb = nn.Embedding(3, d)
+        self.scorer = nn.Sequential(nn.LayerNorm(d), nn.Linear(d, d), nn.GELU(), nn.Linear(d, 1))
+        self.act_head = nn.Sequential(nn.Linear(d + 4, 256), nn.GELU(), nn.Linear(256, n_act))
+
+    def forward(self, h, attention_mask, marker_pos, marker_mask, qtype):
+        h = h + self.type_emb(qtype)[:, None, :]
+        pad = ~attention_mask.bool()
+        for layer in self.head.layers:
+            h = layer(h, src_key_padding_mask=pad)
+        idx = marker_pos.clamp(min=0)[:, :, None].expand(-1, -1, h.size(-1))
+        m = torch.gather(h, 1, idx)
+        logits = self.scorer(m).squeeze(-1).float()
+        logits = logits.masked_fill(~marker_mask, -1e4)
+        p = torch.softmax(logits.detach(), -1)
+        k = marker_mask.sum(-1).clamp(min=2).float()
+        ent = -(p * torch.log(p.clamp_min(1e-9))).sum(-1) / torch.log(k)
+        top2 = p.topk(2, -1).values
+        feats = torch.stack([top2[:, 0], top2[:, 0] - top2[:, 1], ent, k / 255.0], -1)
+        pooled = h[:, 0].float()
+        act_logits = self.act_head(torch.cat([pooled, feats], -1))
+        return logits, act_logits
 
 
 def tensor_blob(t: torch.Tensor) -> bytes:
@@ -157,6 +215,9 @@ def main() -> None:
         "weights": {},
         "inputs": {},
         "output": {},
+        "head_weights": {},
+        "head_inputs": {},
+        "head_output": {},
     }
 
     def dump(section: str, name: str, t: torch.Tensor) -> None:
@@ -177,6 +238,48 @@ def main() -> None:
 
     packed_hidden = torch.cat([out_t[i, : len(s)] for i, s in enumerate(seqs)], dim=0)
     dump("output", "hidden", packed_hidden)
+
+    # ---- Laya M3: the decision head, wrapped around the SAME encoder ----
+    head = DecisionHead(CFG.hidden_size).eval()
+    # Same std=0.1 reasoning as the encoder's own init above, verified
+    # empirically for the head too rather than assumed to transfer: at
+    # `initializer_range` (0.02) the RELU-vs-GELU trap is not numerically
+    # invisible the way the GeGLU one was (ReLU and GELU do not converge to
+    # the same near-zero-input linear approximation the way `gelu(u)*v` vs
+    # `gelu(v)*u` did), but 0.1 keeps one init recipe for the whole fixture
+    # and stays comfortably finite through the head's own 2 layers.
+    gh = torch.Generator().manual_seed(SEED + 3)
+    with torch.no_grad():
+        for _name, p in head.named_parameters():
+            torch.nn.init.normal_(p, std=0.1, generator=gh)
+
+    marker_pos = torch.tensor(MARKER_POS, dtype=torch.long)
+    marker_mask = torch.tensor(MARKER_MASK, dtype=torch.bool)
+    qtype = torch.tensor(QTYPE, dtype=torch.long)
+    with torch.no_grad():
+        logits, act_logits = head(out_t, attention_mask, marker_pos, marker_mask, qtype)
+
+    for name, p in head.named_parameters():
+        dump("head_weights", name, p)
+
+    dump("head_inputs", "marker_pos", marker_pos.to(torch.float32))
+    dump("head_inputs", "marker_mask", marker_mask.to(torch.float32))
+    dump("head_inputs", "qtype", qtype.to(torch.float32))
+
+    # Flat, valid-options-only, front-packed per question - the same shape
+    # `LayaHead::forward` returns (see `crates/modernbert/src/laya.rs`'s own
+    # module doc on why brain never computes a padded/masked entry at all).
+    row0 = [sum(SPANS[:i]) for i in range(len(SPANS))]
+    arity = [int(sum(row)) for row in MARKER_MASK]
+    valid_logits = torch.cat([logits[b, : arity[b]] for b in range(len(SPANS))])
+    marker_rows_absolute = torch.tensor(
+        [row0[b] + MARKER_POS[b][j] for b in range(len(SPANS)) for j in range(arity[b])],
+        dtype=torch.float32,
+    )
+    manifest["head_inputs"]["arity"] = arity
+    dump("head_inputs", "marker_rows_absolute", marker_rows_absolute)
+    dump("head_output", "logits", valid_logits)
+    dump("head_output", "act_logits", act_logits)
 
     (out / "manifest.json").write_text(json.dumps(manifest, indent=1))
     total = sum(f.stat().st_size for f in out.iterdir())

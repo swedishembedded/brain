@@ -28,7 +28,9 @@
 pub mod config;
 pub mod init;
 pub mod kern;
+pub mod laya;
 pub mod model;
 
 pub use config::ModernBertConfig;
+pub use laya::{LayaConfig, LayaHead};
 pub use model::ModernBert;
