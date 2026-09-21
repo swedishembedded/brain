@@ -103,6 +103,21 @@ pub struct FitCfg {
     /// SUB-pixel gaussians (median 0.6 px), and a couple of pixels is already
     /// generous headroom over that.
     pub max_scale_pixels: f32,
+    /// How many times its STARTING size a gaussian may grow. 0 = unbounded.
+    ///
+    /// A ceiling in pixels alone cannot be right for every scene: a sparse
+    /// scene legitimately has gaussians many pixels across, while the
+    /// pixel-aligned reconstruction this usually fits emits SUB-pixel ones
+    /// (median 0.6 px). Tightening the pixel ceiling far enough to constrain
+    /// the second stops the first from representing itself at all.
+    ///
+    /// What was actually measured going wrong is GROWTH: over 400 iterations
+    /// the fit inflated the longest axis of a real reconstruction 7.5x, which
+    /// is what turns a scene into fog when viewed from anywhere it was not
+    /// fitted. A bound relative to where each gaussian started says "the fit
+    /// may refine what the reconstruction proposed, not replace it with
+    /// something far larger", and that is scene-adaptive by construction.
+    pub max_growth: f32,
     /// Fraction of the LARGE gaussians to split each round regardless of what
     /// the gradient says, and to reseed at a probed depth. 0 disables it.
     ///
@@ -150,7 +165,8 @@ impl Default for FitCfg {
             eps2d: RenderOpts::default().eps2d,
             antialiased: RenderOpts::default().antialiased,
             mip_scale: crate::mip::DEFAULT_SCALE,
-            max_scale_pixels: 2.0,
+            max_scale_pixels: 16.0,
+            max_growth: 2.0,
             explore_frac: 0.05,
             sh_degree: 0,
             pose_lr: 0.0,
@@ -527,7 +543,7 @@ fn fit_stage(
     };
     // The same conversion gives the ceiling: `smoothing_sigma` is "this many
     // pixels, in world units, at the rate this gaussian was best sampled".
-    let ceil: Vec<f32> = if cfg.max_scale_pixels > 0.0 {
+    let mut ceil: Vec<f32> = if cfg.max_scale_pixels > 0.0 {
         crate::mip::smoothing_sigma(init, cams, cfg.max_scale_pixels)
             .into_iter()
             .map(|v| if v > 0.0 { v } else { 0.3 })
@@ -535,6 +551,16 @@ fn fit_stage(
     } else {
         vec![0.3; n]
     };
+    // and no gaussian may grow far past what it started as, whichever bound
+    // is tighter for it
+    if cfg.max_growth > 0.0 {
+        for i in 0..n.min(ceil.len()) {
+            let start = init.scales[i * 3..i * 3 + 3].iter().copied().fold(0.0f32, f32::max);
+            if start > 0.0 {
+                ceil[i] = ceil[i].min(start * cfg.max_growth);
+            }
+        }
+    }
 
     // `adamw.wgsl` (M6.4) binds param/grad/m/v PLUS a per-tensor `numel`
     // descriptor and a device-resident grad-scale coefficient, and reads its

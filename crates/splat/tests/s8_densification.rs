@@ -429,21 +429,17 @@ fn a_view_dependent_surface_needs_view_dependent_colour() {
     );
 }
 
-/// A fit may not cover a gap with a splat the size of the room.
+/// A scene the optimizer WANTS to inflate: the truth rendered from three
+/// nearby views, started from a tenth of its gaussians, so covering what is
+/// missing by growing what is left is the cheapest move available.
 ///
-/// Bounding a gaussian's axes by a constant in WORLD units is a bound on
-/// nothing: what 0.3 means depends entirely on how big the scene is, and on a
-/// capture whose camera orbit has radius 0.5 it permits a splat spanning a
-/// fifth of the frame. The optimizer takes that offer, because inflating one
-/// gaussian is the cheapest way to cover a region it cannot otherwise explain,
-/// and the result is a scene that looks correct from the views it was fitted
-/// to and like hair from every other.
-///
-/// The bound that means something is in pixels, through the cameras.
-#[test]
-fn a_fit_may_not_grow_a_splat_past_what_its_cameras_resolve() {
-    let g = Gpu::new_cpu(splat::PIPELINES);
-    let ks = Kernels::at(0);
+/// Deliberately SMALL in world units. The bound this exercises used to be 0.3
+/// world units, which is about 6 px on a scene three units away and roughly
+/// 140 px on a real capture whose camera orbit has radius 0.5 - invisible at
+/// one scale and ruinous at the other, which is what a bound in world units
+/// gets you.
+fn inflatable_scene(g: &Gpu, ks: Kernels) -> (Splats, Vec<TargetView>) {
+    let (g, ks) = (g, ks);
     let (w, h) = (64u32, 64u32);
     // A SMALL scene, which is the whole point. The old bound of 0.3 world
     // units is only about 6 px on a scene three units away, and roughly 140 on
@@ -485,6 +481,76 @@ fn a_fit_may_not_grow_a_splat_past_what_its_cameras_resolve() {
         init.colors.extend_from_slice(&truth.colors[i * 3..i * 3 + 3]);
     }
 
+    (init, shots)
+}
+
+/// A fit may refine what the reconstruction proposed; it may not replace it
+/// with something several times larger.
+///
+/// The pixel ceiling above cannot carry this on its own. It has to be right
+/// for every scene, and scenes differ: a sparse one legitimately has gaussians
+/// many pixels across, while the pixel-aligned reconstruction this usually
+/// fits emits SUB-pixel ones (median 0.6 px on a real capture). Tightening the
+/// pixel ceiling far enough to constrain the second stops the first from
+/// representing itself - measured, as a convergence test that stopped
+/// converging.
+///
+/// What was actually observed going wrong is GROWTH: a 400 iteration fit
+/// inflated the longest axis of a real reconstruction 7.5x, which is what
+/// turns a scene into fog seen from anywhere it was not fitted. A bound
+/// relative to each gaussian's own starting size is scene-adaptive by
+/// construction.
+#[test]
+fn a_fit_may_not_inflate_a_splat_far_past_where_it_started() {
+    let g = Gpu::new_cpu(splat::PIPELINES);
+    let ks = Kernels::at(0);
+    let (init, shots) = inflatable_scene(&g, ks);
+
+    let grew = |s: &Splats| -> f32 {
+        let mut worst = 0.0f32;
+        for i in 0..s.len() {
+            let a = s.scales[i * 3].max(s.scales[i * 3 + 1]).max(s.scales[i * 3 + 2]);
+            let b = init.scales[i * 3].max(init.scales[i * 3 + 1]).max(init.scales[i * 3 + 2]);
+            if b > 0.0 {
+                worst = worst.max(a / b);
+            }
+        }
+        worst
+    };
+
+    let base = FitCfg {
+        iters: 150, lr: 8e-3, log_every: 0, max_scale_pixels: 0.0, max_growth: 0.0,
+        ..Default::default()
+    };
+    let (loose, _) = fit(&g, ks, &init, &shots, &base, &mut |_, _| true);
+    let cap = 2.0f32;
+    let (held, _) = fit(&g, ks, &init, &shots, &FitCfg { max_growth: cap, ..base }, &mut |_, _| true);
+
+    let (l, h) = (grew(&loose), grew(&held));
+    assert!(
+        l > cap * 1.5,
+        "the unbounded fit grew a splat only {l:.2}x, so this scene never tempted it to inflate \
+         anything and the test proves nothing"
+    );
+    assert!(h <= cap * 1.05, "the bounded fit grew a splat {h:.2}x against a cap of {cap}");
+}
+
+/// A fit may not cover a gap with a splat the size of the room.
+///
+/// Bounding a gaussian's axes by a constant in WORLD units is a bound on
+/// nothing: what 0.3 means depends entirely on how big the scene is, and on a
+/// capture whose camera orbit has radius 0.5 it permits a splat spanning a
+/// fifth of the frame. The optimizer takes that offer, because inflating one
+/// gaussian is the cheapest way to cover a region it cannot otherwise explain,
+/// and the result is a scene that looks correct from the views it was fitted
+/// to and like hair from every other.
+///
+/// The bound that means something is in pixels, through the cameras.
+#[test]
+fn a_fit_may_not_grow_a_splat_past_what_its_cameras_resolve() {
+    let g = Gpu::new_cpu(splat::PIPELINES);
+    let ks = Kernels::at(0);
+    let (init, shots) = inflatable_scene(&g, ks);
     let cams: Vec<Camera> = shots.iter().map(|t| t.cam).collect();
     let biggest = |s: &Splats, limit_px: f32| -> f32 {
         // express every gaussian's longest axis in pixels, at the rate its own
@@ -505,7 +571,15 @@ fn a_fit_may_not_grow_a_splat_past_what_its_cameras_resolve() {
     // A deliberately tight cap, so the mechanism is exercised rather than
     // merely present. The shipped default is looser; what is under test is
     // that the bound is expressed through the cameras and actually binds.
-    let base = FitCfg { iters: 150, lr: 8e-3, log_every: 0, max_scale_pixels: 4.0, ..Default::default() };
+    // `max_growth` is off in BOTH runs here. It is a second, independent
+    // ceiling - relative to where each gaussian started rather than to what
+    // the cameras resolve - and leaving it on would bound the control run too,
+    // making this compare two bounded fits and prove nothing. Its own bound is
+    // tested separately.
+    let base = FitCfg {
+        iters: 150, lr: 8e-3, log_every: 0, max_scale_pixels: 4.0, max_growth: 0.0,
+        ..Default::default()
+    };
     let (bounded, _) = fit(&g, ks, &init, &shots, &base, &mut |_, _| true);
     let (loose, _) =
         fit(&g, ks, &init, &shots, &FitCfg { max_scale_pixels: 0.0, ..base }, &mut |_, _| true);

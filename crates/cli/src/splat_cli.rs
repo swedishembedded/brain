@@ -793,7 +793,8 @@ fn fit_cmd(argv: &[String]) {
     // the cameras resolved; it can only blur it, and from a grazing angle a
     // scene of them is fog. The two shape bounds cap the axis RATIOS - see
     // `splat::opt::clamp_axes` - which is a separate question from size.
-    let max_scale_pixels = a.f32_or("--max-scale-pixels", 2.0);
+    let max_scale_pixels = a.f32_or("--max-scale-pixels", 16.0);
+    let max_growth = a.f32_or("--max-growth", 2.0);
     let max_needle = a.f32_or("--max-needle", 2.0);
     let max_flat = a.f32_or("--max-flat", 4.0);
     let cfg = FitCfg {
@@ -808,6 +809,7 @@ fn fit_cmd(argv: &[String]) {
         sh_degree,
         pose_lr,
         max_scale_pixels,
+        max_growth,
         max_needle,
         max_flat,
         ..Default::default()
