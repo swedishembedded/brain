@@ -13,6 +13,7 @@
 
 pub mod align;
 pub mod caps;
+pub mod mcmc;
 pub mod mip;
 pub mod opt;
 pub mod orient;

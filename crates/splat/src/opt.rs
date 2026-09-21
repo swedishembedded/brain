@@ -18,6 +18,24 @@ use crate::renderer::{BwdScratch, GpuSplats, Renderer, SplatGrads};
 use crate::types::{Camera, Mode, RenderOpts, Splats};
 use crate::Kernels;
 
+/// Which density-control strategy `fit` runs when `densify_every > 0`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Densify {
+    /// Upstream 3DGS: threshold a positional-gradient statistic, then SPLIT
+    /// the large gaussians above it and CLONE the small ones, and drop
+    /// whatever has gone transparent. The default, so that turning density
+    /// control on changes nothing about what it then does.
+    #[default]
+    Heuristic,
+    /// 3DGS-MCMC (Kheradmand et al., NeurIPS 2024, arXiv:2404.09591):
+    /// no thresholds and no deletion. Transparent gaussians are RELOCATED onto
+    /// opaque ones with the opacity and scale correction that keeps the render
+    /// unchanged at the moment of the move, the budget is spent up to
+    /// `max_gaussians`, and positions carry noise proportional to the learning
+    /// rate so the fit samples rather than descends. See [`crate::mcmc`].
+    Mcmc,
+}
+
 pub struct FitCfg {
     pub iters: usize,
     pub lr: f32,
@@ -60,10 +78,22 @@ pub struct FitCfg {
     /// Skip density control until this iteration, so the gradients it reads
     /// describe the scene rather than the first few steps of chaos.
     pub densify_after: usize,
+    /// Stop density control at this iteration, 0 = run it to the end.
+    ///
+    /// A fit that is still rearranging its scene on the last iteration never
+    /// gets to converge on the arrangement it chose: whatever was just added
+    /// or moved is left wherever it landed, with a fresh Adam state and no
+    /// steps to spend. Both the reference pipelines stop well before the end
+    /// for this reason (upstream 3DGS at half of training, 3DGS-MCMC at 83%
+    /// of it).
+    pub densify_until: usize,
     /// Fraction of gaussians, by positional-gradient magnitude, considered
     /// under-reconstructed at each density-control step.
     pub densify_frac: f32,
-    /// Drop gaussians below this opacity at each density-control step.
+    /// The opacity below which a gaussian is not carrying anything, and what
+    /// the density control then does about it: [`Densify::Heuristic`] drops
+    /// it, [`Densify::Mcmc`] relocates it. One threshold, because the
+    /// judgement it encodes is the same one.
     pub prune_opacity: f32,
     /// Refuse to grow past this many gaussians, 0 = the device decides. A
     /// runaway subdivision is a much worse failure than a soft scene.
@@ -158,6 +188,52 @@ pub struct FitCfg {
     /// 26.34, which is blades that look right from the training cameras and
     /// render as fur from anywhere else.
     pub depth_weight: f32,
+    /// How density control decides where gaussians go.
+    pub strategy: Densify,
+    /// [`Densify::Mcmc`] only, and only when `max_gaussians` is 0: how much
+    /// bigger the scene may get at each density-control round, as a fraction
+    /// of its current size. The paper's 5%.
+    ///
+    /// With a budget this is not consulted at all - the budget IS the
+    /// schedule, see [`crate::mcmc::step`]. It is the fallback for a fit that
+    /// was given no budget to aim at, where 5% a round is the only answer
+    /// available and a short fit will not get far on it.
+    pub mcmc_grow_frac: f32,
+    /// [`Densify::Mcmc`] only: how fast an unsupported gaussian fades, as
+    /// AdamW's decoupled decay on opacity alone (`o -= lr * decay * o`).
+    ///
+    /// The paper regularizes with `λ_o·Σ|o_i|` added to the loss, and the
+    /// point of that term is to MANUFACTURE dead gaussians: relocation is the
+    /// move that distinguishes MCMC from cloning, and it has nothing to move
+    /// until something has gone transparent. Measured on a scene with no dead
+    /// gaussians in it, a 200-iteration fit relocated ONE.
+    ///
+    /// It is a decay rather than a term in the loss for the same reason
+    /// `densify_frac` is a fraction rather than an absolute gradient
+    /// threshold: this loss is normalized per pixel and per view, so an
+    /// absolute `λ_o` means something different at every image size and view
+    /// count, while a fraction of the opacity per step does not.
+    ///
+    /// OFF by default, because what it buys is not free and the bill arrives
+    /// first. Every gaussian fades and only the loss puts it back, so the fit
+    /// pays for the recycling immediately and collects when the recycled
+    /// samples have had time to settle somewhere useful. Measured at 0.0 /
+    /// 0.05 / 0.15 / 0.5 on one scene: 200 iterations 0.008978, 0.009675,
+    /// 0.010887, 0.011409 - monotonically worse; 600 iterations 0.003055,
+    /// 0.002984 - the sign has flipped. Turn it on for long fits.
+    pub mcmc_opacity_decay: f32,
+    /// [`Densify::Mcmc`] only: the paper's λ_noise, the coefficient of the
+    /// position noise, in units of the gaussian's OWN size per learning-rate
+    /// step. The displacement is `mcmc_noise * lr * N(0, Σ_i)`, weighted per
+    /// gaussian so only the near-transparent ones move - see
+    /// [`crate::mcmc::add_noise`]. 0 turns the chain back into plain descent.
+    ///
+    /// 1.0 is the natural unit of this parameterization rather than a fitted
+    /// constant: one learning-rate step is worth one standard deviation of
+    /// the gaussian's own shape. It is also what the measurements prefer,
+    /// though not by much - on one scene 0.007965 without the noise against
+    /// 0.007128 with it, and 0.3 and 3.0 on either side of it are worse.
+    pub mcmc_noise: f32,
     /// Step size for refining the CAMERAS, in radians and world units per
     /// iteration. 0 freezes them, which is what `fit` does.
     ///
@@ -180,6 +256,7 @@ impl Default for FitCfg {
             log_every: 20,
             densify_every: 0,
             densify_after: 30,
+            densify_until: 0,
             densify_frac: 0.05,
             prune_opacity: 0.02,
             max_gaussians: 0,
@@ -191,6 +268,10 @@ impl Default for FitCfg {
             explore_frac: 0.05,
             sh_degree: 0,
             depth_weight: 0.0,
+            strategy: Densify::Heuristic,
+            mcmc_grow_frac: 0.05,
+            mcmc_opacity_decay: 0.0,
+            mcmc_noise: 1.0,
             pose_lr: 0.0,
         }
     }
@@ -353,7 +434,8 @@ fn fit_inner(gpu: &Gpu, ks: Kernels, init: &Splats, targets: &[TargetView], cfg:
         loss = l;
         done += iters;
         stop = aborted;
-        if cfg.densify_every > 0 && done >= cfg.densify_after && done < cfg.iters && !stop {
+        let until = if cfg.densify_until > 0 { cfg.densify_until.min(cfg.iters) } else { cfg.iters };
+        if cfg.densify_every > 0 && done >= cfg.densify_after && done < until && !stop {
             let before = scene.len();
             // Where the cameras are, so exploration can probe ALONG the
             // viewing ray - the one direction the gradient cannot supply.
@@ -367,7 +449,21 @@ fn fit_inner(gpu: &Gpu, ks: Kernels, init: &Splats, targets: &[TargetView], cfg:
                 }
                 [c[0] as f32, c[1] as f32, c[2] as f32]
             };
-            densify(&mut scene, &grad, cfg, eye);
+            match cfg.strategy {
+                Densify::Heuristic => densify(&mut scene, &grad, cfg, eye),
+                // The chain has no use for the gradient statistic: where a
+                // sample goes is decided by opacity, which is the model's own
+                // statement about whether that sample is explaining anything.
+                Densify::Mcmc => {
+                    let first = cfg.densify_after.max(cfg.densify_every);
+                    let round = done.saturating_sub(first) / cfg.densify_every;
+                    let rounds = (until.saturating_sub(first)).div_ceil(cfg.densify_every);
+                    let (moved, added) = crate::mcmc::step(&mut scene, cfg, round, rounds);
+                    if cfg.log_every > 0 && moved > 0 {
+                        println!("fit iter {done:4}: relocated {moved}, added {added}");
+                    }
+                }
+            }
             if cfg.log_every > 0 && scene.len() != before {
                 println!("fit iter {done:4}: density control {before} -> {} gaussians", scene.len());
             }
@@ -406,7 +502,7 @@ fn fit_inner(gpu: &Gpu, ks: Kernels, init: &Splats, targets: &[TargetView], cfg:
 /// Deterministic per-gaussian jitter in [0,1). A fit has to give the same
 /// answer twice, so exploration is pseudo-random in the scene's own indices
 /// rather than in wall-clock entropy.
-fn jitter(i: usize, salt: u64) -> f32 {
+pub(crate) fn jitter(i: usize, salt: u64) -> f32 {
     let mut z = (i as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ salt.wrapping_mul(0xbf58_476d_1ce4_e5b9);
     z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
@@ -452,6 +548,12 @@ fn densify(scene: &mut Splats, grad: &[f32], cfg: &FitCfg, eye: [f32; 3]) {
     let big = sizes[(n as f32 * 0.8) as usize % n];
 
     let mut out = Splats::default();
+    // Higher-order colour travels with the gaussian it belongs to. It used to
+    // be left behind here, so a fit with `sh_degree` above 0 and density
+    // control on silently lost every harmonic at the first round and started
+    // again from flat colour.
+    let shk = crate::mcmc::sh_stride(scene);
+    out.sh_rest = scene.sh_rest.as_ref().map(|(d, _)| (*d, Vec::new()));
     let push = |o: &mut Splats, i: usize, dm: [f32; 3], shrink: f32| {
         for (k, d) in dm.iter().enumerate() {
             o.means.push(scene.means[i * 3 + k] + d);
@@ -462,6 +564,9 @@ fn densify(scene: &mut Splats, grad: &[f32], cfg: &FitCfg, eye: [f32; 3]) {
         }
         o.opacities.push(scene.opacities[i]);
         o.colors.extend_from_slice(&scene.colors[i * 3..i * 3 + 3]);
+        if let (Some((_, src)), Some((_, dst))) = (&scene.sh_rest, &mut o.sh_rest) {
+            dst.extend_from_slice(&src[i * shk..i * shk + shk]);
+        }
     };
     for i in 0..n {
         if scene.opacities[i] < cfg.prune_opacity {
@@ -947,8 +1052,16 @@ fn fit_stage(
         // projected-gradient clamps (host; N is fit-sized)
         let tm = std::time::Instant::now();
         let mut geo = gpu.read(&p_geo, 10 * n);
-        prof.add("clamp: read geo", tm.elapsed());
+        let mut op = gpu.read(&p_op, n);
+        prof.add("clamp: readback", tm.elapsed());
         let tm = std::time::Instant::now();
+        // The chain's exploration noise, before the clamps rather than after,
+        // so a gaussian cannot be pushed out of bounds and left there. It
+        // rides along on the readback the clamps already needed, so sampling
+        // costs no extra transfer.
+        if cfg.strategy == Densify::Mcmc {
+            crate::mcmc::add_noise(&mut geo, &op, cfg.mcmc_noise * cfg.lr, (it0 + it) as u64 + 1);
+        }
         for i in 0..n {
             let lo = floor[i.min(floor.len() - 1)];
             let hi = ceil[i.min(ceil.len() - 1)].max(lo);
@@ -960,9 +1073,13 @@ fn fit_stage(
         prof.add("clamp: host loop", tm.elapsed());
         let tm = std::time::Instant::now();
         gpu.write(&p_geo, cast(&geo));
-        let mut op = gpu.read(&p_op, n);
+        // The chain's opacity regularizer, as decoupled decay: every gaussian
+        // fades a little every step and only the loss puts it back, so the
+        // ones explaining nothing end up below `prune_opacity` where
+        // relocation can recycle them.
+        let fade = if cfg.strategy == Densify::Mcmc { 1.0 - cfg.lr * cfg.mcmc_opacity_decay } else { 1.0 };
         for v in op.iter_mut() {
-            *v = v.clamp(1e-4, 1.0 - 1e-4);
+            *v = (*v * fade).clamp(1e-4, 1.0 - 1e-4);
         }
         gpu.write(&p_op, cast(&op));
         prof.add("clamp: write back", tm.elapsed());

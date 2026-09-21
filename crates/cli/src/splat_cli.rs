@@ -20,7 +20,7 @@
 //! Esc quit. With no --eye, the camera is auto-framed from the scene bounds.
 
 use gpu_core::Gpu;
-use splat::opt::{FitCfg, TargetView};
+use splat::opt::{Densify, FitCfg, TargetView};
 use splat::renderer::{rgba_to_rgb, sorted_by_depth, GpuSplats, Renderer};
 use splat::types::{auto_camera, cross3, norm3, Camera, Mode, RenderOpts, Splats};
 use splat::Kernels;
@@ -735,6 +735,18 @@ fn fit_cmd(argv: &[String]) {
     let densify_every = a.usize_or("--densify", 0);
     let densify_frac = a.f32_or("--densify-frac", FitCfg::default().densify_frac);
     let max_gaussians = a.usize_or("--max-gaussians", 0);
+    // Which density control. The heuristic is the default so that `--densify`
+    // keeps meaning what it meant; `mcmc` is 3DGS-MCMC, which spends
+    // `--max-gaussians` as a budget and recycles transparent gaussians
+    // instead of deleting them.
+    let strategy = match a.str_or("--densify-strategy", "heuristic").as_str() {
+        "heuristic" => Densify::Heuristic,
+        "mcmc" => Densify::Mcmc,
+        other => {
+            eprintln!("--densify-strategy must be `heuristic` or `mcmc`, got `{other}`");
+            std::process::exit(2);
+        }
+    };
     a.finish();
 
     let cams = read_cameras(&cams_path);
@@ -806,6 +818,7 @@ fn fit_cmd(argv: &[String]) {
         densify_every,
         densify_frac,
         max_gaussians,
+        strategy,
         sh_degree,
         pose_lr,
         max_scale_pixels,

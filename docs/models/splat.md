@@ -89,6 +89,7 @@ into a scene that actually reproduces your photos.
 | `--densify N` | `fit` | run density control every N iterations (default off) |
 | `--densify-frac F` | `fit` | fraction of gaussians treated as under-reconstructed per step (default `0.05`) |
 | `--max-gaussians N` | `fit` | refuse to grow past N |
+| `--densify-strategy S` | `fit` | `heuristic` (default) or `mcmc` - see below |
 
 ## Density control: when the fit may ADD gaussians
 
@@ -168,6 +169,49 @@ Two properties are worth knowing before turning it on, both measured in
 On the headline case - a scene slid 5.7% along every viewing ray, rendering the
 correct image - an RGB-only fit leaves 6.21% of depth error after 150 iterations
 and the same fit with `depth_weight: 1.0` leaves 0.08%.
+
+### `--densify-strategy mcmc`: relocate instead of split and prune
+
+The heuristic above decides where detail may appear by thresholding a
+gradient statistic. 3DGS-MCMC (Kheradmand et al., NeurIPS 2024,
+arXiv:2404.09591) removes the decision: the gaussians are samples from a
+distribution, and the moves are to RELOCATE a sample that has gone
+transparent onto one that has not, and to perturb positions with noise
+proportional to the learning rate. Nothing is thresholded and nothing is
+deleted.
+
+A relocation is free because it is image-preserving. Placing N gaussians
+where one was would composite to `1-(1-o)^N` and stack N tails, so the
+opacity and the scale are corrected (the paper's Eq. 9) to keep the alpha
+integral along a ray equal to what the single gaussian gave. Measured against
+the gaussian they replace, 2 to 5 corrected copies render at 43.7 to 67.2 dB,
+against 26.9 to 38.0 dB for the same copies made naively.
+
+`--max-gaussians` stops being a safety limit and becomes the budget: the
+scene grows geometrically into it over the first fifth of the density-control
+rounds and then stops changing size, so the samples it spends have the rest of
+the fit to settle on somewhere to be.
+
+What MCMC has that the heuristic does not is somewhere to put a gaussian the
+fit cannot use. The heuristic can only delete it, which hands the budget back
+to a split rule that climbs to it again two children at a time. Measured at
+64x64 over three views, 150 iterations, a 400-gaussian budget, from 36 live
+gaussians plus 220 sitting behind the cameras where a bad depth prediction
+leaves them:
+
+| | final MSE | gaussians |
+|---|---|---|
+| no density control | 0.010884 | 256 |
+| heuristic, `--densify-frac 0.05` (default) | 0.010820 | 55 |
+| heuristic, `--densify-frac 0.30` | 0.008462 | 158 |
+| heuristic, `--densify-frac 1.00` and above | 0.007801 | 400 |
+| MCMC | 0.004440 | 400 |
+
+It is not a free win everywhere. On a scene with nothing wasted in it, where
+every gradient is informative, the gradient-targeted heuristic is still ahead
+(0.006774 against 0.008868 on the same budget from a uniform coarse start).
+Relocation pays where budget is being wasted, and it is worth knowing which of
+the two a scene is before choosing.
 
 ## Sharpness, and the anti-alias dilation
 
