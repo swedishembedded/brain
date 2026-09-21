@@ -30,9 +30,24 @@ def main(csv_path, out_dir):
     if not rows:
         sys.exit("no rows in " + csv_path)
     by_map = defaultdict(list)
+    skipped = 0
     for r in rows:
-        by_map[int(r["map"])].append((int(r["generation"]), float(r["progress"]),
-                                      int(float(r["exits"]))))
+        # A row whose numbers are missing is a run that did not report, not a
+        # run that scored zero, and drawing it as zero would put a dip in the
+        # curve where there is only a gap. Say how many rather than failing:
+        # a plot is for looking at, and refusing to draw anything because one
+        # level of one generation is missing helps nobody.
+        try:
+            point = (int(r["generation"]), float(r["progress"]),
+                     int(float(r["exits"])))
+        except (ValueError, TypeError):
+            skipped += 1
+            continue
+        by_map[int(r["map"])].append(point)
+    if skipped:
+        print(f"  skipped {skipped} row(s) that reported no result")
+    if not by_map:
+        sys.exit("no usable rows in " + csv_path)
     for m in by_map:
         by_map[m].sort()
 
