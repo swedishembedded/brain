@@ -167,6 +167,8 @@ pub struct ControlOptions {
     /// Rounds of DAgger between the warm start and the policy gradient.
     pub dagger: usize,
     /// Rounds of outcome-fitted improvement after the imitation phases.
+    pub explore: usize,
+    pub explore_steps: usize,
     pub archive: Option<String>,
     pub self_imitate: usize,
     pub improve: usize,
@@ -218,6 +220,8 @@ impl ControlOptions {
             warmup_epochs: d.warmup_epochs,
             warmup_keep: d.warmup_keep,
             dagger: d.dagger,
+            explore: d.explore,
+            explore_steps: d.explore_steps,
             archive: d.archive.clone(),
             self_imitate: d.self_imitate,
             improve: d.improve,
@@ -250,6 +254,7 @@ impl ControlOptions {
             .warmup_epochs(self.warmup_epochs)
             .warmup_keep(self.warmup_keep)
             .dagger(self.dagger)
+            .exploring(self.explore, self.explore_steps)
             .archive(self.archive.clone())
             .self_imitate(self.self_imitate)
             .improve(self.improve)
@@ -287,6 +292,8 @@ impl ControlOptions {
         self.warmup_episodes = args.usize_or("--warmup", self.warmup_episodes);
         self.warmup_epochs = args.usize_or("--warmup-epochs", self.warmup_epochs);
         self.dagger = args.usize_or("--dagger", self.dagger);
+        self.explore = args.usize_or("--explore", self.explore);
+        self.explore_steps = args.usize_or("--explore-steps", self.explore_steps);
         if let Some(a) = args.take_str("--archive") {
             self.archive = Some(a);
         }
@@ -352,6 +359,14 @@ impl Options for ControlOptions {
   --warmup N          scripted episodes cloned before the policy gradient
   --warmup-epochs N   passes over those demonstrations
   --warmup-keep F     fraction of scripted episodes to clone, best first  [1.0]
+  --explore N         exploring episodes before each self-imitation round.
+                      The SEARCH half: it returns to places already found and
+                      explores RANDOMLY from there, which costs an engine step
+                      and no forward pass - about 4 ms against 100 ms with a
+                      network in the loop. Sampling from the policy can only
+                      find what is near what it already does; this is what
+                      reaches strategies it could never have stumbled into
+  --explore-steps N   steps each exploring episode takes after resuming  [60]
   --archive FILE      where successful trajectories are kept BETWEEN runs.
                       The durable artifact of the loop: the weights are a
                       lossy compression of the archive and can be rebuilt from

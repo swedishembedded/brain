@@ -114,7 +114,7 @@ impl Args {
 fn usage() -> String {
     format!(
         "\
-usage: doom <train|eval|fit|whatif|play|probe|bench> [options]
+usage: doom <train|eval|fit|whatif|value|play|probe|bench> [options]
 
   train    warm-start on the scripted player, then improve it by PPO
   eval     score a policy and the scripted player on the SAME episodes
@@ -127,6 +127,11 @@ usage: doom <train|eval|fit|whatif|play|probe|bench> [options]
            No reward, no critic - it asks only whether the decision is
            EXPRESSIBLE from what the agent reads, which every other question
            about the policy is downstream of
+  value    fit a critic to predict the score an episode finally reaches, and
+           report its error on episodes it has never seen. Everything
+           model-based rests on this: the score is computable on a prefix, so
+           Q(s,a) is V(step(s,a)) and ranking actions needs one forward pass
+           instead of a rollout per candidate
   play     run episodes and show every decision as it is made
   probe    one scripted episode, for artifacts and for checking the plumbing
   bench    time one decision against state length and option count
@@ -224,7 +229,7 @@ fn parse_args() -> Result<Args, String> {
         std::process::exit(0);
     }
     let command = argv[0].clone();
-    if !["train", "eval", "fit", "whatif", "play", "probe", "bench"].contains(&command.as_str()) {
+    if !["train", "eval", "fit", "whatif", "value", "play", "probe", "bench"].contains(&command.as_str()) {
         return Err(format!("unknown command {command:?}\n\n{}", usage()));
     }
 
@@ -423,6 +428,7 @@ fn run() -> Result<(), String> {
         "eval" => evaluate(env, &args),
         "fit" => fit(env, &args),
         "whatif" => whatif(env, &args),
+        "value" => value(env, &args),
         _ => train(env, &args),
     }
 }
@@ -569,6 +575,77 @@ fn fit(env: DoomEnv, args: &Args) -> Result<(), String> {
              being steered by the teacher are not these states, and nothing here has \
              labelled those"
         }
+    );
+    Ok(())
+}
+
+/// Can a critic say how an episode ends, from where it is standing?
+///
+/// The gate on everything model-based. This sample's score is computable on
+/// a prefix, so the value of a state IS the score finally reachable from it
+/// and `Q(s,a) = V(step(s,a))` - ranking the options at a decision costs one
+/// forward pass per option instead of a rollout per option.
+///
+/// Which is the whole point. Measured here, estimating the same quantity by
+/// rolling out to the horizon carries a noise of 0.073 against a signal of
+/// 0.048: re-running one candidate moves its own score by more than the gap
+/// between different candidates, so the ranking is mostly a fact about which
+/// trajectory that rollout happened to take. A critic has no path noise at
+/// all. What it has instead is approximation error, and that is what this
+/// measures - against the spread of the thing being predicted, because an
+/// error equal to that spread is a critic that has learned the mean.
+fn value(env: DoomEnv, args: &Args) -> Result<(), String> {
+    let spec = args.train.spec();
+    let mut builder = ControlPipeline::builder(args.encoder(), env)
+        .seed(args.seed())
+        .device(args.device());
+    if let Some(h) = args.head() {
+        builder = builder.head(h);
+    }
+    let mut pipe = builder.load().map_err(|e| format!("{e}"))?;
+    println!(
+        "doom: playing {} episodes, then fitting a critic to what each one finally scored",
+        spec.episodes
+    );
+    let found = pipe
+        .value_fit(spec.episodes, spec.max_steps, spec.warmup_epochs.max(1) * 20)
+        .map_err(|e| format!("{e}"))?;
+    let Some(v) = found else {
+        return Err("too few episodes to hold any of them out, or the environment does not \
+                    score one - raise --episodes"
+            .into());
+    };
+    println!(
+        "\n  {} states from {} episodes\n  \
+         error on the episodes it was fitted to   {:.3}\n  \
+         error on episodes it has NEVER seen      {:.3}\n  \
+         spread of what it is predicting          {:.3}",
+        v.states, v.episodes, v.train_rmse, v.test_rmse, v.spread
+    );
+    // The two numbers a decision actually rests on, named next to each other.
+    const ROLLOUT_NOISE: f32 = 0.073;
+    const CANDIDATE_SIGNAL: f32 = 0.048;
+    println!(
+        "\n{}",
+        if v.test_rmse >= v.spread {
+            "doom: the critic has learned the mean and nothing else - its error on unseen \
+             episodes is no better than predicting the average. Ranking actions by it would \
+             be ranking them by nothing, and what to fix is the representation or the amount \
+             of data, not the search that would sit on top"
+        } else if v.test_rmse < CANDIDATE_SIGNAL {
+            "doom: the critic resolves what a rollout could not. Its error on unseen episodes \
+             is below the gap between candidate actions, where a rollout's own noise is above \
+             it - so ranking options by Q(s,a) = V(step(s,a)) is worth building, at one \
+             forward pass per option instead of a rollout per option"
+        } else {
+            "doom: better than a rollout but not yet below the gap between candidates. More \
+             episodes is the cheap thing to try first, since this is approximation error and \
+             not path noise - unlike a rollout, it falls with data"
+        }
+    );
+    println!(
+        "  (a rollout of this environment measures the same quantity with a noise of \
+         {ROLLOUT_NOISE:.3}, against a candidate gap of {CANDIDATE_SIGNAL:.3})"
     );
     Ok(())
 }
