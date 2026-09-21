@@ -994,11 +994,23 @@ pub struct ControlPipeline<E: Env> {
     /// Whether this pipeline began from trained weights rather than from
     /// nothing. See the warm start in `run_train`.
     started_from_head: bool,
-    /// The cells the search has reached in the world it is exploring, the
-    /// slot holding each, and the next free slot. Carried between rounds:
-    /// see `explore`, where rebuilding it every round was the difference
-    /// between a search that compounds and four copies of the first round.
-    explored: Option<(String, std::collections::HashMap<String, (usize, f32, u32)>, usize)>,
+    /// The cells the search has reached, per world, and the slot holding
+    /// each. Carried between rounds: see `explore`, where rebuilding it every
+    /// round was the difference between a search that compounds and four
+    /// copies of the first round.
+    ///
+    /// One archive per world rather than one at a time, because a run that
+    /// draws its level from the episode's seed moves between levels
+    /// constantly and would otherwise keep only whichever it last touched.
+    /// The held states are self-describing - a snapshot stands its own level
+    /// back up - so archives for different levels coexist.
+    explored: std::collections::HashMap<
+        String,
+        std::collections::HashMap<String, (usize, f32, u32)>,
+    >,
+    /// The next engine slot nobody is using. Shared across worlds: the slots
+    /// are one pool however many archives point into it.
+    next_slot: usize,
     model: Decide,
     env: E,
     rng: data::rng::Rng,
@@ -2756,18 +2768,14 @@ impl<E: Env> ControlPipeline<E> {
         // level is the same one - so the only thing that had to change is
         // where the map lives.
         let here = self.env.instance().or_else(|| self.env.label());
-        let carried = match self.explored.take() {
-            Some((was, cells, slot)) if Some(&was) == here.as_ref() && !cells.is_empty() => {
-                Some((was, cells, slot))
-            }
-            // A different world, or nothing yet. Whatever was held belongs to
-            // a level that is no longer standing.
-            _ => None,
-        };
-        let (kind, instance, mut seen, mut next_slot) = match carried {
-            Some((was, cells, slot)) => {
+        let carried = here
+            .as_ref()
+            .and_then(|w| self.explored.remove(w).map(|cells| (w.clone(), cells)))
+            .filter(|(_, cells)| !cells.is_empty());
+        let (kind, instance, mut seen) = match carried {
+            Some((was, cells)) => {
                 let kind = self.env.label().unwrap_or_else(|| was.clone());
-                (kind, was, cells, slot)
+                (kind, was, cells)
             }
             None => {
                 self.episode_seed += 1;
@@ -2777,18 +2785,28 @@ impl<E: Env> ControlPipeline<E> {
                 let _ = self.env.reset(self.episode_seed);
                 let kind = self.env.label().unwrap_or_else(|| "world".into());
                 let instance = self.env.instance().unwrap_or_else(|| kind.clone());
-                let mut seen: std::collections::HashMap<String, (usize, f32, u32)> =
-                    std::collections::HashMap::new();
-                let mut next_slot = 1usize;
+                // WHICH world the reset landed in is only known now.
+                //
+                // The lookup above asks where the environment WAS, and a
+                // reset draws a new world from the episode's seed, so a round
+                // that misses there can still land somewhere already
+                // explored. Starting fresh anyway would overwrite that
+                // archive with the handful of cells this round found:
+                // measured over six rounds on two levels, one round in three
+                // threw away everything the level had accumulated.
+                let mut seen = self.explored.remove(&instance).unwrap_or_default();
                 // The starting point, so the archive is never empty and the
                 // first pick has somewhere to go.
                 if let Some(cell) = self.env.cell() {
-                    if self.env.hold_at(next_slot) {
-                        seen.insert(cell, (next_slot, self.env.progress().unwrap_or(0.0), 0));
-                        next_slot += 1;
+                    if !seen.contains_key(&cell) {
+                        let slot = self.next_slot;
+                        if slot < slots && self.env.hold_at(slot) {
+                            seen.insert(cell, (slot, self.env.progress().unwrap_or(0.0), 0));
+                            self.next_slot += 1;
+                        }
                     }
                 }
-                (kind, instance, seen, next_slot)
+                (kind, instance, seen)
             }
         };
         let carried_cells = seen.len();
@@ -2952,9 +2970,9 @@ impl<E: Env> ControlPipeline<E> {
                     // were not kept.
                     let slot = match seen.get(&cell) {
                         Some((s, _, _)) if better => *s,
-                        _ if next_slot < slots => {
-                            let s = next_slot;
-                            next_slot += 1;
+                        _ if self.next_slot < slots => {
+                            let s = self.next_slot;
+                            self.next_slot += 1;
                             s
                         }
                         _ => {
@@ -3017,7 +3035,7 @@ impl<E: Env> ControlPipeline<E> {
         );
         // Hand the archive on. Next round sets off from the frontier this
         // one reached instead of from the level's front door.
-        self.explored = Some((instance.clone(), seen, next_slot));
+        self.explored.insert(instance.clone(), seen);
         // One per cell opened, each keyed by the place it reaches, so the
         // archive keeps the best way to each rather than the best single
         // episode. The whole-episode best is in there too, under the world's
@@ -4248,7 +4266,8 @@ impl<E: Env> ControlPipelineBuilder<E> {
             crate::decision::load_decide(&self.dir, self.head.as_deref(), &self.device, self.limits, self.seed)?;
         let cfg_width = model.cfg.d_model as usize;
         Ok(ControlPipeline {
-            explored: None,
+            explored: std::collections::HashMap::new(),
+            next_slot: 1,
             started_from_head: self.head.is_some(),
             model,
             env: self.env,
