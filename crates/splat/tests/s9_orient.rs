@@ -51,14 +51,18 @@ fn scene(n: usize) -> Splats {
     s
 }
 
+/// A handheld sweep, not a lucky full ring: barely half an arc, and the
+/// subject sits well off the plane the cameras travel in. Both are true of
+/// real captures and both break plane fits that are not careful about which
+/// point they fit around.
 fn orbit(n: usize) -> Vec<[f64; 16]> {
-    // cameras on a tilted ring, so the recovered "up" is nothing like an axis
+    let target = [0.0, -0.05, 3.0];
     (0..n)
         .map(|i| {
-            let a = std::f64::consts::TAU * i as f64 / n as f64;
-            let (e, tilt) = ([1.6 * a.cos(), -0.9, 3.0 + 1.6 * a.sin()], 0.5);
+            let a = 0.2 + std::f64::consts::PI * i as f64 / (n - 1) as f64;
+            let e = [1.6 * a.cos(), -0.9, 3.0 + 1.6 * a.sin()];
             let f = {
-                let d = [-e[0], -e[1] - tilt, 3.0 - e[2]];
+                let d = [target[0] - e[0], target[1] - e[1], target[2] - e[2]];
                 let l = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
                 [d[0] / l, d[1] / l, d[2] / l]
             };
@@ -140,8 +144,10 @@ fn the_scene_comes_out_with_its_orbit_axis_vertical() {
         spread < 0.1 * radius,
         "after re-framing the cameras still vary {spread:.3} in height against a {radius:.3} orbit radius"
     );
-    // and the subject should sit at the origin
-    let cx = eyes.iter().map(|e| e[0]).sum::<f64>() / eyes.len() as f64;
-    let cz = eyes.iter().map(|e| e[2]).sum::<f64>() / eyes.len() as f64;
-    assert!(cx.hypot(cz) < 0.1 * radius, "the subject is not centred: ({cx:.3}, {cz:.3})");
+    // and the subject should sit at the middle. Note that a partial arc's
+    // centroid is nowhere near its centre, so what says the origin is right is
+    // that every camera ends up the same distance out from it.
+    let rs: Vec<f64> = eyes.iter().map(|e| e[0].hypot(e[2])).collect();
+    let off = rs.iter().cloned().fold(f64::MIN, f64::max) - rs.iter().cloned().fold(f64::MAX, f64::min);
+    assert!(off < 0.1 * radius, "the origin is not the subject: camera distances vary by {off:.3}");
 }

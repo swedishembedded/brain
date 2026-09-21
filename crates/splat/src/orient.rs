@@ -54,10 +54,23 @@ pub fn frame_from_cameras(c2w: &[[f64; 16]], up_sign: f64) -> ([f64; 9], [f64; 3
     });
 
     // up: the normal of the plane the cameras lie in, via the smallest
-    // principal axis of their offsets from the centre
+    // principal axis of their offsets.
+    //
+    // Fit that plane about the cameras' own CENTROID, not about the subject.
+    // The subject is generally off the plane the cameras travel in - by 1.5x
+    // the sweep radius on a real handheld capture - and every camera then
+    // carries that same offset along the normal, inflating the one eigenvalue
+    // that is supposed to be smallest until the fit returns an axis with no
+    // relation to the trajectory.
+    let mut mid = [0.0f64; 3];
+    for e in &eyes {
+        for k in 0..3 {
+            mid[k] += e[k] / n;
+        }
+    }
     let mut cov = [[0.0f64; 3]; 3];
     for e in &eyes {
-        let v = [e[0] - centre[0], e[1] - centre[1], e[2] - centre[2]];
+        let v = [e[0] - mid[0], e[1] - mid[1], e[2] - mid[2]];
         for i in 0..3 {
             for j in 0..3 {
                 cov[i][j] += v[i] * v[j];
