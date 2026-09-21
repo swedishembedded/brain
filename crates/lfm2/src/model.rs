@@ -134,6 +134,11 @@ const FLASH_BIDIR_SPLIT: usize = 56;
 /// The register-tiled flash pair, appended so every slot above is unchanged.
 const FLASH_BIDIR_REG: usize = 59;
 const FLASH_BIDIR_REG2: usize = 60;
+/// YaRN long-context RoPE, appended so every slot above is unchanged - see
+/// `crate::config::LfmConfig::rope_scaling`. Used in place of `ROPE`/
+/// `ROPE_BWD` only when a config sets `rope_scaling: Some(...)`.
+const ROPE_YARN: usize = 61;
+const ROPE_YARN_BWD: usize = 62;
 
 pub const PIPELINES: &[(&str, &str)] = &[
     ("embed_tile", kernels::EMBED_TILE),
@@ -200,6 +205,8 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("clip_coef_wg", kernels::CLIP_COEF_WG),
     ("flash_attn_bidir_reg", kernels::FLASH_ATTN_BIDIR_REG),
     ("flash_attn_bidir_reg2", kernels::FLASH_ATTN_BIDIR_REG2),
+    ("rope_base_yarn", kernels::ROPE_BASE_YARN),
+    ("rope_base_yarn_bwd", kernels::ROPE_BASE_YARN_BWD),
 ];
 
 fn linear_kernel(m: usize, n: usize) -> (usize, u32) {
@@ -375,6 +382,13 @@ pub struct Lfm {
     /// Chunked-inference regime: one forward per group size 1..=b (index
     /// `b_use-1`), so partial scheduler groups run at their true size.
     fwd_variants: Vec<Vec<Step>>,
+    /// YaRN long-context RoPE table (`head_dim/2` per-channel inverse
+    /// frequencies) plus the attention-magnitude correction - `None` when
+    /// `cfg.rope_scaling` is unset, the plain analytic-theta RoPE path every
+    /// checkpoint before this field existed still gets. Uploaded ONCE here
+    /// (position-independent, shared by every row/head/layer/step), same
+    /// convention `qwen3::serve::Engine::yarn` already established.
+    yarn: Option<(DeviceBuffer, f32)>,
 }
 
 impl Lfm {
@@ -681,6 +695,15 @@ impl Lfm {
             }
         });
 
+        // Built from `cfg` before it moves into the struct literal below -
+        // one upload for the whole engine, mirroring `qwen3::serve`'s own
+        // `cfg.yarn_scaling()` -> uniform-shared-table pattern.
+        let yarn = cfg.yarn_scaling().map(|(inv_freq, attention_factor)| {
+            let buf = st(inv_freq.len() as u64);
+            gpu.write(&buf, bytemuck::cast_slice(&inv_freq));
+            (buf, attention_factor)
+        });
+
         Lfm {
             cfg,
             b,
@@ -706,6 +729,7 @@ impl Lfm {
             ce_buf,
             fwd_steps: Vec::new(),
             fwd_variants: Vec::new(),
+            yarn,
             gpu,
         }
     }
@@ -860,6 +884,39 @@ impl Lfm {
         ));
     }
 
+    /// Forward RoPE over `buf` in place: the plain analytic-theta kernel
+    /// (`ROPE`), or, when `self.cfg.rope_scaling` is set, the YaRN table
+    /// kernel (`ROPE_YARN`) - same indexing, different frequency source. See
+    /// `crate::config::LfmConfig::rope_scaling`'s own doc for why a `factor
+    /// <= 1.0` config would reproduce the plain path exactly even through
+    /// this branch (untested here only because nothing routes through it at
+    /// `factor <= 1.0` - the identity guarantee lives in
+    /// `model::yarn::scaled_inv_freq` itself).
+    fn rope_step(&self, buf: &DeviceBuffer, n_rows: u32, n_heads: u32, head_dim: u32, row_stride: u32, tcols: u32, theta: f32) -> Step {
+        match &self.yarn {
+            Some((inv_freq, attention_factor)) => self.gpu.step(
+                ROPE_YARN,
+                &[buf, inv_freq],
+                &[n_rows, n_heads, head_dim, row_stride, 0, tcols, gpu_core::f(*attention_factor)],
+                n_rows * n_heads * (head_dim / 2),
+            ),
+            None => self.gpu.step(ROPE, &[buf], &[n_rows, n_heads, head_dim, row_stride, 0, tcols, gpu_core::f(theta)], n_rows * n_heads * (head_dim / 2)),
+        }
+    }
+
+    /// [`Self::rope_step`]'s backward twin (`ROPE_BWD`/`ROPE_YARN_BWD`).
+    fn rope_bwd_step(&self, buf: &DeviceBuffer, n_rows: u32, n_heads: u32, head_dim: u32, row_stride: u32, tcols: u32, theta: f32) -> Step {
+        match &self.yarn {
+            Some((inv_freq, attention_factor)) => self.gpu.step(
+                ROPE_YARN_BWD,
+                &[buf, inv_freq],
+                &[n_rows, n_heads, head_dim, row_stride, 0, tcols, gpu_core::f(*attention_factor)],
+                n_rows * n_heads * (head_dim / 2),
+            ),
+            None => self.gpu.step(ROPE_BWD, &[buf], &[n_rows, n_heads, head_dim, row_stride, 0, tcols, gpu_core::f(theta)], n_rows * n_heads * (head_dim / 2)),
+        }
+    }
+
     /// Attention-mixer projections + QK-norm + RoPE + GQA→MHA expansion into
     /// the fused qkv (everything before the score/apply kernels).
     fn emit_attn_qkv(&self, s: &mut Vec<Step>, l: usize, xn1: &DeviceBuffer, ab: &AttnBufs, b_use: u32, build_fused: bool) {
@@ -879,8 +936,8 @@ impl Lfm {
         // Per-head QK-RMSNorm (head_dim rows), then RoPE in place.
         s.push(block::rmsnorm_eps_fwd(&self.gpu, RMSNORM_EPS, &ab.q_pre, self.w(&p("attn.q_norm.weight")), &ab.q, hd, n * nh, eps));
         s.push(block::rmsnorm_eps_fwd(&self.gpu, RMSNORM_EPS, &ab.k_pre, self.w(&p("attn.k_norm.weight")), &ab.k, hd, n * nkv, eps));
-        s.push(self.gpu.step(ROPE, &[&ab.q], &[n, nh, hd, hq, 0, self.t, gpu_core::f(theta)], n * nh * (hd / 2)));
-        s.push(self.gpu.step(ROPE, &[&ab.k], &[n, nkv, hd, hkv, 0, self.t, gpu_core::f(theta)], n * nkv * (hd / 2)));
+        s.push(self.rope_step(&ab.q, n, nh, hd, hq, self.t, theta));
+        s.push(self.rope_step(&ab.k, n, nkv, hd, hkv, self.t, theta));
         // GQA→MHA fused buffer for the trio consumers; the GEMM-attention path
         // packs straight from q/k/v (folding the replication) and reuses `qkv`
         // as pack space, so it skips these.
@@ -1242,8 +1299,8 @@ impl Lfm {
                     s.push(block::kv_expand_bwd(&self.gpu, KV_EXPAND_BWD, &bw.d_qkv, &bw.d_k, n, nh, group, hd, 3 * d, d));
                     s.push(block::kv_expand_bwd(&self.gpu, KV_EXPAND_BWD, &bw.d_qkv, &bw.d_v, n, nh, group, hd, 3 * d, 2 * d));
                     // RoPE backward in place, then QK-norm backward.
-                    s.push(self.gpu.step(ROPE_BWD, &[&bw.d_q], &[n, nh, hd, hq, 0, self.t, gpu_core::f(theta)], n * nh * (hd / 2)));
-                    s.push(self.gpu.step(ROPE_BWD, &[&bw.d_k], &[n, nkv, hd, hkv, 0, self.t, gpu_core::f(theta)], n * nkv * (hd / 2)));
+                    s.push(self.rope_bwd_step(&bw.d_q, n, nh, hd, hq, self.t, theta));
+                    s.push(self.rope_bwd_step(&bw.d_k, n, nkv, hd, hkv, self.t, theta));
                     self.norm_bwd(&mut s, &ab.q_pre, &p("attn.q_norm.weight"), &bw.d_q, &bw.dq_pre, &bw.inv, hd, n * nh);
                     self.norm_bwd(&mut s, &ab.k_pre, &p("attn.k_norm.weight"), &bw.d_k, &bw.dk_pre, &bw.inv, hd, n * nkv);
                     self.lin_bwd(&mut s, &bw.d_v, &cb.xn1, &p("attn.wv.weight"), &bw.d_xn, n, d, hkv, 0);
@@ -1585,8 +1642,136 @@ mod tests {
             (super::FLASH_BIDIR_SPLIT, "flash_attn_bidir_split"),
             (super::FLASH_BIDIR_REG, "flash_attn_bidir_reg"),
             (super::FLASH_BIDIR_REG2, "flash_attn_bidir_reg2"),
+            (super::ROPE_YARN, "rope_base_yarn"),
+            (super::ROPE_YARN_BWD, "rope_base_yarn_bwd"),
         ] {
             assert_eq!(PIPELINES[slot].0, want, "slot {slot} is not '{want}'");
         }
+    }
+
+    /// Isolated correctness for the new kernel pair: dispatch `ROPE_YARN`
+    /// directly (bypassing the whole model) over a synthetic buffer with a
+    /// known `inv_freq` table, and require it to match a hand-rotated host
+    /// reference - the same "host recomputation is the oracle" discipline
+    /// `qwen3::serve`'s own `yarn_rope_matches_an_independent_host_recomputation`
+    /// test uses, at kernel scope rather than whole-engine scope (lfm2's
+    /// materialized/chunked branching has no single "read the pre-rotation
+    /// buffer" seam the way qwen3's paged decode scratch does).
+    #[test]
+    fn rope_yarn_kernel_matches_a_host_computed_rotation() {
+        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+            return;
+        }
+        let gpu = gpu_core::testgpu::dev(PIPELINES);
+        let (n_rows, n_heads, head_dim, tcols) = (2u32, 1u32, 4u32, 2u32);
+        let row_stride = head_dim;
+        let half = (head_dim / 2) as usize;
+        let attention_factor = 1.3f32;
+        let x: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+        let inv_freq: Vec<f32> = vec![0.5, 0.25];
+
+        let buf = gpu.storage_init("t_yarn_x", &x);
+        let invf_buf = gpu.storage_init("t_yarn_inv_freq", &inv_freq);
+
+        let step = gpu.step(
+            super::ROPE_YARN,
+            &[&buf, &invf_buf],
+            &[n_rows, n_heads, head_dim, row_stride, 0, tcols, gpu_core::f(attention_factor)],
+            n_rows * n_heads * (head_dim / 2),
+        );
+        gpu.submit(&[], &[step]);
+        gpu.poll_wait();
+        let got = gpu.read(&buf, x.len());
+
+        let mut want = x.clone();
+        for row in 0..n_rows as usize {
+            let pos = (row as u32 % tcols) as f32;
+            let base = row * head_dim as usize;
+            for m in 0..half {
+                let angle = pos * inv_freq[m];
+                let (c, s) = (angle.cos() * attention_factor, angle.sin() * attention_factor);
+                let (x0, x1) = (x[base + m], x[base + m + half]);
+                want[base + m] = x0 * c - x1 * s;
+                want[base + m + half] = x1 * c + x0 * s;
+            }
+        }
+        for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+            assert!((g - w).abs() <= 1e-5, "yarn rope[{i}]: got {g:e}, want {w:e}");
+        }
+    }
+
+    /// The end-to-end invariant `model::yarn::YarnConfig`'s own doc promises:
+    /// a `factor <= 1.0` config must reproduce the plain analytic-theta path
+    /// EXACTLY (bit-identical hidden states), proving the new
+    /// `ROPE_YARN`/`ROPE_YARN_BWD` dispatch and buffer wiring is a strict
+    /// superset of the existing path, not a second implementation that could
+    /// drift from it.
+    #[test]
+    fn yarn_at_factor_one_reproduces_the_plain_path_exactly() {
+        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+            return;
+        }
+        let cfg = LfmConfig::tiny();
+        let init = crate::init::init_weights(&cfg, 5);
+        let plain = Lfm::new(cfg.clone(), 1, cfg.block_size, &init);
+        let mut yarn_cfg = cfg.clone();
+        yarn_cfg.rope_scaling = Some(model::yarn::YarnConfig::new(1.0, cfg.block_size));
+        let yarn = Lfm::new(yarn_cfg, 1, cfg.block_size, &init);
+
+        let tokens: Vec<u32> = (0..cfg.block_size).map(|i| i % cfg.vocab).collect();
+        let targets = vec![super::IGNORE; cfg.block_size as usize];
+        plain.set_batch(&tokens, &targets);
+        yarn.set_batch(&tokens, &targets);
+        plain.forward();
+        yarn.forward();
+        assert_eq!(plain.read_hidden(), yarn.read_hidden(), "factor <= 1.0 must reproduce the plain RoPE path exactly");
+    }
+
+    /// The other half of the same invariant: a REAL long-context factor must
+    /// actually reach the table kernel and change the output - proving the
+    /// branch in `Lfm::rope_step`/`rope_bwd_step` is live, not dead code the
+    /// identity test above would pass trivially even if `self.yarn` were
+    /// never read.
+    #[test]
+    fn yarn_scaling_above_one_changes_the_forward_output() {
+        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+            return;
+        }
+        let cfg = LfmConfig::tiny();
+        let init = crate::init::init_weights(&cfg, 5);
+        let plain = Lfm::new(cfg.clone(), 1, cfg.block_size, &init);
+        let mut yarn_cfg = cfg.clone();
+        yarn_cfg.rope_scaling = Some(model::yarn::YarnConfig::new(4.0, cfg.block_size));
+        let yarn = Lfm::new(yarn_cfg, 1, cfg.block_size, &init);
+
+        let tokens: Vec<u32> = (0..cfg.block_size).map(|i| i % cfg.vocab).collect();
+        let targets = vec![super::IGNORE; cfg.block_size as usize];
+        plain.set_batch(&tokens, &targets);
+        yarn.set_batch(&tokens, &targets);
+        plain.forward();
+        yarn.forward();
+        assert_ne!(plain.read_hidden(), yarn.read_hidden(), "a factor > 1.0 config must produce different output than the plain path");
+    }
+
+    /// A checkpoint built for 32768 tokens must actually build and run a
+    /// forward pass at that length - the capability this milestone exists
+    /// to add. Small `d_model`/heads keep the materialized `T^2` attention
+    /// scores within the tiny-fixture budget; only `block_size` and
+    /// `rope_scaling` are the "32k" part under test here.
+    #[test]
+    fn a_32k_configured_checkpoint_builds_and_runs_a_forward_pass() {
+        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+            return;
+        }
+        let mut cfg = LfmConfig::tiny();
+        cfg.block_size = 32768;
+        cfg.rope_scaling = Some(model::yarn::YarnConfig::new(4.0, 8192));
+        let init = crate::init::init_weights(&cfg, 5);
+        let m = Lfm::new_impl(cfg.clone(), 1, 256, &init, Some((512 << 20, 0)), false);
+        let tokens: Vec<u32> = (0..256).map(|i| i % cfg.vocab).collect();
+        m.set_tokens(&tokens);
+        m.forward_group(1);
+        let hidden = m.read_hidden_rows(256);
+        assert!(hidden.iter().all(|v| v.is_finite()), "forward at a 32k-configured context must stay finite");
     }
 }

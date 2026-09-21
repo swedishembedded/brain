@@ -703,7 +703,10 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
 
         // ---- RoPE: rows·heads·hd/2 pairs; angle (pow+mul) + cos + sin + the
         // 6-op rotation = 10 per pair. rope2d reads its angles from tables (7).
-        "rope_base" | "rope_base_bwd" | "rope_at" => {
+        // `_yarn` twins share the first three params and do the same work per
+        // element, reading their angle from a table instead of computing a
+        // pow - same relationship `rope_paged_yarn` has to `rope_paged` above.
+        "rope_base" | "rope_base_bwd" | "rope_at" | "rope_base_yarn" | "rope_base_yarn_bwd" => {
             let (rows, h, hd) = (p(0)?, p(1)?, p(2)?);
             f(5 * rows * h * hd, 8 * rows * h * hd)
         }

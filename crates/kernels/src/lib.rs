@@ -866,6 +866,10 @@ pub const ROPE_AT: &str = include_str!("../wgsl/rope_at.wgsl");
 pub const ROPE_BASE: &str = include_str!("../wgsl/rope_base.wgsl");
 /// `wgsl/rope_base_bwd.wgsl`
 pub const ROPE_BASE_BWD: &str = include_str!("../wgsl/rope_base_bwd.wgsl");
+/// `wgsl/rope_base_yarn.wgsl`
+pub const ROPE_BASE_YARN: &str = include_str!("../wgsl/rope_base_yarn.wgsl");
+/// `wgsl/rope_base_yarn_bwd.wgsl`
+pub const ROPE_BASE_YARN_BWD: &str = include_str!("../wgsl/rope_base_yarn_bwd.wgsl");
 /// `wgsl/rope_interleave_table.wgsl`
 pub const ROPE_INTERLEAVE_TABLE: &str = include_str!("../wgsl/rope_interleave_table.wgsl");
 /// `wgsl/rope_neox.wgsl`
@@ -1439,6 +1443,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("rope_at", ROPE_AT),
     ("rope_base", ROPE_BASE),
     ("rope_base_bwd", ROPE_BASE_BWD),
+    ("rope_base_yarn", ROPE_BASE_YARN),
+    ("rope_base_yarn_bwd", ROPE_BASE_YARN_BWD),
     ("rope_interleave_table", ROPE_INTERLEAVE_TABLE),
     ("rope_neox", ROPE_NEOX),
     ("rope_paged", ROPE_PAGED),

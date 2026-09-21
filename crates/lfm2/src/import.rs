@@ -102,6 +102,11 @@ pub fn config_from_hf(json: &str) -> Result<LfmConfig, String> {
         norm_eps: v["norm_eps"].as_f64().unwrap_or(1e-5) as f32,
         tie_embeddings: v["tie_word_embeddings"].as_bool().unwrap_or(true),
         layer_types,
+        // No released LFM2.5 checkpoint's config.json carries a
+        // `rope_scaling` key yet (it is natively 8192 tokens); a caller
+        // opting into a wider context builds on this with
+        // `LfmConfig { rope_scaling: Some(...), block_size: N, ..imported }`.
+        rope_scaling: None,
     })
 }
 
