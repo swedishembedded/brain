@@ -395,7 +395,13 @@ impl Keep {
 /// the search kept finding new worlds and the compression kept being handed
 /// the same old one. A level with fixed geometry has exactly one instance and
 /// is unaffected at any cap above zero.
-const KEEP_PER_KIND: usize = 8;
+///
+/// It also bounds the FRONTIER, now that a search files one entry per place
+/// it reached rather than one per episode. Eight of those is not a frontier,
+/// it is eight scattered spots. Large enough to describe the edge of what has
+/// been reached, small enough that cloning the archive is still cloning a
+/// selection.
+const KEEP_PER_KIND: usize = 48;
 
 /// One world's best run, and what kind of world it was.
 #[derive(Clone)]
@@ -1037,6 +1043,15 @@ const CRITIC_HIDDEN: usize = 64;
 /// covers ground like the square root of the steps taken and therefore
 /// covers almost none.
 const REPEAT_CHANCE: f32 = 0.95;
+
+/// How often an exploring step does what a competent player would.
+///
+/// A blind walk in a level full of things that shoot back is mostly a dead
+/// one, and a dead walk reaches nothing. A third of the steps taken from the
+/// scripted player keeps the walk alive long enough to wander somewhere, and
+/// leaves two thirds of them free to do what no competent player would - which
+/// is the only way a search finds what its teacher never did.
+const GUIDED_CHANCE: f32 = 0.34;
 /// Transitions per optimizer step. Reference PPO splits a rollout into a
 /// handful of minibatches; with a few hundred transitions per iteration this
 /// is that handful.
@@ -2674,13 +2689,18 @@ impl<E: Env> ControlPipeline<E> {
     /// what it carries - see [`Env::cell`] - so picking up a key makes every
     /// place reachable with it new, and the search files those and goes on.
     /// Nothing says that keys open doors.
-    fn explore(&mut self, spec: &ControlSpec) -> Result<Option<Solved>> {
+    fn explore(&mut self, spec: &ControlSpec) -> Result<Vec<Solved>> {
         let slots = self.env.slots();
         if slots == 0 || spec.explore == 0 {
-            return Ok(None);
+            return Ok(Vec::new());
         }
         let mut best: Option<(f32, Vec<Demo>)> = None;
+        // cell -> the best trail that reached it this round
+        let mut opened: std::collections::HashMap<String, (f32, Vec<Demo>)> =
+            std::collections::HashMap::new();
         let (mut steps, mut restores) = (0usize, 0usize);
+        // Cells whose slot was taken to hold a better one. See below.
+        let mut evicted = 0usize;
         let mut obs = String::new();
 
         // THE ARCHIVE OUTLIVES THE ROUND.
@@ -2740,7 +2760,7 @@ impl<E: Env> ControlPipeline<E> {
                 "    explore: {instance} could not hold its starting state, so there is \
                  nothing to return to"
             );
-            return Ok(None);
+            return Ok(Vec::new());
         }
         let mut refused = 0usize;
 
@@ -2759,9 +2779,31 @@ impl<E: Env> ControlPipeline<E> {
             // to prevent. Sampling from the distribution rather than taking
             // the N least-seen matters for the same reason.
             let pick = {
+                // The frontier, by two measures at once.
+                //
+                // `1 / sqrt(seen + 1)` is Go-Explore's own weight and favours
+                // what has rarely been set off from, which is what stops the
+                // search settling into one corner. On its own it is blind to
+                // how much a cell has to offer: a spot at the level's front
+                // door with nothing done is drawn exactly as often as one
+                // deep in with most of the level cleared, and only the second
+                // can lead anywhere new.
+                //
+                // So the score the cell was reached with multiplies it. A
+                // cell twice as far along is worth twice as many attempts,
+                // and the +1 keeps a cell that has achieved nothing yet in
+                // the draw rather than cutting it off - that is where the
+                // search has to start.
+                let top = seen
+                    .values()
+                    .map(|(_, v, _)| *v)
+                    .fold(f32::MIN_POSITIVE, f32::max) as f64;
                 let weights: Vec<(&String, f64)> = seen
                     .iter()
-                    .map(|(c, (_, _, n))| (c, 1.0 / ((*n as f64) + 1.0).sqrt()))
+                    .map(|(c, (_, v, n))| {
+                        let worth = 1.0 + (*v as f64 / top).clamp(0.0, 1.0);
+                        (c, worth / ((*n as f64) + 1.0).sqrt())
+                    })
                     .collect();
                 let total: f64 = weights.iter().map(|(_, w)| *w).sum();
                 let mut u = self.rng.next_f32() as f64 * total;
@@ -2819,10 +2861,30 @@ impl<E: Env> ControlPipeline<E> {
                 // action INDEX, so "the same action" is matched on the text -
                 // "walk forward, 320 units" and "walk forward, 288 units" are
                 // the same intention with a different number in it.
-                let a = match last.as_deref().filter(|_| self.rng.next_f32() < REPEAT_CHANCE) {
-                    Some(prev) => same_again(prev, &options)
-                        .unwrap_or_else(|| (self.rng.next_u64() as usize) % options.len()),
-                    None => (self.rng.next_u64() as usize) % options.len(),
+                // Sometimes what a competent player would do, mostly what
+                // nobody would.
+                //
+                // Uniformly random is blind, and blind in a level full of
+                // things that shoot back is mostly dead: measured, an eighty
+                // step random walk scores 0.03 where the policy scores 0.18,
+                // so the search spent its whole budget on continuations no
+                // trajectory worth keeping would ever contain. Taking the
+                // scripted player's choice some of the time makes the walk
+                // start from somewhere plausible and wander off it, which is
+                // the useful shape - and it costs a branch rather than a
+                // forward pass, which is why this half of the loop is cheap
+                // enough to run at all.
+                //
+                // Not always, or the search only ever finds what the teacher
+                // finds, and the teacher has never finished a level.
+                let guided = self.rng.next_f32() < GUIDED_CHANCE;
+                let a = match self.env.demo().filter(|_| guided) {
+                    Some(i) if i < options.len() => i,
+                    _ => match last.as_deref().filter(|_| self.rng.next_f32() < REPEAT_CHANCE) {
+                        Some(prev) => same_again(prev, &options)
+                            .unwrap_or_else(|| (self.rng.next_u64() as usize) % options.len()),
+                        None => (self.rng.next_u64() as usize) % options.len(),
+                    },
                 };
                 last = Some(options[a].clone());
                 trail.push(Demo { objective: self.env.objective(), observation: obs.clone(), options, action: a });
@@ -2836,18 +2898,64 @@ impl<E: Env> ControlPipeline<E> {
                 let scored = self.env.progress().unwrap_or(0.0);
                 let fresh = !seen.contains_key(&cell);
                 let better = seen.get(&cell).is_some_and(|(_, v, _)| scored > *v);
-                if (fresh || better) && next_slot < slots {
+                if fresh || better {
+                    // Where to hold it. A cell already in the archive keeps
+                    // its own slot; a new one takes the next free slot, and
+                    // when there are none left it takes the slot of whichever
+                    // cell the selection rule is least likely to draw.
+                    //
+                    // Without that last part the archive silently stopped
+                    // growing the moment the engine ran out of places to put
+                    // things, and a search whose archive cannot grow is a
+                    // search that has finished. It went unnoticed because
+                    // nothing said so: the cells kept being FOUND and simply
+                    // were not kept.
                     let slot = match seen.get(&cell) {
                         Some((s, _, _)) if better => *s,
-                        _ => {
+                        _ if next_slot < slots => {
                             let s = next_slot;
                             next_slot += 1;
                             s
                         }
+                        _ => {
+                            let top = seen
+                                .values()
+                                .map(|(_, v, _)| *v)
+                                .fold(f32::MIN_POSITIVE, f32::max);
+                            let weakest = seen
+                                .iter()
+                                .filter(|(c, _)| *c != &cell)
+                                .map(|(c, (s, v, n))| {
+                                    let worth = 1.0 + (v / top).clamp(0.0, 1.0);
+                                    (c.clone(), *s, worth / ((*n as f32) + 1.0).sqrt())
+                                })
+                                .min_by(|a, b| {
+                                    a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal)
+                                });
+                            match weakest {
+                                Some((c, s, _)) => {
+                                    seen.remove(&c);
+                                    evicted += 1;
+                                    s
+                                }
+                                None => continue,
+                            }
+                        }
                     };
                     if self.env.hold_at(slot) {
                         let visits = seen.get(&cell).map(|(_, _, n)| *n).unwrap_or(0);
-                        seen.insert(cell, (slot, scored, visits));
+                        seen.insert(cell.clone(), (slot, scored, visits));
+                        // THE WAY THERE, not the run it happened during.
+                        //
+                        // What a search produces is ground reached, and what
+                        // is worth keeping is the best way to reach each
+                        // piece of it. Judged as a whole episode instead, an
+                        // eighty step random walk is never going to beat a
+                        // trained policy's own run - measured on E1M1, the
+                        // search scored 0.02 against the policy's 0.18 every
+                        // round, so nothing it found was ever kept and the
+                        // whole half of the loop did nothing.
+                        opened.insert(cell.clone(), (scored, trail.clone()));
                     }
                 }
                 if best.as_ref().is_none_or(|(v, _)| scored > *v) {
@@ -2859,8 +2967,8 @@ impl<E: Env> ControlPipeline<E> {
             println!("    explore: {refused} resumes were REFUSED - the archive is not restorable");
         }
         println!(
-            "    explore: {} cells in {instance} ({carried_cells} carried in) over \
-             {steps} random steps, {restores} resumed from, best {}",
+            "    explore: {} cells in {instance} ({carried_cells} carried in, \
+             {evicted} evicted) over {steps} steps, {restores} resumed from, best {}",
             seen.len(),
             match &best {
                 Some((v, _)) => format!("{v:.2}"),
@@ -2870,7 +2978,24 @@ impl<E: Env> ControlPipeline<E> {
         // Hand the archive on. Next round sets off from the frontier this
         // one reached instead of from the level's front door.
         self.explored = Some((instance.clone(), seen, next_slot));
-        Ok(best.map(|(v, d)| Solved { kind, instance, score: v, demos: d }))
+        // One per cell opened, each keyed by the place it reaches, so the
+        // archive keeps the best way to each rather than the best single
+        // episode. The whole-episode best is in there too, under the world's
+        // own name, so a search that genuinely out-plays the policy still
+        // counts as that.
+        let mut out: Vec<Solved> = opened
+            .into_iter()
+            .map(|(cell, (score, demos))| Solved {
+                kind: instance.clone(),
+                instance: format!("{instance}@{cell}"),
+                score,
+                demos,
+            })
+            .collect();
+        if let Some((v, d)) = best {
+            out.push(Solved { kind, instance, score: v, demos: d });
+        }
+        Ok(out)
     }
 
     /// Rounds of: play, keep the episodes that actually scored best, and
@@ -2976,9 +3101,7 @@ impl<E: Env> ControlPipeline<E> {
             }
             // The search runs first, so what it finds is in the archive
             // before this round's fit reads it.
-            if let Some(found) = self.explore(spec)? {
-                fresh.push(found);
-            }
+            fresh.extend(self.explore(spec)?);
             let played: Vec<f32> = fresh.iter().map(|r| r.score).collect();
             let mean = played.iter().sum::<f32>() / played.len().max(1) as f32;
             let top = played.iter().copied().fold(f32::NEG_INFINITY, f32::max);

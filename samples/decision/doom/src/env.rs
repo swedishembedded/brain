@@ -1873,24 +1873,51 @@ impl Env for DoomEnv {
         4096
     }
 
-    /// Where the run is, coarsely, and what it is carrying.
+    /// Where the run is, what it is carrying, and how much of the level it
+    /// has taken.
     ///
     /// The grid is 128 units - four of the engine's route cells, about a
     /// corridor and a half - so that shuffling on the spot is the same place
     /// and walking into the next room is not. Keys are in the name because
     /// carrying one makes everywhere reachable with it somewhere new, which
     /// is how a search discovers that keys open doors without being told.
+    ///
+    /// And so is HOW MUCH HAS BEEN DONE, because a search explores exactly
+    /// the space this name defines. Named by position alone it saturates the
+    /// moment the map is covered: killing the last monster or finding the
+    /// last secret opens no new cell, so there is no ground left to reach and
+    /// nothing to pull the search toward finishing. It is then a search for
+    /// places, and the task is not places - it is every monster, every item,
+    /// every secret and the way out. Standing in a room having cleared it is
+    /// a different state from standing in it having not, and worth keeping
+    /// separately.
+    ///
+    /// In tenths, because the counters run to a hundred and seventy-seven on
+    /// E1M6 and a cell per kill would be a cell per kill per square of floor.
+    /// Tenths multiply the archive by at most ten and still make progress
+    /// somewhere the search can be sent.
     fn cell(&self) -> Option<String> {
         let p = &self.state.player;
         let (x, y) = (p.x?, p.y?);
         let mut keys = p.keys.clone();
         keys.sort();
+        let l = &self.state.level;
+        let tenth = |got: u32, all: u32| {
+            if all <= 0 {
+                0
+            } else {
+                (got * 10 / all).clamp(0, 10)
+            }
+        };
         Some(format!(
-            "{}:{}:{}:{}",
+            "{}:{}:{}:{}:{}{}{}",
             self.cfg.map,
             x.div_euclid(128),
             y.div_euclid(128),
-            keys.join("+")
+            keys.join("+"),
+            tenth(l.kills, l.total_kills),
+            tenth(l.items, l.total_items),
+            tenth(l.secrets, l.total_secrets)
         ))
     }
 
