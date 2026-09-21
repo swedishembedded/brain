@@ -73,6 +73,17 @@ pub struct State {
     /// [`crate::memory::Memory::wounded`].
     #[serde(skip)]
     pub wounded: Vec<i64>,
+    /// The way back along ground the player has already walked, as a bearing
+    /// and a distance. Filled in by the environment from its own trail.
+    ///
+    /// "Back away" aims at nothing: it walks opposite whatever is in front,
+    /// which in a room with four monsters converging is as likely to be a
+    /// wall or a fifth monster as it is an escape. Falling back the way you
+    /// CAME aims at floor the player has stood on, which is the one place it
+    /// is certain it can go - and in a level built of rooms joined by
+    /// corridors, that is the corridor, where things arrive one at a time.
+    #[serde(skip)]
+    pub came_from: Option<(i32, i32)>,
     pub events: Vec<Event>,
     /// Present only when the engine's per-step event buffer overflowed.
     #[serde(rename = "eventsDropped", default)]

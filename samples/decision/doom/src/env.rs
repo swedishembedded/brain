@@ -280,6 +280,13 @@ const STEP_COST: f32 = 0.002;
 /// seconds of game time, and 160 units is five player widths - covered easily
 /// by three steps of real walking and never by a cycle.
 const CIRCLE_WINDOW: usize = 16;
+/// How far the player has to have moved for the trail to record a step.
+const TRAIL_STEP: i32 = 48;
+/// How many of those steps are kept. Far enough back to reach the room
+/// before this one, which is what falling back is for.
+const TRAIL_WINDOW: usize = 24;
+/// How far back along the trail counts as having left the fight.
+const FELL_BACK: i32 = 320;
 const CIRCLE_RADIUS: i32 = 160;
 /// Side of the patch of floor the exploration bonus counts visits to.
 const EXPLORE_CELL: i32 = 128;
@@ -514,6 +521,11 @@ pub struct DoomEnv {
     /// cannot see it. Measured before this existed: 120 decisions, 15 distinct
     /// cells, the last 90 of them shuttling between two of them.
     recent: std::collections::VecDeque<(i32, i32)>,
+    /// A longer record of the same thing, for falling back ALONG it. Ground
+    /// the player has stood on is ground it can certainly stand on again,
+    /// which is more than can be said for the direction opposite whatever
+    /// happens to be in front of it.
+    trail: std::collections::VecDeque<(i32, i32)>,
     /// Visits per patch of floor THIS EPISODE. Episodic, not lifetime: the
     /// agent should re-explore a level it has been reset into, and a lifetime
     /// count would stop paying for that after the first few episodes and leave
@@ -599,6 +611,7 @@ impl DoomEnv {
             stale: 0,
             tried: std::collections::HashSet::new(),
             recent: std::collections::VecDeque::new(),
+            trail: std::collections::VecDeque::new(),
             visited: std::collections::HashMap::new(),
             commit: 0,
             commit_tag: None,
@@ -764,6 +777,7 @@ impl DoomEnv {
         self.memory.routed(&answered);
         self.state.recalled = self.memory.recall(&self.state);
         self.state.wounded = self.memory.wounded();
+        self.state.came_from = self.came_from();
     }
 
     /// What the game itself scored this episode, with no exploration bonus.
@@ -1106,6 +1120,18 @@ impl DoomEnv {
         if self.recent.len() > CIRCLE_WINDOW {
             self.recent.pop_front();
         }
+        // Only where the player actually MOVED to: a trail holding a hundred
+        // copies of one spot has no way back in it.
+        if self
+            .trail
+            .back()
+            .is_none_or(|&(x, y)| (pos.0 - x).abs() + (pos.1 - y).abs() > TRAIL_STEP)
+        {
+            self.trail.push_back(pos);
+            if self.trail.len() > TRAIL_WINDOW {
+                self.trail.pop_front();
+            }
+        }
         if self.state.events_dropped > 0 && !self.warned_dropped {
             // Once, not per step: the buffer is sized for a step and this
             // means a step ran long enough to overflow it, which makes the
@@ -1235,6 +1261,7 @@ impl DoomEnv {
         self.stale = 0;
         self.tried.clear();
         self.recent.clear();
+        self.trail.clear();
         // A new episode is a new world: nothing seen in the last one is
         // anywhere now, least of all on a level that is built fresh.
         self.memory.clear();
@@ -1275,6 +1302,30 @@ impl DoomEnv {
     /// unreadable - beating it would prove nothing - so it is worth the twenty
     /// lines to make it a real player.
     /// Whether the last several decisions have gone nowhere in aggregate.
+    /// Which way, and how far, back along the ground already walked.
+    ///
+    /// The first point on the trail far enough behind to be out of the fight,
+    /// reported the way everything else is: a bearing off the nose and a
+    /// distance. Map coordinates stay in here.
+    fn came_from(&self) -> Option<(i32, i32)> {
+        let (px, py) = (self.state.player.x?, self.state.player.y?);
+        let angle = self.state.player.angle? as f64;
+        let back = self
+            .trail
+            .iter()
+            .rev()
+            .find(|&&(x, y)| (px - x).abs() + (py - y).abs() > FELL_BACK)?;
+        let (dx, dy) = ((back.0 - px) as f64, (back.1 - py) as f64);
+        let mut rel = dy.atan2(dx).to_degrees() - angle;
+        while rel > 180.0 {
+            rel -= 360.0;
+        }
+        while rel <= -180.0 {
+            rel += 360.0;
+        }
+        Some((rel.round() as i32, dx.hypot(dy).round() as i32))
+    }
+
     fn circling(&self) -> bool {
         if self.recent.len() < CIRCLE_WINDOW {
             return false;

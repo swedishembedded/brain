@@ -68,6 +68,8 @@ pub enum Tag {
     Clear,
     /// Get off floor that is burning the player.
     Escape,
+    /// Go back the way you came, along ground already walked.
+    Fallback,
     /// Operate the lift the route runs through, and wait for it.
     Ride,
     Exit,
@@ -573,6 +575,36 @@ pub fn options(state: &State) -> Vec<Option_> {
                 room: e.route_clearance.or(e.clearance).unwrap_or(0),
             });
         }
+    }
+
+    // --- fall back the way you came ---------------------------------------
+    //
+    // Backing AWAY aims at nothing: it walks opposite whatever is in front,
+    // which in a room with four monsters converging is as likely to be a wall
+    // or a fifth monster as it is a way out. This aims at floor the player
+    // has stood on, so it is the one direction it is certain it can go - and
+    // in a level built of rooms joined by corridors that is the corridor,
+    // where things arrive one at a time instead of all at once.
+    if let Some((bearing, away)) = state.came_from {
+        let far_off = bearing.abs() > FACING_TOL;
+        out.push(Option_ {
+            text: if far_off {
+                format!(
+                    "turn back the way you came, {away} units {}",
+                    bearing_phrase(bearing)
+                )
+            } else {
+                format!("fall back the way you came, {away} units behind you")
+            },
+            commands: if far_off {
+                format!("[{}]", json_turn(state.facing(bearing)))
+            } else {
+                "[{\"type\":\"forward\",\"amount\":8}]".into()
+            },
+            tics: if far_off { FIGHT_TICS } else { MOVE_TICS },
+            tag: Tag::Fallback,
+            room: away,
+        });
     }
 
     // --- sidestep ----------------------------------------------------------
@@ -1216,5 +1248,51 @@ mod saturated_tests {
         let opts = options(&s);
         let grab = opts.iter().find(|o| o.tag == Tag::Grab).expect("something to take");
         assert!(grab.text.contains("health potion"), "{}", grab.text);
+    }
+}
+
+#[cfg(test)]
+mod fallback_tests {
+    use super::tests::state;
+    use super::*;
+
+    fn cornered(came_from: Option<(i32, i32)>) -> State {
+        let mut s = state(
+            r#""threats":[{"id":1,"type":"IMP","distance":91,"bearing":0,"visible":true,
+                          "health":60,"targetingMe":true}],"hazards":[],"pickups":[],
+            "clearance":{"ahead":90,"right":40,"behind":30,"left":40,"aheadRight":40,"aheadLeft":40}"#,
+        );
+        s.came_from = came_from;
+        s
+    }
+
+    /// Backing AWAY aims at nothing - it walks opposite whatever is in front,
+    /// which in a room with four monsters converging is as likely to be a
+    /// wall or a fifth monster as it is a way out. Falling back aims at floor
+    /// the player has stood on.
+    #[test]
+    fn the_way_back_is_offered_when_there_is_one() {
+        assert!(
+            !options(&cornered(None)).iter().any(|o| o.tag == Tag::Fallback),
+            "offered a way back without a trail to follow"
+        );
+        let opts = options(&cornered(Some((150, 480))));
+        let back = opts
+            .iter()
+            .find(|o| o.tag == Tag::Fallback)
+            .expect("a way back");
+        // Off the nose, so it turns first and does not walk the arc.
+        assert!(back.commands.contains("turn-to"), "{}", back.commands);
+        assert!(!back.commands.contains("forward"), "{}", back.commands);
+        assert!(back.text.contains("480 units"), "{}", back.text);
+    }
+
+    /// Once it is behind you, walking is the whole act.
+    #[test]
+    fn once_facing_the_way_back_it_walks() {
+        let opts = options(&cornered(Some((3, 480))));
+        let back = opts.iter().find(|o| o.tag == Tag::Fallback).expect("a way back");
+        assert!(back.commands.contains("forward"), "{}", back.commands);
+        assert!(!back.commands.contains("turn-to"), "{}", back.commands);
     }
 }
