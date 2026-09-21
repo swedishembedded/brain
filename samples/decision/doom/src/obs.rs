@@ -129,6 +129,16 @@ pub struct Player {
     pub angle: Option<i32>,
     pub weapon: Option<String>,
     pub ammo: Option<i32>,
+    /// Every weapon being carried, with the ammo that feeds it and the number
+    /// key that selects it.
+    ///
+    /// A player can see their whole arsenal and pick from it. Told only what
+    /// is in hand right now, an agent cannot choose a shotgun over a pistol
+    /// and cannot get back to one after a pickup switched it away - which is
+    /// less than a player has, not more, and it is the difference between
+    /// trading with a sergeant and losing to one.
+    #[serde(default)]
+    pub weapons: Vec<Weapon>,
     pub keys: Vec<String>,
     /// The floor underfoot is damaging. A player sees the screen flash and
     /// their health tick down; without it an agent crosses a nukage pool
@@ -163,6 +173,26 @@ pub struct Thing {
     pub health: Option<i32>,
     #[serde(rename = "targetingMe")]
     pub targeting_me: Option<bool>,
+}
+
+/// One weapon in the player's possession.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Weapon {
+    pub name: String,
+    /// The number key that selects it. Not the weapon's own index: DOOM puts
+    /// the fist and the chainsaw on 1 and both shotguns on 3.
+    pub slot: u32,
+    /// Rounds for the ammo this weapon uses, or -1 for the ones that need
+    /// none.
+    pub ammo: i32,
+}
+
+impl Weapon {
+    /// Whether it can actually be fired right now.
+    pub fn loaded(&self) -> bool {
+        self.ammo != 0
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]
@@ -356,6 +386,19 @@ impl State {
     pub fn visible_threats(&self) -> impl Iterator<Item = &Thing> {
         self.threats.iter().filter(|t| t.visible)
     }
+
+    /// The enemies in view worth naming, worst first.
+    ///
+    /// Whatever is SHOOTING at you leads, then whatever is nearest. One
+    /// function because the observation and the option list have to agree:
+    /// an agent shown six enemies and offered attacks on three others is
+    /// being asked to choose between things it cannot see and cannot name.
+    pub fn threats_in_view(&self) -> Vec<&Thing> {
+        let mut v: Vec<&Thing> = self.visible_threats().collect();
+        v.sort_by_key(|t| (t.targeting_me != Some(true), t.distance));
+        v.truncate(IN_SIGHT);
+        v
+    }
 }
 
 /// How far is "close enough to describe as close", in map units. The player is
@@ -363,6 +406,14 @@ impl State {
 /// corridor-scale and across-the-map.
 const NEAR: i32 = 200;
 const MID: i32 = 500;
+
+/// How many of the enemies in view get named.
+///
+/// Three was too few to play Ultra-Violence with, where a room routinely
+/// holds more than that and the ones that matter are whichever are shooting.
+/// It is still a cap rather than a census, because the line has to stay
+/// readable and because what is BEHIND a wall must never appear in it.
+pub const IN_SIGHT: usize = 6;
 
 fn range_word(d: i32) -> &'static str {
     if d < NEAR {
@@ -433,6 +484,22 @@ pub fn render(state: &State, history: History) -> String {
         p.weapon.as_deref().unwrap_or("nothing"),
         p.ammo.unwrap_or(0)
     ));
+    // The rest of the arsenal, so that choosing a weapon is a decision the
+    // agent can see the grounds for. Only the ones it is not already holding
+    // - naming the ready weapon twice reads as though there were two.
+    let others: Vec<String> = p
+        .weapons
+        .iter()
+        .filter(|w| Some(w.name.as_str()) != p.weapon.as_deref())
+        .map(|w| match w.ammo {
+            -1 => w.name.clone(),
+            0 => format!("{} (out of ammo)", w.name),
+            n => format!("{} ({n})", w.name),
+        })
+        .collect();
+    if !others.is_empty() {
+        out.push_str(&format!(". Also carrying a {}", others.join(", a ")));
+    }
     if !p.keys.is_empty() {
         out.push_str(&format!(", carrying {}", p.keys.join(" and ")));
     }
@@ -459,7 +526,14 @@ pub fn render(state: &State, history: History) -> String {
     // Only what can be seen. Counting what is behind the walls told an agent
     // that a room it had not entered held seven monsters, which is not
     // something a player knows - they have sound, and sound is not a census.
-    let vis: Vec<&Thing> = state.visible_threats().take(3).collect();
+    //
+    // Ordered by whether it is SHOOTING at you, then by how close it is. A
+    // player sees the whole room in front of them and certainly notices who
+    // is firing; taking the nearest few in engine order meant a sergeant
+    // closing in could be dropped in favour of three harmless imps, which is
+    // less than a player gets rather than more. The engine already sends
+    // `targetingMe` per thing - this only stops throwing it away.
+    let vis = state.threats_in_view();
     if vis.is_empty() {
         out.push_str("No enemy in sight.\n");
     } else {
@@ -707,6 +781,42 @@ pub fn render(state: &State, history: History) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The monster shooting at you is the one you most need to know about,
+    /// and it is not always among the nearest.
+    ///
+    /// A player sees everything in front of them and certainly notices who is
+    /// firing. Showing the first few threats in whatever order they arrive
+    /// meant a sergeant closing in and shooting could be silently dropped in
+    /// favour of three harmless ones nearer by - which is less than a player
+    /// gets, not more, and this sample's own scripted teacher is documented
+    /// as never prioritising the enemy actually shooting at it.
+    #[test]
+    fn the_one_shooting_at_you_is_named_even_when_nearer_ones_are_not() {
+        let mut s = State::parse(SAMPLE).expect("parses");
+        let t = |id: i64, kind: &str, distance: i32, targeting: bool| Thing {
+            id,
+            kind: kind.into(),
+            distance,
+            bearing: 10,
+            visible: true,
+            health: Some(100),
+            targeting_me: Some(targeting),
+        };
+        s.threats = vec![
+            t(1, "IMP", 100, false),
+            t(2, "IMP", 120, false),
+            t(3, "IMP", 140, false),
+            t(4, "IMP", 160, false),
+            t(5, "FORMER HUMAN SERGEANT", 400, true),
+        ];
+        let text = render(&s, History::default());
+        assert!(
+            text.contains("former human sergeant"),
+            "the one shooting was dropped for nearer harmless ones:\n{text}"
+        );
+        assert!(text.contains("coming for you"), "{text}");
+    }
 
     #[test]
     fn what_was_seen_and_is_no_longer_in_view_is_still_said() {

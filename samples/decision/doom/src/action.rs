@@ -58,6 +58,8 @@ pub enum Tag {
     Open,
     /// Go to, and press, the switch that opens what the route is blocked by.
     Switch,
+    /// Put a different weapon in hand.
+    Arm,
     /// Remove whatever is standing in the way of the route.
     Clear,
     /// Get off floor that is burning the player.
@@ -69,6 +71,8 @@ pub enum Tag {
 /// the rate a human plays at and slow enough that a decision model with a
 /// millisecond of latency is never the thing holding the game up.
 const FIGHT_TICS: u32 = 4;
+/// Tics to hold while a weapon is lowered and the next one raised.
+const ARM_TICS: u32 = 18;
 const MOVE_TICS: u32 = 6;
 /// Less floor than this is not somewhere to walk: the player is 32 units wide
 /// and covers about 40 in one decision, so under 64 is a step into a wall.
@@ -122,8 +126,37 @@ pub fn options(state: &State) -> Vec<Option_> {
     let mut out: Vec<Option_> = Vec::new();
     let c = &state.clearance;
 
+    // --- arm --------------------------------------------------------------
+    //
+    // A player picks the gun for the fight. Without this the agent fights
+    // whatever the last pickup left in its hands: walking over a shotgun
+    // switches to it, and running the shells out strands it on a pistol with
+    // no way back. Measured before this existed, three of nine levels ended
+    // with a former human sergeant - a shotgunner - killing it.
+    //
+    // Only weapons it is not already holding, and only ones that can fire.
+    // Offering a switch to the empty gun you are already carrying is an
+    // option that does nothing, and every one of those costs a decision.
+    for w in &state.player.weapons {
+        if Some(w.name.as_str()) == state.player.weapon.as_deref() || !w.loaded() {
+            continue;
+        }
+        out.push(Option_ {
+            text: format!("draw the {}", w.name),
+            commands: format!(
+                "[{{\"type\":\"switch-weapon\",\"amount\":{}}}]",
+                w.slot
+            ),
+            // Long enough for the lowering and raising animation to finish,
+            // or the next decision is taken mid-swap with nothing in hand.
+            tics: ARM_TICS,
+            tag: Tag::Arm,
+            room: 0,
+        });
+    }
+
     // --- fight ------------------------------------------------------------
-    for t in state.visible_threats().take(3) {
+    for t in state.threats_in_view() {
         let facing = state.facing(t.bearing);
         // Naming the one already being fought is what makes finishing it
         // choosable. The two options are otherwise the same sentence with a
