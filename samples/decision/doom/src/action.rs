@@ -60,6 +60,10 @@ pub enum Tag {
     Switch,
     /// Put a different weapon in hand.
     Arm,
+    /// Fire while moving across the line of fire.
+    Circle,
+    /// Stand still and let the moment pass.
+    Hold,
     /// Remove whatever is standing in the way of the route.
     Clear,
     /// Get off floor that is burning the player.
@@ -77,6 +81,10 @@ const MOVE_TICS: u32 = 6;
 /// Less floor than this is not somewhere to walk: the player is 32 units wide
 /// and covers about 40 in one decision, so under 64 is a step into a wall.
 const MIN_ROOM: i32 = 64;
+/// How much open floor makes running worth the loss of control. Two corridor
+/// widths: enough that the extra ground covered is not immediately spent
+/// overshooting whatever is at the end of it.
+const RUN_ROOM: i32 = 256;
 /// How far `use` reaches, in map units - DOOM's own USERANGE.
 const USE_RANGE: i32 = 64;
 /// Close enough to "facing it" that turning again would waste a decision.
@@ -182,6 +190,39 @@ pub fn options(state: &State) -> Vec<Option_> {
             tag: Tag::Attack,
             room: 0,
         });
+
+        // Circle-strafing: keep firing while crossing the line of fire.
+        //
+        // The technique every DOOM player uses and the one the option list
+        // had no way to express - `sidestep` exists but stops shooting, and
+        // `attack` stands still while a hitscanner shoots back. An imp's
+        // fireball travels, so moving across its line beats it; a sergeant
+        // hits instantly, so the value is being somewhere else by the time
+        // the next shot comes. Offered only for the things actually shooting
+        // at you, and only to a side with room to move, because a circle
+        // strafe into a wall is just standing still while being shot.
+        if t.targeting_me == Some(true) {
+            for (name, key, room) in [("left", "strafe-left", c.left), ("right", "strafe-right", c.right)] {
+                if room < MIN_ROOM {
+                    continue;
+                }
+                out.push(Option_ {
+                    text: format!(
+                        "attack the {} {} units away, {}, sidestepping {name} as you fire",
+                        t.kind.to_lowercase(),
+                        t.distance,
+                        bearing_phrase(t.bearing)
+                    ),
+                    commands: format!(
+                        "[{},{{\"type\":\"{key}\",\"amount\":{FIGHT_TICS}}},{{\"type\":\"shoot\"}}]",
+                        json_turn(facing)
+                    ),
+                    tics: FIGHT_TICS,
+                    tag: Tag::Circle,
+                    room,
+                });
+            }
+        }
     }
 
     // --- take something ---------------------------------------------------
@@ -651,6 +692,35 @@ pub fn options(state: &State) -> Vec<Option_> {
         tag: Tag::Explore,
         room: 0,
     });
+
+    // --- run --------------------------------------------------------------
+    //
+    // A twin at a run for every option that walks somewhere far enough for it
+    // to be worth the loss of control.
+    //
+    // DOOM's speed key selects the second entry of `forwardmove` - 0x32
+    // against 0x19, twice the ground per tic - and every human plays holding
+    // it. Without it the agent crossed every level at half pace, and at a
+    // fixed decision budget half pace is half the level: running out of
+    // decisions is how most of these episodes ended. It stays a CHOICE rather
+    // than being folded into walking, because overshooting the doorway you
+    // meant to take is exactly why a player lets go of it.
+    //
+    // Built here, over the finished list, rather than at each of the five
+    // places that emit a movement - a modifier added per site is one that
+    // gets forgotten at the sixth.
+    let sprints: Vec<Option_> = out
+        .iter()
+        .filter(|o| o.room >= RUN_ROOM && o.commands.contains("\"forward\""))
+        .map(|o| Option_ {
+            text: format!("{}, at a run", o.text),
+            commands: format!("[{{\"type\":\"run\",\"amount\":8}},{}", &o.commands[1..]),
+            tics: o.tics,
+            tag: o.tag,
+            room: o.room,
+        })
+        .collect();
+    out.extend(sprints);
 
     out
 }
